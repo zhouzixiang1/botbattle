@@ -12,6 +12,7 @@ from bzplat.backend.contests.stages import (
     swiss_rounds_needed,
 )
 from bzplat.backend.contests.templates import (
+    default_match_config,
     points_for_result,
     resolve_stages,
 )
@@ -49,6 +50,21 @@ def _parse_stages(c: dict) -> list[dict]:
         return []
 
 
+def _match_config(c: dict) -> dict:
+    """解析比赛的 match_config（每游戏一份对局参数）；回退 hands_per_match。"""
+    raw = c.get("match_config_json") or "{}"
+    try:
+        cfg = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except (json.JSONDecodeError, TypeError):
+        cfg = {}
+    if not cfg:
+        # 向后兼容：旧比赛无 match_config，德扑用 hands_per_match
+        hpm = int(c.get("hands_per_match") or 70)
+        if hpm and c.get("game_id", "holdem") == "holdem":
+            cfg = {"hands": hpm}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 class ContestManager:
     def __init__(self, store: Store, orch: MatchOrchestrator) -> None:
         self.store = store
@@ -64,10 +80,14 @@ class ContestManager:
         template_id: str | None = None,
         game_id: str | None = None,
         stages: list[dict] | None = None,
+        match_config: dict | None = None,
     ) -> dict:
         tid, gid, stage_list = resolve_stages(
             template_id, stages, game_id=game_id
         )
+        # match_config：显式传入优先；否则按 game 取默认
+        if match_config is None:
+            match_config = default_match_config(gid)
         return self.store.create_contest(
             title,
             organizer_id,
@@ -78,6 +98,7 @@ class ContestManager:
             template_id=tid,
             stages_json=json.dumps(stage_list, ensure_ascii=False),
             current_stage_idx=0,
+            match_config_json=json.dumps(match_config, ensure_ascii=False),
         )
 
     def open_registration(self, contest_id: int) -> dict:
@@ -303,6 +324,7 @@ class ContestManager:
     async def _dispatch_pending(self, contest_id: int, stage_idx: int) -> None:
         c = self.store.get_contest(contest_id)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+        cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         for p in pairings:
             if p.get("status") != "pending" or p.get("match_id"):
                 continue
@@ -311,10 +333,11 @@ class ContestManager:
                 p["bot_a_id"],
                 p["bot_b_id"],
                 owner_user_id=c["organizer_id"],
-                hands=int(c["hands_per_match"]),
+                hands=int(cfg.get("hands", c.get("hands_per_match") or 70)),
                 match_type=TYPE_CONTEST,
                 contest_id=contest_id,
                 game_id=c.get("game_id") or "holdem",
+                n_dots=int(cfg["n_dots"]) if cfg.get("n_dots") is not None else None,
             )
             self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
 
@@ -576,9 +599,17 @@ class ContestManager:
             conc = max(1, int(conc_raw or 2))
         except ValueError:
             conc = 2
-        # 粗估：每场按 hands * 2s
-        hands = int(c.get("hands_per_match") or 70)
-        sec_per = hands * 2
+        # 粗估每场时长：holdem=每手约 2s；棋类单局按固定估算（n_dots 越大越久）
+        gid = c.get("game_id") or "holdem"
+        cfg = _match_config(c)
+        if gid == "holdem":
+            sec_per = int(cfg.get("hands", c.get("hands_per_match") or 70)) * 2
+        elif gid == "pencil":
+            # n_dots=11 → 约 120s；按 (n_dots/11)*120 线性估
+            n_dots = int(cfg.get("n_dots") or 11)
+            sec_per = max(30, int(n_dots / 11 * 120))
+        else:  # gomoku
+            sec_per = 60
         eta_sec = (total / conc) * sec_per if conc else 0
         return {
             "entries": n,

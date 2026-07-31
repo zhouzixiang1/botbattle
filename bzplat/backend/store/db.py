@@ -58,6 +58,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("current_stage_idx", "INTEGER NOT NULL DEFAULT 0"),
         ("template_id", "TEXT NOT NULL DEFAULT 'holdem_swiss_ko'"),
         ("rest_ends_at", "TEXT"),
+        ("match_config_json", "TEXT NOT NULL DEFAULT '{}'"),
     ):
         _add_col(conn, "contests", col, decl)
 
@@ -82,6 +83,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 current_stage_idx INTEGER NOT NULL DEFAULT 0,
                 template_id TEXT NOT NULL DEFAULT 'holdem_swiss_ko',
                 rest_ends_at TEXT,
+                match_config_json TEXT NOT NULL DEFAULT '{}',
                 CONSTRAINT chk_contest_status CHECK (
                     status IN ('draft','open','running','rest','finished','cancelled'))
             )
@@ -92,7 +94,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "registration_opens_at", "registration_closes_at", "starts_at",
             "ends_at", "hands_per_match", "created_at",
             "game_id", "stages_json", "current_stage_idx", "template_id",
-            "rest_ends_at",
+            "rest_ends_at", "match_config_json",
         ]
         present = [c for c in all_cols if c in cols]
         conn.execute(
@@ -129,6 +131,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     if "matches" in tables:
         _add_col(conn, "matches", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
+        _add_col(conn, "matches", "n_dots", "INTEGER")  # pencil 点阵边长（可空）
         # 放宽 match_type CHECK 以纳入 'ladder'（闲时自动对局）
         m_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'"
@@ -154,6 +157,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     match_type      TEXT    NOT NULL DEFAULT 'challenge',
                     status          TEXT    NOT NULL DEFAULT 'pending',
                     game_id         TEXT    NOT NULL DEFAULT 'holdem',
+                    n_dots          INTEGER,
                     started_at      TEXT,
                     ended_at        TEXT,
                     created_at      TEXT    NOT NULL,
@@ -167,7 +171,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "id", "bot_a_id", "bot_b_id", "owner_id", "contest_id",
                 "hands_played", "total_hands", "earnings_a", "earnings_b",
                 "winner", "reason", "net_bb_a", "match_type", "status",
-                "started_at", "ended_at", "created_at", "game_id",
+                "started_at", "ended_at", "created_at", "game_id", "n_dots",
             ) if c in m_cols]
             conn.execute(
                 f"INSERT INTO matches_new ({', '.join(present_m)}) "
@@ -581,12 +585,13 @@ class Store:
         total_hands: int = 70,
         match_type: str = "challenge",
         game_id: str = "holdem",
+        n_dots: int | None = None,
     ) -> dict:
         with self._tx() as c:
             c.execute(
                 "INSERT INTO matches(id, bot_a_id, bot_b_id, owner_id, "
-                "contest_id, total_hands, match_type, status, game_id, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "contest_id, total_hands, match_type, status, game_id, n_dots, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     bot_a_id,
@@ -597,6 +602,7 @@ class Store:
                     match_type,
                     "pending",
                     game_id or "holdem",
+                    n_dots,
                     _now(),
                 ),
             )
@@ -622,6 +628,7 @@ class Store:
             "started_at",
             "ended_at",
             "contest_id",
+            "n_dots",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
@@ -896,14 +903,15 @@ class Store:
         stages_json: str = "[]",
         template_id: str = "holdem_swiss_ko",
         current_stage_idx: int = 0,
+        match_config_json: str = "{}",
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contests(title, description, organizer_id, status, "
                 "registration_opens_at, registration_closes_at, starts_at, "
                 "ends_at, hands_per_match, created_at, game_id, stages_json, "
-                "current_stage_idx, template_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "current_stage_idx, template_id, match_config_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     title,
                     description,
@@ -919,6 +927,7 @@ class Store:
                     stages_json,
                     current_stage_idx,
                     template_id,
+                    match_config_json,
                 ),
             )
             cid = cur.lastrowid
@@ -949,6 +958,7 @@ class Store:
             "current_stage_idx",
             "template_id",
             "rest_ends_at",
+            "match_config_json",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]

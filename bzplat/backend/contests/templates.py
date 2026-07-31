@@ -8,6 +8,22 @@ from typing import Any
 SCORING_POKER = "poker_3_1_0"
 SCORING_CCGC = "ccgc_2_1_0"
 
+# 每款游戏的对局参数（替代德扑专属的 hands_per_match）
+#   holdem: {"hands": 70}      每场手数
+#   gomoku: {}                  单局，无可调参数
+#   pencil: {"n_dots": 11}      点阵边长
+DEFAULT_MATCH_CONFIG: dict[str, dict[str, Any]] = {
+    "holdem": {"hands": 70},
+    "gomoku": {},
+    "pencil": {"n_dots": 11},
+}
+
+
+def default_match_config(game_id: str | None) -> dict[str, Any]:
+    """返回指定游戏的默认 match_config（深拷贝）。"""
+    return copy.deepcopy(DEFAULT_MATCH_CONFIG.get((game_id or "holdem").strip().lower(), {"hands": 70}))
+
+
 DEFAULT_TEMPLATES: dict[str, dict[str, Any]] = {
     "holdem_swiss_ko": {
         "id": "holdem_swiss_ko",
