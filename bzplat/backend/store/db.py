@@ -897,11 +897,20 @@ class Store:
     leaderboard = list_leaderboard
 
     def least_recently_played(
-        self, game_id: str | None = None, *, limit: int = 100
+        self,
+        game_id: str | None = None,
+        *,
+        limit: int = 100,
+        stale_since: int | None = None,
+        placement_games: int | None = None,
     ) -> list[dict]:
-        """按 last_played_at 升序返回可对战 bot（NULL=从未赛，排最前）。
+        """按陈旧度返回可对战 bot，供闲时自动对局挑选。
 
-        用于闲时自动对局挑选最久未赛的 bot。仅返回 active+public+非内置且有二进制的 bot。
+        - stale_since（秒，>0）：只返回 last_played_at 早于 now-stale_since 或从未赛（NULL）的 bot；
+          None/0 = 不限。
+        - placement_games（>0）：matches_played < 该值的「定级期」bot 排最前（新 bot 优先定级），
+          其后按陈旧度（NULL 最前，再按时间升序）。
+        仅返回 active+public+非内置且有二进制的 bot。
         """
         with self._tx() as c:
             sql = (
@@ -915,8 +924,19 @@ class Store:
             if game_id:
                 sql += " AND b.game_id=?"
                 params.append(game_id)
-            # NULL 最前（最陈旧），其后按时间升序
-            sql += " ORDER BY r.last_played_at IS NULL DESC, r.last_played_at ASC LIMIT ?"
+            if stale_since and stale_since > 0:
+                # last_played_at 早于 cutoff 或 NULL。
+                # 注意：_now() 用本地时间，SQLite datetime('now') 是 UTC，故在 Python 算 cutoff。
+                from datetime import datetime, timedelta
+                cutoff = (datetime.now() - timedelta(seconds=int(stale_since))).isoformat(timespec="seconds")
+                sql += " AND (r.last_played_at IS NULL OR r.last_played_at < ?)"
+                params.append(cutoff)
+            # 排序：定级期 bot 最前（若有），其后 NULL 最前、再按时间升序
+            order = " ORDER BY "
+            if placement_games and placement_games > 0:
+                order += f"(r.matches_played < {int(placement_games)}) DESC, "
+            order += "r.last_played_at IS NULL DESC, r.last_played_at ASC LIMIT ?"
+            sql += order
             params.append(limit)
             return [_row(r) for r in c.execute(sql, params)]
 

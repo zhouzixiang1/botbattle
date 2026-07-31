@@ -72,8 +72,12 @@ def test_runtime_returns_auto_match_block(tmp_path):
     assert set(am) == {
         "enabled", "interval_sec", "min_idle_sec",
         "bot_cooldown", "stale_sec", "reserve_slots",
+        "placement_games", "max_per_round", "daily_cap", "daily_count",
     }
     assert am["enabled"] is True
+    assert am["placement_games"] == 10
+    assert am["daily_cap"] == 200
+    assert am["daily_count"] == 0
 
 
 def test_patch_auto_match_updates_and_hot_reloads(tmp_path):

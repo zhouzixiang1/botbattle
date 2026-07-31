@@ -11,7 +11,9 @@ from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     SETTING_AUTO_MATCH_BOT_COOLDOWN,
+    SETTING_AUTO_MATCH_DAILY_CAP,
     SETTING_AUTO_MATCH_ENABLED,
+    SETTING_AUTO_MATCH_MAX_PER_ROUND,
     SETTING_AUTO_MATCH_MIN_IDLE_SEC,
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     TYPE_LADDER,
@@ -170,3 +172,60 @@ def test_ladder_match_type_writable(store):
     store.create_match("L1", bs[0]["id"], bs[1]["id"], match_type="ladder")
     m = store.get_match("L1")
     assert m["match_type"] == "ladder"
+
+
+# ── 增强：stale 过滤 / 定级优先 / 每日上限 / 每轮上限 ─────────────────────
+def test_least_recently_played_stale_filter(store: Store):
+    """stale_since 过滤：只回陈旧或从未赛的 bot。"""
+    bs = _mk_bots(store, 3, "holdem")
+    # bot0 刚赛过（新鲜），bot1 较旧，bot2 从未赛
+    from datetime import datetime, timedelta
+    fresh = (datetime.now() - timedelta(seconds=10)).isoformat(timespec="seconds")
+    old = (datetime.now() - timedelta(seconds=7200)).isoformat(timespec="seconds")
+    store.update_rating_row(bs[0]["id"], last_played_at=fresh)
+    store.update_rating_row(bs[1]["id"], last_played_at=old)
+    # stale_since=3600：应排除 fresh bot0，保留 old bot1 + NULL bot2
+    rows = store.least_recently_played("holdem", stale_since=3600)
+    ids = {r["bot_id"] for r in rows}
+    assert bs[0]["id"] not in ids
+    assert bs[1]["id"] in ids
+    assert bs[2]["id"] in ids  # NULL（从未赛）始终算陈旧
+
+
+def test_least_recently_played_placement_priority(store: Store):
+    """定级期 bot（matches_played < N）排最前。"""
+    bs = _mk_bots(store, 3, "holdem")
+    # bot0/bot1 已赛多场（非定级），bot2 仅 1 场（定级期）
+    store.update_rating_row(bs[0]["id"], matches_played=20, last_played_at="2020-01-01T00:00:00")
+    store.update_rating_row(bs[1]["id"], matches_played=20, last_played_at="2019-01-01T00:00:00")
+    store.update_rating_row(bs[2]["id"], matches_played=1, last_played_at="2025-01-01T00:00:00")
+    rows = store.least_recently_played("holdem", placement_games=10)
+    # 定级期 bot2 应排第一（尽管它最近才赛过）
+    assert rows[0]["bot_id"] == bs[2]["id"]
+
+
+def test_daily_cap_stops_scheduling(store: Store):
+    """达每日上限后本轮不再调度。"""
+    bs = _mk_bots(store, 2, "holdem")
+    store.set_setting(SETTING_AUTO_MATCH_DAILY_CAP, "1")  # 上限 1
+    orch = FakeOrch(max_concurrent=4)
+    sched = AutoMatchScheduler(orch, store)
+    sched._idle_since = time.monotonic() - 10
+    n1 = asyncio.run(sched._schedule_some(sched._cfg()))
+    assert n1 == 1  # 第 1 场放行
+    sched._idle_since = time.monotonic() - 10
+    n2 = asyncio.run(sched._schedule_some(sched._cfg()))
+    assert n2 == 0  # 达上限，停止
+    assert sched.daily_count == 1
+
+
+def test_max_per_round_limits(store: Store):
+    """每轮上限：max_per_round=1 即使空闲槽更多也只补 1 场。"""
+    bs = _mk_bots(store, 4, "holdem")
+    store.set_setting(SETTING_AUTO_MATCH_MAX_PER_ROUND, "1")
+    orch = FakeOrch(max_concurrent=8)
+    sched = AutoMatchScheduler(orch, store)
+    sched._idle_since = time.monotonic() - 10
+    n = asyncio.run(sched._schedule_some(sched._cfg()))
+    assert n == 1
+

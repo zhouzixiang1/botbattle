@@ -35,9 +35,12 @@ from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     SETTING_ACTION_TIMEOUT,
     SETTING_AUTO_MATCH_BOT_COOLDOWN,
+    SETTING_AUTO_MATCH_DAILY_CAP,
     SETTING_AUTO_MATCH_ENABLED,
     SETTING_AUTO_MATCH_INTERVAL_SEC,
+    SETTING_AUTO_MATCH_MAX_PER_ROUND,
     SETTING_AUTO_MATCH_MIN_IDLE_SEC,
+    SETTING_AUTO_MATCH_PLACEMENT_GAMES,
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     SETTING_AUTO_MATCH_STALE_SEC,
     SETTING_BOT_CPUS,
@@ -102,6 +105,9 @@ def _seed_runtime_settings(store: Store, env_max: int | None) -> int:
     store.seed_setting_if_absent(SETTING_AUTO_MATCH_BOT_COOLDOWN, "600")
     store.seed_setting_if_absent(SETTING_AUTO_MATCH_STALE_SEC, "3600")
     store.seed_setting_if_absent(SETTING_AUTO_MATCH_RESERVE_SLOTS, "1")
+    store.seed_setting_if_absent(SETTING_AUTO_MATCH_PLACEMENT_GAMES, "10")
+    store.seed_setting_if_absent(SETTING_AUTO_MATCH_MAX_PER_ROUND, "2")
+    store.seed_setting_if_absent(SETTING_AUTO_MATCH_DAILY_CAP, "200")
     # 生效值永远压在 ceiling 内
     raw = store.get_setting(SETTING_MAX_CONCURRENT)
     try:
