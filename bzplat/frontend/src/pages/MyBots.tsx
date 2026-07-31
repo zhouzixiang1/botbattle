@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import PageStub from '../components/PageStub'
 import { useAuth } from '../components/useAuth'
 import { apiForm, apiGet, apiJson, errMsg } from '../api'
+import { GAMES, gameLabel } from '../lib/games'
 
 interface Bot {
   id: number
@@ -16,6 +17,7 @@ interface Bot {
   is_public?: number
   is_active?: number
   updated_at?: string
+  game_id?: string
 }
 
 export default function MyBots() {
@@ -26,18 +28,21 @@ export default function MyBots() {
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [description, setDescription] = useState('')
+  const [gameId, setGameId] = useState('holdem')
+  const [filterGame, setFilterGame] = useState('')
   const [file, setFile] = useState<File | null>(null)
 
   const load = useCallback(async () => {
     if (!isLoggedIn) return
     try {
-      const d = await apiGet<{ bots: Bot[] }>('/api/bots/mine')
+      const q = filterGame ? `?game_id=${encodeURIComponent(filterGame)}` : ''
+      const d = await apiGet<{ bots: Bot[] }>(`/api/bots/mine${q}`)
       setBots(d.bots || [])
       setError('')
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     }
-  }, [isLoggedIn])
+  }, [isLoggedIn, filterGame])
 
   useEffect(() => {
     void load()
@@ -57,6 +62,7 @@ export default function MyBots() {
         display_name: displayName,
         description,
         is_public: true,
+        game_id: gameId,
         file,
       })
       setName('')
@@ -99,13 +105,29 @@ export default function MyBots() {
 
   return (
     <PageStub title="我的 Bot">
-      <p className="mb-4">上传二进制 Bot（Linux ELF / Windows PE）。macOS Mach-O 会被拒绝。</p>
+      <p className="mb-4">
+        上传二进制 Bot（Linux ELF / Windows PE）。请选择对应游戏类型。macOS Mach-O 会被拒绝。
+      </p>
 
       <form
         onSubmit={(e) => void onUpload(e)}
         className="mb-8 max-w-lg space-y-3 rounded-xl border border-slate-200 bg-white p-4"
       >
         <h2 className="text-sm font-medium text-slate-700">上传新 Bot</h2>
+        <label className="block text-sm text-slate-600">
+          游戏类型
+          <select
+            value={gameId}
+            onChange={(e) => setGameId(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-400 focus:outline-none"
+          >
+            {GAMES.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="block text-sm text-slate-600">
           名称（唯一标识）
           <input
@@ -152,6 +174,24 @@ export default function MyBots() {
         </button>
       </form>
 
+      <div className="mb-3">
+        <label className="text-sm text-slate-500">
+          筛选游戏
+          <select
+            value={filterGame}
+            onChange={(e) => setFilterGame(e.target.value)}
+            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+          >
+            <option value="">全部</option>
+            {GAMES.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
       <ul className="divide-y divide-slate-700/80 overflow-hidden rounded-xl border border-slate-200 bg-white">
         {bots.length === 0 ? (
           <li className="px-4 py-8 text-center text-slate-500">暂无 Bot，请先上传</li>
@@ -162,6 +202,9 @@ export default function MyBots() {
                 <div className="font-medium text-slate-800">
                   {b.display_name || b.name}
                   <span className="ml-2 font-mono text-xs text-slate-500">#{b.id}</span>
+                  <span className="ml-2 rounded bg-brand-50 px-1.5 py-0.5 text-xs text-brand-700">
+                    {gameLabel(b.game_id)}
+                  </span>
                 </div>
                 <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-400">
                   <span className="rounded bg-slate-100/80 px-1.5 py-0.5">

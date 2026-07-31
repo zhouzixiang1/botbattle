@@ -9,11 +9,16 @@ from datetime import datetime
 from typing import Any, Callable
 
 from bzplat.backend.engine.game import DEFAULT_HANDS
+from bzplat.backend.engine.registry import (
+    GAME_HOLDEM,
+    normalize_game_id,
+)
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
+    REGISTERED_ENGINES,
     STATUS_ABORTED,
     STATUS_COMPLETED,
     STATUS_PENDING,
@@ -21,6 +26,7 @@ from bzplat.backend.store.schema import (
     TYPE_CHALLENGE,
     TYPE_CONTEST,
     TYPE_TABLE,
+    VALID_GAME_IDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,15 +54,24 @@ class MatchOrchestrator:
         # 对局完成后的回调（由外部注入，如比赛归档）。签名: (match_id, contest_id|None) -> None
         self.on_match_done: "Callable[[str, int | None], None] | None" = None
 
+    def rebuild_concurrency(self, max_concurrent: int) -> None:
+        """热更新并发上限：重建 Semaphore（不修改 _value）。"""
+        self.max_concurrent = max(1, int(max_concurrent))
+        self._sem = asyncio.Semaphore(self.max_concurrent)
+
+    def set_action_timeout(self, timeout_sec: float) -> None:
+        self.runner.action_timeout = float(timeout_sec)
+
     async def challenge(
         self,
         challenger_bot_id: int,
         opponent_bot_id: int,
-        owner_user_id: int,
+        owner_user_id: int | None,
         *,
         hands: int = DEFAULT_HANDS,
         match_type: str = TYPE_CHALLENGE,
         contest_id: int | None = None,
+        game_id: str | None = None,
     ) -> str:
         if challenger_bot_id == opponent_bot_id:
             raise ValueError("不能与自己对战")
@@ -71,6 +86,23 @@ class MatchOrchestrator:
         if not bot_b.get("is_public") and bot_b.get("owner_id") != owner_user_id:
             raise ValueError("对手 bot 未公开")
 
+        ga = normalize_game_id(bot_a.get("game_id"))
+        gb = normalize_game_id(bot_b.get("game_id"))
+        if ga != gb:
+            raise ValueError(f"双方 Bot 游戏类型不一致：{ga} vs {gb}")
+        gid = normalize_game_id(game_id) if game_id else ga
+        if gid != ga:
+            raise ValueError(f"指定游戏 {gid} 与 Bot 游戏 {ga} 不一致")
+        if gid not in VALID_GAME_IDS:
+            raise ValueError(f"未知游戏: {gid}")
+        if gid not in REGISTERED_ENGINES:
+            raise ValueError(
+                f"游戏引擎未注册: {gid}（当前支持 {sorted(REGISTERED_ENGINES)}）"
+            )
+
+        # 棋类单局；扑克沿用 hands
+        total_hands = hands if gid == GAME_HOLDEM else 1
+
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self.store.create_match(
             match_id,
@@ -78,8 +110,9 @@ class MatchOrchestrator:
             bot_b_id=opponent_bot_id,
             owner_id=owner_user_id,
             contest_id=contest_id,
-            total_hands=hands,
+            total_hands=total_hands,
             match_type=match_type,
+            game_id=gid,
         )
         self.store.upsert_replay(match_id, "[]", "[]")
         task = asyncio.create_task(self._run_match(match_id), name=f"match-{match_id}")
@@ -113,35 +146,45 @@ class MatchOrchestrator:
                 return
             bot_a = self.store.get_bot(m["bot_a_id"])
             bot_b = self.store.get_bot(m["bot_b_id"])
+            gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
             self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
             events: list[dict] = []
 
             def on_event(kind: str, ev: dict) -> None:
                 events.append(ev)
                 self._broadcast(match_id, ev)
-                if kind in ("settle", "hand_start", "match_end") or len(events) % 5 == 0:
+                if kind in ("settle", "hand_start", "match_end", "move", "match_start") or len(events) % 5 == 0:
                     self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
             try:
                 result = await self.runner.run_binaries(
                     bot_a["binary_path"],
                     bot_b["binary_path"],
+                    game_id=gid,
                     num_hands=int(m["total_hands"]),
                     on_event=on_event,
                 )
-                ea = sum(hr.deltas[0] for hr in result.hand_results)
-                eb = sum(hr.deltas[1] for hr in result.hand_results)
-                if ea > eb:
-                    winner = 0
-                elif eb > ea:
-                    winner = 1
-                else:
-                    winner = None
-                net_bb_a = ea / 100.0
+                ea = sum(r.deltas[0] for r in result.rounds)
+                eb = sum(r.deltas[1] for r in result.rounds)
+                # 棋类（单轮）直接取该轮胜者；德州（多轮）按筹码差判断
+                winner: int | None = result.winner
+                if winner is None:
+                    if ea > eb:
+                        winner = 0
+                    elif eb > ea:
+                        winner = 1
+                    else:
+                        winner = None
+                # 棋类若 match_end 带 winner 更准
+                for ev in reversed(events):
+                    if ev.get("type") == "match_end" and "winner" in ev:
+                        winner = ev.get("winner")
+                        break
+                net_bb_a = (ea / 100.0) if gid == GAME_HOLDEM else float(ea)
                 self.store.update_match(
                     match_id,
                     status=STATUS_COMPLETED,
-                    hands_played=result.hands_played,
+                    hands_played=result.rounds_played,
                     earnings_a=ea,
                     earnings_b=eb,
                     winner=winner,
@@ -152,8 +195,9 @@ class MatchOrchestrator:
                 self.store.upsert_replay(
                     match_id, json.dumps(events, ensure_ascii=False), "[]"
                 )
-                if m["match_type"] != TYPE_CONTEST or True:
-                    # always update global rating for completed matches
+                # 比赛对局只计入赛事内积分，不更新全局 Glicko-2 排行榜
+                # （挑战 / table / ladder 对局均更新全局评分）
+                if m["match_type"] != TYPE_CONTEST:
                     self._apply_ratings(m["bot_a_id"], m["bot_b_id"], winner, ea, eb)
                 self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
             except Exception as exc:
@@ -167,10 +211,11 @@ class MatchOrchestrator:
                 self._broadcast(match_id, {"type": "error", "message": str(exc)})
             finally:
                 self._tasks.pop(match_id, None)
-                # 通知外部（如比赛归档）：对局已结束
                 if self.on_match_done is not None:
                     try:
-                        self.on_match_done(match_id, m.get("contest_id"))
+                        result = self.on_match_done(match_id, m.get("contest_id"))
+                        if asyncio.iscoroutine(result):
+                            await result
                     except Exception:
                         logger.debug("on_match_done failed", exc_info=True)
 

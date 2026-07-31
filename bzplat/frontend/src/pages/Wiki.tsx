@@ -28,7 +28,7 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;')
 }
 
-/** 行内格式：`code`、**bold**、[text](href) */
+/** 行内格式：`code`、**bold**、![alt](src)、[text](href) */
 function inline(s: string): string {
   let out = escapeHtml(s)
   out = out.replace(
@@ -36,6 +36,10 @@ function inline(s: string): string {
     '<code class="rounded bg-slate-100 px-1 py-0.5 text-[0.85em] text-brand-700">$1</code>',
   )
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-slate-900">$1</strong>')
+  out = out.replace(
+    /!\[([^\]]*)\]\(([^)]+)\)/g,
+    '<img class="my-3 max-w-full rounded-lg border border-slate-200" alt="$1" src="$2" />',
+  )
   out = out.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
     '<a class="text-brand-600 underline hover:text-brand-700" href="$2">$1</a>',

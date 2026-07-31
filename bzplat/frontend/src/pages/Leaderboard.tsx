@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import PageStub from '../components/PageStub'
 import { apiGet, errMsg } from '../api'
+import { GAMES, gameLabel, type GameId } from '../lib/games'
 
 interface Row {
   bot_id: number
@@ -18,21 +19,41 @@ interface Row {
   format?: string
   os?: string
   arch?: string
+  game_id?: string
 }
 
 export default function Leaderboard() {
   const [rows, setRows] = useState<Row[]>([])
   const [error, setError] = useState('')
+  const [gameId, setGameId] = useState<GameId | ''>('holdem')
 
   useEffect(() => {
-    apiGet<{ leaderboard: Row[] }>('/api/leaderboard')
+    const q = gameId ? `?game_id=${encodeURIComponent(gameId)}` : ''
+    apiGet<{ leaderboard: Row[] }>(`/api/leaderboard${q}`)
       .then((d) => setRows(d.leaderboard || []))
       .catch((e) => setError(errMsg(e)))
-  }, [])
+  }, [gameId])
 
   return (
     <PageStub title="排行榜">
-      <p className="mb-4 text-sm text-slate-400">全局 Glicko-2 评分排行榜。</p>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <p className="text-sm text-slate-400">Glicko-2 评分（按游戏过滤）。</p>
+        <label className="ml-auto text-sm text-slate-500">
+          游戏
+          <select
+            value={gameId}
+            onChange={(e) => setGameId(e.target.value as GameId | '')}
+            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+          >
+            <option value="">全部</option>
+            {GAMES.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
       <div className="overflow-x-auto rounded-xl border border-slate-200">
         <table className="w-full min-w-[40rem] text-left text-sm">
@@ -40,6 +61,7 @@ export default function Leaderboard() {
             <tr>
               <th className="px-3 py-2.5">#</th>
               <th className="px-3 py-2.5">Bot</th>
+              <th className="px-3 py-2.5">游戏</th>
               <th className="px-3 py-2.5">所有者</th>
               <th className="px-3 py-2.5">Rating</th>
               <th className="px-3 py-2.5">战绩</th>
@@ -49,7 +71,7 @@ export default function Leaderboard() {
           <tbody className="divide-y divide-slate-700/60">
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-slate-500">
+                <td colSpan={7} className="px-3 py-8 text-center text-slate-500">
                   暂无数据
                 </td>
               </tr>
@@ -60,6 +82,7 @@ export default function Leaderboard() {
                   <td className="px-3 py-2.5 font-medium text-slate-800">
                     {r.bot_display || r.bot_name || `#${r.bot_id}`}
                   </td>
+                  <td className="px-3 py-2.5 text-slate-500">{gameLabel(r.game_id)}</td>
                   <td className="px-3 py-2.5">
                     {r.owner_name ? (
                       <Link
@@ -78,8 +101,8 @@ export default function Leaderboard() {
                   <td className="px-3 py-2.5 text-slate-400">
                     {r.wins ?? 0}W / {r.losses ?? 0}L / {r.draws ?? 0}D
                   </td>
-                  <td className="px-3 py-2.5 text-xs text-slate-500">
-                    {r.format} {r.os}/{r.arch}
+                  <td className="px-3 py-2.5 text-xs text-slate-400">
+                    {r.format}/{r.os}-{r.arch}
                   </td>
                 </tr>
               ))

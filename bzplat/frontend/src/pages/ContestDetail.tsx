@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import PageStub from '../components/PageStub'
 import { useAuth } from '../components/useAuth'
@@ -11,6 +11,18 @@ interface Contest {
   status: string
   organizer_id: number
   hands_per_match?: number
+  template_id?: string
+  game_id?: string
+  stages_json?: string
+  current_stage_idx?: number
+  rest_ends_at?: string | null
+}
+
+interface Stage {
+  key?: string
+  type?: string
+  rest_after_minutes?: number
+  allow_bot_swap_in_rest?: boolean
 }
 
 interface Entry {
@@ -18,6 +30,9 @@ interface Entry {
   user_id: number
   bot_id: number
   registered_at?: string
+  group_id?: string
+  seed?: number
+  eliminated?: number
 }
 
 interface Pairing {
@@ -27,6 +42,9 @@ interface Pairing {
   bot_b_id: number
   match_id?: string | null
   status?: string
+  stage_idx?: number
+  stage_key?: string
+  group_id?: string
 }
 
 interface Standing {
@@ -36,6 +54,37 @@ interface Standing {
   draws: number
   losses: number
   net_chips: number
+  group_id?: string
+}
+
+function parseStages(c: Contest | null): Stage[] {
+  if (!c?.stages_json) return []
+  try {
+    return JSON.parse(c.stages_json)
+  } catch {
+    return []
+  }
+}
+
+function RestCountdown({ endsAt }: { endsAt: string }) {
+  const [left, setLeft] = useState('')
+  useEffect(() => {
+    const tick = () => {
+      const ms = new Date(endsAt).getTime() - Date.now()
+      if (ms <= 0) {
+        setLeft('已到时')
+        return
+      }
+      const s = Math.floor(ms / 1000)
+      const m = Math.floor(s / 60)
+      const r = s % 60
+      setLeft(`${m}:${r.toString().padStart(2, '0')}`)
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [endsAt])
+  return <span className="font-mono text-brand-700">{left}</span>
 }
 
 export default function ContestDetail() {
@@ -45,11 +94,18 @@ export default function ContestDetail() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [pairings, setPairings] = useState<Pairing[]>([])
   const [standings, setStandings] = useState<Standing[]>([])
+  const [estimate, setEstimate] = useState<{
+    estimated_matches?: number
+    eta_seconds?: number
+  } | null>(null)
   const [bots, setBots] = useState<Array<{ id: number; name: string; display_name?: string }>>(
     [],
   )
   const [botId, setBotId] = useState('')
+  const [stageTab, setStageTab] = useState(0)
   const [error, setError] = useState('')
+
+  const stages = useMemo(() => parseStages(contest), [contest])
 
   const load = useCallback(() => {
     if (!id) return
@@ -58,12 +114,16 @@ export default function ContestDetail() {
       entries: Entry[]
       pairings: Pairing[]
       standings: Standing[]
+      estimate?: { estimated_matches?: number; eta_seconds?: number }
     }>(`/api/contests/${id}`)
       .then((d) => {
         setContest(d.contest)
         setEntries(d.entries || [])
         setPairings(d.pairings || [])
         setStandings(d.standings || [])
+        setEstimate(d.estimate || null)
+        const idx = d.contest.current_stage_idx ?? 0
+        setStageTab(idx)
       })
       .catch((e) => setError(errMsg(e)))
   }, [id])
@@ -84,6 +144,8 @@ export default function ContestDetail() {
     !!contest &&
     (user.role === 'admin' || user.id === contest.organizer_id)
 
+  const myEntry = entries.find((e) => e.user_id === user?.id)
+
   const act = async (path: string, body?: unknown) => {
     setError('')
     try {
@@ -93,6 +155,8 @@ export default function ContestDetail() {
       setError(errMsg(e))
     }
   }
+
+  const stagePairings = pairings.filter((p) => (p.stage_idx ?? 0) === stageTab)
 
   if (!contest) {
     return (
@@ -108,9 +172,19 @@ export default function ContestDetail() {
         <h2 className="text-lg font-medium text-slate-900">{contest.title}</h2>
         <p className="mt-1 text-sm text-slate-400">{contest.description || '无说明'}</p>
         <p className="mt-2 text-xs text-slate-500">
-          状态 <span className="text-brand-700">{contest.status}</span> · 每场{' '}
+          状态 <span className="text-brand-700">{contest.status}</span> · 模板{' '}
+          {contest.template_id} · 游戏 {contest.game_id || 'holdem'} · 每场{' '}
           {contest.hands_per_match ?? 70} 手
+          {estimate?.estimated_matches != null && (
+            <> · 预估 {estimate.estimated_matches} 场</>
+          )}
         </p>
+        {contest.status === 'rest' && contest.rest_ends_at && (
+          <p className="mt-2 text-sm text-slate-600">
+            阶段休息中，倒计时 <RestCountdown endsAt={contest.rest_ends_at} />
+            （可更换派遣 Bot）
+          </p>
+        )}
       </div>
       {error && <p className="mt-3 text-sm text-error-500">{error}</p>}
 
@@ -130,7 +204,16 @@ export default function ContestDetail() {
             className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"
             onClick={() => void act(`/api/contests/${id}/start`)}
           >
-            开始循环赛
+            开始比赛
+          </button>
+        )}
+        {isOrg && contest.status === 'rest' && (
+          <button
+            type="button"
+            className="rounded-lg bg-brand-600 px-3 py-2 text-sm text-white"
+            onClick={() => void act(`/api/contests/${id}/resume`)}
+          >
+            结束休息 / 下一阶段
           </button>
         )}
         {isLoggedIn && contest.status === 'open' && (
@@ -159,7 +242,56 @@ export default function ContestDetail() {
             </button>
           </div>
         )}
+        {isLoggedIn && myEntry && contest.status === 'rest' && (
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
+              value={botId}
+              onChange={(e) => setBotId(e.target.value)}
+            >
+              <option value="">更换 Bot（当前 #{myEntry.bot_id}）</option>
+              {bots.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.display_name || b.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!botId}
+              className="rounded-lg border border-brand-300 px-3 py-2 text-sm text-brand-700 hover:bg-brand-50 disabled:opacity-40"
+              onClick={() =>
+                void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) })
+              }
+            >
+              确认更换
+            </button>
+          </div>
+        )}
       </div>
+
+      {stages.length > 0 && (
+        <div className="mt-6 flex flex-wrap gap-1 border-b border-slate-200">
+          {stages.map((s, i) => (
+            <button
+              key={s.key || i}
+              type="button"
+              onClick={() => setStageTab(i)}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+                stageTab === i
+                  ? 'border-brand-500 text-brand-700'
+                  : 'border-transparent text-slate-500'
+              }`}
+            >
+              {s.key || `阶段${i + 1}`}
+              <span className="ml-1 text-xs text-slate-400">({s.type})</span>
+              {contest.current_stage_idx === i && contest.status !== 'finished' && (
+                <span className="ml-1 text-xs text-emerald-600">当前</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
 
       <h3 className="mt-8 text-sm font-medium text-slate-600">报名</h3>
       <ul className="mt-2 space-y-1 text-sm text-slate-400">
@@ -167,6 +299,9 @@ export default function ContestDetail() {
         {entries.map((e) => (
           <li key={e.id}>
             user={e.user_id} bot={e.bot_id}
+            {e.seed ? ` seed=${e.seed}` : ''}
+            {e.group_id ? ` ${e.group_id}` : ''}
+            {e.eliminated ? ' [淘汰]' : ''}
             {e.registered_at ? ` @ ${e.registered_at}` : ''}
           </li>
         ))}
@@ -196,12 +331,15 @@ export default function ContestDetail() {
         </tbody>
       </table>
 
-      <h3 className="mt-8 text-sm font-medium text-slate-600">对阵</h3>
+      <h3 className="mt-8 text-sm font-medium text-slate-600">
+        对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab}`}` : ''}
+      </h3>
       <ul className="mt-2 space-y-1 text-sm text-slate-400">
-        {pairings.length === 0 && <li>暂无对阵</li>}
-        {pairings.map((p) => (
+        {stagePairings.length === 0 && <li>暂无对阵</li>}
+        {stagePairings.map((p) => (
           <li key={p.id} className="flex flex-wrap items-center gap-2">
             <span>R{p.round_num ?? 1}</span>
+            {p.group_id && <span>{p.group_id}</span>}
             <span>
               #{p.bot_a_id} vs #{p.bot_b_id}
             </span>

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html class="client-nojs" lang="zh-CN" dir="ltr">
+<head>
+<meta charset="UTF-8"/>
+<title>Gomoku - Botzone Wiki</title>
+<script>document.documentElement.className = document.documentElement.className.replace( /(^|\s)client-nojs(\s|$)/, "$1client-js$2" );</script>
+<script>(window.RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgCanonicalNamespace":"","wgCanonicalSpecialPageName":false,"wgNamespaceNumber":0,"wgPageName":"Gomoku","wgTitle":"Gomoku","wgCurRevisionId":133,"wgRevisionId":133,"wgArticleId":24,"wgIsArticle":true,"wgIsRedirect":false,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":[],"wgBreakFrames":false,"wgPageContentLanguage":"zh-cn","wgPageContentModel":"wikitext","wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"zh","wgMonthNames":["","1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"],"wgMonthNamesShort":["","1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"],"wgRelevantPageName":"Gomoku","wgRelevantArticleId":24,"wgRequestId":"25a0042b5380f3f67720c77c","wgIsProbablyEditable":false,"wgRestrictionEdit":[],"wgRestrictionMove":[],"wgPreferredVariant":"zh-cn","wgMFDisplayWikibaseDescriptions":{"search":false,"nearby":false,"watchlist":false,"tagline":false},"wgULSAcceptLanguageList":[],"wgULSCurrentAutonym":"中文（中国大陆）‎"});mw.loader.state({"site.styles":"ready","noscript":"ready","user.styles":"ready","user.cssprefs":"ready","user":"ready","user.options":"loading","user.tokens":"loading","ext.pygments":"ready","ext.uls.pt":"ready","mediawiki.legacy.shared":"ready","mediawiki.legacy.commonPrint":"ready","mediawiki.sectionAnchor":"ready","mediawiki.skinning.interface":"ready","skins.vector.styles":"ready"});mw.loader.implement("user.options@186b3ov",function($,jQuery,require,module){mw.user.options.set({"variant":"zh-cn"});});mw.loader.implement("user.tokens@10sqgbz",function ( $, jQuery, require, module ) {
+mw.user.tokens.set({"editToken":"+\\","patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});/*@nomin*/;
+
+});mw.loader.load(["mediawiki.page.startup","ext.uls.interface","skins.vector.js"]);});</script>
+<link rel="stylesheet" href="/load.php?debug=false&amp;lang=zh-cn&amp;modules=ext.pygments%7Cext.uls.pt%7Cmediawiki.legacy.commonPrint%2Cshared%7Cmediawiki.sectionAnchor%7Cmediawiki.skinning.interface%7Cskins.vector.styles&amp;only=styles&amp;skin=vector"/>
+<script async="" src="/load.php?debug=false&amp;lang=zh-cn&amp;modules=startup&amp;only=scripts&amp;skin=vector"></script>
+<meta name="ResourceLoaderDynamicStyles" content=""/>
+<meta name="generator" content="MediaWiki 1.28.2"/>
+<link rel="shortcut icon" href="/favicon.ico"/>
+<link rel="search" type="application/opensearchdescription+xml" href="/opensearch_desc.php" title="Botzone Wiki (zh-cn)"/>
+<link rel="EditURI" type="application/rsd+xml" href="//wiki.botzone.org.cn/api.php?action=rsd"/>
+<link rel="alternate" type="application/atom+xml" title="Botzone Wiki的Atom feed" href="/index.php?title=%E7%89%B9%E6%AE%8A:%E6%9C%80%E8%BF%91%E6%9B%B4%E6%94%B9&amp;feed=atom"/>
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject page-Gomoku rootpage-Gomoku skin-vector action-view feature-footer-v2">		<div id="mw-page-base" class="noprint"></div>
+		<div id="mw-head-base" class="noprint"></div>
+		<div id="content" class="mw-body" role="main">
+			<a id="top"></a>
+
+						<div class="mw-indicators">
+</div>
+			<h1 id="firstHeading" class="firstHeading" lang="zh-CN">Gomoku</h1>
+									<div id="bodyContent" class="mw-body-content">
+									<div id="siteSub">来自Botzone Wiki</div>
+								<div id="contentSub"></div>
+												<div id="jump-to-nav" class="mw-jump">
+					跳转至：					<a href="#mw-head">导航</a>，					<a href="#p-search">搜索</a>
+				</div>
+				<div id="mw-content-text" lang="zh-CN" dir="ltr" class="mw-content-ltr"><p>五子棋是一种两人对弈的纯策略型棋类游戏，通常双方分别使用黑白两色的棋子，下在棋盘直线与横线的交叉点上，先形成5子连线者获胜。
+</p><p>1899年日本棋士黒岩涙香证明了无禁手的五子棋有必胜策略。
+</p>
+<div id="toc" class="toc"><div id="toctitle"><h2>目录</h2></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="#.E4.BD.9C.E8.80.85"><span class="tocnumber">1</span> <span class="toctext">作者</span></a></li>
+<li class="toclevel-1 tocsection-2"><a href="#.E6.B8.B8.E6.88.8F.E8.A7.84.E5.88.99"><span class="tocnumber">2</span> <span class="toctext">游戏规则</span></a></li>
+<li class="toclevel-1 tocsection-3"><a href="#.E6.B8.B8.E6.88.8F.E4.BA.A4.E4.BA.92.E6.96.B9.E5.BC.8F"><span class="tocnumber">3</span> <span class="toctext">游戏交互方式</span></a>
+<ul>
+<li class="toclevel-2 tocsection-4"><a href="#.E5.85.B7.E4.BD.93.E4.BA.A4.E4.BA.92.E5.86.85.E5.AE.B9"><span class="tocnumber">3.1</span> <span class="toctext">具体交互内容</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1 tocsection-5"><a href="#.E6.B8.B8.E6.88.8F.E6.A0.B7.E4.BE.8B.E7.A8.8B.E5.BA.8F"><span class="tocnumber">4</span> <span class="toctext">游戏样例程序</span></a>
+<ul>
+<li class="toclevel-2 tocsection-6"><a href="#Javascript"><span class="tocnumber">4.1</span> <span class="toctext">Javascript</span></a></li>
+<li class="toclevel-2 tocsection-7"><a href="#Java"><span class="tocnumber">4.2</span> <span class="toctext">Java</span></a></li>
+<li class="toclevel-2 tocsection-8"><a href="#C.2B.2B"><span class="tocnumber">4.3</span> <span class="toctext">C++</span></a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+<h2><span class="mw-headline" id=".E4.BD.9C.E8.80.85">作者</span></h2>
+<p>裁判程序 &amp; 播放器：<i>leedy</i>
+</p>
+<h2><span class="mw-headline" id=".E6.B8.B8.E6.88.8F.E8.A7.84.E5.88.99">游戏规则</span></h2>
+<ul><li> 棋盘大小为15*15。</li>
+<li> 黑白双方轮流落子。黑方为先手。</li>
+<li> 首先在横、竖、斜方向上成五（连续五个己方棋子）者为胜。超过五子也算。</li></ul>
+<h2><span class="mw-headline" id=".E6.B8.B8.E6.88.8F.E4.BA.A4.E4.BA.92.E6.96.B9.E5.BC.8F">游戏交互方式</span></h2>
+<p>本游戏与Botzone上其他游戏一样，使用相同的交互方式：<a href="/index.php?title=Bot#.E4.BA.A4.E4.BA.92" title="Bot">Bot#交互</a>
+</p>
+<h3><span class="mw-headline" id=".E5.85.B7.E4.BD.93.E4.BA.A4.E4.BA.92.E5.86.85.E5.AE.B9">具体交互内容</span></h3>
+<p>每回合<a href="/index.php?title=Bot" title="Bot">Bot</a>收到的request<b>不是字符串</b>，而是一个<a href="/index.php?title=JSON" title="JSON">JSON</a>对象，表示对方落子位置。格式如下：
+</p>
+<div class="mw-highlight mw-content-ltr" dir="ltr"><pre> <span class="p">{</span>
+ 	<span class="s2">&quot;x&quot;</span><span class="o">:</span> <span class="nb">Number</span><span class="p">,</span> <span class="c1">// 横坐标</span>
+ 	<span class="s2">&quot;y&quot;</span><span class="o">:</span> <span class="nb">Number</span>  <span class="c1">// 纵坐标</span>
+ <span class="p">}</span>
+</pre></div>
+<p>Bot所需要输出的response也是格式相同的<a href="/index.php?title=JSON" title="JSON">JSON</a>对象，表示自己要落子的位置。
+</p><p>如果是黑方的第一回合，则request为 <code>{"x": -1, "y": -1}</code>。
+</p>
+<h2><span class="mw-headline" id=".E6.B8.B8.E6.88.8F.E6.A0.B7.E4.BE.8B.E7.A8.8B.E5.BA.8F">游戏样例程序</span></h2>
+<h3><span class="mw-headline" id="Javascript">Javascript</span></h3>
+<p>这是 Javascript 版本，随机选择棋盘上的一个空白点落子。
+</p>
+<div class="mw-highlight mw-content-ltr" dir="ltr"><pre><span class="kd">var</span> <span class="nx">SIZE</span> <span class="o">=</span> <span class="mi">15</span><span class="p">;</span>    <span class="c1">// 棋盘大小 15*15</span>
+<span class="kd">var</span> <span class="nx">Grid</span> <span class="o">=</span> <span class="k">new</span> <span class="nb">Array</span><span class="p">(</span><span class="nx">SIZE</span><span class="p">);</span>
+<span class="k">for</span> <span class="p">(</span><span class="kd">var</span> <span class="nx">i</span> <span class="o">=</span> <span class="nx">Grid</span><span class="p">.</span><span class="nx">length</span> <span class="o">-</span> <span class="mi">1</span><span class="p">;</span> <span class="nx">i</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">;</span> <span class="nx">i</span><span class="o">--</span><span class="p">)</span> <span class="p">{</span>
+	<span class="nx">Grid</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span> <span class="o">=</span> <span class="k">new</span> <span class="nb">Array</span><span class="p">(</span><span class="nx">SIZE</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="kd">var</span> <span class="nx">inGrid</span> <span class="o">=</span> <span class="kd">function</span><span class="p">(</span><span class="nx">x</span><span class="p">,</span> <span class="nx">y</span><span class="p">)</span> <span class="p">{</span>
+	<span class="k">return</span> <span class="nx">x</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="nx">x</span> <span class="o">&lt;</span> <span class="nx">SIZE</span> <span class="o">&amp;&amp;</span> <span class="nx">y</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="nx">y</span> <span class="o">&lt;</span> <span class="nx">SIZE</span><span class="p">;</span>
+<span class="p">};</span>
+<span class="kd">var</span> <span class="nx">placeAt</span> <span class="o">=</span> <span class="kd">function</span><span class="p">(</span><span class="nx">x</span><span class="p">,</span> <span class="nx">y</span><span class="p">)</span> <span class="p">{</span>
+	<span class="k">if</span> <span class="p">(</span><span class="nx">inGrid</span><span class="p">(</span><span class="nx">x</span><span class="p">,</span> <span class="nx">y</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="nx">Grid</span><span class="p">[</span><span class="nx">x</span><span class="p">][</span><span class="nx">y</span><span class="p">]</span> <span class="o">===</span> <span class="kc">undefined</span><span class="p">)</span> <span class="p">{</span>
+		<span class="nx">Grid</span><span class="p">[</span><span class="nx">x</span><span class="p">][</span><span class="nx">y</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+		<span class="k">return</span> <span class="kc">true</span><span class="p">;</span>
+	<span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+		<span class="k">return</span> <span class="kc">false</span><span class="p">;</span>
+	<span class="p">}</span>
+<span class="p">};</span>
+<span class="kd">var</span> <span class="nx">randomAvailablePosition</span> <span class="o">=</span> <span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+	<span class="kd">var</span> <span class="nx">result</span> <span class="o">=</span> <span class="p">[];</span>
+	<span class="k">for</span> <span class="p">(</span><span class="kd">var</span> <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">SIZE</span><span class="p">;</span> <span class="nx">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">for</span> <span class="p">(</span><span class="kd">var</span> <span class="nx">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="nx">j</span> <span class="o">&lt;</span> <span class="nx">SIZE</span><span class="p">;</span> <span class="nx">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">if</span> <span class="p">(</span><span class="nx">Grid</span><span class="p">[</span><span class="nx">i</span><span class="p">][</span><span class="nx">j</span><span class="p">]</span> <span class="o">===</span> <span class="kc">undefined</span><span class="p">)</span> <span class="p">{</span>
+				<span class="nx">result</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span> <span class="nx">x</span><span class="o">:</span> <span class="nx">i</span><span class="p">,</span> <span class="nx">y</span><span class="o">:</span> <span class="nx">j</span> <span class="p">});</span>
+			<span class="p">}</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+	<span class="k">return</span> <span class="nx">result</span><span class="p">[</span><span class="nb">Math</span><span class="p">.</span><span class="nx">floor</span><span class="p">(</span><span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">()</span><span class="o">*</span><span class="nx">result</span><span class="p">.</span><span class="nx">length</span><span class="p">)];</span>
+<span class="p">};</span>
+
+<span class="nx">process</span><span class="p">.</span><span class="nx">stdin</span><span class="p">.</span><span class="nx">resume</span><span class="p">();</span>
+<span class="nx">process</span><span class="p">.</span><span class="nx">stdin</span><span class="p">.</span><span class="nx">setEncoding</span><span class="p">(</span><span class="s1">&#39;utf8&#39;</span><span class="p">);</span>
+<span class="kd">var</span> <span class="nx">fullInput</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span><span class="p">;</span>
+<span class="nx">process</span><span class="p">.</span><span class="nx">stdin</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;data&#39;</span><span class="p">,</span> <span class="kd">function</span><span class="p">(</span><span class="nx">chunk</span><span class="p">)</span> <span class="p">{</span>
+	<span class="nx">fullInput</span> <span class="o">+=</span> <span class="nx">chunk</span><span class="p">;</span>
+<span class="p">});</span>
+<span class="nx">process</span><span class="p">.</span><span class="nx">stdin</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;end&#39;</span><span class="p">,</span> <span class="kd">function</span><span class="p">()</span> <span class="p">{</span> 
+	<span class="c1">// 解析读入的JSON</span>
+	<span class="kd">var</span> <span class="nx">input</span> <span class="o">=</span> <span class="nx">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">fullInput</span><span class="p">);</span>
+	<span class="kd">var</span> <span class="nx">output</span><span class="p">;</span>
+	<span class="k">for</span> <span class="p">(</span><span class="kd">var</span> <span class="nx">i</span> <span class="o">=</span> <span class="nx">input</span><span class="p">.</span><span class="nx">requests</span><span class="p">.</span><span class="nx">length</span> <span class="o">-</span> <span class="mi">1</span><span class="p">;</span> <span class="nx">i</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">;</span> <span class="nx">i</span><span class="o">--</span><span class="p">)</span> <span class="p">{</span>
+		<span class="nx">placeAt</span><span class="p">(</span><span class="nx">input</span><span class="p">.</span><span class="nx">requests</span><span class="p">[</span><span class="nx">i</span><span class="p">].</span><span class="nx">x</span><span class="p">,</span> <span class="nx">input</span><span class="p">.</span><span class="nx">requests</span><span class="p">[</span><span class="nx">i</span><span class="p">].</span><span class="nx">y</span><span class="p">);</span>
+	<span class="p">}</span>
+	<span class="k">for</span> <span class="p">(</span><span class="nx">i</span> <span class="o">=</span> <span class="nx">input</span><span class="p">.</span><span class="nx">responses</span><span class="p">.</span><span class="nx">length</span> <span class="o">-</span> <span class="mi">1</span><span class="p">;</span> <span class="nx">i</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">;</span> <span class="nx">i</span><span class="o">--</span><span class="p">)</span> <span class="p">{</span>
+		<span class="nx">placeAt</span><span class="p">(</span><span class="nx">input</span><span class="p">.</span><span class="nx">responses</span><span class="p">[</span><span class="nx">i</span><span class="p">].</span><span class="nx">x</span><span class="p">,</span> <span class="nx">input</span><span class="p">.</span><span class="nx">responses</span><span class="p">[</span><span class="nx">i</span><span class="p">].</span><span class="nx">y</span><span class="p">);</span>
+	<span class="p">}</span>
+	<span class="nx">output</span> <span class="o">=</span> <span class="p">{</span>
+		<span class="nx">response</span><span class="o">:</span> <span class="nx">randomAvailablePosition</span><span class="p">()</span>
+	<span class="p">};</span>
+	<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">output</span><span class="p">));</span>
+<span class="p">});</span>
+</pre></div>
+<h3><span class="mw-headline" id="Java">Java</span></h3>
+<div class="mw-highlight mw-content-ltr" dir="ltr"><pre><span class="kn">import</span> <span class="nn">java.util.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.json.simple.JSONValue</span><span class="o">;</span>
+
+<span class="kd">class</span> <span class="nc">Main</span> <span class="o">{</span>
+	<span class="kd">static</span> <span class="kd">class</span> <span class="nc">Grid</span> <span class="o">{</span>
+		<span class="kd">public</span> <span class="kd">static</span> <span class="kd">final</span> <span class="kt">int</span> <span class="n">SIZE</span> <span class="o">=</span> <span class="mi">15</span><span class="o">;</span>
+		<span class="kd">private</span> <span class="kt">int</span><span class="o">[][]</span> <span class="n">grid</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">int</span><span class="o">[</span><span class="n">SIZE</span><span class="o">][</span><span class="n">SIZE</span><span class="o">];</span>
+		<span class="kd">public</span> <span class="kt">void</span> <span class="nf">placeAt</span><span class="o">(</span><span class="kt">int</span> <span class="n">x</span><span class="o">,</span> <span class="kt">int</span> <span class="n">y</span><span class="o">)</span> <span class="o">{</span>
+			<span class="k">if</span> <span class="o">(</span><span class="n">x</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">y</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="o">)</span> <span class="o">{</span>
+				<span class="n">grid</span><span class="o">[</span><span class="n">x</span><span class="o">][</span><span class="n">y</span><span class="o">]</span> <span class="o">=</span> <span class="mi">1</span><span class="o">;</span>
+			<span class="o">}</span>
+		<span class="o">}</span>
+		<span class="kd">public</span> <span class="n">Map</span> <span class="nf">randomAvailablePosition</span><span class="o">()</span> <span class="o">{</span>
+			<span class="n">List</span> <span class="n">xList</span> <span class="o">=</span> <span class="k">new</span> <span class="n">LinkedList</span><span class="o">();</span>
+			<span class="n">List</span> <span class="n">yList</span> <span class="o">=</span> <span class="k">new</span> <span class="n">LinkedList</span><span class="o">();</span>
+			<span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">SIZE</span><span class="o">;</span> <span class="n">i</span><span class="o">++)</span> <span class="o">{</span>
+				<span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">SIZE</span><span class="o">;</span> <span class="n">j</span><span class="o">++)</span> <span class="o">{</span>
+					<span class="k">if</span> <span class="o">(</span><span class="n">grid</span><span class="o">[</span><span class="n">i</span><span class="o">][</span><span class="n">j</span><span class="o">]</span> <span class="o">==</span> <span class="mi">0</span><span class="o">)</span> <span class="o">{</span>
+						<span class="n">xList</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">i</span><span class="o">);</span>
+						<span class="n">yList</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">j</span><span class="o">);</span>
+					<span class="o">}</span>
+				<span class="o">}</span>
+			<span class="o">}</span>
+			<span class="kt">int</span> <span class="n">rand</span> <span class="o">=</span> <span class="o">(</span><span class="kt">int</span><span class="o">)</span> <span class="o">(</span><span class="n">Math</span><span class="o">.</span><span class="na">random</span><span class="o">()*</span><span class="n">xList</span><span class="o">.</span><span class="na">size</span><span class="o">());</span>
+			<span class="n">Map</span> <span class="n">map</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+			<span class="n">map</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">&quot;x&quot;</span><span class="o">,</span> <span class="n">xList</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="n">rand</span><span class="o">));</span>
+			<span class="n">map</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">&quot;y&quot;</span><span class="o">,</span> <span class="n">yList</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="n">rand</span><span class="o">));</span>
+			<span class="k">return</span> <span class="n">map</span><span class="o">;</span>
+		<span class="o">}</span>
+	<span class="o">}</span>
+	<span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+		<span class="n">String</span> <span class="n">input</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Scanner</span><span class="o">(</span><span class="n">System</span><span class="o">.</span><span class="na">in</span><span class="o">).</span><span class="na">nextLine</span><span class="o">();</span>
+		<span class="n">Map</span><span class="o">&lt;</span><span class="n">String</span><span class="o">,</span> <span class="n">List</span><span class="o">&gt;</span> <span class="n">obj</span> <span class="o">=</span> <span class="o">(</span><span class="n">Map</span><span class="o">)</span> <span class="n">JSONValue</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">input</span><span class="o">);</span>
+		<span class="n">Grid</span> <span class="n">grid</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Grid</span><span class="o">();</span>
+		<span class="n">List</span><span class="o">&lt;</span><span class="n">Map</span><span class="o">&gt;</span> <span class="n">requests</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">&quot;requests&quot;</span><span class="o">);</span>
+		<span class="n">List</span><span class="o">&lt;</span><span class="n">Map</span><span class="o">&gt;</span> <span class="n">responses</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">&quot;responses&quot;</span><span class="o">);</span>
+		<span class="k">for</span> <span class="o">(</span><span class="n">Map</span><span class="o">&lt;</span><span class="n">String</span><span class="o">,</span> <span class="n">Long</span><span class="o">&gt;</span> <span class="n">rec</span> <span class="o">:</span> <span class="n">requests</span><span class="o">)</span> <span class="o">{</span>
+			<span class="n">grid</span><span class="o">.</span><span class="na">placeAt</span><span class="o">(</span><span class="n">rec</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">&quot;x&quot;</span><span class="o">).</span><span class="na">intValue</span><span class="o">(),</span> <span class="n">rec</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">&quot;y&quot;</span><span class="o">).</span><span class="na">intValue</span><span class="o">());</span>
+		<span class="o">}</span>
+		<span class="k">for</span> <span class="o">(</span><span class="n">Map</span><span class="o">&lt;</span><span class="n">String</span><span class="o">,</span> <span class="n">Long</span><span class="o">&gt;</span> <span class="n">rec</span> <span class="o">:</span> <span class="n">responses</span><span class="o">)</span> <span class="o">{</span>
+			<span class="n">grid</span><span class="o">.</span><span class="na">placeAt</span><span class="o">(</span><span class="n">rec</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">&quot;x&quot;</span><span class="o">).</span><span class="na">intValue</span><span class="o">(),</span> <span class="n">rec</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">&quot;y&quot;</span><span class="o">).</span><span class="na">intValue</span><span class="o">());</span>
+		<span class="o">}</span>
+		<span class="n">Map</span> <span class="n">output</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+		<span class="n">output</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">&quot;response&quot;</span><span class="o">,</span> <span class="n">grid</span><span class="o">.</span><span class="na">randomAvailablePosition</span><span class="o">());</span>
+		<span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">print</span><span class="o">(</span><span class="n">JSONValue</span><span class="o">.</span><span class="na">toJSONString</span><span class="o">(</span><span class="n">output</span><span class="o">));</span>
+	<span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h3><span class="mw-headline" id="C.2B.2B">C++</span></h3>
+<p>本地编译的方式请查看 <a href="/index.php?title=JSONCPP" title="JSONCPP">JSONCPP</a>。
+</p>
+<div class="mw-highlight mw-content-ltr" dir="ltr"><pre><span class="cp">#include</span> <span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;string&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;vector&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;cstdlib&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&quot;jsoncpp/json.h&quot; // C++编译时默认包含此库 </span><span class="cp"></span>
+
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">std</span><span class="p">;</span>
+
+<span class="k">const</span> <span class="kt">int</span> <span class="n">SIZE</span> <span class="o">=</span> <span class="mi">15</span><span class="p">;</span>
+<span class="kt">bool</span> <span class="n">Grid</span><span class="p">[</span><span class="n">SIZE</span><span class="p">][</span><span class="n">SIZE</span><span class="p">];</span>
+
+<span class="kt">void</span> <span class="nf">placeAt</span><span class="p">(</span><span class="kt">int</span> <span class="n">x</span><span class="p">,</span> <span class="kt">int</span> <span class="n">y</span><span class="p">)</span>
+<span class="p">{</span>
+	<span class="k">if</span> <span class="p">(</span><span class="n">x</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">y</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">Grid</span><span class="p">[</span><span class="n">x</span><span class="p">][</span><span class="n">y</span><span class="p">]</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+	<span class="p">}</span>
+<span class="p">}</span>
+<span class="n">Json</span><span class="o">::</span><span class="n">Value</span> <span class="n">randomAvailablePosition</span><span class="p">()</span>
+<span class="p">{</span>
+	<span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span> <span class="n">xs</span><span class="p">,</span> <span class="n">ys</span><span class="p">;</span>
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">SIZE</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+		<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">SIZE</span><span class="p">;</span> <span class="o">++</span><span class="n">j</span><span class="p">)</span> <span class="p">{</span>
+			<span class="k">if</span> <span class="p">(</span><span class="n">Grid</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="n">j</span><span class="p">]</span> <span class="o">==</span> <span class="nb">false</span><span class="p">)</span> <span class="p">{</span>
+				<span class="n">xs</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+				<span class="n">ys</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">j</span><span class="p">);</span>
+			<span class="p">}</span>
+		<span class="p">}</span>
+	<span class="p">}</span>
+	<span class="n">srand</span><span class="p">(</span><span class="n">time</span><span class="p">(</span><span class="mi">0</span><span class="p">));</span>
+	<span class="kt">int</span> <span class="n">rand_pos</span> <span class="o">=</span> <span class="n">rand</span><span class="p">()</span> <span class="o">%</span> <span class="n">xs</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+	<span class="n">Json</span><span class="o">::</span><span class="n">Value</span> <span class="n">action</span><span class="p">;</span>
+	<span class="n">action</span><span class="p">[</span><span class="s">&quot;x&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">xs</span><span class="p">[</span><span class="n">rand_pos</span><span class="p">];</span>
+	<span class="n">action</span><span class="p">[</span><span class="s">&quot;y&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">ys</span><span class="p">[</span><span class="n">rand_pos</span><span class="p">];</span>
+	<span class="k">return</span> <span class="n">action</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kt">int</span> <span class="n">main</span><span class="p">()</span>
+<span class="p">{</span>
+	<span class="c1">// 读入JSON</span>
+	<span class="n">string</span> <span class="n">str</span><span class="p">;</span>
+	<span class="n">getline</span><span class="p">(</span><span class="n">cin</span><span class="p">,</span> <span class="n">str</span><span class="p">);</span>
+	<span class="n">Json</span><span class="o">::</span><span class="n">Reader</span> <span class="n">reader</span><span class="p">;</span>
+	<span class="n">Json</span><span class="o">::</span><span class="n">Value</span> <span class="n">input</span><span class="p">;</span>
+	<span class="n">reader</span><span class="p">.</span><span class="n">parse</span><span class="p">(</span><span class="n">str</span><span class="p">,</span> <span class="n">input</span><span class="p">);</span> 
+	<span class="c1">// 分析自己收到的输入和自己过往的输出，并恢复状态</span>
+	<span class="kt">int</span> <span class="n">turnID</span> <span class="o">=</span> <span class="n">input</span><span class="p">[</span><span class="s">&quot;responses&quot;</span><span class="p">].</span><span class="n">size</span><span class="p">();</span>
+	<span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">turnID</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+		<span class="n">placeAt</span><span class="p">(</span><span class="n">input</span><span class="p">[</span><span class="s">&quot;requests&quot;</span><span class="p">][</span><span class="n">i</span><span class="p">][</span><span class="s">&quot;x&quot;</span><span class="p">].</span><span class="n">asInt</span><span class="p">(),</span> <span class="n">input</span><span class="p">[</span><span class="s">&quot;requests&quot;</span><span class="p">][</span><span class="n">i</span><span class="p">][</span><span class="s">&quot;y&quot;</span><span class="p">].</span><span class="n">asInt</span><span class="p">());</span>
+		<span class="n">placeAt</span><span class="p">(</span><span class="n">input</span><span class="p">[</span><span class="s">&quot;responses&quot;</span><span class="p">][</span><span class="n">i</span><span class="p">][</span><span class="s">&quot;x&quot;</span><span class="p">].</span><span class="n">asInt</span><span class="p">(),</span> <span class="n">input</span><span class="p">[</span><span class="s">&quot;responses&quot;</span><span class="p">][</span><span class="n">i</span><span class="p">][</span><span class="s">&quot;y&quot;</span><span class="p">].</span><span class="n">asInt</span><span class="p">());</span>
+	<span class="p">}</span>
+	<span class="n">placeAt</span><span class="p">(</span><span class="n">input</span><span class="p">[</span><span class="s">&quot;requests&quot;</span><span class="p">][</span><span class="n">turnID</span><span class="p">][</span><span class="s">&quot;x&quot;</span><span class="p">].</span><span class="n">asInt</span><span class="p">(),</span> <span class="n">input</span><span class="p">[</span><span class="s">&quot;requests&quot;</span><span class="p">][</span><span class="n">turnID</span><span class="p">][</span><span class="s">&quot;y&quot;</span><span class="p">].</span><span class="n">asInt</span><span class="p">());</span>
+	<span class="c1">// 做出决策存为myAction </span>
+	<span class="c1">// 输出决策JSON</span>
+	<span class="n">Json</span><span class="o">::</span><span class="n">Value</span> <span class="n">ret</span><span class="p">;</span>
+	<span class="n">ret</span><span class="p">[</span><span class="s">&quot;response&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">randomAvailablePosition</span><span class="p">();</span>
+	<span class="n">Json</span><span class="o">::</span><span class="n">FastWriter</span> <span class="n">writer</span><span class="p">;</span>
+	<span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">writer</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="n">ret</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">endl</span><span class="p">;</span>
+	<span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+
+<!-- 
+NewPP limit report
+Cached time: 20260731081317
+Cache expiry: 86400
+Dynamic content: false
+CPU time usage: 0.004 seconds
+Real time usage: 0.005 seconds
+Preprocessor visited node count: 61/1000000
+Preprocessor generated node count: 116/1000000
+Post‐expand include size: 0/2097152 bytes
+Template argument size: 0/2097152 bytes
+Highest expansion depth: 2/40
+Expensive parser function count: 0/100
+-->
+
+<!-- 
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    0.000      1 - -total
+-->
+
+<!-- Saved in parser cache with key my_wiki:pcache:idhash:24-0!*!0!!zh-cn!*!* and timestamp 20260731081316 and revision id 133
+ -->
+</div>					<div class="printfooter">
+						取自“<a dir="ltr" href="http://wiki.botzone.org.cn/index.php?title=Gomoku&amp;oldid=133">http://wiki.botzone.org.cn/index.php?title=Gomoku&amp;oldid=133</a>”					</div>
+				<div id="catlinks" class="catlinks catlinks-allhidden" data-mw="interface"></div>				<div class="visualClear"></div>
+							</div>
+		</div>
+		<div id="mw-navigation">
+			<h2>导航菜单</h2>
+
+			<div id="mw-head">
+									<div id="p-personal" role="navigation" class="" aria-labelledby="p-personal-label">
+						<h3 id="p-personal-label">个人工具</h3>
+						<ul>
+							<li id="pt-uls" class="active"><a href="#" class="uls-trigger autonym">中文（中国大陆）‎</a></li><li id="pt-login"><a href="/index.php?title=%E7%89%B9%E6%AE%8A:%E7%94%A8%E6%88%B7%E7%99%BB%E5%BD%95&amp;returnto=Gomoku" title="我们鼓励您登录；然而，这不是强制性的[o]" accesskey="o">登录</a></li>						</ul>
+					</div>
+									<div id="left-navigation">
+										<div id="p-namespaces" role="navigation" class="vectorTabs" aria-labelledby="p-namespaces-label">
+						<h3 id="p-namespaces-label">命名空间</h3>
+						<ul>
+															<li  id="ca-nstab-main" class="selected"><span><a href="/index.php?title=Gomoku"  title="查看内容页面[c]" accesskey="c">页面</a></span></li>
+															<li  id="ca-talk" class="new"><span><a href="/index.php?title=%E8%AE%A8%E8%AE%BA:Gomoku&amp;action=edit&amp;redlink=1"  title="关于内容页面的讨论[t]" accesskey="t" rel="discussion">讨论</a></span></li>
+													</ul>
+					</div>
+										<div id="p-variants" role="navigation" class="vectorMenu emptyPortlet" aria-labelledby="p-variants-label">
+												<h3 id="p-variants-label">
+							<span>变种</span><a href="#"></a>
+						</h3>
+
+						<div class="menu">
+							<ul>
+															</ul>
+						</div>
+					</div>
+									</div>
+				<div id="right-navigation">
+										<div id="p-views" role="navigation" class="vectorTabs" aria-labelledby="p-views-label">
+						<h3 id="p-views-label">视图</h3>
+						<ul>
+															<li id="ca-view" class="selected"><span><a href="/index.php?title=Gomoku" >阅读</a></span></li>
+															<li id="ca-viewsource"><span><a href="/index.php?title=Gomoku&amp;action=edit"  title="本页面受到保护。您可以查看其源代码[e]" accesskey="e">查看源代码</a></span></li>
+															<li id="ca-history" class="collapsible"><span><a href="/index.php?title=Gomoku&amp;action=history"  title="本页面过去的版本[h]" accesskey="h">查看历史</a></span></li>
+													</ul>
+					</div>
+										<div id="p-cactions" role="navigation" class="vectorMenu emptyPortlet" aria-labelledby="p-cactions-label">
+						<h3 id="p-cactions-label"><span>更多</span><a href="#"></a></h3>
+
+						<div class="menu">
+							<ul>
+															</ul>
+						</div>
+					</div>
+										<div id="p-search" role="search">
+						<h3>
+							<label for="searchInput">搜索</label>
+						</h3>
+
+						<form action="/index.php" id="searchform">
+							<div id="simpleSearch">
+							<input type="search" name="search" placeholder="搜索Botzone Wiki" title="搜索Botzone Wiki[f]" accesskey="f" id="searchInput"/><input type="hidden" value="特殊:搜索" name="title"/><input type="submit" name="fulltext" value="搜索" title="搜索含这些文字的页面" id="mw-searchButton" class="searchButton mw-fallbackSearchButton"/><input type="submit" name="go" value="前往" title="若相同标题存在，则直接前往该页面" id="searchButton" class="searchButton"/>							</div>
+						</form>
+					</div>
+									</div>
+			</div>
+			<div id="mw-panel">
+				<div id="p-logo" role="banner"><a class="mw-wiki-logo" href="/index.php?title=%E9%A6%96%E9%A1%B5"  title="访问首页"></a></div>
+						<div class="portal" role="navigation" id='p-navigation' aria-labelledby='p-navigation-label'>
+			<h3 id='p-navigation-label'>导航</h3>
+
+			<div class="body">
+									<ul>
+						<li id="n-mainpage-description"><a href="/index.php?title=%E9%A6%96%E9%A1%B5" title="访问首页[z]" accesskey="z">首页</a></li><li id="n-recentchanges"><a href="/index.php?title=%E7%89%B9%E6%AE%8A:%E6%9C%80%E8%BF%91%E6%9B%B4%E6%94%B9" title="本wiki最近更改的列表[r]" accesskey="r">最近更改</a></li><li id="n-randompage"><a href="/index.php?title=%E7%89%B9%E6%AE%8A:%E9%9A%8F%E6%9C%BA" title="载入一个随机页面[x]" accesskey="x">随机页面</a></li><li id="n-help"><a href="https://www.mediawiki.org/wiki/Special:MyLanguage/Help:Contents" title="查找帮助的地方">帮助</a></li>					</ul>
+							</div>
+		</div>
+			<div class="portal" role="navigation" id='p-tb' aria-labelledby='p-tb-label'>
+			<h3 id='p-tb-label'>工具</h3>
+
+			<div class="body">
+									<ul>
+						<li id="t-whatlinkshere"><a href="/index.php?title=%E7%89%B9%E6%AE%8A:%E9%93%BE%E5%85%A5%E9%A1%B5%E9%9D%A2/Gomoku" title="所有链接至本页面的wiki页面的列表[j]" accesskey="j">链入页面</a></li><li id="t-recentchangeslinked"><a href="/index.php?title=%E7%89%B9%E6%AE%8A:%E6%9C%80%E8%BF%91%E9%93%BE%E5%87%BA%E6%9B%B4%E6%94%B9/Gomoku" rel="nofollow" title="链自本页的页面的最近更改[k]" accesskey="k">相关更改</a></li><li id="t-specialpages"><a href="/index.php?title=%E7%89%B9%E6%AE%8A:%E7%89%B9%E6%AE%8A%E9%A1%B5%E9%9D%A2" title="所有特殊页面的列表[q]" accesskey="q">特殊页面</a></li><li id="t-print"><a href="/index.php?title=Gomoku&amp;printable=yes" rel="alternate" title="本页面的可打印版本[p]" accesskey="p">可打印版本</a></li><li id="t-permalink"><a href="/index.php?title=Gomoku&amp;oldid=133" title="本页面该版本的固定链接">固定链接</a></li><li id="t-info"><a href="/index.php?title=Gomoku&amp;action=info" title="关于此页面的更多信息">页面信息</a></li>					</ul>
+							</div>
+		</div>
+				</div>
+		</div>
+		<div id="footer" role="contentinfo">
+							<ul id="footer-info">
+											<li id="footer-info-lastmod"> 本页面最后修改于2015年3月23日 (星期一) 18:57。</li>
+									</ul>
+							<ul id="footer-places">
+											<li id="footer-places-privacy"><a href="/index.php?title=Botzone_Wiki:%E9%9A%90%E7%A7%81%E6%94%BF%E7%AD%96" title="Botzone Wiki:隐私政策">隐私政策</a></li>
+											<li id="footer-places-about"><a href="/index.php?title=Botzone_Wiki:%E5%85%B3%E4%BA%8E" title="Botzone Wiki:关于">关于Botzone Wiki</a></li>
+											<li id="footer-places-disclaimer"><a href="/index.php?title=Botzone_Wiki:%E5%85%8D%E8%B4%A3%E5%A3%B0%E6%98%8E" title="Botzone Wiki:免责声明">免责声明</a></li>
+											<li id="footer-places-mobileview"><a href="//wiki.botzone.org.cn/index.php?title=Gomoku&amp;mobileaction=toggle_view_mobile" class="noprint stopMobileRedirectToggle">手机版视图</a></li>
+									</ul>
+										<ul id="footer-icons" class="noprint">
+											<li id="footer-poweredbyico">
+							<a href="//www.mediawiki.org/"><img src="/resources/assets/poweredby_mediawiki_88x31.png" alt="Powered by MediaWiki" srcset="/resources/assets/poweredby_mediawiki_132x47.png 1.5x, /resources/assets/poweredby_mediawiki_176x62.png 2x" width="88" height="31"/></a>						</li>
+									</ul>
+						<div style="clear:both"></div>
+		</div>
+		<script>(window.RLQ=window.RLQ||[]).push(function(){mw.loader.load(["mediawiki.toc","mediawiki.action.view.postEdit","site","mediawiki.user","mediawiki.hidpi","mediawiki.page.ready","mediawiki.searchSuggest","ext.uls.init","ext.uls.geoclient"]);});</script><script>(window.RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgBackendResponseTime":55});});</script>
+	</body>
+</html>

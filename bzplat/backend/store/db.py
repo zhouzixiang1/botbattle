@@ -25,6 +25,164 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _add_col(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
+    cols = _table_cols(conn, table)
+    if col not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """为已有库补列；必要时重建 contests 以放宽 status CHECK。"""
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "contests" not in tables:
+        return
+
+    create_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='contests'"
+    ).fetchone()
+    sql_text = (create_sql[0] or "") if create_sql else ""
+    cols = _table_cols(conn, "contests")
+
+    for col, decl in (
+        ("game_id", "TEXT NOT NULL DEFAULT 'holdem'"),
+        ("stages_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("current_stage_idx", "INTEGER NOT NULL DEFAULT 0"),
+        ("template_id", "TEXT NOT NULL DEFAULT 'holdem_swiss_ko'"),
+        ("rest_ends_at", "TEXT"),
+    ):
+        _add_col(conn, "contests", col, decl)
+
+    cols = _table_cols(conn, "contests")
+    if "'rest'" not in sql_text:
+        conn.execute(
+            """
+            CREATE TABLE contests_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                organizer_id INTEGER NOT NULL REFERENCES users(id),
+                status TEXT NOT NULL DEFAULT 'draft',
+                registration_opens_at TEXT,
+                registration_closes_at TEXT,
+                starts_at TEXT,
+                ends_at TEXT,
+                hands_per_match INTEGER NOT NULL DEFAULT 70,
+                created_at TEXT NOT NULL,
+                game_id TEXT NOT NULL DEFAULT 'holdem',
+                stages_json TEXT NOT NULL DEFAULT '[]',
+                current_stage_idx INTEGER NOT NULL DEFAULT 0,
+                template_id TEXT NOT NULL DEFAULT 'holdem_swiss_ko',
+                rest_ends_at TEXT,
+                CONSTRAINT chk_contest_status CHECK (
+                    status IN ('draft','open','running','rest','finished','cancelled'))
+            )
+            """
+        )
+        all_cols = [
+            "id", "title", "description", "organizer_id", "status",
+            "registration_opens_at", "registration_closes_at", "starts_at",
+            "ends_at", "hands_per_match", "created_at",
+            "game_id", "stages_json", "current_stage_idx", "template_id",
+            "rest_ends_at",
+        ]
+        present = [c for c in all_cols if c in cols]
+        conn.execute(
+            f"INSERT INTO contests_new ({', '.join(present)}) "
+            f"SELECT {', '.join(present)} FROM contests"
+        )
+        conn.execute("DROP TABLE contests")
+        conn.execute("ALTER TABLE contests_new RENAME TO contests")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id)"
+        )
+
+    if "contest_entries" in tables:
+        for col, decl in (
+            ("group_id", "TEXT NOT NULL DEFAULT ''"),
+            ("seed", "INTEGER NOT NULL DEFAULT 0"),
+            ("eliminated", "INTEGER NOT NULL DEFAULT 0"),
+            ("dispatched_at", "TEXT"),
+        ):
+            _add_col(conn, "contest_entries", col, decl)
+
+    if "contest_pairings" in tables:
+        for col, decl in (
+            ("stage_idx", "INTEGER NOT NULL DEFAULT 0"),
+            ("stage_key", "TEXT NOT NULL DEFAULT ''"),
+            ("group_id", "TEXT NOT NULL DEFAULT ''"),
+            ("bracket_slot", "INTEGER"),
+            ("color_first", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            _add_col(conn, "contest_pairings", col, decl)
+
+    if "bots" in tables:
+        _add_col(conn, "bots", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
+
+    if "matches" in tables:
+        _add_col(conn, "matches", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
+        # 放宽 match_type CHECK 以纳入 'ladder'（闲时自动对局）
+        m_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'"
+        ).fetchone()
+        m_sql_text = (m_sql[0] or "") if m_sql else ""
+        if "'ladder'" not in m_sql_text:
+            m_cols = _table_cols(conn, "matches")
+            conn.execute(
+                """
+                CREATE TABLE matches_new (
+                    id              TEXT    PRIMARY KEY,
+                    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
+                    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+                    owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+                    hands_played    INTEGER NOT NULL DEFAULT 0,
+                    total_hands     INTEGER NOT NULL DEFAULT 70,
+                    earnings_a      INTEGER NOT NULL DEFAULT 0,
+                    earnings_b      INTEGER NOT NULL DEFAULT 0,
+                    winner          INTEGER,
+                    reason          TEXT    NOT NULL DEFAULT 'completed',
+                    net_bb_a        REAL    NOT NULL DEFAULT 0,
+                    match_type      TEXT    NOT NULL DEFAULT 'challenge',
+                    status          TEXT    NOT NULL DEFAULT 'pending',
+                    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+                    started_at      TEXT,
+                    ended_at        TEXT,
+                    created_at      TEXT    NOT NULL,
+                    CONSTRAINT chk_winner2 CHECK (winner IN (0, 1) OR winner IS NULL),
+                    CONSTRAINT chk_status2 CHECK (status IN ('pending','running','completed','aborted')),
+                    CONSTRAINT chk_type2 CHECK (match_type IN ('challenge','table','contest','ladder'))
+                )
+                """
+            )
+            present_m = [c for c in (
+                "id", "bot_a_id", "bot_b_id", "owner_id", "contest_id",
+                "hands_played", "total_hands", "earnings_a", "earnings_b",
+                "winner", "reason", "net_bb_a", "match_type", "status",
+                "started_at", "ended_at", "created_at", "game_id",
+            ) if c in m_cols]
+            conn.execute(
+                f"INSERT INTO matches_new ({', '.join(present_m)}) "
+                f"SELECT {', '.join(present_m)} FROM matches"
+            )
+            conn.execute("DROP TABLE matches")
+            conn.execute("ALTER TABLE matches_new RENAME TO matches")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_bot_a ON matches(bot_a_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_bot_b ON matches(bot_b_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_owner ON matches(owner_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_contest ON matches(contest_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_time ON matches(created_at)")
+
+
 class Store:
     """SQLite 存储。线程安全；持久连接 check_same_thread=False。"""
 
@@ -35,6 +193,7 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         with self._tx() as conn:
             conn.executescript(SCHEMA)
+            _migrate(conn)
             seed_email_templates(conn, _now())
 
     @contextlib.contextmanager
@@ -250,12 +409,13 @@ class Store:
         binary_path = fields.get("binary_path", "")
         is_builtin = 1 if fields.get("is_builtin") else 0
         is_public = 1 if fields.get("is_public", True) else 0
+        game_id = fields.get("game_id") or "holdem"
         now = _now()
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO bots(owner_id, name, display_name, description, "
-                "os, arch, format, binary_path, is_builtin, is_public, "
-                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "os, arch, format, binary_path, is_builtin, is_public, game_id, "
+                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     owner_id,
                     name,
@@ -267,6 +427,7 @@ class Store:
                     binary_path,
                     is_builtin,
                     is_public,
+                    game_id,
                     now,
                     now,
                 ),
@@ -300,6 +461,7 @@ class Store:
             "current_version",
             "is_public",
             "is_active",
+            "game_id",
             "updated_at",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
@@ -326,6 +488,7 @@ class Store:
         *,
         active_only: bool = True,
         include_builtin: bool = True,
+        game_id: str | None = None,
     ) -> list[dict]:
         with self._tx() as c:
             sql = "SELECT * FROM bots WHERE 1=1"
@@ -339,6 +502,9 @@ class Store:
                 sql += " AND is_active=1"
             if not include_builtin:
                 sql += " AND is_builtin=0"
+            if game_id:
+                sql += " AND game_id=?"
+                params.append(game_id)
             sql += " ORDER BY is_builtin DESC, name"
             return [_row(r) for r in c.execute(sql, params)]
 
@@ -414,12 +580,13 @@ class Store:
         contest_id: int | None = None,
         total_hands: int = 70,
         match_type: str = "challenge",
+        game_id: str = "holdem",
     ) -> dict:
         with self._tx() as c:
             c.execute(
                 "INSERT INTO matches(id, bot_a_id, bot_b_id, owner_id, "
-                "contest_id, total_hands, match_type, status, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "contest_id, total_hands, match_type, status, game_id, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     bot_a_id,
@@ -429,6 +596,7 @@ class Store:
                     total_hands,
                     match_type,
                     "pending",
+                    game_id or "holdem",
                     _now(),
                 ),
             )
@@ -474,6 +642,7 @@ class Store:
         bot_id: int | None = None,
         *,
         contest_id: int | None = None,
+        game_id: str | None = None,
     ) -> list[dict]:
         with self._tx() as c:
             sql = (
@@ -497,6 +666,9 @@ class Store:
             if status:
                 sql += " AND m.status=?"
                 params.append(status)
+            if game_id:
+                sql += " AND m.game_id=?"
+                params.append(game_id)
             sql += " ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             return [_row(r) for r in c.execute(sql, params)]
@@ -588,23 +760,64 @@ class Store:
                 ).fetchone()
             )
 
-    def list_leaderboard(self, limit: int = 50) -> list[dict]:
+    def list_leaderboard(
+        self, limit: int = 50, *, game_id: str | None = None
+    ) -> list[dict]:
         with self._tx() as c:
-            rows = c.execute(
+            sql = (
                 "SELECT r.bot_id, r.rating, r.rd, r.vol, r.wins, r.losses, "
                 "r.draws, r.net_chips, r.matches_played, r.last_played_at, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
-                "b.format, b.os, b.arch, b.is_builtin, "
+                "b.format, b.os, b.arch, b.is_builtin, b.game_id, "
                 "u.username AS owner_name, u.display_name AS owner_display "
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
-                "WHERE b.is_active=1 "
-                "ORDER BY r.rating DESC LIMIT ?",
-                (limit,),
+                "WHERE b.is_active=1"
             )
-            return [_row(r) for r in rows]
+            params: list[Any] = []
+            if game_id:
+                sql += " AND b.game_id=?"
+                params.append(game_id)
+            sql += " ORDER BY r.rating DESC LIMIT ?"
+            params.append(limit)
+            return [_row(r) for r in c.execute(sql, params)]
 
     leaderboard = list_leaderboard
+
+    def least_recently_played(
+        self, game_id: str | None = None, *, limit: int = 100
+    ) -> list[dict]:
+        """按 last_played_at 升序返回可对战 bot（NULL=从未赛，排最前）。
+
+        用于闲时自动对局挑选最久未赛的 bot。仅返回 active+public+非内置且有二进制的 bot。
+        """
+        with self._tx() as c:
+            sql = (
+                "SELECT r.bot_id, r.rating, r.rd, r.matches_played, r.last_played_at, "
+                "b.name AS bot_name, b.game_id, b.binary_path, b.is_active, b.is_public, b.is_builtin "
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id "
+                "WHERE b.is_active=1 AND b.is_public=1 AND b.is_builtin=0 "
+                "AND b.binary_path!=''"
+            )
+            params: list[Any] = []
+            if game_id:
+                sql += " AND b.game_id=?"
+                params.append(game_id)
+            # NULL 最前（最陈旧），其后按时间升序
+            sql += " ORDER BY r.last_played_at IS NULL DESC, r.last_played_at ASC LIMIT ?"
+            params.append(limit)
+            return [_row(r) for r in c.execute(sql, params)]
+
+    def count_matches(self, status: str | None = None) -> int:
+        """按 status 统计对局数；status=None 时返回全部。"""
+        with self._tx() as c:
+            if status:
+                row = c.execute(
+                    "SELECT COUNT(*) FROM matches WHERE status=?", (status,)
+                ).fetchone()
+            else:
+                row = c.execute("SELECT COUNT(*) FROM matches").fetchone()
+            return int(row[0]) if row else 0
 
     def upsert_rating(
         self,
@@ -679,13 +892,18 @@ class Store:
         ends_at: str | None = None,
         hands_per_match: int = 70,
         status: str = "draft",
+        game_id: str = "holdem",
+        stages_json: str = "[]",
+        template_id: str = "holdem_swiss_ko",
+        current_stage_idx: int = 0,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contests(title, description, organizer_id, status, "
                 "registration_opens_at, registration_closes_at, starts_at, "
-                "ends_at, hands_per_match, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "ends_at, hands_per_match, created_at, game_id, stages_json, "
+                "current_stage_idx, template_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     title,
                     description,
@@ -697,6 +915,10 @@ class Store:
                     ends_at,
                     hands_per_match,
                     _now(),
+                    game_id,
+                    stages_json,
+                    current_stage_idx,
+                    template_id,
                 ),
             )
             cid = cur.lastrowid
@@ -722,6 +944,11 @@ class Store:
             "starts_at",
             "ends_at",
             "hands_per_match",
+            "game_id",
+            "stages_json",
+            "current_stage_idx",
+            "template_id",
+            "rest_ends_at",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
@@ -770,6 +997,25 @@ class Store:
 
     add_contest_entry = add_entry
 
+    def update_entry(self, contest_id: int, user_id: int, **fields: Any) -> dict | None:
+        allowed = {"bot_id", "group_id", "seed", "eliminated", "dispatched_at"}
+        sets = [f"{k}=?" for k in fields if k in allowed]
+        vals = [v for k, v in fields.items() if k in allowed]
+        with self._tx() as c:
+            if sets:
+                vals.extend([contest_id, user_id])
+                c.execute(
+                    f"UPDATE contest_entries SET {','.join(sets)} "
+                    "WHERE contest_id=? AND user_id=?",
+                    vals,
+                )
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_entries WHERE contest_id=? AND user_id=?",
+                    (contest_id, user_id),
+                ).fetchone()
+            )
+
     def list_entries(self, contest_id: int) -> list[dict]:
         with self._tx() as c:
             return [
@@ -805,12 +1051,30 @@ class Store:
         round_num: int = 1,
         match_id: str | None = None,
         status: str = "pending",
+        stage_idx: int = 0,
+        stage_key: str = "",
+        group_id: str = "",
+        bracket_slot: int | None = None,
+        color_first: int = 0,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contest_pairings(contest_id, round_num, bot_a_id, "
-                "bot_b_id, match_id, status) VALUES(?,?,?,?,?,?)",
-                (contest_id, round_num, bot_a_id, bot_b_id, match_id, status),
+                "bot_b_id, match_id, status, stage_idx, stage_key, group_id, "
+                "bracket_slot, color_first) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    contest_id,
+                    round_num,
+                    bot_a_id,
+                    bot_b_id,
+                    match_id,
+                    status,
+                    stage_idx,
+                    stage_key,
+                    group_id,
+                    bracket_slot,
+                    color_first,
+                ),
             )
             pid = cur.lastrowid
             return _row(
@@ -821,21 +1085,33 @@ class Store:
 
     add_contest_pairing = add_pairing
 
-    def list_pairings(self, contest_id: int) -> list[dict]:
+    def list_pairings(
+        self, contest_id: int, *, stage_idx: int | None = None
+    ) -> list[dict]:
         with self._tx() as c:
-            return [
-                _row(r)
-                for r in c.execute(
-                    "SELECT * FROM contest_pairings WHERE contest_id=? "
-                    "ORDER BY round_num, id",
-                    (contest_id,),
-                )
-            ]
+            sql = "SELECT * FROM contest_pairings WHERE contest_id=?"
+            params: list[Any] = [contest_id]
+            if stage_idx is not None:
+                sql += " AND stage_idx=?"
+                params.append(stage_idx)
+            sql += " ORDER BY stage_idx, round_num, id"
+            return [_row(r) for r in c.execute(sql, params)]
 
     list_contest_pairings = list_pairings
 
     def update_pairing(self, pairing_id: int, **fields: Any) -> dict | None:
-        allowed = {"match_id", "status", "round_num"}
+        allowed = {
+            "match_id",
+            "status",
+            "round_num",
+            "bot_a_id",
+            "bot_b_id",
+            "stage_idx",
+            "stage_key",
+            "group_id",
+            "bracket_slot",
+            "color_first",
+        }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
@@ -852,6 +1128,99 @@ class Store:
             )
 
     update_contest_pairing = update_pairing
+
+    # ── contest_stage_results ─────────────────────────────────
+
+    def upsert_stage_result(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        bot_id: int,
+        *,
+        stage_key: str = "",
+        points: float = 0,
+        wins: int = 0,
+        draws: int = 0,
+        losses: int = 0,
+        net_chips: int = 0,
+        group_id: str = "",
+        rank_in_group: int | None = None,
+        payload_json: str = "{}",
+    ) -> None:
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO contest_stage_results"
+                "(contest_id, stage_idx, stage_key, bot_id, points, wins, draws, "
+                "losses, net_chips, group_id, rank_in_group, payload_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(contest_id, stage_idx, bot_id) DO UPDATE SET "
+                "stage_key=excluded.stage_key, points=excluded.points, "
+                "wins=excluded.wins, draws=excluded.draws, losses=excluded.losses, "
+                "net_chips=excluded.net_chips, group_id=excluded.group_id, "
+                "rank_in_group=excluded.rank_in_group, "
+                "payload_json=excluded.payload_json",
+                (
+                    contest_id, stage_idx, stage_key, bot_id, points, wins,
+                    draws, losses, net_chips, group_id, rank_in_group, payload_json,
+                ),
+            )
+
+    def list_stage_results(
+        self, contest_id: int, *, stage_idx: int | None = None
+    ) -> list[dict]:
+        with self._tx() as c:
+            sql = "SELECT * FROM contest_stage_results WHERE contest_id=?"
+            params: list[Any] = [contest_id]
+            if stage_idx is not None:
+                sql += " AND stage_idx=?"
+                params.append(stage_idx)
+            sql += " ORDER BY stage_idx, points DESC, net_chips DESC"
+            return [_row(r) for r in c.execute(sql, params)]
+
+    # ── platform_settings ─────────────────────────────────────
+
+    def get_setting(self, key: str) -> str | None:
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT value FROM platform_settings WHERE key=?", (key,)
+            ).fetchone()
+            return row[0] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO platform_settings(key, value, updated_at) "
+                "VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at",
+                (key, value, _now()),
+            )
+
+    def get_settings(self, keys: list[str] | None = None) -> dict[str, str]:
+        with self._tx() as c:
+            if keys:
+                placeholders = ",".join("?" * len(keys))
+                rows = c.execute(
+                    f"SELECT key, value FROM platform_settings WHERE key IN ({placeholders})",
+                    keys,
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT key, value FROM platform_settings"
+                ).fetchall()
+            return {r[0]: r[1] for r in rows}
+
+    def seed_setting_if_absent(self, key: str, value: str) -> None:
+        with self._tx() as c:
+            exists = c.execute(
+                "SELECT 1 FROM platform_settings WHERE key=?", (key,)
+            ).fetchone()
+            if not exists:
+                c.execute(
+                    "INSERT INTO platform_settings(key, value, updated_at) "
+                    "VALUES(?,?,?)",
+                    (key, value, _now()),
+                )
 
     # ── email_templates ───────────────────────────────────────
 

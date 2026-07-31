@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/project/botzone-platform
-EnvironmentFile=-%h/project/botzone-platform/.env
-ExecStart=%h/project/botzone-platform/.venv/bin/python -m bzplat.backend.cli serve --host ${BZ_HOST:-0.0.0.0} --port ${BZ_PORT:-50380}
+WorkingDirectory=%h/project/botbattle
+EnvironmentFile=-%h/project/botbattle/.env
+ExecStart=%h/project/botbattle/.venv/bin/python -m bzplat.backend.cli serve --host ${BZ_HOST:-0.0.0.0} --port ${BZ_PORT:-50380}
 Restart=on-failure
 RestartSec=3
 

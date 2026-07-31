@@ -1,6 +1,19 @@
 # Bot 开发指南
 
-本页教你从零编写一个可上传到平台参赛的 Bot。协议细节请先读[协议规范](#)。
+本页教你从零编写一个可上传到平台参赛的 Bot。协议细节请先读[协议规范](#/wiki?slug=protocol)。
+
+支持的游戏：`holdem`（德州）、`gomoku`（五子棋）、`pencil`（点格棋）。上传时必须选择正确的游戏类型。
+
+## 0. 与 Botzone Bot 模型对照
+
+| 项 | Botzone | 本平台 |
+|----|---------|--------|
+| 输入 | 每回合整包 JSON（含 `requests`/`responses` 历史） | 长驻进程，每步一行当前请求 |
+| 输出 | `{"response": ...}` 信封 | 直接一行决策 JSON |
+| 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB / 默认 60s（可配） |
+| 长时运行 | 可选 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 默认整场长驻 |
+
+棋类请分别阅读 [Gomoku](#/wiki?slug=gomoku)、[Pencil](#/wiki?slug=pencil)；样例：`samples/callbot.py`、`samples/gomokubot.py`、`samples/pencilbot.py`。
 
 ## 1. 核心思路
 
@@ -206,3 +219,7 @@ echo '{"v":1,"t":"act","h":0,"H":70,"id":0,"d":0,"mc":[48,51],"pc":[],"hist":[],
 - **`h` / `H`**：知道当前手数与总手数，调整策略激进程度。
 
 仓库 `samples/aggressivebot.c` 给出了一个稍微进阶的例子：在无人下注时主动加注，否则跟注/过牌，可作为改进起点。
+
+## 10. 运行时资源
+
+Bot 在 Docker 中运行：`--cpus=1`、`--memory=512m`、无网络。决策超时默认 60s。详见[运行时与资源限制](/wiki?slug=runtime)。
