@@ -371,6 +371,24 @@ class Store:
             sql += " ORDER BY created_at"
             return [_row(r) for r in c.execute(sql, params)]
 
+    def search_users(self, q: str, *, limit: int = 20) -> list[dict]:
+        """按用户名前缀搜索（仅返回安全字段 id/username/display_name）。"""
+        q = (q or "").strip()
+        with self._tx() as c:
+            if not q:
+                sql = (
+                    "SELECT id, username, display_name FROM users "
+                    "WHERE is_active=1 ORDER BY username LIMIT ?"
+                )
+                rows = c.execute(sql, (limit,)).fetchall()
+            else:
+                sql = (
+                    "SELECT id, username, display_name FROM users "
+                    "WHERE is_active=1 AND username LIKE ? ORDER BY username LIMIT ?"
+                )
+                rows = c.execute(sql, (q + "%", limit)).fetchall()
+            return [_row(r) for r in rows]
+
     # ── sessions ──────────────────────────────────────────────
 
     def add_session(

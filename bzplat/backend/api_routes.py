@@ -76,8 +76,16 @@ def my_bots(
 
 
 @router.get("/api/bots/public")
-def public_bots(request: Request, game_id: str | None = None):
-    return {"bots": _bots(request).list_public(game_id=game_id)}
+def public_bots(
+    request: Request, game_id: str | None = None, owner_id: int | None = None
+):
+    return {"bots": _bots(request).list_public(game_id=game_id, owner_id=owner_id)}
+
+
+@router.get("/api/users")
+def search_users(request: Request, q: str | None = None, limit: int = 20):
+    """按用户名前缀搜索（公开，仅返回 id/username/display_name）。"""
+    return {"users": _store(request).search_users(q or "", limit=max(1, min(limit, 50)))}
 
 
 @router.get("/api/bots/{bot_id}")
