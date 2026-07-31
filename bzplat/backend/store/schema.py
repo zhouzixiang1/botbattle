@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS bots (
     is_public       INTEGER NOT NULL DEFAULT 1,
     is_active       INTEGER NOT NULL DEFAULT 1,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
+    game_id         TEXT    NOT NULL DEFAULT 'holdem',
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
     UNIQUE(owner_id, name),
@@ -67,8 +68,13 @@ CREATE TABLE IF NOT EXISTS contests (
     ends_at                 TEXT,
     hands_per_match         INTEGER NOT NULL DEFAULT 70,
     created_at              TEXT    NOT NULL,
+    game_id                 TEXT    NOT NULL DEFAULT 'holdem',
+    stages_json             TEXT    NOT NULL DEFAULT '[]',
+    current_stage_idx       INTEGER NOT NULL DEFAULT 0,
+    template_id             TEXT    NOT NULL DEFAULT 'holdem_swiss_ko',
+    rest_ends_at            TEXT,
     CONSTRAINT chk_contest_status CHECK (
-        status IN ('draft','open','running','finished','cancelled'))
+        status IN ('draft','open','running','rest','finished','cancelled'))
 );
 
 CREATE TABLE IF NOT EXISTS matches (
@@ -86,12 +92,13 @@ CREATE TABLE IF NOT EXISTS matches (
     net_bb_a        REAL    NOT NULL DEFAULT 0,
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
+    game_id         TEXT    NOT NULL DEFAULT 'holdem',
     started_at      TEXT,
     ended_at        TEXT,
     created_at      TEXT    NOT NULL,
     CONSTRAINT chk_winner CHECK (winner IN (0, 1) OR winner IS NULL),
     CONSTRAINT chk_status CHECK (status IN ('pending','running','completed','aborted')),
-    CONSTRAINT chk_type CHECK (match_type IN ('challenge','table','contest'))
+    CONSTRAINT chk_type CHECK (match_type IN ('challenge','table','contest','ladder'))
 );
 
 CREATE TABLE IF NOT EXISTS match_replays (
@@ -177,6 +184,10 @@ CREATE TABLE IF NOT EXISTS contest_entries (
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     bot_id          INTEGER NOT NULL REFERENCES bots(id),
     registered_at   TEXT    NOT NULL,
+    group_id        TEXT    NOT NULL DEFAULT '',
+    seed            INTEGER NOT NULL DEFAULT 0,
+    eliminated      INTEGER NOT NULL DEFAULT 0,
+    dispatched_at   TEXT,
     UNIQUE(contest_id, user_id)
 );
 
@@ -187,7 +198,35 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
     bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
     match_id        TEXT    REFERENCES matches(id) ON DELETE SET NULL,
-    status          TEXT    NOT NULL DEFAULT 'pending'
+    status          TEXT    NOT NULL DEFAULT 'pending',
+    stage_idx       INTEGER NOT NULL DEFAULT 0,
+    stage_key       TEXT    NOT NULL DEFAULT '',
+    group_id        TEXT    NOT NULL DEFAULT '',
+    bracket_slot    INTEGER,
+    color_first     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS contest_stage_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+    stage_idx       INTEGER NOT NULL,
+    stage_key       TEXT    NOT NULL DEFAULT '',
+    bot_id          INTEGER NOT NULL REFERENCES bots(id),
+    points          REAL    NOT NULL DEFAULT 0,
+    wins            INTEGER NOT NULL DEFAULT 0,
+    draws           INTEGER NOT NULL DEFAULT 0,
+    losses          INTEGER NOT NULL DEFAULT 0,
+    net_chips       INTEGER NOT NULL DEFAULT 0,
+    group_id        TEXT    NOT NULL DEFAULT '',
+    rank_in_group   INTEGER,
+    payload_json    TEXT    NOT NULL DEFAULT '{}',
+    UNIQUE(contest_id, stage_idx, bot_id)
+);
+
+CREATE TABLE IF NOT EXISTS platform_settings (
+    key             TEXT    PRIMARY KEY,
+    value           TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
@@ -203,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_email_codes_user ON email_codes(user_id, purpose)
 CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id);
 CREATE INDEX IF NOT EXISTS idx_contest_entries_c ON contest_entries(contest_id);
 CREATE INDEX IF NOT EXISTS idx_contest_pairings_c ON contest_pairings(contest_id);
+CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(contest_id);
 """
 
 # 角色
@@ -220,13 +260,38 @@ STATUS_ABORTED = "aborted"
 TYPE_CHALLENGE = "challenge"
 TYPE_TABLE = "table"
 TYPE_CONTEST = "contest"
+TYPE_LADDER = "ladder"  # 闲时自动对局维护天梯榜（系统发起，无 owner）
 
 # 比赛状态
 CONTEST_DRAFT = "draft"
 CONTEST_OPEN = "open"
 CONTEST_RUNNING = "running"
+CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
+
+# 已注册对战引擎（未注册则 contest start / challenge 拒绝）
+REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})
+
+# 合法 game_id
+VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})
+
+# platform_settings keys
+SETTING_ACTION_TIMEOUT = "action_timeout_sec"
+SETTING_MAX_CONCURRENT = "max_concurrent_matches"
+SETTING_BOT_CPUS = "bot_cpus"
+SETTING_BOT_MEMORY = "bot_memory_mb"
+SETTING_CONTEST_REST = "contest_default_rest_minutes"
+SETTING_CONTEST_TEMPLATES = "contest_templates"
+SETTING_FULL_RR_MAX_N = "full_rr_max_n"
+
+# 闲时自动对局（维护天梯榜）
+SETTING_AUTO_MATCH_ENABLED = "auto_match_enabled"          # "1"|"0"
+SETTING_AUTO_MATCH_INTERVAL_SEC = "auto_match_interval_sec"  # 轮询间隔
+SETTING_AUTO_MATCH_MIN_IDLE_SEC = "auto_match_min_idle_sec"  # 连续空闲 N 秒才触发
+SETTING_AUTO_MATCH_BOT_COOLDOWN = "auto_match_bot_cooldown"  # 同 Bot 两场间隔下限(秒)
+SETTING_AUTO_MATCH_STALE_SEC = "auto_match_stale_sec"      # last_played_at 超此视为陈旧
+SETTING_AUTO_MATCH_RESERVE_SLOTS = "auto_match_reserve_slots"  # 为用户挑战预留并发槽
 
 # 二进制格式
 FMT_ELF = "elf"

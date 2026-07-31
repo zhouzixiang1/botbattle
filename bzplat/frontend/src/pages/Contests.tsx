@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import PageStub from '../components/PageStub'
 import { useAuth } from '../components/useAuth'
 import { apiGet, apiJson, errMsg } from '../api'
+import { GAMES, gameLabel } from '../lib/games'
 
 interface Contest {
   id: number
@@ -11,25 +12,45 @@ interface Contest {
   description?: string
   hands_per_match?: number
   created_at?: string
+  template_id?: string
+  game_id?: string
+}
+
+interface Template {
+  id: string
+  name: string
+  game_id: string
 }
 
 export default function Contests() {
   const { user, isLoggedIn } = useAuth()
   const [list, setList] = useState<Contest[]>([])
+  const [templates, setTemplates] = useState<Template[]>([])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [hands, setHands] = useState(70)
+  const [templateId, setTemplateId] = useState('holdem_swiss_ko')
+  const [filterGame, setFilterGame] = useState('')
   const [error, setError] = useState('')
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
 
   const load = () =>
     apiGet<{ contests: Contest[] }>('/api/contests')
-      .then((d) => setList(d.contests || []))
+      .then((d) => {
+        const rows = d.contests || []
+        setList(
+          filterGame ? rows.filter((c) => (c.game_id || 'holdem') === filterGame) : rows,
+        )
+      })
       .catch((e) => setError(errMsg(e)))
 
   useEffect(() => {
     void load()
-  }, [])
+    apiGet<{ templates: Template[] }>('/api/contests/templates')
+      .then((d) => setTemplates(d.templates || []))
+      .catch(() => undefined)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterGame])
 
   const onCreate = async (e: FormEvent) => {
     e.preventDefault()
@@ -39,6 +60,7 @@ export default function Contests() {
         title,
         description,
         hands_per_match: hands,
+        template_id: templateId,
       })
       setTitle('')
       setDescription('')
@@ -50,9 +72,26 @@ export default function Contests() {
 
   return (
     <PageStub title="比赛">
-      <p className="mb-4 text-sm text-slate-400">
-        组织者发布比赛，选手派遣 Bot 参加循环赛。
-      </p>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <p className="text-sm text-slate-400">
+          组织者发布比赛，选手派遣 Bot。默认模板偏 Swiss / 分组，适合校赛规模。
+        </p>
+        <label className="ml-auto text-sm text-slate-500">
+          游戏
+          <select
+            value={filterGame}
+            onChange={(e) => setFilterGame(e.target.value)}
+            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+          >
+            <option value="">全部</option>
+            {GAMES.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
 
       {canCreate && isLoggedIn && (
@@ -76,6 +115,20 @@ export default function Contests() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
+          </label>
+          <label className="text-sm text-slate-600">
+            模板
+            <select
+              className="mt-1 block rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800"
+              value={templateId}
+              onChange={(e) => setTemplateId(e.target.value)}
+            >
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="text-sm text-slate-600">
             手数
@@ -107,7 +160,8 @@ export default function Contests() {
               {c.title}
             </Link>
             <div className="text-xs text-slate-500">
-              {c.status} · {c.hands_per_match} 手 · {c.created_at}
+              {c.status} · {c.template_id || '—'} · {gameLabel(c.game_id)} ·{' '}
+              {c.hands_per_match} 手 · {c.created_at}
             </div>
           </li>
         ))}

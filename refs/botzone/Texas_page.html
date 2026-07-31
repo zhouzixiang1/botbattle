@@ -1,0 +1,527 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+	<!-- Global site tag (gtag.js) - Google Analytics -->
+	<script async src="https://www.googletagmanager.com/gtag/js?id=UA-160786690-1"></script>
+	<script>
+	window.dataLayer = window.dataLayer || [];
+	function gtag(){dataLayer.push(arguments);}
+	gtag('js', new Date());
+
+	gtag('config', 'UA-160786690-1');
+	</script>
+
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+	<meta name="keywords" content="Botzone, Programming, 编程, 计算机, AI, Bot, 算法, 博弈, Algorithm" />
+	<meta name="description" content="TexasHoldem2p 游戏的详情页，包括游戏规则、样例程序、排行榜和相关比赛等。" />
+	<meta name="theme-color" content="#920308">
+	<link rel="alternate" hreflang="x-default" href="//www.botzone.org.cn/game/TexasHoldem2p" />
+	<link rel="alternate" hreflang="zh-cn" href="//cn.botzone.org.cn/game/TexasHoldem2p" />
+	<link rel="alternate" hreflang="en" href="//en.botzone.org.cn/game/TexasHoldem2p" />
+	<!--DYNLOADBEGIN--><title>游戏详情：TexasHoldem2p - Botzone</title><!--DYNLOADEND-->
+	
+	
+	<link rel="stylesheet" href="/bundle/main.css?191222" type="text/css" />
+	
+	<script type="text/javascript" src="/bundle/main.js?200314"></script>
+	<script type="text/javascript" src="/javascripts/prettify/prettify.js"></script>
+	<script type="text/javascript" src="/greensocks/TweenMax.min.js?new2"></script>
+	<script type="text/javascript" src="/greensocks/jquery.gsap.min.js?new2"></script>
+	<script type="text/javascript" src="/greensocks/plugins/ScrollToPlugin.min.js?new2"></script>
+	<script type="text/javascript" src="/greensocks/plugins/TextPlugin.min.js?new2"></script>
+	<script type="text/javascript" src="/greensocks/plugins/ColorPropsPlugin.min.js?new2"></script>
+	
+	<script type="text/javascript" src="/listusersgroupsandgames"></script>
+	
+	<!-- HTML5 Shim and Respond.js IE8 support of HTML5 elements and media queries -->
+	<!-- WARNING: Respond.js doesn't work if you view the page via file:// -->
+	<!--[if lt IE 9]>
+		<script src="//cdn.bootcss.com/html5shiv/3.7.0/html5shiv.min.js"></script>
+		<script src="//cdn.bootcss.com/respond.js/1.3.0/respond.min.js"></script>
+	<![endif]-->
+	<script type="text/javascript">
+		Botzone.consts = {"user":{"name_length_min":3,"name_length_max":18,"password_length_min":6,"password_length_max":16,"max_managed_group_num":5,"max_login_history_length":20,"err":{"name_length":"user.name.length","name_unique":"user.name.unique","name_char":"user.name.invalidchar","email_unique":"user.email.unique","email_form":"user.email.form","secret_length":"user.secret.length","name_invalid":"user.name.censor"},"rank_match_min_expr":1000,"local_ai_min_expr":1,"secret_length_max":10,"lvupexp":[1,64,128,233,512,998,1898,2052,3124,4399,5942,6666,7474,8964,10086,11111,12823,14498,15213,16012,18888,19890,21333,23333,30000,40000,49101,64646,80386,123456,136676,151617,198964,233333,335211,491001,62767007],"badge_display_requirement":[1,2052,23333]},"bot":{"name_length_min":3,"name_length_max":18,"desc_length_max":100,"err":{"name_length":"bot.name.length","name_invalid":"bot.name.censor","name_char":"bot.name.invalidchar","version_length":"bot.version.length","desc_length":"bot.desc.length","desc_invalid":"bot.desc.censor"},"trend_length_max":200,"rank_match_length_max":20,"default_score":1000,"lang_timeout_factor":{"c":[1,1],"cpp":[1,1],"cpp11":[1,1],"cpp17":[1,1],"cpp17a":[1,1],"cppo0":[1,1],"java":[3,2],"cs":[6,4],"js":[2,2],"py":[6,4],"py3":[6,4],"py36":[6,4],"pas":[1,1],"rs":[1,1]},"max_upload_size":4},"game":{"name_length":80,"desc_length":10000,"transform_code_max_length":1000,"player_num_limit":10,"err":{"name_length":"game.name.length","desc_length":"game.desc.length","transform_code_length":"game.transformcode.length"}},"post":{"tag_types":["group","game","misc"],"title_length_min":5,"title_length_max":18,"content_length_max":500,"tag_length_max":5,"err":{"title_length":"post.title.length","content_length":"content.length"}},"group":{"group_types":["open","need_validation","by_general_form","admin_add_only"],"name_length_min":5,"name_length_max":50,"nick_length_max":18,"desc_length_max":500,"reason_length_max":500,"admin_length_max":5,"err":{"name_length":"group.name.length","name_char":"group.name.char","nick_length":"group.nick.length","name_unique":"group.name.unique","desc_length":"group.desc.length","reason_length":"group.reason.length"},"group_badge_titles":[{"lte":1,"name":"champion"},{"lte":2,"name":"firstrunnerup"},{"lte":3,"name":"secondrunnerup"},{"lte":8,"name":"final8"},{"lte":16,"name":"final16"},{"lte":32,"name":"final32"}]},"contest":{"name_length_max":50,"desc_length_max":1000,"rule_length_max":100000,"player_type":["bot","combiner"],"status":["open","running","finished","aborted"],"scoreboard_max_contest_count":10,"err":{"name_length":"contest.name.length","desc_length":"contest.desc.length","rule_length":"contest.rule.length"}},"danmaku":{"danmaku_types":["regular","fixed_top","fixed_bottom"],"content_length_max":200,"err":{"content_length":"content.length"}},"notification":{"notify_types":["system","contest","group","match","user","post","sender"],"content_length_max":1000,"err":{"msg_length":"content.length"}},"generalform":{"name_length":40,"title_length":40,"desc_length":10000,"err":{"name_length":"generalform.name.length","title_length":"generalform.title.length","desc_length":"generalform.desc.length"}},"userscore":{"max_count":5,"badge_types":["special","year","admin","group-admin","game-contributor","groupaward"]},"match":{"player_types":["browser","bot","combiner"],"match_status":["open","waiting","running","finished","aborted"]},"birth":"2014-05-06"};
+		
+	</script>
+	<meta id="headBegin" />
+	<!--DYNLOADBEGIN-->
+	
+	<script>
+        $(document).ready(function () {
+            $("#btnViewJudgeSrc").tooltip({ placement: "top", container: "body" });
+        });
+		function ViewJudgeSrc(game) {
+            $("#dlgViewSource h4").html(__("viewjudgesource"));
+			var codebox = $("#dlgViewSource pre").text(__("loading"));
+			var downloadlink = $("#dlgViewSource .download");
+			$.get("/game/viewsrc/", { game: game, typ: "judge" }, function (data) {
+				if (data.binary) {
+					codebox.hide();
+					downloadlink.show()
+						.prop("href", "/game/viewsrc?typ=judge&game=" + game + "&download=true");
+					return;
+				}
+				downloadlink.hide();
+				// 启用代码高亮
+				codebox.show().replaceWith($("<pre class=\"prettyprint\"></pre>").text(data.message));
+				prettyPrint();
+			}, "json");
+		}
+	</script>
+
+	<!--DYNLOADEND-->
+	<meta id="headEnd" />
+</head>
+<body>
+	<div id="loading" class="waitmask" style="display: none">
+		<div class="loading">
+			<img src="/images/ajax-loader.gif" alt="Loading" />
+		</div>
+	</div>
+
+	<div id="dTablePopup">
+		<a id="aExportCSV" download="table.csv"><span class="glyphicon glyphicon-save-file"></span> 保存表格</a>
+	</div>
+
+	<div id="dUserPopup">
+		<p>USERNAME</p>
+		<p>
+			<a href="javascript:;"><span class="glyphicon glyphicon-envelope"></span> 发消息</a>&nbsp;
+			<a href="javascript:;" target="_blank"><span class="glyphicon glyphicon-new-window"></span> 去主页</a>
+		</p>
+	</div>
+
+	
+	
+	<div id="dNavbar" class="navbar navbar-inverse navbar-fixed-top" role="navigation">
+		
+		<div id="dNewBroadcastMessage" style="display: none">
+			<span class="glyphicon glyphicon-bell"></span>
+			<header></header>
+			<p></p>
+		</div>
+		
+		<div class="container">
+			<div class="navbar-header">
+				<button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-collapse">
+					<span class="sr-only">切换登录面板显示</span>
+					<span class="icon-bar"></span>
+					<span class="icon-bar"></span>
+					<span class="icon-bar"></span>
+				</button>
+				<a href="/" class="navbar-brand">Botzone<span class="brand-betasign"><script>document.write(new Date().getFullYear())</script></span></a>
+			</div>
+			<div class="navbar-collapse collapse">
+				<ul class="nav navbar-nav" id="navBarBtnsOnTop">
+					<!--DYNLOADBEGIN-->
+					<li class=" active "><a href="/games">游戏</a></li>
+					<li class=""><a href="/groups">小组</a></li>
+					<li class=""><a href="/about">关于</a></li>
+					<li><a href="https://wiki.botzone.org.cn/index.php?title=首页" target="_blank">Wiki</a></li>
+					<!--DYNLOADEND-->
+				</ul>
+				
+				<form class="navbar-form navbar-right" id="frmLogin" role="form" onsubmit="return false;">
+					<div class="form-group">
+						<input id="txtLoginEmail" type="text" name="email" placeholder="Email" class="form-control" data-validatefunc="checkEmail" data-placement="bottom" />
+					</div>
+					<div class="form-group forget-pwd-wrapper">
+						<input id="txtLoginPassword" type="password" name="password" placeholder="密码" class="form-control" data-validatefunc="checkPwd" data-placement="bottom" />
+						<div id="panForgetPassword" class="hidden-xs">
+							<a class="btn btn-danger" onclick="SendPasswordResetEmail()">重置密码</a>
+						</div>
+					</div>
+					<button type="submit" class="btn btn-default btn-success" data-submitform="#frmLogin" data-submitconf="confLoginForm">登录</button>
+					<button class="btn btn-default" data-toggle="modal" data-target="#dlgModal" onclick="ReloadCaptcha()">注册</button>
+				</form>
+				
+			</div>
+		</div>
+		
+	</div>
+	<a id="headerBegin"></a>
+	<!--DYNLOADBEGIN-->
+	
+
+	<!--DYNLOADEND-->
+	<a id="headerEnd"></a>
+	<div class="instant-alert" id="instantAlert" style="display: none"></div>
+	<form id="frmQuickMatch" style="display: none" role="form" onsubmit="return false">
+		<div class="form-group">
+			<label class="control-label">人类是几号位</label>
+			<select class="form-control" name="slot">
+				<option value="0">1 号位</option>
+				<option value="1">2 号位</option>
+			</select>
+		</div>
+		<button type="button" class="btn btn-success" onclick="Botzone.quickMatchLink(this)"><span class="glyphicon glyphicon-share"></span> 复制分享链接</button>
+		<button type="submit" class="btn btn-primary" onclick="Botzone.quickMatch(this)">开始对局！</button>
+	</form>
+	<div class="modal fade" id="dlgModal">
+		<div class="modal-dialog">
+			<div class="modal-content">
+				<div class="modal-header">
+					<button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+					<h4 class="modal-title">注册新账户</h4>
+				</div>
+				<div class="modal-body">
+					<form class="form-horizontal" id="frmRegister" role="form" onsubmit="return false">
+						<div class="alert" style="display: none">...</div>
+						<div class="form-group">
+							<label for="txtNick_reg" class="col-sm-3 control-label">昵称</label>
+							<div class="col-sm-7">
+								<input type="text" class="form-control" name="nick" id="txtNick_reg" data-validatefunc="checkNick" />
+								<span class="help-block">昵称的长度应该在 3 到 18 个字符之间。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtEmail_reg" class="col-sm-3 control-label">Email</label>
+							<div class="col-sm-7">
+								<input type="email" class="form-control" name="email" id="txtEmail_reg" data-validatefunc="checkEmail" />
+								<span class="help-block">你的 Email 将用于确认身份和找回密码，并且区分大小写。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtPassword_reg" class="col-sm-3 control-label">密码</label>
+							<div class="col-sm-7">
+								<input type="password" class="form-control" name="password" id="txtPassword_reg"
+									   onchange="UpdatePwdRate(this.value)" onkeyup="UpdatePwdRate(this.value)" data-validatefunc="checkPwd" />
+								<div class="pwd-rate">
+									<div class="pwd-rate-fill"></div>
+									<div class="pwd-rate-text">--</div>
+								</div>
+								<span class="help-block">密码的长度应该在 6 到 16 个字符之间。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtPassword_reg" class="col-sm-3 control-label">确认密码</label>
+							<div class="col-sm-7">
+								<input type="password" class="form-control" id="txtPasswordConfirm_reg" data-validatefunc="checkPwdRep" />
+								<span class="help-block">请再输入一遍你的密码。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtCaptcha" class="col-sm-3 control-label">验证码</label>
+							<div class="col-sm-5">
+								<input type="text" class="form-control" name="captcha" id="txtCaptcha" maxlength="4" data-validatefunc="checkCaptcha" />
+								<span class="help-block">输入你看到的 4 个字符。</span>
+							</div>
+							<div class="col-sm-4">
+								<a href="javascript: ReloadCaptcha()" title="看不清，换一张"><img width="150" height="60" id="imgCaptcha" src="/images/captchaPlaceHolder.png" alt="看不清，换一张" /></a>
+							</div>
+						</div>
+					</form>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>
+					<button type="submit" class="btn btn-primary" data-submitform="#frmRegister" data-submitconf="confRegisterForm">提交</button>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="modal fade" id="dlgViewSource">
+		<div class="modal-dialog">
+			<div class="modal-content">
+				<div class="modal-header clearfix">
+					<button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+					<h4 class="modal-title pull-left">(PLACEHOLDER)</h4>
+					<a class="pull-right" style="margin-right: 20px" href="javascript:;" onclick="SelectText('#dlgViewSource .prettyprint')">全选并复制</a>
+				</div>
+				<div class="modal-body">
+					<pre class="prettyprint"></pre>
+					<a class="download" data-noajax="true"><span class="glyphicon glyphicon-download-alt"></span> 内容可能是二进制文件，点此下载</a>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="modal fade" id="dlgBroadcast">
+		<div class="modal-dialog modal-sm">
+			<div class="modal-content">
+				<div class="modal-header">
+					<button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+					<h4 class="modal-title">(PLACEHOLDER)</h4>
+				</div>
+				<div class="modal-body">
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="modal fade" id="dlgSendMsg">
+		<div class="modal-dialog modal-sm">
+			<div class="modal-content">
+				<div class="modal-header">
+					<button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+					<h4 class="modal-title">发送 / 回复消息</h4>
+				</div>
+				<div class="modal-body">
+					<form id="frmSendMsg" class="form-horizontal" role="form" onsubmit="return false">
+						<div class="alert" style="display: none">...</div>
+						<input type="hidden" id="iTargetID_sendmsg" name="target" data-validatefunc="dummy" />
+						<div class="form-group">
+							<label for="txtNick_sendmsg" class="col-sm-3 control-label">对方昵称</label>
+							<div class="col-sm-7">
+								<input type="text" class="form-control" id="txtNick_sendmsg" disabled />
+							</div>
+						</div>
+						<div class="form-group" id="dIncomingMsg">
+							<label for="txtContent_sendmsg" class="col-sm-3 control-label">收到消息</label>
+							<div class="col-sm-7">
+								<pre class="form-control-static" style="white-space: pre-wrap"></pre>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtContent_sendmsg" class="col-sm-3 control-label">发送内容</label>
+							<div class="col-sm-7">
+								<textarea class="form-control" id="txtContent_sendmsg" name="content" data-validatefunc="checkMsgContent"></textarea>
+								<span class="help-block">消息内容请不要超过 1000 个字符。</span>
+							</div>
+						</div>
+					</form>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>
+					<button type="submit" class="btn btn-primary" data-submitform="#frmSendMsg" data-submitconf="confSendMsg">提交</button>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="modal fade" id="dlgLocalAIConfig">
+		<div class="modal-dialog">
+			<div class="modal-content">
+				<div class="modal-header">
+					<button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+					<h4 class="modal-title">本地 AI 配置</h4>
+				</div>
+				<div class="modal-body">
+					<form id="frmLocalAIConfig" class="form-horizontal" role="form" onsubmit="return false">
+						<div class="alert alert-warning">本地 AI 允许你的电脑上的程序替代你进行决策，这往往用于耗时较长的试验性算法。想要了解如何使用、样例程序以及其他信息，请参看<a href="//wiki.botzone.org.cn/index.php?title=%E6%9C%AC%E5%9C%B0AI">维基的本地 AI 词条</a>。<br /><b>该功能目前仅限等级为 1 及以上的活跃用户使用。使用前，请点击本页面的提交按钮。</b>尚在开发中，可能会有一些问题，欢迎反馈。</div>
+						<div class="form-group">
+							<label for="txtSecret_localai" class="col-sm-3 control-label">AI 连接密钥</label>
+							<div class="col-sm-7">
+								<input class="form-control" id="txtSecret_localai" name="secret" data-validatefunc="checkLocalAISecret" value="" />
+								<span class="help-block">密钥用于避免其他用户恶意取代你的 AI，会出现在下面的 URL 中。请不要超过 10 个字符。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtConnectURL_localai" class="col-sm-3 control-label">本地 AI 连接 URL</label>
+							<div class="col-sm-7">
+								<a class="hidden" id="aConnectURL_localai" href="/api///localai">-</a>
+								<div class="input-group">
+									<input class="form-control" id="txtConnectURL_localai" readonly onmouseover="this.select()" dir="rtl" />
+									<span class="input-group-btn">
+										<a class="btn btn-default" data-toggle="tooltip" title="复制"
+										onclick="Botzone.copy($('#txtConnectURL_localai').val(), __('copy.success.general'), __('copy.prompt.general'))">
+											<span class="glyphicon glyphicon-duplicate"></span>
+										</a>
+									</span>
+								</div>
+								<span class="help-block">这是本地 AI 需要连接到的地址，请使用 GET 方式发送带特定 Header 的 HTTP 请求到该地址。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label class="col-sm-3 control-label">连接状态</label>
+							<div class="col-sm-7">
+								<p class="form-control-static"><span class="glyphicon glyphicon-signal"></span> <span class="localai-state">未知</span></p>
+							</div>
+						</div>
+					</form>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>
+					<button type="submit" class="btn btn-primary" data-submitform="#frmLocalAIConfig" data-submitconf="confLocalAIConfig">提交</button>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div class="modal fade" id="dlgAccountConfig">
+		<div class="modal-dialog">
+			<div class="modal-content">
+				<div class="modal-header">
+					<button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+					<h4 class="modal-title">账户修改</h4>
+				</div>
+				<div class="modal-body">
+					<form class="form-horizontal" id="frmAvatar" role="form" onsubmit="return false">
+						<div class="alert" style="display: none">...</div>
+						<div class="form-group">
+							<label for="ofdAvatar" class="col-sm-3 control-label">头像</label>
+							<div class="col-sm-7">
+								<input type="file" id="ofdAvatar" name="avatar" style="width: 100%" data-validatefunc="nonNull" />
+								<span class="help-block">你可以上传一张正方形图片作为头像。</span>
+							</div>
+						</div>
+						<button type="submit" class="col-sm-offset-3 btn btn-primary" data-submitform="#frmAvatar" data-submitconf="confModifyAvatar">提交</button>
+					</form>
+					
+					<hr />
+					<form class="form-horizontal" id="frmNickname" role="form" onsubmit="return false">
+						<div class="alert" style="display: none">...</div>
+						<div class="form-group">
+							<label for="txtNick_modify" class="col-sm-3 control-label">昵称</label>
+							<div class="col-sm-7">
+								<input type="text" class="form-control" id="txtNick_modify" name="nick" data-validatefunc="checkNick" />
+								<span class="help-block">昵称的长度应该在 3 到 18 个字符之间。</span>
+							</div>
+						</div>
+						<button type="submit" class="col-sm-offset-3 btn btn-primary" data-submitform="#frmNickname" data-submitconf="confModifyName">提交</button>
+					</form>
+					<hr />
+					<form class="form-horizontal" id="frmPassword" role="form" onsubmit="return false">
+						<div class="alert" style="display: none">...</div>
+						<div class="form-group">
+							<label for="txtOrigPassword_modify" class="col-sm-3 control-label">原始密码</label>
+							<div class="col-sm-7">
+								<input type="password" class="form-control" name="origpwd" id="txtOrigPassword_modify" data-validatefunc="checkPwd" />
+								<span class="help-block">请输入你的旧密码以供确认。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtPassword_modify" class="col-sm-3 control-label">新密码</label>
+							<div class="col-sm-7">
+								<input type="password" class="form-control" name="newpwd" id="txtPassword_modify"
+									onchange="UpdatePwdRate(this.value)" onkeyup="UpdatePwdRate(this.value)" data-validatefunc="checkPwd" />
+								<div class="pwd-rate">
+									<div class="pwd-rate-fill"></div>
+									<div class="pwd-rate-text">--</div>
+								</div>
+								<span class="help-block">密码的长度应该在 6 到 16 个字符之间。</span>
+							</div>
+						</div>
+						<div class="form-group">
+							<label for="txtPasswordConfirm_modify" class="col-sm-3 control-label">确认密码</label>
+							<div class="col-sm-7">
+								<input type="password" class="form-control" id="txtPasswordConfirm_modify" data-validatefunc="checkPwdRep_modify" />
+								<span class="help-block">请再输入一遍你的密码。</span>
+							</div>
+						</div>
+						<button type="submit" class="col-sm-offset-3 btn btn-primary" data-submitform="#frmPassword" data-submitconf="confModifyPwd">提交</button>
+					</form>
+					
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="container">
+		<!--DYNLOADBEGIN-->
+<div class="row">
+	<div class="col-md-12">
+		<div class="alert alert-info alert-dismissable">
+			<button type="button" class="close" data-dismiss="alert" aria-hidden="true">&times;</button>
+			这里是游戏详情页，你可以查阅游戏规则和样例程序，也可以在下方找到与该游戏相关的比赛。
+		</div>
+	</div>
+</div>
+<ul class="breadcrumb">
+	<li><a href="/games">游戏列表</a></li>
+	<li class="active">TexasHoldem2p</li>
+</ul>
+<div class="row">
+	<div id="dGameDetail" class="col-md-12">
+		<div class="panel panel-default">
+			<div class="panel-heading clearfix tall-panel-title">
+				<h3 class="panel-title pull-left">
+					
+						TexasHoldem2p <small>(双人德州扑克)</small> 详情
+					
+				</h3>
+				<div class="pull-right btn-group">
+					<a id="btnViewJudgeSrc" class="btn btn-default" href="javascript:;" onclick="ViewJudgeSrc('63dcfaddee1bce5e6c8f4b53')"  data-toggle="modal" data-target="#dlgViewSource" title="仅供参考，随时可能修改">
+						<span class="glyphicon glyphicon-eye-open"></span>
+						裁判代码
+					</a>
+					<!--<a class="btn btn-default" href="/discuss/game-63dcfaddee1bce5e6c8f4b53">
+						<span class="glyphicon glyphicon-comment"></span>
+						游戏讨论
+					</a>-->
+					<div class="btn-group" itemprop="exampleOfWork">
+						<a class="btn btn-default" href="/game/ranklist/63dcfaddee1bce5e6c8f4b53" itemprop="url"><span class="glyphicon glyphicon-sort-by-order" style="margin-right: 10px"></span><span class="detail" itemprop="name">Bot 排行榜</span></a>
+					</div>
+					<a class="btn btn-default" href="/globalmatchlist?game=63dcfaddee1bce5e6c8f4b53">
+						<span class="glyphicon glyphicon-film"></span>
+						近期对局
+					</a>
+				</div>
+			</div>
+			<div class="panel-body">
+				<div style="width: 100%; min-height: 400px"><div style="width: 100%; min-height: 400px">
+  <blockquote class="pull-right">
+    <p>提示：该游戏支持人人/人机/机机对战</p>
+  </blockquote>
+  <h2 style="font-weight: bold">No Limit Texas Hold'em 2p 双人无限注德州扑克</h2>
+  <hr />
+  <h3>规则与样例程序</h3>
+  <p>
+    请前往Botzone维基页面查看：<a
+      href="https://wiki.botzone.org.cn/index.php?title=TexasHoldem2p"
+      target="_blank"
+      >TexasHoldem2p</a
+    >
+  </p>
+</div>
+</div>
+				<table class="table">
+					<tr><th>相关的比赛</th><th>开始时间</th></tr>
+					
+					<tr><td colspan="2">没有开放的比赛</td></tr>
+					
+				</table>
+			</div>
+		</div>
+	</div>
+</div>
+<!--DYNLOADEND-->
+	</div>
+
+	<iframe name="submitTarget" id="submitTarget" src="about:blank" style="display: none"></iframe>
+
+	<div id="footer">
+		<div class="container">
+			<p>
+				<span class="text-muted pull-right">
+					<span class="qrcode-icon" data-toggle="tooltip" data-placement="top" data-html="true" title="<img class='qrcode' src='/images/qrcode_for_gh_3a40a410124d_258.jpg' />">
+						<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" preserveAspectRatio="xMidYMid" width="36.969" height="29.031" viewBox="0 0 36.969 29.031">
+							<path d="M32.399,25.866 L33.384,29.018 L29.793,27.124 C28.483,27.440 27.168,27.755 25.865,27.755 C19.636,27.755 14.731,23.656 14.731,18.609 C14.731,13.568 19.636,9.459 25.865,9.459 C31.747,9.459 36.984,13.568 36.984,18.609 C36.984,21.451 35.026,23.968 32.399,25.866 ZM22.256,14.509 C21.604,14.509 20.947,15.142 20.947,15.769 C20.947,16.407 21.604,17.031 22.256,17.031 C23.246,17.031 23.893,16.407 23.893,15.769 C23.893,15.142 23.246,14.509 22.256,14.509 ZM29.456,14.509 C28.809,14.509 28.155,15.142 28.155,15.769 C28.155,16.407 28.809,17.031 29.456,17.031 C30.437,17.031 31.094,16.407 31.094,15.769 C31.094,15.142 30.437,14.509 29.456,14.509 ZM13.908,18.760 C13.908,19.675 14.056,20.558 14.312,21.401 C13.908,21.432 13.501,21.451 13.090,21.451 C11.456,21.451 10.142,21.130 8.504,20.819 L3.929,23.028 L5.238,19.237 C1.960,17.031 0.001,14.187 0.001,10.726 C0.001,4.728 5.894,0.004 13.090,0.004 C19.527,0.004 25.165,3.778 26.298,8.856 C25.881,8.812 25.461,8.783 25.037,8.783 C18.818,8.783 13.908,13.252 13.908,18.760 ZM8.837,5.365 C7.856,5.365 6.866,5.989 6.866,6.938 C6.866,7.883 7.856,8.516 8.837,8.516 C9.819,8.516 10.471,7.883 10.471,6.938 C10.471,5.989 9.819,5.365 8.837,5.365 ZM17.998,5.365 C17.017,5.365 16.034,5.989 16.034,6.938 C16.034,7.883 17.017,8.516 17.998,8.516 C18.984,8.516 19.636,7.883 19.636,6.938 C19.636,5.989 18.984,5.365 17.998,5.365 Z" />
+						</svg>
+					</span>
+					<select onchange="window.location.href = '/lang/' + this.value">
+						<option value="en" >英文 / English</option>
+						<option value="cn" selected>中文 / Chinese</option>
+					</select>
+				</span>
+				<span class="text-muted">
+					版权所有 © 2014 - <script>document.write(new Date().getFullYear())</script> 北京大学信息科学技术学院 人工智能实验室<br />网站主要作者：<b>zhf zhouhy zhq</b> <a href="/about">…以及更多前辈</a><br />
+					<a href="/downloadmatches">下载 Botzone 的对局数据集</a>
+				</span>
+                <br />
+                <small><a href="https://beian.miit.gov.cn">京ICP备18028450号-1</a></small>
+			</p>
+		</div>
+	</div>
+
+	<div id="tutorial" style="display: none">
+		<div class="container">
+			<figure class="phase" data-focusitem="#navBarBtnsOnTop > li:eq(0)">欢迎加入 Botzone！<br />Botzone 上有许多游戏，<span>点击顶栏的“游戏”</span>可以查看各个游戏的说明和规则。<br />规则页面的样例程序是你起步最好的选择。<br />这里还有每个游戏的排行榜。</figure>
+			<figure class="phase" data-focusitem=".navbar-brand, #btnCreateGametable">你可以通过<span>首页的“创建游戏桌”</span>功能来进行人机对战或测试自己的程序。<br />你也可以参加别人的游戏桌或查看最新对局。</figure>
+			<figure class="phase" data-focusitem=".navbar-fixed-top .navbar-btn.btn-group > a:eq(1)">当你准备好自己提交的程序时，请<span>点击顶栏右侧的“我的 Bot”</span>创建 Bot。<br />我们提供了简单的版本维护系统，你每次修改程序都可以通过“创建版本”功能来实现。<br />你也可以将自己的程序加入游戏的排行榜。</figure>
+			<figure class="phase" data-focusitem="#navBarBtnsOnTop li:eq(1)">如果你已经对自己的程序胸有成竹，那么可以<span>点击顶栏的“小组”</span>加入一些比赛小组。</figure>
+			<figure class="phase" data-focusitem="#navBarBtnsOnTop li:eq(4), #tutorial-trigger">最后，如果你对网站的使用仍有疑问或者想进行进一步的探索，<br />请<span>点击顶栏的 Wiki</span> 访问我们的 Wiki，或者通过 botzone[at]126.com 与我们联系。<br />如果以后还想重新观看导览，请点击页面右下角的灰色问号。<br />祝你编程愉快！</figure>
+			<footer>
+				Botzone 网站使用导览<span class="tutorial-progress">1 / 5</span>
+			</footer>
+		</div>
+	</div>
+	<div class="tutorial-mouse-mask" style="display: none" onclick="SetTutorial()">
+		<button class="dismiss" onclick="SetTutorial(false)">跳过</button>
+	</div>
+
+	<a id="tutorial-trigger" title="显示网站导览" data-toggle="tooltip" data-placement="left" onclick="SetTutorial(true)">
+		?
+	</a>
+
+	<a id="headAddBegin"></a>
+	<a id="headAddEnd"></a>
+</body>
+</html>

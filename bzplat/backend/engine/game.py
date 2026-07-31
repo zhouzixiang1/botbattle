@@ -19,6 +19,8 @@ from enum import Enum
 from typing import Any, Callable
 
 from bzplat.backend.engine.cards import Card, Deck, compare_hands
+from bzplat.backend.engine.result import MatchResult as _BaseMatchResult
+from bzplat.backend.engine.result import RoundResult
 from bzplat.backend.protocol import json_protocol as proto
 
 STARTING_STACK = 20_000
@@ -59,10 +61,10 @@ class PlayerState:
 
 
 @dataclass
-class HandResult:
+class HandResult(RoundResult):
+    """德州单手结果（复用通用 winners/deltas；追加德州专属字段）。"""
+
     hand_index: int  # 0-based
-    winners: list[int]
-    deltas: list[int]  # length 2, zero-sum
     pot: int
     board: list[Card]
     holes: list[list[Card]]
@@ -71,11 +73,20 @@ class HandResult:
 
 
 @dataclass
-class MatchResult:
-    hands_played: int
-    final_chips: list[int]
-    hand_results: list[HandResult]
-    events: list[dict[str, Any]]
+class MatchResult(_BaseMatchResult):
+    """德州整场结果：rounds 即手结果列表。final_chips 为德州专属。"""
+
+    final_chips: list[int] = field(default_factory=list)
+
+    @property
+    def hands_played(self) -> int:
+        # 向后兼容别名
+        return self.rounds_played
+
+    @property
+    def hand_results(self) -> list[HandResult]:
+        # 向后兼容别名（self.rounds 在德州里就是 list[HandResult]）
+        return self.rounds  # type: ignore[return-value]
 
 
 class GameEngine:
@@ -118,7 +129,7 @@ class MatchSession:
         self.on_event = on_event
 
         self.chips = [starting_stack, starting_stack]
-        self.hand_results: list[HandResult] = []
+        self.hand_results: list[HandResult] = []  # 兼容旧名；即 rounds
         self.events: list[dict[str, Any]] = []
 
         # per-hand mutable state
@@ -169,9 +180,9 @@ class MatchSession:
             },
         )
         return MatchResult(
-            hands_played=len(self.hand_results),
+            rounds_played=len(self.hand_results),
+            rounds=list(self.hand_results),
             final_chips=list(self.chips),
-            hand_results=list(self.hand_results),
             events=list(self.events),
         )
 

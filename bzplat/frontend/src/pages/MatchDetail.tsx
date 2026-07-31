@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import PageStub from '../components/PageStub'
-import PokerTable from '../components/poker/PokerTable'
-import { reduceEvents, type RawEvent } from '../components/poker/useMatchState'
+import MatchBoard from '../components/MatchBoard'
+import { type RawEvent } from '../components/poker/useMatchState'
 import { apiGet, errMsg } from '../api'
+import { gameLabel, normalizeGameId } from '../lib/games'
 
 const SPEEDS = [
   { label: '0.5x', ms: 1400 },
@@ -82,8 +83,10 @@ export default function MatchDetail() {
   // 真实显示到第几步（-1 表示全部/最新）
   const cur = stepIdx < 0 ? total - 1 : Math.min(stepIdx, total - 1)
   const visible = cur >= 0 ? events.slice(0, cur + 1) : []
-  const vm = useMemo(() => reduceEvents(visible), [visible])
-  vm.status = data?.match ? String(data.match.status) : 'idle'
+  const gameId = normalizeGameId(
+    data?.match?.game_id != null ? String(data.match.game_id) : 'holdem',
+  )
+  const isBoard = gameId === 'gomoku' || gameId === 'pencil'
 
   // 自动播放
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -164,13 +167,15 @@ export default function MatchDetail() {
 
       {match && (
         <div className="mt-4 grid gap-2 card p-4 text-sm text-slate-600 sm:grid-cols-3">
+          <div>游戏：{gameLabel(gameId)}</div>
           <div>状态：{String(match.status)}</div>
           <div>
-            手数：{String(match.hands_played)}/{String(match.total_hands)}
+            {isBoard ? '步数' : '手数'}：{String(match.hands_played)}
+            {!isBoard ? `/${String(match.total_hands)}` : ''}
           </div>
           <div>类型：{String(match.match_type)}</div>
-          <div>A 净筹码：{String(match.earnings_a)}</div>
-          <div>B 净筹码：{String(match.earnings_b)}</div>
+          <div>{isBoard ? 'A 分差/得分' : 'A 净筹码'}：{String(match.earnings_a)}</div>
+          <div>{isBoard ? 'B 分差/得分' : 'B 净筹码'}：{String(match.earnings_b)}</div>
           <div>
             胜者：{match.winner == null ? '—' : `座位 ${String(match.winner)}`}
           </div>
@@ -202,12 +207,12 @@ export default function MatchDetail() {
             )}
           </p>
         ) : (
-          <PokerTable vm={vm} revealMode="all" />
+          <MatchBoard gameId={gameId} events={visible} revealMode="all" />
         )}
       </div>
 
-      {/* 手导航器（点格子跳手） */}
-      {bounds.length >= 2 && (
+      {/* 手导航器（扑克） */}
+      {!isBoard && bounds.length >= 2 && (
         <div className="mx-auto mt-4 w-full max-w-2xl">
           <div className="mb-1 text-[10px] text-slate-400">手导航（点击跳转）</div>
           <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-2">
@@ -242,13 +247,15 @@ export default function MatchDetail() {
       {total > 0 && (
         <div className="mx-auto mt-3 w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-3">
           <div className="flex flex-wrap items-center justify-center gap-2">
-            <button
-              type="button"
-              onClick={() => jumpHand(-1)}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-            >
-              ⏮ 上一手
-            </button>
+            {!isBoard && (
+              <button
+                type="button"
+                onClick={() => jumpHand(-1)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
+              >
+                ⏮ 上一手
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -281,13 +288,15 @@ export default function MatchDetail() {
             >
               下一步 ▶
             </button>
-            <button
-              type="button"
-              onClick={() => jumpHand(1)}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-            >
-              下一手 ⏭
-            </button>
+            {!isBoard && (
+              <button
+                type="button"
+                onClick={() => jumpHand(1)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
+              >
+                下一手 ⏭
+              </button>
+            )}
             <select
               value={speedIdx}
               onChange={(e) => setSpeedIdx(Number(e.target.value))}
@@ -340,13 +349,19 @@ export default function MatchDetail() {
                     ? `座位 ${ev.player} · ${ACTION_LABEL[String(ev.action)] ?? ev.action}${
                         ev.amount ? ' ' + String(ev.amount) : ''
                       }`
+                    : ev.type === 'move'
+                      ? `座位 ${ev.player} · (${ev.x},${ev.y})${
+                          ev.scored ? ' · 得分连走' : ''
+                        }`
                     : ev.type === 'settle'
                       ? `赢家 座位 ${(ev.winners as number[] | undefined)?.join('/') ?? '?'} · 底池 ${ev.pot}`
                       : ev.type === 'hand_start'
                         ? `第 ${(Number(ev.hand) || 0) + 1} 手开始`
                         : ev.type === 'deal_board'
                           ? `${ev.street}：${(ev.dealt as string[] | undefined)?.join(' ')}`
-                          : JSON.stringify(ev).slice(0, 60)}
+                          : ev.type === 'match_end'
+                            ? `结束 · 胜者 ${ev.winner ?? '平'} · ${ev.reason || ''}`
+                            : JSON.stringify(ev).slice(0, 60)}
                 </span>
               </div>
             ))}

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import PageStub from '../components/PageStub'
 import { useAuth } from '../components/useAuth'
 import { apiGet, apiJson, errMsg } from '../api'
+import { GAMES, gameLabel, type GameId } from '../lib/games'
 
 interface Bot {
   id: number
@@ -13,11 +14,13 @@ interface Bot {
   os?: string
   arch?: string
   is_active?: number
+  game_id?: string
 }
 
 export default function Challenge() {
-  const { isLoggedIn, user } = useAuth()
+  const { isLoggedIn } = useAuth()
   const nav = useNavigate()
+  const [gameId, setGameId] = useState<GameId>('holdem')
   const [mine, setMine] = useState<Bot[]>([])
   const [publicBots, setPublicBots] = useState<Bot[]>([])
   const [myBotId, setMyBotId] = useState('')
@@ -28,36 +31,41 @@ export default function Challenge() {
 
   const load = useCallback(async () => {
     try {
-      const pub = await apiGet<{ bots: Bot[] }>('/api/bots/public')
+      const q = `?game_id=${encodeURIComponent(gameId)}`
+      const pub = await apiGet<{ bots: Bot[] }>(`/api/bots/public${q}`)
       setPublicBots((pub.bots || []).filter((b) => b.is_active !== 0))
       if (isLoggedIn) {
-        const m = await apiGet<{ bots: Bot[] }>('/api/bots/mine')
+        const m = await apiGet<{ bots: Bot[] }>(`/api/bots/mine${q}`)
         setMine((m.bots || []).filter((b) => b.is_active !== 0))
       }
+      setMyBotId('')
+      setOppBotId('')
     } catch (e) {
       setError(errMsg(e, '加载 Bot 失败'))
     }
-  }, [isLoggedIn])
+  }, [isLoggedIn, gameId])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  const opponents = publicBots.filter((b) => {
-    if (!myBotId) return true
-    return String(b.id) !== myBotId
-  })
+  const opponents = useMemo(
+    () => publicBots.filter((b) => !myBotId || String(b.id) !== myBotId),
+    [publicBots, myBotId],
+  )
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setBusy(true)
     setError('')
     try {
-      const d = await apiJson<{ match_id: string }>('/api/matches/challenge', 'POST', {
+      const body: Record<string, unknown> = {
         my_bot_id: Number(myBotId),
         opponent_bot_id: Number(oppBotId),
-        hands,
-      })
+        game_id: gameId,
+      }
+      if (gameId === 'holdem') body.hands = hands
+      const d = await apiJson<{ match_id: string }>('/api/matches/challenge', 'POST', body)
       nav(`/watch/${d.match_id}`)
     } catch (err) {
       setError(errMsg(err, '发起挑战失败'))
@@ -82,10 +90,24 @@ export default function Challenge() {
 
   return (
     <PageStub title="发起挑战">
-      <p className="mb-4">选择己方与公开对手 Bot，发起自发对局（默认 70 手）。</p>
+      <p className="mb-4">选择游戏与 Bot，发起自发对局。</p>
       <form onSubmit={(e) => void onSubmit(e)} className="mx-auto max-w-lg space-y-4">
         <label className="block text-sm text-slate-600">
-          我的 Bot
+          游戏
+          <select
+            value={gameId}
+            onChange={(e) => setGameId(e.target.value as GameId)}
+            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-800 focus:border-brand-400 focus:outline-none"
+          >
+            {GAMES.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-sm text-slate-600">
+          我的 Bot（{gameLabel(gameId)}）
           <select
             value={myBotId}
             onChange={(e) => setMyBotId(e.target.value)}
@@ -101,7 +123,7 @@ export default function Challenge() {
           </select>
         </label>
         <label className="block text-sm text-slate-600">
-          对手 Bot（公开）
+          对手 Bot
           <select
             value={oppBotId}
             onChange={(e) => setOppBotId(e.target.value)}
@@ -111,41 +133,33 @@ export default function Challenge() {
             <option value="">选择…</option>
             {opponents.map((b) => (
               <option key={b.id} value={b.id}>
-                {b.display_name || b.name}
-                {b.owner_id === user?.id ? '（自己）' : ''} — {b.format}/{b.os}
+                {b.display_name || b.name} ({b.format}/{b.os}-{b.arch})
               </option>
             ))}
           </select>
         </label>
-        <label className="block text-sm text-slate-600">
-          手数
-          <input
-            type="number"
-            min={1}
-            max={70}
-            value={hands}
-            onChange={(e) => setHands(Number(e.target.value) || 70)}
-            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-800 focus:border-brand-400 focus:outline-none"
-          />
-        </label>
+        {gameId === 'holdem' && (
+          <label className="block text-sm text-slate-600">
+            手数（1–70）
+            <input
+              type="number"
+              min={1}
+              max={70}
+              value={hands}
+              onChange={(e) => setHands(Number(e.target.value) || 70)}
+              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-800 focus:border-brand-400 focus:outline-none"
+            />
+          </label>
+        )}
         {error && <p className="text-sm text-error-500">{error}</p>}
         <button
           type="submit"
           disabled={busy || !myBotId || !oppBotId}
-          className="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-brand-500 disabled:opacity-60"
+          className="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-brand-500 disabled:opacity-50"
         >
-          {busy ? '发起中…' : '发起挑战并观战'}
+          {busy ? '发起中…' : '开始对局'}
         </button>
       </form>
-      {mine.length === 0 && (
-        <p className="mt-4 text-center text-sm text-slate-500">
-          还没有 Bot？去{' '}
-          <Link to="/my-bots" className="text-brand-600 hover:text-brand-700">
-            我的 Bot
-          </Link>{' '}
-          上传。
-        </p>
-      )}
     </PageStub>
   )
 }

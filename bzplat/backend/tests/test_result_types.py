@@ -1,0 +1,95 @@
+"""三款游戏结果类型解耦后的通用层契约测试。
+
+通用编排层（orchestrator/rating/replay）只依赖：
+- result.rounds[*].winners / .deltas
+- result.rounds_played
+- 单局棋类 result.winner 便捷属性
+本测试用各游戏最小 decide 跑一局，断言通用层提取的 winner/deltas 一致，
+且棋类结果不再含 holdem 专属字段（pot/board/holes/folded）。
+"""
+from __future__ import annotations
+
+import asyncio
+
+from bzplat.backend.engine.gomoku import GomokuResult, GomokuSession
+from bzplat.backend.engine.pencil import PencilResult, PencilSession
+from bzplat.backend.engine.result import MatchResult, RoundResult
+
+
+def test_round_result_is_minimal_contract():
+    r = RoundResult(winners=[0], deltas=[1, -1])
+    assert r.winners == [0]
+    assert r.deltas == [1, -1]
+
+
+def test_match_result_winner_property_single_round():
+    base = MatchResult(rounds_played=1, rounds=[RoundResult([0], [1, -1])])
+    assert base.winner == 0
+    base_draw = MatchResult(rounds_played=1, rounds=[RoundResult([], [0, 0])])
+    assert base_draw.winner is None
+
+
+def test_match_result_winner_property_multi_round_returns_none():
+    # 多手（扑克语义）：winner 属性返回 None，由编排层按筹码差判断
+    base = MatchResult(
+        rounds_played=3,
+        rounds=[RoundResult([0], [1, -1]), RoundResult([1], [-1, 1]), RoundResult([0], [1, -1])],
+    )
+    assert base.winner is None  # 多轮不取单轮胜者
+
+
+def test_gomoku_result_has_no_holdem_fields():
+    # 直接构造一个 GomokuResult，断言它没有 holdem 专属属性
+    g = GomokuResult(
+        rounds_played=9,
+        rounds=[RoundResult([0], [1, -1])],
+        winner=0,
+        reason="five",
+        scores=[1, 0],
+        moves=9,
+    )
+    for holdem_field in ("pot", "holes", "folded", "hand_index", "final_chips"):
+        assert not hasattr(g, holdem_field) or getattr(g, holdem_field, "X") in (None, [], "")
+    # 通用层提取一致
+    assert g.winner == 0
+    ea = sum(r.deltas[0] for r in g.rounds)
+    eb = sum(r.deltas[1] for r in g.rounds)
+    assert ea == 1 and eb == -1
+    assert g.rounds_played == 9
+
+
+def test_pencil_result_has_no_holdem_fields():
+    p = PencilResult(
+        rounds_played=12,
+        rounds=[RoundResult([0], [3, -3])],
+        winner=0,
+        reason="score",
+        scores=[7, 4],
+        moves=12,
+    )
+    for holdem_field in ("pot", "holes", "folded", "hand_index", "final_chips"):
+        assert not hasattr(p, holdem_field) or getattr(p, holdem_field, "X") in (None, [], "")
+    assert p.winner == 0
+    assert sum(p.scores) == 11
+
+
+def test_gomoku_session_returns_gomoku_result():
+    black = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
+    white = [(1, 0), (1, 1), (1, 2), (1, 3)]
+    bi = wi = 0
+
+    async def decide(player, req):
+        nonlocal bi, wi
+        if player == 0:
+            x, y = black[bi]
+            bi += 1
+        else:
+            x, y = white[wi]
+            wi += 1
+        return {"x": x, "y": y}
+
+    result = asyncio.run(GomokuSession().run_async(decide))
+    assert isinstance(result, GomokuResult)
+    assert isinstance(result, MatchResult)
+    assert result.winner == 0
+    assert result.rounds[0].winners == [0]

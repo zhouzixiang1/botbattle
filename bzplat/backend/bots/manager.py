@@ -41,11 +41,17 @@ class BotManager:
         description: str = "",
         upload_note: str = "",
         is_public: bool = True,
+        game_id: str = "holdem",
     ) -> dict:
         if not _NAME_RE.match(name or ""):
             raise BotError(
                 "invalid_name", "bot 名须字母开头，2-32 位字母数字下划线"
             )
+        from bzplat.backend.store.schema import VALID_GAME_IDS
+
+        gid = (game_id or "holdem").strip().lower()
+        if gid not in VALID_GAME_IDS:
+            raise BotError("invalid_game", f"未知游戏类型: {gid}")
         if not raw or len(raw) > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
         info = classify_binary(raw)
@@ -64,6 +70,7 @@ class BotManager:
             arch=info.arch,
             format=info.format,
             is_public=is_public,
+            game_id=gid,
         )
         try:
             self._write_version(bot["id"], raw, info, upload_note=upload_note)
@@ -114,11 +121,11 @@ class BotManager:
             self.store.ensure_rating(bot_id)
         return self.store.get_bot(bot_id)
 
-    def list_mine(self, owner_id: int) -> list[dict]:
-        return self.store.list_bots(owner_id=owner_id)
+    def list_mine(self, owner_id: int, *, game_id: str | None = None) -> list[dict]:
+        return self.store.list_bots(owner_id=owner_id, game_id=game_id)
 
-    def list_public(self) -> list[dict]:
-        return self.store.list_bots(public_only=True)
+    def list_public(self, *, game_id: str | None = None) -> list[dict]:
+        return self.store.list_bots(public_only=True, game_id=game_id)
 
     def get(self, bot_id: int) -> dict | None:
         return self.store.get_bot(bot_id)

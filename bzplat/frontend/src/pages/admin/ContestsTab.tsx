@@ -11,6 +11,8 @@ interface Contest {
   created_at: string
   starts_at: string | null
   ends_at: string | null
+  template_id?: string
+  game_id?: string
 }
 interface Entry {
   id: number
@@ -24,6 +26,7 @@ const NEXT_STATUS: Record<string, string> = {
   draft: 'open',
   open: 'running',
   running: 'finished',
+  rest: 'finished',
   finished: 'cancelled',
 }
 
@@ -108,7 +111,9 @@ export default function ContestsTab() {
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-xs text-slate-400">共 {contests.length} 个比赛</span>
+        <span className="text-xs text-slate-400">
+          共 {contests.length} 个比赛（→ running 会真正调用 start）
+        </span>
         <RefreshBtn onClick={load} />
       </div>
       <ErrorMsg msg={error} />
@@ -119,9 +124,9 @@ export default function ContestsTab() {
             <tr>
               <th className="px-3 py-2.5">ID</th>
               <th className="px-3 py-2.5">标题</th>
-              <th className="px-3 py-2.5">组织者</th>
+              <th className="px-3 py-2.5">模板/游戏</th>
               <th className="px-3 py-2.5">状态</th>
-              <th className="px-3 py-2.5">每局手数</th>
+              <th className="px-3 py-2.5">手数</th>
               <th className="px-3 py-2.5">创建时间</th>
               <th className="px-3 py-2.5">操作</th>
             </tr>
@@ -132,7 +137,9 @@ export default function ContestsTab() {
                 <tr key={c.id} className="hover:bg-slate-50">
                   <td className="px-3 py-2 font-mono text-slate-400">{c.id}</td>
                   <td className="px-3 py-2 font-medium text-slate-700">{c.title}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-500">#{c.organizer_id}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-slate-500">
+                    {c.template_id || '—'} / {c.game_id || 'holdem'}
+                  </td>
                   <td className="px-3 py-2">
                     <StatusBadge status={c.status} />
                   </td>
@@ -148,6 +155,18 @@ export default function ContestsTab() {
                           className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
                         >
                           → {NEXT_STATUS[c.status]}
+                        </button>
+                      )}
+                      {c.status === 'rest' && (
+                        <button
+                          type="button"
+                          disabled={busyId === c.id}
+                          onClick={() =>
+                            void apiJson(`/api/contests/${c.id}/resume`, 'POST').then(load)
+                          }
+                          className="rounded border border-brand-300 bg-white px-2 py-0.5 text-xs text-brand-700 hover:bg-brand-50"
+                        >
+                          结束休息
                         </button>
                       )}
                       <button

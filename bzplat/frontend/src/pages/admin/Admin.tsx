@@ -8,8 +8,9 @@ import BotsTab from './BotsTab'
 import MatchesTab from './MatchesTab'
 import ContestsTab from './ContestsTab'
 import EmailTab from './EmailTab'
+import RuntimeTab from './RuntimeTab'
 
-type TabKey = 'dashboard' | 'users' | 'bots' | 'matches' | 'contests' | 'email'
+type TabKey = 'dashboard' | 'users' | 'bots' | 'matches' | 'contests' | 'runtime' | 'email'
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'dashboard', label: '仪表盘' },
@@ -17,6 +18,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'bots', label: 'Bot' },
   { key: 'matches', label: '对局' },
   { key: 'contests', label: '比赛' },
+  { key: 'runtime', label: '运行时' },
   { key: 'email', label: '邮件' },
 ]
 
@@ -50,7 +52,6 @@ export default function Admin() {
 
   return (
     <PageStub title="管理端">
-      {/* 标签栏 */}
       <div className="mb-5 flex flex-wrap gap-1 border-b border-slate-200">
         {TABS.map((t) => (
           <button
@@ -74,6 +75,7 @@ export default function Admin() {
         {tab === 'bots' && <BotsTab />}
         {tab === 'matches' && <MatchesTab />}
         {tab === 'contests' && <ContestsTab />}
+        {tab === 'runtime' && <RuntimeTab />}
         {tab === 'email' && <EmailTab />}
       </div>
     </PageStub>

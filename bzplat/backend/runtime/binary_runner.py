@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ACTION_TIMEOUT = 60.0
 DEFAULT_MEMORY = "512m"
-DEFAULT_CPUS = "0.5"
+DEFAULT_CPUS = "1"
 LINUX_IMAGE = os.environ.get("BZ_LINUX_BOT_IMAGE", "debian:bookworm-slim")
 WINE_IMAGE = os.environ.get("BZ_WINE_BOT_IMAGE", "scottyhardy/docker-wine:stable")
 

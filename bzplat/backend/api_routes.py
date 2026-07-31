@@ -17,8 +17,29 @@ from bzplat.backend.auth.dependencies import (
 )
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.contests import ContestManager
+from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.matches import MatchOrchestrator
-
+from bzplat.backend.runtime.limits import (
+    ACTION_TIMEOUT_MAX,
+    ACTION_TIMEOUT_MIN,
+    BOT_CPUS,
+    BOT_MEMORY_MB,
+    clamp_concurrent,
+    concurrent_ceiling,
+    cpu_count,
+)
+from bzplat.backend.store.schema import (
+    SETTING_ACTION_TIMEOUT,
+    SETTING_AUTO_MATCH_BOT_COOLDOWN,
+    SETTING_AUTO_MATCH_ENABLED,
+    SETTING_AUTO_MATCH_INTERVAL_SEC,
+    SETTING_AUTO_MATCH_MIN_IDLE_SEC,
+    SETTING_AUTO_MATCH_RESERVE_SLOTS,
+    SETTING_AUTO_MATCH_STALE_SEC,
+    SETTING_CONTEST_REST,
+    SETTING_CONTEST_TEMPLATES,
+    SETTING_MAX_CONCURRENT,
+)
 router = APIRouter()
 
 
@@ -41,13 +62,17 @@ def _store(request: Request):
 # ── bots ──────────────────────────────────────────────────────
 
 @router.get("/api/bots/mine")
-def my_bots(request: Request, user=Depends(require_user)):
-    return {"bots": _bots(request).list_mine(user["id"])}
+def my_bots(
+    request: Request,
+    user=Depends(require_user),
+    game_id: str | None = None,
+):
+    return {"bots": _bots(request).list_mine(user["id"], game_id=game_id)}
 
 
 @router.get("/api/bots/public")
-def public_bots(request: Request):
-    return {"bots": _bots(request).list_public()}
+def public_bots(request: Request, game_id: str | None = None):
+    return {"bots": _bots(request).list_public(game_id=game_id)}
 
 
 @router.get("/api/bots/{bot_id}")
@@ -66,6 +91,7 @@ async def upload_bot(
     description: str = Form(""),
     upload_note: str = Form(""),
     is_public: bool = Form(True),
+    game_id: str = Form("holdem"),
     file: UploadFile = File(...),
     user=Depends(require_user),
 ):
@@ -75,6 +101,7 @@ async def upload_bot(
             user["id"], name, raw,
             display_name=display_name, description=description,
             upload_note=upload_note, is_public=is_public,
+            game_id=game_id,
         )
     except BotError as e:
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
@@ -116,13 +143,18 @@ class ChallengeBody(BaseModel):
     my_bot_id: int
     opponent_bot_id: int
     hands: int = Field(70, ge=1, le=70)
+    game_id: str | None = None
 
 
 @router.post("/api/matches/challenge")
 async def challenge(body: ChallengeBody, request: Request, user=Depends(require_user)):
     try:
         mid = await _orch(request).challenge(
-            body.my_bot_id, body.opponent_bot_id, user["id"], hands=body.hands
+            body.my_bot_id,
+            body.opponent_bot_id,
+            user["id"],
+            hands=body.hands,
+            game_id=body.game_id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -133,10 +165,13 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
 def list_matches(
     request: Request,
     status: str | None = None,
+    game_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
-    rows = _store(request).list_matches(status=status, limit=limit, offset=offset)
+    rows = _store(request).list_matches(
+        status=status, game_id=game_id, limit=limit, offset=offset
+    )
     return {"matches": rows}
 
 
@@ -177,8 +212,8 @@ async def match_events(match_id: str, request: Request):
 # ── leaderboard ───────────────────────────────────────────────
 
 @router.get("/api/leaderboard")
-def leaderboard(request: Request, limit: int = 50):
-    return {"leaderboard": _store(request).list_leaderboard(limit=limit)}
+def leaderboard(request: Request, limit: int = 50, game_id: str | None = None):
+    return {"leaderboard": _store(request).list_leaderboard(limit=limit, game_id=game_id)}
 
 
 # ── contests ──────────────────────────────────────────────────
@@ -187,10 +222,22 @@ class ContestCreate(BaseModel):
     title: str
     description: str = ""
     hands_per_match: int = 70
+    template_id: str | None = None
+    game_id: str | None = None
+    stages: list[dict[str, Any]] | None = None
 
 
 class ContestRegister(BaseModel):
     bot_id: int
+
+
+class ContestDispatch(BaseModel):
+    bot_id: int
+
+
+@router.get("/api/contests/templates")
+def contest_templates():
+    return {"templates": list_templates()}
 
 
 @router.get("/api/contests")
@@ -200,10 +247,18 @@ def list_contests(request: Request, status: str | None = None):
 
 @router.post("/api/contests")
 def create_contest(body: ContestCreate, request: Request, user=Depends(require_organizer)):
-    c = _contests(request).create(
-        user["id"], body.title,
-        description=body.description, hands_per_match=body.hands_per_match,
-    )
+    try:
+        c = _contests(request).create(
+            user["id"],
+            body.title,
+            description=body.description,
+            hands_per_match=body.hands_per_match,
+            template_id=body.template_id,
+            game_id=body.game_id,
+            stages=body.stages,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"contest": c}
 
 
@@ -215,7 +270,19 @@ def contest_detail(contest_id: int, request: Request):
     entries = _store(request).list_contest_entries(contest_id)
     pairings = _store(request).list_contest_pairings(contest_id)
     standings = _contests(request).standings(contest_id)
-    return {"contest": c, "entries": entries, "pairings": pairings, "standings": standings}
+    stage_results = _store(request).list_stage_results(contest_id)
+    try:
+        estimate = _contests(request).estimate(contest_id)
+    except ValueError:
+        estimate = None
+    return {
+        "contest": c,
+        "entries": entries,
+        "pairings": pairings,
+        "standings": standings,
+        "stage_results": stage_results,
+        "estimate": estimate,
+    }
 
 
 @router.post("/api/contests/{contest_id}/open")
@@ -241,6 +308,19 @@ def register_contest(
     return {"entry": entry}
 
 
+@router.post("/api/contests/{contest_id}/dispatch")
+def dispatch_contest(
+    contest_id: int, body: ContestDispatch, request: Request, user=Depends(require_user)
+):
+    try:
+        entry = _contests(request).dispatch(
+            contest_id, user["id"], body.bot_id, role=user.get("role", "")
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"entry": entry}
+
+
 @router.post("/api/contests/{contest_id}/start")
 async def start_contest(
     contest_id: int, request: Request, user=Depends(require_organizer)
@@ -252,6 +332,38 @@ async def start_contest(
         raise HTTPException(403)
     try:
         contest = await _contests(request).start(contest_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"contest": contest}
+
+
+@router.post("/api/contests/{contest_id}/resume")
+async def resume_contest(
+    contest_id: int, request: Request, user=Depends(require_organizer)
+):
+    c = _store(request).get_contest(contest_id)
+    if not c:
+        raise HTTPException(404)
+    if c["organizer_id"] != user["id"] and user["role"] != "admin":
+        raise HTTPException(403)
+    try:
+        contest = await _contests(request).resume(contest_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"contest": contest}
+
+
+@router.post("/api/contests/{contest_id}/advance")
+async def advance_contest(
+    contest_id: int, request: Request, user=Depends(require_organizer)
+):
+    c = _store(request).get_contest(contest_id)
+    if not c:
+        raise HTTPException(404)
+    if c["organizer_id"] != user["id"] and user["role"] != "admin":
+        raise HTTPException(403)
+    try:
+        contest = await _contests(request).advance(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"contest": contest}
@@ -422,12 +534,25 @@ def admin_contests(
 
 
 @router.patch("/api/admin/contests/{contest_id}")
-def admin_patch_contest(
+async def admin_patch_contest(
     contest_id: int, body: AdminContestPatch, request: Request, _admin=Depends(require_admin)
 ):
     fields: dict[str, Any] = {}
     if body.status is not None:
-        if body.status not in ("draft", "open", "running", "finished", "cancelled"):
+        # open → running 必须走真正 start，禁止静默改状态
+        if body.status == "running":
+            c0 = _store(request).get_contest(contest_id)
+            if not c0:
+                raise HTTPException(404, "比赛不存在")
+            if c0["status"] in ("open", "draft"):
+                try:
+                    contest = await _contests(request).start(contest_id)
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
+                return {"contest": contest}
+        if body.status not in (
+            "draft", "open", "running", "rest", "finished", "cancelled"
+        ):
             raise HTTPException(400, "非法比赛状态")
         fields["status"] = body.status
     if body.title is not None:
@@ -510,12 +635,192 @@ def admin_outbox(
     return {"outbox": rows, "total": len(rows)}
 
 
+# ── admin: runtime settings ───────────────────────────────────
+
+class RuntimeSettingsPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    action_timeout_sec: float | None = None
+    max_concurrent_matches: int | None = None
+    contest_default_rest_minutes: int | None = None
+    bot_cpus: float | None = None
+    bot_memory_mb: int | None = None
+    # 闲时自动对局
+    auto_match_enabled: bool | None = None
+    auto_match_interval_sec: int | None = None
+    auto_match_min_idle_sec: int | None = None
+    auto_match_bot_cooldown: int | None = None
+    auto_match_stale_sec: int | None = None
+    auto_match_reserve_slots: int | None = None
+
+
+@router.get("/api/admin/settings/runtime")
+def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
+    store = _store(request)
+    orch = _orch(request)
+    ceiling = concurrent_ceiling()
+    raw_conc = store.get_setting(SETTING_MAX_CONCURRENT) or str(orch.max_concurrent)
+    try:
+        admin_conc = int(raw_conc)
+    except ValueError:
+        admin_conc = orch.max_concurrent
+    timeout = store.get_setting(SETTING_ACTION_TIMEOUT) or "60"
+    rest = store.get_setting(SETTING_CONTEST_REST) or "10"
+    stats = store.count_stats()
+
+    def _sett(key: str, default: str) -> str:
+        return store.get_setting(key) or default
+
+    am = {
+        "enabled": _sett(SETTING_AUTO_MATCH_ENABLED, "1") in ("1", "true", "yes"),
+        "interval_sec": int(_sett(SETTING_AUTO_MATCH_INTERVAL_SEC, "30")),
+        "min_idle_sec": int(_sett(SETTING_AUTO_MATCH_MIN_IDLE_SEC, "5")),
+        "bot_cooldown": int(_sett(SETTING_AUTO_MATCH_BOT_COOLDOWN, "600")),
+        "stale_sec": int(_sett(SETTING_AUTO_MATCH_STALE_SEC, "3600")),
+        "reserve_slots": int(_sett(SETTING_AUTO_MATCH_RESERVE_SLOTS, "1")),
+    }
+    return {
+        "cpu_count": cpu_count(),
+        "ceiling": ceiling,
+        "action_timeout_sec": float(timeout),
+        "max_concurrent_matches": clamp_concurrent(admin_conc),
+        "admin_requested": admin_conc,
+        "effective_concurrent": orch.max_concurrent,
+        "bot_cpus": BOT_CPUS,
+        "bot_memory_mb": BOT_MEMORY_MB,
+        "contest_default_rest_minutes": int(rest),
+        "queue": {
+            "pending": stats.get("matches_pending", 0),
+            "running": stats.get("matches_running", 0),
+        },
+        "auto_match": am,
+        "readonly": ["bot_cpus", "bot_memory_mb"],
+    }
+
+
+@router.patch("/api/admin/settings/runtime")
+def admin_patch_runtime(
+    body: RuntimeSettingsPatch, request: Request, _admin=Depends(require_admin)
+):
+    store = _store(request)
+    orch = _orch(request)
+    ceiling = concurrent_ceiling()
+    updated: dict[str, Any] = {}
+
+    if body.bot_cpus is not None or body.bot_memory_mb is not None:
+        raise HTTPException(400, "bot_cpus / bot_memory_mb 为只读硬限制，不可修改")
+
+    if body.max_concurrent_matches is not None:
+        req = int(body.max_concurrent_matches)
+        if req > ceiling:
+            raise HTTPException(
+                400,
+                f"max_concurrent_matches={req} 超过半负载硬顶 ceiling={ceiling}"
+                f"（机器 {cpu_count()} 核）",
+            )
+        if req < 1:
+            raise HTTPException(400, "max_concurrent_matches 至少为 1")
+        store.set_setting(SETTING_MAX_CONCURRENT, str(req))
+        orch.rebuild_concurrency(req)
+        updated["max_concurrent_matches"] = req
+
+    if body.action_timeout_sec is not None:
+        t = float(body.action_timeout_sec)
+        if t < ACTION_TIMEOUT_MIN or t > ACTION_TIMEOUT_MAX:
+            raise HTTPException(
+                400,
+                f"action_timeout_sec 须在 {ACTION_TIMEOUT_MIN}–{ACTION_TIMEOUT_MAX}",
+            )
+        store.set_setting(SETTING_ACTION_TIMEOUT, str(t))
+        orch.set_action_timeout(t)
+        updated["action_timeout_sec"] = t
+
+    if body.contest_default_rest_minutes is not None:
+        m = int(body.contest_default_rest_minutes)
+        if m < 0 or m > 120:
+            raise HTTPException(400, "contest_default_rest_minutes 须在 0–120")
+        store.set_setting(SETTING_CONTEST_REST, str(m))
+        updated["contest_default_rest_minutes"] = m
+
+    # 闲时自动对局（写 settings 即热更新：调度器每轮重读）
+    if body.auto_match_enabled is not None:
+        store.set_setting(SETTING_AUTO_MATCH_ENABLED, "1" if body.auto_match_enabled else "0")
+        updated["auto_match_enabled"] = body.auto_match_enabled
+    if body.auto_match_interval_sec is not None:
+        v = int(body.auto_match_interval_sec)
+        if v < 1 or v > 3600:
+            raise HTTPException(400, "auto_match_interval_sec 须在 1–3600")
+        store.set_setting(SETTING_AUTO_MATCH_INTERVAL_SEC, str(v))
+        updated["auto_match_interval_sec"] = v
+    if body.auto_match_min_idle_sec is not None:
+        v = int(body.auto_match_min_idle_sec)
+        if v < 0 or v > 600:
+            raise HTTPException(400, "auto_match_min_idle_sec 须在 0–600")
+        store.set_setting(SETTING_AUTO_MATCH_MIN_IDLE_SEC, str(v))
+        updated["auto_match_min_idle_sec"] = v
+    if body.auto_match_bot_cooldown is not None:
+        v = int(body.auto_match_bot_cooldown)
+        if v < 0 or v > 86400:
+            raise HTTPException(400, "auto_match_bot_cooldown 须在 0–86400")
+        store.set_setting(SETTING_AUTO_MATCH_BOT_COOLDOWN, str(v))
+        updated["auto_match_bot_cooldown"] = v
+    if body.auto_match_stale_sec is not None:
+        v = int(body.auto_match_stale_sec)
+        if v < 60 or v > 604800:
+            raise HTTPException(400, "auto_match_stale_sec 须在 60–604800")
+        store.set_setting(SETTING_AUTO_MATCH_STALE_SEC, str(v))
+        updated["auto_match_stale_sec"] = v
+    if body.auto_match_reserve_slots is not None:
+        v = int(body.auto_match_reserve_slots)
+        if v < 0 or v > ceiling:
+            raise HTTPException(400, "auto_match_reserve_slots 须在 0–ceiling")
+        store.set_setting(SETTING_AUTO_MATCH_RESERVE_SLOTS, str(v))
+        updated["auto_match_reserve_slots"] = v
+
+    if not updated:
+        raise HTTPException(400, "无更新字段")
+    return {"updated": updated, "runtime": admin_get_runtime(request, _admin)}
+
+
+@router.get("/api/admin/settings/templates")
+def admin_get_templates(request: Request, _admin=Depends(require_admin)):
+    raw = _store(request).get_setting(SETTING_CONTEST_TEMPLATES)
+    if raw:
+        try:
+            return {"templates": json.loads(raw)}
+        except json.JSONDecodeError:
+            pass
+    return {"templates": list_templates()}
+
+
+class TemplatesBody(BaseModel):
+    templates: list[dict[str, Any]]
+
+
+@router.put("/api/admin/settings/templates")
+def admin_put_templates(
+    body: TemplatesBody, request: Request, _admin=Depends(require_admin)
+):
+    _store(request).set_setting(
+        SETTING_CONTEST_TEMPLATES, json.dumps(body.templates, ensure_ascii=False)
+    )
+    return {"templates": body.templates}
+
+
 # ── wiki ──────────────────────────────────────────────────────
 # 站内 Wiki：多页索引 + 按 slug 取正文。wiki/ 目录下每个 .md 一页，
 # slug 为文件名（去 .md）。索引按固定顺序排列，缺失文件自动跳过。
 WIKI_PAGES: list[dict[str, str]] = [
+    {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "站内文档导航与 Botzone 差异总览"},
     {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "紧凑 JSON 对局协议、字段、卡牌编码、规则"},
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
+    {"slug": "runtime", "file": "RUNTIME.md", "title": "运行时与资源限制", "summary": "Docker CPU/内存、超时、半负载并发与 Botzone 差异"},
+    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议、样例与本平台对照"},
+    {"slug": "gomoku-swap1", "file": "GOMOKU_SWAP1.md", "title": "一手交换五子棋", "summary": "Gomoku-Swap1 简介（规则正文待补）"},
+    {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=11 规则、交错网格、pass 连走与协议"},
+    {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "Botzone 规则摘要与本平台协议对照"},
+    {"slug": "judge", "file": "JUDGE.md", "title": "裁判", "summary": "Botzone 裁判概念与本平台引擎对照"},
+    {"slug": "match", "file": "MATCH.md", "title": "对局", "summary": "对局生命周期、错误码与观赛"},
 ]
 
 

@@ -58,10 +58,10 @@ function Shell() {
             to="/"
             className="mr-2 flex items-center gap-2 text-lg font-semibold tracking-tight text-slate-900"
           >
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-felt-500 text-base text-brand-100 shadow-soft ring-1 ring-brand-700/50">
-              ♠
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-800 text-sm font-bold text-sky-300 shadow-soft ring-1 ring-slate-600/50">
+              B
             </span>
-            <span className="font-display">Botzone Poker</span>
+            <span className="font-display">Botbattle</span>
           </Link>
           <nav className="flex flex-wrap items-center gap-1">
             <NavLink to="/" end className={navCls}>
@@ -154,7 +154,7 @@ function Shell() {
       </main>
 
       <footer className="border-t border-slate-200 px-4 py-4 text-center text-xs text-slate-400">
-        Botzone Poker · 德州扑克竞赛平台
+        Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）
       </footer>
     </div>
   )
