@@ -225,6 +225,7 @@ class ContestCreate(BaseModel):
     template_id: str | None = None
     game_id: str | None = None
     stages: list[dict[str, Any]] | None = None
+    match_config: dict[str, Any] | None = None
 
 
 class ContestRegister(BaseModel):
@@ -256,6 +257,7 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             template_id=body.template_id,
             game_id=body.game_id,
             stages=body.stages,
+            match_config=body.match_config,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
