@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -172,6 +172,89 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"match_id": mid, "status": "pending"}
+
+
+class HumanChallengeBody(BaseModel):
+    bot_id: int
+    human_seat: int = 1  # 0 或 1，人类坐哪位
+    game_id: str | None = None
+    hands: int = Field(70, ge=1, le=300)
+    n_dots: int | None = None
+
+
+@router.post("/api/matches/human")
+async def challenge_human(body: HumanChallengeBody, request: Request, user=Depends(require_user)):
+    """人类 vs bot：当前登录用户作为人类玩家对战指定 bot。"""
+    if body.human_seat not in (0, 1):
+        raise HTTPException(400, "human_seat 须为 0 或 1")
+    try:
+        mid = await _orch(request).challenge_human(
+            body.bot_id,
+            user["id"],
+            human_seat=body.human_seat,
+            game_id=body.game_id,
+            hands=body.hands,
+            n_dots=body.n_dots,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"match_id": mid, "status": "pending"}
+
+
+@router.websocket("/api/matches/{match_id}/play")
+async def play_websocket(websocket: WebSocket, match_id: str):
+    """人类对战双向通道：推送事件（含 your_turn）+ 接收人类落子。
+
+    鉴权：query 参数 token（Bearer）或 cookie bz_session。
+    仅 match.human_user_id 本人可连；解析 pending 人类回合 Future。
+    """
+    store = websocket.app.state.store
+    auth = websocket.app.state.auth
+    orch = websocket.app.state.orch
+    # 鉴权
+    token = websocket.query_params.get("token") or websocket.cookies.get("bz_session")
+    user = auth.verify_session(token)
+    m = store.get_match(match_id)
+    if not user or not m or m.get("human_user_id") != user["id"]:
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "message": "无权访问该对局"})
+        await websocket.close()
+        return
+    await websocket.accept()
+    # 订阅事件流
+    q = orch.subscribe(match_id)
+    # 先发历史快照
+    replay = store.get_replay(match_id) or {}
+    try:
+        await websocket.send_json({
+            "type": "snapshot",
+            "match": m,
+            "events": json.loads(replay.get("events_json") or "[]"),
+        })
+    except Exception:
+        pass
+    human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
+
+    async def pump_events():
+        while True:
+            ev = await q.get()
+            await websocket.send_json(ev)
+            if isinstance(ev, dict) and ev.get("type") in ("match_end", "error"):
+                return
+
+    task = asyncio.create_task(pump_events())
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            # 解析人类落子
+            move = msg if isinstance(msg, dict) else {}
+            if not orch.resolve_human_turn(match_id, human_seat, move):
+                await websocket.send_json({"type": "reject", "message": "当前非你的回合或动作非法"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        task.cancel()
+        orch.unsubscribe(match_id, q)
 
 
 @router.get("/api/matches")

@@ -140,3 +140,42 @@ def test_human_match_uses_independent_semaphore(store: Store):
     orch = _orch(store)
     assert orch._human_sem is not orch._sem
     assert orch.human_max_concurrent >= 1
+
+
+# ── WebSocket /play + POST /api/matches/human API ──────────────
+def test_human_match_api_and_websocket(store: Store, tmp_path):
+    """POST /api/matches/human 建局；WS /play 鉴权（拒绝无 token / 接受合法）。"""
+    from fastapi.testclient import TestClient
+    from bzplat.backend.main import create_app
+
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    # 复用 store 的 db 路径建 app（同库）
+    app = create_app(db_path=store.path)
+    s = app.state.store
+    u = s.create_user("usr2", "u2@ex.com", hash_password("password1"))
+    s.update_user(u["id"], email_verified=1)
+    b = s.create_bot(
+        u["id"], "wb", binary_path=os.path.abspath("samples/gomokubot_linux_amd64"),
+        format="elf", is_public=1, game_id="gomoku",
+    )
+    _, token = app.state.auth.authenticate("usr2", "password1")
+    c = TestClient(app)
+
+    # 建人类对局
+    r = c.post(
+        "/api/matches/human", headers={"Authorization": f"Bearer {token}"},
+        json={"bot_id": b["id"], "human_seat": 0, "game_id": "gomoku"},
+    )
+    assert r.status_code == 200
+    mid = r.json()["match_id"]
+
+    # 无 token → 拒绝
+    with c.websocket_connect(f"/api/matches/{mid}/play") as ws:
+        msg = ws.receive_json()
+    assert msg["type"] == "error"
+
+    # 合法 token → 收 snapshot
+    with c.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
+        snap = ws.receive_json()
+    assert snap["type"] == "snapshot"
+    assert snap["match"]["human_seat"] == 0
