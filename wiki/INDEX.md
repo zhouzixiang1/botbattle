@@ -15,6 +15,7 @@
 | [德州扑克](#/wiki?slug=texas) | Botzone TexasHoldem2p 对照 |
 | [裁判](#/wiki?slug=judge) | 裁判概念 |
 | [对局](#/wiki?slug=match) | 对局生命周期与错误码 |
+| [赛制模板](#/wiki?slug=contest-format) | 模板结构、阶段类型、match_config 与管理员配置 |
 
 ## 本平台 vs Botzone（摘要）
 

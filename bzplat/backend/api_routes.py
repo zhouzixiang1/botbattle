@@ -887,6 +887,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "Botzone 规则摘要与本平台协议对照"},
     {"slug": "judge", "file": "JUDGE.md", "title": "裁判", "summary": "Botzone 裁判概念与本平台引擎对照"},
     {"slug": "match", "file": "MATCH.md", "title": "对局", "summary": "对局生命周期、错误码与观赛"},
+    {"slug": "contest-format", "file": "CONTEST_FORMAT.md", "title": "赛制模板", "summary": "赛制模板结构、阶段类型、match_config 与管理员配置"},
 ]
 
 

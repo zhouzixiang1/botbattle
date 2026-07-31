@@ -12,7 +12,7 @@
 
 1. **上传 Bot**（选择 `game_id`：holdem / gomoku / pencil）。
 2. **挑战**：双方同游戏 Bot → 创建 `match` → MatchRunner 启两进程 → 引擎跑完。
-3. **赛事**：按模板生成 pairing，同样走 challenge 通道，带 `contest_id`。
+3. **赛事**：按[赛制模板](#/wiki?slug=contest-format)生成 pairing，同样走 challenge 通道，带 `contest_id`；每场对局参数由模板的 `match_config`（holdem→hands、pencil→n_dots）决定。
 4. **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`，见下）。
 5. **观赛**：SSE `/api/matches/:id/events`；回放读 `match_replays.events_json`。
 6. **评分**：Glicko-2；排行榜可按游戏过滤。
