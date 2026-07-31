@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +33,12 @@ from bzplat.backend.runtime.limits import (
 from bzplat.backend.store.schema import (
     SETTING_ACTION_TIMEOUT,
     SETTING_AUTO_MATCH_BOT_COOLDOWN,
+    SETTING_AUTO_MATCH_DAILY_CAP,
     SETTING_AUTO_MATCH_ENABLED,
     SETTING_AUTO_MATCH_INTERVAL_SEC,
+    SETTING_AUTO_MATCH_MAX_PER_ROUND,
     SETTING_AUTO_MATCH_MIN_IDLE_SEC,
+    SETTING_AUTO_MATCH_PLACEMENT_GAMES,
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     SETTING_AUTO_MATCH_STALE_SEC,
     SETTING_CONTEST_REST,
@@ -79,7 +83,22 @@ def my_bots(
 def public_bots(
     request: Request, game_id: str | None = None, owner_id: int | None = None
 ):
-    return {"bots": _bots(request).list_public(game_id=game_id, owner_id=owner_id)}
+    bots = _bots(request).list_public(game_id=game_id, owner_id=owner_id)
+    # 附带 owner_name/owner_display（供对手选择弹窗展示）
+    store = _store(request)
+    owner_ids = {b["owner_id"] for b in bots if b.get("owner_id") is not None}
+    owner_map: dict[int, dict] = {}
+    if owner_ids:
+        for oid in owner_ids:
+            ou = store.get_user(oid)
+            if ou:
+                owner_map[oid] = ou
+    for b in bots:
+        ou = owner_map.get(b.get("owner_id"))
+        if ou:
+            b["owner_name"] = ou.get("username")
+            b["owner_display"] = ou.get("display_name")
+    return {"bots": bots}
 
 
 @router.get("/api/users")
@@ -751,6 +770,9 @@ class RuntimeSettingsPatch(BaseModel):
     auto_match_bot_cooldown: int | None = None
     auto_match_stale_sec: int | None = None
     auto_match_reserve_slots: int | None = None
+    auto_match_placement_games: int | None = None
+    auto_match_max_per_round: int | None = None
+    auto_match_daily_cap: int | None = None
 
 
 @router.get("/api/admin/settings/runtime")
@@ -777,6 +799,10 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
         "bot_cooldown": int(_sett(SETTING_AUTO_MATCH_BOT_COOLDOWN, "600")),
         "stale_sec": int(_sett(SETTING_AUTO_MATCH_STALE_SEC, "3600")),
         "reserve_slots": int(_sett(SETTING_AUTO_MATCH_RESERVE_SLOTS, "1")),
+        "placement_games": int(_sett(SETTING_AUTO_MATCH_PLACEMENT_GAMES, "10")),
+        "max_per_round": int(_sett(SETTING_AUTO_MATCH_MAX_PER_ROUND, "2")),
+        "daily_cap": int(_sett(SETTING_AUTO_MATCH_DAILY_CAP, "200")),
+        "daily_count": getattr(getattr(request.app.state, "auto_matcher", None), "daily_count", 0),
     }
     return {
         "cpu_count": cpu_count(),
@@ -865,8 +891,8 @@ def admin_patch_runtime(
         updated["auto_match_bot_cooldown"] = v
     if body.auto_match_stale_sec is not None:
         v = int(body.auto_match_stale_sec)
-        if v < 60 or v > 604800:
-            raise HTTPException(400, "auto_match_stale_sec 须在 60–604800")
+        if v < 0 or v > 604800:  # 0=不限
+            raise HTTPException(400, "auto_match_stale_sec 须在 0–604800（0=不限）")
         store.set_setting(SETTING_AUTO_MATCH_STALE_SEC, str(v))
         updated["auto_match_stale_sec"] = v
     if body.auto_match_reserve_slots is not None:
@@ -875,6 +901,24 @@ def admin_patch_runtime(
             raise HTTPException(400, "auto_match_reserve_slots 须在 0–ceiling")
         store.set_setting(SETTING_AUTO_MATCH_RESERVE_SLOTS, str(v))
         updated["auto_match_reserve_slots"] = v
+    if body.auto_match_placement_games is not None:
+        v = int(body.auto_match_placement_games)
+        if v < 0 or v > 100:
+            raise HTTPException(400, "auto_match_placement_games 须在 0–100（0=禁用）")
+        store.set_setting(SETTING_AUTO_MATCH_PLACEMENT_GAMES, str(v))
+        updated["auto_match_placement_games"] = v
+    if body.auto_match_max_per_round is not None:
+        v = int(body.auto_match_max_per_round)
+        if v < 1 or v > 50:
+            raise HTTPException(400, "auto_match_max_per_round 须在 1–50")
+        store.set_setting(SETTING_AUTO_MATCH_MAX_PER_ROUND, str(v))
+        updated["auto_match_max_per_round"] = v
+    if body.auto_match_daily_cap is not None:
+        v = int(body.auto_match_daily_cap)
+        if v < 0 or v > 100000:
+            raise HTTPException(400, "auto_match_daily_cap 须在 0–100000（0=不限）")
+        store.set_setting(SETTING_AUTO_MATCH_DAILY_CAP, str(v))
+        updated["auto_match_daily_cap"] = v
 
     if not updated:
         raise HTTPException(400, "无更新字段")
@@ -1098,6 +1142,34 @@ def admin_preview_template(
     n = max(0, int(body.n))
     per = [estimate_match_count(st, n) for st in norm_stages]
     return {"per_stage": per, "total": sum(per), "n": n}
+
+
+# ── admin: 日志查看 ────────────────────────────────────────────
+@router.get("/api/admin/logs")
+def admin_logs(
+    request: Request,
+    level: str | None = None,
+    q: str | None = None,
+    limit: int = 300,
+    _admin=Depends(require_admin),
+):
+    """读 logs/app.log 末尾 N 行，按级别/关键字过滤。"""
+    log_path = Path(os.environ.get("BZ_LOG_DIR", "logs")) / "app.log"
+    lines: list[str] = []
+    if log_path.is_file():
+        # 读末尾（最多 ~8000 行，取后 limit 行）
+        with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+            tail = fh.readlines()[-8000:]
+        level_upper = level.upper() if level else None
+        kw = (q or "").lower()
+        for ln in tail:
+            if level_upper and f" {level_upper} " not in f" {ln} ":
+                continue
+            if kw and kw not in ln.lower():
+                continue
+            lines.append(ln.rstrip("\n"))
+        lines = lines[-limit:]
+    return {"lines": lines, "path": str(log_path)}
 
 
 # ── wiki ──────────────────────────────────────────────────────

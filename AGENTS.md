@@ -33,6 +33,8 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 - **本地无 Docker 跑 ELF**：`export BZ_BOT_LOCAL=1`（`BinaryRunner` 退回本机 subprocess，仅测试用）。
 - **端到端冒烟**：`bash scripts/e2e_smoke.sh`。
 - **测试种子账号**：`python scripts/seed_test_accounts.py`（建 tester1/tester2，各上传 holdem/gomoku/pencil 样例 Bot；幂等，便于对战/人类对战测试）。
+- **改完代码必须 rebuild + restart**：`bash scripts/rebuild.sh`（`npm run build` → `platform-ctl.sh restart`）。前端产物（`bzplat/frontend/dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——不 rebuild+restart 代码不会生效（常见症状：新路由 405 Method Not Allowed）。
+- **日志**：`logs/app.log`（`logging_config.setup_logging`，统一格式 `时间 级别 [模块] 消息`）。排查对局/bot 崩溃/auto-match/WS 问题在此；admin「日志」Tab 可网页查看与过滤。bot EOF 会附带 stderr 末尾。
 
 ## 关键约束（容易踩坑）
 
@@ -52,7 +54,9 @@ engine/     裁判：game.py(holdem) gomoku.py pencil.py + 共享基类 result.p
 protocol/   行协议：json_protocol.py(holdem) / board_protocol.py(gomoku,pencil)
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits
 store/      SQLite + schema.py(常量唯一来源)
-api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users
+api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；admin 日志 /api/admin/logs
+logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot stderr 捕获），cli serve 接入
+matches/    后台对局：auto_matcher（闲时自动调度，ladder 类型，stale/placement/daily-cap 增强）
 ```
 
 **核心解耦契约 —— `engine/result.py` 的 `RoundResult`/`MatchResult`**：裁判（engine）产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**，绝不触碰扑克的 pot/board/holes 或棋类的棋盘。这是赛制代码能对三款游戏通用的根本。

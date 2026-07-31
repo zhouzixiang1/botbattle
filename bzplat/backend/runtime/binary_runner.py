@@ -30,6 +30,35 @@ class BotSession:
     mode: str = "docker"  # docker | wine | local
     container_name: str = ""
     _buf: bytes = field(default_factory=bytes)
+    _stderr_tail: bytearray = field(default_factory=bytearray)  # bot stderr 末尾（排查崩溃用）
+    _stderr_task: asyncio.Task | None = None
+
+    def start_stderr_drain(self) -> None:
+        """异步读取 bot stderr 到尾部缓冲（保留末尾 4KB，排查崩溃）。"""
+        proc = self.proc
+        if proc is None or proc.stderr is None:
+            return
+
+        async def _drain() -> None:
+            try:
+                while True:
+                    chunk = await proc.stderr.read(1024)
+                    if not chunk:
+                        break
+                    self._stderr_tail.extend(chunk)
+                    # 仅保留末尾 4KB
+                    if len(self._stderr_tail) > 4096:
+                        del self._stderr_tail[: len(self._stderr_tail) - 4096]
+            except Exception:
+                pass
+
+        try:
+            self._stderr_task = asyncio.create_task(_drain(), name=f"stderr-{self.session_id}")
+        except RuntimeError:
+            pass
+
+    def stderr_tail(self) -> str:
+        return self._stderr_tail.decode("utf-8", errors="replace").strip()
 
 
 class BinaryRunner:
@@ -65,6 +94,11 @@ class BinaryRunner:
             await self._start_wine(session)
         else:
             await self._start_docker(session)
+        session.start_stderr_drain()
+        logger.info(
+            "bot session started sid=%s mode=%s path=%s fmt=%s/%s-%s",
+            sid, mode, session.binary_path, session.info.format, session.info.os, session.info.arch,
+        )
         self._sessions[sid] = session
         return sid
 
@@ -157,8 +191,13 @@ class BinaryRunner:
         try:
             raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
         except asyncio.TimeoutError:
+            tail = session.stderr_tail()
+            logger.warning("bot %s 决策超时 (%ss) stderr=%s", session_id, timeout, tail[:500])
             raise TimeoutError(f"bot {session_id} 决策超时 ({timeout}s)")
         if not raw:
+            tail = session.stderr_tail()
+            logger.warning("bot %s stdout EOF（进程退出码=%s）stderr=%s",
+                           session_id, session.proc.returncode, tail[:500])
             raise RuntimeError(f"bot {session_id} stdout EOF")
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
@@ -166,6 +205,9 @@ class BinaryRunner:
         session = self._sessions.pop(session_id, None)
         if not session:
             return
+        # 取消 stderr drain 任务
+        if session._stderr_task is not None:
+            session._stderr_task.cancel()
         proc = session.proc
         if proc and proc.returncode is None:
             try:

@@ -18,9 +18,12 @@ from typing import Any
 
 from bzplat.backend.store.schema import (
     SETTING_AUTO_MATCH_BOT_COOLDOWN,
+    SETTING_AUTO_MATCH_DAILY_CAP,
     SETTING_AUTO_MATCH_ENABLED,
     SETTING_AUTO_MATCH_INTERVAL_SEC,
+    SETTING_AUTO_MATCH_MAX_PER_ROUND,
     SETTING_AUTO_MATCH_MIN_IDLE_SEC,
+    SETTING_AUTO_MATCH_PLACEMENT_GAMES,
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     SETTING_AUTO_MATCH_STALE_SEC,
     TYPE_LADDER,
@@ -41,6 +44,23 @@ class AutoMatchScheduler:
         self._recent_pairs: dict[tuple[int, int], float] = {}  # (min,max) -> ts
         # 连续空闲计时（monotonic）
         self._idle_since: float | None = None
+        # 每日计数（按本地日期串重置）
+        self._daily_count: int = 0
+        self._daily_date: str = ""
+
+    @property
+    def daily_count(self) -> int:
+        """今日已调度场数（供 admin 可见性展示）。"""
+        self._maybe_reset_daily()
+        return self._daily_count
+
+    def _maybe_reset_daily(self) -> None:
+        from datetime import date
+
+        today = date.today().isoformat()
+        if self._daily_date != today:
+            self._daily_date = today
+            self._daily_count = 0
 
     # ------------------------------------------------------------------ config
     def _cfg(self) -> dict[str, Any]:
@@ -52,6 +72,9 @@ class AutoMatchScheduler:
                 SETTING_AUTO_MATCH_BOT_COOLDOWN,
                 SETTING_AUTO_MATCH_STALE_SEC,
                 SETTING_AUTO_MATCH_RESERVE_SLOTS,
+                SETTING_AUTO_MATCH_PLACEMENT_GAMES,
+                SETTING_AUTO_MATCH_MAX_PER_ROUND,
+                SETTING_AUTO_MATCH_DAILY_CAP,
             ]
         )
 
@@ -68,6 +91,9 @@ class AutoMatchScheduler:
             "cooldown": _int(SETTING_AUTO_MATCH_BOT_COOLDOWN, 600),
             "stale": _int(SETTING_AUTO_MATCH_STALE_SEC, 3600),
             "reserve": _int(SETTING_AUTO_MATCH_RESERVE_SLOTS, 1),
+            "placement_games": _int(SETTING_AUTO_MATCH_PLACEMENT_GAMES, 10),
+            "max_per_round": _int(SETTING_AUTO_MATCH_MAX_PER_ROUND, 2),
+            "daily_cap": _int(SETTING_AUTO_MATCH_DAILY_CAP, 200),
         }
 
     # ------------------------------------------------------------------ loop
@@ -104,27 +130,49 @@ class AutoMatchScheduler:
 
     async def _schedule_some(self, cfg: dict[str, Any]) -> int:
         """在空闲槽内尽量安排对局；返回本轮安排场数。"""
+        self._maybe_reset_daily()
+        # 每日总量上限
+        if cfg["daily_cap"] > 0 and self._daily_count >= cfg["daily_cap"]:
+            logger.info("auto-match daily cap reached %d/%d，今日停止", self._daily_count, cfg["daily_cap"])
+            return 0
         running = len(self.orch._tasks)
         free = self.orch.max_concurrent - cfg["reserve"] - running
         if free <= 0:
             return 0
+        # 本轮上限：空闲槽、每轮上限、每日剩余 取最小
+        max_this_round = min(free, cfg["max_per_round"] if cfg["max_per_round"] > 0 else free)
+        if cfg["daily_cap"] > 0:
+            max_this_round = min(max_this_round, cfg["daily_cap"] - self._daily_count)
+        if max_this_round <= 0:
+            return 0
         now = time.monotonic()
+        placement = cfg["placement_games"]
+        # 定级期 bot 用更短 cooldown，加快定级
+        placement_cd = max(30, cfg["cooldown"] // 10)
         scheduled = 0
         for gid in VALID_GAME_IDS:
-            if scheduled >= free:
+            if scheduled >= max_this_round:
                 break
-            candidates = self.store.least_recently_played(gid, limit=64)
+            candidates = self.store.least_recently_played(
+                gid,
+                limit=64,
+                stale_since=cfg["stale"] if cfg["stale"] > 0 else None,
+                placement_games=placement if placement > 0 else None,
+            )
             if len(candidates) < 2:
                 continue
-            # 过滤：cooldown 内的 bot 跳过
+            # 过滤：cooldown 内的 bot 跳过（定级期 bot 用短 cooldown）
+            def _cd_for(b: dict) -> int:
+                in_placement = placement > 0 and int(b.get("matches_played") or 0) < placement
+                return placement_cd if in_placement else cfg["cooldown"]
+
             avail = [
-                b
-                for b in candidates
-                if (now - self._bot_last_scheduled.get(b["bot_id"], 0.0)) >= cfg["cooldown"]
+                b for b in candidates
+                if (now - self._bot_last_scheduled.get(b["bot_id"], 0.0)) >= _cd_for(b)
             ]
             if len(avail) < 2:
                 continue
-            # 取最陈旧的 A（avail 已按陈旧度升序），按 rating 就近选 B
+            # 取最优先的 A（avail 已按定级优先+陈旧度排序），按 rating 就近选 B
             a = avail[0]
             partner = self._pick_partner(a, avail[1:], now, cfg["cooldown"])
             if partner is None:
@@ -152,13 +200,12 @@ class AutoMatchScheduler:
             ] = now
             self._evict_recent(now, cfg["cooldown"])
             scheduled += 1
+            self._daily_count += 1
+            a_pl = int(a.get("matches_played") or 0) < placement if placement > 0 else False
             logger.info(
-                "auto-match scheduled: %s(%s) vs %s(%s) [%s]",
-                a.get("bot_name"),
-                a["bot_id"],
-                partner.get("bot_name"),
-                partner["bot_id"],
-                gid,
+                "auto-match scheduled: %s(%s) vs %s(%s) [%s] placement=%s daily=%d/%d",
+                a.get("bot_name"), a["bot_id"], partner.get("bot_name"), partner["bot_id"],
+                gid, a_pl, self._daily_count, cfg["daily_cap"],
             )
         return scheduled
 

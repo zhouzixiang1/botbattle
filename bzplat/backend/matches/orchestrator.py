@@ -241,6 +241,11 @@ class MatchOrchestrator:
             bot_a = self.store.get_bot(m["bot_a_id"])
             bot_b = self.store.get_bot(m["bot_b_id"])
             gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
+            logger.info(
+                "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s)",
+                match_id, gid, m.get("match_type"),
+                m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
+            )
             self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
             events: list[dict] = []
 
@@ -300,6 +305,11 @@ class MatchOrchestrator:
                 if m["match_type"] != TYPE_CONTEST:
                     self._apply_ratings(m["bot_a_id"], m["bot_b_id"], winner, ea, eb)
                 self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
+                logger.info(
+                    "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
+                    match_id, winner, result.rounds_played, ea, eb,
+                    m["match_type"] != TYPE_CONTEST,
+                )
             except Exception as exc:
                 logger.exception("match %s failed", match_id)
                 self.store.update_match(
