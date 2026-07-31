@@ -21,6 +21,11 @@ interface Contest {
 interface Stage {
   key?: string
   type?: string
+  scoring?: string
+  rounds?: number
+  group_count?: number
+  advance_count?: number
+  advance_per_group?: number
   rest_after_minutes?: number
   allow_bot_swap_in_rest?: boolean
 }
@@ -271,26 +276,46 @@ export default function ContestDetail() {
       </div>
 
       {stages.length > 0 && (
-        <div className="mt-6 flex flex-wrap gap-1 border-b border-slate-200">
-          {stages.map((s, i) => (
-            <button
-              key={s.key || i}
-              type="button"
-              onClick={() => setStageTab(i)}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm ${
-                stageTab === i
-                  ? 'border-brand-500 text-brand-700'
-                  : 'border-transparent text-slate-500'
-              }`}
-            >
-              {s.key || `阶段${i + 1}`}
-              <span className="ml-1 text-xs text-slate-400">({s.type})</span>
-              {contest.current_stage_idx === i && contest.status !== 'finished' && (
-                <span className="ml-1 text-xs text-emerald-600">当前</span>
-              )}
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="mt-6 flex flex-wrap gap-1 border-b border-slate-200">
+            {stages.map((s, i) => (
+              <button
+                key={s.key || i}
+                type="button"
+                onClick={() => setStageTab(i)}
+                className={`-mb-px border-b-2 px-3 py-2 text-sm ${
+                  stageTab === i
+                    ? 'border-brand-500 text-brand-700'
+                    : 'border-transparent text-slate-500'
+                }`}
+              >
+                {s.key || `阶段${i + 1}`}
+                <span className="ml-1 text-xs text-slate-400">({s.type})</span>
+                {contest.current_stage_idx === i && contest.status !== 'finished' && (
+                  <span className="ml-1 text-xs text-emerald-600">当前</span>
+                )}
+              </button>
+            ))}
+          </div>
+          {/* 当前阶段配置（只读） */}
+          {stages[stageTab] && (
+            <div className="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+              <span className="font-medium text-slate-600">本阶段配置：</span>
+              {[
+                stages[stageTab].type,
+                stages[stageTab].scoring,
+                stages[stageTab].group_count ? `分组=${stages[stageTab].group_count}` : null,
+                stages[stageTab].rounds !== undefined ? `轮数=${stages[stageTab].rounds}` : null,
+                stages[stageTab].advance_count ? `晋级=${stages[stageTab].advance_count}` : null,
+                stages[stageTab].advance_per_group ? `每组晋级=${stages[stageTab].advance_per_group}` : null,
+                stages[stageTab].rest_after_minutes ? `休息=${stages[stageTab].rest_after_minutes}分` : null,
+                stages[stageTab].allow_bot_swap_in_rest ? '休息可换Bot' : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </div>
+          )}
+        </>
       )}
 
       <h3 className="mt-8 text-sm font-medium text-slate-600">报名</h3>
