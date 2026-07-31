@@ -56,6 +56,10 @@ class MatchRunner:
         game_id: str = GAME_HOLDEM,
         num_hands: int = DEFAULT_HANDS,
         n_dots: int | None = None,
+        board_size: int | None = None,
+        starting_stack: int | None = None,
+        sb: int | None = None,
+        bb: int | None = None,
         on_event: EventSink | None = None,
         seed: int | None = None,
     ) -> MatchResult:
@@ -81,7 +85,9 @@ class MatchRunner:
 
             return await run_session(
                 gid, decide,
-                num_hands=num_hands, n_dots=n_dots, on_event=on_event, rng=rng,
+                num_hands=num_hands, n_dots=n_dots,
+                board_size=board_size, starting_stack=starting_stack, sb=sb, bb=bb,
+                on_event=on_event, rng=rng,
             )
         finally:
             await self.runner.stop_session(sid_a)
@@ -95,6 +101,10 @@ class MatchRunner:
         game_id: str = GAME_HOLDEM,
         num_hands: int = DEFAULT_HANDS,
         n_dots: int | None = None,
+        board_size: int | None = None,
+        starting_stack: int | None = None,
+        sb: int | None = None,
+        bb: int | None = None,
         on_event: EventSink | None = None,
         seed: int | None = None,
     ) -> MatchResult:
@@ -111,5 +121,8 @@ class MatchRunner:
             return out
 
         return await run_session(
-            gid, decide, num_hands=num_hands, n_dots=n_dots, on_event=on_event, rng=rng
+            gid, decide,
+            num_hands=num_hands, n_dots=n_dots,
+            board_size=board_size, starting_stack=starting_stack, sb=sb, bb=bb,
+            on_event=on_event, rng=rng,
         )

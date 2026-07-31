@@ -8,7 +8,13 @@ import secrets
 from datetime import datetime
 from typing import Any, Callable
 
-from bzplat.backend.engine.game import DEFAULT_HANDS
+from bzplat.backend.engine.game import (
+    BIG_BLIND,
+    DEFAULT_HANDS,
+    SMALL_BLIND,
+    STARTING_STACK,
+)
+from bzplat.backend.engine.gomoku import BOARD_SIZE
 from bzplat.backend.engine.registry import (
     GAME_HOLDEM,
     normalize_game_id,
@@ -19,6 +25,10 @@ from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     REGISTERED_ENGINES,
+    SETTING_JUDGE_GOMOKU_SIZE,
+    SETTING_JUDGE_HOLDEM_BB,
+    SETTING_JUDGE_HOLDEM_SB,
+    SETTING_JUDGE_HOLDEM_STACK,
     STATUS_ABORTED,
     STATUS_COMPLETED,
     STATUS_PENDING,
@@ -159,12 +169,17 @@ class MatchOrchestrator:
                     self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
             try:
+                jp = self._judge_params()
                 result = await self.runner.run_binaries(
                     bot_a["binary_path"],
                     bot_b["binary_path"],
                     game_id=gid,
                     num_hands=int(m["total_hands"]),
                     n_dots=m.get("n_dots"),
+                    board_size=jp["board_size"],
+                    starting_stack=jp["starting_stack"],
+                    sb=jp["sb"],
+                    bb=jp["bb"],
                     on_event=on_event,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
@@ -221,6 +236,30 @@ class MatchOrchestrator:
                             await result
                     except Exception:
                         logger.debug("on_match_done failed", exc_info=True)
+
+    def _judge_params(self) -> dict[str, int | None]:
+        """从 platform_settings 读裁判规则参数（热生效）；缺失或非法时用引擎常量兜底。
+
+        返回 board_size/starting_stack/sb/bb，None 表示用引擎默认。
+        n_dots 不在此处（走 match 列）；num_hands 走 match.total_hands。
+        """
+
+        def _int(key: str, default: int) -> int | None:
+            raw = self.store.get_setting(key)
+            if raw is None or raw == "":
+                return None
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                return None
+            return v if v > 0 else None
+
+        return {
+            "board_size": _int(SETTING_JUDGE_GOMOKU_SIZE, BOARD_SIZE),
+            "starting_stack": _int(SETTING_JUDGE_HOLDEM_STACK, STARTING_STACK),
+            "sb": _int(SETTING_JUDGE_HOLDEM_SB, SMALL_BLIND),
+            "bb": _int(SETTING_JUDGE_HOLDEM_BB, BIG_BLIND),
+        }
 
     def _apply_ratings(
         self, bot_a_id: int, bot_b_id: int, winner: int | None, ea: int, eb: int
