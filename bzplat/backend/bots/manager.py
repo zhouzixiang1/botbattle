@@ -124,8 +124,12 @@ class BotManager:
     def list_mine(self, owner_id: int, *, game_id: str | None = None) -> list[dict]:
         return self.store.list_bots(owner_id=owner_id, game_id=game_id)
 
-    def list_public(self, *, game_id: str | None = None) -> list[dict]:
-        return self.store.list_bots(public_only=True, game_id=game_id)
+    def list_public(
+        self, *, game_id: str | None = None, owner_id: int | None = None
+    ) -> list[dict]:
+        return self.store.list_bots(
+            public_only=True, game_id=game_id, owner_id=owner_id
+        )
 
     def get(self, bot_id: int) -> dict | None:
         return self.store.get_bot(bot_id)

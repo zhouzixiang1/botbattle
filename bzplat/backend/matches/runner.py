@@ -1,6 +1,7 @@
 """对局执行：BinaryRunner ×2 + 按 game_id 路由引擎。"""
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Callable
 
@@ -92,6 +93,60 @@ class MatchRunner:
         finally:
             await self.runner.stop_session(sid_a)
             await self.runner.stop_session(sid_b)
+
+    async def run_bot_vs_human(
+        self,
+        bot_path: str,
+        *,
+        bot_seat: int,
+        human_decide,
+        game_id: str = GAME_HOLDEM,
+        num_hands: int = DEFAULT_HANDS,
+        n_dots: int | None = None,
+        board_size: int | None = None,
+        starting_stack: int | None = None,
+        sb: int | None = None,
+        bb: int | None = None,
+        on_event: EventSink | None = None,
+        seed: int | None = None,
+    ) -> MatchResult:
+        """Bot vs 人类：bot 侧走 BinaryRunner，人类侧走 human_decide 协程。
+
+        bot_seat 为 bot 坐位（0/1）；人类坐另一侧。human_decide(player_idx, request)
+        由调用方实现（通常经 asyncio.Future 等待 WS 回传），超时由其内部处理。
+        """
+        import random
+
+        gid = normalize_game_id(game_id)
+        sid_bot = await self.runner.start_session(bot_path)
+        try:
+            rng = random.Random(seed) if seed is not None else random.Random()
+
+            async def decide(player_idx: int, request: dict[str, Any]) -> dict[str, Any]:
+                if player_idx == bot_seat:
+                    line = _dumps(gid, request)
+                    try:
+                        resp_line = await self.runner.send(
+                            sid_bot, line, timeout=self.action_timeout
+                        )
+                        return _loads(gid, resp_line)
+                    except Exception as exc:
+                        logger.warning("bot %s decide failed: %s", player_idx, exc)
+                        return _fail_response(gid)
+                # 人类侧
+                out = human_decide(player_idx, request)
+                if inspect.isawaitable(out):
+                    out = await out
+                return out if isinstance(out, dict) else _fail_response(gid)
+
+            return await run_session(
+                gid, decide,
+                num_hands=num_hands, n_dots=n_dots,
+                board_size=board_size, starting_stack=starting_stack, sb=sb, bb=bb,
+                on_event=on_event, rng=rng,
+            )
+        finally:
+            await self.runner.stop_session(sid_bot)
 
     async def run_callables(
         self,

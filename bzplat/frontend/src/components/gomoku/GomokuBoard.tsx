@@ -1,9 +1,16 @@
 import type { GomokuViewModel } from './useGomokuState'
 
-export default function GomokuBoard({ vm }: { vm: GomokuViewModel }) {
+export default function GomokuBoard({
+  vm,
+  onMove,
+}: {
+  vm: GomokuViewModel
+  onMove?: (x: number, y: number) => void
+}) {
   const size = vm.size
   const cell = Math.min(28, Math.floor(420 / size))
   const boardPx = cell * size
+  const interactive = !!onMove && !vm.matchOver
 
   return (
     <div className="overflow-hidden rounded-2xl border border-amber-900/30 bg-gradient-to-br from-amber-100 via-amber-50 to-stone-100 p-4 shadow-soft">
@@ -72,6 +79,22 @@ export default function GomokuBoard({ vm }: { vm: GomokuViewModel }) {
               )
             }),
           )}
+          {/* 人类落子点击层（每个交叉点一个透明方块） */}
+          {interactive &&
+            Array.from({ length: size }).map((_, x) =>
+              Array.from({ length: size }).map((_, y) => (
+                <rect
+                  key={`hit-${x}-${y}`}
+                  x={x * cell}
+                  y={y * cell}
+                  width={cell}
+                  height={cell}
+                  fill="transparent"
+                  className="cursor-pointer"
+                  onClick={() => onMove!(x, y)}
+                />
+              )),
+            )}
         </svg>
       </div>
       <div className="mt-3 flex gap-4 text-xs text-stone-600">
