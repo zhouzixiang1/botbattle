@@ -11,7 +11,10 @@
 ## 本平台流程
 
 1. **上传 Bot**（选择 `game_id`：holdem / gomoku / pencil）。
-2. **挑战**：双方同游戏 Bot → 创建 `match` → MatchRunner 启两进程 → 引擎跑完。
+2. **挑战**：选你的 Bot + 对手方式（见下）→ 创建 `match` → 引擎跑完。
+   - **搜索用户**：`/api/users?q=` 搜用户 → 选其该游戏 public Bot。
+   - **自博弈**：选你自己的另一只同游戏 Bot（同一 owner 两不同 Bot 对战）。
+   - **人类亲自上场**：你作为人类玩家对战 Bot（见「人类对战」）。
 3. **赛事**：按[赛制模板](#/wiki?slug=contest-format)生成 pairing，同样走 challenge 通道，带 `contest_id`；每场对局参数由模板的 `match_config`（holdem→hands、pencil→n_dots）决定。
 4. **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`，见下）。
 5. **观赛**：SSE `/api/matches/:id/events`；回放读 `match_replays.events_json`。
@@ -21,13 +24,29 @@
 
 | 类型 | 来源 | 是否更新全局 Glicko-2 |
 |------|------|----------------------|
-| `challenge` | 用户主动挑战 | ✅ 是 |
+| `challenge` | 用户主动挑战（含自博弈） | ✅ 是 |
 | `table` | 游戏桌 | ✅ 是 |
 | `ladder` | 系统闲时自动对局 | ✅ 是 |
 | `contest` | 赛事内对局 | ❌ 否（仅计入赛事内 stage 积分） |
+| `human` | 人类 vs Bot | ❌ 否（人类无评分） |
 
-> **评分隔离**：比赛（contest）对局只计入赛事内 `contest_stage_results` 积分榜，
-> **不**更新全局 Glicko-2 排行榜；其余三类对局均更新全局评分。
+> **评分隔离**：`contest` 只计入赛事内积分榜；`human` 不计 Glicko（人类无 rating 行）；
+> `challenge`/`table`/`ladder` 更新全局评分。
+
+## 人类对战（match_type=human）
+
+登录用户可作为**人类玩家**亲自上手对战 Bot（挑战页选「人类亲自上场」）：
+
+- 建局：`POST /api/matches/human`（`bot_id` + `human_seat` 0/1）→ 跳 `/play/:id`。
+- 双向通道：**WebSocket** `/api/matches/:id/play`（鉴权：query `token` 或 cookie）。
+  - 推送 `snapshot`（历史）+ 事件流 + `your_turn`（轮到人类，含 request）+ `match_end`。
+  - 人类回传落子：棋类 `{x,y}`、扑克 `{a:"f|c|k|r|all", x?:raise-to}`。
+- **资源**：走独立并发信号量（默认 `human_max_concurrent=4`，不占 Bot 半负载槽）；
+  人类决策超时 `human_action_timeout`（默认 120s，超时回安全默认：扑克 fold / 棋类判负）；
+  每用户同时进行的人类局 ≤ 1。
+- 不计 Glicko-2 天梯。
+
+> 棋类棋盘可点击落子；扑克提供 Fold/Check/Call/Raise/Allin 按钮栏。
 
 ## 状态
 
