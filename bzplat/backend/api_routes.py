@@ -83,7 +83,22 @@ def my_bots(
 def public_bots(
     request: Request, game_id: str | None = None, owner_id: int | None = None
 ):
-    return {"bots": _bots(request).list_public(game_id=game_id, owner_id=owner_id)}
+    bots = _bots(request).list_public(game_id=game_id, owner_id=owner_id)
+    # 附带 owner_name/owner_display（供对手选择弹窗展示）
+    store = _store(request)
+    owner_ids = {b["owner_id"] for b in bots if b.get("owner_id") is not None}
+    owner_map: dict[int, dict] = {}
+    if owner_ids:
+        for oid in owner_ids:
+            ou = store.get_user(oid)
+            if ou:
+                owner_map[oid] = ou
+    for b in bots:
+        ou = owner_map.get(b.get("owner_id"))
+        if ou:
+            b["owner_name"] = ou.get("username")
+            b["owner_display"] = ou.get("display_name")
+    return {"bots": bots}
 
 
 @router.get("/api/users")
