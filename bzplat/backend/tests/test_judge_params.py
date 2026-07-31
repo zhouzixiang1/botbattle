@@ -154,6 +154,56 @@ def test_runner_passes_judge_params_to_session(monkeypatch):
     assert captured["bb"] == 50
 
 
+def test_gomoku_check_win_respects_smaller_board():
+    """回归：check_win 必须用实际 size 判定边界，而非默认 15。
+
+    历史 bug：check_win 默认 size=15，9×9 棋盘下沿 4 方向扫描到 [9,15) 时
+    越界访问 board[cx][cy] 抛 IndexError。这里显式传 size=9 验证不再越界。
+    """
+    from bzplat.backend.engine.gomoku import check_win
+
+    size = 9
+    board = [[-1] * size for _ in range(size)]
+    # 在右下角附近横排成五：x=4..8, y=8（贴边，触发向右扫描到 size 边界）
+    for x in range(4, 9):
+        board[x][8] = 0
+    assert check_win(board, 8, 8, 0, size) is True
+    # 未成五的一手不应误报
+    board2 = [[-1] * size for _ in range(size)]
+    for x in range(4, 8):  # 仅 4 连
+        board2[x][8] = 0
+    assert check_win(board2, 7, 8, 0, size) is False
+
+
+def test_gomoku_small_board_full_game_via_runner():
+    """回归：board_size=9 时两合法 bot 能跑完整局不崩（曾因 check_win 越界崩溃）。"""
+    runner = MatchRunner(BinaryRunner(prefer_local=True))
+    size = 9
+
+    def make_bot():
+        b = [[-1] * size for _ in range(size)]
+
+        async def decide(req):
+            me = int(req.get("me", 0))
+            ox, oy = int(req.get("x", -1)), int(req.get("y", -1))
+            if 0 <= ox < size and 0 <= oy < size:
+                b[ox][oy] = 1 - me
+            for x in range(size):
+                for y in range(size):
+                    if b[x][y] < 0:
+                        b[x][y] = me
+                        return {"x": x, "y": y}
+            return {"x": -1, "y": -1}
+
+        return decide
+
+    result = asyncio.run(
+        runner.run_callables(make_bot(), make_bot(), game_id="gomoku", board_size=size)
+    )
+    assert result.reason in ("five", "draw")
+    assert result.rounds_played <= size * size + 1
+
+
 # ── admin 端点：鉴权 + 范围校验 + 热生效 ──────────────────────────
 
 def _admin_client(tmp_path):

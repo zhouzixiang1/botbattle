@@ -42,13 +42,13 @@ def in_board(x: int, y: int, size: int = BOARD_SIZE) -> bool:
     return 0 <= x < size and 0 <= y < size
 
 
-def check_win(board: list[list[int]], x: int, y: int, player: int) -> bool:
-    """以 (x,y) 为中心，任一方向连续 ≥5 同色即胜。"""
+def check_win(board: list[list[int]], x: int, y: int, player: int, size: int = BOARD_SIZE) -> bool:
+    """以 (x,y) 为中心，任一方向连续 ≥5 同色即胜。size 须与棋盘实际边长一致。"""
     for dx, dy in _DIRS:
         count = 1
         for sign in (1, -1):
             cx, cy = x + sign * dx, y + sign * dy
-            while in_board(cx, cy) and board[cx][cy] == player:
+            while in_board(cx, cy, size) and board[cx][cy] == player:
                 count += 1
                 cx += sign * dx
                 cy += sign * dy
@@ -147,7 +147,7 @@ class GomokuSession:
                 move_index=moves_n,
             )
 
-            if check_win(board, mx, my, to_move):
+            if check_win(board, mx, my, to_move, size):
                 winner = to_move
                 reason = "five"
                 break
