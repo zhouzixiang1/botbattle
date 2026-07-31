@@ -19,6 +19,10 @@ interface Runtime {
     bot_cooldown: number
     stale_sec: number
     reserve_slots: number
+    placement_games: number
+    max_per_round: number
+    daily_cap: number
+    daily_count: number
   }
 }
 
@@ -41,6 +45,9 @@ export default function RuntimeTab() {
   const [amCooldown, setAmCooldown] = useState(600)
   const [amStale, setAmStale] = useState(3600)
   const [amReserve, setAmReserve] = useState(1)
+  const [amPlacement, setAmPlacement] = useState(10)
+  const [amMaxPerRound, setAmMaxPerRound] = useState(2)
+  const [amDailyCap, setAmDailyCap] = useState(200)
   const [error, setError] = useState('')
   const [ok, setOk] = useState('')
   const [loading, setLoading] = useState(true)
@@ -65,6 +72,9 @@ export default function RuntimeTab() {
       setAmCooldown(am.bot_cooldown)
       setAmStale(am.stale_sec)
       setAmReserve(am.reserve_slots)
+      setAmPlacement(am.placement_games)
+      setAmMaxPerRound(am.max_per_round)
+      setAmDailyCap(am.daily_cap)
       setTemplates(t.templates || [])
     } catch (e) {
       setError(errMsg(e, '加载失败'))
@@ -92,6 +102,9 @@ export default function RuntimeTab() {
         auto_match_bot_cooldown: amCooldown,
         auto_match_stale_sec: amStale,
         auto_match_reserve_slots: amReserve,
+        auto_match_placement_games: amPlacement,
+        auto_match_max_per_round: amMaxPerRound,
+        auto_match_daily_cap: amDailyCap,
       })
       setOk('已保存并热更新')
       await load()
@@ -215,9 +228,9 @@ export default function RuntimeTab() {
             />
           </label>
           <label className="text-sm text-slate-600">
-            陈旧阈值（秒）
+            陈旧阈值（秒，0=不限）
             <input
-              type="number" min={60} max={604800}
+              type="number" min={0} max={604800}
               className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
               value={amStale} onChange={(e) => setAmStale(Number(e.target.value))}
             />
@@ -230,9 +243,34 @@ export default function RuntimeTab() {
               value={amReserve} onChange={(e) => setAmReserve(Number(e.target.value))}
             />
           </label>
+          <label className="text-sm text-slate-600">
+            新 Bot 定级赛场次（前N场优先，0=禁用）
+            <input
+              type="number" min={0} max={100}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+              value={amPlacement} onChange={(e) => setAmPlacement(Number(e.target.value))}
+            />
+          </label>
+          <label className="text-sm text-slate-600">
+            每轮最多补几场
+            <input
+              type="number" min={1} max={50}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+              value={amMaxPerRound} onChange={(e) => setAmMaxPerRound(Number(e.target.value))}
+            />
+          </label>
+          <label className="text-sm text-slate-600">
+            每日总量上限（0=不限）
+            <input
+              type="number" min={0} max={100000}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+              value={amDailyCap} onChange={(e) => setAmDailyCap(Number(e.target.value))}
+            />
+          </label>
         </div>
         <p className="mt-3 text-xs text-slate-500">
-          状态：进行中 {rt?.queue.running ?? 0} · 生效并发 {rt?.effective_concurrent ?? '—'}
+          状态：进行中 {rt?.queue.running ?? 0} · 生效并发 {rt?.effective_concurrent ?? '—'} ·
+          今日后台对局 {rt?.auto_match.daily_count ?? 0}/{rt?.auto_match.daily_cap ?? '—'}
         </p>
       </div>
 
