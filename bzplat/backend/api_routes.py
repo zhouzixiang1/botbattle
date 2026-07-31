@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -1098,6 +1099,34 @@ def admin_preview_template(
     n = max(0, int(body.n))
     per = [estimate_match_count(st, n) for st in norm_stages]
     return {"per_stage": per, "total": sum(per), "n": n}
+
+
+# ── admin: 日志查看 ────────────────────────────────────────────
+@router.get("/api/admin/logs")
+def admin_logs(
+    request: Request,
+    level: str | None = None,
+    q: str | None = None,
+    limit: int = 300,
+    _admin=Depends(require_admin),
+):
+    """读 logs/app.log 末尾 N 行，按级别/关键字过滤。"""
+    log_path = Path(os.environ.get("BZ_LOG_DIR", "logs")) / "app.log"
+    lines: list[str] = []
+    if log_path.is_file():
+        # 读末尾（最多 ~8000 行，取后 limit 行）
+        with log_path.open("r", encoding="utf-8", errors="replace") as fh:
+            tail = fh.readlines()[-8000:]
+        level_upper = level.upper() if level else None
+        kw = (q or "").lower()
+        for ln in tail:
+            if level_upper and f" {level_upper} " not in f" {ln} ":
+                continue
+            if kw and kw not in ln.lower():
+                continue
+            lines.append(ln.rstrip("\n"))
+        lines = lines[-limit:]
+    return {"lines": lines, "path": str(log_path)}
 
 
 # ── wiki ──────────────────────────────────────────────────────

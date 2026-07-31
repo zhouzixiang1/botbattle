@@ -1,6 +1,7 @@
 """CLI：serve / 管理辅助。"""
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -33,6 +34,11 @@ def serve(
 ):
     """启动 Web 服务。"""
     _load_dotenv()
+
+    # 统一日志：文件 + 控制台（uvicorn.run 前生效，确保所有模块落 app.log）
+    from bzplat.backend.logging_config import setup_logging
+    setup_logging(level=os.environ.get("BZ_LOG_LEVEL", "INFO"))
+    logging.getLogger(__name__).info("botbattle 启动 host=%s port=%s reload=%s", host, port, reload)
 
     host = host or os.environ.get("BZ_HOST", "127.0.0.1")
     port = port or int(os.environ.get("BZ_PORT", "50380"))
