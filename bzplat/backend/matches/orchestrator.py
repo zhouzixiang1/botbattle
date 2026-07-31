@@ -19,7 +19,7 @@ from bzplat.backend.engine.registry import (
     GAME_HOLDEM,
     normalize_game_id,
 )
-from bzplat.backend.matches.runner import MatchRunner
+from bzplat.backend.matches.runner import MatchRunner, _fail_response
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
@@ -35,6 +35,7 @@ from bzplat.backend.store.schema import (
     STATUS_RUNNING,
     TYPE_CHALLENGE,
     TYPE_CONTEST,
+    TYPE_HUMAN,
     TYPE_TABLE,
     VALID_GAME_IDS,
 )
@@ -63,14 +64,95 @@ class MatchOrchestrator:
         self._lock = asyncio.Lock()
         # 对局完成后的回调（由外部注入，如比赛归档）。签名: (match_id, contest_id|None) -> None
         self.on_match_done: "Callable[[str, int | None], None] | None" = None
+        # ── 人类对战（独立并发，不占 bot 对局槽）──────────────────
+        self.human_max_concurrent = 4
+        self._human_sem = asyncio.Semaphore(self.human_max_concurrent)
+        # (match_id, player_idx) → pending 人类回合 {request, future, ts}
+        self._human_turns: dict[tuple[str, int], dict] = {}
+        # 每 user 同时进行的人类局 ≤ 1（节流，防挂机占满人类槽）
+        self._human_active_users: set[int] = set()
+        self.human_action_timeout = 120.0  # 人类决策超时（秒）
 
     def rebuild_concurrency(self, max_concurrent: int) -> None:
         """热更新并发上限：重建 Semaphore（不修改 _value）。"""
         self.max_concurrent = max(1, int(max_concurrent))
         self._sem = asyncio.Semaphore(self.max_concurrent)
 
+    def rebuild_human_concurrency(self, max_concurrent: int) -> None:
+        """热更新人类对局独立并发上限。"""
+        self.human_max_concurrent = max(1, int(max_concurrent))
+        self._human_sem = asyncio.Semaphore(self.human_max_concurrent)
+
     def set_action_timeout(self, timeout_sec: float) -> None:
         self.runner.action_timeout = float(timeout_sec)
+
+    def set_human_action_timeout(self, timeout_sec: float) -> None:
+        self.human_action_timeout = float(timeout_sec)
+
+    # ── 人类对战：回合 Future 注册表（供 WS /move 解析）─────────
+    def get_human_turn(self, match_id: str, player_idx: int) -> dict | None:
+        return self._human_turns.get((match_id, player_idx))
+
+    def resolve_human_turn(self, match_id: str, player_idx: int, move: dict) -> bool:
+        """WS 收到人类落子：解析 pending Future。返回是否成功。"""
+        entry = self._human_turns.get((match_id, player_idx))
+        if not entry or entry["future"].done():
+            return False
+        entry["future"].set_result(move)
+        return True
+
+    async def challenge_human(
+        self,
+        bot_id: int,
+        human_user_id: int,
+        *,
+        human_seat: int = 1,
+        game_id: str | None = None,
+        hands: int = DEFAULT_HANDS,
+        n_dots: int | None = None,
+    ) -> str:
+        """人类 vs bot：human_seat 为人类坐位（0/1），另一侧为 bot_id。
+
+        人类侧无 bot/binary，走 runner.run_bot_vs_human（人类 decide 经 Future
+        等待 WS 回传）。不计 Glicko；占用独立 _human_sem（不占 bot 对局槽）。
+        """
+        bot = self.store.get_bot(bot_id)
+        if not bot:
+            raise ValueError("bot 不存在")
+        if not bot.get("is_active") or not bot.get("binary_path"):
+            raise ValueError("bot 不可用")
+        if human_user_id in self._human_active_users:
+            raise ValueError("你已有一场人类对局进行中，请先结束")
+        gid = normalize_game_id(game_id or bot.get("game_id"))
+        if gid != normalize_game_id(bot.get("game_id")):
+            raise ValueError(f"指定游戏 {gid} 与 Bot 游戏 {bot.get('game_id')} 不一致")
+        if gid not in VALID_GAME_IDS or gid not in REGISTERED_ENGINES:
+            raise ValueError(f"游戏引擎未注册: {gid}")
+
+        bot_seat = 1 - human_seat
+        # 人类侧用一个伪 bot_id 占位（取 bot_id 自身，仅满足 NOT NULL FK；
+        # 真正的人类动作经 _human_turns / WS 回传，不走 binary）
+        bot_a_id = bot_id if bot_seat == 0 else bot_id
+        bot_b_id = bot_id if bot_seat == 1 else bot_id
+        total_hands = hands if gid == GAME_HOLDEM else 1
+        match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
+        self.store.create_match(
+            match_id,
+            bot_a_id=bot_a_id,
+            bot_b_id=bot_b_id,
+            owner_id=human_user_id,
+            total_hands=total_hands,
+            match_type=TYPE_HUMAN,
+            game_id=gid,
+            n_dots=n_dots,
+            human_user_id=human_user_id,
+            human_seat=human_seat,
+        )
+        self.store.upsert_replay(match_id, "[]", "[]")
+        self._human_active_users.add(human_user_id)
+        task = asyncio.create_task(self._run_human_match(match_id), name=f"human-{match_id}")
+        self._tasks[match_id] = task
+        return match_id
 
     async def challenge(
         self,
@@ -236,6 +318,85 @@ class MatchOrchestrator:
                             await result
                     except Exception:
                         logger.debug("on_match_done failed", exc_info=True)
+
+    async def _run_human_match(self, match_id: str) -> None:
+        """人类 vs bot 对局：独立信号量；人类侧经 _human_turns Future 等待 WS 落子。"""
+        async with self._human_sem:
+            m = self.store.get_match(match_id)
+            if not m:
+                return
+            bot = self.store.get_bot(m["bot_a_id"])
+            gid = normalize_game_id(m.get("game_id") or bot.get("game_id"))
+            human_seat = int(m["human_seat"]) if m.get("human_seat") is not None else 1
+            self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
+            events: list[dict] = []
+
+            def on_event(kind: str, ev: dict) -> None:
+                events.append(ev)
+                self._broadcast(match_id, ev)
+                if kind in ("settle", "hand_start", "match_end", "move", "match_start", "turn") or len(events) % 5 == 0:
+                    self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+
+            async def human_decide(player_idx: int, request: dict) -> dict:
+                # 注册 pending 回合，广播 your_turn，等待 WS /move 解析 Future
+                fut: asyncio.Future = asyncio.get_running_loop().create_future()
+                self._human_turns[(match_id, player_idx)] = {
+                    "request": request,
+                    "future": fut,
+                    "ts": _now(),
+                }
+                self._broadcast(match_id, {
+                    "type": "your_turn", "player": player_idx, "request": request,
+                })
+                try:
+                    return await asyncio.wait_for(fut, timeout=self.human_action_timeout)
+                except asyncio.TimeoutError:
+                    return _fail_response(gid)
+                finally:
+                    self._human_turns.pop((match_id, player_idx), None)
+
+            try:
+                jp = self._judge_params()
+                result = await self.runner.run_bot_vs_human(
+                    bot["binary_path"],
+                    bot_seat=1 - human_seat,
+                    human_decide=human_decide,
+                    game_id=gid,
+                    num_hands=int(m["total_hands"]),
+                    n_dots=m.get("n_dots"),
+                    on_event=on_event,
+                    board_size=jp.get("board_size"),
+                    starting_stack=jp.get("starting_stack"),
+                    sb=jp.get("sb"),
+                    bb=jp.get("bb"),
+                )
+                ea = sum(r.deltas[0] for r in result.rounds)
+                eb = sum(r.deltas[1] for r in result.rounds)
+                winner = result.winner
+                if winner is None:
+                    winner = 0 if ea > eb else 1 if eb > ea else None
+                for ev in reversed(events):
+                    if ev.get("type") == "match_end" and "winner" in ev:
+                        winner = ev.get("winner")
+                        break
+                net_bb_a = (ea / 100.0) if gid == GAME_HOLDEM else float(ea)
+                self.store.update_match(
+                    match_id, status=STATUS_COMPLETED,
+                    hands_played=result.rounds_played, earnings_a=ea, earnings_b=eb,
+                    winner=winner, reason="completed", net_bb_a=net_bb_a, ended_at=_now(),
+                )
+                self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+                # 人类对战不计 Glicko-2（人类无 rating 行）
+                self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
+            except Exception as exc:
+                logger.exception("human match %s failed", match_id)
+                self.store.update_match(match_id, status=STATUS_ABORTED, reason=f"error:{exc}", ended_at=_now())
+                self._broadcast(match_id, {"type": "error", "message": str(exc)})
+            finally:
+                self._tasks.pop(match_id, None)
+                self._human_turns = {k: v for k, v in self._human_turns.items() if k[0] != match_id}
+                if m.get("human_user_id") is not None:
+                    self._human_active_users.discard(int(m["human_user_id"]))
 
     def _judge_params(self) -> dict[str, int | None]:
         """从 platform_settings 读裁判规则参数（热生效）；缺失或非法时用引擎常量兜底。

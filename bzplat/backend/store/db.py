@@ -143,12 +143,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "matches" in tables:
         _add_col(conn, "matches", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
         _add_col(conn, "matches", "n_dots", "INTEGER")  # pencil 点阵边长（可空）
-        # 放宽 match_type CHECK 以纳入 'ladder'（闲时自动对局）
+        _add_col(conn, "matches", "human_user_id", "INTEGER")  # 人类对战：人类用户 id
+        _add_col(conn, "matches", "human_seat", "INTEGER")  # 人类坐位 0/1
+        # 放宽 match_type CHECK 以纳入 'ladder' / 'human'
         m_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'"
         ).fetchone()
         m_sql_text = (m_sql[0] or "") if m_sql else ""
-        if "'ladder'" not in m_sql_text:
+        if "'human'" not in m_sql_text:
             m_cols = _table_cols(conn, "matches")
             conn.execute(
                 """
@@ -169,12 +171,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     status          TEXT    NOT NULL DEFAULT 'pending',
                     game_id         TEXT    NOT NULL DEFAULT 'holdem',
                     n_dots          INTEGER,
+                    human_user_id   INTEGER,
+                    human_seat      INTEGER,
                     started_at      TEXT,
-                    ended_at        TEXT,
+                    ended_at      TEXT,
                     created_at      TEXT    NOT NULL,
                     CONSTRAINT chk_winner2 CHECK (winner IN (0, 1) OR winner IS NULL),
                     CONSTRAINT chk_status2 CHECK (status IN ('pending','running','completed','aborted')),
-                    CONSTRAINT chk_type2 CHECK (match_type IN ('challenge','table','contest','ladder'))
+                    CONSTRAINT chk_type2 CHECK (match_type IN ('challenge','table','contest','ladder','human'))
                 )
                 """
             )
@@ -183,6 +187,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "hands_played", "total_hands", "earnings_a", "earnings_b",
                 "winner", "reason", "net_bb_a", "match_type", "status",
                 "started_at", "ended_at", "created_at", "game_id", "n_dots",
+                "human_user_id", "human_seat",
             ) if c in m_cols]
             conn.execute(
                 f"INSERT INTO matches_new ({', '.join(present_m)}) "
@@ -679,12 +684,15 @@ class Store:
         match_type: str = "challenge",
         game_id: str = "holdem",
         n_dots: int | None = None,
+        human_user_id: int | None = None,
+        human_seat: int | None = None,
     ) -> dict:
         with self._tx() as c:
             c.execute(
                 "INSERT INTO matches(id, bot_a_id, bot_b_id, owner_id, "
-                "contest_id, total_hands, match_type, status, game_id, n_dots, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "contest_id, total_hands, match_type, status, game_id, n_dots, "
+                "human_user_id, human_seat, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     bot_a_id,
@@ -696,6 +704,8 @@ class Store:
                     "pending",
                     game_id or "holdem",
                     n_dots,
+                    human_user_id,
+                    human_seat,
                     _now(),
                 ),
             )
@@ -722,6 +732,8 @@ class Store:
             "ended_at",
             "contest_id",
             "n_dots",
+            "human_user_id",
+            "human_seat",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]

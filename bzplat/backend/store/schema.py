@@ -95,12 +95,14 @@ CREATE TABLE IF NOT EXISTS matches (
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL DEFAULT 'holdem',
     n_dots          INTEGER,  -- pencil 点阵边长（仅 pencil 用；NULL=默认 11）
+    human_user_id   INTEGER,  -- 人类对战：人类玩家用户 id（NULL=纯 bot 对局）
+    human_seat      INTEGER,  -- 人类坐哪位（0/1；NULL=纯 bot）
     started_at      TEXT,
-    ended_at        TEXT,
+    ended_at      TEXT,
     created_at      TEXT    NOT NULL,
     CONSTRAINT chk_winner CHECK (winner IN (0, 1) OR winner IS NULL),
     CONSTRAINT chk_status CHECK (status IN ('pending','running','completed','aborted')),
-    CONSTRAINT chk_type CHECK (match_type IN ('challenge','table','contest','ladder'))
+    CONSTRAINT chk_type CHECK (match_type IN ('challenge','table','contest','ladder','human'))
 );
 
 CREATE TABLE IF NOT EXISTS match_replays (
@@ -274,6 +276,7 @@ TYPE_CHALLENGE = "challenge"
 TYPE_TABLE = "table"
 TYPE_CONTEST = "contest"
 TYPE_LADDER = "ladder"  # 闲时自动对局维护天梯榜（系统发起，无 owner）
+TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 Glicko）
 
 # 比赛状态
 CONTEST_DRAFT = "draft"
