@@ -99,9 +99,13 @@ Botzone「长时运行」模式：
 3. 连续空闲达 `auto_match_min_idle_sec`（默认 5 秒），即真正闲时。
 
 **配对策略**：陈旧度优先（`last_played_at` 最旧 / 从未赛）+ rating 就近（Swiss 式）。
+**新 bot 定级优先**：`matches_played < auto_match_placement_games`（默认 10）的「定级期」bot 排最前，
+且用更短 cooldown（cooldown÷10，最少 30s）加快定级；打满后回归陈旧度调度。
 **节流**：同一 bot 两场间隔不低于 `auto_match_bot_cooldown`（默认 600 秒）；
-近期已配对组合短期不再重复。`match_type=ladder`，`owner` 为空（系统发起），
-**计入全局 Glicko-2 评分**（比赛 contest 对局不计全局，见 [对局](#/wiki?slug=match)）。
+近期已配对组合短期不再重复。**每轮**最多补 `auto_match_max_per_round`（默认 2）场；
+**每日**总量上限 `auto_match_daily_cap`（默认 200，0=不限，达上限当日停）。
+`match_type=ladder`，`owner` 为空（系统发起），**计入全局 Glicko-2 评分**
+（比赛 contest 对局不计全局，见 [对局](#/wiki?slug=match)）。
 
 | 配置项 | 默认 | 含义 |
 |--------|------|------|
@@ -109,10 +113,16 @@ Botzone「长时运行」模式：
 | `auto_match_interval_sec` | 30 | 轮询间隔 |
 | `auto_match_min_idle_sec` | 5 | 连续空闲触发秒数 |
 | `auto_match_bot_cooldown` | 600 | 同 bot 两场间隔下限（秒） |
-| `auto_match_stale_sec` | 3600 | last_played_at 超此视为陈旧 |
+| `auto_match_stale_sec` | 3600 | 仅调度陈旧超此阈值（秒）的 bot；0=不限 |
 | `auto_match_reserve_slots` | 1 | 为用户挑战预留的并发槽 |
+| `auto_match_placement_games` | 10 | 新 bot 定级赛场次（前 N 场优先，0=禁用） |
+| `auto_match_max_per_round` | 2 | 每轮最多补几场 |
+| `auto_match_daily_cap` | 200 | 每日后台对局总量上限（0=不限） |
 
-配置写入即**热更新**（调度器每轮重读 settings），无需重启。
+配置写入即**热更新**（调度器每轮重读 settings），无需重启。admin「运行时」Tab 可见
+「今日后台对局 N/上限」实时计数。
+
+> **可见性**：后台 ladder 对局会出现在首页「最新对局」（带「后台」徽章），便于观察天梯维护。
 
 ## 管理员配置
 
