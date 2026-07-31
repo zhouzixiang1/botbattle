@@ -38,6 +38,11 @@ from bzplat.backend.store.schema import (
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     SETTING_AUTO_MATCH_STALE_SEC,
     SETTING_CONTEST_REST,
+    SETTING_JUDGE_GOMOKU_SIZE,
+    SETTING_JUDGE_HOLDEM_BB,
+    SETTING_JUDGE_HOLDEM_HANDS,
+    SETTING_JUDGE_HOLDEM_SB,
+    SETTING_JUDGE_HOLDEM_STACK,
     SETTING_MAX_CONCURRENT,
 )
 router = APIRouter()
@@ -783,6 +788,135 @@ def admin_patch_runtime(
     if not updated:
         raise HTTPException(400, "无更新字段")
     return {"updated": updated, "runtime": admin_get_runtime(request, _admin)}
+
+
+# ── admin: 裁判引擎（规则参数热调 + 代码只读） ────────────────────
+# 裁判规则参数存 platform_settings，orchestrator 每局热读，下局即生效。
+JUDGE_PARAM_BOUNDS: dict[str, tuple[int, int]] = {
+    SETTING_JUDGE_GOMOKU_SIZE: (9, 19),
+    SETTING_JUDGE_HOLDEM_STACK: (1000, 1_000_000),
+    SETTING_JUDGE_HOLDEM_SB: (1, 10_000),
+    SETTING_JUDGE_HOLDEM_BB: (2, 20_000),
+    SETTING_JUDGE_HOLDEM_HANDS: (1, 1000),
+}
+# 裁判参数默认值（与各引擎常量对齐）
+JUDGE_PARAM_DEFAULTS: dict[str, int] = {
+    SETTING_JUDGE_GOMOKU_SIZE: 15,
+    SETTING_JUDGE_HOLDEM_STACK: 20000,
+    SETTING_JUDGE_HOLDEM_SB: 50,
+    SETTING_JUDGE_HOLDEM_BB: 100,
+    SETTING_JUDGE_HOLDEM_HANDS: 70,
+}
+# 三款游戏裁判元信息（代码位置 / 规则摘要 / 可调参数 key）
+JUDGE_GAMES: list[dict[str, Any]] = [
+    {
+        "game_id": "holdem",
+        "label": "德州扑克",
+        "code_path": "bzplat/backend/engine/game.py",
+        "summary": "HU NLHE；单局多手；按筹码差判胜。",
+        "params": [
+            {"key": SETTING_JUDGE_HOLDEM_STACK, "label": "起始筹码", "field": "starting_stack"},
+            {"key": SETTING_JUDGE_HOLDEM_SB, "label": "小盲注", "field": "sb"},
+            {"key": SETTING_JUDGE_HOLDEM_BB, "label": "大盲注", "field": "bb"},
+            {"key": SETTING_JUDGE_HOLDEM_HANDS, "label": "挑战默认手数", "field": "default_hands"},
+        ],
+    },
+    {
+        "game_id": "gomoku",
+        "label": "五子棋",
+        "code_path": "bzplat/backend/engine/gomoku.py",
+        "summary": "15×15；黑先；横竖斜连续≥5 即胜；无禁手。",
+        "params": [
+            {"key": SETTING_JUDGE_GOMOKU_SIZE, "label": "棋盘边长", "field": "board_size"},
+        ],
+    },
+    {
+        "game_id": "pencil",
+        "label": "点格棋",
+        "code_path": "bzplat/backend/engine/pencil.py",
+        "summary": "N=11 点阵；红先；占相邻边围格得分并连走；格多者胜。",
+        "params": [],  # n_dots 走 match 列，非全局 setting
+    },
+]
+
+
+def _engine_docstring(rel_path: str) -> str:
+    """读引擎源码首段 docstring（只读展示）。"""
+    try:
+        p = Path(__file__).resolve().parents[1] / rel_path.replace("bzplat/backend/", "")
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    if not text.startswith('"""'):
+        return ""
+    end = text.find('"""', 3)
+    return text[3:end].strip() if end > 0 else ""
+
+
+@router.get("/api/admin/judges")
+def admin_get_judges(request: Request, _admin=Depends(require_admin)):
+    store = _store(request)
+    games = []
+    for g in JUDGE_GAMES:
+        params = []
+        for prm in g["params"]:
+            key = prm["key"]
+            raw = store.get_setting(key)
+            try:
+                value = int(raw) if raw not in (None, "") else JUDGE_PARAM_DEFAULTS[key]
+            except (TypeError, ValueError):
+                value = JUDGE_PARAM_DEFAULTS[key]
+            lo, hi = JUDGE_PARAM_BOUNDS[key]
+            params.append({**prm, "value": value, "min": lo, "max": hi})
+        games.append({
+            "game_id": g["game_id"],
+            "label": g["label"],
+            "code_path": g["code_path"],
+            "summary": g["summary"],
+            "params": params,
+            "docstring": _engine_docstring(g["code_path"]),
+        })
+    # admin-only 裁判代码说明（不入公开 WIKI_PAGES）
+    judge_code_path = _wiki_dir() / "JUDGE_CODE.md"
+    markdown = (
+        judge_code_path.read_text(encoding="utf-8") if judge_code_path.is_file() else ""
+    )
+    return {"games": games, "markdown": markdown}
+
+
+class JudgeParamsPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    params: dict[str, int]
+
+
+@router.patch("/api/admin/judges/params")
+def admin_patch_judge_params(
+    body: JudgeParamsPatch, request: Request, _admin=Depends(require_admin)
+):
+    store = _store(request)
+    if not body.params:
+        raise HTTPException(400, "无更新字段")
+    updated: dict[str, Any] = {}
+    for key, value in body.params.items():
+        if key not in JUDGE_PARAM_BOUNDS:
+            raise HTTPException(400, f"未知裁判参数: {key}")
+        lo, hi = JUDGE_PARAM_BOUNDS[key]
+        v = int(value)
+        if v < lo or v > hi:
+            raise HTTPException(400, f"{key} 须在 {lo}–{hi}")
+        updated[key] = v
+    # bb > sb 一致性校验（若两者有任一被改，需综合校验）
+    def _cur(k: str) -> int:
+        return int(updated.get(k, store.get_setting(k)) or JUDGE_PARAM_DEFAULTS[k])
+    sb = _cur(SETTING_JUDGE_HOLDEM_SB)
+    bb = _cur(SETTING_JUDGE_HOLDEM_BB)
+    if bb <= sb:
+        raise HTTPException(400, f"大盲({bb})必须大于小盲({sb})")
+    for key, v in updated.items():
+        store.set_setting(key, str(v))
+    # 返回最新裁判总览
+    return {"updated": updated, "judges": admin_get_judges(request, _admin)}
 
 
 # ── admin: 赛制模板 CRUD ──────────────────────────────────────
