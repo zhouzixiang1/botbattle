@@ -298,6 +298,13 @@ SETTING_CONTEST_REST = "contest_default_rest_minutes"
 SETTING_CONTEST_TEMPLATES = "contest_templates"
 SETTING_FULL_RR_MAX_N = "full_rr_max_n"
 
+# 裁判规则参数（admin 可调，热生效：下局即用新值；NULL/缺失则用引擎常量兜底）
+SETTING_JUDGE_GOMOKU_SIZE = "judge_gomoku_board_size"       # 五子棋棋盘边长，默认 15
+SETTING_JUDGE_HOLDEM_STACK = "judge_holdem_starting_stack"  # 德州起始筹码，默认 20000
+SETTING_JUDGE_HOLDEM_SB = "judge_holdem_sb"                 # 德州小盲注，默认 50
+SETTING_JUDGE_HOLDEM_BB = "judge_holdem_bb"                 # 德州大盲注，默认 100
+SETTING_JUDGE_HOLDEM_HANDS = "judge_holdem_default_hands"   # 德州挑战默认手数，默认 70
+
 # 闲时自动对局（维护天梯榜）
 SETTING_AUTO_MATCH_ENABLED = "auto_match_enabled"          # "1"|"0"
 SETTING_AUTO_MATCH_INTERVAL_SEC = "auto_match_interval_sec"  # 轮询间隔

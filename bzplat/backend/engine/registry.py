@@ -3,8 +3,15 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from bzplat.backend.engine.game import DEFAULT_HANDS, MatchResult, MatchSession
-from bzplat.backend.engine.gomoku import GomokuSession
+from bzplat.backend.engine.game import (
+    BIG_BLIND,
+    DEFAULT_HANDS,
+    MatchResult,
+    MatchSession,
+    SMALL_BLIND,
+    STARTING_STACK,
+)
+from bzplat.backend.engine.gomoku import BOARD_SIZE, GomokuSession
 from bzplat.backend.engine.pencil import DEFAULT_N, PencilSession
 from bzplat.backend.store.schema import REGISTERED_ENGINES
 
@@ -38,13 +45,30 @@ async def run_session(
     on_event: EventFn | None = None,
     rng=None,
     n_dots: int = DEFAULT_N,
+    board_size: int | None = None,
+    starting_stack: int | None = None,
+    sb: int | None = None,
+    bb: int | None = None,
 ) -> MatchResult:
-    """统一入口：按 game_id 构造 Session 并 run_async(decide)。"""
+    """统一入口：按 game_id 构造 Session 并 run_async(decide)。
+
+    规则参数（board_size / starting_stack / sb / bb）传 None 时由各引擎
+    常量兜底（BOARD_SIZE / STARTING_STACK / SMALL_BLIND / BIG_BLIND）。
+    """
     gid = normalize_game_id(game_id)
     if gid == GAME_GOMOKU:
-        return await GomokuSession(on_event=on_event).run_async(decide)
+        return await GomokuSession(
+            size=board_size or BOARD_SIZE, on_event=on_event
+        ).run_async(decide)
     if gid == GAME_PENCIL:
         return await PencilSession(n_dots=n_dots, on_event=on_event).run_async(decide)
     # holdem（默认）
-    session = MatchSession(num_hands=num_hands, rng=rng, on_event=on_event)
+    session = MatchSession(
+        num_hands=num_hands,
+        starting_stack=starting_stack or STARTING_STACK,
+        sb=sb or SMALL_BLIND,
+        bb=bb or BIG_BLIND,
+        rng=rng,
+        on_event=on_event,
+    )
     return await session.run_async(decide)
