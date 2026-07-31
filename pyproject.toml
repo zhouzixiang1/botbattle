@@ -1,0 +1,38 @@
+[project]
+name = "botzone-platform"
+version = "0.1.0"
+description = "Botzone 风格德州扑克竞赛平台：账号、二进制 Bot 沙箱对战、比赛、排行榜、Wiki"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "botzone-platform" }]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "typer>=0.12",
+    "python-multipart>=0.0.9",
+    "captcha>=0.6",
+    "Pillow>=10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+# CLI 入口
+[project.scripts]
+botzone = "bzplat.backend.cli:app"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["bzplat*"]
+exclude = ["bzplat.frontend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["bzplat/backend/tests", "tests"]
+pythonpath = ["."]

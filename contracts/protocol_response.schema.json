@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BotzonePlatformActResponse",
+  "type": "object",
+  "required": ["a"],
+  "properties": {
+    "a": { "type": "string", "enum": ["f", "c", "k", "r", "all"] },
+    "x": { "type": "integer", "minimum": 1 }
+  }
+}

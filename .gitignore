@@ -1,0 +1,62 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# === 虚拟环境 ===
+venv/
+.venv/
+env/
+
+# === Node / 前端 ===
+node_modules/
+bzplat/frontend/dist/
+bzplat/frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# === 环境变量 / 密钥 ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# === 运行产物 ===
+*.log
+logs/
+records/
+data/
+*.db
+*.db-journal
+*.pid
+bot_uploads/
+.docker-tmp/
+platform-ctl/
+
+# === 工具产物 ===
+.zcode/
+.claude/
+.e2e_botzone.db

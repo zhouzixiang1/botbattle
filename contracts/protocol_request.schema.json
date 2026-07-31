@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BotzonePlatformActRequest",
+  "type": "object",
+  "required": ["v", "t", "h", "H", "id", "mc", "c", "o", "sb", "bb", "to"],
+  "properties": {
+    "v": { "const": 1 },
+    "t": { "const": "act" },
+    "h": { "type": "integer", "minimum": 1 },
+    "H": { "type": "integer", "minimum": 1 },
+    "id": { "type": "integer", "enum": [0, 1] },
+    "d": { "type": "integer", "enum": [0, 1] },
+    "mc": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 51 }, "minItems": 2, "maxItems": 2 },
+    "pc": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 51 } },
+    "hist": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3
+      }
+    },
+    "c": { "type": "integer" },
+    "o": { "type": "integer" },
+    "sb": { "type": "integer" },
+    "bb": { "type": "integer" },
+    "to": { "type": "integer", "minimum": 0 }
+  }
+}

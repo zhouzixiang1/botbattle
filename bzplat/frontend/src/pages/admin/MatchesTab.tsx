@@ -1,0 +1,148 @@
+import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { apiGet, apiJson, errMsg } from '../../api'
+import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
+
+interface Match {
+  id: string
+  bot_a_id: number
+  bot_b_id: number
+  bot_a_name?: string
+  bot_b_name?: string
+  status: string
+  match_type: string
+  hands_played: number
+  total_hands: number
+  earnings_a: number
+  earnings_b: number
+  reason: string
+  created_at: string
+  contest_id: number | null
+}
+
+const STATUSES = ['', 'running', 'pending', 'completed', 'aborted']
+
+export default function MatchesTab() {
+  const [matches, setMatches] = useState<Match[]>([])
+  const [status, setStatus] = useState('aborted')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const params = status ? `?status=${status}&limit=100` : '?limit=100'
+      const d = await apiGet<{ matches: Match[] }>(`/api/matches${params}`)
+      setMatches(d.matches || [])
+    } catch (e) {
+      setError(errMsg(e, '加载失败'))
+    } finally {
+      setLoading(false)
+    }
+  }, [status])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const abort = async (id: string) => {
+    if (!confirm(`确认将对局 ${id} 标记为中止？`)) return
+    setBusyId(id)
+    try {
+      await apiJson(`/api/admin/matches/${id}`, 'PATCH', { status: 'aborted', reason: 'admin-abort' })
+      await load()
+    } catch (e) {
+      setError(errMsg(e, '中止失败'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  if (loading && !matches.length) return <Loading />
+  return (
+    <div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <select
+          value={status}
+          onChange={(e) => setStatus(e.target.value)}
+          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700"
+        >
+          {STATUSES.map((s) => (
+            <option key={s} value={s}>
+              {s === '' ? '全部状态' : s}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-slate-400">共 {matches.length} 局</span>
+        <div className="ml-auto">
+          <RefreshBtn onClick={load} />
+        </div>
+      </div>
+      <ErrorMsg msg={error} />
+
+      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+        <table className="w-full min-w-[52rem] text-left text-sm">
+          <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase text-slate-400">
+            <tr>
+              <th className="px-3 py-2.5">对局 ID</th>
+              <th className="px-3 py-2.5">对阵</th>
+              <th className="px-3 py-2.5">类型</th>
+              <th className="px-3 py-2.5">状态</th>
+              <th className="px-3 py-2.5">手数</th>
+              <th className="px-3 py-2.5">盈亏</th>
+              <th className="px-3 py-2.5">时间</th>
+              <th className="px-3 py-2.5">操作</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {matches.map((m) => (
+              <tr key={m.id} className="hover:bg-slate-50">
+                <td className="px-3 py-2 font-mono text-xs text-slate-400">{m.id.slice(0, 16)}…</td>
+                <td className="px-3 py-2 text-slate-700">
+                  {m.bot_a_name || `#${m.bot_a_id}`} vs {m.bot_b_name || `#${m.bot_b_id}`}
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-500">{m.match_type}</td>
+                <td className="px-3 py-2">
+                  <StatusBadge status={m.status} />
+                </td>
+                <td className="px-3 py-2 font-mono text-xs text-slate-500">
+                  {m.hands_played}/{m.total_hands}
+                </td>
+                <td className="px-3 py-2 font-mono text-xs text-slate-500">
+                  {m.earnings_a}/{m.earnings_b}
+                  {m.reason && m.reason !== 'completed' && (
+                    <div className="text-[10px] text-error-500">{m.reason}</div>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-400">{m.created_at}</td>
+                <td className="px-3 py-2">
+                  <div className="flex gap-1">
+                    <Link
+                      to={`/match/${m.id}`}
+                      className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-brand-600 hover:bg-slate-100"
+                    >
+                      查看
+                    </Link>
+                    {(m.status === 'running' || m.status === 'pending') && (
+                      <button
+                        type="button"
+                        disabled={busyId === m.id}
+                        onClick={() => void abort(m.id)}
+                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-error-500 hover:bg-error-50"
+                      >
+                        中止
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {matches.length === 0 && <EmptyState text="无对局" />}
+      </div>
+    </div>
+  )
+}
