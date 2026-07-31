@@ -841,10 +841,12 @@ JUDGE_GAMES: list[dict[str, Any]] = [
 
 
 def _engine_docstring(rel_path: str) -> str:
-    """读引擎源码首段 docstring（只读展示）。"""
+    """读引擎源码首段 docstring（只读展示）。rel_path 形如 bzplat/backend/engine/gomoku.py。"""
     try:
-        p = Path(__file__).resolve().parents[1] / rel_path.replace("bzplat/backend/", "")
-        text = p.read_text(encoding="utf-8")
+        # api_routes.py 在 bzplat/backend/ 下；剥离前缀后相对该目录定位
+        backend_dir = Path(__file__).resolve().parent
+        rel = rel_path.replace("bzplat/backend/", "", 1)
+        text = (backend_dir / rel).read_text(encoding="utf-8")
     except OSError:
         return ""
     if not text.startswith('"""'):
