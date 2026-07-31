@@ -268,3 +268,90 @@ def test_full_rr_rejects_large_n(store: Store):
             await mgr.start(c["id"])
 
     asyncio.run(run())
+
+
+def test_match_config_hands_dispatched_for_holdem(store: Store):
+    """holdem 比赛：match_config.hands 透传到 challenge。"""
+    users, bots = _mk_bots(store, 2)
+    org = users[0]
+    c = store.create_contest(
+        "hcup", org["id"], game_id="holdem", template_id="holdem_rr",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+        match_config_json=json.dumps({"hands": 20}),
+    )
+    for u, b in zip(users, bots):
+        store.add_contest_entry(c["id"], u["id"], b["id"])
+    # 手工生成一条 pending 配对（等价 _begin_stage 的产物）
+    store.add_contest_pairing(c["id"], bots[0]["id"], bots[1]["id"], status="pending")
+    store.update_contest(c["id"], status="running", current_stage_idx=0)
+
+    seen = {}
+
+    class FakeOrch:
+        async def challenge(self, a, b, owner_user_id, *, hands=70, game_id=None,
+                            n_dots=None, **k):
+            seen["hands"] = hands
+            seen["n_dots"] = n_dots
+            seen["game_id"] = game_id
+            store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
+                               total_hands=hands, match_type="contest", game_id=game_id)
+            return "m1"
+
+    mgr = ContestManager(store, FakeOrch())  # type: ignore
+
+    async def run():
+        await mgr._dispatch_pending(c["id"], 0)
+
+    asyncio.run(run())
+    assert seen["hands"] == 20
+    assert seen["n_dots"] is None
+    assert seen["game_id"] == "holdem"
+
+
+def test_match_config_n_dots_dispatched_for_pencil(store: Store):
+    """pencil 比赛：match_config.n_dots 透传到 challenge。"""
+    users, bots = _mk_bots(store, 2)
+    org = users[0]
+    c = store.create_contest(
+        "pcup", org["id"], game_id="pencil", template_id="pencil_swiss_ko",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin", "scoring": "ccgc_2_1_0"}]),
+        match_config_json=json.dumps({"n_dots": 9}),
+    )
+    for u, b in zip(users, bots):
+        store.add_contest_entry(c["id"], u["id"], b["id"])
+    store.add_contest_pairing(c["id"], bots[0]["id"], bots[1]["id"], status="pending")
+    store.update_contest(c["id"], status="running", current_stage_idx=0)
+
+    seen = {}
+
+    class FakeOrch:
+        async def challenge(self, a, b, owner_user_id, *, hands=70, game_id=None,
+                            n_dots=None, **k):
+            seen["hands"] = hands
+            seen["n_dots"] = n_dots
+            seen["game_id"] = game_id
+            store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
+                               total_hands=hands, match_type="contest", game_id=game_id)
+            return "m1"
+
+    mgr = ContestManager(store, FakeOrch())  # type: ignore
+
+    async def run():
+        await mgr._dispatch_pending(c["id"], 0)
+
+    asyncio.run(run())
+    assert seen["n_dots"] == 9
+    assert seen["game_id"] == "pencil"
+
+
+def test_contest_create_uses_template_match_config(store: Store):
+    """ContestManager.create 从模板取自带 match_config（无显式传入时）。"""
+    from bzplat.backend.contests.manager import ContestManager
+    users, _ = _mk_bots(store, 1)
+    mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
+    c = mgr.create(users[0]["id"], "t", template_id="holdem_swiss_ko")
+    assert c["match_config_json"] == '{"hands": 70}'
+    c2 = mgr.create(users[0]["id"], "t2", template_id="gomoku_group_drr_ko")
+    assert c2["match_config_json"] == "{}"
+    c3 = mgr.create(users[0]["id"], "t3", template_id="pencil_swiss_ko")
+    assert c3["match_config_json"] == '{"n_dots": 11}'

@@ -8,6 +8,22 @@ from typing import Any
 SCORING_POKER = "poker_3_1_0"
 SCORING_CCGC = "ccgc_2_1_0"
 
+# 每款游戏的对局参数（替代德扑专属的 hands_per_match）
+#   holdem: {"hands": 70}      每场手数
+#   gomoku: {}                  单局，无可调参数
+#   pencil: {"n_dots": 11}      点阵边长
+DEFAULT_MATCH_CONFIG: dict[str, dict[str, Any]] = {
+    "holdem": {"hands": 70},
+    "gomoku": {},
+    "pencil": {"n_dots": 11},
+}
+
+
+def default_match_config(game_id: str | None) -> dict[str, Any]:
+    """返回指定游戏的默认 match_config（深拷贝）。"""
+    return copy.deepcopy(DEFAULT_MATCH_CONFIG.get((game_id or "holdem").strip().lower(), {"hands": 70}))
+
+
 DEFAULT_TEMPLATES: dict[str, dict[str, Any]] = {
     "holdem_swiss_ko": {
         "id": "holdem_swiss_ko",
@@ -169,17 +185,64 @@ def resolve_stages(
     stages: list[dict[str, Any]] | None = None,
     *,
     game_id: str | None = None,
+    store=None,
 ) -> tuple[str, str, list[dict[str, Any]]]:
-    """返回 (template_id, game_id, stages)。"""
+    """返回 (template_id, game_id, stages)。
+
+    若提供 store，优先从 contest_templates 表读模板（含 admin 覆盖）；
+    否则回退内存 DEFAULT_TEMPLATES（供无 store 的测试用）。
+    """
     if stages:
         tid = template_id or "custom"
         gid = game_id or "holdem"
         return tid, gid, copy.deepcopy(stages)
     tid = template_id or "holdem_swiss_ko"
-    tpl = get_template(tid)
+    tpl = None
+    if store is not None:
+        row = store.get_contest_template(tid)
+        if row:
+            tpl = {
+                "id": row["id"],
+                "name": row["name"],
+                "game_id": row["game_id"],
+                "stages": row.get("stages") or [],
+                "match_config": row.get("match_config") or {},
+            }
+    if tpl is None:
+        tpl = get_template(tid)
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
     return tid, game_id or tpl["game_id"], copy.deepcopy(tpl["stages"])
+
+
+def resolve_template(
+    template_id: str | None,
+    *,
+    game_id: str | None = None,
+    store=None,
+) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
+    """返回 (template_id, game_id, stages, match_config)。优先读 store 表。"""
+    tid = template_id or "holdem_swiss_ko"
+    tpl = None
+    if store is not None:
+        row = store.get_contest_template(tid)
+        if row:
+            tpl = {
+                "game_id": row["game_id"],
+                "stages": row.get("stages") or [],
+                "match_config": row.get("match_config") or {},
+            }
+    if tpl is None:
+        base = get_template(tid)
+        if base:
+            tpl = {
+                "game_id": base["game_id"],
+                "stages": base["stages"],
+                "match_config": default_match_config(base["game_id"]),
+            }
+    if not tpl:
+        raise ValueError(f"未知模板: {tid}")
+    return tid, game_id or tpl["game_id"], copy.deepcopy(tpl["stages"]), copy.deepcopy(tpl["match_config"])
 
 
 def points_for_result(scoring: str, winner: int | None, side: int) -> float:

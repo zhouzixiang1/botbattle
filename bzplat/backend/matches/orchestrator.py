@@ -72,6 +72,7 @@ class MatchOrchestrator:
         match_type: str = TYPE_CHALLENGE,
         contest_id: int | None = None,
         game_id: str | None = None,
+        n_dots: int | None = None,
     ) -> str:
         if challenger_bot_id == opponent_bot_id:
             raise ValueError("不能与自己对战")
@@ -113,6 +114,7 @@ class MatchOrchestrator:
             total_hands=total_hands,
             match_type=match_type,
             game_id=gid,
+            n_dots=n_dots,
         )
         self.store.upsert_replay(match_id, "[]", "[]")
         task = asyncio.create_task(self._run_match(match_id), name=f"match-{match_id}")
@@ -162,6 +164,7 @@ class MatchOrchestrator:
                     bot_b["binary_path"],
                     game_id=gid,
                     num_hands=int(m["total_hands"]),
+                    n_dots=m.get("n_dots"),
                     on_event=on_event,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)

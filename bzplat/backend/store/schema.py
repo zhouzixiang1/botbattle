@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS contests (
     current_stage_idx       INTEGER NOT NULL DEFAULT 0,
     template_id             TEXT    NOT NULL DEFAULT 'holdem_swiss_ko',
     rest_ends_at            TEXT,
+    match_config_json       TEXT    NOT NULL DEFAULT '{}',
     CONSTRAINT chk_contest_status CHECK (
         status IN ('draft','open','running','rest','finished','cancelled'))
 );
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS matches (
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    n_dots          INTEGER,  -- pencil 点阵边长（仅 pencil 用；NULL=默认 11）
     started_at      TEXT,
     ended_at        TEXT,
     created_at      TEXT    NOT NULL,
@@ -229,6 +231,16 @@ CREATE TABLE IF NOT EXISTS platform_settings (
     updated_at      TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS contest_templates (
+    id              TEXT    PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    match_config    TEXT    NOT NULL DEFAULT '{}',
+    stages_json     TEXT    NOT NULL DEFAULT '[]',
+    is_builtin      INTEGER NOT NULL DEFAULT 0,
+    updated_at      TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bot_versions_bot ON bot_versions(bot_id);
 CREATE INDEX IF NOT EXISTS idx_matches_bot_a ON matches(bot_a_id);
@@ -243,6 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id);
 CREATE INDEX IF NOT EXISTS idx_contest_entries_c ON contest_entries(contest_id);
 CREATE INDEX IF NOT EXISTS idx_contest_pairings_c ON contest_pairings(contest_id);
 CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(contest_id);
+CREATE INDEX IF NOT EXISTS idx_contest_templates_game ON contest_templates(game_id);
 """
 
 # 角色
