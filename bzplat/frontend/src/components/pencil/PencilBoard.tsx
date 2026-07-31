@@ -5,10 +5,17 @@ import {
   type PencilViewModel,
 } from './usePencilState'
 
-export default function PencilBoard({ vm }: { vm: PencilViewModel }) {
+export default function PencilBoard({
+  vm,
+  onMove,
+}: {
+  vm: PencilViewModel
+  onMove?: (x: number, y: number) => void
+}) {
   const size = vm.size
   const cell = Math.min(18, Math.floor(480 / size))
   const boardPx = cell * size
+  const interactive = !!onMove && !vm.matchOver
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-300 bg-gradient-to-br from-slate-50 via-sky-50 to-slate-100 p-4 shadow-soft">
@@ -57,6 +64,15 @@ export default function PencilBoard({ vm }: { vm: PencilViewModel }) {
               const used = v === GRID_EDGE_USED
               const color = used ? (isLast ? '#ea580c' : '#0f172a') : '#cbd5e1'
               const sw = used ? Math.max(2, cell * 0.18) : Math.max(1, cell * 0.08)
+              const clickProps =
+                interactive && !used
+                  ? {
+                      className: 'cursor-pointer',
+                      onClick: () => onMove!(x, y),
+                      stroke: '#94a3b8' as const,
+                      strokeWidth: Math.max(3, cell * 0.25) as number,
+                    }
+                  : {}
               if (horiz) {
                 return (
                   <line
@@ -68,6 +84,7 @@ export default function PencilBoard({ vm }: { vm: PencilViewModel }) {
                     stroke={color}
                     strokeWidth={sw}
                     strokeLinecap="round"
+                    {...clickProps}
                   />
                 )
               }
@@ -81,6 +98,7 @@ export default function PencilBoard({ vm }: { vm: PencilViewModel }) {
                   stroke={color}
                   strokeWidth={sw}
                   strokeLinecap="round"
+                  {...clickProps}
                 />
               )
             }

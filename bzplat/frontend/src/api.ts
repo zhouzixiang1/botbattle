@@ -202,3 +202,11 @@ export function errMsg(e: unknown, fallback = '操作失败'): string {
 export function isUnauthorized(e: unknown): boolean {
   return e instanceof UnauthorizedError || (e instanceof ApiError && e.status === 401)
 }
+
+/** 构造人类对战 WebSocket URL（带 token query 鉴权）。
+ * 同源：根据当前 location 推断 ws/wss + host。 */
+export function playWsUrl(matchId: string): string {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const token = userToken.get() || ''
+  return `${proto}//${location.host}/api/matches/${matchId}/play?token=${encodeURIComponent(token)}`
+}

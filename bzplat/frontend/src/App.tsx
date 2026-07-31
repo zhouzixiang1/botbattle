@@ -14,6 +14,7 @@ import ContestDetail from './pages/ContestDetail'
 import Contests from './pages/Contests'
 import History from './pages/History'
 import Home from './pages/Home'
+import HumanPlay from './pages/HumanPlay'
 import Leaderboard from './pages/Leaderboard'
 import Login from './pages/Login'
 import MatchDetail from './pages/MatchDetail'
@@ -140,6 +141,7 @@ function Shell() {
           <Route path="/leaderboard" element={<Leaderboard />} />
           <Route path="/history" element={<History />} />
           <Route path="/match/:id" element={<MatchDetail />} />
+          <Route path="/play/:id" element={<HumanPlay />} />
           <Route path="/my-bots" element={<MyBots />} />
           <Route path="/wiki" element={<Wiki />} />
           <Route path="/contests" element={<Contests />} />
