@@ -185,17 +185,64 @@ def resolve_stages(
     stages: list[dict[str, Any]] | None = None,
     *,
     game_id: str | None = None,
+    store=None,
 ) -> tuple[str, str, list[dict[str, Any]]]:
-    """返回 (template_id, game_id, stages)。"""
+    """返回 (template_id, game_id, stages)。
+
+    若提供 store，优先从 contest_templates 表读模板（含 admin 覆盖）；
+    否则回退内存 DEFAULT_TEMPLATES（供无 store 的测试用）。
+    """
     if stages:
         tid = template_id or "custom"
         gid = game_id or "holdem"
         return tid, gid, copy.deepcopy(stages)
     tid = template_id or "holdem_swiss_ko"
-    tpl = get_template(tid)
+    tpl = None
+    if store is not None:
+        row = store.get_contest_template(tid)
+        if row:
+            tpl = {
+                "id": row["id"],
+                "name": row["name"],
+                "game_id": row["game_id"],
+                "stages": row.get("stages") or [],
+                "match_config": row.get("match_config") or {},
+            }
+    if tpl is None:
+        tpl = get_template(tid)
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
     return tid, game_id or tpl["game_id"], copy.deepcopy(tpl["stages"])
+
+
+def resolve_template(
+    template_id: str | None,
+    *,
+    game_id: str | None = None,
+    store=None,
+) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
+    """返回 (template_id, game_id, stages, match_config)。优先读 store 表。"""
+    tid = template_id or "holdem_swiss_ko"
+    tpl = None
+    if store is not None:
+        row = store.get_contest_template(tid)
+        if row:
+            tpl = {
+                "game_id": row["game_id"],
+                "stages": row.get("stages") or [],
+                "match_config": row.get("match_config") or {},
+            }
+    if tpl is None:
+        base = get_template(tid)
+        if base:
+            tpl = {
+                "game_id": base["game_id"],
+                "stages": base["stages"],
+                "match_config": default_match_config(base["game_id"]),
+            }
+    if not tpl:
+        raise ValueError(f"未知模板: {tid}")
+    return tid, game_id or tpl["game_id"], copy.deepcopy(tpl["stages"]), copy.deepcopy(tpl["match_config"])
 
 
 def points_for_result(scoring: str, winner: int | None, side: int) -> float:

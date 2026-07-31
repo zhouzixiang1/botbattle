@@ -17,7 +17,8 @@ from bzplat.backend.auth.dependencies import (
 )
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.contests import ContestManager
-from bzplat.backend.contests.templates import list_templates
+from bzplat.backend.contests.stages import estimate_match_count
+from bzplat.backend.contests.validation import validate_stage, validate_template
 from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.limits import (
     ACTION_TIMEOUT_MAX,
@@ -37,7 +38,6 @@ from bzplat.backend.store.schema import (
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     SETTING_AUTO_MATCH_STALE_SEC,
     SETTING_CONTEST_REST,
-    SETTING_CONTEST_TEMPLATES,
     SETTING_MAX_CONCURRENT,
 )
 router = APIRouter()
@@ -237,8 +237,9 @@ class ContestDispatch(BaseModel):
 
 
 @router.get("/api/contests/templates")
-def contest_templates():
-    return {"templates": list_templates()}
+def contest_templates(request: Request, game: str | None = None):
+    # 从 contest_templates 表读（与 admin 同源，含覆盖；修复原读代码默认的不一致）
+    return {"templates": _store(request).list_contest_templates(game_id=game)}
 
 
 @router.get("/api/contests")
@@ -784,29 +785,92 @@ def admin_patch_runtime(
     return {"updated": updated, "runtime": admin_get_runtime(request, _admin)}
 
 
-@router.get("/api/admin/settings/templates")
-def admin_get_templates(request: Request, _admin=Depends(require_admin)):
-    raw = _store(request).get_setting(SETTING_CONTEST_TEMPLATES)
-    if raw:
-        try:
-            return {"templates": json.loads(raw)}
-        except json.JSONDecodeError:
-            pass
-    return {"templates": list_templates()}
+# ── admin: 赛制模板 CRUD ──────────────────────────────────────
+class TemplateBody(BaseModel):
+    id: str
+    name: str
+    game_id: str
+    match_config: dict[str, Any] = {}
+    stages: list[dict[str, Any]]
 
 
-class TemplatesBody(BaseModel):
-    templates: list[dict[str, Any]]
+class TemplatePreviewBody(BaseModel):
+    stages: list[dict[str, Any]]
+    n: int = 8
 
 
-@router.put("/api/admin/settings/templates")
-def admin_put_templates(
-    body: TemplatesBody, request: Request, _admin=Depends(require_admin)
+@router.get("/api/admin/templates")
+def admin_list_templates(
+    request: Request, game: str | None = None, _admin=Depends(require_admin)
 ):
-    _store(request).set_setting(
-        SETTING_CONTEST_TEMPLATES, json.dumps(body.templates, ensure_ascii=False)
+    return {"templates": _store(request).list_contest_templates(game_id=game)}
+
+
+@router.post("/api/admin/templates")
+def admin_create_template(
+    body: TemplateBody, request: Request, _admin=Depends(require_admin)
+):
+    store = _store(request)
+    if store.get_contest_template(body.id) is not None:
+        raise HTTPException(409, f"模板 id 已存在：{body.id}")
+    try:
+        norm = validate_template(body.id, body.name, body.game_id, body.match_config, body.stages)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    t = store.upsert_contest_template(
+        norm["id"], name=norm["name"], game_id=norm["game_id"],
+        match_config=norm["match_config"], stages=norm["stages"], is_builtin=False,
     )
-    return {"templates": body.templates}
+    return {"template": t}
+
+
+@router.put("/api/admin/templates/{tid}")
+def admin_update_template(
+    tid: str, body: TemplateBody, request: Request, _admin=Depends(require_admin)
+):
+    if tid != body.id:
+        raise HTTPException(400, "路径 id 与 body.id 不一致")
+    store = _store(request)
+    existing = store.get_contest_template(tid)
+    if existing is None:
+        raise HTTPException(404, f"模板不存在：{tid}")
+    try:
+        norm = validate_template(body.id, body.name, body.game_id, body.match_config, body.stages)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    t = store.upsert_contest_template(
+        norm["id"], name=norm["name"], game_id=norm["game_id"],
+        match_config=norm["match_config"], stages=norm["stages"],
+        is_builtin=bool(existing.get("is_builtin")),
+    )
+    return {"template": t}
+
+
+@router.delete("/api/admin/templates/{tid}")
+def admin_delete_template(tid: str, request: Request, _admin=Depends(require_admin)):
+    store = _store(request)
+    existing = store.get_contest_template(tid)
+    if existing is None:
+        raise HTTPException(404, f"模板不存在：{tid}")
+    if existing.get("is_builtin"):
+        raise HTTPException(400, "内置模板不可删除")
+    if not store.delete_contest_template(tid):
+        raise HTTPException(400, "删除失败")
+    return {"ok": True}
+
+
+@router.post("/api/admin/templates/preview")
+def admin_preview_template(
+    body: TemplatePreviewBody, request: Request, _admin=Depends(require_admin)
+):
+    """dry-run：给定 stages + 人数 n → 各阶段 / 总场数预估。"""
+    try:
+        norm_stages = [validate_stage(s, i) for i, s in enumerate(body.stages)]
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    n = max(0, int(body.n))
+    per = [estimate_match_count(st, n) for st in norm_stages]
+    return {"per_stage": per, "total": sum(per), "n": n}
 
 
 # ── wiki ──────────────────────────────────────────────────────

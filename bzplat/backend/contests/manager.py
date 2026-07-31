@@ -15,6 +15,7 @@ from bzplat.backend.contests.templates import (
     default_match_config,
     points_for_result,
     resolve_stages,
+    resolve_template,
 )
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.runtime.limits import FULL_RR_MAX_N
@@ -82,12 +83,18 @@ class ContestManager:
         stages: list[dict] | None = None,
         match_config: dict | None = None,
     ) -> dict:
-        tid, gid, stage_list = resolve_stages(
-            template_id, stages, game_id=game_id
-        )
-        # match_config：显式传入优先；否则按 game 取默认
-        if match_config is None:
-            match_config = default_match_config(gid)
+        # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages+match_config
+        if stages:
+            tid = template_id or "custom"
+            gid = (game_id or "holdem").strip().lower()
+            stage_list = stages
+            tpl_mc = default_match_config(gid)
+        else:
+            tid, gid, stage_list, tpl_mc = resolve_template(
+                template_id, game_id=game_id, store=self.store
+            )
+        # match_config 优先级：显式传入 > 模板自带 > game 默认
+        cfg = match_config if match_config is not None else tpl_mc
         return self.store.create_contest(
             title,
             organizer_id,
@@ -98,7 +105,7 @@ class ContestManager:
             template_id=tid,
             stages_json=json.dumps(stage_list, ensure_ascii=False),
             current_stage_idx=0,
-            match_config_json=json.dumps(match_config, ensure_ascii=False),
+            match_config_json=json.dumps(cfg, ensure_ascii=False),
         )
 
     def open_registration(self, contest_id: int) -> dict:
@@ -244,7 +251,9 @@ class ContestManager:
 
         stages = _parse_stages(c)
         if not stages:
-            _, _, stages = resolve_stages(c.get("template_id") or "holdem_swiss_ko")
+            _, _, stages = resolve_stages(
+                c.get("template_id") or "holdem_swiss_ko", store=self.store
+            )
             self.store.update_contest(
                 contest_id, stages_json=json.dumps(stages, ensure_ascii=False)
             )
