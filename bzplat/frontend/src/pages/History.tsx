@@ -79,7 +79,13 @@ export default function History() {
             <li key={m.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-slate-800">
-                  {m.bot_a_display || m.bot_a_name} vs {m.bot_b_display || m.bot_b_name}
+                  <Link to={`/bot/${m.bot_a_id}`} className="hover:text-brand-600">
+                    {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
+                  </Link>{' '}
+                  vs{' '}
+                  <Link to={`/bot/${m.bot_b_id}`} className="hover:text-brand-600">
+                    {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
+                  </Link>
                 </div>
                 <div className="mt-1 text-xs text-slate-400">
                   {gameLabel(m.game_id)} · {m.status} · {m.created_at || ''}

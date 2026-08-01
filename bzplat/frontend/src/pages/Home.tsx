@@ -107,8 +107,13 @@ export default function Home() {
                   })()}
                 </td>
                 <td className="px-4 py-3 text-slate-700">
-                  {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`} vs{' '}
-                  {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
+                  <Link to={`/bot/${m.bot_a_id}`} className="hover:text-brand-600">
+                    {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
+                  </Link>{' '}
+                  vs{' '}
+                  <Link to={`/bot/${m.bot_b_id}`} className="hover:text-brand-600">
+                    {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
+                  </Link>
                 </td>
                 <td className="px-4 py-3">{m.status}</td>
                 <td className="px-4 py-3">

@@ -468,3 +468,22 @@ class MatchOrchestrator:
             matches_played=rb["matches_played"] + 1,
             last_played_at=_now(),
         )
+        # 记录评分历史（段位趋势/曲线用）
+        self.store.add_rating_history(
+            bot_a_id, ra_new.mu, ra_new.phi, ra_new.sigma,
+            ra["matches_played"] + 1,
+        )
+        self.store.add_rating_history(
+            bot_b_id, rb_new.mu, rb_new.phi, rb_new.sigma,
+            rb["matches_played"] + 1,
+        )
+        # 累积对战胜负（pair_stats，规范化为小 id 在前）
+        lo, hi = sorted((bot_a_id, bot_b_id))
+        if bot_a_id == lo:
+            aw, al, dd = wa, la, da
+        else:
+            aw, al, dd = wb, lb, db
+        self.store.upsert_pair_stats(
+            lo, hi, 0.0, None, None, 0,
+            a_wins_delta=aw, a_losses_delta=al, draws_delta=dd,
+        )

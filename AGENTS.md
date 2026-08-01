@@ -50,6 +50,7 @@ contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) →
 matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runner(起Bot进程,按game_id路由)
             人类对战：orchestrator.challenge_human/_run_human_match + runner.run_bot_vs_human
             （人类侧经 _human_turns Future + WebSocket /api/matches/{id}/play 回传落子，独立 _human_sem，不计 Glicko）
+            评分副作用：_apply_ratings 在更新 ratings 时顺带落 rating_history（段位趋势）+ 累积 pair_stats 胜负（Bot 详情对手战绩）
 engine/     裁判：game.py(holdem) gomoku.py pencil.py + 共享基类 result.py + registry.run_session()
 protocol/   行协议：json_protocol.py(holdem) / board_protocol.py(gomoku,pencil)
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits

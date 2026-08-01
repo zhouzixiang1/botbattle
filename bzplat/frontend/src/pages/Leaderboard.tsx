@@ -80,7 +80,9 @@ export default function Leaderboard() {
                 <tr key={r.bot_id} className="bg-white hover:bg-slate-100/60">
                   <td className="px-3 py-2.5 text-slate-500">{i + 1}</td>
                   <td className="px-3 py-2.5 font-medium text-slate-800">
-                    {r.bot_display || r.bot_name || `#${r.bot_id}`}
+                    <Link to={`/bot/${r.bot_id}`} className="hover:text-brand-600">
+                      {r.bot_display || r.bot_name || `#${r.bot_id}`}
+                    </Link>
                   </td>
                   <td className="px-3 py-2.5 text-slate-500">{gameLabel(r.game_id)}</td>
                   <td className="px-3 py-2.5">

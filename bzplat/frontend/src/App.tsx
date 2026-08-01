@@ -18,6 +18,7 @@ import HumanPlay from './pages/HumanPlay'
 import Leaderboard from './pages/Leaderboard'
 import Login from './pages/Login'
 import MatchDetail from './pages/MatchDetail'
+import BotDetail from './pages/BotDetail'
 import MyBots from './pages/MyBots'
 import Register from './pages/Register'
 import ResetPassword from './pages/ResetPassword'
@@ -141,6 +142,7 @@ function Shell() {
           <Route path="/leaderboard" element={<Leaderboard />} />
           <Route path="/history" element={<History />} />
           <Route path="/match/:id" element={<MatchDetail />} />
+          <Route path="/bot/:id" element={<BotDetail />} />
           <Route path="/play/:id" element={<HumanPlay />} />
           <Route path="/my-bots" element={<MyBots />} />
           <Route path="/wiki" element={<Wiki />} />

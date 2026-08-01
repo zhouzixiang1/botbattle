@@ -115,6 +115,49 @@ def get_bot(bot_id: int, request: Request):
     return {"bot": bot}
 
 
+@router.get("/api/bots/{bot_id}/profile")
+def bot_profile(bot_id: int, request: Request):
+    """Bot 详情聚合：bot 信息 + owner + rating + 胜率（公开）。"""
+    store = _store(request)
+    p = store.bot_profile(bot_id)
+    if not p:
+        raise HTTPException(404, "bot 不存在")
+    return {"profile": p}
+
+
+@router.get("/api/bots/{bot_id}/matches")
+def bot_matches(
+    bot_id: int, request: Request, limit: int = 30, offset: int = 0
+):
+    """某 Bot 的对局历史（公开，复用 list_matches(bot_id=)）。"""
+    if not _store(request).get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
+    rows = _store(request).list_matches(
+        bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
+    )
+    return {"matches": rows}
+
+
+@router.get("/api/bots/{bot_id}/opponents")
+def bot_opponents(
+    bot_id: int, request: Request, limit: int = 20
+):
+    """某 Bot 对各对手的战绩（公开，从 pair_stats 读）。"""
+    if not _store(request).get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
+    return {"opponents": _store(request).bot_opponents_stats(bot_id, limit=limit)}
+
+
+@router.get("/api/bots/{bot_id}/rating-history")
+def bot_rating_history(
+    bot_id: int, request: Request, limit: int = 100
+):
+    """某 Bot 的评分变化时序（公开，画曲线/趋势用）。"""
+    if not _store(request).get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
+    return {"history": _store(request).list_rating_history(bot_id, limit=limit)}
+
+
 @router.post("/api/bots")
 async def upload_bot(
     request: Request,
