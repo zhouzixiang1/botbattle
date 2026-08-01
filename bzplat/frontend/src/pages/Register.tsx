@@ -37,8 +37,6 @@ export default function Register() {
     }
   }
 
-  const inputCls = 'mt-1.5'
-
   return (
     <AuthShell title="注册账号" subtitle="创建账号，加入 Bot 竞技">
       <Card className="w-full max-w-md">
@@ -46,19 +44,19 @@ export default function Register() {
           <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="reg-username">用户名</Label>
-              <Input id="reg-username" className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)} required minLength={3} maxLength={32} autoComplete="username" />
+              <Input id="reg-username" value={username} onChange={(e) => setUsername(e.target.value)} required minLength={3} maxLength={32} autoComplete="username" />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="reg-email">邮箱</Label>
-              <Input id="reg-email" type="email" className={inputCls} value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
+              <Input id="reg-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="reg-display">显示名（可选）</Label>
-              <Input id="reg-display" className={inputCls} value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={64} />
+              <Input id="reg-display" value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={64} />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="reg-password">密码（至少 8 位）</Label>
-              <Input id="reg-password" type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+              <Input id="reg-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
             </div>
             <CaptchaField onChange={setCaptcha} />
             {error && <ErrorMsg msg={error} />}
