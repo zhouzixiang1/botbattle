@@ -199,12 +199,14 @@ class AuthManager:
         html = render_template(tpl["body_html"], ctx)
         text = render_template(tpl["body_text"], ctx)
         if self.mailer is None:
+            # 验证码脱敏：只记前 2 位 + ***（避免明文泄漏到日志；完整验证码存 DB outbox 可查）
+            masked = code[:2] + "***" if code else "***"
             logger.warning(
                 "SMTP 未配置，验证码未发信 purpose=%s user=%s email=%s code=%s",
                 purpose,
                 user.get("username"),
                 user.get("email"),
-                code,
+                masked,
             )
             self.store.add_outbox(
                 user["email"], subject, template_key=tpl_key, status="skipped",

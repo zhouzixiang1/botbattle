@@ -16,6 +16,7 @@ from bzplat.backend.auth.dependencies import (
     require_organizer,
     require_user,
 )
+from bzplat.backend.security import audit_log
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.stages import estimate_match_count
@@ -304,7 +305,9 @@ async def upload_bot(
             game_id=game_id,
         )
     except BotError as e:
+        audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
+    audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} size={len(raw)}")
     return {"bot": bot}
 
 
@@ -322,7 +325,9 @@ async def upload_bot_version(
             bot_id, user["id"], raw, upload_note=upload_note
         )
     except BotError as e:
+        audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
+    audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={len(raw)}")
     return {"bot": bot}
 
 
@@ -392,7 +397,9 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             game_id=body.game_id,
         )
     except ValueError as e:
+        audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
+    audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=mid, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
     return {"match_id": mid, "status": "pending"}
 
 
@@ -419,7 +426,9 @@ async def challenge_human(body: HumanChallengeBody, request: Request, user=Depen
             n_dots=body.n_dots,
         )
     except ValueError as e:
+        audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
+    audit_log(request, "match_human", result="ok", user=user.get("username"), target=mid, detail=f"bot={body.bot_id} seat={body.human_seat}")
     return {"match_id": mid, "status": "pending"}
 
 
@@ -859,6 +868,7 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    audit_log(request, "contest_create", result="ok", user=user.get("username"), target=c["id"], detail=body.title)
     return {"contest": c}
 
 
@@ -995,11 +1005,12 @@ def admin_users(request: Request, _admin=Depends(require_admin)):
 
 @router.post("/api/admin/users/{user_id}/role")
 def admin_set_role(
-    user_id: int, role: str, request: Request, _admin=Depends(require_admin)
+    user_id: int, role: str, request: Request, admin=Depends(require_admin)
 ):
     if role not in ("user", "organizer", "admin"):
         raise HTTPException(400, "非法角色")
     u = _store(request).update_user(user_id, role=role)
+    audit_log(request, "admin_set_role", result="ok", user=admin.get("username"), target=user_id, detail=f"role={role}")
     return {"user": u}
 
 
@@ -1036,6 +1047,7 @@ def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admi
         raise HTTPException(400, "不能删除自己")
     if not _store(request).delete_user(user_id):
         raise HTTPException(404, "用户不存在")
+    audit_log(request, "admin_delete_user", result="ok", user=admin.get("username"), target=user_id)
     return {"ok": True}
 
 
@@ -1115,9 +1127,10 @@ def admin_patch_bot(
 
 
 @router.delete("/api/admin/bots/{bot_id}")
-def admin_delete_bot(bot_id: int, request: Request, _admin=Depends(require_admin)):
+def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)):
     if not _store(request).delete_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
+    audit_log(request, "admin_delete_bot", result="ok", user=admin.get("username"), target=bot_id)
     return {"ok": True}
 
 
@@ -1185,9 +1198,10 @@ async def admin_patch_contest(
 
 
 @router.delete("/api/admin/contests/{contest_id}")
-def admin_delete_contest(contest_id: int, request: Request, _admin=Depends(require_admin)):
+def admin_delete_contest(contest_id: int, request: Request, admin=Depends(require_admin)):
     if not _store(request).delete_contest(contest_id):
         raise HTTPException(404, "比赛不存在")
+    audit_log(request, "admin_delete_contest", result="ok", user=admin.get("username"), target=contest_id)
     return {"ok": True}
 
 
@@ -1684,10 +1698,17 @@ def admin_logs(
     level: str | None = None,
     q: str | None = None,
     limit: int = 300,
+    file: str = "app",
     _admin=Depends(require_admin),
 ):
-    """读 logs/app.log 末尾 N 行，按级别/关键字过滤。"""
-    log_path = Path(os.environ.get("BZ_LOG_DIR", "logs")) / "app.log"
+    """读 logs/{app,access,audit}.log 末尾 N 行，按级别/关键字过滤。
+
+    file: app（业务/系统）、access（HTTP 访问，含真实 IP）、audit（安全审计）。
+    """
+    # 白名单：只允许读这三个日志文件，防路径穿越
+    allowed = {"app": "app.log", "access": "access.log", "audit": "audit.log"}
+    fname = allowed.get(file, "app.log")
+    log_path = Path(os.environ.get("BZ_LOG_DIR", "logs")) / fname
     lines: list[str] = []
     if log_path.is_file():
         # 读末尾（最多 ~8000 行，取后 limit 行）

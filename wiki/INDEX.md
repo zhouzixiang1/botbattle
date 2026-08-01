@@ -27,6 +27,7 @@
 | [经验与等级](#/wiki?slug=xp-level) | XP 经验奖励 + Level 升级 + gating |
 | [数据集与站点配置](#/wiki?slug=matchpacks-site) | 对局数据集下载（gzip，等级 gating）+ 站点名/公告配置 |
 | [压测](#/wiki?slug=loadtest) | 大规模系统压测脚本（批量用户 + 全端点覆盖） |
+| [安全与日志](#/wiki?slug=security) | 公网加固：三文件日志、IP 透传、限流、审计 |
 
 > 前端设计系统与组件库文档已迁入甲方交付文档 [`doc/DESIGN.md`](../doc/DESIGN.md) §5 前端架构。
 
