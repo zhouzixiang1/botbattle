@@ -1,36 +1,60 @@
-"""按 game_id 路由对战引擎。
+"""按 game_id 路由对战引擎（转发层，委托 games 注册表）。
 
 全面解耦（PR1）：本模块的 if-chain 已删除，统一委托给 ``bzplat.backend.games``
 注册表。保留本模块仅为向后兼容现存 import（``from bzplat.backend.engine.registry
 import run_session/GAME_*/normalize_game_id/is_registered``）。PR4 会把转发逻辑
 迁到独立的 ``_compat/`` 层。
 
-注意：``run_session`` 仍保留旧的具名参数（num_hands/n_dots/board_size/
-starting_stack/sb/bb）以兼容 runner.py 的调用——这些参数按游戏透传给 spec.session_factory。
+**循环依赖处理**：games/<game>/spec.py 会 import engine.<game>（引擎实现），
+故 engine 包的 __init__ 在加载 engine.game 时会触发本模块；而本模块若在顶部
+import games 就会形成 games→spec→engine→__init__→registry→games 的循环。
+因此本模块对 games 的 import 全部延迟到函数体内（运行时才取，此时 games 包已
+完整加载）。
 """
 from __future__ import annotations
 
 from typing import Any, Callable
 
 from bzplat.backend.engine.result import MatchResult  # noqa: F401  (向后兼容 re-export)
-from bzplat.backend.games import (
-    GAME_GOMOKU,
-    GAME_HOLDEM,
-    GAME_PENCIL,
-    normalize_game_id,
-    registry,
-)
 
 EventFn = Callable[[str, dict[str, Any]], Any]
+
+# GAME_* 常量本应从 games 派生，但为打破循环依赖这里保留字面量（与 games 一致，
+# 由 games 包启动断言 + test_game_registry.test_schema_frozensets_match_registry 保证不漂移）。
+GAME_HOLDEM = "holdem"
+GAME_GOMOKU = "gomoku"
+GAME_PENCIL = "pencil"
+
+
+def _registry():
+    """延迟取 games 注册表单例（避免模块顶部循环 import）。"""
+    from bzplat.backend.games import registry as _reg
+
+    return _reg
+
+
+def normalize_game_id(game_id: str | None) -> str:
+    """旧 normalize_game_id 语义：空值兜底 holdem。"""
+    from bzplat.backend.games import normalize_game_id as _norm
+
+    return _norm(game_id)
 
 
 def is_registered(game_id: str) -> bool:
     """引擎是否已注册（委托注册表）。"""
-    return registry.is_registered(game_id)
+    return _registry().is_registered(game_id)
 
 
-# GAME_LABELS 从注册表派生（取代旧手写字典）——单一真相。
-GAME_LABELS: dict[str, str] = {gid: registry.get(gid).label for gid in registry.all_ids()}
+def _build_game_labels() -> dict[str, str]:
+    reg = _registry()
+    return {gid: reg.get(gid).label for gid in reg.all_ids()}
+
+
+# GAME_LABELS 延迟构建：首次访问时从注册表派生。用 __getattr__ 模块级钩子。
+def __getattr__(name: str):
+    if name == "GAME_LABELS":
+        return _build_game_labels()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def run_session(
@@ -68,4 +92,4 @@ async def run_session(
         params["bb"] = bb
     if rng is not None:
         params["rng"] = rng
-    return await registry.get(gid).run_session(decide, on_event=on_event, **params)
+    return await _registry().get(gid).run_session(decide, on_event=on_event, **params)

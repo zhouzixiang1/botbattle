@@ -564,10 +564,19 @@ def leaderboard(request: Request, limit: int = 50, game_id: str | None = None):
 
 
 @router.get("/api/tiers")
-def tiers():
-    """段位定义（公开，前端镜像校验用）。"""
-    from bzplat.backend.engine.tiers import all_tiers
-    return {"tiers": all_tiers()}
+def tiers(game_id: str | None = None):
+    """段位定义（公开，前端镜像校验用）。
+
+    段位与游戏挂钩（PR2）：传 game_id 返回该游戏的段位曲线；不传则返回 holdem
+    的曲线作为默认（向后兼容旧前端无参调用）。经 games 注册表取 per-game 曲线。
+    """
+    from bzplat.backend.games import registry as _game_registry
+    gid = (game_id or "holdem").strip().lower()
+    try:
+        return {"tiers": _game_registry.all_tiers(gid), "game_id": gid}
+    except KeyError:
+        # 未知 game_id 回退 holdem（保公开端点容错）
+        return {"tiers": _game_registry.all_tiers("holdem"), "game_id": "holdem"}
 
 
 @router.get("/api/levels/info")
@@ -1474,52 +1483,12 @@ def admin_patch_runtime(
 
 # ── admin: 裁判引擎（规则参数热调 + 代码只读） ────────────────────
 # 裁判规则参数存 platform_settings，orchestrator 每局热读，下局即生效。
-JUDGE_PARAM_BOUNDS: dict[str, tuple[int, int]] = {
-    SETTING_JUDGE_GOMOKU_SIZE: (9, 19),
-    SETTING_JUDGE_HOLDEM_STACK: (1000, 1_000_000),
-    SETTING_JUDGE_HOLDEM_SB: (1, 10_000),
-    SETTING_JUDGE_HOLDEM_BB: (2, 20_000),
-    SETTING_JUDGE_HOLDEM_HANDS: (1, 1000),
-}
-# 裁判参数默认值（与各引擎常量对齐）
-JUDGE_PARAM_DEFAULTS: dict[str, int] = {
-    SETTING_JUDGE_GOMOKU_SIZE: 15,
-    SETTING_JUDGE_HOLDEM_STACK: 20000,
-    SETTING_JUDGE_HOLDEM_SB: 50,
-    SETTING_JUDGE_HOLDEM_BB: 100,
-    SETTING_JUDGE_HOLDEM_HANDS: 70,
-}
-# 三款游戏裁判元信息（代码位置 / 规则摘要 / 可调参数 key）
-JUDGE_GAMES: list[dict[str, Any]] = [
-    {
-        "game_id": "holdem",
-        "label": "德州扑克",
-        "code_path": "bzplat/backend/engine/game.py",
-        "summary": "HU NLHE；单局多手；按筹码差判胜。",
-        "params": [
-            {"key": SETTING_JUDGE_HOLDEM_STACK, "label": "起始筹码", "field": "starting_stack"},
-            {"key": SETTING_JUDGE_HOLDEM_SB, "label": "小盲注", "field": "sb"},
-            {"key": SETTING_JUDGE_HOLDEM_BB, "label": "大盲注", "field": "bb"},
-            {"key": SETTING_JUDGE_HOLDEM_HANDS, "label": "挑战默认手数", "field": "default_hands"},
-        ],
-    },
-    {
-        "game_id": "gomoku",
-        "label": "五子棋",
-        "code_path": "bzplat/backend/engine/gomoku.py",
-        "summary": "15×15；黑先；横竖斜连续≥5 即胜；无禁手。",
-        "params": [
-            {"key": SETTING_JUDGE_GOMOKU_SIZE, "label": "棋盘边长", "field": "board_size"},
-        ],
-    },
-    {
-        "game_id": "pencil",
-        "label": "点格棋",
-        "code_path": "bzplat/backend/engine/pencil.py",
-        "summary": "N=11 点阵；红先；占相邻边围格得分并连走；格多者胜。",
-        "params": [],  # n_dots 走 match 列，非全局 setting
-    },
-]
+# PR2：三张表（JUDGE_PARAM_BOUNDS/JUDGE_PARAM_DEFAULTS/JUDGE_GAMES）全部从
+# games 注册表派生——消除第 4 个并行游戏元数据来源，单一真相。
+from bzplat.backend.games import registry as _game_registry
+
+JUDGE_PARAM_DEFAULTS, JUDGE_PARAM_BOUNDS = _game_registry.judge_param_table()
+JUDGE_GAMES: list[dict[str, Any]] = _game_registry.judge_games()
 
 
 def _engine_docstring(rel_path: str) -> str:
