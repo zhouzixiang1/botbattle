@@ -18,6 +18,8 @@ export interface CurrentUser {
   email_verified?: number
   created_at?: string
   last_login_at?: string
+  bio?: string
+  avatar?: string
 }
 
 export const userToken = {

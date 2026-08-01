@@ -22,6 +22,7 @@ import BotDetail from './pages/BotDetail'
 import MyBots from './pages/MyBots'
 import Register from './pages/Register'
 import ResetPassword from './pages/ResetPassword'
+import Search from './pages/Search'
 import UserProfile from './pages/UserProfile'
 import VerifyEmail from './pages/VerifyEmail'
 import Wiki from './pages/Wiki'
@@ -90,6 +91,22 @@ function Shell() {
               </NavLink>
             )}
           </nav>
+          <form
+            action="#/search"
+            className="ml-2 hidden md:block"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const fd = new FormData(e.currentTarget)
+              const q = String(fd.get('q') || '').trim()
+              if (q) location.hash = `#/search?q=${encodeURIComponent(q)}&type=users`
+            }}
+          >
+            <input
+              name="q"
+              placeholder="搜索…"
+              className="w-40 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:w-56 focus:outline-none focus:ring-1 focus:ring-brand-300"
+            />
+          </form>
           <div className="ml-auto flex items-center gap-2">
             {loading ? (
               <span className="text-xs text-slate-400">…</span>
@@ -149,6 +166,7 @@ function Shell() {
           <Route path="/contests" element={<Contests />} />
           <Route path="/contests/:id" element={<ContestDetail />} />
           <Route path="/user/:name" element={<UserProfile />} />
+          <Route path="/search" element={<Search />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/verify-email" element={<VerifyEmail />} />

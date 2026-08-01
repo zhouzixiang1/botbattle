@@ -107,6 +107,49 @@ def search_users(request: Request, q: str | None = None, limit: int = 20):
     return {"users": _store(request).search_users(q or "", limit=max(1, min(limit, 50)))}
 
 
+@router.get("/api/users/{username}/profile")
+def user_profile(username: str, request: Request):
+    """用户主页聚合：公开信息 + 总战绩（公开）。"""
+    p = _store(request).user_profile(username)
+    if not p:
+        raise HTTPException(404, "用户不存在")
+    return {"profile": p}
+
+
+@router.get("/api/users/{username}/bots")
+def user_bots(username: str, request: Request):
+    """某用户的公开 Bot 列表（公开）。"""
+    store = _store(request)
+    u = store.get_user_by_username(username)
+    if not u:
+        raise HTTPException(404, "用户不存在")
+    bots = store.list_bots(owner_id=u["id"], public_only=True)
+    return {"bots": bots}
+
+
+@router.get("/api/search")
+def global_search(
+    request: Request,
+    q: str | None = None,
+    type: str | None = None,
+    limit: int = 20,
+):
+    """全局搜索：type=users|bots|matches（默认 users）。
+
+    bots 按 name/display_name 模糊；matches 按 bot 名模糊；users 沿用前缀搜索。
+    """
+    store = _store(request)
+    ql = (q or "").strip()
+    lim = max(1, min(limit, 50))
+    t = (type or "users").lower()
+    if t == "bots":
+        return {"bots": store.search_bots(ql, limit=lim)}
+    if t == "matches":
+        return {"matches": store.search_matches(ql, limit=lim)}
+    # 默认 users
+    return {"users": store.search_users(ql, limit=lim)}
+
+
 @router.get("/api/bots/{bot_id}")
 def get_bot(bot_id: int, request: Request):
     bot = _bots(request).get(bot_id)

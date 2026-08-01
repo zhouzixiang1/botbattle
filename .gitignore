@@ -53,6 +53,7 @@ data/
 *.db-journal
 *.pid
 bot_uploads/
+avatars/
 .docker-tmp/
 platform-ctl/
 

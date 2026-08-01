@@ -55,7 +55,8 @@ engine/     裁判：game.py(holdem) gomoku.py pencil.py + 共享基类 result.p
 protocol/   行协议：json_protocol.py(holdem) / board_protocol.py(gomoku,pencil)
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits
 store/      SQLite + schema.py(常量唯一来源)
-api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；admin 日志 /api/admin/logs
+api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
+auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
 logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot stderr 捕获），cli serve 接入
 matches/    后台对局：auto_matcher（闲时自动调度，ladder 类型，stale/placement/daily-cap 增强）
 ```
