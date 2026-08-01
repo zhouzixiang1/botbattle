@@ -62,10 +62,7 @@ export default function Wiki() {
   }
 
   return (
-    <PageStub title="Wiki">
-      <p className="mb-4 text-sm text-muted-foreground">
-        协议规范、Bot 开发指南、样例与安全说明。
-      </p>
+    <PageStub title="Wiki" subtitle="协议规范、Bot 开发指南、样例与安全说明">
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
       <div className="grid gap-4 lg:grid-cols-[200px_1fr]">

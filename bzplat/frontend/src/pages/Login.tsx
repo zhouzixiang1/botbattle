@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { LogIn } from 'lucide-react'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
-import PageStub from '@/components/PageStub'
+import AuthShell from '@/components/AuthShell'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -39,8 +39,8 @@ export default function Login() {
   }
 
   return (
-    <PageStub title="登录">
-      <Card className="mx-auto mt-2 max-w-md">
+    <AuthShell title="登录" subtitle="登录后即可上传 Bot、发起挑战与观赛">
+      <Card className="w-full max-w-md">
         <CardContent className="py-6">
           <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">
             {sessionTip && (
@@ -70,6 +70,6 @@ export default function Login() {
           </form>
         </CardContent>
       </Card>
-    </PageStub>
+    </AuthShell>
   )
 }

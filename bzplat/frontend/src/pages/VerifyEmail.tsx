@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { MailCheck, Send } from 'lucide-react'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
-import PageStub from '@/components/PageStub'
+import AuthShell from '@/components/AuthShell'
 import { Card, CardContent } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { Button } from '@/components/ui/button'
@@ -62,9 +62,8 @@ export default function VerifyEmail() {
   }
 
   return (
-    <PageStub title="验证邮箱">
-      <p className="mb-4 text-sm text-muted-foreground">请输入邮件中的 6 位验证码完成邮箱验证。</p>
-      <Card className="mx-auto max-w-md">
+    <AuthShell title="验证邮箱" subtitle="输入邮件中的 6 位验证码完成邮箱验证">
+      <Card className="w-full max-w-md">
         <CardContent className="py-6">
           <form onSubmit={(e) => void onVerify(e)} className="space-y-4">
             <div className="space-y-1.5">
@@ -119,6 +118,6 @@ export default function VerifyEmail() {
           </div>
         </CardContent>
       </Card>
-    </PageStub>
+    </AuthShell>
   )
 }

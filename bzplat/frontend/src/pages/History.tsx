@@ -45,38 +45,43 @@ export default function History() {
   }, [status, gameId])
 
   return (
-    <PageStub title="对局历史">
-      <div className="mb-4 flex flex-wrap gap-4">
-        <label className="flex items-center text-sm text-muted-foreground">
-          状态
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            className={selectCls}
-          >
-            <option value="">全部</option>
-            <option value="pending">pending</option>
-            <option value="running">running</option>
-            <option value="completed">completed</option>
-            <option value="aborted">aborted</option>
-          </select>
-        </label>
-        <label className="flex items-center text-sm text-muted-foreground">
-          游戏
-          <select
-            value={gameId}
-            onChange={(e) => setGameId(e.target.value)}
-            className={selectCls}
-          >
-            <option value="">全部</option>
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+    <PageStub
+      title="对局历史"
+      subtitle="全部对局记录，可按状态与游戏筛选"
+      actions={
+        <div className="flex flex-wrap gap-4">
+          <label className="flex items-center text-sm text-muted-foreground">
+            状态
+            <select
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              className={selectCls}
+            >
+              <option value="">全部</option>
+              <option value="pending">pending</option>
+              <option value="running">running</option>
+              <option value="completed">completed</option>
+              <option value="aborted">aborted</option>
+            </select>
+          </label>
+          <label className="flex items-center text-sm text-muted-foreground">
+            游戏
+            <select
+              value={gameId}
+              onChange={(e) => setGameId(e.target.value)}
+              className={selectCls}
+            >
+              <option value="">全部</option>
+              {GAMES.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      }
+    >
       {error && <ErrorMsg msg={error} className="mb-3" />}
       <Card className="gap-0 py-0">
         {matches.length === 0 ? (

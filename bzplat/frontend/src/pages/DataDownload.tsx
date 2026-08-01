@@ -38,11 +38,7 @@ export default function DataDownload() {
   const gated = level < 1
 
   return (
-    <PageStub title="对局数据集">
-      <p className="mb-4 text-sm text-muted-foreground">
-        下载已完成对局的数据集（按游戏 × 月份打包，gzip 压缩，每行一条 JSON 对局）。
-        可用于 AI 训练、对局复盘与数据分析。
-      </p>
+    <PageStub title="对局数据集" subtitle="按游戏 × 月份打包（gzip 压缩，每行一条 JSON 对局），可用于 AI 训练、复盘与数据分析">
       {gated && (
         <div className="mb-4 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning-foreground">
           <AlertTriangle className="mt-0.5 size-4 shrink-0" />

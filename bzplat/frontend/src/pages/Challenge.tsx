@@ -5,6 +5,7 @@ import PageStub from '@/components/PageStub'
 import OpponentPickerModal, { type PickBot } from '@/components/OpponentPickerModal'
 import { useAuth } from '@/components/useAuth'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ErrorMsg } from '@/components/ui/status'
@@ -91,14 +92,18 @@ export default function Challenge() {
 
   if (!isLoggedIn) {
     return (
-      <PageStub title="发起挑战">
-        <p>
-          请先{' '}
-          <Link to="/login" className="font-medium text-primary hover:underline">
-            登录
-          </Link>{' '}
-          后选择己方 Bot 发起挑战。
-        </p>
+      <PageStub title="发起挑战" subtitle="选择游戏与你的 Bot，再选对手（搜索/自博弈/人类亲自上场）">
+        <Card className="mx-auto max-w-lg">
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              请先{' '}
+              <Link to="/login" className="font-medium text-primary hover:underline">
+                登录
+              </Link>{' '}
+              后选择己方 Bot 发起挑战。
+            </p>
+          </CardContent>
+        </Card>
       </PageStub>
     )
   }
@@ -107,42 +112,44 @@ export default function Challenge() {
     'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
 
   return (
-    <PageStub title="发起挑战">
-      <p className="mb-4 text-sm text-muted-foreground">
-        选择游戏与你的 Bot，再选对手（搜索/自博弈/人类亲自上场）。
-      </p>
-      <form onSubmit={(e) => void onSubmit(e)} className="mx-auto max-w-lg space-y-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="challenge-game">游戏</Label>
-          <select
-            id="challenge-game"
-            value={gameId}
-            onChange={(e) => setGameId(e.target.value as GameId)}
-            className={selectCls}
-          >
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>{g.label}</option>
-            ))}
-          </select>
-        </div>
+    <PageStub title="发起挑战" subtitle="选择游戏与你的 Bot，再选对手（搜索/自博弈/人类亲自上场）">
+      <form onSubmit={(e) => void onSubmit(e)} className="mx-auto max-w-2xl">
+        <Card>
+          <CardContent className="space-y-4">
+            {/* 游戏 + 己方 Bot：桌面端双栏，移动端单列 */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="challenge-game">游戏</Label>
+                <select
+                  id="challenge-game"
+                  value={gameId}
+                  onChange={(e) => setGameId(e.target.value as GameId)}
+                  className={selectCls}
+                >
+                  {GAMES.map((g) => (
+                    <option key={g.id} value={g.id}>{g.label}</option>
+                  ))}
+                </select>
+              </div>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="challenge-mybot">你的 Bot（{gameLabel(gameId)}）</Label>
-          <select
-            id="challenge-mybot"
-            value={myBotId}
-            onChange={(e) => setMyBotId(e.target.value)}
-            required
-            className={selectCls}
-          >
-            <option value="">选择…</option>
-            {mine.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.display_name || b.name} ({b.format}/{b.os}-{b.arch})
-              </option>
-            ))}
-          </select>
-        </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="challenge-mybot">你的 Bot（{gameLabel(gameId)}）</Label>
+                <select
+                  id="challenge-mybot"
+                  value={myBotId}
+                  onChange={(e) => setMyBotId(e.target.value)}
+                  required
+                  className={selectCls}
+                >
+                  <option value="">选择…</option>
+                  {mine.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.display_name || b.name} ({b.format}/{b.os}-{b.arch})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
         {/* 对手模式切换 */}
         <div className="rounded-lg border border-border p-3">
@@ -243,6 +250,8 @@ export default function Challenge() {
           <Play className="size-4" />
           {busy ? '发起中…' : humanMode ? '开始人类对战' : '开始对局'}
         </Button>
+          </CardContent>
+        </Card>
       </form>
 
       {pickerOpen && (

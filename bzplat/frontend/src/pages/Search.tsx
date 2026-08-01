@@ -96,7 +96,7 @@ export default function Search() {
   }
 
   return (
-    <PageStub title="搜索">
+    <PageStub title="搜索" subtitle="查找用户、Bot 或对局">
       {/* 搜索框 */}
       <form onSubmit={submit} className="mb-4 flex gap-2">
         <div className="relative min-w-0 flex-1">
