@@ -1,11 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import MatchBoard from '../components/MatchBoard'
-import { type RawEvent } from '../components/poker/useMatchState'
-import { apiGet, errMsg } from '../api'
-import { gameLabel, normalizeGameId } from '../lib/games'
-import Comments from '../components/Comments'
+import {
+  Play,
+  Pause,
+  SkipBack,
+  SkipForward,
+  ChevronLeft,
+  ChevronRight,
+  Radio,
+  ArrowLeft,
+} from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import MatchBoard from '@/components/MatchBoard'
+import { type RawEvent } from '@/components/poker/useMatchState'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Slider } from '@/components/ui/slider'
+import { ErrorMsg, Loading } from '@/components/ui/status'
+import { apiGet, errMsg } from '@/api'
+import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
+import Comments from '@/components/Comments'
 
 const SPEEDS = [
   { label: '0.5x', ms: 1400 },
@@ -24,7 +39,7 @@ function handBoundaries(events: RawEvent[]): number[] {
   events.forEach((ev, i) => {
     if (ev.type === 'hand_start') bounds.push(i)
   })
-  if (events.length) bounds.push(events.length) // 末尾哨兵
+  if (events.length) bounds.push(events.length)
   return bounds
 }
 
@@ -52,7 +67,7 @@ export default function MatchDetail() {
   } | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  const [stepIdx, setStepIdx] = useState(-1) // -1 = 末尾（最新）
+  const [stepIdx, setStepIdx] = useState(-1)
   const [playing, setPlaying] = useState(false)
   const [speedIdx, setSpeedIdx] = useState(1)
 
@@ -81,7 +96,6 @@ export default function MatchDetail() {
   const bounds = useMemo(() => handBoundaries(events), [events])
   const winners = useMemo(() => handWinners(events), [events])
   const total = events.length
-  // 真实显示到第几步（-1 表示全部/最新）
   const cur = stepIdx < 0 ? total - 1 : Math.min(stepIdx, total - 1)
   const visible = cur >= 0 ? events.slice(0, cur + 1) : []
   const gameId = normalizeGameId(
@@ -89,7 +103,6 @@ export default function MatchDetail() {
   )
   const isBoard = gameId === 'gomoku' || gameId === 'pencil'
 
-  // 自动播放
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!playing || total === 0) return
@@ -108,13 +121,11 @@ export default function MatchDetail() {
     }
   }, [playing, cur, total, speedIdx])
 
-  // 数据到达后默认定位到末尾
   useEffect(() => {
     if (total > 0 && stepIdx === -1) setStepIdx(total - 1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [total])
 
-  // 手动操作时暂停
   const pause = () => setPlaying(false)
 
   const jumpHand = (delta: number) => {
@@ -136,7 +147,6 @@ export default function MatchDetail() {
     setStepIdx(bounds[hIdx] ?? 0)
   }
 
-  // 动作列表自动滚动到当前行（仅滚动列表容器内部，不影响外层页面位置）
   const actionListRef = useRef<HTMLDivElement>(null)
   const curActionRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -153,60 +163,69 @@ export default function MatchDetail() {
 
   const match = data?.match
   const isLive = match?.status === 'running' || match?.status === 'pending'
-  // 当前手号（用于导航器高亮）
   const curHandIdx = (() => {
     for (let i = 0; i < bounds.length - 1; i++) {
       if (cur >= bounds[i] && cur < bounds[i + 1]) return i
     }
     return bounds.length >= 2 ? bounds.length - 2 : 0
   })()
+  const GameIcon = gameIcon(gameId)
 
   return (
     <PageStub title="对局详情">
-      <p className="font-mono text-xs text-slate-500">{id}</p>
-      {error && <p className="mt-4 text-sm text-error-500">{error}</p>}
+      <p className="font-mono text-xs text-muted-foreground">{id}</p>
+      {error && <ErrorMsg msg={error} className="mt-4" />}
 
       {match && (
-        <div className="mt-4 grid gap-2 card p-4 text-sm text-slate-600 sm:grid-cols-3">
-          <div>游戏：{gameLabel(gameId)}</div>
-          <div>状态：{String(match.status)}</div>
-          <div>
-            {isBoard ? '步数' : '手数'}：{String(match.hands_played)}
-            {!isBoard ? `/${String(match.total_hands)}` : ''}
-          </div>
-          <div>类型：{String(match.match_type)}</div>
-          <div>{isBoard ? 'A 分差/得分' : 'A 净筹码'}：{String(match.earnings_a)}</div>
-          <div>{isBoard ? 'B 分差/得分' : 'B 净筹码'}：{String(match.earnings_b)}</div>
-          <div>
-            胜者：{match.winner == null ? '—' : `座位 ${String(match.winner)}`}
-          </div>
-          {isLive && (
-            <Link className="text-brand-600 hover:underline" to={`/watch/${id}`}>
-              实时观赛 →
-            </Link>
-          )}
-        </div>
+        <Card className="mt-4">
+          <CardContent className="grid gap-2 py-4 text-sm sm:grid-cols-3">
+            <div className="flex items-center gap-1.5">
+              <GameIcon className="size-4 text-muted-foreground" />
+              <span className="text-muted-foreground">游戏：</span>
+              <span className="font-medium text-foreground">{gameLabel(gameId)}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">状态：</span>
+              <Badge variant={match.status === 'completed' ? 'default' : match.status === 'aborted' ? 'destructive' : 'secondary'} className="ml-1 text-[10px]">
+                {String(match.status)}
+              </Badge>
+            </div>
+            <div className="text-muted-foreground">
+              {isBoard ? '步数' : '手数'}：<span className="font-mono text-foreground">{String(match.hands_played)}</span>
+              {!isBoard && <span className="text-muted-foreground">/{String(match.total_hands)}</span>}
+            </div>
+            <div className="text-muted-foreground">类型：<span className="text-foreground">{String(match.match_type)}</span></div>
+            <div className="text-muted-foreground">{isBoard ? 'A 得分' : 'A 净筹码'}：<span className="font-mono text-foreground">{String(match.earnings_a)}</span></div>
+            <div className="text-muted-foreground">{isBoard ? 'B 得分' : 'B 净筹码'}：<span className="font-mono text-foreground">{String(match.earnings_b)}</span></div>
+            <div className="text-muted-foreground">胜者：<span className="text-foreground">{match.winner == null ? '—' : `座位 ${String(match.winner)}`}</span></div>
+            {isLive && (
+              <Button asChild variant="default" size="sm" className="gap-1.5 sm:self-end">
+                <Link to={`/watch/${id}`}><Radio className="size-3.5" />实时观赛</Link>
+              </Button>
+            )}
+          </CardContent>
+        </Card>
       )}
 
-      {/* 扑克桌 */}
+      {/* 棋盘/牌桌 */}
       <div className="mt-6">
         {loading ? (
-          <p className="py-12 text-center text-sm text-slate-400">加载回放…</p>
+          <Loading text="加载回放…" />
         ) : visible.length === 0 ? (
-          <p className="py-12 text-center text-sm text-slate-500">
-            {isLive ? (
-              <>
-                对局进行中，暂无完整回放。{' '}
-                <Link to={`/watch/${id}`} className="text-brand-600 hover:underline">
-                  去观赛 →
-                </Link>
-              </>
-            ) : events.length === 0 ? (
-              '暂无回放数据'
-            ) : (
-              ''
-            )}
-          </p>
+          <Card>
+            <CardContent className="py-12 text-center text-sm text-muted-foreground">
+              {isLive ? (
+                <>
+                  对局进行中，暂无完整回放。{' '}
+                  <Link to={`/watch/${id}`} className="font-medium text-primary hover:underline">去观赛</Link>
+                </>
+              ) : events.length === 0 ? (
+                '暂无回放数据'
+              ) : (
+                ''
+              )}
+            </CardContent>
+          </Card>
         ) : (
           <MatchBoard gameId={gameId} events={visible} revealMode="all" />
         )}
@@ -215,8 +234,8 @@ export default function MatchDetail() {
       {/* 手导航器（扑克） */}
       {!isBoard && bounds.length >= 2 && (
         <div className="mx-auto mt-4 w-full max-w-2xl">
-          <div className="mb-1 text-[10px] text-slate-400">手导航（点击跳转）</div>
-          <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-2">
+          <div className="mb-1 text-[10px] text-muted-foreground">手导航（点击跳转）</div>
+          <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-card p-2">
             {Array.from({ length: bounds.length - 1 }, (_, h) => {
               const ws = winners[h]
               const isCur = h === curHandIdx
@@ -226,16 +245,15 @@ export default function MatchDetail() {
                   type="button"
                   onClick={() => jumpToHand(h)}
                   title={`第 ${h + 1} 手${ws ? `：胜者座位 ${ws.join('/')}` : ''}`}
-                  className={`relative h-7 w-7 rounded text-[10px] font-medium transition ${
+                  className={`relative size-7 rounded text-[10px] font-medium transition ${
                     isCur
-                      ? 'bg-brand-600 text-white'
-                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-muted-foreground hover:bg-accent'
                   }`}
                 >
                   {h + 1}
-                  {/* 赢家绿点指示 */}
                   {ws && !isCur && (
-                    <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-success-500" />
+                    <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-success" />
                   )}
                 </button>
               )
@@ -246,123 +264,89 @@ export default function MatchDetail() {
 
       {/* 回放控制条 */}
       {total > 0 && (
-        <div className="mx-auto mt-3 w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-3">
-          <div className="flex flex-wrap items-center justify-center gap-2">
-            {!isBoard && (
-              <button
-                type="button"
-                onClick={() => jumpHand(-1)}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
+        <Card className="mx-auto mt-3 w-full max-w-2xl">
+          <CardContent className="py-3">
+            <div className="flex flex-wrap items-center justify-center gap-1.5">
+              {!isBoard && (
+                <Button variant="outline" size="sm" onClick={() => jumpHand(-1)} className="gap-1">
+                  <SkipBack className="size-3.5" />上一手
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => { pause(); setStepIdx((s) => Math.max(0, (s < 0 ? total - 1 : s) - 1)) }} className="gap-1">
+                <ChevronLeft className="size-4" />上一步
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => { if (cur >= total - 1) setStepIdx(0); setPlaying((p) => !p) }}
+                className="gap-1.5"
               >
-                ⏮ 上一手
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                pause()
-                setStepIdx((s) => Math.max(0, (s < 0 ? total - 1 : s) - 1))
-              }}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-            >
-              ◀ 上一步
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (cur >= total - 1) {
-                  setStepIdx(0)
-                }
-                setPlaying((p) => !p)
-              }}
-              className="rounded-lg bg-brand-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-brand-500"
-            >
-              {playing ? '❚❚ 暂停' : '▶ 播放'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                pause()
-                setStepIdx((s) => Math.min(total - 1, (s < 0 ? total - 1 : s) + 1))
-              }}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-            >
-              下一步 ▶
-            </button>
-            {!isBoard && (
-              <button
-                type="button"
-                onClick={() => jumpHand(1)}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
+                {playing ? <><Pause className="size-4" />暂停</> : <><Play className="size-4" />播放</>}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => { pause(); setStepIdx((s) => Math.min(total - 1, (s < 0 ? total - 1 : s) + 1)) }} className="gap-1">
+                下一步<ChevronRight className="size-4" />
+              </Button>
+              {!isBoard && (
+                <Button variant="outline" size="sm" onClick={() => jumpHand(1)} className="gap-1">
+                  下一手<SkipForward className="size-3.5" />
+                </Button>
+              )}
+              <select
+                value={speedIdx}
+                onChange={(e) => setSpeedIdx(Number(e.target.value))}
+                className="h-8 rounded-lg border border-input bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               >
-                下一手 ⏭
-              </button>
-            )}
-            <select
-              value={speedIdx}
-              onChange={(e) => setSpeedIdx(Number(e.target.value))}
-              className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-700"
-            >
-              {SPEEDS.map((s, i) => (
-                <option key={i} value={i}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          {/* 进度条 */}
-          <div className="mt-3 flex items-center gap-2">
-            <span className="text-[10px] text-slate-500">
-              步 {cur + 1}/{total}
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(0, total - 1)}
-              value={cur}
-              onChange={(e) => {
-                pause()
-                setStepIdx(Number(e.target.value))
-              }}
-              className="flex-1 accent-brand-500"
-            />
-          </div>
-        </div>
+                {SPEEDS.map((s, i) => (
+                  <option key={i} value={i}>{s.label}</option>
+                ))}
+              </select>
+            </div>
+            {/* 进度条 */}
+            <div className="mt-3 flex items-center gap-3">
+              <span className="font-mono text-[10px] text-muted-foreground">步 {cur + 1}/{total}</span>
+              <Slider
+                min={0}
+                max={Math.max(0, total - 1)}
+                value={[cur]}
+                onValueChange={(v) => { pause(); setStepIdx(v[0]) }}
+                className="flex-1"
+              />
+            </div>
+          </CardContent>
+        </Card>
       )}
 
-      {/* 动作列表（自动滚动 + 高亮当前） */}
+      {/* 动作列表 */}
       {visible.length > 0 && (
         <div className="mx-auto mt-4 w-full max-w-2xl">
-          <div className="mb-1 text-[10px] text-slate-400">动作时序</div>
-          <div ref={actionListRef} className="max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-2 text-xs">
+          <div className="mb-1 text-[10px] text-muted-foreground">动作时序</div>
+          <div ref={actionListRef} className="max-h-64 overflow-y-auto rounded-lg border border-border bg-card p-2 text-xs">
             {visible.map((ev, i) => (
               <div
                 key={i}
                 ref={i === cur ? curActionRef : undefined}
                 className={`flex items-center gap-2 rounded px-2 py-1 ${
-                  i === cur ? 'bg-brand-50 font-medium text-brand-700' : 'text-slate-600'
+                  i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'
                 }`}
               >
-                <span className="w-8 font-mono text-slate-400">{i + 1}</span>
-                <span className="w-14 text-slate-500">{ev.type}</span>
-                <span className="flex-1 truncate text-slate-500">
+                <span className="w-8 font-mono opacity-60">{i + 1}</span>
+                <span className="w-14 opacity-70">{ev.type}</span>
+                <span className="flex-1 truncate opacity-80">
                   {ev.type === 'action'
                     ? `座位 ${ev.player} · ${ACTION_LABEL[String(ev.action)] ?? ev.action}${
                         ev.amount ? ' ' + String(ev.amount) : ''
                       }`
                     : ev.type === 'move'
-                      ? `座位 ${ev.player} · (${ev.x},${ev.y})${
-                          ev.scored ? ' · 得分连走' : ''
-                        }`
-                    : ev.type === 'settle'
-                      ? `赢家 座位 ${(ev.winners as number[] | undefined)?.join('/') ?? '?'} · 底池 ${ev.pot}`
-                      : ev.type === 'hand_start'
-                        ? `第 ${(Number(ev.hand) || 0) + 1} 手开始`
-                        : ev.type === 'deal_board'
-                          ? `${ev.street}：${(ev.dealt as string[] | undefined)?.join(' ')}`
-                          : ev.type === 'match_end'
-                            ? `结束 · 胜者 ${ev.winner ?? '平'} · ${ev.reason || ''}`
-                            : JSON.stringify(ev).slice(0, 60)}
+                      ? `座位 ${ev.player} · (${ev.x},${ev.y})${ev.scored ? ' · 得分连走' : ''}`
+                      : ev.type === 'settle'
+                        ? `赢家 座位 ${(ev.winners as number[] | undefined)?.join('/') ?? '?'} · 底池 ${ev.pot}`
+                        : ev.type === 'hand_start'
+                          ? `第 ${(Number(ev.hand) || 0) + 1} 手开始`
+                          : ev.type === 'deal_board'
+                            ? `${ev.street}：${(ev.dealt as string[] | undefined)?.join(' ')}`
+                            : ev.type === 'match_end'
+                              ? `结束 · 胜者 ${ev.winner ?? '平'} · ${ev.reason || ''}`
+                              : JSON.stringify(ev).slice(0, 60)}
                 </span>
               </div>
             ))}
@@ -370,9 +354,9 @@ export default function MatchDetail() {
         </div>
       )}
 
-      <Link to="/" className="mt-6 inline-block text-sm text-brand-600 hover:text-brand-700">
-        ← 返回
-      </Link>
+      <Button asChild variant="ghost" size="sm" className="mt-6 gap-1.5">
+        <Link to="/"><ArrowLeft className="size-4" />返回</Link>
+      </Button>
 
       {id && <Comments targetType="match" targetId={id} />}
     </PageStub>
