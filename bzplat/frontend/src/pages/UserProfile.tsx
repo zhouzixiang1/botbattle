@@ -1,9 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { useAuth } from '../components/useAuth'
-import { apiGet, apiJson, errMsg } from '../api'
-import { gameLabel } from '../lib/games'
+import { UserPlus, UserCheck, Pencil, Bot as BotIcon, ArrowLeft } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { Card, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { MetricCard } from '@/components/ui/metric-card'
+import { useAuth } from '@/components/useAuth'
+import { apiGet, apiJson, errMsg } from '@/api'
+import { gameLabel, gameIcon } from '@/lib/games'
 
 interface UserProfileData {
   id: number
@@ -61,7 +68,6 @@ export default function UserProfile() {
       .then(([p, b]) => {
         setProfile(p.profile)
         setBots(b.bots || [])
-        // 关注状态（登录后）
         if (user && user.username !== name) {
           apiGet<{ following: boolean; follower_count: number; following_count: number }>(
             `/api/users/${p.profile.id}/follow-status`,
@@ -92,17 +98,17 @@ export default function UserProfile() {
   if (loading) {
     return (
       <PageStub title="用户资料">
-        <p className="py-8 text-center text-sm text-slate-400">加载中…</p>
+        <Loading />
       </PageStub>
     )
   }
   if (error || !profile) {
     return (
       <PageStub title="用户资料">
-        <p className="mb-3 text-sm text-error-500">{error || '用户不存在或已停用'}</p>
-        <Link to="/leaderboard" className="text-sm text-brand-600 hover:text-brand-700">
-          ← 返回排行榜
-        </Link>
+        <ErrorMsg msg={error || '用户不存在或已停用'} className="mb-3" />
+        <Button asChild variant="ghost" size="sm">
+          <Link to="/leaderboard"><ArrowLeft className="size-4" /> 返回排行榜</Link>
+        </Button>
       </PageStub>
     )
   }
@@ -116,136 +122,118 @@ export default function UserProfile() {
   return (
     <PageStub title={displayName}>
       {/* 顶部信息卡 */}
-      <div className="card mb-5 p-5">
-        <div className="flex flex-wrap items-start gap-4">
-          <div className="h-20 w-20 shrink-0 overflow-hidden rounded-full border border-slate-200 bg-slate-100">
-            {avatarUrl ? (
-              <img src={avatarUrl} alt={displayName} className="h-full w-full object-cover" />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center text-2xl font-bold text-slate-400">
+      <Card className="mb-5">
+        <CardContent className="py-5">
+          <div className="flex flex-wrap items-start gap-4">
+            <Avatar className="size-20 border border-border">
+              {avatarUrl && <AvatarImage src={avatarUrl} alt={displayName} />}
+              <AvatarFallback className="bg-muted text-2xl font-bold text-muted-foreground">
                 {displayName.charAt(0).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-xl font-bold text-foreground">{displayName}</h2>
+                {profile.role !== 'user' && (
+                  <Badge variant={profile.role === 'admin' ? 'destructive' : 'secondary'}>
+                    {profile.role === 'admin' ? '管理员' : '组织者'}
+                  </Badge>
+                )}
+                {(profile.level ?? 0) > 0 && (
+                  <Badge variant="outline" className="gap-1 border-amber-500/40 text-amber-600 dark:text-amber-400">
+                    Lv.{profile.level}
+                  </Badge>
+                )}
               </div>
-            )}
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="text-xl font-bold text-slate-900">{displayName}</h2>
-            <p className="text-sm text-slate-500">@{profile.username}</p>
-            {profile.role !== 'user' && (
-              <span className="mt-1 inline-block rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">
-                {profile.role === 'admin' ? '管理员' : '组织者'}
-              </span>
-            )}
-            {(profile.level ?? 0) > 0 && (
-              <span className="mt-1 ml-1 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
-                Lv.{profile.level}
-              </span>
-            )}
-            {(profile.xp ?? 0) > 0 && (
-              <div className="mt-2 max-w-xs">
-                <div className="flex items-center justify-between text-[10px] text-slate-400">
-                  <span>经验 {profile.xp}</span>
-                  <span>Lv.{profile.level ?? 0}</span>
-                </div>
-                <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
-                  <div
-                    className="h-full rounded-full bg-amber-400"
-                    style={{
-                      width: `${Math.min(100, ((profile.xp ?? 0) % 100) + (((profile.xp ?? 0) % 100) === 0 && (profile.xp ?? 0) > 0 ? 100 : 0))}%`,
-                    }}
-                  />
-                </div>
+              <p className="text-sm text-muted-foreground">@{profile.username}</p>
+              {profile.bio && <p className="text-sm text-foreground/80">{profile.bio}</p>}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-xs text-muted-foreground">
+                <span>注册于 {profile.created_at?.slice(0, 10)}</span>
+                {totalGames > 0 && <span>· 参与 {totalGames} 场对局</span>}
+                {user && !isSelf && (
+                  <>
+                    <span>· 关注 {followingCount}</span>
+                    <span>· 粉丝 {followerCount}</span>
+                  </>
+                )}
               </div>
-            )}
-            {profile.bio && <p className="mt-2 text-sm text-slate-600">{profile.bio}</p>}
-            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
-              <span>注册于 {profile.created_at?.slice(0, 10)}</span>
-              {totalGames > 0 && <span>· 参与 {totalGames} 场对局</span>}
-              {user && !isSelf && (
-                <>
-                  <span>· 关注 {followingCount}</span>
-                  <span>· 粉丝 {followerCount}</span>
-                </>
+              {(profile.xp ?? 0) > 0 && (
+                <div className="max-w-xs pt-1">
+                  <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                    <span>经验 {profile.xp}</span>
+                    <span>Lv.{profile.level ?? 0}</span>
+                  </div>
+                  <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary"
+                      style={{ width: `${Math.min(100, ((profile.xp ?? 0) % 100) + (((profile.xp ?? 0) % 100) === 0 && (profile.xp ?? 0) > 0 ? 100 : 0))}%` }}
+                    />
+                  </div>
+                </div>
               )}
             </div>
+
+            {!isSelf && user && (
+              <Button
+                type="button"
+                variant={following ? 'outline' : 'default'}
+                size="sm"
+                onClick={toggleFollow}
+                className="gap-1.5"
+              >
+                {following ? <UserCheck className="size-3.5" /> : <UserPlus className="size-3.5" />}
+                {following ? '已关注' : '关注'}
+              </Button>
+            )}
+            {isSelf && (
+              <Button asChild variant="outline" size="sm" className="gap-1.5">
+                <Link to="/settings"><Pencil className="size-3.5" />编辑资料</Link>
+              </Button>
+            )}
           </div>
 
-          {!isSelf && user && (
-            <button
-              type="button"
-              onClick={toggleFollow}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
-                following
-                  ? 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
-                  : 'bg-brand-600 text-white hover:bg-brand-500'
-              }`}
-            >
-              {following ? '已关注' : '+ 关注'}
-            </button>
-          )}
-          {isSelf && (
-            <Link
-              to="/settings"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
-            >
-              编辑资料
-            </Link>
-          )}
-        </div>
-
-        {/* 总战绩 */}
-        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-center">
-            <div className="text-xs uppercase tracking-wide text-slate-400">总胜率</div>
-            <div className="mt-1 font-mono text-xl font-bold text-slate-800">{wr.toFixed(1)}%</div>
+          {/* 总战绩 */}
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <MetricCard label="总胜率" value={`${wr.toFixed(1)}%`} />
+            <MetricCard label="胜" value={wins} />
+            <MetricCard label="负/平" value={profile.stats.losses || 0} hint={`平 ${profile.stats.draws || 0}`} danger />
+            <MetricCard label="Bot 数" value={profile.bot_count} icon={<BotIcon className="size-5" />} />
           </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-center">
-            <div className="text-xs uppercase tracking-wide text-slate-400">胜</div>
-            <div className="mt-1 font-mono text-xl font-bold text-success-600">{wins}</div>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-center">
-            <div className="text-xs uppercase tracking-wide text-slate-400">负/平</div>
-            <div className="mt-1 font-mono text-xl font-bold text-error-600">
-              {profile.stats.losses || 0}
-              <span className="text-sm text-slate-400"> / {profile.stats.draws || 0}</span>
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-center">
-            <div className="text-xs uppercase tracking-wide text-slate-400">Bot 数</div>
-            <div className="mt-1 font-mono text-xl font-bold text-brand-700">{profile.bot_count}</div>
-          </div>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
       {/* Bot 列表 */}
-      <h3 className="mb-3 text-sm font-semibold text-slate-700">
-        Bot 列表（{bots.length}）
-      </h3>
+      <h3 className="mb-3 text-sm font-semibold text-foreground">Bot 列表（{bots.length}）</h3>
       {bots.length === 0 ? (
-        <div className="rounded-xl border border-slate-200 bg-white py-8 text-center text-sm text-slate-400">
-          暂无公开 Bot
-        </div>
+        <Card>
+          <EmptyState text="暂无公开 Bot" icon={<BotIcon className="size-7 opacity-40" />} />
+        </Card>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {bots.map((b) => (
-            <Link
-              key={b.id}
-              to={`/bot/${b.id}`}
-              className="card block p-4 transition hover:border-brand-300 hover:shadow-sm"
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-slate-800">
-                  {b.display_name || b.name}
-                </span>
-                <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-medium text-brand-700">
-                  {gameLabel(b.game_id)}
-                </span>
-              </div>
-              <p className="mt-1 truncate text-xs text-slate-400">@{b.name}</p>
-              {b.description && (
-                <p className="mt-1 line-clamp-2 text-xs text-slate-500">{b.description}</p>
-              )}
-            </Link>
-          ))}
+          {bots.map((b) => {
+            const GameIcon = gameIcon(b.game_id)
+            return (
+              <Link key={b.id} to={`/bot/${b.id}`} className="group">
+                <Card className="h-full transition-colors hover:border-primary/40 hover:shadow-lift">
+                  <CardContent className="gap-1 py-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-foreground group-hover:text-primary">
+                        {b.display_name || b.name}
+                      </span>
+                      <Badge variant="secondary" className="gap-1 text-[10px]">
+                        <GameIcon className="size-3" />
+                        {gameLabel(b.game_id)}
+                      </Badge>
+                    </div>
+                    <p className="truncate text-xs text-muted-foreground">@{b.name}</p>
+                    {b.description && (
+                      <p className="line-clamp-2 text-xs text-muted-foreground/80">{b.description}</p>
+                    )}
+                  </CardContent>
+                </Card>
+              </Link>
+            )
+          })}
         </div>
       )}
     </PageStub>
