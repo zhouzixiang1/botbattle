@@ -56,9 +56,10 @@ graph TB
 | 接口 | `api_routes.py` | 主 REST（95 路由）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki/matchpacks |
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
-| 裁判 | `engine/` | 三游戏 Session（game.py/gomoku.py/pencil.py）+ 共享 result.py + registry.py 路由 + tiers.py 段位 + cards.py |
-| 协议 | `protocol/` | 行协议编解码：json_protocol.py（holdem 紧凑 JSON）+ board_protocol.py（棋类） |
-| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战）+ runner（起 Bot 进程,按 game_id 路由协议）+ auto_matcher（闲时自动） |
+| 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例）+ 每游戏 spec.py。GameSpec 集中声明一款游戏的全部固有属性（裁判/协议/配置/段位/模板/元信息），通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支** |
+| 裁判 | `engine/` | 三游戏 Session（game.py/gomoku.py/pencil.py）+ 共享 result.py（PR4 拆 per-game）+ registry.py（现为转发层，委托 games 注册表）+ tiers.py 全局段位（PR2 改 per-game 由 spec 声明）+ cards.py |
+| 协议 | `protocol/` | 行协议编解码：json_protocol.py（holdem 紧凑 JSON）+ board_protocol.py（棋类）。PR4 物理迁移到 games/<game>/protocol.py（各游戏独立副本，不共享） |
+| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战）+ runner（起 Bot 进程，经 games 注册表路由协议）+ auto_matcher（闲时自动） |
 | 赛制 | `contests/` | templates（7 内置模板）+ stages（对阵生成）+ manager（阶段状态机）+ validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
 | 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈）+ schema.py（常量唯一来源） |
@@ -70,26 +71,31 @@ graph TB
 
 ```mermaid
 graph LR
-    E[裁判引擎 engine] -->|产出| R[RoundResult/MatchResult]
+    G[GameSpec games/] -->|session_factory| E[裁判引擎]
+    G -->|protocol| P[行协议]
+    E -->|产出| R[RoundResult/MatchResult]
     R -->|winners + deltas| O[编排层 matches]
     R -->|winners + deltas| C[赛制层 contests]
     O -->|只读 winners/deltas| S[评分/通知/XP]
     C -->|只读 winners/deltas| T[积分榜/晋级]
+    style G fill:#e3f2fd,stroke:#1565c0
     style R fill:#e8f5e9,stroke:#2e7d32
 ```
 
-**`engine/result.py` 的 `RoundResult`/`MatchResult`** 是核心解耦点：
-- `RoundResult`：`winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)。
-- `MatchResult`：`rounds_played` + `rounds` + `events` + `winner`。
+**两层解耦**：
 
-**编排层与赛制层只依赖这两个字段，绝不触碰扑克的 pot/board/holes 或棋类的棋盘**——这是赛制代码能通用于三款游戏的根本。
+1. **GameSpec 注册表（`games/`，全面解耦的单一真相）**：每款游戏是一个 `GameSpec` 对象，集中声明 `game_id`/`label`/`session_factory`(裁判)/`protocol`(行协议)/`default_match_params`+`validate_match_params`(配置)/`rounds_per_match`+`normalize_earnings`(编排特化)/`tiers`+`tier_for`(per-game 段位)/`judge_params`(裁判参数)/`templates`(赛事模板)/`code_path`+`summary`(元信息)。通用层（编排/赛制/评分/DB）经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 `if game_id == ...` 分支**——所有游戏差异封装在各自 spec。
+
+2. **结果鸭子契约（`RoundResult`/`MatchResult`）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。**编排层与赛制层只依赖这两个字段，绝不触碰扑克的 pot/board/holes 或棋类的棋盘**——这是赛制代码能通用于三款游戏的根本。PR4 起 result 拆为各游戏独立副本（不再共享基类），仅保留鸭子契约。
 
 ### 2.3 新增一款游戏的成本
 
-赛制/编排层**零改动**，仅需：
-1. 实现一个 `XxxSession.run_async(decide) → MatchResult`。
-2. 实现一套协议（`_dumps`/`_loads`/`_fail_response`，在 runner.py 按 game_id 分流）。
-3. 在 `registry.run_session` 加分支 + `schema.REGISTERED_ENGINES` / `VALID_GAME_IDS` 各加一项。
+通用层**零改动**，仅需（全部在一个 `games/<game>/` 包内）：
+1. 新建 `games/<game>/` 包：实现引擎 Session + 协议 + 配置 + 段位 + 模板，在 `spec.py` 装配成一个 `GameSpec`。
+2. 在 `games/__init__.py` 注册一行（`registry.register(SPEC)`）。
+3. 在 `schema.REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项（games 包启动时断言二者与注册表一致，防漂移）。
+
+**不再需要**在 `registry.run_session`/`runner._dumps`/`_loads`/`_fail_response`/orchestrator 加 `if game_id==` 分支——这是全面解耦前 6 处分散注册点的彻底消除。
 
 ## 3. 数据库设计
 

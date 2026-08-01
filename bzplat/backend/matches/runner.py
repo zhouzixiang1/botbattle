@@ -5,14 +5,15 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from bzplat.backend.engine.game import DEFAULT_HANDS, MatchResult
+from bzplat.backend.engine.game import DEFAULT_HANDS
 from bzplat.backend.engine.registry import (
     GAME_HOLDEM,
     normalize_game_id,
     run_session,
 )
-from bzplat.backend.protocol import board_protocol as board_proto
-from bzplat.backend.protocol import json_protocol as holdem_proto
+# 全面解耦：runner 不再按 game_id 切协议模块，统一委托 games 注册表。
+from bzplat.backend.games import dumps as _reg_dumps, fail_response as _reg_fail, loads as _reg_loads
+from bzplat.backend.engine.result import MatchResult  # 共享基类（PR4 拆 per-game）
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError, DEFAULT_ACTION_TIMEOUT
 
 logger = logging.getLogger(__name__)
@@ -21,22 +22,16 @@ EventSink = Callable[[str, dict[str, Any]], None]
 
 
 def _dumps(game_id: str, request: dict[str, Any]) -> str:
-    if game_id == GAME_HOLDEM:
-        return holdem_proto.dumps_request(request)
-    return board_proto.dumps_request(request)
+    return _reg_dumps(game_id, request)
 
 
 def _loads(game_id: str, line: str) -> dict[str, Any]:
-    if game_id == GAME_HOLDEM:
-        return holdem_proto.loads_response(line)
-    return board_proto.loads_response(line)
+    return _reg_loads(game_id, line)
 
 
 def _fail_response(game_id: str) -> dict[str, Any]:
-    """超时/异常时的兜底响应：扑克 fold；棋类非法坐标。"""
-    if game_id == GAME_HOLDEM:
-        return {"a": "f"}
-    return {"x": -99, "y": -99}
+    """超时/异常时的兜底响应（按游戏：扑克 fold；棋类非法坐标）。"""
+    return _reg_fail(game_id)
 
 
 class MatchRunner:

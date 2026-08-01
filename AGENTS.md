@@ -74,10 +74,16 @@ matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runne
             通知副作用：对局完成（非 contest）经 orch.notifier.notify_both_owners 通知双方 owner
 notifications/ 通知管理器：NotificationManager（写站内通知 + 按 prefs 复用 Mailer 发邮件）；表 notifications/notification_prefs
             经验/等级：award_xp 在对局完成/赛事报名/评论/被关注时触发（users.xp/level/last_active_at）
-engine/     裁判：game.py(holdem) gomoku.py pencil.py + 共享基类 result.py + registry.run_session()
-            段位：engine/tiers.py（rating→段位映射，前端 lib/tiers.ts 镜像）
+games/      游戏注册表（全面解耦的单一真相）：base.py(GameSpec 接口 + GameRegistry 单例) + 每游戏 spec.py
+            GameSpec 集中声明一款游戏的全部固有属性：session_factory(裁判) + protocol(行协议)
+            + default/validate_match_params(配置) + rounds_per_match/normalize_earnings(编排特化)
+            + tiers/tier_for(per-game 段位曲线) + judge_params(裁判参数) + templates(赛事模板) + 元信息
+            通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
+engine/     裁判实现（PR1 仍原位）：game.py(holdem) gomoku.py pencil.py + 共享基类 result.py
+            registry.py 现为转发层（委托 games 注册表）；tiers.py 全局段位（PR2 改 per-game 由 spec 声明）
             数据集：GET /api/matchpacks[/download]（gzip，等级 gating）+ 站点配置 GET /api/site/info
-protocol/   行协议：json_protocol.py(holdem) / board_protocol.py(gomoku,pencil)
+protocol/   行协议（PR1 仍原位）：json_protocol.py(holdem) / board_protocol.py(gomoku,pencil)
+            PR4 将物理迁移到 games/<game>/protocol.py（各游戏独立副本，不共享）
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits
 store/      SQLite + schema.py(常量唯一来源)
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
@@ -98,11 +104,11 @@ src/pages/                 22 个顶层路由，全部用 React.lazy 代码分�
 ```
 改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
 
-**核心解耦契约 —— `engine/result.py` 的 `RoundResult`/`MatchResult`**：裁判（engine）产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**，绝不触碰扑克的 pot/board/holes 或棋类的棋盘。这是赛制代码能对三款游戏通用的根本。
+**核心解耦契约 —— `engine/result.py` 的 `RoundResult`/`MatchResult`**（鸭子类型，各游戏 result 满足此结构）：裁判产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**，绝不触碰扑克的 pot/board/holes 或棋类的棋盘。这是赛制代码能对三款游戏通用的根本。**PR4 起 result.py 将拆为各游戏独立副本（不再共享基类），仅保留鸭子契约。**
 
-**新增一款游戏的成本**（赛制/编排层零改动）：实现一个 `XxxSession.run_async(decide)→MatchResult` + 一套协议 → 在 `registry.run_session` 加分支，并在 `schema.REGISTERED_ENGINES` / `VALID_GAME_IDS` 各加一项。
+**新增一款游戏的成本**（通用层零改动）：新建 `games/<game>/` 包（spec.py 装配 GameSpec + 引擎 + 协议 + 配置 + 段位 + 模板）→ 在 `games/__init__.py` 注册一行 → 在 `schema.REGISTERED_ENGINES`/`VALID_GAME_IDS` frozenset 各加一项（games 包启动时断言二者与注册表一致，防漂移）。**不再需要**在 `registry.run_session`/`runner._dumps`/`_loads`/`_fail_response`/orchestrator 加 `if game_id==` 分支——全部经 `registry.get(game_id)` 取 spec。
 
-**引擎路由入口**：`registry.run_session(game_id, decide, ...)` —— 按 `game_id` 分流到对应 Session；`MatchRunner` 再按 `game_id` 分流协议（`_dumps/_loads/_fail_response`）。
+**引擎路由入口**：`games.registry.get(game_id)` 取 `GameSpec` → `spec.run_session(decide, **params)` 构造并运行该游戏 Session；`spec.protocol.dumps_request/loads_response/fail_response` 处理行协议。`engine/registry.py` 与 `matches/runner.py` 现均委托 games 注册表（PR1），不再有 if-chain。
 
 **人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局走独立 `_human_sem`（默认 4，不占 bot 对局槽）、`human_action_timeout`（默认 120s）、**不计 Glicko**、per-user 同时 ≤ 1。自博弈（同 owner 两个不同 bot 对战）走普通 `/api/matches/challenge`。
 
