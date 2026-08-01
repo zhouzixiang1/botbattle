@@ -794,7 +794,7 @@ class Store:
             ]
 
     def bot_profile(self, bot_id: int) -> dict | None:
-        """聚合 Bot 详情：bot 信息 + owner + rating + 胜率。
+        """聚合 Bot 详情：bot 信息 + owner + rating + 胜率 + 段位。
 
         不含对局历史与对手战绩（单独端点，避免单次返回过大）。
         """
@@ -810,7 +810,14 @@ class Store:
                 "WHERE b.id=?",
                 (bot_id,),
             ).fetchone()
-            return _row(row)
+            d = _row(row)
+            if d is not None:
+                from bzplat.backend.engine.tiers import tier_for
+                t = tier_for(d.get("rating"))
+                d["tier_level"] = t.level
+                d["tier_key"] = t.key
+                d["tier_name"] = t.name
+            return d
 
     def bot_opponents_stats(
         self, bot_id: int, *, limit: int = 20
@@ -1063,12 +1070,16 @@ class Store:
         self, limit: int = 50, *, game_id: str | None = None
     ) -> list[dict]:
         with self._tx() as c:
+            # rating_delta = 当前 rating - 上一条历史评分（升降趋势）；无历史则 NULL
             sql = (
                 "SELECT r.bot_id, r.rating, r.rd, r.vol, r.wins, r.losses, "
                 "r.draws, r.net_chips, r.matches_played, r.last_played_at, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
                 "b.format, b.os, b.arch, b.is_builtin, b.game_id, "
-                "u.username AS owner_name, u.display_name AS owner_display "
+                "u.username AS owner_name, u.display_name AS owner_display, "
+                "(SELECT rh.rating FROM rating_history rh "
+                " WHERE rh.bot_id=r.bot_id ORDER BY rh.id DESC "
+                " LIMIT 1 OFFSET 1) AS prev_rating "
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
                 "WHERE b.is_active=1"
@@ -1079,7 +1090,20 @@ class Store:
                 params.append(game_id)
             sql += " ORDER BY r.rating DESC LIMIT ?"
             params.append(limit)
-            return [_row(r) for r in c.execute(sql, params)]
+            rows = [_row(r) for r in c.execute(sql, params)]
+            # 计算并补 tier + delta（应用层，避免 SQL 嵌套过深）
+            from bzplat.backend.engine.tiers import tier_for
+            for row in rows:
+                prev = row.pop("prev_rating", None)
+                if prev is not None:
+                    row["rating_delta"] = round(row["rating"] - prev, 2)
+                else:
+                    row["rating_delta"] = None
+                t = tier_for(row["rating"])
+                row["tier_level"] = t.level
+                row["tier_key"] = t.key
+                row["tier_name"] = t.name
+            return rows
 
     leaderboard = list_leaderboard
 

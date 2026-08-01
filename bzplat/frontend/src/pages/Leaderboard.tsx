@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import PageStub from '../components/PageStub'
 import { apiGet, errMsg } from '../api'
 import { GAMES, gameLabel, type GameId } from '../lib/games'
+import { tierFor, trendDelta } from '../lib/tiers'
 
 interface Row {
   bot_id: number
@@ -20,6 +21,9 @@ interface Row {
   os?: string
   arch?: string
   game_id?: string
+  rating_delta?: number | null
+  tier_name?: string
+  tier_key?: string
 }
 
 export default function Leaderboard() {
@@ -63,6 +67,7 @@ export default function Leaderboard() {
               <th className="px-3 py-2.5">Bot</th>
               <th className="px-3 py-2.5">游戏</th>
               <th className="px-3 py-2.5">所有者</th>
+              <th className="px-3 py-2.5">段位</th>
               <th className="px-3 py-2.5">Rating</th>
               <th className="px-3 py-2.5">战绩</th>
               <th className="px-3 py-2.5">平台</th>
@@ -71,7 +76,7 @@ export default function Leaderboard() {
           <tbody className="divide-y divide-slate-700/60">
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-center text-slate-500">
+                <td colSpan={8} className="px-3 py-8 text-center text-slate-500">
                   暂无数据
                 </td>
               </tr>
@@ -97,8 +102,27 @@ export default function Leaderboard() {
                       '—'
                     )}
                   </td>
+                  <td className="px-3 py-2.5">
+                    {(() => {
+                      const t = tierFor(r.rating)
+                      return (
+                        <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${t.bg} ${t.color}`}>
+                          {r.tier_name || t.name}
+                        </span>
+                      )
+                    })()}
+                  </td>
                   <td className="px-3 py-2.5 font-mono text-brand-700">
                     {Number(r.rating).toFixed(1)}
+                    {(() => {
+                      const td = trendDelta(r.rating_delta)
+                      if (!td) return null
+                      return (
+                        <span className={`ml-1 text-xs ${td.up ? 'text-success-600' : 'text-error-600'}`}>
+                          {td.up ? '▲' : '▼'} {td.abs.toFixed(0)}
+                        </span>
+                      )
+                    })()}
                   </td>
                   <td className="px-3 py-2.5 text-slate-400">
                     {r.wins ?? 0}W / {r.losses ?? 0}L / {r.draws ?? 0}D

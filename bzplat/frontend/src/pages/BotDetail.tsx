@@ -4,6 +4,16 @@ import PageStub from '../components/PageStub'
 import { apiGet, apiJson, errMsg } from '../api'
 import { useAuth } from '../components/useAuth'
 import { gameLabel } from '../lib/games'
+import { tierFor } from '../lib/tiers'
+
+function TierInline({ rating, name }: { rating: number | null | undefined; name?: string }) {
+  const t = tierFor(rating)
+  return (
+    <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${t.bg} ${t.color}`}>
+      {name || t.name}
+    </span>
+  )
+}
 
 /* ── 类型 ─────────────────────────────────────────────── */
 interface BotProfile {
@@ -31,6 +41,9 @@ interface BotProfile {
   net_chips?: number
   matches_played?: number
   rated_at?: string
+  tier_level?: number
+  tier_key?: string
+  tier_name?: string
 }
 
 interface MatchRow {
@@ -293,10 +306,13 @@ export default function BotDetail() {
           {/* 评分/战绩 */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-center">
-              <div className="text-xs uppercase tracking-wide text-slate-400">Rating</div>
+              <div className="text-xs uppercase tracking-wide text-slate-400">Rating / 段位</div>
               <div className="mt-1 font-mono text-2xl font-bold text-brand-700">
                 {profile.rating != null ? Number(profile.rating).toFixed(0) : '—'}
               </div>
+              {profile.tier_name && (
+                <TierInline rating={profile.rating} name={profile.tier_name} />
+              )}
               {profile.rd != null && (
                 <div className="text-[10px] text-slate-400">rd {Number(profile.rd).toFixed(0)}</div>
               )}
