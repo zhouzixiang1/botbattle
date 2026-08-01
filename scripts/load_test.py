@@ -312,6 +312,19 @@ def phase1_bots(api: Api, ctx: dict[str, Any]) -> None:
     r = api.client.get("/api/bots/9999999")
     check("GET /api/bots/9999999 → 404", r.status_code == 404, f"{r.status_code}")
 
+    # Bot 详情页端点（profile/matches/opponents/rating-history）—— PR-1
+    r = api.client.get(f"/api/bots/{bid}/profile")
+    check("GET /api/bots/{id}/profile", r.status_code == 200 and "profile" in r.json()
+          and r.json()["profile"].get("name") == f"{u1}_holdem", r.text[:80])
+    r = api.client.get(f"/api/bots/{bid}/matches?limit=10")
+    check("GET /api/bots/{id}/matches", r.status_code == 200 and "matches" in r.json(), r.text[:80])
+    r = api.client.get(f"/api/bots/{bid}/opponents")
+    check("GET /api/bots/{id}/opponents", r.status_code == 200 and "opponents" in r.json(), r.text[:80])
+    r = api.client.get(f"/api/bots/{bid}/rating-history")
+    check("GET /api/bots/{id}/rating-history", r.status_code == 200 and "history" in r.json(), r.text[:80])
+    r = api.client.get("/api/bots/9999999/profile")
+    check("GET /api/bots/9999999/profile → 404", r.status_code == 404, f"{r.status_code}")
+
     # POST /api/bots（新 HTTP 上传一个 bot，验返回 bot.id）—— 名字带版本后缀避免冲突
     elf = (ROOT / SAMPLE_BINARIES["holdem"]).read_bytes()
     new_name = f"{u1}_extra"

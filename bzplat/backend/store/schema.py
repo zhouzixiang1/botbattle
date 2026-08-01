@@ -133,8 +133,25 @@ CREATE TABLE IF NOT EXISTS pair_stats (
     ci_high         REAL,
     samples         INTEGER NOT NULL DEFAULT 0,
     last_played_at  TEXT    NOT NULL,
+    a_wins          INTEGER NOT NULL DEFAULT 0,
+    a_losses        INTEGER NOT NULL DEFAULT 0,
+    draws           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (bot_a_id, bot_b_id)
 );
+
+-- 评分历史快照：每次 _apply_ratings 落一条，用于段位趋势/曲线（PR-1 建表 + 落盘，
+-- PR-5 段位趋势读取）。每 bot 限保留最近 N 条（见 store 截断）。
+CREATE TABLE IF NOT EXISTS rating_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    rating          REAL    NOT NULL,
+    rd              REAL    NOT NULL,
+    vol             REAL    NOT NULL,
+    matches_played  INTEGER NOT NULL,
+    reason          TEXT    NOT NULL DEFAULT '',   -- match_id 或 'contest:<id>' 等
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT    PRIMARY KEY,

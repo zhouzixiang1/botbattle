@@ -202,6 +202,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_time ON matches(created_at)")
 
+    # pair_stats 补胜负计数列（head-to-head 战绩用）
+    if "pair_stats" in tables:
+        for col, decl in (
+            ("a_wins", "INTEGER NOT NULL DEFAULT 0"),
+            ("a_losses", "INTEGER NOT NULL DEFAULT 0"),
+            ("draws", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            _add_col(conn, "pair_stats", col, decl)
+
     # 赛制模板：表为空时从代码默认 + 旧 blob 导入
     if "contest_templates" in tables or True:  # 新库也会建表
         # 懒导入避免循环
@@ -670,6 +679,70 @@ class Store:
                 )
             ]
 
+    def bot_profile(self, bot_id: int) -> dict | None:
+        """聚合 Bot 详情：bot 信息 + owner + rating + 胜率。
+
+        不含对局历史与对手战绩（单独端点，避免单次返回过大）。
+        """
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT b.*, u.username AS owner_name, "
+                "u.display_name AS owner_display, "
+                "r.rating, r.rd, r.vol, r.wins, r.losses, r.draws, "
+                "r.net_chips, r.matches_played, r.last_played_at AS rated_at "
+                "FROM bots b "
+                "LEFT JOIN users u ON b.owner_id=u.id "
+                "LEFT JOIN ratings r ON r.bot_id=b.id "
+                "WHERE b.id=?",
+                (bot_id,),
+            ).fetchone()
+            return _row(row)
+
+    def bot_opponents_stats(
+        self, bot_id: int, *, limit: int = 20
+    ) -> list[dict]:
+        """返回该 Bot 对各对手的战绩（按交手次数倒序），从 pair_stats 读。
+
+        每行含 opponent_id/opponent_name/opponent_display/game_id/
+        wins/losses/draws/samples/last_played_at（wins 从 bot_id 视角）。
+        """
+        with self._tx() as c:
+            # bot 可能在 bot_a 或 bot_b 位
+            rows = c.execute(
+                "SELECT ps.bot_a_id, ps.bot_b_id, ps.a_wins, ps.a_losses, "
+                "ps.draws, ps.samples, ps.last_played_at "
+                "FROM pair_stats ps "
+                "WHERE ps.bot_a_id=? OR ps.bot_b_id=? "
+                "ORDER BY ps.samples DESC LIMIT ?",
+                (bot_id, bot_id, max(1, min(limit, 100))),
+            ).fetchall()
+            out: list[dict] = []
+            for r in rows:
+                d = _row(r)
+                a_id, b_id = d["bot_a_id"], d["bot_b_id"]
+                opp_id = b_id if a_id == bot_id else a_id
+                # 视角还原：若 bot 是 a，wins=a_wins；若 bot 是 b，wins=a_losses
+                if bot_id == a_id:
+                    wins, losses = d["a_wins"], d["a_losses"]
+                else:
+                    wins, losses = d["a_losses"], d["a_wins"]
+                opp = c.execute(
+                    "SELECT name, display_name, game_id FROM bots WHERE id=?",
+                    (opp_id,),
+                ).fetchone()
+                out.append({
+                    "opponent_id": opp_id,
+                    "opponent_name": opp["name"] if opp else f"#{opp_id}",
+                    "opponent_display": opp["display_name"] if opp else "",
+                    "game_id": opp["game_id"] if opp else "",
+                    "wins": wins,
+                    "losses": losses,
+                    "draws": d["draws"],
+                    "samples": d["samples"],
+                    "last_played_at": d["last_played_at"],
+                })
+            return out
+
     # ── matches ───────────────────────────────────────────────
 
     def create_match(
@@ -988,17 +1061,29 @@ class Store:
         ci_low: float | None,
         ci_high: float | None,
         samples: int,
+        *,
+        a_wins_delta: int = 0,
+        a_losses_delta: int = 0,
+        draws_delta: int = 0,
     ) -> None:
+        """记录双方对战统计。a_wins/a_losses 从 bot_a 视角计；
+
+        bb_per_100_mean/ci 为 holdem 期望盈亏（可选，旧接口保留）；
+        胜负计数增量式累加（a_wins_delta 等）。
+        """
         with self._tx() as c:
             c.execute(
                 "INSERT INTO pair_stats(bot_a_id, bot_b_id, bb_per_100_mean, "
-                "ci_low, ci_high, samples, last_played_at) "
-                "VALUES(?,?,?,?,?,?,?) "
+                "ci_low, ci_high, samples, last_played_at, a_wins, a_losses, draws) "
+                "VALUES(?,?,?,?,?,?,?, ?,?,?) "
                 "ON CONFLICT(bot_a_id, bot_b_id) DO UPDATE SET "
                 "bb_per_100_mean=excluded.bb_per_100_mean, "
                 "ci_low=excluded.ci_low, ci_high=excluded.ci_high, "
                 "samples=excluded.samples, "
-                "last_played_at=excluded.last_played_at",
+                "last_played_at=excluded.last_played_at, "
+                "a_wins=pair_stats.a_wins+excluded.a_wins, "
+                "a_losses=pair_stats.a_losses+excluded.a_losses, "
+                "draws=pair_stats.draws+excluded.draws",
                 (
                     bot_a_id,
                     bot_b_id,
@@ -1007,8 +1092,74 @@ class Store:
                     ci_high,
                     samples,
                     _now(),
+                    max(0, a_wins_delta),
+                    max(0, a_losses_delta),
+                    max(0, draws_delta),
                 ),
             )
+
+    def head_to_head(self, bot_a_id: int, bot_b_id: int) -> dict | None:
+        """返回 bot_a 视角的对某对手战绩（a_wins/a_losses/draws/samples）。
+
+        pair_stats 以 (min_id, max_id) 规范化存储，读取时按方向还原视角。
+        """
+        lo, hi = sorted((bot_a_id, bot_b_id))
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT a_wins, a_losses, draws, samples, last_played_at "
+                "FROM pair_stats WHERE bot_a_id=? AND bot_b_id=?",
+                (lo, hi),
+            ).fetchone()
+            if not row:
+                return None
+            d = _row(row)
+            # 规范化存储时 bot_a = 小 id；若查询的 bot_a 是大 id，则胜负视角翻转
+            if bot_a_id == lo:
+                return d
+            return {
+                "a_wins": d["a_losses"],
+                "a_losses": d["a_wins"],
+                "draws": d["draws"],
+                "samples": d["samples"],
+                "last_played_at": d["last_played_at"],
+            }
+
+    def add_rating_history(
+        self,
+        bot_id: int,
+        rating: float,
+        rd: float,
+        vol: float,
+        matches_played: int,
+        reason: str = "",
+    ) -> None:
+        """落一条评分快照，并截断保留最近 N 条（N=200）。"""
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO rating_history(bot_id, rating, rd, vol, "
+                "matches_played, reason, created_at) VALUES(?,?,?,?,?,?,?)",
+                (bot_id, rating, rd, vol, matches_played, reason, _now()),
+            )
+            # 截断：保留每 bot 最近 200 条
+            c.execute(
+                "DELETE FROM rating_history WHERE bot_id=? AND id NOT IN "
+                "(SELECT id FROM rating_history WHERE bot_id=? "
+                "ORDER BY id DESC LIMIT 200)",
+                (bot_id, bot_id),
+            )
+
+    def list_rating_history(
+        self, bot_id: int, *, limit: int = 100
+    ) -> list[dict]:
+        """返回评分历史时序（旧→新），用于画曲线。"""
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT id, rating, rd, vol, matches_played, reason, created_at "
+                "FROM rating_history WHERE bot_id=? "
+                "ORDER BY id DESC LIMIT ?",
+                (bot_id, max(1, min(limit, 500))),
+            ).fetchall()
+            return [_row(r) for r in reversed(rows)]
 
     # ── contests ──────────────────────────────────────────────
 
