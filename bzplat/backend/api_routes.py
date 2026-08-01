@@ -334,6 +334,41 @@ def set_bot_active(
     return {"bot": bot}
 
 
+@router.patch("/api/bots/{bot_id}")
+def update_my_bot(
+    bot_id: int, body: dict, request: Request, user=Depends(require_user)
+):
+    """Bot 拥有者改 display_name/description/is_public/is_active（受限白名单）。"""
+    store = _store(request)
+    bot = store.get_bot(bot_id)
+    if not bot:
+        raise HTTPException(404, "bot 不存在")
+    if bot["owner_id"] != user["id"]:
+        raise HTTPException(403, "无权修改他人的 Bot")
+    allowed = {"display_name", "description", "is_public", "is_active"}
+    fields = {
+        k: (1 if v is True else 0 if v is False else str(v)[:200] if k in ("display_name",) else str(v)[:2000])
+        for k, v in body.items() if k in allowed
+    }
+    if not fields:
+        raise HTTPException(400, "无可更新字段")
+    b = store.update_bot(bot_id, **fields)
+    return {"bot": b}
+
+
+@router.delete("/api/bots/{bot_id}")
+def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
+    """Bot 拥有者删除自己的 Bot（软删：is_active=0 + is_public=0）。"""
+    store = _store(request)
+    bot = store.get_bot(bot_id)
+    if not bot:
+        raise HTTPException(404, "bot 不存在")
+    if bot["owner_id"] != user["id"]:
+        raise HTTPException(403, "无权删除他人的 Bot")
+    store.update_bot(bot_id, is_active=0, is_public=0)
+    return {"ok": True}
+
+
 # ── matches ───────────────────────────────────────────────────
 
 class ChallengeBody(BaseModel):

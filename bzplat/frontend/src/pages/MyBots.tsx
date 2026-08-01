@@ -89,6 +89,47 @@ export default function MyBots() {
     }
   }
 
+  const [editing, setEditing] = useState<number | null>(null)
+  const [editDisplay, setEditDisplay] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+
+  const startEdit = (b: Bot) => {
+    setEditing(b.id)
+    setEditDisplay(b.display_name || '')
+    setEditDesc(b.description || '')
+  }
+
+  const saveEdit = async (b: Bot) => {
+    try {
+      await apiJson(`/api/bots/${b.id}`, 'PATCH', {
+        display_name: editDisplay, description: editDesc,
+      })
+      setEditing(null)
+      await load()
+    } catch (e) {
+      setError(errMsg(e, '更新失败'))
+    }
+  }
+
+  const togglePublic = async (b: Bot) => {
+    try {
+      await apiJson(`/api/bots/${b.id}`, 'PATCH', { is_public: !b.is_public })
+      await load()
+    } catch (e) {
+      setError(errMsg(e, '更新失败'))
+    }
+  }
+
+  const del = async (b: Bot) => {
+    if (!confirm(`确定删除 ${b.display_name || b.name}？（将停用并设为私有）`)) return
+    try {
+      await apiJson(`/api/bots/${b.id}`, 'DELETE')
+      await load()
+    } catch (e) {
+      setError(errMsg(e, '删除失败'))
+    }
+  }
+
   if (!isLoggedIn) {
     return (
       <PageStub title="我的 Bot">
@@ -197,33 +238,70 @@ export default function MyBots() {
           <li className="px-4 py-8 text-center text-slate-500">暂无 Bot，请先上传</li>
         ) : (
           bots.map((b) => (
-            <li key={b.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <div className="min-w-0 flex-1">
-                <div className="font-medium text-slate-800">
-                  {b.display_name || b.name}
-                  <span className="ml-2 font-mono text-xs text-slate-500">#{b.id}</span>
-                  <span className="ml-2 rounded bg-brand-50 px-1.5 py-0.5 text-xs text-brand-700">
-                    {gameLabel(b.game_id)}
-                  </span>
+            <li key={b.id} className="px-4 py-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium text-slate-800">
+                    <Link to={`/bot/${b.id}`} className="hover:text-brand-600">
+                      {b.display_name || b.name}
+                    </Link>
+                    <span className="ml-2 font-mono text-xs text-slate-500">#{b.id}</span>
+                    <span className="ml-2 rounded bg-brand-50 px-1.5 py-0.5 text-xs text-brand-700">
+                      {gameLabel(b.game_id)}
+                    </span>
+                  </div>
+                  {b.description && (
+                    <p className="mt-0.5 text-xs text-slate-500">{b.description}</p>
+                  )}
+                  <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-400">
+                    <span className="rounded bg-slate-100/80 px-1.5 py-0.5">
+                      {b.os || '—'} / {b.arch || '—'}
+                    </span>
+                    <span className="rounded bg-slate-100/80 px-1.5 py-0.5">
+                      format: {b.format || 'unknown'}
+                    </span>
+                    <span>v{b.current_version ?? 0}</span>
+                    <span>{b.is_active ? '启用' : '停用'}</span>
+                    <span>{b.is_public ? '公开' : '私有'}</span>
+                  </div>
                 </div>
-                <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-400">
-                  <span className="rounded bg-slate-100/80 px-1.5 py-0.5">
-                    {b.os || '—'} / {b.arch || '—'}
-                  </span>
-                  <span className="rounded bg-slate-100/80 px-1.5 py-0.5">
-                    format: {b.format || 'unknown'}
-                  </span>
-                  <span>v{b.current_version ?? 0}</span>
-                  <span>{b.is_active ? '启用' : '停用'}</span>
+                <div className="flex flex-wrap gap-1.5">
+                  <button type="button" onClick={() => void toggleActive(b)}
+                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100">
+                    {b.is_active ? '停用' : '启用'}
+                  </button>
+                  <button type="button" onClick={() => void togglePublic(b)}
+                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100">
+                    {b.is_public ? '设私有' : '设公开'}
+                  </button>
+                  <button type="button" onClick={() => startEdit(b)}
+                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100">
+                    编辑
+                  </button>
+                  <button type="button" onClick={() => void del(b)}
+                    className="rounded-lg border border-error-200 px-2.5 py-1 text-xs text-error-600 hover:bg-error-50">
+                    删除
+                  </button>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => void toggleActive(b)}
-                className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100"
-              >
-                {b.is_active ? '停用' : '启用'}
-              </button>
+              {editing === b.id && (
+                <div className="mt-2 flex flex-wrap items-end gap-2 rounded-lg bg-slate-50 p-3">
+                  <label className="text-xs text-slate-500">
+                    显示名
+                    <input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64}
+                      className="mt-1 block rounded border border-slate-300 bg-white px-2 py-1 text-sm" />
+                  </label>
+                  <label className="text-xs text-slate-500">
+                    简介
+                    <input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500}
+                      className="mt-1 block w-64 rounded border border-slate-300 bg-white px-2 py-1 text-sm" />
+                  </label>
+                  <button type="button" onClick={() => void saveEdit(b)}
+                    className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs text-white hover:bg-brand-500">保存</button>
+                  <button type="button" onClick={() => setEditing(null)}
+                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100">取消</button>
+                </div>
+              )}
             </li>
           ))
         )}

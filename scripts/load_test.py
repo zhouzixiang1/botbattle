@@ -424,6 +424,11 @@ def phase1_bots(api: Api, ctx: dict[str, Any]) -> None:
         check("POST /api/bots/{id}/active?active=false", r.status_code == 200 and r.json()["bot"]["is_active"] in (0, False), r.text[:80])
         r = api.authed(tok, "POST", f"/api/bots/{extra_bid}/active?active=true")
         check("POST /api/bots/{id}/active?active=true", r.status_code == 200 and r.json()["bot"]["is_active"] in (1, True), r.text[:80])
+        # owner PATCH/DELETE（PR-8 MyBots 管理）
+        r = api.authed(tok, "PATCH", f"/api/bots/{extra_bid}", json={"display_name": "lt-renamed", "description": "d", "is_public": False})
+        check("PATCH /api/bots/{id}（owner 改名/简介/私有）", r.status_code == 200 and r.json()["bot"]["display_name"] == "lt-renamed", r.text[:80])
+        r = api.authed(tok, "DELETE", f"/api/bots/{extra_bid}")
+        check("DELETE /api/bots/{id}（owner 软删）", r.status_code == 200, r.text[:80])
 
 
 def _user_id(db_path: str, username: str) -> int:
