@@ -21,7 +21,7 @@ from bzplat.backend.engine.registry import (
 )
 from bzplat.backend.matches.runner import MatchRunner, _fail_response
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
-from bzplat.backend.runtime.binary_runner import BinaryRunner
+from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     REGISTERED_ENGINES,
@@ -339,6 +339,12 @@ class MatchOrchestrator:
                                 self.store.award_xp(int(bot["owner_id"]), xp)
                     except Exception:
                         logger.debug("award_xp failed", exc_info=True)
+            except BotCrashedError as exc:
+                logger.warning("match %s aborted: bot crashed — %s", match_id, exc)
+                self.store.update_match(
+                    match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now(),
+                )
+                self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
             except Exception as exc:
                 logger.exception("match %s failed", match_id)
                 self.store.update_match(
@@ -427,6 +433,11 @@ class MatchOrchestrator:
                 self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
                 # 人类对战不计 Glicko-2（人类无 rating 行）
                 self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
+            except BotCrashedError as exc:
+                # Bot 启动即崩/EOF——快速 abort，广播清晰错误（而非吞成默认动作死磕数小时）
+                logger.warning("human match %s aborted: bot crashed — %s", match_id, exc)
+                self.store.update_match(match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now())
+                self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
             except Exception as exc:
                 logger.exception("human match %s failed", match_id)
                 self.store.update_match(match_id, status=STATUS_ABORTED, reason=f"error:{exc}", ended_at=_now())

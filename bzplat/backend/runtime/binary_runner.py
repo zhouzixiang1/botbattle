@@ -61,6 +61,11 @@ class BotSession:
         return self._stderr_tail.decode("utf-8", errors="replace").strip()
 
 
+class BotCrashedError(RuntimeError):
+    """Bot 进程崩溃（启动即退出/EOF），不可恢复。区别于普通的决策超时/格式错误——
+    决策超时是「Bot 慢」，崩溃是「Bot 死了」，后者应快速 abort 对局而非吞成默认动作死磕。"""
+
+
 class BinaryRunner:
     """管理 bot 进程/容器的 stdin/stdout 行协议会话。"""
 
@@ -79,7 +84,7 @@ class BinaryRunner:
                             action_timeout: float = DEFAULT_ACTION_TIMEOUT) -> str:
         path = Path(binary_path).resolve()
         if not path.is_file():
-            raise FileNotFoundError(str(path))
+            raise BotCrashedError(f"bot 二进制不存在: {path}")
         raw = path.read_bytes()[:4096]
         info = info or classify_binary(raw if len(raw) >= 4 else path.read_bytes())
         if not info.runnable:
@@ -139,7 +144,9 @@ class BinaryRunner:
             f"--memory={DEFAULT_MEMORY}",
             f"--cpus={DEFAULT_CPUS}",
             "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            # /tmp 需可执行：PyInstaller 解压运行、动态链接 ELF 的 ld.so 延迟绑定都依赖 /tmp exec。
+            # noexec 会导致 libz.so.1 等 .so 映射失败（exit 127），Bot 启动即崩。
+            "--tmpfs", "/tmp:rw,exec,nosuid,size=64m",
             "--cap-drop=ALL",
             "--security-opt", "no-new-privileges",
             "--user", "65534:65534",
@@ -198,7 +205,9 @@ class BinaryRunner:
             tail = session.stderr_tail()
             logger.warning("bot %s stdout EOF（进程退出码=%s）stderr=%s",
                            session_id, session.proc.returncode, tail[:500])
-            raise RuntimeError(f"bot {session_id} stdout EOF")
+            raise BotCrashedError(
+                f"bot {session_id} stdout EOF（进程退出码={session.proc.returncode}）"
+            )
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
     async def stop_session(self, session_id: str) -> None:

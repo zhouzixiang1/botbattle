@@ -13,7 +13,7 @@ from bzplat.backend.engine.registry import (
 )
 from bzplat.backend.protocol import board_protocol as board_proto
 from bzplat.backend.protocol import json_protocol as holdem_proto
-from bzplat.backend.runtime.binary_runner import BinaryRunner, DEFAULT_ACTION_TIMEOUT
+from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError, DEFAULT_ACTION_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,9 @@ class MatchRunner:
                         sid, line, timeout=self.action_timeout
                     )
                     return _loads(gid, resp_line)
+                except BotCrashedError:
+                    # Bot 进程已死，不可恢复——向上传播触发对局 abort（而非吞成默认动作死磕）
+                    raise
                 except Exception as exc:
                     logger.warning("bot %s decide failed: %s", player_idx, exc)
                     return _fail_response(gid)
@@ -130,6 +133,9 @@ class MatchRunner:
                             sid_bot, line, timeout=self.action_timeout
                         )
                         return _loads(gid, resp_line)
+                    except BotCrashedError:
+                        # Bot 进程已死——向上传播触发对局 abort
+                        raise
                     except Exception as exc:
                         logger.warning("bot %s decide failed: %s", player_idx, exc)
                         return _fail_response(gid)
