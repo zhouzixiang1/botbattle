@@ -66,6 +66,18 @@ logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot
 matches/    后台对局：auto_matcher（闲时自动调度，ladder 类型，stale/placement/daily-cap 增强）
 ```
 
+**前端架构（bzplat/frontend，React 19 + Vite 8 + Tailwind v4 + shadcn/ui）**：
+```
+src/index.css              设计 token：shadcn v4 OKLCH 双主题（:root 浅 / .dark 暗）emerald 品牌色系 + @theme inline 桥接
+src/components/ui/         共享 UI 原语库（shadcn：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart...）—— 全项目唯一组件抽象层
+src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadge（前台+管理端共用）
+src/components/shell/      全局 Shell：AppShell（顶栏+导航+页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
+theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
+src/pages/                 22 页，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
+路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
+```
+改前端务必遵循 [UI_FOUNDATION.md](wiki/UI_FOUNDATION.md) + [UI_COMPONENTS.md](wiki/UI_COMPONENTS.md)：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
+
 **核心解耦契约 —— `engine/result.py` 的 `RoundResult`/`MatchResult`**：裁判（engine）产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**，绝不触碰扑克的 pot/board/holes 或棋类的棋盘。这是赛制代码能对三款游戏通用的根本。
 
 **新增一款游戏的成本**（赛制/编排层零改动）：实现一个 `XxxSession.run_async(decide)→MatchResult` + 一套协议 → 在 `registry.run_session` 加分支，并在 `schema.REGISTERED_ENGINES` / `VALID_GAME_IDS` 各加一项。

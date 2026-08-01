@@ -17,11 +17,13 @@ function levelOf(line: string): string {
   return ''
 }
 
+// 日志面板刻意采用深色控制台样式（bg-slate-900 终端），其内部级别配色
+// 针对该深色底校准，两种主题下保持一致，不随主题切换。
 function levelColor(lv: string): string {
-  if (lv === 'ERROR') return 'text-error-600'
-  if (lv === 'WARNING') return 'text-amber-600'
-  if (lv === 'INFO') return 'text-slate-600'
-  return 'text-slate-400'
+  if (lv === 'ERROR') return 'text-red-400'
+  if (lv === 'WARNING') return 'text-amber-400'
+  if (lv === 'INFO') return 'text-slate-300'
+  return 'text-slate-500'
 }
 
 export default function LogsTab() {
@@ -58,12 +60,12 @@ export default function LogsTab() {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <p className="text-xs text-slate-400">日志文件：{data?.path ?? '—'}</p>
+        <p className="text-xs text-muted-foreground">日志文件：{data?.path ?? '—'}</p>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <select
             value={level}
             onChange={(e) => setLevel(e.target.value)}
-            className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-600"
+            className="rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground"
           >
             {LEVELS.map((l) => (
               <option key={l} value={l}>{l || '全部级别'}</option>
@@ -73,19 +75,19 @@ export default function LogsTab() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="关键字/match_id"
-            className="w-44 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-600"
+            className="w-44 rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground"
           />
           <input
             type="number" min={50} max={2000}
             value={limit}
             onChange={(e) => setLimit(Number(e.target.value))}
-            className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-600"
+            className="w-20 rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground"
           />
           <RefreshBtn onClick={load} />
         </div>
       </div>
       <ErrorMsg msg={error} />
-      <div className="max-h-[70vh] overflow-auto rounded-xl border border-slate-200 bg-slate-900 p-3 font-mono text-xs leading-relaxed">
+      <div className="max-h-[70vh] overflow-auto rounded-xl border border-border bg-slate-900 p-3 font-mono text-xs leading-relaxed">
         {lines.length === 0 ? (
           <div className="py-8 text-center text-slate-500">无匹配日志</div>
         ) : (
@@ -96,7 +98,7 @@ export default function LogsTab() {
           ))
         )}
       </div>
-      <p className="text-xs text-slate-400">共 {lines.length} 行（末尾 {limit} 条过滤后）</p>
+      <p className="text-xs text-muted-foreground">共 {lines.length} 行（末尾 {limit} 条过滤后）</p>
     </div>
   )
 }

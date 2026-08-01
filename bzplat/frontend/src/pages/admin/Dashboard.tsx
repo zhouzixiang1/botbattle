@@ -51,7 +51,7 @@ export default function Dashboard() {
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
-        <p className="text-sm text-slate-500">平台总览统计</p>
+        <p className="text-sm text-muted-foreground">平台总览统计</p>
         <RefreshBtn onClick={load} />
       </div>
       <ErrorMsg msg={error} />
@@ -71,16 +71,16 @@ export default function Dashboard() {
           {stats.recent_users.length === 0 ? (
             <EmptyState text="暂无用户" />
           ) : (
-            <ul className="divide-y divide-slate-100">
+            <ul className="divide-y divide-border">
               {stats.recent_users.map((u) => (
                 <li key={u.id} className="flex items-center justify-between py-2 text-sm">
                   <Link
                     to={`/user/${encodeURIComponent(u.username)}`}
-                    className="font-medium text-brand-600 hover:underline"
+                    className="font-medium text-primary hover:underline"
                   >
                     {u.username}
                   </Link>
-                  <span className="text-xs text-slate-400">
+                  <span className="text-xs text-muted-foreground">
                     <span className="mr-2">{u.role}</span>
                     {u.created_at}
                   </span>
@@ -92,10 +92,10 @@ export default function Dashboard() {
 
         <Card title="对局状态分布">
           <div className="space-y-2">
-            <DistRow label="完成" n={stats.matches_completed} total={stats.matches} color="bg-success-500" />
-            <DistRow label="运行中" n={stats.matches_running} total={stats.matches} color="bg-brand-500" />
-            <DistRow label="待开始" n={stats.matches_pending} total={stats.matches} color="bg-slate-300" />
-            <DistRow label="中止" n={stats.matches_aborted} total={stats.matches} color="bg-error-500" />
+            <DistRow label="完成" n={stats.matches_completed} total={stats.matches} color="bg-success" />
+            <DistRow label="运行中" n={stats.matches_running} total={stats.matches} color="bg-primary" />
+            <DistRow label="待开始" n={stats.matches_pending} total={stats.matches} color="bg-muted-foreground" />
+            <DistRow label="中止" n={stats.matches_aborted} total={stats.matches} color="bg-destructive" />
           </div>
           {stats.matches === 0 && <EmptyState text="暂无对局" />}
         </Card>
@@ -108,11 +108,11 @@ function DistRow({ label, n, total, color }: { label: string; n: number; total: 
   const pct = total > 0 ? Math.round((n / total) * 100) : 0
   return (
     <div className="flex items-center gap-2 text-xs">
-      <span className="w-14 text-slate-500">{label}</span>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
+      <span className="w-14 text-muted-foreground">{label}</span>
+      <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
         <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="w-20 text-right font-mono text-slate-600">
+      <span className="w-20 text-right font-mono text-muted-foreground">
         {n} ({pct}%)
       </span>
     </div>

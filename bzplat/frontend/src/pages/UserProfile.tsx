@@ -140,7 +140,7 @@ export default function UserProfile() {
                   </Badge>
                 )}
                 {(profile.level ?? 0) > 0 && (
-                  <Badge variant="outline" className="gap-1 border-amber-500/40 text-amber-600 dark:text-amber-400">
+                  <Badge variant="outline" className="gap-1 border-warning/40 text-warning">
                     Lv.{profile.level}
                   </Badge>
                 )}

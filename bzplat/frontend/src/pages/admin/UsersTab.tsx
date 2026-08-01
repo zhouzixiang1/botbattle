@@ -96,18 +96,18 @@ export default function UsersTab() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜索用户名/邮箱"
-          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 focus:border-brand-400 focus:outline-none"
+          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
         />
-        <span className="text-xs text-slate-400">共 {filtered.length} 人</span>
+        <span className="text-xs text-muted-foreground">共 {filtered.length} 人</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
         </div>
       </div>
       <ErrorMsg msg={error} />
 
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <div className="overflow-x-auto rounded-xl border border-border bg-card">
         <table className="w-full min-w-[48rem] text-left text-sm">
-          <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase text-slate-400">
+          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
             <tr>
               <th className="px-3 py-2.5">ID</th>
               <th className="px-3 py-2.5">用户名</th>
@@ -118,22 +118,22 @@ export default function UsersTab() {
               <th className="px-3 py-2.5">操作</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-border">
             {filtered.map((u) => (
-              <tr key={u.id} className="hover:bg-slate-50">
-                <td className="px-3 py-2 font-mono text-slate-400">{u.id}</td>
+              <tr key={u.id} className="hover:bg-accent">
+                <td className="px-3 py-2 font-mono text-muted-foreground">{u.id}</td>
                 <td className="px-3 py-2">
-                  <Link to={`/user/${encodeURIComponent(u.username)}`} className="font-medium text-brand-600 hover:underline">
+                  <Link to={`/user/${encodeURIComponent(u.username)}`} className="font-medium text-primary hover:underline">
                     {u.username}
                   </Link>
                 </td>
-                <td className="px-3 py-2 text-slate-500">{u.email}</td>
+                <td className="px-3 py-2 text-muted-foreground">{u.email}</td>
                 <td className="px-3 py-2">
                   <select
                     value={u.role}
                     disabled={busyId === u.id}
                     onChange={(e) => void setRole(u.id, e.target.value)}
-                    className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700"
+                    className="rounded border border-input bg-background px-2 py-1 text-foreground"
                   >
                     <option value="user">user</option>
                     <option value="organizer">organizer</option>
@@ -142,24 +142,24 @@ export default function UsersTab() {
                 </td>
                 <td className="px-3 py-2 text-xs">
                   {u.email_verified ? (
-                    <span className="text-success-600">已验证</span>
+                    <span className="text-success">已验证</span>
                   ) : (
-                    <span className="text-slate-400">未验证</span>
+                    <span className="text-muted-foreground">未验证</span>
                   )}
                   {u.is_active ? (
                     ''
                   ) : (
-                    <span className="ml-1 text-error-600">· 停用</span>
+                    <span className="ml-1 text-destructive">· 停用</span>
                   )}
                 </td>
-                <td className="px-3 py-2 text-xs text-slate-400">{u.created_at || '—'}</td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">{u.created_at || '—'}</td>
                 <td className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
                     <button
                       type="button"
                       disabled={busyId === u.id}
                       onClick={() => void toggleActive(u)}
-                      className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+                      className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
                     >
                       {u.is_active ? '停用' : '启用'}
                     </button>
@@ -167,7 +167,7 @@ export default function UsersTab() {
                       type="button"
                       disabled={busyId === u.id}
                       onClick={() => void revokeSessions(u.id)}
-                      className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+                      className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
                     >
                       下线
                     </button>
@@ -177,14 +177,14 @@ export default function UsersTab() {
                           type="button"
                           disabled={busyId === u.id}
                           onClick={() => void delUser(u.id)}
-                          className="rounded border border-error-300 bg-error-50 px-2 py-0.5 text-xs text-error-600 hover:bg-error-100"
+                          className="rounded border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-xs text-destructive hover:bg-destructive/20"
                         >
                           确认删除
                         </button>
                         <button
                           type="button"
                           onClick={() => setConfirmDel(null)}
-                          className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-500"
+                          className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground"
                         >
                           取消
                         </button>
@@ -194,7 +194,7 @@ export default function UsersTab() {
                         type="button"
                         disabled={busyId === u.id}
                         onClick={() => setConfirmDel(u.id)}
-                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-error-500 hover:bg-error-50"
+                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
                       >
                         删除
                       </button>

@@ -220,7 +220,7 @@ function LikedTopMatches() {
     <Card className="mt-6">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
-          <Flame className="size-4 text-amber-500" />
+          <Flame className="size-4 text-warning" />
           热门对局（点赞榜）
         </CardTitle>
       </CardHeader>

@@ -37,7 +37,7 @@ export default function Admin() {
       <PageStub title="管理端">
         <p>
           请先{' '}
-          <Link to="/login" className="text-brand-600 hover:text-brand-700">
+          <Link to="/login" className="text-primary hover:opacity-80">
             登录
           </Link>
           。
@@ -49,7 +49,7 @@ export default function Admin() {
   if (user?.role !== 'admin') {
     return (
       <PageStub title="管理端">
-        <p className="text-slate-500">
+        <p className="text-muted-foreground">
           仅管理员可访问管理端。组织者请到「比赛」页创建与管理赛事。
         </p>
       </PageStub>
@@ -58,7 +58,7 @@ export default function Admin() {
 
   return (
     <PageStub title="管理端">
-      <div className="mb-5 flex flex-wrap gap-1 border-b border-slate-200">
+      <div className="mb-5 flex flex-wrap gap-1 border-b border-border">
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -66,8 +66,8 @@ export default function Admin() {
             onClick={() => setTab(t.key)}
             className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition ${
               tab === t.key
-                ? 'border-brand-500 text-brand-700'
-                : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:border-input hover:text-foreground'
             }`}
           >
             {t.label}

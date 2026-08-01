@@ -89,7 +89,7 @@ export default function EmailTab() {
             type="button"
             onClick={() => setView('templates')}
             className={`rounded-lg px-3 py-1.5 text-sm ${
-              view === 'templates' ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 border border-slate-300'
+              view === 'templates' ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground border border-input'
             }`}
           >
             邮件模板
@@ -98,7 +98,7 @@ export default function EmailTab() {
             type="button"
             onClick={() => setView('outbox')}
             className={`rounded-lg px-3 py-1.5 text-sm ${
-              view === 'outbox' ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 border border-slate-300'
+              view === 'outbox' ? 'bg-primary text-primary-foreground' : 'bg-card text-muted-foreground border border-input'
             }`}
           >
             发件箱（{outbox.length}）
@@ -121,12 +121,12 @@ export default function EmailTab() {
                 onClick={() => void selectTemplate(t.key)}
                 className={`w-full rounded-lg px-3 py-2 text-left text-sm transition lg:w-auto ${
                   activeKey === t.key
-                    ? 'bg-brand-50 font-medium text-brand-700'
-                    : 'text-slate-600 hover:bg-slate-100'
+                    ? 'bg-primary/10 font-medium text-primary'
+                    : 'text-muted-foreground hover:bg-accent'
                 }`}
               >
                 <div className="font-mono text-xs">{t.key}</div>
-                <div className="mt-0.5 truncate text-xs text-slate-400">{t.subject}</div>
+                <div className="mt-0.5 truncate text-xs text-muted-foreground">{t.subject}</div>
               </button>
             ))}
           </div>
@@ -136,47 +136,47 @@ export default function EmailTab() {
             {draft ? (
               <div className="card p-4">
                 <div className="mb-3 flex items-center justify-between">
-                  <h3 className="font-mono text-sm font-semibold text-slate-700">{draft.key}</h3>
+                  <h3 className="font-mono text-sm font-semibold text-foreground">{draft.key}</h3>
                   <button
                     type="button"
                     disabled={saving}
                     onClick={() => void save()}
-                    className="rounded-lg bg-brand-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-brand-500"
+                    className="rounded-lg bg-primary px-4 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
                   >
                     {saving ? '保存中…' : '保存'}
                   </button>
                 </div>
                 <div className="space-y-3">
                   <div>
-                    <label className="mb-1 block text-xs text-slate-500">主题</label>
+                    <label className="mb-1 block text-xs text-muted-foreground">主题</label>
                     <input
                       value={draft.subject}
                       onChange={(e) => setDraft({ ...draft, subject: e.target.value })}
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-brand-400 focus:outline-none"
+                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs text-slate-500">纯文本正文</label>
+                    <label className="mb-1 block text-xs text-muted-foreground">纯文本正文</label>
                     <textarea
                       value={draft.body_text}
                       onChange={(e) => setDraft({ ...draft, body_text: e.target.value })}
                       rows={4}
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-700 focus:border-brand-400 focus:outline-none"
+                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
                     />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs text-slate-500">HTML 正文</label>
+                    <label className="mb-1 block text-xs text-muted-foreground">HTML 正文</label>
                     <textarea
                       value={draft.body_html}
                       onChange={(e) => setDraft({ ...draft, body_html: e.target.value })}
                       rows={6}
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-700 focus:border-brand-400 focus:outline-none"
+                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
                     />
                   </div>
-                  <p className="text-xs text-slate-400">
-                    可用占位符：<code className="rounded bg-slate-100 px-1">{'{{username}}'}</code>{' '}
-                    <code className="rounded bg-slate-100 px-1">{'{{code}}'}</code>{' '}
-                    <code className="rounded bg-slate-100 px-1">{'{{expires_minutes}}'}</code>
+                  <p className="text-xs text-muted-foreground">
+                    可用占位符：<code className="rounded bg-muted px-1">{'{{username}}'}</code>{' '}
+                    <code className="rounded bg-muted px-1">{'{{code}}'}</code>{' '}
+                    <code className="rounded bg-muted px-1">{'{{expires_minutes}}'}</code>
                   </p>
                 </div>
               </div>
@@ -186,9 +186,9 @@ export default function EmailTab() {
           </div>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
           <table className="w-full min-w-[44rem] text-left text-sm">
-            <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase text-slate-400">
+            <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
               <tr>
                 <th className="px-3 py-2.5">时间</th>
                 <th className="px-3 py-2.5">收件人</th>
@@ -197,16 +197,16 @@ export default function EmailTab() {
                 <th className="px-3 py-2.5">状态</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className="divide-y divide-border">
               {outbox.map((o) => (
-                <tr key={o.id} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 text-xs text-slate-400">{o.created_at}</td>
-                  <td className="px-3 py-2 text-slate-600">{o.to_addr}</td>
-                  <td className="px-3 py-2 text-slate-600">
+                <tr key={o.id} className="hover:bg-accent">
+                  <td className="px-3 py-2 text-xs text-muted-foreground">{o.created_at}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{o.to_addr}</td>
+                  <td className="px-3 py-2 text-muted-foreground">
                     {o.subject}
-                    {o.error && <div className="text-[10px] text-error-500">{o.error}</div>}
+                    {o.error && <div className="text-[10px] text-destructive">{o.error}</div>}
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-400">{o.template_key || '—'}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{o.template_key || '—'}</td>
                   <td className="px-3 py-2">
                     <StatusBadge status={o.status} />
                   </td>
