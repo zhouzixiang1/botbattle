@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 from .auth_manager import COOKIE_NAME, AuthError, AuthManager
 from .captcha import CAPTCHA_TTL_SEC, CaptchaStore, png_to_data_url
 from .dependencies import require_admin, require_user
+from bzplat.backend.security import audit_log, client_ip
+from bzplat.backend.security import _env_bool
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -153,7 +155,9 @@ async def register(req: RegisterReq, request: Request) -> dict:
         )
         auth.send_verify_code(user)
     except AuthError as exc:
+        audit_log(request, "register", result="fail", target=req.username, detail=exc.code)
         raise _err(exc) from exc
+    audit_log(request, "register", result="ok", user=user.get("username"))
     return {
         "user": user,
         "message": "注册成功,验证码已发送到邮箱,请完成验证后再登录",
@@ -167,7 +171,9 @@ async def verify_email(req: VerifyEmailReq, request: Request) -> dict:
     try:
         user = auth.verify_email(req.email_or_username, req.code)
     except AuthError as exc:
+        audit_log(request, "verify_email", result="fail", target=req.email_or_username, detail=exc.code)
         raise _err(exc) from exc
+    audit_log(request, "verify_email", result="ok", user=user.get("username"))
     return {"ok": True, "user": user, "message": "邮箱已验证,请登录"}
 
 
@@ -188,17 +194,26 @@ async def resend_verify(req: ResendVerifyReq, request: Request) -> dict:
 
 @router.post("/login")
 async def login(req: LoginReq, request: Request, response: Response) -> dict:
-    _require_captcha(request, req.captcha_id, req.captcha_answer)
+    try:
+        _require_captcha(request, req.captcha_id, req.captcha_answer)
+    except HTTPException:
+        # 验证码失败也要审计（暴力试探的早期信号）
+        audit_log(request, "login", result="fail", target=req.username, detail="captcha_failed")
+        raise
     auth: AuthManager = request.app.state.auth
+    # 经 nginx/frp 代理后用 X-Forwarded-For 取真实 IP（trust_proxy 已在 RateLimitMiddleware 读取）
+    ip = client_ip(request, trust_proxy=_env_bool("BZ_TRUST_PROXY", False))
     try:
         user, token = auth.authenticate(
             req.username,
             req.password,
-            ip_addr=request.client.host if request.client else "",
+            ip_addr=ip,
             user_agent=request.headers.get("user-agent", ""),
         )
     except AuthError as exc:
+        audit_log(request, "login", result="fail", target=req.username, detail=exc.code)
         raise _err(exc) from exc
+    audit_log(request, "login", result="ok", user=user.get("username") or user.get("id"))
     _set_session_cookie(response, token)
     return {"user": user, "token": token}
 
@@ -213,6 +228,7 @@ async def logout(request: Request, response: Response) -> dict:
         token = request.cookies.get(COOKIE_NAME)
     auth.logout(token)
     response.delete_cookie(COOKIE_NAME, path="/")
+    audit_log(request, "logout")
     return {"ok": True}
 
 
@@ -231,7 +247,9 @@ async def change_password(
     try:
         auth.change_password(user["id"], req.old_password, req.new_password)
     except AuthError as exc:
+        audit_log(request, "change_password", result="fail", user=user.get("username"), detail=exc.code)
         raise _err(exc) from exc
+    audit_log(request, "change_password", result="ok", user=user.get("username"))
     return {"ok": True, "message": "密码已修改,请重新登录"}
 
 
@@ -325,7 +343,9 @@ async def reset_password(req: ResetPasswordReq, request: Request) -> dict:
             req.email_or_username, req.code, req.new_password
         )
     except AuthError as exc:
+        audit_log(request, "reset_password", result="fail", target=req.email_or_username, detail=exc.code)
         raise _err(exc) from exc
+    audit_log(request, "reset_password", result="ok", user=user.get("username"))
     return {
         "ok": True,
         "message": "密码已重置,请用新密码登录",
@@ -337,11 +357,13 @@ async def reset_password(req: ResetPasswordReq, request: Request) -> dict:
 async def admin_create_reset_token(
     req: AdminResetReq,
     request: Request,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
 ) -> dict:
     auth: AuthManager = request.app.state.auth
     try:
         token, user = auth.admin_create_reset_token(req.username_or_email)
     except AuthError as exc:
+        audit_log(request, "admin_create_reset_token", result="fail", user=admin.get("username"), target=req.username_or_email, detail=exc.code)
         raise _err(exc) from exc
+    audit_log(request, "admin_create_reset_token", result="ok", user=admin.get("username"), target=user.get("username"))
     return {"ok": True, "token": token, "user": user}

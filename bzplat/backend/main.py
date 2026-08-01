@@ -30,7 +30,11 @@ from bzplat.backend.runtime.limits import (
     concurrent_ceiling,
     default_max_concurrent,
 )
-from bzplat.backend.security import RateLimitMiddleware, SecurityHeadersMiddleware
+from bzplat.backend.security import (
+    AccessLogMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     SETTING_ACTION_TIMEOUT,
@@ -215,6 +219,8 @@ def create_app(
 
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RateLimitMiddleware)
+    # AccessLog 最后 add = 最外层，记录所有请求（含被限流的 429）
+    app.add_middleware(AccessLogMiddleware)
     app.include_router(auth_router)
     app.include_router(api_router)
 

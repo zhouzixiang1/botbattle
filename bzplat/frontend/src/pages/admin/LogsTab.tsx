@@ -9,6 +9,13 @@ interface LogState {
 
 const LEVELS = ['', 'ERROR', 'WARNING', 'INFO'] as const
 
+/** 日志文件：app（业务/系统）/ access（HTTP 访问）/ audit（安全审计）。 */
+const FILES = [
+  { key: 'app', label: '应用日志' },
+  { key: 'access', label: '访问日志' },
+  { key: 'audit', label: '审计日志' },
+] as const
+
 function levelOf(line: string): string {
   if (line.includes(' ERROR ')) return 'ERROR'
   if (line.includes(' WARNING ')) return 'WARNING'
@@ -30,6 +37,7 @@ export default function LogsTab() {
   const [data, setData] = useState<LogState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [file, setFile] = useState<string>('app')
   const [level, setLevel] = useState<string>('')
   const [q, setQ] = useState('')
   const [limit, setLimit] = useState(300)
@@ -39,6 +47,7 @@ export default function LogsTab() {
     setError('')
     try {
       const params = new URLSearchParams()
+      params.set('file', file)
       if (level) params.set('level', level)
       if (q) params.set('q', q)
       params.set('limit', String(limit))
@@ -49,7 +58,7 @@ export default function LogsTab() {
     } finally {
       setLoading(false)
     }
-  }, [level, q, limit])
+  }, [file, level, q, limit])
 
   useEffect(() => {
     void load()
@@ -60,7 +69,24 @@ export default function LogsTab() {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <p className="text-xs text-muted-foreground">日志文件：{data?.path ?? '—'}</p>
+        {/* 日志文件切换 */}
+        <div className="inline-flex rounded-lg border border-border p-0.5">
+          {FILES.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              onClick={() => setFile(f.key)}
+              className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+                file === f.key
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-muted-foreground">{data?.path ?? '—'}</p>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <select
             value={level}
@@ -74,7 +100,7 @@ export default function LogsTab() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="关键字/match_id"
+            placeholder="关键字 / IP / action"
             className="w-44 rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground"
           />
           <input
