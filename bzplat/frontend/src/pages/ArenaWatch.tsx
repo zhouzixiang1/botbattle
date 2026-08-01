@@ -134,7 +134,7 @@ export default function ArenaWatch() {
       {events.length === 0 ? (
         <Loading text={status === 'connecting' ? '连接中…' : '暂无事件'} />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
           {/* 左：棋盘/牌桌 + 控制条 */}
           <div className="space-y-3">
             <MatchBoard gameId={gameId} events={pb.visible as RawEvent[]} revealMode="all" />

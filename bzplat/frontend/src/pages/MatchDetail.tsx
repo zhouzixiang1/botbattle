@@ -207,7 +207,7 @@ export default function MatchDetail() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
           {/* 左：棋盘/牌桌 + 手导航 + 控制条 */}
           <div className="space-y-3">
             <MatchBoard gameId={gameId} events={visible} revealMode="all" />

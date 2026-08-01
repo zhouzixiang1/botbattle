@@ -1,10 +1,11 @@
 import { useState, lazy, Suspense } from 'react'
-import { Routes, Route, NavLink, Link, useNavigate } from 'react-router-dom'
+import { useLocation, Routes, Route, NavLink, Link, useNavigate } from 'react-router-dom'
 import { Menu, LogOut, User as UserIcon, Loader2 } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
 import NotificationBell from '@/components/NotificationBell'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { GlobalSearch } from '@/components/shell/global-search'
+import BrandMark from '@/components/BrandMark'
 import { NAV_ITEMS, ADMIN_NAV, type NavItem } from '@/components/shell/nav-config'
 import { Button } from '@/components/ui/button'
 import {
@@ -51,21 +52,34 @@ function PageFallback() {
 
 const navCls = ({ isActive }: { isActive: boolean }) =>
   cn(
-    'inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+    'inline-flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
     isActive
       ? 'bg-primary/10 text-primary'
       : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
   )
 
-function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
-  const { user } = useAuth()
+/** 未登录态（auth 页）不显示侧边栏，内容占满宽度居中。 */
+const AUTH_PATHS = ['/login', '/register', '/verify-email', '/reset-password']
+
+/** 主导航列表（桌面侧栏与移动抽屉共用）。 */
+function navItemsFor(user?: { role?: string } | null): NavItem[] {
   const items = [...NAV_ITEMS]
   if (user?.role === 'admin' || user?.role === 'organizer') items.push(ADMIN_NAV)
+  return items
+}
+
+function NavLinks({
+  onNavigate,
+  user,
+}: {
+  onNavigate?: () => void
+  user?: { role?: string } | null
+}) {
   return (
-    <nav className="flex flex-col gap-1">
-      {items.map((item) => (
+    <nav className="flex flex-col gap-0.5">
+      {navItemsFor(user).map((item) => (
         <NavLink key={item.to} to={item.to} end={item.end} className={navCls} onClick={onNavigate}>
-          <item.icon className="size-4" />
+          <item.icon className="size-4 shrink-0" />
           {item.label}
         </NavLink>
       ))}
@@ -74,8 +88,9 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function AppShell() {
-  const { user, isLoggedIn, loading, logout } = useAuth()
+  const { user, isLoggedIn, logout } = useAuth()
   const nav = useNavigate()
+  const location = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
 
   const onLogout = async () => {
@@ -83,155 +98,163 @@ export function AppShell() {
     nav('/')
   }
 
+  // auth 页不显示桌面侧边栏（未登录态更干净，内容占满居中）
+  const isAuthPage = AUTH_PATHS.includes(location.pathname)
+  const showSidebar = isLoggedIn && !isAuthPage
+
   return (
-    <div className="flex min-h-screen flex-col bg-background font-sans text-foreground">
-      {/* 顶栏 */}
-      <header className="sticky top-0 z-50 border-b border-border bg-background/85 backdrop-blur-md">
-        <div className="mx-auto flex h-14 w-full max-w-screen-2xl items-center gap-2 px-4 lg:px-6">
-          {/* 移动端汉堡 */}
-          <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-            <SheetTrigger asChild>
-              <Button variant="ghost" size="icon" className="md:hidden" aria-label="菜单">
-                <Menu className="size-5" />
+    <div className="flex min-h-screen flex-col bg-background font-sans text-foreground lg:flex-row">
+      {/* 桌面侧边栏（lg 及以上，已登录非 auth 页） */}
+      {showSidebar && (
+        <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r border-border bg-card lg:flex">
+          {/* Logo + 搜索 */}
+          <div className="flex flex-col gap-3 border-b border-border p-4">
+            <Link to="/" className="flex items-center">
+              <BrandMark size="md" />
+            </Link>
+            <GlobalSearch compact />
+          </div>
+
+          {/* 导航（flex-1 占满中部，可滚动） */}
+          <div className="no-scrollbar flex-1 overflow-y-auto p-3">
+            <NavLinks user={user} />
+          </div>
+
+          {/* 底部用户区 + 工具 */}
+          <div className="flex flex-col gap-2 border-t border-border p-3">
+            <div className="flex items-center justify-end gap-1">
+              <ThemeToggle />
+              <NotificationBell />
+            </div>
+            <div className="flex items-center gap-2 rounded-lg px-1 py-1">
+              <UserIcon className="size-4 shrink-0 text-primary" />
+              <Link
+                to={`/user/${encodeURIComponent(user?.username ?? '')}`}
+                className="min-w-0 flex-1 truncate text-sm font-medium text-foreground hover:text-primary"
+                title={user?.username}
+              >
+                {user?.display_name || user?.username}
+              </Link>
+              {user?.role === 'admin' && (
+                <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
+                  admin
+                </span>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => void onLogout()}
+                className="size-8 shrink-0 text-muted-foreground"
+                aria-label="登出"
+              >
+                <LogOut className="size-4" />
               </Button>
-            </SheetTrigger>
-            <SheetContent side="left" className="w-72 p-4">
-              <SheetHeader>
-                <SheetTitle className="flex items-center gap-2 text-left">
-                  <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
-                    B
-                  </span>
-                  <span className="font-display">Botbattle</span>
-                </SheetTitle>
-              </SheetHeader>
-              <div className="mt-4 px-1">
-                <NavLinks onNavigate={() => setMobileOpen(false)} />
-              </div>
-            </SheetContent>
-          </Sheet>
+            </div>
+          </div>
+        </aside>
+      )}
 
-          {/* Logo */}
-          <Link
-            to="/"
-            className="flex shrink-0 items-center gap-2 font-semibold tracking-tight text-foreground"
-          >
-            <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground shadow-soft">
-              B
-            </span>
-            <span className="hidden font-display text-lg sm:inline">Botbattle</span>
-          </Link>
+      {/* 右侧主体（侧栏旁，或全宽） */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* 移动端顶栏（lg 以下，含桌面 auth 页的精简顶条） */}
+        <header className="sticky top-0 z-50 border-b border-border bg-background/85 backdrop-blur-md lg:hidden">
+          <div className="flex h-14 w-full items-center gap-2 px-4">
+            {/* 移动端汉堡（仅登录态有导航可开） */}
+            {showSidebar ? (
+              <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+                <SheetTrigger asChild>
+                  <Button variant="ghost" size="icon" aria-label="菜单">
+                    <Menu className="size-5" />
+                  </Button>
+                </SheetTrigger>
+                <SheetContent side="left" className="w-72 p-4">
+                  <SheetHeader>
+                    <SheetTitle className="text-left">
+                      <BrandMark />
+                    </SheetTitle>
+                  </SheetHeader>
+                  <div className="mt-4 px-1">
+                    <NavLinks onNavigate={() => setMobileOpen(false)} user={user} />
+                  </div>
+                </SheetContent>
+              </Sheet>
+            ) : (
+              <BrandMark />
+            )}
 
-          {/* 桌面端主导航 */}
-          <nav className="ml-2 hidden items-center gap-0.5 md:flex">
-            <DesktopNav />
-          </nav>
-
-          {/* 搜索（中间填充） */}
-          <div className="ml-auto flex items-center gap-1.5">
-            <GlobalSearch />
-            <ThemeToggle />
-
-            {loading ? (
-              <span className="text-xs text-muted-foreground">…</span>
-            ) : isLoggedIn && user ? (
-              <div className="flex items-center gap-1.5">
+            {/* 移动端右侧操作（登录态） */}
+            {showSidebar ? (
+              <div className="ml-auto flex items-center gap-1">
+                <GlobalSearch />
+                <ThemeToggle />
                 <NotificationBell />
                 <Link
-                  to={`/user/${encodeURIComponent(user.username)}`}
-                  className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                  title={user.username}
+                  to={`/user/${encodeURIComponent(user?.username ?? '')}`}
+                  className="inline-flex size-9 items-center justify-center rounded-lg text-primary transition-colors hover:bg-accent"
+                  title={user?.username}
                 >
-                  <UserIcon className="size-4 text-primary" />
-                  <span className="hidden max-w-[8rem] truncate font-medium text-primary sm:inline">
-                    {user.display_name || user.username}
-                  </span>
-                  {user.role === 'admin' && (
-                    <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
-                      admin
-                    </span>
-                  )}
+                  <UserIcon className="size-4" />
                 </Link>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void onLogout()}
-                  className="gap-1.5 text-muted-foreground"
-                >
-                  <LogOut className="size-3.5" />
-                  <span className="hidden sm:inline">登出</span>
-                </Button>
               </div>
             ) : (
-              <div className="flex items-center gap-1">
-                <NavLink to="/login" className={navCls}>
-                  登录
-                </NavLink>
-                <Button asChild size="sm" className="shadow-soft">
-                  <Link to="/register">注册</Link>
-                </Button>
+              <div className="ml-auto flex items-center gap-1">
+                <ThemeToggle />
+                {!isLoggedIn && (
+                  <>
+                    <NavLink to="/login" className={navCls}>
+                      登录
+                    </NavLink>
+                    <Button asChild size="sm" className="shadow-soft">
+                      <Link to="/register">注册</Link>
+                    </Button>
+                  </>
+                )}
               </div>
             )}
           </div>
-        </div>
-      </header>
+        </header>
 
-      {/* 主体 */}
-      <main className="mx-auto w-full max-w-screen-2xl flex-1 px-4 py-6 lg:px-6">
-        <Suspense fallback={<PageFallback />}>
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/arena" element={<ArenaWatch />} />
-          <Route path="/watch/:id" element={<ArenaWatch />} />
-          <Route path="/challenge" element={<Challenge />} />
-          <Route path="/leaderboard" element={<Leaderboard />} />
-          <Route path="/history" element={<History />} />
-          <Route path="/match/:id" element={<MatchDetail />} />
-          <Route path="/bot/:id" element={<BotDetail />} />
-          <Route path="/play/:id" element={<HumanPlay />} />
-          <Route path="/my-bots" element={<MyBots />} />
-          <Route path="/wiki" element={<Wiki />} />
-          <Route path="/data" element={<DataDownload />} />
-          <Route path="/contests" element={<Contests />} />
-          <Route path="/contests/:id" element={<ContestDetail />} />
-          <Route path="/user/:name" element={<UserProfile />} />
-          <Route path="/search" element={<SearchPage />} />
-          <Route path="/notifications" element={<Notifications />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
-          <Route path="/verify-email" element={<VerifyEmail />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
-          <Route path="/admin" element={<Admin />} />
-        </Routes>
-        </Suspense>
-      </main>
+        {/* 主体内容 */}
+        <main className="mx-auto w-full flex-1 px-4 py-6 lg:px-8">
+          <Suspense fallback={<PageFallback />}>
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/arena" element={<ArenaWatch />} />
+              <Route path="/watch/:id" element={<ArenaWatch />} />
+              <Route path="/challenge" element={<Challenge />} />
+              <Route path="/leaderboard" element={<Leaderboard />} />
+              <Route path="/history" element={<History />} />
+              <Route path="/match/:id" element={<MatchDetail />} />
+              <Route path="/bot/:id" element={<BotDetail />} />
+              <Route path="/play/:id" element={<HumanPlay />} />
+              <Route path="/my-bots" element={<MyBots />} />
+              <Route path="/wiki" element={<Wiki />} />
+              <Route path="/data" element={<DataDownload />} />
+              <Route path="/contests" element={<Contests />} />
+              <Route path="/contests/:id" element={<ContestDetail />} />
+              <Route path="/user/:name" element={<UserProfile />} />
+              <Route path="/search" element={<SearchPage />} />
+              <Route path="/notifications" element={<Notifications />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="/login" element={<Login />} />
+              <Route path="/register" element={<Register />} />
+              <Route path="/verify-email" element={<VerifyEmail />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
+              <Route path="/admin" element={<Admin />} />
+            </Routes>
+          </Suspense>
+        </main>
 
-      {/* 页脚 */}
-      <footer className="border-t border-border">
-        <div className="mx-auto flex w-full max-w-screen-2xl flex-col items-center justify-between gap-2 px-4 py-5 text-xs text-muted-foreground sm:flex-row lg:px-6">
-          <span>Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
-          <span className="opacity-70">React 19 · Tailwind v4 · shadcn/ui</span>
-        </div>
-      </footer>
+        {/* 页脚（跟随主体宽度，不跨侧栏） */}
+        <footer className="border-t border-border">
+          <div className="flex w-full flex-col items-center justify-between gap-2 px-4 py-5 text-xs text-muted-foreground sm:flex-row lg:px-8">
+            <span>Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
+            <span className="opacity-70">React 19 · Tailwind v4 · shadcn/ui</span>
+          </div>
+        </footer>
+      </div>
     </div>
-  )
-}
-
-/** 桌面端导航（带图标，主项） */
-function DesktopNav() {
-  const { user } = useAuth()
-  const items = [...NAV_ITEMS]
-  if (user?.role === 'admin' || user?.role === 'organizer') items.push(ADMIN_NAV)
-  return (
-    <>
-      {items.map((item) => (
-        <NavLink key={item.to} to={item.to} end={item.end} className={navCls}>
-          <item.icon className="size-4" />
-          <span className="hidden lg:inline">{item.label}</span>
-        </NavLink>
-      ))}
-    </>
   )
 }
 
