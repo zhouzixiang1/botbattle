@@ -20,7 +20,7 @@
 | `--memory=512m` | 内存上限（硬编码） |
 | `--network=none` | 完全断网 |
 | `--read-only` | 根文件系统只读 |
-| `--tmpfs /tmp:rw,noexec,nosuid,size=64m` | 仅 /tmp 可写且不可执行 |
+| `--tmpfs /tmp:rw,exec,nosuid,size=64m` | /tmp 可写且可执行（PyInstaller 自解压 ELF / ld.so 延迟绑定需 /tmp 可执行映射；根 fs 仍只读） |
 | `--cap-drop=ALL` | 丢弃全部 Linux capabilities |
 | `--security-opt no-new-privileges` | 禁止提权 |
 | `--user 65534:65534` | 以 nobody 身份运行 |

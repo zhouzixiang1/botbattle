@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from bzplat.backend.engine.result import MatchResult, RoundResult
 from bzplat.backend.protocol import board_protocol as proto
+from bzplat.backend.runtime.binary_runner import BotCrashedError
 
 BOARD_SIZE = 15
 DecideFn = Callable[[int, dict[str, Any]], Any]
@@ -120,6 +121,10 @@ class GomokuSession:
             )
             try:
                 raw = await self._decide(decide, to_move, req)
+            except BotCrashedError:
+                # Bot 崩溃不可恢复——向上传播，由编排层 abort 对局，
+                # 不能像普通落子错误那样判对手赢（那会掩盖崩溃真相）。
+                raise
             except Exception:
                 winner = 1 - to_move
                 reason = "error"

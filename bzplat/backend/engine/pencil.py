@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from bzplat.backend.engine.result import MatchResult, RoundResult
 from bzplat.backend.protocol import board_protocol as proto
+from bzplat.backend.runtime.binary_runner import BotCrashedError
 
 DEFAULT_N = 11  # 点数边长；Botzone Pencil 正式规则
 DecideFn = Callable[[int, dict[str, Any]], Any]
@@ -166,6 +167,9 @@ class PencilSession:
             )
             try:
                 raw = await self._decide(decide, to_move, req)
+            except BotCrashedError:
+                # Bot 崩溃不可恢复——向上传播触发 abort，不吞成普通落子错误。
+                raise
             except Exception:
                 winner = 1 - to_move
                 reason = "error"
