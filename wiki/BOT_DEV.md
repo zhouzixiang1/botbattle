@@ -166,7 +166,7 @@ x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
 你的 Bot 在受限的沙箱里执行，请确保程序不依赖被禁用的能力：
 
 - **无网络**：容器以 `--network=none` 启动，任何联网调用都会失败。
-- **资源限制**：内存上限（默认 512MB）、CPU（默认 0.5 核）。
+- **资源限制**：内存上限（默认 512MB）、CPU（默认 1 核）。
 - **只读根文件系统** + 仅 `/tmp` 可写（`noexec`，不能在里面执行程序）。
 - **最小权限**：`--cap-drop=ALL`、`--security-opt no-new-privileges`、以非 root 用户（65534）运行。
 - **无 setuid**：禁止提权。

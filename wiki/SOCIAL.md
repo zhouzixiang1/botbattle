@@ -29,4 +29,4 @@
 - `follows(follower_id, followee_id, created_at)` + `CHECK(follower_id <> followee_id)` + 双向索引。
 - `favorites(user_id, bot_id, created_at)` + 双向索引。
 
-关注触发通知经 `app.state.notifier.notify(type='followed')`（PR-3 基础设施）。
+关注触发通知经 `app.state.notifier.notify(type='followed')`。

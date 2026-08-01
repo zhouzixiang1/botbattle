@@ -1,6 +1,6 @@
 # 经验与等级系统
 
-用户通过平台活动获得经验（XP），累积升级（Level）。对标 Botzone 的 level + 活跃度体系，等级可用于功能 gating（如 PR-10 数据下载需 level ≥ 1）。
+用户通过平台活动获得经验（XP），累积升级（Level）。对标 Botzone 的 level + 活跃度体系，等级可用于功能 gating（如 数据下载需 level ≥ 1）。
 
 ## 经验奖励（常量在 `store/schema.py`）
 
@@ -48,7 +48,7 @@ users 表加列 `xp`/`level`/`last_active_at`（migration）。`GET /api/auth/me
 
 ## 功能 gating
 
-`LEVEL_GATE_DOWNLOAD = 1`（PR-10 数据下载需 level ≥ 1）。
+`LEVEL_GATE_DOWNLOAD = 1`。
 
 ## 前端
 

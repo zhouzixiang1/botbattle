@@ -1,7 +1,7 @@
 [project]
 name = "botzone-platform"
 version = "0.1.0"
-description = "Botzone 风格德州扑克竞赛平台：账号、二进制 Bot 沙箱对战、比赛、排行榜、Wiki"
+description = "多游戏 Bot 线上对战平台：账号、二进制 Bot 沙箱对战（德州扑克/五子棋/点格棋）、赛事、排行榜、人类对战、社交"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

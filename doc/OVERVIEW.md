@@ -1,0 +1,117 @@
+# 项目总览
+
+> 本文档为甲方与项目干系人提供 botbattle 平台的全貌：定位、能力、技术栈、目录结构与交付物。
+
+## 1. 项目定位
+
+**botbattle** 是一个**多游戏 Bot 线上对战平台**：用户上传自行编写的二进制 Bot 程序，平台在安全沙箱（Docker / Wine）中自动运行对局，提供实时观赛、对局回放、Glicko-2 评分排行榜、组织者赛事、人类亲自上场等功能。
+
+支持三款游戏（这是有意的产品边界，非技术限制）：
+
+| 游戏 | game_id | 规则摘要 |
+|------|---------|---------|
+| 德州扑克（HU NLHE） | `holdem` | 70 手、20000 筹码、50/100 盲注、raise-to-total 语义 |
+| 五子棋 | `gomoku` | 15×15、黑先、五连即胜（含长连）、无禁手 |
+| 点格棋（Dots and Boxes） | `pencil` | N=11 点（交错网格 21×21）、成格连走计分 |
+
+## 2. 核心能力一览
+
+| 能力域 | 说明 |
+|--------|------|
+| **Bot 上传与沙箱对战** | 支持 ELF（Linux）/ PE（Windows via Wine）二进制，自动魔数分类；Docker 硬隔离（CPU/内存/网络/文件系统全限制） |
+| **三游戏裁判引擎** | 平台内置裁判模块，Bot 通过 stdin/stdout 行协议交互；引擎与赛制/编排完全解耦 |
+| **实时观赛** | SSE 推送对局事件流，前端棋盘/牌桌逐步可视化 |
+| **对局回放** | 完整事件录制，支持播放/暂停/步进/倍速/逐手跳转 |
+| **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场（独立并发，不计评分） |
+| **Glicko-2 排行榜** | 自实现评分系统，按游戏分别排名；含段位称号（6 档）与排名变化趋势 |
+| **赛事系统** | 6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰），完整生命周期（草稿→报名→进行→休息→结束），积分榜 + 对阵图 |
+| **社交与互动** | 关注用户、收藏 Bot、对局/Bot 评论、点赞、浏览计数、点赞榜 |
+| **通知系统** | 站内通知 + 可选邮件提醒（对局完成/被关注/赛事/评论） |
+| **用户体系** | 注册/登录/邮箱验证、个人主页、资料编辑、头像、经验与等级（等级 gating 部分功能） |
+| **全局搜索** | Cmd+K 命令面板，聚合搜索 Bot / 用户 / 对局 |
+| **数据集下载** | 按游戏×月份打包对局数据（gzip JSON 行），等级 gating |
+| **管理后台** | 10 个 Tab：仪表盘、用户/Bot/对局/赛事管理、邮件、运行时热配置、裁判参数热调、赛制模板设计器、日志查看 |
+| **闲时自动对局** | 后台自动调度 ladder 对局维护天梯（陈旧度优先 + 定级赛优先） |
+| **站点可配置** | 站名 / Logo / 公告 / 关于（admin 可配） |
+
+## 3. 技术栈
+
+| 层 | 技术 | 版本 |
+|----|------|------|
+| **后端** | Python + FastAPI + uvicorn + SQLite | Python ≥ 3.12，FastAPI ≥ 0.115 |
+| **CLI** | typer | 入口 `botzone`（serve / create-admin） |
+| **评分** | Glicko-2（自实现，无外部依赖） | — |
+| **沙箱** | Docker（ELF: debian-slim / PE: docker-wine） | 必须，`BZ_BOT_LOCAL=1` 可退回本机（仅测试） |
+| **邮件** | SMTP（注册验证 / 密码重置 / 通知） | python 标准库 smtplib |
+| **前端** | React + Vite + Tailwind CSS v4 + shadcn/ui | React 19 / Vite 8 / Tailwind v4（CSS-first） |
+| **UI 组件** | shadcn/ui（new-york）+ Radix UI + lucide-react + recharts | 26 个共享原语 |
+| **暗色模式** | next-themes（class 策略）+ OKLCH 双主题 token | 浅色默认 + 暗色对等 |
+| **路由** | react-router-dom（HashRouter） | v7 |
+| **实时通信** | SSE（观赛）+ WebSocket（人类对战） | — |
+
+## 4. 目录结构
+
+```
+botbattle/
+├── bzplat/                    # 应用代码（Python 包名 bzplat，刻意规避标准库 platform）
+│   ├── backend/               # 后端（45 个非测试 .py（72 含测试，~14933 全量行））
+│   │   ├── main.py            # FastAPI 应用工厂 + 装配 + lifespan
+│   │   ├── api_routes.py      # 主 REST 路由（95 路由）
+│   │   ├── auth/              # 认证（13 路由 + 验证码 + 依赖）
+│   │   ├── store/             # SQLite 数据层（Store 类 + schema.py 常量唯一来源）
+│   │   ├── engine/            # 裁判引擎（holdem/gomoku/pencil + registry 路由 + tiers 段位）
+│   │   ├── protocol/          # 行协议（json_protocol: holdem / board_protocol: 棋类）
+│   │   ├── runtime/           # 沙箱（BinaryRunner: docker/wine/local + limits 资源硬顶）
+│   │   ├── matches/           # 编排（orchestrator + runner + auto_matcher 闲时自动）
+│   │   ├── contests/          # 赛制（templates 8 模板 + stages 对阵生成 + manager 状态机）
+│   │   ├── notifications/     # 通知管理器（站内 + 邮件）
+│   │   ├── bots/              # Bot 上传/版本/分类
+│   │   ├── rating/            # Glicko-2 评分
+│   │   ├── mail/              # SMTP Mailer + 模板
+│   │   ├── security.py        # 安全头 + IP 限流中间件
+│   │   ├── logging_config.py  # 统一日志（logs/app.log）
+│   │   ├── crypto.py          # 密码 hash + session token
+│   │   ├── cli.py             # typer CLI（serve / create-admin）
+│   │   └── tests/             # 后端测试（26 个测试文件）
+│   └── frontend/              # 前端（React 19 + Vite + Tailwind v4 + shadcn/ui）
+│       └── src/
+│           ├── components/ui/     # 26 个 shadcn 共享原语
+│           ├── components/shell/  # 全局 Shell + 导航 + Cmd+K 搜索
+│           ├── components/{poker,gomoku,pencil}/  # 棋盘/牌桌可视化
+│           ├── pages/             # 21 页面 + admin/ 10 Tab
+│           └── lib/               # tiers/games/utils/markdown
+├── doc/                       # 本目录：面向甲方的交付文档（6 份）
+├── wiki/                      # 面向 Bot 玩家的规则/协议/开发指南文档
+├── contracts/                 # 协议 JSON Schema
+├── samples/                   # 三游戏样例 Bot 源码 + 参考裁判脚本
+├── scripts/                   # 运维脚本（启停/重建/冒烟/压测/浏览器验收/种子）
+├── deploy/                    # systemd unit
+├── pyproject.toml             # Python 包定义 + 依赖 + pytest 配置
+├── AGENTS.md                  # 开发规范（架构分层 + 约束 + 文档规范）
+└── README.md                  # 项目门面
+```
+
+## 5. 交付物清单
+
+| 交付物 | 说明 | 位置 |
+|--------|------|------|
+| **源代码** | 后端 + 前端完整源码 | `bzplat/` |
+| **交付文档**（本文档集） | 6 份甲方交付文档 | `doc/` |
+| **规则与协议文档** | 三游戏规则、对局协议、Bot 开发指南 | `wiki/` |
+| **测试套件** | 26 个后端测试 + 压测 + 浏览器验收 | `bzplat/backend/tests/`、`scripts/` |
+| **部署配置** | systemd unit + 启停脚本 | `deploy/`、`scripts/platform-ctl.sh` |
+| **样例 Bot** | 三游戏可运行的样例 Bot 源码 | `samples/` |
+
+## 6. 如何使用本文档
+
+| 如果你想了解… | 请阅读 |
+|----------------|--------|
+| 项目是什么、能做什么 | 本文档（OVERVIEW） |
+| 需求是什么、是否都满足了 | [REQUIREMENTS.md](./REQUIREMENTS.md) |
+| 系统怎么设计的 | [DESIGN.md](./DESIGN.md) |
+| 怎么开发、部署、运维 | [DEVELOPMENT.md](./DEVELOPMENT.md) |
+| 测得怎么样、能否验收 | [TESTING.md](./TESTING.md) |
+| 整体交付情况、成果与遗留 | [SUMMARY.md](./SUMMARY.md) |
+| 怎么写 Bot、游戏规则 | [../wiki/](../wiki/)（面向 Bot 玩家） |
+
+> 返回 [doc/INDEX.md](./INDEX.md)

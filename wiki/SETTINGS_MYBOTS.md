@@ -25,4 +25,4 @@
 | `PATCH /api/bots/{id}` | owner 改 display_name/description/is_public/is_active（受限白名单；非 owner 403） |
 | `DELETE /api/bots/{id}` | owner 软删（is_active=0 + is_public=0；非 owner 403） |
 
-> 资料编辑（profile/avatar/change-password）端点在 PR-2/PR-3 已就绪，本 PR 补全前端 UI 并聚合到 /settings。
+> 资料编辑（profile/avatar/change-password）端点已就绪，设置中心补全前端 UI 并聚合到 /settings。

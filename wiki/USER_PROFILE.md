@@ -12,7 +12,7 @@
 - 总战绩卡片：总胜率、胜场、负/平场、Bot 数
 - Bot 列表（卡片网格，链接到 Bot 详情页）
 
-查看自己主页时显示「编辑资料」按钮（链接到 `/settings`，PR-8 完善；profile/avatar 端点 PR-2 已就绪）。
+查看自己主页时显示「编辑资料」按钮（链接到 `/settings`，完善；profile/avatar 端点 已就绪）。
 
 ## 全局搜索 `/search`
 
@@ -22,7 +22,7 @@
 - **Bot**：按 name/display_name 模糊搜索（`/api/search?q=&type=bots`，含 owner 名 + rating）
 - **对局**：按 bot 名模糊搜索已完成对局（`/api/search?q=&type=matches`）
 
-## 个人资料编辑（后端端点，PR-2）
+## 个人资料编辑（后端端点，
 
 | 端点 | 鉴权 | 说明 |
 |------|------|------|
