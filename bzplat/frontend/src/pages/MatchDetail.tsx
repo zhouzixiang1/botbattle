@@ -5,6 +5,7 @@ import MatchBoard from '../components/MatchBoard'
 import { type RawEvent } from '../components/poker/useMatchState'
 import { apiGet, errMsg } from '../api'
 import { gameLabel, normalizeGameId } from '../lib/games'
+import Comments from '../components/Comments'
 
 const SPEEDS = [
   { label: '0.5x', ms: 1400 },
@@ -372,6 +373,8 @@ export default function MatchDetail() {
       <Link to="/" className="mt-6 inline-block text-sm text-brand-600 hover:text-brand-700">
         ← 返回
       </Link>
+
+      {id && <Comments targetType="match" targetId={id} />}
     </PageStub>
   )
 }

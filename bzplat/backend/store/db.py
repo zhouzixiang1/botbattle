@@ -149,6 +149,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, "matches", "n_dots", "INTEGER")  # pencil 点阵边长（可空）
         _add_col(conn, "matches", "human_user_id", "INTEGER")  # 人类对战：人类用户 id
         _add_col(conn, "matches", "human_seat", "INTEGER")  # 人类坐位 0/1
+        _add_col(conn, "matches", "likes_count", "INTEGER NOT NULL DEFAULT 0")  # 点赞计数
+        _add_col(conn, "matches", "views_count", "INTEGER NOT NULL DEFAULT 0")  # 浏览计数
         # 放宽 match_type CHECK 以纳入 'ladder' / 'human'
         m_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'"
@@ -1298,6 +1300,124 @@ class Store:
                 (bot_id, max(1, min(limit, 500))),
             ).fetchall()
             return [_row(r) for r in reversed(rows)]
+
+    # ── comments（评论）───────────────────────────────────────
+    def add_comment(
+        self, user_id: int, target_type: str, target_id: str, body: str
+    ) -> dict:
+        with self._tx() as c:
+            cur = c.execute(
+                "INSERT INTO comments(target_type, target_id, user_id, body, "
+                "created_at) VALUES(?,?,?,?,?)",
+                (target_type, str(target_id), user_id, body, _now()),
+            )
+            cid = cur.lastrowid
+            return _row(
+                c.execute(
+                    "SELECT c.*, u.username, u.display_name AS user_display "
+                    "FROM comments c LEFT JOIN users u ON c.user_id=u.id "
+                    "WHERE c.id=?",
+                    (cid,),
+                ).fetchone()
+            )
+
+    def list_comments(
+        self, target_type: str, target_id: str, *, limit: int = 100
+    ) -> list[dict]:
+        with self._tx() as c:
+            return [_row(r) for r in c.execute(
+                "SELECT c.*, u.username, u.display_name AS user_display "
+                "FROM comments c LEFT JOIN users u ON c.user_id=u.id "
+                "WHERE c.target_type=? AND c.target_id=? "
+                "ORDER BY c.id DESC LIMIT ?",
+                (target_type, str(target_id), max(1, min(limit, 500))),
+            )]
+
+    def delete_comment(self, comment_id: int, user_id: int) -> bool:
+        """仅作者或 admin 可删；返回是否删除成功。"""
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT user_id FROM comments WHERE id=?", (comment_id,)
+            ).fetchone()
+            if not row:
+                return False
+            cur = c.execute(
+                "DELETE FROM comments WHERE id=? AND user_id=?",
+                (comment_id, user_id),
+            )
+            return cur.rowcount > 0
+
+    def comment_count(self, target_type: str, target_id: str) -> int:
+        with self._tx() as c:
+            return int(c.execute(
+                "SELECT COUNT(*) FROM comments WHERE target_type=? AND target_id=?",
+                (target_type, str(target_id)),
+            ).fetchone()[0])
+
+    # ── likes（点赞）──────────────────────────────────────────
+    def like(
+        self, user_id: int, target_type: str, target_id: str
+    ) -> bool:
+        """点赞；返回 True 表示新建。"""
+        tid = str(target_id)
+        with self._tx() as c:
+            existing = c.execute(
+                "SELECT 1 FROM likes WHERE user_id=? AND target_type=? AND target_id=?",
+                (user_id, target_type, tid),
+            ).fetchone()
+            if existing:
+                return False
+            c.execute(
+                "INSERT INTO likes(user_id, target_type, target_id, created_at) "
+                "VALUES(?,?,?,?)",
+                (user_id, target_type, tid, _now()),
+            )
+            # 对 match 点赞顺带 +1 计数
+            if target_type == "match":
+                c.execute(
+                    "UPDATE matches SET likes_count = likes_count + 1 WHERE id=?",
+                    (tid,),
+                )
+            return True
+
+    def unlike(
+        self, user_id: int, target_type: str, target_id: str
+    ) -> bool:
+        tid = str(target_id)
+        with self._tx() as c:
+            cur = c.execute(
+                "DELETE FROM likes WHERE user_id=? AND target_type=? AND target_id=?",
+                (user_id, target_type, tid),
+            )
+            if cur.rowcount > 0 and target_type == "match":
+                c.execute(
+                    "UPDATE matches SET likes_count = MAX(0, likes_count - 1) WHERE id=?",
+                    (tid,),
+                )
+            return cur.rowcount > 0
+
+    def is_liked(
+        self, user_id: int, target_type: str, target_id: str
+    ) -> bool:
+        with self._tx() as c:
+            return c.execute(
+                "SELECT 1 FROM likes WHERE user_id=? AND target_type=? AND target_id=?",
+                (user_id, target_type, str(target_id)),
+            ).fetchone() is not None
+
+    def like_count(self, target_type: str, target_id: str) -> int:
+        with self._tx() as c:
+            return int(c.execute(
+                "SELECT COUNT(*) FROM likes WHERE target_type=? AND target_id=?",
+                (target_type, str(target_id)),
+            ).fetchone()[0])
+
+    def incr_match_view(self, match_id: str) -> None:
+        with self._tx() as c:
+            c.execute(
+                "UPDATE matches SET views_count = views_count + 1 WHERE id=?",
+                (match_id,),
+            )
 
     # ── follows（关注关系）────────────────────────────────────
     def follow(self, follower_id: int, followee_id: int) -> bool:

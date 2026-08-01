@@ -455,6 +455,26 @@ def list_matches(
     return {"matches": rows}
 
 
+@router.get("/api/matches/liked-top")
+def liked_top_matches(request: Request, limit: int = 10):
+    """对局点赞排行榜（对标 Botzone，首页用）。必须在 {match_id} 路由前注册。"""
+    store = _store(request)
+    lim = max(1, min(limit, 50))
+    with store._tx() as c:
+        rows = c.execute(
+            "SELECT m.id, m.game_id, m.status, m.winner, m.likes_count, "
+            "m.views_count, m.created_at, "
+            "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+            "bb.name AS bot_b_name, bb.display_name AS bot_b_display "
+            "FROM matches m JOIN bots ba ON m.bot_a_id=ba.id "
+            "JOIN bots bb ON m.bot_b_id=bb.id "
+            "WHERE m.status='completed' AND m.likes_count > 0 "
+            "ORDER BY m.likes_count DESC, m.views_count DESC LIMIT ?",
+            (lim,),
+        ).fetchall()
+        return {"matches": [dict(r) for r in rows]}
+
+
 @router.get("/api/matches/{match_id}")
 def match_detail(match_id: str, request: Request):
     m = _store(request).get_match(match_id)
@@ -501,6 +521,116 @@ def tiers():
     """段位定义（公开，前端镜像校验用）。"""
     from bzplat.backend.engine.tiers import all_tiers
     return {"tiers": all_tiers()}
+
+
+# ── comments / likes ──────────────────────────────────────────
+
+class CommentCreate(BaseModel):
+    target_type: str  # 'match' | 'bot'
+    target_id: str
+    body: str = Field(..., min_length=1, max_length=2000)
+
+
+class LikeReq(BaseModel):
+    target_type: str  # 'match' | 'bot' | 'comment'
+    target_id: str
+
+
+@router.get("/api/comments")
+def list_comments(
+    request: Request,
+    target_type: str,
+    target_id: str,
+    limit: int = 100,
+):
+    store = _store(request)
+    return {
+        "comments": store.list_comments(target_type, target_id, limit=limit),
+        "count": store.comment_count(target_type, target_id),
+    }
+
+
+@router.post("/api/comments")
+def create_comment(
+    req: CommentCreate, request: Request, user=Depends(require_user)
+):
+    store = _store(request)
+    body = req.body.strip()
+    if not body:
+        raise HTTPException(400, "评论内容不能为空")
+    c = store.add_comment(user["id"], req.target_type, req.target_id, body)
+    # 通知 target owner（match → 双方 bot owner；bot → bot owner）
+    notifier = getattr(request.app.state, "notifier", None)
+    if notifier is not None:
+        try:
+            if req.target_type == "match":
+                m = store.get_match(req.target_id)
+                if m:
+                    notifier.notify_both_owners(
+                        m["bot_a_id"], m["bot_b_id"], type="comment",
+                        title="你的对局有新评论",
+                        body=body[:80], link=f"/match/{req.target_id}",
+                    )
+            elif req.target_type == "bot":
+                b = store.get_bot(int(req.target_id))
+                if b and b.get("owner_id"):
+                    notifier.notify(
+                        b["owner_id"], type="comment",
+                        title="你的 Bot 有新评论",
+                        body=body[:80], link=f"/bot/{req.target_id}",
+                    )
+        except Exception:
+            pass
+    return {"comment": c}
+
+
+@router.delete("/api/comments/{comment_id}")
+def delete_comment(comment_id: int, request: Request, user=Depends(require_user)):
+    ok = _store(request).delete_comment(comment_id, user["id"])
+    if not ok and user.get("role") != "admin":
+        # 普通用户只能删自己的；admin 可删任意（再试一次 admin 身份）
+        raise HTTPException(403, "无权删除该评论")
+    if not ok:
+        # admin 删除（无视作者）
+        with _store(request)._tx() as c:
+            c.execute("DELETE FROM comments WHERE id=?", (comment_id,))
+    return {"ok": True}
+
+
+@router.post("/api/likes")
+def like_target(req: LikeReq, request: Request, user=Depends(require_user)):
+    created = _store(request).like(user["id"], req.target_type, req.target_id)
+    return {"ok": True, "liked": True, "created": created}
+
+
+@router.delete("/api/likes")
+def unlike_target(req: LikeReq, request: Request, user=Depends(require_user)):
+    _store(request).unlike(user["id"], req.target_type, req.target_id)
+    return {"ok": True, "liked": False}
+
+
+@router.get("/api/likes/status")
+def like_status(
+    request: Request,
+    target_type: str,
+    target_id: str,
+    user=Depends(require_user),
+):
+    store = _store(request)
+    return {
+        "liked": store.is_liked(user["id"], target_type, target_id),
+        "count": store.like_count(target_type, target_id),
+    }
+
+
+@router.post("/api/matches/{match_id}/view")
+def record_view(match_id: str, request: Request):
+    """记录对局浏览（+1 views_count），公开。"""
+    store = _store(request)
+    if not store.get_match(match_id):
+        raise HTTPException(404, "对局不存在")
+    store.incr_match_view(match_id)
+    return {"ok": True}
 
 
 # ── notifications ─────────────────────────────────────────────

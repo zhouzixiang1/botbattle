@@ -21,6 +21,7 @@
 | [用户主页与搜索](#/wiki?slug=user-profile) | 用户档案/战绩/Bot 列表 + 全局搜索 + 资料编辑 |
 | [通知系统](#/wiki?slug=notifications) | 站内通知 + 邮件提醒（铃铛/列表/偏好） |
 | [社交](#/wiki?slug=social) | 关注用户 + 收藏 Bot |
+| [评论与点赞](#/wiki?slug=comments-likes) | 对局/Bot 评论 + 点赞 + 浏览 + 点赞榜 |
 | [段位称号](#/wiki?slug=tier) | Rating→段位映射 + 排名变化趋势 |
 | [压测](#/wiki?slug=loadtest) | 大规模系统压测脚本（批量用户 + 全端点覆盖） |
 

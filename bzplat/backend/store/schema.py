@@ -155,6 +155,27 @@ CREATE TABLE IF NOT EXISTS rating_history (
 );
 CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, id DESC);
 
+-- 评论（target_type = match|bot；target_id = match_id 字符串 或 bot_id 整数）
+CREATE TABLE IF NOT EXISTS comments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_type     TEXT    NOT NULL,   -- 'match' | 'bot'
+    target_id       TEXT    NOT NULL,   -- match_id 或 bot_id（统一字符串）
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    body            TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_comments_target ON comments(target_type, target_id, id DESC);
+
+-- 点赞（target_type = match|bot|comment）
+CREATE TABLE IF NOT EXISTS likes (
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_type     TEXT    NOT NULL,   -- 'match' | 'bot' | 'comment'
+    target_id       TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL,
+    PRIMARY KEY (user_id, target_type, target_id)
+);
+CREATE INDEX IF NOT EXISTS idx_likes_target ON likes(target_type, target_id);
+
 -- 关注关系（follower 关注 followee）
 CREATE TABLE IF NOT EXISTS follows (
     follower_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
