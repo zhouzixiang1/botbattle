@@ -162,6 +162,12 @@ def create_app(
 
     orch.on_match_done = _on_match_done
 
+    # 通知管理器（写站内通知 + 按用户 prefs 可选发邮件）
+    from bzplat.backend.notifications import NotificationManager
+
+    notifier = NotificationManager(store, mailer=mailer)
+    orch.notifier = notifier
+
     # 闲时自动对局调度器（单进程单事件循环；启动即挂载后台任务）
     auto_matcher = AutoMatchScheduler(orch, store)
 

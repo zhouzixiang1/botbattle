@@ -273,6 +273,16 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     r = api.authed(ctx["admin_token"], "GET", "/api/admin/stats")
     check("GET /api/admin/stats（admin token）", r.status_code == 200, r.text[:80])
 
+    # 通知端点（PR-3）
+    r = api.authed(tok, "GET", "/api/notifications")
+    check("GET /api/notifications", r.status_code == 200 and "notifications" in r.json(), r.text[:80])
+    r = api.authed(tok, "GET", "/api/notifications/unread-count")
+    check("GET /api/notifications/unread-count", r.status_code == 200 and "count" in r.json(), r.text[:80])
+    r = api.authed(tok, "GET", "/api/notification-prefs")
+    check("GET /api/notification-prefs", r.status_code == 200 and "prefs" in r.json(), r.text[:80])
+    r = api.authed(tok, "PUT", "/api/notification-prefs", json={"email_match_done": True})
+    check("PUT /api/notification-prefs", r.status_code == 200 and r.json()["prefs"]["email_match_done"] == 1, r.text[:80])
+
     # organizer token 打通 require_organizer（GET /api/admin/contests 需要 admin；用创建比赛权限验证）
     # 这里用「列表自己的比赛报名」间接验证：require_organizer 端点是 POST /api/contests，下面阶段 5 覆盖
 

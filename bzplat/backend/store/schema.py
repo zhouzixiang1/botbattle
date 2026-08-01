@@ -155,6 +155,28 @@ CREATE TABLE IF NOT EXISTS rating_history (
 );
 CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, id DESC);
 
+-- 站内通知：对局完成 / 被关注 / 赛事阶段变化 / 被评论等
+CREATE TABLE IF NOT EXISTS notifications (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type            TEXT    NOT NULL DEFAULT '',   -- match_done|followed|contest|comment|...
+    title           TEXT    NOT NULL DEFAULT '',
+    body            TEXT    NOT NULL DEFAULT '',
+    link            TEXT    NOT NULL DEFAULT '',   -- 前端路由（如 /match/:id）
+    is_read         INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, id DESC);
+
+-- 通知/邮件偏好（每用户一行）
+CREATE TABLE IF NOT EXISTS notification_prefs (
+    user_id             INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    email_match_done    INTEGER NOT NULL DEFAULT 0,
+    email_followed      INTEGER NOT NULL DEFAULT 0,
+    email_contest       INTEGER NOT NULL DEFAULT 0,
+    email_comment       INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     token           TEXT    PRIMARY KEY,
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

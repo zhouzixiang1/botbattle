@@ -64,6 +64,8 @@ class MatchOrchestrator:
         self._lock = asyncio.Lock()
         # 对局完成后的回调（由外部注入，如比赛归档）。签名: (match_id, contest_id|None) -> None
         self.on_match_done: "Callable[[str, int | None], None] | None" = None
+        # 通知管理器（由 main.py 注入；对局完成时通知双方 owner）
+        self.notifier = None
         # ── 人类对战（独立并发，不占 bot 对局槽）──────────────────
         self.human_max_concurrent = 4
         self._human_sem = asyncio.Semaphore(self.human_max_concurrent)
@@ -310,6 +312,19 @@ class MatchOrchestrator:
                     match_id, winner, result.rounds_played, ea, eb,
                     m["match_type"] != TYPE_CONTEST,
                 )
+                # 通知双方 owner（仅 challenge/table/ladder；contest 内部对局不单独通知）
+                if self.notifier is not None and m["match_type"] != TYPE_CONTEST:
+                    try:
+                        wl = "平局" if winner is None else f"座位 {winner} 胜"
+                        self.notifier.notify_both_owners(
+                            m["bot_a_id"], m["bot_b_id"],
+                            type="match_done",
+                            title=f"对局完成：{wl}",
+                            body=f"对局 {match_id} 已结束（{m.get('game_id', '')}）。",
+                            link=f"/match/{match_id}",
+                        )
+                    except Exception:
+                        logger.debug("notify match_done failed", exc_info=True)
             except Exception as exc:
                 logger.exception("match %s failed", match_id)
                 self.store.update_match(
