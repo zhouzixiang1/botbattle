@@ -13,6 +13,7 @@ import ArenaWatch from './pages/ArenaWatch'
 import Challenge from './pages/Challenge'
 import ContestDetail from './pages/ContestDetail'
 import Contests from './pages/Contests'
+import DataDownload from './pages/DataDownload'
 import History from './pages/History'
 import Home from './pages/Home'
 import HumanPlay from './pages/HumanPlay'
@@ -87,6 +88,9 @@ function Shell() {
             </NavLink>
             <NavLink to="/wiki" className={navCls}>
               Wiki
+            </NavLink>
+            <NavLink to="/data" className={navCls}>
+              数据
             </NavLink>
             {(user?.role === 'admin' || user?.role === 'organizer') && (
               <NavLink to="/admin" className={navCls}>
@@ -167,6 +171,7 @@ function Shell() {
           <Route path="/play/:id" element={<HumanPlay />} />
           <Route path="/my-bots" element={<MyBots />} />
           <Route path="/wiki" element={<Wiki />} />
+          <Route path="/data" element={<DataDownload />} />
           <Route path="/contests" element={<Contests />} />
           <Route path="/contests/:id" element={<ContestDetail />} />
           <Route path="/user/:name" element={<UserProfile />} />

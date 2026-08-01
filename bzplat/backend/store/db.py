@@ -1447,6 +1447,43 @@ class Store:
                 (match_id,),
             )
 
+    # ── matchpacks（对局数据集下载）──────────────────────────
+    def matchpack_months(self, game_id: str | None = None) -> list[dict]:
+        """列出有对局数据的游戏×月份分组（count），用于数据下载页。"""
+        with self._tx() as c:
+            sql = (
+                "SELECT game_id, substr(created_at,1,7) AS month, COUNT(*) AS cnt "
+                "FROM matches WHERE status='completed' AND created_at IS NOT NULL "
+                "AND substr(created_at,1,7) <> ''"
+            )
+            params: list[Any] = []
+            if game_id:
+                sql += " AND game_id=?"
+                params.append(game_id)
+            sql += " GROUP BY game_id, month ORDER BY month DESC, game_id"
+            return [_row(r) for r in c.execute(sql, params)]
+
+    def matchpack_rows(
+        self, game_id: str, month: str, *, limit: int = 10000
+    ) -> list[dict]:
+        """返回某游戏×月份的全部已完成对局（含 replay events），用于打包下载。"""
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT m.id, m.game_id, m.bot_a_id, m.bot_b_id, m.winner, "
+                "m.earnings_a, m.earnings_b, m.hands_played, m.total_hands, "
+                "m.match_type, m.created_at, m.ended_at, m.n_dots, "
+                "ba.name AS bot_a_name, bb.name AS bot_b_name, "
+                "r.events_json, r.hands_json "
+                "FROM matches m JOIN bots ba ON m.bot_a_id=ba.id "
+                "JOIN bots bb ON m.bot_b_id=bb.id "
+                "LEFT JOIN match_replays r ON r.match_id=m.id "
+                "WHERE m.status='completed' AND m.game_id=? "
+                "AND substr(m.created_at,1,7)=? "
+                "ORDER BY m.created_at LIMIT ?",
+                (game_id, month, max(1, min(limit, 50000))),
+            ).fetchall()
+            return [_row(r) for r in rows]
+
     # ── follows（关注关系）────────────────────────────────────
     def follow(self, follower_id: int, followee_id: int) -> bool:
         """关注；返回 True 表示新建关注，False 表示已存在。不能关注自己。"""

@@ -237,6 +237,11 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     # 经验/等级体系（PR-9）
     r = api.client.get("/api/levels/info")
     check("GET /api/levels/info", r.status_code == 200 and "thresholds" in r.json(), r.text[:80])
+    # 站点信息 + 数据集列表（PR-10）
+    r = api.client.get("/api/site/info")
+    check("GET /api/site/info", r.status_code == 200 and "name" in r.json(), r.text[:80])
+    r = api.client.get("/api/matchpacks")
+    check("GET /api/matchpacks", r.status_code == 200 and "packs" in r.json(), r.text[:80])
 
     r = api.client.get("/api/contests/templates")
     check("GET /api/contests/templates", r.status_code == 200 and "templates" in r.json(), r.text[:80])
@@ -1065,6 +1070,10 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     # 合法值
     r = api.authed(tok, "PATCH", "/api/admin/settings/runtime", json={"max_concurrent_matches": max(1, (cur or 2))})
     check("PATCH max_concurrent 合法值", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
+
+    # 站点配置（PR-10）
+    r = api.authed(tok, "PATCH", "/api/admin/settings/site", json={"announcement": "loadtest 公告"})
+    check("PATCH /api/admin/settings/site", r.status_code == 200 and r.json()["site"]["announcement"] == "loadtest 公告", r.text[:80])
 
     # GET/PUT /api/admin/email/templates/{key}
     r = api.authed(tok, "GET", "/api/admin/email/templates/welcome")
