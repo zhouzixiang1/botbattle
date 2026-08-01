@@ -3,7 +3,16 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from pydantic import BaseModel, Field
 
 from .auth_manager import COOKIE_NAME, AuthError, AuthManager
@@ -34,6 +43,11 @@ class LoginReq(BaseModel):
 class ChangePasswordReq(BaseModel):
     old_password: str
     new_password: str = Field(..., min_length=8)
+
+
+class ProfileUpdateReq(BaseModel):
+    display_name: str | None = Field(None, max_length=64)
+    bio: str | None = Field(None, max_length=500)
 
 
 class RequestResetReq(BaseModel):
@@ -219,6 +233,72 @@ async def change_password(
     except AuthError as exc:
         raise _err(exc) from exc
     return {"ok": True, "message": "密码已修改,请重新登录"}
+
+
+@router.put("/profile")
+async def update_profile(
+    req: ProfileUpdateReq,
+    request: Request,
+    user: dict = Depends(require_user),
+) -> dict:
+    """更新当前用户的显示名/简介。"""
+    store = request.app.state.store
+    fields: dict = {}
+    if req.display_name is not None:
+        fields["display_name"] = req.display_name.strip()[:64]
+    if req.bio is not None:
+        fields["bio"] = req.bio.strip()[:500]
+    if fields:
+        store.update_user(user["id"], **fields)
+    u = store.get_user(user["id"])
+    return {"user": _safe_user_out(u)}
+
+
+_AVATAR_MAX = 2 * 1024 * 1024  # 2MB
+_AVATAR_ALLOWED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+
+
+@router.post("/avatar")
+async def upload_avatar(
+    request: Request,
+    file: UploadFile = File(...),
+    user: dict = Depends(require_user),
+) -> dict:
+    """上传/更新当前用户头像。存本地 avatars/<uid>.<ext>，StaticFiles 托管。"""
+    raw = await file.read()
+    if not raw or len(raw) > _AVATAR_MAX:
+        raise HTTPException(400, "头像文件须 1..2MB")
+    ctype = (file.content_type or "").lower()
+    ext_map = {
+        "image/png": "png", "image/jpeg": "jpg",
+        "image/webp": "webp", "image/gif": "gif",
+    }
+    ext = ext_map.get(ctype)
+    if not ext:
+        raise HTTPException(400, "仅支持 png/jpeg/webp/gif")
+    avatars_dir = os.environ.get("BZ_AVATAR_DIR", "avatars")
+    os.makedirs(avatars_dir, exist_ok=True)
+    # 覆盖旧头像（删其他扩展名的同名文件）
+    uid = user["id"]
+    for old in ("png", "jpg", "webp", "gif"):
+        old_path = os.path.join(avatars_dir, f"{uid}.{old}")
+        if os.path.exists(old_path):
+            os.remove(old_path)
+    path = os.path.join(avatars_dir, f"{uid}.{ext}")
+    with open(path, "wb") as f:
+        f.write(raw)
+    store = request.app.state.store
+    rel = f"{uid}.{ext}"
+    store.update_user(uid, avatar=rel)
+    u = store.get_user(uid)
+    return {"user": _safe_user_out(u), "avatar": rel}
+
+
+def _safe_user_out(u: dict | None) -> dict:
+    """剔除敏感字段，保留 bio/avatar。"""
+    if not u:
+        return {}
+    return {k: v for k, v in u.items() if k != "password_hash"}
 
 
 @router.post("/request-reset")

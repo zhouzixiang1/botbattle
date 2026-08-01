@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS users (
     email_verified  INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT    NOT NULL,
     last_login_at   TEXT,
+    bio             TEXT    NOT NULL DEFAULT '',
+    avatar          TEXT    NOT NULL DEFAULT '',
     CONSTRAINT chk_username CHECK (length(username) >= 3),
     CONSTRAINT chk_role CHECK (role IN ('user', 'organizer', 'admin'))
 );

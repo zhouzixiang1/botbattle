@@ -217,6 +217,11 @@ def create_app(
             name="wiki-assets",
         )
 
+    # 头像静态托管（avatars/<uid>.<ext>）
+    avatars_dir = Path(os.environ.get("BZ_AVATAR_DIR", "avatars"))
+    avatars_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/avatars", StaticFiles(directory=str(avatars_dir)), name="avatars")
+
     if dist.is_dir():
         assets = dist / "assets"
         if assets.is_dir():

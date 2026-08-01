@@ -248,6 +248,21 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     r = api.client.get("/api/users?q=load_u&limit=10")
     check("GET /api/users?q=load_u", r.status_code == 200 and len(r.json().get("users", [])) > 0, r.text[:80])
 
+    # 用户主页 + 全局搜索（PR-2）
+    u1 = ctx["user_names"][0]
+    r = api.client.get(f"/api/users/{u1}/profile")
+    check("GET /api/users/{name}/profile", r.status_code == 200 and "profile" in r.json()
+          and r.json()["profile"]["username"] == u1, r.text[:80])
+    r = api.client.get(f"/api/users/{u1}/bots")
+    check("GET /api/users/{name}/bots", r.status_code == 200 and "bots" in r.json(), r.text[:80])
+    for t in ("users", "bots", "matches"):
+        r = api.client.get(f"/api/search?q=load&type={t}&limit=5")
+        check(f"GET /api/search?q=load&type={t}", r.status_code == 200 and t in r.json(), r.text[:80])
+    # PUT /api/auth/profile（更新显示名/简介）
+    tok0 = ctx["tokens"][u1]
+    r = api.authed(tok0, "PUT", "/api/auth/profile", json={"bio": "loadtest bio"})
+    check("PUT /api/auth/profile", r.status_code == 200 and r.json()["user"]["bio"] == "loadtest bio", r.text[:80])
+
     # 鉴权：DB token 真正打通 require_user
     tok = ctx["tokens"][ctx["user_names"][0]]
     r = api.authed(tok, "GET", "/api/auth/me")

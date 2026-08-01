@@ -140,6 +140,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "bots" in tables:
         _add_col(conn, "bots", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
 
+    if "users" in tables:
+        _add_col(conn, "users", "bio", "TEXT NOT NULL DEFAULT ''")
+        _add_col(conn, "users", "avatar", "TEXT NOT NULL DEFAULT ''")
+
     if "matches" in tables:
         _add_col(conn, "matches", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
         _add_col(conn, "matches", "n_dots", "INTEGER")  # pencil 点阵边长（可空）
@@ -345,6 +349,114 @@ class Store:
                 ).fetchone()
             )
 
+    def user_profile(self, username: str) -> dict | None:
+        """用户主页聚合：用户公开信息（不含 password_hash/email）+ 总战绩。
+
+        总战绩 = 该用户所有 bot 的 ratings SUM(wins/losses/draws/net_chips/matches_played)。
+        Bot 列表与对局历史用单独端点（避免单次返回过大）。
+        """
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT id, username, display_name, role, bio, avatar, "
+                "created_at, last_login_at FROM users WHERE username=? AND is_active=1",
+                (username,),
+            ).fetchone()
+            if not row:
+                return None
+            d = _row(row)
+            uid = d["id"]
+            agg = c.execute(
+                "SELECT COALESCE(SUM(r.wins),0) AS wins, "
+                "COALESCE(SUM(r.losses),0) AS losses, "
+                "COALESCE(SUM(r.draws),0) AS draws, "
+                "COALESCE(SUM(r.matches_played),0) AS matches_played, "
+                "COALESCE(SUM(r.net_chips),0) AS net_chips, "
+                "COUNT(r.bot_id) AS rated_bots "
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id "
+                "WHERE b.owner_id=?",
+                (uid,),
+            ).fetchone()
+            d["stats"] = _row(agg) if agg else {
+                "wins": 0, "losses": 0, "draws": 0,
+                "matches_played": 0, "net_chips": 0, "rated_bots": 0,
+            }
+            d["bot_count"] = c.execute(
+                "SELECT COUNT(*) FROM bots WHERE owner_id=?", (uid,)
+            ).fetchone()[0]
+            return d
+
+    def aggregate_owner_stats(self, owner_id: int) -> dict:
+        """按 owner 聚合其所有 bot 的战绩（用于用户主页总战绩）。"""
+        with self._tx() as c:
+            agg = c.execute(
+                "SELECT COALESCE(SUM(r.wins),0) AS wins, "
+                "COALESCE(SUM(r.losses),0) AS losses, "
+                "COALESCE(SUM(r.draws),0) AS draws, "
+                "COALESCE(SUM(r.matches_played),0) AS matches_played, "
+                "COALESCE(SUM(r.net_chips),0) AS net_chips "
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id WHERE b.owner_id=?",
+                (owner_id,),
+            ).fetchone()
+            return _row(agg) if agg else {
+                "wins": 0, "losses": 0, "draws": 0,
+                "matches_played": 0, "net_chips": 0,
+            }
+
+    def search_bots(
+        self,
+        q: str,
+        *,
+        limit: int = 20,
+        game_id: str | None = None,
+    ) -> list[dict]:
+        """按 name/display_name 模糊搜索 public bot（含 owner 名 + rating）。"""
+        ql = f"%{q.lower()}%" if q else "%"
+        with self._tx() as c:
+            sql = (
+                "SELECT b.id, b.name, b.display_name, b.game_id, b.format, "
+                "b.os, b.arch, u.username AS owner_name, "
+                "u.display_name AS owner_display, r.rating "
+                "FROM bots b LEFT JOIN users u ON b.owner_id=u.id "
+                "LEFT JOIN ratings r ON r.bot_id=b.id "
+                "WHERE b.is_public=1 AND b.is_active=1 "
+                "AND (LOWER(b.name) LIKE ? OR LOWER(b.display_name) LIKE ?)"
+            )
+            params: list[Any] = [ql, ql]
+            if game_id:
+                sql += " AND b.game_id=?"
+                params.append(game_id)
+            sql += " ORDER BY r.rating DESC LIMIT ?"
+            params.append(max(1, min(limit, 50)))
+            return [_row(r) for r in c.execute(sql, params)]
+
+    def search_matches(
+        self,
+        q: str,
+        *,
+        limit: int = 20,
+        game_id: str | None = None,
+    ) -> list[dict]:
+        """按 bot 名/owner 名模糊搜索已完成对局。"""
+        ql = f"%{q.lower()}%" if q else "%"
+        with self._tx() as c:
+            sql = (
+                "SELECT m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
+                "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display "
+                "FROM matches m "
+                "JOIN bots ba ON m.bot_a_id=ba.id "
+                "JOIN bots bb ON m.bot_b_id=bb.id "
+                "WHERE m.status='completed' "
+                "AND (LOWER(ba.name) LIKE ? OR LOWER(bb.name) LIKE ? "
+                "OR LOWER(ba.display_name) LIKE ? OR LOWER(bb.display_name) LIKE ?)"
+            )
+            params: list[Any] = [ql, ql, ql, ql]
+            if game_id:
+                sql += " AND m.game_id=?"
+                params.append(game_id)
+            sql += " ORDER BY m.created_at DESC LIMIT ?"
+            params.append(max(1, min(limit, 50)))
+            return [_row(r) for r in c.execute(sql, params)]
+
     def get_user_by_email(self, email: str) -> dict | None:
         with self._tx() as c:
             return _row(
@@ -360,6 +472,8 @@ class Store:
             "is_active",
             "last_login_at",
             "email_verified",
+            "bio",
+            "avatar",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
