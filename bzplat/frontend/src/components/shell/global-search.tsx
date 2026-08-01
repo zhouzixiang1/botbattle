@@ -31,8 +31,12 @@ interface SearchMatch {
 /**
  * 全局搜索命令面板（Cmd/Ctrl + K 唤起）。
  * 聚合搜 Bot / 用户 / 对局，回车跳转。对标 shadcn-admin。
+ *
+ * `compact`：用于窄容器（如侧边栏）——只渲染一个铺满宽度的触发按钮，
+ * 文字截断、不带 ⌘K 快捷键徽章（省横向空间，Cmd+K 仍可用）。
+ * 默认（顶栏）：图标按钮(<md) + 文字按钮(≥md) 两态。
  */
-export function GlobalSearch() {
+export function GlobalSearch({ compact = false }: { compact?: boolean }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [users, setUsers] = useState<SearchUser[]>([])
@@ -89,25 +93,40 @@ export function GlobalSearch() {
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground md:hidden"
-        aria-label="搜索"
-      >
-        <Search className="size-[1.15rem]" />
-      </button>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="hidden h-9 items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-accent md:inline-flex"
-      >
-        <Search className="size-4" />
-        <span>搜索 Bot、用户、对局…</span>
-        <kbd className="ml-4 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
-          ⌘K
-        </kbd>
-      </button>
+      {compact ? (
+        // 侧边栏等窄容器：铺满宽度、单行、文字截断、无快捷键徽章
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="inline-flex h-9 w-full items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-accent"
+          aria-label="搜索"
+        >
+          <Search className="size-4 shrink-0" />
+          <span className="truncate">搜索 Bot、用户、对局…</span>
+        </button>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground md:hidden"
+            aria-label="搜索"
+          >
+            <Search className="size-[1.15rem]" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="hidden h-9 items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-accent md:inline-flex"
+          >
+            <Search className="size-4" />
+            <span>搜索 Bot、用户、对局…</span>
+            <kbd className="ml-4 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+              ⌘K
+            </kbd>
+          </button>
+        </>
+      )}
       <CommandDialog open={open} onOpenChange={setOpen}>
         <CommandInput placeholder="搜索 Bot、用户、对局…" value={q} onValueChange={setQ} />
         <CommandList>

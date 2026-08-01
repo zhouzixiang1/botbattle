@@ -106,7 +106,7 @@ export default function HumanPlay() {
       </div>
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
         {/* 左：棋盘/牌桌 + 动作按钮 */}
         <div className="space-y-3">
           {gameId === 'gomoku' && (

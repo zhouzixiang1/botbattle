@@ -182,17 +182,17 @@ SQLite 单文件（默认 `botzone.db`），**25 张表**，约 23 个索引。�
 ### 5.1 技术栈与设计系统
 - React 19 + Vite 8 + Tailwind CSS v4（CSS-first）+ shadcn/ui（new-york）+ Radix UI + lucide-react（图标，无 emoji）+ recharts（图表）+ next-themes（暗色）。
 - **设计 token**：shadcn v4 OKLCH 双主题（`:root` 浅 / `.dark` 暗），emerald 品牌色系，`@theme inline` 桥接到 Tailwind utility。**刻意无紫色无米色**（规避 AI 默认审美）。
-- **暗色模式**：next-themes class 策略，浅色默认 + 跟随系统，顶栏一键切换。
-- **响应式**：sm/md/lg/xl 断点；移动端 Sheet 汉堡抽屉；表格窄屏隐藏次要列。
+- **暗色模式**：next-themes class 策略，浅色默认 + 跟随系统，侧栏底部一键切换。
+- **响应式**：sm/md/lg/xl 断点；**lg(1024)+ 桌面侧边栏，<lg 移动端顶栏 + Sheet 汉堡抽屉**；表格窄屏隐藏次要列。
 - **代码分割**：React.lazy + Suspense，22 个顶层路由各自独立 chunk；主包 gzip ~115KB，recharts 隔离到 BotDetail chunk。
 - **路径别名 `@/` → src/**，禁相对路径。
 
 ### 5.2 组件库与页面
 - **26 个 shadcn 共享原语**（`src/components/ui/`）：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart/Sheet/Slider 等，是全项目唯一组件抽象层。
 - **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、tier-badge.tsx、BrandMark.tsx（平台品牌标识）、AuthShell.tsx（登录/注册/重置/验证的居中壳：品牌头部 + 居中 Card，解决空旷）、use-playback.ts（定速回放/直播缓冲 hook：buffer/stepIdx/playing/speed/定时步进/live-follow，buffer 有 MAX_BUFFER 上限防 OOM）、playback-controls.tsx（播放/暂停/步进/速度档/进度条控件）。
-- **全局 Shell**：app-shell.tsx（顶栏 + lucide 图标导航 + Cmd+K 全局搜索 + 主题切换）+ nav-config.ts。
+- **全局 Shell**：app-shell.tsx（**lg+ 桌面左侧边栏**：Logo + compact 搜索 + 垂直导航 + 底部用户区/主题/通知；**<lg 移动端顶栏 + Sheet 抽屉**）+ nav-config.ts（9 导航项）。auth 页（登录/注册/重置/验证）不显示侧栏，内容占满居中。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。
 - **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题 + `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；垂直 padding 由全局 `<main>` 统一提供（PageStub 只设水平 padding，避免双倍留白）；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
-- **观赛/对战页左右分栏**：MatchDetail / ArenaWatch / HumanPlay 桌面端 `grid lg:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），移动端自动堆叠；ArenaWatch 走 usePlayback 定速缓冲层（事件入 buffer、可控节奏播放，而非实时直播）。MatchBoard（棋盘/牌桌渲染）对 reduceEvents 结果做 useMemo 缓存，避免定速播放每帧全量归约。
+- **观赛/对战页左右分栏**：MatchDetail / ArenaWatch / HumanPlay `xl:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），`lg`(1024-1279) 因侧栏占位自动堆叠（避免侧栏+分栏三列挤压），`xl`(1280)+ 横排；ArenaWatch 走 usePlayback 定速缓冲层（事件入 buffer、可控节奏播放，而非实时直播）。MatchBoard（棋盘/牌桌渲染）对 reduceEvents 结果做 useMemo 缓存，避免定速播放每帧全量归约。
 - **页面**：21 个独立页面 + admin/ 10 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/对局回放/人类对战/数据下载/账号 等。
 - **三棋盘可视化**：poker（PokerTable 深绿毡面）/ gomoku（GomokuBoard 木色）/ pencil（PencilBoard），统一经 MatchBoard 分发。
 
