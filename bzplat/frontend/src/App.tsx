@@ -7,6 +7,7 @@ import {
   useNavigate,
 } from 'react-router-dom'
 import { AuthProvider, useAuth } from './components/useAuth'
+import NotificationBell from './components/NotificationBell'
 import Admin from './pages/admin/Admin'
 import ArenaWatch from './pages/ArenaWatch'
 import Challenge from './pages/Challenge'
@@ -20,6 +21,7 @@ import Login from './pages/Login'
 import MatchDetail from './pages/MatchDetail'
 import BotDetail from './pages/BotDetail'
 import MyBots from './pages/MyBots'
+import Notifications from './pages/Notifications'
 import Register from './pages/Register'
 import ResetPassword from './pages/ResetPassword'
 import Search from './pages/Search'
@@ -112,6 +114,7 @@ function Shell() {
               <span className="text-xs text-slate-400">…</span>
             ) : isLoggedIn && user ? (
               <>
+                <NotificationBell />
                 <Link
                   to={`/user/${encodeURIComponent(user.username)}`}
                   className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100"
@@ -167,6 +170,7 @@ function Shell() {
           <Route path="/contests/:id" element={<ContestDetail />} />
           <Route path="/user/:name" element={<UserProfile />} />
           <Route path="/search" element={<Search />} />
+          <Route path="/notifications" element={<Notifications />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/verify-email" element={<VerifyEmail />} />

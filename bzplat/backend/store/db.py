@@ -1275,6 +1275,124 @@ class Store:
             ).fetchall()
             return [_row(r) for r in reversed(rows)]
 
+    # ── notifications ─────────────────────────────────────────
+    def add_notification(
+        self,
+        user_id: int,
+        *,
+        type: str = "",
+        title: str = "",
+        body: str = "",
+        link: str = "",
+    ) -> dict:
+        with self._tx() as c:
+            cur = c.execute(
+                "INSERT INTO notifications(user_id, type, title, body, link, "
+                "is_read, created_at) VALUES(?,?,?,?,?,?,?)",
+                (user_id, type, title, body, link, 0, _now()),
+            )
+            nid = cur.lastrowid
+            return _row(
+                c.execute("SELECT * FROM notifications WHERE id=?", (nid,)).fetchone()
+            )
+
+    def list_notifications(
+        self,
+        user_id: int,
+        *,
+        unread_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        with self._tx() as c:
+            sql = "SELECT * FROM notifications WHERE user_id=?"
+            params: list[Any] = [user_id]
+            if unread_only:
+                sql += " AND is_read=0"
+            sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+            params.extend([max(1, min(limit, 200)), max(0, offset)])
+            return [_row(r) for r in c.execute(sql, params)]
+
+    def unread_notification_count(self, user_id: int) -> int:
+        with self._tx() as c:
+            return int(
+                c.execute(
+                    "SELECT COUNT(*) FROM notifications WHERE user_id=? AND is_read=0",
+                    (user_id,),
+                ).fetchone()[0]
+            )
+
+    def mark_notification_read(self, notif_id: int, user_id: int) -> bool:
+        with self._tx() as c:
+            cur = c.execute(
+                "UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?",
+                (notif_id, user_id),
+            )
+            return cur.rowcount > 0
+
+    def mark_all_notifications_read(self, user_id: int) -> int:
+        with self._tx() as c:
+            cur = c.execute(
+                "UPDATE notifications SET is_read=1 WHERE user_id=? AND is_read=0",
+                (user_id,),
+            )
+            return cur.rowcount
+
+    # ── notification_prefs ────────────────────────────────────
+    _NOTIF_PREF_DEFAULTS = {
+        "email_match_done": 0,
+        "email_followed": 0,
+        "email_contest": 0,
+        "email_comment": 0,
+    }
+
+    def get_notification_prefs(self, user_id: int) -> dict:
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT email_match_done, email_followed, email_contest, "
+                "email_comment FROM notification_prefs WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                # 懒建默认行
+                c.execute(
+                    "INSERT INTO notification_prefs(user_id) VALUES(?)",
+                    (user_id,),
+                )
+                row = c.execute(
+                    "SELECT email_match_done, email_followed, email_contest, "
+                    "email_comment FROM notification_prefs WHERE user_id=?",
+                    (user_id,),
+                ).fetchone()
+            return _row(row)
+
+    def update_notification_prefs(self, user_id: int, **fields: Any) -> dict:
+        allowed = {
+            "email_match_done", "email_followed", "email_contest", "email_comment",
+        }
+        clean = {k: (1 if v else 0) for k, v in fields.items() if k in allowed}
+        with self._tx() as c:
+            existing = c.execute(
+                "SELECT user_id FROM notification_prefs WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if not existing:
+                c.execute(
+                    "INSERT INTO notification_prefs(user_id) VALUES(?)", (user_id,)
+                )
+            if clean:
+                sets = ",".join(f"{k}=?" for k in clean)
+                c.execute(
+                    f"UPDATE notification_prefs SET {sets} WHERE user_id=?",
+                    [*clean.values(), user_id],
+                )
+            # 内联读取（避免在 _tx 内递归调用 get_notification_prefs 死锁）
+            row = c.execute(
+                "SELECT email_match_done, email_followed, email_contest, "
+                "email_comment FROM notification_prefs WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            return _row(row)
+
     # ── contests ──────────────────────────────────────────────
 
     def create_contest(

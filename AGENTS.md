@@ -51,6 +51,8 @@ matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runne
             人类对战：orchestrator.challenge_human/_run_human_match + runner.run_bot_vs_human
             （人类侧经 _human_turns Future + WebSocket /api/matches/{id}/play 回传落子，独立 _human_sem，不计 Glicko）
             评分副作用：_apply_ratings 在更新 ratings 时顺带落 rating_history（段位趋势）+ 累积 pair_stats 胜负（Bot 详情对手战绩）
+            通知副作用：对局完成（非 contest）经 orch.notifier.notify_both_owners 通知双方 owner
+notifications/ 通知管理器：NotificationManager（写站内通知 + 按 prefs 复用 Mailer 发邮件）；表 notifications/notification_prefs
 engine/     裁判：game.py(holdem) gomoku.py pencil.py + 共享基类 result.py + registry.run_session()
 protocol/   行协议：json_protocol.py(holdem) / board_protocol.py(gomoku,pencil)
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits

@@ -417,6 +417,68 @@ def leaderboard(request: Request, limit: int = 50, game_id: str | None = None):
     return {"leaderboard": _store(request).list_leaderboard(limit=limit, game_id=game_id)}
 
 
+# ── notifications ─────────────────────────────────────────────
+
+class NotifReadReq(BaseModel):
+    id: int
+
+
+@router.get("/api/notifications")
+def list_notifications(
+    request: Request,
+    unread_only: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+    user=Depends(require_user),
+):
+    store = _store(request)
+    return {
+        "notifications": store.list_notifications(
+            user["id"], unread_only=unread_only, limit=limit, offset=offset
+        ),
+        "unread_count": store.unread_notification_count(user["id"]),
+    }
+
+
+@router.get("/api/notifications/unread-count")
+def unread_count(request: Request, user=Depends(require_user)):
+    return {"count": _store(request).unread_notification_count(user["id"])}
+
+
+@router.post("/api/notifications/read")
+def read_notification(
+    req: NotifReadReq, request: Request, user=Depends(require_user)
+):
+    ok = _store(request).mark_notification_read(req.id, user["id"])
+    if not ok:
+        raise HTTPException(404, "通知不存在或无权操作")
+    return {"ok": True}
+
+
+@router.post("/api/notifications/read-all")
+def read_all_notifications(request: Request, user=Depends(require_user)):
+    n = _store(request).mark_all_notifications_read(user["id"])
+    return {"ok": True, "updated": n}
+
+
+@router.get("/api/notification-prefs")
+def get_notif_prefs(request: Request, user=Depends(require_user)):
+    return {"prefs": _store(request).get_notification_prefs(user["id"])}
+
+
+@router.put("/api/notification-prefs")
+def update_notif_prefs(
+    prefs: dict, request: Request, user=Depends(require_user)
+):
+    allowed = {
+        "email_match_done", "email_followed", "email_contest", "email_comment",
+    }
+    clean = {k: v for k, v in prefs.items() if k in allowed}
+    if not clean:
+        raise HTTPException(400, "无可更新字段")
+    return {"prefs": _store(request).update_notification_prefs(user["id"], **clean)}
+
+
 # ── contests ──────────────────────────────────────────────────
 
 class ContestCreate(BaseModel):
