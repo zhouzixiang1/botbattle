@@ -496,6 +496,13 @@ def leaderboard(request: Request, limit: int = 50, game_id: str | None = None):
     return {"leaderboard": _store(request).list_leaderboard(limit=limit, game_id=game_id)}
 
 
+@router.get("/api/tiers")
+def tiers():
+    """段位定义（公开，前端镜像校验用）。"""
+    from bzplat.backend.engine.tiers import all_tiers
+    return {"tiers": all_tiers()}
+
+
 # ── notifications ─────────────────────────────────────────────
 
 class NotifReadReq(BaseModel):
