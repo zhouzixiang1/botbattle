@@ -325,6 +325,20 @@ class MatchOrchestrator:
                         )
                     except Exception:
                         logger.debug("notify match_done failed", exc_info=True)
+                # 经验奖励：双方 owner 各加 XP（参与 + 胜者额外），仅非 contest
+                if m["match_type"] != TYPE_CONTEST:
+                    try:
+                        from bzplat.backend.store.schema import (
+                            XP_MATCH_PARTICIPATE, XP_MATCH_WIN,
+                        )
+                        ba = self.store.get_bot(m["bot_a_id"])
+                        bb = self.store.get_bot(m["bot_b_id"])
+                        for bot, won in ((ba, winner == 0), (bb, winner == 1)):
+                            if bot and bot.get("owner_id"):
+                                xp = XP_MATCH_PARTICIPATE + (XP_MATCH_WIN if won else 0)
+                                self.store.award_xp(int(bot["owner_id"]), xp)
+                    except Exception:
+                        logger.debug("award_xp failed", exc_info=True)
             except Exception as exc:
                 logger.exception("match %s failed", match_id)
                 self.store.update_match(

@@ -135,19 +135,22 @@ def follow_user(user_id: int, request: Request, user=Depends(require_user)):
     if user["id"] == user_id:
         raise HTTPException(400, "不能关注自己")
     created = store.follow(user["id"], user_id)
-    # 关注时通知被关注者
+    # 关注时通知被关注者 + 被关注者经验
     notifier = getattr(request.app.state, "notifier", None)
-    if created and notifier is not None:
-        try:
-            me = store.get_user(user["id"])
-            notifier.notify(
-                user_id, type="followed",
-                title=f"{me.get('display_name') or me.get('username')} 关注了你",
-                body="",
-                link=f"/user/{me.get('username')}",
-            )
-        except Exception:
-            pass
+    if created:
+        from bzplat.backend.store.schema import XP_FOLLOWED
+        store.award_xp(user_id, XP_FOLLOWED)
+        if notifier is not None:
+            try:
+                me = store.get_user(user["id"])
+                notifier.notify(
+                    user_id, type="followed",
+                    title=f"{me.get('display_name') or me.get('username')} 关注了你",
+                    body="",
+                    link=f"/user/{me.get('username')}",
+                )
+            except Exception:
+                pass
     return {"ok": True, "following": True, "created": created}
 
 
@@ -558,6 +561,20 @@ def tiers():
     return {"tiers": all_tiers()}
 
 
+@router.get("/api/levels/info")
+def levels_info():
+    """经验/等级体系定义（公开，前端展示进度条用）。"""
+    from bzplat.backend.store.schema import xp_for_level
+    return {
+        "xp_match_participate": 10,
+        "xp_match_win": 15,
+        "xp_contest_participate": 50,
+        "xp_comment": 2,
+        "xp_followed": 3,
+        "thresholds": [{"level": lv, "xp": xp_for_level(lv)} for lv in range(0, 11)],
+    }
+
+
 # ── comments / likes ──────────────────────────────────────────
 
 class CommentCreate(BaseModel):
@@ -594,6 +611,9 @@ def create_comment(
     if not body:
         raise HTTPException(400, "评论内容不能为空")
     c = store.add_comment(user["id"], req.target_type, req.target_id, body)
+    # 评论经验（活跃度）
+    from bzplat.backend.store.schema import XP_COMMENT
+    store.award_xp(user["id"], XP_COMMENT)
     # 通知 target owner（match → 双方 bot owner；bot → bot owner）
     notifier = getattr(request.app.state, "notifier", None)
     if notifier is not None:
@@ -836,6 +856,9 @@ def register_contest(
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # 赛事报名经验
+    from bzplat.backend.store.schema import XP_CONTEST_PARTICIPATE
+    _store(request).award_xp(user["id"], XP_CONTEST_PARTICIPATE)
     return {"entry": entry}
 
 

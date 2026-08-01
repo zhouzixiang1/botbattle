@@ -24,6 +24,7 @@
 | [评论与点赞](#/wiki?slug=comments-likes) | 对局/Bot 评论 + 点赞 + 浏览 + 点赞榜 |
 | [个人设置与 MyBots](#/wiki?slug=settings-mybots) | 设置中心（资料/密码/通知/收藏）+ MyBots 管理增强 |
 | [段位称号](#/wiki?slug=tier) | Rating→段位映射 + 排名变化趋势 |
+| [经验与等级](#/wiki?slug=xp-level) | XP 经验奖励 + Level 升级 + gating |
 | [压测](#/wiki?slug=loadtest) | 大规模系统压测脚本（批量用户 + 全端点覆盖） |
 
 ## 本平台 vs Botzone（摘要）

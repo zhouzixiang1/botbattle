@@ -14,6 +14,9 @@ interface UserProfileData {
   avatar: string
   created_at: string
   last_login_at?: string
+  xp?: number
+  level?: number
+  last_active_at?: string
   stats: {
     wins: number
     losses: number
@@ -131,6 +134,27 @@ export default function UserProfile() {
               <span className="mt-1 inline-block rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">
                 {profile.role === 'admin' ? '管理员' : '组织者'}
               </span>
+            )}
+            {(profile.level ?? 0) > 0 && (
+              <span className="mt-1 ml-1 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
+                Lv.{profile.level}
+              </span>
+            )}
+            {(profile.xp ?? 0) > 0 && (
+              <div className="mt-2 max-w-xs">
+                <div className="flex items-center justify-between text-[10px] text-slate-400">
+                  <span>经验 {profile.xp}</span>
+                  <span>Lv.{profile.level ?? 0}</span>
+                </div>
+                <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-amber-400"
+                    style={{
+                      width: `${Math.min(100, ((profile.xp ?? 0) % 100) + (((profile.xp ?? 0) % 100) === 0 && (profile.xp ?? 0) > 0 ? 100 : 0))}%`,
+                    }}
+                  />
+                </div>
+              </div>
             )}
             {profile.bio && <p className="mt-2 text-sm text-slate-600">{profile.bio}</p>}
             <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
