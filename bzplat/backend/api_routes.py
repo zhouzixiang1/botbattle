@@ -575,6 +575,69 @@ def levels_info():
     }
 
 
+@router.get("/api/site/info")
+def site_info(request: Request):
+    """站点公开信息（站名/公告/about，无需登录）。"""
+    from bzplat.backend.store.schema import (
+        SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
+    )
+    s = _store(request).get_settings([
+        SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
+    ])
+    return {
+        "name": s.get(SETTING_SITE_NAME) or "Botbattle",
+        "logo": s.get(SETTING_SITE_LOGO) or "",
+        "announcement": s.get(SETTING_SITE_ANNOUNCEMENT) or "",
+        "about": s.get(SETTING_SITE_ABOUT) or "",
+    }
+
+
+@router.get("/api/matchpacks")
+def list_matchpacks(request: Request, game_id: str | None = None):
+    """对局数据集：列出有数据的游戏×月份分组（公开列表）。"""
+    return {"packs": _store(request).matchpack_months(game_id=game_id)}
+
+
+@router.get("/api/matchpacks/download")
+def download_matchpack(
+    request: Request,
+    game_id: str,
+    month: str,
+    user=Depends(require_user),
+):
+    """下载某游戏×月份的对局数据集（gzip，每行一 JSON）。需 level >= 1（gating）。"""
+    from bzplat.backend.store.schema import LEVEL_GATE_DOWNLOAD
+    if (user.get("level") or 0) < LEVEL_GATE_DOWNLOAD:
+        raise HTTPException(403, f"需等级 {LEVEL_GATE_DOWNLOAD} 以上才能下载数据集")
+    store = _store(request)
+    rows = store.matchpack_rows(game_id, month)
+    import gzip as _gzip
+
+    def gen():
+        buf = []
+        for r in rows:
+            ev = r.get("events_json") or "[]"
+            line = json.dumps({
+                "id": r["id"], "game_id": r["game_id"],
+                "bot_a": {"id": r["bot_a_id"], "name": r["bot_a_name"]},
+                "bot_b": {"id": r["bot_b_id"], "name": r["bot_b_name"]},
+                "winner": r["winner"], "earnings_a": r["earnings_a"],
+                "earnings_b": r["earnings_b"], "hands_played": r["hands_played"],
+                "match_type": r["match_type"], "created_at": r["created_at"],
+                "events": json.loads(ev),
+            }, ensure_ascii=False)
+            buf.append(line)
+        data = ("\n".join(buf) + ("\n" if buf else "")).encode("utf-8")
+        yield _gzip.compress(data)
+
+    fname = f"matchpack-{game_id}-{month}.jsonl.gz"
+    return StreamingResponse(
+        gen(),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 # ── comments / likes ──────────────────────────────────────────
 
 class CommentCreate(BaseModel):
@@ -1257,6 +1320,40 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
         "auto_match": am,
         "readonly": ["bot_cpus", "bot_memory_mb"],
     }
+
+
+class SiteSettingsPatch(BaseModel):
+    name: str | None = Field(None, max_length=64)
+    logo: str | None = Field(None, max_length=500)
+    announcement: str | None = Field(None, max_length=2000)
+    about: str | None = Field(None, max_length=5000)
+
+
+@router.patch("/api/admin/settings/site")
+def admin_patch_site(
+    body: SiteSettingsPatch, request: Request, _admin=Depends(require_admin)
+):
+    from bzplat.backend.store.schema import (
+        SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
+    )
+    store = _store(request)
+    if body.name is not None:
+        store.set_setting(SETTING_SITE_NAME, body.name)
+    if body.logo is not None:
+        store.set_setting(SETTING_SITE_LOGO, body.logo)
+    if body.announcement is not None:
+        store.set_setting(SETTING_SITE_ANNOUNCEMENT, body.announcement)
+    if body.about is not None:
+        store.set_setting(SETTING_SITE_ABOUT, body.about)
+    s = store.get_settings([
+        SETTING_SITE_NAME, SETTING_SITE_LOGO, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
+    ])
+    return {"site": {
+        "name": s.get(SETTING_SITE_NAME) or "Botbattle",
+        "logo": s.get(SETTING_SITE_LOGO) or "",
+        "announcement": s.get(SETTING_SITE_ANNOUNCEMENT) or "",
+        "about": s.get(SETTING_SITE_ABOUT) or "",
+    }}
 
 
 @router.patch("/api/admin/settings/runtime")

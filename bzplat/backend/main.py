@@ -108,6 +108,13 @@ def _seed_runtime_settings(store: Store, env_max: int | None) -> int:
     store.seed_setting_if_absent(SETTING_AUTO_MATCH_PLACEMENT_GAMES, "10")
     store.seed_setting_if_absent(SETTING_AUTO_MATCH_MAX_PER_ROUND, "2")
     store.seed_setting_if_absent(SETTING_AUTO_MATCH_DAILY_CAP, "200")
+    # 站点配置（PR-10）
+    from bzplat.backend.store.schema import (
+        SETTING_SITE_NAME, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
+    )
+    store.seed_setting_if_absent(SETTING_SITE_NAME, "Botbattle")
+    store.seed_setting_if_absent(SETTING_SITE_ANNOUNCEMENT, "")
+    store.seed_setting_if_absent(SETTING_SITE_ABOUT, "多游戏 Bot 线上对战平台")
     # 生效值永远压在 ceiling 内
     raw = store.get_setting(SETTING_MAX_CONCURRENT)
     try:
