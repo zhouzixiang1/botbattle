@@ -61,7 +61,7 @@ async def run_session(
             size=board_size or BOARD_SIZE, on_event=on_event
         ).run_async(decide)
     if gid == GAME_PENCIL:
-        return await PencilSession(n_dots=n_dots, on_event=on_event).run_async(decide)
+        return await PencilSession(n_dots=n_dots or DEFAULT_N, on_event=on_event).run_async(decide)
     # holdem（默认）
     session = MatchSession(
         num_hands=num_hands,

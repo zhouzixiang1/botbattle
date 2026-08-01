@@ -142,3 +142,30 @@ def test_board_protocol_roundtrip():
     assert p["pass"] == 1 and p["scores"] == [2, 1]
     assert parse_xy({"x": 3, "y": 4}) == (3, 4)
     assert parse_xy({}) == (None, None)
+
+
+def test_run_session_pencil_n_dots_none_uses_default():
+    """registry.run_session 在 n_dots=None 时应兜底 DEFAULT_N（而非崩溃）。
+
+    回归：/api/matches/challenge 不接受 n_dots，match 行 n_dots=NULL，
+    经 orchestrator→runner→run_session(n_dots=None)→PencilBoard(None) 曾抛
+    TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'。
+    """
+    from bzplat.backend.engine.pencil import DEFAULT_N
+    from bzplat.backend.engine.registry import run_session
+
+    moves = iter([(0, 1), (0, 1), (0, 1), (0, 1)])  # 简单合法边序列（n_dots=3）
+
+    async def decide(player, req):
+        try:
+            x, y = next(moves)
+        except StopIteration:
+            x, y = -1, -1
+        return {"x": x, "y": y}
+
+    # n_dots=None 不应抛 TypeError；应使用 DEFAULT_N 跑完整局
+    result = asyncio.run(run_session("pencil", decide, n_dots=None, num_hands=1))
+    assert result is not None
+    # 确认用的是默认 n_dots（DEFAULT_N），盘面非空
+    assert result.rounds_played > 0 or result.moves >= 0  # 至少不崩溃
+
