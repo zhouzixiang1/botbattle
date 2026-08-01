@@ -856,6 +856,14 @@ def phase5_contest(api: Api, ctx: dict[str, Any]) -> None:
         check(f"[{game}] detail 含 pairings", isinstance(pairings, list) and len(pairings) > 0, "空")
         check(f"[{game}] detail 含 standings", isinstance(standings, list) and len(standings) > 0, "空")
         check(f"[{game}] detail 含 stage_results", isinstance(stage_results, list), "缺")
+        # entries/pairings 含 bot 名（PR-6 对阵图显示 Bot 名）
+        if entries:
+            check(f"[{game}] detail entries 含 bot_name 字段", "bot_name" in entries[0], str(entries[0])[:80])
+        if pairings:
+            check(f"[{game}] detail pairings 含 bot_a_name 字段", "bot_a_name" in pairings[0], str(pairings[0])[:80])
+        # bracket 端点（PR-6）
+        r = api.client.get(f"/api/contests/{cid}/bracket")
+        check(f"[{game}] GET /api/contests/{{id}}/bracket", r.status_code == 200 and "pairings" in r.json(), r.text[:80])
         # contest 对局 match_type=contest 且不更新 Glicko：抽 1 场
         for p in pairings[:1]:
             pmid = p.get("match_id")

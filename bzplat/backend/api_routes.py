@@ -619,9 +619,15 @@ def contest_detail(contest_id: int, request: Request):
     c = _store(request).get_contest(contest_id)
     if not c:
         raise HTTPException(404, "比赛不存在")
-    entries = _store(request).list_contest_entries(contest_id)
-    pairings = _store(request).list_contest_pairings(contest_id)
+    entries = _store(request).contest_entries_named(contest_id)
+    pairings = _store(request).contest_bracket(contest_id)
     standings = _contests(request).standings(contest_id)
+    # 给 standings 补 bot 名（standings 只有 bot_id）
+    store = _store(request)
+    for s in standings:
+        b = store.get_bot(s.get("bot_id"))
+        if b:
+            s["bot_name"] = b.get("display_name") or b.get("name")
     stage_results = _store(request).list_stage_results(contest_id)
     try:
         estimate = _contests(request).estimate(contest_id)
@@ -635,6 +641,14 @@ def contest_detail(contest_id: int, request: Request):
         "stage_results": stage_results,
         "estimate": estimate,
     }
+
+
+@router.get("/api/contests/{contest_id}/bracket")
+def contest_bracket(contest_id: int, request: Request):
+    """对阵图数据（带 bot 名/owner 名/winner，公开）。"""
+    if not _store(request).get_contest(contest_id):
+        raise HTTPException(404, "比赛不存在")
+    return {"pairings": _store(request).contest_bracket(contest_id)}
 
 
 @router.post("/api/contests/{contest_id}/open")

@@ -1752,6 +1752,44 @@ class Store:
 
     list_contest_pairings = list_pairings
 
+    def contest_bracket(self, contest_id: int) -> list[dict]:
+        """返回对阵（带 bot 名/owner 名 + 对局 winner），便于前端画对阵图。
+
+        每行含 pairing 全字段 + bot_a_name/bot_a_display/bot_b_name/bot_b_display
+        + owner_a_name/owner_b_name + winner（从 matches 取）。
+        """
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT p.*, ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+                "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
+                "ua.username AS owner_a_name, ub.username AS owner_b_name, "
+                "m.winner AS match_winner "
+                "FROM contest_pairings p "
+                "JOIN bots ba ON p.bot_a_id=ba.id "
+                "JOIN bots bb ON p.bot_b_id=bb.id "
+                "LEFT JOIN users ua ON ba.owner_id=ua.id "
+                "LEFT JOIN users ub ON bb.owner_id=ub.id "
+                "LEFT JOIN matches m ON p.match_id=m.id "
+                "WHERE p.contest_id=? "
+                "ORDER BY p.stage_idx, p.round_num, p.id",
+                (contest_id,),
+            ).fetchall()
+            return [_row(r) for r in rows]
+
+    def contest_entries_named(self, contest_id: int) -> list[dict]:
+        """返回报名（带 bot 名/owner 名 + seed/group/eliminated）。"""
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT e.*, b.name AS bot_name, b.display_name AS bot_display, "
+                "b.game_id, u.username AS owner_name, u.display_name AS owner_display "
+                "FROM contest_entries e "
+                "JOIN bots b ON e.bot_id=b.id "
+                "LEFT JOIN users u ON e.user_id=u.id "
+                "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at",
+                (contest_id,),
+            ).fetchall()
+            return [_row(r) for r in rows]
+
     def update_pairing(self, pairing_id: int, **fields: Any) -> dict | None:
         allowed = {
             "match_id",

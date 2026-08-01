@@ -16,6 +16,7 @@
 | [裁判](#/wiki?slug=judge) | 裁判概念 |
 | [对局](#/wiki?slug=match) | 对局生命周期与错误码 |
 | [赛制模板](#/wiki?slug=contest-format) | 模板结构、阶段类型、match_config 与管理员配置 |
+| [赛事对阵图](#/wiki?slug=contest-bracket) | 对阵/报名显示 Bot 名 + bracket 数据端点 |
 | [Bot 详情页](#/wiki?slug=bot-detail) | Bot 档案/对局历史/对手战绩/评分曲线 |
 | [用户主页与搜索](#/wiki?slug=user-profile) | 用户档案/战绩/Bot 列表 + 全局搜索 + 资料编辑 |
 | [通知系统](#/wiki?slug=notifications) | 站内通知 + 邮件提醒（铃铛/列表/偏好） |
