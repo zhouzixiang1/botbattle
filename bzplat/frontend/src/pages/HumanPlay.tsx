@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import MatchBoard from '../components/MatchBoard'
-import { reduceEvents } from '../components/poker/useMatchState'
-import { playWsUrl } from '../api'
-import { gameLabel, normalizeGameId } from '../lib/games'
+import { PlayCircle, ArrowRight } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import MatchBoard from '@/components/MatchBoard'
+import { reduceEvents } from '@/components/poker/useMatchState'
+import { Card } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { ErrorMsg } from '@/components/ui/status'
+import { playWsUrl } from '@/api'
+import { gameLabel, normalizeGameId } from '@/lib/games'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -78,23 +84,27 @@ export default function HumanPlay() {
   return (
     <PageStub title="人类对战">
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <span className="text-sm text-slate-500">
+        <span className="text-sm text-muted-foreground">
           {gameLabel(gameId)} · 你坐【座位 {humanSeat}】
         </span>
         <span className="text-sm">
           {over ? (
-            <span className="text-slate-500">对局结束</span>
+            <span className="text-muted-foreground">对局结束</span>
           ) : myTurn ? (
-            <span className="font-medium text-emerald-600">轮到你落子</span>
+            <span className="flex items-center gap-1 font-medium text-success">
+              <PlayCircle className="size-4" />
+              轮到你落子
+            </span>
           ) : (
-            <span className="text-slate-400">等待中…</span>
+            <span className="text-muted-foreground">等待中…</span>
           )}
         </span>
-        <Link to={`/match/${id}`} className="ml-auto text-sm text-brand-600 hover:underline">
-          查看回放 →
+        <Link to={`/match/${id}`} className="ml-auto inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">
+          查看回放
+          <ArrowRight className="size-4" />
         </Link>
       </div>
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
+      {error && <ErrorMsg msg={error} className="mb-3" />}
 
       {/* 棋类：可点击棋盘；扑克：动作按钮栏 */}
       {gameId === 'gomoku' && (
@@ -114,7 +124,7 @@ export default function HumanPlay() {
         </div>
       )}
       {!isBoard && gameId !== 'holdem' && (
-        <p className="text-sm text-slate-400">未知游戏：{match?.game_id}</p>
+        <p className="text-sm text-muted-foreground">未知游戏：{match?.game_id}</p>
       )}
     </PageStub>
   )
@@ -131,22 +141,39 @@ function HoldemActions({
 }) {
   const [raiseTo, setRaiseTo] = useState(200)
   const dis = disabled || !legal
-  const btn = 'rounded-lg border px-3 py-1.5 text-sm disabled:opacity-40'
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
-      <button type="button" disabled={dis} onClick={() => onAct('f')} className={`${btn} border-error-300 text-error-600 hover:bg-error-50`}>弃牌</button>
-      <button type="button" disabled={dis} onClick={() => onAct('k')} className={`${btn} border-slate-300 text-slate-600 hover:bg-slate-50`}>过牌</button>
-      <button type="button" disabled={dis} onClick={() => onAct('c')} className={`${btn} border-slate-300 text-slate-600 hover:bg-slate-50`}>跟注</button>
-      <label className="flex items-center gap-1 text-sm text-slate-600">
+    <Card className="flex flex-row flex-wrap items-center gap-2 py-3">
+      <Button type="button" variant="destructive" size="sm" disabled={dis} onClick={() => onAct('f')}>
+        弃牌
+      </Button>
+      <Button type="button" variant="outline" size="sm" disabled={dis} onClick={() => onAct('k')}>
+        过牌
+      </Button>
+      <Button type="button" variant="outline" size="sm" disabled={dis} onClick={() => onAct('c')}>
+        跟注
+      </Button>
+      <Label className="flex items-center gap-2 text-sm text-muted-foreground">
         加注到
-        <input
-          type="number" min={1} className="w-24 rounded-lg border border-slate-300 px-2 py-1.5"
-          value={raiseTo} onChange={(e) => setRaiseTo(Number(e.target.value))}
+        <Input
+          type="number"
+          min={1}
+          className="w-24"
+          value={raiseTo}
+          onChange={(e) => setRaiseTo(Number(e.target.value))}
         />
-      </label>
-      <button type="button" disabled={dis} onClick={() => onAct('r', raiseTo)} className={`${btn} border-brand-300 text-brand-600 hover:bg-brand-50`}>加注</button>
-      <button type="button" disabled={dis} onClick={() => onAct('all')} className={`${btn} border-brand-300 text-brand-600 hover:bg-brand-50`}>All-in</button>
-      {legal && <span className="text-xs text-emerald-600">轮到你</span>}
-    </div>
+      </Label>
+      <Button type="button" size="sm" disabled={dis} onClick={() => onAct('r', raiseTo)}>
+        加注
+      </Button>
+      <Button type="button" size="sm" disabled={dis} onClick={() => onAct('all')}>
+        All-in
+      </Button>
+      {legal && (
+        <span className="flex items-center gap-1 text-xs text-success">
+          <PlayCircle className="size-3.5" />
+          轮到你
+        </span>
+      )}
+    </Card>
   )
 }

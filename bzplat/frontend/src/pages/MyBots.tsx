@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { useAuth } from '../components/useAuth'
-import { apiForm, apiGet, apiJson, errMsg } from '../api'
-import { GAMES, gameLabel } from '../lib/games'
+import { Upload, Trash2, Pencil, Save, X, Power, Eye, EyeOff, Bot as BotIcon } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { useAuth } from '@/components/useAuth'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { Badge } from '@/components/ui/badge'
+import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { apiForm, apiGet, apiJson, errMsg } from '@/api'
+import { GAMES, gameLabel } from '@/lib/games'
 
 interface Bot {
   id: number
@@ -135,7 +143,7 @@ export default function MyBots() {
       <PageStub title="我的 Bot">
         <p>
           请先{' '}
-          <Link to="/login" className="text-brand-600 hover:text-brand-700">
+          <Link to="/login" className="font-medium text-primary hover:underline">
             登录
           </Link>{' '}
           后管理 Bot。
@@ -144,84 +152,87 @@ export default function MyBots() {
     )
   }
 
+  const selectCls =
+    'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
+
   return (
     <PageStub title="我的 Bot">
       <p className="mb-4">
         上传二进制 Bot（Linux ELF / Windows PE）。请选择对应游戏类型。macOS Mach-O 会被拒绝。
       </p>
 
-      <form
-        onSubmit={(e) => void onUpload(e)}
-        className="mb-8 max-w-lg space-y-3 rounded-xl border border-slate-200 bg-white p-4"
-      >
-        <h2 className="text-sm font-medium text-slate-700">上传新 Bot</h2>
-        <label className="block text-sm text-slate-600">
-          游戏类型
-          <select
-            value={gameId}
-            onChange={(e) => setGameId(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-400 focus:outline-none"
-          >
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="block text-sm text-slate-600">
-          名称（唯一标识）
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-            pattern="[A-Za-z0-9_\-]+"
-            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-400 focus:outline-none"
-          />
-        </label>
-        <label className="block text-sm text-slate-600">
-          显示名
-          <input
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-400 focus:outline-none"
-          />
-        </label>
-        <label className="block text-sm text-slate-600">
-          简介
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={2}
-            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:border-brand-400 focus:outline-none"
-          />
-        </label>
-        <label className="block text-sm text-slate-600">
-          二进制文件
-          <input
-            type="file"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            required
-            className="mt-1 block w-full text-sm text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-brand-700 file:px-3 file:py-1.5 file:text-sm file:text-white"
-          />
-        </label>
-        {error && <p className="text-sm text-error-500">{error}</p>}
-        <button
-          type="submit"
-          disabled={busy}
-          className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-500 disabled:opacity-60"
-        >
-          {busy ? '上传中…' : '上传'}
-        </button>
-      </form>
+      <Card className="mb-8 max-w-lg">
+        <CardContent>
+          <form onSubmit={(e) => void onUpload(e)} className="space-y-3">
+            <h2 className="text-sm font-medium text-foreground">上传新 Bot</h2>
+            <div className="space-y-1.5">
+              <Label htmlFor="upload-game">游戏类型</Label>
+              <select
+                id="upload-game"
+                value={gameId}
+                onChange={(e) => setGameId(e.target.value)}
+                className={selectCls}
+              >
+                {GAMES.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="upload-name">名称（唯一标识）</Label>
+              <Input
+                id="upload-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                pattern="[A-Za-z0-9_\-]+"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="upload-display">显示名</Label>
+              <Input
+                id="upload-display"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="upload-desc">简介</Label>
+              <Textarea
+                id="upload-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={2}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="upload-file">二进制文件</Label>
+              <Input
+                id="upload-file"
+                type="file"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                required
+                className="cursor-pointer"
+              />
+            </div>
+            {error && <ErrorMsg msg={error} />}
+            <Button type="submit" disabled={busy} className="gap-1.5">
+              <Upload className="size-4" />
+              {busy ? '上传中…' : '上传'}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
 
       <div className="mb-3">
-        <label className="text-sm text-slate-500">
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
           筛选游戏
           <select
             value={filterGame}
             onChange={(e) => setFilterGame(e.target.value)}
-            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+            className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring"
           >
             <option value="">全部</option>
             {GAMES.map((g) => (
@@ -233,79 +244,79 @@ export default function MyBots() {
         </label>
       </div>
 
-      <ul className="divide-y divide-slate-700/80 overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <Card className="gap-0 py-0">
         {bots.length === 0 ? (
-          <li className="px-4 py-8 text-center text-slate-500">暂无 Bot，请先上传</li>
+          <EmptyState text="暂无 Bot，请先上传" icon={<BotIcon className="size-7 opacity-40" />} />
         ) : (
-          bots.map((b) => (
-            <li key={b.id} className="px-4 py-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="font-medium text-slate-800">
-                    <Link to={`/bot/${b.id}`} className="hover:text-brand-600">
-                      {b.display_name || b.name}
-                    </Link>
-                    <span className="ml-2 font-mono text-xs text-slate-500">#{b.id}</span>
-                    <span className="ml-2 rounded bg-brand-50 px-1.5 py-0.5 text-xs text-brand-700">
-                      {gameLabel(b.game_id)}
-                    </span>
+          <ul className="divide-y divide-border">
+            {bots.map((b) => (
+              <li key={b.id} className="px-4 py-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
+                      <Link to={`/bot/${b.id}`} className="hover:text-primary">
+                        {b.display_name || b.name}
+                      </Link>
+                      <span className="font-mono text-xs text-muted-foreground">#{b.id}</span>
+                      <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
+                    </div>
+                    {b.description && (
+                      <p className="mt-0.5 text-xs text-muted-foreground">{b.description}</p>
+                    )}
+                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                      <span className="rounded bg-muted px-1.5 py-0.5">
+                        {b.os || '—'} / {b.arch || '—'}
+                      </span>
+                      <span className="rounded bg-muted px-1.5 py-0.5">
+                        format: {b.format || 'unknown'}
+                      </span>
+                      <span>v{b.current_version ?? 0}</span>
+                      <span>{b.is_active ? '启用' : '停用'}</span>
+                      <span>{b.is_public ? '公开' : '私有'}</span>
+                    </div>
                   </div>
-                  {b.description && (
-                    <p className="mt-0.5 text-xs text-slate-500">{b.description}</p>
-                  )}
-                  <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-400">
-                    <span className="rounded bg-slate-100/80 px-1.5 py-0.5">
-                      {b.os || '—'} / {b.arch || '—'}
-                    </span>
-                    <span className="rounded bg-slate-100/80 px-1.5 py-0.5">
-                      format: {b.format || 'unknown'}
-                    </span>
-                    <span>v{b.current_version ?? 0}</span>
-                    <span>{b.is_active ? '启用' : '停用'}</span>
-                    <span>{b.is_public ? '公开' : '私有'}</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button type="button" variant="outline" size="sm" onClick={() => void toggleActive(b)} className="gap-1">
+                      <Power className="size-3.5" />
+                      {b.is_active ? '停用' : '启用'}
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => void togglePublic(b)} className="gap-1">
+                      {b.is_public ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                      {b.is_public ? '设私有' : '设公开'}
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => startEdit(b)} className="gap-1">
+                      <Pencil className="size-3.5" />
+                      编辑
+                    </Button>
+                    <Button type="button" variant="destructive" size="sm" onClick={() => void del(b)} className="gap-1">
+                      <Trash2 className="size-3.5" />
+                      删除
+                    </Button>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-1.5">
-                  <button type="button" onClick={() => void toggleActive(b)}
-                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100">
-                    {b.is_active ? '停用' : '启用'}
-                  </button>
-                  <button type="button" onClick={() => void togglePublic(b)}
-                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100">
-                    {b.is_public ? '设私有' : '设公开'}
-                  </button>
-                  <button type="button" onClick={() => startEdit(b)}
-                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-100">
-                    编辑
-                  </button>
-                  <button type="button" onClick={() => void del(b)}
-                    className="rounded-lg border border-error-200 px-2.5 py-1 text-xs text-error-600 hover:bg-error-50">
-                    删除
-                  </button>
-                </div>
-              </div>
-              {editing === b.id && (
-                <div className="mt-2 flex flex-wrap items-end gap-2 rounded-lg bg-slate-50 p-3">
-                  <label className="text-xs text-slate-500">
-                    显示名
-                    <input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64}
-                      className="mt-1 block rounded border border-slate-300 bg-white px-2 py-1 text-sm" />
-                  </label>
-                  <label className="text-xs text-slate-500">
-                    简介
-                    <input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500}
-                      className="mt-1 block w-64 rounded border border-slate-300 bg-white px-2 py-1 text-sm" />
-                  </label>
-                  <button type="button" onClick={() => void saveEdit(b)}
-                    className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs text-white hover:bg-brand-500">保存</button>
-                  <button type="button" onClick={() => setEditing(null)}
-                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100">取消</button>
-                </div>
-              )}
-            </li>
-          ))
+                {editing === b.id && (
+                  <div className="mt-2 flex flex-wrap items-end gap-2 rounded-lg bg-muted p-3">
+                    <label className="space-y-1 text-xs text-muted-foreground">
+                      显示名
+                      <Input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64} className="h-8" />
+                    </label>
+                    <label className="block space-y-1 text-xs text-muted-foreground">
+                      简介
+                      <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500} className="h-8 w-64" />
+                    </label>
+                    <Button type="button" size="sm" onClick={() => void saveEdit(b)} className="gap-1">
+                      <Save className="size-3.5" />保存
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => setEditing(null)} className="gap-1">
+                      <X className="size-3.5" />取消
+                    </Button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
-      </ul>
+      </Card>
     </PageStub>
   )
 }

@@ -1,9 +1,16 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { useAuth } from '../components/useAuth'
-import { apiGet, apiJson, errMsg } from '../api'
-import { GAMES, gameLabel } from '../lib/games'
+import { Trophy, Plus } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { useAuth } from '@/components/useAuth'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
+import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { apiGet, apiJson, errMsg } from '@/api'
+import { GAMES, gameLabel } from '@/lib/games'
 
 interface Contest {
   id: number
@@ -100,18 +107,23 @@ export default function Contests() {
     }
   }
 
+  const selectCls =
+    'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
+  const inlineSelectCls =
+    'h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
+
   return (
     <PageStub title="比赛">
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-muted-foreground">
           组织者发布比赛，选手派遣 Bot。默认模板偏 Swiss / 分组，适合校赛规模。
         </p>
-        <label className="ml-auto text-sm text-slate-500">
+        <label className="ml-auto flex items-center gap-2 text-sm text-muted-foreground">
           游戏
           <select
             value={filterGame}
             onChange={(e) => setFilterGame(e.target.value)}
-            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+            className={inlineSelectCls}
           >
             <option value="">全部</option>
             {GAMES.map((g) => (
@@ -122,101 +134,120 @@ export default function Contests() {
           </select>
         </label>
       </div>
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
+      {error && <ErrorMsg msg={error} className="mb-3" />}
 
       {canCreate && isLoggedIn && (
-        <form
-          onSubmit={(e) => void onCreate(e)}
-          className="mb-6 flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4"
-        >
-          <label className="text-sm text-slate-600">
-            标题
-            <input
-              className="mt-1 block rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              required
-            />
-          </label>
-          <label className="text-sm text-slate-600">
-            说明
-            <input
-              className="mt-1 block rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </label>
-          <label className="text-sm text-slate-600">
-            模板
-            <select
-              className="mt-1 block rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800"
-              value={templateId}
-              onChange={(e) => setTemplateId(e.target.value)}
-            >
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}（{gameLabel(t.game_id)}）
-                </option>
-              ))}
-            </select>
-          </label>
-          {selGame === 'holdem' && (
-            <label className="text-sm text-slate-600">
-              手数
-              <input
-                type="number"
-                min={1}
-                max={200}
-                className="mt-1 block w-24 rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800"
-                value={hands}
-                onChange={(e) => setHands(Number(e.target.value))}
-              />
-            </label>
-          )}
-          {selGame === 'pencil' && (
-            <label className="text-sm text-slate-600">
-              点阵边长
-              <input
-                type="number"
-                min={3}
-                max={15}
-                className="mt-1 block w-24 rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800"
-                value={nDots}
-                onChange={(e) => setNDots(Number(e.target.value))}
-              />
-            </label>
-          )}
-          {selGame === 'gomoku' && (
-            <span className="self-center text-xs text-slate-400">五子棋单局，无可调参数</span>
-          )}
-          <button
-            type="submit"
-            className="rounded-lg bg-brand-600 px-4 py-2 text-sm text-white hover:bg-brand-500"
-          >
-            创建比赛
-          </button>
-        </form>
+        <Card className="mb-6">
+          <CardContent>
+            <form onSubmit={(e) => void onCreate(e)} className="flex flex-wrap items-end gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-title">标题</Label>
+                <Input
+                  id="contest-title"
+                  className="w-48"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-desc">说明</Label>
+                <Input
+                  id="contest-desc"
+                  className="w-56"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-template">模板</Label>
+                <select
+                  id="contest-template"
+                  className={selectCls}
+                  value={templateId}
+                  onChange={(e) => setTemplateId(e.target.value)}
+                >
+                  {templates.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}（{gameLabel(t.game_id)}）
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {selGame === 'holdem' && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="contest-hands">手数</Label>
+                  <Input
+                    id="contest-hands"
+                    type="number"
+                    min={1}
+                    max={200}
+                    className="w-24"
+                    value={hands}
+                    onChange={(e) => setHands(Number(e.target.value))}
+                  />
+                </div>
+              )}
+              {selGame === 'pencil' && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="contest-ndots">点阵边长</Label>
+                  <Input
+                    id="contest-ndots"
+                    type="number"
+                    min={3}
+                    max={15}
+                    className="w-24"
+                    value={nDots}
+                    onChange={(e) => setNDots(Number(e.target.value))}
+                  />
+                </div>
+              )}
+              {selGame === 'gomoku' && (
+                <span className="self-center text-xs text-muted-foreground">五子棋单局，无可调参数</span>
+              )}
+              <Button type="submit" className="gap-1.5">
+                <Plus className="size-4" />
+                创建比赛
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
       )}
 
-      <ul className="divide-y divide-slate-700/80 overflow-hidden rounded-xl border border-slate-200 bg-white">
-        {list.map((c) => (
-          <li key={c.id} className="px-4 py-3">
-            <Link
-              to={`/contests/${c.id}`}
-              className="text-lg text-brand-700 hover:underline"
-            >
-              {c.title}
-            </Link>
-            <div className="text-xs text-slate-500">
-              {c.status} · {c.template_id || '—'} · {gameLabel(c.game_id)} ·{' '}
-              {matchConfigSummary(c)} · {c.created_at}
-            </div>
-          </li>
-        ))}
-        {!list.length && (
-          <li className="px-4 py-8 text-center text-slate-500">暂无比赛</li>
+      <Card className="gap-0 py-0">
+        {list.length === 0 ? (
+          <EmptyState text="暂无比赛" icon={<Trophy className="size-7 opacity-40" />} />
+        ) : (
+          <ul className="divide-y divide-border">
+            {list.map((c) => (
+              <li key={c.id} className="px-4 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    to={`/contests/${c.id}`}
+                    className="text-lg font-medium text-primary hover:underline"
+                  >
+                    {c.title}
+                  </Link>
+                  <Badge variant="secondary">{c.status}</Badge>
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span>{c.template_id || '—'}</span>
+                  <span>·</span>
+                  <span>{gameLabel(c.game_id)}</span>
+                  <span>·</span>
+                  <span>{matchConfigSummary(c)}</span>
+                  {c.created_at && (
+                    <>
+                      <span>·</span>
+                      <span>{c.created_at}</span>
+                    </>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
-      </ul>
+      </Card>
     </PageStub>
   )
 }

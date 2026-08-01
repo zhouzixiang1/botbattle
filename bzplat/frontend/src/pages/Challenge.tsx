@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import OpponentPickerModal, { type PickBot } from '../components/OpponentPickerModal'
-import { useAuth } from '../components/useAuth'
-import { apiGet, apiJson, errMsg } from '../api'
-import { GAMES, gameLabel, type GameId } from '../lib/games'
+import { Swords, User, Bot as BotIcon, Plus, Play } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import OpponentPickerModal, { type PickBot } from '@/components/OpponentPickerModal'
+import { useAuth } from '@/components/useAuth'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { ErrorMsg } from '@/components/ui/status'
+import { cn } from '@/lib/utils'
+import { apiGet, apiJson, errMsg } from '@/api'
+import { GAMES, gameLabel, type GameId } from '@/lib/games'
 
 interface Bot {
   id: number
@@ -88,7 +94,7 @@ export default function Challenge() {
       <PageStub title="发起挑战">
         <p>
           请先{' '}
-          <Link to="/login" className="text-brand-600 hover:text-brand-700">
+          <Link to="/login" className="font-medium text-primary hover:underline">
             登录
           </Link>{' '}
           后选择己方 Bot 发起挑战。
@@ -97,26 +103,38 @@ export default function Challenge() {
     )
   }
 
-  const inp = 'mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-800 focus:border-brand-400 focus:outline-none'
+  const selectCls =
+    'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
 
   return (
     <PageStub title="发起挑战">
-      <p className="mb-4 text-sm text-slate-500">
+      <p className="mb-4 text-sm text-muted-foreground">
         选择游戏与你的 Bot，再选对手（搜索/自博弈/人类亲自上场）。
       </p>
       <form onSubmit={(e) => void onSubmit(e)} className="mx-auto max-w-lg space-y-4">
-        <label className="block text-sm text-slate-600">
-          游戏
-          <select value={gameId} onChange={(e) => setGameId(e.target.value as GameId)} className={inp}>
+        <div className="space-y-1.5">
+          <Label htmlFor="challenge-game">游戏</Label>
+          <select
+            id="challenge-game"
+            value={gameId}
+            onChange={(e) => setGameId(e.target.value as GameId)}
+            className={selectCls}
+          >
             {GAMES.map((g) => (
               <option key={g.id} value={g.id}>{g.label}</option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="block text-sm text-slate-600">
-          你的 Bot（{gameLabel(gameId)}）
-          <select value={myBotId} onChange={(e) => setMyBotId(e.target.value)} required className={inp}>
+        <div className="space-y-1.5">
+          <Label htmlFor="challenge-mybot">你的 Bot（{gameLabel(gameId)}）</Label>
+          <select
+            id="challenge-mybot"
+            value={myBotId}
+            onChange={(e) => setMyBotId(e.target.value)}
+            required
+            className={selectCls}
+          >
             <option value="">选择…</option>
             {mine.map((b) => (
               <option key={b.id} value={b.id}>
@@ -124,23 +142,35 @@ export default function Challenge() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
         {/* 对手模式切换 */}
-        <div className="rounded-lg border border-slate-200 p-3">
+        <div className="rounded-lg border border-border p-3">
           <div className="flex flex-wrap gap-2 text-sm">
             <button
               type="button"
               onClick={() => setHumanMode(false)}
-              className={`rounded-lg border px-3 py-1.5 ${!humanMode ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5',
+                !humanMode
+                  ? 'border-primary/40 bg-primary/10 text-primary'
+                  : 'border-input text-muted-foreground hover:bg-accent',
+              )}
             >
+              <Swords className="size-3.5" />
               与 Bot 对战
             </button>
             <button
               type="button"
               onClick={() => setHumanMode(true)}
-              className={`rounded-lg border px-3 py-1.5 ${humanMode ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5',
+                humanMode
+                  ? 'border-primary/40 bg-primary/10 text-primary'
+                  : 'border-input text-muted-foreground hover:bg-accent',
+              )}
             >
+              <User className="size-3.5" />
               人类亲自上场
             </button>
           </div>
@@ -150,58 +180,69 @@ export default function Challenge() {
               <button
                 type="button"
                 onClick={() => setPickerOpen(true)}
-                className="w-full rounded-lg border border-dashed border-slate-300 px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-50"
+                className="flex w-full items-center gap-2 rounded-lg border border-dashed border-input px-3 py-2.5 text-sm text-muted-foreground hover:bg-accent"
               >
                 {opp ? (
-                  <span>
+                  <span className="flex flex-wrap items-center gap-2 text-foreground">
+                    <BotIcon className="size-4 text-primary" />
                     <strong>{opp.display_name || opp.name}</strong>
-                    <span className="ml-2 text-xs text-slate-400">
+                    <span className="text-xs text-muted-foreground">
                       {opp.owner_display || opp.owner_name || `#${opp.owner_id}`}
                       {opp.owner_id === user?.id ? '（自博弈）' : ''}
                     </span>
                   </span>
                 ) : (
-                  '＋ 选择对手 Bot（搜索 / 我的 / 按用户）'
+                  <>
+                    <Plus className="size-4" />
+                    选择对手 Bot（搜索 / 我的 / 按用户）
+                  </>
                 )}
               </button>
             </div>
           ) : (
-            <div className="mt-3 text-sm text-slate-600">
+            <div className="mt-3 text-sm text-muted-foreground">
               <p className="mb-2">
-                你（<strong>{user?.username}</strong>）作为人类玩家，对战上面的 Bot。
+                你（<strong className="text-foreground">{user?.username}</strong>）作为人类玩家，对战上面的 Bot。
               </p>
               <label className="block">
                 你坐哪一位？
-                <select value={humanSeat} onChange={(e) => setHumanSeat(Number(e.target.value))} className={inp}>
+                <select
+                  value={humanSeat}
+                  onChange={(e) => setHumanSeat(Number(e.target.value))}
+                  className={selectCls}
+                >
                   <option value={1}>座位 1（后手/白）</option>
                   <option value={0}>座位 0（先手/黑）</option>
                 </select>
               </label>
-              <p className="mt-2 text-xs text-slate-400">人类对战不计天梯、走独立并发。</p>
+              <p className="mt-2 text-xs text-muted-foreground">人类对战不计天梯、走独立并发。</p>
             </div>
           )}
         </div>
 
         {gameId === 'holdem' && !humanMode && (
-          <label className="block text-sm text-slate-600">
-            手数（1–300）
-            <input
-              type="number" min={1} max={300}
+          <div className="space-y-1.5">
+            <Label htmlFor="challenge-hands">手数（1–300）</Label>
+            <Input
+              id="challenge-hands"
+              type="number"
+              min={1}
+              max={300}
               value={hands}
               onChange={(e) => setHands(Number(e.target.value) || 70)}
-              className={inp}
             />
-          </label>
+          </div>
         )}
 
-        {error && <p className="text-sm text-error-500">{error}</p>}
-        <button
+        {error && <ErrorMsg msg={error} />}
+        <Button
           type="submit"
           disabled={busy || (!humanMode && !opp)}
-          className="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-brand-500 disabled:opacity-50"
+          className="w-full gap-1.5"
         >
+          <Play className="size-4" />
           {busy ? '发起中…' : humanMode ? '开始人类对战' : '开始对局'}
-        </button>
+        </Button>
       </form>
 
       {pickerOpen && (

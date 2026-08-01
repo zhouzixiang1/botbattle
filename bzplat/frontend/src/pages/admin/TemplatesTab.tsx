@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { ArrowLeft } from 'lucide-react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { ErrorMsg, Loading, RefreshBtn } from './ui'
 
@@ -273,7 +274,7 @@ function Editor(props: {
           onClick={() => props.setEditing(null)}
           className="text-xs text-slate-500 hover:text-slate-700"
         >
-          ← 返回列表
+          <ArrowLeft className="inline size-3" /> 返回列表
         </button>
       </div>
       <ErrorMsg msg={error} />
