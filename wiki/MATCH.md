@@ -46,7 +46,8 @@
   每用户同时进行的人类局 ≤ 1。
 - **Bot 崩溃快速中止**：若 Bot 二进制启动即崩（进程退出/EOF，如动态链接库缺失、glibc 不匹配），
   对局立即 `aborted`（reason=`bot_crashed`）并广播 `error`，而非吞成默认动作死磕数小时；
-  对局异常/中止时**无条件释放** per-user 锁。
+  对局异常/中止时**无条件释放** per-user 锁。该行为对三款游戏（holdem/gomoku/pencil）一致——
+  引擎层识别 `BotCrashedError`（不可恢复）与普通决策错误（可恢复，判对手赢）两类，前者上抛触发 abort、后者按规则处理。
 - 不计 Glicko-2 天梯。
 
 > 棋类棋盘可点击落子；扑克提供 Fold/Check/Call/Raise/Allin 按钮栏。
@@ -63,6 +64,7 @@
 SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看），之后逐事件广播；
 空闲时 25 秒发一次 `ping` 保活；`match_end` / `error` 后流结束。回放事件流增量落盘
 （`settle` / `hand_start` / `match_end` / `move` / `match_start` 或每 5 个事件）。
+每个订阅者的事件队列 `maxsize=2000`（Bot 决策极快时减少丢事件）；满时丢最旧事件保最新。
 
 ## 错误与后果
 

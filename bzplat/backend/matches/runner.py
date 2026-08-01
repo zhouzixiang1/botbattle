@@ -68,7 +68,13 @@ class MatchRunner:
 
         gid = normalize_game_id(game_id)
         sid_a = await self.runner.start_session(path_a)
-        sid_b = await self.runner.start_session(path_b)
+        try:
+            sid_b = await self.runner.start_session(path_b)
+        except BaseException:
+            # 第二个 session 启动失败（如 BotCrashedError）时，必须释放已启动的第一个，
+            # 否则其容器/进程会泄漏（finally 只保护下方 try 块，不覆盖这两个 start_session）。
+            await self.runner.stop_session(sid_a)
+            raise
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
 
