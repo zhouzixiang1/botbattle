@@ -179,3 +179,58 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
         snap = ws.receive_json()
     assert snap["type"] == "snapshot"
     assert snap["match"]["human_seat"] == 0
+
+
+# ── Bot 启动崩溃快速失败（PR-G1 治本）──────────────────────────
+def test_bot_crashed_aborts_human_match_quickly(store: Store):
+    """Bot 启动即崩（不存在的二进制）→ BotCrashedError 向上传播 → 对局快速 abort，
+    而非吞成 fold 死磕。验证 _run_human_match 的 abort + 锁清理。"""
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    u = store.create_user("crashusr", "c@ex.com", hash_password("password1"))
+    b = store.create_bot(
+        u["id"], "crashbot", binary_path="/nonexistent/crash_bot", format="elf",
+        is_public=1, game_id="gomoku",
+    )
+    store.ensure_rating(b["id"])
+    orch = _orch(store, human_timeout=1.0)
+
+    async def run():
+        mid = await orch.challenge_human(
+            b["id"], u["id"], human_seat=0, game_id="gomoku",
+        )
+        # 等对局 task 结束（应在数秒内 abort，而非等超时死磕）
+        task = orch._tasks.get(mid)
+        if task:
+            try:
+                await asyncio.wait_for(task, timeout=15)
+            except Exception:
+                pass
+        return mid
+
+    mid = asyncio.run(run())
+    m = store.get_match(mid)
+    # 对局应被 abort（而非 running/completed）
+    assert m["status"] == "aborted", f"expected aborted, got {m['status']} ({m.get('reason')})"
+    assert m["reason"] == "bot_crashed"
+    # 用户锁应已释放（可再次建局）
+    assert u["id"] not in orch._human_active_users
+
+
+def test_bot_crashed_error_not_swallowed_by_runner(store: Store):
+    """run_bot_vs_human 在 Bot 崩溃时应抛 BotCrashedError（而非吞成 _fail_response）。"""
+    from bzplat.backend.runtime.binary_runner import BotCrashedError
+
+    _, _ = _setup(store)
+    runner = MatchRunner(BinaryRunner(prefer_local=True))
+
+    async def human_decide(player_idx, request):
+        return {"x": 0, "y": 0}  # 不会到达（bot 先崩）
+
+    async def run():
+        return await runner.run_bot_vs_human(
+            "/nonexistent/crash_bot", bot_seat=1, human_decide=human_decide,
+            game_id="gomoku", on_event=lambda k, e: None,
+        )
+
+    with pytest.raises(BotCrashedError):
+        asyncio.run(run())
