@@ -5,6 +5,7 @@ import { apiGet, apiJson, errMsg } from '../api'
 import { useAuth } from '../components/useAuth'
 import { gameLabel } from '../lib/games'
 import { tierFor } from '../lib/tiers'
+import Comments from '../components/Comments'
 
 function TierInline({ rating, name }: { rating: number | null | undefined; name?: string }) {
   const t = tierFor(rating)
@@ -492,6 +493,8 @@ export default function BotDetail() {
           <RatingChart points={history} />
         </div>
       )}
+
+      <Comments targetType="bot" targetId={String(botId)} />
     </PageStub>
   )
 }

@@ -146,6 +146,48 @@ export default function Home() {
           </tbody>
         </table>
       </div>
+
+      <LikedTopMatches />
     </PageStub>
+  )
+}
+
+interface LikedMatch {
+  id: string
+  game_id: string
+  likes_count: number
+  views_count: number
+  bot_a_name?: string
+  bot_a_display?: string
+  bot_b_name?: string
+  bot_b_display?: string
+  created_at?: string
+}
+
+function LikedTopMatches() {
+  const [matches, setMatches] = useState<LikedMatch[]>([])
+  useEffect(() => {
+    apiGet<{ matches: LikedMatch[] }>('/api/matches/liked-top?limit=5')
+      .then((d) => setMatches(d.matches || []))
+      .catch(() => {})
+  }, [])
+  if (matches.length === 0) return null
+  return (
+    <div className="mt-6">
+      <h3 className="mb-2 text-sm font-semibold text-slate-700">🔥 热门对局（点赞榜）</h3>
+      <ul className="space-y-1.5">
+        {matches.map((m) => (
+          <li key={m.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-sm">
+            <Link to={`/match/${encodeURIComponent(m.id)}`} className="text-slate-700 hover:text-brand-600">
+              {m.bot_a_display || m.bot_a_name} vs {m.bot_b_display || m.bot_b_name}
+            </Link>
+            <span className="rounded-full bg-brand-50 px-1.5 text-[10px] text-brand-700">{gameLabel(m.game_id)}</span>
+            <span className="ml-auto text-xs text-slate-400">
+              ♥ {m.likes_count} · 👁 {m.views_count}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }

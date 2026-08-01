@@ -287,6 +287,35 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     r = api.authed(tok, "PUT", "/api/notification-prefs", json={"email_match_done": True})
     check("PUT /api/notification-prefs", r.status_code == 200 and r.json()["prefs"]["email_match_done"] == 1, r.text[:80])
 
+    # 评论 + 点赞 + 浏览（PR-7）：对 phase0 的某场对局操作
+    # 先发起一场对局拿 match_id
+    u2 = ctx["user_names"][1]
+    rc = m._paced_challenge if hasattr(m, "_paced_challenge") else None
+    if rc:
+        rr = rc(api, tok, {"my_bot_id": ctx["bots"][ctx["user_names"][0]]["holdem"],
+                           "opponent_bot_id": ctx["bots"][u2]["holdem"], "game_id": "holdem", "hands": 8})
+        if rr.status_code == 200:
+            tmid = rr.json()["match_id"]
+            # 评论
+            r = api.authed(tok, "POST", "/api/comments",
+                           json={"target_type": "match", "target_id": tmid, "body": "loadtest comment"})
+            check("POST /api/comments", r.status_code == 200 and "comment" in r.json(), r.text[:80])
+            r = api.client.get(f"/api/comments?target_type=match&target_id={tmid}")
+            check("GET /api/comments", r.status_code == 200 and "comments" in r.json(), r.text[:80])
+            # 点赞
+            r = api.authed(tok, "POST", "/api/likes", json={"target_type": "match", "target_id": tmid})
+            check("POST /api/likes", r.status_code == 200 and r.json()["liked"] is True, r.text[:80])
+            r = api.authed(tok, "GET", f"/api/likes/status?target_type=match&target_id={tmid}")
+            check("GET /api/likes/status", r.status_code == 200 and r.json()["liked"] is True, r.text[:80])
+            r = api.authed(tok, "DELETE", "/api/likes", json={"target_type": "match", "target_id": tmid})
+            check("DELETE /api/likes", r.status_code == 200, r.text[:80])
+            # 浏览
+            r = api.client.post(f"/api/matches/{tmid}/view")
+            check("POST /api/matches/{id}/view", r.status_code == 200, r.text[:80])
+            # 点赞榜（公开）
+            r = api.client.get("/api/matches/liked-top?limit=5")
+            check("GET /api/matches/liked-top", r.status_code == 200 and "matches" in r.json(), r.text[:80])
+
     # organizer token 打通 require_organizer（GET /api/admin/contests 需要 admin；用创建比赛权限验证）
     # 这里用「列表自己的比赛报名」间接验证：require_organizer 端点是 POST /api/contests，下面阶段 5 覆盖
 
