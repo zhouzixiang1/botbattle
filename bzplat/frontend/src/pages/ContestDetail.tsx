@@ -38,6 +38,10 @@ interface Entry {
   group_id?: string
   seed?: number
   eliminated?: number
+  bot_name?: string
+  bot_display?: string
+  owner_name?: string
+  owner_display?: string
 }
 
 interface Pairing {
@@ -50,6 +54,13 @@ interface Pairing {
   stage_idx?: number
   stage_key?: string
   group_id?: string
+  bot_a_name?: string
+  bot_a_display?: string
+  bot_b_name?: string
+  bot_b_display?: string
+  owner_a_name?: string
+  owner_b_name?: string
+  match_winner?: number | null
 }
 
 interface Standing {
@@ -60,6 +71,7 @@ interface Standing {
   losses: number
   net_chips: number
   group_id?: string
+  bot_name?: string
 }
 
 function parseStages(c: Contest | null): Stage[] {
@@ -319,15 +331,21 @@ export default function ContestDetail() {
       )}
 
       <h3 className="mt-8 text-sm font-medium text-slate-600">报名</h3>
-      <ul className="mt-2 space-y-1 text-sm text-slate-400">
-        {entries.length === 0 && <li>暂无报名</li>}
+      <ul className="mt-2 space-y-1 text-sm text-slate-600">
+        {entries.length === 0 && <li className="text-slate-400">暂无报名</li>}
         {entries.map((e) => (
-          <li key={e.id}>
-            user={e.user_id} bot={e.bot_id}
-            {e.seed ? ` seed=${e.seed}` : ''}
-            {e.group_id ? ` ${e.group_id}` : ''}
-            {e.eliminated ? ' [淘汰]' : ''}
-            {e.registered_at ? ` @ ${e.registered_at}` : ''}
+          <li key={e.id} className="flex flex-wrap items-center gap-2">
+            <Link to={`/bot/${e.bot_id}`} className="font-medium text-slate-800 hover:text-brand-600">
+              {e.bot_display || e.bot_name || `#${e.bot_id}`}
+            </Link>
+            {e.owner_name && (
+              <Link to={`/user/${encodeURIComponent(e.owner_name)}`} className="text-xs text-slate-400 hover:text-brand-600">
+                @{e.owner_display || e.owner_name}
+              </Link>
+            )}
+            {e.seed ? <span className="text-xs text-slate-400">种子 {e.seed}</span> : ''}
+            {e.group_id ? <span className="rounded bg-slate-100 px-1.5 text-xs text-slate-500">{e.group_id}</span> : ''}
+            {e.eliminated ? <span className="text-xs text-error-500">[淘汰]</span> : ''}
           </li>
         ))}
       </ul>
@@ -336,6 +354,7 @@ export default function ContestDetail() {
       <table className="mt-2 min-w-full text-left text-sm">
         <thead className="text-slate-500">
           <tr>
+            <th className="py-1 pr-4">#</th>
             <th className="py-1 pr-4">Bot</th>
             <th className="py-1 pr-4">积分</th>
             <th className="py-1 pr-4">W/D/L</th>
@@ -343,9 +362,14 @@ export default function ContestDetail() {
           </tr>
         </thead>
         <tbody>
-          {standings.map((s) => (
+          {standings.map((s, i) => (
             <tr key={s.bot_id} className="border-t border-slate-200">
-              <td className="py-1 pr-4">#{s.bot_id}</td>
+              <td className="py-1 pr-4 text-slate-400">{i + 1}</td>
+              <td className="py-1 pr-4">
+                <Link to={`/bot/${s.bot_id}`} className="text-slate-800 hover:text-brand-600">
+                  {s.bot_name || `#${s.bot_id}`}
+                </Link>
+              </td>
               <td className="py-1 pr-4 text-brand-700">{s.points}</td>
               <td className="py-1 pr-4">
                 {s.wins}/{s.draws}/{s.losses}
@@ -359,23 +383,32 @@ export default function ContestDetail() {
       <h3 className="mt-8 text-sm font-medium text-slate-600">
         对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab}`}` : ''}
       </h3>
-      <ul className="mt-2 space-y-1 text-sm text-slate-400">
-        {stagePairings.length === 0 && <li>暂无对阵</li>}
-        {stagePairings.map((p) => (
-          <li key={p.id} className="flex flex-wrap items-center gap-2">
-            <span>R{p.round_num ?? 1}</span>
-            {p.group_id && <span>{p.group_id}</span>}
-            <span>
-              #{p.bot_a_id} vs #{p.bot_b_id}
-            </span>
-            <span>{p.status}</span>
-            {p.match_id && (
-              <Link to={`/watch/${p.match_id}`} className="text-brand-600 hover:text-brand-700">
-                观战
-              </Link>
-            )}
-          </li>
-        ))}
+      <ul className="mt-2 space-y-1.5 text-sm text-slate-600">
+        {stagePairings.length === 0 && <li className="text-slate-400">暂无对阵</li>}
+        {stagePairings.map((p) => {
+          const w = p.match_winner
+          return (
+            <li key={p.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5">
+              <span className="rounded bg-slate-100 px-1.5 text-xs text-slate-500">R{p.round_num ?? 1}</span>
+              {p.group_id && <span className="rounded bg-slate-100 px-1.5 text-xs text-slate-500">{p.group_id}</span>}
+              <span className="flex items-center gap-1">
+                <Link to={`/bot/${p.bot_a_id}`} className={`hover:text-brand-600 ${w === 0 ? 'font-semibold text-success-600' : w === 1 ? 'text-slate-400' : ''}`}>
+                  {p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`}
+                </Link>
+                <span className="text-slate-400">vs</span>
+                <Link to={`/bot/${p.bot_b_id}`} className={`hover:text-brand-600 ${w === 1 ? 'font-semibold text-success-600' : w === 0 ? 'text-slate-400' : ''}`}>
+                  {p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
+                </Link>
+              </span>
+              <span className="text-xs text-slate-400">{p.status}</span>
+              {p.match_id && (
+                <Link to={`/watch/${p.match_id}`} className="ml-auto text-brand-600 hover:text-brand-700">
+                  观战
+                </Link>
+              )}
+            </li>
+          )
+        })}
       </ul>
     </PageStub>
   )
