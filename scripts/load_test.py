@@ -333,6 +333,26 @@ def phase1_bots(api: Api, ctx: dict[str, Any]) -> None:
     r = api.client.get(f"/api/bots/{bid}")
     check("GET /api/bots/{id}", r.status_code == 200 and r.json()["bot"]["id"] == bid, r.text[:80])
 
+    # 社交：关注用户 + 收藏 Bot（PR-4）
+    u2 = ctx["user_names"][1]
+    u2_id = _user_id(api.db_path, u2)
+    r = api.authed(tok, "POST", f"/api/users/{u2_id}/follow")
+    check("POST /api/users/{id}/follow", r.status_code == 200 and r.json()["following"] is True, r.text[:80])
+    r = api.authed(tok, "GET", f"/api/users/{u2_id}/follow-status")
+    check("GET /api/users/{id}/follow-status", r.status_code == 200 and r.json()["following"] is True, r.text[:80])
+    r = api.client.get(f"/api/users/{u2_id}/followers")
+    check("GET /api/users/{id}/followers", r.status_code == 200 and len(r.json()["followers"]) >= 1, r.text[:80])
+    r = api.authed(tok, "DELETE", f"/api/users/{u2_id}/follow")
+    check("DELETE /api/users/{id}/follow", r.status_code == 200 and r.json()["following"] is False, r.text[:80])
+    r = api.authed(tok, "POST", f"/api/bots/{bid}/favorite")
+    check("POST /api/bots/{id}/favorite", r.status_code == 200 and r.json()["favorited"] is True, r.text[:80])
+    r = api.authed(tok, "GET", f"/api/bots/{bid}/favorite-status")
+    check("GET /api/bots/{id}/favorite-status", r.status_code == 200 and r.json()["favorited"] is True, r.text[:80])
+    r = api.authed(tok, "GET", "/api/auth/me/favorites")
+    check("GET /api/auth/me/favorites", r.status_code == 200 and len(r.json()["favorites"]) >= 1, r.text[:80])
+    r = api.authed(tok, "DELETE", f"/api/bots/{bid}/favorite")
+    check("DELETE /api/bots/{id}/favorite", r.status_code == 200 and r.json()["favorited"] is False, r.text[:80])
+
     # GET /api/bots/{id} 404
     r = api.client.get("/api/bots/9999999")
     check("GET /api/bots/9999999 → 404", r.status_code == 404, f"{r.status_code}")

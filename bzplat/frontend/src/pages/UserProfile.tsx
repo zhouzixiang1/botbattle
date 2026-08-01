@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import PageStub from '../components/PageStub'
 import { useAuth } from '../components/useAuth'
-import { apiGet, errMsg } from '../api'
+import { apiGet, apiJson, errMsg } from '../api'
 import { gameLabel } from '../lib/games'
 
 interface UserProfileData {
@@ -44,6 +44,9 @@ export default function UserProfile() {
   const [bots, setBots] = useState<BotRow[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [following, setFollowing] = useState(false)
+  const [followerCount, setFollowerCount] = useState(0)
+  const [followingCount, setFollowingCount] = useState(0)
 
   useEffect(() => {
     if (!name) return
@@ -55,10 +58,33 @@ export default function UserProfile() {
       .then(([p, b]) => {
         setProfile(p.profile)
         setBots(b.bots || [])
+        // 关注状态（登录后）
+        if (user && user.username !== name) {
+          apiGet<{ following: boolean; follower_count: number; following_count: number }>(
+            `/api/users/${p.profile.id}/follow-status`,
+          )
+            .then((fs) => {
+              setFollowing(fs.following)
+              setFollowerCount(fs.follower_count)
+              setFollowingCount(fs.following_count)
+            })
+            .catch(() => {})
+        }
       })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
-  }, [name])
+  }, [name, user])
+
+  function toggleFollow() {
+    if (!profile || !user) return
+    const method = following ? 'DELETE' : 'POST'
+    apiJson(`/api/users/${profile.id}/follow`, method)
+      .then(() => {
+        setFollowing(!following)
+        setFollowerCount((c) => c + (following ? -1 : 1))
+      })
+      .catch((e) => setError(errMsg(e)))
+  }
 
   if (loading) {
     return (
@@ -107,12 +133,31 @@ export default function UserProfile() {
               </span>
             )}
             {profile.bio && <p className="mt-2 text-sm text-slate-600">{profile.bio}</p>}
-            <div className="mt-2 text-xs text-slate-400">
-              注册于 {profile.created_at?.slice(0, 10)}
-              {totalGames > 0 && <> · 参与 {totalGames} 场对局</>}
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
+              <span>注册于 {profile.created_at?.slice(0, 10)}</span>
+              {totalGames > 0 && <span>· 参与 {totalGames} 场对局</span>}
+              {user && !isSelf && (
+                <>
+                  <span>· 关注 {followingCount}</span>
+                  <span>· 粉丝 {followerCount}</span>
+                </>
+              )}
             </div>
           </div>
 
+          {!isSelf && user && (
+            <button
+              type="button"
+              onClick={toggleFollow}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                following
+                  ? 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+                  : 'bg-brand-600 text-white hover:bg-brand-500'
+              }`}
+            >
+              {following ? '已关注' : '+ 关注'}
+            </button>
+          )}
           {isSelf && (
             <Link
               to="/settings"
