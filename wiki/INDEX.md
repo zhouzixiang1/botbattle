@@ -27,8 +27,8 @@
 | [经验与等级](#/wiki?slug=xp-level) | XP 经验奖励 + Level 升级 + gating |
 | [数据集与站点配置](#/wiki?slug=matchpacks-site) | 对局数据集下载（gzip，等级 gating）+ 站点名/公告配置 |
 | [压测](#/wiki?slug=loadtest) | 大规模系统压测脚本（批量用户 + 全端点覆盖） |
-| [前端设计系统](UI_FOUNDATION.md) | Token 体系（OKLCH 双主题）+ 暗色模式 + 组件库规范 + 取材库 |
-| [前端组件库](UI_COMPONENTS.md) | shadcn/ui 组件清单 + 使用示例 + 迁移说明 |
+
+> 前端设计系统与组件库文档已迁入甲方交付文档 [`doc/DESIGN.md`](../doc/DESIGN.md) §5 前端架构。
 
 ## 本平台 vs Botzone（摘要）
 

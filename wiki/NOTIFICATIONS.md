@@ -7,9 +7,9 @@
 | type | 触发场景 | 邮件 pref 字段 |
 |------|----------|----------------|
 | `match_done` | challenge/table/ladder 对局完成（contest 内部对局不通知） | `email_match_done` |
-| `followed` | 被其他用户关注（PR-4） | `email_followed` |
-| `contest` | 赛事阶段变化（PR-5） | `email_contest` |
-| `comment` | Bot/对局被评论（PR-7） | `email_comment` |
+| `followed` | 被其他用户关注 | `email_followed` |
+| `contest` | 赛事阶段变化 | `email_contest` |
+| `comment` | Bot/对局被评论 | `email_comment` |
 
 ## 前端
 

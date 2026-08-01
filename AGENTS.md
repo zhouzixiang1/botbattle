@@ -14,6 +14,26 @@
   3. **记忆**：非显而易见的项目约定/架构决策 → 写入记忆文件（`MEMORY.md` 索引 + 单独 fact 文件，见会话记忆目录）。
   不许只改代码不补测试/文档——三者缺一视为未完成。
 
+## 文档规范（改代码必同步）
+
+文档分三个落点，职责不重叠：
+
+- **`doc/`** —— 面向**甲方/干系人/平台开发者**的交付与工程文档（需求/设计/开发/测试/总结）。共 6 份，入口 `doc/INDEX.md`。
+- **`wiki/`** —— 面向 **Bot 玩家/访客**的对外文档（游戏规则、对局协议、Bot 开发指南、功能使用）。入口 `wiki/INDEX.md`。
+- **`README.md`** —— 项目门面：能力一览 + 快速开始 + 指向 `doc/` 与 `wiki/` 的导航。
+
+**边界**：工程内容（需求/架构/设计/测试/规范）只进 `doc/`；协议/规则/Bot 开发只进 `wiki/`——两边互链不复制。
+
+改代码时必须同步的文档（提交前自检）：
+
+1. 新增/改模块、接口、常量、架构分层 → `doc/DESIGN.md`（必要时同步本文件「架构分层」段）。
+2. 改对外协议字段、游戏规则、Bot 行为 → `wiki/`（协议/规则/功能说明）。
+3. 改构建/起服务/依赖/环境变量 → `doc/DEVELOPMENT.md`。
+4. 改测试策略/新增测试维度 → `doc/TESTING.md`。
+5. 改对外能力/技术栈/目录结构 → `README.md` + `doc/OVERVIEW.md`。
+
+**命名**：一律 `SCREAMING_SNAKE_CASE.md` 英文文件名（可检索、与 wiki 一致），H1 标题用中文。新增文件后回填对应 `INDEX.md`，否则视为未完成。
+
 ## 构建与运行
 
 ```bash
@@ -73,10 +93,10 @@ src/components/ui/         共享 UI 原语库（shadcn：Button/Input/Card/Tabl
 src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadge（前台+管理端共用）
 src/components/shell/      全局 Shell：AppShell（顶栏+导航+页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
-src/pages/                 22 页，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
+src/pages/                 22 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
 ```
-改前端务必遵循 [UI_FOUNDATION.md](wiki/UI_FOUNDATION.md) + [UI_COMPONENTS.md](wiki/UI_COMPONENTS.md)：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
+改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
 
 **核心解耦契约 —— `engine/result.py` 的 `RoundResult`/`MatchResult`**：裁判（engine）产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**，绝不触碰扑克的 pot/board/holes 或棋类的棋盘。这是赛制代码能对三款游戏通用的根本。
 

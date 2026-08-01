@@ -29,4 +29,4 @@
 
 ## 等级 gating
 
-`LEVEL_GATE_DOWNLOAD = 1`（PR-9）：下载数据集需用户 `level >= 1`（累计 XP ≥ 100）。对标 Botzone「等级 1 以上可用某功能」。
+`LEVEL_GATE_DOWNLOAD = 1`：下载数据集需用户 `level >= 1`（累计 XP ≥ 100）。对标 Botzone「等级 1 以上可用某功能」。

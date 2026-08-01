@@ -19,7 +19,7 @@
 
 ## 排名变化趋势（rating_delta）
 
-每次对局更新评分时，`_apply_ratings` 落一条 `rating_history` 快照（PR-1）。排行榜的 `rating_delta` = 当前 rating − 上一条历史评分：
+每次对局更新评分时，`_apply_ratings` 落一条 `rating_history` 快照。排行榜的 `rating_delta` = 当前 rating − 上一条历史评分：
 
 - `+N`（绿色 ▲）：评分上升
 - `-N`（红色 ▼）：评分下降
@@ -37,4 +37,4 @@
 - 排行榜：段位列（彩色徽章）+ Rating 列旁升降箭头。
 - Bot 详情：Rating 卡片显示段位徽章。
 
-> 后续 PR-9（等级系统）的等级 gating 可基于 `tier.level` 推导（tier.level ≥ 1 即「进阶」以上）。
+> 等级系统的 gating 可基于 `tier.level` 推导（tier.level ≥ 1 即「进阶」以上）。
