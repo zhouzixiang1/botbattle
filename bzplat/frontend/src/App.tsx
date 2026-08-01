@@ -10,6 +10,8 @@ import { AuthProvider, useAuth } from './components/useAuth'
 import NotificationBell from './components/NotificationBell'
 import { ThemeProvider } from './components/theme-provider'
 import { ThemeToggle } from './components/theme-toggle'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { Toaster } from '@/components/ui/sonner'
 import Admin from './pages/admin/Admin'
 import ArenaWatch from './pages/ArenaWatch'
 import Challenge from './pages/Challenge'
@@ -36,11 +38,14 @@ import Wiki from './pages/Wiki'
 export default function App() {
   return (
     <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
-      <AuthProvider>
-        <HashRouter>
-          <Shell />
-        </HashRouter>
-      </AuthProvider>
+      <TooltipProvider>
+        <AuthProvider>
+          <HashRouter>
+            <Shell />
+          </HashRouter>
+        </AuthProvider>
+        <Toaster richColors position="top-center" />
+      </TooltipProvider>
     </ThemeProvider>
   )
 }
