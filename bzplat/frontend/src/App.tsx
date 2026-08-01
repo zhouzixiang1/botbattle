@@ -8,6 +8,8 @@ import {
 } from 'react-router-dom'
 import { AuthProvider, useAuth } from './components/useAuth'
 import NotificationBell from './components/NotificationBell'
+import { ThemeProvider } from './components/theme-provider'
+import { ThemeToggle } from './components/theme-toggle'
 import Admin from './pages/admin/Admin'
 import ArenaWatch from './pages/ArenaWatch'
 import Challenge from './pages/Challenge'
@@ -33,11 +35,13 @@ import Wiki from './pages/Wiki'
 
 export default function App() {
   return (
-    <AuthProvider>
-      <HashRouter>
-        <Shell />
-      </HashRouter>
-    </AuthProvider>
+    <ThemeProvider attribute="class" defaultTheme="light" enableSystem disableTransitionOnChange>
+      <AuthProvider>
+        <HashRouter>
+          <Shell />
+        </HashRouter>
+      </AuthProvider>
+    </ThemeProvider>
   )
 }
 
@@ -45,8 +49,8 @@ function Shell() {
   const navCls = ({ isActive }: { isActive: boolean }) =>
     `px-3 py-2 rounded-lg text-sm font-medium transition ${
       isActive
-        ? 'bg-brand-50 text-brand-700'
-        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+        ? 'bg-primary/10 text-primary'
+        : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
     }`
 
   const { user, isLoggedIn, loading, logout } = useAuth()
@@ -58,14 +62,14 @@ function Shell() {
   }
 
   return (
-    <div className="min-h-screen font-sans text-slate-800">
-      <header className="sticky top-0 z-50 border-b border-slate-200 bg-white/85 backdrop-blur-md">
+    <div className="min-h-screen bg-background font-sans text-foreground">
+      <header className="sticky top-0 z-50 border-b border-border bg-background/85 backdrop-blur-md">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 px-4 py-3 lg:px-6">
           <Link
             to="/"
-            className="mr-2 flex items-center gap-2 text-lg font-semibold tracking-tight text-slate-900"
+            className="mr-2 flex items-center gap-2 text-lg font-semibold tracking-tight text-foreground"
           >
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-800 text-sm font-bold text-sky-300 shadow-soft ring-1 ring-slate-600/50">
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground shadow-soft">
               B
             </span>
             <span className="font-display">Botbattle</span>
@@ -111,24 +115,25 @@ function Shell() {
             <input
               name="q"
               placeholder="搜索…"
-              className="w-40 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:w-56 focus:outline-none focus:ring-1 focus:ring-brand-300"
+              className="w-40 rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:w-56 focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </form>
           <div className="ml-auto flex items-center gap-2">
+            <ThemeToggle />
             {loading ? (
-              <span className="text-xs text-slate-400">…</span>
+              <span className="text-xs text-muted-foreground">…</span>
             ) : isLoggedIn && user ? (
               <>
                 <NotificationBell />
                 <Link
                   to={`/user/${encodeURIComponent(user.username)}`}
-                  className="rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100"
+                  className="rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                 >
-                  <span className="font-medium text-brand-700">
+                  <span className="font-medium text-primary">
                     {user.display_name || user.username}
                   </span>
                   {user.role === 'admin' && (
-                    <span className="ml-1 rounded-md bg-error-50 px-1.5 py-0.5 text-[10px] font-medium text-error-600">
+                    <span className="ml-1 rounded-md bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
                       admin
                     </span>
                   )}
@@ -136,7 +141,7 @@ function Shell() {
                 <button
                   type="button"
                   onClick={() => void onLogout()}
-                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  className="rounded-lg border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent"
                 >
                   登出
                 </button>
@@ -148,7 +153,7 @@ function Shell() {
                 </NavLink>
                 <Link
                   to="/register"
-                  className="rounded-lg bg-brand-600 px-3 py-2 text-sm font-medium text-white shadow-soft hover:bg-brand-500"
+                  className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground shadow-soft hover:bg-primary/90"
                 >
                   注册
                 </Link>
@@ -186,7 +191,7 @@ function Shell() {
         </Routes>
       </main>
 
-      <footer className="border-t border-slate-200 px-4 py-4 text-center text-xs text-slate-400">
+      <footer className="border-t border-border px-4 py-4 text-center text-xs text-muted-foreground">
         Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）
       </footer>
     </div>
