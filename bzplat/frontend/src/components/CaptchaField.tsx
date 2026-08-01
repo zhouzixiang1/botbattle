@@ -1,5 +1,7 @@
 /** 图形验证码：拉取 /api/auth/captcha，点击刷新。 */
 import { useCallback, useEffect, useState } from 'react'
+import { RefreshCw } from 'lucide-react'
+import { Input } from '@/components/ui/input'
 
 export interface CaptchaValue {
   captcha_id: string
@@ -45,22 +47,24 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
   }, [refresh])
 
   return (
-    <div className={`flex flex-col gap-1 text-sm text-slate-300 ${className}`}>
-      <span>验证码</span>
+    <div className={`flex flex-col gap-1.5 text-sm text-foreground ${className}`}>
+      <span className="font-medium">验证码</span>
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={() => void refresh()}
           title="点击刷新"
-          className="h-14 w-40 shrink-0 overflow-hidden rounded-lg border border-slate-600 bg-slate-800"
+          className="flex h-11 w-40 shrink-0 items-center justify-center gap-1 overflow-hidden rounded-lg border border-input bg-muted text-xs text-muted-foreground transition-colors hover:bg-accent"
         >
           {img ? (
             <img src={img} alt="验证码" className="h-full w-full object-contain" />
+          ) : loading ? (
+            <><RefreshCw className="size-3.5 animate-spin" />加载中</>
           ) : (
-            <span className="text-xs text-slate-400">{loading ? '加载…' : '刷新'}</span>
+            <><RefreshCw className="size-3.5" />点击获取</>
           )}
         </button>
-        <input
+        <Input
           value={answer}
           onChange={(e) => {
             const v = e.target.value
@@ -70,11 +74,11 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
           placeholder="图中字符或算式结果"
           required
           autoComplete="off"
-          className="min-w-0 flex-1 rounded-lg border border-slate-600 bg-slate-800/80 px-3 py-2.5 text-slate-100 placeholder:text-slate-500 focus:border-brand-400 focus:outline-none"
+          className="min-w-0 flex-1"
         />
       </div>
-      {err && <span className="text-xs text-error-500">{err}</span>}
-      <span className="text-xs text-slate-500">看不清可点击图片刷新</span>
+      {err && <span className="text-xs text-destructive">{err}</span>}
+      <span className="text-xs text-muted-foreground">看不清可点击图片刷新</span>
     </div>
   )
 }

@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { apiGet, apiJson, apiPost, errMsg } from '../api'
-import { useAuth } from './useAuth'
+import { Heart, Trash2, MessageSquare } from 'lucide-react'
+import { apiGet, apiJson, apiPost, errMsg } from '@/api'
+import { useAuth } from '@/components/useAuth'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { cn } from '@/lib/utils'
 
 interface Comment {
   id: number
@@ -81,77 +87,76 @@ export default function Comments({
   }
 
   return (
-    <div className="card mt-4 p-4">
-      <div className="mb-3 flex items-center gap-3">
-        <h3 className="text-sm font-semibold text-slate-700">
-          评论（{comments.length}）
-        </h3>
-        <button
-          type="button"
-          onClick={toggleLike}
-          disabled={!user}
-          className={`rounded-lg px-3 py-1 text-xs font-medium ${
-            liked
-              ? 'bg-error-50 text-error-600'
-              : 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
-          } ${!user ? 'opacity-50' : ''}`}
-        >
-          {liked ? '♥' : '♡'} {likeCount}
-        </button>
-      </div>
-      {error && <p className="mb-2 text-xs text-error-500">{error}</p>}
-      {user && (
-        <form onSubmit={submit} className="mb-3 flex gap-2">
-          <input
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            placeholder="写下你的评论…"
-            maxLength={2000}
-            className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700"
-          />
-          <button
-            type="submit"
-            className="rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-500"
+    <Card className="mt-4">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <MessageSquare className="size-4 text-muted-foreground" />
+            评论（{comments.length}）
+          </CardTitle>
+          <Button
+            type="button"
+            variant={liked ? 'destructive' : 'outline'}
+            size="sm"
+            onClick={toggleLike}
+            disabled={!user}
+            className="gap-1.5"
           >
-            发表
-          </button>
-        </form>
-      )}
-      <div className="space-y-2">
-        {comments.length === 0 ? (
-          <p className="py-3 text-center text-xs text-slate-400">暂无评论</p>
-        ) : (
-          comments.map((c) => (
-            <div key={c.id} className="rounded-lg border border-slate-100 px-3 py-2 text-sm">
-              <div className="flex items-center gap-2">
-                {c.username ? (
-                  <Link
-                    to={`/user/${encodeURIComponent(c.username)}`}
-                    className="font-medium text-slate-700 hover:text-brand-600"
-                  >
-                    {c.user_display || c.username}
-                  </Link>
-                ) : (
-                  <span className="text-slate-400">已注销</span>
-                )}
-                <span className="text-xs text-slate-400">
-                  {c.created_at?.replace('T', ' ').slice(0, 16)}
-                </span>
-                {user && (user.id === c.user_id || user.role === 'admin') && (
-                  <button
-                    type="button"
-                    onClick={() => del(c.id)}
-                    className="ml-auto text-xs text-slate-400 hover:text-error-500"
-                  >
-                    删除
-                  </button>
-                )}
-              </div>
-              <p className="mt-1 whitespace-pre-wrap text-slate-600">{c.body}</p>
-            </div>
-          ))
+            <Heart className={cn('size-3.5', liked && 'fill-current')} />
+            {likeCount}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {error && <ErrorMsg msg={error} className="text-xs" />}
+        {user && (
+          <form onSubmit={submit} className="flex gap-2">
+            <Input
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              placeholder="写下你的评论…"
+              maxLength={2000}
+              className="min-w-0 flex-1"
+            />
+            <Button type="submit" size="sm">发表</Button>
+          </form>
         )}
-      </div>
-    </div>
+        {comments.length === 0 ? (
+          <EmptyState text="暂无评论" className="py-6" />
+        ) : (
+          <div className="space-y-2">
+            {comments.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border px-3 py-2 text-sm">
+                <div className="flex items-center gap-2">
+                  {c.username ? (
+                    <Link
+                      to={`/user/${encodeURIComponent(c.username)}`}
+                      className="font-medium text-foreground hover:text-primary"
+                    >
+                      {c.user_display || c.username}
+                    </Link>
+                  ) : (
+                    <span className="text-muted-foreground">已注销</span>
+                  )}
+                  <span className="text-xs text-muted-foreground">
+                    {c.created_at?.replace('T', ' ').slice(0, 16)}
+                  </span>
+                  {user && (user.id === c.user_id || user.role === 'admin') && (
+                    <button
+                      type="button"
+                      onClick={() => del(c.id)}
+                      className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
+                    >
+                      <Trash2 className="size-3" />删除
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 whitespace-pre-wrap text-foreground/80">{c.body}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }

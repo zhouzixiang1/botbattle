@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { apiGet, apiPost, errMsg } from '../api'
+import { CheckCheck, Bell } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { Card } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { cn } from '@/lib/utils'
+import { apiGet, apiPost, errMsg } from '@/api'
 
 interface Notification {
   id: number
@@ -54,76 +60,79 @@ export default function Notifications() {
   return (
     <PageStub title="通知">
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="flex gap-1">
+        <div className="inline-flex rounded-lg border border-border p-1">
           {(['all', 'unread'] as const).map((f) => (
             <button
               key={f}
               type="button"
               onClick={() => setFilter(f)}
-              className={`rounded-lg px-3 py-1.5 text-sm ${
+              className={cn(
+                'rounded-md px-3 py-1 text-sm transition-colors',
                 filter === f
-                  ? 'bg-brand-600 text-white'
-                  : 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
-              }`}
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
             >
               {f === 'all' ? '全部' : `未读${unread > 0 ? ` (${unread})` : ''}`}
             </button>
           ))}
         </div>
         {unread > 0 && (
-          <button
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
             onClick={readAll}
-            className="ml-auto rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
+            className="ml-auto gap-1.5"
           >
+            <CheckCheck className="size-3.5" />
             全部标记已读
-          </button>
+          </Button>
         )}
       </div>
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
+      {error && <ErrorMsg msg={error} className="mb-3" />}
       {loading ? (
-        <p className="py-8 text-center text-sm text-slate-400">加载中…</p>
+        <Loading />
       ) : items.length === 0 ? (
-        <p className="py-8 text-center text-sm text-slate-400">暂无通知</p>
+        <EmptyState text="暂无通知" icon={<Bell className="size-7 opacity-40" />} />
       ) : (
         <div className="space-y-2">
           {items.map((n) => {
             const inner = (
-              <div
-                className={`card flex items-start gap-3 p-3 ${
-                  !n.is_read ? 'border-brand-200 bg-brand-50/30' : ''
-                }`}
+              <Card
+                className={cn(
+                  'gap-0 flex-row items-start p-3',
+                  !n.is_read && 'border-primary/40 bg-primary/5',
+                )}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     {!n.is_read && (
-                      <span className="h-2 w-2 shrink-0 rounded-full bg-brand-500" />
+                      <span className="size-2 shrink-0 rounded-full bg-primary" />
                     )}
-                    <span className="font-medium text-slate-800">{n.title}</span>
-                    {n.type && (
-                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500">
-                        {n.type}
-                      </span>
-                    )}
+                    <span className="font-medium text-foreground">{n.title}</span>
+                    {n.type && <Badge variant="secondary">{n.type}</Badge>}
                   </div>
-                  {n.body && <p className="mt-1 text-sm text-slate-600">{n.body}</p>}
-                  <p className="mt-1 text-xs text-slate-400">
+                  {n.body && <p className="mt-1 text-sm text-muted-foreground">{n.body}</p>}
+                  <p className="mt-1 text-xs text-muted-foreground">
                     {n.created_at?.replace('T', ' ').slice(0, 16)}
                   </p>
                 </div>
                 {!n.is_read && (
-                  <button
+                  <Button
                     type="button"
+                    variant="outline"
+                    size="xs"
                     onClick={(e) => {
                       e.preventDefault()
                       markRead(n.id)
                     }}
-                    className="shrink-0 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                    className="shrink-0"
                   >
                     已读
-                  </button>
+                  </Button>
                 )}
-              </div>
+              </Card>
             )
             return n.link ? (
               <Link key={n.id} to={n.link}>

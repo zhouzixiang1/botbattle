@@ -15,16 +15,16 @@ function inline(s: string): string {
   let out = escapeHtml(s)
   out = out.replace(
     /`([^`]+)`/g,
-    '<code class="rounded bg-slate-100 px-1 py-0.5 text-[0.85em] text-brand-700">$1</code>',
+    '<code class="rounded bg-muted px-1 py-0.5 text-[0.85em] text-primary">$1</code>',
   )
-  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-slate-900">$1</strong>')
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-foreground">$1</strong>')
   out = out.replace(
     /!\[([^\]]*)\]\(([^)]+)\)/g,
-    '<img class="my-3 max-w-full rounded-lg border border-slate-200" alt="$1" src="$2" />',
+    '<img class="my-3 max-w-full rounded-lg border border-border" alt="$1" src="$2" />',
   )
   out = out.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
-    '<a class="text-brand-600 underline hover:text-brand-700" href="$2">$1</a>',
+    '<a class="text-primary underline hover:opacity-80" href="$2">$1</a>',
   )
   return out
 }
@@ -41,7 +41,7 @@ function parseBlock(block: string): Block {
     const code = lines.slice(1, lines.length - 1).join('\n')
     return {
       tag: 'pre',
-      html: `<pre class="my-3 overflow-x-auto rounded-lg bg-slate-900 p-3 text-xs leading-relaxed text-emerald-300">${escapeHtml(
+      html: `<pre class="my-3 overflow-x-auto rounded-lg bg-muted p-3 text-xs leading-relaxed text-foreground">${escapeHtml(
         code,
       )}</pre>`,
     }
@@ -64,7 +64,7 @@ function parseBlock(block: string): Block {
       head
         .map(
           (h) =>
-            `<th class="border border-slate-200 bg-slate-50 px-3 py-2 text-left font-semibold text-slate-700">${inline(
+            `<th class="border border-border bg-muted px-3 py-2 text-left font-semibold text-foreground">${inline(
               h,
             )}</th>`,
         )
@@ -76,7 +76,7 @@ function parseBlock(block: string): Block {
         row
           .map(
             (c) =>
-              `<td class="border border-slate-200 px-3 py-2 align-top text-slate-600">${inline(
+              `<td class="border border-border px-3 py-2 align-top text-muted-foreground">${inline(
                 c,
               )}</td>`,
           )
@@ -93,7 +93,7 @@ function parseBlock(block: string): Block {
       return {
         tag: 'ol',
         html:
-          '<ol class="my-2 ml-5 list-decimal space-y-1 text-slate-600">' +
+          '<ol class="my-2 ml-5 list-decimal space-y-1 text-muted-foreground">' +
           items.map((l) => `<li>${inline(l.replace(/^\s*\d+\.\s+/, ''))}</li>`).join('') +
           '</ol>',
       }
@@ -101,7 +101,7 @@ function parseBlock(block: string): Block {
     return {
       tag: 'ul',
       html:
-        '<ul class="my-2 ml-5 list-disc space-y-1 text-slate-600">' +
+        '<ul class="my-2 ml-5 list-disc space-y-1 text-muted-foreground">' +
         items.map((l) => `<li>${inline(l.replace(/^\s*[-*]\s+/, ''))}</li>`).join('') +
         '</ul>',
     }
@@ -111,10 +111,10 @@ function parseBlock(block: string): Block {
   if (m && lines.length === 1) {
     const level = m[1].length
     const cls = [
-      'mt-2 mb-3 text-xl font-bold text-slate-900',
-      'mt-5 mb-2 text-lg font-semibold text-slate-900',
-      'mt-4 mb-2 text-base font-semibold text-slate-900',
-      'mt-3 mb-1.5 text-sm font-semibold text-brand-200',
+      'mt-2 mb-3 text-xl font-bold text-foreground',
+      'mt-5 mb-2 text-lg font-semibold text-foreground',
+      'mt-4 mb-2 text-base font-semibold text-foreground',
+      'mt-3 mb-1.5 text-sm font-semibold text-foreground',
     ][level - 1]
     return { tag: `h${level}`, html: `<h${level} class="${cls}">${escapeHtml(m[2])}</h${level}>` }
   }
@@ -127,7 +127,7 @@ function parseBlock(block: string): Block {
     if (text) {
       return {
         tag: 'blockquote',
-        html: `<blockquote class="my-3 border-l-2 border-brand-400 bg-brand-50 px-3 py-2 text-sm text-slate-600">${inline(
+        html: `<blockquote class="my-3 border-l-2 border-primary bg-primary/10 px-3 py-2 text-sm text-muted-foreground">${inline(
           text,
         )}</blockquote>`,
       }
@@ -136,7 +136,7 @@ function parseBlock(block: string): Block {
   // 段落（多行用 <br/> 连）
   const text = lines.join(' ').trim()
   if (!text) return { tag: 'space', html: '<div class="h-2"></div>' }
-  return { tag: 'p', html: `<p class="mb-2 leading-relaxed text-slate-600">${inline(text)}</p>` }
+  return { tag: 'p', html: `<p class="mb-2 leading-relaxed text-muted-foreground">${inline(text)}</p>` }
 }
 
 export function renderMarkdown(md: string): string {

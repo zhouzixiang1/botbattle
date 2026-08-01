@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { apiGet, errMsg } from '../api'
-import { GAMES, gameLabel } from '../lib/games'
+import { Swords } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { Card } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { apiGet, errMsg } from '@/api'
+import { GAMES, gameLabel } from '@/lib/games'
 
 interface Match {
   id: string
@@ -22,6 +26,9 @@ interface Match {
   game_id?: string
 }
 
+const selectCls =
+  'ml-2 h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
+
 export default function History() {
   const [matches, setMatches] = useState<Match[]>([])
   const [status, setStatus] = useState('')
@@ -40,12 +47,12 @@ export default function History() {
   return (
     <PageStub title="对局历史">
       <div className="mb-4 flex flex-wrap gap-4">
-        <label className="text-sm text-slate-400">
+        <label className="flex items-center text-sm text-muted-foreground">
           状态
           <select
             value={status}
             onChange={(e) => setStatus(e.target.value)}
-            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+            className={selectCls}
           >
             <option value="">全部</option>
             <option value="pending">pending</option>
@@ -54,12 +61,12 @@ export default function History() {
             <option value="aborted">aborted</option>
           </select>
         </label>
-        <label className="text-sm text-slate-400">
+        <label className="flex items-center text-sm text-muted-foreground">
           游戏
           <select
             value={gameId}
             onChange={(e) => setGameId(e.target.value)}
-            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+            className={selectCls}
           >
             <option value="">全部</option>
             {GAMES.map((g) => (
@@ -70,39 +77,49 @@ export default function History() {
           </select>
         </label>
       </div>
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
-      <ul className="divide-y divide-slate-700/80 overflow-hidden rounded-xl border border-slate-200 bg-white">
+      {error && <ErrorMsg msg={error} className="mb-3" />}
+      <Card className="gap-0 py-0">
         {matches.length === 0 ? (
-          <li className="px-4 py-8 text-center text-slate-500">暂无对局</li>
+          <EmptyState text="暂无对局" icon={<Swords className="size-7 opacity-40" />} />
         ) : (
-          matches.map((m) => (
-            <li key={m.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <div className="min-w-0 flex-1">
-                <div className="font-medium text-slate-800">
-                  <Link to={`/bot/${m.bot_a_id}`} className="hover:text-brand-600">
-                    {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
-                  </Link>{' '}
-                  vs{' '}
-                  <Link to={`/bot/${m.bot_b_id}`} className="hover:text-brand-600">
-                    {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
-                  </Link>
+          <ul className="divide-y divide-border">
+            {matches.map((m) => (
+              <li key={m.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
+                    <Link to={`/bot/${m.bot_a_id}`} className="hover:text-primary">
+                      {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
+                    </Link>
+                    <span className="text-muted-foreground">vs</span>
+                    <Link to={`/bot/${m.bot_b_id}`} className="hover:text-primary">
+                      {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
+                    </Link>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span>{gameLabel(m.game_id)}</span>
+                    <span>·</span>
+                    <Badge variant="secondary" className="text-[10px]">{m.status}</Badge>
+                    {m.created_at && (
+                      <>
+                        <span>·</span>
+                        <span>{m.created_at}</span>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div className="mt-1 text-xs text-slate-400">
-                  {gameLabel(m.game_id)} · {m.status} · {m.created_at || ''}
-                </div>
-              </div>
-              <Link className="text-sm text-brand-600 hover:underline" to={`/match/${m.id}`}>
-                详情
-              </Link>
-              {(m.status === 'running' || m.status === 'pending') && (
-                <Link className="text-sm text-brand-600 hover:underline" to={`/watch/${m.id}`}>
-                  观赛
+                <Link className="text-sm font-medium text-primary hover:underline" to={`/match/${m.id}`}>
+                  详情
                 </Link>
-              )}
-            </li>
-          ))
+                {(m.status === 'running' || m.status === 'pending') && (
+                  <Link className="text-sm font-medium text-primary hover:underline" to={`/watch/${m.id}`}>
+                    观赛
+                  </Link>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
-      </ul>
+      </Card>
     </PageStub>
   )
 }

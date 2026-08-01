@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
-import PageStub from '../components/PageStub'
-import { apiGet, errMsg } from '../api'
-import { renderMarkdown } from '../lib/markdown'
+import PageStub from '@/components/PageStub'
+import { Card } from '@/components/ui/card'
+import { ErrorMsg, Loading } from '@/components/ui/status'
+import { cn } from '@/lib/utils'
+import { apiGet, errMsg } from '@/api'
+import { renderMarkdown } from '@/lib/markdown'
 
 interface WikiPage {
   slug: string
@@ -60,10 +63,10 @@ export default function Wiki() {
 
   return (
     <PageStub title="Wiki">
-      <p className="mb-4 text-sm text-slate-400">
+      <p className="mb-4 text-sm text-muted-foreground">
         协议规范、Bot 开发指南、样例与安全说明。
       </p>
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
+      {error && <ErrorMsg msg={error} className="mb-3" />}
 
       <div className="grid gap-4 lg:grid-cols-[200px_1fr]">
         {/* 侧栏导航 */}
@@ -74,14 +77,15 @@ export default function Wiki() {
                 key={p.slug}
                 type="button"
                 onClick={() => void loadPage(p.slug)}
-                className={`w-full rounded-lg px-3 py-2 text-left text-sm transition lg:w-auto ${
+                className={cn(
+                  'w-full rounded-lg px-3 py-2 text-left text-sm transition lg:w-auto',
                   p.slug === slug
-                    ? 'bg-brand-600 font-medium text-white'
-                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                }`}
+                    ? 'bg-primary font-medium text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                )}
               >
                 <div>{p.title}</div>
-                <div className="mt-0.5 hidden text-xs text-slate-400 lg:block">{p.summary}</div>
+                <div className="mt-0.5 hidden text-xs opacity-80 lg:block">{p.summary}</div>
               </button>
             ))}
           </nav>
@@ -90,14 +94,11 @@ export default function Wiki() {
         {/* 正文 */}
         <div className="min-w-0">
           {loading && !md ? (
-            <pre className="whitespace-pre-wrap rounded-xl border border-slate-700/80 bg-slate-900/40 p-4 text-sm text-slate-400">
-              加载中…
-            </pre>
+            <Loading text="加载中…" />
           ) : (
-            <article
-              className="card p-4 sm:p-6"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(md) }}
-            />
+            <Card className="p-4 sm:p-6">
+              <article dangerouslySetInnerHTML={{ __html: renderMarkdown(md) }} />
+            </Card>
           )}
         </div>
       </div>

@@ -10,8 +10,8 @@ export default function PageStub({
 }) {
   return (
     <div className="px-4 py-8 lg:px-6">
-      <h1 className="page-title text-2xl text-slate-900 sm:text-3xl">{title}</h1>
-      <div className="mt-4 text-sm leading-relaxed text-slate-600">{children}</div>
+      <h1 className="page-title text-2xl text-foreground sm:text-3xl">{title}</h1>
+      <div className="mt-4 text-sm leading-relaxed text-foreground/80">{children}</div>
     </div>
   )
 }

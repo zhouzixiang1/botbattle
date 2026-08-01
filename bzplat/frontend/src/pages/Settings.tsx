@@ -1,9 +1,20 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { useAuth } from '../components/useAuth'
-import { apiGet, apiJson, errMsg } from '../api'
-import { gameLabel } from '../lib/games'
+import { ArrowLeft, CheckCircle2 } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { useAuth } from '@/components/useAuth'
+import { Card } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { Badge } from '@/components/ui/badge'
+import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { Switch } from '@/components/ui/switch'
+import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { apiGet, apiJson, errMsg } from '@/api'
+import { gameLabel } from '@/lib/games'
 
 interface Prefs {
   email_match_done: number
@@ -51,7 +62,7 @@ export default function Settings() {
   if (!user) {
     return (
       <PageStub title="设置">
-        <p className="py-8 text-center text-sm text-slate-400">请先登录</p>
+        <EmptyState text="请先登录" />
       </PageStub>
     )
   }
@@ -103,137 +114,177 @@ export default function Settings() {
   return (
     <PageStub title="个人设置">
       {/* Tabs */}
-      <div className="mb-4 flex gap-1 border-b border-slate-200">
-        {(
-          [
-            ['profile', '资料'],
-            ['password', '密码'],
-            ['notifications', '通知偏好'],
-            ['favorites', '我的收藏'],
-          ] as const
-        ).map(([k, label]) => (
-          <button
-            key={k}
-            type="button"
-            onClick={() => setTab(k)}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${
-              tab === k ? 'border-brand-500 text-brand-700' : 'border-transparent text-slate-500 hover:text-slate-700'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        value={tab}
+        onValueChange={(v) => setTab(v as typeof tab)}
+        className="mb-4 w-full"
+      >
+        <TabsList variant="line">
+          <TabsTrigger value="profile">资料</TabsTrigger>
+          <TabsTrigger value="password">密码</TabsTrigger>
+          <TabsTrigger value="notifications">通知偏好</TabsTrigger>
+          <TabsTrigger value="favorites">我的收藏</TabsTrigger>
+        </TabsList>
 
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
-      {msg && <p className="mb-3 text-sm text-success-600">{msg}</p>}
-
-      {/* 资料 */}
-      {tab === 'profile' && (
-        <form onSubmit={saveProfile} className="max-w-md space-y-4">
-          <div>
-            <label className="mb-1 block text-sm text-slate-600">头像</label>
-            <div className="flex items-center gap-3">
-              <div className="h-16 w-16 overflow-hidden rounded-full border border-slate-200 bg-slate-100">
-                {avatarUrl ? (
-                  <img src={avatarUrl} alt="avatar" className="h-full w-full object-cover" />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center text-xl font-bold text-slate-400">
-                    {(user.display_name || user.username).charAt(0).toUpperCase()}
-                  </div>
-                )}
-              </div>
-              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={uploadAvatar}
-                className="text-xs text-slate-500" />
-            </div>
-            <p className="mt-1 text-xs text-slate-400">png/jpeg/webp/gif，≤2MB</p>
-          </div>
-          <div>
-            <label className="mb-1 block text-sm text-slate-600">显示名</label>
-            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={64}
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700" />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm text-slate-600">简介</label>
-            <textarea value={bio} onChange={(e) => setBio(e.target.value)} maxLength={500} rows={3}
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700" />
-          </div>
-          <button type="submit" className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-500">
-            保存
-          </button>
-        </form>
-      )}
-
-      {/* 密码 */}
-      {tab === 'password' && (
-        <form onSubmit={changePassword} className="max-w-md space-y-4">
-          <div>
-            <label className="mb-1 block text-sm text-slate-600">当前密码</label>
-            <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} required
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700" />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm text-slate-600">新密码（≥8 位）</label>
-            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} required minLength={8}
-              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700" />
-          </div>
-          <button type="submit" className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-500">
-            修改密码
-          </button>
-          <p className="text-xs text-slate-400">修改密码后会清除所有登录会话，需重新登录。</p>
-        </form>
-      )}
-
-      {/* 通知偏好 */}
-      {tab === 'notifications' && (
-        <div className="max-w-md space-y-3">
-          <p className="text-sm text-slate-500">站内通知始终开启；以下控制是否同时发送邮件提醒（需管理员配置 SMTP）。</p>
-          {([
-            ['email_match_done', '对局完成'],
-            ['email_followed', '被关注'],
-            ['email_contest', '赛事阶段变化'],
-            ['email_comment', '被评论'],
-          ] as const).map(([key, label]) => (
-            <label key={key} className="flex items-center gap-2 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={!!prefs[key]}
-                onChange={() => togglePref(key)}
-                className="h-4 w-4 rounded border-slate-300"
-              />
-              {label} 邮件提醒
-            </label>
-          ))}
-        </div>
-      )}
-
-      {/* 我的收藏 */}
-      {tab === 'favorites' && (
-        <div>
-          {favs.length === 0 ? (
-            <p className="py-8 text-center text-sm text-slate-400">暂无收藏的 Bot</p>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {favs.map((b) => (
-                <Link key={b.id} to={`/bot/${b.id}`} className="card block p-4 hover:border-brand-300">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-slate-800">{b.display_name || b.name}</span>
-                    <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] text-brand-700">{gameLabel(b.game_id)}</span>
-                  </div>
-                  <p className="mt-1 text-xs text-slate-400">
-                    @{b.name}{b.owner_name ? ` · ${b.owner_name}` : ''}{b.rating != null ? ` · ${Number(b.rating).toFixed(0)}` : ''}
-                  </p>
-                </Link>
-              ))}
-            </div>
+        {/* 资料 */}
+        <TabsContent value="profile">
+          {error && <ErrorMsg msg={error} className="mb-3 mt-3" />}
+          {msg && (
+            <p className="mb-3 mt-3 flex items-center gap-1.5 text-sm text-success">
+              <CheckCircle2 className="size-4" />
+              {msg}
+            </p>
           )}
-        </div>
-      )}
+          <form onSubmit={saveProfile} className="max-w-md space-y-4">
+            <div className="space-y-2">
+              <Label>头像</Label>
+              <div className="flex items-center gap-3">
+                <Avatar className="size-16">
+                  {avatarUrl ? (
+                    <AvatarImage src={avatarUrl} alt="avatar" />
+                  ) : null}
+                  <AvatarFallback className="text-xl font-bold text-muted-foreground">
+                    {(user.display_name || user.username).charAt(0).toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <Input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  onChange={uploadAvatar}
+                  className="max-w-xs text-xs text-muted-foreground"
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">png/jpeg/webp/gif，≤2MB</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="settings-display">显示名</Label>
+              <Input
+                id="settings-display"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                maxLength={64}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="settings-bio">简介</Label>
+              <Textarea
+                id="settings-bio"
+                value={bio}
+                onChange={(e) => setBio(e.target.value)}
+                maxLength={500}
+                rows={3}
+              />
+            </div>
+            <Button type="submit">保存</Button>
+          </form>
+        </TabsContent>
+
+        {/* 密码 */}
+        <TabsContent value="password">
+          {error && <ErrorMsg msg={error} className="mb-3 mt-3" />}
+          {msg && (
+            <p className="mb-3 mt-3 flex items-center gap-1.5 text-sm text-success">
+              <CheckCircle2 className="size-4" />
+              {msg}
+            </p>
+          )}
+          <form onSubmit={changePassword} className="max-w-md space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="settings-oldpw">当前密码</Label>
+              <Input
+                id="settings-oldpw"
+                type="password"
+                value={oldPw}
+                onChange={(e) => setOldPw(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="settings-newpw">新密码（≥8 位）</Label>
+              <Input
+                id="settings-newpw"
+                type="password"
+                value={newPw}
+                onChange={(e) => setNewPw(e.target.value)}
+                required
+                minLength={8}
+              />
+            </div>
+            <Button type="submit">修改密码</Button>
+            <p className="text-xs text-muted-foreground">修改密码后会清除所有登录会话，需重新登录。</p>
+          </form>
+        </TabsContent>
+
+        {/* 通知偏好 */}
+        <TabsContent value="notifications">
+          {error && <ErrorMsg msg={error} className="mb-3 mt-3" />}
+          {msg && (
+            <p className="mb-3 mt-3 flex items-center gap-1.5 text-sm text-success">
+              <CheckCircle2 className="size-4" />
+              {msg}
+            </p>
+          )}
+          <div className="max-w-md space-y-3">
+            <p className="text-sm text-muted-foreground">
+              站内通知始终开启；以下控制是否同时发送邮件提醒（需管理员配置 SMTP）。
+            </p>
+            {([
+              ['email_match_done', '对局完成'],
+              ['email_followed', '被关注'],
+              ['email_contest', '赛事阶段变化'],
+              ['email_comment', '被评论'],
+            ] as const).map(([key, label]) => (
+              <div key={key} className="flex items-center justify-between gap-2 text-sm">
+                <span className="text-foreground">{label} 邮件提醒</span>
+                <Switch
+                  checked={!!prefs[key]}
+                  onCheckedChange={() => togglePref(key)}
+                />
+              </div>
+            ))}
+          </div>
+        </TabsContent>
+
+        {/* 我的收藏 */}
+        <TabsContent value="favorites">
+          {error && <ErrorMsg msg={error} className="mb-3 mt-3" />}
+          {msg && (
+            <p className="mb-3 mt-3 flex items-center gap-1.5 text-sm text-success">
+              <CheckCircle2 className="size-4" />
+              {msg}
+            </p>
+          )}
+          <div>
+            {favs.length === 0 ? (
+              <EmptyState text="暂无收藏的 Bot" />
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {favs.map((b) => (
+                  <Link key={b.id} to={`/bot/${b.id}`}>
+                    <Card className="py-4 transition-colors hover:border-primary/40">
+                      <div className="flex items-center justify-between px-4">
+                        <span className="font-medium text-foreground">{b.display_name || b.name}</span>
+                        <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
+                      </div>
+                      <p className="mt-1 px-4 text-xs text-muted-foreground">
+                        @{b.name}{b.owner_name ? ` · ${b.owner_name}` : ''}{b.rating != null ? ` · ${Number(b.rating).toFixed(0)}` : ''}
+                      </p>
+                    </Card>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
 
       <p className="mt-6">
-        <Link to={`/user/${encodeURIComponent(user.username)}`} className="text-sm text-brand-600 hover:text-brand-700">
-          ← 返回我的主页
-        </Link>
+        <Button asChild variant="link" className="h-auto p-0">
+          <Link to={`/user/${encodeURIComponent(user.username)}`}>
+            <ArrowLeft className="size-4" />
+            返回我的主页
+          </Link>
+        </Button>
       </p>
     </PageStub>
   )

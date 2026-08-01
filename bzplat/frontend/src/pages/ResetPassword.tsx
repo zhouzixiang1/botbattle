@@ -1,8 +1,14 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import CaptchaField, { type CaptchaValue } from '../components/CaptchaField'
-import PageStub from '../components/PageStub'
-import { apiJson, errMsg } from '../api'
+import { KeyRound, MailCheck } from 'lucide-react'
+import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
+import PageStub from '@/components/PageStub'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { ErrorMsg } from '@/components/ui/status'
+import { apiJson, errMsg } from '@/api'
 
 export default function ResetPassword() {
   const nav = useNavigate()
@@ -60,84 +66,84 @@ export default function ResetPassword() {
 
   return (
     <PageStub title="重置密码">
-      {step === 'request' ? (
-        <form onSubmit={(e) => void onRequest(e)} className="mx-auto mt-2 max-w-md space-y-4">
-          <label className="block text-sm text-slate-600">
-            用户名或邮箱
-            <input
-              value={emailOrUsername}
-              onChange={(e) => setEmailOrUsername(e.target.value)}
-              required
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-800 focus:border-brand-400 focus:outline-none"
-            />
-          </label>
-          <CaptchaField onChange={setCaptcha} />
-          {error && <p className="text-sm text-error-500">{error}</p>}
-          {msg && <p className="text-sm text-brand-700">{msg}</p>}
-          <button
-            type="submit"
-            disabled={busy}
-            className="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-brand-500 disabled:opacity-60"
-          >
-            {busy ? '发送中…' : '发送重置验证码'}
-          </button>
-          <p className="text-center text-sm text-slate-400">
-            <Link to="/login" className="text-brand-600 hover:text-brand-700">
-              返回登录
-            </Link>
-          </p>
-        </form>
-      ) : (
-        <form onSubmit={(e) => void onReset(e)} className="mx-auto mt-2 max-w-md space-y-4">
-          <p className="text-sm text-slate-400">请输入邮件中的验证码与新密码。</p>
-          <label className="block text-sm text-slate-600">
-            用户名或邮箱
-            <input
-              value={emailOrUsername}
-              onChange={(e) => setEmailOrUsername(e.target.value)}
-              required
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-800 focus:border-brand-400 focus:outline-none"
-            />
-          </label>
-          <label className="block text-sm text-slate-600">
-            邮件验证码
-            <input
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              required
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-mono tracking-widest text-slate-800 focus:border-brand-400 focus:outline-none"
-            />
-          </label>
-          <label className="block text-sm text-slate-600">
-            新密码（至少 8 位）
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              required
-              minLength={8}
-              autoComplete="new-password"
-              className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-800 focus:border-brand-400 focus:outline-none"
-            />
-          </label>
-          {error && <p className="text-sm text-error-500">{error}</p>}
-          {msg && <p className="text-sm text-brand-700">{msg}</p>}
-          <button
-            type="submit"
-            disabled={busy}
-            className="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-brand-500 disabled:opacity-60"
-          >
-            {busy ? '提交中…' : '重置密码'}
-          </button>
-          <button
-            type="button"
-            onClick={() => setStep('request')}
-            className="w-full text-sm text-slate-400 hover:text-brand-700"
-          >
-            重新发送验证码
-          </button>
-        </form>
-      )}
+      <Card className="mx-auto mt-2 max-w-md">
+        <CardContent className="py-6">
+          {step === 'request' ? (
+            <form onSubmit={(e) => void onRequest(e)} className="space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="reset-account">用户名或邮箱</Label>
+                <Input
+                  id="reset-account"
+                  value={emailOrUsername}
+                  onChange={(e) => setEmailOrUsername(e.target.value)}
+                  required
+                />
+              </div>
+              <CaptchaField onChange={setCaptcha} />
+              {error && <ErrorMsg msg={error} />}
+              {msg && <p className="text-sm text-primary">{msg}</p>}
+              <Button type="submit" disabled={busy} className="w-full gap-1.5">
+                <KeyRound className="size-4" />
+                {busy ? '发送中…' : '发送重置验证码'}
+              </Button>
+              <p className="text-center text-sm text-muted-foreground">
+                <Link to="/login" className="font-medium text-primary hover:underline">
+                  返回登录
+                </Link>
+              </p>
+            </form>
+          ) : (
+            <form onSubmit={(e) => void onReset(e)} className="space-y-4">
+              <p className="text-sm text-muted-foreground">请输入邮件中的验证码与新密码。</p>
+              <div className="space-y-1.5">
+                <Label htmlFor="reset-account-2">用户名或邮箱</Label>
+                <Input
+                  id="reset-account-2"
+                  value={emailOrUsername}
+                  onChange={(e) => setEmailOrUsername(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="reset-code">邮件验证码</Label>
+                <Input
+                  id="reset-code"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  required
+                  className="font-mono tracking-widest"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="reset-newpw">新密码（至少 8 位）</Label>
+                <Input
+                  id="reset-newpw"
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                />
+              </div>
+              {error && <ErrorMsg msg={error} />}
+              {msg && <p className="text-sm text-primary">{msg}</p>}
+              <Button type="submit" disabled={busy} className="w-full gap-1.5">
+                <MailCheck className="size-4" />
+                {busy ? '提交中…' : '重置密码'}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setStep('request')}
+                className="w-full text-muted-foreground"
+              >
+                重新发送验证码
+              </Button>
+            </form>
+          )}
+        </CardContent>
+      </Card>
     </PageStub>
   )
 }

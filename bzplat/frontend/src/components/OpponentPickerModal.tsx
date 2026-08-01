@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
-import { apiGet, errMsg } from '../api'
-import { gameLabel, type GameId } from '../lib/games'
+import { ArrowLeft, Bot as BotIcon, User as UserIcon } from 'lucide-react'
+import { apiGet, errMsg } from '@/api'
+import { gameLabel, type GameId } from '@/lib/games'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Badge } from '@/components/ui/badge'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { cn } from '@/lib/utils'
 
 export interface PickBot {
   id: number
@@ -59,7 +70,6 @@ export default function OpponentPickerModal({
       .then((d) => {
         let rows = (d.bots || []).filter((b) => b.is_active !== 0)
         if (tab === 'mine') rows = rows.filter((b) => b.owner_id !== myUserId ? false : true)
-        // 客户端按 q 过滤名称
         if (q.trim()) rows = rows.filter((b) => (b.name + (b.display_name || '')).toLowerCase().includes(q.toLowerCase()))
         setBots(rows)
       })
@@ -82,23 +92,26 @@ export default function OpponentPickerModal({
     return () => clearTimeout(t)
   }, [q, tab])
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={onClose}>
-      <div
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* 头部 */}
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-          <h3 className="text-base font-semibold text-slate-800">
-            选择对手 <span className="text-sm font-normal text-slate-400">({gameLabel(gameId)})</span>
-          </h3>
-          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
-        </div>
+  const tabBtn = (t: Tab) =>
+    cn(
+      'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+      tab === t ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'
+    )
 
-        {/* 搜索框 */}
-        <div className="border-b border-slate-100 px-5 py-3">
-          <input
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-2xl gap-0 p-0">
+        <DialogHeader className="border-b border-border px-5 py-3">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <BotIcon className="size-4 text-primary" />
+            选择对手
+            <Badge variant="secondary" className="text-[10px]">{gameLabel(gameId)}</Badge>
+          </DialogTitle>
+        </DialogHeader>
+
+        {/* 搜索框 + tab */}
+        <div className="border-b border-border px-5 py-3">
+          <Input
             autoFocus
             value={q}
             onChange={(e) => {
@@ -106,20 +119,11 @@ export default function OpponentPickerModal({
               if (tab === 'users') setSelUser(null)
             }}
             placeholder={tab === 'users' ? '搜索用户名…' : '搜索 Bot 名称…'}
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-400 focus:outline-none"
           />
-          <div className="mt-2 flex gap-2 text-xs">
+          <div className="mt-2 flex gap-2">
             {([['all', '全部 Bot'], ['mine', '我的 Bot（自博弈）'], ['users', '按用户搜索']] as [Tab, string][]).map(
               ([t, label]) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => {
-                    setTab(t)
-                    setSelUser(null)
-                  }}
-                  className={`rounded-full px-3 py-1 ${tab === t ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-                >
+                <button key={t} type="button" onClick={() => { setTab(t); setSelUser(null) }} className={tabBtn(t)}>
                   {label}
                 </button>
               ),
@@ -128,76 +132,70 @@ export default function OpponentPickerModal({
         </div>
 
         {/* 内容区 */}
-        <div className="flex-1 overflow-auto px-5 py-3">
-          {error && <p className="py-4 text-center text-sm text-error-500">{error}</p>}
+        <div className="max-h-[50vh] overflow-auto px-5 py-3">
+          {error && <ErrorMsg msg={error} className="py-4" />}
 
-          {/* 按用户：先显示用户列表，选定后显示其 bot */}
+          {/* 按用户：先显示用户列表 */}
           {tab === 'users' && !selUser && (
-            <div>
-              {users.length === 0 ? (
-                <p className="py-8 text-center text-sm text-slate-400">
-                  {q.trim() ? '无匹配用户' : '输入用户名前缀搜索…'}
-                </p>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {users.map((u) => (
-                    <li key={u.id}>
-                      <button
-                        type="button"
-                        onClick={() => setSelUser(u)}
-                        className="flex w-full items-center justify-between px-2 py-2.5 text-left hover:bg-slate-50"
-                      >
-                        <span className="text-sm text-slate-700">{u.display_name || u.username}</span>
-                        <span className="text-xs text-slate-400">@{u.username}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            users.length === 0 ? (
+              <EmptyState text={q.trim() ? '无匹配用户' : '输入用户名前缀搜索…'} icon={<UserIcon className="size-7 opacity-40" />} />
+            ) : (
+              <ul className="divide-y divide-border">
+                {users.map((u) => (
+                  <li key={u.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelUser(u)}
+                      className="flex w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-accent"
+                    >
+                      <span className="text-sm font-medium text-foreground">{u.display_name || u.username}</span>
+                      <span className="text-xs text-muted-foreground">@{u.username}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
           )}
 
           {tab === 'users' && selUser && (
-            <div className="mb-2 flex items-center gap-2 text-sm text-slate-600">
-              <button type="button" onClick={() => setSelUser(null)} className="text-brand-600 hover:underline">
-                ← 返回用户搜索
+            <div className="mb-2 flex items-center gap-2 text-sm">
+              <button type="button" onClick={() => setSelUser(null)} className="inline-flex items-center gap-1 text-primary hover:underline">
+                <ArrowLeft className="size-3.5" />返回用户搜索
               </button>
-              <span>已选：{selUser.display_name || selUser.username}</span>
+              <span className="text-muted-foreground">已选：{selUser.display_name || selUser.username}</span>
             </div>
           )}
 
-          {/* bot 列表（all / mine / 选定用户） */}
+          {/* bot 列表 */}
           {!(tab === 'users' && !selUser) && (
-            <>
-              {loading ? (
-                <p className="py-8 text-center text-sm text-slate-400">加载中…</p>
-              ) : bots.length === 0 ? (
-                <p className="py-8 text-center text-sm text-slate-400">无可选 Bot</p>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {bots.map((b) => (
-                    <li key={b.id}>
-                      <button
-                        type="button"
-                        onClick={() => onPick(b)}
-                        className="flex w-full items-center justify-between px-2 py-2.5 text-left hover:bg-brand-50"
-                      >
-                        <span className="text-sm font-medium text-slate-800">
-                          {b.display_name || b.name}
-                          {tab === 'mine' && <span className="ml-2 text-xs text-slate-400">自博弈</span>}
-                        </span>
-                        <span className="text-xs text-slate-400">
-                          {b.owner_display || b.owner_name || `#${b.owner_id}`} · {b.format}/{b.os}-{b.arch}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
+            loading ? (
+              <Loading />
+            ) : bots.length === 0 ? (
+              <EmptyState text="无可选 Bot" icon={<BotIcon className="size-7 opacity-40" />} />
+            ) : (
+              <ul className="divide-y divide-border">
+                {bots.map((b) => (
+                  <li key={b.id}>
+                    <button
+                      type="button"
+                      onClick={() => onPick(b)}
+                      className="flex w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-primary/5"
+                    >
+                      <span className="text-sm font-medium text-foreground">
+                        {b.display_name || b.name}
+                        {tab === 'mine' && <Badge variant="outline" className="ml-2 text-[10px]">自博弈</Badge>}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {b.owner_display || b.owner_name || `#${b.owner_id}`} · {b.format}/{b.os}-{b.arch}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

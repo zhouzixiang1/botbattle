@@ -112,7 +112,7 @@ export default function ContestsTab() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <span className="text-xs text-slate-400">
-          共 {contests.length} 个比赛（→ running 会真正调用 start）
+          共 {contests.length} 个比赛（切到 running 会真正调用 start）
         </span>
         <RefreshBtn onClick={load} />
       </div>
@@ -154,7 +154,7 @@ export default function ContestsTab() {
                           onClick={() => void patch(c.id, { status: NEXT_STATUS[c.status] })}
                           className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
                         >
-                          → {NEXT_STATUS[c.status]}
+                          推进到 {NEXT_STATUS[c.status]}
                         </button>
                       )}
                       {c.status === 'rest' && (
