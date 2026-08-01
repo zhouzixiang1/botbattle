@@ -25,6 +25,7 @@ import Notifications from './pages/Notifications'
 import Register from './pages/Register'
 import ResetPassword from './pages/ResetPassword'
 import Search from './pages/Search'
+import Settings from './pages/Settings'
 import UserProfile from './pages/UserProfile'
 import VerifyEmail from './pages/VerifyEmail'
 import Wiki from './pages/Wiki'
@@ -171,6 +172,7 @@ function Shell() {
           <Route path="/user/:name" element={<UserProfile />} />
           <Route path="/search" element={<Search />} />
           <Route path="/notifications" element={<Notifications />} />
+          <Route path="/settings" element={<Settings />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/verify-email" element={<VerifyEmail />} />
