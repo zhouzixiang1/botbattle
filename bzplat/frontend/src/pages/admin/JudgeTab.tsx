@@ -92,55 +92,55 @@ export default function JudgeTab() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-slate-400">
+        <p className="text-xs text-muted-foreground">
           裁判代码只读展示；规则参数可热调，下一局对局立即生效。代码逻辑改动需走业务代码流程。
         </p>
         <RefreshBtn onClick={load} />
       </div>
       <ErrorMsg msg={error} />
-      {ok && <p className="text-sm text-emerald-600">{ok}</p>}
+      {ok && <p className="text-sm text-success">{ok}</p>}
 
       {games.map((g) => (
-        <div key={g.game_id} className="rounded-xl border border-slate-200 bg-white p-4">
+        <div key={g.game_id} className="rounded-xl border border-border bg-card p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 className="text-sm font-medium text-slate-800">{g.label}</h3>
-            <span className="font-mono text-xs text-slate-400">{g.code_path}</span>
+            <h3 className="text-sm font-medium text-foreground">{g.label}</h3>
+            <span className="font-mono text-xs text-muted-foreground">{g.code_path}</span>
           </div>
-          <p className="mt-1 text-sm text-slate-600">{g.summary}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{g.summary}</p>
 
           {g.params.length > 0 ? (
             <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {g.params.map((p) => (
-                <label key={p.key} className="text-sm text-slate-600">
+                <label key={p.key} className="text-sm text-muted-foreground">
                   {p.label}
                   <input
                     type="number"
                     min={p.min}
                     max={p.max}
-                    className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
+                    className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
                     value={draft[p.key] ?? p.value}
                     onChange={(e) =>
                       setDraft({ ...draft, [p.key]: Number(e.target.value) })
                     }
                   />
-                  <span className="mt-0.5 block text-xs text-slate-400">
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
                     范围 {p.min}–{p.max}
                   </span>
                 </label>
               ))}
             </div>
           ) : (
-            <p className="mt-3 text-xs text-slate-400">
+            <p className="mt-3 text-xs text-muted-foreground">
               无全局可调参数（点格棋 N 由各对局 match 配置决定）。
             </p>
           )}
 
           {g.docstring && (
             <details className="mt-3">
-              <summary className="cursor-pointer text-xs text-slate-500">
+              <summary className="cursor-pointer text-xs text-muted-foreground">
                 裁判代码 docstring（只读）
               </summary>
-              <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-xs leading-relaxed text-slate-600">
+              <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs leading-relaxed text-muted-foreground">
                 {g.docstring}
               </pre>
             </details>
@@ -152,17 +152,17 @@ export default function JudgeTab() {
         type="button"
         disabled={busy}
         onClick={() => void save()}
-        className="rounded-lg bg-brand-600 px-4 py-2 text-sm text-white hover:bg-brand-500 disabled:opacity-50"
+        className="rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
       >
         保存参数
       </button>
 
       {markdown && (
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="rounded-xl border border-border bg-card p-4">
           <button
             type="button"
             onClick={() => setShowCode((v) => !v)}
-            className="text-sm font-medium text-brand-700 hover:text-brand-800"
+            className="text-sm font-medium text-primary hover:opacity-80"
           >
             {showCode ? '▾ 收起裁判代码说明' : '▸ 展开裁判代码说明（仅管理员可见）'}
           </button>

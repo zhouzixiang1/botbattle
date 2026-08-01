@@ -67,7 +67,7 @@ export default function MatchesTab() {
         <select
           value={status}
           onChange={(e) => setStatus(e.target.value)}
-          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700"
+          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground"
         >
           {STATUSES.map((s) => (
             <option key={s} value={s}>
@@ -75,16 +75,16 @@ export default function MatchesTab() {
             </option>
           ))}
         </select>
-        <span className="text-xs text-slate-400">共 {matches.length} 局</span>
+        <span className="text-xs text-muted-foreground">共 {matches.length} 局</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
         </div>
       </div>
       <ErrorMsg msg={error} />
 
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <div className="overflow-x-auto rounded-xl border border-border bg-card">
         <table className="w-full min-w-[52rem] text-left text-sm">
-          <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase text-slate-400">
+          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
             <tr>
               <th className="px-3 py-2.5">对局 ID</th>
               <th className="px-3 py-2.5">对阵</th>
@@ -96,32 +96,32 @@ export default function MatchesTab() {
               <th className="px-3 py-2.5">操作</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-border">
             {matches.map((m) => (
-              <tr key={m.id} className="hover:bg-slate-50">
-                <td className="px-3 py-2 font-mono text-xs text-slate-400">{m.id.slice(0, 16)}…</td>
-                <td className="px-3 py-2 text-slate-700">
+              <tr key={m.id} className="hover:bg-accent">
+                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</td>
+                <td className="px-3 py-2 text-foreground">
                   {m.bot_a_name || `#${m.bot_a_id}`} vs {m.bot_b_name || `#${m.bot_b_id}`}
                 </td>
-                <td className="px-3 py-2 text-xs text-slate-500">{m.match_type}</td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">{m.match_type}</td>
                 <td className="px-3 py-2">
                   <StatusBadge status={m.status} />
                 </td>
-                <td className="px-3 py-2 font-mono text-xs text-slate-500">
+                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {m.hands_played}/{m.total_hands}
                 </td>
-                <td className="px-3 py-2 font-mono text-xs text-slate-500">
+                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {m.earnings_a}/{m.earnings_b}
                   {m.reason && m.reason !== 'completed' && (
-                    <div className="text-[10px] text-error-500">{m.reason}</div>
+                    <div className="text-[10px] text-destructive">{m.reason}</div>
                   )}
                 </td>
-                <td className="px-3 py-2 text-xs text-slate-400">{m.created_at}</td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">{m.created_at}</td>
                 <td className="px-3 py-2">
                   <div className="flex gap-1">
                     <Link
                       to={`/match/${m.id}`}
-                      className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-brand-600 hover:bg-slate-100"
+                      className="rounded border border-input bg-card px-2 py-0.5 text-xs text-primary hover:bg-accent"
                     >
                       查看
                     </Link>
@@ -130,7 +130,7 @@ export default function MatchesTab() {
                         type="button"
                         disabled={busyId === m.id}
                         onClick={() => void abort(m.id)}
-                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-error-500 hover:bg-error-50"
+                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
                       >
                         中止
                       </button>

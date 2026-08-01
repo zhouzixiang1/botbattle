@@ -95,5 +95,37 @@ import { Button } from '@/components/ui/button'
 ## 关键约束
 - **无 emoji**：全项目图标统一 lucide-react。
 - **无紫色/米色**：刻意规避 AI 默认审美（emerald 品牌色系）。
-- **浅色为主、暗色对等**：浅色是默认，暗色必须达到同等可用性。
+- 浅色为主、暗色对等：浅色是默认，暗色必须达到同等可用性。
 - **不破坏功能**：路由、API、业务逻辑不动，只改视觉/结构/组件。
+
+## 代码分割（PR-F7）
+
+页面组件用 `React.lazy` + `Suspense` 按需加载（`src/components/shell/app-shell.tsx`）：
+- 主包 `index.js`：~365KB（115KB gzip）—— 含框架 + Shell + 首页。
+- 每个页面独立 chunk（2-20KB），访问时才加载。
+- 重依赖隔离：recharts 只在 BotDetail chunk（346KB），不进主包。
+- 懒加载 fallback：`PageFallback`（Loader2 旋转图标）。
+
+## 响应式（PR-F7）
+
+- **断点**：`sm`(640) / `md`(768) / `lg`(1024) / `xl`(1280) / `max-w-screen-2xl`(1536)。
+- **顶栏**：`md` 以上横向图标导航；`md` 以下汉堡菜单 → Sheet 侧滑抽屉。
+- **表格**：窄屏隐藏次要列（`hidden sm:table-cell` / `hidden md:table-cell` / `hidden lg:table-cell`），或用 `overflow-x-auto` 横向滚动。
+- **卡片网格**：`grid-cols-2 sm:grid-cols-3 lg:grid-cols-4` 自适应列数。
+- **表单**：单栏，`max-w-md` 居中。
+
+## 暗色全覆盖（PR-F7）
+
+- 全项目 className 用语义 token（自动明暗切换），**禁裸 hex / 禁 `slate-*`/`brand-*`/`error-*` 等硬编码**。
+- 例外（刻意固定配色，不跟随主题）：
+  - 扑克桌 `.felt-table` 深绿毡面（始终深色）。
+  - 五子棋木色棋盘、点格棋配色。
+  - `LogsTab` 日志查看器（始终深色终端风格，level 颜色针对深底校准）。
+  - 段位徽章（`tier-badge.tsx`，浅暗双色已内置 `dark:` 变体）。
+
+## 可访问性（PR-F7）
+
+- 所有交互元素有 `aria-label`（图标按钮）/ `title`。
+- `focus-visible:ring` 聚焦环（Button/Input 等组件内置）。
+- 图标按钮带 `sr-only` 文本（如 ThemeToggle）。
+- 对比度遵循 WCAG AA（OKLCH token 已校准）。

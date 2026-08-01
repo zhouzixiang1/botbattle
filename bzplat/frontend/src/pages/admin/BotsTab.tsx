@@ -107,18 +107,18 @@ export default function BotsTab() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜索 Bot 名称"
-          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 focus:border-brand-400 focus:outline-none"
+          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
         />
-        <span className="text-xs text-slate-400">共 {filtered.length} 个</span>
+        <span className="text-xs text-muted-foreground">共 {filtered.length} 个</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
         </div>
       </div>
       <ErrorMsg msg={error} />
 
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <div className="overflow-x-auto rounded-xl border border-border bg-card">
         <table className="w-full min-w-[50rem] text-left text-sm">
-          <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase text-slate-400">
+          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
             <tr>
               <th className="px-3 py-2.5">ID</th>
               <th className="px-3 py-2.5">名称</th>
@@ -129,31 +129,31 @@ export default function BotsTab() {
               <th className="px-3 py-2.5">操作</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-border">
             {filtered.map((b) => (
               <>
-                <tr key={b.id} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 font-mono text-slate-400">{b.id}</td>
-                  <td className="px-3 py-2 font-medium text-slate-700">
+                <tr key={b.id} className="hover:bg-accent">
+                  <td className="px-3 py-2 font-mono text-muted-foreground">{b.id}</td>
+                  <td className="px-3 py-2 font-medium text-foreground">
                     {b.display_name || b.name}
-                    {b.is_builtin && <span className="ml-1 text-[10px] text-brand-500">内置</span>}
+                    {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
                   </td>
                   <td className="px-3 py-2">
-                    <Link to={`/user/${b.owner_id}`} className="text-brand-600 hover:underline">
+                    <Link to={`/user/${b.owner_id}`} className="text-primary hover:underline">
                       #{b.owner_id}
                     </Link>
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-500">
+                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                     {b.format}/{b.arch}
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-500">v{b.current_version}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">v{b.current_version}</td>
                   <td className="px-3 py-2">
                     <div className="flex gap-1">
                       {b.is_active ? <StatusBadge status="running" /> : <StatusBadge status="aborted" />}
                       {b.is_public ? (
-                        <span className="text-[10px] text-slate-400">公开</span>
+                        <span className="text-[10px] text-muted-foreground">公开</span>
                       ) : (
-                        <span className="text-[10px] text-slate-400">私有</span>
+                        <span className="text-[10px] text-muted-foreground">私有</span>
                       )}
                     </div>
                   </td>
@@ -163,14 +163,14 @@ export default function BotsTab() {
                         type="button"
                         disabled={busyId === b.id}
                         onClick={() => void patch(b.id, { is_active: !b.is_active })}
-                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
                       >
                         {b.is_active ? '下架' : '上架'}
                       </button>
                       <button
                         type="button"
                         onClick={() => void showVersions(b)}
-                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
                       >
                         版本
                       </button>
@@ -178,7 +178,7 @@ export default function BotsTab() {
                         type="button"
                         disabled={busyId === b.id}
                         onClick={() => void del(b.id)}
-                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-error-500 hover:bg-error-50"
+                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
                       >
                         删除
                       </button>
@@ -186,13 +186,13 @@ export default function BotsTab() {
                   </td>
                 </tr>
                 {expand === b.id && (
-                  <tr key={`${b.id}-v`} className="bg-slate-50/60">
+                  <tr key={`${b.id}-v`} className="bg-muted/60">
                     <td colSpan={7} className="px-6 py-3">
                       {versions.length === 0 ? (
                         <EmptyState text="无版本" />
                       ) : (
                         <table className="w-full text-xs">
-                          <thead className="text-slate-400">
+                          <thead className="text-muted-foreground">
                             <tr>
                               <th className="px-2 py-1 text-left">版本</th>
                               <th className="px-2 py-1 text-left">大小</th>
@@ -201,9 +201,9 @@ export default function BotsTab() {
                               <th className="px-2 py-1 text-left">上传时间</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-200">
+                          <tbody className="divide-y divide-border">
                             {versions.map((v) => (
-                              <tr key={v.id} className="font-mono text-slate-600">
+                              <tr key={v.id} className="font-mono text-muted-foreground">
                                 <td className="px-2 py-1">v{v.version}</td>
                                 <td className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</td>
                                 <td className="px-2 py-1">{v.format}/{v.arch}</td>

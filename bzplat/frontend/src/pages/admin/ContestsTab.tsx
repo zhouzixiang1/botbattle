@@ -111,16 +111,16 @@ export default function ContestsTab() {
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-xs text-slate-400">
+        <span className="text-xs text-muted-foreground">
           共 {contests.length} 个比赛（切到 running 会真正调用 start）
         </span>
         <RefreshBtn onClick={load} />
       </div>
       <ErrorMsg msg={error} />
 
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <div className="overflow-x-auto rounded-xl border border-border bg-card">
         <table className="w-full min-w-[46rem] text-left text-sm">
-          <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase text-slate-400">
+          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
             <tr>
               <th className="px-3 py-2.5">ID</th>
               <th className="px-3 py-2.5">标题</th>
@@ -131,20 +131,20 @@ export default function ContestsTab() {
               <th className="px-3 py-2.5">操作</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-border">
             {contests.map((c) => (
               <>
-                <tr key={c.id} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 font-mono text-slate-400">{c.id}</td>
-                  <td className="px-3 py-2 font-medium text-slate-700">{c.title}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-500">
+                <tr key={c.id} className="hover:bg-accent">
+                  <td className="px-3 py-2 font-mono text-muted-foreground">{c.id}</td>
+                  <td className="px-3 py-2 font-medium text-foreground">{c.title}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                     {c.template_id || '—'} / {c.game_id || 'holdem'}
                   </td>
                   <td className="px-3 py-2">
                     <StatusBadge status={c.status} />
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs text-slate-500">{c.hands_per_match}</td>
-                  <td className="px-3 py-2 text-xs text-slate-400">{c.created_at}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{c.hands_per_match}</td>
+                  <td className="px-3 py-2 text-xs text-muted-foreground">{c.created_at}</td>
                   <td className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
                       {NEXT_STATUS[c.status] && (
@@ -152,7 +152,7 @@ export default function ContestsTab() {
                           type="button"
                           disabled={busyId === c.id}
                           onClick={() => void patch(c.id, { status: NEXT_STATUS[c.status] })}
-                          className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+                          className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
                         >
                           推进到 {NEXT_STATUS[c.status]}
                         </button>
@@ -164,7 +164,7 @@ export default function ContestsTab() {
                           onClick={() =>
                             void apiJson(`/api/contests/${c.id}/resume`, 'POST').then(load)
                           }
-                          className="rounded border border-brand-300 bg-white px-2 py-0.5 text-xs text-brand-700 hover:bg-brand-50"
+                          className="rounded border border-primary/30 bg-card px-2 py-0.5 text-xs text-primary hover:bg-primary/10"
                         >
                           结束休息
                         </button>
@@ -172,7 +172,7 @@ export default function ContestsTab() {
                       <button
                         type="button"
                         onClick={() => void showEntries(c)}
-                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-600 hover:bg-slate-100"
+                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
                       >
                         报名
                       </button>
@@ -180,7 +180,7 @@ export default function ContestsTab() {
                         type="button"
                         disabled={busyId === c.id}
                         onClick={() => void del(c.id)}
-                        className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-error-500 hover:bg-error-50"
+                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
                       >
                         删除
                       </button>
@@ -188,13 +188,13 @@ export default function ContestsTab() {
                   </td>
                 </tr>
                 {expand === c.id && (
-                  <tr key={`${c.id}-e`} className="bg-slate-50/60">
+                  <tr key={`${c.id}-e`} className="bg-muted/60">
                     <td colSpan={7} className="px-6 py-3">
                       {entries.length === 0 ? (
                         <EmptyState text="无报名" />
                       ) : (
                         <table className="w-full text-xs">
-                          <thead className="text-slate-400">
+                          <thead className="text-muted-foreground">
                             <tr>
                               <th className="px-2 py-1 text-left">用户</th>
                               <th className="px-2 py-1 text-left">Bot</th>
@@ -202,9 +202,9 @@ export default function ContestsTab() {
                               <th className="px-2 py-1 text-left">操作</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-200">
+                          <tbody className="divide-y divide-border">
                             {entries.map((e) => (
-                              <tr key={e.id} className="font-mono text-slate-600">
+                              <tr key={e.id} className="font-mono text-muted-foreground">
                                 <td className="px-2 py-1">#{e.user_id}</td>
                                 <td className="px-2 py-1">#{e.bot_id}</td>
                                 <td className="px-2 py-1">{e.registered_at}</td>
@@ -212,7 +212,7 @@ export default function ContestsTab() {
                                   <button
                                     type="button"
                                     onClick={() => void removeEntry(c.id, e.user_id)}
-                                    className="rounded border border-slate-300 bg-white px-2 py-0.5 text-error-500 hover:bg-error-50"
+                                    className="rounded border border-input bg-card px-2 py-0.5 text-destructive hover:bg-destructive/10"
                                   >
                                     移除
                                   </button>

@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink, Link, useNavigate } from 'react-router-dom'
-import { Menu, LogOut, User as UserIcon } from 'lucide-react'
+import { Menu, LogOut, User as UserIcon, Loader2 } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
 import NotificationBell from '@/components/NotificationBell'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -16,29 +16,38 @@ import {
 } from '@/components/ui/sheet'
 import { cn } from '@/lib/utils'
 
-// 页面导入
-import Home from '@/pages/Home'
-import Challenge from '@/pages/Challenge'
-import Leaderboard from '@/pages/Leaderboard'
-import Contests from '@/pages/Contests'
-import ContestDetail from '@/pages/ContestDetail'
-import MyBots from '@/pages/MyBots'
-import Wiki from '@/pages/Wiki'
-import DataDownload from '@/pages/DataDownload'
-import ArenaWatch from '@/pages/ArenaWatch'
-import History from '@/pages/History'
-import MatchDetail from '@/pages/MatchDetail'
-import BotDetail from '@/pages/BotDetail'
-import HumanPlay from '@/pages/HumanPlay'
-import UserProfile from '@/pages/UserProfile'
-import SearchPage from '@/pages/Search'
-import Notifications from '@/pages/Notifications'
-import Settings from '@/pages/Settings'
-import Login from '@/pages/Login'
-import Register from '@/pages/Register'
-import VerifyEmail from '@/pages/VerifyEmail'
-import ResetPassword from '@/pages/ResetPassword'
-import Admin from '@/pages/admin/Admin'
+// 页面懒加载（代码分割：每个页面独立 chunk，recharts 等大依赖只在访问时加载）
+const Home = lazy(() => import('@/pages/Home'))
+const Challenge = lazy(() => import('@/pages/Challenge'))
+const Leaderboard = lazy(() => import('@/pages/Leaderboard'))
+const Contests = lazy(() => import('@/pages/Contests'))
+const ContestDetail = lazy(() => import('@/pages/ContestDetail'))
+const MyBots = lazy(() => import('@/pages/MyBots'))
+const Wiki = lazy(() => import('@/pages/Wiki'))
+const DataDownload = lazy(() => import('@/pages/DataDownload'))
+const ArenaWatch = lazy(() => import('@/pages/ArenaWatch'))
+const History = lazy(() => import('@/pages/History'))
+const MatchDetail = lazy(() => import('@/pages/MatchDetail'))
+const BotDetail = lazy(() => import('@/pages/BotDetail'))
+const HumanPlay = lazy(() => import('@/pages/HumanPlay'))
+const UserProfile = lazy(() => import('@/pages/UserProfile'))
+const SearchPage = lazy(() => import('@/pages/Search'))
+const Notifications = lazy(() => import('@/pages/Notifications'))
+const Settings = lazy(() => import('@/pages/Settings'))
+const Login = lazy(() => import('@/pages/Login'))
+const Register = lazy(() => import('@/pages/Register'))
+const VerifyEmail = lazy(() => import('@/pages/VerifyEmail'))
+const ResetPassword = lazy(() => import('@/pages/ResetPassword'))
+const Admin = lazy(() => import('@/pages/admin/Admin'))
+
+/** 懒加载 fallback（旋转加载图标，居中） */
+function PageFallback() {
+  return (
+    <div className="flex min-h-[50vh] items-center justify-center">
+      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+    </div>
+  )
+}
 
 const navCls = ({ isActive }: { isActive: boolean }) =>
   cn(
@@ -169,6 +178,7 @@ export function AppShell() {
 
       {/* 主体 */}
       <main className="mx-auto w-full max-w-screen-2xl flex-1 px-4 py-6 lg:px-6">
+        <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/arena" element={<ArenaWatch />} />
@@ -194,6 +204,7 @@ export function AppShell() {
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>
+        </Suspense>
       </main>
 
       {/* 页脚 */}
