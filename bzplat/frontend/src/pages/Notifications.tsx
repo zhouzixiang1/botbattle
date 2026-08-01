@@ -58,7 +58,7 @@ export default function Notifications() {
   }
 
   return (
-    <PageStub title="通知">
+    <PageStub title="通知" subtitle="你的对局结果、赛事与系统消息">
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="inline-flex rounded-lg border border-border p-1">
           {(['all', 'unread'] as const).map((f) => (

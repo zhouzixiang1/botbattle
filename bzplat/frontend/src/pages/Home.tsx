@@ -51,7 +51,27 @@ export default function Home() {
   }, [gameId])
 
   return (
-    <PageStub title="最新对局">
+    <PageStub
+      title="最新对局"
+      subtitle="进行中与已完成的对局"
+      actions={
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          游戏
+          <select
+            value={gameId}
+            onChange={(e) => setGameId(e.target.value)}
+            className="h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          >
+            <option value="">全部</option>
+            {GAMES.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      }
+    >
       {/* Hero 区 */}
       <Card className="mb-6 overflow-hidden border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card">
         <CardContent className="flex flex-col items-start gap-4 py-6 sm:flex-row sm:items-center sm:justify-between">
@@ -74,25 +94,7 @@ export default function Home() {
         </CardContent>
       </Card>
 
-      {/* 筛选 */}
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">进行中与已完成的对局</p>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
-          游戏
-          <select
-            value={gameId}
-            onChange={(e) => setGameId(e.target.value)}
-            className="h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            <option value="">全部</option>
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+
 
       {error && <ErrorMsg msg={error} className="mb-3" />}
 

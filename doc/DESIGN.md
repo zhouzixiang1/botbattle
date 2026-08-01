@@ -189,8 +189,10 @@ SQLite 单文件（默认 `botzone.db`），**25 张表**，约 23 个索引。�
 
 ### 5.2 组件库与页面
 - **26 个 shadcn 共享原语**（`src/components/ui/`）：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart/Sheet/Slider 等，是全项目唯一组件抽象层。
-- **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、tier-badge.tsx。
+- **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、tier-badge.tsx、BrandMark.tsx（平台品牌标识）、AuthShell.tsx（登录/注册/重置/验证的居中壳：品牌头部 + 居中 Card，解决空旷）。
 - **全局 Shell**：app-shell.tsx（顶栏 + lucide 图标导航 + Cmd+K 全局搜索 + 主题切换）+ nav-config.ts。
+- **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题（py-6）+ `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
+- **观赛/对战页左右分栏**：MatchDetail / ArenaWatch / HumanPlay 桌面端 `grid lg:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），移动端自动堆叠；ArenaWatch 走 usePlayback 定速缓冲层（事件入 buffer、可控节奏播放，而非实时直播）。
 - **页面**：21 个独立页面 + admin/ 10 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/对局回放/人类对战/数据下载/账号 等。
 - **三棋盘可视化**：poker（PokerTable 深绿毡面）/ gomoku（GomokuBoard 木色）/ pencil（PencilBoard），统一经 MatchBoard 分发。
 

@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { KeyRound, MailCheck } from 'lucide-react'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
-import PageStub from '@/components/PageStub'
+import AuthShell from '@/components/AuthShell'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -65,8 +65,8 @@ export default function ResetPassword() {
   }
 
   return (
-    <PageStub title="重置密码">
-      <Card className="mx-auto mt-2 max-w-md">
+    <AuthShell title="重置密码" subtitle="通过邮箱验证码重新设置密码">
+      <Card className="w-full max-w-md">
         <CardContent className="py-6">
           {step === 'request' ? (
             <form onSubmit={(e) => void onRequest(e)} className="space-y-4">
@@ -144,6 +144,6 @@ export default function ResetPassword() {
           )}
         </CardContent>
       </Card>
-    </PageStub>
+    </AuthShell>
   )
 }

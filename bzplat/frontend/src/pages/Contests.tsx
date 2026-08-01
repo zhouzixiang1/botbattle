@@ -113,12 +113,11 @@ export default function Contests() {
     'h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
 
   return (
-    <PageStub title="比赛">
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <p className="text-sm text-muted-foreground">
-          组织者发布比赛，选手派遣 Bot。默认模板偏 Swiss / 分组，适合校赛规模。
-        </p>
-        <label className="ml-auto flex items-center gap-2 text-sm text-muted-foreground">
+    <PageStub
+      title="比赛"
+      subtitle="组织者发布比赛，选手派遣 Bot；默认模板偏 Swiss / 分组，适合校赛规模"
+      actions={
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
           <select
             value={filterGame}
@@ -133,7 +132,8 @@ export default function Contests() {
             ))}
           </select>
         </label>
-      </div>
+      }
+    >
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
       {canCreate && isLoggedIn && (

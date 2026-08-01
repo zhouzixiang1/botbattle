@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { UserPlus } from 'lucide-react'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
-import PageStub from '@/components/PageStub'
+import AuthShell from '@/components/AuthShell'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -40,8 +40,8 @@ export default function Register() {
   const inputCls = 'mt-1.5'
 
   return (
-    <PageStub title="注册">
-      <Card className="mx-auto mt-2 max-w-md">
+    <AuthShell title="注册账号" subtitle="创建账号，加入 Bot 竞技">
+      <Card className="w-full max-w-md">
         <CardContent className="py-6">
           <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">
             <div className="space-y-1.5">
@@ -72,6 +72,6 @@ export default function Register() {
           </form>
         </CardContent>
       </Card>
-    </PageStub>
+    </AuthShell>
   )
 }

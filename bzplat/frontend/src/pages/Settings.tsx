@@ -112,7 +112,7 @@ export default function Settings() {
   const avatarUrl = user.avatar ? `/avatars/${user.avatar}` : ''
 
   return (
-    <PageStub title="个人设置">
+    <PageStub title="个人设置" subtitle="管理资料、头像与密码">
       {/* Tabs */}
       <Tabs
         value={tab}

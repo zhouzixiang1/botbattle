@@ -156,11 +156,7 @@ export default function MyBots() {
     'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
 
   return (
-    <PageStub title="我的 Bot">
-      <p className="mb-4">
-        上传二进制 Bot（Linux ELF / Windows PE）。请选择对应游戏类型。macOS Mach-O 会被拒绝。
-      </p>
-
+    <PageStub title="我的 Bot" subtitle="上传二进制 Bot（Linux ELF / Windows PE），选择对应游戏类型；macOS Mach-O 会被拒绝">
       <Card className="mb-8 max-w-lg">
         <CardContent>
           <form onSubmit={(e) => void onUpload(e)} className="space-y-3">

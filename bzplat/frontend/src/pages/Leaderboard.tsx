@@ -54,9 +54,10 @@ export default function Leaderboard() {
   }, [gameId])
 
   return (
-    <PageStub title="排行榜">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">Glicko-2 评分（按游戏过滤）</p>
+    <PageStub
+      title="排行榜"
+      subtitle="Glicko-2 评分，按游戏过滤"
+      actions={
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
           <select
@@ -72,8 +73,8 @@ export default function Leaderboard() {
             ))}
           </select>
         </label>
-      </div>
-
+      }
+    >
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
       <Card>
