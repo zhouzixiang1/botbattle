@@ -842,8 +842,8 @@ class Store:
             ).fetchone()
             d = _row(row)
             if d is not None:
-                from bzplat.backend.engine.tiers import tier_for
-                t = tier_for(d.get("rating"))
+                from bzplat.backend.games import registry as _game_registry
+                t = _game_registry.tier_for(d.get("game_id") or "holdem", d.get("rating"))
                 d["tier_level"] = t.level
                 d["tier_key"] = t.key
                 d["tier_name"] = t.name
@@ -1122,14 +1122,15 @@ class Store:
             params.append(limit)
             rows = [_row(r) for r in c.execute(sql, params)]
             # 计算并补 tier + delta（应用层，避免 SQL 嵌套过深）
-            from bzplat.backend.engine.tiers import tier_for
+            # 段位 per-game：按该 bot 的 game_id 取对应曲线（经 games 注册表）
+            from bzplat.backend.games import registry as _game_registry
             for row in rows:
                 prev = row.pop("prev_rating", None)
                 if prev is not None:
                     row["rating_delta"] = round(row["rating"] - prev, 2)
                 else:
                     row["rating_delta"] = None
-                t = tier_for(row["rating"])
+                t = _game_registry.tier_for(row.get("game_id") or "holdem", row["rating"])
                 row["tier_level"] = t.level
                 row["tier_key"] = t.key
                 row["tier_name"] = t.name

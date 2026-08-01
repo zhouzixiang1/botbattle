@@ -37,22 +37,34 @@ def orch(store):
     return MatchOrchestrator(store, runner=runner, max_concurrent=1)
 
 
-# ── _judge_params 读取与兜底 ──────────────────────────────────────
+# ── _judge_params 读取与兜底（per-game，PR2 起 _judge_params(gid)）─────────
 
 def test_judge_params_defaults_when_unset(orch):
-    """未写 settings 时全部返回 None（交由引擎常量兜底）。"""
-    jp = orch._judge_params()
-    assert jp == {"board_size": None, "starting_stack": None, "sb": None, "bb": None}
+    """未写 settings 时该游戏字段返回 None（交由引擎常量兜底）。
+
+    PR2 起 _judge_params(gid) 只返回该游戏的字段：holdem→starting_stack/sb/bb/
+    default_hands；gomoku→board_size。
+    """
+    # holdem：4 个字段全 None
+    jp_h = orch._judge_params("holdem")
+    assert jp_h == {"starting_stack": None, "sb": None, "bb": None, "default_hands": None}
+    # gomoku：仅 board_size
+    jp_g = orch._judge_params("gomoku")
+    assert jp_g == {"board_size": None}
+    # pencil：无 judge 参数
+    jp_p = orch._judge_params("pencil")
+    assert jp_p == {}
 
 
 def test_judge_params_reads_settings(orch, store):
-    """写入合法 settings 后 _judge_params 读到对应值。"""
+    """写入合法 settings 后 _judge_params(gid) 读到对应值（按游戏分组）。"""
     store.set_setting(SETTING_JUDGE_GOMOKU_SIZE, "9")
     store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "5000")
     store.set_setting(SETTING_JUDGE_HOLDEM_SB, "25")
     store.set_setting(SETTING_JUDGE_HOLDEM_BB, "50")
-    jp = orch._judge_params()
-    assert jp == {"board_size": 9, "starting_stack": 5000, "sb": 25, "bb": 50}
+    h = orch._judge_params("holdem")
+    assert h["starting_stack"] == 5000 and h["sb"] == 25 and h["bb"] == 50
+    assert orch._judge_params("gomoku") == {"board_size": 9}
 
 
 def test_judge_params_bad_values_fall_back(orch, store):
@@ -61,8 +73,9 @@ def test_judge_params_bad_values_fall_back(orch, store):
     store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "0")
     store.set_setting(SETTING_JUDGE_HOLDEM_BB, "-5")
     store.set_setting(SETTING_JUDGE_HOLDEM_SB, "")
-    jp = orch._judge_params()
-    assert jp == {"board_size": None, "starting_stack": None, "sb": None, "bb": None}
+    h = orch._judge_params("holdem")
+    assert h["starting_stack"] is None and h["sb"] is None and h["bb"] is None
+    assert orch._judge_params("gomoku") == {"board_size": None}
 
 
 # ── run_session 用新参数构造 Session ──────────────────────────────
@@ -266,10 +279,11 @@ def test_patch_judge_params_updates_and_hot(tmp_path):
     assert r.status_code == 200, r.text
     updated = r.json()["updated"]
     assert updated["judge_gomoku_board_size"] == 9
-    # 热生效：_judge_params 立即读到新值
-    jp = app.state.orch._judge_params()
-    assert jp["board_size"] == 9
-    assert jp["sb"] == 25
+    # 热生效：_judge_params(gid) 立即读到新值（per-game，PR2）
+    jp_gomoku = app.state.orch._judge_params("gomoku")
+    assert jp_gomoku["board_size"] == 9
+    jp_holdem = app.state.orch._judge_params("holdem")
+    assert jp_holdem["sb"] == 25
     # 返回的 judges 总览也反映新值
     gomoku = next(g for g in r.json()["judges"]["games"] if g["game_id"] == "gomoku")
     assert gomoku["params"][0]["value"] == 9

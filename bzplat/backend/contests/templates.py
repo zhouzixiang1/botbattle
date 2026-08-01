@@ -8,20 +8,30 @@ from typing import Any
 SCORING_POKER = "poker_3_1_0"
 SCORING_CCGC = "ccgc_2_1_0"
 
-# 每款游戏的对局参数（替代德扑专属的 hands_per_match）
+# 每款游戏的对局参数（经 games 注册表派生——单一真相）
 #   holdem: {"hands": 70}      每场手数
 #   gomoku: {}                  单局，无可调参数
 #   pencil: {"n_dots": 11}      点阵边长
-DEFAULT_MATCH_CONFIG: dict[str, dict[str, Any]] = {
-    "holdem": {"hands": 70},
-    "gomoku": {},
-    "pencil": {"n_dots": 11},
-}
+# PR2：DEFAULT_MATCH_CONFIG 从注册表派生（消除手写重复）；default_match_config 委托注册表。
+def _build_default_match_config() -> dict[str, dict[str, Any]]:
+    from bzplat.backend.games import registry as _reg
+
+    return {gid: copy.deepcopy(_reg.get(gid).default_match_params) for gid in _reg.all_ids()}
+
+
+DEFAULT_MATCH_CONFIG: dict[str, dict[str, Any]] = _build_default_match_config()
 
 
 def default_match_config(game_id: str | None) -> dict[str, Any]:
     """返回指定游戏的默认 match_config（深拷贝）。"""
-    return copy.deepcopy(DEFAULT_MATCH_CONFIG.get((game_id or "holdem").strip().lower(), {"hands": 70}))
+    gid = (game_id or "holdem").strip().lower()
+    from bzplat.backend.games import registry as _reg
+
+    try:
+        return copy.deepcopy(_reg.get(gid).default_match_params)
+    except KeyError:
+        # 未知游戏回退 holdem（保向后兼容；注册表启动断言已保证已知游戏正确）
+        return copy.deepcopy(_reg.get("holdem").default_match_params)
 
 
 DEFAULT_TEMPLATES: dict[str, dict[str, Any]] = {

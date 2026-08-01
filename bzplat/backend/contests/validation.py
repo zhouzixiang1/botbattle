@@ -33,26 +33,11 @@ def validate_template_id(tid: str) -> None:
 
 
 def validate_match_config(cfg: Any, game_id: str) -> dict:
-    """校验并返回规整后的 match_config。"""
-    if not isinstance(cfg, dict):
-        raise ValueError("match_config 必须是对象")
+    """校验并返回规整后的 match_config（经 games 注册表，消除 if game_id）。"""
+    from bzplat.backend.games import registry as _reg
+
     gid = (game_id or "holdem").strip().lower()
-    out: dict[str, Any] = {}
-    if gid == "holdem":
-        hands = cfg.get("hands", 70)
-        if not isinstance(hands, int) or not (1 <= hands <= 500):
-            raise ValueError(f"holdem match_config.hands 须为 1–500 的整数（得到 {hands}）")
-        out["hands"] = hands
-    elif gid == "pencil":
-        n_dots = cfg.get("n_dots", 11)
-        if not isinstance(n_dots, int) or not (3 <= n_dots <= 15):
-            raise ValueError(f"pencil match_config.n_dots 须为 3–15 的整数（得到 {n_dots}）")
-        out["n_dots"] = n_dots
-    elif gid == "gomoku":
-        # gomoku 单局，无可调参数；忽略任何字段
-        pass
-    # 未知 game_id 在 validate_template 阶段已拦截
-    return out
+    return _reg.get(gid).validate_match_params(cfg)
 
 
 def validate_stage(stage: dict, idx: int) -> dict:

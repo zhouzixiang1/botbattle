@@ -18,6 +18,7 @@ from bzplat.backend.contests.templates import (
     resolve_template,
 )
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
+from bzplat.backend.games import registry as game_registry
 from bzplat.backend.runtime.limits import FULL_RR_MAX_N
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
@@ -64,6 +65,24 @@ def _match_config(c: dict) -> dict:
         if hpm and c.get("game_id", "holdem") == "holdem":
             cfg = {"hands": hpm}
     return cfg if isinstance(cfg, dict) else {}
+
+
+def _estimate_sec_per_match(gid: str, cfg: dict, hands_fallback: int) -> int:
+    """粗估每场时长（秒）：以 spec.eta_per_match_sec 为基准，按对局参数线性缩放。
+
+    - holdem：ETA ∝ hands（spec.eta_per_match_sec 按 70 手标定，按实际 hands 缩放）
+    - pencil：ETA ∝ n_dots（spec 标定 N=11，按实际 n_dots 缩放）
+    - gomoku：单局固定 ETA
+    经 spec.eta_per_match_sec 取基准（消除 if game_id 分支），仅在参数缩放上分支。
+    """
+    base = game_registry.get(gid).eta_per_match_sec
+    if gid == "holdem":
+        hands = int(cfg.get("hands", hands_fallback) or hands_fallback)
+        return hands * 2  # 每手约 2s（与历史一致）
+    if gid == "pencil":
+        n_dots = int(cfg.get("n_dots") or 11)
+        return max(30, int(n_dots / 11 * base))  # base 按 N=11 标定
+    return int(base)
 
 
 class ContestManager:
@@ -334,19 +353,30 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
+        gid = c.get("game_id") or "holdem"
+        # 经 spec 取该游戏的对局参数字段（消除 if game_id）；challenge() 接收
+        # hands/n_dots 两个可选 kwarg，按 cfg 里实际存在的字段透传。
         for p in pairings:
             if p.get("status") != "pending" or p.get("match_id"):
                 continue
             # 冻结快照已在 pairing 行；直接开打
+            kw: dict = {
+                "match_type": TYPE_CONTEST,
+                "contest_id": contest_id,
+                "game_id": gid,
+            }
+            if "hands" in cfg:
+                kw["hands"] = int(cfg["hands"])
+            elif gid == "holdem":
+                # 向后兼容：旧 holdem 比赛无 match_config.hands，用 hands_per_match 列
+                kw["hands"] = int(c.get("hands_per_match") or 70)
+            if "n_dots" in cfg and cfg["n_dots"] is not None:
+                kw["n_dots"] = int(cfg["n_dots"])
             mid = await self.orch.challenge(
                 p["bot_a_id"],
                 p["bot_b_id"],
                 owner_user_id=c["organizer_id"],
-                hands=int(cfg.get("hands", c.get("hands_per_match") or 70)),
-                match_type=TYPE_CONTEST,
-                contest_id=contest_id,
-                game_id=c.get("game_id") or "holdem",
-                n_dots=int(cfg["n_dots"]) if cfg.get("n_dots") is not None else None,
+                **kw,
             )
             self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
 
@@ -608,17 +638,10 @@ class ContestManager:
             conc = max(1, int(conc_raw or 2))
         except ValueError:
             conc = 2
-        # 粗估每场时长：holdem=每手约 2s；棋类单局按固定估算（n_dots 越大越久）
+        # 粗估每场时长：经 spec.eta_per_match_sec（消除 if game_id）
         gid = c.get("game_id") or "holdem"
         cfg = _match_config(c)
-        if gid == "holdem":
-            sec_per = int(cfg.get("hands", c.get("hands_per_match") or 70)) * 2
-        elif gid == "pencil":
-            # n_dots=11 → 约 120s；按 (n_dots/11)*120 线性估
-            n_dots = int(cfg.get("n_dots") or 11)
-            sec_per = max(30, int(n_dots / 11 * 120))
-        else:  # gomoku
-            sec_per = 60
+        sec_per = _estimate_sec_per_match(gid, cfg, c.get("hands_per_match") or 70)
         eta_sec = (total / conc) * sec_per if conc else 0
         return {
             "entries": n,

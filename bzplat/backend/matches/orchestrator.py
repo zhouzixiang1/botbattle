@@ -9,26 +9,18 @@ from datetime import datetime
 from typing import Any, Callable
 
 from bzplat.backend.engine.game import (
-    BIG_BLIND,
     DEFAULT_HANDS,
-    SMALL_BLIND,
-    STARTING_STACK,
 )
-from bzplat.backend.engine.gomoku import BOARD_SIZE
 from bzplat.backend.engine.registry import (
-    GAME_HOLDEM,
     normalize_game_id,
 )
+from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches.runner import MatchRunner, _fail_response
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     REGISTERED_ENGINES,
-    SETTING_JUDGE_GOMOKU_SIZE,
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
     STATUS_ABORTED,
     STATUS_COMPLETED,
     STATUS_PENDING,
@@ -136,7 +128,8 @@ class MatchOrchestrator:
         # 真正的人类动作经 _human_turns / WS 回传，不走 binary）
         bot_a_id = bot_id if bot_seat == 0 else bot_id
         bot_b_id = bot_id if bot_seat == 1 else bot_id
-        total_hands = hands if gid == GAME_HOLDEM else 1
+        # 每游戏轮数：holdem=hands；棋类=1（经 spec.rounds_per_match，消除 if game_id）
+        total_hands = game_registry.get(gid).rounds_per_match({"hands": hands})
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self.store.create_match(
             match_id,
@@ -196,7 +189,8 @@ class MatchOrchestrator:
             )
 
         # 棋类单局；扑克沿用 hands
-        total_hands = hands if gid == GAME_HOLDEM else 1
+        # 每游戏轮数：holdem=hands；棋类=1（经 spec.rounds_per_match，消除 if game_id）
+        total_hands = game_registry.get(gid).rounds_per_match({"hands": hands})
 
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self.store.create_match(
@@ -264,17 +258,17 @@ class MatchOrchestrator:
                     self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
             try:
-                jp = self._judge_params()
+                jp = self._judge_params(gid)
                 result = await self.runner.run_binaries(
                     bot_a["binary_path"],
                     bot_b["binary_path"],
                     game_id=gid,
                     num_hands=int(m["total_hands"]),
                     n_dots=m.get("n_dots"),
-                    board_size=jp["board_size"],
-                    starting_stack=jp["starting_stack"],
-                    sb=jp["sb"],
-                    bb=jp["bb"],
+                    board_size=jp.get("board_size"),
+                    starting_stack=jp.get("starting_stack"),
+                    sb=jp.get("sb"),
+                    bb=jp.get("bb"),
                     on_event=on_event,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
@@ -293,7 +287,7 @@ class MatchOrchestrator:
                     if ev.get("type") == "match_end" and "winner" in ev:
                         winner = ev.get("winner")
                         break
-                net_bb_a = (ea / 100.0) if gid == GAME_HOLDEM else float(ea)
+                net_bb_a = game_registry.get(gid).normalize_earnings(ea)
                 self.store.update_match(
                     match_id,
                     status=STATUS_COMPLETED,
@@ -407,7 +401,7 @@ class MatchOrchestrator:
                     self._human_turns.pop((match_id, player_idx), None)
 
             try:
-                jp = self._judge_params()
+                jp = self._judge_params(gid)
                 result = await self.runner.run_bot_vs_human(
                     bot["binary_path"],
                     bot_seat=1 - human_seat,
@@ -430,7 +424,7 @@ class MatchOrchestrator:
                     if ev.get("type") == "match_end" and "winner" in ev:
                         winner = ev.get("winner")
                         break
-                net_bb_a = (ea / 100.0) if gid == GAME_HOLDEM else float(ea)
+                net_bb_a = game_registry.get(gid).normalize_earnings(ea)
                 self.store.update_match(
                     match_id, status=STATUS_COMPLETED,
                     hands_played=result.rounds_played, earnings_a=ea, earnings_b=eb,
@@ -454,11 +448,12 @@ class MatchOrchestrator:
                 if m.get("human_user_id") is not None:
                     self._human_active_users.discard(int(m["human_user_id"]))
 
-    def _judge_params(self) -> dict[str, int | None]:
-        """从 platform_settings 读裁判规则参数（热生效）；缺失或非法时用引擎常量兜底。
+    def _judge_params(self, gid: str) -> dict[str, int | None]:
+        """从 platform_settings 读裁判规则参数（热生效）；缺失或非法时用 spec 默认兜底。
 
-        返回 board_size/starting_stack/sb/bb，None 表示用引擎默认。
-        n_dots 不在此处（走 match 列）；num_hands 走 match.total_hands。
+        经 games 注册表取该游戏的 judge_params 声明（消除 if game_id）。
+        返回 {field: value}，field 对应 run_session 的 kwarg（如 starting_stack/board_size），
+        value=None 表示用引擎默认。n_dots 不在此处（走 match 列）；num_hands 走 match.total_hands。
         """
 
         def _int(key: str, default: int) -> int | None:
@@ -471,12 +466,10 @@ class MatchOrchestrator:
                 return None
             return v if v > 0 else None
 
-        return {
-            "board_size": _int(SETTING_JUDGE_GOMOKU_SIZE, BOARD_SIZE),
-            "starting_stack": _int(SETTING_JUDGE_HOLDEM_STACK, STARTING_STACK),
-            "sb": _int(SETTING_JUDGE_HOLDEM_SB, SMALL_BLIND),
-            "bb": _int(SETTING_JUDGE_HOLDEM_BB, BIG_BLIND),
-        }
+        out: dict[str, int | None] = {}
+        for p in game_registry.get(gid).judge_params:
+            out[p.field] = _int(p.setting_key, p.default)
+        return out
 
     def _apply_ratings(
         self, bot_a_id: int, bot_b_id: int, winner: int | None, ea: int, eb: int
