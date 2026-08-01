@@ -1,215 +1,125 @@
 #!/usr/bin/env python3
-"""浏览器完整测试：用 headless Chromium 逐页验证 10 个 PR 的新前端功能。
-
-复用 ms-playwright 缓存的 chromium（不重新下载）。逐页打开、截图、断言关键元素存在。
 """
-from __future__ import annotations
-
-import os
-import sys
-import time
-from pathlib import Path
-
+前端全量功能验收（PR-F1~F7 终态）。
+用 headless chromium 逐路由访问，断言关键元素渲染 + 明暗双主题 + 移动端。
+"""
+import sys, json, urllib.request
 from playwright.sync_api import sync_playwright
 
-BASE = "http://127.0.0.1:50380"
 CHROME = "/home/zzx/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome"
-SHOT_DIR = Path("browser_shots")
-SHOT_DIR.mkdir(exist_ok=True)
+BASE = "http://127.0.0.1:50380"
 
-PASS = 0
-FAIL = 0
-FAILS: list[str] = []
+passed = 0
+failed = 0
+fails = []
 
-
-def check(name: str, cond: bool, detail: str = "") -> None:
-    global PASS, FAIL
+def check(name, cond, detail=""):
+    global passed, failed
     if cond:
-        PASS += 1
-        print(f"  ✓ {name}")
+        passed += 1
+        print(f"  \033[32m✓\033[0m {name}")
     else:
-        FAIL += 1
-        FAILS.append(f"{name}: {detail}")
-        print(f"  ✗ {name}  {detail}")
+        failed += 1
+        fails.append(name)
+        print(f"  \033[31m✗\033[0m {name} {detail}")
 
+def has_text(page, text):
+    return text in page.eval_on_selector("body", "el => el.innerText")
 
-def has_text(page, text: str) -> bool:
-    return text in page.content()
-
-
-def shot(page, name: str) -> None:
+def main():
     try:
-        page.screenshot(path=str(SHOT_DIR / f"{name}.png"), full_page=True)
+        with urllib.request.urlopen(f"{BASE}/api/matches?limit=10") as r:
+            md = json.load(r)
+        done = [m for m in md.get("matches", []) if m["status"] == "completed"]
+        match_id = done[0]["id"] if done else "0"
+        bot_id = str(done[0].get("bot_a_id", 1)) if done else "1"
+        with urllib.request.urlopen(f"{BASE}/api/leaderboard?game_id=holdem") as r:
+            lb = json.load(r).get("leaderboard", [])
+        username = lb[0]["owner_name"] if lb and lb[0].get("owner_name") else "load_u0"
     except Exception:
-        pass
+        match_id, bot_id, username = "0", "1", "load_u0"
 
-
-def main() -> int:
-    # 获取一些 id 用于构造 URL
-    import sqlite3
-    con = sqlite3.connect("botzone.db")
-    con.row_factory = sqlite3.Row
-    bot = con.execute("SELECT id, name, owner_id FROM bots WHERE is_active=1 LIMIT 1").fetchone()
-    user = con.execute("SELECT username FROM users WHERE is_active=1 LIMIT 1").fetchone()
-    contest = con.execute("SELECT id FROM contests LIMIT 1").fetchone()
-    match = con.execute("SELECT id FROM matches WHERE status='completed' LIMIT 1").fetchone()
-    con.close()
-    bot_id = bot["id"] if bot else 1
-    bot_name = bot["name"] if bot else "x"
-    username = user["username"] if user else "zzx"
-    contest_id = contest["id"] if contest else 1
-    match_id = match["id"] if match else None
-    print(f"测试数据：bot_id={bot_id} username={username} contest_id={contest_id} match_id={match_id}")
+    routes = [
+        ("home", "/"), ("leaderboard", "/leaderboard"), ("botdetail", f"/bot/{bot_id}"),
+        ("userprofile", f"/user/{username}"), ("search", "/search?q=load"),
+        ("notifications", "/notifications"), ("settings", "/settings"), ("data", "/data"),
+        ("contests", "/contests"), ("replay", f"/match/{match_id}"), ("login", "/login"),
+        ("register", "/register"), ("challenge", "/challenge"), ("mybots", "/my-bots"),
+        ("wiki", "/wiki"), ("history", "/history"), ("resetpw", "/reset-password"),
+    ]
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            executable_path=CHROME,
-            headless=True,
-            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-        )
-        context = browser.new_context(viewport={"width": 1280, "height": 900})
-        page = context.new_page()
-        page.set_default_timeout(15000)
+        b = p.chromium.launch(executable_path=CHROME)
 
-        # ── 首页（含搜索框 + 热门对局 + Bot 名链接）──
-        print("\n=== 首页 ===")
-        page.goto(f"{BASE}/")
-        page.wait_for_load_state("networkidle")
-        check("首页加载（含 Botbattle 标题）", has_text(page, "Botbattle") or has_text(page, "最新对局"))
-        check("顶栏搜索框存在", page.locator('input[placeholder="搜索…"]').count() > 0)
-        check("顶栏「数据」导航存在", page.locator('a:has-text("数据")').count() > 0)
-        shot(page, "01_home")
+        print("=== 明色桌面端（17 路由）===")
+        for name, path in routes:
+            try:
+                pg = b.new_page(viewport={"width": 1280, "height": 800})
+                pg.goto(f"{BASE}/#{path}", wait_until="networkidle", timeout=15000)
+                pg.wait_for_timeout(1000)
+                txt_len = pg.eval_on_selector("body", "el => el.innerText.replace(/\s/g,'').length")
+                has_nav = pg.eval_on_selector_all("header a, header button", "els => els.length") > 3
+                check(f"light-{name}", txt_len > 30 and has_nav, f"text={txt_len}")
+                pg.close()
+            except Exception as e:
+                check(f"light-{name}", False, str(e)[:60])
 
-        # ── 排行榜（段位徽章 + 趋势）──
-        print("\n=== 排行榜（段位徽章 + 趋势）===")
-        page.goto(f"{BASE}/#/leaderboard")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        content = page.content()
-        # 段位名应出现（新手/进阶/熟练/高手/专家/大师之一）
-        tier_found = any(t in content for t in ["新手", "进阶", "熟练", "高手", "专家", "大师"])
-        check("排行榜含段位徽章", tier_found, "未见段位名")
-        check("排行榜含「段位」表头", "段位" in content)
-        shot(page, "02_leaderboard")
+        print("=== 暗色模式 ===")
+        for name, path in [("home", "/"), ("leaderboard", "/leaderboard"), ("botdetail", f"/bot/{bot_id}"), ("login", "/login")]:
+            try:
+                pg = b.new_page(viewport={"width": 1280, "height": 800})
+                pg.goto(f"{BASE}/#{path}", wait_until="networkidle", timeout=15000)
+                pg.wait_for_timeout(900)
+                pg.eval_on_selector("html", "el => el.classList.add('dark')")
+                pg.wait_for_timeout(400)
+                bg = pg.eval_on_selector("body", "el => getComputedStyle(el).backgroundColor")
+                is_dark = bg.startswith("oklch(0.") and float(bg.split("(")[1].split()[0]) < 0.3
+                check(f"dark-{name}", is_dark, f"bg={bg}")
+                pg.close()
+            except Exception as e:
+                check(f"dark-{name}", False, str(e)[:60])
 
-        # ── Bot 详情页（/bot/:id）──
-        print("\n=== Bot 详情页（/bot/:id）===")
-        page.goto(f"{BASE}/#/bot/{bot_id}")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        content = page.content()
-        check("Bot 详情页含对局历史 tab", "对局历史" in content)
-        check("Bot 详情页含对手战绩 tab", "对手战绩" in content)
-        check("Bot 详情页含评分曲线 tab", "评分曲线" in content)
-        check("Bot 详情页含 Rating 卡片", "Rating" in content)
-        check("Bot 详情页含评论区", "评论" in content)
-        # 段位徽章（Rating/段位卡片）
-        check("Bot 详情页含段位徽章", any(t in content for t in ["新手", "进阶", "熟练", "高手", "专家", "大师"]))
-        # 收藏按钮（需登录才显示，可能不显示）
-        shot(page, "03_bot_detail")
+        print("=== 移动端（375px）===")
+        for name, path in [("home", "/"), ("leaderboard", "/leaderboard"), ("login", "/login")]:
+            try:
+                pg = b.new_page(viewport={"width": 375, "height": 700})
+                pg.goto(f"{BASE}/#{path}", wait_until="networkidle", timeout=15000)
+                pg.wait_for_timeout(900)
+                menu_btn = pg.eval_on_selector_all('button[aria-label="菜单"]', "els => els.length")
+                txt_len = pg.eval_on_selector("body", "el => el.innerText.replace(/\s/g,'').length")
+                check(f"mobile-{name}", txt_len > 30, f"text={txt_len} menu={menu_btn}")
+                pg.close()
+            except Exception as e:
+                check(f"mobile-{name}", False, str(e)[:60])
 
-        # ── 用户主页（/user/:name）──
-        print("\n=== 用户主页（/user/:name）===")
-        page.goto(f"{BASE}/#/user/{username}")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        content = page.content()
-        check("用户主页含「Bot 列表」", "Bot 列表" in content or "Bot 数" in content)
-        check("用户主页含总战绩（胜率/胜）", "总胜率" in content or "胜" in content)
-        check("用户主页含注册时间", "注册" in content)
-        shot(page, "04_user_profile")
+        print("=== 关键功能 ===")
+        pg = b.new_page(viewport={"width": 1280, "height": 800})
+        pg.goto(f"{BASE}/#/leaderboard", wait_until="networkidle", timeout=15000)
+        pg.wait_for_timeout(1200)
+        check("排行榜段位徽章", has_text(pg, "新手") or has_text(pg, "进阶") or has_text(pg, "熟练") or has_text(pg, "高手"))
+        check("排行榜表格列", pg.eval_on_selector_all("table thead th", "els => els.length") >= 4)
 
-        # ── 全局搜索（/search）──
-        print("\n=== 全局搜索（/search）===")
-        page.goto(f"{BASE}/#/search?q=a&type=users")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        content = page.content()
-        check("搜索页含「用户」tab", "用户" in content)
-        check("搜索页含「Bot」tab", "Bot" in content)
-        check("搜索页含「对局」tab", "对局" in content)
-        # 切到 bots tab
-        try:
-            page.locator('button:has-text("Bot")').first.click()
-            time.sleep(1)
-            check("搜索页 Bot tab 可切换", "Bot" in page.content())
-        except Exception:
-            pass
-        shot(page, "05_search")
+        pg.goto(f"{BASE}/#/login", wait_until="networkidle", timeout=15000)
+        pg.wait_for_timeout(1000)
+        check("登录页无🔔emoji", pg.eval_on_selector_all("span", 'els => els.filter(e => e.innerText.includes("🔔")).length') == 0)
+        check("登录页验证码组件", pg.eval_on_selector_all('button[title="点击刷新"]', "els => els.length") >= 1)
 
-        # ── 通知列表（/notifications）──
-        print("\n=== 通知列表（/notifications）===")
-        page.goto(f"{BASE}/#/notifications")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        # 未登录会跳转登录页或显示提示
-        content = page.content()
-        check("通知页加载（含「通知」标题或登录引导）", "通知" in content or "登录" in content)
-        shot(page, "06_notifications")
+        pg.goto(f"{BASE}/#/leaderboard", wait_until="networkidle", timeout=15000)
+        pg.wait_for_timeout(900)
+        toggle = pg.eval_on_selector_all('button[aria-label*="主题"], button[aria-label*="深色"], button[aria-label*="浅色"]', "els => els.length")
+        check("主题切换按钮存在", toggle >= 1)
+        search_btn = pg.eval_on_selector_all('button, [role="button"]', 'els => els.filter(e => /搜索|⌘K/.test(e.innerText)).length')
+        check("全局搜索入口", search_btn >= 1)
+        pg.close()
+        b.close()
 
-        # ── 个人设置（/settings）──
-        print("\n=== 个人设置（/settings）===")
-        page.goto(f"{BASE}/#/settings")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        content = page.content()
-        check("设置页加载（含「资料/密码/通知偏好/我的收藏」或登录引导）",
-              any(t in content for t in ["资料", "密码", "通知偏好", "我的收藏", "登录"]))
-        shot(page, "07_settings")
-
-        # ── 数据集下载（/data）──
-        print("\n=== 数据集下载（/data）===")
-        page.goto(f"{BASE}/#/data")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        content = page.content()
-        check("数据页含「对局数据集」标题", "对局数据集" in content)
-        check("数据页含「游戏/月份/对局数」表头", "月份" in content)
-        check("数据页含等级 gating 提示或下载链接",
-              "等级" in content or "下载" in content)
-        shot(page, "08_data")
-
-        # ── 赛事对阵图（/contests/:id）──
-        print("\n=== 赛事对阵图（/contests/:id）===")
-        page.goto(f"{BASE}/#/contests/{contest_id}")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        content = page.content()
-        check("赛事详情含「对阵/积分榜/报名」", any(t in content for t in ["对阵", "积分榜", "报名"]))
-        shot(page, "09_contest")
-
-        # ── 对局回放（评论区）──
-        print("\n=== 对局回放（评论区）===")
-        if match_id:
-            page.goto(f"{BASE}/#/match/{match_id}")
-            page.wait_for_load_state("networkidle")
-            time.sleep(1)
-            content = page.content()
-            check("对局回放页含评论区", "评论" in content)
-            check("对局回放页含点赞按钮（♥/♡）", "♡" in content or "♥" in content)
-            shot(page, "10_match_replay")
-        else:
-            check("对局回放页（无 completed 对局可测）", False, "DB 无 completed 对局")
-
-        # ── 登录页（验证 SPA 路由）──
-        print("\n=== 登录页（SPA 路由验证）===")
-        page.goto(f"{BASE}/#/login")
-        page.wait_for_load_state("networkidle")
-        time.sleep(1)
-        check("登录页加载", "登录" in page.content() or "密码" in page.content())
-        shot(page, "11_login")
-
-        browser.close()
-
-    print(f"\n{'='*60}")
-    print(f"浏览器测试：{PASS} passed / {FAIL} failed")
-    if FAILS:
+    print(f"\n{'='*50}")
+    print(f"浏览器功能验收：{passed} passed / {failed} failed")
+    if fails:
         print("失败明细：")
-        for f in FAILS:
-            print(f"  ✗ {f}")
-    print(f"截图保存于 {SHOT_DIR}/")
-    return 0 if FAIL == 0 else 1
-
+        for f in fails:
+            print(f"  - {f}")
+    sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

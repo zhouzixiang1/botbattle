@@ -298,7 +298,7 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     # 评论 + 点赞 + 浏览（PR-7）：对 phase0 的某场对局操作
     # 先发起一场对局拿 match_id
     u2 = ctx["user_names"][1]
-    rc = m._paced_challenge if hasattr(m, "_paced_challenge") else None
+    rc = _paced_challenge
     if rc:
         rr = rc(api, tok, {"my_bot_id": ctx["bots"][ctx["user_names"][0]]["holdem"],
                            "opponent_bot_id": ctx["bots"][u2]["holdem"], "game_id": "holdem", "hands": 8})
