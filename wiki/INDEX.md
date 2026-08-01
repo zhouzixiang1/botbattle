@@ -19,6 +19,7 @@
 | [Bot 详情页](#/wiki?slug=bot-detail) | Bot 档案/对局历史/对手战绩/评分曲线 |
 | [用户主页与搜索](#/wiki?slug=user-profile) | 用户档案/战绩/Bot 列表 + 全局搜索 + 资料编辑 |
 | [通知系统](#/wiki?slug=notifications) | 站内通知 + 邮件提醒（铃铛/列表/偏好） |
+| [社交](#/wiki?slug=social) | 关注用户 + 收藏 Bot |
 | [压测](#/wiki?slug=loadtest) | 大规模系统压测脚本（批量用户 + 全端点覆盖） |
 
 ## 本平台 vs Botzone（摘要）

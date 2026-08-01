@@ -1275,6 +1275,117 @@ class Store:
             ).fetchall()
             return [_row(r) for r in reversed(rows)]
 
+    # ── follows（关注关系）────────────────────────────────────
+    def follow(self, follower_id: int, followee_id: int) -> bool:
+        """关注；返回 True 表示新建关注，False 表示已存在。不能关注自己。"""
+        if follower_id == followee_id:
+            return False
+        with self._tx() as c:
+            existing = c.execute(
+                "SELECT 1 FROM follows WHERE follower_id=? AND followee_id=?",
+                (follower_id, followee_id),
+            ).fetchone()
+            if existing:
+                return False
+            c.execute(
+                "INSERT INTO follows(follower_id, followee_id, created_at) VALUES(?,?,?)",
+                (follower_id, followee_id, _now()),
+            )
+            return True
+
+    def unfollow(self, follower_id: int, followee_id: int) -> bool:
+        with self._tx() as c:
+            cur = c.execute(
+                "DELETE FROM follows WHERE follower_id=? AND followee_id=?",
+                (follower_id, followee_id),
+            )
+            return cur.rowcount > 0
+
+    def is_following(self, follower_id: int, followee_id: int) -> bool:
+        with self._tx() as c:
+            return c.execute(
+                "SELECT 1 FROM follows WHERE follower_id=? AND followee_id=?",
+                (follower_id, followee_id),
+            ).fetchone() is not None
+
+    def list_followers(self, user_id: int, *, limit: int = 50) -> list[dict]:
+        with self._tx() as c:
+            return [_row(r) for r in c.execute(
+                "SELECT u.id, u.username, u.display_name, f.created_at "
+                "FROM follows f JOIN users u ON f.follower_id=u.id "
+                "WHERE f.followee_id=? ORDER BY f.created_at DESC LIMIT ?",
+                (user_id, max(1, min(limit, 200))),
+            )]
+
+    def list_following(self, user_id: int, *, limit: int = 50) -> list[dict]:
+        with self._tx() as c:
+            return [_row(r) for r in c.execute(
+                "SELECT u.id, u.username, u.display_name, f.created_at "
+                "FROM follows f JOIN users u ON f.followee_id=u.id "
+                "WHERE f.follower_id=? ORDER BY f.created_at DESC LIMIT ?",
+                (user_id, max(1, min(limit, 200))),
+            )]
+
+    def follower_count(self, user_id: int) -> int:
+        with self._tx() as c:
+            return int(c.execute(
+                "SELECT COUNT(*) FROM follows WHERE followee_id=?", (user_id,)
+            ).fetchone()[0])
+
+    def following_count(self, user_id: int) -> int:
+        with self._tx() as c:
+            return int(c.execute(
+                "SELECT COUNT(*) FROM follows WHERE follower_id=?", (user_id,)
+            ).fetchone()[0])
+
+    # ── favorites（收藏 Bot）──────────────────────────────────
+    def favorite(self, user_id: int, bot_id: int) -> bool:
+        with self._tx() as c:
+            existing = c.execute(
+                "SELECT 1 FROM favorites WHERE user_id=? AND bot_id=?",
+                (user_id, bot_id),
+            ).fetchone()
+            if existing:
+                return False
+            c.execute(
+                "INSERT INTO favorites(user_id, bot_id, created_at) VALUES(?,?,?)",
+                (user_id, bot_id, _now()),
+            )
+            return True
+
+    def unfavorite(self, user_id: int, bot_id: int) -> bool:
+        with self._tx() as c:
+            cur = c.execute(
+                "DELETE FROM favorites WHERE user_id=? AND bot_id=?", (user_id, bot_id)
+            )
+            return cur.rowcount > 0
+
+    def is_favorite(self, user_id: int, bot_id: int) -> bool:
+        with self._tx() as c:
+            return c.execute(
+                "SELECT 1 FROM favorites WHERE user_id=? AND bot_id=?",
+                (user_id, bot_id),
+            ).fetchone() is not None
+
+    def list_favorites(self, user_id: int, *, limit: int = 50) -> list[dict]:
+        with self._tx() as c:
+            return [_row(r) for r in c.execute(
+                "SELECT b.id, b.name, b.display_name, b.game_id, "
+                "u.username AS owner_name, u.display_name AS owner_display, "
+                "r.rating, fav.created_at "
+                "FROM favorites fav JOIN bots b ON fav.bot_id=b.id "
+                "LEFT JOIN users u ON b.owner_id=u.id "
+                "LEFT JOIN ratings r ON r.bot_id=b.id "
+                "WHERE fav.user_id=? ORDER BY fav.created_at DESC LIMIT ?",
+                (user_id, max(1, min(limit, 200))),
+            )]
+
+    def favorite_count(self, bot_id: int) -> int:
+        with self._tx() as c:
+            return int(c.execute(
+                "SELECT COUNT(*) FROM favorites WHERE bot_id=?", (bot_id,)
+            ).fetchone()[0])
+
     # ── notifications ─────────────────────────────────────────
     def add_notification(
         self,

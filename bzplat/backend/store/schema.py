@@ -155,6 +155,27 @@ CREATE TABLE IF NOT EXISTS rating_history (
 );
 CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, id DESC);
 
+-- 关注关系（follower 关注 followee）
+CREATE TABLE IF NOT EXISTS follows (
+    follower_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    followee_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at      TEXT    NOT NULL,
+    PRIMARY KEY (follower_id, followee_id),
+    CHECK (follower_id <> followee_id)
+);
+CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee_id);
+CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower_id);
+
+-- 收藏 Bot（user 收藏 bot）
+CREATE TABLE IF NOT EXISTS favorites (
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    created_at      TEXT    NOT NULL,
+    PRIMARY KEY (user_id, bot_id)
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id);
+CREATE INDEX IF NOT EXISTS idx_favorites_bot ON favorites(bot_id);
+
 -- 站内通知：对局完成 / 被关注 / 赛事阶段变化 / 被评论等
 CREATE TABLE IF NOT EXISTS notifications (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

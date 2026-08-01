@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import PageStub from '../components/PageStub'
-import { apiGet, errMsg } from '../api'
+import { apiGet, apiJson, errMsg } from '../api'
+import { useAuth } from '../components/useAuth'
 import { gameLabel } from '../lib/games'
 
 /* ── 类型 ─────────────────────────────────────────────── */
@@ -159,6 +160,7 @@ function RatingChart({ points }: { points: RatingPoint[] }) {
 export default function BotDetail() {
   const { id } = useParams<{ id: string }>()
   const botId = Number(id)
+  const { user } = useAuth()
   const [profile, setProfile] = useState<BotProfile | null>(null)
   const [matches, setMatches] = useState<MatchRow[]>([])
   const [opponents, setOpponents] = useState<OpponentRow[]>([])
@@ -166,6 +168,8 @@ export default function BotDetail() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<'history' | 'opponents' | 'rating'>('history')
+  const [favorited, setFavorited] = useState(false)
+  const [favCount, setFavCount] = useState(0)
 
   useEffect(() => {
     if (!botId) return
@@ -184,7 +188,29 @@ export default function BotDetail() {
       })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
-  }, [botId])
+    // 收藏状态（登录后）
+    if (user) {
+      apiGet<{ favorited: boolean; favorite_count: number }>(
+        `/api/bots/${botId}/favorite-status`,
+      )
+        .then((fs) => {
+          setFavorited(fs.favorited)
+          setFavCount(fs.favorite_count)
+        })
+        .catch(() => {})
+    }
+  }, [botId, user])
+
+  function toggleFavorite() {
+    if (!user) return
+    const method = favorited ? 'DELETE' : 'POST'
+    apiJson(`/api/bots/${botId}/favorite`, method)
+      .then(() => {
+        setFavorited(!favorited)
+        setFavCount((c) => c + (favorited ? -1 : 1))
+      })
+      .catch((e) => setError(errMsg(e)))
+  }
 
   if (loading) {
     return (
@@ -249,6 +275,19 @@ export default function BotDetail() {
                 <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-500">已停用</span>
               )}
             </div>
+            {user && (
+              <button
+                type="button"
+                onClick={toggleFavorite}
+                className={`mt-2 rounded-lg px-3 py-1.5 text-xs font-medium ${
+                  favorited
+                    ? 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+                    : 'bg-brand-600 text-white hover:bg-brand-500'
+                }`}
+              >
+                {favorited ? '★ 已收藏' : '☆ 收藏'}（{favCount}）
+              </button>
+            )}
           </div>
 
           {/* 评分/战绩 */}

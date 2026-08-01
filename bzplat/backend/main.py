@@ -195,6 +195,7 @@ def create_app(
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer
+    app.state.notifier = notifier
     app.state.auto_matcher = auto_matcher
     app.state.runtime_ceiling = concurrent_ceiling()
 

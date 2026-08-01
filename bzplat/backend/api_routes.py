@@ -116,6 +116,85 @@ def user_profile(username: str, request: Request):
     return {"profile": p}
 
 
+@router.get("/api/users/{user_id}/followers")
+def user_followers(user_id: int, request: Request, limit: int = 50):
+    return {"followers": _store(request).list_followers(user_id, limit=limit)}
+
+
+@router.get("/api/users/{user_id}/following")
+def user_following(user_id: int, request: Request, limit: int = 50):
+    return {"following": _store(request).list_following(user_id, limit=limit)}
+
+
+@router.post("/api/users/{user_id}/follow")
+def follow_user(user_id: int, request: Request, user=Depends(require_user)):
+    store = _store(request)
+    target = store.get_user(user_id)
+    if not target:
+        raise HTTPException(404, "用户不存在")
+    if user["id"] == user_id:
+        raise HTTPException(400, "不能关注自己")
+    created = store.follow(user["id"], user_id)
+    # 关注时通知被关注者
+    notifier = getattr(request.app.state, "notifier", None)
+    if created and notifier is not None:
+        try:
+            me = store.get_user(user["id"])
+            notifier.notify(
+                user_id, type="followed",
+                title=f"{me.get('display_name') or me.get('username')} 关注了你",
+                body="",
+                link=f"/user/{me.get('username')}",
+            )
+        except Exception:
+            pass
+    return {"ok": True, "following": True, "created": created}
+
+
+@router.delete("/api/users/{user_id}/follow")
+def unfollow_user(user_id: int, request: Request, user=Depends(require_user)):
+    _store(request).unfollow(user["id"], user_id)
+    return {"ok": True, "following": False}
+
+
+@router.get("/api/users/{user_id}/follow-status")
+def follow_status(user_id: int, request: Request, user=Depends(require_user)):
+    store = _store(request)
+    return {
+        "following": store.is_following(user["id"], user_id),
+        "follower_count": store.follower_count(user_id),
+        "following_count": store.following_count(user_id),
+    }
+
+
+@router.post("/api/bots/{bot_id}/favorite")
+def favorite_bot(bot_id: int, request: Request, user=Depends(require_user)):
+    if not _store(request).get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
+    created = _store(request).favorite(user["id"], bot_id)
+    return {"ok": True, "favorited": True, "created": created}
+
+
+@router.delete("/api/bots/{bot_id}/favorite")
+def unfavorite_bot(bot_id: int, request: Request, user=Depends(require_user)):
+    _store(request).unfavorite(user["id"], bot_id)
+    return {"ok": True, "favorited": False}
+
+
+@router.get("/api/bots/{bot_id}/favorite-status")
+def favorite_status(bot_id: int, request: Request, user=Depends(require_user)):
+    store = _store(request)
+    return {
+        "favorited": store.is_favorite(user["id"], bot_id),
+        "favorite_count": store.favorite_count(bot_id),
+    }
+
+
+@router.get("/api/auth/me/favorites")
+def my_favorites(request: Request, limit: int = 50, user=Depends(require_user)):
+    return {"favorites": _store(request).list_favorites(user["id"], limit=limit)}
+
+
 @router.get("/api/users/{username}/bots")
 def user_bots(username: str, request: Request):
     """某用户的公开 Bot 列表（公开）。"""
