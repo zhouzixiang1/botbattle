@@ -27,6 +27,7 @@
 | [经验与等级](#/wiki?slug=xp-level) | XP 经验奖励 + Level 升级 + gating |
 | [数据集与站点配置](#/wiki?slug=matchpacks-site) | 对局数据集下载（gzip，等级 gating）+ 站点名/公告配置 |
 | [压测](#/wiki?slug=loadtest) | 大规模系统压测脚本（批量用户 + 全端点覆盖） |
+| [前端设计系统](UI_FOUNDATION.md) | Token 体系（OKLCH 双主题）+ 暗色模式 + 组件库规范 + 取材库 |
 
 ## 本平台 vs Botzone（摘要）
 

@@ -61,3 +61,5 @@ platform-ctl/
 .zcode/
 .claude/
 .e2e_botzone.db
+refs/ui-refs/
+browser_shots/

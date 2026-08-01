@@ -1,62 +1,166 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap");
 @import "tailwindcss";
+@import "tw-animate-css";
 
-/* 浅色主题：emerald 品牌 + 深绿扑克毡面。无紫色、无米色。 */
-@theme {
+/* 暗色模式：基于 .dark class（next-themes 在 <html> 上切换） */
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * 设计 token 体系（shadcn v4 OKLCH 双主题 + emerald 品牌）
+ * 浅色为默认主战场，暗色对等可用。无紫色、无米色（刻意规避 AI 默认审美）。
+ */
+:root {
+  --radius: 0.625rem;
+
+  /* 基础表面：纯白底 + 近黑文字（中性灰，无色相，干净） */
+  --background: oklch(0.99 0.002 247);
+  --foreground: oklch(0.21 0.034 264);
+
+  /* 卡片 / 弹层：略亮于背景的白 */
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0.034 264);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0.034 264);
+
+  /* 品牌 emerald：primary 用于主按钮 / 激活态 / 链接强调 */
+  --primary: oklch(0.62 0.15 162);
+  --primary-foreground: oklch(0.985 0.01 162);
+
+  /* 次要 / 静音 / 强调：低饱和中性绿灰 */
+  --secondary: oklch(0.97 0.012 162);
+  --secondary-foreground: oklch(0.3 0.04 162);
+  --muted: oklch(0.968 0.004 247);
+  --muted-foreground: oklch(0.55 0.02 247);
+  --accent: oklch(0.96 0.02 162);
+  --accent-foreground: oklch(0.3 0.06 162);
+
+  /* 危险 / 警告 / 成功 语义色 */
+  --destructive: oklch(0.58 0.22 25);
+  --destructive-foreground: oklch(0.985 0.01 25);
+  --warning: oklch(0.76 0.16 70);
+  --warning-foreground: oklch(0.27 0.06 70);
+  --success: oklch(0.62 0.15 162);
+
+  /* 边框 / 输入 / 聚焦环 */
+  --border: oklch(0.92 0.004 247);
+  --input: oklch(0.92 0.004 247);
+  --ring: oklch(0.62 0.15 162);
+
+  /* 图表色阶：emerald 系渐进 + amber 强调（用于段位曲线 / 胜率图） */
+  --chart-1: oklch(0.62 0.15 162);
+  --chart-2: oklch(0.5 0.12 180);
+  --chart-3: oklch(0.76 0.16 70);
+  --chart-4: oklch(0.55 0.18 145);
+  --chart-5: oklch(0.7 0.13 200);
+}
+
+.dark {
+  /* 暗色：深蓝灰底（非纯黑，留呼吸感）+ 近白文字 */
+  --background: oklch(0.16 0.015 264);
+  --foreground: oklch(0.97 0.005 247);
+
+  --card: oklch(0.2 0.018 264);
+  --card-foreground: oklch(0.97 0.005 247);
+  --popover: oklch(0.2 0.018 264);
+  --popover-foreground: oklch(0.97 0.005 247);
+
+  /* 品牌色在暗色下提亮一档，保证对比度 */
+  --primary: oklch(0.72 0.17 162);
+  --primary-foreground: oklch(0.16 0.03 162);
+
+  --secondary: oklch(0.27 0.02 264);
+  --secondary-foreground: oklch(0.97 0.005 247);
+  --muted: oklch(0.25 0.015 264);
+  --muted-foreground: oklch(0.71 0.02 247);
+  --accent: oklch(0.3 0.04 162);
+  --accent-foreground: oklch(0.95 0.02 162);
+
+  --destructive: oklch(0.7 0.19 22);
+  --destructive-foreground: oklch(0.97 0.01 22);
+  --warning: oklch(0.78 0.16 70);
+  --warning-foreground: oklch(0.2 0.05 70);
+  --success: oklch(0.72 0.17 162);
+
+  /* 暗色边框用白色低透明（v4 标准做法） */
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.72 0.17 162);
+
+  --chart-1: oklch(0.72 0.17 162);
+  --chart-2: oklch(0.65 0.13 180);
+  --chart-3: oklch(0.78 0.16 70);
+  --chart-4: oklch(0.65 0.18 145);
+  --chart-5: oklch(0.7 0.13 200);
+}
+
+/* 桥接：把语义变量映射到 Tailwind v4 的 --color-* 命名空间，使 bg-background / text-primary 等 utility 可用 */
+@theme inline {
   --font-sans: "DM Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-display: "Source Serif 4", "Noto Serif SC", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
-  /* 品牌 emerald 翡翠绿（与扑克桌同色系，浅色协调） */
-  --color-brand-50: #ecfdf5;
-  --color-brand-100: #d1fae5;
-  --color-brand-200: #a7f3d0;
-  --color-brand-300: #6ee7b7;
-  --color-brand-400: #34d399;
-  --color-brand-500: #10b981;
-  --color-brand-600: #059669;
-  --color-brand-700: #047857;
-  --color-brand-800: #065f46;
-  --color-brand-900: #064e3b;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
 
-  /* slate：浅色主题里用作中性色阶（50=最浅背景，900=最深文字） */
-  --color-slate-25: #fcfcfd;
-  --color-slate-50: #f8fafc;
-  --color-slate-100: #f1f5f9;
-  --color-slate-200: #e2e8f0;
-  --color-slate-300: #cbd5e1;
-  --color-slate-400: #94a3b8;
-  --color-slate-500: #64748b;
-  --color-slate-600: #475569;
-  --color-slate-700: #334155;
-  --color-slate-800: #1e293b;
-  --color-slate-900: #0f172a;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-success: var(--success);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
 
-  /* felt：扑克桌深绿毡面（仅牌桌用，保持深色） */
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* 扑克桌深绿毡面（仅牌桌用，保持深色，不随主题切换） */
   --color-felt-400: #1a6b4a;
   --color-felt-500: #0f4d38;
   --color-felt-600: #0a3628;
   --color-felt-700: #06241b;
 
-  --color-success-50: #ecfdf3;
-  --color-success-500: #12b76a;
-  --color-success-600: #039855;
-
-  --color-error-50: #fef3f2;
-  --color-error-500: #f04438;
-  --color-error-600: #d92d20;
-
-  --color-warning-50: #fffaeb;
-  --color-warning-500: #f79009;
+  /* 段位 / 状态语义色（保留旧别名，供 tiers.ts 等渐进迁移） */
+  --color-brand-50: oklch(0.97 0.02 162);
+  --color-brand-100: oklch(0.93 0.05 162);
+  --color-brand-200: oklch(0.87 0.09 162);
+  --color-brand-300: oklch(0.78 0.12 162);
+  --color-brand-400: oklch(0.7 0.14 162);
+  --color-brand-500: oklch(0.62 0.15 162);
+  --color-brand-600: oklch(0.54 0.14 162);
+  --color-brand-700: oklch(0.46 0.11 162);
+  --color-brand-800: oklch(0.38 0.09 162);
+  --color-brand-900: oklch(0.3 0.07 162);
 
   --shadow-soft: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.1);
   --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-lift: 0 4px 6px -1px rgba(15, 23, 42, 0.1), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
 }
 
 @layer base {
   *,
   ::after,
   ::before {
-    border-color: var(--color-slate-200);
+    border-color: var(--border);
   }
   html,
   body,
@@ -64,23 +168,44 @@
     margin: 0;
     min-height: 100%;
   }
+  html {
+    scroll-padding-top: 5rem;
+  }
   body {
     font-family: var(--font-sans);
-    /* 浅色基底：极浅灰 + 顶部一抹 emerald 微光 */
-    background:
-      radial-gradient(ellipse 120% 80% at 50% -20%, rgba(16, 185, 129, 0.10), transparent 55%),
-      linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
-    color: var(--color-slate-800);
+    background: var(--background);
+    color: var(--color-foreground);
     -webkit-font-smoothing: antialiased;
+    /* 浅色：顶部一抹 emerald 微光；暗色：纯净深底 */
+    background-image: radial-gradient(
+      ellipse 120% 80% at 50% -20%,
+      oklch(0.62 0.15 162 / 0.08),
+      transparent 55%
+    );
+  }
+  .dark body {
+    background-image: radial-gradient(
+      ellipse 120% 80% at 50% -20%,
+      oklch(0.72 0.17 162 / 0.06),
+      transparent 55%
+    );
   }
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
   }
+  /* 移动端防聚焦缩放 */
+  @media screen and (max-width: 767px) {
+    input,
+    select,
+    textarea {
+      font-size: 16px !important;
+    }
+  }
 }
 
 @layer components {
-  /* 扑克桌毡面：深绿渐变 + 内阴影（深色，不随浅色主题改变） */
+  /* 扑克桌毡面：深绿渐变 + 内阴影（深色，不随主题改变） */
   .felt-table {
     background: linear-gradient(160deg, #1a6b4a 0%, #0f4d38 50%, #0a3628 100%);
     box-shadow:
@@ -95,11 +220,20 @@
     letter-spacing: -0.02em;
   }
 
-  /* 浅色卡片：白底 + 柔和阴影 + 细边框 */
+  /* 浅色卡片（过渡用，新代码请用 <Card> 组件） */
   .card {
-    background: #ffffff;
-    border: 1px solid var(--color-slate-200);
-    border-radius: 0.75rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     box-shadow: var(--shadow-card);
   }
+}
+
+/* 工具类：隐藏滚动条 */
+@utility no-scrollbar {
+  &::-webkit-scrollbar {
+    display: none;
+  }
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
