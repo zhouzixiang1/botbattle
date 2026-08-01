@@ -1192,6 +1192,27 @@ class Store:
                 row = c.execute("SELECT COUNT(*) FROM matches").fetchone()
             return int(row[0]) if row else 0
 
+    def recover_orphan_matches(self) -> int:
+        """启动时清理孤儿对局：把残留的 status=running（无对应内存协程）标 aborted。
+
+        服务非正常退出后，DB 里 running 记录的内存 Task/Future 已丢失（尤其
+        人类对局的 _human_turns），不清理会永久卡 running、泄漏并发与活跃用户计数。
+        返回受影响行数。
+        """
+        from bzplat.backend.store.schema import STATUS_ABORTED
+
+        with self._tx() as c:
+            row = c.execute("SELECT COUNT(*) FROM matches WHERE status='running'").fetchone()
+            n = int(row[0]) if row else 0
+            if n == 0:
+                return 0
+            c.execute(
+                "UPDATE matches SET status=?, reason='orphan_after_restart', "
+                "ended_at=datetime('now') WHERE status='running'",
+                (STATUS_ABORTED,),
+            )
+            return n
+
     def upsert_rating(
         self,
         bot_id: int,

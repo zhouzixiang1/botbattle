@@ -61,6 +61,8 @@
 - `completed`：引擎跑完，已写 `winner / earnings / replay`。
 - `aborted`：异常（容器 OOM、双方崩溃等）。
 
+> **孤儿对局自愈**：服务非正常退出（崩溃/重启）后，DB 里残留的 `running` 记录已无对应内存协程（尤其人类对局的 `_human_turns` Future）。服务启动时 `lifespan` 调 `Store.recover_orphan_matches()`，把所有残留 `running` 统一标为 `aborted`（`reason=orphan_after_restart`），避免永久卡死与并发/活跃用户计数泄漏。
+
 SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看），之后逐事件广播；
 空闲时 25 秒发一次 `ping` 保活；`match_end` / `error` 后流结束。回放事件流增量落盘
 （`settle` / `hand_start` / `match_end` / `move` / `match_start` 或每 5 个事件）。

@@ -134,6 +134,33 @@ def test_matches_replays_pair_stats(tmp_path):
     s.upsert_pair_stats(a["id"], b["id"], 1.5, 0.1, 2.0, 3)
 
 
+def test_recover_orphan_matches(tmp_path):
+    """服务重启后清理孤儿 running 对局：标 aborted，返回受影响数。"""
+    s = _store(tmp_path)
+    u = s.create_user("gina", "g@ex.com", hash_password("password1"))
+    a = s.create_bot(owner_id=u["id"], name="bot_a")
+    b = s.create_bot(owner_id=u["id"], name="bot_b")
+    # 3 场：pending / running / completed
+    s.create_match("m_pending", a["id"], b["id"], owner_id=u["id"])
+    s.create_match("m_running", a["id"], b["id"], owner_id=u["id"])
+    s.create_match("m_done", a["id"], b["id"], owner_id=u["id"])
+    s.update_match("m_running", status="running")
+    s.update_match("m_done", status="completed", winner=0)
+
+    # 重启清理：只有 running 被标 aborted
+    recovered = s.recover_orphan_matches()
+    assert recovered == 1
+    assert s.get_match("m_running")["status"] == "aborted"
+    assert s.get_match("m_running")["reason"] == "orphan_after_restart"
+    assert s.get_match("m_running")["ended_at"] is not None
+    # 其它状态不动
+    assert s.get_match("m_pending")["status"] == "pending"
+    assert s.get_match("m_done")["status"] == "completed"
+
+    # 幂等：再清理一次返回 0（已无 running）
+    assert s.recover_orphan_matches() == 0
+
+
 def test_contests_entries_pairings(tmp_path):
     s = _store(tmp_path)
     org = s.create_user("org1", "o@ex.com", hash_password("password1"), role="organizer")
