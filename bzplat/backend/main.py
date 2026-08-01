@@ -180,6 +180,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # 启动时清理孤儿对局：上次进程非正常退出时，DB 里残留的 status=running
+        # 记录（含人类对局）已无对应内存协程/Future，永久卡死。统一标 aborted。
+        recovered = store.recover_orphan_matches()
+        if recovered:
+            logger.warning(
+                "启动清理孤儿对局 %d 场（标记为 aborted）", recovered
+            )
         task = asyncio.create_task(auto_matcher.loop(), name="auto-match")
         _app.state.auto_matcher = auto_matcher
         _app.state._auto_match_task = task
