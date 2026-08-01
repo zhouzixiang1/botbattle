@@ -1,11 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import MatchBoard from '../components/MatchBoard'
-import { type RawEvent } from '../components/poker/useMatchState'
-import { apiGet } from '../api'
-import { gameLabel, normalizeGameId } from '../lib/games'
+import { Radio, ChevronRight, ChevronDown, Terminal, ArrowRight } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import MatchBoard from '@/components/MatchBoard'
+import { type RawEvent } from '@/components/poker/useMatchState'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Loading } from '@/components/ui/status'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { apiGet } from '@/api'
+import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
 
+const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
+  idle: 'secondary',
+  connecting: 'secondary',
+  live: 'default',
+  match_end: 'outline',
+  error: 'destructive',
+}
 const STATUS_LABEL: Record<string, string> = {
   idle: '空闲',
   connecting: '连接中',
@@ -69,69 +82,70 @@ export default function ArenaWatch() {
     if (showLog) endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [events, showLog])
 
+  const GameIcon = gameIcon(gameId)
+
   if (!id) {
     return (
       <PageStub title="观赛">
-        <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-100 to-sky-50 px-4 py-16 text-center text-slate-700">
-          <p className="text-lg font-medium tracking-wide">对局观赛区</p>
-          <p className="mt-2 text-sm text-slate-500">选择对局后可在此 SSE 实时观战</p>
-          <p className="mt-4">
-            <Link to="/history" className="text-brand-600 hover:text-brand-700">
-              从对局历史选择 →
-            </Link>
-          </p>
-        </div>
+        <Card className="mt-4 overflow-hidden border-primary/20">
+          <CardContent className="flex flex-col items-center gap-3 bg-gradient-to-br from-primary/5 via-card to-card px-4 py-16 text-center">
+            <Radio className="size-10 text-primary/60" />
+            <p className="text-lg font-medium tracking-wide text-foreground">对局观赛区</p>
+            <p className="text-sm text-muted-foreground">选择对局后可在此 SSE 实时观战</p>
+            <Button asChild variant="outline" size="sm" className="mt-2 gap-1.5">
+              <Link to="/history">从对局历史选择<ArrowRight className="size-3.5" /></Link>
+            </Button>
+          </CardContent>
+        </Card>
       </PageStub>
     )
   }
 
   return (
     <PageStub title="实时观赛">
-      <p className="mb-4 text-sm text-slate-400">
-        <span className="font-mono text-brand-300">{id}</span>
-        {' · '}
-        {gameLabel(gameId)}
-        {' · '}状态{' '}
-        <span className={status === 'error' ? 'text-error-400' : 'text-brand-300'}>
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
+        <span className="font-mono text-xs text-muted-foreground">{id}</span>
+        <Badge variant="secondary" className="gap-1">
+          <GameIcon className="size-3" />
+          {gameLabel(gameId)}
+        </Badge>
+        <Badge variant={STATUS_VARIANT[status] ?? 'secondary'} className="gap-1">
+          {status === 'live' && <span className="size-1.5 animate-pulse rounded-full bg-current" />}
           {STATUS_LABEL[status] ?? status}
-        </span>
-      </p>
+        </Badge>
+      </div>
 
       {events.length === 0 ? (
-        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-16 text-center text-slate-500">
-          {status === 'connecting' ? '连接中…' : '暂无事件'}
-        </div>
+        <Loading text={status === 'connecting' ? '连接中…' : '暂无事件'} />
       ) : (
         <MatchBoard gameId={gameId} events={events} revealMode="all" />
       )}
 
-      <div className="mt-4">
-        <button
-          type="button"
-          onClick={() => setShowLog((v) => !v)}
-          className="text-xs text-slate-500 hover:text-slate-700"
-        >
-          {showLog ? '▼' : '▶'} 原始事件流（{events.length}）
-        </button>
-        {showLog && (
-          <div className="mt-2 max-h-80 overflow-y-auto rounded-lg bg-slate-900/60 p-3 font-mono text-xs text-white/70">
+      {/* 原始事件流（折叠） */}
+      <Collapsible open={showLog} onOpenChange={setShowLog} className="mt-4">
+        <CollapsibleTrigger asChild>
+          <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground">
+            {showLog ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+            <Terminal className="size-3.5" />
+            原始事件流（{events.length}）
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="mt-2 max-h-80 overflow-y-auto rounded-lg border border-border bg-muted/40 p-3 font-mono text-xs">
             {events.map((ev, i) => (
-              <div key={i} className="border-b border-white/5 py-1">
-                <span className="mr-2 text-brand-200">{String(ev.type || '?')}</span>
-                <span className="break-all">{JSON.stringify(ev)}</span>
+              <div key={i} className="border-b border-border/50 py-1">
+                <span className="mr-2 font-semibold text-primary">{String(ev.type || '?')}</span>
+                <span className="break-all text-muted-foreground">{JSON.stringify(ev)}</span>
               </div>
             ))}
             <div ref={endRef} />
           </div>
-        )}
-      </div>
+        </CollapsibleContent>
+      </Collapsible>
 
-      <Link
-        className="mt-4 inline-block text-sm text-brand-600 hover:text-brand-700"
-        to={`/match/${id}`}
-      >
-        查看详情页 →
-      </Link>
+      <Button asChild variant="ghost" size="sm" className="mt-4 gap-1.5">
+        <Link to={`/match/${id}`}>查看详情页<ArrowRight className="size-3.5" /></Link>
+      </Button>
     </PageStub>
   )
 }
