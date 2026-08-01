@@ -1,9 +1,21 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { apiGet, errMsg } from '../api'
-import { GAMES, gameLabel, type GameId } from '../lib/games'
-import { tierFor, trendDelta } from '../lib/tiers'
+import { TrendingUp, TrendingDown, Minus, Trophy } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { Card } from '@/components/ui/card'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { TierBadge } from '@/components/tier-badge'
+import { apiGet, errMsg } from '@/api'
+import { GAMES, gameLabel, gameIcon, type GameId } from '@/lib/games'
+import { trendDelta } from '@/lib/tiers'
 
 interface Row {
   bot_id: number
@@ -29,25 +41,28 @@ interface Row {
 export default function Leaderboard() {
   const [rows, setRows] = useState<Row[]>([])
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
   const [gameId, setGameId] = useState<GameId | ''>('holdem')
 
   useEffect(() => {
+    setLoading(true)
     const q = gameId ? `?game_id=${encodeURIComponent(gameId)}` : ''
     apiGet<{ leaderboard: Row[] }>(`/api/leaderboard${q}`)
       .then((d) => setRows(d.leaderboard || []))
       .catch((e) => setError(errMsg(e)))
+      .finally(() => setLoading(false))
   }, [gameId])
 
   return (
     <PageStub title="排行榜">
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <p className="text-sm text-slate-400">Glicko-2 评分（按游戏过滤）。</p>
-        <label className="ml-auto text-sm text-slate-500">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">Glicko-2 评分（按游戏过滤）</p>
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
           <select
             value={gameId}
             onChange={(e) => setGameId(e.target.value as GameId | '')}
-            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+            className="h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           >
             <option value="">全部</option>
             {GAMES.map((g) => (
@@ -58,84 +73,111 @@ export default function Leaderboard() {
           </select>
         </label>
       </div>
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
-      <div className="overflow-x-auto rounded-xl border border-slate-200">
-        <table className="w-full min-w-[40rem] text-left text-sm">
-          <thead className="bg-white text-xs uppercase tracking-wide text-slate-400">
-            <tr>
-              <th className="px-3 py-2.5">#</th>
-              <th className="px-3 py-2.5">Bot</th>
-              <th className="px-3 py-2.5">游戏</th>
-              <th className="px-3 py-2.5">所有者</th>
-              <th className="px-3 py-2.5">段位</th>
-              <th className="px-3 py-2.5">Rating</th>
-              <th className="px-3 py-2.5">战绩</th>
-              <th className="px-3 py-2.5">平台</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-700/60">
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="px-3 py-8 text-center text-slate-500">
-                  暂无数据
-                </td>
-              </tr>
+
+      {error && <ErrorMsg msg={error} className="mb-3" />}
+
+      <Card>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-10">#</TableHead>
+              <TableHead>Bot</TableHead>
+              <TableHead className="hidden md:table-cell">游戏</TableHead>
+              <TableHead className="hidden lg:table-cell">所有者</TableHead>
+              <TableHead>段位</TableHead>
+              <TableHead>Rating</TableHead>
+              <TableHead className="hidden sm:table-cell">战绩</TableHead>
+              <TableHead className="hidden xl:table-cell">平台</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading ? (
+              <TableRow>
+                <TableCell colSpan={8}>
+                  <Loading />
+                </TableCell>
+              </TableRow>
+            ) : rows.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={8}>
+                  <EmptyState text="暂无数据" icon={<Trophy className="size-7 opacity-40" />} />
+                </TableCell>
+              </TableRow>
             ) : (
-              rows.map((r, i) => (
-                <tr key={r.bot_id} className="bg-white hover:bg-slate-100/60">
-                  <td className="px-3 py-2.5 text-slate-500">{i + 1}</td>
-                  <td className="px-3 py-2.5 font-medium text-slate-800">
-                    <Link to={`/bot/${r.bot_id}`} className="hover:text-brand-600">
-                      {r.bot_display || r.bot_name || `#${r.bot_id}`}
-                    </Link>
-                  </td>
-                  <td className="px-3 py-2.5 text-slate-500">{gameLabel(r.game_id)}</td>
-                  <td className="px-3 py-2.5">
-                    {r.owner_name ? (
+              rows.map((r, i) => {
+                const td = trendDelta(r.rating_delta)
+                const GameIcon = gameIcon(r.game_id)
+                return (
+                  <TableRow key={r.bot_id}>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {i + 1}
+                    </TableCell>
+                    <TableCell>
                       <Link
-                        to={`/user/${encodeURIComponent(r.owner_name)}`}
-                        className="text-brand-600 hover:text-brand-700"
+                        to={`/bot/${r.bot_id}`}
+                        className="font-medium text-foreground hover:text-primary"
                       >
-                        {r.owner_name}
+                        {r.bot_display || r.bot_name || `#${r.bot_id}`}
                       </Link>
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5">
-                    {(() => {
-                      const t = tierFor(r.rating)
-                      return (
-                        <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${t.bg} ${t.color}`}>
-                          {r.tier_name || t.name}
+                    </TableCell>
+                    <TableCell className="hidden md:table-cell">
+                      <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                        <GameIcon className="size-3.5" />
+                        {gameLabel(r.game_id)}
+                      </span>
+                    </TableCell>
+                    <TableCell className="hidden lg:table-cell">
+                      {r.owner_name ? (
+                        <Link
+                          to={`/user/${encodeURIComponent(r.owner_name)}`}
+                          className="text-primary hover:underline"
+                        >
+                          {r.owner_name}
+                        </Link>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <TierBadge rating={r.rating} label={r.tier_name} />
+                    </TableCell>
+                    <TableCell>
+                      <span className="font-mono font-semibold text-primary">
+                        {Number(r.rating).toFixed(1)}
+                      </span>
+                      {td && (
+                        <span
+                          className={`ml-1.5 inline-flex items-center text-xs font-medium ${
+                            td.up ? 'text-success' : 'text-destructive'
+                          }`}
+                        >
+                          {td.up ? (
+                            <TrendingUp className="size-3" />
+                          ) : (
+                            <TrendingDown className="size-3" />
+                          )}
+                          {td.abs.toFixed(0)}
                         </span>
-                      )
-                    })()}
-                  </td>
-                  <td className="px-3 py-2.5 font-mono text-brand-700">
-                    {Number(r.rating).toFixed(1)}
-                    {(() => {
-                      const td = trendDelta(r.rating_delta)
-                      if (!td) return null
-                      return (
-                        <span className={`ml-1 text-xs ${td.up ? 'text-success-600' : 'text-error-600'}`}>
-                          {td.up ? '▲' : '▼'} {td.abs.toFixed(0)}
-                        </span>
-                      )
-                    })()}
-                  </td>
-                  <td className="px-3 py-2.5 text-slate-400">
-                    {r.wins ?? 0}W / {r.losses ?? 0}L / {r.draws ?? 0}D
-                  </td>
-                  <td className="px-3 py-2.5 text-xs text-slate-400">
-                    {r.format}/{r.os}-{r.arch}
-                  </td>
-                </tr>
-              ))
+                      )}
+                      {r.rating_delta === 0 && (
+                        <Minus className="ml-1.5 inline size-3 text-muted-foreground" />
+                      )}
+                    </TableCell>
+                    <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
+                      <span className="text-success">{r.wins ?? 0}</span>W{' '}
+                      <span className="text-destructive">{r.losses ?? 0}</span>L{' '}
+                      {r.draws ?? 0}D
+                    </TableCell>
+                    <TableCell className="hidden font-mono text-xs text-muted-foreground xl:table-cell">
+                      {r.format}/{r.os}-{r.arch}
+                    </TableCell>
+                  </TableRow>
+                )
+              })
             )}
-          </tbody>
-        </table>
-      </div>
+          </TableBody>
+        </Table>
+      </Card>
     </PageStub>
   )
 }

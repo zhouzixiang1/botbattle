@@ -1,8 +1,20 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import PageStub from '../components/PageStub'
-import { apiGet, errMsg } from '../api'
-import { GAMES, gameLabel } from '../lib/games'
+import { Heart, Eye, Flame, ArrowRight, Swords } from 'lucide-react'
+import PageStub from '@/components/PageStub'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { apiGet, errMsg } from '@/api'
+import { GAMES, gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
 
 interface Match {
   id: string
@@ -23,51 +35,54 @@ interface Match {
   owner_id?: number | null
 }
 
-// 对局类型徽章（对标 botzone：区分用户挑战/后台/人类/赛事）
-function matchTypeBadge(m: Match): { label: string; cls: string } | null {
-  const t = m.match_type
-  switch (t) {
-    case 'ladder':
-      return { label: '后台', cls: 'bg-sky-50 text-sky-700' }
-    case 'human':
-      return { label: '人类', cls: 'bg-violet-50 text-violet-700' }
-    case 'contest':
-      return { label: '赛事', cls: 'bg-amber-50 text-amber-700' }
-    case 'table':
-      return { label: '桌台', cls: 'bg-slate-100 text-slate-600' }
-    case 'challenge':
-      return { label: '挑战', cls: 'bg-emerald-50 text-emerald-700' }
-    default:
-      return null
-  }
-}
-
 export default function Home() {
   const [matches, setMatches] = useState<Match[]>([])
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
   const [gameId, setGameId] = useState('')
 
   useEffect(() => {
-    const q = gameId
-      ? `?limit=30&game_id=${encodeURIComponent(gameId)}`
-      : '?limit=30'
+    setLoading(true)
+    const q = gameId ? `?limit=30&game_id=${encodeURIComponent(gameId)}` : '?limit=30'
     apiGet<{ matches: Match[] }>(`/api/matches${q}`)
       .then((d) => setMatches(d.matches || []))
       .catch((e) => setError(errMsg(e)))
+      .finally(() => setLoading(false))
   }, [gameId])
 
   return (
     <PageStub title="最新对局">
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <p className="text-sm text-slate-400">
-          发起挑战或参加比赛后，可在此查看进行中与已完成的对局。
-        </p>
-        <label className="ml-auto text-sm text-slate-500">
+      {/* Hero 区 */}
+      <Card className="mb-6 overflow-hidden border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card">
+        <CardContent className="flex flex-col items-start gap-4 py-6 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1.5">
+            <h2 className="font-display text-2xl font-bold tracking-tight text-foreground">
+              多游戏 Bot 竞赛平台
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              上传你的 Bot，在沙箱中对战。支持德州扑克 · 五子棋 · 点格棋，提供观赛、回放与 Glicko-2 排行榜。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {GAMES.map((g) => (
+              <Badge key={g.id} variant="secondary" className="gap-1.5 px-2.5 py-1">
+                <g.icon className="size-3.5" />
+                {g.label}
+              </Badge>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 筛选 */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-muted-foreground">进行中与已完成的对局</p>
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
           <select
             value={gameId}
             onChange={(e) => setGameId(e.target.value)}
-            className="ml-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-slate-700"
+            className="h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           >
             <option value="">全部</option>
             {GAMES.map((g) => (
@@ -78,74 +93,103 @@ export default function Home() {
           </select>
         </label>
       </div>
-      {error && <p className="mb-3 text-sm text-error-500">{error}</p>}
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-        <table className="min-w-full text-left text-sm">
-          <thead className="border-b border-slate-200 text-slate-400">
-            <tr>
-              <th className="px-4 py-3">时间</th>
-              <th className="px-4 py-3">游戏</th>
-              <th className="px-4 py-3">对阵</th>
-              <th className="px-4 py-3">状态</th>
-              <th className="px-4 py-3">进度</th>
-              <th className="px-4 py-3">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {matches.map((m) => (
-              <tr key={m.id} className="border-b border-slate-200">
-                <td className="px-4 py-3 text-slate-400">{m.created_at || '—'}</td>
-                <td className="px-4 py-3">
-                  {gameLabel(m.game_id)}
-                  {(() => {
-                    const b = matchTypeBadge(m)
-                    return b ? (
-                      <span className={`ml-1 inline-block rounded-full px-1.5 py-0.5 text-[10px] font-medium ${b.cls}`}>
-                        {b.label}
-                      </span>
-                    ) : null
-                  })()}
-                </td>
-                <td className="px-4 py-3 text-slate-700">
-                  <Link to={`/bot/${m.bot_a_id}`} className="hover:text-brand-600">
-                    {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
-                  </Link>{' '}
-                  vs{' '}
-                  <Link to={`/bot/${m.bot_b_id}`} className="hover:text-brand-600">
-                    {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
-                  </Link>
-                </td>
-                <td className="px-4 py-3">{m.status}</td>
-                <td className="px-4 py-3">
-                  {m.game_id === 'holdem' || !m.game_id
-                    ? `${m.hands_played ?? 0}/${m.total_hands ?? 70}`
-                    : `${m.hands_played ?? 0} 步`}
-                </td>
-                <td className="space-x-2 px-4 py-3">
-                  {(m.status === 'pending' || m.status === 'running') && (
-                    <Link className="text-brand-700 hover:underline" to={`/watch/${m.id}`}>
-                      观赛
-                    </Link>
-                  )}
-                  <Link className="text-slate-600 hover:underline" to={`/match/${m.id}`}>
-                    详情
-                  </Link>
-                </td>
-              </tr>
-            ))}
-            {!matches.length && !error && (
-              <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                  暂无对局。去{' '}
-                  <Link to="/challenge" className="text-brand-700">
-                    发起挑战
-                  </Link>
-                </td>
-              </tr>
+
+      {error && <ErrorMsg msg={error} className="mb-3" />}
+
+      <Card>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>时间</TableHead>
+              <TableHead>游戏</TableHead>
+              <TableHead>对阵</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>进度</TableHead>
+              <TableHead className="text-right">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading ? (
+              <TableRow>
+                <TableCell colSpan={6}>
+                  <Loading />
+                </TableCell>
+              </TableRow>
+            ) : matches.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6}>
+                  <EmptyState
+                    text="暂无对局"
+                    icon={<Swords className="size-7 opacity-40" />}
+                  />
+                </TableCell>
+              </TableRow>
+            ) : (
+              matches.map((m) => {
+                const tb = matchTypeBadge(m.match_type)
+                const GameIcon = gameIcon(m.game_id)
+                return (
+                  <TableRow key={m.id}>
+                    <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
+                      {m.created_at || '—'}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <GameIcon className="size-3.5 text-muted-foreground" />
+                        <span className="text-sm">{gameLabel(m.game_id)}</span>
+                        {tb && (
+                          <Badge variant="outline" className={`text-[10px] ${tb.cls}`}>
+                            {tb.label}
+                          </Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5 text-sm">
+                        <Link to={`/bot/${m.bot_a_id}`} className="font-medium text-foreground hover:text-primary">
+                          {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
+                        </Link>
+                        <span className="text-muted-foreground">vs</span>
+                        <Link to={`/bot/${m.bot_b_id}`} className="font-medium text-foreground hover:text-primary">
+                          {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
+                        </Link>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={m.status === 'completed' || m.status === 'finished' ? 'default' : m.status === 'aborted' ? 'destructive' : 'secondary'} className="text-[10px]">
+                        {m.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {m.game_id === 'holdem' || !m.game_id
+                        ? `${m.hands_played ?? 0}/${m.total_hands ?? 70}`
+                        : `${m.hands_played ?? 0} 步`}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-2">
+                        {(m.status === 'pending' || m.status === 'running') && (
+                          <Link
+                            className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:underline"
+                            to={`/watch/${m.id}`}
+                          >
+                            观赛
+                          </Link>
+                        )}
+                        <Link
+                          className="inline-flex items-center gap-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                          to={`/match/${m.id}`}
+                        >
+                          详情 <ArrowRight className="size-3" />
+                        </Link>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )
+              })
             )}
-          </tbody>
-        </table>
-      </div>
+          </TableBody>
+        </Table>
+      </Card>
 
       <LikedTopMatches />
     </PageStub>
@@ -173,21 +217,37 @@ function LikedTopMatches() {
   }, [])
   if (matches.length === 0) return null
   return (
-    <div className="mt-6">
-      <h3 className="mb-2 text-sm font-semibold text-slate-700">🔥 热门对局（点赞榜）</h3>
-      <ul className="space-y-1.5">
+    <Card className="mt-6">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Flame className="size-4 text-amber-500" />
+          热门对局（点赞榜）
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
         {matches.map((m) => (
-          <li key={m.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-sm">
-            <Link to={`/match/${encodeURIComponent(m.id)}`} className="text-slate-700 hover:text-brand-600">
+          <Link
+            key={m.id}
+            to={`/match/${encodeURIComponent(m.id)}`}
+            className="flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm transition-colors hover:bg-accent"
+          >
+            <span className="font-medium text-foreground">
               {m.bot_a_display || m.bot_a_name} vs {m.bot_b_display || m.bot_b_name}
-            </Link>
-            <span className="rounded-full bg-brand-50 px-1.5 text-[10px] text-brand-700">{gameLabel(m.game_id)}</span>
-            <span className="ml-auto text-xs text-slate-400">
-              ♥ {m.likes_count} · 👁 {m.views_count}
             </span>
-          </li>
+            <Badge variant="outline" className="text-[10px]">
+              {gameLabel(m.game_id)}
+            </Badge>
+            <span className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <Heart className="size-3 text-destructive" /> {m.likes_count}
+              </span>
+              <span className="flex items-center gap-1">
+                <Eye className="size-3" /> {m.views_count}
+              </span>
+            </span>
+          </Link>
         ))}
-      </ul>
-    </div>
+      </CardContent>
+    </Card>
   )
 }
