@@ -9,9 +9,16 @@ export const SPEEDS = [
 ] as const
 
 /**
+ * 缓冲区上限：实时观赛长对局（如 70 手德州，单局事件可达数百到上千条）时，
+ * 防止 buffer 无界增长导致 append 的 O(n) 全量复制累积成 O(n²)、最终 OOM。
+ * 超过时丢弃头部最旧事件并相应平移 stepIdx（直播跟随态 stepIdx=-1 不受影响）。
+ */
+const MAX_BUFFER = 4000
+
+/**
  * 定速回放/直播缓冲 hook。
  *
- * - `buffer`：事件缓冲区（调用方追加，如 SSE 推送或一次性 replay）。
+ * - `buffer`：事件缓冲区（调用方追加，如 SSE 推送或一次性 replay）；超过 MAX_BUFFER 丢最旧。
  * - `stepIdx`：渲染游标（-1 = 跟随末尾/直播）。
  * - `playing`：是否自动播放（按 SPEEDS[speedIdx].ms 定时步进）。
  *
@@ -34,17 +41,20 @@ export function usePlayback(initialSpeedIdx: number = 1) {
   // 落后步数（直播场景，buffer 比游标多多少）
   const lag = atLive ? 0 : Math.max(0, total - 1 - cur)
 
-  /** 追加事件到缓冲区（直播模式自动跟随） */
+  /** 追加事件到缓冲区（直播模式自动跟随）；超过 MAX_BUFFER 丢最旧并平移游标。 */
   const append = useCallback((ev: unknown | unknown[]) => {
+    const inc = Array.isArray(ev) ? ev : [ev]
     setBuffer((prev) => {
-      const inc = Array.isArray(ev) ? ev : [ev]
-      return [...prev, ...inc]
+      const next = prev.length + inc.length > MAX_BUFFER
+        ? [...prev.slice(-(MAX_BUFFER - inc.length)), ...inc]
+        : [...prev, ...inc]
+      return next
     })
   }, [])
 
-  /** 一次性设置全部缓冲（回放模式） */
+  /** 一次性设置全部缓冲（回放模式）；同样受 MAX_BUFFER 约束（取末尾）。 */
   const setAll = useCallback((evs: unknown[]) => {
-    setBuffer(evs)
+    setBuffer(evs.length > MAX_BUFFER ? evs.slice(-MAX_BUFFER) : evs)
   }, [])
 
   /** 清空 */
@@ -62,23 +72,23 @@ export function usePlayback(initialSpeedIdx: number = 1) {
     setStepIdx(idx)
   }, [])
 
-  /** 步进 ±n */
+  /** 步进 ±n（直播跟随态时先锚定到当前末尾再退/进） */
   const step = useCallback((delta: number) => {
     setPlaying(false)
     setStepIdx((s) => {
-      const base = s < 0 ? total - 1 : s
-      return Math.max(0, Math.min(total - 1, base + delta))
+      const base = s < 0 ? Math.max(0, total - 1) : s
+      return Math.max(0, Math.min(Math.max(0, total - 1), base + delta))
     })
   }, [total])
 
-  /** 切换播放/暂停；播到末尾时再点回到开头 */
+  /** 切换播放/暂停。直播跟随态（atLive）点播放视为 no-op（不跳回开头，避免观赛灾难）。 */
   const togglePlay = useCallback(() => {
-    if (!playing && cur >= total - 1) {
-      // 已到末尾，重新从头播
+    if (!playing && cur >= total - 1 && !atLive) {
+      // 已到末尾（非直播跟随），重新从头播
       setStepIdx(total > 1 ? 0 : -1)
     }
     setPlaying((p) => !p)
-  }, [playing, cur, total])
+  }, [playing, cur, total, atLive])
 
   // 定速播放定时器
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -100,9 +110,6 @@ export function usePlayback(initialSpeedIdx: number = 1) {
       if (timerRef.current) clearTimeout(timerRef.current)
     }
   }, [playing, cur, total, speedIdx])
-
-  // buffer 增长时若在直播跟随，保持游标在末尾（stepIdx 仍 -1，cur 自动算）
-  // 无需额外 effect，因为 cur = stepIdx<0 ? total-1 : ...
 
   return {
     buffer, total, cur, visible, atLive, lag,

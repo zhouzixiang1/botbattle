@@ -63,7 +63,7 @@ botbattle/
 │   │   ├── protocol/          # 行协议（json_protocol: holdem / board_protocol: 棋类）
 │   │   ├── runtime/           # 沙箱（BinaryRunner: docker/wine/local + limits 资源硬顶）
 │   │   ├── matches/           # 编排（orchestrator + runner + auto_matcher 闲时自动）
-│   │   ├── contests/          # 赛制（templates 8 模板 + stages 对阵生成 + manager 状态机）
+│   │   ├── contests/          # 赛制（templates 7 模板 + stages 对阵生成 + manager 状态机）
 │   │   ├── notifications/     # 通知管理器（站内 + 邮件）
 │   │   ├── bots/              # Bot 上传/版本/分类
 │   │   ├── rating/            # Glicko-2 评分

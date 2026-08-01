@@ -38,7 +38,7 @@
 | test_matchpacks_site / test_xp_level / test_tiers / test_settings_mybots | 数据集/经验等级/段位/设置 |
 | test_load_test_seed / test_logging | 压测种子 / 日志配置 |
 
-> 配置：`pyproject.toml` 设 `testpaths=["bzplat/backend/tests","tests"]`，`pythonpath=["."]`，**须从仓库根运行 `pytest`**。`test_human_match.py` 为 pre-existing 卡住项，沿用 `--ignore`。
+> 配置：`pyproject.toml` 设 `testpaths=["bzplat/backend/tests","tests"]`，`pythonpath=["."]`，**须从仓库根运行 `pytest`**（当前 216 passed，含 test_human_match.py 8 项与 test_audit_coverage.py 8 项，无需 `--ignore`）。
 
 ### 2.2 大规模压测 8 阶段覆盖矩阵（`scripts/load_test.py`）
 
@@ -57,9 +57,9 @@
 
 ### 3.1 后端 pytest
 ```
-200 passed, 1 warning in ~39s
+216 passed, 1 warning in ~46s
 ```
-（`--ignore=bzplat/backend/tests/test_human_match.py`，该文件为 pre-existing 阻塞项）
+（含 test_human_match.py 8 项人类对战测试 + test_audit_coverage.py 8 项审计补充测试，已纳入常规套件，无需 `--ignore`）
 
 ### 3.2 大规模压测（60 用户）
 ```
@@ -101,7 +101,7 @@
 ### 5.1 已知非阻塞项
 | 项 | 说明 | 处理 |
 |----|------|------|
-| `test_human_match.py` 阻塞 | pre-existing，WebSocket 测试在当前环境卡住 | `--ignore`，逻辑由 load_test 阶段 4 覆盖 |
+| `test_human_match.py` 时序 | WebSocket/Future 测试曾因时序卡住（pre-existing） | PR #24 修复人类对战治本后已稳定，8 项纳入常规套件（不再 `--ignore`） |
 | auto-match scheduler 时序 | 压测环境后台 scheduler 连续 idle 计时不稳定 | 软断言，单测 `test_auto_matcher.py` 覆盖 |
 
 ### 5.2 测试结论
