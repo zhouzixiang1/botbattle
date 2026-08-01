@@ -216,7 +216,8 @@ class MatchOrchestrator:
         return match_id
 
     def subscribe(self, match_id: str) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=500)
+        # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
+        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self._sse.setdefault(match_id, []).append(q)
         m = self.store.get_match(match_id)
         replay = self.store.get_replay(match_id) or {}
@@ -233,7 +234,12 @@ class MatchOrchestrator:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                pass
+                # 队列满：丢最旧事件腾位，保最新（避免观赛画面卡在最旧处）
+                try:
+                    q.get_nowait()
+                    q.put_nowait(event)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
 
     async def _run_match(self, match_id: str) -> None:
         async with self._sem:

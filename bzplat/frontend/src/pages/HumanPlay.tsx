@@ -106,26 +106,59 @@ export default function HumanPlay() {
       </div>
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
-      {/* 棋类：可点击棋盘；扑克：动作按钮栏 */}
-      {gameId === 'gomoku' && (
-        <MatchBoard gameId="gomoku" events={events} onMove={(x, y) => sendMove({ x, y })} interactive={myTurn} />
-      )}
-      {gameId === 'pencil' && (
-        <MatchBoard gameId="pencil" events={events} onMove={(x, y) => sendMove({ x, y })} interactive={myTurn} />
-      )}
-      {gameId === 'holdem' && (
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+        {/* 左：棋盘/牌桌 + 动作按钮 */}
         <div className="space-y-3">
-          <MatchBoard gameId="holdem" events={events} revealMode="all" />
-          <HoldemActions
-            disabled={!myTurn || over}
-            legal={pokerVm.toAct === humanSeat}
-            onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
-          />
+          {gameId === 'gomoku' && (
+            <MatchBoard gameId="gomoku" events={events} onMove={(x, y) => sendMove({ x, y })} interactive={myTurn} />
+          )}
+          {gameId === 'pencil' && (
+            <MatchBoard gameId="pencil" events={events} onMove={(x, y) => sendMove({ x, y })} interactive={myTurn} />
+          )}
+          {gameId === 'holdem' && (
+            <>
+              <MatchBoard gameId="holdem" events={events} revealMode="all" />
+              <HoldemActions
+                disabled={!myTurn || over}
+                legal={pokerVm.toAct === humanSeat}
+                onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
+              />
+            </>
+          )}
+          {!isBoard && gameId !== 'holdem' && (
+            <p className="text-sm text-muted-foreground">未知游戏：{match?.game_id}</p>
+          )}
         </div>
-      )}
-      {!isBoard && gameId !== 'holdem' && (
-        <p className="text-sm text-muted-foreground">未知游戏：{match?.game_id}</p>
-      )}
+
+        {/* 右：事件日志 */}
+        <Card className="flex flex-col">
+          <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
+            对局进程 <span className="text-xs font-normal text-muted-foreground">({events.length})</span>
+          </div>
+          <div className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
+            {events.length === 0 ? (
+              <p className="py-6 text-center text-muted-foreground">等待对局开始…</p>
+            ) : (
+              events.slice().reverse().map((ev, i) => (
+                <div key={i} className="flex items-center gap-2 rounded px-2 py-1 text-muted-foreground">
+                  <span className="w-16 shrink-0 opacity-60">{ev.type}</span>
+                  <span className="min-w-0 flex-1 truncate opacity-80">
+                    {ev.type === 'action' ? `座${ev.player} · ${ev.action}` : ''}
+                    {ev.type === 'move' ? `座${ev.player} · (${ev.x},${ev.y})` : ''}
+                    {ev.type === 'your_turn' ? '轮到你' : ''}
+                    {ev.type === 'settle' ? `赢家 座${(ev.winners as number[] | undefined)?.join('/')}` : ''}
+                    {ev.type === 'hand_start' ? `第 ${(Number(ev.hand) || 0) + 1} 手` : ''}
+                    {ev.type === 'match_end' ? `结束 · 胜者 ${ev.winner ?? '平'}` : ''}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+          <Button asChild variant="ghost" size="sm" className="m-2 gap-1 self-start">
+            <Link to={`/match/${id}`}>查看回放<ArrowRight className="size-3.5" /></Link>
+          </Button>
+        </Card>
+      </div>
     </PageStub>
   )
 }

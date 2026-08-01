@@ -177,180 +177,138 @@ export default function MatchDetail() {
       {error && <ErrorMsg msg={error} className="mt-4" />}
 
       {match && (
-        <Card className="mt-4">
-          <CardContent className="grid gap-2 py-4 text-sm sm:grid-cols-3">
-            <div className="flex items-center gap-1.5">
-              <GameIcon className="size-4 text-muted-foreground" />
-              <span className="text-muted-foreground">游戏：</span>
-              <span className="font-medium text-foreground">{gameLabel(gameId)}</span>
-            </div>
-            <div>
-              <span className="text-muted-foreground">状态：</span>
-              <Badge variant={match.status === 'completed' ? 'default' : match.status === 'aborted' ? 'destructive' : 'secondary'} className="ml-1 text-[10px]">
-                {String(match.status)}
-              </Badge>
-            </div>
-            <div className="text-muted-foreground">
-              {isBoard ? '步数' : '手数'}：<span className="font-mono text-foreground">{String(match.hands_played)}</span>
-              {!isBoard && <span className="text-muted-foreground">/{String(match.total_hands)}</span>}
-            </div>
-            <div className="text-muted-foreground">类型：<span className="text-foreground">{String(match.match_type)}</span></div>
-            <div className="text-muted-foreground">{isBoard ? 'A 得分' : 'A 净筹码'}：<span className="font-mono text-foreground">{String(match.earnings_a)}</span></div>
-            <div className="text-muted-foreground">{isBoard ? 'B 得分' : 'B 净筹码'}：<span className="font-mono text-foreground">{String(match.earnings_b)}</span></div>
-            <div className="text-muted-foreground">胜者：<span className="text-foreground">{match.winner == null ? '—' : `座位 ${String(match.winner)}`}</span></div>
-            {isLive && (
-              <Button asChild variant="default" size="sm" className="gap-1.5 sm:self-end">
-                <Link to={`/watch/${id}`}><Radio className="size-3.5" />实时观赛</Link>
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* 棋盘/牌桌 */}
-      <div className="mt-6">
-        {loading ? (
-          <Loading text="加载回放…" />
-        ) : visible.length === 0 ? (
-          <Card>
-            <CardContent className="py-12 text-center text-sm text-muted-foreground">
-              {isLive ? (
-                <>
-                  对局进行中，暂无完整回放。{' '}
-                  <Link to={`/watch/${id}`} className="font-medium text-primary hover:underline">去观赛</Link>
-                </>
-              ) : events.length === 0 ? (
-                '暂无回放数据'
-              ) : (
-                ''
-              )}
-            </CardContent>
-          </Card>
-        ) : (
-          <MatchBoard gameId={gameId} events={visible} revealMode="all" />
-        )}
-      </div>
-
-      {/* 手导航器（扑克） */}
-      {!isBoard && bounds.length >= 2 && (
-        <div className="mx-auto mt-4 w-full max-w-2xl">
-          <div className="mb-1 text-[10px] text-muted-foreground">手导航（点击跳转）</div>
-          <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-card p-2">
-            {Array.from({ length: bounds.length - 1 }, (_, h) => {
-              const ws = winners[h]
-              const isCur = h === curHandIdx
-              return (
-                <button
-                  key={h}
-                  type="button"
-                  onClick={() => jumpToHand(h)}
-                  title={`第 ${h + 1} 手${ws ? `：胜者座位 ${ws.join('/')}` : ''}`}
-                  className={`relative size-7 rounded text-[10px] font-medium transition ${
-                    isCur
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted text-muted-foreground hover:bg-accent'
-                  }`}
-                >
-                  {h + 1}
-                  {ws && !isCur && (
-                    <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-success" />
-                  )}
-                </button>
-              )
-            })}
-          </div>
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
+          <GameIcon className="size-4 text-muted-foreground" />
+          <span className="font-medium text-foreground">{gameLabel(gameId)}</span>
+          <Badge variant={match.status === 'completed' ? 'default' : match.status === 'aborted' ? 'destructive' : 'secondary'} className="text-[10px]">
+            {String(match.status)}
+          </Badge>
+          <span className="text-muted-foreground">
+            {isBoard ? '步数' : '手数'}：<span className="font-mono text-foreground">{String(match.hands_played)}</span>
+            {!isBoard && <span className="text-muted-foreground">/{String(match.total_hands)}</span>}
+          </span>
+          <span className="text-muted-foreground">胜者：<span className="text-foreground">{match.winner == null ? '—' : `座${String(match.winner)}`}</span></span>
+          {isLive && (
+            <Button asChild variant="default" size="sm" className="ml-auto gap-1.5">
+              <Link to={`/watch/${id}`}><Radio className="size-3.5" />实时观赛</Link>
+            </Button>
+          )}
         </div>
       )}
 
-      {/* 回放控制条 */}
-      {total > 0 && (
-        <Card className="mx-auto mt-3 w-full max-w-2xl">
-          <CardContent className="py-3">
-            <div className="flex flex-wrap items-center justify-center gap-1.5">
-              {!isBoard && (
-                <Button variant="outline" size="sm" onClick={() => jumpHand(-1)} className="gap-1">
-                  <SkipBack className="size-3.5" />上一手
-                </Button>
-              )}
-              <Button variant="outline" size="sm" onClick={() => { pause(); setStepIdx((s) => Math.max(0, (s < 0 ? total - 1 : s) - 1)) }} className="gap-1">
-                <ChevronLeft className="size-4" />上一步
-              </Button>
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => { if (cur >= total - 1) setStepIdx(0); setPlaying((p) => !p) }}
-                className="gap-1.5"
-              >
-                {playing ? <><Pause className="size-4" />暂停</> : <><Play className="size-4" />播放</>}
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => { pause(); setStepIdx((s) => Math.min(total - 1, (s < 0 ? total - 1 : s) + 1)) }} className="gap-1">
-                下一步<ChevronRight className="size-4" />
-              </Button>
-              {!isBoard && (
-                <Button variant="outline" size="sm" onClick={() => jumpHand(1)} className="gap-1">
-                  下一手<SkipForward className="size-3.5" />
-                </Button>
-              )}
-              <select
-                value={speedIdx}
-                onChange={(e) => setSpeedIdx(Number(e.target.value))}
-                className="h-8 rounded-lg border border-input bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              >
-                {SPEEDS.map((s, i) => (
-                  <option key={i} value={i}>{s.label}</option>
-                ))}
-              </select>
-            </div>
-            {/* 进度条 */}
-            <div className="mt-3 flex items-center gap-3">
-              <span className="font-mono text-[10px] text-muted-foreground">步 {cur + 1}/{total}</span>
-              <Slider
-                min={0}
-                max={Math.max(0, total - 1)}
-                value={[cur]}
-                onValueChange={(v) => { pause(); setStepIdx(v[0]) }}
-                className="flex-1"
-              />
-            </div>
+      {loading ? (
+        <Loading text="加载回放…" />
+      ) : visible.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            {isLive ? (
+              <>对局进行中，暂无完整回放。{' '}<Link to={`/watch/${id}`} className="font-medium text-primary hover:underline">去观赛</Link></>
+            ) : events.length === 0 ? '暂无回放数据' : ''}
           </CardContent>
         </Card>
-      )}
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
+          {/* 左：棋盘/牌桌 + 手导航 + 控制条 */}
+          <div className="space-y-3">
+            <MatchBoard gameId={gameId} events={visible} revealMode="all" />
 
-      {/* 动作列表 */}
-      {visible.length > 0 && (
-        <div className="mx-auto mt-4 w-full max-w-2xl">
-          <div className="mb-1 text-[10px] text-muted-foreground">动作时序</div>
-          <div ref={actionListRef} className="max-h-64 overflow-y-auto rounded-lg border border-border bg-card p-2 text-xs">
-            {visible.map((ev, i) => (
-              <div
-                key={i}
-                ref={i === cur ? curActionRef : undefined}
-                className={`flex items-center gap-2 rounded px-2 py-1 ${
-                  i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'
-                }`}
-              >
-                <span className="w-8 font-mono opacity-60">{i + 1}</span>
-                <span className="w-14 opacity-70">{ev.type}</span>
-                <span className="flex-1 truncate opacity-80">
-                  {ev.type === 'action'
-                    ? `座位 ${ev.player} · ${ACTION_LABEL[String(ev.action)] ?? ev.action}${
-                        ev.amount ? ' ' + String(ev.amount) : ''
-                      }`
-                    : ev.type === 'move'
-                      ? `座位 ${ev.player} · (${ev.x},${ev.y})${ev.scored ? ' · 得分连走' : ''}`
-                      : ev.type === 'settle'
-                        ? `赢家 座位 ${(ev.winners as number[] | undefined)?.join('/') ?? '?'} · 底池 ${ev.pot}`
-                        : ev.type === 'hand_start'
-                          ? `第 ${(Number(ev.hand) || 0) + 1} 手开始`
-                          : ev.type === 'deal_board'
-                            ? `${ev.street}：${(ev.dealt as string[] | undefined)?.join(' ')}`
-                            : ev.type === 'match_end'
-                              ? `结束 · 胜者 ${ev.winner ?? '平'} · ${ev.reason || ''}`
-                              : JSON.stringify(ev).slice(0, 60)}
-                </span>
+            {/* 手导航器（扑克） */}
+            {!isBoard && bounds.length >= 2 && (
+              <div>
+                <div className="mb-1 text-[10px] text-muted-foreground">手导航（点击跳转）</div>
+                <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-card p-2">
+                  {Array.from({ length: bounds.length - 1 }, (_, h) => {
+                    const ws = winners[h]
+                    const isCur = h === curHandIdx
+                    return (
+                      <button
+                        key={h}
+                        type="button"
+                        onClick={() => jumpToHand(h)}
+                        title={`第 ${h + 1} 手${ws ? `：胜者座位 ${ws.join('/')}` : ''}`}
+                        className={`relative size-7 rounded text-[10px] font-medium transition ${
+                          isCur ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'
+                        }`}
+                      >
+                        {h + 1}
+                        {ws && !isCur && <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-success" />}
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
-            ))}
+            )}
+
+            {/* 回放控制条 */}
+            <Card>
+              <CardContent className="py-3">
+                <div className="flex flex-wrap items-center justify-center gap-1.5">
+                  {!isBoard && (
+                    <Button variant="outline" size="sm" onClick={() => jumpHand(-1)} className="gap-1">
+                      <SkipBack className="size-3.5" />上一手
+                    </Button>
+                  )}
+                  <Button variant="outline" size="sm" onClick={() => { pause(); setStepIdx((s) => Math.max(0, (s < 0 ? total - 1 : s) - 1)) }} className="gap-1">
+                    <ChevronLeft className="size-4" />上一步
+                  </Button>
+                  <Button variant="default" size="sm" onClick={() => { if (cur >= total - 1) setStepIdx(0); setPlaying((p) => !p) }} className="gap-1.5">
+                    {playing ? <><Pause className="size-4" />暂停</> : <><Play className="size-4" />播放</>}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => { pause(); setStepIdx((s) => Math.min(total - 1, (s < 0 ? total - 1 : s) + 1)) }} className="gap-1">
+                    下一步<ChevronRight className="size-4" />
+                  </Button>
+                  {!isBoard && (
+                    <Button variant="outline" size="sm" onClick={() => jumpHand(1)} className="gap-1">
+                      下一手<SkipForward className="size-3.5" />
+                    </Button>
+                  )}
+                  <select value={speedIdx} onChange={(e) => setSpeedIdx(Number(e.target.value))} className="h-8 rounded-lg border border-input bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+                    {SPEEDS.map((s, i) => (<option key={i} value={i}>{s.label}</option>))}
+                  </select>
+                </div>
+                <div className="mt-3 flex items-center gap-3">
+                  <span className="font-mono text-[10px] text-muted-foreground">步 {cur + 1}/{total}</span>
+                  <Slider min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => { pause(); setStepIdx(v[0]) }} className="flex-1" />
+                </div>
+              </CardContent>
+            </Card>
           </div>
+
+          {/* 右：动作时序列表 */}
+          <Card className="flex flex-col">
+            <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
+              动作时序 <span className="text-xs font-normal text-muted-foreground">({visible.length})</span>
+            </div>
+            <div ref={actionListRef} className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
+              {visible.map((ev, i) => (
+                <div
+                  key={i}
+                  ref={i === cur ? curActionRef : undefined}
+                  className={`flex items-center gap-2 rounded px-2 py-1 ${
+                    i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'
+                  }`}
+                >
+                  <span className="w-8 font-mono opacity-60">{i + 1}</span>
+                  <span className="w-14 opacity-70">{ev.type}</span>
+                  <span className="flex-1 truncate opacity-80">
+                    {ev.type === 'action'
+                      ? `座位 ${ev.player} · ${ACTION_LABEL[String(ev.action)] ?? ev.action}${ev.amount ? ' ' + String(ev.amount) : ''}`
+                      : ev.type === 'move'
+                        ? `座位 ${ev.player} · (${ev.x},${ev.y})${ev.scored ? ' · 得分连走' : ''}`
+                        : ev.type === 'settle'
+                          ? `赢家 座位 ${(ev.winners as number[] | undefined)?.join('/') ?? '?'} · 底池 ${ev.pot}`
+                          : ev.type === 'hand_start'
+                            ? `第 ${(Number(ev.hand) || 0) + 1} 手开始`
+                            : ev.type === 'deal_board'
+                              ? `${ev.street}：${(ev.dealt as string[] | undefined)?.join(' ')}`
+                              : ev.type === 'match_end'
+                                ? `结束 · 胜者 ${ev.winner ?? '平'} · ${ev.reason || ''}`
+                                : JSON.stringify(ev).slice(0, 60)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </Card>
         </div>
       )}
 
