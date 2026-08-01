@@ -143,6 +143,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "users" in tables:
         _add_col(conn, "users", "bio", "TEXT NOT NULL DEFAULT ''")
         _add_col(conn, "users", "avatar", "TEXT NOT NULL DEFAULT ''")
+        _add_col(conn, "users", "xp", "INTEGER NOT NULL DEFAULT 0")
+        _add_col(conn, "users", "level", "INTEGER NOT NULL DEFAULT 0")
+        _add_col(conn, "users", "last_active_at", "TEXT")
 
     if "matches" in tables:
         _add_col(conn, "matches", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
@@ -360,7 +363,8 @@ class Store:
         with self._tx() as c:
             row = c.execute(
                 "SELECT id, username, display_name, role, bio, avatar, "
-                "created_at, last_login_at FROM users WHERE username=? AND is_active=1",
+                "created_at, last_login_at, xp, level, last_active_at "
+                "FROM users WHERE username=? AND is_active=1",
                 (username,),
             ).fetchone()
             if not row:
@@ -403,6 +407,27 @@ class Store:
                 "wins": 0, "losses": 0, "draws": 0,
                 "matches_played": 0, "net_chips": 0,
             }
+
+    def award_xp(self, user_id: int, amount: int) -> dict | None:
+        """给用户加经验，并重算 level + 更新 last_active_at。返回更新后的 user。"""
+        from bzplat.backend.store.schema import level_for_xp
+        if amount == 0:
+            return self.get_user(user_id)
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT xp FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            if not row:
+                return None
+            new_xp = max(0, int(row["xp"] or 0) + max(0, amount))
+            new_level = level_for_xp(new_xp)
+            c.execute(
+                "UPDATE users SET xp=?, level=?, last_active_at=? WHERE id=?",
+                (new_xp, new_level, _now(), user_id),
+            )
+            return _row(
+                c.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            )
 
     def search_bots(
         self,
@@ -476,6 +501,9 @@ class Store:
             "email_verified",
             "bio",
             "avatar",
+            "xp",
+            "level",
+            "last_active_at",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]

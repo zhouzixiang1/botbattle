@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at   TEXT,
     bio             TEXT    NOT NULL DEFAULT '',
     avatar          TEXT    NOT NULL DEFAULT '',
+    xp              INTEGER NOT NULL DEFAULT 0,
+    level           INTEGER NOT NULL DEFAULT 0,
+    last_active_at  TEXT,
     CONSTRAINT chk_username CHECK (length(username) >= 3),
     CONSTRAINT chk_role CHECK (role IN ('user', 'organizer', 'admin'))
 );
@@ -374,6 +377,36 @@ REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})
 
 # 合法 game_id
 VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})
+
+# ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────
+# 经验奖励：各类活动获得的经验
+XP_MATCH_PARTICIPATE = 10   # 参与一场对局（任意类型）
+XP_MATCH_WIN = 15           # 对局胜利额外加成
+XP_CONTEST_PARTICIPATE = 50 # 赛事报名
+XP_COMMENT = 2              # 发表评论（活跃度）
+XP_FOLLOWED = 3             # 被关注（活跃度）
+
+# 等级阈值：升到 level N 所需累计经验（level 0 = 0xp；level 1 = 100xp；...）
+# 采用递增曲线：level_n = 100 * n * (n+1) / 2
+def xp_for_level(level: int) -> int:
+    """升到指定 level 所需的累计 xp。"""
+    if level <= 0:
+        return 0
+    return 100 * level * (level + 1) // 2
+
+
+def level_for_xp(xp: int) -> int:
+    """根据累计 xp 推导当前 level。"""
+    lvl = 0
+    while xp_for_level(lvl + 1) <= xp:
+        lvl += 1
+        if lvl > 1000:  # 安全上限
+            break
+    return lvl
+
+
+# 功能 gating 最低等级（对标 Botzone「等级 1 以上可用某功能」）
+LEVEL_GATE_DOWNLOAD = 1   # 下载数据集需 level >= 1（PR-10 用）
 
 # platform_settings keys
 SETTING_ACTION_TIMEOUT = "action_timeout_sec"

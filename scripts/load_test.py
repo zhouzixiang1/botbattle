@@ -234,6 +234,9 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     # 段位定义（PR-5）
     r = api.client.get("/api/tiers")
     check("GET /api/tiers", r.status_code == 200 and len(r.json().get("tiers", [])) >= 6, r.text[:80])
+    # 经验/等级体系（PR-9）
+    r = api.client.get("/api/levels/info")
+    check("GET /api/levels/info", r.status_code == 200 and "thresholds" in r.json(), r.text[:80])
 
     r = api.client.get("/api/contests/templates")
     check("GET /api/contests/templates", r.status_code == 200 and "templates" in r.json(), r.text[:80])

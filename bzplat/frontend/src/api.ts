@@ -20,6 +20,8 @@ export interface CurrentUser {
   last_login_at?: string
   bio?: string
   avatar?: string
+  xp?: number
+  level?: number
 }
 
 export const userToken = {
