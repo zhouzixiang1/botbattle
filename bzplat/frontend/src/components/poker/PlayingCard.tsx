@@ -7,7 +7,7 @@ import { type ReactNode } from 'react'
  */
 
 export interface ParsedCard {
-  rank: string // "2".."A"
+  rank: string // "2".."A"（显示用：T 已归一化为 10）
   suit: string // ♠ ♥ ♦ ♣
   red: boolean
 }
@@ -30,16 +30,17 @@ export function parseCard(input: unknown): ParsedCard | null {
   if (m) {
     const suit = SUIT_BY_NUM[m[1]] ?? '?'
     const ri = Number(m[2])
-    const rank = RANK_BY_NUM[ri] ?? '?'
-    return { rank, suit, red: isRedSuit(suit) }
+    const rankCh = RANK_BY_NUM[ri] ?? '?'
+    return { rank: rankCh === 'T' ? '10' : rankCh, suit, red: isRedSuit(suit) }
   }
   // rank+suit 形式，如 "As" "Td" "2c"
   if (s.length >= 2) {
-    const rank = s[0].toUpperCase()
+    const rankCh = s[0].toUpperCase()
     const suitCh = s[1].toLowerCase()
     const suit = SUIT_BY_CHAR[suitCh]
-    if (suit && '23456789TJQKA'.includes(rank)) {
-      return { rank, suit, red: isRedSuit(suit) }
+    if (suit && '23456789TJQKA'.includes(rankCh)) {
+      // 后端用 T 表示 10（紧凑协议），显示归一化为 10（标准扑克客户端惯例）
+      return { rank: rankCh === 'T' ? '10' : rankCh, suit, red: isRedSuit(suit) }
     }
   }
   return null
