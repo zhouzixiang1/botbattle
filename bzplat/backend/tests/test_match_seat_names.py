@@ -67,6 +67,34 @@ def test_match_detail_route_returns_nested_seat_info(tmp_path):
     assert "bot_b_owner_name" not in m
 
 
+def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
+    """观赛页顶栏胜者/累计筹码依赖 match.winner + earnings_a/b 字段。"""
+    s = _store(tmp_path)
+    app = create_app(db_path=s.path)
+    st = app.state.store
+    ua = st.create_user("alice", "a@ex.com", hash_password("pw"))
+    ub = st.create_user("bob", "b@ex.com", hash_password("pw"))
+    ba = st.create_bot(ua["id"], "AlphaBot", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    bb = st.create_bot(ub["id"], "DeepHoldem", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    st.ensure_rating(ba["id"]); st.ensure_rating(bb["id"])
+    mid = "20260802-seat-winner"
+    st.create_match(mid, bot_a_id=ba["id"], bot_b_id=bb["id"], owner_id=ua["id"], game_id="holdem")
+    st.update_match(
+        mid, status="completed", winner=0, earnings_a=1500, earnings_b=-1500,
+        hands_played=70, reason="completed",
+    )
+    c = TestClient(app)
+
+    r = c.get(f"/api/matches/{mid}")
+    assert r.status_code == 200
+    m = r.json()["match"]
+    assert m["winner"] == 0
+    assert m["earnings_a"] == 1500
+    assert m["earnings_b"] == -1500
+    assert m["bot_a"]["name"] == "AlphaBot"
+    assert m["bot_b"]["name"] == "DeepHoldem"
+
+
 def test_match_detail_human_match_marks_is_human(tmp_path):
     """人类对局：human_seat 那侧标 is_human=True。"""
     s = _store(tmp_path)

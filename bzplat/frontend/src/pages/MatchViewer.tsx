@@ -24,7 +24,7 @@ import { isBoardGame } from '@/games'
 import type { SeatInfo } from '@/games/canvas-types'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
-import type { RawEvent } from '@/components/poker/useMatchState'
+import { reduceEvents, type RawEvent } from '@/components/poker/useMatchState'
 
 /** match 行（含 detailed JOIN 的 bot_a/bot_b 嵌套 或 扁平 bot_a_name 列）。 */
 interface MatchRow {
@@ -34,6 +34,8 @@ interface MatchRow {
   hands_played?: number
   total_hands?: number
   winner?: number | null
+  earnings_a?: number
+  earnings_b?: number
   human_seat?: number | null
   bot_a_id?: number
   bot_b_id?: number
@@ -50,23 +52,88 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
 }
 
+/** 座位 BOT 显示名：display_name > name > 扁平列。 */
+function botLabel(
+  nested?: { name?: string; display_name?: string },
+  flatDisplay?: string,
+  flatName?: string,
+): string {
+  return (nested?.display_name || nested?.name || flatDisplay || flatName || '').trim()
+}
+
 /** 从 match 行构造座位身份（兼容嵌套 bot_a/b 和扁平列）。 */
 function seatInfos(m: MatchRow | null | undefined): SeatInfo[] | undefined {
   if (!m) return undefined
-  const a = m.bot_a ?? {}
-  const b = m.bot_b ?? {}
+  const a = m.bot_a
+  const b = m.bot_b
   return [
     {
-      botName: a.name ?? m.bot_a_display ?? m.bot_a_name,
-      ownerName: a.owner_name ?? m.bot_a_owner_name,
-      isHuman: a.is_human ?? (m.match_type === 'human' && m.human_seat === 0),
+      botName: botLabel(a, m.bot_a_display, m.bot_a_name) || undefined,
+      ownerName: a?.owner_name ?? m.bot_a_owner_name,
+      isHuman: a?.is_human ?? (m.match_type === 'human' && m.human_seat === 0),
     },
     {
-      botName: b.name ?? m.bot_b_display ?? m.bot_b_name,
-      ownerName: b.owner_name ?? m.bot_b_owner_name,
-      isHuman: b.is_human ?? (m.match_type === 'human' && m.human_seat === 1),
+      botName: botLabel(b, m.bot_b_display, m.bot_b_name) || undefined,
+      ownerName: b?.owner_name ?? m.bot_b_owner_name,
+      isHuman: b?.is_human ?? (m.match_type === 'human' && m.human_seat === 1),
     },
   ]
+}
+
+/** 顶栏对阵文案：BOT 名（@用户） */
+function seatHeaderLabel(m: MatchRow, side: 0 | 1): string {
+  const nested = side === 0 ? m.bot_a : m.bot_b
+  const bot = botLabel(
+    nested,
+    side === 0 ? m.bot_a_display : m.bot_b_display,
+    side === 0 ? m.bot_a_name : m.bot_b_name,
+  )
+  const owner = nested?.owner_name
+    ?? (side === 0 ? m.bot_a_owner_name : m.bot_b_owner_name)
+  const isHuman = nested?.is_human
+    ?? (m.match_type === 'human' && m.human_seat === side)
+  if (isHuman) return owner ? `${owner}（人类）` : '人类'
+  if (bot && owner) return `${bot} @${owner}`
+  if (bot) return bot
+  if (owner) return `@${owner}`
+  const id = side === 0 ? m.bot_a_id : m.bot_b_id
+  return id != null ? `Bot #${id}` : `座位 ${side}`
+}
+
+/**
+ * 解析整场胜者座位。
+ * 优先 DB `match.winner`（含显式 null=平局），再事件流 matchWinner，再 earnings 比较。
+ * 返回 { kind: 'seat'|'draw'|'pending' }，避免把「未知」和「平局」都画成 —。
+ */
+function resolveWinnerLabel(
+  m: MatchRow | null,
+  eventWinner: number | null | undefined,
+  finished: boolean,
+): string {
+  if (m?.winner === 0 || m?.winner === 1) return `座位 ${m.winner}`
+  if (eventWinner === 0 || eventWinner === 1) return `座位 ${eventWinner}`
+  // DB 显式 null 且已结束 → 平局
+  if (m && m.winner === null && finished) {
+    const ea = m.earnings_a
+    const eb = m.earnings_b
+    if (typeof ea === 'number' && typeof eb === 'number') {
+      if (ea > eb) return '座位 0'
+      if (eb > ea) return '座位 1'
+    }
+    return '平局'
+  }
+  if (typeof m?.earnings_a === 'number' && typeof m?.earnings_b === 'number' && finished) {
+    if (m.earnings_a > m.earnings_b) return '座位 0'
+    if (m.earnings_b > m.earnings_a) return '座位 1'
+    return '平局'
+  }
+  if (eventWinner === null && finished) return '平局'
+  if (!finished) return '进行中'
+  return '—'
+}
+
+function fmtNet(n: number): string {
+  return `${n >= 0 ? '+' : ''}${n.toLocaleString('en-US')}`
 }
 
 /** 找德州每手起始事件索引（逐手跳转用）。 */
@@ -154,6 +221,22 @@ export default function MatchViewer() {
   const atLive = stepIdx < 0
   const lag = atLive ? 0 : Math.max(0, total - 1 - cur)
   const seats = seatInfos(match)
+  // 德州：从当前可见事件归约胜者/累计筹码（与 canvas 同源 reduceEvents）
+  const holdemVm = useMemo(() => {
+    if (isBoard || total === 0) return null
+    return reduceEvents(events.slice(0, cur + 1))
+  }, [isBoard, events, cur, total])
+  // 回放/已结束：用 DB+全量事件定胜者；直播中：用当前可见事件
+  const finished =
+    match?.status === 'completed' ||
+    match?.status === 'aborted' ||
+    status === 'match_end' ||
+    status === 'replay'
+  const winnerLabel = resolveWinnerLabel(match, holdemVm?.matchWinner, finished)
+  const netA = holdemVm?.seats[0]?.net
+    ?? (typeof match?.earnings_a === 'number' ? match.earnings_a : null)
+  const netB = holdemVm?.seats[1]?.net
+    ?? (typeof match?.earnings_b === 'number' ? match.earnings_b : null)
 
   // 定速播放定时器（直播+回放共用）：按 SPEEDS 步进；到末尾后直播继续等（保持 playing），
   // 回放则停。直播时游标追上末尾 → 转贴尾(-1)，新事件来了继续推进。
@@ -234,12 +317,46 @@ export default function MatchViewer() {
             {!isBoard && <span className="text-muted-foreground">/{String(match.total_hands ?? '')}</span>}
           </span>
         )}
+        {match && (
+          <span className="text-muted-foreground">
+            胜者：
+            <span className="font-medium text-foreground">{winnerLabel}</span>
+          </span>
+        )}
         {lag > 0 && (
           <Button variant="outline" size="sm" onClick={jumpToLive} className="gap-1">
             <Radio className="size-3" />落后 {lag} 手·跳最新
           </Button>
         )}
       </div>
+
+      {/* 对阵双方 + 累计筹码（德州 canvas 改版后从顶栏补齐；棋类仅显示名称） */}
+      {match && (
+        <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span className="font-medium text-foreground">{seatHeaderLabel(match, 0)}</span>
+          <span className="text-muted-foreground">vs</span>
+          <span className="font-medium text-foreground">{seatHeaderLabel(match, 1)}</span>
+          {!isBoard && netA != null && netB != null && (
+            <span className="font-mono text-xs text-muted-foreground">
+              累计筹码{' '}
+              <span className={netA >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>
+                座0 {fmtNet(netA)}
+              </span>
+              {' · '}
+              <span className={netB >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>
+                座1 {fmtNet(netB)}
+              </span>
+            </span>
+          )}
+          {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (
+            <span className="text-xs text-muted-foreground">
+              <Link to={`/bot/${match.bot_a_id}`} className="text-primary hover:underline">座0 详情</Link>
+              {' · '}
+              <Link to={`/bot/${match.bot_b_id}`} className="text-primary hover:underline">座1 详情</Link>
+            </span>
+          )}
+        </div>
+      )}
 
       {error && <ErrorMsg msg={error} className="mb-4" />}
 
