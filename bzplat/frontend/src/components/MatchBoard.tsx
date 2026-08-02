@@ -1,6 +1,9 @@
 import { useMemo } from 'react'
 import { getGame } from '@/games'
 import { normalizeGameId } from '@/lib/games'
+import GameCanvas from './GameCanvas'
+import type { SeatInfo } from '@/games/canvas-types'
+import type { RawEvent } from '@/components/poker/useMatchState'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -10,15 +13,25 @@ export default function MatchBoard({
   revealMode = 'all',
   onMove,
   interactive = false,
+  seats,
 }: {
   gameId?: string | null
   events: Ev[]
   revealMode?: 'all' | 'showdown'
   onMove?: (x: number, y: number) => void
   interactive?: boolean
+  /** 座位身份（扑克 canvas 用来绘制座位标签）；DOM Board 路径忽略此 prop */
+  seats?: SeatInfo[]
 }) {
   const gid = normalizeGameId(gameId)
   const spec = getGame(gid)
+
+  // 该游戏已接入 canvas 渲染器 → 优先用 canvas 绘制（holdem 走这）
+  if (spec.CanvasRenderer) {
+    return <GameCanvas gameId={gid} events={events as unknown as RawEvent[]} seats={seats} />
+  }
+
+  // 回退 DOM Board（gomoku/pencil 暂时走这，PR-B/C 加 CanvasRenderer 后自动切）
   // 仅在交互模式且有 onMove 时启用点击
   const handler = interactive && onMove ? onMove : undefined
 
