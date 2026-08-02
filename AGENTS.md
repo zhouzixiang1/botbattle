@@ -11,8 +11,8 @@
 - **改动须同步三处**（提交前自检）：
   1. **测试**：有功能/行为变更 → 在 `bzplat/backend/tests/` 加/改测试用例，覆盖新逻辑与边界。
   2. **文档**：新增模块/接口/常量/行为 → 同步 `wiki/` 对应文档（必要时更新 `INDEX.md` 与 `AGENTS.md` 架构分层）。
-  3. **记忆**：非显而易见的项目约定/架构决策 → 写入记忆文件（`MEMORY.md` 索引 + 单独 fact 文件，见会话记忆目录）。
-  不许只改代码不补测试/文档——三者缺一视为未完成。
+  3. **记忆**（若当前会话环境提供 memory 能力）：非显而易见的项目约定/架构决策 → 写入记忆索引 + 单独 fact；**不以仓库内缺失 MEMORY.md 为阻塞**——测试与文档必须同步。
+  不许只改代码不补测试/文档——功能交付缺测试或文档视为未完成。
 
 ## 文档规范（改代码必同步）
 
@@ -41,7 +41,7 @@
 source .venv/bin/activate
 pip install -e '.[dev]'          # 装 bzplat 包 + pytest/httpx
 
-# 前端（React 19 + Vite 8 + Tailwind v4，浅色主题）
+# 前端（React 19 + Vite 8 + Tailwind v4，浅色默认 + 暗色双主题）
 cd bzplat/frontend && npm install && npm run build   # 产物在 bzplat/frontend/dist/，由后端 StaticFiles 托管
 
 # 起服务（默认 127.0.0.1:50380）

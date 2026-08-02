@@ -11,7 +11,8 @@
 |------|----------------|------------------------|
 | 非法着 | 视为 fold | **判负** |
 | 决策超时 | 视为 fold | **判负** |
-| 进程异常 / 崩溃 | 视为 fold | **判负** |
+| 可恢复的决策异常（坏 JSON 等） | 视为 fold | **判负** |
+| 进程崩溃 / EOF（`BotCrashedError`） | **整场 aborted**（`bot_crashed`） | **同左** |
 | 棋盘满 / 资源耗尽 | — | 平局（点数相同）或按点数判胜 |
 
 ## Botzone 裁判模型
@@ -26,13 +27,15 @@ Botzone 裁判每回合启停，输入大致为 `{"log":[...], "initdata":...}`�
 
 ## 本平台裁判
 
-本平台**无独立「裁判程序」二进制**；由服务端**引擎模块**扮演裁判，进程内直接推进局面：
+本平台**无独立「裁判程序」二进制**；由服务端 **`games/<game>/` 裁判模块**扮演裁判，经 `GameSpec` 注册表调度，进程内直接推进局面：
 
-| 游戏 | 裁判模块 |
+| 游戏 | 裁判模块（实现路径） |
 |------|----------|
-| 德州扑克（holdem） | `MatchSession`（`bzplat/backend/engine/game.py`） |
-| 五子棋（gomoku） | `GomokuSession`（`bzplat/backend/engine/gomoku.py`） |
-| 点格棋（pencil） | `PencilSession`（`bzplat/backend/engine/pencil.py`） |
+| 德州扑克（holdem） | `MatchSession`（`bzplat/backend/games/holdem/engine.py`） |
+| 五子棋（gomoku） | `GomokuSession`（`bzplat/backend/games/gomoku/engine.py`） |
+| 点格棋（pencil） | `PencilSession`（`bzplat/backend/games/pencil/engine.py`） |
+
+> `bzplat/backend/engine/*.py` 仅为兼容旧 import 的 shim，转发到上述实现。
 
 Bot 通过 Docker / 本地长驻进程交互：引擎调用 `decide(player_idx, request)` →
 BinaryRunner 往 bot 的 stdin 写一行 JSON 请求、从 stdout 读一行 JSON 响应。
@@ -98,7 +101,7 @@ def _box_completed(board, bx, by):
 raise 最小总额 = 2× 当前下注（首次 = 2bb）：
 
 ```python
-# raise 下限（engine/game.py）
+# raise 下限（逻辑示意；实现见 games/holdem/engine.py）
 def min_raise_to(current_bet, bb):
     return bb if current_bet == 0 else current_bet * 2
 ```

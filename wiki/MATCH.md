@@ -91,8 +91,11 @@ SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看�
 
 | 情况 | holdem | gomoku / pencil |
 |------|--------|-----------------|
-| 决策超时 / 崩溃 | 视为 fold | 判负 |
-| 非法动作 | fold | 判负 |
-| 容器 OOM 等 | 对局 abort 或该方失败 | 同左 |
+| 决策超时 | 视为 fold | 判负 |
+| 非法动作 / 坏 JSON 等可恢复错误 | fold | 判负 |
+| 进程崩溃 / EOF（`BotCrashedError`） | 整场 `aborted`（`reason=bot_crashed`） | **同左** |
+| 容器 OOM 等 | 对局 `aborted` | 同左 |
+
+> 与「人类对战」一节一致：硬崩溃**中止对局**，不把崩溃吞成整场默认 fold/判负。
 
 资源限制详见 [运行时](#/wiki?slug=runtime)。

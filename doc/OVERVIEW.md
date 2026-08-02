@@ -54,32 +54,30 @@
 ```
 botbattle/
 ├── bzplat/                    # 应用代码（Python 包名 bzplat，刻意规避标准库 platform）
-│   ├── backend/               # 后端（45 个非测试 .py（72 含测试，~14933 全量行））
+│   ├── backend/
 │   │   ├── main.py            # FastAPI 应用工厂 + 装配 + lifespan
-│   │   ├── api_routes.py      # 主 REST 路由（95 路由）
+│   │   ├── api_routes.py      # 主 REST + SSE + WebSocket（约 96 路由装饰器）
 │   │   ├── auth/              # 认证（13 路由 + 验证码 + 依赖）
-│   │   ├── store/             # SQLite 数据层（Store 类 + schema.py 常量唯一来源）
-│   │   ├── engine/            # 裁判引擎（holdem/gomoku/pencil + registry 路由 + tiers 段位）
-│   │   ├── protocol/          # 行协议（json_protocol: holdem / board_protocol: 棋类）
-│   │   ├── runtime/           # 沙箱（BinaryRunner: docker/wine/local + limits 资源硬顶）
-│   │   ├── matches/           # 编排（orchestrator + runner + auto_matcher 闲时自动）
-│   │   ├── contests/          # 赛制（templates 7 模板 + stages 对阵生成 + manager 状态机）
-│   │   ├── notifications/     # 通知管理器（站内 + 邮件）
-│   │   ├── bots/              # Bot 上传/版本/分类
-│   │   ├── rating/            # Glicko-2 评分
-│   │   ├── mail/              # SMTP Mailer + 模板
-│   │   ├── security.py        # 安全头 + IP 限流中间件
-│   │   ├── logging_config.py  # 统一日志（logs/app.log）
-│   │   ├── crypto.py          # 密码 hash + session token
-│   │   ├── cli.py             # typer CLI（serve / create-admin）
-│   │   └── tests/             # 后端测试（26 个测试文件）
-│   └── frontend/              # 前端（React 19 + Vite + Tailwind v4 + shadcn/ui）
+│   │   ├── games/             # 【游戏单一真相】GameSpec + registry + holdem/gomoku/pencil 自包含子包
+│   │   ├── _compat/           # 旧 import 路径转发到 games/
+│   │   ├── engine/            # shim（兼容旧 import；registry 委托 games）
+│   │   ├── protocol/          # shim（json_protocol / board_protocol → _compat）
+│   │   ├── store/             # SQLite（Store + schema.py 常量唯一来源；matches 按游戏分表）
+│   │   ├── runtime/           # 沙箱 BinaryRunner（docker/wine/local）+ limits 资源硬顶
+│   │   ├── matches/           # 编排 orchestrator + runner + auto_matcher
+│   │   ├── contests/          # 赛制 templates/stages/manager（模板由 games 聚合）
+│   │   ├── notifications/     # 站内通知 + 邮件偏好
+│   │   ├── bots/ rating/ mail/
+│   │   ├── security.py / logging_config.py / crypto.py / cli.py
+│   │   └── tests/             # 后端测试（38 个 test_*.py，含架构契约守护）
+│   └── frontend/              # React 19 + Vite 8 + Tailwind v4 + shadcn/ui
 │       └── src/
 │           ├── components/ui/     # 26 个 shadcn 共享原语
-│           ├── components/shell/  # 全局 Shell + 导航 + Cmd+K 搜索
-│           ├── components/{poker,gomoku,pencil}/  # 棋盘/牌桌可视化
-│           ├── pages/             # 21 页面 + admin/ 10 Tab
-│           └── lib/               # tiers/games/utils/markdown
+│           ├── components/shell/  # 全局 Shell + 导航 + Cmd+K
+│           ├── components/{poker,gomoku,pencil}/  # 事件 reducer / 状态（canvas 场景源）
+│           ├── games/             # 前端 GameViewSpec 注册表 + 每游戏 canvas 渲染
+│           ├── pages/             # 22 个 lazy 页面模块（含 admin）
+│           └── lib/               # tiers / utils / markdown 等
 ├── doc/                       # 本目录：面向甲方的交付文档（6 份）
 ├── wiki/                      # 面向 Bot 玩家的规则/协议/开发指南文档
 ├── contracts/                 # 协议 JSON Schema
@@ -98,7 +96,7 @@ botbattle/
 | **源代码** | 后端 + 前端完整源码 | `bzplat/` |
 | **交付文档**（本文档集） | 6 份甲方交付文档 | `doc/` |
 | **规则与协议文档** | 三游戏规则、对局协议、Bot 开发指南 | `wiki/` |
-| **测试套件** | 26 个后端测试 + 压测 + 浏览器验收 | `bzplat/backend/tests/`、`scripts/` |
+| **测试套件** | 38 个后端测试模块 + 压测 + 浏览器验收 | `bzplat/backend/tests/`、`scripts/` |
 | **部署配置** | systemd unit + 启停脚本 | `deploy/`、`scripts/platform-ctl.sh` |
 | **样例 Bot** | 三游戏可运行的样例 Bot 源码 | `samples/` |
 

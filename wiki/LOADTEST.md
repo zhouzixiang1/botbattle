@@ -85,4 +85,4 @@ pytest bzplat/backend/tests/test_load_test_seed.py -v
 
 ## 历史发现
 
-本压测脚本曾发现并修复一个真实 bug：`/api/matches/challenge` 不接受 `n_dots`，pencil 对局经 `orchestrator→runner→run_session(n_dots=None)→PencilBoard(None)` 抛 `TypeError`（全 aborted）。修复在 `engine/registry.py:run_session` —— pencil 分支 `n_dots or DEFAULT_N` 兜底。回归测试 `test_board_engines.py::test_run_session_pencil_n_dots_none_uses_default`。
+本压测脚本曾发现并修复一个真实 bug：`/api/matches/challenge` 不接受 `n_dots`，pencil 对局在 `n_dots=None` 时构造棋盘崩溃（全 aborted）。**当时**在 registry 路径对 pencil 做了默认 N 兜底；**当前**默认与校验由 `games/pencil` 的 `GameSpec`（`default_match_params` / `validate_match_params`）与引擎兜底承担，通用层无 `if game_id` 分支。回归测试 `test_board_engines.py::test_run_session_pencil_n_dots_none_uses_default`。
