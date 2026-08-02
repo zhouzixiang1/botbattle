@@ -379,11 +379,22 @@ class MatchOrchestrator:
                     except Exception:
                         logger.debug("award_xp failed", exc_info=True)
             except BotCrashedError as exc:
-                logger.warning("match %s aborted: bot crashed — %s", match_id, exc)
-                self.store.update_match(
-                    match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now(),
-                )
-                self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
+                logger.warning("match %s bot crashed — %s", match_id, exc)
+                # P4：赛事对局崩溃 → 技术判负（completed + winner=对手 + technical_loss=1），
+                # 不再静默吞分（aborted 在 standings 不计分会导致赛事卡住/丢分）。
+                # 无法判定崩溃方时（start_session 阶段），非 contest 仍 aborted（保旧）。
+                if m.get("match_type") == TYPE_CONTEST:
+                    self.store.update_match(
+                        match_id, status=STATUS_COMPLETED, reason="technical_loss",
+                        winner=1, earnings_a=-1, earnings_b=1,  # 兜底判 bot_a 崩溃（seat0 输）
+                        technical_loss=1, ended_at=_now(),
+                    )
+                    self._broadcast(match_id, {"type": "match_end", "winner": 1, "reason": "technical_loss"})
+                else:
+                    self.store.update_match(
+                        match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now(),
+                    )
+                    self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
             except Exception as exc:
                 logger.exception("match %s failed", match_id)
                 self.store.update_match(
