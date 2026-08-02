@@ -59,6 +59,22 @@ class TierDef:
     min_rating: float   # 该段位最低 rating（含）
 
 
+def tier_for_in(rating: float | int | None, tiers: list[TierDef]) -> TierDef:
+    """在指定段位曲线里按 rating 查段位（共享查表算法，全面解耦 PR-D）。
+
+    各 games/<game>/tiers.py 的 tier_for 是同一算法——此前各存一份副本（有害重复）。
+    本函数集中算法；各 tiers.py 只声明 TIERS 数据列表（曲线数据独立，可分游戏调），
+    调 tier_for_in(rating, TIERS) 即可。
+    """
+    if rating is None:
+        return tiers[-1]
+    r = float(rating)
+    for t in tiers:
+        if r >= t.min_rating:
+            return t
+    return tiers[-1]
+
+
 @dataclass(frozen=True)
 class JudgeParamSpec:
     """一款游戏的一个可调裁判参数（admin 可在前端调，热生效）。"""

@@ -1,11 +1,11 @@
 """德州扑克段位曲线（per-game，独立于其他游戏——全面解耦 PR4）。
 
-rating → 段位映射，配中文名 + tailwind 色板。后续可独立于其他游戏调整阈值。
-前端 lib/tiers.ts（PR6 拆 per-game）保持一致。
+rating → 段位映射。查表算法共享自 base.tier_for_in（PR-D DRY）；本文件只声明
+德州专属的 TIERS 数据列表（曲线阈值可独立于其他游戏调整）。
 """
 from __future__ import annotations
 
-from bzplat.backend.games.base import TierDef
+from bzplat.backend.games.base import TierDef, tier_for_in
 
 TIERS: list[TierDef] = [
     TierDef(5, "master", "大师", "text-violet-700", "bg-violet-50", 2200),
@@ -18,11 +18,5 @@ TIERS: list[TierDef] = [
 
 
 def tier_for(rating: float | int | None) -> TierDef:
-    """返回 rating 对应的段位。None/空 → 最低段位（新手）。"""
-    if rating is None:
-        return TIERS[-1]
-    r = float(rating)
-    for t in TIERS:
-        if r >= t.min_rating:
-            return t
-    return TIERS[-1]
+    """返回 rating 对应的段位（经共享查表算法）。"""
+    return tier_for_in(rating, TIERS)

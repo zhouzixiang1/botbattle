@@ -1,63 +1,14 @@
-"""棋类（Gomoku / Pencil）紧凑 JSON 行协议。
+"""点格棋行协议（全面解耦 PR-D：序列化逻辑共享自 games/_board_protocol.py）。
 
-与德州共用「一行一条 JSON」长驻 stdin/stdout 模型；字段语义对齐 Botzone。
+pencil 的行协议与 gomoku 同构（一行一条 JSON，{x,y} 语义），故序列化逻辑共享。
+本文件仅 re-export 共享工具 + pencil 的请求 builder；游戏规则在 engine.py。
 """
-from __future__ import annotations
-
-import json
-from typing import Any
-
-PROTOCOL_VERSION = 1
-
-
-def dumps_request(req: dict[str, Any]) -> str:
-    return json.dumps(req, separators=(",", ":"), ensure_ascii=False)
-
-
-def loads_response(line: str) -> dict[str, Any]:
-    line = (line or "").strip()
-    if not line:
-        return {}
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        return {}
-    return obj if isinstance(obj, dict) else {}
-
-
-def parse_xy(raw: dict[str, Any] | None) -> tuple[int | None, int | None]:
-    if not isinstance(raw, dict):
-        return None, None
-    try:
-        x = int(raw["x"])
-        y = int(raw["y"])
-    except (KeyError, TypeError, ValueError):
-        return None, None
-    return x, y
-
-
-def build_gomoku_request(*, x: int, y: int, me: int) -> dict[str, Any]:
-    return {"v": PROTOCOL_VERSION, "t": "mv", "x": x, "y": y, "me": me}
-
-
-def build_pencil_request(
-    *,
-    x: int,
-    y: int,
-    pass_: int,
-    me: int,
-    scores: list[int],
-) -> dict[str, Any]:
-    return {
-        "v": PROTOCOL_VERSION,
-        "t": "mv",
-        "x": x,
-        "y": y,
-        "pass": int(pass_),
-        "me": me,
-        "scores": list(scores),
-    }
-
-
-def build_xy_response(x: int, y: int) -> dict[str, int]:
-    return {"x": x, "y": y}
+from bzplat.backend.games._board_protocol import (  # noqa: F401
+    PROTOCOL_VERSION,
+    build_gomoku_request,
+    build_pencil_request,
+    build_xy_response,
+    dumps_request,
+    loads_response,
+    parse_xy,
+)
