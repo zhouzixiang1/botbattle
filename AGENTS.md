@@ -107,11 +107,20 @@ src/pages/                 22 个顶层路由，全部用 React.lazy 代码分�
 ```
 改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
 
-**核心解耦契约 —— 结果鸭子类型**（全面解耦 PR4 起 result 不再共享基类，各游戏在 games/<game>/result.py 独立定义）：裁判产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**（+ rounds_played/rounds/events/winner），绝不触碰扑克的 pot/board/holes 或棋类的棋盘。这是赛制代码能对三款游戏通用的根本。
+**核心解耦契约层**（全面解耦后，游戏对平台暴露统一契约；违反这些契约的游戏会在运行时崩）：
+- **结果鸭子类型**（result.py 独立定义，不共享基类）：裁判产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**（+ `rounds_played`/`rounds`/`events`/`winner`），绝不触碰扑克的 pot/board/holes 或棋类的棋盘。**测试守护**：`tests/test_result_contract.py` 断言三游戏 result 都满足此契约（防 drift）。
+- **GameSpec 接口**（`games/base.py`）：每款游戏须声明全部字段——`session_factory`(裁判,`run_async(decide)→MatchResult`)、`protocol`(`dumps_request/loads_response/fail_response`)、`default_match_params`/`validate_match_params`、`rounds_per_match`/`normalize_earnings`/`eta_for_match`(编排特化)、`tiers`/`tier_for`(per-game 段位)、`judge_params`、`templates`、元信息。通用层经 `registry.get(game_id)` 取 spec，**禁止 `if game_id==` 分支**（`tests/test_import_cycles.py` 源码扫描守护 games/<game>/ 不反向 import engine）。
+- **段位 per-game**：`games/<game>/tiers.py` 声明该游戏段位曲线（查表算法共享 `base.tier_for_in`，曲线数据独立可调）；`/api/tiers?game_id=` 返回对应曲线；前端 `lib/tiers.ts` 的 `useGameTiers(gameId)` 按游戏拉取着色。
 
-**新增一款游戏的成本**（通用层零改动）：新建 `games/<game>/` 包（spec.py 装配 GameSpec + 引擎 + 协议 + 配置 + 段位 + 模板）→ 在 `games/__init__.py` 注册一行 → 在 `schema.REGISTERED_ENGINES`/`VALID_GAME_IDS` frozenset 各加一项（games 包启动时断言二者与注册表一致，防漂移）。**不再需要**在 `registry.run_session`/`runner._dumps`/`_loads`/`_fail_response`/orchestrator 加 `if game_id==` 分支——全部经 `registry.get(game_id)` 取 spec。
+**新增一款游戏的成本**（通用层零改动）——checklist：
+1. 建 `games/<game>/` 子包：`engine.py`(裁判) + `protocol.py`(行协议) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec)。棋类协议可 re-export `games/_board_protocol.py`。
+2. 建 `schema.py`：`matches_<game>` 表（仿 matches_holdem，FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES`/`VALID_GAME_IDS` frozenset 各加该项。
+3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
+4. 前端 `src/games/<game>/index.ts`：GameViewSpec（Board/reducer/kind/configFields）+ `src/games/index.ts` 注册。
+5. **不得**反向：`games/<game>/` 不得 import `bzplat.backend.engine`/`_compat`（循环依赖，`test_import_cycles.py` 守护）；通用层（matches/contests/store/api_routes）不得 import 具体游戏模块（经注册表）。
+6. 跑测试：`pytest`（含 `test_result_contract`/`test_import_cycles`/`test_game_registry`）+ `npm run build` + `screenshot_verify.py`。
 
-**引擎路由入口**：`games.registry.get(game_id)` 取 `GameSpec` → `spec.run_session(decide, **params)` 构造并运行该游戏 Session；`spec.protocol.dumps_request/loads_response/fail_response` 处理行协议。`engine/registry.py` 与 `matches/runner.py` 现均委托 games 注册表（PR1），不再有 if-chain。
+**引擎路由入口**：`games.registry.get(game_id)` 取 `GameSpec` → `spec.run_session(decide, **params)` 构造并运行该游戏 Session；`spec.protocol.dumps_request/loads_response/fail_response` 处理行协议。`engine/registry.py` 与 `matches/runner.py` 现均委托 games 注册表，不再有 if-chain。
 
 **人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局走独立 `_human_sem`（默认 4，不占 bot 对局槽）、`human_action_timeout`（默认 120s）、**不计 Glicko**、per-user 同时 ≤ 1。自博弈（同 owner 两个不同 bot 对战）走普通 `/api/matches/challenge`。
 
