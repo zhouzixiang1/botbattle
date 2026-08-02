@@ -301,22 +301,11 @@ class MatchOrchestrator:
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
-                # 棋类（单轮）直接取该轮胜者；德州（多轮）按筹码差判断
+                # winner：引擎 result.winner 已权威化（棋类单轮胜者；holdem 多手按累计净筹码比较）。
+                # 仅当 result.winner 为 None（平局）时按 ea/eb 兜底——二者一致时返 None（平局）。
                 winner: int | None = result.winner
                 if winner is None:
-                    if ea > eb:
-                        winner = 0
-                    elif eb > ea:
-                        winner = 1
-                    else:
-                        winner = None
-                # 棋类（单轮）若 match_end 带 winner 更准（覆盖上面的兜底判断）。
-                # 注意：仅当 match_end.winner 非 None 才覆盖——holdem 多手 match_end.winner 恒为 None
-                # （多手无单轮胜者），上面 ea/eb 兜底判出的 0/1 才是对的，不能被 None 覆盖回平局。
-                for ev in reversed(events):
-                    if ev.get("type") == "match_end" and ev.get("winner") is not None:
-                        winner = ev.get("winner")
-                        break
+                    winner = 0 if ea > eb else 1 if eb > ea else None
                 net_bb_a = game_registry.get(gid).normalize_earnings(ea)
                 self.store.update_match(
                     match_id,
@@ -461,14 +450,10 @@ class MatchOrchestrator:
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
+                # winner：引擎 result.winner 已权威化（见 _run_match 同款逻辑）
                 winner = result.winner
                 if winner is None:
                     winner = 0 if ea > eb else 1 if eb > ea else None
-                # 棋类若 match_end 带 winner 更准——仅非 None 才覆盖（holdem 多手恒 None）
-                for ev in reversed(events):
-                    if ev.get("type") == "match_end" and ev.get("winner") is not None:
-                        winner = ev.get("winner")
-                        break
                 net_bb_a = game_registry.get(gid).normalize_earnings(ea)
                 self.store.update_match(
                     match_id, status=STATUS_COMPLETED,

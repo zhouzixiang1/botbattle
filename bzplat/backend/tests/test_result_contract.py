@@ -47,9 +47,13 @@ def test_match_result_winner_semantics():
     # holdem 单轮有胜者（property 取 rounds[0].winners[0]）
     h = HMR(rounds_played=1, rounds=[HRR([0], [100, -100])])
     assert h.winner == 0
-    # holdem 多轮（扑克语义）→ winner None（编排层按 deltas 判）
+    # holdem 多轮无 final_chips → winner None（编排层按 ea/eb 兜底判）
     h2 = HMR(rounds_played=3, rounds=[HRR([0], [1, -1]), HRR([1], [-1, 1]), HRR([0], [1, -1])])
     assert h2.winner is None
+    # holdem 多轮带 final_chips（累计净筹码）→ winner 在引擎内权威化（PR4）
+    h3 = HMR(rounds_played=3, rounds=[HRR([0], [100, -100]), HRR([0], [200, -200])],
+             final_chips=[300, -300])
+    assert h3.winner == 0
 
 
 def test_rounds_element_supports_delta_sum():

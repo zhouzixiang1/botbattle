@@ -582,7 +582,7 @@ def tiers(game_id: str | None = None):
         return {"tiers": _game_registry.all_tiers(gid), "game_id": gid}
     except KeyError:
         # 未知 game_id 回退 holdem（保公开端点容错）
-        return {"tiers": _game_registry.all_tiers("holdem"), "game_id": "holdem"}
+        return {"tiers": _game_registry.all_tiers("holdem"), "game_id": "holdem"}  # allow-game-fallback
 
 
 @router.get("/api/levels/info")

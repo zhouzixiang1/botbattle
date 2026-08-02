@@ -42,9 +42,21 @@ class MatchResult:
 
     @property
     def winner(self) -> int | None:
-        """多手扑克按筹码差判断（无单一轮胜者）；返回 None，由编排层按 deltas 判。"""
+        """对局级胜者（权威）：单手取该手胜者；多手按累计净筹码（final_chips）比较。
+
+        PR4 修复：原多手恒返回 None，依赖编排层三层兜底（result.winner→ea/eb→match_end
+        事件）+ holdem 特例注释——这是隐性 if-game_id。现多手也在引擎内权威化 winner，
+        编排层只需读 result.winner（+ ea/eb 平局兜底）。
+        """
         if len(self.rounds) == 1 and self.rounds[0].winners:
             return self.rounds[0].winners[0]
+        # 多手：按累计净筹码（final_chips = net）比较，平局返 None
+        if len(self.final_chips) >= 2:
+            fa, fb = self.final_chips[0], self.final_chips[1]
+            if fa > fb:
+                return 0
+            if fb > fa:
+                return 1
         return None
 
     @property
