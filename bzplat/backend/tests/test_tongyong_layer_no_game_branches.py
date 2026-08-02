@@ -104,3 +104,38 @@ def test_tongyong_layer_no_game_branches():
         "若确为 normalize_game_id 兜底语义，在该行加 # allow-game-fallback 注释豁免。\n"
         "违规：\n" + "\n".join(violations)
     )
+
+
+# ── runner/engine.run_session 不得硬编码游戏专属参数名（PR3：**match_params 透传）──
+# runner.run_binaries / run_bot_vs_human / run_callables 与 engine.registry.run_session
+# 不得把 num_hands/n_dots/board_size/starting_stack/sb/bb 列为具名参数——否则第 4 游戏
+# 带新参数（如 komi）必改通用层签名（违反"零改动新增游戏"承诺）。应改 **match_params 透传。
+_GAME_PARAM_NAMES = {"num_hands", "n_dots", "board_size", "starting_stack", "sb", "bb"}
+
+
+def test_runner_signatures_use_passthrough_not_named_game_params():
+    """runner 三方法 + engine.run_session 用 **match_params 透传，不列游戏专属具名参数。"""
+    import inspect
+
+    from bzplat.backend.engine.registry import run_session as _engine_run_session
+    from bzplat.backend.matches.runner import MatchRunner
+
+    targets = [
+        ("MatchRunner.run_binaries", MatchRunner.run_binaries),
+        ("MatchRunner.run_bot_vs_human", MatchRunner.run_bot_vs_human),
+        ("MatchRunner.run_callables", MatchRunner.run_callables),
+        ("engine.registry.run_session", _engine_run_session),
+    ]
+    for label, fn in targets:
+        params = inspect.signature(fn).parameters
+        # 允许的具名参数（非游戏专属）
+        leaked = _GAME_PARAM_NAMES & set(params)
+        assert not leaked, (
+            f"{label} 不得把游戏专属参数 {leaked} 列为具名参数——"
+            "应经 **match_params/**params 透传（否则第 4 游戏带新参数必改通用层签名）"
+        )
+        # 必须有透传用的 **kwargs 参数
+        has_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        assert has_kwargs, f"{label} 须有 **match_params 透传游戏参数"

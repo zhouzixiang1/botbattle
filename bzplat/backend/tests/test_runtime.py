@@ -105,3 +105,41 @@ def test_orchestrator_resolves_holdem_winner_non_null():
         )
         assert m["winner"] == 1, f"callbot 应胜（foldbot 每手弃），winner={m['winner']}"
         store.close()
+
+
+def test_challenge_validates_match_params_per_game():
+    """PR3：challenge 经 spec.validate_match_params 校验 hands 范围（取代 API 层 le=70）。
+
+    原 api_routes Field(le=70) 把 holdem 上限泄漏成所有游戏上限；现放宽到 le=1000，
+    真正的范围校验交给 spec.validate_match_params（holdem 1-500）。超范围应 ValueError。
+    """
+    import os
+    import tempfile
+
+    from bzplat.backend.matches.orchestrator import MatchOrchestrator
+    from bzplat.backend.store import Store
+
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    with tempfile.TemporaryDirectory() as td:
+        store = Store(str(td + "/v.db"))
+        u = store.create_user("vtest", "v@e.com", "x")
+        # 用 callable bot 避免 ELF 依赖（本测试只验校验，不真跑）
+        ba = store.create_bot(u["id"], "vbotA", binary_path="/dev/null", format="elf", is_public=1, game_id="holdem")
+        bb = store.create_bot(u["id"], "vbotB", binary_path="/dev/null", format="elf", is_public=1, game_id="holdem")
+        store.ensure_rating(ba["id"]); store.ensure_rating(bb["id"])
+        orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
+
+        # holdem hands 超出 500 → ValueError（spec.validate_match_params 校验）
+        with pytest.raises(ValueError, match="match 参数非法"):
+            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], hands=999, game_id="holdem"))
+        # hands=0 非法
+        with pytest.raises(ValueError, match="match 参数非法"):
+            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], hands=0, game_id="holdem"))
+        # 合法 hands=100 不抛（校验通过；之后真跑会因 /dev/null 失败，但那不是本测试关注）
+        try:
+            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], hands=100, game_id="holdem"))
+        except ValueError as e:
+            assert "match 参数非法" not in str(e), "合法 hands 不应触发校验失败"
+        except Exception:
+            pass  # /dev/null 跑不起来是预期的，校验已过即可
+        store.close()

@@ -12,7 +12,8 @@ from bzplat.backend.engine.registry import (
 )
 # 全面解耦：runner 不再按 game_id 切协议模块，统一委托 games 注册表。
 # 注：不 import 具体游戏模块（审计 P1：通用层不得依赖 games/holdem）。
-# num_hands 默认 70（=holdem DEFAULT_HANDS；棋类忽略此参数）。
+# 游戏规则参数（num_hands/n_dots/board_size/...）经 **match_params 透传，runner 不持有
+# 任何游戏专属默认值（第 4 游戏带新参数无需改本签名）。
 from bzplat.backend.games import dumps as _reg_dumps, fail_response as _reg_fail, loads as _reg_loads
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError, DEFAULT_ACTION_TIMEOUT
 
@@ -50,15 +51,16 @@ class MatchRunner:
         path_b: str,
         *,
         game_id: str = GAME_HOLDEM,
-        num_hands: int = 70,  # holdem 默认手数（棋类忽略）
-        n_dots: int | None = None,
-        board_size: int | None = None,
-        starting_stack: int | None = None,
-        sb: int | None = None,
-        bb: int | None = None,
         on_event: EventSink | None = None,
         seed: int | None = None,
+        **match_params: Any,
     ) -> MatchResult:
+        """跑两个二进制 bot。游戏规则参数（num_hands/n_dots/board_size/starting_stack/sb/bb/...）
+        经 **match_params 透传给 run_session——新增第 4 游戏带新参数（如 komi）无需改本签名。
+
+        决定哪些参数、各参数默认值/校验，全在 GameSpec（default_match_params /
+        validate_match_params / judge_params）里声明；runner 不持有任何游戏专属知识。
+        """
         import random
 
         gid = normalize_game_id(game_id)
@@ -89,10 +91,7 @@ class MatchRunner:
                     return _fail_response(gid)
 
             return await run_session(
-                gid, decide,
-                num_hands=num_hands, n_dots=n_dots,
-                board_size=board_size, starting_stack=starting_stack, sb=sb, bb=bb,
-                on_event=on_event, rng=rng,
+                gid, decide, on_event=on_event, rng=rng, **match_params,
             )
         finally:
             await self.runner.stop_session(sid_a)
@@ -105,19 +104,15 @@ class MatchRunner:
         bot_seat: int,
         human_decide,
         game_id: str = GAME_HOLDEM,
-        num_hands: int = 70,  # holdem 默认手数（棋类忽略）
-        n_dots: int | None = None,
-        board_size: int | None = None,
-        starting_stack: int | None = None,
-        sb: int | None = None,
-        bb: int | None = None,
         on_event: EventSink | None = None,
         seed: int | None = None,
+        **match_params: Any,
     ) -> MatchResult:
         """Bot vs 人类：bot 侧走 BinaryRunner，人类侧走 human_decide 协程。
 
         bot_seat 为 bot 坐位（0/1）；人类坐另一侧。human_decide(player_idx, request)
         由调用方实现（通常经 asyncio.Future 等待 WS 回传），超时由其内部处理。
+        游戏规则参数经 **match_params 透传（同 run_binaries）。
         """
         import random
 
@@ -147,10 +142,7 @@ class MatchRunner:
                 return out if isinstance(out, dict) else _fail_response(gid)
 
             return await run_session(
-                gid, decide,
-                num_hands=num_hands, n_dots=n_dots,
-                board_size=board_size, starting_stack=starting_stack, sb=sb, bb=bb,
-                on_event=on_event, rng=rng,
+                gid, decide, on_event=on_event, rng=rng, **match_params,
             )
         finally:
             await self.runner.stop_session(sid_bot)
@@ -161,15 +153,11 @@ class MatchRunner:
         decide_b,
         *,
         game_id: str = GAME_HOLDEM,
-        num_hands: int = 70,  # holdem 默认手数（棋类忽略）
-        n_dots: int | None = None,
-        board_size: int | None = None,
-        starting_stack: int | None = None,
-        sb: int | None = None,
-        bb: int | None = None,
         on_event: EventSink | None = None,
         seed: int | None = None,
+        **match_params: Any,
     ) -> MatchResult:
+        """跑两个 callable bot（测试用）。游戏规则参数经 **match_params 透传。"""
         import random
 
         gid = normalize_game_id(game_id)
@@ -183,8 +171,5 @@ class MatchRunner:
             return out
 
         return await run_session(
-            gid, decide,
-            num_hands=num_hands, n_dots=n_dots,
-            board_size=board_size, starting_stack=starting_stack, sb=sb, bb=bb,
-            on_event=on_event, rng=rng,
+            gid, decide, on_event=on_event, rng=rng, **match_params,
         )
