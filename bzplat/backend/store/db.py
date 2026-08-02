@@ -46,6 +46,48 @@ def _add_col(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
+# 每游戏对局表的建表模板（全面解耦 PR3：matches 拆三表，结构一致）。
+# {suffix} = holdem/gomoku/pencil；{gdef} = 该表 game_id 列的 DEFAULT。
+_CREATE_MATCHES_TABLE_SQL = """
+CREATE TABLE matches_{suffix} (
+    id              TEXT    PRIMARY KEY,
+    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+    hands_played    INTEGER NOT NULL DEFAULT 0,
+    total_hands     INTEGER NOT NULL DEFAULT 70,
+    earnings_a      INTEGER NOT NULL DEFAULT 0,
+    earnings_b      INTEGER NOT NULL DEFAULT 0,
+    winner          INTEGER,
+    reason          TEXT    NOT NULL DEFAULT 'completed',
+    net_bb_a        REAL    NOT NULL DEFAULT 0,
+    match_type      TEXT    NOT NULL DEFAULT 'challenge',
+    status          TEXT    NOT NULL DEFAULT 'pending',
+    game_id         TEXT    NOT NULL DEFAULT '{gdef}',
+    n_dots          INTEGER,
+    human_user_id   INTEGER,
+    human_seat      INTEGER,
+    started_at      TEXT,
+    ended_at        TEXT,
+    created_at      TEXT    NOT NULL,
+    likes_count     INTEGER NOT NULL DEFAULT 0,
+    views_count     INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT chk_winner_{suffix} CHECK (winner IN (0, 1) OR winner IS NULL),
+    CONSTRAINT chk_status_{suffix} CHECK (status IN ('pending','running','completed','aborted')),
+    CONSTRAINT chk_type_{suffix} CHECK (match_type IN ('challenge','table','contest','ladder','human'))
+)
+"""
+
+
+def _matches_table(game_id: str) -> str:
+    """game_id → 对应的物理表名（matches_holdem/gomoku/pencil）。"""
+    gid = (game_id or "holdem").strip().lower()
+    if gid not in ("holdem", "gomoku", "pencil"):
+        raise ValueError(f"未知 game_id: {game_id!r}（合法: holdem/gomoku/pencil）")
+    return f"matches_{gid}"
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """为已有库补列；必要时重建 contests 以放宽 status CHECK。"""
     tables = {
@@ -148,68 +190,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, "users", "last_active_at", "TEXT")
 
     if "matches" in tables:
-        _add_col(conn, "matches", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
-        _add_col(conn, "matches", "n_dots", "INTEGER")  # pencil 点阵边长（可空）
-        _add_col(conn, "matches", "human_user_id", "INTEGER")  # 人类对战：人类用户 id
-        _add_col(conn, "matches", "human_seat", "INTEGER")  # 人类坐位 0/1
-        _add_col(conn, "matches", "likes_count", "INTEGER NOT NULL DEFAULT 0")  # 点赞计数
-        _add_col(conn, "matches", "views_count", "INTEGER NOT NULL DEFAULT 0")  # 浏览计数
-        # 放宽 match_type CHECK 以纳入 'ladder' / 'human'
-        m_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'"
-        ).fetchone()
-        m_sql_text = (m_sql[0] or "") if m_sql else ""
-        if "'human'" not in m_sql_text:
-            m_cols = _table_cols(conn, "matches")
-            conn.execute(
-                """
-                CREATE TABLE matches_new (
-                    id              TEXT    PRIMARY KEY,
-                    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
-                    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
-                    owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
-                    hands_played    INTEGER NOT NULL DEFAULT 0,
-                    total_hands     INTEGER NOT NULL DEFAULT 70,
-                    earnings_a      INTEGER NOT NULL DEFAULT 0,
-                    earnings_b      INTEGER NOT NULL DEFAULT 0,
-                    winner          INTEGER,
-                    reason          TEXT    NOT NULL DEFAULT 'completed',
-                    net_bb_a        REAL    NOT NULL DEFAULT 0,
-                    match_type      TEXT    NOT NULL DEFAULT 'challenge',
-                    status          TEXT    NOT NULL DEFAULT 'pending',
-                    game_id         TEXT    NOT NULL DEFAULT 'holdem',
-                    n_dots          INTEGER,
-                    human_user_id   INTEGER,
-                    human_seat      INTEGER,
-                    started_at      TEXT,
-                    ended_at      TEXT,
-                    created_at      TEXT    NOT NULL,
-                    CONSTRAINT chk_winner2 CHECK (winner IN (0, 1) OR winner IS NULL),
-                    CONSTRAINT chk_status2 CHECK (status IN ('pending','running','completed','aborted')),
-                    CONSTRAINT chk_type2 CHECK (match_type IN ('challenge','table','contest','ladder','human'))
-                )
-                """
-            )
-            present_m = [c for c in (
-                "id", "bot_a_id", "bot_b_id", "owner_id", "contest_id",
-                "hands_played", "total_hands", "earnings_a", "earnings_b",
-                "winner", "reason", "net_bb_a", "match_type", "status",
-                "started_at", "ended_at", "created_at", "game_id", "n_dots",
-                "human_user_id", "human_seat",
-            ) if c in m_cols]
-            conn.execute(
-                f"INSERT INTO matches_new ({', '.join(present_m)}) "
-                f"SELECT {', '.join(present_m)} FROM matches"
-            )
-            conn.execute("DROP TABLE matches")
-            conn.execute("ALTER TABLE matches_new RENAME TO matches")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_bot_a ON matches(bot_a_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_bot_b ON matches(bot_b_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_owner ON matches(owner_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_contest ON matches(contest_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_matches_time ON matches(created_at)")
+        # 全面解耦 PR3：旧单表 matches 拆成每游戏一张表（matches_holdem/gomoku/pencil）
+        # + matches_index 定位表。按用户决策：**对局数据不保留**（可后续跑种子脚本重建），
+        # 用户/Bot/赛事/评论/评分等数据保留。故这里直接 DROP 旧表，由 SCHEMA 建新表。
+        # 同时清空引用旧 matches 的关联数据（match_replays、contest_pairings.match_id）。
+        # 注意顺序：先清 contest_pairings.match_id（此时 matches 还在，FK 校验通过——
+        # 置 NULL 不触发 FK 拒绝），再 DROP matches（被引用表删除时 SQLite 不校验 FK）。
+        cp_cols = _table_cols(conn, "contest_pairings") if "contest_pairings" in tables else set()
+        if "match_id" in cp_cols:
+            conn.execute("UPDATE contest_pairings SET match_id=NULL WHERE match_id IS NOT NULL")
+        conn.execute("DROP TABLE IF EXISTS matches")
+        conn.execute("DROP TABLE IF EXISTS match_replays")  # replay 绑定对局，一并丢弃
+        # 注意：新三张表 + matches_index 由 SCHEMA executescript 创建（IF NOT EXISTS 幂等）
 
     # pair_stats 补胜负计数列（head-to-head 战绩用）
     if "pair_stats" in tables:
@@ -283,6 +275,83 @@ def _migrate(conn: sqlite3.Connection) -> None:
                         now,
                     ),
                 )
+
+    # ── ratings / rating_history 加 game_id 维度（全面解耦 PR3）──────────
+    # 旧库 ratings PK = bot_id（无 game_id 列）；rating_history 无 game_id 列。
+    # 迁移：加 game_id 列，按 bots.game_id 回填，重建表改 PK 为 (bot_id, game_id)。
+    # 幂等：若 ratings 已有 game_id 列则跳过（新库 SCHEMA 直接建复合 PK）。
+    if "ratings" in tables:
+        r_cols = _table_cols(conn, "ratings")
+        if "game_id" not in r_cols:
+            # 重建 ratings：加 game_id 列 + 复合 PK，按 bots.game_id 回填
+            conn.execute(
+                """
+                CREATE TABLE ratings_new (
+                    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+                    rating          REAL    NOT NULL DEFAULT 1500.0,
+                    rd              REAL    NOT NULL DEFAULT 350.0,
+                    vol             REAL    NOT NULL DEFAULT 0.06,
+                    wins            INTEGER NOT NULL DEFAULT 0,
+                    losses          INTEGER NOT NULL DEFAULT 0,
+                    draws           INTEGER NOT NULL DEFAULT 0,
+                    net_chips       INTEGER NOT NULL DEFAULT 0,
+                    matches_played  INTEGER NOT NULL DEFAULT 0,
+                    last_played_at  TEXT,
+                    PRIMARY KEY (bot_id, game_id)
+                )
+                """
+            )
+            # 回填：每行 game_id 取自 bots.game_id（bot 绑定单一游戏）
+            conn.execute(
+                """
+                INSERT INTO ratings_new
+                    (bot_id, game_id, rating, rd, vol, wins, losses, draws,
+                     net_chips, matches_played, last_played_at)
+                SELECT r.bot_id, COALESCE(b.game_id, 'holdem'),
+                       r.rating, r.rd, r.vol, r.wins, r.losses, r.draws,
+                       r.net_chips, r.matches_played, r.last_played_at
+                FROM ratings r
+                LEFT JOIN bots b ON b.id = r.bot_id
+                """
+            )
+            conn.execute("DROP TABLE ratings")
+            conn.execute("ALTER TABLE ratings_new RENAME TO ratings")
+
+    if "rating_history" in tables:
+        rh_cols = _table_cols(conn, "rating_history")
+        if "game_id" not in rh_cols:
+            conn.execute(
+                """
+                CREATE TABLE rating_history_new (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+                    rating          REAL    NOT NULL,
+                    rd              REAL    NOT NULL,
+                    vol             REAL    NOT NULL,
+                    matches_played  INTEGER NOT NULL,
+                    reason          TEXT    NOT NULL DEFAULT '',
+                    created_at      TEXT    NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO rating_history_new
+                    (id, bot_id, game_id, rating, rd, vol, matches_played, reason, created_at)
+                SELECT rh.id, rh.bot_id, COALESCE(b.game_id, 'holdem'),
+                       rh.rating, rh.rd, rh.vol, rh.matches_played, rh.reason, rh.created_at
+                FROM rating_history rh
+                LEFT JOIN bots b ON b.id = rh.bot_id
+                """
+            )
+            conn.execute("DROP TABLE rating_history")
+            conn.execute("ALTER TABLE rating_history_new RENAME TO rating_history")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rating_history_bot "
+                "ON rating_history(bot_id, game_id, id DESC)"
+            )
 
 
 class Store:
@@ -378,7 +447,7 @@ class Store:
                 "COALESCE(SUM(r.matches_played),0) AS matches_played, "
                 "COALESCE(SUM(r.net_chips),0) AS net_chips, "
                 "COUNT(r.bot_id) AS rated_bots "
-                "FROM ratings r JOIN bots b ON r.bot_id=b.id "
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE b.owner_id=?",
                 (uid,),
             ).fetchone()
@@ -400,7 +469,7 @@ class Store:
                 "COALESCE(SUM(r.draws),0) AS draws, "
                 "COALESCE(SUM(r.matches_played),0) AS matches_played, "
                 "COALESCE(SUM(r.net_chips),0) AS net_chips "
-                "FROM ratings r JOIN bots b ON r.bot_id=b.id WHERE b.owner_id=?",
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id WHERE b.owner_id=?",
                 (owner_id,),
             ).fetchone()
             return _row(agg) if agg else {
@@ -444,7 +513,7 @@ class Store:
                 "b.os, b.arch, u.username AS owner_name, "
                 "u.display_name AS owner_display, r.rating "
                 "FROM bots b LEFT JOIN users u ON b.owner_id=u.id "
-                "LEFT JOIN ratings r ON r.bot_id=b.id "
+                "LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE b.is_public=1 AND b.is_active=1 "
                 "AND (LOWER(b.name) LIKE ? OR LOWER(b.display_name) LIKE ?)"
             )
@@ -466,23 +535,38 @@ class Store:
         """按 bot 名/owner 名模糊搜索已完成对局。"""
         ql = f"%{q.lower()}%" if q else "%"
         with self._tx() as c:
-            sql = (
-                "SELECT m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
-                "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display "
-                "FROM matches m "
+            sel = (
+                "m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
+                "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display"
+            )
+            join_bots = (
                 "JOIN bots ba ON m.bot_a_id=ba.id "
-                "JOIN bots bb ON m.bot_b_id=bb.id "
-                "WHERE m.status='completed' "
+                "JOIN bots bb ON m.bot_b_id=bb.id"
+            )
+            where_sql = (
+                " WHERE m.status='completed' "
                 "AND (LOWER(ba.name) LIKE ? OR LOWER(bb.name) LIKE ? "
                 "OR LOWER(ba.display_name) LIKE ? OR LOWER(bb.display_name) LIKE ?)"
             )
             params: list[Any] = [ql, ql, ql, ql]
             if game_id:
-                sql += " AND m.game_id=?"
+                where_sql += " AND m.game_id=?"
                 params.append(game_id)
-            sql += " ORDER BY m.created_at DESC LIMIT ?"
-            params.append(max(1, min(limit, 50)))
-            return [_row(r) for r in c.execute(sql, params)]
+            lim = max(1, min(limit, 50))
+
+            if game_id:
+                tbl = _matches_table(game_id)
+                sql = f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql} ORDER BY m.created_at DESC LIMIT ?"
+                return [_row(r) for r in c.execute(sql, params + [lim])]
+
+            # 跨游戏 UNION ALL
+            subselects = []
+            for gid in ("holdem", "gomoku", "pencil"):
+                tbl = _matches_table(gid)
+                subselects.append(f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}")
+            union = " UNION ALL ".join(subselects)
+            sql = f"SELECT * FROM ({union}) ORDER BY created_at DESC LIMIT ?"
+            return [_row(r) for r in c.execute(sql, params * 3 + [lim])]
 
     def get_user_by_email(self, email: str) -> dict | None:
         with self._tx() as c:
@@ -836,7 +920,7 @@ class Store:
                 "r.net_chips, r.matches_played, r.last_played_at AS rated_at "
                 "FROM bots b "
                 "LEFT JOIN users u ON b.owner_id=u.id "
-                "LEFT JOIN ratings r ON r.bot_id=b.id "
+                "LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE b.id=?",
                 (bot_id,),
             ).fetchone()
@@ -894,7 +978,7 @@ class Store:
                 })
             return out
 
-    # ── matches ───────────────────────────────────────────────
+    # ── matches（全面解耦 PR3：拆每游戏一张表 + matches_index 定位）─────
 
     def create_match(
         self,
@@ -911,9 +995,11 @@ class Store:
         human_user_id: int | None = None,
         human_seat: int | None = None,
     ) -> dict:
+        gid = (game_id or "holdem").strip().lower()
+        tbl = _matches_table(gid)
         with self._tx() as c:
             c.execute(
-                "INSERT INTO matches(id, bot_a_id, bot_b_id, owner_id, "
+                f"INSERT INTO {tbl}(id, bot_a_id, bot_b_id, owner_id, "
                 "contest_id, total_hands, match_type, status, game_id, n_dots, "
                 "human_user_id, human_seat, created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -926,21 +1012,38 @@ class Store:
                     total_hands,
                     match_type,
                     "pending",
-                    game_id or "holdem",
+                    gid,
                     n_dots,
                     human_user_id,
                     human_seat,
                     _now(),
                 ),
             )
-            return _row(
-                c.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+            # 维护定位表
+            c.execute(
+                "INSERT OR REPLACE INTO matches_index(id, game_id) VALUES(?, ?)",
+                (match_id, gid),
             )
+            return _row(
+                c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
+            )
+
+    def _match_table_of(self, c, match_id: str) -> str | None:
+        """经 matches_index 定位 match_id 所在的物理表；不存在返回 None。"""
+        row = c.execute(
+            "SELECT game_id FROM matches_index WHERE id=?", (match_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return _matches_table(row["game_id"])
 
     def get_match(self, match_id: str) -> dict | None:
         with self._tx() as c:
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return None
             return _row(
-                c.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+                c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
 
     def update_match(self, match_id: str, **fields: Any) -> dict | None:
@@ -962,11 +1065,14 @@ class Store:
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return None
             if sets:
                 vals.append(match_id)
-                c.execute(f"UPDATE matches SET {','.join(sets)} WHERE id=?", vals)
+                c.execute(f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?", vals)
             return _row(
-                c.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+                c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
 
     def list_matches(
@@ -980,34 +1086,80 @@ class Store:
         contest_id: int | None = None,
         game_id: str | None = None,
     ) -> list[dict]:
+        """列对局。game_id 指定时只查该游戏表；否则 UNION ALL 三表（跨游戏）。"""
         with self._tx() as c:
-            sql = (
-                "SELECT m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
-                "ba.display_name AS bot_a_display, "
-                "bb.display_name AS bot_b_display "
-                "FROM matches m "
+            join_bots = (
                 "JOIN bots ba ON m.bot_a_id=ba.id "
-                "JOIN bots bb ON m.bot_b_id=bb.id WHERE 1=1"
+                "JOIN bots bb ON m.bot_b_id=bb.id"
             )
+            sel = (
+                "m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
+                "ba.display_name AS bot_a_display, "
+                "bb.display_name AS bot_b_display"
+            )
+            where_parts: list[str] = []
             params: list[Any] = []
             if owner_id is not None:
-                sql += " AND m.owner_id=?"
+                where_parts.append("m.owner_id=?")
                 params.append(owner_id)
             if bot_id is not None:
-                sql += " AND (m.bot_a_id=? OR m.bot_b_id=?)"
+                where_parts.append("(m.bot_a_id=? OR m.bot_b_id=?)")
                 params.extend([bot_id, bot_id])
             if contest_id is not None:
-                sql += " AND m.contest_id=?"
+                where_parts.append("m.contest_id=?")
                 params.append(contest_id)
             if status:
-                sql += " AND m.status=?"
+                where_parts.append("m.status=?")
                 params.append(status)
             if game_id:
-                sql += " AND m.game_id=?"
+                where_parts.append("m.game_id=?")
                 params.append(game_id)
-            sql += " ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-            return [_row(r) for r in c.execute(sql, params)]
+            where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+            if game_id:
+                # 单表查询
+                tbl = _matches_table(game_id)
+                sql = f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}"
+                sql += " ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+                return [_row(r) for r in c.execute(sql, params)]
+
+            # 跨游戏：UNION ALL 三表，外层排序+分页
+            subselects = []
+            for gid in ("holdem", "gomoku", "pencil"):
+                tbl = _matches_table(gid)
+                subselects.append(
+                    f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}"
+                )
+            union = " UNION ALL ".join(subselects)
+            # UNION 后参数要重复三次（每子查询一份 where 参数）
+            all_params = params * 3
+            sql = f"SELECT * FROM ({union}) ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            all_params.extend([limit, offset])
+            return [_row(r) for r in c.execute(sql, all_params)]
+
+    def list_liked_top_matches(self, limit: int = 10) -> list[dict]:
+        """对局点赞排行榜（跨三表 UNION ALL，likes_count>0 的已完成对局）。"""
+        lim = max(1, min(limit, 50))
+        with self._tx() as c:
+            sel = (
+                "m.id, m.game_id, m.status, m.winner, m.likes_count, "
+                "m.views_count, m.created_at, "
+                "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+                "bb.name AS bot_b_name, bb.display_name AS bot_b_display"
+            )
+            join = (
+                "JOIN bots ba ON m.bot_a_id=ba.id "
+                "JOIN bots bb ON m.bot_b_id=bb.id"
+            )
+            where = "WHERE m.status='completed' AND m.likes_count > 0"
+            subs = []
+            for gid in ("holdem", "gomoku", "pencil"):
+                tbl = _matches_table(gid)
+                subs.append(f"SELECT {sel} FROM {tbl} m {join} {where}")
+            union = " UNION ALL ".join(subs)
+            sql = f"SELECT * FROM ({union}) ORDER BY likes_count DESC, views_count DESC LIMIT ?"
+            return [_row(r) for r in c.execute(sql, (lim,))]
 
     # ── match_replays ─────────────────────────────────────────
 
@@ -1038,34 +1190,50 @@ class Store:
                 ).fetchone()
             )
 
-    # ── ratings ───────────────────────────────────────────────
+    # ── ratings（per-game：PK = bot_id + game_id，全面解耦 PR3）─────────
 
-    def ensure_rating(self, bot_id: int) -> dict:
+    def _bot_game_id(self, c, bot_id: int) -> str:
+        """取 bot 绑定的 game_id（bot 绑定单一游戏）；缺失回退 holdem。"""
+        row = c.execute(
+            "SELECT game_id FROM bots WHERE id=?", (bot_id,)
+        ).fetchone()
+        return (row["game_id"] if row and row["game_id"] else "holdem")
+
+    def ensure_rating(self, bot_id: int, *, game_id: str | None = None) -> dict:
+        """确保 (bot_id, game_id) 评分行存在。game_id 缺省取 bot 的 game_id。"""
         with self._tx() as c:
+            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
             existing = c.execute(
-                "SELECT * FROM ratings WHERE bot_id=?", (bot_id,)
+                "SELECT * FROM ratings WHERE bot_id=? AND game_id=?", (bot_id, gid)
             ).fetchone()
             if existing:
                 return _row(existing)
             c.execute(
-                "INSERT INTO ratings(bot_id) VALUES(?)",
-                (bot_id,),
+                "INSERT INTO ratings(bot_id, game_id) VALUES(?, ?)",
+                (bot_id, gid),
             )
             return _row(
                 c.execute(
-                    "SELECT * FROM ratings WHERE bot_id=?", (bot_id,)
+                    "SELECT * FROM ratings WHERE bot_id=? AND game_id=?",
+                    (bot_id, gid),
                 ).fetchone()
             )
 
-    def get_rating(self, bot_id: int) -> dict | None:
+    def get_rating(self, bot_id: int, *, game_id: str | None = None) -> dict | None:
+        """取 (bot_id, game_id) 评分行。game_id 缺省取 bot 的 game_id。"""
         with self._tx() as c:
+            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
             return _row(
                 c.execute(
-                    "SELECT * FROM ratings WHERE bot_id=?", (bot_id,)
+                    "SELECT * FROM ratings WHERE bot_id=? AND game_id=?",
+                    (bot_id, gid),
                 ).fetchone()
             )
 
-    def update_rating_row(self, bot_id: int, **fields: Any) -> dict | None:
+    def update_rating_row(
+        self, bot_id: int, *, game_id: str | None = None, **fields: Any
+    ) -> dict | None:
+        """更新 (bot_id, game_id) 评分行；不存在则建。game_id 缺省取 bot 的 game_id。"""
         allowed = {
             "rating",
             "rd",
@@ -1080,19 +1248,26 @@ class Store:
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
+            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
             existing = c.execute(
-                "SELECT bot_id FROM ratings WHERE bot_id=?", (bot_id,)
+                "SELECT bot_id FROM ratings WHERE bot_id=? AND game_id=?",
+                (bot_id, gid),
             ).fetchone()
             if not existing:
-                c.execute("INSERT INTO ratings(bot_id) VALUES(?)", (bot_id,))
-            if sets:
-                vals.append(bot_id)
                 c.execute(
-                    f"UPDATE ratings SET {','.join(sets)} WHERE bot_id=?", vals
+                    "INSERT INTO ratings(bot_id, game_id) VALUES(?, ?)",
+                    (bot_id, gid),
+                )
+            if sets:
+                vals.extend([bot_id, gid])
+                c.execute(
+                    f"UPDATE ratings SET {','.join(sets)} WHERE bot_id=? AND game_id=?",
+                    vals,
                 )
             return _row(
                 c.execute(
-                    "SELECT * FROM ratings WHERE bot_id=?", (bot_id,)
+                    "SELECT * FROM ratings WHERE bot_id=? AND game_id=?",
+                    (bot_id, gid),
                 ).fetchone()
             )
 
@@ -1101,6 +1276,8 @@ class Store:
     ) -> list[dict]:
         with self._tx() as c:
             # rating_delta = 当前 rating - 上一条历史评分（升降趋势）；无历史则 NULL
+            # ratings/rating_history 现按 (bot_id, game_id) 复合键——join/subquery 都
+            # 加 game_id 谓词（bot 绑定单一游戏，r.game_id=b.game_id 恰一行）。
             sql = (
                 "SELECT r.bot_id, r.rating, r.rd, r.vol, r.wins, r.losses, "
                 "r.draws, r.net_chips, r.matches_played, r.last_played_at, "
@@ -1108,9 +1285,9 @@ class Store:
                 "b.format, b.os, b.arch, b.is_builtin, b.game_id, "
                 "u.username AS owner_name, u.display_name AS owner_display, "
                 "(SELECT rh.rating FROM rating_history rh "
-                " WHERE rh.bot_id=r.bot_id ORDER BY rh.id DESC "
-                " LIMIT 1 OFFSET 1) AS prev_rating "
-                "FROM ratings r JOIN bots b ON r.bot_id=b.id "
+                " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id "
+                " ORDER BY rh.id DESC LIMIT 1 OFFSET 1) AS prev_rating "
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
                 "WHERE b.is_active=1"
             )
@@ -1158,7 +1335,7 @@ class Store:
             sql = (
                 "SELECT r.bot_id, r.rating, r.rd, r.matches_played, r.last_played_at, "
                 "b.name AS bot_name, b.game_id, b.binary_path, b.is_active, b.is_public, b.is_builtin "
-                "FROM ratings r JOIN bots b ON r.bot_id=b.id "
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE b.is_active=1 AND b.is_public=1 AND b.is_builtin=0 "
                 "AND b.binary_path!=''"
             )
@@ -1183,35 +1360,44 @@ class Store:
             return [_row(r) for r in c.execute(sql, params)]
 
     def count_matches(self, status: str | None = None) -> int:
-        """按 status 统计对局数；status=None 时返回全部。"""
+        """按 status 统计对局数（跨三表求和）；status=None 时返回全部。"""
         with self._tx() as c:
-            if status:
-                row = c.execute(
-                    "SELECT COUNT(*) FROM matches WHERE status=?", (status,)
-                ).fetchone()
-            else:
-                row = c.execute("SELECT COUNT(*) FROM matches").fetchone()
-            return int(row[0]) if row else 0
+            total = 0
+            for gid in ("holdem", "gomoku", "pencil"):
+                tbl = _matches_table(gid)
+                if status:
+                    row = c.execute(
+                        f"SELECT COUNT(*) FROM {tbl} WHERE status=?", (status,)
+                    ).fetchone()
+                else:
+                    row = c.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
+                total += int(row[0]) if row else 0
+            return total
 
     def recover_orphan_matches(self) -> int:
         """启动时清理孤儿对局：把残留的 status=running（无对应内存协程）标 aborted。
 
         服务非正常退出后，DB 里 running 记录的内存 Task/Future 已丢失（尤其
         人类对局的 _human_turns），不清理会永久卡 running、泄漏并发与活跃用户计数。
-        返回受影响行数。
+        遍历三张 per-game 表清理。返回受影响行数。
         """
         from bzplat.backend.store.schema import STATUS_ABORTED
 
         with self._tx() as c:
-            row = c.execute("SELECT COUNT(*) FROM matches WHERE status='running'").fetchone()
-            n = int(row[0]) if row else 0
-            if n == 0:
-                return 0
-            c.execute(
-                "UPDATE matches SET status=?, reason='orphan_after_restart', "
-                "ended_at=datetime('now') WHERE status='running'",
-                (STATUS_ABORTED,),
-            )
+            n = 0
+            for gid in ("holdem", "gomoku", "pencil"):
+                tbl = _matches_table(gid)
+                row = c.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE status='running'"
+                ).fetchone()
+                cnt = int(row[0]) if row else 0
+                if cnt:
+                    c.execute(
+                        f"UPDATE {tbl} SET status=?, reason='orphan_after_restart', "
+                        "ended_at=datetime('now') WHERE status='running'",
+                        (STATUS_ABORTED,),
+                    )
+                    n += cnt
             return n
 
     def upsert_rating(
@@ -1322,32 +1508,36 @@ class Store:
         vol: float,
         matches_played: int,
         reason: str = "",
+        *,
+        game_id: str | None = None,
     ) -> None:
-        """落一条评分快照，并截断保留最近 N 条（N=200）。"""
+        """落一条评分快照（per-game），并截断保留每 (bot,game) 最近 N 条（N=200）。"""
         with self._tx() as c:
+            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
             c.execute(
-                "INSERT INTO rating_history(bot_id, rating, rd, vol, "
-                "matches_played, reason, created_at) VALUES(?,?,?,?,?,?,?)",
-                (bot_id, rating, rd, vol, matches_played, reason, _now()),
+                "INSERT INTO rating_history(bot_id, game_id, rating, rd, vol, "
+                "matches_played, reason, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (bot_id, gid, rating, rd, vol, matches_played, reason, _now()),
             )
-            # 截断：保留每 bot 最近 200 条
+            # 截断：保留每 (bot, game) 最近 200 条
             c.execute(
-                "DELETE FROM rating_history WHERE bot_id=? AND id NOT IN "
-                "(SELECT id FROM rating_history WHERE bot_id=? "
+                "DELETE FROM rating_history WHERE bot_id=? AND game_id=? AND id NOT IN "
+                "(SELECT id FROM rating_history WHERE bot_id=? AND game_id=? "
                 "ORDER BY id DESC LIMIT 200)",
-                (bot_id, bot_id),
+                (bot_id, gid, bot_id, gid),
             )
 
     def list_rating_history(
-        self, bot_id: int, *, limit: int = 100
+        self, bot_id: int, *, limit: int = 100, game_id: str | None = None
     ) -> list[dict]:
-        """返回评分历史时序（旧→新），用于画曲线。"""
+        """返回评分历史时序（旧→新，per-game），用于画曲线。"""
         with self._tx() as c:
+            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
             rows = c.execute(
                 "SELECT id, rating, rd, vol, matches_played, reason, created_at "
-                "FROM rating_history WHERE bot_id=? "
+                "FROM rating_history WHERE bot_id=? AND game_id=? "
                 "ORDER BY id DESC LIMIT ?",
-                (bot_id, max(1, min(limit, 500))),
+                (bot_id, gid, max(1, min(limit, 500))),
             ).fetchall()
             return [_row(r) for r in reversed(rows)]
 
@@ -1422,12 +1612,14 @@ class Store:
                 "VALUES(?,?,?,?)",
                 (user_id, target_type, tid, _now()),
             )
-            # 对 match 点赞顺带 +1 计数
+            # 对 match 点赞顺带 +1 计数（经 matches_index 定位到 per-game 表）
             if target_type == "match":
-                c.execute(
-                    "UPDATE matches SET likes_count = likes_count + 1 WHERE id=?",
-                    (tid,),
-                )
+                tbl = self._match_table_of(c, tid)
+                if tbl:
+                    c.execute(
+                        f"UPDATE {tbl} SET likes_count = likes_count + 1 WHERE id=?",
+                        (tid,),
+                    )
             return True
 
     def unlike(
@@ -1440,10 +1632,12 @@ class Store:
                 (user_id, target_type, tid),
             )
             if cur.rowcount > 0 and target_type == "match":
-                c.execute(
-                    "UPDATE matches SET likes_count = MAX(0, likes_count - 1) WHERE id=?",
-                    (tid,),
-                )
+                tbl = self._match_table_of(c, tid)
+                if tbl:
+                    c.execute(
+                        f"UPDATE {tbl} SET likes_count = MAX(0, likes_count - 1) WHERE id=?",
+                        (tid,),
+                    )
             return cur.rowcount > 0
 
     def is_liked(
@@ -1464,39 +1658,52 @@ class Store:
 
     def incr_match_view(self, match_id: str) -> None:
         with self._tx() as c:
-            c.execute(
-                "UPDATE matches SET views_count = views_count + 1 WHERE id=?",
-                (match_id,),
-            )
+            tbl = self._match_table_of(c, match_id)
+            if tbl:
+                c.execute(
+                    f"UPDATE {tbl} SET views_count = views_count + 1 WHERE id=?",
+                    (match_id,),
+                )
 
     # ── matchpacks（对局数据集下载）──────────────────────────
     def matchpack_months(self, game_id: str | None = None) -> list[dict]:
-        """列出有对局数据的游戏×月份分组（count），用于数据下载页。"""
+        """列出有对局数据的游戏×月份分组（count），用于数据下载页。
+
+        跨三表 UNION ALL（每表 game_id 固定，故 game_id 列直接取自表名）。
+        """
         with self._tx() as c:
-            sql = (
+            base = (
                 "SELECT game_id, substr(created_at,1,7) AS month, COUNT(*) AS cnt "
-                "FROM matches WHERE status='completed' AND created_at IS NOT NULL "
-                "AND substr(created_at,1,7) <> ''"
+                "FROM {tbl} WHERE status='completed' AND created_at IS NOT NULL "
+                "AND substr(created_at,1,7) <> '' GROUP BY game_id, substr(created_at,1,7)"
             )
-            params: list[Any] = []
             if game_id:
-                sql += " AND game_id=?"
-                params.append(game_id)
-            sql += " GROUP BY game_id, month ORDER BY month DESC, game_id"
-            return [_row(r) for r in c.execute(sql, params)]
+                # 单表
+                tbl = _matches_table(game_id)
+                sql = base.format(tbl=tbl) + " ORDER BY month DESC, game_id"
+                return [_row(r) for r in c.execute(sql)]
+            # 跨游戏 UNION ALL（每子查询 GROUP BY，空表不产生行）
+            subs = [base.format(tbl=_matches_table(gid)) for gid in ("holdem", "gomoku", "pencil")]
+            union = " UNION ALL ".join(subs)
+            sql = f"SELECT game_id, month, SUM(cnt) AS cnt FROM ({union}) GROUP BY game_id, month ORDER BY month DESC, game_id"
+            return [_row(r) for r in c.execute(sql)]
 
     def matchpack_rows(
         self, game_id: str, month: str, *, limit: int = 10000
     ) -> list[dict]:
-        """返回某游戏×月份的全部已完成对局（含 replay events），用于打包下载。"""
+        """返回某游戏×月份的全部已完成对局（含 replay events），用于打包下载。
+
+        game_id 必填，直接查该游戏表（match_replays 仍是全局单表，按 match_id join）。
+        """
         with self._tx() as c:
+            tbl = _matches_table(game_id)
             rows = c.execute(
-                "SELECT m.id, m.game_id, m.bot_a_id, m.bot_b_id, m.winner, "
+                f"SELECT m.id, m.game_id, m.bot_a_id, m.bot_b_id, m.winner, "
                 "m.earnings_a, m.earnings_b, m.hands_played, m.total_hands, "
                 "m.match_type, m.created_at, m.ended_at, m.n_dots, "
                 "ba.name AS bot_a_name, bb.name AS bot_b_name, "
                 "r.events_json, r.hands_json "
-                "FROM matches m JOIN bots ba ON m.bot_a_id=ba.id "
+                f"FROM {tbl} m JOIN bots ba ON m.bot_a_id=ba.id "
                 "JOIN bots bb ON m.bot_b_id=bb.id "
                 "LEFT JOIN match_replays r ON r.match_id=m.id "
                 "WHERE m.status='completed' AND m.game_id=? "
@@ -1606,7 +1813,7 @@ class Store:
                 "r.rating, fav.created_at "
                 "FROM favorites fav JOIN bots b ON fav.bot_id=b.id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
-                "LEFT JOIN ratings r ON r.bot_id=b.id "
+                "LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE fav.user_id=? ORDER BY fav.created_at DESC LIMIT ?",
                 (user_id, max(1, min(limit, 200))),
             )]
@@ -1966,6 +2173,12 @@ class Store:
         + owner_a_name/owner_b_name + winner（从 matches 取）。
         """
         with self._tx() as c:
+            # 赛事绑定单一游戏——取其 game_id 定位 per-game 对局表 join winner
+            ct = c.execute(
+                "SELECT game_id FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            gid = (ct["game_id"] if ct and ct["game_id"] else "holdem").strip().lower()
+            tbl = _matches_table(gid)
             rows = c.execute(
                 "SELECT p.*, ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
                 "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
@@ -1976,7 +2189,7 @@ class Store:
                 "JOIN bots bb ON p.bot_b_id=bb.id "
                 "LEFT JOIN users ua ON ba.owner_id=ua.id "
                 "LEFT JOIN users ub ON bb.owner_id=ub.id "
-                "LEFT JOIN matches m ON p.match_id=m.id "
+                f"LEFT JOIN {tbl} m ON p.match_id=m.id "
                 "WHERE p.contest_id=? "
                 "ORDER BY p.stage_idx, p.round_num, p.id",
                 (contest_id,),
@@ -2321,10 +2534,24 @@ class Store:
     # ── 聚合统计（仪表盘） ──────────────────────────────────
 
     def count_stats(self) -> dict:
-        """一次性聚合各表计数 + 对局按状态分组 + 最近趋势。"""
+        """一次性聚合各表计数 + 对局按状态分组 + 最近趋势。
+
+        对局计数跨三张 per-game 表求和（全面解耦 PR3）。
+        """
         with self._tx() as c:
             def one(sql: str, *p: Any) -> int:
                 return int(c.execute(sql, p).fetchone()[0])
+
+            def match_count(status: str | None = None) -> int:
+                """跨三表统计对局数（可选 status 过滤）。"""
+                total = 0
+                for gid in ("holdem", "gomoku", "pencil"):
+                    tbl = _matches_table(gid)
+                    if status:
+                        total += one(f"SELECT COUNT(*) FROM {tbl} WHERE status=?", status)
+                    else:
+                        total += one(f"SELECT COUNT(*) FROM {tbl}")
+                return total
 
             stats = {
                 "users": one("SELECT COUNT(*) FROM users"),
@@ -2332,11 +2559,11 @@ class Store:
                 "users_verified": one("SELECT COUNT(*) FROM users WHERE email_verified=1"),
                 "bots": one("SELECT COUNT(*) FROM bots"),
                 "bots_active": one("SELECT COUNT(*) FROM bots WHERE is_active=1"),
-                "matches": one("SELECT COUNT(*) FROM matches"),
-                "matches_completed": one("SELECT COUNT(*) FROM matches WHERE status='completed'"),
-                "matches_aborted": one("SELECT COUNT(*) FROM matches WHERE status='aborted'"),
-                "matches_running": one("SELECT COUNT(*) FROM matches WHERE status='running'"),
-                "matches_pending": one("SELECT COUNT(*) FROM matches WHERE status='pending'"),
+                "matches": match_count(),
+                "matches_completed": match_count("completed"),
+                "matches_aborted": match_count("aborted"),
+                "matches_running": match_count("running"),
+                "matches_pending": match_count("pending"),
                 "contests": one("SELECT COUNT(*) FROM contests"),
                 "contests_running": one("SELECT COUNT(*) FROM contests WHERE status='running'"),
                 "active_sessions": one(
@@ -2344,15 +2571,25 @@ class Store:
                     _now(),
                 ),
             }
-            # 按对局状态分组
+            # 按对局状态分组（跨三表 UNION ALL 再聚合）
+            subs = [
+                f"SELECT status, COUNT(*) AS n FROM {_matches_table(gid)} GROUP BY status"
+                for gid in ("holdem", "gomoku", "pencil")
+            ]
             rows = c.execute(
-                "SELECT status, COUNT(*) AS n FROM matches GROUP BY status"
+                f"SELECT status, SUM(n) AS n FROM ({' UNION ALL '.join(subs)}) "
+                "GROUP BY status"
             ).fetchall()
             stats["matches_by_status"] = {r["status"]: int(r["n"]) for r in rows}
-            # 最近 7 天每日新对局数
+            # 最近 7 天每日新对局数（跨三表）
+            subs_recent = [
+                f"SELECT substr(created_at,1,10) AS d, COUNT(*) AS n "
+                f"FROM {_matches_table(gid)} WHERE created_at >= date('now','-7 days') "
+                "GROUP BY substr(created_at,1,10)"
+                for gid in ("holdem", "gomoku", "pencil")
+            ]
             recent = c.execute(
-                "SELECT substr(created_at,1,10) AS d, COUNT(*) AS n "
-                "FROM matches WHERE created_at >= date('now','-7 days') "
+                f"SELECT d, SUM(n) AS n FROM ({' UNION ALL '.join(subs_recent)}) "
                 "GROUP BY d ORDER BY d"
             ).fetchall()
             stats["matches_recent_daily"] = [

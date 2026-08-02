@@ -506,20 +506,7 @@ def list_matches(
 def liked_top_matches(request: Request, limit: int = 10):
     """对局点赞排行榜（对标 Botzone，首页用）。必须在 {match_id} 路由前注册。"""
     store = _store(request)
-    lim = max(1, min(limit, 50))
-    with store._tx() as c:
-        rows = c.execute(
-            "SELECT m.id, m.game_id, m.status, m.winner, m.likes_count, "
-            "m.views_count, m.created_at, "
-            "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
-            "bb.name AS bot_b_name, bb.display_name AS bot_b_display "
-            "FROM matches m JOIN bots ba ON m.bot_a_id=ba.id "
-            "JOIN bots bb ON m.bot_b_id=bb.id "
-            "WHERE m.status='completed' AND m.likes_count > 0 "
-            "ORDER BY m.likes_count DESC, m.views_count DESC LIMIT ?",
-            (lim,),
-        ).fetchall()
-        return {"matches": [dict(r) for r in rows]}
+    return {"matches": store.list_liked_top_matches(limit)}
 
 
 @router.get("/api/matches/{match_id}")

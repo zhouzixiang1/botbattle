@@ -83,7 +83,10 @@ CREATE TABLE IF NOT EXISTS contests (
         status IN ('draft','open','running','rest','finished','cancelled'))
 );
 
-CREATE TABLE IF NOT EXISTS matches (
+-- 对局表（全面解耦 PR3：拆每游戏一张表 + matches_index 定位）
+-- 三表结构完全一致（含所有列，游戏专属列在其他游戏中默认 NULL/0），
+-- 便于跨游戏 UNION ALL 聚合。matches_index(id, game_id) 供 get_match(id) 定位。
+CREATE TABLE IF NOT EXISTS matches_holdem (
     id              TEXT    PRIMARY KEY,
     bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
     bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
@@ -99,26 +102,90 @@ CREATE TABLE IF NOT EXISTS matches (
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL DEFAULT 'holdem',
-    n_dots          INTEGER,  -- pencil 点阵边长（仅 pencil 用；NULL=默认 11）
-    human_user_id   INTEGER,  -- 人类对战：人类玩家用户 id（NULL=纯 bot 对局）
-    human_seat      INTEGER,  -- 人类坐哪位（0/1；NULL=纯 bot）
+    n_dots          INTEGER,
+    human_user_id   INTEGER,
+    human_seat      INTEGER,
     started_at      TEXT,
-    ended_at      TEXT,
+    ended_at        TEXT,
     created_at      TEXT    NOT NULL,
-    CONSTRAINT chk_winner CHECK (winner IN (0, 1) OR winner IS NULL),
-    CONSTRAINT chk_status CHECK (status IN ('pending','running','completed','aborted')),
-    CONSTRAINT chk_type CHECK (match_type IN ('challenge','table','contest','ladder','human'))
+    likes_count     INTEGER NOT NULL DEFAULT 0,
+    views_count     INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT chk_winner_h CHECK (winner IN (0, 1) OR winner IS NULL),
+    CONSTRAINT chk_status_h CHECK (status IN ('pending','running','completed','aborted')),
+    CONSTRAINT chk_type_h CHECK (match_type IN ('challenge','table','contest','ladder','human'))
+);
+CREATE TABLE IF NOT EXISTS matches_gomoku (
+    id              TEXT    PRIMARY KEY,
+    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+    hands_played    INTEGER NOT NULL DEFAULT 0,
+    total_hands     INTEGER NOT NULL DEFAULT 70,
+    earnings_a      INTEGER NOT NULL DEFAULT 0,
+    earnings_b      INTEGER NOT NULL DEFAULT 0,
+    winner          INTEGER,
+    reason          TEXT    NOT NULL DEFAULT 'completed',
+    net_bb_a        REAL    NOT NULL DEFAULT 0,
+    match_type      TEXT    NOT NULL DEFAULT 'challenge',
+    status          TEXT    NOT NULL DEFAULT 'pending',
+    game_id         TEXT    NOT NULL DEFAULT 'gomoku',
+    n_dots          INTEGER,
+    human_user_id   INTEGER,
+    human_seat      INTEGER,
+    started_at      TEXT,
+    ended_at        TEXT,
+    created_at      TEXT    NOT NULL,
+    likes_count     INTEGER NOT NULL DEFAULT 0,
+    views_count     INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT chk_winner_g CHECK (winner IN (0, 1) OR winner IS NULL),
+    CONSTRAINT chk_status_g CHECK (status IN ('pending','running','completed','aborted')),
+    CONSTRAINT chk_type_g CHECK (match_type IN ('challenge','table','contest','ladder','human'))
+);
+CREATE TABLE IF NOT EXISTS matches_pencil (
+    id              TEXT    PRIMARY KEY,
+    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
+    hands_played    INTEGER NOT NULL DEFAULT 0,
+    total_hands     INTEGER NOT NULL DEFAULT 70,
+    earnings_a      INTEGER NOT NULL DEFAULT 0,
+    earnings_b      INTEGER NOT NULL DEFAULT 0,
+    winner          INTEGER,
+    reason          TEXT    NOT NULL DEFAULT 'completed',
+    net_bb_a        REAL    NOT NULL DEFAULT 0,
+    match_type      TEXT    NOT NULL DEFAULT 'challenge',
+    status          TEXT    NOT NULL DEFAULT 'pending',
+    game_id         TEXT    NOT NULL DEFAULT 'pencil',
+    n_dots          INTEGER,
+    human_user_id   INTEGER,
+    human_seat      INTEGER,
+    started_at      TEXT,
+    ended_at        TEXT,
+    created_at      TEXT    NOT NULL,
+    likes_count     INTEGER NOT NULL DEFAULT 0,
+    views_count     INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT chk_winner_p CHECK (winner IN (0, 1) OR winner IS NULL),
+    CONSTRAINT chk_status_p CHECK (status IN ('pending','running','completed','aborted')),
+    CONSTRAINT chk_type_p CHECK (match_type IN ('challenge','table','contest','ladder','human'))
+);
+-- 跨游戏对局定位：id → game_id（get_match(id) 先查此表定位到哪张 matches_<game>）
+CREATE TABLE IF NOT EXISTS matches_index (
+    id              TEXT    PRIMARY KEY,
+    game_id         TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS match_replays (
-    match_id        TEXT    PRIMARY KEY REFERENCES matches(id) ON DELETE CASCADE,
+    match_id        TEXT    PRIMARY KEY,
     events_json     TEXT    NOT NULL DEFAULT '[]',
     hands_json      TEXT    NOT NULL DEFAULT '[]',
     updated_at      TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ratings (
-    bot_id          INTEGER PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    game_id         TEXT    NOT NULL DEFAULT 'holdem',
     rating          REAL    NOT NULL DEFAULT 1500.0,
     rd              REAL    NOT NULL DEFAULT 350.0,
     vol             REAL    NOT NULL DEFAULT 0.06,
@@ -127,7 +194,8 @@ CREATE TABLE IF NOT EXISTS ratings (
     draws           INTEGER NOT NULL DEFAULT 0,
     net_chips       INTEGER NOT NULL DEFAULT 0,
     matches_played  INTEGER NOT NULL DEFAULT 0,
-    last_played_at  TEXT
+    last_played_at  TEXT,
+    PRIMARY KEY (bot_id, game_id)
 );
 
 CREATE TABLE IF NOT EXISTS pair_stats (
@@ -149,6 +217,7 @@ CREATE TABLE IF NOT EXISTS pair_stats (
 CREATE TABLE IF NOT EXISTS rating_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    game_id         TEXT    NOT NULL DEFAULT 'holdem',
     rating          REAL    NOT NULL,
     rd              REAL    NOT NULL,
     vol             REAL    NOT NULL,
@@ -156,7 +225,7 @@ CREATE TABLE IF NOT EXISTS rating_history (
     reason          TEXT    NOT NULL DEFAULT '',   -- match_id 或 'contest:<id>' 等
     created_at      TEXT    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, game_id, id DESC);
 
 -- 评论（target_type = match|bot；target_id = match_id 字符串 或 bot_id 整数）
 CREATE TABLE IF NOT EXISTS comments (
@@ -287,7 +356,7 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     round_num       INTEGER NOT NULL DEFAULT 1,
     bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
     bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
-    match_id        TEXT    REFERENCES matches(id) ON DELETE SET NULL,
+    match_id        TEXT,  -- 逻辑外键，指向 matches_<game>.id（经 matches_index 定位）；无 DB 级 FK
     status          TEXT    NOT NULL DEFAULT 'pending',
     stage_idx       INTEGER NOT NULL DEFAULT 0,
     stage_key       TEXT    NOT NULL DEFAULT '',
@@ -331,12 +400,25 @@ CREATE TABLE IF NOT EXISTS contest_templates (
 
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bot_versions_bot ON bot_versions(bot_id);
-CREATE INDEX IF NOT EXISTS idx_matches_bot_a ON matches(bot_a_id);
-CREATE INDEX IF NOT EXISTS idx_matches_bot_b ON matches(bot_b_id);
-CREATE INDEX IF NOT EXISTS idx_matches_owner ON matches(owner_id);
-CREATE INDEX IF NOT EXISTS idx_matches_contest ON matches(contest_id);
-CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
-CREATE INDEX IF NOT EXISTS idx_matches_time ON matches(created_at);
+-- 每游戏对局表的索引（全面解耦 PR3：matches 拆三表）
+CREATE INDEX IF NOT EXISTS idx_mholdem_bot_a ON matches_holdem(bot_a_id);
+CREATE INDEX IF NOT EXISTS idx_mholdem_bot_b ON matches_holdem(bot_b_id);
+CREATE INDEX IF NOT EXISTS idx_mholdem_owner ON matches_holdem(owner_id);
+CREATE INDEX IF NOT EXISTS idx_mholdem_contest ON matches_holdem(contest_id);
+CREATE INDEX IF NOT EXISTS idx_mholdem_status ON matches_holdem(status);
+CREATE INDEX IF NOT EXISTS idx_mholdem_time ON matches_holdem(created_at);
+CREATE INDEX IF NOT EXISTS idx_mgomoku_bot_a ON matches_gomoku(bot_a_id);
+CREATE INDEX IF NOT EXISTS idx_mgomoku_bot_b ON matches_gomoku(bot_b_id);
+CREATE INDEX IF NOT EXISTS idx_mgomoku_owner ON matches_gomoku(owner_id);
+CREATE INDEX IF NOT EXISTS idx_mgomoku_contest ON matches_gomoku(contest_id);
+CREATE INDEX IF NOT EXISTS idx_mgomoku_status ON matches_gomoku(status);
+CREATE INDEX IF NOT EXISTS idx_mgomoku_time ON matches_gomoku(created_at);
+CREATE INDEX IF NOT EXISTS idx_mpencil_bot_a ON matches_pencil(bot_a_id);
+CREATE INDEX IF NOT EXISTS idx_mpencil_bot_b ON matches_pencil(bot_b_id);
+CREATE INDEX IF NOT EXISTS idx_mpencil_owner ON matches_pencil(owner_id);
+CREATE INDEX IF NOT EXISTS idx_mpencil_contest ON matches_pencil(contest_id);
+CREATE INDEX IF NOT EXISTS idx_mpencil_status ON matches_pencil(status);
+CREATE INDEX IF NOT EXISTS idx_mpencil_time ON matches_pencil(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_email_codes_user ON email_codes(user_id, purpose);
 CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id);
