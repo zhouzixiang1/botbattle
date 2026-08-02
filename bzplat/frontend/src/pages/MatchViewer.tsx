@@ -23,9 +23,8 @@ import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/game
 import { isBoardGame } from '@/games'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
-import { reduceEvents, type RawEvent } from '@/components/poker/useMatchState'
-import { reduceGomokuEvents } from '@/components/gomoku/useGomokuState'
-import { reducePencilEvents } from '@/components/pencil/usePencilState'
+import { getGame } from '@/games'
+import type { RawEvent } from '@/games/base'
 import {
   type MatchSeatRow,
   seatInfos,
@@ -135,14 +134,16 @@ export default function MatchViewer() {
   const atLive = stepIdx < 0
   const lag = atLive ? 0 : Math.max(0, total - 1 - cur)
   const seats = seatInfos(match)
-  // 当前可见事件归约（三游戏）：胜者 / 累计 / 步数 / 比分
+  // 当前可见事件归约：经注册表 spec.reduce（消除 gameId=== if-chain）。
+  // kind 区分仍保留用于下方 VM 字段分流（扑克 matchWinner vs 棋类 winner）。
   const visibleVm = useMemo(() => {
     if (total === 0) return null
     const slice = events.slice(0, cur + 1)
-    if (gameId === 'holdem') return { kind: 'holdem' as const, vm: reduceEvents(slice) }
-    if (gameId === 'gomoku') return { kind: 'gomoku' as const, vm: reduceGomokuEvents(slice) }
-    if (gameId === 'pencil') return { kind: 'pencil' as const, vm: reducePencilEvents(slice) }
-    return null
+    const kind = getGame(gameId).kind
+    const vm = getGame(gameId).reduce(slice as RawEvent[])
+    return { kind, vm } as
+      | { kind: 'cards'; vm: { matchWinner: number | null; seats?: { net: number }[] } }
+      | { kind: 'board'; vm: { winner: number | null; moveCount?: number; scores?: number[] } }
   }, [gameId, events, cur, total])
   const finished =
     match?.status === 'completed' ||
@@ -150,24 +151,27 @@ export default function MatchViewer() {
     status === 'match_end' ||
     status === 'replay'
   const eventWinner =
-    visibleVm?.kind === 'holdem' ? visibleVm.vm.matchWinner
-      : visibleVm?.kind === 'gomoku' || visibleVm?.kind === 'pencil' ? visibleVm.vm.winner
+    visibleVm?.kind === 'cards' ? visibleVm.vm.matchWinner
+      : visibleVm?.kind === 'board' ? visibleVm.vm.winner
         : undefined
   const colorLabel = (seat: number) => {
     if (!match) return `座位 ${seat}`
-    if (gameId === 'gomoku') return `${seatHeaderLabel(match, seat as 0 | 1)}（${seat === 0 ? '黑' : '白'}）`
-    if (gameId === 'pencil') return `${seatHeaderLabel(match, seat as 0 | 1)}（${seat === 0 ? '红' : '蓝'}）`
+    // 棋类座位着色（黑白/红蓝）按 spec.kind === 'board' 判定，再细分 gomoku/pencil
+    if (isBoardGame(gameId)) {
+      const colorName = gameId === 'gomoku' ? (seat === 0 ? '黑' : '白') : (seat === 0 ? '红' : '蓝')
+      return `${seatHeaderLabel(match, seat as 0 | 1)}（${colorName}）`
+    }
     return seatHeaderLabel(match, seat as 0 | 1)
   }
   const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
-  const netA = visibleVm?.kind === 'holdem'
-    ? visibleVm.vm.seats[0]?.net
+  const netA = visibleVm?.kind === 'cards'
+    ? visibleVm.vm.seats?.[0]?.net ?? null
     : typeof match?.earnings_a === 'number' ? match.earnings_a : null
-  const netB = visibleVm?.kind === 'holdem'
-    ? visibleVm.vm.seats[1]?.net
+  const netB = visibleVm?.kind === 'cards'
+    ? visibleVm.vm.seats?.[1]?.net ?? null
     : typeof match?.earnings_b === 'number' ? match.earnings_b : null
-  const liveSteps = visibleVm && visibleVm.kind !== 'holdem' ? visibleVm.vm.moveCount : null
-  const pencilScores = visibleVm?.kind === 'pencil' ? visibleVm.vm.scores : null
+  const liveSteps = visibleVm?.kind === 'board' ? visibleVm.vm.moveCount ?? null : null
+  const pencilScores = gameId === 'pencil' && visibleVm?.kind === 'board' ? visibleVm.vm.scores ?? null : null
   const typeBadge = matchTypeBadge(match?.match_type)
 
   // 定速播放定时器（直播+回放共用）：按 SPEEDS 步进；到末尾后直播继续等（保持 playing），

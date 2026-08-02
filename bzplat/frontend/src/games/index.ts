@@ -31,11 +31,17 @@ export function getGame(id: string | null | undefined): GameViewSpec {
   return BY_ID[gid] ?? holdemSpec
 }
 
-/** 规整 game_id（小写）；未知/空回退 holdem（保旧 normalizeGameId 语义）。 */
+/** 已注册 game_id 集合（从 GAMES 派生——新增游戏自动纳入，无需手改字面量三选一）。 */
+const VALID_IDS: ReadonlySet<string> = new Set(GAMES.map((g) => g.id))
+
+/** 规整 game_id（小写）；未知/空回退 holdem（保旧 normalizeGameId 语义）。
+ *
+ * 合法集从注册表派生（曾硬编码 'gomoku'||'pencil'||'holdem' 三选一——新增第 4 游戏
+ * 若忘改此处会被静默回退 holdem）。现在经 VALID_IDS 判断，注册即合法。
+ */
 export function normalizeGameId(id: string | null | undefined): GameId {
   const gid = (id || '').trim().toLowerCase()
-  if (gid === 'gomoku' || gid === 'pencil' || gid === 'holdem') return gid
-  return 'holdem'
+  return (VALID_IDS.has(gid) ? gid : 'holdem') as GameId
 }
 
 /** 游戏显示名。 */

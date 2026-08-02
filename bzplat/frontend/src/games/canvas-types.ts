@@ -7,7 +7,7 @@
  * `GameViewSpec.CanvasRenderer` 是可选字段：若提供，GameCanvas 组件优先用它绘制，
  * 替代默认的 DOM Board。无该字段的游戏继续走原有 DOM 渲染路径（gomoku/pencil 等）。
  */
-import type { RawEvent } from '@/components/poker/useMatchState'
+import type { RawEvent } from '@/games/base'
 
 /** 一个游戏的归一化场景（由 toScene 从 events 归约）。每游戏自定义具体结构。 */
 export type Scene = Record<string, unknown>

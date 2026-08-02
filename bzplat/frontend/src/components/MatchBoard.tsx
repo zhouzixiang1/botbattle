@@ -3,7 +3,7 @@ import { getGame } from '@/games'
 import { normalizeGameId } from '@/lib/games'
 import GameCanvas from './GameCanvas'
 import type { SeatInfo } from '@/games/canvas-types'
-import type { RawEvent } from '@/components/poker/useMatchState'
+import type { RawEvent } from '@/games/base'
 
 type Ev = Record<string, unknown> & { type?: string }
 

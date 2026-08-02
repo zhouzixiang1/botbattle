@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 
-export type RawEvent = Record<string, unknown> & { type?: string }
+import type { RawEvent } from '@/games/base'
 
 export interface GomokuViewModel {
   size: number

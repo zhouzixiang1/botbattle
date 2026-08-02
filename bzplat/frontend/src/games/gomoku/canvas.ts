@@ -2,8 +2,8 @@
  * 五子棋 canvas 渲染器（PR-B：DOM GomokuBoard → canvas + GSAP）。
  * 复用 reduceGomokuEvents（不重写归约）；棋子落子缩放+淡入动画；最后一手标记脉冲。
  */
-import type { RawEvent } from '@/components/gomoku/useGomokuState'
-import { reduceGomokuEvents, type GomokuViewModel } from '@/components/gomoku/useGomokuState'
+import type { RawEvent } from '@/games/base'
+import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
 
 interface GomokuScene extends Scene {

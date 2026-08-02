@@ -1,15 +1,12 @@
 import { useMemo } from 'react'
 
+import type { RawEvent } from '@/games/base'
+
 /* ── 对局事件 → 可视化状态归约 ────────────────────────────────
  * 后端事件不含「下注中的 pot / 当前行动者 / 本街下注」，前端按事件序列
  * 自行累积重建。action.amount 语义：call=本次投入增量、raise/allin=本街
  * 累计下注总额（raise-to）。fold/check=0。
  */
-
-export interface RawEvent {
-  type: string
-  [k: string]: unknown
-}
 
 export interface SeatState {
   chips: number // 当前剩余筹码
@@ -25,7 +22,7 @@ export interface SeatState {
 
 export type Street = 'preflop' | 'flop' | 'turn' | 'river' | 'showdown'
 
-export interface MatchViewModel {
+export interface HoldemViewModel {
   events: RawEvent[]
   hand: number // 当前手号（0-based）
   totalHands: number
@@ -68,7 +65,7 @@ function freshSeats(chips: [number, number] = [20000, 20000]): [SeatState, SeatS
 }
 
 /** 从一串事件归约出当前对局状态 */
-export function reduceEvents(events: RawEvent[]): MatchViewModel {
+export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
   let hand = 0
   let totalHands = 70
   let sbSeat = 0
@@ -77,7 +74,7 @@ export function reduceEvents(events: RawEvent[]): MatchViewModel {
   let pot = 0
   let seats = freshSeats()
   let toAct: number | null = null
-  let lastSettle: MatchViewModel['lastSettle'] = null
+  let lastSettle: HoldemViewModel['lastSettle'] = null
   let matchOver = false
   let matchWinner: number | null = null
   let finalChips: [number, number] | null = null
@@ -88,7 +85,7 @@ export function reduceEvents(events: RawEvent[]): MatchViewModel {
         // 快照：重置后重放其携带的历史事件
         const hist = (ev.events as RawEvent[] | undefined) ?? []
         if (hist.length) {
-          const sub = reduceEvents(hist)
+          const sub = reduceHoldemEvents(hist)
           hand = sub.hand
           totalHands = sub.totalHands
           sbSeat = sub.sbSeat
@@ -276,6 +273,6 @@ export function reduceEvents(events: RawEvent[]): MatchViewModel {
 }
 
 /** hook：传入事件数组，返回当前视图状态 */
-export function useMatchState(events: RawEvent[]) {
-  return useMemo(() => reduceEvents(events), [events])
+export function useHoldemState(events: RawEvent[]) {
+  return useMemo(() => reduceHoldemEvents(events), [events])
 }
