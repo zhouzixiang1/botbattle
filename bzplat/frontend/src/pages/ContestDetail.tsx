@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer } from 'lucide-react'
+import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -15,6 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { ErrorMsg, EmptyState, Loading } from '@/components/ui/status'
+import BracketTree from '@/components/contest/BracketTree'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
 
@@ -58,6 +59,7 @@ interface Entry {
 interface Pairing {
   id: number
   round_num?: number
+  bracket_slot?: number | null
   bot_a_id: number
   bot_b_id: number
   match_id?: string | null
@@ -174,6 +176,8 @@ export default function ContestDetail() {
   }
 
   const stagePairings = pairings.filter((p) => (p.stage_idx ?? 0) === stageTab)
+  const curStageType = stages[stageTab]?.type as string | undefined
+  const isElimStage = curStageType === 'single_elimination' || curStageType === 'double_elimination'
 
   if (!contest) {
     return (
@@ -372,18 +376,66 @@ export default function ContestDetail() {
           对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab + 1}`}` : ''}
         </h3>
       </div>
-      <div className="mt-2 space-y-1.5">
-        {stagePairings.length === 0 ? (
-          <Card><EmptyState text="暂无对阵" icon={<Swords className="size-7 opacity-40" />} /></Card>
-        ) : (
-          stagePairings.map((p) => {
-            const w = p.match_winner
-            return (
-              <Card key={p.id}>
-                <CardContent className="flex flex-wrap items-center gap-2 py-2.5">
-                  <Badge variant="secondary" className="text-[10px]">R{p.round_num ?? 1}</Badge>
-                  {p.group_id && <Badge variant="outline" className="text-[10px]">{p.group_id}</Badge>}
-                  <div className="flex items-center gap-1.5 text-sm">
+      {stagePairings.length === 0 ? (
+        <Card className="mt-2"><EmptyState text="暂无对阵" icon={<Swords className="size-7 opacity-40" />} /></Card>
+      ) : isElimStage ? (
+        // 淘汰赛：树状对阵图（按 bracket_slot 排列，胜者高亮，横向滚动+轮次折叠）
+        <div className="mt-2">
+          <BracketTree pairings={stagePairings} />
+        </div>
+      ) : (
+        // swiss/循环/分组：按轮次/分组折叠的列表（大规模自动收起）
+        <PairingFoldedList pairings={stagePairings} />
+      )}
+    </PageStub>
+  )
+}
+
+/** swiss/循环/分组的对阵展示：按 round_num（或 group_id）折叠分组，大规模默认收起。 */
+function PairingFoldedList({ pairings }: { pairings: Pairing[] }) {
+  // 按 group_id 优先分组（分组赛），否则按 round_num（swiss/循环）
+  const groups = useMemo(() => {
+    const hasGroup = pairings.some((p) => p.group_id)
+    const keyFn = hasGroup
+      ? (p: Pairing) => p.group_id || '—'
+      : (p: Pairing) => `第 ${(p.round_num ?? 1)} 轮`
+    const map = new Map<string, Pairing[]>()
+    for (const p of pairings) {
+      const k = keyFn(p)
+      if (!map.has(k)) map.set(k, [])
+      map.get(k)!.push(p)
+    }
+    return Array.from(map.entries())
+  }, [pairings])
+
+  // 大规模（>6 组或任一组 >12 场）默认全部收起
+  const big = groups.length > 6 || pairings.length > 60
+  const [open, setOpen] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(groups.map(([k]) => [k, !big])),
+  )
+
+  return (
+    <div className="mt-2 space-y-2">
+      {groups.map(([k, ps]) => (
+        <Card key={k}>
+          <button
+            type="button"
+            onClick={() => setOpen((o) => ({ ...o, [k]: !o[k] }))}
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm font-medium text-foreground hover:bg-accent"
+          >
+            {open[k] ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+            <span>{k}</span>
+            <Badge variant="secondary" className="text-[10px]">{ps.length} 场</Badge>
+            <span className="ml-auto text-xs text-muted-foreground">
+              {ps.filter((p) => p.status === 'completed').length} 已完成
+            </span>
+          </button>
+          {open[k] && (
+            <div className="space-y-1.5 border-t border-border px-2 py-2">
+              {ps.map((p) => {
+                const w = p.match_winner
+                return (
+                  <div key={p.id} className="flex flex-wrap items-center gap-2 rounded px-2 py-1.5 text-sm">
                     <Link to={`/bot/${p.bot_a_id}`} className={`hover:text-primary ${w === 0 ? 'font-semibold text-success' : w === 1 ? 'text-muted-foreground' : 'text-foreground'}`}>
                       {p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`}
                     </Link>
@@ -391,21 +443,21 @@ export default function ContestDetail() {
                     <Link to={`/bot/${p.bot_b_id}`} className={`hover:text-primary ${w === 1 ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'}`}>
                       {p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
                     </Link>
+                    <Badge variant={p.status === 'completed' ? 'default' : p.status === 'aborted' ? 'destructive' : 'secondary'} className="text-[10px]">
+                      {p.status}
+                    </Badge>
+                    {p.match_id && (
+                      <Button asChild variant="ghost" size="sm" className="ml-auto gap-1 text-primary">
+                        <Link to={`/match/${p.match_id}`}>查看</Link>
+                      </Button>
+                    )}
                   </div>
-                  <Badge variant={p.status === 'completed' ? 'default' : p.status === 'aborted' ? 'destructive' : 'secondary'} className="text-[10px]">
-                    {p.status}
-                  </Badge>
-                  {p.match_id && (
-                    <Button asChild variant="ghost" size="sm" className="ml-auto gap-1 text-primary">
-                      <Link to={`/watch/${p.match_id}`}>观战</Link>
-                    </Button>
-                  )}
-                </CardContent>
-              </Card>
-            )
-          })
-        )}
-      </div>
-    </PageStub>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
   )
 }
