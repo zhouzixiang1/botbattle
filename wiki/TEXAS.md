@@ -82,7 +82,7 @@ Botzone 原页：播放器、裁判程序、Python 样例程序：**dhbloo**。
 
 ### 牌局进行流程
 
-一场比赛包括多个小局，每个小局为独立的手牌，并且每小局所有玩家**起始筹码固定为 20000**（Botzone；本平台筹码是否跨手延续见 [§5](#与-botzone-差异一览)）。
+一场比赛包括多个小局，每个小局为独立的手牌，并且每小局所有玩家**起始筹码固定为 20000**（每手复位，不跨手累积——对齐 Botzone）。每手结算的**净输赢累加**为整场累计净筹码，最终按累计净筹码判定胜负（净筹码高者胜，相等为平局）。
 
 首先，被选定为小盲注和大盲注的玩家分别下小盲注（50）和大盲注（100）的筹码。之后每个玩家均被发到 **2 张底牌**，并进入叫注环节。
 
@@ -361,7 +361,7 @@ print(json.dumps({"response": action}))
 |----|----------------------|-----------------|
 | 进程模型 | 每回合启停；聚合 `requests` / `responses` | **整场长驻**，一行一条 JSON |
 | 默认手数 | 50（`max_hand`） | **70**（可配 `match_config.hands`） |
-| 每手筹码 | **每手固定 20000 复位** | 引擎按 `starting_stack` 开局，**跨手延续剩余筹码**（直至一方码尽或手数用尽） |
+| 每手筹码 | **每手固定 20000 复位** | **同左**：每手复位 20000，不跨手累积；按各手净输赢累加（累计净筹码）判定胜负 |
 | 决策时限 | 约 1s/步 | 管理员可配（默认常 60s） |
 | Request | 大 JSON：`my_cards` / `history` / `total_win_chips`… | 紧凑：`mc` / `pc` / `hist` / `c` / `o` / `to`… |
 | Response | **整数** `-1/-2/0/>0`（raise=**增量**） | `{"a":"f\|c\|k\|r\|all","x"?}`，`r` 的 `x`=**raise-to-total** |
@@ -437,4 +437,4 @@ def min_raise_to(current_bet, bb):
 2. 本地快照：`refs/botzone/TexasHoldem2p.html`
 3. 站内 [协议规范](#/wiki?slug=protocol)、[Bot 开发指南](#/wiki?slug=bot-dev)、[对局](#/wiki?slug=match)
 4. 参考裁判：[`samples/judges/`](../samples/judges/)
-5. 牌型图：[`wiki/assets/TexasHoldemHandType.jpg`](assets/TexasHoldemHandType.jpg)
+5. 牌型图：`/wiki-assets/TexasHoldemHandType.jpg`

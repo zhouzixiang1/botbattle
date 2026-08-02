@@ -99,7 +99,10 @@ class MatchSession:
         self.rng = rng or random.Random()
         self.on_event = on_event
 
+        # Botzone 计分：每手筹码复位为 starting_stack（不跨手累积），
+        # 最终比的是 self.net（各手净输赢累加），不是最终累积筹码。
         self.chips = [starting_stack, starting_stack]
+        self.net = [0, 0]  # 累计净输赢（= 各手 deltas 之和），赛事/编排层据此排名
         self.hand_results: list[HandResult] = []  # 兼容旧名；即 rounds
         self.events: list[dict[str, Any]] = []
 
@@ -141,30 +144,25 @@ class MatchSession:
     async def run_async(self, decide: DecideFn) -> MatchResult:
         crash_loser: int | None = None
         for h in range(self.num_hands):
-            if self.chips[0] <= 0 or self.chips[1] <= 0:
-                break
+            # Botzone 计分：每手筹码复位为 starting_stack（不跨手累积，不因归零提前结束）
+            self.chips = [self.starting_stack, self.starting_stack]
             try:
                 await self._play_hand(h, decide)
             except BotCrashedError:
-                # 对齐权威裁判：bot 崩溃不可恢复 → 判负（对手赢全部剩余筹码），不中止整场。
+                # 对齐权威裁判：bot 崩溃不可恢复 → 判负（本手全筹码输给对手），不中止整场。
                 # _call_decide 抛 BotCrashedError 时，_to_act 是崩溃方的对手视角；
                 # 但 decide(player_idx) 的 player_idx 才是崩溃方。用 _to_act 推断：
                 # _call_decide 在 _betting_round 里被 _to_act 调用，崩溃方 = _to_act。
-                # 这里无法精确取到崩溃方（异常已抛出），但 holdem 多手——崩了就把
-                # 当前 _to_act 视为崩溃方（它在被请求决策时崩）。
-                # 用 self._to_act 作为崩溃方（谁轮到行动谁崩）。
                 crash_loser = self._to_act
+                # 本手判负：崩溃方 net 扣全筹码，对手得全筹码（与 botzone 一致）
+                self.net[crash_loser] -= self.starting_stack
+                self.net[1 - crash_loser] += self.starting_stack
                 break
-        if crash_loser is not None:
-            # 崩溃方筹码清零，对手获得全部（判负）
-            winner = 1 - crash_loser
-            self.chips[winner] += self.chips[crash_loser]
-            self.chips[crash_loser] = 0
         self._emit(
             "match_end",
             {
                 "hands_played": len(self.hand_results),
-                "final_chips": list(self.chips),
+                "final_chips": list(self.net),  # Botzone 计分：累计净输赢
                 "winner": (1 - crash_loser) if crash_loser is not None else None,
                 "reason": "crash" if crash_loser is not None else None,
             },
@@ -172,7 +170,7 @@ class MatchSession:
         return MatchResult(
             rounds_played=len(self.hand_results),
             rounds=list(self.hand_results),
-            final_chips=list(self.chips),
+            final_chips=list(self.net),  # Botzone 计分：累计净输赢（编排层 sum(deltas) 与之等价）
             events=list(self.events),
         )
 
@@ -740,6 +738,9 @@ class MatchSession:
         after = [self._players[0].chips, self._players[1].chips]
         deltas = [after[0] - before[0], after[1] - before[1]]
         self.chips = after
+        # Botzone 计分：本手净输赢累加进整场 net（每手复位筹码，比累计净输赢）
+        self.net[0] += deltas[0]
+        self.net[1] += deltas[1]
 
         result = HandResult(
             hand_index=self._hand,
@@ -759,7 +760,8 @@ class MatchSession:
                 "hand": self._hand,
                 "winners": winners,
                 "deltas": deltas,
-                "chips": list(self.chips),
+                "chips": list(self.chips),       # 本手复位后的筹码（手内显示用）
+                "net": list(self.net),           # Botzone 计分：累计净输赢（赛事排名用）
                 "pot": result.pot,
                 "board": [str(c) for c in self._board],
                 "reason": reason,

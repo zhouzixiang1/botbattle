@@ -384,12 +384,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     return False
         return True
 
-    for _gid, _suffix in (("holdem", "holdem"), ("gomoku", "gomoku"), ("pencil", "pencil")):
-        _tbl = f"matches_{_suffix}"
+    # 解耦审计 P0：从 games 注册表派生 game_id 列表（不得硬编码 ("holdem","gomoku","pencil")），
+    # 否则新增第 4 游戏会静默漏掉 FK 重建 → delete_bot 在该表崩 FOREIGN KEY constraint failed。
+    for _gid in _all_game_ids():
+        _tbl = _matches_table(_gid)
         if _tbl in tables and not _match_fk_has_set_null(conn, _tbl):
             # FK 非 SET NULL → 重建（对局数据丢弃，与分表迁移一致）
             conn.execute(f"DROP TABLE IF EXISTS {_tbl}")
-            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_suffix, gdef=_gid))
+            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_gid, gdef=_gid))
             # 清理 matches_index 中指向该表的残留定位（表已空）
             conn.execute(
                 "DELETE FROM matches_index WHERE game_id=?", (_gid,)

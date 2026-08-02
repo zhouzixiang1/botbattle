@@ -60,9 +60,11 @@ def _match_config(c: dict) -> dict:
     except (json.JSONDecodeError, TypeError):
         cfg = {}
     if not cfg:
-        # 向后兼容：旧比赛无 match_config，德扑用 hands_per_match
-        hpm = int(c.get("hands_per_match") or 70)
-        if hpm and c.get("game_id", "holdem") == "holdem":
+        # 向后兼容：旧比赛无 match_config，德扑用 hands_per_match 列兜底
+        # （仅 holdem 行有该列显式值；非 holdem 行 hands_per_match 恒为默认 70 但无意义，
+        # 故只认非零显式值——解耦审计 I2：不再按 game_id 名分支）
+        hpm = int(c.get("hands_per_match") or 0)
+        if hpm:
             cfg = {"hands": hpm}
     return cfg if isinstance(cfg, dict) else {}
 
@@ -233,13 +235,31 @@ class ContestManager:
             return FULL_RR_MAX_N
 
     def _guard_full_rr(self, stages: list[dict], n: int) -> None:
+        """人数护栏：防止超大规模循环赛静默生成海量对局（@500 全员单循环=124750 场）。
+
+        - round_robin / double_round_robin：全员互打，校验总人数 n ≤ limit。
+        - group_round_robin / group_double_round_robin：组内循环，校验**每组**人数
+          （蛇形分组后每组 ≈ ceil(n/group_count)）≤ limit。审计补漏：原护栏漏掉 group_*
+          变体，500 人 group_drr=62000 场会静默触发压垮编排。
+        """
+        import math
+
         limit = self._full_rr_max_n()
         for st in stages:
             t = st.get("type") or ""
-            if t in ("round_robin", "double_round_robin") and n > limit:
-                raise ValueError(
-                    f"全员{t} 人数 {n} 超过上限 {limit}，请改用 Swiss/分组模板"
-                )
+            if t in ("round_robin", "double_round_robin"):
+                if n > limit:
+                    raise ValueError(
+                        f"全员{t} 人数 {n} 超过上限 {limit}，请改用 Swiss/分组模板"
+                    )
+            elif t in ("group_round_robin", "group_double_round_robin"):
+                gc = max(1, int(st.get("group_count") or 4))
+                per_group = math.ceil(n / gc)
+                if per_group > limit:
+                    raise ValueError(
+                        f"{t} 每组人数 {per_group}（{n}人÷{gc}组）超过上限 {limit}，"
+                        f"请增加 group_count 或改用 Swiss 模板"
+                    )
 
     def _assert_engine(self, game_id: str) -> None:
         if game_id not in REGISTERED_ENGINES:
@@ -359,9 +379,8 @@ class ContestManager:
             }
             if "hands" in cfg:
                 kw["hands"] = int(cfg["hands"])
-            elif gid == "holdem":
-                # 向后兼容：旧 holdem 比赛无 match_config.hands，用 hands_per_match 列
-                kw["hands"] = int(c.get("hands_per_match") or 70)
+            # 解耦审计 I1：原 elif gid=="holdem" 死代码已删——_match_config() 已在 L62-67
+            # 把旧 holdem 行的 hands_per_match 兜底进 cfg["hands"]，故此处 cfg 必已含 hands（若有）。
             if "n_dots" in cfg and cfg["n_dots"] is not None:
                 kw["n_dots"] = int(cfg["n_dots"])
             mid = await self.orch.challenge(
