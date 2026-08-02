@@ -397,23 +397,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "DELETE FROM matches_index WHERE game_id=?", (_gid,)
             )
 
-    # ── contest_* 表 bot FK 加 CASCADE（审计 P0：delete_bot 被 contest FK RESTRICT 阻断）──
-    # contest_entries / contest_pairings / contest_stage_results 的 bot FK 旧为 NO ACTION，
-    # 删 bot 时若该 bot 报名/对阵/有成绩过会崩。改为 ON DELETE CASCADE（删 bot → 清其赛事数据）。
-    def _bot_fk_is_cascade(conn, table: str) -> bool:
+    # ── contest_* 表 bot FK 改 SET NULL + entry 身份列（预赛/决赛 P0：删 bot 不得抹成绩）──
+    # 旧：bot FK 为 CASCADE（删 bot → 清报名/对阵/成绩）。新：SET NULL（删 bot → bot_id 置空，
+    # entry/pairing/stage_results 保留，历史成绩不丢）。同时加 entry 身份列：
+    #   contest_pairings.entry_a_id/entry_b_id（排名键，换 Bot 不丢分）
+    #   contest_stage_results.entry_id（唯一键改 entry）
+    def _bot_fk_is_set_null(conn, table: str) -> bool:
+        """该表所有 bots FK 都已带 ON DELETE SET NULL。"""
         for row in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall():
-            if row["table"] == "bots" and (row["on_delete"] or "").upper() != "CASCADE":
+            if row["table"] == "bots" and (row["on_delete"] or "").upper() != "SET NULL":
                 return False
         return True
 
-    # 各表（含列定义）的重建模板；列与 SCHEMA 一致，仅 bot FK 加 ON DELETE CASCADE
+    # 各表重建模板：bot FK = SET NULL + 新增 entry 身份列。列与 SCHEMA 一致。
     _CONTEST_TABLE_REBUILDS = {
         "contest_entries": (
             "CREATE TABLE {n}_new ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE, "
             "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
-            "bot_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
+            "bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "  # SET NULL：删 bot 留 entry
             "registered_at TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', "
             "seed INTEGER NOT NULL DEFAULT 0, eliminated INTEGER NOT NULL DEFAULT 0, "
             "dispatched_at TEXT)",
@@ -424,8 +427,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE, "
             "round_num INTEGER NOT NULL DEFAULT 1, "
-            "bot_a_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
-            "bot_b_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
+            "entry_a_id INTEGER, entry_b_id INTEGER, "  # P0：entry 身份键（换 Bot 不丢分）
+            "bot_a_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "
+            "bot_b_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "
             "match_id TEXT, status TEXT NOT NULL DEFAULT 'pending', "
             "stage_idx INTEGER NOT NULL DEFAULT 0, stage_key TEXT NOT NULL DEFAULT '', "
             "group_id TEXT NOT NULL DEFAULT '', bracket_slot INTEGER, color_first INTEGER NOT NULL DEFAULT 0)",
@@ -437,39 +441,47 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE, "
             "stage_idx INTEGER NOT NULL, stage_key TEXT NOT NULL DEFAULT '', "
-            "bot_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
+            "entry_id INTEGER, "  # P0：排名键改 entry（唯一键含 entry_id）
+            "bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "
             "points REAL NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, "
             "draws INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, "
             "net_chips INTEGER NOT NULL DEFAULT 0, group_id TEXT NOT NULL DEFAULT '', "
-            "rank_in_group INTEGER, payload_json TEXT NOT NULL DEFAULT '{{}}', "
-            "UNIQUE(contest_id, stage_idx, bot_id))",
+            "rank_in_group INTEGER, payload_json TEXT NOT NULL DEFAULT '{{}}')",
             "id, contest_id, stage_idx, stage_key, bot_id, points, wins, draws, losses, "
             "net_chips, group_id, rank_in_group, payload_json",
         ),
     }
     for _ctable, (_ddl_tpl, _cols) in _CONTEST_TABLE_REBUILDS.items():
-        if _ctable in tables and not _bot_fk_is_cascade(conn, _ctable):
-            # 清理上次失败残留的 _new 表（保幂等）
-            conn.execute(f"DROP TABLE IF EXISTS {_ctable}_new")
-            # 取实际存在的列（旧库可能少列），只迁移都有的
-            _have = _table_cols(conn, _ctable)
-            _present = [c.strip() for c in _cols.split(",") if c.strip() in _have]
-            _col_list = ", ".join(_present)
-            conn.execute(_ddl_tpl.format(n=_ctable))
-            if _col_list:
-                conn.execute(
-                    f"INSERT INTO {_ctable}_new ({_col_list}) "
-                    f"SELECT {_col_list} FROM {_ctable}"
-                )
+        # 触发重建：FK 非 SET NULL，或新身份列缺失
+        _need = _ctable not in tables or not _bot_fk_is_set_null(conn, _ctable)
+        if _ctable == "contest_pairings" and _ctable in tables:
+            _need = _need or "entry_a_id" not in _table_cols(conn, _ctable)
+        if _ctable == "contest_stage_results" and _ctable in tables:
+            _need = _need or "entry_id" not in _table_cols(conn, _ctable)
+        if not _need:
+            continue
+        # 清理上次失败残留的 _new 表（保幂等）
+        conn.execute(f"DROP TABLE IF EXISTS {_ctable}_new")
+        # 取实际存在的列（旧库可能少列），只迁移都有的
+        _have = _table_cols(conn, _ctable) if _ctable in tables else set()
+        _present = [c.strip() for c in _cols.split(",") if c.strip() in _have]
+        _col_list = ", ".join(_present)
+        conn.execute(_ddl_tpl.format(n=_ctable))
+        if _col_list:
+            conn.execute(
+                f"INSERT INTO {_ctable}_new ({_col_list}) "
+                f"SELECT {_col_list} FROM {_ctable}"
+            )
+        if _ctable in tables:
             conn.execute(f"DROP TABLE {_ctable}")
-            conn.execute(f"ALTER TABLE {_ctable}_new RENAME TO {_ctable}")
-            # 重建索引（SCHEMA 的 IF NOT EXISTS 不会对已 DROP 的表生效，手动补）
-            if _ctable == "contest_entries":
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_entries_c ON contest_entries(contest_id)")
-            elif _ctable == "contest_pairings":
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_pairings_c ON contest_pairings(contest_id)")
-            elif _ctable == "contest_stage_results":
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(contest_id)")
+        conn.execute(f"ALTER TABLE {_ctable}_new RENAME TO {_ctable}")
+        # 重建索引（SCHEMA 的 IF NOT EXISTS 不会对已 DROP 的表生效，手动补）
+        if _ctable == "contest_entries":
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_entries_c ON contest_entries(contest_id)")
+        elif _ctable == "contest_pairings":
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_pairings_c ON contest_pairings(contest_id)")
+        elif _ctable == "contest_stage_results":
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(contest_id)")
 
     # ── per-game matches 表自动建（解耦审计：让"新增第 4 游戏"真正零改动 DB）────────
     # schema.py 里 matches_holdem/gomoku/pencil 三张表是字面 CREATE 语句；新增注册游戏
@@ -2365,15 +2377,20 @@ class Store:
         group_id: str = "",
         bracket_slot: int | None = None,
         color_first: int = 0,
+        entry_a_id: int | None = None,
+        entry_b_id: int | None = None,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
-                "INSERT INTO contest_pairings(contest_id, round_num, bot_a_id, "
-                "bot_b_id, match_id, status, stage_idx, stage_key, group_id, "
-                "bracket_slot, color_first) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO contest_pairings(contest_id, round_num, entry_a_id, "
+                "entry_b_id, bot_a_id, bot_b_id, match_id, status, stage_idx, "
+                "stage_key, group_id, bracket_slot, color_first) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     contest_id,
                     round_num,
+                    entry_a_id,
+                    entry_b_id,
                     bot_a_id,
                     bot_b_id,
                     match_id,
@@ -2439,13 +2456,16 @@ class Store:
             return [_row(r) for r in rows]
 
     def contest_entries_named(self, contest_id: int) -> list[dict]:
-        """返回报名（带 bot 名/owner 名 + seed/group/eliminated）。"""
+        """返回报名（带 bot 名/owner 名 + seed/group/eliminated）。
+
+        LEFT JOIN bots：bot_id 现可为 NULL（删 bot 后保留 entry，P0 SET NULL）。
+        """
         with self._tx() as c:
             rows = c.execute(
                 "SELECT e.*, b.name AS bot_name, b.display_name AS bot_display, "
                 "b.game_id, u.username AS owner_name, u.display_name AS owner_display "
                 "FROM contest_entries e "
-                "JOIN bots b ON e.bot_id=b.id "
+                "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN users u ON e.user_id=u.id "
                 "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at",
                 (contest_id,),
@@ -2457,6 +2477,8 @@ class Store:
             "match_id",
             "status",
             "round_num",
+            "entry_a_id",
+            "entry_b_id",
             "bot_a_id",
             "bot_b_id",
             "stage_idx",
@@ -2488,8 +2510,9 @@ class Store:
         self,
         contest_id: int,
         stage_idx: int,
-        bot_id: int,
+        entry_id: int,
         *,
+        bot_id: int | None = None,
         stage_key: str = "",
         points: float = 0,
         wins: int = 0,
@@ -2503,18 +2526,19 @@ class Store:
         with self._tx() as c:
             c.execute(
                 "INSERT INTO contest_stage_results"
-                "(contest_id, stage_idx, stage_key, bot_id, points, wins, draws, "
-                "losses, net_chips, group_id, rank_in_group, payload_json) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(contest_id, stage_idx, bot_id) DO UPDATE SET "
-                "stage_key=excluded.stage_key, points=excluded.points, "
-                "wins=excluded.wins, draws=excluded.draws, losses=excluded.losses, "
-                "net_chips=excluded.net_chips, group_id=excluded.group_id, "
-                "rank_in_group=excluded.rank_in_group, "
+                "(contest_id, stage_idx, stage_key, entry_id, bot_id, points, wins, "
+                "draws, losses, net_chips, group_id, rank_in_group, payload_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(contest_id, stage_idx, entry_id) DO UPDATE SET "
+                "stage_key=excluded.stage_key, bot_id=excluded.bot_id, "
+                "points=excluded.points, wins=excluded.wins, draws=excluded.draws, "
+                "losses=excluded.losses, net_chips=excluded.net_chips, "
+                "group_id=excluded.group_id, rank_in_group=excluded.rank_in_group, "
                 "payload_json=excluded.payload_json",
                 (
-                    contest_id, stage_idx, stage_key, bot_id, points, wins,
-                    draws, losses, net_chips, group_id, rank_in_group, payload_json,
+                    contest_id, stage_idx, stage_key, entry_id, bot_id, points,
+                    wins, draws, losses, net_chips, group_id, rank_in_group,
+                    payload_json,
                 ),
             )
 

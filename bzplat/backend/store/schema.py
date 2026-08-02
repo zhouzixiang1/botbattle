@@ -341,7 +341,7 @@ CREATE TABLE IF NOT EXISTS contest_entries (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     registered_at   TEXT    NOT NULL,
     group_id        TEXT    NOT NULL DEFAULT '',
     seed            INTEGER NOT NULL DEFAULT 0,
@@ -354,8 +354,10 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
     round_num       INTEGER NOT NULL DEFAULT 1,
-    bot_a_id        INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-    bot_b_id        INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    entry_a_id      INTEGER,
+    entry_b_id      INTEGER,
+    bot_a_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     match_id        TEXT,  -- 逻辑外键，指向 matches_<game>.id（经 matches_index 定位）；无 DB 级 FK
     status          TEXT    NOT NULL DEFAULT 'pending',
     stage_idx       INTEGER NOT NULL DEFAULT 0,
@@ -370,7 +372,8 @@ CREATE TABLE IF NOT EXISTS contest_stage_results (
     contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
     stage_idx       INTEGER NOT NULL,
     stage_key       TEXT    NOT NULL DEFAULT '',
-    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    entry_id        INTEGER,
+    bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     points          REAL    NOT NULL DEFAULT 0,
     wins            INTEGER NOT NULL DEFAULT 0,
     draws           INTEGER NOT NULL DEFAULT 0,
@@ -379,7 +382,7 @@ CREATE TABLE IF NOT EXISTS contest_stage_results (
     group_id        TEXT    NOT NULL DEFAULT '',
     rank_in_group   INTEGER,
     payload_json    TEXT    NOT NULL DEFAULT '{}',
-    UNIQUE(contest_id, stage_idx, bot_id)
+    UNIQUE(contest_id, stage_idx, entry_id)
 );
 
 CREATE TABLE IF NOT EXISTS platform_settings (
