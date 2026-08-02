@@ -457,10 +457,10 @@ CONTEST_CANCELLED = "cancelled"
 # 已注册对战引擎（未注册则 contest start / challenge 拒绝）
 # schema.py 是无 import 的纯常量模块（为破循环依赖不能从 registry 派生），
 # 此字面量是 registry 的镜像——由 games/__init__.py 启动断言 + test_schema_frozensets_match_registry 守护不漂移。
-REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
+REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil", "reversi"})  # allow-game-fallback
 
 # 合法 game_id（与 REGISTERED_ENGINES 镜像，守护测试白名单）
-VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
+VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil", "reversi"})  # allow-game-fallback
 
 # ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────
 # 经验奖励：各类活动获得的经验
