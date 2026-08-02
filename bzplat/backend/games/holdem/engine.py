@@ -21,6 +21,7 @@ from typing import Any, Callable
 from bzplat.backend.games.holdem.cards import Card, Deck, compare_hands
 from bzplat.backend.games.holdem.result import HandResult, MatchResult, RoundResult
 from bzplat.backend.games.holdem import protocol as proto
+from bzplat.backend.runtime.binary_runner import BotCrashedError
 
 STARTING_STACK = 20_000
 SMALL_BLIND = 50
@@ -138,15 +139,34 @@ class MatchSession:
 
     # ------------------------------------------------------------------ public
     async def run_async(self, decide: DecideFn) -> MatchResult:
+        crash_loser: int | None = None
         for h in range(self.num_hands):
             if self.chips[0] <= 0 or self.chips[1] <= 0:
                 break
-            await self._play_hand(h, decide)
+            try:
+                await self._play_hand(h, decide)
+            except BotCrashedError:
+                # 对齐权威裁判：bot 崩溃不可恢复 → 判负（对手赢全部剩余筹码），不中止整场。
+                # _call_decide 抛 BotCrashedError 时，_to_act 是崩溃方的对手视角；
+                # 但 decide(player_idx) 的 player_idx 才是崩溃方。用 _to_act 推断：
+                # _call_decide 在 _betting_round 里被 _to_act 调用，崩溃方 = _to_act。
+                # 这里无法精确取到崩溃方（异常已抛出），但 holdem 多手——崩了就把
+                # 当前 _to_act 视为崩溃方（它在被请求决策时崩）。
+                # 用 self._to_act 作为崩溃方（谁轮到行动谁崩）。
+                crash_loser = self._to_act
+                break
+        if crash_loser is not None:
+            # 崩溃方筹码清零，对手获得全部（判负）
+            winner = 1 - crash_loser
+            self.chips[winner] += self.chips[crash_loser]
+            self.chips[crash_loser] = 0
         self._emit(
             "match_end",
             {
                 "hands_played": len(self.hand_results),
                 "final_chips": list(self.chips),
+                "winner": (1 - crash_loser) if crash_loser is not None else None,
+                "reason": "crash" if crash_loser is not None else None,
             },
         )
         return MatchResult(

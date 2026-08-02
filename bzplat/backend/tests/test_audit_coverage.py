@@ -142,9 +142,12 @@ def test_bot_crashed_aborts_normal_match(store: Store):
 # ── gomoku 引擎层传播 BotCrashedError（审计 P0-1，棋类引擎吞异常回归保护）─────
 
 
-def test_gomoku_engine_propagates_bot_crashed():
-    """gomoku 引擎的 run_async 在 decide 抛 BotCrashedError 时必须向上传播，
-    而非吞成普通落子错误判对手赢（reason=error）。"""
+def test_gomoku_engine_crash_judges_defeat():
+    """gomoku 引擎：BotCrashedError 对齐裁判→判负（对手赢），不中止整场向上抛。
+
+    原审计要求传播（防被 except Exception 吞成默认动作死磕）；后续对齐权威裁判时
+    改为崩溃=判负（与 pencil 一致），故此处断言判负而非抛错。
+    """
     from bzplat.backend.engine.gomoku import GomokuSession
 
     sess = GomokuSession()
@@ -152,8 +155,10 @@ def test_gomoku_engine_propagates_bot_crashed():
     def crashing_decide(player_idx, request):
         raise BotCrashedError("simulated bot crash in gomoku decide")
 
-    with pytest.raises(BotCrashedError):
-        asyncio.run(sess.run_async(crashing_decide))
+    result = asyncio.run(sess.run_async(crashing_decide))
+    # 崩溃方（seat 0，黑方先手第一手就崩）判负 → winner=1（白），scores=[0,1]
+    assert result.winner == 1
+    assert result.reason == "crash"
 
 
 def test_pencil_engine_crash_judges_defeat():
@@ -191,6 +196,24 @@ def test_board_engine_still_treats_illegal_move_as_error():
     # 普通异常 → 判对手赢（非平局、非正常完成）
     assert result.winner is not None
     assert result.reason == "error"
+
+
+def test_holdem_engine_crash_judges_defeat():
+    """holdem 引擎：BotCrashedError 对齐裁判→判负（对手赢全部筹码），不中止整场。
+
+    三游戏统一：崩溃=判负（pencil 2-0 / gomoku 对手赢 / holdem 对手赢全部筹码）。
+    """
+    from bzplat.backend.engine.game import MatchSession
+
+    sess = MatchSession(num_hands=10)
+
+    def crashing_decide(player_idx, request):
+        raise BotCrashedError("simulated holdem bot crash")
+
+    result = asyncio.run(sess.run_async(crashing_decide))
+    # 崩溃方（第一手轮到 seat 0 决策时崩）判负 → 对手 seat 1 赢全部筹码
+    assert result.final_chips[1] > result.final_chips[0]
+    assert result.final_chips[0] == 0  # 崩溃方筹码清零
 
 
 # ── start_session 文件不存在 → BotCrashedError（异常类型契约）─────────────────
