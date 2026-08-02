@@ -451,7 +451,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "points REAL NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, "
             "draws INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, "
             "net_chips INTEGER NOT NULL DEFAULT 0, group_id TEXT NOT NULL DEFAULT '', "
-            "rank_in_group INTEGER, payload_json TEXT NOT NULL DEFAULT '{{}}')",
+            "rank_in_group INTEGER, payload_json TEXT NOT NULL DEFAULT '{{}}', "
+            "UNIQUE(contest_id, stage_idx, entry_id))",
             "id, contest_id, stage_idx, stage_key, bot_id, points, wins, draws, losses, "
             "net_chips, group_id, rank_in_group, payload_json",
         ),
@@ -463,6 +464,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
             _need = _need or "entry_a_id" not in _table_cols(conn, _ctable)
         if _ctable == "contest_stage_results" and _ctable in tables:
             _need = _need or "entry_id" not in _table_cols(conn, _ctable)
+            # P0 fix：旧迁移重建漏了 UNIQUE(contest_id,stage_idx,entry_id) → upsert ON CONFLICT 崩。
+            # 检测表 DDL 是否含该 UNIQUE，缺则重建。
+            if not _need:
+                _ddl = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (_ctable,),
+                ).fetchone()
+                _ddl_text = (_ddl[0] if _ddl else "") or ""
+                if "UNIQUE(contest_id, stage_idx, entry_id)" not in _ddl_text:
+                    _need = True
         if not _need:
             continue
         # 清理上次失败残留的 _new 表（保幂等）
