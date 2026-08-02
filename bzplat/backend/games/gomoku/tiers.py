@@ -1,7 +1,10 @@
-"""五子棋段位曲线（per-game，独立于其他游戏——全面解耦 PR4）。"""
+"""五子棋段位曲线（per-game，独立于其他游戏——全面解耦 PR4）。
+
+查表算法共享自 base.tier_for_in（PR-D DRY）；本文件只声明五子棋专属 TIERS。
+"""
 from __future__ import annotations
 
-from bzplat.backend.games.base import TierDef
+from bzplat.backend.games.base import TierDef, tier_for_in
 
 TIERS: list[TierDef] = [
     TierDef(5, "master", "大师", "text-violet-700", "bg-violet-50", 2200),
@@ -14,10 +17,4 @@ TIERS: list[TierDef] = [
 
 
 def tier_for(rating: float | int | None) -> TierDef:
-    if rating is None:
-        return TIERS[-1]
-    r = float(rating)
-    for t in TIERS:
-        if r >= t.min_rating:
-            return t
-    return TIERS[-1]
+    return tier_for_in(rating, TIERS)
