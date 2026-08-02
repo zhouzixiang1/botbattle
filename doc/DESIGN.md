@@ -57,10 +57,7 @@ graph TB
 | 接口 | `api_routes.py` | 主 REST（≈96 路由，含 SSE/WS）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki/matchpacks |
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
-| 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例）+ 每游戏完全自包含子包 games/<game>/（engine.py 裁判 + protocol.py 行协议 + result.py 独立结果 + tiers.py per-game 段位 + cards.py[holdem] + spec.py 装配）。GameSpec 集中声明全部固有属性，通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支** |
-| 兼容转发 | `_compat/` | 向后兼容转发层：把旧 import 路径（`engine.<x>`/`protocol.<x>`）转发到 games/<game>/。engine/ 与 protocol/ 旧文件改为 re-export 自 _compat（一行 shim） |
-| 裁判(shim) | `engine/` | 保留仅为兼容旧 import：__init__/game/gomoku/pencil/result/tiers/cards 改为 shim；registry.py 委托 games 注册表 |
-| 协议(shim) | `protocol/` | 保留仅为兼容旧 import：json_protocol/board_protocol → re-export 自 _compat |
+| 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例 + MatchResult/RoundResult 平台契约基类[仅类型提示/测试用]）+ __init__.py（注册表单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS 模块级便捷函数）+ _board_protocol.py（棋类共享行协议工具）+ 每游戏完全自包含子包 games/<game>/（engine.py 裁判 + protocol.py 行协议 + result.py 独立结果 + tiers.py per-game 段位 + cards.py[holdem] + templates.py 赛事模板 + spec.py 装配）。GameSpec 集中声明全部固有属性，通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支**。三层冗余 shim（engine/ + protocol/ + _compat/）已删——真实现全在 games/ |
 | 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战）+ runner（起 Bot 进程，经 games 注册表路由协议）+ auto_matcher（闲时自动） |
 | 赛制 | `contests/` | templates（**7 内置模板**，由 `games/*/templates.py` 经注册表聚合）+ stages（对阵生成）+ manager（阶段状态机）+ validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
@@ -99,7 +96,7 @@ graph LR
 2. `schema.py`：`matches_<game>` 表（FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES`/`VALID_GAME_IDS` 各加该项。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
 4. 前端 `src/games/<game>/`：`index.ts`（GameViewSpec）+ `canvas.ts`（CanvasRenderer）+ `reducer.ts`（事件归约，对标后端 engine.py，自包含不依赖 components/）+ `src/games/index.ts` 注册一行。`RawEvent` 公共类型在 `src/games/base.ts`（对标后端 `_board_protocol.py`）。
-5. **约束**：`games/<game>/` 不得反向 import `engine`/`_compat`（循环依赖，`test_import_cycles.py` 守护）；通用层不得 import 具体游戏模块。
+5. **约束**：`games/<game>/` 不得反向 import 已删的 `engine`/`_compat`/`protocol` shim 或通用层（matches/contests/store/api_routes）——`test_import_cycles.py` 源码扫描守护（forbidden 含已删 shim 作"防回退"哨兵 + 通用层全列）。通用层不得 import 具体游戏模块（经注册表）。
 
 **不再需要**在 `registry.run_session`/`runner._dumps`/`_loads`/`_fail_response`/orchestrator 加 `if game_id==` 分支——这是全面解耦前 6 处分散注册点的彻底消除。
 

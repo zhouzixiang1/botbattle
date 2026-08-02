@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 
-from bzplat.backend.engine.gomoku import GomokuResult, GomokuSession
-from bzplat.backend.engine.pencil import PencilResult, PencilSession
-from bzplat.backend.engine.result import MatchResult, RoundResult
+from bzplat.backend.games.gomoku.engine import GomokuSession
+from bzplat.backend.games.gomoku.result import MatchResult as GomokuResult
+from bzplat.backend.games.pencil.engine import PencilSession
+from bzplat.backend.games.pencil.result import MatchResult as PencilResult
+from bzplat.backend.games.base import MatchResult, RoundResult
 
 
 def test_round_result_is_minimal_contract():

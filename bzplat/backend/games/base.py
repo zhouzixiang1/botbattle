@@ -15,14 +15,33 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
 
-# ── 平台契约（鸭子类型，不强制继承）──────────────────────────────
-# 每款游戏的结果类（各自的 result.py）须满足以下结构（字段名/语义）：
-#   rounds_played: int                 # holdem=手数；棋类=步数（仅显示用）
-#   rounds: list[<该游戏的 RoundResult>]  # 每轮含 winners(list[int]) + deltas(list[int])
-#   events: list[dict]                 # 事件流（回放/SSE 用）
-#   winner: int | None (property)      # 单局棋类取该轮胜者；多手扑克 None
-# 平台通用层只读 winners/deltas/rounds_played，绝不触碰游戏专属字段。
-# 本模块不 import 任何 result 基类——满足"不要共享"。
+# ── 平台契约基类（仅类型提示 / 测试构造 fake result 用，各游戏真 result 类不继承）──
+# 全面解耦后各游戏 result.py 独立定义（鸭子契约，不共享基类）。本基类集中"最小契约
+# 字段"供测试构造最小 fake result（MatchResult(rounds_played=0) / RoundResult([0],[1,-1])），
+# 测通用层只读 winners/deltas/rounds_played/rounds/winner 的契约不变量。
+# 各游戏真 result 类（games/<game>/result.py）不继承此类——结构兼容（鸭子类型）。
+@dataclass
+class RoundResult:
+    """单轮结果（类型提示用基类；各游戏独立定义同名类）。"""
+
+    winners: list[int]
+    deltas: list[int]
+
+
+@dataclass
+class MatchResult:
+    """整场结果（类型提示用基类；各游戏独立定义同名类）。"""
+
+    rounds_played: int
+    rounds: list[RoundResult] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def winner(self) -> int | None:
+        if len(self.rounds) == 1 and self.rounds[0].winners:
+            return self.rounds[0].winners[0]
+        return None
+
 
 DecideFn = Callable[[int, dict[str, Any]], Any]
 EventFn = Callable[[str, dict[str, Any]], Any]

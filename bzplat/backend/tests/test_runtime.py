@@ -8,7 +8,7 @@ import pytest
 
 from bzplat.backend.bots.classify import classify_binary
 from bzplat.backend.matches.runner import MatchRunner
-from bzplat.backend.protocol import json_protocol as proto
+from bzplat.backend.games.holdem import protocol as proto
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
@@ -41,7 +41,7 @@ def test_match_two_callbots_short():
 
 
 def test_protocol_roundtrip():
-    from bzplat.backend.engine.cards import Card
+    from bzplat.backend.games.holdem.cards import Card
 
     req = proto.build_act_request(
         hand=0,

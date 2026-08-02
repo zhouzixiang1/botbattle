@@ -16,7 +16,7 @@ import asyncio
 
 import pytest
 
-from bzplat.backend.engine.registry import (
+from bzplat.backend.games import (
     GAME_LABELS,
     GAME_GOMOKU,
     GAME_HOLDEM,

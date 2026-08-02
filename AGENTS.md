@@ -60,7 +60,7 @@ scripts/platform-ctl.sh start     # 或：botzone serve
 botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验证
 ```
 
-- **测试**：`pytest`（`pyproject.toml` 设 `testpaths=["bzplat/backend/tests","tests"]`，`pythonpath=["."]`），务必从仓库根运行。
+- **测试**：`pytest`（`pyproject.toml` 设 `testpaths=["bzplat/backend/tests"]`，`pythonpath=["."]`），务必从仓库根运行。
 - **本地无 Docker 跑 ELF**：`export BZ_BOT_LOCAL=1`（`BinaryRunner` 退回本机 subprocess，仅测试用）。
 - **端到端冒烟**：`bash scripts/e2e_smoke.sh`。
 - **测试种子账号**：`python scripts/seed_test_accounts.py`（建 tester1/tester2，各上传 holdem/gomoku/pencil 样例 Bot；幂等，便于对战/人类对战测试）。
@@ -86,19 +86,17 @@ matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runne
             通知副作用：对局完成（非 contest）经 orch.notifier.notify_both_owners 通知双方 owner
 notifications/ 通知管理器：NotificationManager（写站内通知 + 按 prefs 复用 Mailer 发邮件）；表 notifications/notification_prefs
             经验/等级：award_xp 在对局完成/赛事报名/评论/被关注时触发（users.xp/level/last_active_at）
-games/      游戏注册表（全面解耦的单一真相）：base.py(GameSpec 接口 + GameRegistry 单例)
+games/      游戏注册表（全面解耦的单一真相）：base.py(GameSpec 接口 + GameRegistry 单例
+            + MatchResult/RoundResult 平台契约基类，仅类型提示/测试用) + __init__.py(注册表
+            单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS
+            等模块级便捷函数) + _board_protocol.py(棋类共享行协议工具)
             + 每游戏完全自包含的子包 games/<game>/：engine.py(裁判) + protocol.py(行协议)
             + result.py(结果，独立定义不共享基类) + tiers.py(per-game 段位) + cards.py(holdem)
-            + spec.py(装配 GameSpec)。GameSpec 集中声明一款游戏的全部固有属性。
+            + templates.py(赛事模板) + spec.py(装配 GameSpec)。GameSpec 集中声明一款游戏的全部固有属性。
             通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
-_compat/    向后兼容转发层（全面解耦 PR4）：集中把旧 import 路径
-            (bzplat.backend.engine.<x> / bzplat.backend.protocol.<x>) 转发到 games/<game>/
-            engine/ 与 protocol/ 下的旧文件改为 re-export 自 _compat（一行 shim）
-engine/     shim 层（保留仅为兼容旧 import）：__init__/game/gomoku/pencil/result/tiers/cards
-            registry.py 委托 games 注册表；转发逻辑集中在 _compat/，games/ 包不含兼容代码
+            （engine/ + protocol/ + _compat/ 三层冗余 shim 已删——真实现全在 games/）
             数据集：GET /api/matchpacks[/download]（gzip，等级 gating）+ 站点配置 GET /api/site/info
-protocol/   shim 层（保留仅为兼容旧 import）：json_protocol/board_protocol → re-export 自 _compat
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits
 store/      SQLite + schema.py(常量唯一来源)；matches 拆每游戏表 + matches_index + ratings per-game
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
@@ -132,7 +130,7 @@ src/pages/                 22 个顶层路由，全部用 React.lazy 代码分�
 5. **不得**反向：`games/<game>/` 不得 import `bzplat.backend.engine`/`_compat`（循环依赖，`test_import_cycles.py` 守护）；通用层（matches/contests/store/api_routes）不得 import 具体游戏模块（经注册表）。
 6. 跑测试：`pytest`（含 `test_result_contract`/`test_import_cycles`/`test_game_registry`）+ `npm run build` + `screenshot_verify.py`。
 
-**引擎路由入口**：`games.registry.get(game_id)` 取 `GameSpec` → `spec.run_session(decide, **params)` 构造并运行该游戏 Session；`spec.protocol.dumps_request/loads_response/fail_response` 处理行协议。`engine/registry.py` 与 `matches/runner.py` 现均委托 games 注册表，不再有 if-chain。
+**引擎路由入口**：`games.registry.get(game_id)` 取 `GameSpec` → `spec.run_session(decide, **params)` 构造并运行该游戏 Session；`spec.protocol.dumps_request/loads_response/fail_response` 处理行协议。`matches/runner.py` 经 games 注册表路由（`run_session`/`GAME_HOLDEM`/`normalize_game_id` 都 import 自 `bzplat.backend.games`），不再有 if-chain。
 
 **人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局走独立 `_human_sem`（默认 4，不占 bot 对局槽）、`human_action_timeout`（默认 120s）、**不计 Glicko**、per-user 同时 ≤ 1。自博弈（同 owner 两个不同 bot 对战）走普通 `/api/matches/challenge`。
 

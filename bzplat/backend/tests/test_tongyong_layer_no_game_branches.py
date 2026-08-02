@@ -177,7 +177,7 @@ def test_runner_signatures_use_passthrough_not_named_game_params():
     """runner 三方法 + engine.run_session 用 **match_params 透传，不列游戏专属具名参数。"""
     import inspect
 
-    from bzplat.backend.engine.registry import run_session as _engine_run_session
+    from bzplat.backend.games import run_session as _engine_run_session
     from bzplat.backend.matches.runner import MatchRunner
 
     targets = [

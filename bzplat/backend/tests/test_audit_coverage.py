@@ -148,7 +148,7 @@ def test_gomoku_engine_crash_judges_defeat():
     原审计要求传播（防被 except Exception 吞成默认动作死磕）；后续对齐权威裁判时
     改为崩溃=判负（与 pencil 一致），故此处断言判负而非抛错。
     """
-    from bzplat.backend.engine.gomoku import GomokuSession
+    from bzplat.backend.games.gomoku.engine import GomokuSession
 
     sess = GomokuSession()
 
@@ -167,7 +167,7 @@ def test_pencil_engine_crash_judges_defeat():
     原审计要求 BotCrashedError 传播（防被 except Exception 吞成默认动作死磕）；
     后续对齐权威裁判时改为崩溃=判负 2-0（与超时一致），故此处断言判负而非抛错。
     """
-    from bzplat.backend.engine.pencil import PencilSession
+    from bzplat.backend.games.pencil.engine import PencilSession
 
     sess = PencilSession()
 
@@ -184,7 +184,7 @@ def test_pencil_engine_crash_judges_defeat():
 def test_board_engine_still_treats_illegal_move_as_error():
     """回归保护：普通落子错误（非崩溃）仍应判对手赢（reason=error），
     不能因为加了 BotCrashedError 传播就把所有异常都向上抛。"""
-    from bzplat.backend.engine.gomoku import GomokuSession
+    from bzplat.backend.games.gomoku.engine import GomokuSession
 
     sess = GomokuSession()
 
@@ -203,7 +203,7 @@ def test_holdem_engine_crash_judges_defeat():
 
     三游戏统一：崩溃=判负（pencil 2-0 / gomoku 对手赢 / holdem 对手赢全部筹码）。
     """
-    from bzplat.backend.engine.game import MatchSession
+    from bzplat.backend.games.holdem.engine import MatchSession
 
     sess = MatchSession(num_hands=10)
 

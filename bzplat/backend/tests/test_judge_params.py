@@ -11,8 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
-from bzplat.backend.engine.gomoku import BOARD_SIZE
-from bzplat.backend.engine.registry import run_session
+from bzplat.backend.games.gomoku.engine import BOARD_SIZE
+from bzplat.backend.games import run_session
 from bzplat.backend.main import create_app
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
@@ -147,7 +147,7 @@ def test_runner_passes_judge_params_to_session(monkeypatch):
 
     async def fake_run_session(game_id, decide, **kw):
         captured.update(kw)
-        from bzplat.backend.engine.result import MatchResult
+        from bzplat.backend.games.base import MatchResult
         return MatchResult(rounds_played=0)
 
     runner = MatchRunner(BinaryRunner(prefer_local=True))
@@ -177,7 +177,7 @@ def test_gomoku_check_win_respects_smaller_board():
     历史 bug：check_win 默认 size=15，9×9 棋盘下沿 4 方向扫描到 [9,15) 时
     越界访问 board[cx][cy] 抛 IndexError。这里显式传 size=9 验证不再越界。
     """
-    from bzplat.backend.engine.gomoku import check_win
+    from bzplat.backend.games.gomoku.engine import check_win
 
     size = 9
     board = [[-1] * size for _ in range(size)]
