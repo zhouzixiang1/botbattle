@@ -111,7 +111,7 @@ def test_compat_engine_gomoku_imports():
 
 def test_compat_engine_pencil_imports():
     from bzplat.backend.engine.pencil import PencilSession, PencilResult, DEFAULT_N, PencilBoard
-    assert DEFAULT_N == 11
+    assert DEFAULT_N == 6  # 对齐裁判 25 格
 
 
 def test_compat_engine_cards_imports():

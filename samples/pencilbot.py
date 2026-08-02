@@ -6,7 +6,7 @@ import json
 import random
 import sys
 
-N = 11
+N = 6  # 对齐 Botzone grid_size=11 交错维度（6 点 → 25 格）
 SIZE = 2 * N - 1
 GRID_EDGE = 4
 GRID_EDGE_USED = 5

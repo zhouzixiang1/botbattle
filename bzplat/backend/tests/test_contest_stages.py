@@ -354,4 +354,4 @@ def test_contest_create_uses_template_match_config(store: Store):
     c2 = mgr.create(users[0]["id"], "t2", template_id="gomoku_group_drr_ko")
     assert c2["match_config_json"] == "{}"
     c3 = mgr.create(users[0]["id"], "t3", template_id="pencil_swiss_ko")
-    assert c3["match_config_json"] == '{"n_dots": 11}'
+    assert c3["match_config_json"] == '{"n_dots": 6}'  # 对齐裁判 25 格

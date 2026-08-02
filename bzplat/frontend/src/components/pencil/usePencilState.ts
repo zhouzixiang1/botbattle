@@ -15,6 +15,12 @@ export interface PencilViewModel {
   reason: string
   moveCount: number
   status: string
+  /** 已占边归属："x,y" → player(0红/1蓝)。前端按玩家着色用。 */
+  edgeOwner: Record<string, number>
+  /** 格心归属网格：-1 未占 / 0 红 / 1 蓝 / -2 非格心。前端按归属着色用。 */
+  boxOwner: number[][]
+  /** 连走指示：true=当前手刚得分、本方将继续走 */
+  extraTurn: boolean
 }
 
 const GRID_DOT = 3
@@ -36,9 +42,22 @@ function emptyGrid(size: number): number[][] {
   return g
 }
 
+function emptyBoxOwner(size: number): number[][] {
+  // -2=非格心，-1=未占
+  const g: number[][] = []
+  for (let x = 0; x < size; x++) {
+    const col: number[] = []
+    for (let y = 0; y < size; y++) {
+      col.push(x % 2 === 1 && y % 2 === 1 ? -1 : -2)
+    }
+    g.push(col)
+  }
+  return g
+}
+
 export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
-  let nDots = 11
-  let size = 21
+  let nDots = 6
+  let size = 11
   let grid = emptyGrid(size)
   let scores: [number, number] = [0, 0]
   let lastEdge: { x: number; y: number } | null = null
@@ -48,6 +67,9 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
   let reason = ''
   let moveCount = 0
   let status = 'live'
+  let edgeOwner: Record<string, number> = {}
+  let boxOwner: number[][] = emptyBoxOwner(size)
+  let extraTurn = false
 
   for (const ev of events) {
     const t = String(ev.type || '')
@@ -55,11 +77,14 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
       return reducePencilEvents(ev.events as RawEvent[])
     }
     if (t === 'match_start') {
-      nDots = Number(ev.n_dots) || 11
+      nDots = Number(ev.n_dots) || 6
       size = Number(ev.size) || 2 * nDots - 1
       grid = emptyGrid(size)
+      boxOwner = emptyBoxOwner(size)
       scores = [0, 0]
       toAct = 0
+      edgeOwner = {}
+      extraTurn = false
     } else if (t === 'turn') {
       toAct = typeof ev.player === 'number' ? ev.player : toAct
       if (Array.isArray(ev.scores) && ev.scores.length >= 2) {
@@ -68,21 +93,48 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     } else if (t === 'move') {
       const x = Number(ev.x)
       const y = Number(ev.y)
+      const player = typeof ev.player === 'number' ? ev.player : 0
       if (x >= 0 && y >= 0 && x < size && y < size) {
         grid[x][y] = GRID_EDGE_USED
+        edgeOwner[`${x},${y}`] = player
         lastEdge = { x, y }
       }
       if (Array.isArray(ev.scores) && ev.scores.length >= 2) {
         scores = [Number(ev.scores[0]), Number(ev.scores[1])]
       }
       moveCount = Number(ev.move_index) || moveCount + 1
+      // 消费 closed_boxes（本手新闭合格 + owner）——前端按归属着色
+      const scored = !!ev.scored
+      extraTurn = scored
+      if (Array.isArray(ev.closed_boxes)) {
+        for (const cb of ev.closed_boxes as { x: number; y: number; owner: number }[]) {
+          const bx = Number(cb.x)
+          const by = Number(cb.y)
+          if (bx >= 0 && by >= 0 && bx < size && by < size) {
+            boxOwner[bx][by] = Number(cb.owner)
+          }
+        }
+      }
+    } else if (t === 'pass') {
+      // 对方正确 pass（连走方将再次行棋）——清 extraTurn
+      extraTurn = false
     } else if (t === 'match_end') {
       matchOver = true
       winner = ev.winner === null || ev.winner === undefined ? null : Number(ev.winner)
       reason = String(ev.reason || '')
       status = 'match_end'
+      extraTurn = false
       if (Array.isArray(ev.scores) && ev.scores.length >= 2) {
         scores = [Number(ev.scores[0]), Number(ev.scores[1])]
+      }
+      // 消费 box_owners（最终归属网格，权威来源）
+      if (Array.isArray(ev.box_owners)) {
+        const bo = ev.box_owners as number[][]
+        for (let x = 0; x < bo.length && x < size; x++) {
+          for (let y = 0; y < (bo[x]?.length || 0) && y < size; y++) {
+            boxOwner[x][y] = Number(bo[x][y])
+          }
+        }
       }
     } else if (t === 'error') {
       status = 'error'
@@ -102,6 +154,9 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     reason,
     moveCount,
     status,
+    edgeOwner,
+    boxOwner,
+    extraTurn,
   }
 }
 

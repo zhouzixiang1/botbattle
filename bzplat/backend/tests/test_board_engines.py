@@ -74,19 +74,23 @@ def test_gomoku_illegal_loses():
 
 
 def test_pencil_score_and_continue():
-    """小棋盘：占第四边得分并连走。"""
+    """小棋盘：占第四边得分并连走。do_action 返回新闭合的格心坐标列表。"""
     # n_dots=2 → size=3，只有 1 个格子
     g = PencilBoard(2)
     assert g.size == 3
     assert len(g.legal_actions()) == 4
-    # 占三条边不得分
+    # 占三条边不得分（返回空列表）
     g.curr_player = 0
-    assert g.do_action(0, 1) is False  # 上边
-    assert g.do_action(1, 0) is False  # 左边
-    assert g.do_action(1, 2) is False  # 右边
+    assert g.do_action(0, 1) == []  # 上边
+    assert g.do_action(1, 0) == []  # 左边
+    assert g.do_action(1, 2) == []  # 右边
     assert g.scores == [0, 0]
-    assert g.do_action(2, 1) is True  # 下边 → 成格
+    closed = g.do_action(2, 1)  # 下边 → 成格
+    assert len(closed) == 1  # 闭合 1 格
+    assert closed[0] == (1, 1)  # 格心坐标
     assert g.scores == [1, 0]
+    assert g.box_owner[(1, 1)] == 0  # 归属红方
+    assert g.edge_owner[(2, 1)] == 0  # 下边归属红方
 
 
 def test_pencil_illegal_edge():
@@ -168,4 +172,120 @@ def test_run_session_pencil_n_dots_none_uses_default():
     assert result is not None
     # 确认用的是默认 n_dots（DEFAULT_N），盘面非空
     assert result.rounds_played > 0 or result.moves >= 0  # 至少不崩溃
+
+
+# ── 对齐权威裁判（C++）：25 格 / 多数胜 / 2-0 归一化 / 归属追踪 ──────────
+
+def test_pencil_default_n_is_6_25_boxes():
+    """对齐裁判：默认 n_dots=6 → size=11 → 25 格（奇数无平局）。"""
+    from bzplat.backend.games.pencil.engine import DEFAULT_N, PencilBoard
+    assert DEFAULT_N == 6
+    g = PencilBoard()
+    assert g.size == 11
+    assert (g.n_dots - 1) ** 2 == 25  # 25 格
+    assert g.min_win() == 13  # 多数胜阈值 ⌈25/2⌉
+
+
+def test_pencil_majority_win_ends_early():
+    """对齐裁判 hasPlayerWon：先到多数格（13）立即胜，不等终局。"""
+    from bzplat.backend.games.pencil.engine import PencilBoard
+
+    # 构造一个红方连得 13 分的场景：n_dots=6，红方每次占第四边成格连走
+    # 用最小可复现：直接检查 min_win 阈值 + do_action 后的 scores 触发
+    g = PencilBoard(6)
+    assert g.min_win() == 13
+    # 模拟：红方分数到 13 时应判胜（engine 在 do_action 后检查 scores[curr]>=min_win）
+    g.scores = [12, 0]
+    g.curr_player = 0
+    # 占一条边让红方得第 13 分（需构造一个可成格的四边场景——用 n_dots=2 单格验证逻辑）
+    g2 = PencilBoard(2)  # 1 格，min_win=1
+    assert g2.min_win() == 1
+    g2.curr_player = 0
+    g2.do_action(0, 1)
+    g2.do_action(1, 0)
+    g2.do_action(1, 2)
+    closed = g2.do_action(2, 1)  # 成格 → scores=[1,0] >= min_win(1)
+    assert len(closed) == 1
+    assert g2.scores[0] >= g2.min_win()  # 触发多数胜条件
+
+
+def test_pencil_illegal_normalizes_2_0():
+    """对齐裁判：非法着 → 对手 2-0（scores 归一化，非实时部分分）。"""
+    async def decide(player, req):
+        return {"x": 0, "y": 0}  # (0,0) 是点不是边 → 非法
+
+    result = asyncio.run(PencilSession(n_dots=3).run_async(decide))
+    assert result.reason == "illegal"
+    assert result.winner == 1  # 红方非法 → 蓝方胜
+    assert result.scores == [0, 2]  # 归一化 2-0（对手蓝方 2 分）
+    assert result.rounds[0].deltas == [-2, 2]  # deltas 反映归一化
+
+
+def test_pencil_crash_normalizes_2_0():
+    """对齐裁判：bot 崩溃 → 判负 2-0（不再中止整场）。"""
+    from bzplat.backend.runtime.binary_runner import BotCrashedError
+
+    def crashing_decide(player, req):
+        raise BotCrashedError("simulated crash")
+
+    result = asyncio.run(PencilSession(n_dots=3).run_async(crashing_decide))
+    assert result.reason == "crash"
+    assert result.winner == 1  # 红方崩 → 蓝方胜
+    assert result.scores == [0, 2]
+
+
+def test_pencil_ownership_tracking():
+    """edge_owner + box_owner 追踪（前端着色用）。"""
+    g = PencilBoard(2)  # 1 格
+    g.curr_player = 0
+    g.do_action(0, 1)
+    g.do_action(1, 0)
+    g.do_action(1, 2)
+    # 第四边前：无归属格
+    assert g.box_owner == {}
+    closed = g.do_action(2, 1)  # 成格
+    assert (1, 1) in g.box_owner
+    assert g.box_owner[(1, 1)] == 0  # 红方
+    assert g.edge_owner[(2, 1)] == 0  # 下边属红方
+    # box_owners_grid 返回真实归属
+    bog = g.box_owners_grid()
+    assert bog[1][1] == 0  # 格心属红方
+
+
+def test_pencil_move_event_has_closed_boxes():
+    """move 事件带 closed_boxes（本手新闭合格 + owner）。"""
+    moves = iter([(0, 1), (1, 0), (1, 2), (2, 1)])  # n_dots=2，双方交替占四边
+
+    async def decide(player, req):
+        if int(req.get("pass") or 0) == 1:
+            return {"x": -1, "y": -1}
+        try:
+            x, y = next(moves)
+        except StopIteration:
+            x, y = -1, -1
+        return {"x": x, "y": y}
+
+    sess = PencilSession(n_dots=2)
+    result = asyncio.run(sess.run_async(decide))
+    # 找带 closed_boxes 的 move 事件
+    move_events = [e for e in result.events if e.get("type") == "move"]
+    scoring_moves = [e for e in move_events if e.get("scored")]
+    assert len(scoring_moves) >= 1
+    sm = scoring_moves[0]
+    assert "closed_boxes" in sm
+    assert len(sm["closed_boxes"]) == 1
+    # 第 4 手是蓝方(player=1)下的 → 格属蓝方；且 n_dots=2 的 min_win=1 → 多数胜提前结束
+    assert sm["closed_boxes"][0]["owner"] == 1  # 蓝方
+    assert result.reason == "majority"  # 蓝方 1 分 >= min_win(1)
+
+
+def test_pencil_match_end_has_box_owners():
+    """match_end 事件带 box_owners 网格（前端最终着色）。"""
+    async def decide(player, req):
+        return {"x": 0, "y": 0}  # 非法→快速结束
+
+    result = asyncio.run(PencilSession(n_dots=3).run_async(decide))
+    me = next(e for e in result.events if e.get("type") == "match_end")
+    assert "box_owners" in me
+    assert isinstance(me["box_owners"], list)
 

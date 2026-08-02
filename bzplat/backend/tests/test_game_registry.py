@@ -169,7 +169,7 @@ def test_validate_match_config_holdem():
 
 def test_validate_match_config_pencil():
     assert validate_match_config("pencil", {"n_dots": 11}) == {"n_dots": 11}
-    assert validate_match_config("pencil", {}) == {"n_dots": 11}
+    assert validate_match_config("pencil", {}) == {"n_dots": 6}  # 默认 6（对齐裁判 25 格）
     with pytest.raises(ValueError):
         validate_match_config("pencil", {"n_dots": 2})
     with pytest.raises(ValueError):
@@ -185,7 +185,7 @@ def test_validate_match_config_gomoku_no_params():
 def test_default_match_config_per_game():
     assert default_match_config("holdem") == {"hands": 70}
     assert default_match_config("gomoku") == {}
-    assert default_match_config("pencil") == {"n_dots": 11}
+    assert default_match_config("pencil") == {"n_dots": 6}  # 对齐裁判 25 格
     # 返回深拷贝（改不影响注册表）
     d = default_match_config("holdem")
     d["hands"] = 999
