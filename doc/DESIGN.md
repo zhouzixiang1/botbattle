@@ -11,17 +11,17 @@
 ```mermaid
 graph TB
     subgraph 客户端
-        FE[React SPA<br/>shadcn/ui + 暗色]
+        FE[React SPA<br/>shadcn/ui + 双主题]
     end
     subgraph 后端 FastAPI 单进程
-        API[REST API<br/>109 路由]
+        API[REST API<br/>~110 路由]
         SSE[SSE 观赛]
         WS[WebSocket 人类对战]
         MW[中间件<br/>限流+安全头]
     end
     subgraph 核心层
         ORCH[编排层<br/>orchestrator]
-        ENGINE[裁判引擎<br/>holdem/gomoku/pencil]
+        GAMES[游戏注册表 games/<br/>GameSpec ×3]
         CONTEST[赛制层<br/>templates/stages/manager]
         STORE[数据层<br/>Store + SQLite]
         NOTIFY[通知层]
@@ -33,12 +33,13 @@ graph TB
     FE -->|HTTP/SSE/WS| MW
     MW --> API & SSE & WS
     API --> ORCH & CONTEST & STORE & NOTIFY
-    ORCH --> ENGINE
+    ORCH --> GAMES
     ORCH --> DOCKER
     ORCH --> STORE
     CONTEST --> ORCH
+    CONTEST --> GAMES
     AUTO --> ORCH
-    ENGINE -.->|MatchResult| ORCH
+    GAMES -.->|MatchResult winners+deltas| ORCH
 ```
 
 ### 1.2 运行模型
@@ -53,7 +54,7 @@ graph TB
 
 | 层 | 模块 | 职责 |
 |----|------|------|
-| 接口 | `api_routes.py` | 主 REST（95 路由）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki/matchpacks |
+| 接口 | `api_routes.py` | 主 REST（≈96 路由，含 SSE/WS）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki/matchpacks |
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
 | 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例）+ 每游戏完全自包含子包 games/<game>/（engine.py 裁判 + protocol.py 行协议 + result.py 独立结果 + tiers.py per-game 段位 + cards.py[holdem] + spec.py 装配）。GameSpec 集中声明全部固有属性，通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支** |
@@ -61,7 +62,7 @@ graph TB
 | 裁判(shim) | `engine/` | 保留仅为兼容旧 import：__init__/game/gomoku/pencil/result/tiers/cards 改为 shim；registry.py 委托 games 注册表 |
 | 协议(shim) | `protocol/` | 保留仅为兼容旧 import：json_protocol/board_protocol → re-export 自 _compat |
 | 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战）+ runner（起 Bot 进程，经 games 注册表路由协议）+ auto_matcher（闲时自动） |
-| 赛制 | `contests/` | templates（7 内置模板）+ stages（对阵生成）+ manager（阶段状态机）+ validation |
+| 赛制 | `contests/` | templates（**7 内置模板**，由 `games/*/templates.py` 经注册表聚合）+ stages（对阵生成）+ manager（阶段状态机）+ validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
 | 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈）+ schema.py（常量唯一来源） |
 | 认证 | `auth/` | routes + auth_manager + captcha + dependencies（require_user/admin/organizer） |
@@ -104,7 +105,7 @@ graph LR
 
 ## 3. 数据库设计
 
-SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。所有常量（状态码/类型/段位阈值/配置键名）集中在 `store/schema.py`。
+SQLite 单文件（默认 `botzone.db`），**28 张表**，**35** 个索引（`schema.py` 中 `CREATE TABLE` / `CREATE INDEX` 计数）。所有常量（状态码/类型/`REGISTERED_ENGINES`/配置键名）集中在 `store/schema.py`。
 
 ### 3.1 核心表（选录）
 
@@ -151,7 +152,7 @@ SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。�
 
 ## 4. 接口设计
 
-**共 109 个路由装饰器**：api_routes.py 95（含 1 WebSocket + 1 SSE）+ auth/routes.py 13 + main.py 1 健康端点。按权限分四类：
+**共约 110 个 API 路由装饰器**：api_routes.py ≈96（含 1 WebSocket + 1 SSE）+ auth/routes.py 13 + main.py 1 健康端点（SPA 静态路由另计）。按权限分四类：
 
 ### 4.1 公开端点（无需登录，访客可用）
 - 健康：`GET /api/health`
@@ -181,7 +182,7 @@ SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。�
 
 ### 4.4 管理员端点（require_admin）
 - 用户管理：`GET /api/admin/users`、`POST /role`、`PATCH/DELETE /api/admin/users/{id}`、`/sessions`
-- Bot/对局/赛事管理：`GET /api/admin/{bots,matches,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`
+- Bot/赛事管理：`GET /api/admin/{bots,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`；对局列表走公开 `GET /api/matches`，管理操作为 `PATCH/DELETE /api/admin/matches/{id}`
 - 配置：`GET /api/admin/settings/runtime`、`PATCH /api/admin/settings/{runtime,site}`
 - 裁判：`GET /api/admin/judges`、`PATCH /api/admin/judges/params`
 - 模板：`GET/POST /api/admin/templates`、`PUT/DELETE /{tid}`、`POST /preview`
@@ -210,11 +211,11 @@ SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。�
   - **已登录**：**lg+ 桌面左侧边栏**（Logo + compact 搜索 + 垂直导航 + 底部用户区/主题/通知）；**<lg 移动端顶栏 + Sheet 抽屉**。
   - **访客（未登录）**：**全断点顶栏**（BrandMark + 公开导航 + 主题切换 + **登录/注册**；窄屏用 Sheet 抽屉放导航与 CTA）。侧栏仅登录后出现，避免访客桌面无入口。
   - **auth 页**（登录/注册/重置/验证）：不显示侧栏，内容占满居中；顶栏保留精简条（品牌 + 主题 + 登录/注册）。
-  - nav-config.ts（9 导航项）。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。首页 Hero 对访客额外展示注册/登录 CTA。
+  - nav-config.ts（**7** 项主导航 + 条件显示的 Admin）。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。首页 Hero 对访客额外展示注册/登录 CTA。
   - **统一对局页** `/match/:id`（MatchViewer）：实时 SSE + 回放 DVR；座位身份经 `matches.seat_info.with_seat_info`（人类座真人用户名）；canvas 绘 BOT 名/累计/胜者；`/watch` 与 `/arena?id=` 重定向至此。人类 `/play` 复用 seats + revealMode=showdown。
 - **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题 + `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；垂直 padding 由全局 `<main>` 统一提供（PageStub 只设水平 padding，避免双倍留白）；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
 - **观赛/对战页左右分栏**：MatchViewer（统一对局页）/ ArenaWatch（直播列表入口）/ HumanPlay `xl:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），`lg`(1024-1279) 因侧栏占位自动堆叠，`xl`(1280)+ 横排。MatchViewer 合并旧 MatchDetail（回放）+ ArenaWatch（直播）：按 match.status 选模式（running→SSE 直播 DVR 模型：定位最新后按回放速度推进；completed→从头播放），座位身份从 `get_match_detailed`（JOIN bots+users）取 BOT 名/@用户名。MatchBoard（canvas 棋盘渲染）经 GSAP timeline 驱动动画。
-- **页面**：21 个独立页面 + admin/ 10 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/统一对局页(MatchViewer)/人类对战/数据下载/账号 等。
+- **页面**：**22** 个 `React.lazy` 页面模块（含 admin 壳）+ admin 内多 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/统一对局页(MatchViewer)/人类对战/数据下载/账号 等。
 - **三棋盘可视化**：holdem / gomoku / pencil 均**canvas + GSAP 动画渲染**（见 5.3），统一经 MatchBoard 分发（DOM 棋盘组件已删，全部走 canvas）。
 
 ### 5.3 Canvas 渲染层（canvas + GSAP 视觉重写）

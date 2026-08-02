@@ -104,8 +104,8 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | **安全** | 认证 | 密码 hash 存储，session token，cookie `bz_session`，验证码防爆破 |
 | **可靠** | 数据持久 | SQLite 单文件，自带 `_migrate` 自愈（补列/重建表），向后兼容旧库 |
 | **可靠** | 日志可查 | 统一日志 `logs/app.log`（5MB×5 轮转），Bot stderr 尾部 4KB 捕获，admin 网页查看 |
-| **可维护** | 新增游戏低成本 | 赛制/编排层零改动，仅实现 Session + 协议 + registry 分支 |
-| **可维护** | 常量集中 | 所有状态码/类型/段位/平台 settings 键名集中在 `schema.py` |
+| **可维护** | 新增游戏低成本 | 赛制/编排层零改动：实现 `games/<game>/`（engine/protocol/result/tiers/templates/spec）+ schema 注册 + 前端 GameViewSpec，**禁止**通用层 `if game_id` 分支 |
+| **可维护** | 常量集中 | 所有状态码/类型/`REGISTERED_ENGINES`/平台 settings 键名集中在 `schema.py` |
 | **可用性** | 响应式 | 桌面/平板/手机三档适配，移动端汉堡菜单 + 表格列隐藏 |
 | **可用性** | 暗色模式 | OKLCH 双主题，浅色默认 + 暗色对等，顶栏一键切换 |
 | **可用性** | 无障碍 | aria-label / focus-visible / 键盘导航 / WCAG AA 对比度 |
@@ -118,14 +118,15 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | Bot 管理 | `bots/` + api_routes | test_settings_mybots | wiki/BOT_DEV、BOT_DETAIL |
 | 对局编排 | `matches/orchestrator+runner` | test_engine、test_protocol | wiki/MATCH |
 | 人类对战 | orchestrator + WS /play | test_human_match | wiki/MATCH |
-| 评分排行 | `rating/glicko2` + engine/tiers | test_tiers、test_engine | wiki/TIER |
-| 赛事 | `contests/` | test_contest_*（3 文件） | wiki/CONTEST_FORMAT、CONTEST_BRACKET |
+| 评分排行 | `rating/glicko2` + `games/*/tiers.py` | test_tiers、test_engine | wiki/TIER |
+| 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/CONTEST_FORMAT、CONTEST_BRACKET |
 | 社交 | api_routes + store | test_social、test_comments_likes | wiki/SOCIAL、COMMENTS_LIKES |
 | 通知 | `notifications/` | test_notifications | wiki/NOTIFICATIONS |
 | 经验等级 | store + api_routes | test_xp_level | wiki/XP_LEVEL |
 | 沙箱运行时 | `runtime/` | test_runtime、test_runtime_settings | wiki/RUNTIME |
-| 三游戏引擎 | `engine/` | test_engine、test_board_engines | wiki/PROTOCOL、GOMOKU、PENCIL、TEXAS |
-| 前端 | `frontend/` | browser_verify（30 项） | wiki/UI_*（迁入 doc/DESIGN） |
+| 三游戏引擎 | `games/<game>/`（engine 为 shim） | test_engine、test_board_engines、test_result_contract、test_game_registry、test_import_cycles | wiki/PROTOCOL、GOMOKU、PENCIL、TEXAS、JUDGE_CODE |
+| 架构契约 | games 注册表 + 通用层无游戏分支 | test_tongyong_layer_no_game_branches、test_despecialization、test_physical_reorg | doc/DESIGN、AGENTS.md |
+| 前端 | `frontend/`（`src/games/` 注册表 + canvas） | browser_verify / screenshot_verify | doc/DESIGN §5 |
 
 > 所有功能需求均有对应的代码实现 + 自动化测试 + wiki 文档，覆盖率完整。
 

@@ -145,7 +145,7 @@ Botzone 上本游戏与其它游戏一样使用 [Bot 交互](https://wiki.botzon
 
 Botzone 默认：**请注意程序有计算时间限制，每步要在 1 秒内完成！**
 
-本平台：整场**长驻**进程 + 一行 JSON；默认决策超时由管理员配置（常见默认 **60s**），超时 / 崩溃 / 非法动作 → **fold**。详见 [运行时](#/wiki?slug=runtime)、[协议规范](#/wiki?slug=protocol)。
+本平台：整场**长驻**进程 + 一行 JSON；默认决策超时由管理员配置（常见默认 **60s**）。超时 / 非法动作 → **fold**；进程崩溃 / EOF → 整场 **aborted**（`bot_crashed`）。详见 [运行时](#/wiki?slug=runtime)、[协议规范](#/wiki?slug=protocol)、[对局](#/wiki?slug=match)。
 
 ### 具体交互内容
 
@@ -414,7 +414,7 @@ def min_raise_to(current_bet, bb):
 
 ### 裁判与本地自测
 
-服务端 `MatchSession`：从 2 张底牌 + 最多 5 张公共牌取**最佳五牌**比较；非法 / 超时 → fold；牌力顺序与 [§牌型和大小](#牌型和大小) 一致（含 A-5 轮子）。
+服务端 `MatchSession`（`games/holdem/engine.py`）：从 2 张底牌 + 最多 5 张公共牌取**最佳五牌**比较；非法 / 超时 → fold；进程崩溃 → 整场 aborted；牌力顺序与 [§牌型和大小](#牌型和大小) 一致（含 A-5 轮子）。
 
 本地自测：
 

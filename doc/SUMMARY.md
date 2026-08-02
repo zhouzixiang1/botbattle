@@ -13,7 +13,7 @@
 
 ## 2. 里程碑与开发历程
 
-项目经多个阶段交付，共 **27 个 PR**（#1–#27）全部合并到 main：
+项目经多个阶段交付。早期 **#1–#27** 奠定功能与文档基线；其后继续合并全面解耦、canvas 观赛、安全日志、赛事修复等（见 §2.4）：
 
 ### 2.1 平台功能建设（15 PR：#1–#15）
 对标 Botzone 全量补齐平台功能：
@@ -51,20 +51,31 @@
 | #26 | 前端逐页视觉修复（紧凑标题区 + 表格统一 + auth 品牌壳） |
 | #27 | 对抗审计：引擎层传播 BotCrashedError + start_session 泄漏 + 测试盲区 |
 
+### 2.4 后续演进（#27 之后，节选）
+| 主题 | 说明 |
+|------|------|
+| 全面解耦 | `games/` GameSpec 注册表、per-game matches 表、engine/protocol 降为 shim |
+| canvas 观赛 | 三游戏 canvas + GSAP；统一 MatchViewer |
+| 安全与日志 | access/audit 三文件日志、限流与审计埋点 |
+| 赛事修复 | 瑞士/淘汰多轮推进等（赛事压测发现） |
+| 文档对齐 | 交付文档与 wiki 与代码现状一致（本轮） |
+
 ## 3. 成果指标
+
+> 下列为文档对齐时点（2026-08）的代码盘点；API/测试数字以仓库当前状态为准。
 
 | 指标 | 数值 |
 |------|------|
-| 后端代码 | 45 个非测试 .py（72 含测试，~14933 全量行） |
-| API 路由 | 109 个（api_routes 95 含 WS/SSE + auth 13 + health 1） |
-| 数据库表 | 25 张 + ~23 索引 |
+| 后端代码 | `bzplat/backend` 约 80 个非测试 `.py`（含 `games/` / `_compat/` 等） |
+| API 路由 | 约 **110**（api_routes ≈96 含 WS/SSE + auth 13 + health 1） |
+| 数据库表 | **28** 张 + **35** 索引（`schema.py`） |
+| 游戏架构 | `games/` 注册表 + 3 自包含子包；`engine/`/`protocol/` 为 shim |
 | 前端组件 | 26 个 shadcn 共享原语 |
-| 前端页面 | 21 页 + admin 10 Tab，23 条路由 |
-| 自动化测试 | 27 个后端测试文件（216 passed） |
-| 大规模压测 | 60 用户 × 8 阶段，152 passed / 0 failed / 40.9s |
-| 浏览器验收 | 30/30 passed（明暗 + 移动端） |
-| 前端主包 | gzip ~115KB（代码分割后） |
-| 合并 PR | 27 个（15 平台 + 7 前端 + 5 文档/修复/审计），合并后删除本地特性分支 |
+| 前端页面 | **22** 个 lazy 页面模块（含 admin）；约 23 条 `<Route>`（含 `/watch` 重定向） |
+| 自动化测试 | **38** 个 `test_*.py`；`pytest --collect-only` ≈ **362** tests |
+| 大规模压测 | 60 用户 × 8 阶段（历史基线 152 passed / 0 failed） |
+| 浏览器验收 | browser_verify / screenshot_verify |
+| 合并 PR | 早期 27 个里程碑后继续演进（全面解耦、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
 
@@ -76,7 +87,7 @@
 | 规则/协议文档 | ✅ | `wiki/` |
 | 协议 JSON Schema | ✅ | `contracts/` |
 | 样例 Bot + 参考裁判 | ✅ | `samples/` |
-| 测试套件 | ✅ 200 passed | `bzplat/backend/tests/` |
+| 测试套件 | ✅ 38 模块 / 300+ 用例 | `bzplat/backend/tests/` |
 | 压测脚本 | ✅ 152✓/0✗ | `scripts/load_test.py` |
 | 浏览器验收 | ✅ 30/30 | `scripts/browser_verify.py` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |
@@ -103,13 +114,13 @@
 | `.env` 敏感信息 | SMTP 明文密码已提交历史 | 建议轮换凭据 + `git filter-branch` 清理历史 + 确认 `.gitignore` |
 
 ### 6.2 维护计划
-- **新增游戏**：按 `doc/DEVELOPMENT.md` §5.1，赛制/编排层零改动，成本低。
+- **新增游戏**：按 `AGENTS.md` 与 `doc/DESIGN.md` §2.3 / `doc/DEVELOPMENT.md` §5.1（GameSpec 注册表，**禁止**通用层 if-chain），赛制/编排层零改动。
 - **文档同步**：改代码时按 `AGENTS.md` 文档规范同步 `doc/` 或 `wiki/`。
-- **测试维护**：新增功能/行为变更须在 `tests/` 加用例；定期跑 `load_test.py` + `browser_verify.py`。
-- **日志监控**：`logs/app.log` + admin 日志 Tab；Bot 崩溃看 stderr 末尾。
+- **测试维护**：新增功能/行为变更须在 `bzplat/backend/tests/` 加用例；架构改动同步契约测试；定期跑 `load_test.py` + `browser_verify.py`。
+- **日志监控**：`logs/app.log` + `access.log` + `audit.log` + admin 日志 Tab；Bot 崩溃看 stderr 末尾。
 
 ## 7. 结论
 
-botbattle 平台已**完整交付**：三游戏对战核心稳定（核心解耦契约保障）、平台功能对标 Botzone 全量补齐（15 PR）、前端经设计系统全面重塑（7 PR，shadcn/ui + 暗色 + 响应式 + 无 emoji）、文档体系与体验修复（5 PR：文档 + 人类对战治本 + 观赛定速分栏 + 视觉修复 + 对抗审计）、测试覆盖充分（216 单测 + 60 用户压测 0 失败 + 浏览器 30/30，含多 agent 对抗审计回归保护）。代码、文档、测试、部署四类交付物齐备，满足验收准则。
+botbattle 平台已**完整交付并持续演进**：三游戏对战核心稳定（`games/` GameSpec + 结果鸭子契约 + 自动化守护）、平台功能对标 Botzone 补齐、前端经设计系统重塑（shadcn/ui + 浅/暗双主题 + canvas/GSAP 观赛 + 响应式 + 无 emoji）、文档与运维脚本齐备。代码、文档、测试、部署四类交付物满足验收与后续维护要求。
 
 > 返回 [doc/INDEX.md](./INDEX.md)
