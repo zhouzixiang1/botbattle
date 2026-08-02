@@ -12,6 +12,7 @@ import { ErrorMsg } from '@/components/ui/status'
 import { cn } from '@/lib/utils'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel, type GameId } from '@/lib/games'
+import { getGame, defaultMatchConfig } from '@/games'
 
 interface Bot {
   id: number
@@ -36,9 +37,15 @@ export default function Challenge() {
   const [humanMode, setHumanMode] = useState(false) // true=人类亲自上场
   const [humanSeat, setHumanSeat] = useState(1)
   const [pickerOpen, setPickerOpen] = useState(false)
-  const [hands, setHands] = useState(70)
+  // 动态对局参数（按所选游戏的 configFields 驱动，消除散落 hands 状态 + 漏 pencil n_dots）
+  const [matchCfg, setMatchCfg] = useState<Record<string, number>>(defaultMatchConfig('holdem'))
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const gameSpec = getGame(gameId)
+  // 切换游戏时重置参数为该游戏默认
+  useEffect(() => {
+    setMatchCfg(defaultMatchConfig(gameId))
+  }, [gameId])
 
   const load = useCallback(async () => {
     try {
@@ -66,8 +73,8 @@ export default function Challenge() {
           bot_id: Number(myBotId),
           human_seat: humanSeat,
           game_id: gameId,
+          ...matchCfg,
         }
-        if (gameId === 'holdem') body.hands = hands
         const d = await apiJson<{ match_id: string }>('/api/matches/human', 'POST', body)
         nav(`/play/${d.match_id}`)
         return
@@ -79,8 +86,8 @@ export default function Challenge() {
         my_bot_id: Number(myBotId),
         opponent_bot_id: opp.id,
         game_id: gameId,
+        ...matchCfg,
       }
-      if (gameId === 'holdem') body.hands = hands
       const d = await apiJson<{ match_id: string }>('/api/matches/challenge', 'POST', body)
       nav(`/watch/${d.match_id}`)
     } catch (err) {
@@ -227,19 +234,22 @@ export default function Challenge() {
           )}
         </div>
 
-        {gameId === 'holdem' && !humanMode && (
-          <div className="space-y-1.5">
-            <Label htmlFor="challenge-hands">手数（1–300）</Label>
-            <Input
-              id="challenge-hands"
-              type="number"
-              min={1}
-              max={300}
-              value={hands}
-              onChange={(e) => setHands(Number(e.target.value) || 70)}
-            />
-          </div>
-        )}
+        {!humanMode &&
+          gameSpec.configFields.map((f) => (
+            <div key={f.key} className="space-y-1.5">
+              <Label htmlFor={`challenge-${f.key}`}>
+                {f.label}（{f.min}–{f.max}）
+              </Label>
+              <Input
+                id={`challenge-${f.key}`}
+                type="number"
+                min={f.min}
+                max={f.max}
+                value={matchCfg[f.key] ?? f.default}
+                onChange={(e) => setMatchCfg({ ...matchCfg, [f.key]: Number(e.target.value) })}
+              />
+            </div>
+          ))}
 
         {error && <ErrorMsg msg={error} />}
         <Button

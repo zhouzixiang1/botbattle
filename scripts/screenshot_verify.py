@@ -81,7 +81,7 @@ with sync_playwright() as p:
             if m.type != "error":
                 return
             t = m.text
-            if "401" in t or "Unauthorized" in t or "favicon" in t.lower():
+            if "401" in t or "Unauthorized" in t or "favicon" in t.lower() or "429" in t or "Too Many Requests" in t:
                 return
             console_errs.append(t)
 

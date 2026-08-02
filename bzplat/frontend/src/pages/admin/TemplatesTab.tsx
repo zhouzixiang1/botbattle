@@ -2,10 +2,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft } from 'lucide-react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { ErrorMsg, Loading, RefreshBtn } from './ui'
-import { defaultMatchConfig } from '@/games'
+import { defaultMatchConfig, getGame, GAMES, type GameId } from '@/games'
 
 // ── 类型 ──────────────────────────────────────────────────────
-type GameId = 'holdem' | 'gomoku' | 'pencil'
 type StageType =
   | 'round_robin'
   | 'double_round_robin'
@@ -30,16 +29,11 @@ interface Template {
   id: string
   name: string
   game_id: GameId
-  match_config: { hands?: number; n_dots?: number }
+  match_config: Record<string, number>
   stages: Stage[]
   is_builtin?: number | boolean
 }
 
-const GAMES: { id: GameId; label: string }[] = [
-  { id: 'holdem', label: '德州扑克' },
-  { id: 'gomoku', label: '五子棋' },
-  { id: 'pencil', label: '点格棋' },
-]
 const STAGE_TYPES: { id: StageType; label: string }[] = [
   { id: 'round_robin', label: '单循环' },
   { id: 'double_round_robin', label: '双循环' },
@@ -301,24 +295,20 @@ function Editor(props: {
         </label>
       </div>
 
-      {/* 对局参数 match_config */}
+      {/* 对局参数 match_config（经注册表 configFields，消除 per-game if 分支） */}
       <div className="rounded-lg bg-muted p-3">
         <p className="mb-2 text-xs font-medium text-muted-foreground">对局参数（match_config）</p>
-        {t.game_id === 'holdem' && (
-          <label className="text-sm text-muted-foreground">
-            每场手数（1–500）
-            <input type="number" min={1} max={500} className={inp} value={t.match_config.hands ?? 70}
-              onChange={(e) => props.setMatchConfig('hands', Number(e.target.value))} />
+        {getGame(t.game_id).configFields.map((f) => (
+          <label key={f.key} className="text-sm text-muted-foreground">
+            {f.label}（{f.min}–{f.max}）
+            <input type="number" min={f.min} max={f.max} className={inp}
+              value={t.match_config[f.key] ?? f.default}
+              onChange={(e) => props.setMatchConfig(f.key, Number(e.target.value))} />
           </label>
+        ))}
+        {getGame(t.game_id).configFields.length === 0 && (
+          <p className="text-xs text-muted-foreground">{getGame(t.game_id).label}单局，无可调参数。</p>
         )}
-        {t.game_id === 'pencil' && (
-          <label className="text-sm text-muted-foreground">
-            点阵边长 n_dots（3–15）
-            <input type="number" min={3} max={15} className={inp} value={t.match_config.n_dots ?? 11}
-              onChange={(e) => props.setMatchConfig('n_dots', Number(e.target.value))} />
-          </label>
-        )}
-        {t.game_id === 'gomoku' && <p className="text-xs text-muted-foreground">五子棋单局，无可调参数。</p>}
       </div>
 
       {/* 阶段列表 */}
