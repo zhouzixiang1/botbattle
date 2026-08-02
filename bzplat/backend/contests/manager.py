@@ -530,6 +530,20 @@ class ContestManager:
                     await self._maybe_next_swiss_round(contest_id, stage_idx, stage)
             return None
 
+        # 多轮赛制推进（500 人压测发现的 bug 修复）：
+        # swiss / single_elimination 是「懒生成」轮次——_stage_done 只看现有 pairing 是否全完成，
+        # 但 R1 完成时该阶段可能还需要更多轮（swiss 未到 total_rounds；淘汰赛胜者>1）。
+        # 在判定阶段真正结束前，尝试生成下一轮；生成了则阶段未完成（return），否则继续。
+        if stages and 0 <= stage_idx < len(stages):
+            stage = stages[stage_idx]
+            stype = stage.get("type") or ""
+            if stype == "swiss":
+                if await self._maybe_next_swiss_round(contest_id, stage_idx, stage):
+                    return None  # 生成了下一轮，阶段未完成
+            elif stype == "single_elimination":
+                if await self._maybe_next_elim_round(contest_id, stage_idx, stage):
+                    return None  # 生成了下一轮（半决赛/决赛），阶段未完成
+
         self._snapshot_stage_results(contest_id, stage_idx)
         rest_min = int((stages[stage_idx].get("rest_after_minutes") or 0) if stages else 0)
         has_next = stage_idx + 1 < len(stages)
@@ -555,25 +569,26 @@ class ContestManager:
 
     async def _maybe_next_swiss_round(
         self, contest_id: int, stage_idx: int, stage: dict
-    ) -> None:
+    ) -> bool:
+        """瑞士轮当前轮完成后生成下一轮。返回是否生成了新一轮（True=阶段未完成）。"""
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         if not pairings:
-            return
+            return False
         max_round = max(int(p.get("round_num") or 1) for p in pairings)
         # 当前轮是否全部结束
         cur = [p for p in pairings if int(p.get("round_num") or 1) == max_round]
         for p in cur:
             mid = p.get("match_id")
             if not mid:
-                return
+                return False
             m = self.store.get_match(mid)
             if not m or m["status"] not in (STATUS_COMPLETED, STATUS_ABORTED):
-                return
+                return False
         total_rounds = int(stage.get("rounds") or swiss_rounds_needed(
             len(self.store.list_contest_entries(contest_id))
         ))
         if max_round >= total_rounds:
-            return
+            return False
         # 生成下一轮
         standings = self.standings(contest_id, stage_idx=stage_idx)
         scores = {s["bot_id"]: s["points"] for s in standings}
@@ -598,6 +613,53 @@ class ContestManager:
                 color_first=sp.color_first,
             )
         await self._dispatch_pending(contest_id, stage_idx)
+        return True
+
+    async def _maybe_next_elim_round(
+        self, contest_id: int, stage_idx: int, stage: dict
+    ) -> bool:
+        """单败淘汰：当前轮完成后用胜者生成下一轮（半决赛/决赛）。返回是否生成了新一轮。
+
+        复现修复：500 人压测发现 KO 只跑四分之一就 finished——_stage_done 只看现有 pairing，
+        但 single_elimination 只生成首轮，后续轮需根据胜者推进。
+        """
+        pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+        if not pairings:
+            return False
+        max_round = max(int(p.get("round_num") or 1) for p in pairings)
+        cur = [p for p in pairings if int(p.get("round_num") or 1) == max_round]
+        # 当前轮全部完成
+        winners: list[int] = []
+        for p in cur:
+            mid = p.get("match_id")
+            if not mid:
+                return False
+            m = self.store.get_match(mid)
+            if not m or m["status"] not in (STATUS_COMPLETED, STATUS_ABORTED):
+                return False
+            w = m.get("winner")
+            if w is None:
+                # 平局/异常：取 bot_a 兜底（淘汰赛不应平局，但兜底防卡死）
+                w = 0
+            winners.append(p["bot_a_id"] if w == 0 else p["bot_b_id"])
+        # 胜者 ≤1 → 已决出冠军，阶段真正完成
+        if len(winners) <= 1:
+            return False
+        # 用胜者生成下一轮（按 bracket_slot 顺序配对：相邻两胜者一组）
+        key = stage.get("key") or f"stage{stage_idx}"
+        next_round = max_round + 1
+        slot = 0
+        for i in range(0, len(winners) - 1, 2):
+            a, b = winners[i], winners[i + 1]
+            self.store.add_contest_pairing(
+                contest_id, a, b,
+                round_num=next_round, status="pending",
+                stage_idx=stage_idx, stage_key=key,
+                bracket_slot=slot, color_first=0,
+            )
+            slot += 1
+        await self._dispatch_pending(contest_id, stage_idx)
+        return True
 
     async def _maybe_auto_resume(self, contest_id: int) -> dict | None:
         c = self.store.get_contest(contest_id)
