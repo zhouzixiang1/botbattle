@@ -10,6 +10,7 @@ import {
   CommandList,
 } from '@/components/ui/command'
 import { apiGet } from '@/api'
+import { gameLabel } from '@/games'
 
 interface SearchUser {
   id: number
@@ -87,9 +88,6 @@ export function GlobalSearch({ compact = false }: { compact?: boolean }) {
     setQ('')
     nav(path)
   }
-
-  const gameLabel = (g: string) =>
-    g === 'holdem' ? '德州扑克' : g === 'gomoku' ? '五子棋' : g === 'pencil' ? '点格棋' : g
 
   return (
     <>

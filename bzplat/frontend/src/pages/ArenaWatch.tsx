@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Loading } from '@/components/ui/status'
 import { apiGet } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
+import { isBoardGame } from '@/games'
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   idle: 'secondary', connecting: 'secondary', live: 'default', match_end: 'outline', error: 'destructive',
@@ -94,7 +95,7 @@ export default function ArenaWatch() {
 
   const GameIcon = gameIcon(gameId)
   const events = pb.buffer as RawEvent[]
-  const isBoard = gameId === 'gomoku' || gameId === 'pencil'
+  const isBoard = isBoardGame(gameId)
 
   if (!id) {
     return (
