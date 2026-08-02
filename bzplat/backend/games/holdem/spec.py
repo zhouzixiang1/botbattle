@@ -1,21 +1,21 @@
 """德州扑克 GameSpec——把引擎/协议/配置/段位/模板统一声明成一个对象。
 
-PR1 阶段：引擎/协议文件仍留原位（engine/game.py、protocol/json_protocol.py），
-本 spec 用 import 引用它们；PR4 会物理迁移到 games/holdem/ 包内。
+PR4：引擎/协议/结果/段位已物理迁入本包（games/holdem/），不再共享基类。
 """
 from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, JudgeParamSpec, ProtocolSpec, TierDef
-from bzplat.backend.engine.game import (
+from bzplat.backend.games.base import GameSpec, JudgeParamSpec, ProtocolSpec
+from bzplat.backend.games.holdem.engine import (
     BIG_BLIND,
     DEFAULT_HANDS,
     MatchSession,
     SMALL_BLIND,
     STARTING_STACK,
 )
-from bzplat.backend.protocol import json_protocol as proto
+from bzplat.backend.games.holdem import protocol as proto
+from bzplat.backend.games.holdem import tiers as _tiers_mod
 from bzplat.backend.store.schema import (
     SETTING_JUDGE_HOLDEM_BB,
     SETTING_JUDGE_HOLDEM_HANDS,
@@ -64,30 +64,6 @@ def _normalize_earnings(ea: int) -> float:
     return ea / 100.0
 
 
-# 德州段位曲线（per-game；与全局 tiers.py 历史阈值一致，后续可独立调整）
-_TIERS = [
-    TierDef(5, "master", "大师", "text-violet-700", "bg-violet-50", 2200),
-    TierDef(4, "expert", "专家", "text-indigo-700", "bg-indigo-50", 2050),
-    TierDef(3, "gold", "高手", "text-amber-700", "bg-amber-50", 1900),
-    TierDef(2, "silver", "熟练", "text-slate-700", "bg-slate-100", 1750),
-    TierDef(1, "bronze", "进阶", "text-emerald-700", "bg-emerald-50", 1600),
-    TierDef(0, "novice", "新手", "text-sky-700", "bg-sky-50", 0),
-]
-
-
-def _tier_for(rating: float | int | None) -> TierDef:
-    if rating is None:
-        return _TIERS[-1]
-    r = float(rating)
-    for t in _TIERS:
-        if r >= t.min_rating:
-            return t
-    return _TIERS[-1]
-
-
-# 德州赛事模板（PR2 会从 contests/templates.py 迁入；PR1 先空，避免循环依赖）
-# PR1 阶段 templates 暂为空列表，PR2/PR5 落位。
-
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="德州扑克",
@@ -108,11 +84,11 @@ SPEC = GameSpec(
         JudgeParamSpec(SETTING_JUDGE_HOLDEM_HANDS, "挑战默认手数", "default_hands",
                        DEFAULT_HANDS, (1, 1000)),
     ],
-    tiers=_TIERS,
-    tier_for=_tier_for,
-    templates=[],  # PR2 迁入
+    tiers=_tiers_mod.TIERS,
+    tier_for=_tiers_mod.tier_for,
+    templates=[],  # PR5 迁入
     default_scoring="poker_3_1_0",
-    code_path="bzplat/backend/engine/game.py",
+    code_path="bzplat/backend/games/holdem/engine.py",
     summary="HU NLHE；单局多手；按筹码差判胜。",
     frontend_module="@/games/holdem",
 )

@@ -56,9 +56,10 @@ graph TB
 | 接口 | `api_routes.py` | 主 REST（95 路由）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki/matchpacks |
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
-| 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例）+ 每游戏 spec.py。GameSpec 集中声明一款游戏的全部固有属性（裁判/协议/配置/段位/模板/元信息），通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支** |
-| 裁判 | `engine/` | 三游戏 Session（game.py/gomoku.py/pencil.py）+ 共享 result.py（PR4 拆 per-game）+ registry.py（现为转发层，委托 games 注册表）+ tiers.py 全局段位（PR2 改 per-game 由 spec 声明）+ cards.py |
-| 协议 | `protocol/` | 行协议编解码：json_protocol.py（holdem 紧凑 JSON）+ board_protocol.py（棋类）。PR4 物理迁移到 games/<game>/protocol.py（各游戏独立副本，不共享） |
+| 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例）+ 每游戏完全自包含子包 games/<game>/（engine.py 裁判 + protocol.py 行协议 + result.py 独立结果 + tiers.py per-game 段位 + cards.py[holdem] + spec.py 装配）。GameSpec 集中声明全部固有属性，通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支** |
+| 兼容转发 | `_compat/` | 向后兼容转发层：把旧 import 路径（`engine.<x>`/`protocol.<x>`）转发到 games/<game>/。engine/ 与 protocol/ 旧文件改为 re-export 自 _compat（一行 shim） |
+| 裁判(shim) | `engine/` | 保留仅为兼容旧 import：__init__/game/gomoku/pencil/result/tiers/cards 改为 shim；registry.py 委托 games 注册表 |
+| 协议(shim) | `protocol/` | 保留仅为兼容旧 import：json_protocol/board_protocol → re-export 自 _compat |
 | 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战）+ runner（起 Bot 进程，经 games 注册表路由协议）+ auto_matcher（闲时自动） |
 | 赛制 | `contests/` | templates（7 内置模板）+ stages（对阵生成）+ manager（阶段状态机）+ validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |

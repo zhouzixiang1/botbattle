@@ -5,7 +5,7 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from bzplat.backend.engine.game import DEFAULT_HANDS
+from bzplat.backend.games.holdem.engine import DEFAULT_HANDS  # holdem 常量（runner 默认参数用）
 from bzplat.backend.engine.registry import (
     GAME_HOLDEM,
     normalize_game_id,
@@ -13,7 +13,6 @@ from bzplat.backend.engine.registry import (
 )
 # 全面解耦：runner 不再按 game_id 切协议模块，统一委托 games 注册表。
 from bzplat.backend.games import dumps as _reg_dumps, fail_response as _reg_fail, loads as _reg_loads
-from bzplat.backend.engine.result import MatchResult  # 共享基类（PR4 拆 per-game）
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError, DEFAULT_ACTION_TIMEOUT
 
 logger = logging.getLogger(__name__)
