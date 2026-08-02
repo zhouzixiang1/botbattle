@@ -390,9 +390,9 @@ class MatchOrchestrator:
             def on_event(kind: str, ev: dict) -> None:
                 events.append(ev)
                 self._broadcast(match_id, ev)
-                # your_turn 须持久化：前端重连/StrictMode 重挂载时从 snapshot 历史恢复 myTurn
-                if kind in ("settle", "hand_start", "match_end", "move", "match_start", "turn", "your_turn") or len(events) % 5 == 0:
+                if kind in ("settle", "hand_start", "match_end", "move", "match_start", "turn") or len(events) % 5 == 0:
                     self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+                # 注：your_turn 不经 on_event，由 human_decide 直接 append + 立即落库（见下）
 
             async def human_decide(player_idx: int, request: dict) -> dict:
                 # 注册 pending 回合，广播 your_turn，等待 WS /move 解析 Future

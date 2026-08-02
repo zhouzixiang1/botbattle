@@ -71,8 +71,8 @@
 
 SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看），之后逐事件广播；
 空闲时 25 秒发一次 `ping` 保活；`match_end` / `error` 后流结束。回放事件流增量落盘
-（`settle` / `hand_start` / `match_end` / `move` / `match_start` / `your_turn` 或每 5 个事件；
-其中 `your_turn` 在人类对局中**发出即落库**，保证前端重连可恢复）。
+（`settle` / `hand_start` / `match_end` / `move` / `match_start` 或每 5 个事件）。
+人类对局中 `your_turn` 额外**发出即落库**（不经此 checkpoint，由 `human_decide` 直接写），保证前端重连可恢复。
 每个订阅者的事件队列 `maxsize=2000`（Bot 决策极快时减少丢事件）；满时丢最旧事件保最新。
 
 ## 错误与后果
