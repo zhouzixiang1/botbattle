@@ -5,8 +5,19 @@
 ## 开发规范（务必遵守）
 
 - **先理解再动手**：任何修改前，必须先沿调用链查到根、定位到底层实现、读懂逻辑后再改。禁止"看到表层就改"。
-- **分支工作流**：任何修改先从 `main` 切出特性分支（`feat/...` 或 `fix/...`），在分支上完成；**合并必须走 GitHub Pull Request**（`gh pr create` → 评审 → 合并），**禁止本地 `git merge` 直推 main**；PR 合并后**删除原分支**（本地 + 远端）。不要直接在 `main` 上提交，也不要本地 merge 后 push。
-- **多 agent 协作避免上下文污染**：不同任务用独立分支/独立 agent 隔离；不要让一个 agent 的大改动串进另一个任务的上下文。每个 agent 只对自己的分支负责，改完即合并即清。
+- **worktree 隔离工作流**（硬约束——主目录、后端、数据库都不受开发影响）：
+  主目录只跑 `main` 的线上服务（:50380 + 主 db + 主源码），**绝不被开发分支污染**。流程：
+  1. 主目录保持 `main` 干净（只 `git pull` 同步）；50380 服务始终是 main 最新代码、线上 db 不被测试写入。
+  2. `git worktree add .worktrees/<分支名> -b feat/...`（或 `fix/...`）——共享主仓库 `.git`，秒建零拷贝。`.worktrees/` 已在 `.gitignore`（不跟踪 node_modules/dist/db 等产物）。
+  3. **worktree 跑完全独立的运行时栈**（CWD=worktree 是隔离关键）：
+     - **后端**：`cd .worktrees/<分支名> && python -m bzplat.backend.cli serve --host 127.0.0.1 --port <非50380>`
+       （CWD=worktree → 加载 worktree 源码 + worktree/botzone.db + 独立 bot_uploads/avatars/logs；与主目录源码/db 完全隔离）
+     - **前端**：`cd .worktrees/<分支名>/bzplat/frontend && npm install && BZ_API_TARGET=http://127.0.0.1:<worktree端口> npm run dev`
+       （vite.config.ts 的 proxy 目标读 `BZ_API_TARGET` 环境变量）
+     - **严禁**前端 proxy 到 50380 线上服务（会把测试写进线上 db）；**严禁** worktree 后端用 CWD=主目录（会加载主目录源码+db）。
+  4. **合并必须走 GitHub Pull Request**（`gh pr create` → 评审 → 合并到 main），**禁止本地 `git merge` 直推 main**。
+  5. PR 合并后**清理**：停 worktree 服务 → 主目录 `git worktree remove .worktrees/<分支名>` → 删分支（本地 + 远端）→ 主目录 `git pull` + `bash scripts/rebuild.sh`（rebuild + restart，让 50380 生效新代码）。
+- **多 agent 协作避免上下文污染**：不同任务用独立 worktree（独立分支 + 独立目录 + 独立运行时栈）隔离；不要让一个 agent 的大改动串进另一个任务的上下文。每个 agent 只对自己的 worktree 负责，改完即合并即清。
 - **提交前跑测试**：`pytest`（从仓库根目录），前端改了再 `npm run build`。
 - **改动须同步三处**（提交前自检）：
   1. **测试**：有功能/行为变更 → 在 `bzplat/backend/tests/` 加/改测试用例，覆盖新逻辑与边界。
@@ -54,6 +65,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 - **端到端冒烟**：`bash scripts/e2e_smoke.sh`。
 - **测试种子账号**：`python scripts/seed_test_accounts.py`（建 tester1/tester2，各上传 holdem/gomoku/pencil 样例 Bot；幂等，便于对战/人类对战测试）。
 - **改完代码必须 rebuild + restart**：`bash scripts/rebuild.sh`（`npm run build` → `platform-ctl.sh restart`）。前端产物（`bzplat/frontend/dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——不 rebuild+restart 代码不会生效（常见症状：新路由 405 Method Not Allowed）。
+- **worktree 前端独立预览**（开发期，不碰主服务 50380）：先在 worktree 起独立后端 `cd .worktrees/<分支> && python -m bzplat.backend.cli serve --port 50381`，再 `BZ_API_TARGET=http://127.0.0.1:50381 npm run dev`（vite dev server，proxy 到 worktree 后端）。详见上方「worktree 隔离工作流」。
 - **日志**：`logs/app.log`（`logging_config.setup_logging`，统一格式 `时间 级别 [模块] 消息`）。排查对局/bot 崩溃/auto-match/WS 问题在此；admin「日志」Tab 可网页查看与过滤。bot EOF 会附带 stderr 末尾。
 
 ## 关键约束（容易踩坑）

@@ -63,3 +63,6 @@ platform-ctl/
 .e2e_botzone.db
 refs/ui-refs/
 browser_shots/
+
+# === Git worktree 隔离开发（本地工作树，不跟踪）===
+.worktrees/

@@ -157,7 +157,10 @@ export default function MyBots() {
 
   return (
     <PageStub title="我的 Bot" subtitle="上传二进制 Bot（Linux ELF / Windows PE），选择对应游戏类型；macOS Mach-O 会被拒绝">
-      <Card className="mb-8 max-w-lg">
+      {/* 桌面双栏：左=上传表单（sticky 常驻），右=筛选+列表主区；<lg 单列堆叠 */}
+      <div className="lg:grid lg:grid-cols-[20rem_minmax(0,1fr)] lg:gap-6">
+      <div className="lg:sticky lg:top-20 lg:self-start">
+      <Card>
         <CardContent>
           <form onSubmit={(e) => void onUpload(e)} className="space-y-3">
             <h2 className="text-sm font-medium text-foreground">上传新 Bot</h2>
@@ -221,7 +224,9 @@ export default function MyBots() {
           </form>
         </CardContent>
       </Card>
+      </div>{/* /左栏 sticky */}
 
+      <div className="mt-6 lg:mt-0">
       <div className="mb-3">
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
           筛选游戏
@@ -313,6 +318,8 @@ export default function MyBots() {
           </ul>
         )}
       </Card>
+      </div>{/* /右栏 */}
+      </div>{/* /桌面双栏栅格 */}
     </PageStub>
   )
 }
