@@ -3,6 +3,7 @@ import { Spade } from 'lucide-react'
 import type { GameViewSpec } from '../base'
 import PokerTable from '@/components/poker/PokerTable'
 import { reduceEvents } from '@/components/poker/useMatchState'
+import { PokerCanvasRenderer } from './canvas'
 
 export const holdemSpec: GameViewSpec = {
   id: 'holdem',
@@ -11,6 +12,7 @@ export const holdemSpec: GameViewSpec = {
   kind: 'cards',
   Board: PokerTable as unknown as GameViewSpec['Board'],
   reduce: reduceEvents as unknown as GameViewSpec['reduce'],
+  CanvasRenderer: PokerCanvasRenderer,
   defaultMatchConfig: { hands: 70 },
   configFields: [
     { key: 'hands', label: '手数', default: 70, min: 1, max: 500 },
