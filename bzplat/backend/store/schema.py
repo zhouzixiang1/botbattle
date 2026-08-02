@@ -358,6 +358,10 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     entry_b_id      INTEGER,
     bot_a_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    bot_a_version_id INTEGER,  -- P1：发布轮冻结的 bot 版本（→ bot_versions.binary_path）
+    bot_b_version_id INTEGER,
+    pairing_seed    INTEGER,   -- P1：轮次确定性 seed（duplicate/复现用）
+    published_at    TEXT,      -- P1：发布时间戳（非 NULL = 已发布轮，dispatch 不改）
     match_id        TEXT,  -- 逻辑外键，指向 matches_<game>.id（经 matches_index 定位）；无 DB 级 FK
     status          TEXT    NOT NULL DEFAULT 'pending',
     stage_idx       INTEGER NOT NULL DEFAULT 0,

@@ -259,6 +259,13 @@ class MatchOrchestrator:
                 except (asyncio.QueueEmpty, asyncio.QueueFull):
                     pass
 
+    def _find_contest_pairing(self, contest_id: int, match_id: str) -> dict | None:
+        """P1：按 contest_id + match_id 定位 contest_pairing 行（读冻结 version_id 用）。"""
+        for p in self.store.list_contest_pairings(contest_id):
+            if p.get("match_id") == match_id:
+                return p
+        return None
+
     async def _run_match(self, match_id: str) -> None:
         async with self._sem:
             m = self.store.get_match(match_id)
@@ -266,6 +273,21 @@ class MatchOrchestrator:
                 return
             bot_a = self.store.get_bot(m["bot_a_id"])
             bot_b = self.store.get_bot(m["bot_b_id"])
+            # P1：赛事对局读冻结的 bot 版本路径（pairing.bot_a_version_id → bot_versions.binary_path），
+            # 不受选手中途上传新版本影响；非 contest 读 bots.binary_path（最新）。
+            path_a = bot_a["binary_path"]
+            path_b = bot_b["binary_path"]
+            if m.get("match_type") == TYPE_CONTEST and m.get("contest_id"):
+                pairing = self._find_contest_pairing(m["contest_id"], match_id)
+                if pairing:
+                    if pairing.get("bot_a_version_id"):
+                        v = self.store.get_bot_version(pairing["bot_a_version_id"])
+                        if v and v.get("binary_path"):
+                            path_a = v["binary_path"]
+                    if pairing.get("bot_b_version_id"):
+                        v = self.store.get_bot_version(pairing["bot_b_version_id"])
+                        if v and v.get("binary_path"):
+                            path_b = v["binary_path"]
             gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
             logger.info(
                 "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s)",
@@ -286,8 +308,8 @@ class MatchOrchestrator:
                 # num_hands：admin 全局设置（SETTING_JUDGE_HOLDEM_HANDS）优先，未设回退对局级 total_hands
                 num_hands = jp.get("num_hands") or int(m["total_hands"])
                 result = await self.runner.run_binaries(
-                    bot_a["binary_path"],
-                    bot_b["binary_path"],
+                    path_a,
+                    path_b,
                     game_id=gid,
                     num_hands=num_hands,
                     n_dots=m.get("n_dots"),
