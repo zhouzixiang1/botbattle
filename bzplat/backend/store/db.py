@@ -51,8 +51,8 @@ def _add_col(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
 _CREATE_MATCHES_TABLE_SQL = """
 CREATE TABLE matches_{suffix} (
     id              TEXT    PRIMARY KEY,
-    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
-    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_a_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     hands_played    INTEGER NOT NULL DEFAULT 0,
@@ -200,8 +200,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if "match_id" in cp_cols:
             conn.execute("UPDATE contest_pairings SET match_id=NULL WHERE match_id IS NOT NULL")
         conn.execute("DROP TABLE IF EXISTS matches")
-        conn.execute("DROP TABLE IF EXISTS match_replays")  # replay 绑定对局，一并丢弃
-        # 注意：新三张表 + matches_index 由 SCHEMA executescript 创建（IF NOT EXISTS 幂等）
+        # 注意：不 DROP match_replays——SCHEMA executescript 已用 IF NOT EXISTS 建空表，
+        # 若此处 DROP 会让迁移当次进程内 match_replays 缺失到下次重启。旧 replay 数据
+        # 本就随对局丢弃（重建库），无需 DROP 再建。
+        # 新三张表 + matches_index 由 SCHEMA executescript 创建（IF NOT EXISTS 幂等）
 
     # pair_stats 补胜负计数列（head-to-head 战绩用）
     if "pair_stats" in tables:
@@ -302,7 +304,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 )
                 """
             )
-            # 回填：每行 game_id 取自 bots.game_id（bot 绑定单一游戏）
+            # 回填：每行 game_id 取自 bots.game_id（bot 绑定单一游戏）。
+            # 只迁移 bots 表里仍存在的 bot（丢弃孤儿 ratings 行，避免 FK 校验崩溃）。
             conn.execute(
                 """
                 INSERT INTO ratings_new
@@ -313,6 +316,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                        r.net_chips, r.matches_played, r.last_played_at
                 FROM ratings r
                 LEFT JOIN bots b ON b.id = r.bot_id
+                WHERE r.bot_id IN (SELECT id FROM bots)
                 """
             )
             conn.execute("DROP TABLE ratings")
@@ -344,6 +348,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                        rh.rating, rh.rd, rh.vol, rh.matches_played, rh.reason, rh.created_at
                 FROM rating_history rh
                 LEFT JOIN bots b ON b.id = rh.bot_id
+                WHERE rh.bot_id IN (SELECT id FROM bots)
                 """
             )
             conn.execute("DROP TABLE rating_history")
@@ -352,6 +357,105 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_rating_history_bot "
                 "ON rating_history(bot_id, game_id, id DESC)"
             )
+
+    # ── per-game matches 表 FK 加固（ON DELETE SET NULL，全面解耦审计 P0 修复）─────
+    # 旧库分表后 bot_a_id/bot_b_id 无 ON DELETE 子句（SQLite 默认 RESTRICT）→
+    # delete_bot 在 bot 参与过对局后抛 FOREIGN KEY constraint failed。
+    # 检测并重建三表（SQLite 不能 ALTER FK，需 CREATE new→INSERT→DROP→RENAME）。
+    # 对局数据可丢弃（用户决策），重建后为空也无妨。
+    def _match_fk_has_set_null(conn, table: str) -> bool:
+        """该 matches_<game> 表的 bot_a_id FK 是否已带 ON DELETE SET NULL。"""
+        for row in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall():
+            # row: (id, seq, table, from, to, on_update, on_delete, match)
+            if row["table"] == "bots" and row["from"] in ("bot_a_id", "bot_b_id"):
+                if (row["on_delete"] or "").upper() != "SET NULL":
+                    return False
+        return True
+
+    for _gid, _suffix in (("holdem", "holdem"), ("gomoku", "gomoku"), ("pencil", "pencil")):
+        _tbl = f"matches_{_suffix}"
+        if _tbl in tables and not _match_fk_has_set_null(conn, _tbl):
+            # FK 非 SET NULL → 重建（对局数据丢弃，与分表迁移一致）
+            conn.execute(f"DROP TABLE IF EXISTS {_tbl}")
+            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_suffix, gdef=_gid))
+            # 清理 matches_index 中指向该表的残留定位（表已空）
+            conn.execute(
+                "DELETE FROM matches_index WHERE game_id=?", (_gid,)
+            )
+
+    # ── contest_* 表 bot FK 加 CASCADE（审计 P0：delete_bot 被 contest FK RESTRICT 阻断）──
+    # contest_entries / contest_pairings / contest_stage_results 的 bot FK 旧为 NO ACTION，
+    # 删 bot 时若该 bot 报名/对阵/有成绩过会崩。改为 ON DELETE CASCADE（删 bot → 清其赛事数据）。
+    def _bot_fk_is_cascade(conn, table: str) -> bool:
+        for row in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall():
+            if row["table"] == "bots" and (row["on_delete"] or "").upper() != "CASCADE":
+                return False
+        return True
+
+    # 各表（含列定义）的重建模板；列与 SCHEMA 一致，仅 bot FK 加 ON DELETE CASCADE
+    _CONTEST_TABLE_REBUILDS = {
+        "contest_entries": (
+            "CREATE TABLE {n}_new ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE, "
+            "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+            "bot_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
+            "registered_at TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', "
+            "seed INTEGER NOT NULL DEFAULT 0, eliminated INTEGER NOT NULL DEFAULT 0, "
+            "dispatched_at TEXT)",
+            "contest_id, user_id, bot_id, registered_at, group_id, seed, eliminated, dispatched_at",
+        ),
+        "contest_pairings": (
+            "CREATE TABLE {n}_new ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE, "
+            "round_num INTEGER NOT NULL DEFAULT 1, "
+            "bot_a_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
+            "bot_b_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
+            "match_id TEXT, status TEXT NOT NULL DEFAULT 'pending', "
+            "stage_idx INTEGER NOT NULL DEFAULT 0, stage_key TEXT NOT NULL DEFAULT '', "
+            "group_id TEXT NOT NULL DEFAULT '', bracket_slot INTEGER, color_first INTEGER NOT NULL DEFAULT 0)",
+            "id, contest_id, round_num, bot_a_id, bot_b_id, match_id, status, "
+            "stage_idx, stage_key, group_id, bracket_slot, color_first",
+        ),
+        "contest_stage_results": (
+            "CREATE TABLE {n}_new ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE, "
+            "stage_idx INTEGER NOT NULL, stage_key TEXT NOT NULL DEFAULT '', "
+            "bot_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE, "
+            "points REAL NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, "
+            "draws INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, "
+            "net_chips INTEGER NOT NULL DEFAULT 0, group_id TEXT NOT NULL DEFAULT '', "
+            "rank_in_group INTEGER, payload_json TEXT NOT NULL DEFAULT '{{}}', "
+            "UNIQUE(contest_id, stage_idx, bot_id))",
+            "id, contest_id, stage_idx, stage_key, bot_id, points, wins, draws, losses, "
+            "net_chips, group_id, rank_in_group, payload_json",
+        ),
+    }
+    for _ctable, (_ddl_tpl, _cols) in _CONTEST_TABLE_REBUILDS.items():
+        if _ctable in tables and not _bot_fk_is_cascade(conn, _ctable):
+            # 清理上次失败残留的 _new 表（保幂等）
+            conn.execute(f"DROP TABLE IF EXISTS {_ctable}_new")
+            # 取实际存在的列（旧库可能少列），只迁移都有的
+            _have = _table_cols(conn, _ctable)
+            _present = [c.strip() for c in _cols.split(",") if c.strip() in _have]
+            _col_list = ", ".join(_present)
+            conn.execute(_ddl_tpl.format(n=_ctable))
+            if _col_list:
+                conn.execute(
+                    f"INSERT INTO {_ctable}_new ({_col_list}) "
+                    f"SELECT {_col_list} FROM {_ctable}"
+                )
+            conn.execute(f"DROP TABLE {_ctable}")
+            conn.execute(f"ALTER TABLE {_ctable}_new RENAME TO {_ctable}")
+            # 重建索引（SCHEMA 的 IF NOT EXISTS 不会对已 DROP 的表生效，手动补）
+            if _ctable == "contest_entries":
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_entries_c ON contest_entries(contest_id)")
+            elif _ctable == "contest_pairings":
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_pairings_c ON contest_pairings(contest_id)")
+            elif _ctable == "contest_stage_results":
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(contest_id)")
 
 
 class Store:
@@ -1074,6 +1178,23 @@ class Store:
             return _row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
+
+    def delete_match(self, match_id: str) -> bool:
+        """删除对局（经 matches_index 定位）：删 per-game 表行 + matches_index + replay。
+
+        统一删除入口，保 matches_index 与 per-game 表不漂移（审计 P0：matches_index
+        无清理会导致 like/view 计数静默 drift）。返回是否删到了行。
+        """
+        with self._tx() as c:
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return False
+            cur = c.execute(f"DELETE FROM {tbl} WHERE id=?", (match_id,))
+            deleted = cur.rowcount > 0
+            if deleted:
+                c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
+                c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+            return deleted
 
     def list_matches(
         self,
