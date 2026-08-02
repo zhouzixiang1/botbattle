@@ -3,7 +3,7 @@
 验证通用层的 if game_id 分支已被 spec 能力取代：
 - orchestrator 用 spec.rounds_per_match / spec.normalize_earnings（不再 GAME_HOLDEM）
 - _judge_params(gid) per-game（只返回该游戏字段）
-- contests estimate 经 spec.eta_per_match_sec
+- contests estimate 经 spec.eta_for_match
 - validate_match_config 经 spec.validate_match_params
 - 段位 per-game：/api/tiers?game_id= 返回该游戏曲线；bot_profile/leaderboard 按 bot 的 game_id 取段位
 """

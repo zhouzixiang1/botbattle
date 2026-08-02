@@ -94,15 +94,12 @@ SPEC = GameSpec(
     validate_match_params=_validate_match_params,
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
-    eta_per_match_sec=60.0,  # N=6/25 格基准（随 n_dots 缩放）
     eta_for_match=_eta_for_match,
     judge_params=[],  # n_dots 走 match 列，非全局 setting
     tiers=_tiers_mod.TIERS,
-    tier_for=_tiers_mod.tier_for,
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/pencil/engine.py",
     summary="N=6 点阵（对齐 Botzone grid_size=11 交错→25 格）；红先；占相邻边围格得分并连走；先到多数格（13）或终局格多者胜。",
-    frontend_module="@/games/pencil",
     preflight_check=_preflight_check,
 )

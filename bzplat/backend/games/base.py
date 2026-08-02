@@ -29,9 +29,20 @@ EventFn = Callable[[str, dict[str, Any]], Any]
 
 
 class SessionFactory(Protocol):
-    """构造并运行一局对局的协程工厂：spec.session_factory(decide, **params) → 结果对象。"""
+    """构造并运行一局对局的协程工厂：spec.session_factory(decide, **params) → 结果对象。
 
-    async def __call__(self, decide: DecideFn, **params: Any) -> Any: ...
+    唯一调用点是 ``GameSpec.run_session``，它必传 ``on_event`` 关键字参数，故
+    工厂签名须显式声明 ``on_event``（与 run_session 对齐，否则外部按本 Protocol
+    实现的工厂会在 run_session 里因收到意外的 on_event kwarg 而崩）。
+    """
+
+    async def __call__(
+        self,
+        decide: DecideFn,
+        *,
+        on_event: EventFn | None = None,
+        **params: Any,
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -108,13 +119,11 @@ class GameSpec:
     validate_match_params: Callable[[dict[str, Any]], dict[str, Any]]
     rounds_per_match: Callable[[dict[str, Any]], int]      # holdem=match_config["hands"]；棋类=1
     normalize_earnings: Callable[[int], float]             # holdem: ea/100.0；棋类: float(ea)
-    eta_per_match_sec: float                               # ETA 基准（estimate 用）
     eta_for_match: Callable[[dict[str, Any]], int]         # 按 match_config 算每场秒数（取代 if game_id 缩放分支）
     judge_params: list[JudgeParamSpec] = field(default_factory=list)
 
-    # 段位曲线（完全 per-game，替代全局 engine/tiers.py）
+    # 段位曲线（完全 per-game，替代全局 engine/tiers.py）。查表算法共享 base.tier_for_in。
     tiers: list[TierDef] = field(default_factory=list)
-    tier_for: Callable[[float | int | None], TierDef] | None = None
 
     # 赛事模板（本游戏的 DEFAULT_TEMPLATES 条目）
     templates: list[dict[str, Any]] = field(default_factory=list)
@@ -124,8 +133,8 @@ class GameSpec:
     code_path: str = ""
     summary: str = ""
 
-    # 前端模块路径（lazy 加载该游戏的前端包，如 '@/games/holdem'）
-    frontend_module: str = ""
+    # 座位数（2=双人，当前全平台双人；预留 N 人扩展钩子，通用层已声明但 DB/评分仍按 2 人）。
+    num_seats: int = 2
 
     # Bot 预检（上传时试跑：构造首个请求，验证响应合法）——拒绝明显不合格的 bot。
     # 返回 (ok: bool, detail: str)。ok=False 时上传被拒（detail 给前端展示）。
@@ -176,12 +185,11 @@ class GameRegistry:
     # ── 便捷函数（通用层经 registry 调用，而非直接 import 具体游戏）──
     def tier_for(self, game_id: str, rating: float | int | None) -> TierDef:
         spec = self.get(game_id)
-        if spec.tier_for is not None:
-            return spec.tier_for(rating)
         # 无段位曲线的游戏：返回最低档占位（不应发生在已配置段位的游戏上）
         if not spec.tiers:
             return TierDef(0, "novice", "新手", "text-sky-700", "bg-sky-50", 0)
-        return spec.tiers[-1]
+        # 查表算法共享 base.tier_for_in（各游戏的 tier_for 包装已删除，统一走此）
+        return tier_for_in(rating, spec.tiers)
 
     def tier_dict(self, game_id: str, rating: float | int | None) -> dict:
         t = self.tier_for(game_id, rating)

@@ -21,6 +21,7 @@ from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     SETTING_JUDGE_GOMOKU_SIZE,
     SETTING_JUDGE_HOLDEM_BB,
+    SETTING_JUDGE_HOLDEM_HANDS,
     SETTING_JUDGE_HOLDEM_SB,
     SETTING_JUDGE_HOLDEM_STACK,
 )
@@ -43,11 +44,11 @@ def test_judge_params_defaults_when_unset(orch):
     """未写 settings 时该游戏字段返回 None（交由引擎常量兜底）。
 
     PR2 起 _judge_params(gid) 只返回该游戏的字段：holdem→starting_stack/sb/bb/
-    default_hands；gomoku→board_size。
+    num_hands（field 已对齐 session_factory 的 kwarg 名）；gomoku→board_size。
     """
     # holdem：4 个字段全 None
     jp_h = orch._judge_params("holdem")
-    assert jp_h == {"starting_stack": None, "sb": None, "bb": None, "default_hands": None}
+    assert jp_h == {"starting_stack": None, "sb": None, "bb": None, "num_hands": None}
     # gomoku：仅 board_size
     jp_g = orch._judge_params("gomoku")
     assert jp_g == {"board_size": None}
@@ -62,8 +63,11 @@ def test_judge_params_reads_settings(orch, store):
     store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "5000")
     store.set_setting(SETTING_JUDGE_HOLDEM_SB, "25")
     store.set_setting(SETTING_JUDGE_HOLDEM_BB, "50")
+    store.set_setting(SETTING_JUDGE_HOLDEM_HANDS, "30")
     h = orch._judge_params("holdem")
     assert h["starting_stack"] == 5000 and h["sb"] == 25 and h["bb"] == 50
+    # SETTING_JUDGE_HOLDEM_HANDS 映射到 field="num_hands"（PR2 修复：原 default_hands 接不上）
+    assert h["num_hands"] == 30
     assert orch._judge_params("gomoku") == {"board_size": 9}
 
 
