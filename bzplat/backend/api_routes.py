@@ -851,6 +851,8 @@ class ContestCreate(BaseModel):
     game_id: str | None = None
     stages: list[dict[str, Any]] | None = None
     match_config: dict[str, Any] | None = None
+    phase: str = "standalone"  # P5: preliminary/final/standalone
+    source_contest_id: int | None = None  # P5: 软链（预赛→决赛导航）
 
 
 class ContestRegister(BaseModel):
@@ -884,6 +886,8 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             game_id=body.game_id,
             stages=body.stages,
             match_config=body.match_config,
+            phase=body.phase,
+            source_contest_id=body.source_contest_id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -926,6 +930,108 @@ def contest_bracket(contest_id: int, request: Request):
     if not _store(request).get_contest(contest_id):
         raise HTTPException(404, "比赛不存在")
     return {"pairings": _store(request).contest_bracket(contest_id)}
+
+
+def _require_contest_organizer(c: dict, user: dict) -> None:
+    """校验当前用户是该场赛事组织者或 admin（与 open/start 同权限模型）。"""
+    if c.get("organizer_id") != user.get("id") and user.get("role") != "admin":
+        raise HTTPException(403, "仅该场赛事组织者或管理员可操作")
+
+
+@router.post("/api/contests/{contest_id}/entries")
+def organizer_add_entry(
+    contest_id: int, body: dict, request: Request, user=Depends(require_organizer)
+):
+    """P5 组织者名单：单条加人（draft/open 允许，绕开 register 的 open/owner 校验）。"""
+    store = _store(request)
+    c = store.get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    if c["status"] not in ("draft", "open"):
+        raise HTTPException(400, "开赛后不可改名册")
+    from bzplat.backend.games import normalize_game_id
+    uid = int(body.get("user_id"))
+    bid = int(body.get("bot_id"))
+    b = store.get_bot(bid)
+    if not b or not b.get("is_active") or not b.get("binary_path"):
+        raise HTTPException(400, "bot 不可用")
+    cgid = normalize_game_id(c.get("game_id"))
+    if normalize_game_id(b.get("game_id")) != cgid:
+        raise HTTPException(400, f"bot 游戏 {b.get('game_id')} ≠ 赛事 {cgid}")
+    if store.get_entry(contest_id, uid):
+        raise HTTPException(400, "该用户已报名")
+    store.add_contest_entry(contest_id, uid, bid)
+    return {"ok": True}
+
+
+@router.post("/api/contests/{contest_id}/entries/bulk")
+def organizer_assign_entries(
+    contest_id: int, body: AdminAssignEntries, request: Request, user=Depends(require_organizer)
+):
+    """P5 组织者名单：批量加人（迁移自 admin bulk，assign_all + 显式列表两模式）。"""
+    store = _store(request)
+    c = store.get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    if c["status"] not in ("draft", "open"):
+        raise HTTPException(400, "开赛后不可改名册")
+    from bzplat.backend.games import normalize_game_id
+    cgid = normalize_game_id(c.get("game_id"))
+    if body.assign_all:
+        gid = normalize_game_id(body.game_id or cgid)
+        if gid != cgid:
+            raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
+        bots = store.list_bots(public_only=False, active_only=True, game_id=gid)
+        if body.name_prefix:
+            np = body.name_prefix.lower()
+            bots = [b for b in bots if np in (b.get("name") or "").lower()]
+        seen_users: set[int] = set()
+        target: list[tuple[int, int]] = []
+        for b in bots:
+            uid = b.get("owner_id")
+            if uid is None or uid in seen_users:
+                continue
+            seen_users.add(uid)
+            target.append((uid, b["id"]))
+    else:
+        target = [(int(e.get("user_id")), int(e.get("bot_id"))) for e in body.entries or []]
+    added = 0
+    skipped: list[str] = []
+    existing = {e["user_id"] for e in store.list_entries(contest_id)}
+    for uid, bid in target:
+        if uid in existing:
+            skipped.append(f"user {uid} 已报名，跳过")
+            continue
+        b = store.get_bot(bid)
+        if not b or not b.get("is_active") or not b.get("binary_path"):
+            skipped.append(f"bot {bid} 不可用，跳过")
+            continue
+        if normalize_game_id(b.get("game_id")) != cgid:
+            skipped.append(f"bot {bid} 游戏 {b.get('game_id')} ≠ 赛事 {cgid}，跳过")
+            continue
+        store.add_contest_entry(contest_id, uid, bid)
+        existing.add(uid)
+        added += 1
+    return {"added": added, "skipped": skipped, "total_entries": len(existing)}
+
+
+@router.delete("/api/contests/{contest_id}/entries/{user_id}")
+def organizer_delete_entry(
+    contest_id: int, user_id: int, request: Request, user=Depends(require_organizer)
+):
+    """P5 组织者名单：删人（draft/open 允许）。"""
+    store = _store(request)
+    c = store.get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    if c["status"] not in ("draft", "open"):
+        raise HTTPException(400, "开赛后不可改名册")
+    if not store.delete_entry(contest_id, user_id):
+        raise HTTPException(404, "报名记录不存在")
+    return {"ok": True}
 
 
 @router.get("/api/contests/{contest_id}/official-results")

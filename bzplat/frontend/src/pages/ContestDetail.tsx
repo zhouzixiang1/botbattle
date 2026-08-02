@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight } from 'lucide-react'
+import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -326,6 +326,16 @@ export default function ContestDetail() {
             <div className="flex items-center gap-2">
               <Users className="size-4 text-muted-foreground" />
               <h3 className="text-sm font-semibold text-foreground">报名（{entries.length}）</h3>
+              {isOrg && (contest.status === 'draft' || contest.status === 'open') && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto h-7 gap-1 text-xs"
+                  onClick={() => void act(`/api/contests/${id}/entries/bulk`, { assign_all: true, game_id: contest.game_id })}
+                >
+                  <Plus className="size-3" />批量指派
+                </Button>
+              )}
             </div>
             <Card className="mt-2">
               <CardContent className="py-3">
@@ -346,6 +356,16 @@ export default function ContestDetail() {
                         {e.seed ? <span className="text-xs text-muted-foreground">种子 {e.seed}</span> : ''}
                         {e.group_id && <Badge variant="secondary" className="text-[10px]">{e.group_id}</Badge>}
                         {e.eliminated ? <Badge variant="destructive" className="text-[10px]">淘汰</Badge> : ''}
+                        {isOrg && (contest.status === 'draft' || contest.status === 'open') && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="ml-auto h-6 px-2 text-xs text-destructive"
+                            onClick={() => void apiJson(`/api/contests/${id}/entries/${e.user_id}`, 'DELETE').then(load).catch((x) => setError(errMsg(x)))}
+                          >
+                            移除
+                          </Button>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -353,6 +373,22 @@ export default function ContestDetail() {
               </CardContent>
             </Card>
           </div>
+
+          {/* P5：全员正式名次（赛事 finished 时显示 + 下载） */}
+          {contest.status === 'finished' && (
+            <div>
+              <div className="flex items-center gap-2">
+                <Trophy className="size-4 text-muted-foreground" />
+                <h3 className="text-sm font-semibold text-foreground">正式名次</h3>
+                <a
+                  href={`/api/contests/${id}/official-results?format=csv`}
+                  className="ml-auto inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  <Download className="size-3" />导出 CSV
+                </a>
+              </div>
+            </div>
+          )}
 
           {/* 积分榜 */}
           <div>

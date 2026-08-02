@@ -13,6 +13,7 @@ from bzplat.backend.contests.stages import (
 )
 from bzplat.backend.contests.templates import (
     default_match_config,
+    get_template,
     points_for_result,
     resolve_stages,
     resolve_template,
@@ -95,6 +96,8 @@ class ContestManager:
         game_id: str | None = None,
         stages: list[dict] | None = None,
         match_config: dict | None = None,
+        phase: str = "standalone",
+        source_contest_id: int | None = None,
     ) -> dict:
         # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages+match_config
         if stages:
@@ -106,6 +109,11 @@ class ContestManager:
             tid, gid, stage_list, tpl_mc = resolve_template(
                 template_id, game_id=game_id, store=self.store
             )
+        # P5：phase 优先级：显式传入 > 模板自带 phase > standalone
+        if phase == "standalone":
+            tpl = get_template(tid)
+            if tpl and tpl.get("phase"):
+                phase = tpl["phase"]
         # match_config 优先级：显式传入 > 模板自带 > game 默认
         cfg = match_config if match_config is not None else tpl_mc
         return self.store.create_contest(
@@ -119,6 +127,8 @@ class ContestManager:
             stages_json=json.dumps(stage_list, ensure_ascii=False),
             current_stage_idx=0,
             match_config_json=json.dumps(cfg, ensure_ascii=False),
+            phase=phase,
+            source_contest_id=source_contest_id,
         )
 
     def open_registration(self, contest_id: int) -> dict:
@@ -242,9 +252,9 @@ class ContestManager:
         """人数护栏：防止超大规模循环赛静默生成海量对局（@500 全员单循环=124750 场）。
 
         - round_robin / double_round_robin：全员互打，校验总人数 n ≤ limit。
+          stage.allow_large_round_robin=True 时旁路（仅白名单 builtin 模板，如决赛）。
         - group_round_robin / group_double_round_robin：组内循环，校验**每组**人数
-          （蛇形分组后每组 ≈ ceil(n/group_count)）≤ limit。审计补漏：原护栏漏掉 group_*
-          变体，500 人 group_drr=62000 场会静默触发压垮编排。
+          （蛇形分组后每组 ≈ ceil(n/group_count)）≤ limit。
         """
         import math
 
@@ -252,6 +262,8 @@ class ContestManager:
         for st in stages:
             t = st.get("type") or ""
             if t in ("round_robin", "double_round_robin"):
+                if st.get("allow_large_round_robin"):
+                    continue  # 决赛等白名单模板旁路护栏（组织者自负规模）
                 if n > limit:
                     raise ValueError(
                         f"全员{t} 人数 {n} 超过上限 {limit}，请改用 Swiss/分组模板"
@@ -608,26 +620,41 @@ class ContestManager:
         return self.store.get_contest(contest_id)
 
     def _finalize_official_results(self, contest_id: int, stage_idx: int) -> None:
-        """计算全员正式名次（破同分）并落库 contest_official_results。"""
+        """计算全员正式名次（破同分）并落库 contest_official_results。
+
+        若末阶段 stage.ranking_mode=replace_top：合成榜（1..scope 取末阶段 Top，
+        scope+1..N 取前一阶段未晋级者相对序）。
+        """
         from bzplat.backend.contests import ranking as _ranking
         from bzplat.backend.games import registry as _reg
 
         c = self.store.get_contest(contest_id)
         if not c:
             return
+        stages = _parse_stages(c)
+        cur_stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
         gid = (c.get("game_id") or "holdem").lower()
         try:
             normalize_earnings = _reg.get(gid).normalize_earnings
         except Exception:
             normalize_earnings = None
-        standings = self.standings(contest_id, stage_idx=stage_idx)
-        pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
-        match_ids = [p["match_id"] for p in pairings if p.get("match_id")]
-        matches = {mid: self.store.get_match(mid) for mid in match_ids if mid}
-        matches = {k: v for k, v in matches.items() if v}
-        ranking_rows = _ranking.compute_official_ranking(
-            standings, pairings, matches, normalize_earnings=normalize_earnings
-        )
+
+        def _rank_stage(sidx: int) -> list[dict]:
+            standings = self.standings(contest_id, stage_idx=sidx)
+            pairings = self.store.list_contest_pairings(contest_id, stage_idx=sidx)
+            match_ids = [p["match_id"] for p in pairings if p.get("match_id")]
+            matches = {mid: self.store.get_match(mid) for mid in match_ids if mid}
+            matches = {k: v for k, v in matches.items() if v}
+            return _ranking.compute_official_ranking(
+                standings, pairings, matches, normalize_earnings=normalize_earnings
+            )
+
+        ranking_rows = _rank_stage(stage_idx)
+        # replace_top 合成榜（决赛：末阶段 Top8 + 前一阶段未晋级者）
+        if cur_stage.get("ranking_mode") == "replace_top" and stage_idx > 0:
+            scope = int(cur_stage.get("ranking_scope") or 8)
+            stage1_ranking = _rank_stage(stage_idx - 1)
+            ranking_rows = _ranking.merge_replace_top(stage1_ranking, ranking_rows, scope=scope)
         _ranking.persist_official_results(
             self.store, contest_id, ranking_rows, stage_idx=stage_idx
         )
