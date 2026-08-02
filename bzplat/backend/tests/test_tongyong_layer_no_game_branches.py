@@ -3,13 +3,15 @@
 镜像 test_game_subpackages_dont_import_engine_top 的源码扫描模式，但反向：
 扫描通用层（matches/ contests/ store/ api_routes/ bots/ auth/ rating/ runtime/
 notifications/）禁止：
-  - `== "holdem"` / `== "gomoku"` / `== "pencil"` 这类按游戏名分支（应经 registry）
-  - `("holdem", "gomoku", "pencil")` / `["holdem","gomoku","pencil"]` 硬编码 3-game 列表
-    （应从 _all_game_ids()/VALID_GAME_IDS 派生，否则新增第 4 游戏会静默漏掉）
+  - `== "holdem"` / `!= "holdem"` / `in ("holdem",...)` / `startswith("holdem")` 等按游戏名分支
+  - `("holdem", "gomoku", "pencil")` / `["holdem","gomoku","pencil"]` / `{"holdem",...}`
+    硬编码 3-game 列表（任意顺序、含 2-game 子集）
+  - `registry.get("holdem")` / `all_tiers("holdem")` 等硬指某游戏的调用（应经变量）
+  - `from bzplat.backend.games.holdem import` 直接 import 具体游戏模块（应经 registry）
 
 豁免：纯默认值兜底（如 `game_id: str = "holdem"`、`c.get("game_id", "holdem")`、
-`or "holdem"`）是 normalize_game_id 的合法语义，不算分支。用 `# allow-game-fallback`
-注释标记豁免点（守护测试跳过该行）。
+`or "holdem"`、`except KeyError: ...holdem`）是 normalize_game_id 的合法语义，不算分支。
+用 `# allow-game-fallback` 注释标记豁免点（守护测试跳过该行）。
 
 触发场景：审计发现 db.py FK 重建曾硬编码 3-game 元组（C1）、manager.py 曾有
 `if gid == "holdem"` 死分支（I1/I2）。本测试防回归。
@@ -26,15 +28,34 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2] / "backend"
 _SCAN_DIRS = ("matches", "contests", "store", "bots", "auth", "rating", "runtime", "notifications")
 _SCAN_FILES = ("api_routes.py", "main.py", "cli.py", "logging_config.py")
 
-# 禁止的模式：按游戏名分支（== "holdem" 等，含单双引号、空格变体）
-_BRANCH_RE = re.compile(r'==\s*["\'](?:holdem|gomoku|pencil)["\']')
-# 禁止的模式：硬编码 3-game 列表字面量
+# 游戏名集合（用于模式匹配）
+_GAMES = r"(?:holdem|gomoku|pencil)"
+
+# 禁止的模式：按游戏名分支
+# == "holdem" / != "holdem" / in ("holdem",...) / startswith("holdem") / .get("holdem") / all_tiers("holdem")
+_BRANCH_RE = re.compile(
+    r'==\s*["\']' + _GAMES + r'["\']'                                  # == / != "holdem"
+    r'|!=\s*["\']' + _GAMES + r'["\']'
+    r'|\bin\s*[\(\[]\s*[^)\]]*["\']' + _GAMES + r'["\']'               # in (... "holdem" ...)
+    r'|\.(?:startswith|endswith)\s*\(\s*["\']' + _GAMES + r'["\']'    # .startswith("holdem")
+    # 硬指某游戏的调用：registry.get("holdem") / all_tiers("holdem") / default_match_config("holdem")
+    # 排除 = "holdem" 赋值/默认值与 , "holdem" 参数列表里的合法默认（这些由 _FALLBACK_RE 兜底豁免）
+    r'|\.(?:get|all_tiers|default_match_config|game_label|is_registered)\s*\(\s*["\']' + _GAMES + r'["\']'
+)
+# 禁止的模式：硬编码 3-game 列表字面量（任意括号 ()/[]/{}，任意顺序，含 2-game 子集）
+# 匹配形如 ("holdem","gomoku","pencil") 或 {"gomoku","holdem"} 或 ["holdem","pencil"] 等
 _TUPLE_RE = re.compile(
-    r'[\(\[]\s*["\']holdem["\']\s*,\s*["\']gomoku["\']\s*,\s*["\']pencil["\']'
+    r'[\(\[\{]\s*["\']' + _GAMES + r'["\']\s*,\s*["\']' + _GAMES + r'["\']'
+    r'(?:\s*,\s*["\']' + _GAMES + r'["\'])*\s*[\)\]\}]'
+)
+# 禁止的模式：通用层直接 import 具体游戏模块（应经 registry）
+_IMPORT_RE = re.compile(
+    r'from\s+bzplat\.backend\.games\.(?:holdem|gomoku|pencil)\b'
+    r'|import\s+bzplat\.backend\.games\.(?:holdem|gomoku|pencil)\b'
 )
 
-# 允许的纯默认值/兜底模式（不算分支）：= "holdem" / , "holdem" / or "holdem"
-# 这些是 normalize_game_id 的合法兜底语义。若某行同时命中 _BRANCH_RE/_TUPLE_RE 又是兜底，
+# 允许的纯默认值/兜底模式（不算分支）：= "holdem" / , "holdem" / or "holdem" / except KeyError
+# 这些是 normalize_game_id 的合法兜底语义。若某行命中 _BRANCH_RE/_TUPLE_RE 又是兜底，
 # 用 # allow-game-fallback 注释显式豁免。
 _FALLBACK_RE = re.compile(r'#\s*allow-game-fallback')
 
@@ -76,6 +97,9 @@ def _scan_file(py: pathlib.Path) -> list[str]:
         # 检查硬编码 3-game 元组
         if _TUPLE_RE.search(line):
             violations.append(f"{rel}:{i}: 硬编码 3-game 列表 {line.strip()}")
+        # 检查直接 import 具体游戏模块
+        if _IMPORT_RE.search(line):
+            violations.append(f"{rel}:{i}: 通用层直接 import 具体游戏模块 {line.strip()}")
     return violations
 
 
@@ -104,6 +128,42 @@ def test_tongyong_layer_no_game_branches():
         "若确为 normalize_game_id 兜底语义，在该行加 # allow-game-fallback 注释豁免。\n"
         "违规：\n" + "\n".join(violations)
     )
+
+
+# ── 守护测试自身的有效性（正则能抓各类变体）──────────────────────
+def test_guard_regex_catches_branch_variants():
+    """PR4：守护正则覆盖各类 game-name 分支变体（防守护测试盲区）。
+
+    上一版 _BRANCH_RE 只抓 == "holdem"，漏 != / in / startswith / .get("holdem")。
+    本测试断言各变体都被抓，且合法兜底（= "holdem" / or "holdem"）不被误抓。
+    """
+    # 应被抓的违规变体（真实调用形式，方法调用带点）
+    must_catch = [
+        'if gid == "holdem":',
+        'if gid != "gomoku":',
+        'if x in ("holdem", "gomoku"):',
+        'if gid.startswith("pencil"):',
+        'return _reg.get("holdem")',
+        '_game_registry.all_tiers("holdem")',
+        'registry.default_match_config("gomoku")',
+        '("holdem","gomoku","pencil")',
+        '["gomoku","holdem"]',            # 乱序 2-game 子集
+        '{"holdem","gomoku","pencil"}',   # frozenset 字面量
+        'from bzplat.backend.games.holdem import X',
+        'import bzplat.backend.games.gomoku',
+    ]
+    for sample in must_catch:
+        assert _BRANCH_RE.search(sample) or _TUPLE_RE.search(sample) or _IMPORT_RE.search(sample), (
+            f"守护正则漏抓违规变体: {sample!r}"
+        )
+    # 合法兜底不应被抓（这些是 normalize 语义，由 = / or / , 上下文区分，不在 _BRANCH_RE 内）
+    ok_fallbacks = [
+        'game_id: str = "holdem"',
+        'gid = game_id or "holdem"',
+        'c.get("game_id", "holdem")',
+    ]
+    for sample in ok_fallbacks:
+        assert not _BRANCH_RE.search(sample), f"守护正则误抓合法兜底: {sample!r}"
 
 
 # ── runner/engine.run_session 不得硬编码游戏专属参数名（PR3：**match_params 透传）──

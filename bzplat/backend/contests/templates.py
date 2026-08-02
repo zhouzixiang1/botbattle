@@ -72,7 +72,7 @@ def default_match_config(game_id: str | None) -> dict[str, Any]:
     try:
         return copy.deepcopy(_reg.get(gid).default_match_params)
     except KeyError:
-        return copy.deepcopy(_reg.get("holdem").default_match_params)
+        return copy.deepcopy(_reg.get("holdem").default_match_params)  # allow-game-fallback: 未知游戏兜底 holdem 默认
 
 
 def get_template(template_id: str) -> dict[str, Any] | None:
