@@ -1,6 +1,7 @@
 """三款游戏结果类型解耦后的通用层契约测试。
 
-通用编排层（orchestrator/rating/replay）只依赖：
+通用编排层（orchestrator/rating/replay）只依赖**鸭子契约**（全面解耦 PR4 起
+result 不再共享基类，各游戏独立定义 games/<game>/result.py）：
 - result.rounds[*].winners / .deltas
 - result.rounds_played
 - 单局棋类 result.winner 便捷属性
@@ -89,7 +90,10 @@ def test_gomoku_session_returns_gomoku_result():
         return {"x": x, "y": y}
 
     result = asyncio.run(GomokuSession().run_async(decide))
-    assert isinstance(result, GomokuResult)
-    assert isinstance(result, MatchResult)
+    # PR4 起 result 不再共享基类——断言鸭子契约字段（通用层只读这些）
+    assert hasattr(result, "rounds_played")
+    assert hasattr(result, "rounds") and hasattr(result, "events")
     assert result.winner == 0
     assert result.rounds[0].winners == [0]
+    # 各游戏 result 类独立，但 GomokuResult 别名（=games.gomoku.result.MatchResult）一致
+    assert isinstance(result, GomokuResult)
