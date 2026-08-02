@@ -39,26 +39,29 @@ def test_specs_reference_local_templates():
     assert len(registry.get("gomoku").templates) == 3
     # pencil 2 个
     assert len(registry.get("pencil").templates) == 2
+    # reversi 2 个（第 4 游戏）
+    assert len(registry.get("reversi").templates) == 2
 
 
 # ── DEFAULT_TEMPLATES 从注册表派生 ────────────────────────────
 def test_default_templates_derived_from_registry():
-    """DEFAULT_TEMPLATES 是各 spec.templates 的聚合（7 个）。"""
+    """DEFAULT_TEMPLATES 是各 spec.templates 的聚合（9 个：7 + reversi×2）。"""
     # 聚合注册表
     aggregated = {}
     for gid in registry.all_ids():
         for t in registry.get(gid).templates:
             aggregated[t["id"]] = t
     assert set(aggregated.keys()) == set(DEFAULT_TEMPLATES.keys())
-    assert len(DEFAULT_TEMPLATES) == 7
+    assert len(DEFAULT_TEMPLATES) == 9
 
 
-def test_default_templates_has_all_seven():
+def test_default_templates_has_all():
     ids = set(DEFAULT_TEMPLATES.keys())
     expected = {
         "holdem_swiss_ko", "holdem_rr",
         "gomoku_group_drr_ko", "gomoku_swiss_ko", "board_rr",
         "pencil_group_drr_ko", "pencil_swiss_ko",
+        "reversi_swiss_ko", "reversi_rr",
     }
     assert ids == expected
 
@@ -106,7 +109,7 @@ def test_get_template_unknown_returns_none():
 
 def test_list_templates_returns_all():
     tpls = list_templates()
-    assert len(tpls) == 7
+    assert len(tpls) == 9
     assert {t["id"] for t in tpls} == set(DEFAULT_TEMPLATES.keys())
 
 

@@ -248,24 +248,26 @@ def _plain_client(tmp_path):
     return client
 
 
-def test_get_judges_returns_three_games(tmp_path):
+def test_get_judges_returns_all_games(tmp_path):
     client, _ = _admin_client(tmp_path)
     r = client.get("/api/admin/judges")
     assert r.status_code == 200
     data = r.json()
     gids = [g["game_id"] for g in data["games"]]
-    assert gids == ["holdem", "gomoku", "pencil"]
+    assert gids == ["holdem", "gomoku", "pencil", "reversi"]
     # 每款游戏带代码位置与 docstring
     for g in data["games"]:
         assert g["code_path"].endswith(".py")
         assert isinstance(g["docstring"], str)
-    # holdem 有 4 个参数，gomoku 1 个，pencil 0 个
+    # holdem 有 4 个参数，gomoku 1 个，pencil/reversi 0 个
     holdem = next(g for g in data["games"] if g["game_id"] == "holdem")
     gomoku = next(g for g in data["games"] if g["game_id"] == "gomoku")
     pencil = next(g for g in data["games"] if g["game_id"] == "pencil")
+    reversi = next(g for g in data["games"] if g["game_id"] == "reversi")
     assert len(holdem["params"]) == 4
     assert len(gomoku["params"]) == 1
     assert pencil["params"] == []
+    assert reversi["params"] == []
 
 
 def test_get_judges_non_admin_forbidden(tmp_path):

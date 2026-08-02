@@ -20,12 +20,14 @@ from bzplat.backend.games.base import (
 from bzplat.backend.games.gomoku.spec import SPEC as _GOMOKU_SPEC
 from bzplat.backend.games.holdem.spec import SPEC as _HOLDEM_SPEC
 from bzplat.backend.games.pencil.spec import SPEC as _PENCIL_SPEC
+from bzplat.backend.games.reversi.spec import SPEC as _REVERSI_SPEC
 
 # 全局单例
 registry = GameRegistry()
 registry.register(_HOLDEM_SPEC)
 registry.register(_GOMOKU_SPEC)
 registry.register(_PENCIL_SPEC)
+registry.register(_REVERSI_SPEC)
 
 # 一致性断言：schema.py 的 REGISTERED_ENGINES / VALID_GAME_IDS 必须与注册表一致。
 # schema.py 是纯常量模块（无 import），不能在 import 时从注册表派生（会循环依赖），

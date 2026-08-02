@@ -1,6 +1,6 @@
 # AGENTS.md — botbattle
 
-多游戏 Bot 线上对战平台（holdem 德州扑克 / gomoku 五子棋 / pencil 点格棋）：用户上传二进制 Bot，平台在沙箱中跑对局，提供观赛、回放、Glicko-2 排行榜与组织者赛事。
+多游戏 Bot 线上对战平台（holdem 德州扑克 / gomoku 五子棋 / pencil 点格棋 / reversi 黑白棋）：用户上传二进制 Bot，平台在沙箱中跑对局，提供观赛、回放、Glicko-2 排行榜与组织者赛事。
 
 ## 开发规范（务必遵守）
 
@@ -142,4 +142,4 @@ src/pages/                 22 个顶层路由，全部用 React.lazy 代码分�
 - `wiki/BOT_DEV.md` —— Bot 开发指南（编译、上传、调试）。
 - `wiki/INDEX.md` —— 文档总入口（含 vs Botzone 差异表：本平台**整场长驻**、一行一条 JSON）。
 - `contracts/` —— 协议 JSON Schema。
-- `samples/` —— 三款游戏样例 Bot 源码。
+- `samples/` —— 四款游戏样例 Bot 源码。
