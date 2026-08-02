@@ -61,3 +61,47 @@ def test_protocol_roundtrip():
     assert '"t":"act"' in line
     action, _x = proto.parse_response({"a": "c"})
     assert action == "call"
+
+
+def test_orchestrator_resolves_holdem_winner_non_null():
+    """回归：holdem 多手对局 winner 不得被 match_end.winner=None 覆盖成平局。
+
+    场景：foldbot vs callbot（foldbot 每手弃牌输盲注，70 手后 callbot 净筹码远高）。
+    orchestrator 应按 ea/eb 判 winner=1（callbot 胜），而非 None（平局）。
+    根因修复（L298-303）：仅当 match_end.winner 非 None 才覆盖兜底判定的 winner。
+    """
+    import os
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    foldbot = SAMPLES / "holdem_bots" / "foldbot"
+    callbot = ELF
+    if not foldbot.is_file() or not callbot.is_file():
+        pytest.skip("foldbot/callbot binary missing")
+
+    from bzplat.backend.matches.orchestrator import MatchOrchestrator
+    from bzplat.backend.store import Store
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        store = Store(str(td + "/w.db"))
+        u = store.create_user("wintest", "w@e.com", "x")
+        ba = store.create_bot(u["id"], "foldbotA", binary_path=str(foldbot), format="elf", is_public=1, game_id="holdem")
+        bb = store.create_bot(u["id"], "callbotB", binary_path=str(callbot), format="elf", is_public=1, game_id="holdem")
+        store.ensure_rating(ba["id"]); store.ensure_rating(bb["id"])
+        orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
+        import asyncio
+
+        async def _run():
+            mid = await orch.challenge(ba["id"], bb["id"], u["id"], hands=10, game_id="holdem")
+            task = orch._tasks.get(mid)
+            if task:
+                await asyncio.wait_for(task, timeout=60)
+            return mid
+
+        mid = asyncio.run(_run())
+        m = store.get_match(mid)
+        # foldbot 每手弃 → callbot 净筹码高 → winner 应是 1（非 None 平局）
+        assert m["winner"] is not None, (
+            f"holdem 多手 winner 不应是 None（平局）；earnings_a={m['earnings_a']} earnings_b={m['earnings_b']}"
+        )
+        assert m["winner"] == 1, f"callbot 应胜（foldbot 每手弃），winner={m['winner']}"
+        store.close()

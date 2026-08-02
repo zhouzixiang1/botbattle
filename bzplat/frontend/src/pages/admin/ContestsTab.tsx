@@ -81,6 +81,15 @@ export default function ContestsTab() {
     }
   }
 
+  const loadEntries = async (cid: number) => {
+    try {
+      const d = await apiGet<{ entries: Entry[] }>(`/api/admin/contests/${cid}/entries`)
+      setEntries(d.entries || [])
+    } catch (e) {
+      setError(errMsg(e, '加载报名失败'))
+    }
+  }
+
   const showEntries = async (c: Contest) => {
     if (expand === c.id) {
       setExpand(null)
@@ -88,12 +97,7 @@ export default function ContestsTab() {
     }
     setExpand(c.id)
     setEntries([])
-    try {
-      const d = await apiGet<{ entries: Entry[] }>(`/api/admin/contests/${c.id}/entries`)
-      setEntries(d.entries || [])
-    } catch (e) {
-      setError(errMsg(e, '加载报名失败'))
-    }
+    await loadEntries(c.id)
   }
 
   const removeEntry = async (cid: number, uid: number) => {
@@ -190,6 +194,8 @@ export default function ContestsTab() {
                 {expand === c.id && (
                   <tr key={`${c.id}-e`} className="bg-muted/60">
                     <td colSpan={7} className="px-6 py-3">
+                      {/* 批量指派（测试期 admin 派遣参赛者+Bot；正式版用户自己报名） */}
+                      <AssignPanel contestId={c.id} gameId={c.game_id} onDone={() => void loadEntries(c.id)} />
                       {entries.length === 0 ? (
                         <EmptyState text="无报名" />
                       ) : (
@@ -231,6 +237,52 @@ export default function ContestsTab() {
         </table>
         {contests.length === 0 && <EmptyState text="无比赛" />}
       </div>
+    </div>
+  )
+}
+
+/** 批量指派面板（admin 派遣参赛者+Bot）。assign_all 模式按 game_id 全选，
+ * 可选 name_prefix 过滤（如 "load_"/"cs_" 前缀的测试用户）。 */
+function AssignPanel({ contestId, gameId, onDone }: { contestId: number; gameId?: string; onDone: () => void }) {
+  const [prefix, setPrefix] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  const assignAll = async () => {
+    setBusy(true); setMsg('')
+    try {
+      const d = await apiJson<{ added: number; skipped: string[]; total_entries: number }>(
+        `/api/admin/contests/${contestId}/entries/bulk`, 'POST',
+        { assign_all: true, game_id: gameId || 'holdem', name_prefix: prefix || undefined },
+      )
+      setMsg(`已指派 ${d.added} 人（共 ${d.total_entries} 报名${d.skipped.length ? `，跳过 ${d.skipped.length}` : ''}）`)
+      onDone()
+    } catch (e) {
+      setMsg(errMsg(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-2 rounded border border-border bg-card p-2 text-xs">
+      <span className="font-medium text-foreground">批量指派：</span>
+      <input
+        type="text"
+        placeholder="用户/Bot 名前缀（可选，如 load_）"
+        value={prefix}
+        onChange={(e) => setPrefix(e.target.value)}
+        className="h-7 w-56 rounded border border-input bg-background px-2 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+      />
+      <button
+        type="button"
+        onClick={() => void assignAll()}
+        disabled={busy}
+        className="rounded bg-primary px-3 py-1 font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+      >
+        {busy ? '指派中…' : `指派全部 ${gameId || 'holdem'} 用户`}
+      </button>
+      {msg && <span className="text-muted-foreground">{msg}</span>}
     </div>
   )
 }
