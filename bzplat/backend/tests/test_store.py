@@ -133,6 +133,16 @@ def test_matches_replays_pair_stats(tmp_path):
     assert '"t": 1' in s.get_replay("m1")["events_json"] or '"t":1' in s.get_replay("m1")["events_json"]
     s.upsert_pair_stats(a["id"], b["id"], 1.5, 0.1, 2.0, 3)
 
+    # count_matches：与 list_matches 语义对齐（status / game_id 过滤）
+    assert s.count_matches() == 1
+    assert s.count_matches(status="completed") == 1
+    assert s.count_matches(status="running") == 0
+    # create_match 默认 game_id=holdem
+    assert s.count_matches(game_id="holdem") == 1
+    assert s.count_matches(game_id="gomoku") == 0
+    assert s.count_matches(status="completed", game_id="holdem") == 1
+    assert s.count_matches(status="completed", game_id="gomoku") == 0
+
 
 def test_recover_orphan_matches(tmp_path):
     """服务重启后清理孤儿 running 对局：标 aborted，返回受影响数。"""
