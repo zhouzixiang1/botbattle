@@ -68,6 +68,8 @@ CREATE TABLE matches_{suffix} (
     n_dots          INTEGER,
     human_user_id   INTEGER,
     human_seat      INTEGER,
+    match_seed      INTEGER,  -- P4：对局确定性 seed（duplicate 复现/回放用）
+    technical_loss  INTEGER NOT NULL DEFAULT 0,  -- P4：技术判负标记（崩溃/超时判负但计分）
     started_at      TEXT,
     ended_at        TEXT,
     created_at      TEXT    NOT NULL,
@@ -512,6 +514,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_m{_gid}_{_col} ON {_tbl}({_col})"
             )
+        # P4：matches 表加 match_seed + technical_loss 列（幂等）
+        _add_col(conn, _tbl, "match_seed", "INTEGER")
+        _add_col(conn, _tbl, "technical_loss", "INTEGER NOT NULL DEFAULT 0")
 
     # ── contest_pairings 轮次冻结列（预赛/决赛 P1：版本/seed/发布闸门）────────
     if "contest_pairings" in _tables_after:
@@ -1320,6 +1325,8 @@ class Store:
             "n_dots",
             "human_user_id",
             "human_seat",
+            "match_seed",
+            "technical_loss",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]

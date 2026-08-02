@@ -77,6 +77,21 @@ class GameEngine:
         self.rng = rng or random.Random()
 
 
+def generate_deal_sequence(num_hands: int, seed: int) -> list[list[int]]:
+    """P4 duplicate：用 seed 确定性生成 num_hands 手的牌序。
+
+    每手是 52 张牌的洗牌序列（rank*4+suit 编码）。同 seed → 同序列，两 leg
+    （A-vs-B / B-vs-A）用同 deal_sequence 复现同牌局，净筹码相加判胜负（消除运气）。
+    """
+    rng = random.Random(seed)
+    out: list[list[int]] = []
+    for _ in range(num_hands):
+        cards = list(range(52))
+        rng.shuffle(cards)
+        out.append(cards)
+    return out
+
+
 class MatchSession:
     """Run N hands between two seats via decide(player_idx, request) → response."""
 
@@ -89,6 +104,7 @@ class MatchSession:
         bb: int = BIG_BLIND,
         rng: random.Random | None = None,
         on_event: EventFn | None = None,
+        deal_sequence: list[list[int]] | None = None,
     ) -> None:
         if num_hands < 1:
             raise ValueError("num_hands must be >= 1")
@@ -98,6 +114,10 @@ class MatchSession:
         self.bb = bb
         self.rng = rng or random.Random()
         self.on_event = on_event
+        # P4 duplicate：预生成的每手牌序（[hand_idx] → list[Card 编码 rank*4+suit]）。
+        # 提供时 _play_hand 用它发牌（绕开 rng 漂移，两 leg 同 deal_sequence 复现同牌局）；
+        # 不提供时走 Deck(rng).shuffle()（旧行为）。
+        self.deal_sequence = deal_sequence
 
         # Botzone 计分：每手筹码复位为 starting_stack（不跨手累积），
         # 最终比的是 self.net（各手净输赢累加），不是最终累积筹码。
@@ -200,7 +220,11 @@ class MatchSession:
         ]
 
         self._deck = Deck(self.rng)
-        self._deck.shuffle()
+        # P4 duplicate：若有预生成牌序，用它发牌（两 leg 同 deal_sequence 复现同牌局）
+        if self.deal_sequence is not None and hand_index < len(self.deal_sequence):
+            self._deck._cards = [Card(c // 4, c % 4) for c in self.deal_sequence[hand_index]]
+        else:
+            self._deck.shuffle()
 
         self._emit(
             "hand_start",

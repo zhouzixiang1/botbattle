@@ -28,7 +28,7 @@ GAME_ID = "holdem"
 
 
 async def _session_factory(decide, *, on_event=None, **params: Any):
-    """构造 MatchSession 并 run_async。params 含 num_hands/starting_stack/sb/bb/rng。"""
+    """构造 MatchSession 并 run_async。params 含 num_hands/starting_stack/sb/bb/rng/deal_sequence。"""
     session = MatchSession(
         num_hands=params.get("num_hands", DEFAULT_HANDS),
         starting_stack=params.get("starting_stack") or STARTING_STACK,
@@ -36,6 +36,7 @@ async def _session_factory(decide, *, on_event=None, **params: Any):
         bb=params.get("bb") or BIG_BLIND,
         rng=params.get("rng"),
         on_event=on_event,
+        deal_sequence=params.get("deal_sequence"),
     )
     return await session.run_async(decide)
 
@@ -69,6 +70,24 @@ def _eta_for_match(match_config: dict[str, Any]) -> int:
     # holdem ETA ∝ 手数（每手约 2s）
     hands = int(match_config.get("hands", DEFAULT_HANDS) or DEFAULT_HANDS)
     return hands * 2
+
+
+def _build_match_plan(seed: int, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """P4 duplicate：返回 2 leg（A-seat0/B-seat1 + B-seat0/A-seat1），同 deal_sequence。
+
+    消除运气：同 seed 生成 deal_sequence，两 leg 用它发牌，净筹码相加判胜负。
+    seed=None 或 params['duplicate']=False 时返回单 leg（普通赛）。
+    """
+    if not params.get("duplicate"):
+        return [{"seat_swap": False, "params": {**params, "match_seed": seed}}]
+    num_hands = int(params.get("num_hands") or DEFAULT_HANDS)
+    from bzplat.backend.games.holdem.engine import generate_deal_sequence
+    ds = generate_deal_sequence(num_hands, seed) if seed is not None else None
+    shared = {**params, "deal_sequence": ds, "match_seed": seed}
+    return [
+        {"seat_swap": False, "params": shared},  # leg1: A=seat0, B=seat1
+        {"seat_swap": True, "params": shared},   # leg2: B=seat0, A=seat1（座位对调）
+    ]
 
 
 async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
@@ -131,4 +150,5 @@ SPEC = GameSpec(
     code_path="bzplat/backend/games/holdem/engine.py",
     summary="HU NLHE；单局多手；按筹码差判胜。",
     preflight_check=_preflight_check,
+    build_match_plan=_build_match_plan,
 )
