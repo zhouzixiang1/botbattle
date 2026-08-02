@@ -211,9 +211,11 @@ def test_holdem_engine_crash_judges_defeat():
         raise BotCrashedError("simulated holdem bot crash")
 
     result = asyncio.run(sess.run_async(crashing_decide))
-    # 崩溃方（第一手轮到 seat 0 决策时崩）判负 → 对手 seat 1 赢全部筹码
+    # Botzone 计分：崩溃方判负 → 本手全筹码（STARTING_STACK）输给对手，net 体现为
+    # 崩溃方 -STARTING_STACK、对手 +STARTING_STACK（final_chips = 累计净输赢）
     assert result.final_chips[1] > result.final_chips[0]
-    assert result.final_chips[0] == 0  # 崩溃方筹码清零
+    assert result.final_chips[0] == -20000  # 崩溃方净输 20000
+    assert result.final_chips[1] == 20000   # 对手净赢 20000
 
 
 # ── start_session 文件不存在 → BotCrashedError（异常类型契约）─────────────────

@@ -12,7 +12,7 @@
 | [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 |
 | [一手交换五子棋](#/wiki?slug=gomoku-swap1) | Swap1 简介 |
 | [点格棋 Pencil](#/wiki?slug=pencil) | 规则 + 交错网格 + pass |
-| [德州扑克](#/wiki?slug=texas) | Botzone TexasHoldem2p 对照 |
+| [德州扑克](#/wiki?slug=texas) | 对齐 Botzone TexasHoldem2p 全文结构 + 本平台行协议 |
 | [裁判](#/wiki?slug=judge) | 裁判概念 |
 | [对局](#/wiki?slug=match) | 对局生命周期与错误码 |
 | [赛制模板](#/wiki?slug=contest-format) | 模板结构、阶段类型、match_config 与管理员配置 |

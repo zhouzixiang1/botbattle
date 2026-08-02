@@ -98,8 +98,8 @@ def test_short_match_check_call_bots():
     result = asyncio.run(session.run_async(_passive_bot))
     assert result.hands_played == 2
     assert len(result.hand_results) == 2
-    # Chips conserved
-    assert sum(result.final_chips) == 2 * STARTING_STACK
+    # Botzone 计分：final_chips = 累计净输赢 net（零和），不再守恒于 2*STARTING_STACK
+    assert sum(result.final_chips) == 0
     types = [e["type"] for e in result.events]
     assert "hand_start" in types
     assert "deal_hole" in types
@@ -187,10 +187,53 @@ def test_fold_ends_hand():
     assert hr.reason == "fold"
     assert hr.winners == [1]
     assert hr.deltas == [-SMALL_BLIND, SMALL_BLIND]
-    assert result.final_chips == [
-        STARTING_STACK - SMALL_BLIND,
-        STARTING_STACK + SMALL_BLIND,
+    # Botzone 计分：final_chips 语义改为「累计净输赢 net」。
+    # 单手 SB fold → 净输赢 = [-SB, +SB]
+    assert result.final_chips == [-SMALL_BLIND, SMALL_BLIND]
+
+
+def test_each_hand_resets_to_starting_stack():
+    """Botzone 计分：每手开始筹码复位为 STARTING_STACK，不跨手累积。
+    多手对局中每个 hand_start 事件的 chips 都是 [20000, 20000]。"""
+    session = MatchSession(num_hands=3, rng=__import__("random").Random(42))
+    result = asyncio.run(session.run_async(_passive_bot))
+    starts = [e for e in result.events if e["type"] == "hand_start"]
+    assert len(starts) == 3
+    for hs in starts:
+        assert hs["chips"] == [STARTING_STACK, STARTING_STACK], (
+            f"每手应复位到 {STARTING_STACK}，实际 {hs['chips']}"
+        )
+
+
+def test_final_chips_is_cumulative_net():
+    """Botzone 计分：final_chips = 各手 deltas 之和（累计净输赢），不是最终累积筹码。
+    每手复位 20000 → 多手 passive bot 对局后，net = sum(deltas)。"""
+    session = MatchSession(num_hands=4, rng=__import__("random").Random(42))
+    result = asyncio.run(session.run_async(_passive_bot))
+    expected_net = [
+        sum(r.deltas[0] for r in result.hand_results),
+        sum(r.deltas[1] for r in result.hand_results),
     ]
+    assert result.final_chips == expected_net, (
+        f"final_chips 应为累计净输赢 {expected_net}，实际 {result.final_chips}"
+    )
+    # match_end 事件也带 net（累计净输赢）
+    me = [e for e in result.events if e["type"] == "match_end"][0]
+    assert me["final_chips"] == expected_net
+
+
+def test_no_early_exit_on_bust():
+    """Botzone 计分：每手独立复位，一方某手筹码归零不提前结束整场。
+    用 allin bot：每手可能全押归零，但下一手仍复位 20000 继续。
+    num_hands=5 应全部跑完（rounds_played==5）。"""
+    def allin_bot(pid: int, req: dict) -> dict:
+        return build_response("allin")
+
+    session = MatchSession(num_hands=5, rng=__import__("random").Random(7))
+    result = asyncio.run(session.run_async(allin_bot))
+    assert result.hands_played == 5, (
+        f"每手复位不应因归零提前结束，应跑完 5 手，实际 {result.hands_played}"
+    )
 
 
 def test_min_raise_to_helper():

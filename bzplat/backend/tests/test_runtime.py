@@ -36,7 +36,8 @@ def test_match_two_callbots_short():
     runner = MatchRunner(BinaryRunner(prefer_local=True))
     result = asyncio.run(runner.run_binaries(str(ELF), str(ELF), num_hands=2, seed=1))
     assert result.hands_played == 2
-    assert sum(result.final_chips) == 40000
+    # Botzone 计分：final_chips = 累计净输赢 net（零和），不再守恒于 2*STARTING_STACK
+    assert sum(result.final_chips) == 0
 
 
 def test_protocol_roundtrip():
