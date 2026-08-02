@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label'
 import { ErrorMsg } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
 import { gameLabel, normalizeGameId } from '@/lib/games'
-import { isBoardGame, getGame } from '@/games'
+import { isBoardGame } from '@/games'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -25,13 +25,17 @@ export default function HumanPlay() {
   const { id } = useParams<{ id: string }>()
   const [match, setMatch] = useState<MatchRow | null>(null)
   const [events, setEvents] = useState<Ev[]>([])
-  const [myTurn, setMyTurn] = useState(false)
   const [over, setOver] = useState(false)
   const [error, setError] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
     if (!id) return
+    // StrictMode 双挂载防护：先关旧连接，避免两个 WS 并发导致状态错乱
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
     const ws = new WebSocket(playWsUrl(id))
     wsRef.current = ws
     ws.onmessage = (e) => {
@@ -40,19 +44,11 @@ export default function HumanPlay() {
         if (ev.type === 'snapshot') {
           setMatch(ev.match || {})
           setEvents(ev.events || [])
-        } else if (ev.type === 'your_turn') {
-          setMyTurn(true)
-          setEvents((prev) => [...prev, ev])
         } else if (ev.type === 'match_end' || ev.type === 'error') {
           setEvents((prev) => [...prev, ev])
-          setMyTurn(false)
           setOver(true)
         } else {
           setEvents((prev) => [...prev, ev])
-          // 收到任何非 your_turn 事件，暂时关闭输入（直到下一个 your_turn）
-          if (ev.type === 'move' || ev.type === 'action' || ev.type === 'pass') {
-            setMyTurn(false)
-          }
         }
       } catch {
         /* ignore parse error */
@@ -62,24 +58,45 @@ export default function HumanPlay() {
     ws.onclose = () => {
       /* 服务端在 match_end 后会关闭 */
     }
-    return () => ws.close()
+    return () => {
+      ws.close()
+      wsRef.current = null
+    }
   }, [id])
 
   const gameId = normalizeGameId(match?.game_id)
   const humanSeat = match?.human_seat ?? 1
 
+  // myTurn 直接从事件流推导（不依赖瞬时 WS 消息）：
+  // 找到最后一个面向本座位的 your_turn；其后若无 move/action/pass/settle/match_end/error
+  // 或面向他人的 your_turn，则仍轮到我。这样 snapshot 重连/StrictMode 重挂载都能正确恢复。
+  // 根因修复：旧版只从实时 your_turn 消息设 myTurn，重连时历史 your_turn 不恢复 → 按钮点不动。
+  const myTurn = useMemo(() => {
+    if (over) return false
+    let pendingIdx = -1
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i]
+      if (ev.type === 'your_turn' && Number(ev.player) === humanSeat) {
+        pendingIdx = i
+      } else if (pendingIdx >= 0) {
+        // pending 之后任何这些事件都表示该回合已结束
+        if (
+          ev.type === 'move' || ev.type === 'action' || ev.type === 'pass' ||
+          ev.type === 'settle' || ev.type === 'match_end' || ev.type === 'error' ||
+          ev.type === 'your_turn'
+        ) {
+          pendingIdx = -1
+        }
+      }
+    }
+    return pendingIdx >= 0
+  }, [events, humanSeat, over])
+
   const sendMove = (move: Record<string, unknown>) => {
     if (!myTurn) return
     wsRef.current?.send(JSON.stringify(move))
-    setMyTurn(false)
   }
 
-  // 德州 viewmodel（经注册表 spec.reduce，不再直接 import poker reducer——审计 PR-C）
-  const holdemSpec = getGame('holdem')
-  const pokerVm = useMemo(
-    () => holdemSpec.reduce(events) as { toAct?: number },
-    [events, holdemSpec],
-  )
   const isBoard = isBoardGame(gameId)
 
   return (
@@ -121,7 +138,7 @@ export default function HumanPlay() {
               <MatchBoard gameId="holdem" events={events} revealMode="all" />
               <HoldemActions
                 disabled={!myTurn || over}
-                legal={pokerVm.toAct === humanSeat}
+                legal={myTurn}
                 onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
               />
             </>

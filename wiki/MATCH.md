@@ -41,13 +41,19 @@
 - 双向通道：**WebSocket** `/api/matches/:id/play`（鉴权：query `token` 或 cookie）。
   - 推送 `snapshot`（历史）+ 事件流 + `your_turn`（轮到人类，含 request）+ `match_end`。
   - 人类回传落子：棋类 `{x,y}`、扑克 `{a:"f|c|k|r|all", x?:raise-to}`。
+- **`your_turn` 持久化**：`your_turn` 事件**同时进入实时推送与持久化事件流（snapshot 历史）**，
+  且发出即落库（不等下一个 checkpoint）。这样前端重连 / React StrictMode 重挂载 / 迟到连接时，
+  能从 snapshot 历史正确恢复「轮到我」状态（前端 `myTurn` 由事件流推导，不依赖瞬时消息）。
 - **资源**：走独立并发信号量（默认 `human_max_concurrent=4`，不占 Bot 半负载槽）；
   人类决策超时 `human_action_timeout`（默认 120s，超时回安全默认：扑克 fold / 棋类判负）；
   每用户同时进行的人类局 ≤ 1。
+- **连续超时自动中止**：人类连续 `human_max_consecutive_timeouts`（默认 5）次不响应即中止对局
+  （`aborted`，reason=`human_inactive`，广播 `error`），避免扑克 70 手最长 2.3 小时死磕占用人类槽、
+  锁死 per-user 名额。棋类一手非法即结束，不会累积到此阈值。对局异常/中止时**无条件释放** per-user 锁。
 - **Bot 崩溃快速中止**：若 Bot 二进制启动即崩（进程退出/EOF，如动态链接库缺失、glibc 不匹配），
-  对局立即 `aborted`（reason=`bot_crashed`）并广播 `error`，而非吞成默认动作死磕数小时；
-  对局异常/中止时**无条件释放** per-user 锁。该行为对三款游戏（holdem/gomoku/pencil）一致——
-  引擎层识别 `BotCrashedError`（不可恢复）与普通决策错误（可恢复，判对手赢）两类，前者上抛触发 abort、后者按规则处理。
+  对局立即 `aborted`（reason=`bot_crashed`）并广播 `error`，而非吞成默认动作死磕数小时。
+  该行为对三款游戏（holdem/gomoku/pencil）一致——引擎层识别 `BotCrashedError`（不可恢复）与
+  普通决策错误（可恢复，判对手赢）两类，前者上抛触发 abort、后者按规则处理。
 - 不计 Glicko-2 天梯。
 
 > 棋类棋盘可点击落子；扑克提供 Fold/Check/Call/Raise/Allin 按钮栏。
@@ -66,6 +72,7 @@
 SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看），之后逐事件广播；
 空闲时 25 秒发一次 `ping` 保活；`match_end` / `error` 后流结束。回放事件流增量落盘
 （`settle` / `hand_start` / `match_end` / `move` / `match_start` 或每 5 个事件）。
+人类对局中 `your_turn` 额外**发出即落库**（不经此 checkpoint，由 `human_decide` 直接写），保证前端重连可恢复。
 每个订阅者的事件队列 `maxsize=2000`（Bot 决策极快时减少丢事件）；满时丢最旧事件保最新。
 
 ## 错误与后果
