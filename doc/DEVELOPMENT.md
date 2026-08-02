@@ -52,6 +52,9 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员（跳过邮箱验�
 ```bash
 cd bzplat/frontend && npm run build   # 产物 dist/，由后端 StaticFiles 托管
 ```
+> **关键前端依赖**：react 19 / vite 8 / tailwindcss v4 / shadcn(new-york) / recharts。
+> 视觉层另用 `gsap ^3.x`（npm 安装，2025-04 起 100% 免费商用，驱动 canvas 牌桌动画）+
+> Poker.JS（vendor 副本，来源 Tairraos/Poker.JS，经 botzone 使用，canvas 矢量扑克牌绘制）。
 
 ### 2.3 改完代码必须 rebuild + restart
 ```bash

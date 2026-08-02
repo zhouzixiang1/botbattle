@@ -58,6 +58,14 @@
 
 > 棋类棋盘可点击落子；扑克提供 Fold/Check/Call/Raise/Allin 按钮栏。
 
+## 观赛视觉（holdem）
+
+- holdem 的**观赛 / 回放 / 人类对战**牌桌现已改为 **canvas + GSAP 动画渲染**（照搬 botzone.org.cn）：
+  发牌翻面、动作浮字（Fold/Call/Raise…）、筹码增减插值过渡，均由 `GameCanvas` 组件按
+  GSAP timeline 逐帧驱动（替代原 DOM 牌桌）。
+- 点数 `10` 在牌面正确显示为 `10`（修复了原先受 Poker.JS 短码影响显示成 `T` 的问题）。
+- 棋类（gomoku/pencil）暂时维持原有 DOM 棋盘，canvas 化留待后续 PR。
+
 ## 状态
 
 `pending` → `running` → `completed` | `aborted`

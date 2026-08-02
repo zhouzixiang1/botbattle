@@ -214,7 +214,16 @@ SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。�
 - **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题 + `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；垂直 padding 由全局 `<main>` 统一提供（PageStub 只设水平 padding，避免双倍留白）；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
 - **观赛/对战页左右分栏**：MatchDetail / ArenaWatch / HumanPlay `xl:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），`lg`(1024-1279) 因侧栏占位自动堆叠（避免侧栏+分栏三列挤压），`xl`(1280)+ 横排；ArenaWatch 走 usePlayback 定速缓冲层（事件入 buffer、可控节奏播放，而非实时直播）。MatchBoard（棋盘/牌桌渲染）对 reduceEvents 结果做 useMemo 缓存，避免定速播放每帧全量归约。
 - **页面**：21 个独立页面 + admin/ 10 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/对局回放/人类对战/数据下载/账号 等。
-- **三棋盘可视化**：poker（PokerTable 深绿毡面）/ gomoku（GomokuBoard 木色）/ pencil（PencilBoard），统一经 MatchBoard 分发。
+- **三棋盘可视化**：poker（holdem，**canvas 牌桌**，见 5.3）/ gomoku（GomokuBoard 木色）/ pencil（PencilBoard），统一经 MatchBoard 分发。
+
+### 5.3 Canvas 渲染层（canvas + GSAP 视觉重写）
+
+为对齐 botzone.org.cn 的牌桌观感，新增一层**可选的 canvas 动画渲染层**，与原有 DOM Board 并存、按游戏渐进迁移：
+
+- **`GameViewSpec.CanvasRenderer`**（`games/base.ts` 可选字段）：每款游戏可提供一个 `GameCanvasRenderer<S>`（`games/canvas-types.ts` 定义：`toScene` events→归一化场景 / `diff` 两帧差分定动画 / `draw` 按 t 在 prev↔next 间逐帧绘制）。`MatchBoard` 优先用 CanvasRenderer 绘制；未提供该字段的游戏继续走原 DOM Board。
+- **`<GameCanvas>`**（`components/GameCanvas.tsx`）：通用 canvas 宿主组件 + `useCanvasGameRenderer` hook，用 **GSAP timeline** 驱动插值动画（发牌翻面、动作浮字、筹码增减插值）。
+- **per-game 实现**：`games/<game>/canvas.ts` 提供该游戏的 `PokerCanvasRenderer` 等。牌面矢量绘制走 vendor 的 **Poker.JS**（`lib/pokerjs/`，来源 Tairraos/Poker.JS）。
+- **迁移进度**：**holdem 为首个迁移游戏**（PR-A，DOM PokerTable/PlayingCard 已删除；点数 10 正确显示，修复了原 `牌 T` bug）；gomoku/pencil canvas 化留待 **PR-B/C**。
 
 ## 6. 安全设计
 

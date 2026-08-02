@@ -134,14 +134,14 @@ export default function HumanPlay() {
             <MatchBoard gameId="pencil" events={events} onMove={(x, y) => sendMove({ x, y })} interactive={myTurn} />
           )}
           {gameId === 'holdem' && (
-            <>
+            <div className="relative">
               <MatchBoard gameId="holdem" events={events} revealMode="all" />
               <HoldemActions
                 disabled={!myTurn || over}
                 legal={myTurn}
                 onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
               />
-            </>
+            </div>
           )}
           {!isBoard && gameId !== 'holdem' && (
             <p className="text-sm text-muted-foreground">未知游戏：{match?.game_id}</p>
