@@ -1,14 +1,19 @@
-"""点格棋引擎（对齐 Botzone Pencil）。
+"""点格棋引擎（对齐 Botzone Pencil 官方 C++ 裁判）。
 
-规则：N×N 点（默认 N=11）→ 交错网格 size=2N-1；红先（seat 0）；
-占相邻边；围成格得分并连走；格多者胜；平分则平局。
-非法着 / 超时 → 判负。
+规则（对齐权威裁判 grid_size=11 交错维度）：
+- N×N 点（默认 N=6 → 交错 size=2N-1=11 → (N-1)²=25 格，奇数无平局）
+- 红先（seat 0）；占相邻边；围成格得分并连走；**先到多数格（⌈boxes/2⌉）立即胜**；
+  全部占完则格多者胜。
+- 非法着 / 超时 / 崩溃 → **对手 2-0 胜**（scores 归一化，对齐裁判）。
 
 长驻行协议（语义对齐 Botzone `{x,y,pass}`）：
   请求: {"v":1,"t":"mv","x":int,"y":int,"pass":0|1,"me":0|1,"scores":[r,b]}
     - 红方首手 x=y=-1, pass=0
     - pass=1 时必须响应 {"x":-1,"y":-1}（对方得分连走）
   响应: {"x":int,"y":int}
+
+归属追踪（前端着色用）：edge_owner 记每条已占边的玩家；box_owner 记每个已闭合格
+的归属。move 事件带 closed_boxes（本手新闭合格 + owner）；match_end 带 box_owners 网格。
 """
 from __future__ import annotations
 
@@ -21,7 +26,7 @@ from bzplat.backend.games.pencil.result import MatchResult, RoundResult
 from bzplat.backend.games.pencil import protocol as proto
 from bzplat.backend.runtime.binary_runner import BotCrashedError
 
-DEFAULT_N = 11  # 点数边长；Botzone Pencil 正式规则
+DEFAULT_N = 6  # 点数边长（对齐 Botzone grid_size=11 交错 → 6 点 → 25 格）
 DecideFn = Callable[[int, dict[str, Any]], Any]
 EventFn = Callable[[str, dict[str, Any]], Any]
 
@@ -33,7 +38,7 @@ _DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 
 class PencilBoard:
-    """交错网格：偶偶=点，奇偶/偶奇=边，奇奇=格心。"""
+    """交错网格：偶偶=点，奇偶/偶奇=边，奇奇=格心。追踪 edge/box 归属。"""
 
     def __init__(self, n_dots: int = DEFAULT_N) -> None:
         self.n_dots = n_dots
@@ -41,6 +46,9 @@ class PencilBoard:
         self.board = [[0] * self.size for _ in range(self.size)]
         self.scores = [0, 0]
         self.curr_player = 0
+        # 归属追踪（前端着色用）：edge_owner[(x,y)]=player；box_owner[(bx,by)]=player
+        self.edge_owner: dict[tuple[int, int], int] = {}
+        self.box_owner: dict[tuple[int, int], int] = {}
         for x in range(self.size):
             for y in range(self.size):
                 if x % 2 == 0 and y % 2 == 0:
@@ -67,32 +75,45 @@ class PencilBoard:
     def remaining_edges(self) -> int:
         return sum(1 for row in self.board for c in row if c == GRID_EDGE)
 
-    def _update_boxes(self, x: int, y: int) -> bool:
-        scored = False
+    def _update_boxes(self, x: int, y: int) -> list[tuple[int, int]]:
+        """检查 (x,y) 边四邻格心是否成格；返回本手新闭合的格心坐标列表。"""
+        closed: list[tuple[int, int]] = []
         for dx, dy in _DIRS:
             bx, by = x + dx, y + dy
             if not (self.in_board(bx, by) and self.board[bx][by] == GRID_BOX):
                 continue
+            if (bx, by) in self.box_owner:
+                continue  # 已闭合
             n = 0
             for ddx, ddy in _DIRS:
                 ex, ey = bx + ddx, by + ddy
                 if self.in_board(ex, ey) and self.board[ex][ey] == GRID_EDGE_USED:
                     n += 1
             if n == 4:
-                scored = True
                 self.scores[self.curr_player] += 1
-        return scored
+                self.box_owner[(bx, by)] = self.curr_player
+                closed.append((bx, by))
+        return closed
 
-    def do_action(self, x: int, y: int) -> bool:
-        """占边；返回是否得分。调用前须校验合法。"""
+    def do_action(self, x: int, y: int) -> list[tuple[int, int]]:
+        """占边；返回本手新闭合的格心坐标列表（空=未得分）。调用前须校验合法。"""
         self.board[x][y] = GRID_EDGE_USED
+        self.edge_owner[(x, y)] = self.curr_player
         return self._update_boxes(x, y)
 
     def box_owners_grid(self) -> list[list[int]]:
-        """仅返回格心归属示意：-1 未完成，否则为占格时的 curr 无法回溯。
-        前端靠 scores + 已用边渲染即可；此处返回边占用图。
-        """
-        return [row[:] for row in self.board]
+        """格心归属网格：-1 未占，0 红，1 蓝（前端着色用）。非格心位置为 -2（忽略）。"""
+        grid = [[-2] * self.size for _ in range(self.size)]
+        for x in range(self.size):
+            for y in range(self.size):
+                if self.board[x][y] == GRID_BOX:
+                    grid[x][y] = self.box_owner.get((x, y), -1)
+        return grid
+
+    def min_win(self) -> int:
+        """多数胜阈值：⌈boxes/2⌉（对齐裁判 hasPlayerWon）。6 点→25 格→13。"""
+        boxes = (self.n_dots - 1) ** 2
+        return boxes // 2 + 1
 
 
 @dataclass
@@ -135,6 +156,9 @@ class PencilSession:
         reason = "completed"
         moves_n = 0
         max_boxes = (self.n_dots - 1) ** 2
+        min_win = g.min_win()
+        # 最终 scores（正常终局用实时分；非法/崩溃归一化 2-0）
+        final_scores: list[int] | None = None
 
         while g.remaining_edges() > 0 or pass_flag == 1:
             # 若边已尽且非 pass 回合，结束
@@ -158,11 +182,19 @@ class PencilSession:
             try:
                 raw = await self._decide(decide, to_move, req)
             except BotCrashedError:
-                # Bot 崩溃不可恢复——向上传播触发 abort，不吞成普通落子错误。
-                raise
+                # 对齐裁判：bot 崩溃不可恢复 → 判负 2-0（不再中止整场）。
+                winner = 1 - to_move
+                reason = "crash"
+                await self._emit_async(
+                    "illegal", player=to_move, move={"x": None, "y": None}, why="crash"
+                )
+                break
             except Exception:
                 winner = 1 - to_move
                 reason = "error"
+                await self._emit_async(
+                    "illegal", player=to_move, move={"x": None, "y": None}, why="error"
+                )
                 break
 
             mx, my = proto.parse_xy(raw)
@@ -189,11 +221,13 @@ class PencilSession:
                     "illegal",
                     player=to_move,
                     move={"x": mx, "y": my},
+                    why="illegal_move",
                 )
                 break
 
             g.curr_player = to_move
-            scored = g.do_action(mx, my)
+            closed = g.do_action(mx, my)
+            scored = len(closed) > 0
             moves_n += 1
             await self._emit_async(
                 "move",
@@ -203,7 +237,14 @@ class PencilSession:
                 scored=scored,
                 scores=list(g.scores),
                 move_index=moves_n,
+                closed_boxes=[{"x": bx, "y": by, "owner": g.box_owner[(bx, by)]} for bx, by in closed],
             )
+
+            # 多数胜提前结束（对齐裁判 hasPlayerWon）
+            if g.scores[to_move] >= min_win:
+                winner = to_move
+                reason = "majority"
+                break
 
             if sum(g.scores) >= max_boxes:
                 # 全部格子已占完
@@ -219,8 +260,14 @@ class PencilSession:
                 pass_flag = 0
                 to_move = 1 - to_move
 
+        # 计算最终 scores（非法/崩溃归一化 2-0，对齐裁判）
+        if winner is not None and reason in ("illegal", "error", "crash"):
+            final_scores = [2, 0] if winner == 0 else [0, 2]
+        else:
+            final_scores = list(g.scores)
+
         if winner is None:
-            sa, sb = g.scores
+            sa, sb = final_scores
             if sa > sb:
                 winner = 0
                 reason = "score"
@@ -231,7 +278,7 @@ class PencilSession:
                 winner = None
                 reason = "draw"
 
-        deltas = [g.scores[0] - g.scores[1], g.scores[1] - g.scores[0]]
+        deltas = [final_scores[0] - final_scores[1], final_scores[1] - final_scores[0]]
         round_result = RoundResult(
             winners=[winner] if winner is not None else [],
             deltas=deltas,
@@ -241,8 +288,9 @@ class PencilSession:
             game_id="pencil",
             winner=winner,
             reason=reason,
-            scores=list(g.scores),
+            scores=list(final_scores),
             moves=moves_n,
+            box_owners=g.box_owners_grid(),
         )
         return MatchResult(
             rounds_played=moves_n,
@@ -250,7 +298,7 @@ class PencilSession:
             events=self.events,
             winner=winner,
             reason=reason,
-            scores=list(g.scores),
+            scores=list(final_scores),
             moves=moves_n,
         )
 

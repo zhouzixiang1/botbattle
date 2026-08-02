@@ -50,9 +50,10 @@ def _normalize_earnings(ea: int) -> float:
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
-    # pencil ETA ∝ n_dots（基准 N=11 标定 90s，按 n_dots 线性缩放）
+    # pencil ETA ∝ 格数（基准 N=6 → 25 格 标定 60s，按 (n_dots-1)² 缩放）
     n_dots = int(match_config.get("n_dots", DEFAULT_N) or DEFAULT_N)
-    return max(30, int(n_dots / 11 * 90))
+    boxes = (n_dots - 1) ** 2
+    return max(30, int(boxes / 25 * 60))
 
 
 SPEC = GameSpec(
@@ -64,7 +65,7 @@ SPEC = GameSpec(
     validate_match_params=_validate_match_params,
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
-    eta_per_match_sec=90.0,  # 随 n_dots 缩放，此处取中等估算
+    eta_per_match_sec=60.0,  # N=6/25 格基准（随 n_dots 缩放）
     eta_for_match=_eta_for_match,
     judge_params=[],  # n_dots 走 match 列，非全局 setting
     tiers=_tiers_mod.TIERS,
@@ -72,6 +73,6 @@ SPEC = GameSpec(
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/pencil/engine.py",
-    summary="N=11 点阵；红先；占相邻边围格得分并连走；格多者胜。",
+    summary="N=6 点阵（对齐 Botzone grid_size=11 交错→25 格）；红先；占相邻边围格得分并连走；先到多数格（13）或终局格多者胜。",
     frontend_module="@/games/pencil",
 )

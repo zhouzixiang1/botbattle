@@ -2,8 +2,14 @@ import {
   GRID_DOT,
   GRID_EDGE,
   GRID_EDGE_USED,
+  GRID_BOX,
   type PencilViewModel,
 } from './usePencilState'
+
+/** 玩家配色：已占边按玩家着色（红 #ef4444 / 蓝 #3b82f6）。 */
+const EDGE_COLOR = ['#ef4444', '#3b82f6']
+/** 格归属配色（淡填充）：红 rgba(239,68,68,0.25) / 蓝 rgba(59,130,246,0.25)。 */
+const BOX_FILL = ['rgba(239,68,68,0.25)', 'rgba(59,130,246,0.25)']
 
 export default function PencilBoard({
   vm,
@@ -13,7 +19,7 @@ export default function PencilBoard({
   onMove?: (x: number, y: number) => void
 }) {
   const size = vm.size
-  const cell = Math.min(18, Math.floor(480 / size))
+  const cell = Math.min(36, Math.floor(480 / size))
   const boardPx = cell * size
   const interactive = !!onMove && !vm.matchOver
 
@@ -25,14 +31,21 @@ export default function PencilBoard({
           {vm.moveCount > 0 ? ` · ${vm.moveCount} 边` : ''}
         </span>
         <span className="font-medium">
-          红 {vm.scores[0]} : {vm.scores[1]} 蓝
+          <span className="text-red-600">红 {vm.scores[0]}</span>
+          {' : '}
+          <span className="text-blue-600">{vm.scores[1]} 蓝</span>
           {vm.matchOver
             ? ` · ${
                 vm.winner === null
                   ? '平局'
-                  : `${vm.winner === 0 ? '红' : '蓝'}胜`
+                  : `${vm.winner === 0 ? '红' : '蓝'}胜（${vm.reason}）`
               }`
             : ` · 待行：${vm.toAct === 0 ? '红' : vm.toAct === 1 ? '蓝' : '—'}`}
+          {vm.extraTurn && !vm.matchOver && (
+            <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+              连走
+            </span>
+          )}
         </span>
       </div>
       <svg
@@ -48,13 +61,33 @@ export default function PencilBoard({
             const cx = cell / 2 + x * cell
             const cy = cell / 2 + y * cell
             const isLast = vm.lastEdge?.x === x && vm.lastEdge?.y === y
+
+            // 格心：按归属着色（已占格填淡红/淡蓝）
+            if (v === GRID_BOX) {
+              const owner = vm.boxOwner[x]?.[y]
+              if (owner === 0 || owner === 1) {
+                // 已占格：填充归属色，画在格心区域（从四角点构成的方块）
+                return (
+                  <rect
+                    key={`b-${x}-${y}`}
+                    x={cx - cell / 2}
+                    y={cy - cell / 2}
+                    width={cell}
+                    height={cell}
+                    fill={BOX_FILL[owner]}
+                  />
+                )
+              }
+              return null
+            }
+
             if (v === GRID_DOT) {
               return (
                 <circle
                   key={`d-${x}-${y}`}
                   cx={cx}
                   cy={cy}
-                  r={Math.max(2, cell * 0.22)}
+                  r={Math.max(2, cell * 0.18)}
                   fill="#334155"
                 />
               )
@@ -62,15 +95,18 @@ export default function PencilBoard({
             if (v === GRID_EDGE || v === GRID_EDGE_USED) {
               const horiz = y % 2 === 1 && x % 2 === 0
               const used = v === GRID_EDGE_USED
-              const color = used ? (isLast ? '#ea580c' : '#0f172a') : '#cbd5e1'
-              const sw = used ? Math.max(2, cell * 0.18) : Math.max(1, cell * 0.08)
+              // 已占边按玩家着色（经 edgeOwner 取色）；最后一手加粗高亮
+              const owner = vm.edgeOwner[`${x},${y}`]
+              const baseColor = owner === 0 || owner === 1 ? EDGE_COLOR[owner] : '#0f172a'
+              const color = used ? baseColor : '#cbd5e1'
+              const sw = used ? (isLast ? Math.max(3, cell * 0.22) : Math.max(2, cell * 0.16)) : Math.max(1, cell * 0.08)
               const clickProps =
                 interactive && !used
                   ? {
                       className: 'cursor-pointer',
                       onClick: () => onMove!(x, y),
                       stroke: '#94a3b8' as const,
-                      strokeWidth: Math.max(3, cell * 0.25) as number,
+                      strokeWidth: Math.max(3, cell * 0.22) as number,
                     }
                   : {}
               if (horiz) {

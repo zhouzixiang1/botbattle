@@ -156,8 +156,12 @@ def test_gomoku_engine_propagates_bot_crashed():
         asyncio.run(sess.run_async(crashing_decide))
 
 
-def test_pencil_engine_propagates_bot_crashed():
-    """pencil 引擎同理——BotCrashedError 不被 except Exception 吞掉。"""
+def test_pencil_engine_crash_judges_defeat():
+    """pencil 引擎：BotCrashedError 对齐裁判→判负 2-0（不再中止整场向上抛）。
+
+    原审计要求 BotCrashedError 传播（防被 except Exception 吞成默认动作死磕）；
+    后续对齐权威裁判时改为崩溃=判负 2-0（与超时一致），故此处断言判负而非抛错。
+    """
     from bzplat.backend.engine.pencil import PencilSession
 
     sess = PencilSession()
@@ -165,8 +169,11 @@ def test_pencil_engine_propagates_bot_crashed():
     def crashing_decide(player_idx, request):
         raise BotCrashedError("simulated bot crash in pencil decide")
 
-    with pytest.raises(BotCrashedError):
-        asyncio.run(sess.run_async(crashing_decide))
+    result = asyncio.run(sess.run_async(crashing_decide))
+    # 崩溃方（seat 0，红方先手第一手就崩）判负 → winner=1（蓝），scores 归一化 0-2
+    assert result.winner == 1
+    assert result.reason == "crash"
+    assert result.scores == [0, 2]  # 归一化 2-0（对手蓝方 2 分）
 
 
 def test_board_engine_still_treats_illegal_move_as_error():
