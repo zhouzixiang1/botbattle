@@ -49,6 +49,11 @@ def _normalize_earnings(ea: int) -> float:
     return float(ea)
 
 
+def _eta_for_match(match_config: dict[str, Any]) -> int:
+    # gomoku 单局固定 ETA（无可调参数）
+    return 60
+
+
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="五子棋",
@@ -59,6 +64,7 @@ SPEC = GameSpec(
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
     eta_per_match_sec=60.0,
+    eta_for_match=_eta_for_match,
     judge_params=[
         JudgeParamSpec(SETTING_JUDGE_GOMOKU_SIZE, "棋盘边长", "board_size",
                        BOARD_SIZE, (9, 19)),

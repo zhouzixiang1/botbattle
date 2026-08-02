@@ -92,7 +92,8 @@ class GameSpec:
     validate_match_params: Callable[[dict[str, Any]], dict[str, Any]]
     rounds_per_match: Callable[[dict[str, Any]], int]      # holdem=match_config["hands"]；棋类=1
     normalize_earnings: Callable[[int], float]             # holdem: ea/100.0；棋类: float(ea)
-    eta_per_match_sec: float                               # ETA 启发式（estimate 用）
+    eta_per_match_sec: float                               # ETA 基准（estimate 用）
+    eta_for_match: Callable[[dict[str, Any]], int]         # 按 match_config 算每场秒数（取代 if game_id 缩放分支）
     judge_params: list[JudgeParamSpec] = field(default_factory=list)
 
     # 段位曲线（完全 per-game，替代全局 engine/tiers.py）

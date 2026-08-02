@@ -8,9 +8,6 @@ import secrets
 from datetime import datetime
 from typing import Any, Callable
 
-from bzplat.backend.engine.game import (
-    DEFAULT_HANDS,
-)
 from bzplat.backend.engine.registry import (
     normalize_game_id,
 )
@@ -102,7 +99,7 @@ class MatchOrchestrator:
         *,
         human_seat: int = 1,
         game_id: str | None = None,
-        hands: int = DEFAULT_HANDS,
+        hands: int = 70,  # holdem 默认手数（审计 P1：不 import 具体游戏模块）
         n_dots: int | None = None,
     ) -> str:
         """人类 vs bot：human_seat 为人类坐位（0/1），另一侧为 bot_id。
@@ -155,7 +152,7 @@ class MatchOrchestrator:
         opponent_bot_id: int,
         owner_user_id: int | None,
         *,
-        hands: int = DEFAULT_HANDS,
+        hands: int = 70,  # holdem 默认手数（审计 P1：不 import 具体游戏模块）
         match_type: str = TYPE_CHALLENGE,
         contest_id: int | None = None,
         game_id: str | None = None,

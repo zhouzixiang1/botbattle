@@ -83,9 +83,21 @@ CREATE TABLE matches_{suffix} (
 def _matches_table(game_id: str) -> str:
     """game_id → 对应的物理表名（matches_holdem/gomoku/pencil）。"""
     gid = (game_id or "holdem").strip().lower()
-    if gid not in ("holdem", "gomoku", "pencil"):
-        raise ValueError(f"未知 game_id: {game_id!r}（合法: holdem/gomoku/pencil）")
+    if gid not in _all_game_ids():
+        raise ValueError(f"未知 game_id: {game_id!r}（合法: {sorted(_all_game_ids())}）")
     return f"matches_{gid}"
+
+
+def _all_game_ids() -> frozenset[str]:
+    """已注册的全部 game_id（从 games 注册表派生——单一真相，审计 P1 修复）。
+
+    延迟 import 避免循环依赖（games 包加载时 store 已可用）。
+    db.py 的跨游戏聚合（UNION ALL / COUNT 遍历）须用此函数，不得硬编码
+    ("holdem","gomoku","pencil")——否则新增第 4 游戏会静默漏掉所有跨游戏统计。
+    """
+    from bzplat.backend.games import registry as _reg
+
+    return _reg.all_ids()
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -665,7 +677,7 @@ class Store:
 
             # 跨游戏 UNION ALL
             subselects = []
-            for gid in ("holdem", "gomoku", "pencil"):
+            for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 subselects.append(f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}")
             union = " UNION ALL ".join(subselects)
@@ -1247,7 +1259,7 @@ class Store:
 
             # 跨游戏：UNION ALL 三表，外层排序+分页
             subselects = []
-            for gid in ("holdem", "gomoku", "pencil"):
+            for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 subselects.append(
                     f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}"
@@ -1275,7 +1287,7 @@ class Store:
             )
             where = "WHERE m.status='completed' AND m.likes_count > 0"
             subs = []
-            for gid in ("holdem", "gomoku", "pencil"):
+            for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 subs.append(f"SELECT {sel} FROM {tbl} m {join} {where}")
             union = " UNION ALL ".join(subs)
@@ -1484,7 +1496,7 @@ class Store:
         """按 status 统计对局数（跨三表求和）；status=None 时返回全部。"""
         with self._tx() as c:
             total = 0
-            for gid in ("holdem", "gomoku", "pencil"):
+            for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 if status:
                     row = c.execute(
@@ -1506,7 +1518,7 @@ class Store:
 
         with self._tx() as c:
             n = 0
-            for gid in ("holdem", "gomoku", "pencil"):
+            for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 row = c.execute(
                     f"SELECT COUNT(*) FROM {tbl} WHERE status='running'"
@@ -1804,7 +1816,7 @@ class Store:
                 sql = base.format(tbl=tbl) + " ORDER BY month DESC, game_id"
                 return [_row(r) for r in c.execute(sql)]
             # 跨游戏 UNION ALL（每子查询 GROUP BY，空表不产生行）
-            subs = [base.format(tbl=_matches_table(gid)) for gid in ("holdem", "gomoku", "pencil")]
+            subs = [base.format(tbl=_matches_table(gid)) for gid in _all_game_ids()]
             union = " UNION ALL ".join(subs)
             sql = f"SELECT game_id, month, SUM(cnt) AS cnt FROM ({union}) GROUP BY game_id, month ORDER BY month DESC, game_id"
             return [_row(r) for r in c.execute(sql)]
@@ -2666,7 +2678,7 @@ class Store:
             def match_count(status: str | None = None) -> int:
                 """跨三表统计对局数（可选 status 过滤）。"""
                 total = 0
-                for gid in ("holdem", "gomoku", "pencil"):
+                for gid in _all_game_ids():
                     tbl = _matches_table(gid)
                     if status:
                         total += one(f"SELECT COUNT(*) FROM {tbl} WHERE status=?", status)
@@ -2695,7 +2707,7 @@ class Store:
             # 按对局状态分组（跨三表 UNION ALL 再聚合）
             subs = [
                 f"SELECT status, COUNT(*) AS n FROM {_matches_table(gid)} GROUP BY status"
-                for gid in ("holdem", "gomoku", "pencil")
+                for gid in _all_game_ids()
             ]
             rows = c.execute(
                 f"SELECT status, SUM(n) AS n FROM ({' UNION ALL '.join(subs)}) "
@@ -2707,7 +2719,7 @@ class Store:
                 f"SELECT substr(created_at,1,10) AS d, COUNT(*) AS n "
                 f"FROM {_matches_table(gid)} WHERE created_at >= date('now','-7 days') "
                 "GROUP BY substr(created_at,1,10)"
-                for gid in ("holdem", "gomoku", "pencil")
+                for gid in _all_game_ids()
             ]
             recent = c.execute(
                 f"SELECT d, SUM(n) AS n FROM ({' UNION ALL '.join(subs_recent)}) "

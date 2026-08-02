@@ -368,3 +368,37 @@ def test_migrate_old_db_orphan_ratings_dropped_not_crash(tmp_path):
     s.close()
     assert r1 is not None and r1["rating"] == 1800  # 有效行保留
     assert r_orphan is None  # 孤儿行被丢弃（FK 校验：bots 表无 999）
+
+
+# ── 审计 P1：跨游戏聚合遍历注册表（防第 4 游戏静默漏统计）─────────
+
+def test_all_game_ids_derived_from_registry():
+    """_all_game_ids 从注册表派生（db.py 跨游戏聚合用它，不再硬编码元组）。"""
+    from bzplat.backend.store.db import _all_game_ids
+    from bzplat.backend.games import registry
+    assert _all_game_ids() == registry.all_ids()
+    assert "holdem" in _all_game_ids() and "gomoku" in _all_game_ids() and "pencil" in _all_game_ids()
+
+
+def test_cross_game_stats_cover_all_registered_games(store_with_matches):
+    """count_stats / count_matches / list_matches 跨游戏聚合覆盖注册表全部游戏。
+
+    审计 HIGH：曾硬编码 ("holdem","gomoku","pencil")，新增第 4 游戏会静默漏掉。
+    此测试用各注册游戏各建一场对局，断言统计含全部——若有人加第 4 游戏但忘了
+    更新 db.py，此处仍应覆盖（因 _all_game_ids 从注册表派生）。
+    """
+    s, u, bh, bg, bp = store_with_matches
+    # 各注册游戏各建一场
+    for gid, bot in (("holdem", bh), ("gomoku", bg), ("pencil", bp)):
+        s.create_match(f"m_{gid}", bot, bot, game_id=gid)
+    # count_matches 跨游戏 = 注册游戏数
+    from bzplat.backend.games import registry
+    assert s.count_matches() == len(registry.all_ids())
+    # count_stats
+    st = s.count_stats()
+    assert st["matches"] == len(registry.all_ids())
+    # list_matches 跨游戏 UNION 含全部
+    allm = s.list_matches(limit=50)
+    gids = {m["game_id"] for m in allm}
+    assert gids == registry.all_ids()
+    s.close()

@@ -65,6 +65,12 @@ def _normalize_earnings(ea: int) -> float:
     return ea / 100.0
 
 
+def _eta_for_match(match_config: dict[str, Any]) -> int:
+    # holdem ETA ∝ 手数（每手约 2s）
+    hands = int(match_config.get("hands", DEFAULT_HANDS) or DEFAULT_HANDS)
+    return hands * 2
+
+
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="德州扑克",
@@ -74,7 +80,8 @@ SPEC = GameSpec(
     validate_match_params=_validate_match_params,
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
-    eta_per_match_sec=140.0,  # ~2s/手 × 70 手
+    eta_per_match_sec=140.0,  # ~2s/手 × 70 手（基准）
+    eta_for_match=_eta_for_match,
     judge_params=[
         JudgeParamSpec(SETTING_JUDGE_HOLDEM_STACK, "起始筹码", "starting_stack",
                        STARTING_STACK, (1000, 1_000_000)),

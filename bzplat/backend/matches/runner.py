@@ -5,13 +5,14 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from bzplat.backend.games.holdem.engine import DEFAULT_HANDS  # holdem 常量（runner 默认参数用）
 from bzplat.backend.engine.registry import (
     GAME_HOLDEM,
     normalize_game_id,
     run_session,
 )
 # 全面解耦：runner 不再按 game_id 切协议模块，统一委托 games 注册表。
+# 注：不 import 具体游戏模块（审计 P1：通用层不得依赖 games/holdem）。
+# num_hands 默认 70（=holdem DEFAULT_HANDS；棋类忽略此参数）。
 from bzplat.backend.games import dumps as _reg_dumps, fail_response as _reg_fail, loads as _reg_loads
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError, DEFAULT_ACTION_TIMEOUT
 
@@ -49,7 +50,7 @@ class MatchRunner:
         path_b: str,
         *,
         game_id: str = GAME_HOLDEM,
-        num_hands: int = DEFAULT_HANDS,
+        num_hands: int = 70,  # holdem 默认手数（棋类忽略）
         n_dots: int | None = None,
         board_size: int | None = None,
         starting_stack: int | None = None,
@@ -104,7 +105,7 @@ class MatchRunner:
         bot_seat: int,
         human_decide,
         game_id: str = GAME_HOLDEM,
-        num_hands: int = DEFAULT_HANDS,
+        num_hands: int = 70,  # holdem 默认手数（棋类忽略）
         n_dots: int | None = None,
         board_size: int | None = None,
         starting_stack: int | None = None,
@@ -160,7 +161,7 @@ class MatchRunner:
         decide_b,
         *,
         game_id: str = GAME_HOLDEM,
-        num_hands: int = DEFAULT_HANDS,
+        num_hands: int = 70,  # holdem 默认手数（棋类忽略）
         n_dots: int | None = None,
         board_size: int | None = None,
         starting_stack: int | None = None,

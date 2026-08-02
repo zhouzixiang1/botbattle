@@ -49,6 +49,12 @@ def _normalize_earnings(ea: int) -> float:
     return float(ea)
 
 
+def _eta_for_match(match_config: dict[str, Any]) -> int:
+    # pencil ETA ∝ n_dots（基准 N=11 标定 90s，按 n_dots 线性缩放）
+    n_dots = int(match_config.get("n_dots", DEFAULT_N) or DEFAULT_N)
+    return max(30, int(n_dots / 11 * 90))
+
+
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="点格棋",
@@ -59,6 +65,7 @@ SPEC = GameSpec(
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
     eta_per_match_sec=90.0,  # 随 n_dots 缩放，此处取中等估算
+    eta_for_match=_eta_for_match,
     judge_params=[],  # n_dots 走 match 列，非全局 setting
     tiers=_tiers_mod.TIERS,
     tier_for=_tiers_mod.tier_for,
