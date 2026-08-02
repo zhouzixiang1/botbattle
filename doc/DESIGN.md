@@ -206,7 +206,11 @@ SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。�
 ### 5.2 组件库与页面
 - **26 个 shadcn 共享原语**（`src/components/ui/`）：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart/Sheet/Slider 等，是全项目唯一组件抽象层。
 - **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、tier-badge.tsx、BrandMark.tsx（平台品牌标识）、AuthShell.tsx（登录/注册/重置/验证的居中壳：品牌头部 + 居中 Card，解决空旷）、use-playback.ts（定速回放/直播缓冲 hook：buffer/stepIdx/playing/speed/定时步进/live-follow，buffer 有 MAX_BUFFER 上限防 OOM）、playback-controls.tsx（播放/暂停/步进/速度档/进度条控件）。
-- **全局 Shell**：app-shell.tsx（**lg+ 桌面左侧边栏**：Logo + compact 搜索 + 垂直导航 + 底部用户区/主题/通知；**<lg 移动端顶栏 + Sheet 抽屉**）+ nav-config.ts（9 导航项）。auth 页（登录/注册/重置/验证）不显示侧栏，内容占满居中。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。
+- **全局 Shell**：app-shell.tsx 按登录态分两套 chrome：
+  - **已登录**：**lg+ 桌面左侧边栏**（Logo + compact 搜索 + 垂直导航 + 底部用户区/主题/通知）；**<lg 移动端顶栏 + Sheet 抽屉**。
+  - **访客（未登录）**：**全断点顶栏**（BrandMark + 公开导航 + 主题切换 + **登录/注册**；窄屏用 Sheet 抽屉放导航与 CTA）。侧栏仅登录后出现，避免访客桌面无入口。
+  - **auth 页**（登录/注册/重置/验证）：不显示侧栏，内容占满居中；顶栏保留精简条（品牌 + 主题 + 登录/注册）。
+  - nav-config.ts（9 导航项）。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。首页 Hero 对访客额外展示注册/登录 CTA。
 - **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题 + `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；垂直 padding 由全局 `<main>` 统一提供（PageStub 只设水平 padding，避免双倍留白）；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
 - **观赛/对战页左右分栏**：MatchDetail / ArenaWatch / HumanPlay `xl:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），`lg`(1024-1279) 因侧栏占位自动堆叠（避免侧栏+分栏三列挤压），`xl`(1280)+ 横排；ArenaWatch 走 usePlayback 定速缓冲层（事件入 buffer、可控节奏播放，而非实时直播）。MatchBoard（棋盘/牌桌渲染）对 reduceEvents 结果做 useMemo 缓存，避免定速播放每帧全量归约。
 - **页面**：21 个独立页面 + admin/ 10 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/对局回放/人类对战/数据下载/账号 等。

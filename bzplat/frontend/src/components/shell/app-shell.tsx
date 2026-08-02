@@ -58,6 +58,15 @@ const navCls = ({ isActive }: { isActive: boolean }) =>
       : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
   )
 
+/** 顶栏水平导航（访客桌面）：更紧凑，无图标以省宽度 */
+const topNavCls = ({ isActive }: { isActive: boolean }) =>
+  cn(
+    'inline-flex items-center rounded-lg px-2.5 py-1.5 text-sm font-medium transition-colors',
+    isActive
+      ? 'bg-primary/10 text-primary'
+      : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+  )
+
 /** 未登录态（auth 页）不显示侧边栏，内容占满宽度居中。 */
 const AUTH_PATHS = ['/login', '/register', '/verify-email', '/reset-password']
 
@@ -71,19 +80,37 @@ function navItemsFor(user?: { role?: string } | null): NavItem[] {
 function NavLinks({
   onNavigate,
   user,
+  compact,
 }: {
   onNavigate?: () => void
   user?: { role?: string } | null
+  /** 顶栏水平布局：不显示图标 */
+  compact?: boolean
 }) {
+  const cls = compact ? topNavCls : navCls
   return (
-    <nav className="flex flex-col gap-0.5">
+    <nav className={cn(compact ? 'flex items-center gap-0.5' : 'flex flex-col gap-0.5')}>
       {navItemsFor(user).map((item) => (
-        <NavLink key={item.to} to={item.to} end={item.end} className={navCls} onClick={onNavigate}>
-          <item.icon className="size-4 shrink-0" />
+        <NavLink key={item.to} to={item.to} end={item.end} className={cls} onClick={onNavigate}>
+          {!compact && <item.icon className="size-4 shrink-0" />}
           {item.label}
         </NavLink>
       ))}
     </nav>
+  )
+}
+
+/** 访客顶栏：登录 + 注册 CTA */
+function GuestAuthActions() {
+  return (
+    <>
+      <Button asChild variant="ghost" size="sm" className="text-muted-foreground">
+        <Link to="/login">登录</Link>
+      </Button>
+      <Button asChild size="sm" className="shadow-soft">
+        <Link to="/register">注册</Link>
+      </Button>
+    </>
   )
 }
 
@@ -100,6 +127,7 @@ export function AppShell() {
 
   // auth 页不显示桌面侧边栏（未登录态更干净，内容占满居中）
   const isAuthPage = AUTH_PATHS.includes(location.pathname)
+  // 已登录且非 auth：桌面侧栏；访客 / auth 页：全断点顶栏（含登录注册入口）
   const showSidebar = isLoggedIn && !isAuthPage
 
   return (
@@ -157,10 +185,19 @@ export function AppShell() {
 
       {/* 右侧主体（侧栏旁，或全宽） */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* 移动端顶栏（lg 以下，含桌面 auth 页的精简顶条） */}
-        <header className="sticky top-0 z-50 border-b border-border bg-background/85 backdrop-blur-md lg:hidden">
-          <div className="flex h-14 w-full items-center gap-2 px-4">
-            {/* 移动端汉堡（仅登录态有导航可开） */}
+        {/*
+          顶栏策略：
+          - 已登录 + 非 auth：仅 <lg 显示（lg+ 用侧栏）
+          - 访客 / auth 页：全断点显示，保证桌面也能登录/注册与公开导航
+        */}
+        <header
+          className={cn(
+            'sticky top-0 z-50 border-b border-border bg-background/85 backdrop-blur-md',
+            showSidebar && 'lg:hidden'
+          )}
+        >
+          <div className="flex h-14 w-full items-center gap-2 px-4 lg:px-8">
+            {/* 左侧：汉堡（需导航时）+ 品牌 */}
             {showSidebar ? (
               <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
                 <SheetTrigger asChild>
@@ -180,10 +217,54 @@ export function AppShell() {
                 </SheetContent>
               </Sheet>
             ) : (
-              <BrandMark />
+              <>
+                {/* 访客窄屏：公开导航抽屉 */}
+                {!isAuthPage && (
+                  <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+                    <SheetTrigger asChild>
+                      <Button variant="ghost" size="icon" className="md:hidden" aria-label="菜单">
+                        <Menu className="size-5" />
+                      </Button>
+                    </SheetTrigger>
+                    <SheetContent side="left" className="w-72 p-4">
+                      <SheetHeader>
+                        <SheetTitle className="text-left">
+                          <BrandMark />
+                        </SheetTitle>
+                      </SheetHeader>
+                      <div className="mt-4 px-1">
+                        <NavLinks onNavigate={() => setMobileOpen(false)} />
+                      </div>
+                      {!isLoggedIn && (
+                        <div className="mt-6 flex flex-col gap-2 px-1">
+                          <Button asChild variant="outline" className="w-full">
+                            <Link to="/login" onClick={() => setMobileOpen(false)}>
+                              登录
+                            </Link>
+                          </Button>
+                          <Button asChild className="w-full shadow-soft">
+                            <Link to="/register" onClick={() => setMobileOpen(false)}>
+                              注册
+                            </Link>
+                          </Button>
+                        </div>
+                      )}
+                    </SheetContent>
+                  </Sheet>
+                )}
+                <Link to="/" className="flex items-center">
+                  <BrandMark />
+                </Link>
+                {/* 访客桌面：水平公开导航 */}
+                {!isAuthPage && (
+                  <div className="ml-2 hidden min-w-0 flex-1 md:block">
+                    <NavLinks compact />
+                  </div>
+                )}
+              </>
             )}
 
-            {/* 移动端右侧操作（登录态） */}
+            {/* 右侧操作 */}
             {showSidebar ? (
               <div className="ml-auto flex items-center gap-1">
                 <GlobalSearch />
@@ -198,18 +279,14 @@ export function AppShell() {
                 </Link>
               </div>
             ) : (
-              <div className="ml-auto flex items-center gap-1">
-                <ThemeToggle />
-                {!isLoggedIn && (
-                  <>
-                    <NavLink to="/login" className={navCls}>
-                      登录
-                    </NavLink>
-                    <Button asChild size="sm" className="shadow-soft">
-                      <Link to="/register">注册</Link>
-                    </Button>
-                  </>
+              <div className={cn('flex items-center gap-1', isAuthPage ? 'ml-auto' : 'ml-auto md:ml-2')}>
+                {!isAuthPage && (
+                  <div className="hidden sm:block">
+                    <GlobalSearch />
+                  </div>
                 )}
+                <ThemeToggle />
+                {!isLoggedIn && <GuestAuthActions />}
               </div>
             )}
           </div>

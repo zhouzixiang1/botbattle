@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, Eye, Flame, ArrowRight, Swords } from 'lucide-react'
+import { Heart, Eye, Flame, ArrowRight, Swords, LogIn, UserPlus } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import {
   Table,
   TableBody,
@@ -13,6 +14,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { useAuth } from '@/components/useAuth'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
 
@@ -36,6 +38,7 @@ interface Match {
 }
 
 export default function Home() {
+  const { isLoggedIn } = useAuth()
   const [matches, setMatches] = useState<Match[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -82,6 +85,22 @@ export default function Home() {
             <p className="text-sm text-muted-foreground">
               上传你的 Bot，在沙箱中对战。支持德州扑克 · 五子棋 · 点格棋，提供观赛、回放与 Glicko-2 排行榜。
             </p>
+            {!isLoggedIn && (
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button asChild size="sm" className="gap-1.5 shadow-soft">
+                  <Link to="/register">
+                    <UserPlus className="size-3.5" />
+                    注册账号
+                  </Link>
+                </Button>
+                <Button asChild variant="outline" size="sm" className="gap-1.5">
+                  <Link to="/login">
+                    <LogIn className="size-3.5" />
+                    登录
+                  </Link>
+                </Button>
+              </div>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             {GAMES.map((g) => (
