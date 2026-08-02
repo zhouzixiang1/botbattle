@@ -11,6 +11,7 @@ from bzplat.backend.games.base import GameSpec, JudgeParamSpec, ProtocolSpec
 from bzplat.backend.games.pencil.engine import DEFAULT_N, PencilSession
 from bzplat.backend.games.pencil import protocol as proto
 from bzplat.backend.games.pencil import tiers as _tiers_mod
+from bzplat.backend.games.pencil import templates as _templates_mod
 
 GAME_ID = "pencil"
 
@@ -61,7 +62,7 @@ SPEC = GameSpec(
     judge_params=[],  # n_dots 走 match 列，非全局 setting
     tiers=_tiers_mod.TIERS,
     tier_for=_tiers_mod.tier_for,
-    templates=[],  # PR5 迁入
+    templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/pencil/engine.py",
     summary="N=11 点阵；红先；占相邻边围格得分并连走；格多者胜。",
