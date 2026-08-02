@@ -16,6 +16,7 @@ from bzplat.backend.games.holdem.engine import (
 )
 from bzplat.backend.games.holdem import protocol as proto
 from bzplat.backend.games.holdem import tiers as _tiers_mod
+from bzplat.backend.games.holdem import templates as _templates_mod
 from bzplat.backend.store.schema import (
     SETTING_JUDGE_HOLDEM_BB,
     SETTING_JUDGE_HOLDEM_HANDS,
@@ -86,7 +87,7 @@ SPEC = GameSpec(
     ],
     tiers=_tiers_mod.TIERS,
     tier_for=_tiers_mod.tier_for,
-    templates=[],  # PR5 迁入
+    templates=_templates_mod.TEMPLATES,
     default_scoring="poker_3_1_0",
     code_path="bzplat/backend/games/holdem/engine.py",
     summary="HU NLHE；单局多手；按筹码差判胜。",

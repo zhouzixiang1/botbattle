@@ -11,6 +11,7 @@ from bzplat.backend.games.base import GameSpec, JudgeParamSpec, ProtocolSpec
 from bzplat.backend.games.gomoku.engine import BOARD_SIZE, GomokuSession
 from bzplat.backend.games.gomoku import protocol as proto
 from bzplat.backend.games.gomoku import tiers as _tiers_mod
+from bzplat.backend.games.gomoku import templates as _templates_mod
 from bzplat.backend.store.schema import SETTING_JUDGE_GOMOKU_SIZE
 
 GAME_ID = "gomoku"
@@ -64,7 +65,7 @@ SPEC = GameSpec(
     ],
     tiers=_tiers_mod.TIERS,
     tier_for=_tiers_mod.tier_for,
-    templates=[],  # PR5 迁入
+    templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/gomoku/engine.py",
     summary="15×15；黑先；横竖斜连续≥5 即胜；无禁手。",
