@@ -112,9 +112,13 @@ class GomokuSession:
             try:
                 raw = await self._decide(decide, to_move, req)
             except BotCrashedError:
-                # Bot 崩溃不可恢复——向上传播，由编排层 abort 对局，
-                # 不能像普通落子错误那样判对手赢（那会掩盖崩溃真相）。
-                raise
+                # 对齐权威裁判：bot 崩溃不可恢复 → 判负（对手赢），不中止整场。
+                winner = 1 - to_move
+                reason = "crash"
+                await self._emit_async(
+                    "illegal", player=to_move, move={"x": None, "y": None}, why="crash"
+                )
+                break
             except Exception:
                 winner = 1 - to_move
                 reason = "error"
