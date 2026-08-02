@@ -42,6 +42,7 @@ class BotManager:
         upload_note: str = "",
         is_public: bool = True,
         game_id: str = "holdem",
+        binary_runner=None,
     ) -> dict:
         if not _NAME_RE.match(name or ""):
             raise BotError(
@@ -77,10 +78,16 @@ class BotManager:
         except Exception:
             self.store.delete_bot(bot["id"])
             raise
+        # 预检：试跑 bot 验证响应合法（拒绝明显不合格的二进制）
+        if binary_runner is not None:
+            ok, detail = self._run_preflight(bot["id"], gid, binary_runner)
+            if not ok:
+                self.store.delete_bot(bot["id"])
+                raise BotError("preflight_failed", f"Bot 预检失败：{detail}")
         return self.store.get_bot(bot["id"])
 
     def upload_version(
-        self, bot_id: int, owner_id: int, raw: bytes, *, upload_note: str = ""
+        self, bot_id: int, owner_id: int, raw: bytes, *, upload_note: str = "", binary_runner=None
     ) -> dict:
         bot = self.store.get_bot(bot_id)
         if not bot or bot["owner_id"] != owner_id:
@@ -92,7 +99,54 @@ class BotManager:
             raise BotError(
                 "unsupported_binary", info.reject_reason or "不支持的二进制"
             )
-        return self._write_version(bot_id, raw, info, upload_note=upload_note)
+        result = self._write_version(bot_id, raw, info, upload_note=upload_note)
+        # 预检
+        if binary_runner is not None:
+            ok, detail = self._run_preflight(bot_id, bot["game_id"], binary_runner)
+            if not ok:
+                # 回滚到上一个版本（删除刚写的版本）
+                self._rollback_version(bot_id)
+                raise BotError("preflight_failed", f"Bot 预检失败：{detail}")
+        return result
+
+    def _run_preflight(self, bot_id: int, game_id: str, binary_runner) -> tuple[bool, str]:
+        """试跑 bot 验证响应合法（经该游戏的 spec.preflight_check）。"""
+        import asyncio
+        from bzplat.backend.games import preflight_bot
+
+        bot = self.store.get_bot(bot_id)
+        if not bot or not bot.get("binary_path"):
+            return True, "无二进制路径，跳过"
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 在已有事件循环中（如 FastAPI）——用 ensure_future
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    return pool.submit(
+                        lambda: asyncio.run(
+                            preflight_bot(game_id, bot["binary_path"], binary_runner)
+                        )
+                    ).result()
+            return asyncio.run(preflight_bot(game_id, bot["binary_path"], binary_runner))
+        except Exception as e:
+            logger.warning("preflight bot %s failed: %s", bot_id, e)
+            return False, f"预检异常: {e}"
+
+    def _rollback_version(self, bot_id: int) -> None:
+        """删除最新版本，回退到上一版本（预检失败时）。"""
+        bot = self.store.get_bot(bot_id)
+        if not bot:
+            return
+        cur_ver = int(bot.get("current_version") or 0)
+        if cur_ver <= 1:
+            return  # 第一版无法回滚
+        # 删除最新版本目录 + DB 记录
+        import shutil
+        dest_dir = self.upload_root / str(bot_id) / f"v{cur_ver}"
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        self.store.delete_bot_version(bot_id, cur_ver)
 
     def _write_version(
         self, bot_id: int, raw: bytes, info, *, upload_note: str

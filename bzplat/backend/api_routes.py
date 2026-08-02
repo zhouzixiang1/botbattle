@@ -303,6 +303,7 @@ async def upload_bot(
             display_name=display_name, description=description,
             upload_note=upload_note, is_public=is_public,
             game_id=game_id,
+            binary_runner=getattr(request.app.state, "binary_runner", None),
         )
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
@@ -322,7 +323,8 @@ async def upload_bot_version(
     raw = await file.read()
     try:
         bot = _bots(request).upload_version(
-            bot_id, user["id"], raw, upload_note=upload_note
+            bot_id, user["id"], raw, upload_note=upload_note,
+            binary_runner=getattr(request.app.state, "binary_runner", None),
         )
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)

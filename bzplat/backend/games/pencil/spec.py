@@ -56,6 +56,35 @@ def _eta_for_match(match_config: dict[str, Any]) -> int:
     return max(30, int(boxes / 25 * 60))
 
 
+async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
+    """Bot 预检：发点格棋首手请求（红方 x=y=-1 pass=0），验证响应含合法坐标。"""
+    from bzplat.backend.games._board_protocol import build_pencil_request, dumps_request, loads_response, parse_xy
+    from bzplat.backend.runtime.binary_runner import BotCrashedError
+    import asyncio
+
+    req = build_pencil_request(x=-1, y=-1, pass_=0, me=0, scores=[0, 0])
+    line = dumps_request(req)
+    try:
+        sid = await binary_runner.start_session(binary_path)
+    except Exception as e:
+        return False, f"启动失败: {e}"
+    try:
+        resp_line = await binary_runner.send(sid, line, timeout=timeout)
+        resp = loads_response(resp_line) if isinstance(resp_line, str) else resp_line
+        x, y = parse_xy(resp)
+        if x is None or y is None:
+            return False, f"响应缺 x/y 坐标: {resp_line}"
+        return True, f"响应合法: ({x},{y})"
+    except BotCrashedError:
+        return False, "Bot 启动后立即退出（stdout EOF）——不符合长驻协议"
+    except asyncio.TimeoutError:
+        return False, f"Bot {timeout}s 内未响应"
+    except Exception as e:
+        return False, f"响应不合法: {e}"
+    finally:
+        await binary_runner.stop_session(sid)
+
+
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="点格棋",
@@ -75,4 +104,5 @@ SPEC = GameSpec(
     code_path="bzplat/backend/games/pencil/engine.py",
     summary="N=6 点阵（对齐 Botzone grid_size=11 交错→25 格）；红先；占相邻边围格得分并连走；先到多数格（13）或终局格多者胜。",
     frontend_module="@/games/pencil",
+    preflight_check=_preflight_check,
 )

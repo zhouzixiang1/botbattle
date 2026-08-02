@@ -262,3 +262,28 @@ def test_judge_param_table():
     # pencil 无全局 judge 参数
     pencil_keys = {p.setting_key for p in registry.get("pencil").judge_params}
     assert pencil_keys == set()
+
+
+# ── preflight_check（bot 上传时试跑验证）──────────────────────
+def test_all_games_have_preflight_check():
+    """三游戏的 spec 都声明了 preflight_check（上传时试跑验响应）。"""
+    for gid in ("holdem", "gomoku", "pencil"):
+        spec = registry.get(gid)
+        assert spec.preflight_check is not None, f"{gid} 缺 preflight_check"
+
+
+def test_preflight_sample_bots_pass():
+    """合格 sample bot 通过预检（发首请求，收到合法响应）。"""
+    import asyncio
+    from bzplat.backend.runtime.binary_runner import BinaryRunner
+    from bzplat.backend.games import preflight_bot
+
+    runner = BinaryRunner(prefer_local=True)
+    samples = [
+        ("holdem", "samples/callbot_linux_amd64"),
+        ("gomoku", "samples/gomokubot_linux_amd64"),
+        ("pencil", "samples/pencilbot_linux_amd64"),
+    ]
+    for gid, path in samples:
+        ok, detail = asyncio.run(preflight_bot(gid, path, runner))
+        assert ok, f"{gid} sample 应通过预检，实际: {detail}"

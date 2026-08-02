@@ -71,6 +71,38 @@ def _eta_for_match(match_config: dict[str, Any]) -> int:
     return hands * 2
 
 
+async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
+    """Bot 预检：发一个德州 act 请求，验证响应含合法 action。"""
+    from bzplat.backend.games.holdem.protocol import build_act_request, parse_response, dumps_request
+    from bzplat.backend.runtime.binary_runner import BotCrashedError
+    import asyncio
+
+    # 构造最小 act 请求（preflop，seat 0/SB，需 call 50）
+    from bzplat.backend.games.holdem.cards import Card
+    req = build_act_request(
+        hand=0, total_hands=1, my_id=0, dealer_or_sb=0,
+        my_cards=[Card(0, 0), Card(1, 0)], board=[], hist=[],
+        my_chips=19950, opp_chips=19900, sb=50, bb=100, to_call=50,
+    )
+    line = dumps_request(req)
+    try:
+        sid = await binary_runner.start_session(binary_path)
+    except Exception as e:
+        return False, f"启动失败: {e}"
+    try:
+        resp_line = await binary_runner.send(sid, line, timeout=timeout)
+        parse_response(resp_line)  # 抛 ValueError = 不合法
+        return True, "响应合法"
+    except BotCrashedError:
+        return False, "Bot 启动后立即退出（stdout EOF）——不符合长驻协议"
+    except asyncio.TimeoutError:
+        return False, f"Bot {timeout}s 内未响应"
+    except (ValueError, Exception) as e:
+        return False, f"响应不合法: {e}"
+    finally:
+        await binary_runner.stop_session(sid)
+
+
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="德州扑克",
@@ -99,4 +131,5 @@ SPEC = GameSpec(
     code_path="bzplat/backend/games/holdem/engine.py",
     summary="HU NLHE；单局多手；按筹码差判胜。",
     frontend_module="@/games/holdem",
+    preflight_check=_preflight_check,
 )
