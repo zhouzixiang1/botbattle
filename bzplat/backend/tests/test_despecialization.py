@@ -114,9 +114,9 @@ def test_tiers_endpoint_per_game(tmp_path):
     assert r.json()["game_id"] == "holdem"
 
 
-def test_tiers_endpoint_per_game_curves_independent():
+def test_tiers_endpoint_per_game_curves_independent(tmp_path):
     """三游戏的段位曲线经注册表独立（PR2：可独立调阈值，初始一致）。"""
-    app = create_app()
+    app = create_app(db_path=str(tmp_path / "tiers2.db"))
     c = TestClient(app)
     h = c.get("/api/tiers?game_id=holdem").json()["tiers"]
     g = c.get("/api/tiers?game_id=gomoku").json()["tiers"]

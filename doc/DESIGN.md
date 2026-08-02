@@ -99,7 +99,7 @@ graph LR
 
 ## 3. 数据库设计
 
-SQLite 单文件（默认 `botzone.db`），**25 张表**，约 23 个索引。所有常量（状态码/类型/段位阈值/配置键名）集中在 `store/schema.py`。
+SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。所有常量（状态码/类型/段位阈值/配置键名）集中在 `store/schema.py`。
 
 ### 3.1 核心表（选录）
 
@@ -107,17 +107,18 @@ SQLite 单文件（默认 `botzone.db`），**25 张表**，约 23 个索引。�
 |----|------|--------|
 | `users` | 用户 | id/username/email/password_hash/role/display_name/bio/avatar/xp/level/last_active_at |
 | `bots` | Bot | owner_id/name/display_name/game_id/os/arch/format/binary_path/current_version/is_public/is_active |
-| `matches` | 对局 | id/bot_a_id/bot_b_id/match_type(challenge/table/contest/ladder/human)/status/game_id/winner/n_dots/human_user_id/likes_count/views_count |
-| `ratings` | 评分 | bot_id/rating(1500)/rd(350)/vol/wins/losses/draws/last_played_at |
+| `matches_holdem` / `matches_gomoku` / `matches_pencil` | 对局（**每游戏一张表**，全面解耦 PR3） | id/bot_a_id/bot_b_id/match_type/status/game_id/winner/n_dots/human_user_id/likes_count/views_count；三表结构一致，游戏专属列在其他游戏中默认 NULL/0 |
+| `matches_index` | 对局定位 | id(PK)/game_id——get_match(id) 先查此表定位到哪张 matches_<game> |
+| `ratings` | 评分（**per-game**，PK=bot_id+game_id） | bot_id/game_id/rating(1500)/rd(350)/vol/wins/losses/draws/last_played_at |
 | `contests` | 赛事 | title/organizer_id/status(draft/open/running/rest/finished/cancelled)/game_id/stages_json/current_stage_idx |
-| `contest_pairings` | 对阵 | contest_id/round_num/bot_a_id/bot_b_id/match_id/stage_idx/bracket_slot/match_winner |
+| `contest_pairings` | 对阵 | contest_id/round_num/bot_a_id/bot_b_id/match_id(逻辑外键，无 DB FK)/stage_idx/bracket_slot |
 | `contest_stage_results` | 积分 | contest_id/stage_idx/bot_id/points/wins/draws/losses/rank_in_group |
 
 ### 3.2 社交/互动表
 
 | 表 | 用途 |
 |----|------|
-| `rating_history` | 评分变化时序（段位趋势曲线，每 bot 截断保留） |
+| `rating_history` | 评分变化时序（**per-game**，bot_id+game_id；段位趋势曲线，每 bot×game 截断保留） |
 | `follows` | 关注关系（follower_id, followee_id） |
 | `favorites` | 收藏 Bot（user_id, bot_id） |
 | `comments` | 评论（target_type=match/bot, target_id, user_id, body） |
@@ -137,7 +138,11 @@ SQLite 单文件（默认 `botzone.db`），**25 张表**，约 23 个索引。�
 | `pair_stats` | 对手战绩统计（a_wins/a_losses/draws） |
 
 ### 3.4 迁移机制
-`Store._migrate()` 在每次建连时自愈：为旧库补新增列（game_id/xp/level/bio/avatar/likes_count 等），必要时重建表放宽 CHECK 约束（纳入 rest/ladder/human 等新状态）。**向后兼容，不破坏现有数据**。
+`Store._migrate()` 在每次建连时自愈：为旧库补新增列（game_id/xp/level/bio/avatar/likes_count 等），必要时重建表放宽 CHECK 约束（纳入 rest/ladder/human 等新状态）。**向后兼容，不破坏现有数据**（除对局数据——见下）。
+
+**全面解耦 PR3 的迁移**（matches 拆 per-game 表 + ratings 加 game_id 维度）：
+- **对局数据不保留**（用户决策）：检测旧单表 `matches` → 先清 `contest_pairings.match_id`（置 NULL），再 DROP `matches`+`match_replays`；新三表（`matches_holdem/gomoku/pencil`）+ `matches_index` 由 SCHEMA `IF NOT EXISTS` 建。对局可后续跑种子脚本（`scripts/seed_test_accounts.py`）重建。
+- **用户/Bot/赛事/评论/评分保留**：`ratings`/`rating_history` 加 `game_id` 列、PK 改 `(bot_id, game_id)`、按 `bots.game_id` 回填（CREATE new→INSERT SELECT JOIN bots→DROP→RENAME）。
 
 ## 4. 接口设计
 
