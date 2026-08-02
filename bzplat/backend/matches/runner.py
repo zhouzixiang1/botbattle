@@ -5,8 +5,11 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from bzplat.backend.engine.registry import (
+from bzplat.backend.games import (
     GAME_HOLDEM,
+    dumps as _reg_dumps,
+    fail_response as _reg_fail,
+    loads as _reg_loads,
     normalize_game_id,
     run_session,
 )
@@ -14,7 +17,6 @@ from bzplat.backend.engine.registry import (
 # 注：不 import 具体游戏模块（审计 P1：通用层不得依赖 games/holdem）。
 # 游戏规则参数（num_hands/n_dots/board_size/...）经 **match_params 透传，runner 不持有
 # 任何游戏专属默认值（第 4 游戏带新参数无需改本签名）。
-from bzplat.backend.games import dumps as _reg_dumps, fail_response as _reg_fail, loads as _reg_loads
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError, DEFAULT_ACTION_TIMEOUT
 
 logger = logging.getLogger(__name__)

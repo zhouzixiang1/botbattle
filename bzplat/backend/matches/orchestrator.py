@@ -8,10 +8,8 @@ import secrets
 from datetime import datetime
 from typing import Any, Callable
 
-from bzplat.backend.engine.registry import (
-    normalize_game_id,
-)
 from bzplat.backend.games import registry as game_registry
+from bzplat.backend.games import normalize_game_id
 from bzplat.backend.matches.runner import MatchRunner, _fail_response
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError

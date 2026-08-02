@@ -1251,7 +1251,7 @@ def admin_assign_entries(
     c = store.get_contest(contest_id)
     if not c:
         raise HTTPException(404, "赛事不存在")
-    from bzplat.backend.engine.registry import normalize_game_id
+    from bzplat.backend.games import normalize_game_id
     cgid = normalize_game_id(c.get("game_id"))
 
     # 解析目标 entries 列表
