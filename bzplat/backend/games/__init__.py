@@ -56,7 +56,7 @@ def _legacy_normalize(game_id: str | None) -> str:
     return gid if gid else GAME_HOLDEM
 
 
-# 别名（保 from bzplat.backend.engine.registry import normalize_game_id 可用）
+# normalize_game_id：空值兜底 holdem（保旧语义；通用层 import 自本包）
 normalize_game_id = _legacy_normalize
 
 
@@ -114,6 +114,38 @@ def game_label(game_id: str) -> str:
     return registry.get(game_id).label
 
 
+# ── 段位便捷函数（模块级，默认 holdem；取代旧 engine.tiers 全局 API）──
+def tier_for(rating: float | int | None, game_id: str = "holdem"):
+    """按 rating 查段位（默认 holdem 曲线）。旧 engine.tiers.tier_for 语义。"""
+    return registry.tier_for(game_id, rating)
+
+
+def tier_dict(rating: float | int | None, game_id: str = "holdem") -> dict:
+    """段位字典（默认 holdem）。旧 engine.tiers.tier_dict 语义。"""
+    return registry.tier_dict(game_id, rating)
+
+
+def all_tiers(game_id: str = "holdem") -> list[dict]:
+    """该游戏的全部段位曲线（默认 holdem）。旧 engine.tiers.all_tiers 语义。"""
+    return registry.all_tiers(game_id)
+
+
+def _build_game_labels() -> dict[str, str]:
+    return {gid: registry.get(gid).label for gid in registry.all_ids()}
+
+
+# GAME_LABELS：首次访问时从注册表派生（取代旧 engine.registry 的延迟 __getattr__）。
+# 用模块级 __getattr__ 延迟构建（避免 import 时注册表未完全加载）。
+def __getattr__(name: str):
+    if name == "GAME_LABELS":
+        return _build_game_labels()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | {"GAME_LABELS"})
+
+
 async def preflight_bot(
     game_id: str, binary_path: str, binary_runner: Any, *, timeout: float = 8.0
 ) -> tuple[bool, str]:
@@ -149,4 +181,8 @@ __all__ = [
     "validate_match_config",
     "default_match_config",
     "game_label",
+    "tier_for",
+    "tier_dict",
+    "all_tiers",
+    "GAME_LABELS",
 ]

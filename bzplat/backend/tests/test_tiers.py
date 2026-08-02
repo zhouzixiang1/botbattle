@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from bzplat.backend.engine.tiers import tier_for, tier_dict, all_tiers
+from bzplat.backend.games import tier_for, tier_dict, all_tiers
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
 

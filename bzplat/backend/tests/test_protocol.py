@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from bzplat.backend.engine.cards import Card
-from bzplat.backend.protocol.json_protocol import (
+from bzplat.backend.games.holdem.cards import Card
+from bzplat.backend.games.holdem.protocol import (
     A_TO_ACTION,
     ACTION_TO_A,
     PROTOCOL_VERSION,

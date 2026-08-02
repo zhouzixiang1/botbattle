@@ -5,14 +5,14 @@ import asyncio
 
 import pytest
 
-from bzplat.backend.engine.gomoku import (
+from bzplat.backend.games.gomoku.engine import (
     BOARD_SIZE,
     GomokuSession,
     check_win,
     in_board,
 )
-from bzplat.backend.engine.pencil import PencilBoard, PencilSession
-from bzplat.backend.protocol.board_protocol import (
+from bzplat.backend.games.pencil.engine import PencilBoard, PencilSession
+from bzplat.backend.games._board_protocol import (
     build_gomoku_request,
     build_pencil_request,
     parse_xy,
@@ -155,8 +155,8 @@ def test_run_session_pencil_n_dots_none_uses_default():
     经 orchestrator→runner→run_session(n_dots=None)→PencilBoard(None) 曾抛
     TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'。
     """
-    from bzplat.backend.engine.pencil import DEFAULT_N
-    from bzplat.backend.engine.registry import run_session
+    from bzplat.backend.games.pencil.engine import DEFAULT_N
+    from bzplat.backend.games import run_session
 
     moves = iter([(0, 1), (0, 1), (0, 1), (0, 1)])  # 简单合法边序列（n_dots=3）
 

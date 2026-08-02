@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from bzplat.backend.engine.cards import (
+from bzplat.backend.games.holdem.cards import (
     CAT_FLUSH,
     CAT_FULL_HOUSE,
     CAT_PAIR,
@@ -20,14 +20,14 @@ from bzplat.backend.engine.cards import (
     compare_hands,
     evaluate,
 )
-from bzplat.backend.engine.game import (
+from bzplat.backend.games.holdem.engine import (
     BIG_BLIND,
     SMALL_BLIND,
     STARTING_STACK,
     Action,
     MatchSession,
 )
-from bzplat.backend.protocol.json_protocol import build_response
+from bzplat.backend.games.holdem.protocol import build_response
 
 
 def test_deck_size_and_unique():

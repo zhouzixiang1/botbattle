@@ -34,5 +34,5 @@ include = ["bzplat*"]
 exclude = ["bzplat.frontend*"]
 
 [tool.pytest.ini_options]
-testpaths = ["bzplat/backend/tests", "tests"]
+testpaths = ["bzplat/backend/tests"]
 pythonpath = ["."]
