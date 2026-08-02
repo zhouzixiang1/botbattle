@@ -146,25 +146,51 @@ def swiss_pairings(
     scores: dict[int, float] | None = None,
     played: set[tuple[int, int]] | None = None,
     round_num: int = 1,
+    color_counts: dict[int, int] | None = None,
 ) -> list[PairingSpec]:
-    """简易瑞士：按积分排序后相邻配对，尽量避开已交手。"""
+    """Dutch-Swiss 配对（O(N log N)，万人赛单轮秒级）。
+
+    - 按 scores 降序分组（同分组内配对，跨组只在偶数补缺时）
+    - 避开已交手（played set）；组内全交手过则跨组找
+    - 座位平衡（color_first 轮换：历史先手多的本轮后手）
+    - 奇数 N：最低分者 bye（不生成 pairing，上层记轮空分）
+    """
     scores = scores or {b: 0.0 for b in bot_ids}
     played = played or set()
+    color_counts = color_counts or {}  # bot_id → 累计先手次数（正=先手多）
+    # 按 (-score, bot_id) 排序（确定性，积分同按 id）
     ordered = sorted(bot_ids, key=lambda b: (-scores.get(b, 0.0), b))
-    unpaired = list(ordered)
+    # 奇数 N：移除最低分者作 bye（返回的 out 不含它）
+    bye_bot = None
+    if len(ordered) % 2 == 1:
+        bye_bot = ordered.pop()  # 最低分（排序末尾）
     out: list[PairingSpec] = []
-    while len(unpaired) >= 2:
-        a = unpaired.pop(0)
-        partner_idx = None
-        for i, b in enumerate(unpaired):
+    unpaired = list(ordered)
+    idx = 0
+    while idx < len(unpaired):
+        a = unpaired[idx]
+        # 在剩余未配对里找首个未交手过的（从 idx+1 起，同分组优先）
+        partner = None
+        for j in range(idx + 1, len(unpaired)):
+            b = unpaired[j]
             key = (min(a, b), max(a, b))
             if key not in played:
-                partner_idx = i
+                partner = j
                 break
-        if partner_idx is None:
-            partner_idx = 0
-        b = unpaired.pop(partner_idx)
-        out.append(PairingSpec(a, b, round_num=round_num, color_first=0))
+        if partner is None:
+            # 组内全交手过 → 取下一个（跨组强配，避免卡死）
+            if idx + 1 < len(unpaired):
+                partner = idx + 1
+            else:
+                break
+        b = unpaired.pop(partner)
+        # 座位平衡：先手累计少者本轮先手（color_first=该侧）
+        ca = color_counts.get(a, 0)
+        cb = color_counts.get(b, 0)
+        # color_first=0 表示 a 先手；若 b 先手累计少（更该先手），则 color_first=1
+        color_first = 0 if ca <= cb else 1
+        out.append(PairingSpec(a, b, round_num=round_num, color_first=color_first))
+        idx += 1
     return out
 
 

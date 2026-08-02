@@ -799,7 +799,15 @@ class ContestManager:
             raise ValueError("比赛不存在")
         n = len(self.store.list_contest_entries(contest_id))
         stages = _parse_stages(c)
-        total = sum(estimate_match_count(st, n) for st in stages)
+        # P3：estimate 按 advance_count 传播各 stage 人数。
+        # stage1 用 n；stage2 用 stage1 的 advance_count（决赛 Top8 循环等）。
+        total = 0
+        cur_n = n
+        for st in stages:
+            total += estimate_match_count(st, cur_n)
+            ac = st.get("advance_count")
+            if ac and int(ac) > 0:
+                cur_n = int(ac)
         conc_raw = self.store.get_setting("max_concurrent_matches")
         try:
             conc = max(1, int(conc_raw or 2))
