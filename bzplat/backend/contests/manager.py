@@ -67,22 +67,14 @@ def _match_config(c: dict) -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
-def _estimate_sec_per_match(gid: str, cfg: dict, hands_fallback: int) -> int:
-    """粗估每场时长（秒）：以 spec.eta_per_match_sec 为基准，按对局参数线性缩放。
+def _estimate_sec_per_match(gid: str, cfg: dict) -> int:
+    """粗估每场时长（秒）：经 spec.eta_for_match（消除 if game_id 分支）。
 
-    - holdem：ETA ∝ hands（spec.eta_per_match_sec 按 70 手标定，按实际 hands 缩放）
-    - pencil：ETA ∝ n_dots（spec 标定 N=11，按实际 n_dots 缩放）
-    - gomoku：单局固定 ETA
-    经 spec.eta_per_match_sec 取基准（消除 if game_id 分支），仅在参数缩放上分支。
+    holdem=hands×2；pencil=n_dots 缩放；gomoku 固定——这些游戏特化逻辑封装在
+    各 spec.eta_for_match 里，通用层不再 if gid==。cfg 的 hands 缺省由 _match_config
+    的 hands_per_match 回退已处理（旧 holdem 比赛）。
     """
-    base = game_registry.get(gid).eta_per_match_sec
-    if gid == "holdem":
-        hands = int(cfg.get("hands", hands_fallback) or hands_fallback)
-        return hands * 2  # 每手约 2s（与历史一致）
-    if gid == "pencil":
-        n_dots = int(cfg.get("n_dots") or 11)
-        return max(30, int(n_dots / 11 * base))  # base 按 N=11 标定
-    return int(base)
+    return game_registry.get(gid).eta_for_match(cfg)
 
 
 class ContestManager:
@@ -641,7 +633,7 @@ class ContestManager:
         # 粗估每场时长：经 spec.eta_per_match_sec（消除 if game_id）
         gid = c.get("game_id") or "holdem"
         cfg = _match_config(c)
-        sec_per = _estimate_sec_per_match(gid, cfg, c.get("hands_per_match") or 70)
+        sec_per = _estimate_sec_per_match(gid, cfg)
         eta_sec = (total / conc) * sec_per if conc else 0
         return {
             "entries": n,

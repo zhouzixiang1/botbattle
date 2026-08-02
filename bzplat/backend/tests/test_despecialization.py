@@ -34,23 +34,23 @@ def test_rounds_per_match_via_spec():
 
 # ── contests estimate 经 spec ETA ──────────────────────────────
 def test_estimate_holdem_uses_hands(tmp_path):
-    """holdem ETA 按手数线性（每手 ~2s），经 _estimate_sec_per_match。"""
+    """holdem ETA 按手数线性（每手 ~2s），经 spec.eta_for_match。"""
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
     # 70 手 → 140s
-    assert _estimate_sec_per_match("holdem", {"hands": 70}, 70) == 140
+    assert _estimate_sec_per_match("holdem", {"hands": 70}) == 140
     # 35 手 → 70s
-    assert _estimate_sec_per_match("holdem", {"hands": 35}, 70) == 70
-    # 无 config 用 fallback
-    assert _estimate_sec_per_match("holdem", {}, 50) == 100
+    assert _estimate_sec_per_match("holdem", {"hands": 35}) == 70
+    # 无 config 用 spec 默认（DEFAULT_HANDS=70 → 140s）
+    assert _estimate_sec_per_match("holdem", {}) == 140
 
 
 def test_estimate_pencil_scales_with_n_dots(tmp_path):
     """pencil ETA 按 n_dots 线性缩放（N=11 标定）。"""
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
-    base = _estimate_sec_per_match("pencil", {"n_dots": 11}, 70)
-    half = _estimate_sec_per_match("pencil", {"n_dots": 5}, 70)
+    base = _estimate_sec_per_match("pencil", {"n_dots": 11})
+    half = _estimate_sec_per_match("pencil", {"n_dots": 5})
     assert base > half > 0
 
 
@@ -58,8 +58,8 @@ def test_estimate_gomoku_fixed():
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
     # gomoku 单局固定 ETA
-    a = _estimate_sec_per_match("gomoku", {}, 70)
-    b = _estimate_sec_per_match("gomoku", {"foo": 1}, 70)
+    a = _estimate_sec_per_match("gomoku", {})
+    b = _estimate_sec_per_match("gomoku", {"foo": 1})
     assert a == b > 0
 
 
