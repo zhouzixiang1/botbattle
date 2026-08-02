@@ -1,0 +1,159 @@
+"""预赛/决赛 P0：entry 身份改键测试。
+
+验证：
+1. 排名/积分键为 contest_entry.id（换 Bot 不丢历史分）
+2. 删 Bot 后 entry/pairing/stage_results 保留（bot_id NULL，FK SET NULL）
+3. pairing 存 entry_a_id/entry_b_id（生成时快照）
+"""
+from __future__ import annotations
+
+import pytest
+
+from bzplat.backend.store import Store
+
+
+def _store(tmp_path):
+    return Store(str(tmp_path / "p0.db"))
+
+
+def test_pairings_have_entry_id_columns(tmp_path):
+    """contest_pairings 表有 entry_a_id/entry_b_id 列（P0 迁移）。"""
+    s = _store(tmp_path)
+    with s._tx() as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(contest_pairings)")}
+    s.close()
+    assert "entry_a_id" in cols and "entry_b_id" in cols
+
+
+def test_stage_results_has_entry_id_and_unique(tmp_path):
+    """contest_stage_results 有 entry_id 列，唯一键含 entry_id。"""
+    s = _store(tmp_path)
+    with s._tx() as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(contest_stage_results)")}
+        # 唯一键含 entry_id（UNIQUE(contest_id, stage_idx, entry_id)）
+        idxs = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='contest_stage_results'").fetchone()
+    s.close()
+    assert "entry_id" in cols
+    assert "entry_id" in (idxs["sql"] if idxs else "")
+
+
+def test_bot_fk_is_set_null(tmp_path):
+    """contest_entries/pairings/stage_results 的 bot FK 都是 ON DELETE SET NULL（删 bot 留成绩）。"""
+    s = _store(tmp_path)
+    with s._tx() as c:
+        for tbl in ("contest_entries", "contest_pairings", "contest_stage_results"):
+            fks = c.execute(f"PRAGMA foreign_key_list({tbl})").fetchall()
+            bot_fks = [fk for fk in fks if fk["table"] == "bots"]
+            assert bot_fks, f"{tbl} 应有 bots FK"
+            for fk in bot_fks:
+                assert (fk["on_delete"] or "").upper() == "SET NULL", (
+                    f"{tbl}.bot FK 应 SET NULL，实际 {fk['on_delete']}"
+                )
+    s.close()
+
+
+def test_standings_keyed_by_entry_id(tmp_path):
+    """standings 返回结构含 entry_id（P0 改键）。"""
+    s = _store(tmp_path)
+    from bzplat.backend.contests.manager import ContestManager
+
+    u = s.create_user("org1", "o@e.com", "x", role="organizer")["id"]
+    ua = s.create_user("p0a", "a@e.com", "x")["id"]
+    ub = s.create_user("p0b", "b@e.com", "x")["id"]
+    ba = s.create_bot(ua, "botA", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    bb = s.create_bot(ub, "botB", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    c = s.create_contest(
+        "P0键测试", organizer_id=u, game_id="holdem",
+        stages_json='[{"key":"s1","type":"double_round_robin","scoring":"poker_3_1_0"}]',
+    )["id"]
+    s.add_contest_entry(c, ua, ba)
+    s.add_contest_entry(c, ub, bb)
+    class _FakeOrch:
+        pass
+    cm = ContestManager(s, _FakeOrch())  # type: ignore
+    standings = cm.standings(c)
+    assert len(standings) == 2
+    for row in standings:
+        assert "entry_id" in row, "standings 行应含 entry_id（P0 改键）"
+        assert "bot_id" in row  # bot_id 仍带（展示用）
+    s.close()
+
+
+def test_swap_bot_keeps_history_points(tmp_path):
+    """换 Bot 后历史积分不丢（P0 核心价值：entry 身份为键）。
+
+    场景：entry1 用 botA 打 2 场（胜），换 Bot 为 botA2 → standings 仍累计原 entry1 的分。
+    """
+    s = _store(tmp_path)
+    from bzplat.backend.contests.manager import ContestManager
+
+    u = s.create_user("org2", "o2@e.com", "x", role="organizer")["id"]
+    ua = s.create_user("sw1", "s1@e.com", "x")["id"]
+    ub = s.create_user("sw2", "s2@e.com", "x")["id"]
+    ba = s.create_bot(ua, "swbotA", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    bb = s.create_bot(ub, "swbotB", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    c = s.create_contest(
+        "P0换Bot", organizer_id=u, game_id="holdem",
+        stages_json='[{"key":"s1","type":"double_round_robin","scoring":"poker_3_1_0"}]',
+    )["id"]
+    s.add_contest_entry(c, ua, ba)
+    s.add_contest_entry(c, ub, bb)
+    # 取 entry1 的 id
+    e1 = s.get_entry(c, ua)
+    e2 = s.get_entry(c, ub)
+    # 造 2 场已完成对局：entry1(botA) 都赢（winner=0=bot_a 侧）
+    # 用 standings 走 pairing.entry_a_id → 需先建 pairing
+    s.add_contest_pairing(c, ba, bb, stage_idx=0, stage_key="s1", round_num=1,
+                          entry_a_id=e1["id"], entry_b_id=e2["id"])
+    s.add_contest_pairing(c, ba, bb, stage_idx=0, stage_key="s1", round_num=2,
+                          entry_a_id=e1["id"], entry_b_id=e2["id"])
+    # 建对应 match（completed, botA 赢）
+    for i, p in enumerate(s.list_contest_pairings(c, stage_idx=0)):
+        mid = f"p0swap-{i}"
+        s.create_match(mid, ba, bb, game_id="holdem", contest_id=c, total_hands=2)
+        s.update_match(mid, status="completed", winner=0, earnings_a=100, earnings_b=-100,
+                       hands_played=2, reason="completed")
+        s.update_contest_pairing(p["id"], match_id=mid, status="running")
+    class _FakeOrch:
+        pass
+    cm = ContestManager(s, _FakeOrch())  # type: ignore
+    before = {r["entry_id"]: r["points"] for r in cm.standings(c)}
+    assert before[e1["id"]] == 6.0  # 2 胜 × poker_3_1_0 = 6
+    # 换 Bot：entry1.bot_id 改为新 botA2（但 pairing.entry_a_id 不变）
+    ba2 = s.create_bot(ua, "swbotA2", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    s.update_entry(c, ua, bot_id=ba2)
+    # standings 仍应累计 entry1 的 6 分（因为键是 entry_id，pairing.entry_a_id 仍指向 entry1）
+    after = {r["entry_id"]: r["points"] for r in cm.standings(c)}
+    assert after[e1["id"]] == 6.0, (
+        f"换 Bot 后 entry1 应保留 6 分（entry 身份为键），实际 {after[e1['id']]}"
+    )
+    s.close()
+
+
+def test_delete_bot_preserves_contest_data(tmp_path):
+    """删 Bot 后 entry/pairing/stage_results 保留（bot_id NULL，FK SET NULL）。"""
+    s = _store(tmp_path)
+    u = s.create_user("org3", "o3@e.com", "x", role="organizer")["id"]
+    ua = s.create_user("del1", "d1@e.com", "x")["id"]
+    ba = s.create_bot(ua, "delbotA", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    c = s.create_contest("P0删Bot", organizer_id=u, game_id="holdem",
+                         stages_json='[{"key":"s1","type":"round_robin","scoring":"poker_3_1_0"}]')["id"]
+    s.add_contest_entry(c, ua, ba)
+    e1 = s.get_entry(c, ua)
+    # 建 pairing + stage_result
+    s.add_contest_pairing(c, ba, ba, stage_idx=0, stage_key="s1",
+                          entry_a_id=e1["id"], entry_b_id=e1["id"])
+    s.upsert_stage_result(c, 0, e1["id"], bot_id=ba, points=3.0, wins=1)
+    # 删 bot
+    s.delete_bot(ba)
+    # entry 保留（bot_id NULL）
+    e1b = s.get_entry(c, ua)
+    assert e1b is not None, "删 bot 后 entry 应保留"
+    assert e1b["bot_id"] is None, "删 bot 后 entry.bot_id 应 NULL"
+    # pairing 保留
+    ps = s.list_contest_pairings(c, stage_idx=0)
+    assert len(ps) == 1, "删 bot 后 pairing 应保留"
+    # stage_result 保留
+    srs = s.list_stage_results(c)
+    assert len(srs) == 1, "删 bot 后 stage_result 应保留"
+    s.close()

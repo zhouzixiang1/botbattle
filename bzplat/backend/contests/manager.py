@@ -320,16 +320,18 @@ class ContestManager:
             for e in self.store.list_contest_entries(contest_id)
             if not e.get("eliminated")
         ]
-        # 按 seed / 上一阶段积分排序
+        # 按 seed / 上一阶段积分排序（P0：standings 键改 entry_id，score_map 用 entry_id）
         standings = self.standings(contest_id, stage_idx=max(0, stage_idx - 1))
-        score_map = {s["bot_id"]: s["points"] for s in standings}
+        score_map = {s["entry_id"]: s["points"] for s in standings}
         entries.sort(
-            key=lambda e: (-score_map.get(e["bot_id"], 0), e.get("seed") or 0)
+            key=lambda e: (-score_map.get(e["id"], 0), e.get("seed") or 0)
         )
-        bot_ids = [e["bot_id"] for e in entries]
+        bot_ids = [e["bot_id"] for e in entries if e.get("bot_id") is not None]
+        # P0：bot_id → entry_id 映射（生成 pairing 时快照 entry 身份）
+        bot_to_entry = {e["bot_id"]: e["id"] for e in entries if e.get("bot_id") is not None}
         if len(bot_ids) < 2 and stage.get("type") != "single_elimination":
             self.store.update_contest(
-                contest_id, status=CONTEST_FINISHED, ends_at=_now()
+                contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
             )
             return
 
@@ -355,6 +357,8 @@ class ContestManager:
                 group_id=sp.group_id,
                 bracket_slot=sp.bracket_slot,
                 color_first=sp.color_first,
+                entry_a_id=bot_to_entry.get(sp.bot_a_id),
+                entry_b_id=bot_to_entry.get(sp.bot_b_id),
             )
         self.store.update_contest(
             contest_id, status=CONTEST_RUNNING, current_stage_idx=stage_idx, rest_ends_at=None
@@ -402,10 +406,15 @@ class ContestManager:
         scoring = stage.get("scoring") or default_scoring
 
         entries = self.store.list_contest_entries(contest_id)
+        # P0：排名/积分键改为 entry.id（换 Bot 不丢历史分）。
+        # pairing 存 entry_a_id/entry_b_id（生成时快照），用它定位 stats；
+        # match 的 winner(座位0/1) 对应 pairing 的 a/b 侧。
         stats = {
-            e["bot_id"]: {
+            e["id"]: {
+                "entry_id": e["id"],
                 "bot_id": e["bot_id"],
                 "user_id": e["user_id"],
+                "seed": e.get("seed") or 0,
                 "points": 0.0,
                 "wins": 0,
                 "draws": 0,
@@ -423,28 +432,29 @@ class ContestManager:
             m = self.store.get_match(mid)
             if not m or m["status"] != STATUS_COMPLETED:
                 continue
-            a, b = m["bot_a_id"], m["bot_b_id"]
-            if a not in stats or b not in stats:
+            ea_id = p.get("entry_a_id")
+            eb_id = p.get("entry_b_id")
+            if ea_id not in stats or eb_id not in stats:
                 continue
-            stats[a]["net_chips"] += m["earnings_a"]
-            stats[b]["net_chips"] += m["earnings_b"]
+            stats[ea_id]["net_chips"] += m["earnings_a"]
+            stats[eb_id]["net_chips"] += m["earnings_b"]
             wa = points_for_result(scoring, m["winner"], 0)
             wb = points_for_result(scoring, m["winner"], 1)
-            stats[a]["points"] += wa
-            stats[b]["points"] += wb
+            stats[ea_id]["points"] += wa
+            stats[eb_id]["points"] += wb
             if m["winner"] == 0:
-                stats[a]["wins"] += 1
-                stats[b]["losses"] += 1
+                stats[ea_id]["wins"] += 1
+                stats[eb_id]["losses"] += 1
             elif m["winner"] == 1:
-                stats[b]["wins"] += 1
-                stats[a]["losses"] += 1
+                stats[eb_id]["wins"] += 1
+                stats[ea_id]["losses"] += 1
             else:
-                stats[a]["draws"] += 1
-                stats[b]["draws"] += 1
+                stats[ea_id]["draws"] += 1
+                stats[eb_id]["draws"] += 1
             gid = p.get("group_id") or ""
             if gid:
-                stats[a]["group_id"] = gid
-                stats[b]["group_id"] = gid
+                stats[ea_id]["group_id"] = gid
+                stats[eb_id]["group_id"] = gid
         rows = list(stats.values())
         rows.sort(key=lambda r: (-r["points"], -r["net_chips"]))
         return rows
@@ -472,7 +482,8 @@ class ContestManager:
             self.store.upsert_stage_result(
                 contest_id,
                 stage_idx,
-                s["bot_id"],
+                s["entry_id"],
+                bot_id=s.get("bot_id"),
                 stage_key=key,
                 points=s["points"],
                 wins=s["wins"],
@@ -491,6 +502,7 @@ class ContestManager:
             return
         stage = stages[stage_idx]
         standings = self.standings(contest_id, stage_idx=stage_idx)
+        # P0：advance 以 entry_id 为键（与 standings 一致，换 Bot 不影响晋级判定）
         advance: set[int] = set()
         if stage.get("advance_per_group"):
             per = int(stage["advance_per_group"])
@@ -499,17 +511,17 @@ class ContestManager:
                 by_g.setdefault(s.get("group_id") or "_", []).append(s)
             for rows in by_g.values():
                 for s in rows[:per]:
-                    advance.add(s["bot_id"])
+                    advance.add(s["entry_id"])
         elif stage.get("advance_count"):
             n = int(stage["advance_count"])
             for s in standings[:n]:
-                advance.add(s["bot_id"])
+                advance.add(s["entry_id"])
         else:
             # 默认全部晋级（如单阶段 RR）
-            advance = {s["bot_id"] for s in standings}
+            advance = {s["entry_id"] for s in standings}
 
         for e in self.store.list_contest_entries(contest_id):
-            if e["bot_id"] not in advance:
+            if e["id"] not in advance:
                 self.store.update_entry(contest_id, e["user_id"], eliminated=1)
 
     async def maybe_finish(self, contest_id: int) -> dict | None:
@@ -589,13 +601,15 @@ class ContestManager:
         ))
         if max_round >= total_rounds:
             return False
-        # 生成下一轮
+        # 生成下一轮（P0：standings 键改 entry_id；scores/bot_ids 经 entry 取 bot_id）
         standings = self.standings(contest_id, stage_idx=stage_idx)
-        scores = {s["bot_id"]: s["points"] for s in standings}
-        bot_ids = [s["bot_id"] for s in standings if not s.get("eliminated")]
+        bot_to_entry = {s["bot_id"]: s["entry_id"] for s in standings if s["bot_id"] is not None}
+        scores = {s["bot_id"]: s["points"] for s in standings if s["bot_id"] is not None}
+        bot_ids = [s["bot_id"] for s in standings if not s.get("eliminated") and s["bot_id"] is not None]
         played: set[tuple[int, int]] = set()
         for p in pairings:
-            played.add((min(p["bot_a_id"], p["bot_b_id"]), max(p["bot_a_id"], p["bot_b_id"])))
+            if p.get("bot_a_id") is not None and p.get("bot_b_id") is not None:
+                played.add((min(p["bot_a_id"], p["bot_b_id"]), max(p["bot_a_id"], p["bot_b_id"])))
         specs = generate_stage_pairings(
             stage, bot_ids, scores=scores, played=played, swiss_round=max_round + 1
         )
@@ -611,6 +625,8 @@ class ContestManager:
                 stage_key=key,
                 group_id=sp.group_id,
                 color_first=sp.color_first,
+                entry_a_id=bot_to_entry.get(sp.bot_a_id),
+                entry_b_id=bot_to_entry.get(sp.bot_b_id),
             )
         await self._dispatch_pending(contest_id, stage_idx)
         return True
@@ -629,7 +645,7 @@ class ContestManager:
         max_round = max(int(p.get("round_num") or 1) for p in pairings)
         cur = [p for p in pairings if int(p.get("round_num") or 1) == max_round]
         # 当前轮全部完成
-        winners: list[int] = []
+        winners: list[tuple[int, int | None]] = []  # (bot_id, entry_id)
         for p in cur:
             mid = p.get("match_id")
             if not mid:
@@ -641,7 +657,10 @@ class ContestManager:
             if w is None:
                 # 平局/异常：取 bot_a 兜底（淘汰赛不应平局，但兜底防卡死）
                 w = 0
-            winners.append(p["bot_a_id"] if w == 0 else p["bot_b_id"])
+            if w == 0:
+                winners.append((p["bot_a_id"], p.get("entry_a_id")))
+            else:
+                winners.append((p["bot_b_id"], p.get("entry_b_id")))
         # 胜者 ≤1 → 已决出冠军，阶段真正完成
         if len(winners) <= 1:
             return False
@@ -650,12 +669,14 @@ class ContestManager:
         next_round = max_round + 1
         slot = 0
         for i in range(0, len(winners) - 1, 2):
-            a, b = winners[i], winners[i + 1]
+            a_bot, a_entry = winners[i]
+            b_bot, b_entry = winners[i + 1]
             self.store.add_contest_pairing(
-                contest_id, a, b,
+                contest_id, a_bot, b_bot,
                 round_num=next_round, status="pending",
                 stage_idx=stage_idx, stage_key=key,
                 bracket_slot=slot, color_first=0,
+                entry_a_id=a_entry, entry_b_id=b_entry,
             )
             slot += 1
         await self._dispatch_pending(contest_id, stage_idx)

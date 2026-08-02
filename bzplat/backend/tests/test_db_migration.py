@@ -219,6 +219,7 @@ def test_migrate_old_db_drops_matches_keeps_users(tmp_path):
     """)
     conn.execute("INSERT INTO users(username,email,password_hash,created_at) VALUES('alice','a@ex.com','h','2026-01-01')")
     conn.execute("INSERT INTO bots(owner_id,name,game_id,created_at,updated_at) VALUES(1,'botH','holdem','2026-01-01','2026-01-01')")
+    conn.execute("INSERT INTO contests(id,title,organizer_id,created_at) VALUES(1,'old',1,'2026-01-01')")
     conn.execute("INSERT INTO matches(id,bot_a_id,bot_b_id,game_id,status,created_at) VALUES('m1',1,1,'holdem','completed','2026-01-01')")
     conn.execute("INSERT INTO contest_pairings(contest_id,round_num,bot_a_id,bot_b_id,match_id) VALUES(1,1,1,1,'m1')")
     conn.execute("INSERT INTO ratings(bot_id,rating) VALUES(1,1800)")

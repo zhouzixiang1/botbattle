@@ -137,7 +137,9 @@ SQLite 单文件（默认 `botzone.db`），**28 张表**，**35** 个索引（`
 | `match_replays` | 对局回放事件存储（events_json） |
 | `sessions` | 会话（token, user_id, expires_at，认证核心） |
 | `platform_settings` | 所有热配置 KV（运行时/站点/裁判/auto-match） |
-| `contest_entries` | 赛事报名（user_id, bot_id, group_id, seed） |
+| `contest_entries` | 赛事报名（user_id, bot_id SET NULL, group_id, seed）—— **P0：排名/积分键为 entry.id（换 Bot 不丢分）**；bot FK = SET NULL（删 Bot 留报名） |
+| `contest_pairings` | 赛事对阵（entry_a_id/entry_b_id 身份键 + bot_a_id/bot_b_id SET NULL）—— P0：pairing 快照 entry 身份 |
+| `contest_stage_results` | 阶段成绩（entry_id 唯一键 + bot_id SET NULL）—— P0：唯一键 (contest_id, stage_idx, entry_id) |
 | `pair_stats` | 对手战绩统计（a_wins/a_losses/draws） |
 
 ### 3.4 迁移机制
