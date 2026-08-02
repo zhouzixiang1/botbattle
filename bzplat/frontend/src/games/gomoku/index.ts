@@ -1,7 +1,7 @@
 /** 五子棋前端视图规格（canvas 渲染；DOM GomokuBoard 已删）。 */
 import { Grid3x3 } from 'lucide-react'
 import type { GameViewSpec } from '../base'
-import { reduceGomokuEvents } from '@/components/gomoku/useGomokuState'
+import { reduceGomokuEvents } from './reducer'
 import { GomokuCanvasRenderer } from './canvas'
 
 const GomokuBoardStub = () => null  // canvas 接管，DOM Board 不再用

@@ -2,11 +2,11 @@
  * 点格棋 canvas 渲染器（PR-C：DOM PencilBoard → canvas + GSAP）。
  * 复用 reducePencilEvents（不重写归约）；新占边沿线绘制动画；闭合格归属淡入。
  */
-import type { RawEvent } from '@/components/pencil/usePencilState'
+import type { RawEvent } from '@/games/base'
 import {
   reducePencilEvents, type PencilViewModel,
   GRID_DOT, GRID_EDGE, GRID_EDGE_USED, GRID_BOX,
-} from '@/components/pencil/usePencilState'
+} from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
 
 const EDGE_COLOR = ['#ef4444', '#3b82f6']

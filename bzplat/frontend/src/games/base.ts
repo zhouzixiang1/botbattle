@@ -15,6 +15,15 @@ import type { ComponentType } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import type { GameCanvasRenderer } from './canvas-types'
 
+/**
+ * 平台事件流的最小公共类型（对标后端 games/_board_protocol.py 的公共契约层）。
+ *
+ * 各游戏 reducer（games/<game>/reducer.ts）接受 RawEvent[]，内部按需断言字段。
+ * 此类型上提到 games/base.ts，避免每个 reducer 各自定义一份（曾有三处重复 +
+ * poker 版 type: string 必填 vs 棋类 type? 可选的不兼容）。统一为可选 type?。
+ */
+export type RawEvent = Record<string, unknown> & { type?: string }
+
 /** 对局参数字段定义（取代散落的 per-game 配置 UI 分支）。 */
 export interface MatchConfigField {
   /** match_config 里的 key（如 'hands' / 'n_dots'） */

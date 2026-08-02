@@ -2,7 +2,7 @@
 import { useEffect, useRef } from 'react'
 import gsap from 'gsap'
 import { getGame } from '@/games'
-import type { RawEvent } from '@/components/poker/useMatchState'
+import type { RawEvent } from '@/games/base'
 import type { SeatInfo, Scene } from '@/games/canvas-types'
 
 interface Props {

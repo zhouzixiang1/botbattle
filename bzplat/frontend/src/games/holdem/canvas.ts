@@ -13,8 +13,9 @@
  * 消费：useMatchState reducer（VM 字段名以该文件为准）、Poker.JS（Task 1 注入 ctx.drawPokerCard/drawPokerBack）、
  * GameCanvasRenderer 接口（Task 2）。
  */
-import type { RawEvent, SeatState } from '@/components/poker/useMatchState'
-import { reduceEvents } from '@/components/poker/useMatchState'
+import type { RawEvent } from '@/games/base'
+import type { SeatState } from './reducer'
+import { reduceHoldemEvents } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta, SeatInfo } from '@/games/canvas-types'
 import { ensurePokerJS } from '@/lib/pokerjs'
 
@@ -61,9 +62,9 @@ function parseCardCode(card: string): { suit: 'h' | 'd' | 's' | 'c'; point: stri
 
 export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
   toScene(events: RawEvent[]): HoldemScene {
-    // reduceEvents 返回 { hand, sbSeat, street, board, pot, seats, toAct, lastSettle, matchOver, matchWinner, ... }
+    // reduceHoldemEvents 返回 { hand, sbSeat, street, board, pot, seats, toAct, lastSettle, matchOver, matchWinner, ... }
     // seats[i] = SeatState { hole:(string|null)[], chips, bet, folded, allin, isWinner, net, lastAction }
-    const vm = reduceEvents(events)
+    const vm = reduceHoldemEvents(events)
     const seats = vm.seats ?? []
     // match_end 若只带 earnings 无 final_chips/winner，用累计 net 兜底判胜
     let matchWinner = vm.matchWinner

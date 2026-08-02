@@ -116,7 +116,7 @@ src/pages/                 22 个顶层路由，全部用 React.lazy 代码分�
 1. 建 `games/<game>/` 子包：`engine.py`(裁判) + `protocol.py`(行协议) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec)。棋类协议可 re-export `games/_board_protocol.py`。
 2. 建 `schema.py`：`matches_<game>` 表（仿 matches_holdem，FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES`/`VALID_GAME_IDS` frozenset 各加该项。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
-4. 前端 `src/games/<game>/index.ts`：GameViewSpec（Board/reducer/kind/configFields）+ `src/games/index.ts` 注册。
+4. 前端 `src/games/<game>/`：`index.ts`（GameViewSpec：Board/kind/configFields）+ `canvas.ts`（CanvasRenderer）+ `reducer.ts`（事件归约，自包含对标后端 engine.py）+ `src/games/index.ts` 注册一行。`RawEvent` 公共类型在 `src/games/base.ts`；`normalizeGameId` 从注册表 `GAMES` 派生（不硬编码游戏名三选一）。
 5. **不得**反向：`games/<game>/` 不得 import `bzplat.backend.engine`/`_compat`（循环依赖，`test_import_cycles.py` 守护）；通用层（matches/contests/store/api_routes）不得 import 具体游戏模块（经注册表）。
 6. 跑测试：`pytest`（含 `test_result_contract`/`test_import_cycles`/`test_game_registry`）+ `npm run build` + `screenshot_verify.py`。
 

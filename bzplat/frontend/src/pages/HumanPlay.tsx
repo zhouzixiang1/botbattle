@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label'
 import { ErrorMsg } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
 import { gameLabel, normalizeGameId } from '@/lib/games'
-import { isBoardGame } from '@/games'
+import { isBoardGame, getGame } from '@/games'
 import {
   type MatchSeatRow,
   seatInfos,
@@ -18,9 +18,7 @@ import {
   resolveWinnerLabel,
   fmtNet,
 } from '@/lib/match-seats'
-import { reduceEvents, type RawEvent } from '@/components/poker/useMatchState'
-import { reduceGomokuEvents } from '@/components/gomoku/useGomokuState'
-import { reducePencilEvents } from '@/components/pencil/usePencilState'
+import type { RawEvent } from '@/games/base'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -139,14 +137,12 @@ export default function HumanPlay() {
   const isBoard = isBoardGame(gameId)
   const remainSec = turnDeadline ? Math.max(0, Math.ceil((turnDeadline - nowTs) / 1000)) : null
 
-  // 结局摘要
+  // 结局摘要：经注册表 spec.reduce（消除 gameId=== if-chain）
   const endVm = useMemo(() => {
     if (!over || !events.length) return null
-    const raw = events as RawEvent[]
-    if (gameId === 'holdem') return reduceEvents(raw)
-    if (gameId === 'gomoku') return reduceGomokuEvents(raw)
-    if (gameId === 'pencil') return reducePencilEvents(raw)
-    return null
+    return getGame(gameId).reduce(events as RawEvent[]) as
+      | { matchWinner?: number | null; winner?: number | null; seats?: { net: number }[] }
+      | null
   }, [over, events, gameId])
 
   const winnerLabel = resolveWinnerLabel(
@@ -187,9 +183,9 @@ export default function HumanPlay() {
             <span className="text-muted-foreground">等待中…</span>
           )}
         </span>
-        {!isBoard && over && endVm && 'seats' in endVm && (
+        {!isBoard && over && endVm && endVm.seats && (
           <span className="font-mono text-xs text-muted-foreground">
-            累计 {fmtNet(endVm.seats[0].net)} / {fmtNet(endVm.seats[1].net)}
+            累计 {fmtNet(endVm.seats[0]?.net ?? 0)} / {fmtNet(endVm.seats[1]?.net ?? 0)}
           </span>
         )}
         <Link to={`/match/${id}`} className="ml-auto inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">

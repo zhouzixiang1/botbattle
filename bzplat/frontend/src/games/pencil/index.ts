@@ -1,7 +1,7 @@
 /** 点格棋前端视图规格（canvas 渲染；DOM PencilBoard 已删）。 */
 import { Circle } from 'lucide-react'
 import type { GameViewSpec } from '../base'
-import { reducePencilEvents } from '@/components/pencil/usePencilState'
+import { reducePencilEvents } from './reducer'
 import { PencilCanvasRenderer } from './canvas'
 
 const PencilBoardStub = () => null  // canvas 接管，DOM Board 不再用
