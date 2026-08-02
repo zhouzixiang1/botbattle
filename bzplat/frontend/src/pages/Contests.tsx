@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
+import { getGame, defaultMatchConfig } from '@/games'
 
 interface Contest {
   id: number
@@ -24,23 +25,25 @@ interface Contest {
   match_config_json?: string
 }
 
-/** 解析比赛对局参数概要（按游戏展示）。 */
+/** 解析比赛对局参数概要（经注册表 configFields，消除 per-game if 分支）。 */
 function matchConfigSummary(c: Contest): string {
   const gid = c.game_id || 'holdem'
+  const spec = getGame(gid)
   let cfg: Record<string, unknown> = {}
   try {
     cfg = c.match_config_json ? JSON.parse(c.match_config_json) : {}
   } catch {
     cfg = {}
   }
-  if (gid === 'holdem') {
-    const h = (cfg.hands as number) || c.hands_per_match || 70
-    return `${h} 手`
-  }
-  if (gid === 'pencil') {
-    return `${cfg.n_dots || 11} 点`
-  }
-  return '单局'
+  if (spec.configFields.length === 0) return '单局'
+  // 展示该游戏所有可调参数（如 holdem "70 手"、pencil "11 点"）
+  return spec.configFields
+    .map((f) => {
+      const v = (cfg[f.key] as number) ?? f.default
+      const unit = f.key === 'hands' ? '手' : f.key === 'n_dots' ? '点' : ''
+      return `${v} ${unit}`.trim()
+    })
+    .join(' / ')
 }
 
 interface Template {
@@ -55,14 +58,19 @@ export default function Contests() {
   const [templates, setTemplates] = useState<Template[]>([])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
-  const [hands, setHands] = useState(70)
-  const [nDots, setNDots] = useState(11)
+  // 动态对局参数（按所选游戏的 configFields 驱动，取代散落的 hands/nDots 状态）
+  const [matchCfg, setMatchCfg] = useState<Record<string, number>>({})
   const [templateId, setTemplateId] = useState('holdem_swiss_ko')
   const [filterGame, setFilterGame] = useState('')
   const [error, setError] = useState('')
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
   // 当前所选模板对应的游戏（决定 match_config 字段）
   const selGame = templates.find((t) => t.id === templateId)?.game_id || 'holdem'
+  const selSpec = getGame(selGame)
+  // 切换模板/游戏时重置动态参数为该游戏默认
+  useEffect(() => {
+    setMatchCfg(defaultMatchConfig(selGame))
+  }, [selGame])
 
   const load = () =>
     apiGet<{ contests: Contest[] }>('/api/contests')
@@ -86,18 +94,12 @@ export default function Contests() {
     e.preventDefault()
     setError('')
     try {
-      // 按所选模板的游戏组装 match_config（取代德扑专属 hands_per_match）
-      const match_config =
-        selGame === 'holdem'
-          ? { hands }
-          : selGame === 'pencil'
-            ? { n_dots: nDots }
-            : {} // gomoku 单局，无可调参数
+      // match_config 按所选游戏的 configFields 组装（消除 per-game if 分支）
       await apiJson('/api/contests', 'POST', {
         title,
         description,
         template_id: templateId,
-        match_config,
+        match_config: { ...matchCfg },
       })
       setTitle('')
       setDescription('')
@@ -174,36 +176,24 @@ export default function Contests() {
                   ))}
                 </select>
               </div>
-              {selGame === 'holdem' && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="contest-hands">手数</Label>
+              {selSpec.configFields.map((f) => (
+                <div key={f.key} className="space-y-1.5">
+                  <Label htmlFor={`contest-${f.key}`}>{f.label}</Label>
                   <Input
-                    id="contest-hands"
+                    id={`contest-${f.key}`}
                     type="number"
-                    min={1}
-                    max={200}
+                    min={f.min}
+                    max={f.max}
                     className="w-24"
-                    value={hands}
-                    onChange={(e) => setHands(Number(e.target.value))}
+                    value={matchCfg[f.key] ?? f.default}
+                    onChange={(e) => setMatchCfg({ ...matchCfg, [f.key]: Number(e.target.value) })}
                   />
                 </div>
-              )}
-              {selGame === 'pencil' && (
-                <div className="space-y-1.5">
-                  <Label htmlFor="contest-ndots">点阵边长</Label>
-                  <Input
-                    id="contest-ndots"
-                    type="number"
-                    min={3}
-                    max={15}
-                    className="w-24"
-                    value={nDots}
-                    onChange={(e) => setNDots(Number(e.target.value))}
-                  />
-                </div>
-              )}
-              {selGame === 'gomoku' && (
-                <span className="self-center text-xs text-muted-foreground">五子棋单局，无可调参数</span>
+              ))}
+              {selSpec.configFields.length === 0 && (
+                <span className="self-center text-xs text-muted-foreground">
+                  {selSpec.label}单局，无可调参数
+                </span>
               )}
               <Button type="submit" className="gap-1.5">
                 <Plus className="size-4" />

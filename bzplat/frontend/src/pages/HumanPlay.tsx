@@ -3,7 +3,6 @@ import { Link, useParams } from 'react-router-dom'
 import { PlayCircle, ArrowRight } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
-import { reduceEvents } from '@/components/poker/useMatchState'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -11,7 +10,7 @@ import { Label } from '@/components/ui/label'
 import { ErrorMsg } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
 import { gameLabel, normalizeGameId } from '@/lib/games'
-import { isBoardGame } from '@/games'
+import { isBoardGame, getGame } from '@/games'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -75,10 +74,11 @@ export default function HumanPlay() {
     setMyTurn(false)
   }
 
-  // 德州 viewmodel（用于判定 toAct）
+  // 德州 viewmodel（经注册表 spec.reduce，不再直接 import poker reducer——审计 PR-C）
+  const holdemSpec = getGame('holdem')
   const pokerVm = useMemo(
-    () => reduceEvents(events as unknown as Parameters<typeof reduceEvents>[0]),
-    [events],
+    () => holdemSpec.reduce(events) as { toAct?: number },
+    [events, holdemSpec],
   )
   const isBoard = isBoardGame(gameId)
 

@@ -237,7 +237,9 @@ export default function BotDetail() {
               <h2 className="text-xl font-bold text-foreground">
                 {profile.display_name || profile.name}
               </h2>
-              {profile.tier_name && <TierBadge rating={profile.rating} label={profile.tier_name} />}
+              {profile.tier_name && (
+                <TierBadge rating={profile.rating} label={profile.tier_name} gameId={profile.game_id} tierKey={profile.tier_key} />
+              )}
               {!profile.is_active && <Badge variant="secondary">已停用</Badge>}
             </div>
             <p className="text-sm text-muted-foreground">@{profile.name}</p>

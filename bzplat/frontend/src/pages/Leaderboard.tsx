@@ -140,7 +140,7 @@ export default function Leaderboard() {
                       )}
                     </TableCell>
                     <TableCell>
-                      <TierBadge rating={r.rating} label={r.tier_name} />
+                      <TierBadge rating={r.rating} label={r.tier_name} gameId={r.game_id} tierKey={r.tier_key} />
                     </TableCell>
                     <TableCell>
                       <span className="font-mono font-semibold text-primary">
