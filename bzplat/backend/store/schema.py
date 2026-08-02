@@ -88,8 +88,8 @@ CREATE TABLE IF NOT EXISTS contests (
 -- 便于跨游戏 UNION ALL 聚合。matches_index(id, game_id) 供 get_match(id) 定位。
 CREATE TABLE IF NOT EXISTS matches_holdem (
     id              TEXT    PRIMARY KEY,
-    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
-    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_a_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     hands_played    INTEGER NOT NULL DEFAULT 0,
@@ -116,8 +116,8 @@ CREATE TABLE IF NOT EXISTS matches_holdem (
 );
 CREATE TABLE IF NOT EXISTS matches_gomoku (
     id              TEXT    PRIMARY KEY,
-    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
-    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_a_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     hands_played    INTEGER NOT NULL DEFAULT 0,
@@ -144,8 +144,8 @@ CREATE TABLE IF NOT EXISTS matches_gomoku (
 );
 CREATE TABLE IF NOT EXISTS matches_pencil (
     id              TEXT    PRIMARY KEY,
-    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
-    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_a_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     hands_played    INTEGER NOT NULL DEFAULT 0,
@@ -341,7 +341,7 @@ CREATE TABLE IF NOT EXISTS contest_entries (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    bot_id          INTEGER NOT NULL REFERENCES bots(id),
+    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     registered_at   TEXT    NOT NULL,
     group_id        TEXT    NOT NULL DEFAULT '',
     seed            INTEGER NOT NULL DEFAULT 0,
@@ -354,8 +354,8 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
     round_num       INTEGER NOT NULL DEFAULT 1,
-    bot_a_id        INTEGER NOT NULL REFERENCES bots(id),
-    bot_b_id        INTEGER NOT NULL REFERENCES bots(id),
+    bot_a_id        INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    bot_b_id        INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     match_id        TEXT,  -- 逻辑外键，指向 matches_<game>.id（经 matches_index 定位）；无 DB 级 FK
     status          TEXT    NOT NULL DEFAULT 'pending',
     stage_idx       INTEGER NOT NULL DEFAULT 0,
@@ -370,7 +370,7 @@ CREATE TABLE IF NOT EXISTS contest_stage_results (
     contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
     stage_idx       INTEGER NOT NULL,
     stage_key       TEXT    NOT NULL DEFAULT '',
-    bot_id          INTEGER NOT NULL REFERENCES bots(id),
+    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     points          REAL    NOT NULL DEFAULT 0,
     wins            INTEGER NOT NULL DEFAULT 0,
     draws           INTEGER NOT NULL DEFAULT 0,

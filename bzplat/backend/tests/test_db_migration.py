@@ -250,3 +250,121 @@ def test_migrate_old_db_drops_matches_keeps_users(tmp_path):
         cp = c.execute("SELECT match_id FROM contest_pairings WHERE id=1").fetchone()
     assert cp["match_id"] is None
     s2.close()
+
+
+# ── P0 修复测试（delete_bot FK + delete_match 一致性）─────────
+
+def test_delete_bot_after_match_succeeds(tmp_path):
+    """审计 P0：bot 参与过对局后 delete_bot 不再抛 FOREIGN KEY constraint failed。
+
+    分表后 bot_a_id/bot_b_id 改 ON DELETE SET NULL（可空），删 bot 时对局保留、引用置空。
+    """
+    s = Store(str(tmp_path / "del.db"))
+    u = s.create_user("alice", "a@ex.com", "x")
+    b1 = s.create_bot(u["id"], "bot1", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    b2 = s.create_bot(u["id"], "bot2", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    s.create_match("m1", b1, b2, game_id="holdem")
+    # 删 bot1（参与过 m1）——不应抛异常
+    assert s.delete_bot(b1) is True
+    # 对局保留，bot_a_id 置空（SET NULL）
+    m = s.get_match("m1")
+    assert m is not None
+    assert m["bot_a_id"] is None  # 被删的 bot 引用置空
+    assert m["bot_b_id"] == b2  # 另一方保留
+    s.close()
+
+
+def test_delete_user_cascades_through_matches(tmp_path):
+    """delete_user 级联到 bots → matches 的 bot_a/b 置空（不再因 RESTRICT 崩）。"""
+    s = Store(str(tmp_path / "delu.db"))
+    u = s.create_user("alice", "a@ex.com", "x")
+    b1 = s.create_bot(u["id"], "bot1", binary_path="/tmp", format="elf", game_id="gomoku")["id"]
+    b2 = s.create_bot(u["id"], "bot2", binary_path="/tmp", format="elf", game_id="gomoku")["id"]
+    s.create_match("m1", b1, b2, game_id="gomoku")
+    # 删用户 → 级联删 bots → matches bot_a/b 置空
+    assert s.delete_user(u["id"]) is True
+    m = s.get_match("m1")
+    assert m is not None and m["bot_a_id"] is None and m["bot_b_id"] is None
+    s.close()
+
+
+def test_delete_match_cleans_index_and_replay(store_with_matches):
+    """delete_match 删 per-game 行 + matches_index + replay（保 index 不漂移）。"""
+    s, u, bh, bg, bp = store_with_matches
+    s.create_match("mg1", bg, bg, game_id="gomoku")
+    s.upsert_replay("mg1", '[{"type":"move"}]', "[]")
+    # 删前都在
+    assert s.get_match("mg1") is not None
+    assert s.get_replay("mg1") is not None
+    with s._tx() as c:
+        assert c.execute("SELECT 1 FROM matches_index WHERE id=?", ("mg1",)).fetchone() is not None
+    # 删除
+    assert s.delete_match("mg1") is True
+    # 删后全清
+    assert s.get_match("mg1") is None
+    assert s.get_replay("mg1") is None
+    with s._tx() as c:
+        assert c.execute("SELECT 1 FROM matches_index WHERE id=?", ("mg1",)).fetchone() is None
+        assert c.execute("SELECT 1 FROM matches_gomoku WHERE id=?", ("mg1",)).fetchone() is None
+    # 再删已删的返回 False
+    assert s.delete_match("mg1") is False
+    assert s.delete_match("nonexistent") is False
+
+
+def test_per_game_tables_fk_on_delete_set_null(tmp_path):
+    """所有引用 bots 的 FK 都是 CASCADE 或 SET NULL（防 delete_bot 回归）。
+
+    matches_<game>.bot_a/b = SET NULL（对局保留）；contest_*/pair_stats/ratings 等 = CASCADE。
+    """
+    s = Store(str(tmp_path / "fk.db"))
+    with s._tx() as c:
+        for t, in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+            for r in c.execute(f"PRAGMA foreign_key_list({t})"):
+                if r["table"] == "bots":
+                    on_del = (r["on_delete"] or "").upper()
+                    assert on_del in ("CASCADE", "SET NULL"), (
+                        f"{t}.{r['from']} → bots FK 应 CASCADE 或 SET NULL，实际 {on_del}"
+                    )
+    s.close()
+
+
+def test_migrate_old_db_orphan_ratings_dropped_not_crash(tmp_path):
+    """迁移旧库时孤儿 ratings 行（引用已删 bot）被丢弃而非崩溃启动。"""
+    db = str(tmp_path / "orphan.db")
+    import sqlite3
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE, email TEXT UNIQUE, password_hash TEXT,
+            role TEXT DEFAULT 'user', display_name TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 1, email_verified INTEGER DEFAULT 0,
+            created_at TEXT, bio TEXT DEFAULT '', avatar TEXT DEFAULT '',
+            xp INTEGER DEFAULT 0, level INTEGER DEFAULT 0, last_active_at TEXT);
+        CREATE TABLE bots (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id INTEGER, name TEXT, display_name TEXT DEFAULT '',
+            description TEXT DEFAULT '', os TEXT DEFAULT '', arch TEXT DEFAULT '',
+            format TEXT DEFAULT 'unknown', binary_path TEXT DEFAULT '',
+            current_version INTEGER DEFAULT 0, is_public INTEGER DEFAULT 1,
+            is_active INTEGER DEFAULT 1, is_builtin INTEGER DEFAULT 0,
+            game_id TEXT DEFAULT 'holdem', created_at TEXT, updated_at TEXT,
+            UNIQUE(owner_id, name));
+        CREATE TABLE ratings (bot_id INTEGER PRIMARY KEY, rating REAL DEFAULT 1500.0,
+            rd REAL DEFAULT 350.0, vol REAL DEFAULT 0.06, wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0, draws INTEGER DEFAULT 0, net_chips INTEGER DEFAULT 0,
+            matches_played INTEGER DEFAULT 0, last_played_at TEXT);
+    """)
+    conn.execute("INSERT INTO users(username,email,password_hash,created_at) VALUES('a','a@e.com','h','2026')")
+    conn.execute("INSERT INTO bots(owner_id,name,game_id,created_at,updated_at) VALUES(1,'bot1','holdem','2026','2026')")
+    # bot_id=1 存在；bot_id=999 是孤儿（bots 表无此行）
+    conn.execute("INSERT INTO ratings(bot_id,rating) VALUES(1,1800)")
+    conn.execute("INSERT INTO ratings(bot_id,rating) VALUES(999,1500)")
+    conn.commit()
+    conn.close()
+
+    # 迁移不应崩溃
+    s = Store(db)
+    r1 = s.get_rating(1)
+    r_orphan = s.get_rating(999)
+    s.close()
+    assert r1 is not None and r1["rating"] == 1800  # 有效行保留
+    assert r_orphan is None  # 孤儿行被丢弃（FK 校验：bots 表无 999）
