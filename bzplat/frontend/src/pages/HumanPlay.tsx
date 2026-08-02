@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { PlayCircle, ArrowRight } from 'lucide-react'
+import { PlayCircle, ArrowRight, Clock } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
 import { Card } from '@/components/ui/card'
@@ -11,27 +11,35 @@ import { ErrorMsg } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
 import { gameLabel, normalizeGameId } from '@/lib/games'
 import { isBoardGame } from '@/games'
+import {
+  type MatchSeatRow,
+  seatInfos,
+  seatHeaderLabel,
+  resolveWinnerLabel,
+  fmtNet,
+} from '@/lib/match-seats'
+import { reduceEvents, type RawEvent } from '@/components/poker/useMatchState'
+import { reduceGomokuEvents } from '@/components/gomoku/useGomokuState'
+import { reducePencilEvents } from '@/components/pencil/usePencilState'
 
 type Ev = Record<string, unknown> & { type?: string }
 
-interface MatchRow {
-  game_id?: string
-  human_seat?: number | null
-  status?: string
-  match_type?: string
-}
+/** 默认人类超时（与后端 human_action_timeout 默认 120s 对齐，仅 UI 提示） */
+const HUMAN_TIMEOUT_SEC = 120
 
 export default function HumanPlay() {
   const { id } = useParams<{ id: string }>()
-  const [match, setMatch] = useState<MatchRow | null>(null)
+  const [match, setMatch] = useState<MatchSeatRow | null>(null)
   const [events, setEvents] = useState<Ev[]>([])
   const [over, setOver] = useState(false)
   const [error, setError] = useState('')
+  const [endInfo, setEndInfo] = useState<{ winner?: number | null; earnings_a?: number; earnings_b?: number; reason?: string } | null>(null)
+  const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
+  const [nowTs, setNowTs] = useState(() => Date.now())
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
     if (!id) return
-    // StrictMode 双挂载防护：先关旧连接，避免两个 WS 并发导致状态错乱
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -47,30 +55,49 @@ export default function HumanPlay() {
         } else if (ev.type === 'match_end' || ev.type === 'error') {
           setEvents((prev) => [...prev, ev])
           setOver(true)
+          setTurnDeadline(null)
+          setEndInfo({
+            winner: ev.winner as number | null | undefined,
+            earnings_a: ev.earnings_a != null ? Number(ev.earnings_a) : undefined,
+            earnings_b: ev.earnings_b != null ? Number(ev.earnings_b) : undefined,
+            reason: ev.reason || ev.message,
+          })
+          setMatch((prev) => prev ? {
+            ...prev,
+            status: 'completed',
+            winner: ev.winner as number | null | undefined,
+            earnings_a: ev.earnings_a != null ? Number(ev.earnings_a) : prev.earnings_a,
+            earnings_b: ev.earnings_b != null ? Number(ev.earnings_b) : prev.earnings_b,
+          } : prev)
         } else {
           setEvents((prev) => [...prev, ev])
+          if (ev.type === 'your_turn') {
+            setTurnDeadline(Date.now() + HUMAN_TIMEOUT_SEC * 1000)
+          }
         }
       } catch {
         /* ignore parse error */
       }
     }
     ws.onerror = () => setError('连接异常')
-    ws.onclose = () => {
-      /* 服务端在 match_end 后会关闭 */
-    }
+    ws.onclose = () => { /* 服务端在 match_end 后会关闭 */ }
     return () => {
       ws.close()
       wsRef.current = null
     }
   }, [id])
 
+  // 回合倒计时 tick
+  useEffect(() => {
+    if (!turnDeadline || over) return
+    const t = setInterval(() => setNowTs(Date.now()), 500)
+    return () => clearInterval(t)
+  }, [turnDeadline, over])
+
   const gameId = normalizeGameId(match?.game_id)
   const humanSeat = match?.human_seat ?? 1
+  const seats = seatInfos(match)
 
-  // myTurn 直接从事件流推导（不依赖瞬时 WS 消息）：
-  // 找到最后一个面向本座位的 your_turn；其后若无 move/action/pass/settle/match_end/error
-  // 或面向他人的 your_turn，则仍轮到我。这样 snapshot 重连/StrictMode 重挂载都能正确恢复。
-  // 根因修复：旧版只从实时 your_turn 消息设 myTurn，重连时历史 your_turn 不恢复 → 按钮点不动。
   const myTurn = useMemo(() => {
     if (over) return false
     let pendingIdx = -1
@@ -79,7 +106,6 @@ export default function HumanPlay() {
       if (ev.type === 'your_turn' && Number(ev.player) === humanSeat) {
         pendingIdx = i
       } else if (pendingIdx >= 0) {
-        // pending 之后任何这些事件都表示该回合已结束
         if (
           ev.type === 'move' || ev.type === 'action' || ev.type === 'pass' ||
           ev.type === 'settle' || ev.type === 'match_end' || ev.type === 'error' ||
@@ -92,12 +118,43 @@ export default function HumanPlay() {
     return pendingIdx >= 0
   }, [events, humanSeat, over])
 
+  // 最近 your_turn.request（德州合法动作 / to_call）
+  const turnRequest = useMemo(() => {
+    if (!myTurn) return null
+    for (let i = events.length - 1; i >= 0; i--) {
+      const ev = events[i]
+      if (ev.type === 'your_turn' && Number(ev.player) === humanSeat) {
+        return (ev.request as Record<string, unknown> | undefined) ?? null
+      }
+    }
+    return null
+  }, [events, humanSeat, myTurn])
+
   const sendMove = (move: Record<string, unknown>) => {
     if (!myTurn) return
     wsRef.current?.send(JSON.stringify(move))
+    setTurnDeadline(null)
   }
 
   const isBoard = isBoardGame(gameId)
+  const remainSec = turnDeadline ? Math.max(0, Math.ceil((turnDeadline - nowTs) / 1000)) : null
+
+  // 结局摘要
+  const endVm = useMemo(() => {
+    if (!over || !events.length) return null
+    const raw = events as RawEvent[]
+    if (gameId === 'holdem') return reduceEvents(raw)
+    if (gameId === 'gomoku') return reduceGomokuEvents(raw)
+    if (gameId === 'pencil') return reducePencilEvents(raw)
+    return null
+  }, [over, events, gameId])
+
+  const winnerLabel = resolveWinnerLabel(
+    match,
+    endInfo?.winner ?? (endVm && 'matchWinner' in endVm ? endVm.matchWinner : endVm && 'winner' in endVm ? endVm.winner : undefined),
+    over,
+    (seat) => (match ? seatHeaderLabel(match, seat as 0 | 1) : `座位 ${seat}`),
+  )
 
   return (
     <PageStub title="人类对战">
@@ -105,18 +162,36 @@ export default function HumanPlay() {
         <span className="text-sm text-muted-foreground">
           {gameLabel(gameId)} · 你坐【座位 {humanSeat}】
         </span>
+        {match && (
+          <span className="text-sm text-muted-foreground">
+            {seatHeaderLabel(match, 0)} vs {seatHeaderLabel(match, 1)}
+          </span>
+        )}
         <span className="text-sm">
           {over ? (
-            <span className="text-muted-foreground">对局结束</span>
+            <span className="font-medium text-foreground">
+              对局结束 · 胜者：{winnerLabel}
+              {endInfo?.reason ? `（${endInfo.reason}）` : ''}
+            </span>
           ) : myTurn ? (
             <span className="flex items-center gap-1 font-medium text-success">
               <PlayCircle className="size-4" />
               轮到你落子
+              {remainSec != null && (
+                <span className="ml-1 inline-flex items-center gap-0.5 text-xs text-muted-foreground">
+                  <Clock className="size-3" />{remainSec}s
+                </span>
+              )}
             </span>
           ) : (
             <span className="text-muted-foreground">等待中…</span>
           )}
         </span>
+        {!isBoard && over && endVm && 'seats' in endVm && (
+          <span className="font-mono text-xs text-muted-foreground">
+            累计 {fmtNet(endVm.seats[0].net)} / {fmtNet(endVm.seats[1].net)}
+          </span>
+        )}
         <Link to={`/match/${id}`} className="ml-auto inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">
           查看回放
           <ArrowRight className="size-4" />
@@ -125,20 +200,37 @@ export default function HumanPlay() {
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-        {/* 左：棋盘/牌桌 + 动作按钮 */}
         <div className="space-y-3">
           {gameId === 'gomoku' && (
-            <MatchBoard gameId="gomoku" events={events} onMove={(x, y) => sendMove({ x, y })} interactive={myTurn} />
+            <MatchBoard
+              gameId="gomoku"
+              events={events}
+              seats={seats}
+              onMove={(x, y) => sendMove({ x, y })}
+              interactive={myTurn}
+            />
           )}
           {gameId === 'pencil' && (
-            <MatchBoard gameId="pencil" events={events} onMove={(x, y) => sendMove({ x, y })} interactive={myTurn} />
+            <MatchBoard
+              gameId="pencil"
+              events={events}
+              seats={seats}
+              onMove={(x, y) => sendMove({ x, y })}
+              interactive={myTurn}
+            />
           )}
           {gameId === 'holdem' && (
             <div className="relative">
-              <MatchBoard gameId="holdem" events={events} revealMode="all" />
+              <MatchBoard
+                gameId="holdem"
+                events={events}
+                seats={seats}
+                revealMode="showdown"
+              />
               <HoldemActions
                 disabled={!myTurn || over}
                 legal={myTurn}
+                request={turnRequest}
                 onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
               />
             </div>
@@ -148,7 +240,6 @@ export default function HumanPlay() {
           )}
         </div>
 
-        {/* 右：事件日志 */}
         <Card className="flex flex-col">
           <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
             对局进程 <span className="text-xs font-normal text-muted-foreground">({events.length})</span>
@@ -167,6 +258,7 @@ export default function HumanPlay() {
                     {ev.type === 'settle' ? `赢家 座${(ev.winners as number[] | undefined)?.join('/')}` : ''}
                     {ev.type === 'hand_start' ? `第 ${(Number(ev.hand) || 0) + 1} 手` : ''}
                     {ev.type === 'match_end' ? `结束 · 胜者 ${ev.winner ?? '平'}` : ''}
+                    {ev.type === 'error' ? String(ev.message || '') : ''}
                   </span>
                 </div>
               ))
@@ -184,24 +276,38 @@ export default function HumanPlay() {
 function HoldemActions({
   disabled,
   legal,
+  request,
   onAct,
 }: {
   disabled: boolean
   legal: boolean
+  /** your_turn.request：紧凑协议字段 c/o/to/… 或展开字段 */
+  request: Record<string, unknown> | null
   onAct: (a: string, x?: number) => void
 }) {
-  const [raiseTo, setRaiseTo] = useState(200)
+  // 协议：to=跟注额；c=己方筹码；展开字段可能用 to_call / chips
+  const toCall = Number(request?.to ?? request?.to_call ?? 0)
+  const myChips = Number(request?.c ?? request?.chips ?? 20000)
+  const canCheck = toCall === 0
+  const canCall = toCall > 0 && myChips > 0
+  const minRaise = Math.max(toCall * 2, 200) // 粗略默认；精确以引擎为准
+  const [raiseTo, setRaiseTo] = useState(minRaise)
+
+  useEffect(() => {
+    setRaiseTo(Math.max(minRaise, toCall + 100))
+  }, [minRaise, toCall])
+
   const dis = disabled || !legal
   return (
     <Card className="flex flex-row flex-wrap items-center gap-2 py-3">
       <Button type="button" variant="destructive" size="sm" disabled={dis} onClick={() => onAct('f')}>
         弃牌
       </Button>
-      <Button type="button" variant="outline" size="sm" disabled={dis} onClick={() => onAct('k')}>
+      <Button type="button" variant="outline" size="sm" disabled={dis || !canCheck} onClick={() => onAct('k')}>
         过牌
       </Button>
-      <Button type="button" variant="outline" size="sm" disabled={dis} onClick={() => onAct('c')}>
-        跟注
+      <Button type="button" variant="outline" size="sm" disabled={dis || !canCall} onClick={() => onAct('c')}>
+        跟注{toCall > 0 ? ` ${toCall}` : ''}
       </Button>
       <Label className="flex items-center gap-2 text-sm text-muted-foreground">
         加注到
@@ -213,16 +319,16 @@ function HoldemActions({
           onChange={(e) => setRaiseTo(Number(e.target.value))}
         />
       </Label>
-      <Button type="button" size="sm" disabled={dis} onClick={() => onAct('r', raiseTo)}>
+      <Button type="button" size="sm" disabled={dis || myChips <= 0} onClick={() => onAct('r', raiseTo)}>
         加注
       </Button>
-      <Button type="button" size="sm" disabled={dis} onClick={() => onAct('all')}>
+      <Button type="button" size="sm" disabled={dis || myChips <= 0} onClick={() => onAct('all')}>
         All-in
       </Button>
       {legal && (
         <span className="flex items-center gap-1 text-xs text-success">
           <PlayCircle className="size-3.5" />
-          轮到你
+          轮到你{toCall > 0 ? ` · 需跟 ${toCall}` : ' · 可过牌'}
         </span>
       )}
     </Card>

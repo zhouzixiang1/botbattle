@@ -188,19 +188,12 @@ export default function Home() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
-                        {(m.status === 'pending' || m.status === 'running') && (
-                          <Link
-                            className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:underline"
-                            to={`/watch/${m.id}`}
-                          >
-                            观赛
-                          </Link>
-                        )}
                         <Link
-                          className="inline-flex items-center gap-0.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                          className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:underline"
                           to={`/match/${m.id}`}
                         >
-                          详情 <ArrowRight className="size-3" />
+                          {(m.status === 'pending' || m.status === 'running') ? '观赛' : '详情'}
+                          <ArrowRight className="size-3" />
                         </Link>
                       </div>
                     </TableCell>

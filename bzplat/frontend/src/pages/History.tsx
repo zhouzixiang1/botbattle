@@ -113,13 +113,8 @@ export default function History() {
                   </div>
                 </div>
                 <Link className="text-sm font-medium text-primary hover:underline" to={`/match/${m.id}`}>
-                  详情
+                  {(m.status === 'running' || m.status === 'pending') ? '观赛' : '打开'}
                 </Link>
-                {(m.status === 'running' || m.status === 'pending') && (
-                  <Link className="text-sm font-medium text-primary hover:underline" to={`/watch/${m.id}`}>
-                    观赛
-                  </Link>
-                )}
               </li>
             ))}
           </ul>

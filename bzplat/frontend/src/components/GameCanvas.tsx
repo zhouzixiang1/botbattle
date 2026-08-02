@@ -9,6 +9,7 @@ interface Props {
   gameId?: string | null
   events: RawEvent[]
   seats?: SeatInfo[]
+  revealMode?: 'all' | 'showdown'
   width?: number
   height?: number
   className?: string
@@ -17,7 +18,10 @@ interface Props {
   interactive?: boolean
 }
 
-export default function GameCanvas({ gameId, events, seats, width = 900, height = 600, className, onMove, interactive }: Props) {
+export default function GameCanvas({
+  gameId, events, seats, revealMode = 'all',
+  width = 900, height = 600, className, onMove, interactive,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stateRef = useRef<{ prev: Scene | null; next: Scene } | null>(null)
   const tlRef = useRef<gsap.core.Timeline | null>(null)
@@ -41,7 +45,11 @@ export default function GameCanvas({ gameId, events, seats, width = 900, height 
     ctx.scale(dpr, dpr)
     // 尺寸变化不应清空画面：若有上一帧则立即静态重绘
     const last = stateRef.current?.next
-    if (last) spec.CanvasRenderer.draw(ctx, stateRef.current?.prev ?? null, last, 1, { width, height, seats })
+    if (last) {
+      spec.CanvasRenderer.draw(ctx, stateRef.current?.prev ?? null, last, 1, {
+        width, height, seats, revealMode,
+      })
+    }
   }, [width, height, gameId])
 
   // 主绘制 effect —— events 增长时重算场景并跑 GSAP 动画；
@@ -59,8 +67,9 @@ export default function GameCanvas({ gameId, events, seats, width = 900, height 
     const st = stateRef.current
     const prev = st?.next ?? null
     // events 长度未变 且 已有场景 → 静态重绘上一帧（用最新 seats），不跑动画
+    const drawOpts = { width, height, seats, revealMode }
     if (events.length === lastEventsLenRef.current && st && prev) {
-      renderer.draw(ctx, st.prev, st.next, 1, { width, height, seats })
+      renderer.draw(ctx, st.prev, st.next, 1, drawOpts)
       return
     }
 
@@ -73,7 +82,7 @@ export default function GameCanvas({ gameId, events, seats, width = 900, height 
     // 杀掉旧 timeline，建新的（同 botzone：每个状态变化一个 tl）
     tlRef.current?.kill()
     if (delta.animation === 'none') {
-      renderer.draw(ctx, prev, next, 1, { width, height, seats })
+      renderer.draw(ctx, prev, next, 1, drawOpts)
       return
     }
     const animdata = { t: 0 }
@@ -83,11 +92,11 @@ export default function GameCanvas({ gameId, events, seats, width = 900, height 
       t: 1,
       duration: dur,
       ease: 'power2.out',
-      onUpdate: () => renderer.draw(ctx, prev, next, animdata.t, { width, height, seats }),
+      onUpdate: () => renderer.draw(ctx, prev, next, animdata.t, drawOpts),
     })
     // 每次运行拥有自己的 timeline：cleanup 杀掉本次创建的 tl（StrictMode 双调用安全）
     return () => { tlRef.current?.kill() }
-  }, [gameId, events, seats, width, height])
+  }, [gameId, events, seats, revealMode, width, height])
 
   // 卸载清理（belt-and-suspenders）
   useEffect(() => () => { tlRef.current?.kill() }, [])
@@ -105,7 +114,9 @@ export default function GameCanvas({ gameId, events, seats, width = 900, height 
     const scale = width / rect.width
     const canvasX = (e.clientX - rect.left) * scale
     const canvasY = (e.clientY - rect.top) * (height / rect.height)
-    const picked = renderer.pick(canvasX, canvasY, stateRef.current.next, { width, height, seats })
+    const picked = renderer.pick(canvasX, canvasY, stateRef.current.next, {
+      width, height, seats, revealMode,
+    })
     if (picked) onMove(picked.x, picked.y)
   }
 

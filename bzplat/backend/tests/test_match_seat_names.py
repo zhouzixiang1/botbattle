@@ -96,18 +96,21 @@ def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
 
 
 def test_match_detail_human_match_marks_is_human(tmp_path):
-    """人类对局：human_seat 那侧标 is_human=True。"""
+    """人类对局：human_seat 那侧标 is_human=True，且 owner 为真人用户名（非 bot 主人复用）。"""
     s = _store(tmp_path)
     app = create_app(db_path=s.path)
     st = app.state.store
-    u = st.create_user("alice", "a@ex.com", hash_password("pw"))
-    b = st.create_bot(u["id"], "AlphaBot", binary_path="/tmp", format="elf", is_public=1, game_id="gomoku")
+    u_human = st.create_user("human_player", "h@ex.com", hash_password("pw"))
+    u_bot_owner = st.create_user("bot_owner", "o@ex.com", hash_password("pw"))
+    b = st.create_bot(
+        u_bot_owner["id"], "AlphaBot", binary_path="/tmp", format="elf", is_public=1, game_id="gomoku",
+    )
     st.ensure_rating(b["id"])
     mid = "20260802-seat-3"
     # 人类坐座 1（bot_seat=0，两侧复用同一 bot_id 满足 NOT NULL FK）
     st.create_match(
-        mid, bot_a_id=b["id"], bot_b_id=b["id"], owner_id=u["id"],
-        game_id="gomoku", match_type="human", human_user_id=u["id"], human_seat=1,
+        mid, bot_a_id=b["id"], bot_b_id=b["id"], owner_id=u_human["id"],
+        game_id="gomoku", match_type="human", human_user_id=u_human["id"], human_seat=1,
     )
     c = TestClient(app)
 
@@ -115,4 +118,8 @@ def test_match_detail_human_match_marks_is_human(tmp_path):
     assert r.status_code == 200
     m = r.json()["match"]
     assert m["bot_a"]["is_human"] is False   # seat 0 = bot
+    assert m["bot_a"]["name"] == "AlphaBot"
+    assert m["bot_a"]["owner_name"] == "bot_owner"
     assert m["bot_b"]["is_human"] is True    # seat 1 = human
+    assert m["bot_b"]["owner_name"] == "human_player"
+    assert m["bot_b"]["name"] in ("human_player", "人类") or m["bot_b"]["display_name"]

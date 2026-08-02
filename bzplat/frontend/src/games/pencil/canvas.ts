@@ -5,7 +5,7 @@
 import type { RawEvent } from '@/components/pencil/usePencilState'
 import {
   reducePencilEvents, type PencilViewModel,
-  GRID_DOT, GRID_EDGE_USED, GRID_BOX,
+  GRID_DOT, GRID_EDGE, GRID_EDGE_USED, GRID_BOX,
 } from '@/components/pencil/usePencilState'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
 
@@ -71,19 +71,21 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
       }
     }
 
-    // 边（已占边按玩家着色；新占边沿线绘制：length 随 t 0→1）
+    // 边：未占灰色细线 + 已占按玩家着色（新占边沿线动画）
     for (let x = 0; x < size; x++) {
       for (let y = 0; y < size; y++) {
         const v = next.grid[x]?.[y]
-        if (v !== GRID_EDGE_USED) continue
+        if (v !== GRID_EDGE && v !== GRID_EDGE_USED) continue
         const horiz = y % 2 === 1 && x % 2 === 0
+        const used = v === GRID_EDGE_USED
         const owner = next.edgeOwner[`${x},${y}`]
-        const color = owner === 0 || owner === 1 ? EDGE_COLOR[owner] : '#0f172a'
-        const isLast = next.lastEdge?.x === x && next.lastEdge?.y === y
+        const color = used
+          ? (owner === 0 || owner === 1 ? EDGE_COLOR[owner] : '#0f172a')
+          : 'rgba(148,163,184,0.55)'
+        const isLast = used && next.lastEdge?.x === x && next.lastEdge?.y === y
         const wasUsed = prev?.grid[x]?.[y] === GRID_EDGE_USED
-        // 新占边：从起点画到 t 比例处（沿线动画）
-        const frac = (!wasUsed && t < 1) ? t : 1
-        const sw = Math.max(3, cell * (isLast ? 0.22 : 0.16))
+        const frac = used && !wasUsed && t < 1 ? t : 1
+        const sw = Math.max(used ? 3 : 1.5, cell * (isLast ? 0.22 : used ? 0.16 : 0.06))
         ctx.save()
         ctx.strokeStyle = color
         ctx.lineWidth = sw
@@ -101,6 +103,28 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
       }
     }
 
+    // 闭合格内归属标记（首字母/分数）
+    ctx.font = `bold ${Math.max(10, Math.floor(cell * 0.35))}px "DM Sans", sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    for (let x = 0; x < size; x++) {
+      for (let y = 0; y < size; y++) {
+        if (next.grid[x]?.[y] !== GRID_BOX) continue
+        const owner = next.boxOwner[x]?.[y]
+        if (owner !== 0 && owner !== 1) continue
+        const wasOwned = prev?.boxOwner[x]?.[y] === owner
+        const alpha = wasOwned ? 1 : t
+        ctx.save()
+        ctx.globalAlpha = alpha
+        ctx.fillStyle = EDGE_COLOR[owner]
+        const label = opts.seats?.[owner]?.botName?.[0]
+          || opts.seats?.[owner]?.ownerName?.[0]
+          || (owner === 0 ? 'R' : 'B')
+        ctx.fillText(label.toUpperCase(), cx(x), cy(y))
+        ctx.restore()
+      }
+    }
+
     // 圆点
     ctx.fillStyle = '#334155'
     for (let x = 0; x < size; x++) {
@@ -113,15 +137,20 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
       }
     }
 
-    // 顶部信息
+    // 顶部信息 + 双方名
     ctx.fillStyle = '#334155'
     ctx.font = 'bold 15px "DM Sans", sans-serif'
     ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
+    const name0 = seatShort(opts.seats?.[0], '红')
+    const name1 = seatShort(opts.seats?.[1], '蓝')
     const turnLabel = next.matchOver
-      ? (next.winner === null ? '平局' : `${next.winner === 0 ? '红' : '蓝'}胜（${next.reason}）`)
-      : `待行：${next.toAct === 0 ? '红' : next.toAct === 1 ? '蓝' : '—'}${next.extraTurn ? '（连走）' : ''}`
+      ? (next.winner === null
+        ? '平局'
+        : `${next.winner === 0 ? name0 : name1}胜（${next.reason}）`)
+      : `待行：${next.toAct === 0 ? name0 : next.toAct === 1 ? name1 : '—'}${next.extraTurn ? '（连走）' : ''}`
     ctx.fillText(
-      `点格棋 · ${next.nDots}×${next.nDots} · 红 ${next.scores[0]} : ${next.scores[1]} 蓝 · ${turnLabel}`,
+      `点格棋 · ${next.nDots}×${next.nDots} · ${name0} ${next.scores[0]} : ${next.scores[1]} ${name1} · ${turnLabel}`,
       12, 24,
     )
   },
@@ -133,6 +162,17 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
     if (gx < 0 || gy < 0 || gx >= s.size || gy >= s.size) return null
     return { x: gx, y: gy }
   },
+}
+
+function seatShort(
+  info: { botName?: string; ownerName?: string; isHuman?: boolean } | undefined,
+  fallback: string,
+): string {
+  const bot = (info?.botName || '').trim()
+  if (bot) return bot
+  const owner = (info?.ownerName || '').trim()
+  if (owner) return owner
+  return fallback
 }
 
 /** pencil 棋盘布局（draw 与 pick 共用）。 */

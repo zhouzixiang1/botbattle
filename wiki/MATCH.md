@@ -61,14 +61,14 @@
 ## 观赛视觉（canvas + GSAP）
 
 - **三游戏棋盘**（holdem / gomoku / pencil）的**观赛 / 回放 / 人类对战**现已统一改为 **canvas + GSAP 动画渲染**（照搬 botzone.org.cn）：
-  - **holdem**：发牌翻面、动作浮字（Fold/Call/Raise…）、本轮剩余筹码 / 底池数字插值、座位旁 **累计净筹码**；牌面矢量绘制走 Poker.JS。对局结束时 canvas 顶栏显示 **胜者：座位 n / 平局**。
-  - **gomoku**：棋子落子缩放 + 淡入进入，最后一手彩色标记。
-  - **pencil**：新占边沿线绘制动画，闭合格归属淡入。
-  - 均由 `GameCanvas` 组件按 GSAP timeline 逐帧驱动（替代原 DOM 棋盘）。
-- 点数 `10` 在牌面正确显示为 `10`（修复了原先受紧凑协议 `T` 短码影响显示成 `T` 的问题）。
-- **座位身份**：观赛 / 回放页座位显示双方 **BOT 名 + @用户名**（后端 `get_match_detailed` JOIN bots+users；人类对局真人座标 `is_human`）。
-- **统一对局页** `/match/:id`：实时（running）走 SSE 直播 + DVR 模型（定位到最新后按回放速度推进，可拖动 / 跳最新）；已结束自动从头播放。`/watch/:id` 重定向到 `/match/:id`。
-  - 顶栏展示：**胜者**（DB `winner` / 事件流 `match_end` / earnings 兜底）、**双方名称**、德州 **累计筹码**（事件 `settle.deltas` 累加，与 DB `earnings_a/b` 对齐）。
+  - **holdem**：发牌翻面、动作浮字、本轮下注 / 弃牌 / 全押标记、筹码与 **累计净筹码**、每手结算叠层；`revealMode=showdown` 时人类对战仅亮己方底牌。对局结束显示胜者名。
+  - **gomoku**：落子动画 + 最后一手标记；图例含 **BOT 名**。
+  - **pencil**：未占边灰色细线、已占边着色动画、闭合格归属字；图例含双方名与比分。
+  - 均由 `GameCanvas` + GSAP timeline 驱动。
+- **座位身份**（`matches.seat_info`）：REST / SSE snapshot / 人类 WS 统一 `get_match_detailed` + 嵌套 `bot_a/bot_b`；人类座改写为 **真人用户名**（`is_human`）。
+- **统一对局页** `/match/:id`：实时 SSE DVR + 回放；`/watch/:id` 与 `/arena?id=` 均导向此页。
+  - 顶栏：**胜者（名）**、**双方**、德州累计 / 点格比分、**match_type** 徽章、中止 reason；进入页 `POST /view` 计浏览。
+  - **人类对战** `/play/:id`：传 seats、结束胜者摘要、德州合法按钮（读 `your_turn.request`）、回合倒计时提示。
 
 ## 状态
 

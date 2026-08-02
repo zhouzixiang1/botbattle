@@ -18,122 +18,27 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Slider } from '@/components/ui/slider'
 import { ErrorMsg, Loading } from '@/components/ui/status'
-import { apiGet, errMsg } from '@/api'
-import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
+import { apiGet, apiPost, errMsg } from '@/api'
+import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/games'
 import { isBoardGame } from '@/games'
-import type { SeatInfo } from '@/games/canvas-types'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { reduceEvents, type RawEvent } from '@/components/poker/useMatchState'
+import { reduceGomokuEvents } from '@/components/gomoku/useGomokuState'
+import { reducePencilEvents } from '@/components/pencil/usePencilState'
+import {
+  type MatchSeatRow,
+  seatInfos,
+  seatHeaderLabel,
+  resolveWinnerLabel,
+  fmtNet,
+} from '@/lib/match-seats'
 
-/** match 行（含 detailed JOIN 的 bot_a/bot_b 嵌套 或 扁平 bot_a_name 列）。 */
-interface MatchRow {
-  game_id?: string
-  status?: string
-  match_type?: string
-  hands_played?: number
-  total_hands?: number
-  winner?: number | null
-  earnings_a?: number
-  earnings_b?: number
-  human_seat?: number | null
-  bot_a_id?: number
-  bot_b_id?: number
-  bot_a?: { name?: string; display_name?: string; owner_name?: string; owner_display?: string; is_human?: boolean }
-  bot_b?: { name?: string; display_name?: string; owner_name?: string; owner_display?: string; is_human?: boolean }
-  bot_a_name?: string; bot_a_display?: string
-  bot_b_name?: string; bot_b_display?: string
-  bot_a_owner_name?: string; bot_a_owner_display?: string
-  bot_b_owner_name?: string; bot_b_owner_display?: string
-}
+type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: string }
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   connecting: 'secondary', live: 'default', match_end: 'outline', error: 'destructive',
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
-}
-
-/** 座位 BOT 显示名：display_name > name > 扁平列。 */
-function botLabel(
-  nested?: { name?: string; display_name?: string },
-  flatDisplay?: string,
-  flatName?: string,
-): string {
-  return (nested?.display_name || nested?.name || flatDisplay || flatName || '').trim()
-}
-
-/** 从 match 行构造座位身份（兼容嵌套 bot_a/b 和扁平列）。 */
-function seatInfos(m: MatchRow | null | undefined): SeatInfo[] | undefined {
-  if (!m) return undefined
-  const a = m.bot_a
-  const b = m.bot_b
-  return [
-    {
-      botName: botLabel(a, m.bot_a_display, m.bot_a_name) || undefined,
-      ownerName: a?.owner_name ?? m.bot_a_owner_name,
-      isHuman: a?.is_human ?? (m.match_type === 'human' && m.human_seat === 0),
-    },
-    {
-      botName: botLabel(b, m.bot_b_display, m.bot_b_name) || undefined,
-      ownerName: b?.owner_name ?? m.bot_b_owner_name,
-      isHuman: b?.is_human ?? (m.match_type === 'human' && m.human_seat === 1),
-    },
-  ]
-}
-
-/** 顶栏对阵文案：BOT 名（@用户） */
-function seatHeaderLabel(m: MatchRow, side: 0 | 1): string {
-  const nested = side === 0 ? m.bot_a : m.bot_b
-  const bot = botLabel(
-    nested,
-    side === 0 ? m.bot_a_display : m.bot_b_display,
-    side === 0 ? m.bot_a_name : m.bot_b_name,
-  )
-  const owner = nested?.owner_name
-    ?? (side === 0 ? m.bot_a_owner_name : m.bot_b_owner_name)
-  const isHuman = nested?.is_human
-    ?? (m.match_type === 'human' && m.human_seat === side)
-  if (isHuman) return owner ? `${owner}（人类）` : '人类'
-  if (bot && owner) return `${bot} @${owner}`
-  if (bot) return bot
-  if (owner) return `@${owner}`
-  const id = side === 0 ? m.bot_a_id : m.bot_b_id
-  return id != null ? `Bot #${id}` : `座位 ${side}`
-}
-
-/**
- * 解析整场胜者座位。
- * 优先 DB `match.winner`（含显式 null=平局），再事件流 matchWinner，再 earnings 比较。
- * 返回 { kind: 'seat'|'draw'|'pending' }，避免把「未知」和「平局」都画成 —。
- */
-function resolveWinnerLabel(
-  m: MatchRow | null,
-  eventWinner: number | null | undefined,
-  finished: boolean,
-): string {
-  if (m?.winner === 0 || m?.winner === 1) return `座位 ${m.winner}`
-  if (eventWinner === 0 || eventWinner === 1) return `座位 ${eventWinner}`
-  // DB 显式 null 且已结束 → 平局
-  if (m && m.winner === null && finished) {
-    const ea = m.earnings_a
-    const eb = m.earnings_b
-    if (typeof ea === 'number' && typeof eb === 'number') {
-      if (ea > eb) return '座位 0'
-      if (eb > ea) return '座位 1'
-    }
-    return '平局'
-  }
-  if (typeof m?.earnings_a === 'number' && typeof m?.earnings_b === 'number' && finished) {
-    if (m.earnings_a > m.earnings_b) return '座位 0'
-    if (m.earnings_b > m.earnings_a) return '座位 1'
-    return '平局'
-  }
-  if (eventWinner === null && finished) return '平局'
-  if (!finished) return '进行中'
-  return '—'
-}
-
-function fmtNet(n: number): string {
-  return `${n >= 0 ? '+' : ''}${n.toLocaleString('en-US')}`
 }
 
 /** 找德州每手起始事件索引（逐手跳转用）。 */
@@ -170,6 +75,9 @@ export default function MatchViewer() {
     let cancelled = false
     let es: EventSource | null = null
 
+    // 浏览计数（公开，失败忽略）
+    void apiPost(`/api/matches/${encodeURIComponent(id)}/view`, 'POST', {}).catch(() => undefined)
+
     void apiGet<{ match: MatchRow; replay: { events_json?: string } }>(`/api/matches/${encodeURIComponent(id)}`)
       .then((d) => {
         if (cancelled) return
@@ -179,9 +87,7 @@ export default function MatchViewer() {
         setEvents(evs)
         const live = m.status === 'running' || m.status === 'pending'
         if (live) {
-          // 直播：定位到最新，按回放速度推进
           setStatus('live'); setStepIdx(-1); setPlaying(true)
-          // 开 SSE 继续接增量
           es = new EventSource(`/api/matches/${encodeURIComponent(id)}/events`)
           es.onmessage = (msg) => {
             try {
@@ -190,19 +96,27 @@ export default function MatchViewer() {
                 if (ev.match) setMatch(ev.match as MatchRow)
                 const hist = Array.isArray(ev.events) ? (ev.events as RawEvent[]) : []
                 setEvents(hist.slice(-4000))
-                // 直播切入：定位到最新
                 setStepIdx(-1); setPlaying(true)
               } else {
                 setEvents((prev) => [...prev, ev])
               }
               if (ev.type === 'match_end' || ev.type === 'error') {
+                // 回写胜者/earnings 到 match，避免顶栏一直「—」
+                setMatch((prev) => {
+                  if (!prev) return prev
+                  const patch: MatchRow = { ...prev, status: 'completed' }
+                  if (ev.winner !== undefined) patch.winner = ev.winner as number | null
+                  if (ev.earnings_a !== undefined) patch.earnings_a = Number(ev.earnings_a)
+                  if (ev.earnings_b !== undefined) patch.earnings_b = Number(ev.earnings_b)
+                  if (ev.reason) patch.reason = String(ev.reason)
+                  return patch
+                })
                 setStatus(String(ev.type)); es?.close()
               }
             } catch { /* ignore */ }
           }
           es.onerror = () => { setStatus((s) => (s === 'match_end' ? s : 'error')); es?.close() }
         } else {
-          // 回放：从头自动播放
           setStatus('replay'); setStepIdx(evs.length > 0 ? 0 : -1); setPlaying(evs.length > 0)
         }
       })
@@ -221,22 +135,40 @@ export default function MatchViewer() {
   const atLive = stepIdx < 0
   const lag = atLive ? 0 : Math.max(0, total - 1 - cur)
   const seats = seatInfos(match)
-  // 德州：从当前可见事件归约胜者/累计筹码（与 canvas 同源 reduceEvents）
-  const holdemVm = useMemo(() => {
-    if (isBoard || total === 0) return null
-    return reduceEvents(events.slice(0, cur + 1))
-  }, [isBoard, events, cur, total])
-  // 回放/已结束：用 DB+全量事件定胜者；直播中：用当前可见事件
+  // 当前可见事件归约（三游戏）：胜者 / 累计 / 步数 / 比分
+  const visibleVm = useMemo(() => {
+    if (total === 0) return null
+    const slice = events.slice(0, cur + 1)
+    if (gameId === 'holdem') return { kind: 'holdem' as const, vm: reduceEvents(slice) }
+    if (gameId === 'gomoku') return { kind: 'gomoku' as const, vm: reduceGomokuEvents(slice) }
+    if (gameId === 'pencil') return { kind: 'pencil' as const, vm: reducePencilEvents(slice) }
+    return null
+  }, [gameId, events, cur, total])
   const finished =
     match?.status === 'completed' ||
     match?.status === 'aborted' ||
     status === 'match_end' ||
     status === 'replay'
-  const winnerLabel = resolveWinnerLabel(match, holdemVm?.matchWinner, finished)
-  const netA = holdemVm?.seats[0]?.net
-    ?? (typeof match?.earnings_a === 'number' ? match.earnings_a : null)
-  const netB = holdemVm?.seats[1]?.net
-    ?? (typeof match?.earnings_b === 'number' ? match.earnings_b : null)
+  const eventWinner =
+    visibleVm?.kind === 'holdem' ? visibleVm.vm.matchWinner
+      : visibleVm?.kind === 'gomoku' || visibleVm?.kind === 'pencil' ? visibleVm.vm.winner
+        : undefined
+  const colorLabel = (seat: number) => {
+    if (!match) return `座位 ${seat}`
+    if (gameId === 'gomoku') return `${seatHeaderLabel(match, seat as 0 | 1)}（${seat === 0 ? '黑' : '白'}）`
+    if (gameId === 'pencil') return `${seatHeaderLabel(match, seat as 0 | 1)}（${seat === 0 ? '红' : '蓝'}）`
+    return seatHeaderLabel(match, seat as 0 | 1)
+  }
+  const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
+  const netA = visibleVm?.kind === 'holdem'
+    ? visibleVm.vm.seats[0]?.net
+    : typeof match?.earnings_a === 'number' ? match.earnings_a : null
+  const netB = visibleVm?.kind === 'holdem'
+    ? visibleVm.vm.seats[1]?.net
+    : typeof match?.earnings_b === 'number' ? match.earnings_b : null
+  const liveSteps = visibleVm && visibleVm.kind !== 'holdem' ? visibleVm.vm.moveCount : null
+  const pencilScores = visibleVm?.kind === 'pencil' ? visibleVm.vm.scores : null
+  const typeBadge = matchTypeBadge(match?.match_type)
 
   // 定速播放定时器（直播+回放共用）：按 SPEEDS 步进；到末尾后直播继续等（保持 playing），
   // 回放则停。直播时游标追上末尾 → 转贴尾(-1)，新事件来了继续推进。
@@ -307,13 +239,19 @@ export default function MatchViewer() {
       <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
         <span className="font-mono text-xs text-muted-foreground">{id}</span>
         <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
+        {typeBadge && (
+          <Badge variant="outline" className={`text-[10px] ${typeBadge.cls}`}>{typeBadge.label}</Badge>
+        )}
         <Badge variant={STATUS_VARIANT[status] ?? 'secondary'} className="gap-1">
           {status === 'live' && <span className="size-1.5 animate-pulse rounded-full bg-current" />}
           {status === 'live' ? '直播中' : status === 'completed' ? '已完成' : status === 'aborted' ? '已中止' : status === 'match_end' ? '已结束' : status === 'error' ? '出错' : status === 'connecting' ? '连接中' : '回放'}
         </Badge>
         {match && (
           <span className="text-muted-foreground">
-            {isBoard ? '步数' : '手数'}：<span className="font-mono text-foreground">{String(match.hands_played ?? 0)}</span>
+            {isBoard ? '步数' : '手数'}：
+            <span className="font-mono text-foreground">
+              {String(liveSteps ?? match.hands_played ?? 0)}
+            </span>
             {!isBoard && <span className="text-muted-foreground">/{String(match.total_hands ?? '')}</span>}
           </span>
         )}
@@ -323,6 +261,9 @@ export default function MatchViewer() {
             <span className="font-medium text-foreground">{winnerLabel}</span>
           </span>
         )}
+        {match?.reason && (match.status === 'aborted' || status === 'error') && (
+          <span className="text-xs text-destructive">原因：{match.reason}</span>
+        )}
         {lag > 0 && (
           <Button variant="outline" size="sm" onClick={jumpToLive} className="gap-1">
             <Radio className="size-3" />落后 {lag} 手·跳最新
@@ -330,7 +271,7 @@ export default function MatchViewer() {
         )}
       </div>
 
-      {/* 对阵双方 + 累计筹码（德州 canvas 改版后从顶栏补齐；棋类仅显示名称） */}
+      {/* 对阵双方 + 累计筹码 / 点格比分 */}
       {match && (
         <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
           <span className="font-medium text-foreground">{seatHeaderLabel(match, 0)}</span>
@@ -346,6 +287,13 @@ export default function MatchViewer() {
               <span className={netB >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>
                 座1 {fmtNet(netB)}
               </span>
+            </span>
+          )}
+          {pencilScores && (
+            <span className="font-mono text-xs text-muted-foreground">
+              比分 <span className="text-red-500">{pencilScores[0]}</span>
+              {' : '}
+              <span className="text-blue-500">{pencilScores[1]}</span>
             </span>
           )}
           {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (

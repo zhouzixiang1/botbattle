@@ -89,14 +89,20 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
       }
     }
 
-    // 顶部信息：步数 / 待行 / 胜负
+    // 顶部信息：步数 / 待行 / 胜负 + 双方 BOT 名
     ctx.fillStyle = '#5b4413'
     ctx.font = 'bold 15px "DM Sans", sans-serif'
     ctx.textAlign = 'left'
+    const name0 = seatShort(opts.seats?.[0], '黑')
+    const name1 = seatShort(opts.seats?.[1], '白')
     const turnLabel = next.matchOver
-      ? (next.winner === null ? '平局' : `${next.winner === 0 ? '黑' : '白'}胜${next.reason ? `（${next.reason}）` : ''}`)
-      : `待行：${next.toAct === 0 ? '黑' : next.toAct === 1 ? '白' : '—'}`
+      ? (next.winner === null
+        ? '平局'
+        : `${next.winner === 0 ? name0 : name1}胜${next.reason ? `（${next.reason}）` : ''}`)
+      : `待行：${next.toAct === 0 ? name0 : next.toAct === 1 ? name1 : '—'}`
     ctx.fillText(`五子棋 · ${size}×${size} · 第 ${next.moveCount} 手 · ${turnLabel}`, 12, 24)
+    ctx.font = '12px "DM Sans", sans-serif'
+    ctx.fillText(`● ${name0}（黑）  ○ ${name1}（白）`, 12, 42)
   },
   pick(canvasX, canvasY, scene, opts) {
     const s = scene as GomokuScene
@@ -106,6 +112,17 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     if (gx < 0 || gy < 0 || gx >= s.size || gy >= s.size) return null
     return { x: gx, y: gy }
   },
+}
+
+function seatShort(
+  info: { botName?: string; ownerName?: string; isHuman?: boolean } | undefined,
+  fallback: string,
+): string {
+  const bot = (info?.botName || '').trim()
+  if (bot) return bot
+  const owner = (info?.ownerName || '').trim()
+  if (owner) return info?.isHuman ? `${owner}` : owner
+  return fallback
 }
 
 /** gomoku 棋盘布局（draw 与 pick 共用，保证坐标一致）。 */

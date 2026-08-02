@@ -20,6 +20,12 @@ export interface DrawOpts {
   height: number
   /** 可选：座位身份（Bot 名/用户名），用于绘制座位标签 */
   seats?: SeatInfo[]
+  /**
+   * 底牌揭示：
+   * - all：有牌就亮（Bot 观赛）
+   * - showdown：仅摊牌/对局结束/人类己方亮（人类对战防透视）
+   */
+  revealMode?: 'all' | 'showdown'
 }
 export interface SeatInfo {
   botName?: string

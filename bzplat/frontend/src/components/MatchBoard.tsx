@@ -33,6 +33,7 @@ export default function MatchBoard({
         gameId={gid}
         events={events as unknown as RawEvent[]}
         seats={seats}
+        revealMode={revealMode}
         onMove={interactive ? onMove : undefined}
         interactive={interactive}
       />
