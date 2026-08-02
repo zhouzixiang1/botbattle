@@ -355,3 +355,104 @@ def test_contest_create_uses_template_match_config(store: Store):
     assert c2["match_config_json"] == "{}"
     c3 = mgr.create(users[0]["id"], "t3", template_id="pencil_swiss_ko")
     assert c3["match_config_json"] == '{"n_dots": 6}'  # 对齐裁判 25 格
+
+
+# ── 多轮赛制推进修复（500 人压测发现的 bug）─────────────────────
+class _FakeOrch:
+    """伪 orchestrator：challenge 直接建 match 行（不真跑 bot）。"""
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+        self.n = 0
+
+    async def challenge(self, a, b, owner_user_id, *, hands=1, contest_id=None, **k):
+        self.n += 1
+        mid = f"fake-match-{contest_id}-{self.n}"
+        self.store.create_match(
+            mid, a, b, owner_id=owner_user_id, contest_id=contest_id,
+            total_hands=hands, match_type="contest",
+        )
+        return mid
+
+
+def _complete_all_pairs(store: Store, cid: int, stage_idx: int, *, winner_fn) -> int:
+    """把某 stage 的所有 pending/running pairing 的 match 标完成（winner_fn(a,b)->0|1）。"""
+    n = 0
+    for p in store.list_contest_pairings(cid, stage_idx=stage_idx):
+        mid = p.get("match_id")
+        if not mid:
+            continue
+        m = store.get_match(mid)
+        if not m or m["status"] not in (STATUS_COMPLETED, "aborted"):
+            w = winner_fn(p["bot_a_id"], p["bot_b_id"])
+            store.update_match(mid, status=STATUS_COMPLETED, winner=w, earnings_a=100 if w == 0 else -100, earnings_b=-100 if w == 0 else 100)
+            store.update_contest_pairing(p["id"], status="completed")
+            n += 1
+    return n
+
+
+def test_swiss_generates_next_round(store: Store):
+    """swiss rounds=2：R1 完成后 maybe_finish 应生成 R2（而非直接进下一阶段）。
+    复现 500 人压测 bug：swiss 只跑 R1 就进 KO。"""
+    users, bots = _mk_bots(store, 4)
+    cid = store.create_contest(
+        "swiss2", users[0]["id"], game_id="holdem",
+        stages_json=json.dumps([{"key": "s", "type": "swiss", "rounds": 2, "scoring": "poker_3_1_0", "advance_count": 2, "rest_after_minutes": 0}]),
+    )["id"]
+    for u, b in zip(users, bots):
+        store.add_contest_entry(cid, u["id"], b["id"])
+    store.update_contest(cid, status="running", current_stage_idx=0)
+    orch = _FakeOrch(store)
+    mgr = ContestManager(store, orch)  # type: ignore
+
+    async def run():
+        await mgr._begin_stage(cid, 0)
+        # R1: 2 场
+        r1 = store.list_contest_pairings(cid, stage_idx=0)
+        assert len(r1) == 2, f"R1 应 2 场，实际 {len(r1)}"
+        # 完成 R1（固定 bot_a 胜）
+        _complete_all_pairs(store, cid, 0, winner_fn=lambda a, b: 0)
+        await mgr.maybe_finish(cid)
+        # 关键断言：R1 完成后应生成 R2（swiss 还没到 2 轮），不应进下一阶段/finished
+        all_pairs = store.list_contest_pairings(cid, stage_idx=0)
+        rounds = {p["round_num"] for p in all_pairs}
+        assert 2 in rounds, f"swiss rounds=2 应生成 R2，实际轮次 {rounds}"
+        c2 = store.get_contest(cid)
+        assert c2["status"] == "running" and c2["current_stage_idx"] == 0, (
+            f"swiss R1 完成不应结束阶段，status={c2['status']} stage={c2['current_stage_idx']}"
+        )
+
+    asyncio.run(run())
+
+
+def test_single_elimination_generates_final(store: Store):
+    """single_elimination 4 人：四分之一(R1,2场)完成后 maybe_finish 应生成决赛(R2,1场)，
+    而非直接 finished。复现 500 人压测 bug：KO 只跑四分之一就结束。"""
+    users, bots = _mk_bots(store, 4)
+    cid = store.create_contest(
+        "ko4", users[0]["id"], game_id="holdem",
+        stages_json=json.dumps([{"key": "ko", "type": "single_elimination", "scoring": "poker_3_1_0", "rest_after_minutes": 0}]),
+    )["id"]
+    for u, b in zip(users, bots):
+        store.add_contest_entry(cid, u["id"], b["id"])
+    store.update_contest(cid, status="running", current_stage_idx=0)
+    orch = _FakeOrch(store)
+    mgr = ContestManager(store, orch)  # type: ignore
+
+    async def run():
+        await mgr._begin_stage(cid, 0)
+        r1 = store.list_contest_pairings(cid, stage_idx=0)
+        assert len(r1) == 2, f"4人淘汰 R1 应 2 场，实际 {len(r1)}"
+        # 完成 R1
+        _complete_all_pairs(store, cid, 0, winner_fn=lambda a, b: 0)
+        await mgr.maybe_finish(cid)
+        # 关键断言：R1 完成应生成 R2（决赛），不应 finished
+        all_pairs = store.list_contest_pairings(cid, stage_idx=0)
+        rounds = {p["round_num"] for p in all_pairs}
+        assert 2 in rounds, f"4人淘汰应生成 R2(决赛)，实际轮次 {rounds}"
+        r2 = [p for p in all_pairs if p["round_num"] == 2]
+        assert len(r2) == 1, f"决赛应 1 场，实际 {len(r2)}"
+        c2 = store.get_contest(cid)
+        assert c2["status"] != "finished", "R1 完成不应直接 finished，应继续决赛"
+
+    asyncio.run(run())
