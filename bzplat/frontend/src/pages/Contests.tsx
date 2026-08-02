@@ -7,8 +7,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Badge } from '@/components/ui/badge'
-import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import { getGame, defaultMatchConfig } from '@/games'
@@ -218,7 +217,7 @@ export default function Contests() {
                   >
                     {c.title}
                   </Link>
-                  <Badge variant="secondary">{c.status}</Badge>
+                  <StatusBadge status={c.status} />
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                   <span>{c.template_id || '—'}</span>

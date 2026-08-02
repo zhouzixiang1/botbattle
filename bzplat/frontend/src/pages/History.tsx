@@ -3,8 +3,7 @@ import { Link } from 'react-router-dom'
 import { Swords } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 
@@ -58,10 +57,10 @@ export default function History() {
               className={selectCls}
             >
               <option value="">全部</option>
-              <option value="pending">pending</option>
-              <option value="running">running</option>
-              <option value="completed">completed</option>
-              <option value="aborted">aborted</option>
+              <option value="pending">排队中</option>
+              <option value="running">进行中</option>
+              <option value="completed">已完成</option>
+              <option value="aborted">已中止</option>
             </select>
           </label>
           <label className="flex items-center text-sm text-muted-foreground">
@@ -103,7 +102,7 @@ export default function History() {
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>{gameLabel(m.game_id)}</span>
                     <span>·</span>
-                    <Badge variant="secondary" className="text-[10px]">{m.status}</Badge>
+                    <StatusBadge status={m.status} />
                     {m.created_at && (
                       <>
                         <span>·</span>

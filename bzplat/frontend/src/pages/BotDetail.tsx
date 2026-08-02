@@ -16,13 +16,13 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
-import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { MetricCard } from '@/components/ui/metric-card'
 import { TierBadge } from '@/components/tier-badge'
 import Comments from '@/components/Comments'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { useAuth } from '@/components/useAuth'
-import { gameLabel, gameIcon } from '@/lib/games'
+import { gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
 
 /* ── 类型 ─────────────────────────────────────────────── */
 interface BotProfile {
@@ -334,10 +334,19 @@ export default function BotDetail() {
                               {outcome === 'win' ? '胜' : outcome === 'loss' ? '负' : '平'}
                             </Badge>
                           ) : (
-                            <span className="text-xs text-muted-foreground">{m.status}</span>
+                            <StatusBadge status={m.status} />
                           )}
                         </TableCell>
-                        <TableCell className="hidden text-xs text-muted-foreground sm:table-cell">{m.match_type}</TableCell>
+                        <TableCell className="hidden text-xs text-muted-foreground sm:table-cell">
+                          {(() => {
+                            const tb = matchTypeBadge(m.match_type)
+                            return tb ? (
+                              <Badge variant="outline" className={`text-[10px] ${tb.cls}`}>{tb.label}</Badge>
+                            ) : (
+                              m.match_type || '—'
+                            )
+                          })()}
+                        </TableCell>
                         <TableCell className="text-right">
                           <Link to={`/match/${encodeURIComponent(m.id)}`} className="text-xs font-medium text-primary hover:underline">回放</Link>
                         </TableCell>

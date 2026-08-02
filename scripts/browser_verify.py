@@ -6,7 +6,6 @@
 import sys, json, urllib.request
 from playwright.sync_api import sync_playwright
 
-CHROME = "/home/zzx/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome"
 BASE = "http://127.0.0.1:50380"
 
 passed = 0
@@ -49,7 +48,7 @@ def main():
     ]
 
     with sync_playwright() as p:
-        b = p.chromium.launch(executable_path=CHROME)
+        b = p.chromium.launch(headless=True)
 
         print("=== 明色桌面端（17 路由）===")
         for name, path in routes:
