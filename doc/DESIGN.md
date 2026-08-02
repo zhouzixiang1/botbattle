@@ -211,19 +211,21 @@ SQLite 单文件（默认 `botzone.db`），**27 张表**，约 38 个索引。�
   - **访客（未登录）**：**全断点顶栏**（BrandMark + 公开导航 + 主题切换 + **登录/注册**；窄屏用 Sheet 抽屉放导航与 CTA）。侧栏仅登录后出现，避免访客桌面无入口。
   - **auth 页**（登录/注册/重置/验证）：不显示侧栏，内容占满居中；顶栏保留精简条（品牌 + 主题 + 登录/注册）。
   - nav-config.ts（9 导航项）。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。首页 Hero 对访客额外展示注册/登录 CTA。
+  - **统一对局页** `/match/:id`（MatchViewer）：实时 SSE + 回放 DVR；座位身份经 `matches.seat_info.with_seat_info`（人类座真人用户名）；canvas 绘 BOT 名/累计/胜者；`/watch` 与 `/arena?id=` 重定向至此。人类 `/play` 复用 seats + revealMode=showdown。
 - **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题 + `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；垂直 padding 由全局 `<main>` 统一提供（PageStub 只设水平 padding，避免双倍留白）；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
-- **观赛/对战页左右分栏**：MatchDetail / ArenaWatch / HumanPlay `xl:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），`lg`(1024-1279) 因侧栏占位自动堆叠（避免侧栏+分栏三列挤压），`xl`(1280)+ 横排；ArenaWatch 走 usePlayback 定速缓冲层（事件入 buffer、可控节奏播放，而非实时直播）。MatchBoard（棋盘/牌桌渲染）对 reduceEvents 结果做 useMemo 缓存，避免定速播放每帧全量归约。
-- **页面**：21 个独立页面 + admin/ 10 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/对局回放/人类对战/数据下载/账号 等。
-- **三棋盘可视化**：poker（holdem，**canvas 牌桌**，见 5.3）/ gomoku（GomokuBoard 木色）/ pencil（PencilBoard），统一经 MatchBoard 分发。
+- **观赛/对战页左右分栏**：MatchViewer（统一对局页）/ ArenaWatch（直播列表入口）/ HumanPlay `xl:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），`lg`(1024-1279) 因侧栏占位自动堆叠，`xl`(1280)+ 横排。MatchViewer 合并旧 MatchDetail（回放）+ ArenaWatch（直播）：按 match.status 选模式（running→SSE 直播 DVR 模型：定位最新后按回放速度推进；completed→从头播放），座位身份从 `get_match_detailed`（JOIN bots+users）取 BOT 名/@用户名。MatchBoard（canvas 棋盘渲染）经 GSAP timeline 驱动动画。
+- **页面**：21 个独立页面 + admin/ 10 Tab，覆盖首页/排行榜/Bot 详情/用户主页/搜索/通知/设置/赛事/统一对局页(MatchViewer)/人类对战/数据下载/账号 等。
+- **三棋盘可视化**：holdem / gomoku / pencil 均**canvas + GSAP 动画渲染**（见 5.3），统一经 MatchBoard 分发（DOM 棋盘组件已删，全部走 canvas）。
 
 ### 5.3 Canvas 渲染层（canvas + GSAP 视觉重写）
 
-为对齐 botzone.org.cn 的牌桌观感，新增一层**可选的 canvas 动画渲染层**，与原有 DOM Board 并存、按游戏渐进迁移：
+为对齐 botzone.org.cn 的牌桌观感，新增一层**可选的 canvas 动画渲染层**，现已三游戏全部迁移：
 
-- **`GameViewSpec.CanvasRenderer`**（`games/base.ts` 可选字段）：每款游戏可提供一个 `GameCanvasRenderer<S>`（`games/canvas-types.ts` 定义：`toScene` events→归一化场景 / `diff` 两帧差分定动画 / `draw` 按 t 在 prev↔next 间逐帧绘制）。`MatchBoard` 优先用 CanvasRenderer 绘制；未提供该字段的游戏继续走原 DOM Board。
-- **`<GameCanvas>`**（`components/GameCanvas.tsx`）：通用 canvas 宿主组件 + `useCanvasGameRenderer` hook，用 **GSAP timeline** 驱动插值动画（发牌翻面、动作浮字、筹码增减插值）。
-- **per-game 实现**：`games/<game>/canvas.ts` 提供该游戏的 `PokerCanvasRenderer` 等。牌面矢量绘制走 vendor 的 **Poker.JS**（`lib/pokerjs/`，来源 Tairraos/Poker.JS）。
-- **迁移进度**：**holdem 为首个迁移游戏**（PR-A，DOM PokerTable/PlayingCard 已删除；点数 10 正确显示，修复了原 `牌 T` bug）；gomoku/pencil canvas 化留待 **PR-B/C**。
+- **`GameViewSpec.CanvasRenderer`**（`games/base.ts` 可选字段）：每款游戏提供一个 `GameCanvasRenderer<S>`（`games/canvas-types.ts` 定义：`toScene` events→归一化场景（复用现有 reducer）/ `diff` 两帧差分定动画 / `draw` 按 t 在 prev↔next 间逐帧绘制 / `pick` 可选 canvas 坐标→落子坐标（棋类人类对战））。`MatchBoard` 用 CanvasRenderer 绘制；DOM Board 字段保留为 stub。
+- **`<GameCanvas>`**（`components/GameCanvas.tsx`）：通用 canvas 宿主组件，用 **GSAP timeline** 驱动插值动画（发牌翻面、动作浮字、棋子缩放、边连线绘制）；尺寸/DPR 适配与绘制拆为两个 effect（避免无关重渲染清空位图）；支持 `onMove`/`interactive`（经 `pick` 转换）服务人类对战。
+- **per-game 实现**：`games/<game>/canvas.ts` —— holdem `PokerCanvasRenderer`（牌面矢量走 vendor **Poker.JS** `lib/pokerjs/`，来源 Tairraos/Poker.JS；发牌翻面/动作浮字/筹码插值）/ gomoku `GomokuCanvasRenderer`（棋子缩放进入、最后一手标记）/ pencil `PencilCanvasRenderer`（边沿线绘制、格归属淡入）。
+- **座位身份**：`get_match_detailed`（`store/db.py`）JOIN bots+users 返回 bot_a/bot_b 名+owner 名，`_with_seat_info`（`api_routes.py`）整理成嵌套 + 标 is_human；match_detail + SSE/WS snapshot 均用之。
+- **迁移进度**：三游戏 DOM 棋盘组件（PokerTable/PlayingCard/GomokuBoard/PencilBoard）已全部删除，统一走 canvas。点数 10 正确显示（修复了原 `牌 T` bug）。
 
 ## 6. 安全设计
 

@@ -1,16 +1,19 @@
-/** 五子棋前端视图规格（封装现有 components/gomoku/）。 */
+/** 五子棋前端视图规格（canvas 渲染；DOM GomokuBoard 已删）。 */
 import { Grid3x3 } from 'lucide-react'
 import type { GameViewSpec } from '../base'
-import GomokuBoard from '@/components/gomoku/GomokuBoard'
 import { reduceGomokuEvents } from '@/components/gomoku/useGomokuState'
+import { GomokuCanvasRenderer } from './canvas'
+
+const GomokuBoardStub = () => null  // canvas 接管，DOM Board 不再用
 
 export const gomokuSpec: GameViewSpec = {
   id: 'gomoku',
   label: '五子棋',
   icon: Grid3x3,
   kind: 'board',
-  Board: GomokuBoard as unknown as GameViewSpec['Board'],
+  Board: GomokuBoardStub as unknown as GameViewSpec['Board'],
   reduce: reduceGomokuEvents as unknown as GameViewSpec['reduce'],
+  CanvasRenderer: GomokuCanvasRenderer,
   defaultMatchConfig: {},
   configFields: [], // 单局无可调参数
 }

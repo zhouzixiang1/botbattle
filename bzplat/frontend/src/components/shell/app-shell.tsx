@@ -1,5 +1,5 @@
 import { useState, lazy, Suspense } from 'react'
-import { useLocation, Routes, Route, NavLink, Link, useNavigate } from 'react-router-dom'
+import { useLocation, Routes, Route, NavLink, Link, useNavigate, Navigate, useParams } from 'react-router-dom'
 import { Menu, LogOut, User as UserIcon, Loader2, PanelLeftClose, PanelLeft } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
 import NotificationBell from '@/components/NotificationBell'
@@ -28,7 +28,7 @@ const Wiki = lazy(() => import('@/pages/Wiki'))
 const DataDownload = lazy(() => import('@/pages/DataDownload'))
 const ArenaWatch = lazy(() => import('@/pages/ArenaWatch'))
 const History = lazy(() => import('@/pages/History'))
-const MatchDetail = lazy(() => import('@/pages/MatchDetail'))
+const MatchViewer = lazy(() => import('@/pages/MatchViewer'))
 const BotDetail = lazy(() => import('@/pages/BotDetail'))
 const HumanPlay = lazy(() => import('@/pages/HumanPlay'))
 const UserProfile = lazy(() => import('@/pages/UserProfile'))
@@ -40,6 +40,12 @@ const Register = lazy(() => import('@/pages/Register'))
 const VerifyEmail = lazy(() => import('@/pages/VerifyEmail'))
 const ResetPassword = lazy(() => import('@/pages/ResetPassword'))
 const Admin = lazy(() => import('@/pages/admin/Admin'))
+
+/** /watch/:id → /match/:id 重定向（统一对局页）。 */
+function WatchRedirect() {
+  const { id } = useParams<{ id: string }>()
+  return <Navigate to={`/match/${id ?? ''}`} replace />
+}
 
 /** 懒加载 fallback（旋转加载图标，居中） */
 function PageFallback() {
@@ -282,11 +288,11 @@ export function AppShell() {
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/arena" element={<ArenaWatch />} />
-              <Route path="/watch/:id" element={<ArenaWatch />} />
+              <Route path="/watch/:id" element={<WatchRedirect />} />
               <Route path="/challenge" element={<Challenge />} />
               <Route path="/leaderboard" element={<Leaderboard />} />
               <Route path="/history" element={<History />} />
-              <Route path="/match/:id" element={<MatchDetail />} />
+              <Route path="/match/:id" element={<MatchViewer />} />
               <Route path="/bot/:id" element={<BotDetail />} />
               <Route path="/play/:id" element={<HumanPlay />} />
               <Route path="/my-bots" element={<MyBots />} />

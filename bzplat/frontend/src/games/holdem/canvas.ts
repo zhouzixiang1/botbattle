@@ -33,8 +33,16 @@ interface HoldemScene extends Scene {
   toAct: number | null
   lastAction: { player: number; action: string; amount?: number } | null
   roundBets: number[]          // 每座本轮已下注
+  /** 当前手结算赢家（lastSettle）；对局总胜者用 matchWinner */
   winners: number[] | null
+  /** 当前手 settle.deltas（每手叠层用） */
+  handDeltas: [number, number] | null
+  handSettleReason: string | null
   matchOver: boolean
+  /** 整场胜者座位 0/1；平局 null（match_end / final_chips 推导） */
+  matchWinner: number | null
+  /** 累计净筹码（各手 settle.deltas 累加，对应旧 PokerTable「累计」） */
+  nets: [number, number]
   folded: boolean[]
   allin: boolean[]
 }
@@ -53,10 +61,18 @@ function parseCardCode(card: string): { suit: 'h' | 'd' | 's' | 'c'; point: stri
 
 export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
   toScene(events: RawEvent[]): HoldemScene {
-    // reduceEvents 返回 { hand, sbSeat, street, board, pot, seats, toAct, lastSettle, matchOver, ... }
+    // reduceEvents 返回 { hand, sbSeat, street, board, pot, seats, toAct, lastSettle, matchOver, matchWinner, ... }
     // seats[i] = SeatState { hole:(string|null)[], chips, bet, folded, allin, isWinner, net, lastAction }
     const vm = reduceEvents(events)
     const seats = vm.seats ?? []
+    // match_end 若只带 earnings 无 final_chips/winner，用累计 net 兜底判胜
+    let matchWinner = vm.matchWinner
+    if (vm.matchOver && matchWinner === null) {
+      const n0 = seats[0]?.net ?? 0
+      const n1 = seats[1]?.net ?? 0
+      if (n0 > n1) matchWinner = 0
+      else if (n1 > n0) matchWinner = 1
+    }
     return {
       hand: vm.hand ?? 0,
       chips: [seats[0]?.chips ?? 20000, seats[1]?.chips ?? 20000],
@@ -85,7 +101,13 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       })(),
       roundBets: seats.map((s: SeatState) => s?.bet ?? 0),
       winners: vm.lastSettle?.winners ?? null,
+      handDeltas: vm.lastSettle
+        ? [Number(vm.lastSettle.deltas[0] ?? 0), Number(vm.lastSettle.deltas[1] ?? 0)]
+        : null,
+      handSettleReason: vm.lastSettle?.reason ?? null,
       matchOver: !!vm.matchOver,
+      matchWinner,
+      nets: [seats[0]?.net ?? 0, seats[1]?.net ?? 0],
       folded: seats.map((s: SeatState) => !!s?.folded),
       allin: seats.map((s: SeatState) => !!s?.allin),
     }
@@ -129,9 +151,28 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     drawSeat(ctx, X(-0.75), Y0, 1, next, prev, t, opts.seats)
     drawSeat(ctx, X(-0.75), Y1, 0, next, prev, t, opts.seats)
 
-    // 手牌（翻面动画：新牌 scale(2|t-0.5|,1)）
-    drawCards(ctx, X(0), Y0, next.holes[1] ?? null, t, prev?.holes[1] ?? null)
-    drawCards(ctx, X(0), Y1, next.holes[0] ?? null, t, prev?.holes[0] ?? null)
+    // 手牌：showdown 模式隐藏非人类/非摊牌对手牌
+    const reveal = opts.revealMode ?? 'all'
+    const showdownOpen =
+      next.matchOver ||
+      (next.handSettleReason === 'showdown' && !!next.winners)
+    const holeFor = (idx: number): string[] | null => {
+      const raw = next.holes[idx] ?? null
+      if (!raw?.length) return null
+      if (reveal === 'all' || showdownOpen) return raw
+      // showdown：仅人类己方亮牌；其它画牌背
+      if (opts.seats?.[idx]?.isHuman) return raw
+      return ['back', 'back'] // 哨兵：drawCards 画牌背
+    }
+    const prevHoleFor = (idx: number): string[] | null => {
+      const raw = prev?.holes[idx] ?? null
+      if (!raw?.length) return null
+      if (reveal === 'all' || showdownOpen) return raw
+      if (opts.seats?.[idx]?.isHuman) return raw
+      return ['back', 'back']
+    }
+    drawCards(ctx, X(0), Y0, holeFor(1), t, prevHoleFor(1))
+    drawCards(ctx, X(0), Y1, holeFor(0), t, prevHoleFor(0))
 
     // 公共牌（5 槽，新发的翻面）
     const board = [...next.board]
@@ -145,18 +186,51 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       drawActionFloat(ctx, X(0.75), next.lastAction.player === 0 ? Y1 : Y0, next.lastAction, t)
     }
 
-    // 结算覆盖（简要高亮赢家座）
-    if (next.matchOver && next.winners && next.winners.length) {
+    // 每手结算叠层（非整场结束时）
+    if (!next.matchOver && next.handDeltas && next.winners && t > 0.15) {
+      ctx.save()
+      ctx.textAlign = 'center'
+      ctx.font = 'bold 18px "DM Sans", sans-serif'
+      ctx.shadowColor = 'black'
+      ctx.shadowBlur = 8
+      for (const idx of [0, 1] as const) {
+        const d = next.handDeltas[idx]
+        const yy = idx === 0 ? Y1 - 70 : Y0 - 70
+        const txt = d > 0 ? `赢得 ${d}` : d < 0 ? `输掉 ${-d}` : '不赚不亏'
+        ctx.fillStyle = d > 0 ? 'rgba(52,211,153,0.95)' : d < 0 ? 'rgba(248,113,113,0.95)' : 'rgba(255,255,255,0.85)'
+        ctx.globalAlpha = Math.min(1, t * 1.2)
+        ctx.fillText(txt, X(0.75), yy)
+      }
+      ctx.restore()
+    }
+
+    // 结算覆盖：对局结束 + 胜者（优先 BOT 名）
+    if (next.matchOver) {
       ctx.save()
       ctx.textAlign = 'center'
       ctx.font = 'bold 28px "DM Sans", sans-serif'
       ctx.fillStyle = 'rgba(255,238,88,0.95)'
       ctx.shadowColor = 'black'
       ctx.shadowBlur = 12
-      ctx.fillText('对局结束', X(0), H / 2 - R - 20)
+      let winnerTxt = '平局'
+      if (next.matchWinner === 0 || next.matchWinner === 1) {
+        winnerTxt = `胜者：${seatDisplayName(opts.seats?.[next.matchWinner], next.matchWinner)}`
+      }
+      ctx.fillText('对局结束', X(0), H / 2 - R - 36)
+      ctx.font = 'bold 20px "DM Sans", sans-serif'
+      ctx.fillText(winnerTxt, X(0), H / 2 - R - 8)
       ctx.restore()
     }
   },
+}
+
+/** 座位显示名：BOT 名优先，否则 @用户名，再回退「座位 n」。 */
+function seatDisplayName(info: SeatInfo | undefined, idx: number): string {
+  const bot = (info?.botName || '').trim()
+  if (bot) return bot
+  const owner = (info?.ownerName || '').trim()
+  if (owner) return info?.isHuman ? `${owner}（人类）` : owner
+  return `座位 ${idx}`
 }
 
 function drawSeat(
@@ -169,23 +243,58 @@ function drawSeat(
   const chips = prev && prev.chips[idx] !== next.chips[idx]
     ? Math.round(prev.chips[idx] + (next.chips[idx] - prev.chips[idx]) * t)
     : next.chips[idx]
+  const net = prev && prev.nets[idx] !== next.nets[idx]
+    ? Math.round(prev.nets[idx] + (next.nets[idx] - prev.nets[idx]) * t)
+    : next.nets[idx]
   const isToAct = next.toAct === idx && !next.matchOver
+  const isMatchWinner = next.matchOver && next.matchWinner === idx
+  const name = seatDisplayName(info, idx)
   ctx.textAlign = 'center'
   // 头像圆（首字母）
-  const initial = info?.botName?.[0] ?? info?.ownerName?.[0] ?? '?'
+  const initial = (name[0] || '?').toUpperCase()
   ctx.beginPath(); ctx.arc(x - 25, y - 45 + 25, 18, 0, Math.PI * 2)
   ctx.fillStyle = idx === 0 ? '#3b82f6' : '#ef4444'; ctx.fill()
+  if (isMatchWinner) {
+    ctx.strokeStyle = 'rgba(255,238,88,0.95)'
+    ctx.lineWidth = 3
+    ctx.stroke()
+  }
   ctx.fillStyle = '#fff'; ctx.font = 'bold 16px "DM Sans"'
   ctx.fillText(initial, x - 25, y - 45 + 25 + 5)
   // 名字（两行：BOT名 + @用户名）
-  ctx.fillStyle = '#fff'; ctx.font = '13px "DM Sans"'
+  ctx.fillStyle = isMatchWinner ? 'rgba(255,238,88,0.98)' : '#fff'
+  ctx.font = 'bold 13px "DM Sans"'
   if (isToAct) ctx.fillText('👉', x - 45, y - 12)
-  ctx.fillText(info?.botName ?? `座位 ${idx}`, x, y + 20)
-  ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '11px "DM Sans"'
-  ctx.fillText(info?.isHuman ? `@${info?.ownerName} (你)` : `@${info?.ownerName ?? ''}`, x, y + 36)
-  // 筹码
+  ctx.fillText(name, x, y + 18)
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '11px "DM Sans"'
+  const ownerLine = info?.isHuman
+    ? `@${info?.ownerName || '人类'}（你）`
+    : info?.ownerName
+      ? `@${info.ownerName}`
+      : `座位 ${idx}`
+  ctx.fillText(ownerLine, x, y + 34)
+  // 本轮剩余筹码 + 累计净筹码（旧 PokerTable 底部「累计」搬到座位旁）
   ctx.fillStyle = '#fff'; ctx.font = 'bold 13px "DM Sans"'
-  ctx.fillText(`筹码 ${chips}`, x, y + 52)
+  ctx.fillText(`筹码 ${chips.toLocaleString('en-US')}`, x, y + 50)
+  ctx.fillStyle = net > 0 ? '#34d399' : net < 0 ? '#f87171' : 'rgba(255,255,255,0.75)'
+  ctx.font = '12px "DM Sans"'
+  ctx.fillText(`累计 ${net >= 0 ? '+' : ''}${net.toLocaleString('en-US')}`, x, y + 66)
+  // 本轮下注 / 弃牌 / 全押
+  const bet = next.roundBets[idx] ?? 0
+  if (bet > 0 && !next.folded[idx]) {
+    ctx.fillStyle = 'rgba(253,224,71,0.95)'
+    ctx.font = '11px "DM Sans"'
+    ctx.fillText(`下注 ${bet.toLocaleString('en-US')}`, x, y + 82)
+  }
+  if (next.folded[idx]) {
+    ctx.fillStyle = 'rgba(248,113,113,0.95)'
+    ctx.font = 'bold 12px "DM Sans"'
+    ctx.fillText('已弃牌', x, y + 82)
+  } else if (next.allin[idx]) {
+    ctx.fillStyle = 'rgba(251,191,36,0.95)'
+    ctx.font = 'bold 12px "DM Sans"'
+    ctx.fillText('ALL-IN', x, y + 82)
+  }
 }
 
 function drawCards(
@@ -197,16 +306,18 @@ function drawCards(
   const d = (CARD_SIZE * 3.3) / 4
   const x0 = x - (d / 2) * (cards.length - 1) - (CARD_SIZE * 3) / 8
   for (let i = 0; i < cards.length; i++) {
-    const isNew = !prevCards || !prevCards[i]
-    const ct = isNew ? t : 1
+    const code = cards[i]
+    const forceBack = !code || code === 'back'
+    const isNew = !prevCards || !prevCards[i] || prevCards[i] === 'back'
+    const ct = isNew && !forceBack ? t : 1
     ctx.save()
     ctx.translate(x0 + i * d, y - CARD_SIZE / 2)
-    if (isNew && ct < 1) {
+    if (isNew && ct < 1 && !forceBack) {
       ctx.translate(d * (0.5 - Math.abs(ct - 0.5)), 0)
       ctx.scale(2 * Math.abs(ct - 0.5), 1)
     }
-    const parsed = parseCardCode(cards[i])
-    if (!parsed || (isNew && ct < 0.5)) {
+    const parsed = forceBack ? null : parseCardCode(code)
+    if (!parsed || (isNew && ct < 0.5) || forceBack) {
       ctx.drawPokerBack(0, 0, CARD_SIZE)
     } else {
       ctx.drawPokerCard(0, 0, CARD_SIZE, parsed.suit, parsed.point)

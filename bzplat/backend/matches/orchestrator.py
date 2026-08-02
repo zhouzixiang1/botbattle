@@ -223,9 +223,12 @@ class MatchOrchestrator:
         # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
         q: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self._sse.setdefault(match_id, []).append(q)
-        m = self.store.get_match(match_id)
+        # 统一 detailed + 嵌套 seats（含人类座真人用户名）
+        from bzplat.backend.matches.seat_info import match_for_viewer
+
+        m = match_for_viewer(self.store, match_id)
         replay = self.store.get_replay(match_id) or {}
-        q.put_nowait({"type": "snapshot", "match": m, "events": json.loads(replay.get("events_json") or "[]")})
+        q.put_nowait({"type": "snapshot", "match": m or {}, "events": json.loads(replay.get("events_json") or "[]")})
         return q
 
     def unsubscribe(self, match_id: str, q: asyncio.Queue) -> None:

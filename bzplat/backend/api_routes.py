@@ -69,6 +69,19 @@ def _store(request: Request):
     return request.app.state.store
 
 
+def _with_seat_info(m: dict, store=None) -> dict:
+    """观赛座位身份：委托 matches.seat_info（人类座改写真人用户名）。"""
+    from bzplat.backend.matches.seat_info import with_seat_info
+
+    human_user = None
+    if store is not None and m and m.get("match_type") == "human" and m.get("human_user_id") is not None:
+        try:
+            human_user = store.get_user(int(m["human_user_id"]))
+        except Exception:
+            human_user = None
+    return with_seat_info(m, human_user=human_user) or m
+
+
 # ── bots ──────────────────────────────────────────────────────
 
 @router.get("/api/bots/mine")
@@ -454,14 +467,15 @@ async def play_websocket(websocket: WebSocket, match_id: str):
         await websocket.close()
         return
     await websocket.accept()
-    # 订阅事件流
+    # 订阅事件流（subscribe 会再推一条带 seats 的 snapshot，此处先发一份便于立即渲染）
     q = orch.subscribe(match_id)
-    # 先发历史快照
+    from bzplat.backend.matches.seat_info import match_for_viewer
+
     replay = store.get_replay(match_id) or {}
     try:
         await websocket.send_json({
             "type": "snapshot",
-            "match": m,
+            "match": match_for_viewer(store, match_id) or m,
             "events": json.loads(replay.get("events_json") or "[]"),
         })
     except Exception:
@@ -513,11 +527,12 @@ def liked_top_matches(request: Request, limit: int = 10):
 
 @router.get("/api/matches/{match_id}")
 def match_detail(match_id: str, request: Request):
-    m = _store(request).get_match(match_id)
+    store = _store(request)
+    m = store.get_match_detailed(match_id)
     if not m:
         raise HTTPException(404, "对局不存在")
     replay = _store(request).get_replay(match_id) or {}
-    return {"match": m, "replay": replay}
+    return {"match": _with_seat_info(m, store=store), "replay": replay}
 
 
 @router.get("/api/matches/{match_id}/events")

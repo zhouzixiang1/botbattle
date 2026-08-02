@@ -226,13 +226,23 @@ export function reduceEvents(events: RawEvent[]): MatchViewModel {
       }
       case 'match_end': {
         matchOver = true
-        // 引擎版：final_chips / hands_played；orchestrator 版：winner/earnings
+        // 引擎版：final_chips / hands_played；orchestrator 版：winner/earnings_a/b
         if (Array.isArray(ev.final_chips)) {
           finalChips = [Number(ev.final_chips[0]), Number(ev.final_chips[1])]
           if (finalChips[0] > finalChips[1]) matchWinner = 0
           else if (finalChips[1] > finalChips[0]) matchWinner = 1
+          else matchWinner = null
         } else if (ev.winner !== undefined && ev.winner !== null) {
           matchWinner = Number(ev.winner)
+        } else if (ev.earnings_a !== undefined || ev.earnings_b !== undefined) {
+          const ea = Number(ev.earnings_a ?? 0)
+          const eb = Number(ev.earnings_b ?? 0)
+          if (ea > eb) matchWinner = 0
+          else if (eb > ea) matchWinner = 1
+          else matchWinner = null
+        } else if (seats[0].net !== seats[1].net) {
+          // 无 winner 字段时用累计 net 兜底
+          matchWinner = seats[0].net > seats[1].net ? 0 : 1
         }
         break
       }
