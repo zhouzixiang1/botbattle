@@ -1225,6 +1225,80 @@ def admin_contest_entries(
     return {"entries": _store(request).list_entries(contest_id)}
 
 
+class AdminAssignEntries(BaseModel):
+    """管理员批量指派参赛者+Bot（测试期 admin 派遣，正式版用户自己报名）。
+
+    两种模式：
+    - 显式列表：entries=[{user_id, bot_id}, ...]
+    - 便捷全选：assign_all=true + game_id（自动找该游戏所有 active+public 的 Bot，
+      每用户取其一个 Bot 指派），可选 name_prefix 过滤 Bot/用户名前缀（如 "load_"）。
+    """
+    entries: list[dict] | None = None  # [{user_id, bot_id}, ...]
+    assign_all: bool = False
+    game_id: str | None = None
+    name_prefix: str | None = None
+
+
+@router.post("/api/admin/contests/{contest_id}/entries/bulk")
+def admin_assign_entries(
+    contest_id: int, body: AdminAssignEntries, request: Request, _admin=Depends(require_admin)
+):
+    """管理员批量指派参赛者+Bot。绕开 register() 的 CONTEST_OPEN + owner 校验（admin 专享）。
+    校验：bot 存在+active、bot.game_id==contest.game_id、用户未重复报名。"""
+    store = _store(request)
+    c = store.get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    from bzplat.backend.engine.registry import normalize_game_id
+    cgid = normalize_game_id(c.get("game_id"))
+
+    # 解析目标 entries 列表
+    if body.assign_all:
+        gid = normalize_game_id(body.game_id or cgid)
+        if gid != cgid:
+            raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
+        bots = store.list_bots(public_only=False, active_only=True, game_id=gid)
+        if body.name_prefix:
+            np = body.name_prefix.lower()
+            bots = [b for b in bots if np in (b.get("name") or "").lower()]
+        # 每用户取其一个 Bot（UNIQUE(contest,user) 限制每用户一个 Bot）
+        seen_users: set[int] = set()
+        target: list[tuple[int, int]] = []
+        for b in bots:
+            uid = b.get("owner_id")
+            if uid is None or uid in seen_users:
+                continue
+            seen_users.add(uid)
+            target.append((uid, b["id"]))
+    else:
+        target = []
+        for e in body.entries or []:
+            uid = int(e.get("user_id"))
+            bid = int(e.get("bot_id"))
+            target.append((uid, bid))
+
+    added = 0
+    skipped: list[str] = []
+    existing = {e["user_id"] for e in store.list_entries(contest_id)}
+    for uid, bid in target:
+        if uid in existing:
+            skipped.append(f"user {uid} 已报名，跳过")
+            continue
+        b = store.get_bot(bid)
+        if not b or not b.get("is_active") or not b.get("binary_path"):
+            skipped.append(f"bot {bid} 不可用，跳过")
+            continue
+        if normalize_game_id(b.get("game_id")) != cgid:
+            skipped.append(f"bot {bid} 游戏 {b.get('game_id')} ≠ 赛事 {cgid}，跳过")
+            continue
+        store.add_contest_entry(contest_id, uid, bid)
+        existing.add(uid)
+        added += 1
+    audit_log(request, "admin_assign_entries", result="ok", target=contest_id,
+              detail=f"added={added} skipped={len(skipped)}")
+    return {"added": added, "skipped": skipped, "total_entries": len(existing)}
+
+
 @router.delete("/api/admin/contests/{contest_id}/entries/{user_id}")
 def admin_delete_entry(
     contest_id: int, user_id: int, request: Request, _admin=Depends(require_admin)

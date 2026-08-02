@@ -295,9 +295,11 @@ class MatchOrchestrator:
                         winner = 1
                     else:
                         winner = None
-                # 棋类若 match_end 带 winner 更准
+                # 棋类（单轮）若 match_end 带 winner 更准（覆盖上面的兜底判断）。
+                # 注意：仅当 match_end.winner 非 None 才覆盖——holdem 多手 match_end.winner 恒为 None
+                # （多手无单轮胜者），上面 ea/eb 兜底判出的 0/1 才是对的，不能被 None 覆盖回平局。
                 for ev in reversed(events):
-                    if ev.get("type") == "match_end" and "winner" in ev:
+                    if ev.get("type") == "match_end" and ev.get("winner") is not None:
                         winner = ev.get("winner")
                         break
                 net_bb_a = game_registry.get(gid).normalize_earnings(ea)
@@ -445,8 +447,9 @@ class MatchOrchestrator:
                 winner = result.winner
                 if winner is None:
                     winner = 0 if ea > eb else 1 if eb > ea else None
+                # 棋类若 match_end 带 winner 更准——仅非 None 才覆盖（holdem 多手恒 None）
                 for ev in reversed(events):
-                    if ev.get("type") == "match_end" and "winner" in ev:
+                    if ev.get("type") == "match_end" and ev.get("winner") is not None:
                         winner = ev.get("winner")
                         break
                 net_bb_a = game_registry.get(gid).normalize_earnings(ea)
