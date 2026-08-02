@@ -514,10 +514,14 @@ def list_matches(
     limit: int = 50,
     offset: int = 0,
 ):
-    rows = _store(request).list_matches(
-        status=status, game_id=game_id, limit=limit, offset=offset
+    store = _store(request)
+    lim = max(1, min(limit, 100))
+    off = max(0, offset)
+    rows = store.list_matches(
+        status=status, game_id=game_id, limit=lim, offset=off
     )
-    return {"matches": rows}
+    total = store.count_matches(status=status, game_id=game_id)
+    return {"matches": rows, "total": total, "limit": lim, "offset": off}
 
 
 @router.get("/api/matches/liked-top")

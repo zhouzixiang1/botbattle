@@ -235,7 +235,8 @@ SQLite 单文件（默认 `botzone.db`），**28 张表**，**35** 个索引（`
 - **桌面双栏（按需）**：内容密集页在 children 内自行 `lg:grid lg:grid-cols-[...]` 双栏，吃满宽度提升密度；`<lg` 自动堆叠为单列（响应式不破坏）：
   - **MyBots**：`lg:grid-cols-[20rem_minmax(0,1fr)]` —— 左栏上传表单 `lg:sticky lg:top-20` 常驻，右栏筛选 + Bot 列表主区。
   - **ContestDetail**：头部信息全宽；下方 `lg:grid-cols-[minmax(0,1fr)_22rem]` —— 左主区对阵（BracketTree/PairingFoldedList 吃满宽），右边栏报名 + 积分榜（`lg:sticky` 常驻）。
-- **约定**：新增内容密集页默认复用 PageStub 收口；需要双栏时用 `lg:grid` + 语义 token（`bg-card/text-foreground/bg-muted`），不裸 hex、不硬编码宽度，移动端务必回落单列。
+- **长列表分页**：行数可能很大的列表页（如 **History** 对局历史）用**服务端分页**而非一次全量渲染——`/api/matches` 接受 `limit`+`offset` 并返回 `total`，前端按页（默认 20 条）渲染分页器（上一页/下一页 + `第 x-y 条，共 N 条`），筛选切换重置到第 1 页。避免一次性渲染几十上百行拖慢首屏、撑高页面。窄表单（如 **Settings** 资料/密码/通知）用 `mx-auto max-w-md` 居中，去除宽屏右侧留白。
+- **约定**：新增内容密集页默认复用 PageStub 收口；需要双栏时用 `lg:grid` + 语义 token（`bg-card/text-foreground/bg-muted`），不裸 hex、不硬编码宽度，移动端务必回落单列；长列表用服务端分页 + 客户端分页器。
 
 ### 5.5 Worktree 隔离开发（物理隔离）
 

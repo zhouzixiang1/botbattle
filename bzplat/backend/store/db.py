@@ -1593,18 +1593,26 @@ class Store:
             params.append(limit)
             return [_row(r) for r in c.execute(sql, params)]
 
-    def count_matches(self, status: str | None = None) -> int:
-        """按 status 统计对局数（跨三表求和）；status=None 时返回全部。"""
+    def count_matches(
+        self,
+        status: str | None = None,
+        *,
+        game_id: str | None = None,
+    ) -> int:
+        """按 status/game_id 统计对局数；与 list_matches 对齐——game_id 指定时只查该表，
+        否则跨所有已注册游戏表求和。供分页器算 total 用。"""
         with self._tx() as c:
+            where_parts: list[str] = []
+            params: list[Any] = []
+            if status:
+                where_parts.append("status=?")
+                params.append(status)
+            where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
             total = 0
-            for gid in _all_game_ids():
+            gids = [game_id] if game_id else _all_game_ids()
+            for gid in gids:
                 tbl = _matches_table(gid)
-                if status:
-                    row = c.execute(
-                        f"SELECT COUNT(*) FROM {tbl} WHERE status=?", (status,)
-                    ).fetchone()
-                else:
-                    row = c.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
+                row = c.execute(f"SELECT COUNT(*) FROM {tbl}{where_sql}", params).fetchone()
                 total += int(row[0]) if row else 0
             return total
 

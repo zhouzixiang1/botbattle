@@ -18,7 +18,7 @@
 
 ## 2. 测试范围
 
-### 2.1 后端单元/集成测试（38 个 `test_*.py`）
+### 2.1 后端单元/集成测试（39 个 `test_*.py`）
 
 配置：`pyproject.toml` 设 `testpaths=["bzplat/backend/tests","tests"]`，`pythonpath=["."]`，**须从仓库根运行 `pytest`**。  
 （`tests/` 为预留路径，当前用例均在 `bzplat/backend/tests/`。）
@@ -30,7 +30,7 @@
 | **认证 / 安全** | `test_auth`、`test_security_logging`、`test_logging`、`test_audit_coverage` |
 | **引擎 / 协议** | `test_engine`、`test_board_engines`、`test_result_types`、`test_protocol`、`test_judge_params` |
 | **运行时** | `test_runtime`、`test_runtime_settings` |
-| **编排 / 人类** | `test_human_match`、`test_auto_matcher`、`test_match_seat_names` |
+| **编排 / 人类** | `test_human_match`、`test_auto_matcher`、`test_match_seat_names`、`test_matches_pagination`（对局列表分页：`total` 返回 + offset 分页 + game_id/status 过滤计数） |
 | **赛事** | `test_contest_templates`、`test_contest_stages`、`test_contest_bracket`、`test_game_templates`、`test_admin_assign_entries` |
 | **社交 / 通知 / 成长** | `test_notifications`、`test_comments_likes`、`test_social`、`test_user_profile_search`、`test_user_search`、`test_bot_profile`、`test_xp_level`、`test_tiers`、`test_settings_mybots` |
 | **数据与站点** | `test_matchpacks_site`、`test_load_test_seed` |
@@ -54,8 +54,8 @@
 
 ### 3.1 后端 pytest
 ```
-pytest --collect-only → 362 tests collected
-pytest 须从仓库根运行；38 个 test_*.py 模块
+pytest --collect-only → 370+ tests collected（随游戏/功能增长）
+pytest 须从仓库根运行；39 个 test_*.py 模块
 ```
 （含人类对战、审计、安全日志、游戏注册表/结果契约/通用层无分支等守护测试。）
 

@@ -135,7 +135,7 @@ export default function Settings() {
               {msg}
             </p>
           )}
-          <form onSubmit={saveProfile} className="max-w-md space-y-4">
+          <form onSubmit={saveProfile} className="mx-auto max-w-md space-y-4">
             <div className="space-y-2">
               <Label>头像</Label>
               <div className="flex items-center gap-3">
@@ -188,7 +188,7 @@ export default function Settings() {
               {msg}
             </p>
           )}
-          <form onSubmit={changePassword} className="max-w-md space-y-4">
+          <form onSubmit={changePassword} className="mx-auto max-w-md space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="settings-oldpw">当前密码</Label>
               <Input
@@ -224,7 +224,7 @@ export default function Settings() {
               {msg}
             </p>
           )}
-          <div className="max-w-md space-y-3">
+          <div className="mx-auto max-w-md space-y-3">
             <p className="text-sm text-muted-foreground">
               站内通知始终开启；以下控制是否同时发送邮件提醒（需管理员配置 SMTP）。
             </p>
