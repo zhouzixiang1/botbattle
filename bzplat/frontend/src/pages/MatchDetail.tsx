@@ -20,6 +20,7 @@ import { Slider } from '@/components/ui/slider'
 import { ErrorMsg, Loading } from '@/components/ui/status'
 import { apiGet, errMsg } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
+import { isBoardGame } from '@/games'
 import Comments from '@/components/Comments'
 
 const SPEEDS = [
@@ -101,7 +102,7 @@ export default function MatchDetail() {
   const gameId = normalizeGameId(
     data?.match?.game_id != null ? String(data.match.game_id) : 'holdem',
   )
-  const isBoard = gameId === 'gomoku' || gameId === 'pencil'
+  const isBoard = isBoardGame(gameId)
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {

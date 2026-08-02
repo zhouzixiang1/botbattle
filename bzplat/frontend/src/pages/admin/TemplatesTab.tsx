@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft } from 'lucide-react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { ErrorMsg, Loading, RefreshBtn } from './ui'
+import { defaultMatchConfig } from '@/games'
 
 // ── 类型 ──────────────────────────────────────────────────────
 type GameId = 'holdem' | 'gomoku' | 'pencil'
@@ -92,12 +93,10 @@ export default function TemplatesTab() {
     void load()
   }, [load])
 
-  // 切换 game 时重置 match_config 为该游戏默认
+  // 切换 game 时重置 match_config 为该游戏默认（经注册表，消除 if game_id）
   const changeGame = (gid: GameId) => {
     if (!editing) return
-    const mc =
-      gid === 'holdem' ? { hands: 70 } : gid === 'pencil' ? { n_dots: 11 } : {}
-    setEditing({ ...editing, game_id: gid, match_config: mc })
+    setEditing({ ...editing, game_id: gid, match_config: defaultMatchConfig(gid) })
   }
 
   const patchStage = (i: number, patch: Partial<Stage>) => {

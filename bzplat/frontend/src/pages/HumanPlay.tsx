@@ -11,6 +11,7 @@ import { Label } from '@/components/ui/label'
 import { ErrorMsg } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
 import { gameLabel, normalizeGameId } from '@/lib/games'
+import { isBoardGame } from '@/games'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -79,7 +80,7 @@ export default function HumanPlay() {
     () => reduceEvents(events as unknown as Parameters<typeof reduceEvents>[0]),
     [events],
   )
-  const isBoard = gameId === 'gomoku' || gameId === 'pencil'
+  const isBoard = isBoardGame(gameId)
 
   return (
     <PageStub title="人类对战">
