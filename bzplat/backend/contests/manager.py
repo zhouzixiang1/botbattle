@@ -214,8 +214,12 @@ class ContestManager:
             contest_id, entry["user_id"], bot_id=bot_id, dispatched_at=_now()
         )
 
-        # 尚未开打的 pending pairing：用新 bot 替换旧 bot 快照
+        # P1：轮次冻结——已发布轮（published_at 非空）的 pairing 不改写 bot/version/seed。
+        # 仅未发布的 pending pairing（理论不存在，因生成即发布）才用新 bot 替换。
+        # 换 Bot 只影响下一轮生成（_maybe_next_swiss_round 读 entry 当前 bot_id）。
         for p in self.store.list_contest_pairings(contest_id):
+            if p.get("published_at"):
+                continue  # 已发布轮冻结
             if p.get("status") != "pending" or p.get("match_id"):
                 continue
             fields: dict[str, Any] = {}
@@ -345,6 +349,7 @@ class ContestManager:
             specs = generate_stage_pairings(stage, bot_ids)
 
         key = stage.get("key") or f"stage{stage_idx}"
+        published_at = _now()
         for sp in specs:
             self.store.add_contest_pairing(
                 contest_id,
@@ -359,11 +364,29 @@ class ContestManager:
                 color_first=sp.color_first,
                 entry_a_id=bot_to_entry.get(sp.bot_a_id),
                 entry_b_id=bot_to_entry.get(sp.bot_b_id),
+                published_at=published_at,
+                **self._version_snapshot(sp.bot_a_id, sp.bot_b_id),
             )
         self.store.update_contest(
             contest_id, status=CONTEST_RUNNING, current_stage_idx=stage_idx, rest_ends_at=None
         )
         await self._dispatch_pending(contest_id, stage_idx)
+
+    def _version_snapshot(self, bot_a_id: int | None, bot_b_id: int | None) -> dict:
+        """P1：发布轮时冻结 bot 版本（取各自 current_version 的 version_id）。
+
+        返回 {bot_a_version_id, bot_b_version_id}；bot 不存在/无版本时对应值为 None。
+        _run_match 读 version_id → bot_versions.binary_path，保证赛事用发布时的版本，
+        不受选手中途上传新版本影响。
+        """
+        out: dict[str, Any] = {"bot_a_version_id": None, "bot_b_version_id": None}
+        for key, bid in (("bot_a_version_id", bot_a_id), ("bot_b_version_id", bot_b_id)):
+            if bid is None:
+                continue
+            v = self.store.get_latest_bot_version(bid)
+            if v:
+                out[key] = v["id"]
+        return out
 
     async def _dispatch_pending(self, contest_id: int, stage_idx: int) -> None:
         c = self.store.get_contest(contest_id)
@@ -601,11 +624,25 @@ class ContestManager:
         ))
         if max_round >= total_rounds:
             return False
-        # 生成下一轮（P0：standings 键改 entry_id；scores/bot_ids 经 entry 取 bot_id）
+        # 生成下一轮（P0：standings 键 entry_id；P1：bot_id 取 entry 当前值——
+        # dispatch 换 Bot 后下一轮用新 Bot，已发布轮冻结不受影响）
         standings = self.standings(contest_id, stage_idx=stage_idx)
-        bot_to_entry = {s["bot_id"]: s["entry_id"] for s in standings if s["bot_id"] is not None}
-        scores = {s["bot_id"]: s["points"] for s in standings if s["bot_id"] is not None}
-        bot_ids = [s["bot_id"] for s in standings if not s.get("eliminated") and s["bot_id"] is not None]
+        # entry_id → 该 entry 当前 bot_id（dispatch 后是新 Bot）
+        entries = {e["id"]: e for e in self.store.list_contest_entries(contest_id)}
+        entry_to_bot = {s["entry_id"]: entries.get(s["entry_id"], {}).get("bot_id") for s in standings}
+        # 仍用发布轮的 bot_id 算 scores/played（积分/对手历史键稳定，不变）
+        scores = {}
+        bot_to_entry = {}
+        for s in standings:
+            cur_bot = entry_to_bot.get(s["entry_id"])
+            if cur_bot is not None:
+                scores[cur_bot] = s["points"]
+                bot_to_entry[cur_bot] = s["entry_id"]
+        bot_ids = [
+            entry_to_bot[s["entry_id"]]
+            for s in standings
+            if not s.get("eliminated") and entry_to_bot.get(s["entry_id"]) is not None
+        ]
         played: set[tuple[int, int]] = set()
         for p in pairings:
             if p.get("bot_a_id") is not None and p.get("bot_b_id") is not None:
@@ -614,6 +651,7 @@ class ContestManager:
             stage, bot_ids, scores=scores, played=played, swiss_round=max_round + 1
         )
         key = stage.get("key") or f"stage{stage_idx}"
+        published_at = _now()
         for sp in specs:
             self.store.add_contest_pairing(
                 contest_id,
@@ -627,6 +665,8 @@ class ContestManager:
                 color_first=sp.color_first,
                 entry_a_id=bot_to_entry.get(sp.bot_a_id),
                 entry_b_id=bot_to_entry.get(sp.bot_b_id),
+                published_at=published_at,
+                **self._version_snapshot(sp.bot_a_id, sp.bot_b_id),
             )
         await self._dispatch_pending(contest_id, stage_idx)
         return True
@@ -667,6 +707,7 @@ class ContestManager:
         # 用胜者生成下一轮（按 bracket_slot 顺序配对：相邻两胜者一组）
         key = stage.get("key") or f"stage{stage_idx}"
         next_round = max_round + 1
+        published_at = _now()
         slot = 0
         for i in range(0, len(winners) - 1, 2):
             a_bot, a_entry = winners[i]
@@ -677,6 +718,8 @@ class ContestManager:
                 stage_idx=stage_idx, stage_key=key,
                 bracket_slot=slot, color_first=0,
                 entry_a_id=a_entry, entry_b_id=b_entry,
+                published_at=published_at,
+                **self._version_snapshot(a_bot, b_bot),
             )
             slot += 1
         await self._dispatch_pending(contest_id, stage_idx)

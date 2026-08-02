@@ -510,6 +510,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 f"CREATE INDEX IF NOT EXISTS idx_m{_gid}_{_col} ON {_tbl}({_col})"
             )
 
+    # ── contest_pairings 轮次冻结列（预赛/决赛 P1：版本/seed/发布闸门）────────
+    if "contest_pairings" in _tables_after:
+        _add_col(conn, "contest_pairings", "bot_a_version_id", "INTEGER")
+        _add_col(conn, "contest_pairings", "bot_b_version_id", "INTEGER")
+        _add_col(conn, "contest_pairings", "pairing_seed", "INTEGER")
+        _add_col(conn, "contest_pairings", "published_at", "TEXT")
+
 
 class Store:
     """SQLite 存储。线程安全；持久连接 check_same_thread=False。"""
@@ -1107,6 +1114,27 @@ class Store:
                     (bot_id,),
                 )
             ]
+
+    def get_bot_version(self, version_id: int) -> dict | None:
+        """按 version_id 取 bot_versions 行（含 binary_path，P1 版本冻结用）。"""
+        with self._tx() as c:
+            return _row(
+                c.execute(
+                    "SELECT * FROM bot_versions WHERE id=?",
+                    (version_id,),
+                ).fetchone()
+            )
+
+    def get_latest_bot_version(self, bot_id: int) -> dict | None:
+        """该 bot 的最新版本行（current_version 对应）。P1：发布轮冻结时取此快照。"""
+        with self._tx() as c:
+            return _row(
+                c.execute(
+                    "SELECT * FROM bot_versions WHERE bot_id=? "
+                    "ORDER BY version DESC LIMIT 1",
+                    (bot_id,),
+                ).fetchone()
+            )
 
     def bot_profile(self, bot_id: int) -> dict | None:
         """聚合 Bot 详情：bot 信息 + owner + rating + 胜率 + 段位。
@@ -2379,13 +2407,18 @@ class Store:
         color_first: int = 0,
         entry_a_id: int | None = None,
         entry_b_id: int | None = None,
+        bot_a_version_id: int | None = None,
+        bot_b_version_id: int | None = None,
+        pairing_seed: int | None = None,
+        published_at: str | None = None,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contest_pairings(contest_id, round_num, entry_a_id, "
-                "entry_b_id, bot_a_id, bot_b_id, match_id, status, stage_idx, "
+                "entry_b_id, bot_a_id, bot_b_id, bot_a_version_id, bot_b_version_id, "
+                "pairing_seed, published_at, match_id, status, stage_idx, "
                 "stage_key, group_id, bracket_slot, color_first) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     contest_id,
                     round_num,
@@ -2393,6 +2426,10 @@ class Store:
                     entry_b_id,
                     bot_a_id,
                     bot_b_id,
+                    bot_a_version_id,
+                    bot_b_version_id,
+                    pairing_seed,
+                    published_at,
                     match_id,
                     status,
                     stage_idx,
@@ -2481,6 +2518,10 @@ class Store:
             "entry_b_id",
             "bot_a_id",
             "bot_b_id",
+            "bot_a_version_id",
+            "bot_b_version_id",
+            "pairing_seed",
+            "published_at",
             "stage_idx",
             "stage_key",
             "group_id",
