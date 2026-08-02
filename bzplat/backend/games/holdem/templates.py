@@ -49,4 +49,49 @@ TEMPLATES: list[dict[str, Any]] = [
             },
         ],
     },
+    {
+        # 预赛：单阶段瑞士，全员唯一正式名次（公开报名，无人数上限）。
+        "id": "holdem_prelim_swiss",
+        "name": "德州：预赛（瑞士全员排名）",
+        "game_id": "holdem",
+        "phase": "preliminary",
+        "stages": [
+            {
+                "key": "prelim",
+                "type": "swiss",
+                "rounds": 0,  # ceil(log2(n)) 自动
+                "scoring": SCORING_POKER,
+                "allow_bot_swap_in_rest": True,
+                "rest_after_minutes": 0,
+            },
+        ],
+    },
+    {
+        # 决赛：Stage1 全员单循环（allow_large_round_robin 旁路 FULL_RR_MAX_N）
+        # → Stage2 Top8 双循环（ranking_mode=replace_top 合成榜）。
+        "id": "holdem_final_ranked",
+        "name": "德州：决赛（循环→Top8）",
+        "game_id": "holdem",
+        "phase": "final",
+        "stages": [
+            {
+                "key": "qualify",
+                "type": "round_robin",
+                "allow_large_round_robin": True,  # 旁路 FULL_RR_MAX_N=12（仅白名单模板）
+                "advance_count": 8,
+                "scoring": SCORING_POKER,
+                "rest_after_minutes": 10,
+                "allow_bot_swap_in_rest": True,
+            },
+            {
+                "key": "final8",
+                "type": "double_round_robin",
+                "ranking_mode": "replace_top",
+                "ranking_scope": 8,
+                "scoring": SCORING_POKER,
+                "rest_after_minutes": 0,
+                "allow_bot_swap_in_rest": False,
+            },
+        ],
+    },
 ]
