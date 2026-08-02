@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
@@ -177,9 +177,7 @@ export default function Home() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant={m.status === 'completed' || m.status === 'finished' ? 'default' : m.status === 'aborted' ? 'destructive' : 'secondary'} className="text-[10px]">
-                        {m.status}
-                      </Badge>
+                      <StatusBadge status={m.status} />
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {m.game_id === 'holdem' || !m.game_id

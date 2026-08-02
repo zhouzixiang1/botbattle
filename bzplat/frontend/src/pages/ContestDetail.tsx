@@ -14,7 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { ErrorMsg, EmptyState, Loading } from '@/components/ui/status'
+import { ErrorMsg, EmptyState, Loading, StatusBadge } from '@/components/ui/status'
 import BracketTree from '@/components/contest/BracketTree'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
@@ -199,9 +199,7 @@ export default function ContestDetail() {
               <h2 className="text-lg font-semibold text-foreground">{contest.title}</h2>
               <p className="mt-1 text-sm text-muted-foreground">{contest.description || '无说明'}</p>
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <Badge variant={contest.status === 'finished' ? 'outline' : contest.status === 'open' ? 'default' : 'secondary'}>
-                  {contest.status}
-                </Badge>
+                <StatusBadge status={contest.status} />
                 <span>模板 {contest.template_id}</span>
                 <span>· 游戏 {contest.game_id || 'holdem'}</span>
                 <span>· 每场 {contest.hands_per_match ?? 70} 手</span>
@@ -443,9 +441,7 @@ function PairingFoldedList({ pairings }: { pairings: Pairing[] }) {
                     <Link to={`/bot/${p.bot_b_id}`} className={`hover:text-primary ${w === 1 ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'}`}>
                       {p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
                     </Link>
-                    <Badge variant={p.status === 'completed' ? 'default' : p.status === 'aborted' ? 'destructive' : 'secondary'} className="text-[10px]">
-                      {p.status}
-                    </Badge>
+                    <StatusBadge status={p.status || 'pending'} />
                     {p.match_id && (
                       <Button asChild variant="ghost" size="sm" className="ml-auto gap-1 text-primary">
                         <Link to={`/match/${p.match_id}`}>查看</Link>
