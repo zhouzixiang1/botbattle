@@ -234,3 +234,79 @@ def test_bot_crashed_error_not_swallowed_by_runner(store: Store):
 
     with pytest.raises(BotCrashedError):
         asyncio.run(run())
+
+
+# ── 修复：your_turn 持久化 + 连续超时中止（点不动按钮根因） ──────
+def test_your_turn_persisted_into_replay_snapshot(store: Store):
+    """your_turn 事件必须进入持久化 events_json（snapshot.events），否则：
+    - WS 晚连/重连/StrictMode 重挂载时，snapshot 历史里没有 your_turn；
+    - 前端 myTurn 无法从历史恢复 → 按钮永远点不动 → 每手超时弃牌。
+    复现对局 20260802132013-7eb5087b：8 手全部弃牌（人类从未响应）。
+    """
+    u, b = _setup(store, game="gomoku")
+    orch = _orch(store, human_timeout=1.0)
+    first_turn_seen = asyncio.Event()
+
+    async def solver():
+        """模拟 WS /move：仅在首个 your_turn 出现后让第一手响应（其余超时）。"""
+        for _ in range(500):
+            for (mid, pidx), entry in list(orch._human_turns.items()):
+                if not first_turn_seen.is_set():
+                    first_turn_seen.set()  # 标记已经看到至少一个 your_turn
+                if not entry["future"].done():
+                    # 只解第一手，其余超时
+                    if not getattr(solver, "_first_done", False):
+                        orch.resolve_human_turn(mid, pidx, {"x": 7, "y": 7})
+                        solver._first_done = True
+            await asyncio.sleep(0.02)
+
+    async def run():
+        mid = await orch.challenge_human(b["id"], u["id"], human_seat=0, game_id="gomoku")
+        done = asyncio.Event()
+        await asyncio.gather(solver(), _wait_done(store, mid, done))
+        return mid
+
+    mid = asyncio.run(run())
+    # 等快照稳定：读取持久化事件
+    import json as _json
+    events = _json.loads(store.get_replay(mid)["events_json"])
+    types = [e.get("type") for e in events]
+    assert "your_turn" in types, (
+        f"your_turn 未持久化到 events_json，前端重连无法恢复 myTurn；"
+        f"实际事件类型: {types}"
+    )
+
+
+def test_consecutive_human_timeouts_aborts_match(store: Store):
+    """人类连续多次超时不响应 → 应中止对局，而非死磕 70 手最长 2.3 小时。
+    否则对局永久卡在 running，占 _human_active_users，用户无法再开新对局。
+    用 holdem（超时=弃牌，对局会持续），棋类一手非法即结束不适用此场景。
+    复现对局 20260802132013-7eb5087b：holdem 卡 running，hands_played=0，8 手全弃牌。
+    """
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    u = store.create_user("touser", "t@ex.com", hash_password("password1"))
+    path = os.path.abspath("samples/callbot_linux_amd64")
+    b = store.create_bot(u["id"], "holdbot", binary_path=path, format="elf", is_public=1, game_id="holdem")
+    orch = _orch(store, human_timeout=0.3)
+    orch.human_max_consecutive_timeouts = 3  # 连续 3 次超时即中止
+
+    async def run():
+        mid = await orch.challenge_human(
+            b["id"], u["id"], human_seat=1, game_id="holdem", hands=70,
+        )
+        # 从不响应 → 每手弃牌超时 → 连续达阈值应中止
+        for _ in range(400):
+            m = store.get_match(mid)
+            if m["status"] in ("completed", "aborted"):
+                return mid
+            await asyncio.sleep(0.1)
+        return mid
+
+    mid = asyncio.run(run())
+    m = store.get_match(mid)
+    assert m["status"] == "aborted", (
+        f"连续超时应中止对局，实际 status={m['status']}（卡死占用人类槽）"
+    )
+    assert "human_inactive" in (m["reason"] or ""), f"reason 应标注人类不活跃: {m['reason']}"
+    # 中止后释放用户锁
+    assert u["id"] not in orch._human_active_users

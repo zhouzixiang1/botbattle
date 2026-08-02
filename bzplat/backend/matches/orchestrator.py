@@ -36,6 +36,16 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+class HumanInactive(Exception):
+    """人类玩家连续超时不响应（连续 ≥ human_max_consecutive_timeouts 次）。
+
+    由 _run_human_match 的 human_decide 在达到阈值时抛出，向上经 runner（人类侧
+    不吞异常）→ holdem 引擎（run_async 的 try 仅捕 BotCrashedError，故透传）→
+    回到 _run_human_match 的 except HumanInactive 分支中止对局。
+    棋类一手非法即结束，不会累积到此阈值。
+    """
+
+
 class MatchOrchestrator:
     def __init__(
         self,
@@ -63,6 +73,9 @@ class MatchOrchestrator:
         # 每 user 同时进行的人类局 ≤ 1（节流，防挂机占满人类槽）
         self._human_active_users: set[int] = set()
         self.human_action_timeout = 120.0  # 人类决策超时（秒）
+        # 连续超时阈值：人类连续 N 次不响应则中止对局（避免 70 手最长 2.3h 死磕，
+        # 占用人类槽 + 锁死 _human_active_users）。棋类一手非法即结束，仅 holdem 触发。
+        self.human_max_consecutive_timeouts = 5
 
     def rebuild_concurrency(self, max_concurrent: int) -> None:
         """热更新并发上限：重建 Semaphore（不修改 _value）。"""
@@ -372,11 +385,13 @@ class MatchOrchestrator:
             human_seat = int(m["human_seat"]) if m.get("human_seat") is not None else 1
             self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
             events: list[dict] = []
+            consecutive_timeouts = {"n": 0}  # 闭包内可变计数器
 
             def on_event(kind: str, ev: dict) -> None:
                 events.append(ev)
                 self._broadcast(match_id, ev)
-                if kind in ("settle", "hand_start", "match_end", "move", "match_start", "turn") or len(events) % 5 == 0:
+                # your_turn 须持久化：前端重连/StrictMode 重挂载时从 snapshot 历史恢复 myTurn
+                if kind in ("settle", "hand_start", "match_end", "move", "match_start", "turn", "your_turn") or len(events) % 5 == 0:
                     self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
             async def human_decide(player_idx: int, request: dict) -> dict:
@@ -387,12 +402,22 @@ class MatchOrchestrator:
                     "future": fut,
                     "ts": _now(),
                 }
-                self._broadcast(match_id, {
-                    "type": "your_turn", "player": player_idx, "request": request,
-                })
+                yt = {"type": "your_turn", "player": player_idx, "request": request}
+                events.append(yt)               # 进入持久化事件流（前端可恢复）
+                # 立即落库：前端重连走 subscribe() → get_replay() 读快照，必须能看到 your_turn
+                self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+                self._broadcast(match_id, yt)   # 实时推送（已连接的 WS 立即点亮）
                 try:
-                    return await asyncio.wait_for(fut, timeout=self.human_action_timeout)
+                    resp = await asyncio.wait_for(fut, timeout=self.human_action_timeout)
+                    consecutive_timeouts["n"] = 0  # 人类响应 → 清零
+                    return resp
                 except asyncio.TimeoutError:
+                    consecutive_timeouts["n"] += 1
+                    # 连续多次不响应 → 视为挂机，中止对局（避免 70 手死磕占用人类槽）
+                    if consecutive_timeouts["n"] >= self.human_max_consecutive_timeouts:
+                        raise HumanInactive(
+                            f"human seat {player_idx} inactive: {consecutive_timeouts['n']} consecutive timeouts"
+                        )
                     return _fail_response(gid)
                 finally:
                     self._human_turns.pop((match_id, player_idx), None)
@@ -434,7 +459,16 @@ class MatchOrchestrator:
                 # Bot 启动即崩/EOF——快速 abort，广播清晰错误（而非吞成默认动作死磕数小时）
                 logger.warning("human match %s aborted: bot crashed — %s", match_id, exc)
                 self.store.update_match(match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now())
+                self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
                 self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
+            except HumanInactive as exc:
+                # 人类连续超时不响应 → 中止对局，释放人类槽（避免死磕占用 + 锁死用户）
+                logger.warning("human match %s aborted: human inactive — %s", match_id, exc)
+                self.store.update_match(
+                    match_id, status=STATUS_ABORTED, reason="human_inactive", ended_at=_now(),
+                )
+                self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+                self._broadcast(match_id, {"type": "error", "message": "你长时间未响应，对局已中止"})
             except Exception as exc:
                 logger.exception("human match %s failed", match_id)
                 self.store.update_match(match_id, status=STATUS_ABORTED, reason=f"error:{exc}", ended_at=_now())
