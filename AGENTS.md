@@ -100,7 +100,7 @@ matches/    后台对局：auto_matcher（闲时自动调度，ladder 类型，s
 src/index.css              设计 token：shadcn v4 OKLCH 双主题（:root 浅 / .dark 暗）emerald 品牌色系 + @theme inline 桥接
 src/components/ui/         共享 UI 原语库（shadcn：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart...）—— 全项目唯一组件抽象层
 src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadge（前台+管理端共用）
-src/components/shell/      全局 Shell：AppShell（顶栏+导航+页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
+src/components/shell/      全局 Shell：AppShell（已登录 lg+ 侧栏 / 访客全断点顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
 src/pages/                 22 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
