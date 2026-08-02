@@ -272,11 +272,13 @@ class MatchOrchestrator:
 
             try:
                 jp = self._judge_params(gid)
+                # num_hands：admin 全局设置（SETTING_JUDGE_HOLDEM_HANDS）优先，未设回退对局级 total_hands
+                num_hands = jp.get("num_hands") or int(m["total_hands"])
                 result = await self.runner.run_binaries(
                     bot_a["binary_path"],
                     bot_b["binary_path"],
                     game_id=gid,
-                    num_hands=int(m["total_hands"]),
+                    num_hands=num_hands,
                     n_dots=m.get("n_dots"),
                     board_size=jp.get("board_size"),
                     starting_stack=jp.get("starting_stack"),
@@ -429,12 +431,14 @@ class MatchOrchestrator:
 
             try:
                 jp = self._judge_params(gid)
+                # num_hands：admin 全局设置（SETTING_JUDGE_HOLDEM_HANDS）优先，未设回退对局级 total_hands
+                num_hands = jp.get("num_hands") or int(m["total_hands"])
                 result = await self.runner.run_bot_vs_human(
                     bot["binary_path"],
                     bot_seat=1 - human_seat,
                     human_decide=human_decide,
                     game_id=gid,
-                    num_hands=int(m["total_hands"]),
+                    num_hands=num_hands,
                     n_dots=m.get("n_dots"),
                     on_event=on_event,
                     board_size=jp.get("board_size"),

@@ -399,7 +399,12 @@ class ContestManager:
         if stage_idx is None:
             stage_idx = int((c or {}).get("current_stage_idx") or 0)
         stage = stages[stage_idx] if stages and 0 <= stage_idx < len(stages) else {}
-        scoring = stage.get("scoring") or "poker_3_1_0"
+        # 默认 scoring 从该游戏 spec 派生（而非硬编码 poker_3_1_0——否则棋类赛事被套 3-1-0）
+        try:
+            default_scoring = game_registry.get((c or {}).get("game_id") or "holdem").default_scoring
+        except Exception:
+            default_scoring = "poker_3_1_0"
+        scoring = stage.get("scoring") or default_scoring
 
         entries = self.store.list_contest_entries(contest_id)
         stats = {
@@ -711,7 +716,7 @@ class ContestManager:
             conc = max(1, int(conc_raw or 2))
         except ValueError:
             conc = 2
-        # 粗估每场时长：经 spec.eta_per_match_sec（消除 if game_id）
+        # 粗估每场时长：经 spec.eta_for_match（消除 if game_id）
         gid = c.get("game_id") or "holdem"
         cfg = _match_config(c)
         sec_per = _estimate_sec_per_match(gid, cfg)

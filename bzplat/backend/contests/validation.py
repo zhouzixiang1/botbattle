@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from bzplat.backend.games import registry as _reg
 from bzplat.backend.store.schema import VALID_GAME_IDS
 
 # 阶段类型（与 stages.generate_stage_pairings 对齐）
@@ -34,14 +35,16 @@ def validate_template_id(tid: str) -> None:
 
 def validate_match_config(cfg: Any, game_id: str) -> dict:
     """校验并返回规整后的 match_config（经 games 注册表，消除 if game_id）。"""
-    from bzplat.backend.games import registry as _reg
-
     gid = (game_id or "holdem").strip().lower()
     return _reg.get(gid).validate_match_params(cfg)
 
 
-def validate_stage(stage: dict, idx: int) -> dict:
-    """校验并返回规整后的单个阶段配置。"""
+def validate_stage(stage: dict, idx: int, game_id: str = "") -> dict:
+    """校验并返回规整后的单个阶段配置。
+
+    scoring 默认值从该游戏的 spec.default_scoring 派生（而非硬编码 holdem 的
+    poker_3_1_0——否则棋类赛事不显式传 scoring 时被悄悄套用 3-1-0 计分）。
+    """
     if not isinstance(stage, dict):
         raise ValueError(f"阶段 {idx + 1} 必须是对象")
     stype = stage.get("type") or "round_robin"
@@ -49,10 +52,15 @@ def validate_stage(stage: dict, idx: int) -> dict:
         raise ValueError(
             f"阶段 {idx + 1} type 非法：{stype!r}（允许 {sorted(STAGE_TYPES)}）"
         )
+    # 默认 scoring 从游戏 spec 派生；未知游戏回退 poker_3_1_0（保旧兜底语义）
+    try:
+        default_scoring = _reg.get((game_id or "holdem").strip().lower()).default_scoring
+    except Exception:
+        default_scoring = "poker_3_1_0"
     out: dict[str, Any] = {
         "key": str(stage.get("key") or f"stage{idx + 1}"),
         "type": stype,
-        "scoring": stage.get("scoring") or "poker_3_1_0",
+        "scoring": stage.get("scoring") or default_scoring,
     }
     if out["scoring"] not in SCORINGS:
         raise ValueError(
@@ -114,7 +122,7 @@ def validate_template(
         raise ValueError(f"game_id 非法：{gid!r}（允许 {sorted(VALID_GAME_IDS)}）")
     if not isinstance(stages, list) or len(stages) == 0:
         raise ValueError("stages 须为非空数组")
-    norm_stages = [validate_stage(s, i) for i, s in enumerate(stages)]
+    norm_stages = [validate_stage(s, i, gid) for i, s in enumerate(stages)]
     norm_mc = validate_match_config(match_config or {}, gid)
     return {
         "id": tid,

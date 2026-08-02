@@ -94,18 +94,15 @@ SPEC = GameSpec(
     validate_match_params=_validate_match_params,
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
-    eta_per_match_sec=60.0,
     eta_for_match=_eta_for_match,
     judge_params=[
         JudgeParamSpec(SETTING_JUDGE_GOMOKU_SIZE, "棋盘边长", "board_size",
                        BOARD_SIZE, (9, 19)),
     ],
     tiers=_tiers_mod.TIERS,
-    tier_for=_tiers_mod.tier_for,
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/gomoku/engine.py",
     summary="15×15；黑先；横竖斜连续≥5 即胜；无禁手。",
-    frontend_module="@/games/gomoku",
     preflight_check=_preflight_check,
 )

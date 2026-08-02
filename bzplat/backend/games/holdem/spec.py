@@ -112,7 +112,6 @@ SPEC = GameSpec(
     validate_match_params=_validate_match_params,
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
-    eta_per_match_sec=140.0,  # ~2s/手 × 70 手（基准）
     eta_for_match=_eta_for_match,
     judge_params=[
         JudgeParamSpec(SETTING_JUDGE_HOLDEM_STACK, "起始筹码", "starting_stack",
@@ -121,15 +120,15 @@ SPEC = GameSpec(
                        SMALL_BLIND, (1, 10_000)),
         JudgeParamSpec(SETTING_JUDGE_HOLDEM_BB, "大盲注", "bb",
                        BIG_BLIND, (2, 20_000)),
-        JudgeParamSpec(SETTING_JUDGE_HOLDEM_HANDS, "挑战默认手数", "default_hands",
+        # field="num_hands" 对齐 session_factory 的 kwarg 名（原 default_hands 接不上 → 静默失效）。
+        # orchestrator 优先用此 admin 全局设置，未设时回退 match.total_hands（对局级配置）。
+        JudgeParamSpec(SETTING_JUDGE_HOLDEM_HANDS, "挑战默认手数", "num_hands",
                        DEFAULT_HANDS, (1, 1000)),
     ],
     tiers=_tiers_mod.TIERS,
-    tier_for=_tiers_mod.tier_for,
     templates=_templates_mod.TEMPLATES,
     default_scoring="poker_3_1_0",
     code_path="bzplat/backend/games/holdem/engine.py",
     summary="HU NLHE；单局多手；按筹码差判胜。",
-    frontend_module="@/games/holdem",
     preflight_check=_preflight_check,
 )

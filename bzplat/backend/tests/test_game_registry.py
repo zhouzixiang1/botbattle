@@ -287,3 +287,57 @@ def test_preflight_sample_bots_pass():
     for gid, path in samples:
         ok, detail = asyncio.run(preflight_bot(gid, path, runner))
         assert ok, f"{gid} sample 应通过预检，实际: {detail}"
+
+
+# ── GameSpec 接口诚实化（PR2：声明=使用，无死字段）──────────────
+def test_default_scoring_per_game_not_all_poker():
+    """default_scoring 按游戏区分（holdem=扑克 3-1-0；棋类=2-1-0），不再统一 holdem。"""
+    assert registry.get("holdem").default_scoring == "poker_3_1_0"
+    assert registry.get("gomoku").default_scoring == "ccgc_2_1_0"
+    assert registry.get("pencil").default_scoring == "ccgc_2_1_0"
+
+
+def test_default_scoring_consumed_by_validation_not_hardcoded():
+    """validate_stage 的 scoring 默认值从 spec 派生（不再硬编码 poker_3_1_0）。
+
+    棋类赛事不显式传 scoring 时应得 ccgc_2_1_0（而非被悄悄套用 holdem 的 3-1-0）。
+    """
+    from bzplat.backend.contests.validation import validate_stage
+
+    # gomoku 阶段不传 scoring → 默认 ccgc_2_1_0（从 spec 派生，非硬编码 poker_3_1_0）
+    g_stage = validate_stage({"type": "round_robin"}, 0, "gomoku")
+    assert g_stage["scoring"] == "ccgc_2_1_0", "棋类 scoring 默认应是 ccgc_2_1_0"
+    # holdem 阶段不传 scoring → 默认 poker_3_1_0
+    h_stage = validate_stage({"type": "swiss"}, 0, "holdem")
+    assert h_stage["scoring"] == "poker_3_1_0"
+    # 显式传 scoring 仍生效
+    custom = validate_stage({"type": "round_robin", "scoring": "poker_3_1_0"}, 0, "gomoku")
+    assert custom["scoring"] == "poker_3_1_0"
+
+
+def test_num_seats_field_present():
+    """GameSpec 声明 num_seats（当前全 2，为 N 人游戏留钩子）。"""
+    for gid in registry.all_ids():
+        assert registry.get(gid).num_seats == 2, f"{gid} 当前应为 2 人"
+
+
+def test_dead_fields_removed():
+    """PR2 删除的死字段不再存在于 GameSpec（eta_per_match_sec/frontend_module/tier_for）。"""
+    from bzplat.backend.games.base import GameSpec
+    import dataclasses
+
+    field_names = {f.name for f in dataclasses.fields(GameSpec)}
+    assert "eta_per_match_sec" not in field_names, "eta_per_match_sec 是死字段（通用层读 eta_for_match），已删"
+    assert "frontend_module" not in field_names, "frontend_module 后端从不读，已删"
+    assert "tier_for" not in field_names, "tier_for 字段冗余（registry.tier_for 统一走 tier_for_in），已删"
+
+
+def test_session_factory_protocol_has_on_event():
+    """SessionFactory Protocol 声明 on_event kwarg（与 run_session 唯一调用点对齐）。"""
+    import inspect
+    from bzplat.backend.games.base import SessionFactory
+
+    sig = inspect.signature(SessionFactory.__call__)
+    assert "on_event" in sig.parameters, "SessionFactory 须声明 on_event（run_session 必传）"
+    # on_event 应是 keyword-only
+    assert sig.parameters["on_event"].kind == inspect.Parameter.KEYWORD_ONLY
