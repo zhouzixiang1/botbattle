@@ -471,6 +471,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
             elif _ctable == "contest_stage_results":
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(contest_id)")
 
+    # ── per-game matches 表自动建（解耦审计：让"新增第 4 游戏"真正零改动 DB）────────
+    # schema.py 里 matches_holdem/gomoku/pencil 三张表是字面 CREATE 语句；新增注册游戏
+    # （如 reversi）后 SCHEMA executescript 不会建 matches_<new>，create_match 会崩
+    # `no such table`。这里对每个已注册游戏幂等建表 + 索引（CREATE TABLE IF NOT EXISTS），
+    # 让 DB 层随注册表自动扩展，无需手改 schema.py 的 DDL。
+    # 每游戏表的统一索引列（与 schema.py:404-421 的三套索引一一对应）。
+    _PER_GAME_INDEX_COLS = ("bot_a_id", "bot_b_id", "owner_id", "contest_id", "status", "created_at")
+    for _gid in _all_game_ids():
+        _tbl = _matches_table(_gid)
+        if _tbl not in tables:
+            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_gid, gdef=_gid))
+    # 重新读取当前物理表集合（上面的建表/FK 重建可能改变了它），再幂等补索引。
+    _tables_after = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    for _gid in _all_game_ids():
+        _tbl = _matches_table(_gid)
+        if _tbl not in _tables_after:
+            continue  # 表确实没建出来（如 _CREATE_MATCHES_TABLE_SQL 被破坏）→ 跳过，交给启动断言报错
+        for _col in _PER_GAME_INDEX_COLS:
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_m{_gid}_{_col} ON {_tbl}({_col})"
+            )
+
 
 class Store:
     """SQLite 存储。线程安全；持久连接 check_same_thread=False。"""
@@ -484,6 +511,24 @@ class Store:
             conn.executescript(SCHEMA)
             _migrate(conn)
             seed_email_templates(conn, _now())
+            # 启动一致性断言：每个已注册游戏必须有对应的物理表 matches_<game>。
+            # schema.py 的字面 DDL 只覆盖 holdem/gomoku/pencil；第 4 游戏须经
+            # _migrate 的自动建表补出来。此断言在 _migrate 之后跑，确保"注册了
+            # 但表没建"的 drift 在启动即报（而非 create_match 时才崩 no such table）。
+            _existing = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            _missing = [
+                f"matches_{gid}" for gid in _all_game_ids()
+                if f"matches_{gid}" not in _existing
+            ]
+            assert not _missing, (
+                f"注册表里的游戏缺物理表（_migrate 自动建表应覆盖此场景）："
+                f"{_missing}。检查 games/__init__.py 注册 vs schema.py DDL。"
+            )
 
     @contextlib.contextmanager
     def _tx(self):
@@ -684,7 +729,9 @@ class Store:
                 subselects.append(f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}")
             union = " UNION ALL ".join(subselects)
             sql = f"SELECT * FROM ({union}) ORDER BY created_at DESC LIMIT ?"
-            return [_row(r) for r in c.execute(sql, params * 3 + [lim])]
+            # 子查询数 = 已注册游戏数，WHERE 参数须按此倍数复制（每个子查询一份）。
+            # 不得硬编码 * 3——新增第 4 游戏会触发 Incorrect number of bindings。
+            return [_row(r) for r in c.execute(sql, params * len(_all_game_ids()) + [lim])]
 
     def get_user_by_email(self, email: str) -> dict | None:
         with self._tx() as c:
@@ -1318,8 +1365,9 @@ class Store:
                     f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}"
                 )
             union = " UNION ALL ".join(subselects)
-            # UNION 后参数要重复三次（每子查询一份 where 参数）
-            all_params = params * 3
+            # UNION 后参数要按子查询数（=已注册游戏数）复制，每子查询一份 where 参数。
+            # 不得硬编码 * 3——新增第 4 游戏会触发 Incorrect number of bindings。
+            all_params = params * len(_all_game_ids())
             sql = f"SELECT * FROM ({union}) ORDER BY created_at DESC LIMIT ? OFFSET ?"
             all_params.extend([limit, offset])
             return [_row(r) for r in c.execute(sql, all_params)]
