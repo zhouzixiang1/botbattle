@@ -13,6 +13,7 @@
  */
 import type { ComponentType } from 'react'
 import type { LucideIcon } from 'lucide-react'
+import type { GameCanvasRenderer } from './canvas-types'
 
 /** 对局参数字段定义（取代散落的 per-game 配置 UI 分支）。 */
 export interface MatchConfigField {
@@ -44,6 +45,8 @@ export interface GameViewSpec {
   reduce: (events: Record<string, unknown>[]) => unknown
   // 注：各游戏 reducer（reduceEvents/reduceGomokuEvents/reducePencilEvents）接受更具体
   // 的 RawEvent[]，注册时经类型断言适配（结构兼容，运行时无影响）。
+  /** canvas 渲染器（可选）。若提供，GameCanvas 优先用它绘制，替代默认 DOM Board。 */
+  CanvasRenderer?: GameCanvasRenderer
   /** 默认 match_config（取代散落 {hands:70}/{n_dots:11}） */
   defaultMatchConfig: Record<string, number>
   /** 可调对局参数字段（取代散落配置 UI 分支） */
