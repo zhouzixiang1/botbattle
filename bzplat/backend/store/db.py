@@ -1186,6 +1186,33 @@ class Store:
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
 
+    def get_match_detailed(self, match_id: str) -> dict | None:
+        """get_match + JOIN bots(ba/bb 名/display) + users(owner 名/display)。
+        统一观赛/回放页座位身份显示用（bot_a/bot_b 各含 name/display_name +
+        owner_name/owner_display）。人类对局(match_type=human)时 bot_a_id==bot_b_id
+        复用同一 bot 行——人类侧靠 human_seat 区分（api 层标 is_human）。
+        """
+        with self._tx() as c:
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return None
+            sel = (
+                "m.*, "
+                "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+                "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
+                "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
+                "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display"
+            )
+            sql = (
+                f"SELECT {sel} FROM {tbl} m "
+                "JOIN bots ba ON m.bot_a_id=ba.id "
+                "JOIN bots bb ON m.bot_b_id=bb.id "
+                "JOIN users ua ON ba.owner_id=ua.id "
+                "JOIN users ub ON bb.owner_id=ub.id "
+                "WHERE m.id=?"
+            )
+            return _row(c.execute(sql, (match_id,)).fetchone())
+
     def update_match(self, match_id: str, **fields: Any) -> dict | None:
         allowed = {
             "hands_played",

@@ -69,6 +69,40 @@ def _store(request: Request):
     return request.app.state.store
 
 
+def _with_seat_info(m: dict) -> dict:
+    """把 get_match_detailed 的扁平 JOIN 列整理成嵌套 bot_a/bot_b 座位身份，
+    供前端 canvas 绘制座位标签（BOT 名 + @用户名）。人类对局标 is_human。
+    不修改原 match 行的其他字段。"""
+    if not m:
+        return m
+    out = dict(m)
+    # 清掉扁平 JOIN 列（已挪进 bot_a/bot_b）
+    for k in (
+        "bot_a_name", "bot_a_display", "bot_b_name", "bot_b_display",
+        "bot_a_owner_name", "bot_a_owner_display", "bot_b_owner_name", "bot_b_owner_display",
+    ):
+        out.pop(k, None)
+    human_seat = m.get("human_seat")
+    is_human = m.get("match_type") == "human"
+    out["bot_a"] = {
+        "id": m.get("bot_a_id"),
+        "name": m.get("bot_a_name"),
+        "display_name": m.get("bot_a_display"),
+        "owner_name": m.get("bot_a_owner_name"),
+        "owner_display": m.get("bot_a_owner_display"),
+        "is_human": is_human and human_seat == 0,
+    }
+    out["bot_b"] = {
+        "id": m.get("bot_b_id"),
+        "name": m.get("bot_b_name"),
+        "display_name": m.get("bot_b_display"),
+        "owner_name": m.get("bot_b_owner_name"),
+        "owner_display": m.get("bot_b_owner_display"),
+        "is_human": is_human and human_seat == 1,
+    }
+    return out
+
+
 # ── bots ──────────────────────────────────────────────────────
 
 @router.get("/api/bots/mine")
@@ -513,11 +547,11 @@ def liked_top_matches(request: Request, limit: int = 10):
 
 @router.get("/api/matches/{match_id}")
 def match_detail(match_id: str, request: Request):
-    m = _store(request).get_match(match_id)
+    m = _store(request).get_match_detailed(match_id)
     if not m:
         raise HTTPException(404, "对局不存在")
     replay = _store(request).get_replay(match_id) or {}
-    return {"match": m, "replay": replay}
+    return {"match": _with_seat_info(m), "replay": replay}
 
 
 @router.get("/api/matches/{match_id}/events")

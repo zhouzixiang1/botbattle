@@ -12,9 +12,12 @@ interface Props {
   width?: number
   height?: number
   className?: string
+  /** 可选：人类对战棋类落子回调（canvas 坐标 → 游戏坐标，经 renderer.pick）。 */
+  onMove?: (x: number, y: number) => void
+  interactive?: boolean
 }
 
-export default function GameCanvas({ gameId, events, seats, width = 900, height = 600, className }: Props) {
+export default function GameCanvas({ gameId, events, seats, width = 900, height = 600, className, onMove, interactive }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stateRef = useRef<{ prev: Scene | null; next: Scene } | null>(null)
   const tlRef = useRef<gsap.core.Timeline | null>(null)
@@ -89,13 +92,31 @@ export default function GameCanvas({ gameId, events, seats, width = 900, height 
   // 卸载清理（belt-and-suspenders）
   useEffect(() => () => { tlRef.current?.kill() }, [])
 
+  // 人类对战落子：canvas 像素坐标 → 游戏坐标（经 renderer.pick），仅在 interactive 时启用
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!interactive || !onMove) return
+    const spec = getGame(gameId)
+    const renderer = spec.CanvasRenderer
+    if (!renderer?.pick || !stateRef.current?.next) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    // canvas 内部坐标系是 width×height（CSS 缩放后映射回内部坐标）
+    const scale = width / rect.width
+    const canvasX = (e.clientX - rect.left) * scale
+    const canvasY = (e.clientY - rect.top) * (height / rect.height)
+    const picked = renderer.pick(canvasX, canvasY, stateRef.current.next, { width, height, seats })
+    if (picked) onMove(picked.x, picked.y)
+  }
+
   return (
     <canvas
       ref={canvasRef}
       style={{ width: '100%', height: 'auto', maxWidth: width }}
-      className={className}
+      className={className + (interactive && onMove ? ' cursor-pointer' : '')}
       role="img"
       aria-label={`${gameId ?? ''} 对局画面`}
+      onClick={handleClick}
     />
   )
 }

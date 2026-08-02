@@ -58,13 +58,16 @@
 
 > 棋类棋盘可点击落子；扑克提供 Fold/Check/Call/Raise/Allin 按钮栏。
 
-## 观赛视觉（holdem）
+## 观赛视觉（canvas + GSAP）
 
-- holdem 的**观赛 / 回放 / 人类对战**牌桌现已改为 **canvas + GSAP 动画渲染**（照搬 botzone.org.cn）：
-  发牌翻面、动作浮字（Fold/Call/Raise…）、筹码增减插值过渡，均由 `GameCanvas` 组件按
-  GSAP timeline 逐帧驱动（替代原 DOM 牌桌）。
-- 点数 `10` 在牌面正确显示为 `10`（修复了原先受 Poker.JS 短码影响显示成 `T` 的问题）。
-- 棋类（gomoku/pencil）暂时维持原有 DOM 棋盘，canvas 化留待后续 PR。
+- **三游戏棋盘**（holdem / gomoku / pencil）的**观赛 / 回放 / 人类对战**现已统一改为 **canvas + GSAP 动画渲染**（照搬 botzone.org.cn）：
+  - **holdem**：发牌翻面、动作浮字（Fold/Call/Raise…）、筹码 / 底池数字插值；牌面矢量绘制走 Poker.JS。
+  - **gomoku**：棋子落子缩放 + 淡入进入，最后一手彩色标记。
+  - **pencil**：新占边沿线绘制动画，闭合格归属淡入。
+  - 均由 `GameCanvas` 组件按 GSAP timeline 逐帧驱动（替代原 DOM 棋盘）。
+- 点数 `10` 在牌面正确显示为 `10`（修复了原先受紧凑协议 `T` 短码影响显示成 `T` 的问题）。
+- **座位身份**：观赛 / 回放页座位显示双方 **BOT 名 + @用户名**（后端 `get_match_detailed` JOIN bots+users；人类对局真人座标 `is_human`）。
+- **统一对局页** `/match/:id`：实时（running）走 SSE 直播 + DVR 模型（定位到最新后按回放速度推进，可拖动 / 跳最新）；已结束自动从头播放。`/watch/:id` 重定向到 `/match/:id`。
 
 ## 状态
 

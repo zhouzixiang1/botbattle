@@ -223,7 +223,8 @@ class MatchOrchestrator:
         # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
         q: asyncio.Queue = asyncio.Queue(maxsize=2000)
         self._sse.setdefault(match_id, []).append(q)
-        m = self.store.get_match(match_id)
+        # 用 detailed（JOIN bots+users）让前端观赛页能显示座位 BOT 名/用户名
+        m = self.store.get_match_detailed(match_id) or self.store.get_match(match_id)
         replay = self.store.get_replay(match_id) or {}
         q.put_nowait({"type": "snapshot", "match": m, "events": json.loads(replay.get("events_json") or "[]")})
         return q

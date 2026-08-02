@@ -26,9 +26,17 @@ export default function MatchBoard({
   const gid = normalizeGameId(gameId)
   const spec = getGame(gid)
 
-  // 该游戏已接入 canvas 渲染器 → 优先用 canvas 绘制（holdem 走这）
+  // 该游戏已接入 canvas 渲染器 → 优先用 canvas 绘制（三游戏都走这）
   if (spec.CanvasRenderer) {
-    return <GameCanvas gameId={gid} events={events as unknown as RawEvent[]} seats={seats} />
+    return (
+      <GameCanvas
+        gameId={gid}
+        events={events as unknown as RawEvent[]}
+        seats={seats}
+        onMove={interactive ? onMove : undefined}
+        interactive={interactive}
+      />
+    )
   }
 
   // 回退 DOM Board（gomoku/pencil 暂时走这，PR-B/C 加 CanvasRenderer 后自动切）
