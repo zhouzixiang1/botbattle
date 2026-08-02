@@ -296,95 +296,107 @@ export default function ContestDetail() {
         </div>
       )}
 
-      {/* 报名列表 */}
-      <div className="mt-8 flex items-center gap-2">
-        <Users className="size-4 text-muted-foreground" />
-        <h3 className="text-sm font-semibold text-foreground">报名（{entries.length}）</h3>
-      </div>
-      <Card className="mt-2">
-        <CardContent className="py-3">
-          {entries.length === 0 ? (
-            <EmptyState text="暂无报名" className="py-6" />
+      {/* 区2：双栏 = 对阵主区(左, 核心视觉) + 报名/积分边栏(右, sticky)。 <lg 单列堆叠 */}
+      <div className="mt-6 lg:grid lg:grid-cols-[minmax(0,1fr)_22rem] lg:gap-6">
+        {/* 左主区：对阵（BracketTree/PairedFoldedList 能吃满宽） */}
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Swords className="size-4 text-muted-foreground" />
+            <h3 className="text-sm font-semibold text-foreground">
+              对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab + 1}`}` : ''}
+            </h3>
+          </div>
+          {stagePairings.length === 0 ? (
+            <Card className="mt-2"><EmptyState text="暂无对阵" icon={<Swords className="size-7 opacity-40" />} /></Card>
+          ) : isElimStage ? (
+            // 淘汰赛：树状对阵图（按 bracket_slot 排列，胜者高亮，横向滚动+轮次折叠）
+            <div className="mt-2">
+              <BracketTree pairings={stagePairings} />
+            </div>
           ) : (
-            <ul className="space-y-1.5 text-sm">
-              {entries.map((e) => (
-                <li key={e.id} className="flex flex-wrap items-center gap-2">
-                  <Link to={`/bot/${e.bot_id}`} className="font-medium text-foreground hover:text-primary">
-                    {e.bot_display || e.bot_name || `#${e.bot_id}`}
-                  </Link>
-                  {e.owner_name && (
-                    <Link to={`/user/${encodeURIComponent(e.owner_name)}`} className="text-xs text-muted-foreground hover:text-primary">
-                      @{e.owner_display || e.owner_name}
-                    </Link>
-                  )}
-                  {e.seed ? <span className="text-xs text-muted-foreground">种子 {e.seed}</span> : ''}
-                  {e.group_id && <Badge variant="secondary" className="text-[10px]">{e.group_id}</Badge>}
-                  {e.eliminated ? <Badge variant="destructive" className="text-[10px]">淘汰</Badge> : ''}
-                </li>
-              ))}
-            </ul>
+            // swiss/循环/分组：按轮次/分组折叠的列表（大规模自动收起）
+            <PairingFoldedList pairings={stagePairings} />
           )}
-        </CardContent>
-      </Card>
-
-      {/* 积分榜 */}
-      <div className="mt-8 flex items-center gap-2">
-        <ListOrdered className="size-4 text-muted-foreground" />
-        <h3 className="text-sm font-semibold text-foreground">积分榜</h3>
-      </div>
-      <Card className="mt-2">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-10">#</TableHead>
-              <TableHead>Bot</TableHead>
-              <TableHead>积分</TableHead>
-              <TableHead className="hidden sm:table-cell">W/D/L</TableHead>
-              <TableHead className="hidden md:table-cell">净筹码</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {standings.length === 0 ? (
-              <TableRow><TableCell colSpan={5}><EmptyState text="暂无积分数据" icon={<Trophy className="size-7 opacity-40" />} /></TableCell></TableRow>
-            ) : (
-              standings.map((s, i) => (
-                <TableRow key={s.bot_id}>
-                  <TableCell className="font-mono text-xs text-muted-foreground">{i + 1}</TableCell>
-                  <TableCell>
-                    <Link to={`/bot/${s.bot_id}`} className="font-medium text-foreground hover:text-primary">
-                      {s.bot_name || `#${s.bot_id}`}
-                    </Link>
-                  </TableCell>
-                  <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
-                  <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
-                    <span className="text-success">{s.wins}</span>/{s.draws}/<span className="text-destructive">{s.losses}</span>
-                  </TableCell>
-                  <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.net_chips}</TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </Card>
-
-      {/* 对阵 */}
-      <div className="mt-8 flex items-center gap-2">
-        <Swords className="size-4 text-muted-foreground" />
-        <h3 className="text-sm font-semibold text-foreground">
-          对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab + 1}`}` : ''}
-        </h3>
-      </div>
-      {stagePairings.length === 0 ? (
-        <Card className="mt-2"><EmptyState text="暂无对阵" icon={<Swords className="size-7 opacity-40" />} /></Card>
-      ) : isElimStage ? (
-        // 淘汰赛：树状对阵图（按 bracket_slot 排列，胜者高亮，横向滚动+轮次折叠）
-        <div className="mt-2">
-          <BracketTree pairings={stagePairings} />
         </div>
-      ) : (
-        // swiss/循环/分组：按轮次/分组折叠的列表（大规模自动收起）
-        <PairingFoldedList pairings={stagePairings} />
-      )}
+
+        {/* 右边栏：报名列表 + 积分榜（桌面 sticky 常驻） */}
+        <div className="mt-6 space-y-6 lg:mt-0 lg:self-start lg:sticky lg:top-20">
+          {/* 报名列表 */}
+          <div>
+            <div className="flex items-center gap-2">
+              <Users className="size-4 text-muted-foreground" />
+              <h3 className="text-sm font-semibold text-foreground">报名（{entries.length}）</h3>
+            </div>
+            <Card className="mt-2">
+              <CardContent className="py-3">
+                {entries.length === 0 ? (
+                  <EmptyState text="暂无报名" className="py-6" />
+                ) : (
+                  <ul className="space-y-1.5 text-sm">
+                    {entries.map((e) => (
+                      <li key={e.id} className="flex flex-wrap items-center gap-2">
+                        <Link to={`/bot/${e.bot_id}`} className="font-medium text-foreground hover:text-primary">
+                          {e.bot_display || e.bot_name || `#${e.bot_id}`}
+                        </Link>
+                        {e.owner_name && (
+                          <Link to={`/user/${encodeURIComponent(e.owner_name)}`} className="text-xs text-muted-foreground hover:text-primary">
+                            @{e.owner_display || e.owner_name}
+                          </Link>
+                        )}
+                        {e.seed ? <span className="text-xs text-muted-foreground">种子 {e.seed}</span> : ''}
+                        {e.group_id && <Badge variant="secondary" className="text-[10px]">{e.group_id}</Badge>}
+                        {e.eliminated ? <Badge variant="destructive" className="text-[10px]">淘汰</Badge> : ''}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* 积分榜 */}
+          <div>
+            <div className="flex items-center gap-2">
+              <ListOrdered className="size-4 text-muted-foreground" />
+              <h3 className="text-sm font-semibold text-foreground">积分榜</h3>
+            </div>
+            <Card className="mt-2">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-10">#</TableHead>
+                    <TableHead>Bot</TableHead>
+                    <TableHead>积分</TableHead>
+                    <TableHead className="hidden sm:table-cell">W/D/L</TableHead>
+                    <TableHead className="hidden md:table-cell">净筹码</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {standings.length === 0 ? (
+                    <TableRow><TableCell colSpan={5}><EmptyState text="暂无积分数据" icon={<Trophy className="size-7 opacity-40" />} /></TableCell></TableRow>
+                  ) : (
+                    standings.map((s, i) => (
+                      <TableRow key={s.bot_id}>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{i + 1}</TableCell>
+                        <TableCell>
+                          <Link to={`/bot/${s.bot_id}`} className="font-medium text-foreground hover:text-primary">
+                            {s.bot_name || `#${s.bot_id}`}
+                          </Link>
+                        </TableCell>
+                        <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
+                        <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
+                          <span className="text-success">{s.wins}</span>/{s.draws}/<span className="text-destructive">{s.losses}</span>
+                        </TableCell>
+                        <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.net_chips}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </Card>
+          </div>
+        </div>{/* /右边栏 */}
+      </div>{/* /双栏 */}
     </PageStub>
   )
 }
