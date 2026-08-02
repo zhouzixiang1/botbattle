@@ -210,6 +210,7 @@ def create_app(
     app.state.captcha = captcha
     app.state.captcha_store = captcha
     app.state.bot_manager = bot_manager
+    app.state.binary_runner = binary_runner
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer

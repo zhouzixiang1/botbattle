@@ -1012,6 +1012,30 @@ class Store:
                 c.execute("SELECT * FROM bot_versions WHERE id=?", (vid,)).fetchone()
             )
 
+    def delete_bot_version(self, bot_id: int, version: int) -> bool:
+        """删除指定版本；若删的是当前版本，回退到 max(version)。"""
+        with self._tx() as c:
+            cur = c.execute(
+                "DELETE FROM bot_versions WHERE bot_id=? AND version=?",
+                (bot_id, version),
+            )
+            if cur.rowcount == 0:
+                return False
+            # 若删的是当前版本，回退到剩余最新版本
+            row = c.execute(
+                "SELECT MAX(version) AS mv, binary_path, os, arch, format "
+                "FROM bot_versions WHERE bot_id=?",
+                (bot_id,),
+            ).fetchone()
+            if row and row["mv"]:
+                c.execute(
+                    "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
+                    "format=?, updated_at=? WHERE id=?",
+                    (row["mv"], row["binary_path"], row["os"], row["arch"],
+                     row["format"], _now(), bot_id),
+                )
+            return True
+
     def list_bot_versions(self, bot_id: int) -> list[dict]:
         with self._tx() as c:
             return [

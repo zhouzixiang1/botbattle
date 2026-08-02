@@ -127,6 +127,10 @@ class GameSpec:
     # 前端模块路径（lazy 加载该游戏的前端包，如 '@/games/holdem'）
     frontend_module: str = ""
 
+    # Bot 预检（上传时试跑：构造首个请求，验证响应合法）——拒绝明显不合格的 bot。
+    # 返回 (ok: bool, detail: str)。ok=False 时上传被拒（detail 给前端展示）。
+    preflight_check: Callable[[str, Any], Awaitable[tuple[bool, str]]] | None = None
+
     def run_session(
         self, decide: DecideFn, *, on_event: EventFn | None = None, **params: Any
     ) -> Awaitable[Any]:
