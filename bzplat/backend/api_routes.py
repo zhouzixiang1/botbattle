@@ -928,6 +928,60 @@ def contest_bracket(contest_id: int, request: Request):
     return {"pairings": _store(request).contest_bracket(contest_id)}
 
 
+@router.get("/api/contests/{contest_id}/official-results")
+def contest_official_results(contest_id: int, request: Request, format: str = "json"):
+    """全员唯一正式名次（P2）。?format=csv|json 导出。
+
+    赛事 finished 且 official_results_ready=1 时返回全员排名（1..N 唯一连续，
+    含破同分明细 tiebreaks）；否则 404/409。
+    """
+    store = _store(request)
+    c = store.get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "比赛不存在")
+    if not int(c.get("official_results_ready") or 0):
+        raise HTTPException(409, "正式名次尚未生成（赛事未结束或排名未落库）")
+    rows = store.list_official_results(contest_id)
+    if format.lower() == "csv":
+        import csv as _csv
+        import io
+
+        def gen():
+            buf = io.StringIO()
+            w = _csv.writer(buf)
+            w.writerow(["rank", "entry_id", "bot_name", "owner_name", "points",
+                        "buchholz_cut1", "sonneborn_berger", "awarded"])
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+            for r in rows:
+                tb = r.get("tiebreaks_json") or "{}"
+                try:
+                    import json as _json
+                    tb = _json.loads(tb)
+                except Exception:
+                    tb = {}
+                w.writerow([
+                    r["rank"], r["entry_id"], r.get("bot_name") or "",
+                    r.get("owner_name") or "", r.get("points") or 0,
+                    tb.get("buchholz_cut1", 0), tb.get("sonneborn_berger", 0),
+                    r.get("awarded") or "",
+                ])
+                yield buf.getvalue()
+                buf.seek(0); buf.truncate(0)
+
+        return StreamingResponse(
+            gen(), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="contest-{contest_id}-results.csv"'},
+        )
+    # json（默认）：返回结构化排名
+    return {
+        "contest_id": contest_id,
+        "phase": c.get("phase") or "standalone",
+        "ready": True,
+        "results": rows,
+    }
+
+
 @router.post("/api/contests/{contest_id}/open")
 def open_contest(contest_id: int, request: Request, user=Depends(require_organizer)):
     c = _store(request).get_contest(contest_id)

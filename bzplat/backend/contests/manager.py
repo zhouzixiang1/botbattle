@@ -600,7 +600,37 @@ class ContestManager:
         self.store.update_contest(
             contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
         )
+        # P2：末阶段完成 → 计算全员唯一正式名次（破同分链）并落库
+        try:
+            self._finalize_official_results(contest_id, stage_idx)
+        except Exception:
+            logger.exception("compute official results failed contest=%s", contest_id)
         return self.store.get_contest(contest_id)
+
+    def _finalize_official_results(self, contest_id: int, stage_idx: int) -> None:
+        """计算全员正式名次（破同分）并落库 contest_official_results。"""
+        from bzplat.backend.contests import ranking as _ranking
+        from bzplat.backend.games import registry as _reg
+
+        c = self.store.get_contest(contest_id)
+        if not c:
+            return
+        gid = (c.get("game_id") or "holdem").lower()
+        try:
+            normalize_earnings = _reg.get(gid).normalize_earnings
+        except Exception:
+            normalize_earnings = None
+        standings = self.standings(contest_id, stage_idx=stage_idx)
+        pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+        match_ids = [p["match_id"] for p in pairings if p.get("match_id")]
+        matches = {mid: self.store.get_match(mid) for mid in match_ids if mid}
+        matches = {k: v for k, v in matches.items() if v}
+        ranking_rows = _ranking.compute_official_ranking(
+            standings, pairings, matches, normalize_earnings=normalize_earnings
+        )
+        _ranking.persist_official_results(
+            self.store, contest_id, ranking_rows, stage_idx=stage_idx
+        )
 
     async def _maybe_next_swiss_round(
         self, contest_id: int, stage_idx: int, stage: dict

@@ -124,6 +124,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("template_id", "TEXT NOT NULL DEFAULT 'holdem_swiss_ko'"),
         ("rest_ends_at", "TEXT"),
         ("match_config_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("phase", "TEXT NOT NULL DEFAULT 'standalone'"),  # P2 预赛/决赛
+        ("source_contest_id", "INTEGER"),
+        ("official_results_ready", "INTEGER NOT NULL DEFAULT 0"),
     ):
         _add_col(conn, "contests", col, decl)
 
@@ -2243,14 +2246,17 @@ class Store:
         template_id: str = "holdem_swiss_ko",
         current_stage_idx: int = 0,
         match_config_json: str = "{}",
+        phase: str = "standalone",
+        source_contest_id: int | None = None,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contests(title, description, organizer_id, status, "
                 "registration_opens_at, registration_closes_at, starts_at, "
                 "ends_at, hands_per_match, created_at, game_id, stages_json, "
-                "current_stage_idx, template_id, match_config_json) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "current_stage_idx, template_id, match_config_json, phase, "
+                "source_contest_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     title,
                     description,
@@ -2267,6 +2273,8 @@ class Store:
                     current_stage_idx,
                     template_id,
                     match_config_json,
+                    phase,
+                    source_contest_id,
                 ),
             )
             cid = cur.lastrowid
@@ -2298,6 +2306,9 @@ class Store:
             "template_id",
             "rest_ends_at",
             "match_config_json",
+            "phase",
+            "source_contest_id",
+            "official_results_ready",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
@@ -2594,6 +2605,58 @@ class Store:
                 params.append(stage_idx)
             sql += " ORDER BY stage_idx, points DESC, net_chips DESC"
             return [_row(r) for r in c.execute(sql, params)]
+
+    # ── contest_official_results（P2 全员正式名次）─────────────
+
+    def clear_official_results(self, contest_id: int) -> None:
+        with self._tx() as c:
+            c.execute(
+                "DELETE FROM contest_official_results WHERE contest_id=?",
+                (contest_id,),
+            )
+
+    def upsert_official_result(
+        self,
+        contest_id: int,
+        entry_id: int,
+        rank: int,
+        *,
+        stage_idx: int = 0,
+        points: float = 0,
+        bot_id: int | None = None,
+        user_id: int | None = None,
+        tiebreaks_json: str = "{}",
+        awarded: str = "",
+    ) -> None:
+        with self._tx() as c:
+            c.execute(
+                "INSERT INTO contest_official_results"
+                "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
+                "tiebreaks_json, awarded) VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(contest_id, entry_id) DO UPDATE SET "
+                "stage_idx=excluded.stage_idx, rank=excluded.rank, "
+                "points=excluded.points, bot_id=excluded.bot_id, "
+                "user_id=excluded.user_id, tiebreaks_json=excluded.tiebreaks_json, "
+                "awarded=excluded.awarded",
+                (
+                    contest_id, entry_id, stage_idx, rank, points, bot_id, user_id,
+                    tiebreaks_json, awarded,
+                ),
+            )
+
+    def list_official_results(self, contest_id: int) -> list[dict]:
+        """全员正式名次（按 rank 升序，1..N 唯一连续）。"""
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT r.*, b.name AS bot_name, b.display_name AS bot_display, "
+                "u.username AS owner_name, u.display_name AS owner_display "
+                "FROM contest_official_results r "
+                "LEFT JOIN bots b ON r.bot_id=b.id "
+                "LEFT JOIN users u ON r.user_id=u.id "
+                "WHERE r.contest_id=? ORDER BY r.rank",
+                (contest_id,),
+            ).fetchall()
+            return [_row(r) for r in rows]
 
     # ── contest_templates（赛制模板）──────────────────────────
 

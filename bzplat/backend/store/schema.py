@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS contests (
     template_id             TEXT    NOT NULL DEFAULT 'holdem_swiss_ko',
     rest_ends_at            TEXT,
     match_config_json       TEXT    NOT NULL DEFAULT '{}',
+    phase                   TEXT    NOT NULL DEFAULT 'standalone',  -- P2: preliminary/final/standalone
+    source_contest_id       INTEGER,  -- P2: 软链（预赛→决赛导航，不复制 entry）
+    official_results_ready  INTEGER NOT NULL DEFAULT 0,  -- P2: 全员正式名次是否已落库
     CONSTRAINT chk_contest_status CHECK (
         status IN ('draft','open','running','rest','finished','cancelled'))
 );
@@ -387,6 +390,20 @@ CREATE TABLE IF NOT EXISTS contest_stage_results (
     rank_in_group   INTEGER,
     payload_json    TEXT    NOT NULL DEFAULT '{}',
     UNIQUE(contest_id, stage_idx, entry_id)
+);
+
+CREATE TABLE IF NOT EXISTS contest_official_results (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+    entry_id        INTEGER NOT NULL,
+    stage_idx       INTEGER NOT NULL DEFAULT 0,  -- 末阶段（全员榜来源）
+    rank            INTEGER NOT NULL,            -- 1-based 唯一连续正式名次
+    points          REAL    NOT NULL DEFAULT 0,
+    bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    user_id         INTEGER,
+    tiebreaks_json  TEXT    NOT NULL DEFAULT '{}',  -- 各破同分项明细（buchholz/sonneborn/...）
+    awarded         TEXT    NOT NULL DEFAULT '',    -- 奖项标注（如 suggested_finalist）
+    UNIQUE(contest_id, entry_id)
 );
 
 CREATE TABLE IF NOT EXISTS platform_settings (
