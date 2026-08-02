@@ -66,12 +66,22 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       street: vm.street ?? 'preflop',
       toAct: vm.toAct ?? null,
       lastAction: (() => {
-        // 取最后一个有 lastAction 的座位（当前行动方）
-        for (let i = 0; i < seats.length; i++) {
-          const la = seats[i]?.lastAction
-          if (la) return { player: i, action: la.action, amount: la.amount }
+        // 注意：不能直接遍历 seats 取「第一个 lastAction 非空」的座 —— reducer 只在
+        // acting 座上写 lastAction 但从不清除对手座（仅 hand_start/freshSeats 复位），
+        // 故同街两人都行动后两座都会带 lastAction，正向遍历恒为座 0（陈旧）。
+        // 改从事件流取最近一条 action 事件确定「最近行动者」，再用其 VM 座上权威的
+        // lastAction（reducer 已按 call=投入增量 / raise=allin=本街累计做归一化）。
+        let lastPlayer: number | null = null
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (events[i]?.type === 'action') {
+            lastPlayer = Number(events[i].player ?? 0)
+            break
+          }
         }
-        return null
+        if (lastPlayer === null) return null
+        const la = seats[lastPlayer]?.lastAction
+        if (!la) return null
+        return { player: lastPlayer, action: la.action, amount: la.amount }
       })(),
       roundBets: seats.map((s: SeatState) => s?.bet ?? 0),
       winners: vm.lastSettle?.winners ?? null,
