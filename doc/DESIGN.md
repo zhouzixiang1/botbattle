@@ -85,16 +85,20 @@ graph LR
 
 **两层解耦**：
 
-1. **GameSpec 注册表（`games/`，全面解耦的单一真相）**：每款游戏是一个 `GameSpec` 对象，集中声明 `game_id`/`label`/`session_factory`(裁判)/`protocol`(行协议)/`default_match_params`+`validate_match_params`(配置)/`rounds_per_match`+`normalize_earnings`(编排特化)/`tiers`+`tier_for`(per-game 段位)/`judge_params`(裁判参数)/`templates`(赛事模板)/`code_path`+`summary`(元信息)。通用层（编排/赛制/评分/DB）经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 `if game_id == ...` 分支**——所有游戏差异封装在各自 spec。
+1. **GameSpec 注册表（`games/`，全面解耦的单一真相）**：每款游戏是一个 `GameSpec` 对象，集中声明 `game_id`/`label`/`session_factory`(裁判)/`protocol`(行协议)/`default_match_params`+`validate_match_params`(配置)/`rounds_per_match`+`normalize_earnings`+`eta_for_match`(编排特化)/`tiers`+`tier_for`(per-game 段位)/`judge_params`(裁判参数)/`templates`(赛事模板)/`code_path`+`summary`(元信息)。通用层（编排/赛制/评分/DB）经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 `if game_id == ...` 分支**——所有游戏差异封装在各自 spec。
 
-2. **结果鸭子契约（`RoundResult`/`MatchResult`）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。**编排层与赛制层只依赖这两个字段，绝不触碰扑克的 pot/board/holes 或棋类的棋盘**——这是赛制代码能通用于三款游戏的根本。PR4 起 result 拆为各游戏独立副本（不再共享基类），仅保留鸭子契约。
+2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。**编排层与赛制层只依赖这两个字段，绝不触碰扑克的 pot/board/holes 或棋类的棋盘**——这是赛制代码能通用于三款游戏的根本。`tests/test_result_contract.py` 断言三游戏 result 都满足此契约（防 drift）。
+
+**DRY 边界**：游戏规则（engine/result/tiers 数据/templates）各游戏独立；平台工具（`_board_protocol.py` 行协议序列化、`base.tier_for_in` 段位查表算法）共享——避免字节级重复的维护隐患。
 
 ### 2.3 新增一款游戏的成本
 
-通用层**零改动**，仅需（全部在一个 `games/<game>/` 包内）：
-1. 新建 `games/<game>/` 包：实现引擎 Session + 协议 + 配置 + 段位 + 模板，在 `spec.py` 装配成一个 `GameSpec`。
-2. 在 `games/__init__.py` 注册一行（`registry.register(SPEC)`）。
-3. 在 `schema.REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项（games 包启动时断言二者与注册表一致，防漂移）。
+通用层**零改动**，仅需：
+1. 建 `games/<game>/` 子包：`engine.py`(裁判) + `protocol.py`(行协议，棋类可 re-export `_board_protocol`) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线，调 `base.tier_for_in`) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec)。
+2. `schema.py`：`matches_<game>` 表（FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES`/`VALID_GAME_IDS` 各加该项。
+3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
+4. 前端 `src/games/<game>/index.ts`（GameViewSpec）+ `src/games/index.ts` 注册。
+5. **约束**：`games/<game>/` 不得反向 import `engine`/`_compat`（循环依赖，`test_import_cycles.py` 守护）；通用层不得 import 具体游戏模块。
 
 **不再需要**在 `registry.run_session`/`runner._dumps`/`_loads`/`_fail_response`/orchestrator 加 `if game_id==` 分支——这是全面解耦前 6 处分散注册点的彻底消除。
 
