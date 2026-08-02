@@ -366,8 +366,8 @@ class ContestManager:
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         gid = c.get("game_id") or "holdem"
-        # 经 spec 取该游戏的对局参数字段（消除 if game_id）；challenge() 接收
-        # hands/n_dots 两个可选 kwarg，按 cfg 里实际存在的字段透传。
+        # cfg 的键就是该游戏的 match_config 字段（holdem→{"hands"}, pencil→{"n_dots"},
+        # 第 4 游戏自带其字段）。challenge() 透传整包，无需按字段名逐条硬判断。
         for p in pairings:
             if p.get("status") != "pending" or p.get("match_id"):
                 continue
@@ -377,12 +377,7 @@ class ContestManager:
                 "contest_id": contest_id,
                 "game_id": gid,
             }
-            if "hands" in cfg:
-                kw["hands"] = int(cfg["hands"])
-            # 解耦审计 I1：原 elif gid=="holdem" 死代码已删——_match_config() 已在 L62-67
-            # 把旧 holdem 行的 hands_per_match 兜底进 cfg["hands"]，故此处 cfg 必已含 hands（若有）。
-            if "n_dots" in cfg and cfg["n_dots"] is not None:
-                kw["n_dots"] = int(cfg["n_dots"])
+            kw.update({k: int(v) for k, v in cfg.items() if v is not None})
             mid = await self.orch.challenge(
                 p["bot_a_id"],
                 p["bot_b_id"],

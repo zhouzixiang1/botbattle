@@ -397,7 +397,9 @@ def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
 class ChallengeBody(BaseModel):
     my_bot_id: int
     opponent_bot_id: int
-    hands: int = Field(70, ge=1, le=70)
+    # 上限交 spec.validate_match_params 校验（holdem 1-500；棋类忽略 hands）。
+    # 原 le=70 是 holdem 专用上限泄漏成所有游戏上限——第 4 个扑克游戏 max>70 会被静默拒。
+    hands: int = Field(70, ge=1, le=1000)
     game_id: str | None = None
 
 

@@ -133,6 +133,12 @@ class MatchOrchestrator:
         if gid not in VALID_GAME_IDS or gid not in REGISTERED_ENGINES:
             raise ValueError(f"游戏引擎未注册: {gid}")
 
+        # 校验 match_config（hands 范围按游戏 spec；取代 API 层 le=300 的宽上限）
+        try:
+            game_registry.get(gid).validate_match_params({"hands": hands})
+        except ValueError as e:
+            raise ValueError(f"match 参数非法: {e}") from None
+
         bot_seat = 1 - human_seat
         # 人类侧用一个伪 bot_id 占位（取 bot_id 自身，仅满足 NOT NULL FK；
         # 真正的人类动作经 _human_turns / WS 回传，不走 binary）
@@ -170,6 +176,7 @@ class MatchOrchestrator:
         contest_id: int | None = None,
         game_id: str | None = None,
         n_dots: int | None = None,
+        **extra_match_params: Any,
     ) -> str:
         if challenger_bot_id == opponent_bot_id:
             raise ValueError("不能与自己对战")
@@ -197,6 +204,12 @@ class MatchOrchestrator:
             raise ValueError(
                 f"游戏引擎未注册: {gid}（当前支持 {sorted(REGISTERED_ENGINES)}）"
             )
+
+        # 校验 match_config（hands 范围按游戏 spec；取代 API 层 le=70 的 holdem 专用上限泄漏）
+        try:
+            game_registry.get(gid).validate_match_params({"hands": hands})
+        except ValueError as e:
+            raise ValueError(f"match 参数非法: {e}") from None
 
         # 棋类单局；扑克沿用 hands
         # 每游戏轮数：holdem=hands；棋类=1（经 spec.rounds_per_match，消除 if game_id）

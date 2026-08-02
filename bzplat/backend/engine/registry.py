@@ -61,35 +61,21 @@ async def run_session(
     game_id: str,
     decide,
     *,
-    num_hands: int | None = None,
     on_event=None,
     rng=None,
-    n_dots: int | None = None,
-    board_size: int | None = None,
-    starting_stack: int | None = None,
-    sb: int | None = None,
-    bb: int | None = None,
+    **params: Any,
 ) -> MatchResult:
     """统一入口：按 game_id 取 spec 并 run_session。
+
+    游戏规则参数（num_hands/n_dots/board_size/starting_stack/sb/bb/...）经 **params
+    透传给 spec.run_session——新增第 4 游戏带新参数（如 komi）无需改本签名。
+    各参数的意义/默认值/校验全在 GameSpec（default_match_params / judge_params）里声明。
 
     未知 game_id：旧行为是静默兜底跑 holdem；新行为是经 registry.get 抛 KeyError。
     为保持向后兼容（runner/orchestrator 传入已 normalize 的 gid），这里仍用
     normalize_game_id（空值兜底 holdem）；但 normalize 后若不在注册表则报错（修正）。
     """
     gid = normalize_game_id(game_id)
-    params: dict[str, object] = {}
-    if num_hands is not None:
-        params["num_hands"] = num_hands
-    if n_dots is not None:
-        params["n_dots"] = n_dots
-    if board_size is not None:
-        params["board_size"] = board_size
-    if starting_stack is not None:
-        params["starting_stack"] = starting_stack
-    if sb is not None:
-        params["sb"] = sb
-    if bb is not None:
-        params["bb"] = bb
     if rng is not None:
         params["rng"] = rng
     return await _registry().get(gid).run_session(decide, on_event=on_event, **params)
