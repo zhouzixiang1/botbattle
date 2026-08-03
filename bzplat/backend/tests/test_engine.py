@@ -27,7 +27,26 @@ from bzplat.backend.games.holdem.engine import (
     Action,
     MatchSession,
 )
-from bzplat.backend.games.holdem.protocol import build_response
+from bzplat.backend.games.holdem.protocol import RESP_ALLIN, RESP_CALL_CHECK, RESP_FOLD
+
+
+def resp(action: str, *, raise_to: int | None = None, street_bet: int = 0) -> dict:
+    """构造 Botzone 协议响应信封 ``{"response": <裸整数>}``。
+
+    - fold → -1；allin → -2；call/check → 0。
+    - raise：``raise_to`` 是意图的「加注到此总额」，转换为 Botzone delta =
+      raise_to - street_bet（玩家加注前已在本街投入的筹码）。
+    """
+    if action == "fold":
+        return {"response": RESP_FOLD}
+    if action == "allin":
+        return {"response": RESP_ALLIN}
+    if action in ("call", "check"):
+        return {"response": RESP_CALL_CHECK}
+    if action == "raise":
+        assert raise_to is not None and raise_to > street_bet, (raise_to, street_bet)
+        return {"response": raise_to - street_bet}
+    raise ValueError(f"unknown action: {action}")
 
 
 def test_deck_size_and_unique():
@@ -87,10 +106,10 @@ def test_hand_evaluation_pairwise():
 
 def _passive_bot(player_idx: int, req: dict) -> dict:
     """Always check if possible else call; never raise."""
-    to_call = int(req.get("to", 0))
+    to_call = int(req.get("to_call", req.get("to", 0)))
     if to_call <= 0:
-        return build_response("check")
-    return build_response("call")
+        return resp("check")
+    return resp("call")
 
 
 def test_short_match_check_call_bots():
@@ -112,59 +131,80 @@ def test_short_match_check_call_bots():
 
 
 def test_raise_validation_exact_2x():
-    """Facing BB, raise-to 200 legal; after that min re-raise-to is 400."""
-    session = MatchSession(num_hands=1, rng=__import__("random").Random(1))
-    # Manually drive first hand setup pieces via private API after start
-    # Use scripted decide instead.
+    """Facing BB, raise-to 200 legal; after that min re-raise-to is 400.
 
+    Botzone 协议：raise response 是「额外下注筹码」= raise_to_total - 加注方 street_bet。
+    - SB(0) street_bet=50（盲注）raise 到 200 → delta=150。
+    - BB(1) street_bet=100（盲注）raise 到 400 → delta=300。
+    """
+    session = MatchSession(num_hands=1, rng=__import__("random").Random(1))
+
+    # 脚本存「意图加注到的总额」（便于读），resp() 按当前 street_bet 转 delta。
+    # street_bet 从 req 推断：本手开始 = 0，盲注后 = SB 的 sb / BB 的 bb。
     script = {
-        # hand 0 preflop: SB (0) raise 200; BB (1) raise 400; SB fold
-        0: ["r200", "f"],
-        1: ["r400"],
+        0: [("raise", 200), "f"],   # SB raise to 200, then fold
+        1: [("raise", 400)],         # BB raise to 400
     }
     cursors = {0: 0, 1: 0}
+
+    def _street_bet(pid: int, req: dict) -> int:
+        # 从 history 推断本街已投入：累加本玩家在当前 street 的下注增量。
+        # 简化：盲注后 SB=50、BB=100（preflop 起始）。
+        my = req.get("my_id", pid)
+        hist = req.get("history", [])
+        bet = 0
+        cur_round = None
+        for ev in hist:
+            if ev.get("player_id") == my:
+                a = ev.get("action")
+                at = ev.get("action_type")
+                if at == "raise" and isinstance(a, int) and a > 0:
+                    bet += a  # delta 累加为本玩家已投入
+        # 盲注基础：preflop SB 投了 50、BB 投了 100（history 不含盲注，单独补）
+        if not hist:  # preflop 开局前
+            bet = 50 if my == 0 else 100
+        return bet
 
     def scripted(pid: int, req: dict) -> dict:
         seq = script[pid]
         i = cursors[pid]
         if i >= len(seq):
-            return build_response("fold")
+            return resp("fold")
         token = seq[i]
         cursors[pid] = i + 1
         if token == "f":
-            return build_response("fold")
+            return resp("fold")
         if token == "k":
-            return build_response("check")
+            return resp("check")
         if token == "c":
-            return build_response("call")
-        if token.startswith("r"):
-            return build_response("raise", int(token[1:]))
-        return build_response("fold")
+            return resp("call")
+        if isinstance(token, tuple) and token[0] == "raise":
+            return resp("raise", raise_to=token[1], street_bet=_street_bet(pid, req))
+        return resp("fold")
 
     result = asyncio.run(session.run_async(scripted))
     assert result.hands_played == 1
     assert result.hand_results[0].reason == "fold"
     # SB raised 200 (put 200 total: already 50 blind + 150), BB raised to 400,
     # SB folded → BB wins 200 (SB's contrib) after uncalled return.
-    # SB contrib at fold: 200; BB had put 400 but uncalled 200 returned.
-    # SB delta -200, BB +200
     assert result.hand_results[0].deltas == [-200, 200]
 
     # Illegal short re-raise (< 2x) → fold
     session2 = MatchSession(num_hands=1, rng=__import__("random").Random(2))
-    script2 = {0: ["r200"], 1: ["r300"]}  # 300 < 400 → illegal → fold
+    script2 = {0: [("raise", 200)], 1: [("raise", 300)]}  # 300 < 400 → illegal → fold
     cursors2 = {0: 0, 1: 0}
 
     def scripted2(pid: int, req: dict) -> dict:
         seq = script2[pid]
         i = cursors2[pid]
         if i >= len(seq):
-            return build_response("check") if req.get("to", 0) == 0 else build_response("call")
+            to_call = int(req.get("to_call", 0))
+            return resp("check") if to_call == 0 else resp("call")
         token = seq[i]
         cursors2[pid] = i + 1
-        if token.startswith("r"):
-            return build_response("raise", int(token[1:]))
-        return build_response("fold")
+        if isinstance(token, tuple) and token[0] == "raise":
+            return resp("raise", raise_to=token[1], street_bet=_street_bet(pid, req))
+        return resp("fold")
 
     result2 = asyncio.run(session2.run_async(scripted2))
     assert result2.hands_played == 1
@@ -178,8 +218,8 @@ def test_fold_ends_hand():
 
     def sb_folds(pid: int, req: dict) -> dict:
         if pid == 0:
-            return build_response("fold")
-        return build_response("check")
+            return resp("fold")
+        return resp("check")
 
     result = asyncio.run(session.run_async(sb_folds))
     assert result.hands_played == 1
@@ -227,7 +267,7 @@ def test_no_early_exit_on_bust():
     用 allin bot：每手可能全押归零，但下一手仍复位 20000 继续。
     num_hands=5 应全部跑完（rounds_played==5）。"""
     def allin_bot(pid: int, req: dict) -> dict:
-        return build_response("allin")
+        return resp("allin")
 
     session = MatchSession(num_hands=5, rng=__import__("random").Random(7))
     result = asyncio.run(session.run_async(allin_bot))

@@ -1,4 +1,22 @@
-"""紧凑 JSON 对局协议（stdin/stdout 一行一条）。"""
+"""德州扑克行协议（完全照 Botzone TexasHoldem2p 标准）。
+
+参考：https://wiki.botzone.org.cn/index.php?title=TexasHoldem2p
+
+关键点（对照 Botzone wiki）：
+- **Request 负载字段全名**：``num_players`` / ``dealer_id`` / ``my_id`` / ``my_chips``
+  / ``my_cards``(0-51) / ``public_cards``(0-51) / ``history``(对象数组) / ``hand``
+  / ``max_hand`` / ``total_win_chips`` / ``total_win_games``。
+- **Response 是裸整数**：``-1``=fold, ``-2``=allin, ``0``=call/check, ``>0``=raise
+  **额外加注量**（=「需要额外下注的筹码」= raise_to_total - 当前已下注额）。
+- **牌编码 0-51**：``card % 4`` = 花色（0♥ 1♦ 2♠ 3♣），``card // 4 + 2`` = 点数（2..14）。
+  注意 Botzone 花色顺序与平台内部不同（内部 0♠1♥2♦3♣），这里在编码边界做映射。
+- **history 对象**：``{"round": 0/1/2/3, "player_id": 0/1, "action": <裸整数>,
+  "action_type": "fold"/"call"/"check"/"raise"/"allin"}``。
+
+引擎内部仍用 raise-to-total 语义（min_raise_to = 2×current_bet），转换发生在
+本协议边界：``build_act_request`` 写 history.action 时把引擎的 raise-to 换算成
+delta；``parse_response`` 读 Bot 的 raise delta 后引擎再转成 raise-to-total 校验。
+"""
 
 from __future__ import annotations
 
@@ -7,50 +25,56 @@ from typing import Any, Sequence
 
 from bzplat.backend.games.holdem.cards import Card
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2  # Botzone 标准（v1 是旧的紧凑协议，已废弃）
 
-# hist action codes
-CODE_FOLD = 0
-CODE_CHECK = 1
-CODE_CALL = 2
-CODE_RAISE = 3
-CODE_ALLIN = 4
+# ── Botzone 裸整数 response 码 ─────────────────────────────────────────────
+RESP_FOLD = -1
+RESP_ALLIN = -2
+RESP_CALL_CHECK = 0
 
-ACTION_TO_CODE = {
-    "fold": CODE_FOLD,
-    "check": CODE_CHECK,
-    "call": CODE_CALL,
-    "raise": CODE_RAISE,
-    "allin": CODE_ALLIN,
+# action_type 字符串（Botzone history.action_type）
+ATYPE_FOLD = "fold"
+ATYPE_ALLIN = "allin"
+ATYPE_CALL = "call"
+ATYPE_CHECK = "check"
+ATYPE_RAISE = "raise"
+
+ACTION_TO_ATYPE = {
+    "fold": ATYPE_FOLD,
+    "check": ATYPE_CHECK,
+    "call": ATYPE_CALL,
+    "raise": ATYPE_RAISE,
+    "allin": ATYPE_ALLIN,
 }
-CODE_TO_ACTION = {v: k for k, v in ACTION_TO_CODE.items()}
+ATYPE_TO_ACTION = {v: k for k, v in ACTION_TO_ATYPE.items()}
 
-# response short codes a ∈ f|c|k|r|all
-A_TO_ACTION = {
-    "f": "fold",
-    "c": "call",
-    "k": "check",
-    "r": "raise",
-    "all": "allin",
+# 裸整数 → 动作名（>0 是 raise delta，具体量由调用方取）。
+_INT_TO_ACTION = {
+    RESP_FOLD: "fold",
+    RESP_ALLIN: "allin",
+    RESP_CALL_CHECK: "call",  # 0 可能是 call 也可能是 check，引擎按合法集判定
 }
-ACTION_TO_A = {v: k for k, v in A_TO_ACTION.items()}
-RESP_TO_ACTION = A_TO_ACTION  # alias
 
-# internal suit 0=♠ 1=♥ 2=♦ 3=♣ → judge suit
-_SUIT_TO_JUDGE = {0: 2, 1: 0, 2: 1, 3: 3}
-_JUDGE_TO_SUIT = {v: k for k, v in _SUIT_TO_JUDGE.items()}
+# 街道 → Botzone history.round（0=preflop 1=flop 2=turn 3=river）
+STREET_TO_ROUND = {"preflop": 0, "flop": 1, "turn": 2, "river": 3}
+
+# 内部花色（0♠ 1♥ 2♦ 3♣）→ Botzone 花色（0♥ 1♦ 2♠ 3♣）
+# Botzone: card % 4 == 0 → ♥, 1 → ♦, 2 → ♠, 3 → ♣
+_SUIT_TO_BOTZONE = {0: 2, 1: 0, 2: 1, 3: 3}
+_BOTZONE_TO_SUIT = {v: k for k, v in _SUIT_TO_BOTZONE.items()}
 
 
 def encode_card(card: Card) -> int:
-    """card_int = rank*4 + judge_suit; judge map {0:2,1:0,2:1,3:3}."""
-    return int(card.rank) * 4 + _SUIT_TO_JUDGE[int(card.suit)]
+    """Card → Botzone 整数 ``rank*4 + botzone_suit``（0-51）。"""
+    return int(card.rank) * 4 + _SUIT_TO_BOTZONE[int(card.suit)]
 
 
 def decode_card(n: int) -> Card:
+    """Botzone 整数 → Card（内部花色）。"""
     if not isinstance(n, int) or isinstance(n, bool) or n < 0 or n > 51:
         raise ValueError(f"invalid card_int: {n}")
-    rank, js = divmod(n, 4)
-    return Card(rank, _JUDGE_TO_SUIT[js])
+    rank, bs = divmod(n, 4)
+    return Card(rank, _BOTZONE_TO_SUIT[bs])
 
 
 def encode_cards(cards: Sequence[Card]) -> list[int]:
@@ -66,75 +90,168 @@ def build_act_request(
     hand: int,
     total_hands: int,
     my_id: int,
-    dealer_or_sb: int,
+    dealer_id: int,
     my_cards: Sequence[Card],
     board: Sequence[Card],
-    hist: list[list[int]],
+    history: list[dict[str, Any]],
     my_chips: int,
     opp_chips: int,
     sb: int,
     bb: int,
     to_call: int,
+    street_bet: int = 0,
+    current_bet: int = 0,
+    total_win_chips: list[int] | None = None,
+    total_win_games: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Build compact act request. `hand` is 0-based (emitted as-is in `h`)."""
-    return {
-        "v": PROTOCOL_VERSION,
-        "t": "act",
-        "h": int(hand),
-        "H": int(total_hands),
-        "id": int(my_id),
-        "d": int(dealer_or_sb),
-        "mc": encode_cards(my_cards),
-        "pc": encode_cards(board),
-        "hist": hist,
-        "c": int(my_chips),
-        "o": int(opp_chips),
+    """构造 Botzone 标准 act 请求负载（信封由传输层包）。
+
+    字段名严格对齐 Botzone TexasHoldem2p。``hand`` 为 0-based 当前手牌序号，
+    ``max_hand`` = 总手数（用户要求 70，Botzone 文档默认 50）。
+
+    注：``to_call`` / ``sb`` / ``bb`` 不在 Botzone 原始字段表里，但平台需下发给 Bot
+    方便决策；Bot 可忽略。核心字段（my_chips/my_cards/public_cards/history/...）
+    与 Botzone 一致，故标准 Botzone Bot 可直接跑。
+    """
+    req: dict[str, Any] = {
+        "num_players": 2,
+        "dealer_id": int(dealer_id),
+        "my_id": int(my_id),
+        "my_chips": int(my_chips),
+        "my_cards": encode_cards(my_cards),
+        "public_cards": encode_cards(board),
+        "history": history,
+        "hand": int(hand),
+        "max_hand": int(total_hands),
+        "total_win_chips": list(total_win_chips) if total_win_chips is not None else [0, 0],
+        "total_win_games": list(total_win_games) if total_win_games is not None else [0, 0],
+        # 平台扩展（非 Botzone 原始字段，标准 Bot 可忽略；便于 Bot 决策）。
+        "to_call": int(to_call),
+        "street_bet": int(street_bet),
+        "current_bet": int(current_bet),
         "sb": int(sb),
         "bb": int(bb),
-        "to": int(to_call),
+        "opp_chips": int(opp_chips),
+        "quitting": False,
+        "last_opponent_action": _last_action(history, exclude_player=my_id),
+        "last_opponent_raise_delta": _last_raise_delta(history, exclude_player=my_id),
     }
+    return req
 
 
-def parse_response(raw: dict[str, Any] | str | None) -> tuple[str, int | None]:
-    """Parse bot response → (action_name, optional raise_to)."""
+def _last_action(history: list[dict[str, Any]], *, exclude_player: int) -> Any:
+    """history 里最近一个非本玩家动作的裸整数（便于 Bot 快速决策）；无则 None。"""
+    for ev in reversed(history):
+        if ev.get("player_id") != exclude_player:
+            return ev.get("action")
+    return None
+
+
+def _last_raise_delta(history: list[dict[str, Any]], *, exclude_player: int) -> int:
+    """对手最近一次 raise 的额外量（便于 Bot 判断跟注额）；非 raise 或无则 0。"""
+    for ev in reversed(history):
+        if ev.get("player_id") != exclude_player:
+            if ev.get("action_type") == "raise":
+                return int(ev.get("action", 0))
+            return 0
+    return 0
+
+
+def action_to_history_int(action: str, raise_extra: int | None) -> int:
+    """动作 → Botzone history.action 裸整数。
+
+    - fold → -1；allin → -2；call/check → 0；raise → raise_extra（>0）。
+    - raise 时 raise_extra 必须为正整数（=「额外下注筹码」=raise_to - 旧 current_bet）。
+    """
+    if action == "fold":
+        return RESP_FOLD
+    if action == "allin":
+        return RESP_ALLIN
+    if action in ("call", "check"):
+        return RESP_CALL_CHECK
+    if action == "raise":
+        if raise_extra is None or raise_extra <= 0:
+            raise ValueError(f"raise 需要 raise_extra>0，得到 {raise_extra}")
+        return int(raise_extra)
+    raise ValueError(f"未知动作: {action}")
+
+
+def parse_response(raw: Any) -> tuple[str, int | None]:
+    """解析 Bot 输出 → ``(action_name, raise_delta | None)``。
+
+    接受三种输入（兼容测试与历史格式）：
+    1. 裸整数（Botzone 标准）：``-1`` / ``-2`` / ``0`` / ``>0``。
+    2. ``{"response": <裸整数>}`` 信封（loads_response 之后取出的负载）。
+    3. 旧 ``{"a": "r", "x": 400}``（测试/兼容，逐步废弃）。
+
+    返回：raise 时第二个元素是 **raise delta**（额外量，非 raise-to-total）。
+    """
+    # 裸整数
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return _int_to_action(raw), (raw if raw > 0 else None)
+
+    # 字符串 → 先尝试整数再 JSON
     if isinstance(raw, str):
-        raw = json.loads(raw)
-    if not isinstance(raw, dict):
-        raise ValueError("response must be a dict")
-    a = raw.get("a")
-    if not isinstance(a, str):
-        raise ValueError("missing or invalid a")
-    a = a.strip().lower()
-    if a in A_TO_ACTION:
-        action = A_TO_ACTION[a]
-    elif a in ACTION_TO_CODE:
-        action = a
-    else:
-        raise ValueError(f"unknown action code: {a}")
-    x = raw.get("x")
-    if x is None:
-        return action, None
-    if isinstance(x, bool) or not isinstance(x, (int, float)):
-        raise ValueError("invalid x")
-    xi = int(x)
-    if xi < 0:
-        raise ValueError("negative x")
-    return action, xi
+        s = raw.strip()
+        try:
+            n = int(s)
+            return _int_to_action(n), (n if n > 0 else None)
+        except ValueError:
+            raw = json.loads(s)
+
+    # dict
+    if isinstance(raw, dict):
+        # Botzone 信封 {"response": int}
+        if "response" in raw:
+            payload = raw["response"]
+            if isinstance(payload, bool) or not isinstance(payload, int):
+                raise ValueError(f"response 必须是整数，得到 {payload!r}")
+            return _int_to_action(payload), (payload if payload > 0 else None)
+        # 旧格式 {"a": ..., "x": ...}
+        a = raw.get("a")
+        if isinstance(a, str):
+            a = a.strip().lower()
+            mapping = {
+                "f": "fold", "c": "call", "k": "check",
+                "r": "raise", "all": "allin",
+                **ATYPE_TO_ACTION,
+            }
+            if a not in mapping:
+                raise ValueError(f"未知动作码: {a}")
+            action = mapping[a]
+            x = raw.get("x")
+            if action == "raise":
+                if x is None:
+                    raise ValueError("raise 缺 x")
+                xi = int(x)
+                if xi <= 0:
+                    raise ValueError("raise delta 须为正")
+                return action, xi
+            return action, None
+        raise ValueError("响应 dict 无 response/a 字段")
+
+    raise ValueError(f"无法解析的响应: {raw!r}")
 
 
-def build_response(action: str, raise_to: int | None = None) -> dict[str, Any]:
-    """Build bot response dict from action name."""
-    if action not in ACTION_TO_A:
-        raise ValueError(f"unknown action: {action}")
-    out: dict[str, Any] = {"a": ACTION_TO_A[action]}
-    if raise_to is not None:
-        out["x"] = int(raise_to)
-    return out
+def _int_to_action(n: int) -> str:
+    """裸整数 → 动作名（0 优先当 call；引擎按合法集把非法 call 折成 check/fold）。"""
+    if n in _INT_TO_ACTION:
+        return _INT_TO_ACTION[n]
+    if n > 0:
+        return "raise"
+    raise ValueError(f"未知 response 整数: {n}")
 
 
 def dumps_request(req: dict[str, Any]) -> str:
+    """序列化请求负载为单行 JSON（信封化由 runner 传输层做）。"""
     return json.dumps(req, separators=(",", ":"), ensure_ascii=False)
 
 
 def loads_response(line: str) -> dict[str, Any]:
+    """解析 Bot 输出一行（返回信封 dict，payload 由调用方取）。"""
     return json.loads(line)
+
+
+def fail_response() -> int:
+    """超时/异常兜底：fold（Botzone 裸整数 -1）。"""
+    return RESP_FOLD

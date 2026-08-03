@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""最小 call/check 样例 bot（紧凑 JSON 协议）。开发期可直接当「二进制」用：
-python3 -c "..." 或 chmod +x 本脚本后上传（需为 ELF 时请用 samples/build_sample.sh）。
+"""最小 call/check 样例 bot（Botzone 标准协议）。
 
-本文件也可被 samples/callbot.py 以解释器方式本地测试。
+Botzone 信封：平台每回合发一行
+  - Traditional / LongRunning 首回合：{"requests":[...], "responses":[...], ...}
+  - LongRunning 后续回合：{"request": <单条请求负载>}
+Bot 输出：{"response": <裸整数>}（-1 fold / -2 allin / 0 call-check / >0 raise 额外量）。
+
+callbot 策略：永远 call/check（response=0）。
 """
 from __future__ import annotations
 
 import json
 import sys
+
+
+def _extract_request(envelope: dict) -> dict:
+    """从信封取当前回合的请求负载。"""
+    if "request" in envelope:          # LongRunning 单条
+        return envelope["request"]
+    reqs = envelope.get("requests") or []  # Traditional / 首回合
+    return reqs[-1] if reqs else {}
 
 
 def main() -> None:
@@ -16,15 +28,12 @@ def main() -> None:
         if not line:
             continue
         try:
-            req = json.loads(line)
+            envelope = json.loads(line)
         except json.JSONDecodeError:
-            print(json.dumps({"a": "f"}), flush=True)
+            print(json.dumps({"response": -1}), flush=True)  # 出错 fold
             continue
-        to_call = int(req.get("to", 0) or 0)
-        if to_call > 0:
-            print(json.dumps({"a": "c"}), flush=True)
-        else:
-            print(json.dumps({"a": "k"}), flush=True)
+        # callbot：永远 call/check（0）
+        print(json.dumps({"response": 0}), flush=True)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,11 @@
-/* foldbot：永远弃牌（最弱策略，几乎必输）。测试赛制排名兜底用。 */
+/* foldbot：永远弃牌（最弱策略）。Botzone 协议：response=-1。 */
 #include "poker_util.h"
 
 int main(void) {
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    while ((n = getline(&line, &cap, stdin)) != -1) {
-        /* 不管请求，永远 fold */
-        emit("f", 0);
+    char *line = (char *)malloc(MAXLINE);
+    if (!line) return 1;
+    while (fgets(line, MAXLINE, stdin)) {
+        emit_int(-1);  /* fold */
     }
     free(line);
     return 0;

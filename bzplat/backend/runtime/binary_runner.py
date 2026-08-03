@@ -32,6 +32,12 @@ class BotSession:
     _buf: bytes = field(default_factory=bytes)
     _stderr_tail: bytearray = field(default_factory=bytearray)  # bot stderr 末尾（排查崩溃用）
     _stderr_task: asyncio.Task | None = None
+    # ── Botzone 协议会话状态（传输层维护，runner 读写）──
+    runtime_mode: str = "longrunning"  # "traditional" | "longrunning"
+    requests: list = field(default_factory=list)   # 累积下发的请求负载（Traditional 重放用）
+    responses: list = field(default_factory=list)  # 累积 Bot 响应负载（Traditional 信封 responses[]）
+    turn: int = 0                                  # 已完成的回合数（0=首回合尚未握手判定）
+    long_running: bool = False  # LongRunning Bot 首回合握手后置 True（之后发单 request 信封）
 
     def start_stderr_drain(self) -> None:
         """异步读取 bot stderr 到尾部缓冲（保留末尾 4KB，排查崩溃）。"""
@@ -87,7 +93,8 @@ class BinaryRunner:
 
     async def start_session(self, binary_path: str | Path, *,
                             info: BinaryInfo | None = None,
-                            action_timeout: float = DEFAULT_ACTION_TIMEOUT) -> str:
+                            action_timeout: float = DEFAULT_ACTION_TIMEOUT,
+                            runtime_mode: str = "longrunning") -> str:
         path = Path(binary_path).resolve()
         if not path.is_file():
             raise BotCrashedError(f"bot 二进制不存在: {path}")
@@ -98,7 +105,10 @@ class BinaryRunner:
 
         sid = uuid.uuid4().hex[:12]
         mode = self._select_mode(info)
-        session = BotSession(session_id=sid, info=info, binary_path=path, mode=mode)
+        session = BotSession(
+            session_id=sid, info=info, binary_path=path, mode=mode,
+            runtime_mode=runtime_mode,
+        )
         if mode == "local":
             await self._start_local(session)
         elif mode == "wine":
@@ -215,6 +225,24 @@ class BinaryRunner:
                 f"bot {session_id} stdout EOF（进程退出码={session.proc.returncode}）"
             )
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+    async def read_extra_line(self, session_id: str, *,
+                              timeout: float = 1.0) -> str | None:
+        """读取 Bot stdout 的一行（带短超时）。无数据返回 None（不报错）。
+
+        用于 LongRunning 模式首回合后探测 ``>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`` 握手：
+        Bot 若想长驻，在响应后立即输出该行；平台读到即置 long_running。
+        """
+        session = self._sessions.get(session_id)
+        if not session or not session.proc or not session.proc.stdout:
+            return None
+        try:
+            raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        if not raw:
+            return None
+        return raw.decode("utf-8", errors="replace").rstrip("\r\n") or None
 
     async def stop_session(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)

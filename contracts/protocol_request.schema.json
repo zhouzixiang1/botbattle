@@ -1,29 +1,48 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "BotzonePlatformActRequest",
+  "title": "BotzoneHoldemRequest",
+  "description": "Botzone 标准德州扑克请求负载（信封内 requests[] 元素或 request 字段）。字段全名对齐 Botzone TexasHoldem2p。",
   "type": "object",
-  "required": ["v", "t", "h", "H", "id", "mc", "c", "o", "sb", "bb", "to"],
+  "required": ["num_players", "dealer_id", "my_id", "my_chips", "my_cards", "public_cards", "history", "hand", "max_hand"],
   "properties": {
-    "v": { "const": 1 },
-    "t": { "const": "act" },
-    "h": { "type": "integer", "minimum": 0 },
-    "H": { "type": "integer", "minimum": 1 },
-    "id": { "type": "integer", "enum": [0, 1] },
-    "d": { "type": "integer", "enum": [0, 1] },
-    "mc": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 51 }, "minItems": 2, "maxItems": 2 },
-    "pc": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 51 } },
-    "hist": {
+    "num_players": { "type": "integer", "const": 2 },
+    "dealer_id": { "type": "integer", "enum": [0, 1] },
+    "my_id": { "type": "integer", "enum": [0, 1] },
+    "my_chips": { "type": "integer", "minimum": 0 },
+    "my_cards": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 51 },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "public_cards": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 51 },
+      "minItems": 0,
+      "maxItems": 5
+    },
+    "history": {
       "type": "array",
       "items": {
-        "type": "array",
-        "minItems": 3,
-        "maxItems": 3
+        "type": "object",
+        "required": ["round", "player_id", "action", "action_type"],
+        "properties": {
+          "round": { "type": "integer", "minimum": 0, "maximum": 3 },
+          "player_id": { "type": "integer", "enum": [0, 1] },
+          "action": { "type": "integer" },
+          "action_type": { "type": "string", "enum": ["fold", "allin", "call", "check", "raise"] }
+        }
       }
     },
-    "c": { "type": "integer" },
-    "o": { "type": "integer" },
+    "hand": { "type": "integer", "minimum": 0 },
+    "max_hand": { "type": "integer", "minimum": 1 },
+    "total_win_chips": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+    "total_win_games": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+    "to_call": { "type": "integer", "minimum": 0, "description": "平台扩展：跟注额" },
+    "street_bet": { "type": "integer", "minimum": 0, "description": "平台扩展：本街已投" },
+    "current_bet": { "type": "integer", "minimum": 0, "description": "平台扩展：本街最高下注" },
     "sb": { "type": "integer" },
     "bb": { "type": "integer" },
-    "to": { "type": "integer", "minimum": 0 }
+    "opp_chips": { "type": "integer", "minimum": 0 }
   }
 }

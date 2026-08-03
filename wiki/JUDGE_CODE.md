@@ -51,7 +51,7 @@ games.registry.get(game_id).run_session(decide, **params)
 
 ### 德州扑克（`games/holdem/engine.py`）
 
-- HU NLHE；盲注 SB/BB 交替；`raise` 为 raise-to-total；min re-raise-to ≥ 2× 上一 raise-to。
+- HU NLHE；盲注 SB/BB 交替；Bot 协议 raise response 的正整数 = **额外下注筹码**（raise delta，引擎内部转 raise-to-total 校验，min re-raise-to ≥ 2× 上一 raise-to）。
 - 非法着 / 超时 / 可恢复决策错误 → fold；all-in 后直接发出剩余公共牌结算。
 - **对局中途进程崩溃 / EOF（`BotCrashedError`）** → 引擎内**计分判负**（崩溃方本手全筹码给对手，对局 `completed`，`reason=crash`），不是继续 fold 跑完。
 - **启动失败**由编排层处理：非赛事 `aborted`（`bot_crashed`）；赛事 `technical_loss` completed。
