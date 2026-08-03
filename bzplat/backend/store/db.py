@@ -300,6 +300,34 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     ),
                 )
 
+        # 对账：补齐代码定义但 DB 缺失的内置模板。生产库 PR#74 前创建时 seed 只在
+        # 表空时跑一次（上方 if ntpl==0 守卫），导致之后新增的内置模板（如预赛/决赛）
+        # 永远不会入库——前端 GET /api/contests/templates 读 DB 表 → 缺失 → UI 看不到。
+        # 每次 _migrate 都跑：仅 INSERT 缺失项，绝不覆盖已有行（尊重 admin 覆盖/旧 blob
+        # 导入的 is_builtin=0 行）。幂等：已存在的跳过。
+        now2 = _now()
+        for tid, t in DEFAULT_TEMPLATES.items():
+            exists = conn.execute(
+                "SELECT 1 FROM contest_templates WHERE id=?", (tid,)
+            ).fetchone()
+            if exists:
+                continue
+            gid = t.get("game_id") or "holdem"
+            conn.execute(
+                "INSERT INTO contest_templates"
+                "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    tid,
+                    t.get("name") or tid,
+                    gid,
+                    json.dumps(default_match_config(gid)),
+                    json.dumps(t.get("stages") or [], ensure_ascii=False),
+                    1,
+                    now2,
+                ),
+            )
+
     # ── ratings / rating_history 加 game_id 维度（全面解耦 PR3）──────────
     # 旧库 ratings PK = bot_id（无 game_id 列）；rating_history 无 game_id 列。
     # 迁移：加 game_id 列，按 bots.game_id 回填，重建表改 PK 为 (bot_id, game_id)。
