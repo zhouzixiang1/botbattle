@@ -389,9 +389,8 @@ def test_cross_game_stats_cover_all_registered_games(store_with_matches):
     更新 db.py，此处仍应覆盖（因 _all_game_ids 从注册表派生）。
     """
     s, u, bh, bg, bp = store_with_matches
-    # 各注册游戏各建一场（reversi 是第 4 游戏，自建 bot）
-    br = s.create_bot(u["id"], "botR", binary_path="/tmp", format="elf", game_id="reversi")["id"]
-    for gid, bot in (("holdem", bh), ("gomoku", bg), ("pencil", bp), ("reversi", br)):
+    # 各注册游戏各建一场
+    for gid, bot in (("holdem", bh), ("gomoku", bg), ("pencil", bp)):
         s.create_match(f"m_{gid}", bot, bot, game_id=gid)
     # count_matches 跨游戏 = 注册游戏数
     from bzplat.backend.games import registry

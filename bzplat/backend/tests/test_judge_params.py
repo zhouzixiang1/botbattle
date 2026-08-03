@@ -254,7 +254,7 @@ def test_get_judges_returns_all_games(tmp_path):
     assert r.status_code == 200
     data = r.json()
     gids = [g["game_id"] for g in data["games"]]
-    assert gids == ["holdem", "gomoku", "pencil", "reversi"]
+    assert gids == ["holdem", "gomoku", "pencil"]
     # 每款游戏带代码位置与 docstring
     for g in data["games"]:
         assert g["code_path"].endswith(".py")
@@ -263,11 +263,9 @@ def test_get_judges_returns_all_games(tmp_path):
     holdem = next(g for g in data["games"] if g["game_id"] == "holdem")
     gomoku = next(g for g in data["games"] if g["game_id"] == "gomoku")
     pencil = next(g for g in data["games"] if g["game_id"] == "pencil")
-    reversi = next(g for g in data["games"] if g["game_id"] == "reversi")
     assert len(holdem["params"]) == 4
     assert len(gomoku["params"]) == 1
     assert pencil["params"] == []
-    assert reversi["params"] == []
 
 
 def test_get_judges_non_admin_forbidden(tmp_path):

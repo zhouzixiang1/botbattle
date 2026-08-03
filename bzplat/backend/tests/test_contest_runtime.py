@@ -57,8 +57,7 @@ def test_holdem_build_match_plan_nonduplicate_single_leg():
 
 
 def test_non_holdem_spec_has_no_build_match_plan():
-    """gomoku/pencil/reversi 无 build_match_plan（仅 holdem 支持 duplicate）。"""
-    for gid in ("gomoku", "pencil", "reversi"):
+    for gid in ("gomoku", "pencil"):
         assert registry.get(gid).build_match_plan is None
 
 
