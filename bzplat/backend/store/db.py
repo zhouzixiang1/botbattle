@@ -2364,7 +2364,8 @@ class Store:
             )
 
     def list_contests(
-        self, *, status: str | None = None, organizer_id: int | None = None
+        self, *, status: str | None = None, organizer_id: int | None = None,
+        game_id: str | None = None,
     ) -> list[dict]:
         with self._tx() as c:
             sql = "SELECT * FROM contests WHERE 1=1"
@@ -2375,6 +2376,9 @@ class Store:
             if organizer_id is not None:
                 sql += " AND organizer_id=?"
                 params.append(organizer_id)
+            if game_id:
+                sql += " AND game_id=?"
+                params.append(game_id)
             sql += " ORDER BY created_at DESC"
             return [_row(r) for r in c.execute(sql, params)]
 
