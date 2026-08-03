@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Slider } from '@/components/ui/slider'
 import { ErrorMsg, Loading } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, apiPost, errMsg } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/games'
 import { isBoardGame } from '@/games'
@@ -352,10 +353,14 @@ export default function MatchViewer() {
                   {!isBoard && (
                     <Button variant="outline" size="sm" onClick={() => jumpHand(1)} className="gap-1">下一手<SkipForward className="size-3.5" /></Button>
                   )}
-                  <select value={speedIdx} onChange={(e) => setSpeedIdx(Number(e.target.value))}
-                    className="h-8 rounded-lg border border-input bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
-                    {SPEEDS.map((s, i) => (<option key={i} value={i}>{s.label}</option>))}
-                  </select>
+                  <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
+                    <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SPEEDS.map((s, i) => (<SelectItem key={i} value={String(i)}>{s.label}</SelectItem>))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="mt-3 flex items-center gap-3">
                   <span className="font-mono text-[10px] text-muted-foreground">步 {cur + 1}/{total}{atLive ? ' ·直播' : ''}</span>

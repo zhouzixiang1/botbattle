@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft } from 'lucide-react'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { ErrorMsg, Loading, RefreshBtn } from './ui'
+import { ErrorMsg, Loading, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 import { defaultMatchConfig, getGame, GAMES, type GameId } from '@/games'
 
 // ── 类型 ──────────────────────────────────────────────────────
@@ -285,14 +285,19 @@ function Editor(props: {
           <input className={inp} value={t.name}
             onChange={(e) => props.setField('name', e.target.value)} />
         </label>
-        <label className="text-sm text-muted-foreground">
+        <div className="space-y-1 text-sm text-muted-foreground">
           游戏
-          <select className={inp} value={t.game_id} onChange={(e) => props.changeGame(e.target.value as GameId)}>
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>{g.label}</option>
-            ))}
-          </select>
-        </label>
+          <Select value={t.game_id} onValueChange={(v) => props.changeGame(v as GameId)}>
+            <SelectTrigger className="mt-1 h-9 w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {GAMES.map((g) => (
+                <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* 对局参数 match_config（经注册表 configFields，消除 per-game if 分支） */}
@@ -326,18 +331,28 @@ function Editor(props: {
                 标识 key
                 <input className={inp} value={s.key ?? ''} onChange={(e) => props.patchStage(i, { key: e.target.value })} />
               </label>
-              <label className="text-sm text-muted-foreground">
+              <div className="space-y-1 text-sm text-muted-foreground">
                 类型
-                <select className={inp} value={s.type} onChange={(e) => props.patchStage(i, { type: e.target.value as StageType })}>
-                  {STAGE_TYPES.map((st) => <option key={st.id} value={st.id}>{st.label}</option>)}
-                </select>
-              </label>
-              <label className="text-sm text-muted-foreground">
+                <Select value={s.type} onValueChange={(v) => props.patchStage(i, { type: v as StageType })}>
+                  <SelectTrigger className="mt-1 h-9 w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {STAGE_TYPES.map((st) => <SelectItem key={st.id} value={st.id}>{st.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1 text-sm text-muted-foreground">
                 计分
-                <select className={inp} value={s.scoring ?? 'poker_3_1_0'} onChange={(e) => props.patchStage(i, { scoring: e.target.value as Scoring })}>
-                  {SCORINGS.map((sc) => <option key={sc.id} value={sc.id}>{sc.label}</option>)}
-                </select>
-              </label>
+                <Select value={s.scoring ?? 'poker_3_1_0'} onValueChange={(v) => props.patchStage(i, { scoring: v as Scoring })}>
+                  <SelectTrigger className="mt-1 h-9 w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SCORINGS.map((sc) => <SelectItem key={sc.id} value={sc.id}>{sc.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
               <label className="text-sm text-muted-foreground">
                 晋级人数 advance_count
                 <input type="number" min={1} className={inp} value={s.advance_count ?? ''}

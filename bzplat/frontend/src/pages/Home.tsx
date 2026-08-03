@@ -14,6 +14,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
@@ -58,21 +59,22 @@ export default function Home() {
       title="最新对局"
       subtitle="进行中与已完成的对局"
       actions={
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
-          <select
-            value={gameId}
-            onChange={(e) => setGameId(e.target.value)}
-            className="h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            <option value="">全部</option>
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          <Select value={gameId || 'all'} onValueChange={(v) => setGameId(v === 'all' ? '' : v)}>
+            <SelectTrigger className="h-9 w-[8.5rem]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部</SelectItem>
+              {GAMES.map((g) => (
+                <SelectItem key={g.id} value={g.id}>
+                  {g.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       }
     >
       {/* Hero 区 */}

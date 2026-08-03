@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiForm, apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 
@@ -152,9 +153,6 @@ export default function MyBots() {
     )
   }
 
-  const selectCls =
-    'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
-
   return (
     <PageStub title="我的 Bot" subtitle="上传二进制 Bot（Linux ELF / Windows PE），选择对应游戏类型；macOS Mach-O 会被拒绝">
       {/* 桌面双栏：左=上传表单（sticky 常驻），右=筛选+列表主区；<lg 单列堆叠 */}
@@ -165,19 +163,19 @@ export default function MyBots() {
           <form onSubmit={(e) => void onUpload(e)} className="space-y-3">
             <h2 className="text-sm font-medium text-foreground">上传新 Bot</h2>
             <div className="space-y-1.5">
-              <Label htmlFor="upload-game">游戏类型</Label>
-              <select
-                id="upload-game"
-                value={gameId}
-                onChange={(e) => setGameId(e.target.value)}
-                className={selectCls}
-              >
-                {GAMES.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.label}
-                  </option>
-                ))}
-              </select>
+              <Label>游戏类型</Label>
+              <Select value={gameId} onValueChange={setGameId}>
+                <SelectTrigger className="mt-1.5 h-9 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {GAMES.map((g) => (
+                    <SelectItem key={g.id} value={g.id}>
+                      {g.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="upload-name">名称（唯一标识）</Label>
@@ -228,21 +226,22 @@ export default function MyBots() {
 
       <div className="mt-6 lg:mt-0">
       <div className="mb-3">
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
           筛选游戏
-          <select
-            value={filterGame}
-            onChange={(e) => setFilterGame(e.target.value)}
-            className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            <option value="">全部</option>
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          <Select value={filterGame || 'all'} onValueChange={(v) => setFilterGame(v === 'all' ? '' : v)}>
+            <SelectTrigger className="h-9 w-[8.5rem]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部</SelectItem>
+              {GAMES.map((g) => (
+                <SelectItem key={g.id} value={g.id}>
+                  {g.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       <Card className="gap-0 py-0">

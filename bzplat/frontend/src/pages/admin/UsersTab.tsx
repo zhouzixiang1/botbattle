@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn } from './ui'
+import { EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 
 interface User {
   id: number
@@ -129,16 +129,20 @@ export default function UsersTab() {
                 </td>
                 <td className="px-3 py-2 text-muted-foreground">{u.email}</td>
                 <td className="px-3 py-2">
-                  <select
+                  <Select
                     value={u.role}
                     disabled={busyId === u.id}
-                    onChange={(e) => void setRole(u.id, e.target.value)}
-                    className="rounded border border-input bg-background px-2 py-1 text-foreground"
+                    onValueChange={(v) => void setRole(u.id, v)}
                   >
-                    <option value="user">user</option>
-                    <option value="organizer">organizer</option>
-                    <option value="admin">admin</option>
-                  </select>
+                    <SelectTrigger size="sm" className="h-8 w-full text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="user">user</SelectItem>
+                      <SelectItem value="organizer">organizer</SelectItem>
+                      <SelectItem value="admin">admin</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </td>
                 <td className="px-3 py-2 text-xs">
                   {u.email_verified ? (

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, errMsg } from '../../api'
-import { ErrorMsg, Loading, RefreshBtn } from './ui'
+import { ErrorMsg, Loading, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 
 interface LogState {
   lines: string[]
@@ -88,15 +88,16 @@ export default function LogsTab() {
         </div>
         <p className="text-xs text-muted-foreground">{data?.path ?? '—'}</p>
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          <select
-            value={level}
-            onChange={(e) => setLevel(e.target.value)}
-            className="rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground"
-          >
-            {LEVELS.map((l) => (
-              <option key={l} value={l}>{l || '全部级别'}</option>
-            ))}
-          </select>
+          <Select value={level || 'all'} onValueChange={(v) => setLevel(v === 'all' ? '' : v)}>
+            <SelectTrigger size="sm" className="h-8 w-[8.5rem] text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {LEVELS.map((l) => (
+                <SelectItem key={l || 'all'} value={l || 'all'}>{l || '全部级别'}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}

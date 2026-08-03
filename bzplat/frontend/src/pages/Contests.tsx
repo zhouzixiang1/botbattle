@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import { getGame, defaultMatchConfig } from '@/games'
@@ -108,31 +109,27 @@ export default function Contests() {
     }
   }
 
-  const selectCls =
-    'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
-  const inlineSelectCls =
-    'h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
-
   return (
     <PageStub
       title="比赛"
       subtitle="组织者发布比赛，选手派遣 Bot；默认模板偏 Swiss / 分组，适合校赛规模"
       actions={
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
-          <select
-            value={filterGame}
-            onChange={(e) => setFilterGame(e.target.value)}
-            className={inlineSelectCls}
-          >
-            <option value="">全部</option>
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          <Select value={filterGame || 'all'} onValueChange={(v) => setFilterGame(v === 'all' ? '' : v)}>
+            <SelectTrigger className="h-9 w-[8.5rem]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部</SelectItem>
+              {GAMES.map((g) => (
+                <SelectItem key={g.id} value={g.id}>
+                  {g.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       }
     >
       {error && <ErrorMsg msg={error} className="mb-3" />}
@@ -161,19 +158,19 @@ export default function Contests() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="contest-template">模板</Label>
-                <select
-                  id="contest-template"
-                  className={selectCls}
-                  value={templateId}
-                  onChange={(e) => setTemplateId(e.target.value)}
-                >
-                  {templates.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}（{gameLabel(t.game_id)}）
-                    </option>
-                  ))}
-                </select>
+                <Label>模板</Label>
+                <Select value={templateId} onValueChange={setTemplateId}>
+                  <SelectTrigger className="mt-1.5 h-9 w-full">
+                    <SelectValue placeholder="选择模板" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {templates.map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.name}（{gameLabel(t.game_id)}）
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               {selSpec.configFields.map((f) => (
                 <div key={f.key} className="space-y-1.5">
