@@ -15,6 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { ErrorMsg, EmptyState, Loading, StatusBadge } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import BracketTree from '@/components/contest/BracketTree'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
@@ -187,7 +188,6 @@ export default function ContestDetail() {
     )
   }
 
-  const selCls = 'h-9 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring'
 
   return (
     <PageStub title="比赛详情">
@@ -240,10 +240,14 @@ export default function ContestDetail() {
         )}
         {isLoggedIn && contest.status === 'open' && (
           <div className="flex flex-wrap items-center gap-2">
-            <select className={selCls} value={botId} onChange={(e) => setBotId(e.target.value)}>
-              <option value="">选择我的 Bot</option>
-              {bots.map((b) => (<option key={b.id} value={b.id}>{b.display_name || b.name}</option>))}
-            </select>
+            <Select value={botId} onValueChange={setBotId}>
+              <SelectTrigger className="h-9 w-[12rem]">
+                <SelectValue placeholder="选择我的 Bot" />
+              </SelectTrigger>
+              <SelectContent>
+                {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
+              </SelectContent>
+            </Select>
             <Button variant="outline" disabled={!botId} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) })}>
               报名派遣
             </Button>
@@ -251,10 +255,14 @@ export default function ContestDetail() {
         )}
         {isLoggedIn && myEntry && contest.status === 'rest' && (
           <div className="flex flex-wrap items-center gap-2">
-            <select className={selCls} value={botId} onChange={(e) => setBotId(e.target.value)}>
-              <option value="">更换 Bot（当前 #{myEntry.bot_id}）</option>
-              {bots.map((b) => (<option key={b.id} value={b.id}>{b.display_name || b.name}</option>))}
-            </select>
+            <Select value={botId} onValueChange={setBotId}>
+              <SelectTrigger className="h-9 w-[12rem]">
+                <SelectValue placeholder={`更换 Bot（当前 #${myEntry.bot_id}）`} />
+              </SelectTrigger>
+              <SelectContent>
+                {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
+              </SelectContent>
+            </Select>
             <Button variant="outline" disabled={!botId} onClick={() => void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) })}>
               确认更换
             </Button>

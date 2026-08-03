@@ -11,6 +11,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
@@ -49,19 +50,20 @@ export default function DataDownload() {
       )}
       {error && <ErrorMsg msg={error} className="mb-3" />}
       <div className="mb-3">
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
           筛选游戏
-          <select
-            value={filterGame}
-            onChange={(e) => setFilterGame(e.target.value)}
-            className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring"
-          >
-            <option value="">全部</option>
-            {GAMES.map((g) => (
-              <option key={g.id} value={g.id}>{g.label}</option>
-            ))}
-          </select>
-        </label>
+          <Select value={filterGame || 'all'} onValueChange={(v) => setFilterGame(v === 'all' ? '' : v)}>
+            <SelectTrigger className="h-9 w-[8.5rem]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部</SelectItem>
+              {GAMES.map((g) => (
+                <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
       {packs.length === 0 ? (
         <EmptyState text="暂无可下载的数据集" />

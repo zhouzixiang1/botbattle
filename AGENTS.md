@@ -108,14 +108,20 @@ matches/    后台对局：auto_matcher（闲时自动调度，ladder 类型，s
 **前端架构（bzplat/frontend，React 19 + Vite 8 + Tailwind v4 + shadcn/ui）**：
 ```
 src/index.css              设计 token：shadcn v4 OKLCH 双主题（:root 浅 / .dark 暗）emerald 品牌色系 + @theme inline 桥接
-src/components/ui/         共享 UI 原语库（shadcn：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart...）—— 全项目唯一组件抽象层
+src/components/ui/         共享 UI 原语库（shadcn new-york：Button/Input/Card/Table/Tabs/Badge/Dialog/DropdownMenu/Select/Command/Popover/Tooltip/Slider/Switch/Separator/Sheet/Skeleton/Sonner/Avatar/Label/ScrollArea/MetricCard/Chart...）—— 全项目唯一组件抽象层
 src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadge（前台+管理端共用）
+src/components/ui/select.tsx   shadcn Select（Radix）—— 全站下拉框唯一实现，禁裸用原生 <select>
 src/components/shell/      全局 Shell：AppShell（已登录 lg+ 侧栏 / 访客全断点顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
 src/pages/                 22 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
 ```
 改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
+**下拉框统一规范**（硬约束）：所有下拉框一律用 `@/components/ui/select`（shadcn Radix Select）+ `SelectTrigger/SelectValue/SelectContent/SelectItem`，**禁止裸用原生 `<select>`**（跨设备/浏览器展开样式不统一）。迁移注意 4 点：
+1. 受控 API：`<Select value onValueChange>`（非 `onChange(e.target.value)`）。
+2. **空值哨兵**：表"全部/不过滤"的空 value `''` 不能直接传 Radix（`value=""` 被当未选/placeholder）——统一用哨兵 `'all'`：`value={x || 'all'}` + `onValueChange={(v) => setX(v === 'all' ? '' : v)}`。
+3. **number value 转 string**：Radix value 只接受 string，`speedIdx`/座位号等 number 需 `value={String(n)}` + `onValueChange={(v) => setN(Number(v))}`；动态实体 id（number）的 `<SelectItem value={String(id)}>`。
+4. **label 包裹**：SelectTrigger 是 `<button>` 不支持 `htmlFor`——表单内用 `<div className="space-y-1.5"><Label>…</Label><Select>…</Select></div>`；inline 行内用 `<div className="flex items-center gap-2"><span>…</span><Select>…</Select></div>`。
 
 **核心解耦契约层**（全面解耦后，游戏对平台暴露统一契约；违反这些契约的游戏会在运行时崩）：
 - **结果鸭子类型**（result.py 独立定义，不共享基类）：裁判产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**（+ `rounds_played`/`rounds`/`events`/`winner`），绝不触碰扑克的 pot/board/holes 或棋类的棋盘。**`winner` 在引擎内权威化**（PR4）：棋类单轮取胜者；holdem 多手按累计净筹码（`final_chips`/net）比较——编排层只读 `result.winner`（+ ea/eb 平局兜底），不再有 match_end 事件三层兜底 / holdem 特例注释（隐性 if-game_id 已消除）。**测试守护**：`tests/test_result_contract.py` 断言三游戏 result 都满足此契约（防 drift）。

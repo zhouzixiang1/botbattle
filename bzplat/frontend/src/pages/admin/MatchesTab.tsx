@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
+import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 
 interface Match {
   id: string
@@ -64,17 +64,18 @@ export default function MatchesTab() {
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground"
-        >
-          {STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s === '' ? '全部状态' : s}
-            </option>
-          ))}
-        </select>
+        <Select value={status || 'all'} onValueChange={(v) => setStatus(v === 'all' ? '' : v)}>
+          <SelectTrigger size="sm" className="h-9 w-[8.5rem]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {STATUSES.map((s) => (
+              <SelectItem key={s || 'all'} value={s || 'all'}>
+                {s === '' ? '全部状态' : s}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <span className="text-xs text-muted-foreground">共 {matches.length} 局</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />

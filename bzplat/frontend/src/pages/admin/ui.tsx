@@ -6,3 +6,4 @@
 export { Card } from '@/components/ui/card'
 export { MetricCard } from '@/components/ui/metric-card'
 export { EmptyState, Loading, ErrorMsg, StatusBadge, RefreshBtn } from '@/components/ui/status'
+export { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'

@@ -5,6 +5,7 @@ import {
   ChevronRight,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { SPEEDS } from '@/components/use-playback'
 
 /** 回放控制条：播放/暂停 + 步进 + 速度档 + 进度。MatchDetail / ArenaWatch 共用。 */
@@ -65,17 +66,18 @@ export function PlaybackControls({
         {!compact && '下一步'}
         <ChevronRight className="size-4" />
       </Button>
-      <select
-        value={speedIdx}
-        onChange={(e) => onSpeedChange(Number(e.target.value))}
-        className="h-8 rounded-lg border border-input bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-      >
-        {SPEEDS.map((s, i) => (
-          <option key={i} value={i}>
-            {s.label}
-          </option>
-        ))}
-      </select>
+      <Select value={String(speedIdx)} onValueChange={(v) => onSpeedChange(Number(v))}>
+        <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {SPEEDS.map((s, i) => (
+            <SelectItem key={i} value={String(i)}>
+              {s.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       {/* 进度条 */}
       <div className="flex min-w-[120px] flex-1 items-center gap-2">
         <span className="font-mono text-[10px] text-muted-foreground">

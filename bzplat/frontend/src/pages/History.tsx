@@ -5,6 +5,7 @@ import PageStub from '@/components/PageStub'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 
@@ -27,9 +28,6 @@ interface Match {
 }
 
 const PAGE_SIZE = 20
-
-const selectCls =
-  'ml-2 h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
 
 export default function History() {
   const [matches, setMatches] = useState<Match[]>([])
@@ -66,35 +64,37 @@ export default function History() {
       subtitle="全部对局记录，可按状态与游戏筛选"
       actions={
         <div className="flex flex-wrap gap-4">
-          <label className="flex items-center text-sm text-muted-foreground">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
             状态
-            <select
-              value={status}
-              onChange={(e) => onStatus(e.target.value)}
-              className={selectCls}
-            >
-              <option value="">全部</option>
-              <option value="pending">排队中</option>
-              <option value="running">进行中</option>
-              <option value="completed">已完成</option>
-              <option value="aborted">已中止</option>
-            </select>
-          </label>
-          <label className="flex items-center text-sm text-muted-foreground">
+            <Select value={status || 'all'} onValueChange={(v) => onStatus(v === 'all' ? '' : v)}>
+              <SelectTrigger className="h-9 w-[8.5rem]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部</SelectItem>
+                <SelectItem value="pending">排队中</SelectItem>
+                <SelectItem value="running">进行中</SelectItem>
+                <SelectItem value="completed">已完成</SelectItem>
+                <SelectItem value="aborted">已中止</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
             游戏
-            <select
-              value={gameId}
-              onChange={(e) => onGame(e.target.value)}
-              className={selectCls}
-            >
-              <option value="">全部</option>
-              {GAMES.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.label}
-                </option>
-              ))}
-            </select>
-          </label>
+            <Select value={gameId || 'all'} onValueChange={(v) => onGame(v === 'all' ? '' : v)}>
+              <SelectTrigger className="h-9 w-[8.5rem]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部</SelectItem>
+                {GAMES.map((g) => (
+                  <SelectItem key={g.id} value={g.id}>
+                    {g.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       }
     >

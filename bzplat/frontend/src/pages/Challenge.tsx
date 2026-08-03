@@ -9,6 +9,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ErrorMsg } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel, type GameId } from '@/lib/games'
@@ -115,9 +116,6 @@ export default function Challenge() {
     )
   }
 
-  const selectCls =
-    'mt-1.5 h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs focus:outline-none focus:ring-2 focus:ring-ring'
-
   return (
     <PageStub title="发起挑战" subtitle="选择游戏与你的 Bot，再选对手（搜索/自博弈/人类亲自上场）">
       <form onSubmit={(e) => void onSubmit(e)} className="mx-auto max-w-2xl">
@@ -126,35 +124,33 @@ export default function Challenge() {
             {/* 游戏 + 己方 Bot：桌面端双栏，移动端单列 */}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="challenge-game">游戏</Label>
-                <select
-                  id="challenge-game"
-                  value={gameId}
-                  onChange={(e) => setGameId(e.target.value as GameId)}
-                  className={selectCls}
-                >
-                  {GAMES.map((g) => (
-                    <option key={g.id} value={g.id}>{g.label}</option>
-                  ))}
-                </select>
+                <Label>游戏</Label>
+                <Select value={gameId} onValueChange={(v) => setGameId(v as GameId)}>
+                  <SelectTrigger className="mt-1.5 h-9 w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {GAMES.map((g) => (
+                      <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="challenge-mybot">你的 Bot（{gameLabel(gameId)}）</Label>
-                <select
-                  id="challenge-mybot"
-                  value={myBotId}
-                  onChange={(e) => setMyBotId(e.target.value)}
-                  required
-                  className={selectCls}
-                >
-                  <option value="">选择…</option>
-                  {mine.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.display_name || b.name} ({b.format}/{b.os}-{b.arch})
-                    </option>
-                  ))}
-                </select>
+                <Label>你的 Bot（{gameLabel(gameId)}）</Label>
+                <Select value={myBotId} onValueChange={setMyBotId}>
+                  <SelectTrigger className="mt-1.5 h-9 w-full">
+                    <SelectValue placeholder="选择…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {mine.map((b) => (
+                      <SelectItem key={b.id} value={String(b.id)}>
+                        {b.display_name || b.name} ({b.format}/{b.os}-{b.arch})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
@@ -218,17 +214,18 @@ export default function Challenge() {
               <p className="mb-2">
                 你（<strong className="text-foreground">{user?.username}</strong>）作为人类玩家，对战上面的 Bot。
               </p>
-              <label className="block">
-                你坐哪一位？
-                <select
-                  value={humanSeat}
-                  onChange={(e) => setHumanSeat(Number(e.target.value))}
-                  className={selectCls}
-                >
-                  <option value={1}>座位 1（后手/白）</option>
-                  <option value={0}>座位 0（先手/黑）</option>
-                </select>
-              </label>
+              <div className="space-y-1.5">
+                <span className="text-sm text-muted-foreground">你坐哪一位？</span>
+                <Select value={String(humanSeat)} onValueChange={(v) => setHumanSeat(Number(v))}>
+                  <SelectTrigger className="mt-1.5 h-9 w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">座位 1（后手/白）</SelectItem>
+                    <SelectItem value="0">座位 0（先手/黑）</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <p className="mt-2 text-xs text-muted-foreground">人类对战不计天梯、走独立并发。</p>
             </div>
           )}
