@@ -98,6 +98,7 @@ class ContestManager:
         match_config: dict | None = None,
         phase: str = "standalone",
         source_contest_id: int | None = None,
+        require_real_name: int = 0,
     ) -> dict:
         # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages+match_config
         if stages:
@@ -129,6 +130,7 @@ class ContestManager:
             match_config_json=json.dumps(cfg, ensure_ascii=False),
             phase=phase,
             source_contest_id=source_contest_id,
+            require_real_name=require_real_name,
         )
 
     def open_registration(self, contest_id: int) -> dict:
@@ -148,6 +150,11 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c or c["status"] != CONTEST_OPEN:
             raise ValueError("比赛未开放报名")
+        # 实名校验：赛事要求实名时，报名者必须已填完整实名信息
+        if int(c.get("require_real_name") or 0):
+            u = self.store.get_user(user_id)
+            if not u or not all((u.get(k) or "").strip() for k in ("real_name", "phone", "school", "student_id")):
+                raise ValueError("本赛事要求实名，请先在个人资料填写实名信息（姓名/手机号/学校/学号）")
         bot = self.store.get_bot(bot_id)
         if not bot:
             raise ValueError("bot 不存在")

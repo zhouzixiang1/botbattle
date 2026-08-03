@@ -84,6 +84,10 @@ class AuthManager:
         password: str,
         *,
         display_name: str = "",
+        real_name: str = "",
+        phone: str = "",
+        school: str = "",
+        student_id: str = "",
     ) -> dict:
         _validate_username(username)
         _validate_email(email)
@@ -94,7 +98,8 @@ class AuthManager:
             raise AuthError("email_taken", "邮箱已注册")
         pw_hash = hash_password(password)
         user = self.store.create_user(
-            username, email, pw_hash, display_name=display_name, role=ROLE_USER
+            username, email, pw_hash, display_name=display_name, role=ROLE_USER,
+            real_name=real_name, phone=phone, school=school, student_id=student_id,
         )
         self.store.update_user(user["id"], email_verified=0)
         user = self.store.get_user(user["id"])

@@ -16,6 +16,10 @@ export default function Register() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
+  const [realName, setRealName] = useState('')
+  const [phone, setPhone] = useState('')
+  const [school, setSchool] = useState('')
+  const [studentId, setStudentId] = useState('')
   const [captcha, setCaptcha] = useState<CaptchaValue>({ captcha_id: '', captcha_answer: '' })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -27,6 +31,7 @@ export default function Register() {
     try {
       await apiJson('/api/auth/register', 'POST', {
         username, email, password, display_name: displayName,
+        real_name: realName, phone, school, student_id: studentId,
         captcha_id: captcha.captcha_id, captcha_answer: captcha.captcha_answer,
       })
       nav(`/verify-email?u=${encodeURIComponent(username || email)}`)
@@ -53,6 +58,28 @@ export default function Register() {
             <div className="space-y-1.5">
               <Label htmlFor="reg-display">显示名（可选）</Label>
               <Input id="reg-display" value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={64} />
+            </div>
+            {/* 实名信息（可选，注册后也可在设置页补填） */}
+            <div className="rounded-lg border border-border p-3 space-y-3">
+              <p className="text-sm font-medium text-foreground">实名信息（选填）</p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="reg-realname">姓名</Label>
+                  <Input id="reg-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="reg-phone">手机号</Label>
+                  <Input id="reg-phone" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={20} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="reg-school">学校</Label>
+                  <Input id="reg-school" value={school} onChange={(e) => setSchool(e.target.value)} maxLength={64} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="reg-studentid">学号</Label>
+                  <Input id="reg-studentid" value={studentId} onChange={(e) => setStudentId(e.target.value)} maxLength={32} />
+                </div>
+              </div>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="reg-password">密码（至少 8 位）</Label>

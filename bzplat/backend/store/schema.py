@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS users (
     xp              INTEGER NOT NULL DEFAULT 0,
     level           INTEGER NOT NULL DEFAULT 0,
     last_active_at  TEXT,
+    real_name       TEXT    NOT NULL DEFAULT '',
+    phone           TEXT    NOT NULL DEFAULT '',
+    school          TEXT    NOT NULL DEFAULT '',
+    student_id      TEXT    NOT NULL DEFAULT '',
     CONSTRAINT chk_username CHECK (length(username) >= 3),
     CONSTRAINT chk_role CHECK (role IN ('user', 'organizer', 'admin'))
 );
@@ -82,6 +86,7 @@ CREATE TABLE IF NOT EXISTS contests (
     phase                   TEXT    NOT NULL DEFAULT 'standalone',  -- P2: preliminary/final/standalone
     source_contest_id       INTEGER,  -- P2: 软链（预赛→决赛导航，不复制 entry）
     official_results_ready  INTEGER NOT NULL DEFAULT 0,  -- P2: 全员正式名次是否已落库
+    require_real_name       INTEGER NOT NULL DEFAULT 0,  -- 报名是否要求实名
     CONSTRAINT chk_contest_status CHECK (
         status IN ('draft','open','running','rest','finished','cancelled'))
 );

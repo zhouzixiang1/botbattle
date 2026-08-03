@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from fastapi import (
     APIRouter,
@@ -21,6 +22,9 @@ from .dependencies import require_admin, require_user
 from bzplat.backend.security import audit_log, client_ip
 from bzplat.backend.security import _env_bool
 
+# 中国大陆手机号格式（空值跳过——实名信息可选）
+_PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_MAX_AGE = 7 * 24 * 3600
@@ -31,6 +35,10 @@ class RegisterReq(BaseModel):
     email: str
     password: str = Field(..., min_length=8)
     display_name: str = Field("", max_length=64)
+    real_name: str | None = Field(None, max_length=32)
+    phone: str | None = Field(None, max_length=20)
+    school: str | None = Field(None, max_length=64)
+    student_id: str | None = Field(None, max_length=32)
     captcha_id: str
     captcha_answer: str
 
@@ -50,6 +58,10 @@ class ChangePasswordReq(BaseModel):
 class ProfileUpdateReq(BaseModel):
     display_name: str | None = Field(None, max_length=64)
     bio: str | None = Field(None, max_length=500)
+    real_name: str | None = Field(None, max_length=32)
+    phone: str | None = Field(None, max_length=20)
+    school: str | None = Field(None, max_length=64)
+    student_id: str | None = Field(None, max_length=32)
 
 
 class RequestResetReq(BaseModel):
@@ -152,6 +164,10 @@ async def register(req: RegisterReq, request: Request) -> dict:
             req.email,
             req.password,
             display_name=req.display_name,
+            real_name=(req.real_name or "").strip(),
+            phone=(req.phone or "").strip(),
+            school=(req.school or "").strip(),
+            student_id=(req.student_id or "").strip(),
         )
         auth.send_verify_code(user)
     except AuthError as exc:
@@ -259,13 +275,25 @@ async def update_profile(
     request: Request,
     user: dict = Depends(require_user),
 ) -> dict:
-    """更新当前用户的显示名/简介。"""
+    """更新当前用户的显示名/简介/实名信息。"""
     store = request.app.state.store
     fields: dict = {}
     if req.display_name is not None:
         fields["display_name"] = req.display_name.strip()[:64]
     if req.bio is not None:
         fields["bio"] = req.bio.strip()[:500]
+    if req.real_name is not None:
+        fields["real_name"] = req.real_name.strip()[:32]
+    if req.phone is not None:
+        phone = req.phone.strip()
+        if phone and not _PHONE_RE.match(phone):
+            from fastapi import HTTPException
+            raise HTTPException(400, "手机号格式不正确")
+        fields["phone"] = phone[:20]
+    if req.school is not None:
+        fields["school"] = req.school.strip()[:64]
+    if req.student_id is not None:
+        fields["student_id"] = req.student_id.strip()[:32]
     if fields:
         store.update_user(user["id"], **fields)
     u = store.get_user(user["id"])

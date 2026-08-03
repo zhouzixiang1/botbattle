@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import { getGame, defaultMatchConfig } from '@/games'
@@ -23,6 +24,7 @@ interface Contest {
   template_id?: string
   game_id?: string
   match_config_json?: string
+  require_real_name?: number
 }
 
 /** 解析比赛对局参数概要（经注册表 configFields，消除 per-game if 分支）。 */
@@ -62,6 +64,7 @@ export default function Contests() {
   const [matchCfg, setMatchCfg] = useState<Record<string, number>>({})
   const [templateId, setTemplateId] = useState('holdem_swiss_ko')
   const [filterGame, setFilterGame] = useState('')
+  const [requireRealName, setRequireRealName] = useState(false)
   const [error, setError] = useState('')
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
   // 当前所选模板对应的游戏（决定 match_config 字段）
@@ -100,6 +103,7 @@ export default function Contests() {
         description,
         template_id: templateId,
         match_config: { ...matchCfg },
+        require_real_name: requireRealName,
       })
       setTitle('')
       setDescription('')
@@ -191,6 +195,12 @@ export default function Contests() {
                   {selSpec.label}单局，无可调参数
                 </span>
               )}
+              <div className="flex items-center gap-2">
+                <Switch checked={requireRealName} onCheckedChange={setRequireRealName} />
+                <Label htmlFor="contest-realname" className="cursor-pointer text-sm">
+                  要求实名报名（报名者须填写姓名/手机号/学校/学号）
+                </Label>
+              </div>
               <Button type="submit" className="gap-1.5">
                 <Plus className="size-4" />
                 创建比赛

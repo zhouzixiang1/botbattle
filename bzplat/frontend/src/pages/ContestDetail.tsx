@@ -32,6 +32,7 @@ interface Contest {
   stages_json?: string
   current_stage_idx?: number
   rest_ends_at?: string | null
+  require_real_name?: number
 }
 interface Stage {
   key?: string
@@ -165,6 +166,10 @@ export default function ContestDetail() {
 
   const isOrg = !!user && !!contest && (user.role === 'admin' || user.id === contest.organizer_id)
   const myEntry = entries.find((e) => e.user_id === user?.id)
+  // 实名校验：赛事要求实名且当前用户未填完整 → 提示去设置页补填
+  const needsRealName = !!contest?.require_real_name && !!user && !(
+    user.real_name && user.phone && user.school && user.student_id
+  )
 
   const act = async (path: string, body?: unknown) => {
     setError('')
@@ -240,6 +245,12 @@ export default function ContestDetail() {
         )}
         {isLoggedIn && contest.status === 'open' && (
           <div className="flex flex-wrap items-center gap-2">
+            {needsRealName && (
+              <span className="text-sm text-amber-600 dark:text-amber-500">
+                本赛事要求实名报名，请先{' '}
+                <Link to="/settings" className="font-medium underline">填写实名信息</Link>
+              </span>
+            )}
             <Select value={botId} onValueChange={setBotId}>
               <SelectTrigger className="h-9 w-[12rem]">
                 <SelectValue placeholder="选择我的 Bot" />
@@ -248,7 +259,7 @@ export default function ContestDetail() {
                 {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!botId} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) })}>
+            <Button variant="outline" disabled={!botId || needsRealName} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) })}>
               报名派遣
             </Button>
           </div>
