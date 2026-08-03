@@ -78,7 +78,6 @@ def _mk_bots(store: Store, n: int = 4):
             binary_path=f"/tmp/fake{i}",
             format="elf",
             is_active=1,
-            is_public=1,
         )
         bots.append(b)
     return users, bots
@@ -119,7 +118,6 @@ def test_dispatch_does_not_touch_running_pairings(store: Store):
         binary_path="/tmp/fake0b",
         format="elf",
         is_active=1,
-        is_public=1,
     )
     orch = MatchOrchestrator(
         store,

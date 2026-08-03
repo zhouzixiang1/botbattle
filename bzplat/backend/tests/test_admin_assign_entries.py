@@ -29,7 +29,7 @@ def _setup(tmp_path, game: str = "holdem"):
     for i in range(6):
         u = st.create_user(f"usr{i}", f"u{i}@ex.com", hash_password("pw"))
         b = st.create_bot(u["id"], f"bot{i}", binary_path="/tmp/b", format="elf",
-                          is_public=1, is_active=1, game_id=game)
+                          is_active=1, game_id=game)
         st.ensure_rating(b["id"])
         users.append((u, b))
     cid = st.create_contest("Cup", organizer_id=admin["id"], game_id=game)["id"]
@@ -91,7 +91,7 @@ def test_admin_assign_skips_game_mismatch(tmp_path):
     # 建一个 gomoku bot，指派进 holdem 赛事 → 应跳过
     ug = st.create_user("gomokuusr", "ug@ex.com", hash_password("pw"))
     bg = st.create_bot(ug["id"], "gobot", binary_path="/tmp/g", format="elf",
-                       is_public=1, is_active=1, game_id="gomoku")
+                       is_active=1, game_id="gomoku")
     r = c.post(f"/api/admin/contests/{cid}/entries/bulk",
                headers={"Authorization": f"Bearer {tok}"},
                json={"entries": [{"user_id": ug["id"], "bot_id": bg["id"]}]})

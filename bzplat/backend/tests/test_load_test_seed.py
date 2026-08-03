@@ -101,7 +101,8 @@ def test_seed_bots_are_load_prefixed(tmp_path):
             assert bot is not None
             assert bot["name"].startswith("load_"), f"bot 名 {bot['name']} 缺 load_ 前缀"
             assert bot["game_id"] == gid
-            assert bot["is_public"] in (1, True)
+            # 私有 bot 功能已下线，bots 表无 is_public 列
+            assert "is_public" not in bot
     store.close()
 
 

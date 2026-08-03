@@ -18,8 +18,8 @@ def _app(tmp_path):
     store = app.state.store
     u = store.create_user("alice", "a@ex.com", hash_password("pw123456"))
     store.update_user(u["id"], email_verified=1)
-    b1 = store.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    b2 = store.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = store.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+    b2 = store.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
     # 建若干 holdem + gomoku 对局（completed / aborted 混合）
     for i in range(7):
         mid = f"mh{i}"

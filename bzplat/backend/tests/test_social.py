@@ -43,7 +43,7 @@ def test_favorite_unfavorite_and_count(tmp_path):
     s = _store(tmp_path)
     u1 = s.create_user("alice", "a@ex.com", "x")
     u2 = s.create_user("bob", "b@ex.com", "x")
-    b = s.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b = s.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
     assert s.favorite(u2["id"], b["id"]) is True
     assert s.favorite(u2["id"], b["id"]) is False  # 重复收藏幂等
     assert s.is_favorite(u2["id"], b["id"]) is True
@@ -64,7 +64,7 @@ def _app(tmp_path):
     u2 = store.create_user("bob", "b@ex.com", hash_password("pw123456"))
     store.update_user(u1["id"], email_verified=1)
     store.update_user(u2["id"], email_verified=1)
-    b = store.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b = store.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
     _, t1 = app.state.auth.authenticate("alice", "pw123456")
     _, t2 = app.state.auth.authenticate("bob", "pw123456")
     c = TestClient(app)

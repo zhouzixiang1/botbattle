@@ -131,7 +131,7 @@ def test_bot_profile_tier_uses_bot_game_id(tmp_path):
     s = Store(str(tmp_path / "prof.db"))
     u = s.create_user("alice", "a@ex.com", "x")
     # gomoku bot rating 2100 → 经 gomoku 曲线 = 专家
-    b = s.create_bot(u["id"], "gomuBot", binary_path="/tmp", format="elf", is_public=1, game_id="gomoku")
+    b = s.create_bot(u["id"], "gomuBot", binary_path="/tmp", format="elf", game_id="gomoku")
     s.ensure_rating(b["id"])
     s.update_rating_row(b["id"], rating=2100)
     p = s.bot_profile(b["id"])
@@ -144,7 +144,7 @@ def test_leaderboard_tier_uses_game_id(tmp_path):
     """leaderboard 的段位按每行 bot 的 game_id 取对应曲线。"""
     s = Store(str(tmp_path / "lb.db"))
     u = s.create_user("alice", "a@ex.com", "x")
-    b = s.create_bot(u["id"], "penBot", binary_path="/tmp", format="elf", is_public=1, game_id="pencil")
+    b = s.create_bot(u["id"], "penBot", binary_path="/tmp", format="elf", game_id="pencil")
     s.ensure_rating(b["id"])
     s.update_rating_row(b["id"], rating=1900)
     lb = s.list_leaderboard(game_id="pencil")

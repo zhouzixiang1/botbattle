@@ -34,8 +34,8 @@ def test_like_unlike_count_and_match_counter(tmp_path):
     s = _store(tmp_path)
     u1 = s.create_user("alice", "a@ex.com", "x")
     u2 = s.create_user("bob", "b@ex.com", "x")
-    b1 = s.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    b2 = s.create_bot(u2["id"], "botB", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = s.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+    b2 = s.create_bot(u2["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
     mid = "m1"
     s.create_match(mid, bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u1["id"])
     assert s.like(u1["id"], "match", mid) is True
@@ -56,8 +56,8 @@ def test_like_unlike_count_and_match_counter(tmp_path):
 def test_incr_view(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("alice", "a@ex.com", "x")
-    b1 = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    b2 = s.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+    b2 = s.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
     mid = "m1"
     s.create_match(mid, bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u["id"])
     s.incr_match_view(mid)
@@ -75,8 +75,8 @@ def _app(tmp_path):
     store.update_user(u1["id"], email_verified=1)
     u2 = store.create_user("bob", "b@ex.com", hash_password("pw123456"))
     store.update_user(u2["id"], email_verified=1)
-    b1 = store.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    b2 = store.create_bot(u2["id"], "botB", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = store.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+    b2 = store.create_bot(u2["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
     mid = "20260101-test"
     store.create_match(mid, bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u1["id"])
     store.update_match(mid, status="completed")

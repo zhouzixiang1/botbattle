@@ -39,7 +39,7 @@ def test_all_tiers_descending():
 def test_leaderboard_includes_tier_and_delta(tmp_path):
     s = Store(str(tmp_path / "t.db"))
     u = s.create_user("alice", "a@ex.com", "x")
-    b = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
     s.ensure_rating(b["id"])
     s.update_rating_row(b["id"], rating=1850, matches_played=2)
     # 落两条历史：prev=1700, current=1850 → delta=+150
@@ -57,7 +57,7 @@ def test_leaderboard_includes_tier_and_delta(tmp_path):
 def test_leaderboard_no_history_delta_none(tmp_path):
     s = Store(str(tmp_path / "t.db"))
     u = s.create_user("alice", "a@ex.com", "x")
-    b = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
     s.ensure_rating(b["id"])
     s.update_rating_row(b["id"], rating=1500)
     lb = s.list_leaderboard()
@@ -69,7 +69,7 @@ def test_leaderboard_no_history_delta_none(tmp_path):
 def test_bot_profile_includes_tier(tmp_path):
     s = Store(str(tmp_path / "t.db"))
     u = s.create_user("alice", "a@ex.com", "x")
-    b = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
     s.ensure_rating(b["id"])
     s.update_rating_row(b["id"], rating=2100)
     p = s.bot_profile(b["id"])

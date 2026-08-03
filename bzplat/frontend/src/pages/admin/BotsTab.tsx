@@ -13,7 +13,6 @@ interface Bot {
   arch: string
   format: string
   current_version: number
-  is_public: boolean
   is_active: boolean
   is_builtin: boolean
   created_at: string
@@ -157,11 +156,6 @@ export default function BotsTab() {
                   <td className="px-3 py-2">
                     <div className="flex gap-1">
                       {b.is_active ? <StatusBadge status="running" /> : <StatusBadge status="aborted" />}
-                      {b.is_public ? (
-                        <span className="text-[10px] text-muted-foreground">公开</span>
-                      ) : (
-                        <span className="text-[10px] text-muted-foreground">私有</span>
-                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2">

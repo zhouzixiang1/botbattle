@@ -40,7 +40,6 @@ class BotManager:
         display_name: str = "",
         description: str = "",
         upload_note: str = "",
-        is_public: bool = True,
         game_id: str = "holdem",
         binary_runner=None,
     ) -> dict:
@@ -70,7 +69,6 @@ class BotManager:
             os=info.os,
             arch=info.arch,
             format=info.format,
-            is_public=is_public,
             game_id=gid,
         )
         try:
@@ -181,9 +179,9 @@ class BotManager:
     def list_public(
         self, *, game_id: str | None = None, owner_id: int | None = None
     ) -> list[dict]:
-        return self.store.list_bots(
-            public_only=True, game_id=game_id, owner_id=owner_id
-        )
+        # 私有 bot 功能已下线——所有 bot 都是公开的。保留方法名为兼容旧调用方，
+        # 直接转发到 list_bots（不再有 public_only 过滤）。
+        return self.store.list_bots(game_id=game_id, owner_id=owner_id)
 
     def get(self, bot_id: int) -> dict | None:
         return self.store.get_bot(bot_id)

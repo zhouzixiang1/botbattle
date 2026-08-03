@@ -55,7 +55,7 @@ def get_or_create_bot(bm: BotManager, owner_id: int, name: str, game_id: str, pa
     raw = path.read_bytes()
     try:
         return bm.create_from_upload(
-            owner_id, name, raw, display_name=name, game_id=game_id, is_public=True,
+            owner_id, name, raw, display_name=name, game_id=game_id,
         )
     except BotError as e:
         print(f"  ! 上传 {name}({game_id}) 失败：{e.code} {e.message}", file=sys.stderr)

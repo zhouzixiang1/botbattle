@@ -84,8 +84,8 @@ def test_orchestrator_resolves_holdem_winner_non_null():
     with tempfile.TemporaryDirectory() as td:
         store = Store(str(td + "/w.db"))
         u = store.create_user("wintest", "w@e.com", "x")
-        ba = store.create_bot(u["id"], "foldbotA", binary_path=str(foldbot), format="elf", is_public=1, game_id="holdem")
-        bb = store.create_bot(u["id"], "callbotB", binary_path=str(callbot), format="elf", is_public=1, game_id="holdem")
+        ba = store.create_bot(u["id"], "foldbotA", binary_path=str(foldbot), format="elf", game_id="holdem")
+        bb = store.create_bot(u["id"], "callbotB", binary_path=str(callbot), format="elf", game_id="holdem")
         store.ensure_rating(ba["id"]); store.ensure_rating(bb["id"])
         orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
         import asyncio
@@ -124,8 +124,8 @@ def test_challenge_validates_match_params_per_game():
         store = Store(str(td + "/v.db"))
         u = store.create_user("vtest", "v@e.com", "x")
         # 用 callable bot 避免 ELF 依赖（本测试只验校验，不真跑）
-        ba = store.create_bot(u["id"], "vbotA", binary_path="/dev/null", format="elf", is_public=1, game_id="holdem")
-        bb = store.create_bot(u["id"], "vbotB", binary_path="/dev/null", format="elf", is_public=1, game_id="holdem")
+        ba = store.create_bot(u["id"], "vbotA", binary_path="/dev/null", format="elf", game_id="holdem")
+        bb = store.create_bot(u["id"], "vbotB", binary_path="/dev/null", format="elf", game_id="holdem")
         store.ensure_rating(ba["id"]); store.ensure_rating(bb["id"])
         orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
 

@@ -154,7 +154,7 @@ def seed(db_path: str, n_users: int, upload_root: str) -> dict[str, Any]:
         if existing:
             return existing
         return bm.create_from_upload(
-            owner_id, name, raw, display_name=name, game_id=game_id, is_public=True
+            owner_id, name, raw, display_name=name, game_id=game_id
         )
 
     tokens: dict[str, str] = {}
@@ -414,7 +414,7 @@ def phase1_bots(api: Api, ctx: dict[str, Any]) -> None:
     # POST /api/bots（新 HTTP 上传一个 bot，验返回 bot.id）—— 名字带版本后缀避免冲突
     elf = (ROOT / SAMPLE_BINARIES["holdem"]).read_bytes()
     new_name = f"{u1}_extra"
-    headers, body = multipart({"name": new_name, "is_public": "true", "game_id": "holdem"}, "file", "bot.bin", elf)
+    headers, body = multipart({"name": new_name, "game_id": "holdem"}, "file", "bot.bin", elf)
     r = api.authed(tok, "POST", "/api/bots", headers=headers, content=body)
     # 幂等：重跑压测时同名 bot 已存在（name_taken）也视为通过（端点可达即验证目的达成）
     upload_ok = r.status_code == 200 and "bot" in r.json()
@@ -436,8 +436,8 @@ def phase1_bots(api: Api, ctx: dict[str, Any]) -> None:
         r = api.authed(tok, "POST", f"/api/bots/{extra_bid}/active?active=true")
         check("POST /api/bots/{id}/active?active=true", r.status_code == 200 and r.json()["bot"]["is_active"] in (1, True), r.text[:80])
         # owner PATCH/DELETE（PR-8 MyBots 管理）
-        r = api.authed(tok, "PATCH", f"/api/bots/{extra_bid}", json={"display_name": "lt-renamed", "description": "d", "is_public": False})
-        check("PATCH /api/bots/{id}（owner 改名/简介/私有）", r.status_code == 200 and r.json()["bot"]["display_name"] == "lt-renamed", r.text[:80])
+        r = api.authed(tok, "PATCH", f"/api/bots/{extra_bid}", json={"display_name": "lt-renamed", "description": "d"})
+        check("PATCH /api/bots/{id}（owner 改名/简介）", r.status_code == 200 and r.json()["bot"]["display_name"] == "lt-renamed", r.text[:80])
         r = api.authed(tok, "DELETE", f"/api/bots/{extra_bid}")
         check("DELETE /api/bots/{id}（owner 软删）", r.status_code == 200, r.text[:80])
 

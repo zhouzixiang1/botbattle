@@ -35,7 +35,6 @@ interface BotProfile {
   owner_name?: string
   owner_display?: string
   is_active: number | boolean
-  is_public: number | boolean
   format?: string
   os?: string
   arch?: string

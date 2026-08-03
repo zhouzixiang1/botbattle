@@ -25,7 +25,7 @@ def _setup(store: Store, game: str = "gomoku"):
     u = store.create_user("usr1", "u@ex.com", hash_password("password1"))
     path = os.path.abspath("samples/gomokubot_linux_amd64")
     b = store.create_bot(
-        u["id"], "mybot", binary_path=path, format="elf", is_public=1, game_id=game
+        u["id"], "mybot", binary_path=path, format="elf", game_id=game
     )
     store.ensure_rating(b["id"])
     return u, b
@@ -156,7 +156,7 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
     s.update_user(u["id"], email_verified=1)
     b = s.create_bot(
         u["id"], "wb", binary_path=os.path.abspath("samples/gomokubot_linux_amd64"),
-        format="elf", is_public=1, game_id="gomoku",
+        format="elf", game_id="gomoku",
     )
     _, token = app.state.auth.authenticate("usr2", "password1")
     c = TestClient(app)
@@ -189,7 +189,7 @@ def test_bot_crashed_aborts_human_match_quickly(store: Store):
     u = store.create_user("crashusr", "c@ex.com", hash_password("password1"))
     b = store.create_bot(
         u["id"], "crashbot", binary_path="/nonexistent/crash_bot", format="elf",
-        is_public=1, game_id="gomoku",
+        game_id="gomoku",
     )
     store.ensure_rating(b["id"])
     orch = _orch(store, human_timeout=1.0)
@@ -286,7 +286,7 @@ def test_consecutive_human_timeouts_aborts_match(store: Store):
     os.environ.setdefault("BZ_BOT_LOCAL", "1")
     u = store.create_user("touser", "t@ex.com", hash_password("password1"))
     path = os.path.abspath("samples/callbot_linux_amd64")
-    b = store.create_bot(u["id"], "holdbot", binary_path=path, format="elf", is_public=1, game_id="holdem")
+    b = store.create_bot(u["id"], "holdbot", binary_path=path, format="elf", game_id="holdem")
     orch = _orch(store, human_timeout=0.3)
     orch.human_max_consecutive_timeouts = 3  # 连续 3 次超时即中止
 

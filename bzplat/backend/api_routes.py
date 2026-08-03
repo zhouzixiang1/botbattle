@@ -219,7 +219,7 @@ def user_bots(username: str, request: Request):
     u = store.get_user_by_username(username)
     if not u:
         raise HTTPException(404, "用户不存在")
-    bots = store.list_bots(owner_id=u["id"], public_only=True)
+    bots = store.list_bots(owner_id=u["id"])
     return {"bots": bots}
 
 
@@ -306,7 +306,6 @@ async def upload_bot(
     display_name: str = Form(""),
     description: str = Form(""),
     upload_note: str = Form(""),
-    is_public: bool = Form(True),
     game_id: str = Form("holdem"),
     file: UploadFile = File(...),
     user=Depends(require_user),
@@ -316,7 +315,7 @@ async def upload_bot(
         bot = _bots(request).create_from_upload(
             user["id"], name, raw,
             display_name=display_name, description=description,
-            upload_note=upload_note, is_public=is_public,
+            upload_note=upload_note,
             game_id=game_id,
             binary_runner=getattr(request.app.state, "binary_runner", None),
         )
@@ -363,14 +362,14 @@ def set_bot_active(
 def update_my_bot(
     bot_id: int, body: dict, request: Request, user=Depends(require_user)
 ):
-    """Bot 拥有者改 display_name/description/is_public/is_active（受限白名单）。"""
+    """Bot 拥有者改 display_name/description/is_active（受限白名单）。"""
     store = _store(request)
     bot = store.get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "bot 不存在")
     if bot["owner_id"] != user["id"]:
         raise HTTPException(403, "无权修改他人的 Bot")
-    allowed = {"display_name", "description", "is_public", "is_active"}
+    allowed = {"display_name", "description", "is_active"}
     fields = {
         k: (1 if v is True else 0 if v is False else str(v)[:200] if k in ("display_name",) else str(v)[:2000])
         for k, v in body.items() if k in allowed
@@ -383,14 +382,14 @@ def update_my_bot(
 
 @router.delete("/api/bots/{bot_id}")
 def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
-    """Bot 拥有者删除自己的 Bot（软删：is_active=0 + is_public=0）。"""
+    """Bot 拥有者删除自己的 Bot（软删：is_active=0）。"""
     store = _store(request)
     bot = store.get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "bot 不存在")
     if bot["owner_id"] != user["id"]:
         raise HTTPException(403, "无权删除他人的 Bot")
-    store.update_bot(bot_id, is_active=0, is_public=0)
+    store.update_bot(bot_id, is_active=0)
     return {"ok": True}
 
 
@@ -987,7 +986,7 @@ def organizer_assign_entries(
         gid = normalize_game_id(body.game_id or cgid)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
-        bots = store.list_bots(public_only=False, active_only=True, game_id=gid)
+        bots = store.list_bots(active_only=True, game_id=gid)
         if body.name_prefix:
             np = body.name_prefix.lower()
             bots = [b for b in bots if np in (b.get("name") or "").lower()]
@@ -1302,7 +1301,7 @@ def admin_bots(
 def admin_patch_bot(
     bot_id: int, body: dict, request: Request, _admin=Depends(require_admin)
 ):
-    allowed = {"is_active", "is_public", "is_builtin", "display_name", "description"}
+    allowed = {"is_active", "is_builtin", "display_name", "description"}
     fields = {k: (1 if v is True else 0 if v is False else v)
               for k, v in body.items() if k in allowed}
     if not fields:
@@ -1432,7 +1431,7 @@ def admin_assign_entries(
         gid = normalize_game_id(body.game_id or cgid)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
-        bots = store.list_bots(public_only=False, active_only=True, game_id=gid)
+        bots = store.list_bots(active_only=True, game_id=gid)
         if body.name_prefix:
             np = body.name_prefix.lower()
             bots = [b for b in bots if np in (b.get("name") or "").lower()]
