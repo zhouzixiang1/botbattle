@@ -47,10 +47,12 @@ export default function NotificationBell() {
   }, [open])
 
   function readAll() {
-    apiPost('/api/notifications/read-all', 'POST', {}).then(() => {
-      setUnread(0)
-      setRecent((rs) => rs.map((n) => ({ ...n, is_read: 1 })))
-    })
+    apiPost('/api/notifications/read-all', 'POST', {})
+      .then(() => {
+        setUnread(0)
+        setRecent((rs) => rs.map((n) => ({ ...n, is_read: 1 })))
+      })
+      .catch(() => {})
   }
 
   return (

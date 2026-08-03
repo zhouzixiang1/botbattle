@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Tooltip, TooltipContent, TooltipTrigger } from './ui'
@@ -137,8 +137,8 @@ export default function BotsTab() {
           </thead>
           <tbody className="divide-y divide-border">
             {filtered.map((b) => (
-              <>
-                <tr key={b.id} className="hover:bg-accent">
+              <Fragment key={b.id}>
+                <tr className="hover:bg-accent">
                   <td className="px-3 py-2 font-mono text-muted-foreground">{b.id}</td>
                   <td className="px-3 py-2 font-medium text-foreground">
                     {b.display_name || b.name}
@@ -225,7 +225,7 @@ export default function BotsTab() {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>

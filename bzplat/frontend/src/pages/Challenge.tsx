@@ -90,7 +90,7 @@ export default function Challenge() {
         ...matchCfg,
       }
       const d = await apiJson<{ match_id: string }>('/api/matches/challenge', 'POST', body)
-      nav(`/watch/${d.match_id}`)
+      nav(`/match/${d.match_id}`)
     } catch (err) {
       setError(errMsg(err, '发起挑战失败'))
     } finally {

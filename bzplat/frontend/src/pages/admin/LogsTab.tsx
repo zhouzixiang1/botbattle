@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, errMsg } from '../../api'
-import { ErrorMsg, Loading, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import { ErrorMsg, Loading, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, inp } from './ui'
 
 interface LogState {
   lines: string[]
@@ -40,7 +40,14 @@ export default function LogsTab() {
   const [file, setFile] = useState<string>('app')
   const [level, setLevel] = useState<string>('')
   const [q, setQ] = useState('')
+  const [debouncedQ, setDebouncedQ] = useState('')
   const [limit, setLimit] = useState(300)
+
+  // q 防抖 250ms（避免每按键触发 /api/admin/logs 请求）
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q), 250)
+    return () => clearTimeout(t)
+  }, [q])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -49,7 +56,7 @@ export default function LogsTab() {
       const params = new URLSearchParams()
       params.set('file', file)
       if (level) params.set('level', level)
-      if (q) params.set('q', q)
+      if (debouncedQ) params.set('q', debouncedQ)
       params.set('limit', String(limit))
       const d = await apiGet<LogState>(`/api/admin/logs?${params.toString()}`)
       setData(d)
@@ -58,7 +65,7 @@ export default function LogsTab() {
     } finally {
       setLoading(false)
     }
-  }, [file, level, q, limit])
+  }, [file, level, debouncedQ, limit])
 
   useEffect(() => {
     void load()
@@ -102,13 +109,13 @@ export default function LogsTab() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="关键字 / IP / action"
-            className="w-44 rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground"
+            className={`${inp} w-44 px-2 py-1 text-xs`}
           />
           <input
             type="number" min={50} max={2000}
             value={limit}
             onChange={(e) => setLimit(Number(e.target.value))}
-            className="w-20 rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground"
+            className={`${inp} w-20 px-2 py-1 text-xs`}
           />
           <RefreshBtn onClick={load} />
         </div>

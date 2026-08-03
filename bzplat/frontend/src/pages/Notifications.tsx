@@ -44,17 +44,21 @@ export default function Notifications() {
   }, [filter])
 
   function markRead(id: number) {
-    apiPost('/api/notifications/read', 'POST', { id }).then(() => {
-      setItems((rs) => rs.map((n) => (n.id === id ? { ...n, is_read: 1 } : n)))
-      setUnread((u) => Math.max(0, u - 1))
-    })
+    apiPost('/api/notifications/read', 'POST', { id })
+      .then(() => {
+        setItems((rs) => rs.map((n) => (n.id === id ? { ...n, is_read: 1 } : n)))
+        setUnread((u) => Math.max(0, u - 1))
+      })
+      .catch((e) => setError(errMsg(e)))
   }
 
   function readAll() {
-    apiPost('/api/notifications/read-all', 'POST', {}).then(() => {
-      setItems((rs) => rs.map((n) => ({ ...n, is_read: 1 })))
-      setUnread(0)
-    })
+    apiPost('/api/notifications/read-all', 'POST', {})
+      .then(() => {
+        setItems((rs) => rs.map((n) => ({ ...n, is_read: 1 })))
+        setUnread(0)
+      })
+      .catch((e) => setError(errMsg(e)))
   }
 
   return (

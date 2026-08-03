@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
@@ -149,8 +149,8 @@ export default function ContestsTab() {
           </thead>
           <tbody className="divide-y divide-border">
             {contests.map((c) => (
-              <>
-                <tr key={c.id} className="hover:bg-accent">
+              <Fragment key={c.id}>
+                <tr className="hover:bg-accent">
                   <td className="px-3 py-2 font-mono text-muted-foreground">{c.id}</td>
                   <td className="px-3 py-2 font-medium text-foreground">{c.title}</td>
                   <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
@@ -178,7 +178,9 @@ export default function ContestsTab() {
                           type="button"
                           disabled={busyId === c.id}
                           onClick={() =>
-                            void apiJson(`/api/contests/${c.id}/resume`, 'POST').then(load)
+                            void apiJson(`/api/contests/${c.id}/resume`, 'POST')
+                              .then(load)
+                              .catch((e) => setError(errMsg(e, '结束休息失败')))
                           }
                           className="rounded border border-primary/30 bg-card px-2 py-0.5 text-xs text-primary hover:bg-primary/10"
                         >
@@ -243,7 +245,7 @@ export default function ContestsTab() {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>
