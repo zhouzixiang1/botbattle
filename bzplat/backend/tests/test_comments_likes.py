@@ -124,6 +124,15 @@ def test_comment_endpoints(tmp_path):
     assert r.status_code == 200
 
 
+def test_delete_comment_nonexistent_returns_404(tmp_path):
+    """删除不存在的评论统一返 404（对抗审计：原非 admin 返 403 误导，admin 返 404）。"""
+    c, mid, bid, t1, t2 = _app(tmp_path)
+    h1 = {"Authorization": f"Bearer {t1}"}
+    # 非 admin 删不存在的评论 → 404（不是 403「无权删除」）
+    r = c.delete("/api/comments/99999", headers=h1)
+    assert r.status_code == 404, f"不存在的评论应 404，实际 {r.status_code}"
+
+
 def test_like_endpoints(tmp_path):
     c, mid, bid, t1, t2 = _app(tmp_path)
     h1 = {"Authorization": f"Bearer {t1}"}

@@ -74,6 +74,7 @@ def test_organizer_entries_api_permissions(tmp_path):
         json={"user_id": u1["id"], "bot_id": b1["id"]}, headers=oh,
     )
     assert r.status_code == 403
+    assert "组织者" in str(r.json().get("detail", "")), "403 应带组织者权限提示（防回退无消息）"
     # 组织者可加
     r = client.post(
         f"/api/contests/{c}/entries",

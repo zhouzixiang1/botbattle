@@ -1,5 +1,5 @@
 import { useState, lazy, Suspense } from 'react'
-import { useLocation, Routes, Route, NavLink, Link, useNavigate } from 'react-router-dom'
+import { useLocation, Routes, Route, NavLink, Link, useNavigate, Navigate } from 'react-router-dom'
 import { Menu, LogOut, User as UserIcon, Loader2, PanelLeftClose, PanelLeft } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
 import NotificationBell from '@/components/NotificationBell'
@@ -317,6 +317,8 @@ export function AppShell() {
               <Route path="/verify-email" element={<VerifyEmail />} />
               <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/admin" element={<Admin />} />
+              {/* catch-all：未知路由（旧 /arena、/watch、拼写错）重定向首页，不渲染空白页 */}
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>
         </main>

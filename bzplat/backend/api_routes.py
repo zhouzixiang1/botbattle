@@ -742,13 +742,17 @@ def create_comment(
 def delete_comment(comment_id: int, request: Request, user=Depends(require_user)):
     store = _store(request)
     ok = store.delete_comment(comment_id, user["id"])
-    if not ok and user.get("role") != "admin":
-        # 普通用户只能删自己的
+    if ok:
+        return {"ok": True}
+    # 删除失败：要么评论不存在，要么非作者。统一规则：评论不存在→404（先于权限判），
+    # 存在但非作者→admin 可强删 / 非 admin 403。用只读 exists 区分（不破坏性删除）。
+    exists = store.comment_exists(comment_id)
+    if not exists:
+        raise HTTPException(404, "评论不存在")
+    if user.get("role") != "admin":
         raise HTTPException(403, "无权删除该评论")
-    if not ok:
-        # admin 删除（无视作者）；评论不存在则 404（经 Store 方法，不穿透 _tx）
-        if not store.delete_comment_admin(comment_id):
-            raise HTTPException(404, "评论不存在")
+    # admin 强删（无视作者）
+    store.delete_comment_admin(comment_id)
     return {"ok": True}
 
 
@@ -953,7 +957,12 @@ def _require_contest_organizer(c: dict, user: dict) -> None:
 def organizer_add_entry(
     contest_id: int, body: dict, request: Request, user=Depends(require_organizer)
 ):
-    """P5 组织者名单：单条加人（draft/open 允许，绕开 register 的 open/owner 校验）。"""
+    """P5 组织者名单：单条加人（draft/open 允许）。
+
+    有意设计：此处**绕开** register 流程的 owner 校验——组织者可替他人把任意其名下
+    Bot 加进赛事（如现场代报名/补录）。权限收口在 _require_contest_organizer（仅组织者或
+    admin 可调用），bot 归属/游戏/激活状态等业务校验仍保留。
+    """
     store = _store(request)
     c = store.get_contest(contest_id)
     if not c:
