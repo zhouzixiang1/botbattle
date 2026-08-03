@@ -2071,6 +2071,13 @@ class Store:
             cur = c.execute("DELETE FROM comments WHERE id=?", (comment_id,))
             return cur.rowcount > 0
 
+    def comment_exists(self, comment_id: int) -> bool:
+        """只读探测评论是否存在（DELETE handler 区分 404 vs 403 用）。"""
+        with self._tx() as c:
+            return c.execute(
+                "SELECT 1 FROM comments WHERE id=?", (comment_id,)
+            ).fetchone() is not None
+
     def comment_count(self, target_type: str, target_id: str) -> int:
         with self._tx() as c:
             return int(c.execute(

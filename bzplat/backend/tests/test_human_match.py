@@ -312,14 +312,15 @@ def test_consecutive_human_timeouts_aborts_match(store: Store):
     assert u["id"] not in orch._human_active_users
 
 
-# ── resolve_human_turn 并发安全（审计 P1：double-submit 竞态→500）──────────────
+# ── resolve_human_turn 幂等性（审计：done 后再 resolve 不抛）──────────────────
 
 
-def test_resolve_human_turn_concurrent_double_submit(store: Store):
-    """并发两次 resolve_human_turn（同 match/seat）：第一个成功，第二个返 False 不抛。
+def test_resolve_human_turn_after_done_returns_false(store: Store):
+    """future 已 done 后再 resolve_human_turn：返 False 不抛（防御性 catch InvalidStateError）。
 
-    审计发现 done() 检查与 set_result 非原子——并发 WS 消息或超时+落子竞争时
-    第二个 set_result 抛 InvalidStateError→500。修复后捕获返回 False。
+    注：resolve_human_turn 是同步函数，CPython 下 done() 检查与 set_result 不会真正
+    交错——此测试验证的是 done 后的幂等降级（早返 False），不声称测真正的并发竞态。
+    fix 的 try/except InvalidStateError 是无害防御，保留。
     """
     os.environ.setdefault("BZ_BOT_LOCAL", "1")
     orch = MatchOrchestrator(

@@ -214,6 +214,12 @@ class MatchRunner:
         sid_a = await self.runner.start_session(path_a)
         try:
             sid_b = await self.runner.start_session(path_b)
+        except BotCrashedError as exc:
+            # 第二个 session（bot_b）启动失败：释放已启动的 bot_a，并注解崩溃方=1
+            # 供 orchestrator 的技术判负判胜方（bot_b 崩 → winner=0）。镜像 run_binaries。
+            await self.runner.stop_session(sid_a)
+            exc.crashed_seat = 1
+            raise
         except BaseException:
             await self.runner.stop_session(sid_a)
             raise

@@ -72,7 +72,7 @@
 | 游戏架构 | `games/` 注册表 + 3 自包含子包（shim 已删，真实现全在 games/） |
 | 前端组件 | 26 个 shadcn 共享原语 |
 | 前端页面 | **20** 个 lazy 页面模块（含 admin 壳）；**20** 条 `<Route>`（/watch 与 /arena 旧路径已删，无重定向） |
-| 自动化测试 | **52** 个 `test_*.py`；`pytest --collect-only` ≈ **452** tests |
+| 自动化测试 | **52** 个 `test_*.py`；`pytest --collect-only` ≈ **453** tests |
 | 大规模压测 | 60 用户 × 8 阶段（历史基线 152 passed / 0 failed） |
 | 浏览器验收 | browser_verify / screenshot_verify |
 | 合并 PR | 早期 27 个里程碑后继续演进（全面解耦、canvas 重写、安全日志、赛事修复等） |
@@ -87,7 +87,7 @@
 | 规则/协议文档 | ✅ | `wiki/` |
 | 协议 JSON Schema | ✅ | `contracts/` |
 | 样例 Bot + 参考裁判 | ✅ | `samples/` |
-| 测试套件 | ✅ 52 模块 / 452 用例 | `bzplat/backend/tests/` |
+| 测试套件 | ✅ 52 模块 / 453 用例 | `bzplat/backend/tests/` |
 | 压测脚本 | ✅ 152✓/0✗ | `scripts/load_test.py` |
 | 浏览器验收 | ✅ 30/30 | `scripts/browser_verify.py` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |

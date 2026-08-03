@@ -34,9 +34,9 @@ def test_wiki_pages_no_orphan_md_files():
     assert not orphans, f"wiki/ 下有未注册的 .md 文件（前端 GET /api/wiki 看不到）: {sorted(orphans)}"
 
 
-def test_every_slug_returns_real_content():
+def test_every_slug_returns_real_content(tmp_path):
     """每个注册 slug 经 GET /api/wiki?slug= 返回真实 markdown（非占位）。"""
-    app = create_app()
+    app = create_app(db_path=str(tmp_path / "w.db"))
     c = TestClient(app)
     for p in WIKI_PAGES:
         r = c.get(f"/api/wiki?slug={p['slug']}")
@@ -49,9 +49,9 @@ def test_every_slug_returns_real_content():
         assert body["slug"] == p["slug"]
 
 
-def test_wiki_slug_unregistered_returns_placeholder():
+def test_wiki_slug_unregistered_returns_placeholder(tmp_path):
     """未注册的 slug 返回占位（不崩）。"""
-    app = create_app()
+    app = create_app(db_path=str(tmp_path / "w.db"))
     c = TestClient(app)
     r = c.get("/api/wiki?slug=this-slug-does-not-exist")
     assert r.status_code == 200
