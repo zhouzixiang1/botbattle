@@ -54,7 +54,7 @@
 
 ### 3.1 后端 pytest
 ```
-pytest --collect-only → 446 tests collected（随游戏/功能增长）
+pytest --collect-only → 452 tests collected（随游戏/功能增长）
 pytest 须从仓库根运行；52 个 test_*.py 模块
 ```
 （含人类对战、审计、安全日志、游戏注册表/结果契约/通用层无分支等守护测试。）
@@ -98,7 +98,7 @@ browser_verify / screenshot_verify：关键路由 + 明暗主题 + 移动端布�
 
 ### 5.2 测试结论
 **平台功能完整、架构契约有自动化守护，满足验收准则**：
-- 后端测试模块 52 个、用例规模 446（以 `pytest --collect-only` 为准）。
+- 后端测试模块 52 个、用例规模 452（以 `pytest --collect-only` 为准）。
 - 解耦契约由专用测试守护（结果鸭子类型 / 注册表 = schema / 无反向 import / 通用层无 game 分支）。
 - 压测与浏览器脚本覆盖核心业务路径。
 - 功能需求（账号/Bot/对局/观赛/回放/人类对战/排行/赛事/社交/通知/经验/管理/数据集）均有对应测试入口。

@@ -268,7 +268,7 @@ def main() -> int:
         ("match", f"/match/{match_id}"),
         ("bot", f"/bot/{bot_id}"),
         ("user", f"/user/{username}"),
-        ("arena", "/arena"),
+        ("history", "/history"),
         ("login", "/login"),
         ("register", "/register"),
         ("verify_email", "/verify-email"),
@@ -410,7 +410,6 @@ def main() -> int:
         for label, path in user_pages + [
             ("contest_detail", f"/contests/{contest_id}"),
             ("data", "/data"),
-            ("arena", "/arena"),
             ("search", "/search?q=bot"),
         ]:
             visit(label, path, "user", "desk", creds=("tester1", "Test1234"))

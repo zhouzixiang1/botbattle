@@ -64,7 +64,7 @@
   - **pencil**：未占边灰色细线、已占边着色动画、闭合格归属字；图例含双方名与比分。
   - 均由 `GameCanvas` + GSAP timeline 驱动。
 - **座位身份**（`matches.seat_info`）：REST / SSE snapshot / 人类 WS 统一 `get_match_detailed` + 嵌套 `bot_a/bot_b`；人类座改写为 **真人用户名**（`is_human`）。
-- **统一对局页** `/match/:id`：实时 SSE DVR + 回放；`/watch/:id` 与 `/arena?id=` 均导向此页。
+- **统一对局页** `/match/:id`：实时 SSE DVR + 回放（旧 `/watch/:id` 与 `/arena?id=` 路径已删除，无重定向，请使用 `/match/:id` 或从 `/history` 进入）。
   - 顶栏：**胜者（名）**、**双方**、德州累计 / 点格比分、**match_type** 徽章、中止 reason；进入页 `POST /view` 计浏览。
   - **人类对战** `/play/:id`：传 seats、结束胜者摘要、德州合法按钮（读 `your_turn.request`）、回合倒计时提示。
 
