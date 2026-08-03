@@ -66,3 +66,6 @@ browser_shots/
 
 # === Git worktree 隔离开发（本地工作树，不跟踪）===
 .worktrees/
+
+# === 强 Bot 本地样例（含策略源码与 PyInstaller 产物，不入库）===
+samples/national_v156_bz/
