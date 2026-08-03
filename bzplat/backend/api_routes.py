@@ -229,19 +229,21 @@ def global_search(
     q: str | None = None,
     type: str | None = None,
     limit: int = 20,
+    game_id: str | None = None,
 ):
     """全局搜索：type=users|bots|matches（默认 users）。
 
     bots 按 name/display_name 模糊；matches 按 bot 名模糊；users 沿用前缀搜索。
+    game_id 可选过滤（仅对 bots/matches 有效）。
     """
     store = _store(request)
     ql = (q or "").strip()
     lim = max(1, min(limit, 50))
     t = (type or "users").lower()
     if t == "bots":
-        return {"bots": store.search_bots(ql, limit=lim)}
+        return {"bots": store.search_bots(ql, limit=lim, game_id=game_id)}
     if t == "matches":
-        return {"matches": store.search_matches(ql, limit=lim)}
+        return {"matches": store.search_matches(ql, limit=lim, game_id=game_id)}
     # 默认 users
     return {"users": store.search_users(ql, limit=lim)}
 
@@ -871,8 +873,8 @@ def contest_templates(request: Request, game: str | None = None):
 
 
 @router.get("/api/contests")
-def list_contests(request: Request, status: str | None = None):
-    return {"contests": _store(request).list_contests(status=status)}
+def list_contests(request: Request, status: str | None = None, game_id: str | None = None):
+    return {"contests": _store(request).list_contests(status=status, game_id=game_id)}
 
 
 @router.post("/api/contests")
@@ -1281,9 +1283,13 @@ def admin_bots(
     request: Request,
     active: bool | None = None,
     q: str | None = None,
+    game_id: str | None = None,
     _admin=Depends(require_admin),
 ):
-    rows = _store(request).list_bots(active_only=bool(active) if active is not None else False)
+    rows = _store(request).list_bots(
+        active_only=bool(active) if active is not None else False,
+        game_id=game_id,
+    )
     if q:
         ql = q.lower()
         rows = [b for b in rows if ql in (b.get("name") or "").lower()
@@ -1339,9 +1345,10 @@ class AdminContestPatch(BaseModel):
 
 @router.get("/api/admin/contests")
 def admin_contests(
-    request: Request, status: str | None = None, _admin=Depends(require_admin)
+    request: Request, status: str | None = None, game_id: str | None = None,
+    _admin=Depends(require_admin),
 ):
-    return {"contests": _store(request).list_contests(status=status)}
+    return {"contests": _store(request).list_contests(status=status, game_id=game_id)}
 
 
 @router.patch("/api/admin/contests/{contest_id}")
