@@ -2,7 +2,7 @@
 """五子棋参考裁判（独立、无平台依赖）。
 
 Bot 作者可本地运行此脚本自测合法着 / 胜负判定，逻辑与本平台服务端
-`bzplat/backend/engine/gomoku.py` 的 GomokuSession 裁判一致。
+`bzplat/backend/games/gomoku/engine.py` 的 GomokuSession 裁判一致。
 
 规则：15×15；黑先（seat 0）；横/竖/斜连续 ≥5 即胜（含长连，无禁手）；
 非法着（越界 / 占用）→ 判负；棋盘下满无人成五 → 平局。

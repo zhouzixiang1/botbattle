@@ -25,7 +25,7 @@ is_builtin    内置标记（内置可改不可删）
 |---------|--------------|------|
 | holdem  | `{"hands": 70}` | 每场手数（1–500） |
 | gomoku  | `{}` | 单局，无可调参数 |
-| pencil  | `{"n_dots": 11}` | 点阵边长（3–15） |
+| pencil  | `{"n_dots": 6}` | 点阵边长（默认 6；可调 3–15） |
 
 创建比赛时按所选游戏显示对应字段；派遣对局时按 game 取参数透传给引擎
 （holdem→`hands`，pencil→`n_dots`，gomoku 单局）。旧的 `hands_per_match` 字段保留向后兼容。
@@ -93,17 +93,27 @@ is_builtin    内置标记（内置可改不可删）
 
 > 公开端与 admin 端**同源读表**，确保组织者看到的模板与 admin 配置一致。
 
-## 默认内置模板
+## 默认内置模板（9 个）
 
-| id | 游戏 | 赛制 |
-|----|------|------|
-| `holdem_swiss_ko` | 德州 | 瑞士 → 单败 |
-| `holdem_rr` | 德州 | 单循环（小规模） |
-| `gomoku_group_drr_ko` | 五子棋 | 分组双循环 → 单败 |
-| `gomoku_swiss_ko` | 五子棋 | 瑞士 → 单败 |
-| `pencil_group_drr_ko` | 点格棋 | 分组双循环 → 单败 |
-| `pencil_swiss_ko` | 点格棋 | 瑞士 → 单败 |
-| `board_rr` | 棋类 | 双循环（课堂演示） |
+模板由各游戏 `games/<game>/templates.py` 经注册表聚合；内置可改不可删。部分模板带 **`phase`**（赛事阶段语义）与阶段级选项：
+
+| id | 游戏 | 赛制 | phase / 备注 |
+|----|------|------|----------------|
+| `holdem_swiss_ko` | 德州 | 瑞士 → 单败 | `standalone`（默认） |
+| `holdem_rr` | 德州 | 单循环（小规模） | `standalone` |
+| `holdem_prelim_swiss` | 德州 | 单阶段瑞士（全员排名） | **`preliminary`** 预赛：全员唯一正式名次 |
+| `holdem_final_ranked` | 德州 | 全员单循环 → Top8 双循环 | **`final`** 决赛：Stage1 `allow_large_round_robin` 旁路 `FULL_RR_MAX_N`；Stage2 `ranking_mode=replace_top` 合成正式榜 |
+| `gomoku_group_drr_ko` | 五子棋 | 分组双循环 → 单败 | `standalone` |
+| `gomoku_swiss_ko` | 五子棋 | 瑞士 → 单败 | `standalone` |
+| `board_rr` | 棋类 | 双循环（课堂演示） | `standalone`（挂在 gomoku 模板集） |
+| `pencil_group_drr_ko` | 点格棋 | 分组双循环 → 单败 | `standalone` |
+| `pencil_swiss_ko` | 点格棋 | 瑞士 → 单败 | `standalone` |
+
+### 预赛 / 决赛与正式名次（简要）
+
+- 创建比赛时，若模板声明 `phase`（`preliminary` / `final`），赛事继承该 phase（也可显式覆盖；默认 `standalone`）。
+- 阶段结束时赛制层经 `contests/ranking.py` 计算**全员正式名次**（破同分：积分 → Buchholz Cut1 → Sonneborn-Berger → 直接交手 → 净码等），写入 `contest_official_results`。
+- 决赛模板 `holdem_final_ranked`：Stage1 允许大于 12 人的全员单循环（见下节旁路）；Stage2 用 `replace_top` 把 Top8 循环结果嵌回总榜。
 
 ## 赛制合理性指南（人数 → 场次 → 时长 → 推荐）
 
@@ -133,6 +143,7 @@ is_builtin    内置标记（内置可改不可删）
 ### 关键约束
 
 - **`FULL_RR_MAX_N`**（默认 12，admin 可调）：全员单/双循环 + 分组循环的每组人数上限。超限报错「请改用 Swiss/分组模板」。500 人全员循环 = 124750 场不现实，护栏保护。
+- **旁路**：阶段配置 `allow_large_round_robin=true` 时**不套**该护栏。仅白名单内置模板使用（当前：`holdem_final_ranked` 的资格循环阶段），自定义模板勿滥用。
 - **并发硬顶** = `max(1, cpu//4)`（32 核 → 8）。赛事对局按此并发，场次/8 ≈ 批次数。
 - **瑞士轮数** = `ceil(log2(n))`（500人=9轮），每轮 n//2 场，是大规模唯一可行的"循环式"赛制。
 - **单败淘汰** = n-1 场（500人=499场），最快但单场定胜负、运气成分大，适合决冠军而非排全员名次。

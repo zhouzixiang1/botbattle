@@ -130,9 +130,14 @@ export default function UserProfile() {
                 {displayName.charAt(0).toUpperCase()}
               </AvatarFallback>
             </Avatar>
-            <div className="min-w-0 flex-1 space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-xl font-bold text-foreground">{displayName}</h2>
+            <div className="min-w-0 flex-1 space-y-1.5 overflow-hidden">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <h2
+                  className="max-w-full break-words text-xl font-bold text-foreground [overflow-wrap:anywhere]"
+                  title={displayName}
+                >
+                  {displayName}
+                </h2>
                 {profile.role !== 'user' && (
                   <Badge variant={profile.role === 'admin' ? 'destructive' : 'secondary'}>
                     {profile.role === 'admin' ? '管理员' : '组织者'}
@@ -145,7 +150,11 @@ export default function UserProfile() {
                 )}
               </div>
               <p className="text-sm text-muted-foreground">@{profile.username}</p>
-              {profile.bio && <p className="text-sm text-foreground/80">{profile.bio}</p>}
+              {profile.bio && (
+                <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-sm text-foreground/80 [overflow-wrap:anywhere]">
+                  {profile.bio}
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-xs text-muted-foreground">
                 <span>注册于 {profile.created_at?.slice(0, 10)}</span>
                 {totalGames > 0 && <span>· 参与 {totalGames} 场对局</span>}

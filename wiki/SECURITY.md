@@ -50,7 +50,7 @@ ip=<真实IP> action=<动作> result=<ok|fail> user=<操作者> target=<目标> 
 |------|------|
 | `/api/auth/{login,register,verify-email,reset-password,request-reset,resend-verify}` | 20 次/60s |
 | `/api/auth/captcha` | 60 次/60s |
-| `/api/bots/upload`、`*/upload` | 6 次/60s |
+| `POST /api/bots`、`POST /api/bots/{id}/versions` | 6 次/60s |
 | `/api/matches/challenge` | 8 次/60s |
 | 其它 `/api/*` | 120 次/60s |
 | 静态资源、`/api/health`、`/` | 不限 |

@@ -32,7 +32,8 @@ Windows PE 走 Wine 容器时 CPU/内存/断网/cap-drop 对齐，但保留写�
 ## 决策超时
 
 - 默认 **60 秒 / 决策**（管理员可在「运行时」面板改，范围 1–300）。
-- 决策超时视为该 Bot **fold / 判负**（扑克弃牌；棋类判负）。进程崩溃 / EOF 则整场对局 **aborted**（`bot_crashed`），见 [对局](#/wiki?slug=match)。
+- 决策超时视为该 Bot **fold / 判负**（扑克弃牌；棋类判负）。
+- **崩溃语义**（详见 [对局](#/wiki?slug=match)）：对局**中途** `BotCrashedError` 由引擎**计分判负**（`completed`）；**启动失败**非赛事 → `aborted`（`bot_crashed`），赛事 → `completed` + `technical_loss`。
 - 本平台采用**整场对局长驻**进程（stdin/stdout 行协议），因此超时默认远高于 Botzone 的 1s/回合。
 
 ### Botzone 语言时限倍率（对照）

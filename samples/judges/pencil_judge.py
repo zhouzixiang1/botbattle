@@ -2,7 +2,7 @@
 """点格棋（Dots and Boxes）参考裁判（独立、无平台依赖）。
 
 Bot 作者可本地运行自测合法着 / 成格计分，逻辑与本平台服务端
-`bzplat/backend/engine/pencil.py` 的 PencilSession 裁判一致。
+`bzplat/backend/games/pencil/engine.py` 的 PencilSession 裁判一致。
 
 规则：N×N 点（默认 N=3 便于演示）→ 交错网格 size=2N-1；红先（seat 0）；
 占相邻边；围成格得分并连走；格多者胜；平分则平局。
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 
-DEFAULT_N = 3  # 演示用小棋盘；正式规则 N=11
+DEFAULT_N = 3  # 演示用小棋盘；正式规则 N=6
 GRID_DOT = 3
 GRID_EDGE = 4
 GRID_EDGE_USED = 5

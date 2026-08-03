@@ -160,6 +160,17 @@ def test_update_profile_endpoint(tmp_path):
     assert u["bio"] == "updated bio"
 
 
+def test_update_profile_rejects_angle_brackets_in_display_name(tmp_path):
+    """显示名禁止 < >，避免脏数据/伪 HTML 污染侧栏与主页（审计 U10）。"""
+    c, ctx, bid = _app(tmp_path)
+    r = c.put(
+        "/api/auth/profile",
+        json={"display_name": "测1_<script>alert(1)</script>"},
+        headers={"Authorization": f"Bearer {ctx['token']}"},
+    )
+    assert r.status_code == 422, r.text
+
+
 def test_update_profile_requires_auth(tmp_path):
     c, ctx, bid = _app(tmp_path)
     r = c.put("/api/auth/profile", json={"bio": "x"})

@@ -25,13 +25,13 @@
 | 类型 | 来源 | 是否更新全局 Glicko-2 |
 |------|------|----------------------|
 | `challenge` | 用户主动挑战（含自博弈） | ✅ 是 |
-| `table` | 游戏桌 | ✅ 是 |
 | `ladder` | 系统闲时自动对局 | ✅ 是 |
 | `contest` | 赛事内对局 | ❌ 否（仅计入赛事内 stage 积分） |
 | `human` | 人类 vs Bot | ❌ 否（人类无评分） |
+| `table` | **schema 预留**（未实现业务路径） | — |
 
 > **评分隔离**：`contest` 只计入赛事内积分榜；`human` 不计 Glicko（人类无 rating 行）；
-> `challenge`/`table`/`ladder` 更新全局评分。
+> `challenge`/`ladder` 更新全局评分。`table` 仅出现在 DB 约束与常量中，当前无建桌/占位 API。
 
 ## 人类对战（match_type=human）
 
@@ -50,10 +50,8 @@
 - **连续超时自动中止**：人类连续 `human_max_consecutive_timeouts`（默认 5）次不响应即中止对局
   （`aborted`，reason=`human_inactive`，广播 `error`），避免扑克 70 手最长 2.3 小时死磕占用人类槽、
   锁死 per-user 名额。棋类一手非法即结束，不会累积到此阈值。对局异常/中止时**无条件释放** per-user 锁。
-- **Bot 崩溃快速中止**：若 Bot 二进制启动即崩（进程退出/EOF，如动态链接库缺失、glibc 不匹配），
-  对局立即 `aborted`（reason=`bot_crashed`）并广播 `error`，而非吞成默认动作死磕数小时。
-  该行为对三款游戏（holdem/gomoku/pencil）一致——引擎层识别 `BotCrashedError`（不可恢复）与
-  普通决策错误（可恢复，判对手赢）两类，前者上抛触发 abort、后者按规则处理。
+- **Bot 崩溃**：人类局中 Bot 启动失败或进程崩溃 → 对局 `aborted`（reason=`bot_crashed`）并广播 `error`，
+  而非吞成默认动作死磕数小时。普通可恢复决策错误仍按规则（扑克 fold / 棋类判负）。
 - 不计 Glicko-2 天梯。
 
 > 棋类棋盘可点击落子；扑克提供 Fold/Check/Call/Raise/Allin 按钮栏。
@@ -93,9 +91,13 @@ SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看�
 |------|--------|-----------------|
 | 决策超时 | 视为 fold | 判负 |
 | 非法动作 / 坏 JSON 等可恢复错误 | fold | 判负 |
-| 进程崩溃 / EOF（`BotCrashedError`） | 整场 `aborted`（`reason=bot_crashed`） | **同左** |
+| **对局中途**进程崩溃 / EOF（引擎内 `BotCrashedError`） | **计分判负**，对局 `completed`（崩溃方负，`reason=crash`） | **同左** |
+| **启动失败**（session 起不来）· 非赛事 | `aborted`（`reason=bot_crashed`） | **同左** |
+| **启动失败** · 赛事（`match_type=contest`） | `completed` + `technical_loss`（对手胜，避免赛事 standings 卡住） | **同左** |
+| 人类对战中 Bot 崩 | `aborted`（`bot_crashed`） | **同左** |
 | 容器 OOM 等 | 对局 `aborted` | 同左 |
 
-> 与「人类对战」一节一致：硬崩溃**中止对局**，不把崩溃吞成整场默认 fold/判负。
+> 中途崩溃由各游戏引擎捕获并产出正常 `MatchResult`（计分判负）；启动期失败才由编排层分支：
+> 非赛事 abort / 赛事技术判负。不把崩溃吞成「整场默认 fold 继续跑完」。
 
 资源限制详见 [运行时](#/wiki?slug=runtime)。

@@ -12,7 +12,8 @@
 | 非法着 | 视为 fold | **判负** |
 | 决策超时 | 视为 fold | **判负** |
 | 可恢复的决策异常（坏 JSON 等） | 视为 fold | **判负** |
-| 进程崩溃 / EOF（`BotCrashedError`） | **整场 aborted**（`bot_crashed`） | **同左** |
+| **对局中途**进程崩溃 / EOF（`BotCrashedError`） | **计分判负**（对局 `completed`，崩溃方负） | **同左**（对手胜，`reason=crash`） |
+| **启动失败**（进程起不来） | 非赛事 → `aborted`（`bot_crashed`）；赛事 → `completed` + `technical_loss` | **同左** |
 | 棋盘满 / 资源耗尽 | — | 平局（点数相同）或按点数判胜 |
 
 ## Botzone 裁判模型
@@ -35,7 +36,7 @@ Botzone 裁判每回合启停，输入大致为 `{"log":[...], "initdata":...}`�
 | 五子棋（gomoku） | `GomokuSession`（`bzplat/backend/games/gomoku/engine.py`） |
 | 点格棋（pencil） | `PencilSession`（`bzplat/backend/games/pencil/engine.py`） |
 
-> `bzplat/backend/engine/*.py` 仅为兼容旧 import 的 shim，转发到上述实现。
+> 真实现全在 `games/<game>/`。旧的 `bzplat/backend/engine/` 包已删除，不再存在 shim。
 
 Bot 通过 Docker / 本地长驻进程交互：引擎调用 `decide(player_idx, request)` →
 BinaryRunner 往 bot 的 stdin 写一行 JSON 请求、从 stdout 读一行 JSON 响应。

@@ -167,11 +167,11 @@ x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
 
 - **无网络**：容器以 `--network=none` 启动，任何联网调用都会失败。
 - **资源限制**：内存上限（默认 512MB）、CPU（默认 1 核）。
-- **只读根文件系统** + 仅 `/tmp` 可写（`noexec`，不能在里面执行程序）。
+- **只读根文件系统** + 仅 `/tmp` 可写且 **可执行**（`--tmpfs /tmp:rw,exec,nosuid`；PyInstaller 自解压 / 动态链接需可执行映射；勿依赖在 `/tmp` 外写文件）。
 - **最小权限**：`--cap-drop=ALL`、`--security-opt no-new-privileges`、以非 root 用户（65534）运行。
 - **无 setuid**：禁止提权。
 
-> 结论：Bot 应是**纯计算**程序，只读 stdin、写 stdout，不要尝试读写文件系统、联网、调用外部命令。
+> 结论：Bot 应是**纯计算**程序，只读 stdin、写 stdout，不要尝试联网或依赖持久可写目录。
 
 ## 7. 本地调试
 
@@ -204,7 +204,7 @@ echo '{"v":1,"t":"act","h":0,"H":70,"id":0,"d":0,"mc":[48,51],"pc":[],"hist":[],
 | `to=0` 时回 `call` | 判 fold（此时只能 check/raise） | `to=0` 用 `{"a":"k"}` |
 | `raise` 的 `x` 当成增量 | 加注额不对被判 fold | `x` 是**加注到的总额** |
 | `raise` 的 `x` 低于最小加注 | 判 fold | `x` ≥ 上次加注的 2 倍 |
-| 进程崩溃 / 主动 exit | 整场对局 aborted（`bot_crashed`） | 保持进程存活，出错就回安全默认动作（扑克 `{"a":"f"}`） |
+| 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负（`completed`）；启动失败非赛事 → `aborted`（`bot_crashed`） | 保持进程存活，出错就回安全默认动作（扑克 `{"a":"f"}`） |
 | 上传 macOS 二进制 | 被拒绝 | 交叉编译为 Linux ELF |
 | 依赖联网 / 文件写入 | 调用失败 | 纯计算，只用 stdin/stdout |
 

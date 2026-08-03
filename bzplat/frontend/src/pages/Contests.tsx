@@ -38,7 +38,7 @@ function matchConfigSummary(c: Contest): string {
     cfg = {}
   }
   if (spec.configFields.length === 0) return '单局'
-  // 展示该游戏所有可调参数（如 holdem "70 手"、pencil "11 点"）
+  // 展示该游戏所有可调参数（如 holdem "70 手"、pencil "6 点"）
   return spec.configFields
     .map((f) => {
       const v = (cfg[f.key] as number) ?? f.default
@@ -234,18 +234,21 @@ export default function Contests() {
         ) : (
           <ul className="divide-y divide-border">
             {list.map((c) => (
-              <li key={c.id} className="px-4 py-3">
-                <div className="flex flex-wrap items-center gap-2">
+              <li key={c.id} className="min-w-0 px-4 py-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <Link
                     to={`/contests/${c.id}`}
-                    className="text-lg font-medium text-primary hover:underline"
+                    className="min-w-0 max-w-full break-words text-lg font-medium text-primary [overflow-wrap:anywhere] hover:underline"
+                    title={c.title}
                   >
                     {c.title}
                   </Link>
                   <StatusBadge status={c.status} />
                 </div>
-                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                  <span>{c.template_id || '—'}</span>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span className="max-w-full truncate" title={c.template_id || undefined}>
+                    {templates.find((t) => t.id === c.template_id)?.name || c.template_id || '—'}
+                  </span>
                   <span>·</span>
                   <span>{gameLabel(c.game_id)}</span>
                   <span>·</span>

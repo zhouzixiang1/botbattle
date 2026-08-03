@@ -53,7 +53,7 @@ sqlite3 botzone.db "DELETE FROM users WHERE username LIKE 'load_%';"
 |------|----------|------|
 | **0 基础** | `GET /api/{health,wiki,leaderboard,contests,contests/templates,matches,users,auth/captcha}`；`GET /api/auth/me`；`POST /api/auth/change-password`（验旧 session 失效） | 公开 + user |
 | **1 Bot** | `GET /api/bots/{mine,public,{id}}`；`POST /api/bots`（HTTP 上传）；`POST /api/bots/{id}/versions`；`POST /api/bots/{id}/active` | user |
-| **2 对局** | `POST /api/matches/challenge`（三游戏混跑 + 自博弈，~80 场，8 并发）；`GET /api/matches`；`GET /api/matches/{id}`；`GET /api/leaderboard`（验 Glicko 更新） | user |
+| **2 对局** | `POST /api/matches/challenge`（三游戏混跑 + 自博弈，目标 `TARGET_MATCHES=12` 场，8 并发）；`GET /api/matches`；`GET /api/matches/{id}`；`GET /api/leaderboard`（验 Glicko 更新） | user |
 | **3 SSE** | `GET /api/matches/{id}/events`（验 snapshot 首事件 + 历史列表） | 公开 |
 | **4 人类 vs Bot** | `POST /api/matches/human`；WS `/api/matches/{id}/play`（holdem/gomoku/pencil，收 `your_turn` 回着至 `match_end`）；验 per-user ≤1 并发被拒、match_type=human、**Glicko 不变** | user |
 | **5 赛事** | `POST /api/contests`（template）；`/{id}/{open,register,dispatch,start,resume}`；轮询到 finished；验 standings/pairings/stage_results、contest 对局不更新 Glicko | organizer + user |
@@ -76,9 +76,9 @@ pytest bzplat/backend/tests/test_load_test_seed.py -v
 
 ## 注意
 
-- **holdem 加速**：阶段 2/3/5 用 `hands=8`（原 70 手约 140s/局），棋类单局。全量约 10-15 分钟。
+- **holdem 加速**：脚本常量 `HOLDEM_HANDS=4`（默认 70 手太慢）；棋类单局。阶段 2 目标 `TARGET_MATCHES=12`（三游戏×4）。全量约数分钟级（关/放宽限流时更快）。
 - **并发硬顶** = `cpu//4`（本机 32 核 → 8 场）；admin 不可抬高（`max_concurrent_matches` 超 ceiling 报 400）。
-- **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。阶段 2 按此节流（每 ~7.5s 发一个挑战），目标 80 场需约 10 分钟；阶段 2 结束后等一个完整限流窗口再进下一阶段，避免后续零星挑战被 429。`_paced_challenge` / `_paced_human` 遇 429 自动按 `Retry-After` 重试。
+- **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。阶段 2 按此节流；`_paced_challenge` / `_paced_human` 遇 429 自动按 `Retry-After` 重试。
 - **judge 参数**：阶段 7 临时改 gomoku size→13 跑 1 场后**改回** 15，验 bb≤sb 报错。
 - **资源不调高**：不改 `bot_cpus/bot_memory`（只读硬顶）。
 - **Docker 跑 Bot**：dev 服务现状即 Docker；若阶段 2 大量 EOF，脚本记 warning 不硬失败（属环境问题）。

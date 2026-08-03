@@ -73,12 +73,12 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
 - **所有常量集中在 `bzplat/backend/store/schema.py`**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`platform_settings` 键名。新增常量加这里，别散落。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
-- **资源硬顶**（`runtime/limits.py`，admin 不可抬高）：每 Bot `--cpus=1` / `--memory=512m`；半负载并发 ceiling = `max(1, cpu//4)`；全员单/双循环人数上限 `FULL_RR_MAX_N=12`。
+- **资源硬顶**（`runtime/limits.py`，admin 不可抬高）：每 Bot `--cpus=1` / `--memory=512m`；半负载并发 ceiling = `max(1, cpu//4)`；全员单/双循环人数上限 `FULL_RR_MAX_N=12`（阶段可设 `allow_large_round_robin` 旁路，仅白名单内置决赛模板如 `holdem_final_ranked`）。
 
 ## 架构分层（编辑时切勿越界）
 
 ```
-contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) → manager(阶段状态机)
+contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) → manager(阶段状态机) → ranking(正式名次/破同分)
 matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runner(起Bot进程,按game_id路由)
             人类对战：orchestrator.challenge_human/_run_human_match + runner.run_bot_vs_human
             （人类侧经 _human_turns Future + WebSocket /api/matches/{id}/play 回传落子，独立 _human_sem，不计 Glicko）
@@ -89,7 +89,7 @@ notifications/ 通知管理器：NotificationManager（写站内通知 + 按 pre
 games/      游戏注册表（全面解耦的单一真相）：base.py(GameSpec 接口 + GameRegistry 单例
             + MatchResult/RoundResult 平台契约基类，仅类型提示/测试用) + __init__.py(注册表
             单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS
-            等模块级便捷函数) + _board_protocol.py(棋类共享行协议工具)
+            等模块级便捷函数) + _board_protocol.py(棋类共享行协议工具；gomoku/pencil 的 protocol.py re-export)
             + 每游戏完全自包含的子包 games/<game>/：engine.py(裁判) + protocol.py(行协议)
             + result.py(结果，独立定义不共享基类) + tiers.py(per-game 段位) + cards.py(holdem)
             + templates.py(赛事模板) + spec.py(装配 GameSpec)。GameSpec 集中声明一款游戏的全部固有属性。
@@ -111,7 +111,7 @@ src/index.css              设计 token：shadcn v4 OKLCH 双主题（:root 浅 
 src/components/ui/         共享 UI 原语库（shadcn new-york：Button/Input/Card/Table/Tabs/Badge/Dialog/DropdownMenu/Select/Command/Popover/Tooltip/Slider/Switch/Separator/Sheet/Skeleton/Sonner/Avatar/Label/ScrollArea/MetricCard/Chart...）—— 全项目唯一组件抽象层
 src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadge（前台+管理端共用）
 src/components/ui/select.tsx   shadcn Select（Radix）—— 全站下拉框唯一实现，禁裸用原生 <select>
-src/components/shell/      全局 Shell：AppShell（已登录 lg+ 侧栏 / 访客全断点顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
+src/components/shell/      全局 Shell：AppShell（lg+ 侧栏——登录与访客均显示；auth 页除外；窄屏顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
 src/pages/                 22 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）

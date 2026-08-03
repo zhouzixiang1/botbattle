@@ -19,7 +19,7 @@
 
 **数据来源**：
 
-- 后端：`games/<game>/tiers.py` + `GameSpec.tier_for`
+- 后端：`games/<game>/tiers.py` 声明曲线，挂在 **`GameSpec.tiers`**；查表经共享 `base.tier_for_in`，统一入口 **`registry.tier_for(game_id, rating)`**（GameSpec **无** `tier_for` 字段）
 - API：`GET /api/tiers?game_id=`（不传则按实现默认；推荐按游戏拉取）
 - 前端：`lib/tiers.ts` 的 `fetchTiers` / `useGameTiers(gameId)`（带缓存）；`TIERS` 常量仅作兜底镜像
 

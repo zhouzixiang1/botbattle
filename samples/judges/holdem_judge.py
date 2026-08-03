@@ -2,10 +2,10 @@
 """德州扑克参考裁判（独立、无平台依赖）：手牌评估 + 动作合法性。
 
 Bot 作者可本地自测：
-- 七牌最佳五牌组合的牌力比较（与本平台 engine/cards.py 评估口径一致）
+- 七牌最佳五牌组合的牌力比较（与本平台 games/holdem/cards.py 评估口径一致）
 - raise 下限（min-raise = 2× 当前下注）等动作合法性
 
-注意：平台裁判（engine/game.py MatchSession）还处理盲注、side pot、
+注意：平台裁判（games/holdem/engine.py MatchSession）还处理盲注、side pot、
 all-in runout、超时 fold 等；本参考脚本只覆盖手牌评估与下注合法性核心。
 """
 from __future__ import annotations

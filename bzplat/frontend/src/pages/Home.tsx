@@ -119,90 +119,102 @@ export default function Home() {
 
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
-      <Card>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>时间</TableHead>
-              <TableHead>游戏</TableHead>
-              <TableHead>对阵</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>进度</TableHead>
-              <TableHead className="text-right">操作</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {loading ? (
+      <Card className="overflow-hidden">
+        <div className="overflow-x-auto">
+          <Table className="min-w-[40rem]">
+            <TableHeader>
               <TableRow>
-                <TableCell colSpan={6}>
-                  <Loading />
-                </TableCell>
+                <TableHead className="whitespace-nowrap">时间</TableHead>
+                <TableHead className="whitespace-nowrap">游戏</TableHead>
+                <TableHead className="min-w-[10rem]">对阵</TableHead>
+                <TableHead className="whitespace-nowrap">状态</TableHead>
+                <TableHead className="whitespace-nowrap">进度</TableHead>
+                <TableHead className="text-right whitespace-nowrap">操作</TableHead>
               </TableRow>
-            ) : matches.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6}>
-                  <EmptyState
-                    text="暂无对局"
-                    icon={<Swords className="size-7 opacity-40" />}
-                  />
-                </TableCell>
-              </TableRow>
-            ) : (
-              matches.map((m) => {
-                const tb = matchTypeBadge(m.match_type)
-                const GameIcon = gameIcon(m.game_id)
-                return (
-                  <TableRow key={m.id}>
-                    <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                      {m.created_at || '—'}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1.5">
-                        <GameIcon className="size-3.5 text-muted-foreground" />
-                        <span className="text-sm">{gameLabel(m.game_id)}</span>
-                        {tb && (
-                          <Badge variant="outline" className={`text-[10px] ${tb.cls}`}>
-                            {tb.label}
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1.5 text-sm">
-                        <Link to={`/bot/${m.bot_a_id}`} className="font-medium text-foreground hover:text-primary">
-                          {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
-                        </Link>
-                        <span className="text-muted-foreground">vs</span>
-                        <Link to={`/bot/${m.bot_b_id}`} className="font-medium text-foreground hover:text-primary">
-                          {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
-                        </Link>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={m.status} />
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {isBoardGame(m.game_id)
-                        ? `${m.hands_played ?? 0} 步`
-                        : `${m.hands_played ?? 0}/${m.total_hands ?? 70}`}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Link
-                          className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:underline"
-                          to={`/match/${m.id}`}
-                        >
-                          {(m.status === 'pending' || m.status === 'running') ? '观赛' : '详情'}
-                          <ArrowRight className="size-3" />
-                        </Link>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                )
-              })
-            )}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {loading ? (
+                <TableRow>
+                  <TableCell colSpan={6}>
+                    <Loading />
+                  </TableCell>
+                </TableRow>
+              ) : matches.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6}>
+                    <EmptyState
+                      text="暂无对局"
+                      icon={<Swords className="size-7 opacity-40" />}
+                    />
+                  </TableCell>
+                </TableRow>
+              ) : (
+                matches.map((m) => {
+                  const tb = matchTypeBadge(m.match_type)
+                  const GameIcon = gameIcon(m.game_id)
+                  const aName = m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`
+                  const bName = m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`
+                  return (
+                    <TableRow key={m.id}>
+                      <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
+                        {m.created_at || '—'}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                          <span className="text-sm whitespace-nowrap">{gameLabel(m.game_id)}</span>
+                          {tb && (
+                            <Badge variant="outline" className={`text-[10px] ${tb.cls}`}>
+                              {tb.label}
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="max-w-[14rem]">
+                        <div className="flex min-w-0 items-center gap-1.5 text-sm">
+                          <Link
+                            to={`/bot/${m.bot_a_id}`}
+                            className="min-w-0 truncate font-medium text-foreground hover:text-primary"
+                            title={aName}
+                          >
+                            {aName}
+                          </Link>
+                          <span className="shrink-0 text-muted-foreground">vs</span>
+                          <Link
+                            to={`/bot/${m.bot_b_id}`}
+                            className="min-w-0 truncate font-medium text-foreground hover:text-primary"
+                            title={bName}
+                          >
+                            {bName}
+                          </Link>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={m.status} />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
+                        {isBoardGame(m.game_id)
+                          ? `${m.hands_played ?? 0} 步`
+                          : `${m.hands_played ?? 0}/${m.total_hands ?? 70}`}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-2">
+                          <Link
+                            className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:underline"
+                            to={`/match/${m.id}`}
+                          >
+                            {(m.status === 'pending' || m.status === 'running') ? '观赛' : '详情'}
+                            <ArrowRight className="size-3" />
+                          </Link>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
+        </div>
       </Card>
 
       <LikedTopMatches />

@@ -202,13 +202,20 @@ export default function MyBots() {
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="upload-file">二进制文件</Label>
-              <Input
-                id="upload-file"
-                type="file"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                required
-                className="cursor-pointer"
-              />
+              <label
+                htmlFor="upload-file"
+                className="flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent"
+              >
+                <span className="shrink-0 font-medium text-foreground">选择文件</span>
+                <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
+                <input
+                  id="upload-file"
+                  type="file"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  required
+                  className="sr-only"
+                />
+              </label>
             </div>
             {error && <ErrorMsg msg={error} />}
             <Button type="submit" disabled={busy} className="gap-1.5">

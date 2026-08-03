@@ -379,9 +379,10 @@ export default function MatchViewer() {
               {visible.map((ev, i) => (
                 <div key={i} ref={i === cur ? curActionRef : undefined}
                   className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
-                  <span className="w-8 font-mono opacity-60">{i + 1}</span>
-                  <span className="w-14 opacity-70">{ev.type}</span>
-                  <span className="flex-1 truncate opacity-80">{eventDesc(ev)}</span>
+                  <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
+                  <span className="min-w-0 flex-1 break-words opacity-80" title={String(ev.type || '')}>
+                    {eventDesc(ev)}
+                  </span>
                 </div>
               ))}
             </div>

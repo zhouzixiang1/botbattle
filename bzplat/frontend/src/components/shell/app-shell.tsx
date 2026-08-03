@@ -172,7 +172,12 @@ export function AppShell() {
               </div>
             )}
             {isLoggedIn ? (
-              <div className={cn('flex items-center gap-2 rounded-lg px-1 py-1', sidebarCollapsed && 'justify-center')}>
+              <div
+                className={cn(
+                  'flex min-w-0 items-center gap-2 rounded-lg px-1 py-1',
+                  sidebarCollapsed && 'justify-center',
+                )}
+              >
                 <UserIcon className="size-4 shrink-0 text-primary" />
                 {!sidebarCollapsed && (
                   <>
@@ -180,12 +185,16 @@ export function AppShell() {
                       <TooltipTrigger asChild>
                         <Link
                           to={`/user/${encodeURIComponent(user?.username ?? '')}`}
-                          className="min-w-0 flex-1 truncate text-sm font-medium text-foreground hover:text-primary"
+                          className="min-w-0 max-w-[9rem] flex-1 truncate text-sm font-medium text-foreground hover:text-primary"
+                          title={user?.display_name || user?.username}
                         >
                           {user?.display_name || user?.username}
                         </Link>
                       </TooltipTrigger>
-                      <TooltipContent>{user?.username}</TooltipContent>
+                      <TooltipContent className="max-w-xs break-all">
+                        {user?.display_name || user?.username}
+                        {user?.username ? ` (@${user.username})` : ''}
+                      </TooltipContent>
                     </Tooltip>
                     {user?.role === 'admin' && (
                       <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
