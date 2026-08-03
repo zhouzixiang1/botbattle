@@ -103,7 +103,7 @@ def page_routes(match_id, bot_id, username, contest_id):
         ("match", f"/match/{match_id}"),
         ("bot", f"/bot/{bot_id}"),
         ("user", f"/user/{username}"),
-        ("arena", "/arena"),
+        ("history", "/history"),
         ("login", "/login"),
         ("register", "/register"),
         ("verify_email", "/verify-email"),

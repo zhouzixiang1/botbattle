@@ -30,7 +30,7 @@ export default function GameCanvas({
   // 尺寸/DPR 适配 effect —— 仅在 width/height/gameId 变化时重跑。
   // canvas.width/height 赋值会清空位图（HTML 规范），故只在尺寸真正变化时才做，
   // 并立即静态重绘上一帧（若已有），避免尺寸变化导致空白。
-  // NOTE: deps 故意不含 seats —— seats 引用变化（如 ArenaWatch 每次渲染传新数组）
+  // NOTE: deps 故意不含 seats —— seats 引用变化（调用方每次渲染传新数组）
   // 由下方主绘制 effect 的静态重绘分支处理（不清位图），否则会重现 I1：
   // 每次 seats 引用变化都清空位图。这是修复的核心：位图永不在无即时重绘时被清。
   useEffect(() => {

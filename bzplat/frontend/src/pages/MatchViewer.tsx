@@ -6,7 +6,7 @@
  *   游标走完剩余停（不强制跳结局）；已结束对局重开页 → 自动从头播放。
  * - completed/aborted → 回放模式：一次性加载 events_json，从头自动播放。
  * - 座位身份：从 match.bot_a/bot_b（后端 JOIN）构造 SeatInfo 传 canvas。
- * - 合并旧 MatchDetail + ArenaWatch；/watch/:id 重定向到此。
+ * - 合并旧 MatchDetail（回放）逻辑；ArenaWatch 已删除，/watch 旧路径不再重定向。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'

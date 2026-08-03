@@ -72,7 +72,7 @@ botbattle/
 │           ├── components/ui/     # 26 个 shadcn 共享原语
 │           ├── components/shell/  # 全局 Shell + 导航 + Cmd+K（lg+ 侧栏，含访客）
 │           ├── games/             # 前端 GameViewSpec 注册表 + 每游戏 canvas/reducer
-│           ├── pages/             # 22 个 lazy 页面模块（含 admin）
+│           ├── pages/             # 20 个 lazy 页面模块（含 admin）
 │           └── lib/               # tiers / utils / markdown 等
 ├── doc/                       # 本目录：面向甲方的交付文档（6 份）
 ├── wiki/                      # 面向 Bot 玩家的规则/协议/开发指南文档

@@ -434,7 +434,7 @@ def main() -> int:
         visit(page, "guest", "08_bot", f"/bot/{bot_id}", cons, perrs)
         visit(page, "guest", "09_user", f"/user/{uname}", cons, perrs)
         visit(page, "guest", "10_data", "/data", cons, perrs)
-        visit(page, "guest", "11_arena", "/arena", cons, perrs)
+        visit(page, "guest", "11_history", "/history", cons, perrs)
 
         # gated pages as guest
         visit(page, "guest", "12_challenge_gate", "/challenge", cons, perrs)
@@ -618,7 +618,6 @@ def main() -> int:
             visit(page, "user", "12_search", "/search?q=tester", cons, perrs)
             visit(page, "user", "13_data", "/data", cons, perrs)
             visit(page, "user", "14_leaderboard", "/leaderboard", cons, perrs)
-            visit(page, "user", "15_arena", "/arena", cons, perrs)
             if live_match:
                 visit(page, "user", "16_live_match", f"/match/{live_match}", cons, perrs)
 

@@ -113,7 +113,7 @@ src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadg
 src/components/ui/select.tsx   shadcn Select（Radix）—— 全站下拉框唯一实现，禁裸用原生 <select>
 src/components/shell/      全局 Shell：AppShell（lg+ 侧栏——登录与访客均显示；auth 页除外；窄屏顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
-src/pages/                 22 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
+src/pages/                 20 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
 ```
 改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
