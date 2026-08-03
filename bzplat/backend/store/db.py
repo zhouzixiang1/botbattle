@@ -129,6 +129,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("phase", "TEXT NOT NULL DEFAULT 'standalone'"),  # P2 预赛/决赛
         ("source_contest_id", "INTEGER"),
         ("official_results_ready", "INTEGER NOT NULL DEFAULT 0"),
+        ("require_real_name", "INTEGER NOT NULL DEFAULT 0"),
     ):
         _add_col(conn, "contests", col, decl)
 
@@ -205,6 +206,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, "users", "xp", "INTEGER NOT NULL DEFAULT 0")
         _add_col(conn, "users", "level", "INTEGER NOT NULL DEFAULT 0")
         _add_col(conn, "users", "last_active_at", "TEXT")
+        _add_col(conn, "users", "real_name", "TEXT NOT NULL DEFAULT ''")
+        _add_col(conn, "users", "phone", "TEXT NOT NULL DEFAULT ''")
+        _add_col(conn, "users", "school", "TEXT NOT NULL DEFAULT ''")
+        _add_col(conn, "users", "student_id", "TEXT NOT NULL DEFAULT ''")
 
     if "matches" in tables:
         # 全面解耦 PR3：旧单表 matches 拆成每游戏一张表（matches_holdem/gomoku/pencil）
@@ -593,11 +598,16 @@ class Store:
         *,
         display_name: str = "",
         role: str = "user",
+        real_name: str = "",
+        phone: str = "",
+        school: str = "",
+        student_id: str = "",
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO users(username, email, password_hash, role, "
-                "display_name, created_at) VALUES(?,?,?,?,?,?)",
+                "display_name, created_at, real_name, phone, school, student_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     username,
                     email,
@@ -605,6 +615,10 @@ class Store:
                     role,
                     display_name or username,
                     _now(),
+                    real_name,
+                    phone,
+                    school,
+                    student_id,
                 ),
             )
             uid = cur.lastrowid
@@ -791,6 +805,10 @@ class Store:
             "xp",
             "level",
             "last_active_at",
+            "real_name",
+            "phone",
+            "school",
+            "student_id",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
@@ -2266,6 +2284,7 @@ class Store:
         match_config_json: str = "{}",
         phase: str = "standalone",
         source_contest_id: int | None = None,
+        require_real_name: int = 0,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
@@ -2273,8 +2292,8 @@ class Store:
                 "registration_opens_at, registration_closes_at, starts_at, "
                 "ends_at, hands_per_match, created_at, game_id, stages_json, "
                 "current_stage_idx, template_id, match_config_json, phase, "
-                "source_contest_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "source_contest_id, require_real_name) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     title,
                     description,
@@ -2293,6 +2312,7 @@ class Store:
                     match_config_json,
                     phase,
                     source_contest_id,
+                    require_real_name,
                 ),
             )
             cid = cur.lastrowid
@@ -2327,6 +2347,7 @@ class Store:
             "phase",
             "source_contest_id",
             "official_results_ready",
+            "require_real_name",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]

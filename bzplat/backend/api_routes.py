@@ -853,6 +853,7 @@ class ContestCreate(BaseModel):
     match_config: dict[str, Any] | None = None
     phase: str = "standalone"  # P5: preliminary/final/standalone
     source_contest_id: int | None = None  # P5: 软链（预赛→决赛导航）
+    require_real_name: bool = False  # 报名是否要求实名
 
 
 class ContestRegister(BaseModel):
@@ -888,6 +889,7 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             match_config=body.match_config,
             phase=body.phase,
             source_contest_id=body.source_contest_id,
+            require_real_name=int(body.require_real_name),
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

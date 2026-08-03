@@ -40,6 +40,10 @@ export default function Settings() {
   // profile 表单
   const [displayName, setDisplayName] = useState(user?.display_name || '')
   const [bio, setBio] = useState(user?.bio || '')
+  const [realName, setRealName] = useState(user?.real_name || '')
+  const [phone, setPhone] = useState(user?.phone || '')
+  const [school, setSchool] = useState(user?.school || '')
+  const [studentId, setStudentId] = useState(user?.student_id || '')
   // password 表单
   const [oldPw, setOldPw] = useState('')
   const [newPw, setNewPw] = useState('')
@@ -70,7 +74,10 @@ export default function Settings() {
   function saveProfile(e: React.FormEvent) {
     e.preventDefault()
     setError(''); setMsg('')
-    apiJson('/api/auth/profile', 'PUT', { display_name: displayName, bio })
+    apiJson('/api/auth/profile', 'PUT', {
+      display_name: displayName, bio,
+      real_name: realName, phone, school, student_id: studentId,
+    })
       .then(() => {
         if (refresh) refresh()
         setMsg('资料已保存')
@@ -174,6 +181,29 @@ export default function Settings() {
                 maxLength={500}
                 rows={3}
               />
+            </div>
+            {/* 实名信息（可选，报名要求实名的赛事需要） */}
+            <div className="rounded-lg border border-border p-3 space-y-3">
+              <p className="text-sm font-medium text-foreground">实名信息（选填）</p>
+              <p className="text-xs text-muted-foreground">报名「要求实名」的赛事时需要填写完整。信息不公开展示。</p>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-realname">姓名</Label>
+                  <Input id="settings-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-phone">手机号</Label>
+                  <Input id="settings-phone" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={20} placeholder="13800138000" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-school">学校</Label>
+                  <Input id="settings-school" value={school} onChange={(e) => setSchool(e.target.value)} maxLength={64} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-studentid">学号</Label>
+                  <Input id="settings-studentid" value={studentId} onChange={(e) => setStudentId(e.target.value)} maxLength={32} />
+                </div>
+              </div>
             </div>
             <Button type="submit">保存</Button>
           </form>

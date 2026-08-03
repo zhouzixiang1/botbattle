@@ -22,6 +22,10 @@ export interface CurrentUser {
   avatar?: string
   xp?: number
   level?: number
+  real_name?: string
+  phone?: string
+  school?: string
+  student_id?: string
 }
 
 export const userToken = {
