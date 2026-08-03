@@ -16,8 +16,9 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, errMsg } from '@/api'
-import { gameLabel, gameIcon } from '@/lib/games'
+import { gameLabel, gameIcon, GAMES } from '@/lib/games'
 
 type SearchType = 'users' | 'bots' | 'matches'
 
@@ -53,6 +54,7 @@ export default function Search() {
   const navigate = useNavigate()
   const q = params.get('q') || ''
   const type = (params.get('type') as SearchType) || 'users'
+  const gameId = params.get('game_id') || ''
   const [input, setInput] = useState(q)
   const [users, setUsers] = useState<UserRow[]>([])
   const [bots, setBots] = useState<BotRow[]>([])
@@ -68,8 +70,9 @@ export default function Search() {
     if (!q.trim()) return
     setLoading(true)
     const t = type
+    const gidParam = gameId ? `&game_id=${encodeURIComponent(gameId)}` : ''
     apiGet<Record<string, unknown[]>>(
-      `/api/search?q=${encodeURIComponent(q)}&type=${t}&limit=30`,
+      `/api/search?q=${encodeURIComponent(q)}&type=${t}&limit=30${gidParam}`,
     )
       .then((d) => {
         setUsers(t === 'users' ? (d.users as UserRow[]) : [])
@@ -112,14 +115,37 @@ export default function Search() {
         <Button type="submit">搜索</Button>
       </form>
 
-      {/* 类型 tab */}
-      <Tabs value={type} onValueChange={(v) => switchType(v as SearchType)} className="mb-4">
-        <TabsList>
-          <TabsTrigger value="users" className="gap-1.5"><UserIcon className="size-3.5" />用户</TabsTrigger>
-          <TabsTrigger value="bots" className="gap-1.5"><BotIcon className="size-3.5" />Bot</TabsTrigger>
-          <TabsTrigger value="matches" className="gap-1.5"><Swords className="size-3.5" />对局</TabsTrigger>
-        </TabsList>
-      </Tabs>
+      {/* 类型 tab + 游戏筛选 */}
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <Tabs value={type} onValueChange={(v) => switchType(v as SearchType)}>
+          <TabsList>
+            <TabsTrigger value="users" className="gap-1.5"><UserIcon className="size-3.5" />用户</TabsTrigger>
+            <TabsTrigger value="bots" className="gap-1.5"><BotIcon className="size-3.5" />Bot</TabsTrigger>
+            <TabsTrigger value="matches" className="gap-1.5"><Swords className="size-3.5" />对局</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        {type !== 'users' && (
+          <Select
+            value={gameId || 'all'}
+            onValueChange={(v) => {
+              const next = new URLSearchParams(params)
+              if (v === 'all') next.delete('game_id')
+              else next.set('game_id', v)
+              navigate(`/search?${next.toString()}`)
+            }}
+          >
+            <SelectTrigger className="h-9 w-[8.5rem]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部游戏</SelectItem>
+              {GAMES.map((g) => (
+                <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
 
       {error && <ErrorMsg msg={error} className="mb-3" />}
 

@@ -64,44 +64,48 @@ export default function Contests() {
   const [matchCfg, setMatchCfg] = useState<Record<string, number>>({})
   const [templateId, setTemplateId] = useState('holdem_swiss_ko')
   const [filterGame, setFilterGame] = useState('')
+  const [formGameId, setFormGameId] = useState('holdem')
   const [requireRealName, setRequireRealName] = useState(false)
   const [error, setError] = useState('')
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
-  // 当前所选模板对应的游戏（决定 match_config 字段）
-  const selGame = templates.find((t) => t.id === templateId)?.game_id || 'holdem'
+  // 建赛表单：游戏由用户选（不再从模板反推），决定 match_config 字段 + 模板可选集
+  const selGame = formGameId
   const selSpec = getGame(selGame)
-  // 切换模板/游戏时重置动态参数为该游戏默认
+  // 切换游戏时重置动态参数为该游戏默认
   useEffect(() => {
-    setMatchCfg(defaultMatchConfig(selGame))
-  }, [selGame])
+    setMatchCfg(defaultMatchConfig(formGameId))
+  }, [formGameId])
 
   const load = () =>
-    apiGet<{ contests: Contest[] }>('/api/contests')
-      .then((d) => {
-        const rows = d.contests || []
-        setList(
-          filterGame ? rows.filter((c) => (c.game_id || 'holdem') === filterGame) : rows,
-        )
-      })
+    apiGet<{ contests: Contest[] }>('/api/contests' + (filterGame ? `?game_id=${filterGame}` : ''))
+      .then((d) => setList(d.contests || []))
       .catch((e) => setError(errMsg(e)))
 
   useEffect(() => {
     void load()
-    apiGet<{ templates: Template[] }>('/api/contests/templates')
-      .then((d) => setTemplates(d.templates || []))
+    // 模板按建赛表单选中的游戏过滤（后端 ?game= 已支持）
+    apiGet<{ templates: Template[] }>('/api/contests/templates?game=' + formGameId)
+      .then((d) => {
+        const tpls = d.templates || []
+        setTemplates(tpls)
+        // 切游戏后重置 templateId 为该游戏第一个模板（避免 value 指向已不存在的模板）
+        if (tpls.length > 0 && !tpls.some((t) => t.id === templateId)) {
+          setTemplateId(tpls[0].id)
+        }
+      })
       .catch(() => undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterGame])
+  }, [filterGame, formGameId])
 
   const onCreate = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
     try {
-      // match_config 按所选游戏的 configFields 组装（消除 per-game if 分支）
       await apiJson('/api/contests', 'POST', {
         title,
         description,
         template_id: templateId,
+        game_id: formGameId,
         match_config: { ...matchCfg },
         require_real_name: requireRealName,
       })
@@ -142,6 +146,20 @@ export default function Contests() {
         <Card className="mb-6">
           <CardContent>
             <form onSubmit={(e) => void onCreate(e)} className="flex flex-wrap items-end gap-3">
+              {/* 先选游戏 → 再选该游戏的模板 */}
+              <div className="space-y-1.5">
+                <Label>游戏</Label>
+                <Select value={formGameId} onValueChange={setFormGameId}>
+                  <SelectTrigger className="mt-1.5 h-9 w-[8.5rem]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {GAMES.map((g) => (
+                      <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               <div className="space-y-1.5">
                 <Label htmlFor="contest-title">标题</Label>
                 <Input
@@ -170,7 +188,7 @@ export default function Contests() {
                   <SelectContent>
                     {templates.map((t) => (
                       <SelectItem key={t.id} value={t.id}>
-                        {t.name}（{gameLabel(t.game_id)}）
+                        {t.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
