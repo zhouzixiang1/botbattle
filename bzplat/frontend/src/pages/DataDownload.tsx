@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AlertTriangle, Lock, Download } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import PageStub from '@/components/PageStub'
 import { Card } from '@/components/ui/card'
 import {
@@ -86,10 +87,20 @@ export default function DataDownload() {
                   <TableCell className="hidden text-muted-foreground sm:table-cell">{p.cnt}</TableCell>
                   <TableCell>
                     {gated ? (
-                      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                        <Lock className="size-3.5" />
-                        需 Lv.1
-                      </span>
+                      user ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                          <Lock className="size-3.5" />
+                          需 Lv.1
+                        </span>
+                      ) : (
+                        <Link
+                          to="/login"
+                          className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                        >
+                          <Lock className="size-3.5" />
+                          登录后下载
+                        </Link>
+                      )
                     ) : (
                       <a
                         href={`/api/matchpacks/download?game_id=${p.game_id}&month=${p.month}`}

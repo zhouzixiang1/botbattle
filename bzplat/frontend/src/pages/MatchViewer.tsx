@@ -9,7 +9,7 @@
  * - 合并旧 MatchDetail（回放）逻辑；ArenaWatch 已删除，/watch 旧路径不再重定向。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
@@ -51,6 +51,7 @@ function handBoundaries(events: RawEvent[]): number[] {
 
 export default function MatchViewer() {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const [match, setMatch] = useState<MatchRow | null>(null)
   const [events, setEvents] = useState<RawEvent[]>([])
   const [status, setStatus] = useState<string>('connecting')  // connecting|live|match_end|error|replay
@@ -257,7 +258,7 @@ export default function MatchViewer() {
             <span className="font-mono text-foreground">
               {String(liveSteps ?? match.hands_played ?? 0)}
             </span>
-            {!isBoard && <span className="text-muted-foreground">/{String(match.total_hands ?? '')}</span>}
+            {!isBoard && match.total_hands ? <span className="text-muted-foreground">/{String(match.total_hands)}</span> : null}
           </span>
         )}
         {match && (
@@ -327,10 +328,10 @@ export default function MatchViewer() {
             {!isBoard && bounds.length >= 2 && (
               <div>
                 <div className="mb-1 text-[10px] text-muted-foreground">手导航（点击跳转）</div>
-                <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-card p-2">
+                <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto rounded-lg border border-border bg-card p-2">
                   {Array.from({ length: bounds.length - 1 }, (_, h) => (
                     <button key={h} type="button" onClick={() => seek(bounds[h] ?? 0)}
-                      className={`relative size-7 rounded text-[10px] font-medium transition ${h === curHandIdx ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'}`}>
+                      className={`size-7 shrink-0 rounded text-[10px] font-medium transition ${h === curHandIdx ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'}`}>
                       {h + 1}
                     </button>
                   ))}
@@ -390,8 +391,8 @@ export default function MatchViewer() {
         </div>
       )}
 
-      <Button asChild variant="ghost" size="sm" className="mt-6 gap-1.5">
-        <Link to="/"><ArrowLeft className="size-4" />返回</Link>
+      <Button variant="ghost" size="sm" className="mt-6 gap-1.5" onClick={() => navigate(-1)}>
+        <ArrowLeft className="size-4" />返回
       </Button>
       {id && <Comments targetType="match" targetId={id} />}
     </PageStub>

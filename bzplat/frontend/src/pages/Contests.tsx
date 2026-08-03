@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
+import { fmtTime } from '@/lib/format'
 import { getGame, defaultMatchConfig } from '@/games'
 
 interface Contest {
@@ -256,7 +257,7 @@ export default function Contests() {
                   {c.created_at && (
                     <>
                       <span>·</span>
-                      <span>{c.created_at}</span>
+                      <span>{fmtTime(c.created_at)}</span>
                     </>
                   )}
                 </div>

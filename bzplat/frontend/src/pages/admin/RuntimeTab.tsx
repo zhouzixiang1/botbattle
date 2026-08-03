@@ -57,10 +57,15 @@ export default function RuntimeTab() {
     setLoading(true)
     setError('')
     try {
-      const [r, t] = await Promise.all([
+      // 用 allSettled：runtime 主数据与模板列表解耦，模板拉取失败不拖垮核心展示
+      const [rRes, tRes] = await Promise.allSettled([
         apiGet<Runtime>('/api/admin/settings/runtime'),
-        apiGet<{ templates: Template[] }>('/api/admin/settings/templates'),
+        apiGet<{ templates: Template[] }>('/api/admin/templates'),
       ])
+      if (rRes.status !== 'fulfilled') {
+        throw tRes.status === 'fulfilled' ? tRes.value : new Error('加载失败')
+      }
+      const r = rRes.value
       setRt(r)
       setTimeoutSec(r.action_timeout_sec)
       setConc(r.max_concurrent_matches)
@@ -75,7 +80,7 @@ export default function RuntimeTab() {
       setAmPlacement(am.placement_games)
       setAmMaxPerRound(am.max_per_round)
       setAmDailyCap(am.daily_cap)
-      setTemplates(t.templates || [])
+      setTemplates(tRes.status === 'fulfilled' ? tRes.value.templates || [] : [])
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     } finally {

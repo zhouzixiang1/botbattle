@@ -8,6 +8,7 @@ import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
+import { fmtTime } from '@/lib/format'
 
 interface Match {
   id: string
@@ -123,7 +124,7 @@ export default function History() {
                     {m.created_at && (
                       <>
                         <span>·</span>
-                        <span>{m.created_at}</span>
+                        <span>{fmtTime(m.created_at)}</span>
                       </>
                     )}
                   </div>

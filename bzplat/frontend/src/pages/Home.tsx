@@ -18,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useAuth } from '@/components/useAuth'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel, gameIcon, matchTypeBadge, isBoardGame } from '@/lib/games'
+import { fmtTime } from '@/lib/format'
 
 interface Match {
   id: string
@@ -56,8 +57,8 @@ export default function Home() {
 
   return (
     <PageStub
-      title="最新对局"
-      subtitle="进行中与已完成的对局"
+      title="首页"
+      subtitle="最新对局 · 进行中与已完成"
       actions={
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
@@ -157,7 +158,7 @@ export default function Home() {
                   return (
                     <TableRow key={m.id}>
                       <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                        {m.created_at || '—'}
+                        {fmtTime(m.created_at)}
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">
@@ -195,7 +196,9 @@ export default function Home() {
                       <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
                         {isBoardGame(m.game_id)
                           ? `${m.hands_played ?? 0} 步`
-                          : `${m.hands_played ?? 0}/${m.total_hands ?? 70}`}
+                          : m.total_hands
+                            ? `${m.hands_played ?? 0}/${m.total_hands}`
+                            : `${m.hands_played ?? 0} 手`}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">

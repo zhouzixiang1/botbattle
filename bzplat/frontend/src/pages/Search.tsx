@@ -19,6 +19,7 @@ import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, errMsg } from '@/api'
 import { gameLabel, gameIcon, GAMES } from '@/lib/games'
+import { fmtTime } from '@/lib/format'
 
 type SearchType = 'users' | 'bots' | 'matches'
 
@@ -81,7 +82,7 @@ export default function Search() {
       })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
-  }, [q, type])
+  }, [q, type, gameId])
 
   function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -233,7 +234,7 @@ export default function Search() {
                 matches.map((m) => (
                   <TableRow key={m.id}>
                     <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                      {m.created_at?.slice(0, 16).replace('T', ' ') || '—'}
+                      {fmtTime(m.created_at)}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1.5 text-sm">

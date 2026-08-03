@@ -23,6 +23,7 @@ import Comments from '@/components/Comments'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { useAuth } from '@/components/useAuth'
 import { gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
+import { fmtTime } from '@/lib/format'
 
 /* ── 类型 ─────────────────────────────────────────────── */
 interface BotProfile {
@@ -261,7 +262,7 @@ export default function BotDetail() {
                 )}
               </span>
               <span>版本 v{profile.current_version ?? 1}</span>
-              <span className="font-mono">{profile.format}/{profile.os}-{profile.arch}</span>
+              <span className="max-w-full break-all font-mono">{profile.format}/{profile.os}-{profile.arch}</span>
               {profile.created_at && <span>创建于 {profile.created_at.slice(0, 10)}</span>}
             </div>
             {user && (
@@ -289,20 +290,21 @@ export default function BotDetail() {
       </Card>
 
       <Tabs defaultValue="history" className="w-full">
-        <TabsList>
-          <TabsTrigger value="history" className="gap-1.5"><HistoryIcon className="size-3.5" />对局历史 ({matches.length})</TabsTrigger>
-          <TabsTrigger value="opponents" className="gap-1.5"><Swords className="size-3.5" />对手战绩 ({opponents.length})</TabsTrigger>
-          <TabsTrigger value="rating" className="gap-1.5"><Target className="size-3.5" />评分曲线</TabsTrigger>
+        <TabsList className="w-full">
+          <TabsTrigger value="history" className="min-w-0 gap-1.5"><HistoryIcon className="size-3.5 shrink-0" /><span className="truncate">对局历史</span> <span className="hidden text-xs text-muted-foreground sm:inline">({matches.length})</span></TabsTrigger>
+          <TabsTrigger value="opponents" className="min-w-0 gap-1.5"><Swords className="size-3.5 shrink-0" /><span className="truncate">对手战绩</span> <span className="hidden text-xs text-muted-foreground sm:inline">({opponents.length})</span></TabsTrigger>
+          <TabsTrigger value="rating" className="min-w-0 gap-1.5"><Target className="size-3.5 shrink-0" /><span className="truncate">评分曲线</span></TabsTrigger>
         </TabsList>
 
         {/* 对局历史 */}
         <TabsContent value="history">
-          <Card>
-            <Table>
+          <Card className="overflow-hidden">
+            <div className="overflow-x-auto">
+            <Table className="min-w-[36rem]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
-                  <TableHead>对手</TableHead>
+                  <TableHead className="min-w-[6rem]">对手</TableHead>
                   <TableHead>结果</TableHead>
                   <TableHead className="hidden sm:table-cell">类型</TableHead>
                   <TableHead className="text-right">操作</TableHead>
@@ -320,10 +322,10 @@ export default function BotDetail() {
                     return (
                       <TableRow key={m.id}>
                         <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                          {m.created_at?.slice(0, 16).replace('T', ' ') || '—'}
+                          {fmtTime(m.created_at)}
                         </TableCell>
-                        <TableCell>
-                          <Link to={`/bot/${oppId}`} className="font-medium text-foreground hover:text-primary">
+                        <TableCell className="max-w-[10rem]">
+                          <Link to={`/bot/${oppId}`} className="block truncate font-medium text-foreground hover:text-primary" title={oppName || `#${oppId}`}>
                             {oppName || `#${oppId}`}
                           </Link>
                         </TableCell>
@@ -355,16 +357,18 @@ export default function BotDetail() {
                 )}
               </TableBody>
             </Table>
+            </div>
           </Card>
         </TabsContent>
 
         {/* 对手战绩 */}
         <TabsContent value="opponents">
-          <Card>
-            <Table>
+          <Card className="overflow-hidden">
+            <div className="overflow-x-auto">
+            <Table className="min-w-[32rem]">
               <TableHeader>
                 <TableRow>
-                  <TableHead>对手</TableHead>
+                  <TableHead className="min-w-[6rem]">对手</TableHead>
                   <TableHead>交手</TableHead>
                   <TableHead>胜</TableHead>
                   <TableHead>负</TableHead>
@@ -381,8 +385,8 @@ export default function BotDetail() {
                     const r = t > 0 ? (o.wins + o.draws * 0.5) / t : 0
                     return (
                       <TableRow key={o.opponent_id}>
-                        <TableCell>
-                          <Link to={`/bot/${o.opponent_id}`} className="font-medium text-foreground hover:text-primary">
+                        <TableCell className="max-w-[10rem]">
+                          <Link to={`/bot/${o.opponent_id}`} className="block truncate font-medium text-foreground hover:text-primary" title={o.opponent_display || o.opponent_name || `#${o.opponent_id}`}>
                             {o.opponent_display || o.opponent_name || `#${o.opponent_id}`}
                           </Link>
                         </TableCell>
@@ -397,6 +401,7 @@ export default function BotDetail() {
                 )}
               </TableBody>
             </Table>
+            </div>
           </Card>
         </TabsContent>
 

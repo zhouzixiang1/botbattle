@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
+import { fmtTime } from '../../lib/format'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 import { toast } from 'sonner'
 
@@ -157,7 +158,7 @@ export default function UsersTab() {
                     <span className="ml-1 text-destructive">· 停用</span>
                   )}
                 </td>
-                <td className="px-3 py-2 text-xs text-muted-foreground">{u.created_at || '—'}</td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(u.created_at)}</td>
                 <td className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
                     <button

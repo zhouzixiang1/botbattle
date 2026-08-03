@@ -446,39 +446,41 @@ export default function ContestDetail() {
               <ListOrdered className="size-4 text-muted-foreground" />
               <h3 className="text-sm font-semibold text-foreground">积分榜</h3>
             </div>
-            <Card className="mt-2">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-10">#</TableHead>
-                    <TableHead>Bot</TableHead>
-                    <TableHead>积分</TableHead>
-                    <TableHead className="hidden sm:table-cell">W/D/L</TableHead>
-                    <TableHead className="hidden md:table-cell">净筹码</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {standings.length === 0 ? (
-                    <TableRow><TableCell colSpan={5}><EmptyState text="暂无积分数据" icon={<Trophy className="size-7 opacity-40" />} /></TableCell></TableRow>
-                  ) : (
-                    standings.map((s, i) => (
-                      <TableRow key={s.bot_id}>
-                        <TableCell className="font-mono text-xs text-muted-foreground">{i + 1}</TableCell>
-                        <TableCell>
-                          <Link to={`/bot/${s.bot_id}`} className="font-medium text-foreground hover:text-primary">
-                            {s.bot_name || `#${s.bot_id}`}
-                          </Link>
-                        </TableCell>
-                        <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
-                        <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
-                          <span className="text-success">{s.wins}</span>/{s.draws}/<span className="text-destructive">{s.losses}</span>
-                        </TableCell>
-                        <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.net_chips}</TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+            <Card className="mt-2 overflow-hidden">
+              <div className="overflow-x-auto">
+                <Table className="min-w-[28rem]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10">#</TableHead>
+                      <TableHead className="min-w-[6rem]">Bot</TableHead>
+                      <TableHead>积分</TableHead>
+                      <TableHead className="hidden sm:table-cell">W/D/L</TableHead>
+                      <TableHead className="hidden md:table-cell">净筹码</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {standings.length === 0 ? (
+                      <TableRow><TableCell colSpan={5}><EmptyState text="暂无积分数据" icon={<Trophy className="size-7 opacity-40" />} /></TableCell></TableRow>
+                    ) : (
+                      standings.map((s, i) => (
+                        <TableRow key={s.bot_id}>
+                          <TableCell className="font-mono text-xs text-muted-foreground">{i + 1}</TableCell>
+                          <TableCell className="max-w-[10rem]">
+                            <Link to={`/bot/${s.bot_id}`} className="block truncate font-medium text-foreground hover:text-primary" title={s.bot_name || `#${s.bot_id}`}>
+                              {s.bot_name || `#${s.bot_id}`}
+                            </Link>
+                          </TableCell>
+                          <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
+                          <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
+                            <span className="text-success">{s.wins}</span>/{s.draws}/<span className="text-destructive">{s.losses}</span>
+                          </TableCell>
+                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.net_chips}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </Card>
           </div>
         </div>{/* /右边栏 */}

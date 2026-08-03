@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { cn } from '@/lib/utils'
 import { apiGet, apiPost, errMsg } from '@/api'
+import { fmtTime } from '@/lib/format'
 
 interface Notification {
   id: number
@@ -119,7 +120,7 @@ export default function Notifications() {
                   </div>
                   {n.body && <p className="mt-1 text-sm text-muted-foreground">{n.body}</p>}
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {n.created_at?.replace('T', ' ').slice(0, 16)}
+                    {fmtTime(n.created_at)}
                   </p>
                 </div>
                 {!n.is_read && (
