@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Slider } from '@/components/ui/slider'
 import { SPEEDS } from '@/components/use-playback'
 
 /** 回放控制条：播放/暂停 + 步进 + 速度档 + 进度。MatchDetail / ArenaWatch 共用。 */
@@ -85,14 +86,13 @@ export function PlaybackControls({
           {lag > 0 && <span className="ml-1 text-warning">落后{lag}</span>}
           {atLive && total > 0 && <span className="ml-1 text-primary">●直播</span>}
         </span>
-        <input
-          type="range"
+        <Slider
           min={0}
           max={Math.max(0, total - 1)}
-          value={cur}
-          onChange={(e) => onSeek(Number(e.target.value))}
+          value={[cur]}
+          onValueChange={(v) => onSeek(v[0])}
           disabled={total === 0}
-          className="h-1 flex-1 cursor-pointer accent-primary"
+          className="h-1 flex-1"
         />
       </div>
     </div>

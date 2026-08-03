@@ -15,6 +15,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '@/components/ui/sheet'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 // 页面懒加载（代码分割：每个页面独立 chunk，recharts 等大依赖只在访问时加载）
@@ -143,15 +144,18 @@ export function AppShell() {
             {sidebarCollapsed ? (
               <nav className="flex flex-col items-center gap-1">
                 {navItemsFor(user).map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.end}
-                    className="inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent [&.active]:bg-primary/10 [&.active]:text-primary"
-                    title={item.label}
-                  >
-                    <item.icon className="size-4" />
-                  </NavLink>
+                  <Tooltip key={item.to}>
+                    <TooltipTrigger asChild>
+                      <NavLink
+                        to={item.to}
+                        end={item.end}
+                        className="inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent [&.active]:bg-primary/10 [&.active]:text-primary"
+                      >
+                        <item.icon className="size-4" />
+                      </NavLink>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">{item.label}</TooltipContent>
+                  </Tooltip>
                 ))}
               </nav>
             ) : (
@@ -172,13 +176,17 @@ export function AppShell() {
                 <UserIcon className="size-4 shrink-0 text-primary" />
                 {!sidebarCollapsed && (
                   <>
-                    <Link
-                      to={`/user/${encodeURIComponent(user?.username ?? '')}`}
-                      className="min-w-0 flex-1 truncate text-sm font-medium text-foreground hover:text-primary"
-                      title={user?.username}
-                    >
-                      {user?.display_name || user?.username}
-                    </Link>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Link
+                          to={`/user/${encodeURIComponent(user?.username ?? '')}`}
+                          className="min-w-0 flex-1 truncate text-sm font-medium text-foreground hover:text-primary"
+                        >
+                          {user?.display_name || user?.username}
+                        </Link>
+                      </TooltipTrigger>
+                      <TooltipContent>{user?.username}</TooltipContent>
+                    </Tooltip>
                     {user?.role === 'admin' && (
                       <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
                         admin

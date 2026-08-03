@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { ErrorMsg, Loading, RefreshBtn } from './ui'
+import { ErrorMsg, Loading, RefreshBtn, Switch, inp } from './ui'
 
 interface Runtime {
   cpu_count: number
@@ -136,7 +136,7 @@ export default function RuntimeTab() {
               type="number"
               min={1}
               max={300}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={timeoutSec}
               onChange={(e) => setTimeoutSec(Number(e.target.value))}
             />
@@ -147,7 +147,7 @@ export default function RuntimeTab() {
               type="number"
               min={1}
               max={rt?.ceiling ?? 1}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={conc}
               onChange={(e) => setConc(Number(e.target.value))}
             />
@@ -158,7 +158,7 @@ export default function RuntimeTab() {
               type="number"
               min={0}
               max={120}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={restMin}
               onChange={(e) => setRestMin(Number(e.target.value))}
             />
@@ -189,15 +189,10 @@ export default function RuntimeTab() {
       <div className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-medium text-foreground">闲时自动对局</h3>
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              className="h-4 w-4 rounded border-input"
-              checked={amEnabled}
-              onChange={(e) => setAmEnabled(e.target.checked)}
-            />
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Switch checked={amEnabled} onCheckedChange={setAmEnabled} />
             启用
-          </label>
+          </div>
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
           系统空闲时自动安排 bot 对战以维护天梯榜（陈旧度优先 + rating 就近配对）。
@@ -207,7 +202,7 @@ export default function RuntimeTab() {
             轮询间隔（秒）
             <input
               type="number" min={1} max={3600}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amInterval} onChange={(e) => setAmInterval(Number(e.target.value))}
             />
           </label>
@@ -215,7 +210,7 @@ export default function RuntimeTab() {
             连续空闲触发（秒）
             <input
               type="number" min={0} max={600}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amMinIdle} onChange={(e) => setAmMinIdle(Number(e.target.value))}
             />
           </label>
@@ -223,7 +218,7 @@ export default function RuntimeTab() {
             同 Bot 冷却（秒）
             <input
               type="number" min={0} max={86400}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amCooldown} onChange={(e) => setAmCooldown(Number(e.target.value))}
             />
           </label>
@@ -231,7 +226,7 @@ export default function RuntimeTab() {
             陈旧阈值（秒，0=不限）
             <input
               type="number" min={0} max={604800}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amStale} onChange={(e) => setAmStale(Number(e.target.value))}
             />
           </label>
@@ -239,7 +234,7 @@ export default function RuntimeTab() {
             预留挑战槽（≤ {rt?.ceiling ?? 1}）
             <input
               type="number" min={0} max={rt?.ceiling ?? 1}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amReserve} onChange={(e) => setAmReserve(Number(e.target.value))}
             />
           </label>
@@ -247,7 +242,7 @@ export default function RuntimeTab() {
             新 Bot 定级赛场次（前N场优先，0=禁用）
             <input
               type="number" min={0} max={100}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amPlacement} onChange={(e) => setAmPlacement(Number(e.target.value))}
             />
           </label>
@@ -255,7 +250,7 @@ export default function RuntimeTab() {
             每轮最多补几场
             <input
               type="number" min={1} max={50}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amMaxPerRound} onChange={(e) => setAmMaxPerRound(Number(e.target.value))}
             />
           </label>
@@ -263,7 +258,7 @@ export default function RuntimeTab() {
             每日总量上限（0=不限）
             <input
               type="number" min={0} max={100000}
-              className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+              className={inp}
               value={amDailyCap} onChange={(e) => setAmDailyCap(Number(e.target.value))}
             />
           </label>

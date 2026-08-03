@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/table'
 import { ErrorMsg, EmptyState, Loading, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import BracketTree from '@/components/contest/BracketTree'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
@@ -208,9 +209,14 @@ export default function ContestDetail() {
                 )}
               </div>
             </div>
-            <Button variant="ghost" size="icon" onClick={() => void load()} title="刷新">
-              <RefreshCw className="size-4" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={() => void load()}>
+                  <RefreshCw className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>刷新</TooltipContent>
+            </Tooltip>
           </div>
           {contest.status === 'rest' && contest.rest_ends_at && (
             <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning-foreground">

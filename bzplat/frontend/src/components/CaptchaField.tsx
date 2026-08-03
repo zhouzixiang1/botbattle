@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { Input } from '@/components/ui/input'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 export interface CaptchaValue {
   captcha_id: string
@@ -50,20 +51,24 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
     <div className={`flex flex-col gap-1.5 text-sm text-foreground ${className}`}>
       <span className="font-medium">验证码</span>
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          title="点击刷新"
-          className="flex h-11 w-40 shrink-0 items-center justify-center gap-1 overflow-hidden rounded-lg border border-input bg-muted text-xs text-muted-foreground transition-colors hover:bg-accent"
-        >
-          {img ? (
-            <img src={img} alt="验证码" className="h-full w-full object-contain" />
-          ) : loading ? (
-            <><RefreshCw className="size-3.5 animate-spin" />加载中</>
-          ) : (
-            <><RefreshCw className="size-3.5" />点击获取</>
-          )}
-        </button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              className="flex h-11 w-40 shrink-0 items-center justify-center gap-1 overflow-hidden rounded-lg border border-input bg-muted text-xs text-muted-foreground transition-colors hover:bg-accent"
+            >
+              {img ? (
+                <img src={img} alt="验证码" className="h-full w-full object-contain" />
+              ) : loading ? (
+                <><RefreshCw className="size-3.5 animate-spin" />加载中</>
+              ) : (
+                <><RefreshCw className="size-3.5" />点击获取</>
+              )}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>点击刷新</TooltipContent>
+        </Tooltip>
         <Input
           value={answer}
           onChange={(e) => {

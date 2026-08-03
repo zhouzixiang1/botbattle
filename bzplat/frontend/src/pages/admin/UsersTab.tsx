@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import { toast } from 'sonner'
 
 interface User {
   id: number
@@ -60,7 +61,7 @@ export default function UsersTab() {
     setBusyId(uid)
     try {
       await apiJson(`/api/admin/users/${uid}/sessions`, 'DELETE')
-      alert('已强制下线该用户全部会话')
+      toast.success('已强制下线该用户全部会话')
     } catch (e) {
       setError(errMsg(e, '操作失败'))
     } finally {

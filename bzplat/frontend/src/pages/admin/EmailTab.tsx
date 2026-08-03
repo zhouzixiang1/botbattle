@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
+import { toast } from 'sonner'
 
 interface Template {
   key: string
@@ -72,7 +73,7 @@ export default function EmailTab() {
         body_text: draft.body_text,
       })
       await load()
-      alert('模板已保存')
+      toast.success('模板已保存')
     } catch (e) {
       setError(errMsg(e, '保存失败'))
     } finally {

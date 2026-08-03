@@ -11,6 +11,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { useConfirm } from '@/hooks/use-confirm'
 import { apiForm, apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 
@@ -31,6 +32,7 @@ interface Bot {
 
 export default function MyBots() {
   const { isLoggedIn } = useAuth()
+  const [confirm, confirmDialog] = useConfirm()
   const [bots, setBots] = useState<Bot[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -130,7 +132,12 @@ export default function MyBots() {
   }
 
   const del = async (b: Bot) => {
-    if (!confirm(`确定删除 ${b.display_name || b.name}？（将停用并设为私有）`)) return
+    if (!await confirm({
+      title: '删除 Bot',
+      desc: `确定删除 ${b.display_name || b.name}？（将停用并设为私有）`,
+      confirmText: '删除',
+      danger: true,
+    })) return
     try {
       await apiJson(`/api/bots/${b.id}`, 'DELETE')
       await load()
@@ -319,6 +326,7 @@ export default function MyBots() {
       </Card>
       </div>{/* /右栏 */}
       </div>{/* /桌面双栏栅格 */}
+      {confirmDialog}
     </PageStub>
   )
 }

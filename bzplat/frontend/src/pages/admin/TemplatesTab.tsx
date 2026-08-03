@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft } from 'lucide-react'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { ErrorMsg, Loading, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import { ErrorMsg, Loading, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, inp } from './ui'
+import { useConfirm } from '@/hooks/use-confirm'
 import { defaultMatchConfig, getGame, GAMES, type GameId } from '@/games'
 
 // ── 类型 ──────────────────────────────────────────────────────
@@ -57,9 +58,8 @@ const emptyTemplate = (): Template => ({
   stages: [emptyStage(0)],
 })
 
-const inp = 'mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2'
-
 export default function TemplatesTab() {
+  const [confirm, confirmDialog] = useConfirm()
   const [list, setList] = useState<Template[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -138,7 +138,12 @@ export default function TemplatesTab() {
   }
 
   const remove = async (id: string) => {
-    if (!confirm(`删除模板 ${id}？`)) return
+    if (!await confirm({
+      title: '删除模板',
+      desc: `删除模板 ${id}？`,
+      confirmText: '删除',
+      danger: true,
+    })) return
     try {
       await apiJson(`/api/admin/templates/${id}`, 'DELETE')
       await load()
@@ -233,6 +238,7 @@ export default function TemplatesTab() {
         ))}
         {!list.length && <li className="px-4 py-8 text-center text-muted-foreground">无模板</li>}
       </ul>
+      {confirmDialog}
     </div>
   )
 }
@@ -384,11 +390,11 @@ function Editor(props: {
                 <input type="number" min={0} className={inp} value={s.rest_after_minutes ?? 0}
                   onChange={(e) => props.patchStage(i, { rest_after_minutes: Number(e.target.value) })} />
               </label>
-              <label className="flex items-center gap-2 self-end pb-2 text-sm text-muted-foreground">
-                <input type="checkbox" className="h-4 w-4" checked={!!s.allow_bot_swap_in_rest}
-                  onChange={(e) => props.patchStage(i, { allow_bot_swap_in_rest: e.target.checked })} />
+              <div className="flex items-center gap-2 self-end pb-2 text-sm text-muted-foreground">
+                <Switch checked={!!s.allow_bot_swap_in_rest}
+                  onCheckedChange={(v) => props.patchStage(i, { allow_bot_swap_in_rest: v })} />
                 休息期允许换 Bot
-              </label>
+              </div>
             </div>
           </div>
         ))}

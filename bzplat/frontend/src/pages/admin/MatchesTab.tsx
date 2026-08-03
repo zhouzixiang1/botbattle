@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import { useConfirm } from '@/hooks/use-confirm'
 
 interface Match {
   id: string
@@ -23,6 +24,7 @@ interface Match {
 const STATUSES = ['', 'running', 'pending', 'completed', 'aborted']
 
 export default function MatchesTab() {
+  const [confirm, confirmDialog] = useConfirm()
   const [matches, setMatches] = useState<Match[]>([])
   const [status, setStatus] = useState('aborted')
   const [error, setError] = useState('')
@@ -48,7 +50,12 @@ export default function MatchesTab() {
   }, [load])
 
   const abort = async (id: string) => {
-    if (!confirm(`确认将对局 ${id} 标记为中止？`)) return
+    if (!await confirm({
+      title: '中止对局',
+      desc: `确认将对局 ${id} 标记为中止？`,
+      confirmText: '中止',
+      danger: true,
+    })) return
     setBusyId(id)
     try {
       await apiJson(`/api/admin/matches/${id}`, 'PATCH', { status: 'aborted', reason: 'admin-abort' })
@@ -144,6 +151,7 @@ export default function MatchesTab() {
         </table>
         {matches.length === 0 && <EmptyState text="无对局" />}
       </div>
+      {confirmDialog}
     </div>
   )
 }

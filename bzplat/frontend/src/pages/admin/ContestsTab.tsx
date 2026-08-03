@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
+import { useConfirm } from '@/hooks/use-confirm'
 
 interface Contest {
   id: number
@@ -31,6 +32,7 @@ const NEXT_STATUS: Record<string, string> = {
 }
 
 export default function ContestsTab() {
+  const [confirm, confirmDialog] = useConfirm()
   const [contests, setContests] = useState<Contest[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -69,7 +71,12 @@ export default function ContestsTab() {
   }
 
   const del = async (id: number) => {
-    if (!confirm(`确认删除比赛 #${id}？`)) return
+    if (!await confirm({
+      title: '删除比赛',
+      desc: `确认删除比赛 #${id}？`,
+      confirmText: '删除',
+      danger: true,
+    })) return
     setBusyId(id)
     try {
       await apiJson(`/api/admin/contests/${id}`, 'DELETE')
@@ -101,7 +108,12 @@ export default function ContestsTab() {
   }
 
   const removeEntry = async (cid: number, uid: number) => {
-    if (!confirm(`移除用户 #${uid} 的报名？`)) return
+    if (!await confirm({
+      title: '移除报名',
+      desc: `移除用户 #${uid} 的报名？`,
+      confirmText: '移除',
+      danger: true,
+    })) return
     try {
       await apiJson(`/api/admin/contests/${cid}/entries/${uid}`, 'DELETE')
       const d = await apiGet<{ entries: Entry[] }>(`/api/admin/contests/${cid}/entries`)
@@ -237,6 +249,7 @@ export default function ContestsTab() {
         </table>
         {contests.length === 0 && <EmptyState text="无比赛" />}
       </div>
+      {confirmDialog}
     </div>
   )
 }
