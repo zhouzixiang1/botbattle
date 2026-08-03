@@ -879,8 +879,8 @@ class Store:
                 "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display"
             )
             join_bots = (
-                "JOIN bots ba ON m.bot_a_id=ba.id "
-                "JOIN bots bb ON m.bot_b_id=bb.id"
+                "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id"
             )
             where_sql = (
                 " WHERE m.status='completed' "
@@ -1449,10 +1449,10 @@ class Store:
             )
             sql = (
                 f"SELECT {sel} FROM {tbl} m "
-                "JOIN bots ba ON m.bot_a_id=ba.id "
-                "JOIN bots bb ON m.bot_b_id=bb.id "
-                "JOIN users ua ON ba.owner_id=ua.id "
-                "JOIN users ub ON bb.owner_id=ub.id "
+                "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id "
+                "LEFT JOIN users ua ON ba.owner_id=ua.id "
+                "LEFT JOIN users ub ON bb.owner_id=ub.id "
                 "WHERE m.id=?"
             )
             return _row(c.execute(sql, (match_id,)).fetchone())
@@ -1519,8 +1519,8 @@ class Store:
         """列对局。game_id 指定时只查该游戏表；否则 UNION ALL 三表（跨游戏）。"""
         with self._tx() as c:
             join_bots = (
-                "JOIN bots ba ON m.bot_a_id=ba.id "
-                "JOIN bots bb ON m.bot_b_id=bb.id"
+                "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id"
             )
             sel = (
                 "m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
@@ -2148,8 +2148,8 @@ class Store:
                 "m.match_type, m.created_at, m.ended_at, m.n_dots, "
                 "ba.name AS bot_a_name, bb.name AS bot_b_name, "
                 "r.events_json, r.hands_json "
-                f"FROM {tbl} m JOIN bots ba ON m.bot_a_id=ba.id "
-                "JOIN bots bb ON m.bot_b_id=bb.id "
+                f"FROM {tbl} m LEFT JOIN bots ba ON m.bot_a_id=ba.id "
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id "
                 "LEFT JOIN match_replays r ON r.match_id=m.id "
                 "WHERE m.status='completed' AND m.game_id=? "
                 "AND substr(m.created_at,1,7)=? "
@@ -2659,8 +2659,8 @@ class Store:
                 "ua.username AS owner_a_name, ub.username AS owner_b_name, "
                 "m.winner AS match_winner "
                 "FROM contest_pairings p "
-                "JOIN bots ba ON p.bot_a_id=ba.id "
-                "JOIN bots bb ON p.bot_b_id=bb.id "
+                "LEFT JOIN bots ba ON p.bot_a_id=ba.id "
+                "LEFT JOIN bots bb ON p.bot_b_id=bb.id "
                 "LEFT JOIN users ua ON ba.owner_id=ua.id "
                 "LEFT JOIN users ub ON bb.owner_id=ub.id "
                 f"LEFT JOIN {tbl} m ON p.match_id=m.id "
