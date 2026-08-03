@@ -102,10 +102,10 @@ bash scripts/rebuild.sh   # npm run build → platform-ctl.sh restart
 2. `store/schema.py`：新增 `matches_<game>` 表（仿现有 per-game 表，FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动时断言 schema 与注册表 ID 集合一致）。
 4. 前端：`src/games/<game>/index.ts`（`GameViewSpec`：Board/reducer/`CanvasRenderer`/configFields）+ 在 `src/games/index.ts` 注册。
-5. **禁止反向依赖**：`games/<game>/` 不得 import `bzplat.backend.engine` / `_compat`；通用层不得 import 具体游戏模块。
+5. **禁止反向依赖**：`games/<game>/` 不得反向 import 已删的 `engine`/`_compat`/`protocol` shim 或通用层；通用层不得 import 具体游戏模块（`test_import_cycles.py` 源码扫描守护，forbidden 含已删 shim 作"防回退"哨兵）。
 6. 跑测试：`pytest`（含 `test_result_contract` / `test_import_cycles` / `test_game_registry` / `test_tongyong_layer_no_game_branches`）+ `npm run build`。
 
-> `engine/` 与 `protocol/` 仅为旧 import 的 **shim**（经 `_compat/` 转发到 `games/`）。新代码请直接面向 `games` 注册表，不要在 `engine/registry.py` 或 `matches/runner.py` 加游戏分支。
+> `engine/`/`protocol/`/`_compat/` shim 已删除（真实现全在 `games/`）。新代码直接面向 `games` 注册表，不要在 `matches/runner.py` 加游戏分支。
 
 ### 5.2 新增 API 端点
 - 在 `api_routes.py`（或 `auth/routes.py`）加路由，按需用 `require_user`/`require_admin`/`require_organizer` 依赖。

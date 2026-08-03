@@ -1,6 +1,6 @@
-# 裁判代码说明（仅管理员）
+# 裁判代码说明
 
-> 本页**仅管理员可见**，不进入公开 Wiki。描述三款游戏裁判引擎的代码位置、规则、可调参数与协议要点。
+> 描述各游戏裁判引擎的代码位置、规则、可调参数与协议要点。
 > 裁判代码本身在 Web 上**只读**；规则参数可在管理端「裁判」Tab 热调（下一局即生效）。代码逻辑改动需走业务代码流程（git 分支）。
 
 ## 架构总览
@@ -13,14 +13,14 @@
 | 五子棋 | `games/gomoku/engine.py` | `GomokuSession` |
 | 点格棋 | `games/pencil/engine.py` | `PencilSession` |
 
-统一入口经 **游戏注册表**（`games.registry` / 兼容层 `engine/registry.py` 委托）：
+统一入口经 **游戏注册表**（`games.registry`）：
 
 ```text
 games.registry.get(game_id).run_session(decide, **params)
 # 或：from bzplat.backend.games import run_session
 ```
 
-每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。`engine/` 与 `protocol/` 目录仅为旧 import 的 **shim**（经 `_compat/` 转发到 `games/`），**不要**在 shim 里加新逻辑。
+每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。`engine/`/`protocol/`/`_compat/` shim 已删除，真实现全在 `games/`。
 
 ## 解耦契约
 

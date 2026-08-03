@@ -1793,7 +1793,7 @@ def admin_get_judges(request: Request, _admin=Depends(require_admin)):
             "params": params,
             "docstring": _engine_docstring(g["code_path"]),
         })
-    # admin-only 裁判代码说明（不入公开 WIKI_PAGES）
+    # 裁判代码说明（也经公开 WIKI_PAGES 的 judge-code slug 提供前端 wiki 阅读）
     judge_code_path = _wiki_dir() / "JUDGE_CODE.md"
     markdown = (
         judge_code_path.read_text(encoding="utf-8") if judge_code_path.is_file() else ""
