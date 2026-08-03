@@ -69,7 +69,12 @@ def test_levels_info_endpoint(tmp_path):
     assert r.status_code == 200
     d = r.json()
     assert "thresholds" in d and len(d["thresholds"]) == 11
+    # 全部 XP 键应从 schema.py 常量派生（审计：原硬编码 10/15/50/2/3 会 drift）
     assert d["xp_match_participate"] == XP_MATCH_PARTICIPATE
+    assert d["xp_match_win"] == XP_MATCH_WIN
+    assert d["xp_contest_participate"] == XP_CONTEST_PARTICIPATE
+    assert d["xp_comment"] == XP_COMMENT
+    assert d["xp_followed"] == XP_FOLLOWED
 
 
 def test_me_includes_xp_level(tmp_path):
