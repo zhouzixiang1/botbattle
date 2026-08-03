@@ -10,6 +10,15 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;')
 }
 
+/** 标题 slugify：用于生成锚点 id（支持中文标题，空格→-，转小写）。
+ * 与 wiki md 内现有的中文锚点（如 #简介、#与-botzone-差异一览）对齐。 */
+function headingId(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^\w\u4e00-\u9fff-]/g, '')
+}
+
 /** 行内格式：`code`、**bold**、![alt](src)、[text](href) */
 function inline(s: string): string {
   let out = escapeHtml(s)
@@ -116,7 +125,7 @@ function parseBlock(block: string): Block {
       'mt-4 mb-2 text-base font-semibold text-foreground',
       'mt-3 mb-1.5 text-sm font-semibold text-foreground',
     ][level - 1]
-    return { tag: `h${level}`, html: `<h${level} class="${cls}">${escapeHtml(m[2])}</h${level}>` }
+    return { tag: `h${level}`, html: `<h${level} id="${headingId(m[2])}" class="${cls}">${escapeHtml(m[2])}</h${level}>` }
   }
   // 引用块
   if (lines.every((l) => l.trim() === '' || /^\s*>\s?/.test(l))) {

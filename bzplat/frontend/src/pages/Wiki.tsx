@@ -33,8 +33,18 @@ export default function Wiki() {
         const d = await apiGet<WikiResp>('/api/wiki')
         if (cancelled) return
         setPages(d.pages || [])
-        setSlug(d.slug)
-        setMd(d.markdown || '')
+        // 初始化：若 URL hash 指向某 slug（#/wiki?slug=xxx），优先加载它，否则用首页。
+        const hashed = window.location.hash.match(/slug=([\w-]+)/)
+        const initial = hashed ? hashed[1] : d.slug
+        if (hashed && initial !== d.slug) {
+          const p = await apiGet<WikiResp>(`/api/wiki?slug=${encodeURIComponent(initial)}`)
+          if (cancelled) return
+          setSlug(p.slug)
+          setMd(p.markdown || '')
+        } else {
+          setSlug(d.slug)
+          setMd(d.markdown || '')
+        }
       } catch (e) {
         if (!cancelled) setError(errMsg(e, '加载失败'))
       } finally {
@@ -46,6 +56,16 @@ export default function Wiki() {
     }
   }, [])
 
+  // 监听 hash 变化：跨页链接（#/wiki?slug=xxx）点击时跳转到对应 wiki 页。
+  useEffect(() => {
+    const onHash = () => {
+      const m = window.location.hash.match(/slug=([\w-]+)/)
+      if (m && m[1] !== slug) void loadPage(m[1])
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [slug])
+
   const loadPage = async (target: string) => {
     if (target === slug) return
     setLoading(true)
@@ -54,6 +74,10 @@ export default function Wiki() {
       const d = await apiGet<WikiResp>(`/api/wiki?slug=${encodeURIComponent(target)}`)
       setSlug(d.slug)
       setMd(d.markdown || '')
+      // 同步 URL hash（可分享 / 刷新保持当前页）
+      if (window.location.hash !== `#/wiki?slug=${target}`) {
+        window.location.hash = `#/wiki?slug=${target}`
+      }
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     } finally {

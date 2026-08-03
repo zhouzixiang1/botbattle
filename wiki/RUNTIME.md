@@ -80,7 +80,7 @@ Botzone「长时运行」模式：
 
 ![Botzone 长时运行模式](/wiki-assets/BotRunMode_LongRunning.png)
 
-本平台对齐长驻进程思路，但协议为紧凑行 JSON，详见[协议规范](/wiki?slug=protocol)。
+本平台对齐长驻进程思路，但协议为紧凑行 JSON，详见[协议规范](#/wiki?slug=protocol)。
 
 ## 德州牌型参考
 
