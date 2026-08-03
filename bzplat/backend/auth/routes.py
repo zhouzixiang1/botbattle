@@ -145,6 +145,10 @@ def _err(exc: AuthError) -> HTTPException:
 
 
 def _require_captcha(request: Request, captcha_id: str, answer: str) -> None:
+    # 测试便利开关：BZ_SKIP_CAPTCHA=1 时跳过验证码校验，便于端到端自动化
+    # （仅测试/开发环境开启；生产环境不设此变量，行为与原来完全一致）
+    if _env_bool("BZ_SKIP_CAPTCHA", False):
+        return
     store: CaptchaStore = request.app.state.captcha
     if not store.verify(captcha_id, answer):
         raise HTTPException(status_code=400, detail="图形验证码错误或已过期")

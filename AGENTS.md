@@ -62,6 +62,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 
 - **测试**：`pytest`（`pyproject.toml` 设 `testpaths=["bzplat/backend/tests"]`，`pythonpath=["."]`），务必从仓库根运行。
 - **本地无 Docker 跑 ELF**：`export BZ_BOT_LOCAL=1`（`BinaryRunner` 退回本机 subprocess，仅测试用）。
+- **测试/开发跳过验证码**：`export BZ_SKIP_CAPTCHA=1`（`_require_captcha` 直接放行，免验证码即可登录/注册——便于 GUI 自动化与端到端测试；**仅测试/开发环境开启，生产绝不设**）。与之对照 `BZ_TEST_CAPTCHA=1` 仍走验证码流程，只是 `/api/auth/captcha` 响应额外返回 `answer` 便于脚本读取。
 - **端到端冒烟**：`bash scripts/e2e_smoke.sh`。
 - **测试种子账号**：`python scripts/seed_test_accounts.py`（建 tester1/tester2，各上传 holdem/gomoku/pencil 样例 Bot；幂等，便于对战/人类对战测试）。
 - **改完代码必须 rebuild + restart**：`bash scripts/rebuild.sh`（`npm run build` → `platform-ctl.sh restart`）。前端产物（`bzplat/frontend/dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——不 rebuild+restart 代码不会生效（常见症状：新路由 405 Method Not Allowed）。

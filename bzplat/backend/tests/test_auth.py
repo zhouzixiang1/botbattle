@@ -145,3 +145,62 @@ def test_captcha_wrong_answer(tmp_path):
     cs = CaptchaStore()
     cid, _answer, _ = cs.create()
     assert cs.verify(cid, "definitely-wrong-xxx") is False
+
+
+# ---------- BZ_SKIP_CAPTCHA 开关：HTTP 级端到端守护 ----------
+
+
+def _make_test_app(tmp_path, monkeypatch, *, skip_captcha: bool):
+    """起一个临时 app + 已验证用户，返回 (client, username, password)。"""
+    from fastapi.testclient import TestClient
+
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+
+    db_path = str(tmp_path / "skipcap.db")
+    monkeypatch.setenv("BZ_DB_PATH", db_path)
+    if skip_captcha:
+        monkeypatch.setenv("BZ_SKIP_CAPTCHA", "1")
+    else:
+        monkeypatch.delenv("BZ_SKIP_CAPTCHA", raising=False)
+
+    store = Store(db_path)
+    u = store.create_user("skipuser", "skip@ex.com", hash_password("pw123456"))
+    store.update_user(u["id"], email_verified=1)
+    store.close()
+
+    app = create_app()
+    return TestClient(app), "skipuser", "pw123456"
+
+
+def test_skip_captcha_allows_login_with_any_answer(tmp_path, monkeypatch):
+    """BZ_SKIP_CAPTCHA=1 时，登录可跳过验证码校验（任意/空 captcha 均可）。"""
+    client, username, password = _make_test_app(tmp_path, monkeypatch, skip_captcha=True)
+    # 完全不用取验证码，captcha_id/answer 传占位值
+    r = client.post(
+        "/api/auth/login",
+        json={
+            "username": username,
+            "password": password,
+            "captcha_id": "skipped",
+            "captcha_answer": "anything",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json().get("token")
+
+
+def test_skip_captcha_off_still_validates(tmp_path, monkeypatch):
+    """默认（BZ_SKIP_CAPTCHA 未开）时，错误验证码仍被拒——守护开关不误开。"""
+    client, username, password = _make_test_app(tmp_path, monkeypatch, skip_captcha=False)
+    r = client.post(
+        "/api/auth/login",
+        json={
+            "username": username,
+            "password": password,
+            "captcha_id": "whatever",
+            "captcha_answer": "definitely-wrong-xxx",
+        },
+    )
+    assert r.status_code == 400
+    assert "验证码" in r.json().get("detail", "")
