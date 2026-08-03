@@ -17,7 +17,7 @@ import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/stat
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, errMsg } from '@/api'
-import { GAMES, gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
+import { GAMES, gameLabel, gameIcon, matchTypeBadge, isBoardGame } from '@/lib/games'
 
 interface Match {
   id: string
@@ -182,9 +182,9 @@ export default function Home() {
                       <StatusBadge status={m.status} />
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
-                      {m.game_id === 'holdem' || !m.game_id
-                        ? `${m.hands_played ?? 0}/${m.total_hands ?? 70}`
-                        : `${m.hands_played ?? 0} 步`}
+                      {isBoardGame(m.game_id)
+                        ? `${m.hands_played ?? 0} 步`
+                        : `${m.hands_played ?? 0}/${m.total_hands ?? 70}`}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">

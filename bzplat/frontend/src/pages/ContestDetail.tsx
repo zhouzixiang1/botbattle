@@ -156,14 +156,17 @@ export default function ContestDetail() {
 
   useEffect(() => {
     void load()
-    if (isLoggedIn) {
+  }, [load])
+
+  useEffect(() => {
+    if (isLoggedIn && contest?.game_id) {
       apiGet<{ bots: Array<{ id: number; name: string; display_name?: string }> }>(
-        '/api/bots/mine',
+        `/api/bots/mine?game_id=${contest.game_id}`,
       )
         .then((d) => setBots(d.bots || []))
         .catch(() => undefined)
     }
-  }, [load, isLoggedIn])
+  }, [isLoggedIn, contest?.game_id])
 
   const isOrg = !!user && !!contest && (user.role === 'admin' || user.id === contest.organizer_id)
   const myEntry = entries.find((e) => e.user_id === user?.id)
