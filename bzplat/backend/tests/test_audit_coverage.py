@@ -42,7 +42,7 @@ def _user_with_bot(store: Store, *, name: str, path: str, game: str = "gomoku"):
     """建一个用户 + 一个 bot（path 可指向不存在文件以模拟崩溃）。"""
     u = store.create_user(name, f"{name}@ex.com", hash_password("password1"))
     b = store.create_bot(
-        u["id"], f"{name}_bot", binary_path=path, format="elf", is_public=1, game_id=game
+        u["id"], f"{name}_bot", binary_path=path, format="elf", game_id=game
     )
     store.ensure_rating(b["id"])
     return u, b

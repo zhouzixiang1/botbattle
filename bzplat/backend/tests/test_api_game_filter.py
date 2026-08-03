@@ -21,8 +21,8 @@ def _setup(app):
     u = store.create_user("gfu", "gfu@a.com", hash_password("pw123456"))
     store.update_user(u["id"], email_verified=1)
     # 建不同游戏的 bot（public）
-    bh = store.create_bot(u["id"], "gfh", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    bg = store.create_bot(u["id"], "gfg", binary_path="/tmp", format="elf", is_public=1, game_id="gomoku")
+    bh = store.create_bot(u["id"], "gfh", binary_path="/tmp", format="elf", game_id="holdem")
+    bg = store.create_bot(u["id"], "gfg", binary_path="/tmp", format="elf", game_id="gomoku")
     # 建不同游戏的赛事
     ch = store.create_contest("GF Holdem赛", organizer_id=admin["id"], game_id="holdem")["id"]
     cg = store.create_contest("GF Gomoku赛", organizer_id=admin["id"], game_id="gomoku")["id"]

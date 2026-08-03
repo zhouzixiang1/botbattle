@@ -71,14 +71,14 @@ def test_notification_manager_notify_both_owners_dedup(tmp_path):
     s = _store(tmp_path)
     u1 = s.create_user("alice", "a@ex.com", "x")
     u2 = s.create_user("bob", "b@ex.com", "x")
-    b1 = s.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    b2 = s.create_bot(u2["id"], "botB", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = s.create_bot(u1["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+    b2 = s.create_bot(u2["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
     nm = NotificationManager(s, mailer=None)
     nm.notify_both_owners(b1["id"], b2["id"], type="match_done", title="完成")
     assert s.unread_notification_count(u1["id"]) == 1
     assert s.unread_notification_count(u2["id"]) == 1
     # 同 owner 两个 bot 去重：只通知一次
-    b3 = s.create_bot(u1["id"], "botC", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b3 = s.create_bot(u1["id"], "botC", binary_path="/tmp", format="elf", game_id="holdem")
     nm.notify_both_owners(b1["id"], b3["id"], type="match_done", title="自博弈")
     assert s.unread_notification_count(u1["id"]) == 2  # 第二条
     s.close()

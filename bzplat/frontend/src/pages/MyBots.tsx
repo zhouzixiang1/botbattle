@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { Upload, Trash2, Pencil, Save, X, Power, Eye, EyeOff, Bot as BotIcon } from 'lucide-react'
+import { Upload, Trash2, Pencil, Save, X, Power, Bot as BotIcon } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
@@ -24,7 +24,6 @@ interface Bot {
   arch?: string
   format?: string
   current_version?: number
-  is_public?: number
   is_active?: number
   updated_at?: string
   game_id?: string
@@ -72,7 +71,6 @@ export default function MyBots() {
         name,
         display_name: displayName,
         description,
-        is_public: true,
         game_id: gameId,
         file,
       })
@@ -122,19 +120,10 @@ export default function MyBots() {
     }
   }
 
-  const togglePublic = async (b: Bot) => {
-    try {
-      await apiJson(`/api/bots/${b.id}`, 'PATCH', { is_public: !b.is_public })
-      await load()
-    } catch (e) {
-      setError(errMsg(e, '更新失败'))
-    }
-  }
-
   const del = async (b: Bot) => {
     if (!await confirm({
       title: '删除 Bot',
-      desc: `确定删除 ${b.display_name || b.name}？（将停用并设为私有）`,
+      desc: `确定删除 ${b.display_name || b.name}？（将停用此 Bot）`,
       confirmText: '删除',
       danger: true,
     })) return
@@ -279,17 +268,12 @@ export default function MyBots() {
                       </span>
                       <span>v{b.current_version ?? 0}</span>
                       <span>{b.is_active ? '启用' : '停用'}</span>
-                      <span>{b.is_public ? '公开' : '私有'}</span>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     <Button type="button" variant="outline" size="sm" onClick={() => void toggleActive(b)} className="gap-1">
                       <Power className="size-3.5" />
                       {b.is_active ? '停用' : '启用'}
-                    </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => void togglePublic(b)} className="gap-1">
-                      {b.is_public ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                      {b.is_public ? '设私有' : '设公开'}
                     </Button>
                     <Button type="button" variant="outline" size="sm" onClick={() => startEdit(b)} className="gap-1">
                       <Pencil className="size-3.5" />

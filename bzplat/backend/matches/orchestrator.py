@@ -186,8 +186,6 @@ class MatchOrchestrator:
             raise ValueError("己方 bot 不可用")
         if not bot_b.get("is_active") or not bot_b.get("binary_path"):
             raise ValueError("对手 bot 不可用")
-        if not bot_b.get("is_public") and bot_b.get("owner_id") != owner_user_id:
-            raise ValueError("对手 bot 未公开")
 
         ga = normalize_game_id(bot_a.get("game_id"))
         gb = normalize_game_id(bot_b.get("game_id"))

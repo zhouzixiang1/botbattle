@@ -22,8 +22,8 @@ def test_user_profile_aggregates_stats_and_bio(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("alice", "a@ex.com", "x")
     s.update_user(u["id"], bio="hello", avatar="1.png", display_name="Alice")
-    b1 = s.create_bot(u["id"], "botA", binary_path="/tmp/x", format="elf", is_public=1, game_id="holdem")
-    b2 = s.create_bot(u["id"], "botB", binary_path="/tmp/x", format="elf", is_public=1, game_id="gomoku")
+    b1 = s.create_bot(u["id"], "botA", binary_path="/tmp/x", format="elf", game_id="holdem")
+    b2 = s.create_bot(u["id"], "botB", binary_path="/tmp/x", format="elf", game_id="gomoku")
     s.ensure_rating(b1["id"])
     s.ensure_rating(b2["id"])
     s.update_rating_row(b1["id"], wins=3, losses=1, matches_played=4)
@@ -51,18 +51,18 @@ def test_user_profile_nonexistent_returns_none(tmp_path):
 def test_search_bots_by_name_and_display(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("alice", "a@ex.com", "x")
-    s.create_bot(u["id"], "alphaBot", binary_path="/tmp/x", format="elf", is_public=1, game_id="holdem", display_name="阿尔法")
-    s.create_bot(u["id"], "betaBot", binary_path="/tmp/x", format="elf", is_public=1, game_id="gomoku")
-    s.create_bot(u["id"], "gammaBot", binary_path="/tmp/x", format="elf", is_public=0, game_id="holdem")  # 私有，不出现
+    s.create_bot(u["id"], "alphaBot", binary_path="/tmp/x", format="elf", game_id="holdem", display_name="阿尔法")
+    s.create_bot(u["id"], "betaBot", binary_path="/tmp/x", format="elf", game_id="gomoku")
+    s.create_bot(u["id"], "gammaBot", binary_path="/tmp/x", format="elf", game_id="holdem")  # is_public=0 已下线——不再隐藏
     # 按 name 搜
     r = s.search_bots("alpha")
     assert len(r) == 1 and r[0]["name"] == "alphaBot"
     # 按 display_name 搜（中文）
     r2 = s.search_bots("阿尔法")
     assert len(r2) == 1 and r2[0]["name"] == "alphaBot"
-    # 空 q 返回全部 public
+    # 空 q 返回全部（私有 bot 功能已下线，全部可见）
     r3 = s.search_bots("")
-    assert len(r3) == 2  # 排除私有 gammaBot
+    assert len(r3) == 3  # gammaBot 不再隐藏
     # 按 game 过滤
     r4 = s.search_bots("", game_id="gomoku")
     assert len(r4) == 1 and r4[0]["name"] == "betaBot"
@@ -72,8 +72,8 @@ def test_search_bots_by_name_and_display(tmp_path):
 def test_search_matches_by_bot_name(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("alice", "a@ex.com", "x")
-    b1 = s.create_bot(u["id"], "findme", binary_path="/tmp/x", format="elf", is_public=1, game_id="holdem")
-    b2 = s.create_bot(u["id"], "otherbot", binary_path="/tmp/x", format="elf", is_public=1, game_id="holdem")
+    b1 = s.create_bot(u["id"], "findme", binary_path="/tmp/x", format="elf", game_id="holdem")
+    b2 = s.create_bot(u["id"], "otherbot", binary_path="/tmp/x", format="elf", game_id="holdem")
     s.create_match("m1", bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u["id"])
     s.update_match("m1", status="completed")
     s.create_match("m2", bot_a_id=b2["id"], bot_b_id=b1["id"], owner_id=u["id"])  # 默认 pending
@@ -105,7 +105,7 @@ def _app(tmp_path) -> tuple[TestClient, dict, int]:
     store = app.state.store
     u = store.create_user("alice", "a@ex.com", hash_password("pw123456"), display_name="Alice")
     store.update_user(u["id"], email_verified=1, bio="hi")
-    b = store.create_bot(u["id"], "botA", binary_path="/tmp/x", format="elf", is_public=1, game_id="holdem")
+    b = store.create_bot(u["id"], "botA", binary_path="/tmp/x", format="elf", game_id="holdem")
     store.ensure_rating(b["id"])
     store.update_rating_row(b["id"], wins=1, matches_played=1)
     _, token = app.state.auth.authenticate("alice", "pw123456")

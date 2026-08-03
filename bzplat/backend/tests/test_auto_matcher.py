@@ -61,7 +61,6 @@ def _mk_bots(store: Store, n: int, game_id: str = "holdem", *, base: int = 0):
             binary_path=f"/tmp/b{k}",
             format="elf",
             is_active=1,
-            is_public=1,
             game_id=game_id,
         )
         store.ensure_rating(b["id"])  # last_played_at = NULL（最陈旧）

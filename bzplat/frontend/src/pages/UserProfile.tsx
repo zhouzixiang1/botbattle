@@ -42,7 +42,6 @@ interface BotRow {
   game_id: string
   description?: string
   is_active: number | boolean
-  is_public: number | boolean
 }
 
 export default function UserProfile() {

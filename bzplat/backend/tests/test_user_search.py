@@ -60,13 +60,13 @@ def test_search_users_no_sensitive_fields(store: Store):
         assert set(r.keys()) >= {"id", "username", "display_name"}
 
 
-def test_list_public_bots_filter_by_owner(store: Store):
+def test_list_bots_filter_by_owner(store: Store):
     ua = store.create_user("owna", "a@ex.com", hash_password("p1"))
     ub = store.create_user("ownb", "b@ex.com", hash_password("p1"))
-    ba = store.create_bot(ua["id"], "bota", binary_path="/tmp/a", format="elf", is_public=1, game_id="holdem")
-    bb = store.create_bot(ub["id"], "botb", binary_path="/tmp/b", format="elf", is_public=1, game_id="holdem")
-    mine = store.list_bots(public_only=True, owner_id=ua["id"], game_id="holdem")
+    ba = store.create_bot(ua["id"], "bota", binary_path="/tmp/a", format="elf", game_id="holdem")
+    bb = store.create_bot(ub["id"], "botb", binary_path="/tmp/b", format="elf", game_id="holdem")
+    mine = store.list_bots(owner_id=ua["id"], game_id="holdem")
     assert {b["id"] for b in mine} == {ba["id"]}
-    # 不过滤 owner：两个都在
-    allp = store.list_bots(public_only=True, game_id="holdem")
+    # 不过滤 owner：两个都在（私有 bot 功能已下线，全部可见）
+    allp = store.list_bots(game_id="holdem")
     assert {b["id"] for b in allp} == {ba["id"], bb["id"]}

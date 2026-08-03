@@ -18,10 +18,10 @@ def _seed_two_bots(s: Store):
     """建 1 用户 + 2 个 holdem bot（带 rating 行）。"""
     u = s.create_user("alice", "a@ex.com", "xhash")
     b1 = s.create_bot(
-        u["id"], "botA", binary_path="/tmp/a", format="elf", is_public=1, game_id="holdem"
+        u["id"], "botA", binary_path="/tmp/a", format="elf", game_id="holdem"
     )
     b2 = s.create_bot(
-        u["id"], "botB", binary_path="/tmp/b", format="elf", is_public=1, game_id="holdem"
+        u["id"], "botB", binary_path="/tmp/b", format="elf", game_id="holdem"
     )
     s.ensure_rating(b1["id"])
     s.ensure_rating(b2["id"])
@@ -161,10 +161,10 @@ def _app_with_admin(tmp_path):
     _, token = app.state.auth.authenticate("admin", "password12")
     # 建 2 bot + rating + 历史
     b1 = store.create_bot(
-        u["id"], "botA", binary_path="/tmp/a", format="elf", is_public=1, game_id="holdem"
+        u["id"], "botA", binary_path="/tmp/a", format="elf", game_id="holdem"
     )
     b2 = store.create_bot(
-        u["id"], "botB", binary_path="/tmp/b", format="elf", is_public=1, game_id="holdem"
+        u["id"], "botB", binary_path="/tmp/b", format="elf", game_id="holdem"
     )
     store.ensure_rating(b1["id"])
     store.ensure_rating(b2["id"])

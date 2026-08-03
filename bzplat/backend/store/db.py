@@ -199,6 +199,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     if "bots" in tables:
         _add_col(conn, "bots", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
+        # 下线私有 bot 功能（全局只有「公开」一种状态）：旧库的 is_public 列先转公开
+        # 再 DROP COLUMN（保数据不丢）。幂等：列已不存在则跳过。
+        if "is_public" in _table_cols(conn, "bots"):
+            conn.execute("UPDATE bots SET is_public=1 WHERE is_public=0")
+            conn.execute("ALTER TABLE bots DROP COLUMN is_public")
 
     if "users" in tables:
         _add_col(conn, "users", "bio", "TEXT NOT NULL DEFAULT ''")
@@ -757,7 +762,7 @@ class Store:
                 "u.display_name AS owner_display, r.rating "
                 "FROM bots b LEFT JOIN users u ON b.owner_id=u.id "
                 "LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
-                "WHERE b.is_public=1 AND b.is_active=1 "
+                "WHERE b.is_active=1 "
                 "AND (LOWER(b.name) LIKE ? OR LOWER(b.display_name) LIKE ?)"
             )
             params: list[Any] = [ql, ql]
@@ -996,14 +1001,13 @@ class Store:
         fmt = fields.get("format", "unknown")
         binary_path = fields.get("binary_path", "")
         is_builtin = 1 if fields.get("is_builtin") else 0
-        is_public = 1 if fields.get("is_public", True) else 0
         game_id = fields.get("game_id") or "holdem"
         now = _now()
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO bots(owner_id, name, display_name, description, "
-                "os, arch, format, binary_path, is_builtin, is_public, game_id, "
-                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "os, arch, format, binary_path, is_builtin, game_id, "
+                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     owner_id,
                     name,
@@ -1014,7 +1018,6 @@ class Store:
                     fmt,
                     binary_path,
                     is_builtin,
-                    is_public,
                     game_id,
                     now,
                     now,
@@ -1047,7 +1050,6 @@ class Store:
             "format",
             "binary_path",
             "current_version",
-            "is_public",
             "is_active",
             "game_id",
             "updated_at",
@@ -1072,7 +1074,6 @@ class Store:
     def list_bots(
         self,
         owner_id: int | None = None,
-        public_only: bool = False,
         *,
         active_only: bool = True,
         include_builtin: bool = True,
@@ -1084,8 +1085,6 @@ class Store:
             if owner_id is not None:
                 sql += " AND owner_id=?"
                 params.append(owner_id)
-            if public_only:
-                sql += " AND is_public=1"
             if active_only:
                 sql += " AND is_active=1"
             if not include_builtin:
@@ -1675,9 +1674,9 @@ class Store:
         with self._tx() as c:
             sql = (
                 "SELECT r.bot_id, r.rating, r.rd, r.matches_played, r.last_played_at, "
-                "b.name AS bot_name, b.game_id, b.binary_path, b.is_active, b.is_public, b.is_builtin "
+                "b.name AS bot_name, b.game_id, b.binary_path, b.is_active, b.is_builtin "
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
-                "WHERE b.is_active=1 AND b.is_public=1 AND b.is_builtin=0 "
+                "WHERE b.is_active=1 AND b.is_builtin=0 "
                 "AND b.binary_path!=''"
             )
             params: list[Any] = []

@@ -21,8 +21,8 @@ def _store(tmp_path) -> Store:
 def test_matchpack_months_and_rows(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("alice", "a@ex.com", "x")
-    b1 = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    b2 = s.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+    b2 = s.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
     s.create_match("m1", bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u["id"])
     s.update_match("m1", status="completed")
     s.create_match("m2", bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u["id"])
@@ -46,8 +46,8 @@ def _app(tmp_path):
     store = app.state.store
     u = store.create_user("alice", "a@ex.com", hash_password("pw123456"))
     store.update_user(u["id"], email_verified=1)
-    b1 = store.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    b2 = store.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = store.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+    b2 = store.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
     mid = "m1"
     store.create_match(mid, bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u["id"])
     store.update_match(mid, status="completed")

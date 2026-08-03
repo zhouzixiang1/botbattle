@@ -21,8 +21,8 @@ def test_get_match_detailed_joins_bot_and_owner_names(tmp_path):
     s = _store(tmp_path)
     ua = s.create_user("alice", "a@ex.com", hash_password("pw"))
     ub = s.create_user("bob", "b@ex.com", hash_password("pw"))
-    ba = s.create_bot(ua["id"], "AlphaBot", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    bb = s.create_bot(ub["id"], "DeepHoldem", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    ba = s.create_bot(ua["id"], "AlphaBot", binary_path="/tmp", format="elf", game_id="holdem")
+    bb = s.create_bot(ub["id"], "DeepHoldem", binary_path="/tmp", format="elf", game_id="holdem")
     s.ensure_rating(ba["id"]); s.ensure_rating(bb["id"])
     mid = "20260802-seat-1"
     s.create_match(mid, bot_a_id=ba["id"], bot_b_id=bb["id"], owner_id=ua["id"], game_id="holdem")
@@ -46,8 +46,8 @@ def test_match_detail_route_returns_nested_seat_info(tmp_path):
     st = app.state.store
     ua = st.create_user("alice", "a@ex.com", hash_password("pw"))
     ub = st.create_user("bob", "b@ex.com", hash_password("pw"))
-    ba = st.create_bot(ua["id"], "AlphaBot", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    bb = st.create_bot(ub["id"], "DeepHoldem", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    ba = st.create_bot(ua["id"], "AlphaBot", binary_path="/tmp", format="elf", game_id="holdem")
+    bb = st.create_bot(ub["id"], "DeepHoldem", binary_path="/tmp", format="elf", game_id="holdem")
     st.ensure_rating(ba["id"]); st.ensure_rating(bb["id"])
     mid = "20260802-seat-2"
     st.create_match(mid, bot_a_id=ba["id"], bot_b_id=bb["id"], owner_id=ua["id"], game_id="holdem")
@@ -74,8 +74,8 @@ def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
     st = app.state.store
     ua = st.create_user("alice", "a@ex.com", hash_password("pw"))
     ub = st.create_user("bob", "b@ex.com", hash_password("pw"))
-    ba = st.create_bot(ua["id"], "AlphaBot", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
-    bb = st.create_bot(ub["id"], "DeepHoldem", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    ba = st.create_bot(ua["id"], "AlphaBot", binary_path="/tmp", format="elf", game_id="holdem")
+    bb = st.create_bot(ub["id"], "DeepHoldem", binary_path="/tmp", format="elf", game_id="holdem")
     st.ensure_rating(ba["id"]); st.ensure_rating(bb["id"])
     mid = "20260802-seat-winner"
     st.create_match(mid, bot_a_id=ba["id"], bot_b_id=bb["id"], owner_id=ua["id"], game_id="holdem")
@@ -103,7 +103,7 @@ def test_match_detail_human_match_marks_is_human(tmp_path):
     u_human = st.create_user("human_player", "h@ex.com", hash_password("pw"))
     u_bot_owner = st.create_user("bot_owner", "o@ex.com", hash_password("pw"))
     b = st.create_bot(
-        u_bot_owner["id"], "AlphaBot", binary_path="/tmp", format="elf", is_public=1, game_id="gomoku",
+        u_bot_owner["id"], "AlphaBot", binary_path="/tmp", format="elf", game_id="gomoku",
     )
     st.ensure_rating(b["id"])
     mid = "20260802-seat-3"

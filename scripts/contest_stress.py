@@ -71,7 +71,7 @@ def seed(db_path: str, n_users: int) -> tuple[dict[str, int], int, str]:
         if existing:
             b = existing
         else:
-            b = bm.create_from_upload(u["id"], bname, raw, display_name=bname, game_id="holdem", is_public=True)
+            b = bm.create_from_upload(u["id"], bname, raw, display_name=bname, game_id="holdem")
         store.ensure_rating(b["id"])
         uid2bot[uname] = b["id"]
 

@@ -40,7 +40,6 @@ CREATE TABLE IF NOT EXISTS bots (
     format          TEXT    NOT NULL DEFAULT 'unknown',
     binary_path     TEXT    NOT NULL DEFAULT '',
     current_version INTEGER NOT NULL DEFAULT 0,
-    is_public       INTEGER NOT NULL DEFAULT 1,
     is_active       INTEGER NOT NULL DEFAULT 1,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
     game_id         TEXT    NOT NULL DEFAULT 'holdem',

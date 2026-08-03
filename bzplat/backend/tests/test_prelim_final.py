@@ -61,7 +61,7 @@ def test_organizer_entries_api_permissions(tmp_path):
     store.update_user(other["id"], email_verified=1)
     u1 = store.create_user("usr1", "usr1@ex.com", hash_password("pw123456"))
     store.update_user(u1["id"], email_verified=1)
-    b1 = store.create_bot(u1["id"], "usrb1", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = store.create_bot(u1["id"], "usrb1", binary_path="/tmp", format="elf", game_id="holdem")
     c = store.create_contest("P5名单", organizer_id=o["id"], game_id="holdem")["id"]
     client = TestClient(app)
     _, tok = app.state.auth.authenticate("org", "pw123456")
@@ -97,7 +97,7 @@ def test_organizer_bulk_and_delete(tmp_path):
     store.update_user(o["id"], email_verified=1)
     u1 = store.create_user("u1b", "u1b@ex.com", hash_password("pw123456"))
     store.update_user(u1["id"], email_verified=1)
-    b1 = store.create_bot(u1["id"], "usrb1b", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")
+    b1 = store.create_bot(u1["id"], "usrb1b", binary_path="/tmp", format="elf", game_id="holdem")
     c = store.create_contest("P5bulk", organizer_id=o["id"], game_id="holdem")["id"]
     client = TestClient(app)
     _, tok = app.state.auth.authenticate("org", "pw123456")
@@ -134,7 +134,7 @@ def test_allow_large_round_robin_bypasses_guard(tmp_path):
     for i in range(13):
         u = store.create_user(f"lr{i}", f"lr{i}@ex.com", hash_password("pw123456"))["id"]
         store.update_user(u, email_verified=1)
-        b = store.create_bot(u, f"lrb{i}", binary_path="/tmp", format="elf", is_public=1, game_id="holdem")["id"]
+        b = store.create_bot(u, f"lrb{i}", binary_path="/tmp", format="elf", game_id="holdem")["id"]
         users.append(u)
     c = store.create_contest(
         "P5大RR", organizer_id=o["id"], game_id="holdem",
