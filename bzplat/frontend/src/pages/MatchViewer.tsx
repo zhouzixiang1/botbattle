@@ -157,10 +157,10 @@ export default function MatchViewer() {
         : undefined
   const colorLabel = (seat: number) => {
     if (!match) return `座位 ${seat}`
-    // 棋类座位着色（黑白/红蓝）按 spec.kind === 'board' 判定，再细分 gomoku/pencil
-    if (isBoardGame(gameId)) {
-      const colorName = gameId === 'gomoku' ? (seat === 0 ? '黑' : '白') : (seat === 0 ? '红' : '蓝')
-      return `${seatHeaderLabel(match, seat as 0 | 1)}（${colorName}）`
+    // 棋类座位着色（黑白/红蓝）经 spec.seatColors 取（消除游戏名分支）
+    const seatColors = getGame(gameId).seatColors
+    if (seatColors && seatColors[seat]) {
+      return `${seatHeaderLabel(match, seat as 0 | 1)}（${seatColors[seat]}）`
     }
     return seatHeaderLabel(match, seat as 0 | 1)
   }
@@ -172,7 +172,7 @@ export default function MatchViewer() {
     ? visibleVm.vm.seats?.[1]?.net ?? null
     : typeof match?.earnings_b === 'number' ? match.earnings_b : null
   const liveSteps = visibleVm?.kind === 'board' ? visibleVm.vm.moveCount ?? null : null
-  const pencilScores = gameId === 'pencil' && visibleVm?.kind === 'board' ? visibleVm.vm.scores ?? null : null
+  const pencilScores = getGame(gameId).showScores && visibleVm?.kind === 'board' ? visibleVm.vm.scores ?? null : null
   const typeBadge = matchTypeBadge(match?.match_type)
 
   // 定速播放定时器（直播+回放共用）：按 SPEEDS 步进；到末尾后直播继续等（保持 playing），

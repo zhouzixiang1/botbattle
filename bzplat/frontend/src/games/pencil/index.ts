@@ -18,4 +18,7 @@ export const pencilSpec: GameViewSpec = {
   configFields: [
     { key: 'n_dots', label: '点阵边长', default: 6, min: 3, max: 15 },
   ],
+  seatColors: ['红', '蓝'],
+  progressUnit: 'move',
+  showScores: true,
 }

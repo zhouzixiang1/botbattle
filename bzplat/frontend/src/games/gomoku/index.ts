@@ -16,4 +16,6 @@ export const gomokuSpec: GameViewSpec = {
   CanvasRenderer: GomokuCanvasRenderer,
   defaultMatchConfig: {},
   configFields: [], // 单局无可调参数
+  seatColors: ['黑', '白'],
+  progressUnit: 'move',
 }

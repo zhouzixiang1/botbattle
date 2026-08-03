@@ -19,4 +19,5 @@ export const holdemSpec: GameViewSpec = {
   configFields: [
     { key: 'hands', label: '手数', default: 70, min: 1, max: 500 },
   ],
+  progressUnit: 'hand',
 }

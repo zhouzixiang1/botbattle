@@ -3,6 +3,7 @@
  * 复用 reducePencilEvents（不重写归约）；新占边沿线绘制动画；闭合格归属淡入。
  */
 import type { RawEvent } from '@/games/base'
+import { getGame } from '@/games'
 import {
   reducePencilEvents, type PencilViewModel,
   GRID_DOT, GRID_EDGE, GRID_EDGE_USED, GRID_BOX,
@@ -142,8 +143,9 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
     ctx.font = 'bold 15px "DM Sans", sans-serif'
     ctx.textAlign = 'left'
     ctx.textBaseline = 'alphabetic'
-    const name0 = seatShort(opts.seats?.[0], '红')
-    const name1 = seatShort(opts.seats?.[1], '蓝')
+    const sc = getGame('pencil').seatColors ?? ['红', '蓝']
+    const name0 = seatShort(opts.seats?.[0], sc[0] ?? '红')
+    const name1 = seatShort(opts.seats?.[1], sc[1] ?? '蓝')
     const turnLabel = next.matchOver
       ? (next.winner === null
         ? '平局'
