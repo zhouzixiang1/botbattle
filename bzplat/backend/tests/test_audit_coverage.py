@@ -139,6 +139,100 @@ def test_bot_crashed_aborts_normal_match(store: Store):
     assert m["reason"] == "bot_crashed"
 
 
+# ── 赛事对局崩溃判责（审计 P0-2：start_session 失败应判崩溃方输，非总判 seat0）──
+
+
+def test_contest_crash_blames_correct_seat_bot_b(store: Store):
+    """赛事对局：bot_b 启动失败（start_session）→ 技术判负 winner=0（bot_a 赢）。
+
+    审计发现原代码总判 winner=1（bot_a 输）即使 bot_b 才是崩溃方。修复后 runner
+    在 bot_b start_session 失败时注解 exc.crashed_seat=1，orchestrator 判 winner=1-1=0。
+    """
+    from bzplat.backend.store.schema import (
+        CONTEST_RUNNING,
+
+        TYPE_CONTEST,
+    )
+
+    orch = _orch(store)
+    ua, ba = _user_with_bot(
+        store, name="goodu2", path=os.path.abspath("samples/gomokubot_linux_amd64")
+    )
+    ub, bb = _user_with_bot(store, name="badu2", path="/nonexistent/crash_bot")
+
+    # 建一个 running 赛事 + 报名
+    cid = store.create_contest(
+        "t", ua["id"], game_id="gomoku", template_id="gomoku_rr",
+    )["id"]
+    store.update_contest(cid, status=CONTEST_RUNNING)
+    store.add_contest_entry(cid, ua["id"], ba["id"])
+    store.add_contest_entry(cid, ub["id"], bb["id"])
+    mid = _new_match_id()
+    store.create_match(
+        mid, ba["id"], bb["id"], owner_id=ua["id"], contest_id=cid,
+        game_id="gomoku", match_type=TYPE_CONTEST,
+    )
+
+    async def run():
+        task = orch._run_match(mid)
+        try:
+            await asyncio.wait_for(task, timeout=20)
+        except Exception:
+            pass
+
+    asyncio.run(run())
+    m = store.get_match(mid)
+    assert m["status"] == "completed", f"expected completed, got {m['status']}"
+    assert m["reason"] == "technical_loss"
+    # bot_b 崩溃 → winner=0（bot_a 赢）
+    assert m["winner"] == 0, f"bot_b 崩溃应判 winner=0，实际 {m['winner']}"
+    assert m["technical_loss"] == 1
+
+
+def test_contest_crash_blames_correct_seat_bot_a(store: Store):
+    """赛事对局：bot_a 启动失败 → 技术判负 winner=1（bot_b 赢）。
+
+    bot_a start_session 失败未注解 crashed_seat（默认 0）→ winner=1-0=1。
+    """
+    from bzplat.backend.store.schema import (
+        CONTEST_RUNNING,
+
+        TYPE_CONTEST,
+    )
+
+    orch = _orch(store)
+    ua, ba = _user_with_bot(store, name="badu3", path="/nonexistent/crash_bot")
+    ub, bb = _user_with_bot(
+        store, name="goodu3", path=os.path.abspath("samples/gomokubot_linux_amd64")
+    )
+
+    cid = store.create_contest(
+        "t2", ub["id"], game_id="gomoku", template_id="gomoku_rr",
+    )["id"]
+    store.update_contest(cid, status=CONTEST_RUNNING)
+    store.add_contest_entry(cid, ua["id"], ba["id"])
+    store.add_contest_entry(cid, ub["id"], bb["id"])
+    mid = _new_match_id()
+    store.create_match(
+        mid, ba["id"], bb["id"], owner_id=ub["id"], contest_id=cid,
+        game_id="gomoku", match_type=TYPE_CONTEST,
+    )
+
+    async def run():
+        task = orch._run_match(mid)
+        try:
+            await asyncio.wait_for(task, timeout=20)
+        except Exception:
+            pass
+
+    asyncio.run(run())
+    m = store.get_match(mid)
+    assert m["status"] == "completed", f"expected completed, got {m['status']}"
+    assert m["reason"] == "technical_loss"
+    # bot_a 崩溃 → winner=1（bot_b 赢）
+    assert m["winner"] == 1, f"bot_a 崩溃应判 winner=1，实际 {m['winner']}"
+
+
 # ── gomoku 引擎层传播 BotCrashedError（审计 P0-1，棋类引擎吞异常回归保护）─────
 
 

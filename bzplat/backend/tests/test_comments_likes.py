@@ -30,6 +30,20 @@ def test_comment_add_list_delete(tmp_path):
     s.close()
 
 
+def test_delete_comment_admin_ignores_author(tmp_path):
+    """admin 强删任意评论（无视作者）；评论不存在返回 False。"""
+    s = _store(tmp_path)
+    u1 = s.create_user("alice", "a@ex.com", "x")
+    u2 = s.create_user("bob", "b@ex.com", "x")
+    c = s.add_comment(u2["id"], "match", "m1", "bob的评论")
+    # admin（u1，非作者）强删 → 成功
+    assert s.delete_comment_admin(c["id"]) is True
+    assert s.comment_count("match", "m1") == 0
+    # 不存在的评论 → False（不崩）
+    assert s.delete_comment_admin(99999) is False
+    s.close()
+
+
 def test_like_unlike_count_and_match_counter(tmp_path):
     s = _store(tmp_path)
     u1 = s.create_user("alice", "a@ex.com", "x")

@@ -310,3 +310,36 @@ def test_consecutive_human_timeouts_aborts_match(store: Store):
     assert "human_inactive" in (m["reason"] or ""), f"reason 应标注人类不活跃: {m['reason']}"
     # 中止后释放用户锁
     assert u["id"] not in orch._human_active_users
+
+
+# ── resolve_human_turn 并发安全（审计 P1：double-submit 竞态→500）──────────────
+
+
+def test_resolve_human_turn_concurrent_double_submit(store: Store):
+    """并发两次 resolve_human_turn（同 match/seat）：第一个成功，第二个返 False 不抛。
+
+    审计发现 done() 检查与 set_result 非原子——并发 WS 消息或超时+落子竞争时
+    第二个 set_result 抛 InvalidStateError→500。修复后捕获返回 False。
+    """
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    orch = MatchOrchestrator(
+        store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=2
+    )
+    # 注册一个 pending human turn（用 new_event_loop 创建 Future，避免无运行 loop 报错）
+    loop = asyncio.new_event_loop()
+    fut = loop.create_future()
+    orch._human_turns[("m_race", 0)] = {"future": fut}
+    # 第一次 resolve → 成功
+    assert orch.resolve_human_turn("m_race", 0, {"row": 7, "col": 7}) is True
+    assert fut.done()
+    # 第二次（已 done）→ 应返 False，不抛 InvalidStateError
+    assert orch.resolve_human_turn("m_race", 0, {"row": 8, "col": 8}) is False
+
+
+def test_resolve_human_turn_unknown_match_returns_false(store: Store):
+    """未注册的 match/seat → 返 False（不抛 KeyError）。"""
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    orch = MatchOrchestrator(
+        store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=2
+    )
+    assert orch.resolve_human_turn("nonexistent", 0, {"row": 0, "col": 0}) is False

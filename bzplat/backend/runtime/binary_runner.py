@@ -65,6 +65,12 @@ class BotCrashedError(RuntimeError):
     """Bot 进程崩溃（启动即退出/EOF），不可恢复。区别于普通的决策超时/格式错误——
     决策超时是「Bot 慢」，崩溃是「Bot 死了」，后者应快速 abort 对局而非吞成默认动作死磕。"""
 
+    def __init__(self, *args: object, crashed_seat: int | None = None) -> None:
+        super().__init__(*args)
+        # 崩溃方座位号（0=bot_a, 1=bot_b）；None=未知（如 start_session 阶段未注解）。
+        # 由 runner 在 start_session 失败时注解，供 orchestrator 判技术判负的胜方。
+        self.crashed_seat = crashed_seat
+
 
 class BinaryRunner:
     """管理 bot 进程/容器的 stdin/stdout 行协议会话。"""

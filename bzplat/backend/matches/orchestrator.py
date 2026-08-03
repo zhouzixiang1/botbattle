@@ -100,7 +100,12 @@ class MatchOrchestrator:
         entry = self._human_turns.get((match_id, player_idx))
         if not entry or entry["future"].done():
             return False
-        entry["future"].set_result(move)
+        # done() 检查与 set_result 非原子——并发 WS 消息或超时可能在此间隙已解析，
+        # 第二个 set_result 会抛 InvalidStateError→500。捕获视为该消息未生效。
+        try:
+            entry["future"].set_result(move)
+        except asyncio.InvalidStateError:
+            return False
         return True
 
     async def challenge_human(
@@ -378,16 +383,21 @@ class MatchOrchestrator:
                         logger.debug("award_xp failed", exc_info=True)
             except BotCrashedError as exc:
                 logger.warning("match %s bot crashed — %s", match_id, exc)
-                # P4：赛事对局崩溃 → 技术判负（completed + winner=对手 + technical_loss=1），
+                # 赛事对局崩溃 → 技术判负（completed + winner=对手 + technical_loss=1），
                 # 不再静默吞分（aborted 在 standings 不计分会导致赛事卡住/丢分）。
-                # 无法判定崩溃方时（start_session 阶段），非 contest 仍 aborted（保旧）。
+                # 崩溃方从 exc.crashed_seat 取（runner 在 start_session 失败时注解）；
+                # 未注解（游戏内崩溃已由引擎处理产出正常 result，不会到这；bot_a start
+                # 失败未注解→默认 0）。
+                crashed_seat = getattr(exc, "crashed_seat", None) or 0
+                winner = 1 - crashed_seat
+                ea, eb = (-1, 1) if crashed_seat == 0 else (1, -1)
                 if m.get("match_type") == TYPE_CONTEST:
                     self.store.update_match(
                         match_id, status=STATUS_COMPLETED, reason="technical_loss",
-                        winner=1, earnings_a=-1, earnings_b=1,  # 兜底判 bot_a 崩溃（seat0 输）
+                        winner=winner, earnings_a=ea, earnings_b=eb,
                         technical_loss=1, ended_at=_now(),
                     )
-                    self._broadcast(match_id, {"type": "match_end", "winner": 1, "reason": "technical_loss"})
+                    self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "technical_loss"})
                 else:
                     self.store.update_match(
                         match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now(),

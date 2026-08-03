@@ -593,13 +593,20 @@ def tiers(game_id: str | None = None):
 @router.get("/api/levels/info")
 def levels_info():
     """经验/等级体系定义（公开，前端展示进度条用）。"""
-    from bzplat.backend.store.schema import xp_for_level
+    from bzplat.backend.store.schema import (
+        XP_COMMENT,
+        XP_CONTEST_PARTICIPATE,
+        XP_FOLLOWED,
+        XP_MATCH_PARTICIPATE,
+        XP_MATCH_WIN,
+        xp_for_level,
+    )
     return {
-        "xp_match_participate": 10,
-        "xp_match_win": 15,
-        "xp_contest_participate": 50,
-        "xp_comment": 2,
-        "xp_followed": 3,
+        "xp_match_participate": XP_MATCH_PARTICIPATE,
+        "xp_match_win": XP_MATCH_WIN,
+        "xp_contest_participate": XP_CONTEST_PARTICIPATE,
+        "xp_comment": XP_COMMENT,
+        "xp_followed": XP_FOLLOWED,
         "thresholds": [{"level": lv, "xp": xp_for_level(lv)} for lv in range(0, 11)],
     }
 
@@ -733,14 +740,15 @@ def create_comment(
 
 @router.delete("/api/comments/{comment_id}")
 def delete_comment(comment_id: int, request: Request, user=Depends(require_user)):
-    ok = _store(request).delete_comment(comment_id, user["id"])
+    store = _store(request)
+    ok = store.delete_comment(comment_id, user["id"])
     if not ok and user.get("role") != "admin":
-        # 普通用户只能删自己的；admin 可删任意（再试一次 admin 身份）
+        # 普通用户只能删自己的
         raise HTTPException(403, "无权删除该评论")
     if not ok:
-        # admin 删除（无视作者）
-        with _store(request)._tx() as c:
-            c.execute("DELETE FROM comments WHERE id=?", (comment_id,))
+        # admin 删除（无视作者）；评论不存在则 404（经 Store 方法，不穿透 _tx）
+        if not store.delete_comment_admin(comment_id):
+            raise HTTPException(404, "评论不存在")
     return {"ok": True}
 
 
@@ -954,8 +962,16 @@ def organizer_add_entry(
     if c["status"] not in ("draft", "open"):
         raise HTTPException(400, "开赛后不可改名册")
     from bzplat.backend.games import normalize_game_id
-    uid = int(body.get("user_id"))
-    bid = int(body.get("bot_id"))
+    raw_uid = body.get("user_id")
+    raw_bid = body.get("bot_id")
+    if raw_uid is None or raw_bid is None:
+        raise HTTPException(400, "user_id 与 bot_id 均不可为空")
+    try:
+        uid, bid = int(raw_uid), int(raw_bid)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "user_id / bot_id 必须是整数")
+    if not store.get_user(uid):
+        raise HTTPException(400, f"user {uid} 不存在")
     b = store.get_bot(bid)
     if not b or not b.get("is_active") or not b.get("binary_path"):
         raise HTTPException(400, "bot 不可用")
@@ -1095,9 +1111,8 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
 def open_contest(contest_id: int, request: Request, user=Depends(require_organizer)):
     c = _store(request).get_contest(contest_id)
     if not c:
-        raise HTTPException(404)
-    if c["organizer_id"] != user["id"] and user["role"] != "admin":
-        raise HTTPException(403)
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
     return {"contest": _contests(request).open_registration(contest_id)}
 
 
@@ -1136,9 +1151,8 @@ async def start_contest(
 ):
     c = _store(request).get_contest(contest_id)
     if not c:
-        raise HTTPException(404)
-    if c["organizer_id"] != user["id"] and user["role"] != "admin":
-        raise HTTPException(403)
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
     try:
         contest = await _contests(request).start(contest_id)
     except ValueError as e:
@@ -1152,9 +1166,8 @@ async def resume_contest(
 ):
     c = _store(request).get_contest(contest_id)
     if not c:
-        raise HTTPException(404)
-    if c["organizer_id"] != user["id"] and user["role"] != "admin":
-        raise HTTPException(403)
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
     try:
         contest = await _contests(request).resume(contest_id)
     except ValueError as e:
@@ -1168,9 +1181,8 @@ async def advance_contest(
 ):
     c = _store(request).get_contest(contest_id)
     if not c:
-        raise HTTPException(404)
-    if c["organizer_id"] != user["id"] and user["role"] != "admin":
-        raise HTTPException(403)
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
     try:
         contest = await _contests(request).advance(contest_id)
     except ValueError as e:
@@ -1836,6 +1848,7 @@ class TemplateBody(BaseModel):
 class TemplatePreviewBody(BaseModel):
     stages: list[dict[str, Any]]
     n: int = 8
+    game_id: str = "holdem"
 
 
 @router.get("/api/admin/templates")
@@ -1904,7 +1917,7 @@ def admin_preview_template(
 ):
     """dry-run：给定 stages + 人数 n → 各阶段 / 总场数预估。"""
     try:
-        norm_stages = [validate_stage(s, i) for i, s in enumerate(body.stages)]
+        norm_stages = [validate_stage(s, i, body.game_id) for i, s in enumerate(body.stages)]
     except ValueError as e:
         raise HTTPException(400, str(e))
     n = max(0, int(body.n))

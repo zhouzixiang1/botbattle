@@ -215,12 +215,9 @@ class ContestManager:
                 f"Bot 游戏类型 ({bot_game}) 与比赛 ({contest_game}) 不一致"
             )
 
-        entry = self.store.get_entry(contest_id, bot["owner_id"] if can_proxy else user_id)
-        # 普通用户按自己 user_id；proxy 时按 bot owner
+        # proxy（admin/organizer）按 bot owner 查 entry；普通用户 owner_id==user_id（line 207 已保证）
         owner_id = bot["owner_id"]
         entry = self.store.get_entry(contest_id, owner_id)
-        if not entry and not can_proxy:
-            entry = self.store.get_entry(contest_id, user_id)
         if not entry:
             raise ValueError("未报名本比赛")
         if entry["user_id"] != user_id and not can_proxy:

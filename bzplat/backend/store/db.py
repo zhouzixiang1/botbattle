@@ -2022,6 +2022,12 @@ class Store:
             )
             return cur.rowcount > 0
 
+    def delete_comment_admin(self, comment_id: int) -> bool:
+        """admin 强删任意评论（无视作者）；返回是否删除成功（False=评论不存在）。"""
+        with self._tx() as c:
+            cur = c.execute("DELETE FROM comments WHERE id=?", (comment_id,))
+            return cur.rowcount > 0
+
     def comment_count(self, target_type: str, target_id: str) -> int:
         with self._tx() as c:
             return int(c.execute(
