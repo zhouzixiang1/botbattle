@@ -533,6 +533,21 @@ class ContestManager:
                 rank_in_group=i + 1,
             )
 
+    def _mark_stage_pairings_done(self, contest_id: int, stage_idx: int) -> None:
+        """阶段真正完成时（_stage_done 通过后），把该 stage 已完成 match 的 pairing 标
+        status='completed'。积分逻辑只读 match，不依赖 pairing.status——但前端对阵图 /
+        管理端读 pairing.status 显示进度，原实现只在 dispatch 时设 'running'、从不收尾，
+        导致阶段完成后 pairing 永显 running。"""
+        for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx):
+            if p.get("status") == "completed":
+                continue
+            mid = p.get("match_id")
+            if not mid:
+                continue
+            m = self.store.get_match(mid)
+            if m and m["status"] in (STATUS_COMPLETED, STATUS_ABORTED):
+                self.store.update_contest_pairing(p["id"], status="completed")
+
     def _advance_participants(self, contest_id: int, stage_idx: int) -> None:
         """根据阶段配置标记淘汰（不晋级者）。"""
         c = self.store.get_contest(contest_id)
@@ -595,6 +610,7 @@ class ContestManager:
                 if await self._maybe_next_elim_round(contest_id, stage_idx, stage):
                     return None  # 生成了下一轮（半决赛/决赛），阶段未完成
 
+        self._mark_stage_pairings_done(contest_id, stage_idx)
         self._snapshot_stage_results(contest_id, stage_idx)
         rest_min = int((stages[stage_idx].get("rest_after_minutes") or 0) if stages else 0)
         has_next = stage_idx + 1 < len(stages)
@@ -622,6 +638,125 @@ class ContestManager:
         except Exception:
             logger.exception("compute official results failed contest=%s", contest_id)
         return self.store.get_contest(contest_id)
+
+    async def reconcile_running_contests(self) -> int:
+        """启动对账：让所有 running/rest 的 contest 收敛到正确终态。
+
+        解决三类「赛事卡 running」：
+        1. match 全完成但 maybe_finish 回调丢失/异常被吞（生产 contest 25）→ 直接 maybe_finish。
+        2. match 被 orphan_after_restart 清成 aborted，pairing 仍指它（生产 contest 24）→
+           reset_dead_contest_pairings 复位后重派。
+        3. pairing 建了 match 行但 _run_match 从未跑完（pending match，started_at=None）→
+           识别为死 pairing 复位重派。
+
+        maybe_finish 在 _stage_done=False 时只生成下一轮、不重派 pending pairing，
+        所以对账须在 maybe_finish 之后显式 _dispatch_pending 死而复生的 pending pairing。
+        返回处理的 contest 数。
+        """
+        # 1. 复位死 pairing（status=running 但 match 已 aborted/pending/不存在）→ pending+match_id=NULL
+        reset_n = self.store.reset_dead_contest_pairings()
+        if reset_n:
+            logger.info("启动对账：复位 %d 个死 pairing（待重派或标 aborted）", reset_n)
+
+        contests = self.store.list_contests_by_status(
+            [CONTEST_RUNNING, CONTEST_REST]
+        )
+        for c in contests:
+            cid = c["id"]
+            try:
+                await self._reconcile_one(cid)
+            except Exception:
+                # 单个 contest 对账失败不阻塞其他——但必须可见（防静默卡死再复发）
+                logger.exception("reconcile contest %s failed", cid)
+        return len(contests)
+
+    async def _reconcile_one(self, contest_id: int) -> None:
+        """对账单个 contest：maybe_finish → 重派 pending → 再 maybe_finish。"""
+        # 第一轮 maybe_finish：能 finish 的直接 finish（match 全完成的场景）
+        await self.maybe_finish(contest_id)
+        c = self.store.get_contest(contest_id)
+        if not c or c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
+            return  # 已 finish/advance
+        if c["status"] == CONTEST_REST:
+            return  # rest 期交由 _maybe_auto_resume（启动时点未到则等）
+
+        stage_idx = int(c.get("current_stage_idx") or 0)
+        # 第二轮：重派 pending 无 match_id 的 pairing（死而复生 + 新生成轮）。
+        # _dispatch_pending 内部 challenge() 可能抛 ValueError（bot 已删/不可用）——
+        # 此时该 pairing 挂一条 aborted match（_stage_done 接受 aborted），让阶段仍能推进。
+        await self._dispatch_pending_safe(contest_id, stage_idx)
+        # 第三轮：重派/标 aborted 后再 maybe_finish，让阶段真正推进
+        await self.maybe_finish(contest_id)
+
+    async def _dispatch_pending_safe(
+        self, contest_id: int, stage_idx: int
+    ) -> None:
+        """重派 pending pairing，对单个 pairing 的 bot 不可用做容错（标 aborted 而非整体崩溃）。
+
+        _dispatch_pending 是批量 dispatch，任一 pairing 的 bot 删了会抛 ValueError 中断后续。
+        此方法逐 pairing try/except：失败则给该 pairing 挂一条 aborted match
+        （reason='contest_bot_unavailable'），保证 _stage_done 仍通过。
+        """
+        c = self.store.get_contest(contest_id)
+        if not c:
+            return
+        cfg = _match_config(c)
+        gid = c.get("game_id") or "holdem"
+        pending = [
+            p
+            for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+            if p.get("status") == "pending" and not p.get("match_id")
+        ]
+        for p in pending:
+            try:
+                kw: dict = {
+                    "match_type": TYPE_CONTEST,
+                    "contest_id": contest_id,
+                    "game_id": gid,
+                }
+                kw.update({k: int(v) for k, v in cfg.items() if v is not None})
+                mid = await self.orch.challenge(
+                    p["bot_a_id"],
+                    p["bot_b_id"],
+                    owner_user_id=c["organizer_id"],
+                    **kw,
+                )
+                self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
+            except Exception as exc:
+                # bot 已删/不可用：建 aborted match 挂回 pairing，让 _stage_done 通过
+                logger.warning(
+                    "reconcile: contest=%s pairing=%s 重派失败，标记 aborted: %s",
+                    contest_id, p["id"], exc,
+                )
+                mid = self._force_aborted_match_row(
+                    c, p, reason="contest_bot_unavailable"
+                )
+                self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
+
+    def _force_aborted_match_row(self, contest: dict, pairing: dict, *, reason: str) -> str:
+        """bot 不可用时建一条 aborted match 行挂回 pairing（绕过 challenge 的 bot 校验）。
+
+        contest 对局的 bot 可能已被删（owner_id 改变/标 inactive）——challenge() 会拒。
+        但赛事要能推进，必须让该 pairing 有终态 match。用 0 占位 bot id 建行后立即标 aborted。
+        """
+        from datetime import datetime
+        import secrets
+        mid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
+        gid = (contest.get("game_id") or "holdem").lower()
+        self.store.create_match(
+            mid,
+            bot_a_id=pairing.get("bot_a_id") or 0,
+            bot_b_id=pairing.get("bot_b_id") or 0,
+            owner_id=contest.get("organizer_id"),
+            contest_id=contest["id"],
+            total_hands=1,
+            match_type=TYPE_CONTEST,
+            game_id=gid,
+        )
+        self.store.update_match(
+            mid, status=STATUS_ABORTED, reason=reason, ended_at=_now(),
+        )
+        return mid
 
     def _finalize_official_results(self, contest_id: int, stage_idx: int) -> None:
         """计算全员正式名次（破同分）并落库 contest_official_results。

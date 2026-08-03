@@ -420,7 +420,9 @@ class MatchOrchestrator:
                         if asyncio.iscoroutine(result):
                             await result
                     except Exception:
-                        logger.debug("on_match_done failed", exc_info=True)
+                        # 对局完成回调（赛事 maybe_finish）失败必须可见——
+                        # 原用 debug 级会静默吞掉，导致赛事卡 running 无从排查。
+                        logger.exception("on_match_done failed match=%s", match_id)
 
     async def _run_human_match(self, match_id: str) -> None:
         """人类 vs bot 对局：独立信号量；人类侧经 _human_turns Future 等待 WS 落子。"""

@@ -44,7 +44,7 @@ graph TB
 
 ### 1.2 运行模型
 - **单进程 uvicorn factory**（`main:create_app`），默认 `127.0.0.1:50380`。
-- **lifespan** 启动后台 asyncio 闲时自动对局任务（AutoMatchScheduler）。
+- **lifespan** 启动顺序：① `recover_orphan_matches`（把重启残留的 `running` match 标 aborted）→ ② `contest_manager.reconcile_running_contests`（**赛事状态自愈对账**：让所有 `running/rest` 的赛事收敛到正确终态——复位死 pairing、重派 pending、`maybe_finish` 推进；防「赛事卡 running」）→ ③ 起 `AutoMatchScheduler` 后台任务。
 - **并发控制**：`asyncio.Semaphore(max_concurrent)` 限制 bot 对局槽；人类对战独立 `_human_sem`（默认 4）。
 - **限流**：内存滑动窗口 IP 限流（单进程；多 worker 部署需换 Redis）。
 
@@ -59,7 +59,7 @@ graph TB
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
 | 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例 + MatchResult/RoundResult 平台契约基类[仅类型提示/测试用]）+ __init__.py（注册表单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS 模块级便捷函数）+ _board_protocol.py（棋类共享行协议工具）+ 每游戏完全自包含子包 games/<game>/（engine.py 裁判 + protocol.py 行协议 + result.py 独立结果 + tiers.py per-game 段位 + cards.py[holdem] + templates.py 赛事模板 + spec.py 装配）。GameSpec 集中声明全部固有属性，通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支**。三层冗余 shim（engine/ + protocol/ + _compat/）已删——真实现全在 games/ |
 | 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战）+ runner（起 Bot 进程，经 games 注册表路由协议）+ auto_matcher（闲时自动） |
-| 赛制 | `contests/` | templates（**9 内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板）+ stages（对阵生成）+ manager（阶段状态机）+ ranking（正式名次/破同分）+ validation |
+| 赛制 | `contests/` | templates（**9 内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板）+ stages（对阵生成）+ manager（阶段状态机 + `reconcile_running_contests` 启动自愈对账）+ ranking（正式名次/破同分）+ validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
 | 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈）+ schema.py（常量唯一来源） |
 | 认证 | `auth/` | routes + auth_manager + captcha + dependencies（require_user/admin/organizer） |
@@ -157,6 +157,7 @@ SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`
 
 ### 4.1 公开端点（无需登录，访客可用）
 - 健康：`GET /api/health`
+- **API 404 兜底**：`@app.api_route("/api/{rest:path}")`（main.py，catch-all 之前注册）——未匹配的 `/api/*` 一律 `raise HTTPException(404)` 返 JSON，**绝不走下方 SPA catch-all 返 HTML**（否则前端 `api.ts` 把 HTML 当返回值解析成静默错误数据）。非 `/api` 的未知路径仍走 SPA fallback 返 `index.html`。
 - Bot 浏览：`GET /api/bots/public`、`/api/bots/{id}`、`/profile`、`/matches`、`/opponents`、`/rating-history`
 - 用户浏览：`GET /api/users`、`/api/users/{name}/profile`、`/bots`、`/followers`、`/following`
 - 对局浏览：`GET /api/matches`、`/matches/liked-top`、`/matches/{id}`
