@@ -148,7 +148,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 f"AND {_col} NOT IN (SELECT id FROM {'bots' if _col.endswith('bot_id') or _col in ('bot_a_id', 'bot_b_id') else 'users'})"
             )
 
-    # SET NULL 类（置空保留行）：matches_*.{bot_a/b/owner} + contest_*.{bot_id}
+    # SET NULL 类（置空保留行）：matches_*.{bot_a/b/owner/contest} + contest_*.{bot_id}
     for _gid in _all_game_ids():
         _tbl = _matches_table(_gid)
         if _has(_tbl):
@@ -160,6 +160,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"UPDATE {_tbl} SET owner_id=NULL WHERE owner_id IS NOT NULL "
                 f"AND owner_id NOT IN (SELECT id FROM users)"
+            )
+            conn.execute(
+                f"UPDATE {_tbl} SET contest_id=NULL WHERE contest_id IS NOT NULL "
+                f"AND contest_id NOT IN (SELECT id FROM contests)"
             )
     for _tbl, _col in (
         ("contest_entries", "bot_id"),
