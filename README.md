@@ -6,7 +6,7 @@
 
 **对战核心**
 - 上传 **Linux ELF / Windows PE** 二进制 Bot（macOS Mach-O 拒绝），Docker 硬隔离沙箱执行
-- 四游戏独立裁判引擎 + 紧凑 JSON 行协议；**新增游戏对赛制/编排层零改动**
+- 各游戏独立裁判引擎 + 紧凑 JSON 行协议；**新增游戏对赛制/编排层零改动**
 - SSE 实时观赛 + 完整对局回放（播放/暂停/步进/倍速/逐手跳转）
 - 人类 vs Bot（WebSocket 实时交互，独立并发，不计评分）
 
@@ -86,7 +86,7 @@ export BZ_BOT_LOCAL=1
 ```
 ├── bzplat/
 │   ├── backend/          # FastAPI：games(注册表) / matches / contests / store / runtime /
-│   │                     # auth / bots / notifications / rating / mail / _compat + engine·protocol shim
+│   │                     # auth / bots / notifications / rating / mail
 │   └── frontend/         # React 19 + Vite 8 + Tailwind v4 + shadcn/ui（src/games 注册表 + canvas）
 ├── doc/                  # 甲方交付文档（6 份：总览/需求/设计/开发/测试/总结）
 ├── wiki/                 # Bot 玩家文档（规则/协议/Bot 开发指南）

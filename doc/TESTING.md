@@ -18,22 +18,22 @@
 
 ## 2. 测试范围
 
-### 2.1 后端单元/集成测试（39 个 `test_*.py`）
+### 2.1 后端单元/集成测试（52 个 `test_*.py`）
 
-配置：`pyproject.toml` 设 `testpaths=["bzplat/backend/tests","tests"]`，`pythonpath=["."]`，**须从仓库根运行 `pytest`**。  
+配置：`pyproject.toml` 设 `testpaths=["bzplat/backend/tests"]`，`pythonpath=["."]`，**须从仓库根运行 `pytest`**。
 （`tests/` 为预留路径，当前用例均在 `bzplat/backend/tests/`。）
 
 | 类别 | 测试文件 |
 |------|----------|
-| **架构契约（解耦守护）** | `test_result_contract`、`test_game_registry`、`test_import_cycles`、`test_tongyong_layer_no_game_branches`、`test_despecialization`、`test_physical_reorg` |
-| **数据层 / 迁移** | `test_store`、`test_db_migration` |
-| **认证 / 安全** | `test_auth`、`test_security_logging`、`test_logging`、`test_audit_coverage` |
+| **架构契约（解耦守护）** | `test_result_contract`、`test_game_registry`、`test_import_cycles`、`test_tongyong_layer_no_game_branches`、`test_despecialization`、`test_physical_reorg`、`test_db_layer_extensibility` |
+| **数据层 / 迁移** | `test_store`、`test_db_migration`（含 FK 全局开 + 孤儿清理 + 去重索引 + 删孤儿表） |
+| **认证 / 安全** | `test_auth`、`test_security_logging`、`test_logging`、`test_audit_coverage`（含赛事崩溃判责）、`test_real_name`、`test_no_private_bot` |
 | **引擎 / 协议** | `test_engine`、`test_board_engines`、`test_result_types`、`test_protocol`、`test_judge_params` |
 | **运行时** | `test_runtime`、`test_runtime_settings` |
-| **编排 / 人类** | `test_human_match`、`test_auto_matcher`、`test_match_seat_names`、`test_matches_pagination`（对局列表分页：`total` 返回 + offset 分页 + game_id/status 过滤计数） |
-| **赛事** | `test_contest_templates`、`test_contest_stages`、`test_contest_bracket`、`test_game_templates`、`test_admin_assign_entries` |
+| **编排 / 人类** | `test_human_match`（含 resolve_human_turn 竞态）、`test_auto_matcher`、`test_match_seat_names`、`test_matches_pagination`、`test_api_game_filter`、`test_organizer_add_entry` |
+| **赛事** | `test_contest_templates`、`test_contest_stages`、`test_contest_bracket`、`test_contest_entry_identity`、`test_contest_ranking`、`test_contest_runtime`、`test_contest_template_seed`、`test_contest_version_freeze`、`test_game_templates`、`test_admin_assign_entries`、`test_prelim_final`、`test_swiss_scale` |
 | **社交 / 通知 / 成长** | `test_notifications`、`test_comments_likes`、`test_social`、`test_user_profile_search`、`test_user_search`、`test_bot_profile`、`test_xp_level`、`test_tiers`、`test_settings_mybots` |
-| **数据与站点** | `test_matchpacks_site`、`test_load_test_seed` |
+| **数据与站点** | `test_matchpacks_site`、`test_load_test_seed`、`test_wiki_pages` |
 
 ### 2.2 大规模压测 8 阶段覆盖矩阵（`scripts/load_test.py`）
 
@@ -54,8 +54,8 @@
 
 ### 3.1 后端 pytest
 ```
-pytest --collect-only → 370+ tests collected（随游戏/功能增长）
-pytest 须从仓库根运行；39 个 test_*.py 模块
+pytest --collect-only → 446 tests collected（随游戏/功能增长）
+pytest 须从仓库根运行；52 个 test_*.py 模块
 ```
 （含人类对战、审计、安全日志、游戏注册表/结果契约/通用层无分支等守护测试。）
 
@@ -98,7 +98,7 @@ browser_verify / screenshot_verify：关键路由 + 明暗主题 + 移动端布�
 
 ### 5.2 测试结论
 **平台功能完整、架构契约有自动化守护，满足验收准则**：
-- 后端测试模块 38 个、用例规模 300+（以 `pytest --collect-only` 为准）。
+- 后端测试模块 52 个、用例规模 446（以 `pytest --collect-only` 为准）。
 - 解耦契约由专用测试守护（结果鸭子类型 / 注册表 = schema / 无反向 import / 通用层无 game 分支）。
 - 压测与浏览器脚本覆盖核心业务路径。
 - 功能需求（账号/Bot/对局/观赛/回放/人类对战/排行/赛事/社交/通知/经验/管理/数据集）均有对应测试入口。
