@@ -197,28 +197,21 @@ export default function HumanPlay() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="space-y-3">
-          {gameId === 'gomoku' && (
+          {/* 棋类（board kind）：统一点击落子交互，消除 per-game gameId=== 分支 */}
+          {isBoard && (
             <MatchBoard
-              gameId="gomoku"
+              gameId={gameId}
               events={events}
               seats={seats}
               onMove={(x, y) => sendMove({ x, y })}
               interactive={myTurn}
             />
           )}
-          {gameId === 'pencil' && (
-            <MatchBoard
-              gameId="pencil"
-              events={events}
-              seats={seats}
-              onMove={(x, y) => sendMove({ x, y })}
-              interactive={myTurn}
-            />
-          )}
-          {gameId === 'holdem' && (
+          {/* 扑克（cards kind）：牌桌 + 动作面板 */}
+          {!isBoard && (
             <div className="relative">
               <MatchBoard
-                gameId="holdem"
+                gameId={gameId}
                 events={events}
                 seats={seats}
                 revealMode="showdown"
@@ -230,9 +223,6 @@ export default function HumanPlay() {
                 onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
               />
             </div>
-          )}
-          {!isBoard && gameId !== 'holdem' && (
-            <p className="text-sm text-muted-foreground">未知游戏：{match?.game_id}</p>
           )}
         </div>
 

@@ -3,6 +3,7 @@
  * 复用 reduceGomokuEvents（不重写归约）；棋子落子缩放+淡入动画；最后一手标记脉冲。
  */
 import type { RawEvent } from '@/games/base'
+import { getGame } from '@/games'
 import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
 
@@ -93,8 +94,9 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     ctx.fillStyle = '#5b4413'
     ctx.font = 'bold 15px "DM Sans", sans-serif'
     ctx.textAlign = 'left'
-    const name0 = seatShort(opts.seats?.[0], '黑')
-    const name1 = seatShort(opts.seats?.[1], '白')
+    const sc = getGame('gomoku').seatColors ?? ['黑', '白']
+    const name0 = seatShort(opts.seats?.[0], sc[0] ?? '黑')
+    const name1 = seatShort(opts.seats?.[1], sc[1] ?? '白')
     const turnLabel = next.matchOver
       ? (next.winner === null
         ? '平局'

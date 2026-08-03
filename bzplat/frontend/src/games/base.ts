@@ -60,6 +60,12 @@ export interface GameViewSpec {
   defaultMatchConfig: Record<string, number>
   /** 可调对局参数字段（取代散落配置 UI 分支） */
   configFields: MatchConfigField[]
+  /** 座位着色（如 gomoku=['黑','白'], pencil=['红','蓝']）—— 取代渲染层按游戏名分支 */
+  seatColors?: string[]
+  /** 进度单位：hand=手数(扑克), move=步数(棋类) —— 取代 Home 等页面的游戏名分支 */
+  progressUnit: 'hand' | 'move'
+  /** 是否在顶栏显示比分（如 pencil=true，其余 false）—— 取代 MatchViewer 游戏名分支 */
+  showScores?: boolean
 }
 
 /** Board 组件统一 props（各游戏 Board 须兼容）。 */
