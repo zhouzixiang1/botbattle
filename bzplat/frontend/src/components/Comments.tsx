@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { cn } from '@/lib/utils'
+import { fmtTime } from '@/lib/format'
 
 interface Comment {
   id: number
@@ -139,7 +140,7 @@ export default function Comments({
                     <span className="text-muted-foreground">已注销</span>
                   )}
                   <span className="text-xs text-muted-foreground">
-                    {c.created_at?.replace('T', ' ').slice(0, 16)}
+                    {fmtTime(c.created_at)}
                   </span>
                   {user && (user.id === c.user_id || user.role === 'admin') && (
                     <button

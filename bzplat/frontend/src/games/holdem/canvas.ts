@@ -24,6 +24,22 @@ const R = 190, L = 230, CARD_SIZE = 100
 const POINT = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 const SUIT_BY_CODE: Record<string, 'h' | 'd' | 's' | 'c'> = { h: 'h', d: 'd', s: 's', c: 'c' }
 
+/**
+ * 按当前 ctx 字体测量文本宽度，超出 maxWidth 时尾部加「…」截断。
+ * 用于 canvas 内固定布局区域（座位名/胜者/底池等），防止长文本越出牌桌椭圆或与相邻元素重叠。
+ */
+function fitText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (ctx.measureText(text).width <= maxWidth) return text
+  // 二分找最长前缀（保留 1 字符给「…」）
+  let lo = 1, hi = text.length, ans = 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (ctx.measureText(text.slice(0, mid) + '…').width <= maxWidth) { ans = mid; lo = mid + 1 }
+    else hi = mid - 1
+  }
+  return text.slice(0, ans) + '…'
+}
+
 interface HoldemScene extends Scene {
   hand: number
   chips: [number, number]
@@ -139,14 +155,16 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     ctx.fillStyle = '#0f5132'
     ctx.fill()
 
-    // 左侧信息：手数/轮/底池（随 t 插值底池）
+    // 左侧信息：手数/轮/底池（随 t 插值底池）—— 截断到大底池时不顶到座位筹码区
     const pot = prev && prev.pot !== next.pot ? Math.round(prev.pot + (next.pot - prev.pot) * t) : next.pot
     ctx.font = 'bold 16px "DM Sans", sans-serif'
     ctx.fillStyle = '#fff'
     ctx.textAlign = 'left'
-    ctx.fillText(`第 ${(next.hand || 0) + 1} 手`, X(-1.4), H / 2 - 35)
-    ctx.fillText(`轮: ${next.street}`, X(-1.4), H / 2)
-    ctx.fillText(`底池: ${pot}`, X(-1.4), H / 2 + 35)
+    // 左侧文字可用宽度：从 X(-1.4) 到座位左缘 X(-0.75)-半座位宽
+    const leftMaxW = X(-0.75) - 70 - X(-1.4)
+    ctx.fillText(fitText(ctx, `第 ${(next.hand || 0) + 1} 手`, leftMaxW), X(-1.4), H / 2 - 35)
+    ctx.fillText(fitText(ctx, `轮: ${next.street}`, leftMaxW), X(-1.4), H / 2)
+    ctx.fillText(fitText(ctx, `底池: ${pot.toLocaleString('en-US')}`, leftMaxW), X(-1.4), H / 2 + 35)
 
     // 座位（上=座1, 下=座0）
     drawSeat(ctx, X(-0.75), Y0, 1, next, prev, t, opts.seats)
@@ -197,10 +215,10 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       for (const idx of [0, 1] as const) {
         const d = next.handDeltas[idx]
         const yy = idx === 0 ? Y1 - 70 : Y0 - 70
-        const txt = d > 0 ? `赢得 ${d}` : d < 0 ? `输掉 ${-d}` : '不赚不亏'
+        const txt = d > 0 ? `赢得 ${d.toLocaleString('en-US')}` : d < 0 ? `输掉 ${(-d).toLocaleString('en-US')}` : '不赚不亏'
         ctx.fillStyle = d > 0 ? 'rgba(52,211,153,0.95)' : d < 0 ? 'rgba(248,113,113,0.95)' : 'rgba(255,255,255,0.85)'
         ctx.globalAlpha = Math.min(1, t * 1.2)
-        ctx.fillText(txt, X(0.75), yy)
+        ctx.fillText(fitText(ctx, txt, 180), X(0.75), yy)
       }
       ctx.restore()
     }
@@ -219,7 +237,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       }
       ctx.fillText('对局结束', X(0), H / 2 - R - 36)
       ctx.font = 'bold 20px "DM Sans", sans-serif'
-      ctx.fillText(winnerTxt, X(0), H / 2 - R - 8)
+      ctx.fillText(fitText(ctx, winnerTxt, 360), X(0), H / 2 - R - 8)
       ctx.restore()
     }
   },
@@ -262,18 +280,19 @@ function drawSeat(
   }
   ctx.fillStyle = '#fff'; ctx.font = 'bold 16px "DM Sans"'
   ctx.fillText(initial, x - 25, y - 45 + 25 + 5)
-  // 名字（两行：BOT名 + @用户名）
+  // 名字（两行：BOT名 + @用户名）—— 测量后按座位宽度截断，防止长名越出牌桌
   ctx.fillStyle = isMatchWinner ? 'rgba(255,238,88,0.98)' : '#fff'
   ctx.font = 'bold 13px "DM Sans"'
   if (isToAct) ctx.fillText('👉', x - 45, y - 12)
-  ctx.fillText(name, x, y + 18)
+  ctx.textAlign = 'center'
+  ctx.fillText(fitText(ctx, name, 130), x, y + 18)
   ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '11px "DM Sans"'
   const ownerLine = info?.isHuman
     ? `@${info?.ownerName || '人类'}（你）`
     : info?.ownerName
       ? `@${info.ownerName}`
       : `座位 ${idx}`
-  ctx.fillText(ownerLine, x, y + 34)
+  ctx.fillText(fitText(ctx, ownerLine, 130), x, y + 34)
   // 本轮剩余筹码 + 累计净筹码（旧 PokerTable 底部「累计」搬到座位旁）
   ctx.fillStyle = '#fff'; ctx.font = 'bold 13px "DM Sans"'
   ctx.fillText(`筹码 ${chips.toLocaleString('en-US')}`, x, y + 50)
@@ -369,6 +388,7 @@ function drawActionFloat(
   ctx.font = 'bold 22px "DM Sans"'
   ctx.fillStyle = `rgba(255,238,88,${1 - ty})`
   ctx.shadowColor = 'black'; ctx.shadowBlur = 10
-  ctx.fillText(action.amount ? `${txt} ${action.amount}` : txt, x, y - 20 - 10 * ty)
+  const actionTxt = action.amount ? `${txt} ${action.amount.toLocaleString('en-US')}` : txt
+  ctx.fillText(fitText(ctx, actionTxt, 180), x, y - 20 - 10 * ty)
   ctx.restore()
 }

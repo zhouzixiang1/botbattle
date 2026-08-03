@@ -58,13 +58,13 @@ export default function Admin() {
 
   return (
     <PageStub title="管理端">
-      <div className="mb-5 flex flex-wrap gap-1 border-b border-border">
+      <div className="mb-5 flex gap-1 overflow-x-auto border-b border-border">
         {TABS.map((t) => (
           <button
             key={t.key}
             type="button"
             onClick={() => setTab(t.key)}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition ${
+            className={`-mb-px shrink-0 whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium transition ${
               tab === t.key
                 ? 'border-primary text-primary'
                 : 'border-transparent text-muted-foreground hover:border-input hover:text-foreground'
