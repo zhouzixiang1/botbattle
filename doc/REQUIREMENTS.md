@@ -59,9 +59,9 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 ### 3.5 赛事系统
 | 需求 | 验收标准 |
 |------|---------|
-| 赛制模板 | 6 种阶段（单/双循环、分组单/双循环、瑞士、单败淘汰）+ 2 种计分 + 7 内置模板 |
-| 赛事生命周期 | draft→open→running→(rest)→finished，组织者可 open/register/dispatch/start/resume/advance |
-| 积分榜与对阵图 | 实时积分榜 + 单败淘汰 bracket 树 + 瑞士/循环轮次分组，显示 Bot 名（非裸 ID） |
+| 赛制模板 | 6 种阶段（单/双循环、分组单/双循环、瑞士、单败淘汰）+ 2 种计分 + **9 内置模板**（含 `holdem_prelim_swiss` 预赛 / `holdem_final_ranked` 决赛等） |
+| 赛事生命周期 | draft→open→running→(rest)→finished，组织者可 open/register/dispatch/start/resume/advance；模板可带 `phase`（`preliminary`/`final`/`standalone`） |
+| 积分榜与对阵图 | 实时积分榜 + 单败淘汰 bracket 树 + 瑞士/循环轮次分组，显示 Bot 名（非裸 ID）；阶段结束可落**正式名次**（破同分，`contests/ranking.py`） |
 | 休息期换 Bot | 阶段间休息期允许选手更换派遣 Bot |
 
 ### 3.6 社交与互动

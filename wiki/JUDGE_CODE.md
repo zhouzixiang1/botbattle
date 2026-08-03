@@ -53,22 +53,23 @@ games.registry.get(game_id).run_session(decide, **params)
 
 - HU NLHE；盲注 SB/BB 交替；`raise` 为 raise-to-total；min re-raise-to ≥ 2× 上一 raise-to。
 - 非法着 / 超时 / 可恢复决策错误 → fold；all-in 后直接发出剩余公共牌结算。
-- **进程崩溃 / EOF（`BotCrashedError`）** → 整场对局 `aborted`（`reason=bot_crashed`），不是继续 fold。
-- `MatchSession` 一手 = 一轮，按手数循环，最终按筹码差判胜。
+- **对局中途进程崩溃 / EOF（`BotCrashedError`）** → 引擎内**计分判负**（崩溃方本手全筹码给对手，对局 `completed`，`reason=crash`），不是继续 fold 跑完。
+- **启动失败**由编排层处理：非赛事 `aborted`（`bot_crashed`）；赛事 `technical_loss` completed。
+- `MatchSession` 一手 = 一轮，按手数循环，最终按累计净筹码判胜。
 
 ### 五子棋（`games/gomoku/engine.py`）
 
 - 15×15（可调 9–19）；黑先（seat 0）；横/竖/斜连续 ≥5 含长连即胜；无禁手。
 - 非法着 / 超时 → 判负；棋盘下满无人成五 → 平局。
-- 进程崩溃 → 整场 `aborted`（`bot_crashed`）。
+- 对局中途进程崩溃 → 计分判负（对手胜，`reason=crash`）。
 - 长驻行协议：请求 `{"v":1,"t":"mv","x","y","me"}`，响应 `{"x","y"}`。
 
 ### 点格棋（`games/pencil/engine.py`）
 
-- N=11 点阵 → 交错网格 size=2N-1；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
+- 默认 **N=6** 点阵 → 交错网格 size=2N-1=11；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
 - pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"x":-1,"y":-1}` 把回合交还。
-- 非法着 / 超时 → 判负；进程崩溃 → 整场 `aborted`。
+- 非法着 / 超时 → 判负；对局中途进程崩溃 → 计分判负（`reason=crash`）。
 
 ## 改动裁判代码
 
-裁判规则逻辑的修改（非参数）需改 `games/<game>/engine.py`（及相关 protocol/result）源码，按仓库规范：从 `main` 切特性分支 → 改 → 测试（`pytest`）→ GitHub PR 合并 → 删分支。**不要**改 `engine/` shim 冒充实现。Web 上不提供代码编辑能力。
+裁判规则逻辑的修改（非参数）需改 `games/<game>/engine.py`（及相关 protocol/result）源码，按仓库规范：从 `main` 切特性分支 → 改 → 测试（`pytest`）→ GitHub PR 合并 → 删分支。真实现全在 `games/`（旧 `engine/` 包已删除）。Web 上不提供代码编辑能力。

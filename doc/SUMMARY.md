@@ -54,7 +54,7 @@
 ### 2.4 后续演进（#27 之后，节选）
 | 主题 | 说明 |
 |------|------|
-| 全面解耦 | `games/` GameSpec 注册表、per-game matches 表、engine/protocol 降为 shim |
+| 全面解耦 | `games/` GameSpec 注册表、per-game matches 表；旧 `engine/`/`protocol/`/`_compat/` shim **已删除**，真实现全在 `games/` |
 | canvas 观赛 | 三游戏 canvas + GSAP；统一 MatchViewer |
 | 安全与日志 | access/audit 三文件日志、限流与审计埋点 |
 | 赛事修复 | 瑞士/淘汰多轮推进等（赛事压测发现） |

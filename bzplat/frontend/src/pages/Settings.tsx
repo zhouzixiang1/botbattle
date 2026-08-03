@@ -53,6 +53,7 @@ export default function Settings() {
   })
   // favorites
   const [favs, setFavs] = useState<FavBot[]>([])
+  const [avatarFileName, setAvatarFileName] = useState('')
 
   useEffect(() => {
     apiGet<{ prefs: Prefs }>('/api/notification-prefs')
@@ -87,6 +88,7 @@ export default function Settings() {
 
   function uploadAvatar(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]
+    setAvatarFileName(f?.name || '')
     if (!f) return
     setError(''); setMsg('')
     const fd = new FormData()
@@ -154,12 +156,16 @@ export default function Settings() {
                     {(user.display_name || user.username).charAt(0).toUpperCase()}
                   </AvatarFallback>
                 </Avatar>
-                <Input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  onChange={uploadAvatar}
-                  className="max-w-xs text-xs text-muted-foreground"
-                />
+                <label className="inline-flex max-w-xs cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-accent">
+                  <span className="shrink-0 font-medium text-foreground">选择文件</span>
+                  <span className="min-w-0 truncate">{avatarFileName || '未选择文件'}</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    onChange={uploadAvatar}
+                    className="sr-only"
+                  />
+                </label>
               </div>
               <p className="text-xs text-muted-foreground">png/jpeg/webp/gif，≤2MB</p>
             </div>

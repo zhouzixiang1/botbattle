@@ -62,6 +62,24 @@ bash scripts/rebuild.sh   # npm run build → platform-ctl.sh restart
 ```
 > 前端产物（`dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——**不 rebuild + restart 代码不生效**（常见症状：新路由 405）。
 
+### 2.4 worktree 隔离开发（勿碰线上 50380）
+
+主目录 `main` 只跑线上服务（默认 `:50380` + 主库）。特性开发在 **git worktree** 中跑**独立**栈，避免污染线上 db/源码：
+
+```bash
+# 1) 后端：CWD=worktree，端口勿用 50380
+cd .worktrees/<分支名>
+python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50381
+
+# 2) 前端：proxy 必须指向 worktree 后端
+cd .worktrees/<分支名>/bzplat/frontend
+BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
+```
+
+- **严禁**前端 `BZ_API_TARGET` 指向 50380（测试写入线上 db）。
+- **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
+- 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
+
 ## 3. 编码规范
 
 | 规范 | 要求 |

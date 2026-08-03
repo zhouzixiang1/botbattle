@@ -144,7 +144,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return _AUTH_STRICT
         if path == "/api/auth/captcha":
             return _CAPTCHA_LIMIT
-        if path == "/api/bots/upload" or path.endswith("/upload"):
+        # Bot 上传：POST /api/bots（新建）与 POST /api/bots/{id}/versions（新版本）
+        if method == "POST" and (
+            path == "/api/bots"
+            or (path.startswith("/api/bots/") and path.endswith("/versions"))
+        ):
             return _UPLOAD_STRICT
         if path == "/api/matches/challenge":
             return _CHALLENGE_STRICT

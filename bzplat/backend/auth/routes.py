@@ -14,7 +14,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .auth_manager import COOKIE_NAME, AuthError, AuthManager
 from .captcha import CAPTCHA_TTL_SEC, CaptchaStore, png_to_data_url
@@ -62,6 +62,16 @@ class ProfileUpdateReq(BaseModel):
     phone: str | None = Field(None, max_length=20)
     school: str | None = Field(None, max_length=64)
     student_id: str | None = Field(None, max_length=32)
+
+    @field_validator("display_name")
+    @classmethod
+    def display_name_no_angle_brackets(cls, v: str | None) -> str | None:
+        """禁止 <> 等尖括号，避免侧栏/主页脏显示名（转义安全但体验差）。"""
+        if v is None:
+            return v
+        if "<" in v or ">" in v:
+            raise ValueError("显示名不能包含 < 或 > 字符")
+        return v
 
 
 class RequestResetReq(BaseModel):

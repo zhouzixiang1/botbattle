@@ -20,6 +20,20 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import BracketTree from '@/components/contest/BracketTree'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
+import { gameLabel } from '@/lib/games'
+
+const STAGE_TYPE_LABEL: Record<string, string> = {
+  swiss: '瑞士轮',
+  round_robin: '单循环',
+  double_round_robin: '双循环',
+  group_round_robin: '分组单循环',
+  group_double_round_robin: '分组双循环',
+  single_elimination: '单败淘汰',
+}
+const SCORING_LABEL: Record<string, string> = {
+  poker_3_1_0: '计分 3/1/0',
+  ccgc_2_1_0: '计分 2/1/0',
+}
 
 interface Contest {
   id: number
@@ -29,6 +43,8 @@ interface Contest {
   organizer_id: number
   hands_per_match?: number
   template_id?: string
+  /** 可选：后端/模板表解析出的可读名 */
+  template_name?: string
   game_id?: string
   stages_json?: string
   current_stage_idx?: number
@@ -204,13 +220,19 @@ export default function ContestDetail() {
       <Card>
         <CardContent className="py-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-lg font-semibold text-foreground">{contest.title}</h2>
-              <p className="mt-1 text-sm text-muted-foreground">{contest.description || '无说明'}</p>
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <h2 className="break-words text-lg font-semibold text-foreground [overflow-wrap:anywhere]">
+                {contest.title}
+              </h2>
+              <p className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
+                {contest.description || '无说明'}
+              </p>
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <StatusBadge status={contest.status} />
-                <span>模板 {contest.template_id}</span>
-                <span>· 游戏 {contest.game_id || 'holdem'}</span>
+                <span className="max-w-full truncate" title={contest.template_id || undefined}>
+                  模板 {contest.template_name || contest.template_id || '—'}
+                </span>
+                <span>· 游戏 {gameLabel(contest.game_id || 'holdem')}</span>
                 <span>· 每场 {contest.hands_per_match ?? 70} 手</span>
                 {estimate?.estimated_matches != null && (
                   <Badge variant="outline" className="text-[10px]">预估 {estimate.estimated_matches} 场</Badge>
@@ -307,19 +329,19 @@ export default function ContestDetail() {
         </Tabs>
       )}
 
-      {/* 阶段配置 */}
+      {/* 阶段配置（中文可读化，避免 raw type/scoring 字符串） */}
       {stages[stageTab] && (
-        <div className="mt-2 rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+        <div className="mt-2 break-words rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">本阶段配置：</span>
           {[
-            stages[stageTab].type,
-            stages[stageTab].scoring,
-            stages[stageTab].group_count ? `分组=${stages[stageTab].group_count}` : null,
-            stages[stageTab].rounds !== undefined ? `轮数=${stages[stageTab].rounds}` : null,
-            stages[stageTab].advance_count ? `晋级=${stages[stageTab].advance_count}` : null,
-            stages[stageTab].advance_per_group ? `每组晋级=${stages[stageTab].advance_per_group}` : null,
-            stages[stageTab].rest_after_minutes ? `休息=${stages[stageTab].rest_after_minutes}分` : null,
-            stages[stageTab].allow_bot_swap_in_rest ? '休息可换Bot' : null,
+            STAGE_TYPE_LABEL[stages[stageTab].type || ''] || stages[stageTab].type,
+            SCORING_LABEL[stages[stageTab].scoring || ''] || stages[stageTab].scoring,
+            stages[stageTab].group_count ? `分组 ${stages[stageTab].group_count}` : null,
+            stages[stageTab].rounds !== undefined ? `轮数 ${stages[stageTab].rounds}` : null,
+            stages[stageTab].advance_count ? `晋级 ${stages[stageTab].advance_count}` : null,
+            stages[stageTab].advance_per_group ? `每组晋级 ${stages[stageTab].advance_per_group}` : null,
+            stages[stageTab].rest_after_minutes ? `休息 ${stages[stageTab].rest_after_minutes} 分` : null,
+            stages[stageTab].allow_bot_swap_in_rest ? '休息可换 Bot' : null,
           ].filter(Boolean).join(' · ')}
         </div>
       )}

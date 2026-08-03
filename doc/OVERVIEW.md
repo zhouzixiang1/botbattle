@@ -12,7 +12,7 @@
 |------|---------|---------|
 | 德州扑克（HU NLHE） | `holdem` | 70 手、20000 筹码、50/100 盲注、raise-to-total 语义 |
 | 五子棋 | `gomoku` | 15×15、黑先、五连即胜（含长连）、无禁手 |
-| 点格棋（Dots and Boxes） | `pencil` | N=11 点（交错网格 21×21）、成格连走计分 |
+| 点格棋（Dots and Boxes） | `pencil` | 默认 N=6 点（交错网格 11×11、25 格）、成格连走计分 |
 
 ## 2. 核心能力一览
 
@@ -24,7 +24,7 @@
 | **对局回放** | 完整事件录制，支持播放/暂停/步进/倍速/逐手跳转 |
 | **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场（独立并发，不计评分） |
 | **Glicko-2 排行榜** | 自实现评分系统，按游戏分别排名；含段位称号（6 档）与排名变化趋势 |
-| **赛事系统** | 6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰），完整生命周期（草稿→报名→进行→休息→结束），积分榜 + 对阵图 |
+| **赛事系统** | 6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰）+ 9 内置模板（含预赛/决赛），完整生命周期（草稿→报名→进行→休息→结束），积分榜 + 对阵图 + 正式名次 |
 | **社交与互动** | 关注用户、收藏 Bot、对局/Bot 评论、点赞、浏览计数、点赞榜 |
 | **通知系统** | 站内通知 + 可选邮件提醒（对局完成/被关注/赛事/评论） |
 | **用户体系** | 注册/登录/邮箱验证、个人主页、资料编辑、头像、经验与等级（等级 gating 部分功能） |
@@ -62,7 +62,7 @@ botbattle/
 │   │   ├── store/             # SQLite（Store + schema.py 常量唯一来源；matches 按游戏分表）
 │   │   ├── runtime/           # 沙箱 BinaryRunner（docker/wine/local）+ limits 资源硬顶
 │   │   ├── matches/           # 编排 orchestrator + runner + auto_matcher
-│   │   ├── contests/          # 赛制 templates/stages/manager（模板由 games 聚合）
+│   │   ├── contests/          # 赛制 templates/stages/manager/ranking（模板由 games 聚合）
 │   │   ├── notifications/     # 站内通知 + 邮件偏好
 │   │   ├── bots/ rating/ mail/
 │   │   ├── security.py / logging_config.py / crypto.py / cli.py
@@ -70,9 +70,8 @@ botbattle/
 │   └── frontend/              # React 19 + Vite 8 + Tailwind v4 + shadcn/ui
 │       └── src/
 │           ├── components/ui/     # 26 个 shadcn 共享原语
-│           ├── components/shell/  # 全局 Shell + 导航 + Cmd+K
-│           ├── components/{poker,gomoku,pencil}/  # 事件 reducer / 状态（canvas 场景源）
-│           ├── games/             # 前端 GameViewSpec 注册表 + 每游戏 canvas 渲染
+│           ├── components/shell/  # 全局 Shell + 导航 + Cmd+K（lg+ 侧栏，含访客）
+│           ├── games/             # 前端 GameViewSpec 注册表 + 每游戏 canvas/reducer
 │           ├── pages/             # 22 个 lazy 页面模块（含 admin）
 │           └── lib/               # tiers / utils / markdown 等
 ├── doc/                       # 本目录：面向甲方的交付文档（6 份）

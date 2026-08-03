@@ -79,16 +79,17 @@ export default function Leaderboard() {
     >
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
-      <Card>
-        <Table>
+      <Card className="overflow-hidden">
+        <div className="overflow-x-auto">
+        <Table className="min-w-[28rem]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">#</TableHead>
-              <TableHead>Bot</TableHead>
+              <TableHead className="min-w-[7rem]">Bot</TableHead>
               <TableHead className="hidden md:table-cell">游戏</TableHead>
               <TableHead className="hidden lg:table-cell">所有者</TableHead>
-              <TableHead>段位</TableHead>
-              <TableHead>Rating</TableHead>
+              <TableHead className="whitespace-nowrap">段位</TableHead>
+              <TableHead className="whitespace-nowrap">Rating</TableHead>
               <TableHead className="hidden sm:table-cell">战绩</TableHead>
               <TableHead className="hidden xl:table-cell">平台</TableHead>
             </TableRow>
@@ -115,10 +116,11 @@ export default function Leaderboard() {
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {i + 1}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="max-w-[10rem]">
                       <Link
                         to={`/bot/${r.bot_id}`}
-                        className="font-medium text-foreground hover:text-primary"
+                        className="block truncate font-medium text-foreground hover:text-primary"
+                        title={r.bot_display || r.bot_name || `#${r.bot_id}`}
                       >
                         {r.bot_display || r.bot_name || `#${r.bot_id}`}
                       </Link>
@@ -144,8 +146,8 @@ export default function Leaderboard() {
                     <TableCell>
                       <TierBadge rating={r.rating} label={r.tier_name} gameId={r.game_id} tierKey={r.tier_key} />
                     </TableCell>
-                    <TableCell>
-                      <span className="font-mono font-semibold text-primary">
+                    <TableCell className="whitespace-nowrap">
+                      <span className="font-mono font-semibold text-primary tabular-nums">
                         {Number(r.rating).toFixed(1)}
                       </span>
                       {td && (
@@ -180,6 +182,7 @@ export default function Leaderboard() {
             )}
           </TableBody>
         </Table>
+        </div>
       </Card>
     </PageStub>
   )
