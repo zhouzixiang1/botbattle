@@ -8,7 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -191,6 +191,12 @@ def create_app(
             logger.warning(
                 "启动清理孤儿对局 %d 场（标记为 aborted）", recovered
             )
+        # 启动对账：让 running/rest 的赛事收敛到正确终态。
+        # 修复「赛事卡 running」——match 全完成但 maybe_finish 回调丢失/被吞、或 match 被
+        # orphan 清成 aborted 但赛事状态未同步。详见 ContestManager.reconcile_running_contests。
+        reconciled = await contest_manager.reconcile_running_contests()
+        if reconciled:
+            logger.info("启动对账 %d 场赛事状态收敛", reconciled)
         task = asyncio.create_task(auto_matcher.loop(), name="auto-match")
         _app.state.auto_matcher = auto_matcher
         _app.state._auto_match_task = task
@@ -234,6 +240,17 @@ def create_app(
             "max_concurrent": orch.max_concurrent,
             "ceiling": concurrent_ceiling(),
         }
+
+    # /api/* 未匹配路由一律返 JSON 404，绝不走下方 SPA catch-all（否则客户端收到
+    # 200 + index.html，前端 api.ts 会把 HTML 当返回值解析成静默错误数据）。
+    # 必须在 catch-all（/{full_path:path}）之前注册；放 if dist.is_dir() 块外，
+    # 保证 dev 模式（无 dist）也一致返 JSON 404。
+    @app.api_route(
+        "/api/{rest:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    )
+    def api_not_found(rest: str):
+        raise HTTPException(404, "Not Found")
 
     # 静态前端
     dist = Path(__file__).resolve().parents[1] / "frontend" / "dist"

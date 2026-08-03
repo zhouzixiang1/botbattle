@@ -1878,6 +1878,56 @@ class Store:
                     n += cnt
             return n
 
+    def reset_dead_contest_pairings(self) -> int:
+        """启动对账辅助：把 contest_pairings 里 status='running' 但对应 match 已终态
+        非 completed（aborted/orphan 或不存在）的 pairing，重置为 status='pending' +
+        match_id=NULL，供 ContestManager.maybe_finish/_dispatch_pending 重派。
+
+        completed 的 pairing 不动（保留真实比赛结果，防误伤）。
+        对应 recover_orphan_matches 把 running match 标 aborted 后的赛事善后——
+        那些赛事 pairing 仍指 aborted match（_stage_done 不通过 pairing 状态判，而是
+        读 match.status，但 _dispatch_pending 只挑 status=pending 且无 match_id 的重派，
+        所以 status=running+match_id=aborted 的死 pairing 永远不会被重派 → 赛事卡死）。
+        返回重置行数。
+        """
+        from bzplat.backend.store.schema import STATUS_COMPLETED
+
+        n = 0
+        # 收集每个游戏表里「已终态非 completed」的 match_id（按 match_id 反查 pairing）。
+        # contest_pairings.match_id 跨游戏共享同一 id 空间（create_match 用全局时间戳+hex）。
+        with self._tx() as c:
+            dead_match_ids: set[str] = set()
+            for gid in _all_game_ids():
+                tbl = _matches_table(gid)
+                for row in c.execute(
+                    f"SELECT id FROM {tbl} WHERE status != ?", (STATUS_COMPLETED,)
+                ):
+                    dead_match_ids.add(str(row["id"]))
+            if not dead_match_ids:
+                return 0
+            placeholders = ",".join("?" for _ in dead_match_ids)
+            cur = c.execute(
+                "UPDATE contest_pairings SET status='pending', match_id=NULL "
+                f"WHERE status='running' AND match_id IS NOT NULL "
+                f"AND match_id IN ({placeholders})",
+                tuple(dead_match_ids),
+            )
+            n = int(cur.rowcount or 0)
+            return n
+
+    def list_contests_by_status(self, statuses: list[str]) -> list[dict]:
+        """返回 status 在给定集合内的 contest（启动对账 reconcile_running_contests 用）。"""
+        if not statuses:
+            return []
+        with self._tx() as c:
+            placeholders = ",".join("?" for _ in statuses)
+            rows = c.execute(
+                f"SELECT * FROM contests WHERE status IN ({placeholders}) "
+                "ORDER BY id",
+                tuple(statuses),
+            ).fetchall()
+            return [_row(r) for r in rows]
+
     def upsert_rating(
         self,
         bot_id: int,
