@@ -12,12 +12,11 @@ import type { GameViewSpec } from './base'
 import { holdemSpec } from './holdem'
 import { gomokuSpec } from './gomoku'
 import { pencilSpec } from './pencil'
-import { reversiSpec } from './reversi'
 
 export type { GameViewSpec, MatchConfigField, BoardProps } from './base'
 
 /** 全部已注册游戏规格。 */
-export const GAMES: GameViewSpec[] = [holdemSpec, gomokuSpec, pencilSpec, reversiSpec]
+export const GAMES: GameViewSpec[] = [holdemSpec, gomokuSpec, pencilSpec]
 
 /** 合法 GameId 联合（从注册表派生）。 */
 export type GameId = (typeof GAMES)[number]['id']

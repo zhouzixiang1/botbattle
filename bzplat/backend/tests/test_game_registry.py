@@ -37,8 +37,7 @@ from bzplat.backend.store import schema
 
 # ── 注册表一致性 ──────────────────────────────────────────────
 def test_registry_has_all_games():
-    """注册表含全部已注册游戏（PR7 起含第 4 款 reversi）。"""
-    assert registry.all_ids() == frozenset({"holdem", "gomoku", "pencil", "reversi"})
+    assert registry.all_ids() == frozenset({"holdem", "gomoku", "pencil"})
 
 
 def test_schema_frozensets_match_registry():
@@ -58,7 +57,6 @@ def test_is_registered():
 
 def test_game_labels_derived_from_registry():
     """GAME_LABELS 从注册表派生（不再手写字典）。"""
-    assert GAME_LABELS == {"holdem": "德州扑克", "gomoku": "五子棋", "pencil": "点格棋", "reversi": "黑白棋"}
     # 与各 spec.label 一致
     for gid in registry.all_ids():
         assert GAME_LABELS[gid] == registry.get(gid).label
@@ -242,7 +240,7 @@ def test_normalize_earnings_per_game():
 def test_judge_games_derived():
     games = registry.judge_games()
     ids = {g["game_id"] for g in games}
-    assert ids == {"holdem", "gomoku", "pencil", "reversi"}
+    assert ids == {"holdem", "gomoku", "pencil"}
     # holdem 有 4 个裁判参数
     holdem = next(g for g in games if g["game_id"] == "holdem")
     assert len(holdem["params"]) == 4
@@ -252,9 +250,6 @@ def test_judge_games_derived():
     # pencil 0 个（n_dots 走 match 列）
     pencil = next(g for g in games if g["game_id"] == "pencil")
     assert len(pencil["params"]) == 0
-    # reversi 0 个（第 4 游戏，无全局 judge 参数）
-    reversi = next(g for g in games if g["game_id"] == "reversi")
-    assert len(reversi["params"]) == 0
 
 
 def test_judge_param_table():
