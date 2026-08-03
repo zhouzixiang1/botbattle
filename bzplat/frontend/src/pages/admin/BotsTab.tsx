@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
+import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Tooltip, TooltipContent, TooltipTrigger } from './ui'
+import { useConfirm } from '@/hooks/use-confirm'
 
 interface Bot {
   id: number
@@ -29,6 +30,7 @@ interface Version {
 }
 
 export default function BotsTab() {
+  const [confirm, confirmDialog] = useConfirm()
   const [bots, setBots] = useState<Bot[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -68,7 +70,12 @@ export default function BotsTab() {
   }
 
   const del = async (id: number) => {
-    if (!confirm(`确认删除 Bot #${id}？同时删除其版本与文件。`)) return
+    if (!await confirm({
+      title: '删除 Bot',
+      desc: `确认删除 Bot #${id}？同时删除其版本与文件。`,
+      confirmText: '删除',
+      danger: true,
+    })) return
     setBusyId(id)
     try {
       await apiJson(`/api/admin/bots/${id}`, 'DELETE')
@@ -207,8 +214,13 @@ export default function BotsTab() {
                                 <td className="px-2 py-1">v{v.version}</td>
                                 <td className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</td>
                                 <td className="px-2 py-1">{v.format}/{v.arch}</td>
-                                <td className="px-2 py-1" title={v.checksum}>
-                                  {v.checksum.slice(0, 12)}…
+                                <td className="px-2 py-1">
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="cursor-help">{v.checksum.slice(0, 12)}…</span>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="font-mono">{v.checksum}</TooltipContent>
+                                  </Tooltip>
                                 </td>
                                 <td className="px-2 py-1">{v.uploaded_at}</td>
                               </tr>
@@ -225,6 +237,7 @@ export default function BotsTab() {
         </table>
         {filtered.length === 0 && <EmptyState text="无 Bot" />}
       </div>
+      {confirmDialog}
     </div>
   )
 }

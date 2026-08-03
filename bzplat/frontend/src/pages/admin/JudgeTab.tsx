@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { renderMarkdown } from '../../lib/markdown'
-import { ErrorMsg, Loading, RefreshBtn } from './ui'
+import { ErrorMsg, Loading, RefreshBtn, inp } from './ui'
 
 interface JudgeParam {
   key: string
@@ -117,7 +117,7 @@ export default function JudgeTab() {
                     type="number"
                     min={p.min}
                     max={p.max}
-                    className="mt-1 block w-full rounded-lg border border-input bg-background px-3 py-2"
+                    className={inp}
                     value={draft[p.key] ?? p.value}
                     onChange={(e) =>
                       setDraft({ ...draft, [p.key]: Number(e.target.value) })
