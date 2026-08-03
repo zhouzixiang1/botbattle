@@ -28,8 +28,11 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2] / "backend"
 _SCAN_DIRS = ("matches", "contests", "store", "bots", "auth", "rating", "runtime", "notifications")
 _SCAN_FILES = ("api_routes.py", "main.py", "cli.py", "logging_config.py")
 
-# 游戏名集合（用于模式匹配）
-_GAMES = r"(?:holdem|gomoku|pencil)"
+# 游戏名集合（用于模式匹配）——从注册表派生，避免硬编码 3-game 名导致未来加第 4 款
+# 游戏时守护失效（漏报）。schema 与注册表一致性由 test_game_registry + 启动断言守护。
+from bzplat.backend.store.schema import VALID_GAME_IDS  # noqa: E402
+
+_GAMES = "(?:" + "|".join(sorted(VALID_GAME_IDS)) + ")"
 
 # 禁止的模式：按游戏名分支
 # == "holdem" / != "holdem" / in ("holdem",...) / startswith("holdem") / .get("holdem") / all_tiers("holdem")
@@ -50,8 +53,8 @@ _TUPLE_RE = re.compile(
 )
 # 禁止的模式：通用层直接 import 具体游戏模块（应经 registry）
 _IMPORT_RE = re.compile(
-    r'from\s+bzplat\.backend\.games\.(?:holdem|gomoku|pencil)\b'
-    r'|import\s+bzplat\.backend\.games\.(?:holdem|gomoku|pencil)\b'
+    r'from\s+bzplat\.backend\.games\.' + _GAMES + r'\b'
+    r'|import\s+bzplat\.backend\.games\.' + _GAMES + r'\b'
 )
 
 # 允许的纯默认值/兜底模式（不算分支）：= "holdem" / , "holdem" / or "holdem" / except KeyError
