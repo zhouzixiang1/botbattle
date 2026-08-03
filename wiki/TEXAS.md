@@ -58,7 +58,7 @@
 
 若当前自己剩余的筹码数不足以跟注或加注，或者是对手全押，则只能选择弃牌或全押。
 
-> 本平台人类对战界面同样提供 Fold / All-in / Call·Check / Raise；**本平台 Bot 协议中 Raise 的 `x` 为 raise-to-total（加注到的总额）**，与人类 UI / Botzone 整数「增量」不同，见 [§5](#本平台长驻行协议)。
+> 本平台人类对战界面同样提供 Fold / All-in / Call·Check / Raise；**本平台 Bot 协议完全照 Botzone**（raise response 的正整数 = 额外下注筹码 / 增量，与人类 UI / Botzone 一致），见 [§5](#本平台适配)。
 
 ### 作者
 
@@ -106,7 +106,7 @@ Botzone 原页：播放器、裁判程序、Python 样例程序：**dhbloo**。
 2. **跟注（Call）**：与上一位在场玩家下注相同的筹码。
 3. **过牌（Check）**：如果本轮前面没有玩家下注，则可以选择不下注，并将下注机会交给下一位在场玩家。
 4. **加注（Raise）**：下注**额外**的筹码，要求下注的筹码不少于本轮最大下注筹码的 **2 倍**。如果本轮前面没有玩家下注，则不少于**大盲注**。  
-   （Botzone / 人类 UI 语义为**增量**；本平台 Bot 的 `x` 为 **raise-to-total**，见 §5。）
+   （Bot 协议中 raise response 的正整数即此「额外筹码」，与 Botzone / 人类 UI 语义一致，见 §5。）
 5. **全押（Allin）**：将手中的所有筹码全部下注。
 
 跟注和加注时需要保证手上剩余的筹码**大于**所需下注额，否则只能选择弃牌或全押。**错误的下注为非法操作，会被视为弃牌。**
@@ -265,7 +265,7 @@ Bot 所需要输出的 response 是一个**整数**，表示自己要下注的�
 
 ### Python 版本（Botzone 协议）
 
-以下为 Botzone 原页 Python 样例（每回合启停 + 整型 response），便于对照规则与状态恢复逻辑。**不能直接上传到本平台**——本平台需长驻读行 + `{"a","x"}`，见 [§5](#本平台长驻行协议) 与仓库 `samples/`。
+以下为 Botzone 原页 Python 样例（Botzone 信封 + 整型 response）。**本平台完全兼容 Botzone 标准，此样例经少量适配（首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 握手即可长驻）即可直接上传**。详见 [§5](#本平台适配) 与仓库 `samples/`。
 
 ```python
 import json
@@ -349,68 +349,64 @@ action = get_action(requests[-1])
 print(json.dumps({"response": action}))
 ```
 
-本平台可直接上传的样例见仓库：`samples/callbot.c`、`samples/callbot.py` 及 `samples/holdem_bots/` 等（长驻 + `{"a":"c"}` / `{"a":"r","x":…}`）。
+本平台可直接上传的样例见仓库：`samples/callbot.c`、`samples/callbot.py` 及 `samples/holdem_bots/`（8 种风格）等（Botzone 信封 + 裸整数 `{"response":0}` / `{"response":250}`）。
 
 ---
 
 ## 本平台适配
 
-### 与 Botzone 差异一览
+### 与 Botzone 对照（本平台完全遵循 Botzone 标准）
 
 | 项 | Botzone TexasHoldem2p | 本平台 `holdem` |
 |----|----------------------|-----------------|
-| 进程模型 | 每回合启停；聚合 `requests` / `responses` | **整场长驻**，一行一条 JSON |
-| 默认手数 | 50（`max_hand`） | **70**（可配 `match_config.hands`） |
+| 进程模型 | Traditional 每回合启停 / LongRunning 长驻 | **整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动可直接跑 |
+| 运行模式 | Traditional / LongRunning | 都支持（上传时标明） |
+| 默认手数 | 50（`max_hand`） | **70**（可配 `match_config.hands`；其余规则一致） |
 | 每手筹码 | **每手固定 20000 复位** | **同左**：每手复位 20000，不跨手累积；按各手净输赢累加（累计净筹码）判定胜负 |
-| 决策时限 | 约 1s/步 | 管理员可配（默认常 60s） |
-| Request | 大 JSON：`my_cards` / `history` / `total_win_chips`… | 紧凑：`mc` / `pc` / `hist` / `c` / `o` / `to`… |
-| Response | **整数** `-1/-2/0/>0`（raise=**增量**） | `{"a":"f\|c\|k\|r\|all","x"?}`，`r` 的 `x`=**raise-to-total** |
+| 决策时限 | 约 1s/步 | 管理员可配（默认 60s） |
+| Request | Botzone 信封 `{"requests":[...]}` / `{"request":...}` | **同左**（字段全名 `num_players`/`my_cards`/`history`/`total_win_chips`…，与 Botzone 一致） |
+| Response | 信封 `{"response": <裸整数>}`；raise=**额外量（增量）** | **同左**（裸整数 `-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量） |
 | 非法操作 | 视为弃牌 | 同（fold） |
 | 计分展示 | 累积赢码 / BB | 对局 `earnings` / 天梯 Glicko-2 |
-| 人类 UI Raise | 额外增量 | 界面加注语义对齐人类说明；Bot 协议仍为 raise-to |
+| 人类 UI Raise | 额外增量 | 界面加注语义对齐人类说明；Bot 协议同 Botzone（raise=额外量） |
 
-### 本平台长驻行协议
+### 本平台协议（完全照 Botzone）
 
 权威全文：[协议规范](#/wiki?slug=protocol)。摘要：
 
-**请求（平台 → Bot）一行：**
+**请求信封（平台 → Bot，LongRunning 首回合 / Traditional 每回合）：**
 
 ```json
-{"v":1,"t":"act","h":12,"H":70,"id":0,"d":0,"mc":[48,51],"pc":[12,24,36],"hist":[[0,0,0],[1,0,100]],"c":19900,"o":19800,"sb":50,"bb":100,"to":100}
+{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],"to_call":50,"street_bet":50,"current_bet":100,"sb":50,"bb":100,"opp_chips":19900}],"responses":[]}
 ```
 
-| 字段 | 含义 |
-|------|------|
-| `h` / `H` | 当前手数（**0-based**）/ 总手数 |
-| `id` | 本 Bot 座位 0/1 |
-| `d` | 本手小盲（SB）座位 |
-| `mc` / `pc` | 手牌 / 公共牌（0–51，与上表一致） |
-| `hist` | `[座位, 动作码, 金额]`：0 fold / 1 check / 2 call / 3 raise / 4 allin；call 金额=本次**投入增量**，raise/allin 金额=本街**累计总额** |
-| `c` / `o` | 己方 / 对手剩余筹码（盲注已扣） |
-| `to` | 跟注还需补入的筹码；`0` 可 check |
+核心字段（全名，对齐 Botzone）：`num_players` / `dealer_id` / `my_id` / `my_chips` / `my_cards`(0-51) / `public_cards`(0-51) / `history`(对象数组) / `hand` / `max_hand` / `total_win_chips` / `total_win_games`。平台扩展字段（标准 Bot 可忽略）：`to_call` / `street_bet` / `current_bet` / `sb` / `bb` / `opp_chips`。
 
-**响应（Bot → 平台）一行：**
+LongRunning 后续回合单 request：`{"request":{...}}`。
 
-| `a` | 动作 | `x` |
-|-----|------|-----|
-| `f` | fold | 无 |
-| `c` | call | 无 |
-| `k` | check | 无（仅 `to=0`） |
-| `r` | raise | **必填**，加注到的**总额**（raise-to-total） |
-| `all` | all-in | 无 |
+**响应信封（Bot → 平台）：`{"response": <裸整数>}`**
+
+| response | 动作 |
+|----------|------|
+| `-1` | fold |
+| `-2` | allin |
+| `0` | call / check（平台按 `to_call` 合法性判定） |
+| `>0` | raise **额外下注筹码**（= 目标总额 − 本街已投 `street_bet`） |
 
 ```json
-{"a":"r","x":400}
+{"response":250}
 ```
 
-最小可用策略（同 `samples/callbot.c`）：`to>0` → `{"a":"c"}`，否则 `{"a":"k"}`。
+最小可用策略（同 `samples/callbot.c`）：永远 `{"response":0}`（call/check）。
 
-最小加注总额（与引擎一致）：
+最小加注总额（引擎内部语义，平台校验用）：
 
 ```python
 def min_raise_to(current_bet, bb):
     return bb if current_bet == 0 else current_bet * 2
 ```
+
+LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 声明长驻（否则每回合收到完整历史信封，Traditional 等效）。
 
 ### 裁判与本地自测
 

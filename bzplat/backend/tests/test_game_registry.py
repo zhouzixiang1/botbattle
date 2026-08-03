@@ -133,7 +133,8 @@ def test_run_session_unknown_raises():
 
 # ── 协议按游戏路由 ────────────────────────────────────────────
 def test_protocol_fail_response_per_game():
-    assert fail_response("holdem") == {"a": "f"}
+    # holdem：Botzone 裸整数 -1（fold）；棋类：非法坐标 {-99,-99}。
+    assert fail_response("holdem") == -1
     assert fail_response("gomoku") == {"x": -99, "y": -99}
     assert fail_response("pencil") == {"x": -99, "y": -99}
 

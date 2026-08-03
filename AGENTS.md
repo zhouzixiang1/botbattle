@@ -153,8 +153,8 @@ src/pages/                 20 个顶层路由，全部用 React.lazy 代码分�
 
 ## 动手前必读文档
 
-- `wiki/PROTOCOL.md` —— 德州紧凑 JSON 行协议（字段、raise=raise-to-total、卡牌编码）。
-- `wiki/BOT_DEV.md` —— Bot 开发指南（编译、上传、调试）。
-- `wiki/INDEX.md` —— 文档总入口（含 vs Botzone 差异表：本平台**整场长驻**、一行一条 JSON）。
+- `wiki/PROTOCOL.md` —— **Botzone 标准协议**（信封、两模式、德州裸整数 response/raise delta、牌 0-51）。
+- `wiki/BOT_DEV.md` —— Bot 开发指南（编译、上传、调试、运行模式选择）。
+- `wiki/INDEX.md` —— 文档总入口（vs Botzone 对照：本平台**整场长驻**、Botzone 信封、手数 70）。
 - `contracts/` —— 协议 JSON Schema。
 - `samples/` —— 三款游戏样例 Bot 源码。

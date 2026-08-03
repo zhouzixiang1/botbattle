@@ -47,10 +47,10 @@ def test_protocol_roundtrip():
         hand=0,
         total_hands=70,
         my_id=0,
-        dealer_or_sb=0,
+        dealer_id=0,
         my_cards=[Card(12, 0), Card(11, 1)],
         board=[],
-        hist=[],
+        history=[],
         my_chips=20000,
         opp_chips=20000,
         sb=50,
@@ -58,8 +58,14 @@ def test_protocol_roundtrip():
         to_call=50,
     )
     line = proto.dumps_request(req)
-    assert '"t":"act"' in line
-    action, _x = proto.parse_response({"a": "c"})
+    # Botzone 全名字段
+    assert '"num_players":2' in line
+    assert '"dealer_id":0' in line
+    assert '"my_cards":[' in line
+    # 裸整数 response 解析（信封 + 裸 int 两种）
+    action, _x = proto.parse_response({"response": 0})
+    assert action == "call"
+    action, _x = proto.parse_response(0)
     assert action == "call"
 
 

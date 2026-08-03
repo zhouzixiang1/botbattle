@@ -1,10 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "BotzonePlatformActResponse",
+  "title": "BotzoneHoldemResponse",
+  "description": "Botzone 标准德州扑克响应信封。response 为裸整数：-1=fold, -2=allin, 0=call/check, >0=raise 额外下注筹码（raise delta = raise_to_total - my_street_bet）。",
   "type": "object",
-  "required": ["a"],
+  "required": ["response"],
   "properties": {
-    "a": { "type": "string", "enum": ["f", "c", "k", "r", "all"] },
-    "x": { "type": "integer", "minimum": 1 }
+    "response": {
+      "type": "integer",
+      "description": "-1 fold / -2 allin / 0 call-check / >0 raise 额外量"
+    },
+    "debug": { "type": "string", "description": "调试信息（≤1KB，写日志）" },
+    "data": { "description": "存到下一回合的数据（≤100KB；LongRunning 握手后失效）" },
+    "globaldata": { "description": "跨对局持久数据（≤100KB；LongRunning 握手后失效）" }
   }
 }

@@ -6,7 +6,7 @@
 
 | 页面 | 说明 |
 |------|------|
-| [协议规范](#/wiki?slug=protocol) | 德州紧凑 JSON 协议 |
+| [协议规范](#/wiki?slug=protocol) | **Botzone 标准协议**（信封、两模式、德州裸整数 response） |
 | [Bot 开发指南](#/wiki?slug=bot-dev) | 上传、调试、样例 |
 | [运行时与资源限制](#/wiki?slug=runtime) | Docker / 超时 / 并发 |
 | [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 |
@@ -35,12 +35,12 @@
 
 | 项 | Botzone | 本平台 |
 |----|---------|--------|
-| 进程模型 | 默认每回合启停；可选长时运行 | **整场对局长驻**，一行一条 JSON |
+| 进程模型 | 默认每回合启停；可选长时运行 | **整场对局长驻**（不每回合重启），Botzone 信封一行一条 JSON |
 | CPU / 内存 | 1 核 / 默认 256MB | Docker `--cpus=1` / `--memory=512m` |
 | 决策时限 | 默认 1s/回合（首回合×2） | 管理员可配（默认 60s） |
 | 游戏 | 站内多游戏 | `holdem` / `gomoku` / `pencil` |
-| 德州 response | 整型；raise=增量 | `{"a","x"}`；raise=`x` 为 **raise-to-total** |
-| 棋类协议 | 聚合 `requests`/`responses` | 每步推送对方上一手，语义对齐 |
+| 德州协议 | 信封 + 裸整数 response + raise=增量 | **完全照 Botzone**（信封 + 裸整数 `-1/-2/0/>0` + raise=额外量；手数 70） |
+| 棋类协议 | 聚合 `requests`/`responses` | 每步推送对方上一手，语义对齐（Botzone 化在后续 PR） |
 
 上传 Bot 时请选择正确的 **游戏类型**；挑战与排行榜按 `game_id` 过滤。
 

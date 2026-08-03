@@ -1,5 +1,7 @@
 /* randombot：随机合法动作（check/call/fold/raise 随机），不可预测。
- * 用 /dev/urandom 取种子 + 线性同余，保证跨进程不同序列。 */
+ * 用 /dev/urandom 取种子 + 线性同余，保证跨进程不同序列。
+ * Botzone 协议：raise = raise_to - street_bet 的额外量。
+ */
 #include "poker_util.h"
 
 static unsigned long rng_state = 0;
@@ -14,30 +16,31 @@ static unsigned long next_rand(void) {
 }
 
 int main(void) {
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    while ((n = getline(&line, &cap, stdin)) != -1) {
-        long to = pj_long(line, "to", 0);
-        long chips = pj_long(line, "c", 0);
+    char *line = (char *)malloc(MAXLINE);
+    if (!line) return 1;
+    while (fgets(line, MAXLINE, stdin)) {
+        long to_call = req_long(line, "to_call", 0);
+        long chips = req_long(line, "my_chips", 0);
+        long sb = req_long(line, "street_bet", 0);
         unsigned long r = next_rand() % 100;
-        if (to == 0) {
+        if (to_call == 0) {
             /* 可 check：60% check，30% raise(最小)，10% fold(故意弱) */
-            if (r < 60) emit("k", 0);
+            if (r < 60) emit_int(0);                 /* check */
             else if (r < 90) {
-                long rt = 100;
-                if (chips >= rt) emit("r", rt);
-                else emit("k", 0);
-            } else emit("f", 0);
+                long rt = sb + 100;
+                if (chips >= 100) emit_int(raise_delta(rt, sb));  /* raise */
+                else emit_int(0);                    /* check */
+            } else emit_int(-1);                     /* fold */
         } else {
             /* 需跟注：40% call，35% fold，25% raise */
-            if (r < 40) emit("c", 0);
-            else if (r < 75) emit("f", 0);
+            if (r < 40) emit_int(0);                 /* call */
+            else if (r < 75) emit_int(-1);           /* fold */
             else {
-                long rt = to * 2 + 100;
-                if (rt > chips + to) rt = chips + to;
-                if (rt > to && chips > to) emit("r", rt);
-                else emit(to > 0 && chips >= to ? "c" : "f", 0);
+                long rt = sb + to_call + 100;
+                if (rt > sb + chips) rt = sb + chips;
+                if (rt > sb && chips > to_call) emit_int(raise_delta(rt, sb));
+                else if (chips >= to_call) emit_int(0);  /* call */
+                else emit_int(-1);                       /* fold */
             }
         }
     }

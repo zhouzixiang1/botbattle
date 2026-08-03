@@ -1,9 +1,13 @@
 """Heads-up No-Limit Texas Hold'em engine (national-competition semantics).
 
+协议：Botzone TexasHoldem2p 标准（response 裸整数；raise=「需要额外下注的筹码」=
+raise_to_total - 加注方加注前的 street_bet）。引擎内部仍用 raise-to-total 语义
+（min_raise_to = 2×current_bet），与 Bot 协议的 delta 互转发生在 protocol.py 边界。
+
 Rules summary:
 - HU NLHE; default 70 hands; SB/BB alternate each hand
 - Starting stack 20000; SB=50; BB=100
-- raise = raise-to-total; min re-raise-to >= 2× previous raise-to (exact 2× legal)
+- raise = raise-to-total（内部）；min re-raise-to >= 2× previous raise-to（exact 2× legal）
 - Preflop: SB acts first; postflop: BB (non-SB) acts first
 - Illegal action → fold
 - All-in runout: deal remaining board, then settle
@@ -139,7 +143,9 @@ class MatchSession:
         self._min_raise_to: int = 0
         self._to_act: int = 0
         self._pending_actors: set[int] = set()
-        self._hist: list[list[int]] = []  # [[pid, action_code, amount], ...]
+        # Botzone history 对象数组：[{round, player_id, action, action_type}, ...]
+        # （raise 的 action 字段是「额外下注筹码」=raise_to - 该玩家加注前的 street_bet）
+        self._hist: list[dict[str, Any]] = []
         self._hand_over: bool = False
         self._aggressor: int | None = None
 
@@ -484,19 +490,30 @@ class MatchSession:
             legal = self.legal_actions(player_idx)
         p = self._players[player_idx]
         opp = self._players[1 - player_idx]
+        # total_win_chips = 各手净输赢累加（Botzone 字段语义）；total_win_games = 各方累计赢手数。
+        total_win_games = [0, 0]
+        for hr in self.hand_results:
+            if hr.winners:
+                for w in hr.winners:
+                    if 0 <= w < 2:
+                        total_win_games[w] += 1
         return proto.build_act_request(
             hand=self._hand,
             total_hands=self.num_hands,
             my_id=player_idx,
-            dealer_or_sb=self._sb_idx,
+            dealer_id=self._sb_idx,
             my_cards=p.hole,
             board=self._board,
-            hist=list(self._hist),
+            history=list(self._hist),
             my_chips=p.chips,
             opp_chips=opp.chips,
             sb=self.sb,
             bb=self.bb,
             to_call=legal["to_call"],
+            street_bet=p.street_bet,
+            current_bet=self._current_bet,
+            total_win_chips=list(self.net),
+            total_win_games=total_win_games,
         )
 
     def _parse_and_validate(
@@ -539,7 +556,12 @@ class MatchSession:
             min_to = legal["min_raise_to"]
             if x is None:
                 return Action.FOLD, 0
-            raise_to = int(x)
+            # Botzone 协议：x 是「需要额外下注的筹码」=raise_to - 玩家加注前的 street_bet。
+            # 转回引擎的 raise-to-total 语义：raise_to = street_bet + delta。
+            delta = int(x)
+            if delta <= 0:
+                return Action.FOLD, 0
+            raise_to = p.street_bet + delta
             if raise_to >= max_to:
                 # treat as all-in
                 return Action.ALLIN, 0
@@ -554,14 +576,32 @@ class MatchSession:
             return Action.RAISE, raise_to
         return Action.FOLD, 0
 
+    def _round_for_history(self) -> int:
+        """当前街道 → Botzone history.round（0=preflop 1=flop 2=turn 3=river）。"""
+        return proto.STREET_TO_ROUND.get(self._street.value, 0)
+
+    def _record_history(
+        self, player_idx: int, action: Action, raise_extra: int | None
+    ) -> None:
+        """追加一条 Botzone history 对象。
+
+        raise_extra：仅 raise 时为「该玩家加注前 street_bet → 加注后 street_bet 的增量」
+        （=Bot 返回的 delta）。fold/check/call/allin 时为 None（action 整数码自含语义）。
+        """
+        self._hist.append({
+            "round": self._round_for_history(),
+            "player_id": player_idx,
+            "action": proto.action_to_history_int(action.value, raise_extra),
+            "action_type": proto.ACTION_TO_ATYPE[action.value],
+        })
+
     def _apply_action(self, player_idx: int, action: Action, raise_to: int) -> None:
         p = self._players[player_idx]
-        code = proto.ACTION_TO_CODE[action.value]
         amount = 0
 
         if action == Action.FOLD:
             p.folded = True
-            self._hist.append([player_idx, code, 0])
+            self._record_history(player_idx, action, None)
             self._emit(
                 "action",
                 {"hand": self._hand, "player": player_idx, "action": "fold", "amount": 0},
@@ -581,9 +621,13 @@ class MatchSession:
             amount = pay
             self._pending_actors.discard(player_idx)
         elif action == Action.RAISE:
+            # raise_extra（Botzone delta）= raise_to - 玩家加注前的 street_bet。
+            # 必须在 _put_chips 更新 street_bet 之前算。
+            raise_extra = raise_to - p.street_bet
             need = raise_to - p.street_bet
             self._put_chips(player_idx, need)
             amount = raise_to
+            self._record_history(player_idx, action, raise_extra)
             self._current_bet = raise_to
             self._last_raise_to = raise_to
             self._min_raise_to = 2 * raise_to
@@ -597,6 +641,7 @@ class MatchSession:
             new_bet = p.street_bet + pay
             self._put_chips(player_idx, pay)
             amount = new_bet
+            self._record_history(player_idx, action, None)
             p.all_in = True
             if new_bet > self._current_bet:
                 # raise (possibly short)
@@ -626,7 +671,6 @@ class MatchSession:
             self._settle_fold(1 - player_idx)
             return
 
-        self._hist.append([player_idx, code, amount])
         self._emit(
             "action",
             {

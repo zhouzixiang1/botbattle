@@ -1,54 +1,10 @@
 /* tightbot：保守策略——翻前只玩中等以上底牌（至少一张 ≥10），否则 fold；
  * 翻后若需跟注则 call/check，不加注。避免大损失。
- * 协议请求含 mc（手牌 card_int 数组，rank = card//4，0=2..12=A）。
+ * Botzone 协议请求含 my_cards（card_int 数组，poker rank = card//4+2，2..14）。
  */
 #include "poker_util.h"
 
-/* 简单随机（前置声明，定义在文件末尾） */
 static unsigned long _ts = 0;
-static unsigned long next_rand_simple(void);
-
-/* 取手牌第一张的 rank（card_int//4）。粗略解析 mc 数组首元素。 */
-static long first_hole_rank(const char *s) {
-    const char *p = strstr(s, "\"mc\"");
-    if (!p) return -1;
-    p = strchr(p, '[');
-    if (!p) return -1;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    long c = atol(p);
-    return c / 4; /* 0=2 .. 12=A */
-}
-
-int main(void) {
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    while ((n = getline(&line, &cap, stdin)) != -1) {
-        long to = pj_long(line, "to", 0);
-        long chips = pj_long(line, "c", 0);
-        long r1 = first_hole_rank(line);
-        /* 翻前判断（无 pc 公共牌时）：底牌 rank ≥ 8（即 ≥10）才玩。
-         * 简化：只看第一张。rank 8=10,11=J,12=Q,13?——实际 0-12: 8=10,9=J,10=Q,11=K,12=A */
-        int strong = (r1 >= 8); /* 第一张 ≥10 视为可玩 */
-        if (to == 0) {
-            /* 可 check：强牌偶尔加注，否则 check（绝不主动 fold 免费牌） */
-            if (strong && (next_rand_simple() % 3 == 0)) {
-                long rt = 100;
-                if (chips >= rt) emit("r", rt);
-                else emit("k", 0);
-            } else emit("k", 0);
-        } else {
-            /* 需跟注：强牌 call，弱牌 fold（筹码不足也 fold） */
-            if (strong && chips >= to) emit("c", 0);
-            else emit("f", 0);
-        }
-    }
-    free(line);
-    return 0;
-}
-
-/* 简单随机（避免 randombot 那么讲究，够用） */
 static unsigned long next_rand_simple(void) {
     if (_ts == 0) {
         FILE *f = fopen("/dev/urandom", "rb");
@@ -57,4 +13,43 @@ static unsigned long next_rand_simple(void) {
     }
     _ts = _ts * 1103515245UL + 12345UL;
     return _ts >> 16;
+}
+
+/* 取手牌第一张的 poker rank（card_int//4 + 2）。粗略解析 my_cards 数组首元素。 */
+static long first_hole_rank(const char *s) {
+    const char *p = strstr(s, "\"my_cards\"");
+    if (!p) return -1;
+    p = strchr(p, '[');
+    if (!p) return -1;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    long c = atol(p);
+    return c / 4 + 2; /* poker 点数 2..14 */
+}
+
+int main(void) {
+    char *line = (char *)malloc(MAXLINE);
+    if (!line) return 1;
+    while (fgets(line, MAXLINE, stdin)) {
+        long to_call = req_long(line, "to_call", 0);
+        long chips = req_long(line, "my_chips", 0);
+        long sb = req_long(line, "street_bet", 0);
+        long r1 = first_hole_rank(line);
+        /* 底牌 rank ≥ 10（10/J/Q/K/A）才玩。 */
+        int strong = (r1 >= 10);
+        if (to_call == 0) {
+            /* 可 check：强牌偶尔加注，否则 check（绝不主动 fold 免费牌） */
+            if (strong && (next_rand_simple() % 3 == 0)) {
+                long rt = sb + 100;
+                if (chips >= 100) emit_int(raise_delta(rt, sb));
+                else emit_int(0);
+            } else emit_int(0);  /* check */
+        } else {
+            /* 需跟注：强牌 call，弱牌 fold（筹码不足也 fold） */
+            if (strong && chips >= to_call) emit_int(0);  /* call */
+            else emit_int(-1);                            /* fold */
+        }
+    }
+    free(line);
+    return 0;
 }

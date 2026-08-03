@@ -44,7 +44,7 @@ async def _session_factory(decide, *, on_event=None, **params: Any):
 _PROTOCOL = ProtocolSpec(
     dumps_request=proto.dumps_request,
     loads_response=proto.loads_response,
-    fail_response=lambda: {"a": "f"},  # 扑克超时兜底：fold
+    fail_response=proto.fail_response,  # 扑克超时兜底：fold（Botzone 裸整数 -1）
 )
 
 
@@ -99,8 +99,8 @@ async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: flo
     # 构造最小 act 请求（preflop，seat 0/SB，需 call 50）
     from bzplat.backend.games.holdem.cards import Card
     req = build_act_request(
-        hand=0, total_hands=1, my_id=0, dealer_or_sb=0,
-        my_cards=[Card(0, 0), Card(1, 0)], board=[], hist=[],
+        hand=0, total_hands=1, my_id=0, dealer_id=0,
+        my_cards=[Card(0, 0), Card(1, 0)], board=[], history=[],
         my_chips=19950, opp_chips=19900, sb=50, bb=100, to_call=50,
     )
     line = dumps_request(req)

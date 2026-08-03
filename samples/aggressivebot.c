@@ -1,43 +1,42 @@
-/* aggressivebot: 有加注空间则 raise-to (to+bb*2 近似)，否则 call/check */
+/* aggressivebot: 有加注空间则加注（≈ to_call + BB），否则 call/check。
+ * Botzone 协议：raise = raise_to - street_bet 的额外量；call/check/allin = 0/-2。
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static int peek_int(const char *s, const char *key) {
-    char pat[16];
+static long peek_long(const char *s, const char *key) {
+    char pat[32];
     snprintf(pat, sizeof(pat), "\"%s\"", key);
     const char *p = strstr(s, pat);
     if (!p) return 0;
     p = strchr(p, ':');
     if (!p) return 0;
-    return atoi(p + 1);
+    return atol(p + 1);
 }
 
 int main(void) {
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    while ((n = getline(&line, &cap, stdin)) != -1) {
-        while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r'))
-            line[--n] = 0;
-        if (n <= 0) continue;
-        int to = peek_int(line, "to");
-        int bb = peek_int(line, "bb");
-        int my = peek_int(line, "c");
+    char *line = (char *)malloc(4000000);
+    if (!line) return 1;
+    while (fgets(line, 4000000, stdin)) {
+        long to_call = peek_long(line, "to_call");
+        long bb = peek_long(line, "bb");
+        long chips = peek_long(line, "my_chips");
+        long sb = peek_long(line, "street_bet");
         if (bb <= 0) bb = 100;
-        if (to == 0 && my > bb * 4) {
-            /* open-ish: raise to 3bb street total approx */
-            int x = bb * 3;
-            if (x < bb) x = bb;
-            if (x >= my) {
-                fputs("{\"a\":\"all\"}\n", stdout);
-            } else {
-                printf("{\"a\":\"r\",\"x\":%d}\n", x);
-            }
-        } else if (to > 0) {
-            fputs("{\"a\":\"c\"}\n", stdout);
+        /* 加注目标 = 补跟注 + BB（即 raise_to = sb + to_call + bb） */
+        long raise_to = sb + to_call + bb;
+        if (raise_to >= sb + chips) {
+            /* 筹码足够全押则 allin */
+            fputs("{\"response\":-2}\n", stdout);
+        } else if (chips > to_call) {
+            /* raise：delta = raise_to - street_bet */
+            long delta = raise_to - sb;
+            if (delta <= 0) delta = bb;
+            printf("{\"response\":%ld}\n", delta);
         } else {
-            fputs("{\"a\":\"k\"}\n", stdout);
+            /* call/check 都是 0 */
+            fputs("{\"response\":0}\n", stdout);
         }
         fflush(stdout);
     }

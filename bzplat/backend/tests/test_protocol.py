@@ -1,14 +1,17 @@
-"""Unit tests for compact JSON protocol."""
+"""Unit tests for Botzone 标准德州扑克协议（裸整数 response + raise delta + 牌 0-51）。"""
 
 from __future__ import annotations
 
+import pytest
+
 from bzplat.backend.games.holdem.cards import Card
 from bzplat.backend.games.holdem.protocol import (
-    A_TO_ACTION,
-    ACTION_TO_A,
     PROTOCOL_VERSION,
+    RESP_ALLIN,
+    RESP_CALL_CHECK,
+    RESP_FOLD,
+    action_to_history_int,
     build_act_request,
-    build_response,
     decode_card,
     decode_cards,
     encode_card,
@@ -26,14 +29,30 @@ def test_encode_decode_card_roundtrip():
             assert decode_card(n) == c
 
 
-def test_suit_judge_mapping():
-    # suit map internal→judge: {0:2,1:0,2:1,3:3}
-    # card_int = rank*4 + judge
-    assert encode_card(Card(0, 0)) == 0 * 4 + 2  # 2♠ → judge suit 2
-    assert encode_card(Card(0, 1)) == 0 * 4 + 0  # 2♥ → 0
-    assert encode_card(Card(0, 2)) == 0 * 4 + 1  # 2♦ → 1
-    assert encode_card(Card(0, 3)) == 0 * 4 + 3  # 2♣ → 3
-    assert encode_card(Card(12, 1)) == 12 * 4 + 0  # A♥
+def test_suit_botzone_mapping():
+    # Botzone: card % 4 == 0 → ♥, 1 → ♦, 2 → ♠, 3 → ♣
+    # 内部 suit: 0♠ 1♥ 2♦ 3♣
+    # 内部 2♠ (rank0,suit0) → Botzone 0*4+2 = 2（%4==2 → ♠ ✓）
+    assert encode_card(Card(0, 0)) == 0 * 4 + 2  # 2♠
+    # 内部 2♥ (rank0,suit1) → 0*4+0 = 0（%4==0 → ♥ ✓）
+    assert encode_card(Card(0, 1)) == 0 * 4 + 0  # 2♥
+    # 内部 2♦ (rank0,suit2) → 0*4+1 = 1（%4==1 → ♦ ✓）
+    assert encode_card(Card(0, 2)) == 0 * 4 + 1  # 2♦
+    # 内部 2♣ (rank0,suit3) → 0*4+3 = 3（%4==3 → ♣ ✓）
+    assert encode_card(Card(0, 3)) == 0 * 4 + 3  # 2♣
+    # A♥ rank12 suit1 → 12*4+0 = 48
+    assert encode_card(Card(12, 1)) == 12 * 4 + 0
+
+
+def test_card_rank_formula():
+    # Botzone 整数 → 内部 Card（内部 rank 0-indexed：0=deuce, 12=Ace）。
+    # Botzone 公式 rank = card//4 + 2（poker 点数）；内部 rank = card//4（0-indexed）。
+    assert decode_card(0).rank == 0        # 内部 0 = poker '2'
+    assert decode_card(48).rank == 12      # 内部 12 = poker 'A'
+    assert decode_card(51).rank == 12      # A
+    # 验证 Botzone poker 点数公式：card//4 + 2
+    assert 0 // 4 + 2 == 2     # '2'
+    assert 48 // 4 + 2 == 14   # 'A'
 
 
 def test_encode_cards_list():
@@ -42,51 +61,94 @@ def test_encode_cards_list():
     assert decode_cards(ints) == cards
 
 
-def test_build_and_parse_act():
+def test_build_act_request_botzone_fields():
     req = build_act_request(
         hand=12,
         total_hands=70,
         my_id=0,
-        dealer_or_sb=0,
+        dealer_id=0,
         my_cards=[Card(12, 0), Card(12, 3)],
         board=[Card(3, 0), Card(6, 1), Card(9, 2)],
-        hist=[[0, 2, 50], [1, 3, 200]],
+        history=[
+            {"round": 0, "player_id": 0, "action": 50, "action_type": "raise"},
+            {"round": 0, "player_id": 1, "action": -1, "action_type": "fold"},
+        ],
         my_chips=19900,
         opp_chips=19800,
         sb=50,
         bb=100,
         to_call=100,
     )
-    assert req["v"] == PROTOCOL_VERSION
-    assert req["t"] == "act"
-    assert req["h"] == 12
-    assert req["H"] == 70
-    assert req["id"] == 0
-    assert req["d"] == 0
-    assert len(req["mc"]) == 2
-    assert len(req["pc"]) == 3
-    assert req["to"] == 100
-    assert req["c"] == 19900
-    assert req["sb"] == 50
+    # Botzone 全名字段
+    assert req["num_players"] == 2
+    assert req["dealer_id"] == 0
+    assert req["my_id"] == 0
+    assert req["hand"] == 12
+    assert req["max_hand"] == 70
+    assert len(req["my_cards"]) == 2
+    assert len(req["public_cards"]) == 3
+    assert req["my_chips"] == 19900
+    assert req["total_win_chips"] == [0, 0]
+    assert req["total_win_games"] == [0, 0]
+    assert isinstance(req["history"], list)
+    assert req["history"][0]["action_type"] == "raise"
 
 
-def test_parse_response_codes():
+def test_parse_response_bare_int():
+    """Botzone response 是裸整数。"""
+    assert parse_response(RESP_FOLD) == ("fold", None)
+    assert parse_response(RESP_ALLIN) == ("allin", None)
+    assert parse_response(RESP_CALL_CHECK) == ("call", None)
+    assert parse_response(150) == ("raise", 150)  # raise delta
+    assert parse_response(1) == ("raise", 1)
+
+
+def test_parse_response_envelope():
+    """Botzone 信封 {"response": int}。"""
+    assert parse_response({"response": -1}) == ("fold", None)
+    assert parse_response({"response": -2}) == ("allin", None)
+    assert parse_response({"response": 0}) == ("call", None)
+    assert parse_response({"response": 250}) == ("raise", 250)
+
+
+def test_parse_response_string():
+    assert parse_response("-1") == ("fold", None)
+    assert parse_response("150") == ("raise", 150)
+    assert parse_response('{"response":-2}') == ("allin", None)
+
+
+def test_parse_response_legacy_compat():
+    """旧 {a, x} 格式仍兼容（测试/过渡期）。"""
     assert parse_response({"a": "f"}) == ("fold", None)
+    assert parse_response({"a": "all"}) == ("allin", None)
+    assert parse_response({"a": "r", "x": 400}) == ("raise", 400)
     assert parse_response({"a": "c"}) == ("call", None)
     assert parse_response({"a": "k"}) == ("check", None)
-    assert parse_response({"a": "r", "x": 400}) == ("raise", 400)
-    assert parse_response({"a": "all"}) == ("allin", None)
-    assert parse_response({"a": "R", "x": 200}) == ("raise", 200)
 
 
-def test_build_response_roundtrip():
-    for name, code in ACTION_TO_A.items():
-        if name == "raise":
-            raw = build_response(name, 400)
-            assert raw == {"a": "r", "x": 400}
-            assert parse_response(raw) == ("raise", 400)
-        else:
-            raw = build_response(name)
-            assert raw["a"] == code
-            assert parse_response(raw)[0] == name
-            assert A_TO_ACTION[code] == name
+def test_parse_response_invalid():
+    with pytest.raises(Exception):
+        parse_response({"response": "not an int"})
+    with pytest.raises(Exception):
+        parse_response({"response": True})  # bool rejected
+    with pytest.raises(Exception):
+        parse_response(99.5)  # float not int
+
+
+def test_action_to_history_int():
+    assert action_to_history_int("fold", None) == RESP_FOLD
+    assert action_to_history_int("allin", None) == RESP_ALLIN
+    assert action_to_history_int("call", None) == RESP_CALL_CHECK
+    assert action_to_history_int("check", None) == RESP_CALL_CHECK
+    assert action_to_history_int("raise", 250) == 250
+    # raise without delta / non-positive → error
+    with pytest.raises(ValueError):
+        action_to_history_int("raise", None)
+    with pytest.raises(ValueError):
+        action_to_history_int("raise", 0)
+    with pytest.raises(ValueError):
+        action_to_history_int("raise", -5)
+
+
+def test_protocol_version():
+    assert PROTOCOL_VERSION == 2
