@@ -519,3 +519,92 @@ def test_migrate_drops_unregistered_matches_table(tmp_path):
     # matches_index（合法、名字相似）必须保留
     assert "matches_index" in tabs
 
+
+# ── 迁移完整性收尾（对抗审计：contest 侧孤儿清理 + 全库 FK check）────────────
+def test_migrate_cleans_contest_side_orphans_and_passes_fk_check(tmp_path):
+    """赛事侧孤儿（contest_id / organizer_id）在迁移时被清理，且迁移后
+    PRAGMA foreign_key_check 返回 0 行（无任何 FK 违规，catch ALL 遗漏 FK 目标）。
+
+    覆盖 PR #88/#93 遗漏的 contest 侧：
+      - contests.organizer_id 指向已删 user（NO ACTION + NOT NULL → 删整条 contest）
+      - contest_entries/pairings/stage_results/official_results.contest_id 指向已删 contest
+      - contest_entries.user_id 指向已删 user
+    """
+    import sqlite3
+
+    db = str(tmp_path / "contest_orphans.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE,
+            email TEXT UNIQUE, password_hash TEXT, role TEXT DEFAULT 'user',
+            display_name TEXT DEFAULT '', is_active INTEGER DEFAULT 1,
+            email_verified INTEGER DEFAULT 0, created_at TEXT);
+        CREATE TABLE bots (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER,
+            name TEXT, display_name TEXT DEFAULT '', description TEXT DEFAULT '',
+            os TEXT DEFAULT '', arch TEXT DEFAULT '', format TEXT DEFAULT 'unknown',
+            binary_path TEXT DEFAULT '', current_version INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1, is_builtin INTEGER DEFAULT 0,
+            game_id TEXT DEFAULT 'holdem', created_at TEXT, updated_at TEXT,
+            UNIQUE(owner_id, name));
+        CREATE TABLE contests (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT,
+            description TEXT DEFAULT '', organizer_id INTEGER NOT NULL,
+            status TEXT DEFAULT 'draft', registration_opens_at TEXT,
+            registration_closes_at TEXT, starts_at TEXT, ends_at TEXT,
+            hands_per_match INTEGER DEFAULT 70, created_at TEXT,
+            game_id TEXT DEFAULT 'holdem', stages_json TEXT DEFAULT '[]',
+            current_stage_idx INTEGER DEFAULT 0, template_id TEXT DEFAULT 'holdem_swiss_ko',
+            rest_ends_at TEXT, match_config_json TEXT DEFAULT '{}');
+        CREATE TABLE contest_entries (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contest_id INTEGER, user_id INTEGER, bot_id INTEGER,
+            registered_at TEXT, group_id TEXT DEFAULT '', seed INTEGER DEFAULT 0,
+            eliminated INTEGER DEFAULT 0, dispatched_at TEXT);
+        CREATE TABLE contest_pairings (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contest_id INTEGER, round_num INTEGER DEFAULT 1, bot_a_id INTEGER,
+            bot_b_id INTEGER, match_id TEXT, status TEXT DEFAULT 'pending',
+            stage_idx INTEGER DEFAULT 0, stage_key TEXT DEFAULT '',
+            group_id TEXT DEFAULT '', bracket_slot INTEGER, color_first INTEGER DEFAULT 0);
+        CREATE TABLE contest_stage_results (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contest_id INTEGER, stage_idx INTEGER, stage_key TEXT DEFAULT '',
+            bot_id INTEGER, points REAL DEFAULT 0, wins INTEGER DEFAULT 0,
+            draws INTEGER DEFAULT 0, losses INTEGER DEFAULT 0, net_chips INTEGER DEFAULT 0,
+            group_id TEXT DEFAULT '', rank_in_group INTEGER, payload_json TEXT DEFAULT '{}');
+        CREATE TABLE contest_official_results (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contest_id INTEGER, entry_id INTEGER, stage_idx INTEGER DEFAULT 0,
+            rank INTEGER, points REAL DEFAULT 0, bot_id INTEGER, user_id INTEGER,
+            tiebreaks_json TEXT DEFAULT '{}', awarded TEXT DEFAULT '');
+    """
+    )
+    # user=1 / bot=1 / contest=1 合法；contest=2 organizer=999 孤儿；
+    # contest_* 指向 contest=888（孤儿）/ user=999（孤儿）
+    conn.execute("INSERT INTO users(username,email,password_hash,created_at) VALUES('a','a@e.com','h','2026')")
+    conn.execute("INSERT INTO bots(owner_id,name,game_id,created_at,updated_at) VALUES(1,'b','holdem','2026','2026')")
+    conn.execute("INSERT INTO contests(id,title,organizer_id,created_at) VALUES(1,'ok',1,'2026')")
+    conn.execute("INSERT INTO contests(id,title,organizer_id,created_at) VALUES(2,'orphan_org',999,'2026')")
+    conn.execute("INSERT INTO contest_entries(contest_id,user_id,registered_at) VALUES(1,1,'2026')")
+    conn.execute("INSERT INTO contest_entries(contest_id,user_id,registered_at) VALUES(888,1,'2026')")   # orphan contest
+    conn.execute("INSERT INTO contest_entries(contest_id,user_id,registered_at) VALUES(1,999,'2026')")   # orphan user
+    conn.execute("INSERT INTO contest_pairings(contest_id,round_num) VALUES(888,1)")
+    conn.execute("INSERT INTO contest_stage_results(contest_id,stage_idx) VALUES(888,0)")
+    conn.execute("INSERT INTO contest_official_results(contest_id,entry_id,rank) VALUES(888,1,1)")
+    conn.commit()
+    conn.close()
+
+    s = Store(db)  # 迁移 + 清理，不应崩溃
+
+    with s._tx() as c:
+        # (1) 合法行保留
+        assert c.execute("SELECT COUNT(*) FROM contests WHERE id=1").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM contest_entries WHERE contest_id=1 AND user_id=1").fetchone()[0] == 1
+        # (2) 孤儿行已清
+        assert c.execute("SELECT COUNT(*) FROM contests WHERE id=2").fetchone()[0] == 0  # organizer 孤儿→删
+        assert c.execute("SELECT COUNT(*) FROM contest_entries WHERE contest_id=888 OR user_id=999").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM contest_pairings WHERE contest_id=888").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM contest_stage_results WHERE contest_id=888").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM contest_official_results WHERE contest_id=888").fetchone()[0] == 0
+        # (3) 关键：全库 FK 完整性校验通过（0 行 = 无违规，catch ANY 遗漏 FK 目标）
+        violations = c.execute("PRAGMA foreign_key_check").fetchall()
+        assert violations == [], f"FK 违规残留：{violations}"
+    s.close()
+
+

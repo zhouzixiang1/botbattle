@@ -178,6 +178,43 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 f"AND {_col} NOT IN (SELECT id FROM bots)"
             )
 
+    # ── 赛事侧孤儿 FK 清理（对抗审计：PR #88/#93 仅覆盖 bots/users，漏 contest 侧）──
+    # contests.* 的子表 contest_id/user_id 孤儿（CASCADE：删行）+ contests.organizer_id
+    # 孤儿（NO ACTION + NOT NULL：只能删整条 contest）。必须在 contests_new / contest_*
+    # 重建（下方 INSERT INTO _new SELECT FROM _old，未过滤孤儿）之前完成，否则 FK ON 时
+    # 重建 INSERT 抛 IntegrityError 启动崩溃。
+    # 顺序：先删 contest 子表孤儿（contest_id/user_id），再删 organizer 孤儿的 contest 本身。
+    for _tbl, _col, _parent in (
+        ("contest_entries", "contest_id", "contests"),
+        ("contest_entries", "user_id", "users"),
+        ("contest_pairings", "contest_id", "contests"),
+        ("contest_stage_results", "contest_id", "contests"),
+        ("contest_official_results", "contest_id", "contests"),
+    ):
+        if _has(_tbl):
+            conn.execute(
+                f"DELETE FROM {_tbl} WHERE {_col} IS NOT NULL "
+                f"AND {_col} NOT IN (SELECT id FROM {_parent})"
+            )
+    # contests.organizer_id → users（NO ACTION + NOT NULL）：organizer 不存在的 contest 整条删。
+    # 此时其 contest_* 子表孤儿已清（上方），CASCADE 亦带走残留——双保险。
+    if _has("contests"):
+        conn.execute(
+            "DELETE FROM contests WHERE organizer_id IS NOT NULL "
+            "AND organizer_id NOT IN (SELECT id FROM users)"
+        )
+    # 补 PR #88 CASCADE 类遗漏：bots.owner_id / favorites.user_id / notification_prefs.user_id
+    for _tbl, _col in (
+        ("bots", "owner_id"),
+        ("favorites", "user_id"),
+        ("notification_prefs", "user_id"),
+    ):
+        if _has(_tbl):
+            conn.execute(
+                f"DELETE FROM {_tbl} WHERE {_col} IS NOT NULL "
+                f"AND {_col} NOT IN (SELECT id FROM users)"
+            )
+
     create_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='contests'"
     ).fetchone()
@@ -235,7 +272,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         present = [c for c in all_cols if c in cols]
         conn.execute(
             f"INSERT INTO contests_new ({', '.join(present)}) "
-            f"SELECT {', '.join(present)} FROM contests"
+            f"SELECT {', '.join(present)} FROM contests "
+            f"WHERE organizer_id IN (SELECT id FROM users)"
         )
         conn.execute("DROP TABLE contests")
         conn.execute("ALTER TABLE contests_new RENAME TO contests")
@@ -589,7 +627,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if _col_list:
             conn.execute(
                 f"INSERT INTO {_ctable}_new ({_col_list}) "
-                f"SELECT {_col_list} FROM {_ctable}"
+                f"SELECT {_col_list} FROM {_ctable} "
+                f"WHERE contest_id IN (SELECT id FROM contests)"
             )
         if _ctable in tables:
             conn.execute(f"DROP TABLE {_ctable}")
