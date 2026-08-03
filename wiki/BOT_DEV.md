@@ -222,4 +222,4 @@ echo '{"v":1,"t":"act","h":0,"H":70,"id":0,"d":0,"mc":[48,51],"pc":[],"hist":[],
 
 ## 10. 运行时资源
 
-Bot 在 Docker 中运行：`--cpus=1`、`--memory=512m`、无网络。决策超时默认 60s。详见[运行时与资源限制](/wiki?slug=runtime)。
+Bot 在 Docker 中运行：`--cpus=1`、`--memory=512m`、无网络。决策超时默认 60s。详见[运行时与资源限制](#/wiki?slug=runtime)。
