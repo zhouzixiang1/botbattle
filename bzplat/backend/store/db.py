@@ -113,6 +113,67 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "contests" not in tables:
         return
 
+    # ── 孤儿 FK 行清理（审计 P0：生产 9943 条孤儿源于连接期 FK=OFF，删 bot/user 未级联）──
+    # 一次性清理存量孤儿。幂等：DELETE/UPDATE 0 行代价极低，每次迁移都跑。
+    # 放在 _migrate 开头（新库早返之后）保证所有后续表重建 INSERT 只看到干净数据
+    # （contest_* 重建的 INSERT INTO _new SELECT FROM _ctable 未过滤孤儿，FK ON 时会失败）。
+    def _has(table: str) -> bool:
+        return table in {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            )
+        }
+
+    # CASCADE 类（删行）：bots→子表 + users→子表
+    for _tbl, _col in (
+        ("ratings", "bot_id"),
+        ("rating_history", "bot_id"),
+        ("bot_versions", "bot_id"),
+        ("favorites", "bot_id"),
+        ("pair_stats", "bot_a_id"),
+        ("pair_stats", "bot_b_id"),
+        ("password_resets", "user_id"),
+        ("sessions", "user_id"),
+        ("email_codes", "user_id"),
+        ("notifications", "user_id"),
+        ("comments", "user_id"),
+        ("likes", "user_id"),
+        ("follows", "follower_id"),
+        ("follows", "followee_id"),
+    ):
+        if _has(_tbl):
+            conn.execute(
+                f"DELETE FROM {_tbl} WHERE {_col} IS NOT NULL "
+                f"AND {_col} NOT IN (SELECT id FROM {'bots' if _col.endswith('bot_id') or _col in ('bot_a_id', 'bot_b_id') else 'users'})"
+            )
+
+    # SET NULL 类（置空保留行）：matches_*.{bot_a/b/owner} + contest_*.{bot_id}
+    for _gid in _all_game_ids():
+        _tbl = _matches_table(_gid)
+        if _has(_tbl):
+            for _col in ("bot_a_id", "bot_b_id"):
+                conn.execute(
+                    f"UPDATE {_tbl} SET {_col}=NULL WHERE {_col} IS NOT NULL "
+                    f"AND {_col} NOT IN (SELECT id FROM bots)"
+                )
+            conn.execute(
+                f"UPDATE {_tbl} SET owner_id=NULL WHERE owner_id IS NOT NULL "
+                f"AND owner_id NOT IN (SELECT id FROM users)"
+            )
+    for _tbl, _col in (
+        ("contest_entries", "bot_id"),
+        ("contest_pairings", "bot_a_id"),
+        ("contest_pairings", "bot_b_id"),
+        ("contest_stage_results", "bot_id"),
+        ("contest_official_results", "bot_id"),
+    ):
+        if _has(_tbl):
+            conn.execute(
+                f"UPDATE {_tbl} SET {_col}=NULL WHERE {_col} IS NOT NULL "
+                f"AND {_col} NOT IN (SELECT id FROM bots)"
+            )
+
     create_sql = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='contests'"
     ).fetchone()
@@ -567,6 +628,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, _tbl, "match_seed", "INTEGER")
         _add_col(conn, _tbl, "technical_loss", "INTEGER NOT NULL DEFAULT 0")
 
+    # ── 去重：删 schema.py 旧字面索引（与上面 _PER_GAME_INDEX_COLS 循环建的重复）─────
+    # 旧索引名后缀 bot_a/bot_b/owner/contest/time（无 _id/_at）；
+    # 新索引名后缀为完整列名（bot_a_id/owner_id/contest_id/created_at）。
+    # 注意 status 列两套同名（都是 idx_m{g}_status），不能删（删了会误删新索引）。
+    # 幂等：DROP INDEX IF EXISTS 对不存在的索引是 no-op。
+    _LEGACY_IDX_SUFFIXES = ("bot_a", "bot_b", "owner", "contest", "time")
+    for _gid in _all_game_ids():
+        for _suf in _LEGACY_IDX_SUFFIXES:
+            conn.execute(f"DROP INDEX IF EXISTS idx_m{_gid}_{_suf}")
+
+    # ── 清理已下线游戏的残留 matches_<game> 表（审计：生产 matches_reversi 孤儿）──
+    # reversi 在 commit f1c92fc 下线，但生产库表残留。泛化：任何 matches_* 表
+    # 若其 game_id 不在注册表，则 DROP（数据随游戏下线一并丢弃，与 reversi 决策一致）。
+    # 安全：matches_index 是路由表（非 matches_<game> 形式），显式排除防误删。
+    _registered = {f"matches_{gid}" for gid in _all_game_ids()}
+    for (_name,) in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'matches\\_%' ESCAPE '\\'"
+    ):
+        if _name not in _registered and _name != "matches_index":
+            conn.execute(f"DROP TABLE IF EXISTS {_name}")
+
     # ── contest_pairings 轮次冻结列（预赛/决赛 P1：版本/seed/发布闸门）────────
     if "contest_pairings" in _tables_after:
         _add_col(conn, "contest_pairings", "bot_a_version_id", "INTEGER")
@@ -582,6 +664,11 @@ class Store:
         self.path = path or DEFAULT_DB_PATH
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        # FK 强制是 SQLite 的连接级设置（默认 OFF）。在连接处一次性开启，覆盖所有
+        # 访问路径（_tx / 直接 _conn / 脚本 / 备份恢复）——_tx() 内的重复开启是冗余
+        # no-op 但保留以明示意。修前 FK 仅 _tx 内 ON，绕过 _tx 的删除不级联→留孤儿。
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=5000")  # 锁等待 5s，防并发写直接报错
         self._conn.row_factory = sqlite3.Row
         with self._tx() as conn:
             conn.executescript(SCHEMA)

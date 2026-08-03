@@ -403,3 +403,119 @@ def test_cross_game_stats_cover_all_registered_games(store_with_matches):
     gids = {m["game_id"] for m in allm}
     assert gids == registry.all_ids()
     s.close()
+
+
+# ── DB 完整性修复（审计 P0）：FK 全局开 + 孤儿清理 + 去重索引 + 删孤儿表 ────────
+def test_connection_has_fk_on_at_init(tmp_path):
+    """连接级 FK=ON（审计：修前只在 _tx 内 ON，绕过 _tx 的删除不级联→留孤儿）。"""
+    s = Store(str(tmp_path / "fk.db"))
+    val = s._conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    s.close()
+    assert val == 1  # 1 = ON at connection level
+
+
+def test_raw_connection_enforces_fk(tmp_path):
+    """绕过 _tx 直接用 _conn 删 user → bots 应级联删（FK 全程 ON）。
+
+    修前（FK 仅 _tx 内 ON）此路径 FK OFF → 不级联 → 留孤儿 ratings/bot_versions。
+    """
+    s = Store(str(tmp_path / "fk_raw.db"))
+    u = s.create_user("alice", "a@ex.com", "x")
+    bid = s.create_bot(u["id"], "bot1", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    # 直接用底层连接（绕过 _tx），模拟脚本/restore 路径
+    s._conn.execute("DELETE FROM users WHERE id=?", (u["id"],))
+    s._conn.commit()
+    # users CASCADE → bots 应已级联删除
+    assert s._conn.execute("SELECT 1 FROM bots WHERE id=?", (bid,)).fetchone() is None
+    s.close()
+
+
+def test_migrate_cleans_orphan_fk_rows(tmp_path):
+    """存量孤儿（FK OFF 期间删 bot/user 残留）在迁移时被清理。"""
+    import sqlite3
+
+    db = str(tmp_path / "orphans.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE,
+            email TEXT UNIQUE, password_hash TEXT, role TEXT DEFAULT 'user',
+            display_name TEXT DEFAULT '', is_active INTEGER DEFAULT 1,
+            email_verified INTEGER DEFAULT 0, created_at TEXT);
+        CREATE TABLE bots (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER,
+            name TEXT, display_name TEXT DEFAULT '', description TEXT DEFAULT '',
+            os TEXT DEFAULT '', arch TEXT DEFAULT '', format TEXT DEFAULT 'unknown',
+            binary_path TEXT DEFAULT '', current_version INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1, is_builtin INTEGER DEFAULT 0,
+            game_id TEXT DEFAULT 'holdem', created_at TEXT, updated_at TEXT,
+            UNIQUE(owner_id, name));
+        CREATE TABLE bot_versions (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bot_id INTEGER NOT NULL, version INTEGER, binary_path TEXT,
+            upload_note TEXT DEFAULT '', checksum TEXT DEFAULT '', size_bytes INTEGER DEFAULT 0,
+            os TEXT DEFAULT '', arch TEXT DEFAULT '', format TEXT DEFAULT 'unknown',
+            uploaded_at TEXT, UNIQUE(bot_id, version));
+        CREATE TABLE password_resets (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+            expires_at TEXT, used_at TEXT, created_at TEXT);
+        CREATE TABLE contests (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT,
+            description TEXT DEFAULT '', organizer_id INTEGER, status TEXT DEFAULT 'draft',
+            registration_opens_at TEXT, registration_closes_at TEXT, starts_at TEXT,
+            ends_at TEXT, hands_per_match INTEGER DEFAULT 70, created_at TEXT,
+            game_id TEXT DEFAULT 'holdem', stages_json TEXT DEFAULT '[]',
+            current_stage_idx INTEGER DEFAULT 0, template_id TEXT DEFAULT 'holdem_swiss_ko',
+            rest_ends_at TEXT, match_config_json TEXT DEFAULT '{}');
+    """
+    )
+    conn.execute("INSERT INTO users(username,email,password_hash,created_at) VALUES('a','a@e.com','h','2026')")
+    conn.execute("INSERT INTO bots(owner_id,name,game_id,created_at,updated_at) VALUES(1,'bot1','holdem','2026','2026')")
+    # 孤儿：bot_versions.bot_id=999, password_resets.user_id=999（父行不存在）
+    conn.execute("INSERT INTO bot_versions(bot_id,version,binary_path,uploaded_at) VALUES(999,1,'/x','2026')")
+    conn.execute("INSERT INTO password_resets(token,user_id,expires_at,created_at) VALUES('tok',999,'2026','2026')")
+    conn.commit()
+    conn.close()
+
+    s = Store(db)  # 触发迁移 + 孤儿清理
+    with s._tx() as c:
+        assert c.execute("SELECT COUNT(*) FROM bot_versions WHERE bot_id=999").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM password_resets WHERE user_id=999").fetchone()[0] == 0
+    s.close()
+
+
+def test_legacy_per_game_indexes_dropped(tmp_path):
+    """schema.py 旧字面索引（idx_m{game}_bot_a 等）被迁移删除，仅保留 loop 建的。"""
+    import sqlite3
+    from bzplat.backend.store.schema import SCHEMA
+
+    db = str(tmp_path / "dupidx.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(SCHEMA)  # 含 idx_mholdem_bot_a 等 18 个旧索引
+    conn.commit()
+    conn.close()
+    s = Store(db)
+    with s._tx() as c:
+        idx = {r[1] for r in c.execute("PRAGMA index_list('matches_holdem')")}
+    s.close()
+    # 旧名应消失
+    assert "idx_mholdem_bot_a" not in idx
+    assert "idx_mholdem_time" not in idx
+    # 新名保留
+    assert "idx_mholdem_bot_a_id" in idx
+    assert "idx_mholdem_created_at" in idx
+
+
+def test_migrate_drops_unregistered_matches_table(tmp_path):
+    """下线游戏的 matches_<game> 残留表被 DROP（如 matches_reversi）。"""
+    db = str(tmp_path / "reversi.db")
+    s1 = Store(db)
+    with s1._tx() as c:
+        c.execute("CREATE TABLE matches_reversi (id TEXT PRIMARY KEY, bot_a_id INTEGER)")
+        c.execute("INSERT INTO matches_reversi(id) VALUES('r1')")
+    s1.close()
+    # 重开 → 迁移应 DROP matches_reversi（reversi 不在注册表）
+    s2 = Store(db)
+    with s2._tx() as c:
+        tabs = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    s2.close()
+    assert "matches_reversi" not in tabs
+    # matches_index（合法、名字相似）必须保留
+    assert "matches_index" in tabs
+
