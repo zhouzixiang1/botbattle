@@ -428,25 +428,8 @@ CREATE TABLE IF NOT EXISTS contest_templates (
 
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bot_versions_bot ON bot_versions(bot_id);
--- 每游戏对局表的索引（全面解耦 PR3：matches 拆三表）
-CREATE INDEX IF NOT EXISTS idx_mholdem_bot_a ON matches_holdem(bot_a_id);
-CREATE INDEX IF NOT EXISTS idx_mholdem_bot_b ON matches_holdem(bot_b_id);
-CREATE INDEX IF NOT EXISTS idx_mholdem_owner ON matches_holdem(owner_id);
-CREATE INDEX IF NOT EXISTS idx_mholdem_contest ON matches_holdem(contest_id);
-CREATE INDEX IF NOT EXISTS idx_mholdem_status ON matches_holdem(status);
-CREATE INDEX IF NOT EXISTS idx_mholdem_time ON matches_holdem(created_at);
-CREATE INDEX IF NOT EXISTS idx_mgomoku_bot_a ON matches_gomoku(bot_a_id);
-CREATE INDEX IF NOT EXISTS idx_mgomoku_bot_b ON matches_gomoku(bot_b_id);
-CREATE INDEX IF NOT EXISTS idx_mgomoku_owner ON matches_gomoku(owner_id);
-CREATE INDEX IF NOT EXISTS idx_mgomoku_contest ON matches_gomoku(contest_id);
-CREATE INDEX IF NOT EXISTS idx_mgomoku_status ON matches_gomoku(status);
-CREATE INDEX IF NOT EXISTS idx_mgomoku_time ON matches_gomoku(created_at);
-CREATE INDEX IF NOT EXISTS idx_mpencil_bot_a ON matches_pencil(bot_a_id);
-CREATE INDEX IF NOT EXISTS idx_mpencil_bot_b ON matches_pencil(bot_b_id);
-CREATE INDEX IF NOT EXISTS idx_mpencil_owner ON matches_pencil(owner_id);
-CREATE INDEX IF NOT EXISTS idx_mpencil_contest ON matches_pencil(contest_id);
-CREATE INDEX IF NOT EXISTS idx_mpencil_status ON matches_pencil(status);
-CREATE INDEX IF NOT EXISTS idx_mpencil_time ON matches_pencil(created_at);
+-- 每游戏对局表的索引由 db.py _migrate 的 _PER_GAME_INDEX_COLS 循环建（注册表派生，
+-- 覆盖第 4 游戏），不在此字面硬编码（避免重复索引 + 加游戏漏建）。
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_email_codes_user ON email_codes(user_id, purpose);
 CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id);
