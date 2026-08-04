@@ -13,6 +13,7 @@ import { Switch } from '@/components/ui/switch'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
+import Countdown from '@/components/Countdown'
 import { toast } from 'sonner'
 import { getGame, defaultMatchConfig } from '@/games'
 
@@ -27,6 +28,23 @@ interface Contest {
   game_id?: string
   match_config_json?: string
   require_real_name?: number
+  registration_opens_at?: string | null
+  registration_closes_at?: string | null
+  starts_at?: string | null
+}
+
+/** 状态相关的时间提示文案 + 倒计时目标 */
+function scheduleHint(c: Contest): { label: string; time?: string | null } | null {
+  const now = Date.now()
+  const future = (t?: string | null) => t && new Date(t).getTime() > now
+  if (c.status === 'draft' && future(c.registration_opens_at))
+    return { label: '距开放报名', time: c.registration_opens_at }
+  if (c.status === 'open' && future(c.registration_closes_at))
+    return { label: '距报名截止', time: c.registration_closes_at }
+  if (c.status === 'published' && future(c.starts_at))
+    return { label: '距开赛', time: c.starts_at }
+  if (c.status === 'rest') return { label: '休息中', time: undefined }
+  return null
 }
 
 /** 解析比赛对局参数概要（经注册表 configFields，消除 per-game if 分支）。 */
@@ -68,6 +86,10 @@ export default function Contests() {
   const [filterGame, setFilterGame] = useState('')
   const [formGameId, setFormGameId] = useState('holdem')
   const [requireRealName, setRequireRealName] = useState(false)
+  // 时间编排（datetime-local 字符串；空=不设，手动触发对应阶段）
+  const [regOpensAt, setRegOpensAt] = useState('')
+  const [regClosesAt, setRegClosesAt] = useState('')
+  const [startsAt, setStartsAt] = useState('')
   const [error, setError] = useState('')
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
   // 建赛表单：游戏由用户选（不再从模板反推），决定 match_config 字段 + 模板可选集
@@ -99,6 +121,13 @@ export default function Contests() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterGame, formGameId])
 
+  /** datetime-local 值（如 2026-01-01T14:00）→ ISO 秒级字符串（后端 naive 本地时间约定） */
+  const toIso = (v: string): string | undefined => {
+    if (!v) return undefined
+    // datetime-local 已是 YYYY-MM-DDTHH:MM，补秒
+    return v.length === 16 ? v + ':00' : v
+  }
+
   const onCreate = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
@@ -110,9 +139,15 @@ export default function Contests() {
         game_id: formGameId,
         match_config: { ...matchCfg },
         require_real_name: requireRealName,
+        registration_opens_at: toIso(regOpensAt),
+        registration_closes_at: toIso(regClosesAt),
+        starts_at: toIso(startsAt),
       })
       setTitle('')
       setDescription('')
+      setRegOpensAt('')
+      setRegClosesAt('')
+      setStartsAt('')
       await load()
       toast.success('赛事创建成功')
     } catch (err) {
@@ -222,6 +257,24 @@ export default function Contests() {
                   要求实名报名（报名者须填写姓名/手机号/学校/学号）
                 </Label>
               </div>
+              {/* 时间编排（可选；留空=手动触发对应阶段） */}
+              <div className="flex flex-wrap items-end gap-3 border-t border-border pt-3">
+                <span className="self-center text-xs font-medium text-muted-foreground">
+                  时间编排（可选，留空=手动）：
+                </span>
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>开放报名时间</span>
+                  <Input type="datetime-local" value={regOpensAt} onChange={(e) => setRegOpensAt(e.target.value)} className="h-9" />
+                </label>
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>报名截止时间</span>
+                  <Input type="datetime-local" value={regClosesAt} onChange={(e) => setRegClosesAt(e.target.value)} className="h-9" />
+                </label>
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>比赛开始时间</span>
+                  <Input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} className="h-9" />
+                </label>
+              </div>
               <Button type="submit" className="gap-1.5">
                 <Plus className="size-4" />
                 创建比赛
@@ -263,6 +316,16 @@ export default function Contests() {
                     </>
                   )}
                 </div>
+                {(() => {
+                  const hint = scheduleHint(c)
+                  if (!hint) return null
+                  return (
+                    <div className="mt-1 flex items-center gap-1 text-xs text-primary">
+                      <span className="font-medium">{hint.label}</span>
+                      {hint.time && <Countdown endsAt={hint.time} />}
+                    </div>
+                  )
+                })()}
               </li>
             ))}
           </ul>
