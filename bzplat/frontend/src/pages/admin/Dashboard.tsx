@@ -76,7 +76,8 @@ export default function Dashboard() {
                 <li key={u.id} className="flex items-center justify-between py-2 text-sm">
                   <Link
                     to={`/user/${encodeURIComponent(u.username)}`}
-                    className="font-medium text-primary hover:underline"
+                    className="min-w-0 max-w-[10rem] truncate font-medium text-primary hover:underline"
+                    title={u.username}
                   >
                     {u.username}
                   </Link>
