@@ -1,7 +1,7 @@
-/* 五子棋随机空点 bot — 长驻 JSON 行协议（对齐 board_protocol）
- * 请求: {"v":1,"t":"mv","x":int,"y":int,"me":0|1}
+/* 五子棋随机空点 bot — Botzone 标准协议（信封）。
+ * 请求信封: {"requests":[...]} 或 {"request":{"x":int,"y":int,"me":0|1}}
  *   - 黑方(me=0)首手 x=y=-1；之后 x,y 为对方上一手
- * 响应: {"x":int,"y":int}
+ * 响应信封: {"response":{"x":int,"y":int}}
  * 策略：把对方上一手落到本地棋盘，随机选一个空点返回。
  */
 #include <stdio.h>
@@ -50,16 +50,17 @@ int main(void) {
             for (int y = 0; y < SIZE; y++)
                 if (board[x][y] == 0) { xs[ec] = x; ys[ec] = y; ec++; }
         if (ec == 0) {
-            fputs("{\"x\":-1,\"y\":-1}\n", stdout);
+            fputs("{\"response\":{\"x\":-1,\"y\":-1}}\n", stdout);
             fflush(stdout);
             continue;
         }
         int idx = rand() % ec;
         int x = xs[idx], y = ys[idx];
         board[x][y] = my;
-        printf("{\"x\":%d,\"y\":%d}\n", x, y);
+        printf("{\"response\":{\"x\":%d,\"y\":%d}}\n", x, y);
         fflush(stdout);
     }
     free(line);
     return 0;
 }
+

@@ -40,7 +40,7 @@
 | 决策时限 | 默认 1s/回合（首回合×2） | 管理员可配（默认 60s） |
 | 游戏 | 站内多游戏 | `holdem` / `gomoku` / `pencil` |
 | 德州协议 | 信封 + 裸整数 response + raise=增量 | **完全照 Botzone**（信封 + 裸整数 `-1/-2/0/>0` + raise=额外量；手数 70） |
-| 棋类协议 | 聚合 `requests`/`responses` | 每步推送对方上一手，语义对齐（Botzone 化在后续 PR） |
+| 棋类协议 | 聚合 `requests`/`responses` | 每步推送对方上一手，Botzone 信封 + `{x,y}` 落子（完全照 Botzone） |
 
 上传 Bot 时请选择正确的 **游戏类型**；挑战与排行榜按 `game_id` 过滤。
 

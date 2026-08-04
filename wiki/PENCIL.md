@@ -66,22 +66,24 @@ else:
     resp = choose_legal_edge()
 ```
 
-## 本平台长驻行协议
+## 本平台长驻行协议（完全照 Botzone）
 
-请求：
+请求信封（Traditional 完整历史 / LongRunning 单 request）：
 
 ```json
-{"v":1,"t":"mv","x":3,"y":4,"pass":0,"me":0,"scores":[1,0]}
+{"request":{"x":3,"y":4,"pass":0,"me":0,"scores":[1,0]}}
 ```
 
 | 字段 | 含义 |
 |------|------|
 | `x`,`y` | 对方上一手边坐标；首手 / 连走后通知为 `-1,-1` |
-| `pass` | `1` 时必须响应 `{"x":-1,"y":-1}` |
+| `pass` | `1` 时必须响应 `{"response":{"x":-1,"y":-1}}` |
 | `me` | 本方座位 |
 | `scores` | 当前红/蓝得分 |
 
-响应：`{"x":5,"y":4}`；pass 回合：`{"x":-1,"y":-1}`。
+响应信封：`{"response":{"x":5,"y":4}}`；pass 回合：`{"response":{"x":-1,"y":-1}}`。
+
+完全遵循 Botzone 标准（信封 + `{x,y}` 落子）。详见 [协议规范](#/wiki?slug=protocol)。
 
 ### 连走时序（与 Botzone 对齐）
 

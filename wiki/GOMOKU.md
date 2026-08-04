@@ -41,14 +41,14 @@ placeAt(requests[turnID].x, requests[turnID].y); // 本回合最新对手着
 
 `placeAt`：仅当 `x>=0 && y>=0` 才落子（跳过首手 `-1,-1`）。
 
-## 本平台长驻行协议
+## 本平台长驻行协议（完全照 Botzone）
 
-整场对局进程不退出；裁判每步推送一行，Bot 回一行。
+整场对局进程不退出；裁判每步推送一行 Botzone 信封，Bot 回一行信封。
 
-请求：
+请求信封（Traditional 完整历史 / LongRunning 单 request）：
 
 ```json
-{"v":1,"t":"mv","x":7,"y":7,"me":0}
+{"request":{"x":7,"y":7,"me":0}}
 ```
 
 | 字段 | 含义 |
@@ -56,13 +56,14 @@ placeAt(requests[turnID].x, requests[turnID].y); // 本回合最新对手着
 | `x`,`y` | 对方上一手；黑方首手为 `-1,-1` |
 | `me` | 本方座位 `0` 黑 / `1` 白 |
 
-响应：
+响应信封：
 
 ```json
-{"x":7,"y":8}
+{"response":{"x":7,"y":8}}
 ```
 
-与 Botzone **字段语义对齐**，但不发送完整历史——Bot 应在内存中维护棋盘。
+完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准（信封 + `{x,y}` 落子）。Botzone 标准 Bot 可直接跑。详见 [协议规范](#/wiki?slug=protocol)。
+
 
 ## 事件（观赛 / 回放）
 
