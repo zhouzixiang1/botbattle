@@ -1,6 +1,7 @@
 """组织者比赛：阶段模板、休息换 Bot、对阵调度。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -51,10 +52,29 @@ def _validate_contest_times(
 
     时间是 naive 本地 ISO 字符串，字符串字典序 == 时间序（因格式固定到秒）。
     """
+    for label, t in (("开放报名", opens_at), ("报名截止", closes_at), ("比赛开始", starts_at)):
+        if t is not None:
+            _validate_iso(t, label)
     if opens_at and closes_at and opens_at > closes_at:
         raise ValueError("报名截止时间必须晚于开放报名时间")
     if closes_at and starts_at and closes_at > starts_at:
         raise ValueError("比赛开始时间必须晚于报名截止时间")
+
+
+def _validate_iso(t: str, label: str = "时间") -> None:
+    """校验 naive 本地 ISO 字符串格式（YYYY-MM-DDTHH:MM:SS，无时区）。
+
+    非标准格式（带毫秒/时区/非零填充）会破坏字符串字典序比较。规范化到秒级。
+    """
+    if not isinstance(t, str):
+        raise ValueError(f"{label}必须是 ISO 时间字符串")
+    try:
+        dt = datetime.fromisoformat(t)
+    except ValueError:
+        raise ValueError(f"{label}格式非法（需 YYYY-MM-DDTHH:MM:SS）: {t}")
+    # 拒绝带时区的（naive 约定）
+    if dt.tzinfo is not None:
+        raise ValueError(f"{label}不应带时区（平台用 naive 本地时间）: {t}")
 
 
 def _parse_stages(c: dict) -> list[dict]:
@@ -98,6 +118,17 @@ class ContestManager:
     def __init__(self, store: Store, orch: MatchOrchestrator) -> None:
         self.store = store
         self.orch = orch
+        # per-contest 锁：串行化所有写状态路径（start/publish/resume/advance/maybe_finish/
+        # _dispatch_pending），防止 on_match_done 并发回调 + scheduler 并发导致重复生成轮次。
+        self._locks: dict[int, asyncio.Lock] = {}
+
+    def _lock(self, contest_id: int) -> asyncio.Lock:
+        """取（或建）该 contest 的锁。"""
+        lk = self._locks.get(contest_id)
+        if lk is None:
+            lk = asyncio.Lock()
+            self._locks[contest_id] = lk
+        return lk
 
     def create(
         self,
@@ -320,7 +351,9 @@ class ContestManager:
     async def start(self, contest_id: int) -> dict:
         """立即开赛（手动触发，跳过排期等待）。
 
-        生成对阵 + 设 scheduled_at=now（立即开打）+ dispatch 全部。兼容手动开赛场景。
+        - **open/draft**：生成对阵 + 设 scheduled_at=now（立即开打）+ dispatch 全部。
+        - **published**：排期已发布（pairing 已生成），**不重新生成**——仅把现有 pending
+          pairing 的 scheduled_at 改成 now（立即到点）+ dispatch。避免重复生成 pairing。
         若要走两阶段（截止报名→出排期→到开赛时间再开打），用 publish() + 调度器。
         """
         c = self.store.get_contest(contest_id)
@@ -330,6 +363,16 @@ class ContestManager:
             raise ValueError("仅 open/draft/published 可开赛")
         game_id = c.get("game_id") or "holdem"
         self._assert_engine(game_id)
+
+        # published 态：pairing 已存在，直接改 scheduled_at=now 立即开打（不重新生成）
+        if c["status"] == CONTEST_PUBLISHED:
+            now = _now()
+            for p in self.store.list_contest_pairings(contest_id, stage_idx=int(c.get("current_stage_idx") or 0)):
+                if p.get("status") == "pending" and not p.get("match_id"):
+                    self.store.update_contest_pairing(p["id"], scheduled_at=now)
+            self.store.update_contest(contest_id, starts_at=now, rest_ends_at=None)
+            await self._dispatch_pending(contest_id, int(c.get("current_stage_idx") or 0))
+            return self.store.get_contest(contest_id)
 
         entries = self.store.list_contest_entries(contest_id)
         if len(entries) < 2:
@@ -450,9 +493,16 @@ class ContestManager:
         else:
             specs = generate_stage_pairings(stage, bot_ids)
 
-        # 逐场排期：schedule_immediately 时全 now；否则按 starts_at + round stagger
-        base = _now() if schedule_immediately else (c.get("starts_at") or _now())
-        stagger_min = int(stage.get("round_stagger_minutes") or 0)
+        # 逐场排期：schedule_immediately 时全 now；否则按 base + round stagger。
+        # base = starts_at（仅第一阶段用赛事开赛时间）；后续阶段（stage_idx>0）用 now
+        # （阶段间排期基准：rest 恢复/晋级后的新阶段从当前时刻起排）。
+        if schedule_immediately:
+            base = _now()
+        elif stage_idx > 0:
+            base = _now()  # 后续阶段从当前时刻排期（不用最初 starts_at，已过期）
+        else:
+            base = c.get("starts_at") or _now()
+        stagger_min = max(0, int(stage.get("round_stagger_minutes") or 0))  # 非负
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
         for sp in specs:
@@ -698,7 +748,16 @@ class ContestManager:
                 self.store.update_entry(contest_id, e["user_id"], eliminated=1)
 
     async def maybe_finish(self, contest_id: int) -> dict | None:
-        """对局结束回调：检查当前阶段是否完成，进入 rest 或下一阶段。"""
+        """对局结束回调：检查当前阶段是否完成，进入 rest 或下一阶段。
+
+        加 per-contest 锁串行化——防止多场对局同时完成的 on_match_done 并发回调
+        + scheduler 并发调用导致重复生成轮次/重复对局。
+        """
+        async with self._lock(contest_id):
+            return await self._maybe_finish_locked(contest_id)
+
+    async def _maybe_finish_locked(self, contest_id: int) -> dict | None:
+        """maybe_finish 的实际逻辑（调用方已持锁）。"""
         c = self.store.get_contest(contest_id)
         if not c or c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
             return None

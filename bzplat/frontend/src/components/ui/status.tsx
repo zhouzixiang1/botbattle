@@ -83,9 +83,10 @@ const STATUS_VARIANT: Record<string, { variant: 'default' | 'secondary' | 'destr
   running: { variant: 'default', label: '进行中' },
   pending: { variant: 'secondary', label: '排队中' },
   aborted: { variant: 'destructive', label: '已中止' },
-  // 赛事阶段
+  // 赛事阶段（running 与对局共用「进行中」，上方已声明）
   finished: { variant: 'default', label: '已结束' },
   open: { variant: 'default', label: '报名中' },
+  published: { variant: 'secondary', label: '排期已发布' },
   draft: { variant: 'secondary', label: '草稿' },
   cancelled: { variant: 'destructive', label: '已取消' },
   // 邮件

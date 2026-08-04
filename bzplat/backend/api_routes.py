@@ -1456,7 +1456,7 @@ async def admin_patch_contest(
             c0 = _store(request).get_contest(contest_id)
             if not c0:
                 raise HTTPException(404, "比赛不存在")
-            if c0["status"] in ("open", "draft"):
+            if c0["status"] in ("open", "draft", "published"):
                 try:
                     contest = await _contests(request).start(contest_id)
                 except ValueError as e:
