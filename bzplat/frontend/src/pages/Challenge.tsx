@@ -221,8 +221,8 @@ export default function Challenge() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="1">座位 1（后手/白）</SelectItem>
                     <SelectItem value="0">座位 0（先手/黑）</SelectItem>
+                    <SelectItem value="1">座位 1（后手/白）</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -257,6 +257,12 @@ export default function Challenge() {
           <Play className="size-4" />
           {busy ? '发起中…' : humanMode ? '开始人类对战' : '开始对局'}
         </Button>
+        {/* disabled 原因提示：仅在按钮不可用时给出一句引导 */}
+        {!busy && (() => {
+          if (!myBotId) return <p className="text-center text-xs text-muted-foreground">请先选择你的 Bot</p>
+          if (!humanMode && !opp) return <p className="text-center text-xs text-muted-foreground">请选择对手 Bot</p>
+          return null
+        })()}
           </CardContent>
         </Card>
       </form>

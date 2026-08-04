@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, Eye, Flame, ArrowRight, Swords, LogIn, UserPlus } from 'lucide-react'
+import { Heart, Eye, Flame, ArrowRight, Swords, LogIn, UserPlus, Upload, Trophy as TrophyIcon } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -48,9 +48,21 @@ export default function Home() {
 
   useEffect(() => {
     setLoading(true)
-    const q = gameId ? `?limit=30&game_id=${encodeURIComponent(gameId)}` : '?limit=30'
+    const q = gameId ? `?limit=50&game_id=${encodeURIComponent(gameId)}` : '?limit=50'
     apiGet<{ matches: Match[] }>(`/api/matches${q}`)
-      .then((d) => setMatches(d.matches || []))
+      .then((d) => {
+        // 首页去重：同一场赛事(contest_id)的批量对阵只保留最新 1 条，
+        // 避免首页被一场赛事的内部对阵刷屏（让首页展示更多样化的动态）。
+        const seenContest = new Set<string | number | null>()
+        const deduped = (d.matches || []).filter((m) => {
+          const cid = (m as Match & { contest_id?: string | number | null }).contest_id
+          if (!cid) return true // 非赛事对局保留
+          if (seenContest.has(cid)) return false // 同赛事只留首条
+          seenContest.add(cid)
+          return true
+        })
+        setMatches(deduped.slice(0, 30))
+      })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
   }, [gameId])
@@ -102,6 +114,44 @@ export default function Home() {
                     登录
                   </Link>
                 </Button>
+              </div>
+            )}
+            {/* 已登录新用户「快速开始」三步指引（loading 完成后才显示，避免闪烁） */}
+            {isLoggedIn && !loading && (
+              <div className="flex flex-col gap-3 pt-1 sm:flex-row">
+                <Link
+                  to="/my-bots"
+                  className="group flex flex-1 items-center gap-2.5 rounded-lg border border-border bg-card/60 px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-accent"
+                >
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 font-mono text-xs font-semibold text-primary">1</span>
+                  <Upload className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+                  <span className="min-w-0">
+                    <span className="block font-medium text-foreground">上传 Bot</span>
+                    <span className="block text-xs text-muted-foreground">提交二进制，选择游戏</span>
+                  </span>
+                </Link>
+                <Link
+                  to="/challenge"
+                  className="group flex flex-1 items-center gap-2.5 rounded-lg border border-border bg-card/60 px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-accent"
+                >
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 font-mono text-xs font-semibold text-primary">2</span>
+                  <Swords className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+                  <span className="min-w-0">
+                    <span className="block font-medium text-foreground">发起挑战</span>
+                    <span className="block text-xs text-muted-foreground">搜索对手或自博弈</span>
+                  </span>
+                </Link>
+                <Link
+                  to="/leaderboard"
+                  className="group flex flex-1 items-center gap-2.5 rounded-lg border border-border bg-card/60 px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-accent"
+                >
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 font-mono text-xs font-semibold text-primary">3</span>
+                  <TrophyIcon className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+                  <span className="min-w-0">
+                    <span className="block font-medium text-foreground">查看排行</span>
+                    <span className="block text-xs text-muted-foreground">Glicko-2 天梯榜</span>
+                  </span>
+                </Link>
               </div>
             )}
           </div>

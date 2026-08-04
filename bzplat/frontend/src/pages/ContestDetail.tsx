@@ -21,6 +21,7 @@ import BracketTree from '@/components/contest/BracketTree'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { gameLabel } from '@/lib/games'
+import { toast } from 'sonner'
 
 const STAGE_TYPE_LABEL: Record<string, string> = {
   swiss: '瑞士轮',
@@ -191,11 +192,12 @@ export default function ContestDetail() {
     user.real_name && user.phone && user.school && user.student_id
   )
 
-  const act = async (path: string, body?: unknown) => {
+  const act = async (path: string, body?: unknown, okMsg?: string) => {
     setError('')
     try {
       await apiJson(path, 'POST', body)
       await load()
+      if (okMsg) toast.success(okMsg)
     } catch (e) {
       setError(errMsg(e))
     }
@@ -262,22 +264,22 @@ export default function ContestDetail() {
       {/* 操作区 */}
       <div className="mt-4 flex flex-wrap gap-2">
         {isOrg && contest.status === 'draft' && (
-          <Button onClick={() => void act(`/api/contests/${id}/open`)} className="gap-1.5">
+          <Button onClick={() => void act(`/api/contests/${id}/open`, undefined, '已开放报名')} className="gap-1.5">
             <DoorOpen className="size-4" />开放报名
           </Button>
         )}
         {isOrg && (contest.status === 'open' || contest.status === 'draft') && (
-          <Button variant="outline" onClick={() => void act(`/api/contests/${id}/start`)} className="gap-1.5">
+          <Button variant="outline" onClick={() => void act(`/api/contests/${id}/start`, undefined, '比赛已开始')} className="gap-1.5">
             <Play className="size-4" />开始比赛
           </Button>
         )}
         {isOrg && contest.status === 'rest' && (
-          <Button onClick={() => void act(`/api/contests/${id}/resume`)}>结束休息 / 下一阶段</Button>
+          <Button onClick={() => void act(`/api/contests/${id}/resume`, undefined, '已进入下一阶段')}>结束休息 / 下一阶段</Button>
         )}
         {isLoggedIn && contest.status === 'open' && (
           <div className="flex flex-wrap items-center gap-2">
             {needsRealName && (
-              <span className="text-sm text-amber-600 dark:text-amber-500">
+              <span className="text-sm text-warning">
                 本赛事要求实名报名，请先{' '}
                 <Link to="/settings" className="font-medium underline">填写实名信息</Link>
               </span>
@@ -290,7 +292,7 @@ export default function ContestDetail() {
                 {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!botId || needsRealName} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) })}>
+            <Button variant="outline" disabled={!botId || needsRealName} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) }, '报名成功')}>
               报名派遣
             </Button>
           </div>
@@ -305,7 +307,7 @@ export default function ContestDetail() {
                 {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!botId} onClick={() => void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) })}>
+            <Button variant="outline" disabled={!botId} onClick={() => void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) }, '派遣 Bot 已更换')}>
               确认更换
             </Button>
           </div>
@@ -381,7 +383,7 @@ export default function ContestDetail() {
                   size="sm"
                   variant="outline"
                   className="ml-auto h-7 gap-1 text-xs"
-                  onClick={() => void act(`/api/contests/${id}/entries/bulk`, { assign_all: true, game_id: contest.game_id })}
+                  onClick={() => void act(`/api/contests/${id}/entries/bulk`, { assign_all: true, game_id: contest.game_id }, '批量指派完成')}
                 >
                   <Plus className="size-3" />批量指派
                 </Button>

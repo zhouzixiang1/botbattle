@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
 import PageStub from '@/components/PageStub'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Table,
@@ -16,14 +17,15 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
-import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
+import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { MetricCard } from '@/components/ui/metric-card'
 import { TierBadge } from '@/components/tier-badge'
 import Comments from '@/components/Comments'
 import { apiGet, apiJson, errMsg } from '@/api'
+import { toast } from 'sonner'
 import { useAuth } from '@/components/useAuth'
 import { gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
-import { fmtTime } from '@/lib/format'
+import { fmtTime, fmtRating, fmtDate } from '@/lib/format'
 
 /* ── 类型 ─────────────────────────────────────────────── */
 interface BotProfile {
@@ -155,6 +157,7 @@ function RatingChart({ points }: { points: RatingPoint[] }) {
 export default function BotDetail() {
   const { id } = useParams<{ id: string }>()
   const botId = Number(id)
+  const navigate = useNavigate()
   const { user } = useAuth()
   const [profile, setProfile] = useState<BotProfile | null>(null)
   const [matches, setMatches] = useState<MatchRow[]>([])
@@ -201,6 +204,7 @@ export default function BotDetail() {
       .then(() => {
         setFavorited(!favorited)
         setFavCount((c) => c + (favorited ? -1 : 1))
+        toast.success(favorited ? '已取消收藏' : '收藏成功')
       })
       .catch((e) => setError(errMsg(e)))
   }
@@ -208,7 +212,20 @@ export default function BotDetail() {
   if (loading) {
     return (
       <PageStub title="Bot 详情">
-        <Loading />
+        {/* 骨架屏：信息卡 + 指标卡轮廓，避免裸 spinner 布局抖动 */}
+        <Card className="mb-4">
+          <CardContent className="flex flex-col gap-5 py-5 lg:flex-row lg:items-start">
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-7 w-40" />
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-4 w-48" />
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[24rem]">
+              {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-20" />)}
+            </div>
+          </CardContent>
+        </Card>
+        <Card><CardContent className="py-4"><Skeleton className="h-32" /></CardContent></Card>
       </PageStub>
     )
   }
@@ -216,8 +233,14 @@ export default function BotDetail() {
     return (
       <PageStub title="Bot 详情">
         <ErrorMsg msg={error || 'Bot 不存在'} className="mb-3" />
-        <Button asChild variant="ghost" size="sm">
-          <Link to="/leaderboard"><ArrowLeft className="size-4" /> 返回排行榜</Link>
+        {/* 后退策略：有历史则返回上一页，直接 URL 进入（无历史）fallback 到排行榜 */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="gap-1"
+          onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/leaderboard'))}
+        >
+          <ArrowLeft className="size-4" /> 返回
         </Button>
       </PageStub>
     )
@@ -263,7 +286,7 @@ export default function BotDetail() {
               </span>
               <span>版本 v{profile.current_version ?? 1}</span>
               <span className="max-w-full break-all font-mono">{profile.format}/{profile.os}-{profile.arch}</span>
-              {profile.created_at && <span>创建于 {profile.created_at.slice(0, 10)}</span>}
+              {profile.created_at && <span>创建于 {fmtDate(profile.created_at)}</span>}
             </div>
             {user && (
               <Button
@@ -281,7 +304,7 @@ export default function BotDetail() {
 
           {/* 指标 */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[24rem] lg:shrink-0">
-            <MetricCard label="Rating" value={profile.rating != null ? Number(profile.rating).toFixed(0) : '—'} hint={profile.rd != null ? `rd ${Number(profile.rd).toFixed(0)}` : undefined} />
+            <MetricCard label="Rating" value={fmtRating(profile.rating)} hint={profile.rd != null ? `rd ${Number(profile.rd).toFixed(0)}` : undefined} />
             <MetricCard label="胜率" value={fmtPct(wr)} hint={`共 ${total} 场`} />
             <MetricCard label="胜" value={profile.wins ?? 0} danger={false} />
             <MetricCard label="负/平" value={profile.losses ?? 0} hint={`平 ${profile.draws ?? 0}`} danger />

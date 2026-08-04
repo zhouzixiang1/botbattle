@@ -30,3 +30,14 @@ export function fmtDate(iso: string | null | undefined, fallback = '—'): strin
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
+
+/**
+ * 统一 Rating 展示格式（一位小数，如 1850.3）。
+ *
+ * 全站口径：Glicko-2 Rating 是浮点，统一一位小数避免各页 toFixed(0)/toFixed(1) 混用导致
+ * 同一 Bot 在排行榜显示 1850.3、在 Bot 详情卡显示 1850 的困惑。
+ */
+export function fmtRating(r: number | null | undefined, fallback = '—'): string {
+  if (r == null || Number.isNaN(r)) return fallback
+  return Number(r).toFixed(1)
+}

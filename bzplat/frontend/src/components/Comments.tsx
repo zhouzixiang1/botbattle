@@ -123,7 +123,7 @@ export default function Comments({
           </form>
         )}
         {comments.length === 0 ? (
-          <EmptyState text="暂无评论" className="py-6" />
+          <EmptyState text="暂无评论" className="py-6" icon={<MessageSquare className="size-7 opacity-40" />} />
         ) : (
           <div className="space-y-2">
             {comments.map((c) => (
