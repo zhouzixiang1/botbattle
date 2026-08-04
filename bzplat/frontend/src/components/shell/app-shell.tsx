@@ -26,11 +26,7 @@ const Contests = lazy(() => import('@/pages/Contests'))
 const ContestDetail = lazy(() => import('@/pages/ContestDetail'))
 const MyBots = lazy(() => import('@/pages/MyBots'))
 const Wiki = lazy(() => import('@/pages/Wiki'))
-<<<<<<< HEAD
 const Judges = lazy(() => import('@/pages/Judges'))
-const DataDownload = lazy(() => import('@/pages/DataDownload'))
-=======
->>>>>>> origin/chore/remove-dataset-download
 const History = lazy(() => import('@/pages/History'))
 const MatchViewer = lazy(() => import('@/pages/MatchViewer'))
 const BotDetail = lazy(() => import('@/pages/BotDetail'))
@@ -317,11 +313,7 @@ export function AppShell() {
               <Route path="/play/:id" element={<HumanPlay />} />
               <Route path="/my-bots" element={<MyBots />} />
               <Route path="/wiki" element={<Wiki />} />
-<<<<<<< HEAD
               <Route path="/judges" element={<Judges />} />
-              <Route path="/data" element={<DataDownload />} />
-=======
->>>>>>> origin/chore/remove-dataset-download
               <Route path="/contests" element={<Contests />} />
               <Route path="/contests/:id" element={<ContestDetail />} />
               <Route path="/user/:name" element={<UserProfile />} />
