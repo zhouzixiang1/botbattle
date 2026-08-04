@@ -256,8 +256,8 @@ export default function BotDetail() {
       <Card className="mb-5">
         <CardContent className="flex flex-col gap-5 py-5 lg:flex-row lg:items-start">
           <div className="min-w-0 flex-1 space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-xl font-bold text-foreground">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h2 className="max-w-full break-words text-xl font-bold text-foreground [overflow-wrap:anywhere]">
                 {profile.display_name || profile.name}
               </h2>
               {profile.tier_name && (

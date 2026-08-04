@@ -397,7 +397,7 @@ export default function ContestDetail() {
                   <ul className="space-y-1.5 text-sm">
                     {entries.map((e) => (
                       <li key={e.id} className="flex flex-wrap items-center gap-2">
-                        <Link to={`/bot/${e.bot_id}`} className="font-medium text-foreground hover:text-primary">
+                        <Link to={`/bot/${e.bot_id}`} className="max-w-[12rem] truncate font-medium text-foreground hover:text-primary" title={e.bot_display || e.bot_name || `#${e.bot_id}`}>
                           {e.bot_display || e.bot_name || `#${e.bot_id}`}
                         </Link>
                         {e.owner_name && (
@@ -406,7 +406,7 @@ export default function ContestDetail() {
                           </Link>
                         )}
                         {e.seed ? <span className="text-xs text-muted-foreground">种子 {e.seed}</span> : ''}
-                        {e.group_id && <Badge variant="secondary" className="text-[10px]">{e.group_id}</Badge>}
+                        {e.group_id && <Badge variant="secondary" className="max-w-[8rem] truncate text-[10px]">{e.group_id}</Badge>}
                         {e.eliminated ? <Badge variant="destructive" className="text-[10px]">淘汰</Badge> : ''}
                         {isOrg && (contest.status === 'draft' || contest.status === 'open') && (
                           <Button

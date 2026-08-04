@@ -140,8 +140,10 @@ export default function BotsTab() {
               <Fragment key={b.id}>
                 <tr className="hover:bg-accent">
                   <td className="px-3 py-2 font-mono text-muted-foreground">{b.id}</td>
-                  <td className="px-3 py-2 font-medium text-foreground">
-                    {b.display_name || b.name}
+                  <td className="max-w-[16rem] px-3 py-2 font-medium text-foreground">
+                    <span className="block truncate" title={b.display_name || b.name}>
+                      {b.display_name || b.name}
+                    </span>
                     {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
                   </td>
                   <td className="px-3 py-2">
