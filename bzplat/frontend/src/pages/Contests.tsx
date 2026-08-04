@@ -291,10 +291,10 @@ export default function Contests() {
           <ul className="divide-y divide-border">
             {list.map((c) => (
               <li key={c.id} className="min-w-0 px-4 py-3">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <div className="flex min-w-0 items-center gap-2">
                   <Link
                     to={`/contests/${c.id}`}
-                    className="min-w-0 max-w-full break-words text-lg font-medium text-primary [overflow-wrap:anywhere] hover:underline"
+                    className="min-w-0 shrink truncate text-lg font-medium text-primary hover:underline"
                     title={c.title}
                   >
                     {c.title}

@@ -108,12 +108,12 @@ export default function History() {
             {matches.map((m) => (
               <li key={m.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
                 <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
-                    <Link to={`/bot/${m.bot_a_id}`} className="hover:text-primary">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2 font-medium text-foreground">
+                    <Link to={`/bot/${m.bot_a_id}`} className="min-w-0 max-w-[10rem] truncate hover:text-primary" title={m.bot_a_display || m.bot_a_name}>
                       {m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`}
                     </Link>
                     <span className="text-muted-foreground">vs</span>
-                    <Link to={`/bot/${m.bot_b_id}`} className="hover:text-primary">
+                    <Link to={`/bot/${m.bot_b_id}`} className="min-w-0 max-w-[10rem] truncate hover:text-primary" title={m.bot_b_display || m.bot_b_name}>
                       {m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`}
                     </Link>
                   </div>
