@@ -43,10 +43,12 @@ CREATE TABLE IF NOT EXISTS bots (
     is_active       INTEGER NOT NULL DEFAULT 1,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
     game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    runtime_mode    TEXT    NOT NULL DEFAULT 'longrunning',
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
     UNIQUE(owner_id, name),
-    CONSTRAINT chk_format CHECK (format IN ('elf', 'pe', 'macho', 'unknown'))
+    CONSTRAINT chk_format CHECK (format IN ('elf', 'pe', 'macho', 'unknown')),
+    CONSTRAINT chk_runtime CHECK (runtime_mode IN ('traditional', 'longrunning'))
 );
 
 CREATE TABLE IF NOT EXISTS bot_versions (
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     os              TEXT    NOT NULL DEFAULT '',
     arch            TEXT    NOT NULL DEFAULT '',
     format          TEXT    NOT NULL DEFAULT 'unknown',
+    runtime_mode    TEXT    NOT NULL DEFAULT 'longrunning',
     uploaded_at     TEXT    NOT NULL,
     UNIQUE(bot_id, version)
 );
@@ -472,6 +475,13 @@ REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fal
 
 # 合法 game_id（与 REGISTERED_ENGINES 镜像，守护测试白名单）
 VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
+
+# ── Botzone 运行模式（上传时标明，runner 据此选传输路径）──────────────────
+# traditional: 每回合发完整历史信封（Bot 自重放）；longrunning: 首回合完整 + 握手后单 request。
+RUNTIME_TRADITIONAL = "traditional"
+RUNTIME_LONGRUNNING = "longrunning"
+VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
+DEFAULT_RUNTIME_MODE = RUNTIME_LONGRUNNING  # 平台默认长驻
 
 # ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────
 # 经验奖励：各类活动获得的经验

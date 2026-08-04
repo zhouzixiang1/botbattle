@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { Upload, Trash2, Pencil, Save, X, Power, Bot as BotIcon } from 'lucide-react'
+import { Upload, Trash2, Pencil, Save, X, Power, Bot as BotIcon, History } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
@@ -11,9 +11,11 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useConfirm } from '@/hooks/use-confirm'
 import { apiForm, apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
+import BotVersionManager from '@/components/BotVersionManager'
 
 interface Bot {
   id: number
@@ -27,6 +29,7 @@ interface Bot {
   is_active?: number
   updated_at?: string
   game_id?: string
+  runtime_mode?: string
 }
 
 export default function MyBots() {
@@ -39,8 +42,11 @@ export default function MyBots() {
   const [displayName, setDisplayName] = useState('')
   const [description, setDescription] = useState('')
   const [gameId, setGameId] = useState('holdem')
+  const [runtimeMode, setRuntimeMode] = useState('longrunning')
   const [filterGame, setFilterGame] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  // 版本管理对话框状态：打开的 bot id（null = 关闭）+ 当前 bot 的运行模式
+  const [verBot, setVerBot] = useState<{ id: number; name: string; current: number; mode: string } | null>(null)
 
   const load = useCallback(async () => {
     if (!isLoggedIn) return
@@ -72,6 +78,7 @@ export default function MyBots() {
         display_name: displayName,
         description,
         game_id: gameId,
+        runtime_mode: runtimeMode,
         file,
       })
       setName('')
@@ -174,6 +181,23 @@ export default function MyBots() {
               </Select>
             </div>
             <div className="space-y-1.5">
+              <Label>Botzone 运行模式</Label>
+              <Select value={runtimeMode} onValueChange={setRuntimeMode}>
+                <SelectTrigger className="mt-1.5 h-9 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="longrunning">LongRunning（长驻，推荐）</SelectItem>
+                  <SelectItem value="traditional">Traditional（传统）</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {runtimeMode === 'longrunning'
+                  ? '进程整场不重启；首回合完整历史 + 握手后单 request。'
+                  : '每回合发完整历史信封，Bot 自重放重建状态。'}
+              </p>
+            </div>
+            <div className="space-y-1.5">
               <Label htmlFor="upload-name">名称（唯一标识）</Label>
               <Input
                 id="upload-name"
@@ -273,6 +297,9 @@ export default function MyBots() {
                       <span className="rounded bg-muted px-1.5 py-0.5">
                         format: {b.format || 'unknown'}
                       </span>
+                      <span className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                        {b.runtime_mode || 'longrunning'}
+                      </span>
                       <span>v{b.current_version ?? 0}</span>
                       <span>{b.is_active ? '启用' : '停用'}</span>
                     </div>
@@ -282,6 +309,28 @@ export default function MyBots() {
                       <Power className="size-3.5" />
                       {b.is_active ? '停用' : '启用'}
                     </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            setVerBot({
+                              id: b.id,
+                              name: b.display_name || b.name,
+                              current: b.current_version ?? 0,
+                              mode: b.runtime_mode || 'longrunning',
+                            })
+                          }
+                          className="gap-1"
+                        >
+                          <History className="size-3.5" />
+                          版本
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>上传新版本 / 查看历史 / 回滚</TooltipContent>
+                    </Tooltip>
                     <Button type="button" variant="outline" size="sm" onClick={() => startEdit(b)} className="gap-1">
                       <Pencil className="size-3.5" />
                       编辑
@@ -318,6 +367,14 @@ export default function MyBots() {
       </div>{/* /右栏 */}
       </div>{/* /桌面双栏栅格 */}
       {confirmDialog}
+      <BotVersionManager
+        botId={verBot?.id ?? null}
+        botName={verBot?.name}
+        currentVersion={verBot?.current}
+        currentRuntimeMode={verBot?.mode}
+        onClose={() => setVerBot(null)}
+        onChanged={load}
+      />
     </PageStub>
   )
 }
