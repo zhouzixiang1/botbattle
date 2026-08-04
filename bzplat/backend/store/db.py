@@ -2368,54 +2368,6 @@ class Store:
                     (match_id,),
                 )
 
-    # ── matchpacks（对局数据集下载）──────────────────────────
-    def matchpack_months(self, game_id: str | None = None) -> list[dict]:
-        """列出有对局数据的游戏×月份分组（count），用于数据下载页。
-
-        跨三表 UNION ALL（每表 game_id 固定，故 game_id 列直接取自表名）。
-        """
-        with self._tx() as c:
-            base = (
-                "SELECT game_id, substr(created_at,1,7) AS month, COUNT(*) AS cnt "
-                "FROM {tbl} WHERE status='completed' AND created_at IS NOT NULL "
-                "AND substr(created_at,1,7) <> '' GROUP BY game_id, substr(created_at,1,7)"
-            )
-            if game_id:
-                # 单表
-                tbl = _matches_table(game_id)
-                sql = base.format(tbl=tbl) + " ORDER BY month DESC, game_id"
-                return [_row(r) for r in c.execute(sql)]
-            # 跨游戏 UNION ALL（每子查询 GROUP BY，空表不产生行）
-            subs = [base.format(tbl=_matches_table(gid)) for gid in _all_game_ids()]
-            union = " UNION ALL ".join(subs)
-            sql = f"SELECT game_id, month, SUM(cnt) AS cnt FROM ({union}) GROUP BY game_id, month ORDER BY month DESC, game_id"
-            return [_row(r) for r in c.execute(sql)]
-
-    def matchpack_rows(
-        self, game_id: str, month: str, *, limit: int = 10000
-    ) -> list[dict]:
-        """返回某游戏×月份的全部已完成对局（含 replay events），用于打包下载。
-
-        game_id 必填，直接查该游戏表（match_replays 仍是全局单表，按 match_id join）。
-        """
-        with self._tx() as c:
-            tbl = _matches_table(game_id)
-            rows = c.execute(
-                f"SELECT m.id, m.game_id, m.bot_a_id, m.bot_b_id, m.winner, "
-                "m.earnings_a, m.earnings_b, m.hands_played, m.total_hands, "
-                "m.match_type, m.created_at, m.ended_at, m.n_dots, "
-                "ba.name AS bot_a_name, bb.name AS bot_b_name, "
-                "r.events_json, r.hands_json "
-                f"FROM {tbl} m LEFT JOIN bots ba ON m.bot_a_id=ba.id "
-                "LEFT JOIN bots bb ON m.bot_b_id=bb.id "
-                "LEFT JOIN match_replays r ON r.match_id=m.id "
-                "WHERE m.status='completed' AND m.game_id=? "
-                "AND substr(m.created_at,1,7)=? "
-                "ORDER BY m.created_at LIMIT ?",
-                (game_id, month, max(1, min(limit, 50000))),
-            ).fetchall()
-            return [_row(r) for r in rows]
-
     # ── follows（关注关系）────────────────────────────────────
     def follow(self, follower_id: int, followee_id: int) -> bool:
         """关注；返回 True 表示新建关注，False 表示已存在。不能关注自己。"""

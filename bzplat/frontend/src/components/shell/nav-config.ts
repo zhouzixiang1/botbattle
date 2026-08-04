@@ -5,9 +5,7 @@ import {
   Medal,
   Bot,
   BookOpen,
-  Database,
   Shield,
-  ScrollText,
   History as HistoryIcon,
   type LucideIcon,
 } from 'lucide-react'
@@ -31,8 +29,6 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/contests', label: '比赛', icon: Medal },
   { to: '/my-bots', label: '我的 Bot', icon: Bot },
   { to: '/wiki', label: 'Wiki', icon: BookOpen },
-  { to: '/judges', label: '裁判', icon: ScrollText },
-  { to: '/data', label: '数据', icon: Database },
 ]
 
 /** 管理入口（仅 admin/organizer 可见，单独放） */
