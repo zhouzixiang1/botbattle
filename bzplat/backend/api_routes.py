@@ -1878,6 +1878,60 @@ def _engine_docstring(rel_path: str) -> str:
     return text[3:end].strip() if end > 0 else ""
 
 
+# ── 公开：裁判规则与源码（对全体玩家透明，可审计） ──────────────────
+# 裁判是公开的规则定义（非私有 Bot 策略）——源码必须对全体玩家公开明文展示。
+# 这与 Bot 端「私有黑盒二进制」形成对照：Bot 保护玩家智力成果，裁判保证规则公正可查。
+@router.get("/api/judges")
+def public_get_judges(request: Request):
+    """公开裁判列表：每游戏的元信息（label/code_path/summary/source_files 列表）。
+
+    无需登录——任意访客可查。不含可调参数当前值（那是 admin 能力）。
+    """
+    return {
+        "games": [
+            {
+                "game_id": g["game_id"],
+                "label": g["label"],
+                "code_path": g["code_path"],
+                "summary": g["summary"],
+                "source_files": g["source_files"],
+            }
+            for g in JUDGE_GAMES
+        ]
+    }
+
+
+@router.get("/api/judges/{game_id}/source")
+def public_get_judge_source(game_id: str, request: Request):
+    """公开裁判源码全文：返回该游戏 spec.source_files 声明的源码文件明文。
+
+    无需登录——任意访客可查。裁判源码透明是平台公正性的基础。
+    """
+    try:
+        spec = _game_registry.get(game_id)
+    except KeyError:
+        raise HTTPException(404, f"未注册的游戏: {game_id!r}")
+    backend_dir = Path(__file__).resolve().parent
+    # games 包目录：code_path 形如 bzplat/backend/games/<game>/engine.py
+    pkg_dir = backend_dir / "games" / spec.game_id
+    files: list[dict[str, str]] = []
+    for rel in spec.source_files:
+        path = pkg_dir / rel
+        if not path.is_file():
+            continue  # 游戏未提供该文件则跳过（如某些游戏无独立 result.py）
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        files.append({"name": rel, "path": str(path.relative_to(backend_dir.parent)), "source": text})
+    return {
+        "game_id": spec.game_id,
+        "label": spec.label,
+        "summary": spec.summary,
+        "files": files,
+    }
+
+
 @router.get("/api/admin/judges")
 def admin_get_judges(request: Request, _admin=Depends(require_admin)):
     store = _store(request)
@@ -2095,7 +2149,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "matchpacks-site", "file": "MATCHPACKS_SITE.md", "title": "数据集与站点", "summary": "对局数据集下载（等级 gating）+ 站点配置"},
     {"slug": "loadtest", "file": "LOADTEST.md", "title": "压测", "summary": "大规模系统压测脚本与用法"},
     {"slug": "security", "file": "SECURITY.md", "title": "安全与日志", "summary": "公网加固、三文件日志与审计"},
-    {"slug": "judge-code", "file": "JUDGE_CODE.md", "title": "裁判代码说明（管理员）", "summary": "管理员视角的裁判代码说明"},
+    {"slug": "judge-code", "file": "JUDGE_CODE.md", "title": "裁判代码说明", "summary": "各游戏裁判引擎的代码位置、规则、可调参数与协议要点（对全体玩家公开）"},
 ]
 
 

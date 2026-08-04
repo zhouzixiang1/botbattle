@@ -41,6 +41,17 @@ Botzone 裁判每回合启停，输入大致为 `{"log":[...], "initdata":...}`�
 Bot 通过 Docker / 本地长驻进程交互：引擎调用 `decide(player_idx, request)` →
 BinaryRunner 往 bot 的 stdin 写一行 JSON 请求、从 stdout 读一行 JSON 响应。
 
+## 裁判源码公开可查
+
+裁判是**公开可审计的规则定义**——区别于 Bot 的私有黑盒二进制（保护玩家智力成果），
+裁判源码对**全体玩家透明**。任何访客（无需登录）都可在网页「裁判」页查看每款游戏
+裁判引擎（`engine.py`）、行协议（`protocol.py`）、结果契约（`result.py`）的完整明文源码：
+
+- 网页：顶部导航「裁判」页（`/judges`）
+- API：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（源码全文）
+
+规则透明是平台公正性的基础——玩家可核对每一手判罚是否符合代码、验证裁判无可利用漏洞。
+
 ## 参考裁判（可本地自测）
 
 仓库提供**独立、无平台依赖**的参考裁判脚本，Bot 作者可在本地直接运行，

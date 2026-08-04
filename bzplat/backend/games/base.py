@@ -152,6 +152,11 @@ class GameSpec:
     code_path: str = ""
     summary: str = ""
 
+    # 公开裁判源码：要对全体玩家公开明文展示的源码文件相对路径（相对 games/<game>/ 包目录）。
+    # 裁判是公开可审计的规则定义——源码必须对全体玩家透明（区别于 Bot 的私有黑盒二进制）。
+    # 默认公开三件套（裁判引擎 + 行协议 + 结果契约），GET /api/judges/{game_id}/source 返回。
+    source_files: tuple[str, ...] = ("engine.py", "protocol.py", "result.py")
+
     # 座位数（2=双人，当前全平台双人；预留 N 人扩展钩子，通用层已声明但 DB/评分仍按 2 人）。
     num_seats: int = 2
 
@@ -229,7 +234,7 @@ class GameRegistry:
         ]
 
     def judge_games(self) -> list[dict[str, Any]]:
-        """聚合所有游戏的管理端裁判元信息（替代 api_routes 里手写的 JUDGE_GAMES）。"""
+        """聚合所有游戏的裁判元信息（供 admin 管理端 + 公开端点共用）。"""
         out: list[dict[str, Any]] = []
         for spec in self._specs.values():
             out.append({
@@ -237,6 +242,7 @@ class GameRegistry:
                 "label": spec.label,
                 "code_path": spec.code_path,
                 "summary": spec.summary,
+                "source_files": list(spec.source_files),
                 "params": [
                     {"key": p.setting_key, "label": p.label, "field": p.field}
                     for p in spec.judge_params
