@@ -13,6 +13,7 @@ import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useConfirm } from '@/hooks/use-confirm'
+import { toast } from 'sonner'
 import { apiForm, apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import BotVersionManager from '@/components/BotVersionManager'
@@ -86,6 +87,7 @@ export default function MyBots() {
       setDescription('')
       setFile(null)
       await load()
+      toast.success('Bot 上传成功')
     } catch (err) {
       setError(errMsg(err, '上传失败'))
     } finally {
@@ -100,6 +102,7 @@ export default function MyBots() {
         'POST',
       )
       await load()
+      toast.success(bot.is_active ? 'Bot 已停用' : 'Bot 已启用')
     } catch (e) {
       setError(errMsg(e, '更新失败'))
     }
@@ -122,6 +125,7 @@ export default function MyBots() {
       })
       setEditing(null)
       await load()
+      toast.success('Bot 信息已更新')
     } catch (e) {
       setError(errMsg(e, '更新失败'))
     }
@@ -137,6 +141,7 @@ export default function MyBots() {
     try {
       await apiJson(`/api/bots/${b.id}`, 'DELETE')
       await load()
+      toast.success('Bot 已删除')
     } catch (e) {
       setError(errMsg(e, '删除失败'))
     }
@@ -235,11 +240,22 @@ export default function MyBots() {
                 <input
                   id="upload-file"
                   type="file"
-                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null
+                    // 前端预校验：超过 50MB 直接拒绝（与服务端限制一致，避免无谓上传）
+                    if (f && f.size > 50 * 1024 * 1024) {
+                      setError('文件过大，请上传 ≤50MB 的二进制文件')
+                      setFile(null)
+                      e.target.value = ''
+                      return
+                    }
+                    setFile(f)
+                  }}
                   required
                   className="sr-only"
                 />
               </label>
+              <p className="text-xs text-muted-foreground">Linux ELF / Windows PE，≤50MB</p>
             </div>
             {error && <ErrorMsg msg={error} />}
             <Button type="submit" disabled={busy} className="gap-1.5">

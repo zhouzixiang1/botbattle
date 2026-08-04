@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { TrendingUp, TrendingDown, Minus, Trophy } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
 import {
   Table,
   TableBody,
@@ -16,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { TierBadge } from '@/components/tier-badge'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel, gameIcon, type GameId } from '@/lib/games'
+import { fmtRating } from '@/lib/format'
 import { trendDelta } from '@/lib/tiers'
 
 interface Row {
@@ -111,6 +113,7 @@ export default function Leaderboard() {
               rows.map((r, i) => {
                 const td = trendDelta(r.rating_delta)
                 const GameIcon = gameIcon(r.game_id)
+                const totalGames = (r.wins ?? 0) + (r.losses ?? 0) + (r.draws ?? 0)
                 return (
                   <TableRow key={r.bot_id}>
                     <TableCell className="font-mono text-xs text-muted-foreground">
@@ -144,11 +147,15 @@ export default function Leaderboard() {
                       )}
                     </TableCell>
                     <TableCell>
-                      <TierBadge rating={r.rating} label={r.tier_name} gameId={r.game_id} tierKey={r.tier_key} />
+                      {totalGames < 5 ? (
+                        <Badge variant="secondary" className="text-muted-foreground">定级中</Badge>
+                      ) : (
+                        <TierBadge rating={r.rating} label={r.tier_name} gameId={r.game_id} tierKey={r.tier_key} />
+                      )}
                     </TableCell>
                     <TableCell className="whitespace-nowrap">
                       <span className="font-mono font-semibold text-primary tabular-nums">
-                        {Number(r.rating).toFixed(1)}
+                        {fmtRating(r.rating)}
                       </span>
                       {td && (
                         <span

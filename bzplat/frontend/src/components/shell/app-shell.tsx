@@ -254,6 +254,14 @@ export function AppShell() {
                   <div className="mt-4 px-1">
                     <NavLinks onNavigate={() => setMobileOpen(false)} user={user} />
                   </div>
+                  {/* 移动端补齐桌面侧栏的功能入口：搜索 + 通知 + 主题（<lg 时桌面侧栏隐藏，抽屉需对等） */}
+                  <div className="mt-4 px-1">
+                    <GlobalSearch compact />
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      {isLoggedIn && <NotificationBell />}
+                      <ThemeToggle />
+                    </div>
+                  </div>
                   {!isLoggedIn && (
                     <div className="mt-6 flex flex-col gap-2 px-1">
                       <Button asChild variant="outline" className="w-full">

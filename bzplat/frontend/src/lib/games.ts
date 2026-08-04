@@ -20,7 +20,7 @@ export function matchTypeBadge(t: string | undefined): { label: string; cls: str
     case 'human':
       return { label: '人类', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300' }
     case 'contest':
-      return { label: '赛事', cls: 'bg-primary/15 text-primary' }
+      return { label: '比赛', cls: 'bg-primary/15 text-primary' }
     case 'table':
       return { label: '桌台', cls: 'bg-muted text-muted-foreground' }
     case 'challenge':

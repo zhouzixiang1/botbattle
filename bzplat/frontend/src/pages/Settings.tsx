@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowLeft, CheckCircle2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, Star } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { useAuth } from '@/components/useAuth'
 import { Card } from '@/components/ui/card'
@@ -15,6 +15,7 @@ import { Switch } from '@/components/ui/switch'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { gameLabel } from '@/lib/games'
+import { fmtRating } from '@/lib/format'
 
 interface Prefs {
   email_match_done: number
@@ -292,7 +293,7 @@ export default function Settings() {
           )}
           <div>
             {favs.length === 0 ? (
-              <EmptyState text="暂无收藏的 Bot" />
+              <EmptyState text="暂无收藏的 Bot" icon={<Star className="size-7 opacity-40" />} />
             ) : (
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {favs.map((b) => (
@@ -303,7 +304,7 @@ export default function Settings() {
                         <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
                       </div>
                       <p className="mt-1 px-4 text-xs text-muted-foreground">
-                        @{b.name}{b.owner_name ? ` · ${b.owner_name}` : ''}{b.rating != null ? ` · ${Number(b.rating).toFixed(0)}` : ''}
+                        @{b.name}{b.owner_name ? ` · ${b.owner_name}` : ''}{b.rating != null ? ` · ${fmtRating(b.rating)}` : ''}
                       </p>
                     </Card>
                   </Link>

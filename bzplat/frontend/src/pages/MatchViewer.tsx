@@ -10,14 +10,14 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Slider } from '@/components/ui/slider'
-import { ErrorMsg, Loading } from '@/components/ui/status'
+import { ErrorMsg, Loading, EmptyState } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, apiPost, errMsg } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/games'
@@ -286,16 +286,17 @@ export default function MatchViewer() {
           {!isBoard && netA != null && netB != null && (
             <span className="font-mono text-xs text-muted-foreground">
               累计筹码{' '}
-              <span className={netA >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>
+              <span className={netA >= 0 ? 'text-success' : 'text-destructive'}>
                 座0 {fmtNet(netA)}
               </span>
               {' · '}
-              <span className={netB >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}>
+              <span className={netB >= 0 ? 'text-success' : 'text-destructive'}>
                 座1 {fmtNet(netB)}
               </span>
             </span>
           )}
           {pencilScores && (
+            /* 点格棋比分：红/蓝为玩家方颜色语义（座0=红、座1=蓝），保留裸色 */
             <span className="font-mono text-xs text-muted-foreground">
               比分 <span className="text-red-500">{pencilScores[0]}</span>
               {' : '}
@@ -317,7 +318,7 @@ export default function MatchViewer() {
       {loading ? (
         <Loading text="加载中…" />
       ) : visible.length === 0 ? (
-        <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">暂无事件</CardContent></Card>
+        <Card><EmptyState text="暂无事件" icon={<History className="size-7 opacity-40" />} /></Card>
       ) : (
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}

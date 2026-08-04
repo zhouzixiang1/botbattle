@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Upload, History, RotateCcw } from 'lucide-react'
+import { fmtTime } from '@/lib/format'
 import {
   Dialog,
   DialogContent,
@@ -248,7 +249,7 @@ export default function BotVersionManager({
                         </Badge>
                       </div>
                       <div className="mt-0.5 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                        <span>{v.uploaded_at?.slice(0, 16).replace('T', ' ') || ''}</span>
+                        <span>{fmtTime(v.uploaded_at)}</span>
                         <span>{fmtSize(v.size_bytes)}</span>
                         <span>{v.os}/{v.arch}</span>
                       </div>

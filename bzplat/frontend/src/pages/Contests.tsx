@@ -13,6 +13,7 @@ import { Switch } from '@/components/ui/switch'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
+import { toast } from 'sonner'
 import { getGame, defaultMatchConfig } from '@/games'
 
 interface Contest {
@@ -113,6 +114,7 @@ export default function Contests() {
       setTitle('')
       setDescription('')
       await load()
+      toast.success('赛事创建成功')
     } catch (err) {
       setError(errMsg(err))
     }

@@ -1,15 +1,18 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useNavigate } from 'react-router-dom'
 import { UserPlus, UserCheck, Pencil, Bot as BotIcon, ArrowLeft } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card, CardContent } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
-import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { MetricCard } from '@/components/ui/metric-card'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
+import { toast } from 'sonner'
+import { fmtDate } from '@/lib/format'
 import { gameLabel, gameIcon } from '@/lib/games'
 
 interface UserProfileData {
@@ -46,6 +49,7 @@ interface BotRow {
 
 export default function UserProfile() {
   const { name } = useParams<{ name: string }>()
+  const navigate = useNavigate()
   const { user } = useAuth()
   const isSelf = !!user && user.username === name
 
@@ -90,6 +94,7 @@ export default function UserProfile() {
       .then(() => {
         setFollowing(!following)
         setFollowerCount((c) => c + (following ? -1 : 1))
+        toast.success(following ? '已取消关注' : '关注成功')
       })
       .catch((e) => setError(errMsg(e)))
   }
@@ -97,7 +102,20 @@ export default function UserProfile() {
   if (loading) {
     return (
       <PageStub title="用户资料">
-        <Loading />
+        {/* 骨架屏：头像+信息块 + 指标卡轮廓 */}
+        <Card className="mb-4">
+          <CardContent className="flex flex-col gap-5 py-5 sm:flex-row sm:items-center">
+            <Skeleton className="size-20 rounded-full" />
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-6 w-32" />
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-4 w-40" />
+            </div>
+          </CardContent>
+        </Card>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-20" />)}
+        </div>
       </PageStub>
     )
   }
@@ -105,8 +123,14 @@ export default function UserProfile() {
     return (
       <PageStub title="用户资料">
         <ErrorMsg msg={error || '用户不存在或已停用'} className="mb-3" />
-        <Button asChild variant="ghost" size="sm">
-          <Link to="/leaderboard"><ArrowLeft className="size-4" /> 返回排行榜</Link>
+        {/* 后退策略：有历史则返回上一页，直接 URL 进入（无历史）fallback 到排行榜 */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="gap-1"
+          onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/leaderboard'))}
+        >
+          <ArrowLeft className="size-4" /> 返回
         </Button>
       </PageStub>
     )
@@ -156,7 +180,7 @@ export default function UserProfile() {
                 </p>
               )}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-xs text-muted-foreground">
-                <span>注册于 {profile.created_at?.slice(0, 10)}</span>
+                <span>注册于 {fmtDate(profile.created_at)}</span>
                 {totalGames > 0 && <span>· 参与 {totalGames} 场对局</span>}
                 {user && !isSelf && (
                   <>

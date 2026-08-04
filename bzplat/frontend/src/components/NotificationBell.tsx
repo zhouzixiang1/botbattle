@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Bell, Check } from 'lucide-react'
 import { apiGet, apiPost } from '@/api'
+import { fmtTime } from '@/lib/format'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
+import { EmptyState } from '@/components/ui/status'
 import { cn } from '@/lib/utils'
 
 interface Notification {
@@ -82,7 +84,7 @@ export default function NotificationBell() {
         </div>
         <div className="max-h-80 overflow-y-auto">
           {recent.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">暂无通知</p>
+            <EmptyState text="暂无通知" icon={<Bell className="size-7 opacity-40" />} />
           ) : (
             recent.map((n) => {
               const inner = (
@@ -98,7 +100,7 @@ export default function NotificationBell() {
                   </div>
                   {n.body && <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{n.body}</p>}
                   <p className="mt-0.5 text-[10px] text-muted-foreground">
-                    {n.created_at?.slice(5, 16).replace('T', ' ')}
+                    {fmtTime(n.created_at)}
                   </p>
                 </div>
               )

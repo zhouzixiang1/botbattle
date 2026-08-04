@@ -19,7 +19,7 @@ import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, errMsg } from '@/api'
 import { gameLabel, gameIcon, GAMES } from '@/lib/games'
-import { fmtTime } from '@/lib/format'
+import { fmtTime, fmtRating } from '@/lib/format'
 
 type SearchType = 'users' | 'bots' | 'matches'
 
@@ -204,7 +204,7 @@ export default function Search() {
                       <p className="text-xs text-muted-foreground">
                         @{b.name}
                         {b.owner_name ? ` · ${b.owner_display || b.owner_name}` : ''}
-                        {b.rating != null && ` · ${Number(b.rating).toFixed(0)}`}
+                        {b.rating != null && ` · ${fmtRating(b.rating)}`}
                       </p>
                     </CardContent>
                   </Card>
