@@ -34,7 +34,7 @@
 
 | 能力 | 现状 | 差距 |
 |------|------|------|
-| 多 stage 状态机 `draft→open→running⇄rest→finished` | 有 | 可复用 |
+| 多 stage 状态机 `draft→open→published→running⇄rest→finished` | 有 | 可复用（published 为时间编排新增的排期已发布态） |
 | 瑞士 / RR / DRR / 分组 / 单败 | 有 | 预赛只需瑞士；决赛需大 RR 例外 |
 | 自行报名 `POST /api/contests/{id}/register` | 仅 `open` | 决赛同样走此路径；**不加** capacity 拒绝 |
 | 组织者 open/start/resume | 校验 `organizer_id` | 名单加减尚未对组织者开放 |

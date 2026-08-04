@@ -36,9 +36,14 @@ export default function Countdown({ endsAt, expiredText = '已到时', className
   const [left, setLeft] = useState('')
 
   useEffect(() => {
+    // 非法 ISO 字符串 → target=NaN，直接显示 expiredText（不渲染 NaN:NaN）
+    if (!Number.isFinite(target)) {
+      setLeft('')
+      return
+    }
     const tick = () => {
       const ms = target - Date.now()
-      setLeft(ms <= 0 ? '' : format(ms))
+      setLeft(!Number.isFinite(ms) || ms <= 0 ? '' : format(ms))
     }
     tick()
     const id = setInterval(tick, 1000)

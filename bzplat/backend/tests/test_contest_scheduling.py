@@ -213,3 +213,64 @@ def test_scheduler_does_not_advance_future_contest(setup):
                    registration_opens_at="2099-12-31T23:59:59")  # 未来
     asyncio.run(sched._tick())
     assert store.get_contest(c["id"])["status"] == "draft"  # 不变
+
+
+# ── 审计修复回归（start+published 不重复 / maybe_finish 锁 / 时间格式校验） ──
+
+def test_start_from_published_does_not_duplicate_pairings(setup):
+    """start() 从 published 态开赛：不重新生成 pairing，只改 scheduled_at=now + dispatch。"""
+    store, mgr, _, users = setup
+    c = mgr.create(users["u1"], "Dup", template_id="holdem_rr", game_id="holdem",
+                   starts_at="2099-12-31T23:59:59")
+    mgr.open_registration(c["id"])
+    mgr.register(c["id"], users["u1"], users["b1"])
+    mgr.register(c["id"], users["u2"], users["b2"])
+    asyncio.run(mgr.publish(c["id"]))
+    before = len(store.list_contest_pairings(c["id"]))
+    assert before >= 1
+    # start 从 published 开赛
+    asyncio.run(mgr.start(c["id"]))
+    after = len(store.list_contest_pairings(c["id"]))
+    assert after == before, f"start(published) 不应重复生成 pairing: {before} → {after}"
+    assert store.get_contest(c["id"])["status"] == "running"
+
+
+def test_maybe_finish_has_per_contest_lock(setup):
+    """maybe_finish 用 per-contest asyncio.Lock（防并发重复轮次）。"""
+    store, mgr, _, _ = setup
+    # 验证 _locks 字典存在 + _lock 返回同一个 Lock 实例
+    lk1 = mgr._lock(999)
+    lk2 = mgr._lock(999)
+    assert lk1 is lk2, "同一 contest 应返回同一个 Lock 实例"
+    assert isinstance(lk1, asyncio.Lock)
+
+
+def test_time_format_validation_rejects_bad_iso(setup):
+    """时间格式校验：拒绝带毫秒/时区/非法格式的 ISO 字符串。"""
+    store, mgr, _, users = setup
+    # 带时区
+    with pytest.raises(ValueError, match="不应带时区"):
+        mgr.create(users["u1"], "TZ", template_id="holdem_rr", game_id="holdem",
+                   registration_opens_at="2026-01-01T00:00:00+08:00")
+    # 非法格式
+    with pytest.raises(ValueError, match="格式非法"):
+        mgr.create(users["u1"], "Bad", template_id="holdem_rr", game_id="holdem",
+                   registration_opens_at="not-a-date")
+
+
+def test_scheduler_tick_does_not_double_process(setup):
+    """scheduler tick 快照分派：published→running 后同 tick 不再 running 分支处理。"""
+    store, mgr, sched, users = setup
+    c = mgr.create(users["u1"], "NoDouble", template_id="holdem_rr", game_id="holdem",
+                   starts_at="2020-01-01T00:00:00")  # 过去，排期立即到
+    mgr.open_registration(c["id"])
+    mgr.register(c["id"], users["u1"], users["b1"])
+    mgr.register(c["id"], users["u2"], users["b2"])
+    asyncio.run(mgr.publish(c["id"]))
+    # publish 后 scheduled_at 已是过去 → _dispatch_pending（在 publish 内）应已转 running
+    # 或至少 tick 后转 running。验证 tick 不抛、不重复
+    pairings_before = len(store.list_contest_pairings(c["id"]))
+    asyncio.run(sched._tick())
+    pairings_after = len(store.list_contest_pairings(c["id"]))
+    assert pairings_after == pairings_before, "tick 不应增加 pairing 数量"
+

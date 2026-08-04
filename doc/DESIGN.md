@@ -113,7 +113,7 @@ SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`
 | `matches_holdem` / `matches_gomoku` / `matches_pencil` | 对局（**每游戏一张表**） | id/bot_a_id/bot_b_id/match_type/status/game_id/winner/n_dots/human_user_id/likes_count/views_count；三表结构一致，游戏专属列在其他游戏中默认 NULL/0 |
 | `matches_index` | 对局定位 | id(PK)/game_id——get_match(id) 先查此表定位到哪张 matches_<game> |
 | `ratings` | 评分（**per-game**，PK=bot_id+game_id） | bot_id/game_id/rating(1500)/rd(350)/vol/wins/losses/draws/last_played_at |
-| `contests` | 赛事 | title/organizer_id/status(draft/open/running/rest/finished/cancelled)/game_id/stages_json/current_stage_idx |
+| `contests` | 赛事 | title/organizer_id/status(draft/open/published/running/rest/finished/cancelled)/game_id/stages_json/current_stage_idx/registration_opens_at/closes_at/starts_at/rest_ends_at |
 | `contest_pairings` | 对阵 | contest_id/round_num/bot_a_id/bot_b_id/match_id(逻辑外键，无 DB FK)/stage_idx/bracket_slot |
 | `contest_stage_results` | 积分 | contest_id/stage_idx/bot_id/points/wins/draws/losses/rank_in_group |
 
