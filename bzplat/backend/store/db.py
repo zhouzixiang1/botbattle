@@ -281,6 +281,59 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id)"
         )
 
+    # ── contests CHECK 加 'published' 状态（时间编排：排期已发布、等待开赛）──
+    # 重建表以放宽 CHECK（旧库 CHECK 不含 'published'，新赛事到点出排期会违反约束）。
+    if "contests" in tables and "'published'" not in sql_text:
+        cols = _table_cols(conn, "contests")
+        conn.execute(
+            """
+            CREATE TABLE contests_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                organizer_id INTEGER NOT NULL REFERENCES users(id),
+                status TEXT NOT NULL DEFAULT 'draft',
+                registration_opens_at TEXT,
+                registration_closes_at TEXT,
+                starts_at TEXT,
+                ends_at TEXT,
+                hands_per_match INTEGER NOT NULL DEFAULT 70,
+                created_at TEXT NOT NULL,
+                game_id TEXT NOT NULL DEFAULT 'holdem',
+                stages_json TEXT NOT NULL DEFAULT '[]',
+                current_stage_idx INTEGER NOT NULL DEFAULT 0,
+                template_id TEXT NOT NULL DEFAULT 'holdem_swiss_ko',
+                rest_ends_at TEXT,
+                match_config_json TEXT NOT NULL DEFAULT '{}',
+                phase TEXT NOT NULL DEFAULT 'standalone',
+                source_contest_id INTEGER,
+                official_results_ready INTEGER NOT NULL DEFAULT 0,
+                require_real_name INTEGER NOT NULL DEFAULT 0,
+                CONSTRAINT chk_contest_status CHECK (
+                    status IN ('draft','open','published','running','rest','finished','cancelled'))
+            )
+            """
+        )
+        all_cols = [
+            "id", "title", "description", "organizer_id", "status",
+            "registration_opens_at", "registration_closes_at", "starts_at",
+            "ends_at", "hands_per_match", "created_at", "game_id",
+            "stages_json", "current_stage_idx", "template_id", "rest_ends_at",
+            "match_config_json", "phase", "source_contest_id",
+            "official_results_ready", "require_real_name",
+        ]
+        present = [c for c in all_cols if c in cols]
+        conn.execute(
+            f"INSERT INTO contests_new ({', '.join(present)}) "
+            f"SELECT {', '.join(present)} FROM contests "
+            f"WHERE organizer_id IN (SELECT id FROM users)"
+        )
+        conn.execute("DROP TABLE contests")
+        conn.execute("ALTER TABLE contests_new RENAME TO contests")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id)"
+        )
+
     if "contest_entries" in tables:
         for col, decl in (
             ("group_id", "TEXT NOT NULL DEFAULT ''"),
@@ -297,6 +350,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ("group_id", "TEXT NOT NULL DEFAULT ''"),
             ("bracket_slot", "INTEGER"),
             ("color_first", "INTEGER NOT NULL DEFAULT 0"),
+            ("scheduled_at", "TEXT"),  # 计划开赛时间（逐场排期；NULL=立即可打）
         ):
             _add_col(conn, "contest_pairings", col, decl)
 
@@ -2737,14 +2791,15 @@ class Store:
         bot_b_version_id: int | None = None,
         pairing_seed: int | None = None,
         published_at: str | None = None,
+        scheduled_at: str | None = None,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contest_pairings(contest_id, round_num, entry_a_id, "
                 "entry_b_id, bot_a_id, bot_b_id, bot_a_version_id, bot_b_version_id, "
-                "pairing_seed, published_at, match_id, status, stage_idx, "
+                "pairing_seed, published_at, scheduled_at, match_id, status, stage_idx, "
                 "stage_key, group_id, bracket_slot, color_first) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     contest_id,
                     round_num,
@@ -2756,6 +2811,7 @@ class Store:
                     bot_b_version_id,
                     pairing_seed,
                     published_at,
+                    scheduled_at,
                     match_id,
                     status,
                     stage_idx,
@@ -2848,6 +2904,7 @@ class Store:
             "bot_b_version_id",
             "pairing_seed",
             "published_at",
+            "scheduled_at",
             "stage_idx",
             "stage_key",
             "group_id",

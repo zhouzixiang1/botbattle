@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS contests (
     official_results_ready  INTEGER NOT NULL DEFAULT 0,  -- P2: 全员正式名次是否已落库
     require_real_name       INTEGER NOT NULL DEFAULT 0,  -- 报名是否要求实名
     CONSTRAINT chk_contest_status CHECK (
-        status IN ('draft','open','running','rest','finished','cancelled'))
+        status IN ('draft','open','published','running','rest','finished','cancelled'))
 );
 
 -- 对局表（全面解耦 PR3：拆每游戏一张表 + matches_index 定位）
@@ -372,6 +372,7 @@ CREATE TABLE IF NOT EXISTS contest_pairings (
     bot_b_version_id INTEGER,
     pairing_seed    INTEGER,   -- P1：轮次确定性 seed（duplicate/复现用）
     published_at    TEXT,      -- P1：发布时间戳（非 NULL = 已发布轮，dispatch 不改）
+    scheduled_at    TEXT,      -- 计划开赛时间（NULL=立即可打；逐场排期用，scheduler 到点 dispatch）
     match_id        TEXT,  -- 逻辑外键，指向 matches_<game>.id（经 matches_index 定位）；无 DB 级 FK
     status          TEXT    NOT NULL DEFAULT 'pending',
     stage_idx       INTEGER NOT NULL DEFAULT 0,
@@ -463,10 +464,15 @@ TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 
 # 比赛状态
 CONTEST_DRAFT = "draft"
 CONTEST_OPEN = "open"
+CONTEST_PUBLISHED = "published"  # 排期已发布、等待开赛（报名截止→出排期→到点开打的两阶段中间态）
 CONTEST_RUNNING = "running"
 CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
+
+# 赛事时间调度器（后台周期扫描 *_at 字段，到点自动推进阶段）
+SETTING_CONTEST_SCHEDULER_ENABLED = "contest_scheduler_enabled"
+SETTING_CONTEST_SCHEDULER_INTERVAL_SEC = "contest_scheduler_interval_sec"
 
 # 已注册对战引擎（未注册则 contest start / challenge 拒绝）
 # schema.py 是无 import 的纯常量模块（为破循环依赖不能从 registry 派生），

@@ -89,7 +89,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 ## 架构分层（编辑时切勿越界）
 
 ```
-contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) → manager(阶段状态机) → ranking(正式名次/破同分)
+contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) → manager(阶段状态机) → ranking(正式名次/破同分) + scheduler(时间调度器，到点自动推进阶段)
 matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runner(起Bot进程,按game_id路由)
             人类对战：orchestrator.challenge_human/_run_human_match + runner.run_bot_vs_human
             （人类侧经 _human_turns Future + WebSocket /api/matches/{id}/play 回传落子，独立 _human_sem，不计 Glicko）
@@ -159,7 +159,7 @@ src/pages/                 20 个顶层路由，全部用 React.lazy 代码分�
 
 **人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局走独立 `_human_sem`（默认 4，不占 bot 对局槽）、`human_action_timeout`（默认 120s）、**不计 Glicko**、per-user 同时 ≤ 1。自博弈（同 owner 两个不同 bot 对战）走普通 `/api/matches/challenge`。
 
-**赛制阶段状态机**：`draft→open→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。
+**赛制阶段状态机**：`draft→open→published→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。`published` 是「排期已发布、等待开赛」中间态（报名截止→出排期→到点开打的两阶段）。`ContestScheduler`（`contests/scheduler.py`，挂 main.py lifespan）后台周期扫描赛事 `*_at` 字段，到点自动推进阶段（开放报名/截止报名出排期/到点 dispatch pairing/rest 恢复）；组织者手动按钮始终可提前触发。逐场排期：`contest_pairings.scheduled_at`（NULL=立即可打），`_dispatch_pending` 只 dispatch 到点的 pairing。
 
 ## 动手前必读文档
 

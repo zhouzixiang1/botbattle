@@ -907,6 +907,10 @@ class ContestCreate(BaseModel):
     phase: str = "standalone"  # P5: preliminary/final/standalone
     source_contest_id: int | None = None  # P5: 软链（预赛→决赛导航）
     require_real_name: bool = False  # 报名是否要求实名
+    # 时间编排（ISO 字符串，可选；留空=手动触发对应阶段）
+    registration_opens_at: str | None = None
+    registration_closes_at: str | None = None
+    starts_at: str | None = None
 
 
 class ContestRegister(BaseModel):
@@ -943,6 +947,9 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             phase=body.phase,
             source_contest_id=body.source_contest_id,
             require_real_name=int(body.require_real_name),
+            registration_opens_at=body.registration_opens_at,
+            registration_closes_at=body.registration_closes_at,
+            starts_at=body.starts_at,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -1209,6 +1216,27 @@ async def start_contest(
     return {"contest": contest}
 
 
+@router.post("/api/contests/{contest_id}/publish")
+async def publish_contest(
+    contest_id: int, request: Request, user=Depends(require_organizer)
+):
+    """手动截止报名 + 出排期（open→published）。
+
+    生成对阵 + 逐场排期 scheduled_at + 冻结版本，但不立即开打——等开赛时间到
+    调度器 dispatch（或组织者手动 start 立即开打）。
+    """
+    c = _store(request).get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    try:
+        contest = await _contests(request).publish(contest_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    audit_log(request, "contest_publish", result="ok", user=user.get("username"), target=contest_id)
+    return {"contest": contest}
+
+
 @router.post("/api/contests/{contest_id}/resume")
 async def resume_contest(
     contest_id: int, request: Request, user=Depends(require_organizer)
@@ -1403,6 +1431,10 @@ class AdminContestPatch(BaseModel):
     status: str | None = None
     title: str | None = None
     hands_per_match: int | None = None
+    # 时间编排（admin 可改时间窗口）
+    registration_opens_at: str | None = None
+    registration_closes_at: str | None = None
+    starts_at: str | None = None
 
 
 @router.get("/api/admin/contests")
@@ -1431,7 +1463,7 @@ async def admin_patch_contest(
                     raise HTTPException(400, str(e))
                 return {"contest": contest}
         if body.status not in (
-            "draft", "open", "running", "rest", "finished", "cancelled"
+            "draft", "open", "published", "running", "rest", "finished", "cancelled"
         ):
             raise HTTPException(400, "非法比赛状态")
         fields["status"] = body.status
@@ -1439,6 +1471,11 @@ async def admin_patch_contest(
         fields["title"] = body.title
     if body.hands_per_match is not None:
         fields["hands_per_match"] = body.hands_per_match
+    # 时间编排字段（admin 可改）
+    for tk in ("registration_opens_at", "registration_closes_at", "starts_at"):
+        tv = getattr(body, tk)
+        if tv is not None:
+            fields[tk] = tv
     if not fields:
         raise HTTPException(400, "无更新字段")
     c = _store(request).update_contest(contest_id, **fields)
