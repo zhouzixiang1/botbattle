@@ -48,7 +48,7 @@ users 表加列 `xp`/`level`/`last_active_at`（migration）。`GET /api/auth/me
 
 ## 功能 gating
 
-`LEVEL_GATE_DOWNLOAD = 1`。
+目前等级暂无功能 gating（数据集下载已下线）。等级仅用于展示用户活跃度。
 
 ## 前端
 

@@ -517,7 +517,6 @@ def level_for_xp(xp: int) -> int:
 
 
 # 功能 gating 最低等级（对标 Botzone「等级 1 以上可用某功能」）
-LEVEL_GATE_DOWNLOAD = 1   # 下载数据集需 level >= 1（PR-10 用）
 
 # 站点配置键（platform_settings）
 SETTING_SITE_NAME = "site_name"
