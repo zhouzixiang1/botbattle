@@ -18,9 +18,11 @@ import { ErrorMsg, EmptyState, Loading, StatusBadge } from '@/components/ui/stat
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import BracketTree from '@/components/contest/BracketTree'
+import Countdown from '@/components/Countdown'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { gameLabel } from '@/lib/games'
+import { fmtTime } from '@/lib/format'
 import { toast } from 'sonner'
 
 const STAGE_TYPE_LABEL: Record<string, string> = {
@@ -51,6 +53,11 @@ interface Contest {
   current_stage_idx?: number
   rest_ends_at?: string | null
   require_real_name?: number
+  // 时间编排
+  registration_opens_at?: string | null
+  registration_closes_at?: string | null
+  starts_at?: string | null
+  ends_at?: string | null
 }
 interface Stage {
   key?: string
@@ -115,25 +122,31 @@ function parseStages(c: Contest | null): Stage[] {
   }
 }
 
-function RestCountdown({ endsAt }: { endsAt: string }) {
-  const [left, setLeft] = useState('')
-  useEffect(() => {
-    const tick = () => {
-      const ms = new Date(endsAt).getTime() - Date.now()
-      if (ms <= 0) {
-        setLeft('已到时')
-        return
-      }
-      const s = Math.floor(ms / 1000)
-      const m = Math.floor(s / 60)
-      const r = s % 60
-      setLeft(`${m}:${r.toString().padStart(2, '0')}`)
-    }
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => clearInterval(id)
-  }, [endsAt])
-  return <span className="font-mono font-semibold text-primary">{left}</span>
+/** 状态相关的时间编排提示（报名窗口/开赛/rest 倒计时） */
+function ContestScheduleInfo({ c }: { c: Contest }) {
+  const now = Date.now()
+  const items: { label: string; time?: string | null; countdown?: string }[] = []
+  if (c.registration_opens_at) items.push({ label: '开放报名', time: c.registration_opens_at })
+  if (c.registration_closes_at) items.push({ label: '报名截止', time: c.registration_closes_at })
+  if (c.starts_at) items.push({ label: '比赛开始', time: c.starts_at })
+  if (c.ends_at) items.push({ label: '比赛结束', time: c.ends_at })
+  if (items.length === 0) return null
+  return (
+    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      {items.map((it) => {
+        const future = it.time && new Date(it.time).getTime() > now
+        return (
+          <span key={it.label} className="flex items-center gap-1">
+            <span className="font-medium text-foreground">{it.label}:</span>
+            <span>{it.time ? fmtTime(it.time) : '—'}</span>
+            {future && it.time && (
+              <Countdown endsAt={it.time} className="text-primary" />
+            )}
+          </span>
+        )
+      })}
+    </div>
+  )
 }
 
 export default function ContestDetail() {
@@ -253,9 +266,11 @@ export default function ContestDetail() {
           {contest.status === 'rest' && contest.rest_ends_at && (
             <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
               <Timer className="size-4 text-warning" />
-              阶段休息中，倒计时 <RestCountdown endsAt={contest.rest_ends_at} />（可更换派遣 Bot）
+              阶段休息中，倒计时 <Countdown endsAt={contest.rest_ends_at} className="text-warning" />（可更换派遣 Bot）
             </div>
           )}
+          {/* 时间编排：报名窗口 / 开赛 / 比赛时间 */}
+          <ContestScheduleInfo c={contest} />
         </CardContent>
       </Card>
 
@@ -269,8 +284,13 @@ export default function ContestDetail() {
           </Button>
         )}
         {isOrg && (contest.status === 'open' || contest.status === 'draft') && (
+          <Button variant="outline" onClick={() => void act(`/api/contests/${id}/publish`, undefined, '排期已发布')} className="gap-1.5">
+            <ListOrdered className="size-4" />截止报名·出排期
+          </Button>
+        )}
+        {isOrg && (contest.status === 'open' || contest.status === 'draft' || contest.status === 'published') && (
           <Button variant="outline" onClick={() => void act(`/api/contests/${id}/start`, undefined, '比赛已开始')} className="gap-1.5">
-            <Play className="size-4" />开始比赛
+            <Play className="size-4" />立即开赛
           </Button>
         )}
         {isOrg && contest.status === 'rest' && (

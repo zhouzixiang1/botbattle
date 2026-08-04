@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
+import { fmtTime } from '@/lib/format'
 
 interface Contest {
   id: number
@@ -12,6 +13,8 @@ interface Contest {
   created_at: string
   starts_at: string | null
   ends_at: string | null
+  registration_opens_at?: string | null
+  registration_closes_at?: string | null
   template_id?: string
   game_id?: string
 }
@@ -25,7 +28,8 @@ interface Entry {
 
 const NEXT_STATUS: Record<string, string> = {
   draft: 'open',
-  open: 'running',
+  open: 'published',
+  published: 'running',
   running: 'finished',
   rest: 'finished',
   finished: 'cancelled',
@@ -142,6 +146,7 @@ export default function ContestsTab() {
               <th className="px-3 py-2.5">标题</th>
               <th className="px-3 py-2.5">模板/游戏</th>
               <th className="px-3 py-2.5">状态</th>
+              <th className="px-3 py-2.5">时间编排</th>
               <th className="px-3 py-2.5">手数</th>
               <th className="px-3 py-2.5">创建时间</th>
               <th className="px-3 py-2.5">操作</th>
@@ -158,6 +163,12 @@ export default function ContestsTab() {
                   </td>
                   <td className="px-3 py-2">
                     <StatusBadge status={c.status} />
+                  </td>
+                  <td className="px-3 py-2 text-xs text-muted-foreground">
+                    {c.registration_opens_at && <div>报名: {fmtTime(c.registration_opens_at)}</div>}
+                    {c.registration_closes_at && <div>截止: {fmtTime(c.registration_closes_at)}</div>}
+                    {c.starts_at && <div className="font-medium text-foreground">开赛: {fmtTime(c.starts_at)}</div>}
+                    {!c.registration_opens_at && !c.registration_closes_at && !c.starts_at && <span>—</span>}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{c.hands_per_match}</td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">{c.created_at}</td>
