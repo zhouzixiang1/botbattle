@@ -57,7 +57,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 |----------|------|------|
 | `-1` | fold 弃牌 | 放弃本手 |
 | `-2` | all-in 全押 | 把剩余筹码全部推入底池 |
-| `0` | call / check | `to_call > 0` 时为跟注；`to_call == 0` 时为过牌（平台按合法性判定） |
+| `0` | call / check | 与 Botzone 一致：`0` 是 call/check 歧义码——需要跟注时为跟注，无需跟注时为过牌（平台按合法性判定） |
 | `>0` | raise 加注 | **额外下注的筹码**（raise delta，见下） |
 
 ### raise 的正整数是「额外下注筹码」，不是「加注到的总额」
@@ -71,7 +71,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 
 ### 简易决策
 
-最小可用 Bot 只需看 `to_call`（请求负载里的平台扩展字段）：`to_call > 0` 就回 `{"response":0}`（call），`to_call == 0` 就回 `{"response":0}`（check）。这正是仓库 `samples/callbot.c` 的全部逻辑。
+最小可用 Bot 永远回 `{"response":0}` 即可（`0` 是 call/check 歧义码，平台按当前合法性自动判定为跟注或过牌）——这正是仓库 `samples/callbot.c` 的全部逻辑。需要更精细决策的 Bot 可从 `history`（本手动作序列）+ `my_chips` 重放出当前需跟注的额度，与 Botzone 标准模型完全一致（不再下发 `to_call` 等平台扩展字段）。
 
 ## 4. 请求负载字段（德州扑克）
 
@@ -91,17 +91,9 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 | `total_win_chips` | int[2] | 双方**累计净筹码**（各手 deltas 之和） |
 | `total_win_games` | int[2] | 双方累计赢手数 |
 
-**平台扩展字段**（非 Botzone 原始字段，标准 Botzone Bot 可忽略；便于决策）：
+> **严格对齐 Botzone**：请求负载**恰好**这 11 个官方字段，不多发任何平台扩展字段（不再下发 `to_call` / `sb` / `bb` / `opp_chips` 等）——标准 Botzone Bot 可直接跑，需要跟注额/盲注等信息的 Bot 从 `history` + `my_chips` 自行重放推导（与 Botzone 标准模型一致）。
 
-| 字段 | 含义 |
-|------|------|
-| `to_call` | 跟注额：你若 call 需再补入的筹码数。`0` = 可 check |
-| `street_bet` | 你本街已投入的筹码（算 raise delta 用） |
-| `current_bet` | 本街当前最高下注额 |
-| `sb` / `bb` | 小盲 / 大盲注（恒 50 / 100） |
-| `opp_chips` | 对手剩余筹码 |
-
-> **盲注已扣除**：请求到达时本手盲注已从 `my_chips` 扣除并进入底池。例如首手你是 SB，`my_chips` 会是 `19950`（20000−50），`to_call` 会是 `50`（需补到与大盲持平）。
+> **盲注已扣除**：请求到达时本手盲注已从 `my_chips` 扣除并进入底池。例如首手你是 SB，`my_chips` 会是 `19950`（20000−50）。
 
 ### 4.1 动作历史 `history`
 
@@ -192,12 +184,12 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 
 ```jsonc
 // 首回合：完整历史信封（requests[] 含本手第 1 个决策）
-{"requests":[{"num_players":2,"dealer_id":1,"my_id":1,"my_chips":19950,"my_cards":[44,50],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],"to_call":50,"street_bet":50,"current_bet":100,"sb":50,"bb":100,"opp_chips":19900}],"responses":[]}
+{"requests":[{"num_players":2,"dealer_id":1,"my_id":1,"my_chips":19950,"my_cards":[44,50],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}
 // Bot 回 {"response":250}  → 额外量 250（加注到总额 300）
 //   再回 >>>BOTZONE_REQUEST_KEEP_RUNNING<<< 声明长驻
 
 // 后续回合：单 request 信封
-{"request":{"num_players":2,"dealer_id":1,"my_id":1,"my_chips":19700,"my_cards":[44,50],"public_cards":[5,18,33],"history":[{"round":0,"player_id":1,"action":250,"action_type":"raise"},{"round":0,"player_id":0,"action":0,"action_type":"call"}],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],"to_call":0,"street_bet":300,"current_bet":300,"sb":50,"bb":100,"opp_chips":19700}}
+{"request":{"num_players":2,"dealer_id":1,"my_id":1,"my_chips":19700,"my_cards":[44,50],"public_cards":[5,18,33],"history":[{"round":0,"player_id":1,"action":250,"action_type":"raise"},{"round":0,"player_id":0,"action":0,"action_type":"call"}],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}}
 // Bot 回 {"response":0}  → check（翻牌）
 ```
 
@@ -230,7 +222,7 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 | 牌编码 | 0–51（`%4` 花色 0♥1♦2♠3♣） | 同左 |
 | 握手串 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
 
-**差异**：仅手数 70 vs 50；平台额外下发 `to_call`/`street_bet` 等扩展字段（标准 Bot 可忽略）。资源与超时见 [运行时与资源限制](#/wiki?slug=runtime)。
+**差异**：仅手数 70 vs 50（其余字段、计分、盲注、规则完全一致，标准 Botzone Bot 直接可跑）。资源与超时见 [运行时与资源限制](#/wiki?slug=runtime)。
 
 ## 10. 平台与 Botzone 的运行模型差异
 

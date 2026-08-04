@@ -36,9 +36,9 @@ bash samples/holdem_bots/gen.sh
 
 ## 协议速查
 
-请求信封（平台 → Bot，LongRunning 首回合）：
+请求信封（平台 → Bot，LongRunning 首回合，严格对齐 Botzone TexasHoldem2p 11 字段）：
 ```json
-{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,0],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],"to_call":50,"street_bet":50,"current_bet":100,"sb":50,"bb":100,"opp_chips":19900}],"responses":[]}
+{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,0],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}
 ```
 后续回合（LongRunning）单 request：`{"request":{...}}`
 

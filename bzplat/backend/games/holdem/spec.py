@@ -96,12 +96,12 @@ async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: flo
     from bzplat.backend.runtime.binary_runner import BotCrashedError
     import asyncio
 
-    # 构造最小 act 请求（preflop，seat 0/SB，需 call 50）
+    # 构造最小 act 请求（preflop，seat 0/SB）
     from bzplat.backend.games.holdem.cards import Card
     req = build_act_request(
         hand=0, total_hands=1, my_id=0, dealer_id=0,
         my_cards=[Card(0, 0), Card(1, 0)], board=[], history=[],
-        my_chips=19950, opp_chips=19900, sb=50, bb=100, to_call=50,
+        my_chips=19950,
     )
     line = dumps_request(req)
     try:

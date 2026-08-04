@@ -62,6 +62,10 @@ def test_encode_cards_list():
 
 
 def test_build_act_request_botzone_fields():
+    """build_act_request 输出必须严格对齐 Botzone TexasHoldem2p 官方 11 字段——
+    不多发任何平台扩展字段（to_call/sb/bb/opp_chips/... 已移除），保证标准 Botzone
+    Bot 直接可跑。本测试是「防扩展字段回归」的守护测试。
+    """
     req = build_act_request(
         hand=12,
         total_hands=70,
@@ -74,12 +78,19 @@ def test_build_act_request_botzone_fields():
             {"round": 0, "player_id": 1, "action": -1, "action_type": "fold"},
         ],
         my_chips=19900,
-        opp_chips=19800,
-        sb=50,
-        bb=100,
-        to_call=100,
     )
-    # Botzone 全名字段
+    # Botzone TexasHoldem2p 官方字段（恰好 11 个，一个不多一个不少）
+    botzone_fields = {
+        "num_players", "dealer_id", "my_id", "my_chips", "my_cards",
+        "public_cards", "history", "hand", "max_hand",
+        "total_win_chips", "total_win_games",
+    }
+    assert set(req.keys()) == botzone_fields, (
+        f"字段集合偏离 Botzone 官方 11 字段。"
+        f"多余: {set(req.keys()) - botzone_fields}；"
+        f"缺失: {botzone_fields - set(req.keys())}"
+    )
+    # Botzone 全名字段值
     assert req["num_players"] == 2
     assert req["dealer_id"] == 0
     assert req["my_id"] == 0

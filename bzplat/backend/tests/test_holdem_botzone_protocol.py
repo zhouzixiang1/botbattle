@@ -84,7 +84,7 @@ def test_build_request_history_format():
             {"round": 0, "player_id": 0, "action": 50, "action_type": "raise"},
             {"round": 1, "player_id": 1, "action": -1, "action_type": "fold"},
         ],
-        my_chips=19900, opp_chips=19800, sb=50, bb=100, to_call=50,
+        my_chips=19900,
     )
     h = req["history"]
     assert h[0] == {"round": 0, "player_id": 0, "action": 50, "action_type": "raise"}
@@ -193,9 +193,7 @@ def test_sample_bot_responds_botzone_envelope(botname):
     req = (
         '{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,'
         '"my_cards":[48,0],"public_cards":[],"history":[],'
-        '"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],'
-        '"to_call":50,"street_bet":50,"current_bet":100,"sb":50,"bb":100,'
-        '"opp_chips":19900}'
+        '"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}'
     )
     # LongRunning 首回合信封
     envelope = '{"requests":[' + req + '],"responses":[]}'
@@ -229,13 +227,11 @@ def test_raisebot_emits_raise_delta():
     if not path.is_file():
         pytest.skip("raisebot missing")
     import subprocess, json
-    # preflop SB: street_bet=50, to_call=50 → raisebot 加注
+    # preflop SB → raisebot 加注（纯 Botzone 11 字段信封）
     req = (
         '{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,'
         '"my_cards":[48,0],"public_cards":[],"history":[],'
-        '"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],'
-        '"to_call":50,"street_bet":50,"current_bet":100,"sb":50,"bb":100,'
-        '"opp_chips":19900}'
+        '"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}'
     )
     envelope = '{"requests":[' + req + '],"responses":[]}'
     out = subprocess.run([str(path)], input=envelope + "\n", capture_output=True, text=True, timeout=5)

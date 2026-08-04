@@ -25,6 +25,49 @@ type Ev = Record<string, unknown> & { type?: string }
 /** 默认人类超时（与后端 human_action_timeout 默认 120s 对齐，仅 UI 提示） */
 const HUMAN_TIMEOUT_SEC = 120
 
+/** 从 Botzone 标准 holdem 请求（11 字段，无 to_call 扩展）推导当前跟注额。
+ *
+ * 纯 Botzone TexasHoldem2p 模型：跟注额 = 本街最高下注 − 我本街已下注。
+ * 本街已下注从 history 重放（含盲注：dealer_id 是 SB，另一座是 BB）。
+ * 与后端 engine 的判定一致，仅供人类对战 UI 提示（精确以引擎校验为准）。
+ */
+function deriveToCall(request: Record<string, unknown> | null): number {
+  if (!request) return 0
+  const myId = Number(request.my_id ?? 0)
+  const dealerId = Number(request.dealer_id ?? 0)
+  const bbSeat = 1 - dealerId // dealer=SB，另一座=BB
+  const SB = 50, BB = 100
+  // 本街各方已下注（翻前初始含盲注）
+  const bets = [0, 0]
+  bets[dealerId] = SB
+  bets[bbSeat] = BB
+  // 翻后每进入新 street 重置；用 history.round 变化检测换街
+  let lastRound = 0
+  const history = (request.history as Array<Record<string, unknown>> | undefined) ?? []
+  for (const h of history) {
+    const round = Number(h.round ?? 0)
+    if (round > lastRound) {
+      // 进入新街道：重置本街下注（保留盲注语义只在 preflop）
+      bets[0] = 0
+      bets[1] = 0
+      lastRound = round
+    }
+    const pid = Number(h.player_id ?? 0)
+    const action = Number(h.action ?? 0)
+    if (action === -1 || action === -2) {
+      bets[pid] = -1 // fold/allin 标记，不参与跟注计算
+    } else if (action > 0) {
+      bets[pid] += action // raise delta 累加到本街已投
+    }
+    // call/check(0)：跟注到本街最高，用最高值兜底
+    if (action === 0) {
+      bets[pid] = Math.max(bets[0], bets[1])
+    }
+  }
+  const streetBet = Math.max(bets[0], bets[1])
+  return Math.max(0, streetBet - bets[myId])
+}
+
 export default function HumanPlay() {
   const { id } = useParams<{ id: string }>()
   const [match, setMatch] = useState<MatchSeatRow | null>(null)
@@ -271,9 +314,10 @@ function HoldemActions({
   request: Record<string, unknown> | null
   onAct: (a: string, x?: number) => void
 }) {
-  // 协议：to=跟注额；c=己方筹码；展开字段可能用 to_call / chips
-  const toCall = Number(request?.to ?? request?.to_call ?? 0)
-  const myChips = Number(request?.c ?? request?.chips ?? 20000)
+  // 跟注额：优先用紧凑协议 to / 旧扩展 to_call（如有），否则从 Botzone 标准
+  // history + my_chips 推导（协议已严格对齐 Botzone 11 字段，不再下发 to_call）。
+  const toCall = Number(request?.to ?? request?.to_call ?? deriveToCall(request))
+  const myChips = Number(request?.c ?? request?.my_chips ?? request?.chips ?? 20000)
   const canCheck = toCall === 0
   const canCall = toCall > 0 && myChips > 0
   const minRaise = Math.max(toCall * 2, 200) // 粗略默认；精确以引擎为准
