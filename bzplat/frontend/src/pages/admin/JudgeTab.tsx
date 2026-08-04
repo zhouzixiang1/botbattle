@@ -164,7 +164,7 @@ export default function JudgeTab() {
             onClick={() => setShowCode((v) => !v)}
             className="text-sm font-medium text-primary hover:opacity-80"
           >
-            {showCode ? '▾ 收起裁判代码说明' : '▸ 展开裁判代码说明（仅管理员可见）'}
+            {showCode ? '▾ 收起裁判代码说明' : '▸ 展开裁判代码说明'}
           </button>
           {showCode && (
             <article

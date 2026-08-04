@@ -83,7 +83,7 @@ graph LR
 
 **两层解耦**：
 
-1. **GameSpec 注册表（`games/`，全面解耦的单一真相）**：每款游戏是一个 `GameSpec` 对象，集中声明 `game_id`/`label`/`session_factory`(裁判)/`protocol`(行协议)/`default_match_params`+`validate_match_params`(配置)/`rounds_per_match`+`normalize_earnings`+`eta_for_match`(编排特化)/`tiers`(per-game 段位曲线；查表经 `registry.tier_for` → `tier_for_in`，**无** `tier_for` 字段)/`judge_params`(裁判参数)/`templates`(赛事模板)/`code_path`+`summary`(元信息)。通用层（编排/赛制/评分/DB）经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 `if game_id == ...` 分支**——所有游戏差异封装在各自 spec。
+1. **GameSpec 注册表（`games/`，全面解耦的单一真相）**：每款游戏是一个 `GameSpec` 对象，集中声明 `game_id`/`label`/`session_factory`(裁判)/`protocol`(行协议)/`default_match_params`+`validate_match_params`(配置)/`rounds_per_match`+`normalize_earnings`+`eta_for_match`(编排特化)/`tiers`(per-game 段位曲线；查表经 `registry.tier_for` → `tier_for_in`，**无** `tier_for` 字段)/`judge_params`(裁判参数)/`templates`(赛事模板)/`code_path`+`summary`(元信息)/`source_files`(公开裁判源码文件列表，默认 engine.py+protocol.py+result.py，对全体玩家透明)。通用层（编排/赛制/评分/DB）经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 `if game_id == ...` 分支**——所有游戏差异封装在各自 spec。
 
 2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。**编排层与赛制层只依赖这两个字段，绝不触碰扑克的 pot/board/holes 或棋类的棋盘**——这是赛制代码能通用于三款游戏的根本。**`winner` 在引擎内权威化**：棋类单轮取胜者；holdem 多手按累计净筹码（`final_chips`/net）比较——编排层只读 `result.winner`（+ ea/eb 平局兜底），不再有 match_end 事件三层兜底 / holdem 特例注释。`tests/test_result_contract.py` 断言各游戏 result 都满足此契约（防 drift）。
 
@@ -165,6 +165,7 @@ SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`
 - 搜索：`GET /api/search`
 - 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
 - Wiki：`GET /api/wiki`
+- **裁判公开**：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（裁判源码全文）——裁判是公开可审计的规则定义（区别于 Bot 私有黑盒），源码对全体玩家透明
 - 数据集列表：`GET /api/matchpacks`
 
 ### 4.2 鉴权端点（require_user，登录玩家）
@@ -186,7 +187,7 @@ SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`
 - 用户管理：`GET /api/admin/users`、`POST /role`、`PATCH/DELETE /api/admin/users/{id}`、`/sessions`
 - Bot/赛事管理：`GET /api/admin/{bots,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`；对局列表走公开 `GET /api/matches`，管理操作为 `PATCH/DELETE /api/admin/matches/{id}`
 - 配置：`GET /api/admin/settings/runtime`、`PATCH /api/admin/settings/{runtime,site}`
-- 裁判：`GET /api/admin/judges`、`PATCH /api/admin/judges/params`
+- 裁判：`GET /api/admin/judges`（含可调参数当前值 + docstring，区别于公开 `/api/judges`）、`PATCH /api/admin/judges/params`（热调规则参数）
 - 模板：`GET/POST /api/admin/templates`、`PUT/DELETE /{tid}`、`POST /preview`
 - 邮件：`GET /api/admin/email/{templates,outbox}`、`PUT /templates/{key}`
 - 日志：`GET /api/admin/logs`
