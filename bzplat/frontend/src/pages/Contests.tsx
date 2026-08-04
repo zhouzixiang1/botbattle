@@ -14,6 +14,7 @@ import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import Countdown from '@/components/Countdown'
+import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
 import { getGame, defaultMatchConfig } from '@/games'
 
@@ -91,6 +92,10 @@ export default function Contests() {
   const [regClosesAt, setRegClosesAt] = useState('')
   const [startsAt, setStartsAt] = useState('')
   const [error, setError] = useState('')
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 20
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
   // 建赛表单：游戏由用户选（不再从模板反推），决定 match_config 字段 + 模板可选集
   const selGame = formGameId
@@ -100,10 +105,20 @@ export default function Contests() {
     setMatchCfg(defaultMatchConfig(formGameId))
   }, [formGameId])
 
-  const load = () =>
-    apiGet<{ contests: Contest[] }>('/api/contests' + (filterGame ? `?game_id=${filterGame}` : ''))
-      .then((d) => setList(d.contests || []))
+  const load = () => {
+    const params = new URLSearchParams()
+    if (filterGame) params.set('game_id', filterGame)
+    params.set('page', String(page))
+    params.set('per_page', String(perPage))
+    return apiGet<{ contests: Contest[]; total?: number; page?: number }>(
+      '/api/contests?' + params.toString(),
+    )
+      .then((d) => {
+        setList(d.contests || [])
+        if (d.total !== undefined) setTotal(d.total)
+      })
       .catch((e) => setError(errMsg(e)))
+  }
 
   useEffect(() => {
     void load()
@@ -119,7 +134,7 @@ export default function Contests() {
       })
       .catch(() => undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterGame, formGameId])
+  }, [filterGame, formGameId, page])
 
   /** datetime-local 值（如 2026-01-01T14:00）→ ISO 秒级字符串（后端 naive 本地时间约定） */
   const toIso = (v: string): string | undefined => {
@@ -330,6 +345,7 @@ export default function Contests() {
             ))}
           </ul>
         )}
+        <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
       </Card>
     </PageStub>
   )
