@@ -302,11 +302,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     if "bots" in tables:
         _add_col(conn, "bots", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
+        # Botzone 运行模式（上传时标明，runner 据此选传输路径）
+        _add_col(conn, "bots", "runtime_mode", "TEXT NOT NULL DEFAULT 'longrunning'")
         # 下线私有 bot 功能（全局只有「公开」一种状态）：旧库的 is_public 列先转公开
         # 再 DROP COLUMN（保数据不丢）。幂等：列已不存在则跳过。
         if "is_public" in _table_cols(conn, "bots"):
             conn.execute("UPDATE bots SET is_public=1 WHERE is_public=0")
             conn.execute("ALTER TABLE bots DROP COLUMN is_public")
+
+    # bot_versions 加 runtime_mode（每版本独立标明，回滚时恢复该版本的运行模式）
+    if "bot_versions" in tables:
+        _add_col(conn, "bot_versions", "runtime_mode", "TEXT NOT NULL DEFAULT 'longrunning'")
 
     if "users" in tables:
         _add_col(conn, "users", "bio", "TEXT NOT NULL DEFAULT ''")
@@ -1132,12 +1138,16 @@ class Store:
         binary_path = fields.get("binary_path", "")
         is_builtin = 1 if fields.get("is_builtin") else 0
         game_id = fields.get("game_id") or "holdem"
+        from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
+        runtime_mode = fields.get("runtime_mode") or DEFAULT_RUNTIME_MODE
+        if runtime_mode not in VALID_RUNTIME_MODES:
+            raise ValueError(f"非法 runtime_mode: {runtime_mode}")
         now = _now()
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO bots(owner_id, name, display_name, description, "
-                "os, arch, format, binary_path, is_builtin, game_id, "
-                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "os, arch, format, binary_path, is_builtin, game_id, runtime_mode, "
+                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     owner_id,
                     name,
@@ -1149,6 +1159,7 @@ class Store:
                     binary_path,
                     is_builtin,
                     game_id,
+                    runtime_mode,
                     now,
                     now,
                 ),
@@ -1238,8 +1249,16 @@ class Store:
         os: str = "",
         arch: str = "",
         format: str = "unknown",
+        runtime_mode: str | None = None,
         version: int | None = None,
     ) -> dict:
+        from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
+        if runtime_mode is None:
+            # 沿用 bot 当前的运行模式（回滚/补传时不强制改模式）
+            runtime_mode = self.get_bot(bot_id) or {}
+            runtime_mode = runtime_mode.get("runtime_mode") or DEFAULT_RUNTIME_MODE
+        if runtime_mode not in VALID_RUNTIME_MODES:
+            raise ValueError(f"非法 runtime_mode: {runtime_mode}")
         with self._tx() as c:
             if version is None:
                 row = c.execute(
@@ -1249,8 +1268,8 @@ class Store:
                 version = (row["mv"] or 0) + 1
             cur = c.execute(
                 "INSERT INTO bot_versions(bot_id, version, binary_path, "
-                "upload_note, checksum, size_bytes, os, arch, format, "
-                "uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "upload_note, checksum, size_bytes, os, arch, format, runtime_mode, "
+                "uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     bot_id,
                     version,
@@ -1261,21 +1280,22 @@ class Store:
                     os,
                     arch,
                     format,
+                    runtime_mode,
                     _now(),
                 ),
             )
             vid = cur.lastrowid
             c.execute(
                 "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
-                "format=?, updated_at=? WHERE id=?",
-                (version, binary_path, os, arch, format, _now(), bot_id),
+                "format=?, runtime_mode=?, updated_at=? WHERE id=?",
+                (version, binary_path, os, arch, format, runtime_mode, _now(), bot_id),
             )
             return _row(
                 c.execute("SELECT * FROM bot_versions WHERE id=?", (vid,)).fetchone()
             )
 
     def delete_bot_version(self, bot_id: int, version: int) -> bool:
-        """删除指定版本；若删的是当前版本，回退到 max(version)。"""
+        """删除指定版本；若删的是当前版本，回退到 max(version)（含 runtime_mode）。"""
         with self._tx() as c:
             cur = c.execute(
                 "DELETE FROM bot_versions WHERE bot_id=? AND version=?",
@@ -1285,18 +1305,40 @@ class Store:
                 return False
             # 若删的是当前版本，回退到剩余最新版本
             row = c.execute(
-                "SELECT MAX(version) AS mv, binary_path, os, arch, format "
+                "SELECT MAX(version) AS mv, binary_path, os, arch, format, runtime_mode "
                 "FROM bot_versions WHERE bot_id=?",
                 (bot_id,),
             ).fetchone()
             if row and row["mv"]:
                 c.execute(
                     "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
-                    "format=?, updated_at=? WHERE id=?",
+                    "format=?, runtime_mode=?, updated_at=? WHERE id=?",
                     (row["mv"], row["binary_path"], row["os"], row["arch"],
-                     row["format"], _now(), bot_id),
+                     row["format"], row["runtime_mode"], _now(), bot_id),
                 )
             return True
+
+    def set_current_version(self, bot_id: int, version: int) -> dict | None:
+        """回滚到指定版本（不删除其他版本）：把 bots 镜像切到该版本的
+        binary_path/os/arch/format/runtime_mode，current_version=version。
+
+        用于 MyBots「回滚到此版本」。版本不存在返回 None。
+        """
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT version, binary_path, os, arch, format, runtime_mode "
+                "FROM bot_versions WHERE bot_id=? AND version=?",
+                (bot_id, version),
+            ).fetchone()
+            if not row:
+                return None
+            c.execute(
+                "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
+                "format=?, runtime_mode=?, updated_at=? WHERE id=?",
+                (row["version"], row["binary_path"], row["os"], row["arch"],
+                 row["format"], row["runtime_mode"], _now(), bot_id),
+            )
+            return _row(c.execute("SELECT * FROM bots WHERE id=?", (bot_id,)).fetchone())
 
     def list_bot_versions(self, bot_id: int) -> list[dict]:
         with self._tx() as c:

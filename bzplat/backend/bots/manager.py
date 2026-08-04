@@ -41,17 +41,21 @@ class BotManager:
         description: str = "",
         upload_note: str = "",
         game_id: str = "holdem",
+        runtime_mode: str | None = None,
         binary_runner=None,
     ) -> dict:
         if not _NAME_RE.match(name or ""):
             raise BotError(
                 "invalid_name", "bot 名须字母开头，2-32 位字母数字下划线"
             )
-        from bzplat.backend.store.schema import VALID_GAME_IDS
+        from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_GAME_IDS, VALID_RUNTIME_MODES
 
         gid = (game_id or "holdem").strip().lower()
         if gid not in VALID_GAME_IDS:
             raise BotError("invalid_game", f"未知游戏类型: {gid}")
+        rmode = (runtime_mode or DEFAULT_RUNTIME_MODE).strip().lower()
+        if rmode not in VALID_RUNTIME_MODES:
+            raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
         if not raw or len(raw) > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
         info = classify_binary(raw)
@@ -70,9 +74,10 @@ class BotManager:
             arch=info.arch,
             format=info.format,
             game_id=gid,
+            runtime_mode=rmode,
         )
         try:
-            self._write_version(bot["id"], raw, info, upload_note=upload_note)
+            self._write_version(bot["id"], raw, info, upload_note=upload_note, runtime_mode=rmode)
         except Exception:
             self.store.delete_bot(bot["id"])
             raise
@@ -85,11 +90,17 @@ class BotManager:
         return self.store.get_bot(bot["id"])
 
     def upload_version(
-        self, bot_id: int, owner_id: int, raw: bytes, *, upload_note: str = "", binary_runner=None
+        self, bot_id: int, owner_id: int, raw: bytes, *, upload_note: str = "",
+        runtime_mode: str | None = None, binary_runner=None
     ) -> dict:
+        from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
         bot = self.store.get_bot(bot_id)
         if not bot or bot["owner_id"] != owner_id:
             raise BotError("not_found", "bot 不存在")
+        # runtime_mode 缺省沿用 bot 当前模式
+        rmode = (runtime_mode or bot.get("runtime_mode") or DEFAULT_RUNTIME_MODE).strip().lower()
+        if rmode not in VALID_RUNTIME_MODES:
+            raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
         if not raw or len(raw) > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
         info = classify_binary(raw)
@@ -97,7 +108,7 @@ class BotManager:
             raise BotError(
                 "unsupported_binary", info.reject_reason or "不支持的二进制"
             )
-        result = self._write_version(bot_id, raw, info, upload_note=upload_note)
+        result = self._write_version(bot_id, raw, info, upload_note=upload_note, runtime_mode=rmode)
         # 预检
         if binary_runner is not None:
             ok, detail = self._run_preflight(bot_id, bot["game_id"], binary_runner)
@@ -147,7 +158,7 @@ class BotManager:
         self.store.delete_bot_version(bot_id, cur_ver)
 
     def _write_version(
-        self, bot_id: int, raw: bytes, info, *, upload_note: str
+        self, bot_id: int, raw: bytes, info, *, upload_note: str, runtime_mode: str | None = None
     ) -> dict:
         checksum = hashlib.sha256(raw).hexdigest()
         bot = self.store.get_bot(bot_id)
@@ -167,6 +178,7 @@ class BotManager:
             os=info.os,
             arch=info.arch,
             format=info.format,
+            runtime_mode=runtime_mode,
             version=version,
         )
         if not self.store.get_rating(bot_id):

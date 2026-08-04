@@ -72,7 +72,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 ## 关键约束（容易踩坑）
 
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
-- **所有常量集中在 `bzplat/backend/store/schema.py`**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`platform_settings` 键名。新增常量加这里，别散落。
+- **所有常量集中在 `bzplat/backend/store/schema.py`**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（Botzone traditional/longrunning）、`platform_settings` 键名。新增常量加这里，别散落。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
 - **资源硬顶**（`runtime/limits.py`，admin 不可抬高）：每 Bot `--cpus=1` / `--memory=512m`；半负载并发 ceiling = `max(1, cpu//4)`；全员单/双循环人数上限 `FULL_RR_MAX_N=12`（阶段可设 `allow_large_round_robin` 旁路，仅白名单内置决赛模板如 `holdem_final_ranked`）。
 

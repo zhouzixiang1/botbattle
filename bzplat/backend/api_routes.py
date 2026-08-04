@@ -307,6 +307,7 @@ async def upload_bot(
     description: str = Form(""),
     upload_note: str = Form(""),
     game_id: str = Form("holdem"),
+    runtime_mode: str = Form("longrunning"),
     file: UploadFile = File(...),
     user=Depends(require_user),
 ):
@@ -317,12 +318,13 @@ async def upload_bot(
             display_name=display_name, description=description,
             upload_note=upload_note,
             game_id=game_id,
+            runtime_mode=runtime_mode,
             binary_runner=getattr(request.app.state, "binary_runner", None),
         )
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
-    audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} size={len(raw)}")
+    audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={len(raw)}")
     return {"bot": bot}
 
 
@@ -331,6 +333,7 @@ async def upload_bot_version(
     bot_id: int,
     request: Request,
     upload_note: str = Form(""),
+    runtime_mode: str = Form(""),
     file: UploadFile = File(...),
     user=Depends(require_user),
 ):
@@ -338,6 +341,7 @@ async def upload_bot_version(
     try:
         bot = _bots(request).upload_version(
             bot_id, user["id"], raw, upload_note=upload_note,
+            runtime_mode=runtime_mode or None,
             binary_runner=getattr(request.app.state, "binary_runner", None),
         )
     except BotError as e:
@@ -345,6 +349,42 @@ async def upload_bot_version(
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
     audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={len(raw)}")
     return {"bot": bot}
+
+
+@router.get("/api/bots/{bot_id}/versions")
+def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_user)):
+    """Bot 拥有者查看自己 Bot 的版本历史（MyBots 版本管理用）。
+
+    含每版本的 runtime_mode（回滚时恢复）。仅 owner 可见；非 owner 返回 403。
+    """
+    store = _store(request)
+    bot = store.get_bot(bot_id)
+    if not bot:
+        raise HTTPException(404, "bot 不存在")
+    if bot["owner_id"] != user["id"] and user.get("role") != "admin":
+        raise HTTPException(403, "无权查看他人 Bot 的版本历史")
+    return {"versions": store.list_bot_versions(bot_id), "current_version": bot["current_version"]}
+
+
+@router.post("/api/bots/{bot_id}/versions/{version}/activate")
+def rollback_bot_version(
+    bot_id: int, version: int, request: Request, user=Depends(require_user)
+):
+    """Bot 拥有者回滚到指定版本（MyBots「回滚到此版本」）。
+
+    不删除其他版本，仅切换 current_version + 镜像（binary_path/runtime_mode/...）。
+    """
+    store = _store(request)
+    bot = store.get_bot(bot_id)
+    if not bot:
+        raise HTTPException(404, "bot 不存在")
+    if bot["owner_id"] != user["id"]:
+        raise HTTPException(403, "无权修改他人的 Bot")
+    result = store.set_current_version(bot_id, version)
+    if result is None:
+        raise HTTPException(404, f"版本 {version} 不存在")
+    audit_log(request, "bot_version_rollback", result="ok", user=user.get("username"), target=bot_id, detail=f"v{version}")
+    return {"bot": result}
 
 
 @router.post("/api/bots/{bot_id}/active")

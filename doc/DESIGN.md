@@ -133,7 +133,7 @@ SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`
 
 | 表 | 用途 |
 |----|------|
-| `bot_versions` | Bot 版本管理（多版本 + 切换激活） |
+| `bot_versions` | Bot 版本管理（多版本 + 切换激活 + runtime_mode per-version；`set_current_version` 回滚恢复运行模式） |
 | `match_replays` | 对局回放事件存储（events_json） |
 | `sessions` | 会话（token, user_id, expires_at，认证核心） |
 | `platform_settings` | 所有热配置 KV（运行时/站点/裁判/auto-match） |

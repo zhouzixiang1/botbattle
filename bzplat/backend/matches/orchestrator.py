@@ -15,6 +15,7 @@ from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
+    DEFAULT_RUNTIME_MODE,
     REGISTERED_ENGINES,
     STATUS_ABORTED,
     STATUS_COMPLETED,
@@ -278,8 +279,11 @@ class MatchOrchestrator:
             bot_b = self.store.get_bot(m["bot_b_id"])
             # P1：赛事对局读冻结的 bot 版本路径（pairing.bot_a_version_id → bot_versions.binary_path），
             # 不受选手中途上传新版本影响；非 contest 读 bots.binary_path（最新）。
+            # runtime_mode 同源：冻结版本优先读 bot_versions.runtime_mode，否则读 bots.runtime_mode。
             path_a = bot_a["binary_path"]
             path_b = bot_b["binary_path"]
+            mode_a = bot_a.get("runtime_mode") or DEFAULT_RUNTIME_MODE
+            mode_b = bot_b.get("runtime_mode") or DEFAULT_RUNTIME_MODE
             if m.get("match_type") == TYPE_CONTEST and m.get("contest_id"):
                 pairing = self._find_contest_pairing(m["contest_id"], match_id)
                 if pairing:
@@ -287,10 +291,12 @@ class MatchOrchestrator:
                         v = self.store.get_bot_version(pairing["bot_a_version_id"])
                         if v and v.get("binary_path"):
                             path_a = v["binary_path"]
+                            mode_a = v.get("runtime_mode") or mode_a
                     if pairing.get("bot_b_version_id"):
                         v = self.store.get_bot_version(pairing["bot_b_version_id"])
                         if v and v.get("binary_path"):
                             path_b = v["binary_path"]
+                            mode_b = v.get("runtime_mode") or mode_b
             gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
             logger.info(
                 "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s)",
@@ -321,6 +327,7 @@ class MatchOrchestrator:
                     sb=jp.get("sb"),
                     bb=jp.get("bb"),
                     on_event=on_event,
+                    runtime_modes=(mode_a, mode_b),
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
@@ -488,6 +495,7 @@ class MatchOrchestrator:
                     starting_stack=jp.get("starting_stack"),
                     sb=jp.get("sb"),
                     bb=jp.get("bb"),
+                    runtime_mode=bot.get("runtime_mode") or DEFAULT_RUNTIME_MODE,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
