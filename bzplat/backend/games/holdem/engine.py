@@ -489,7 +489,6 @@ class MatchSession:
         if legal is None:
             legal = self.legal_actions(player_idx)
         p = self._players[player_idx]
-        opp = self._players[1 - player_idx]
         # total_win_chips = 各手净输赢累加（Botzone 字段语义）；total_win_games = 各方累计赢手数。
         total_win_games = [0, 0]
         for hr in self.hand_results:
@@ -506,12 +505,6 @@ class MatchSession:
             board=self._board,
             history=list(self._hist),
             my_chips=p.chips,
-            opp_chips=opp.chips,
-            sb=self.sb,
-            bb=self.bb,
-            to_call=legal["to_call"],
-            street_bet=p.street_bet,
-            current_bet=self._current_bet,
             total_win_chips=list(self.net),
             total_win_games=total_win_games,
         )

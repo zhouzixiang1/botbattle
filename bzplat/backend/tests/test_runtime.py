@@ -52,10 +52,6 @@ def test_protocol_roundtrip():
         board=[],
         history=[],
         my_chips=20000,
-        opp_chips=20000,
-        sb=50,
-        bb=100,
-        to_call=50,
     )
     line = proto.dumps_request(req)
     # Botzone 全名字段

@@ -95,25 +95,22 @@ def build_act_request(
     board: Sequence[Card],
     history: list[dict[str, Any]],
     my_chips: int,
-    opp_chips: int,
-    sb: int,
-    bb: int,
-    to_call: int,
-    street_bet: int = 0,
-    current_bet: int = 0,
     total_win_chips: list[int] | None = None,
     total_win_games: list[int] | None = None,
 ) -> dict[str, Any]:
     """构造 Botzone 标准 act 请求负载（信封由传输层包）。
 
-    字段名严格对齐 Botzone TexasHoldem2p。``hand`` 为 0-based 当前手牌序号，
-    ``max_hand`` = 总手数（用户要求 70，Botzone 文档默认 50）。
+    字段名严格对齐 Botzone TexasHoldem2p 的 11 个官方字段（不多发任何平台扩展字段，
+    标准 Botzone Bot 可直接跑）：
+    ``num_players`` / ``dealer_id`` / ``my_id`` / ``my_chips`` / ``my_cards``(0-51)
+    / ``public_cards``(0-51) / ``history``(对象数组) / ``hand`` / ``max_hand``
+    / ``total_win_chips`` / ``total_win_games``。
 
-    注：``to_call`` / ``sb`` / ``bb`` 不在 Botzone 原始字段表里，但平台需下发给 Bot
-    方便决策；Bot 可忽略。核心字段（my_chips/my_cards/public_cards/history/...）
-    与 Botzone 一致，故标准 Botzone Bot 可直接跑。
+    ``hand`` 为 0-based 当前手牌序号；``max_hand`` = 总手数（用户要求 70，Botzone
+    文档默认 50）。需要更多决策信息（to_call/sb/bb/对手筹码等）的 Bot 可从
+    ``history`` + ``my_chips`` 自行重放推导——这正是 Botzone 标准模型。
     """
-    req: dict[str, Any] = {
+    return {
         "num_players": 2,
         "dealer_id": int(dealer_id),
         "my_id": int(my_id),
@@ -125,36 +122,7 @@ def build_act_request(
         "max_hand": int(total_hands),
         "total_win_chips": list(total_win_chips) if total_win_chips is not None else [0, 0],
         "total_win_games": list(total_win_games) if total_win_games is not None else [0, 0],
-        # 平台扩展（非 Botzone 原始字段，标准 Bot 可忽略；便于 Bot 决策）。
-        "to_call": int(to_call),
-        "street_bet": int(street_bet),
-        "current_bet": int(current_bet),
-        "sb": int(sb),
-        "bb": int(bb),
-        "opp_chips": int(opp_chips),
-        "quitting": False,
-        "last_opponent_action": _last_action(history, exclude_player=my_id),
-        "last_opponent_raise_delta": _last_raise_delta(history, exclude_player=my_id),
     }
-    return req
-
-
-def _last_action(history: list[dict[str, Any]], *, exclude_player: int) -> Any:
-    """history 里最近一个非本玩家动作的裸整数（便于 Bot 快速决策）；无则 None。"""
-    for ev in reversed(history):
-        if ev.get("player_id") != exclude_player:
-            return ev.get("action")
-    return None
-
-
-def _last_raise_delta(history: list[dict[str, Any]], *, exclude_player: int) -> int:
-    """对手最近一次 raise 的额外量（便于 Bot 判断跟注额）；非 raise 或无则 0。"""
-    for ev in reversed(history):
-        if ev.get("player_id") != exclude_player:
-            if ev.get("action_type") == "raise":
-                return int(ev.get("action", 0))
-            return 0
-    return 0
 
 
 def action_to_history_int(action: str, raise_extra: int | None) -> int:
