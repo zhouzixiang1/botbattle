@@ -104,7 +104,7 @@ export default function JudgeTab() {
         <div key={g.game_id} className="rounded-xl border border-border bg-card p-4">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-sm font-medium text-foreground">{g.label}</h3>
-            <span className="font-mono text-xs text-muted-foreground">{g.code_path}</span>
+            <span className="max-w-full break-all font-mono text-xs text-muted-foreground">{g.code_path}</span>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">{g.summary}</p>
 

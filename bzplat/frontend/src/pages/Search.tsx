@@ -193,7 +193,7 @@ export default function Search() {
                   <Card className="h-full transition-colors hover:border-primary/40 hover:shadow-lift">
                     <CardContent className="gap-1 py-4">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium text-foreground group-hover:text-primary">
+                        <span className="min-w-0 truncate font-medium text-foreground group-hover:text-primary" title={b.display_name || b.name}>
                           {b.display_name || b.name}
                         </span>
                         <Badge variant="secondary" className="gap-1 text-[10px]">
@@ -236,13 +236,21 @@ export default function Search() {
                     <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                       {fmtTime(m.created_at)}
                     </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1.5 text-sm">
-                        <Link to={`/bot/${m.bot_a_id}`} className="font-medium text-foreground hover:text-primary">
+                    <TableCell className="max-w-[14rem]">
+                      <div className="flex min-w-0 items-center gap-1.5 text-sm">
+                        <Link
+                          to={`/bot/${m.bot_a_id}`}
+                          className="min-w-0 truncate font-medium text-foreground hover:text-primary"
+                          title={m.bot_a_display || m.bot_a_name}
+                        >
                           {m.bot_a_display || m.bot_a_name}
                         </Link>
-                        <span className="text-muted-foreground">vs</span>
-                        <Link to={`/bot/${m.bot_b_id}`} className="font-medium text-foreground hover:text-primary">
+                        <span className="shrink-0 text-muted-foreground">vs</span>
+                        <Link
+                          to={`/bot/${m.bot_b_id}`}
+                          className="min-w-0 truncate font-medium text-foreground hover:text-primary"
+                          title={m.bot_b_display || m.bot_b_name}
+                        >
                           {m.bot_b_display || m.bot_b_name}
                         </Link>
                       </div>

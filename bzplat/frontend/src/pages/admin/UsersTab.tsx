@@ -129,7 +129,9 @@ export default function UsersTab() {
                     {u.username}
                   </Link>
                 </td>
-                <td className="px-3 py-2 text-muted-foreground">{u.email}</td>
+                <td className="max-w-[16rem] truncate px-3 py-2 text-muted-foreground">
+                  <span className="block truncate" title={u.email}>{u.email}</span>
+                </td>
                 <td className="px-3 py-2">
                   <Select
                     value={u.role}

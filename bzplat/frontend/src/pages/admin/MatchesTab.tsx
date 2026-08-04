@@ -108,8 +108,16 @@ export default function MatchesTab() {
             {matches.map((m) => (
               <tr key={m.id} className="hover:bg-accent">
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</td>
-                <td className="px-3 py-2 text-foreground">
-                  {m.bot_a_name || `#${m.bot_a_id}`} vs {m.bot_b_name || `#${m.bot_b_id}`}
+                <td className="max-w-[16rem] px-3 py-2 text-foreground">
+                  <div className="flex min-w-0 items-center gap-1 truncate">
+                    <span className="min-w-0 truncate" title={m.bot_a_name || `#${m.bot_a_id}`}>
+                      {m.bot_a_name || `#${m.bot_a_id}`}
+                    </span>
+                    <span className="shrink-0 text-muted-foreground">vs</span>
+                    <span className="min-w-0 truncate" title={m.bot_b_name || `#${m.bot_b_id}`}>
+                      {m.bot_b_name || `#${m.bot_b_id}`}
+                    </span>
+                  </div>
                 </td>
                 <td className="px-3 py-2 text-xs text-muted-foreground">{m.match_type}</td>
                 <td className="px-3 py-2">

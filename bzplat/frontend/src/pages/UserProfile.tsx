@@ -249,7 +249,7 @@ export default function UserProfile() {
                 <Card className="h-full transition-colors hover:border-primary/40 hover:shadow-lift">
                   <CardContent className="gap-1 py-4">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium text-foreground group-hover:text-primary">
+                      <span className="min-w-0 truncate font-medium text-foreground group-hover:text-primary" title={b.display_name || b.name}>
                         {b.display_name || b.name}
                       </span>
                       <Badge variant="secondary" className="gap-1 text-[10px]">

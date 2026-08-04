@@ -152,7 +152,7 @@ export default function Comments({
                     </button>
                   )}
                 </div>
-                <p className="mt-1 whitespace-pre-wrap text-foreground/80">{c.body}</p>
+                <p className="mt-1 whitespace-pre-wrap break-all text-foreground/80">{c.body}</p>
               </div>
             ))}
           </div>
