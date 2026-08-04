@@ -66,21 +66,25 @@ def _sha256(path: Path) -> str:
 
 
 def _is_migrated(store: Store, bot_id: int) -> bool:
-    """最新版本是否已标记为 botzone-migrated。"""
+    """该 bot 是否曾经被迁移过（任意版本标 botzone-migrated）。
+
+    用「任意版本」而非「最新版本」判定：迁移后用户若上传新版本（非 botzone-migrated），
+    重跑脚本不应把用户的版本再次覆盖成样例。只要该 bot 历史上有过一次迁移，即视为已处理。
+    """
     versions = store.list_bot_versions(bot_id)
-    if not versions:
-        return False
-    latest = max(versions, key=lambda v: v["version"])
-    return (latest.get("upload_note") or "") == MIGRATION_NOTE
+    return any((v.get("upload_note") or "") == MIGRATION_NOTE for v in versions)
 
 
 def migrate(store: Store, *, game_id: str = "holdem", dry_run: bool = False,
             seed: int = 20260804) -> dict:
-    """执行迁移，返回统计 {total, migrated, skipped, styles}。"""
-    rng = random.Random(seed)
+    """执行迁移，返回统计 {total, migrated, skipped, styles}。
+
+    seed 确定性：每 bot 用 ``random.Random(seed + bot_id)`` 独立派生风格，不受其他 bot
+    是否 skip 影响——部分迁移后重跑，未迁移 bot 的风格与首次一致。
+    """
     rows = store._conn.execute(
         "SELECT id, name, binary_path, current_version, game_id FROM bots "
-        "WHERE game_id=? ORDER BY id",
+        "WHERE game_id=?",
         (game_id,),
     ).fetchall()
 
@@ -95,7 +99,10 @@ def migrate(store: Store, *, game_id: str = "holdem", dry_run: bool = False,
             print(f"[skip] bot {bot_id} ({name}) 已迁移")
             continue
 
-        style = rng.choice(list(STYLE_BINARIES[game_id].keys()))
+        # 每 bot 独立派生随机数（seed + bot_id）——确定性且不受其他 bot 是否 skip 影响。
+        # 这样部分迁移后重跑，未迁移 bot 的风格分配仍与首次一致（可复现）。
+        bot_rng = random.Random(seed + bot_id)
+        style = bot_rng.choice(list(STYLE_BINARIES[game_id].keys()))
         src = ROOT / STYLE_BINARIES[game_id][style]
         if not src.is_file():
             print(f"[ERROR] 样例 binary 不存在: {src}", file=sys.stderr)
@@ -155,10 +162,13 @@ def main() -> int:
                       file=sys.stderr)
                 return 2
 
+    # 每游戏一个固定的确定性 seed offset（不用 hash()——它跨进程随机，PYTHONHASHSEED 未固定）。
+    GAME_SEED_OFFSET = {"holdem": 0, "gomoku": 1000003, "pencil": 2000003}
     store = Store(args.db)
     total_stats = {"total": 0, "migrated": 0, "skipped": 0, "styles": {}}
     for gid in games:
-        stats = migrate(store, game_id=gid, dry_run=args.dry_run, seed=args.seed + hash(gid) % 1000)
+        stats = migrate(store, game_id=gid, dry_run=args.dry_run,
+                        seed=args.seed + GAME_SEED_OFFSET.get(gid, 0))
         for k in ("total", "migrated", "skipped"):
             total_stats[k] += stats[k]
         for s, c in stats["styles"].items():

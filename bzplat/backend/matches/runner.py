@@ -58,12 +58,22 @@ async def _botzone_decide(
     非 Botzone 协议的游戏（未来）可不走本函数；当前所有游戏均 Botzone 协议。
     """
     session = runner._sessions[session_id]
-    session.requests.append(request)
 
     is_first_turn = session.turn == 0
-    if session.runtime_mode == _bz.RUNTIME_TRADITIONAL or (session.runtime_mode == _bz.RUNTIME_LONGRUNNING and is_first_turn):
-        # 首回合 / Traditional：发完整历史信封。
-        line = _bz.dumps_traditional(session.requests, session.responses)
+    # 传输格式判定：
+    # - Traditional：每回合发完整历史信封。
+    # - LongRunning：首回合发完整历史信封 + 探测握手；若 Bot 输出 keep_running 握手串
+    #   （session.long_running=True），后续回合发单 request 信封；若未握手（Bot 实际是
+    #   traditional 风格却标了 longrunning），继续发完整历史信封兜底——否则 Bot 收到
+    #   单 request 无法重建状态。
+    send_full_envelope = (
+        session.runtime_mode == _bz.RUNTIME_TRADITIONAL
+        or is_first_turn
+        or not session.long_running
+    )
+    if send_full_envelope:
+        # 完整历史信封（含本轮 request——暂存到 pending_request，解析成功后才提交）。
+        line = _bz.dumps_traditional(session.requests + [request], session.responses)
     else:
         # LongRunning 后续回合：发单 request 信封。
         line = _bz.dumps_longrunning_single(request)
@@ -71,13 +81,17 @@ async def _botzone_decide(
     resp_line = await runner.send(session_id, line, timeout=action_timeout)
 
     # LongRunning 首回合响应后探测 keep_running 握手。
-    if (session.runtime_mode == _bz.RUNTIME_LONGRUNNING and is_first_turn):
+    if session.runtime_mode == _bz.RUNTIME_LONGRUNNING and is_first_turn:
         extra = await runner.read_extra_line(session_id, timeout=1.0)
         if extra is not None and _bz.is_keep_running_signal(extra):
             session.long_running = True
 
     envelope = _bz.loads_response(resp_line)
     payload = _bz.extract_response_payload(envelope)
+    # 原子提交会话状态：requests/responses/turn 一起更新。若上面的 loads/extract 抛异常
+    # （Bot 输出非法 JSON / 缺 response），不提交——避免 requests 比 responses 多一条导致
+    # traditional Bot 后续信封错位（requests[i]↔responses[i] 配对重放错乱）。
+    session.requests.append(request)
     session.responses.append(payload)
     session.turn += 1
     # 返回信封 dict（引擎 parse_response 接受 {"response": int} 与裸 int 两种；这里统一
