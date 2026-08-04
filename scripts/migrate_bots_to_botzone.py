@@ -121,6 +121,8 @@ def migrate(store: Store, *, game_id: str = "holdem", dry_run: bool = False,
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / "bot.bin"
         shutil.copyfile(str(src), str(dest))
+        # 确保可执行权限（Docker 只读挂载需 exec 位；copyfile 不保留源权限位）
+        dest.chmod(0o755)
         checksum = _sha256(dest)
         size = dest.stat().st_size
 

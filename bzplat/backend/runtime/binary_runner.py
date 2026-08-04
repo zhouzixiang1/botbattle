@@ -148,6 +148,12 @@ class BinaryRunner:
     async def _start_docker(self, session: BotSession) -> None:
         name = f"bzbot-{session.session_id}"
         session.container_name = name
+        # 确保二进制可执行（Docker 只读挂载 -v path:/app/bot:ro 不经 _start_local 的 chmod；
+        # 若文件缺 exec 位 → exit 126 permission denied）。防御性补权限。
+        try:
+            session.binary_path.chmod(session.binary_path.stat().st_mode | 0o111)
+        except (OSError, PermissionError):
+            pass  # 只读挂载/权限不足时忽略（本机路径通常可改）
         platform = {
             "amd64": "linux/amd64",
             "arm64": "linux/arm64",

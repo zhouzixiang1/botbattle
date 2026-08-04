@@ -1964,6 +1964,9 @@ class Store:
         服务非正常退出后，DB 里 running 记录的内存 Task/Future 已丢失（尤其
         人类对局的 _human_turns），不清理会永久卡 running、泄漏并发与活跃用户计数。
         遍历三张 per-game 表清理。返回受影响行数。
+
+        同时清理孤儿 pending 赛事对局（contest_id=NULL AND match_type='contest' AND
+        status='pending'）——e2e 测试残留等无主 pending 会永久卡「排队中」。
         """
         from bzplat.backend.store.schema import STATUS_ABORTED
 
@@ -1982,6 +1985,22 @@ class Store:
                         (STATUS_ABORTED,),
                     )
                     n += cnt
+                # 清理孤儿 pending 赛事对局（无 contest 归属的 type=contest pending）
+                row2 = c.execute(
+                    f"SELECT COUNT(*) FROM {tbl} "
+                    f"WHERE status='pending' AND match_type='contest' "
+                    f"AND contest_id IS NULL"
+                ).fetchone()
+                cnt2 = int(row2[0]) if row2 else 0
+                if cnt2:
+                    c.execute(
+                        f"UPDATE {tbl} SET status=?, reason='orphan_pending_no_contest', "
+                        "ended_at=datetime('now') "
+                        f"WHERE status='pending' AND match_type='contest' "
+                        f"AND contest_id IS NULL",
+                        (STATUS_ABORTED,),
+                    )
+                    n += cnt2
             return n
 
     def reset_dead_contest_pairings(self) -> int:
