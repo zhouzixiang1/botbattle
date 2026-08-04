@@ -110,6 +110,11 @@ class ContestScheduler:
                 continue
             try:
                 stage_idx = int(c.get("current_stage_idx") or 0)
+                # 防御：published 态若无 pairing（publish 时 _begin_stage 异常未生成），补生成
+                pairings = self.manager.store.list_contest_pairings(c["id"], stage_idx=stage_idx)
+                if not pairings:
+                    logger.warning("scheduler: published contest %s has 0 pairings, regenerating", c["id"])
+                    await self.manager._begin_stage(c["id"], stage_idx, schedule_immediately=False)
                 await self.manager._dispatch_pending(c["id"], stage_idx)
                 await self.manager.maybe_finish(c["id"])
             except Exception:
