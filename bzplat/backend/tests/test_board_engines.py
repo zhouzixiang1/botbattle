@@ -140,12 +140,17 @@ def test_pencil_full_game_randomish():
 
 
 def test_board_protocol_roundtrip():
+    # Botzone 标准协议：请求负载 {x,y,me}（信封由传输层包），无 v/t 字段。
     g = build_gomoku_request(x=-1, y=-1, me=0)
-    assert g["t"] == "mv" and g["x"] == -1
+    assert g["x"] == -1 and g["me"] == 0
+    assert "t" not in g  # Botzone 化后无 t 字段
     p = build_pencil_request(x=1, y=0, pass_=1, me=1, scores=[2, 1])
     assert p["pass"] == 1 and p["scores"] == [2, 1]
+    # parse_xy 接受 Botzone 信封 {"response": {x,y}} + 裸 {x,y} 两种
     assert parse_xy({"x": 3, "y": 4}) == (3, 4)
+    assert parse_xy({"response": {"x": 5, "y": 10}}) == (5, 10)
     assert parse_xy({}) == (None, None)
+    assert parse_xy({"response": {}}) == (None, None)
 
 
 def test_run_session_pencil_n_dots_none_uses_default():

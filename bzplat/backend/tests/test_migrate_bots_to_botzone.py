@@ -97,8 +97,8 @@ def test_migration_style_distribution_deterministic(tmp_store):
             store2.create_bot(uid, f"bot{i}", binary_path="x", format="elf", game_id="holdem")
         s2 = mod.migrate(store2, game_id="holdem", seed=42)
     assert s1["styles"] == s2["styles"]
-    # 风格都在 8 种样例里
-    valid = set(mod.STYLE_BINARIES.keys())
+    # 风格都在 holdem 8 种样例里
+    valid = set(mod.STYLE_BINARIES["holdem"].keys())
     for style in s1["styles"]:
         assert style in valid
 
@@ -114,3 +114,27 @@ def test_migration_dry_run_no_writes(tmp_store, tmp_path):
     rows = tmp_store._conn.execute("SELECT binary_path FROM bots WHERE game_id='holdem'").fetchall()
     for r in rows:
         assert r["binary_path"] == "samples/old_holdem_bot"
+
+
+def test_migration_board_games(tmp_store, tmp_path):
+    """迁移脚本支持 gomoku/pencil（STYLE_BINARIES 按游戏索引）。"""
+    mod = _load_migration_module()
+    assert "gomoku" in mod.STYLE_BINARIES
+    assert "pencil" in mod.STYLE_BINARIES
+    assert "holdem" in mod.STYLE_BINARIES
+    # gomoku/pencil 各有样例
+    assert len(mod.STYLE_BINARIES["gomoku"]) >= 1
+    assert len(mod.STYLE_BINARIES["pencil"]) >= 1
+    # 建一个 gomoku bot 迁移它
+    tmp_store.create_bot(
+        1, "gb1", binary_path="samples/old_gomoku", format="elf", game_id="gomoku",
+    )
+    stats = mod.migrate(tmp_store, game_id="gomoku", seed=42)
+    assert stats["total"] == 1
+    assert stats["migrated"] == 1
+    # binary 指向 bot_uploads
+    row = tmp_store._conn.execute(
+        "SELECT binary_path FROM bots WHERE game_id='gomoku'"
+    ).fetchone()
+    assert "bot_uploads" in row["binary_path"]
+

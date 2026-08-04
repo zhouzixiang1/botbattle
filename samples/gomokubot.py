@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""五子棋随机空点样例 bot（长驻行协议）。"""
+"""五子棋随机空点样例 bot（Botzone 标准协议，信封）。
+
+Botzone 信封：Traditional 完整历史 / LongRunning 单 request（首回合完整）。
+请求负载：{x,y,me}；响应信封：{"response": {"x":.., "y":..}}。
+"""
 from __future__ import annotations
 
 import json
@@ -16,6 +20,14 @@ def place(x: int, y: int, p: int) -> None:
         board[x][y] = p
 
 
+def _extract_request(envelope: dict) -> dict:
+    """从信封取当前回合请求负载。"""
+    if "request" in envelope:
+        return envelope["request"]
+    reqs = envelope.get("requests") or []
+    return reqs[-1] if reqs else {}
+
+
 def main() -> None:
     global my_color
     for line in sys.stdin:
@@ -23,10 +35,11 @@ def main() -> None:
         if not line:
             continue
         try:
-            req = json.loads(line)
+            env = json.loads(line)
         except json.JSONDecodeError:
-            print(json.dumps({"x": -1, "y": -1}), flush=True)
+            print(json.dumps({"response": {"x": -1, "y": -1}}), flush=True)
             continue
+        req = _extract_request(env) if isinstance(env, dict) else {}
         me = int(req.get("me", 0))
         if my_color is None:
             my_color = me
@@ -40,11 +53,11 @@ def main() -> None:
             if board[x][y] < 0
         ]
         if not empties:
-            print(json.dumps({"x": -1, "y": -1}), flush=True)
+            print(json.dumps({"response": {"x": -1, "y": -1}}), flush=True)
             continue
         x, y = random.choice(empties)
         place(x, y, me)
-        print(json.dumps({"x": x, "y": y}), flush=True)
+        print(json.dumps({"response": {"x": x, "y": y}}), flush=True)
 
 
 if __name__ == "__main__":

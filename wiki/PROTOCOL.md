@@ -243,12 +243,25 @@ Botzone 官方在 Traditional 模式下**每回合重启进程**（冷启动重�
 
 ## 11. 棋类协议（Gomoku / Pencil）
 
-通信模型与德州相同（Botzone 信封 + 单行 JSON）。棋类 payload 走 Botzone 标准 `{x, y}` 落子格式，信封包裹与德州一致。
+通信模型与德州相同（Botzone 信封 + 单行 JSON，见第 1–2 节）。棋类 payload 是 Botzone 标准 `{x, y}` 落子格式，信封包裹（Traditional 完整历史 / LongRunning 单 request + keep_running 握手）与德州一致。
 
-> ⚠️ 棋类协议的 Botzone 化在后续 PR 完成（当前棋类仍用旧紧凑协议）。完成后本节将更新为标准 Botzone 格式。
+请求信封：`{"requests":[{x,y,...}]}` 或 LongRunning 后续 `{"request":{x,y,...}}`。
+响应信封：`{"response": {"x": int, "y": int}}`。
 
 ### 五子棋（Gomoku）
-当前请求 payload：`{"v":1,"t":"mv","x":int,"y":int,"me":0|1}`（黑方首手 `x=y=-1`）。响应 `{"x":int,"y":int}`。详见 [五子棋](#/wiki?slug=gomoku)。非法着 / 超时 → **判负**。
+
+请求 payload：`{"x": int, "y": int, "me": 0|1}`
+- `x,y` = 对手最近一手（0-based 坐标，15×15 棋盘）。黑方（`me=0`）首手 `x=y=-1`（无上一手）。
+- `me` = 本方座位（0=黑，1=白）。
+
+响应：`{"response": {"x": <你的落子>, "y": <你的落子>}}`。详见 [五子棋](#/wiki?slug=gomoku)。非法着 / 超时 → **判负**。
 
 ### 点格棋（Pencil）
-当前请求 payload：`{"v":1,"t":"mv","x":int,"y":int,"pass":0|1,"me":0|1,"scores":[r,b]}`。`pass=1` 时必须响应 `{"x":-1,"y":-1}`。详见 [点格棋](#/wiki?slug=pencil)。
+
+请求 payload：`{"x": int, "y": int, "pass": 0|1, "me": 0|1, "scores": [r, b]}`
+- `x,y` = 对手最近落点（交错网格，红方 `me=0` 首手 `x=y=-1`）。
+- `pass` = 对手是否得分连走（`pass=1` 时你必须响应 `{"response":{"x":-1,"y":-1}}` 把回合交还）。
+- `scores` = [红方得分, 蓝方得分]。
+
+响应：`{"response": {"x": <边的坐标>, "y": <边的坐标>}}`。详见 [点格棋](#/wiki?slug=pencil)。
+

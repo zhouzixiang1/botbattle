@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""点格棋随机占边样例 bot（长驻行协议，对齐 Botzone pass 语义）。"""
+"""点格棋随机占边样例 bot（Botzone 标准协议，信封，对齐 pass 语义）。
+
+Botzone 信封：Traditional 完整历史 / LongRunning 单 request（首回合完整）。
+请求负载：{x,y,pass,me,scores}；响应信封：{"response": {"x":.., "y":..}}。
+"""
 from __future__ import annotations
 
 import json
@@ -67,6 +71,14 @@ def legal():
     ]
 
 
+def _extract_request(envelope: dict) -> dict:
+    """从信封取当前回合请求负载。"""
+    if "request" in envelope:
+        return envelope["request"]
+    reqs = envelope.get("requests") or []
+    return reqs[-1] if reqs else {}
+
+
 def main() -> None:
     global curr
     for line in sys.stdin:
@@ -74,15 +86,16 @@ def main() -> None:
         if not line:
             continue
         try:
-            req = json.loads(line)
+            env = json.loads(line)
         except json.JSONDecodeError:
-            print(json.dumps({"x": -1, "y": -1}), flush=True)
+            print(json.dumps({"response": {"x": -1, "y": -1}}), flush=True)
             continue
+        req = _extract_request(env) if isinstance(env, dict) else {}
         if int(req.get("pass") or 0) == 1:
             ox, oy = int(req.get("x", -1)), int(req.get("y", -1))
             if ox >= 0 and board[ox][oy] == GRID_EDGE:
                 do_action(ox, oy)
-            print(json.dumps({"x": -1, "y": -1}), flush=True)
+            print(json.dumps({"response": {"x": -1, "y": -1}}), flush=True)
             continue
         ox, oy = int(req.get("x", -1)), int(req.get("y", -1))
         me = int(req.get("me", 0))
@@ -90,11 +103,11 @@ def main() -> None:
             do_action(ox, oy)
         acts = legal()
         if not acts:
-            print(json.dumps({"x": -1, "y": -1}), flush=True)
+            print(json.dumps({"response": {"x": -1, "y": -1}}), flush=True)
             continue
         x, y = random.choice(acts)
         do_action(x, y)
-        print(json.dumps({"x": x, "y": y}), flush=True)
+        print(json.dumps({"response": {"x": x, "y": y}}), flush=True)
 
 
 if __name__ == "__main__":
