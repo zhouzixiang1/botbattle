@@ -28,7 +28,7 @@ export function MetricCard({
           </div>
           <div
             className={cn(
-              'mt-1 font-mono text-2xl font-bold tabular-nums',
+              'mt-1 break-all font-mono text-xl font-bold tabular-nums sm:text-2xl',
               danger ? 'text-destructive' : 'text-foreground'
             )}
           >
