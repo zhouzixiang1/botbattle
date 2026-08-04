@@ -17,7 +17,17 @@
      - **严禁**前端 proxy 到 50380 线上服务（会把测试写进线上 db）；**严禁** worktree 后端用 CWD=主目录（会加载主目录源码+db）。
   4. **合并必须走 GitHub Pull Request**（`gh pr create` → 评审 → 合并到 main），**禁止本地 `git merge` 直推 main**。
   5. PR 合并后**清理**：停 worktree 服务 → 主目录 `git worktree remove .worktrees/<分支名>` → 删分支（本地 + 远端）→ 主目录 `git pull` + `bash scripts/rebuild.sh`（rebuild + restart，让 50380 生效新代码）。
-- **多 agent 协作避免上下文污染**：不同任务用独立 worktree（独立分支 + 独立目录 + 独立运行时栈）隔离；不要让一个 agent 的大改动串进另一个任务的上下文。每个 agent 只对自己的 worktree 负责，改完即合并即清。
+- **多 agent 协作避免上下文污染**（硬约束——三条铁律，违反会污染他人工作）：
+  不同任务用独立 worktree（独立分支 + 独立目录 + 独立运行时栈）隔离；不要让一个 agent 的大改动串进另一个任务的上下文。每个 agent 只对自己的 worktree 负责，改完即合并即清。具体铁律：
+  1. **不动别人开发一半的**：动手前必须 `git worktree list` + `git branch -a` 盘点现有 worktree/分支。遇到**非自己创建的** worktree（尤其含未提交改动 `git status` 非空的）——**那是其他 agent/人在开发的，绝不删、不改、不合并、不往里提交**。不确定归属时先问用户，不要自作主张。重启/中断恢复后尤其要重新盘点（worktree 可能在中断期间被他人新增/改动）。
+  2. **端口/进程互不抢**：自己的 worktree 用 50381+ 端口（50380 是线上 main 专属），起服务前先 `ss -tlnp | grep -E '5038[0-9]|517[0-9]'` 确认端口空闲；不要 kill 非自己起的进程。
+  3. **最后不留脏分支和产物**（收尾自检清单，缺一不可）：
+     - 停掉自己起的所有服务进程（后端 serve / 前端 vite dev / 后台造数据脚本）——按 PID 精确 kill，`ps aux | grep -E 'bzplat.backend.cli serve|vite'` 确认无残留。
+     - `git worktree remove` 自己的 worktree 目录（含 node_modules/db 等产物一并清除）。
+     - 删自己的分支：本地 `git branch -D <分支>` + 远端 `git push origin --delete <分支>`（**PR 用 `--delete-branch` 合并会自动删远端，但本地分支和 remote-tracking 引用仍要手动清；中断/手动合并的更要补删**）。
+     - `git remote prune origin` 清理失效的 remote-tracking 引用。
+     - 自检：`git worktree list`（只剩 main + 别人的）、`git branch -a`（无自己的残留）、`ps aux | grep botbattle`（无自己的进程）、`ss -tlnp`（自己的端口已释放）。
+     - **任务被打断/会话重启时，恢复后第一件事是盘点并清理上一轮可能遗留的脏产物**（worktree/进程/分支），不要直接开新工作堆在上面。
 - **提交前跑测试**：`pytest`（从仓库根目录），前端改了再 `npm run build`。
 - **改动须同步三处**（提交前自检）：
   1. **测试**：有功能/行为变更 → 在 `bzplat/backend/tests/` 加/改测试用例，覆盖新逻辑与边界。
