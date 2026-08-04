@@ -148,21 +148,19 @@ def test_raise_validation_exact_2x():
     cursors = {0: 0, 1: 0}
 
     def _street_bet(pid: int, req: dict) -> int:
-        # 从 history 推断本街已投入：累加本玩家在当前 street 的下注增量。
-        # 简化：盲注后 SB=50、BB=100（preflop 起始）。
+        # 从 history 推断本方本街已投入：盲注基础（preflop SB=50/BB=100，history 不含盲注）
+        # + 本方在当前 street 的 raise delta 累加。
         my = req.get("my_id", pid)
         hist = req.get("history", [])
-        bet = 0
-        cur_round = None
+        # 翻前盲注基础（round 0）：SB 投了 50、BB 投了 100
+        round0 = all(ev.get("round", 0) == 0 for ev in hist) if hist else True
+        bet = (50 if my == 0 else 100) if round0 else 0
         for ev in hist:
             if ev.get("player_id") == my:
                 a = ev.get("action")
                 at = ev.get("action_type")
                 if at == "raise" and isinstance(a, int) and a > 0:
                     bet += a  # delta 累加为本玩家已投入
-        # 盲注基础：preflop SB 投了 50、BB 投了 100（history 不含盲注，单独补）
-        if not hist:  # preflop 开局前
-            bet = 50 if my == 0 else 100
         return bet
 
     def scripted(pid: int, req: dict) -> dict:

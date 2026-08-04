@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "BotzoneHoldemResponse",
-  "description": "Botzone 标准德州扑克响应信封。response 为裸整数：-1=fold, -2=allin, 0=call/check, >0=raise 额外下注筹码（raise delta = raise_to_total - my_street_bet）。",
+  "description": "Botzone 标准德州扑克响应信封。response 为裸整数：-1=fold, -2=allin, 0=call/check, >0=raise 额外下注筹码（raise delta = raise_to_total - street_bet，street_bet 为本方本街已投额）。",
   "type": "object",
   "required": ["response"],
   "properties": {

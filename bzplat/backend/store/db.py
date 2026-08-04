@@ -1295,27 +1295,37 @@ class Store:
             )
 
     def delete_bot_version(self, bot_id: int, version: int) -> bool:
-        """删除指定版本；若删的是当前版本，回退到 max(version)（含 runtime_mode）。"""
+        """删除指定版本；若删的是当前版本，回退到 max(version)（含 runtime_mode）。
+
+        删非当前版本时**不动 bots 镜像**——否则会覆盖用户主动回滚到的旧版本状态。
+        """
         with self._tx() as c:
+            # 先读当前版本，判定删的是否是当前版本
+            cur_bot = c.execute(
+                "SELECT current_version FROM bots WHERE id=?", (bot_id,)
+            ).fetchone()
+            is_current = cur_bot and cur_bot["current_version"] == version
+
             cur = c.execute(
                 "DELETE FROM bot_versions WHERE bot_id=? AND version=?",
                 (bot_id, version),
             )
             if cur.rowcount == 0:
                 return False
-            # 若删的是当前版本，回退到剩余最新版本
-            row = c.execute(
-                "SELECT MAX(version) AS mv, binary_path, os, arch, format, runtime_mode "
-                "FROM bot_versions WHERE bot_id=?",
-                (bot_id,),
-            ).fetchone()
-            if row and row["mv"]:
-                c.execute(
-                    "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
-                    "format=?, runtime_mode=?, updated_at=? WHERE id=?",
-                    (row["mv"], row["binary_path"], row["os"], row["arch"],
-                     row["format"], row["runtime_mode"], _now(), bot_id),
-                )
+            # 仅当删的是当前版本，才回退镜像到剩余最新版本
+            if is_current:
+                row = c.execute(
+                    "SELECT MAX(version) AS mv, binary_path, os, arch, format, runtime_mode "
+                    "FROM bot_versions WHERE bot_id=?",
+                    (bot_id,),
+                ).fetchone()
+                if row and row["mv"]:
+                    c.execute(
+                        "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
+                        "format=?, runtime_mode=?, updated_at=? WHERE id=?",
+                        (row["mv"], row["binary_path"], row["os"], row["arch"],
+                         row["format"], row["runtime_mode"], _now(), bot_id),
+                    )
             return True
 
     def set_current_version(self, bot_id: int, version: int) -> dict | None:

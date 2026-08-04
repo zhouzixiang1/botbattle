@@ -1377,6 +1377,8 @@ def admin_patch_bot(
 def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)):
     if not _store(request).delete_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
+    # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
+    _bots(request).purge_bot_files(bot_id)
     audit_log(request, "admin_delete_bot", result="ok", user=admin.get("username"), target=bot_id)
     return {"ok": True}
 

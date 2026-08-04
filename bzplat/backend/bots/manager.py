@@ -185,6 +185,17 @@ class BotManager:
             self.store.ensure_rating(bot_id)
         return self.store.get_bot(bot_id)
 
+    def purge_bot_files(self, bot_id: int) -> None:
+        """删除 bot 的全部上传文件目录（bot_uploads/<id>/）。
+
+        用于硬删 bot（admin_delete_bot）时清理磁盘——避免 DB 行 CASCADE 删了但文件
+        留在磁盘变孤儿。软删（is_active=0）不调本方法（保留文件供恢复/历史对局）。
+        """
+        import shutil
+        dest = self.upload_root / str(bot_id)
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+
     def list_mine(self, owner_id: int, *, game_id: str | None = None) -> list[dict]:
         return self.store.list_bots(owner_id=owner_id, game_id=game_id)
 

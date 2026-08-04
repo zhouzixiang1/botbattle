@@ -536,6 +536,11 @@ class MatchSession:
             return Action.CHECK, 0
         if action == Action.CALL:
             if Action.CALL.value not in allowed:
+                # Botzone response 0 既是 call 也是 check（歧义码）。若 call 不合法但
+                # check 合法（to_call==0），降级为 check 而非 fold——否则 to_call==0 时
+                # 所有标准 Botzone Bot（用 0 表示 check）会被误判 fold。
+                if Action.CHECK.value in allowed:
+                    return Action.CHECK, 0
                 # maybe only allin is allowed for the call amount
                 if Action.ALLIN.value in allowed and legal["to_call"] >= self._players[player_idx].chips:
                     return Action.ALLIN, 0
@@ -614,12 +619,14 @@ class MatchSession:
             amount = 0
             self._pending_actors.discard(player_idx)
             # if no aggressor and both checked, round ends when pending empty
+            self._record_history(player_idx, action, None)
         elif action == Action.CALL:
             to_call = self._current_bet - p.street_bet
             pay = min(to_call, p.chips)
             self._put_chips(player_idx, pay)
             amount = pay
             self._pending_actors.discard(player_idx)
+            self._record_history(player_idx, action, None)
         elif action == Action.RAISE:
             # raise_extra（Botzone delta）= raise_to - 玩家加注前的 street_bet。
             # 必须在 _put_chips 更新 street_bet 之前算。

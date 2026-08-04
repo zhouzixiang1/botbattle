@@ -78,6 +78,9 @@ export default function BotVersionManager({
   const open = botId !== null
   const [confirm, confirmDialog] = useConfirm()
   const [versions, setVersions] = useState<BotVersion[]>([])
+  // 本地缓存的 current_version——上传/回滚后 load() 刷新，立即正确高亮当前版本
+  // （外层 prop currentVersion 不会同步刷新，故本地优先）。
+  const [curVer, setCurVer] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -95,6 +98,7 @@ export default function BotVersionManager({
         `/api/bots/${botId}/versions`,
       )
       setVersions(d.versions || [])
+      setCurVer(d.current_version)
     } catch (e) {
       setError(errMsg(e, '加载版本历史失败'))
     } finally {
@@ -106,8 +110,11 @@ export default function BotVersionManager({
     if (open) void load()
   }, [open, load])
 
-  // 切换 Bot 时同步默认运行模式
+  // 切换 Bot 时重置所有本地状态（busy 泄漏会导致新 Bot 对话框按钮被禁用）
   useEffect(() => {
+    setVersions([])
+    setCurVer(undefined)
+    setBusy(false)
     setMode(currentRuntimeMode || 'longrunning')
     setNote('')
     setFile(null)
@@ -234,7 +241,7 @@ export default function BotVersionManager({
           ) : (
             <ul className="space-y-1.5">
               {versions.map((v) => {
-                const isCurrent = v.version === currentVersion
+                const isCurrent = v.version === (curVer ?? currentVersion)
                 return (
                   <li
                     key={v.id}

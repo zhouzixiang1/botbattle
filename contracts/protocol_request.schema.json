@@ -43,6 +43,9 @@
     "current_bet": { "type": "integer", "minimum": 0, "description": "平台扩展：本街最高下注" },
     "sb": { "type": "integer" },
     "bb": { "type": "integer" },
-    "opp_chips": { "type": "integer", "minimum": 0 }
+    "opp_chips": { "type": "integer", "minimum": 0 },
+    "quitting": { "type": "boolean", "description": "平台扩展：对局是否即将结束（Bot 可据此调整策略）" },
+    "last_opponent_action": { "description": "平台扩展：对手最近一手的裸整数（便于 Bot 快速决策）" },
+    "last_opponent_raise_delta": { "type": "integer", "minimum": 0, "description": "平台扩展：对手最近一次 raise 的额外量（非 raise 或无则 0）" }
   }
 }

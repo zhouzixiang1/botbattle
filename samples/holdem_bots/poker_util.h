@@ -36,11 +36,13 @@ static long pj_long(const char *s, const char *key, long def) {
 }
 
 /* 从 Botzone 信封行里取出「当前回合」的请求负载的某个数字字段。
- * LongRunning 后续回合 {"request":...} 与首回合 {"requests":[...]} 都兼容：
- *  - request 字段直接取；
- *  - requests 数组取最后一个元素（最后一条请求 = 当前回合）。
- * 简化：本工具直接在整个 line 里搜字段名——由于请求负载字段名（my_chips 等）只
- * 出现在最后一条请求里（responses 数组无这些键），顶层搜即可命中当前回合。
+ *
+ * ⚠️ 限制：本简化解析（pj_long 用 strstr 命中第一个出现的字段名）只在以下情况正确：
+ *  - **LongRunning 后续回合**（平台默认）：信封是 {"request":{...}}，只有 1 个请求。
+ *  - **首回合**（traditional/longrunning）：requests 数组只有 1 个元素。
+ * 在 **Traditional 多回合**信封 {"requests":[req0,req1,...]} 里，pj_long 会命中 req0
+ * （最早一回合）的字段值而非当前回合。本平台默认 LongRunning 故不受影响；若你的 Bot
+ * 需支持 Traditional 多回合，请自行解析 requests[] 的最后一个元素。
  */
 static long req_long(const char *line, const char *key, long def) {
     return pj_long(line, key, def);
