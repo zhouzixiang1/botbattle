@@ -5,7 +5,6 @@ import {
   Medal,
   Bot,
   BookOpen,
-  Database,
   Shield,
   History as HistoryIcon,
   type LucideIcon,
@@ -30,7 +29,6 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/contests', label: '比赛', icon: Medal },
   { to: '/my-bots', label: '我的 Bot', icon: Bot },
   { to: '/wiki', label: 'Wiki', icon: BookOpen },
-  { to: '/data', label: '数据', icon: Database },
 ]
 
 /** 管理入口（仅 admin/organizer 可见，单独放） */

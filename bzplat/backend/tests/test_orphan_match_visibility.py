@@ -46,23 +46,8 @@ def test_get_match_detailed_returns_orphaned(tmp_path):
 
 
 def test_matchpack_count_matches_rows(tmp_path):
-    """matchpack_months 计数应与 matchpack_rows 实际行数一致（孤儿对局不被 JOIN 丢弃）。"""
-    s, mid = _store_with_orphan_match(tmp_path)
-    # 标记完成 + 设 created_at 月份，使 matchpack 能统计到
-    s.update_match(mid, status="completed", ended_at="2026-08-01T00:00:00")
-    with s._tx() as c:
-        c.execute("UPDATE matches_holdem SET created_at='2026-08-01T00:00:00' WHERE id=?", (mid,))
-    months = s.matchpack_months()
-    # 找 holdem 2026-08
-    entry = next((m for m in months if m["game_id"] == "holdem" and m["month"] == "2026-08"), None)
-    assert entry is not None, f"holdem 2026-08 应在 matchpack_months 中，实际 {months}"
-    rows = s.matchpack_rows("holdem", "2026-08", limit=50000)
-    assert entry["cnt"] == len(rows), (
-        f"matchpack 计数({entry['cnt']}) != 实际行数({len(rows)})（孤儿对局被 INNER JOIN 丢弃）"
-    )
-    # 孤儿对局应在下载内容里
-    assert mid in {r["id"] for r in rows}
-    s.close()
+    """数据集下载已下线（matchpack_months/matchpack_rows 已删）——留空占位保持文件结构。"""
+    pass
 
 
 def test_contest_bracket_handles_deleted_bot(tmp_path):

@@ -668,52 +668,6 @@ def site_info(request: Request):
     }
 
 
-@router.get("/api/matchpacks")
-def list_matchpacks(request: Request, game_id: str | None = None):
-    """对局数据集：列出有数据的游戏×月份分组（公开列表）。"""
-    return {"packs": _store(request).matchpack_months(game_id=game_id)}
-
-
-@router.get("/api/matchpacks/download")
-def download_matchpack(
-    request: Request,
-    game_id: str,
-    month: str,
-    user=Depends(require_user),
-):
-    """下载某游戏×月份的对局数据集（gzip，每行一 JSON）。需 level >= 1（gating）。"""
-    from bzplat.backend.store.schema import LEVEL_GATE_DOWNLOAD
-    if (user.get("level") or 0) < LEVEL_GATE_DOWNLOAD:
-        raise HTTPException(403, f"需等级 {LEVEL_GATE_DOWNLOAD} 以上才能下载数据集")
-    store = _store(request)
-    rows = store.matchpack_rows(game_id, month)
-    import gzip as _gzip
-
-    def gen():
-        buf = []
-        for r in rows:
-            ev = r.get("events_json") or "[]"
-            line = json.dumps({
-                "id": r["id"], "game_id": r["game_id"],
-                "bot_a": {"id": r["bot_a_id"], "name": r["bot_a_name"]},
-                "bot_b": {"id": r["bot_b_id"], "name": r["bot_b_name"]},
-                "winner": r["winner"], "earnings_a": r["earnings_a"],
-                "earnings_b": r["earnings_b"], "hands_played": r["hands_played"],
-                "match_type": r["match_type"], "created_at": r["created_at"],
-                "events": json.loads(ev),
-            }, ensure_ascii=False)
-            buf.append(line)
-        data = ("\n".join(buf) + ("\n" if buf else "")).encode("utf-8")
-        yield _gzip.compress(data)
-
-    fname = f"matchpack-{game_id}-{month}.jsonl.gz"
-    return StreamingResponse(
-        gen(),
-        media_type="application/gzip",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
-    )
-
-
 # ── comments / likes ──────────────────────────────────────────
 
 class CommentCreate(BaseModel):
@@ -2092,7 +2046,6 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "settings-mybots", "file": "SETTINGS_MYBOTS.md", "title": "设置与 MyBots", "summary": "个人设置中心 + 我的 Bot 管理"},
     {"slug": "tier", "file": "TIER.md", "title": "段位与排名趋势", "summary": "段位称号曲线 + 段位趋势"},
     {"slug": "xp-level", "file": "XP_LEVEL.md", "title": "经验与等级", "summary": "XP/level 累积、升级与 gating"},
-    {"slug": "matchpacks-site", "file": "MATCHPACKS_SITE.md", "title": "数据集与站点", "summary": "对局数据集下载（等级 gating）+ 站点配置"},
     {"slug": "loadtest", "file": "LOADTEST.md", "title": "压测", "summary": "大规模系统压测脚本与用法"},
     {"slug": "security", "file": "SECURITY.md", "title": "安全与日志", "summary": "公网加固、三文件日志与审计"},
     {"slug": "judge-code", "file": "JUDGE_CODE.md", "title": "裁判代码说明（管理员）", "summary": "管理员视角的裁判代码说明"},
