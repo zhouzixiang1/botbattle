@@ -928,8 +928,14 @@ def contest_templates(request: Request, game: str | None = None):
 
 
 @router.get("/api/contests")
-def list_contests(request: Request, status: str | None = None, game_id: str | None = None):
-    return {"contests": _store(request).list_contests(status=status, game_id=game_id)}
+def list_contests(request: Request, status: str | None = None, game_id: str | None = None,
+                  page: int | None = None, per_page: int = 20):
+    result = _store(request).list_contests(status=status, game_id=game_id,
+                                           page=page, per_page=per_page)
+    if isinstance(result, dict):
+        return {"contests": result["items"], "page": result["page"],
+                "per_page": result["per_page"], "total": result["total"]}
+    return {"contests": result}
 
 
 @router.post("/api/contests")
@@ -1372,6 +1378,8 @@ def admin_bots(
     active: bool | None = None,
     q: str | None = None,
     game_id: str | None = None,
+    page: int | None = None,
+    per_page: int = 50,
     _admin=Depends(require_admin),
 ):
     rows = _store(request).list_bots(
@@ -1383,6 +1391,12 @@ def admin_bots(
         rows = [b for b in rows if ql in (b.get("name") or "").lower()
                 or ql in (b.get("display_name") or "").lower()
                 or ql in str(b.get("owner_id"))]
+    total = len(rows)
+    if page is not None:
+        pp = max(1, min(200, per_page))
+        offset = (max(1, page) - 1) * pp
+        rows = rows[offset:offset + pp]
+        return {"bots": rows, "page": page, "per_page": pp, "total": total}
     return {"bots": rows}
 
 
@@ -1440,9 +1454,15 @@ class AdminContestPatch(BaseModel):
 @router.get("/api/admin/contests")
 def admin_contests(
     request: Request, status: str | None = None, game_id: str | None = None,
+    page: int | None = None, per_page: int = 50,
     _admin=Depends(require_admin),
 ):
-    return {"contests": _store(request).list_contests(status=status, game_id=game_id)}
+    result = _store(request).list_contests(status=status, game_id=game_id,
+                                           page=page, per_page=per_page)
+    if isinstance(result, dict):
+        return {"contests": result["items"], "page": result["page"],
+                "per_page": result["per_page"], "total": result["total"]}
+    return {"contests": result}
 
 
 @router.patch("/api/admin/contests/{contest_id}")

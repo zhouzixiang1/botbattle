@@ -26,6 +26,43 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def _paginate(
+    c: sqlite3.Connection,
+    base_query: str,
+    params: tuple,
+    *,
+    page: int = 1,
+    per_page: int = 50,
+) -> tuple[list[dict], int]:
+    """通用分页 helper：返回 (rows, total)。
+
+    ``base_query`` 是不含 LIMIT/OFFSET 的 SELECT（不含 ORDER BY 时在 COUNT 里自动裁剪）。
+    自动算 total + 加 LIMIT/OFFSET。page 从 1 开始。
+    """
+    page = max(1, int(page))
+    per_page = max(1, min(200, int(per_page)))  # 上限 200 防滥用
+    offset = (page - 1) * per_page
+    # total：把 SELECT ... 改成 SELECT COUNT(*)。粗略：取 FROM 之前替换。
+    count_query = base_query
+    # 简单启发：去掉 SELECT ... 到 FROM 之间的列，替换为 COUNT(*)
+    from_idx = count_query.upper().find(" FROM ")
+    if from_idx > 0:
+        count_query = "SELECT COUNT(*)" + count_query[from_idx:]
+    else:
+        count_query = f"SELECT COUNT(*) FROM ({count_query})"
+    # 去掉 ORDER BY（COUNT 不需要，且可能引用别名报错）
+    ob_idx = count_query.upper().rfind(" ORDER BY ")
+    if ob_idx > 0:
+        count_query = count_query[:ob_idx]
+    total = int(c.execute(count_query, params).fetchone()[0])
+    rows = [
+        _row(r) for r in c.execute(
+            f"{base_query} LIMIT ? OFFSET ?", params + (per_page, offset)
+        ).fetchall()
+    ]
+    return rows, total
+
+
 def _loads_json(raw: str | None, *, default: Any) -> Any:
     """容错 JSON 解析：失败/空返回 default。"""
     if not raw:
@@ -2710,8 +2747,8 @@ class Store:
 
     def list_contests(
         self, *, status: str | None = None, organizer_id: int | None = None,
-        game_id: str | None = None,
-    ) -> list[dict]:
+        game_id: str | None = None, page: int | None = None, per_page: int = 20,
+    ) -> list[dict] | dict:
         with self._tx() as c:
             sql = "SELECT * FROM contests WHERE 1=1"
             params: list[Any] = []
@@ -2725,6 +2762,9 @@ class Store:
                 sql += " AND game_id=?"
                 params.append(game_id)
             sql += " ORDER BY created_at DESC"
+            if page is not None:
+                rows, total = _paginate(c, sql, tuple(params), page=page, per_page=per_page)
+                return {"items": rows, "page": page, "per_page": per_page, "total": total}
             return [_row(r) for r in c.execute(sql, params)]
 
     # ── contest_entries ───────────────────────────────────────
