@@ -62,7 +62,7 @@ games.registry.get(game_id).run_session(decide, **params)
 - 15×15（可调 9–19）；黑先（seat 0）；横/竖/斜连续 ≥5 含长连即胜；无禁手。
 - 非法着 / 超时 → 判负；棋盘下满无人成五 → 平局。
 - 对局中途进程崩溃 → 计分判负（对手胜，`reason=crash`）。
-- 长驻行协议：请求 `{"v":1,"t":"mv","x","y","me"}`，响应 `{"x","y"}`。
+- Botzone 标准协议：请求信封 `{"request":{"x","y","me"}}`，响应信封 `{"response":{"x","y"}}`（信封包裹见 [协议规范](#/wiki?slug=protocol)）。
 
 ### 点格棋（`games/pencil/engine.py`）
 
