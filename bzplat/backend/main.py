@@ -50,6 +50,8 @@ from bzplat.backend.store.schema import (
     SETTING_BOT_CPUS,
     SETTING_BOT_MEMORY,
     SETTING_CONTEST_REST,
+    SETTING_CONTEST_SCHEDULER_ENABLED,
+    SETTING_CONTEST_SCHEDULER_INTERVAL_SEC,
     SETTING_CONTEST_TEMPLATES,
     SETTING_FULL_RR_MAX_N,
     SETTING_JUDGE_GOMOKU_SIZE,
@@ -119,6 +121,9 @@ def _seed_runtime_settings(store: Store, env_max: int | None) -> int:
     store.seed_setting_if_absent(SETTING_SITE_NAME, "Botbattle")
     store.seed_setting_if_absent(SETTING_SITE_ANNOUNCEMENT, "")
     store.seed_setting_if_absent(SETTING_SITE_ABOUT, "多游戏 Bot 线上对战平台")
+    # 赛事时间调度器（后台周期扫描 *_at 字段，到点自动推进阶段）
+    store.seed_setting_if_absent(SETTING_CONTEST_SCHEDULER_ENABLED, "1")
+    store.seed_setting_if_absent(SETTING_CONTEST_SCHEDULER_INTERVAL_SEC, "15")
     # 生效值永远压在 ceiling 内
     raw = store.get_setting(SETTING_MAX_CONCURRENT)
     try:
@@ -200,12 +205,24 @@ def create_app(
         task = asyncio.create_task(auto_matcher.loop(), name="auto-match")
         _app.state.auto_matcher = auto_matcher
         _app.state._auto_match_task = task
+        # 赛事时间调度器：后台周期扫描赛事 *_at 字段，到点自动推进阶段
+        # （开放报名/截止报名出排期/到点开打/rest 恢复）。仿 auto_matcher.loop()。
+        from bzplat.backend.contests.scheduler import ContestScheduler
+        contest_scheduler = ContestScheduler(contest_manager, store)
+        sched_task = asyncio.create_task(contest_scheduler.loop(), name="contest-scheduler")
+        _app.state.contest_scheduler = contest_scheduler
+        _app.state._contest_sched_task = sched_task
         try:
             yield
         finally:
             task.cancel()
+            sched_task.cancel()
             try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await sched_task
             except asyncio.CancelledError:
                 pass
 

@@ -1,0 +1,128 @@
+"""赛事时间调度器——后台周期扫描赛事的 *_at 字段，到点自动推进阶段。
+
+仿 ``matches/auto_matcher.AutoMatchScheduler`` 的 ``while True + asyncio.sleep`` 后台任务，
+挂到 ``main.py`` lifespan。每 interval（默认 15s，platform_settings 可配）扫描所有赛事：
+
+1. **draft 且 registration_opens_at<=now** → ``open_registration()``（到点开放报名）
+2. **open 且 registration_closes_at<=now** → ``publish()``（到点截止报名 + 出排期，→ published）
+3. **published** → ``_dispatch_pending()``（到点开打：scheduled_at<=now 的 pairing 才 dispatch；
+   全部 pairing 打完则经 maybe_finish 推进）
+4. **rest 且 rest_ends_at<=now** → ``resume()``（到点恢复休息期，修现有「rest 不自动恢复」漏洞）
+
+组织者手动按钮（open/publish/start/resume/advance）始终可用——调度器到点自动 + 手动可提前。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from bzplat.backend.store.schema import (
+    CONTEST_DRAFT,
+    CONTEST_OPEN,
+    CONTEST_PUBLISHED,
+    CONTEST_REST,
+    SETTING_CONTEST_SCHEDULER_ENABLED,
+    SETTING_CONTEST_SCHEDULER_INTERVAL_SEC,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _now() -> str:
+    from datetime import datetime
+    return datetime.now().isoformat(timespec="seconds")
+
+
+class ContestScheduler:
+    """赛事时间调度器（后台周期扫描，到点推进赛事阶段）。"""
+
+    def __init__(self, manager: Any, store: Any) -> None:
+        self.manager = manager
+        self.store = store
+
+    def _cfg(self) -> dict[str, Any]:
+        s = self.store.get_settings(
+            [SETTING_CONTEST_SCHEDULER_ENABLED, SETTING_CONTEST_SCHEDULER_INTERVAL_SEC]
+        )
+        try:
+            interval = int(s.get(SETTING_CONTEST_SCHEDULER_INTERVAL_SEC) or 15)
+        except (TypeError, ValueError):
+            interval = 15
+        return {
+            "enabled": (s.get(SETTING_CONTEST_SCHEDULER_ENABLED) or "1") in ("1", "true", "True"),
+            "interval": max(5, interval),  # 下限 5s，避免过频
+        }
+
+    async def loop(self) -> None:
+        """周期扫描：到点的赛事自动推进阶段。"""
+        while True:
+            try:
+                cfg = self._cfg()
+                await asyncio.sleep(cfg["interval"])
+                if cfg["enabled"]:
+                    await self._tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - 调度器不得因单轮异常退出
+                logger.exception("contest-scheduler loop iteration failed")
+
+    async def _tick(self) -> None:
+        """单轮扫描：检查所有赛事的时间窗口，到点推进。"""
+        now = _now()
+        # 1. draft→open：到点开放报名
+        for c in self._contests_by_status(CONTEST_DRAFT):
+            opens = c.get("registration_opens_at")
+            if opens and now >= opens:
+                try:
+                    self.manager.open_registration(c["id"])
+                    logger.info("scheduler: contest %s auto-opened (was draft)", c["id"])
+                except Exception:
+                    logger.exception("scheduler: auto-open contest %s failed", c["id"])
+
+        # 2. open→published：到点截止报名 + 出排期
+        for c in self._contests_by_status(CONTEST_OPEN):
+            closes = c.get("registration_closes_at")
+            if closes and now >= closes:
+                try:
+                    await self.manager.publish(c["id"])
+                    logger.info("scheduler: contest %s auto-published (registration closed)", c["id"])
+                except Exception:
+                    logger.exception("scheduler: auto-publish contest %s failed", c["id"])
+
+        # 3. published：到点开打（scheduled_at<=now 的 pairing 才 dispatch）
+        for c in self._contests_by_status(CONTEST_PUBLISHED):
+            try:
+                stage_idx = int(c.get("current_stage_idx") or 0)
+                await self.manager._dispatch_pending(c["id"], stage_idx)
+                # dispatch 后若该阶段全打完，maybe_finish 推进
+                await self.manager.maybe_finish(c["id"])
+            except Exception:
+                logger.exception("scheduler: published contest %s dispatch failed", c["id"])
+
+        # 4. running：检查是否有到点的 pending pairing 需 dispatch（逐场排期后续轮次）
+        #    + maybe_finish 推进阶段。
+        for c in self._contests_by_status("running"):
+            try:
+                stage_idx = int(c.get("current_stage_idx") or 0)
+                await self.manager._dispatch_pending(c["id"], stage_idx)
+                await self.manager.maybe_finish(c["id"])
+            except Exception:
+                logger.exception("scheduler: running contest %s tick failed", c["id"])
+
+        # 5. rest→running：到点恢复休息期（修现有「rest 不自动恢复」漏洞）
+        for c in self._contests_by_status(CONTEST_REST):
+            ends = c.get("rest_ends_at")
+            if ends and now >= ends:
+                try:
+                    await self.manager.resume(c["id"])
+                    logger.info("scheduler: contest %s auto-resumed (rest ended)", c["id"])
+                except Exception:
+                    logger.exception("scheduler: auto-resume contest %s failed", c["id"])
+
+    def _contests_by_status(self, status: str) -> list[dict]:
+        """按状态列赛事（容错：list_contests_by_status 不存在则空）。"""
+        fn = getattr(self.store, "list_contests_by_status", None)
+        if fn is None:
+            return []
+        return fn([status])

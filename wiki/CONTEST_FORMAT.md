@@ -65,11 +65,18 @@ is_builtin    内置标记（内置可改不可删）
 
 ## 阶段状态机
 
-`draft → open → running ⇄ rest → finished`
+`draft → open → published → running ⇄ rest → finished`
 
-- 每阶段对阵生成后派遣（`match_type=contest`）；
-- 阶段全部完成 → 快照积分 → 若有下一阶段且配了休息 → 进 `rest`（休息期可换 Bot）→ 恢复后晋级下一阶段；
-- 末阶段完成 → `finished`。
+- **draft**：创建后未开放报名；
+- **open**：开放报名（选手派遣 Bot）；`registration_opens_at` 到点自动开放（或组织者手动）；
+- **published**：报名截止、排期已发布、等待开赛。`registration_closes_at` 到点自动出排期（或组织者手动 `/publish`）；选手可看到完整对阵表 + 每场计划开赛时间（`scheduled_at`），但比赛未开始；
+- **running**：比赛中。`starts_at`（或逐场 `scheduled_at`）到点自动开打（dispatch pairing）；每阶段对阵生成后派遣（`match_type=contest`）；
+- **rest**：阶段间休息（可换 Bot）。`rest_ends_at` 到点自动恢复；
+- **finished**：末阶段完成。
+
+**时间调度器**：后台周期扫描赛事的 `registration_opens_at` / `registration_closes_at` / `starts_at` / `rest_ends_at` / `scheduled_at` 字段，到点自动推进阶段。组织者手动按钮（`/open` `/publish` `/start` `/resume` `/advance`）始终可用——到点自动 + 手动可提前。
+
+**逐场排期**：每场对阵（pairing）有独立的 `scheduled_at`（计划开赛时间）。阶段可配 `round_stagger_minutes`（轮次间错峰分钟数）；`scheduled_at` 到点才 dispatch。
 
 详见 [对局](#/wiki?slug=match)。
 

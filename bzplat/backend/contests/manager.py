@@ -25,6 +25,7 @@ from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     CONTEST_FINISHED,
     CONTEST_OPEN,
+    CONTEST_PUBLISHED,
     CONTEST_REST,
     CONTEST_RUNNING,
     REGISTERED_ENGINES,
@@ -41,6 +42,19 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _validate_contest_times(
+    opens_at: str | None, closes_at: str | None, starts_at: str | None
+) -> None:
+    """校验赛事时间窗口逻辑：开放报名 < 截止报名 < 开赛（三者非 None 时）。
+
+    时间是 naive 本地 ISO 字符串，字符串字典序 == 时间序（因格式固定到秒）。
+    """
+    if opens_at and closes_at and opens_at > closes_at:
+        raise ValueError("报名截止时间必须晚于开放报名时间")
+    if closes_at and starts_at and closes_at > starts_at:
+        raise ValueError("比赛开始时间必须晚于报名截止时间")
 
 
 def _parse_stages(c: dict) -> list[dict]:
@@ -99,6 +113,9 @@ class ContestManager:
         phase: str = "standalone",
         source_contest_id: int | None = None,
         require_real_name: int = 0,
+        registration_opens_at: str | None = None,
+        registration_closes_at: str | None = None,
+        starts_at: str | None = None,
     ) -> dict:
         # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages+match_config
         if stages:
@@ -117,6 +134,8 @@ class ContestManager:
                 phase = tpl["phase"]
         # match_config 优先级：显式传入 > 模板自带 > game 默认
         cfg = match_config if match_config is not None else tpl_mc
+        # 时间校验：开放报名 < 截止报名 < 开赛（三者非 None 时）
+        _validate_contest_times(registration_opens_at, registration_closes_at, starts_at)
         return self.store.create_contest(
             title,
             organizer_id,
@@ -131,11 +150,18 @@ class ContestManager:
             phase=phase,
             source_contest_id=source_contest_id,
             require_real_name=require_real_name,
+            registration_opens_at=registration_opens_at,
+            registration_closes_at=registration_closes_at,
+            starts_at=starts_at,
         )
 
     def open_registration(self, contest_id: int) -> dict:
+        """手动开放报名。若 registration_opens_at 未预设则盖 now（手动触发兼容）；
+        已预设则调度器到点自动调本方法。"""
+        c = self.store.get_contest(contest_id)
+        opens = (c or {}).get("registration_opens_at") or _now()
         self.store.update_contest(
-            contest_id, status=CONTEST_OPEN, registration_opens_at=_now()
+            contest_id, status=CONTEST_OPEN, registration_opens_at=opens
         )
         return self.store.get_contest(contest_id)
 
@@ -150,6 +176,10 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c or c["status"] != CONTEST_OPEN:
             raise ValueError("比赛未开放报名")
+        # 报名截止时间校验：若 registration_closes_at 已预设且当前已过，拒绝报名
+        closes = c.get("registration_closes_at")
+        if closes and _now() > closes:
+            raise ValueError("报名已截止")
         # 实名校验：赛事要求实名时，报名者必须已填完整实名信息
         if int(c.get("require_real_name") or 0):
             u = self.store.get_user(user_id)
@@ -288,11 +318,16 @@ class ContestManager:
             )
 
     async def start(self, contest_id: int) -> dict:
+        """立即开赛（手动触发，跳过排期等待）。
+
+        生成对阵 + 设 scheduled_at=now（立即开打）+ dispatch 全部。兼容手动开赛场景。
+        若要走两阶段（截止报名→出排期→到开赛时间再开打），用 publish() + 调度器。
+        """
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
-        if c["status"] not in (CONTEST_OPEN, "draft"):
-            raise ValueError("仅 open/draft 可开赛")
+        if c["status"] not in (CONTEST_OPEN, "draft", CONTEST_PUBLISHED):
+            raise ValueError("仅 open/draft/published 可开赛")
         game_id = c.get("game_id") or "holdem"
         self._assert_engine(game_id)
 
@@ -323,10 +358,61 @@ class ContestManager:
             current_stage_idx=0,
             rest_ends_at=None,
         )
-        await self._begin_stage(contest_id, 0)
+        await self._begin_stage(contest_id, 0, schedule_immediately=True)
         return self.store.get_contest(contest_id)
 
-    async def _begin_stage(self, contest_id: int, stage_idx: int) -> None:
+    async def publish(self, contest_id: int) -> dict:
+        """截止报名 + 出排期（status=open→published）。
+
+        生成对阵 + 逐场排期 scheduled_at + 冻结版本，但**不 dispatch**——等开赛时间到
+        调度器到点 dispatch（scheduled_at<=now 的 pairing 才开打）。
+        组织者可手动调本方法提前出排期；调度器到 registration_closes_at 自动调。
+        """
+        c = self.store.get_contest(contest_id)
+        if not c:
+            raise ValueError("比赛不存在")
+        if c["status"] not in (CONTEST_OPEN, "draft"):
+            raise ValueError("仅 open/draft 可出排期")
+        game_id = c.get("game_id") or "holdem"
+        self._assert_engine(game_id)
+
+        entries = self.store.list_contest_entries(contest_id)
+        if len(entries) < 2:
+            raise ValueError("至少需要 2 名参赛")
+
+        stages = _parse_stages(c)
+        if not stages:
+            _, _, stages = resolve_stages(
+                c.get("template_id") or "holdem_swiss_ko", store=self.store
+            )
+            self.store.update_contest(
+                contest_id, stages_json=json.dumps(stages, ensure_ascii=False)
+            )
+
+        self._guard_full_rr(stages, len(entries))
+
+        # 按报名序赋 seed
+        for i, e in enumerate(entries):
+            self.store.update_entry(contest_id, e["user_id"], seed=i + 1, eliminated=0)
+
+        # 截止报名盖戳（用预设的 closes_at 或 now）+ 进 published 态
+        closes = c.get("registration_closes_at") or _now()
+        self.store.update_contest(
+            contest_id,
+            status=CONTEST_PUBLISHED,
+            registration_closes_at=closes,
+            current_stage_idx=0,
+            rest_ends_at=None,
+        )
+        await self._begin_stage(contest_id, 0, schedule_immediately=False)
+        return self.store.get_contest(contest_id)
+
+    async def _begin_stage(
+        self, contest_id: int, stage_idx: int, *, schedule_immediately: bool = False
+    ) -> None:
+        """生成阶段对阵。schedule_immediately=True 时 scheduled_at 全设 now（立即开打）；
+        False 时按赛事 starts_at + 轮次 stagger 逐场排期（published 态，等调度器到点 dispatch）。
+        """
         c = self.store.get_contest(contest_id)
         stages = _parse_stages(c)
         if stage_idx < 0 or stage_idx >= len(stages):
@@ -364,9 +450,13 @@ class ContestManager:
         else:
             specs = generate_stage_pairings(stage, bot_ids)
 
+        # 逐场排期：schedule_immediately 时全 now；否则按 starts_at + round stagger
+        base = _now() if schedule_immediately else (c.get("starts_at") or _now())
+        stagger_min = int(stage.get("round_stagger_minutes") or 0)
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
         for sp in specs:
+            sched = self._compute_scheduled_at(sp.round_num, base, stagger_min)
             self.store.add_contest_pairing(
                 contest_id,
                 sp.bot_a_id,
@@ -381,12 +471,31 @@ class ContestManager:
                 entry_a_id=bot_to_entry.get(sp.bot_a_id),
                 entry_b_id=bot_to_entry.get(sp.bot_b_id),
                 published_at=published_at,
+                scheduled_at=sched,
                 **self._version_snapshot(sp.bot_a_id, sp.bot_b_id),
             )
-        self.store.update_contest(
-            contest_id, status=CONTEST_RUNNING, current_stage_idx=stage_idx, rest_ends_at=None
-        )
+        # published 态不立即改 status=running（等 dispatch 才 running）；
+        # schedule_immediately 时直接 running（start() 路径）。
+        if schedule_immediately:
+            self.store.update_contest(
+                contest_id, status=CONTEST_RUNNING, current_stage_idx=stage_idx, rest_ends_at=None
+            )
         await self._dispatch_pending(contest_id, stage_idx)
+
+    @staticmethod
+    def _compute_scheduled_at(round_num: int, base: str, stagger_min: int) -> str:
+        """逐场排期：scheduled_at = base + (round_num-1) * stagger_min 分钟。
+
+        round_num 从 1 开始；stagger_min=0 时全用 base（同批同时）。
+        """
+        if not stagger_min or round_num <= 1:
+            return base
+        from datetime import datetime, timedelta
+        try:
+            dt = datetime.fromisoformat(base)
+        except (ValueError, TypeError):
+            return base
+        return (dt + timedelta(minutes=stagger_min * (round_num - 1))).isoformat(timespec="seconds")
 
     def _version_snapshot(self, bot_a_id: int | None, bot_b_id: int | None) -> dict:
         """P1：发布轮时冻结 bot 版本（取各自 current_version 的 version_id）。
@@ -409,11 +518,21 @@ class ContestManager:
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         gid = c.get("game_id") or "holdem"
+        now = _now()
         # cfg 的键就是该游戏的 match_config 字段（holdem→{"hands"}, pencil→{"n_dots"},
         # 第 4 游戏自带其字段）。challenge() 透传整包，无需按字段名逐条硬判断。
+        dispatched_any = False
         for p in pairings:
             if p.get("status") != "pending" or p.get("match_id"):
                 continue
+            # 逐场排期：scheduled_at 未到则跳过（等调度器到点再 dispatch）
+            sched = p.get("scheduled_at")
+            if sched and sched > now:
+                continue
+            # published 态首次 dispatch → 转 running（排期到点开打）
+            if not dispatched_any and c.get("status") == CONTEST_PUBLISHED:
+                self.store.update_contest(contest_id, status=CONTEST_RUNNING)
+                dispatched_any = True
             # 冻结快照已在 pairing 行；直接开打
             kw: dict = {
                 "match_type": TYPE_CONTEST,
