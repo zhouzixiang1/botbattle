@@ -106,7 +106,8 @@ class AutoMatchScheduler:
                 if not cfg["enabled"]:
                     self._idle_since = None
                     continue
-                if self._is_idle(cfg):
+                idle = self._is_idle(cfg)
+                if idle:
                     await self._schedule_some(cfg)
                 else:
                     self._idle_since = None  # 重置连续空闲计时
@@ -140,7 +141,7 @@ class AutoMatchScheduler:
         if cfg["daily_cap"] > 0 and self._daily_count >= cfg["daily_cap"]:
             logger.info("auto-match daily cap reached %d/%d，今日停止", self._daily_count, cfg["daily_cap"])
             return 0
-        running = len(self.orch._tasks)
+        running = getattr(self.orch, "_bot_running", 0) or 0  # 同 _is_idle：用实际占信号量槽位数
         free = self.orch.max_concurrent - cfg["reserve"] - running
         if free <= 0:
             return 0

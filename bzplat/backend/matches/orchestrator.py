@@ -608,6 +608,12 @@ class MatchOrchestrator:
     def _apply_ratings(
         self, bot_a_id: int, bot_b_id: int, winner: int | None, ea: int, eb: int
     ) -> None:
+        # 自博弈（同 bot 对战）：不计 Glicko 评分——同 bot 评分无信息量，且 update_rating_row
+        # 同一行被写两次（ra/rb 是同一快照），第二次覆盖第一次，导致胜负/评分错乱。
+        # 自博弈仅作功能验证/版本对比，不进天梯。同 contest（match_type=contest）也不会进这里。
+        if bot_a_id == bot_b_id:
+            logger.info("self-play match %s vs %s: skip rating update", bot_a_id, bot_b_id)
+            return
         self.store.ensure_rating(bot_a_id)
         self.store.ensure_rating(bot_b_id)
         ra = self.store.get_rating(bot_a_id)

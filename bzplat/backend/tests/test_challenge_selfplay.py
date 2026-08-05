@@ -80,3 +80,24 @@ def test_challenge_wrong_version_rejected(tmp_path):
             bot_b_version_id=va_other["id"],  # 属于 ba 不属于 bb
         ))
     s.close()
+
+
+def test_selfplay_skips_rating_update(tmp_path):
+    """自博弈完成不更新 Glicko 评分（防 _apply_ratings 同行双写损坏）。"""
+    import os, tempfile
+    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    with tempfile.TemporaryDirectory() as td:
+        s = Store(str(td + "/sr.db"))
+        u = s.create_user("sruser", "sr@e.com", "x")["id"]
+        b = s.create_bot(u, "srbot", binary_path="/dev/null", format="elf", game_id="holdem")
+        s.ensure_rating(b["id"])
+        r_before = s.get_rating(b["id"])
+        # 模拟 _apply_ratings 对自博弈（同 bot）
+        orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
+        orch._apply_ratings(b["id"], b["id"], winner=0, ea=100, eb=-100)
+        r_after = s.get_rating(b["id"])
+        # 评分/胜负/对局数 应不变（自博弈跳过）
+        assert r_after["rating"] == r_before["rating"], "自博弈不应改 rating"
+        assert r_after["wins"] == r_before["wins"], "自博弈不应改 wins"
+        assert r_after["matches_played"] == r_before["matches_played"], "自博弈不应改 matches_played"
+        s.close()

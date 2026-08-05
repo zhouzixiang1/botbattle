@@ -145,7 +145,7 @@ export default function Challenge() {
           bot_id: humanBot.id,
           human_seat: humanSeat,
           game_id: gameId,
-          ...matchCfg,
+          match_config: { ...matchCfg },
         }
         const d = await apiJson<{ match_id: string }>('/api/matches/human', 'POST', body)
         nav(`/play/${d.match_id}`)
@@ -157,7 +157,7 @@ export default function Challenge() {
         my_bot_id: seats[0].bot.id,
         opponent_bot_id: seats[1].bot.id,
         game_id: gameId,
-        ...matchCfg,
+        match_config: { ...matchCfg },
       }
       if (seats[0].versionId !== undefined) body.my_bot_version_id = seats[0].versionId
       if (seats[1].versionId !== undefined) body.opponent_bot_version_id = seats[1].versionId
