@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from bzplat.backend.auth.dependencies import (
     _extract_token,
+    optional_user,
     require_admin,
     require_organizer,
     require_user,
@@ -268,12 +269,25 @@ def global_search(
     return {"users": store.search_users(ql, limit=lim)}
 
 
+# 公开 bot 详情需脱敏的敏感字段（非 owner/admin 不可见）。
+# 与 /api/bots/{id}/versions 的脱敏口径一致：binary_path 暴露磁盘布局，
+# runtime_mode 是内部运行配置，均不应泄漏给访客（审计 P1-B）。
+_BOT_SENSITIVE_FIELDS = ("binary_path", "runtime_mode")
+
+
+def _sanitize_bot(bot: dict, user: dict | None) -> dict:
+    """非 owner/admin 访问时脱敏 bot 字段（返回副本，不改原 dict）。"""
+    if user is not None and (bot.get("owner_id") == user.get("id") or user.get("role") == "admin"):
+        return bot
+    return {k: v for k, v in bot.items() if k not in _BOT_SENSITIVE_FIELDS}
+
+
 @router.get("/api/bots/{bot_id}")
-def get_bot(bot_id: int, request: Request):
+def get_bot(bot_id: int, request: Request, user=Depends(optional_user)):
     bot = _bots(request).get(bot_id)
     if not bot:
         raise HTTPException(404, "bot 不存在")
-    return {"bot": bot}
+    return {"bot": _sanitize_bot(bot, user)}
 
 
 @router.get("/api/bots/{bot_id}/profile")

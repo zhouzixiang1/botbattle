@@ -260,3 +260,57 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
             break
     assert captured.get("modes") == ("traditional", "longrunning"), captured
     assert captured.get("paths") == ("/tmp/a", "/tmp/b")
+
+
+# ── GET /api/bots/{id} 脱敏（审计 P1-B）─────────────────────────────
+
+def test_get_bot_public_desensitizes_binary_path(tmp_path):
+    """GET /api/bots/{id} 公开访问必须脱敏 binary_path/runtime_mode
+    （与 /api/bots/{id}/versions 脱敏口径一致；审计 P1-B）。"""
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    bot = store.create_bot(
+        owner["id"], "secretbot", binary_path="/uploads/secret/bot.bin",
+        format="elf", game_id="holdem", runtime_mode="longrunning",
+    )
+    client = TestClient(app)
+
+    # 1. 未登录（访客）：binary_path/runtime_mode 必须被脱敏
+    r = client.get(f"/api/bots/{bot['id']}")
+    assert r.status_code == 200
+    public_bot = r.json()["bot"]
+    assert "binary_path" not in public_bot, "访客不应看到 binary_path（泄漏磁盘布局）"
+    assert "runtime_mode" not in public_bot, "访客不应看到 runtime_mode"
+    # 其余公开字段保留
+    assert public_bot["name"] == "secretbot"
+    assert public_bot["game_id"] == "holdem"
+
+    # 2. 非 owner 登录：同样脱敏
+    other = store.create_user("other", "o@e.com", hash_password("pw123456"))
+    store.update_user(other["id"], email_verified=1)
+    _, other_tok = app.state.auth.authenticate("other", "pw123456")
+    r = client.get(
+        f"/api/bots/{bot['id']}", headers={"Authorization": f"Bearer {other_tok}"},
+    )
+    assert r.status_code == 200
+    assert "binary_path" not in r.json()["bot"]
+
+    # 3. owner 登录：完整字段（含 binary_path/runtime_mode）
+    _, owner_tok = app.state.auth.authenticate("mvu", "pw123456")
+    r = client.get(
+        f"/api/bots/{bot['id']}", headers={"Authorization": f"Bearer {owner_tok}"},
+    )
+    assert r.status_code == 200
+    owner_bot = r.json()["bot"]
+    assert owner_bot["binary_path"] == "/uploads/secret/bot.bin"
+    assert owner_bot["runtime_mode"] == "longrunning"
+
+    # 4. admin 登录：同样可见完整字段
+    admin = store.create_user("adm", "a@e.com", hash_password("pw123456"))
+    store.update_user(admin["id"], role="admin", email_verified=1)
+    _, admin_tok = app.state.auth.authenticate("adm", "pw123456")
+    r = client.get(
+        f"/api/bots/{bot['id']}", headers={"Authorization": f"Bearer {admin_tok}"},
+    )
+    assert r.status_code == 200
+    assert r.json()["bot"]["binary_path"] == "/uploads/secret/bot.bin"
