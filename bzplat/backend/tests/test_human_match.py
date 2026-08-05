@@ -292,7 +292,7 @@ def test_consecutive_human_timeouts_aborts_match(store: Store):
 
     async def run():
         mid = await orch.challenge_human(
-            b["id"], u["id"], human_seat=1, game_id="holdem", hands=70,
+            b["id"], u["id"], human_seat=1, game_id="holdem", match_config={"hands": 70},
         )
         # 从不响应 → 每手弃牌超时 → 连续达阈值应中止
         for _ in range(400):

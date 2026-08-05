@@ -26,6 +26,7 @@ class FakeOrch:
     def __init__(self, *, max_concurrent: int = 4) -> None:
         self.max_concurrent = max_concurrent
         self._tasks: dict[str, object] = {}
+        self._bot_running = 0  # 模拟实际占用信号量槽位（_is_idle 据此判定）
         self.calls: list[dict] = []
 
     async def challenge(self, a, b, owner_user_id, *, match_type="challenge",
@@ -80,8 +81,7 @@ def test_disabled_does_not_schedule(store):
 def test_not_idle_when_full(store):
     _mk_bots(store, 4)
     orch = FakeOrch(max_concurrent=2)
-    orch._tasks["x"] = object()
-    orch._tasks["y"] = object()  # 满（reserve=1 → free = 2-1-2 = -1）
+    orch._bot_running = 2  # 满（reserve=1 → free = 2-1-2 = -1）
     sched = AutoMatchScheduler(orch, store)
     assert sched._is_idle(sched._cfg()) is False
 
@@ -89,7 +89,7 @@ def test_not_idle_when_full(store):
 def test_idle_respects_reserve_slots(store):
     _mk_bots(store, 4)
     orch = FakeOrch(max_concurrent=2)
-    orch._tasks["x"] = object()  # 1 running；reserve=1 → free=0 → 非闲
+    orch._bot_running = 1  # 1 running；reserve=1 → free=0 → 非闲
     sched = AutoMatchScheduler(orch, store)
     assert sched._is_idle(sched._cfg()) is False
     # reserve=0 → free=1 → 有空闲槽

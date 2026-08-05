@@ -99,6 +99,11 @@ def single_elimination(bot_ids: list[int]) -> list[PairingSpec]:
     下一轮配对时正常带入（见 _maybe_next_elim_round 的 bye 收集逻辑）。
     """
     bots = list(bot_ids)
+    # n<=1：无对手不生成对阵（防 IndexError——_seed_bracket 对 len<2 返回原样，
+    # 配对 loop 取 seeded[i+1] 越界崩溃）。调用方 _begin_stage 对 KO 阶段收到
+    # 空 specs 会判定阶段无对阵 → 标 finished。
+    if len(bots) <= 1:
+        return []
     size = next_power_of_two(len(bots))
     # 补 bye：强种子轮空
     byes = size - len(bots)

@@ -21,7 +21,7 @@ export interface BracketPairing {
   round_num?: number
   bracket_slot?: number | null
   bot_a_id: number
-  bot_b_id: number
+  bot_b_id: number | null
   bot_a_name?: string
   bot_a_display?: string
   bot_b_name?: string
@@ -39,10 +39,12 @@ interface Props {
 
 function botLabel(p: BracketPairing, side: 0 | 1): string {
   if (side === 0) return p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`
+  // 轮空（bye placeholder）：bot_b_id 为 null，展示为「轮空」而非 #null
+  if (p.bot_b_id == null) return '轮空'
   return p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`
 }
 
-function botId(p: BracketPairing, side: 0 | 1): number {
+function botId(p: BracketPairing, side: 0 | 1): number | null {
   return side === 0 ? p.bot_a_id : p.bot_b_id
 }
 
@@ -127,8 +129,10 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                   <div className="space-y-2">
                     {r.pairings.map((p) => {
                       const w = p.match_winner
-                      const aWin = w === 0
-                      const bWin = w === 1
+                      // 轮空（bye）：bot_b_id 为 null 且 status=completed，bot_a 自动晋级为胜者
+                      const isBye = p.bot_b_id == null && p.status === 'completed'
+                      const aWin = isBye || w === 0
+                      const bWin = !isBye && w === 1
                       return (
                         <div
                           key={p.id}
@@ -140,14 +144,15 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                             label={botLabel(p, 0)}
                             botId={botId(p, 0)}
                             win={aWin}
-                            lose={w === 1}
+                            lose={bWin && !isBye ? true : false}
                           />
                           <div className="my-0.5 text-center text-[10px] text-muted-foreground">vs</div>
                           <SlotRow
                             label={botLabel(p, 1)}
                             botId={botId(p, 1)}
                             win={bWin}
-                            lose={w === 0}
+                            lose={aWin && !isBye ? true : false}
+                            bye={p.bot_b_id == null}
                           />
                           {p.match_id && p.status === 'completed' && (
                             <Link
@@ -176,11 +181,14 @@ function SlotRow({
   botId,
   win,
   lose,
+  bye = false,
 }: {
   label: string
-  botId: number
+  botId: number | null
   win: boolean
   lose: boolean
+  /** 轮空占位：无对手，渲染为非链接的 muted 文本而非 /bot/null */
+  bye?: boolean
 }) {
   return (
     <div
@@ -188,9 +196,13 @@ function SlotRow({
         win ? 'bg-success/10 font-semibold text-success' : lose ? 'text-muted-foreground line-through' : 'text-foreground'
       }`}
     >
-      <Link to={`/bot/${botId}`} className="min-w-0 flex-1 truncate hover:text-primary">
-        {label || '—'}
-      </Link>
+      {bye || botId == null ? (
+        <span className="min-w-0 flex-1 truncate italic text-muted-foreground">{label}</span>
+      ) : (
+        <Link to={`/bot/${botId}`} className="min-w-0 flex-1 truncate hover:text-primary">
+          {label || '—'}
+        </Link>
+      )}
       {win && <span className="text-[10px]">✓</span>}
     </div>
   )

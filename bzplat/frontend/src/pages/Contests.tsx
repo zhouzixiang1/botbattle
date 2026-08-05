@@ -177,7 +177,7 @@ export default function Contests() {
       actions={
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
-          <Select value={filterGame || 'all'} onValueChange={(v) => setFilterGame(v === 'all' ? '' : v)}>
+          <Select value={filterGame || 'all'} onValueChange={(v) => { setFilterGame(v === 'all' ? '' : v); setPage(1) }}>
             <SelectTrigger className="h-9 w-[8.5rem]">
               <SelectValue />
             </SelectTrigger>

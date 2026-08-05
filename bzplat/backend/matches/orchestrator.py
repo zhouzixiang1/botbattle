@@ -58,6 +58,9 @@ class MatchOrchestrator:
         self.max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
         self._tasks: dict[str, asyncio.Task] = {}
+        # 实际占用 bot 对局槽（已 acquire _sem）的任务数。区别于 _tasks（含等信号量的）。
+        # auto_matcher._is_idle 据此判定空闲，避免大量 pending 任务排队等槽时误判不空闲。
+        self._bot_running = 0
         self._sse: dict[str, list[asyncio.Queue]] = {}
         self._lock = asyncio.Lock()
         # 对局完成后的回调（由外部注入，如比赛归档）。签名: (match_id, contest_id|None) -> None
@@ -80,6 +83,7 @@ class MatchOrchestrator:
         """热更新并发上限：重建 Semaphore（不修改 _value）。"""
         self.max_concurrent = max(1, int(max_concurrent))
         self._sem = asyncio.Semaphore(self.max_concurrent)
+        self._bot_running = 0  # 重置（重建后当前运行任务的计数由 _run_match 维护）
 
     def rebuild_human_concurrency(self, max_concurrent: int) -> None:
         """热更新人类对局独立并发上限。"""
@@ -179,17 +183,29 @@ class MatchOrchestrator:
         contest_id: int | None = None,
         game_id: str | None = None,
         match_config: dict[str, Any] | None = None,
+        bot_a_version_id: int | None = None,
+        bot_b_version_id: int | None = None,
     ) -> str:
-        if challenger_bot_id == opponent_bot_id:
-            raise ValueError("不能与自己对战")
+        # 自博弈（同 bot 对战）：允许——用于对比同 bot 的不同版本（如 v1 vs v2），
+        # 或同 bot 同版本的对阵。仅 challenge 路径放开（contest 仍各自走 pairing）。
         bot_a = self.store.get_bot(challenger_bot_id)
         bot_b = self.store.get_bot(opponent_bot_id)
         if not bot_a or not bot_b:
             raise ValueError("bot 不存在")
         if not bot_a.get("is_active") or not bot_a.get("binary_path"):
-            raise ValueError("己方 bot 不可用")
+            raise ValueError("座位0 bot 不可用")
         if not bot_b.get("is_active") or not bot_b.get("binary_path"):
-            raise ValueError("对手 bot 不可用")
+            raise ValueError("座位1 bot 不可用")
+        # 自博弈同 bot 同版本时，座位区分（seat 0/1）即可，不阻拦。
+        # 但校验指定的版本确实属于对应 bot。
+        if bot_a_version_id is not None:
+            va = self.store.get_bot_version(bot_a_version_id)
+            if not va or va.get("bot_id") != challenger_bot_id:
+                raise ValueError("座位0 指定的版本不存在或不属于该 bot")
+        if bot_b_version_id is not None:
+            vb = self.store.get_bot_version(bot_b_version_id)
+            if not vb or vb.get("bot_id") != opponent_bot_id:
+                raise ValueError("座位1 指定的版本不存在或不属于该 bot")
 
         ga = normalize_game_id(bot_a.get("game_id"))
         gb = normalize_game_id(bot_b.get("game_id"))
@@ -208,10 +224,16 @@ class MatchOrchestrator:
         # 对局级配置：spec 默认 + 调用方覆盖（取代散落的 hands/n_dots/**extra 具名参数）。
         spec = game_registry.get(gid)
         mc = dict(spec.default_match_params, **(match_config or {}))
+        # 版本快照存入 match_config（_run_match 读这两个内部键解析版本路径；
+        # 不污染 spec.validate_match_params——先校验再注入版本键）。
         try:
             spec.validate_match_params(mc)
         except ValueError as e:
             raise ValueError(f"match 参数非法: {e}") from None
+        if bot_a_version_id is not None:
+            mc["_bot_a_version_id"] = int(bot_a_version_id)
+        if bot_b_version_id is not None:
+            mc["_bot_b_version_id"] = int(bot_b_version_id)
 
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self.store.create_match(
@@ -267,164 +289,190 @@ class MatchOrchestrator:
 
     async def _run_match(self, match_id: str) -> None:
         async with self._sem:
-            m = self.store.get_match(match_id)
-            if not m:
-                return
-            bot_a = self.store.get_bot(m["bot_a_id"])
-            bot_b = self.store.get_bot(m["bot_b_id"])
-            # P1：赛事对局读冻结的 bot 版本路径（pairing.bot_a_version_id → bot_versions.binary_path），
-            # 不受选手中途上传新版本影响；非 contest 读 bots.binary_path（最新）。
-            # runtime_mode 同源：冻结版本优先读 bot_versions.runtime_mode，否则读 bots.runtime_mode。
-            path_a = bot_a["binary_path"]
-            path_b = bot_b["binary_path"]
-            mode_a = bot_a.get("runtime_mode") or DEFAULT_RUNTIME_MODE
-            mode_b = bot_b.get("runtime_mode") or DEFAULT_RUNTIME_MODE
-            if m.get("match_type") == TYPE_CONTEST and m.get("contest_id"):
-                pairing = self._find_contest_pairing(m["contest_id"], match_id)
-                if pairing:
-                    if pairing.get("bot_a_version_id"):
-                        v = self.store.get_bot_version(pairing["bot_a_version_id"])
-                        if v and v.get("binary_path"):
-                            path_a = v["binary_path"]
-                            mode_a = v.get("runtime_mode") or mode_a
-                    if pairing.get("bot_b_version_id"):
-                        v = self.store.get_bot_version(pairing["bot_b_version_id"])
-                        if v and v.get("binary_path"):
-                            path_b = v["binary_path"]
-                            mode_b = v.get("runtime_mode") or mode_b
-            gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
-            logger.info(
-                "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s)",
-                match_id, gid, m.get("match_type"),
-                m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
-            )
-            self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
-            events: list[dict] = []
-
-            def on_event(kind: str, ev: dict) -> None:
-                events.append(ev)
-                self._broadcast(match_id, ev)
-                if kind in ("settle", "hand_start", "match_end", "move", "match_start") or len(events) % 5 == 0:
-                    self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
-
+            self._bot_running += 1  # 占用槽位（供 auto_matcher._is_idle 准确判定）
             try:
-                # 对局配置统一通路：DB match_config（对局级）+ admin 全局设置覆盖，整体 **透传。
-                # match_config 经 _parse_match_json_cols 已是 dict（如 {"hands":70}/{"n_dots":6}）。
-                spec = game_registry.get(gid)
-                mc: dict[str, Any] = dict(m.get("match_config") or {})
-                for k, v in self._judge_params(gid).items():
-                    if v is not None:
-                        mc[k] = v
-                result = await self.runner.run_binaries(
-                    path_a,
-                    path_b,
-                    game_id=gid,
-                    on_event=on_event,
-                    runtime_modes=(mode_a, mode_b),
-                    **mc,
-                )
-                ea = sum(r.deltas[0] for r in result.rounds)
-                eb = sum(r.deltas[1] for r in result.rounds)
-                # winner：引擎 result.winner 已权威化（棋类单轮胜者；holdem 多手按累计净筹码比较）。
-                # 仅当 result.winner 为 None（平局）时按 ea/eb 兜底——二者一致时返 None（平局）。
-                winner: int | None = result.winner
-                if winner is None:
-                    winner = 0 if ea > eb else 1 if eb > ea else None
-                self.store.update_match(
-                    match_id,
-                    status=STATUS_COMPLETED,
-                    winner=winner,
-                    reason="completed",
-                    result={
-                        "hands_played": result.rounds_played,
-                        "deltas": [ea, eb],
-                        "net_bb": spec.normalize_earnings(ea),
-                    },
-                    ended_at=_now(),
-                )
-                self.store.upsert_replay(
-                    match_id, json.dumps(events, ensure_ascii=False), "[]"
-                )
-                # 比赛对局只计入赛事内积分，不更新全局 Glicko-2 排行榜
-                # （挑战 / table / ladder 对局均更新全局评分）
-                if m["match_type"] != TYPE_CONTEST:
-                    self._apply_ratings(m["bot_a_id"], m["bot_b_id"], winner, ea, eb)
-                self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
-                logger.info(
-                    "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
-                    match_id, winner, result.rounds_played, ea, eb,
-                    m["match_type"] != TYPE_CONTEST,
-                )
-                # 通知双方 owner（仅 challenge/table/ladder；contest 内部对局不单独通知）
-                if self.notifier is not None and m["match_type"] != TYPE_CONTEST:
-                    try:
-                        wl = "平局" if winner is None else f"座位 {winner} 胜"
-                        self.notifier.notify_both_owners(
-                            m["bot_a_id"], m["bot_b_id"],
-                            type="match_done",
-                            title=f"对局完成：{wl}",
-                            body=f"对局 {match_id} 已结束（{m.get('game_id', '')}）。",
-                            link=f"/match/{match_id}",
-                        )
-                    except Exception:
-                        logger.debug("notify match_done failed", exc_info=True)
-                # 经验奖励：双方 owner 各加 XP（参与 + 胜者额外），仅非 contest
-                if m["match_type"] != TYPE_CONTEST:
-                    try:
-                        from bzplat.backend.store.schema import (
-                            XP_MATCH_PARTICIPATE, XP_MATCH_WIN,
-                        )
-                        ba = self.store.get_bot(m["bot_a_id"])
-                        bb = self.store.get_bot(m["bot_b_id"])
-                        for bot, won in ((ba, winner == 0), (bb, winner == 1)):
-                            if bot and bot.get("owner_id"):
-                                xp = XP_MATCH_PARTICIPATE + (XP_MATCH_WIN if won else 0)
-                                self.store.award_xp(int(bot["owner_id"]), xp)
-                    except Exception:
-                        logger.debug("award_xp failed", exc_info=True)
-            except BotCrashedError as exc:
-                logger.warning("match %s bot crashed — %s", match_id, exc)
-                # 赛事对局崩溃 → 技术判负（completed + winner=对手 + technical_loss=1），
-                # 不再静默吞分（aborted 在 standings 不计分会导致赛事卡住/丢分）。
-                # 崩溃方从 exc.crashed_seat 取（runner 在 start_session 失败时注解）；
-                # 未注解（游戏内崩溃已由引擎处理产出正常 result，不会到这；bot_a start
-                # 失败未注解→默认 0）。
-                crashed_seat = getattr(exc, "crashed_seat", None) or 0
-                winner = 1 - crashed_seat
-                ea, eb = (-1, 1) if crashed_seat == 0 else (1, -1)
-                if m.get("match_type") == TYPE_CONTEST:
-                    self.store.update_match(
-                        match_id, status=STATUS_COMPLETED, reason="technical_loss",
-                        winner=winner,
-                        result={"deltas": [ea, eb]},
-                        technical_loss=1, ended_at=_now(),
-                    )
-                    self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "technical_loss"})
-                else:
-                    self.store.update_match(
-                        match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now(),
-                    )
-                    self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
-            except Exception as exc:
-                logger.exception("match %s failed", match_id)
-                self.store.update_match(
-                    match_id,
-                    status=STATUS_ABORTED,
-                    reason=f"error:{exc}",
-                    ended_at=_now(),
-                )
-                self._broadcast(match_id, {"type": "error", "message": str(exc)})
+                return await self.__run_match_inner(match_id)
             finally:
-                self._tasks.pop(match_id, None)
-                if self.on_match_done is not None:
-                    try:
-                        result = self.on_match_done(match_id, m.get("contest_id"))
-                        if asyncio.iscoroutine(result):
-                            await result
-                    except Exception:
-                        # 对局完成回调（赛事 maybe_finish）失败必须可见——
-                        # 原用 debug 级会静默吞掉，导致赛事卡 running 无从排查。
-                        logger.exception("on_match_done failed match=%s", match_id)
+                self._bot_running = max(0, self._bot_running - 1)
+
+    async def __run_match_inner(self, match_id: str) -> None:
+        m = self.store.get_match(match_id)
+        if not m:
+            return
+        bot_a = self.store.get_bot(m["bot_a_id"])
+        bot_b = self.store.get_bot(m["bot_b_id"])
+        # P1：赛事对局读冻结的 bot 版本路径（pairing.bot_a_version_id → bot_versions.binary_path），
+        # 不受选手中途上传新版本影响；非 contest 读 bots.binary_path（最新）。
+        # runtime_mode 同源：冻结版本优先读 bot_versions.runtime_mode，否则读 bots.runtime_mode。
+        path_a = bot_a["binary_path"]
+        path_b = bot_b["binary_path"]
+        mode_a = bot_a.get("runtime_mode") or DEFAULT_RUNTIME_MODE
+        mode_b = bot_b.get("runtime_mode") or DEFAULT_RUNTIME_MODE
+        if m.get("match_type") == TYPE_CONTEST and m.get("contest_id"):
+            pairing = self._find_contest_pairing(m["contest_id"], match_id)
+            if pairing:
+                if pairing.get("bot_a_version_id"):
+                    v = self.store.get_bot_version(pairing["bot_a_version_id"])
+                    if v and v.get("binary_path"):
+                        path_a = v["binary_path"]
+                        mode_a = v.get("runtime_mode") or mode_a
+                if pairing.get("bot_b_version_id"):
+                    v = self.store.get_bot_version(pairing["bot_b_version_id"])
+                    if v and v.get("binary_path"):
+                        path_b = v["binary_path"]
+                        mode_b = v.get("runtime_mode") or mode_b
+        else:
+            # challenge/table/ladder：match_config 可能带版本快照（_bot_a/b_version_id，
+            # 由挑战页版本选择注入）。读指定版本的 binary_path，不受中途上传新版本影响。
+            mc = m.get("match_config") or {}
+            if isinstance(mc, str):
+                try:
+                    mc = json.loads(mc)
+                except Exception:
+                    mc = {}
+            if mc.get("_bot_a_version_id"):
+                v = self.store.get_bot_version(mc["_bot_a_version_id"])
+                if v and v.get("binary_path"):
+                    path_a = v["binary_path"]
+                    mode_a = v.get("runtime_mode") or mode_a
+            if mc.get("_bot_b_version_id"):
+                v = self.store.get_bot_version(mc["_bot_b_version_id"])
+                if v and v.get("binary_path"):
+                    path_b = v["binary_path"]
+                    mode_b = v.get("runtime_mode") or mode_b
+        gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
+        logger.info(
+            "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s)",
+            match_id, gid, m.get("match_type"),
+            m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
+        )
+        self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
+        events: list[dict] = []
+
+        def on_event(kind: str, ev: dict) -> None:
+            events.append(ev)
+            self._broadcast(match_id, ev)
+            if kind in ("settle", "hand_start", "match_end", "move", "match_start") or len(events) % 5 == 0:
+                self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+
+        try:
+            # 对局配置统一通路：DB match_config（对局级）+ admin 全局设置覆盖，整体 **透传。
+            # match_config 经 _parse_match_json_cols 已是 dict（如 {"hands":70}/{"n_dots":6}）。
+            spec = game_registry.get(gid)
+            mc: dict[str, Any] = dict(m.get("match_config") or {})
+            for k, v in self._judge_params(gid).items():
+                if v is not None:
+                    mc[k] = v
+            result = await self.runner.run_binaries(
+                path_a,
+                path_b,
+                game_id=gid,
+                on_event=on_event,
+                runtime_modes=(mode_a, mode_b),
+                **mc,
+            )
+            ea = sum(r.deltas[0] for r in result.rounds)
+            eb = sum(r.deltas[1] for r in result.rounds)
+            # winner：引擎 result.winner 已权威化（棋类单轮胜者；holdem 多手按累计净筹码比较）。
+            # 仅当 result.winner 为 None（平局）时按 ea/eb 兜底——二者一致时返 None（平局）。
+            winner: int | None = result.winner
+            if winner is None:
+                winner = 0 if ea > eb else 1 if eb > ea else None
+            self.store.update_match(
+                match_id,
+                status=STATUS_COMPLETED,
+                winner=winner,
+                reason="completed",
+                result={
+                    "hands_played": result.rounds_played,
+                    "deltas": [ea, eb],
+                    "net_bb": spec.normalize_earnings(ea),
+                },
+                ended_at=_now(),
+            )
+            self.store.upsert_replay(
+                match_id, json.dumps(events, ensure_ascii=False), "[]"
+            )
+            # 比赛对局只计入赛事内积分，不更新全局 Glicko-2 排行榜
+            # （挑战 / table / ladder 对局均更新全局评分）
+            if m["match_type"] != TYPE_CONTEST:
+                self._apply_ratings(m["bot_a_id"], m["bot_b_id"], winner, ea, eb)
+            self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
+            logger.info(
+                "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
+                match_id, winner, result.rounds_played, ea, eb,
+                m["match_type"] != TYPE_CONTEST,
+            )
+            # 通知双方 owner（仅 challenge/table/ladder；contest 内部对局不单独通知）
+            if self.notifier is not None and m["match_type"] != TYPE_CONTEST:
+                try:
+                    wl = "平局" if winner is None else f"座位 {winner} 胜"
+                    self.notifier.notify_both_owners(
+                        m["bot_a_id"], m["bot_b_id"],
+                        type="match_done",
+                        title=f"对局完成：{wl}",
+                        body=f"对局 {match_id} 已结束（{m.get('game_id', '')}）。",
+                        link=f"/match/{match_id}",
+                    )
+                except Exception:
+                    logger.debug("notify match_done failed", exc_info=True)
+            # 经验奖励：双方 owner 各加 XP（参与 + 胜者额外），仅非 contest
+            if m["match_type"] != TYPE_CONTEST:
+                try:
+                    from bzplat.backend.store.schema import (
+                        XP_MATCH_PARTICIPATE, XP_MATCH_WIN,
+                    )
+                    ba = self.store.get_bot(m["bot_a_id"])
+                    bb = self.store.get_bot(m["bot_b_id"])
+                    for bot, won in ((ba, winner == 0), (bb, winner == 1)):
+                        if bot and bot.get("owner_id"):
+                            xp = XP_MATCH_PARTICIPATE + (XP_MATCH_WIN if won else 0)
+                            self.store.award_xp(int(bot["owner_id"]), xp)
+                except Exception:
+                    logger.debug("award_xp failed", exc_info=True)
+        except BotCrashedError as exc:
+            logger.warning("match %s bot crashed — %s", match_id, exc)
+            # 赛事对局崩溃 → 技术判负（completed + winner=对手 + technical_loss=1），
+            # 不再静默吞分（aborted 在 standings 不计分会导致赛事卡住/丢分）。
+            # 崩溃方从 exc.crashed_seat 取（runner 在 start_session 失败时注解）；
+            # 未注解（游戏内崩溃已由引擎处理产出正常 result，不会到这；bot_a start
+            # 失败未注解→默认 0）。
+            crashed_seat = getattr(exc, "crashed_seat", None) or 0
+            winner = 1 - crashed_seat
+            ea, eb = (-1, 1) if crashed_seat == 0 else (1, -1)
+            if m.get("match_type") == TYPE_CONTEST:
+                self.store.update_match(
+                    match_id, status=STATUS_COMPLETED, reason="technical_loss",
+                    winner=winner,
+                    result={"deltas": [ea, eb]},
+                    technical_loss=1, ended_at=_now(),
+                )
+                self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "technical_loss"})
+            else:
+                self.store.update_match(
+                    match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now(),
+                )
+                self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
+        except Exception as exc:
+            logger.exception("match %s failed", match_id)
+            self.store.update_match(
+                match_id,
+                status=STATUS_ABORTED,
+                reason=f"error:{exc}",
+                ended_at=_now(),
+            )
+            self._broadcast(match_id, {"type": "error", "message": str(exc)})
+        finally:
+            self._tasks.pop(match_id, None)
+            if self.on_match_done is not None:
+                try:
+                    result = self.on_match_done(match_id, m.get("contest_id"))
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    # 对局完成回调（赛事 maybe_finish）失败必须可见——
+                    # 原用 debug 级会静默吞掉，导致赛事卡 running 无从排查。
+                    logger.exception("on_match_done failed match=%s", match_id)
 
     async def _run_human_match(self, match_id: str) -> None:
         """人类 vs bot 对局：独立信号量；人类侧经 _human_turns Future 等待 WS 落子。"""

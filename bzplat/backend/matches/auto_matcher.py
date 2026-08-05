@@ -116,8 +116,13 @@ class AutoMatchScheduler:
                 logger.exception("auto-match loop iteration failed")
 
     def _is_idle(self, cfg: dict[str, Any]) -> bool:
-        """有预留后的空闲并发槽，且连续空闲达 min_idle 秒。"""
-        running = len(self.orch._tasks)  # 已派遣任务（含等信号量的）
+        """有预留后的空闲并发槽，且连续空闲达 min_idle 秒。
+
+        注意：用 _bot_running（实际占用 _sem 槽位的）而非 _tasks（含等信号量的）。
+        否则大量 pending 任务排队等槽时（如赛事排期积压），running 虚高 → 永不空闲 →
+        定级对局永远打不起来。_bot_running 准确反映真正占用的槽位。
+        """
+        running = getattr(self.orch, "_bot_running", 0) or 0
         free = self.orch.max_concurrent - cfg["reserve"] - running
         if free <= 0:
             self._idle_since = None

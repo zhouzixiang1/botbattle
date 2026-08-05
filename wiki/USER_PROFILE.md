@@ -27,21 +27,15 @@
 | 端点 | 鉴权 | 说明 |
 |------|------|------|
 | `PUT /api/auth/profile` | require_user | 更新 display_name（≤64）/ bio（≤500） |
-| `POST /api/auth/avatar` | require_user | 上传头像（png/jpeg/webp/gif，≤2MB），存本地 `avatars/<uid>.<ext>` |
+| `POST /api/auth/avatar` | require_user | 上传头像（png/jpeg/webp/gif，≤2MB） |
 
-头像通过 `/avatars/<file>` 静态访问（StaticFiles 托管）。上传新头像会覆盖旧扩展名文件。
+上传新头像会覆盖旧头像。
 
 ## 用户主页数据端点（公开）
 
 | 端点 | 说明 |
 |------|------|
-| `GET /api/users/{username}/profile` | 公开档案 + 总战绩聚合（不含 email/password_hash） |
+| `GET /api/users/{username}/profile` | 公开档案 + 总战绩聚合 |
 | `GET /api/users/{username}/bots` | 该用户的公开 Bot 列表 |
 
-总战绩 = 该用户所有 Bot 的 ratings SUM(wins/losses/draws/matches_played/net_chips)。
-
-## 数据基础
-
-- `users` 表新增 `bio`/`avatar` 列（migration 幂等）。
-- `update_user` 允许 bio/avatar；`_safe_user` 自动透传（剔除 password_hash）。
-- store: `user_profile`（聚合）、`aggregate_owner_stats`、`search_bots`（模糊）、`search_matches`（模糊）。
+总战绩 = 该用户所有 Bot 的累计胜负 / 平局 / 净筹码。

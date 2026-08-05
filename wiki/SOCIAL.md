@@ -24,9 +24,4 @@
 | `GET /api/bots/{id}/favorite-status` | require_user | 是否收藏 + 收藏数 |
 | `GET /api/auth/me/favorites` | require_user | 我的收藏列表 |
 
-## 数据表
-
-- `follows(follower_id, followee_id, created_at)` + `CHECK(follower_id <> followee_id)` + 双向索引。
-- `favorites(user_id, bot_id, created_at)` + 双向索引。
-
-关注触发通知经 `app.state.notifier.notify(type='followed')`。
+关注其他用户后，对方会收到一条 `followed` 通知。

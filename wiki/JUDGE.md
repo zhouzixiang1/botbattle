@@ -28,24 +28,21 @@ Botzone 裁判每回合启停，输入大致为 `{"log":[...], "initdata":...}`�
 
 ## 本平台裁判
 
-本平台**无独立「裁判程序」二进制**；由服务端 **`games/<game>/` 裁判模块**扮演裁判，经 `GameSpec` 注册表调度，进程内直接推进局面：
+本平台**无独立「裁判程序」二进制**；由服务端各游戏的**裁判引擎**在进程内直接推进局面：
 
-| 游戏 | 裁判模块（实现路径） |
-|------|----------|
-| 德州扑克（holdem） | `MatchSession`（`bzplat/backend/games/holdem/engine.py`） |
-| 五子棋（gomoku） | `GomokuSession`（`bzplat/backend/games/gomoku/engine.py`） |
-| 点格棋（pencil） | `PencilSession`（`bzplat/backend/games/pencil/engine.py`） |
+| 游戏 | 裁判 |
+|------|------|
+| 德州扑克（holdem） | 德州裁判引擎 |
+| 五子棋（gomoku） | 五子棋裁判引擎 |
+| 点格棋（pencil） | 点格棋裁判引擎 |
 
-> 真实现全在 `games/<game>/`。旧的 `bzplat/backend/engine/` 包已删除，不再存在 shim。
-
-Bot 通过 Docker / 本地长驻进程交互：引擎调用 `decide(player_idx, request)` →
-BinaryRunner 往 bot 的 stdin 写一行 JSON 请求、从 stdout 读一行 JSON 响应。
+Bot 通过 Docker / 本地长驻进程交互：引擎向 Bot 的 stdin 写一行 JSON 请求，从 Bot 的 stdout 读一行 JSON 响应，循环推进每一手。
 
 ## 裁判源码公开可查
 
 裁判是**公开可审计的规则定义**——区别于 Bot 的私有黑盒二进制（保护玩家智力成果），
 裁判源码对**全体玩家透明**。任何访客（无需登录）都可在网页「裁判」页查看每款游戏
-裁判引擎（`engine.py`）、行协议（`protocol.py`）、结果契约（`result.py`）的完整明文源码：
+裁判引擎、行协议、结果契约的完整明文源码：
 
 - 网页：顶部导航「裁判」页（`/judges`）
 - API：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（源码全文）
@@ -113,9 +110,9 @@ def _box_completed(board, bx, by):
 raise 最小总额 = 2× 当前下注（首次 = 2bb）：
 
 ```python
-# raise 下限（逻辑示意；实现见 games/holdem/engine.py）
+# raise 下限（逻辑示意）
 def min_raise_to(current_bet, bb):
     return bb if current_bet == 0 else current_bet * 2
 ```
 
-详见 [运行时](#/wiki?slug=runtime)、[协议](#/wiki?slug=protocol)、各游戏 wiki 页。
+详见 [协议](#/wiki?slug=protocol)、各游戏 wiki 页。

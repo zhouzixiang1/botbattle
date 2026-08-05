@@ -14,11 +14,5 @@
 
 ## 后端
 
-- `store.contest_bracket(contest_id)`：JOIN bots + users + matches，返回带名 + winner 的对阵。
-- `store.contest_entries_named(contest_id)`：JOIN bots + users，返回带名的报名。
-- `GET /api/contests/{id}`：entries 与 pairings 改用 named 版本；standings 补 `bot_name`。
-- `GET /api/contests/{id}/bracket`（公开）：对阵图聚合数据。
-
-## 数据基础
-
-`contest_pairings` 表已有 `stage_idx/round_num/group_id/bracket_slot/match_id`（JOIN matches 取 winner）—— 足以支撑前端画单败淘汰 bracket 树与瑞士/循环轮次分组表。`contest_entries` 有 `seed/group_id/eliminated`。
+- `GET /api/contests/{id}`：报名列表、积分榜、对阵均显示 Bot 名 / 用户名。
+- `GET /api/contests/{id}/bracket`（公开）：对阵图聚合数据（含 `stage_idx/round_num/group_id/bracket_slot/match_winner`），便于前端画 bracket 树。

@@ -211,9 +211,16 @@ def test_api_versions_owner_only(tmp_path):
             files={"file": ("bot.bin", f, "application/octet-stream")},
         )
     bot_id = r.json()["bot"]["id"]
-    # other 看不到 mvu 的 bot 版本
+    # 非 owner 现在可看脱敏版本（供挑战页版本选择）：200 + 无 binary_path/runtime_mode
     r2 = client.get(f"/api/bots/{bot_id}/versions", headers=h_other)
-    assert r2.status_code == 403
+    assert r2.status_code == 200
+    vers = r2.json()["versions"]
+    assert len(vers) >= 1
+    # 脱敏：不应含 binary_path / runtime_mode
+    assert all("binary_path" not in v for v in vers), "非 owner 不应见 binary_path"
+    assert all("runtime_mode" not in v for v in vers), "非 owner 不应见 runtime_mode"
+    # 但应含 id（挑战页版本选择需要）+ version + upload_note
+    assert all("id" in v and "version" in v for v in vers)
 
 
 # ── orchestrator 透传 ────────────────────────────────────────────────

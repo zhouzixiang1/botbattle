@@ -89,7 +89,7 @@ interface Pairing {
   round_num?: number
   bracket_slot?: number | null
   bot_a_id: number
-  bot_b_id: number
+  bot_b_id: number | null
   match_id?: string | null
   status?: string
   stage_idx?: number
@@ -578,9 +578,14 @@ function PairingFoldedList({ pairings }: { pairings: Pairing[] }) {
                       {p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`}
                     </Link>
                     <span className="text-muted-foreground">vs</span>
-                    <Link to={`/bot/${p.bot_b_id}`} className={`hover:text-primary ${w === 1 ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'}`}>
-                      {p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
-                    </Link>
+                    {p.bot_b_id == null ? (
+                      // 轮空（bye placeholder）：无对手，渲染为 muted 非链接文本而非 /bot/null
+                      <span className="italic text-muted-foreground">轮空 (bye)</span>
+                    ) : (
+                      <Link to={`/bot/${p.bot_b_id}`} className={`hover:text-primary ${w === 1 ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'}`}>
+                        {p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
+                      </Link>
+                    )}
                     <StatusBadge status={p.status || 'pending'} />
                     {p.match_id && (
                       <Button asChild variant="ghost" size="sm" className="ml-auto gap-1 text-primary">

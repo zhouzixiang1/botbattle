@@ -10,14 +10,14 @@
 
 ## 本平台流程
 
-1. **上传 Bot**（选择 `game_id`：holdem / gomoku / pencil）。
-2. **挑战**：选你的 Bot + 对手方式（见下）→ 创建 `match` → 引擎跑完。
-   - **搜索用户**：`/api/users?q=` 搜用户 → 选其该游戏 public Bot。
+1. **上传 Bot**（选择游戏类型：holdem / gomoku / pencil）。
+2. **挑战**：选你的 Bot + 对手方式（见下）→ 创建对局 → 引擎跑完。
+   - **搜索用户**：搜用户 → 选其该游戏的公开 Bot。
    - **自博弈**：选你自己的另一只同游戏 Bot（同一 owner 两不同 Bot 对战）。
    - **人类亲自上场**：你作为人类玩家对战 Bot（见「人类对战」）。
-3. **赛事**：按[赛制模板](#/wiki?slug=contest-format)生成 pairing，同样走 challenge 通道，带 `contest_id`；每场对局参数由模板的 `match_config`（holdem→hands、pencil→n_dots）决定。
+3. **赛事**：按[赛制模板](#/wiki?slug=contest-format)生成对阵，带 `contest_id`；每场对局参数由模板的 `match_config`（holdem→hands、pencil→n_dots）决定。
 4. **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`，见下）。
-5. **观赛**：SSE `/api/matches/:id/events`；回放读 `match_replays.events_json`。
+5. **观赛**：进入对局页实时观赛或回放完整对局。
 6. **评分**：Glicko-2；排行榜可按游戏过滤。
 
 ## 对局类型（match_type）
@@ -28,62 +28,46 @@
 | `ladder` | 系统闲时自动对局 | ✅ 是 |
 | `contest` | 赛事内对局 | ❌ 否（仅计入赛事内 stage 积分） |
 | `human` | 人类 vs Bot | ❌ 否（人类无评分） |
-| `table` | **schema 预留**（未实现业务路径） | — |
 
-> **评分隔离**：`contest` 只计入赛事内积分榜；`human` 不计 Glicko（人类无 rating 行）；
-> `challenge`/`ladder` 更新全局评分。`table` 仅出现在 DB 约束与常量中，当前无建桌/占位 API。
+> **评分隔离**：`contest` 只计入赛事内积分榜；`human` 不计 Glicko（人类无评分）；
+> `challenge`/`ladder` 更新全局评分。
 
 ## 人类对战（match_type=human）
 
 登录用户可作为**人类玩家**亲自上手对战 Bot（挑战页选「人类亲自上场」）：
 
-- 建局：`POST /api/matches/human`（`bot_id` + `human_seat` 0/1）→ 跳 `/play/:id`。
-- 双向通道：**WebSocket** `/api/matches/:id/play`（鉴权：query `token` 或 cookie）。
-  - 推送 `snapshot`（历史）+ 事件流 + `your_turn`（轮到人类，含 request）+ `match_end`。
-  - 人类回传落子：棋类 `{x,y}`、扑克 `{a:"f|c|k|r|all", x?:raise-to}`。
-- **`your_turn` 持久化**：`your_turn` 事件**同时进入实时推送与持久化事件流（snapshot 历史）**，
-  且发出即落库（不等下一个 checkpoint）。这样前端重连 / React StrictMode 重挂载 / 迟到连接时，
-  能从 snapshot 历史正确恢复「轮到我」状态（前端 `myTurn` 由事件流推导，不依赖瞬时消息）。
-- **资源**：走独立并发信号量（默认 `human_max_concurrent=4`，不占 Bot 半负载槽）；
-  人类决策超时 `human_action_timeout`（默认 120s，超时回安全默认：扑克 fold / 棋类判负）；
-  每用户同时进行的人类局 ≤ 1。
-- **连续超时自动中止**：人类连续 `human_max_consecutive_timeouts`（默认 5）次不响应即中止对局
-  （`aborted`，reason=`human_inactive`，广播 `error`），避免扑克 70 手最长 2.3 小时死磕占用人类槽、
-  锁死 per-user 名额。棋类一手非法即结束，不会累积到此阈值。对局异常/中止时**无条件释放** per-user 锁。
-- **Bot 崩溃**：人类局中 Bot 启动失败或进程崩溃 → 对局 `aborted`（reason=`bot_crashed`）并广播 `error`，
-  而非吞成默认动作死磕数小时。普通可恢复决策错误仍按规则（扑克 fold / 棋类判负）。
+- 建局：挑战页选你的 Bot + 「人类亲自上场」+ 选择座位（先手/后手）→ 进入对局页。
+- **实时对战**：人类每回合在棋盘上点击落子（棋类）或点按 Fold/Check/Call/Raise/Allin 按钮（扑克），与 Bot 实时对战。
+- **断线可恢复**：中途刷新或重连不会丢「轮到我」状态，可从历史继续。
+- **决策超时**：人类决策超时会回退到安全默认动作（扑克 fold / 棋类判负）；连续多次不响应会自动中止对局，避免长时间挂机。
+- **Bot 崩溃**：人类局中若 Bot 启动失败或崩溃，对局会被中止（而非死磕到底）；普通可恢复决策错误仍按规则（扑克 fold / 棋类判负）。
 - 不计 Glicko-2 天梯。
 
 > 棋类棋盘可点击落子；扑克提供 Fold/Check/Call/Raise/Allin 按钮栏。
 
-## 观赛视觉（canvas + GSAP）
+## 观赛视觉
 
-- **三游戏棋盘**（holdem / gomoku / pencil）的**观赛 / 回放 / 人类对战**现已统一改为 **canvas + GSAP 动画渲染**（照搬 botzone.org.cn）：
-  - **holdem**：发牌翻面、动作浮字、本轮下注 / 弃牌 / 全押标记、筹码与 **累计净筹码**、每手结算叠层；`revealMode=showdown` 时人类对战仅亮己方底牌。对局结束显示胜者名。
+- **三游戏棋盘**（holdem / gomoku / pencil）的**观赛 / 回放 / 人类对战**采用动画渲染（对齐 botzone.org.cn）：
+  - **holdem**：发牌翻面、动作浮字、本轮下注 / 弃牌 / 全押标记、筹码与 **累计净筹码**、每手结算叠层；人类对战仅亮己方底牌。对局结束显示胜者名。
   - **gomoku**：落子动画 + 最后一手标记；图例含 **BOT 名**。
   - **pencil**：未占边灰色细线、已占边着色动画、闭合格归属字；图例含双方名与比分。
-  - 均由 `GameCanvas` + GSAP timeline 驱动。
-- **座位身份**（`matches.seat_info`）：REST / SSE snapshot / 人类 WS 统一 `get_match_detailed` + 嵌套 `bot_a/bot_b`；人类座改写为 **真人用户名**（`is_human`）。
-- **统一对局页** `/match/:id`：实时 SSE DVR + 回放（旧 `/watch/:id` 与 `/arena?id=` 路径已删除，无重定向，请使用 `/match/:id` 或从 `/history` 进入）。
-  - 顶栏：**胜者（名）**、**双方**、德州累计 / 点格比分、**match_type** 徽章、中止 reason；进入页 `POST /view` 计浏览。
-  - **人类对战** `/play/:id`：传 seats、结束胜者摘要、德州合法按钮（读 `your_turn.request`）、回合倒计时提示。
+- **座位身份**：观赛 / 回放中显示双方 **Bot 名**；人类对战的人类座显示 **真人用户名**。
+- **统一对局页** `/match/:id`：实时观赛 + 回放（请使用 `/match/:id` 或从 `/history` 进入）。
+  - 顶栏：**胜者（名）**、**双方**、德州累计 / 点格比分、**match_type** 徽章、中止原因。
+  - **人类对战** `/play/:id`：实时对战页，提供合法操作按钮与回合倒计时提示。
 
 ## 状态
 
 `pending` → `running` → `completed` | `aborted`
 
-- `pending`：已创建 match 行，尚未获取并发信号量。
-- `running`：已获信号量、引擎正在跑（DB `status='running'`，对应 admin 面板「进行中」计数）。
-- `completed`：引擎跑完，已写 `winner / earnings / replay`。
-- `aborted`：异常（容器 OOM、双方崩溃等）。
+- `pending`：已创建对局，排队等待并发槽。
+- `running`：引擎正在跑。
+- `completed`：对局正常结束，已记录胜者与回放。
+- `aborted`：异常中止（如容器 OOM、Bot 崩溃等）。
 
-> **孤儿对局自愈**：服务非正常退出（崩溃/重启）后，DB 里残留的 `running` 记录已无对应内存协程（尤其人类对局的 `_human_turns` Future）。服务启动时 `lifespan` 调 `Store.recover_orphan_matches()`，把所有残留 `running` 统一标为 `aborted`（`reason=orphan_after_restart`），避免永久卡死与并发/活跃用户计数泄漏。
+> **孤儿对局自愈**：服务重启后，残留的 `running` 对局会被自动标记为 `aborted`，不会永久卡死。
 
-SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看），之后逐事件广播；
-空闲时 25 秒发一次 `ping` 保活；`match_end` / `error` 后流结束。回放事件流增量落盘
-（`settle` / `hand_start` / `match_end` / `move` / `match_start` 或每 5 个事件）。
-人类对局中 `your_turn` 额外**发出即落库**（不经此 checkpoint，由 `human_decide` 直接写），保证前端重连可恢复。
-每个订阅者的事件队列 `maxsize=2000`（Bot 决策极快时减少丢事件）；满时丢最旧事件保最新。
+观赛：进入对局页先收到一份当前事件历史快照（迟到者可补看已发生的局面），之后实时推送新事件，直到对局结束。回放可随时观看完整对局过程。
 
 ## 错误与后果
 
@@ -100,4 +84,4 @@ SSE 观赛：先推送 `snapshot`（含当前事件历史，迟到者可补看�
 > 中途崩溃由各游戏引擎捕获并产出正常 `MatchResult`（计分判负）；启动期失败才由编排层分支：
 > 非赛事 abort / 赛事技术判负。不把崩溃吞成「整场默认 fold 继续跑完」。
 
-资源限制详见 [运行时](#/wiki?slug=runtime)。
+资源限制见 [Bot 开发指南](#/wiki?slug=bot-dev) §6。

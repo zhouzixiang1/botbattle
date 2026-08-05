@@ -140,7 +140,7 @@ BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 - `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时）。
 - `logs/audit.log`：安全审计（登录/注册/改密/上传/管理操作等）。
 - `logs/web.log`：uvicorn 启动 stdout。
-- **admin「日志」Tab**：`GET /api/admin/logs?file={app|access|audit}`（文件参数白名单）。详见 [wiki/SECURITY.md](../wiki/SECURITY.md)。
+- **admin「日志」Tab**：`GET /api/admin/logs?file={app|access|audit}`（文件参数白名单）。详见 [SECURITY.md](./SECURITY.md)。
 
 ### 6.3 测试种子账号
 ```bash

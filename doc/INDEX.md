@@ -18,6 +18,10 @@
 | 文档 | 说明 |
 |------|------|
 | [PRELIM_FINAL_PLAN.md](./PRELIM_FINAL_PLAN.md) | 预赛/决赛体系实施计划草稿（已落地；现行以 wiki/CONTEST_FORMAT 为准） |
+| [SECURITY.md](./SECURITY.md) | 公网加固运维细节：三文件日志、IP 透传（nginx/frp）、限流、安全响应头、相关环境变量 |
+| [LOADTEST.md](./LOADTEST.md) | QA 压测脚本 `scripts/load_test.py`：批量用户 + 全端点覆盖（含 DB-direct 播种） |
+| [RUNTIME.md](./RUNTIME.md) | 运维侧运行时：Docker 硬限制加固参数、auto_match 配置、admin 运行时配置端点 |
+| [JUDGE_CODE.md](./JUDGE_CODE.md) | 各游戏裁判引擎代码位置、契约、热调参数与改动工作流（面向平台开发者） |
 
 ## doc/ 与 wiki/ 的分工
 

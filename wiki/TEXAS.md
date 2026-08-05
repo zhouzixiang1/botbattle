@@ -64,7 +64,7 @@
 
 Botzone 原页：播放器、裁判程序、Python 样例程序：**dhbloo**。
 
-本平台：引擎 `MatchSession`、紧凑行协议与观赛 canvas 由 Botbattle 维护。
+本平台：裁判引擎、紧凑行协议与观赛 canvas 由 Botbattle 维护。
 
 ---
 
@@ -145,7 +145,7 @@ Botzone 上本游戏与其它游戏一样使用 [Bot 交互](https://wiki.botzon
 
 Botzone 默认：**请注意程序有计算时间限制，每步要在 1 秒内完成！**
 
-本平台：整场**长驻**进程 + 一行 JSON；默认决策超时由管理员配置（常见默认 **60s**）。超时 / 非法动作 → **fold**；对局中途进程崩溃 / EOF → **计分判负**（`completed`）；启动失败见 [对局](#/wiki?slug=match)。详见 [运行时](#/wiki?slug=runtime)、[协议规范](#/wiki?slug=protocol)。
+本平台：整场**长驻**进程 + 一行 JSON；默认决策超时由管理员配置（常见默认 **60s**）。超时 / 非法动作 → **fold**；对局中途进程崩溃 / EOF → **计分判负**（`completed`）；启动失败见 [对局](#/wiki?slug=match)。详见 [协议规范](#/wiki?slug=protocol)。
 
 ### 具体交互内容
 
@@ -410,12 +410,12 @@ LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<
 
 ### 裁判与本地自测
 
-服务端 `MatchSession`（`games/holdem/engine.py`）：从 2 张底牌 + 最多 5 张公共牌取**最佳五牌**比较；非法 / 超时 → fold；对局中途进程崩溃 → 计分判负（本手全筹码给对手后结束）；牌力顺序与 [§牌型和大小](#牌型和大小) 一致（含 A-5 轮子）。
+服务端裁判：从 2 张底牌 + 最多 5 张公共牌取**最佳五牌**比较；非法 / 超时 → fold；对局中途进程崩溃 → 计分判负（本手全筹码给对手后结束）；牌力顺序与 [§牌型和大小](#牌型和大小) 一致（含 A-5 轮子）。
 
 本地自测：
 
 - [`samples/judges/holdem_judge.py`](../samples/judges/holdem_judge.py) — 七牌最佳五牌、raise 合法性
-- 引擎实现：`bzplat/backend/games/holdem/engine.py`、`cards.py`、`protocol.py`
+- 裁判源码对全体玩家公开（见 [裁判](#裁判) / Wiki「裁判」页）
 
 观赛 / 回放事件：`hand_start` / `deal_hole` / `deal_board` / `action` / `settle` / `match_end` 等，见 [对局](#/wiki?slug=match)。
 

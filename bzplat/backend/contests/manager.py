@@ -493,6 +493,13 @@ class ContestManager:
             specs = generate_stage_pairings(stage, bot_ids, swiss_round=1)
         else:
             specs = generate_stage_pairings(stage, bot_ids)
+        # specs 为空（如 single_elimination 收到 <2 bot → 无对手）：阶段无对阵 →
+        # 直接 finished（防 maybe_finish 反复尝试空阶段）。
+        if not specs:
+            self.store.update_contest(
+                contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
+            )
+            return
 
         # 逐场排期：schedule_immediately 时全 now；否则按 base + round stagger。
         # base = starts_at（仅第一阶段用赛事开赛时间）；后续阶段（stage_idx>0）用 now

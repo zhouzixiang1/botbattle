@@ -15,7 +15,7 @@
 - **启用/停用**：`POST /api/bots/{id}/active`
 - **版本**：打开版本管理对话框（上传新版本 / 查看历史 / 回滚）
 - **编辑**：内联表单改 display_name/description（`PATCH /api/bots/{id}`）
-- **删除**：软删（is_active=0，`DELETE /api/bots/{id}`）
+- **删除**：软删除（`DELETE /api/bots/{id}`，Bot 从列表移除但历史对局保留）
 - Bot 名链接到 Bot 详情页。
 - 每张卡片显示当前 **Botzone 运行模式**（`longrunning` / `traditional`）徽章 + 版本号。
 
@@ -35,9 +35,9 @@
 
 - **上传新版本**：`POST /api/bots/{id}/versions`（带 `runtime_mode` + 文件）。新版本成为当前版本。
 - **查看历史**：`GET /api/bots/{id}/versions`（owner / admin 可见；含每版本的 runtime_mode、大小、时间、备注）。
-- **回滚到此版本**：`POST /api/bots/{id}/versions/{version}/activate`。不删除其他版本，仅切换 current_version + 镜像（binary_path / runtime_mode / ...）。回滚时该版本的 runtime_mode 一并恢复。
+- **回滚到此版本**：`POST /api/bots/{id}/versions/{version}/activate`。不删除其他版本，仅切换当前生效版本。回滚时该版本的运行模式（runtime_mode）一并恢复。
 
-> 版本管理用于迭代 Bot 而不丢失旧版本。赛事对局冻结到报名时的版本（`contest_pairings.bot_a_version_id`），不受上传新版本影响。
+> 版本管理用于迭代 Bot 而不丢失旧版本。赛事对局冻结到报名时的版本，不受上传新版本影响。
 
 > 私有 Bot 功能已下线——所有 Bot 默认且仅处于公开状态，不再有公开/私有切换。
 
@@ -46,7 +46,7 @@
 | 端点 | 说明 |
 |------|------|
 | `PATCH /api/bots/{id}` | owner 改 display_name/description/is_active（受限白名单；非 owner 403） |
-| `DELETE /api/bots/{id}` | owner 软删（is_active=0；非 owner 403） |
+| `DELETE /api/bots/{id}` | owner 软删（非 owner 403） |
 | `POST /api/bots` | 上传新 Bot（带 `runtime_mode` Form） |
 | `POST /api/bots/{id}/versions` | owner 上传新版本（带 `runtime_mode`） |
 | `GET /api/bots/{id}/versions` | owner/admin 查版本历史（非 owner 403） |
