@@ -222,17 +222,20 @@ export default function Challenge() {
           )}
         </button>
 
-        {/* 版本选择：bot 选定后展示。空串哨兵 = 当前/激活版本。 */}
+        {/* 版本选择：bot 选定后展示。
+            「当前/激活版本」用 'current' 哨兵而非空串——Radix Select 把 value=""
+            当作未选中/占位状态，空串会导致选中后触发器仍显示 placeholder
+            而非「当前版本 (vN)」（审计 P1-C）。与项目 Select 规范一致（空值用非空哨兵）。 */}
         {seat.bot && (
           <Select
-            value={seat.versionId === undefined ? '' : String(seat.versionId)}
-            onValueChange={(v) => setSeatVersion(slot, v === '' ? undefined : Number(v))}
+            value={seat.versionId === undefined ? 'current' : String(seat.versionId)}
+            onValueChange={(v) => setSeatVersion(slot, v === 'current' ? undefined : Number(v))}
           >
             <SelectTrigger className="h-9 w-full">
               <SelectValue placeholder="选择版本" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="">
+              <SelectItem value="current">
                 {vc?.current !== undefined ? `当前版本 (v${vc.current})` : '当前版本'}
               </SelectItem>
               {(vc?.rows || []).map((vr) => {
