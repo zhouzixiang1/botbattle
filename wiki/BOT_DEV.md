@@ -179,27 +179,14 @@ x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
 
 你的 Bot 在受限的沙箱里执行，请确保程序不依赖被禁用的能力：
 
-- **无网络**：容器以 `--network=none` 启动，任何联网调用都会失败。
-- **资源限制**：内存上限（默认 512MB）、CPU（默认 1 核）。
-- **只读根文件系统** + 仅 `/tmp` 可写且 **可执行**（`--tmpfs /tmp:rw,exec,nosuid`；PyInstaller 自解压 / 动态链接需可执行映射；勿依赖在 `/tmp` 外写文件）。
-- **最小权限**：`--cap-drop=ALL`、`--security-opt no-new-privileges`、以非 root 用户（65534）运行。
-- **无 setuid**：禁止提权。
+- **无网络**：沙箱完全断网，任何联网调用都会失败。
+- **资源限制**：内存上限 **512MB**、CPU **1 核**。
+- **磁盘**：根文件系统只读，**仅 `/tmp` 可写且可执行**（如需写临时文件或 PyInstaller 自解压请放 `/tmp`，勿依赖在 `/tmp` 外写文件）。
+- **最小权限**：以非 root 用户运行，无提权能力。
 
 > 结论：Bot 应是**纯计算**程序，只读 stdin、写 stdout，不要尝试联网或依赖持久可写目录。
 
 ## 7. 本地调试
-
-无需 Docker 也能在本地跑同架构 ELF（平台支持「本地执行」模式）：
-
-```bash
-# 在项目根目录
-export BZ_BOT_LOCAL=1
-scripts/platform-ctl.sh start
-```
-
-设置 `BZ_BOT_LOCAL=1` 后，平台直接在本机用子进程运行你上传的 ELF（绕过 Docker），方便快速调试。正式部署/比赛时应使用 Docker 沙箱。
-
-### 直接手测你的 Bot
 
 你也可以脱离平台，手动给 Bot 喂请求行来验证输出（Botzone 信封，LongRunning 首回合）：
 
@@ -238,4 +225,4 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 
 ## 10. 运行时资源
 
-Bot 在 Docker 中运行：`--cpus=1`、`--memory=512m`、无网络。决策超时默认 60s。详见[运行时与资源限制](#/wiki?slug=runtime)。
+Bot 在 Docker 中运行：单核、512MB 内存、无网络。决策超时默认 60s。

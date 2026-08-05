@@ -98,10 +98,15 @@ export default function MatchViewer() {
                 const hist = Array.isArray(ev.events) ? (ev.events as RawEvent[]) : []
                 setEvents(hist.slice(-4000))
                 setStepIdx(-1); setPlaying(true)
-              } else {
-                setEvents((prev) => [...prev, ev])
-              }
-              if (ev.type === 'match_end' || ev.type === 'error') {
+              } else if (ev.type === 'match_end' || ev.type === 'error') {
+                // match_end/error 时游标停当前位置（不跳尾）：
+                // 在追加该事件前，把游标钉在当时看到的最后一条；停止自动播放。
+                // 否则 stepIdx=-1(贴尾) 会因 match_end 入列 total+1 而跳到尾部结局。
+                setEvents((prev) => {
+                  if (prev.length > 0) setStepIdx(prev.length - 1)
+                  return [...prev, ev]
+                })
+                setPlaying(false)
                 // 回写胜者/earnings 到 match，避免顶栏一直「—」
                 setMatch((prev) => {
                   if (!prev) return prev
@@ -121,6 +126,9 @@ export default function MatchViewer() {
                   return patch
                 })
                 setStatus(String(ev.type)); es?.close()
+              } else {
+                // 常规事件（落子/判决等）：追加
+                setEvents((prev) => [...prev, ev])
               }
             } catch { /* ignore */ }
           }

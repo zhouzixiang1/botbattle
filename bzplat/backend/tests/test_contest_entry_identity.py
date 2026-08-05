@@ -165,7 +165,7 @@ def test_bot_active_references_detects_pending_match(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("user1a", "u1a@e.com", "x")["id"]
     b = s.create_bot(u, "bot1a", binary_path="/tmp", format="elf", game_id="holdem")["id"]
-    s.create_match("m-active", b, b, owner_id=u, total_hands=1,
+    s.create_match("m-active", b, b, owner_id=u, match_config={"hands": 1},
                    match_type="challenge", game_id="holdem")
     refs = s.bot_active_references(b)
     assert refs["matches"] >= 1, "pending 对局应被检测到"
@@ -208,7 +208,7 @@ def test_admin_delete_bot_blocked_by_api_when_active(tmp_path):
     store.update_user(u, email_verified=1)
     b = store.create_bot(u, "delbotX", binary_path="/tmp", format="elf", game_id="holdem")["id"]
     # pending 对局 → 活跃引用
-    store.create_match("m-api-active", b, b, owner_id=u, total_hands=1,
+    store.create_match("m-api-active", b, b, owner_id=u, match_config={"hands": 1},
                        match_type="challenge", game_id="holdem")
     _, atok = app.state.auth.authenticate("deladmin", "pw123456")
     h = {"Authorization": f"Bearer {atok}"}

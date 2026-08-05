@@ -2166,8 +2166,10 @@ class Store:
         人类对局的 _human_turns），不清理会永久卡 running、泄漏并发与活跃用户计数。
         遍历三张 per-game 表清理。返回受影响行数。
 
-        同时清理孤儿 pending 赛事对局（contest_id=NULL AND match_type='contest' AND
-        status='pending'）——e2e 测试残留等无主 pending 会永久卡「排队中」。
+        同时清理孤儿 pending 赛事对局：
+        - contest_id=NULL AND match_type='contest' AND status='pending'（e2e 残留等无主）；
+        - contest 已终态（finished/cancelled）但仍 pending 的赛事对局（排期积压后赛事已结束，
+          这些 pending 永不会被打，堵 orchestrator._tasks → auto_matcher 误判不空闲）。
         """
         from bzplat.backend.store.schema import STATUS_ABORTED
 
@@ -2202,6 +2204,24 @@ class Store:
                         (STATUS_ABORTED,),
                     )
                     n += cnt2
+                # 清理已终态赛事的残留 pending 对局（赛事 finished/cancelled 但 match 仍 pending）
+                row3 = c.execute(
+                    f"SELECT COUNT(*) FROM {tbl} m "
+                    f"WHERE m.status='pending' AND m.contest_id IS NOT NULL "
+                    f"AND m.contest_id IN (SELECT id FROM contests "
+                    f"WHERE status IN ('finished','cancelled'))"
+                ).fetchone()
+                cnt3 = int(row3[0]) if row3 else 0
+                if cnt3:
+                    c.execute(
+                        f"UPDATE {tbl} SET status=?, reason='contest_ended_pending_orphan', "
+                        "ended_at=datetime('now') "
+                        f"WHERE status='pending' AND contest_id IS NOT NULL "
+                        f"AND contest_id IN (SELECT id FROM contests "
+                        f"WHERE status IN ('finished','cancelled'))",
+                        (STATUS_ABORTED,),
+                    )
+                    n += cnt3
             return n
 
     def reset_dead_contest_pairings(self) -> int:
@@ -2895,8 +2915,9 @@ class Store:
                 params.append(game_id)
             sql += " ORDER BY created_at DESC"
             if page is not None:
-                rows, total = _paginate(c, sql, tuple(params), page=page, per_page=per_page)
-                return {"items": rows, "page": page, "per_page": per_page, "total": total}
+                pp = max(1, min(200, int(per_page)))
+                rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
+                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
             return [_row(r) for r in c.execute(sql, params)]
 
     # ── contest_entries ───────────────────────────────────────

@@ -386,17 +386,33 @@ async def upload_bot_version(
 
 @router.get("/api/bots/{bot_id}/versions")
 def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_user)):
-    """Bot 拥有者查看自己 Bot 的版本历史（MyBots 版本管理用）。
+    """Bot 版本列表。
 
-    含每版本的 runtime_mode（回滚时恢复）。仅 owner 可见；非 owner 返回 403。
+    - owner/admin：完整版本信息（含 runtime_mode，回滚时恢复）。
+    - 非 owner（公开访客）：仅版本号 + 上传时间 + 备注（不含 binary_path/runtime_mode），
+      供挑战页版本选择（选某版本对战）。必须登录（挑战需登录）。
     """
     store = _store(request)
     bot = store.get_bot(bot_id)
     if not bot:
         raise HTTPException(404, "bot 不存在")
-    if bot["owner_id"] != user["id"] and user.get("role") != "admin":
-        raise HTTPException(403, "无权查看他人 Bot 的版本历史")
-    return {"versions": store.list_bot_versions(bot_id), "current_version": bot["current_version"]}
+    is_owner = bot["owner_id"] == user["id"] or user.get("role") == "admin"
+    versions = store.list_bot_versions(bot_id)
+    if not is_owner:
+        # 公开视图：脱敏（不含 binary_path/runtime_mode 等敏感字段）。
+        # 保留 id：挑战页选某版本对战时，my_bot_version_id/opponent_bot_version_id
+        # 解析的是 bot_versions.id（主键），非 version 号——故必须回传 id 才能选版本。
+        versions = [
+            {
+                "id": v.get("id"),
+                "version": v.get("version"),
+                "upload_note": v.get("upload_note") or "",
+                "created_at": v.get("created_at") or v.get("uploaded_at") or "",
+                "size_bytes": v.get("size_bytes") or 0,
+            }
+            for v in versions
+        ]
+    return {"versions": versions, "current_version": bot["current_version"]}
 
 
 @router.post("/api/bots/{bot_id}/versions/{version}/activate")
@@ -471,6 +487,10 @@ def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
 class ChallengeBody(BaseModel):
     my_bot_id: int
     opponent_bot_id: int
+    # 版本快照（可选）：指定各座位跑哪个版本。缺省/None=当前激活版本。
+    # 自博弈（my_bot_id == opponent_bot_id）允许——用于同 bot 新旧版本对比。
+    my_bot_version_id: int | None = None
+    opponent_bot_version_id: int | None = None
     # 对局级配置（如 {"hands":70}/{"n_dots":6}）；缺省/空用 spec.default_match_params。
     # 取代散落的 hands/n_dots 具名字段——第 4 游戏带新参数无需改本 Body。范围校验交
     # spec.validate_match_params（holdem 1-500；棋类忽略 hands）。
@@ -487,6 +507,8 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             user["id"],
             match_config=body.match_config,
             game_id=body.game_id,
+            bot_a_version_id=body.my_bot_version_id,
+            bot_b_version_id=body.opponent_bot_version_id,
         )
     except ValueError as e:
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
@@ -737,12 +759,14 @@ def list_comments(
     result = store.list_comments(
         target_type, target_id, limit=lim, page=page, per_page=per_page,
     )
-    count = store.comment_count(target_type, target_id)
     if isinstance(result, dict):
+        # 分页模式：total 已由 _paginate 算出，count 复用它避免冗余 COUNT 查询
         return {
             "comments": result["items"], "page": result["page"],
-            "per_page": result["per_page"], "total": result["total"], "count": count,
+            "per_page": result["per_page"], "total": result["total"],
+            "count": result["total"],
         }
+    count = store.comment_count(target_type, target_id)
     return {"comments": result, "count": count}
 
 
@@ -1470,10 +1494,11 @@ def admin_patch_bot(
 @router.delete("/api/admin/bots/{bot_id}")
 def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)):
     store = _store(request)
-    # 业务规则：硬删前检查活跃引用。bots 表 FK 是 ON DELETE SET NULL（matches，保历史）
-    # / ON DELETE CASCADE（contest_pairings）。硬删正在打(pending/running)对局或进行中赛事
-    # (published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→_apply_ratings(None)崩；
-    # ②把进行中赛事对阵表 CASCADE 删光。此时应改用停用（is_active=0，用户路径）。
+    # 业务规则：硬删前检查活跃引用。bots 表 FK 是 ON DELETE SET NULL（matches 与
+    # contest_pairings/entries 均为 SET NULL，保历史）。硬删正在打(pending/running)对局或
+    # 进行中赛事(published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→
+    # _apply_ratings(None) 崩；②进行中赛事对阵/报名的 bot_id 变 NULL→对阵表残缺。
+    # 此时应改用停用（is_active=0，用户路径）。
     refs = store.bot_active_references(bot_id)
     if any(v > 0 for v in refs.values()):
         raise HTTPException(
@@ -2018,8 +2043,8 @@ def admin_get_judges(request: Request, _admin=Depends(require_admin)):
             "params": params,
             "docstring": _engine_docstring(g["code_path"]),
         })
-    # 裁判代码说明（也经公开 WIKI_PAGES 的 judge-code slug 提供前端 wiki 阅读）
-    judge_code_path = _wiki_dir() / "JUDGE_CODE.md"
+    # 裁判代码说明（JUDGE_CODE.md 已移至 doc/——面向开发者；玩家经 /api/judges/{game}/source 看源码）
+    judge_code_path = _wiki_dir().parent / "doc" / "JUDGE_CODE.md"
     markdown = (
         judge_code_path.read_text(encoding="utf-8") if judge_code_path.is_file() else ""
     )
@@ -2192,7 +2217,6 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "站内文档导航与 Botzone 差异总览"},
     {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "紧凑 JSON 对局协议、字段、卡牌编码、规则"},
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
-    {"slug": "runtime", "file": "RUNTIME.md", "title": "运行时与资源限制", "summary": "Docker CPU/内存、超时、半负载并发与 Botzone 差异"},
     {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议、样例与本平台对照"},
     {"slug": "gomoku-swap1", "file": "GOMOKU_SWAP1.md", "title": "一手交换五子棋", "summary": "Gomoku-Swap1 简介（规则正文待补）"},
     {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=11 规则、交错网格、pass 连走与协议"},
@@ -2209,9 +2233,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "settings-mybots", "file": "SETTINGS_MYBOTS.md", "title": "设置与 MyBots", "summary": "个人设置中心 + 我的 Bot 管理"},
     {"slug": "tier", "file": "TIER.md", "title": "段位与排名趋势", "summary": "段位称号曲线 + 段位趋势"},
     {"slug": "xp-level", "file": "XP_LEVEL.md", "title": "经验与等级", "summary": "XP/level 累积、升级与 gating"},
-    {"slug": "loadtest", "file": "LOADTEST.md", "title": "压测", "summary": "大规模系统压测脚本与用法"},
-    {"slug": "security", "file": "SECURITY.md", "title": "安全与日志", "summary": "公网加固、三文件日志与审计"},
-    {"slug": "judge-code", "file": "JUDGE_CODE.md", "title": "裁判代码说明", "summary": "各游戏裁判引擎的代码位置、规则、可调参数与协议要点（对全体玩家公开）"},
+    # SECURITY/LOADTEST/RUNTIME/JUDGE_CODE 已移至 doc/（面向开发者/运维，非玩家）。
 ]
 
 

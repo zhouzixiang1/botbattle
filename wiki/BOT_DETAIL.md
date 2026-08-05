@@ -27,15 +27,8 @@
 | 端点 | 说明 |
 |------|------|
 | `GET /api/bots/{id}/profile` | Bot 档案聚合：bot 信息 + owner + rating + 胜率字段 |
-| `GET /api/bots/{id}/matches?limit=&offset=` | 该 Bot 的对局历史（复用 list_matches，含双方 bot 名） |
-| `GET /api/bots/{id}/opponents?limit=` | 该 Bot 对各对手的战绩（从 pair_stats 读，视角还原） |
-| `GET /api/bots/{id}/rating-history?limit=` | 评分变化时序（rating_history 表，画曲线用） |
+| `GET /api/bots/{id}/matches?limit=&offset=` | 该 Bot 的对局历史（含双方 bot 名） |
+| `GET /api/bots/{id}/opponents?limit=` | 该 Bot 对各对手的战绩 |
+| `GET /api/bots/{id}/rating-history?limit=` | 评分变化时序（画曲线用） |
 
-## 数据来源
-
-- **档案/胜率**：`ratings` 表（rating/rd/vol/wins/losses/draws/net_chips/matches_played）+ `bots` 表 + `users` 表 JOIN。
-- **对局历史**：`matches` 表（按 `bot_a_id=? OR bot_b_id=?` 查）。
-- **对手战绩**：`pair_stats` 表（`a_wins/a_losses/draws` 列，按 `(min_id, max_id)` 规范化存储，读取时按查询方向还原视角）。
-- **评分曲线**：`rating_history` 表（每次 `_apply_ratings` 落一条快照，每 bot 截断保留最近 200 条）。
-
-`pair_stats` 的胜负计数在对局完成评分更新时（`orchestrator._apply_ratings`）顺带累积——challenge/table/ladder 类型对局都会记录（contest 与 human 类型不更新评分，故不计入）。
+> 对手战绩的胜负计数在 challenge / ladder 类型对局完成时累积（contest 与 human 类型不更新评分，故不计入）。

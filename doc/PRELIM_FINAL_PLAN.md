@@ -155,7 +155,7 @@
 - 时间银行 + 动作硬超时 → `BotForfeitError` → match completed 技术负。
 - 有界调度泵；索引 `(contest_id, stage_idx, round_num, status)`；同 contest 推进加锁。
 - 预赛 summary 回放；决赛 full。
-- 资源：默认维持 `BOT_CPUS=1.0` 与现网一致；若改为 0.5 须同步 `limits.py`、BinaryRunner、AGENTS.md、wiki/RUNTIME.md（单独决策，不静默漂移）。
+- 资源：默认维持 `BOT_CPUS=1.0` 与现网一致；若改为 0.5 须同步 `limits.py`、BinaryRunner、AGENTS.md、doc/RUNTIME.md（单独决策，不静默漂移）。
 
 ---
 
@@ -186,7 +186,7 @@
 **文档**
 
 - `wiki/CONTEST_FORMAT.md`：双 contest、单阶段瑞士、决赛无报名上限、组织者名单、ETA。
-- `wiki/RUNTIME.md`：若调整 CPU/并发。
+- `doc/RUNTIME.md`：若调整 CPU/并发。
 - `doc/DESIGN.md`、`doc/TESTING.md`、`README.md` 能力一览。
 - 本文件在合并 P5 后可将状态改为「已落地」，并在 DESIGN 中吸收稳定架构段。
 

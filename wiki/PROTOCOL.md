@@ -222,16 +222,11 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 | 牌编码 | 0–51（`%4` 花色 0♥1♦2♠3♣） | 同左 |
 | 握手串 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
 
-**差异**：仅手数 70 vs 50（其余字段、计分、盲注、规则完全一致，标准 Botzone Bot 直接可跑）。资源与超时见 [运行时与资源限制](#/wiki?slug=runtime)。
+**差异**：仅手数 70 vs 50（其余字段、计分、盲注、规则完全一致，标准 Botzone Bot 直接可跑）。资源与超时见 [Bot 开发指南](#/wiki?slug=bot-dev)。
 
 ## 10. 平台与 Botzone 的运行模型差异
 
-Botzone 官方在 Traditional 模式下**每回合重启进程**（冷启动重放历史）；LongRunning 模式下进程长驻、平台用 SIGSTOP/SIGCONT 挂起唤醒。
-
-本平台的实现略有不同：
-- **进程整场长驻**：无论 Traditional 还是 LongRunning，Bot 进程对局期间都不重启（平台不主动 kill + restart）。Traditional Bot 每回合收到累积完整历史 `requests[]`，自己重放——即使进程不重启，重放逻辑仍正确。
-- **每回合一行**：平台每个决策点发一行、Bot 回一行（不依赖进程重启）。
-- 对 Bot 作者而言，Botzone 标准 Bot（无论两种模式）**可直接在本平台运行**，无需改动。
+本平台**完全兼容 Botzone 协议**：无论你的 Bot 使用 Traditional 还是 LongRunning 模式，**Botzone 标准 Bot 无需改动即可在本平台运行**。两种模式的输入输出信封格式（见第 1–2 节）与 Botzone 完全一致。
 
 ## 11. 棋类协议（Gomoku / Pencil）
 

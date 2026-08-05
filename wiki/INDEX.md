@@ -8,15 +8,14 @@
 |------|------|
 | [协议规范](#/wiki?slug=protocol) | **Botzone 标准协议**（信封、两模式、德州裸整数 response） |
 | [Bot 开发指南](#/wiki?slug=bot-dev) | 上传、调试、样例 |
-| [运行时与资源限制](#/wiki?slug=runtime) | Docker / 超时 / 并发 |
 | [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 |
 | [一手交换五子棋](#/wiki?slug=gomoku-swap1) | Swap1 简介 |
 | [点格棋 Pencil](#/wiki?slug=pencil) | 规则 + 交错网格 + pass |
 | [德州扑克](#/wiki?slug=texas) | 对齐 Botzone TexasHoldem2p 全文结构 + 本平台行协议 |
 | [裁判](#/wiki?slug=judge) | 裁判概念 |
 | [对局](#/wiki?slug=match) | 对局生命周期与错误码 |
-| [赛制模板](#/wiki?slug=contest-format) | 模板结构、阶段类型、match_config 与管理员配置 |
-| [赛事对阵图](#/wiki?slug=contest-bracket) | 对阵/报名显示 Bot 名 + bracket 数据端点 |
+| [赛制模板](#/wiki?slug=contest-format) | 模板结构、阶段类型、match_config |
+| [赛事对阵图](#/wiki?slug=contest-bracket) | 对阵/报名显示 Bot 名 + bracket |
 | [Bot 详情页](#/wiki?slug=bot-detail) | Bot 档案/对局历史/对手战绩/评分曲线 |
 | [用户主页与搜索](#/wiki?slug=user-profile) | 用户档案/战绩/Bot 列表 + 全局搜索 + 资料编辑 |
 | [通知系统](#/wiki?slug=notifications) | 站内通知 + 邮件提醒（铃铛/列表/偏好） |
@@ -25,8 +24,6 @@
 | [个人设置与 MyBots](#/wiki?slug=settings-mybots) | 设置中心（资料/密码/通知/收藏）+ MyBots 管理增强 |
 | [段位称号](#/wiki?slug=tier) | Rating→段位映射 + 排名变化趋势 |
 | [经验与等级](#/wiki?slug=xp-level) | XP 经验奖励 + Level 升级 + gating |
-| [压测](#/wiki?slug=loadtest) | 大规模系统压测脚本（批量用户 + 全端点覆盖） |
-| [安全与日志](#/wiki?slug=security) | 公网加固：三文件日志、IP 透传、限流、审计 |
 
 > 前端设计系统与组件库文档已迁入甲方交付文档 [`doc/DESIGN.md`](../doc/DESIGN.md) §5 前端架构。
 
@@ -46,5 +43,5 @@
 ## 参考资源
 
 - **参考裁判**（`samples/judges/`）：可在本地自测合法着 / 胜负 / 手牌评估的独立脚本，与服务端引擎逻辑一致。见 [裁判](#/wiki?slug=judge)。
-- **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`）。见 [运行时](#/wiki?slug=runtime)。
+- **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`）。
 - Bot 开发入门见 [Bot 开发指南](#/wiki?slug=bot-dev)。
