@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { fmtTime } from '../../lib/format'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
 
 interface User {
@@ -24,19 +25,26 @@ export default function UsersTab() {
   const [q, setQ] = useState('')
   const [busyId, setBusyId] = useState<number | null>(null)
   const [confirmDel, setConfirmDel] = useState<number | null>(null)
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 50
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const d = await apiGet<{ users: User[] }>('/api/admin/users')
+      const d = await apiGet<{ users: User[]; total?: number }>(
+        `/api/admin/users?page=${page}&per_page=${perPage}`,
+      )
       setUsers(d.users || [])
+      if (d.total !== undefined) setTotal(d.total)
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [page])
 
   useEffect(() => {
     void load()
@@ -100,7 +108,7 @@ export default function UsersTab() {
           placeholder="搜索用户名/邮箱"
           className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
         />
-        <span className="text-xs text-muted-foreground">共 {filtered.length} 人</span>
+        <span className="text-xs text-muted-foreground">共 {total || filtered.length} 人</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
         </div>
@@ -215,6 +223,7 @@ export default function UsersTab() {
         </table>
         {filtered.length === 0 && <EmptyState text="无用户" />}
       </div>
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
     </div>
   )
 }

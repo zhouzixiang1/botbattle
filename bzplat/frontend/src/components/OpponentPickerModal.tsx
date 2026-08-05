@@ -11,6 +11,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import Pagination from '@/components/Pagination'
 import { cn } from '@/lib/utils'
 
 export interface PickBot {
@@ -58,24 +59,30 @@ export default function OpponentPickerModal({
   const [selUser, setSelUser] = useState<User | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  // 分页（picker 弹窗每页较大，避免频繁翻页；q 仍为客户端过滤当前页）
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 50
 
-  // bot 列表（全部 / 我的 / 选定用户的）
+  // bot 列表（全部 / 我的 / 选定用户的）——服务端分页
   useEffect(() => {
     if (tab === 'users' && !selUser) return
     setLoading(true)
     const params = new URLSearchParams({ game_id: gameId })
     if (tab === 'mine') params.set('owner_id', String(myUserId ?? ''))
     if (tab === 'users' && selUser) params.set('owner_id', String(selUser.id))
-    apiGet<{ bots: PickBot[] }>(`/api/bots/public?${params.toString()}`)
+    params.set('page', String(page))
+    params.set('per_page', String(perPage))
+    apiGet<{ bots: PickBot[]; total?: number }>(`/api/bots/public?${params.toString()}`)
       .then((d) => {
         let rows = (d.bots || []).filter((b) => b.is_active !== 0)
         if (tab === 'mine') rows = rows.filter((b) => b.owner_id !== myUserId ? false : true)
-        if (q.trim()) rows = rows.filter((b) => (b.name + (b.display_name || '')).toLowerCase().includes(q.toLowerCase()))
         setBots(rows)
+        if (d.total !== undefined) setTotal(d.total)
       })
       .catch((e) => setError(errMsg(e, '加载失败')))
       .finally(() => setLoading(false))
-  }, [gameId, tab, selUser, q, myUserId])
+  }, [gameId, tab, selUser, page, myUserId])
 
   // 用户搜索
   useEffect(() => {
@@ -116,14 +123,14 @@ export default function OpponentPickerModal({
             value={q}
             onChange={(e) => {
               setQ(e.target.value)
-              if (tab === 'users') setSelUser(null)
+              if (tab === 'users') { setSelUser(null); setPage(1) }
             }}
             placeholder={tab === 'users' ? '搜索用户名…' : '搜索 Bot 名称…'}
           />
           <div className="mt-2 flex gap-2">
             {([['all', '全部 Bot'], ['mine', '我的 Bot（自博弈）'], ['users', '按用户搜索']] as [Tab, string][]).map(
               ([t, label]) => (
-                <button key={t} type="button" onClick={() => { setTab(t); setSelUser(null) }} className={tabBtn(t)}>
+                <button key={t} type="button" onClick={() => { setTab(t); setSelUser(null); setPage(1) }} className={tabBtn(t)}>
                   {label}
                 </button>
               ),
@@ -145,7 +152,7 @@ export default function OpponentPickerModal({
                   <li key={u.id}>
                     <button
                       type="button"
-                      onClick={() => setSelUser(u)}
+                      onClick={() => { setSelUser(u); setPage(1) }}
                       className="flex w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-accent"
                     >
                       <span className="text-sm font-medium text-foreground">{u.display_name || u.username}</span>
@@ -166,32 +173,41 @@ export default function OpponentPickerModal({
             </div>
           )}
 
-          {/* bot 列表 */}
+          {/* bot 列表（q 为客户端过滤，仅作用于当前页） */}
           {!(tab === 'users' && !selUser) && (
             loading ? (
               <Loading />
             ) : bots.length === 0 ? (
               <EmptyState text="无可选 Bot" icon={<BotIcon className="size-7 opacity-40" />} />
             ) : (
-              <ul className="divide-y divide-border">
-                {bots.map((b) => (
-                  <li key={b.id}>
-                    <button
-                      type="button"
-                      onClick={() => onPick(b)}
-                      className="flex w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-primary/5"
-                    >
-                      <span className="text-sm font-medium text-foreground">
-                        {b.display_name || b.name}
-                        {tab === 'mine' && <Badge variant="outline" className="ml-2 text-[10px]">自博弈</Badge>}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {b.owner_display || b.owner_name || `#${b.owner_id}`} · {b.format}/{b.os}-{b.arch}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="divide-y divide-border">
+                  {bots
+                    .filter((b) => {
+                      if (tab === 'users') return true
+                      if (!q.trim()) return true
+                      return (b.name + (b.display_name || '')).toLowerCase().includes(q.toLowerCase())
+                    })
+                    .map((b) => (
+                      <li key={b.id}>
+                        <button
+                          type="button"
+                          onClick={() => onPick(b)}
+                          className="flex w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-primary/5"
+                        >
+                          <span className="text-sm font-medium text-foreground">
+                            {b.display_name || b.name}
+                            {tab === 'mine' && <Badge variant="outline" className="ml-2 text-[10px]">自博弈</Badge>}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {b.owner_display || b.owner_name || `#${b.owner_id}`} · {b.format}/{b.os}-{b.arch}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+                <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+              </>
             )
           )}
         </div>

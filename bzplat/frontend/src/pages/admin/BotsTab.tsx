@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Tooltip, TooltipContent, TooltipTrigger } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
+import Pagination from '@/components/Pagination'
 
 interface Bot {
   id: number
@@ -37,19 +38,26 @@ export default function BotsTab() {
   const [expand, setExpand] = useState<number | null>(null)
   const [versions, setVersions] = useState<Version[]>([])
   const [busyId, setBusyId] = useState<number | null>(null)
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 50
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const d = await apiGet<{ bots: Bot[] }>('/api/admin/bots')
+      const d = await apiGet<{ bots: Bot[]; total?: number }>(
+        `/api/admin/bots?page=${page}&per_page=${perPage}`,
+      )
       setBots(d.bots || [])
+      if (d.total !== undefined) setTotal(d.total)
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [page])
 
   useEffect(() => {
     void load()
@@ -115,7 +123,7 @@ export default function BotsTab() {
           placeholder="搜索 Bot 名称"
           className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
         />
-        <span className="text-xs text-muted-foreground">共 {filtered.length} 个</span>
+        <span className="text-xs text-muted-foreground">共 {total || filtered.length} 个</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
         </div>
@@ -233,6 +241,7 @@ export default function BotsTab() {
         </table>
         {filtered.length === 0 && <EmptyState text="无 Bot" />}
       </div>
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
       {confirmDialog}
     </div>
   )

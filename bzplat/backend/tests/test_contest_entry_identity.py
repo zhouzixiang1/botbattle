@@ -157,3 +157,62 @@ def test_delete_bot_preserves_contest_data(tmp_path):
     srs = s.list_stage_results(c)
     assert len(srs) == 1, "删 bot 后 stage_result 应保留"
     s.close()
+
+
+def test_bot_active_references_detects_pending_match(tmp_path):
+    """store 层：bot_active_references 正确检测 pending 对局（业务规则在 API 层调用）。"""
+    s = _store(tmp_path)
+    u = s.create_user("user1a", "u1a@e.com", "x")["id"]
+    b = s.create_bot(u, "bot1a", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    s.create_match("m-active", b, b, owner_id=u, total_hands=1,
+                   match_type="challenge", game_id="holdem")
+    refs = s.bot_active_references(b)
+    assert refs["matches"] >= 1, "pending 对局应被检测到"
+    # 直接 store.delete_bot 仍允许（store 层不拦截，FK SET NULL 保历史）——业务规则在 API 层
+    assert s.delete_bot(b) is True
+    s.close()
+
+
+def test_bot_active_references_detects_running_contest(tmp_path):
+    """store 层：running 赛事的报名/对阵被检测，finished 的不阻拦。"""
+    s = _store(tmp_path)
+    org = s.create_user("orgA", "oa@e.com", "x", role="organizer")["id"]
+    u = s.create_user("user2a", "u2a@e.com", "x")["id"]
+    b = s.create_bot(u, "bot2a", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    c = s.create_contest("运行中赛A", organizer_id=org, game_id="holdem",
+                         stages_json='[{"key":"s1","type":"round_robin","scoring":"poker_3_1_0"}]')["id"]
+    s.add_contest_entry(c, u, b)
+    s.add_contest_pairing(c, b, b, stage_idx=0, stage_key="s1")
+    s.update_contest(c, status="running")  # 进行中
+    refs = s.bot_active_references(b)
+    assert refs["pairings"] >= 1, "running 赛事的报名/对阵应被检测到"
+    # finished 后不再阻拦
+    s.update_contest(c, status="finished")
+    refs2 = s.bot_active_references(b)
+    assert refs2["matches"] == 0 and refs2["pairings"] == 0, "finished 赛事历史不阻拦"
+    s.close()
+
+
+def test_admin_delete_bot_blocked_by_api_when_active(tmp_path):
+    """API 层：admin DELETE /api/admin/bots/{id} 对活跃引用的 bot 返回 409。"""
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+    from fastapi.testclient import TestClient
+
+    app = create_app(db_path=str(tmp_path / "delapi.db"))
+    store = app.state.store
+    admin = store.create_user("deladmin", "da@e.com", hash_password("pw123456"), role="admin")
+    store.update_user(admin["id"], email_verified=1)
+    u = store.create_user("deluser", "du@e.com", hash_password("pw123456"))["id"]
+    store.update_user(u, email_verified=1)
+    b = store.create_bot(u, "delbotX", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    # pending 对局 → 活跃引用
+    store.create_match("m-api-active", b, b, owner_id=u, total_hands=1,
+                       match_type="challenge", game_id="holdem")
+    _, atok = app.state.auth.authenticate("deladmin", "pw123456")
+    h = {"Authorization": f"Bearer {atok}"}
+    client = TestClient(app)
+    r = client.delete(f"/api/admin/bots/{b}", headers=h)
+    assert r.status_code == 409, f"活跃引用应 409 拒绝，实际 {r.status_code} {r.text}"
+    # bot 仍在（未删）
+    assert store.get_bot(b) is not None

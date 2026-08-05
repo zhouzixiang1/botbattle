@@ -1081,8 +1081,9 @@ class Store:
             )
 
     def list_users(
-        self, *, role: str | None = None, active_only: bool = False
-    ) -> list[dict]:
+        self, *, role: str | None = None, active_only: bool = False,
+        page: int | None = None, per_page: int = 50,
+    ) -> list[dict] | dict:
         with self._tx() as c:
             sql = "SELECT * FROM users WHERE 1=1"
             params: list[Any] = []
@@ -1092,6 +1093,10 @@ class Store:
             if active_only:
                 sql += " AND is_active=1"
             sql += " ORDER BY created_at"
+            if page is not None:
+                pp = max(1, min(200, int(per_page)))
+                rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
+                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
             return [_row(r) for r in c.execute(sql, params)]
 
     def search_users(self, q: str, *, limit: int = 20) -> list[dict]:
@@ -1300,8 +1305,52 @@ class Store:
             )
 
     def delete_bot(self, bot_id: int) -> bool:
+        # 注意：此处不做「活跃引用」业务校验——那是 admin_delete_bot 端点的职责（业务规则）。
+        # 本方法保持纯 store 行为：直接删，FK ON DELETE SET NULL（matches，保历史）/ CASCADE
+        # （contest_pairings）由 DB 处理。bot_active_references() 供端点层调用判断是否阻拦。
         with self._tx() as c:
             return c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
+
+    def bot_active_references(self, bot_id: int) -> dict:
+        """检查 bot 是否被**活跃**对局/赛事引用（会因此被破坏才拒绝）。
+
+        返回 {matches: n, pairings: n}，全 0 表示可安全硬删。
+        注意：已完成的历史对局/赛事（status=completed/finished）不阻拦——FK SET NULL 会
+        保留历史（bot_id→NULL），这是预期行为（见 test_delete_bot_preserves_contest_data）。
+        仅阻拦 pending/running 对局 + 未完成赛事的报名/对阵（硬删会破坏进行中的赛事）。
+        """
+        out = {"matches": 0, "pairings": 0}
+        with self._tx() as c:
+            # 活跃对局：pending/running 状态（跨每游戏表）
+            for gid in _all_game_ids():
+                tbl = _matches_table(gid)
+                row = c.execute(
+                    f"SELECT COUNT(*) AS n FROM {tbl} "
+                    f"WHERE (bot_a_id=? OR bot_b_id=?) AND status IN ('pending','running')",
+                    (bot_id, bot_id),
+                ).fetchone()
+                if row and row["n"]:
+                    out["matches"] += int(row["n"])
+            # 进行中赛事（running/published/rest）的报名/对阵：硬删会破坏对阵表（CASCADE）。
+            # draft/open 的报名可重建（用户重新报名），不阻拦；finished 的历史 SET NULL 保留。
+            row = c.execute(
+                "SELECT COUNT(*) AS n FROM contest_pairings cp "
+                "JOIN contests c ON c.id=cp.contest_id "
+                "WHERE (cp.bot_a_id=? OR cp.bot_b_id=?) "
+                "AND c.status IN ('published','running','rest')",
+                (bot_id, bot_id),
+            ).fetchone()
+            if row and row["n"]:
+                out["pairings"] += int(row["n"])
+            row = c.execute(
+                "SELECT COUNT(*) AS n FROM contest_entries ce "
+                "JOIN contests c ON c.id=ce.contest_id "
+                "WHERE ce.bot_id=? AND c.status IN ('published','running','rest')",
+                (bot_id,),
+            ).fetchone()
+            if row and row["n"]:
+                out["pairings"] += int(row["n"])
+        return out
 
     def list_bots(
         self,
@@ -1310,7 +1359,11 @@ class Store:
         active_only: bool = True,
         include_builtin: bool = True,
         game_id: str | None = None,
-    ) -> list[dict]:
+        page: int | None = None,
+        per_page: int = 50,
+    ) -> list[dict] | dict:
+        """列 bot。``page`` 为 None 时返回 list（旧契约，部分调用方需全量）；
+        ``page`` 给定时返回 ``{"items", "page", "per_page", "total"}``。"""
         with self._tx() as c:
             sql = "SELECT * FROM bots WHERE 1=1"
             params: list[Any] = []
@@ -1325,6 +1378,10 @@ class Store:
                 sql += " AND game_id=?"
                 params.append(game_id)
             sql += " ORDER BY is_builtin DESC, name"
+            if page is not None:
+                pp = max(1, min(200, int(per_page)))
+                rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
+                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
             return [_row(r) for r in c.execute(sql, params)]
 
     # ── bot_versions ──────────────────────────────────────────
@@ -1885,13 +1942,27 @@ class Store:
             )
 
     def list_leaderboard(
-        self, limit: int = 50, *, game_id: str | None = None
-    ) -> list[dict]:
+        self, limit: int = 50, *, game_id: str | None = None,
+        page: int | None = None, per_page: int = 50,
+    ) -> list[dict] | dict:
         with self._tx() as c:
             # rating_delta = 当前 rating - 上一条历史评分（升降趋势）；无历史则 NULL
             # ratings/rating_history 现按 (bot_id, game_id) 复合键——join/subquery 都
             # 加 game_id 谓词（bot 绑定单一游戏，r.game_id=b.game_id 恰一行）。
-            sql = (
+            #
+            # 注意：SELECT 中含 prev_rating 子查询（含自己的 FROM），_paginate 的
+            # "首个 FROM" 启发会被子查询骗到。故分页时显式写 COUNT（不含子查询），
+            # 行查询交由 _paginate 自动加 LIMIT/OFFSET。
+            base_from = (
+                "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
+                "LEFT JOIN users u ON b.owner_id=u.id "
+                "WHERE b.is_active=1"
+            )
+            params: list[Any] = []
+            if game_id:
+                base_from += " AND b.game_id=?"
+                params.append(game_id)
+            sel = (
                 "SELECT r.bot_id, r.rating, r.rd, r.vol, r.wins, r.losses, "
                 "r.draws, r.net_chips, r.matches_played, r.last_played_at, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
@@ -1900,17 +1971,24 @@ class Store:
                 "(SELECT rh.rating FROM rating_history rh "
                 " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id "
                 " ORDER BY rh.id DESC LIMIT 1 OFFSET 1) AS prev_rating "
-                "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
-                "LEFT JOIN users u ON b.owner_id=u.id "
-                "WHERE b.is_active=1"
             )
-            params: list[Any] = []
-            if game_id:
-                sql += " AND b.game_id=?"
-                params.append(game_id)
-            sql += " ORDER BY r.rating DESC LIMIT ?"
-            params.append(limit)
-            rows = [_row(r) for r in c.execute(sql, params)]
+            order = " ORDER BY r.rating DESC"
+            if page is not None:
+                # 显式 COUNT（_paginate 启发在此查询上不可靠）
+                count_sql = f"SELECT COUNT(*) {base_from}"
+                total = int(c.execute(count_sql, tuple(params)).fetchone()[0])
+                pp = max(1, min(200, int(per_page)))
+                off = (max(1, int(page)) - 1) * pp
+                sql = f"{sel}{base_from}{order} LIMIT ? OFFSET ?"
+                rows = [_row(r) for r in c.execute(
+                    sql, tuple(params) + (pp, off)
+                ).fetchall()]
+            else:
+                sql = f"{sel}{base_from}{order} LIMIT ?"
+                rows = [_row(r) for r in c.execute(
+                    sql, tuple(params) + (max(1, min(limit, 200)),)
+                )]
+                total = None  # 旧契约不返回 total
             # 计算并补 tier + delta（应用层，避免 SQL 嵌套过深）
             # 段位 per-game：按该 bot 的 game_id 取对应曲线（经 games 注册表）
             from bzplat.backend.games import registry as _game_registry
@@ -1924,6 +2002,8 @@ class Store:
                 row["tier_level"] = t.level
                 row["tier_key"] = t.key
                 row["tier_name"] = t.name
+            if page is not None:
+                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
             return rows
 
     leaderboard = list_leaderboard
@@ -1992,6 +2072,23 @@ class Store:
             for gid in gids:
                 tbl = _matches_table(gid)
                 row = c.execute(f"SELECT COUNT(*) FROM {tbl}{where_sql}", params).fetchone()
+                total += int(row[0]) if row else 0
+            return total
+
+    def count_bot_matches(self, bot_id: int) -> int:
+        """统计某 bot 参与的对局数（跨所有已注册游戏表，bot_a 或 bot_b 均算）。
+
+        供 /api/bots/{id}/matches 分页算 total——list_matches 用 ``(bot_a_id=? OR
+        bot_b_id=?)`` 过滤，count 维度需与之对齐。
+        """
+        with self._tx() as c:
+            total = 0
+            for gid in _all_game_ids():
+                tbl = _matches_table(gid)
+                row = c.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE bot_a_id=? OR bot_b_id=?",
+                    (bot_id, bot_id),
+                ).fetchone()
                 total += int(row[0]) if row else 0
             return total
 
@@ -2252,15 +2349,24 @@ class Store:
             )
 
     def list_comments(
-        self, target_type: str, target_id: str, *, limit: int = 100
-    ) -> list[dict]:
+        self, target_type: str, target_id: str, *, limit: int = 100,
+        page: int | None = None, per_page: int = 50,
+    ) -> list[dict] | dict:
         with self._tx() as c:
-            return [_row(r) for r in c.execute(
+            sql = (
                 "SELECT c.*, u.username, u.display_name AS user_display "
                 "FROM comments c LEFT JOIN users u ON c.user_id=u.id "
                 "WHERE c.target_type=? AND c.target_id=? "
-                "ORDER BY c.id DESC LIMIT ?",
-                (target_type, str(target_id), max(1, min(limit, 500))),
+                "ORDER BY c.id DESC"
+            )
+            params = (target_type, str(target_id))
+            if page is not None:
+                pp = max(1, min(200, int(per_page)))
+                rows, total = _paginate(c, sql, params, page=page, per_page=pp)
+                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
+            sql += " LIMIT ?"
+            return [_row(r) for r in c.execute(
+                sql, params + (max(1, min(limit, 500)),)
             )]
 
     def delete_comment(self, comment_id: int, user_id: int) -> bool:
@@ -2507,13 +2613,20 @@ class Store:
         unread_only: bool = False,
         limit: int = 50,
         offset: int = 0,
-    ) -> list[dict]:
+        page: int | None = None,
+        per_page: int = 50,
+    ) -> list[dict] | dict:
         with self._tx() as c:
             sql = "SELECT * FROM notifications WHERE user_id=?"
             params: list[Any] = [user_id]
             if unread_only:
                 sql += " AND is_read=0"
-            sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+            sql += " ORDER BY id DESC"
+            if page is not None:
+                pp = max(1, min(200, int(per_page)))
+                rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
+                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
+            sql += " LIMIT ? OFFSET ?"
             params.extend([max(1, min(limit, 200)), max(0, offset)])
             return [_row(r) for r in c.execute(sql, params)]
 
@@ -2885,22 +2998,29 @@ class Store:
             ).fetchall()
             return [_row(r) for r in rows]
 
-    def contest_entries_named(self, contest_id: int) -> list[dict]:
+    def contest_entries_named(
+        self, contest_id: int, *, page: int | None = None, per_page: int = 50,
+    ) -> list[dict] | dict:
         """返回报名（带 bot 名/owner 名 + seed/group/eliminated）。
 
         LEFT JOIN bots：bot_id 现可为 NULL（删 bot 后保留 entry，P0 SET NULL）。
+        ``page`` 为 None 时返回 list（旧契约）；给定时返回分页 dict。
         """
         with self._tx() as c:
-            rows = c.execute(
+            sql = (
                 "SELECT e.*, b.name AS bot_name, b.display_name AS bot_display, "
                 "b.game_id, u.username AS owner_name, u.display_name AS owner_display "
                 "FROM contest_entries e "
                 "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN users u ON e.user_id=u.id "
-                "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at",
-                (contest_id,),
-            ).fetchall()
-            return [_row(r) for r in rows]
+                "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at"
+            )
+            params = (contest_id,)
+            if page is not None:
+                pp = max(1, min(200, int(per_page)))
+                rows, total = _paginate(c, sql, params, page=page, per_page=pp)
+                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
+            return [_row(r) for r in c.execute(sql, params).fetchall()]
 
     def update_pairing(self, pairing_id: int, **fields: Any) -> dict | None:
         allowed = {

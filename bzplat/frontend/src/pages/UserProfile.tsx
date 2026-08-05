@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { UserPlus, UserCheck, Pencil, Bot as BotIcon, ArrowLeft } from 'lucide-react'
 import PageStub from '@/components/PageStub'
@@ -10,6 +10,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
 import { MetricCard } from '@/components/ui/metric-card'
 import { useAuth } from '@/components/useAuth'
+import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { toast } from 'sonner'
 import { fmtDate } from '@/lib/format'
@@ -60,17 +61,33 @@ export default function UserProfile() {
   const [following, setFollowing] = useState(false)
   const [followerCount, setFollowerCount] = useState(0)
   const [followingCount, setFollowingCount] = useState(0)
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 20
+
+  const loadBots = useCallback(() => {
+    if (!name) return Promise.resolve()
+    const params = new URLSearchParams({ page: String(page), per_page: String(perPage) })
+    return apiGet<{ bots: BotRow[]; total?: number }>(
+      `/api/users/${encodeURIComponent(name)}/bots?${params.toString()}`,
+    )
+      .then((b) => {
+        setBots(b.bots || [])
+        if (b.total !== undefined) setTotal(b.total)
+      })
+      .catch((e) => setError(errMsg(e)))
+  }, [name, page])
 
   useEffect(() => {
     if (!name) return
     setLoading(true)
     Promise.all([
       apiGet<{ profile: UserProfileData }>(`/api/users/${encodeURIComponent(name)}/profile`),
-      apiGet<{ bots: BotRow[] }>(`/api/users/${encodeURIComponent(name)}/bots`),
+      loadBots(),
     ])
-      .then(([p, b]) => {
+      .then(([p]) => {
         setProfile(p.profile)
-        setBots(b.bots || [])
         if (user && user.username !== name) {
           apiGet<{ following: boolean; follower_count: number; following_count: number }>(
             `/api/users/${p.profile.id}/follow-status`,
@@ -85,7 +102,7 @@ export default function UserProfile() {
       })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
-  }, [name, user])
+  }, [name, user, loadBots])
 
   function toggleFollow() {
     if (!profile || !user) return
@@ -235,7 +252,7 @@ export default function UserProfile() {
       </Card>
 
       {/* Bot 列表 */}
-      <h3 className="mb-3 text-sm font-semibold text-foreground">Bot 列表（{bots.length}）</h3>
+      <h3 className="mb-3 text-sm font-semibold text-foreground">Bot 列表（{total || bots.length}）</h3>
       {bots.length === 0 ? (
         <Card>
           <EmptyState text="暂无公开 Bot" icon={<BotIcon className="size-7 opacity-40" />} />
@@ -268,6 +285,7 @@ export default function UserProfile() {
           })}
         </div>
       )}
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
     </PageStub>
   )
 }

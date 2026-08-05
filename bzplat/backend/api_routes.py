@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from bzplat.backend.auth.dependencies import (
+    _extract_token,
     require_admin,
     require_organizer,
     require_user,
@@ -89,15 +90,27 @@ def my_bots(
     request: Request,
     user=Depends(require_user),
     game_id: str | None = None,
+    page: int | None = None,
+    per_page: int = 50,
 ):
-    return {"bots": _bots(request).list_mine(user["id"], game_id=game_id)}
+    result = _bots(request).list_mine(
+        user["id"], game_id=game_id, page=page, per_page=per_page
+    )
+    if isinstance(result, dict):
+        return {"bots": result["items"], "page": result["page"],
+                "per_page": result["per_page"], "total": result["total"]}
+    return {"bots": result}
 
 
 @router.get("/api/bots/public")
 def public_bots(
-    request: Request, game_id: str | None = None, owner_id: int | None = None
+    request: Request, game_id: str | None = None, owner_id: int | None = None,
+    page: int | None = None, per_page: int = 50,
 ):
-    bots = _bots(request).list_public(game_id=game_id, owner_id=owner_id)
+    result = _bots(request).list_public(
+        game_id=game_id, owner_id=owner_id, page=page, per_page=per_page
+    )
+    bots = result["items"] if isinstance(result, dict) else result
     # 附带 owner_name/owner_display（供对手选择弹窗展示）
     store = _store(request)
     owner_ids = {b["owner_id"] for b in bots if b.get("owner_id") is not None}
@@ -112,6 +125,9 @@ def public_bots(
         if ou:
             b["owner_name"] = ou.get("username")
             b["owner_display"] = ou.get("display_name")
+    if isinstance(result, dict):
+        return {"bots": bots, "page": result["page"],
+                "per_page": result["per_page"], "total": result["total"]}
     return {"bots": bots}
 
 
@@ -213,14 +229,19 @@ def my_favorites(request: Request, limit: int = 50, user=Depends(require_user)):
 
 
 @router.get("/api/users/{username}/bots")
-def user_bots(username: str, request: Request):
+def user_bots(
+    username: str, request: Request, page: int | None = None, per_page: int = 50,
+):
     """某用户的公开 Bot 列表（公开）。"""
     store = _store(request)
     u = store.get_user_by_username(username)
     if not u:
         raise HTTPException(404, "用户不存在")
-    bots = store.list_bots(owner_id=u["id"])
-    return {"bots": bots}
+    result = store.list_bots(owner_id=u["id"], page=page, per_page=per_page)
+    if isinstance(result, dict):
+        return {"bots": result["items"], "page": result["page"],
+                "per_page": result["per_page"], "total": result["total"]}
+    return {"bots": result}
 
 
 @router.get("/api/search")
@@ -268,12 +289,24 @@ def bot_profile(bot_id: int, request: Request):
 
 @router.get("/api/bots/{bot_id}/matches")
 def bot_matches(
-    bot_id: int, request: Request, limit: int = 30, offset: int = 0
+    bot_id: int, request: Request, limit: int = 30, offset: int = 0,
+    page: int | None = None, per_page: int = 50,
 ):
-    """某 Bot 的对局历史（公开，复用 list_matches(bot_id=)）。"""
-    if not _store(request).get_bot(bot_id):
+    """某 Bot 的对局历史（公开，复用 list_matches(bot_id=)）。
+
+    旘认 ``limit``/``offset`` 仍生效（向后兼容）；提供 ``page`` 时改返回
+    ``{matches, page, per_page, total}`` 分页契约（limit/offset 在该模式下忽略）。
+    """
+    store = _store(request)
+    if not store.get_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
-    rows = _store(request).list_matches(
+    if page is not None:
+        pp = max(1, min(200, per_page))
+        off = (max(1, page) - 1) * pp
+        rows = store.list_matches(limit=pp, offset=off, bot_id=bot_id)
+        total = store.count_bot_matches(bot_id)
+        return {"matches": rows, "page": max(1, page), "per_page": pp, "total": total}
+    rows = store.list_matches(
         bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
     )
     return {"matches": rows}
@@ -286,7 +319,7 @@ def bot_opponents(
     """某 Bot 对各对手的战绩（公开，从 pair_stats 读）。"""
     if not _store(request).get_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
-    return {"opponents": _store(request).bot_opponents_stats(bot_id, limit=limit)}
+    return {"opponents": _store(request).bot_opponents_stats(bot_id, limit=max(1, min(limit, 200)))}
 
 
 @router.get("/api/bots/{bot_id}/rating-history")
@@ -296,7 +329,7 @@ def bot_rating_history(
     """某 Bot 的评分变化时序（公开，画曲线/趋势用）。"""
     if not _store(request).get_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
-    return {"history": _store(request).list_rating_history(bot_id, limit=limit)}
+    return {"history": _store(request).list_rating_history(bot_id, limit=max(1, min(limit, 500)))}
 
 
 @router.post("/api/bots")
@@ -610,8 +643,17 @@ async def match_events(match_id: str, request: Request):
 # ── leaderboard ───────────────────────────────────────────────
 
 @router.get("/api/leaderboard")
-def leaderboard(request: Request, limit: int = 50, game_id: str | None = None):
-    return {"leaderboard": _store(request).list_leaderboard(limit=limit, game_id=game_id)}
+def leaderboard(
+    request: Request, limit: int = 50, game_id: str | None = None,
+    page: int | None = None, per_page: int = 50,
+):
+    result = _store(request).list_leaderboard(
+        limit=max(1, min(limit, 200)), game_id=game_id, page=page, per_page=per_page,
+    )
+    if isinstance(result, dict):
+        return {"leaderboard": result["items"], "page": result["page"],
+                "per_page": result["per_page"], "total": result["total"]}
+    return {"leaderboard": result}
 
 
 @router.get("/api/tiers")
@@ -687,12 +729,21 @@ def list_comments(
     target_type: str,
     target_id: str,
     limit: int = 100,
+    page: int | None = None,
+    per_page: int = 50,
 ):
     store = _store(request)
-    return {
-        "comments": store.list_comments(target_type, target_id, limit=limit),
-        "count": store.comment_count(target_type, target_id),
-    }
+    lim = max(1, min(limit, 500))  # clamp（评论可能很多，但 500 已够看）
+    result = store.list_comments(
+        target_type, target_id, limit=lim, page=page, per_page=per_page,
+    )
+    count = store.comment_count(target_type, target_id)
+    if isinstance(result, dict):
+        return {
+            "comments": result["items"], "page": result["page"],
+            "per_page": result["per_page"], "total": result["total"], "count": count,
+        }
+    return {"comments": result, "count": count}
 
 
 @router.post("/api/comments")
@@ -798,15 +849,25 @@ def list_notifications(
     unread_only: bool = False,
     limit: int = 50,
     offset: int = 0,
+    page: int | None = None,
+    per_page: int = 50,
     user=Depends(require_user),
 ):
     store = _store(request)
-    return {
-        "notifications": store.list_notifications(
-            user["id"], unread_only=unread_only, limit=limit, offset=offset
-        ),
-        "unread_count": store.unread_notification_count(user["id"]),
-    }
+    lim = max(1, min(limit, 200))
+    off = max(0, offset)
+    result = store.list_notifications(
+        user["id"], unread_only=unread_only, limit=lim, offset=off,
+        page=page, per_page=per_page,
+    )
+    unread = store.unread_notification_count(user["id"])
+    if isinstance(result, dict):
+        return {
+            "notifications": result["items"], "page": result["page"],
+            "per_page": result["per_page"], "total": result["total"],
+            "unread_count": unread,
+        }
+    return {"notifications": result, "unread_count": unread}
 
 
 @router.get("/api/notifications/unread-count")
@@ -918,32 +979,62 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
 
 
 @router.get("/api/contests/{contest_id}")
-def contest_detail(contest_id: int, request: Request):
+def contest_detail(
+    contest_id: int, request: Request,
+    entries_page: int | None = None, entries_per_page: int = 50,
+):
     c = _store(request).get_contest(contest_id)
     if not c:
         raise HTTPException(404, "比赛不存在")
-    entries = _store(request).contest_entries_named(contest_id)
-    pairings = _store(request).contest_bracket(contest_id)
+    store = _store(request)
+    # entries 可单列分页（115 报名场景）：提供 entries_page 时返回分页元信息，
+    # 否则保持旧的全量列表契约（pairings/standings 不分页——stage 级，量小）。
+    entries_result = store.contest_entries_named(
+        contest_id, page=entries_page, per_page=entries_per_page,
+    )
+    if isinstance(entries_result, dict):
+        entries = entries_result["items"]
+        entries_meta = {
+            "entries_page": entries_result["page"],
+            "entries_per_page": entries_result["per_page"],
+            "entries_total": entries_result["total"],
+        }
+    else:
+        entries = entries_result
+        entries_meta = {}
+    pairings = store.contest_bracket(contest_id)
     standings = _contests(request).standings(contest_id)
     # 给 standings 补 bot 名（standings 只有 bot_id）
-    store = _store(request)
     for s in standings:
         b = store.get_bot(s.get("bot_id"))
         if b:
             s["bot_name"] = b.get("display_name") or b.get("name")
-    stage_results = _store(request).list_stage_results(contest_id)
+    stage_results = store.list_stage_results(contest_id)
     try:
         estimate = _contests(request).estimate(contest_id)
     except ValueError:
         estimate = None
-    return {
+    # my_entry：当前登录用户的报名条目（不分页——entries 分页后前端无法靠 entries.find
+    # 可靠拿到自己的条目，休息换 Bot UI 依赖它）。未登录或未报名时为 null。
+    my_entry = None
+    try:
+        token = _extract_token(request)
+        u = request.app.state.auth.verify_session(token) if token else None
+        if u:
+            my_entry = store.get_entry(contest_id, u["id"])
+    except Exception:
+        pass
+    resp = {
         "contest": c,
         "entries": entries,
         "pairings": pairings,
         "standings": standings,
         "stage_results": stage_results,
         "estimate": estimate,
+        "my_entry": my_entry,
     }
+    resp.update(entries_meta)
+    return resp
 
 
 @router.get("/api/contests/{contest_id}/bracket")
@@ -1230,8 +1321,15 @@ async def advance_contest(
 # ── admin ─────────────────────────────────────────────────────
 
 @router.get("/api/admin/users")
-def admin_users(request: Request, _admin=Depends(require_admin)):
-    return {"users": _store(request).list_users()}
+def admin_users(
+    request: Request, page: int | None = None, per_page: int = 50,
+    _admin=Depends(require_admin),
+):
+    result = _store(request).list_users(page=page, per_page=per_page)
+    if isinstance(result, dict):
+        return {"users": result["items"], "page": result["page"],
+                "per_page": result["per_page"], "total": result["total"]}
+    return {"users": result}
 
 
 @router.post("/api/admin/users/{user_id}/role")
@@ -1371,7 +1469,18 @@ def admin_patch_bot(
 
 @router.delete("/api/admin/bots/{bot_id}")
 def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)):
-    if not _store(request).delete_bot(bot_id):
+    store = _store(request)
+    # 业务规则：硬删前检查活跃引用。bots 表 FK 是 ON DELETE SET NULL（matches，保历史）
+    # / ON DELETE CASCADE（contest_pairings）。硬删正在打(pending/running)对局或进行中赛事
+    # (published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→_apply_ratings(None)崩；
+    # ②把进行中赛事对阵表 CASCADE 删光。此时应改用停用（is_active=0，用户路径）。
+    refs = store.bot_active_references(bot_id)
+    if any(v > 0 for v in refs.values()):
+        raise HTTPException(
+            409,
+            f"bot 存在活跃引用，不能硬删：{refs}（进行中对局/赛事；请改用停用 is_active=0）",
+        )
+    if not store.delete_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
     # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
     _bots(request).purge_bot_files(bot_id)

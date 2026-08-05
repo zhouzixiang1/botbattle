@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
+import Pagination from '@/components/Pagination'
 
 interface Match {
   id: string
@@ -30,20 +31,35 @@ export default function MatchesTab() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
+  // 分页（/api/matches 为公开端点，支持 limit/offset + 返回 total）
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 50
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const params = status ? `?status=${status}&limit=100` : '?limit=100'
-      const d = await apiGet<{ matches: Match[] }>(`/api/matches${params}`)
+      const offset = (page - 1) * perPage
+      const params = new URLSearchParams()
+      if (status) params.set('status', status)
+      params.set('limit', String(perPage))
+      params.set('offset', String(offset))
+      const d = await apiGet<{ matches: Match[]; total?: number }>(`/api/matches?${params.toString()}`)
       setMatches(d.matches || [])
+      if (d.total !== undefined) setTotal(d.total)
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     } finally {
       setLoading(false)
     }
-  }, [status])
+  }, [status, page])
+
+  // 状态筛选切换 → 回到第 1 页
+  const onStatusChange = (v: string) => {
+    setStatus(v === 'all' ? '' : v)
+    setPage(1)
+  }
 
   useEffect(() => {
     void load()
@@ -71,7 +87,7 @@ export default function MatchesTab() {
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Select value={status || 'all'} onValueChange={(v) => setStatus(v === 'all' ? '' : v)}>
+        <Select value={status || 'all'} onValueChange={onStatusChange}>
           <SelectTrigger size="sm" className="h-9 w-[8.5rem]">
             <SelectValue />
           </SelectTrigger>
@@ -83,7 +99,7 @@ export default function MatchesTab() {
             ))}
           </SelectContent>
         </Select>
-        <span className="text-xs text-muted-foreground">共 {matches.length} 局</span>
+        <span className="text-xs text-muted-foreground">共 {total || matches.length} 局</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
         </div>
@@ -159,6 +175,7 @@ export default function MatchesTab() {
         </table>
         {matches.length === 0 && <EmptyState text="无对局" />}
       </div>
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
       {confirmDialog}
     </div>
   )

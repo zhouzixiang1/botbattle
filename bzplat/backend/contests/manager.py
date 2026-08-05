@@ -507,6 +507,24 @@ class ContestManager:
         published_at = _now()
         for sp in specs:
             sched = self._compute_scheduled_at(sp.round_num, base, stagger_min)
+            if sp.bot_b_id is None:
+                # 轮空占位：bot_b_id=None、无 match、status=completed（轮空者直接晋级）。
+                self.store.add_contest_pairing(
+                    contest_id,
+                    sp.bot_a_id,
+                    None,
+                    round_num=sp.round_num,
+                    status="completed",
+                    stage_idx=stage_idx,
+                    stage_key=key,
+                    group_id=sp.group_id,
+                    bracket_slot=sp.bracket_slot,
+                    color_first=sp.color_first,
+                    entry_a_id=bot_to_entry.get(sp.bot_a_id),
+                    entry_b_id=None,
+                    published_at=published_at,
+                )
+                continue
             self.store.add_contest_pairing(
                 contest_id,
                 sp.bot_a_id,
@@ -672,6 +690,9 @@ class ContestManager:
         if not pairings:
             return False
         for p in pairings:
+            # 轮空占位 pairing（bot_b_id=None、无 match、status=completed）视为已完成。
+            if p.get("bot_b_id") is None and not p.get("match_id"):
+                continue
             mid = p.get("match_id")
             if not mid:
                 return False
@@ -1061,6 +1082,11 @@ class ContestManager:
         # 当前轮全部完成
         winners: list[tuple[int, int | None]] = []  # (bot_id, entry_id)
         for p in cur:
+            # 轮空占位 pairing（bot_b_id=None、无 match、status=completed）：
+            # 视为已完成，胜者为轮空者 bot_a。
+            if p.get("bot_b_id") is None and not p.get("match_id"):
+                winners.append((p["bot_a_id"], p.get("entry_a_id")))
+                continue
             mid = p.get("match_id")
             if not mid:
                 return False
@@ -1083,19 +1109,36 @@ class ContestManager:
         next_round = max_round + 1
         published_at = _now()
         slot = 0
-        for i in range(0, len(winners) - 1, 2):
+        for i in range(0, len(winners), 2):
             a_bot, a_entry = winners[i]
-            b_bot, b_entry = winners[i + 1]
-            self.store.add_contest_pairing(
-                contest_id, a_bot, b_bot,
-                round_num=next_round, status="pending",
-                stage_idx=stage_idx, stage_key=key,
-                bracket_slot=slot, color_first=0,
-                entry_a_id=a_entry, entry_b_id=b_entry,
-                published_at=published_at,
-                **self._version_snapshot(a_bot, b_bot),
-            )
-            slot += 1
+            if i + 1 < len(winners):
+                # 相邻两胜者配对
+                b_bot, b_entry = winners[i + 1]
+                self.store.add_contest_pairing(
+                    contest_id, a_bot, b_bot,
+                    round_num=next_round, status="pending",
+                    stage_idx=stage_idx, stage_key=key,
+                    bracket_slot=slot, color_first=0,
+                    entry_a_id=a_entry, entry_b_id=b_entry,
+                    published_at=published_at,
+                    **self._version_snapshot(a_bot, b_bot),
+                )
+                slot += 1
+            else:
+                # 奇数末位胜者：轮空自动晋级（不打本轮）。
+                # 创建「轮空占位 pairing」：bot_b_id=None、无 match、直接标 completed，
+                # winner 固定为 bot_a（轮空者）。这样 _stage_done 把它视为已完成、
+                # _maybe_next_elim_round 能从它收集到轮空胜者，下一轮配对时正常带入——
+                # 确保奇数胜者（非 2 幂人数）无人丢失、阶段能 finish。
+                self.store.add_contest_pairing(
+                    contest_id, a_bot, None,
+                    round_num=next_round, status="completed",
+                    stage_idx=stage_idx, stage_key=key,
+                    bracket_slot=slot, color_first=0,
+                    entry_a_id=a_entry, entry_b_id=None,
+                    published_at=published_at,
+                )
+                slot += 1
         await self._dispatch_pending(contest_id, stage_idx)
         return True
 

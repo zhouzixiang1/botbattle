@@ -189,6 +189,12 @@ class BinaryRunner:
     async def _start_wine(self, session: BotSession) -> None:
         name = f"bzbot-wine-{session.session_id}"
         session.container_name = name
+        # 防御性补执行权限（与 _start_local/_start_docker 对齐：wine 容器内虽不经 host exec 位，
+        # 但保持一致防御，避免某些 wine 版本检查文件 mode）。
+        try:
+            session.binary_path.chmod(session.binary_path.stat().st_mode | 0o111)
+        except (OSError, PermissionError):
+            pass
         cmd = [
             self._docker_bin, "run", "-i", "--rm",
             "--name", name,

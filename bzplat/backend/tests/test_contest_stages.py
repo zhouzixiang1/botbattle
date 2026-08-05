@@ -454,3 +454,90 @@ def test_single_elimination_generates_final(store: Store):
         assert c2["status"] != "finished", "R1 完成不应直接 finished，应继续决赛"
 
     asyncio.run(run())
+
+
+def test_single_elimination_bye_round1_odd_count():
+    """非 2 幂人数（奇数）首轮：bye 者应生成 bot_b_id=None 的占位 spec，
+    不能被丢弃。n=5 → size=8, 3 bye → 1 real(1v5) + 3 bye(seed2/3/4) = 4 spec（无人丢失）。"""
+    bots = list(range(1, 6))  # 5 人
+    specs = single_elimination(bots)
+    real = [s for s in specs if s.bot_b_id is not None]
+    byes = [s for s in specs if s.bot_b_id is None]
+    # 5 人首轮：1 场 real match(1v5) + 3 个 bye 占位 = 4（所有 5 bot 都出现）
+    assert len(real) >= 1, f"5人首轮应至少 1 场 real match，实际 {len(real)}"
+    assert len(byes) == 3, f"5人首轮应 3 个 bye 占位，实际 {len(byes)}"
+    # 所有 5 个 bot 必须出现在某 spec 里（不能丢失）
+    appearing = set()
+    for s in specs:
+        appearing.add(s.bot_a_id)
+        if s.bot_b_id is not None:
+            appearing.add(s.bot_b_id)
+    assert appearing == set(bots), f"5人淘汰首轮丢失 bot：{set(bots) - appearing}"
+
+
+def _run_single_elim_to_finish(store: Store, n: int, winner_fn):
+    """建 n 人 single_elimination 赛事，逐轮完成直到 finished。返回最终 contest 状态。"""
+    users, bots = _mk_bots(store, n)
+    cid = store.create_contest(
+        f"ko{n}", users[0]["id"], game_id="holdem",
+        stages_json=json.dumps([{"key": "ko", "type": "single_elimination",
+                                 "scoring": "poker_3_1_0", "rest_after_minutes": 0}]),
+    )["id"]
+    for u, b in zip(users, bots):
+        store.add_contest_entry(cid, u["id"], b["id"])
+    store.update_contest(cid, status="running", current_stage_idx=0)
+    orch = _FakeOrch(store)
+    mgr = ContestManager(store, orch)  # type: ignore
+
+    async def run():
+        await mgr._begin_stage(cid, 0)
+        # 反复完成当前轮 + maybe_finish，直到 finished 或无进展
+        for _ in range(20):  # 上限防死循环
+            c = store.get_contest(cid)
+            if c["status"] == "finished":
+                break
+            _complete_all_pairs(store, cid, 0, winner_fn=winner_fn)
+            await mgr.maybe_finish(cid)
+        return store.get_contest(cid)
+
+    return asyncio.run(run()), store, cid, bots
+
+
+def test_single_elim_5_players_finishes_with_champion(store: Store):
+    """5 人（非 2 幂，3 bye）：必须能 finish 且决出唯一冠军。
+    复现 bug：range(0,len-1,2) 丢末位胜者 + bye 不记录 → 赛事卡死/错冠军。"""
+    c_final, store, cid, bots = _run_single_elim_to_finish(
+        store, 5, winner_fn=lambda a, b: 0  # 永远 bot_a 胜（高种子）
+    )
+    assert c_final["status"] == "finished", f"5人淘汰应 finish，实际 {c_final['status']}"
+    # 所有首轮 bot 都应参与（无人丢失）：统计所有出现过 match 的 bot_a/bot_b
+    appearing = set()
+    for p in store.list_contest_pairings(cid, stage_idx=0):
+        if p.get("bot_a_id") is not None:
+            appearing.add(p["bot_a_id"])
+        if p.get("bot_b_id") is not None:
+            appearing.add(p["bot_b_id"])
+    assert appearing == {b["id"] for b in bots}, "5人淘汰丢失了 bot"
+
+
+def test_single_elim_7_players_finishes_with_champion(store: Store):
+    """7 人（非 2 幂，1 bye）：必须能 finish。"""
+    c_final, store, cid, bots = _run_single_elim_to_finish(
+        store, 7, winner_fn=lambda a, b: 1  # 永远 bot_b 胜
+    )
+    assert c_final["status"] == "finished", f"7人淘汰应 finish，实际 {c_final['status']}"
+    appearing = set()
+    for p in store.list_contest_pairings(cid, stage_idx=0):
+        if p.get("bot_a_id") is not None:
+            appearing.add(p["bot_a_id"])
+        if p.get("bot_b_id") is not None:
+            appearing.add(p["bot_b_id"])
+    assert appearing == {b["id"] for b in bots}, "7人淘汰丢失了 bot"
+
+
+def test_single_elim_8_players_power_of_two(store: Store):
+    """8 人（2 幂，0 bye）：回归测试，不应被 bye 修复破坏。"""
+    c_final, store, cid, bots = _run_single_elim_to_finish(
+        store, 8, winner_fn=lambda a, b: 0
+    )
+    assert c_final["status"] == "finished", f"8人淘汰应 finish，实际 {c_final['status']}"
