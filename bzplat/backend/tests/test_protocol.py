@@ -163,3 +163,33 @@ def test_action_to_history_int():
 
 def test_protocol_version():
     assert PROTOCOL_VERSION == 2
+
+
+def test_protocol_request_schema_matches_engine():
+    """contracts/protocol_request.schema.json 必须与引擎 build_act_request 产出字段
+    严格一致（双向守护）——schema 是 Bot 作者读的协议真相源，若与引擎 drift 会误导。
+
+    PR#115 移除了 7+ 平台扩展字段（to_call/sb/bb/opp_chips/...），但当时漏更新本
+    schema（审计 P1-A 发现）。本测试防此类 drift 再次发生。
+    """
+    import json
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[3] / "contracts" / "protocol_request.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema_fields = set(schema["properties"].keys())
+
+    # 引擎实际产出字段（与 test_build_act_request_botzone_fields 同源）
+    req = build_act_request(
+        hand=0, total_hands=70, my_id=0, dealer_id=0,
+        my_cards=[Card(0, 0), Card(1, 0)], board=[], history=[], my_chips=1000,
+    )
+    engine_fields = set(req.keys())
+
+    assert schema_fields == engine_fields, (
+        f"协议 schema 与引擎产出字段 drift。"
+        f"schema 多余: {schema_fields - engine_fields}；"
+        f"schema 缺失: {engine_fields - schema_fields}"
+    )
+    # additionalProperties: false 必须开启（防扩展字段回归）
+    assert schema.get("additionalProperties") is False, "schema 必须禁额外字段（防扩展回归）"
