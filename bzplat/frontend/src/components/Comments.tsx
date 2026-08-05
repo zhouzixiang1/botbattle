@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Heart, Trash2, MessageSquare } from 'lucide-react'
 import { apiGet, apiJson, apiPost, errMsg } from '@/api'
@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { EmptyState, ErrorMsg } from '@/components/ui/status'
+import Pagination from '@/components/Pagination'
 import { cn } from '@/lib/utils'
 import { fmtTime } from '@/lib/format'
 
@@ -33,11 +34,15 @@ export default function Comments({
   const [error, setError] = useState('')
   const [liked, setLiked] = useState(false)
   const [likeCount, setLikeCount] = useState(0)
+  // 分页（评论为密集列表，每页 20 条）
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 20
 
-  function load() {
+  const load = useCallback(() => {
     Promise.all([
-      apiGet<{ comments: Comment[]; count: number }>(
-        `/api/comments?target_type=${targetType}&target_id=${encodeURIComponent(targetId)}`,
+      apiGet<{ comments: Comment[]; count: number; total?: number }>(
+        `/api/comments?target_type=${targetType}&target_id=${encodeURIComponent(targetId)}&page=${page}&per_page=${perPage}`,
       ),
       user
         ? apiGet<{ liked: boolean; count: number }>(
@@ -47,18 +52,18 @@ export default function Comments({
     ])
       .then(([c, l]) => {
         setComments(c.comments || [])
+        if (c.total !== undefined) setTotal(c.total)
         if (l) {
           setLiked(l.liked)
           setLikeCount(l.count)
         }
       })
       .catch((e) => setError(errMsg(e)))
-  }
+  }, [targetType, targetId, user, page])
 
   useEffect(() => {
     load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetId, user])
+  }, [load])
 
   function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -66,7 +71,7 @@ export default function Comments({
     apiPost('/api/comments', 'POST', { target_type: targetType, target_id: targetId, body: body.trim() })
       .then(() => {
         setBody('')
-        load()
+        setPage(1)
       })
       .catch((e) => setError(errMsg(e)))
   }
@@ -93,7 +98,7 @@ export default function Comments({
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2 text-base">
             <MessageSquare className="size-4 text-muted-foreground" />
-            评论（{comments.length}）
+            评论（{total || comments.length}）
           </CardTitle>
           <Button
             type="button"
@@ -157,6 +162,7 @@ export default function Comments({
             ))}
           </div>
         )}
+        <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
       </CardContent>
     </Card>
   )

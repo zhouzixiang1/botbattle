@@ -21,6 +21,7 @@ import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { MetricCard } from '@/components/ui/metric-card'
 import { TierBadge } from '@/components/tier-badge'
 import Comments from '@/components/Comments'
+import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { toast } from 'sonner'
 import { useAuth } from '@/components/useAuth'
@@ -167,19 +168,21 @@ export default function BotDetail() {
   const [loading, setLoading] = useState(true)
   const [favorited, setFavorited] = useState(false)
   const [favCount, setFavCount] = useState(0)
+  // 对局历史分页
+  const [matchesPage, setMatchesPage] = useState(1)
+  const [matchesTotal, setMatchesTotal] = useState(0)
+  const matchesPerPage = 30
 
   useEffect(() => {
     if (!botId) return
     setLoading(true)
     Promise.all([
       apiGet<{ profile: BotProfile }>(`/api/bots/${botId}/profile`),
-      apiGet<{ matches: MatchRow[] }>(`/api/bots/${botId}/matches?limit=30`),
       apiGet<{ opponents: OpponentRow[] }>(`/api/bots/${botId}/opponents?limit=20`),
       apiGet<{ history: RatingPoint[] }>(`/api/bots/${botId}/rating-history?limit=100`),
     ])
-      .then(([p, m, o, h]) => {
+      .then(([p, o, h]) => {
         setProfile(p.profile)
-        setMatches(m.matches || [])
         setOpponents(o.opponents || [])
         setHistory(h.history || [])
       })
@@ -196,6 +199,19 @@ export default function BotDetail() {
         .catch(() => {})
     }
   }, [botId, user])
+
+  // 对局历史单独分页（切页只重拉 matches，不重置 profile/opponents/history）
+  useEffect(() => {
+    if (!botId) return
+    apiGet<{ matches: MatchRow[]; total?: number }>(
+      `/api/bots/${botId}/matches?page=${matchesPage}&per_page=${matchesPerPage}`,
+    )
+      .then((m) => {
+        setMatches(m.matches || [])
+        if (m.total !== undefined) setMatchesTotal(m.total)
+      })
+      .catch((e) => setError(errMsg(e)))
+  }, [botId, matchesPage])
 
   function toggleFavorite() {
     if (!user) return
@@ -314,7 +330,7 @@ export default function BotDetail() {
 
       <Tabs defaultValue="history" className="w-full">
         <TabsList className="w-full">
-          <TabsTrigger value="history" className="min-w-0 gap-1.5"><HistoryIcon className="size-3.5 shrink-0" /><span className="truncate">对局历史</span> <span className="hidden text-xs text-muted-foreground sm:inline">({matches.length})</span></TabsTrigger>
+          <TabsTrigger value="history" className="min-w-0 gap-1.5"><HistoryIcon className="size-3.5 shrink-0" /><span className="truncate">对局历史</span> <span className="hidden text-xs text-muted-foreground sm:inline">({matchesTotal || matches.length})</span></TabsTrigger>
           <TabsTrigger value="opponents" className="min-w-0 gap-1.5"><Swords className="size-3.5 shrink-0" /><span className="truncate">对手战绩</span> <span className="hidden text-xs text-muted-foreground sm:inline">({opponents.length})</span></TabsTrigger>
           <TabsTrigger value="rating" className="min-w-0 gap-1.5"><Target className="size-3.5 shrink-0" /><span className="truncate">评分曲线</span></TabsTrigger>
         </TabsList>
@@ -381,6 +397,12 @@ export default function BotDetail() {
               </TableBody>
             </Table>
             </div>
+            <Pagination
+              page={matchesPage}
+              perPage={matchesPerPage}
+              total={matchesTotal}
+              onPageChange={setMatchesPage}
+            />
           </Card>
         </TabsContent>
 

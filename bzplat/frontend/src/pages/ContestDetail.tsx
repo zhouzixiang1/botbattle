@@ -20,6 +20,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import BracketTree from '@/components/contest/BracketTree'
 import Countdown from '@/components/Countdown'
 import { useAuth } from '@/components/useAuth'
+import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
@@ -156,11 +157,16 @@ export default function ContestDetail() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [pairings, setPairings] = useState<Pairing[]>([])
   const [standings, setStandings] = useState<Standing[]>([])
+  const [myEntry, setMyEntry] = useState<Entry | null>(null)
   const [estimate, setEstimate] = useState<{ estimated_matches?: number; eta_seconds?: number } | null>(null)
   const [bots, setBots] = useState<Array<{ id: number; name: string; display_name?: string }>>([])
   const [botId, setBotId] = useState('')
   const [stageTab, setStageTab] = useState(0)
   const [error, setError] = useState('')
+  // 报名列表分页（115 人赛事场景：服务端分页，避免一次性渲染全部）
+  const [entriesPage, setEntriesPage] = useState(1)
+  const [entriesTotal, setEntriesTotal] = useState(0)
+  const entriesPerPage = 20
 
   const stages = useMemo(() => parseStages(contest), [contest])
 
@@ -172,7 +178,11 @@ export default function ContestDetail() {
       pairings: Pairing[]
       standings: Standing[]
       estimate?: { estimated_matches?: number; eta_seconds?: number }
-    }>(`/api/contests/${id}`)
+      entries_page?: number
+      entries_per_page?: number
+      entries_total?: number
+      my_entry?: Entry | null
+    }>(`/api/contests/${id}?entries_page=${entriesPage}&entries_per_page=${entriesPerPage}`)
       .then((d) => {
         setContest(d.contest)
         setEntries(d.entries || [])
@@ -180,9 +190,11 @@ export default function ContestDetail() {
         setStandings(d.standings || [])
         setEstimate(d.estimate || null)
         setStageTab(d.contest.current_stage_idx ?? 0)
+        setEntriesTotal(d.entries_total ?? d.entries.length)
+        setMyEntry(d.my_entry ?? null)
       })
       .catch((e) => setError(errMsg(e)))
-  }, [id])
+  }, [id, entriesPage, entriesPerPage])
 
   useEffect(() => {
     void load()
@@ -199,7 +211,7 @@ export default function ContestDetail() {
   }, [isLoggedIn, contest?.game_id])
 
   const isOrg = !!user && !!contest && (user.role === 'admin' || user.id === contest.organizer_id)
-  const myEntry = entries.find((e) => e.user_id === user?.id)
+  // myEntry 来自后端 my_entry 字段（不分页，休息换 Bot UI 依赖；entries 分页后前端 find 不可靠）
   // 实名校验：赛事要求实名且当前用户未填完整 → 提示去设置页补填
   const needsRealName = !!contest?.require_real_name && !!user && !(
     user.real_name && user.phone && user.school && user.student_id
@@ -397,7 +409,7 @@ export default function ContestDetail() {
           <div>
             <div className="flex items-center gap-2">
               <Users className="size-4 text-muted-foreground" />
-              <h3 className="text-sm font-semibold text-foreground">报名（{entries.length}）</h3>
+              <h3 className="text-sm font-semibold text-foreground">报名（{entriesTotal}）</h3>
               {isOrg && (contest.status === 'draft' || contest.status === 'open') && (
                 <Button
                   size="sm"
@@ -442,6 +454,12 @@ export default function ContestDetail() {
                     ))}
                   </ul>
                 )}
+                <Pagination
+                  page={entriesPage}
+                  perPage={entriesPerPage}
+                  total={entriesTotal}
+                  onPageChange={setEntriesPage}
+                />
               </CardContent>
             </Card>
           </div>

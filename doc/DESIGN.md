@@ -59,7 +59,7 @@ graph TB
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
 | 游戏注册 | `games/` | **全面解耦的单一真相**：base.py（GameSpec 接口 + GameRegistry 单例 + MatchResult/RoundResult 平台契约基类[仅类型提示/测试用]）+ __init__.py（注册表单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS 模块级便捷函数）+ **`_botzone_protocol.py`（Botzone 标准信封传输层：Traditional 完整历史 / LongRunning 单 request + keep_running 握手，全游戏共享）** + _board_protocol.py（棋类共享行协议工具：Botzone `{x,y}` 落子 + 信封解析；gomoku/pencil re-export）+ 每游戏完全自包含子包 games/<game>/（engine.py 裁判 + protocol.py 行协议[**三游戏均已 Botzone 化**：holdem 裸整数 response + raise delta + 牌 0-51；棋类 `{x,y}` 落子 + 信封包裹] + result.py 独立结果 + tiers.py per-game 段位 + cards.py[holdem] + templates.py 赛事模板 + spec.py 装配）。GameSpec 集中声明全部固有属性，通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支**。三层冗余 shim（engine/ + protocol/ + _compat/）已删——真实现全在 games/ |
 | 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战）+ runner（起 Bot 进程，经 games 注册表路由协议；**`_botzone_decide` 双模式传输**：按 session.runtime_mode 选 Traditional 完整历史 / LongRunning 单 request + keep_running 握手）+ auto_matcher（闲时自动） |
-| 赛制 | `contests/` | templates（**9 内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板）+ stages（对阵生成）+ manager（阶段状态机 `draft→open→published→running→rest→finished` + `reconcile_running_contests` 启动自愈对账 + `publish` 两阶段排期 + 逐场 `scheduled_at`）+ **`scheduler`（时间调度器：后台周期扫描 `*_at` 字段到点自动推进阶段）** + ranking（正式名次/破同分）+ validation |
+| 赛制 | `contests/` | templates（**9 内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板）+ stages（对阵生成；**单败淘汰 `single_elimination`：非 2 幂人数时 bye 者用 `PairingSpec(bot_b_id=None)` 占位——manager 创建无 match 的 `status=completed` 轮空 pairing，轮空者被追踪、阶段可 finish、下轮正常带入，杜绝丢胜者/卡死**）+ manager（阶段状态机 `draft→open→published→running→rest→finished` + `_maybe_next_elim_round` 奇数胜者末位轮空自动晋级 + `reconcile_running_contests` 启动自愈对账 + `publish` 两阶段排期 + 逐场 `scheduled_at`）+ **`scheduler`（时间调度器：后台周期扫描 `*_at` 字段到点自动推进阶段）** + ranking（正式名次/破同分）+ validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
 | 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈）+ schema.py（常量唯一来源） |
 | 认证 | `auth/` | routes + auth_manager + captcha + dependencies（require_user/admin/organizer） |
@@ -239,7 +239,11 @@ SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`
 - **桌面双栏（按需）**：内容密集页在 children 内自行 `lg:grid lg:grid-cols-[...]` 双栏，吃满宽度提升密度；`<lg` 自动堆叠为单列（响应式不破坏）：
   - **MyBots**：`lg:grid-cols-[20rem_minmax(0,1fr)]` —— 左栏上传表单 `lg:sticky lg:top-20` 常驻，右栏筛选 + Bot 列表主区。
   - **ContestDetail**：头部信息全宽；下方 `lg:grid-cols-[minmax(0,1fr)_22rem]` —— 左主区对阵（BracketTree/PairingFoldedList 吃满宽），右边栏报名 + 积分榜（`lg:sticky` 常驻）。
-- **长列表分页**：行数可能很大的列表页（如 **History** 对局历史）用**服务端分页**而非一次全量渲染——`/api/matches` 接受 `limit`+`offset` 并返回 `total`，前端按页（默认 20 条）渲染分页器（上一页/下一页 + `第 x-y 条，共 N 条`），筛选切换重置到第 1 页。避免一次性渲染几十上百行拖慢首屏、撑高页面。窄表单（如 **Settings** 资料/密码/通知）用 `mx-auto max-w-md` 居中，去除宽屏右侧留白。
+- **长列表分页（统一约定）**：行数可能很大的列表页一律用**服务端分页**而非一次全量渲染。统一契约：
+  - 后端：`store/db.py` 的 `_paginate(c, base_query, params, page, per_page)` helper（返回 `(rows, total)`，page 从 1 起，per_page clamp `max(1,min(200))`）。列表 store 方法加 `page: int | None = None, per_page: int = 50`——`page is None` 时返回旧的全量 list（向后兼容，内部调用如赛事 manager 需全量）；`page` 传入时返回分页。
+  - 端点：加 `page: int | None = None, per_page: int = 50` 查询参数，分页时返回 `{<key>:[...], page, per_page, total}`。已分页端点：`/api/contests`、`/api/leaderboard`、`/api/bots/public`、`/api/bots/{id}/matches`、`/api/contests/{id}`(entries)、`/api/users/{name}/bots`、`/api/bots/mine`、`/api/comments`、`/api/notifications`、`/api/admin/{users,bots,contests,matches}`。
+  - 前端：`@/components/Pagination`（页码 + 上一页/下一页 + 共 N 条），各列表页加 `page`/`total` state + fetch 带 `page`/`per_page`，筛选切换重置到第 1 页。默认每页 20-50 条。
+  - **避免**：OpponentPickerModal 等搜索弹窗不再前端全量过滤——走服务端 `q` 搜索 + debounce。
 - **约定**：新增内容密集页默认复用 PageStub 收口；需要双栏时用 `lg:grid` + 语义 token（`bg-card/text-foreground/bg-muted`），不裸 hex、不硬编码宽度，移动端务必回落单列；长列表用服务端分页 + 客户端分页器。
 
 ### 5.5 Worktree 隔离开发（物理隔离）

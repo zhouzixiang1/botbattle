@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CheckCheck, Bell } from 'lucide-react'
 import PageStub from '@/components/PageStub'
@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import Pagination from '@/components/Pagination'
 import { cn } from '@/lib/utils'
 import { apiGet, apiPost, errMsg } from '@/api'
 import { fmtTime } from '@/lib/format'
@@ -26,23 +27,34 @@ export default function Notifications() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<'all' | 'unread'>('all')
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 20
 
-  function load() {
+  const load = useCallback(() => {
     setLoading(true)
-    apiGet<{ notifications: Notification[]; unread_count: number }>(
-      `/api/notifications?unread_only=${filter === 'unread'}&limit=100`,
+    apiGet<{ notifications: Notification[]; unread_count: number; total?: number }>(
+      `/api/notifications?unread_only=${filter === 'unread'}&page=${page}&per_page=${perPage}`,
     )
       .then((d) => {
         setItems(d.notifications || [])
         setUnread(d.unread_count || 0)
+        if (d.total !== undefined) setTotal(d.total)
       })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
-  }
+  }, [filter, page])
 
   useEffect(() => {
     load()
-  }, [filter])
+  }, [load])
+
+  // 切换筛选 → 回到第 1 页
+  const onFilterChange = (f: 'all' | 'unread') => {
+    setFilter(f)
+    setPage(1)
+  }
 
   function markRead(id: number) {
     apiPost('/api/notifications/read', 'POST', { id })
@@ -70,7 +82,7 @@ export default function Notifications() {
             <button
               key={f}
               type="button"
-              onClick={() => setFilter(f)}
+              onClick={() => onFilterChange(f)}
               className={cn(
                 'rounded-md px-3 py-1 text-sm transition-colors',
                 filter === f
@@ -149,6 +161,7 @@ export default function Notifications() {
           })}
         </div>
       )}
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
     </PageStub>
   )
 }

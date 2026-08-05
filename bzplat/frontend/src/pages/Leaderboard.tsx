@@ -15,6 +15,7 @@ import {
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { TierBadge } from '@/components/tier-badge'
+import Pagination from '@/components/Pagination'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel, gameIcon, type GameId } from '@/lib/games'
 import { fmtRating } from '@/lib/format'
@@ -46,15 +47,31 @@ export default function Leaderboard() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [gameId, setGameId] = useState<GameId | ''>('holdem')
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 50
 
   useEffect(() => {
     setLoading(true)
-    const q = gameId ? `?game_id=${encodeURIComponent(gameId)}` : ''
-    apiGet<{ leaderboard: Row[] }>(`/api/leaderboard${q}`)
-      .then((d) => setRows(d.leaderboard || []))
+    const params = new URLSearchParams()
+    if (gameId) params.set('game_id', gameId)
+    params.set('page', String(page))
+    params.set('per_page', String(perPage))
+    apiGet<{ leaderboard: Row[]; total?: number }>(`/api/leaderboard?${params.toString()}`)
+      .then((d) => {
+        setRows(d.leaderboard || [])
+        if (d.total !== undefined) setTotal(d.total)
+      })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
-  }, [gameId])
+  }, [gameId, page])
+
+  // 切换游戏 tab → 回到第 1 页
+  const onGameChange = (v: string) => {
+    setGameId(v === 'all' ? '' : (v as GameId))
+    setPage(1)
+  }
 
   return (
     <PageStub
@@ -63,7 +80,7 @@ export default function Leaderboard() {
       actions={
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
-          <Select value={gameId || 'all'} onValueChange={(v) => setGameId(v === 'all' ? '' : (v as GameId))}>
+          <Select value={gameId || 'all'} onValueChange={onGameChange}>
             <SelectTrigger className="h-9 w-[8.5rem]">
               <SelectValue />
             </SelectTrigger>
@@ -117,7 +134,7 @@ export default function Leaderboard() {
                 return (
                   <TableRow key={r.bot_id}>
                     <TableCell className="font-mono text-xs text-muted-foreground">
-                      {i + 1}
+                      {(page - 1) * perPage + i + 1}
                     </TableCell>
                     <TableCell className="max-w-[10rem]">
                       <Link
@@ -190,6 +207,7 @@ export default function Leaderboard() {
           </TableBody>
         </Table>
         </div>
+        <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
       </Card>
     </PageStub>
   )

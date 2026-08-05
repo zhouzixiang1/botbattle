@@ -9,7 +9,7 @@ from typing import Any
 @dataclass
 class PairingSpec:
     bot_a_id: int
-    bot_b_id: int
+    bot_b_id: int | None
     round_num: int = 1
     group_id: str = ""
     bracket_slot: int | None = None
@@ -92,7 +92,12 @@ def next_power_of_two(n: int) -> int:
 
 
 def single_elimination(bot_ids: list[int]) -> list[PairingSpec]:
-    """首轮单败对阵；bye 直接晋级（不写 pairing，由调用方标 seed）。"""
+    """首轮单败对阵；bye 直接晋级。
+
+    轮空者用 PairingSpec(bot_b_id=None) 表示——由调用方（manager）创建「轮空占位 pairing」
+    （bot_b_id=None、无 match、status=completed），这样轮空者被追踪、阶段可 finish、
+    下一轮配对时正常带入（见 _maybe_next_elim_round 的 bye 收集逻辑）。
+    """
     bots = list(bot_ids)
     size = next_power_of_two(len(bots))
     # 补 bye：强种子轮空
@@ -107,7 +112,12 @@ def single_elimination(bot_ids: list[int]) -> list[PairingSpec]:
         if a is None and b is None:
             continue
         if a is None or b is None:
-            # bye：不生成 pairing
+            # bye：生成 bot_b_id=None 的轮空占位 spec（调用方据此标 completed）
+            advancer = a if a is not None else b
+            out.append(
+                PairingSpec(advancer, None, round_num=1, bracket_slot=slot, color_first=0)
+            )
+            slot += 1
             continue
         out.append(
             PairingSpec(a, b, round_num=1, bracket_slot=slot, color_first=0)

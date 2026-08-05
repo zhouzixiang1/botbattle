@@ -196,15 +196,23 @@ class BotManager:
         if dest.exists():
             shutil.rmtree(dest, ignore_errors=True)
 
-    def list_mine(self, owner_id: int, *, game_id: str | None = None) -> list[dict]:
-        return self.store.list_bots(owner_id=owner_id, game_id=game_id)
+    def list_mine(
+        self, owner_id: int, *, game_id: str | None = None,
+        page: int | None = None, per_page: int = 50,
+    ) -> list[dict] | dict:
+        return self.store.list_bots(
+            owner_id=owner_id, game_id=game_id, page=page, per_page=per_page,
+        )
 
     def list_public(
-        self, *, game_id: str | None = None, owner_id: int | None = None
-    ) -> list[dict]:
+        self, *, game_id: str | None = None, owner_id: int | None = None,
+        page: int | None = None, per_page: int = 50,
+    ) -> list[dict] | dict:
         # 私有 bot 功能已下线——所有 bot 都是公开的。保留方法名为兼容旧调用方，
         # 直接转发到 list_bots（不再有 public_only 过滤）。
-        return self.store.list_bots(game_id=game_id, owner_id=owner_id)
+        return self.store.list_bots(
+            game_id=game_id, owner_id=owner_id, page=page, per_page=per_page,
+        )
 
     def get(self, bot_id: int) -> dict | None:
         return self.store.get_bot(bot_id)

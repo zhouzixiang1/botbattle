@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
+import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
 
 interface Contest {
@@ -43,19 +44,26 @@ export default function ContestsTab() {
   const [busyId, setBusyId] = useState<number | null>(null)
   const [expand, setExpand] = useState<number | null>(null)
   const [entries, setEntries] = useState<Entry[]>([])
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 50
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const d = await apiGet<{ contests: Contest[] }>('/api/admin/contests')
+      const d = await apiGet<{ contests: Contest[]; total?: number }>(
+        `/api/admin/contests?page=${page}&per_page=${perPage}`,
+      )
       setContests(d.contests || [])
+      if (d.total !== undefined) setTotal(d.total)
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [page])
 
   useEffect(() => {
     void load()
@@ -132,7 +140,7 @@ export default function ContestsTab() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <span className="text-xs text-muted-foreground">
-          共 {contests.length} 个比赛（切到 running 会真正调用 start）
+          共 {total || contests.length} 个比赛（切到 running 会真正调用 start）
         </span>
         <RefreshBtn onClick={load} />
       </div>
@@ -262,6 +270,7 @@ export default function ContestsTab() {
         </table>
         {contests.length === 0 && <EmptyState text="无比赛" />}
       </div>
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
       {confirmDialog}
     </div>
   )

@@ -17,6 +17,7 @@ import { toast } from 'sonner'
 import { apiForm, apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import BotVersionManager from '@/components/BotVersionManager'
+import Pagination from '@/components/Pagination'
 
 interface Bot {
   id: number
@@ -48,18 +49,26 @@ export default function MyBots() {
   const [file, setFile] = useState<File | null>(null)
   // 版本管理对话框状态：打开的 bot id（null = 关闭）+ 当前 bot 的运行模式
   const [verBot, setVerBot] = useState<{ id: number; name: string; current: number; mode: string } | null>(null)
+  // 分页
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const perPage = 20
 
   const load = useCallback(async () => {
     if (!isLoggedIn) return
     try {
-      const q = filterGame ? `?game_id=${encodeURIComponent(filterGame)}` : ''
-      const d = await apiGet<{ bots: Bot[] }>(`/api/bots/mine${q}`)
+      const params = new URLSearchParams()
+      if (filterGame) params.set('game_id', filterGame)
+      params.set('page', String(page))
+      params.set('per_page', String(perPage))
+      const d = await apiGet<{ bots: Bot[]; total?: number }>(`/api/bots/mine?${params.toString()}`)
       setBots(d.bots || [])
+      if (d.total !== undefined) setTotal(d.total)
       setError('')
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     }
-  }, [isLoggedIn, filterGame])
+  }, [isLoggedIn, filterGame, page])
 
   useEffect(() => {
     void load()
@@ -271,7 +280,7 @@ export default function MyBots() {
       <div className="mb-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           筛选游戏
-          <Select value={filterGame || 'all'} onValueChange={(v) => setFilterGame(v === 'all' ? '' : v)}>
+          <Select value={filterGame || 'all'} onValueChange={(v) => { setFilterGame(v === 'all' ? '' : v); setPage(1) }}>
             <SelectTrigger className="h-9 w-[8.5rem]">
               <SelectValue />
             </SelectTrigger>
@@ -379,6 +388,7 @@ export default function MyBots() {
             ))}
           </ul>
         )}
+        <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
       </Card>
       </div>{/* /右栏 */}
       </div>{/* /桌面双栏栅格 */}
