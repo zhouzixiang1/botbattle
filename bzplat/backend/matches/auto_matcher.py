@@ -109,8 +109,8 @@ class AutoMatchScheduler:
                 idle = self._is_idle(cfg)
                 if idle:
                     await self._schedule_some(cfg)
-                else:
-                    self._idle_since = None  # 重置连续空闲计时
+                # 注意：不在 else 里重置 _idle_since——_is_idle 内部管理：
+                # free<=0 时重置（真忙）；计时中（第一轮）保留供下一轮判断。
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - 调度器不得因单轮异常退出
