@@ -6,7 +6,9 @@
  * - kind：'board'（棋类，步进式）| 'cards'（扑克，手牌式）—— 取代散落的 isBoard 布尔
  * - Board：棋盘/牌桌渲染组件
  * - reduce：事件归约函数（events → view model）
- * - defaultMatchConfig / configFields：对局参数默认值与可调字段（取代散落的 {hands:70} 等）
+ *
+ * 注：游戏规则参数（手数/棋盘/点阵）已钉死固定值，前端不再提供配置 UI
+ * （原 defaultMatchConfig/configFields 字段已移除）。
  *
  * 通用组件（MatchBoard 等）经 getGame(id) 取 spec，不再 if game_id 分支。
  * 新增一款游戏 = 建 src/games/<game>/ 子包 + index.ts 注册一行。
@@ -23,20 +25,6 @@ import type { GameCanvasRenderer } from './canvas-types'
  * poker 版 type: string 必填 vs 棋类 type? 可选的不兼容）。统一为可选 type?。
  */
 export type RawEvent = Record<string, unknown> & { type?: string }
-
-/** 对局参数字段定义（取代散落的 per-game 配置 UI 分支）。 */
-export interface MatchConfigField {
-  /** match_config 里的 key（如 'hands' / 'n_dots'） */
-  key: string
-  /** 显示名 */
-  label: string
-  /** 默认值 */
-  default: number
-  /** 最小值 */
-  min: number
-  /** 最大值 */
-  max: number
-}
 
 /** 一款游戏的前端视图规格。 */
 export interface GameViewSpec {
@@ -56,10 +44,6 @@ export interface GameViewSpec {
   // 的 RawEvent[]，注册时经类型断言适配（结构兼容，运行时无影响）。
   /** canvas 渲染器（可选）。若提供，GameCanvas 优先用它绘制，替代默认 DOM Board。 */
   CanvasRenderer?: GameCanvasRenderer
-  /** 默认 match_config（取代散落 {hands:70}/{n_dots:11}） */
-  defaultMatchConfig: Record<string, number>
-  /** 可调对局参数字段（取代散落配置 UI 分支） */
-  configFields: MatchConfigField[]
   /** 座位着色（如 gomoku=['黑','白'], pencil=['红','蓝']）—— 取代渲染层按游戏名分支 */
   seatColors?: string[]
   /** 进度单位：hand=手数(扑克), move=步数(棋类) —— 取代 Home 等页面的游戏名分支 */

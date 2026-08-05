@@ -15,9 +15,5 @@ export const holdemSpec: GameViewSpec = {
   Board: HoldemBoardStub,
   reduce: reduceHoldemEvents as unknown as GameViewSpec['reduce'],
   CanvasRenderer: PokerCanvasRenderer,
-  defaultMatchConfig: { hands: 70 },
-  configFields: [
-    { key: 'hands', label: '手数', default: 70, min: 1, max: 500 },
-  ],
   progressUnit: 'hand',
 }

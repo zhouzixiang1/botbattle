@@ -22,7 +22,7 @@ import Countdown from '@/components/Countdown'
 import { useAuth } from '@/components/useAuth'
 import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
-import { gameLabel } from '@/lib/games'
+import { gameLabel, isBoardGame } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import { toast } from 'sonner'
 
@@ -260,7 +260,11 @@ export default function ContestDetail() {
                   模板 {contest.template_name || contest.template_id || '—'}
                 </span>
                 <span>· 游戏 {gameLabel(contest.game_id || 'holdem')}</span>
-                <span>· 每场 {contest.hands_per_match ?? 70} 手</span>
+                {isBoardGame(contest.game_id) ? (
+                  <span>· 单局决胜</span>
+                ) : (
+                  <span>· 每场 70 手</span>
+                )}
                 {estimate?.estimated_matches != null && (
                   <Badge variant="outline" className="text-[10px]">预估 {estimate.estimated_matches} 场</Badge>
                 )}

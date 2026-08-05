@@ -3,7 +3,7 @@ import { ArrowLeft } from 'lucide-react'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { ErrorMsg, Loading, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, inp } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
-import { defaultMatchConfig, getGame, GAMES, type GameId } from '@/games'
+import { GAMES, type GameId } from '@/games'
 
 // ── 类型 ──────────────────────────────────────────────────────
 type StageType =
@@ -54,7 +54,7 @@ const emptyTemplate = (): Template => ({
   id: '',
   name: '',
   game_id: 'holdem',
-  match_config: { hands: 70 },
+  match_config: {},
   stages: [emptyStage(0)],
 })
 
@@ -87,10 +87,10 @@ export default function TemplatesTab() {
     void load()
   }, [load])
 
-  // 切换 game 时重置 match_config 为该游戏默认（经注册表，消除 if game_id）
+  // 切换 game：规则参数已钉死，match_config 恒空
   const changeGame = (gid: GameId) => {
     if (!editing) return
-    setEditing({ ...editing, game_id: gid, match_config: defaultMatchConfig(gid) })
+    setEditing({ ...editing, game_id: gid, match_config: {} })
   }
 
   const patchStage = (i: number, patch: Partial<Stage>) => {
@@ -169,9 +169,6 @@ export default function TemplatesTab() {
         setEditing={setEditing}
         addStage={() => setEditing({ ...editing, stages: [...editing.stages, emptyStage(editing.stages.length)] })}
         delStage={(i) => setEditing({ ...editing, stages: editing.stages.filter((_, idx) => idx !== i) })}
-        setMatchConfig={(k, v) =>
-          setEditing({ ...editing, match_config: { ...editing.match_config, [k]: v } })
-        }
         setField={(k, v) => setEditing({ ...editing, [k]: v })}
         onPreview={doPreview}
         onSave={save}
@@ -258,7 +255,6 @@ function Editor(props: {
   setEditing: (t: Template | null) => void
   addStage: () => void
   delStage: (i: number) => void
-  setMatchConfig: (k: string, v: number) => void
   setField: (k: 'id' | 'name', v: string) => void
   onPreview: () => void
   onSave: () => void
@@ -304,22 +300,6 @@ function Editor(props: {
             </SelectContent>
           </Select>
         </div>
-      </div>
-
-      {/* 对局参数 match_config（经注册表 configFields，消除 per-game if 分支） */}
-      <div className="rounded-lg bg-muted p-3">
-        <p className="mb-2 text-xs font-medium text-muted-foreground">对局参数（match_config）</p>
-        {getGame(t.game_id).configFields.map((f) => (
-          <label key={f.key} className="text-sm text-muted-foreground">
-            {f.label}（{f.min}–{f.max}）
-            <input type="number" min={f.min} max={f.max} className={inp}
-              value={t.match_config[f.key] ?? f.default}
-              onChange={(e) => props.setMatchConfig(f.key, Number(e.target.value))} />
-          </label>
-        ))}
-        {getGame(t.game_id).configFields.length === 0 && (
-          <p className="text-xs text-muted-foreground">{getGame(t.game_id).label}单局，无可调参数。</p>
-        )}
       </div>
 
       {/* 阶段列表 */}

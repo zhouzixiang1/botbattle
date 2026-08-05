@@ -14,10 +14,6 @@ export const pencilSpec: GameViewSpec = {
   Board: PencilBoardStub as unknown as GameViewSpec['Board'],
   reduce: reducePencilEvents as unknown as GameViewSpec['reduce'],
   CanvasRenderer: PencilCanvasRenderer,
-  defaultMatchConfig: { n_dots: 6 }, // 对齐 Botzone grid_size=11 交错 → 6 点 → 25 格
-  configFields: [
-    { key: 'n_dots', label: '点阵边长', default: 6, min: 3, max: 15 },
-  ],
   seatColors: ['红', '蓝'],
   progressUnit: 'move',
   showScores: true,

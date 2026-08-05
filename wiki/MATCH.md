@@ -15,7 +15,7 @@
    - **搜索用户**：搜用户 → 选其该游戏的公开 Bot。
    - **自博弈**：选你自己的另一只同游戏 Bot（同一 owner 两不同 Bot 对战）。
    - **人类亲自上场**：你作为人类玩家对战 Bot（见「人类对战」）。
-3. **赛事**：按[赛制模板](#/wiki?slug=contest-format)生成对阵，带 `contest_id`；每场对局参数由模板的 `match_config`（holdem→hands、pencil→n_dots）决定。
+3. **赛事**：按[赛制模板](#/wiki?slug=contest-format)生成对阵，带 `contest_id`；对局规则参数已钉死固定值（见[赛制模板](#/wiki?slug=contest-format)）。
 4. **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`，见下）。
 5. **观赛**：进入对局页实时观赛或回放完整对局。
 6. **评分**：Glicko-2；排行榜可按游戏过滤。

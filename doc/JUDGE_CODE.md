@@ -40,10 +40,10 @@ games.registry.get(game_id).run_session(decide, **params)
 | `judge_holdem_starting_stack` | 20000 | 1000–1000000 | 德州起始筹码 |
 | `judge_holdem_sb` | 50 | 1–10000 | 德州小盲注 |
 | `judge_holdem_bb` | 100 | 2–20000 | 德州大盲注（须 > SB） |
-| `judge_holdem_default_hands` | 70 | 1–1000 | 德州挑战默认手数 |
-| `judge_gomoku_board_size` | 15 | 9–19 | 五子棋棋盘边长 |
 
-> 点格棋 N（`n_dots`）**不是**全局参数——由各对局的 match 配置决定，因此不在本页可调参数中。`None` 时由游戏 `GameSpec` / 引擎默认值兜底。
+> 游戏规则参数（手数/棋盘边长/点阵边长）已**钉死固定值**，不再是 admin 可调项：
+> holdem 固定 70 手、gomoku 固定 15×15、pencil 固定 6 点。原 `judge_holdem_default_hands` /
+> `judge_gomoku_board_size` 设置项已移除。
 
 参数贯通链路：`platform_settings` → 编排 judge params → `runner.run_binaries()` → `games` 注册表 `run_session` → 各 Session 构造参数。
 

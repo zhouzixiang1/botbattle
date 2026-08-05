@@ -35,7 +35,7 @@
 | CPU / 内存 | 1 核 / 默认 256MB | Docker `--cpus=1` / `--memory=512m` |
 | 决策时限 | 默认 1s/回合（首回合×2） | 管理员可配（默认 60s） |
 | 游戏 | 站内多游戏 | `holdem` / `gomoku` / `pencil` |
-| 德州协议 | 信封 + 裸整数 response + raise=增量 | **完全照 Botzone**（信封 + 裸整数 `-1/-2/0/>0` + raise=额外量；手数 70） |
+| 德州协议 | 信封 + 裸整数 response + raise=增量 | **完全照 Botzone**（信封 + 裸整数 `-1/-2/0/>0` + raise=额外量；固定 70 手） |
 | 棋类协议 | 聚合 `requests`/`responses` | 每步推送对方上一手，Botzone 信封 + `{x,y}` 落子（完全照 Botzone） |
 
 上传 Bot 时请选择正确的 **游戏类型**；挑战与排行榜按 `game_id` 过滤。

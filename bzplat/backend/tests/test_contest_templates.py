@@ -26,8 +26,8 @@ def test_builtin_templates_seeded(store: Store):
     # 内置标记
     by_id = {t["id"]: t for t in tpls}
     assert by_id["holdem_swiss_ko"]["is_builtin"] in (1, True)
-    # match_config 按 game 填好
-    assert by_id["holdem_swiss_ko"]["match_config"] == {"hands": 70}
+    # match_config 已钉死（规则参数固定），恒为空 dict
+    assert by_id["holdem_swiss_ko"]["match_config"] == {}
     assert by_id["gomoku_group_drr_ko"]["match_config"] == {}
     # stages 已解析
     assert len(by_id["holdem_swiss_ko"]["stages"]) >= 1
@@ -73,7 +73,8 @@ def test_validate_template_ok():
         {"n_dots": 9}, [{"key": "g", "type": "group_double_round_robin", "group_count": 2}],
     )
     assert norm["game_id"] == "pencil"
-    assert norm["match_config"] == {"n_dots": 9}
+    # n_dots 已钉死，match_config 规整为空（传入值被忽略）
+    assert norm["match_config"] == {}
     assert norm["stages"][0]["group_count"] == 2
 
 
@@ -92,20 +93,19 @@ def test_validate_rejects_group_count_on_non_group():
         validate_stage({"type": "swiss", "group_count": 4}, 0)
 
 
-def test_validate_match_config_holdem_bounds():
-    validate_match_config({"hands": 1}, "holdem")
-    validate_match_config({"hands": 500}, "holdem")
-    with pytest.raises(ValueError):
-        validate_match_config({"hands": 0}, "holdem")
-    with pytest.raises(ValueError):
-        validate_match_config({"hands": 999}, "holdem")
+def test_validate_match_config_holdem_ignored():
+    # 手数已钉死，validate 忽略任何 hands 字段，返回空 dict（不再校验范围）
+    assert validate_match_config({"hands": 1}, "holdem") == {}
+    assert validate_match_config({"hands": 500}, "holdem") == {}
+    assert validate_match_config({"hands": 0}, "holdem") == {}  # 不再抛 ValueError
+    assert validate_match_config({"hands": 999}, "holdem") == {}
 
 
-def test_validate_match_config_pencil_bounds():
-    validate_match_config({"n_dots": 3}, "pencil")
-    validate_match_config({"n_dots": 15}, "pencil")
-    with pytest.raises(ValueError):
-        validate_match_config({"n_dots": 2}, "pencil")
+def test_validate_match_config_pencil_ignored():
+    # 点阵边长已钉死，validate 忽略任何 n_dots 字段，返回空 dict
+    assert validate_match_config({"n_dots": 3}, "pencil") == {}
+    assert validate_match_config({"n_dots": 15}, "pencil") == {}
+    assert validate_match_config({"n_dots": 2}, "pencil") == {}  # 不再抛 ValueError
 
 
 def test_validate_template_id_format():

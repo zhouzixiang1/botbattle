@@ -24,10 +24,11 @@
   3. **最后不留脏分支和产物**（收尾自检清单，缺一不可）：
      - 停掉自己起的所有服务进程（后端 serve / 前端 vite dev / 后台造数据脚本）——按 PID 精确 kill，`ps aux | grep -E 'bzplat.backend.cli serve|vite'` 确认无残留。
      - `git worktree remove` 自己的 worktree 目录（含 node_modules/db 等产物一并清除）。
+     - **一次性临时脚本用完即删**：agent 写的数据迁移/修补/清理类脚本（`scripts/fix_*.py`、`migrate_*.py`、`cleanup_*.py`、`repair_*.py` 等）跑完必须立即删除，**不得残留在工作区/仓库**（否则会污染 `scripts/` 让后人误以为是长期运维脚本）。放 `/tmp/` 跑或跑完 `rm` 删；长期运维脚本（`platform-ctl.sh`/`rebuild.sh`/`e2e_smoke.sh`/`seed_test_accounts.py` 等）不在删除范围。
      - 删自己的分支：本地 `git branch -D <分支>` + 远端 `git push origin --delete <分支>`（**PR 用 `--delete-branch` 合并会自动删远端，但本地分支和 remote-tracking 引用仍要手动清；中断/手动合并的更要补删**）。
      - `git remote prune origin` 清理失效的 remote-tracking 引用。
-     - 自检：`git worktree list`（只剩 main + 别人的）、`git branch -a`（无自己的残留）、`ps aux | grep botbattle`（无自己的进程）、`ss -tlnp`（自己的端口已释放）。
-     - **任务被打断/会话重启时，恢复后第一件事是盘点并清理上一轮可能遗留的脏产物**（worktree/进程/分支），不要直接开新工作堆在上面。
+     - 自检：`git worktree list`（只剩 main + 别人的）、`git branch -a`（无自己的残留）、`ps aux | grep botbattle`（无自己的进程）、`ss -tlnp`（自己的端口已释放）、`ls scripts/`（无自己的临时脚本残留）。
+     - **任务被打断/会话重启时，恢复后第一件事是盘点并清理上一轮可能遗留的脏产物**（worktree/进程/分支/临时脚本），不要直接开新工作堆在上面。
 - **提交前跑测试**：`pytest`（从仓库根目录），前端改了再 `npm run build`。
 - **改动须同步三处**（提交前自检）：
   1. **测试**：有功能/行为变更 → 在 `bzplat/backend/tests/` 加/改测试用例，覆盖新逻辑与边界。
@@ -144,7 +145,7 @@ src/pages/                 20 个顶层路由，全部用 React.lazy 代码分�
 
 **核心解耦契约层**（全面解耦后，游戏对平台暴露统一契约；违反这些契约的游戏会在运行时崩）：
 - **结果鸭子类型**（result.py 独立定义，不共享基类）：裁判产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层**只依赖这两个字段**（+ `rounds_played`/`rounds`/`events`/`winner`），绝不触碰扑克的 pot/board/holes 或棋类的棋盘。**`winner` 在引擎内权威化**（PR4）：棋类单轮取胜者；holdem 多手按累计净筹码（`final_chips`/net）比较——编排层只读 `result.winner`（+ ea/eb 平局兜底），不再有 match_end 事件三层兜底 / holdem 特例注释（隐性 if-game_id 已消除）。**测试守护**：`tests/test_result_contract.py` 断言三游戏 result 都满足此契约（防 drift）。
-- **GameSpec 接口**（`games/base.py`）：每款游戏须声明全部字段——`session_factory`(裁判,`async __call__(decide,*,on_event,**params)→MatchResult`，Protocol 与 `run_session` 唯一调用点对齐)、`protocol`(`dumps_request/loads_response/fail_response`)、`default_match_params`/`validate_match_params`、`rounds_per_match`/`normalize_earnings`/`eta_for_match`(编排特化)、`judge_params`(`field` 是 `run_session` 形参名，须与 session_factory kwarg 一致，否则 admin 设置静默失效)、`tiers`(段位曲线，查表算法共享 `base.tier_for_in`，无需各游戏再包一层 `tier_for`)、`templates`、`default_scoring`(默认计分，通用层从 spec 读不得硬编码 poker_3_1_0)、`num_seats`(座位数，当前全 2，预留 N 人扩展)、`code_path`/`summary`(元信息)、`preflight_check`(上传预检)。**每个字段都被通用层真正消费**（无死字段；曾删 `eta_per_match_sec`/`frontend_module`/`tier_for` 三个死字段）。通用层经 `registry.get(game_id)` 取 spec，**禁止 `if game_id==` 分支**（`tests/test_import_cycles.py` 源码扫描守护 games/<game>/ 不反向 import engine；`tests/test_tongyong_layer_no_game_branches.py` 源码扫描守护通用层无 game-name 分支/硬编码 3-game 列表/直接 import 具体游戏模块——含 `==`/`!=`/`in`/`startswith`/`.get("holdem")` 各变体，合法兜底用 `# allow-game-fallback` 注释豁免）。
+- **GameSpec 接口**（`games/base.py`）：每款游戏须声明全部字段——`session_factory`(裁判,`async __call__(decide,*,on_event,**params)→MatchResult`，Protocol 与 `run_session` 唯一调用点对齐)、`protocol`(`dumps_request/loads_response/fail_response`)、`default_match_params`/`validate_match_params`/**`rounds_per_match`/`normalize_earnings`/`eta_for_match`**(编排特化)、`judge_params`(`field` 是 `run_session` 形参名，须与 session_factory kwarg 一致，否则 admin 设置静默失效)、`tiers`(段位曲线，查表算法共享 `base.tier_for_in`，无需各游戏再包一层 `tier_for`)、`templates`、`default_scoring`(默认计分，通用层从 spec 读不得硬编码 poker_3_1_0)、`num_seats`(座位数，当前全 2，预留 N 人扩展)、`code_path`/`summary`(元信息)、`preflight_check`(上传预检)。**每个字段都被通用层真正消费**（无死字段；曾删 `eta_per_match_sec`/`frontend_module`/`tier_for` 三个死字段）。**游戏规则参数（手数/棋盘/点阵）已钉死固定值**：`default_match_params` 恒 `{}`、`validate_match_params` 忽略任何传入字段返回 `{}`、`rounds_per_match`/`eta_for_match` 返回固定常量、`session_factory` 用模块常量构造 Session（不再读 params 里的规则键）；`judge_params` 仅保留 holdem 的 starting_stack/sb/bb（手数/棋盘已从可调项移除）。通用层经 `registry.get(game_id)` 取 spec，**禁止 `if game_id==` 分支**（`tests/test_import_cycles.py` 源码扫描守护 games/<game>/ 不反向 import engine；`tests/test_tongyong_layer_no_game_branches.py` 源码扫描守护通用层无 game-name 分支/硬编码 3-game 列表/直接 import 具体游戏模块——含 `==`/`!=`/`in`/`startswith`/`.get("holdem")` 各变体，合法兜底用 `# allow-game-fallback` 注释豁免）。
 - **段位 per-game**：`games/<game>/tiers.py` 声明该游戏段位曲线（查表算法共享 `base.tier_for_in`，曲线数据独立可调）；`registry.tier_for(game_id, rating)` 统一经 `tier_for_in(rating, spec.tiers)`（各游戏无需再声明 `tier_for` 字段）；`/api/tiers?game_id=` 返回对应曲线；前端 `lib/tiers.ts` 的 `useGameTiers(gameId)` 按游戏拉取着色。
 
 **新增一款游戏的成本**（通用层零改动）——checklist：

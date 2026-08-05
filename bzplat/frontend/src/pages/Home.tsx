@@ -246,9 +246,7 @@ export default function Home() {
                       <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
                         {isBoardGame(m.game_id)
                           ? `${m.result?.hands_played ?? 0} 步`
-                          : m.match_config?.hands
-                            ? `${m.result?.hands_played ?? 0}/${m.match_config.hands}`
-                            : `${m.result?.hands_played ?? 0} 手`}
+                          : `${m.result?.hands_played ?? 0} 手`}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">

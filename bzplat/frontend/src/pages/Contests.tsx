@@ -16,7 +16,7 @@ import { fmtTime } from '@/lib/format'
 import Countdown from '@/components/Countdown'
 import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
-import { getGame, defaultMatchConfig } from '@/games'
+import { isBoardGame } from '@/games'
 
 interface Contest {
   id: number
@@ -48,25 +48,10 @@ function scheduleHint(c: Contest): { label: string; time?: string | null } | nul
   return null
 }
 
-/** 解析比赛对局参数概要（经注册表 configFields，消除 per-game if 分支）。 */
+/** 比赛对局参数概要（游戏规则已钉死固定值：holdem 70 手、棋类单局）。 */
 function matchConfigSummary(c: Contest): string {
   const gid = c.game_id || 'holdem'
-  const spec = getGame(gid)
-  let cfg: Record<string, unknown> = {}
-  try {
-    cfg = c.match_config_json ? JSON.parse(c.match_config_json) : {}
-  } catch {
-    cfg = {}
-  }
-  if (spec.configFields.length === 0) return '单局'
-  // 展示该游戏所有可调参数（如 holdem "70 手"、pencil "6 点"）
-  return spec.configFields
-    .map((f) => {
-      const v = (cfg[f.key] as number) ?? f.default
-      const unit = f.key === 'hands' ? '手' : f.key === 'n_dots' ? '点' : ''
-      return `${v} ${unit}`.trim()
-    })
-    .join(' / ')
+  return isBoardGame(gid) ? '单局' : '70 手'
 }
 
 interface Template {
@@ -81,8 +66,6 @@ export default function Contests() {
   const [templates, setTemplates] = useState<Template[]>([])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
-  // 动态对局参数（按所选游戏的 configFields 驱动，取代散落的 hands/nDots 状态）
-  const [matchCfg, setMatchCfg] = useState<Record<string, number>>({})
   const [templateId, setTemplateId] = useState('holdem_swiss_ko')
   const [filterGame, setFilterGame] = useState('')
   const [formGameId, setFormGameId] = useState('holdem')
@@ -97,13 +80,7 @@ export default function Contests() {
   const [total, setTotal] = useState(0)
   const perPage = 20
   const canCreate = user?.role === 'organizer' || user?.role === 'admin'
-  // 建赛表单：游戏由用户选（不再从模板反推），决定 match_config 字段 + 模板可选集
-  const selGame = formGameId
-  const selSpec = getGame(selGame)
-  // 切换游戏时重置动态参数为该游戏默认
-  useEffect(() => {
-    setMatchCfg(defaultMatchConfig(formGameId))
-  }, [formGameId])
+  // 建赛表单：游戏由用户选（不再从模板反推）；规则参数已钉死，无需动态配置 UI。
 
   const load = () => {
     const params = new URLSearchParams()
@@ -152,7 +129,6 @@ export default function Contests() {
         description,
         template_id: templateId,
         game_id: formGameId,
-        match_config: { ...matchCfg },
         require_real_name: requireRealName,
         registration_opens_at: toIso(regOpensAt),
         registration_closes_at: toIso(regClosesAt),
@@ -247,25 +223,6 @@ export default function Contests() {
                   </SelectContent>
                 </Select>
               </div>
-              {selSpec.configFields.map((f) => (
-                <div key={f.key} className="space-y-1.5">
-                  <Label htmlFor={`contest-${f.key}`}>{f.label}</Label>
-                  <Input
-                    id={`contest-${f.key}`}
-                    type="number"
-                    min={f.min}
-                    max={f.max}
-                    className="w-24"
-                    value={matchCfg[f.key] ?? f.default}
-                    onChange={(e) => setMatchCfg({ ...matchCfg, [f.key]: Number(e.target.value) })}
-                  />
-                </div>
-              ))}
-              {selSpec.configFields.length === 0 && (
-                <span className="self-center text-xs text-muted-foreground">
-                  {selSpec.label}单局，无可调参数
-                </span>
-              )}
               <div className="flex items-center gap-2">
                 <Switch checked={requireRealName} onCheckedChange={setRequireRealName} />
                 <Label htmlFor="contest-realname" className="cursor-pointer text-sm">

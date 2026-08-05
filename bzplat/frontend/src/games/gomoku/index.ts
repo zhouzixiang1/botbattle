@@ -14,8 +14,6 @@ export const gomokuSpec: GameViewSpec = {
   Board: GomokuBoardStub as unknown as GameViewSpec['Board'],
   reduce: reduceGomokuEvents as unknown as GameViewSpec['reduce'],
   CanvasRenderer: GomokuCanvasRenderer,
-  defaultMatchConfig: {},
-  configFields: [], // 单局无可调参数
   seatColors: ['黑', '白'],
   progressUnit: 'move',
 }

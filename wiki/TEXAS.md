@@ -255,7 +255,7 @@ Bot 所需要输出的 response 是一个**整数**，表示自己要下注的�
 
 `max_hand`：比赛总局数；双人模式默认为 **50**，六人模式默认为 18。
 
-本平台对局参数见管理员「裁判参数」与 `match_config.hands` 等（默认 **70** 手），不经 Botzone 的 `initdata` 字段。
+本平台手数**固定 70 手**（规则钉死，不可配），不经 Botzone 的 `initdata` 字段。
 
 ---
 
@@ -361,7 +361,7 @@ print(json.dumps({"response": action}))
 |----|----------------------|-----------------|
 | 进程模型 | Traditional 每回合启停 / LongRunning 长驻 | **整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动可直接跑 |
 | 运行模式 | Traditional / LongRunning | 都支持（上传时标明） |
-| 默认手数 | 50（`max_hand`） | **70**（可配 `match_config.hands`；其余规则一致） |
+| 默认手数 | 50（`max_hand`） | **固定 70**（不可配；其余规则一致） |
 | 每手筹码 | **每手固定 20000 复位** | **同左**：每手复位 20000，不跨手累积；按各手净输赢累加（累计净筹码）判定胜负 |
 | 决策时限 | 约 1s/步 | 管理员可配（默认 60s） |
 | Request | Botzone 信封 `{"requests":[...]}` / `{"request":...}` | **同左**（字段全名 `num_players`/`my_cards`/`history`/`total_win_chips`…，与 Botzone 一致） |

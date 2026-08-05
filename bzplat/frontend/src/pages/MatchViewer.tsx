@@ -274,7 +274,6 @@ export default function MatchViewer() {
             <span className="font-mono text-foreground">
               {String(liveSteps ?? match.result?.hands_played ?? 0)}
             </span>
-            {!isBoard && match.match_config?.hands ? <span className="text-muted-foreground">/{String(match.match_config.hands)}</span> : null}
           </span>
         )}
         {match && (
