@@ -15,6 +15,15 @@
      - **前端**：`cd .worktrees/<分支名>/bzplat/frontend && npm install && BZ_API_TARGET=http://127.0.0.1:<worktree端口> npm run dev`
        （vite.config.ts 的 proxy 目标读 `BZ_API_TARGET` 环境变量）
      - **严禁**前端 proxy 到 50380 线上服务（会把测试写进线上 db）；**严禁** worktree 后端用 CWD=主目录（会加载主目录源码+db）。
+  3.5. **建 worktree 时把数据库带出来 + 评估对数据库的影响**（硬约束——测试要真实数据，但绝不能写主库）：
+     - **带库**：worktree 新建时目录里没有 `botzone.db`（后端启动会建空库，缺数据导致测试不真实）。须从主目录**复制**一份主库到 worktree：
+       ```bash
+       cp /home/zzx/project/botbattle/botzone.db .worktrees/<分支名>/botzone.db
+       # 副本与主库完全独立——往 worktree 库写不会影响主库（关键：是 cp 不是软链接）
+       ```
+     - **先评估影响再动**：复制前必须想清「这个 worktree 的改动会怎么读写数据库？」——新增表/列（需迁移测试）、写业务数据（造测试数据）、只读查询（副本即可）、清空/迁移（高风险，确认在 worktree 库操作）。评估结论写进 PR 描述的「数据库影响」一栏。
+     - **起服务必须钉死 worktree 库**：`cd .worktrees/<分支名> && BZ_DB_PATH=$PWD/botzone.db python -m bzplat.backend.cli serve --port <非50380>`——显式 `BZ_DB_PATH=$PWD/botzone.db`（绝对路径）锁死到 worktree 库，杜绝 CWD 漂移或误连主库。关联产物（`bot_uploads/`/`avatars/`/`logs/`）也跑在 worktree 下（CWD 隔离）。
+     - **铁律：测试只能动 worktree 库，绝不动主分支库**——`/home/zzx/project/botbattle/botzone.db`（50380 服务）是**只读真相源**，任何写操作（造数据/迁移/清空/修复）都必须在 worktree 副本上进行。误写主库 = 污染线上，不可逆。验证某操作安全时，先在 worktree 库跑通再考虑是否适用于主库（且主库操作必须用户明确授权）。
   4. **合并必须走 GitHub Pull Request**（`gh pr create` → 评审 → 合并到 main），**禁止本地 `git merge` 直推 main**。
   5. PR 合并后**清理**：停 worktree 服务 → 主目录 `git worktree remove .worktrees/<分支名>` → 删分支（本地 + 远端）→ 主目录 `git pull` + `bash scripts/rebuild.sh`（rebuild + restart，让 50380 生效新代码）。
 - **多 agent 协作避免上下文污染**（硬约束——三条铁律，违反会污染他人工作）：

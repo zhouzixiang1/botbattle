@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { fmtTime } from '../../lib/format'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import { EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tooltip, TooltipContent, TooltipTrigger } from './ui'
 import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
 
@@ -16,6 +16,30 @@ interface User {
   email_verified: boolean
   created_at?: string
   last_login_at?: string | null
+  // 实名信息（仅 admin 可见；后端 list_users 返回 SELECT *，字段已在数据里）
+  real_name?: string
+  phone?: string
+  school?: string
+  student_id?: string
+}
+
+/** 是否已完成实名（4 项全填非空，与后端 contests/manager.py 报名校验口径一致）。 */
+function hasRealName(u: User): boolean {
+  return Boolean(
+    (u.real_name || '').trim() &&
+      (u.phone || '').trim() &&
+      (u.school || '').trim() &&
+      (u.student_id || '').trim(),
+  )
+}
+
+/** 实名详情文本（Tooltip 展示用）。 */
+function realNameDetail(u: User): string {
+  return [
+    `手机：${u.phone || '—'}`,
+    `学校：${u.school || '—'}`,
+    `学号：${u.student_id || '—'}`,
+  ].join('\n')
 }
 
 export default function UsersTab() {
@@ -23,6 +47,8 @@ export default function UsersTab() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
+  // 实名筛选：'all' = 不过滤（哨兵，符合项目 Select 规范——空串被 Radix 当占位）
+  const [realNameFilter, setRealNameFilter] = useState<'all' | 'yes' | 'no'>('all')
   const [busyId, setBusyId] = useState<number | null>(null)
   const [confirmDel, setConfirmDel] = useState<number | null>(null)
   // 分页
@@ -91,12 +117,18 @@ export default function UsersTab() {
     }
   }
 
-  const filtered = users.filter(
-    (u) =>
+  const filtered = users.filter((u) => {
+    // 文本搜索（用户名/邮箱）
+    const matchQ =
       !q ||
       u.username.toLowerCase().includes(q.toLowerCase()) ||
-      u.email.toLowerCase().includes(q.toLowerCase()),
-  )
+      u.email.toLowerCase().includes(q.toLowerCase())
+    // 实名筛选
+    const matchRealName =
+      realNameFilter === 'all' ||
+      (realNameFilter === 'yes' ? hasRealName(u) : !hasRealName(u))
+    return matchQ && matchRealName
+  })
 
   if (loading && !users.length) return <Loading />
   return (
@@ -108,6 +140,19 @@ export default function UsersTab() {
           placeholder="搜索用户名/邮箱"
           className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
         />
+        <Select
+          value={realNameFilter}
+          onValueChange={(v) => setRealNameFilter(v as 'all' | 'yes' | 'no')}
+        >
+          <SelectTrigger size="sm" className="h-9 w-32 text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部用户</SelectItem>
+            <SelectItem value="yes">已实名</SelectItem>
+            <SelectItem value="no">未实名</SelectItem>
+          </SelectContent>
+        </Select>
         <span className="text-xs text-muted-foreground">共 {total || filtered.length} 人</span>
         <div className="ml-auto">
           <RefreshBtn onClick={load} />
@@ -122,6 +167,7 @@ export default function UsersTab() {
               <th className="px-3 py-2.5">ID</th>
               <th className="px-3 py-2.5">用户名</th>
               <th className="px-3 py-2.5">邮箱</th>
+              <th className="px-3 py-2.5">实名</th>
               <th className="px-3 py-2.5">角色</th>
               <th className="px-3 py-2.5">状态</th>
               <th className="px-3 py-2.5">注册时间</th>
@@ -139,6 +185,22 @@ export default function UsersTab() {
                 </td>
                 <td className="max-w-[16rem] truncate px-3 py-2 text-muted-foreground">
                   <span className="block truncate" title={u.email}>{u.email}</span>
+                </td>
+                <td className="px-3 py-2 text-sm">
+                  {hasRealName(u) ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="cursor-help underline decoration-dotted underline-offset-2">
+                          {u.real_name}
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="whitespace-pre-line text-xs">
+                        {realNameDetail(u)}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                 </td>
                 <td className="px-3 py-2">
                   <Select

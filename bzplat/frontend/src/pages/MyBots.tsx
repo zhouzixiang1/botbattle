@@ -44,7 +44,7 @@ export default function MyBots() {
   const [displayName, setDisplayName] = useState('')
   const [description, setDescription] = useState('')
   const [gameId, setGameId] = useState('holdem')
-  const [runtimeMode, setRuntimeMode] = useState('longrunning')
+  const [runtimeMode, setRuntimeMode] = useState('traditional')
   const [filterGame, setFilterGame] = useState('')
   const [file, setFile] = useState<File | null>(null)
   // 版本管理对话框状态：打开的 bot id（null = 关闭）+ 当前 bot 的运行模式
@@ -323,7 +323,7 @@ export default function MyBots() {
                         format: {b.format || 'unknown'}
                       </span>
                       <span className="rounded bg-muted px-1.5 py-0.5 font-mono">
-                        {b.runtime_mode || 'longrunning'}
+                        {b.runtime_mode || 'traditional'}
                       </span>
                       <span>v{b.current_version ?? 0}</span>
                       <span>{b.is_active ? '启用' : '停用'}</span>
@@ -345,7 +345,7 @@ export default function MyBots() {
                               id: b.id,
                               name: b.display_name || b.name,
                               current: b.current_version ?? 0,
-                              mode: b.runtime_mode || 'longrunning',
+                              mode: b.runtime_mode || 'traditional',
                             })
                           }
                           className="gap-1"

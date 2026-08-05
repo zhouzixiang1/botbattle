@@ -50,6 +50,18 @@ def get_current_user(
 require_user = get_current_user
 
 
+def optional_user(
+    request: Request, auth: AuthManager = Depends(get_auth)
+) -> dict | None:
+    """可选登录：已登录返回 user，未登录返回 None（不抛 401）。
+
+    用于公开端点需区分 owner/访客做脱敏的场景（如 bot 详情：owner 看完整、
+    访客脱敏 binary_path）。区别于 require_user（未登录直接 401）。
+    """
+    token = _extract_token(request)
+    return auth.verify_session(token) or None
+
+
 def require_admin(user: dict = Depends(require_user)) -> dict:
     if user.get("role") != ROLE_ADMIN:
         raise HTTPException(status_code=403, detail="需要管理员权限")

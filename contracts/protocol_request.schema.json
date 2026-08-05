@@ -1,9 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "BotzoneHoldemRequest",
-  "description": "Botzone 标准德州扑克请求负载（信封内 requests[] 元素或 request 字段）。字段全名对齐 Botzone TexasHoldem2p。",
+  "description": "Botzone 标准德州扑克请求负载（信封内 requests[] 元素或 request 字段）。字段严格对齐 Botzone TexasHoldem2p 官方 11 字段（PR#115 移除全部平台扩展字段，本 schema 同步）。additionalProperties: false 防止扩展字段回归。",
   "type": "object",
-  "required": ["num_players", "dealer_id", "my_id", "my_chips", "my_cards", "public_cards", "history", "hand", "max_hand"],
+  "required": ["num_players", "dealer_id", "my_id", "my_chips", "my_cards", "public_cards", "history", "hand", "max_hand", "total_win_chips", "total_win_games"],
+  "additionalProperties": false,
   "properties": {
     "num_players": { "type": "integer", "const": 2 },
     "dealer_id": { "type": "integer", "enum": [0, 1] },
@@ -37,15 +38,6 @@
     "hand": { "type": "integer", "minimum": 0 },
     "max_hand": { "type": "integer", "minimum": 1 },
     "total_win_chips": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
-    "total_win_games": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
-    "to_call": { "type": "integer", "minimum": 0, "description": "平台扩展：跟注额" },
-    "street_bet": { "type": "integer", "minimum": 0, "description": "平台扩展：本街已投" },
-    "current_bet": { "type": "integer", "minimum": 0, "description": "平台扩展：本街最高下注" },
-    "sb": { "type": "integer" },
-    "bb": { "type": "integer" },
-    "opp_chips": { "type": "integer", "minimum": 0 },
-    "quitting": { "type": "boolean", "description": "平台扩展：对局是否即将结束（Bot 可据此调整策略）" },
-    "last_opponent_action": { "description": "平台扩展：对手最近一手的裸整数（便于 Bot 快速决策）" },
-    "last_opponent_raise_delta": { "type": "integer", "minimum": 0, "description": "平台扩展：对手最近一次 raise 的额外量（非 raise 或无则 0）" }
+    "total_win_games": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }
   }
 }

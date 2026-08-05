@@ -86,7 +86,7 @@ export default function BotVersionManager({
   const [error, setError] = useState('')
   // 上传新版本表单
   const [note, setNote] = useState('')
-  const [mode, setMode] = useState(currentRuntimeMode || 'longrunning')
+  const [mode, setMode] = useState(currentRuntimeMode || 'traditional')
   const [file, setFile] = useState<File | null>(null)
 
   const load = useCallback(async () => {
@@ -115,7 +115,7 @@ export default function BotVersionManager({
     setVersions([])
     setCurVer(undefined)
     setBusy(false)
-    setMode(currentRuntimeMode || 'longrunning')
+    setMode(currentRuntimeMode || 'traditional')
     setNote('')
     setFile(null)
     setError('')

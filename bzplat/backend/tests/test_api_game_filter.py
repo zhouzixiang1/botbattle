@@ -23,9 +23,10 @@ def _setup(app):
     # 建不同游戏的 bot（public）
     bh = store.create_bot(u["id"], "gfh", binary_path="/tmp", format="elf", game_id="holdem")
     bg = store.create_bot(u["id"], "gfg", binary_path="/tmp", format="elf", game_id="gomoku")
-    # 建不同游戏的赛事
-    ch = store.create_contest("GF Holdem赛", organizer_id=admin["id"], game_id="holdem")["id"]
-    cg = store.create_contest("GF Gomoku赛", organizer_id=admin["id"], game_id="gomoku")["id"]
+    # 建不同游戏的赛事（公开列表测试用 open 状态——draft/cancelled 已被
+    # GET /api/contests 默认排除，见 test_contest_visibility.py）
+    ch = store.create_contest("GF Holdem赛", organizer_id=admin["id"], game_id="holdem", status="open")["id"]
+    cg = store.create_contest("GF Gomoku赛", organizer_id=admin["id"], game_id="gomoku", status="open")["id"]
     _, atok = app.state.auth.authenticate("gfadmin", "pw123456")
     return store, {"Authorization": f"Bearer {atok}"}, ch, cg, bh, bg
 
