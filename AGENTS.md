@@ -109,7 +109,7 @@ games/      游戏注册表（全面解耦的单一真相）：base.py(GameSpec 
             （engine/ + protocol/ + _compat/ 三层冗余 shim 已删——真实现全在 games/）
             数据集：GET /api/matchpacks[/download]（gzip，等级 gating）+ 站点配置 GET /api/site/info
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits
-store/      SQLite + schema.py(常量唯一来源)；matches 拆每游戏表 + matches_index + ratings per-game
+store/      SQLite + schema.py(常量唯一来源)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
 logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot stderr 捕获），cli serve 接入

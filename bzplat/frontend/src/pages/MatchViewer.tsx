@@ -107,8 +107,16 @@ export default function MatchViewer() {
                   if (!prev) return prev
                   const patch: MatchRow = { ...prev, status: 'completed' }
                   if (ev.winner !== undefined) patch.winner = ev.winner as number | null
-                  if (ev.earnings_a !== undefined) patch.earnings_a = Number(ev.earnings_a)
-                  if (ev.earnings_b !== undefined) patch.earnings_b = Number(ev.earnings_b)
+                  // match_end 事件的 earnings_a/b 回写进 result.deltas（取代旧 earnings_a/b 列）
+                  if (ev.earnings_a !== undefined || ev.earnings_b !== undefined) {
+                    patch.result = {
+                      ...(prev.result || {}),
+                      deltas: [
+                        ev.earnings_a !== undefined ? Number(ev.earnings_a) : prev.result?.deltas?.[0] ?? 0,
+                        ev.earnings_b !== undefined ? Number(ev.earnings_b) : prev.result?.deltas?.[1] ?? 0,
+                      ],
+                    }
+                  }
                   if (ev.reason) patch.reason = String(ev.reason)
                   return patch
                 })
@@ -168,10 +176,10 @@ export default function MatchViewer() {
   const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
   const netA = visibleVm?.kind === 'cards'
     ? visibleVm.vm.seats?.[0]?.net ?? null
-    : typeof match?.earnings_a === 'number' ? match.earnings_a : null
+    : typeof match?.result?.deltas?.[0] === 'number' ? match.result.deltas[0] : null
   const netB = visibleVm?.kind === 'cards'
     ? visibleVm.vm.seats?.[1]?.net ?? null
-    : typeof match?.earnings_b === 'number' ? match.earnings_b : null
+    : typeof match?.result?.deltas?.[1] === 'number' ? match.result.deltas[1] : null
   const liveSteps = visibleVm?.kind === 'board' ? visibleVm.vm.moveCount ?? null : null
   const pencilScores = getGame(gameId).showScores && visibleVm?.kind === 'board' ? visibleVm.vm.scores ?? null : null
   const typeBadge = matchTypeBadge(match?.match_type)
@@ -256,9 +264,9 @@ export default function MatchViewer() {
           <span className="text-muted-foreground">
             {isBoard ? '步数' : '手数'}：
             <span className="font-mono text-foreground">
-              {String(liveSteps ?? match.hands_played ?? 0)}
+              {String(liveSteps ?? match.result?.hands_played ?? 0)}
             </span>
-            {!isBoard && match.total_hands ? <span className="text-muted-foreground">/{String(match.total_hands)}</span> : null}
+            {!isBoard && match.match_config?.hands ? <span className="text-muted-foreground">/{String(match.match_config.hands)}</span> : null}
           </span>
         )}
         {match && (

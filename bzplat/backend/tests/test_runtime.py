@@ -93,7 +93,7 @@ def test_orchestrator_resolves_holdem_winner_non_null():
         import asyncio
 
         async def _run():
-            mid = await orch.challenge(ba["id"], bb["id"], u["id"], hands=10, game_id="holdem")
+            mid = await orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 10}, game_id="holdem")
             task = orch._tasks.get(mid)
             if task:
                 await asyncio.wait_for(task, timeout=60)
@@ -103,7 +103,7 @@ def test_orchestrator_resolves_holdem_winner_non_null():
         m = store.get_match(mid)
         # foldbot 每手弃 → callbot 净筹码高 → winner 应是 1（非 None 平局）
         assert m["winner"] is not None, (
-            f"holdem 多手 winner 不应是 None（平局）；earnings_a={m['earnings_a']} earnings_b={m['earnings_b']}"
+            f"holdem 多手 winner 不应是 None（平局）；result={m.get('result')}"
         )
         assert m["winner"] == 1, f"callbot 应胜（foldbot 每手弃），winner={m['winner']}"
         store.close()
@@ -133,13 +133,13 @@ def test_challenge_validates_match_params_per_game():
 
         # holdem hands 超出 500 → ValueError（spec.validate_match_params 校验）
         with pytest.raises(ValueError, match="match 参数非法"):
-            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], hands=999, game_id="holdem"))
+            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 999}, game_id="holdem"))
         # hands=0 非法
         with pytest.raises(ValueError, match="match 参数非法"):
-            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], hands=0, game_id="holdem"))
+            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 0}, game_id="holdem"))
         # 合法 hands=100 不抛（校验通过；之后真跑会因 /dev/null 失败，但那不是本测试关注）
         try:
-            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], hands=100, game_id="holdem"))
+            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 100}, game_id="holdem"))
         except ValueError as e:
             assert "match 参数非法" not in str(e), "合法 hands 不应触发校验失败"
         except Exception:

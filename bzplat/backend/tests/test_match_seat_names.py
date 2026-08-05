@@ -80,8 +80,9 @@ def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
     mid = "20260802-seat-winner"
     st.create_match(mid, bot_a_id=ba["id"], bot_b_id=bb["id"], owner_id=ua["id"], game_id="holdem")
     st.update_match(
-        mid, status="completed", winner=0, earnings_a=1500, earnings_b=-1500,
-        hands_played=70, reason="completed",
+        mid, status="completed", winner=0,
+        result={"hands_played": 70, "deltas": [1500, -1500]},
+        reason="completed",
     )
     c = TestClient(app)
 
@@ -89,8 +90,8 @@ def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
     assert r.status_code == 200
     m = r.json()["match"]
     assert m["winner"] == 0
-    assert m["earnings_a"] == 1500
-    assert m["earnings_b"] == -1500
+    assert m["result"]["deltas"][0] == 1500
+    assert m["result"]["deltas"][1] == -1500
     assert m["bot_a"]["name"] == "AlphaBot"
     assert m["bot_b"]["name"] == "DeepHoldem"
 

@@ -77,9 +77,9 @@ def store_with_matches(tmp_path):
 
 def test_create_match_routes_to_correct_table(store_with_matches):
     s, u, bh, bg, bp = store_with_matches
-    s.create_match("mh1", bh, bh, game_id="holdem", total_hands=70)
+    s.create_match("mh1", bh, bh, game_id="holdem", match_config={"hands": 70})
     s.create_match("mg1", bg, bg, game_id="gomoku")
-    s.create_match("mp1", bp, bp, game_id="pencil", n_dots=11)
+    s.create_match("mp1", bp, bp, game_id="pencil", match_config={"n_dots": 11})
     # 验证写到了正确的物理表
     with s._tx() as c:
         assert c.execute("SELECT game_id FROM matches_holdem WHERE id=?", ("mh1",)).fetchone()["game_id"] == "holdem"
@@ -104,9 +104,9 @@ def test_get_match_routes_via_index(store_with_matches):
 def test_update_match_routes_via_index(store_with_matches):
     s, u, bh, bg, bp = store_with_matches
     s.create_match("mg1", bg, bg, game_id="gomoku")
-    s.update_match("mg1", status="completed", winner=0, hands_played=9)
+    s.update_match("mg1", status="completed", winner=0, result={"hands_played": 9, "deltas": [1, -1]})
     m = s.get_match("mg1")
-    assert m["status"] == "completed" and m["winner"] == 0 and m["hands_played"] == 9
+    assert m["status"] == "completed" and m["winner"] == 0 and m["result"]["hands_played"] == 9
 
 
 def test_list_matches_cross_game_union(store_with_matches):

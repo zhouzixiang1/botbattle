@@ -61,7 +61,7 @@ class _FakeOrch:
         mid = f"fake-match-{contest_id}-{self.n}"
         self.store.create_match(
             mid, a, b, owner_id=owner_user_id, contest_id=contest_id,
-            total_hands=k.get("hands", 1), match_type="contest",
+            match_type="contest", match_config=k.get("match_config") or {},
         )
         return mid
 
@@ -81,8 +81,7 @@ def _complete_all_pairs(
         w = winner_fn(p["bot_a_id"], p["bot_b_id"]) if winner_fn else 0
         store.update_match(
             mid, status=STATUS_COMPLETED, winner=w,
-            earnings_a=100 if w == 0 else (-100 if w == 1 else 0),
-            earnings_b=-100 if w == 0 else (100 if w == 1 else 0),
+            result={"deltas": [100 if w == 0 else (-100 if w == 1 else 0), -100 if w == 0 else (100 if w == 1 else 0)]},
         )
         store.update_contest_pairing(p["id"], status="completed")
         n += 1

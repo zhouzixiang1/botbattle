@@ -13,10 +13,8 @@ interface Match {
   bot_b_name?: string
   status: string
   match_type: string
-  hands_played: number
-  total_hands: number
-  earnings_a: number
-  earnings_b: number
+  match_config?: Record<string, number>
+  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
   reason: string
   created_at: string
   contest_id: number | null
@@ -140,10 +138,10 @@ export default function MatchesTab() {
                   <StatusBadge status={m.status} />
                 </td>
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                  {m.hands_played}/{m.total_hands}
+                  {m.result?.hands_played ?? 0}/{m.match_config?.hands ?? '-'}
                 </td>
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                  {m.earnings_a}/{m.earnings_b}
+                  {m.result?.deltas?.[0] ?? 0}/{m.result?.deltas?.[1] ?? 0}
                   {m.reason && m.reason !== 'completed' && (
                     <div className="text-[10px] text-destructive">{m.reason}</div>
                   )}

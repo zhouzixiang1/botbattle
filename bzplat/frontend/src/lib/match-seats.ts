@@ -5,15 +5,15 @@ export interface MatchSeatRow {
   match_type?: string
   human_seat?: number | null
   winner?: number | null
-  earnings_a?: number
-  earnings_b?: number
   reason?: string
   status?: string
-  hands_played?: number
-  total_hands?: number
   game_id?: string
   bot_a_id?: number
   bot_b_id?: number
+  /** 对局级配置 JSON（如 {hands:70}/{n_dots:6}），游戏无关。 */
+  match_config?: Record<string, number>
+  /** 对局结果详情 JSON（{hands_played, deltas:[ea,eb], net_bb}）。 */
+  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
   bot_a?: {
     id?: number | null
     name?: string
@@ -101,18 +101,22 @@ export function resolveWinnerLabel(
   if (m?.winner === 0 || m?.winner === 1) return nameOf(m.winner)
   if (eventWinner === 0 || eventWinner === 1) return nameOf(eventWinner)
   if (m && m.winner === null && finished) {
-    const ea = m.earnings_a
-    const eb = m.earnings_b
+    const ea = m.result?.deltas?.[0]
+    const eb = m.result?.deltas?.[1]
     if (typeof ea === 'number' && typeof eb === 'number') {
       if (ea > eb) return nameOf(0)
       if (eb > ea) return nameOf(1)
     }
     return '平局'
   }
-  if (typeof m?.earnings_a === 'number' && typeof m?.earnings_b === 'number' && finished) {
-    if (m.earnings_a > m.earnings_b) return nameOf(0)
-    if (m.earnings_b > m.earnings_a) return nameOf(1)
-    return '平局'
+  if (Array.isArray(m?.result?.deltas) && finished) {
+    const ea = m!.result!.deltas![0]
+    const eb = m!.result!.deltas![1]
+    if (typeof ea === 'number' && typeof eb === 'number') {
+      if (ea > eb) return nameOf(0)
+      if (eb > ea) return nameOf(1)
+      return '平局'
+    }
   }
   if (eventWinner === null && finished) return '平局'
   if (!finished) return '进行中'

@@ -19,11 +19,9 @@ interface Match {
   bot_b_name?: string
   bot_a_display?: string
   bot_b_display?: string
-  earnings_a?: number
-  earnings_b?: number
   created_at?: string
-  hands_played?: number
-  total_hands?: number
+  match_config?: Record<string, number>
+  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
   match_type?: string
   game_id?: string
 }

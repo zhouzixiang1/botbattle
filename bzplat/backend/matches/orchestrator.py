@@ -116,13 +116,14 @@ class MatchOrchestrator:
         *,
         human_seat: int = 1,
         game_id: str | None = None,
-        hands: int = 70,  # holdem 默认手数（审计 P1：不 import 具体游戏模块）
-        n_dots: int | None = None,
+        match_config: dict[str, Any] | None = None,
     ) -> str:
         """人类 vs bot：human_seat 为人类坐位（0/1），另一侧为 bot_id。
 
         人类侧无 bot/binary，走 runner.run_bot_vs_human（人类 decide 经 Future
         等待 WS 回传）。不计 Glicko；占用独立 _human_sem（不占 bot 对局槽）。
+
+        match_config：对局级配置（如 {"hands":70}/{"n_dots":6}），None 用 spec 默认。
         """
         bot = self.store.get_bot(bot_id)
         if not bot:
@@ -137,9 +138,11 @@ class MatchOrchestrator:
         if gid not in VALID_GAME_IDS or gid not in REGISTERED_ENGINES:
             raise ValueError(f"游戏引擎未注册: {gid}")
 
-        # 校验 match_config（hands 范围按游戏 spec；取代 API 层 le=300 的宽上限）
+        # 对局级配置：spec 默认 + 调用方覆盖（取代散落的 hands/n_dots 具名参数）。
+        spec = game_registry.get(gid)
+        mc = dict(spec.default_match_params, **(match_config or {}))
         try:
-            game_registry.get(gid).validate_match_params({"hands": hands})
+            spec.validate_match_params(mc)
         except ValueError as e:
             raise ValueError(f"match 参数非法: {e}") from None
 
@@ -148,18 +151,15 @@ class MatchOrchestrator:
         # 真正的人类动作经 _human_turns / WS 回传，不走 binary）
         bot_a_id = bot_id if bot_seat == 0 else bot_id
         bot_b_id = bot_id if bot_seat == 1 else bot_id
-        # 每游戏轮数：holdem=hands；棋类=1（经 spec.rounds_per_match，消除 if game_id）
-        total_hands = game_registry.get(gid).rounds_per_match({"hands": hands})
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self.store.create_match(
             match_id,
             bot_a_id=bot_a_id,
             bot_b_id=bot_b_id,
             owner_id=human_user_id,
-            total_hands=total_hands,
             match_type=TYPE_HUMAN,
             game_id=gid,
-            n_dots=n_dots,
+            match_config=mc,
             human_user_id=human_user_id,
             human_seat=human_seat,
         )
@@ -175,12 +175,10 @@ class MatchOrchestrator:
         opponent_bot_id: int,
         owner_user_id: int | None,
         *,
-        hands: int = 70,  # holdem 默认手数（审计 P1：不 import 具体游戏模块）
         match_type: str = TYPE_CHALLENGE,
         contest_id: int | None = None,
         game_id: str | None = None,
-        n_dots: int | None = None,
-        **extra_match_params: Any,
+        match_config: dict[str, Any] | None = None,
     ) -> str:
         if challenger_bot_id == opponent_bot_id:
             raise ValueError("不能与自己对战")
@@ -207,15 +205,13 @@ class MatchOrchestrator:
                 f"游戏引擎未注册: {gid}（当前支持 {sorted(REGISTERED_ENGINES)}）"
             )
 
-        # 校验 match_config（hands 范围按游戏 spec；取代 API 层 le=70 的 holdem 专用上限泄漏）
+        # 对局级配置：spec 默认 + 调用方覆盖（取代散落的 hands/n_dots/**extra 具名参数）。
+        spec = game_registry.get(gid)
+        mc = dict(spec.default_match_params, **(match_config or {}))
         try:
-            game_registry.get(gid).validate_match_params({"hands": hands})
+            spec.validate_match_params(mc)
         except ValueError as e:
             raise ValueError(f"match 参数非法: {e}") from None
-
-        # 棋类单局；扑克沿用 hands
-        # 每游戏轮数：holdem=hands；棋类=1（经 spec.rounds_per_match，消除 if game_id）
-        total_hands = game_registry.get(gid).rounds_per_match({"hands": hands})
 
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self.store.create_match(
@@ -224,10 +220,9 @@ class MatchOrchestrator:
             bot_b_id=opponent_bot_id,
             owner_id=owner_user_id,
             contest_id=contest_id,
-            total_hands=total_hands,
             match_type=match_type,
             game_id=gid,
-            n_dots=n_dots,
+            match_config=mc,
         )
         self.store.upsert_replay(match_id, "[]", "[]")
         task = asyncio.create_task(self._run_match(match_id), name=f"match-{match_id}")
@@ -313,21 +308,20 @@ class MatchOrchestrator:
                     self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
             try:
-                jp = self._judge_params(gid)
-                # num_hands：admin 全局设置（SETTING_JUDGE_HOLDEM_HANDS）优先，未设回退对局级 total_hands
-                num_hands = jp.get("num_hands") or int(m["total_hands"])
+                # 对局配置统一通路：DB match_config（对局级）+ admin 全局设置覆盖，整体 **透传。
+                # match_config 经 _parse_match_json_cols 已是 dict（如 {"hands":70}/{"n_dots":6}）。
+                spec = game_registry.get(gid)
+                mc: dict[str, Any] = dict(m.get("match_config") or {})
+                for k, v in self._judge_params(gid).items():
+                    if v is not None:
+                        mc[k] = v
                 result = await self.runner.run_binaries(
                     path_a,
                     path_b,
                     game_id=gid,
-                    num_hands=num_hands,
-                    n_dots=m.get("n_dots"),
-                    board_size=jp.get("board_size"),
-                    starting_stack=jp.get("starting_stack"),
-                    sb=jp.get("sb"),
-                    bb=jp.get("bb"),
                     on_event=on_event,
                     runtime_modes=(mode_a, mode_b),
+                    **mc,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
@@ -336,16 +330,16 @@ class MatchOrchestrator:
                 winner: int | None = result.winner
                 if winner is None:
                     winner = 0 if ea > eb else 1 if eb > ea else None
-                net_bb_a = game_registry.get(gid).normalize_earnings(ea)
                 self.store.update_match(
                     match_id,
                     status=STATUS_COMPLETED,
-                    hands_played=result.rounds_played,
-                    earnings_a=ea,
-                    earnings_b=eb,
                     winner=winner,
                     reason="completed",
-                    net_bb_a=net_bb_a,
+                    result={
+                        "hands_played": result.rounds_played,
+                        "deltas": [ea, eb],
+                        "net_bb": spec.normalize_earnings(ea),
+                    },
                     ended_at=_now(),
                 )
                 self.store.upsert_replay(
@@ -401,7 +395,8 @@ class MatchOrchestrator:
                 if m.get("match_type") == TYPE_CONTEST:
                     self.store.update_match(
                         match_id, status=STATUS_COMPLETED, reason="technical_loss",
-                        winner=winner, earnings_a=ea, earnings_b=eb,
+                        winner=winner,
+                        result={"deltas": [ea, eb]},
                         technical_loss=1, ended_at=_now(),
                     )
                     self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "technical_loss"})
@@ -480,22 +475,20 @@ class MatchOrchestrator:
                     self._human_turns.pop((match_id, player_idx), None)
 
             try:
-                jp = self._judge_params(gid)
-                # num_hands：admin 全局设置（SETTING_JUDGE_HOLDEM_HANDS）优先，未设回退对局级 total_hands
-                num_hands = jp.get("num_hands") or int(m["total_hands"])
+                # 对局配置统一通路（同 _run_match）：DB match_config + admin 设置覆盖，整体 **透传。
+                spec = game_registry.get(gid)
+                mc: dict[str, Any] = dict(m.get("match_config") or {})
+                for k, v in self._judge_params(gid).items():
+                    if v is not None:
+                        mc[k] = v
                 result = await self.runner.run_bot_vs_human(
                     bot["binary_path"],
                     bot_seat=1 - human_seat,
                     human_decide=human_decide,
                     game_id=gid,
-                    num_hands=num_hands,
-                    n_dots=m.get("n_dots"),
                     on_event=on_event,
-                    board_size=jp.get("board_size"),
-                    starting_stack=jp.get("starting_stack"),
-                    sb=jp.get("sb"),
-                    bb=jp.get("bb"),
                     runtime_mode=bot.get("runtime_mode") or DEFAULT_RUNTIME_MODE,
+                    **mc,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
@@ -503,11 +496,15 @@ class MatchOrchestrator:
                 winner = result.winner
                 if winner is None:
                     winner = 0 if ea > eb else 1 if eb > ea else None
-                net_bb_a = game_registry.get(gid).normalize_earnings(ea)
                 self.store.update_match(
                     match_id, status=STATUS_COMPLETED,
-                    hands_played=result.rounds_played, earnings_a=ea, earnings_b=eb,
-                    winner=winner, reason="completed", net_bb_a=net_bb_a, ended_at=_now(),
+                    winner=winner, reason="completed",
+                    result={
+                        "hands_played": result.rounds_played,
+                        "deltas": [ea, eb],
+                        "net_bb": spec.normalize_earnings(ea),
+                    },
+                    ended_at=_now(),
                 )
                 self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
                 # 人类对战不计 Glicko-2（人类无 rating 行）
@@ -541,7 +538,8 @@ class MatchOrchestrator:
 
         经 games 注册表取该游戏的 judge_params 声明（消除 if game_id）。
         返回 {field: value}，field 对应 run_session 的 kwarg（如 starting_stack/board_size），
-        value=None 表示用引擎默认。n_dots 不在此处（走 match 列）；num_hands 走 match.total_hands。
+        value=None 表示用引擎默认。这些是 admin 全局设置；对局级配置（hands/n_dots 等）
+        走 match_config（create_match 时落，_run_match 时读 + 此处 admin 设置覆盖）。
         """
 
         def _int(key: str, default: int) -> int | None:

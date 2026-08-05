@@ -87,6 +87,8 @@ graph LR
 
 2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。**编排层与赛制层只依赖这两个字段，绝不触碰扑克的 pot/board/holes 或棋类的棋盘**——这是赛制代码能通用于三款游戏的根本。**`winner` 在引擎内权威化**：棋类单轮取胜者；holdem 多手按累计净筹码（`final_chips`/net）比较——编排层只读 `result.winner`（+ ea/eb 平局兜底），不再有 match_end 事件三层兜底 / holdem 特例注释。`tests/test_result_contract.py` 断言各游戏 result 都满足此契约（防 drift）。
 
+3. **对局配置/结果双 JSON 通路（matches 表收敛）**：对局级配置走 `match_config` JSON 列（如 `{"hands":70}`/`{"n_dots":6}`/`{}`），对局结果详情走 `result` JSON 列（`{"hands_played":N,"deltas":[ea,eb],"net_bb":float}`）——**两者都游戏无关、结构统一**，取代旧的散落固定列（total_hands/n_dots 配置列 + hands_played/earnings_a/earnings_b/net_bb_a 结果列，6 列已删）。链路：`challenge(match_config=...)` → `create_match(match_config=mc)` 落库 → `_run_match` 读回 `mc` + admin 全局设置（`_judge_params`）覆盖 → `**mc` 整体透传 runner；结果 `update_match(result={...})` 落 result JSON。赛事排名经 `store.db.match_deltas(m)` helper 从 `result.deltas` 取净筹码（取代旧 earnings_a/b 列）。**消除三条参数路 + 两次转换的割裂**，配置/结果各一条通路、游戏无关。守护：`test_tongyong_layer_no_game_branches.py` 的 AST 守护（orchestrator 调用侧不得具名传游戏参数 + matches 表不得含死列）。
+
 **DRY 边界**：游戏规则（engine/result/tiers 数据/templates）各游戏独立；平台工具（`_board_protocol.py` 行协议序列化、`base.tier_for_in` 段位查表算法）共享——避免字节级重复的维护隐患。
 
 ### 2.3 新增一款游戏的成本
@@ -110,7 +112,7 @@ SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`
 |----|------|--------|
 | `users` | 用户 | id/username/email/password_hash/role/display_name/bio/avatar/xp/level/last_active_at + **实名信息**（real_name/phone/school/student_id，可选，不公开） |
 | `bots` | Bot | owner_id/name/display_name/game_id/os/arch/format/binary_path/current_version/is_active |
-| `matches_holdem` / `matches_gomoku` / `matches_pencil` | 对局（**每游戏一张表**） | id/bot_a_id/bot_b_id/match_type/status/game_id/winner/n_dots/human_user_id/likes_count/views_count；三表结构一致，游戏专属列在其他游戏中默认 NULL/0 |
+| `matches_holdem` / `matches_gomoku` / `matches_pencil` | 对局（**每游戏一张表**） | id/bot_a_id/bot_b_id/owner_id/contest_id/winner/reason/match_type/status/game_id/**`match_config`(JSON 配置)**/**`result`(JSON 结果)**/human_user_id/human_seat/match_seed/technical_loss/likes_count/views_count；三表结构一致，配置/结果走双 JSON 列（游戏无关），取代旧的游戏专属固定列（total_hands/n_dots/earnings_a/earnings_b/net_bb_a/hands_played 已删） |
 | `matches_index` | 对局定位 | id(PK)/game_id——get_match(id) 先查此表定位到哪张 matches_<game> |
 | `ratings` | 评分（**per-game**，PK=bot_id+game_id） | bot_id/game_id/rating(1500)/rd(350)/vol/wins/losses/draws/last_played_at |
 | `contests` | 赛事 | title/organizer_id/status(draft/open/published/running/rest/finished/cancelled)/game_id/stages_json/current_stage_idx/registration_opens_at/closes_at/starts_at/rest_ends_at |
