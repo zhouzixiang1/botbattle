@@ -475,7 +475,7 @@ VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallbac
 RUNTIME_TRADITIONAL = "traditional"
 RUNTIME_LONGRUNNING = "longrunning"
 VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
-DEFAULT_RUNTIME_MODE = RUNTIME_LONGRUNNING  # 平台默认长驻
+DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL  # 平台默认传统（每回合完整历史，便于调试）
 
 # ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────
 # 经验奖励：各类活动获得的经验

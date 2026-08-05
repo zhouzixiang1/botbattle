@@ -33,6 +33,7 @@ from bzplat.backend.runtime.limits import (
     cpu_count,
 )
 from bzplat.backend.store.schema import (
+    DEFAULT_RUNTIME_MODE,
     SETTING_ACTION_TIMEOUT,
     SETTING_AUTO_MATCH_BOT_COOLDOWN,
     SETTING_AUTO_MATCH_DAILY_CAP,
@@ -338,7 +339,7 @@ async def upload_bot(
     description: str = Form(""),
     upload_note: str = Form(""),
     game_id: str = Form("holdem"),
-    runtime_mode: str = Form("longrunning"),
+    runtime_mode: str = Form(DEFAULT_RUNTIME_MODE),
     file: UploadFile = File(...),
     user=Depends(require_user),
 ):
