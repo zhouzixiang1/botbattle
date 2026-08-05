@@ -3090,15 +3090,18 @@ class Store:
     def contest_entries_named(
         self, contest_id: int, *, page: int | None = None, per_page: int = 50,
     ) -> list[dict] | dict:
-        """返回报名（带 bot 名/owner 名 + seed/group/eliminated）。
+        """返回报名（带 bot 名/owner 名 + seed/group/eliminated + 实名信息）。
 
         LEFT JOIN bots：bot_id 现可为 NULL（删 bot 后保留 entry，P0 SET NULL）。
+        实名字段（real_name/phone/school/student_id）随行返回——**调用方（api 层）负责
+        对非组织者脱敏**（contest_detail 仅组织者可见；export 端点组织者 gated）。
         ``page`` 为 None 时返回 list（旧契约）；给定时返回分页 dict。
         """
         with self._tx() as c:
             sql = (
                 "SELECT e.*, b.name AS bot_name, b.display_name AS bot_display, "
-                "b.game_id, u.username AS owner_name, u.display_name AS owner_display "
+                "b.game_id, u.username AS owner_name, u.display_name AS owner_display, "
+                "u.real_name, u.phone, u.school, u.student_id "
                 "FROM contest_entries e "
                 "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN users u ON e.user_id=u.id "
@@ -3110,6 +3113,34 @@ class Store:
                 rows, total = _paginate(c, sql, params, page=page, per_page=pp)
                 return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
             return [_row(r) for r in c.execute(sql, params).fetchall()]
+
+    def list_contest_export(self, contest_id: int) -> list[dict]:
+        """合并导出：一行 per 报名者 = 报名信息（实名）+ 结果排名 + 战绩。
+
+        LEFT JOIN official_results：未完赛/未出排名者 rank/points 列为 NULL（仍出现）。
+        stage_results 取末阶段（official_results.stage_idx）。供组织者导出 CSV。
+        """
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT e.id AS entry_id, e.seed, e.group_id, e.eliminated, e.registered_at, "
+                "u.username AS owner_name, u.display_name AS owner_display, "
+                "u.real_name, u.phone, u.school, u.student_id, "
+                "b.name AS bot_name, b.display_name AS bot_display, "
+                "r.rank, r.points, r.awarded, r.stage_idx, "
+                "sr.wins, sr.draws, sr.losses, sr.net_chips "
+                "FROM contest_entries e "
+                "LEFT JOIN users u ON e.user_id=u.id "
+                "LEFT JOIN bots b ON e.bot_id=b.id "
+                "LEFT JOIN contest_official_results r "
+                "  ON r.entry_id=e.id AND r.contest_id=e.contest_id "
+                "LEFT JOIN contest_stage_results sr "
+                "  ON sr.entry_id=e.id AND sr.contest_id=e.contest_id "
+                "  AND sr.stage_idx=r.stage_idx "
+                "WHERE e.contest_id=? "
+                "ORDER BY CASE WHEN r.rank IS NULL THEN 999999 ELSE r.rank END, e.seed",
+                (contest_id,),
+            ).fetchall()
+            return [_row(r) for r in rows]
 
     def update_pairing(self, pairing_id: int, **fields: Any) -> dict | None:
         allowed = {

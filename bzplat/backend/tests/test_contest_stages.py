@@ -301,7 +301,8 @@ def test_match_config_hands_dispatched_for_holdem(store: Store):
         await mgr._dispatch_pending(c["id"], 0)
 
     asyncio.run(run())
-    assert seen["match_config"] == {"hands": 20}
+    # #123：hands 钉死固定，match_config 不再含 hands
+    assert seen["match_config"] == {}
     assert seen["game_id"] == "holdem"
 
 
@@ -336,7 +337,8 @@ def test_match_config_n_dots_dispatched_for_pencil(store: Store):
         await mgr._dispatch_pending(c["id"], 0)
 
     asyncio.run(run())
-    assert seen["match_config"] == {"n_dots": 9}
+    # #123：n_dots 钉死固定，match_config 不再含 n_dots
+    assert seen["match_config"] == {}
     assert seen["game_id"] == "pencil"
 
 
@@ -346,11 +348,12 @@ def test_contest_create_uses_template_match_config(store: Store):
     users, _ = _mk_bots(store, 1)
     mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
     c = mgr.create(users[0]["id"], "t", template_id="holdem_swiss_ko")
-    assert c["match_config_json"] == '{"hands": 70}'
+    # #123：游戏规则参数（hands/n_dots）已钉死固定值，match_config 为空（不再含 hands）
+    assert c["match_config_json"] == "{}"
     c2 = mgr.create(users[0]["id"], "t2", template_id="gomoku_group_drr_ko")
     assert c2["match_config_json"] == "{}"
     c3 = mgr.create(users[0]["id"], "t3", template_id="pencil_swiss_ko")
-    assert c3["match_config_json"] == '{"n_dots": 6}'  # 对齐裁判 25 格
+    assert c3["match_config_json"] == "{}"  # n_dots 钉死固定（不再配置）
 
 
 # ── 多轮赛制推进修复（500 人压测发现的 bug）─────────────────────

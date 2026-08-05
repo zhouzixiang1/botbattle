@@ -18,6 +18,7 @@ import { ErrorMsg, EmptyState, Loading, StatusBadge } from '@/components/ui/stat
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import BracketTree from '@/components/contest/BracketTree'
+import ScheduleTable from '@/components/contest/ScheduleTable'
 import Countdown from '@/components/Countdown'
 import { useAuth } from '@/components/useAuth'
 import Pagination from '@/components/Pagination'
@@ -83,6 +84,11 @@ interface Entry {
   bot_display?: string
   owner_name?: string
   owner_display?: string
+  // 实名信息（仅组织者可见——后端对非组织者脱敏剔除）
+  real_name?: string
+  phone?: string
+  school?: string
+  student_id?: string
 }
 interface Pairing {
   id: number
@@ -102,6 +108,7 @@ interface Pairing {
   owner_a_name?: string
   owner_b_name?: string
   match_winner?: number | null
+  scheduled_at?: string | null
 }
 interface Standing {
   bot_id: number
@@ -162,6 +169,8 @@ export default function ContestDetail() {
   const [bots, setBots] = useState<Array<{ id: number; name: string; display_name?: string }>>([])
   const [botId, setBotId] = useState('')
   const [stageTab, setStageTab] = useState(0)
+  // 对阵视图：'tree'（对阵树）/ 'table'（一览表）。淘汰赛默认 tree，其余默认 table，可手动切换。
+  const [pairingView, setPairingView] = useState<'tree' | 'table'>('tree')
   const [error, setError] = useState('')
   // 报名列表分页（115 人赛事场景：服务端分页，避免一次性渲染全部）
   const [entriesPage, setEntriesPage] = useState(1)
@@ -231,6 +240,25 @@ export default function ContestDetail() {
   const stagePairings = pairings.filter((p) => (p.stage_idx ?? 0) === stageTab)
   const curStageType = stages[stageTab]?.type as string | undefined
   const isElimStage = curStageType === 'single_elimination' || curStageType === 'double_elimination'
+  // 阶段切换时，按赛制重置对阵视图默认值（淘汰→对阵树；swiss/循环→一览表），用户仍可手动切换
+  useEffect(() => {
+    setPairingView(isElimStage ? 'tree' : 'table')
+  }, [stageTab, isElimStage])
+
+  // 每阶段的对阵进度（已完成 / 总数）+ 已进行到的最大轮次，供 stage tab 进度条与「第 N 轮」展示
+  const stageProgress = useMemo(() => {
+    const map = new Map<number, { completed: number; total: number; maxRound: number }>()
+    for (const p of pairings) {
+      const idx = p.stage_idx ?? 0
+      const cur = map.get(idx) ?? { completed: 0, total: 0, maxRound: 0 }
+      cur.total += 1
+      if (p.status === 'completed') cur.completed += 1
+      const r = p.round_num ?? 1
+      if (r > cur.maxRound) cur.maxRound = r
+      map.set(idx, cur)
+    }
+    return map
+  }, [pairings])
 
   if (!contest) {
     return (
@@ -350,19 +378,32 @@ export default function ContestDetail() {
         )}
       </div>
 
-      {/* 阶段 Tabs */}
+      {/* 阶段 Tabs（中文赛制名 + 当前进度，隐藏 raw type 字符串） */}
       {stages.length > 0 && (
         <Tabs value={String(stageTab)} onValueChange={(v) => setStageTab(Number(v))} className="mt-6">
           <TabsList>
-            {stages.map((s, i) => (
-              <TabsTrigger key={s.key || i} value={String(i)} className="gap-1.5">
-                {s.key || `阶段${i + 1}`}
-                <span className="text-xs text-muted-foreground">({s.type})</span>
-                {contest.current_stage_idx === i && contest.status !== 'finished' && (
-                  <Badge variant="outline" className="ml-1 text-[9px] text-primary">当前</Badge>
-                )}
-              </TabsTrigger>
-            ))}
+            {stages.map((s, i) => {
+              const prog = stageProgress.get(i)
+              const typeLabel = STAGE_TYPE_LABEL[s.type || ''] || s.type
+              // 「瑞士轮 · 第3轮」式：有对阵且未全部完成时显示当前轮次
+              const roundTag = prog && prog.maxRound > 0 && prog.completed < prog.total
+                ? `第${prog.maxRound}轮`
+                : null
+              return (
+                <TabsTrigger key={s.key || i} value={String(i)} className="gap-1.5">
+                  <span>{typeLabel || s.key || `阶段${i + 1}`}</span>
+                  {roundTag && <span className="text-xs text-muted-foreground">· {roundTag}</span>}
+                  {contest.current_stage_idx === i && contest.status !== 'finished' && (
+                    <Badge variant="outline" className="ml-1 text-[9px] text-primary">当前</Badge>
+                  )}
+                  {prog && prog.total > 0 && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {prog.completed}/{prog.total}
+                    </span>
+                  )}
+                </TabsTrigger>
+              )
+            })}
           </TabsList>
         </Tabs>
       )}
@@ -393,9 +434,37 @@ export default function ContestDetail() {
             <h3 className="text-sm font-semibold text-foreground">
               对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab + 1}`}` : ''}
             </h3>
+            {/* 对阵视图切换：对阵树 / 一览表（淘汰赛默认树，其余默认表，可手动切换） */}
+            {stagePairings.length > 0 && (
+              <div className="ml-auto flex items-center gap-1 rounded-lg bg-muted p-0.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPairingView('tree')}
+                  className={`rounded-md px-2 py-1 transition-colors ${
+                    pairingView === 'tree' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  对阵树
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPairingView('table')}
+                  className={`rounded-md px-2 py-1 transition-colors ${
+                    pairingView === 'table' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  一览表
+                </button>
+              </div>
+            )}
           </div>
           {stagePairings.length === 0 ? (
             <Card className="mt-2"><EmptyState text="暂无对阵" icon={<Swords className="size-7 opacity-40" />} /></Card>
+          ) : pairingView === 'table' ? (
+            // 一览表：所有对阵的扁平表格（轮次/Bot/排期时间/状态/查看）
+            <div className="mt-2">
+              <ScheduleTable pairings={stagePairings} />
+            </div>
           ) : isElimStage ? (
             // 淘汰赛：树状对阵图（按 bracket_slot 排列，胜者高亮，横向滚动+轮次折叠）
             <div className="mt-2">
@@ -424,6 +493,16 @@ export default function ContestDetail() {
                   <Plus className="size-3" />批量指派
                 </Button>
               )}
+              {/* 组织者导出：报名名单（含实名）+ 结果排名合并 CSV */}
+              {isOrg && (
+                <a
+                  href={`/api/contests/${id}/export?format=csv`}
+                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  title="导出报名名单（含实名信息）与成绩排名 CSV"
+                >
+                  <Download className="size-3" />导出名单
+                </a>
+              )}
             </div>
             <Card className="mt-2">
               <CardContent className="py-3">
@@ -440,6 +519,12 @@ export default function ContestDetail() {
                           <Link to={`/user/${encodeURIComponent(e.owner_name)}`} className="text-xs text-muted-foreground hover:text-primary">
                             @{e.owner_display || e.owner_name}
                           </Link>
+                        )}
+                        {/* 组织者可见实名信息（姓名/手机/学校/学号）——非组织者后端已脱敏剔除 */}
+                        {isOrg && e.real_name && (
+                          <span className="text-xs text-muted-foreground">
+                            · {e.real_name}{e.phone ? ` / ${e.phone}` : ''}{e.school ? ` / ${e.school}` : ''}{e.student_id ? ` / ${e.student_id}` : ''}
+                          </span>
                         )}
                         {e.seed ? <span className="text-xs text-muted-foreground">种子 {e.seed}</span> : ''}
                         {e.group_id && <Badge variant="secondary" className="max-w-[8rem] truncate text-[10px]">{e.group_id}</Badge>}
@@ -591,6 +676,9 @@ function PairingFoldedList({ pairings }: { pairings: Pairing[] }) {
                       </Link>
                     )}
                     <StatusBadge status={p.status || 'pending'} />
+                    {p.scheduled_at && (
+                      <span className="text-xs text-muted-foreground">{fmtTime(p.scheduled_at)}</span>
+                    )}
                     {p.match_id && (
                       <Button asChild variant="ghost" size="sm" className="ml-auto gap-1 text-primary">
                         <Link to={`/match/${p.match_id}`}>查看</Link>

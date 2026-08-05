@@ -34,8 +34,10 @@ def test_match_two_callbots_short():
     if not ELF.is_file():
         pytest.skip("sample ELF missing")
     runner = MatchRunner(BinaryRunner(prefer_local=True))
-    result = asyncio.run(runner.run_binaries(str(ELF), str(ELF), num_hands=2, seed=1))
-    assert result.hands_played == 2
+    # 手数已钉死 DEFAULT_HANDS（70，#123 游戏参数固定）——num_hands 参数被忽略
+    result = asyncio.run(runner.run_binaries(str(ELF), str(ELF), seed=1))
+    from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
+    assert result.hands_played == DEFAULT_HANDS
     # Botzone 计分：final_chips = 累计净输赢 net（零和），不再守恒于 2*STARTING_STACK
     assert sum(result.final_chips) == 0
 
@@ -110,10 +112,11 @@ def test_orchestrator_resolves_holdem_winner_non_null():
 
 
 def test_challenge_validates_match_params_per_game():
-    """PR3：challenge 经 spec.validate_match_params 校验 hands 范围（取代 API 层 le=70）。
+    """#123：游戏规则参数（手数等）已钉死固定值，challenge 的 match_config 不再控制手数。
 
-    原 api_routes Field(le=70) 把 holdem 上限泄漏成所有游戏上限；现放宽到 le=1000，
-    真正的范围校验交给 spec.validate_match_params（holdem 1-500）。超范围应 ValueError。
+    旧测试断言 hands=999/hands=0 触发 ValueError；现手数固定 DEFAULT_HANDS（70），
+    match_config 里的 hands 字段被忽略（不校验、不生效）。本测试验证：传任意 hands
+    不再触发校验错误（challenge 成功建 match 或因 /dev/null 崩，但非校验失败）。
     """
     import os
     import tempfile
@@ -125,23 +128,17 @@ def test_challenge_validates_match_params_per_game():
     with tempfile.TemporaryDirectory() as td:
         store = Store(str(td + "/v.db"))
         u = store.create_user("vtest", "v@e.com", "x")
-        # 用 callable bot 避免 ELF 依赖（本测试只验校验，不真跑）
         ba = store.create_bot(u["id"], "vbotA", binary_path="/dev/null", format="elf", game_id="holdem")
         bb = store.create_bot(u["id"], "vbotB", binary_path="/dev/null", format="elf", game_id="holdem")
         store.ensure_rating(ba["id"]); store.ensure_rating(bb["id"])
         orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
 
-        # holdem hands 超出 500 → ValueError（spec.validate_match_params 校验）
-        with pytest.raises(ValueError, match="match 参数非法"):
-            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 999}, game_id="holdem"))
-        # hands=0 非法
-        with pytest.raises(ValueError, match="match 参数非法"):
-            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 0}, game_id="holdem"))
-        # 合法 hands=100 不抛（校验通过；之后真跑会因 /dev/null 失败，但那不是本测试关注）
-        try:
-            asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 100}, game_id="holdem"))
-        except ValueError as e:
-            assert "match 参数非法" not in str(e), "合法 hands 不应触发校验失败"
-        except Exception:
-            pass  # /dev/null 跑不起来是预期的，校验已过即可
+        # hands 参数被忽略（手数固定），不触发校验错误
+        for cfg in ({"hands": 999}, {"hands": 0}, {"hands": 100}, {}):
+            try:
+                asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config=cfg, game_id="holdem"))
+            except ValueError as e:
+                assert "match 参数非法" not in str(e), f"cfg={cfg} 不应触发校验失败（手数固定）"
+            except Exception:
+                pass  # /dev/null 跑不起来是预期的，校验已过即可
         store.close()

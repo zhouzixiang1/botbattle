@@ -173,7 +173,8 @@ export default function MatchViewer() {
       : visibleVm?.kind === 'board' ? visibleVm.vm.winner
         : undefined
   const colorLabel = (seat: number) => {
-    if (!match) return `座位 ${seat}`
+    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
+    if (!match) return `座位 ${seat + 1}`
     // 棋类座位着色（黑白/红蓝）经 spec.seatColors 取（消除游戏名分支）
     const seatColors = getGame(gameId).seatColors
     if (seatColors && seatColors[seat]) {
