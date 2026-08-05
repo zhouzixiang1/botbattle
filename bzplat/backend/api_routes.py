@@ -1259,6 +1259,8 @@ def contest_export(contest_id: int, request: Request, format: str = "csv"):
     c = store.get_contest(contest_id)
     if not c:
         raise HTTPException(404, "比赛不存在")
+    if format.lower() not in ("csv",):
+        raise HTTPException(400, "仅支持 format=csv")
     # 组织者鉴权（实名隐私——仅组织者/admin 可导出）。用 _extract_token + verify_session
     # 取当前用户（endpoint 无 Depends(require_user)，直接从 request 解析）。
     token = _extract_token(request)
@@ -1269,6 +1271,12 @@ def contest_export(contest_id: int, request: Request, format: str = "csv"):
     rows = store.list_contest_export(contest_id)
     import csv as _csv
     import io
+
+    def _safe(v: object) -> object:
+        """防 CSV 公式注入：以 =/+/-/@ 开头的字符串前缀单引号（Excel 不解释为公式）。"""
+        if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@"):
+            return "'" + v
+        return v
 
     def gen():
         buf = io.StringIO()
@@ -1284,22 +1292,22 @@ def contest_export(contest_id: int, request: Request, format: str = "csv"):
         for r in rows:
             w.writerow([
                 r.get("rank") if r.get("rank") is not None else "",
-                r.get("seed") or 0, r.get("group_id") or "",
-                r.get("bot_name") or "", r.get("owner_name") or "",
-                r.get("real_name") or "", r.get("phone") or "",
-                r.get("school") or "", r.get("student_id") or "",
+                r.get("seed") or 0, _safe(r.get("group_id") or ""),
+                _safe(r.get("bot_name") or ""), _safe(r.get("owner_name") or ""),
+                _safe(r.get("real_name") or ""), _safe(r.get("phone") or ""),
+                _safe(r.get("school") or ""), _safe(r.get("student_id") or ""),
                 r.get("points") if r.get("points") is not None else "",
                 r.get("wins") if r.get("wins") is not None else "",
                 r.get("draws") if r.get("draws") is not None else "",
                 r.get("losses") if r.get("losses") is not None else "",
                 int(bool(r.get("eliminated"))),
-                r.get("awarded") or "", r.get("registered_at") or "",
+                _safe(r.get("awarded") or ""), r.get("registered_at") or "",
             ])
             yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
 
     return StreamingResponse(
-        gen(), media_type="text/csv",
+        gen(), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="contest-{contest_id}-export.csv"'},
     )
 
