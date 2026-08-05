@@ -63,6 +63,10 @@ export default function MatchViewer() {
   const [speedIdx, setSpeedIdx] = useState(1)
   const logRef = useRef<HTMLDivElement>(null)
   const curActionRef = useRef<HTMLDivElement>(null)
+  // events 最新长度的 ref——SSE 回调里读「当前长度」算 match_end 贴尾游标，
+  // 避免在 setEvents updater 内部触发 setStepIdx（React updater 须为纯函数；
+  // 审计 P1-D 反模式修复）。
+  const eventsLenRef = useRef(0)
 
   // 直播 SSE / 回放加载（一次性探测状态，决定模式）
   const isLiveMatch = match?.status === 'running' || match?.status === 'pending'
@@ -70,6 +74,7 @@ export default function MatchViewer() {
     if (!id) return
     setLoading(true)
     setError('')
+    eventsLenRef.current = 0
     setEvents([])
     setStepIdx(-1)
     setPlaying(false)
@@ -85,6 +90,7 @@ export default function MatchViewer() {
         setMatch(d.match)
         const m = d.match
         const evs: RawEvent[] = (() => { try { return JSON.parse(d.replay?.events_json || '[]') as RawEvent[] } catch { return [] } })()
+        eventsLenRef.current = evs.length
         setEvents(evs)
         const live = m.status === 'running' || m.status === 'pending'
         if (live) {
@@ -96,16 +102,19 @@ export default function MatchViewer() {
               if (ev.type === 'snapshot') {
                 if (ev.match) setMatch(ev.match as MatchRow)
                 const hist = Array.isArray(ev.events) ? (ev.events as RawEvent[]) : []
-                setEvents(hist.slice(-4000))
+                const sliced = hist.slice(-4000)
+                eventsLenRef.current = sliced.length
+                setEvents(sliced)
                 setStepIdx(-1); setPlaying(true)
               } else if (ev.type === 'match_end' || ev.type === 'error') {
                 // match_end/error 时游标停当前位置（不跳尾）：
                 // 在追加该事件前，把游标钉在当时看到的最后一条；停止自动播放。
                 // 否则 stepIdx=-1(贴尾) 会因 match_end 入列 total+1 而跳到尾部结局。
-                setEvents((prev) => {
-                  if (prev.length > 0) setStepIdx(prev.length - 1)
-                  return [...prev, ev]
-                })
+                // 用 ref 读「追加前长度」算游标，避免在 setEvents updater 内部
+                // 触发 setStepIdx（React updater 须为纯函数；审计 P1-D）。
+                if (eventsLenRef.current > 0) setStepIdx(eventsLenRef.current - 1)
+                eventsLenRef.current += 1
+                setEvents((prev) => [...prev, ev])
                 setPlaying(false)
                 // 回写胜者/earnings 到 match，避免顶栏一直「—」
                 setMatch((prev) => {
@@ -128,6 +137,7 @@ export default function MatchViewer() {
                 setStatus(String(ev.type)); es?.close()
               } else {
                 // 常规事件（落子/判决等）：追加
+                eventsLenRef.current += 1
                 setEvents((prev) => [...prev, ev])
               }
             } catch { /* ignore */ }
