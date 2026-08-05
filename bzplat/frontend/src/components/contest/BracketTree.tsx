@@ -10,11 +10,12 @@
  *   （1v种子 vs 末种子 等）。胜者按 slot//2 进入下一轮槽位。
  *   bye（None bot）不生成 pairing，该种子自动晋级。
  */
-import { useState, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, ChevronDown } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { StatusBadge } from '@/components/ui/status'
 
 export interface BracketPairing {
   id: number
@@ -29,6 +30,7 @@ export interface BracketPairing {
   match_winner?: number | null
   match_id?: string | null
   status?: string
+  scheduled_at?: string | null
 }
 
 interface Props {
@@ -46,6 +48,15 @@ function botLabel(p: BracketPairing, side: 0 | 1): string {
 
 function botId(p: BracketPairing, side: 0 | 1): number | null {
   return side === 0 ? p.bot_a_id : p.bot_b_id
+}
+
+/** 排期时间格式化为紧凑的 MM-DD HH:mm（仅在展示空间有限的对阵卡里用）。 */
+function fmtScheduled(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 export default function BracketTree({ pairings, completedRounds }: Props) {
@@ -72,6 +83,67 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
   )
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set())
   const visibleRounds = rounds.filter((r) => r.round <= expandTo)
+
+  // ── 连接线（SVG overlay）──────────────────────────────────────
+  // 拓扑：(round R, bracket_slot s) → 下一轮 bracket_slot = s // 2
+  const successorLookup = useMemo(() => {
+    const map = new Map<string, BracketPairing>()
+    for (const p of pairings) {
+      const key = `${p.round_num ?? 1}:${p.bracket_slot ?? 0}`
+      map.set(key, p)
+    }
+    return map
+  }, [pairings])
+
+  // pairing 卡片 ref map（key=pairing.id），供 getBoundingClientRect 量像素位置
+  const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map())
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [paths, setPaths] = useState<{ d: string }[]>([])
+  // 渲染后触发重量的计数器（依赖 expandTo / collapsed / pairings / resize）
+  const [measureTick, setMeasureTick] = useState(0)
+
+  const measure = () => {
+    const container = containerRef.current
+    if (!container) {
+      setPaths([])
+      return
+    }
+    const cRect = container.getBoundingClientRect()
+    const next: { d: string }[] = []
+    for (const p of pairings) {
+      if (p.round_num == null || p.bracket_slot == null) continue
+      const nextSlot = Math.floor(p.bracket_slot / 2)
+      const target = successorLookup.get(`${p.round_num + 1}:${nextSlot}`)
+      if (!target) continue
+      const src = cardRefs.current.get(p.id)
+      const dst = cardRefs.current.get(target.id)
+      if (!src || !dst) continue
+      const s = src.getBoundingClientRect()
+      const d = dst.getBoundingClientRect()
+      // 卡片相对容器坐标：RIGHT-center → LEFT-center
+      const sx = s.right - cRect.left
+      const sy = s.top + s.height / 2 - cRect.top
+      const tx = d.left - cRect.left
+      const ty = d.top + d.height / 2 - cRect.top
+      // 三次贝塞尔：水平向右出发、从左侧水平进入目标（平滑的「S/L」连接）
+      const cx = (sx + tx) / 2
+      next.push({ d: `M ${sx} ${sy} C ${cx} ${sy}, ${cx} ${ty}, ${tx} ${ty}` })
+    }
+    setPaths(next)
+  }
+
+  // 首次渲染 + 依赖变化后重量（useLayoutEffect 避免闪烁）
+  useLayoutEffect(() => {
+    measure()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairings, expandTo, collapsed, measureTick, successorLookup])
+
+  // 浏览器窗口尺寸变化 → 卡片位置变了，重新量
+  useEffect(() => {
+    const onResize = () => setMeasureTick((t) => t + 1)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   if (rounds.length === 0) {
     return <p className="py-6 text-center text-sm text-muted-foreground">暂无对阵</p>
@@ -109,13 +181,24 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
         </div>
       )}
 
-      {/* 树状图：每轮一列，横向滚动 */}
+      {/* 树状图：每轮一列，横向滚动；外层 relative 供 SVG overlay 定位 */}
       <div className="overflow-x-auto pb-2">
-        <div className="flex min-w-max gap-6">
+        <div ref={containerRef} className="relative flex min-w-max gap-6">
+          {/* 连接线层：覆盖整片对阵区，不拦截鼠标事件（点击穿透到卡片） */}
+          <svg
+            className="text-muted-foreground/40 pointer-events-none absolute inset-0 h-full w-full"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+          >
+            {paths.map((p, i) => (
+              <path key={i} d={p.d} />
+            ))}
+          </svg>
           {visibleRounds.map((r) => {
             const isCollapsed = collapsed.has(r.round)
             return (
-              <div key={r.round} className="flex min-w-[180px] flex-col">
+              <div key={r.round} className="relative flex min-w-[180px] flex-col">
                 <button
                   type="button"
                   onClick={() => toggleCollapse(r.round)}
@@ -133,9 +216,14 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                       const isBye = p.bot_b_id == null && p.status === 'completed'
                       const aWin = isBye || w === 0
                       const bWin = !isBye && w === 1
+                      const scheduled = fmtScheduled(p.scheduled_at)
                       return (
                         <div
                           key={p.id}
+                          ref={(el) => {
+                            if (el) cardRefs.current.set(p.id, el)
+                            else cardRefs.current.delete(p.id)
+                          }}
                           className={`rounded-lg border bg-card p-2 text-xs shadow-sm ${
                             w != null ? 'border-primary/30' : 'border-border'
                           }`}
@@ -154,6 +242,17 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                             lose={aWin && !isBye ? true : false}
                             bye={p.bot_b_id == null}
                           />
+                          {/* 排期时间 + 状态徽章（紧凑展示） */}
+                          {(scheduled || p.status) && (
+                            <div className="mt-1 flex items-center justify-center gap-1.5">
+                              {scheduled && (
+                                <span className="text-[10px] text-muted-foreground">{scheduled}</span>
+                              )}
+                              {p.status && p.status !== 'completed' && (
+                                <StatusBadge status={p.status} />
+                              )}
+                            </div>
+                          )}
                           {p.match_id && p.status === 'completed' && (
                             <Link
                               to={`/match/${p.match_id}`}

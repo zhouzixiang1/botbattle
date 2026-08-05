@@ -1036,16 +1036,24 @@ def contest_detail(
         estimate = _contests(request).estimate(contest_id)
     except ValueError:
         estimate = None
-    # my_entry：当前登录用户的报名条目（不分页——entries 分页后前端无法靠 entries.find
-    # 可靠拿到自己的条目，休息换 Bot UI 依赖它）。未登录或未报名时为 null。
+    # my_entry + is_organizer：当前登录用户的报名条目 + 是否赛事组织者（组织者可见实名）。
+    # 未登录或未报名时 my_entry 为 null。实名脱敏：仅组织者/admin 可见 real_name/phone/
+    # school/student_id（contest_entries_named 已 JOIN 这几列，这里对非组织者剔除）。
     my_entry = None
+    is_organizer = False
     try:
         token = _extract_token(request)
         u = request.app.state.auth.verify_session(token) if token else None
         if u:
             my_entry = store.get_entry(contest_id, u["id"])
+            is_organizer = c.get("organizer_id") == u.get("id") or u.get("role") == "admin"
     except Exception:
         pass
+    # 非组织者脱敏实名字段（隐私保护——实名仅组织者用于线下核对/上报）
+    if not is_organizer:
+        for e in entries:
+            for k in ("real_name", "phone", "school", "student_id"):
+                e.pop(k, None)
     resp = {
         "contest": c,
         "entries": entries,
@@ -1054,6 +1062,7 @@ def contest_detail(
         "stage_results": stage_results,
         "estimate": estimate,
         "my_entry": my_entry,
+        "is_organizer": is_organizer,
     }
     resp.update(entries_meta)
     return resp
@@ -1234,6 +1243,65 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
         "ready": True,
         "results": rows,
     }
+
+
+@router.get("/api/contests/{contest_id}/export")
+def contest_export(contest_id: int, request: Request, format: str = "csv"):
+    """组织者导出：报名名单（含实名）+ 结果排名合并 CSV。
+
+    仅赛事组织者/admin 可访问（实名隐私）。任何赛事状态可导出：
+    - 报名中（draft/open）：导出已报名名单（rank 列空）。
+    - 已结束（finished）：含正式排名 + 战绩。
+    列：rank, seed, group_id, bot_name, owner_name, real_name, phone, school,
+    student_id, points, wins, draws, losses, eliminated, awarded, registered_at。
+    """
+    store = _store(request)
+    c = store.get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "比赛不存在")
+    # 组织者鉴权（实名隐私——仅组织者/admin 可导出）。用 _extract_token + verify_session
+    # 取当前用户（endpoint 无 Depends(require_user)，直接从 request 解析）。
+    token = _extract_token(request)
+    user = request.app.state.auth.verify_session(token) if token else None
+    if not user:
+        raise HTTPException(401, "未登录或会话过期")
+    _require_contest_organizer(c, user)
+    rows = store.list_contest_export(contest_id)
+    import csv as _csv
+    import io
+
+    def gen():
+        buf = io.StringIO()
+        w = _csv.writer(buf)
+        # BOM 让 Excel 正确识别 UTF-8
+        yield "\ufeff"
+        w.writerow(["rank", "seed", "group_id", "bot_name", "owner_name",
+                    "real_name", "phone", "school", "student_id",
+                    "points", "wins", "draws", "losses", "eliminated",
+                    "awarded", "registered_at"])
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        for r in rows:
+            w.writerow([
+                r.get("rank") if r.get("rank") is not None else "",
+                r.get("seed") or 0, r.get("group_id") or "",
+                r.get("bot_name") or "", r.get("owner_name") or "",
+                r.get("real_name") or "", r.get("phone") or "",
+                r.get("school") or "", r.get("student_id") or "",
+                r.get("points") if r.get("points") is not None else "",
+                r.get("wins") if r.get("wins") is not None else "",
+                r.get("draws") if r.get("draws") is not None else "",
+                r.get("losses") if r.get("losses") is not None else "",
+                int(bool(r.get("eliminated"))),
+                r.get("awarded") or "", r.get("registered_at") or "",
+            ])
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    return StreamingResponse(
+        gen(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="contest-{contest_id}-export.csv"'},
+    )
 
 
 @router.post("/api/contests/{contest_id}/open")

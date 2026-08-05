@@ -83,7 +83,8 @@ export function seatHeaderLabel(m: MatchSeatRow, side: 0 | 1): string {
   if (bot) return bot
   if (owner) return `@${owner}`
   const id = side === 0 ? m.bot_a_id : m.bot_b_id
-  return id != null ? `Bot #${id}` : `座位 ${side}`
+  // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
+  return id != null ? `Bot #${id}` : `座位 ${side + 1}`
 }
 
 /** 胜者文案：优先名字，回退座位号 / 平局 / 进行中 */
@@ -96,7 +97,8 @@ export function resolveWinnerLabel(
   const nameOf = (seat: number) => {
     if (colorLabel) return colorLabel(seat)
     if (m) return seatHeaderLabel(m, seat as 0 | 1)
-    return `座位 ${seat}`
+    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
+    return `座位 ${seat + 1}`
   }
   if (m?.winner === 0 || m?.winner === 1) return nameOf(m.winner)
   if (eventWinner === 0 || eventWinner === 1) return nameOf(eventWinner)

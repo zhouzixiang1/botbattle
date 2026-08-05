@@ -249,7 +249,8 @@ function seatDisplayName(info: SeatInfo | undefined, idx: number): string {
   if (bot) return bot
   const owner = (info?.ownerName || '').trim()
   if (owner) return info?.isHuman ? `${owner}（人类）` : owner
-  return `座位 ${idx}`
+  // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
+  return `座位 ${idx + 1}`
 }
 
 function drawSeat(
@@ -291,7 +292,8 @@ function drawSeat(
     ? `@${info?.ownerName || '人类'}（你）`
     : info?.ownerName
       ? `@${info.ownerName}`
-      : `座位 ${idx}`
+      // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
+      : `座位 ${idx + 1}`
   ctx.fillText(fitText(ctx, ownerLine, 130), x, y + 34)
   // 本轮剩余筹码 + 累计净筹码（旧 PokerTable 底部「累计」搬到座位旁）
   ctx.fillStyle = '#fff'; ctx.font = 'bold 13px "DM Sans"'

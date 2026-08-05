@@ -195,14 +195,15 @@ export default function HumanPlay() {
     match,
     endInfo?.winner ?? (endVm && 'matchWinner' in endVm ? endVm.matchWinner : endVm && 'winner' in endVm ? endVm.winner : undefined),
     over,
-    (seat) => (match ? seatHeaderLabel(match, seat as 0 | 1) : `座位 ${seat}`),
+    // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
+    (seat) => (match ? seatHeaderLabel(match, seat as 0 | 1) : `座位 ${seat + 1}`),
   )
 
   return (
     <PageStub title="人类对战">
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <span className="text-sm text-muted-foreground">
-          {gameLabel(gameId)} · 你坐【座位 {humanSeat}】
+          {gameLabel(gameId)} · 你坐【座位 {humanSeat + 1}】
         </span>
         {match && (
           <span className="text-sm text-muted-foreground">
