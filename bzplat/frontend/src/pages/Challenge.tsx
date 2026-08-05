@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Swords, User, Bot as BotIcon, Plus, Play, X as XIcon } from 'lucide-react'
 import PageStub from '@/components/PageStub'
@@ -6,7 +6,6 @@ import OpponentPickerModal, { type PickBot } from '@/components/OpponentPickerMo
 import { useAuth } from '@/components/useAuth'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { ErrorMsg } from '@/components/ui/status'
@@ -14,7 +13,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { cn } from '@/lib/utils'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel, type GameId } from '@/lib/games'
-import { getGame, defaultMatchConfig } from '@/games'
 
 /** 版本列表条目（公开视图：id+version+upload_note+created_at+size_bytes；owner 视图字段更多）。 */
 interface VersionRow {
@@ -51,16 +49,9 @@ export default function Challenge() {
   const [humanSeat, setHumanSeat] = useState(1)
   // 弹窗：pickingSeat 标记当前为哪个座位挑 bot（'s0'|'s1'|'human'）。
   const [pickingSeat, setPickingSeat] = useState<'s0' | 's1' | 'human' | null>(null)
-  // 动态对局参数（按所选游戏的 configFields 驱动，消除散落 hands 状态 + 漏 pencil n_dots）
-  const [matchCfg, setMatchCfg] = useState<Record<string, number>>(defaultMatchConfig('holdem'))
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const gameSpec = getGame(gameId)
-
-  // 切换游戏时重置参数 + 两座位 + 人类 bot（不同游戏的 bot 不互通）。
-  useEffect(() => {
-    setMatchCfg(defaultMatchConfig(gameId))
-  }, [gameId])
+  // 注：游戏规则参数（手数/棋盘/点阵）已钉死固定值，挑战页不再提供配置 UI。
 
   const resetSeatsOnGameChange = useCallback(() => {
     setSeats([{ ...EMPTY_SEAT }, { ...EMPTY_SEAT }])
@@ -145,7 +136,6 @@ export default function Challenge() {
           bot_id: humanBot.id,
           human_seat: humanSeat,
           game_id: gameId,
-          match_config: { ...matchCfg },
         }
         const d = await apiJson<{ match_id: string }>('/api/matches/human', 'POST', body)
         nav(`/play/${d.match_id}`)
@@ -157,7 +147,6 @@ export default function Challenge() {
         my_bot_id: seats[0].bot.id,
         opponent_bot_id: seats[1].bot.id,
         game_id: gameId,
-        match_config: { ...matchCfg },
       }
       if (seats[0].versionId !== undefined) body.my_bot_version_id = seats[0].versionId
       if (seats[1].versionId !== undefined) body.opponent_bot_version_id = seats[1].versionId
@@ -377,23 +366,6 @@ export default function Challenge() {
                 </div>
               )}
             </div>
-
-            {!humanMode &&
-              gameSpec.configFields.map((f) => (
-                <div key={f.key} className="space-y-1.5">
-                  <Label htmlFor={`challenge-${f.key}`}>
-                    {f.label}（{f.min}–{f.max}）
-                  </Label>
-                  <Input
-                    id={`challenge-${f.key}`}
-                    type="number"
-                    min={f.min}
-                    max={f.max}
-                    value={matchCfg[f.key] ?? f.default}
-                    onChange={(e) => setMatchCfg({ ...matchCfg, [f.key]: Number(e.target.value) })}
-                  />
-                </div>
-              ))}
 
             {error && <ErrorMsg msg={error} />}
             <Button

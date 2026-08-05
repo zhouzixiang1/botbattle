@@ -114,7 +114,10 @@ def test_specs_reference_local_package():
 
 # ── run_session 经注册表跑各游戏（端到端）──────────────────────
 def test_run_session_holdem_via_registry():
-    """holdem 经注册表跑（黑盒：不抛错，返回有 rounds_played 的结果）。"""
+    """holdem 经注册表跑（黑盒：不抛错，返回有 rounds_played 的结果）。
+
+    手数已钉死 DEFAULT_HANDS=70，即使传 num_hands=2 也被忽略，仍跑 70 手。
+    """
     from bzplat.backend.games import run_session
 
     async def decide(player, req):
@@ -122,7 +125,8 @@ def test_run_session_holdem_via_registry():
 
     result = asyncio.run(run_session("holdem", decide, num_hands=2))
     assert hasattr(result, "rounds_played")
-    assert result.rounds_played == 2
+    from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
+    assert result.rounds_played == DEFAULT_HANDS  # 钉死 70，忽略 num_hands 参数
 
 
 def test_run_session_gomoku_via_registry():

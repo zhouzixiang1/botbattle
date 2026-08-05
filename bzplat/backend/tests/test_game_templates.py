@@ -120,7 +120,7 @@ def test_resolve_stages_memory_fallback():
 
 def test_resolve_template_with_match_config():
     tid, gid, stages, mc = resolve_template("pencil_group_drr_ko")
-    assert gid == "pencil" and mc == {"n_dots": 6}  # 对齐裁判 25 格
+    assert gid == "pencil" and mc == {}  # 规则参数已钉死，match_config 恒空
 
 
 def test_resolve_stages_custom_stages():

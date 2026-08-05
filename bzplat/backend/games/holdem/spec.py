@@ -19,7 +19,6 @@ from bzplat.backend.games.holdem import tiers as _tiers_mod
 from bzplat.backend.games.holdem import templates as _templates_mod
 from bzplat.backend.store.schema import (
     SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_HANDS,
     SETTING_JUDGE_HOLDEM_SB,
     SETTING_JUDGE_HOLDEM_STACK,
 )
@@ -28,9 +27,14 @@ GAME_ID = "holdem"
 
 
 async def _session_factory(decide, *, on_event=None, **params: Any):
-    """构造 MatchSession 并 run_async。params 含 num_hands/starting_stack/sb/bb/rng/deal_sequence。"""
+    """构造 MatchSession 并 run_async。
+
+    手数固定 DEFAULT_HANDS（70）——游戏规则钉死，不接受 match_config 配置
+    （曾因 hands/num_hands key 名不一致导致配置静默失效，现彻底移除配置能力）。
+    params 仅保留 starting_stack/sb/bb（盲注/筹码经 admin judge_params 注入）+ rng/deal_sequence。
+    """
     session = MatchSession(
-        num_hands=params.get("num_hands", DEFAULT_HANDS),
+        num_hands=DEFAULT_HANDS,
         starting_stack=params.get("starting_stack") or STARTING_STACK,
         sb=params.get("sb") or SMALL_BLIND,
         bb=params.get("bb") or BIG_BLIND,
@@ -49,16 +53,15 @@ _PROTOCOL = ProtocolSpec(
 
 
 def _validate_match_params(cfg: dict[str, Any]) -> dict[str, Any]:
+    # 手数已钉死 DEFAULT_HANDS，不再接受配置；忽略任何传入字段。
     if not isinstance(cfg, dict):
         raise ValueError("match_config 必须是对象")
-    hands = cfg.get("hands", DEFAULT_HANDS)
-    if not isinstance(hands, int) or not (1 <= hands <= 500):
-        raise ValueError(f"holdem match_config.hands 须为 1–500 的整数（得到 {hands}）")
-    return {"hands": hands}
+    return {}
 
 
 def _rounds_per_match(match_config: dict[str, Any]) -> int:
-    return int(match_config.get("hands", DEFAULT_HANDS))
+    # 手数钉死 70（不再读 match_config）
+    return DEFAULT_HANDS
 
 
 def _normalize_earnings(ea: int) -> float:
@@ -67,9 +70,8 @@ def _normalize_earnings(ea: int) -> float:
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
-    # holdem ETA ∝ 手数（每手约 2s）
-    hands = int(match_config.get("hands", DEFAULT_HANDS) or DEFAULT_HANDS)
-    return hands * 2
+    # holdem ETA ∝ 手数（每手约 2s）；手数钉死 70
+    return DEFAULT_HANDS * 2
 
 
 def _build_match_plan(seed: int, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -80,9 +82,9 @@ def _build_match_plan(seed: int, params: dict[str, Any]) -> list[dict[str, Any]]
     """
     if not params.get("duplicate"):
         return [{"seat_swap": False, "params": {**params, "match_seed": seed}}]
-    num_hands = int(params.get("num_hands") or DEFAULT_HANDS)
+    # 手数钉死 DEFAULT_HANDS（不再读 params["num_hands"]）
     from bzplat.backend.games.holdem.engine import generate_deal_sequence
-    ds = generate_deal_sequence(num_hands, seed) if seed is not None else None
+    ds = generate_deal_sequence(DEFAULT_HANDS, seed) if seed is not None else None
     shared = {**params, "deal_sequence": ds, "match_seed": seed}
     return [
         {"seat_swap": False, "params": shared},  # leg1: A=seat0, B=seat1
@@ -127,7 +129,7 @@ SPEC = GameSpec(
     label="德州扑克",
     session_factory=_session_factory,
     protocol=_PROTOCOL,
-    default_match_params={"hands": DEFAULT_HANDS},
+    default_match_params={},  # 手数钉死 DEFAULT_HANDS，无对局级可配参数
     validate_match_params=_validate_match_params,
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
@@ -139,10 +141,7 @@ SPEC = GameSpec(
                        SMALL_BLIND, (1, 10_000)),
         JudgeParamSpec(SETTING_JUDGE_HOLDEM_BB, "大盲注", "bb",
                        BIG_BLIND, (2, 20_000)),
-        # field="num_hands" 对齐 session_factory 的 kwarg 名（原 default_hands 接不上 → 静默失效）。
-        # orchestrator 优先用此 admin 全局设置，未设时回退 match.total_hands（对局级配置）。
-        JudgeParamSpec(SETTING_JUDGE_HOLDEM_HANDS, "挑战默认手数", "num_hands",
-                       DEFAULT_HANDS, (1, 1000)),
+        # 手数（原 SETTING_JUDGE_HOLDEM_HANDS）已钉死 70，移除该 admin 可调项。
     ],
     tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,

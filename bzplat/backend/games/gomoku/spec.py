@@ -7,20 +7,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, JudgeParamSpec, ProtocolSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec
 from bzplat.backend.games.gomoku.engine import BOARD_SIZE, GomokuSession
 from bzplat.backend.games.gomoku import protocol as proto
 from bzplat.backend.games.gomoku import tiers as _tiers_mod
 from bzplat.backend.games.gomoku import templates as _templates_mod
-from bzplat.backend.store.schema import SETTING_JUDGE_GOMOKU_SIZE
 
 GAME_ID = "gomoku"
 
 
 async def _session_factory(decide, *, on_event=None, **params: Any):
-    """构造 GomokuSession 并 run_async。params 含 board_size。"""
+    """构造 GomokuSession 并 run_async。
+
+    棋盘边长固定 BOARD_SIZE（15）——游戏规则钉死，不接受 match_config/board_size 配置。
+    """
     session = GomokuSession(
-        size=params.get("board_size") or BOARD_SIZE,
+        size=BOARD_SIZE,
         on_event=on_event,
     )
     return await session.run_async(decide)
@@ -95,10 +97,7 @@ SPEC = GameSpec(
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
     eta_for_match=_eta_for_match,
-    judge_params=[
-        JudgeParamSpec(SETTING_JUDGE_GOMOKU_SIZE, "棋盘边长", "board_size",
-                       BOARD_SIZE, (9, 19)),
-    ],
+    judge_params=[],  # 棋盘边长钉死 BOARD_SIZE（15），无 admin 可调项
     tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",

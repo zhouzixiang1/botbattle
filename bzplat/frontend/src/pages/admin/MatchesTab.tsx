@@ -138,7 +138,7 @@ export default function MatchesTab() {
                   <StatusBadge status={m.status} />
                 </td>
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                  {m.result?.hands_played ?? 0}/{m.match_config?.hands ?? '-'}
+                  {m.result?.hands_played ?? 0}
                 </td>
                 <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {m.result?.deltas?.[0] ?? 0}/{m.result?.deltas?.[1] ?? 0}

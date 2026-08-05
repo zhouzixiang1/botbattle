@@ -17,9 +17,12 @@ GAME_ID = "pencil"
 
 
 async def _session_factory(decide, *, on_event=None, **params: Any):
-    """构造 PencilSession 并 run_async。params 含 n_dots。"""
+    """构造 PencilSession 并 run_async。
+
+    点阵边长固定 DEFAULT_N（6）——游戏规则钉死，不接受 match_config 配置。
+    """
     session = PencilSession(
-        n_dots=params.get("n_dots") or DEFAULT_N,
+        n_dots=DEFAULT_N,
         on_event=on_event,
     )
     return await session.run_async(decide)
@@ -33,12 +36,10 @@ _PROTOCOL = ProtocolSpec(
 
 
 def _validate_match_params(cfg: dict[str, Any]) -> dict[str, Any]:
+    # 点阵边长已钉死 DEFAULT_N（6），不再接受配置；忽略任何传入字段。
     if not isinstance(cfg, dict):
         raise ValueError("match_config 必须是对象")
-    n_dots = cfg.get("n_dots", DEFAULT_N)
-    if not isinstance(n_dots, int) or not (3 <= n_dots <= 15):
-        raise ValueError(f"pencil match_config.n_dots 须为 3–15 的整数（得到 {n_dots}）")
-    return {"n_dots": n_dots}
+    return {}
 
 
 def _rounds_per_match(match_config: dict[str, Any]) -> int:
@@ -50,10 +51,8 @@ def _normalize_earnings(ea: int) -> float:
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
-    # pencil ETA ∝ 格数（基准 N=6 → 25 格 标定 60s，按 (n_dots-1)² 缩放）
-    n_dots = int(match_config.get("n_dots", DEFAULT_N) or DEFAULT_N)
-    boxes = (n_dots - 1) ** 2
-    return max(30, int(boxes / 25 * 60))
+    # pencil ETA 固定（N=6 钉死 → 25 格 标定 60s）
+    return 60
 
 
 async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
@@ -90,7 +89,7 @@ SPEC = GameSpec(
     label="点格棋",
     session_factory=_session_factory,
     protocol=_PROTOCOL,
-    default_match_params={"n_dots": DEFAULT_N},
+    default_match_params={},  # 点阵边长钉死 DEFAULT_N（6），无对局级可配参数
     validate_match_params=_validate_match_params,
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,

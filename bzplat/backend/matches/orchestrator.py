@@ -142,13 +142,9 @@ class MatchOrchestrator:
         if gid not in VALID_GAME_IDS or gid not in REGISTERED_ENGINES:
             raise ValueError(f"游戏引擎未注册: {gid}")
 
-        # 对局级配置：spec 默认 + 调用方覆盖（取代散落的 hands/n_dots 具名参数）。
+        # 游戏规则参数已由 GameSpec 钉死，match_config 不再承载 hands/n_dots。
         spec = game_registry.get(gid)
-        mc = dict(spec.default_match_params, **(match_config or {}))
-        try:
-            spec.validate_match_params(mc)
-        except ValueError as e:
-            raise ValueError(f"match 参数非法: {e}") from None
+        mc: dict[str, Any] = {}
 
         bot_seat = 1 - human_seat
         # 人类侧用一个伪 bot_id 占位（取 bot_id 自身，仅满足 NOT NULL FK；
@@ -221,15 +217,10 @@ class MatchOrchestrator:
                 f"游戏引擎未注册: {gid}（当前支持 {sorted(REGISTERED_ENGINES)}）"
             )
 
-        # 对局级配置：spec 默认 + 调用方覆盖（取代散落的 hands/n_dots/**extra 具名参数）。
+        # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死固定值，不再走 match_config。
+        # match_config 仅保留版本快照等内部键（_run_match 读 _bot_a/b_version_id 解析版本路径）。
         spec = game_registry.get(gid)
-        mc = dict(spec.default_match_params, **(match_config or {}))
-        # 版本快照存入 match_config（_run_match 读这两个内部键解析版本路径；
-        # 不污染 spec.validate_match_params——先校验再注入版本键）。
-        try:
-            spec.validate_match_params(mc)
-        except ValueError as e:
-            raise ValueError(f"match 参数非法: {e}") from None
+        mc: dict[str, Any] = {}
         if bot_a_version_id is not None:
             mc["_bot_a_version_id"] = int(bot_a_version_id)
         if bot_b_version_id is not None:
@@ -356,13 +347,12 @@ class MatchOrchestrator:
                 self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
         try:
-            # 对局配置统一通路：DB match_config（对局级）+ admin 全局设置覆盖，整体 **透传。
-            # match_config 经 _parse_match_json_cols 已是 dict（如 {"hands":70}/{"n_dots":6}）。
+            # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死，不再从 match_config 读取。
+            # 此处仅注入 admin judge_params（holdem 的 starting_stack/sb/bb）给 runner。
             spec = game_registry.get(gid)
-            mc: dict[str, Any] = dict(m.get("match_config") or {})
-            for k, v in self._judge_params(gid).items():
-                if v is not None:
-                    mc[k] = v
+            mc: dict[str, Any] = {
+                k: v for k, v in self._judge_params(gid).items() if v is not None
+            }
             result = await self.runner.run_binaries(
                 path_a,
                 path_b,
@@ -523,12 +513,11 @@ class MatchOrchestrator:
                     self._human_turns.pop((match_id, player_idx), None)
 
             try:
-                # 对局配置统一通路（同 _run_match）：DB match_config + admin 设置覆盖，整体 **透传。
+                # 游戏规则参数已由 GameSpec 钉死，仅注入 admin judge_params（同 _run_match）。
                 spec = game_registry.get(gid)
-                mc: dict[str, Any] = dict(m.get("match_config") or {})
-                for k, v in self._judge_params(gid).items():
-                    if v is not None:
-                        mc[k] = v
+                mc: dict[str, Any] = {
+                    k: v for k, v in self._judge_params(gid).items() if v is not None
+                }
                 result = await self.runner.run_bot_vs_human(
                     bot["binary_path"],
                     bot_seat=1 - human_seat,
@@ -585,9 +574,9 @@ class MatchOrchestrator:
         """从 platform_settings 读裁判规则参数（热生效）；缺失或非法时用 spec 默认兜底。
 
         经 games 注册表取该游戏的 judge_params 声明（消除 if game_id）。
-        返回 {field: value}，field 对应 run_session 的 kwarg（如 starting_stack/board_size），
-        value=None 表示用引擎默认。这些是 admin 全局设置；对局级配置（hands/n_dots 等）
-        走 match_config（create_match 时落，_run_match 时读 + 此处 admin 设置覆盖）。
+        返回 {field: value}，field 对应 run_session 的 kwarg（如 holdem 的
+        starting_stack/sb/bb），value=None 表示用引擎默认。
+        游戏规则参数（手数/棋盘/点阵）已钉死，不在 judge_params 声明，故不在此返回。
         """
 
         def _int(key: str, default: int) -> int | None:

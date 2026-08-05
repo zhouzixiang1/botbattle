@@ -159,21 +159,17 @@ def test_protocol_loads_board_tolerates_garbage():
 
 # ── validate / default match_config ───────────────────────────
 def test_validate_match_config_holdem():
-    assert validate_match_config("holdem", {"hands": 100}) == {"hands": 100}
-    assert validate_match_config("holdem", {}) == {"hands": 70}  # 默认
-    with pytest.raises(ValueError):
-        validate_match_config("holdem", {"hands": 0})
-    with pytest.raises(ValueError):
-        validate_match_config("holdem", {"hands": 501})
+    # 手数已钉死 DEFAULT_HANDS，不再接受配置；忽略任何传入字段，返回空 dict。
+    assert validate_match_config("holdem", {"hands": 100}) == {}
+    assert validate_match_config("holdem", {}) == {}
+    assert validate_match_config("holdem", {"hands": 0}) == {}  # 不再校验范围
 
 
 def test_validate_match_config_pencil():
-    assert validate_match_config("pencil", {"n_dots": 11}) == {"n_dots": 11}
-    assert validate_match_config("pencil", {}) == {"n_dots": 6}  # 默认 6（对齐裁判 25 格）
-    with pytest.raises(ValueError):
-        validate_match_config("pencil", {"n_dots": 2})
-    with pytest.raises(ValueError):
-        validate_match_config("pencil", {"n_dots": 16})
+    # 点阵边长已钉死 DEFAULT_N（6），不再接受配置；忽略任何传入字段。
+    assert validate_match_config("pencil", {"n_dots": 11}) == {}
+    assert validate_match_config("pencil", {}) == {}
+    assert validate_match_config("pencil", {"n_dots": 2}) == {}  # 不再校验范围
 
 
 def test_validate_match_config_gomoku_no_params():
@@ -183,13 +179,10 @@ def test_validate_match_config_gomoku_no_params():
 
 
 def test_default_match_config_per_game():
-    assert default_match_config("holdem") == {"hands": 70}
+    # 所有游戏规则参数已钉死，default_match_config 恒为空 dict。
+    assert default_match_config("holdem") == {}
     assert default_match_config("gomoku") == {}
-    assert default_match_config("pencil") == {"n_dots": 6}  # 对齐裁判 25 格
-    # 返回深拷贝（改不影响注册表）
-    d = default_match_config("holdem")
-    d["hands"] = 999
-    assert default_match_config("holdem") == {"hands": 70}
+    assert default_match_config("pencil") == {}
 
 
 # ── 段位 per-game ─────────────────────────────────────────────
@@ -224,7 +217,8 @@ def test_all_tiers_per_game():
 
 # ── 编排特化函数（spec 上的能力）──────────────────────────────
 def test_rounds_per_match_per_game():
-    assert registry.get("holdem").rounds_per_match({"hands": 50}) == 50
+    # 手数钉死 DEFAULT_HANDS（70），不再读 match_config
+    assert registry.get("holdem").rounds_per_match({"hands": 50}) == 70
     assert registry.get("holdem").rounds_per_match({}) == 70
     assert registry.get("gomoku").rounds_per_match({}) == 1
     assert registry.get("pencil").rounds_per_match({}) == 1
@@ -242,23 +236,24 @@ def test_judge_games_derived():
     games = registry.judge_games()
     ids = {g["game_id"] for g in games}
     assert ids == {"holdem", "gomoku", "pencil"}
-    # holdem 有 4 个裁判参数
+    # holdem 有 3 个裁判参数（stack/sb/bb；手数已钉死移除）
     holdem = next(g for g in games if g["game_id"] == "holdem")
-    assert len(holdem["params"]) == 4
-    # gomoku 1 个（棋盘边长）
+    assert len(holdem["params"]) == 3
+    # gomoku 0 个（棋盘边长已钉死移除）
     gomoku = next(g for g in games if g["game_id"] == "gomoku")
-    assert len(gomoku["params"]) == 1
-    # pencil 0 个（n_dots 走 match 列）
+    assert len(gomoku["params"]) == 0
+    # pencil 0 个
     pencil = next(g for g in games if g["game_id"] == "pencil")
     assert len(pencil["params"]) == 0
 
 
 def test_judge_param_table():
     defaults, bounds = registry.judge_param_table()
-    # holdem 的 4 个 setting key 都在
+    # holdem 的 3 个 setting key 都在（stack/sb/bb；手数已钉死移除）
     assert schema.SETTING_JUDGE_HOLDEM_STACK in defaults
     assert defaults[schema.SETTING_JUDGE_HOLDEM_STACK] == 20000
-    assert bounds[schema.SETTING_JUDGE_GOMOKU_SIZE] == (9, 19)
+    # gomoku 棋盘边长已钉死，不在 judge_param_table
+    assert schema.SETTING_JUDGE_GOMOKU_SIZE not in bounds
     # pencil 无全局 judge 参数
     pencil_keys = {p.setting_key for p in registry.get("pencil").judge_params}
     assert pencil_keys == set()

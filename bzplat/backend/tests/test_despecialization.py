@@ -25,33 +25,31 @@ def test_normalize_earnings_via_spec():
 
 
 def test_rounds_per_match_via_spec():
-    """orchestrator 的 total_hands 经 spec.rounds_per_match（holdem=hands；棋类=1）。"""
-    assert registry.get("holdem").rounds_per_match({"hands": 80}) == 80
-    assert registry.get("holdem").rounds_per_match({"hands": 1}) == 1
+    """手数钉死 DEFAULT_HANDS（70），rounds_per_match 忽略 match_config 返回固定值。"""
+    assert registry.get("holdem").rounds_per_match({"hands": 80}) == 70
+    assert registry.get("holdem").rounds_per_match({"hands": 1}) == 70
+    assert registry.get("holdem").rounds_per_match({}) == 70
     assert registry.get("gomoku").rounds_per_match({}) == 1
     assert registry.get("pencil").rounds_per_match({}) == 1
 
 
-# ── contests estimate 经 spec ETA ──────────────────────────────
-def test_estimate_holdem_uses_hands(tmp_path):
-    """holdem ETA 按手数线性（每手 ~2s），经 spec.eta_for_match。"""
+# ── contests estimate 经 spec ETA（已钉死固定值）─────────────────
+def test_estimate_holdem_fixed(tmp_path):
+    """holdem ETA 固定（手数钉死 70 → 140s），忽略 match_config。"""
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
-    # 70 手 → 140s
     assert _estimate_sec_per_match("holdem", {"hands": 70}) == 140
-    # 35 手 → 70s
-    assert _estimate_sec_per_match("holdem", {"hands": 35}) == 70
-    # 无 config 用 spec 默认（DEFAULT_HANDS=70 → 140s）
+    assert _estimate_sec_per_match("holdem", {"hands": 35}) == 140  # 忽略，仍 140
     assert _estimate_sec_per_match("holdem", {}) == 140
 
 
-def test_estimate_pencil_scales_with_n_dots(tmp_path):
-    """pencil ETA 按 n_dots 线性缩放（N=11 标定）。"""
+def test_estimate_pencil_fixed(tmp_path):
+    """pencil ETA 固定（N=6 钉死 → 60s），忽略 n_dots。"""
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
-    base = _estimate_sec_per_match("pencil", {"n_dots": 11})
-    half = _estimate_sec_per_match("pencil", {"n_dots": 5})
-    assert base > half > 0
+    assert _estimate_sec_per_match("pencil", {"n_dots": 11}) == 60
+    assert _estimate_sec_per_match("pencil", {"n_dots": 5}) == 60
+    assert _estimate_sec_per_match("pencil", {}) == 60
 
 
 def test_estimate_gomoku_fixed():
@@ -63,23 +61,17 @@ def test_estimate_gomoku_fixed():
     assert a == b > 0
 
 
-# ── validate_match_config 经 spec ──────────────────────────────
+# ── validate_match_config 经 spec（已钉死，忽略配置）─────────────
 def test_validate_match_config_delegates_to_spec():
     from bzplat.backend.contests.validation import validate_match_config
 
-    # holdem
-    assert validate_match_config({"hands": 100}, "holdem") == {"hands": 100}
-    assert validate_match_config({}, "holdem") == {"hands": 70}
-    # pencil
-    assert validate_match_config({"n_dots": 9}, "pencil") == {"n_dots": 9}
+    # holdem：手数钉死，忽略 hands 字段，返回空
+    assert validate_match_config({"hands": 100}, "holdem") == {}
+    assert validate_match_config({}, "holdem") == {}
+    # pencil：n_dots 钉死，返回空
+    assert validate_match_config({"n_dots": 9}, "pencil") == {}
     # gomoku 无参数
     assert validate_match_config({"x": 1}, "gomoku") == {}
-    # 非法值抛 ValueError
-    import pytest
-    with pytest.raises(ValueError):
-        validate_match_config({"hands": 0}, "holdem")
-    with pytest.raises(ValueError):
-        validate_match_config({"n_dots": 99}, "pencil")
 
 
 # ── DEFAULT_MATCH_CONFIG 从注册表派生 ──────────────────────────

@@ -19,9 +19,7 @@ from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
-    SETTING_JUDGE_GOMOKU_SIZE,
     SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_HANDS,
     SETTING_JUDGE_HOLDEM_SB,
     SETTING_JUDGE_HOLDEM_STACK,
 )
@@ -43,15 +41,15 @@ def orch(store):
 def test_judge_params_defaults_when_unset(orch):
     """未写 settings 时该游戏字段返回 None（交由引擎常量兜底）。
 
-    PR2 起 _judge_params(gid) 只返回该游戏的字段：holdem→starting_stack/sb/bb/
-    num_hands（field 已对齐 session_factory 的 kwarg 名）；gomoku→board_size。
+    游戏规则参数（手数/棋盘/点阵）已钉死，不在 judge_params 声明；
+    holdem 仅 stack/sb/bb 三个字段。
     """
-    # holdem：4 个字段全 None
+    # holdem：3 个字段全 None（手数已钉死，移除 num_hands）
     jp_h = orch._judge_params("holdem")
-    assert jp_h == {"starting_stack": None, "sb": None, "bb": None, "num_hands": None}
-    # gomoku：仅 board_size
+    assert jp_h == {"starting_stack": None, "sb": None, "bb": None}
+    # gomoku：棋盘边长已钉死，无 judge 参数
     jp_g = orch._judge_params("gomoku")
-    assert jp_g == {"board_size": None}
+    assert jp_g == {}
     # pencil：无 judge 参数
     jp_p = orch._judge_params("pencil")
     assert jp_p == {}
@@ -59,27 +57,21 @@ def test_judge_params_defaults_when_unset(orch):
 
 def test_judge_params_reads_settings(orch, store):
     """写入合法 settings 后 _judge_params(gid) 读到对应值（按游戏分组）。"""
-    store.set_setting(SETTING_JUDGE_GOMOKU_SIZE, "9")
     store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "5000")
     store.set_setting(SETTING_JUDGE_HOLDEM_SB, "25")
     store.set_setting(SETTING_JUDGE_HOLDEM_BB, "50")
-    store.set_setting(SETTING_JUDGE_HOLDEM_HANDS, "30")
     h = orch._judge_params("holdem")
     assert h["starting_stack"] == 5000 and h["sb"] == 25 and h["bb"] == 50
-    # SETTING_JUDGE_HOLDEM_HANDS 映射到 field="num_hands"（PR2 修复：原 default_hands 接不上）
-    assert h["num_hands"] == 30
-    assert orch._judge_params("gomoku") == {"board_size": 9}
+    # num_hands 已钉死，不再作为 judge 参数返回
 
 
 def test_judge_params_bad_values_fall_back(orch, store):
     """非法值（负数/非数字/空串）返回 None，由引擎兜底。"""
-    store.set_setting(SETTING_JUDGE_GOMOKU_SIZE, "not-a-number")
     store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "0")
     store.set_setting(SETTING_JUDGE_HOLDEM_BB, "-5")
     store.set_setting(SETTING_JUDGE_HOLDEM_SB, "")
     h = orch._judge_params("holdem")
     assert h["starting_stack"] is None and h["sb"] is None and h["bb"] is None
-    assert orch._judge_params("gomoku") == {"board_size": None}
 
 
 # ── run_session 用新参数构造 Session ──────────────────────────────
@@ -121,21 +113,18 @@ def _run_callables(game_id, **kw):
     raise ValueError(f"unsupported game in helper: {game_id}")
 
 
-def test_gomoku_board_size_takes_effect():
-    """board_size=9 时对局在 9×9 棋盘进行：第 10 手（index 9）会越界被判非法。"""
-    result = _run_callables("gomoku", board_size=9)
-    # 黑方从 x=0..顺序下，白方同理；9×9 共 81 格，双方各占一半。
-    # 这里只断言参数确实被传进去（9 而非默认 15）：非法应在 x>=9 后触发。
+def test_gomoku_board_size_pinned_to_default():
+    """棋盘边长已钉死 BOARD_SIZE（15），即使传 board_size=9 也被忽略，仍用 15×15。"""
+    result = _run_callables("gomoku", board_size=9)  # 传 9 但 spec 忽略，用固定 15
     assert result.reason in ("five", "illegal", "draw")
-    # 关键：回合数不应超过 9*9（若仍是 15×15 则不会因 9 越界而提前结束结构异常）
-    assert result.rounds_played <= 9 * 9 + 1
+    # 15×15 固定，回合数上限 15*15+1
+    assert result.rounds_played <= 15 * 15 + 1
 
 
-def test_gomoku_board_size_none_uses_default():
-    """board_size=None 用默认 15。"""
-    result = _run_callables("gomoku")  # 不传 board_size
+def test_gomoku_default_board_size():
+    """不传 board_size 时用默认 15×15。"""
+    result = _run_callables("gomoku")
     assert result.reason in ("five", "illegal", "draw")
-    # 默认 15×15，回合数上限 15*15+1
     assert result.rounds_played <= 15 * 15 + 1
 
 
@@ -263,8 +252,9 @@ def test_get_judges_returns_all_games(tmp_path):
     holdem = next(g for g in data["games"] if g["game_id"] == "holdem")
     gomoku = next(g for g in data["games"] if g["game_id"] == "gomoku")
     pencil = next(g for g in data["games"] if g["game_id"] == "pencil")
-    assert len(holdem["params"]) == 4
-    assert len(gomoku["params"]) == 1
+    # holdem 3 个（stack/sb/bb；手数已钉死）；gomoku 0 个（棋盘已钉死）；pencil 0 个
+    assert len(holdem["params"]) == 3
+    assert len(gomoku["params"]) == 0
     assert pencil["params"] == []
 
 
@@ -276,28 +266,28 @@ def test_get_judges_non_admin_forbidden(tmp_path):
 
 def test_patch_judge_params_updates_and_hot(tmp_path):
     client, app = _admin_client(tmp_path)
+    # gomoku 棋盘边长已钉死，不再可调；仅 patch holdem 的 sb
     r = client.patch(
         "/api/admin/judges/params",
-        json={"params": {"judge_gomoku_board_size": 9, "judge_holdem_sb": 25}},
+        json={"params": {"judge_holdem_sb": 25}},
     )
     assert r.status_code == 200, r.text
     updated = r.json()["updated"]
-    assert updated["judge_gomoku_board_size"] == 9
-    # 热生效：_judge_params(gid) 立即读到新值（per-game，PR2）
-    jp_gomoku = app.state.orch._judge_params("gomoku")
-    assert jp_gomoku["board_size"] == 9
+    assert updated["judge_holdem_sb"] == 25
+    # 热生效：_judge_params(gid) 立即读到新值
     jp_holdem = app.state.orch._judge_params("holdem")
     assert jp_holdem["sb"] == 25
     # 返回的 judges 总览也反映新值
-    gomoku = next(g for g in r.json()["judges"]["games"] if g["game_id"] == "gomoku")
-    assert gomoku["params"][0]["value"] == 9
+    holdem = next(g for g in r.json()["judges"]["games"] if g["game_id"] == "holdem")
+    sb_param = next(p for p in holdem["params"] if p["key"] == "judge_holdem_sb")
+    assert sb_param["value"] == 25
 
 
 def test_patch_judge_params_out_of_bounds_rejected(tmp_path):
     client, _ = _admin_client(tmp_path)
     r = client.patch(
         "/api/admin/judges/params",
-        json={"params": {"judge_gomoku_board_size": 5}},  # 下限 9
+        json={"params": {"judge_holdem_bb": 1}},  # 下限 2
     )
     assert r.status_code == 400
 
@@ -325,6 +315,6 @@ def test_patch_judge_params_non_admin_forbidden(tmp_path):
     client = _plain_client(tmp_path)
     r = client.patch(
         "/api/admin/judges/params",
-        json={"params": {"judge_gomoku_board_size": 9}},
+        json={"params": {"judge_holdem_sb": 50}},
     )
     assert r.status_code == 403

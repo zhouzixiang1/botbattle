@@ -13,7 +13,7 @@ import { holdemSpec } from './holdem'
 import { gomokuSpec } from './gomoku'
 import { pencilSpec } from './pencil'
 
-export type { GameViewSpec, MatchConfigField, BoardProps } from './base'
+export type { GameViewSpec, BoardProps } from './base'
 
 /** 全部已注册游戏规格。 */
 export const GAMES: GameViewSpec[] = [holdemSpec, gomokuSpec, pencilSpec]
@@ -57,11 +57,6 @@ export function gameIcon(id: string | null | undefined): LucideIcon {
 /** 该游戏是否棋类（步进式，取代散落的 isBoard 布尔）。 */
 export function isBoardGame(id: string | null | undefined): boolean {
   return getGame(id).kind === 'board'
-}
-
-/** 该游戏的默认 match_config（深拷贝，取代散落 {hands:70}）。 */
-export function defaultMatchConfig(id: string | null | undefined): Record<string, number> {
-  return { ...getGame(id).defaultMatchConfig }
 }
 
 /** GAME_LABEL 映射（向后兼容 lib/games.ts 导出）。 */

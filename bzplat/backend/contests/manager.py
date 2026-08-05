@@ -13,7 +13,6 @@ from bzplat.backend.contests.stages import (
     swiss_rounds_needed,
 )
 from bzplat.backend.contests.templates import (
-    default_match_config,
     get_template,
     points_for_result,
     resolve_stages,
@@ -89,29 +88,15 @@ def _parse_stages(c: dict) -> list[dict]:
 
 
 def _match_config(c: dict) -> dict:
-    """解析比赛的 match_config（每游戏一份对局参数）；回退 hands_per_match。"""
-    raw = c.get("match_config_json") or "{}"
-    try:
-        cfg = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
-    except (json.JSONDecodeError, TypeError):
-        cfg = {}
-    if not cfg:
-        # 向后兼容：旧比赛无 match_config，德扑用 hands_per_match 列兜底
-        # （仅 holdem 行有该列显式值；非 holdem 行 hands_per_match 恒为默认 70 但无意义，
-        # 故只认非零显式值——解耦审计 I2：不再按 game_id 名分支）
-        hpm = int(c.get("hands_per_match") or 0)
-        if hpm:
-            cfg = {"hands": hpm}
-    return cfg if isinstance(cfg, dict) else {}
+    """赛事对局配置。游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死固定值，
+    不再从 match_config_json/hands_per_match 读取；此处保留空 dict 占位
+    （orchestrator.challenge 不再消费游戏规则参数，仅用版本快照等内部键）。
+    """
+    return {}
 
 
 def _estimate_sec_per_match(gid: str, cfg: dict) -> int:
-    """粗估每场时长（秒）：经 spec.eta_for_match（消除 if game_id 分支）。
-
-    holdem=hands×2；pencil=n_dots 缩放；gomoku 固定——这些游戏特化逻辑封装在
-    各 spec.eta_for_match 里，通用层不再 if gid==。cfg 的 hands 缺省由 _match_config
-    的 hands_per_match 回退已处理（旧 holdem 比赛）。
-    """
+    """粗估每场时长（秒）：经 spec.eta_for_match（各游戏已钉死固定 ETA）。"""
     return game_registry.get(gid).eta_for_match(cfg)
 
 
@@ -149,14 +134,13 @@ class ContestManager:
         registration_closes_at: str | None = None,
         starts_at: str | None = None,
     ) -> dict:
-        # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages+match_config
+        # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages
         if stages:
             tid = template_id or "custom"
             gid = (game_id or "holdem").strip().lower()
             stage_list = stages
-            tpl_mc = default_match_config(gid)
         else:
-            tid, gid, stage_list, tpl_mc = resolve_template(
+            tid, gid, stage_list, _tpl_mc = resolve_template(
                 template_id, game_id=game_id, store=self.store
             )
         # P5：phase 优先级：显式传入 > 模板自带 phase > standalone
@@ -164,8 +148,9 @@ class ContestManager:
             tpl = get_template(tid)
             if tpl and tpl.get("phase"):
                 phase = tpl["phase"]
-        # match_config 优先级：显式传入 > 模板自带 > game 默认
-        cfg = match_config if match_config is not None else tpl_mc
+        # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死，赛事不再存 match_config；
+        # match_config_json 落空 dict（DB 列保留向后兼容，但不再承载游戏规则）。
+        cfg: dict = {}
         # 时间校验：开放报名 < 截止报名 < 开赛（三者非 None 时）
         _validate_contest_times(registration_opens_at, registration_closes_at, starts_at)
         return self.store.create_contest(

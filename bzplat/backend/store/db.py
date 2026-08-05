@@ -823,14 +823,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN n_dots")
         if "hands_played" in _mcols or "earnings_a" in _mcols:
             # 结果：hands_played + earnings_a/b → result.{hands_played,deltas}（按行原值）
+            # 注意：WHERE 只判 IS NOT NULL，保留零值行——零手判负（bot 第一手崩）的
+            # rounds_played=0/earnings=0 行也必须迁移，否则 result 会丢成 '{}'。
             conn.execute(
                 f"UPDATE {_tbl} SET result=json_set(result,'$.hands_played',hands_played) "
-                "WHERE hands_played IS NOT NULL AND hands_played!=0"
+                "WHERE hands_played IS NOT NULL"
             )
             conn.execute(
                 f"UPDATE {_tbl} SET result=json_set(result,'$.deltas',json_array(earnings_a,earnings_b)) "
-                "WHERE (earnings_a IS NOT NULL AND earnings_a!=0) "
-                "OR (earnings_b IS NOT NULL AND earnings_b!=0)"
+                "WHERE earnings_a IS NOT NULL OR earnings_b IS NOT NULL"
             )
             for _dead in ("hands_played", "earnings_a", "earnings_b", "net_bb_a"):
                 if _dead in _table_cols(conn, _tbl):

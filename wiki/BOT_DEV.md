@@ -17,7 +17,7 @@
 | 长时运行握手 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
 | 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB / 默认 60s（可配） |
 
-> 差异：本平台 Bot 进程**整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动即可运行（见 [协议](#/wiki?slug=protocol) §10）。手数默认 **70**（Botzone 文档 50）。
+> 差异：本平台 Bot 进程**整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动即可运行（见 [协议](#/wiki?slug=protocol) §10）。手数**固定 70**（Botzone 文档 50，规则钉死不可配）。
 
 ### 选择运行模式
 

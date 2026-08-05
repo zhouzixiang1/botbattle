@@ -10,7 +10,7 @@ interface Contest {
   title: string
   organizer_id: number
   status: string
-  hands_per_match: number
+  hands_per_match?: number  // 已钉死固定值，不再展示；保留字段兼容 API 响应
   created_at: string
   starts_at: string | null
   ends_at: string | null
@@ -155,7 +155,6 @@ export default function ContestsTab() {
               <th className="px-3 py-2.5">模板/游戏</th>
               <th className="px-3 py-2.5">状态</th>
               <th className="px-3 py-2.5">时间编排</th>
-              <th className="px-3 py-2.5">手数</th>
               <th className="px-3 py-2.5">创建时间</th>
               <th className="px-3 py-2.5">操作</th>
             </tr>
@@ -178,7 +177,6 @@ export default function ContestsTab() {
                     {c.starts_at && <div className="font-medium text-foreground">开赛: {fmtTime(c.starts_at)}</div>}
                     {!c.registration_opens_at && !c.registration_closes_at && !c.starts_at && <span>—</span>}
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{c.hands_per_match}</td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">{c.created_at}</td>
                   <td className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
