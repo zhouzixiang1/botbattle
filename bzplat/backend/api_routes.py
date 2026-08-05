@@ -979,11 +979,21 @@ def contest_templates(request: Request, game: str | None = None):
     return {"templates": _store(request).list_contest_templates(game_id=game)}
 
 
+# 访客/普通用户不可见的赛事状态（草稿/取消）——组织者/admin 可见全部（审计 P1-E）。
+_CONTEST_HIDDEN_STATUSES = ["draft", "cancelled"]
+
+
 @router.get("/api/contests")
 def list_contests(request: Request, status: str | None = None, game_id: str | None = None,
-                  page: int | None = None, per_page: int = 20):
+                  page: int | None = None, per_page: int = 20,
+                  user=Depends(optional_user)):
+    # 非 organizer/admin 且未显式指定 status 时，默认排除 draft/cancelled
+    # （组织者未发布的赛事结构不应提前暴露给访客）。显式传 status 则尊重调用方。
+    is_privileged = user is not None and user.get("role") in ("organizer", "admin")
+    exclude = None if (is_privileged or status) else _CONTEST_HIDDEN_STATUSES
     result = _store(request).list_contests(status=status, game_id=game_id,
-                                           page=page, per_page=per_page)
+                                           page=page, per_page=per_page,
+                                           exclude_statuses=exclude)
     if isinstance(result, dict):
         return {"contests": result["items"], "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}

@@ -2901,6 +2901,7 @@ class Store:
     def list_contests(
         self, *, status: str | None = None, organizer_id: int | None = None,
         game_id: str | None = None, page: int | None = None, per_page: int = 20,
+        exclude_statuses: list[str] | None = None,
     ) -> list[dict] | dict:
         with self._tx() as c:
             sql = "SELECT * FROM contests WHERE 1=1"
@@ -2914,6 +2915,11 @@ class Store:
             if game_id:
                 sql += " AND game_id=?"
                 params.append(game_id)
+            # 排除某些状态（如访客不见 draft/cancelled；审计 P1-E）。与 status 互斥使用。
+            if exclude_statuses:
+                placeholders = ",".join("?" for _ in exclude_statuses)
+                sql += f" AND status NOT IN ({placeholders})"
+                params.extend(exclude_statuses)
             sql += " ORDER BY created_at DESC"
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
