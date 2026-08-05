@@ -303,11 +303,11 @@ export default function MatchViewer() {
             <span className="font-mono text-xs text-muted-foreground">
               累计筹码{' '}
               <span className={netA >= 0 ? 'text-success' : 'text-destructive'}>
-                座0 {fmtNet(netA)}
+                座1 {fmtNet(netA)}
               </span>
               {' · '}
               <span className={netB >= 0 ? 'text-success' : 'text-destructive'}>
-                座1 {fmtNet(netB)}
+                座2 {fmtNet(netB)}
               </span>
             </span>
           )}
@@ -321,9 +321,9 @@ export default function MatchViewer() {
           )}
           {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (
             <span className="text-xs text-muted-foreground">
-              <Link to={`/bot/${match.bot_a_id}`} className="text-primary hover:underline">座0 详情</Link>
+              <Link to={`/bot/${match.bot_a_id}`} className="text-primary hover:underline">座1 详情</Link>
               {' · '}
-              <Link to={`/bot/${match.bot_b_id}`} className="text-primary hover:underline">座1 详情</Link>
+              <Link to={`/bot/${match.bot_b_id}`} className="text-primary hover:underline">座2 详情</Link>
             </span>
           )}
         </div>
