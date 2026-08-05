@@ -108,7 +108,7 @@ def test_contest_crash_technical_loss_completed(tmp_path):
     mid = s.create_match("p4crash-m1", ba, ba, game_id="holdem")["id"]
     s.update_match(
         mid, status="completed", winner=1, reason="technical_loss",
-        earnings_a=-1, earnings_b=1, technical_loss=1,
+        result={"deltas": [-1, 1]}, technical_loss=1,
     )
     m = s.get_match(mid)
     assert m["status"] == "completed"

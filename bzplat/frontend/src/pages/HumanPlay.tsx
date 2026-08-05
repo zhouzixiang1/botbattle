@@ -74,7 +74,7 @@ export default function HumanPlay() {
   const [events, setEvents] = useState<Ev[]>([])
   const [over, setOver] = useState(false)
   const [error, setError] = useState('')
-  const [endInfo, setEndInfo] = useState<{ winner?: number | null; earnings_a?: number; earnings_b?: number; reason?: string } | null>(null)
+  const [endInfo, setEndInfo] = useState<{ winner?: number | null; reason?: string } | null>(null)
   const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
   const [nowTs, setNowTs] = useState(() => Date.now())
   const wsRef = useRef<WebSocket | null>(null)
@@ -99,16 +99,19 @@ export default function HumanPlay() {
           setTurnDeadline(null)
           setEndInfo({
             winner: ev.winner as number | null | undefined,
-            earnings_a: ev.earnings_a != null ? Number(ev.earnings_a) : undefined,
-            earnings_b: ev.earnings_b != null ? Number(ev.earnings_b) : undefined,
             reason: ev.reason || ev.message,
           })
           setMatch((prev) => prev ? {
             ...prev,
             status: 'completed',
             winner: ev.winner as number | null | undefined,
-            earnings_a: ev.earnings_a != null ? Number(ev.earnings_a) : prev.earnings_a,
-            earnings_b: ev.earnings_b != null ? Number(ev.earnings_b) : prev.earnings_b,
+            result: {
+              ...(prev.result || {}),
+              deltas: [
+                ev.earnings_a != null ? Number(ev.earnings_a) : prev.result?.deltas?.[0] ?? 0,
+                ev.earnings_b != null ? Number(ev.earnings_b) : prev.result?.deltas?.[1] ?? 0,
+              ],
+            },
           } : prev)
         } else {
           setEvents((prev) => [...prev, ev])

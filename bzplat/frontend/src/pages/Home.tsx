@@ -29,11 +29,11 @@ interface Match {
   bot_b_name?: string
   bot_a_display?: string
   bot_b_display?: string
-  earnings_a?: number
+  earnings_a?: number  // 已废弃（result.deltas 取代），保留向后兼容旧 API 响应
   earnings_b?: number
   created_at?: string
-  hands_played?: number
-  total_hands?: number
+  match_config?: Record<string, number>
+  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
   game_id?: string
   match_type?: string
   owner_id?: number | null
@@ -245,10 +245,10 @@ export default function Home() {
                       </TableCell>
                       <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
                         {isBoardGame(m.game_id)
-                          ? `${m.hands_played ?? 0} 步`
-                          : m.total_hands
-                            ? `${m.hands_played ?? 0}/${m.total_hands}`
-                            : `${m.hands_played ?? 0} 手`}
+                          ? `${m.result?.hands_played ?? 0} 步`
+                          : m.match_config?.hands
+                            ? `${m.result?.hands_played ?? 0}/${m.match_config.hands}`
+                            : `${m.result?.hands_played ?? 0} 手`}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">

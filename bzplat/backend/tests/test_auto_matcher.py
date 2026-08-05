@@ -28,8 +28,8 @@ class FakeOrch:
         self._tasks: dict[str, object] = {}
         self.calls: list[dict] = []
 
-    async def challenge(self, a, b, owner_user_id, *, hands=70, match_type="challenge",
-                        contest_id=None, game_id=None):
+    async def challenge(self, a, b, owner_user_id, *, match_type="challenge",
+                        contest_id=None, game_id=None, match_config=None):
         mid = f"m{len(self.calls)}"
         self._tasks[mid] = object()
         self.calls.append(

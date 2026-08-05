@@ -160,7 +160,8 @@ def test_swiss_ko_smoke_pairings(store: Store):
             self.n = 0
 
         async def challenge(
-            self, a, b, owner_user_id, *, hands=1, contest_id=None, **k
+            self, a, b, owner_user_id, *, match_type="contest", contest_id=None,
+            game_id=None, match_config=None, **k
         ):
             self.n += 1
             mid = f"fake-match-{self.n}"
@@ -170,8 +171,9 @@ def test_swiss_ko_smoke_pairings(store: Store):
                 b,
                 owner_id=owner_user_id,
                 contest_id=contest_id,
-                total_hands=hands,
-                match_type="contest",
+                match_type=match_type,
+                game_id=game_id,
+                match_config=match_config,
             )
             return mid
 
@@ -190,8 +192,7 @@ def test_swiss_ko_smoke_pairings(store: Store):
                 mid,
                 status=STATUS_COMPLETED,
                 winner=0,
-                earnings_a=100,
-                earnings_b=-100,
+                result={"deltas": [100, -100]},
             )
             store.update_contest_pairing(p["id"], status="completed")
 
@@ -286,13 +287,12 @@ def test_match_config_hands_dispatched_for_holdem(store: Store):
     seen = {}
 
     class FakeOrch:
-        async def challenge(self, a, b, owner_user_id, *, hands=70, game_id=None,
-                            n_dots=None, **k):
-            seen["hands"] = hands
-            seen["n_dots"] = n_dots
+        async def challenge(self, a, b, owner_user_id, *, match_type="contest",
+                            contest_id=None, game_id=None, match_config=None, **k):
+            seen["match_config"] = match_config
             seen["game_id"] = game_id
             store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               total_hands=hands, match_type="contest", game_id=game_id)
+                               match_type=match_type, game_id=game_id, match_config=match_config)
             return "m1"
 
     mgr = ContestManager(store, FakeOrch())  # type: ignore
@@ -301,8 +301,7 @@ def test_match_config_hands_dispatched_for_holdem(store: Store):
         await mgr._dispatch_pending(c["id"], 0)
 
     asyncio.run(run())
-    assert seen["hands"] == 20
-    assert seen["n_dots"] is None
+    assert seen["match_config"] == {"hands": 20}
     assert seen["game_id"] == "holdem"
 
 
@@ -323,13 +322,12 @@ def test_match_config_n_dots_dispatched_for_pencil(store: Store):
     seen = {}
 
     class FakeOrch:
-        async def challenge(self, a, b, owner_user_id, *, hands=70, game_id=None,
-                            n_dots=None, **k):
-            seen["hands"] = hands
-            seen["n_dots"] = n_dots
+        async def challenge(self, a, b, owner_user_id, *, match_type="contest",
+                            contest_id=None, game_id=None, match_config=None, **k):
+            seen["match_config"] = match_config
             seen["game_id"] = game_id
             store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               total_hands=hands, match_type="contest", game_id=game_id)
+                               match_type=match_type, game_id=game_id, match_config=match_config)
             return "m1"
 
     mgr = ContestManager(store, FakeOrch())  # type: ignore
@@ -338,7 +336,7 @@ def test_match_config_n_dots_dispatched_for_pencil(store: Store):
         await mgr._dispatch_pending(c["id"], 0)
 
     asyncio.run(run())
-    assert seen["n_dots"] == 9
+    assert seen["match_config"] == {"n_dots": 9}
     assert seen["game_id"] == "pencil"
 
 
@@ -363,12 +361,13 @@ class _FakeOrch:
         self.store = store
         self.n = 0
 
-    async def challenge(self, a, b, owner_user_id, *, hands=1, contest_id=None, **k):
+    async def challenge(self, a, b, owner_user_id, *, match_type="contest",
+                        contest_id=None, game_id=None, match_config=None, **k):
         self.n += 1
         mid = f"fake-match-{contest_id}-{self.n}"
         self.store.create_match(
             mid, a, b, owner_id=owner_user_id, contest_id=contest_id,
-            total_hands=hands, match_type="contest",
+            match_type=match_type, game_id=game_id, match_config=match_config or {},
         )
         return mid
 
@@ -383,7 +382,7 @@ def _complete_all_pairs(store: Store, cid: int, stage_idx: int, *, winner_fn) ->
         m = store.get_match(mid)
         if not m or m["status"] not in (STATUS_COMPLETED, "aborted"):
             w = winner_fn(p["bot_a_id"], p["bot_b_id"])
-            store.update_match(mid, status=STATUS_COMPLETED, winner=w, earnings_a=100 if w == 0 else -100, earnings_b=-100 if w == 0 else 100)
+            store.update_match(mid, status=STATUS_COMPLETED, winner=w, result={"deltas": [100 if w == 0 else -100, -100 if w == 0 else 100]})
             store.update_contest_pairing(p["id"], status="completed")
             n += 1
     return n

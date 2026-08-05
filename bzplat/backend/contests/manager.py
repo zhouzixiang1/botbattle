@@ -23,6 +23,7 @@ from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.runtime.limits import FULL_RR_MAX_N
 from bzplat.backend.store import Store
+from bzplat.backend.store.db import match_deltas
 from bzplat.backend.store.schema import (
     CONTEST_FINISHED,
     CONTEST_OPEN,
@@ -584,17 +585,16 @@ class ContestManager:
                 self.store.update_contest(contest_id, status=CONTEST_RUNNING)
                 dispatched_any = True
             # 冻结快照已在 pairing 行；直接开打
-            kw: dict = {
-                "match_type": TYPE_CONTEST,
-                "contest_id": contest_id,
-                "game_id": gid,
-            }
-            kw.update({k: int(v) for k, v in cfg.items() if v is not None})
+            # cfg 是该游戏的 match_config（holdem→{"hands"}, pencil→{"n_dots"}），
+            # 整包传给 challenge(match_config=...)，无需按字段名逐条具名传递。
             mid = await self.orch.challenge(
                 p["bot_a_id"],
                 p["bot_b_id"],
                 owner_user_id=c["organizer_id"],
-                **kw,
+                match_type=TYPE_CONTEST,
+                contest_id=contest_id,
+                game_id=gid,
+                match_config=cfg,
             )
             self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
 
@@ -644,8 +644,10 @@ class ContestManager:
             eb_id = p.get("entry_b_id")
             if ea_id not in stats or eb_id not in stats:
                 continue
-            stats[ea_id]["net_chips"] += m["earnings_a"]
-            stats[eb_id]["net_chips"] += m["earnings_b"]
+            # net_chips 从 result.deltas 取（取代旧 earnings_a/b 物理列）
+            ea_earn, eb_earn = match_deltas(m)
+            stats[ea_id]["net_chips"] += ea_earn
+            stats[eb_id]["net_chips"] += eb_earn
             wa = points_for_result(scoring, m["winner"], 0)
             wb = points_for_result(scoring, m["winner"], 1)
             stats[ea_id]["points"] += wa
@@ -927,9 +929,9 @@ class ContestManager:
             bot_b_id=pairing.get("bot_b_id") or 0,
             owner_id=contest.get("organizer_id"),
             contest_id=contest["id"],
-            total_hands=1,
             match_type=TYPE_CONTEST,
             game_id=gid,
+            match_config={},
         )
         self.store.update_match(
             mid, status=STATUS_ABORTED, reason=reason, ended_at=_now(),

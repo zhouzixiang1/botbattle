@@ -26,6 +26,44 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def _parse_match_json_cols(m: dict | None) -> dict | None:
+    """把 match 行的 match_config/result JSON 字符串列解析成 dict（消费方直接用）。
+
+    无效/空 JSON → 空 dict。matches 表的 match_config/result 是双 JSON 通路
+    （配置 + 结果详情），物理存 TEXT，逻辑是 dict——统一在此解析，避免各消费方重复 json.loads。
+    """
+    if m is None:
+        return None
+    for k in ("match_config", "result"):
+        raw = m.get(k)
+        if isinstance(raw, str):
+            try:
+                m[k] = json.loads(raw) if raw else {}
+            except (ValueError, TypeError):
+                m[k] = {}
+        elif m.get(k) is None:
+            m[k] = {}
+    return m
+
+
+def match_deltas(m: dict | None) -> tuple[int, int]:
+    """从 match dict 的 result JSON 取双方净筹码/胜负分（deltas）。
+
+    matches 表收敛后结果详情存 result JSON（{"deltas":[ea,eb],...}），取代旧的
+    earnings_a/earnings_b 物理列。赛事排名（ranking/manager）经此 helper 统一读取，
+    避免各处重复解析 JSON + 兜底缺字段。无 result 或 deltas 缺失 → (0, 0)。
+    """
+    if not m:
+        return (0, 0)
+    deltas = (m.get("result") or {}).get("deltas")
+    if isinstance(deltas, list) and len(deltas) >= 2:
+        try:
+            return (int(deltas[0]), int(deltas[1]))
+        except (TypeError, ValueError):
+            return (0, 0)
+    return (0, 0)
+
+
 def _paginate(
     c: sqlite3.Connection,
     base_query: str,
@@ -92,17 +130,13 @@ CREATE TABLE matches_{suffix} (
     bot_b_id        INTEGER REFERENCES bots(id) ON DELETE SET NULL,
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
-    hands_played    INTEGER NOT NULL DEFAULT 0,
-    total_hands     INTEGER NOT NULL DEFAULT 70,
-    earnings_a      INTEGER NOT NULL DEFAULT 0,
-    earnings_b      INTEGER NOT NULL DEFAULT 0,
     winner          INTEGER,
     reason          TEXT    NOT NULL DEFAULT 'completed',
-    net_bb_a        REAL    NOT NULL DEFAULT 0,
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL DEFAULT '{gdef}',
-    n_dots          INTEGER,
+    match_config    TEXT    NOT NULL DEFAULT '{{}}',  -- 对局级配置 JSON（hands/n_dots 等），游戏无关；{{}} 经 .format 转义为字面空 JSON
+    result          TEXT    NOT NULL DEFAULT '{{}}',  -- 对局结果详情 JSON（hands_played/deltas/net_bb）
     human_user_id   INTEGER,
     human_seat      INTEGER,
     match_seed      INTEGER,  -- P4：对局确定性 seed（duplicate 复现/回放用）
@@ -767,6 +801,40 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # P4：matches 表加 match_seed + technical_loss 列（幂等）
         _add_col(conn, _tbl, "match_seed", "INTEGER")
         _add_col(conn, _tbl, "technical_loss", "INTEGER NOT NULL DEFAULT 0")
+        # match_config + result 双 JSON 通路收敛（删 total_hands/n_dots/hands_played/
+        # earnings_a/earnings_b/net_bb_a 6 个游戏专属固定列）。旧数据整理进 JSON 再 DROP
+        # （复用 db.py:398-402 bots.is_public 的 DROP COLUMN 模式）。幂等：列已不存在则跳过。
+        _add_col(conn, _tbl, "match_config", "TEXT NOT NULL DEFAULT '{}'")
+        _add_col(conn, _tbl, "result", "TEXT NOT NULL DEFAULT '{}'")
+        _mcols = _table_cols(conn, _tbl)
+        if "total_hands" in _mcols:
+            # 配置：total_hands → match_config.hands（按行原值）
+            conn.execute(
+                f"UPDATE {_tbl} SET match_config=json_set(match_config,'$.hands',total_hands) "
+                "WHERE total_hands IS NOT NULL"
+            )
+            conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN total_hands")
+        if "n_dots" in _mcols:
+            # 配置：n_dots → match_config.n_dots（pencil 专属，按行原值）
+            conn.execute(
+                f"UPDATE {_tbl} SET match_config=json_set(match_config,'$.n_dots',n_dots) "
+                "WHERE n_dots IS NOT NULL"
+            )
+            conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN n_dots")
+        if "hands_played" in _mcols or "earnings_a" in _mcols:
+            # 结果：hands_played + earnings_a/b → result.{hands_played,deltas}（按行原值）
+            conn.execute(
+                f"UPDATE {_tbl} SET result=json_set(result,'$.hands_played',hands_played) "
+                "WHERE hands_played IS NOT NULL AND hands_played!=0"
+            )
+            conn.execute(
+                f"UPDATE {_tbl} SET result=json_set(result,'$.deltas',json_array(earnings_a,earnings_b)) "
+                "WHERE (earnings_a IS NOT NULL AND earnings_a!=0) "
+                "OR (earnings_b IS NOT NULL AND earnings_b!=0)"
+            )
+            for _dead in ("hands_played", "earnings_a", "earnings_b", "net_bb_a"):
+                if _dead in _table_cols(conn, _tbl):
+                    conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN {_dead}")
 
     # ── 去重：删 schema.py 旧字面索引（与上面 _PER_GAME_INDEX_COLS 循环建的重复）─────
     # 旧索引名后缀 bot_a/bot_b/owner/contest/time（无 _id/_at）；
@@ -1554,32 +1622,31 @@ class Store:
         *,
         owner_id: int | None = None,
         contest_id: int | None = None,
-        total_hands: int = 70,
         match_type: str = "challenge",
         game_id: str = "holdem",
-        n_dots: int | None = None,
+        match_config: dict | None = None,
         human_user_id: int | None = None,
         human_seat: int | None = None,
     ) -> dict:
         gid = (game_id or "holdem").strip().lower()
         tbl = _matches_table(gid)
+        mc_json = json.dumps(match_config or {}, ensure_ascii=False)
         with self._tx() as c:
             c.execute(
                 f"INSERT INTO {tbl}(id, bot_a_id, bot_b_id, owner_id, "
-                "contest_id, total_hands, match_type, status, game_id, n_dots, "
+                "contest_id, match_type, status, game_id, match_config, "
                 "human_user_id, human_seat, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     bot_a_id,
                     bot_b_id,
                     owner_id,
                     contest_id,
-                    total_hands,
                     match_type,
                     "pending",
                     gid,
-                    n_dots,
+                    mc_json,
                     human_user_id,
                     human_seat,
                     _now(),
@@ -1608,9 +1675,9 @@ class Store:
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return None
-            return _row(
+            return _parse_match_json_cols(_row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
-            )
+            ))
 
     def get_match_detailed(self, match_id: str) -> dict | None:
         """get_match + JOIN bots(ba/bb 名/display) + users(owner 名/display)。
@@ -1637,28 +1704,28 @@ class Store:
                 "LEFT JOIN users ub ON bb.owner_id=ub.id "
                 "WHERE m.id=?"
             )
-            return _row(c.execute(sql, (match_id,)).fetchone())
+            return _parse_match_json_cols(_row(c.execute(sql, (match_id,)).fetchone()))
 
     def update_match(self, match_id: str, **fields: Any) -> dict | None:
         allowed = {
-            "hands_played",
-            "earnings_a",
-            "earnings_b",
             "winner",
             "reason",
-            "net_bb_a",
+            "result",  # dict → 序列化 JSON 落 result 列
             "status",
             "started_at",
             "ended_at",
             "contest_id",
-            "n_dots",
             "human_user_id",
             "human_seat",
             "match_seed",
             "technical_loss",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
-        vals = [v for k, v in fields.items() if k in allowed]
+        vals = [
+            (json.dumps(v, ensure_ascii=False) if k == "result" and not isinstance(v, str) else v)
+            for k, v in fields.items()
+            if k in allowed
+        ]
         with self._tx() as c:
             tbl = self._match_table_of(c, match_id)
             if not tbl:
@@ -1734,7 +1801,7 @@ class Store:
                 sql = f"SELECT {sel} FROM {tbl} m {join_bots}{where_sql}"
                 sql += " ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
                 params.extend([limit, offset])
-                return [_row(r) for r in c.execute(sql, params)]
+                return [_parse_match_json_cols(_row(r)) for r in c.execute(sql, params)]
 
             # 跨游戏：UNION ALL 三表，外层排序+分页
             subselects = []
@@ -1749,7 +1816,7 @@ class Store:
             all_params = params * len(_all_game_ids())
             sql = f"SELECT * FROM ({union}) ORDER BY created_at DESC LIMIT ? OFFSET ?"
             all_params.extend([limit, offset])
-            return [_row(r) for r in c.execute(sql, all_params)]
+            return [_parse_match_json_cols(_row(r)) for r in c.execute(sql, all_params)]
 
     def list_liked_top_matches(self, limit: int = 10) -> list[dict]:
         """对局点赞排行榜（跨三表 UNION ALL，likes_count>0 的已完成对局）。"""

@@ -438,9 +438,10 @@ def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
 class ChallengeBody(BaseModel):
     my_bot_id: int
     opponent_bot_id: int
-    # 上限交 spec.validate_match_params 校验（holdem 1-500；棋类忽略 hands）。
-    # 原 le=70 是 holdem 专用上限泄漏成所有游戏上限——第 4 个扑克游戏 max>70 会被静默拒。
-    hands: int = Field(70, ge=1, le=1000)
+    # 对局级配置（如 {"hands":70}/{"n_dots":6}）；缺省/空用 spec.default_match_params。
+    # 取代散落的 hands/n_dots 具名字段——第 4 游戏带新参数无需改本 Body。范围校验交
+    # spec.validate_match_params（holdem 1-500；棋类忽略 hands）。
+    match_config: dict = Field(default_factory=dict)
     game_id: str | None = None
 
 
@@ -451,7 +452,7 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             body.my_bot_id,
             body.opponent_bot_id,
             user["id"],
-            hands=body.hands,
+            match_config=body.match_config,
             game_id=body.game_id,
         )
     except ValueError as e:
@@ -465,8 +466,8 @@ class HumanChallengeBody(BaseModel):
     bot_id: int
     human_seat: int = 1  # 0 或 1，人类坐哪位
     game_id: str | None = None
-    hands: int = Field(70, ge=1, le=300)
-    n_dots: int | None = None
+    # 对局级配置（同 ChallengeBody.match_config）；缺省用 spec 默认。
+    match_config: dict = Field(default_factory=dict)
 
 
 @router.post("/api/matches/human")
@@ -480,8 +481,7 @@ async def challenge_human(body: HumanChallengeBody, request: Request, user=Depen
             user["id"],
             human_seat=body.human_seat,
             game_id=body.game_id,
-            hands=body.hands,
-            n_dots=body.n_dots,
+            match_config=body.match_config,
         )
     except ValueError as e:
         audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))

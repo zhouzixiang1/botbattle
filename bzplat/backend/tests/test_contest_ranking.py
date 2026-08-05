@@ -47,8 +47,8 @@ def test_tiebreak_buchholz_breaks_tie():
         {"entry_a_id": 2, "entry_b_id": 3, "match_id": "m2", "bot_a_id": 20, "bot_b_id": 30},
     ]
     matches = {
-        "m1": {"status": "completed", "winner": 0, "earnings_a": 100, "earnings_b": -100},
-        "m2": {"status": "completed", "winner": 0, "earnings_a": 100, "earnings_b": -100},
+        "m1": {"status": "completed", "winner": 0, "result": {"deltas": [100, -100]}},
+        "m2": {"status": "completed", "winner": 0, "result": {"deltas": [100, -100]}},
     }
     rows = ranking.compute_official_ranking(standings, pairings, matches)
     by_entry = {r["entry_id"]: r for r in rows}

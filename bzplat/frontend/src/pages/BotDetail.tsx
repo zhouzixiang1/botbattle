@@ -69,9 +69,8 @@ interface MatchRow {
   bot_b_name: string
   bot_a_display?: string
   bot_b_display?: string
-  earnings_a?: number
-  earnings_b?: number
-  hands_played?: number
+  match_config?: Record<string, number>
+  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
   created_at?: string
 }
 

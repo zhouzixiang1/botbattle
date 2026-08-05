@@ -122,7 +122,7 @@ def test_matches_replays_pair_stats(tmp_path):
     b = s.create_bot(owner_id=u["id"], name="bot_b")
     m = s.create_match("m1", a["id"], b["id"], owner_id=u["id"])
     assert m["status"] == "pending"
-    s.update_match("m1", status="completed", winner=0, earnings_a=100)
+    s.update_match("m1", status="completed", winner=0, result={"deltas": [100, -100]})
     assert s.get_match("m1")["winner"] == 0
     listed = s.list_matches(limit=10, offset=0, owner_id=u["id"])
     assert len(listed) == 1
