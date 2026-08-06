@@ -36,11 +36,17 @@ ip=<真实IP> action=<动作> result=<ok|fail> user=<操作者> target=<目标> 
 
 **关键开关 `BZ_TRUST_PROXY=1`**（公网经反代必需）：
 - `.env` 已设。未开启时 `request.client.host` 是 `127.0.0.1`（frp/uvicorn 对端），限流全站共一个桶（失效）、登录 IP 记录错误。
-- 开启后 `client_ip()`（`security.py`）按 `X-Forwarded-For` 取第一段（原始客户端），回退 `X-Real-IP`。
-- **nginx 已设** `proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`；frp 是纯 TCP 代理透传 HTTP 头不改。
+- 开启后 `client_ip()`（`security.py`）**优先取 `X-Real-IP`**（nginx 覆盖式设置，客户端无法伪造）；无则取 `X-Forwarded-For` 的**倒数第 `BZ_TRUSTED_PROXY_HOPS` 跳**（受信代理前一跳，默认 1），而非最左可伪造段。
+- **nginx 推荐配置**（覆盖式，防伪造）：
+  ```nginx
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $remote_addr;   # 覆盖式（非 $proxy_add_x_forwarded_for 追加）
+  ```
+  若必须用追加式（`$proxy_add_x_forwarded_for`），配套 `real_ip` 模块（`set_real_ip_from` + `real_ip_recursive on`）剥离可信段。
+- `BZ_TRUSTED_PROXY_HOPS`：受信代理层数（默认 1=单层 nginx）。多层代理时调大（如 frp+nginx 两层设 2）。
 - 本地开发（无反代）保持 `BZ_TRUST_PROXY` 不设或 `0`。
 
-> 安全提示：`X-Forwarded-For` 可被客户端伪造。当前取第一段（最左 = 原始客户端），适用于 nginx 是唯一可信入口的场景。若中间有多层不可信代理，需在 nginx 用 `real_ip` 模块校验。
+> 安全提示（审计 P1）：客户端可任意伪造 `X-Forwarded-For` 最左段。若 nginx 用追加式 `$proxy_add_x_forwarded_for` 且未配 `real_ip` 模块校验，攻击者每请求塞不同最左 IP 可绕过限流。代码侧已改为取倒数第 N 跳 + 优先 `X-Real-IP`（覆盖式不可伪造），彻底防御需运维正确配 nginx（覆盖式 XFF 或 `real_ip` 模块）。
 
 ## 限流（内存滑动窗口）
 

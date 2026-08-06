@@ -82,13 +82,19 @@ class _FakeReq:
         self.client = type("C", (), {"host": host})()
 
 
-def test_client_ip_trust_proxy_reads_xff():
-    req = _FakeReq({"x-forwarded-for": "203.0.113.5, 10.0.0.1"})
-    assert client_ip(req, trust_proxy=True) == "203.0.113.5"
+def test_client_ip_trust_proxy_reads_xff_rightmost():
+    """XFF 取倒数第 hops 跳（受信代理前一跳），非最左可伪造段（审计 P1）。"""
+    # 单层 nginx（覆盖式 XFF 只 1 段）：最左==最右，行为不变
+    req = _FakeReq({"x-forwarded-for": "203.0.113.5"})
+    assert client_ip(req, trust_proxy=True, hops=1) == "203.0.113.5"
+    # 追加式 XFF（客户端塞伪造最左 + nginx 追加真实段）：取最右（nginx 加的）
+    req = _FakeReq({"x-forwarded-for": "999.999.999.999, 203.0.113.5"})
+    assert client_ip(req, trust_proxy=True, hops=1) == "203.0.113.5"
 
 
-def test_client_ip_trust_proxy_falls_back_to_real_ip():
-    req = _FakeReq({"x-real-ip": "198.51.100.7"})
+def test_client_ip_trust_proxy_prefers_real_ip():
+    """优先 X-Real-IP（nginx 覆盖式设置，客户端无法伪造）。"""
+    req = _FakeReq({"x-real-ip": "198.51.100.7", "x-forwarded-for": "1.2.3.4"})
     assert client_ip(req, trust_proxy=True) == "198.51.100.7"
 
 
@@ -97,10 +103,15 @@ def test_client_ip_no_trust_proxy_uses_socket_peer():
     assert client_ip(req, trust_proxy=False) == "127.0.0.1"
 
 
-def test_client_ip_xff_spoof_takes_first_segment():
-    """XFF 取第一段（最左 = 原始客户端），防中间代理注入干扰。"""
+def test_client_ip_xff_spoofed_leftmost_ignored():
+    """攻击者在 XFF 最左塞伪造 IP 不应击穿（取最右可信跳）。"""
     req = _FakeReq({"x-forwarded-for": "1.1.1.1, 2.2.2.2, 3.3.3.3"})
-    assert client_ip(req, trust_proxy=True) == "1.1.1.1"
+    # hops=1 → 取最后 1 段（3.3.3.3 = 受信代理加的真实客户端段）
+    assert client_ip(req, trust_proxy=True, hops=1) == "3.3.3.3"
+    # hops=2 → 取倒数第 2 段（2.2.2.2，双层代理场景）
+    assert client_ip(req, trust_proxy=True, hops=2) == "2.2.2.2"
+    # 关键：最左的 1.1.1.1（可伪造）绝不被取
+    assert client_ip(req, trust_proxy=True, hops=1) != "1.1.1.1"
 
 
 # ── audit_log：格式 + result=fail 升级为 WARNING ─────────────────────────────

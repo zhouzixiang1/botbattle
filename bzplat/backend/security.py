@@ -49,14 +49,42 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def client_ip(request: Request, *, trust_proxy: bool) -> str:
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
+def client_ip(request: Request, *, trust_proxy: bool, hops: int = 1) -> str:
+    """解析客户端真实 IP。
+
+    trust_proxy 开启时（部署在 nginx/frp 等反代后）：
+    - **优先信 X-Real-IP**（nginx 用 ``X-Real-IP: $remote_addr`` 覆盖式设置，
+      客户端无法伪造——比 XFF 最左段可靠）。
+    - X-Forwarded-For 取**倒数第 ``hops`` 跳**（受信代理前一跳），而非最左可伪造段。
+      ``hops`` = 受信代理层数（env ``BZ_TRUSTED_PROXY_HOPS``，默认 1）。
+      攻击者在 XFF 最左塞伪造 IP 不再击穿限流（审计 P1）。
+    - 单层 nginx + 覆盖式配置（XFF 只 1 段=$remote_addr）时，最左==最右，行为不变。
+
+    注意：彻底防御需运维正确配 nginx（``set_real_ip_from`` + 覆盖式 XFF，
+    见 doc/SECURITY.md）。代码侧此处减少误配的伤害面。
+    """
     if trust_proxy:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip() or "unknown"
+        # 优先 X-Real-IP（nginx 覆盖，不可被客户端伪造）
         real = request.headers.get("x-real-ip")
         if real:
-            return real.strip()
+            return real.strip() or "unknown"
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+            if parts:
+                # 取倒数第 hops 跳（受信代理前一跳），最左的可伪造
+                idx = max(0, len(parts) - max(1, hops))
+                return parts[idx] or "unknown"
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
@@ -120,6 +148,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             _env_bool("BZ_RATE_LIMIT", True) if enabled is None else enabled
         )
         self.trust_proxy = _env_bool("BZ_TRUST_PROXY", False)
+        self.proxy_hops = max(1, _env_int("BZ_TRUSTED_PROXY_HOPS", 1))
         self._limiter = InMemoryRateLimiter()
         self._last_cleanup = time.monotonic()
 
@@ -170,7 +199,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             self._last_cleanup = now
 
         max_req, window = limits
-        ip = client_ip(request, trust_proxy=self.trust_proxy)
+        ip = client_ip(request, trust_proxy=self.trust_proxy, hops=self.proxy_hops)
         key = f"{ip}:{request.url.path}"
         ok, remaining, retry = self._limiter.check(key, max_req, window)
         if not ok:
@@ -216,6 +245,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         self.trust_proxy = (
             _env_bool("BZ_TRUST_PROXY", False) if trust_proxy is None else trust_proxy
         )
+        self.proxy_hops = max(1, _env_int("BZ_TRUSTED_PROXY_HOPS", 1))
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
@@ -233,14 +263,14 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             # 异常也要记访问日志（5xx/崩溃），再向上抛
             status = 500
             dt_ms = int((time.monotonic() - start) * 1000)
-            ip = client_ip(request, trust_proxy=self.trust_proxy)
+            ip = client_ip(request, trust_proxy=self.trust_proxy, hops=self.proxy_hops)
             _access_logger.info(
                 "ip=%s method=%s path=%s status=%s dt=%dms",
                 ip, request.method, path, status, dt_ms,
             )
             raise
         dt_ms = int((time.monotonic() - start) * 1000)
-        ip = client_ip(request, trust_proxy=self.trust_proxy)
+        ip = client_ip(request, trust_proxy=self.trust_proxy, hops=self.proxy_hops)
         _access_logger.info(
             "ip=%s method=%s path=%s status=%d dt=%dms",
             ip, request.method, path, status, dt_ms,
@@ -268,7 +298,8 @@ def audit_log(
     - ``detail``：附加细节（如失败原因、变更摘要）。
     """
     tp = _env_bool("BZ_TRUST_PROXY", False) if trust_proxy is None else trust_proxy
-    ip = client_ip(request, trust_proxy=tp)
+    hops = max(1, _env_int("BZ_TRUSTED_PROXY_HOPS", 1))
+    ip = client_ip(request, trust_proxy=tp, hops=hops)
     parts = [f"ip={ip}", f"action={action}", f"result={result}"]
     if user is not None:
         parts.append(f"user={user}")
