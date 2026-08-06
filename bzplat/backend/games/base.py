@@ -38,8 +38,12 @@ class MatchResult:
 
     @property
     def winner(self) -> int | None:
-        if len(self.rounds) == 1 and self.rounds[0].winners:
-            return self.rounds[0].winners[0]
+        if len(self.rounds) == 1:
+            w = self.rounds[0].winners
+            if len(w) == 1:  # 唯一胜者
+                return w[0]
+            # winners 长度 0 或 >1（split pot 平局）→ 平局
+            return None
         return None
 
 
@@ -74,7 +78,9 @@ class ProtocolSpec:
 
     dumps_request: Callable[[dict[str, Any]], str]
     loads_response: Callable[[str], dict[str, Any]]
-    fail_response: Callable[[], dict[str, Any]]
+    # fail_response 返回值由各游戏自定（holdem 返裸 int -1=fold；棋类返 dict）。
+    # 调用方（runner）把它传给该游戏的 parse_response/parse_xy，类型在此不强约束。
+    fail_response: Callable[[], Any]
 
 
 @dataclass(frozen=True)
