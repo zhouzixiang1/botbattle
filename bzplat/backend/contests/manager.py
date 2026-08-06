@@ -938,6 +938,12 @@ class ContestManager:
             return
         cfg = _match_config(c)
         gid = c.get("game_id") or "holdem"
+        # 复式赛制判断（与 _dispatch_pending_locked 一致）——reconcile 重派也保留
+        # duplicate 标志（复审 P2-2），否则同赛事出现 duplicate/单 leg 混合。
+        stages = _parse_stages(c)
+        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        spec = game_registry.get(gid) if gid in REGISTERED_ENGINES else None
+        want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
         pending = [
             p
             for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
@@ -945,18 +951,30 @@ class ContestManager:
         ]
         for p in pending:
             try:
-                kw: dict = {
-                    "match_type": TYPE_CONTEST,
-                    "contest_id": contest_id,
-                    "game_id": gid,
-                }
-                kw.update({k: int(v) for k, v in cfg.items() if v is not None})
-                mid = await self.orch.challenge(
-                    p["bot_a_id"],
-                    p["bot_b_id"],
-                    owner_user_id=c["organizer_id"],
-                    **kw,
-                )
+                if want_duplicate:
+                    mid = await self.orch.challenge_duplicate(
+                        p["bot_a_id"],
+                        p["bot_b_id"],
+                        owner_user_id=c["organizer_id"],
+                        match_type=TYPE_CONTEST,
+                        contest_id=contest_id,
+                        game_id=gid,
+                        match_config=cfg,
+                        duplicate_seed=int(p["id"]) * 7919 + 1,
+                    )
+                else:
+                    kw: dict = {
+                        "match_type": TYPE_CONTEST,
+                        "contest_id": contest_id,
+                        "game_id": gid,
+                    }
+                    kw.update({k: int(v) for k, v in cfg.items() if v is not None})
+                    mid = await self.orch.challenge(
+                        p["bot_a_id"],
+                        p["bot_b_id"],
+                        owner_user_id=c["organizer_id"],
+                        **kw,
+                    )
                 self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
             except Exception as exc:
                 # bot 已删/不可用：建 aborted match 挂回 pairing，让 _stage_done 通过

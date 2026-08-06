@@ -232,7 +232,12 @@ async def login(req: LoginReq, request: Request, response: Response) -> dict:
         raise
     auth: AuthManager = request.app.state.auth
     # 经 nginx/frp 代理后用 X-Forwarded-For 取真实 IP（trust_proxy 已在 RateLimitMiddleware 读取）
-    ip = client_ip(request, trust_proxy=_env_bool("BZ_TRUST_PROXY", False))
+    from bzplat.backend.security import _env_int
+    ip = client_ip(
+        request,
+        trust_proxy=_env_bool("BZ_TRUST_PROXY", False),
+        hops=_env_int("BZ_TRUSTED_PROXY_HOPS", 1),
+    )
     try:
         user, token = auth.authenticate(
             req.username,
