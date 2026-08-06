@@ -235,7 +235,7 @@ export default function BotDetail() {
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-4 w-48" />
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[24rem]">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[32rem]">
               {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-20" />)}
             </div>
           </CardContent>
@@ -318,7 +318,7 @@ export default function BotDetail() {
           </div>
 
           {/* 指标 */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[28rem] lg:shrink-0">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[32rem] lg:shrink-0">
             <MetricCard label="Rating" value={fmtRating(profile.rating)} hint={profile.rd != null ? `rd ${Number(profile.rd).toFixed(0)}` : undefined} />
             <MetricCard label="胜率" value={fmtPct(wr)} hint={`共 ${total} 场`} />
             <MetricCard label="胜" value={profile.wins ?? 0} danger={false} />
