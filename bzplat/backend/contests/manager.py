@@ -597,6 +597,13 @@ class ContestManager:
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         gid = c.get("game_id") or "holdem"
         now = _now()
+        # P2 residual：阶段配置 duplicate=True 且游戏 spec 支持 build_match_plan（仅 holdem）
+        # 时走复式赛制——每对阵跑 1 场 duplicate 对局（2 leg 同副牌交换座位，合并 net 判胜）。
+        # 棋类（build_match_plan is None）即便误标 duplicate 也走原单 leg 路径（不破坏现有赛制）。
+        stages = _parse_stages(c)
+        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        spec = game_registry.get(gid) if gid in REGISTERED_ENGINES else None
+        want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
         # cfg 的键就是该游戏的 match_config 字段（holdem→{"hands"}, pencil→{"n_dots"},
         # 第 4 游戏自带其字段）。challenge() 透传整包，无需按字段名逐条硬判断。
         dispatched_any = False
@@ -614,15 +621,29 @@ class ContestManager:
             # 冻结快照已在 pairing 行；直接开打
             # cfg 是该游戏的 match_config（holdem→{"hands"}, pencil→{"n_dots"}），
             # 整包传给 challenge(match_config=...)，无需按字段名逐条具名传递。
-            mid = await self.orch.challenge(
-                p["bot_a_id"],
-                p["bot_b_id"],
-                owner_user_id=c["organizer_id"],
-                match_type=TYPE_CONTEST,
-                contest_id=contest_id,
-                game_id=gid,
-                match_config=cfg,
-            )
+            # duplicate=True 时用对阵 pair 派生的确定性 seed（pairing.id 稳定），
+            # 保证两 leg 同副牌可复现。
+            if want_duplicate:
+                mid = await self.orch.challenge_duplicate(
+                    p["bot_a_id"],
+                    p["bot_b_id"],
+                    owner_user_id=c["organizer_id"],
+                    match_type=TYPE_CONTEST,
+                    contest_id=contest_id,
+                    game_id=gid,
+                    match_config=cfg,
+                    duplicate_seed=int(p["id"]) * 7919 + 1,
+                )
+            else:
+                mid = await self.orch.challenge(
+                    p["bot_a_id"],
+                    p["bot_b_id"],
+                    owner_user_id=c["organizer_id"],
+                    match_type=TYPE_CONTEST,
+                    contest_id=contest_id,
+                    game_id=gid,
+                    match_config=cfg,
+                )
             self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
 
     def standings(

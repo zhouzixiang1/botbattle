@@ -33,8 +33,8 @@ def test_specs_reference_local_templates():
     """各 spec.templates 引用本包 templates.TEMPLATES（不经 contests）。"""
     import inspect
 
-    # holdem spec 应有 4 个模板（P5 加 holdem_prelim_swiss + holdem_final_ranked）
-    assert len(registry.get("holdem").templates) == 4
+    # holdem spec 应有 5 个模板（P5 prelim/final + P2 residual holdem_dup_rr）
+    assert len(registry.get("holdem").templates) == 5
     # gomoku 3 个（含 board_rr）
     assert len(registry.get("gomoku").templates) == 3
     # pencil 2 个
@@ -43,14 +43,14 @@ def test_specs_reference_local_templates():
 
 # ── DEFAULT_TEMPLATES 从注册表派生 ────────────────────────────
 def test_default_templates_derived_from_registry():
-    """DEFAULT_TEMPLATES 是各 spec.templates 的聚合（9 个：7 + reversi×2）。"""
+    """DEFAULT_TEMPLATES 是各 spec.templates 的聚合（10 个：holdem×5 + 棋类×4[board_rr 共享]）。"""
     # 聚合注册表
     aggregated = {}
     for gid in registry.all_ids():
         for t in registry.get(gid).templates:
             aggregated[t["id"]] = t
     assert set(aggregated.keys()) == set(DEFAULT_TEMPLATES.keys())
-    assert len(DEFAULT_TEMPLATES) == 9
+    assert len(DEFAULT_TEMPLATES) == 10
 
 
 def test_default_templates_has_all():
@@ -58,6 +58,7 @@ def test_default_templates_has_all():
     expected = {
         "holdem_swiss_ko", "holdem_rr",
         "holdem_prelim_swiss", "holdem_final_ranked",  # P5 预赛/决赛
+        "holdem_dup_rr",  # P2 residual 复式赛制（duplicate）
         "gomoku_group_drr_ko", "gomoku_swiss_ko", "board_rr",
         "pencil_group_drr_ko", "pencil_swiss_ko",
     }
@@ -107,7 +108,7 @@ def test_get_template_unknown_returns_none():
 
 def test_list_templates_returns_all():
     tpls = list_templates()
-    assert len(tpls) == 9
+    assert len(tpls) == 10
     assert {t["id"] for t in tpls} == set(DEFAULT_TEMPLATES.keys())
 
 

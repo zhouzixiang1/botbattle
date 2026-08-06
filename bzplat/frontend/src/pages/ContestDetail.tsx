@@ -71,6 +71,8 @@ interface Stage {
   advance_per_group?: number
   rest_after_minutes?: number
   allow_bot_swap_in_rest?: boolean
+  /** 复式赛制（duplicate）：每对阵 2 leg 同副牌交换座位合并判胜（仅 holdem） */
+  duplicate?: boolean
 }
 interface Entry {
   id: number
@@ -183,6 +185,15 @@ export default function ContestDetail() {
   const standingsPerPage = 30
 
   const stages = useMemo(() => parseStages(contest), [contest])
+
+  // 复式赛制（duplicate）：任一阶段 duplicate=True 或模板名含 dup 时展示标记。
+  // 仅 holdem 支持（后端 build_match_plan 判定），这里仅前端提示，不阻断。
+  const isDuplicate = useMemo(
+    () =>
+      stages.some((s) => s.duplicate) ||
+      !!(contest?.template_id || '').toLowerCase().includes('dup'),
+    [stages, contest?.template_id],
+  )
 
   const load = useCallback(() => {
     if (!id) return
@@ -308,6 +319,9 @@ export default function ContestDetail() {
                   <span>· 单局决胜</span>
                 ) : (
                   <span>· 每场 70 手</span>
+                )}
+                {isDuplicate && (
+                  <Badge variant="secondary" className="text-[10px]">复式赛制</Badge>
                 )}
                 {estimate?.estimated_matches != null && (
                   <Badge variant="outline" className="text-[10px]">预估 {estimate.estimated_matches} 场</Badge>
@@ -453,6 +467,7 @@ export default function ContestDetail() {
               {[
                 STAGE_TYPE_LABEL[stages[stageTab].type || ''] || stages[stageTab].type,
                 SCORING_LABEL[stages[stageTab].scoring || ''] || stages[stageTab].scoring,
+                stages[stageTab].duplicate ? '复式赛制（同副牌）' : null,
                 stages[stageTab].group_count ? `分组 ${stages[stageTab].group_count}` : null,
                 stages[stageTab].rounds !== undefined ? `轮数 ${stages[stageTab].rounds}` : null,
                 stages[stageTab].advance_count ? `晋级 ${stages[stageTab].advance_count}` : null,

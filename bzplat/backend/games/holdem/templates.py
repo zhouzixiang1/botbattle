@@ -94,4 +94,24 @@ TEMPLATES: list[dict[str, Any]] = [
             },
         ],
     },
+    {
+        # P2 residual：复式赛制（duplicate）——每对阵 1 场 duplicate 对局 = 2 leg
+        # （同副牌交换座位），合并净筹码判胜负。消除发牌运气，纯比策略。
+        # 单循环骨架：每对对手 1 场 duplicate 对局（内部 2 leg）。
+        # 仅 holdem 支持（spec.build_match_plan 非 None）；duplicate=True 触发
+        # ContestManager 走 challenge_duplicate 路径。
+        "id": "holdem_dup_rr",
+        "name": "德州：复式单循环（同副牌）",
+        "game_id": "holdem",
+        "stages": [
+            {
+                "key": "dup_rr",
+                "type": "round_robin",
+                "duplicate": True,
+                "scoring": SCORING_POKER,
+                "rest_after_minutes": 0,
+                "allow_bot_swap_in_rest": False,
+            },
+        ],
+    },
 ]
