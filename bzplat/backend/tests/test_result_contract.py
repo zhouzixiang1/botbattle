@@ -92,3 +92,26 @@ def test_real_gomoku_result_satisfies_contract():
     assert result.rounds[0].winners == [0]
     ea = sum(r.deltas[0] for r in result.rounds)
     assert ea == 1  # 胜方 +1
+
+
+def test_holdem_single_hand_split_pot_is_draw():
+    """单手 split pot（winners=[0,1]）→ winner 应为 None（平局），非误判 seat0。
+
+    审计 P1：原逻辑 `winners[0]` 在双胜者（split）时误判座位0胜。
+    修复：winners 长度==1 才取，>1 视为平局返 None。
+    生产路径（70手多手）走 final_chips 比较，不受影响。
+    """
+    # split pot（deltas 相等）
+    h = HMR(rounds_played=1, rounds=[HRR([0, 1], [50, 50])])
+    assert h.winner is None, "split pot（winners=[0,1]）应为平局 None，非误判 seat0"
+    # odd chip 给一方，winners 仍是 [0,1]（双胜者=平局），不靠 deltas 判
+    h2 = HMR(rounds_played=1, rounds=[HRR([0, 1], [51, 50])])
+    assert h2.winner is None, "odd chip split 仍应平局（winners 长度=2 是权威平局信号）"
+    # 唯一胜者不受影响
+    h3 = HMR(rounds_played=1, rounds=[HRR([0], [100, -100])])
+    assert h3.winner == 0
+    h4 = HMR(rounds_played=1, rounds=[HRR([1], [-100, 100])])
+    assert h4.winner == 1
+    # 无胜者（winners=[]）平局
+    h5 = HMR(rounds_played=1, rounds=[HRR([], [0, 0])])
+    assert h5.winner is None

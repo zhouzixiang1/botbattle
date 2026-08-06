@@ -1887,8 +1887,8 @@ class Store:
                 "bb.name AS bot_b_name, bb.display_name AS bot_b_display"
             )
             join = (
-                "JOIN bots ba ON m.bot_a_id=ba.id "
-                "JOIN bots bb ON m.bot_b_id=bb.id"
+                "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id"
             )
             where = "WHERE m.status='completed' AND m.likes_count > 0"
             subs = []

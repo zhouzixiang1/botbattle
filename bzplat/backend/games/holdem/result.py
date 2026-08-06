@@ -48,8 +48,12 @@ class MatchResult:
         事件）+ holdem 特例注释——这是隐性 if-game_id。现多手也在引擎内权威化 winner，
         编排层只需读 result.winner（+ ea/eb 平局兜底）。
         """
-        if len(self.rounds) == 1 and self.rounds[0].winners:
-            return self.rounds[0].winners[0]
+        if len(self.rounds) == 1:
+            w = self.rounds[0].winners
+            if len(w) == 1:  # 唯一胜者
+                return w[0]
+            # winners 长度 0（无胜者）或 >1（split pot 平局）→ 视为平局返 None
+            return None
         # 多手：按累计净筹码（final_chips = net）比较，平局返 None
         if len(self.final_chips) >= 2:
             fa, fb = self.final_chips[0], self.final_chips[1]

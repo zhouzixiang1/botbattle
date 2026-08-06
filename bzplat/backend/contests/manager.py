@@ -387,7 +387,8 @@ class ContestManager:
             current_stage_idx=0,
             rest_ends_at=None,
         )
-        await self._begin_stage(contest_id, 0, schedule_immediately=True)
+        async with self._lock(contest_id):
+            await self._begin_stage(contest_id, 0, schedule_immediately=True)
         return self.store.get_contest(contest_id)
 
     async def publish(self, contest_id: int) -> dict:
@@ -433,7 +434,8 @@ class ContestManager:
             current_stage_idx=0,
             rest_ends_at=None,
         )
-        await self._begin_stage(contest_id, 0, schedule_immediately=False)
+        async with self._lock(contest_id):
+            await self._begin_stage(contest_id, 0, schedule_immediately=False)
         return self.store.get_contest(contest_id)
 
     async def _begin_stage(
@@ -541,7 +543,7 @@ class ContestManager:
             self.store.update_contest(
                 contest_id, status=CONTEST_RUNNING, current_stage_idx=stage_idx, rest_ends_at=None
             )
-        await self._dispatch_pending(contest_id, stage_idx)
+        await self._dispatch_pending_locked(contest_id, stage_idx)
 
     @staticmethod
     def _compute_scheduled_at(round_num: int, base: str, stagger_min: int) -> str:
@@ -575,11 +577,33 @@ class ContestManager:
         return out
 
     async def _dispatch_pending(self, contest_id: int, stage_idx: int) -> None:
+        """派发 pending pairing（对外入口，获取 per-contest 锁串行化）。
+
+        所有调度路径（scheduler tick / start / publish / reconcile）都应调本方法，
+        它会获取 per-contest 锁，与 maybe_finish 的锁串行化，防并发双发孤儿对局
+        （审计 P1：scheduler 锁外调 _dispatch_pending 与 maybe_finish 持锁并发，
+        challenge() 的 await 让出期间另一路径读到同一 pending pairing 二次派发）。
+
+        注意：maybe_finish 持锁链路（_begin_stage/_maybe_next_*）调
+        _dispatch_pending_locked（不重复获锁，防 asyncio.Lock 不可重入死锁）。
+        """
+        async with self._lock(contest_id):
+            await self._dispatch_pending_locked(contest_id, stage_idx)
+
+    async def _dispatch_pending_locked(self, contest_id: int, stage_idx: int) -> None:
+        """_dispatch_pending 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         gid = c.get("game_id") or "holdem"
         now = _now()
+        # P2 residual：阶段配置 duplicate=True 且游戏 spec 支持 build_match_plan（仅 holdem）
+        # 时走复式赛制——每对阵跑 1 场 duplicate 对局（2 leg 同副牌交换座位，合并 net 判胜）。
+        # 棋类（build_match_plan is None）即便误标 duplicate 也走原单 leg 路径（不破坏现有赛制）。
+        stages = _parse_stages(c)
+        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        spec = game_registry.get(gid) if gid in REGISTERED_ENGINES else None
+        want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
         # cfg 的键就是该游戏的 match_config 字段（holdem→{"hands"}, pencil→{"n_dots"},
         # 第 4 游戏自带其字段）。challenge() 透传整包，无需按字段名逐条硬判断。
         dispatched_any = False
@@ -597,15 +621,29 @@ class ContestManager:
             # 冻结快照已在 pairing 行；直接开打
             # cfg 是该游戏的 match_config（holdem→{"hands"}, pencil→{"n_dots"}），
             # 整包传给 challenge(match_config=...)，无需按字段名逐条具名传递。
-            mid = await self.orch.challenge(
-                p["bot_a_id"],
-                p["bot_b_id"],
-                owner_user_id=c["organizer_id"],
-                match_type=TYPE_CONTEST,
-                contest_id=contest_id,
-                game_id=gid,
-                match_config=cfg,
-            )
+            # duplicate=True 时用对阵 pair 派生的确定性 seed（pairing.id 稳定），
+            # 保证两 leg 同副牌可复现。
+            if want_duplicate:
+                mid = await self.orch.challenge_duplicate(
+                    p["bot_a_id"],
+                    p["bot_b_id"],
+                    owner_user_id=c["organizer_id"],
+                    match_type=TYPE_CONTEST,
+                    contest_id=contest_id,
+                    game_id=gid,
+                    match_config=cfg,
+                    duplicate_seed=int(p["id"]) * 7919 + 1,
+                )
+            else:
+                mid = await self.orch.challenge(
+                    p["bot_a_id"],
+                    p["bot_b_id"],
+                    owner_user_id=c["organizer_id"],
+                    match_type=TYPE_CONTEST,
+                    contest_id=contest_id,
+                    game_id=gid,
+                    match_config=cfg,
+                )
             self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
 
     def standings(
@@ -890,11 +928,22 @@ class ContestManager:
         此方法逐 pairing try/except：失败则给该 pairing 挂一条 aborted match
         （reason='contest_bot_unavailable'），保证 _stage_done 仍通过。
         """
+        async with self._lock(contest_id):
+            await self._dispatch_pending_safe_locked(contest_id, stage_idx)
+
+    async def _dispatch_pending_safe_locked(self, contest_id: int, stage_idx: int) -> None:
+        """_dispatch_pending_safe 的实际逻辑（调用方已持锁）。"""
         c = self.store.get_contest(contest_id)
         if not c:
             return
         cfg = _match_config(c)
         gid = c.get("game_id") or "holdem"
+        # 复式赛制判断（与 _dispatch_pending_locked 一致）——reconcile 重派也保留
+        # duplicate 标志（复审 P2-2），否则同赛事出现 duplicate/单 leg 混合。
+        stages = _parse_stages(c)
+        stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
+        spec = game_registry.get(gid) if gid in REGISTERED_ENGINES else None
+        want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
         pending = [
             p
             for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
@@ -902,18 +951,30 @@ class ContestManager:
         ]
         for p in pending:
             try:
-                kw: dict = {
-                    "match_type": TYPE_CONTEST,
-                    "contest_id": contest_id,
-                    "game_id": gid,
-                }
-                kw.update({k: int(v) for k, v in cfg.items() if v is not None})
-                mid = await self.orch.challenge(
-                    p["bot_a_id"],
-                    p["bot_b_id"],
-                    owner_user_id=c["organizer_id"],
-                    **kw,
-                )
+                if want_duplicate:
+                    mid = await self.orch.challenge_duplicate(
+                        p["bot_a_id"],
+                        p["bot_b_id"],
+                        owner_user_id=c["organizer_id"],
+                        match_type=TYPE_CONTEST,
+                        contest_id=contest_id,
+                        game_id=gid,
+                        match_config=cfg,
+                        duplicate_seed=int(p["id"]) * 7919 + 1,
+                    )
+                else:
+                    kw: dict = {
+                        "match_type": TYPE_CONTEST,
+                        "contest_id": contest_id,
+                        "game_id": gid,
+                    }
+                    kw.update({k: int(v) for k, v in cfg.items() if v is not None})
+                    mid = await self.orch.challenge(
+                        p["bot_a_id"],
+                        p["bot_b_id"],
+                        owner_user_id=c["organizer_id"],
+                        **kw,
+                    )
                 self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
             except Exception as exc:
                 # bot 已删/不可用：建 aborted match 挂回 pairing，让 _stage_done 通过
@@ -1057,7 +1118,7 @@ class ContestManager:
                 published_at=published_at,
                 **self._version_snapshot(sp.bot_a_id, sp.bot_b_id),
             )
-        await self._dispatch_pending(contest_id, stage_idx)
+        await self._dispatch_pending_locked(contest_id, stage_idx)
         return True
 
     async def _maybe_next_elim_round(
@@ -1133,19 +1194,30 @@ class ContestManager:
                     published_at=published_at,
                 )
                 slot += 1
-        await self._dispatch_pending(contest_id, stage_idx)
+        await self._dispatch_pending_locked(contest_id, stage_idx)
         return True
 
     async def _maybe_auto_resume(self, contest_id: int) -> dict | None:
+        """maybe_finish 持锁链路调（rest→running 自动恢复）。调用方已持锁。"""
         c = self.store.get_contest(contest_id)
         if not c or c["status"] != CONTEST_REST:
             return None
         ends = c.get("rest_ends_at")
         if ends and ends <= _now():
-            return await self.resume(contest_id)
+            return await self._resume_locked(contest_id)
         return None
 
     async def resume(self, contest_id: int) -> dict:
+        """rest→running（对外入口，获取 per-contest 锁）。
+
+        scheduler tick（锁外）调本方法；maybe_finish 锁内链路调 _resume_locked
+        （防 asyncio.Lock 不可重入死锁 + 防双发竞态，与 _dispatch_pending 同模式）。
+        """
+        async with self._lock(contest_id):
+            return await self._resume_locked(contest_id)
+
+    async def _resume_locked(self, contest_id: int) -> dict:
+        """resume 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")

@@ -181,6 +181,8 @@ class MatchOrchestrator:
         match_config: dict[str, Any] | None = None,
         bot_a_version_id: int | None = None,
         bot_b_version_id: int | None = None,
+        duplicate: bool = False,
+        duplicate_seed: int | None = None,
     ) -> str:
         # 自博弈（同 bot 对战）：允许——用于对比同 bot 的不同版本（如 v1 vs v2），
         # 或同 bot 同版本的对阵。仅 challenge 路径放开（contest 仍各自走 pairing）。
@@ -219,12 +221,21 @@ class MatchOrchestrator:
 
         # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死固定值，不再走 match_config。
         # match_config 仅保留版本快照等内部键（_run_match 读 _bot_a/b_version_id 解析版本路径）。
+        # P2 residual：duplicate=True 时把标志 + seed 落 match_config，
+        # __run_match_inner 据此走 run_duplicate（2 leg 合并），并落 match_seed 供回放。
         spec = game_registry.get(gid)
+        if duplicate and spec.build_match_plan is None:
+            # 游戏（棋类）不支持 duplicate：降级为单 leg（不抛错，保持容错）。
+            duplicate = False
         mc: dict[str, Any] = {}
         if bot_a_version_id is not None:
             mc["_bot_a_version_id"] = int(bot_a_version_id)
         if bot_b_version_id is not None:
             mc["_bot_b_version_id"] = int(bot_b_version_id)
+        if duplicate:
+            mc["duplicate"] = True
+            if duplicate_seed is not None:
+                mc["duplicate_seed"] = int(duplicate_seed)
 
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self.store.create_match(
@@ -237,10 +248,51 @@ class MatchOrchestrator:
             game_id=gid,
             match_config=mc,
         )
+        # duplicate 落 match_seed（确定性回放/复现用）
+        if duplicate and duplicate_seed is not None:
+            self.store.update_match(match_id, match_seed=int(duplicate_seed))
         self.store.upsert_replay(match_id, "[]", "[]")
         task = asyncio.create_task(self._run_match(match_id), name=f"match-{match_id}")
         self._tasks[match_id] = task
         return match_id
+
+    async def challenge_duplicate(
+        self,
+        challenger_bot_id: int,
+        opponent_bot_id: int,
+        owner_user_id: int | None,
+        *,
+        match_type: str = TYPE_CHALLENGE,
+        contest_id: int | None = None,
+        game_id: str | None = None,
+        match_config: dict[str, Any] | None = None,
+        bot_a_version_id: int | None = None,
+        bot_b_version_id: int | None = None,
+        duplicate_seed: int | None = None,
+    ) -> str:
+        """复式赛制（duplicate）对局：跑 2 leg（同副牌交换座位）合并 net 判胜负。
+
+        签名与 challenge 一致，区别仅在于 match_config 标 duplicate=True。
+        内部走 runner.run_duplicate（每 leg 同 deal_sequence，seat_swap 翻转 deltas
+        累加到物理 bot）。游戏不支持 duplicate（spec.build_match_plan is None）时
+        自动降级为单 leg（challenge 内部兜底，不抛错）。
+
+        match 行落 1 条 merged result（deltas=2 leg 累加、winner 按 merged net 判），
+        供 standings/scoring 读取（与单 leg result 鸭子契约一致：result.deltas）。
+        """
+        return await self.challenge(
+            challenger_bot_id,
+            opponent_bot_id,
+            owner_user_id,
+            match_type=match_type,
+            contest_id=contest_id,
+            game_id=game_id,
+            match_config=match_config,
+            bot_a_version_id=bot_a_version_id,
+            bot_b_version_id=bot_b_version_id,
+            duplicate=True,
+            duplicate_seed=duplicate_seed,
+        )
 
     def subscribe(self, match_id: str) -> asyncio.Queue:
         # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
@@ -332,10 +384,24 @@ class MatchOrchestrator:
                     path_b = v["binary_path"]
                     mode_b = v.get("runtime_mode") or mode_b
         gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
+        # P2 residual：复式赛制（duplicate）——match_config.duplicate=True 且游戏 spec
+        # 支持 build_match_plan（仅 holdem）时，走 run_duplicate（2 leg 同副牌交换座位，
+        # 合并 net 判胜负）。spec 不支持时退化为单 leg（runner.run_duplicate 内部兜底）。
+        stored_mc = m.get("match_config") or {}
+        if isinstance(stored_mc, str):
+            try:
+                stored_mc = json.loads(stored_mc)
+            except Exception:
+                stored_mc = {}
+        spec = game_registry.get(gid)
+        want_duplicate = bool(stored_mc.get("duplicate")) and spec.build_match_plan is not None
+        # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
+        dup_seed = int(stored_mc.get("duplicate_seed")) if stored_mc.get("duplicate_seed") is not None else None
         logger.info(
-            "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s)",
+            "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s) duplicate=%s",
             match_id, gid, m.get("match_type"),
             m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
+            want_duplicate,
         )
         self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
         events: list[dict] = []
@@ -349,21 +415,42 @@ class MatchOrchestrator:
         try:
             # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死，不再从 match_config 读取。
             # 此处仅注入 admin judge_params（holdem 的 starting_stack/sb/bb）给 runner。
-            spec = game_registry.get(gid)
+            # duplicate=True 时透传该标志 + seed 给 runner（build_match_plan 据此生成 2 leg）。
             mc: dict[str, Any] = {
                 k: v for k, v in self._judge_params(gid).items() if v is not None
             }
-            result = await self.runner.run_binaries(
-                path_a,
-                path_b,
-                game_id=gid,
-                on_event=on_event,
-                runtime_modes=(mode_a, mode_b),
-                **mc,
-            )
-            ea = sum(r.deltas[0] for r in result.rounds)
-            eb = sum(r.deltas[1] for r in result.rounds)
-            # winner：引擎 result.winner 已权威化（棋类单轮胜者；holdem 多手按累计净筹码比较）。
+            if want_duplicate:
+                mc["duplicate"] = True
+                result = await self.runner.run_duplicate(
+                    path_a,
+                    path_b,
+                    game_id=gid,
+                    on_event=on_event,
+                    seed=dup_seed,
+                    runtime_modes=(mode_a, mode_b),
+                    **mc,
+                )
+            else:
+                result = await self.runner.run_binaries(
+                    path_a,
+                    path_b,
+                    game_id=gid,
+                    on_event=on_event,
+                    runtime_modes=(mode_a, mode_b),
+                    **mc,
+                )
+            # duplicate 的 merged deltas 已按物理 bot A/B 累加（含 seat_swap 翻转），
+            # 存于 result.final_chips（== net）。不可再 sum(rounds.deltas)——rounds 内的
+            # deltas 仍是座位视角（未翻转），sum 会重复且错位。
+            if want_duplicate and hasattr(result, "final_chips") and len(result.final_chips) >= 2:
+                ea, eb = int(result.final_chips[0]), int(result.final_chips[1])
+            elif want_duplicate and hasattr(result, "net") and len(result.net) >= 2:
+                ea, eb = int(result.net[0]), int(result.net[1])
+            else:
+                ea = sum(r.deltas[0] for r in result.rounds)
+                eb = sum(r.deltas[1] for r in result.rounds)
+            # winner：引擎 result.winner 已权威化（棋类单轮胜者；holdem 多手按累计净筹码比较；
+            # duplicate 的 merged final_chips 已写入 result，property 据此判胜）。
             # 仅当 result.winner 为 None（平局）时按 ea/eb 兜底——二者一致时返 None（平局）。
             winner: int | None = result.winner
             if winner is None:

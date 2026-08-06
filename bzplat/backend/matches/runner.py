@@ -258,12 +258,18 @@ class MatchRunner:
         game_id: str = GAME_HOLDEM,
         seed: int | None = None,
         on_event: EventSink | None = None,
+        runtime_modes: tuple[str, str] | None = None,
         **match_params: Any,
     ) -> Any:
         """P4 duplicate：跑多 leg（经 spec.build_match_plan），合并 net 判胜负。
 
         每 leg 用同 deal_sequence（消除运气）；seat_swap=True 的 leg 对调 decide 回调
-        （B 在 seat0）；合并各 leg 的 deltas 为最终结果。
+        （B 在 seat0）；合并各 leg 的 deltas 为最终结果（按**物理 bot** A/B 累加，
+        swap leg 的座位 deltas 翻转映射回原 bot）。
+
+        decide 闭包复用 `_botzone_decide`（与 run_binaries 一致），支持 traditional/
+        longrunning 协议与 runtime_modes——真 Botzone bot 在两 leg 中均可正确收发。
+        游戏不支持 duplicate（spec.build_match_plan is None）→ 退化为单 leg run_binaries。
         """
         from bzplat.backend.games import registry as _reg
 
@@ -272,17 +278,18 @@ class MatchRunner:
             # 游戏不支持 duplicate → 退化为单 leg
             return await self.run_binaries(
                 path_a, path_b, game_id=game_id, on_event=on_event, seed=seed,
-                **match_params,
+                runtime_modes=runtime_modes, **match_params,
             )
         legs = spec.build_match_plan(seed or 0, match_params)
-        # 合并结果：用第一 leg 的 MatchResult 结构，累加 deltas；winner 按 net 判
+        # 合并结果：用第一 leg 的 MatchResult 结构，累加 deltas（按物理 bot A/B）；winner 按 net 判
         merged_deltas = [0, 0]
         merged_rounds: list[Any] = []
         merged_events: list[dict[str, Any]] = []
         final_result = None
-        sid_a = await self.runner.start_session(path_a)
+        rm_a, rm_b = runtime_modes or (_bz.RUNTIME_LONGRUNNING, _bz.RUNTIME_LONGRUNNING)
+        sid_a = await self.runner.start_session(path_a, runtime_mode=rm_a)
         try:
-            sid_b = await self.runner.start_session(path_b)
+            sid_b = await self.runner.start_session(path_b, runtime_mode=rm_b)
         except BotCrashedError as exc:
             # 第二个 session（bot_b）启动失败：释放已启动的 bot_a，并注解崩溃方=1
             # 供 orchestrator 的技术判负判胜方（bot_b 崩 → winner=0）。镜像 run_binaries。
@@ -292,6 +299,7 @@ class MatchRunner:
         except BaseException:
             await self.runner.stop_session(sid_a)
             raise
+        gid = normalize_game_id(game_id)
         try:
             for li, leg in enumerate(legs):
                 lp = dict(leg.get("params") or {})
@@ -304,15 +312,17 @@ class MatchRunner:
                         sid = sid_b if player_idx == 0 else sid_a
                     else:
                         sid = sid_a if player_idx == 0 else sid_b
-                    line = _dumps(game_id, request)
                     try:
-                        resp_line = await self.runner.send(sid, line, timeout=self.action_timeout)
-                        return _loads(game_id, resp_line)
+                        return await _botzone_decide(
+                            self.runner, sid, request,
+                            game_id=gid, action_timeout=self.action_timeout,
+                        )
                     except BotCrashedError:
+                        # Bot 进程已死——向上传播触发对局 abort（与 run_binaries 一致）
                         raise
                     except Exception as exc:
                         logger.warning("bot decide failed (leg%s seat%s): %s", li, player_idx, exc)
-                        return _fail_response(game_id)
+                        return _fail_response(gid)
 
                 def leg_on_event(kind: str, ev: dict[str, Any]) -> None:
                     ev2 = {**ev, "leg": li}
@@ -320,15 +330,16 @@ class MatchRunner:
                         on_event(kind, ev2)
 
                 res = await run_session(
-                    game_id, decide, on_event=leg_on_event, **lp,
+                    gid, decide, on_event=leg_on_event, **lp,
                 )
                 if final_result is None:
                     final_result = res
-                # 累加 deltas（注意 seat_swap 的 leg2：B 在 seat0，其 delta[0] 属于 B）
+                # 累加 deltas 到**物理 bot** A/B（merged_deltas[0]=A, [1]=B）。
+                # swap leg：seat0=B，故 delta[0] 属 B、delta[1] 属 A。
                 for r in getattr(res, "rounds", []):
                     d = r.deltas
                     if swap:
-                        merged_deltas[1] += d[0]  # leg2 seat0=B 的净筹码加给 B（seat1）
+                        merged_deltas[1] += d[0]  # leg2 seat0=B 的净筹码加给 B（物理 path_b）
                         merged_deltas[0] += d[1]
                     else:
                         merged_deltas[0] += d[0]
@@ -340,12 +351,13 @@ class MatchRunner:
             await self.runner.stop_session(sid_b)
         # 构造合并后的结果（用首 leg 的 result 类型，覆盖 deltas/rounds/winner）
         if final_result is not None:
-            ea, eb = merged_deltas[0], merged_deltas[1]
-            winner = 0 if ea > eb else 1 if eb > ea else None
             try:
                 final_result.rounds = merged_rounds
                 final_result.events = merged_events
-                # holdem result：覆盖 net/final_chips（如果属性存在）
+                # merged deltas 已按物理 bot 累加（含 swap 翻转）→ 覆盖 net/final_chips，
+                # 使 result.winner property（基于 final_chips 比较）返回正确胜者。
+                # 注意：merged_rounds 内每 round 的 deltas 仍是**座位视角**（未翻转），
+                # 故调用方不可再 sum(rounds.deltas)，必须读 final_chips/net。
                 if hasattr(final_result, "net"):
                     final_result.net = list(merged_deltas)
                 if hasattr(final_result, "final_chips"):

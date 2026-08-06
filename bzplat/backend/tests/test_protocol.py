@@ -193,3 +193,23 @@ def test_protocol_request_schema_matches_engine():
     )
     # additionalProperties: false 必须开启（防扩展字段回归）
     assert schema.get("additionalProperties") is False, "schema 必须禁额外字段（防扩展回归）"
+
+
+def test_fail_response_parseable_per_game():
+    """每游戏的 fail_response 返回值必须能直接喂给该游戏的解析器不抛（审计 P1）。
+
+    holdem fail_response 返裸 int -1（=fold，Botzone 标准）；棋类返 dict。
+    签名统一为 Any（如实反映），运行时各解析器兼容各自返回类型。
+    """
+    from bzplat.backend.games import registry
+    from bzplat.backend.games.holdem.protocol import parse_response
+    from bzplat.backend.games._board_protocol import parse_xy
+
+    # holdem: fail_response 返回值能喂 parse_response
+    h = registry.get("holdem").protocol.fail_response()
+    parse_response(h)  # 不抛
+
+    # gomoku/pencil: fail_response 返回值能喂 parse_xy
+    for gid in ("gomoku", "pencil"):
+        g = registry.get(gid).protocol.fail_response()
+        parse_xy(g)  # 不抛
