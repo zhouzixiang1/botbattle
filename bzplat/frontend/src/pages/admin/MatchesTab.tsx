@@ -32,7 +32,7 @@ export default function MatchesTab() {
   // 分页（/api/matches 为公开端点，支持 limit/offset + 返回 total）
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const perPage = 50
+  const perPage = 20
 
   const load = useCallback(async () => {
     setLoading(true)

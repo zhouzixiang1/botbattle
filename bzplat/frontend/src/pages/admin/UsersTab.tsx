@@ -54,7 +54,7 @@ export default function UsersTab() {
   // 分页
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const perPage = 50
+  const perPage = 20
 
   const load = useCallback(async () => {
     setLoading(true)
