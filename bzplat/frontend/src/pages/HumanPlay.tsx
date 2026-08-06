@@ -206,7 +206,8 @@ export default function HumanPlay() {
           {gameLabel(gameId)} · 你坐【座位 {humanSeat + 1}】
         </span>
         {match && (
-          <span className="text-sm text-muted-foreground">
+          // min-w-0 + truncate：长 Bot 名换行时压缩自身而非整行增高、挤压 canvas 高度
+          <span className="min-w-0 max-w-full truncate text-sm text-muted-foreground">
             {seatHeaderLabel(match, 0)} vs {seatHeaderLabel(match, 1)}
           </span>
         )}
@@ -231,21 +232,22 @@ export default function HumanPlay() {
           )}
         </span>
         {!isBoard && over && endVm && endVm.seats && (
-          <span className="font-mono text-xs text-muted-foreground">
+          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
             累计 {fmtNet(endVm.seats[0]?.net ?? 0)} / {fmtNet(endVm.seats[1]?.net ?? 0)}
           </span>
         )}
-        <Link to={`/match/${id}`} className="ml-auto inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">
+        <Link to={`/match/${id}`} className="ml-auto inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary hover:underline">
           查看回放
           <ArrowRight className="size-4" />
         </Link>
       </div>
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-        <div className="space-y-3">
-          {/* 棋类（board kind）：统一点击落子交互，消除 per-game gameId=== 分支 */}
-          {isBoard && (
+      {/* 棋类：左 canvas + 右对局进程（双栏，沿用紧凑布局） */}
+      {isBoard && (
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+          <div className="space-y-3">
+            {/* 棋类（board kind）：统一点击落子交互，消除 per-game gameId=== 分支 */}
             <MatchBoard
               gameId={gameId}
               events={events}
@@ -253,56 +255,65 @@ export default function HumanPlay() {
               onMove={(x, y) => sendMove({ x, y })}
               interactive={myTurn}
             />
-          )}
-          {/* 扑克（cards kind）：牌桌 + 动作面板 */}
-          {!isBoard && (
-            <div className="relative">
-              <MatchBoard
-                gameId={gameId}
-                events={events}
-                seats={seats}
-                revealMode="showdown"
-              />
-              <HoldemActions
-                disabled={!myTurn || over}
-                legal={myTurn}
-                request={turnRequest}
-                onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
-              />
-            </div>
-          )}
+          </div>
+          <EventLogCard id={id} events={events} />
         </div>
+      )}
 
-        <Card className="flex flex-col">
-          <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
-            对局进程 <span className="text-xs font-normal text-muted-foreground">({events.length})</span>
-          </div>
-          <div className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
-            {events.length === 0 ? (
-              <p className="py-6 text-center text-muted-foreground">等待对局开始…</p>
-            ) : (
-              events.slice().reverse().map((ev, i) => (
-                <div key={i} className="flex items-center gap-2 rounded px-2 py-1 text-muted-foreground">
-                  <span className="w-16 shrink-0 opacity-60">{ev.type}</span>
-                  <span className="min-w-0 flex-1 truncate opacity-80">
-                    {ev.type === 'action' ? `座${ev.player} · ${ev.action}` : ''}
-                    {ev.type === 'move' ? `座${ev.player} · (${ev.x},${ev.y})` : ''}
-                    {ev.type === 'your_turn' ? '轮到你' : ''}
-                    {ev.type === 'settle' ? `赢家 座${(ev.winners as number[] | undefined)?.join('/')}` : ''}
-                    {ev.type === 'hand_start' ? `第 ${(Number(ev.hand) || 0) + 1} 手` : ''}
-                    {ev.type === 'match_end' ? `结束 · 胜者 ${ev.winner ?? '平'}` : ''}
-                    {ev.type === 'error' ? String(ev.message || '') : ''}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-          <Button asChild variant="ghost" size="sm" className="m-2 gap-1 self-start">
-            <Link to={`/match/${id}`}>查看回放<ArrowRight className="size-3.5" /></Link>
-          </Button>
-        </Card>
-      </div>
+      {/* 扑克：牌桌独占整行宽度（撑满主区）+ 动作面板独立成行 + 对局进程在下。
+          比旧双栏（canvas 挤在 1fr 列里被 22rem 侧栏压到 ~688px）空间利用率更高。 */}
+      {!isBoard && (
+        <div className="space-y-4">
+          <MatchBoard
+            gameId={gameId}
+            events={events}
+            seats={seats}
+            revealMode="showdown"
+          />
+          <HoldemActions
+            disabled={!myTurn || over}
+            legal={myTurn}
+            request={turnRequest}
+            onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
+          />
+          <EventLogCard id={id} events={events} />
+        </div>
+      )}
     </PageStub>
+  )
+}
+
+/** 对局进程事件日志卡（棋类/扑克分支共用，避免布局分叉后重复）。 */
+function EventLogCard({ id, events }: { id?: string; events: Ev[] }) {
+  return (
+    <Card className="flex flex-col">
+      <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
+        对局进程 <span className="text-xs font-normal text-muted-foreground">({events.length})</span>
+      </div>
+      <div className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
+        {events.length === 0 ? (
+          <p className="py-6 text-center text-muted-foreground">等待对局开始…</p>
+        ) : (
+          events.slice().reverse().map((ev, i) => (
+            <div key={i} className="flex items-center gap-2 rounded px-2 py-1 text-muted-foreground">
+              <span className="w-16 shrink-0 opacity-60">{ev.type}</span>
+              <span className="min-w-0 flex-1 truncate opacity-80">
+                {ev.type === 'action' ? `座${ev.player} · ${ev.action}` : ''}
+                {ev.type === 'move' ? `座${ev.player} · (${ev.x},${ev.y})` : ''}
+                {ev.type === 'your_turn' ? '轮到你' : ''}
+                {ev.type === 'settle' ? `赢家 座${(ev.winners as number[] | undefined)?.join('/')}` : ''}
+                {ev.type === 'hand_start' ? `第 ${(Number(ev.hand) || 0) + 1} 手` : ''}
+                {ev.type === 'match_end' ? `结束 · 胜者 ${ev.winner ?? '平'}` : ''}
+                {ev.type === 'error' ? String(ev.message || '') : ''}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+      <Button asChild variant="ghost" size="sm" className="m-2 gap-1 self-start">
+        <Link to={`/match/${id}`}>查看回放<ArrowRight className="size-3.5" /></Link>
+      </Button>
+    </Card>
   )
 }
 
@@ -343,11 +354,12 @@ function HoldemActions({
       <Button type="button" variant="outline" size="sm" disabled={dis || !canCall} onClick={() => onAct('c')}>
         跟注{toCall > 0 ? ` ${toCall}` : ''}
       </Button>
-      <Label className="flex items-center gap-2 text-sm text-muted-foreground">
+      <Label className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
         加注到
         <Input
           type="number"
           min={1}
+          max={myChips}
           className="w-24"
           value={raiseTo}
           onChange={(e) => setRaiseTo(Number(e.target.value))}
@@ -360,7 +372,7 @@ function HoldemActions({
         All-in
       </Button>
       {legal && (
-        <span className="flex items-center gap-1 text-xs text-success">
+        <span className="flex min-w-0 items-center gap-1 text-xs text-success">
           <PlayCircle className="size-3.5" />
           轮到你{toCall > 0 ? ` · 需跟 ${toCall}` : ' · 可过牌'}
         </span>

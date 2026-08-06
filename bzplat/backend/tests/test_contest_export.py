@@ -31,6 +31,7 @@ def _setup(app, *, require_real_name=True):
     cid = store.create_contest(
         "导出测试赛", organizer_id=org["id"], game_id="holdem",
         stages_json='[{"key":"s1","type":"round_robin","scoring":"poker_3_1_0"}]',
+        status="open",  # 公开赛事（draft 仅 organizer 可见，见 test_contest_visibility）
         require_real_name=1 if require_real_name else 0,
     )["id"]
     store.add_contest_entry(cid, u["id"], bu["id"])

@@ -1971,7 +1971,13 @@ class Store:
     def update_rating_row(
         self, bot_id: int, *, game_id: str | None = None, **fields: Any
     ) -> dict | None:
-        """更新 (bot_id, game_id) 评分行；不存在则建。game_id 缺省取 bot 的 game_id。"""
+        """更新 (bot_id, game_id) 评分行；不存在则建。game_id 缺省取 bot 的 game_id。
+
+        累加字段（wins/losses/draws/net_chips/matches_played）用 SQL 原子
+        ``field = field + ?``（传入增量），防并发 lost-update（审计 P1：同 bot
+        并发两局时快照+增量会丢一次）。其余字段（rating/rd/vol/last_played_at）
+        是绝对赋值。
+        """
         allowed = {
             "rating",
             "rd",
@@ -1983,7 +1989,13 @@ class Store:
             "matches_played",
             "last_played_at",
         }
-        sets = [f"{k}=?" for k in fields if k in allowed]
+        # 累加字段：传增量，SQL 原子加（防 lost-update）
+        accum = {"wins", "losses", "draws", "net_chips", "matches_played"}
+        sets = [
+            f"{k} = {k} + ?" if k in accum else f"{k}=?"
+            for k in fields
+            if k in allowed
+        ]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
             gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()

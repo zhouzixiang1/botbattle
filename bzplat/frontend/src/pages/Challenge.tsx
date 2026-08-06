@@ -365,14 +365,14 @@ export default function Challenge() {
                           const vc = versionCache[seats[1].bot!.id]
                           return (
                             <Select
-                              value={seats[1].versionId === undefined ? '' : String(seats[1].versionId)}
-                              onValueChange={(v) => setSeatVersion('s2', v === '' ? undefined : Number(v))}
+                              value={seats[1].versionId === undefined ? 'current' : String(seats[1].versionId)}
+                              onValueChange={(v) => setSeatVersion('s2', v === 'current' ? undefined : Number(v))}
                             >
                               <SelectTrigger className="h-9 w-full">
                                 <SelectValue placeholder="选择版本" />
                               </SelectTrigger>
                               <SelectContent>
-                                <SelectItem value="">
+                                <SelectItem value="current">
                                   {vc?.current !== undefined ? `当前版本 (v${vc.current})` : '当前版本'}
                                 </SelectItem>
                                 {(vc?.rows || []).map((vr) => {

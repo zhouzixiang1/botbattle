@@ -22,19 +22,20 @@ export function MetricCard({
   return (
     <Card className={cn('gap-0 py-4', className)}>
       <CardContent className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-medium uppercase tracking-wide text-muted-foreground">
             {label}
           </div>
           <div
             className={cn(
-              'mt-1 break-all font-mono text-lg font-bold tabular-nums sm:text-xl',
+              'mt-1 w-full truncate font-mono text-base font-bold tabular-nums sm:text-lg lg:text-xl',
               danger ? 'text-destructive' : 'text-foreground'
             )}
+            title={typeof value === 'string' || typeof value === 'number' ? String(value) : undefined}
           >
             {value}
           </div>
-          {hint && <div className="mt-0.5 text-xs text-muted-foreground">{hint}</div>}
+          {hint && <div className="mt-0.5 truncate text-xs text-muted-foreground" title={hint}>{hint}</div>}
         </div>
         {icon && <div className="shrink-0 text-muted-foreground opacity-70">{icon}</div>}
       </CardContent>

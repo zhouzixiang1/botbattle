@@ -295,7 +295,7 @@ def test_contest_detail_entries_pagination(tmp_path):
     store = app.state.store
     org = store.create_user("org", "o@ex.com", hash_password("pw123456"), role="organizer")
     store.update_user(org["id"], email_verified=1)
-    cid = store.create_contest("BigCup", organizer_id=org["id"], game_id="holdem")["id"]
+    cid = store.create_contest("BigCup", organizer_id=org["id"], game_id="holdem", status="open")["id"]
     # 8 名参赛者各一 bot，全部报名
     for i in range(8):
         u = store.create_user(f"ply{i}", f"p{i}@ex.com", hash_password("pw123456"))

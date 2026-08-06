@@ -46,7 +46,7 @@ def _tok(app, username):
 def test_visitor_does_not_see_draft_or_cancelled(tmp_path):
     """访客（未登录）GET /api/contests 不应见 draft/cancelled 赛事。"""
     app = _app(tmp_path)
-    _setup(app)
+    store, ctx = _setup(app)
     client = TestClient(app)
     r = client.get("/api/contests")
     assert r.status_code == 200
@@ -54,6 +54,16 @@ def test_visitor_does_not_see_draft_or_cancelled(tmp_path):
     assert "公开赛" in titles
     assert "草稿赛" not in titles, "访客不应见 draft 赛事"
     assert "已取消赛" not in titles, "访客不应见 cancelled 赛事"
+
+    # contest_detail 也不能直读 draft（审计 P1-E：list 已守，detail 漏守）
+    r2 = client.get(f"/api/contests/{ctx['c_draft']['id']}")
+    assert r2.status_code == 404, "访客不应直读 draft 赛事 detail（id 枚举泄漏）"
+    r3 = client.get(f"/api/contests/{ctx['c_cancel']['id']}")
+    assert r3.status_code == 404, "访客不应直读 cancelled 赛事 detail"
+    # organizer 可读自己的 draft
+    r4 = client.get(f"/api/contests/{ctx['c_draft']['id']}", headers=_tok(app, "org"))
+    assert r4.status_code == 200
+    assert r4.json()["contest"]["status"] == "draft"
 
 
 def test_normal_user_does_not_see_draft(tmp_path):

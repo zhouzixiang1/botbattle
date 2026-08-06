@@ -5,7 +5,7 @@ import PageStub from '@/components/PageStub'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   Table,
   TableBody,
@@ -176,6 +176,11 @@ export default function ContestDetail() {
   const [entriesPage, setEntriesPage] = useState(1)
   const [entriesTotal, setEntriesTotal] = useState(0)
   const entriesPerPage = 20
+  // 内容区 Tab：对阵 / 选手 / 排行（只渲染当前 tab，避免大量报名/积分全量铺开导致长空白）
+  const [contentTab, setContentTab] = useState<'matchups' | 'entries' | 'standings'>('matchups')
+  // 积分榜客户端分页（量级通常 < 200，客户端 slice 足够；每页 30 行）
+  const [standingsPage, setStandingsPage] = useState(1)
+  const standingsPerPage = 30
 
   const stages = useMemo(() => parseStages(contest), [contest])
 
@@ -259,6 +264,17 @@ export default function ContestDetail() {
     }
     return map
   }, [pairings])
+
+  // 积分榜客户端分页：当前页 slice + 越界回退（如 standings 缩短到当前页之外）
+  const standingsTotal = standings.length
+  const standingsTotalPages = Math.max(1, Math.ceil(standingsTotal / standingsPerPage))
+  const safeStandingsPage = Math.min(standingsPage, standingsTotalPages)
+  const standingsPageItems = standings.slice(
+    (safeStandingsPage - 1) * standingsPerPage,
+    safeStandingsPage * standingsPerPage,
+  )
+  // 行号需要按全量排序位置计算（而非当前页内序），保证翻页后名次连续
+  const standingsPageBase = (safeStandingsPage - 1) * standingsPerPage
 
   if (!contest) {
     return (
@@ -378,110 +394,144 @@ export default function ContestDetail() {
         )}
       </div>
 
-      {/* 阶段 Tabs（中文赛制名 + 当前进度，隐藏 raw type 字符串） */}
-      {stages.length > 0 && (
-        <Tabs value={String(stageTab)} onValueChange={(v) => setStageTab(Number(v))} className="mt-6">
-          <TabsList>
-            {stages.map((s, i) => {
-              const prog = stageProgress.get(i)
-              const typeLabel = STAGE_TYPE_LABEL[s.type || ''] || s.type
-              // 「瑞士轮 · 第3轮」式：有对阵且未全部完成时显示当前轮次
-              const roundTag = prog && prog.maxRound > 0 && prog.completed < prog.total
-                ? `第${prog.maxRound}轮`
-                : null
-              return (
-                <TabsTrigger key={s.key || i} value={String(i)} className="gap-1.5">
-                  <span>{typeLabel || s.key || `阶段${i + 1}`}</span>
-                  {roundTag && <span className="text-xs text-muted-foreground">· {roundTag}</span>}
-                  {contest.current_stage_idx === i && contest.status !== 'finished' && (
-                    <Badge variant="outline" className="ml-1 text-[9px] text-primary">当前</Badge>
-                  )}
-                  {prog && prog.total > 0 && (
-                    <span className="text-[10px] text-muted-foreground">
-                      {prog.completed}/{prog.total}
-                    </span>
-                  )}
-                </TabsTrigger>
-              )
-            })}
-          </TabsList>
-        </Tabs>
-      )}
+      {/* 内容区 Tabs：对阵 / 选手 / 排行（只渲染当前 tab，避免大量报名/积分全量铺开导致长空白） */}
+      <Tabs value={contentTab} onValueChange={(v) => setContentTab(v as typeof contentTab)} className="mt-4">
+        <TabsList>
+          <TabsTrigger value="matchups" className="gap-1.5">
+            <Swords className="size-4" />对阵
+          </TabsTrigger>
+          <TabsTrigger value="entries" className="gap-1.5">
+            <Users className="size-4" />选手
+            {entriesTotal > 0 && (
+              <span className="text-xs text-muted-foreground">{entriesTotal}</span>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="standings" className="gap-1.5">
+            <ListOrdered className="size-4" />排行
+            {standings.length > 0 && (
+              <span className="text-xs text-muted-foreground">{standings.length}</span>
+            )}
+          </TabsTrigger>
+        </TabsList>
 
-      {/* 阶段配置（中文可读化，避免 raw type/scoring 字符串） */}
-      {stages[stageTab] && (
-        <div className="mt-2 break-words rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">本阶段配置：</span>
-          {[
-            STAGE_TYPE_LABEL[stages[stageTab].type || ''] || stages[stageTab].type,
-            SCORING_LABEL[stages[stageTab].scoring || ''] || stages[stageTab].scoring,
-            stages[stageTab].group_count ? `分组 ${stages[stageTab].group_count}` : null,
-            stages[stageTab].rounds !== undefined ? `轮数 ${stages[stageTab].rounds}` : null,
-            stages[stageTab].advance_count ? `晋级 ${stages[stageTab].advance_count}` : null,
-            stages[stageTab].advance_per_group ? `每组晋级 ${stages[stageTab].advance_per_group}` : null,
-            stages[stageTab].rest_after_minutes ? `休息 ${stages[stageTab].rest_after_minutes} 分` : null,
-            stages[stageTab].allow_bot_swap_in_rest ? '休息可换 Bot' : null,
-          ].filter(Boolean).join(' · ')}
-        </div>
-      )}
+        {/* Tab「对阵」：阶段切换(S4) + 阶段配置 + 对阵视图(S6a) + 正式名次(finished) */}
+        <TabsContent value="matchups" className="mt-4 space-y-4">
+          {/* 阶段 Tabs（中文赛制名 + 当前进度，隐藏 raw type 字符串） */}
+          {stages.length > 0 && (
+            <Tabs value={String(stageTab)} onValueChange={(v) => setStageTab(Number(v))}>
+              <TabsList>
+                {stages.map((s, i) => {
+                  const prog = stageProgress.get(i)
+                  const typeLabel = STAGE_TYPE_LABEL[s.type || ''] || s.type
+                  // 「瑞士轮 · 第3轮」式：有对阵且未全部完成时显示当前轮次
+                  const roundTag = prog && prog.maxRound > 0 && prog.completed < prog.total
+                    ? `第${prog.maxRound}轮`
+                    : null
+                  return (
+                    <TabsTrigger key={s.key || i} value={String(i)} className="gap-1.5">
+                      <span>{typeLabel || s.key || `阶段${i + 1}`}</span>
+                      {roundTag && <span className="text-xs text-muted-foreground">· {roundTag}</span>}
+                      {contest.current_stage_idx === i && contest.status !== 'finished' && (
+                        <Badge variant="outline" className="ml-1 text-[9px] text-primary">当前</Badge>
+                      )}
+                      {prog && prog.total > 0 && (
+                        <span className="text-[10px] text-muted-foreground">
+                          {prog.completed}/{prog.total}
+                        </span>
+                      )}
+                    </TabsTrigger>
+                  )
+                })}
+              </TabsList>
+            </Tabs>
+          )}
 
-      {/* 区2：双栏 = 对阵主区(左, 核心视觉) + 报名/积分边栏(右, sticky)。 <lg 单列堆叠 */}
-      <div className="mt-6 lg:grid lg:grid-cols-[minmax(0,1fr)_22rem] lg:gap-6">
-        {/* 左主区：对阵（BracketTree/PairedFoldedList 能吃满宽） */}
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Swords className="size-4 text-muted-foreground" />
-            <h3 className="text-sm font-semibold text-foreground">
-              对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab + 1}`}` : ''}
-            </h3>
-            {/* 对阵视图切换：对阵树 / 一览表（淘汰赛默认树，其余默认表，可手动切换） */}
-            {stagePairings.length > 0 && (
-              <div className="ml-auto flex items-center gap-1 rounded-lg bg-muted p-0.5 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setPairingView('tree')}
-                  className={`rounded-md px-2 py-1 transition-colors ${
-                    pairingView === 'tree' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  对阵树
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPairingView('table')}
-                  className={`rounded-md px-2 py-1 transition-colors ${
-                    pairingView === 'table' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  一览表
-                </button>
+          {/* 阶段配置（中文可读化，避免 raw type/scoring 字符串） */}
+          {stages[stageTab] && (
+            <div className="break-words rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">本阶段配置：</span>
+              {[
+                STAGE_TYPE_LABEL[stages[stageTab].type || ''] || stages[stageTab].type,
+                SCORING_LABEL[stages[stageTab].scoring || ''] || stages[stageTab].scoring,
+                stages[stageTab].group_count ? `分组 ${stages[stageTab].group_count}` : null,
+                stages[stageTab].rounds !== undefined ? `轮数 ${stages[stageTab].rounds}` : null,
+                stages[stageTab].advance_count ? `晋级 ${stages[stageTab].advance_count}` : null,
+                stages[stageTab].advance_per_group ? `每组晋级 ${stages[stageTab].advance_per_group}` : null,
+                stages[stageTab].rest_after_minutes ? `休息 ${stages[stageTab].rest_after_minutes} 分` : null,
+                stages[stageTab].allow_bot_swap_in_rest ? '休息可换 Bot' : null,
+              ].filter(Boolean).join(' · ')}
+            </div>
+          )}
+
+          {/* 对阵区（BracketTree/PairedFoldedList 能吃满宽） */}
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-foreground">
+                对阵{stages.length ? ` · ${stages[stageTab]?.key || `阶段${stageTab + 1}`}` : ''}
+              </h3>
+              {/* 对阵视图切换：对阵树 / 一览表（淘汰赛默认树，其余默认表，可手动切换） */}
+              {stagePairings.length > 0 && (
+                <div className="ml-auto flex items-center gap-1 rounded-lg bg-muted p-0.5 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setPairingView('tree')}
+                    className={`rounded-md px-2 py-1 transition-colors ${
+                      pairingView === 'tree' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    对阵树
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPairingView('table')}
+                    className={`rounded-md px-2 py-1 transition-colors ${
+                      pairingView === 'table' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    一览表
+                  </button>
+                </div>
+              )}
+            </div>
+            {stagePairings.length === 0 ? (
+              <Card className="mt-2"><EmptyState text="暂无对阵" icon={<Swords className="size-7 opacity-40" />} /></Card>
+            ) : pairingView === 'table' ? (
+              // 一览表：所有对阵的扁平表格（轮次/Bot/排期时间/状态/查看）
+              <div className="mt-2">
+                <ScheduleTable pairings={stagePairings} />
               </div>
+            ) : isElimStage ? (
+              // 淘汰赛：树状对阵图（按 bracket_slot 排列，胜者高亮，横向滚动+轮次折叠）
+              <div className="mt-2">
+                <BracketTree pairings={stagePairings} />
+              </div>
+            ) : (
+              // swiss/循环/分组：按轮次/分组折叠的列表（大规模自动收起）
+              <PairingFoldedList pairings={stagePairings} />
             )}
           </div>
-          {stagePairings.length === 0 ? (
-            <Card className="mt-2"><EmptyState text="暂无对阵" icon={<Swords className="size-7 opacity-40" />} /></Card>
-          ) : pairingView === 'table' ? (
-            // 一览表：所有对阵的扁平表格（轮次/Bot/排期时间/状态/查看）
-            <div className="mt-2">
-              <ScheduleTable pairings={stagePairings} />
-            </div>
-          ) : isElimStage ? (
-            // 淘汰赛：树状对阵图（按 bracket_slot 排列，胜者高亮，横向滚动+轮次折叠）
-            <div className="mt-2">
-              <BracketTree pairings={stagePairings} />
-            </div>
-          ) : (
-            // swiss/循环/分组：按轮次/分组折叠的列表（大规模自动收起）
-            <PairingFoldedList pairings={stagePairings} />
-          )}
-        </div>
 
-        {/* 右边栏：报名列表 + 积分榜（桌面 sticky 常驻） */}
-        <div className="mt-6 space-y-6 lg:mt-0 lg:self-start lg:sticky lg:top-20">
-          {/* 报名列表 */}
+          {/* P5：全员正式名次（赛事 finished 时显示在阵区下方 + 下载） */}
+          {contest.status === 'finished' && (
+            <div>
+              <div className="flex items-center gap-2">
+                <Trophy className="size-4 text-muted-foreground" />
+                <h3 className="text-sm font-semibold text-foreground">正式名次</h3>
+                <a
+                  href={`/api/contests/${id}/official-results?format=csv`}
+                  className="ml-auto inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  <Download className="size-3" />导出 CSV
+                </a>
+              </div>
+            </div>
+          )}
+        </TabsContent>
+
+        {/* Tab「选手」：报名列表（含组织者批量指派/导出/实名显示/移除） */}
+        <TabsContent value="entries" className="mt-4">
           <div>
             <div className="flex items-center gap-2">
-              <Users className="size-4 text-muted-foreground" />
               <h3 className="text-sm font-semibold text-foreground">报名（{entriesTotal}）</h3>
               {isOrg && (contest.status === 'draft' || contest.status === 'open') && (
                 <Button
@@ -552,27 +602,12 @@ export default function ContestDetail() {
               </CardContent>
             </Card>
           </div>
+        </TabsContent>
 
-          {/* P5：全员正式名次（赛事 finished 时显示 + 下载） */}
-          {contest.status === 'finished' && (
-            <div>
-              <div className="flex items-center gap-2">
-                <Trophy className="size-4 text-muted-foreground" />
-                <h3 className="text-sm font-semibold text-foreground">正式名次</h3>
-                <a
-                  href={`/api/contests/${id}/official-results?format=csv`}
-                  className="ml-auto inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                >
-                  <Download className="size-3" />导出 CSV
-                </a>
-              </div>
-            </div>
-          )}
-
-          {/* 积分榜 */}
+        {/* Tab「排行」：积分榜（客户端分页，per_page=30） */}
+        <TabsContent value="standings" className="mt-4">
           <div>
             <div className="flex items-center gap-2">
-              <ListOrdered className="size-4 text-muted-foreground" />
               <h3 className="text-sm font-semibold text-foreground">积分榜</h3>
             </div>
             <Card className="mt-2 overflow-hidden">
@@ -591,9 +626,9 @@ export default function ContestDetail() {
                     {standings.length === 0 ? (
                       <TableRow><TableCell colSpan={5}><EmptyState text="暂无积分数据" icon={<Trophy className="size-7 opacity-40" />} /></TableCell></TableRow>
                     ) : (
-                      standings.map((s, i) => (
+                      standingsPageItems.map((s, i) => (
                         <TableRow key={s.bot_id}>
-                          <TableCell className="font-mono text-xs text-muted-foreground">{i + 1}</TableCell>
+                          <TableCell className="font-mono text-xs text-muted-foreground">{standingsPageBase + i + 1}</TableCell>
                           <TableCell className="max-w-[10rem]">
                             <Link to={`/bot/${s.bot_id}`} className="block truncate font-medium text-foreground hover:text-primary" title={s.bot_name || `#${s.bot_id}`}>
                               {s.bot_name || `#${s.bot_id}`}
@@ -611,9 +646,16 @@ export default function ContestDetail() {
                 </Table>
               </div>
             </Card>
+            {/* 积分榜客户端分页：standings 量级通常 < 200，slice 分页够用 */}
+            <Pagination
+              page={safeStandingsPage}
+              perPage={standingsPerPage}
+              total={standingsTotal}
+              onPageChange={setStandingsPage}
+            />
           </div>
-        </div>{/* /右边栏 */}
-      </div>{/* /双栏 */}
+        </TabsContent>
+      </Tabs>
     </PageStub>
   )
 }

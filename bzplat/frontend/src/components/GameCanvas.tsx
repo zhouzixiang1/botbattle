@@ -1,15 +1,25 @@
 // bzplat/frontend/src/components/GameCanvas.tsx
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import { getGame } from '@/games'
 import type { RawEvent } from '@/games/base'
 import type { SeatInfo, Scene } from '@/games/canvas-types'
+
+/** 默认设计宽高（位图分辨率基线，宽高比 3:2）。 */
+const BASE_W = 900
+const BASE_H = 600
+const ASPECT = BASE_H / BASE_W // 2/3
 
 interface Props {
   gameId?: string | null
   events: RawEvent[]
   seats?: SeatInfo[]
   revealMode?: 'all' | 'showdown'
+  /**
+   * 设计坐标系宽高（canvas 内部绘制基准，宽高比决定位图比例）。
+   * 不再作为 CSS 最大宽度封顶；父容器宽度经 ResizeObserver 动态回填到 width，
+   * 位图分辨率跟随以保持清晰（DPR 缩放）。
+   */
   width?: number
   height?: number
   className?: string
@@ -20,12 +30,41 @@ interface Props {
 
 export default function GameCanvas({
   gameId, events, seats, revealMode = 'all',
-  width = 900, height = 600, className, onMove, interactive,
+  width: widthProp, height: heightProp, className, onMove, interactive,
 }: Props) {
+  // 响应式位图分辨率：默认沿用设计基线；父容器宽度经 ResizeObserver 回填，
+  // 保持宽高比 3:2（height = width * 2/3）。位图分辨率跟随 → 始终清晰。
+  const [width, setWidth] = useState(widthProp ?? BASE_W)
+  const height = heightProp ?? Math.round(width * ASPECT)
+
+  const wrapperRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const stateRef = useRef<{ prev: Scene | null; next: Scene } | null>(null)
   const tlRef = useRef<gsap.core.Timeline | null>(null)
   const lastEventsLenRef = useRef(0)
+  // ref 镜像 width，供 ResizeObserver 回调读最新值做去抖（避免把 width 进 deps 导致 observer 反复重建）
+  const widthRef = useRef(width)
+  widthRef.current = width
+
+  // ResizeObserver：测量父容器实际宽度，动态设置位图分辨率 width（保持 3:2）。
+  // 仅当调用方未显式传 width 时启用（显式 width 视为固定尺寸，不响应式）。
+  // 节流：只在宽度变化超过 1px 时更新，避免微小抖动频繁重置位图。
+  useEffect(() => {
+    if (widthProp != null) return // 显式 width → 固定，不响应式
+    const el = wrapperRef.current
+    if (!el) return
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const w = Math.round(e.contentRect.width)
+        if (w > 0 && Math.abs(w - widthRef.current) > 1) {
+          widthRef.current = w
+          setWidth(w)
+        }
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [widthProp])
 
   // 尺寸/DPR 适配 effect —— 仅在 width/height/gameId 变化时重跑。
   // canvas.width/height 赋值会清空位图（HTML 规范），故只在尺寸真正变化时才做，
@@ -121,13 +160,17 @@ export default function GameCanvas({
   }
 
   return (
-    <canvas
-      ref={canvasRef}
-      style={{ width: '100%', height: 'auto', maxWidth: width }}
-      className={className + (interactive && onMove ? ' cursor-pointer' : '')}
-      role="img"
-      aria-label={`${gameId ?? ''} 对局画面`}
-      onClick={handleClick}
-    />
+    <div ref={wrapperRef} style={{ width: '100%' }}>
+      <canvas
+        ref={canvasRef}
+        // 宽度撑满父容器；高度按 3:2 宽高比自动撑开（aspect-ratio + height: auto）。
+        // 位图分辨率由上方 DPR effect 按 width/height 设定，不再用 maxWidth 封顶。
+        style={{ width: '100%', height: 'auto', aspectRatio: '3 / 2', display: 'block' }}
+        className={className + (interactive && onMove ? ' cursor-pointer' : '')}
+        role="img"
+        aria-label={`${gameId ?? ''} 对局画面`}
+        onClick={handleClick}
+      />
+    </div>
   )
 }
