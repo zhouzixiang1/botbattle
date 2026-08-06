@@ -19,10 +19,24 @@ import { reduceHoldemEvents } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta, SeatInfo } from '@/games/canvas-types'
 import { ensurePokerJS } from '@/lib/pokerjs'
 
-// botzone 布局常量（照搬）
-const R = 190, L = 230, CARD_SIZE = 100
+// botzone 布局比例（相对设计基线宽 W0=900）。
+// 原绝对常量 R=190/L=230/CARD_SIZE=100 → 比例化：W 变化时整体缩放，
+// 在 900px 宽时视觉与原版完全一致（230/900≈0.2556, 190/900≈0.2111, 100/900≈0.1111）。
+const W0 = 900
+const L_RATIO = 230 / W0    // 座位/牌堆横向间距系数
+const R_RATIO = 190 / W0    // 椭圆桌半轴系数
+const CARD_RATIO = 100 / W0 // 牌尺寸系数
 const POINT = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 const SUIT_BY_CODE: Record<string, 'h' | 'd' | 's' | 'c'> = { h: 'h', d: 'd', s: 's', c: 'c' }
+
+/** 按当前位图宽 W 计算布局尺寸（W 跟随父容器响应式变化）。 */
+const layout = (W: number) => ({
+  L: L_RATIO * W,
+  R: R_RATIO * W,
+  CARD_SIZE: CARD_RATIO * W,
+  /** 缩放因子：W/基线宽，用于把固定像素的 fitText maxWidth 等比放大。 */
+  s: W / W0,
+})
 
 /**
  * 按当前 ctx 字体测量文本宽度，超出 maxWidth 时尾部加「…」截断。
@@ -142,7 +156,8 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
   draw(ctx, prev, next, t, opts) {
     ensurePokerJS(ctx)
     const W = opts.width, H = opts.height
-    const X = (s: number) => W / 2 + L * s
+    const { L, R, CARD_SIZE, s } = layout(W)
+    const X = (k: number) => W / 2 + L * k
     const Y0 = H / 2 - R * 0.67, Y1 = H / 2 + R * 0.67
 
     // 清屏 + 椭圆桌（照搬 drawBackground）
@@ -157,18 +172,18 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
 
     // 左侧信息：手数/轮/底池（随 t 插值底池）—— 截断到大底池时不顶到座位筹码区
     const pot = prev && prev.pot !== next.pot ? Math.round(prev.pot + (next.pot - prev.pot) * t) : next.pot
-    ctx.font = 'bold 16px "DM Sans", sans-serif'
+    ctx.font = `bold ${Math.round(16 * s)}px "DM Sans", sans-serif`
     ctx.fillStyle = '#fff'
     ctx.textAlign = 'left'
-    // 左侧文字可用宽度：从 X(-1.4) 到座位左缘 X(-0.75)-半座位宽
-    const leftMaxW = X(-0.75) - 70 - X(-1.4)
-    ctx.fillText(fitText(ctx, `第 ${(next.hand || 0) + 1} 手`, leftMaxW), X(-1.4), H / 2 - 35)
+    // 左侧文字可用宽度：从 X(-1.4) 到座位左缘 X(-0.75)-半座位宽（半座位宽随 s 缩放）
+    const leftMaxW = X(-0.75) - 70 * s - X(-1.4)
+    ctx.fillText(fitText(ctx, `第 ${(next.hand || 0) + 1} 手`, leftMaxW), X(-1.4), H / 2 - 35 * s)
     ctx.fillText(fitText(ctx, `轮: ${next.street}`, leftMaxW), X(-1.4), H / 2)
-    ctx.fillText(fitText(ctx, `底池: ${pot.toLocaleString('en-US')}`, leftMaxW), X(-1.4), H / 2 + 35)
+    ctx.fillText(fitText(ctx, `底池: ${pot.toLocaleString('en-US')}`, leftMaxW), X(-1.4), H / 2 + 35 * s)
 
     // 座位（上=座1, 下=座0）
-    drawSeat(ctx, X(-0.75), Y0, 1, next, prev, t, opts.seats)
-    drawSeat(ctx, X(-0.75), Y1, 0, next, prev, t, opts.seats)
+    drawSeat(ctx, X(-0.75), Y0, 1, next, prev, t, opts.seats, s)
+    drawSeat(ctx, X(-0.75), Y1, 0, next, prev, t, opts.seats, s)
 
     // 手牌：showdown 模式隐藏非人类/非摊牌对手牌
     const reveal = opts.revealMode ?? 'all'
@@ -190,35 +205,35 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       if (opts.seats?.[idx]?.isHuman) return raw
       return ['back', 'back']
     }
-    drawCards(ctx, X(0), Y0, holeFor(1), t, prevHoleFor(1))
-    drawCards(ctx, X(0), Y1, holeFor(0), t, prevHoleFor(0))
+    drawCards(ctx, X(0), Y0, holeFor(1), t, prevHoleFor(1), CARD_SIZE)
+    drawCards(ctx, X(0), Y1, holeFor(0), t, prevHoleFor(0), CARD_SIZE)
 
     // 公共牌（5 槽，新发的翻面）
     const board = [...next.board]
     while (board.length < 5) board.push('')
     const prevBoard = prev ? [...(prev.board || [])] : []
     while (prevBoard.length < 5) prevBoard.push('')
-    drawCommunity(ctx, X(0), H / 2, board, prevBoard, t)
+    drawCommunity(ctx, X(0), H / 2, board, prevBoard, t, CARD_SIZE)
 
     // 动作浮字（黄字+阴影+上浮淡出）
     if (next.lastAction && (!prev || JSON.stringify(prev.lastAction) !== JSON.stringify(next.lastAction))) {
-      drawActionFloat(ctx, X(0.75), next.lastAction.player === 0 ? Y1 : Y0, next.lastAction, t)
+      drawActionFloat(ctx, X(0.75), next.lastAction.player === 0 ? Y1 : Y0, next.lastAction, t, s)
     }
 
     // 每手结算叠层（非整场结束时）
     if (!next.matchOver && next.handDeltas && next.winners && t > 0.15) {
       ctx.save()
       ctx.textAlign = 'center'
-      ctx.font = 'bold 18px "DM Sans", sans-serif'
+      ctx.font = `bold ${Math.round(18 * s)}px "DM Sans", sans-serif`
       ctx.shadowColor = 'black'
       ctx.shadowBlur = 8
       for (const idx of [0, 1] as const) {
         const d = next.handDeltas[idx]
-        const yy = idx === 0 ? Y1 - 70 : Y0 - 70
+        const yy = idx === 0 ? Y1 - 70 * s : Y0 - 70 * s
         const txt = d > 0 ? `赢得 ${d.toLocaleString('en-US')}` : d < 0 ? `输掉 ${(-d).toLocaleString('en-US')}` : '不赚不亏'
         ctx.fillStyle = d > 0 ? 'rgba(52,211,153,0.95)' : d < 0 ? 'rgba(248,113,113,0.95)' : 'rgba(255,255,255,0.85)'
         ctx.globalAlpha = Math.min(1, t * 1.2)
-        ctx.fillText(fitText(ctx, txt, 180), X(0.75), yy)
+        ctx.fillText(fitText(ctx, txt, 180 * s), X(0.75), yy)
       }
       ctx.restore()
     }
@@ -227,7 +242,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     if (next.matchOver) {
       ctx.save()
       ctx.textAlign = 'center'
-      ctx.font = 'bold 28px "DM Sans", sans-serif'
+      ctx.font = `bold ${Math.round(28 * s)}px "DM Sans", sans-serif`
       ctx.fillStyle = 'rgba(255,238,88,0.95)'
       ctx.shadowColor = 'black'
       ctx.shadowBlur = 12
@@ -235,9 +250,9 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       if (next.matchWinner === 0 || next.matchWinner === 1) {
         winnerTxt = `胜者：${seatDisplayName(opts.seats?.[next.matchWinner], next.matchWinner)}`
       }
-      ctx.fillText('对局结束', X(0), H / 2 - R - 36)
-      ctx.font = 'bold 20px "DM Sans", sans-serif'
-      ctx.fillText(fitText(ctx, winnerTxt, 360), X(0), H / 2 - R - 8)
+      ctx.fillText('对局结束', X(0), H / 2 - R - 36 * s)
+      ctx.font = `bold ${Math.round(20 * s)}px "DM Sans", sans-serif`
+      ctx.fillText(fitText(ctx, winnerTxt, 360 * s), X(0), H / 2 - R - 8 * s)
       ctx.restore()
     }
   },
@@ -257,7 +272,8 @@ function drawSeat(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, idx: number,
   next: HoldemScene, prev: HoldemScene | null, t: number,
-  seats?: SeatInfo[],
+  seats: SeatInfo[] | undefined,
+  s: number, // 缩放因子 W/W0
 ) {
   const info = seats?.[idx]
   const chips = prev && prev.chips[idx] !== next.chips[idx]
@@ -269,53 +285,57 @@ function drawSeat(
   const isToAct = next.toAct === idx && !next.matchOver
   const isMatchWinner = next.matchOver && next.matchWinner === idx
   const name = seatDisplayName(info, idx)
+  // 座位块横向半宽（用于截断名字/数值，避免长文本越出椭圆桌或与公共牌重叠）
+  const seatW = 130 * s
   ctx.textAlign = 'center'
-  // 头像圆（首字母）
+  // 头像圆（首字母）—— 圆心/半径随 s 缩放
+  const ax = x - 25 * s, ay = y - 45 * s + 25 * s
   const initial = (name[0] || '?').toUpperCase()
-  ctx.beginPath(); ctx.arc(x - 25, y - 45 + 25, 18, 0, Math.PI * 2)
+  ctx.beginPath(); ctx.arc(ax, ay, 18 * s, 0, Math.PI * 2)
   ctx.fillStyle = idx === 0 ? '#3b82f6' : '#ef4444'; ctx.fill()
   if (isMatchWinner) {
     ctx.strokeStyle = 'rgba(255,238,88,0.95)'
-    ctx.lineWidth = 3
+    ctx.lineWidth = 3 * s
     ctx.stroke()
   }
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 16px "DM Sans"'
-  ctx.fillText(initial, x - 25, y - 45 + 25 + 5)
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(16 * s)}px "DM Sans"`
+  ctx.fillText(initial, ax, ay + 5 * s)
   // 名字（两行：BOT名 + @用户名）—— 测量后按座位宽度截断，防止长名越出牌桌
   ctx.fillStyle = isMatchWinner ? 'rgba(255,238,88,0.98)' : '#fff'
-  ctx.font = 'bold 13px "DM Sans"'
-  if (isToAct) ctx.fillText('👉', x - 45, y - 12)
+  ctx.font = `bold ${Math.round(13 * s)}px "DM Sans"`
+  if (isToAct) ctx.fillText('👉', x - 45 * s, y - 12 * s)
   ctx.textAlign = 'center'
-  ctx.fillText(fitText(ctx, name, 130), x, y + 18)
-  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '11px "DM Sans"'
+  ctx.fillText(fitText(ctx, name, seatW), x, y + 18 * s)
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `${Math.round(11 * s)}px "DM Sans"`
   const ownerLine = info?.isHuman
     ? `@${info?.ownerName || '人类'}（你）`
     : info?.ownerName
       ? `@${info.ownerName}`
       // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
       : `座位 ${idx + 1}`
-  ctx.fillText(fitText(ctx, ownerLine, 130), x, y + 34)
-  // 本轮剩余筹码 + 累计净筹码（旧 PokerTable 底部「累计」搬到座位旁）
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 13px "DM Sans"'
-  ctx.fillText(`筹码 ${chips.toLocaleString('en-US')}`, x, y + 50)
+  ctx.fillText(fitText(ctx, ownerLine, seatW), x, y + 34 * s)
+  // 本轮剩余筹码 + 累计净筹码（旧 PokerTable 底部「累计」搬到座位旁）。
+  // fitText 保护：大数字（如 20000）按座位宽度截断，防溢出。
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(13 * s)}px "DM Sans"`
+  ctx.fillText(fitText(ctx, `筹码 ${chips.toLocaleString('en-US')}`, seatW), x, y + 50 * s)
   ctx.fillStyle = net > 0 ? '#34d399' : net < 0 ? '#f87171' : 'rgba(255,255,255,0.75)'
-  ctx.font = '12px "DM Sans"'
-  ctx.fillText(`累计 ${net >= 0 ? '+' : ''}${net.toLocaleString('en-US')}`, x, y + 66)
+  ctx.font = `${Math.round(12 * s)}px "DM Sans"`
+  ctx.fillText(fitText(ctx, `累计 ${net >= 0 ? '+' : ''}${net.toLocaleString('en-US')}`, seatW), x, y + 66 * s)
   // 本轮下注 / 弃牌 / 全押
   const bet = next.roundBets[idx] ?? 0
   if (bet > 0 && !next.folded[idx]) {
     ctx.fillStyle = 'rgba(253,224,71,0.95)'
-    ctx.font = '11px "DM Sans"'
-    ctx.fillText(`下注 ${bet.toLocaleString('en-US')}`, x, y + 82)
+    ctx.font = `${Math.round(11 * s)}px "DM Sans"`
+    ctx.fillText(fitText(ctx, `下注 ${bet.toLocaleString('en-US')}`, seatW), x, y + 82 * s)
   }
   if (next.folded[idx]) {
     ctx.fillStyle = 'rgba(248,113,113,0.95)'
-    ctx.font = 'bold 12px "DM Sans"'
-    ctx.fillText('已弃牌', x, y + 82)
+    ctx.font = `bold ${Math.round(12 * s)}px "DM Sans"`
+    ctx.fillText('已弃牌', x, y + 82 * s)
   } else if (next.allin[idx]) {
     ctx.fillStyle = 'rgba(251,191,36,0.95)'
-    ctx.font = 'bold 12px "DM Sans"'
-    ctx.fillText('ALL-IN', x, y + 82)
+    ctx.font = `bold ${Math.round(12 * s)}px "DM Sans"`
+    ctx.fillText('ALL-IN', x, y + 82 * s)
   }
 }
 
@@ -323,6 +343,7 @@ function drawCards(
   ctx: CanvasRenderingContext2D,
   x: number, y: number,
   cards: string[] | null, t: number, prevCards: string[] | null,
+  CARD_SIZE: number,
 ) {
   if (!cards || !cards.length) return
   const d = (CARD_SIZE * 3.3) / 4
@@ -352,6 +373,7 @@ function drawCommunity(
   ctx: CanvasRenderingContext2D,
   x: number, y: number,
   board: string[], prevBoard: string[], t: number,
+  CARD_SIZE: number,
 ) {
   const d = (CARD_SIZE * 3.3) / 4
   const x0 = x - (d / 2) * (board.length - 1) - (CARD_SIZE * 3) / 8
@@ -382,15 +404,16 @@ function drawActionFloat(
   ctx: CanvasRenderingContext2D,
   x: number, y: number,
   action: { action: string; amount?: number }, t: number,
+  s: number, // 缩放因子 W/W0
 ) {
   const ty = Math.pow(t, 4)
   const txt = ACTION_TEXT[action.action] ?? action.action
   ctx.save()
   ctx.textAlign = 'center'
-  ctx.font = 'bold 22px "DM Sans"'
+  ctx.font = `bold ${Math.round(22 * s)}px "DM Sans"`
   ctx.fillStyle = `rgba(255,238,88,${1 - ty})`
-  ctx.shadowColor = 'black'; ctx.shadowBlur = 10
+  ctx.shadowColor = 'black'; ctx.shadowBlur = 10 * s
   const actionTxt = action.amount ? `${txt} ${action.amount.toLocaleString('en-US')}` : txt
-  ctx.fillText(fitText(ctx, actionTxt, 180), x, y - 20 - 10 * ty)
+  ctx.fillText(fitText(ctx, actionTxt, 180 * s), x, y - 20 * s - 10 * s * ty)
   ctx.restore()
 }

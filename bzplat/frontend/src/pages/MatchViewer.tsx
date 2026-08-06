@@ -306,9 +306,9 @@ export default function MatchViewer() {
       {/* 对阵双方 + 累计筹码 / 点格比分 */}
       {match && (
         <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-          <span className="font-medium text-foreground">{seatHeaderLabel(match, 0)}</span>
+          <span className="min-w-0 max-w-[40%] truncate font-medium text-foreground">{seatHeaderLabel(match, 0)}</span>
           <span className="text-muted-foreground">vs</span>
-          <span className="font-medium text-foreground">{seatHeaderLabel(match, 1)}</span>
+          <span className="min-w-0 max-w-[40%] truncate font-medium text-foreground">{seatHeaderLabel(match, 1)}</span>
           {!isBoard && netA != null && netB != null && (
             <span className="font-mono text-xs text-muted-foreground">
               累计筹码{' '}
