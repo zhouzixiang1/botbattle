@@ -387,7 +387,8 @@ class ContestManager:
             current_stage_idx=0,
             rest_ends_at=None,
         )
-        await self._begin_stage(contest_id, 0, schedule_immediately=True)
+        async with self._lock(contest_id):
+            await self._begin_stage(contest_id, 0, schedule_immediately=True)
         return self.store.get_contest(contest_id)
 
     async def publish(self, contest_id: int) -> dict:
@@ -433,7 +434,8 @@ class ContestManager:
             current_stage_idx=0,
             rest_ends_at=None,
         )
-        await self._begin_stage(contest_id, 0, schedule_immediately=False)
+        async with self._lock(contest_id):
+            await self._begin_stage(contest_id, 0, schedule_immediately=False)
         return self.store.get_contest(contest_id)
 
     async def _begin_stage(
@@ -541,7 +543,7 @@ class ContestManager:
             self.store.update_contest(
                 contest_id, status=CONTEST_RUNNING, current_stage_idx=stage_idx, rest_ends_at=None
             )
-        await self._dispatch_pending(contest_id, stage_idx)
+        await self._dispatch_pending_locked(contest_id, stage_idx)
 
     @staticmethod
     def _compute_scheduled_at(round_num: int, base: str, stagger_min: int) -> str:
@@ -575,6 +577,21 @@ class ContestManager:
         return out
 
     async def _dispatch_pending(self, contest_id: int, stage_idx: int) -> None:
+        """派发 pending pairing（对外入口，获取 per-contest 锁串行化）。
+
+        所有调度路径（scheduler tick / start / publish / reconcile）都应调本方法，
+        它会获取 per-contest 锁，与 maybe_finish 的锁串行化，防并发双发孤儿对局
+        （审计 P1：scheduler 锁外调 _dispatch_pending 与 maybe_finish 持锁并发，
+        challenge() 的 await 让出期间另一路径读到同一 pending pairing 二次派发）。
+
+        注意：maybe_finish 持锁链路（_begin_stage/_maybe_next_*）调
+        _dispatch_pending_locked（不重复获锁，防 asyncio.Lock 不可重入死锁）。
+        """
+        async with self._lock(contest_id):
+            await self._dispatch_pending_locked(contest_id, stage_idx)
+
+    async def _dispatch_pending_locked(self, contest_id: int, stage_idx: int) -> None:
+        """_dispatch_pending 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
@@ -890,6 +907,11 @@ class ContestManager:
         此方法逐 pairing try/except：失败则给该 pairing 挂一条 aborted match
         （reason='contest_bot_unavailable'），保证 _stage_done 仍通过。
         """
+        async with self._lock(contest_id):
+            await self._dispatch_pending_safe_locked(contest_id, stage_idx)
+
+    async def _dispatch_pending_safe_locked(self, contest_id: int, stage_idx: int) -> None:
+        """_dispatch_pending_safe 的实际逻辑（调用方已持锁）。"""
         c = self.store.get_contest(contest_id)
         if not c:
             return
@@ -1057,7 +1079,7 @@ class ContestManager:
                 published_at=published_at,
                 **self._version_snapshot(sp.bot_a_id, sp.bot_b_id),
             )
-        await self._dispatch_pending(contest_id, stage_idx)
+        await self._dispatch_pending_locked(contest_id, stage_idx)
         return True
 
     async def _maybe_next_elim_round(
@@ -1133,7 +1155,7 @@ class ContestManager:
                     published_at=published_at,
                 )
                 slot += 1
-        await self._dispatch_pending(contest_id, stage_idx)
+        await self._dispatch_pending_locked(contest_id, stage_idx)
         return True
 
     async def _maybe_auto_resume(self, contest_id: int) -> dict | None:
