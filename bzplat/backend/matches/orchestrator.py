@@ -623,17 +623,17 @@ class MatchOrchestrator:
         self.store.update_rating_row(
             bot_a_id,
             rating=ra_new.mu, rd=ra_new.phi, vol=ra_new.sigma,
-            wins=ra["wins"] + wa, losses=ra["losses"] + la, draws=ra["draws"] + da,
-            net_chips=ra["net_chips"] + ea,
-            matches_played=ra["matches_played"] + 1,
+            wins=wa, losses=la, draws=da,  # 传增量——update_rating_row 原子累加（防 lost-update，审计 P1）
+            net_chips=ea,
+            matches_played=1,
             last_played_at=_now(),
         )
         self.store.update_rating_row(
             bot_b_id,
             rating=rb_new.mu, rd=rb_new.phi, vol=rb_new.sigma,
-            wins=rb["wins"] + wb, losses=rb["losses"] + lb, draws=rb["draws"] + db,
-            net_chips=rb["net_chips"] + eb,
-            matches_played=rb["matches_played"] + 1,
+            wins=wb, losses=lb, draws=db,
+            net_chips=eb,
+            matches_played=1,
             last_played_at=_now(),
         )
         # 记录评分历史（段位趋势/曲线用）

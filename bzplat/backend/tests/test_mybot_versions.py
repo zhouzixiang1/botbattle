@@ -314,3 +314,43 @@ def test_get_bot_public_desensitizes_binary_path(tmp_path):
     )
     assert r.status_code == 200
     assert r.json()["bot"]["binary_path"] == "/uploads/secret/bot.bin"
+
+
+def test_public_bot_endpoints_desensitize_binary_path(tmp_path):
+    """其他公开 bot 端点也必须脱敏 binary_path/runtime_mode（审计 P1-B 扩展）：
+    /api/bots/public、/api/bots/{id}/profile、/api/users/{name}/bots。
+    PR#125 只修了 get_bot，这 3 个端点遗漏（实测泄漏）。
+    """
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    bot = store.create_bot(
+        owner["id"], "leakbot", binary_path="/uploads/leak/bot.bin",
+        format="elf", game_id="holdem", runtime_mode="longrunning",
+    )
+    client = TestClient(app)
+
+    # 1. /api/bots/public —— 访客不应见 binary_path
+    r = client.get("/api/bots/public?game_id=holdem")
+    assert r.status_code == 200
+    for b in r.json().get("bots", []):
+        assert "binary_path" not in b, f"/api/bots/public 泄漏 binary_path: {b.get('name')}"
+        assert "runtime_mode" not in b
+
+    # 2. /api/bots/{id}/profile —— 访客不应见 binary_path
+    r = client.get(f"/api/bots/{bot['id']}/profile")
+    assert r.status_code == 200
+    prof = r.json()["profile"]
+    assert "binary_path" not in prof, "/api/bots/{id}/profile 泄漏 binary_path"
+    assert "runtime_mode" not in prof
+
+    # 3. /api/users/{name}/bots —— 访客不应见 binary_path
+    r = client.get(f"/api/users/mvu/bots")
+    assert r.status_code == 200
+    for b in r.json().get("bots", []):
+        assert "binary_path" not in b, f"/api/users/{{name}}/bots 泄漏 binary_path: {b.get('name')}"
+
+    # 4. owner 看 profile 应含完整字段
+    _, owner_tok = app.state.auth.authenticate("mvu", "pw123456")
+    r = client.get(f"/api/bots/{bot['id']}/profile", headers={"Authorization": f"Bearer {owner_tok}"})
+    assert r.status_code == 200
+    assert r.json()["profile"]["binary_path"] == "/uploads/leak/bot.bin"

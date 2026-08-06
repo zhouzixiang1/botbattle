@@ -71,7 +71,12 @@ export default function Comments({
     apiPost('/api/comments', 'POST', { target_type: targetType, target_id: targetId, body: body.trim() })
       .then(() => {
         setBody('')
-        setPage(1)
+        // 回第1页并强制刷新列表——仅 setPage(1) 在已是第1页时不触发 effect（审计 P1）
+        if (page !== 1) {
+          setPage(1)  // page 变化会触发 load
+        } else {
+          void load()  // 已在第1页，显式重载
+        }
       })
       .catch((e) => setError(errMsg(e)))
   }

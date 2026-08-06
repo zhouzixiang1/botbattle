@@ -106,11 +106,14 @@ def my_bots(
 def public_bots(
     request: Request, game_id: str | None = None, owner_id: int | None = None,
     page: int | None = None, per_page: int = 50,
+    user=Depends(optional_user),
 ):
     result = _bots(request).list_public(
         game_id=game_id, owner_id=owner_id, page=page, per_page=per_page
     )
     bots = result["items"] if isinstance(result, dict) else result
+    # 脱敏敏感字段（binary_path/runtime_mode）——非 owner/admin 不可见（审计 P1-B）
+    bots = [_sanitize_bot(b, user) for b in bots]
     # 附带 owner_name/owner_display（供对手选择弹窗展示）
     store = _store(request)
     owner_ids = {b["owner_id"] for b in bots if b.get("owner_id") is not None}
@@ -231,6 +234,7 @@ def my_favorites(request: Request, limit: int = 50, user=Depends(require_user)):
 @router.get("/api/users/{username}/bots")
 def user_bots(
     username: str, request: Request, page: int | None = None, per_page: int = 50,
+    user=Depends(optional_user),
 ):
     """某用户的公开 Bot 列表（公开）。"""
     store = _store(request)
@@ -239,9 +243,11 @@ def user_bots(
         raise HTTPException(404, "用户不存在")
     result = store.list_bots(owner_id=u["id"], page=page, per_page=per_page)
     if isinstance(result, dict):
-        return {"bots": result["items"], "page": result["page"],
+        # 脱敏敏感字段（审计 P1-B）
+        items = [_sanitize_bot(b, user) for b in result["items"]]
+        return {"bots": items, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"bots": result}
+    return {"bots": [_sanitize_bot(b, user) for b in result]}
 
 
 @router.get("/api/search")
@@ -291,12 +297,18 @@ def get_bot(bot_id: int, request: Request, user=Depends(optional_user)):
 
 
 @router.get("/api/bots/{bot_id}/profile")
-def bot_profile(bot_id: int, request: Request):
+def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
     """Bot 详情聚合：bot 信息 + owner + rating + 胜率（公开）。"""
     store = _store(request)
     p = store.bot_profile(bot_id)
     if not p:
         raise HTTPException(404, "bot 不存在")
+    # 脱敏敏感字段（审计 P1-B）——profile 是聚合 dict，按 owner/admin 判断后 pop
+    is_privileged = user is not None and (
+        p.get("owner_id") == user.get("id") or user.get("role") == "admin"
+    )
+    if not is_privileged:
+        p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
     return {"profile": p}
 
 
@@ -1029,9 +1041,16 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
 def contest_detail(
     contest_id: int, request: Request,
     entries_page: int | None = None, entries_per_page: int = 50,
+    user=Depends(optional_user),
 ):
     c = _store(request).get_contest(contest_id)
     if not c:
+        raise HTTPException(404, "比赛不存在")
+    # draft/cancelled 赛事仅 organizer/admin 可见（与 list_contests 口径一致；审计 P1-E）
+    is_privileged = user is not None and (
+        c.get("organizer_id") == user.get("id") or user.get("role") in ("organizer", "admin")
+    )
+    if c.get("status") in _CONTEST_HIDDEN_STATUSES and not is_privileged:
         raise HTTPException(404, "比赛不存在")
     store = _store(request)
     # entries 可单列分页（115 报名场景）：提供 entries_page 时返回分页元信息，
