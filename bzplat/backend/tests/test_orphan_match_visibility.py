@@ -72,3 +72,25 @@ def test_contest_bracket_handles_deleted_bot(tmp_path):
     assert bracket[0].get("bot_a_name") is None  # 已删
     assert bracket[0].get("bot_b_name") == "botB"
     s.close()
+
+
+def test_list_liked_top_includes_orphaned(tmp_path):
+    """孤儿对局（bot_a_id NULL）有点赞时应出现在 liked_top（LEFT JOIN 保行）。
+
+    审计发现 list_liked_top_matches 用 INNER JOIN（与 list_matches 的 LEFT JOIN
+    契约不一致），删 bot 后孤儿对局从点赞榜消失。修复后应可见。
+    """
+    s, mid = _store_with_orphan_match(tmp_path)
+    # 把孤儿对局标 completed + 加点赞，使其满足 liked_top 的 WHERE
+    # （update_match 不支持 likes_count/views_count，直接写表）
+    s.update_match(mid, status="completed")
+    with s._tx() as c:
+        c.execute("UPDATE matches_holdem SET likes_count=3, views_count=10 WHERE id=?", (mid,))
+    top = s.list_liked_top_matches(limit=10)
+    ids = {m["id"] for m in top}
+    assert mid in ids, f"孤儿对局 {mid}（有点赞）应在 liked_top 中可见，实际 ids={ids}"
+    # 孤儿方的 bot_a_name 应为 None（LEFT JOIN 不丢弃）
+    orphan = next(m for m in top if m["id"] == mid)
+    assert orphan.get("bot_a_name") is None, "已删 bot 的 bot_a_name 应为 NULL（LEFT JOIN 保行）"
+    assert orphan.get("bot_b_name") == "botB"
+    s.close()
