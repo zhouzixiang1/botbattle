@@ -1180,15 +1180,26 @@ class ContestManager:
         return True
 
     async def _maybe_auto_resume(self, contest_id: int) -> dict | None:
+        """maybe_finish 持锁链路调（rest→running 自动恢复）。调用方已持锁。"""
         c = self.store.get_contest(contest_id)
         if not c or c["status"] != CONTEST_REST:
             return None
         ends = c.get("rest_ends_at")
         if ends and ends <= _now():
-            return await self.resume(contest_id)
+            return await self._resume_locked(contest_id)
         return None
 
     async def resume(self, contest_id: int) -> dict:
+        """rest→running（对外入口，获取 per-contest 锁）。
+
+        scheduler tick（锁外）调本方法；maybe_finish 锁内链路调 _resume_locked
+        （防 asyncio.Lock 不可重入死锁 + 防双发竞态，与 _dispatch_pending 同模式）。
+        """
+        async with self._lock(contest_id):
+            return await self._resume_locked(contest_id)
+
+    async def _resume_locked(self, contest_id: int) -> dict:
+        """resume 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
