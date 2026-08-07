@@ -28,7 +28,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 
 - **一行一条**：请求和响应都各占完整一行（以 `\n` 结尾）。响应**必须**以换行结尾并**立即 flush** stdout，否则平台会等到超时（60 秒）后判 fold。
 - **紧凑格式**：字段间无多余空白（如 `{"response":0}`，不是 `{ "response": 0 }`）。你的响应不强制紧凑，但建议紧凑。
-- **超时 / 非法响应**：每个决策限时 **60 秒**（管理员可配）。超时、输出非法 JSON 或非法动作，本手判 **fold**（弃牌，response `-1`）。**对局中途进程崩溃 / 主动 exit / EOF** 由引擎**计分判负**（对局 `completed`）；**启动失败**才可能 `aborted`（`bot_crashed`）或赛事 `technical_loss`，见 [对局](#/wiki?slug=match)。
+- **超时 / 非法响应**：每个决策限时 **60 秒**（管理员可配）。超时、输出非法 JSON 或非法动作，本手判 **fold**（弃牌，response `-1`）。**对局中途进程崩溃 / 主动 exit / EOF** 由引擎**计分判负**（对局 `completed`）；**启动失败**才可能 `aborted`（`bot_crashed`）或赛事 `technical_loss`，见 [对局](#/wiki?slug=guide)。
 
 ## 2. 信封格式
 

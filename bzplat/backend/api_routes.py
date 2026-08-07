@@ -2331,27 +2331,15 @@ def admin_logs(
 # ── wiki ──────────────────────────────────────────────────────
 # 站内 Wiki：多页索引 + 按 slug 取正文。wiki/ 目录下每个 .md 一页，
 # slug 为文件名（去 .md）。索引按固定顺序排列，缺失文件自动跳过。
+# 精简为 7 页（核心 = 3 游戏；功能说明统一进 GUIDE）。
 WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "站内文档导航与 Botzone 差异总览"},
-    {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "紧凑 JSON 对局协议、字段、卡牌编码、规则"},
+    {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "Botzone 标准对局协议、信封、两模式、卡牌编码"},
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
-    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议、样例与本平台对照"},
-    {"slug": "gomoku-swap1", "file": "GOMOKU_SWAP1.md", "title": "一手交换五子棋", "summary": "Gomoku-Swap1 简介（规则正文待补）"},
-    {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=11 规则、交错网格、pass 连走与协议"},
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "Botzone 规则摘要与本平台协议对照"},
-    {"slug": "judge", "file": "JUDGE.md", "title": "裁判", "summary": "Botzone 裁判概念与本平台引擎对照"},
-    {"slug": "match", "file": "MATCH.md", "title": "对局", "summary": "对局生命周期、错误码与观赛"},
-    {"slug": "contest-format", "file": "CONTEST_FORMAT.md", "title": "赛制模板", "summary": "赛制模板结构、阶段类型、match_config 与管理员配置"},
-    {"slug": "contest-bracket", "file": "CONTEST_BRACKET.md", "title": "赛事对阵图", "summary": "对阵图展示、Bot 名渲染与阶段对阵"},
-    {"slug": "bot-detail", "file": "BOT_DETAIL.md", "title": "Bot 详情页", "summary": "Bot 档案、对局历史、对手战绩与评分曲线"},
-    {"slug": "user-profile", "file": "USER_PROFILE.md", "title": "用户主页与搜索", "summary": "用户主页 /user/:name 与全局搜索"},
-    {"slug": "notifications", "file": "NOTIFICATIONS.md", "title": "通知系统", "summary": "站内通知 + 邮件偏好与铃铛"},
-    {"slug": "social", "file": "SOCIAL.md", "title": "社交", "summary": "关注用户 + 收藏 Bot"},
-    {"slug": "comments-likes", "file": "COMMENTS_LIKES.md", "title": "评论与点赞", "summary": "Bot 评论 + 点赞 + 浏览计数"},
-    {"slug": "settings-mybots", "file": "SETTINGS_MYBOTS.md", "title": "设置与 MyBots", "summary": "个人设置中心 + 我的 Bot 管理"},
-    {"slug": "tier", "file": "TIER.md", "title": "段位与排名趋势", "summary": "段位称号曲线 + 段位趋势"},
-    {"slug": "xp-level", "file": "XP_LEVEL.md", "title": "经验与等级", "summary": "XP/level 累积、升级与 gating"},
-    # SECURITY/LOADTEST/RUNTIME/JUDGE_CODE 已移至 doc/（面向开发者/运维，非玩家）。
+    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议、样例 + 一手交换变体"},
+    {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "交错网格、pass 连走与协议"},
+    {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/段位/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
 ]
 
 

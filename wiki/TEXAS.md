@@ -145,7 +145,7 @@ Botzone 上本游戏与其它游戏一样使用 [Bot 交互](https://wiki.botzon
 
 Botzone 默认：**请注意程序有计算时间限制，每步要在 1 秒内完成！**
 
-本平台：整场**长驻**进程 + 一行 JSON；默认决策超时由管理员配置（常见默认 **60s**）。超时 / 非法动作 → **fold**；对局中途进程崩溃 / EOF → **计分判负**（`completed`）；启动失败见 [对局](#/wiki?slug=match)。详见 [协议规范](#/wiki?slug=protocol)。
+本平台：整场**长驻**进程 + 一行 JSON；默认决策超时由管理员配置（常见默认 **60s**）。超时 / 非法动作 → **fold**；对局中途进程崩溃 / EOF → **计分判负**（`completed`）；启动失败见 [对局](#/wiki?slug=guide)。详见 [协议规范](#/wiki?slug=protocol)。
 
 ### 具体交互内容
 
@@ -417,13 +417,13 @@ LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<
 - [`samples/judges/holdem_judge.py`](../samples/judges/holdem_judge.py) — 七牌最佳五牌、raise 合法性
 - 裁判源码对全体玩家公开（见 [裁判](#裁判) / Wiki「裁判」页）
 
-观赛 / 回放事件：`hand_start` / `deal_hole` / `deal_board` / `action` / `settle` / `match_end` 等，见 [对局](#/wiki?slug=match)。
+观赛 / 回放事件：`hand_start` / `deal_hole` / `deal_board` / `action` / `settle` / `match_end` 等，见 [对局](#/wiki?slug=guide)。
 
 ### 赛制模板
 
 | template_id | 管线 |
 |-------------|------|
-| `holdem_rr` 等 | 见 [赛制模板](#/wiki?slug=contest-format) 与管理员 Templates |
+| `holdem_rr` 等 | 见 [赛制模板](#/wiki?slug=guide) 与管理员 Templates |
 
 ---
 
@@ -431,6 +431,6 @@ LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<
 
 1. [Botzone · TexasHoldem2p](https://wiki.botzone.org.cn/index.php?title=TexasHoldem2p)（内容与章节对齐来源）
 2. 本地快照：`refs/botzone/TexasHoldem2p.html`
-3. 站内 [协议规范](#/wiki?slug=protocol)、[Bot 开发指南](#/wiki?slug=bot-dev)、[对局](#/wiki?slug=match)
+3. 站内 [协议规范](#/wiki?slug=protocol)、[Bot 开发指南](#/wiki?slug=bot-dev)、[对局](#/wiki?slug=guide)
 4. 参考裁判：[`samples/judges/`](../samples/judges/)
 5. 牌型图：`/wiki-assets/TexasHoldemHandType.jpg`

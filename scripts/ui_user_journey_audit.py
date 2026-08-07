@@ -425,7 +425,7 @@ def main() -> int:
         visit(page, "guest", "03_wiki", "/wiki", cons, perrs)
         # wiki slug dirty / known
         visit(page, "guest", "03b_wiki_protocol", "/wiki?slug=protocol", cons, perrs)
-        visit(page, "guest", "03c_wiki_contest", "/wiki?slug=contest-format", cons, perrs)
+        visit(page, "guest", "03c_wiki_contest", "/wiki?slug=guide", cons, perrs)
 
         visit(page, "guest", "04_search_dirty", f"/search?q={urllib.request.quote(DIRTY_SEARCH[:60])}", cons, perrs)
         visit(page, "guest", "05_contests", "/contests", cons, perrs)

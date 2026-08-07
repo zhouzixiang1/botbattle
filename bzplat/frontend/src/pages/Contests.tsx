@@ -148,8 +148,8 @@ export default function Contests() {
 
   return (
     <PageStub
-      title="比赛"
-      subtitle="组织者发布比赛，选手派遣 Bot；默认模板偏 Swiss / 分组，适合校赛规模"
+      title="锦标赛"
+      subtitle="组织者发布锦标赛，选手派遣 Bot；默认模板偏 Swiss / 分组，适合校赛规模"
       actions={
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           游戏
