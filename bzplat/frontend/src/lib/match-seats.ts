@@ -13,7 +13,13 @@ export interface MatchSeatRow {
   /** 对局级配置 JSON（如 {hands:70}/{n_dots:6}），游戏无关。 */
   match_config?: Record<string, number>
   /** 对局结果详情 JSON（{hands_played, deltas:[ea,eb], net_bb}）。 */
-  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
+  result?: {
+    hands_played?: number
+    deltas?: number[]
+    net_bb?: number
+    bot_decide_errors?: Record<number, number>
+    bot_decide_error_samples?: Array<{ seat: number; error: string; turn?: number | null }>
+  }
   bot_a?: {
     id?: number | null
     name?: string

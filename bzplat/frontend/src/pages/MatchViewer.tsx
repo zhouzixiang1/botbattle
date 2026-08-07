@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
 import { Card, CardContent } from '@/components/ui/card'
@@ -295,6 +295,15 @@ export default function MatchViewer() {
         )}
         {match?.reason && (match.status === 'aborted' || status === 'error') && (
           <span className="text-xs text-destructive">原因：{match.reason}</span>
+        )}
+        {match?.result?.bot_decide_errors && (
+          <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+            <TriangleAlert className="size-3" />
+            {Object.entries(match.result.bot_decide_errors)
+              .filter(([, n]) => Number(n) > 0)
+              .map(([seat, n]) => `座位${Number(seat) + 1} ${n} 次响应错误`)
+              .join('，') || ''}
+          </span>
         )}
         {lag > 0 && (
           <Button variant="outline" size="sm" onClick={jumpToLive} className="gap-1">
