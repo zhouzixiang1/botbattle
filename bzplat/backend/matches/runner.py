@@ -261,15 +261,19 @@ class MatchRunner:
         runtime_modes: tuple[str, str] | None = None,
         **match_params: Any,
     ) -> Any:
-        """P4 duplicate：跑多 leg（经 spec.build_match_plan），合并 net 判胜负。
+        """P4 duplicate：跑多 leg（经 spec.build_match_plan），**每 leg 独立判胜负**。
 
         每 leg 用同 deal_sequence（消除运气）；seat_swap=True 的 leg 对调 decide 回调
-        （B 在 seat0）；合并各 leg 的 deltas 为最终结果（按**物理 bot** A/B 累加，
-        swap leg 的座位 deltas 翻转映射回原 bot）。
+        （B 在 seat0）。每 leg 独立产出 winner + deltas（物理 bot A/B 视角，swap leg 翻转），
+        收集进 ``legs`` 字段——编排层（standings/ranking）按"打了两场"逐 leg 累加积分
+        （如 2 场 poker_3_1_0），**不再把两场净筹码合并判 1 场胜负**。
 
         decide 闭包复用 `_botzone_decide`（与 run_binaries 一致），支持 traditional/
         longrunning 协议与 runtime_modes——真 Botzone bot 在两 leg 中均可正确收发。
         游戏不支持 duplicate（spec.build_match_plan is None）→ 退化为单 leg run_binaries。
+
+        返回带 ``legs`` 字段的结果（首 leg 的 MatchResult 结构 + legs 列表）。
+        final_chips/net 保留两 leg 物理累加（仅作 net_chips tiebreak，不作为胜负判据）。
         """
         from bzplat.backend.games import registry as _reg
 
@@ -280,9 +284,10 @@ class MatchRunner:
                 path_a, path_b, game_id=game_id, on_event=on_event, seed=seed,
                 runtime_modes=runtime_modes, **match_params,
             )
-        legs = spec.build_match_plan(seed or 0, match_params)
-        # 合并结果：用第一 leg 的 MatchResult 结构，累加 deltas（按物理 bot A/B）；winner 按 net 判
-        merged_deltas = [0, 0]
+        legs_plan = spec.build_match_plan(seed or 0, match_params)
+        # 每 leg 独立胜负（物理 bot A/B 视角）；累加 deltas 仅留作 net_chips tiebreak
+        leg_results: list[dict[str, Any]] = []
+        merged_deltas = [0, 0]  # 物理 A/B，仅 net_chips tiebreak 用
         merged_rounds: list[Any] = []
         merged_events: list[dict[str, Any]] = []
         final_result = None
@@ -301,7 +306,7 @@ class MatchRunner:
             raise
         gid = normalize_game_id(game_id)
         try:
-            for li, leg in enumerate(legs):
+            for li, leg in enumerate(legs_plan):
                 lp = dict(leg.get("params") or {})
                 lp.pop("match_seed", None)
                 swap = bool(leg.get("seat_swap"))
@@ -334,34 +339,43 @@ class MatchRunner:
                 )
                 if final_result is None:
                     final_result = res
-                # 累加 deltas 到**物理 bot** A/B（merged_deltas[0]=A, [1]=B）。
-                # swap leg：seat0=B，故 delta[0] 属 B、delta[1] 属 A。
+                # 该 leg 的 deltas 翻转到**物理 bot A/B 视角**
+                leg_deltas = [0, 0]
                 for r in getattr(res, "rounds", []):
                     d = r.deltas
                     if swap:
-                        merged_deltas[1] += d[0]  # leg2 seat0=B 的净筹码加给 B（物理 path_b）
-                        merged_deltas[0] += d[1]
+                        leg_deltas[1] += d[0]  # seat0=B
+                        leg_deltas[0] += d[1]  # seat1=A
                     else:
-                        merged_deltas[0] += d[0]
-                        merged_deltas[1] += d[1]
+                        leg_deltas[0] += d[0]  # seat0=A
+                        leg_deltas[1] += d[1]  # seat1=B
                     merged_rounds.append(r)
+                merged_deltas[0] += leg_deltas[0]
+                merged_deltas[1] += leg_deltas[1]
                 merged_events.extend(getattr(res, "events", []))
+                # 该 leg 独立 winner（按物理 A/B 的 leg_deltas 比较）
+                if leg_deltas[0] > leg_deltas[1]:
+                    leg_winner = 0
+                elif leg_deltas[1] > leg_deltas[0]:
+                    leg_winner = 1
+                else:
+                    leg_winner = None  # 平局
+                leg_results.append({"winner": leg_winner, "deltas": list(leg_deltas)})
         finally:
             await self.runner.stop_session(sid_a)
             await self.runner.stop_session(sid_b)
-        # 构造合并后的结果（用首 leg 的 result 类型，覆盖 deltas/rounds/winner）
+        # 构造结果：首 leg 结构 + legs 字段（每 leg 独立胜负）+ 累加 deltas（tiebreak 用）
         if final_result is not None:
             try:
                 final_result.rounds = merged_rounds
                 final_result.events = merged_events
-                # merged deltas 已按物理 bot 累加（含 swap 翻转）→ 覆盖 net/final_chips，
-                # 使 result.winner property（基于 final_chips 比较）返回正确胜者。
-                # 注意：merged_rounds 内每 round 的 deltas 仍是**座位视角**（未翻转），
-                # 故调用方不可再 sum(rounds.deltas)，必须读 final_chips/net。
+                # net/final_chips 留作 net_chips tiebreak（两 leg 物理累加），不作胜负判据
                 if hasattr(final_result, "net"):
                     final_result.net = list(merged_deltas)
                 if hasattr(final_result, "final_chips"):
                     final_result.final_chips = list(merged_deltas)
+                # legs 字段：编排层（standings/ranking）按每 leg 独立判胜负累加积分
+                final_result.legs = leg_results
             except Exception:
                 pass
         return final_result

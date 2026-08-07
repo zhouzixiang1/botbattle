@@ -40,17 +40,36 @@ def _entry_opponents_map(
         eb = p.get("entry_b_id")
         if ea is None or eb is None:
             continue
-        w = m.get("winner")
-        ea_earn, eb_earn = match_deltas(m)  # 从 result.deltas 取（取代旧 earnings_a/b 列）
-        for me, opp, side, my_earn in (
-            (ea, eb, 0, ea_earn),
-            (eb, ea, 1, eb_earn),
-        ):
-            won = 1 if w == side else 0
-            draw = 1 if w is None else 0
-            out.setdefault(me, []).append(
-                {"opp_entry": opp, "won": won, "draw": draw, "earn": my_earn}
-            )
+        # result.legs（复式赛制）：每 leg 独立判胜负，逐场产对手记录。
+        # 无 legs（普通赛制）：单场胜负产 1 条（原逻辑）。
+        result = m.get("result") or {}
+        legs_data = result.get("legs") if isinstance(result, dict) else None
+        if legs_data:
+            for lg in legs_data:
+                w = lg.get("winner")
+                ld = lg.get("deltas") or [0, 0]
+                ea_earn, eb_earn = int(ld[0]), int(ld[1])
+                for me, opp, side, my_earn in (
+                    (ea, eb, 0, ea_earn),
+                    (eb, ea, 1, eb_earn),
+                ):
+                    won = 1 if w == side else 0
+                    draw = 1 if w is None else 0
+                    out.setdefault(me, []).append(
+                        {"opp_entry": opp, "won": won, "draw": draw, "earn": my_earn}
+                    )
+        else:
+            w = m.get("winner")
+            ea_earn, eb_earn = match_deltas(m)  # 从 result.deltas 取（取代旧 earnings_a/b 列）
+            for me, opp, side, my_earn in (
+                (ea, eb, 0, ea_earn),
+                (eb, ea, 1, eb_earn),
+            ):
+                won = 1 if w == side else 0
+                draw = 1 if w is None else 0
+                out.setdefault(me, []).append(
+                    {"opp_entry": opp, "won": won, "draw": draw, "earn": my_earn}
+                )
     return out
 
 

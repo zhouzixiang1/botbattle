@@ -692,23 +692,46 @@ class ContestManager:
             eb_id = p.get("entry_b_id")
             if ea_id not in stats or eb_id not in stats:
                 continue
-            # net_chips 从 result.deltas 取（取代旧 earnings_a/b 物理列）
-            ea_earn, eb_earn = match_deltas(m)
-            stats[ea_id]["net_chips"] += ea_earn
-            stats[eb_id]["net_chips"] += eb_earn
-            wa = points_for_result(scoring, m["winner"], 0)
-            wb = points_for_result(scoring, m["winner"], 1)
-            stats[ea_id]["points"] += wa
-            stats[eb_id]["points"] += wb
-            if m["winner"] == 0:
-                stats[ea_id]["wins"] += 1
-                stats[eb_id]["losses"] += 1
-            elif m["winner"] == 1:
-                stats[eb_id]["wins"] += 1
-                stats[ea_id]["losses"] += 1
+            # result.legs（复式赛制）：每 leg 独立判胜负，按"打了两场"逐场累加。
+            # 无 legs（普通赛制）：单场胜负累加（原逻辑）。
+            result = m.get("result") or {}
+            legs_data = result.get("legs") if isinstance(result, dict) else None
+            if legs_data:
+                # 复式：逐 leg 累加 points/wins/draws/losses/net_chips
+                for lg in legs_data:
+                    lg_winner = lg.get("winner")
+                    lg_deltas = lg.get("deltas") or [0, 0]
+                    stats[ea_id]["net_chips"] += int(lg_deltas[0])
+                    stats[eb_id]["net_chips"] += int(lg_deltas[1])
+                    stats[ea_id]["points"] += points_for_result(scoring, lg_winner, 0)
+                    stats[eb_id]["points"] += points_for_result(scoring, lg_winner, 1)
+                    if lg_winner == 0:
+                        stats[ea_id]["wins"] += 1
+                        stats[eb_id]["losses"] += 1
+                    elif lg_winner == 1:
+                        stats[eb_id]["wins"] += 1
+                        stats[ea_id]["losses"] += 1
+                    else:
+                        stats[ea_id]["draws"] += 1
+                        stats[eb_id]["draws"] += 1
             else:
-                stats[ea_id]["draws"] += 1
-                stats[eb_id]["draws"] += 1
+                # 普通赛制：单场胜负累加
+                ea_earn, eb_earn = match_deltas(m)
+                stats[ea_id]["net_chips"] += ea_earn
+                stats[eb_id]["net_chips"] += eb_earn
+                wa = points_for_result(scoring, m["winner"], 0)
+                wb = points_for_result(scoring, m["winner"], 1)
+                stats[ea_id]["points"] += wa
+                stats[eb_id]["points"] += wb
+                if m["winner"] == 0:
+                    stats[ea_id]["wins"] += 1
+                    stats[eb_id]["losses"] += 1
+                elif m["winner"] == 1:
+                    stats[eb_id]["wins"] += 1
+                    stats[ea_id]["losses"] += 1
+                else:
+                    stats[ea_id]["draws"] += 1
+                    stats[eb_id]["draws"] += 1
             gid = p.get("group_id") or ""
             if gid:
                 stats[ea_id]["group_id"] = gid
