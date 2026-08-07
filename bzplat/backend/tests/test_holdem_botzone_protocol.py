@@ -102,6 +102,7 @@ class _FakeSession:
         self.responses = []
         self.turn = turn
         self.long_running = long_running
+        self.binary_path = "/fake/bot"  # traditional 每回合重启用
 
 
 class _FakeRunner:
@@ -110,6 +111,17 @@ class _FakeRunner:
         self._sessions = {"fake": session}
         self._responses = list(response_lines)
         self.sent_lines: list[str] = []
+        self._tmp_counter = 0
+
+    async def start_session(self, binary_path, *, runtime_mode="longrunning"):
+        """traditional 每回合重启：返回临时 session id（复用同一 session 的响应队列）。"""
+        self._tmp_counter += 1
+        sid = f"tmp_trad_{self._tmp_counter}"
+        self._sessions[sid] = _FakeSession(runtime_mode=runtime_mode)
+        return sid
+
+    async def stop_session(self, sid):
+        self._sessions.pop(sid, None)
 
     async def send(self, sid, line, *, timeout=None):
         self.sent_lines.append(line)
