@@ -70,8 +70,8 @@ def test_challenge_duplicate_flag_persisted_to_match_config(tmp_path):
 
 @pytest.mark.skipif(not (FOLDBOT.is_file() and CALLBOT.is_file()),
                     reason="foldbot/callbot binary missing")
-def test_duplicate_contest_one_merged_match_zero_sum(tmp_path):
-    """端到端：2 选手 duplicate 赛事 → 每对阵 1 条 merged match，deltas 零和，winner 正确。"""
+def test_duplicate_contest_two_legs_independent_scoring(tmp_path):
+    """端到端：2 选手 duplicate 赛事 → 1 match 内 2 leg 各独立判胜负（result.legs）。"""
     os.environ.setdefault("BZ_BOT_LOCAL", "1")
     from bzplat.backend.contests.manager import ContestManager
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
@@ -114,7 +114,7 @@ def test_duplicate_contest_one_merged_match_zero_sum(tmp_path):
     cc = s.get_contest(c)
     assert cc["status"] == "finished", f"赛事应 finished，实为 {cc['status']}"
 
-    # 2. 每对阵只产 1 条 merged match（2 人 round_robin = 1 场）
+    # 2. 1 pairing = 1 match（2 leg 同副牌在 match 内）
     ps = s.list_contest_pairings(c, stage_idx=0)
     real_pairings = [p for p in ps if p.get("match_id")]
     assert len(real_pairings) == 1, f"2 人 round_robin 应 1 场对阵，实有 {len(real_pairings)}"
@@ -122,17 +122,27 @@ def test_duplicate_contest_one_merged_match_zero_sum(tmp_path):
     m = s.get_match(mid)
     assert m["status"] == "completed", f"match 应 completed，实为 {m['status']}"
 
-    # 3. merged deltas 零和（2 leg 累加，seat_swap 翻转后仍零和）
+    # 3. result.legs：2 leg 各独立判胜负（不是 merged 净筹码判 1 胜）
+    result = m.get("result") or {}
+    legs = result.get("legs") or []
+    assert len(legs) == 2, f"duplicate 应有 2 leg，实有 {len(legs)}（result={result}）"
+    # 每 leg 有独立 winner + deltas（物理 A/B 视角）
+    for lg in legs:
+        assert "winner" in lg, f"leg 缺 winner: {lg}"
+        assert "deltas" in lg and len(lg["deltas"]) == 2, f"leg deltas 应长 2: {lg}"
+    # match.winner 应为 None（胜负由 standings 读 legs 决定，无单一 match 胜者）
+    assert m["winner"] is None, f"duplicate match.winner 应 None（由 legs 判），实={m['winner']}"
+
+    # 4. 两 leg 的 deltas 累加零和（net_chips tiebreak 用）
     ea, eb = match_deltas(m)
-    assert ea + eb == 0, f"merged deltas 应零和，实 ea={ea} eb={eb}（和={ea+eb}）"
+    assert ea + eb == 0, f"两 leg deltas 累加应零和，实 ea={ea} eb={eb}"
 
-    # 4. winner 按 merged net 判：foldbot 每手弃 → callbot 净筹码高 → callbot 侧胜。
-    # callbot 是 bot_b（pairing 的 b 侧 / seat 1）。
-    w = m["winner"]
-    assert w is not None, f"duplicate winner 不应是 None（平局）；result={m.get('result')}"
-    assert w == 1, f"callbot (seat1) 应胜（foldbot 每手弃），winner={w}"
+    # 5. foldbot 每手弃 → callbot 两 leg 都应赢（winner=1，callbot 是 bot_b=seat1 物理）
+    #    leg_winner 按 leg_deltas 比较：callbot 净筹码高 → winner=1
+    for i, lg in enumerate(legs):
+        assert lg["winner"] == 1, f"leg{i} callbot 应胜（foldbot 弃），winner={lg['winner']}"
 
-    # 5. match_seed 落库（确定性回放）
+    # 6. match_seed 落库（确定性回放）
     assert m.get("match_seed") is not None, "duplicate 对局应落 match_seed"
 
     s.close()
@@ -140,8 +150,8 @@ def test_duplicate_contest_one_merged_match_zero_sum(tmp_path):
 
 @pytest.mark.skipif(not (FOLDBOT.is_file() and CALLBOT.is_file()),
                     reason="foldbot/callbot binary missing")
-def test_duplicate_standings_ordered_by_merged_deltas(tmp_path):
-    """standings 按 merged deltas 排序：callbot 选手积分/净筹码高于 foldbot 选手。"""
+def test_duplicate_standings_two_legs_accumulated(tmp_path):
+    """standings 按 2 场独立胜负累加：callbot 两 leg 都赢 → 6 分（poker_3_1_0×2）。"""
     os.environ.setdefault("BZ_BOT_LOCAL", "1")
     from bzplat.backend.contests.manager import ContestManager
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
@@ -177,15 +187,18 @@ def test_duplicate_standings_ordered_by_merged_deltas(tmp_path):
 
     rows = cm.standings(c)
     assert len(rows) == 2, f"应有 2 选手 standings，实有 {len(rows)}"
-    # 排行按 points 降序（同 points 时 net_chips 降序）。callbot 胜 → 3 分 + 正净筹码。
     by_bot = {r["bot_id"]: r for r in rows}
     call_row = by_bot[bb]
     fold_row = by_bot[ba]
-    assert call_row["points"] > fold_row["points"], (
-        f"callbot 选手积分应更高：call={call_row['points']} fold={fold_row['points']}"
-    )
-    assert call_row["net_chips"] > fold_row["net_chips"], (
-        f"callbot 选手净筹码应更高：call={call_row['net_chips']} fold={fold_row['net_chips']}"
+    # callbot 两 leg 都赢 → 2 场 × 3 分 = 6 分；foldbot 两 leg 都输 → 0 分
+    assert call_row["points"] == 6, f"callbot 两场都赢应 6 分，实={call_row['points']}"
+    assert fold_row["points"] == 0, f"foldbot 两场都输应 0 分，实={fold_row['points']}"
+    # 胜场数：callbot 2 胜 0 负；foldbot 0 胜 2 负
+    assert call_row["wins"] == 2 and call_row["losses"] == 0, f"callbot 应 2胜0负: {call_row}"
+    assert fold_row["wins"] == 0 and fold_row["losses"] == 2, f"foldbot 应 0胜2负: {fold_row}"
+    # net_chips：callbot 正、foldbot 负（两 leg 累加）
+    assert call_row["net_chips"] > 0 and fold_row["net_chips"] < 0, (
+        f"callbot 净筹码应正 foldbot 应负: call={call_row['net_chips']} fold={fold_row['net_chips']}"
     )
     # 零和：两人 net_chips 互为相反数
     assert call_row["net_chips"] + fold_row["net_chips"] == 0, "双人 net_chips 应零和"

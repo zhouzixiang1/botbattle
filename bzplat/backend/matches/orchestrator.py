@@ -439,34 +439,47 @@ class MatchOrchestrator:
                     runtime_modes=(mode_a, mode_b),
                     **mc,
                 )
-            # duplicate 的 merged deltas 已按物理 bot A/B 累加（含 seat_swap 翻转），
-            # 存于 result.final_chips（== net）。不可再 sum(rounds.deltas)——rounds 内的
-            # deltas 仍是座位视角（未翻转），sum 会重复且错位。
-            if want_duplicate and hasattr(result, "final_chips") and len(result.final_chips) >= 2:
-                ea, eb = int(result.final_chips[0]), int(result.final_chips[1])
-            elif want_duplicate and hasattr(result, "net") and len(result.net) >= 2:
-                ea, eb = int(result.net[0]), int(result.net[1])
+            # duplicate：每 leg 独立判胜负（result.legs），不把净筹码合并判 1 场。
+            # 胜负完全由 standings/ranking 读 result.legs 决定；match.winner 留 None。
+            if want_duplicate:
+                winner = None  # 胜负由 standings 读 result.legs 决定（无单一 match 胜者）
+                legs_data = getattr(result, "legs", None) or []
+                # net_chips tiebreak 用：两 leg 物理 deltas 累加
+                ea = sum(int(lg.get("deltas", [0, 0])[0]) for lg in legs_data) if legs_data else 0
+                eb = sum(int(lg.get("deltas", [0, 0])[1]) for lg in legs_data) if legs_data else 0
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_COMPLETED,
+                    winner=None,  # 胜负由 standings 读 result.legs 决定
+                    reason="completed",
+                    result={
+                        "hands_played": result.rounds_played,
+                        "deltas": [ea, eb],  # 两 leg 累加（net_chips tiebreak）
+                        "legs": legs_data,   # 每 leg 独立 winner/deltas（物理 A/B 视角）
+                        "net_bb": spec.normalize_earnings(ea),
+                    },
+                    ended_at=_now(),
+                )
             else:
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
-            # winner：引擎 result.winner 已权威化（棋类单轮胜者；holdem 多手按累计净筹码比较；
-            # duplicate 的 merged final_chips 已写入 result，property 据此判胜）。
-            # 仅当 result.winner 为 None（平局）时按 ea/eb 兜底——二者一致时返 None（平局）。
-            winner: int | None = result.winner
-            if winner is None:
-                winner = 0 if ea > eb else 1 if eb > ea else None
-            self.store.update_match(
-                match_id,
-                status=STATUS_COMPLETED,
-                winner=winner,
-                reason="completed",
-                result={
-                    "hands_played": result.rounds_played,
-                    "deltas": [ea, eb],
-                    "net_bb": spec.normalize_earnings(ea),
-                },
-                ended_at=_now(),
-            )
+                # winner：引擎 result.winner 已权威化（棋类单轮胜者；holdem 多手按累计净筹码比较）。
+                # 仅当 result.winner 为 None（平局）时按 ea/eb 兜底——二者一致时返 None（平局）。
+                winner: int | None = result.winner
+                if winner is None:
+                    winner = 0 if ea > eb else 1 if eb > ea else None
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_COMPLETED,
+                    winner=winner,
+                    reason="completed",
+                    result={
+                        "hands_played": result.rounds_played,
+                        "deltas": [ea, eb],
+                        "net_bb": spec.normalize_earnings(ea),
+                    },
+                    ended_at=_now(),
+                )
             self.store.upsert_replay(
                 match_id, json.dumps(events, ensure_ascii=False), "[]"
             )
