@@ -33,7 +33,7 @@ Windows PE 走 Wine 容器时 CPU/内存/断网/cap-drop 对齐，但保留写�
 
 - 默认 **60 秒 / 决策**（管理员可在「运行时」面板改，范围 1–300）。
 - 决策超时视为该 Bot **fold / 判负**（扑克弃牌；棋类判负）。
-- **崩溃语义**（详见 [对局](#/wiki?slug=match)）：对局**中途** `BotCrashedError` 由引擎**计分判负**（`completed`）；**启动失败**非赛事 → `aborted`（`bot_crashed`），赛事 → `completed` + `technical_loss`。
+- **崩溃语义**（详见 [对局](#/wiki?slug=guide)）：对局**中途** `BotCrashedError` 由引擎**计分判负**（`completed`）；**启动失败**非赛事 → `aborted`（`bot_crashed`），赛事 → `completed` + `technical_loss`。
 - 本平台采用**整场对局长驻**进程（stdin/stdout 行协议），因此超时默认远高于 Botzone 的 1s/回合。
 
 ### Botzone 语言时限倍率（对照）
@@ -106,7 +106,7 @@ Botzone「长时运行」模式：
 近期已配对组合短期不再重复。**每轮**最多补 `auto_match_max_per_round`（默认 2）场；
 **每日**总量上限 `auto_match_daily_cap`（默认 200，0=不限，达上限当日停）。
 `match_type=ladder`，`owner` 为空（系统发起），**计入全局 Glicko-2 评分**
-（比赛 contest 对局不计全局，见 [对局](#/wiki?slug=match)）。
+（比赛 contest 对局不计全局，见 [对局](#/wiki?slug=guide)）。
 
 | 配置项 | 默认 | 含义 |
 |--------|------|------|

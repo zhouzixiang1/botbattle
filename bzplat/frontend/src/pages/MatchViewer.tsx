@@ -355,7 +355,9 @@ export default function MatchViewer() {
       ) : visible.length === 0 ? (
         <Card><EmptyState text="暂无事件" icon={<History className="size-7 opacity-40" />} /></Card>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        // 德州扑克（!isBoard）：canvas 单栏全宽 + 时序栏移下方（牌桌是主视觉，需更大）；
+        // 棋类（isBoard）：保留双栏（棋盘 + 时序并排）。
+        <div className={isBoard ? "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]" : "space-y-4"}>
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
           <div className="space-y-3">
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />

@@ -25,8 +25,8 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: '首页', icon: Home, end: true },
   { to: '/challenge', label: '挑战', icon: Swords },
   { to: '/leaderboard', label: '排行榜', icon: Trophy },
-  { to: '/history', label: '对局', icon: HistoryIcon },
-  { to: '/contests', label: '比赛', icon: Medal },
+  { to: '/history', label: '对局记录', icon: HistoryIcon },
+  { to: '/contests', label: '锦标赛', icon: Medal },
   { to: '/my-bots', label: '我的 Bot', icon: Bot },
   { to: '/wiki', label: 'Wiki', icon: BookOpen },
 ]

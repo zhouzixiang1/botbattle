@@ -1,6 +1,6 @@
 # Wiki 首页
 
-本站文档从 [Botzone Wiki](https://wiki.botzone.org.cn/) 相关页面迁移并适配本平台（长驻 stdin/stdout 行协议）。
+本站文档从 [Botzone Wiki](https://wiki.botzone.org.cn/) 相关页面迁移并适配本平台（长驻 stdin/stdout 行协议）。**核心是三款游戏**，其余功能集中在[平台功能指南](#/wiki?slug=guide)。
 
 ## 文档目录
 
@@ -8,24 +8,12 @@
 |------|------|
 | [协议规范](#/wiki?slug=protocol) | **Botzone 标准协议**（信封、两模式、德州裸整数 response） |
 | [Bot 开发指南](#/wiki?slug=bot-dev) | 上传、调试、样例 |
-| [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 |
-| [一手交换五子棋](#/wiki?slug=gomoku-swap1) | Swap1 简介 |
-| [点格棋 Pencil](#/wiki?slug=pencil) | 规则 + 交错网格 + pass |
 | [德州扑克](#/wiki?slug=texas) | 对齐 Botzone TexasHoldem2p 全文结构 + 本平台行协议 |
-| [裁判](#/wiki?slug=judge) | 裁判概念 |
-| [对局](#/wiki?slug=match) | 对局生命周期与错误码 |
-| [赛制模板](#/wiki?slug=contest-format) | 模板结构、阶段类型、match_config |
-| [赛事对阵图](#/wiki?slug=contest-bracket) | 对阵/报名显示 Bot 名 + bracket |
-| [Bot 详情页](#/wiki?slug=bot-detail) | Bot 档案/对局历史/对手战绩/评分曲线 |
-| [用户主页与搜索](#/wiki?slug=user-profile) | 用户档案/战绩/Bot 列表 + 全局搜索 + 资料编辑 |
-| [通知系统](#/wiki?slug=notifications) | 站内通知 + 邮件提醒（铃铛/列表/偏好） |
-| [社交](#/wiki?slug=social) | 关注用户 + 收藏 Bot |
-| [评论与点赞](#/wiki?slug=comments-likes) | 对局/Bot 评论 + 点赞 + 浏览 + 点赞榜 |
-| [个人设置与 MyBots](#/wiki?slug=settings-mybots) | 设置中心（资料/密码/通知/收藏）+ MyBots 管理增强 |
-| [段位称号](#/wiki?slug=tier) | Rating→段位映射 + 排名变化趋势 |
-| [经验与等级](#/wiki?slug=xp-level) | XP 经验奖励 + Level 升级 + gating |
+| [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 + 一手交换变体 |
+| [点格棋 Pencil](#/wiki?slug=pencil) | 规则 + 交错网格 + pass |
+| [平台功能指南](#/wiki?slug=guide) | 对局 / 裁判 / 段位 / 等级 / 锦标赛 / Bot详情 / 用户主页 / 社交 / 通知 / 设置——一页看全 |
 
-> 前端设计系统与组件库文档已迁入甲方交付文档 [`doc/DESIGN.md`](../doc/DESIGN.md) §5 前端架构。
+> 前端设计系统与组件库、开发/测试/架构等工程文档在 [`doc/`](../doc/INDEX.md)（面向开发者）。
 
 ## 本平台 vs Botzone（摘要）
 
@@ -42,6 +30,6 @@
 
 ## 参考资源
 
-- **参考裁判**（`samples/judges/`）：可在本地自测合法着 / 胜负 / 手牌评估的独立脚本，与服务端引擎逻辑一致。见 [裁判](#/wiki?slug=judge)。
+- **参考裁判**（`samples/judges/`）：可在本地自测合法着 / 胜负 / 手牌评估的独立脚本，与服务端引擎逻辑一致。见[功能指南 · 裁判](#/wiki?slug=guide)。
 - **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`）。
 - Bot 开发入门见 [Bot 开发指南](#/wiki?slug=bot-dev)。

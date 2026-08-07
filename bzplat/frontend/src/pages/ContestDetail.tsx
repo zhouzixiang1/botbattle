@@ -289,7 +289,7 @@ export default function ContestDetail() {
 
   if (!contest) {
     return (
-      <PageStub title="比赛详情">
+      <PageStub title="锦标赛详情">
         {error ? <ErrorMsg msg={error} /> : <Loading />}
       </PageStub>
     )
@@ -297,7 +297,7 @@ export default function ContestDetail() {
 
 
   return (
-    <PageStub title="比赛详情">
+    <PageStub title="锦标赛详情">
       {/* 头部信息卡 */}
       <Card>
         <CardContent className="py-4">

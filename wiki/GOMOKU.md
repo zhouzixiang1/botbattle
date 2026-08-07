@@ -106,8 +106,14 @@ def check_win(board, x, y, player):
 
 评分：`ccgc_2_1_0`（胜 2 / 平 1 / 负 0）。
 
+## 一手交换五子棋（Gomoku-Swap1）
+
+对齐 Botzone 游戏「一手交换五子棋」——用一手交换削弱黑先优势：黑方下一手后，白方可选择交换（典型 Swap 变体）。
+
+> **状态**：本地调研未下载到完整 Wiki 规则正文（`allpages` / 游戏列表仅有条目）。引擎**尚未**以独立 `game_id` 实现，当前请使用标准五子棋。规则正文补全后：协议在标准 Gomoku 上增加白方可选 `{"x":-1,"y":-1}` 换手；`game_id` 另议（如 `gomoku_swap1`）。Wiki 标题：[Gomoku-Swap1](https://wiki.botzone.org.cn/index.php?title=Gomoku-Swap1)。
+
 ## 参考
 
 1. https://wiki.botzone.org.cn/index.php?title=Gomoku  
 2. 本地：`refs/botzone/Gomoku.html`  
-3. 相关：一手交换五子棋（Swap1）见站内 Wiki 对应页
+3. 相关：一手交换五子棋（Swap1）见上节
