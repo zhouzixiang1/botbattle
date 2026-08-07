@@ -38,6 +38,42 @@ def _fail_response(game_id: str) -> dict[str, Any]:
     return _reg_fail(game_id)
 
 
+async def _traditional_decide_one_shot(
+    runner: BinaryRunner,
+    session: Any,
+    request: dict[str, Any],
+    action_timeout: float,
+) -> dict[str, Any]:
+    """Traditional 模式单次决策：启动 Bot → 发完整历史信封 → 读响应 → 停 Bot。
+
+    Botzone 官方 traditional 语义：Bot 是无状态一次性程序，每个决策点平台重启 Bot
+    喂完整 ``{"requests":[...], "responses":[...]}`` 信封。Bot 处理后输出
+    ``{"response": ...}`` 并退出（不常驻）。
+
+    本函数每回合用 ``session.binary_path`` 启动临时 session，发完整信封（含当前
+    request + 历史 responses），读响应后 stop 临时 session。主 session 的
+    requests/responses/turn 仍维护（供信封累积）。
+    """
+    # 暂存当前 request 到会话历史（信封含它）
+    full_requests = session.requests + [request]
+    line = _bz.dumps_traditional(full_requests, session.responses)
+    # 启动临时 bot 进程（每回合重启——traditional 语义）
+    tmp_sid = await runner.start_session(
+        session.binary_path, runtime_mode=_bz.RUNTIME_TRADITIONAL,
+    )
+    try:
+        resp_line = await runner.send(tmp_sid, line, timeout=action_timeout)
+    finally:
+        await runner.stop_session(tmp_sid)
+    envelope = _bz.loads_response(resp_line)
+    payload = _bz.extract_response_payload(envelope)
+    # 提交会话状态（与 longrunning 路径一致）
+    session.requests.append(request)
+    session.responses.append(payload)
+    session.turn += 1
+    return {"response": payload}
+
+
 async def _botzone_decide(
     runner: BinaryRunner,
     session_id: str,
@@ -58,6 +94,14 @@ async def _botzone_decide(
     非 Botzone 协议的游戏（未来）可不走本函数；当前所有游戏均 Botzone 协议。
     """
     session = runner._sessions[session_id]
+
+    # Traditional 模式：Bot 是一次性程序（处理一个信封→输出→退出），平台每回合重启。
+    # 这是 Botzone 官方 traditional 语义——Bot 无状态，每次从完整历史信封重建。
+    # LongRunning 模式 Bot 常驻（session 复用，首回合握手后发单 request）。
+    if session.runtime_mode == _bz.RUNTIME_TRADITIONAL:
+        return await _traditional_decide_one_shot(
+            runner, session, request, action_timeout
+        )
 
     is_first_turn = session.turn == 0
     # 传输格式判定：

@@ -147,10 +147,9 @@ def action_to_history_int(action: str, raise_extra: int | None) -> int:
 def parse_response(raw: Any) -> tuple[str, int | None]:
     """解析 Bot 输出 → ``(action_name, raise_delta | None)``。
 
-    接受三种输入（兼容测试与历史格式）：
+    全面对齐 Botzone 标准协议，只接受两种输入：
     1. 裸整数（Botzone 标准）：``-1`` / ``-2`` / ``0`` / ``>0``。
-    2. ``{"response": <裸整数>}`` 信封（loads_response 之后取出的负载）。
-    3. 旧 ``{"a": "r", "x": 400}``（测试/兼容，逐步废弃）。
+    2. ``{"response": <裸整数>}`` 信封（传输层 extract_response_payload 取出的负载包成信封）。
 
     返回：raise 时第二个元素是 **raise delta**（额外量，非 raise-to-total）。
     """
@@ -167,36 +166,14 @@ def parse_response(raw: Any) -> tuple[str, int | None]:
         except ValueError:
             raw = json.loads(s)
 
-    # dict
+    # dict：Botzone 信封 {"response": int}
     if isinstance(raw, dict):
-        # Botzone 信封 {"response": int}
         if "response" in raw:
             payload = raw["response"]
             if isinstance(payload, bool) or not isinstance(payload, int):
                 raise ValueError(f"response 必须是整数，得到 {payload!r}")
             return _int_to_action(payload), (payload if payload > 0 else None)
-        # 旧格式 {"a": ..., "x": ...}
-        a = raw.get("a")
-        if isinstance(a, str):
-            a = a.strip().lower()
-            mapping = {
-                "f": "fold", "c": "call", "k": "check",
-                "r": "raise", "all": "allin",
-                **ATYPE_TO_ACTION,
-            }
-            if a not in mapping:
-                raise ValueError(f"未知动作码: {a}")
-            action = mapping[a]
-            x = raw.get("x")
-            if action == "raise":
-                if x is None:
-                    raise ValueError("raise 缺 x")
-                xi = int(x)
-                if xi <= 0:
-                    raise ValueError("raise delta 须为正")
-                return action, xi
-            return action, None
-        raise ValueError("响应 dict 无 response/a 字段")
+        raise ValueError("响应 dict 缺 response 字段（Botzone 标准协议要求 {\"response\": int}）")
 
     raise ValueError(f"无法解析的响应: {raw!r}")
 

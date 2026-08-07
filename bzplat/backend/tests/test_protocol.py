@@ -128,13 +128,12 @@ def test_parse_response_string():
     assert parse_response('{"response":-2}') == ("allin", None)
 
 
-def test_parse_response_legacy_compat():
-    """旧 {a, x} 格式仍兼容（测试/过渡期）。"""
-    assert parse_response({"a": "f"}) == ("fold", None)
-    assert parse_response({"a": "all"}) == ("allin", None)
-    assert parse_response({"a": "r", "x": 400}) == ("raise", 400)
-    assert parse_response({"a": "c"}) == ("call", None)
-    assert parse_response({"a": "k"}) == ("check", None)
+def test_parse_response_legacy_format_rejected():
+    """旧 {a, x} 格式已废弃（全面对齐 Botzone 标准协议）——拒绝并报错。"""
+    with pytest.raises(ValueError):
+        parse_response({"a": "f"})
+    with pytest.raises(ValueError):
+        parse_response({"a": "r", "x": 400})
 
 
 def test_parse_response_invalid():

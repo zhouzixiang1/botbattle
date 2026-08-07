@@ -66,18 +66,11 @@ def test_loads_response_and_extract_payload():
     assert bz.extract_response_payload(bz.loads_response(line)) == 250
 
 
-def test_extract_payload_missing_response_falls_back_to_envelope():
-    """无 response 字段 → 回退把整个 dict 当 payload（兼容旧格式 {a:...}）。
-
-    Bot 未迁移到信封、直接输出决策负载时，传输层不再抛错——把整个 envelope
-    当 payload 返回，由各游戏 parse_response 兼容识别旧格式（平滑过渡）。
-    """
-    env = {"a": "f"}
-    payload = bz.extract_response_payload(env)
-    assert payload == {"a": "f"}, f"旧格式应回退为整个 dict，实={payload!r}"
-    # 纯控制字段无决策内容也回退（上游 parse_response 兜底处理）
-    env2 = {"debug": "no response"}
-    assert bz.extract_response_payload(env2) == {"debug": "no response"}
+def test_extract_payload_missing_response_raises():
+    """无 response 字段 → KeyError（Botzone 标准协议，response 必填）。"""
+    env = {"debug": "no response"}
+    with pytest.raises(KeyError):
+        bz.extract_response_payload(env)
 
 
 def test_loads_response_invalid_raises():
