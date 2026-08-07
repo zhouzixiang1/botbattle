@@ -35,6 +35,27 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _bot_decide_error_summary(events: list[dict]) -> dict:
+    """从对局 events 统计 bot_decide_error（Bot 响应格式错误等）。
+
+    返回 ``{"bot_decide_errors": {0: N, 1: M}, "bot_decide_error_samples": [...]}``，
+    供前端 Bot 详情/对局记录展示给 Bot 作者调试（"你的 Bot 第 N 手响应缺 response 字段"）。
+    无错误时返回空 dict（不污染 result）。
+    """
+    errors = [e for e in events if e.get("type") == "bot_decide_error"]
+    if not errors:
+        return {}
+    counts: dict[int, int] = {0: 0, 1: 0}
+    samples: list[dict] = []
+    for e in errors:
+        seat = int(e.get("seat", -1))
+        if seat in counts:
+            counts[seat] += 1
+        if len(samples) < 3:  # 最多存 3 条样本错误（防爆 result JSON）
+            samples.append({"seat": seat, "error": e.get("error", ""), "turn": e.get("turn")})
+    return {"bot_decide_errors": counts, "bot_decide_error_samples": samples}
+
+
 class HumanInactive(Exception):
     """人类玩家连续超时不响应（连续 ≥ human_max_consecutive_timeouts 次）。
 
@@ -457,6 +478,7 @@ class MatchOrchestrator:
                         "deltas": [ea, eb],  # 两 leg 累加（net_chips tiebreak）
                         "legs": legs_data,   # 每 leg 独立 winner/deltas（物理 A/B 视角）
                         "net_bb": spec.normalize_earnings(ea),
+                        **_bot_decide_error_summary(events),
                     },
                     ended_at=_now(),
                 )
@@ -477,6 +499,7 @@ class MatchOrchestrator:
                         "hands_played": result.rounds_played,
                         "deltas": [ea, eb],
                         "net_bb": spec.normalize_earnings(ea),
+                        **_bot_decide_error_summary(events),
                     },
                     ended_at=_now(),
                 )

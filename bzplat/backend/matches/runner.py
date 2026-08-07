@@ -161,7 +161,16 @@ class MatchRunner:
                     # Bot 进程已死，不可恢复——向上传播触发对局 abort（而非吞成默认动作死磕）
                     raise
                 except Exception as exc:
+                    # Bot 响应格式错误等可恢复异常：记日志 + 通过 on_event 发错误事件
+                    # （编排层收集到 events/replay，前端 MatchViewer/Bot 详情可展示给 Bot 作者调试）
                     logger.warning("bot %s decide failed: %s", player_idx, exc)
+                    if on_event is not None:
+                        on_event("bot_decide_error", {
+                            "type": "bot_decide_error",
+                            "seat": player_idx,
+                            "error": str(exc)[:200],
+                            "turn": getattr(self.runner._sessions.get(sid), "turn", None),
+                        })
                     return _fail_response(gid)
 
             return await run_session(

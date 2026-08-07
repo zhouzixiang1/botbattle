@@ -87,14 +87,25 @@ def loads_response(line: str) -> dict[str, Any]:
     return json.loads(line)
 
 
-def extract_response_payload(envelope: dict[str, Any]) -> Any:
+def extract_response_payload(envelope: Any) -> Any:
     """从信封取 ``response`` 字段（Bot 本回合的决策负载）。
 
     Botzone 信封里 ``response`` 是必填字段；缺它视为协议违规（交给上游兜底）。
+
+    **兼容旧格式**：Bot 未迁移到信封、直接输出决策负载（如旧 ``{"a":"r","x":400}``
+    或裸整数）时，把整个 envelope 当 payload 返回——各游戏 ``parse_response`` 会
+    兼容识别旧格式（parse_response 支持 ``{"a":...}`` 和裸 int）。这样新旧协议
+    Bot 都能跑，平滑过渡。
     """
+    # 非 dict（裸整数等）→ 直接当 payload（parse_response 接受裸 int）
     if not isinstance(envelope, dict):
-        raise ValueError("响应信封不是对象")
-    return envelope["response"]
+        return envelope
+    # 标准 Botzone 信封 {"response": <payload>}
+    if "response" in envelope:
+        return envelope["response"]
+    # 旧格式：整个 dict 当 payload（parse_response 兼容 {"a":...,"x":...}）
+    # 含 Botzone 控制键（response/keep_running）之外的 dict 视为决策负载。
+    return envelope
 
 
 def is_keep_running_signal(line: str) -> bool:
