@@ -1,8 +1,6 @@
 """象棋钟计时测试（_ChessClock 纯逻辑 + runner 集成）。"""
 from __future__ import annotations
 
-import pytest
-
 from bzplat.backend.matches.runner import _ChessClock
 
 

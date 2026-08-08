@@ -266,11 +266,12 @@ class MatchRunner:
                     # 象棋钟超时（剩余时间用完）→ 判超时负（非可恢复异常）
                     if clock.active:
                         elapsed = clock.now() - t0
-                        clock.record(player_idx, elapsed)
+                        # 不在此 record——finally 会统一记录，否则重复累计。
+                        # 事件 payload 用投影值（已用 + 本次），与 finally 记录一致。
                         if on_event is not None:
                             on_event("time_out", {
                                 "type": "time_out", "seat": player_idx,
-                                "used": round(clock.used(player_idx), 1),
+                                "used": round(clock.used(player_idx) + elapsed, 1),
                                 "budget": clock.budget,
                             })
                         raise TimeoutError(
@@ -282,6 +283,7 @@ class MatchRunner:
                         on_event("bot_decide_error", {
                             "type": "bot_decide_error", "seat": player_idx,
                             "error": str(exc)[:200],
+                            "turn": getattr(self.runner._sessions.get(sid), "turn", None),
                         })
                     return _fail_response(gid)
                 except Exception as exc:
