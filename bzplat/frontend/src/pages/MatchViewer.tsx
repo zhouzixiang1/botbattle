@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Clock } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
 import { Card, CardContent } from '@/components/ui/card'
@@ -407,7 +407,8 @@ export default function MatchViewer() {
                       </div>
                       {remaining != null && (
                         <div className={`mt-1 text-sm ${isActing ? 'text-foreground' : 'text-muted-foreground'}`}>
-                          ⏱ {fmtClock(remaining)}
+                          <Clock className="size-3.5 inline" /> {fmtClock(remaining)}
+                          {vm.timeOut === seat && <Badge variant="destructive" className="ml-1 text-xs">超时</Badge>}
                         </div>
                       )}
                     </div>
