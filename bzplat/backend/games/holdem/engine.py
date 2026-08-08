@@ -232,6 +232,15 @@ class MatchSession:
         else:
             self._deck.shuffle()
 
+        # deal hole cards（先发牌再下盲注，让 hand_start 的 chips 反映盲注后筹码）
+        for i in (0, 1):
+            self._players[i].hole = self._deck.deal(2)
+
+        # post blinds（在 hand_start 之前，使 chips 字段反映盲注扣除后的筹码——
+        # 对齐 Botzone：用户看到 fold 时筹码立即变化，而非等到 settle 才跳变）
+        self._post_blind(self._sb_idx, self.sb)
+        self._post_blind(self._bb_idx, self.bb)
+
         self._emit(
             "hand_start",
             {
@@ -242,9 +251,6 @@ class MatchSession:
             },
         )
 
-        # deal hole cards
-        for i in (0, 1):
-            self._players[i].hole = self._deck.deal(2)
         self._emit(
             "deal_hole",
             {
@@ -252,10 +258,6 @@ class MatchSession:
                 "holes": [[str(c) for c in p.hole] for p in self._players],
             },
         )
-
-        # post blinds
-        self._post_blind(self._sb_idx, self.sb)
-        self._post_blind(self._bb_idx, self.bb)
 
         self._current_bet = max(
             self._players[0].street_bet, self._players[1].street_bet
