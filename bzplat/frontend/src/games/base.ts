@@ -26,6 +26,32 @@ import type { GameCanvasRenderer } from './canvas-types'
  */
 export type RawEvent = Record<string, unknown> & { type?: string }
 
+/**
+ * Canvas 渲染共享工具（holdem/gomoku/pencil 统一用）。
+ */
+
+/** canvas 渲染基线宽（与各游戏 layout 的 W0 一致）。W 变化时按 W/W0 缩放固定像素常量。 */
+export const CANVAS_W0 = 900
+
+/** 缩放因子：当前 canvas 宽 / 基线宽。用于把固定像素的字体/偏移/线宽等比放大。 */
+export const scaleFactor = (canvasWidth: number): number => canvasWidth / CANVAS_W0
+
+/**
+ * 按当前 ctx 字体测量文本宽度，超出 maxWidth 时尾部加「…」截断。
+ * 防止长 bot 名/胜负原因/比分越出 canvas 边界（三游戏 HUD 共用）。
+ */
+export function fitText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (ctx.measureText(text).width <= maxWidth) return text
+  // 二分找最长前缀（保留 1 字符给「…」）
+  let lo = 1, hi = text.length, ans = 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (ctx.measureText(text.slice(0, mid) + '…').width <= maxWidth) { ans = mid; lo = mid + 1 }
+    else hi = mid - 1
+  }
+  return text.slice(0, ans) + '…'
+}
+
 /** 一款游戏的前端视图规格。 */
 export interface GameViewSpec {
   /** 游戏 id（与后端 game_id 一致） */

@@ -3,6 +3,7 @@
  * 复用 reducePencilEvents（不重写归约）；新占边沿线绘制动画；闭合格归属淡入。
  */
 import type { RawEvent } from '@/games/base'
+import { fitText, scaleFactor } from '@/games/base'
 import { getGame } from '@/games'
 import {
   reducePencilEvents, type PencilViewModel,
@@ -46,14 +47,15 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
     return { animation: 'none' }
   },
   draw(ctx, prev, next, t, opts) {
-    const { cell, ox, oy, cx, cy } = pencilLayout(opts.width, opts.height, next.size)
+    const { cell, cx, cy } = pencilLayout(opts.width, opts.height, next.size)
     const W = opts.width
     const H = opts.height
     const size = next.size
 
+    // 填满整个 canvas 背景（避免方形棋盘两侧透明留白）
     ctx.clearRect(0, 0, W, H)
     ctx.fillStyle = 'rgba(255,255,255,0.9)'
-    ctx.fillRect(ox - cell / 2, oy - cell / 2, cell * (size - 1) + cell, cell * (size - 1) + cell)
+    ctx.fillRect(0, 0, W, H)
 
     // 闭合格归属填充（新闭合的格淡入：alpha 随 t）
     for (let x = 0; x < size; x++) {
@@ -138,9 +140,10 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
       }
     }
 
-    // 顶部信息 + 双方名
+    // 顶部信息 + 双方名（字体/偏移按 s=W/W0 缩放，fitText 防长名+比分溢出）
+    const s = scaleFactor(W)
     ctx.fillStyle = '#334155'
-    ctx.font = 'bold 15px "DM Sans", sans-serif'
+    ctx.font = `bold ${Math.round(15 * s)}px "DM Sans", sans-serif`
     ctx.textAlign = 'left'
     ctx.textBaseline = 'alphabetic'
     const sc = getGame('pencil').seatColors ?? ['红', '蓝']
@@ -152,8 +155,8 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
         : `${next.winner === 0 ? name0 : name1}胜（${next.reason}）`)
       : `待行：${next.toAct === 0 ? name0 : next.toAct === 1 ? name1 : '—'}${next.extraTurn ? '（连走）' : ''}`
     ctx.fillText(
-      `点格棋 · ${next.nDots}×${next.nDots} · ${name0} ${next.scores[0]} : ${next.scores[1]} ${name1} · ${turnLabel}`,
-      12, 24,
+      fitText(ctx, `点格棋 · ${next.nDots}×${next.nDots} · ${name0} ${next.scores[0]} : ${next.scores[1]} ${name1} · ${turnLabel}`, W - 24 * s),
+      12 * s, 24 * s,
     )
   },
   pick(canvasX, canvasY, scene, opts) {
@@ -179,7 +182,7 @@ function seatShort(
 
 /** pencil 棋盘布局（draw 与 pick 共用）。 */
 function pencilLayout(W: number, H: number, size: number) {
-  const margin = 40
+  const margin = Math.max(24, W * 0.05)
   const cell = Math.max(10, Math.floor(Math.min(W - margin * 2, H - margin * 2) / (size + 1)))
   const boardPx = cell * (size - 1)
   const ox = (W - boardPx) / 2

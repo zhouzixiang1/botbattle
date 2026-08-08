@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Tooltip, TooltipContent, TooltipTrigger } from './ui'
+import { Badge,  Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, Tooltip, TooltipContent, TooltipTrigger } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 
@@ -121,7 +121,7 @@ export default function BotsTab() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜索 Bot 名称"
-          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
+          className="h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring outline-none"
         />
         <span className="text-xs text-muted-foreground">共 {total || filtered.length} 个</span>
         <div className="ml-auto">
@@ -131,57 +131,57 @@ export default function BotsTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <table className="w-full min-w-[50rem] text-left text-sm">
-          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
-            <tr>
-              <th className="px-3 py-2.5">ID</th>
-              <th className="px-3 py-2.5">名称</th>
-              <th className="px-3 py-2.5">所有者</th>
-              <th className="px-3 py-2.5">格式/架构</th>
-              <th className="px-3 py-2.5">版本</th>
-              <th className="px-3 py-2.5">状态</th>
-              <th className="px-3 py-2.5">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
+        <Table className="min-w-[48rem]">
+          <TableHeader>
+            <TableRow>
+              <TableHead className="px-3 py-2.5">ID</TableHead>
+              <TableHead className="px-3 py-2.5">名称</TableHead>
+              <TableHead className="px-3 py-2.5">所有者</TableHead>
+              <TableHead className="px-3 py-2.5">格式/架构</TableHead>
+              <TableHead className="px-3 py-2.5">版本</TableHead>
+              <TableHead className="px-3 py-2.5">状态</TableHead>
+              <TableHead className="px-3 py-2.5">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {filtered.map((b) => (
               <Fragment key={b.id}>
-                <tr className="hover:bg-accent">
-                  <td className="px-3 py-2 font-mono text-muted-foreground">{b.id}</td>
-                  <td className="max-w-[16rem] px-3 py-2 font-medium text-foreground">
+                <TableRow className="hover:bg-accent">
+                  <TableCell className="px-3 py-2 font-mono text-muted-foreground">{b.id}</TableCell>
+                  <TableCell className="max-w-[16rem] px-3 py-2 font-medium text-foreground">
                     <span className="block truncate" title={b.display_name || b.name}>
                       {b.display_name || b.name}
                     </span>
                     {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
-                  </td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell className="px-3 py-2">
                     <Link to={`/user/${b.owner_id}`} className="text-primary hover:underline">
                       #{b.owner_id}
                     </Link>
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                  </TableCell>
+                  <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                     {b.format}/{b.arch}
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">v{b.current_version}</td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">v{b.current_version}</TableCell>
+                  <TableCell className="px-3 py-2">
                     <div className="flex gap-1">
-                      {b.is_active ? <StatusBadge status="running" /> : <StatusBadge status="aborted" />}
+                      {b.is_active ? <Badge variant="secondary" className="text-[10px]">启用</Badge> : <Badge variant="outline" className="text-[10px] text-muted-foreground">停用</Badge>}
                     </div>
-                  </td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
                       <button
                         type="button"
                         disabled={busyId === b.id}
                         onClick={() => void patch(b.id, { is_active: !b.is_active })}
-                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
+                        className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         {b.is_active ? '下架' : '上架'}
                       </button>
                       <button
                         type="button"
                         onClick={() => void showVersions(b)}
-                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
+                        className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         版本
                       </button>
@@ -189,56 +189,56 @@ export default function BotsTab() {
                         type="button"
                         disabled={busyId === b.id}
                         onClick={() => void del(b.id)}
-                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         删除
                       </button>
                     </div>
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
                 {expand === b.id && (
-                  <tr key={`${b.id}-v`} className="bg-muted/60">
-                    <td colSpan={7} className="px-6 py-3">
+                  <TableRow key={`${b.id}-v`} className="bg-muted/60">
+                    <TableCell colSpan={7} className="px-6 py-3">
                       {versions.length === 0 ? (
                         <EmptyState text="无版本" />
                       ) : (
-                        <table className="w-full text-xs">
-                          <thead className="text-muted-foreground">
-                            <tr>
-                              <th className="px-2 py-1 text-left">版本</th>
-                              <th className="px-2 py-1 text-left">大小</th>
-                              <th className="px-2 py-1 text-left">格式/架构</th>
-                              <th className="px-2 py-1 text-left">校验和</th>
-                              <th className="px-2 py-1 text-left">上传时间</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-border">
+                        <Table className="min-w-[48rem]">
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="px-2 py-1 text-left">版本</TableHead>
+                              <TableHead className="px-2 py-1 text-left">大小</TableHead>
+                              <TableHead className="px-2 py-1 text-left">格式/架构</TableHead>
+                              <TableHead className="px-2 py-1 text-left">校验和</TableHead>
+                              <TableHead className="px-2 py-1 text-left">上传时间</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
                             {versions.map((v) => (
-                              <tr key={v.id} className="font-mono text-muted-foreground">
-                                <td className="px-2 py-1">v{v.version}</td>
-                                <td className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</td>
-                                <td className="px-2 py-1">{v.format}/{v.arch}</td>
-                                <td className="px-2 py-1">
+                              <TableRow key={v.id} className="font-mono text-muted-foreground">
+                                <TableCell className="px-2 py-1">v{v.version}</TableCell>
+                                <TableCell className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</TableCell>
+                                <TableCell className="px-2 py-1">{v.format}/{v.arch}</TableCell>
+                                <TableCell className="px-2 py-1">
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <span className="cursor-help">{v.checksum.slice(0, 12)}…</span>
                                     </TooltipTrigger>
                                     <TooltipContent className="font-mono">{v.checksum}</TooltipContent>
                                   </Tooltip>
-                                </td>
-                                <td className="px-2 py-1">{v.uploaded_at}</td>
-                              </tr>
+                                </TableCell>
+                                <TableCell className="px-2 py-1">{v.uploaded_at}</TableCell>
+                              </TableRow>
                             ))}
-                          </tbody>
-                        </table>
+                          </TableBody>
+                        </Table>
                       )}
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 )}
               </Fragment>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
         {filtered.length === 0 && <EmptyState text="无 Bot" />}
       </div>
       <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />

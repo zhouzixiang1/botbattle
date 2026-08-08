@@ -12,19 +12,19 @@ import { GAMES as _GAMES } from '@/games'
 // re-export GAMES 的形状（{id,label,icon}）兼容旧解构——注册表的 GAMES 是 GameViewSpec[]
 // 含更多字段，旧代码只取 id/label/icon，结构兼容。
 
-/** 对局类型徽章（统一配色，无散落 sky/violet）—— 通用赛事概念，留在此处。 */
+/** 对局类型徽章（统一语义 token 配色，跟随主题）—— 通用赛事概念，留在此处。 */
 export function matchTypeBadge(t: string | undefined): { label: string; cls: string } | null {
   switch (t) {
     case 'ladder':
-      return { label: '后台', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300' }
+      return { label: '后台', cls: 'bg-secondary text-secondary-foreground' }
     case 'human':
-      return { label: '人类', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300' }
+      return { label: '人类', cls: 'bg-warning/15 text-warning' }
     case 'contest':
       return { label: '比赛', cls: 'bg-primary/15 text-primary' }
     case 'table':
       return { label: '桌台', cls: 'bg-muted text-muted-foreground' }
     case 'challenge':
-      return { label: '挑战', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' }
+      return { label: '挑战', cls: 'bg-success/15 text-success' }
     default:
       return null
   }

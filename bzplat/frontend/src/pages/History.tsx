@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Swords, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Swords } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
+import Pagination from '@/components/Pagination'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
@@ -31,13 +31,14 @@ const PAGE_SIZE = 20
 export default function History() {
   const [matches, setMatches] = useState<Match[]>([])
   const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(0)
+  const [page, setPage] = useState(1)
   const [status, setStatus] = useState('')
   const [gameId, setGameId] = useState('')
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE) })
+    const offset = (page - 1) * PAGE_SIZE
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
     if (status) params.set('status', status)
     if (gameId) params.set('game_id', gameId)
     apiGet<{ matches: Match[]; total: number }>(`/api/matches?${params}`)
@@ -50,12 +51,8 @@ export default function History() {
   }, [status, gameId, page])
 
   // 筛选变化时回到第 1 页
-  const onStatus = (v: string) => { setStatus(v); setPage(0) }
-  const onGame = (v: string) => { setGameId(v); setPage(0) }
-
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
-  const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1
-  const rangeEnd = Math.min(total, (page + 1) * PAGE_SIZE)
+  const onStatus = (v: string) => { setStatus(v); setPage(1) }
+  const onGame = (v: string) => { setGameId(v); setPage(1) }
 
   return (
     <PageStub
@@ -136,35 +133,8 @@ export default function History() {
         )}
       </Card>
 
-      {/* 分页器 */}
-      {total > PAGE_SIZE && (
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
-          <span>
-            第 <span className="font-medium text-foreground">{rangeStart}-{rangeEnd}</span> 条，共 {total} 条
-          </span>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1"
-              disabled={page === 0}
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-            >
-              <ChevronLeft className="size-4" />上一页
-            </Button>
-            <span className="font-mono text-xs">第 {page + 1} / {totalPages} 页</span>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1"
-              disabled={page + 1 >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              下一页<ChevronRight className="size-4" />
-            </Button>
-          </div>
-        </div>
-      )}
+      {/* 分页器（统一用共享 Pagination 组件） */}
+      <Pagination page={page} perPage={PAGE_SIZE} total={total} onPageChange={setPage} />
     </PageStub>
   )
 }

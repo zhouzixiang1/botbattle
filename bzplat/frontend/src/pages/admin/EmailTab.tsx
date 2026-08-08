@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
+import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
 import { toast } from 'sonner'
 
 interface Template {
@@ -135,7 +135,7 @@ export default function EmailTab() {
           {/* 编辑区 */}
           <div className="min-w-0">
             {draft ? (
-              <div className="card p-4">
+              <div className="rounded-xl border border-border bg-card p-4">
                 <div className="mb-3 flex items-center justify-between">
                   <h3 className="font-mono text-sm font-semibold text-foreground">{draft.key}</h3>
                   <button
@@ -153,7 +153,7 @@ export default function EmailTab() {
                     <input
                       value={draft.subject}
                       onChange={(e) => setDraft({ ...draft, subject: e.target.value })}
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
+                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring outline-none"
                     />
                   </div>
                   <div>
@@ -162,7 +162,7 @@ export default function EmailTab() {
                       value={draft.body_text}
                       onChange={(e) => setDraft({ ...draft, body_text: e.target.value })}
                       rows={4}
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
+                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus-visible:ring-2 focus-visible:ring-ring outline-none"
                     />
                   </div>
                   <div>
@@ -171,7 +171,7 @@ export default function EmailTab() {
                       value={draft.body_html}
                       onChange={(e) => setDraft({ ...draft, body_html: e.target.value })}
                       rows={6}
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
+                      className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus-visible:ring-2 focus-visible:ring-ring outline-none"
                     />
                   </div>
                   <p className="text-xs text-muted-foreground">
@@ -188,33 +188,33 @@ export default function EmailTab() {
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-border bg-card">
-          <table className="w-full min-w-[44rem] text-left text-sm">
-            <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="px-3 py-2.5">时间</th>
-                <th className="px-3 py-2.5">收件人</th>
-                <th className="px-3 py-2.5">主题</th>
-                <th className="px-3 py-2.5">模板</th>
-                <th className="px-3 py-2.5">状态</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
+          <Table className="min-w-[48rem]">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="px-3 py-2.5">时间</TableHead>
+                <TableHead className="px-3 py-2.5">收件人</TableHead>
+                <TableHead className="px-3 py-2.5">主题</TableHead>
+                <TableHead className="px-3 py-2.5">模板</TableHead>
+                <TableHead className="px-3 py-2.5">状态</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {outbox.map((o) => (
-                <tr key={o.id} className="hover:bg-accent">
-                  <td className="px-3 py-2 text-xs text-muted-foreground">{o.created_at}</td>
-                  <td className="px-3 py-2 text-muted-foreground">{o.to_addr}</td>
-                  <td className="px-3 py-2 text-muted-foreground">
+                <TableRow key={o.id} className="hover:bg-accent">
+                  <TableCell className="px-3 py-2 text-xs text-muted-foreground">{o.created_at}</TableCell>
+                  <TableCell className="px-3 py-2 text-muted-foreground">{o.to_addr}</TableCell>
+                  <TableCell className="px-3 py-2 text-muted-foreground">
                     {o.subject}
                     {o.error && <div className="text-[10px] text-destructive">{o.error}</div>}
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{o.template_key || '—'}</td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{o.template_key || '—'}</TableCell>
+                  <TableCell className="px-3 py-2">
                     <StatusBadge status={o.status} />
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
           {outbox.length === 0 && <EmptyState text="无发信记录" />}
         </div>
       )}

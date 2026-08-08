@@ -44,7 +44,7 @@ export default function Login() {
         <CardContent className="py-6">
           <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">
             {sessionTip && (
-              <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
+              <p className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
                 未登录或会话过期，请重新登录
               </p>
             )}

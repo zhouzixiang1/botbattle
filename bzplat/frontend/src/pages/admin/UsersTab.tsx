@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { fmtTime } from '../../lib/format'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tooltip, TooltipContent, TooltipTrigger } from './ui'
+import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tooltip, TooltipContent, TooltipTrigger } from './ui'
 import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
 
@@ -138,7 +138,7 @@ export default function UsersTab() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="搜索用户名/邮箱"
-          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus:outline-none"
+          className="h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring outline-none"
         />
         <Select
           value={realNameFilter}
@@ -161,32 +161,32 @@ export default function UsersTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <table className="w-full min-w-[48rem] text-left text-sm">
-          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
-            <tr>
-              <th className="px-3 py-2.5">ID</th>
-              <th className="px-3 py-2.5">用户名</th>
-              <th className="px-3 py-2.5">邮箱</th>
-              <th className="px-3 py-2.5">实名</th>
-              <th className="px-3 py-2.5">角色</th>
-              <th className="px-3 py-2.5">状态</th>
-              <th className="px-3 py-2.5">注册时间</th>
-              <th className="px-3 py-2.5">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
+        <Table className="min-w-[48rem]">
+          <TableHeader>
+            <TableRow>
+              <TableHead className="px-3 py-2.5">ID</TableHead>
+              <TableHead className="px-3 py-2.5">用户名</TableHead>
+              <TableHead className="px-3 py-2.5">邮箱</TableHead>
+              <TableHead className="px-3 py-2.5">实名</TableHead>
+              <TableHead className="px-3 py-2.5">角色</TableHead>
+              <TableHead className="px-3 py-2.5">状态</TableHead>
+              <TableHead className="px-3 py-2.5">注册时间</TableHead>
+              <TableHead className="px-3 py-2.5">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {filtered.map((u) => (
-              <tr key={u.id} className="hover:bg-accent">
-                <td className="px-3 py-2 font-mono text-muted-foreground">{u.id}</td>
-                <td className="px-3 py-2">
+              <TableRow key={u.id} className="hover:bg-accent">
+                <TableCell className="px-3 py-2 font-mono text-muted-foreground">{u.id}</TableCell>
+                <TableCell className="px-3 py-2">
                   <Link to={`/user/${encodeURIComponent(u.username)}`} className="font-medium text-primary hover:underline">
                     {u.username}
                   </Link>
-                </td>
-                <td className="max-w-[16rem] truncate px-3 py-2 text-muted-foreground">
+                </TableCell>
+                <TableCell className="max-w-[16rem] truncate px-3 py-2 text-muted-foreground">
                   <span className="block truncate" title={u.email}>{u.email}</span>
-                </td>
-                <td className="px-3 py-2 text-sm">
+                </TableCell>
+                <TableCell className="px-3 py-2 text-sm">
                   {hasRealName(u) ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -201,8 +201,8 @@ export default function UsersTab() {
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}
-                </td>
-                <td className="px-3 py-2">
+                </TableCell>
+                <TableCell className="px-3 py-2">
                   <Select
                     value={u.role}
                     disabled={busyId === u.id}
@@ -217,8 +217,8 @@ export default function UsersTab() {
                       <SelectItem value="admin">admin</SelectItem>
                     </SelectContent>
                   </Select>
-                </td>
-                <td className="px-3 py-2 text-xs">
+                </TableCell>
+                <TableCell className="px-3 py-2 text-xs">
                   {u.email_verified ? (
                     <span className="text-success">已验证</span>
                   ) : (
@@ -229,15 +229,15 @@ export default function UsersTab() {
                   ) : (
                     <span className="ml-1 text-destructive">· 停用</span>
                   )}
-                </td>
-                <td className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(u.created_at)}</td>
-                <td className="px-3 py-2">
+                </TableCell>
+                <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(u.created_at)}</TableCell>
+                <TableCell className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
                     <button
                       type="button"
                       disabled={busyId === u.id}
                       onClick={() => void toggleActive(u)}
-                      className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
+                      className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       {u.is_active ? '停用' : '启用'}
                     </button>
@@ -245,7 +245,7 @@ export default function UsersTab() {
                       type="button"
                       disabled={busyId === u.id}
                       onClick={() => void revokeSessions(u.id)}
-                      className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
+                      className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       下线
                     </button>
@@ -255,14 +255,14 @@ export default function UsersTab() {
                           type="button"
                           disabled={busyId === u.id}
                           onClick={() => void delUser(u.id)}
-                          className="rounded border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-xs text-destructive hover:bg-destructive/20"
+                          className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           确认删除
                         </button>
                         <button
                           type="button"
                           onClick={() => setConfirmDel(null)}
-                          className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground"
+                          className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           取消
                         </button>
@@ -272,17 +272,17 @@ export default function UsersTab() {
                         type="button"
                         disabled={busyId === u.id}
                         onClick={() => setConfirmDel(u.id)}
-                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         删除
                       </button>
                     )}
                   </div>
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
         {filtered.length === 0 && <EmptyState text="无用户" />}
       </div>
       <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />

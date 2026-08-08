@@ -297,7 +297,7 @@ export default function MatchViewer() {
           <span className="text-xs text-destructive">原因：{match.reason}</span>
         )}
         {match?.result?.bot_decide_errors && (
-          <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+          <span className="inline-flex items-center gap-1 text-xs text-warning">
             <TriangleAlert className="size-3" />
             {Object.entries(match.result.bot_decide_errors)
               .filter(([, n]) => Number(n) > 0)
@@ -331,11 +331,11 @@ export default function MatchViewer() {
             </span>
           )}
           {pencilScores && (
-            /* 点格棋比分：红/蓝为玩家方颜色语义（座0=红、座1=蓝），保留裸色 */
+            /* 点格棋比分：用 chart token（红=chart-3 暖色、蓝=chart-2 冷色），跟随主题而非裸 tailwind 色 */
             <span className="font-mono text-xs text-muted-foreground">
-              比分 <span className="text-red-500">{pencilScores[0]}</span>
+              比分 <span className="text-chart-3 font-semibold">{pencilScores[0]}</span>
               {' : '}
-              <span className="text-blue-500">{pencilScores[1]}</span>
+              <span className="text-chart-2 font-semibold">{pencilScores[1]}</span>
             </span>
           )}
           {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (
