@@ -70,6 +70,8 @@ export default function MatchViewer() {
   const [stepIdx, setStepIdx] = useState(-1)
   const [playing, setPlaying] = useState(false)
   const [speedIdx, setSpeedIdx] = useState(1)
+  // 时序面板折叠态（窄屏默认折叠，棋盘获全宽）
+  const [timelineCollapsed, setTimelineCollapsed] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const curActionRef = useRef<HTMLDivElement>(null)
   // events 最新长度的 ref——SSE 回调里读「当前长度」算 match_end 贴尾游标，
@@ -161,6 +163,11 @@ export default function MatchViewer() {
 
     return () => { cancelled = true; es?.close() }
   }, [id])
+
+  // 窄屏默认折叠时序面板（不影响桌面布局）
+  useEffect(() => {
+    if (window.innerWidth < 1280) setTimelineCollapsed(true)
+  }, [])
 
   const gameId = normalizeGameId(match?.game_id)
   const isBoard = isBoardGame(gameId)
@@ -459,20 +466,29 @@ export default function MatchViewer() {
 
           {/* 右：动作时序 */}
           <Card className="flex flex-col">
-            <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
-              动作时序 <span className="text-xs font-normal text-muted-foreground">({visible.length})</span>
+            <div className="border-b border-border px-4 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">
+                  动作时序 <span className="text-xs font-normal text-muted-foreground">({visible.length})</span>
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => setTimelineCollapsed(c => !c)}>
+                  {timelineCollapsed ? '展开' : '折叠'}
+                </Button>
+              </div>
             </div>
-            <div ref={logRef} className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
-              {visible.map((ev, i) => (
-                <div key={i} ref={i === cur ? curActionRef : undefined}
-                  className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
-                  <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
-                  <span className="min-w-0 flex-1 break-words opacity-80" title={String(ev.type || '')}>
-                    {eventDesc(ev)}
-                  </span>
-                </div>
-              ))}
-            </div>
+            {!timelineCollapsed && (
+              <div ref={logRef} className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
+                {visible.map((ev, i) => (
+                  <div key={i} ref={i === cur ? curActionRef : undefined}
+                    className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
+                    <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
+                    <span className="min-w-0 flex-1 break-words opacity-80" title={String(ev.type || '')}>
+                      {eventDesc(ev)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </Card>
         </div>
       )}
