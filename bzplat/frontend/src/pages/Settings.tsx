@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, Star } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { useAuth } from '@/components/useAuth'
@@ -33,7 +33,8 @@ interface FavBot {
 }
 
 export default function Settings() {
-  const { user, refresh } = useAuth()
+  const { user, refresh, logout } = useAuth()
+  const navigate = useNavigate()
   const [tab, setTab] = useState<'profile' | 'password' | 'notifications' | 'favorites'>('profile')
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
@@ -97,6 +98,7 @@ export default function Settings() {
     apiJson('/api/auth/avatar', 'POST', fd)
       .then(() => {
         if (refresh) refresh()
+        setAvatarVer((v) => v + 1) // 刷新 <img> src 缓存（文件名不变）
         setMsg('头像已更新')
       })
       .catch((e) => setError(errMsg(e)))
@@ -106,9 +108,12 @@ export default function Settings() {
     e.preventDefault()
     setError(''); setMsg('')
     apiJson('/api/auth/change-password', 'POST', { old_password: oldPw, new_password: newPw })
-      .then(() => {
-        setMsg('密码已修改，请重新登录')
+      .then(async () => {
+        // 后端已清除所有会话——前端必须同步清理本地 token/user，否则停留在无效会话上后续操作全 401。
+        setMsg('密码已修改，正在跳转登录…')
         setOldPw(''); setNewPw('')
+        await logout()
+        navigate('/login', { replace: true })
       })
       .catch((e) => setError(errMsg(e)))
   }
@@ -119,7 +124,9 @@ export default function Settings() {
     apiJson('/api/notification-prefs', 'PUT', next).catch((e) => setError(errMsg(e)))
   }
 
-  const avatarUrl = user.avatar ? `/avatars/${user.avatar}` : ''
+  const [avatarVer, setAvatarVer] = useState(0)
+  // 后端覆盖头像时文件名不变（<uid>.<ext>），加 cache-buster 防浏览器显示旧图。
+  const avatarUrl = user.avatar ? `/avatars/${user.avatar}?v=${avatarVer}` : ''
 
   return (
     <PageStub title="个人设置" subtitle="管理资料、头像与密码">

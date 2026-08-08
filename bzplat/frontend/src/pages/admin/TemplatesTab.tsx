@@ -107,7 +107,7 @@ export default function TemplatesTab() {
       const r = await apiJson<{ per_stage: number[]; total: number }>(
         '/api/admin/templates/preview',
         'POST',
-        { stages: editing.stages, n: previewN },
+        { stages: editing.stages, n: previewN, game_id: editing.game_id },
       )
       setPreview(r)
     } catch (e) {

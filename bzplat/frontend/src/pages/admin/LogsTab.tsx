@@ -114,7 +114,7 @@ export default function LogsTab() {
           <input
             type="number" min={50} max={2000}
             value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
+            onChange={(e) => setLimit(Math.min(2000, Math.max(50, Number(e.target.value) || 300)))}
             className={`${inp} w-20 px-2 py-1 text-xs`}
           />
           <RefreshBtn onClick={load} />
