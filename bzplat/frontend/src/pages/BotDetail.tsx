@@ -128,8 +128,8 @@ function RatingChart({ points }: { points: RatingPoint[] }) {
   if (points.length < 2) {
     return <EmptyState text="评分数据不足，至少需 2 个数据点" icon={<Target className="size-7 opacity-40" />} />
   }
-  const data = points.map((p) => ({
-    idx: points.indexOf(p) + 1,
+  const data = points.map((p, idx) => ({
+    idx: idx + 1,
     rating: Number(p.rating.toFixed(1)),
     date: p.created_at?.slice(0, 10),
   }))

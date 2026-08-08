@@ -68,6 +68,31 @@ function deriveToCall(request: Record<string, unknown> | null): number {
   return Math.max(0, streetBet - bets[myId])
 }
 
+/** 推导本街自己已下注筹码（用于 raise 换算：目标总额 − 本街已投 = 额外量）。
+ *  与 deriveToCall 同源逻辑，返回 bets[myId]。 */
+function deriveMyBet(request: Record<string, unknown> | null): number {
+  if (!request) return 0
+  const myId = Number(request.my_id ?? 0)
+  const dealerId = Number(request.dealer_id ?? 0)
+  const bbSeat = 1 - dealerId
+  const SB = 50, BB = 100
+  const bets = [0, 0]
+  bets[dealerId] = SB
+  bets[bbSeat] = BB
+  let lastRound = 0
+  const history = (request.history as Array<Record<string, unknown>> | undefined) ?? []
+  for (const h of history) {
+    const round = Number(h.round ?? 0)
+    if (round > lastRound) { bets[0] = 0; bets[1] = 0; lastRound = round }
+    const pid = Number(h.player_id ?? 0)
+    const action = Number(h.action ?? 0)
+    if (action === -1 || action === -2) bets[pid] = -1
+    else if (action > 0) bets[pid] += action
+    if (action === 0) bets[pid] = Math.max(bets[0], bets[1])
+  }
+  return Math.max(0, bets[myId])
+}
+
 export default function HumanPlay() {
   const { id } = useParams<{ id: string }>()
   const [match, setMatch] = useState<MatchSeatRow | null>(null)
@@ -176,7 +201,12 @@ export default function HumanPlay() {
 
   const sendMove = (move: Record<string, unknown>) => {
     if (!myTurn) return
-    wsRef.current?.send(JSON.stringify(move))
+    // 检查连接状态：socket 已关闭时给明确反馈，否则动作被静默吞掉（用户以为出了牌）。
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('连接已断开，动作未发送。请刷新页面重连。')
+      return
+    }
+    wsRef.current.send(JSON.stringify(move))
     setTurnDeadline(null)
   }
 
@@ -274,7 +304,21 @@ export default function HumanPlay() {
             disabled={!myTurn || over}
             legal={myTurn}
             request={turnRequest}
-            onAct={(a, x) => sendMove(x !== undefined ? { a, x } : { a })}
+            onAct={(a, x) => {
+              // 人类德州动作 → Botzone 标准整数（协议层只接受 -1/-2/0/>0）。
+              //   fold → -1, allin → -2, check/call → 0, raise → 额外下注筹码（目标总额 − 本街已投）
+              // 旧 {a,x} 格式已被 PR#130 移除（parse_response 只认裸整数/{"response":int}）。
+              let resp = 0
+              if (a === 'f') resp = -1
+              else if (a === 'all') resp = -2
+              else if (a === 'k' || a === 'c') resp = 0
+              else if (a === 'r' && typeof x === 'number') {
+                // raise：x=目标总额，需转成额外量（= 目标 − 本街已投 my_bet）。
+                const myBet = Number(turnRequest?.my_bet ?? turnRequest?.b ?? deriveMyBet(turnRequest))
+                resp = Math.max(1, Math.round(x - myBet))
+              }
+              sendMove({ response: resp })
+            }}
           />
           <EventLogCard id={id} events={events} />
         </div>
