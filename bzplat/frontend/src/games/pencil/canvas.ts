@@ -3,8 +3,6 @@
  * 复用 reducePencilEvents（不重写归约）；新占边沿线绘制动画；闭合格归属淡入。
  */
 import type { RawEvent } from '@/games/base'
-import { fitText, scaleFactor } from '@/games/base'
-import { getGame } from '@/games'
 import {
   reducePencilEvents, type PencilViewModel,
   GRID_DOT, GRID_EDGE, GRID_EDGE_USED, GRID_BOX,
@@ -139,25 +137,6 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
         }
       }
     }
-
-    // 顶部信息 + 双方名（字体/偏移按 s=W/W0 缩放，fitText 防长名+比分溢出）
-    const s = scaleFactor(W)
-    ctx.fillStyle = '#334155'
-    ctx.font = `bold ${Math.round(15 * s)}px "DM Sans", sans-serif`
-    ctx.textAlign = 'left'
-    ctx.textBaseline = 'alphabetic'
-    const sc = getGame('pencil').seatColors ?? ['红', '蓝']
-    const name0 = seatShort(opts.seats?.[0], sc[0] ?? '红')
-    const name1 = seatShort(opts.seats?.[1], sc[1] ?? '蓝')
-    const turnLabel = next.matchOver
-      ? (next.winner === null
-        ? '平局'
-        : `${next.winner === 0 ? name0 : name1}胜（${next.reason}）`)
-      : `待行：${next.toAct === 0 ? name0 : next.toAct === 1 ? name1 : '—'}${next.extraTurn ? '（连走）' : ''}`
-    ctx.fillText(
-      fitText(ctx, `点格棋 · ${next.nDots}×${next.nDots} · ${name0} ${next.scores[0]} : ${next.scores[1]} ${name1} · ${turnLabel}`, W - 24 * s),
-      12 * s, 24 * s,
-    )
   },
   pick(canvasX, canvasY, scene, opts) {
     const s = scene as PencilScene
@@ -169,20 +148,9 @@ export const PencilCanvasRenderer: GameCanvasRenderer<PencilScene> = {
   },
 }
 
-function seatShort(
-  info: { botName?: string; ownerName?: string; isHuman?: boolean } | undefined,
-  fallback: string,
-): string {
-  const bot = (info?.botName || '').trim()
-  if (bot) return bot
-  const owner = (info?.ownerName || '').trim()
-  if (owner) return owner
-  return fallback
-}
-
 /** pencil 棋盘布局（draw 与 pick 共用）。 */
 function pencilLayout(W: number, H: number, size: number) {
-  const margin = Math.max(24, W * 0.05)
+  const margin = Math.max(16, W * 0.03)  // 收紧留白让棋盘更大
   const cell = Math.max(10, Math.floor(Math.min(W - margin * 2, H - margin * 2) / (size + 1)))
   const boardPx = cell * (size - 1)
   const ox = (W - boardPx) / 2
