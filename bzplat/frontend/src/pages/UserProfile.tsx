@@ -241,12 +241,12 @@ export default function UserProfile() {
             )}
           </div>
 
-          {/* 总战绩 */}
+          {/* 总战绩（plain：嵌套在本 Card 内，无边框避免 Card 套 Card） */}
           <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <MetricCard label="总胜率" value={`${wr.toFixed(1)}%`} />
-            <MetricCard label="胜" value={wins} />
-            <MetricCard label="负/平" value={profile.stats.losses || 0} hint={`平 ${profile.stats.draws || 0}`} danger />
-            <MetricCard label="Bot 数" value={profile.bot_count} icon={<BotIcon className="size-5" />} />
+            <MetricCard plain label="总胜率" value={`${wr.toFixed(1)}%`} />
+            <MetricCard plain label="胜" value={wins} />
+            <MetricCard plain label="负/平" value={profile.stats.losses || 0} hint={`平 ${profile.stats.draws || 0}`} danger />
+            <MetricCard plain label="Bot 数" value={profile.bot_count} icon={<BotIcon className="size-5" />} />
           </div>
         </CardContent>
       </Card>

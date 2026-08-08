@@ -116,13 +116,13 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 |----------|---------|---------|------|
 | 账号认证 | `auth/` | test_auth | wiki（功能说明散见） |
 | Bot 管理 | `bots/` + api_routes | test_settings_mybots | wiki/BOT_DEV、BOT_DETAIL |
-| 对局编排 | `matches/orchestrator+runner` | test_engine、test_protocol | wiki/MATCH |
-| 人类对战 | orchestrator + WS /play | test_human_match | wiki/MATCH |
-| 评分排行 | `rating/glicko2` + `games/*/tiers.py` | test_tiers、test_engine | wiki/TIER |
-| 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/CONTEST_FORMAT、CONTEST_BRACKET |
-| 社交 | api_routes + store | test_social、test_comments_likes | wiki/SOCIAL、COMMENTS_LIKES |
-| 通知 | `notifications/` | test_notifications | wiki/NOTIFICATIONS |
-| 经验等级 | store + api_routes | test_xp_level | wiki/XP_LEVEL |
+| 对局编排 | `matches/orchestrator+runner` | test_engine、test_protocol | wiki/GUIDE |
+| 人类对战 | orchestrator + WS /play | test_human_match | wiki/GUIDE |
+| 评分排行 | `rating/glicko2` + `games/*/tiers.py` | test_tiers、test_engine | wiki/GUIDE |
+| 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/GUIDE、CONTEST_BRACKET |
+| 社交 | api_routes + store | test_social、test_comments_likes | wiki/GUIDE |
+| 通知 | `notifications/` | test_notifications | wiki/GUIDE |
+| 经验等级 | store + api_routes | test_xp_level | wiki/GUIDE |
 | 沙箱运行时 | `runtime/` | test_runtime、test_runtime_settings | doc/RUNTIME |
 | 各游戏引擎 | `games/<game>/`（自包含子包，真实现全在 games/） | test_engine、test_board_engines、test_result_contract、test_game_registry、test_import_cycles | wiki/PROTOCOL、GOMOKU、PENCIL、TEXAS、doc/JUDGE_CODE |
 | 架构契约 | games 注册表 + 通用层无游戏分支 | test_tongyong_layer_no_game_branches、test_despecialization、test_physical_reorg | doc/DESIGN、AGENTS.md |

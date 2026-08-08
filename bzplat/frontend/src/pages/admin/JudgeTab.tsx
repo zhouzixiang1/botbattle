@@ -131,7 +131,7 @@ export default function JudgeTab() {
             </div>
           ) : (
             <p className="mt-3 text-xs text-muted-foreground">
-              无全局可调参数（点格棋 N 由各对局 match 配置决定）。
+              无全局可调参数（点格棋 N 已钉死为 6，不可配）。
             </p>
           )}
 

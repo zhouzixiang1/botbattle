@@ -48,7 +48,7 @@ export default function Home() {
 
   useEffect(() => {
     setLoading(true)
-    const q = gameId ? `?limit=50&game_id=${encodeURIComponent(gameId)}` : '?limit=50'
+    const q = gameId ? `?limit=20&game_id=${encodeURIComponent(gameId)}` : '?limit=20'
     apiGet<{ matches: Match[] }>(`/api/matches${q}`)
       .then((d) => {
         // 首页去重：同一场赛事(contest_id)的批量对阵只保留最新 1 条，
@@ -61,7 +61,7 @@ export default function Home() {
           seenContest.add(cid)
           return true
         })
-        setMatches(deduped.slice(0, 30))
+        setMatches(deduped.slice(0, 8))
       })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
@@ -171,6 +171,10 @@ export default function Home() {
       {error && <ErrorMsg msg={error} className="mb-3" />}
 
       <Card className="overflow-hidden">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+          <span className="text-sm font-semibold text-foreground">最新对局</span>
+          <Link to="/history" className="text-xs text-primary hover:underline">查看全部 →</Link>
+        </div>
         <div className="overflow-x-auto">
           <Table className="min-w-[40rem]">
             <TableHeader>

@@ -317,12 +317,12 @@ export default function BotDetail() {
             )}
           </div>
 
-          {/* 指标 */}
+          {/* 指标（plain：嵌套在本 Card 内，无边框避免 Card 套 Card） */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[32rem] lg:shrink-0">
-            <MetricCard label="Rating" value={fmtRating(profile.rating)} hint={profile.rd != null ? `rd ${Number(profile.rd).toFixed(0)}` : undefined} />
-            <MetricCard label="胜率" value={fmtPct(wr)} hint={`共 ${total} 场`} />
-            <MetricCard label="胜" value={profile.wins ?? 0} danger={false} />
-            <MetricCard label="负/平" value={profile.losses ?? 0} hint={`平 ${profile.draws ?? 0}`} danger />
+            <MetricCard plain label="Rating" value={fmtRating(profile.rating)} hint={profile.rd != null ? `rd ${Number(profile.rd).toFixed(0)}` : undefined} />
+            <MetricCard plain label="胜率" value={fmtPct(wr)} hint={`共 ${total} 场`} />
+            <MetricCard plain label="胜" value={profile.wins ?? 0} danger={false} />
+            <MetricCard plain label="负/平" value={profile.losses ?? 0} hint={`平 ${profile.draws ?? 0}`} danger />
           </div>
         </CardContent>
       </Card>

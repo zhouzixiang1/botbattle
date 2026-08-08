@@ -1075,7 +1075,6 @@ def contest_detail(
         b = store.get_bot(s.get("bot_id"))
         if b:
             s["bot_name"] = b.get("display_name") or b.get("name")
-    stage_results = store.list_stage_results(contest_id)
     try:
         estimate = _contests(request).estimate(contest_id)
     except ValueError:
@@ -1103,7 +1102,6 @@ def contest_detail(
         "entries": entries,
         "pairings": pairings,
         "standings": standings,
-        "stage_results": stage_results,
         "estimate": estimate,
         "my_entry": my_entry,
         "is_organizer": is_organizer,

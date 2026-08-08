@@ -236,7 +236,7 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 
 关键约束：循环人数上限默认 12（admin 可调，超限提示改 Swiss）；瑞士 = `ceil(log2(n))` 轮；单败 = n-1 场（最快但运气成分大）。
 
-### 默认内置模板（9 个）
+### 默认内置模板（10 个）
 
 | id | 游戏 | 赛制 |
 |----|------|------|
@@ -244,6 +244,7 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 | `holdem_rr` | 德州 | 单循环（小规模） |
 | `holdem_prelim_swiss` | 德州 | 单阶段瑞士（全员排名，预赛） |
 | `holdem_final_ranked` | 德州 | 全员单循环 → Top8 双循环（决赛） |
+| `holdem_dup_rr` | 德州 | 复式单循环（同副牌交换座位，2 leg） |
 | `gomoku_group_drr_ko` | 五子棋 | 分组双循环 → 单败（默认） |
 | `gomoku_swiss_ko` | 五子棋 | 瑞士 → 单败（默认） |
 | `board_rr` | 棋类 | 双循环（课堂演示） |
