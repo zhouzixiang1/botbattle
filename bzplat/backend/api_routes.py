@@ -96,10 +96,16 @@ def my_bots(
     result = _bots(request).list_mine(
         user["id"], game_id=game_id, page=page, per_page=per_page
     )
+    # 裁响应死字段（对抗审计：created_at/updated_at 前端 MyBots 不消费；
+    # 不动 owner_id/is_builtin——共享 list_bots 喂 /api/bots/public + /api/admin/bots）。
+    items = result["items"] if isinstance(result, dict) else result
+    for b in items:
+        b.pop("created_at", None)
+        b.pop("updated_at", None)
     if isinstance(result, dict):
-        return {"bots": result["items"], "page": result["page"],
+        return {"bots": items, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"bots": result}
+    return {"bots": items}
 
 
 @router.get("/api/bots/public")
@@ -309,6 +315,10 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
     )
     if not is_privileged:
         p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
+    # 裁响应死字段（对抗审计验证：vol/net_chips/rated_at/is_builtin/updated_at 前端不消费；
+    # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
+    for k in ("vol", "net_chips", "rated_at", "is_builtin", "updated_at"):
+        p.pop(k, None)
     return {"profile": p}
 
 
@@ -641,6 +651,14 @@ def list_matches(
     rows = store.list_matches(
         status=status, game_id=game_id, limit=lim, offset=off
     )
+    # 裁列表响应死字段（对抗审计：started_at/ended_at/human_user_id/human_seat/
+    # likes_count/views_count/owner_id 列表不消费；
+    # 不动 winner/reason/match_type/contest_id——BotDetail/Home/admin 有消费者，删了致回归）。
+    _MATCH_LIST_DEAD = ("started_at", "ended_at", "human_user_id", "human_seat",
+                        "likes_count", "views_count", "owner_id")
+    for m in rows:
+        for k in _MATCH_LIST_DEAD:
+            m.pop(k, None)
     total = store.count_matches(status=status, game_id=game_id)
     return {"matches": rows, "total": total, "limit": lim, "offset": off}
 
@@ -697,10 +715,19 @@ def leaderboard(
     result = _store(request).list_leaderboard(
         limit=max(1, min(limit, 200)), game_id=game_id, page=page, per_page=per_page,
     )
+    # 响应白名单投影：只返回前端 Leaderboard.tsx 消费的字段（裁死字段 vol/last_played_at/
+    # is_builtin/owner_display；留 tier_level——test_tiers 断言）。
+    items = result["items"] if isinstance(result, dict) else result
+    keep = {
+        "bot_id", "rating", "rd", "wins", "losses", "draws", "net_chips",
+        "matches_played", "bot_name", "bot_display", "format", "os", "arch",
+        "game_id", "owner_name", "rating_delta", "tier_level", "tier_key", "tier_name",
+    }
+    proj = [{k: row[k] for k in keep if k in row} for row in items]
     if isinstance(result, dict):
-        return {"leaderboard": result["items"], "page": result["page"],
+        return {"leaderboard": proj, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"leaderboard": result}
+    return {"leaderboard": proj}
 
 
 @router.get("/api/tiers")
@@ -1006,10 +1033,17 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
     result = _store(request).list_contests(status=status, game_id=game_id,
                                            page=page, per_page=per_page,
                                            exclude_statuses=exclude)
+    # 裁列表响应死字段（对抗审计：match_config_json/hands_per_match/phase/source_contest_id
+    # 列表视图不消费；不动 organizer_id/stages_json/rest_ends_at/current_stage_idx/
+    # official_results_ready——共享 list_contests 喂 /api/contests/{id} + 后端内部读取）。
+    items = result["items"] if isinstance(result, dict) else result
+    for c in items:
+        for k in ("match_config_json", "hands_per_match", "phase", "source_contest_id"):
+            c.pop(k, None)
     if isinstance(result, dict):
-        return {"contests": result["items"], "page": result["page"],
+        return {"contests": items, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"contests": result}
+    return {"contests": items}
 
 
 @router.post("/api/contests")
@@ -1097,6 +1131,20 @@ def contest_detail(
         for e in entries:
             for k in ("real_name", "phone", "school", "student_id"):
                 e.pop(k, None)
+    # 裁 standings/pairings 响应死字段（对抗审计：前端 ContestDetail/BracketTree/
+    # ScheduleTable 不消费；表列与内部计算保留——仅从响应 dict 去掉）。
+    _STANDINGS_DEAD = ("entry_id", "user_id", "seed", "eliminated")
+    for s in standings:
+        for k in _STANDINGS_DEAD:
+            s.pop(k, None)
+    _PAIRING_DEAD = (
+        "contest_id", "entry_a_id", "entry_b_id", "bot_a_version_id",
+        "bot_b_version_id", "pairing_seed", "published_at", "color_first",
+        "owner_a_name", "owner_b_name",
+    )
+    for p in pairings:
+        for k in _PAIRING_DEAD:
+            p.pop(k, None)
     resp = {
         "contest": c,
         "entries": entries,
