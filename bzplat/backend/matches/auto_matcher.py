@@ -224,6 +224,9 @@ class AutoMatchScheduler:
         key_a = a["bot_id"]
         a_rating = float(a.get("rating") or 1500.0)
         for b in rest:
+            # P2-12 修复：显式排除自身（原依赖 rest 不含 a 的隐式假设，防御性加固）。
+            if b["bot_id"] == key_a:
+                continue
             pair = (min(key_a, b["bot_id"]), max(key_a, b["bot_id"]))
             last = self._recent_pairs.get(pair)
             if last is not None and (now - last) < cooldown:

@@ -125,7 +125,7 @@ def test_dispatch_does_not_touch_running_pairings(store: Store):
         max_concurrent=1,
     )
     mgr = ContestManager(store, orch)
-    mgr.dispatch(c["id"], users[0]["id"], b_new["id"])
+    asyncio.run(mgr.dispatch(c["id"], users[0]["id"], b_new["id"]))
 
     rows = {p["id"]: p for p in store.list_contest_pairings(c["id"])}
     assert rows[p_run["id"]]["bot_a_id"] == bots[0]["id"]

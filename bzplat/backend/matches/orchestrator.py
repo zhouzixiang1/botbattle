@@ -104,10 +104,14 @@ class MatchOrchestrator:
         self.human_max_consecutive_timeouts = 5
 
     def rebuild_concurrency(self, max_concurrent: int) -> None:
-        """热更新并发上限：重建 Semaphore（不修改 _value）。"""
+        """热更新并发上限。
+
+        P0-2 修复：不重置 _bot_running=0（在途任务仍会在 finally 里 -1，重置会导致
+        计数失真→auto_matcher 误判 idle→超额调度）；只换 Semaphore（新任务用新上限，
+        旧任务在旧 sem 上自然排空）。_bot_running 保持真实值，auto_matcher 据此准确判断。
+        """
         self.max_concurrent = max(1, int(max_concurrent))
         self._sem = asyncio.Semaphore(self.max_concurrent)
-        self._bot_running = 0  # 重置（重建后当前运行任务的计数由 _run_match 维护）
 
     def rebuild_human_concurrency(self, max_concurrent: int) -> None:
         """热更新人类对局独立并发上限。"""
@@ -334,6 +338,9 @@ class MatchOrchestrator:
         lst = self._sse.get(match_id) or []
         if q in lst:
             lst.remove(q)
+        # P1-7 修复：列表空时清 key，防 _sse dict 无界增长（每个曾观看的 match_id 永留空 list）。
+        if not lst:
+            self._sse.pop(match_id, None)
 
     def _broadcast(self, match_id: str, event: dict[str, Any]) -> None:
         for q in list(self._sse.get(match_id) or []):
@@ -381,6 +388,9 @@ class MatchOrchestrator:
                 technical_loss=1, ended_at=_now(),
             )
             self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "bot_deleted"})
+            # P0-1 回归修复：必须走收尾（清 _tasks + on_match_done 触发赛事推进），
+            # 不能裸 return 绕过 finally——否则赛事对局卡死。
+            await self._finish_match_task(match_id, m.get("contest_id"))
             return
         # P1：赛事对局读冻结的 bot 版本路径（pairing.bot_a_version_id → bot_versions.binary_path），
         # 不受选手中途上传新版本影响；非 contest 读 bots.binary_path（最新）。
@@ -596,16 +606,28 @@ class MatchOrchestrator:
             )
             self._broadcast(match_id, {"type": "error", "message": str(exc)})
         finally:
-            self._tasks.pop(match_id, None)
-            if self.on_match_done is not None:
-                try:
-                    result = self.on_match_done(match_id, m.get("contest_id"))
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:
-                    # 对局完成回调（赛事 maybe_finish）失败必须可见——
-                    # 原用 debug 级会静默吞掉，导致赛事卡 running 无从排查。
-                    logger.exception("on_match_done failed match=%s", match_id)
+            await self._finish_match_task(match_id, m.get("contest_id"))
+
+    async def _finish_match_task(self, match_id: str, contest_id: int | None) -> None:
+        """对局任务收尾：清理 _tasks + 触发 on_match_done（赛事推进必须经此）。
+
+        P0-1 回归修复：原 null-bot 防护分支 return 在 try/finally 外，绕过此收尾
+        → _tasks 泄漏 + 赛事对局 on_match_done 不触发 → 赛事卡死。现抽成方法，
+        所有对局结束路径（含 null-bot/崩溃/正常完成）统一调用。
+        """
+        self._tasks.pop(match_id, None)
+        # P1-7：对局结束后清 SSE dict 的该 match_id 条目（直播已结束，防无界增长）。
+        # 残留订阅者会在 _broadcast 时因 list 为空自然无操作；unsubscribe 也会清空 list。
+        self._sse.pop(match_id, None)
+        if self.on_match_done is not None:
+            try:
+                result = self.on_match_done(match_id, contest_id)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                # 对局完成回调（赛事 maybe_finish）失败必须可见——
+                # 原用 debug 级会静默吞掉，导致赛事卡 running 无从排查。
+                logger.exception("on_match_done failed match=%s", match_id)
 
     async def _run_human_match(self, match_id: str) -> None:
         """人类 vs bot 对局：独立信号量；人类侧经 _human_turns Future 等待 WS 落子。"""
@@ -738,10 +760,19 @@ class MatchOrchestrator:
         return out
 
     def _rating_lock_for(self, bot_id: int, game_id: str) -> asyncio.Lock:
-        """获取/创建某 (bot, game) 的评分串行化锁（防同 bot 并发评分 lost-update）。"""
+        """获取/创建某 (bot, game) 的评分串行化锁（防同 bot 并发评分 lost-update）。
+
+        P1-8 修复：锁永不清理会导致 dict 随 bot 数无界增长。采用惰性清理——
+        当 dict 超阈值（如 2000）时，清掉所有未被持有的空闲锁（asyncio.Lock.locked()）。
+        """
         key = (bot_id, game_id)
         lock = self._rating_locks.get(key)
         if lock is None:
+            # 惰性清理：超阈值时回收空闲锁（防无界增长；活跃锁 locked()=True 保留）
+            if len(self._rating_locks) > 2000:
+                self._rating_locks = {
+                    k: v for k, v in self._rating_locks.items() if v.locked()
+                }
             lock = asyncio.Lock()
             self._rating_locks[key] = lock
         return lock

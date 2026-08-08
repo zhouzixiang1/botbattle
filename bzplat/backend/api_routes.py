@@ -538,6 +538,15 @@ class ChallengeBody(BaseModel):
 
 @router.post("/api/matches/challenge")
 async def challenge(body: ChallengeBody, request: Request, user=Depends(require_user)):
+    # P1-3 安全修复：my_bot_id 必须属于当前用户（防用别人的 bot 开赛，污染其评分/战绩）。
+    # opponent_bot_id 允许任意（挑战他人 bot 是正常功能）。
+    my_bot = _store(request).get_bot(body.my_bot_id)
+    if not my_bot:
+        raise HTTPException(404, "Bot 不存在")
+    if my_bot["owner_id"] != user["id"]:
+        audit_log(request, "match_challenge", result="deny", user=user.get("username"),
+                  detail=f"my_bot_id={body.my_bot_id} 非本人 bot")
+        raise HTTPException(403, "只能用自己的 Bot 发起挑战")
     try:
         mid = await _orch(request).challenge(
             body.my_bot_id,
@@ -1431,11 +1440,11 @@ def register_contest(
 
 
 @router.post("/api/contests/{contest_id}/dispatch")
-def dispatch_contest(
+async def dispatch_contest(
     contest_id: int, body: ContestDispatch, request: Request, user=Depends(require_user)
 ):
     try:
-        entry = _contests(request).dispatch(
+        entry = await _contests(request).dispatch(
             contest_id, user["id"], body.bot_id, role=user.get("role", "")
         )
     except ValueError as e:

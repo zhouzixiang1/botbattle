@@ -110,9 +110,15 @@ class ContestManager:
         self._locks: dict[int, asyncio.Lock] = {}
 
     def _lock(self, contest_id: int) -> asyncio.Lock:
-        """取（或建）该 contest 的锁。"""
+        """取（或建）该 contest 的锁。
+
+        P1-9 修复：finished/cancelled 的 contest 锁永不清理导致无界增长。
+        惰性清理——超阈值时回收空闲锁（locked()=False 的已结束赛事）。
+        """
         lk = self._locks.get(contest_id)
         if lk is None:
+            if len(self._locks) > 500:
+                self._locks = {k: v for k, v in self._locks.items() if v.locked()}
             lk = asyncio.Lock()
             self._locks[contest_id] = lk
         return lk
@@ -222,7 +228,7 @@ class ContestManager:
             raise ValueError("该用户在此比赛中已报名")
         return self.store.add_contest_entry(contest_id, owner_id, bot_id)
 
-    def dispatch(
+    async def dispatch(
         self,
         contest_id: int,
         user_id: int,
@@ -234,7 +240,21 @@ class ContestManager:
 
         已 running/completed 的 pairing 不变；仅更新 entry，影响尚未创建
         match 的 pending pairing 与后续阶段。
+
+        P1-4 修复：加 per-contest 锁，与 scheduler 的 resume/_begin_stage 串行化，
+        防 bot 交换与下一阶段配对生成竞态（旧代码无锁，TOCTOU 导致配对指向错误 bot/version）。
         """
+        async with self._lock(contest_id):
+            return await self._dispatch_locked(contest_id, user_id, bot_id, role=role)
+
+    async def _dispatch_locked(
+        self,
+        contest_id: int,
+        user_id: int,
+        bot_id: int,
+        *,
+        role: str = "",
+    ) -> dict:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
@@ -594,6 +614,10 @@ class ContestManager:
     async def _dispatch_pending_locked(self, contest_id: int, stage_idx: int) -> None:
         """_dispatch_pending 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
+        # P1-5 修复：锁内重检状态——published 可能在 scheduler snapshot 后被取消，
+        # finished/cancelled 的 pending pairing 不应再派发（否则产孤儿对局）。
+        if c["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING):
+            return
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         gid = c.get("game_id") or "holdem"

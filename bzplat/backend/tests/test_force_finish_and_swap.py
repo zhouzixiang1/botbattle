@@ -52,11 +52,11 @@ def test_force_finish_rejects_non_running(tmp_path):
 
 
 def test_dispatch_rejects_running(tmp_path):
-    """Bot 换人在 running 态被拒（仅开赛前+休息可换）。"""
+    """Bot 换人在 running 态被拒（仅开赛前+休息可换）。dispatch 现为 async（加锁）。"""
     store, mgr = _mgr(tmp_path)
     cid = _make_contest(store, status="running")
     with pytest.raises(ValueError, match="不可更换"):
-        mgr.dispatch(contest_id=cid, user_id=1, bot_id=1, role="user")
+        asyncio.run(mgr.dispatch(contest_id=cid, user_id=1, bot_id=1, role="user"))
 
 
 def test_rating_lock_dict_keyed_by_bot_game(tmp_path):
