@@ -193,10 +193,19 @@ def swiss_pairings(
                 partner = j
                 break
         if partner is None:
-            # 组内全交手过 → 取下一个（跨组强配，避免卡死）
-            if idx + 1 < len(unpaired):
-                partner = idx + 1
-            else:
+            # 组内全交手过 → 在剩余未配对里选「重复次数最少」的（P1-6 修复：原硬取 idx+1
+            # 可能产出重复配对——小场多轮时所有 pair 都打过，强配会产生同 pair 二次对局
+            # 导致 standings 双计）。选最少重复的降低重复概率；全重复时仍取首个避免卡死。
+            best_j = -1
+            best_repeat = None
+            for j in range(idx + 1, len(unpaired)):
+                b = unpaired[j]
+                rep = played.get((min(a, b), max(a, b)), 0)
+                if best_repeat is None or rep < best_repeat:
+                    best_repeat = rep
+                    best_j = j
+            partner = best_j if best_j >= 0 else (idx + 1 if idx + 1 < len(unpaired) else -1)
+            if partner < 0:
                 break
         b = unpaired.pop(partner)
         # 座位平衡：先手累计少者本轮先手（color_first=该侧）

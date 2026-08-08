@@ -208,3 +208,54 @@ def test_null_bot_match_does_not_crash_orchestrator(tmp_path):
     assert m2["reason"] == "bot_deleted"
     assert m2["winner"] == 1
     s.close()
+
+
+def test_null_bot_match_triggers_on_match_done(tmp_path):
+    from bzplat.backend.store import Store
+    """P0-1 回归守护：deleted-bot 对局（__run_match_inner null-bot 分支）必须触发
+    on_match_done 回调，否则赛事对局卡死（原 PR#141 的 null-bot 防护 return 在
+    try/finally 外，绕过 on_match_done → 赛事 maybe_finish 不触发 → 卡 running）。"""
+    import asyncio
+    from bzplat.backend.matches.orchestrator import MatchOrchestrator
+
+    s = Store(str(tmp_path / "nulldone.db"))
+    u = s.create_user("org", "o@e.com", "x")["id"]
+    ba = s.create_bot(u, "na", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    bb = s.create_bot(u, "nb", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    mid = s.create_match("nulldone-m", ba, bb, game_id="holdem", match_type="challenge")["id"]
+    # 删除 bot_a（模拟 ON DELETE SET NULL 场景）
+    s.delete_bot(ba)
+    orch = MatchOrchestrator(s)
+    fired = {"done": False}
+
+    def on_done(match_id, contest_id):
+        fired["done"] = True
+    orch.on_match_done = on_done
+    # 直接调 _finish_match_task（null-bot 分支会调它）
+    asyncio.run(orch._finish_match_task(mid, None))
+    assert fired["done"], "on_match_done 必须触发（P0-1 回归：原 null-bot return 绕过它）"
+    s.close()
+
+
+def test_challenge_rejects_non_owner_bot(tmp_path):
+    """P1-3 安全回归：challenge 必须 403 拒绝用非本人 bot 开赛（防污染他人评分/战绩）。"""
+    from fastapi.testclient import TestClient
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+
+    app = create_app(db_path=str(tmp_path / "chown.db"))
+    store = app.state.store
+    u1 = store.create_user("owner1", "o1@e.com", hash_password("pw123456"), role="user")
+    store.update_user(u1["id"], email_verified=1)
+    u2 = store.create_user("owner2", "o2@e.com", hash_password("pw123456"), role="user")
+    store.update_user(u2["id"], email_verified=1)
+    ba = store.create_bot(u1["id"], "u1bot", binary_path="/tmp/x", format="elf", game_id="holdem")
+    bb = store.create_bot(u2["id"], "u2bot", binary_path="/tmp/y", format="elf", game_id="holdem")
+    # u2 的 token
+    _, tok2 = app.state.auth.authenticate("owner2", "pw123456")
+    client = TestClient(app)
+    # u2 试图用 u1 的 bot（ba）发起挑战 → 应 403（防用他人 bot 开赛）
+    r = client.post("/api/matches/challenge",
+                    json={"my_bot_id": ba["id"], "opponent_bot_id": bb["id"]},
+                    headers={"Authorization": f"Bearer {tok2}"})
+    assert r.status_code == 403, f"用他人 bot 开赛应 403，实际 {r.status_code}: {r.text[:100]}"
