@@ -386,8 +386,8 @@ export default function MatchViewer() {
         /></Card>
       ) : (
         // 德州扑克（!isBoard）：canvas 单栏全宽 + 时序栏移下方（牌桌是主视觉，需更大）；
-        // 棋类（isBoard）：保留双栏（棋盘 + 时序并排）。
-        <div className={isBoard ? "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]" : "space-y-4"}>
+        // 棋类（isBoard）：保留双栏（棋盘 + 时序并排）；桌面端折叠时序栏时棋盘获全宽。
+        <div className={!isBoard ? "space-y-4" : timelineCollapsed ? "grid gap-4" : "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]"}>
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
           <div className="space-y-3">
             {/* 点格棋玩家卡：双方名字+比分+剩余时间（象棋钟）；当前方高亮 */}
