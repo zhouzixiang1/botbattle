@@ -2899,6 +2899,31 @@ class Store:
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
+            # 状态机校验：status 变更须合法（防止 admin PATCH 把 finished/cancelled
+            # 错误改写——曾导致 contest3 已完成 96 场却被改成 cancelled 隐藏全部结果）。
+            if "status" in fields and fields["status"]:
+                from bzplat.backend.store.schema import (
+                    CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
+                    CONTEST_RUNNING, CONTEST_REST, CONTEST_FINISHED, CONTEST_CANCELLED,
+                )
+                cur = c.execute(
+                    "SELECT status FROM contests WHERE id=?", (contest_id,)
+                ).fetchone()
+                if cur:
+                    cur_status = cur["status"]
+                    new_status = fields["status"]
+                    # 终态不可变（finished/cancelled 是终态，不允许再改）
+                    if cur_status in (CONTEST_FINISHED, CONTEST_CANCELLED) and new_status != cur_status:
+                        raise ValueError(
+                            f"赛事已处于终态 {cur_status}，不能改为 {new_status}"
+                        )
+                    # cancelled 只能从「未开始」态进入（draft/open/published）
+                    if new_status == CONTEST_CANCELLED and cur_status not in (
+                        CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
+                    ):
+                        raise ValueError(
+                            f"赛事处于 {cur_status} 态，不能取消（仅 draft/open/published 可取消）"
+                        )
             if sets:
                 vals.append(contest_id)
                 c.execute(

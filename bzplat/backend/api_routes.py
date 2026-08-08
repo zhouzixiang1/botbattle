@@ -1769,9 +1769,21 @@ async def admin_patch_contest(
             fields[tk] = tv
     if not fields:
         raise HTTPException(400, "无更新字段")
-    c = _store(request).update_contest(contest_id, **fields)
+    try:
+        c = _store(request).update_contest(contest_id, **fields)
+    except ValueError as e:
+        # 状态机校验拒绝（终态不可变 / 非法转换）
+        raise HTTPException(400, str(e))
     if not c:
         raise HTTPException(404, "比赛不存在")
+    # 审计日志：状态变更（尤其 cancelled）必须可追溯（原无审计，曾导致赛事被改
+    # cancelled 却无从查证谁操作）。非状态字段更新不打审计避免噪音。
+    if "status" in fields:
+        audit_log(
+            request, "admin_patch_contest_status", result="ok",
+            user=admin.get("username"), target=contest_id,
+            detail=fields["status"],
+        )
     return {"contest": c}
 
 

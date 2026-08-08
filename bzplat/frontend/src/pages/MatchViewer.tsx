@@ -275,10 +275,29 @@ export default function MatchViewer() {
         {typeBadge && (
           <Badge variant="outline" className={`text-[10px] ${typeBadge.cls}`}>{typeBadge.label}</Badge>
         )}
-        <Badge variant={STATUS_VARIANT[status] ?? 'secondary'} className="gap-1">
-          {status === 'live' && <span className="size-1.5 animate-pulse rounded-full bg-current" />}
-          {status === 'live' ? '直播中' : status === 'completed' ? '已完成' : status === 'aborted' ? '已中止' : status === 'match_end' ? '已结束' : status === 'error' ? '出错' : status === 'connecting' ? '连接中' : '回放'}
-        </Badge>
+        {/* 状态徽标：优先用 DB 权威字段 match.status（completed/aborted/running/pending），
+            回退到本地连接态（connecting/live/match_end/error/replay）。
+            原仅读本地 status 导致已完成的对局刷新后显示「回放」而非「已完成」。 */}
+        {(() => {
+          const dbStatus = match?.status  // 'completed'|'aborted'|'running'|'pending'（权威）
+          const showLive = status === 'live'
+          const label = showLive ? '直播中'
+            : dbStatus === 'completed' ? '已完成'
+            : dbStatus === 'aborted' ? '已中止'
+            : status === 'match_end' ? '已结束'
+            : status === 'error' ? '出错'
+            : status === 'connecting' ? '连接中'
+            : '回放'
+          const variant = showLive ? STATUS_VARIANT['live']
+            : dbStatus ? (STATUS_VARIANT[dbStatus] ?? 'secondary')
+            : (STATUS_VARIANT[status] ?? 'secondary')
+          return (
+            <Badge variant={variant ?? 'secondary'} className="gap-1">
+              {showLive && <span className="size-1.5 animate-pulse rounded-full bg-current" />}
+              {label}
+            </Badge>
+          )
+        })()}
         {match && (
           <span className="text-muted-foreground">
             {isBoard ? '步数' : '手数'}：
@@ -353,7 +372,10 @@ export default function MatchViewer() {
       {loading ? (
         <Loading text="加载中…" />
       ) : visible.length === 0 ? (
-        <Card><EmptyState text="暂无事件" icon={<History className="size-7 opacity-40" />} /></Card>
+        <Card><EmptyState
+          text={match?.status === 'aborted' ? '此对局已中止，无回放数据' : '暂无事件'}
+          icon={<History className="size-7 opacity-40" />}
+        /></Card>
       ) : (
         // 德州扑克（!isBoard）：canvas 单栏全宽 + 时序栏移下方（牌桌是主视觉，需更大）；
         // 棋类（isBoard）：保留双栏（棋盘 + 时序并排）。
