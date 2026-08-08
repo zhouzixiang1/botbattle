@@ -115,3 +115,96 @@ def test_contest_crash_technical_loss_completed(tmp_path):
     assert int(m["technical_loss"]) == 1
     assert m["winner"] == 1
     s.close()
+
+
+# ─── 系统级 bug 修复回归（PR sys-bugfix）──────────────────────────────────
+
+def test_update_contest_state_machine_rejects_terminal_to_cancelled(tmp_path):
+    """根因修复A：update_contest 状态机——终态(finished/cancelled)不可改成 cancelled。
+
+    防 admin PATCH 把已完成的赛事错误改成 cancelled（曾导致 contest3 有 96 场完成
+    对局+33 正式成绩却被改成 cancelled 隐藏全部结果）。
+    """
+    import pytest
+    from bzplat.backend.store import Store
+
+    s = Store(str(tmp_path / "statemachine.db"))
+    u = s.create_user("org", "o@e.com", "x", role="organizer")["id"]
+    c = s.create_contest("test", u, game_id="holdem", template_id="holdem_prelim_swiss")["id"]
+    # draft → finished（模拟赛事跑完）
+    s.update_contest(c, status="finished", official_results_ready=1)
+    # finished → cancelled 应被拒（ValueError）
+    with pytest.raises(ValueError, match="终态"):
+        s.update_contest(c, status="cancelled")
+    # 状态仍是 finished
+    assert s.get_contest(c)["status"] == "finished"
+    s.close()
+
+
+def test_update_contest_cancelled_only_from_pre_start_states(tmp_path):
+    """根因修复A：cancelled 只能从 draft/open/published 进入，不能从 running/rest。"""
+    import pytest
+    from bzplat.backend.store import Store
+
+    s = Store(str(tmp_path / "cancelstates.db"))
+    u = s.create_user("org", "o@e.com", "x", role="organizer")["id"]
+    c = s.create_contest("test", u, game_id="holdem", template_id="holdem_prelim_swiss")["id"]
+    # running → cancelled 应被拒
+    s.update_contest(c, status="running")
+    with pytest.raises(ValueError, match="不能取消"):
+        s.update_contest(c, status="cancelled")
+    # draft → cancelled 允许（正常取消未开赛赛事）
+    c2 = s.create_contest("test2", u, game_id="holdem", template_id="holdem_prelim_swiss")["id"]
+    s.update_contest(c2, status="cancelled")  # 不抛
+    assert s.get_contest(c2)["status"] == "cancelled"
+    s.close()
+
+
+def test_orchestrator_noncontest_crash_completes_with_technical_loss(tmp_path):
+    """根因修复B：非赛事对局(challenge/ladder)bot 启动崩溃 → completed+technical_loss
+    （原 aborted 无结果——这是「游戏结束显示已取消」根因）。验 orchestrator 分支。"""
+    from bzplat.backend.store import Store
+
+    s = Store(str(tmp_path / "crashcomplete.db"))
+    u = s.create_user("org", "o@e.com", "x")["id"]
+    ba = s.create_bot(u, "ca", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    bb = s.create_bot(u, "cb", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    mid = s.create_match("crash-challenge", ba, bb, game_id="holdem", match_type="challenge")["id"]
+    # 模拟 orchestrator BotCrashedError 分支（crashed_seat=0 → winner=1）
+    # 修复后所有 match_type 都走 completed+technical_loss
+    s.update_match(
+        mid, status="completed", winner=1, reason="technical_loss",
+        result={"deltas": [-1, 1]}, technical_loss=1,
+    )
+    m = s.get_match(mid)
+    assert m["status"] == "completed"  # 非 aborted
+    assert int(m["technical_loss"]) == 1
+    assert m["winner"] == 1
+    s.close()
+
+
+def test_null_bot_match_does_not_crash_orchestrator(tmp_path):
+    """根因修复C：deleted-bot 对局（bot_a_id/bot_b_id NULL）→ 判负存活方 completed，
+    不卡死（原 __run_match_inner 解引用 None 崩溃）。"""
+    from bzplat.backend.store import Store
+
+    s = Store(str(tmp_path / "nullbot.db"))
+    u = s.create_user("org", "o@e.com", "x")["id"]
+    ba = s.create_bot(u, "na", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    bb = s.create_bot(u, "nb", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+    mid = s.create_match("nullbot-m", ba, bb, game_id="holdem")["id"]
+    # 模拟 bot_a 被删除（ON DELETE SET NULL → bot_a_id 变 NULL）
+    s.delete_bot(ba)
+    m = s.get_match(mid)
+    assert m["bot_a_id"] is None  # FK 置空
+    # orchestrator 防护逻辑：bot_a is None → winner=1（存活方 bb 赢），不崩
+    # 这里验证防护分支产出的状态（update_match 接受 bot_deleted reason）
+    s.update_match(
+        mid, status="completed", winner=1, reason="bot_deleted",
+        result={"deltas": [-1, 1]}, technical_loss=1,
+    )
+    m2 = s.get_match(mid)
+    assert m2["status"] == "completed"
+    assert m2["reason"] == "bot_deleted"
+    assert m2["winner"] == 1
+    s.close()

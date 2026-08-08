@@ -364,9 +364,14 @@ export default function BotDetail() {
                           {fmtTime(m.created_at)}
                         </TableCell>
                         <TableCell className="max-w-[10rem]">
-                          <Link to={`/bot/${oppId}`} className="block truncate font-medium text-foreground hover:text-primary" title={oppName || `#${oppId}`}>
-                            {oppName || `#${oppId}`}
-                          </Link>
+                          {/* 对手可能已被删除（ON DELETE SET NULL → oppId 为 null）→ 不渲染链接，避免 /bot/null 死链 */}
+                          {oppId != null ? (
+                            <Link to={`/bot/${oppId}`} className="block truncate font-medium text-foreground hover:text-primary" title={oppName || `#${oppId}`}>
+                              {oppName || `#${oppId}`}
+                            </Link>
+                          ) : (
+                            <span className="block truncate text-muted-foreground" title="对手 Bot 已删除">（已删除）</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           {m.status === 'completed' ? (

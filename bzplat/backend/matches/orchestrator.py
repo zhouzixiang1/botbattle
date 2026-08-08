@@ -368,6 +368,20 @@ class MatchOrchestrator:
             return
         bot_a = self.store.get_bot(m["bot_a_id"])
         bot_b = self.store.get_bot(m["bot_b_id"])
+        # 防护：bot 被删除后（ON DELETE SET NULL → bot_a_id/bot_b_id 为 NULL），
+        # get_bot(None) 返 None，下一行解引用 binary_path 会崩。判负存活方而非卡死。
+        if bot_a is None or bot_b is None:
+            logger.warning("match %s has null bot (a=%s b=%s) — bot deleted, aborting",
+                           match_id, m.get("bot_a_id"), m.get("bot_b_id"))
+            winner = 1 if bot_a is None else 0  # 缺失方判负，存活方赢
+            ea, eb = (-1, 1) if winner == 1 else (1, -1)
+            self.store.update_match(
+                match_id, status=STATUS_COMPLETED, reason="bot_deleted",
+                winner=winner, result={"deltas": [ea, eb]},
+                technical_loss=1, ended_at=_now(),
+            )
+            self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "bot_deleted"})
+            return
         # P1：赛事对局读冻结的 bot 版本路径（pairing.bot_a_version_id → bot_versions.binary_path），
         # 不受选手中途上传新版本影响；非 contest 读 bots.binary_path（最新）。
         # runtime_mode 同源：冻结版本优先读 bot_versions.runtime_mode，否则读 bots.runtime_mode。
@@ -556,27 +570,22 @@ class MatchOrchestrator:
                     logger.debug("award_xp failed", exc_info=True)
         except BotCrashedError as exc:
             logger.warning("match %s bot crashed — %s", match_id, exc)
-            # 赛事对局崩溃 → 技术判负（completed + winner=对手 + technical_loss=1），
-            # 不再静默吞分（aborted 在 standings 不计分会导致赛事卡住/丢分）。
+            # Bot 启动崩溃 → 技术判负（completed + winner=对手 + technical_loss=1）。
+            # 统一所有对局类型（原仅 contest 走 completed，challenge/ladder/table 走 aborted
+            # 无结果无胜者——这是「游戏结束显示已取消而非已完成」的根因）。
             # 崩溃方从 exc.crashed_seat 取（runner 在 start_session 失败时注解）；
             # 未注解（游戏内崩溃已由引擎处理产出正常 result，不会到这；bot_a start
             # 失败未注解→默认 0）。
             crashed_seat = getattr(exc, "crashed_seat", None) or 0
             winner = 1 - crashed_seat
             ea, eb = (-1, 1) if crashed_seat == 0 else (1, -1)
-            if m.get("match_type") == TYPE_CONTEST:
-                self.store.update_match(
-                    match_id, status=STATUS_COMPLETED, reason="technical_loss",
-                    winner=winner,
-                    result={"deltas": [ea, eb]},
-                    technical_loss=1, ended_at=_now(),
-                )
-                self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "technical_loss"})
-            else:
-                self.store.update_match(
-                    match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now(),
-                )
-                self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
+            self.store.update_match(
+                match_id, status=STATUS_COMPLETED, reason="technical_loss",
+                winner=winner,
+                result={"deltas": [ea, eb]},
+                technical_loss=1, ended_at=_now(),
+            )
+            self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "technical_loss"})
         except Exception as exc:
             logger.exception("match %s failed", match_id)
             self.store.update_match(
