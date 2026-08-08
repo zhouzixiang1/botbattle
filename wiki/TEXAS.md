@@ -377,10 +377,10 @@ print(json.dumps({"response": action}))
 **请求信封（平台 → Bot，LongRunning 首回合 / Traditional 每回合）：**
 
 ```json
-{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],"to_call":50,"street_bet":50,"current_bet":100,"sb":50,"bb":100,"opp_chips":19900}],"responses":[]}
+{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}
 ```
 
-核心字段（全名，对齐 Botzone）：`num_players` / `dealer_id` / `my_id` / `my_chips` / `my_cards`(0-51) / `public_cards`(0-51) / `history`(对象数组) / `hand` / `max_hand` / `total_win_chips` / `total_win_games`。平台扩展字段（标准 Bot 可忽略）：`to_call` / `street_bet` / `current_bet` / `sb` / `bb` / `opp_chips`。
+核心字段（全名，对齐 Botzone TexasHoldem2p 11 字段）：`num_players` / `dealer_id` / `my_id` / `my_chips` / `my_cards`(0-51) / `public_cards`(0-51) / `history`(对象数组) / `hand` / `max_hand` / `total_win_chips` / `total_win_games`。**不发送任何平台扩展字段**——需要跟注额/盲注/对手筹码的 Bot 从 `history` + `my_chips` 自行重放推导。
 
 LongRunning 后续回合单 request：`{"request":{...}}`。
 
@@ -390,8 +390,8 @@ LongRunning 后续回合单 request：`{"request":{...}}`。
 |----------|------|
 | `-1` | fold |
 | `-2` | allin |
-| `0` | call / check（平台按 `to_call` 合法性判定） |
-| `>0` | raise **额外下注筹码**（= 目标总额 − 本街已投 `street_bet`） |
+| `0` | call / check（平台按当前下注合法性自动判定为跟注或过牌） |
+| `>0` | raise **额外下注筹码**（= 目标总额 − 本街已投筹码） |
 
 ```json
 {"response":250}

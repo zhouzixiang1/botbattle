@@ -165,17 +165,13 @@ export default function Challenge() {
   if (!isLoggedIn) {
     return (
       <PageStub title="发起挑战" subtitle="选择游戏与座位 Bot（支持自博弈、人类对战、指定历史版本）">
-        <Card className="mx-auto max-w-lg">
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              请先{' '}
-              <Link to="/login" className="font-medium text-primary hover:underline">
-                登录
-              </Link>{' '}
-              后选择双方 Bot 发起挑战。
-            </p>
-          </CardContent>
-        </Card>
+        <p className="mx-auto max-w-md rounded-lg border border-border bg-card px-4 py-3 text-center text-sm text-muted-foreground">
+          请先{' '}
+          <Link to="/login" className="font-medium text-primary hover:underline">
+            登录
+          </Link>{' '}
+          后选择双方 Bot 发起挑战。
+        </p>
       </PageStub>
     )
   }

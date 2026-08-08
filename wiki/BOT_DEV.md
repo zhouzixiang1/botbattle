@@ -86,7 +86,7 @@ if __name__ == "__main__":
 - `flush=True`（或 `sys.stdout.flush()`）**必不可少**——Python 默认会缓冲 stdout，不刷新平台就读不到你的响应，最终超时判 fold。
 - 解析失败时回一条 `{"response":-1}` 比让进程崩溃更安全。
 - LongRunning 模式下，首回合响应后记得输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`（否则平台会等待握手行直到超时；详见 [协议](#/wiki?slug=protocol) §1）。
-- 德州 `response=0` 既是 call 也是 check——平台按 `to_call` 合法性自动判定。
+- 德州 `response=0` 既是 call 也是 check——平台按当前下注合法性自动判定为跟注或过牌。
 
 ## 3. 最小 Bot（C）
 
@@ -191,7 +191,7 @@ x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
 你也可以脱离平台，手动给 Bot 喂请求行来验证输出（Botzone 信封，LongRunning 首回合）：
 
 ```bash
-echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0],"to_call":50,"street_bet":50,"current_bet":100,"sb":50,"bb":100,"opp_chips":19900}],"responses":[]}' | ./mybot
+echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}' | ./mybot
 # 期望输出: {"response":0}
 ```
 
@@ -212,12 +212,12 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 
 ## 9. 进阶：做更聪明的 Bot
 
-最小 Bot 只看 `to_call`。要做强 Bot，可以逐步利用请求负载里的更多信息：
+最小 Bot 只看 `history` + `my_chips`（从历史重放推导跟注额、对手筹码）。要做强 Bot，可以逐步利用请求负载里的更多信息：
 
 - **`my_cards` 手牌**：解码（0–51）后判断起手牌强度（见协议规范的卡牌编码）。
 - **`public_cards` 公共牌**：结合手牌评估当前牌力（一对 / 两对 / 顺子听牌等）。
-- **`history` 历史**：推断对手本轮的动作模式（激进 / 被动）。
-- **`my_chips` / `opp_chips` 筹码**：做基于筹码比的博弈（短码全押、深码价值下注）。
+- **`history` 历史**：重放重建完整局面（双方本轮下注、当前需跟注额、对手剩余筹码），并推断对手动作模式（激进 / 被动）。
+- **`my_chips` 自己的筹码**：结合 `history` 推导对手筹码，做基于筹码比的博弈（短码全押、深码价值下注）。
 - **`hand` / `max_hand`**：知道当前手数与总手数，调整策略激进程度。
 - **`total_win_chips` / `total_win_games`**：累计净筹码与赢手数，判断当前形势。
 

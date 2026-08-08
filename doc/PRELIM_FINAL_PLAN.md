@@ -1,7 +1,7 @@
 # 预赛与决赛赛事体系实施计划（历史归档）
 
 > **归档说明（2026-08-03）**：本文件为预赛/决赛体系落地过程中的**实施计划草稿**，仅作历史与决策追溯。  
-> **现行权威文档**：[`wiki/CONTEST_FORMAT.md`](../wiki/CONTEST_FORMAT.md)、[`doc/DESIGN.md`](./DESIGN.md)。  
+> **现行权威文档**：[`wiki/GUIDE.md`](../wiki/GUIDE.md)、[`doc/DESIGN.md`](./DESIGN.md)。  
 > 文中「现状差距」表格描述的是落地**前**代码事实，勿当作当前实现。
 
 | 项 | 内容 |
@@ -11,7 +11,7 @@
 | 范围 | 德州扑克内置预赛/决赛模板 + 赛事身份/冻结/排名/组织者名单等底座 |
 | 工作流 | 从 `main` 切特性分支，分 PR 合并；禁止本地直合 main |
 | 相关代码 | `bzplat/backend/contests/`、`games/holdem/`、`matches/`、`runtime/`、`store/`、`frontend/src/pages/Contest*.tsx` |
-| 相关文档 | 以 wiki/CONTEST_FORMAT、doc/DESIGN 为准（本文件不再同步维护） |
+| 相关文档 | 以 wiki/GUIDE、doc/DESIGN 为准（本文件不再同步维护） |
 
 ---
 
@@ -185,7 +185,7 @@
 
 **文档**
 
-- `wiki/CONTEST_FORMAT.md`：双 contest、单阶段瑞士、决赛无报名上限、组织者名单、ETA。
+- `wiki/GUIDE.md`：双 contest、单阶段瑞士、决赛无报名上限、组织者名单、ETA。
 - `doc/RUNTIME.md`：若调整 CPU/并发。
 - `doc/DESIGN.md`、`doc/TESTING.md`、`README.md` 能力一览。
 - 本文件在合并 P5 后可将状态改为「已落地」，并在 DESIGN 中吸收稳定架构段。
