@@ -14,6 +14,7 @@
  * GameCanvasRenderer 接口（Task 2）。
  */
 import type { RawEvent } from '@/games/base'
+import { fitText } from '@/games/base'
 import type { SeatState } from './reducer'
 import { reduceHoldemEvents } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta, SeatInfo } from '@/games/canvas-types'
@@ -39,22 +40,6 @@ const layout = (W: number) => ({
   /** 缩放因子：W/基线宽，用于把固定像素的 fitText maxWidth 等比放大。 */
   s: W / W0,
 })
-
-/**
- * 按当前 ctx 字体测量文本宽度，超出 maxWidth 时尾部加「…」截断。
- * 用于 canvas 内固定布局区域（座位名/胜者/底池等），防止长文本越出牌桌椭圆或与相邻元素重叠。
- */
-function fitText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
-  if (ctx.measureText(text).width <= maxWidth) return text
-  // 二分找最长前缀（保留 1 字符给「…」）
-  let lo = 1, hi = text.length, ans = 1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (ctx.measureText(text.slice(0, mid) + '…').width <= maxWidth) { ans = mid; lo = mid + 1 }
-    else hi = mid - 1
-  }
-  return text.slice(0, ans) + '…'
-}
 
 interface HoldemScene extends Scene {
   hand: number

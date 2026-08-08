@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 
@@ -105,24 +105,24 @@ export default function MatchesTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <table className="w-full min-w-[52rem] text-left text-sm">
-          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
-            <tr>
-              <th className="px-3 py-2.5">对局 ID</th>
-              <th className="px-3 py-2.5">对阵</th>
-              <th className="px-3 py-2.5">类型</th>
-              <th className="px-3 py-2.5">状态</th>
-              <th className="px-3 py-2.5">手数</th>
-              <th className="px-3 py-2.5">盈亏</th>
-              <th className="px-3 py-2.5">时间</th>
-              <th className="px-3 py-2.5">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
+        <Table className="min-w-[48rem]">
+          <TableHeader>
+            <TableRow>
+              <TableHead className="px-3 py-2.5">对局 ID</TableHead>
+              <TableHead className="px-3 py-2.5">对阵</TableHead>
+              <TableHead className="px-3 py-2.5">类型</TableHead>
+              <TableHead className="px-3 py-2.5">状态</TableHead>
+              <TableHead className="px-3 py-2.5">手数</TableHead>
+              <TableHead className="px-3 py-2.5">盈亏</TableHead>
+              <TableHead className="px-3 py-2.5">时间</TableHead>
+              <TableHead className="px-3 py-2.5">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {matches.map((m) => (
-              <tr key={m.id} className="hover:bg-accent">
-                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</td>
-                <td className="max-w-[16rem] px-3 py-2 text-foreground">
+              <TableRow key={m.id} className="hover:bg-accent">
+                <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</TableCell>
+                <TableCell className="max-w-[16rem] px-3 py-2 text-foreground">
                   <div className="flex min-w-0 items-center gap-1 truncate">
                     <span className="min-w-0 truncate" title={m.bot_a_name || `#${m.bot_a_id}`}>
                       {m.bot_a_name || `#${m.bot_a_id}`}
@@ -132,26 +132,26 @@ export default function MatchesTab() {
                       {m.bot_b_name || `#${m.bot_b_id}`}
                     </span>
                   </div>
-                </td>
-                <td className="px-3 py-2 text-xs text-muted-foreground">{m.match_type}</td>
-                <td className="px-3 py-2">
+                </TableCell>
+                <TableCell className="px-3 py-2 text-xs text-muted-foreground">{m.match_type}</TableCell>
+                <TableCell className="px-3 py-2">
                   <StatusBadge status={m.status} />
-                </td>
-                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                </TableCell>
+                <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {m.result?.hands_played ?? 0}
-                </td>
-                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                </TableCell>
+                <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {m.result?.deltas?.[0] ?? 0}/{m.result?.deltas?.[1] ?? 0}
                   {m.reason && m.reason !== 'completed' && (
                     <div className="text-[10px] text-destructive">{m.reason}</div>
                   )}
-                </td>
-                <td className="px-3 py-2 text-xs text-muted-foreground">{m.created_at}</td>
-                <td className="px-3 py-2">
+                </TableCell>
+                <TableCell className="px-3 py-2 text-xs text-muted-foreground">{m.created_at}</TableCell>
+                <TableCell className="px-3 py-2">
                   <div className="flex gap-1">
                     <Link
                       to={`/match/${m.id}`}
-                      className="rounded border border-input bg-card px-2 py-0.5 text-xs text-primary hover:bg-accent"
+                      className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-primary hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       查看
                     </Link>
@@ -160,17 +160,17 @@ export default function MatchesTab() {
                         type="button"
                         disabled={busyId === m.id}
                         onClick={() => void abort(m.id)}
-                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         中止
                       </button>
                     )}
                   </div>
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
         {matches.length === 0 && <EmptyState text="无对局" />}
       </div>
       <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />

@@ -3,6 +3,7 @@
  * 复用 reduceGomokuEvents（不重写归约）；棋子落子缩放+淡入动画；最后一手标记脉冲。
  */
 import type { RawEvent } from '@/games/base'
+import { fitText, scaleFactor } from '@/games/base'
 import { getGame } from '@/games'
 import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
@@ -39,15 +40,15 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     return { animation: 'none' }
   },
   draw(ctx, prev, next, t, opts) {
-    const { cell, ox, oy, cx, cy } = gomokuLayout(opts.width, opts.height, next.size)
+    const { cell, cx, cy } = gomokuLayout(opts.width, opts.height, next.size)
     const W = opts.width
     const H = opts.height
     const size = next.size
 
-    // 清屏 + 木色背景
+    // 清屏 + 木色背景（填满整个 canvas，避免方形棋盘两侧透明留白）
     ctx.clearRect(0, 0, W, H)
     ctx.fillStyle = '#e8c98a'
-    ctx.fillRect(ox - cell / 2, oy - cell / 2, cell * (size - 1) + cell, cell * (size - 1) + cell)
+    ctx.fillRect(0, 0, W, H)
 
     // 网格线
     ctx.strokeStyle = '#8b6914'
@@ -55,6 +56,22 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     for (let i = 0; i < size; i++) {
       ctx.beginPath(); ctx.moveTo(cx(0), cy(i)); ctx.lineTo(cx(size - 1), cy(i)); ctx.stroke()
       ctx.beginPath(); ctx.moveTo(cx(i), cy(0)); ctx.lineTo(cx(i), cy(size - 1)); ctx.stroke()
+    }
+
+    // 星位（天元+星）：size≥9 时在 (size-1)/4 的倍数处画实心点。
+    // 真实棋盘视觉必备——无星位的棋盘「看起来没做完」。
+    if (size >= 9) {
+      const step = (size - 1) / 4
+      const starPos = [step, step * 2, step * 3]
+      ctx.fillStyle = '#8b6914'
+      for (const sx of starPos) {
+        for (const sy of starPos) {
+          const ix = Math.round(sx), iy = Math.round(sy)
+          ctx.beginPath()
+          ctx.arc(cx(ix), cy(iy), Math.max(2, cell * 0.1), 0, Math.PI * 2)
+          ctx.fill()
+        }
+      }
     }
 
     // 棋子（新棋子缩放+淡入：r 从 0→cell*0.42，alpha 0→1）
@@ -90,9 +107,10 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
       }
     }
 
-    // 顶部信息：步数 / 待行 / 胜负 + 双方 BOT 名
+    // 顶部信息：步数 / 待行 / 胜负 + 双方 BOT 名（字体/偏移按 s=W/W0 缩放，fitText 防溢出）
+    const s = scaleFactor(W)
     ctx.fillStyle = '#5b4413'
-    ctx.font = 'bold 15px "DM Sans", sans-serif'
+    ctx.font = `bold ${Math.round(15 * s)}px "DM Sans", sans-serif`
     ctx.textAlign = 'left'
     const sc = getGame('gomoku').seatColors ?? ['黑', '白']
     const name0 = seatShort(opts.seats?.[0], sc[0] ?? '黑')
@@ -102,9 +120,9 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
         ? '平局'
         : `${next.winner === 0 ? name0 : name1}胜${next.reason ? `（${next.reason}）` : ''}`)
       : `待行：${next.toAct === 0 ? name0 : next.toAct === 1 ? name1 : '—'}`
-    ctx.fillText(`五子棋 · ${size}×${size} · 第 ${next.moveCount} 手 · ${turnLabel}`, 12, 24)
-    ctx.font = '12px "DM Sans", sans-serif'
-    ctx.fillText(`● ${name0}（黑）  ○ ${name1}（白）`, 12, 42)
+    ctx.fillText(fitText(ctx, `五子棋 · ${size}×${size} · 第 ${next.moveCount} 手 · ${turnLabel}`, W - 24 * s), 12 * s, 24 * s)
+    ctx.font = `${Math.round(12 * s)}px "DM Sans", sans-serif`
+    ctx.fillText(fitText(ctx, `● ${name0}（黑）  ○ ${name1}（白）`, W - 24 * s), 12 * s, 42 * s)
   },
   pick(canvasX, canvasY, scene, opts) {
     const s = scene as GomokuScene
@@ -127,9 +145,9 @@ function seatShort(
   return fallback
 }
 
-/** gomoku 棋盘布局（draw 与 pick 共用，保证坐标一致）。 */
+/** gomoku 棋盘布局（draw 与 pick 共用，保证坐标一致）。margin 按宽比例缩放（对齐 holdem）。 */
 function gomokuLayout(W: number, H: number, size: number) {
-  const margin = 40
+  const margin = Math.max(24, W * 0.05)
   const cell = Math.max(8, Math.floor(Math.min(W - margin * 2, H - margin * 2) / (size + 1)))
   const boardPx = cell * (size - 1)
   const ox = (W - boardPx) / 2

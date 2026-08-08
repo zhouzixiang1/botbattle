@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
+import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
@@ -47,7 +47,7 @@ export default function ContestsTab() {
   // 分页
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const perPage = 50
+  const perPage = 20
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -147,45 +147,45 @@ export default function ContestsTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <table className="w-full min-w-[46rem] text-left text-sm">
-          <thead className="border-b border-border bg-muted text-xs uppercase text-muted-foreground">
-            <tr>
-              <th className="px-3 py-2.5">ID</th>
-              <th className="px-3 py-2.5">标题</th>
-              <th className="px-3 py-2.5">模板/游戏</th>
-              <th className="px-3 py-2.5">状态</th>
-              <th className="px-3 py-2.5">时间编排</th>
-              <th className="px-3 py-2.5">创建时间</th>
-              <th className="px-3 py-2.5">操作</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
+        <Table className="min-w-[48rem]">
+          <TableHeader>
+            <TableRow>
+              <TableHead className="px-3 py-2.5">ID</TableHead>
+              <TableHead className="px-3 py-2.5">标题</TableHead>
+              <TableHead className="px-3 py-2.5">模板/游戏</TableHead>
+              <TableHead className="px-3 py-2.5">状态</TableHead>
+              <TableHead className="px-3 py-2.5">时间编排</TableHead>
+              <TableHead className="px-3 py-2.5">创建时间</TableHead>
+              <TableHead className="px-3 py-2.5">操作</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {contests.map((c) => (
               <Fragment key={c.id}>
-                <tr className="hover:bg-accent">
-                  <td className="px-3 py-2 font-mono text-muted-foreground">{c.id}</td>
-                  <td className="px-3 py-2 font-medium text-foreground">{c.title}</td>
-                  <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                <TableRow className="hover:bg-accent">
+                  <TableCell className="px-3 py-2 font-mono text-muted-foreground">{c.id}</TableCell>
+                  <TableCell className="px-3 py-2 font-medium text-foreground">{c.title}</TableCell>
+                  <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                     {c.template_id || '—'} / {c.game_id || 'holdem'}
-                  </td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell className="px-3 py-2">
                     <StatusBadge status={c.status} />
-                  </td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">
+                  </TableCell>
+                  <TableCell className="px-3 py-2 text-xs text-muted-foreground">
                     {c.registration_opens_at && <div>报名: {fmtTime(c.registration_opens_at)}</div>}
                     {c.registration_closes_at && <div>截止: {fmtTime(c.registration_closes_at)}</div>}
                     {c.starts_at && <div className="font-medium text-foreground">开赛: {fmtTime(c.starts_at)}</div>}
                     {!c.registration_opens_at && !c.registration_closes_at && !c.starts_at && <span>—</span>}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">{c.created_at}</td>
-                  <td className="px-3 py-2">
+                  </TableCell>
+                  <TableCell className="px-3 py-2 text-xs text-muted-foreground">{c.created_at}</TableCell>
+                  <TableCell className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
                       {NEXT_STATUS[c.status] && (
                         <button
                           type="button"
                           disabled={busyId === c.id}
                           onClick={() => void patch(c.id, { status: NEXT_STATUS[c.status] })}
-                          className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
+                          className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           推进到 {NEXT_STATUS[c.status]}
                         </button>
@@ -199,7 +199,7 @@ export default function ContestsTab() {
                               .then(load)
                               .catch((e) => setError(errMsg(e, '结束休息失败')))
                           }
-                          className="rounded border border-primary/30 bg-card px-2 py-0.5 text-xs text-primary hover:bg-primary/10"
+                          className="inline-flex h-8 items-center rounded-md border border-primary/30 bg-primary/10 px-3 text-xs text-primary hover:bg-primary/20 focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           结束休息
                         </button>
@@ -207,7 +207,7 @@ export default function ContestsTab() {
                       <button
                         type="button"
                         onClick={() => void showEntries(c)}
-                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"
+                        className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         报名
                       </button>
@@ -215,57 +215,57 @@ export default function ContestsTab() {
                         type="button"
                         disabled={busyId === c.id}
                         onClick={() => void del(c.id)}
-                        className="rounded border border-input bg-card px-2 py-0.5 text-xs text-destructive hover:bg-destructive/10"
+                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         删除
                       </button>
                     </div>
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
                 {expand === c.id && (
-                  <tr key={`${c.id}-e`} className="bg-muted/60">
-                    <td colSpan={7} className="px-6 py-3">
+                  <TableRow key={`${c.id}-e`} className="bg-muted/60">
+                    <TableCell colSpan={7} className="px-6 py-3">
                       {/* 批量指派（测试期 admin 派遣参赛者+Bot；正式版用户自己报名） */}
                       <AssignPanel contestId={c.id} gameId={c.game_id} onDone={() => void loadEntries(c.id)} />
                       {entries.length === 0 ? (
                         <EmptyState text="无报名" />
                       ) : (
-                        <table className="w-full text-xs">
-                          <thead className="text-muted-foreground">
-                            <tr>
-                              <th className="px-2 py-1 text-left">用户</th>
-                              <th className="px-2 py-1 text-left">Bot</th>
-                              <th className="px-2 py-1 text-left">报名时间</th>
-                              <th className="px-2 py-1 text-left">操作</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-border">
+                        <Table className="min-w-[48rem]">
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="px-2 py-1 text-left">用户</TableHead>
+                              <TableHead className="px-2 py-1 text-left">Bot</TableHead>
+                              <TableHead className="px-2 py-1 text-left">报名时间</TableHead>
+                              <TableHead className="px-2 py-1 text-left">操作</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
                             {entries.map((e) => (
-                              <tr key={e.id} className="font-mono text-muted-foreground">
-                                <td className="px-2 py-1">#{e.user_id}</td>
-                                <td className="px-2 py-1">#{e.bot_id}</td>
-                                <td className="px-2 py-1">{e.registered_at}</td>
-                                <td className="px-2 py-1">
+                              <TableRow key={e.id} className="font-mono text-muted-foreground">
+                                <TableCell className="px-2 py-1">#{e.user_id}</TableCell>
+                                <TableCell className="px-2 py-1">#{e.bot_id}</TableCell>
+                                <TableCell className="px-2 py-1">{e.registered_at}</TableCell>
+                                <TableCell className="px-2 py-1">
                                   <button
                                     type="button"
                                     onClick={() => void removeEntry(c.id, e.user_id)}
-                                    className="rounded border border-input bg-card px-2 py-0.5 text-destructive hover:bg-destructive/10"
+                                    className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                                   >
                                     移除
                                   </button>
-                                </td>
-                              </tr>
+                                </TableCell>
+                              </TableRow>
                             ))}
-                          </tbody>
-                        </table>
+                          </TableBody>
+                        </Table>
                       )}
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 )}
               </Fragment>
             ))}
-          </tbody>
-        </table>
+          </TableBody>
+        </Table>
         {contests.length === 0 && <EmptyState text="无比赛" />}
       </div>
       <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
@@ -305,7 +305,7 @@ function AssignPanel({ contestId, gameId, onDone }: { contestId: number; gameId?
         placeholder="用户/Bot 名前缀（可选，如 load_）"
         value={prefix}
         onChange={(e) => setPrefix(e.target.value)}
-        className="h-7 w-56 rounded border border-input bg-background px-2 text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        className="h-9 w-56 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring outline-none"
       />
       <button
         type="button"

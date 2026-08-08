@@ -168,7 +168,7 @@ export default function JudgeTab() {
           </button>
           {showCode && (
             <article
-              className="mt-3 card p-4 sm:p-6"
+              className="mt-3 rounded-xl border border-border bg-card p-4 sm:p-6"
               dangerouslySetInnerHTML={{ __html: renderMarkdown(markdown) }}
             />
           )}

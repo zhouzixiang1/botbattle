@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, errMsg } from '../../api'
-import { MetricCard, Card, EmptyState, Loading, ErrorMsg, RefreshBtn } from './ui'
+import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn } from './ui'
 
 interface Stats {
   users: number
@@ -67,7 +67,8 @@ export default function Dashboard() {
       </div>
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        <Card title="最近注册用户">
+        <Card>
+          <CardHeader><CardTitle>最近注册用户</CardTitle></CardHeader>
           {stats.recent_users.length === 0 ? (
             <EmptyState text="暂无用户" />
           ) : (
@@ -91,7 +92,8 @@ export default function Dashboard() {
           )}
         </Card>
 
-        <Card title="对局状态分布">
+        <Card>
+          <CardHeader><CardTitle>对局状态分布</CardTitle></CardHeader>
           <div className="space-y-2">
             <DistRow label="完成" n={stats.matches_completed} total={stats.matches} color="bg-success" />
             <DistRow label="运行中" n={stats.matches_running} total={stats.matches} color="bg-primary" />

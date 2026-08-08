@@ -315,7 +315,7 @@ export default function ContestDetail() {
         <CardContent className="py-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0 flex-1 overflow-hidden">
-              <h2 className="break-words text-lg font-semibold text-foreground [overflow-wrap:anywhere]">
+              <h2 className="break-words text-xl font-semibold text-foreground [overflow-wrap:anywhere]">
                 {contest.title}
               </h2>
               <p className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap break-words text-sm text-muted-foreground [overflow-wrap:anywhere]">
