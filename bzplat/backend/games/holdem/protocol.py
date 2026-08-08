@@ -9,11 +9,12 @@
 - **Response 是裸整数**：``-1``=fold, ``-2``=allin, ``0``=call/check, ``>0``=raise
   **额外加注量**（=「需要额外下注的筹码」= raise_to_total - 当前已下注额）。
 - **牌编码 0-51**：``card % 4`` = 花色（0♥ 1♦ 2♠ 3♣），``card // 4 + 2`` = 点数（2..14）。
-  注意 Botzone 花色顺序与平台内部不同（内部 0♠1♥2♦3♣），这里在编码边界做映射。
+  裁判 Card（holdem_judge.Card）的花色编码恰与 Botzone 线协议一致（Suit: 0♥ 1♦ 2♠ 3♣），
+  故 encode/decode 无需映射表——``encode_card(card) == card.to_int()``。
 - **history 对象**：``{"round": 0/1/2/3, "player_id": 0/1, "action": <裸整数>,
   "action_type": "fold"/"call"/"check"/"raise"/"allin"}``。
 
-引擎内部仍用 raise-to-total 语义（min_raise_to = 2×current_bet），转换发生在
+引擎内部用 raise-to-total 语义（min_raise_to = 2×current_bet），转换发生在
 本协议边界：``build_act_request`` 写 history.action 时把引擎的 raise-to 换算成
 delta；``parse_response`` 读 Bot 的 raise delta 后引擎再转成 raise-to-total 校验。
 """
@@ -23,7 +24,7 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
-from bzplat.backend.games.holdem.cards import Card
+from bzplat.backend.games.holdem.holdem_judge import Card, Suit
 
 PROTOCOL_VERSION = 2  # Botzone 标准（v1 是旧的紧凑协议，已废弃）
 
@@ -58,23 +59,22 @@ _INT_TO_ACTION = {
 # 街道 → Botzone history.round（0=preflop 1=flop 2=turn 3=river）
 STREET_TO_ROUND = {"preflop": 0, "flop": 1, "turn": 2, "river": 3}
 
-# 内部花色（0♠ 1♥ 2♦ 3♣）→ Botzone 花色（0♥ 1♦ 2♠ 3♣）
-# Botzone: card % 4 == 0 → ♥, 1 → ♦, 2 → ♠, 3 → ♣
-_SUIT_TO_BOTZONE = {0: 2, 1: 0, 2: 1, 3: 3}
-_BOTZONE_TO_SUIT = {v: k for k, v in _SUIT_TO_BOTZONE.items()}
+# 裁判 Card 花色编码（Suit: 0♥ 1♦ 2♠ 3♣）== Botzone 线协议花色编码，无需映射。
 
 
 def encode_card(card: Card) -> int:
-    """Card → Botzone 整数 ``rank*4 + botzone_suit``（0-51）。"""
-    return int(card.rank) * 4 + _SUIT_TO_BOTZONE[int(card.suit)]
+    """Card → Botzone 整数 ``(number-2)*4 + suit``（0-51）。
+
+    裁判 Card 的 ``to_int()`` 即此公式（花色编码与 Botzone 一致，无映射表）。
+    """
+    return card.to_int()
 
 
 def decode_card(n: int) -> Card:
-    """Botzone 整数 → Card（内部花色）。"""
+    """Botzone 整数 → Card。``n%4``=suit(0♥1♦2♠3♣)，``n//4+2``=number(2..14)。"""
     if not isinstance(n, int) or isinstance(n, bool) or n < 0 or n > 51:
         raise ValueError(f"invalid card_int: {n}")
-    rank, bs = divmod(n, 4)
-    return Card(rank, _BOTZONE_TO_SUIT[bs])
+    return Card.from_int(n)
 
 
 def encode_cards(cards: Sequence[Card]) -> list[int]:

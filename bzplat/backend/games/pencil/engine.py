@@ -1,9 +1,9 @@
 """点格棋引擎（适配层）——对齐 Botzone Pencil 官方 C++ 裁判。
 
 本文件是**平台协议适配层**：调 decide → 经 protocol 构造请求/解析响应 → 驱动纯裁判
-（点格棋裁判程序.py 的 PencilBoard）做规则判定 → emit 平台事件 → 返回 MatchResult。
+（pencil_judge.py 的 PencilBoard）做规则判定 → emit 平台事件 → 返回 MatchResult。
 
-纯游戏规则（交错网格/占边/成格连走/多数胜/归属追踪）在 点格棋裁判程序.py，0 平台依赖。
+纯游戏规则（交错网格/占边/成格连走/多数胜/归属追踪）在 pencil_judge.py，0 平台依赖。
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from bzplat.backend.games.pencil.result import MatchResult, RoundResult
 from bzplat.backend.games.pencil import protocol as proto
-from bzplat.backend.games.pencil.点格棋裁判程序 import (
+from bzplat.backend.games.pencil.pencil_judge import (
     DEFAULT_N,
     PencilBoard,
 )

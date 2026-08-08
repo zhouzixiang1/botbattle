@@ -6,19 +6,12 @@ import asyncio
 
 import pytest
 
-from bzplat.backend.games.holdem.cards import (
-    CAT_FLUSH,
-    CAT_FULL_HOUSE,
-    CAT_PAIR,
-    CAT_QUADS,
-    CAT_STRAIGHT,
-    CAT_STRAIGHT_FLUSH,
-    CAT_TRIPS,
-    CAT_TWO_PAIR,
+from bzplat.backend.games.holdem.holdem_judge import (
     Card,
-    Deck,
-    compare_hands,
-    evaluate,
+    HandType,
+    Suit,
+    compare_full_cards,
+    hand_type_of_cards,
 )
 from bzplat.backend.games.holdem.engine import (
     BIG_BLIND,
@@ -49,59 +42,47 @@ def resp(action: str, *, raise_to: int | None = None, street_bet: int = 0) -> di
     raise ValueError(f"unknown action: {action}")
 
 
-def test_deck_size_and_unique():
-    d = Deck()
-    assert len(d) == 52
-    cards = d.deal(52)
-    assert len(cards) == 52
-    assert len(set(cards)) == 52
-    assert len(d) == 0
-
-
 def test_hand_evaluation_pairwise():
+    """裁判 holdem_judge 牌型评估（hand_type_of_cards + compare_full_cards）。"""
     # Royal / straight flush beats quads
-    sf = [Card(12, 0), Card(11, 0), Card(10, 0), Card(9, 0), Card(8, 0)]
-    quads = [Card(12, 0), Card(12, 1), Card(12, 2), Card(12, 3), Card(2, 0)]
-    assert evaluate(sf)[0] == CAT_STRAIGHT_FLUSH
-    assert evaluate(quads)[0] == CAT_QUADS
-    assert compare_hands(sf, quads) == 1
+    sf = [Card(Suit.SPADE, 14), Card(Suit.SPADE, 13), Card(Suit.SPADE, 12), Card(Suit.SPADE, 11), Card(Suit.SPADE, 10)]
+    quads = [Card(Suit.SPADE, 14), Card(Suit.HEART, 14), Card(Suit.DIAMOND, 14), Card(Suit.CLUB, 14), Card(Suit.SPADE, 4)]
+    assert hand_type_of_cards(sf) == HandType.STRAIGHT_FLUSH
+    assert hand_type_of_cards(quads) == HandType.FOUR_OF_A_KIND
+    assert compare_full_cards(sf, quads) > 0
 
     # Full house beats flush
-    fh = [Card(8, 0), Card(8, 1), Card(8, 2), Card(3, 0), Card(3, 1)]
-    fl = [Card(12, 1), Card(10, 1), Card(7, 1), Card(4, 1), Card(2, 1)]
-    assert evaluate(fh)[0] == CAT_FULL_HOUSE
-    assert evaluate(fl)[0] == CAT_FLUSH
-    assert compare_hands(fh, fl) == 1
+    fh = [Card(Suit.SPADE, 10), Card(Suit.HEART, 10), Card(Suit.DIAMOND, 10), Card(Suit.SPADE, 5), Card(Suit.HEART, 5)]
+    fl = [Card(Suit.HEART, 14), Card(Suit.HEART, 12), Card(Suit.HEART, 9), Card(Suit.HEART, 6), Card(Suit.HEART, 4)]
+    assert hand_type_of_cards(fh) == HandType.FULL_HOUSE
+    assert hand_type_of_cards(fl) == HandType.FLUSH
+    assert compare_full_cards(fh, fl) > 0
 
     # Straight beats trips
-    st = [Card(4, 0), Card(5, 1), Card(6, 2), Card(7, 0), Card(8, 1)]
-    tr = [Card(9, 0), Card(9, 1), Card(9, 2), Card(2, 0), Card(3, 1)]
-    assert evaluate(st)[0] == CAT_STRAIGHT
-    assert evaluate(tr)[0] == CAT_TRIPS
-    assert compare_hands(st, tr) == 1
+    st = [Card(Suit.SPADE, 6), Card(Suit.HEART, 7), Card(Suit.DIAMOND, 8), Card(Suit.SPADE, 9), Card(Suit.HEART, 10)]
+    tr = [Card(Suit.SPADE, 11), Card(Suit.HEART, 11), Card(Suit.DIAMOND, 11), Card(Suit.SPADE, 4), Card(Suit.HEART, 5)]
+    assert hand_type_of_cards(st) == HandType.STRAIGHT
+    assert hand_type_of_cards(tr) == HandType.THREE_OF_A_KIND
+    assert compare_full_cards(st, tr) > 0
 
     # Two pair beats pair
-    tp = [Card(10, 0), Card(10, 1), Card(5, 0), Card(5, 1), Card(2, 0)]
-    op = [Card(12, 0), Card(12, 1), Card(8, 0), Card(7, 1), Card(3, 0)]
-    assert evaluate(tp)[0] == CAT_TWO_PAIR
-    assert evaluate(op)[0] == CAT_PAIR
-    assert compare_hands(tp, op) == 1
+    tp = [Card(Suit.SPADE, 12), Card(Suit.HEART, 12), Card(Suit.SPADE, 7), Card(Suit.HEART, 7), Card(Suit.SPADE, 4)]
+    op = [Card(Suit.SPADE, 14), Card(Suit.HEART, 14), Card(Suit.SPADE, 10), Card(Suit.HEART, 9), Card(Suit.SPADE, 5)]
+    assert hand_type_of_cards(tp) == HandType.TWO_PAIR
+    assert hand_type_of_cards(op) == HandType.PAIR
+    assert compare_full_cards(tp, op) > 0
 
-    # Wheel straight
-    wheel = [Card(12, 0), Card(0, 1), Card(1, 2), Card(2, 0), Card(3, 1)]
-    assert evaluate(wheel)[0] == CAT_STRAIGHT
+    # Wheel straight（修复点 1：A-2-3-4-5 = 5-high straight）
+    wheel = [Card(Suit.SPADE, 14), Card(Suit.HEART, 2), Card(Suit.DIAMOND, 3), Card(Suit.SPADE, 4), Card(Suit.HEART, 5)]
+    assert hand_type_of_cards(wheel) == HandType.STRAIGHT
 
-    # 7-card: best five
+    # 7-card: best five（取最佳五牌）
     seven = [
-        Card(12, 0),
-        Card(12, 1),
-        Card(12, 2),
-        Card(5, 0),
-        Card(5, 1),
-        Card(2, 3),
-        Card(3, 3),
+        Card(Suit.SPADE, 14), Card(Suit.HEART, 14), Card(Suit.DIAMOND, 14),
+        Card(Suit.SPADE, 7), Card(Suit.HEART, 7), Card(Suit.CLUB, 4), Card(Suit.DIAMOND, 5),
     ]
-    assert evaluate(seven)[0] == CAT_FULL_HOUSE
+    ht, _ = __import__("bzplat.backend.games.holdem.holdem_judge", fromlist=["find_max_hand_type"]).find_max_hand_type(seven)
+    assert ht == HandType.FULL_HOUSE
 
 
 def _passive_bot(player_idx: int, req: dict) -> dict:
@@ -279,12 +260,111 @@ def test_no_early_exit_on_bust():
     )
 
 
-def test_min_raise_to_helper():
-    session = MatchSession(num_hands=1, rng=__import__("random").Random(0))
-    # After blinds conceptually current_bet=bb
-    session._current_bet = BIG_BLIND
-    assert session._compute_min_raise_to(0) == 2 * BIG_BLIND
-    session._current_bet = 200
-    assert session._compute_min_raise_to(0) == 400
-    session._current_bet = 0
-    assert session._compute_min_raise_to(0) == BIG_BLIND
+def test_min_raise_rule_in_judge():
+    """min re-raise-to = 2 × round_raise（裁判机制，原适配层 _compute_min_raise_to 已移除）。
+
+    裁判 player_action raise 分支要求 bet + street_bet >= round_raise * 2。
+    盲注后 round_raise = BB（100），SB street_bet=50 → min delta = 200-50 = 150
+    （即 raise-to 200 = 2×100）。"""
+    from bzplat.backend.games.holdem.holdem_judge import Holdem
+
+    # 非法 raise（delta 不达 min）→ 裁判抛 ValueError
+    judge = Holdem(player_chips=[20000, 20000], dealer_idx=0)
+    judge.set_deck_from_str(["As"] * 8)
+    judge.deal_cards_and_blind()
+    # SB raise delta=100 → raise-to=150 < 2*round_raise(100)=200 → INVALID
+    with pytest.raises(ValueError):
+        judge.player_action(100)  # delta=100, street_bet=50 → 150 < 200
+    # 合法 raise delta=150 → raise-to=200 = 2*100 → OK
+    judge.player_action(150)
+
+
+# ─── 对抗审计 P0 回归测试 ───────────────────────────────────────────────
+
+def test_allin_runout_emits_deal_board_for_all_streets():
+    """P0：all-in runout 必须补 emit deal_board（flop/turn/river 三事件）。
+
+    两人全下后裁判内部递归 _next_round 连发板子，适配层 diff public_cards 长度
+    补 emit。若 _emit_runout_deal_boards 的 idx 阶梯有 off-by-one，会漏发/重发。
+    """
+    import random as _r
+
+    def allin_both(pid, req):
+        return resp("allin")
+
+    session = MatchSession(num_hands=1, rng=_r.Random(7))
+    result = asyncio.run(session.run_async(allin_both))
+    boards = [e for e in result.events if e["type"] == "deal_board"]
+    # all-in runout 应发 flop(3) + turn(1) + river(1) = 3 个 deal_board 事件
+    assert len(boards) == 3, f"all-in runout 应发 3 个 deal_board，实际 {len(boards)}"
+    # 街道顺序 + 增量正确
+    assert boards[0]["street"] == "flop"
+    assert len(boards[0]["dealt"]) == 3
+    assert boards[1]["street"] == "turn"
+    assert len(boards[1]["dealt"]) == 1
+    assert boards[2]["street"] == "river"
+    assert len(boards[2]["dealt"]) == 1
+    # 最终 board 5 张
+    settle = next(e for e in result.events if e["type"] == "settle")
+    assert len(settle["board"]) == 5
+
+
+def test_holdem_event_contract_keys():
+    """P0：holdem 6 类事件 dict 键契约守护（前端 reducer 读这些键，drift 会静默破坏 UI）。
+
+    任何键增删都会导致前端 reducer 读到 undefined。本测试锚定各事件类型必须含的键集。
+    """
+    import random as _r
+
+    def call_bot(pid, req):
+        return resp("call")
+
+    session = MatchSession(num_hands=1, rng=_r.Random(1))
+    result = asyncio.run(session.run_async(call_bot))
+    by_type = {}
+    for e in result.events:
+        by_type.setdefault(e["type"], []).append(e)
+
+    # 事件类型齐全
+    expected_types = {"hand_start", "deal_hole", "action", "deal_board", "settle", "match_end"}
+    assert expected_types <= set(by_type.keys()), f"缺事件类型: {expected_types - set(by_type.keys())}"
+
+    # 各事件必须含的键（前端 reducer 读的子集）
+    key_contract = {
+        "hand_start": {"hand", "sb", "bb", "chips"},
+        "deal_hole": {"hand", "holes"},
+        "deal_board": {"hand", "street", "board", "dealt"},
+        "action": {"hand", "player", "action", "amount"},
+        "settle": {"hand", "winners", "deltas", "chips", "net", "pot", "board", "reason"},
+        "match_end": {"hands_played", "final_chips", "winner", "reason"},
+    }
+    for etype, required in key_contract.items():
+        for ev in by_type[etype]:
+            missing = required - set(ev.keys())
+            assert not missing, f"{etype} 事件缺键: {missing}（前端 reducer 会读 undefined）"
+
+
+def test_holdem_crash_loser_identified():
+    """P1：bot 崩溃 → 判负（崩溃方 net 扣全筹码，对手得全筹码）。
+
+    _call_decide 抛 BotCrashedError 时，_current_actor 必须是崩溃方。
+    """
+    import random as _r
+    from bzplat.backend.runtime.binary_runner import BotCrashedError
+
+    call_count = {0: 0, 1: 0}
+
+    def crashing_bot(pid, req):
+        call_count[pid] += 1
+        # 座 1 第 2 次调用时崩溃
+        if pid == 1 and call_count[1] >= 2:
+            raise BotCrashedError("test crash")
+        return resp("call")
+
+    session = MatchSession(num_hands=3, rng=_r.Random(1))
+    result = asyncio.run(session.run_async(crashing_bot))
+    # 崩溃方(座1) net 扣 STARTING_STACK，对手(座0) 得 STARTING_STACK
+    assert result.final_chips == [STARTING_STACK, -STARTING_STACK], f"crash net: {result.final_chips}"
+    me = next(e for e in result.events if e["type"] == "match_end")
+    assert me["reason"] == "crash"
+    assert me["winner"] == 0  # 座 1 崩溃 → 座 0 胜

@@ -1,9 +1,9 @@
 """五子棋引擎（适配层）——对齐 Botzone Gomoku。
 
 本文件是**平台协议适配层**：调 decide → 经 protocol 构造请求/解析响应 → 驱动纯裁判
-（五子棋裁判程序.py）做规则判定 → emit 平台事件 → 返回 MatchResult。
+（gomoku_judge.py）做规则判定 → emit 平台事件 → 返回 MatchResult。
 
-纯游戏规则（棋盘/合法着/连五/计分）在 五子棋裁判程序.py，0 平台依赖，可独立审计。
+纯游戏规则（棋盘/合法着/连五/计分）在 gomoku_judge.py，0 平台依赖，可独立审计。
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from bzplat.backend.games.gomoku.result import MatchResult, RoundResult
 from bzplat.backend.games.gomoku import protocol as proto
-from bzplat.backend.games.gomoku.五子棋裁判程序 import (
+from bzplat.backend.games.gomoku.gomoku_judge import (
     BOARD_SIZE,
     in_board,
     check_win,

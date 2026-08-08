@@ -1,5 +1,16 @@
 """点格棋纯裁判程序（游戏规则，0 平台依赖）。
 
+游戏规则对齐 SAU Game Platform 2.1.0 点格棋（DotsAndBoxes，参考
+refs/SAU_Game_Platform_2.1.0_r3）：
+- 6×6 点阵 → (N-1)²=25 格（SAU: Box[5][5]，6 点交错维度 size=2N-1=11）
+- 占相邻边；围成格得分并连走（SAU: 捕获格.wav，成格者再走一步）
+- 先到多数格（⌈25/2⌉=13）立即胜（对齐 SAU hasPlayerWon 语义）
+- 全部占完则格多者胜（奇数格 25 无平局）
+- 非法着/超时/崩溃 → 对手胜（比分归一化 2-0，Botzone 风格）
+
+协议层仍用 Botzone JSON（{x,y,pass} 交错坐标），**不**换 SAU 老管道
+（move num KIJ + Board[2][6][5] 3D 线坐标）——会破坏所有现有 Botzone Bot。
+
 只管游戏规则：交错网格、占边、成格连走、多数胜、归属追踪。
 不 import protocol/result/engine/orchestrator/runner —— 可独立审计/复用/单测。
 
