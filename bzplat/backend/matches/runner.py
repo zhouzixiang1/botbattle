@@ -1,8 +1,10 @@
 """对局执行：BinaryRunner ×2 + 按 game_id 路由引擎。"""
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import time as _time
 from typing import Any, Callable
 
 from bzplat.backend.games import (
@@ -143,6 +145,45 @@ async def _botzone_decide(
     return {"response": payload}
 
 
+class _ChessClock:
+    """象棋钟：累计每方决策耗时，判定是否超时。
+
+    纯逻辑类（可独立单测），decide 闭包调它记录耗时 + 查剩余时间。
+    budget=None 时不计时（走原单步超时逻辑）。
+    """
+
+    def __init__(self, budget: float | None):
+        self.budget = budget
+        self._used = [0.0, 0.0] if budget is not None else None
+
+    @property
+    def active(self) -> bool:
+        """是否启用象棋钟（budget 非 None）。"""
+        return self._used is not None
+
+    def remaining(self, seat: int) -> float:
+        """seat 方的剩余时间（秒）。未启用时返 +inf（不限时）。"""
+        if self._used is None:
+            return float("inf")
+        return max(0.0, self.budget - self._used[seat])
+
+    def used(self, seat: int) -> float:
+        """seat 方已用时间（秒）。"""
+        return self._used[seat] if self._used is not None else 0.0
+
+    def is_exhausted(self, seat: int) -> bool:
+        """seat 方是否时间耗尽。"""
+        return self.remaining(seat) <= 0
+
+    def record(self, seat: int, elapsed: float) -> None:
+        """记录 seat 方本次决策耗时。"""
+        if self._used is not None:
+            self._used[seat] += elapsed
+
+    def now(self) -> float:
+        """单调时钟（测试可 monkeypatch）。"""
+        return _time.monotonic()
+
 
 class MatchRunner:
     def __init__(
@@ -163,6 +204,7 @@ class MatchRunner:
         on_event: EventSink | None = None,
         seed: int | None = None,
         runtime_modes: tuple[str, str] | None = None,
+        time_budget_per_side: float | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """跑两个二进制 bot。游戏规则参数（num_hands/n_dots/board_size/starting_stack/sb/bb/...）
@@ -193,29 +235,76 @@ class MatchRunner:
             raise
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
+            clock = _ChessClock(time_budget_per_side)
 
             async def decide(player_idx: int, request: dict[str, Any]) -> dict[str, Any]:
                 sid = sid_a if player_idx == 0 else sid_b
+                # 象棋钟：剩余时间作为本次 timeout；耗尽判超时负
+                if clock.active:
+                    if clock.is_exhausted(player_idx):
+                        if on_event is not None:
+                            on_event("time_out", {
+                                "type": "time_out", "seat": player_idx,
+                                "used": round(clock.used(player_idx), 1),
+                                "budget": clock.budget,
+                            })
+                        raise TimeoutError(
+                            f"seat {player_idx} 时间耗尽（{clock.budget}s）"
+                        )
+                    effective_timeout = clock.remaining(player_idx)
+                else:
+                    effective_timeout = self.action_timeout
+                t0 = clock.now()
                 try:
-                    return await _botzone_decide(
+                    resp = await _botzone_decide(
                         self.runner, sid, request,
-                        game_id=gid, action_timeout=self.action_timeout,
+                        game_id=gid, action_timeout=effective_timeout,
                     )
                 except BotCrashedError:
-                    # Bot 进程已死，不可恢复——向上传播触发对局 abort（而非吞成默认动作死磕）
                     raise
+                except asyncio.TimeoutError as exc:
+                    # 象棋钟超时（剩余时间用完）→ 判超时负（非可恢复异常）
+                    if clock.active:
+                        elapsed = clock.now() - t0
+                        clock.record(player_idx, elapsed)
+                        if on_event is not None:
+                            on_event("time_out", {
+                                "type": "time_out", "seat": player_idx,
+                                "used": round(clock.used(player_idx), 1),
+                                "budget": clock.budget,
+                            })
+                        raise TimeoutError(
+                            f"seat {player_idx} 时间耗尽（{clock.budget}s）"
+                        ) from exc
+                    # 非象棋钟的单步超时 → 走原可恢复路径
+                    logger.warning("bot %s 决策超时 (%ss)", player_idx, effective_timeout)
+                    if on_event is not None:
+                        on_event("bot_decide_error", {
+                            "type": "bot_decide_error", "seat": player_idx,
+                            "error": str(exc)[:200],
+                        })
+                    return _fail_response(gid)
                 except Exception as exc:
-                    # Bot 响应格式错误等可恢复异常：记日志 + 通过 on_event 发错误事件
-                    # （编排层收集到 events/replay，前端 MatchViewer/Bot 详情可展示给 Bot 作者调试）
                     logger.warning("bot %s decide failed: %s", player_idx, exc)
                     if on_event is not None:
                         on_event("bot_decide_error", {
-                            "type": "bot_decide_error",
-                            "seat": player_idx,
+                            "type": "bot_decide_error", "seat": player_idx,
                             "error": str(exc)[:200],
                             "turn": getattr(self.runner._sessions.get(sid), "turn", None),
                         })
                     return _fail_response(gid)
+                finally:
+                    if clock.active:
+                        clock.record(player_idx, clock.now() - t0)
+                # emit 时间更新（前端时钟显示）
+                if clock.active and on_event is not None:
+                    on_event("time_used", {
+                        "type": "time_used", "seat": player_idx,
+                        "used": round(clock.used(player_idx), 1),
+                        "remaining": round(clock.remaining(player_idx), 1),
+                        "budget": clock.budget,
+                    })
+                return resp
 
             return await run_session(
                 gid, decide, on_event=on_event, rng=rng, **match_params,
