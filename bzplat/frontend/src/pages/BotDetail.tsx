@@ -262,7 +262,8 @@ export default function BotDetail() {
   }
 
   const wr = winRate(profile)
-  const total = (profile.wins ?? 0) + (profile.losses ?? 0) + (profile.draws ?? 0)
+  // 总场次优先用后端 matches_played（store 聚合，含未评分类对局），否则本地兜底。
+  const total = profile.matches_played ?? ((profile.wins ?? 0) + (profile.losses ?? 0) + (profile.draws ?? 0))
   const GameIcon = gameIcon(profile.game_id)
 
   return (
