@@ -119,9 +119,13 @@ export default function Settings() {
   }
 
   function togglePref(key: keyof Prefs) {
+    const prev = prefs
     const next = { ...prefs, [key]: prefs[key] ? 0 : 1 }
     setPrefs(next)
-    apiJson('/api/notification-prefs', 'PUT', next).catch((e) => setError(errMsg(e)))
+    apiJson('/api/notification-prefs', 'PUT', next).catch((e) => {
+      setPrefs(prev) // 失败回滚开关到原状态，避免 UI 与服务端不一致
+      setError(errMsg(e))
+    })
   }
 
   const [avatarVer, setAvatarVer] = useState(0)

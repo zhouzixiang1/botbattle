@@ -95,7 +95,9 @@ def test_dispatch_does_not_change_published_pairing(tmp_path):
     s.update_contest(c, status="open")
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
     cm = ContestManager(s, orch)
-    s.update_contest(c, status="running", current_stage_idx=0)
+    # 用 rest 态测 dispatch（running 态已禁止换 Bot——保证公平；
+    # allow_bot_swap_in_rest=true 允许休息期换，entry.bot_id 更新但已发布 pairing 冻结）。
+    s.update_contest(c, status="rest", current_stage_idx=0)
 
     async def _begin():
         await cm._begin_stage(c, 0)

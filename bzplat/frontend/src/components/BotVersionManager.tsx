@@ -218,7 +218,16 @@ export default function BotVersionManager({
               <input
                 id="ver-file"
                 type="file"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null
+                  // 客户端 50MB 预检（与 MyBots 上传一致），避免大文件传完才被服务端拒
+                  if (f && f.size > 50 * 1024 * 1024) {
+                    toast.error('文件超过 50MB 上限')
+                    e.target.value = ''
+                    return
+                  }
+                  setFile(f)
+                }}
                 required
                 className="sr-only"
               />

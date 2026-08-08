@@ -20,6 +20,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import BracketTree from '@/components/contest/BracketTree'
 import ScheduleTable from '@/components/contest/ScheduleTable'
 import Countdown from '@/components/Countdown'
+import { useConfirm } from '@/hooks/use-confirm'
 import { useAuth } from '@/components/useAuth'
 import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
@@ -253,6 +254,17 @@ export default function ContestDetail() {
     }
   }
 
+  const [confirm, confirmDialog] = useConfirm()
+  const forceFinish = async () => {
+    if (!await confirm({
+      title: '强制结束赛事？',
+      desc: '这将立即结束赛事（未完成的对阵作废），并按当前结果计算正式名次。此操作不可撤销。',
+      danger: true,
+      confirmText: '确认结束',
+    })) return
+    await act(`/api/contests/${id}/finish`, undefined, '赛事已结束')
+  }
+
   const stagePairings = pairings.filter((p) => (p.stage_idx ?? 0) === stageTab)
   const curStageType = stages[stageTab]?.type as string | undefined
   const isElimStage = curStageType === 'single_elimination' || curStageType === 'double_elimination'
@@ -370,6 +382,11 @@ export default function ContestDetail() {
         {isOrg && contest.status === 'rest' && (
           <Button onClick={() => void act(`/api/contests/${id}/resume`, undefined, '已进入下一阶段')}>结束休息 / 下一阶段</Button>
         )}
+        {isOrg && (contest.status === 'running' || contest.status === 'rest') && (
+          <Button variant="destructive" onClick={() => void forceFinish()} className="gap-1.5">
+            强制结束赛事
+          </Button>
+        )}
         {isLoggedIn && contest.status === 'open' && (
           <div className="flex flex-wrap items-center gap-2">
             {needsRealName && (
@@ -391,7 +408,7 @@ export default function ContestDetail() {
             </Button>
           </div>
         )}
-        {isLoggedIn && myEntry && contest.status === 'rest' && (
+        {isLoggedIn && myEntry && (contest.status === 'rest' || contest.status === 'draft' || contest.status === 'open' || contest.status === 'published') && (
           <div className="flex flex-wrap items-center gap-2">
             <Select value={botId} onValueChange={setBotId}>
               <SelectTrigger className="h-9 w-[12rem]">
@@ -671,6 +688,7 @@ export default function ContestDetail() {
           </div>
         </TabsContent>
       </Tabs>
+      {confirmDialog}
     </PageStub>
   )
 }

@@ -103,56 +103,84 @@ export default function HumanPlay() {
   const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
   const [nowTs, setNowTs] = useState(() => Date.now())
   const wsRef = useRef<WebSocket | null>(null)
+  // 重连：网络断开时自动重连（指数退避，≤5 次）。match 结束或组件卸载后停止。
+  const overRef = useRef(false)
+  const unmountedRef = useRef(false)
+  const [reconnecting, setReconnecting] = useState(false)
 
   useEffect(() => {
     if (!id) return
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
-    }
-    const ws = new WebSocket(playWsUrl(id))
-    wsRef.current = ws
-    ws.onmessage = (e) => {
-      try {
-        const ev = JSON.parse(e.data)
-        if (ev.type === 'snapshot') {
-          setMatch(ev.match || {})
-          setEvents(ev.events || [])
-        } else if (ev.type === 'match_end' || ev.type === 'error') {
-          setEvents((prev) => [...prev, ev])
-          setOver(true)
-          setTurnDeadline(null)
-          setEndInfo({
-            winner: ev.winner as number | null | undefined,
-            reason: ev.reason || ev.message,
-          })
-          setMatch((prev) => prev ? {
-            ...prev,
-            status: 'completed',
-            winner: ev.winner as number | null | undefined,
-            result: {
-              ...(prev.result || {}),
-              deltas: [
-                ev.earnings_a != null ? Number(ev.earnings_a) : prev.result?.deltas?.[0] ?? 0,
-                ev.earnings_b != null ? Number(ev.earnings_b) : prev.result?.deltas?.[1] ?? 0,
-              ],
-            },
-          } : prev)
-        } else {
-          setEvents((prev) => [...prev, ev])
-          if (ev.type === 'your_turn') {
-            setTurnDeadline(Date.now() + HUMAN_TIMEOUT_SEC * 1000)
+    overRef.current = false
+    unmountedRef.current = false
+    let attempt = 0
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+    const connect = () => {
+      if (overRef.current || unmountedRef.current) return
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+      const ws = new WebSocket(playWsUrl(id))
+      wsRef.current = ws
+      ws.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data)
+          if (ev.type === 'snapshot') {
+            // 重连后服务端重发 snapshot：resync 状态（含已发生事件）
+            setMatch(ev.match || {})
+            setEvents(ev.events || [])
+            setReconnecting(false)
+          } else if (ev.type === 'match_end' || ev.type === 'error') {
+            setEvents((prev) => [...prev, ev])
+            setOver(true)
+            overRef.current = true
+            setTurnDeadline(null)
+            setEndInfo({
+              winner: ev.winner as number | null | undefined,
+              reason: ev.reason || ev.message,
+            })
+            setMatch((prev) => prev ? {
+              ...prev,
+              status: 'completed',
+              winner: ev.winner as number | null | undefined,
+              result: {
+                ...(prev.result || {}),
+                deltas: [
+                  ev.earnings_a != null ? Number(ev.earnings_a) : prev.result?.deltas?.[0] ?? 0,
+                  ev.earnings_b != null ? Number(ev.earnings_b) : prev.result?.deltas?.[1] ?? 0,
+                ],
+              },
+            } : prev)
+          } else {
+            setEvents((prev) => [...prev, ev])
+            setReconnecting(false)
+            if (ev.type === 'your_turn') {
+              setTurnDeadline(Date.now() + HUMAN_TIMEOUT_SEC * 1000)
+            }
           }
+        } catch {
+          /* ignore parse error */
         }
-      } catch {
-        /* ignore parse error */
+      }
+      ws.onerror = () => setError('连接异常')
+      ws.onclose = () => {
+        // match 结束后服务端正常关闭；否则尝试重连
+        if (overRef.current || unmountedRef.current) return
+        attempt += 1
+        if (attempt > 5) {
+          setError('连接已断开，重连失败。请刷新页面。')
+          setReconnecting(false)
+          return
+        }
+        setReconnecting(true)
+        setError('')
+        const delay = Math.min(8000, 500 * 2 ** (attempt - 1)) // 0.5/1/2/4/8s
+        reconnectTimer = setTimeout(connect, delay)
       }
     }
-    ws.onerror = () => setError('连接异常')
-    ws.onclose = () => { /* 服务端在 match_end 后会关闭 */ }
+    connect()
     return () => {
-      ws.close()
-      wsRef.current = null
+      unmountedRef.current = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     }
   }, [id])
 
@@ -272,6 +300,11 @@ export default function HumanPlay() {
         </Link>
       </div>
       {error && <ErrorMsg msg={error} className="mb-3" />}
+      {reconnecting && (
+        <div className="mb-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning">
+          连接已断开，正在重连…（请勿关闭页面）
+        </div>
+      )}
 
       {/* 棋类：左 canvas + 右对局进程（双栏，沿用紧凑布局） */}
       {isBoard && (

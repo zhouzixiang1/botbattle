@@ -310,7 +310,8 @@ function Editor(props: {
             <div className="mb-2 flex items-center justify-between">
               <span className="text-xs font-medium text-muted-foreground">阶段 {i + 1}</span>
               <button type="button" onClick={() => props.delStage(i)}
-                className="text-xs text-destructive hover:underline">删除</button>
+                disabled={t.stages.length <= 1}
+                className="text-xs text-destructive hover:underline disabled:opacity-40 disabled:no-underline">删除</button>
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <label className="text-sm text-muted-foreground">
@@ -342,7 +343,7 @@ function Editor(props: {
               <label className="text-sm text-muted-foreground">
                 晋级人数 advance_count
                 <input type="number" min={1} className={inp} value={s.advance_count ?? ''}
-                  onChange={(e) => props.patchStage(i, { advance_count: e.target.value === '' ? undefined : Number(e.target.value) })} />
+                  onChange={(e) => props.patchStage(i, { advance_count: e.target.value === '' ? undefined : Math.max(1, Number(e.target.value)) })} />
               </label>
               {GROUP_TYPES.includes(s.type) && (
                 <>

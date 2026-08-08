@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ from bzplat.backend.auth.dependencies import (
 )
 from bzplat.backend.security import audit_log
 from bzplat.backend.bots import BotError, BotManager
+
+logger = logging.getLogger(__name__)
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.stages import estimate_match_count
 from bzplat.backend.contests.validation import validate_stage, validate_template
@@ -189,7 +192,7 @@ def follow_user(user_id: int, request: Request, user=Depends(require_user)):
                     link=f"/user/{me.get('username')}",
                 )
             except Exception:
-                pass
+                logger.warning("follow notify failed target=%s follower=%s", user_id, user.get("id"), exc_info=True)
     return {"ok": True, "following": True, "created": created}
 
 
@@ -1501,6 +1504,22 @@ async def advance_contest(
     _require_contest_organizer(c, user)
     try:
         contest = await _contests(request).advance(contest_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"contest": contest}
+
+
+@router.post("/api/contests/{contest_id}/finish")
+async def finish_contest(
+    contest_id: int, request: Request, user=Depends(require_organizer)
+):
+    """组织者/admin 强制结束赛事（running/rest → finished；卡住时的手动出口）。"""
+    c = _store(request).get_contest(contest_id)
+    if not c:
+        raise HTTPException(404, "赛事不存在")
+    _require_contest_organizer(c, user)
+    try:
+        contest = await _contests(request).finish(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"contest": contest}

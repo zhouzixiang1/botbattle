@@ -84,6 +84,9 @@ class MatchOrchestrator:
         self._bot_running = 0
         self._sse: dict[str, list[asyncio.Queue]] = {}
         self._lock = asyncio.Lock()
+        # 评分串行化锁：按 (bot_id, game_id) 维度串行化 _apply_ratings，防同 bot 两场
+        # 并发完成时快照读+绝对写 rating/rd/vol 互相覆盖（lost-update，审计 FRAGILE 5a）。
+        self._rating_locks: dict[tuple[int, str], asyncio.Lock] = {}
         # 对局完成后的回调（由外部注入，如比赛归档）。签名: (match_id, contest_id|None) -> None
         self.on_match_done: "Callable[[str, int | None], None] | None" = None
         # 通知管理器（由 main.py 注入；对局完成时通知双方 owner）
@@ -509,7 +512,15 @@ class MatchOrchestrator:
             # 比赛对局只计入赛事内积分，不更新全局 Glicko-2 排行榜
             # （挑战 / table / ladder 对局均更新全局评分）
             if m["match_type"] != TYPE_CONTEST:
-                self._apply_ratings(m["bot_a_id"], m["bot_b_id"], winner, ea, eb)
+                # 串行化同 bot 的评分更新（按 bot_id 排序获取锁，防死锁）：
+                # 同 bot 两场并发完成时，快照读+绝对写 rating/rd/vol 会互相覆盖（lost-update）。
+                gid = m.get("game_id") or "holdem"
+                async with self._rating_lock_for(m["bot_a_id"], gid):
+                    if m["bot_a_id"] != m["bot_b_id"]:
+                        async with self._rating_lock_for(m["bot_b_id"], gid):
+                            self._apply_ratings(m["bot_a_id"], m["bot_b_id"], winner, ea, eb)
+                    else:
+                        self._apply_ratings(m["bot_a_id"], m["bot_b_id"], winner, ea, eb)
             self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
             logger.info(
                 "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
@@ -716,6 +727,15 @@ class MatchOrchestrator:
         for p in game_registry.get(gid).judge_params:
             out[p.field] = _int(p.setting_key, p.default)
         return out
+
+    def _rating_lock_for(self, bot_id: int, game_id: str) -> asyncio.Lock:
+        """获取/创建某 (bot, game) 的评分串行化锁（防同 bot 并发评分 lost-update）。"""
+        key = (bot_id, game_id)
+        lock = self._rating_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._rating_locks[key] = lock
+        return lock
 
     def _apply_ratings(
         self, bot_a_id: int, bot_b_id: int, winner: int | None, ea: int, eb: int
