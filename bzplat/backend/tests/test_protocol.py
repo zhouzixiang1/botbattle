@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bzplat.backend.games.holdem.cards import Card
+from bzplat.backend.games.holdem.holdem_judge import Card, Suit
 from bzplat.backend.games.holdem.protocol import (
     PROTOCOL_VERSION,
     RESP_ALLIN,
@@ -21,42 +21,40 @@ from bzplat.backend.games.holdem.protocol import (
 
 
 def test_encode_decode_card_roundtrip():
-    for rank in range(13):
-        for suit in range(4):
-            c = Card(rank, suit)
+    for number in range(2, 15):
+        for suit in Suit:
+            c = Card(suit, number)
             n = encode_card(c)
             assert 0 <= n <= 51
             assert decode_card(n) == c
 
 
 def test_suit_botzone_mapping():
-    # Botzone: card % 4 == 0 → ♥, 1 → ♦, 2 → ♠, 3 → ♣
-    # 内部 suit: 0♠ 1♥ 2♦ 3♣
-    # 内部 2♠ (rank0,suit0) → Botzone 0*4+2 = 2（%4==2 → ♠ ✓）
-    assert encode_card(Card(0, 0)) == 0 * 4 + 2  # 2♠
-    # 内部 2♥ (rank0,suit1) → 0*4+0 = 0（%4==0 → ♥ ✓）
-    assert encode_card(Card(0, 1)) == 0 * 4 + 0  # 2♥
-    # 内部 2♦ (rank0,suit2) → 0*4+1 = 1（%4==1 → ♦ ✓）
-    assert encode_card(Card(0, 2)) == 0 * 4 + 1  # 2♦
-    # 内部 2♣ (rank0,suit3) → 0*4+3 = 3（%4==3 → ♣ ✓）
-    assert encode_card(Card(0, 3)) == 0 * 4 + 3  # 2♣
-    # A♥ rank12 suit1 → 12*4+0 = 48
-    assert encode_card(Card(12, 1)) == 12 * 4 + 0
+    # 裁判 Card 花色编码（Suit: 0♥ 1♦ 2♠ 3♣）== Botzone 线协议花色编码。
+    # 2♠ → (2-2)*4+2 = 2（%4==2 → ♠ ✓）
+    assert encode_card(Card(Suit.SPADE, 2)) == 0 * 4 + 2  # 2♠
+    # 2♥ → (2-2)*4+0 = 0（%4==0 → ♥ ✓）
+    assert encode_card(Card(Suit.HEART, 2)) == 0 * 4 + 0  # 2♥
+    # 2♦ → (2-2)*4+1 = 1（%4==1 → ♦ ✓）
+    assert encode_card(Card(Suit.DIAMOND, 2)) == 0 * 4 + 1  # 2♦
+    # 2♣ → (2-2)*4+3 = 3（%4==3 → ♣ ✓）
+    assert encode_card(Card(Suit.CLUB, 2)) == 0 * 4 + 3  # 2♣
+    # A♥ number14 suitHEART → (14-2)*4+0 = 48
+    assert encode_card(Card(Suit.HEART, 14)) == (14 - 2) * 4 + 0
 
 
 def test_card_rank_formula():
-    # Botzone 整数 → 内部 Card（内部 rank 0-indexed：0=deuce, 12=Ace）。
-    # Botzone 公式 rank = card//4 + 2（poker 点数）；内部 rank = card//4（0-indexed）。
-    assert decode_card(0).rank == 0        # 内部 0 = poker '2'
-    assert decode_card(48).rank == 12      # 内部 12 = poker 'A'
-    assert decode_card(51).rank == 12      # A
+    # Botzone 整数 → 裁判 Card。number = card//4 + 2（poker 点数 2..14）。
+    assert decode_card(0).number == 2        # 2
+    assert decode_card(48).number == 14      # A
+    assert decode_card(51).number == 14      # A
     # 验证 Botzone poker 点数公式：card//4 + 2
     assert 0 // 4 + 2 == 2     # '2'
     assert 48 // 4 + 2 == 14   # 'A'
 
 
 def test_encode_cards_list():
-    cards = [Card(12, 0), Card(0, 3)]
+    cards = [Card(Suit.SPADE, 14), Card(Suit.CLUB, 2)]
     ints = encode_cards(cards)
     assert decode_cards(ints) == cards
 
@@ -71,8 +69,8 @@ def test_build_act_request_botzone_fields():
         total_hands=70,
         my_id=0,
         dealer_id=0,
-        my_cards=[Card(12, 0), Card(12, 3)],
-        board=[Card(3, 0), Card(6, 1), Card(9, 2)],
+        my_cards=[Card(Suit.SPADE, 14), Card(Suit.CLUB, 14)],
+        board=[Card(Suit.SPADE, 5), Card(Suit.HEART, 8), Card(Suit.DIAMOND, 11)],
         history=[
             {"round": 0, "player_id": 0, "action": 50, "action_type": "raise"},
             {"round": 0, "player_id": 1, "action": -1, "action_type": "fold"},
@@ -181,7 +179,7 @@ def test_protocol_request_schema_matches_engine():
     # 引擎实际产出字段（与 test_build_act_request_botzone_fields 同源）
     req = build_act_request(
         hand=0, total_hands=70, my_id=0, dealer_id=0,
-        my_cards=[Card(0, 0), Card(1, 0)], board=[], history=[], my_chips=1000,
+        my_cards=[Card(Suit.SPADE, 2), Card(Suit.SPADE, 3)], board=[], history=[], my_chips=1000,
     )
     engine_fields = set(req.keys())
 

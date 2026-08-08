@@ -75,7 +75,7 @@ def test_import_all_main_modules():
         "bzplat.backend.games.gomoku.spec",
         "bzplat.backend.games.pencil.spec",
         "bzplat.backend.games.holdem.engine",
-        "bzplat.backend.games.holdem.cards",
+        "bzplat.backend.games.holdem.holdem_judge",
         "bzplat.backend.games.holdem.result",
         "bzplat.backend.games.holdem.tiers",
         "bzplat.backend.games.gomoku.engine",

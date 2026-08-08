@@ -99,10 +99,10 @@ async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: flo
     import asyncio
 
     # 构造最小 act 请求（preflop，seat 0/SB）
-    from bzplat.backend.games.holdem.cards import Card
+    from bzplat.backend.games.holdem.holdem_judge import Card, Suit
     req = build_act_request(
         hand=0, total_hands=1, my_id=0, dealer_id=0,
-        my_cards=[Card(0, 0), Card(1, 0)], board=[], history=[],
+        my_cards=[Card(Suit.SPADE, 2), Card(Suit.SPADE, 3)], board=[], history=[],
         my_chips=19950,
     )
     line = dumps_request(req)

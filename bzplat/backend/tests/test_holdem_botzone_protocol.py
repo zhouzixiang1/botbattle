@@ -17,7 +17,7 @@ import pytest
 
 from bzplat.backend.games import _botzone_protocol as bz
 from bzplat.backend.games.holdem import protocol as proto
-from bzplat.backend.games.holdem.cards import Card
+from bzplat.backend.games.holdem.holdem_judge import Card, Suit
 from bzplat.backend.matches.runner import MatchRunner, _botzone_decide
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 
@@ -27,25 +27,25 @@ SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 # ── 牌编码 ────────────────────────────────────────────────────────────
 
 def test_card_encoding_botzone_suit_order():
-    """Botzone: card % 4 == 0 → ♥, 1 → ♦, 2 → ♠, 3 → ♣。内部 0♠1♥2♦3♣。"""
-    # 内部 2♠ (rank0, suit0) → Botzone card = 0*4+2 = 2（%4=2 → ♠ ✓）
-    assert proto.encode_card(Card(0, 0)) == 2
-    # 内部 2♥ (rank0, suit1) → 0*4+0 = 0（%4=0 → ♥ ✓）
-    assert proto.encode_card(Card(0, 1)) == 0
-    # 内部 A♣ (rank12, suit3) → 12*4+3 = 51
-    assert proto.encode_card(Card(12, 3)) == 51
+    """Botzone: card % 4 == 0 → ♥, 1 → ♦, 2 → ♠, 3 → ♣。裁判 Card 花色编码同此。"""
+    # 2♠ (Suit.SPADE=2, number2) → (2-2)*4+2 = 2（%4=2 → ♠ ✓）
+    assert proto.encode_card(Card(Suit.SPADE, 2)) == 2
+    # 2♥ (Suit.HEART=0, number2) → (2-2)*4+0 = 0（%4=0 → ♥ ✓）
+    assert proto.encode_card(Card(Suit.HEART, 2)) == 0
+    # A♣ (Suit.CLUB=3, number14) → (14-2)*4+3 = 51
+    assert proto.encode_card(Card(Suit.CLUB, 14)) == 51
 
 
 def test_card_decode_botzone_formula():
     """Botzone poker rank = card // 4 + 2（2..14）。"""
-    assert proto.encode_card(Card(0, 1)) // 4 + 2 == 2      # '2'
-    assert proto.encode_card(Card(12, 1)) // 4 + 2 == 14    # 'A'
+    assert proto.encode_card(Card(Suit.HEART, 2)) // 4 + 2 == 2      # '2'
+    assert proto.encode_card(Card(Suit.HEART, 14)) // 4 + 2 == 14    # 'A'
 
 
 def test_card_roundtrip_all_52():
-    for rank in range(13):
-        for suit in range(4):
-            c = Card(rank, suit)
+    for number in range(2, 15):
+        for suit in Suit:
+            c = Card(suit, number)
             assert proto.decode_card(proto.encode_card(c)) == c
 
 
@@ -79,7 +79,7 @@ def test_action_to_history_int_raise_delta():
 def test_build_request_history_format():
     req = proto.build_act_request(
         hand=0, total_hands=70, my_id=0, dealer_id=0,
-        my_cards=[Card(12, 0), Card(12, 1)], board=[Card(3, 0)],
+        my_cards=[Card(Suit.SPADE, 14), Card(Suit.HEART, 14)], board=[Card(Suit.SPADE, 5)],
         history=[
             {"round": 0, "player_id": 0, "action": 50, "action_type": "raise"},
             {"round": 1, "player_id": 1, "action": -1, "action_type": "fold"},

@@ -294,3 +294,104 @@ def test_pencil_match_end_has_box_owners():
     assert "box_owners" in me
     assert isinstance(me["box_owners"], list)
 
+
+
+# ─── SAU 点格棋规则形式化对齐（pencil_judge 独立单测）──────────────────────
+# 对齐 SAU Game Platform 2.1.0 DotsAndBoxes（refs/SAU_Game_Platform_2.1.0_r3）。
+# 规则逐条断言：6×6 点→25 格、捕获连走、多数胜 13、不 pass、归属追踪。
+
+
+def test_sau_grid_6x6_yields_25_boxes():
+    """SAU: 6×6 点阵 → 交错 size=11 → (N-1)²=25 格（Box[5][5]）。"""
+    from bzplat.backend.games.pencil.pencil_judge import PencilBoard, DEFAULT_N
+
+    assert DEFAULT_N == 6
+    g = PencilBoard()
+    assert g.n_dots == 6
+    assert g.size == 2 * 6 - 1  # 交错维度 11
+    assert (g.n_dots - 1) ** 2 == 25  # 25 格
+    assert g.min_win() == 25 // 2 + 1  # ⌈25/2⌉ = 13（多数胜阈值）
+
+
+def test_sau_capture_continues_turn():
+    """SAU: 占边围成格 → 得分并连走（curr_player 不变）。"""
+    from bzplat.backend.games.pencil.pencil_judge import PencilBoard
+
+    g = PencilBoard(2)  # 1 格，好控制
+    g.curr_player = 0
+    g.do_action(0, 1)  # 无格
+    g.do_action(1, 0)  # 无格
+    g.do_action(1, 2)  # 无格
+    assert g.scores == [0, 0]
+    closed = g.do_action(2, 1)  # 闭合格
+    assert len(closed) == 1
+    assert g.scores == [1, 0]
+    # 捕获连走：engine 层据此让本方再走（裁判本身不改 curr_player，由适配层轮转）
+    # 裁判契约：闭合时 curr_player 仍是得分方（适配层读到 scored → 不换人）
+    assert g.curr_player == 0
+
+
+def test_sau_majority_win_threshold_13():
+    """SAU hasPlayerWon: 先到 ⌈boxes/2⌉=13 立即胜。"""
+    from bzplat.backend.games.pencil.pencil_judge import PencilBoard
+
+    g = PencilBoard(6)
+    assert g.min_win() == 13
+    # 12 分未到多数胜阈值
+    g.scores = [12, 5]
+    assert not g.scores[0] >= g.min_win()
+    # 13 分达到阈值
+    g.scores = [13, 5]
+    assert g.scores[0] >= g.min_win()
+
+
+def test_sau_single_edge_per_move_no_pass_on_capture():
+    """SAU 非 Botzone: 一步占 1 边（不传 num+多线）。捕获格时也只占 1 边。"""
+    from bzplat.backend.games.pencil.pencil_judge import PencilBoard
+
+    g = PencilBoard(3)  # 4 格
+    g.curr_player = 0
+    before = g.remaining_edges()
+    closed = g.do_action(0, 1)  # 占 1 边
+    after = g.remaining_edges()
+    assert before - after == 1  # 每手恰好 1 边
+    # 即便闭合格（连走），本手仍只占 1 边（SAU 多线 vs Botzone 单边的区别）
+    # do_action 返回的是「本手新闭合格」，不是多线列表
+    assert isinstance(closed, list)
+
+
+def test_sau_box_ownership_grid_tracks_players():
+    """SAU: 格归属追踪（前端着色用）——红/蓝/未占三态。"""
+    from bzplat.backend.games.pencil.pencil_judge import PencilBoard
+
+    g = PencilBoard(2)  # 1 格
+    g.curr_player = 0
+    g.do_action(0, 1)
+    g.do_action(1, 0)
+    g.do_action(1, 2)
+    bog = g.box_owners_grid()
+    assert bog[1][1] == -1  # 未闭合
+    g.do_action(2, 1)  # 红方闭合格
+    bog = g.box_owners_grid()
+    assert bog[1][1] == 0  # 红方
+    # 非格心位置为 -2（忽略）
+    assert bog[0][0] == -2
+
+
+# ─── 裁判模块 0 平台依赖守护（gomoku/pencil）────────────────────────────
+def test_gomoku_judge_zero_platform_deps():
+    """gomoku_judge 不得 import bzplat（0 平台依赖守护）。"""
+    import inspect
+    from bzplat.backend.games.gomoku import gomoku_judge
+
+    src = inspect.getsource(gomoku_judge)
+    assert "bzplat" not in src, "gomoku_judge 含平台依赖"
+
+
+def test_pencil_judge_zero_platform_deps():
+    """pencil_judge 不得 import bzplat（0 平台依赖守护）。"""
+    import inspect
+    from bzplat.backend.games.pencil import pencil_judge
+
+    src = inspect.getsource(pencil_judge)
+    assert "bzplat" not in src, "pencil_judge 含平台依赖"

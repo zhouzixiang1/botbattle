@@ -43,14 +43,14 @@ def test_match_two_callbots_short():
 
 
 def test_protocol_roundtrip():
-    from bzplat.backend.games.holdem.cards import Card
+    from bzplat.backend.games.holdem.holdem_judge import Card, Suit
 
     req = proto.build_act_request(
         hand=0,
         total_hands=70,
         my_id=0,
         dealer_id=0,
-        my_cards=[Card(12, 0), Card(11, 1)],
+        my_cards=[Card(Suit.SPADE, 14), Card(Suit.HEART, 13)],
         board=[],
         history=[],
         my_chips=20000,

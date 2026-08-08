@@ -111,9 +111,12 @@ games/      游戏注册表（全面解耦的单一真相）：base.py(GameSpec 
             + MatchResult/RoundResult 平台契约基类，仅类型提示/测试用) + __init__.py(注册表
             单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS
             等模块级便捷函数) + _board_protocol.py(棋类共享行协议工具；gomoku/pencil 的 protocol.py re-export)
-            + 每游戏完全自包含的子包 games/<game>/：engine.py(裁判) + protocol.py(行协议)
-            + result.py(结果，独立定义不共享基类) + tiers.py(per-game 段位) + cards.py(holdem)
+            + 每游戏完全自包含的子包 games/<game>/：<game>_judge.py(纯裁判=游戏规则，0 平台依赖，可独立审计/复用)
+            + engine.py(适配层：裁判↔平台协议桥接，调 decide→驱动裁判→emit 事件) + protocol.py(行协议)
+            + result.py(结果，独立定义不共享基类) + tiers.py(per-game 段位)
             + templates.py(赛事模板) + spec.py(装配 GameSpec)。GameSpec 集中声明一款游戏的全部固有属性。
+            三层分离：**裁判**(<game>_judge.py，纯游戏规则/0 依赖) ↔ **适配层**(engine.py Session，平台协议桥接) ↔ **平台层**(spec/protocol/orchestrator/runner/FE)。
+            holdem 的 Card 也在裁判模块（holdem_judge.py）——cards.py 已删。
             通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
             （engine/ + protocol/ + _compat/ 三层冗余 shim 已删——真实现全在 games/）
@@ -158,7 +161,7 @@ src/pages/                 20 个顶层路由，全部用 React.lazy 代码分�
 - **段位 per-game**：`games/<game>/tiers.py` 声明该游戏段位曲线（查表算法共享 `base.tier_for_in`，曲线数据独立可调）；`registry.tier_for(game_id, rating)` 统一经 `tier_for_in(rating, spec.tiers)`（各游戏无需再声明 `tier_for` 字段）；`/api/tiers?game_id=` 返回对应曲线；前端 `lib/tiers.ts` 的 `useGameTiers(gameId)` 按游戏拉取着色。
 
 **新增一款游戏的成本**（通用层零改动）——checklist：
-1. 建 `games/<game>/` 子包：`engine.py`(裁判) + `protocol.py`(行协议) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec)。棋类协议可 re-export `games/_board_protocol.py`。
+1. 建 `games/<game>/` 子包：`<game>_judge.py`(纯裁判=游戏规则，0 平台依赖) + `engine.py`(适配层：裁判↔平台协议桥接) + `protocol.py`(行协议) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec)。棋类协议可 re-export `games/_board_protocol.py`。
 2. 建 `schema.py`：`matches_<game>` 表（仿 matches_holdem，FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES`/`VALID_GAME_IDS` frozenset 各加该项。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
 4. 前端 `src/games/<game>/`：`index.ts`（GameViewSpec：Board/kind/configFields）+ `canvas.ts`（CanvasRenderer）+ `reducer.ts`（事件归约，自包含对标后端 engine.py）+ `src/games/index.ts` 注册一行。`RawEvent` 公共类型在 `src/games/base.ts`；`normalizeGameId` 从注册表 `GAMES` 派生（不硬编码游戏名三选一）。
