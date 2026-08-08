@@ -231,15 +231,20 @@ def test_fold_ends_hand():
 
 
 def test_each_hand_resets_to_starting_stack():
-    """Botzone 计分：每手开始筹码复位为 STARTING_STACK，不跨手累积。
-    多手对局中每个 hand_start 事件的 chips 都是 [20000, 20000]。"""
+    """Botzone 计分：每手筹码复位为 STARTING_STACK（不跨手累积），但 hand_start 事件
+    的 chips 字段反映盲注扣除后的筹码（对齐 Botzone 显示：fold 时筹码立即变化）。
+    即 hand_start.chips = [STARTING_STACK - SB, STARTING_STACK - BB]。"""
     session = MatchSession(num_hands=3, rng=__import__("random").Random(42))
     result = asyncio.run(session.run_async(_passive_bot))
     starts = [e for e in result.events if e["type"] == "hand_start"]
     assert len(starts) == 3
     for hs in starts:
-        assert hs["chips"] == [STARTING_STACK, STARTING_STACK], (
-            f"每手应复位到 {STARTING_STACK}，实际 {hs['chips']}"
+        sb_idx, bb_idx = hs["sb"], hs["bb"]
+        expected = [0, 0]
+        expected[sb_idx] = STARTING_STACK - SMALL_BLIND
+        expected[bb_idx] = STARTING_STACK - BIG_BLIND
+        assert hs["chips"] == expected, (
+            f"hand_start chips 应为盲注后 {[STARTING_STACK-SMALL_BLIND, STARTING_STACK-BIG_BLIND]}（按 sb/bb 位），实际 {hs['chips']}"
         )
 
 
