@@ -1,13 +1,9 @@
-"""五子棋引擎（对齐 Botzone Gomoku）。
+"""五子棋引擎（适配层）——对齐 Botzone Gomoku。
 
-规则：15×15；黑先（seat 0）；横/竖/斜连续 ≥5 含长连即胜；无禁手。
-非法着 / 超时 → 判负。棋盘下满且无人成五 → 平局。
+本文件是**平台协议适配层**：调 decide → 经 protocol 构造请求/解析响应 → 驱动纯裁判
+（五子棋裁判程序.py）做规则判定 → emit 平台事件 → 返回 MatchResult。
 
-长驻行协议（语义对齐 Botzone `{x,y}`）：
-  请求: {"v":1,"t":"mv","x":int,"y":int,"me":0|1}
-    - 黑方首手 x=y=-1
-    - 之后 x,y 为对方上一手
-  响应: {"x":int,"y":int}
+纯游戏规则（棋盘/合法着/连五/计分）在 五子棋裁判程序.py，0 平台依赖，可独立审计。
 """
 from __future__ import annotations
 
@@ -18,38 +14,20 @@ from typing import Any, Callable
 
 from bzplat.backend.games.gomoku.result import MatchResult, RoundResult
 from bzplat.backend.games.gomoku import protocol as proto
+from bzplat.backend.games.gomoku.五子棋裁判程序 import (
+    BOARD_SIZE,
+    in_board,
+    check_win,
+    board_full,
+    is_legal_move,
+    new_board,
+    compute_scores,
+    compute_deltas,
+)
 from bzplat.backend.runtime.binary_runner import BotCrashedError
 
-BOARD_SIZE = 15
 DecideFn = Callable[[int, dict[str, Any]], Any]
 EventFn = Callable[[str, dict[str, Any]], Any]
-
-
-# 方向：横、竖、两斜
-_DIRS = ((1, 0), (0, 1), (1, 1), (1, -1))
-
-
-def in_board(x: int, y: int, size: int = BOARD_SIZE) -> bool:
-    return 0 <= x < size and 0 <= y < size
-
-
-def check_win(board: list[list[int]], x: int, y: int, player: int, size: int = BOARD_SIZE) -> bool:
-    """以 (x,y) 为中心，任一方向连续 ≥5 同色即胜。size 须与棋盘实际边长一致。"""
-    for dx, dy in _DIRS:
-        count = 1
-        for sign in (1, -1):
-            cx, cy = x + sign * dx, y + sign * dy
-            while in_board(cx, cy, size) and board[cx][cy] == player:
-                count += 1
-                cx += sign * dx
-                cy += sign * dy
-        if count >= 5:
-            return True
-    return False
-
-
-def board_full(board: list[list[int]]) -> bool:
-    return all(cell != -1 for row in board for cell in row)
 
 
 @dataclass
@@ -87,7 +65,7 @@ class GomokuSession:
 
     async def run_async(self, decide: DecideFn) -> MatchResult:
         size = self.size
-        board = [[-1 for _ in range(size)] for _ in range(size)]
+        board = new_board(size)
         moves: list[dict[str, int]] = []
         await self._emit_async(
             "match_start",
@@ -125,7 +103,7 @@ class GomokuSession:
                 break
 
             mx, my = proto.parse_xy(raw)
-            if mx is None or my is None or not in_board(mx, my, size) or board[mx][my] != -1:
+            if not is_legal_move(board, mx, my, size):
                 winner = 1 - to_move
                 reason = "illegal"
                 await self._emit_async(
@@ -158,14 +136,8 @@ class GomokuSession:
             last_x, last_y = mx, my
             to_move = 1 - to_move
 
-        scores = [0, 0]
-        if winner is not None:
-            scores[winner] = 1
-        deltas = [0, 0]
-        if winner == 0:
-            deltas = [1, -1]
-        elif winner == 1:
-            deltas = [-1, 1]
+        scores = compute_scores(winner)
+        deltas = compute_deltas(winner)
 
         round_result = RoundResult(
             winners=[winner] if winner is not None else [],
