@@ -101,4 +101,5 @@ SPEC = GameSpec(
     code_path="bzplat/backend/games/pencil/engine.py",
     summary="N=6 点阵（对齐 Botzone grid_size=11 交错→25 格）；红先；占相邻边围格得分并连走；先到多数格（13）或终局格多者胜。",
     preflight_check=_preflight_check,
+    time_budget_per_side=900.0,  # 象棋钟：每方累计 15 分钟
 )

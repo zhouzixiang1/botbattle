@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Clock } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
 import { Card, CardContent } from '@/components/ui/card'
@@ -26,6 +26,7 @@ import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { getGame } from '@/games'
 import type { RawEvent } from '@/games/base'
+import type { PencilViewModel } from '@/games/pencil/reducer'
 import {
   type MatchSeatRow,
   seatInfos,
@@ -39,6 +40,14 @@ type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: str
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   connecting: 'secondary', live: 'default', match_end: 'outline', error: 'destructive',
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
+}
+
+/** 秒 → mm:ss 格式（象棋钟显示用）。 */
+function fmtClock(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}:${r.toString().padStart(2, '0')}`
 }
 
 /** 找德州每手起始事件索引（逐手跳转用）。 */
@@ -61,6 +70,8 @@ export default function MatchViewer() {
   const [stepIdx, setStepIdx] = useState(-1)
   const [playing, setPlaying] = useState(false)
   const [speedIdx, setSpeedIdx] = useState(1)
+  // 时序面板折叠态（窄屏默认折叠，棋盘获全宽）
+  const [timelineCollapsed, setTimelineCollapsed] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const curActionRef = useRef<HTMLDivElement>(null)
   // events 最新长度的 ref——SSE 回调里读「当前长度」算 match_end 贴尾游标，
@@ -152,6 +163,11 @@ export default function MatchViewer() {
 
     return () => { cancelled = true; es?.close() }
   }, [id])
+
+  // 窄屏默认折叠时序面板（不影响桌面布局）
+  useEffect(() => {
+    if (window.innerWidth < 1280) setTimelineCollapsed(true)
+  }, [])
 
   const gameId = normalizeGameId(match?.game_id)
   const isBoard = isBoardGame(gameId)
@@ -349,14 +365,6 @@ export default function MatchViewer() {
               </span>
             </span>
           )}
-          {pencilScores && (
-            /* 点格棋比分：用 chart token（红=chart-3 暖色、蓝=chart-2 冷色），跟随主题而非裸 tailwind 色 */
-            <span className="font-mono text-xs text-muted-foreground">
-              比分 <span className="text-chart-3 font-semibold">{pencilScores[0]}</span>
-              {' : '}
-              <span className="text-chart-2 font-semibold">{pencilScores[1]}</span>
-            </span>
-          )}
           {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (
             <span className="text-xs text-muted-foreground">
               <Link to={`/bot/${match.bot_a_id}`} className="text-primary hover:underline">座1 详情</Link>
@@ -378,10 +386,36 @@ export default function MatchViewer() {
         /></Card>
       ) : (
         // 德州扑克（!isBoard）：canvas 单栏全宽 + 时序栏移下方（牌桌是主视觉，需更大）；
-        // 棋类（isBoard）：保留双栏（棋盘 + 时序并排）。
-        <div className={isBoard ? "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]" : "space-y-4"}>
+        // 棋类（isBoard）：保留双栏（棋盘 + 时序并排）；桌面端折叠时序栏时棋盘获全宽。
+        <div className={!isBoard ? "space-y-4" : timelineCollapsed ? "grid gap-4" : "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]"}>
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
           <div className="space-y-3">
+            {/* 点格棋玩家卡：双方名字+比分+剩余时间（象棋钟）；当前方高亮 */}
+            {pencilScores && visibleVm?.kind === 'board' && (
+              <div className="grid grid-cols-2 gap-2">
+                {([0, 1] as const).map((seat) => {
+                  const vm = visibleVm.vm as PencilViewModel
+                  const isActing = !vm.matchOver && vm.toAct === seat
+                  const remaining = vm.timeRemaining?.[seat]
+                  const name = seats?.[seat]?.botName || seats?.[seat]?.ownerName || (seat === 0 ? '红方' : '蓝方')
+                  const color = seat === 0 ? 'text-chart-3' : 'text-chart-2'
+                  return (
+                    <div key={seat} className={`rounded-lg border p-3 ${isActing ? 'ring-2 ring-primary' : 'border-border'}`}>
+                      <div className={`flex items-center justify-between`}>
+                        <span className={`font-medium ${color}`}>{name}</span>
+                        <span className="font-mono text-lg font-bold">{pencilScores[seat]}</span>
+                      </div>
+                      {remaining != null && (
+                        <div className={`mt-1 text-sm ${isActing ? 'text-foreground' : 'text-muted-foreground'}`}>
+                          <Clock className="size-3.5 inline" /> {fmtClock(remaining)}
+                          {vm.timeOut === seat && <Badge variant="destructive" className="ml-1 text-xs">超时</Badge>}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
             {/* 德州手导航器 */}
@@ -433,20 +467,29 @@ export default function MatchViewer() {
 
           {/* 右：动作时序 */}
           <Card className="flex flex-col">
-            <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
-              动作时序 <span className="text-xs font-normal text-muted-foreground">({visible.length})</span>
+            <div className="border-b border-border px-4 py-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium">
+                  动作时序 <span className="text-xs font-normal text-muted-foreground">({visible.length})</span>
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => setTimelineCollapsed(c => !c)}>
+                  {timelineCollapsed ? '展开' : '折叠'}
+                </Button>
+              </div>
             </div>
-            <div ref={logRef} className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
-              {visible.map((ev, i) => (
-                <div key={i} ref={i === cur ? curActionRef : undefined}
-                  className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
-                  <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
-                  <span className="min-w-0 flex-1 break-words opacity-80" title={String(ev.type || '')}>
-                    {eventDesc(ev)}
-                  </span>
-                </div>
-              ))}
-            </div>
+            {!timelineCollapsed && (
+              <div ref={logRef} className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
+                {visible.map((ev, i) => (
+                  <div key={i} ref={i === cur ? curActionRef : undefined}
+                    className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
+                    <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
+                    <span className="min-w-0 flex-1 break-words opacity-80" title={String(ev.type || '')}>
+                      {eventDesc(ev)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </Card>
         </div>
       )}

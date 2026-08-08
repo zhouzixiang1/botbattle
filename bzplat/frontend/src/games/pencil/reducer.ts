@@ -21,6 +21,12 @@ export interface PencilViewModel {
   boxOwner: number[][]
   /** 连走指示：true=当前手刚得分、本方将继续走 */
   extraTurn: boolean
+  /** 每方已用秒（象棋钟）；null=不限时 */
+  timeUsed: [number, number] | null
+  /** 每方剩余秒 */
+  timeRemaining: [number, number] | null
+  /** 超时方（null=未超时） */
+  timeOut: number | null
 }
 
 const GRID_DOT = 3
@@ -70,6 +76,9 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
   let edgeOwner: Record<string, number> = {}
   let boxOwner: number[][] = emptyBoxOwner(size)
   let extraTurn = false
+  let timeUsed: [number, number] | null = null
+  let timeRemaining: [number, number] | null = null
+  let timeOut: number | null = null
 
   for (const ev of events) {
     const t = String(ev.type || '')
@@ -139,6 +148,14 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     } else if (t === 'error') {
       status = 'error'
       matchOver = true
+    } else if (t === 'time_used') {
+      const seat = Number(ev.seat)
+      if (!timeUsed) timeUsed = [0, 0]
+      if (!timeRemaining) timeRemaining = [0, 0]
+      timeUsed[seat] = Number(ev.used) || 0
+      timeRemaining[seat] = Number(ev.remaining) || 0
+    } else if (t === 'time_out') {
+      timeOut = Number(ev.seat)
     }
   }
 
@@ -157,6 +174,9 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     edgeOwner,
     boxOwner,
     extraTurn,
+    timeUsed,
+    timeRemaining,
+    timeOut,
   }
 }
 

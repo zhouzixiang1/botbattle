@@ -476,6 +476,7 @@ class MatchOrchestrator:
                     on_event=on_event,
                     seed=dup_seed,
                     runtime_modes=(mode_a, mode_b),
+                    time_budget_per_side=spec.time_budget_per_side,
                     **mc,
                 )
             else:
@@ -485,6 +486,7 @@ class MatchOrchestrator:
                     game_id=gid,
                     on_event=on_event,
                     runtime_modes=(mode_a, mode_b),
+                    time_budget_per_side=spec.time_budget_per_side,
                     **mc,
                 )
             # duplicate：每 leg 独立判胜负（result.legs），不把净筹码合并判 1 场。
