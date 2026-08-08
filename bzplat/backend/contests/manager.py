@@ -24,6 +24,7 @@ from bzplat.backend.runtime.limits import FULL_RR_MAX_N
 from bzplat.backend.store import Store
 from bzplat.backend.store.db import match_deltas
 from bzplat.backend.store.schema import (
+    CONTEST_DRAFT,
     CONTEST_FINISHED,
     CONTEST_OPEN,
     CONTEST_PUBLISHED,
@@ -237,13 +238,13 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
-        if c["status"] not in (CONTEST_REST, CONTEST_OPEN, CONTEST_RUNNING):
-            raise ValueError("当前状态不可更换 Bot")
+        # 换人时机：开赛前（draft/open/published）+ 中场休息（rest，受 allow_bot_swap_in_rest 控制）。
+        # 不允许 running 态换人（与赛程对齐：比赛中途换 Bot 影响公平性）。
+        if c["status"] not in (CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED, CONTEST_REST):
+            raise ValueError("当前状态不可更换 Bot（仅开赛前或休息期可换）")
         stages = _parse_stages(c)
         idx = int(c.get("current_stage_idx") or 0)
         stage = stages[idx] if 0 <= idx < len(stages) else {}
-        if c["status"] == CONTEST_RUNNING and not stage.get("allow_bot_swap_in_rest"):
-            raise ValueError("当前阶段不允许中途换 Bot（请等休息期）")
         if c["status"] == CONTEST_REST and not stage.get("allow_bot_swap_in_rest", True):
             raise ValueError("本阶段休息不允许换 Bot")
 
@@ -1268,6 +1269,28 @@ class ContestManager:
         if not self._stage_done(contest_id, stage_idx):
             raise ValueError("当前阶段对阵尚未全部完成")
         return (await self.maybe_finish(contest_id)) or self.store.get_contest(contest_id)
+
+    async def finish(self, contest_id: int) -> dict:
+        """组织者/admin 强制结束赛事（running/rest → finished）。
+
+        用于 running 态卡住时（如 bot 不可用 abort 后 pairing 挂起）的手动出口。
+        正常完成走 maybe_finish 自动路径；本方法跳过「阶段全部完成」检查直接收尾，
+        计算当前已有结果的正式名次（未完成阶段的名次为空）。
+        """
+        c = self.store.get_contest(contest_id)
+        if not c:
+            raise ValueError("比赛不存在")
+        if c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
+            raise ValueError("仅运行中/休息中的赛事可强制结束")
+        stage_idx = int(c.get("current_stage_idx") or 0)
+        self.store.update_contest(
+            contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
+        )
+        try:
+            self._finalize_official_results(contest_id, stage_idx)
+        except Exception:
+            logger.exception("force-finish official results failed contest=%s", contest_id)
+        return self.store.get_contest(contest_id)
 
     def estimate(self, contest_id: int) -> dict:
         c = self.store.get_contest(contest_id)

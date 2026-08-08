@@ -190,6 +190,10 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 - **rest**：阶段间休息（可换 Bot）。`rest_ends_at` 到点自动恢复；
 - **finished**：末阶段完成。
 
+> **组织者手动控制**：到点自动推进之外，组织者始终可手动操作——开放报名（draft→open）、截止报名出排期（→published）、立即开赛（→running）、结束休息进下一阶段。**running/rest 态还可「强制结束赛事」**（→finished，用于赛事卡住时的手动出口，未完成对阵作废并按当前结果计算名次）。
+
+**Bot 换人时机**：选手可在**开赛前**（draft/open/published，已报名者可改派 Bot）和**中场休息**（rest，受 `allow_bot_swap_in_rest` 控制）更换派遣 Bot；**比赛中（running）不可换**（保证公平）。
+
 **时间调度器**后台周期扫描赛事的 `registration_opens_at` / `registration_closes_at` / `starts_at` / `rest_ends_at` / `scheduled_at` 字段，到点自动推进阶段。组织者手动按钮（`/open` `/publish` `/start` `/resume` `/advance`）始终可用——到点自动 + 手动可提前。
 
 > **逐场排期**：每场对阵（pairing）有独立的 `scheduled_at`。阶段可配 `round_stagger_minutes`（轮次间错峰分钟数）；`scheduled_at` 到点才 dispatch。**排期在「对阵」Tab 的赛程表（ScheduleTable）里查看**。
