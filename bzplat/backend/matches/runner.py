@@ -403,6 +403,7 @@ class MatchRunner:
         seed: int | None = None,
         on_event: EventSink | None = None,
         runtime_modes: tuple[str, str] | None = None,
+        time_budget_per_side: float | None = None,
         **match_params: Any,
     ) -> Any:
         """P4 duplicate：跑多 leg（经 spec.build_match_plan），**每 leg 独立判胜负**。
@@ -423,10 +424,13 @@ class MatchRunner:
 
         spec = _reg.get(game_id)
         if spec.build_match_plan is None:
-            # 游戏不支持 duplicate → 退化为单 leg
+            # 游戏不支持 duplicate → 退化为单 leg（透传 time_budget_per_side，
+            # 与 run_binaries 象棋钟路径一致）
             return await self.run_binaries(
                 path_a, path_b, game_id=game_id, on_event=on_event, seed=seed,
-                runtime_modes=runtime_modes, **match_params,
+                runtime_modes=runtime_modes,
+                time_budget_per_side=time_budget_per_side,
+                **match_params,
             )
         legs_plan = spec.build_match_plan(seed or 0, match_params)
         # 每 leg 独立胜负（物理 bot A/B 视角）；累加 deltas 仅留作 net_chips tiebreak
