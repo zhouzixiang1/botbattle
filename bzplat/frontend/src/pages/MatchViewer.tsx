@@ -26,6 +26,7 @@ import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { getGame } from '@/games'
 import type { RawEvent } from '@/games/base'
+import type { PencilViewModel } from '@/games/pencil/reducer'
 import {
   type MatchSeatRow,
   seatInfos,
@@ -39,6 +40,14 @@ type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: str
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   connecting: 'secondary', live: 'default', match_end: 'outline', error: 'destructive',
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
+}
+
+/** 秒 → mm:ss 格式（象棋钟显示用）。 */
+function fmtClock(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}:${r.toString().padStart(2, '0')}`
 }
 
 /** 找德州每手起始事件索引（逐手跳转用）。 */
@@ -349,14 +358,6 @@ export default function MatchViewer() {
               </span>
             </span>
           )}
-          {pencilScores && (
-            /* 点格棋比分：用 chart token（红=chart-3 暖色、蓝=chart-2 冷色），跟随主题而非裸 tailwind 色 */
-            <span className="font-mono text-xs text-muted-foreground">
-              比分 <span className="text-chart-3 font-semibold">{pencilScores[0]}</span>
-              {' : '}
-              <span className="text-chart-2 font-semibold">{pencilScores[1]}</span>
-            </span>
-          )}
           {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (
             <span className="text-xs text-muted-foreground">
               <Link to={`/bot/${match.bot_a_id}`} className="text-primary hover:underline">座1 详情</Link>
@@ -382,6 +383,31 @@ export default function MatchViewer() {
         <div className={isBoard ? "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]" : "space-y-4"}>
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
           <div className="space-y-3">
+            {/* 点格棋玩家卡：双方名字+比分+剩余时间（象棋钟）；当前方高亮 */}
+            {pencilScores && visibleVm?.kind === 'board' && (
+              <div className="grid grid-cols-2 gap-2">
+                {([0, 1] as const).map((seat) => {
+                  const vm = visibleVm.vm as PencilViewModel
+                  const isActing = !vm.matchOver && vm.toAct === seat
+                  const remaining = vm.timeRemaining?.[seat]
+                  const name = seats?.[seat]?.botName || seats?.[seat]?.ownerName || (seat === 0 ? '红方' : '蓝方')
+                  const color = seat === 0 ? 'text-chart-3' : 'text-chart-2'
+                  return (
+                    <div key={seat} className={`rounded-lg border p-3 ${isActing ? 'ring-2 ring-primary' : 'border-border'}`}>
+                      <div className={`flex items-center justify-between`}>
+                        <span className={`font-medium ${color}`}>{name}</span>
+                        <span className="font-mono text-lg font-bold">{pencilScores[seat]}</span>
+                      </div>
+                      {remaining != null && (
+                        <div className={`mt-1 text-sm ${isActing ? 'text-foreground' : 'text-muted-foreground'}`}>
+                          ⏱ {fmtClock(remaining)}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
             {/* 德州手导航器 */}
