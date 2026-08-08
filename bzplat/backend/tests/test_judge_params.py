@@ -318,3 +318,11 @@ def test_patch_judge_params_non_admin_forbidden(tmp_path):
         json={"params": {"judge_holdem_sb": 50}},
     )
     assert r.status_code == 403
+
+
+def test_time_budget_only_pencil():
+    """仅点格棋有 time_budget_per_side（象棋钟）；gomoku/holdem 为 None。"""
+    from bzplat.backend.games import registry
+    assert registry.get("pencil").time_budget_per_side == 900.0
+    assert registry.get("gomoku").time_budget_per_side is None
+    assert registry.get("holdem").time_budget_per_side is None

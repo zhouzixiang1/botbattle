@@ -172,6 +172,9 @@ class GameSpec:
     # P4 duplicate：构造多 leg 对局计划（默认单 leg；holdem 覆写返回 2 leg 同 deal_sequence）。
     # 返回 list[LegSpec]，每 leg 含 seat_swap（是否对调座位）+ 共享 params（deal_sequence 等）。
     build_match_plan: Callable[[int, dict[str, Any]], list[dict[str, Any]]] | None = None
+    # 每方总时间预算（秒）；None=不限时（走原单步 action_timeout 超时）。
+    # 仅 pencil 设 900.0（象棋钟：每方累计 15 分钟，超时判负）。
+    time_budget_per_side: float | None = None
 
     def run_session(
         self, decide: DecideFn, *, on_event: EventFn | None = None, **params: Any
