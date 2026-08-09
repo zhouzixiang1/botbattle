@@ -203,6 +203,72 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
   await monitor.expectClean()
 })
 
+test('notification preference sends one boolean field and survives a refresh', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  let initial = false
+  let changed = false
+
+  await loginThroughUi(page, USER)
+  await withCleanup(async () => {
+    const initialResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/notification-prefs',
+    )
+    await page.goto('/#/settings')
+    const initialResponse = await initialResponsePromise
+    const initialBody = await initialResponse.json() as {
+      prefs: Record<string, unknown>
+    }
+    expect(Object.values(initialBody.prefs).every((value) => typeof value === 'boolean')).toBe(true)
+
+    await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+    const matchDone = page.getByRole('switch', { name: '对局完成邮件提醒', exact: true })
+    initial = await matchDone.isChecked()
+
+    const requestPromise = page.waitForRequest((request) =>
+      request.method() === 'PUT' &&
+      new URL(request.url()).pathname === '/api/notification-prefs',
+    )
+    const responsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'PUT' &&
+      new URL(response.url()).pathname === '/api/notification-prefs',
+    )
+    await matchDone.click()
+    changed = true
+    const updateRequest = await requestPromise
+    expect(updateRequest.postDataJSON()).toEqual({ email_match_done: !initial })
+    const updateResponse = await responsePromise
+    expect(updateResponse.status(), await updateResponse.text()).toBe(200)
+    expect((await updateResponse.json() as { prefs: { email_match_done: unknown } })
+      .prefs.email_match_done).toBe(!initial)
+
+    const refreshedResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/notification-prefs',
+    )
+    await page.reload()
+    const refreshedResponse = await refreshedResponsePromise
+    expect((await refreshedResponse.json() as { prefs: { email_match_done: unknown } })
+      .prefs.email_match_done).toBe(!initial)
+    await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+    await expect(matchDone).toBeChecked({ checked: !initial })
+  }, async () => {
+    if (!changed) return
+    await page.goto('/#/settings')
+    await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+    const matchDone = page.getByRole('switch', { name: '对局完成邮件提醒', exact: true })
+    if (await matchDone.isChecked() !== initial) {
+      const restored = page.waitForResponse((response) =>
+        response.request().method() === 'PUT' &&
+        new URL(response.url()).pathname === '/api/notification-prefs',
+      )
+      await matchDone.click()
+      expect((await restored).status()).toBe(200)
+    }
+  })
+  await monitor.expectClean()
+})
+
 test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, USER)
@@ -758,6 +824,151 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await monitor.expectClean()
 })
 
+test('terminal reason presentation keeps normal adjudication neutral and faults dangerous', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const viewerFixtures = [
+    {
+      id: 'mock-reason-five', gameId: 'gomoku', reason: 'five',
+      label: '连成五子', tone: 'neutral', winner: 0,
+    },
+    {
+      id: 'mock-reason-protocol', gameId: 'gomoku', reason: 'protocol_error',
+      label: 'Bot 响应协议错误', tone: 'danger', winner: 1,
+    },
+    {
+      id: 'mock-reason-legacy', gameId: 'gomoku', reason: 'legacy_internal_reason',
+      label: '已完成', tone: 'neutral', winner: 0,
+    },
+  ] as const
+  const humanFixtures = {
+    'mock-human-score': {
+      gameId: 'pencil', reason: 'score', label: '按最终得分判定', tone: 'neutral', winner: 1,
+    },
+    'mock-human-illegal': {
+      gameId: 'gomoku', reason: 'illegal', label: '非法落子', tone: 'danger', winner: 0,
+    },
+  } as const
+
+  // WebSocket interception must be installed before the first Vite navigation.
+  await page.routeWebSocket(
+    (url) => Object.hasOwn(humanFixtures, url.pathname.split('/').at(-2) || ''),
+    (socket) => {
+      const id = new URL(socket.url()).pathname.split('/').at(-2) as keyof typeof humanFixtures
+      const fixture = humanFixtures[id]
+      setTimeout(() => socket.send(JSON.stringify({
+        type: 'snapshot',
+        match: {
+          id,
+          game_id: fixture.gameId,
+          status: 'completed',
+          reason: fixture.reason,
+          match_type: 'human',
+          human_seat: 1,
+          winner: fixture.winner,
+          bot_a: { name: 'reason_bot', owner_name: 'alpha' },
+          bot_b: { owner_name: 'human_player', is_human: true },
+          result: { hands_played: 1, deltas: fixture.winner === 0 ? [1, -1] : [-1, 1] },
+        },
+        events: [{
+          type: 'match_end',
+          winner: fixture.winner,
+          reason: fixture.reason,
+          scores: fixture.gameId === 'pencil' ? [4, 9] : undefined,
+        }],
+      })), 0)
+    },
+  )
+
+  for (const fixture of viewerFixtures) {
+    await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: '{"ok":true}',
+    }))
+    await page.route(`**/api/matches/${fixture.id}`, async (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: fixture.id,
+          game_id: fixture.gameId,
+          status: 'completed',
+          reason: fixture.reason,
+          winner: fixture.winner,
+          match_type: 'challenge',
+          bot_a: { name: 'reason_a', owner_name: 'alpha' },
+          bot_b: { name: 'reason_b', owner_name: 'beta' },
+          result: {
+            hands_played: 1,
+            deltas: fixture.winner === 0 ? [1, -1] : [-1, 1],
+          },
+        },
+        replay: {
+          events_json: JSON.stringify([{
+            type: 'match_end', winner: fixture.winner, reason: fixture.reason,
+          }]),
+        },
+      }),
+    }))
+  }
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ comments: [], count: 0, total: 0 }),
+  }))
+
+  for (const fixture of viewerFixtures) {
+    await page.goto(`/#/match/${fixture.id}`)
+    const reason = page.getByTestId('terminal-reason')
+    await expect(reason).toHaveText(fixture.label)
+    await expect(reason).toHaveAttribute('data-tone', fixture.tone)
+    await expect(page.locator('main')).not.toContainText('legacy_internal_reason')
+    if (fixture.reason === 'five') {
+      // The generic timeline must retain the game's richer match_end description.
+      await expect(page.getByText('结束 · 座1获胜 · 连成五子', { exact: true })).toBeVisible()
+    }
+  }
+
+  for (const [id, fixture] of Object.entries(humanFixtures)) {
+    // Stay in the same SPA document: reloading the Vite document tears down its
+    // routed sockets before the second mocked human channel can deliver a snapshot.
+    await page.evaluate((matchId) => { window.location.hash = `#/play/${matchId}` }, id)
+    await expect(page).toHaveURL(new RegExp(`#\\/play\\/${id}$`))
+    const reason = page.getByTestId('terminal-reason')
+    await expect(reason).toHaveText(`（${fixture.label}）`)
+    await expect(reason).toHaveAttribute('data-tone', fixture.tone)
+  }
+
+  await loginThroughUi(page, ADMIN)
+  await page.route('**/api/matches?*', async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      matches: [
+        {
+          id: 'admin-normal-majority', game_id: 'pencil', status: 'completed',
+          reason: 'majority', match_type: 'contest', winner: 0,
+          bot_a_id: 1, bot_b_id: 2, bot_a_name: 'normal_a', bot_b_name: 'normal_b',
+          result: { hands_played: 12, deltas: [1, -1] }, created_at: '2026-08-09T12:00:00Z',
+          contest_id: 1,
+        },
+        {
+          id: 'admin-danger-platform', game_id: 'holdem', status: 'aborted',
+          reason: 'platform_error', match_type: 'challenge', winner: null,
+          bot_a_id: 3, bot_b_id: 4, bot_a_name: 'fault_a', bot_b_name: 'fault_b',
+          result: { hands_played: 0, deltas: [0, 0] }, created_at: '2026-08-09T12:01:00Z',
+          contest_id: null,
+        },
+      ],
+      total: 2,
+    }),
+  }))
+  await page.goto('/#/admin?tab=matches')
+  await expect(page.getByTestId('terminal-reason').filter({ hasText: '已取得过半格子' }))
+    .toHaveAttribute('data-tone', 'neutral')
+  await expect(page.getByTestId('terminal-reason').filter({ hasText: '平台运行异常' }))
+    .toHaveAttribute('data-tone', 'danger')
+  await monitor.expectClean()
+})
+
 test('Pencil clock initializes the untouched seat and renders a first-event timeout', async ({ page }) => {
   const monitor = monitorBrowser(page)
 
@@ -942,7 +1153,7 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   await expect(page.locator('main')).not.toContainText('落后')
   await expect(page.getByRole('button', { name: '播放', exact: true })).toHaveCount(0)
   await expect(page.getByText('手导航（点击跳转）', { exact: true })).toHaveCount(0)
-  await expect(page.getByText('对局结束 · 协议错误', { exact: true })).toBeVisible()
+  await expect(page.getByText('结束 · 座2获胜 · Bot 响应协议错误', { exact: true })).toBeVisible()
   const canvasBox = await page.locator('canvas').boundingBox()
   expect(canvasBox).not.toBeNull()
   expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
@@ -1462,7 +1673,8 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
   expect(abortResponse.status(), await abortResponse.text()).toBe(200)
 
   await expect(page.getByText(/对局结束/)).toBeVisible()
-  await expect(page.locator('main')).toContainText('admin-abort')
+  await expect(page.locator('main')).toContainText('管理员中止')
+  await expect(page.locator('main')).not.toContainText('admin-abort')
   await expect.poll(async () => {
     const response = await request.get(`/api/matches/${createdMatchId}`)
     const body = await response.json() as { match?: { status?: string } }

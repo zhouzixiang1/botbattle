@@ -5,9 +5,11 @@ import { reduceHoldemEvents, type HoldemViewModel } from './reducer'
 import { PokerCanvasRenderer } from './canvas'
 import { HoldemHumanActions, holdemEndSummary } from './human-actions'
 import { describeHoldemEvent, holdemHandBoundaries, HoldemReplaySummary } from './view'
+import { createTerminalReasonResolver } from '@/games/reasons'
 
 // canvas 接管后 DOM Board 不再用于 holdem；GameViewSpec 要求 Board 必填，给一个空 stub。
 const HoldemBoardStub = () => null
+const holdemTerminalReason = createTerminalReasonResolver({})
 
 export const holdemSpec: GameViewSpec = {
   id: 'holdem',
@@ -22,6 +24,7 @@ export const holdemSpec: GameViewSpec = {
   matchFormatLabel: '70 手',
   winner: (vm) => (vm as HoldemViewModel).matchWinner,
   describeEvent: describeHoldemEvent,
+  terminalReason: holdemTerminalReason,
   humanPlay: {
     layout: 'canvas-controls-log',
     turnLabel: '轮到你操作',

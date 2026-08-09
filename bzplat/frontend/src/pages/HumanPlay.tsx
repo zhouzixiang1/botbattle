@@ -7,7 +7,7 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ErrorMsg } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
-import { findGame, gameLabel, normalizeGameId, unsupportedGameLabel } from '@/games'
+import { findGame, gameLabel, normalizeGameId, resolveTerminalReason, unsupportedGameLabel } from '@/games'
 import {
   type MatchSeatRow,
   seatInfos,
@@ -287,6 +287,9 @@ export default function HumanPlay() {
   )
   const endSummary = endVm ? gameSpec?.humanPlay.endSummary?.(endVm) : null
   const ActionPanel = gameSpec?.humanPlay.ActionPanel
+  const terminalReason = gameSpec
+    ? gameSpec.terminalReason(endInfo?.reason, match?.status)
+    : resolveTerminalReason(endInfo?.reason, match?.status)
 
   return (
     <PageStub title="人类对战">
@@ -304,7 +307,15 @@ export default function HumanPlay() {
           {over ? (
             <span className="font-medium text-foreground">
               对局结束 · 胜者：{winnerLabel}
-              {endInfo?.reason ? `（${endInfo.reason}）` : ''}
+              {endInfo?.reason && (
+                <span
+                  data-testid="terminal-reason"
+                  data-tone={terminalReason.tone}
+                  className={terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}
+                >
+                  {`（${terminalReason.label}）`}
+                </span>
+              )}
             </span>
           ) : canSubmitAction ? (
             <span className="flex items-center gap-1 font-medium text-success">

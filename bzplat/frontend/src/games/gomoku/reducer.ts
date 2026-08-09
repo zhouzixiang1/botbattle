@@ -17,19 +17,6 @@ export interface GomokuViewModel {
 const emptyBoard = (size: number) =>
   Array.from({ length: size }, () => Array(size).fill(-1) as number[])
 
-const REASON_LABELS: Record<string, string> = {
-  five: '连成五子',
-  draw: '棋盘下满，平局',
-  illegal: '非法落子',
-  error: '决策异常',
-  crash: 'Bot 运行异常',
-  completed: '正常结束',
-}
-
-export function gomokuReasonLabel(reason: string): string {
-  return REASON_LABELS[reason] ?? reason
-}
-
 export function reduceGomokuEvents(events: RawEvent[]): GomokuViewModel {
   let size = 15
   let board = emptyBoard(size)

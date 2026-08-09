@@ -3640,9 +3640,19 @@ class Store:
     # ── follows（关注关系）────────────────────────────────────
     def follow(self, follower_id: int, followee_id: int) -> bool:
         """关注；返回 True 表示新建关注，False 表示已存在。不能关注自己。"""
-        if follower_id == followee_id:
-            return False
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            users = {
+                int(row["id"])
+                for row in c.execute(
+                    "SELECT id FROM users WHERE id IN (?,?)",
+                    (follower_id, followee_id),
+                ).fetchall()
+            }
+            if follower_id not in users or followee_id not in users:
+                raise LookupError("关注关系中的用户不存在")
+            if follower_id == followee_id:
+                return False
             existing = c.execute(
                 "SELECT 1 FROM follows WHERE follower_id=? AND followee_id=?",
                 (follower_id, followee_id),
@@ -3657,6 +3667,16 @@ class Store:
 
     def unfollow(self, follower_id: int, followee_id: int) -> bool:
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            users = {
+                int(row["id"])
+                for row in c.execute(
+                    "SELECT id FROM users WHERE id IN (?,?)",
+                    (follower_id, followee_id),
+                ).fetchall()
+            }
+            if follower_id not in users or followee_id not in users:
+                raise LookupError("关注关系中的用户不存在")
             cur = c.execute(
                 "DELETE FROM follows WHERE follower_id=? AND followee_id=?",
                 (follower_id, followee_id),
@@ -3703,6 +3723,11 @@ class Store:
     # ── favorites（收藏 Bot）──────────────────────────────────
     def favorite(self, user_id: int, bot_id: int) -> bool:
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not c.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
+                raise LookupError("收藏用户不存在")
+            if not c.execute("SELECT 1 FROM bots WHERE id=?", (bot_id,)).fetchone():
+                raise LookupError("收藏 Bot 不存在")
             existing = c.execute(
                 "SELECT 1 FROM favorites WHERE user_id=? AND bot_id=?",
                 (user_id, bot_id),
@@ -3717,6 +3742,11 @@ class Store:
 
     def unfavorite(self, user_id: int, bot_id: int) -> bool:
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not c.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
+                raise LookupError("收藏用户不存在")
+            if not c.execute("SELECT 1 FROM bots WHERE id=?", (bot_id,)).fetchone():
+                raise LookupError("收藏 Bot 不存在")
             cur = c.execute(
                 "DELETE FROM favorites WHERE user_id=? AND bot_id=?", (user_id, bot_id)
             )

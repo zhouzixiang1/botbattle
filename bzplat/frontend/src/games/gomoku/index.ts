@@ -1,8 +1,9 @@
 /** 五子棋前端视图规格（canvas 渲染；DOM GomokuBoard 已删）。 */
 import { Grid3x3 } from 'lucide-react'
 import type { GameViewSpec, RawEvent } from '../base'
-import { gomokuReasonLabel, reduceGomokuEvents, type GomokuViewModel } from './reducer'
+import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import { GomokuCanvasRenderer } from './canvas'
+import { gomokuTerminalReason } from './reasons'
 
 const GomokuBoardStub = () => null  // canvas 接管，DOM Board 不再用
 
@@ -19,7 +20,7 @@ function describeGomokuEvent(event: RawEvent): string {
   if (event.type === 'match_start') return '对局开始'
   if (event.type === 'match_end') {
     const outcome = event.winner == null ? '平局' : `座${displaySeat(event.winner)}获胜`
-    const reason = gomokuReasonLabel(String(event.reason || ''))
+    const reason = gomokuTerminalReason(event.reason, 'completed').label
     return `结束 · ${outcome}${reason ? ` · ${reason}` : ''}`
   }
   if (event.type === 'error') return String(event.message || '对局异常')
@@ -39,6 +40,7 @@ export const gomokuSpec: GameViewSpec = {
   matchFormatLabel: '单局',
   winner: (vm) => (vm as GomokuViewModel).winner,
   describeEvent: describeGomokuEvent,
+  terminalReason: gomokuTerminalReason,
   humanPlay: {
     layout: 'canvas-with-log',
     turnLabel: '轮到你落子',

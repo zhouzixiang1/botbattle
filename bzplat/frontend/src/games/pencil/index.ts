@@ -4,6 +4,7 @@ import type { GameViewSpec, RawEvent } from '../base'
 import { reducePencilEvents, type PencilViewModel } from './reducer'
 import { PencilCanvasRenderer } from './canvas'
 import { PencilReplayHud } from './replay-hud'
+import { pencilTerminalReason } from './reasons'
 
 const PencilBoardStub = () => null  // canvas 接管，DOM Board 不再用
 
@@ -20,7 +21,10 @@ function describePencilEvent(event: RawEvent): string {
   if (event.type === 'turn') return `轮到座${displaySeat(event.player)}`
   if (event.type === 'your_turn') return '轮到你'
   if (event.type === 'match_start') return '对局开始'
-  if (event.type === 'match_end') return `结束 · 胜者 ${event.winner == null ? '平' : `座${displaySeat(event.winner)}`}`
+  if (event.type === 'match_end') {
+    const outcome = event.winner == null ? '平局' : `座${displaySeat(event.winner)}获胜`
+    return `结束 · ${outcome} · ${pencilTerminalReason(event.reason, 'completed').label}`
+  }
   if (event.type === 'time_out') return `座${displaySeat(event.seat)} · 超时`
   if (event.type === 'error') return String(event.message || '对局异常')
   return event.type || '?'
@@ -39,6 +43,7 @@ export const pencilSpec: GameViewSpec = {
   matchFormatLabel: '单局',
   winner: (vm) => (vm as PencilViewModel).winner,
   describeEvent: describePencilEvent,
+  terminalReason: pencilTerminalReason,
   humanPlay: {
     layout: 'canvas-with-log',
     turnLabel: '轮到你连边',

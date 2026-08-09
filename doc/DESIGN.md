@@ -133,12 +133,12 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 | 表 | 用途 |
 |----|------|
 | `rating_history` | 评分变化时序（**per-game**，bot_id+game_id；段位趋势曲线，每 bot×game 截断保留） |
-| `follows` | 关注关系（follower_id, followee_id） |
-| `favorites` | 收藏 Bot（user_id, bot_id） |
+| `follows` | 关注关系（follower_id, followee_id）；写入/删除在同一 `BEGIN IMMEDIATE` 事务内复核 actor 与 target，竞态删除统一 404 |
+| `favorites` | 收藏 Bot（user_id, bot_id）；写入/删除在同一 `BEGIN IMMEDIATE` 事务内复核用户与 Bot，竞态删除统一 404 |
 | `comments` | 评论（target_type=match/bot, target_id, user_id, body）；写入前在同一事务验证目标存在，删目标级联清理 |
 | `likes` | 点赞（user_id, target_type=match/bot/comment, target_id）；写入前验证目标，删目标/评论级联清理 |
 | `notifications` | 通知（user_id, type, title, body, link, is_read） |
-| `notification_prefs` | 通知邮件偏好（email_match_done/email_followed/email_contest/email_comment） |
+| `notification_prefs` | 通知邮件偏好（email_match_done/email_followed/email_contest/email_comment）；DB 保持 0/1，公开 GET/PUT 请求与响应只使用 boolean |
 
 ### 3.3 支撑表（选录）
 
@@ -158,6 +158,11 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 `Store._migrate()` 在每次建连时自愈：为旧库补新增列（game_id/xp/level/bio/avatar/likes_count 等），必要时重建表放宽 CHECK 约束（纳入 rest/ladder/human 等新状态）。**向后兼容，不破坏现有数据**（除对局数据——见下）。
 迁移还会删除多态社交表中已失去用户或目标的孤儿行、按真实 likes 重算每场对局的
 `likes_count` 缓存，并把历史 `pair_stats.samples` 修正为胜负平之和。
+
+**本次主库数据影响不是零**：2026-08-09 首次只读审计显示该修复会更新 147 条
+`pair_stats`，`samples` 合计从 0 回填为 918；线上继续产生对局后，23:39 再次只读复核为
+152 条、合计 0→933。发布前必须再次以主库只读查询复核并在 PR/发布记录写入最终数字，迁移
+只更新 `samples != a_wins+a_losses+draws` 的行，不应宣称“无数据库影响”。
 
 **matches 拆 per-game 表 + ratings 加 game_id 维度的迁移**：
 - **对局数据不保留**（用户决策）：检测旧单表 `matches` → 先清 `contest_pairings.match_id`（置 NULL），再 DROP `matches`+`match_replays`；新三表（`matches_holdem/gomoku/pencil`）+ `matches_index` 由 SCHEMA `IF NOT EXISTS` 建。对局可后续跑种子脚本（`scripts/seed_test_accounts.py`）重建。
@@ -184,9 +189,9 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 ### 4.2 鉴权端点（require_user，登录玩家）
 - Bot 管理：`POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`
 - 对局：`POST /api/matches/challenge`（两座位各选 bot + 可选版本快照，**自博弈允许**——同 bot 同/不同版本）、`/api/matches/human`（公开契约固定 `human_seat=1`，即展示座位 2/白方）
-- 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；读写不存在的目标统一 404
+- 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；API 预检用于友好提示，Store 仍在同一写事务内复核 actor/target，竞态删除或不存在统一 404
 - 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`；评论/点赞请求使用严格 target 枚举且必须引用当前存在的实体，通知排除行为发起者本人
-- 通知：`GET /api/notifications`、`POST /read`、`/read-all`、`GET/PUT /api/notification-prefs`
+- 通知：`GET /api/notifications`、`POST /read`、`/read-all`、`GET/PUT /api/notification-prefs`；偏好 REST 四字段唯一类型为 boolean，PUT 可只提交一个变化字段，SQLite 0/1 不穿透到前端
 - 赛事：`POST /api/contests/{id}/register`
 - 认证：`GET /api/auth/me`、`POST /logout`、`/change-password`、`PUT /profile`、`POST /avatar`
 
@@ -228,7 +233,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
   - **auth 页**（登录/注册/重置/验证）：不显示侧栏，内容占满居中；顶栏保留精简条（品牌 + 主题 + 登录/注册）。
   - nav-config.ts（**7** 项主导航 + 条件显示的 Admin）。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。首页 Hero 对访客额外展示注册/登录 CTA。
   - **统一对局页** `/match/:id`（MatchViewer）：实时 SSE + 回放 DVR；座位身份经 `matches.seat_info.with_seat_info`（人类座真人用户名）；canvas 绘 BOT 名/累计/胜者（旧 `/watch` 与 `/arena?id=` 路径已删，无重定向，请用 `/match/:id` 或从 `/history` 进入）。人类 `/play` 复用 seats + revealMode=showdown。直播结束时游标停在当前位置（match_end 把 stepIdx 钉在最后一条事件、停止自动推进），不跳到尾部结局；终态不再计算直播 lag，播放游标明确按事件计数，顶部总手数/步数读取持久化结果。0 完成手/步的技术判负直接定位终局，展示脱敏 `technical_incident_samples` 的座位、code、turn 与 error，并隐藏无意义的分段导航和播放控制。
-- **前端游戏契约**：`games/base.ts` 的 `GameViewSpec` 除 canvas/reducer 外，还统一声明 `winner`、`describeEvent`、`humanPlay`、`replay` 与可选 `canvasAspectRatio`。德州牌桌声明 16:9 并使用右侧时序，棋类沿用通用 3:2；`humanPlay.serializeBoardPick` 把画布坐标封装为该游戏唯一的 WebSocket `response` 信封，`humanPlay.ActionPanel` 承载非画布动作控件及序列化；`replay.Hud/Summary/progress/navigation` 承载比分、棋钟、筹码摘要和逐段导航。`HumanPlay`/`MatchViewer` 只挂载这些能力，不 import 或断言具体游戏 ViewModel。依赖方向固定为“页面/通用组件 → 注册表契约 → 游戏包”；游戏动作/HUD 组件仅依赖 `games/base.ts` 类型与共享 UI，不反向 import 页面，避免循环依赖。
+- **前端游戏契约**：`games/base.ts` 的 `GameViewSpec` 除 canvas/reducer 外，还统一声明 `winner`、`describeEvent`、`terminalReason`、`humanPlay`、`replay` 与可选 `canvasAspectRatio`。`terminalReason(reason,status)` 是单一 `{label,tone}` 展示契约：游戏包声明正常/异常裁判原因，平台协议错误、超时和平台故障在共享层集中；未知 completed 原因中性归纳且不裸显内部码。MatchViewer、HumanPlay、admin 对局表共用它，通用时间线不得覆盖游戏 `describeEvent`。德州牌桌声明 16:9 并使用右侧时序，棋类沿用通用 3:2；`humanPlay.serializeBoardPick` 把画布坐标封装为该游戏唯一的 WebSocket `response` 信封，`humanPlay.ActionPanel` 承载非画布动作控件及序列化；`replay.Hud/Summary/progress/navigation` 承载比分、棋钟、筹码摘要和逐段导航。`HumanPlay`/`MatchViewer` 只挂载这些能力，不 import 或断言具体游戏 ViewModel。依赖方向固定为“页面/通用组件 → 注册表契约 → 游戏包”；游戏动作/HUD 组件仅依赖 `games/base.ts` 类型与共享 UI，不反向 import 页面，避免循环依赖。
 - **未知游戏 fail-closed**：`normalizeGameId` 只做字符串规整；`findGame` 对未注册 id 返回 `undefined`，`getGame` 明确抛错。详情、回放、人类对战与列表展示统一显示“不支持的游戏/规则不可用”，不得把缺失或未来 `game_id` 静默渲染成德州扑克。
 - **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题 + `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；垂直 padding 由全局 `<main>` 统一提供，内容宽度封顶 1536px 并居中，避免 2K/4K 视口无限拉伸；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
 - **观赛/对战页左右分栏**：MatchViewer（统一对局页）/ History（对局列表入口，nav「对局记录」）/ HumanPlay `xl:grid-cols-[minmax(0,1fr)_22rem]`（左展示 / 右日志），`lg`(1024-1279) 因侧栏占位自动堆叠，`xl`(1280)+ 横排。MatchViewer 合并旧 MatchDetail（回放）逻辑，直播 DVR 模型内联实现：按 match.status 选模式（running→SSE 直播 DVR 模型：定位最新后按回放速度推进；completed→从头播放），座位身份从 `get_match_detailed`（LEFT JOIN bots+users，孤儿对局容错 NULL）取 BOT 名/@用户名。MatchBoard（canvas 棋盘渲染）经 GSAP timeline 驱动动画。
@@ -240,7 +245,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 平台新增一层**可选的 canvas 动画渲染层**，现已三游戏全部迁移：
 
 - **`GameViewSpec.CanvasRenderer`**（`games/base.ts` 可选字段）：每款游戏提供一个 `GameCanvasRenderer<S>`（`games/canvas-types.ts` 定义：`toScene` events→归一化场景（复用现有 reducer）/ `diff` 两帧差分定动画 / `draw` 按 t 在 prev↔next 间逐帧绘制 / `pick` 可选 canvas 坐标→落子坐标（棋类人类对战））。`MatchBoard` 用 CanvasRenderer 绘制；DOM Board 字段保留为 stub。
-- **`<GameCanvas>`**（`components/GameCanvas.tsx`）：通用 canvas 宿主组件，用 **GSAP timeline** 驱动插值动画（发牌翻面、动作浮字、棋子缩放、边连线绘制）；按 `GameViewSpec.canvasAspectRatio` 计算响应式位图尺寸并适配 DPR，尺寸与绘制拆为两个 effect（避免无关重渲染清空位图）；支持 `onMove`/`interactive`（经 `pick` 转换为游戏坐标，再由 `GameViewSpec.humanPlay.serializeBoardPick` 生成唯一 WS 信封）服务人类对战。
+- **`<GameCanvas>`**（`components/GameCanvas.tsx`）：通用 canvas 宿主组件，用 **GSAP timeline** 驱动插值动画（发牌翻面、动作浮字、棋子缩放、边连线绘制）；按 `GameViewSpec.canvasAspectRatio` 计算响应式位图尺寸并适配 DPR，尺寸与绘制拆为两个 effect（避免无关重渲染清空位图）；同一 SPA 实例切换 `game_id` 时先清空旧 renderer 的 Scene/timeline，禁止把不同游戏场景交叉传给新 renderer；支持 `onMove`/`interactive`（经 `pick` 转换为游戏坐标，再由 `GameViewSpec.humanPlay.serializeBoardPick` 生成唯一 WS 信封）服务人类对战。
 - **per-game 实现**：`games/<game>/canvas.ts` —— holdem `PokerCanvasRenderer`（牌面矢量走 vendor **Poker.JS** `lib/pokerjs/`，来源 Tairraos/Poker.JS；发牌翻面/动作浮字/筹码插值）/ gomoku `GomokuCanvasRenderer`（棋子缩放进入、最后一手标记）/ pencil `PencilCanvasRenderer`（边沿线绘制、格归属淡入）。
 - **座位身份**：`get_match_detailed`（`store/db.py`）JOIN bots+users 返回 bot_a/bot_b 名+owner 名，`_with_seat_info`（`api_routes.py`）整理成嵌套 + 标 is_human；match_detail + SSE/WS snapshot 均用之。
 - **迁移进度**：三游戏 DOM 棋盘组件（PokerTable/PlayingCard/GomokuBoard/PencilBoard）已全部删除，统一走 canvas。点数 10 正确显示（修复了原 `牌 T` bug）。

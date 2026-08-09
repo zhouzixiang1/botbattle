@@ -255,7 +255,12 @@ def follow_user(user_id: int, request: Request, user=Depends(require_user)):
         raise HTTPException(404, "用户不存在")
     if user["id"] == user_id:
         raise HTTPException(400, "不能关注自己")
-    created = store.follow(user["id"], user_id)
+    try:
+        # Store 在同一写事务内再次确认两端仍存在；这里处理预检查与写入之间
+        # 被管理员删除的竞态，不能把底层 FK/LookupError 泄漏成 500。
+        created = store.follow(user["id"], user_id)
+    except LookupError:
+        raise HTTPException(404, "用户不存在") from None
     # 关注时通知被关注者 + 被关注者经验
     notifier = getattr(request.app.state, "notifier", None)
     if created:
@@ -280,7 +285,10 @@ def unfollow_user(user_id: int, request: Request, user=Depends(require_user)):
     store = _store(request)
     if not store.get_user(user_id):
         raise HTTPException(404, "用户不存在")
-    store.unfollow(user["id"], user_id)
+    try:
+        store.unfollow(user["id"], user_id)
+    except LookupError:
+        raise HTTPException(404, "用户不存在") from None
     return {"ok": True, "following": False}
 
 
@@ -298,9 +306,13 @@ def follow_status(user_id: int, request: Request, user=Depends(require_user)):
 
 @router.post("/api/bots/{bot_id}/favorite")
 def favorite_bot(bot_id: int, request: Request, user=Depends(require_user)):
-    if not _store(request).get_bot(bot_id):
+    store = _store(request)
+    if not store.get_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
-    created = _store(request).favorite(user["id"], bot_id)
+    try:
+        created = store.favorite(user["id"], bot_id)
+    except LookupError:
+        raise HTTPException(404, "bot 不存在") from None
     return {"ok": True, "favorited": True, "created": created}
 
 
@@ -309,7 +321,10 @@ def unfavorite_bot(bot_id: int, request: Request, user=Depends(require_user)):
     store = _store(request)
     if not store.get_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
-    store.unfavorite(user["id"], bot_id)
+    try:
+        store.unfavorite(user["id"], bot_id)
+    except LookupError:
+        raise HTTPException(404, "bot 不存在") from None
     return {"ok": True, "favorited": False}
 
 
@@ -1226,6 +1241,14 @@ class NotificationPrefsUpdate(BaseModel):
     email_comment: StrictBool | None = None
 
 
+_NOTIFICATION_PREF_FIELDS = tuple(NotificationPrefsUpdate.model_fields)
+
+
+def _public_notification_prefs(stored: dict[str, Any]) -> dict[str, bool]:
+    """Project SQLite's 0/1 storage values onto the public boolean contract."""
+    return {field: bool(stored.get(field, 0)) for field in _NOTIFICATION_PREF_FIELDS}
+
+
 @router.get("/api/notifications")
 def list_notifications(
     request: Request,
@@ -1276,7 +1299,8 @@ def read_all_notifications(request: Request, user=Depends(require_user)):
 
 @router.get("/api/notification-prefs")
 def get_notif_prefs(request: Request, user=Depends(require_user)):
-    return {"prefs": _store(request).get_notification_prefs(user["id"])}
+    stored = _store(request).get_notification_prefs(user["id"])
+    return {"prefs": _public_notification_prefs(stored)}
 
 
 @router.put("/api/notification-prefs")
@@ -1288,7 +1312,8 @@ def update_notif_prefs(
     clean = prefs.model_dump(exclude_none=True)
     if not clean:
         raise HTTPException(400, "无可更新字段")
-    return {"prefs": _store(request).update_notification_prefs(user["id"], **clean)}
+    stored = _store(request).update_notification_prefs(user["id"], **clean)
+    return {"prefs": _public_notification_prefs(stored)}
 
 
 # ── contests ──────────────────────────────────────────────────

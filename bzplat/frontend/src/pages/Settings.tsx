@@ -18,10 +18,10 @@ import { gameLabel } from '@/lib/games'
 import { fmtRating } from '@/lib/format'
 
 interface Prefs {
-  email_match_done: number
-  email_followed: number
-  email_contest: number
-  email_comment: number
+  email_match_done: boolean
+  email_followed: boolean
+  email_contest: boolean
+  email_comment: boolean
 }
 interface FavBot {
   id: number
@@ -51,7 +51,10 @@ export default function Settings() {
   const [newPw, setNewPw] = useState('')
   // prefs
   const [prefs, setPrefs] = useState<Prefs>({
-    email_match_done: 0, email_followed: 0, email_contest: 0, email_comment: 0,
+    email_match_done: false,
+    email_followed: false,
+    email_contest: false,
+    email_comment: false,
   })
   // favorites
   const [favs, setFavs] = useState<FavBot[]>([])
@@ -119,14 +122,18 @@ export default function Settings() {
       .catch((e) => setError(errMsg(e)))
   }
 
-  function togglePref(key: keyof Prefs) {
-    const prev = prefs
-    const next = { ...prefs, [key]: prefs[key] ? 0 : 1 }
-    setPrefs(next)
-    apiJson('/api/notification-prefs', 'PUT', next).catch((e) => {
-      setPrefs(prev) // 失败回滚开关到原状态，避免 UI 与服务端不一致
-      setError(errMsg(e))
-    })
+  function togglePref(key: keyof Prefs, checked: boolean) {
+    const previous = prefs[key]
+    setPrefs((current) => ({ ...current, [key]: checked }))
+    // 偏好是独立开关：一次只提交用户刚操作的字段，避免用旧快照覆盖其他并发更新。
+    apiJson<{ prefs: Prefs }>('/api/notification-prefs', 'PUT', { [key]: checked })
+      .then(({ prefs: saved }) => {
+        setPrefs((current) => ({ ...current, [key]: saved[key] }))
+      })
+      .catch((e) => {
+        setPrefs((current) => ({ ...current, [key]: previous }))
+        setError(errMsg(e))
+      })
   }
 
   const [avatarVer, setAvatarVer] = useState(0)
@@ -286,8 +293,9 @@ export default function Settings() {
               <div key={key} className="flex items-center justify-between gap-2 text-sm">
                 <span className="text-foreground">{label} 邮件提醒</span>
                 <Switch
-                  checked={!!prefs[key]}
-                  onCheckedChange={() => togglePref(key)}
+                  aria-label={`${label}邮件提醒`}
+                  checked={prefs[key]}
+                  onCheckedChange={(checked) => togglePref(key, checked)}
                 />
               </div>
             ))}

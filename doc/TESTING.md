@@ -113,6 +113,9 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 - **对局重启恢复**：上一进程遗留的 running 与非赛事 pending 对局统一中止；活跃赛事 pending 由 pairing 对账精确恢复，避免把可重派赛事粗暴 abort。
 - **评分恰好一次 + 顺序屏障**：`match_rating_settlements` 的 claim 与双方 rating/history/pair_stats 同事务；失败整体回滚。覆盖 M1 评分事务失败后 M2 触发补算，必须严格按 `(created_at,id)` 得到与 M1→M2 正常路径完全一致的 rating/history；并发后处理不越序且通知/XP 不重复。启动恢复共用同一顺序机制，只补评分，任一早场失败即停止，重复调用无副作用。
 - **定级/对手统计一致性**：定级场数由代码配置同时驱动 auto-match、tiers、leaderboard 与 Bot profile；正式 Bot 始终排在定级 Bot 之前。每次 rating settlement 同事务递增 `pair_stats.samples`，并断言其恒等于胜+负+平；迁移回归修复历史零值。
+- **通知偏好布尔边界**：Store 单测保留 SQLite 0/1 断言，HTTP 测试断言 GET/PUT 四字段只返回 boolean、字符串布尔被拒绝；浏览器测试抓取 Switch 的 PUT 请求体，必须只含当前字段与 boolean，并刷新验证持久化。
+- **终局原因展示**：浏览器以正常 `five/score/majority`、异常 `illegal/protocol_error/platform_error` 和未知 completed 历史码作对照，断言 MatchViewer、HumanPlay、admin 对局表的 `{label,tone}` 一致，内部英文码不泄漏，时间线保留游戏 `describeEvent`；同一 SPA 内从点格棋人机终局切到五子棋人机终局，验证旧 Scene 不会跨 renderer 复用导致画布崩溃。
+- **关注/收藏竞态**：Store 直接覆盖 actor/target 任一缺失；API 故障注入在预检查后删除目标，follow/favorite 必须稳定返回 404 且不留下关系，证明最终存在性检查与写入位于同一事务。
 - **赛事两阶段派发与阶段推进**：prepare match → 原子绑定 pairing → start task；任一步失败须删除/解绑本次精确对象。服务重启可清理未绑定幽灵、复位死 pairing，并只在整个 published 批次尚未启动时原子重建残缺排期。后续 stage 的全部 pairing（含版本快照、bye、排期）与 `current_stage_idx/status` 同事务提交；Swiss/KO 懒生成的后续轮先构造完整 rows，再在 `BEGIN IMMEDIATE` 内复核 contest/stage/上一轮/目标轮并一次追加。两类批次均须以第二行故障注入验证零 partial，重试只生成一个完整批次。Swiss 还须验证按 entry 累计实际 seat0、`color_first=1` 落库前交换 A/B、challenge 收到同一实际顺序。
 - **正式榜破同分**：从 pairing 的实际 A/B 与 completed match 的 `technical_loss/winner` 识别技术负 entry；其余破同分项相同时，技术负次数较少者必须排前。
 - **正式榜发布恢复**：`contest_official_results` 的清旧、全量插入与 `official_results_ready=1` 同事务；中途注入失败不得留下 partial。若进程在赛事先写 `finished` 后、榜事务提交前退出，启动对账须对 `finished+ready=0` 幂等补算，恢复后公开接口不再返回 409，重复启动不重写已就绪结果。

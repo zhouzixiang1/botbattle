@@ -23,7 +23,7 @@ import { apiGet, apiPost, errMsg } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/games'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
-import { findGame, unsupportedGameLabel } from '@/games'
+import { findGame, resolveTerminalReason, unsupportedGameLabel } from '@/games'
 import type { RawEvent } from '@/games/base'
 import {
   type MatchSeatRow,
@@ -33,23 +33,6 @@ import {
 } from '@/lib/match-seats'
 
 type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: string }
-
-const REASON_LABELS: Record<string, string> = {
-  completed: '正常结束',
-  protocol_error: '协议错误',
-  technical_loss: 'Bot 技术判负',
-  timeout: '决策超时',
-  crash: 'Bot 运行异常',
-  invalid_action: '非法动作',
-  version_unavailable: 'Bot 版本不可用',
-  platform_error: '平台运行异常',
-  admin_aborted: '管理员中止',
-}
-
-function reasonLabel(reason: unknown): string {
-  const value = String(reason ?? '').trim()
-  return REASON_LABELS[value] ?? (value.replaceAll('_', ' ') || '未知原因')
-}
 
 function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
   if (!match) return false
@@ -66,11 +49,10 @@ function describeTimelineEvent(event: RawEvent, gameDescription: string): string
     const seatText = Number.isFinite(seat) ? `座位 ${seat + 1}` : 'Bot'
     const turn = Number(event.turn)
     const turnText = Number.isFinite(turn) && turn > 0 ? ` · 第 ${turn} 次决策` : ''
-    return `${seatText} 技术故障${turnText}：${String(event.error || reasonLabel(event.reason))}`
+    const reason = resolveTerminalReason(event.reason, 'completed').label
+    return `${seatText} 技术故障${turnText}：${String(event.error || reason)}`
   }
-  if (event.type === 'match_end' && event.reason && event.reason !== 'completed') {
-    return `对局结束 · ${reasonLabel(event.reason)}`
-  }
+  // match_end 的裁判原因属于游戏契约；不得在通用时间线覆盖 describeEvent。
   return gameDescription
 }
 
@@ -317,12 +299,15 @@ export default function MatchViewer() {
   const ReplayHud = gameSpec?.replay.Hud
   const navigation = gameSpec?.replay.navigation
   const typeBadge = matchTypeBadge(match?.match_type)
+  const terminalReason = gameSpec
+    ? gameSpec.terminalReason(match?.reason, match?.status)
+    : resolveTerminalReason(match?.reason, match?.status)
   const persistedIncidents = match?.result?.technical_incident_samples ?? []
   const eventIncidents = events
     .filter((event) => event.type === 'technical_incident')
     .map((event) => ({
       seat: Number(event.seat),
-      error: String(event.error || reasonLabel(event.reason)),
+      error: String(event.error || resolveTerminalReason(event.reason, 'completed').label),
       code: event.code == null ? undefined : String(event.code),
       reason: event.reason == null ? undefined : String(event.reason),
       turn: event.turn == null ? null : Number(event.turn),
@@ -494,8 +479,12 @@ export default function MatchViewer() {
                 {finished ? winnerLabel : '对局进行中'}
               </div>
               {match.reason && (
-                <div className={`mt-1 text-xs ${match.reason === 'completed' ? 'text-muted-foreground' : 'text-destructive'}`}>
-                  {reasonLabel(match.reason)}
+                <div
+                  data-testid="terminal-reason"
+                  data-tone={terminalReason.tone}
+                  className={`mt-1 text-xs ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
+                >
+                  {terminalReason.label}
                 </div>
               )}
             </div>
@@ -535,7 +524,7 @@ export default function MatchViewer() {
                     ))}
                   </div>
                 ) : (
-                  <p className="mt-2 text-xs text-muted-foreground">故障类型：{reasonLabel(match.reason)}</p>
+                  <p className="mt-2 text-xs text-muted-foreground">故障类型：{terminalReason.label}</p>
                 )}
               </div>
             </div>

@@ -44,6 +44,7 @@ export default function GameCanvas({
   const stateRef = useRef<{ prev: Scene | null; next: Scene } | null>(null)
   const tlRef = useRef<gsap.core.Timeline | null>(null)
   const lastEventsLenRef = useRef(0)
+  const activeSpecRef = useRef(spec)
   // ref 镜像 width，供 ResizeObserver 回调读最新值做去抖（避免把 width 进 deps 导致 observer 反复重建）
   const widthRef = useRef(width)
   widthRef.current = width
@@ -67,6 +68,17 @@ export default function GameCanvas({
     ro.observe(el)
     return () => ro.disconnect()
   }, [widthProp])
+
+  // Hash 路由可在不卸载 GameCanvas 的情况下切换到另一款游戏。不同 renderer 的
+  // Scene 结构不兼容，必须先清掉前一游戏的场景和动画，不能拿 PencilScene 给
+  // GomokuRenderer.diff/draw（会在真实跨游戏回放导航时崩溃并清空整页）。
+  useEffect(() => {
+    if (activeSpecRef.current === spec) return
+    tlRef.current?.kill()
+    stateRef.current = null
+    lastEventsLenRef.current = -1
+    activeSpecRef.current = spec
+  }, [spec])
 
   // 尺寸/DPR 适配 effect —— 仅在 width/height/gameId 变化时重跑。
   // canvas.width/height 赋值会清空位图（HTML 规范），故只在尺寸真正变化时才做，
