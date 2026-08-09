@@ -741,104 +741,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ):
             _add_col(conn, "pair_stats", col, decl)
 
-    # 赛制模板：表为空时从代码默认 + 旧 blob 导入
-    if "contest_templates" in tables or True:  # 新库也会建表
-        # 懒导入避免循环
-        from bzplat.backend.contests.templates import (
-            DEFAULT_TEMPLATES,
-            default_match_config,
-        )
-
-        ntpl = conn.execute("SELECT COUNT(*) FROM contest_templates").fetchone()[0]
-        if ntpl == 0:
-            # 先看旧 platform_settings blob（admin 历史覆盖）
-            blob_row = conn.execute(
-                "SELECT value FROM platform_settings WHERE key='contest_templates'"
-            ).fetchone()
-            imported_ids: set[str] = set()
-            now = _now()
-            if blob_row and blob_row[0]:
-                try:
-                    blob = json.loads(blob_row[0])
-                    if isinstance(blob, list):
-                        for t in blob:
-                            if not isinstance(t, dict):
-                                continue
-                            tid = str(t.get("id") or "").strip()
-                            if not tid or tid in imported_ids:
-                                continue
-                            gid = t.get("game_id")
-                            try:
-                                gid = _registered_game_id(gid)
-                            except ValueError:
-                                # 无法确定所属游戏的旧模板不能猜成 holdem；代码内置
-                                # 同名模板仍会在下方按其权威 game_id 补入。
-                                continue
-                            imported_ids.add(tid)
-                            conn.execute(
-                                "INSERT OR REPLACE INTO contest_templates"
-                                "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
-                                "VALUES(?,?,?,?,?,?,?)",
-                                (
-                                    tid,
-                                    str(t.get("name") or tid),
-                                    gid,
-                                    json.dumps(t.get("match_config") or default_match_config(gid)),
-                                    json.dumps(t.get("stages") or [], ensure_ascii=False),
-                                    0,
-                                    now,
-                                ),
-                            )
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            # 再补代码默认模板（未被 blob 覆盖的）
-            for tid, t in DEFAULT_TEMPLATES.items():
-                if tid in imported_ids:
-                    continue
-                gid = _registered_game_id(t.get("game_id"))
-                conn.execute(
-                    "INSERT OR REPLACE INTO contest_templates"
-                    "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (
-                        tid,
-                        t.get("name") or tid,
-                        gid,
-                        json.dumps(default_match_config(gid)),
-                        json.dumps(t.get("stages") or [], ensure_ascii=False),
-                        1,
-                        now,
-                    ),
-                )
-
-        # 对账：补齐代码定义但 DB 缺失的内置模板。生产库 PR#74 前创建时 seed 只在
-        # 表空时跑一次（上方 if ntpl==0 守卫），导致之后新增的内置模板（如预赛/决赛）
-        # 永远不会入库——前端 GET /api/contests/templates 读 DB 表 → 缺失 → UI 看不到。
-        # 每次 _migrate 都跑：仅 INSERT 缺失项，绝不覆盖已有行（尊重 admin 覆盖/旧 blob
-        # 导入的 is_builtin=0 行）。幂等：已存在的跳过。
-        now2 = _now()
-        for tid, t in DEFAULT_TEMPLATES.items():
-            exists = conn.execute(
-                "SELECT 1 FROM contest_templates WHERE id=?", (tid,)
-            ).fetchone()
-            if exists:
-                continue
-            gid = _registered_game_id(t.get("game_id"))
-            conn.execute(
-                "INSERT INTO contest_templates"
-                "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (
-                    tid,
-                    t.get("name") or tid,
-                    gid,
-                    json.dumps(default_match_config(gid)),
-                    json.dumps(t.get("stages") or [], ensure_ascii=False),
-                    1,
-                    now2,
-                ),
-            )
-
     # ── ratings / rating_history 加 game_id 维度（全面解耦 PR3）──────────
     # 旧库 ratings PK = bot_id（无 game_id 列）；rating_history 无 game_id 列。
     # 迁移：加 game_id 列，按 bots.game_id 回填，重建表改 PK 为 (bot_id, game_id)。
@@ -5067,7 +4969,7 @@ class Store:
             ).fetchall()
             return [_row(r) for r in rows]
 
-    # ── contest_templates（赛制模板）──────────────────────────
+    # ── contest_templates（历史只读；运行模板来自代码注册表）──
 
     def list_contest_templates(self, *, game_id: str | None = None) -> list[dict]:
         with self._tx() as c:
@@ -5095,52 +4997,6 @@ class Store:
         r["stages"] = _loads_json(r.get("stages_json"), default=[])
         r["match_config"] = _loads_json(r.get("match_config"), default={})
         return r
-
-    def upsert_contest_template(
-        self,
-        tid: str,
-        *,
-        name: str,
-        game_id: str,
-        match_config: dict | str,
-        stages: list | str,
-        is_builtin: bool = False,
-    ) -> dict:
-        gid = _registered_game_id(game_id)
-        mc_json = (
-            match_config if isinstance(match_config, str) else json.dumps(match_config)
-        )
-        st_json = stages if isinstance(stages, str) else json.dumps(stages, ensure_ascii=False)
-        with self._tx() as c:
-            c.execute(
-                "INSERT INTO contest_templates(id, name, game_id, match_config, "
-                "stages_json, is_builtin, updated_at) VALUES(?,?,?,?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
-                "game_id=excluded.game_id, match_config=excluded.match_config, "
-                "stages_json=excluded.stages_json, updated_at=excluded.updated_at",
-                (tid, name, gid, mc_json, st_json, 1 if is_builtin else 0, _now()),
-            )
-            r = _row(
-                c.execute(
-                    "SELECT * FROM contest_templates WHERE id=?", (tid,)
-                ).fetchone()
-            )
-        r["stages"] = _loads_json(r.get("stages_json"), default=[])
-        r["match_config"] = _loads_json(r.get("match_config"), default={})
-        return r
-
-    def delete_contest_template(self, tid: str) -> bool:
-        """删除非内置模板；内置模板返回 False。"""
-        with self._tx() as c:
-            r = c.execute(
-                "SELECT is_builtin FROM contest_templates WHERE id=?", (tid,)
-            ).fetchone()
-            if not r:
-                return False
-            if r["is_builtin"]:
-                return False
-            cur = c.execute("DELETE FROM contest_templates WHERE id=?", (tid,))
-            return cur.rowcount > 0
 
     # ── platform_settings ─────────────────────────────────────
 

@@ -479,10 +479,7 @@ def main() -> int:
         # --- admin all tabs ---
         print("== admin tabs ==")
         def admin_all_tabs(page):
-            labels = [
-                "仪表盘", "用户", "Bot", "对局", "比赛",
-                "赛制模板", "运行时", "裁判", "日志", "邮件",
-            ]
+            labels = ["仪表盘", "用户", "Bot", "对局记录", "锦标赛", "日志", "邮件"]
             for lab in labels:
                 try:
                     # tabs are buttons, not role=tab

@@ -3,21 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 
 import pytest
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
+from bzplat.backend.runtime.config import AUTO_MATCH_CONFIG
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import (
-    SETTING_AUTO_MATCH_BOT_COOLDOWN,
-    SETTING_AUTO_MATCH_DAILY_CAP,
-    SETTING_AUTO_MATCH_ENABLED,
-    SETTING_AUTO_MATCH_MAX_PER_ROUND,
-    SETTING_AUTO_MATCH_MIN_IDLE_SEC,
-    SETTING_AUTO_MATCH_RESERVE_SLOTS,
-    TYPE_LADDER,
-)
+from bzplat.backend.store.schema import TYPE_LADDER
 
 
 class FakeOrch:
@@ -26,7 +20,7 @@ class FakeOrch:
     def __init__(self, *, max_concurrent: int = 4) -> None:
         self.max_concurrent = max_concurrent
         self._tasks: dict[str, object] = {}
-        self._bot_running = 0  # 模拟实际占用信号量槽位（_is_idle 据此判定）
+        self._bot_running = 0  # 旧 orchestrator fallback 的实际运行计数
         self.calls: list[dict] = []
 
     async def challenge(self, a, b, owner_user_id, *, match_type="challenge",
@@ -41,13 +35,7 @@ class FakeOrch:
 
 @pytest.fixture
 def store(tmp_path):
-    s = Store(str(tmp_path / "am.db"))
-    # 种入默认 auto_match 配置
-    s.seed_setting_if_absent(SETTING_AUTO_MATCH_ENABLED, "1")
-    s.seed_setting_if_absent(SETTING_AUTO_MATCH_MIN_IDLE_SEC, "0")  # 测试立即触发
-    s.seed_setting_if_absent(SETTING_AUTO_MATCH_BOT_COOLDOWN, "600")
-    s.seed_setting_if_absent(SETTING_AUTO_MATCH_RESERVE_SLOTS, "1")
-    return s
+    return Store(str(tmp_path / "am.db"))
 
 
 def _mk_bots(store: Store, n: int, game_id: str = "holdem", *, base: int = 0):
@@ -72,10 +60,10 @@ def _mk_bots(store: Store, n: int, game_id: str = "holdem", *, base: int = 0):
 def test_disabled_does_not_schedule(store):
     _mk_bots(store, 4)
     orch = FakeOrch(max_concurrent=4)
-    sched = AutoMatchScheduler(orch, store)
-    store.set_setting(SETTING_AUTO_MATCH_ENABLED, "0")
-    # enabled=False 时 _is_idle 总返回 False
-    assert sched._is_idle(sched._cfg()) is False
+    sched = AutoMatchScheduler(
+        orch, store, config=replace(AUTO_MATCH_CONFIG, enabled=False)
+    )
+    assert sched._cfg()["enabled"] is False
 
 
 def test_not_idle_when_full(store):
@@ -86,6 +74,30 @@ def test_not_idle_when_full(store):
     assert sched._is_idle(sched._cfg()) is False
 
 
+def test_admitted_waiting_task_consumes_global_slot(store):
+    """尚未进入 _bot_running 的已接纳任务也不能被 auto-match 越过。"""
+    orch = FakeOrch(max_concurrent=2)
+    orch._tasks["contest-waiting"] = object()
+    sched = AutoMatchScheduler(orch, store)
+
+    assert orch._bot_running == 0
+    assert sched._free_slots(reserve=1) == 0
+    assert sched._is_idle(sched._cfg()) is False
+
+
+def test_legacy_auto_match_rows_cannot_override_code_config(store):
+    store.set_settings(
+        {
+            "auto_match_enabled": "0",
+            "auto_match_interval_sec": "1",
+            "auto_match_reserve_slots": "99",
+        }
+    )
+    sched = AutoMatchScheduler(FakeOrch(), store)
+
+    assert sched._cfg() == AUTO_MATCH_CONFIG.as_dict()
+
+
 def test_idle_respects_reserve_slots(store):
     _mk_bots(store, 4)
     orch = FakeOrch(max_concurrent=2)
@@ -93,8 +105,11 @@ def test_idle_respects_reserve_slots(store):
     sched = AutoMatchScheduler(orch, store)
     assert sched._is_idle(sched._cfg()) is False
     # reserve=0 → free=1 → 有空闲槽
-    store.set_setting(SETTING_AUTO_MATCH_RESERVE_SLOTS, "0")
-    orch._idle_since = None
+    sched = AutoMatchScheduler(
+        orch,
+        store,
+        config=replace(AUTO_MATCH_CONFIG, reserve=0, min_idle=0),
+    )
     # 第一次设 idle_since
     assert sched._is_idle(sched._cfg()) is False
     # 第二次（min_idle=0）应触发
@@ -206,9 +221,10 @@ def test_least_recently_played_placement_priority(store: Store):
 def test_daily_cap_stops_scheduling(store: Store):
     """达每日上限后本轮不再调度。"""
     bs = _mk_bots(store, 2, "holdem")
-    store.set_setting(SETTING_AUTO_MATCH_DAILY_CAP, "1")  # 上限 1
     orch = FakeOrch(max_concurrent=4)
-    sched = AutoMatchScheduler(orch, store)
+    sched = AutoMatchScheduler(
+        orch, store, config=replace(AUTO_MATCH_CONFIG, daily_cap=1)
+    )
     sched._idle_since = time.monotonic() - 10
     n1 = asyncio.run(sched._schedule_some(sched._cfg()))
     assert n1 == 1  # 第 1 场放行
@@ -221,10 +237,10 @@ def test_daily_cap_stops_scheduling(store: Store):
 def test_max_per_round_limits(store: Store):
     """每轮上限：max_per_round=1 即使空闲槽更多也只补 1 场。"""
     bs = _mk_bots(store, 4, "holdem")
-    store.set_setting(SETTING_AUTO_MATCH_MAX_PER_ROUND, "1")
     orch = FakeOrch(max_concurrent=8)
-    sched = AutoMatchScheduler(orch, store)
+    sched = AutoMatchScheduler(
+        orch, store, config=replace(AUTO_MATCH_CONFIG, max_per_round=1)
+    )
     sched._idle_since = time.monotonic() - 10
     n = asyncio.run(sched._schedule_some(sched._cfg()))
     assert n == 1
-

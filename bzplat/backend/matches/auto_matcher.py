@@ -7,7 +7,8 @@
 - 节流：同一 bot 两场间隔不低于 bot_cooldown；内存 recent_pairs 去重近期配对。
 - owner_user_id=None（系统发起，无 owner）；match_type=ladder，更新全局 Glicko-2 评分。
 
-不与 orchestrator 的并发上限冲突：每场对局经 orch._tasks 计数，_sem 仍硬限制执行。
+不与 orchestrator 的并发上限冲突：只使用全局 admission 的剩余槽位，已接纳但尚未
+开始执行的对局同样占位，不能在信号量外继续堆积任务。
 """
 from __future__ import annotations
 
@@ -16,19 +17,8 @@ import logging
 import time
 from typing import Any
 
-from bzplat.backend.store.schema import (
-    SETTING_AUTO_MATCH_BOT_COOLDOWN,
-    SETTING_AUTO_MATCH_DAILY_CAP,
-    SETTING_AUTO_MATCH_ENABLED,
-    SETTING_AUTO_MATCH_INTERVAL_SEC,
-    SETTING_AUTO_MATCH_MAX_PER_ROUND,
-    SETTING_AUTO_MATCH_MIN_IDLE_SEC,
-    SETTING_AUTO_MATCH_PLACEMENT_GAMES,
-    SETTING_AUTO_MATCH_RESERVE_SLOTS,
-    SETTING_AUTO_MATCH_STALE_SEC,
-    TYPE_LADDER,
-    VALID_GAME_IDS,
-)
+from bzplat.backend.runtime.config import AUTO_MATCH_CONFIG, AutoMatchConfig
+from bzplat.backend.store.schema import TYPE_LADDER, VALID_GAME_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +26,16 @@ logger = logging.getLogger(__name__)
 class AutoMatchScheduler:
     """后台闲时自动对局调度器。"""
 
-    def __init__(self, orch: Any, store: Any) -> None:
+    def __init__(
+        self,
+        orch: Any,
+        store: Any,
+        *,
+        config: AutoMatchConfig = AUTO_MATCH_CONFIG,
+    ) -> None:
         self.orch = orch
         self.store = store
+        self.config = config
         # 内存节流状态
         self._bot_last_scheduled: dict[int, float] = {}  # bot_id -> monotonic ts
         self._recent_pairs: dict[tuple[int, int], float] = {}  # (min,max) -> ts
@@ -64,37 +61,27 @@ class AutoMatchScheduler:
 
     # ------------------------------------------------------------------ config
     def _cfg(self) -> dict[str, Any]:
-        s = self.store.get_settings(
-            [
-                SETTING_AUTO_MATCH_ENABLED,
-                SETTING_AUTO_MATCH_INTERVAL_SEC,
-                SETTING_AUTO_MATCH_MIN_IDLE_SEC,
-                SETTING_AUTO_MATCH_BOT_COOLDOWN,
-                SETTING_AUTO_MATCH_STALE_SEC,
-                SETTING_AUTO_MATCH_RESERVE_SLOTS,
-                SETTING_AUTO_MATCH_PLACEMENT_GAMES,
-                SETTING_AUTO_MATCH_MAX_PER_ROUND,
-                SETTING_AUTO_MATCH_DAILY_CAP,
-            ]
-        )
+        """Return the immutable code configuration used by this scheduler."""
+        return self.config.as_dict()
 
-        def _int(key: str, default: int) -> int:
-            try:
-                return int(s.get(key) or default)
-            except (TypeError, ValueError):
-                return default
+    def _free_slots(self, reserve: int) -> int:
+        """Return slots eligible for background work after the user reserve.
 
-        return {
-            "enabled": (s.get(SETTING_AUTO_MATCH_ENABLED) or "1") in ("1", "true", "yes"),
-            "interval": _int(SETTING_AUTO_MATCH_INTERVAL_SEC, 30),
-            "min_idle": _int(SETTING_AUTO_MATCH_MIN_IDLE_SEC, 5),
-            "cooldown": _int(SETTING_AUTO_MATCH_BOT_COOLDOWN, 600),
-            "stale": _int(SETTING_AUTO_MATCH_STALE_SEC, 3600),
-            "reserve": _int(SETTING_AUTO_MATCH_RESERVE_SLOTS, 1),
-            "placement_games": _int(SETTING_AUTO_MATCH_PLACEMENT_GAMES, 10),
-            "max_per_round": _int(SETTING_AUTO_MATCH_MAX_PER_ROUND, 2),
-            "daily_cap": _int(SETTING_AUTO_MATCH_DAILY_CAP, 200),
-        }
+        New orchestrators expose ``available_bot_slots`` as the global admission
+        source, including work already admitted but still waiting for execution.
+        The fallback is deliberately conservative for older/test orchestrators:
+        every tracked task counts as admitted, so background scheduling cannot
+        pile up merely because ``_bot_running`` has not increased yet.
+        """
+        available = getattr(self.orch, "available_bot_slots", None)
+        if callable(available):
+            slots = int(available())
+        else:
+            running = int(getattr(self.orch, "_bot_running", 0) or 0)
+            tasks = getattr(self.orch, "_tasks", {}) or {}
+            admitted = max(running, len(tasks))
+            slots = int(self.orch.max_concurrent) - admitted
+        return max(0, slots - max(0, int(reserve)))
 
     # ------------------------------------------------------------------ loop
     async def loop(self) -> None:
@@ -119,12 +106,10 @@ class AutoMatchScheduler:
     def _is_idle(self, cfg: dict[str, Any]) -> bool:
         """有预留后的空闲并发槽，且连续空闲达 min_idle 秒。
 
-        注意：用 _bot_running（实际占用 _sem 槽位的）而非 _tasks（含等信号量的）。
-        否则大量 pending 任务排队等槽时（如赛事排期积压），running 虚高 → 永不空闲 →
-        定级对局永远打不起来。_bot_running 准确反映真正占用的槽位。
+        使用 orchestrator 的全局 admission 可用槽，而非只看已开始运行数。赛事或
+        用户挑战已接纳但尚未占用执行槽时也必须计入，否则 auto-match 会继续超额入队。
         """
-        running = getattr(self.orch, "_bot_running", 0) or 0
-        free = self.orch.max_concurrent - cfg["reserve"] - running
+        free = self._free_slots(cfg["reserve"])
         if free <= 0:
             self._idle_since = None
             return False
@@ -141,8 +126,7 @@ class AutoMatchScheduler:
         if cfg["daily_cap"] > 0 and self._daily_count >= cfg["daily_cap"]:
             logger.info("auto-match daily cap reached %d/%d，今日停止", self._daily_count, cfg["daily_cap"])
             return 0
-        running = getattr(self.orch, "_bot_running", 0) or 0  # 同 _is_idle：用实际占信号量槽位数
-        free = self.orch.max_concurrent - cfg["reserve"] - running
+        free = self._free_slots(cfg["reserve"])
         if free <= 0:
             return 0
         # 本轮上限：空闲槽、每轮上限、每日剩余 取最小

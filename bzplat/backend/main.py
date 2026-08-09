@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -18,7 +17,6 @@ from bzplat.backend.auth.captcha import CaptchaStore
 from bzplat.backend.auth.routes import router as auth_router
 from bzplat.backend.bots import BotManager
 from bzplat.backend.contests import ContestManager
-from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.mail import Mailer
 from bzplat.backend.matches import MatchOrchestrator, MatchRunner
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
@@ -30,9 +28,8 @@ from bzplat.backend.qa_safety import (
     qa_instance_enabled,
 )
 from bzplat.backend.runtime import BinaryRunner
+from bzplat.backend.runtime.config import ACTION_TIMEOUT_SEC
 from bzplat.backend.runtime.limits import (
-    BOT_CPUS,
-    BOT_MEMORY_MB,
     clamp_concurrent,
     concurrent_ceiling,
     default_max_concurrent,
@@ -43,26 +40,6 @@ from bzplat.backend.security import (
     SecurityHeadersMiddleware,
 )
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import (
-    SETTING_ACTION_TIMEOUT,
-    SETTING_AUTO_MATCH_BOT_COOLDOWN,
-    SETTING_AUTO_MATCH_DAILY_CAP,
-    SETTING_AUTO_MATCH_ENABLED,
-    SETTING_AUTO_MATCH_INTERVAL_SEC,
-    SETTING_AUTO_MATCH_MAX_PER_ROUND,
-    SETTING_AUTO_MATCH_MIN_IDLE_SEC,
-    SETTING_AUTO_MATCH_PLACEMENT_GAMES,
-    SETTING_AUTO_MATCH_RESERVE_SLOTS,
-    SETTING_AUTO_MATCH_STALE_SEC,
-    SETTING_BOT_CPUS,
-    SETTING_BOT_MEMORY,
-    SETTING_CONTEST_REST,
-    SETTING_CONTEST_SCHEDULER_ENABLED,
-    SETTING_CONTEST_SCHEDULER_INTERVAL_SEC,
-    SETTING_CONTEST_TEMPLATES,
-    SETTING_FULL_RR_MAX_N,
-    SETTING_MAX_CONCURRENT,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -84,52 +61,21 @@ def _load_dotenv() -> None:
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def _seed_runtime_settings(store: Store, env_max: int | None) -> int:
-    """写入默认 platform_settings；返回生效并发。"""
-    ceiling = concurrent_ceiling()
-    seed_conc = clamp_concurrent(
-        env_max if env_max is not None else default_max_concurrent()
-    )
-    store.seed_setting_if_absent(SETTING_ACTION_TIMEOUT, "60")
-    store.seed_setting_if_absent(SETTING_MAX_CONCURRENT, str(seed_conc))
-    store.seed_setting_if_absent(SETTING_BOT_CPUS, str(BOT_CPUS))
-    store.seed_setting_if_absent(SETTING_BOT_MEMORY, str(BOT_MEMORY_MB))
-    store.seed_setting_if_absent(SETTING_CONTEST_REST, "10")
-    store.seed_setting_if_absent(SETTING_FULL_RR_MAX_N, "12")
-    store.seed_setting_if_absent(
-        SETTING_CONTEST_TEMPLATES,
-        json.dumps(list_templates(), ensure_ascii=False),
-    )
-    # 闲时自动对局（默认启用，admin 可关）
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_ENABLED, "1")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_INTERVAL_SEC, "30")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_MIN_IDLE_SEC, "5")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_BOT_COOLDOWN, "600")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_STALE_SEC, "3600")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_RESERVE_SLOTS, "1")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_PLACEMENT_GAMES, "10")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_MAX_PER_ROUND, "2")
-    store.seed_setting_if_absent(SETTING_AUTO_MATCH_DAILY_CAP, "200")
-    # 站点配置（PR-10）
+def _seed_site_settings(store: Store) -> None:
+    """仅初始化仍由管理端维护的站点文案；运行参数不写数据库。"""
     from bzplat.backend.store.schema import (
         SETTING_SITE_NAME, SETTING_SITE_ANNOUNCEMENT, SETTING_SITE_ABOUT,
     )
     store.seed_setting_if_absent(SETTING_SITE_NAME, "Botbattle")
     store.seed_setting_if_absent(SETTING_SITE_ANNOUNCEMENT, "")
     store.seed_setting_if_absent(SETTING_SITE_ABOUT, "多游戏 Bot 线上对战平台")
-    # 赛事时间调度器（后台周期扫描 *_at 字段，到点自动推进阶段）
-    store.seed_setting_if_absent(SETTING_CONTEST_SCHEDULER_ENABLED, "1")
-    store.seed_setting_if_absent(SETTING_CONTEST_SCHEDULER_INTERVAL_SEC, "15")
-    # 生效值永远压在 ceiling 内
-    raw = store.get_setting(SETTING_MAX_CONCURRENT)
-    try:
-        requested = int(raw or seed_conc)
-    except ValueError:
-        requested = seed_conc
-    effective = clamp_concurrent(requested)
-    if effective != requested:
-        store.set_setting(SETTING_MAX_CONCURRENT, str(effective))
-    return effective
+
+
+def _effective_max_concurrent(requested: int | None) -> int:
+    """返回代码配置（或显式测试注入）经机器硬顶钳制后的并发。"""
+    return clamp_concurrent(
+        default_max_concurrent() if requested is None else requested
+    )
 
 
 def create_app(
@@ -166,12 +112,10 @@ def create_app(
             source_root,
             purpose="BZ_QA_INSTANCE 头像目录",
         )
-    env_max = max_concurrent
-    if env_max is None and os.environ.get("BZ_MAX_CONCURRENT_MATCHES"):
-        env_max = int(os.environ["BZ_MAX_CONCURRENT_MATCHES"])
     prefer_local = os.environ.get("BZ_BOT_LOCAL", "").lower() in ("1", "true", "yes")
     store = Store(db_path)
-    effective_conc = _seed_runtime_settings(store, env_max)
+    _seed_site_settings(store)
+    effective_conc = _effective_max_concurrent(max_concurrent)
 
     mailer = Mailer()
     if mailer.config.configured:
@@ -184,12 +128,7 @@ def create_app(
     bot_manager = BotManager(store, upload_root=upload_root)
     binary_runner = BinaryRunner(prefer_local=prefer_local)
 
-    timeout_raw = store.get_setting(SETTING_ACTION_TIMEOUT) or "60"
-    try:
-        action_timeout = float(timeout_raw)
-    except ValueError:
-        action_timeout = 60.0
-    match_runner = MatchRunner(binary_runner, action_timeout=action_timeout)
+    match_runner = MatchRunner(binary_runner, action_timeout=ACTION_TIMEOUT_SEC)
     orch = MatchOrchestrator(store, runner=match_runner, max_concurrent=effective_conc)
     contest_manager = ContestManager(store, orch)
 

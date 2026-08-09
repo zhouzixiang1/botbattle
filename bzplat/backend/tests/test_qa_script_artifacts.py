@@ -288,19 +288,14 @@ def test_load_missing_websocket_dependency_is_a_hard_failure(monkeypatch):
     assert not module.WARN
 
 
-def test_load_auto_match_miss_fails_by_default_and_soft_mode_is_explicit():
+def test_load_test_does_not_mutate_code_owned_auto_match_configuration():
     module = load_script("load_test")
+    source = (ROOT / "scripts" / "load_test.py").read_text(encoding="utf-8")
 
-    module._record_auto_match_outcome(7, 7, 11, 11)
-    assert module.FAIL == 1
-    assert not module.WARN
-
-    module.FAIL = 0
-    module.FAILS.clear()
-    module._record_auto_match_outcome(7, 7, 11, 11, allow_miss=True)
-    assert module.FAIL == 0
-    assert len(module.WARN) == 1
-    assert "不能作为 auto-match 验收证据" in module.WARN[0]
+    assert not hasattr(module, "_record_auto_match_outcome")
+    assert "--allow-auto-match-miss" not in source
+    assert "PATCH runtime 写入口不存在" in source
+    assert "公开赛制模板来自代码且只读" in source
 
 
 def test_qa_script_claims_match_the_observed_coverage():
@@ -311,7 +306,7 @@ def test_qa_script_claims_match_the_observed_coverage():
     doc_index = (ROOT / "doc" / "INDEX.md").read_text(encoding="utf-8")
 
     assert "CONCURRENCY =" not in load_source
-    assert "--allow-auto-match-miss" in load_source
+    assert "--allow-auto-match-miss" not in load_source
     assert "不等待也不声称验证" in load_source
     assert "snapshot 之后的实时增量事件" in load_source
     assert "SSE 实时事件流" not in api_source

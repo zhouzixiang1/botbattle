@@ -987,102 +987,41 @@ def phase5_contest(api: Api, ctx: dict[str, Any]) -> None:
                 break
 
 
-# ── 阶段 6：自动对局（ladder）─────────────────────────────────
-def phase6_auto_match(
-    api: Api,
-    ctx: dict[str, Any],
-    *,
-    allow_miss: bool = False,
-) -> None:
-    print("\n=== 阶段 6：自动对局（ladder）===")
+# ── 阶段 6：代码配置只读边界 ──────────────────────────────────
+def phase6_code_config(api: Api, ctx: dict[str, Any]) -> None:
+    print("\n=== 阶段 6：代码配置只读边界 ===")
     admin_tok = ctx["admin_token"]
 
-    # 记录赛前 daily_count
     r = api.authed(admin_tok, "GET", "/api/admin/settings/runtime")
-    before_cfg = r.json()
-    before_count = before_cfg.get("auto_match", {}).get("daily_count", 0)
-    check("GET runtime settings（含 auto_match）", r.status_code == 200 and "auto_match" in before_cfg, r.text[:80])
+    runtime = r.json() if r.status_code == 200 else {}
+    check(
+        "GET runtime 只读诊断来自代码",
+        r.status_code == 200
+        and runtime.get("source") == "code"
+        and runtime.get("mutable") is False
+        and "auto_match" in runtime,
+        r.text[:120],
+    )
+    r = api.authed(
+        admin_tok,
+        "PATCH",
+        "/api/admin/settings/runtime",
+        json={"max_concurrent_matches": 1},
+    )
+    check("PATCH runtime 写入口不存在", r.status_code == 404, r.text[:80])
 
-    # 记录赛前 ladder 对局数
-    before_ladder = _count_ladder_matches(api.db_path)
-
-    # 催化：开 enabled + min_idle=0 + interval=2 + reserve=0 + stale=0（关陈旧过滤，否则刚跑过的 bot 被排除）+ cooldown=0
-    orig = {
-        "auto_match_enabled": before_cfg["auto_match"]["enabled"],
-        "auto_match_min_idle_sec": before_cfg["auto_match"]["min_idle_sec"],
-        "auto_match_interval_sec": before_cfg["auto_match"]["interval_sec"],
-        "auto_match_reserve_slots": before_cfg["auto_match"]["reserve_slots"],
-        "auto_match_stale_sec": before_cfg["auto_match"]["stale_sec"],
-        "auto_match_bot_cooldown": before_cfg["auto_match"]["bot_cooldown"],
-    }
-    r = api.authed(admin_tok, "PATCH", "/api/admin/settings/runtime", json={
-        "auto_match_enabled": True, "auto_match_min_idle_sec": 0,
-        "auto_match_interval_sec": 2, "auto_match_reserve_slots": 0,
-        "auto_match_stale_sec": 0, "auto_match_bot_cooldown": 0,
-    })
-    check("PATCH runtime 催化 auto-match", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
-
-    # 等待 auto-match 触发（_is_idle 需连续两轮 interval，min_idle=0、interval=2 下约 2 个 interval ≈ 4-8s）。
-    time.sleep(25)
-
-    after_count = api.authed(admin_tok, "GET", "/api/admin/settings/runtime").json()["auto_match"]["daily_count"]
-    after_ladder = _count_ladder_matches(api.db_path)
-    # 恢复原设置
-    api.authed(admin_tok, "PATCH", "/api/admin/settings/runtime", json={
-        "auto_match_enabled": orig["auto_match_enabled"],
-        "auto_match_min_idle_sec": orig["auto_match_min_idle_sec"],
-        "auto_match_interval_sec": orig["auto_match_interval_sec"],
-        "auto_match_reserve_slots": orig["auto_match_reserve_slots"],
-        "auto_match_stale_sec": orig["auto_match_stale_sec"],
-        "auto_match_bot_cooldown": orig["auto_match_bot_cooldown"],
-    })
-
-    _record_auto_match_outcome(
-        before_count,
-        after_count,
-        before_ladder,
-        after_ladder,
-        allow_miss=allow_miss,
+    r = api.client.get("/api/contests/templates")
+    public_templates = r.json() if r.status_code == 200 else {}
+    check(
+        "公开赛制模板来自代码且只读",
+        r.status_code == 200
+        and public_templates.get("source") == "code"
+        and public_templates.get("mutable") is False,
+        r.text[:120],
     )
 
-
-def _record_auto_match_outcome(
-    before_count: int,
-    after_count: int,
-    before_ladder: int,
-    after_ladder: int,
-    *,
-    allow_miss: bool = False,
-) -> None:
-    """Record an auto-match observation without allowing silent false coverage."""
-    grew = after_count > before_count or after_ladder > before_ladder
-    detail = (
-        f"daily_count {before_count}→{after_count}; "
-        f"ladder {before_ladder}→{after_ladder}"
-    )
-    if grew:
-        check("auto-match 触发（daily_count 或 ladder 对局增长）", True,
-              detail)
-    elif allow_miss:
-        warn(
-            f"auto-match 未触发（{detail}）；已显式启用 --allow-auto-match-miss，"
-            "本次运行只能用于诊断，不能作为 auto-match 验收证据"
-        )
-    else:
-        check(
-            "auto-match 触发（daily_count 或 ladder 对局增长）",
-            False,
-            f"{detail}；默认验收要求观察到真实 ladder 增长",
-        )
-
-
-def _count_ladder_matches(db_path: str) -> int:
-    con = sqlite3.connect(db_path)
-    try:
-        row = con.execute("SELECT COUNT(*) FROM matches WHERE match_type='ladder'").fetchone()
-        return int(row[0])
-    finally:
-        con.close()
+    r = api.authed(admin_tok, "POST", "/api/admin/templates", json={})
+    check("Admin 赛制模板写入口不存在", r.status_code == 404, r.text[:80])
 
 
 # ── 阶段 7：Admin 关键端点 ────────────────────────────────────
@@ -1098,7 +1037,6 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
         ("/api/admin/contests", "contests"),
         ("/api/admin/email/templates", "email templates"),
         ("/api/admin/email/outbox?limit=5", "email outbox"),
-        ("/api/admin/templates", "templates"),
         ("/api/admin/logs?limit=5", "logs"),
         ("/api/admin/settings/runtime", "runtime settings"),
     ]:
@@ -1161,18 +1099,6 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     else:
         warn(f"阶段7 强制 abort 对局发起失败 {r.status_code}")
 
-    # PATCH /api/admin/settings/runtime：调 max_concurrent_matches（应被 ceiling 钳制，超限 400）
-    r = api.authed(tok, "GET", "/api/admin/settings/runtime")
-    ceiling = r.json().get("ceiling")
-    cur = r.json().get("max_concurrent_matches")
-    # 超限应 400
-    if ceiling:
-        r = api.authed(tok, "PATCH", "/api/admin/settings/runtime", json={"max_concurrent_matches": ceiling + 5})
-        check("PATCH max_concurrent 超 ceiling 被拒", r.status_code == 400, f"{r.status_code} {r.text[:60]}")
-    # 合法值
-    r = api.authed(tok, "PATCH", "/api/admin/settings/runtime", json={"max_concurrent_matches": max(1, (cur or 2))})
-    check("PATCH max_concurrent 合法值", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
-
     # 站点配置（PR-10）
     r = api.authed(tok, "PATCH", "/api/admin/settings/site", json={"announcement": "loadtest 公告"})
     check("PATCH /api/admin/settings/site", r.status_code == 200 and r.json()["site"]["announcement"] == "loadtest 公告", r.text[:80])
@@ -1187,27 +1113,6 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
         check("PUT /api/admin/email/templates/welcome", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
     else:
         warn(f"email template welcome 不可读 {r.status_code}（跳过 PUT）")
-
-    # GET/POST/PUT/DELETE /api/admin/templates：建自定义模板→preview→删
-    r = api.authed(tok, "POST", "/api/admin/templates", json={
-        "id": "loadtest_custom", "name": "LoadTest Custom", "game_id": "holdem",
-        "stages": [{"key": "s1", "type": "round_robin", "scoring": "poker_3_1_0"}],
-    })
-    check("POST /api/admin/templates（建自定义）", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
-    # preview
-    r = api.authed(tok, "POST", "/api/admin/templates/preview", json={
-        "stages": [{"key": "s1", "type": "round_robin", "scoring": "poker_3_1_0"}], "n": 8,
-    })
-    check("POST /api/admin/templates/preview", r.status_code == 200 and "total" in r.json(), r.text[:80])
-    # PUT
-    r = api.authed(tok, "PUT", "/api/admin/templates/loadtest_custom", json={
-        "id": "loadtest_custom", "name": "LoadTest Custom v2", "game_id": "holdem",
-        "stages": [{"key": "s1", "type": "round_robin", "scoring": "poker_3_1_0"}],
-    })
-    check("PUT /api/admin/templates/{tid}", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
-    # DELETE
-    r = api.authed(tok, "DELETE", "/api/admin/templates/loadtest_custom")
-    check("DELETE /api/admin/templates/{tid}", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
 
     # POST /api/auth/admin/create-reset-token
     r = api.authed(tok, "POST", "/api/auth/admin/create-reset-token", json={"username_or_email": u1})
@@ -1237,14 +1142,6 @@ def main() -> int:
     ap.add_argument("--skip-seed", action="store_true", help="跳过种子（假设已种好）")
     ap.add_argument("--no-throttle", action="store_true",
                     help="跳过挑战节流（用于服务端已设 BZ_RATE_LIMIT=0 关限流时，大幅加速阶段 2/3）")
-    ap.add_argument(
-        "--allow-auto-match-miss",
-        action="store_true",
-        help=(
-            "仅诊断：auto-match 未触发时记 warning 而非失败；"
-            "启用后的结果不能作为 auto-match 验收证据"
-        ),
-    )
     args = ap.parse_args()
 
     global NO_THROTTLE
@@ -1295,7 +1192,7 @@ def main() -> int:
         phase3_sse(api, ctx)
         phase4_human(api, ctx)
         phase5_contest(api, ctx)
-        phase6_auto_match(api, ctx, allow_miss=args.allow_auto_match_miss)
+        phase6_code_config(api, ctx)
         phase7_admin(api, ctx)
     except KeyboardInterrupt:
         print("\n中断")

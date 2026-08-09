@@ -1,42 +1,8 @@
 import { expect, test, type Page } from '@playwright/test'
 
-import { loginThroughUi, monitorBrowser, runCleanupTasks, withCleanup } from './helpers'
+import { loginThroughUi, monitorBrowser, withCleanup } from './helpers'
 
 const ADMIN = process.env.BZ_E2E_ADMIN || 'qa_admin'
-
-interface RuntimeState {
-  action_timeout_sec: number
-  max_concurrent_matches: number
-  contest_default_rest_minutes: number
-  auto_match: {
-    enabled: boolean
-    interval_sec: number
-    min_idle_sec: number
-    bot_cooldown: number
-    stale_sec: number
-    reserve_slots: number
-    placement_games: number
-    max_per_round: number
-    daily_cap: number
-  }
-}
-
-function runtimePatch(state: RuntimeState) {
-  return {
-    action_timeout_sec: state.action_timeout_sec,
-    max_concurrent_matches: state.max_concurrent_matches,
-    contest_default_rest_minutes: state.contest_default_rest_minutes,
-    auto_match_enabled: state.auto_match.enabled,
-    auto_match_interval_sec: state.auto_match.interval_sec,
-    auto_match_min_idle_sec: state.auto_match.min_idle_sec,
-    auto_match_bot_cooldown: state.auto_match.bot_cooldown,
-    auto_match_stale_sec: state.auto_match.stale_sec,
-    auto_match_reserve_slots: state.auto_match.reserve_slots,
-    auto_match_placement_games: state.auto_match.placement_games,
-    auto_match_max_per_round: state.auto_match.max_per_round,
-    auto_match_daily_cap: state.auto_match.daily_cap,
-  }
-}
 
 async function expectNoRootOverflow(page: Page, label: string) {
   const overflow = await page.evaluate(
@@ -56,18 +22,12 @@ for (const viewport of [
   { name: 'laptop', width: 1280, height: 720, interactive: false },
   { name: 'mobile', width: 390, height: 844, interactive: false },
 ] as const) {
-  test(`admin loads all nine tabs without runtime/network/layout errors (${viewport.name})`, async ({ page }) => {
+  test(`admin loads all seven operational tabs without runtime/network/layout errors (${viewport.name})`, async ({ page }) => {
     test.setTimeout(viewport.interactive ? 150_000 : 90_000)
-    let runtimeSnapshot: RuntimeState | null = null
     await withCleanup(async () => {
       await page.setViewportSize(viewport)
       const monitor = monitorBrowser(page)
       await loginThroughUi(page, ADMIN)
-      if (viewport.interactive) {
-        const runtimeResponse = await page.request.get('/api/admin/settings/runtime')
-        expect(runtimeResponse.status(), await runtimeResponse.text()).toBe(200)
-        runtimeSnapshot = await runtimeResponse.json() as RuntimeState
-      }
       await page.goto('/#/admin')
 
     await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
@@ -208,27 +168,27 @@ for (const viewport of [
     await expect(page.getByText(/共 \d+ 个锦标赛/)).toBeVisible()
     await expectNoRootOverflow(page, 'contests')
 
-    await page.getByRole('button', { name: '赛制模板', exact: true }).click()
-    const newTemplate = page.getByRole('button', { name: '+ 新建模板', exact: true })
-    await expect(newTemplate).toBeVisible()
+    await expect(page.getByRole('button', { name: '赛制模板', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '运行时', exact: true })).toHaveCount(0)
     if (viewport.interactive) {
-      await newTemplate.click()
-      await expect(page.getByRole('heading', { name: '新建模板', exact: true })).toBeVisible()
-      await page.getByRole('button', { name: '取消', exact: true }).click()
+      const runtimeResponse = await page.request.get('/api/admin/settings/runtime')
+      expect(runtimeResponse.status(), await runtimeResponse.text()).toBe(200)
+      expect((await runtimeResponse.json() as { source?: string; mutable?: boolean })).toMatchObject({
+        source: 'code',
+        mutable: false,
+      })
+      const runtimePatchResponse = await page.request.patch('/api/admin/settings/runtime', {
+        data: { max_concurrent_matches: 1 },
+      })
+      expect(runtimePatchResponse.status()).toBe(404)
+      expect((await page.request.get('/api/admin/templates')).status()).toBe(404)
+      const publicTemplates = await page.request.get('/api/contests/templates')
+      expect(publicTemplates.status(), await publicTemplates.text()).toBe(200)
+      expect((await publicTemplates.json() as { source?: string; mutable?: boolean })).toMatchObject({
+        source: 'code',
+        mutable: false,
+      })
     }
-    await expectNoRootOverflow(page, 'templates')
-
-    await page.getByRole('button', { name: '运行时', exact: true }).click()
-    await expect(page.getByRole('heading', { name: '运行时', exact: true })).toBeVisible()
-    if (viewport.interactive) {
-      const responsePromise = page.waitForResponse(
-        (response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname === '/api/admin/settings/runtime',
-      )
-      await page.getByRole('button', { name: '保存', exact: true }).click()
-      expect((await responsePromise).status()).toBe(200)
-      await expect(page.getByText('已保存并热更新', { exact: true })).toBeVisible()
-    }
-    await expectNoRootOverflow(page, 'runtime')
 
     await page.getByRole('button', { name: '日志', exact: true }).click()
     const logSearch = page.getByPlaceholder('对局 ID / Bot ID / 模块 / IP / 操作')
@@ -272,25 +232,7 @@ for (const viewport of [
     await expectNoRootOverflow(page, 'email')
 
       await monitor.expectClean()
-    }, async () => {
-      const tasks: Array<{ label: string; run: () => Promise<void> }> = []
-      if (runtimeSnapshot) {
-        const originalRuntime = runtimeSnapshot
-        tasks.push({
-          label: 'restore runtime settings',
-          run: async () => {
-            const restore = await page.request.patch('/api/admin/settings/runtime', {
-              data: runtimePatch(originalRuntime),
-            })
-            expect(restore.status(), await restore.text()).toBe(200)
-            const verify = await page.request.get('/api/admin/settings/runtime')
-            expect(verify.status(), await verify.text()).toBe(200)
-            expect(runtimePatch(await verify.json() as RuntimeState)).toEqual(runtimePatch(originalRuntime))
-          },
-        })
-      }
-      await runCleanupTasks(tasks)
-    })
+    }, async () => {})
   })
 }
 

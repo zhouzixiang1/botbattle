@@ -12,6 +12,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bzplat.backend.runtime.config import ACTION_TIMEOUT_SEC
+
 from ..bots.classify import (
     BinaryInfo,
     BinaryRejectError,
@@ -26,7 +28,7 @@ from ..store.schema import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ACTION_TIMEOUT = 60.0
+DEFAULT_ACTION_TIMEOUT = ACTION_TIMEOUT_SEC
 DEFAULT_MEMORY = "512m"
 DEFAULT_CPUS = "1"
 DEFAULT_LINUX_IMAGE = "debian:bookworm-slim"
