@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER, setup_logging
-from bzplat.backend.security import audit_log, client_ip
+from bzplat.backend.security import RateLimitMiddleware, audit_log, client_ip
 
 
 @pytest.fixture
@@ -113,6 +113,32 @@ def test_client_ip_xff_spoofed_leftmost_ignored():
     assert client_ip(req, trust_proxy=True, hops=2) == "2.2.2.2"
     # 关键：最左的 1.1.1.1（可伪造）绝不被取
     assert client_ip(req, trust_proxy=True, hops=1) != "1.1.1.1"
+
+
+def test_rate_limit_separates_reads_from_upload_writes():
+    """刷新版本历史不能提前耗尽同一路径 POST 的 6 次上传额度。"""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, enabled=True)
+
+    @app.get("/api/bots/7/versions")
+    def read_versions():
+        return {"versions": []}
+
+    @app.post("/api/bots/7/versions")
+    def upload_version():
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        for _ in range(10):
+            assert client.get("/api/bots/7/versions").status_code == 200
+        for _ in range(6):
+            assert client.post("/api/bots/7/versions").status_code == 200
+        limited = client.post("/api/bots/7/versions")
+
+    assert limited.status_code == 429
+    assert limited.json()["code"] == "rate_limit_exceeded"
 
 
 # ── audit_log：格式 + result=fail 升级为 WARNING ─────────────────────────────

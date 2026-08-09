@@ -31,7 +31,7 @@ async function loggedInPage(
   return { context, page, monitor }
 }
 
-async function ensureCreatedContestDeleted(
+async function ensureCreatedContestSettled(
   browser: Browser,
   baseURL: string,
   contestId: number,
@@ -80,10 +80,22 @@ async function ensureCreatedContestDeleted(
       )
     }
 
+    const finalDetail = await admin.page.request.get(`/api/contests/${contestId}`)
+    expect(finalDetail.status(), await finalDetail.text()).toBe(200)
+    const finalStatus = ((await finalDetail.json()) as { contest: { status: string } }).contest.status
     const remove = await admin.page.request.delete(`/api/admin/contests/${contestId}`)
-    expect(remove.status(), await remove.text()).toBe(200)
-    const verify = await admin.page.request.get(`/api/contests/${contestId}`)
-    expect(verify.status(), await verify.text()).toBe(404)
+    if (finalStatus === 'finished') {
+      // Finished contests are immutable audit records by product contract. A QA
+      // instance is disposable as a whole, so cleanup verifies protection rather
+      // than bypassing it or corrupting the terminal history.
+      expect(remove.status(), await remove.text()).toBe(409)
+      const verify = await admin.page.request.get(`/api/contests/${contestId}`)
+      expect(verify.status(), await verify.text()).toBe(200)
+    } else {
+      expect(remove.status(), await remove.text()).toBe(200)
+      const verify = await admin.page.request.get(`/api/contests/${contestId}`)
+      expect(verify.status(), await verify.text()).toBe(404)
+    }
   } finally {
     await admin.context.close()
   }
@@ -114,7 +126,7 @@ async function registerContestBot(page: Page, contestId: number, botName: string
   expect(posts).toBe(1)
 }
 
-test('organizer contest lifecycle completes with two browser registrations and admin cleanup', async ({
+test('organizer contest lifecycle completes and preserves the terminal audit record', async ({
   page,
   browser,
   baseURL,
@@ -238,7 +250,7 @@ test('organizer contest lifecycle completes with two browser registrations and a
   await expect(page.getByRole('main').getByText('已结束', { exact: true })).toBeVisible()
   await page.getByRole('tab', { name: /对阵/ }).click()
   await expect(page.getByText(/2\/2/).first()).toBeVisible()
-  await page.getByRole('tab', { name: /排行/ }).click()
+  await page.getByRole('tab', { name: /正式名次/ }).click()
   await expect(page.locator('main')).toContainText(`${USER}_gomoku`)
   await organizerMonitor.expectClean()
 
@@ -248,15 +260,10 @@ test('organizer contest lifecycle completes with two browser registrations and a
   await admin.page.getByRole('button', { name: '锦标赛', exact: true }).click()
   const row = admin.page.getByText(title, { exact: true }).locator('xpath=ancestor::tr[1]')
   await expect(row).toBeVisible()
-  await row.getByRole('button', { name: '删除', exact: true }).click()
-  const dialog = admin.page.getByRole('dialog').filter({ hasText: `删除比赛 #${contestId}` })
-  const deleteResponse = admin.page.waitForResponse(
-    (response) => response.request().method() === 'DELETE' && new URL(response.url()).pathname === `/api/admin/contests/${contestId}`,
-  )
-  await dialog.getByRole('button', { name: '删除', exact: true }).click()
-  expect((await deleteResponse).status()).toBe(200)
-  contestDeleted = true
-  await expect(admin.page.getByText(title, { exact: true })).toHaveCount(0)
+  await expect(row.getByText('成绩已归档 · 只读', { exact: true })).toBeVisible()
+  await expect(row.getByRole('button', { name: /删除/ })).toHaveCount(0)
+  const forbiddenDelete = await admin.page.request.delete(`/api/admin/contests/${contestId}`)
+  expect(forbiddenDelete.status(), await forbiddenDelete.text()).toBe(409)
   await admin.monitor.expectClean()
   await admin.context.close()
   childContexts.delete(admin.context)
@@ -266,7 +273,7 @@ test('organizer contest lifecycle completes with two browser registrations and a
       const createdContestId = contestId
       tasks.push({
         label: `delete contest ${createdContestId}`,
-        run: () => ensureCreatedContestDeleted(
+        run: () => ensureCreatedContestSettled(
           browser,
           baseURL!,
           createdContestId,

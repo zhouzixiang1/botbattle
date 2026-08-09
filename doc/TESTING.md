@@ -33,7 +33,7 @@ pytest
 | **架构解耦** | `test_result_contract`、`test_game_registry`、`test_import_cycles`、`test_tongyong_layer_no_game_branches`、`test_db_layer_extensibility` |
 | **固定规则与协议** | `test_engine`、`test_board_engines`、`test_protocol`、`test_judge_params`；holdem=70、gomoku=15×15、pencil=N=6 |
 | **可发布样例 Bot** | `test_sample_bots_runtime`：脚本实际编译 Holdem/Pencil C 源码，两个运行模式分别跑完整 70 手 Holdem 与合法终局 Pencil；另守护 Pencil Python 完整历史重放/握手和六种 Holdem 策略仅依赖标准 history 字段 |
-| **认证/安全/审计** | `test_auth`、`test_store`、`test_security_logging`、`test_logging`、`test_audit_coverage`、`test_real_name`；密码重置覆盖邮箱码/管理员 token、双 Store 并发单赢家、session 删除故障整事务回滚及过期凭据不消费 |
+| **认证/安全/审计** | `test_auth`、`test_store`、`test_security_logging`、`test_logging`、`test_audit_coverage`、`test_real_name`；密码重置覆盖邮箱码/管理员 token、双 Store 并发单赢家、session 删除故障整事务回滚及过期凭据不消费；限流按 IP+方法+路径分桶，版本历史 GET 不得误耗上传 POST 额度 |
 | **编排/实时通信** | `test_human_match`、`test_chess_clock`、`test_auto_matcher`、`test_match_seat_names`；GameSpec 棋钟覆盖 Bot-vs-Bot 与人类双方的累计/超时事件，另含 SSE/WS 终态关闭与 shutdown 收敛 |
 | **崩溃语义** | 中途崩溃（含 human）=`completed + reason=crash`；Bot-vs-Bot 启动失败=`technical_loss`；human 启动失败=`aborted` |
 | **Bot 技术故障** | `test_bot_technical_faults` 覆盖旧 `{a:...}`、缺 response、非法 JSON/类型、超时、三游戏、duplicate、人机隔离、评分政策、bounded result/replay 样本与结构化日志；`test_matches_pagination` 覆盖列表/详情对历史与当前事件的兼容聚合、敏感旧错误脱敏、`has_bot_errors` 跨游戏/状态过滤和 malformed replay；平台故障继续由 `test_audit_coverage` 断言 aborted 且不评分 |

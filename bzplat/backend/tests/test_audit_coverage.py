@@ -386,6 +386,12 @@ def test_rating_sequence_repairs_earlier_failure_before_settling_target(
             "matches_played",
         )
         history_fields = ("rating", "rd", "vol", "matches_played", "reason")
+        pair_fields = ("a_wins", "a_losses", "draws", "samples")
+
+        def pair_snapshot(bot_a_id, bot_b_id):
+            row = case_store.head_to_head(bot_a_id, bot_b_id)
+            return None if row is None else tuple(row[key] for key in pair_fields)
+
         return {
             "ratings": [
                 tuple(case_store.get_rating(bot["id"])[key] for key in rating_fields)
@@ -400,8 +406,11 @@ def test_rating_sequence_repairs_earlier_failure_before_settling_target(
                 ]
                 for bot in bots
             ],
-            "pair_ab": case_store.head_to_head(bots[0]["id"], bots[1]["id"]),
-            "pair_ac": case_store.head_to_head(bots[0]["id"], bots[2]["id"]),
+            # last_played_at is deliberately excluded: two independent stores can
+            # cross a wall-clock second while still producing identical business
+            # state. The ordering contract concerns counters/ratings/history.
+            "pair_ab": pair_snapshot(bots[0]["id"], bots[1]["id"]),
+            "pair_ac": pair_snapshot(bots[0]["id"], bots[2]["id"]),
             "xp": [case_store.get_user(owner["id"])["xp"] for owner in owners],
         }
 

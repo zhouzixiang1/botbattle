@@ -50,7 +50,7 @@ ip=<真实IP> action=<动作> result=<ok|fail> user=<操作者> target=<目标> 
 
 ## 限流（内存滑动窗口）
 
-`RateLimitMiddleware`（`security.py`）按 `{真实IP}:{路径}` 分桶：
+`RateLimitMiddleware`（`security.py`）按 `{真实IP}:{HTTP方法}:{路径}` 分桶；同一路径的只读 GET 不会消耗 POST 上传/写操作额度：
 
 | 路径 | 限制 |
 |------|------|

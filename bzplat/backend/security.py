@@ -200,7 +200,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         max_req, window = limits
         ip = client_ip(request, trust_proxy=self.trust_proxy, hops=self.proxy_hops)
-        key = f"{ip}:{request.url.path}"
+        # The same resource commonly has a cheap GET and a stricter mutating
+        # POST budget (notably Bot version history vs version upload). Sharing a
+        # path-only bucket lets harmless reads consume the write allowance.
+        key = f"{ip}:{request.method}:{request.url.path}"
         ok, remaining, retry = self._limiter.check(key, max_req, window)
         if not ok:
             logger.warning("rate limit: ip=%s path=%s", ip, request.url.path)
@@ -310,4 +313,3 @@ def audit_log(
         parts.append(f'detail="{detail}"')
     level = logging.WARNING if result == "fail" else logging.INFO
     _audit_logger.log(level, " ".join(parts))
-

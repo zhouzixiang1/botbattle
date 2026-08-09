@@ -343,6 +343,13 @@ test('contest recovery finish trusts terminal matches when pairing status is sta
       body: JSON.stringify({ contest: { id: contestId, status: 'finished' } }),
     })
   })
+  await page.route(`**/api/contests/${contestId}/official-results`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ results: [] }),
+    })
+  })
 
   await page.goto(`/#/contests/${contestId}`)
   const finish = page.getByRole('button', { name: '强制结束赛事', exact: true })
@@ -1128,8 +1135,8 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
       url.pathname === '/api/matches' &&
       url.search === '?status=running&limit=20&offset=0'
   })
-  await adminPage.getByRole('combobox').click()
-  await adminPage.getByRole('option', { name: 'running', exact: true }).click()
+  await adminPage.getByRole('combobox').filter({ hasText: '全部状态' }).click()
+  await adminPage.getByRole('option', { name: '进行中', exact: true }).click()
   const runningResponse = await runningResponsePromise
   expect(runningResponse.status(), await runningResponse.text()).toBe(200)
   const runningMatches = await runningResponse.json() as {
