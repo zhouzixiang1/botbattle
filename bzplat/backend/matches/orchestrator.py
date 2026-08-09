@@ -174,6 +174,34 @@ def _bounded_replay_events(events: list[dict]) -> list[dict]:
     return bounded
 
 
+def _live_replay_events(events: list[dict]) -> list[dict]:
+    """Return a running-match snapshot without engine terminal markers.
+
+    A game session emits its own ``match_end`` immediately before returning its
+    result to the orchestrator.  At that point the match row is still
+    ``running``.  Persisting that marker into a live snapshot lets a reconnecting
+    WebSocket client mistake the replay for an authoritative terminal state.
+    Engine terminal events are retained only as internal inputs.  After the
+    match row/result commit, the final replay replaces all of them with the same
+    single canonical terminal event used by the live transport.
+    """
+    return [event for event in events if event.get("type") != "match_end"]
+
+
+def _authoritative_match_end(
+    winner: int | None,
+    reason: str,
+    deltas: list[int],
+) -> dict[str, Any]:
+    """Build the one public live completion event emitted by the orchestrator."""
+    return {
+        "type": "match_end",
+        "winner": winner,
+        "reason": reason,
+        "deltas": [int(deltas[0]), int(deltas[1])],
+    }
+
+
 def _completed_match_reason(result: Any, events: list[dict]) -> str:
     """Preserve an engine-adjudicated mid-match crash in the persisted match.
 
@@ -897,8 +925,12 @@ class MatchOrchestrator:
                 winner=winner, result={"deltas": [ea, eb]},
                 technical_loss=1, ended_at=_now(),
             )
+            terminal_event = _authoritative_match_end(
+                winner, "bot_deleted", [ea, eb]
+            )
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
             await self._safe_postprocess_completed_match(m, match_id, winner, ea, eb)
-            self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "bot_deleted"})
+            self._broadcast(match_id, terminal_event)
             # P0-1 回归修复：必须走收尾（清 _tasks + on_match_done 触发赛事推进），
             # 不能裸 return 绕过 finally——否则赛事对局卡死。
             await self._finish_match_task(match_id, m.get("contest_id"))
@@ -975,9 +1007,21 @@ class MatchOrchestrator:
 
         def on_event(kind: str, ev: dict) -> None:
             events.append(ev)
+            # The engine terminal is an internal result signal, not a public
+            # transport/replay terminal: result/status have not committed yet.
+            # This is especially important for duplicate matches, whose every
+            # leg emits a game-level match_end while the platform match remains
+            # running. The final flush replaces all of them with one canonical
+            # platform terminal.
+            if kind == "match_end":
+                return
             self._broadcast(match_id, ev)
-            if kind in ("settle", "hand_start", "match_end", "move", "match_start") or len(events) % 5 == 0:
-                self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+            if kind in ("settle", "hand_start", "move", "match_start") or len(events) % 5 == 0:
+                self.store.upsert_replay(
+                    match_id,
+                    json.dumps(_live_replay_events(events), ensure_ascii=False),
+                    "[]",
+                )
 
         try:
             path_a, mode_a = self._runtime_for_bot_version(
@@ -1019,6 +1063,7 @@ class MatchOrchestrator:
             # 胜负完全由 standings/ranking 读 result.legs 决定；match.winner 留 None。
             if want_duplicate:
                 winner = None  # 胜负由 standings 读 result.legs 决定（无单一 match 胜者）
+                terminal_reason = "completed"
                 legs_data = getattr(result, "legs", None) or []
                 # net_chips tiebreak 用：两 leg 物理 deltas 累加
                 ea = sum(int(lg.get("deltas", [0, 0])[0]) for lg in legs_data) if legs_data else 0
@@ -1027,7 +1072,7 @@ class MatchOrchestrator:
                     match_id,
                     status=STATUS_COMPLETED,
                     winner=None,  # 胜负由 standings 读 result.legs 决定
-                    reason="completed",
+                    reason=terminal_reason,
                     result={
                         "hands_played": result.rounds_played,
                         "deltas": [ea, eb],  # 两 leg 累加（net_chips tiebreak）
@@ -1044,11 +1089,12 @@ class MatchOrchestrator:
                 winner: int | None = result.winner
                 if winner is None:
                     winner = 0 if ea > eb else 1 if eb > ea else None
+                terminal_reason = _completed_match_reason(result, events)
                 self.store.update_match(
                     match_id,
                     status=STATUS_COMPLETED,
                     winner=winner,
-                    reason=_completed_match_reason(result, events),
+                    reason=terminal_reason,
                     result={
                         "hands_played": result.rounds_played,
                         "deltas": [ea, eb],
@@ -1056,9 +1102,12 @@ class MatchOrchestrator:
                     },
                     ended_at=_now(),
                 )
-            self._safe_flush_terminal_replay(match_id, events)
+            terminal_event = _authoritative_match_end(
+                winner, terminal_reason, [ea, eb]
+            )
+            self._safe_flush_terminal_replay(match_id, events, terminal_event)
             await self._safe_postprocess_completed_match(m, match_id, winner, ea, eb)
-            self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
+            self._broadcast(match_id, terminal_event)
             logger.info(
                 "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
                 match_id, winner, result.rounds_played, ea, eb,
@@ -1106,19 +1155,14 @@ class MatchOrchestrator:
                 technical_loss=1,
                 ended_at=_now(),
             )
-            self._safe_flush_terminal_replay(match_id, events)
+            terminal_event = _authoritative_match_end(
+                winner, exc.reason, [ea, eb]
+            )
+            self._safe_flush_terminal_replay(match_id, events, terminal_event)
             await self._safe_postprocess_completed_match(
                 m, match_id, winner, ea, eb
             )
-            self._broadcast(
-                match_id,
-                {
-                    "type": "match_end",
-                    "winner": winner,
-                    "reason": exc.reason,
-                    "technical_loss": 1,
-                },
-            )
+            self._broadcast(match_id, terminal_event)
         except PlatformRunnerError as exc:
             # Docker daemon/image/runtime failures are platform faults, not Bot
             # behaviour.  Abort without a winner/technical loss and, crucially,
@@ -1130,6 +1174,7 @@ class MatchOrchestrator:
                 reason="platform_error",
                 ended_at=_now(),
             )
+            self._safe_flush_terminal_replay(match_id, events)
             self._broadcast(
                 match_id,
                 {"type": "error", "reason": "platform_error", "message": "Bot 沙箱暂不可用"},
@@ -1151,8 +1196,12 @@ class MatchOrchestrator:
                 result={"deltas": [ea, eb]},
                 technical_loss=1, ended_at=_now(),
             )
+            terminal_event = _authoritative_match_end(
+                winner, "technical_loss", [ea, eb]
+            )
+            self._safe_flush_terminal_replay(match_id, events, terminal_event)
             await self._safe_postprocess_completed_match(m, match_id, winner, ea, eb)
-            self._broadcast(match_id, {"type": "match_end", "winner": winner, "reason": "technical_loss"})
+            self._broadcast(match_id, terminal_event)
         except Exception as exc:
             logger.exception("match %s failed", match_id)
             self.store.update_match(
@@ -1161,6 +1210,7 @@ class MatchOrchestrator:
                 reason=f"error:{exc}",
                 ended_at=_now(),
             )
+            self._safe_flush_terminal_replay(match_id, events)
             self._broadcast(match_id, {"type": "error", "message": str(exc)})
         finally:
             await self._finish_match_task(match_id, m.get("contest_id"))
@@ -1180,20 +1230,30 @@ class MatchOrchestrator:
             logger.exception("completed match postprocess failed match=%s", match_id)
 
     def _safe_flush_terminal_replay(
-        self, match_id: str, events: list[dict]
+        self,
+        match_id: str,
+        events: list[dict],
+        terminal_event: dict[str, Any] | None = None,
     ) -> None:
         """终态后的最后一次 replay flush 失败不得让状态/原因倒退。
 
         对局进行中已由 ``on_event`` 持续写快照；最后 flush 是补强持久化。此时
         completed/aborted 业务结果已经提交，故写失败只记录诊断；completed 后的
         评分仍必须执行，aborted 的明确原因也必须保留。
+        游戏 engine 自己发出的 ``match_end`` 是内部中间事件，一律移除；completed
+        路径传入的 ``terminal_event`` 会作为唯一终态追加，确保公开 replay 与 live
+        transport 使用完全相同的 ``winner/reason/deltas`` schema。复式每 leg 的
+        明细由 ``result.legs`` 保存，不再伪装成多个整场终态。
         challenge/challenge_human 创建阶段的初始 replay 写入不走本 helper，仍保持
         失败即补偿删除 pending 对局的强约束。
         """
         try:
+            replay_events = _bounded_replay_events(_live_replay_events(events))
+            if terminal_event is not None:
+                replay_events.append(dict(terminal_event))
             self.store.upsert_replay(
                 match_id,
-                json.dumps(_bounded_replay_events(events), ensure_ascii=False),
+                json.dumps(replay_events, ensure_ascii=False),
                 "[]",
             )
         except Exception:
@@ -1498,9 +1558,18 @@ class MatchOrchestrator:
 
             def on_event(kind: str, ev: dict) -> None:
                 events.append(ev)
+                # See the Bot-vs-Bot path above: a game-level match_end is an
+                # internal result signal, not permission to close WebSocket or
+                # create a second public replay contract before the result commits.
+                if kind == "match_end":
+                    return
                 self._broadcast(match_id, ev)
-                if kind in ("settle", "hand_start", "match_end", "move", "match_start", "turn") or len(events) % 5 == 0:
-                    self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+                if kind in ("settle", "hand_start", "move", "match_start", "turn") or len(events) % 5 == 0:
+                    self.store.upsert_replay(
+                        match_id,
+                        json.dumps(_live_replay_events(events), ensure_ascii=False),
+                        "[]",
+                    )
                 # 注：your_turn 不经 on_event，由 human_decide 直接 append + 立即落库（见下）
 
             async def human_decide(player_idx: int, request: dict) -> dict:
@@ -1514,7 +1583,11 @@ class MatchOrchestrator:
                 yt = {"type": "your_turn", "player": player_idx, "request": request}
                 events.append(yt)               # 进入持久化事件流（前端可恢复）
                 # 立即落库：前端重连走 subscribe() → get_replay() 读快照，必须能看到 your_turn
-                self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
+                self.store.upsert_replay(
+                    match_id,
+                    json.dumps(_live_replay_events(events), ensure_ascii=False),
+                    "[]",
+                )
                 self._broadcast(match_id, yt)   # 实时推送（已连接的 WS 立即点亮）
                 try:
                     resp = await asyncio.wait_for(fut, timeout=self.human_action_timeout)
@@ -1548,9 +1621,10 @@ class MatchOrchestrator:
                 winner = result.winner
                 if winner is None:
                     winner = 0 if ea > eb else 1 if eb > ea else None
+                terminal_reason = _completed_match_reason(result, events)
                 self.store.update_match(
                     match_id, status=STATUS_COMPLETED,
-                    winner=winner, reason=_completed_match_reason(result, events),
+                    winner=winner, reason=terminal_reason,
                     result={
                         "hands_played": result.rounds_played,
                         "deltas": [ea, eb],
@@ -1558,9 +1632,14 @@ class MatchOrchestrator:
                     },
                     ended_at=_now(),
                 )
-                self._safe_flush_terminal_replay(match_id, events)
+                terminal_event = _authoritative_match_end(
+                    winner, terminal_reason, [ea, eb]
+                )
+                self._safe_flush_terminal_replay(
+                    match_id, events, terminal_event
+                )
                 # 人类对战不计 Glicko-2（人类无 rating 行）
-                self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
+                self._broadcast(match_id, terminal_event)
             except BotTechnicalError as exc:
                 # Only the subprocess path can construct BotTechnicalError. Human
                 # WebSocket payloads keep their existing game-validation/inactivity
@@ -1597,17 +1676,14 @@ class MatchOrchestrator:
                     technical_loss=1,
                     ended_at=_now(),
                 )
-                self._safe_flush_terminal_replay(match_id, events)
-                # Human matches never enter Glicko/pair_stats settlement.
-                self._broadcast(
-                    match_id,
-                    {
-                        "type": "match_end",
-                        "winner": winner,
-                        "reason": exc.reason,
-                        "technical_loss": 1,
-                    },
+                terminal_event = _authoritative_match_end(
+                    winner, exc.reason, [ea, eb]
                 )
+                self._safe_flush_terminal_replay(
+                    match_id, events, terminal_event
+                )
+                # Human matches never enter Glicko/pair_stats settlement.
+                self._broadcast(match_id, terminal_event)
             except PlatformRunnerError as exc:
                 logger.error("human match %s sandbox unavailable — %s", match_id, exc)
                 self.store.update_match(
@@ -1638,6 +1714,7 @@ class MatchOrchestrator:
             except Exception as exc:
                 logger.exception("human match %s failed", match_id)
                 self.store.update_match(match_id, status=STATUS_ABORTED, reason=f"error:{exc}", ended_at=_now())
+                self._safe_flush_terminal_replay(match_id, events)
                 self._broadcast(match_id, {"type": "error", "message": str(exc)})
             finally:
                 self._release_human_match_state(

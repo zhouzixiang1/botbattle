@@ -34,7 +34,7 @@ pytest
 | **固定规则与协议** | `test_engine`、`test_board_engines`、`test_protocol`、`test_canonical_protocol_docs`、`test_pinned_game_config`、`test_canonical_bot_protocol`、`test_judge_public`；holdem=70+20000+50/100（预检首信封同样 `max_hand=70`）、gomoku=15×15、pencil=N=6+900s；direct session 未知规则参数、赛事阶段未知/错拼字段均拒绝；棋类每个 protocol 只导出自身 API且共享实现随源码公开；schema 与 Wiki 守护唯一严格信封 |
 | **可发布样例 Bot** | `test_canonical_protocol_docs` 逐字绑定 Wiki 内嵌的三游戏 C/Python 完整示例与回归源码；`test_sample_bots_runtime` 实际构建三款 C ELF 与三款 PyInstaller 单文件 ELF，校验 Linux x86_64，并让两类产物在 Traditional/LongRunning 下分别跑完整 70 手 Holdem 与两款棋类合法终局；另守护完整历史重放、精确握手和六种 Holdem 策略仅依赖标准 history 字段 |
 | **认证/安全/审计** | `test_auth`、`test_store`、`test_security_logging`、`test_logging`、`test_audit_coverage`、`test_real_name`；密码重置覆盖邮箱码/管理员 token、双 Store 并发单赢家、session 删除故障整事务回滚及过期凭据不消费；限流按 IP+方法+路径分桶，版本历史 GET 不得误耗上传 POST 额度 |
-| **编排/实时通信** | `test_human_match`、`test_frozen_version_failclosed`、`test_chess_clock`、`test_auto_matcher`、`test_match_seat_names`；GameSpec 棋钟覆盖 Bot-vs-Bot 与人类双方的累计/超时事件；冻结版本缺失、跨 Bot、空路径、快照异常或 SHA-256/文件大小漂移在普通/人机/赛事三路径均须 fail-closed：创建前发现则零 match/task，已排队后发现则 `aborted + version_unavailable`，两者 runner 调用数与评分副作用均为零，任务/人类占用/赛事 pairing 统一收敛；同尺寸覆盖并恢复 mtime 仍须因 ctime 变化使缓存失效并重新哈希，checksum/size 为空的真正历史版本保持可运行；另含 SSE/WS 终态关闭与 shutdown 收敛 |
+| **编排/实时通信** | `test_authoritative_terminal_events`、`test_human_match`、`test_frozen_version_failclosed`、`test_chess_clock`、`test_auto_matcher`、`test_match_seat_names`；GameSpec 棋钟覆盖 Bot-vs-Bot 与人类双方的累计/超时事件；终态回归覆盖真实 70 手 Holdem、复式每 leg、协议技术负、启动崩溃、平台故障与 human WS，断言 engine `match_end` 不进入公开写入、replay/live 各只有一条且是相同 canonical `winner/reason/deltas`，广播时 Store/GET 已提交终态，复式细节只由 `result.legs` 表达；冻结版本缺失、跨 Bot、空路径、快照异常或 SHA-256/文件大小漂移在普通/人机/赛事三路径均须 fail-closed：创建前发现则零 match/task，已排队后发现则 `aborted + version_unavailable`，两者 runner 调用数与评分副作用均为零，任务/人类占用/赛事 pairing 统一收敛；同尺寸覆盖并恢复 mtime 仍须因 ctime 变化使缓存失效并重新哈希，checksum/size 为空的真正历史版本保持可运行；另含 SSE/WS 终态关闭与 shutdown 收敛 |
 | **崩溃语义** | 中途崩溃（含 human）=`completed + reason=crash`；Bot-vs-Bot 启动失败=`technical_loss`；human 启动失败=`aborted` |
 | **Bot 技术故障** | `test_bot_technical_faults` 覆盖拒绝 `{a:...}`、顶层整数/裸坐标、额外字段、缺 response、非法 JSON/类型、LongRunning 缺失/错误握手、超时、三游戏、duplicate、人机隔离、评分政策、新写 `technical_incident` 事件、bounded result/replay 样本与结构化日志；预检必须走同一首回合信封。`test_matches_pagination` 覆盖只读归一化两种历史事件、敏感旧错误脱敏、REST 回放/SSE snapshot 只输出 `technical_incident`、现行 `technical_incident_*` 字段、`has_technical_incidents` 跨游戏/状态过滤、两个退役查询名显式 400 与 malformed replay；平台故障继续由 `test_audit_coverage` 断言 aborted 且不评分 |
 | **二进制目标闸门** | `test_runtime`、`test_binary_visibility` 覆盖仅 ELF64/小端/Linux/x86-64 可写与可执行；历史 PE 行不迁移但 owner/admin 标记不可运行，公开候选过滤，owner/admin 激活与版本回滚均 409 且 DB 不被改写；Playwright 还用真实 PE 上传验证服务端 400 与 UI 错误态 |
@@ -48,12 +48,12 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 27 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 28 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航、表单边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航、表单边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 9 个 Tab、查询参数/返回数据一致性、关键保存操作与布局 |
 
@@ -86,11 +86,13 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 |------|----------|-----------|
 | 隔离端到端冒烟 | **ALL PASSED** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **27 条 / 4 spec** | `npx playwright test --list` 实测 |
+| Playwright 收集 | **28 条 / 4 spec** | `npx playwright test --list` 实测 |
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
+| 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
+| 权威终态后端定向回归 | **72 passed / 1 warning（32.87s）** | `test_authoritative_terminal_events` + 技术故障 + human + audit：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
 | 后端协议/文档分支门禁 | **873 passed / 1 skipped / 1 warning（226.48s）** | 独立 worktree 完整执行；skip 因该 worktree 未构建 `frontend/dist`，warning 为既有 Starlette/httpx deprecation；最终整合提交仍须重跑 |
-| 后端整合提交收集/完整 pytest | **待最终重采集** | 不把独立分支数字冒充整合结果；发布前用本节命令回填 |
-| Playwright 完整执行 | **新增回归前基线 21 passed；27 条整合套件待重跑** | Chromium 单 worker 的旧基线为 2.3m；新增未知游戏、动作契约与 PE 拒绝回归后，必须在最终整合栈重新执行全部 27 条 |
+| 后端本分支完整 pytest | **951 passed / 1 warning（240.26s）** | 使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation。后续合并其他分支后仍须在最终整合提交重采集 |
+| Playwright 完整执行 | **新增回归前基线 21 passed；28 条整合套件待重跑** | Chromium 单 worker 的旧基线为 2.3m；新增未知游戏、动作契约、PE 拒绝与 canonical 终态回归后，必须在最终整合栈重新执行全部 28 条 |
 | 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2560 modules transformed |
 
 ## 5. 可靠性与恢复专项

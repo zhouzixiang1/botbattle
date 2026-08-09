@@ -155,7 +155,7 @@ export default function MatchViewer() {
                 eventsLenRef.current = beforeEnd + 1
                 setEvents((prev) => [...prev, ...queued, ev])
                 setPlaying(false)
-                // 回写胜者/earnings 到 match，避免顶栏一直「—」
+                // 回写权威终态，避免顶栏一直停在直播中的旧快照。
                 setMatch((prev) => {
                   if (!prev) return prev
                   const patch: MatchRow = {
@@ -163,13 +163,14 @@ export default function MatchViewer() {
                     status: ev.type === 'error' ? 'aborted' : 'completed',
                   }
                   if (ev.winner !== undefined) patch.winner = ev.winner as number | null
-                  // match_end 事件的 earnings_a/b 回写进 result.deltas（取代旧 earnings_a/b 列）
-                  if (ev.earnings_a !== undefined || ev.earnings_b !== undefined) {
+                  // live match_end 唯一结果字段是 canonical result.deltas；不再
+                  // 接受已退役的双标量第二套合约。
+                  if (Array.isArray(ev.deltas) && ev.deltas.length >= 2) {
                     patch.result = {
                       ...(prev.result || {}),
                       deltas: [
-                        ev.earnings_a !== undefined ? Number(ev.earnings_a) : prev.result?.deltas?.[0] ?? 0,
-                        ev.earnings_b !== undefined ? Number(ev.earnings_b) : prev.result?.deltas?.[1] ?? 0,
+                        Number(ev.deltas[0]),
+                        Number(ev.deltas[1]),
                       ],
                     }
                   }

@@ -658,6 +658,95 @@ test('terminal SSE snapshot switches a raced live page to replay without reconne
   await monitor.expectClean()
 })
 
+test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const viewerId = 'mock-canonical-terminal-viewer'
+  const humanId = 'mock-canonical-terminal-human'
+
+  // Register WebSocket interception before the first navigation. Vite creates
+  // its HMR socket on that navigation; Playwright must install page-level WS
+  // routing before any socket exists for subsequent business sockets to route.
+  await page.routeWebSocket(
+    (url) => url.pathname === `/api/matches/${humanId}/play`,
+    (socket) => {
+      setTimeout(() => {
+        socket.send(JSON.stringify({
+          type: 'snapshot',
+          match: {
+            id: humanId,
+            game_id: 'holdem',
+            status: 'running',
+            match_type: 'human',
+            human_seat: 1,
+            bot_a: { name: 'canonical_bot', owner_name: 'alpha' },
+            bot_b: { owner_name: 'human_player', is_human: true },
+            result: { hands_played: 0, deltas: [0, 0] },
+          },
+          events: [{ type: 'match_start', game_id: 'holdem', num_hands: 1 }],
+        }))
+      }, 0)
+      setTimeout(() => {
+        socket.send(JSON.stringify({
+          type: 'match_end',
+          winner: 0,
+          reason: 'completed',
+          deltas: [23, -23],
+        }))
+      }, 30)
+    },
+  )
+
+  await page.route(`**/api/matches/${viewerId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${viewerId}/events`, async (route) => {
+    const stream = [
+      { type: 'match_start', game_id: 'holdem', num_hands: 1 },
+      { type: 'match_end', winner: 0, reason: 'completed', deltas: [37, -37] },
+    ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: stream })
+  })
+  await page.route(`**/api/matches/${viewerId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: viewerId,
+          game_id: 'holdem',
+          status: 'running',
+          match_type: 'challenge',
+          bot_a: { name: 'canonical_a', owner_name: 'alpha' },
+          bot_b: { name: 'canonical_b', owner_name: 'beta' },
+          result: { hands_played: 0, deltas: [0, 0] },
+        },
+        replay: { events_json: '[]' },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ comments: [], count: 0, total: 0 }),
+    })
+  })
+
+  await page.goto(`/#/match/${viewerId}`)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(page.getByText('canonical_a @alpha', { exact: true }).first()).toBeVisible()
+  // The viewer intentionally parks on the event before terminal. Step once to
+  // prove the game reducer consumes canonical `deltas`, not retired aliases.
+  await page.getByRole('button', { name: '下一步', exact: true }).click()
+  await expect(page.getByText(/累计筹码/)).toContainText('座1 +37')
+  await expect(page.getByText(/累计筹码/)).toContainText('座2 -37')
+
+  await page.goto(`/#/play/${humanId}`)
+  await expect(page.getByText(/对局结束 · 胜者：canonical_bot @alpha/)).toBeVisible()
+  await expect(page.getByText('累计 +23 / -23', { exact: true })).toBeVisible()
+  await monitor.expectClean()
+})
+
 test('Pencil clock initializes the untouched seat and renders a first-event timeout', async ({ page }) => {
   const monitor = monitorBrowser(page)
 
@@ -669,7 +758,10 @@ test('Pencil clock initializes the untouched seat and renders a first-event time
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
     })
     await page.route(`**/api/matches/${matchId}/events`, async (route) => {
-      const stream = [...events, { type: 'match_end', winner: 1, reason: 'completed' }]
+      const stream = [
+        ...events,
+        { type: 'match_end', winner: 1, reason: 'completed', deltas: [-1, 1] },
+      ]
         .map((event) => `data: ${JSON.stringify(event)}\n\n`)
         .join('')
       await route.fulfill({ status: 200, contentType: 'text/event-stream', body: stream })
@@ -1286,7 +1378,12 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
           winner: 0,
           result: { hands_played: 1, deltas: [1, -1] },
         },
-        replay: { events_json: JSON.stringify([{ type: 'match_start' }, { type: 'match_end', winner: 0 }]) },
+        replay: {
+          events_json: JSON.stringify([
+            { type: 'match_start' },
+            { type: 'match_end', winner: 0, reason: 'completed', deltas: [1, -1] },
+          ]),
+        },
       }),
     })
   })

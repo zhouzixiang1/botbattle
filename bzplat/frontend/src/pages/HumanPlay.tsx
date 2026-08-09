@@ -152,18 +152,21 @@ export default function HumanPlay() {
               winner: ev.winner as number | null | undefined,
               reason: ev.reason || ev.message,
             })
-            setMatch((prev) => prev ? {
-              ...prev,
-              status: ev.type === 'error' ? 'aborted' : 'completed',
-              winner: ev.winner as number | null | undefined,
-              result: {
-                ...(prev.result || {}),
-                deltas: [
-                  ev.earnings_a != null ? Number(ev.earnings_a) : prev.result?.deltas?.[0] ?? 0,
-                  ev.earnings_b != null ? Number(ev.earnings_b) : prev.result?.deltas?.[1] ?? 0,
-                ],
-              },
-            } : prev)
+            setMatch((prev) => {
+              if (!prev) return prev
+              const next: MatchSeatRow = {
+                ...prev,
+                status: ev.type === 'error' ? 'aborted' : 'completed',
+                winner: ev.winner as number | null | undefined,
+              }
+              if (Array.isArray(ev.deltas) && ev.deltas.length >= 2) {
+                next.result = {
+                  ...(prev.result || {}),
+                  deltas: [Number(ev.deltas[0]), Number(ev.deltas[1])],
+                }
+              }
+              return next
+            })
             setReconnecting(false)
             // 终态后不再需要双向通道；主动关闭令后端 receive_json 退出并 unsubscribe。
             ws.close(1000, 'match complete')
