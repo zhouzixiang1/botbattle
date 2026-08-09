@@ -275,6 +275,10 @@ export default function MatchViewer() {
     const slice = events.slice(0, cur + 1)
     return gameSpec.reduce(slice as RawEvent[])
   }, [gameSpec, events, cur, total])
+  const fullVm = useMemo(() => {
+    if (total === 0 || !gameSpec) return null
+    return gameSpec.reduce(events as RawEvent[])
+  }, [gameSpec, events, total])
   const finished =
     match?.status === 'completed' ||
     match?.status === 'aborted' ||
@@ -293,10 +297,18 @@ export default function MatchViewer() {
   }
   const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
   const liveProgress = visibleVm && gameSpec ? gameSpec.replay.progress(visibleVm) : null
+  const fullReplayProgress = fullVm && gameSpec ? gameSpec.replay.progress(fullVm) : null
   const progressUnitLabel = gameSpec?.progressUnit === 'move' ? '步' : '手'
   const persistedProgress = Number(match?.result?.hands_played)
+  // 棋类的持久化兼容字段 hands_played 恒为 0；事件 reducer 才是已走步数的权威来源。
+  // 德州的 replay.progress 为 null，继续使用持久化手数。
+  const resolvedProgress = fullReplayProgress != null && Number.isFinite(fullReplayProgress) && fullReplayProgress > 0
+    ? fullReplayProgress
+    : Number.isFinite(persistedProgress)
+      ? persistedProgress
+      : null
   const displayedProgress = finished
-    ? (Number.isFinite(persistedProgress) ? persistedProgress : null)
+    ? resolvedProgress
     : liveProgress
   const progressText = displayedProgress != null && displayedProgress > 0
     ? `${finished ? '共' : '当前'} ${displayedProgress} ${progressUnitLabel}`
@@ -317,7 +329,7 @@ export default function MatchViewer() {
     }))
   const technicalIncidents = persistedIncidents.length ? persistedIncidents : eventIncidents
   const technicalTerminal = finished && (matchHasTechnicalLoss(match) || technicalIncidents.length > 0)
-  const staticTechnicalReplay = technicalTerminal && (!Number.isFinite(persistedProgress) || persistedProgress <= 0)
+  const staticTechnicalReplay = technicalTerminal && (resolvedProgress == null || resolvedProgress <= 0)
   const failedSeat = (() => {
     const sampleSeat = Number(technicalIncidents[0]?.seat)
     if (sampleSeat === 0 || sampleSeat === 1) return sampleSeat

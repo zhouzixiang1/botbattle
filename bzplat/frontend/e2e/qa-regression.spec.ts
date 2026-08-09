@@ -950,6 +950,56 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   await monitor.expectClean()
 })
 
+test('MatchViewer keeps chess history playable after a mid-game technical loss', async ({ page }) => {
+  const matchId = 'mock-gomoku-midgame-protocol-loss'
+  const events = [
+    { type: 'match_start', game_id: 'gomoku', size: 15 },
+    { type: 'move', player: 0, x: 7, y: 7, move_index: 1 },
+    { type: 'move', player: 1, x: 7, y: 8, move_index: 2 },
+    {
+      type: 'technical_incident', seat: 0, code: 'missing_response',
+      error: 'Bot 响应缺少必填 response 字段', reason: 'protocol_error', turn: 3,
+    },
+    { type: 'match_end', winner: 1, reason: 'protocol_error', deltas: [-1, 1] },
+  ]
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'gomoku',
+          status: 'completed',
+          match_type: 'challenge',
+          winner: 1,
+          reason: 'protocol_error',
+          technical_loss: 1,
+          bot_a: { name: 'black_bot', owner_name: 'alpha' },
+          bot_b: { name: 'white_bot', owner_name: 'beta' },
+          // 历史通用字段对棋类为 0；已走步数必须从 replay reducer 取。
+          result: { hands_played: 0, deltas: [-1, 1] },
+        },
+        replay: { events_json: JSON.stringify(events) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}' })
+  })
+
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  await expect(page.getByText('共 2 步', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '播放', exact: true })).toBeVisible()
+  await expect(page.locator('main')).toContainText('动作时序')
+  await expect(page.getByRole('alert')).toContainText('missing_response')
+  await monitor.expectClean()
+})
+
 async function activateVersion(page: Page, manager: Locator, botId: number, version: number) {
   const row = versionRow(manager, version)
   await row.getByRole('button', { name: '回滚', exact: true }).click()
