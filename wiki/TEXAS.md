@@ -4,7 +4,7 @@
 本平台 `game_id`：**`holdem`**。
 
 > 下文 **§1–§4** 的标题层级、内容要素与 Botzone 原页一致（简介 / 游戏规则 / 交互 / 样例）。  
-> **§5 起** 为平台适配（长驻行协议、与 Botzone 差异、裁判与样例路径）。权威协议字段见 [协议规范](#/wiki?slug=protocol)。
+> **§5 起** 为平台适配（双运行模式、与 Botzone 差异、裁判与样例路径）。权威协议字段见 [协议规范](#/wiki?slug=protocol)。
 
 ---
 
@@ -27,7 +27,7 @@
    - [Python 版本](#python-版本botzone-协议)
 5. [本平台适配](#本平台适配)
    - [与 Botzone 差异一览](#与-botzone-差异一览)
-   - [本平台长驻行协议](#本平台长驻行协议)
+   - [本平台协议](#本平台协议标准字段与动作编码)
    - [裁判与本地自测](#裁判与本地自测)
    - [赛制模板](#赛制模板)
 
@@ -43,7 +43,7 @@
 
 - 每人**初始筹码数 20000**
 - **小盲注 50**，**大盲注 100**
-- 比赛开始时，随机选定庄家位置；庄家的下家担任小盲注，庄家的下下家担任大盲注
+- 比赛开始时选定按钮位；本游戏是双人桌，按钮位（dealer）同时担任小盲，另一位担任大盲
 - 每小局结束后庄家转移到下家
 
 对于二人比赛版本，一场 Bot 比赛共包含 **50 小局**（Botzone 默认；本平台默认手数见 [§5](#与-botzone-差异一览)）。
@@ -58,7 +58,7 @@
 
 若当前自己剩余的筹码数不足以跟注或加注，或者是对手全押，则只能选择弃牌或全押。
 
-> 本平台人类对战界面同样提供 Fold / All-in / Call·Check / Raise；**本平台 Bot 协议完全照 Botzone**（raise response 的正整数 = 额外下注筹码 / 增量，与人类 UI / Botzone 一致），见 [§5](#本平台适配)。
+> 本平台人类对战界面同样提供 Fold / All-in / Call·Check / Raise；Bot 的 raise response 正整数沿用 Botzone 的额外下注筹码语义，见 [§5](#本平台适配)。
 
 ### 作者
 
@@ -74,11 +74,7 @@ Botzone 原页：播放器、裁判程序、Python 样例程序：**dhbloo**。
 
 ### 玩家位置与下注次序
 
-从 0 号玩家开始按照顺时针方向围成一圈坐在一张桌子前。对于 N 个玩家的比赛，玩家 i 的下家为 `(i+1) % N`。
-
-开始比赛时裁判随机选定一个玩家作为初始庄家，庄家的下家担任小盲注，庄家的下下家担任大盲注。每小局结束后庄家转移到当前庄家的下家。
-
-> 二人时：`(dealer+1)%2` 为小盲，`(dealer+2)%2` 为大盲（大盲恰为庄家本人）。本平台 `d` 字段表示**本手小盲座位**（亦为按钮位），见协议。
+本游戏固定两名玩家。标准 Heads-Up 约定为：按钮位（`dealer_id`）同时是小盲并在翻前先行动；另一位是大盲。每手按钮位交替。
 
 ### 牌局进行流程
 
@@ -145,7 +141,7 @@ Botzone 上本游戏与其它游戏一样使用 [Bot 交互](https://wiki.botzon
 
 Botzone 默认：**请注意程序有计算时间限制，每步要在 1 秒内完成！**
 
-本平台：整场**长驻**进程 + 一行 JSON；默认决策超时由管理员配置（常见默认 **60s**）。超时 / 非法动作 → **fold**；对局中途进程崩溃 / EOF → **计分判负**（`completed`）；启动失败见 [对局](#/wiki?slug=guide)。详见 [协议规范](#/wiki?slug=protocol)。
+本平台使用一行 JSON，并支持 Traditional（默认、每决策重启）与 LongRunning（显式选择、握手后长驻）；默认决策超时为 **60s**，管理员可在硬范围内调整。超时 / 非法动作 → **fold**；对局中途进程崩溃 / EOF → **计分判负**（`completed`）；启动失败见 [对局](#/wiki?slug=guide)。详见 [协议规范](#/wiki?slug=protocol)。
 
 ### 具体交互内容
 
@@ -174,7 +170,7 @@ suit  = card % 4     # 0 红桃, 1 方块, 2 黑桃, 3 草花
 rank  = card // 4 + 2  # 2..14（A=14）
 ```
 
-本平台协议中的 `mc` / `pc` 整数编码与上表**一致**（经 `protocol.encode_card` 映射）。
+本平台协议中的 `my_cards` / `public_cards` 整数编码与上表一致。
 
 #### Request（Botzone）
 
@@ -265,7 +261,7 @@ Bot 所需要输出的 response 是一个**整数**，表示自己要下注的�
 
 ### Python 版本（Botzone 协议）
 
-以下为 Botzone 原页 Python 样例（Botzone 信封 + 整型 response）。**本平台完全兼容 Botzone 标准，此样例经少量适配（首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 握手即可长驻）即可直接上传**。详见 [§5](#本平台适配) 与仓库 `samples/`。
+以下为 Botzone 原页风格的 Python **Traditional 单次决策源码**（信封 + 整型 response），用于理解状态重放。它只读取一行后退出，且 `.py` 源文件不满足平台 ELF/PE 上传格式，**不能直接上传，也不能只加一行握手就变成 LongRunning Bot**。可上传样例见本节代码块之后的构建说明。
 
 ```python
 import json
@@ -290,8 +286,9 @@ def get_action(input):
     round_raise = 2 * round_bet  # 当前轮次最小加注到的筹码数
     round_action_count = 0  # 当前轮次已经叫注的玩家数
     player_bets = [0] * N_PLAYERS  # 当前轮次每个玩家已经下注的筹码数
-    player_bets[next_player(input["dealer_id"], 1)] = SMALL_BLIND
-    player_bets[next_player(input["dealer_id"], 2)] = BIG_BLIND
+    # 本平台 HU：dealer_id 就是 SB，另一座位是 BB
+    player_bets[input["dealer_id"]] = SMALL_BLIND
+    player_bets[1 - input["dealer_id"]] = BIG_BLIND
 
     for h in input["history"]:
         id, action, type = h["player_id"], h["action"], h["action_type"]
@@ -349,17 +346,17 @@ action = get_action(requests[-1])
 print(json.dumps({"response": action}))
 ```
 
-本平台可直接上传的样例见仓库：`samples/callbot.c`、`samples/callbot.py` 及 `samples/holdem_bots/`（8 种风格）等（Botzone 信封 + 裸整数 `{"response":0}` / `{"response":250}`）。
+可上传样例需先构建：在仓库根执行 `bash samples/build_sample.sh`，上传生成的 `samples/callbot_linux_amd64` 并选择 `holdem`。`samples/callbot.py`、本节代码块和 C 文件都是源码，不能原样上传；`samples/holdem_bots/` 的多策略样例可用其 `gen.sh` 构建。
 
 ---
 
 ## 本平台适配
 
-### 与 Botzone 对照（本平台完全遵循 Botzone 标准）
+### 与 Botzone 对照（标准信封与动作编码兼容）
 
 | 项 | Botzone TexasHoldem2p | 本平台 `holdem` |
 |----|----------------------|-----------------|
-| 进程模型 | Traditional 每回合启停 / LongRunning 长驻 | **整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动可直接跑 |
+| 进程模型 | Traditional 每回合启停 / LongRunning 长驻 | **默认 Traditional** 每决策重启；显式 LongRunning 握手后长驻 |
 | 运行模式 | Traditional / LongRunning | 都支持（上传时标明） |
 | 默认手数 | 50（`max_hand`） | **固定 70**（不可配；其余规则一致） |
 | 每手筹码 | **每手固定 20000 复位** | **同左**：每手复位 20000，不跨手累积；按各手净输赢累加（累计净筹码）判定胜负 |
@@ -370,7 +367,7 @@ print(json.dumps({"response": action}))
 | 计分展示 | 累积赢码 / BB | 对局 `earnings` / 天梯 Glicko-2 |
 | 人类 UI Raise | 额外增量 | 界面加注语义对齐人类说明；Bot 协议同 Botzone（raise=额外量） |
 
-### 本平台协议（完全照 Botzone）
+### 本平台协议（标准字段与动作编码）
 
 权威全文：[协议规范](#/wiki?slug=protocol)。摘要：
 
@@ -406,7 +403,7 @@ def min_raise_to(current_bet, bb):
     return bb if current_bet == 0 else current_bet * 2
 ```
 
-LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 声明长驻（否则每回合收到完整历史信封，Traditional 等效）。
+LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 声明长驻。平台最多等 1 秒；未握手时会在**同一进程**继续发送完整历史作兼容回退，并非 Traditional 的逐回合重启。
 
 ### 裁判与本地自测
 
@@ -430,7 +427,6 @@ LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<
 ## 参考
 
 1. [Botzone · TexasHoldem2p](https://wiki.botzone.org.cn/index.php?title=TexasHoldem2p)（内容与章节对齐来源）
-2. 本地快照：`refs/botzone/TexasHoldem2p.html`
-3. 站内 [协议规范](#/wiki?slug=protocol)、[Bot 开发指南](#/wiki?slug=bot-dev)、[对局](#/wiki?slug=guide)
-4. 参考裁判：[`samples/judges/`](../samples/judges/)
-5. 牌型图：`/wiki-assets/TexasHoldemHandType.jpg`
+2. 站内 [协议规范](#/wiki?slug=protocol)、[Bot 开发指南](#/wiki?slug=bot-dev)、[对局](#/wiki?slug=guide)
+3. 参考裁判：[`samples/judges/`](../samples/judges/)
+4. 牌型图：`/wiki-assets/TexasHoldemHandType.jpg`

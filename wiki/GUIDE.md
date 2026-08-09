@@ -394,7 +394,7 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 
 上传时须选择**游戏类型** + **Botzone 运行模式**：
 
-- **LongRunning（长驻，推荐）**：进程整场不重启；首回合发完整历史信封，Bot 响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 握手，之后每回合只发单 request。适合有昂贵初始化的 Bot。
+- **LongRunning（长驻，可选）**：进程整场不重启；首回合发完整历史信封，Bot 响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 握手，之后每回合只发单 request。适合有昂贵初始化的 Bot。平台默认仍是 Traditional。
 - **Traditional（传统）**：每回合发完整历史信封 `{"requests":[...],"responses":[...]}`，Bot 自重放重建状态。适合无状态、易调试的 Bot。
 
 详见 [协议规范](#/wiki?slug=protocol)。

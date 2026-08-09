@@ -6,7 +6,7 @@
 
 **对战核心**
 - 上传 **Linux ELF / Windows PE** 二进制 Bot（macOS Mach-O 拒绝），Docker 硬隔离沙箱执行
-- 各游戏独立裁判引擎 + 紧凑 JSON 行协议；**新增游戏对赛制/编排层零改动**
+- 各游戏独立裁判引擎 + 统一 GameSpec/结果契约；赛制与编排主流程无需游戏名分支
 - SSE 实时观赛 + 完整对局回放（播放/暂停/步进/倍速/逐手跳转）
 - 人类 vs Bot（WebSocket 实时交互，独立并发，不计评分）
 
@@ -35,7 +35,7 @@
 | 五子棋 | `gomoku` | 15×15 / 黑先 / 五连即胜（含长连）/ 无禁手 |
 | 点格棋（Dots and Boxes） | `pencil` | 固定 N=6 点交错网格 / 成格连走计分 / 每方累计 15 分钟棋钟（Bot 与人类对局同契约） |
 
-> 平台架构按 `game_id` 解耦，新增游戏只需实现规则引擎与协议适配。
+> 平台在赛制/编排契约层按 `game_id` 解耦。新增游戏仍需注册 GameSpec、前端视图与元数据；数据库会按注册 ID 自动建立同构 `matches_<game>` 表。
 
 ## 快速开始
 
@@ -89,7 +89,7 @@ botzone create-admin alice alice@example.com 'password123'
 │   ├── backend/          # FastAPI：games(注册表) / matches / contests / store / runtime /
 │   │                     # auth / bots / notifications / rating / mail
 │   └── frontend/         # React 19 + Vite 8 + Tailwind v4 + shadcn/ui（src/games 注册表 + canvas）
-├── doc/                  # 甲方交付文档（6 份：总览/需求/设计/开发/测试/总结）
+├── doc/                  # 工程交付文档（6 份核心文档 + 专项/历史文档 + INDEX）
 ├── wiki/                 # Bot 玩家文档（规则/协议/Bot 开发指南）
 ├── contracts/            # 协议 JSON Schema
 ├── samples/              # 样例 Bot（C / Python 源码 + 参考裁判脚本）

@@ -41,7 +41,7 @@ placeAt(requests[turnID].x, requests[turnID].y); // 本回合最新对手着
 
 `placeAt`：仅当 `x>=0 && y>=0` 才落子（跳过首手 `-1,-1`）。
 
-## 本平台长驻行协议（完全照 Botzone）
+## 本平台双模式行协议
 
 整场对局进程不退出；裁判每步推送一行 Botzone 信封，Bot 回一行信封。
 
@@ -62,7 +62,7 @@ placeAt(requests[turnID].x, requests[turnID].y); // 本回合最新对手着
 {"response":{"x":7,"y":8}}
 ```
 
-完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准（信封 + `{x,y}` 落子）。Botzone 标准 Bot 可直接跑。详见 [协议规范](#/wiki?slug=protocol)。
+信封与 `{x,y}` 落子兼容 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot)，`me` 是本平台附加字段。平台默认 Traditional，LongRunning 需握手。详见 [协议规范](#/wiki?slug=protocol)。
 
 
 ## 事件（观赛 / 回放）

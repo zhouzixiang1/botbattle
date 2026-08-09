@@ -1,12 +1,12 @@
 # Wiki 首页
 
-本站文档从 [Botzone Wiki](https://wiki.botzone.org.cn/) 相关页面迁移并适配本平台（长驻 stdin/stdout 行协议）。**核心是三款游戏**，其余功能集中在[平台功能指南](#/wiki?slug=guide)。
+本站文档参考 [Botzone Wiki](https://wiki.botzone.org.cn/) 并按本平台实现修订（Traditional 默认 / LongRunning 可选的 stdin/stdout 行协议）。**核心是三款游戏**，其余功能集中在[平台功能指南](#/wiki?slug=guide)。
 
 ## 文档目录
 
 | 页面 | 说明 |
 |------|------|
-| [协议规范](#/wiki?slug=protocol) | **Botzone 标准协议**（信封、两模式、德州裸整数 response） |
+| [协议规范](#/wiki?slug=protocol) | Botzone 兼容信封、两模式、德州裸整数 response 与平台扩展 |
 | [Bot 开发指南](#/wiki?slug=bot-dev) | 上传、调试、样例 |
 | [德州扑克](#/wiki?slug=texas) | 对齐 Botzone TexasHoldem2p 全文结构 + 本平台行协议 |
 | [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 + 一手交换变体 |
@@ -19,12 +19,12 @@
 
 | 项 | Botzone | 本平台 |
 |----|---------|--------|
-| 进程模型 | 默认每回合启停；可选长时运行 | **整场对局长驻**（不每回合重启），Botzone 信封一行一条 JSON |
+| 进程模型 | 默认每回合启停；可选长时运行 | **默认 Traditional 每决策重启**；显式 LongRunning 握手后整场长驻 |
 | CPU / 内存 | 1 核 / 默认 256MB | Docker `--cpus=1` / `--memory=512m` |
 | 决策时限 | 默认 1s/回合（首回合×2） | holdem / gomoku 默认 60s/决策（可配）；Pencil 固定 900s/方累计（含人类局） |
 | 游戏 | 站内多游戏 | `holdem` / `gomoku` / `pencil` |
-| 德州协议 | 信封 + 裸整数 response + raise=增量 | **完全照 Botzone**（信封 + 裸整数 `-1/-2/0/>0` + raise=额外量；固定 70 手） |
-| 棋类协议 | 聚合 `requests`/`responses` | 每步推送对方上一手，Botzone 信封 + `{x,y}` 落子（完全照 Botzone） |
+| 德州协议 | 信封 + 裸整数 response + raise=增量 | 标准 11 字段与动作编码兼容；本平台固定 70 手 |
+| 棋类协议 | 聚合 `requests`/`responses` | Botzone 风格信封 + `{x,y}` 落子；本平台增加 `me`/`scores` 状态字段 |
 
 上传 Bot 时请选择正确的 **游戏类型**；挑战与排行榜按 `game_id` 过滤。
 

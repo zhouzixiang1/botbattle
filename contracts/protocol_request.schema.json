@@ -27,6 +27,7 @@
       "items": {
         "type": "object",
         "required": ["round", "player_id", "action", "action_type"],
+        "additionalProperties": false,
         "properties": {
           "round": { "type": "integer", "minimum": 0, "maximum": 3 },
           "player_id": { "type": "integer", "enum": [0, 1] },

@@ -13,7 +13,7 @@
 
 ## 2. 里程碑与开发历程
 
-项目经多个阶段交付。早期 **#1–#27** 奠定功能与文档基线；其后继续合并全面解耦、canvas 观赛、安全日志、赛事修复等（见 §2.4）：
+项目经多个阶段交付。早期 **#1–#27** 奠定功能与文档基线；其后继续合并游戏契约收敛、canvas 观赛、安全日志、赛事修复等（见 §2.4）：
 
 ### 2.1 平台功能建设（15 PR：#1–#15）
 对标 Botzone 全量补齐平台功能：
@@ -54,7 +54,7 @@
 ### 2.4 后续演进（#27 之后，节选）
 | 主题 | 说明 |
 |------|------|
-| 全面解耦 | `games/` GameSpec 注册表、per-game matches 表；旧 `engine/`/`protocol/`/`_compat/` shim **已删除**，真实现全在 `games/` |
+| 契约解耦 | `games/` GameSpec 注册表、per-game matches 表；赛制/编排主流程不按游戏名分支，具体适配仍在各游戏包与前端视图 |
 | canvas 观赛 | 三游戏 canvas + GSAP；统一 MatchViewer |
 | 安全与日志 | access/audit 三文件日志、限流与审计埋点 |
 | 赛事修复 | 瑞士/淘汰多轮推进等（赛事压测发现） |
@@ -70,14 +70,14 @@
 |------|------|
 | 后端代码 | `bzplat/backend` 当前 66 个非测试 `.py`（含 `games/`，以 `rg --files` 为准） |
 | API 路由 | **120 个声明**（api_routes 105 含 WS/SSE + auth 13 + health 1 + API 404 fallback 1） |
-| 数据库表 | **29** 张 + **17** 索引（`schema.py`；per-game 索引由 `_migrate` 循环建） |
+| 数据库表 | **30** 张 + **36** 个具名索引（全新初始化结果；per-game 表/索引由 `_migrate` 模板补齐） |
 | 游戏架构 | `games/` 注册表 + 3 自包含子包（shim 已删，真实现全在 games/） |
 | 前端组件 | 26 个 shadcn 共享原语 |
 | 前端页面 | **21** 个 lazy 页面模块（含 admin 壳）；21 条业务 `<Route>` + fallback（/watch 与 /arena 旧路径已删） |
 | 自动化测试 | 后端 **80 个测试模块 / 812 条 collected**；当前目标提交全量 `812 passed`（1 warning，165.16s） |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
 | 浏览器验收 | Playwright **4 个 spec / 21 条 collected**；当前目标提交 Chromium 全量 `21 passed`（2.3m）；另有 browser/screenshot 辅助脚本 |
-| 合并 PR | 早期 27 个里程碑后继续演进（全面解耦、canvas 重写、安全日志、赛事修复等） |
+| 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
 
@@ -89,7 +89,7 @@
 | 规则/协议文档 | ✅ | `wiki/` |
 | 协议 JSON Schema | ✅ | `contracts/` |
 | 样例 Bot + 参考裁判 | ✅ | `samples/` |
-| 测试套件 | ✅ 80 模块 / 812 条，当前目标提交全量 `812 passed`（1 warning，165.16s） | `bzplat/backend/tests/` |
+| 测试套件 | ✅ 81 模块 / 818 条，当前工作树全量 `817 passed / 1 skipped`（未构建前端 dist 的 SPA catch-all 用例；1 warning，164.66s） | `bzplat/backend/tests/` |
 | 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
 | 浏览器验收 | ✅ 4 spec / 21 条 Chromium 全量通过（2.3m；Console/Network/SSE/WS 与三视口） | `bzplat/frontend/e2e/` |
@@ -99,7 +99,7 @@
 
 | 经验 | 说明 |
 |------|------|
-| **核心解耦契约的价值** | `RoundResult/MatchResult` 让赛制/编排层对三游戏通用，新增游戏零改动——这是架构最成功的设计 |
+| **核心游戏契约的价值** | 公共结果字段与 `GameSpec` 让赛制/编排主流程对三游戏通用；新增游戏仍需注册后端 spec、元数据与前端视图，但主流程不新增游戏名分支 |
 | **大规模压测暴露真实 bug** | pencil 引擎 `n_dots=None` 崩溃是压测暴露的生产 bug（非测试环境复现） |
 | **shadcn CLI 字面 @ 目录坑** | `npx shadcn add` 生成到字面 `@/` 目录而非 `src/`，需手动迁移 |
 | **挑战限流是压测瓶颈** | 同 IP 共享限流使顺序压测极慢，加 `--no-throttle` + `BZ_RATE_LIMIT=0` 解决 |
@@ -116,7 +116,7 @@
 | `.env` 敏感信息 | SMTP 明文密码已提交历史 | 建议轮换凭据 + `git filter-branch` 清理历史 + 确认 `.gitignore` |
 
 ### 6.2 维护计划
-- **新增游戏**：按 `AGENTS.md` 与 `doc/DESIGN.md` §2.3 / `doc/DEVELOPMENT.md` §5.1（GameSpec 注册表，**禁止**通用层 if-chain），赛制/编排层零改动。
+- **新增游戏**：按 `AGENTS.md` 与 `doc/DESIGN.md` §2.3 / `doc/DEVELOPMENT.md` §5.1 接入 GameSpec/前端视图/注册常量，**禁止**赛制与编排主流程新增游戏名分支。
 - **文档同步**：改代码时按 `AGENTS.md` 文档规范同步 `doc/` 或 `wiki/`。
 - **测试维护**：新增功能/行为变更须在 `bzplat/backend/tests/` 加用例；架构改动同步契约测试；定期跑 `load_test.py`，核心用户流程优先维护 `frontend/e2e/` Playwright 回归。
 - **日志监控**：`logs/app.log` + `access.log` + `audit.log` + admin 日志 Tab；Bot 崩溃看 stderr 末尾。

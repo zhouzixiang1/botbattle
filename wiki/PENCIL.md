@@ -52,31 +52,25 @@ Response：
 {"x": Number, "y": Number}
 ```
 
-### 状态恢复（Python 样例逻辑）
+### Traditional 状态恢复（样例逻辑）
 
 ```python
-for i in range(len(all_requests) - 1):
-    curr_player = 1 - curr_player
-    if requests[i].x != -1:
-        do_action(requests[i].x, requests[i].y)
-    curr_player = 1 - curr_player
-    if responses[i].x != -1:
-        do_action(responses[i].x, responses[i].y)
+board = make_empty_board()
+for req in envelope["requests"]:       # 对手已经占过的边（含当前 request）
+    mark_used(req["x"], req["y"])
+for resp in envelope["responses"]:     # 自己过去占过的边
+    mark_used(resp["x"], resp["y"])
 
-lat_req = all_requests[-1]
-curr_player = 1 - curr_player
-if lat_req["x"] != -1:
-    opp_should_continue = do_action(lat_req["x"], lat_req["y"])
-curr_player = 1 - curr_player
-if lat_req["pass"] == 1:
+current = envelope["requests"][-1]
+if current["pass"] == 1:
     resp = (-1, -1)
 else:
     resp = choose_legal_edge()
 ```
 
-## 本平台长驻行协议（完全照 Botzone）
+## 本平台双模式行协议
 
-请求信封（Traditional 完整历史 / LongRunning 单 request）：
+平台默认 Traditional：每次重启进程并发送完整 `requests[]/responses[]`。显式选择 LongRunning 后，首回合发送完整历史；Bot 响应并输出标准握手后，后续发送单 request：
 
 ```json
 {"request":{"x":3,"y":4,"pass":0,"me":0,"scores":[1,0]}}
@@ -91,7 +85,7 @@ else:
 
 响应信封：`{"response":{"x":5,"y":4}}`；pass 回合：`{"response":{"x":-1,"y":-1}}`。
 
-完全遵循 Botzone 标准（信封 + `{x,y}` 落子）。详见 [协议规范](#/wiki?slug=protocol)。
+信封与 `{x,y}` 落子兼容 Botzone；`me`、`scores` 是本平台附加状态字段。LongRunning 未握手时平台最多等待 1 秒，然后在同一进程继续发送完整历史作兼容回退；这不等于 Traditional 重启。详见 [协议规范](#/wiki?slug=protocol)。
 
 ### 连走时序（与 Botzone 对齐）
 
@@ -120,7 +114,13 @@ def _box_completed(board, bx, by):
 
 ## 样例 Bot
 
-仓库：`samples/pencilbot.py`；裁判自测见 [`samples/judges/`](../samples/judges/)。完整样例亦见 `refs/botzone/Pencil.html`。
+仓库同时提供：
+
+- `samples/pencilbot.c`：可编译的 C 源码；正确重放 Traditional 完整历史，并支持 LongRunning 握手与增量 request。
+- `samples/pencilbot.py`：便于阅读和本地调试的等价 Python 源码，`.py` 文件不能直接上传。
+- `samples/pencilbot_linux_amd64`：执行 `bash samples/build_sample.sh` 后生成的可上传 Linux ELF。上传时游戏选择 `pencil`，Traditional（默认）或 LongRunning 均可。
+
+裁判自测见 [`samples/judges/`](../samples/judges/)。
 
 ## 默认赛制模板
 
@@ -135,4 +135,4 @@ def _box_completed(board, bx, by):
 
 1. https://botzone.org.cn/game/Pencil  
 2. https://wiki.botzone.org.cn/index.php?title=Pencil  
-3. `refs/botzone/Pencil.html`、`Pencil_game.html`
+3. 仓库样例与服务端裁判源码（见上文链接）

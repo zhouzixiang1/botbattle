@@ -12,7 +12,7 @@
 - Windows PE Bot：公共镜像 `scottyhardy/docker-wine:stable`（`BZ_WINE_BOT_IMAGE`）。
 - 测试无 Docker 时：`BZ_BOT_LOCAL=1` 直接本机跑 ELF（降级，不施加容器限制）。
 
-每场对局起 2 个容器（双方各一），完整 `docker run` 加固参数（Linux 路径）：
+LongRunning 对局会同时保留双方各一个容器；Traditional 则在每个决策点启动当前行动方的容器并在响应后销毁。两种路径都使用以下 `docker run` 加固参数（Linux 路径）：
 
 | 参数 | 作用 |
 |------|------|
@@ -40,7 +40,7 @@ tmpfs，`/tmp` 是另一个隔离 tmpfs，对局结束后一并销毁。
 - 人类对战的 `human_action_timeout` 默认仍为 **120 秒 / 回合**，用于等待 WebSocket 落子的内层保护；Pencil 同时受外层 900 秒累计棋钟约束，以先到的限制为准。
 - 棋钟成功决策写入 `time_used {seat,used,remaining,budget}`，耗尽写入 `time_out {seat,used,budget}`；事件进入回放/SSE，点格棋对局页据此展示双方剩余时间和「超时」标记。
 - **崩溃语义**（详见 [对局](#/wiki?slug=guide)）：Bot 在对局**中途**崩溃由引擎计分判负，Bot-vs-Bot 与 human 都持久化为 `completed + reason=crash`；Bot-vs-Bot 启动失败由编排层统一结算为 `completed + technical_loss`（challenge/table/ladder/contest 一致），只有 human 的启动失败记为 `aborted`（`bot_crashed`）。Docker 返回 125（daemon／镜像／挂载／容器 runtime 故障）恒属于**平台沙箱故障**。126/127 同时可能是 Bot 自己的退出码，只有在 Bot `exec` 前由平台 wrapper 产生本会话不可伪造的 runtime/entrypoint 诊断时才归因平台；普通 Bot stderr 不会豁免技术负。平台故障对局记为 `aborted + platform_error`、不评分；上传在 worker 中用专用 runner 对隐藏临时文件预检，成功后才发布版本。平台故障返回 503，既不修改原激活版本，也不阻塞主事件循环。
-- 本平台采用**整场对局长驻**进程（stdin/stdout 行协议），因此单步默认或 Pencil 累计预算均高于 Botzone 的 1s/回合。
+- 本平台默认 Traditional（每个决策点重启进程）；显式选择 LongRunning 并完成握手后才整场长驻。两种模式使用相同 stdin/stdout 单行 JSON 信封。
 
 ### Botzone 语言时限倍率（对照）
 
@@ -56,7 +56,7 @@ tmpfs，`/tmp` 是另一个隔离 tmpfs，对局结束后一并销毁。
 
 ## 并发半负载
 
-每场对局 = **2 个 bot 容器 × 1 核**。
+容量按最保守的 LongRunning 情况估算：每场对局最多同时保留 **2 个 Bot 容器 × 1 核**。Traditional 实际并发容器数通常更低，但不据此抬高平台硬上限。
 
 ```
 cpu_count = os.cpu_count()          # 真实核数，禁止伪造
@@ -75,7 +75,7 @@ effective = min(admin_requested, ceiling)
 | CPU | 评测机单核 | Docker `--cpus=1` |
 | 内存 | 默认 256MB | **512MB** |
 | 决策时限 | 默认 1s/回合（首回合×2） | holdem / gomoku 默认 **60s/决策**（可配）；Pencil **900s/方累计**（固定，含人类局） |
-| 进程模型 | 传统每回合启停，或可选长时运行 | **整场长驻**行协议 |
+| 进程模型 | 传统每回合启停，或可选长时运行 | **默认 Traditional**；可选 LongRunning |
 
 ### 运行模式示意
 
@@ -87,7 +87,7 @@ Botzone「长时运行」模式：
 
 ![Botzone 长时运行模式](/wiki-assets/BotRunMode_LongRunning.png)
 
-本平台对齐长驻进程思路，但协议为紧凑行 JSON，详见[协议规范](#/wiki?slug=protocol)。
+本平台两种模式都支持。LongRunning 首响应后固定探测握手最多 1 秒；未握手时在同一进程发送完整历史作兼容回退，但不等于 Traditional 的逐回合重启。详见[协议规范](#/wiki?slug=protocol)。
 
 ## 德州牌型参考
 

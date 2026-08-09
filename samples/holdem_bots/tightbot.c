@@ -15,39 +15,25 @@ static unsigned long next_rand_simple(void) {
     return _ts >> 16;
 }
 
-/* 取手牌第一张的 poker rank（card_int//4 + 2）。粗略解析 my_cards 数组首元素。 */
-static long first_hole_rank(const char *s) {
-    const char *p = strstr(s, "\"my_cards\"");
-    if (!p) return -1;
-    p = strchr(p, '[');
-    if (!p) return -1;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    long c = atol(p);
-    return c / 4 + 2; /* poker 点数 2..14 */
-}
-
 int main(void) {
     char *line = (char *)malloc(MAXLINE);
     if (!line) return 1;
     while (fgets(line, MAXLINE, stdin)) {
-        long to_call = req_long(line, "to_call", 0);
-        long chips = req_long(line, "my_chips", 0);
-        long sb = req_long(line, "street_bet", 0);
-        long r1 = first_hole_rank(line);
+        HoldemState s = holdem_state(line);
+        long r1 = best_hole_rank(line);
         /* 底牌 rank ≥ 10（10/J/Q/K/A）才玩。 */
         int strong = (r1 >= 10);
-        if (to_call == 0) {
+        if (s.facing_allin) {
+            emit_int(strong ? -2 : -1);
+        } else if (s.to_call == 0) {
             /* 可 check：强牌偶尔加注，否则 check（绝不主动 fold 免费牌） */
-            if (strong && (next_rand_simple() % 3 == 0)) {
-                long rt = sb + 100;
-                if (chips >= 100) emit_int(raise_delta(rt, sb));
-                else emit_int(0);
-            } else emit_int(0);  /* check */
+            if (strong && s.can_raise && (next_rand_simple() % 3 == 0))
+                emit_int(s.min_raise_delta);
+            else emit_int(0);
         } else {
             /* 需跟注：强牌 call，弱牌 fold（筹码不足也 fold） */
-            if (strong && chips >= to_call) emit_int(0);  /* call */
-            else emit_int(-1);                            /* fold */
+            if (strong && s.chips > s.to_call) emit_int(0);
+            else emit_int(-1);
         }
     }
     free(line);

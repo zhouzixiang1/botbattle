@@ -6,7 +6,7 @@
 
 ## 0. 与 Botzone Bot 模型对照
 
-本平台**完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准**，你的 Botzone Bot 可直接上传运行：
+本平台兼容 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 的信封、运行模式与动作编码。只依赖已列标准字段的 Bot 可迁移；固定规则、资源限制和可选字段能力以本站文档为准：
 
 | 项 | Botzone | 本平台 |
 |----|---------|--------|
@@ -17,16 +17,18 @@
 | 长时运行握手 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
 | 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB；holdem/gomoku 默认 60s/决策（可配），Pencil 固定 900s/方累计 |
 
-> 差异：本平台 Bot 进程**整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动即可运行（见 [协议](#/wiki?slug=protocol) §10）。手数**固定 70**（Botzone 文档 50，规则钉死不可配）。
+> 本平台默认 **Traditional**：每个决策点重启进程并发送完整历史。显式选择 LongRunning 后进程才整场长驻。德州手数固定 **70**（Botzone 文档默认 50）。
 
 ### 选择运行模式
 
 上传 Bot 时需选择运行模式：
 
-- **Traditional（传统）**：每个决策点收到**完整历史信封** `{"requests":[...],"responses":[...]}`，Bot 自己重放重建状态。适合无状态、易调试的 Bot。
-- **LongRunning（长驻，默认推荐）**：首回合收到完整历史信封，之后只收到单条 `{"request":...}`。Bot 须自维护内存状态。首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 握手。适合有昂贵初始化（如神经网络）的 Bot。
+- **Traditional（传统，默认）**：每个决策点进程重启并收到**完整历史信封** `{"requests":[...],"responses":[...]}`，Bot 自己重放重建状态。适合无状态、易调试的 Bot。
+- **LongRunning（长驻，显式选择）**：首回合收到完整历史信封，握手成功后才改收单条 `{"request":...}`。Bot 须自维护内存状态。适合有昂贵初始化（如神经网络）的 Bot。
 
-棋类请分别阅读 [Gomoku](#/wiki?slug=gomoku)、[Pencil](#/wiki?slug=pencil)；样例：`samples/callbot.py`、`samples/gomokubot.py`、`samples/pencilbot.py`。
+LongRunning 首个响应后，平台最多等待 1 秒读取握手；没收到时会在**同一进程**继续发送完整历史作兼容回退。这不等于 Traditional 的逐回合重启，状态型 Bot 不要依赖回退。
+
+棋类请分别阅读 [Gomoku](#/wiki?slug=gomoku)、[Pencil](#/wiki?slug=pencil)。`samples/*.py` 是便于阅读和本地调试的**源码**，不能把 `.py` 文件直接上传；可直接上传的是构建脚本产出的 ELF。
 
 ## 1. 核心思路
 
@@ -37,7 +39,7 @@
 3. 往 stdout 写**一行 JSON** 信封 `{"response": <裸整数>}`（德州：`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量）。
 4. **立即换行并刷新缓冲区**，平台才能立刻读到。
 5. LongRunning 模式下，首回合响应后再输出一行 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 声明长驻。
-6. 不要退出进程——下一个决策点平台会再写一行，循环往复直到对局结束。
+6. LongRunning 握手成功后不要退出进程；Traditional 每个决策点都会启动一个新进程。
 
 用伪代码表示就是：
 
@@ -59,6 +61,7 @@ for 每一行 stdin:
 import json, sys
 
 def main():
+    first_response = True
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -76,6 +79,9 @@ def main():
             req = reqs[-1] if reqs else {}
         # callbot：永远 call/check（response=0）
         print(json.dumps({"response": 0}), flush=True)
+        if first_response:
+            print(">>>BOTZONE_REQUEST_KEEP_RUNNING<<<", flush=True)
+            first_response = False
 
 if __name__ == "__main__":
     main()
@@ -85,7 +91,7 @@ if __name__ == "__main__":
 
 - `flush=True`（或 `sys.stdout.flush()`）**必不可少**——Python 默认会缓冲 stdout，不刷新平台就读不到你的响应，最终超时判 fold。
 - 解析失败时回一条 `{"response":-1}` 比让进程崩溃更安全。
-- LongRunning 模式下，首回合响应后记得输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`（否则平台会等待握手行直到超时；详见 [协议](#/wiki?slug=protocol) §1）。
+- LongRunning 模式下，首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`。未握手不会让本次动作超时，但会增加最多 1 秒探测等待，并进入同进程完整历史的兼容回退。
 - 德州 `response=0` 既是 call 也是 check——平台按当前下注合法性自动判定为跟注或过牌。
 
 ## 3. 最小 Bot（C）
@@ -111,9 +117,14 @@ static long peek_long(const char *s, const char *key) {
 int main(void) {
     char *line = (char *)malloc(4000000);  /* 完整历史可能很长 */
     if (!line) return 1;
+    int first_response = 1;
     while (fgets(line, 4000000, stdin)) {
         /* callbot：永远 call/check（Botzone 裸整数 0） */
         fputs("{\"response\":0}\n", stdout);
+        if (first_response) {
+            fputs(">>>BOTZONE_REQUEST_KEEP_RUNNING<<<\n", stdout);
+            first_response = 0;
+        }
         fflush(stdout);                          /* 关键！必须刷新 */
     }
     free(line);
@@ -142,10 +153,12 @@ chmod +x mybot
 file mybot      # 确认输出 "ELF ... x86-64"
 ```
 
-仓库提供一键脚本：
+仓库提供一键脚本，同时构建德州与点格棋的可上传 ELF：
 
 ```bash
-samples/build_sample.sh        # 产出 samples/callbot_linux_amd64
+bash samples/build_sample.sh
+# 产出 samples/callbot_linux_amd64（holdem）
+#      samples/pencilbot_linux_amd64（pencil）
 ```
 
 ### 4.2 Windows PE（经 Wine 容器执行）
@@ -174,6 +187,8 @@ x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
    - Mach-O（`FEEDFACE / FEEDFACF` 等）→ **拒绝**。
 3. 同一个 Bot 名字可多次上传新版本，平台保留版本历史并记录校验和、大小、架构。
 4. 上传后记得在 Bot 设置里把它**设为活跃（active）**，否则无法参赛。
+
+上传时会做一次轻量响应预检，但当前预检只验证单个游戏 payload/响应形状，未按所选 `runtime_mode` 执行完整 Botzone 信封或多回合重放。预检通过不等于能完成整场；请先按第 7 节本地调试，并用正确运行模式创建挑战赛验证。
 
 ## 6. 沙箱安全基线
 
@@ -205,7 +220,7 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 | response 不是裸整数 | 判 fold（协议违规） | 德州 response 必须是 `-1/-2/0/>0` 整数 |
 | `raise` 的正整数当成「加注到总额」 | 加注额不对被判 fold | 正整数是**额外下注筹码**（= 目标总额 − 本街已投） |
 | `raise` 换算后总额低于最小加注 | 判 fold | 目标总额 ≥ 上次下注的 2 倍 |
-| LongRunning 首回合没输出握手串 | 平台等待握手行直到超时 | 首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` |
+| LongRunning 首回合没输出握手串 | 首个响应后额外等待最多 1 秒，随后在同一进程发送完整历史；状态型 Bot 可能错乱 | 首回合响应后立即输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` |
 | 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负；Bot-vs-Bot 启动失败 → `completed` + `technical_loss`；人类对战启动失败 → `aborted` | 保持进程存活，出错就回安全默认动作（扑克 `{"response":-1}`） |
 | 上传 macOS 二进制 | 被拒绝 | 交叉编译为 Linux ELF |
 | 依赖联网 / 文件写入 | 调用失败 | 纯计算，只用 stdin/stdout |

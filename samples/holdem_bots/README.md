@@ -1,7 +1,7 @@
 # 德州扑克多策略样例 Bot（Botzone 标准协议）
 
 8 种不同策略的 holdem Bot（用于赛事功能验证：策略多样性让对局结果非全是平局，
-能真实排名）。**完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准协议**：
+能真实排名）。它们使用兼容 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 的核心协议：
 Botzone 信封（Traditional 完整历史 / LongRunning 单 request + keep_running 握手），
 德州 response 裸整数（`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量），
 牌编码 0-51（`%4` 花色 0♥1♦2♠3♣）。详见 [协议规范](../../wiki/PROTOCOL.md)。
@@ -45,5 +45,6 @@ bash samples/holdem_bots/gen.sh
 响应信封（Bot → 平台）：`{"response": <裸整数>}`
 - `-1`=fold `-2`=allin `0`=call/check `>0`=raise **额外下注筹码**（= 目标总额 − 本街已投）
 
-LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`（本平台默认长驻，
-Bot 不输出握手串则每回合都收到完整历史信封——Traditional 等效）。
+这些样例同时支持两种模式，并在首回合响应后输出 LongRunning 握手。本平台默认
+Traditional（逐决策重启）；选择 LongRunning 时握手后改收单 request。未握手的兼容
+回退是在同一进程发送完整历史，不等于 Traditional 重启。

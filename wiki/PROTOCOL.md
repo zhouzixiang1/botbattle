@@ -1,6 +1,6 @@
-# Botzone 标准对局协议
+# Botzone 兼容对局协议
 
-平台与你的 Bot 之间通过 **标准输入 / 标准输出** 的「单行 JSON」协议通信，**完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准**：平台每个决策点向 Bot 的 stdin 写**一行** JSON 信封，Bot 从 stdout 回**一行** JSON 信封。
+平台与你的 Bot 之间通过 **标准输入 / 标准输出** 的「单行 JSON」协议通信。信封、运行模式和德州动作编码兼容 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot)；本平台另有固定 70 手、棋类 `me` / `scores` 等明确列出的扩展。
 
 > 本页是协议的**权威规范**，所有字段与语义均与平台引擎实现逐一对应，并与 Botzone 官方文档对齐。Bot 开发入门请见 [Bot 开发指南](#/wiki?slug=bot-dev)。棋类协议见第 11 节。
 
@@ -8,17 +8,20 @@
 
 Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 
-### Traditional（传统模式）
+### Traditional（传统模式，平台默认）
+- 平台在**每个决策点重启 Bot 进程**。
 - 平台**每个决策点**都向 Bot 发送**完整历史信封** `{"requests":[...], "responses":[...], ...}`。
 - Bot 自己重放 `requests[]` / `responses[]` 重建状态，最后一条 `requests[-1]` 是当前决策。
 - Bot 回 `{"response": <决策>}`。
 - 适合：无状态、易调试的 Bot（每次从历史重建）。
 
-### LongRunning（长驻模式，平台默认）
+### LongRunning（长驻模式，需上传时显式选择）
 - 进程**整场长驻**不重启。**首回合**仍发完整历史信封（同 Traditional）；Bot 响应后**额外输出一行握手串** `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`（前后各带换行）声明长驻。
 - 之后每个决策点，平台只发**单条 request 信封** `{"request": <当前决策>}`（不再重放历史）——Bot 须自行在内存里维护状态。
 - 适合：有昂贵初始化（如神经网络加载）的 Bot，避免每回合重启开销。
 - 握手后 `data` / `globaldata` / `debug` 字段失效。
+
+平台在首个响应后最多等待 **1 秒**读取握手。未收到正确握手时，为兼容误标为 LongRunning 的无状态 Bot，平台保留当前进程并继续发送完整历史信封。这个「同一进程 + 完整历史」是兼容回退，**不等于** Traditional 的逐回合重启；会维护进程内状态的 Bot 不应依赖回退。
 
 ```
 平台 ──stdin (一行 JSON 信封)──►  Bot
@@ -47,7 +50,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 {"response": <裸整数>}
 ```
 - `response` 是必填字段（德州扑克的决策，见第 3 节）。
-- 可选 `debug`（写日志，≤1KB）、`data`（存到下一回合，≤100KB）、`globaldata`（跨对局持久，≤100KB）。LongRunning 握手后这些字段失效。
+- 解析器允许响应携带 `debug` / `data` / `globaldata` 以兼容标准信封，但当前平台只消费 `response`：这些可选字段**不会被记录、透传或持久化，也未实施 Botzone 的长度上限**。不要依赖它们保存状态；Traditional 从完整历史重建，LongRunning 用进程内存维护状态。
 
 ## 3. 德州扑克响应（裸整数）
 
@@ -71,7 +74,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 
 ### 简易决策
 
-最小可用 Bot 永远回 `{"response":0}` 即可（`0` 是 call/check 歧义码，平台按当前合法性自动判定为跟注或过牌）——这正是仓库 `samples/callbot.c` 的全部逻辑。需要更精细决策的 Bot 可从 `history`（本手动作序列）+ `my_chips` 重放出当前需跟注的额度，与 Botzone 标准模型完全一致（不再下发 `to_call` 等平台扩展字段）。
+最小可用 Bot 永远回 `{"response":0}` 即可（`0` 是 call/check 歧义码，平台按当前合法性自动判定为跟注或过牌）——这正是仓库 `samples/callbot.c` 的决策逻辑。需要更精细决策的 Bot 可从 `history`（本手动作序列）+ `my_chips` 重放出当前需跟注的额度；平台不再下发 `to_call` 等扩展字段。
 
 ## 4. 请求负载字段（德州扑克）
 
@@ -91,7 +94,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 | `total_win_chips` | int[2] | 双方**累计净筹码**（各手 deltas 之和） |
 | `total_win_games` | int[2] | 双方累计赢手数 |
 
-> **严格对齐 Botzone**：请求负载**恰好**这 11 个官方字段，不多发任何平台扩展字段（不再下发 `to_call` / `sb` / `bb` / `opp_chips` 等）——标准 Botzone Bot 可直接跑，需要跟注额/盲注等信息的 Bot 从 `history` + `my_chips` 自行重放推导（与 Botzone 标准模型一致）。
+> **德州请求字段**：请求负载恰好是上述 11 个字段，不再下发 `to_call` / `sb` / `bb` / `opp_chips` 等平台扩展字段。Bot 需要从 `history` + `my_chips` 自行重放推导跟注额与盲注状态。
 
 > **盲注已扣除**：请求到达时本手盲注已从 `my_chips` 扣除并进入底池。例如首手你是 SB，`my_chips` 会是 `19950`（20000−50）。
 
@@ -193,7 +196,7 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 // Bot 回 {"response":0}  → check（翻牌）
 ```
 
-> Traditional 模式下，每个决策点都收到完整 `requests[]` 累积历史，Bot 无状态地只看最后一条即可决策。
+> Traditional 模式下，每个决策点都会重启进程并收到完整 `requests[]` / `responses[]`。无状态动作可只看最后一条；棋盘等有状态游戏必须重放完整历史。
 
 ## 8. 常见错误与处理
 
@@ -210,7 +213,7 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 
 ## 9. 与 Botzone 官方对照
 
-本平台德州扑克协议**完全遵循 Botzone TexasHoldem2p 标准**：
+本平台德州扑克的信封、11 个请求字段和动作编码遵循 Botzone TexasHoldem2p；平台规则差异如下：
 
 | 概念 | Botzone | 本平台 |
 |------|---------|--------|
@@ -222,15 +225,15 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 | 牌编码 | 0–51（`%4` 花色 0♥1♦2♠3♣） | 同左 |
 | 握手串 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
 
-**差异**：仅手数固定 70 vs 50（其余字段、计分、盲注、规则完全一致，标准 Botzone Bot 直接可跑）。资源与超时见 [Bot 开发指南](#/wiki?slug=bot-dev)。
+**已知差异**：手数固定 70、决策时限与沙箱资源由本平台配置；响应中的 `data/globaldata/debug` 当前不持久化或记录。只依赖标准 11 字段与 `response` 的 Botzone 德州 Bot 可直接迁移。资源与超时见 [Bot 开发指南](#/wiki?slug=bot-dev)。
 
 ## 10. 平台与 Botzone 的运行模型差异
 
-本平台**完全兼容 Botzone 协议**：无论你的 Bot 使用 Traditional 还是 LongRunning 模式，**Botzone 标准 Bot 无需改动即可在本平台运行**。两种模式的输入输出信封格式（见第 1–2 节）与 Botzone 完全一致。
+本平台兼容 Botzone 的 Traditional / LongRunning 信封与握手。上传时必须选择 Bot 实际实现的模式；若只依赖德州标准 11 字段与 `response`，通常无需改动。平台固定规则、超时、沙箱及未实现的可选字段语义仍以本文为准。
 
 ## 11. 棋类协议（Gomoku / Pencil）
 
-通信模型与德州相同（Botzone 信封 + 单行 JSON，见第 1–2 节）。棋类 payload 是 Botzone 标准 `{x, y}` 落子格式，信封包裹（Traditional 完整历史 / LongRunning 单 request + keep_running 握手）与德州一致。
+通信模型与德州相同（Botzone 信封 + 单行 JSON，见第 1–2 节）。棋类用 `{x, y}` 落子，并由平台增加 `me`（两款棋类）与 `scores`（Pencil）等状态字段；信封包裹与握手规则与德州一致。
 
 请求信封：`{"requests":[{x,y,...}]}` 或 LongRunning 后续 `{"request":{x,y,...}}`。
 响应信封：`{"response": {"x": int, "y": int}}`。

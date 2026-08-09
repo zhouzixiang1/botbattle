@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "BotzoneHoldemResponse",
-  "description": "Botzone 标准德州扑克响应信封。response 为裸整数：-1=fold, -2=allin, 0=call/check, >0=raise 额外下注筹码（raise delta = raise_to_total - street_bet，street_bet 为本方本街已投额）。",
+  "description": "Botzone 风格德州扑克响应信封。平台只消费 response：-1=fold, -2=allin, 0=call/check, >0=raise 额外下注筹码（raise delta = raise_to_total - 本方本街已投额）。",
   "type": "object",
   "required": ["response"],
   "properties": {
@@ -9,8 +9,8 @@
       "type": "integer",
       "description": "-1 fold / -2 allin / 0 call-check / >0 raise 额外量"
     },
-    "debug": { "type": "string", "description": "调试信息（≤1KB，写日志）" },
-    "data": { "description": "存到下一回合的数据（≤100KB；LongRunning 握手后失效）" },
-    "globaldata": { "description": "跨对局持久数据（≤100KB；LongRunning 握手后失效）" }
+    "debug": { "type": "string", "description": "兼容解析；当前平台不记录或消费" },
+    "data": { "description": "兼容解析；当前平台不透传或持久化" },
+    "globaldata": { "description": "兼容解析；当前平台不跨对局持久化" }
   }
 }

@@ -23,6 +23,7 @@ def _extract_request(envelope: dict) -> dict:
 
 
 def main() -> None:
+    first_response = True
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -34,6 +35,9 @@ def main() -> None:
             continue
         # callbot：永远 call/check（0）
         print(json.dumps({"response": 0}), flush=True)
+        if first_response:
+            print(">>>BOTZONE_REQUEST_KEEP_RUNNING<<<", flush=True)
+            first_response = False
 
 
 if __name__ == "__main__":

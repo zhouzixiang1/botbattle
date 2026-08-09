@@ -57,7 +57,7 @@ graph TB
 | 接口 | `api_routes.py` | 主 REST（105 个路由声明，含 SSE/WS）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki |
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
-| 游戏注册 | `games/` | **全面解耦的单一真相（裁判/协议分离）**：base.py（GameSpec 接口 + GameRegistry 单例 + MatchResult/RoundResult 平台契约基类[仅类型提示/测试用]）+ __init__.py（注册表单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS 模块级便捷函数）+ **`_botzone_protocol.py`（Botzone 标准信封传输层：Traditional 完整历史 / LongRunning 单 request + keep_running 握手，全游戏共享）** + _board_protocol.py（棋类共享行协议工具：Botzone `{x,y}` 落子 + 信封解析；gomoku/pencil re-export）+ 每游戏完全自包含子包 games/<game>/，**三层分离**：`<game>_judge.py`（纯裁判=游戏规则，0 平台依赖，可独立审计/复用）+ `engine.py`（适配层：裁判↔平台协议桥接，调 decide→驱动裁判→emit 事件）+ protocol.py 行协议[**三游戏均已 Botzone 化**：holdem 裸整数 response + raise delta + 牌 0-51；棋类 `{x,y}` 落子 + 信封包裹] + result.py 独立结果 + tiers.py per-game 段位 + templates.py 赛事模板 + spec.py 装配。holdem 的 Card 也在 holdem_judge.py（cards.py 已删）。GameSpec 集中声明全部固有属性，通用层经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 if game_id 分支**。 |
+| 游戏注册 | `games/` | **赛制/编排契约解耦入口（裁判/协议分离）**：base.py（GameSpec 接口 + GameRegistry）+ __init__.py（注册与便捷函数）+ `_botzone_protocol.py`（Traditional / LongRunning 信封）+ `_board_protocol.py`（棋类共享协议工具）+ 各 `games/<game>/` 子包。三层分离：`<game>_judge.py` 是 0 平台依赖的纯规则；`engine.py` 是平台适配层（会使用运行时异常契约）；protocol/result/tiers/templates/spec 封装游戏差异。赛制与编排主流程经 registry/spec 调用，不按游戏名分支；这不表示整个前后端对新增游戏零接入工作。 |
 | 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；支持 `defer_start` 的赛事两阶段创建、显式 start/discard；中途崩溃含 human 都保留 `completed + reason=crash`，Bot-vs-Bot 启动失败走 `technical_loss`，human 启动失败走 `aborted`；完成与技术判负共用评分/通知/XP 后处理）+ runner（起 Bot 进程，经 games 注册表路由协议；**`_botzone_decide` 双模式传输**：按 session.runtime_mode 选 Traditional 完整历史 / LongRunning 单 request + keep_running 握手；消费 `GameSpec.time_budget_per_side`，Bot-vs-Bot 与人类对战双方使用同一累计棋钟及 `time_used/time_out` 事件契约）+ auto_matcher（闲时自动） |
 | 赛制 | `contests/` | templates（**10 个内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板；创建时模板 `game_id` 与请求游戏强绑定，不允许用请求字段覆盖混搭）+ stages（按当前阶段/轮次生成对阵；后续轮由比赛结果逐步确定；Swiss 接收按 entry 历史统计的先手次数）+ manager（状态机 `draft→open→published→running→rest→finished`；per-contest 锁串行化报名、推进与派发；发布/开赛先在锁内复核所有报名 Bot 的 active/binary/游戏一致性；`published` 只保证当前可确定批次，pairing 冻结 Bot/版本/seed；`PairingSpec.color_first` 在持久化前落实为实际 A/B 座位，落库后统一 A=seat0；派发采用“准备 pending match→原子绑定 pairing→启动任务”，失败精确补偿；aborted 无裁决对局保留历史并将 pairing 复位 pending，不积分/不晋级；中途单侧 Bot 不可用落 completed 技术判负，双侧不可用显式阻塞；每个新 stage 的完整 pairing 批次〔版本快照/bye/排期〕与 `current_stage_idx/status` 在 Store 单事务提交，旧版遗留的未绑定下一阶段 partial 可安全替换；Swiss/KO 懒生成的每个后续整轮也经 `BEGIN IMMEDIATE` 单事务追加，锁内复核阶段游标/上一轮/目标轮，失败零 partial、并发重试不重复；启动对账保留首阶段 published 批次恢复，并补算 `finished + ready=0` 的正式榜；正式榜按 pairing 实际座位及 match winner 统计 entry 技术负，完整排名全量替换与 ready 标志同事务；已有真实进度则拒绝猜测覆盖；存在未裁决对阵时拒绝强制固化名次）+ **`scheduler`（扫描 `*_at` 到点推进）** + ranking + validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
@@ -83,9 +83,9 @@ graph LR
 
 **两层解耦**：
 
-1. **GameSpec 注册表（`games/`，全面解耦的单一真相）**：每款游戏是一个 `GameSpec` 对象，集中声明 `game_id`/`label`/`session_factory`(裁判)/`protocol`(行协议)/`default_match_params`+`validate_match_params`(配置)/`rounds_per_match`+`normalize_earnings`+`eta_for_match`(编排特化)/`judge_params`(裁判参数)/`tiers`(per-game 段位曲线)/`templates`+`default_scoring`(赛制)/`code_path`+`summary`(元信息)/`source_files`(公开裁判源码白名单)/`num_seats`/`preflight_check`(上传预检)/`build_match_plan`(duplicate 多 leg)/`time_budget_per_side`(每方累计棋钟，`None` 表示沿用通用单步超时)。通用层（编排/赛制/评分/DB）经 `registry.get(game_id)` 取 spec 调用其能力，**禁止 `if game_id == ...` 分支**——所有游戏差异封装在各自 spec。
+1. **GameSpec 注册表（`games/`，契约入口）**：每款游戏声明 `game_id`/`label`/`session_factory`/`protocol`/配置校验/计分与 ETA/裁判参数/段位/模板/源码元信息/预检/多 leg 计划/累计棋钟等。通用赛制与编排路径经 `registry.get(game_id)` 取 spec，禁止增加游戏名分支。`rounds_per_match` 与 `num_seats` 当前是契约元数据和测试约束，生产路径尚未直接消费；不能据此宣称所有字段均已运行时使用。
 
-2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。**编排层与赛制层只依赖这两个字段，绝不触碰扑克的 pot/board/holes 或棋类的棋盘**——这是赛制代码能通用于三款游戏的根本。**`winner` 在引擎内权威化**：棋类单轮取胜者；holdem 多手按累计净筹码（`final_chips`/net）比较——编排层只读 `result.winner`（+ ea/eb 平局兜底），不再有 match_end 事件三层兜底 / holdem 特例注释。`tests/test_result_contract.py` 断言各游戏 result 都满足此契约（防 drift）。
+2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。赛制代码依赖公共结果字段，不读取扑克 pot/board/holes。Holdem 的权威胜者是 `result.winner`（按累计 `final_chips`），正常结束时原始 `match_end` 事件的 `winner` 目前可能为 `null`；持久化与编排不得用该事件覆盖结果胜者。`tests/test_result_contract.py` 与 runtime 回归覆盖此约束。
 
 3. **对局配置/结果双 JSON 通路（matches 表收敛）**：对局结果详情走 `result` JSON 列（`{"hands_played":N,"deltas":[ea,eb],"net_bb":float}`）；`match_config` JSON 列保留（向后兼容 + 承载版本快照等内部键），但**游戏规则参数（手数/棋盘/点阵）已钉死固定值**，不再走 match_config 配置（曾因 hands/num_hands key 名不一致导致配置静默失效，已彻底移除配置能力）。普通挑战、天梯和人类对局即使未显式选择版本，也会在创建时把各实际 Bot 的当前激活 `bot_versions.id` 冻结进 `_bot_a/b_version_id`；排队期间上传或回滚不改变 runner 路径/runtime_mode，只有无版本行的 legacy Bot 回退 `bots.binary_path`。链路：`_run_match` 仅注入 admin judge_params（holdem 的 starting_stack/sb/bb）→ runner 透传 → session_factory 用模块常量构造 Session（忽略规则参数）；结果 `update_match(result={...})` 落 result JSON。赛事排名经 `store.db.match_deltas(m)` helper 从 `result.deltas` 取净筹码。守护：`test_tongyong_layer_no_game_branches.py` 的 AST 守护 + `test_pinned_game_config.py` 守护规则参数钉死。
 
@@ -95,19 +95,19 @@ graph LR
 
 ### 2.3 新增一款游戏的成本
 
-通用层**零改动**，仅需：
+赛制/编排主流程不增加游戏名分支，但仍需完成以下接入：
 1. 建 `games/<game>/` 子包：`<game>_judge.py`（纯规则、零平台依赖）+ `engine.py`（纯裁判与平台协议的适配层）+ `protocol.py`（行协议，棋类可 re-export `_board_protocol`）+ `result.py`（独立结果，满足鸭子契约）+ `tiers.py`（段位曲线，调 `base.tier_for_in`）+ `templates.py`（赛事模板）+ `spec.py`（装配 GameSpec，明确 `time_budget_per_side`）。`GameSpec.source_files` 默认公开前四个文件；显式覆写时仍必须包含 `<game>_judge.py`。
-2. `schema.py`：`matches_<game>` 表（FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES`/`VALID_GAME_IDS` 各加该项。
+2. `schema.py` 的 `REGISTERED_ENGINES`/`VALID_GAME_IDS` 各加该项；`Store._migrate()` 根据注册 ID 用模板自动创建同构 `matches_<game>` 表与索引。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
 4. 前端 `src/games/<game>/`：`index.ts`（GameViewSpec）+ `canvas.ts`（CanvasRenderer）+ `reducer.ts`（事件归约，对标后端 engine.py，自包含不依赖 components/）+ `src/games/index.ts` 注册一行。`RawEvent` 公共类型在 `src/games/base.ts`（对标后端 `_board_protocol.py`）。
 5. **约束**：`games/<game>/` 不得反向 import 已删的 `engine`/`_compat`/`protocol` shim 或通用层（matches/contests/store/api_routes）——`test_import_cycles.py` 源码扫描守护（forbidden 含已删 shim 作"防回退"哨兵 + 通用层全列）。通用层不得 import 具体游戏模块（经注册表）。
 6. **验证**：运行完整 `pytest`（至少覆盖 registry/result/import/通用层无游戏分支、预检与 runner 行为）+ `npm run build` + Playwright。若 `time_budget_per_side` 为正数，还须覆盖 Bot-vs-Bot 与人类双方累计/耗尽事件，并让前端 reducer 与 UI 回归验证 `time_used/time_out`；不需要累计棋钟时显式使用 `None`。
 
-**不再需要**在 `registry.run_session`/`runner._dumps`/`_loads`/`_fail_response`/orchestrator 加 `if game_id==` 分支——这是全面解耦前 6 处分散注册点的彻底消除。
+**不再需要**在 `registry.run_session`/`runner._dumps`/`_loads`/`_fail_response`/orchestrator 加 `if game_id==` 分支；这些调用点已收敛到注册表契约。
 
 ## 3. 数据库设计
 
-SQLite 单文件（默认 `botzone.db`），**29 张表**，**17** 个索引（`schema.py` 中 `CREATE INDEX`；per-game 索引由 `_migrate` 循环建）。所有常量（状态码/类型/`REGISTERED_ENGINES`/配置键名）集中在 `store/schema.py`。
+SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表**、**36** 个具名索引；per-game 表与索引由 `_migrate` 按注册表模板补齐。所有常量（状态码/类型/`REGISTERED_ENGINES`/配置键名）集中在 `store/schema.py`。
 
 ### 3.1 核心表（选录）
 

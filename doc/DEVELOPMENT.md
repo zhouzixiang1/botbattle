@@ -122,7 +122,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 
 ## 5. 模块扩展指南
 
-### 5.1 新增一款游戏（赛制/编排层零改动）
+### 5.1 新增一款游戏（赛制/编排主流程不加游戏名分支）
 
 通用层**不得**再加 `if game_id == ...` 分支。权威 checklist 与 [`AGENTS.md`](../AGENTS.md) / [`DESIGN.md`](./DESIGN.md) §2.3 一致：
 
@@ -134,9 +134,9 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
    - `tiers.py`（段位曲线，查表用 `base.tier_for_in`）
    - `templates.py`（本游戏内置赛事模板）
    - `spec.py`（装配 `GameSpec`）
-2. `store/schema.py`：新增 `matches_<game>` 表（仿现有 per-game 表，FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项。
+2. `store/schema.py` 的 `REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项；`Store._migrate()` 根据注册 ID 用同构模板创建 `matches_<game>` 表及索引，不复制静态 DDL。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动时断言 schema 与注册表 ID 集合一致）。
-4. 前端：`src/games/<game>/index.ts`（`GameViewSpec`：Board/reducer/`CanvasRenderer`/configFields）+ 在 `src/games/index.ts` 注册。
+4. 前端：`src/games/<game>/index.ts`（`GameViewSpec`：Board/kind/reduce/`CanvasRenderer`）+ 在 `src/games/index.ts` 注册；规则参数固定后已无 `configFields`。
 5. **禁止反向依赖**：`games/<game>/` 不得反向 import 已删的 `engine`/`_compat`/`protocol` shim 或通用层；通用层不得 import 具体游戏模块（`test_import_cycles.py` 源码扫描守护，forbidden 含已删 shim 作"防回退"哨兵）。
 6. 跑测试：`pytest`（含 `test_result_contract` / `test_import_cycles` / `test_game_registry` / `test_tongyong_layer_no_game_branches`）+ `npm run build`。
 

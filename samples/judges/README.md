@@ -26,5 +26,5 @@ python samples/judges/pencil_judge.py --check
 python samples/judges/holdem_judge.py
 ```
 
-裁判完整规则见 wiki：[裁判](../../wiki/JUDGE.md)、[五子棋](../../wiki/GOMOKU.md)、
-[点格棋](../../wiki/PENCIL.md)、[德州](../../wiki/TEXAS.md)。
+裁判功能说明见 [平台功能指南 · 裁判](../../wiki/GUIDE.md)，完整规则见
+[五子棋](../../wiki/GOMOKU.md)、[点格棋](../../wiki/PENCIL.md)、[德州](../../wiki/TEXAS.md)。

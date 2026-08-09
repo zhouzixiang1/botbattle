@@ -11,15 +11,13 @@ Botzone 协议（参考 https://wiki.botzone.org.cn/index.php?title=Bot）有两
   ``{"request":...}``，Bot 自行在内存里维护状态。握手后 ``data``/``globaldata``/``debug``
   字段失效。
 
-本平台默认长驻模式（进程不重启，每回合一行）——这正好对应 Botzone LongRunning，
-但**首回合也只发单 request**（我们不像 Botzone 那样冷启动重放历史）。
-因此平台对两种 Bot 的兼容方式是：
+本平台上传默认是 Traditional。两种模式的实际执行方式是：
 
-- Traditional Bot：平台每回合给它发**累积完整历史**信封（requests[]/responses[]），
-  Bot 自己重放。平台内部仍维护同一进程——对 Traditional Bot 来说每回合的 requests
-  足够它重建状态（它不依赖进程重启）。
+- Traditional Bot：平台每个决策点重启进程并发送**累积完整历史**信封，Bot 自己重放。
 - LongRunning Bot：首回合发完整历史信封，Bot 回完响应后回读握手串；之后每回合
-  发单 request 信封。
+  发单 request 信封。平台最多等 1 秒读取握手；未收到时，为兼容误标模式的无状态
+  Bot，会保留同一进程并继续发送完整历史。这个混合回退不等于 Traditional 重启语义，
+  有进程内状态的 Bot 必须正确选择模式并输出握手。
 
 各游戏不直接处理信封——它只产出/消费**游戏负载**（holdem 的 act request dict、
 棋类的 {x,y}）。本模块负责把负载包进/取出信封。各游戏的 ``protocol.py`` 调用本模块。

@@ -19,7 +19,7 @@
 | 能力域 | 说明 |
 |--------|------|
 | **Bot 上传与沙箱对战** | 支持 ELF（Linux）/ PE（Windows via Wine）二进制，自动魔数分类；Docker 硬隔离（CPU/内存/网络/文件系统全限制） |
-| **三游戏裁判引擎** | 平台内置裁判模块，Bot 通过 stdin/stdout 行协议交互；引擎与赛制/编排完全解耦 |
+| **三游戏裁判引擎** | 平台内置裁判模块，Bot 通过 stdin/stdout 行协议交互；赛制/编排主流程经统一 GameSpec 与结果契约调用，不写游戏名分支 |
 | **实时观赛** | SSE 推送对局事件流，前端棋盘/牌桌逐步可视化 |
 | **对局回放** | 完整事件录制，支持播放/暂停/步进/倍速/逐手跳转 |
 | **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场（独立并发，不计评分） |
@@ -73,7 +73,7 @@ botbattle/
 │           ├── games/             # 前端 GameViewSpec 注册表 + 每游戏 canvas/reducer
 │           ├── pages/             # 21 个 lazy 页面模块（含 admin）
 │           └── lib/               # tiers / utils / markdown 等
-├── doc/                       # 本目录：面向甲方的交付文档（6 份）
+├── doc/                       # 本目录：6 份核心交付文档 + 专项/历史文档 + INDEX
 ├── wiki/                      # 面向 Bot 玩家的规则/协议/开发指南文档
 ├── contracts/                 # 协议 JSON Schema
 ├── samples/                   # 三游戏样例 Bot 源码 + 参考裁判脚本
@@ -89,11 +89,11 @@ botbattle/
 | 交付物 | 说明 | 位置 |
 |--------|------|------|
 | **源代码** | 后端 + 前端完整源码 | `bzplat/` |
-| **交付文档**（本文档集） | 6 份甲方交付文档 | `doc/` |
+| **交付文档**（本文档集） | 6 份核心交付文档及专项/历史说明 | `doc/` |
 | **规则与协议文档** | 三游戏规则、对局协议、Bot 开发指南 | `wiki/` |
 | **测试套件** | 后端 pytest + 隔离 API/E2E 脚本 + Playwright 真浏览器回归 | `bzplat/backend/tests/`、`bzplat/frontend/e2e/`、`scripts/` |
 | **部署配置** | systemd unit + 启停脚本 | `deploy/`、`scripts/platform-ctl.sh` |
-| **样例 Bot** | 三游戏可运行的样例 Bot 源码 | `samples/` |
+| **样例 Bot** | 三游戏样例源码；德州与点格棋另含构建脚本生成的可上传 ELF | `samples/` |
 
 ## 6. 如何使用本文档
 
