@@ -322,6 +322,10 @@ def test_finish_waits_for_dispatch_then_rejects_active_match(tmp_path):
         store, contest_id, _, _ = _manager_fixture(tmp_path, status="open")
         manager = ContestManager(store, _CountingOrch())
         await manager.publish(contest_id)
+        published = store.get_contest(contest_id)
+        store.update_contest(
+            contest_id, starts_at=published["registration_closes_at"]
+        )
         blocker = _BlockingMatchOrch(store)
         manager.orch = blocker
 
@@ -353,6 +357,10 @@ def test_delete_waits_for_dispatch_then_rejects_running_contest(tmp_path):
         store, contest_id, _, _ = _manager_fixture(tmp_path, status="open")
         manager = ContestManager(store, _CountingOrch())
         await manager.publish(contest_id)
+        published = store.get_contest(contest_id)
+        store.update_contest(
+            contest_id, starts_at=published["registration_closes_at"]
+        )
         blocker = _BlockingMatchOrch(store)
         manager.orch = blocker
 

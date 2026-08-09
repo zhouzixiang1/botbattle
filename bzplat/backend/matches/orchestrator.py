@@ -257,6 +257,15 @@ class BotVersionUnavailableError(ValueError):
         self.seat = seat
 
 
+class BotCapacityError(ValueError):
+    """No global Bot execution slot is available for a new match."""
+
+    code = "bot_capacity_exhausted"
+
+    def __init__(self) -> None:
+        super().__init__("Bot 对局并发已满，请稍后重试")
+
+
 class MatchOrchestrator:
     def __init__(
         self,
@@ -270,6 +279,11 @@ class MatchOrchestrator:
         self.max_concurrent = max_concurrent
         self._sem = asyncio.Semaphore(max_concurrent)
         self._tasks: dict[str, asyncio.Task] = {}
+        # Global admission tokens.  A Bot match reserves one token before its
+        # DB row/task is created and releases it only after task cleanup (or a
+        # prepared-match compensation).  This prevents callers from piling an
+        # unbounded pending queue behind ``_sem``.
+        self._bot_admitted: set[str] = set()
         # admin abort 正在接管的 match：被取消任务的 finally 只移除 task，不提前
         # 清 SSE/触发回调；abort_match 落稳 aborted 后统一广播与回调一次。
         self._admin_aborting: set[str] = set()
@@ -317,6 +331,20 @@ class MatchOrchestrator:
         """
         self.max_concurrent = max(1, int(max_concurrent))
         self._sem = asyncio.Semaphore(self.max_concurrent)
+
+    def available_bot_slots(self) -> int:
+        """Return globally reservable Bot slots (human matches are separate)."""
+        return max(0, int(self.max_concurrent) - len(self._bot_admitted))
+
+    def _reserve_bot_slot(self, match_id: str) -> None:
+        if match_id in self._bot_admitted:
+            return
+        if self.available_bot_slots() <= 0:
+            raise BotCapacityError()
+        self._bot_admitted.add(match_id)
+
+    def _release_bot_slot(self, match_id: str) -> None:
+        self._bot_admitted.discard(match_id)
 
     def rebuild_human_concurrency(self, max_concurrent: int) -> None:
         """热更新人类对局独立并发上限。"""
@@ -526,6 +554,7 @@ class MatchOrchestrator:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         self._tasks.clear()
+        self._bot_admitted.clear()
         self._admin_aborting.clear()
         self._admin_abort_handoffs.clear()
         self._human_turns.clear()
@@ -695,29 +724,32 @@ class MatchOrchestrator:
                 mc["duplicate_seed"] = int(duplicate_seed)
 
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
-        self.store.create_match(
-            match_id,
-            bot_a_id=challenger_bot_id,
-            bot_b_id=opponent_bot_id,
-            owner_id=owner_user_id,
-            contest_id=contest_id,
-            match_type=match_type,
-            game_id=gid,
-            match_config=mc,
-        )
+        self._reserve_bot_slot(match_id)
         try:
+            self.store.create_match(
+                match_id,
+                bot_a_id=challenger_bot_id,
+                bot_b_id=opponent_bot_id,
+                owner_id=owner_user_id,
+                contest_id=contest_id,
+                match_type=match_type,
+                game_id=gid,
+                match_config=mc,
+            )
             # duplicate 落 match_seed（确定性回放/复现用）。create_match 后的
             # 两次写都必须处在同一补偿边界内；任一步失败，调用方都尚未拿到 id。
             if duplicate and duplicate_seed is not None:
                 self.store.update_match(match_id, match_seed=int(duplicate_seed))
             self.store.upsert_replay(match_id, "[]", "[]")
+            if not defer_start:
+                self.start_prepared_match(match_id)
         except Exception:
             # create_match 与 replay 分属两个 Store 事务；第二步失败时精确清理，
             # 不把一个调用方从未拿到 id 的 pending match 留成孤儿。
-            self.store.delete_match(match_id)
+            if match_id not in self._tasks:
+                self.store.delete_match(match_id)
+                self._release_bot_slot(match_id)
             raise
-        if not defer_start:
-            self.start_prepared_match(match_id)
         return match_id
 
     def start_prepared_match(self, match_id: str) -> None:
@@ -730,11 +762,18 @@ class MatchOrchestrator:
             return
         match = self.store.get_match(match_id)
         if not match:
+            self._release_bot_slot(match_id)
             raise ValueError("待启动对局不存在")
         if match.get("status") != STATUS_PENDING:
+            self._release_bot_slot(match_id)
             raise ValueError(f"仅 pending 对局可启动，当前状态: {match.get('status')}")
-        task = asyncio.create_task(self._run_match(match_id), name=f"match-{match_id}")
-        self._tasks[match_id] = task
+        self._reserve_bot_slot(match_id)
+        try:
+            task = asyncio.create_task(self._run_match(match_id), name=f"match-{match_id}")
+            self._tasks[match_id] = task
+        except Exception:
+            self._release_bot_slot(match_id)
+            raise
 
     def discard_prepared_match(self, match_id: str) -> bool:
         """删除尚未启动的 prepared match；已启动/非 pending 时拒绝删除。"""
@@ -742,10 +781,14 @@ class MatchOrchestrator:
             return False
         match = self.store.get_match(match_id)
         if not match:
+            self._release_bot_slot(match_id)
             return True
         if match.get("status") != STATUS_PENDING:
             return False
-        return self.store.delete_match(match_id)
+        deleted = self.store.delete_match(match_id)
+        if deleted:
+            self._release_bot_slot(match_id)
+        return deleted
 
     async def abort_match(self, match_id: str, *, reason: str = "admin_aborted") -> dict:
         """取消/drain 编排器拥有的任务并稳定落 aborted，终态不可倒退。"""
@@ -900,6 +943,7 @@ class MatchOrchestrator:
     async def __run_match_inner(self, match_id: str) -> None:
         m = self.store.get_match(match_id)
         if not m:
+            await self._finish_match_task(match_id, None)
             return
         bot_a = self.store.get_bot(m["bot_a_id"])
         bot_b = self.store.get_bot(m["bot_b_id"])
@@ -1500,6 +1544,7 @@ class MatchOrchestrator:
         所有对局结束路径（含 null-bot/崩溃/正常完成）统一调用。
         """
         self._tasks.pop(match_id, None)
+        self._release_bot_slot(match_id)
         if match_id in self._admin_aborting:
             return
         # P1-7：对局结束后清 SSE dict 的该 match_id 条目（直播已结束，防无界增长）。

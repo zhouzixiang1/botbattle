@@ -1233,6 +1233,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, "contest_pairings", "bot_b_version_id", "INTEGER")
         _add_col(conn, "contest_pairings", "pairing_seed", "INTEGER")
         _add_col(conn, "contest_pairings", "published_at", "TEXT")
+        duplicate_binding = conn.execute(
+            "SELECT match_id, COUNT(*) AS n FROM contest_pairings "
+            "WHERE match_id IS NOT NULL GROUP BY match_id HAVING COUNT(*)>1 "
+            "LIMIT 1"
+        ).fetchone()
+        if duplicate_binding:
+            raise RuntimeError(
+                "contest_pairings 存在重复 match_id 绑定，必须先修复: "
+                f"{duplicate_binding['match_id']} ({duplicate_binding['n']} rows)"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_contest_pairings_match_unique "
+            "ON contest_pairings(match_id) WHERE match_id IS NOT NULL"
+        )
 
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
     # 升级前的 completed 对局大多已经由旧后处理更新过 ratings，但没有 marker。
@@ -4673,6 +4687,12 @@ class Store:
             allowed = ("published", "running")
             if not contest or contest["status"] not in allowed:
                 raise ValueError("赛事状态已变化，不能绑定对局")
+            already_bound = c.execute(
+                "SELECT id FROM contest_pairings WHERE match_id=? AND id<>? LIMIT 1",
+                (match_id, pairing_id),
+            ).fetchone()
+            if already_bound:
+                raise ValueError("同一对局不能绑定到多个赛事对阵")
             cur = c.execute(
                 "UPDATE contest_pairings SET match_id=?, status='running' "
                 "WHERE id=? AND contest_id=? AND status='pending' AND match_id IS NULL",
@@ -4682,9 +4702,10 @@ class Store:
                 raise ValueError("对阵已被派发或状态已变化")
             if activate_running:
                 cur = c.execute(
-                    "UPDATE contests SET status='running' "
+                    "UPDATE contests SET status='running', "
+                    "starts_at=COALESCE(starts_at, ?) "
                     "WHERE id=? AND status='published'",
-                    (contest_id,),
+                    (_now(), contest_id),
                 )
                 if cur.rowcount != 1:
                     raise ValueError("赛事已不处于 published 状态")
@@ -4693,6 +4714,138 @@ class Store:
                     "SELECT * FROM contest_pairings WHERE id=?", (pairing_id,)
                 ).fetchone()
             )
+
+    def complete_contest_pairing_for_match(
+        self, contest_id: int, match_id: str
+    ) -> dict | None:
+        """Atomically mirror one adjudicated match into its pairing status.
+
+        The match row remains the scoring authority.  This method only updates
+        the presentation/scheduling state after proving that the exact bound
+        match belongs to the contest and is ``completed``; pending, running and
+        aborted matches can never be mislabeled as completed.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            table = self._match_table_of(c, match_id)
+            if not table:
+                return None
+            match = c.execute(
+                f"SELECT status, contest_id FROM {table} WHERE id=?", (match_id,)
+            ).fetchone()
+            if (
+                not match
+                or match["status"] != STATUS_COMPLETED
+                or match["contest_id"] != contest_id
+            ):
+                return None
+            pairings = c.execute(
+                "SELECT id FROM contest_pairings "
+                "WHERE contest_id=? AND match_id=?",
+                (contest_id, match_id),
+            ).fetchall()
+            if not pairings:
+                return None
+            if len(pairings) != 1:
+                raise RuntimeError(
+                    f"match {match_id} 绑定了 {len(pairings)} 个赛事对阵"
+                )
+            pairing = pairings[0]
+            c.execute(
+                "UPDATE contest_pairings SET status=? "
+                "WHERE id=? AND contest_id=? AND match_id=?",
+                (STATUS_COMPLETED, pairing["id"], contest_id, match_id),
+            )
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_pairings WHERE id=?", (pairing["id"],)
+                ).fetchone()
+            )
+
+    def backfill_contest_actual_start(self, contest_id: int) -> str | None:
+        """Backfill a missing starts_at from an owned, actually-started match.
+
+        Only already-started lifecycle states are eligible.  Published contests
+        intentionally keep NULL as the manual-start gate, so corrupt historical
+        pairings can never make them start automatically during reconciliation.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status, starts_at, registration_closes_at, ends_at "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if (
+                not contest
+                or contest["starts_at"]
+                or contest["status"] not in (
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                    CONTEST_FINISHED,
+                )
+            ):
+                return None
+
+            candidates: list[tuple[datetime, str]] = []
+            rows = c.execute(
+                "SELECT match_id FROM contest_pairings "
+                "WHERE contest_id=? AND match_id IS NOT NULL",
+                (contest_id,),
+            ).fetchall()
+            for row in rows:
+                match_id = row["match_id"]
+                table = self._match_table_of(c, match_id)
+                if not table:
+                    continue
+                match = c.execute(
+                    f"SELECT contest_id, status, started_at FROM {table} WHERE id=?",
+                    (match_id,),
+                ).fetchone()
+                if (
+                    not match
+                    or match["contest_id"] != contest_id
+                    or match["status"] == STATUS_PENDING
+                    or not match["started_at"]
+                ):
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(str(match["started_at"]))
+                except ValueError:
+                    logger.error(
+                        "contest %s match %s has invalid started_at",
+                        contest_id,
+                        match_id,
+                    )
+                    continue
+                candidates.append((parsed, str(match["started_at"])))
+
+            if not candidates:
+                return None
+            _, actual = min(candidates, key=lambda item: item[0])
+            actual_dt = datetime.fromisoformat(actual)
+            closes = contest["registration_closes_at"]
+            ends = contest["ends_at"]
+            try:
+                if closes and datetime.fromisoformat(str(closes)) > actual_dt:
+                    return None
+                if ends and actual_dt > datetime.fromisoformat(str(ends)):
+                    return None
+            except ValueError:
+                return None
+            cur = c.execute(
+                "UPDATE contests SET starts_at=? "
+                "WHERE id=? AND starts_at IS NULL "
+                "AND status IN (?,?,?)",
+                (
+                    actual,
+                    contest_id,
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                    CONTEST_FINISHED,
+                ),
+            )
+            return actual if cur.rowcount == 1 else None
 
     def unbind_prepared_contest_match(
         self,

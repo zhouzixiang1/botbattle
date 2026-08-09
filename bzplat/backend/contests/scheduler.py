@@ -108,6 +108,12 @@ class ContestScheduler:
         for c in snapshot[CONTEST_PUBLISHED]:
             if c["id"] in processed:
                 continue
+            # ``starts_at`` 为空表示只发布排期、等待组织者手动开始，绝不能
+            # 偷换成“报名截止后立即开打”。有计划开赛时间时也必须先过赛事
+            # 级闸门，再检查逐场 scheduled_at。
+            starts_at = c.get("starts_at")
+            if not starts_at or now < starts_at:
+                continue
             try:
                 stage_idx = int(c.get("current_stage_idx") or 0)
                 # 防御：published 态若无 pairing（publish 时 _begin_stage 异常未生成），补生成

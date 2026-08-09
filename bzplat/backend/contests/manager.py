@@ -912,7 +912,10 @@ class ContestManager:
         elif stage_idx > 0:
             base = _now()  # 后续阶段从当前时刻排期（不用最初 starts_at，已过期）
         else:
-            base = c.get("starts_at") or _now()
+            # starts_at 为空表示“发布后等待手动开始”。首阶段保持 NULL
+            # 排期，scheduler 不得把报名截止误当成开赛；手动 start 会在
+            # dispatch 前把 pending pairing 统一盖戳为 now。
+            base = c.get("starts_at")
         stagger_min = max(0, int(stage.get("round_stagger_minutes") or 0))  # 非负
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
@@ -1050,7 +1053,7 @@ class ContestManager:
         base = contest.get("starts_at") or next(
             (row.get("scheduled_at") for row in existing if row.get("scheduled_at")),
             None,
-        ) or _now()
+        )
         published_at = next(
             (row.get("published_at") for row in existing if row.get("published_at")),
             None,
@@ -1087,11 +1090,15 @@ class ContestManager:
         )
 
     @staticmethod
-    def _compute_scheduled_at(round_num: int, base: str, stagger_min: int) -> str:
+    def _compute_scheduled_at(
+        round_num: int, base: str | None, stagger_min: int
+    ) -> str | None:
         """逐场排期：scheduled_at = base + (round_num-1) * stagger_min 分钟。
 
         round_num 从 1 开始；stagger_min=0 时全用 base（同批同时）。
         """
+        if base is None:
+            return None
         if not stagger_min or round_num <= 1:
             return base
         from datetime import datetime, timedelta
@@ -1233,6 +1240,17 @@ class ContestManager:
         )
         return "completed"
 
+    def _dispatch_slot_budget(self) -> int | None:
+        """Return the orchestrator's global Bot admission budget when supported.
+
+        Legacy test doubles predate admission control; ``None`` preserves their
+        synchronous contract without weakening the production orchestrator.
+        """
+        capacity_fn = getattr(self.orch, "available_bot_slots", None)
+        if not callable(capacity_fn):
+            return None
+        return max(0, int(capacity_fn()))
+
     async def _dispatch_pending_locked(self, contest_id: int, stage_idx: int) -> None:
         """_dispatch_pending 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
@@ -1240,11 +1258,17 @@ class ContestManager:
         # finished/cancelled 的 pending pairing 不应再派发（否则产孤儿对局）。
         if not c or c["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING):
             return
+        now = _now()
         if c["status"] == CONTEST_PUBLISHED:
+            # ``starts_at`` 为空表示发布后等待组织者手动开赛；未来时间则
+            # 仍处于候场。把赛事级闸门放在 manager，而不是只依赖
+            # scheduler，避免启动对账或直接调用绕过后提前派发。
+            starts_at = c.get("starts_at")
+            if not starts_at or starts_at > now:
+                return
             self._ensure_published_pairings_locked(contest_id, stage_idx)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
-        now = _now()
         # P2 residual：阶段配置 duplicate=True 且游戏 spec 支持 build_match_plan（仅 holdem）
         # 时走复式赛制——每对阵跑 1 场 duplicate 对局（2 leg 同副牌交换座位，合并 net 判胜）。
         # 棋类（build_match_plan is None）即便误标 duplicate 也走原单 leg 路径（不破坏现有赛制）。
@@ -1258,6 +1282,7 @@ class ContestManager:
         had_progress = c.get("status") == CONTEST_RUNNING or any(
             p.get("match_id") for p in pairings
         )
+        slot_budget = self._dispatch_slot_budget()
         technical_adjudicated = False
         for p in pairings:
             if p.get("status") != "pending" or p.get("match_id"):
@@ -1280,6 +1305,12 @@ class ContestManager:
                 had_progress = True
                 technical_adjudicated = True
                 continue
+            # Keep not-yet-admitted pairings genuinely pending: no match row,
+            # no task waiting behind the semaphore, and no misleading running
+            # badge.  A completion callback or scheduler tick will fill the next
+            # free slot.
+            if slot_budget is not None and slot_budget <= 0:
+                break
             # 冻结快照已在 pairing 行；直接开打
             # duplicate=True 时用对阵 pair 派生的确定性 seed（pairing.id 稳定），
             # 保证两 leg 同副牌可复现。
@@ -1294,6 +1325,8 @@ class ContestManager:
                     ),
                 )
                 had_progress = True
+                if slot_budget is not None:
+                    slot_budget -= 1
             except Exception:
                 if not had_progress:
                     raise
@@ -1582,6 +1615,40 @@ class ContestManager:
             if m and m["status"] == STATUS_COMPLETED:
                 self.store.update_contest_pairing(p["id"], status="completed")
 
+    def _sync_completed_pairings(self, contest_id: int, stage_idx: int) -> int:
+        """Idempotently repair per-match pairing status for one stage."""
+        changed = 0
+        for pairing in self.store.list_contest_pairings(
+            contest_id, stage_idx=stage_idx
+        ):
+            if pairing.get("status") == STATUS_COMPLETED:
+                continue
+            match_id = pairing.get("match_id")
+            if not match_id:
+                continue
+            if self.store.complete_contest_pairing_for_match(
+                contest_id, match_id
+            ):
+                changed += 1
+        return changed
+
+    def _backfill_actual_start(self, contest: dict) -> bool:
+        """Repair legacy contests whose first match started with NULL starts_at."""
+        if contest.get("status") not in (
+            CONTEST_RUNNING,
+            CONTEST_REST,
+            CONTEST_FINISHED,
+        ):
+            return False
+        actual = self.store.backfill_contest_actual_start(contest["id"])
+        if actual is None:
+            return False
+        logger.warning(
+            "contest %s repaired missing starts_at from first match: %s",
+            contest["id"], actual,
+        )
+        return True
+
     def _advance_participants(self, contest_id: int, stage_idx: int) -> None:
         """根据阶段配置标记淘汰（不晋级者）。"""
         c = self.store.get_contest(contest_id)
@@ -1665,7 +1732,17 @@ class ContestManager:
                             contest_id, int(pairing.get("stage_idx") or 0)
                         )
                 return self.store.get_contest(contest_id)
-            return await self._maybe_finish_locked(contest_id)
+            if match.get("status") == STATUS_COMPLETED:
+                self.store.complete_contest_pairing_for_match(
+                    contest_id, match_id
+                )
+            result = await self._maybe_finish_locked(contest_id)
+            latest = self.store.get_contest(contest_id)
+            if latest and latest.get("status") == CONTEST_RUNNING:
+                await self._dispatch_pending_locked(
+                    contest_id, int(latest.get("current_stage_idx") or 0)
+                )
+            return result or self.store.get_contest(contest_id)
 
     async def maybe_finish(self, contest_id: int) -> dict | None:
         """对局结束回调：检查当前阶段是否完成，进入 rest 或下一阶段。
@@ -1685,6 +1762,7 @@ class ContestManager:
             return await self._maybe_auto_resume(contest_id)
 
         stage_idx = int(c.get("current_stage_idx") or 0)
+        self._sync_completed_pairings(contest_id, stage_idx)
         stages = _parse_stages(c)
         if not self._stage_done(contest_id, stage_idx):
             # 瑞士制：当前轮完成则生成下一轮
@@ -1757,6 +1835,17 @@ class ContestManager:
         所以对账须在 maybe_finish 之后显式 _dispatch_pending 死而复生的 pending pairing。
         返回处理的 contest 数。
         """
+        # 0. 修复旧版本留下的观测时间线。此步骤幂等，覆盖 finished
+        # 历史赛事以及当前 running 赛事，不改任何裁决结果。
+        for contest in self.store.list_contests():
+            self._backfill_actual_start(contest)
+            stage_indices = {
+                int(pairing.get("stage_idx") or 0)
+                for pairing in self.store.list_contest_pairings(contest["id"])
+            }
+            for stage_idx in stage_indices:
+                self._sync_completed_pairings(contest["id"], stage_idx)
+
         # 1. 清理未绑定 prepared 幽灵 + 复位已绑定死 pairing。
         reset_n = self.store.reset_dead_contest_pairings()
         if reset_n:
@@ -1847,12 +1936,15 @@ class ContestManager:
             for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
             if p.get("status") == "pending" and not p.get("match_id")
         ]
+        slot_budget = self._dispatch_slot_budget()
         for p in pending:
             unavailable = self._adjudicate_unavailable_pairing(
                 c, p, gid=gid, activate_running=False
             )
             if unavailable != "ready":
                 continue
+            if slot_budget is not None and slot_budget <= 0:
+                break
             try:
                 await self._prepare_bind_start_pairing(
                     c,
@@ -1861,6 +1953,8 @@ class ContestManager:
                     want_duplicate=want_duplicate,
                     activate_running=False,
                 )
+                if slot_budget is not None:
+                    slot_budget -= 1
             except Exception:
                 logger.exception(
                     "reconcile: contest=%s pairing=%s 重派失败，保持 pending",
