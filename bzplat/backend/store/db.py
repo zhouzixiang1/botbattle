@@ -2838,9 +2838,13 @@ class Store:
             base_from = (
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
-                "WHERE b.is_active=1"
+                "WHERE b.is_active=1 AND b.format=? AND b.os=? AND b.arch=?"
             )
-            params: list[Any] = []
+            params: list[Any] = [
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+                SUPPORTED_BINARY_ARCH,
+            ]
             if game_id:
                 base_from += " AND b.game_id=?"
                 params.append(game_id)
@@ -2914,9 +2918,14 @@ class Store:
                 "b.name AS bot_name, b.game_id, b.binary_path, b.is_active, b.is_builtin "
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE b.is_active=1 AND b.is_builtin=0 "
-                "AND b.binary_path!=''"
+                "AND b.binary_path!='' "
+                "AND b.format=? AND b.os=? AND b.arch=?"
             )
-            params: list[Any] = []
+            params: list[Any] = [
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+                SUPPORTED_BINARY_ARCH,
+            ]
             if game_id:
                 sql += " AND b.game_id=?"
                 params.append(game_id)

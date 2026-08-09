@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
+import stat as stat_module
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -53,22 +54,24 @@ def require_binary_file_integrity(
 ) -> None:
     """Validate persisted size/SHA metadata without exposing ``path`` in errors.
 
-    Empty checksum plus zero size identifies a pre-integrity historical row and
-    intentionally performs no file check.  Any supplied integrity field is
-    authoritative.  Cache identity includes device, inode, size, mtime and ctime,
-    so replacement or in-place modification cannot reuse an earlier digest merely
-    by restoring the old mtime.
+    Empty checksum plus zero size identifies a pre-integrity historical row: its
+    digest is unavailable, but the referenced file must still exist and be a
+    regular file.  Any supplied integrity field is authoritative.  Cache identity
+    includes device, inode, size, mtime and ctime, so replacement or in-place
+    modification cannot reuse an earlier digest merely by restoring the old mtime.
     """
 
     expected_checksum = str(runtime.get("checksum") or "").strip().lower()
     expected_size = int(runtime.get("size_bytes") or 0)
     if expected_size < 0:
         raise ValueError(VERSION_UNAVAILABLE_REASON)
-    if not expected_checksum and expected_size == 0:
-        return
 
     binary_path = Path(path)
     stat_before = binary_path.stat()
+    if not stat_module.S_ISREG(stat_before.st_mode):
+        raise ValueError(VERSION_UNAVAILABLE_REASON)
+    if not expected_checksum and expected_size == 0:
+        return
     signature = (
         int(stat_before.st_dev),
         int(stat_before.st_ino),

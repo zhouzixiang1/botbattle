@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
+from bzplat.backend.store import Store
 
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
@@ -26,6 +27,45 @@ def _pe_amd64() -> bytes:
 def _auth(app, username: str, password: str = "pw123456") -> dict[str, str]:
     _, token = app.state.auth.authenticate(username, password)
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_blank_legacy_metadata_is_excluded_from_every_public_selector(tmp_path):
+    """覆盖旧主库的 elf/空/空 + version unknown/空/空 真实形态。"""
+    store = Store(str(tmp_path / "blank-legacy.db"))
+    owner = store.create_user("blanklegacy", "blanklegacy@example.com", "hash")
+    bot = store.create_bot(
+        owner["id"],
+        "blank_legacy_bot",
+        display_name="Blank Legacy",
+        binary_path=str(ELF),
+        game_id="holdem",
+    )
+    store.add_bot_version(bot["id"], binary_path=str(ELF), version=1)
+    store.ensure_rating(bot["id"], game_id="holdem")
+
+    store._conn.execute("PRAGMA ignore_check_constraints=ON")
+    store._conn.execute(
+        "UPDATE bots SET format='elf', os='', arch='', is_active=1 WHERE id=?",
+        (bot["id"],),
+    )
+    store._conn.execute(
+        "UPDATE bot_versions SET format='unknown', os='', arch='' WHERE bot_id=?",
+        (bot["id"],),
+    )
+    store._conn.execute("PRAGMA ignore_check_constraints=OFF")
+    store._conn.commit()
+
+    assert bot["id"] not in {
+        row["id"] for row in store.list_bots(runnable_only=True)
+    }
+    assert bot["id"] not in {row["id"] for row in store.search_bots("blank")}
+    assert bot["id"] not in {
+        row["bot_id"] for row in store.list_leaderboard(game_id="holdem")
+    }
+    assert bot["id"] not in {
+        row["bot_id"] for row in store.least_recently_played("holdem")
+    }
+    store.close()
 
 
 def test_legacy_pe_is_owner_visible_but_never_public_or_reactivated(tmp_path):
@@ -74,6 +114,17 @@ def test_legacy_pe_is_owner_visible_but_never_public_or_reactivated(tmp_path):
     )
     store._conn.execute("PRAGMA ignore_check_constraints=OFF")
     store._conn.commit()
+    store.ensure_rating(bot["id"], game_id="holdem")
+
+    # Public ranking and the auto-match scheduler are executable selection
+    # surfaces too.  A historical PE must not appear in either, even when its
+    # stale row is still active and has a rating.
+    assert bot["id"] not in {
+        row["bot_id"] for row in store.list_leaderboard(game_id="holdem")
+    }
+    assert bot["id"] not in {
+        row["bot_id"] for row in store.least_recently_played("holdem")
+    }
 
     with TestClient(app) as client:
         owner_headers = _auth(app, "legacyowner")

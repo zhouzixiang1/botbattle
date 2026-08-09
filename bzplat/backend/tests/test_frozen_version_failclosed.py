@@ -36,18 +36,23 @@ class NeverRunner:
         raise AssertionError("失效的冻结版本不得进入 human runner")
 
 
-def _create_versioned_bots(store: Store, prefix: str, *, game_id: str = "holdem"):
+def _create_versioned_bots(
+    store: Store, tmp_path, prefix: str, *, game_id: str = "holdem"
+):
     users = [
         store.create_user(
             f"{prefix}u{i}", f"{prefix}u{i}@example.com", "hash"
         )
         for i in range(2)
     ]
+    paths = [tmp_path / f"{prefix}-frozen-{i}" for i in range(2)]
+    for path in paths:
+        path.write_bytes(b"pre-integrity historical executable placeholder")
     bots = [
         store.create_bot(
             users[i]["id"],
             f"{prefix}b{i}",
-            binary_path=f"/private/{prefix}-mirror-{i}",
+            binary_path=str(paths[i]),
             game_id=game_id,
         )
         for i in range(2)
@@ -55,7 +60,7 @@ def _create_versioned_bots(store: Store, prefix: str, *, game_id: str = "holdem"
     versions = [
         store.add_bot_version(
             bots[i]["id"],
-            binary_path=f"/private/{prefix}-frozen-{i}",
+            binary_path=str(paths[i]),
             version=1,
         )
         for i in range(2)
@@ -105,7 +110,9 @@ def test_bot_match_never_falls_back_from_invalid_frozen_version(
 
     async def exercise() -> None:
         store = Store(str(tmp_path / f"ordinary-{corruption}.db"))
-        users, bots, versions = _create_versioned_bots(store, "ordinary")
+        users, bots, versions = _create_versioned_bots(
+            store, tmp_path, "ordinary"
+        )
         runner = NeverRunner()
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
         before = _ratings(store, bots, "holdem")
@@ -170,12 +177,12 @@ def test_bot_match_never_falls_back_from_invalid_frozen_version(
                 "message": "对局所需的 Bot 版本不可用，对局已中止",
             }
         ]
-        assert "/private/" not in json.dumps(errors, ensure_ascii=False)
+        assert str(tmp_path) not in json.dumps(errors, ensure_ascii=False)
         store.close()
 
     with caplog.at_level(logging.ERROR):
         asyncio.run(exercise())
-    assert "/private/" not in caplog.text
+    assert str(tmp_path) not in caplog.text
 
 
 def test_human_match_cross_bot_version_aborts_and_releases_user(tmp_path):
@@ -184,7 +191,7 @@ def test_human_match_cross_bot_version_aborts_and_releases_user(tmp_path):
     async def exercise() -> None:
         store = Store(str(tmp_path / "human-cross-bot.db"))
         users, bots, versions = _create_versioned_bots(
-            store, "human", game_id="gomoku"
+            store, tmp_path, "human", game_id="gomoku"
         )
         runner = NeverRunner()
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
@@ -220,7 +227,40 @@ def test_human_match_cross_bot_version_aborts_and_releases_user(tmp_path):
         errors = [event for event in _drain(queue) if event.get("type") == "error"]
         assert len(errors) == 1
         assert errors[0]["reason"] == "version_unavailable"
-        assert "/private/" not in json.dumps(errors, ensure_ascii=False)
+        assert str(tmp_path) not in json.dumps(errors, ensure_ascii=False)
+        store.close()
+
+    asyncio.run(exercise())
+
+
+def test_pre_integrity_missing_file_is_rejected_before_match_creation(tmp_path):
+    """旧版本即使没有 checksum/size，也不能把缺文件延迟成 Bot 技术负。"""
+
+    async def exercise() -> None:
+        store = Store(str(tmp_path / "legacy-missing-file.db"))
+        users, bots, versions = _create_versioned_bots(
+            store, tmp_path, "legacymissing"
+        )
+        missing = versions[0]["binary_path"]
+        os.unlink(missing)
+        runner = NeverRunner()
+        orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+        before = _ratings(store, bots, "holdem")
+
+        with pytest.raises(BotVersionUnavailableError, match="version_unavailable"):
+            await orch.challenge(
+                bots[0]["id"], bots[1]["id"], users[0]["id"], game_id="holdem"
+            )
+
+        assert store.list_matches() == []
+        assert orch._tasks == {}
+        assert runner.calls == 0
+        assert _ratings(store, bots, "holdem") == before
+
+        manager = ContestManager(store, orch)
+        with pytest.raises(ValueError, match="version_unavailable"):
+            manager._version_snapshot(bots[0]["id"], bots[1]["id"])
+        assert store.list_matches() == []
         store.close()
 
     asyncio.run(exercise())
@@ -377,7 +417,9 @@ def test_contest_empty_frozen_path_aborts_and_resets_pairing_safely(tmp_path):
 
     async def exercise() -> None:
         store = Store(str(tmp_path / "contest-empty-path.db"))
-        users, bots, versions = _create_versioned_bots(store, "contest")
+        users, bots, versions = _create_versioned_bots(
+            store, tmp_path, "contest"
+        )
         organizer = store.create_user(
             "contestorg", "contestorg@example.com", "hash", role="organizer"
         )
