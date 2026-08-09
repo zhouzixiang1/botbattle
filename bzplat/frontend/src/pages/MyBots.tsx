@@ -77,7 +77,7 @@ export default function MyBots() {
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
     if (!file) {
-      setError('请选择二进制文件')
+      setError('请选择 Linux x86_64 ELF 程序文件')
       return
     }
     setBusy(true)
@@ -171,7 +171,7 @@ export default function MyBots() {
   }
 
   return (
-    <PageStub title="我的 Bot" subtitle="上传二进制 Bot（Linux ELF / Windows PE），选择对应游戏类型；macOS Mach-O 会被拒绝">
+    <PageStub title="我的 Bot" subtitle="上传 Linux x86_64 ELF Bot，并选择对应游戏与运行模式">
       {/* 桌面双栏：左=上传表单（sticky 常驻），右=筛选+列表主区；<lg 单列堆叠 */}
       <div className="lg:grid lg:grid-cols-[20rem_minmax(0,1fr)] lg:gap-6">
       <div className="lg:sticky lg:top-20 lg:self-start">
@@ -242,7 +242,7 @@ export default function MyBots() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="upload-file">二进制文件</Label>
+              <Label htmlFor="upload-file">程序文件（Linux x86_64 ELF）</Label>
               <label
                 htmlFor="upload-file"
                 className="flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent"
@@ -256,7 +256,7 @@ export default function MyBots() {
                     const f = e.target.files?.[0] ?? null
                     // 前端预校验：超过 50MB 直接拒绝（与服务端限制一致，避免无谓上传）
                     if (f && f.size > 50 * 1024 * 1024) {
-                      setError('文件过大，请上传 ≤50MB 的二进制文件')
+                      setError('文件过大，请上传 ≤50MB 的 Linux x86_64 ELF 程序文件')
                       setFile(null)
                       e.target.value = ''
                       return
@@ -267,7 +267,9 @@ export default function MyBots() {
                   className="sr-only"
                 />
               </label>
-              <p className="text-xs text-muted-foreground">Linux ELF / Windows PE，≤50MB</p>
+              <p className="text-xs text-muted-foreground">
+                仅接受 Linux x86_64 ELF，最大 50MB；Windows .exe、macOS 程序和原始 .py 文件均不支持。
+              </p>
             </div>
             {error && <ErrorMsg msg={error} />}
             <Button type="submit" disabled={busy} className="gap-1.5">

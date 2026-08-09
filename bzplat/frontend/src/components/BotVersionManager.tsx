@@ -151,7 +151,7 @@ export default function BotVersionManager({
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
     if (botId === null || !file) {
-      setError('请选择二进制文件')
+      setError('请选择 Linux x86_64 ELF 程序文件')
       return
     }
     const targetBotId = botId
@@ -250,7 +250,7 @@ export default function BotVersionManager({
             <Input id="ver-note" value={note} onChange={(e) => setNote(e.target.value)} maxLength={200} />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="ver-file">二进制文件</Label>
+            <Label htmlFor="ver-file">程序文件（Linux x86_64 ELF）</Label>
             <label
               htmlFor="ver-file"
               className="flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent"
@@ -275,6 +275,9 @@ export default function BotVersionManager({
                 className="sr-only"
               />
             </label>
+            <p className="text-xs text-muted-foreground">
+              仅接受 Linux x86_64 ELF，最大 50MB；Windows .exe、macOS 程序和原始 .py 文件均不支持。
+            </p>
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
           <Button type="submit" disabled={busy} className="gap-1.5">
