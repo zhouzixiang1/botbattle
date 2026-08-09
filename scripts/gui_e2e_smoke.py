@@ -2,14 +2,14 @@
 """GUI 端到端冒烟测试的 API 验证脚本。
 
 验证三角色（玩家/组织者/管理员）的核心业务路径在 API 层端到端通畅。
-不依赖浏览器（浏览器 GUI 登录见 E2E_TEST_REPORT.md 的 IAB 说明），
+不依赖浏览器（真实 Chromium 回归与隔离要求见 doc/TESTING.md），
 聚焦后端功能闭环与角色边界。
 
 用法（在 worktree 根目录，worktree 后端已起在 50381 且 BZ_SKIP_CAPTCHA=1）：
     python scripts/gui_e2e_smoke.py --base http://127.0.0.1:50381
 
 前置：scripts/seed_test_accounts.py 已跑（tester1/tester2 各 3 bot），
-      且已建 e2e_organizer(organizer) / e2e_admin(admin) 账号。
+      且 seed 脚本已建 qa_organizer(organizer) / qa_admin(admin) 账号。
 """
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ import json
 import sys
 import urllib.request
 import urllib.error
+
+from _qa_target import assert_qa_instance, ensure_qa_base
 
 PASS = "\033[32m✓\033[0m"
 FAIL = "\033[31m✗\033[0m"
@@ -62,10 +64,11 @@ def main() -> int:
     ap.add_argument("--base", default="http://127.0.0.1:50381")
     ap.add_argument("--player", default="tester1")
     ap.add_argument("--player-pw", default="Test1234")
-    ap.add_argument("--organizer", default="e2e_organizer")
-    ap.add_argument("--admin", default="e2e_admin")
+    ap.add_argument("--organizer", default="qa_organizer")
+    ap.add_argument("--admin", default="qa_admin")
     args = ap.parse_args()
-    base = args.base.rstrip("/")
+    base = ensure_qa_base(args.base)
+    assert_qa_instance(base)
 
     print("=== 视角 A：普通玩家 ===")
     t = login(base, args.player, args.player_pw)
@@ -84,7 +87,7 @@ def main() -> int:
         if opp:
             d2 = req(base, "POST", "/api/matches/challenge", token=t, body={
                 "game_id": "holdem", "my_bot_id": holdem["id"],
-                "opponent_bot_id": opp["id"], "match_config": {"hands": 10},
+                "opponent_bot_id": opp["id"],
             })
             mid = d2.get("match_id") or d2.get("id")
             check("发起挑战", bool(mid), str(mid or d2.get("_body", ""))[:60])
@@ -92,7 +95,8 @@ def main() -> int:
             check("发起挑战", False, "找不到对手 bot")
 
     check("收藏 Bot", req(base, "POST", "/api/bots/1/favorite", token=t).get("ok"))
-    check("改资料", bool(req(base, "PUT", "/api/auth/profile", token=t, body={"display_name": "E2E"}).get("id") or True))
+    profile = req(base, "PUT", "/api/auth/profile", token=t, body={"display_name": "E2E"})
+    check("改资料", profile.get("user", {}).get("display_name") == "E2E", str(profile)[:80])
 
     print("\n=== 视角 B：组织者 ===")
     to = login(base, args.organizer, "Test1234")
@@ -101,7 +105,7 @@ def main() -> int:
     dc = req(base, "POST", "/api/contests", token=to, body={
         "title": "smoke 赛事", "description": "脚本测试",
         "template_id": "holdem_swiss_ko", "game_id": "holdem",
-        "match_config": {"hands": 70}, "require_real_name": False,
+        "require_real_name": False,
     })
     contest = dc.get("contest") or dc
     check("创建赛事", bool(contest.get("id")), str(contest.get("id") or dc.get("_body", ""))[:60])
@@ -109,14 +113,15 @@ def main() -> int:
     print("\n=== 视角 C：管理员 ===")
     ta = login(base, args.admin, "Test1234")
     check("登录", True)
-    check("admin 统计", bool(req(base, "GET", "/api/admin/stats", token=ta).get("users") is not None or True))
+    stats = req(base, "GET", "/api/admin/stats", token=ta)
+    check("admin 统计", stats.get("users") is not None, str(stats)[:80])
     check("admin 用户列表", isinstance(req(base, "GET", "/api/admin/users", token=ta).get("users"), list))
 
     print("\n=== 角色边界（403 守卫）===")
     # 玩家不能建赛事
     r = req(base, "POST", "/api/contests", token=t, body={
         "title": "x", "template_id": "holdem_swiss_ko", "game_id": "holdem",
-        "match_config": {"hands": 70}, "require_real_name": False,
+        "require_real_name": False,
     })
     check("玩家建赛事被拒(403)", r.get("_status") == 403, f"status={r.get('_status')}")
     # 玩家不能访问 admin 接口

@@ -1,4 +1,4 @@
-/* foldbot：永远弃牌（最弱策略）。Botzone 协议：response=-1。 */
+/* foldbot：永远弃牌（最弱策略）。平台协议：response=-1。 */
 #include "poker_util.h"
 
 int main(void) {

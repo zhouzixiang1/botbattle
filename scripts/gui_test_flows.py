@@ -19,8 +19,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from _qa_target import assert_qa_instance, qa_base
 
-BASE = "http://127.0.0.1:50380"
+BASE = qa_base("http://127.0.0.1:50381")
+assert_qa_instance(BASE)
 PASS = 0
 FAIL = 0
 RESULTS: list[tuple[str, str, str]] = []  # (name, status, detail)
@@ -153,7 +155,7 @@ def main() -> int:
         check("Bot对局历史分页", st == 200 and "total" in d, f"keys={list(d.keys())}")
         # 发起挑战（tester1 vs tester2）
         st, d = api("POST", "/api/matches/challenge", token=tok_tester1, body={
-            "my_bot_id": 2, "opponent_bot_id": 3, "hands": 1,
+            "my_bot_id": 2, "opponent_bot_id": 3,
         })
         check("发起对战", st == 200, f"status={st} {str(d)[:100]}")
         # 评论
@@ -167,7 +169,6 @@ def main() -> int:
         st, d = api("POST", "/api/contests", token=tok_org, body={
             "title": "[GUI测试]组织者创建赛", "game_id": "holdem",
             "template_id": "holdem_swiss_ko",
-            "hands_per_match": 1,
         })
         cid = d.get("id") if st == 200 else None
         check("组织者创建赛事", st == 200 and cid is not None, f"status={st} {str(d)[:100]}")
@@ -199,7 +200,7 @@ def main() -> int:
         # B3 防护：强删活跃 bot → 409
         # 先建一个 pending 对局的 bot
         st, d = api("POST", "/api/matches/challenge", token=tok_tester1, body={
-            "my_bot_id": 2, "opponent_bot_id": 786, "hands": 1,
+            "my_bot_id": 2, "opponent_bot_id": 786,
         })
         # bot 2 现在有 pending 对局 → 强删应 409
         st, d = api("DELETE", "/api/admin/bots/2", token=tok_admin)

@@ -5,12 +5,13 @@
 2. match 被 orphan_after_restart 清成 aborted，pairing 仍指它（生产 contest 24）→
    reset_dead_contest_pairings 复位后重派完成。
 3. pairing 建了 match 行但 _run_match 从未跑完（pending match）→ 识别为死 pairing 重派。
-4. bot 已删/不可用 → 重派抛 ValueError → 标 aborted，_stage_done 仍通过推进。
+4. 双方 bot 都不可用 → 明确保持 pending 阻塞，不伪造无裁决结果。
 """
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -26,15 +27,19 @@ def store(tmp_path):
 
 
 def _mk_bots(store: Store, n: int = 4):
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
     users = []
     bots = []
     for i in range(n):
         u = store.create_user(f"user{i}", f"u{i}@ex.com", hash_password("password1"))
         users.append(u)
+        binary_path = fixture_dir / f"fake{i}"
+        binary_path.write_bytes(b"test fixture")
         b = store.create_bot(
             u["id"],
             f"bot{i}",
-            binary_path=f"/tmp/fake{i}",
+            binary_path=str(binary_path),
             format="elf",
             is_active=1,
             game_id="holdem",
@@ -187,12 +192,215 @@ def test_reconcile_redispatches_after_orphan_restart(store: Store):
     asyncio.run(run())
 
 
+def test_reconcile_deletes_bound_prepared_ghost_before_redispatch(store: Store):
+    """bind 已提交但 start 前崩溃：启动对账须删旧 pending match/replay/index 再重派。"""
+    from bzplat.backend.matches.orchestrator import MatchOrchestrator
+
+    users, bots = _mk_bots(store, 2)
+    cid = store.create_contest(
+        "prepared-crash", users[0]["id"], game_id="holdem",
+        stages_json=json.dumps([{
+            "key": "rr", "type": "round_robin", "rest_after_minutes": 0,
+        }]),
+    )["id"]
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(cid, user["id"], bot["id"])
+    store.update_contest(cid, status="running", current_stage_idx=0)
+
+    async def run():
+        original_orch = MatchOrchestrator(store)
+        ghost_id = await original_orch.challenge(
+            bots[0]["id"], bots[1]["id"], users[0]["id"],
+            contest_id=cid, match_type="contest", game_id="holdem",
+            defer_start=True,
+        )
+        pairing = store.add_contest_pairing(
+            cid, bots[0]["id"], bots[1]["id"], status="pending", stage_idx=0,
+        )
+        store.bind_contest_pairing_match(cid, pairing["id"], ghost_id)
+        assert store.get_match(ghost_id)["status"] == "pending"
+        assert store.get_replay(ghost_id) is not None
+
+        # 新进程只有新 orchestrator；旧 prepared map/task 均不存在。
+        replacement = _FakeOrch(store)
+        manager = ContestManager(store, replacement)  # type: ignore
+        await manager.reconcile_running_contests()
+
+        assert store.get_match(ghost_id) is None
+        assert store.get_replay(ghost_id) is None
+        index = store._conn.execute(
+            "SELECT 1 FROM matches_index WHERE id=?", (ghost_id,)
+        ).fetchone()
+        assert index is None
+        refreshed = store.list_contest_pairings(cid, stage_idx=0)[0]
+        assert refreshed["match_id"] != ghost_id
+        live_matches = store.list_matches(contest_id=cid)
+        assert {match["id"] for match in live_matches} == {refreshed["match_id"]}
+
+        _complete_all_pairs(store, cid, 0, winner_fn=lambda a, b: 0)
+        await manager.reconcile_running_contests()
+        assert store.get_contest(cid)["status"] == "finished"
+        assert not store.contest_has_active_matches(cid)
+
+    asyncio.run(run())
+
+
+def test_reconcile_deletes_unbound_prepared_ghost_before_redispatch(store: Store):
+    """prepare 成功但 bind 前硬崩：删无引用 pending match/index/replay 再重派。"""
+    from bzplat.backend.matches.orchestrator import MatchOrchestrator
+
+    users, bots = _mk_bots(store, 2)
+    cid = store.create_contest(
+        "prepare-before-bind-crash",
+        users[0]["id"],
+        game_id="holdem",
+        stages_json=json.dumps(
+            [{"key": "rr", "type": "round_robin", "rest_after_minutes": 0}]
+        ),
+    )["id"]
+    entries = []
+    for user, bot in zip(users, bots):
+        entries.append(store.add_contest_entry(cid, user["id"], bot["id"]))
+    store.update_contest(cid, status="running", current_stage_idx=0)
+    pairing = store.add_contest_pairing(
+        cid,
+        bots[0]["id"],
+        bots[1]["id"],
+        status="pending",
+        stage_idx=0,
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+
+    async def run():
+        old_orchestrator = MatchOrchestrator(store)
+        ghost_id = await old_orchestrator.challenge(
+            bots[0]["id"],
+            bots[1]["id"],
+            users[0]["id"],
+            contest_id=cid,
+            match_type="contest",
+            game_id="holdem",
+            defer_start=True,
+        )
+        assert store.get_match(ghost_id)["status"] == "pending"
+        assert store.get_replay(ghost_id) is not None
+        assert store.list_contest_pairings(cid)[0]["match_id"] is None
+
+        replacement = _FakeOrch(store)
+        manager = ContestManager(store, replacement)  # type: ignore[arg-type]
+        await manager.reconcile_running_contests()
+
+        assert store.get_match(ghost_id) is None
+        assert store.get_replay(ghost_id) is None
+        assert store._conn.execute(
+            "SELECT 1 FROM matches_index WHERE id=?", (ghost_id,)
+        ).fetchone() is None
+        refreshed = store.list_contest_pairings(cid)[0]
+        assert refreshed["id"] == pairing["id"]
+        assert refreshed["match_id"] and refreshed["match_id"] != ghost_id
+        assert {row["id"] for row in store.list_matches(contest_id=cid)} == {
+            refreshed["match_id"]
+        }
+
+    asyncio.run(run())
+
+
+def test_reconcile_rebuilds_partial_unbound_published_first_stage(store: Store):
+    """published 首阶段只持久化部分 pairing 就硬崩，启动对账重建完整批次。"""
+    users, bots = _mk_bots(store, 4)
+    cid = store.create_contest(
+        "partial-published",
+        users[0]["id"],
+        status="published",
+        starts_at="2099-01-01T00:00:00",
+        game_id="holdem",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )["id"]
+    entries = [
+        store.add_contest_entry(cid, user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    partial = store.add_contest_pairing(
+        cid,
+        bots[0]["id"],
+        bots[3]["id"],
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[3]["id"],
+        published_at="2026-01-01T00:00:00",
+        scheduled_at="2099-01-01T00:00:00",
+    )
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+
+    async def run():
+        assert await manager.reconcile_running_contests() == 1
+        rebuilt = store.list_contest_pairings(cid, stage_idx=0)
+        assert len(rebuilt) == 6
+        assert partial["id"] not in {row["id"] for row in rebuilt}
+        assert all(
+            row["status"] == "pending"
+            and row["match_id"] is None
+            and row["scheduled_at"] == "2099-01-01T00:00:00"
+            for row in rebuilt
+        )
+        assert store.get_contest(cid)["status"] == "published"
+
+    asyncio.run(run())
+
+
+def test_published_partial_batch_with_bound_match_reports_inconsistency(store: Store):
+    """残缺 published 批次若已绑定/active，不能覆盖真实进度静默重建。"""
+    users, bots = _mk_bots(store, 4)
+    cid = store.create_contest(
+        "partial-bound",
+        users[0]["id"],
+        status="published",
+        starts_at="2099-01-01T00:00:00",
+        game_id="holdem",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )["id"]
+    entries = [
+        store.add_contest_entry(cid, user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    pairing = store.add_contest_pairing(
+        cid,
+        bots[0]["id"],
+        bots[3]["id"],
+        status="pending",
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[3]["id"],
+    )
+    store.create_match(
+        "partial-bound-active",
+        bots[0]["id"],
+        bots[3]["id"],
+        owner_id=users[0]["id"],
+        contest_id=cid,
+        match_type="contest",
+    )
+    store.bind_contest_pairing_match(cid, pairing["id"], "partial-bound-active")
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+
+    async def run():
+        with pytest.raises(ValueError, match="已绑定|不一致|active"):
+            await manager.ensure_published_pairings(cid, 0)
+        preserved = store.list_contest_pairings(cid, stage_idx=0)
+        assert len(preserved) == 1
+        assert preserved[0]["match_id"] == "partial-bound-active"
+
+    asyncio.run(run())
+
+
 # ── 3. bot 不可用 → pairing 标 aborted，阶段仍推进 ──────────────────────
 
 
-def test_reconcile_bot_unavailable_aborts_pairing(store: Store):
-    """死 pairing 重派时 bot 被 reject（模拟已删）→ challenge 抛 ValueError →
-    pairing 挂 aborted match → _stage_done 接受 aborted → 阶段推进 → finished。"""
+def test_reconcile_both_bots_unavailable_blocks_pairing(store: Store):
+    """死 pairing 重派时双方 Bot 都不可用，必须保留 pending 供人工修复。"""
     users, bots = _mk_bots(store, 4)
     cid = store.create_contest(
         "swiss4deadbot", users[0]["id"], game_id="holdem",
@@ -205,26 +413,27 @@ def test_reconcile_bot_unavailable_aborts_pairing(store: Store):
         store.add_contest_entry(cid, u["id"], b["id"])
     store.update_contest(cid, status="running", current_stage_idx=0)
 
-    # 所有 bot 都 reject（极端：全部不可用）→ 所有 pairing 都标 aborted
-    rejected = {b["id"] for b in bots}
-    # 初始 reject 集为空：R1 正常派发；之后再打开 reject 模拟「重启后 bot 被删」
+    # 初始正常派发；之后将全部 Bot 停用模拟重启后名册已不可用。
     orch = _FakeOrch(store, reject_bot_ids=set())
     mgr = ContestManager(store, orch)  # type: ignore
 
     async def run():
         await mgr._begin_stage(cid, 0)
-        # 初始 R1 已派发成功（此时 reject 集还是空）。现在打开 reject，模拟 bot
-        # 在「重启后被删」——对账重派时全部失败。
-        orch.reject_bot_ids = rejected
+        for bot in bots:
+            store.update_bot(bot["id"], is_active=0)
         # 把已派的 match 全标 aborted（模拟孤儿）→ pairing 复位
         for p in store.list_contest_pairings(cid, stage_idx=0):
             store.update_match(p["match_id"], status=STATUS_ABORTED, reason="orphan_after_restart")
-        # 对账：重派全部失败（bot 不可用）→ 全标 aborted → _stage_done 通过 → finished
+        # 对账：旧 aborted 历史保留，pairing 复位后因双方不可用而阻塞。
         n = await mgr.reconcile_running_contests()
         assert n == 1
         c = store.get_contest(cid)
-        assert c["status"] == "finished", (
-            f"所有 bot 不可用 → pairing 全 aborted → 阶段应推进 finished，实际 {c['status']}"
+        assert c["status"] == "running"
+        pairings = store.list_contest_pairings(cid, stage_idx=0)
+        assert all(p["status"] == "pending" and p["match_id"] is None for p in pairings)
+        assert all(
+            m["status"] == STATUS_ABORTED
+            for m in store.list_matches(contest_id=cid)
         )
 
     asyncio.run(run())

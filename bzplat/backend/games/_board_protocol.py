@@ -7,15 +7,13 @@
 - 响应信封：``{"response": {"x":.., "y":..}}``（Botzone 标准）。
 
 本模块是**平台协议工具**（请求负载 builder + 响应解析），不是游戏规则——共享安全。
-各游戏 rule/tier/result 仍独立。gomoku/pencil 的 protocol.py 仅 re-export。
+它是棋类同构 JSON 原语的唯一实现，并通过各 GameSpec 的 shared_source_files 随
+公开裁判源码提供；各游戏 protocol.py 只导出本游戏实际使用的 builder。
 """
 from __future__ import annotations
 
 import json
 from typing import Any
-
-PROTOCOL_VERSION = 2  # Botzone 标准（v1 是旧的紧凑协议，已废弃）
-
 
 def dumps_request(req: dict[str, Any]) -> str:
     """序列化请求负载为单行 JSON（信封化由 runner 传输层做）。"""
@@ -23,35 +21,52 @@ def dumps_request(req: dict[str, Any]) -> str:
 
 
 def loads_response(line: str) -> dict[str, Any]:
-    """解析 Bot 输出一行（返回信封 dict，payload 由 parse_xy 取）。"""
-    line = (line or "").strip()
-    if not line:
-        return {}
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        return {}
-    return obj if isinstance(obj, dict) else {}
+    """解析响应信封并只返回平台消费的规范化坐标。"""
+    from bzplat.backend.games import _botzone_protocol as envelope_protocol
+
+    obj = json.loads(line)
+    payload = envelope_protocol.extract_response_payload(obj)
+    payload = validate_response_payload(payload)
+    return {"response": payload}
 
 
 def parse_xy(raw: dict[str, Any] | None) -> tuple[int | None, int | None]:
     """从响应取落子坐标 ``(x, y)``。
 
-    接受两种输入（兼容 Botzone 信封 + 旧裸 ``{x,y}``）：
-    1. Botzone 信封：``{"response": {"x":.., "y":..}}``。
-    2. 裸 ``{"x":.., "y":..}``（测试/兼容）。
+    唯一现行信封必须包含 ``response``；其他顶层字段忽略。游戏 payload
+    仍严格为整数 ``x/y``，避免把另一套落子结构带入裁判。
     """
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or "response" not in raw:
         return None, None
-    # Botzone 信封：先取 response 字段
-    if "response" in raw and isinstance(raw["response"], dict):
-        raw = raw["response"]
-    try:
-        x = int(raw["x"])
-        y = int(raw["y"])
-    except (KeyError, TypeError, ValueError):
+    payload = raw["response"]
+    if not isinstance(payload, dict) or set(payload) != {"x", "y"}:
+        return None, None
+    x, y = payload["x"], payload["y"]
+    if (
+        isinstance(x, bool)
+        or isinstance(y, bool)
+        or not isinstance(x, int)
+        or not isinstance(y, int)
+    ):
         return None, None
     return x, y
+
+
+def validate_response_payload(payload: Any) -> Any:
+    """校验棋类 ``response`` 负载形状，不判坐标对应的游戏内合法性。"""
+    if not isinstance(payload, dict):
+        raise ValueError("response 必须是包含 x/y 的对象")
+    if set(payload) != {"x", "y"}:
+        raise ValueError("response 必须且仅能包含 x/y 坐标")
+    x, y = payload["x"], payload["y"]
+    if (
+        isinstance(x, bool)
+        or isinstance(y, bool)
+        or not isinstance(x, int)
+        or not isinstance(y, int)
+    ):
+        raise ValueError("response.x/response.y 必须是整数")
+    return {"x": x, "y": y}
 
 
 def build_gomoku_request(*, x: int, y: int, me: int) -> dict[str, Any]:

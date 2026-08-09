@@ -61,7 +61,9 @@ export default function UsersTab() {
     setError('')
     try {
       const d = await apiGet<{ users: User[]; total?: number }>(
-        `/api/admin/users?page=${page}&per_page=${perPage}`,
+        `/api/admin/users?page=${page}&per_page=${perPage}` +
+          `${q ? `&q=${encodeURIComponent(q)}` : ''}` +
+          `${realNameFilter === 'all' ? '' : `&real_name=${realNameFilter === 'yes'}`}`,
       )
       setUsers(d.users || [])
       if (d.total !== undefined) setTotal(d.total)
@@ -70,7 +72,7 @@ export default function UsersTab() {
     } finally {
       setLoading(false)
     }
-  }, [page])
+  }, [page, q, realNameFilter])
 
   useEffect(() => {
     void load()
@@ -136,13 +138,19 @@ export default function UsersTab() {
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => {
+            setQ(e.target.value)
+            setPage(1)
+          }}
           placeholder="搜索用户名/邮箱"
           className="h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring outline-none"
         />
         <Select
           value={realNameFilter}
-          onValueChange={(v) => setRealNameFilter(v as 'all' | 'yes' | 'no')}
+          onValueChange={(v) => {
+            setRealNameFilter(v as 'all' | 'yes' | 'no')
+            setPage(1)
+          }}
         >
           <SelectTrigger size="sm" className="h-9 w-32 text-sm">
             <SelectValue />

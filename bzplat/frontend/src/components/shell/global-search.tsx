@@ -27,6 +27,10 @@ interface SearchMatch {
   id: string
   game_id: string
   winner_bot_id?: number
+  bot_a_name?: string
+  bot_b_name?: string
+  bot_a_display?: string
+  bot_b_display?: string
 }
 
 /**
@@ -37,7 +41,14 @@ interface SearchMatch {
  * 文字截断、不带 ⌘K 快捷键徽章（省横向空间，Cmd+K 仍可用）。
  * 默认（顶栏）：图标按钮(<md) + 文字按钮(≥md) 两态。
  */
-export function GlobalSearch({ compact = false }: { compact?: boolean }) {
+export function GlobalSearch({
+  compact = false,
+  hotkey = false,
+}: {
+  compact?: boolean
+  /** AppShell 只给一个常驻实例注册快捷键，避免多个响应式入口同时打开重叠弹窗。 */
+  hotkey?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
   const [users, setUsers] = useState<SearchUser[]>([])
@@ -47,6 +58,7 @@ export function GlobalSearch({ compact = false }: { compact?: boolean }) {
 
   // Cmd/Ctrl + K 唤起
   useEffect(() => {
+    if (!hotkey) return
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
@@ -55,7 +67,7 @@ export function GlobalSearch({ compact = false }: { compact?: boolean }) {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [])
+  }, [hotkey])
 
   // 防抖搜索
   useEffect(() => {
@@ -66,21 +78,31 @@ export function GlobalSearch({ compact = false }: { compact?: boolean }) {
       setMatches([])
       return
     }
+    let cancelled = false
     const t = setTimeout(async () => {
       try {
-        const d = await apiGet<{
-          users?: SearchUser[]
-          bots?: SearchBot[]
-          matches?: SearchMatch[]
-        }>(`/api/search?q=${encodeURIComponent(query)}`)
-        setUsers(d.users ?? [])
-        setBots(d.bots ?? [])
-        setMatches(d.matches ?? [])
+        const encoded = encodeURIComponent(query)
+        const [u, b, m] = await Promise.all([
+          apiGet<{ users?: SearchUser[] }>(`/api/search?q=${encoded}&type=users&limit=6`),
+          apiGet<{ bots?: SearchBot[] }>(`/api/search?q=${encoded}&type=bots&limit=6`),
+          apiGet<{ matches?: SearchMatch[] }>(`/api/search?q=${encoded}&type=matches&limit=6`),
+        ])
+        if (cancelled) return
+        setUsers(u.users ?? [])
+        setBots(b.bots ?? [])
+        setMatches(m.matches ?? [])
       } catch {
-        /* 忽略 */
+        if (!cancelled) {
+          setUsers([])
+          setBots([])
+          setMatches([])
+        }
       }
     }, 250)
-    return () => clearTimeout(t)
+    return () => {
+      cancelled = true
+      clearTimeout(t)
+    }
   }, [q])
 
   const go = (path: string) => {
@@ -154,7 +176,11 @@ export function GlobalSearch({ compact = false }: { compact?: boolean }) {
           {matches.length > 0 && (
             <CommandGroup heading="对局">
               {matches.slice(0, 6).map((m) => (
-                <CommandItem key={`m${m.id}`} value={`match ${m.id}`} onSelect={() => go(`/match/${m.id}`)}>
+                <CommandItem
+                  key={`m${m.id}`}
+                  value={`match ${m.id} ${m.bot_a_name ?? ''} ${m.bot_b_name ?? ''} ${m.bot_a_display ?? ''} ${m.bot_b_display ?? ''}`}
+                  onSelect={() => go(`/match/${m.id}`)}
+                >
                   <Swords className="size-4 text-muted-foreground" />
                   <span className="font-mono text-xs">{m.id.slice(0, 8)}</span>
                   <span className="text-xs text-muted-foreground">{gameLabel(m.game_id)}</span>

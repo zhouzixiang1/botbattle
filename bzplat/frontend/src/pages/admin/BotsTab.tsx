@@ -8,6 +8,8 @@ import Pagination from '@/components/Pagination'
 interface Bot {
   id: number
   owner_id: number
+  owner_name?: string
+  owner_display?: string
   name: string
   display_name: string
   os: string
@@ -17,6 +19,8 @@ interface Bot {
   is_active: boolean
   is_builtin: boolean
   created_at: string
+  runnable?: boolean
+  unsupported_reason?: string | null
 }
 interface Version {
   id: number
@@ -27,6 +31,8 @@ interface Version {
   arch: string
   format: string
   uploaded_at: string
+  runnable?: boolean
+  unsupported_reason?: string | null
 }
 
 export default function BotsTab() {
@@ -48,7 +54,7 @@ export default function BotsTab() {
     setError('')
     try {
       const d = await apiGet<{ bots: Bot[]; total?: number }>(
-        `/api/admin/bots?page=${page}&per_page=${perPage}`,
+        `/api/admin/bots?page=${page}&per_page=${perPage}${q ? `&q=${encodeURIComponent(q)}` : ''}`,
       )
       setBots(d.bots || [])
       if (d.total !== undefined) setTotal(d.total)
@@ -57,7 +63,7 @@ export default function BotsTab() {
     } finally {
       setLoading(false)
     }
-  }, [page])
+  }, [page, q])
 
   useEffect(() => {
     void load()
@@ -119,7 +125,10 @@ export default function BotsTab() {
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => {
+            setQ(e.target.value)
+            setPage(1)
+          }}
           placeholder="搜索 Bot 名称"
           className="h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring outline-none"
         />
@@ -155,9 +164,11 @@ export default function BotsTab() {
                     {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
                   </TableCell>
                   <TableCell className="px-3 py-2">
-                    <Link to={`/user/${b.owner_id}`} className="text-primary hover:underline">
-                      #{b.owner_id}
-                    </Link>
+                    {b.owner_name ? (
+                      <Link to={`/user/${encodeURIComponent(b.owner_name)}`} className="text-primary hover:underline">
+                        {b.owner_display || b.owner_name}
+                      </Link>
+                    ) : <span className="text-muted-foreground">#{b.owner_id}</span>}
                   </TableCell>
                   <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                     {b.format}/{b.arch}
@@ -166,17 +177,18 @@ export default function BotsTab() {
                   <TableCell className="px-3 py-2">
                     <div className="flex gap-1">
                       {b.is_active ? <Badge variant="secondary" className="text-[10px]">启用</Badge> : <Badge variant="outline" className="text-[10px] text-muted-foreground">停用</Badge>}
+                      {b.runnable === false && <Badge variant="destructive" className="text-[10px]">不可运行</Badge>}
                     </div>
                   </TableCell>
                   <TableCell className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
                       <button
                         type="button"
-                        disabled={busyId === b.id}
+                        disabled={busyId === b.id || (!b.is_active && b.runnable === false)}
                         onClick={() => void patch(b.id, { is_active: !b.is_active })}
                         className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                       >
-                        {b.is_active ? '下架' : '上架'}
+                        {b.is_active ? '下架' : b.runnable === false ? '不可上架' : '上架'}
                       </button>
                       <button
                         type="button"
@@ -217,7 +229,12 @@ export default function BotsTab() {
                               <TableRow key={v.id} className="font-mono text-muted-foreground">
                                 <TableCell className="px-2 py-1">v{v.version}</TableCell>
                                 <TableCell className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</TableCell>
-                                <TableCell className="px-2 py-1">{v.format}/{v.arch}</TableCell>
+                                <TableCell className="px-2 py-1">
+                                  {v.format}/{v.arch}
+                                  {v.runnable === false && (
+                                    <Badge variant="destructive" className="ml-2 text-[10px]">不可运行</Badge>
+                                  )}
+                                </TableCell>
                                 <TableCell className="px-2 py-1">
                                   <Tooltip>
                                     <TooltipTrigger asChild>

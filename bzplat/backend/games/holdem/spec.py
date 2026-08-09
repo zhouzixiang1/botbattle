@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, JudgeParamSpec, ProtocolSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec
+from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.holdem.engine import (
     BIG_BLIND,
     DEFAULT_HANDS,
@@ -17,11 +18,6 @@ from bzplat.backend.games.holdem.engine import (
 from bzplat.backend.games.holdem import protocol as proto
 from bzplat.backend.games.holdem import tiers as _tiers_mod
 from bzplat.backend.games.holdem import templates as _templates_mod
-from bzplat.backend.store.schema import (
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
-)
 
 GAME_ID = "holdem"
 
@@ -31,13 +27,18 @@ async def _session_factory(decide, *, on_event=None, **params: Any):
 
     手数固定 DEFAULT_HANDS（70）——游戏规则钉死，不接受 match_config 配置
     （曾因 hands/num_hands key 名不一致导致配置静默失效，现彻底移除配置能力）。
-    params 仅保留 starting_stack/sb/bb（盲注/筹码经 admin judge_params 注入）+ rng/deal_sequence。
+    规则常量全部固定；params 仅接受平台内部的 rng/deal_sequence。任何其他键
+    都是错误调用，必须显式失败，不能静默按固定规则继续执行。
     """
+    unexpected = set(params) - {"rng", "deal_sequence"}
+    if unexpected:
+        fields = ", ".join(sorted(unexpected))
+        raise TypeError(f"德州扑克 Session 不接受参数: {fields}")
     session = MatchSession(
         num_hands=DEFAULT_HANDS,
-        starting_stack=params.get("starting_stack") or STARTING_STACK,
-        sb=params.get("sb") or SMALL_BLIND,
-        bb=params.get("bb") or BIG_BLIND,
+        starting_stack=STARTING_STACK,
+        sb=SMALL_BLIND,
+        bb=BIG_BLIND,
         rng=params.get("rng"),
         on_event=on_event,
         deal_sequence=params.get("deal_sequence"),
@@ -48,20 +49,17 @@ async def _session_factory(decide, *, on_event=None, **params: Any):
 _PROTOCOL = ProtocolSpec(
     dumps_request=proto.dumps_request,
     loads_response=proto.loads_response,
-    fail_response=proto.fail_response,  # 扑克超时兜底：fold（Botzone 裸整数 -1）
+    validate_response_payload=proto.validate_response_payload,
+    fail_response=proto.fail_response,  # 人类超时等游戏内兜底：fold
 )
 
 
 def _validate_match_params(cfg: dict[str, Any]) -> dict[str, Any]:
-    # 手数已钉死 DEFAULT_HANDS，不再接受配置；忽略任何传入字段。
     if not isinstance(cfg, dict):
         raise ValueError("match_config 必须是对象")
+    if cfg:
+        raise ValueError("德州扑克规则固定，match_config 不允许包含字段")
     return {}
-
-
-def _rounds_per_match(match_config: dict[str, Any]) -> int:
-    # 手数钉死 70（不再读 match_config）
-    return DEFAULT_HANDS
 
 
 def _normalize_earnings(ea: int) -> float:
@@ -70,6 +68,7 @@ def _normalize_earnings(ea: int) -> float:
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
+    _validate_match_params(match_config)
     # holdem ETA ∝ 手数（每手约 2s）；手数钉死 70
     return DEFAULT_HANDS * 2
 
@@ -80,48 +79,59 @@ def _build_match_plan(seed: int, params: dict[str, Any]) -> list[dict[str, Any]]
     消除运气：同 seed 生成 deal_sequence，两 leg 用它发牌，净筹码相加判胜负。
     seed=None 或 params['duplicate']=False 时返回单 leg（普通赛）。
     """
+    unexpected = set(params) - {"duplicate"}
+    if unexpected:
+        fields = ", ".join(sorted(unexpected))
+        raise ValueError(f"复式赛计划不接受参数: {fields}")
     if not params.get("duplicate"):
-        return [{"seat_swap": False, "params": {**params, "match_seed": seed}}]
+        return [{"seat_swap": False, "params": {}}]
     # 手数钉死 DEFAULT_HANDS（不再读 params["num_hands"]）
     from bzplat.backend.games.holdem.engine import generate_deal_sequence
     ds = generate_deal_sequence(DEFAULT_HANDS, seed) if seed is not None else None
-    shared = {**params, "deal_sequence": ds, "match_seed": seed}
+    shared = {"deal_sequence": ds}
     return [
         {"seat_swap": False, "params": shared},  # leg1: A=seat0, B=seat1
         {"seat_swap": True, "params": shared},   # leg2: B=seat0, A=seat1（座位对调）
     ]
 
 
-async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
-    """Bot 预检：发一个德州 act 请求，验证响应含合法 action。"""
-    from bzplat.backend.games.holdem.protocol import build_act_request, parse_response, dumps_request
-    from bzplat.backend.runtime.binary_runner import BotCrashedError
+async def _preflight_check(
+    binary_path: str,
+    binary_runner: Any,
+    *,
+    runtime_mode: str,
+    timeout: float = 8.0,
+) -> tuple[bool, str]:
+    """按所选模式发送 canonical 首回合并验证德州响应。"""
+    from bzplat.backend.games.holdem.protocol import build_act_request
+    from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
     import asyncio
 
     # 构造最小 act 请求（preflop，seat 0/SB）
     from bzplat.backend.games.holdem.holdem_judge import Card, Suit
     req = build_act_request(
-        hand=0, total_hands=1, my_id=0, dealer_id=0,
+        hand=0, total_hands=DEFAULT_HANDS, my_id=0, dealer_id=0,
         my_cards=[Card(Suit.SPADE, 2), Card(Suit.SPADE, 3)], board=[], history=[],
         my_chips=19950,
     )
-    line = dumps_request(req)
     try:
-        sid = await binary_runner.start_session(binary_path)
-    except Exception as e:
-        return False, f"启动失败: {e}"
-    try:
-        resp_line = await binary_runner.send(sid, line, timeout=timeout)
-        parse_response(resp_line)  # 抛 ValueError = 不合法
+        await botzone.preflight_exchange(
+            binary_path,
+            binary_runner,
+            req,
+            proto.validate_response_payload,
+            runtime_mode=runtime_mode,
+            timeout=timeout,
+        )
         return True, "响应合法"
-    except BotCrashedError:
-        return False, "Bot 启动后立即退出（stdout EOF）——不符合长驻协议"
+    except PlatformRunnerError:
+        raise
+    except BotCrashedError as exc:
+        return False, f"Bot 进程异常退出: {exc}"
     except asyncio.TimeoutError:
         return False, f"Bot {timeout}s 内未响应"
-    except (ValueError, Exception) as e:
+    except Exception as e:
         return False, f"响应不合法: {e}"
-    finally:
-        await binary_runner.stop_session(sid)
 
 
 SPEC = GameSpec(
@@ -131,18 +141,8 @@ SPEC = GameSpec(
     protocol=_PROTOCOL,
     default_match_params={},  # 手数钉死 DEFAULT_HANDS，无对局级可配参数
     validate_match_params=_validate_match_params,
-    rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
     eta_for_match=_eta_for_match,
-    judge_params=[
-        JudgeParamSpec(SETTING_JUDGE_HOLDEM_STACK, "起始筹码", "starting_stack",
-                       STARTING_STACK, (1000, 1_000_000)),
-        JudgeParamSpec(SETTING_JUDGE_HOLDEM_SB, "小盲注", "sb",
-                       SMALL_BLIND, (1, 10_000)),
-        JudgeParamSpec(SETTING_JUDGE_HOLDEM_BB, "大盲注", "bb",
-                       BIG_BLIND, (2, 20_000)),
-        # 手数（原 SETTING_JUDGE_HOLDEM_HANDS）已钉死 70，移除该 admin 可调项。
-    ],
     tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,
     default_scoring="poker_3_1_0",

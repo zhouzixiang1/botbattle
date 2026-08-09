@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download } from 'lucide-react'
+import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -24,7 +24,7 @@ import { useConfirm } from '@/hooks/use-confirm'
 import { useAuth } from '@/components/useAuth'
 import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
-import { gameLabel, isBoardGame } from '@/lib/games'
+import { findGame, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import { toast } from 'sonner'
 
@@ -47,7 +47,6 @@ interface Contest {
   description?: string
   status: string
   organizer_id: number
-  hands_per_match?: number
   template_id?: string
   /** 可选：后端/模板表解析出的可读名 */
   template_name?: string
@@ -61,6 +60,7 @@ interface Contest {
   registration_closes_at?: string | null
   starts_at?: string | null
   ends_at?: string | null
+  official_results_ready?: number
 }
 interface Stage {
   key?: string
@@ -123,6 +123,19 @@ interface Standing {
   group_id?: string
   bot_name?: string
 }
+interface OfficialResult {
+  rank: number
+  entry_id: number
+  bot_id?: number | null
+  user_id?: number | null
+  points: number
+  bot_name?: string
+  bot_display?: string
+  owner_name?: string
+  owner_display?: string
+  awarded?: string
+  tiebreaks_json?: string
+}
 
 function parseStages(c: Contest | null): Stage[] {
   if (!c?.stages_json) return []
@@ -131,6 +144,16 @@ function parseStages(c: Contest | null): Stage[] {
   } catch {
     return []
   }
+}
+
+function scheduleIssue(c: Contest): string {
+  const opens = c.registration_opens_at ? new Date(c.registration_opens_at).getTime() : null
+  const closes = c.registration_closes_at ? new Date(c.registration_closes_at).getTime() : null
+  const starts = c.starts_at ? new Date(c.starts_at).getTime() : null
+  if (opens != null && closes != null && opens > closes) return '开放报名时间晚于报名截止时间'
+  if (closes != null && starts != null && closes > starts) return '报名截止时间晚于比赛开始时间'
+  if (opens != null && starts != null && opens > starts) return '开放报名时间晚于比赛开始时间'
+  return ''
 }
 
 /** 状态相关的时间编排提示（报名窗口/开赛/rest 倒计时） */
@@ -167,6 +190,7 @@ export default function ContestDetail() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [pairings, setPairings] = useState<Pairing[]>([])
   const [standings, setStandings] = useState<Standing[]>([])
+  const [officialResults, setOfficialResults] = useState<OfficialResult[]>([])
   const [myEntry, setMyEntry] = useState<Entry | null>(null)
   const [estimate, setEstimate] = useState<{ estimated_matches?: number; eta_seconds?: number } | null>(null)
   const [bots, setBots] = useState<Array<{ id: number; name: string; display_name?: string }>>([])
@@ -175,12 +199,22 @@ export default function ContestDetail() {
   // 对阵视图：'tree'（对阵树）/ 'table'（一览表）。淘汰赛默认 tree，其余默认 table，可手动切换。
   const [pairingView, setPairingView] = useState<'tree' | 'table'>('tree')
   const [error, setError] = useState('')
+  const [busyAction, setBusyAction] = useState(false)
+  const actionLockRef = useRef(false)
+  const activeContestIdRef = useRef<string | undefined>(id)
+  const loadGenerationRef = useRef(0)
+  const contentTabInitializedRef = useRef(false)
+  const [confirm, confirmDialog, cancelConfirm] = useConfirm()
+  // Params can change while this component instance is reused. Keep the authority
+  // ref current during render, before effects run, so an old async handler cannot
+  // act in the render-to-effect window of the next contest.
+  activeContestIdRef.current = id
   // 报名列表分页（115 人赛事场景：服务端分页，避免一次性渲染全部）
   const [entriesPage, setEntriesPage] = useState(1)
   const [entriesTotal, setEntriesTotal] = useState(0)
   const entriesPerPage = 20
-  // 内容区 Tab：对阵 / 选手 / 排行（只渲染当前 tab，避免大量报名/积分全量铺开导致长空白）
-  const [contentTab, setContentTab] = useState<'matchups' | 'entries' | 'standings'>('matchups')
+  // 内容区按生命周期显示：报名期优先选手，赛中优先对阵，完赛优先正式名次。
+  const [contentTab, setContentTab] = useState<'matchups' | 'entries' | 'standings' | 'official'>('entries')
   // 积分榜客户端分页（量级通常 < 200，客户端 slice 足够；每页 30 行）
   const [standingsPage, setStandingsPage] = useState(1)
   const standingsPerPage = 30
@@ -196,45 +230,120 @@ export default function ContestDetail() {
     [stages, contest?.template_id],
   )
 
-  const load = useCallback(() => {
-    if (!id) return
-    apiGet<{
-      contest: Contest
-      entries: Entry[]
-      pairings: Pairing[]
-      standings: Standing[]
-      estimate?: { estimated_matches?: number; eta_seconds?: number }
-      entries_page?: number
-      entries_per_page?: number
-      entries_total?: number
-      my_entry?: Entry | null
-    }>(`/api/contests/${id}?entries_page=${entriesPage}&entries_per_page=${entriesPerPage}`)
-      .then((d) => {
-        setContest(d.contest)
-        setEntries(d.entries || [])
-        setPairings(d.pairings || [])
-        setStandings(d.standings || [])
-        setEstimate(d.estimate || null)
-        setStageTab(d.contest.current_stage_idx ?? 0)
-        setEntriesTotal(d.entries_total ?? d.entries.length)
-        setMyEntry(d.my_entry ?? null)
-      })
-      .catch((e) => setError(errMsg(e)))
+  const load = useCallback(async () => {
+    if (!id) return Promise.resolve()
+    const targetId = id
+    const targetEntriesPage = entriesPage
+    const generation = ++loadGenerationRef.current
+    try {
+      const d = await apiGet<{
+        contest: Contest
+        entries: Entry[]
+        pairings: Pairing[]
+        standings: Standing[]
+        estimate?: { estimated_matches?: number; eta_seconds?: number }
+        entries_page?: number
+        entries_per_page?: number
+        entries_total?: number
+        my_entry?: Entry | null
+      }>(`/api/contests/${targetId}?entries_page=${targetEntriesPage}&entries_per_page=${entriesPerPage}`)
+      let nextOfficialResults: OfficialResult[] = []
+      let officialResultsError = ''
+      if (d.contest.status === 'finished') {
+        try {
+          const official = await apiGet<{ results: OfficialResult[] }>(
+            `/api/contests/${targetId}/official-results`,
+          )
+          nextOfficialResults = official.results || []
+        } catch (e) {
+          officialResultsError = `正式名次加载失败：${errMsg(e)}`
+        }
+      }
+      if (
+        activeContestIdRef.current !== targetId ||
+        loadGenerationRef.current !== generation
+      ) return
+      setContest(d.contest)
+      setEntries(d.entries || [])
+      setPairings(d.pairings || [])
+      setStandings(d.standings || [])
+      setOfficialResults(nextOfficialResults)
+      setEstimate(d.estimate || null)
+      setStageTab(d.contest.current_stage_idx ?? 0)
+      setEntriesTotal(d.entries_total ?? d.entries.length)
+      setMyEntry(d.my_entry ?? null)
+      if (!contentTabInitializedRef.current) {
+        const status = d.contest.status
+        setContentTab(
+          status === 'finished'
+            ? 'official'
+            : (status === 'published' || status === 'running' || status === 'rest')
+              ? 'matchups'
+              : 'entries',
+        )
+        contentTabInitializedRef.current = true
+      }
+      setError(officialResultsError)
+    } catch (e) {
+      if (
+        activeContestIdRef.current === targetId &&
+        loadGenerationRef.current === generation
+      ) setError(errMsg(e))
+    }
   }, [id, entriesPage, entriesPerPage])
+
+  // React Router reuses this component for /contests/A → /contests/B. Invalidate
+  // every A request/action before B can render, and clear A's privileged controls.
+  useEffect(() => {
+    // Resolve an outstanding confirmation as cancelled. Without this, useConfirm's
+    // state survives the reused route component and the old destructive dialog can
+    // reappear after the next contest finishes loading.
+    cancelConfirm()
+    activeContestIdRef.current = id
+    loadGenerationRef.current += 1
+    setContest(null)
+    setEntries([])
+    setPairings([])
+    setStandings([])
+    setOfficialResults([])
+    setMyEntry(null)
+    setEstimate(null)
+    setBots([])
+    setBotId('')
+    setError('')
+    setEntriesPage(1)
+    setStageTab(0)
+    setStandingsPage(1)
+    setContentTab('entries')
+    contentTabInitializedRef.current = false
+    actionLockRef.current = false
+    setBusyAction(false)
+    return () => {
+      if (activeContestIdRef.current === id) activeContestIdRef.current = undefined
+      loadGenerationRef.current += 1
+    }
+  }, [id, cancelConfirm])
 
   useEffect(() => {
     void load()
   }, [load])
 
   useEffect(() => {
+    let cancelled = false
+    const targetId = id
     if (isLoggedIn && contest?.game_id) {
       apiGet<{ bots: Array<{ id: number; name: string; display_name?: string }> }>(
         `/api/bots/mine?game_id=${contest.game_id}`,
       )
-        .then((d) => setBots(d.bots || []))
+        .then((d) => {
+          if (!cancelled && activeContestIdRef.current === targetId) {
+            setBots(d.bots || [])
+          }
+        })
         .catch(() => undefined)
     }
-  }, [isLoggedIn, contest?.game_id])
+    return () => { cancelled = true }
+  }, [id, isLoggedIn, contest?.game_id])
 
   const isOrg = !!user && !!contest && (user.role === 'admin' || user.id === contest.organizer_id)
   // myEntry 来自后端 my_entry 字段（不分页，休息换 Bot UI 依赖；entries 分页后前端 find 不可靠）
@@ -244,25 +353,39 @@ export default function ContestDetail() {
   )
 
   const act = async (path: string, body?: unknown, okMsg?: string) => {
+    const targetId = id
+    if (!targetId || activeContestIdRef.current !== targetId || actionLockRef.current) return
+    actionLockRef.current = true
+    setBusyAction(true)
     setError('')
     try {
       await apiJson(path, 'POST', body)
+      if (activeContestIdRef.current !== targetId) return
       await load()
       if (okMsg) toast.success(okMsg)
     } catch (e) {
-      setError(errMsg(e))
+      if (activeContestIdRef.current === targetId) setError(errMsg(e))
+    } finally {
+      if (activeContestIdRef.current === targetId) {
+        actionLockRef.current = false
+        setBusyAction(false)
+      }
     }
   }
 
-  const [confirm, confirmDialog] = useConfirm()
   const forceFinish = async () => {
+    const targetId = id
+    if (!targetId) return
     if (!await confirm({
       title: '强制结束赛事？',
-      desc: '这将立即结束赛事（未完成的对阵作废），并按当前结果计算正式名次。此操作不可撤销。',
+      desc: '后端将根据关联对局的实际终态执行恢复性收尾，并计算正式名次；若仍有运行中的对局，请求会被拒绝。此操作不可撤销。',
       danger: true,
       confirmText: '确认结束',
     })) return
-    await act(`/api/contests/${id}/finish`, undefined, '赛事已结束')
+    // Navigation may have reused this component while the non-blocking dialog was
+    // open. The old closure must neither POST its contest nor lock the new page.
+    if (activeContestIdRef.current !== targetId) return
+    await act(`/api/contests/${targetId}/finish`, undefined, '赛事已结束')
   }
 
   const stagePairings = pairings.filter((p) => (p.stage_idx ?? 0) === stageTab)
@@ -307,6 +430,11 @@ export default function ContestDetail() {
     )
   }
 
+  const contestScheduleIssue = scheduleIssue(contest)
+  const contestGame = findGame(contest.game_id)
+  const showMatchups = pairings.length > 0 || ['published', 'running', 'rest', 'finished'].includes(contest.status)
+  const showStandings = standings.length > 0 || ['running', 'rest', 'finished'].includes(contest.status)
+  const showOfficial = contest.status === 'finished'
 
   return (
     <PageStub title="锦标赛详情">
@@ -326,12 +454,8 @@ export default function ContestDetail() {
                 <span className="max-w-full truncate" title={contest.template_id || undefined}>
                   模板 {contest.template_name || contest.template_id || '—'}
                 </span>
-                <span>· 游戏 {gameLabel(contest.game_id || 'holdem')}</span>
-                {isBoardGame(contest.game_id) ? (
-                  <span>· 单局决胜</span>
-                ) : (
-                  <span>· 每场 70 手</span>
-                )}
+                <span>· 游戏 {gameLabel(contest.game_id)}</span>
+                <span>· {contestGame ? contestGame.matchFormatLabel : '规则不可用'}</span>
                 {isDuplicate && (
                   <Badge variant="secondary" className="text-[10px]">复式赛制</Badge>
                 )}
@@ -357,6 +481,14 @@ export default function ContestDetail() {
           )}
           {/* 时间编排：报名窗口 / 开赛 / 比赛时间 */}
           <ContestScheduleInfo c={contest} />
+          {contestScheduleIssue && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <span>
+                时间配置异常：{contestScheduleIssue}。该历史数据需要组织者或管理员修正，系统不会据此倒退赛事状态。
+              </span>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -365,29 +497,43 @@ export default function ContestDetail() {
       {/* 操作区 */}
       <div className="mt-4 flex flex-wrap gap-2">
         {isOrg && contest.status === 'draft' && (
-          <Button onClick={() => void act(`/api/contests/${id}/open`, undefined, '已开放报名')} className="gap-1.5">
+          <Button disabled={busyAction} onClick={() => void act(`/api/contests/${id}/open`, undefined, '已开放报名')} className="gap-1.5">
             <DoorOpen className="size-4" />开放报名
           </Button>
         )}
-        {isOrg && (contest.status === 'open' || contest.status === 'draft') && (
-          <Button variant="outline" onClick={() => void act(`/api/contests/${id}/publish`, undefined, '排期已发布')} className="gap-1.5">
+        {isOrg && contest.status === 'open' && (
+          <Button variant="outline" disabled={busyAction} onClick={() => void act(`/api/contests/${id}/publish`, undefined, '排期已发布')} className="gap-1.5">
             <ListOrdered className="size-4" />截止报名·出排期
           </Button>
         )}
-        {isOrg && (contest.status === 'open' || contest.status === 'draft' || contest.status === 'published') && (
-          <Button variant="outline" onClick={() => void act(`/api/contests/${id}/start`, undefined, '比赛已开始')} className="gap-1.5">
+        {isOrg && contest.status === 'published' && (
+          <Button variant="outline" disabled={busyAction} onClick={() => void act(`/api/contests/${id}/start`, undefined, '比赛已开始')} className="gap-1.5">
             <Play className="size-4" />立即开赛
           </Button>
         )}
         {isOrg && contest.status === 'rest' && (
-          <Button onClick={() => void act(`/api/contests/${id}/resume`, undefined, '已进入下一阶段')}>结束休息 / 下一阶段</Button>
+          <Button disabled={busyAction} onClick={() => void act(`/api/contests/${id}/resume`, undefined, '已进入下一阶段')}>结束休息 / 下一阶段</Button>
         )}
         {isOrg && (contest.status === 'running' || contest.status === 'rest') && (
-          <Button variant="destructive" onClick={() => void forceFinish()} className="gap-1.5">
-            强制结束赛事
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>
+                <Button
+                  variant="destructive"
+                  disabled={busyAction}
+                  onClick={() => void forceFinish()}
+                  className="gap-1.5"
+                >
+                  强制结束赛事
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              由后端核验关联对局终态并执行恢复性收尾
+            </TooltipContent>
+          </Tooltip>
         )}
-        {isLoggedIn && contest.status === 'open' && (
+        {isLoggedIn && !myEntry && contest.status === 'open' && (
           <div className="flex flex-wrap items-center gap-2">
             {needsRealName && (
               <span className="text-sm text-warning">
@@ -395,7 +541,7 @@ export default function ContestDetail() {
                 <Link to="/settings" className="font-medium underline">填写实名信息</Link>
               </span>
             )}
-            <Select value={botId} onValueChange={setBotId}>
+            <Select value={botId} onValueChange={setBotId} disabled={busyAction}>
               <SelectTrigger className="h-9 w-[12rem]">
                 <SelectValue placeholder="选择我的 Bot" />
               </SelectTrigger>
@@ -403,14 +549,14 @@ export default function ContestDetail() {
                 {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!botId || needsRealName} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) }, '报名成功')}>
+            <Button variant="outline" disabled={busyAction || !botId || needsRealName} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) }, '报名成功')}>
               报名派遣
             </Button>
           </div>
         )}
         {isLoggedIn && myEntry && (contest.status === 'rest' || contest.status === 'draft' || contest.status === 'open' || contest.status === 'published') && (
           <div className="flex flex-wrap items-center gap-2">
-            <Select value={botId} onValueChange={setBotId}>
+            <Select value={botId} onValueChange={setBotId} disabled={busyAction}>
               <SelectTrigger className="h-9 w-[12rem]">
                 <SelectValue placeholder={`更换 Bot（当前 #${myEntry.bot_id}）`} />
               </SelectTrigger>
@@ -418,31 +564,43 @@ export default function ContestDetail() {
                 {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!botId} onClick={() => void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) }, '派遣 Bot 已更换')}>
+            <Button variant="outline" disabled={busyAction || !botId} onClick={() => void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) }, '派遣 Bot 已更换')}>
               确认更换
             </Button>
           </div>
         )}
       </div>
 
-      {/* 内容区 Tabs：对阵 / 选手 / 排行（只渲染当前 tab，避免大量报名/积分全量铺开导致长空白） */}
+      {/* 内容区按赛事阶段展示，避免草稿期出现空对阵、完赛后仍以临时积分为主。 */}
       <Tabs value={contentTab} onValueChange={(v) => setContentTab(v as typeof contentTab)} className="mt-4">
         <TabsList>
-          <TabsTrigger value="matchups" className="gap-1.5">
-            <Swords className="size-4" />对阵
-          </TabsTrigger>
+          {showMatchups && (
+            <TabsTrigger value="matchups" className="gap-1.5">
+              <Swords className="size-4" />对阵
+            </TabsTrigger>
+          )}
           <TabsTrigger value="entries" className="gap-1.5">
             <Users className="size-4" />选手
             {entriesTotal > 0 && (
               <span className="text-xs text-muted-foreground">{entriesTotal}</span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="standings" className="gap-1.5">
-            <ListOrdered className="size-4" />排行
-            {standings.length > 0 && (
-              <span className="text-xs text-muted-foreground">{standings.length}</span>
-            )}
-          </TabsTrigger>
+          {showStandings && (
+            <TabsTrigger value="standings" className="gap-1.5">
+              <ListOrdered className="size-4" />阶段积分
+              {standings.length > 0 && (
+                <span className="text-xs text-muted-foreground">{standings.length}</span>
+              )}
+            </TabsTrigger>
+          )}
+          {showOfficial && (
+            <TabsTrigger value="official" className="gap-1.5">
+              <Trophy className="size-4" />正式名次
+              {officialResults.length > 0 && (
+                <span className="text-xs text-muted-foreground">{officialResults.length}</span>
+              )}
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* Tab「对阵」：阶段切换(S4) + 阶段配置 + 对阵视图(S6a) + 正式名次(finished) */}
@@ -543,21 +701,6 @@ export default function ContestDetail() {
             )}
           </div>
 
-          {/* P5：全员正式名次（赛事 finished 时显示在阵区下方 + 下载） */}
-          {contest.status === 'finished' && (
-            <div>
-              <div className="flex items-center gap-2">
-                <Trophy className="size-4 text-muted-foreground" />
-                <h3 className="text-sm font-semibold text-foreground">正式名次</h3>
-                <a
-                  href={`/api/contests/${id}/official-results?format=csv`}
-                  className="ml-auto inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                >
-                  <Download className="size-3" />导出 CSV
-                </a>
-              </div>
-            </div>
-          )}
         </TabsContent>
 
         {/* Tab「选手」：报名列表（含组织者批量指派/导出/实名显示/移除） */}
@@ -685,6 +828,79 @@ export default function ContestDetail() {
               total={standingsTotal}
               onPageChange={setStandingsPage}
             />
+          </div>
+        </TabsContent>
+
+        {/* 完赛后的权威、已固化名次；与赛中动态积分明确分开。 */}
+        <TabsContent value="official" className="mt-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <Trophy className="size-4 text-muted-foreground" />
+              <h3 className="text-sm font-semibold text-foreground">正式名次</h3>
+              <a
+                href={`/api/contests/${id}/official-results?format=csv`}
+                className="ml-auto inline-flex items-center gap-1 text-xs text-primary hover:underline"
+              >
+                <Download className="size-3" />导出 CSV
+              </a>
+            </div>
+            <Card className="mt-2 overflow-hidden">
+              <div className="overflow-x-auto">
+                <Table className="min-w-[34rem]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-14">名次</TableHead>
+                      <TableHead>Bot</TableHead>
+                      <TableHead>选手</TableHead>
+                      <TableHead>积分</TableHead>
+                      <TableHead className="hidden md:table-cell">奖项</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {officialResults.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5}>
+                          <EmptyState
+                            text={contest.official_results_ready ? '正式名次为空' : '正式名次尚未生成'}
+                            icon={<Trophy className="size-7 opacity-40" />}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ) : officialResults.map((result) => (
+                      <TableRow key={result.entry_id}>
+                        <TableCell className="font-mono text-base font-semibold text-primary">
+                          {result.rank}
+                        </TableCell>
+                        <TableCell className="max-w-[12rem]">
+                          {result.bot_id ? (
+                            <Link
+                              to={`/bot/${result.bot_id}`}
+                              className="block truncate font-medium text-foreground hover:text-primary"
+                            >
+                              {result.bot_display || result.bot_name || `#${result.bot_id}`}
+                            </Link>
+                          ) : <span className="text-muted-foreground">已删除 Bot</span>}
+                        </TableCell>
+                        <TableCell className="max-w-[12rem]">
+                          {result.owner_name ? (
+                            <Link
+                              to={`/user/${encodeURIComponent(result.owner_name)}`}
+                              className="block truncate text-muted-foreground hover:text-primary"
+                            >
+                              @{result.owner_display || result.owner_name}
+                            </Link>
+                          ) : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className="font-mono font-semibold">{result.points ?? 0}</TableCell>
+                        <TableCell className="hidden text-muted-foreground md:table-cell">
+                          {result.awarded || '—'}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </Card>
           </div>
         </TabsContent>
       </Tabs>

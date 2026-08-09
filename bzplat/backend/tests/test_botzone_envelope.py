@@ -21,9 +21,9 @@ def test_runtime_mode_constants():
 def test_keep_running_signal():
     assert bz.KEEP_RUNNING_SIGNAL == ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
     assert bz.is_keep_running_signal(bz.KEEP_RUNNING_SIGNAL)
-    # 带空白/换行仍识别
-    assert bz.is_keep_running_signal("\n>>>BOTZONE_REQUEST_KEEP_RUNNING<<<\n")
-    assert bz.is_keep_running_signal("  >>>BOTZONE_REQUEST_KEEP_RUNNING<<<  ")
+    # 行传输层会去掉 CRLF；协议层逐字符匹配，不接受额外空白。
+    assert not bz.is_keep_running_signal("\n>>>BOTZONE_REQUEST_KEEP_RUNNING<<<\n")
+    assert not bz.is_keep_running_signal("  >>>BOTZONE_REQUEST_KEEP_RUNNING<<<  ")
     assert not bz.is_keep_running_signal('{"response":0}')
     assert not bz.is_keep_running_signal("")
 
@@ -40,11 +40,13 @@ def test_dumps_traditional_envelope():
     assert " " not in line
 
 
-def test_dumps_traditional_with_data():
-    line = bz.dumps_traditional([1], [2], data={"k": "v"}, globaldata={"g": 1})
-    env = json.loads(line)
-    assert env["data"] == {"k": "v"}
-    assert env["globaldata"] == {"g": 1}
+def test_request_envelopes_have_one_canonical_shape():
+    trad = json.loads(bz.dumps_traditional([1], [2]))
+    longrunning = json.loads(bz.dumps_longrunning_single({"turn": 2}))
+    assert set(trad) == {"requests", "responses"}
+    assert set(longrunning) == {"request"}
+    with pytest.raises(TypeError):
+        bz.dumps_traditional([1], [2], data={"obsolete": True})
 
 
 def test_dumps_longrunning_single():
@@ -58,7 +60,7 @@ def test_dumps_longrunning_single():
 
 def test_loads_response_and_extract_payload():
     """解析 Bot 输出信封，取 response 字段。"""
-    line = json.dumps({"response": -1, "debug": "x"})
+    line = json.dumps({"response": -1})
     env = bz.loads_response(line)
     assert bz.extract_response_payload(env) == -1
 
@@ -67,15 +69,33 @@ def test_loads_response_and_extract_payload():
 
 
 def test_extract_payload_missing_response_raises():
-    """无 response 字段 → KeyError（Botzone 标准协议，response 必填）。"""
+    """无 response 字段 → 精确协议错误。"""
     env = {"debug": "no response"}
-    with pytest.raises(KeyError):
+    with pytest.raises(bz.ResponseProtocolError) as raised:
         bz.extract_response_payload(env)
+    assert raised.value.code == "missing_response"
+
+
+@pytest.mark.parametrize("field", ["debug", "data", "globaldata", "a"])
+def test_response_envelope_ignores_every_non_response_field(field):
+    assert bz.extract_response_payload({"response": 0, field: "ignored"}) == 0
 
 
 def test_loads_response_invalid_raises():
     with pytest.raises(json.JSONDecodeError):
         bz.loads_response("not json")
+
+
+@pytest.mark.parametrize("line", ["0", "[]", "{}"])
+def test_loads_response_itself_enforces_the_unique_top_level(line):
+    with pytest.raises(bz.ResponseProtocolError):
+        bz.loads_response(line)
+
+
+def test_loads_response_normalizes_away_ignored_top_level_fields():
+    assert bz.loads_response('{"response":0,"debug":"visible only to bot"}') == {
+        "response": 0
+    }
 
 
 def test_traditional_vs_longrunning_envelope_difference():

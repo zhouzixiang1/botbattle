@@ -1,93 +1,119 @@
-/* 点格棋随机占边 bot — Botzone 标准协议（信封）。
- * 请求信封: {"requests":[...]} 或 {"request":{x,y,pass,me,scores}}
- *   - 红方(me=0)首手 x=y=-1,pass=0；之后 x,y 为对方上一手
- *   - pass=1：对方得分连走，须响应 {"response":{"x":-1,"y":-1}}
- * 响应信封: {"response":{"x":int,"y":int}}
- * 交错网格 size=2N-1：偶偶=点(3) 奇偶/偶奇=边(4) 奇奇=格心(2)；占边后置 5。
- * 策略：照对方上一手占边，再随机占一条合法边。
+/* 点格棋随机合法边样例 Bot（平台 Traditional + LongRunning）。
+ *
+ * Traditional 每次启动都会收到完整 requests/responses 历史；本程序先从历史重建
+ * 已占边，再选择新边。LongRunning 首回合同样重建历史，响应后输出标准握手，后续
+ * 根据单条 request 增量维护棋盘。两种模式可使用同一个二进制。
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #define N 6
-#define SIZE (2 * N - 1)           /* 11（对齐引擎 DEFAULT_N=6，grid_size=11 交错 → 25 格）*/
-#define DOT 3
+#define SIZE (2 * N - 1)
 #define EDGE 4
 #define EDGE_USED 5
-#define BOX 2
+#define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 static int g[SIZE][SIZE];
 
 static void init_board(void) {
     for (int x = 0; x < SIZE; x++)
-        for (int y = 0; y < SIZE; y++) {
-            if (x % 2 == 0 && y % 2 == 0) g[x][y] = DOT;
-            else if ((x + y) % 2 == 1)    g[x][y] = EDGE;
-            else                          g[x][y] = BOX;
-        }
+        for (int y = 0; y < SIZE; y++)
+            g[x][y] = ((x + y) % 2 == 1) ? EDGE : 0;
 }
-
-static int in_board(int x, int y) { return x >= 0 && x < SIZE && y >= 0 && y < SIZE; }
 
 static int is_legal_edge(int x, int y) {
-    return in_board(x, y) && g[x][y] == EDGE;
+    return x >= 0 && x < SIZE && y >= 0 && y < SIZE && g[x][y] == EDGE;
 }
 
-static int field_int(const char *s, const char *key) {
+static int number_after(const char *p, const char *key, int def) {
     char pat[32];
     snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char *p = strstr(s, pat);
-    if (!p) return -1;
+    p = strstr(p, pat);
+    if (!p) return def;
     p = strchr(p + strlen(pat), ':');
-    if (!p) return -1;
-    return atoi(p + 1);
+    return p ? atoi(p + 1) : def;
+}
+
+/* 信封里只有 Pencil request/response 对象含 x/y；扫描全部坐标即可同时重放
+ * requests[]（对手边）与 responses[]（自己的边）。重复坐标无害。 */
+static void replay_all_edges(const char *line) {
+    const char *p = line;
+    while ((p = strstr(p, "\"x\"")) != NULL) {
+        int x = number_after(p, "x", -1);
+        int y = number_after(p, "y", -1);
+        if (is_legal_edge(x, y)) g[x][y] = EDGE_USED;
+        p += 3;
+    }
+}
+
+static int last_number(const char *line, const char *key, int def) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = line;
+    const char *last = NULL;
+    while ((p = strstr(p, pat)) != NULL) {
+        last = p;
+        p += strlen(pat);
+    }
+    return last ? number_after(last, key, def) : def;
+}
+
+static void emit_move(int x, int y) {
+    printf("{\"response\":{\"x\":%d,\"y\":%d}}\n", x, y);
+    fflush(stdout);
 }
 
 int main(void) {
     srand((unsigned)time(NULL));
     init_board();
+    int first_response = 1;
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
+
     while ((n = getline(&line, &cap, stdin)) != -1) {
         while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
             line[--n] = 0;
         if (n <= 0) continue;
 
-        int pass = field_int(line, "pass");
-        int ox = field_int(line, "x");
-        int oy = field_int(line, "y");
+        /* 完整历史是权威状态。Traditional 每回合进程会重启；这里重置也让手工
+         * 连续喂多份完整信封时保持正确。 */
+        if (strstr(line, "\"requests\"") != NULL) init_board();
+        replay_all_edges(line);
 
-        /* pass 回合：把对方那一步落到棋盘，然后回 (-1,-1) 把回合交还 */
+        int pass = last_number(line, "pass", 0);
         if (pass == 1) {
-            if (is_legal_edge(ox, oy)) g[ox][oy] = EDGE_USED;
-            fputs("{\"response\":{\"x\":-1,\"y\":-1}}\n", stdout);
-            fflush(stdout);
-            continue;
+            emit_move(-1, -1);
+        } else {
+            int xs[SIZE * SIZE], ys[SIZE * SIZE], count = 0;
+            for (int x = 0; x < SIZE; x++)
+                for (int y = 0; y < SIZE; y++)
+                    if (g[x][y] == EDGE) {
+                        xs[count] = x;
+                        ys[count] = y;
+                        count++;
+                    }
+            if (count == 0) {
+                emit_move(-1, -1);
+            } else {
+                int idx = rand() % count;
+                int x = xs[idx], y = ys[idx];
+                g[x][y] = EDGE_USED;
+                emit_move(x, y);
+            }
         }
 
-        /* 普通回合：落对方上一手 */
-        if (is_legal_edge(ox, oy)) g[ox][oy] = EDGE_USED;
-
-        /* 随机占一条合法边 */
-        int xs[SIZE * SIZE], ys[SIZE * SIZE], ec = 0;
-        for (int x = 0; x < SIZE; x++)
-            for (int y = 0; y < SIZE; y++)
-                if (g[x][y] == EDGE) { xs[ec] = x; ys[ec] = y; ec++; }
-        if (ec == 0) {
-            fputs("{\"response\":{\"x\":-1,\"y\":-1}}\n", stdout);
+        /* Traditional 模式读取第一行后停止该进程，因此额外握手无副作用；
+         * LongRunning 模式会校验它并切换为后续单 request。 */
+        if (first_response) {
+            fputs(KEEP_RUNNING "\n", stdout);
             fflush(stdout);
-            continue;
+            first_response = 0;
         }
-        int idx = rand() % ec;
-        int x = xs[idx], y = ys[idx];
-        g[x][y] = EDGE_USED;
-        printf("{\"response\":{\"x\":%d,\"y\":%d}}\n", x, y);
-        fflush(stdout);
     }
     free(line);
     return 0;
 }
-

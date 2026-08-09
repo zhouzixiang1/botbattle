@@ -69,7 +69,15 @@ export default function Register() {
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="reg-phone">手机号</Label>
-                  <Input id="reg-phone" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={20} />
+                  <Input
+                    id="reg-phone"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    inputMode="tel"
+                    maxLength={11}
+                    pattern="1[3-9][0-9]{9}"
+                  />
+                  <p className="text-xs text-muted-foreground">选填；填写时须为 11 位大陆手机号</p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="reg-school">学校</Label>

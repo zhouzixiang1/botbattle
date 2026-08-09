@@ -6,7 +6,15 @@ GAMES / GAME_LABEL / gameLabel / gameIcon / normalizeGameId / matchTypeBadge / G
 */
 import type { LucideIcon } from 'lucide-react'
 export type { GameId } from '@/games'
-export { GAMES, GAME_LABEL, gameLabel, gameIcon, isBoardGame, normalizeGameId } from '@/games'
+export {
+  GAMES,
+  GAME_LABEL,
+  findGame,
+  gameLabel,
+  gameIcon,
+  normalizeGameId,
+  unsupportedGameLabel,
+} from '@/games'
 import { GAMES as _GAMES } from '@/games'
 
 // re-export GAMES 的形状（{id,label,icon}）兼容旧解构——注册表的 GAMES 是 GameViewSpec[]

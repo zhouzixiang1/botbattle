@@ -32,6 +32,8 @@ interface Bot {
   updated_at?: string
   game_id?: string
   runtime_mode?: string
+  runnable?: boolean
+  unsupported_reason?: string | null
 }
 
 export default function MyBots() {
@@ -77,7 +79,7 @@ export default function MyBots() {
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
     if (!file) {
-      setError('请选择二进制文件')
+      setError('请选择 Linux x86_64 ELF 程序文件')
       return
     }
     setBusy(true)
@@ -105,6 +107,10 @@ export default function MyBots() {
   }
 
   const toggleActive = async (bot: Bot) => {
+    if (!bot.is_active && bot.runnable === false) {
+      setError(bot.unsupported_reason || '该历史 Bot 不是 Linux x86_64 ELF，不能重新启用')
+      return
+    }
     try {
       await apiJson(
         `/api/bots/${bot.id}/active?active=${bot.is_active ? 'false' : 'true'}`,
@@ -171,7 +177,7 @@ export default function MyBots() {
   }
 
   return (
-    <PageStub title="我的 Bot" subtitle="上传二进制 Bot（Linux ELF / Windows PE），选择对应游戏类型；macOS Mach-O 会被拒绝">
+    <PageStub title="我的 Bot" subtitle="上传 Linux x86_64 ELF Bot，并选择对应游戏与运行模式">
       {/* 桌面双栏：左=上传表单（sticky 常驻），右=筛选+列表主区；<lg 单列堆叠 */}
       <div className="lg:grid lg:grid-cols-[20rem_minmax(0,1fr)] lg:gap-6">
       <div className="lg:sticky lg:top-20 lg:self-start">
@@ -201,14 +207,14 @@ export default function MyBots() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="longrunning">LongRunning（长驻，推荐）</SelectItem>
-                  <SelectItem value="traditional">Traditional（传统）</SelectItem>
+                  <SelectItem value="traditional">Traditional（默认）</SelectItem>
+                  <SelectItem value="longrunning">LongRunning（严格长驻）</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
                 {runtimeMode === 'longrunning'
-                  ? '进程整场不重启；首回合完整历史 + 握手后单 request。'
-                  : '每回合发完整历史信封，Bot 自重放重建状态。'}
+                  ? '进程整场不重启；首回合响应后必须输出 KEEP_RUNNING 握手，之后接收单 request。缺少握手会被拒绝。'
+                  : '平台默认模式；每个决策点重启进程并发送完整历史信封，Bot 须自行重放。'}
               </p>
             </div>
             <div className="space-y-1.5">
@@ -218,8 +224,11 @@ export default function MyBots() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 required
-                pattern="[A-Za-z0-9_\-]+"
+                minLength={2}
+                maxLength={32}
+                pattern="[A-Za-z][A-Za-z0-9_]{1,31}"
               />
+              <p className="text-xs text-muted-foreground">2–32 位，字母开头，仅可含字母、数字和下划线</p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="upload-display">显示名</Label>
@@ -239,7 +248,7 @@ export default function MyBots() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="upload-file">二进制文件</Label>
+              <Label htmlFor="upload-file">程序文件（Linux x86_64 ELF）</Label>
               <label
                 htmlFor="upload-file"
                 className="flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent"
@@ -253,7 +262,7 @@ export default function MyBots() {
                     const f = e.target.files?.[0] ?? null
                     // 前端预校验：超过 50MB 直接拒绝（与服务端限制一致，避免无谓上传）
                     if (f && f.size > 50 * 1024 * 1024) {
-                      setError('文件过大，请上传 ≤50MB 的二进制文件')
+                      setError('文件过大，请上传 ≤50MB 的 Linux x86_64 ELF 程序文件')
                       setFile(null)
                       e.target.value = ''
                       return
@@ -264,7 +273,9 @@ export default function MyBots() {
                   className="sr-only"
                 />
               </label>
-              <p className="text-xs text-muted-foreground">Linux ELF / Windows PE，≤50MB</p>
+              <p className="text-xs text-muted-foreground">
+                仅接受 Linux x86_64 ELF，最大 50MB；Windows .exe、macOS 程序和原始 .py 文件均不支持。
+              </p>
             </div>
             {error && <ErrorMsg msg={error} />}
             <Button type="submit" disabled={busy} className="gap-1.5">
@@ -311,6 +322,7 @@ export default function MyBots() {
                       </Link>
                       <span className="font-mono text-xs text-muted-foreground">#{b.id}</span>
                       <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
+                      {b.runnable === false && <Badge variant="destructive">不可运行</Badge>}
                     </div>
                     {b.description && (
                       <p className="mt-0.5 text-xs text-muted-foreground">{b.description}</p>
@@ -328,12 +340,35 @@ export default function MyBots() {
                       <span>v{b.current_version ?? 0}</span>
                       <span>{b.is_active ? '启用' : '停用'}</span>
                     </div>
+                    {b.runnable === false && (
+                      <p className="mt-1 text-xs text-destructive">
+                        {b.unsupported_reason || '仅保留为历史记录；请上传 Linux x86_64 ELF 新版本。'}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    <Button type="button" variant="outline" size="sm" onClick={() => void toggleActive(b)} className="gap-1">
-                      <Power className="size-3.5" />
-                      {b.is_active ? '停用' : '启用'}
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={!b.is_active && b.runnable === false}
+                            onClick={() => void toggleActive(b)}
+                            className="gap-1"
+                          >
+                            <Power className="size-3.5" />
+                            {b.is_active ? '停用' : b.runnable === false ? '不可启用' : '启用'}
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {!b.is_active && b.runnable === false
+                          ? b.unsupported_reason || '仅支持 Linux x86_64 ELF64（小端）'
+                          : b.is_active ? '停用 Bot' : '启用 Bot'}
+                      </TooltipContent>
+                    </Tooltip>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button

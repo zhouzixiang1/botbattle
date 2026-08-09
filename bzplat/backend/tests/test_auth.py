@@ -99,6 +99,50 @@ def test_wrong_password_and_duplicate(tmp_path):
     assert ei.value.code == "invalid_credentials"
 
 
+def test_register_rejects_invalid_phone(tmp_path):
+    auth, _ = _auth(tmp_path)
+    for index, invalid in enumerate(("abc", "13١٢٣٤٥٦٧٨٩", "13１２３４５６７８９")):
+        username = f"phoneuser{index}"
+        with pytest.raises(AuthError) as ei:
+            auth.register(
+                username, f"phone{index}@ex.com", "password12", phone=invalid
+            )
+        assert ei.value.code == "invalid_phone"
+        assert auth.store.get_user_by_username(username) is None
+
+    user = auth.register(
+        "phoneok", "phoneok@ex.com", "password12", phone=" 13800138000 "
+    )
+    assert auth.store.get_user(user["id"])["phone"] == "13800138000"
+
+
+def test_register_route_rolls_back_user_when_verify_mail_fails(tmp_path, monkeypatch):
+    """首封验证邮件失败时，HTTP 注册不能留下占用用户名的半成品账号。"""
+    from fastapi.testclient import TestClient
+    from bzplat.backend.main import create_app
+
+    monkeypatch.setenv("BZ_SKIP_CAPTCHA", "1")
+    app = create_app(db_path=str(tmp_path / "register-atomic.db"))
+    app.state.auth.mailer = None
+    client = TestClient(app)
+    payload = {
+        "username": "atomicuser",
+        "email": "atomic@example.com",
+        "password": "password12",
+        "phone": "13800138000",
+        "captcha_id": "skip",
+        "captcha_answer": "skip",
+    }
+    first = client.post("/api/auth/register", json=payload)
+    assert first.status_code == 503, first.text
+    assert app.state.store.get_user_by_username("atomicuser") is None
+
+    # 重试仍进入发信路径（503），而非用户名/邮箱已占用（409）。
+    second = client.post("/api/auth/register", json=payload)
+    assert second.status_code == 503, second.text
+    assert app.state.store.get_user_by_username("atomicuser") is None
+
+
 def test_change_password(tmp_path):
     auth, _ = _auth(tmp_path, mailer=False)
     user = auth.register("dave", "d@ex.com", "password12")
@@ -114,18 +158,67 @@ def test_request_reset_and_reset_password(tmp_path):
     auth, mailer = _auth(tmp_path)
     user = auth.register("erin", "e@ex.com", "password12")
     auth.store.update_user(user["id"], email_verified=1)
+    _, old_session = auth.authenticate("erin", "password12")
     ok, _ = auth.request_reset("e@ex.com")
     assert ok
     assert any("重置" in m["subject"] or "reset" in m["subject"].lower() for m in mailer.sent)
     code = auth.store.get_latest_email_code(user["id"], CODE_RESET)["code"]
     auth.reset_password("erin", code, "brandnew1")
+    assert auth.verify_session(old_session) is None
     _, token = auth.authenticate("erin", "brandnew1")
     assert token
+    with pytest.raises(AuthError) as reused:
+        auth.reset_password("erin", code, "anotherpass1")
+    assert reused.value.code == "invalid_code"
 
     # 不存在用户不抛
     ok2, empty = auth.request_reset("nobody@ex.com")
     assert ok2 is False
     assert empty == {}
+
+
+def test_admin_reset_token_updates_password_consumes_token_and_revokes_sessions(
+    tmp_path,
+):
+    auth, _ = _auth(tmp_path, mailer=False)
+    user = auth.register("tokenuser", "token@example.com", "password12")
+    auth.store.update_user(user["id"], email_verified=1)
+    _, old_session = auth.authenticate("tokenuser", "password12")
+    reset_token, _ = auth.admin_create_reset_token("token@example.com")
+
+    reset_user = auth.reset_password_by_token(reset_token, "tokenpass1")
+
+    assert reset_user["id"] == user["id"]
+    assert auth.store.get_password_reset(reset_token) is None
+    assert auth.verify_session(old_session) is None
+    _, new_session = auth.authenticate("tokenuser", "tokenpass1")
+    assert new_session
+    with pytest.raises(AuthError) as reused:
+        auth.reset_password_by_token(reset_token, "anotherpass1")
+    assert reused.value.code == "invalid_reset_token"
+
+
+def test_expired_reset_credentials_report_expired_without_consuming(tmp_path):
+    auth, _ = _auth(tmp_path, mailer=False)
+    user = auth.register("expiredauth", "expiredauth@example.com", "password12")
+    original_hash = auth.store.get_user(user["id"])["password_hash"]
+    auth.store.add_email_code(
+        user["id"], CODE_RESET, "222222", "2000-01-01T00:00:00"
+    )
+    auth.store.add_password_reset(
+        "expired-auth-token", user["id"], "2000-01-01T00:00:00"
+    )
+
+    with pytest.raises(AuthError) as code_error:
+        auth.reset_password("expiredauth", "222222", "newpass123")
+    assert code_error.value.code == "expired_code"
+    assert auth.store.get_latest_email_code(user["id"], CODE_RESET) is not None
+
+    with pytest.raises(AuthError) as token_error:
+        auth.reset_password_by_token("expired-auth-token", "newpass123")
+    assert token_error.value.code == "expired_reset_token"
+    assert auth.store.get_password_reset("expired-auth-token") is not None
+    assert auth.store.get_user(user["id"])["password_hash"] == original_hash
 
 
 def test_captcha_create_verify_once(tmp_path):

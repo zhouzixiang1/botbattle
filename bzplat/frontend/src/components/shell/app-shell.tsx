@@ -64,7 +64,7 @@ const AUTH_PATHS = ['/login', '/register', '/verify-email', '/reset-password']
 /** 主导航列表（桌面侧栏与移动抽屉共用）。 */
 function navItemsFor(user?: { role?: string } | null): NavItem[] {
   const items = [...NAV_ITEMS]
-  if (user?.role === 'admin' || user?.role === 'organizer') items.push(ADMIN_NAV)
+  if (user?.role === 'admin') items.push(ADMIN_NAV)
   return items
 }
 
@@ -287,7 +287,7 @@ export function AppShell() {
             <div className={cn('flex items-center gap-1', isAuthPage ? 'ml-auto' : 'ml-auto')}>
               {!isAuthPage && (
                 <div className="hidden sm:block">
-                  <GlobalSearch />
+                  <GlobalSearch hotkey />
                 </div>
               )}
               <ThemeToggle />
@@ -333,9 +333,8 @@ export function AppShell() {
 
         {/* 页脚（跟随主体宽度，不跨侧栏） */}
         <footer className="border-t border-border">
-          <div className="flex w-full flex-col items-center justify-between gap-2 px-4 py-5 text-xs text-muted-foreground sm:flex-row lg:px-8">
+          <div className="flex w-full items-center px-4 py-5 text-xs text-muted-foreground lg:px-8">
             <span>Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
-            <span className="opacity-70">React 19 · Tailwind v4 · shadcn/ui</span>
           </div>
         </footer>
       </div>

@@ -44,6 +44,7 @@ type Resolver = (ok: boolean) => void
 export function useConfirm(): [
   (opts: ConfirmOptions) => Promise<boolean>,
   ReactNode,
+  () => void,
 ] {
   const [open, setOpen] = useState(false)
   const [opts, setOpts] = useState<ConfirmOptions>({})
@@ -71,6 +72,7 @@ export function useConfirm(): [
     },
     [settle],
   )
+  const cancel = useCallback(() => settle(false), [settle])
 
   const {
     title = '确认操作',
@@ -102,5 +104,5 @@ export function useConfirm(): [
     </Dialog>
   )
 
-  return [confirm, dialog]
+  return [confirm, dialog, cancel]
 }

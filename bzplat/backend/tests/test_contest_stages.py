@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +48,43 @@ def test_swiss_and_ko():
     assert len(ko) == 2  # 4 人首轮 2 场
 
 
+def test_swiss_repeated_pair_fallback_accepts_played_set():
+    """3 人第二轮仅剩已交手候选时不得对 played set 调 .get 崩溃。"""
+    pairings = swiss_pairings(
+        [1, 2, 3],
+        scores={1: 3.0, 2: 1.0, 3: 0.0},
+        played={(1, 2)},
+        round_num=2,
+    )
+    matches = [pairing for pairing in pairings if pairing.requires_match]
+    byes = [pairing for pairing in pairings if not pairing.requires_match]
+    assert len(matches) == len(byes) == 1
+    assert {matches[0].bot_a_id, matches[0].bot_b_id} == {1, 2}
+    assert matches[0].round_num == byes[0].round_num == 2
+
+
+def test_swiss_odd_pairings_persist_explicit_rotating_bye_specs():
+    """奇数 Swiss 每轮返回 completed/no-match bye，且优先轮换未 bye 者。"""
+    bye_counts: dict[int, int] = {}
+    bye_order: list[int] = []
+    for round_num in range(1, 4):
+        pairings = swiss_pairings(
+            [1, 2, 3],
+            scores={1: 0.0, 2: 0.0, 3: 0.0},
+            round_num=round_num,
+            bye_counts=bye_counts,
+        )
+        assert len(pairings) == 2
+        bye = next(pairing for pairing in pairings if not pairing.requires_match)
+        assert bye.bot_b_id is None
+        assert bye.status == "completed"
+        assert bye.round_num == round_num
+        bye_order.append(bye.bot_a_id)
+        bye_counts[bye.bot_a_id] = bye_counts.get(bye.bot_a_id, 0) + 1
+
+    assert set(bye_order) == {1, 2, 3}
+
+
 def test_full_rr_guard_and_templates():
     tid, gid, stages = resolve_stages("holdem_swiss_ko")
     assert gid == "holdem"
@@ -66,18 +104,23 @@ def store(tmp_path):
     return Store(str(tmp_path / "c.db"))
 
 
-def _mk_bots(store: Store, n: int = 4):
+def _mk_bots(store: Store, n: int = 4, *, game_id: str = "holdem"):
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
     users = []
     bots = []
     for i in range(n):
         u = store.create_user(f"user{i}", f"u{i}@ex.com", hash_password("password1"))
         users.append(u)
+        binary_path = fixture_dir / f"fake{i}"
+        binary_path.write_bytes(b"test fixture")
         b = store.create_bot(
             u["id"],
             f"bot{i}",
-            binary_path=f"/tmp/fake{i}",
+            binary_path=str(binary_path),
             format="elf",
             is_active=1,
+            game_id=game_id,
         )
         bots.append(b)
     return users, bots
@@ -112,10 +155,12 @@ def test_dispatch_does_not_touch_running_pairings(store: Store):
     p_pend = store.add_contest_pairing(
         c["id"], bots[0]["id"], bots[1]["id"], status="pending"
     )
+    new_binary_path = Path(store.path).resolve().parent / "bot-fixtures" / "fake0b"
+    new_binary_path.write_bytes(b"test fixture")
     b_new = store.create_bot(
         users[0]["id"],
         "bot0b",
-        binary_path="/tmp/fake0b",
+        binary_path=str(new_binary_path),
         format="elf",
         is_active=1,
     )
@@ -148,7 +193,6 @@ def test_swiss_ko_smoke_pairings(store: Store):
         game_id=gid,
         template_id=tid,
         stages_json=json.dumps(stages),
-        hands_per_match=1,
     )
     for u, b in zip(users, bots):
         store.add_contest_entry(c["id"], u["id"], b["id"])
@@ -161,7 +205,7 @@ def test_swiss_ko_smoke_pairings(store: Store):
 
         async def challenge(
             self, a, b, owner_user_id, *, match_type="contest", contest_id=None,
-            game_id=None, match_config=None, **k
+            game_id=None, **k
         ):
             self.n += 1
             mid = f"fake-match-{self.n}"
@@ -173,7 +217,7 @@ def test_swiss_ko_smoke_pairings(store: Store):
                 contest_id=contest_id,
                 match_type=match_type,
                 game_id=game_id,
-                match_config=match_config,
+                match_config={},
             )
             return mid
 
@@ -215,27 +259,18 @@ def test_group_drr_ko_estimate():
     assert len(ko) == 2
 
 
-def test_start_rejects_unregistered_engine(store: Store):
-    users, bots = _mk_bots(store, 2)
-    c = store.create_contest(
-        "g",
-        users[0]["id"],
-        game_id="unknown_game",
-        template_id="gomoku_group_drr_ko",
-        stages_json=json.dumps(
-            [{"key": "g", "type": "group_double_round_robin", "group_count": 1}]
-        ),
-    )
-    for u, b in zip(users, bots):
-        store.add_contest_entry(c["id"], u["id"], b["id"])
-    store.update_contest(c["id"], status="open")
-    mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
-
-    async def run():
-        with pytest.raises(ValueError, match="未注册"):
-            await mgr.start(c["id"])
-
-    asyncio.run(run())
+def test_create_rejects_unregistered_engine(store: Store):
+    users, _ = _mk_bots(store, 2)
+    with pytest.raises(ValueError, match="game_id"):
+        store.create_contest(
+            "g",
+            users[0]["id"],
+            game_id="unknown_game",
+            template_id="gomoku_group_drr_ko",
+            stages_json=json.dumps(
+                [{"key": "g", "type": "group_double_round_robin", "group_count": 1}]
+            ),
+        )
 
 
 def test_gomoku_engine_registered(store: Store):
@@ -269,91 +304,38 @@ def test_full_rr_rejects_large_n(store: Store):
     asyncio.run(run())
 
 
-def test_match_config_hands_dispatched_for_holdem(store: Store):
-    """holdem 比赛：match_config.hands 透传到 challenge。"""
-    users, bots = _mk_bots(store, 2)
-    org = users[0]
-    c = store.create_contest(
-        "hcup", org["id"], game_id="holdem", template_id="holdem_rr",
-        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
-        match_config_json=json.dumps({"hands": 20}),
-    )
-    for u, b in zip(users, bots):
-        store.add_contest_entry(c["id"], u["id"], b["id"])
-    # 手工生成一条 pending 配对（等价 _begin_stage 的产物）
-    store.add_contest_pairing(c["id"], bots[0]["id"], bots[1]["id"], status="pending")
-    store.update_contest(c["id"], status="running", current_stage_idx=0)
-
-    seen = {}
-
-    class FakeOrch:
-        async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                            contest_id=None, game_id=None, match_config=None, **k):
-            seen["match_config"] = match_config
-            seen["game_id"] = game_id
-            store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               match_type=match_type, game_id=game_id, match_config=match_config)
-            return "m1"
-
-    mgr = ContestManager(store, FakeOrch())  # type: ignore
-
-    async def run():
-        await mgr._dispatch_pending(c["id"], 0)
-
-    asyncio.run(run())
-    # #123：hands 钉死固定，match_config 不再含 hands
-    assert seen["match_config"] == {}
-    assert seen["game_id"] == "holdem"
+@pytest.mark.parametrize(
+    "removed",
+    [
+        {"match_config_json": json.dumps({"hands": 20})},
+        {"hands_per_match": 20},
+    ],
+)
+def test_contest_store_creation_rejects_removed_rule_fields(store: Store, removed):
+    users, _ = _mk_bots(store, 1)
+    with pytest.raises(TypeError):
+        store.create_contest(
+            "removed",
+            users[0]["id"],
+            game_id="holdem",
+            **removed,
+        )
 
 
-def test_match_config_n_dots_dispatched_for_pencil(store: Store):
-    """pencil 比赛：match_config.n_dots 透传到 challenge。"""
-    users, bots = _mk_bots(store, 2)
-    org = users[0]
-    c = store.create_contest(
-        "pcup", org["id"], game_id="pencil", template_id="pencil_swiss_ko",
-        stages_json=json.dumps([{"key": "rr", "type": "round_robin", "scoring": "ccgc_2_1_0"}]),
-        match_config_json=json.dumps({"n_dots": 9}),
-    )
-    for u, b in zip(users, bots):
-        store.add_contest_entry(c["id"], u["id"], b["id"])
-    store.add_contest_pairing(c["id"], bots[0]["id"], bots[1]["id"], status="pending")
-    store.update_contest(c["id"], status="running", current_stage_idx=0)
-
-    seen = {}
-
-    class FakeOrch:
-        async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                            contest_id=None, game_id=None, match_config=None, **k):
-            seen["match_config"] = match_config
-            seen["game_id"] = game_id
-            store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               match_type=match_type, game_id=game_id, match_config=match_config)
-            return "m1"
-
-    mgr = ContestManager(store, FakeOrch())  # type: ignore
-
-    async def run():
-        await mgr._dispatch_pending(c["id"], 0)
-
-    asyncio.run(run())
-    # #123：n_dots 钉死固定，match_config 不再含 n_dots
-    assert seen["match_config"] == {}
-    assert seen["game_id"] == "pencil"
-
-
-def test_contest_create_uses_template_match_config(store: Store):
-    """ContestManager.create 从模板取自带 match_config（无显式传入时）。"""
+def test_contest_create_does_not_expose_rule_config_columns(store: Store):
+    """新赛事结构不再产生 hands_per_match/match_config_json。"""
     from bzplat.backend.contests.manager import ContestManager
     users, _ = _mk_bots(store, 1)
     mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
     c = mgr.create(users[0]["id"], "t", template_id="holdem_swiss_ko")
-    # #123：游戏规则参数（hands/n_dots）已钉死固定值，match_config 为空（不再含 hands）
-    assert c["match_config_json"] == "{}"
+    assert "hands_per_match" not in c
+    assert "match_config_json" not in c
     c2 = mgr.create(users[0]["id"], "t2", template_id="gomoku_group_drr_ko")
-    assert c2["match_config_json"] == "{}"
+    assert "hands_per_match" not in c2
+    assert "match_config_json" not in c2
     c3 = mgr.create(users[0]["id"], "t3", template_id="pencil_swiss_ko")
-    assert c3["match_config_json"] == "{}"  # n_dots 钉死固定（不再配置）
+    assert "hands_per_match" not in c3
+    assert "match_config_json" not in c3
 
 
 # ── 多轮赛制推进修复（500 人压测发现的 bug）─────────────────────
@@ -365,12 +347,12 @@ class _FakeOrch:
         self.n = 0
 
     async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                        contest_id=None, game_id=None, match_config=None, **k):
+                        contest_id=None, game_id=None, **k):
         self.n += 1
         mid = f"fake-match-{contest_id}-{self.n}"
         self.store.create_match(
             mid, a, b, owner_id=owner_user_id, contest_id=contest_id,
-            match_type=match_type, game_id=game_id, match_config=match_config or {},
+            match_type=match_type, game_id=game_id, match_config={},
         )
         return mid
 
@@ -421,6 +403,103 @@ def test_swiss_generates_next_round(store: Store):
         assert c2["status"] == "running" and c2["current_stage_idx"] == 0, (
             f"swiss R1 完成不应结束阶段，status={c2['status']} stage={c2['current_stage_idx']}"
         )
+
+    asyncio.run(run())
+
+
+def test_swiss_materializes_balanced_seats_into_pairing_and_challenge(store: Store):
+    """三轮两人 Swiss 的实际 seat0 应轮换，并原样传给 challenge。"""
+    users, bots = _mk_bots(store, 2)
+    cid = store.create_contest(
+        "swiss-seat-balance",
+        users[0]["id"],
+        game_id="holdem",
+        stages_json=json.dumps(
+            [{"key": "s", "type": "swiss", "rounds": 3}]
+        ),
+    )["id"]
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(cid, user["id"], bot["id"])
+    store.update_contest(cid, status="running", current_stage_idx=0)
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+
+    async def run():
+        await manager._begin_stage(cid, 0)
+        for _ in range(2):
+            _complete_all_pairs(store, cid, 0, winner_fn=lambda _a, _b: 0)
+            await manager.maybe_finish(cid)
+
+    asyncio.run(run())
+    pairings = store.list_contest_pairings(cid, stage_idx=0)
+    actual_seat0 = [
+        next(p for p in pairings if p["round_num"] == round_num)["bot_a_id"]
+        for round_num in (1, 2, 3)
+    ]
+    assert actual_seat0 == [bots[0]["id"], bots[1]["id"], bots[0]["id"]]
+    assert all(pairing["color_first"] == 0 for pairing in pairings)
+    for pairing in pairings:
+        match = store.get_match(pairing["match_id"])
+        assert (match["bot_a_id"], match["bot_b_id"]) == (
+            pairing["bot_a_id"],
+            pairing["bot_b_id"],
+        )
+
+
+def test_swiss_odd_multi_round_byes_are_scored_rotated_and_persisted(store: Store):
+    """3 人 3 轮 Swiss：bye 每轮落一条 completed/no-match，三人各一次。
+
+    bye 给胜场分，但在尚未完成真实对局的 R1 不应增加 wins/对手。
+    每轮完成后 ``maybe_finish`` 必须能识别 bye 已完成并持久化下一轮。
+    """
+    users, bots = _mk_bots(store, 3)
+    stage = {
+        "key": "swiss-odd",
+        "type": "swiss",
+        "rounds": 3,
+        "scoring": "poker_3_1_0",
+        "rest_after_minutes": 0,
+    }
+    cid = store.create_contest(
+        "swiss-odd-3",
+        users[0]["id"],
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )["id"]
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(cid, user["id"], bot["id"])
+    store.update_contest(cid, status="running", current_stage_idx=0)
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+
+    async def run():
+        await manager._begin_stage(cid, 0)
+        first_round = store.list_contest_pairings(cid, stage_idx=0)
+        first_bye = next(pairing for pairing in first_round if pairing["bot_b_id"] is None)
+        initial_standings = {
+            row["entry_id"]: row for row in manager.standings(cid, stage_idx=0)
+        }
+        assert initial_standings[first_bye["entry_a_id"]]["points"] == 3
+        assert initial_standings[first_bye["entry_a_id"]]["wins"] == 0
+        assert first_bye["status"] == "completed" and first_bye["match_id"] is None
+
+        for round_num in range(1, 4):
+            _complete_all_pairs(store, cid, 0, winner_fn=lambda _a, _b: 0)
+            await manager.maybe_finish(cid)
+            persisted = store.list_contest_pairings(cid, stage_idx=0)
+            assert any(
+                pairing["round_num"] == round_num
+                and pairing["bot_b_id"] is None
+                and pairing["match_id"] is None
+                and pairing["status"] == "completed"
+                for pairing in persisted
+            )
+
+        pairings = store.list_contest_pairings(cid, stage_idx=0)
+        byes = [pairing for pairing in pairings if pairing["bot_b_id"] is None]
+        assert len(byes) == 3
+        assert {pairing["entry_a_id"] for pairing in byes} == {
+            entry["id"] for entry in store.list_contest_entries(cid)
+        }
+        assert store.get_contest(cid)["status"] == "finished"
 
     asyncio.run(run())
 

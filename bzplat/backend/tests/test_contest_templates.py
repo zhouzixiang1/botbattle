@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from bzplat.backend.contests.templates import resolve_template, resolve_stages
+from bzplat.backend.contests.templates import (
+    default_match_config,
+    points_for_result,
+    resolve_template,
+    resolve_stages,
+)
+from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.contests.validation import (
     validate_match_config,
     validate_stage,
@@ -70,42 +76,88 @@ def test_list_filter_by_game(store: Store):
 def test_validate_template_ok():
     norm = validate_template(
         "cup1", "杯赛", "pencil",
-        {"n_dots": 9}, [{"key": "g", "type": "group_double_round_robin", "group_count": 2}],
+        {}, [{"key": "g", "type": "group_double_round_robin", "group_count": 2}],
     )
     assert norm["game_id"] == "pencil"
-    # n_dots 已钉死，match_config 规整为空（传入值被忽略）
     assert norm["match_config"] == {}
     assert norm["stages"][0]["group_count"] == 2
 
 
 def test_validate_rejects_bad_type():
     with pytest.raises(ValueError, match="type"):
-        validate_stage({"type": "nope"}, 0)
+        validate_stage({"type": "nope"}, 0, "holdem")
 
 
 def test_validate_rejects_bad_scoring():
     with pytest.raises(ValueError, match="scoring"):
-        validate_stage({"type": "round_robin", "scoring": "xxx"}, 0)
+        validate_stage({"type": "round_robin", "scoring": "xxx"}, 0, "holdem")
 
 
 def test_validate_rejects_group_count_on_non_group():
     with pytest.raises(ValueError, match="group_count"):
-        validate_stage({"type": "swiss", "group_count": 4}, 0)
+        validate_stage({"type": "swiss", "group_count": 4}, 0, "holdem")
 
 
-def test_validate_match_config_holdem_ignored():
-    # 手数已钉死，validate 忽略任何 hands 字段，返回空 dict（不再校验范围）
-    assert validate_match_config({"hands": 1}, "holdem") == {}
-    assert validate_match_config({"hands": 500}, "holdem") == {}
-    assert validate_match_config({"hands": 0}, "holdem") == {}  # 不再抛 ValueError
-    assert validate_match_config({"hands": 999}, "holdem") == {}
+@pytest.mark.parametrize("field", ["max_hand", "maxHand", "roundz", "board_size"])
+def test_validate_stage_rejects_every_unknown_key(field):
+    with pytest.raises(ValueError, match=field):
+        validate_stage({"type": "round_robin", field: 1}, 0, "holdem")
 
 
-def test_validate_match_config_pencil_ignored():
-    # 点阵边长已钉死，validate 忽略任何 n_dots 字段，返回空 dict
-    assert validate_match_config({"n_dots": 3}, "pencil") == {}
-    assert validate_match_config({"n_dots": 15}, "pencil") == {}
-    assert validate_match_config({"n_dots": 2}, "pencil") == {}  # 不再抛 ValueError
+@pytest.mark.parametrize(
+    ("stage", "message"),
+    [
+        ({"type": None}, "type"),
+        ({"type": []}, "type"),
+        ({"type": "round_robin", "scoring": None}, "scoring"),
+        ({"type": "round_robin", "scoring": []}, "scoring"),
+        ({"type": "swiss", "rounds": True}, "rounds"),
+        ({"type": "round_robin", "duplicate": 1}, "duplicate"),
+        ({"type": "round_robin", "duplicate": None}, "duplicate"),
+        ({"type": "round_robin", "allow_large_round_robin": "yes"}, "allow_large"),
+        ({"type": "round_robin", "round_stagger_minutes": 1.5}, "round_stagger"),
+    ],
+)
+def test_validate_stage_rejects_wrong_typed_values(stage, message):
+    with pytest.raises(ValueError, match=message):
+        validate_stage(stage, 0, "holdem")
+
+
+def test_validate_stage_preserves_supported_specialized_fields():
+    duplicate = validate_stage(
+        {"type": "round_robin", "duplicate": True, "allow_large_round_robin": True},
+        0,
+        "holdem",
+    )
+    assert duplicate["duplicate"] is True
+    assert duplicate["allow_large_round_robin"] is True
+    ranked = validate_stage(
+        {
+            "type": "double_round_robin",
+            "ranking_mode": "replace_top",
+            "ranking_scope": 8,
+        },
+        0,
+        "holdem",
+    )
+    assert ranked["ranking_mode"] == "replace_top"
+    assert ranked["ranking_scope"] == 8
+    with pytest.raises(ValueError, match="不支持 duplicate"):
+        validate_stage({"type": "round_robin", "duplicate": True}, 0, "gomoku")
+
+
+def test_validate_match_config_holdem_rejects_old_fields():
+    assert validate_match_config({}, "holdem") == {}
+    for config in ({"hands": 1}, {"num_hands": 70}, {"starting_stack": 20_000}):
+        with pytest.raises(ValueError, match="游戏规则已固定"):
+            validate_match_config(config, "holdem")
+
+
+def test_validate_match_config_pencil_rejects_old_fields():
+    assert validate_match_config({}, "pencil") == {}
+    for config in ({"n_dots": 3}, {"time_limit": 900}):
+        with pytest.raises(ValueError, match="游戏规则已固定"):
+            validate_match_config(config, "pencil")
 
 
 def test_validate_template_id_format():
@@ -121,17 +173,104 @@ def test_validate_rejects_bad_game_id():
         validate_template("goodid", "n", "unknown", {}, [{"type": "round_robin"}])
 
 
+@pytest.mark.parametrize("game_id", [None, "", "unknown"])
+def test_direct_config_lookup_does_not_guess_holdem(game_id):
+    with pytest.raises((ValueError, KeyError)):
+        default_match_config(game_id)  # type: ignore[arg-type]
+
+
+def test_custom_empty_stages_does_not_resolve_a_default_template():
+    with pytest.raises(ValueError, match="非空"):
+        resolve_stages(None, [], game_id="holdem")
+
+
+def test_unknown_scoring_does_not_fall_back_to_poker():
+    with pytest.raises(ValueError, match="未知计分规则"):
+        points_for_result("typo", None, 0)
+
+
 # ── resolve 读表（含 admin 覆盖）──────────────────────────────
 def test_resolve_template_reads_table(store: Store):
     # admin 覆盖内置模板的 stages
     store.upsert_contest_template(
-        "holdem_swiss_ko", name="改", game_id="holdem", match_config={"hands": 30},
+        "holdem_swiss_ko", name="改", game_id="holdem", match_config={},
         stages=[{"key": "x", "type": "round_robin"}], is_builtin=True,
     )
     tid, gid, stages, mc = resolve_template("holdem_swiss_ko", store=store)
     assert tid == "holdem_swiss_ko" and gid == "holdem"
     assert stages == [{"key": "x", "type": "round_robin"}]
-    assert mc == {"hands": 30}  # 读到覆盖值而非代码默认 70
+    assert mc == {}
+
+
+def test_stored_template_with_unknown_game_does_not_become_holdem(store: Store):
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_templates SET game_id='unknown' WHERE id='holdem_swiss_ko'"
+        )
+    with pytest.raises(ValueError, match="未知游戏"):
+        resolve_template("holdem_swiss_ko", store=store)
+
+
+def test_store_creation_and_rating_reject_invalid_game_ids(store: Store):
+    user_id = store.create_user("strictgid", "strictgid@example.com", "x")["id"]
+    for bad in ("", "unknown"):
+        with pytest.raises(ValueError, match="game_id"):
+            store.create_bot(
+                user_id,
+                f"bad_{bad or 'empty'}",
+                binary_path="/tmp/bot",
+                format="elf",
+                game_id=bad,
+            )
+        with pytest.raises(ValueError, match="game_id"):
+            store.create_contest("bad", user_id, game_id=bad)
+        with pytest.raises(ValueError, match="game_id"):
+            store.upsert_contest_template(
+                f"bad_{bad or 'empty'}",
+                name="bad",
+                game_id=bad,
+                match_config={},
+                stages=[{"type": "round_robin"}],
+            )
+        with pytest.raises(ValueError, match="game_id"):
+            store.create_match("bad", 1, 2, game_id=bad)
+
+    bot = store.create_bot(
+        user_id,
+        "strict_bot",
+        binary_path="/tmp/bot",
+        format="elf",
+        game_id="gomoku",
+    )
+    with store._tx() as conn:
+        conn.execute("UPDATE bots SET game_id='unknown' WHERE id=?", (bot["id"],))
+    with pytest.raises(ValueError, match="game_id"):
+        store.ensure_rating(bot["id"])
+
+
+def test_create_rejects_template_game_mismatch(store: Store):
+    """请求 game_id 不能覆盖模板所属游戏，避免跨游戏 stages 混搭。"""
+    manager = ContestManager(store, object())  # create 不消费 orchestrator
+
+    with pytest.raises(ValueError, match=r"holdem.*不能用于游戏 gomoku"):
+        manager.create(
+            1,
+            "错误混搭",
+            template_id="holdem_swiss_ko",
+            game_id="gomoku",
+        )
+
+    # 显式 stages 也不能绕过具名模板的所属游戏约束。
+    with pytest.raises(ValueError, match=r"holdem.*不能用于游戏 gomoku"):
+        manager.create(
+            1,
+            "自定义阶段绕过",
+            template_id="holdem_swiss_ko",
+            game_id="gomoku",
+            stages=[{"key": "rr", "type": "round_robin"}],
+        )
+
+    assert store.list_contests() == []
 
 
 def test_resolve_stages_falls_back_to_defaults_without_store():

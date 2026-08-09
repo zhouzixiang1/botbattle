@@ -150,12 +150,23 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
       matchOver = true
     } else if (t === 'time_used') {
       const seat = Number(ev.seat)
+      if (seat !== 0 && seat !== 1) continue
+      const budget = Math.max(0, Number(ev.budget) || 0)
       if (!timeUsed) timeUsed = [0, 0]
-      if (!timeRemaining) timeRemaining = [0, 0]
+      // The first clock event belongs to only one player. Initialise the untouched
+      // player from the shared budget instead of showing a false 0:00 timeout.
+      if (!timeRemaining) timeRemaining = [budget, budget]
       timeUsed[seat] = Number(ev.used) || 0
       timeRemaining[seat] = Number(ev.remaining) || 0
     } else if (t === 'time_out') {
-      timeOut = Number(ev.seat)
+      const seat = Number(ev.seat)
+      if (seat !== 0 && seat !== 1) continue
+      const budget = Math.max(0, Number(ev.budget) || 0)
+      if (!timeUsed) timeUsed = [0, 0]
+      if (!timeRemaining) timeRemaining = [budget, budget]
+      timeUsed[seat] = Number(ev.used) || budget
+      timeRemaining[seat] = 0
+      timeOut = seat
     }
   }
 

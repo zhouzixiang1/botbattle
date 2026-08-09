@@ -8,7 +8,8 @@
 本层只管平台特有：事件序列（6 类事件 dict 键不变）、decide 调用、跨手 Botzone 计分
 （每手复位筹码，比累计净输赢 net）、BotCrashedError 处理、P4 duplicate（deal_sequence）。
 
-协议：Botzone TexasHoldem2p 标准（response 裸整数；raise=「额外加注量」= delta）。
+协议：唯一响应信封为 ``{"response": int}``；其中 response 字段的整数采用
+TexasHoldem2p 动作编码，raise=「额外加注量」= delta。
 
 Rules summary（对齐 holdem_judge）：
 - HU NLHE; default 70 hands; 庄家=SB 交替（hand_index % 2）
@@ -29,7 +30,11 @@ from typing import Any, Callable
 from bzplat.backend.games.holdem.holdem_judge import Holdem
 from bzplat.backend.games.holdem.result import HandResult, MatchResult
 from bzplat.backend.games.holdem import protocol as proto
-from bzplat.backend.runtime.binary_runner import BotCrashedError
+from bzplat.backend.runtime.binary_runner import (
+    BotCrashedError,
+    BotTechnicalError,
+    PlatformRunnerError,
+)
 
 STARTING_STACK = 20_000
 SMALL_BLIND = 50
@@ -38,11 +43,6 @@ DEFAULT_HANDS = 70
 
 DecideFn = Callable[[int, dict[str, Any]], Any]  # sync or async → response dict
 EventFn = Callable[[str, dict[str, Any]], Any]
-
-# 平台内部花色编码（0♠ 1♥ 2♦ 3♣）→ suit 字符（deal_sequence int 转裁判 Card 字符串用）
-_PLATFORM_SUIT_CHAR = "shdc"
-_PLATFORM_RANK_CHAR = "23456789TJQKA"
-
 
 class Action(str, Enum):
     FOLD = "fold"
@@ -63,12 +63,10 @@ class Street(str, Enum):
 def generate_deal_sequence(num_hands: int, seed: int) -> list[list[int]]:
     """P4 duplicate：用 seed 确定性生成 num_hands 手的牌序。
 
-    每手是 52 张牌的洗牌序列（平台编码 rank*4+platform_suit，rank 0-12，suit 0♠1♥2♦3♣）。
+    每手是 52 张牌的洗牌序列，使用唯一的 Botzone 整数编码：
+    ``card = (rank - 2) * 4 + suit``，``suit = 0♥1♦2♠3♣``。
     同 seed → 同序列，两 leg（A-vs-B / B-vs-A）用同 deal_sequence 复现同牌局，
     净筹码相加判胜负（消除运气）。
-
-    注：这里的 int 用平台花色编码（旧 cards.py 语义），适配层 _deal_seq_to_card_strs
-    负责转成裁判 Card 字符串（绕开花色编码差异）。
     """
     rng = random.Random(seed)
     out: list[list[int]] = []
@@ -77,20 +75,6 @@ def generate_deal_sequence(num_hands: int, seed: int) -> list[list[int]]:
         rng.shuffle(cards)
         out.append(cards)
     return out
-
-
-def _deal_seq_to_card_strs(seq: list[int]) -> list[str]:
-    """deal_sequence int（平台编码 c%4=0♠1♥2♦3♣，c//4=rank 0-12）→ 裁判 Card 字符串列表。
-
-    用标准扑克记法（rank 字符 + suit 字符）绕开两套花色整数编码差异——同物理牌在
-    两种模型里都是同一字符串。返回顺序不变（调用方需自行 reversed 适配裁判 LIFO pop）。
-    """
-    return [
-        _PLATFORM_RANK_CHAR[c // 4] + _PLATFORM_SUIT_CHAR[c % 4]
-        for c in seq
-    ]
-
-
 class MatchSession:
     """Run N hands between two seats via decide(player_idx, request) → response.
 
@@ -122,7 +106,7 @@ class MatchSession:
         # Botzone 计分：每手筹码复位 starting_stack（不跨手累积），
         # 最终比 self.net（各手净输赢累加），不是最终累积筹码。
         self.net = [0, 0]  # 累计净输赢（= 各手 deltas 之和），赛事/编排层据此排名
-        self.hand_results: list[HandResult] = []  # 兼容旧名；即 rounds
+        self.rounds: list[HandResult] = []
         self.events: list[dict[str, Any]] = []
         self._current_actor = 0  # BotCrashedError 时定位崩溃方
 
@@ -150,6 +134,11 @@ class MatchSession:
             # Botzone 计分：每手筹码复位 starting_stack（不跨手累积，不因归零提前结束）
             try:
                 await self._play_hand(h, decide)
+            except PlatformRunnerError:
+                raise
+            except BotTechnicalError:
+                # 协议错误/超时由平台统一落技术判负，不能伪装成一手 fold。
+                raise
             except BotCrashedError:
                 # 对齐权威裁判：bot 崩溃不可恢复 → 判负（本手全筹码输给对手），不中止整场。
                 # _call_decide 抛 BotCrashedError 时，_current_actor 是崩溃方。
@@ -160,15 +149,15 @@ class MatchSession:
         self._emit(
             "match_end",
             {
-                "hands_played": len(self.hand_results),
+                "hands_played": len(self.rounds),
                 "final_chips": list(self.net),  # Botzone 计分：累计净输赢
                 "winner": (1 - crash_loser) if crash_loser is not None else None,
                 "reason": "crash" if crash_loser is not None else None,
             },
         )
         return MatchResult(
-            rounds_played=len(self.hand_results),
-            rounds=list(self.hand_results),
+            rounds_played=len(self.rounds),
+            rounds=list(self.rounds),
             final_chips=list(self.net),  # Botzone 计分：累计净输赢
             events=list(self.events),
         )
@@ -193,16 +182,16 @@ class MatchSession:
             small_blind=self.sb,
             big_blind=self.bb,
         )
-        # 注入牌序：P4 duplicate 用预生成 deal_sequence（绕开 rng 漂移），否则用 rng 生成
+        # 注入牌序：duplicate 用预生成 deal_sequence（绕开 rng 漂移），
+        # 否则用 rng 生成。两条路径都直接交给 Card.from_int，整个引擎只有
+        # 0♥1♦2♠3♣ 一套花色整数编码。
         if self.deal_sequence is not None and hand_index < len(self.deal_sequence):
-            # 裁判 LIFO pop（deck.pop 取末尾），旧 engine FIFO deal（取头部）→ reversed 对齐
-            strs = _deal_seq_to_card_strs(self.deal_sequence[hand_index])
-            judge.set_deck_from_str(list(reversed(strs)))
+            # 裁判 LIFO pop（deck.pop 取末尾），deal_sequence 按头部先发，故反转。
+            judge.set_deck_array(list(reversed(self.deal_sequence[hand_index])))
         else:
             cards = list(range(52))
             self.rng.shuffle(cards)
-            strs = _deal_seq_to_card_strs(cards)
-            judge.set_deck_from_str(list(reversed(strs)))
+            judge.set_deck_array(list(reversed(cards)))
 
         # 发牌 + 下盲注（修复后庄家=SB）
         judge.deal_cards_and_blind()
@@ -292,7 +281,7 @@ class MatchSession:
             folded=[judge.round_player_bet[i] == Holdem.FOLD for i in range(2)],
             reason=reason,
         )
-        self.hand_results.append(hand_result)
+        self.rounds.append(hand_result)
 
         self._emit("settle", {
             "hand": hand_index,
@@ -375,13 +364,13 @@ class MatchSession:
     ) -> dict[str, Any]:
         """构造 Botzone 标准 act 请求（11 字段，严格对齐 Botzone wiki）。"""
         total_win_games = [0, 0]
-        for hr in self.hand_results:
+        for hr in self.rounds:
             if hr.winners:
                 for w in hr.winners:
                     if 0 <= w < 2:
                         total_win_games[w] += 1
         return proto.build_act_request(
-            hand=len(self.hand_results),
+            hand=len(self.rounds),
             total_hands=self.num_hands,
             my_id=actor,
             dealer_id=judge.dealer_idx,

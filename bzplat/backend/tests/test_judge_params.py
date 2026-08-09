@@ -1,11 +1,8 @@
-"""裁判规则参数（settings → 引擎）贯通测试。
-
-验证：settings 写入后 `_judge_params` 能读到、`run_session` 用新参数构造 Session、
-缺失/非法 settings 时用引擎常量兜底；admin 端点 GET/PATCH 的鉴权与范围校验。
-"""
+"""固定裁判规则回归：旧 settings/admin 入口不再影响现行引擎。"""
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,11 +15,6 @@ from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import (
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
-)
 
 
 @pytest.fixture()
@@ -36,42 +28,44 @@ def orch(store):
     return MatchOrchestrator(store, runner=runner, max_concurrent=1)
 
 
-# ── _judge_params 读取与兜底（per-game，PR2 起 _judge_params(gid)）─────────
+def test_removed_judge_setting_rows_are_not_read_by_orchestrator(store):
+    """数据库中的历史键只是无效数据，不得再注入任何对局。"""
+    store.set_setting("judge_holdem_starting_stack", "5000")
+    store.set_setting("judge_holdem_sb", "25")
+    store.set_setting("judge_holdem_bb", "50")
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    path_a = fixture_dir / "fixed-a"
+    path_b = fixture_dir / "fixed-b"
+    path_a.write_bytes(b"test fixture")
+    path_b.write_bytes(b"test fixture")
+    user = store.create_user("fixedrules", "fixed@example.com", "x")
+    a = store.create_bot(user["id"], "fixed_a", binary_path=str(path_a), format="elf", game_id="holdem")
+    b = store.create_bot(user["id"], "fixed_b", binary_path=str(path_b), format="elf", game_id="holdem")
+    store.ensure_rating(a["id"])
+    store.ensure_rating(b["id"])
+    captured: dict = {}
 
-def test_judge_params_defaults_when_unset(orch):
-    """未写 settings 时该游戏字段返回 None（交由引擎常量兜底）。
+    class FixedRunner:
+        async def run_binaries(self, *args, **kwargs):
+            captured.update(kwargs)
 
-    游戏规则参数（手数/棋盘/点阵）已钉死，不在 judge_params 声明；
-    holdem 仅 stack/sb/bb 三个字段。
-    """
-    # holdem：3 个字段全 None（手数已钉死，移除 num_hands）
-    jp_h = orch._judge_params("holdem")
-    assert jp_h == {"starting_stack": None, "sb": None, "bb": None}
-    # gomoku：棋盘边长已钉死，无 judge 参数
-    jp_g = orch._judge_params("gomoku")
-    assert jp_g == {}
-    # pencil：无 judge 参数
-    jp_p = orch._judge_params("pencil")
-    assert jp_p == {}
+            class Result:
+                rounds_played = 0
+                rounds = []
+                winner = None
+                events = []
+            return Result()
 
+    orchestrator = MatchOrchestrator(store, runner=FixedRunner(), max_concurrent=1)
 
-def test_judge_params_reads_settings(orch, store):
-    """写入合法 settings 后 _judge_params(gid) 读到对应值（按游戏分组）。"""
-    store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "5000")
-    store.set_setting(SETTING_JUDGE_HOLDEM_SB, "25")
-    store.set_setting(SETTING_JUDGE_HOLDEM_BB, "50")
-    h = orch._judge_params("holdem")
-    assert h["starting_stack"] == 5000 and h["sb"] == 25 and h["bb"] == 50
-    # num_hands 已钉死，不再作为 judge 参数返回
+    async def exercise():
+        mid = await orchestrator.challenge(a["id"], b["id"], user["id"], game_id="holdem")
+        await orchestrator._tasks[mid]
 
-
-def test_judge_params_bad_values_fall_back(orch, store):
-    """非法值（负数/非数字/空串）返回 None，由引擎兜底。"""
-    store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "0")
-    store.set_setting(SETTING_JUDGE_HOLDEM_BB, "-5")
-    store.set_setting(SETTING_JUDGE_HOLDEM_SB, "")
-    h = orch._judge_params("holdem")
-    assert h["starting_stack"] is None and h["sb"] is None and h["bb"] is None
+    asyncio.run(exercise())
+    assert not {"starting_stack", "sb", "bb"}.intersection(captured)
+    assert not hasattr(orchestrator, "_judge_params")
 
 
 # ── run_session 用新参数构造 Session ──────────────────────────────
@@ -84,7 +78,7 @@ def _run_callables(game_id, **kw):
 
     async def make_decide(board_state):
         async def decide(player_idx, request):
-            return board_state[player_idx].play(request)
+            return {"response": board_state[player_idx].play(request)}
         return decide
 
     # gomoku: 每方维护本地棋盘，随机/顺序下空点
@@ -106,19 +100,18 @@ def _run_callables(game_id, **kw):
         sa, sb = GState(), GState()
 
         async def decide(player_idx, request):
-            return sa.play(request) if player_idx == 0 else sb.play(request)
+            payload = sa.play(request) if player_idx == 0 else sb.play(request)
+            return {"response": payload}
 
         return asyncio.run(run_session(game_id, decide, rng=rng, **kw))
 
     raise ValueError(f"unsupported game in helper: {game_id}")
 
 
-def test_gomoku_board_size_pinned_to_default():
-    """棋盘边长已钉死 BOARD_SIZE（15），即使传 board_size=9 也被忽略，仍用 15×15。"""
-    result = _run_callables("gomoku", board_size=9)  # 传 9 但 spec 忽略，用固定 15
-    assert result.reason in ("five", "illegal", "draw")
-    # 15×15 固定，回合数上限 15*15+1
-    assert result.rounds_played <= 15 * 15 + 1
+def test_gomoku_board_size_override_is_rejected():
+    """平台入口不接受第二套棋盘规则。"""
+    with pytest.raises(TypeError, match="Session 不接受参数: board_size"):
+        _run_callables("gomoku", board_size=9)
 
 
 def test_gomoku_default_board_size():
@@ -128,19 +121,11 @@ def test_gomoku_default_board_size():
     assert result.rounds_played <= 15 * 15 + 1
 
 
-# ── runner 透传 ───────────────────────────────────────────────────
+# ── runner 规则入口 ───────────────────────────────────────────────
 
-def test_runner_passes_judge_params_to_session(monkeypatch):
-    """run_callables 把 board_size 透传给 run_session（patch run_session 捕获）。"""
-    captured: dict = {}
-
-    async def fake_run_session(game_id, decide, **kw):
-        captured.update(kw)
-        from bzplat.backend.games.base import MatchResult
-        return MatchResult(rounds_played=0)
-
+def test_runner_rejects_removed_rule_params():
+    """通用 runner 透传后由目标 spec 统一拒绝旧规则键。"""
     runner = MatchRunner(BinaryRunner(prefer_local=True))
-    monkeypatch.setattr("bzplat.backend.matches.runner.run_session", fake_run_session)
 
     async def decide_a(req):
         return {"x": 0, "y": 0}
@@ -148,16 +133,12 @@ def test_runner_passes_judge_params_to_session(monkeypatch):
     async def decide_b(req):
         return {"x": 0, "y": 0}
 
-    asyncio.run(
-        runner.run_callables(
-            decide_a, decide_b, game_id="gomoku",
-            board_size=13, starting_stack=10000, sb=25, bb=50,
+    with pytest.raises(TypeError, match="Session 不接受参数"):
+        asyncio.run(
+            runner.run_callables(
+                decide_a, decide_b, game_id="gomoku", board_size=13,
+            )
         )
-    )
-    assert captured["board_size"] == 13
-    assert captured["starting_stack"] == 10000
-    assert captured["sb"] == 25
-    assert captured["bb"] == 50
 
 
 def test_gomoku_check_win_respects_smaller_board():
@@ -181,8 +162,8 @@ def test_gomoku_check_win_respects_smaller_board():
     assert check_win(board2, 7, 8, 0, size) is False
 
 
-def test_gomoku_small_board_full_game_via_runner():
-    """回归：board_size=9 时两合法 bot 能跑完整局不崩（曾因 check_win 越界崩溃）。"""
+def test_gomoku_small_board_cannot_be_selected_via_runner():
+    """纯裁判支持边界单测，不代表平台允许选择 9×9 规则。"""
     runner = MatchRunner(BinaryRunner(prefer_local=True))
     size = 9
 
@@ -203,11 +184,12 @@ def test_gomoku_small_board_full_game_via_runner():
 
         return decide
 
-    result = asyncio.run(
-        runner.run_callables(make_bot(), make_bot(), game_id="gomoku", board_size=size)
-    )
-    assert result.reason in ("five", "draw")
-    assert result.rounds_played <= size * size + 1
+    with pytest.raises(TypeError, match="Session 不接受参数: board_size"):
+        asyncio.run(
+            runner.run_callables(
+                make_bot(), make_bot(), game_id="gomoku", board_size=size,
+            )
+        )
 
 
 # ── admin 端点：鉴权 + 范围校验 + 热生效 ──────────────────────────
@@ -224,100 +206,24 @@ def _admin_client(tmp_path):
     return client, app
 
 
-def _plain_client(tmp_path):
-    """普通用户客户端（用于验证 403）。"""
-    db = str(tmp_path / "judge_plain.db")
-    app = create_app(db_path=db, max_concurrent=1)
-    store: Store = app.state.store
-    u = store.create_user("plain", "p@ex.com", hash_password("password12"), role="user")
-    store.update_user(u["id"], email_verified=1)
-    _, token = app.state.auth.authenticate("plain", "password12")
-    client = TestClient(app)
-    client.headers["Authorization"] = f"Bearer {token}"
-    return client
-
-
-def test_get_judges_returns_all_games(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.get("/api/admin/judges")
+def test_public_judges_is_the_only_rules_listing(tmp_path):
+    client, app = _admin_client(tmp_path)
+    r = client.get("/api/judges")
     assert r.status_code == 200
     data = r.json()
     gids = [g["game_id"] for g in data["games"]]
     assert gids == ["holdem", "gomoku", "pencil"]
-    # 每款游戏带代码位置与 docstring
     for g in data["games"]:
         assert g["code_path"].endswith(".py")
-        assert isinstance(g["docstring"], str)
-    # holdem 有 4 个参数，gomoku 1 个，pencil/reversi 0 个
-    holdem = next(g for g in data["games"] if g["game_id"] == "holdem")
-    gomoku = next(g for g in data["games"] if g["game_id"] == "gomoku")
-    pencil = next(g for g in data["games"] if g["game_id"] == "pencil")
-    # holdem 3 个（stack/sb/bb；手数已钉死）；gomoku 0 个（棋盘已钉死）；pencil 0 个
-    assert len(holdem["params"]) == 3
-    assert len(gomoku["params"]) == 0
-    assert pencil["params"] == []
-
-
-def test_get_judges_non_admin_forbidden(tmp_path):
-    client = _plain_client(tmp_path)
-    r = client.get("/api/admin/judges")
-    assert r.status_code == 403
-
-
-def test_patch_judge_params_updates_and_hot(tmp_path):
-    client, app = _admin_client(tmp_path)
-    # gomoku 棋盘边长已钉死，不再可调；仅 patch holdem 的 sb
-    r = client.patch(
+        assert "params" not in g
+    assert client.get("/api/admin/judges").status_code == 404
+    assert client.patch(
         "/api/admin/judges/params",
         json={"params": {"judge_holdem_sb": 25}},
-    )
-    assert r.status_code == 200, r.text
-    updated = r.json()["updated"]
-    assert updated["judge_holdem_sb"] == 25
-    # 热生效：_judge_params(gid) 立即读到新值
-    jp_holdem = app.state.orch._judge_params("holdem")
-    assert jp_holdem["sb"] == 25
-    # 返回的 judges 总览也反映新值
-    holdem = next(g for g in r.json()["judges"]["games"] if g["game_id"] == "holdem")
-    sb_param = next(p for p in holdem["params"] if p["key"] == "judge_holdem_sb")
-    assert sb_param["value"] == 25
-
-
-def test_patch_judge_params_out_of_bounds_rejected(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_holdem_bb": 1}},  # 下限 2
-    )
-    assert r.status_code == 400
-
-
-def test_patch_judge_params_bb_le_sb_rejected(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_holdem_sb": 100, "judge_holdem_bb": 100}},
-    )
-    assert r.status_code == 400
-    assert "盲" in r.json()["detail"]
-
-
-def test_patch_judge_params_unknown_key_rejected(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_unknown": 1}},
-    )
-    assert r.status_code == 400
-
-
-def test_patch_judge_params_non_admin_forbidden(tmp_path):
-    client = _plain_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_holdem_sb": 50}},
-    )
-    assert r.status_code == 403
+    ).status_code == 404
+    assert app.state.store.get_setting("judge_holdem_starting_stack") is None
+    assert app.state.store.get_setting("judge_holdem_sb") is None
+    assert app.state.store.get_setting("judge_holdem_bb") is None
 
 
 def test_time_budget_only_pencil():

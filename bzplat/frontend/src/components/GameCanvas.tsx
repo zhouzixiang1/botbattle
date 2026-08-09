@@ -1,7 +1,7 @@
 // bzplat/frontend/src/components/GameCanvas.tsx
 import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
-import { getGame } from '@/games'
+import { findGame, unsupportedGameLabel } from '@/games'
 import type { RawEvent } from '@/games/base'
 import type { SeatInfo, Scene } from '@/games/canvas-types'
 
@@ -74,7 +74,7 @@ export default function GameCanvas({
   // 每次 seats 引用变化都清空位图。这是修复的核心：位图永不在无即时重绘时被清。
   useEffect(() => {
     const canvas = canvasRef.current
-    const spec = getGame(gameId)
+    const spec = findGame(gameId)
     if (!canvas || !spec?.CanvasRenderer) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -97,8 +97,8 @@ export default function GameCanvas({
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const spec = getGame(gameId)
-    const renderer = spec.CanvasRenderer
+    const spec = findGame(gameId)
+    const renderer = spec?.CanvasRenderer
     if (!renderer) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -143,8 +143,8 @@ export default function GameCanvas({
   // 人类对战落子：canvas 像素坐标 → 游戏坐标（经 renderer.pick），仅在 interactive 时启用
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!interactive || !onMove) return
-    const spec = getGame(gameId)
-    const renderer = spec.CanvasRenderer
+    const spec = findGame(gameId)
+    const renderer = spec?.CanvasRenderer
     if (!renderer?.pick || !stateRef.current?.next) return
     const canvas = canvasRef.current
     if (!canvas) return
@@ -159,6 +159,14 @@ export default function GameCanvas({
     if (picked) onMove(picked.x, picked.y)
   }
 
+  if (!findGame(gameId)) {
+    return (
+      <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+        无法显示对局：{unsupportedGameLabel(gameId)}
+      </div>
+    )
+  }
+
   return (
     <div ref={wrapperRef} style={{ width: '100%' }}>
       <canvas
@@ -166,7 +174,7 @@ export default function GameCanvas({
         // 宽度撑满父容器；高度按 3:2 宽高比自动撑开（aspect-ratio + height: auto）。
         // 位图分辨率由上方 DPR effect 按 width/height 设定，不再用 maxWidth 封顶。
         style={{ width: '100%', height: 'auto', aspectRatio: '3 / 2', display: 'block' }}
-        className={className + (interactive && onMove ? ' cursor-pointer' : '')}
+        className={`${className ?? ''}${interactive && onMove ? ' cursor-pointer' : ''}`}
         role="img"
         aria-label={`${gameId ?? ''} 对局画面`}
         onClick={handleClick}

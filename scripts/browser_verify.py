@@ -5,8 +5,10 @@
 """
 import sys, json, urllib.request
 from playwright.sync_api import sync_playwright
+from _qa_target import assert_qa_instance, qa_base
 
-BASE = "http://127.0.0.1:50380"
+BASE = qa_base()
+assert_qa_instance(BASE)
 
 passed = 0
 failed = 0
@@ -41,7 +43,7 @@ def main():
     routes = [
         ("home", "/"), ("leaderboard", "/leaderboard"), ("botdetail", f"/bot/{bot_id}"),
         ("userprofile", f"/user/{username}"), ("search", "/search?q=load"),
-        ("notifications", "/notifications"), ("settings", "/settings"), ("data", "/data"),
+        ("notifications", "/notifications"), ("settings", "/settings"),
         ("contests", "/contests"), ("replay", f"/match/{match_id}"), ("login", "/login"),
         ("register", "/register"), ("challenge", "/challenge"), ("mybots", "/my-bots"),
         ("wiki", "/wiki"), ("history", "/history"), ("resetpw", "/reset-password"),
@@ -50,13 +52,13 @@ def main():
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
 
-        print("=== 明色桌面端（17 路由）===")
+        print(f"=== 明色桌面端（{len(routes)} 路由）===")
         for name, path in routes:
             try:
                 pg = b.new_page(viewport={"width": 1280, "height": 800})
                 pg.goto(f"{BASE}/#{path}", wait_until="networkidle", timeout=15000)
                 pg.wait_for_timeout(1000)
-                txt_len = pg.eval_on_selector("body", "el => el.innerText.replace(/\s/g,'').length")
+                txt_len = pg.eval_on_selector("body", r"el => el.innerText.replace(/\s/g,'').length")
                 has_nav = pg.eval_on_selector_all("header a, header button", "els => els.length") > 3
                 check(f"light-{name}", txt_len > 30 and has_nav, f"text={txt_len}")
                 pg.close()
@@ -85,7 +87,7 @@ def main():
                 pg.goto(f"{BASE}/#{path}", wait_until="networkidle", timeout=15000)
                 pg.wait_for_timeout(900)
                 menu_btn = pg.eval_on_selector_all('button[aria-label="菜单"]', "els => els.length")
-                txt_len = pg.eval_on_selector("body", "el => el.innerText.replace(/\s/g,'').length")
+                txt_len = pg.eval_on_selector("body", r"el => el.innerText.replace(/\s/g,'').length")
                 check(f"mobile-{name}", txt_len > 30, f"text={txt_len} menu={menu_btn}")
                 pg.close()
             except Exception as e:

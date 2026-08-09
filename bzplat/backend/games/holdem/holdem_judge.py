@@ -1,34 +1,20 @@
 """德州扑克纯裁判程序（游戏规则，0 平台依赖）。
 
-源自玩家提供的 Botzone TexasHoldem2p 官方参考裁判，本模块在忠实保留其评估/下注
-状态机骨架的基础上，**修复了参考代码的 5 处会改变对局结果的 bug**（详见各修复点
-注释），使裁判规则正确。本模块只管游戏规则：牌型评估、下注状态机、边池结算、
+本站唯一现行裁判。本模块只管游戏规则：牌型评估、下注状态机、边池结算、
 showdown 判胜。不 import protocol/result/engine/orchestrator/runner —— 可独立
 审计/复用/单测。
 
 适配层（engine.py MatchSession）调用本模块的 Holdem 状态机驱动一手牌，自己做
 协议/事件/decide/跨手计分。
 
-计分模型（与 Botzone 完全一致）：
+计分模型：
 - 每手筹码复位 starting_stack（不跨手累积）
 - 适配层累计各手净输赢（win_chips = final_chips - mean_chips）定胜负
 - score = total_win_chips / big_blind
 
-== 修复点（相对原始 Botzone 参考代码）==
-1. **wheel 顺子**：原代码严格连续检测，A(14)-5-4-3-2 判高牌；修正为 wheel=5-high
-   straight（标准规则）。见 _is_straight / _straight_high。
-2. **庄家/盲注反演**：原 deal_cards_and_blind 先 _next_player 使非庄家当 SB、
-   庄家当 BB 且庄家翻前先动（与标准 HU 相反）；修正为庄家=SB、庄家翻前先动。
-   见 deal_cards_and_blind。
-3. **不等额 all-in 结算**：原 get_player_final_chips 把整个 pot 按胜者均分，无边池/
-   退未跟注（短筹码赢会多拿）；修正为 HU main_pot=2×min(contrib)，超额退还大筹码方。
-   见 get_player_final_chips。
-4. **allin 毒化 round_bet**：原 player_action ALLIN 分支设 round_bet=-2，导致后续
-   CALL 分支 round_bet>=0 永不命中（只能 ALLIN/FOLD）；修正为 allin 不毒化 round_bet
-   （水位保持当前最高下注额），对手可正常 CALL。见 player_action。
-5. **split pot 浮点除**：原 pot/len(winners) 浮点除（奇筹码归属错）；修正为整数除
-   + 奇筹码给 SB（HU 约定）。见 get_player_final_chips。
-6. **(额外) 终端 fold history 缺 round 键**：补 round 键对齐 Botzone 协议。
+规则要点：wheel 按 5-high 顺子；庄家同时为小盲且翻牌前先行动；不等额 all-in 只形成
+双方等额主池，超额退还；all-in 后对手仍可正常跟注；平分底池的奇筹码给小盲；所有动作
+历史均带当前下注轮次。
 """
 from __future__ import annotations
 
@@ -66,8 +52,8 @@ class Card:
     """一张扑克牌。suit 见 Suit（0♥1♦2♠3♣，恰与 Botzone 线协议编码一致）；
     number 2..14（2=2,…,10=T,11=J,12=Q,13=K,14=A）。
 
-    str(Card) → "Ts"/"Ah"（rank 字符 + suit 字符），与平台原 cards.py 输出一致，
-    事件 payload / 前端 reducer 都依赖此格式。
+    str(Card) → "Ts"/"Ah"（rank 字符 + suit 字符），事件 payload / 前端
+    reducer 都依赖此展示格式；整数输入输出统一使用上面的 Botzone 编码。
     """
     __slots__ = ("suit", "number")
 
@@ -302,10 +288,7 @@ class Holdem:
         self.deck = [Card.from_int(card_int) for card_int in deck_array]
 
     def set_deck_from_str(self, card_strs):
-        """用 'Ts','Ah' 字符串列表设置牌序（适配层用；LIFO pop）。
-
-        字符串路径绕开内部花色编码差异——同物理牌在两种 Card 模型里都是同一字符串。
-        """
+        """用 ``'Ts'``/``'Ah'`` 字符串列表设置牌序（测试注入；LIFO pop）。"""
         self.deck = [_parse_card_str(s) for s in card_strs]
 
     def _next_player(self):

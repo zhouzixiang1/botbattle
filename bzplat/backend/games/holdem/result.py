@@ -63,13 +63,4 @@ class MatchResult:
                 return 1
         return None
 
-    @property
-    def hands_played(self) -> int:
-        return self.rounds_played  # 向后兼容别名
-
-    @property
-    def hand_results(self) -> list[HandResult]:
-        return self.rounds  # type: ignore[return-value]
-
-
 __all__ = ["RoundResult", "HandResult", "MatchResult"]

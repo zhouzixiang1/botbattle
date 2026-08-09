@@ -4,6 +4,7 @@
 - 显式 entries 列表模式
 - assign_all 便捷模式（按 game_id 全选）
 - 重复报名跳过 / bot 不可用跳过 / 游戏不匹配跳过
+- 管理员移除报名成功/失败审计
 - 非 admin 403 / 赛事不存在 404
 """
 from __future__ import annotations
@@ -53,6 +54,57 @@ def test_admin_assign_explicit_entries(tmp_path):
     assert body["total_entries"] == 2
     ents = st.list_entries(cid)
     assert len(ents) == 2
+    s.close()
+
+
+def test_admin_entries_include_user_bot_and_game_labels(tmp_path):
+    s, st, _admin, users, cid, tok, client = _setup(tmp_path)
+    st.add_entry(cid, users[0][0]["id"], users[0][1]["id"])
+
+    response = client.get(
+        f"/api/admin/contests/{cid}/entries",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+
+    assert response.status_code == 200, response.text
+    entry = response.json()["entries"][0]
+    assert entry["username"] == "usr0"
+    assert entry["bot_name"] == "bot0"
+    assert entry["game_id"] == "holdem"
+    s.close()
+
+
+def test_admin_delete_entry_audits_success_and_missing(tmp_path, monkeypatch):
+    s, st, _admin, users, cid, tok, client = _setup(tmp_path)
+    user_id = users[0][0]["id"]
+    st.add_entry(cid, user_id, users[0][1]["id"])
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append({"action": action, **fields}),
+    )
+
+    response = client.delete(
+        f"/api/admin/contests/{cid}/entries/{user_id}",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    missing = client.delete(
+        f"/api/admin/contests/{cid}/entries/{user_id}",
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert missing.status_code == 404, missing.text
+    assert audits[0] == {
+        "action": "admin_delete_contest_entry",
+        "result": "ok",
+        "user": "adminusr",
+        "target": cid,
+        "detail": f"user_id={user_id}",
+    }
+    assert audits[1]["action"] == "admin_delete_contest_entry"
+    assert audits[1]["result"] == "fail"
+    assert "报名记录不存在" in audits[1]["detail"]
     s.close()
 
 
@@ -120,4 +172,17 @@ def test_admin_assign_contest_not_found(tmp_path):
                headers={"Authorization": f"Bearer {tok}"},
                json={"assign_all": True, "game_id": "holdem"})
     assert r.status_code == 404
+    s.close()
+
+
+def test_admin_assign_rejects_missing_or_non_integer_ids(tmp_path):
+    s, _st, _admin, _users, cid, tok, c = _setup(tmp_path)
+    for entry in ({"user_id": 1}, {"user_id": "x", "bot_id": 2}):
+        r = c.post(
+            f"/api/admin/contests/{cid}/entries/bulk",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"entries": [entry]},
+        )
+        assert r.status_code == 400, r.text
+        assert "必须是整数" in r.text
     s.close()

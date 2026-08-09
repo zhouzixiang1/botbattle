@@ -1,9 +1,16 @@
 """Store 层单测。"""
 from __future__ import annotations
 
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
+    CODE_RESET,
     CODE_VERIFY,
     TPL_VERIFY_EMAIL,
     TPL_WELCOME,
@@ -82,6 +89,142 @@ def test_password_resets(tmp_path):
     assert s.get_password_reset("rtok") is None
 
 
+@pytest.mark.parametrize("credential_kind", ["email_code", "reset_token"])
+def test_password_reset_credential_is_single_winner_across_stores(
+    tmp_path, credential_kind
+):
+    """两个连接并发消费同一凭据时，只有一个完整改密事务成功。"""
+    db_path = tmp_path / f"reset-race-{credential_kind}.db"
+    first = Store(str(db_path))
+    user = first.create_user("raceuser", "race@example.com", "old-hash")
+    first.add_session("old-session", user["id"], "2099-01-01T00:00:00")
+    if credential_kind == "email_code":
+        first.add_email_code(
+            user["id"], CODE_RESET, "123456", "2099-01-01T00:00:00"
+        )
+        code_row = first.get_latest_email_code(user["id"], CODE_RESET)
+        credential = {
+            "email_code_id": code_row["id"],
+            "email_code": code_row["code"],
+        }
+    else:
+        first.add_password_reset(
+            "shared-reset-token", user["id"], "2099-01-01T00:00:00"
+        )
+        credential = {"reset_token": "shared-reset-token"}
+
+    second = Store(str(db_path))
+    barrier = threading.Barrier(2)
+
+    def attempt(store: Store, new_hash: str) -> str:
+        barrier.wait()
+        return store.reset_password_with_credential(
+            user["id"], new_hash, **credential
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = [
+                pool.submit(attempt, first, "new-hash-a"),
+                pool.submit(attempt, second, "new-hash-b"),
+            ]
+            outcomes = [future.result(timeout=10) for future in results]
+
+        assert sorted(outcomes) == ["invalid", "ok"]
+        assert first.get_user(user["id"])["password_hash"] in {
+            "new-hash-a",
+            "new-hash-b",
+        }
+        assert first.get_session("old-session") is None
+        if credential_kind == "email_code":
+            assert first.get_latest_email_code(user["id"], CODE_RESET) is None
+        else:
+            assert first.get_password_reset("shared-reset-token") is None
+    finally:
+        second.close()
+        first.close()
+
+
+@pytest.mark.parametrize("credential_kind", ["email_code", "reset_token"])
+def test_password_reset_rolls_back_when_session_delete_fails(
+    tmp_path, credential_kind
+):
+    """撤销 session 失败时，凭据、密码和 session 都不能留下半提交。"""
+    s = _store(tmp_path)
+    user = s.create_user("rollbackuser", "rollback@example.com", "old-hash")
+    s.add_session("kept-session", user["id"], "2099-01-01T00:00:00")
+    if credential_kind == "email_code":
+        s.add_email_code(
+            user["id"], CODE_RESET, "654321", "2099-01-01T00:00:00"
+        )
+        code_row = s.get_latest_email_code(user["id"], CODE_RESET)
+        credential = {
+            "email_code_id": code_row["id"],
+            "email_code": code_row["code"],
+        }
+    else:
+        s.add_password_reset(
+            "rollback-reset-token", user["id"], "2099-01-01T00:00:00"
+        )
+        credential = {"reset_token": "rollback-reset-token"}
+
+    with s._tx() as c:
+        c.execute(
+            f"""
+            CREATE TEMP TRIGGER fail_password_reset_session_delete
+            BEFORE DELETE ON sessions
+            WHEN OLD.user_id={int(user['id'])}
+            BEGIN
+                SELECT RAISE(ABORT, 'forced session delete failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.DatabaseError, match="forced session delete failure"):
+        s.reset_password_with_credential(user["id"], "new-hash", **credential)
+
+    assert s.get_user(user["id"])["password_hash"] == "old-hash"
+    assert s.get_session("kept-session") is not None
+    if credential_kind == "email_code":
+        assert s.get_latest_email_code(user["id"], CODE_RESET)["used_at"] is None
+    else:
+        assert s.get_password_reset("rollback-reset-token")["used_at"] is None
+
+
+@pytest.mark.parametrize("credential_kind", ["email_code", "reset_token"])
+def test_expired_password_reset_credential_is_not_consumed(
+    tmp_path, credential_kind
+):
+    s = _store(tmp_path)
+    user = s.create_user("expireduser", "expired@example.com", "old-hash")
+    s.add_session("kept-session", user["id"], "2099-01-01T00:00:00")
+    if credential_kind == "email_code":
+        s.add_email_code(
+            user["id"], CODE_RESET, "111111", "2000-01-01T00:00:00"
+        )
+        code_row = s.get_latest_email_code(user["id"], CODE_RESET)
+        credential = {
+            "email_code_id": code_row["id"],
+            "email_code": code_row["code"],
+        }
+    else:
+        s.add_password_reset(
+            "expired-reset-token", user["id"], "2000-01-01T00:00:00"
+        )
+        credential = {"reset_token": "expired-reset-token"}
+
+    assert (
+        s.reset_password_with_credential(user["id"], "new-hash", **credential)
+        == "expired"
+    )
+    assert s.get_user(user["id"])["password_hash"] == "old-hash"
+    assert s.get_session("kept-session") is not None
+    if credential_kind == "email_code":
+        assert s.get_latest_email_code(user["id"], CODE_RESET)["used_at"] is None
+    else:
+        assert s.get_password_reset("expired-reset-token")["used_at"] is None
+
+
 def test_bots_versions_ratings(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("frank", "f@ex.com", hash_password("password1"))
@@ -95,7 +238,7 @@ def test_bots_versions_ratings(tmp_path):
         checksum="abc",
         size_bytes=10,
         os="linux",
-        arch="x86_64",
+        arch="amd64",
         format="elf",
     )
     assert ver["version"] == 1
@@ -145,30 +288,95 @@ def test_matches_replays_pair_stats(tmp_path):
 
 
 def test_recover_orphan_matches(tmp_path):
-    """服务重启后清理孤儿 running 对局：标 aborted，返回受影响数。"""
+    """重启后 running + 非赛事 pending 已无内存任务，均标 aborted。
+
+    活跃赛事 pending 仍需留给 pairing 恢复链精确判断，本层不误吞。
+    """
     s = _store(tmp_path)
     u = s.create_user("gina", "g@ex.com", hash_password("password1"))
     a = s.create_bot(owner_id=u["id"], name="bot_a")
     b = s.create_bot(owner_id=u["id"], name="bot_b")
-    # 3 场：pending / running / completed
-    s.create_match("m_pending", a["id"], b["id"], owner_id=u["id"])
+    # 四类非赛事 pending + running / completed
+    for match_type in ("challenge", "table", "ladder", "human"):
+        s.create_match(
+            f"m_pending_{match_type}",
+            a["id"],
+            b["id"],
+            owner_id=u["id"],
+            match_type=match_type,
+        )
     s.create_match("m_running", a["id"], b["id"], owner_id=u["id"])
     s.create_match("m_done", a["id"], b["id"], owner_id=u["id"])
     s.update_match("m_running", status="running")
     s.update_match("m_done", status="completed", winner=0)
+    contest = s.create_contest("restart cup", u["id"], status="running")
+    s.create_match(
+        "m_contest_pending",
+        a["id"],
+        b["id"],
+        owner_id=u["id"],
+        contest_id=contest["id"],
+        match_type="contest",
+    )
 
-    # 重启清理：只有 running 被标 aborted
+    # 重启清理：running + 非赛事 pending 被标 aborted
     recovered = s.recover_orphan_matches()
-    assert recovered == 1
+    assert recovered == 5
     assert s.get_match("m_running")["status"] == "aborted"
     assert s.get_match("m_running")["reason"] == "orphan_after_restart"
     assert s.get_match("m_running")["ended_at"] is not None
-    # 其它状态不动
-    assert s.get_match("m_pending")["status"] == "pending"
+    for match_type in ("challenge", "table", "ladder", "human"):
+        pending = s.get_match(f"m_pending_{match_type}")
+        assert pending["status"] == "aborted"
+        assert pending["reason"] == "orphan_pending_after_restart"
+    # completed 与活跃赛事 pending 不动
     assert s.get_match("m_done")["status"] == "completed"
+    assert s.get_match("m_contest_pending")["status"] == "pending"
 
     # 幂等：再清理一次返回 0（已无 running）
     assert s.recover_orphan_matches() == 0
+
+
+def test_rating_settlement_schema_migrates_legacy_db_idempotently(tmp_path):
+    """旧库首次建 marker 表并回填历史 completed；再次启动保持幂等。"""
+    db_path = tmp_path / "legacy-rating-settlement.db"
+    s = Store(str(db_path))
+    u = s.create_user("legacyrate", "legacyrate@example.com", hash_password("password1"))
+    a = s.create_bot(owner_id=u["id"], name="legacy_a", game_id="gomoku")
+    b = s.create_bot(owner_id=u["id"], name="legacy_b", game_id="gomoku")
+    s.create_match(
+        "legacy-completed",
+        a["id"],
+        b["id"],
+        owner_id=u["id"],
+        game_id="gomoku",
+    )
+    s.update_match(
+        "legacy-completed",
+        status="completed",
+        winner=0,
+        result={"deltas": [1, -1]},
+    )
+    # 模拟升级前数据库：有历史 completed，但 marker 表尚不存在。
+    with s._tx() as c:
+        c.execute("DROP TABLE match_rating_settlements")
+    s.close()
+
+    migrated = Store(str(db_path))
+    with migrated._tx() as c:
+        ddl = c.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='match_rating_settlements'"
+        ).fetchone()
+    assert ddl is not None
+    assert migrated.is_match_rating_settled("legacy-completed")
+    assert migrated.list_unsettled_completed_rating_matches() == []
+    migrated.close()
+
+    reopened = Store(str(db_path))
+    assert reopened.is_match_rating_settled("legacy-completed")
+    assert reopened.list_unsettled_completed_rating_matches() == []
+    reopened.close()
 
 
 def test_contests_entries_pairings(tmp_path):

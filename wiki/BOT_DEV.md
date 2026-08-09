@@ -1,228 +1,328 @@
 # Bot 开发指南
 
-本页教你从零编写一个可上传到平台参赛的 Bot。协议细节请先读[协议规范](#/wiki?slug=protocol)。
+本页面向准备上传 Bot 的玩家。平台唯一接受的上传产物是 **Linux x86_64 ELF**：
 
-支持的游戏：`holdem`（德州）、`gomoku`（五子棋）、`pencil`（点格棋）。上传时必须选择正确的游戏类型。
+- 必须是 64 位、`x86-64` / `amd64` 架构的 Linux ELF 可执行文件；
+- 不接受 Windows PE / `.exe`、macOS Mach-O、ARM64 / `aarch64` ELF；
+- 不接受 `.py` 源文件、Shell 脚本、压缩包或源码目录；
+- 文件叫什么名字并不重要，平台按文件内容校验格式与架构。
 
-## 0. 与 Botzone Bot 模型对照
+因此，即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建。
+最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
 
-本平台**完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准**，你的 Botzone Bot 可直接上传运行：
+开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则。先复制一份完整示例跑通，
+再替换其中的决策函数，通常是最快的上手方式。
 
-| 项 | Botzone | 本平台 |
-|----|---------|--------|
-| 输入信封 | Traditional 完整历史 / LongRunning 首回合完整历史 + 后续单 request | 同左 |
-| 输出信封 | `{"response": ...}` | 同左 |
-| 德州 response | 裸整数 `-1/-2/0/>0` | 同左 |
-| 运行模式 | Traditional / LongRunning | 都支持（上传时标明） |
-| 长时运行握手 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
-| 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB / 默认 60s（可配） |
+## 1. 选择运行模式
 
-> 差异：本平台 Bot 进程**整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动即可运行（见 [协议](#/wiki?slug=protocol) §10）。手数**固定 70**（Botzone 文档 50，规则钉死不可配）。
+- **Traditional（默认）**：每个决策点重启进程；每次收到
+  `{"requests":[...],"responses":[...]}` 完整历史。
+- **LongRunning**：首回合收到同一完整历史；输出首个响应后必须立即输出精确握手
+  `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`；后续收到 `{"request":...}`，进程不得退出。
 
-### 选择运行模式
+两种模式共用同一游戏 payload 和 `{"response":...}` 响应信封。LongRunning 未完成精确
+握手会直接协议判负，不会回退成 Traditional。
 
-上传 Bot 时需选择运行模式：
+Traditional Bot 可以只读取一行完整信封、输出一行响应后退出；它也可以像下方示例一样
+保持读取循环，由平台在取得该回合响应后结束进程。LongRunning Bot 必须保持进程运行并
+持续读取增量信封。
 
-- **Traditional（传统）**：每个决策点收到**完整历史信封** `{"requests":[...],"responses":[...]}`，Bot 自己重放重建状态。适合无状态、易调试的 Bot。
-- **LongRunning（长驻，默认推荐）**：首回合收到完整历史信封，之后只收到单条 `{"request":...}`。Bot 须自维护内存状态。首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 握手。适合有昂贵初始化（如神经网络）的 Bot。
+## 2. 完整可复制的 C 最小 Bot
 
-棋类请分别阅读 [Gomoku](#/wiki?slug=gomoku)、[Pencil](#/wiki?slug=pencil)；样例：`samples/callbot.py`、`samples/gomokubot.py`、`samples/pencilbot.py`。
+下面是一个可用于 Holdem 的完整 `bot.c`。策略永远 call/check。它在首个 JSON 响应后
+输出 LongRunning 握手，因此同一个 ELF 可选择 Traditional 或 LongRunning；Traditional
+只读取本次 JSON 响应后便结束进程。
 
-## 1. 核心思路
-
-平台通过你的 Bot 的 **stdin / stdout** 与它通信（Botzone 信封）：
-
-1. 平台往 stdin 写**一行 JSON** 信封（Traditional 完整历史 / LongRunning 单 request）。
-2. 你读取、解析、从 `requests[-1]` 或 `request` 取当前决策负载。
-3. 往 stdout 写**一行 JSON** 信封 `{"response": <裸整数>}`（德州：`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量）。
-4. **立即换行并刷新缓冲区**，平台才能立刻读到。
-5. LongRunning 模式下，首回合响应后再输出一行 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 声明长驻。
-6. 不要退出进程——下一个决策点平台会再写一行，循环往复直到对局结束。
-
-用伪代码表示就是：
-
-```
-for 每一行 stdin:
-    信封 = JSON解析(这一行)
-    请求 = 信封["request"] 或 信封["requests"][-1]   # 当前决策
-    响应 = 做决策(请求)                              # 裸整数
-    print(JSON序列化({"response": 响应}))            # 必须以 \n 结尾
-    flush(stdout)                                    # 关键！
-```
-
-## 2. 最小 Bot（Python）
-
-下面是一个只跟注 / 过牌的最小 Bot（仓库 `samples/callbot.py` 的核心逻辑，Botzone 信封）：
-
-```python
-#!/usr/bin/env python3
-import json, sys
-
-def main():
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            env = json.loads(line)
-        except json.JSONDecodeError:
-            print(json.dumps({"response": -1}), flush=True)   # 无法解析就弃牌
-            continue
-        # 取当前决策负载：LongRunning 后续是 {"request":...}，否则 {"requests":[...]}
-        if "request" in env:
-            req = env["request"]
-        else:
-            reqs = env.get("requests") or []
-            req = reqs[-1] if reqs else {}
-        # callbot：永远 call/check（response=0）
-        print(json.dumps({"response": 0}), flush=True)
-
-if __name__ == "__main__":
-    main()
-```
-
-要点：
-
-- `flush=True`（或 `sys.stdout.flush()`）**必不可少**——Python 默认会缓冲 stdout，不刷新平台就读不到你的响应，最终超时判 fold。
-- 解析失败时回一条 `{"response":-1}` 比让进程崩溃更安全。
-- LongRunning 模式下，首回合响应后记得输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`（否则平台会等待握手行直到超时；详见 [协议](#/wiki?slug=protocol) §1）。
-- 德州 `response=0` 既是 call 也是 check——平台按当前下注合法性自动判定为跟注或过牌。
-
-## 3. 最小 Bot（C）
-
-仓库 `samples/callbot.c` 用 Botzone 信封协议，编译后是独立 ELF 可执行文件，可直接上传：
-
+<!-- SAMPLE:holdem:c -->
 ```c
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-/* 从 Botzone 信封行粗略提取顶层字段（请求负载字段名独有，顶层搜即命中）。 */
-static long peek_long(const char *s, const char *key) {
-    char pat[32];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char *p = strstr(s, pat);
-    if (!p) return 0;
-    p = strchr(p, ':');
-    if (!p) return 0;
-    return atol(p + 1);
-}
+#define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
+#define MAX_LINE (4 * 1024 * 1024)
 
 int main(void) {
-    char *line = (char *)malloc(4000000);  /* 完整历史可能很长 */
-    if (!line) return 1;
-    while (fgets(line, 4000000, stdin)) {
-        /* callbot：永远 call/check（Botzone 裸整数 0） */
+    char *line = malloc(MAX_LINE);
+    int first_response = 1;
+    if (line == NULL) return 1;
+
+    while (fgets(line, MAX_LINE, stdin) != NULL) {
+        /* Holdem: response=0 表示 call/check。 */
         fputs("{\"response\":0}\n", stdout);
-        fflush(stdout);                          /* 关键！必须刷新 */
+
+        if (first_response) {
+            fputs(KEEP_RUNNING "\n", stdout);
+            first_response = 0;
+        }
+        fflush(stdout);
     }
+
     free(line);
     return 0;
 }
 ```
 
-要点：
+把代码完整保存为当前目录下的 `bot.c`。不要向 stdout 打印日志；调试信息只能写 stderr。
 
-- `\n` 和 `fflush(stdout)` **缺一不可**。
-- C 里不必用完整 JSON 库——`strstr`/`strchr`/`atol` 提取单个整数字段已足够，轻量且无依赖。
-- 缓冲区要足够大（如 4MB）：Traditional 模式完整历史信封可能很长。
+## 3. 完整可复制的 Python 最小 Bot
 
-## 4. 编译与交叉编译
+下面是等价的完整 `bot.py`。源文件不能直接上传，必须按后文使用 Linux amd64 容器中的
+PyInstaller 打包成 ELF。
 
-平台宿主是 **Linux 服务器**。可执行文件必须是 **Linux ELF** 或 **Windows PE**；**macOS Mach-O 会被拒绝上传**。
+<!-- SAMPLE:holdem:python -->
+```python
+#!/usr/bin/env python3
+import json
+import sys
 
-### 4.1 Linux ELF（推荐）
+KEEP_RUNNING = ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
-```bash
-# 静态链接，兼容性最好（不依赖目标机器的 glibc 版本）
-cc -O2 -static -o mybot callbot.c
-# 若静态链接失败（某些系统缺静态库），退而用动态链接：
-cc -O2 -o mybot callbot.c
-chmod +x mybot
-file mybot      # 确认输出 "ELF ... x86-64"
+
+def current_request(envelope):
+    if "request" in envelope:
+        request = envelope["request"]
+    else:
+        requests = envelope.get("requests")
+        if not isinstance(requests, list) or not requests:
+            raise ValueError("missing requests")
+        request = requests[-1]
+    if not isinstance(request, dict):
+        raise ValueError("request payload must be an object")
+    return request
+
+
+def main():
+    first_response = True
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+
+        envelope = json.loads(line)
+        current_request(envelope)
+
+        # Holdem: response=0 表示 call/check。
+        print(json.dumps({"response": 0}, separators=(",", ":")), flush=True)
+
+        if first_response:
+            print(KEEP_RUNNING, flush=True)
+            first_response = False
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-仓库提供一键脚本：
+把代码完整保存为当前目录下的 `bot.py`。PyInstaller 会把解释器和依赖一起打进单文件
+ELF；这不代表平台会执行原始 `.py` 文件。
+
+## 4. Linux：构建 C 与 Python
+
+先安装 Docker Engine，并确认 `docker version` 正常。以下命令在 Bash 中执行，当前目录
+应包含上面的 `bot.c` 和 `bot.py`。即使开发机是 ARM Linux，也要保留
+`--platform linux/amd64`。
+
+### C：Alpine 静态编译
 
 ```bash
-samples/build_sample.sh        # 产出 samples/callbot_linux_amd64
+docker run --rm --platform linux/amd64 \
+  --mount "type=bind,source=$PWD,target=/work" \
+  -w /work alpine:3.20 sh -lc '
+    apk add --no-cache build-base file &&
+    cc -O2 -pipe -static -s -o /work/bot_c_linux_amd64 /work/bot.c &&
+    chmod a+rx /work/bot_c_linux_amd64 &&
+    file /work/bot_c_linux_amd64
+  '
 ```
 
-### 4.2 Windows PE（经 Wine 容器执行）
-
-若你更习惯在 Windows 工具链下开发，可交叉编译为 PE，平台会在 Wine 容器中运行：
+### Python：Linux PyInstaller 打包
 
 ```bash
-# MinGW 交叉编译（需安装 mingw-w64）
-x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
+docker run --rm --platform linux/amd64 \
+  --mount "type=bind,source=$PWD,target=/work" \
+  -w /work python:3.12-bookworm bash -lc '
+    python -m pip install --no-cache-dir pyinstaller &&
+    pyinstaller --noconfirm --clean --onefile \
+      --name bot_py_linux_amd64 \
+      --distpath /work \
+      --workpath /tmp/pyinstaller \
+      --specpath /tmp \
+      /work/bot.py &&
+    chmod a+rx /work/bot_py_linux_amd64
+  '
 ```
 
-> 平台运行 PE 依赖 Wine 镜像；若部署环境未配置 Wine，PE Bot 将无法运行。**Linux ELF 是首选**。
+生成的 `bot_c_linux_amd64` 或 `bot_py_linux_amd64` 才是上传文件。
 
-### 4.3 macOS Mach-O —— 不支持
+## 5. Windows：构建 C 与 Python
 
-平台**无法在 Linux 上可靠沙箱执行 macOS 二进制**，上传时会被直接拒绝。macOS 用户请交叉编译为 Linux ELF 或 Windows PE（见上）。
+安装 Docker Desktop，启用 WSL 2 后端，并确保使用 Linux containers。打开 PowerShell，
+进入保存 `bot.c` / `bot.py` 的目录。Windows 上的编译器和本机 PyInstaller 会生成 PE，
+不能作为平台上传文件；必须通过下列 Linux amd64 容器构建。
 
-## 5. 上传与分类
+### C：Alpine 静态编译
 
-在「我的 Bot」页面：
+```powershell
+docker run --rm --platform linux/amd64 `
+  --mount "type=bind,source=$($PWD.Path),target=/work" `
+  -w /work alpine:3.20 sh -lc '
+    apk add --no-cache build-base file &&
+    cc -O2 -pipe -static -s -o /work/bot_c_linux_amd64 /work/bot.c &&
+    chmod a+rx /work/bot_c_linux_amd64 &&
+    file /work/bot_c_linux_amd64
+  '
+```
 
-1. 上传编译好的二进制文件。
-2. 平台通过**文件魔数**自动识别格式与架构，无需你声明：
-   - `ELF`（`\x7fELF`）→ Linux；进一步识别 `amd64 / arm64 / i386` 架构。
-   - `MZ ... PE`（Windows PE 头）→ Windows；识别 `i386 / amd64`。
-   - Mach-O（`FEEDFACE / FEEDFACF` 等）→ **拒绝**。
-3. 同一个 Bot 名字可多次上传新版本，平台保留版本历史并记录校验和、大小、架构。
-4. 上传后记得在 Bot 设置里把它**设为活跃（active）**，否则无法参赛。
+### Python：Linux PyInstaller 打包
 
-## 6. 沙箱安全基线
+```powershell
+docker run --rm --platform linux/amd64 `
+  --mount "type=bind,source=$($PWD.Path),target=/work" `
+  -w /work python:3.12-bookworm bash -lc '
+    python -m pip install --no-cache-dir pyinstaller &&
+    pyinstaller --noconfirm --clean --onefile \
+      --name bot_py_linux_amd64 \
+      --distpath /work \
+      --workpath /tmp/pyinstaller \
+      --specpath /tmp \
+      /work/bot.py &&
+    chmod a+rx /work/bot_py_linux_amd64
+  '
+```
 
-你的 Bot 在受限的沙箱里执行，请确保程序不依赖被禁用的能力：
+如果你已在 WSL 的 Linux 终端中工作，也可以直接执行上一节的 Linux 命令。关键不是
+终端名称，而是构建环境必须为 Linux x86_64。Windows ARM 设备仍应使用 Docker 的
+`--platform linux/amd64`，不要上传 WSL 本机生成的 `aarch64` 文件。
 
-- **无网络**：沙箱完全断网，任何联网调用都会失败。
-- **资源限制**：内存上限 **512MB**、CPU **1 核**。
-- **磁盘**：根文件系统只读，**仅 `/tmp` 可写且可执行**（如需写临时文件或 PyInstaller 自解压请放 `/tmp`，勿依赖在 `/tmp` 外写文件）。
-- **最小权限**：以非 root 用户运行，无提权能力。
+## 6. macOS：构建 C 与 Python
 
-> 结论：Bot 应是**纯计算**程序，只读 stdin、写 stdout，不要尝试联网或依赖持久可写目录。
+安装 Docker Desktop，打开 Terminal，进入保存源码的目录。macOS 本机 `clang` 生成
+Mach-O，本机 PyInstaller 也只生成 Mach-O；PyInstaller 不支持从 macOS 原生跨系统打包
+Linux ELF。Intel Mac 和 Apple Silicon 都使用下面的 Linux amd64 容器命令，Apple
+Silicon 尤其不能删除 `--platform linux/amd64`。
 
-## 7. 本地调试
-
-你也可以脱离平台，手动给 Bot 喂请求行来验证输出（Botzone 信封，LongRunning 首回合）：
+### C：Alpine 静态编译
 
 ```bash
-echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}' | ./mybot
-# 期望输出: {"response":0}
+docker run --rm --platform linux/amd64 \
+  --mount "type=bind,source=$PWD,target=/work" \
+  -w /work alpine:3.20 sh -lc '
+    apk add --no-cache build-base file &&
+    cc -O2 -pipe -static -s -o /work/bot_c_linux_amd64 /work/bot.c &&
+    chmod a+rx /work/bot_c_linux_amd64 &&
+    file /work/bot_c_linux_amd64
+  '
 ```
 
-## 8. 常见陷阱
+### Python：Linux PyInstaller 打包
 
-| 陷阱 | 后果 | 正确做法 |
-|------|------|----------|
-| 忘了 `flush` stdout | 60 秒超时判 fold | 每次输出后 flush（Python `flush=True`、C `fflush`） |
-| 输出不带换行 `\n` | 平台可能读不到完整行 | 响应以 `\n` 结尾 |
-| 用 `print` 后进程阻塞缓冲 | 同上 | 显式刷新或关闭缓冲 |
-| response 不是裸整数 | 判 fold（协议违规） | 德州 response 必须是 `-1/-2/0/>0` 整数 |
-| `raise` 的正整数当成「加注到总额」 | 加注额不对被判 fold | 正整数是**额外下注筹码**（= 目标总额 − 本街已投） |
-| `raise` 换算后总额低于最小加注 | 判 fold | 目标总额 ≥ 上次下注的 2 倍 |
-| LongRunning 首回合没输出握手串 | 平台等待握手行直到超时 | 首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` |
-| 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负（`completed`）；启动失败非赛事 → `aborted`（`bot_crashed`） | 保持进程存活，出错就回安全默认动作（扑克 `{"response":-1}`） |
-| 上传 macOS 二进制 | 被拒绝 | 交叉编译为 Linux ELF |
-| 依赖联网 / 文件写入 | 调用失败 | 纯计算，只用 stdin/stdout |
+```bash
+docker run --rm --platform linux/amd64 \
+  --mount "type=bind,source=$PWD,target=/work" \
+  -w /work python:3.12-bookworm bash -lc '
+    python -m pip install --no-cache-dir pyinstaller &&
+    pyinstaller --noconfirm --clean --onefile \
+      --name bot_py_linux_amd64 \
+      --distpath /work \
+      --workpath /tmp/pyinstaller \
+      --specpath /tmp \
+      /work/bot.py &&
+    chmod a+rx /work/bot_py_linux_amd64
+  '
+```
 
-## 9. 进阶：做更聪明的 Bot
+## 7. 上传前验证文件类型
 
-最小 Bot 只看 `history` + `my_chips`（从历史重放推导跟注额、对手筹码）。要做强 Bot，可以逐步利用请求负载里的更多信息：
+任何操作系统都应在上传前检查产物。Linux / macOS Terminal：
 
-- **`my_cards` 手牌**：解码（0–51）后判断起手牌强度（见协议规范的卡牌编码）。
-- **`public_cards` 公共牌**：结合手牌评估当前牌力（一对 / 两对 / 顺子听牌等）。
-- **`history` 历史**：重放重建完整局面（双方本轮下注、当前需跟注额、对手剩余筹码），并推断对手动作模式（激进 / 被动）。
-- **`my_chips` 自己的筹码**：结合 `history` 推导对手筹码，做基于筹码比的博弈（短码全押、深码价值下注）。
-- **`hand` / `max_hand`**：知道当前手数与总手数，调整策略激进程度。
-- **`total_win_chips` / `total_win_games`**：累计净筹码与赢手数，判断当前形势。
+```bash
+docker run --rm --platform linux/amd64 \
+  --mount "type=bind,source=$PWD,target=/work,readonly" \
+  alpine:3.20 sh -lc '
+    apk add --no-cache file >/dev/null &&
+    file /work/bot_c_linux_amd64 /work/bot_py_linux_amd64
+  '
+```
 
-仓库 `samples/aggressivebot.c` 给出了一个稍微进阶的例子：在无人下注时主动加注，否则跟注/过牌，可作为改进起点。`samples/holdem_bots/` 下还有 6 种风格（fold/allin/raise/random/tight/loose）可供参考。
+Windows PowerShell：
 
-## 10. 运行时资源
+```powershell
+docker run --rm --platform linux/amd64 `
+  --mount "type=bind,source=$($PWD.Path),target=/work,readonly" `
+  alpine:3.20 sh -lc '
+    apk add --no-cache file >/dev/null &&
+    file /work/bot_c_linux_amd64 /work/bot_py_linux_amd64
+  '
+```
 
-Bot 在 Docker 中运行：单核、512MB 内存、无网络。决策超时默认 60s。
+两行都必须包含类似输出：
+
+```text
+ELF 64-bit LSB executable, x86-64
+```
+
+看到 `PE32`、`MS Windows`、`Mach-O`、`ARM aarch64`、`script` 或仅显示 Python source，
+都说明文件不符合上传要求。不要只靠扩展名判断，也不要把错误格式改名后上传。
+
+## 8. 在 Linux 容器中做通信冒烟
+
+以下命令用一个最小 Holdem 首回合请求运行 C 产物。Python 产物只需把最后的文件名换成
+`/work/bot_py_linux_amd64`。
+
+```bash
+printf '%s\n' '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,51],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}' |
+docker run --rm -i --platform linux/amd64 \
+  --mount "type=bind,source=$PWD,target=/work,readonly" \
+  debian:bookworm-slim /work/bot_c_linux_amd64
+```
+
+正确输出的前两行是：
+
+```text
+{"response":0}
+>>>BOTZONE_REQUEST_KEEP_RUNNING<<<
+```
+
+真实 Traditional 对局读取第一行响应后会结束本次进程；真实 LongRunning 对局会校验
+第二行握手并继续向同一进程发送增量请求。
+
+## 9. 上传预检
+
+上传新版本时先选择正确的游戏和运行模式。平台预检会：
+
+1. 拒绝不是 Linux x86_64 ELF 的文件；
+2. 使用与正式对局首回合相同的完整历史信封；
+3. 要求响应对象包含 `response`，忽略其他顶层字段；
+4. 校验本游戏的 response payload 类型；
+5. LongRunning 额外要求精确握手。
+
+预检使用独立的 **8 秒首回合健康检查**。它只证明文件可以启动并完成一次首回合通信；
+上传后仍应创建挑战，验证完整历史重放、增量状态和整场策略。该 8 秒不会计入正式对局，
+也不会改变 Pencil 每方 900 秒累计棋钟。
+
+平台会先准备 Linux x86_64 沙箱镜像，再开始这 8 秒计时。若镜像仓库或平台沙箱故障，
+上传会明确提示平台暂不可用，不会把镜像下载时间误判成 Bot 响应慢。
+
+## 10. 常见故障
+
+| 故障 | 结果 | 修复 |
+|------|------|------|
+| 上传 `.py`、`.exe`、Mach-O 或 ARM64 ELF | 上传校验拒绝 | 在 Linux amd64 容器中生成 x86-64 ELF |
+| Windows/macOS 本机运行 PyInstaller | 生成宿主系统格式 | 使用 `python:3.12-bookworm` + `--platform linux/amd64` |
+| 忘记换行或 flush | 决策超时并技术判负 | 每次输出完整行后立即 flush |
+| 顶层输出 `0` | `protocol_error` | 输出 `{"response":0}` |
+| 棋类输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
+| 附加 `debug/data/globaldata` | 平台忽略 | 只有 `response` 参与对局与历史重放 |
+| LongRunning 未精确握手 | `protocol_error`，不回退 | 首响应后立即输出固定握手行 |
+| Holdem 把正数当目标总额 | 游戏动作错误 | 正数是本次额外投入筹码 |
+| Traditional 不重放棋类历史 | 后续可能重复落子 | 重放全部 `requests[]/responses[]` |
+| 依赖网络或持久磁盘 | 沙箱内失败 | 只读 stdin、写 stdout，状态放内存 |
+
+## 11. 沙箱与时限
+
+- 每个 Bot：1 核、512MB、无网络、只读根文件系统；仅 `/tmp` 可写。
+- Holdem / Gomoku 使用平台固定的单步决策时限。
+- Pencil 双方各有固定 900 秒累计棋钟；每次思考消耗同一份总预算。
+- 棋钟信息只用于页面展示和回放，不改变 Bot 输入协议。
+
+完整字段与规则：[通信协议](#/wiki?slug=protocol) · [德州扑克](#/wiki?slug=texas) ·
+[五子棋](#/wiki?slug=gomoku) · [点格棋](#/wiki?slug=pencil)。

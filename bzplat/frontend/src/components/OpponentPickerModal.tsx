@@ -26,6 +26,7 @@ export interface PickBot {
   os?: string
   arch?: string
   is_active?: number
+  runnable?: boolean
 }
 
 interface User {
@@ -44,15 +45,18 @@ type Tab = 'all' | 'mine' | 'users'
 export default function OpponentPickerModal({
   gameId,
   myUserId,
+  mineOnly = false,
   onClose,
   onPick,
 }: {
   gameId: GameId
   myUserId?: number
+  /** 发起 Bot-vs-Bot 时座位 1 必须属于当前用户，与后端 my_bot_id 权限一致。 */
+  mineOnly?: boolean
   onClose: () => void
   onPick: (bot: PickBot) => void
 }) {
-  const [tab, setTab] = useState<Tab>('all')
+  const [tab, setTab] = useState<Tab>(mineOnly ? 'mine' : 'all')
   const [q, setQ] = useState('')
   const [bots, setBots] = useState<PickBot[]>([])
   const [users, setUsers] = useState<User[]>([])
@@ -69,20 +73,20 @@ export default function OpponentPickerModal({
     if (tab === 'users' && !selUser) return
     setLoading(true)
     const params = new URLSearchParams({ game_id: gameId })
-    if (tab === 'mine') params.set('owner_id', String(myUserId ?? ''))
+    if (tab === 'mine' || mineOnly) params.set('owner_id', String(myUserId ?? ''))
     if (tab === 'users' && selUser) params.set('owner_id', String(selUser.id))
     params.set('page', String(page))
     params.set('per_page', String(perPage))
     apiGet<{ bots: PickBot[]; total?: number }>(`/api/bots/public?${params.toString()}`)
       .then((d) => {
-        let rows = (d.bots || []).filter((b) => b.is_active !== 0)
-        if (tab === 'mine') rows = rows.filter((b) => b.owner_id !== myUserId ? false : true)
+        let rows = (d.bots || []).filter((b) => b.is_active !== 0 && b.runnable !== false)
+        if (tab === 'mine' || mineOnly) rows = rows.filter((b) => b.owner_id === myUserId)
         setBots(rows)
         if (d.total !== undefined) setTotal(d.total)
       })
       .catch((e) => setError(errMsg(e, '加载失败')))
       .finally(() => setLoading(false))
-  }, [gameId, tab, selUser, page, myUserId])
+  }, [gameId, tab, selUser, page, myUserId, mineOnly])
 
   // 用户搜索
   useEffect(() => {
@@ -125,17 +129,19 @@ export default function OpponentPickerModal({
               setQ(e.target.value)
               if (tab === 'users') { setSelUser(null); setPage(1) }
             }}
-            placeholder={tab === 'users' ? '搜索用户名…' : '搜索 Bot 名称…'}
+            placeholder={tab === 'users' ? '搜索用户名…' : mineOnly ? '搜索我的 Bot 名称…' : '搜索 Bot 名称…'}
           />
-          <div className="mt-2 flex gap-2">
-            {([['all', '全部 Bot'], ['mine', '我的 Bot（自博弈）'], ['users', '按用户搜索']] as [Tab, string][]).map(
-              ([t, label]) => (
-                <button key={t} type="button" onClick={() => { setTab(t); setSelUser(null); setPage(1) }} className={tabBtn(t)}>
-                  {label}
-                </button>
-              ),
-            )}
-          </div>
+          {!mineOnly && (
+            <div className="mt-2 flex gap-2">
+              {([['all', '全部 Bot'], ['mine', '我的 Bot（自博弈）'], ['users', '按用户搜索']] as [Tab, string][]).map(
+                ([t, label]) => (
+                  <button key={t} type="button" onClick={() => { setTab(t); setSelUser(null); setPage(1) }} className={tabBtn(t)}>
+                    {label}
+                  </button>
+                ),
+              )}
+            </div>
+          )}
         </div>
 
         {/* 内容区 */}

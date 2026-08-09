@@ -1,12 +1,17 @@
 # 协议 JSON Schema
 
-本目录为 **德州扑克（holdem）Botzone 标准协议** 的 JSON Schema，供校验与对照 [wiki/PROTOCOL.md](../wiki/PROTOCOL.md)。
+本目录保存平台**唯一现行 Holdem 协议**的机器可读契约，与
+[`wiki/PROTOCOL.md`](../wiki/PROTOCOL.md)一致。
 
 | 文件 | 用途 |
 |------|------|
-| `protocol_request.schema.json` | 请求负载（Botzone 全名字段 `num_players`/`my_cards`/`history`/...） |
-| `protocol_response.schema.json` | 响应信封（`{"response": <裸整数>}`：`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量） |
+| `protocol_request.schema.json` | 固定 70 手、11 字段的 Holdem request payload |
+| `protocol_request_envelope.schema.json` | Traditional/首回合完整历史与 LongRunning 后续单 request 信封 |
+| `protocol_response.schema.json` | 必须包含 `response` 的 Holdem 响应信封 |
 
-**范围**：当前 schema **仅覆盖 holdem** 动作协议；五子棋 / 点格棋协议见 wiki 对应页（Botzone 化在后续 PR），不在本目录。
+顶层整数和缺少 `response` 的旧 `{"a":...}` 不会通过 schema。`debug` / `data` /
+`globaldata` 等额外顶层键允许存在，但运行时会丢弃；只有 `response` 进入历史和裁判。
 
-**协议**：完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准（信封 + 裸整数 response）。请求负载字段名对齐 [TexasHoldem2p](https://wiki.botzone.org.cn/index.php?title=TexasHoldem2p)。响应 `response` 为裸整数；raise 的正整数是「额外下注筹码」(raise delta = 目标总额 − 本街已投)。
+当前 JSON Schema 覆盖 Holdem；Gomoku / Pencil 共用相同的严格外层信封，其
+`response` payload 为 `{"x":int,"y":int}`，详见协议 Wiki。上传预检与正式首回合
+使用同一信封和严格规则。

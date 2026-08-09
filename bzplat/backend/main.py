@@ -22,6 +22,13 @@ from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.mail import Mailer
 from bzplat.backend.matches import MatchOrchestrator, MatchRunner
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
+from bzplat.backend.notifications import NotificationManager
+from bzplat.backend.qa_safety import (
+    assert_qa_database_isolated,
+    assert_qa_runtime_path_isolated,
+    assert_qa_upload_root_isolated,
+    qa_instance_enabled,
+)
 from bzplat.backend.runtime import BinaryRunner
 from bzplat.backend.runtime.limits import (
     BOT_CPUS,
@@ -54,9 +61,6 @@ from bzplat.backend.store.schema import (
     SETTING_CONTEST_SCHEDULER_INTERVAL_SEC,
     SETTING_CONTEST_TEMPLATES,
     SETTING_FULL_RR_MAX_N,
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
     SETTING_MAX_CONCURRENT,
 )
 
@@ -92,11 +96,6 @@ def _seed_runtime_settings(store: Store, env_max: int | None) -> int:
     store.seed_setting_if_absent(SETTING_BOT_MEMORY, str(BOT_MEMORY_MB))
     store.seed_setting_if_absent(SETTING_CONTEST_REST, "10")
     store.seed_setting_if_absent(SETTING_FULL_RR_MAX_N, "12")
-    # 裁判规则参数默认值（与各引擎常量对齐；admin 可在 Web 上热调）
-    # 注：手数(holdem)/棋盘边长(gomoku)/点阵(pencil) 已钉死固定值，不再作为 admin 可调项 seed。
-    store.seed_setting_if_absent(SETTING_JUDGE_HOLDEM_STACK, "20000")
-    store.seed_setting_if_absent(SETTING_JUDGE_HOLDEM_SB, "50")
-    store.seed_setting_if_absent(SETTING_JUDGE_HOLDEM_BB, "100")
     store.seed_setting_if_absent(
         SETTING_CONTEST_TEMPLATES,
         json.dumps(list_templates(), ensure_ascii=False),
@@ -136,16 +135,41 @@ def _seed_runtime_settings(store: Store, env_max: int | None) -> int:
 def create_app(
     *,
     db_path: str | None = None,
-    upload_root: str | Path = "bot_uploads",
+    upload_root: str | Path | None = None,
     max_concurrent: int | None = None,
 ) -> FastAPI:
     _load_dotenv()
     db_path = db_path or os.environ.get("BZ_DB_PATH", "botzone.db")
+    qa_instance = qa_instance_enabled(os.environ.get("BZ_QA_INSTANCE"))
+    avatar_raw = os.environ.get("BZ_AVATAR_DIR")
+    avatars_dir = (
+        Path(avatar_raw)
+        if avatar_raw
+        else (
+            Path(db_path).expanduser().resolve().parent / "avatars"
+            if qa_instance
+            else Path("avatars")
+        )
+    )
+    if upload_root is None:
+        # Explicit/temporary DBs must not silently share the caller's production
+        # bot_uploads directory. For the normal CWD botzone.db this remains ./bot_uploads.
+        upload_root = Path(db_path).expanduser().resolve().parent / "bot_uploads"
+    if qa_instance:
+        source_root = Path(__file__).resolve().parents[2]
+        # Both checks happen before Store/BotManager constructors can create or migrate
+        # anything. The public health marker is emitted only after these pass.
+        db_path = str(assert_qa_database_isolated(db_path, source_root))
+        upload_root = assert_qa_upload_root_isolated(upload_root, source_root)
+        avatars_dir = assert_qa_runtime_path_isolated(
+            avatars_dir,
+            source_root,
+            purpose="BZ_QA_INSTANCE 头像目录",
+        )
     env_max = max_concurrent
     if env_max is None and os.environ.get("BZ_MAX_CONCURRENT_MATCHES"):
         env_max = int(os.environ["BZ_MAX_CONCURRENT_MATCHES"])
     prefer_local = os.environ.get("BZ_BOT_LOCAL", "").lower() in ("1", "true", "yes")
-
     store = Store(db_path)
     effective_conc = _seed_runtime_settings(store, env_max)
 
@@ -169,15 +193,19 @@ def create_app(
     orch = MatchOrchestrator(store, runner=match_runner, max_concurrent=effective_conc)
     contest_manager = ContestManager(store, orch)
 
-    async def _on_match_done(_match_id: str, contest_id: int | None) -> None:
+    async def _on_match_done(match_id: str, contest_id: int | None) -> None:
         if contest_id is not None:
-            await contest_manager.maybe_finish(contest_id)
+            # 必须传 match_id：completed 才能进积分/晋级；aborted
+            # 需先精确复位其 pairing 供重派，不能当作已裁决终态。
+            await contest_manager.handle_match_done(
+                match_id,
+                contest_id,
+                retry_aborted=orch.is_admin_abort_handoff(match_id),
+            )
 
     orch.on_match_done = _on_match_done
 
     # 通知管理器（写站内通知 + 按用户 prefs 可选发邮件）
-    from bzplat.backend.notifications import NotificationManager
-
     notifier = NotificationManager(store, mailer=mailer)
     orch.notifier = notifier
 
@@ -193,7 +221,13 @@ def create_app(
             logger.warning(
                 "启动清理孤儿对局 %d 场（标记为 aborted）", recovered
             )
-        # 启动对账：让 running/rest 的赛事收敛到正确终态。
+        # completed 业务结果与全局评分是两个事务：若上次进程在二者之间退出，
+        # 用持久化 result/winner 补算。settlement claim 与评分同事务，重复启动
+        # 无副作用；这里只补评分，不重发通知或重复奖励 XP。必须先于 auto-match。
+        rating_recovered = await orch.recover_unsettled_match_ratings()
+        if rating_recovered:
+            logger.warning("启动补算未结算评分 %d 场", rating_recovered)
+        # 启动对账：让 published/running/rest 赛事收敛，并补算 finished+ready=0 正式榜。
         # 修复「赛事卡 running」——match 全完成但 maybe_finish 回调丢失/被吞、或 match 被
         # orphan 清成 aborted 但赛事状态未同步。详见 ContestManager.reconcile_running_contests。
         reconciled = await contest_manager.reconcile_running_contests()
@@ -222,6 +256,10 @@ def create_app(
                 await sched_task
             except asyncio.CancelledError:
                 pass
+            # Match tasks can be inside asyncio subprocess pipe setup.  Drain
+            # them explicitly before the server closes the event loop; relying
+            # on loop-wide cancellation can otherwise hang shutdown forever.
+            await orch.shutdown()
 
     app = FastAPI(title="botzone-platform", version="0.1.0", lifespan=lifespan)
     app.state.store = store
@@ -231,11 +269,20 @@ def create_app(
     app.state.captcha_store = captcha
     app.state.bot_manager = bot_manager
     app.state.binary_runner = binary_runner
+    # Upload preflight runs in a worker thread and must own its BinaryRunner.
+    # Sharing the orchestrator runner across event loops/threads would race its
+    # session map and subprocess transports.
+    app.state.preflight_runner_factory = lambda: BinaryRunner(
+        prefer_local=prefer_local
+    )
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer
     app.state.notifier = notifier
     app.state.auto_matcher = auto_matcher
+    # Avatar writes and StaticFiles must share the exact preflight-validated path.
+    # Routes must not resolve BZ_AVATAR_DIR independently after app creation.
+    app.state.avatar_dir = avatars_dir
     app.state.runtime_ceiling = concurrent_ceiling()
 
     app.add_middleware(SecurityHeadersMiddleware)
@@ -250,7 +297,9 @@ def create_app(
         return {
             "ok": True,
             "smtp_configured": mailer.config.configured,
-            "db": db_path,
+            # Never expose the server filesystem path publicly. Browser/API QA uses
+            # the explicit marker to reject a Vite proxy accidentally targeting main.
+            "qa_instance": qa_instance,
             "max_concurrent": orch.max_concurrent,
             "ceiling": concurrent_ceiling(),
         }
@@ -277,7 +326,6 @@ def create_app(
         )
 
     # 头像静态托管（avatars/<uid>.<ext>）
-    avatars_dir = Path(os.environ.get("BZ_AVATAR_DIR", "avatars"))
     avatars_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/avatars", StaticFiles(directory=str(avatars_dir)), name="avatars")
 

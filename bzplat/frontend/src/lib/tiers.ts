@@ -1,9 +1,9 @@
 /**
  * 段位映射（后端 games/<game>/tiers.py 镜像）。
  *
- * 全面解耦 PR-C：段位 per-game。后端 /api/tiers?game_id= 返回各游戏曲线。
+ * 段位按游戏独立。后端 /api/tiers?game_id= 返回对应曲线。
  * 本模块提供：
- * - 默认全局曲线 TIERS（向后兼容 + 首次加载兜底）
+ * - 未指定游戏时使用展示默认曲线 TIERS
  * - fetchTiers(gameId)：按游戏拉曲线（带缓存）
  * - tierFor(rating, gameTier?)：在指定曲线里查段位
  * - useGameTiers(gameId)：React hook，按游戏缓存曲线
@@ -12,6 +12,7 @@
  * 每档提供浅/暗双色 badge 类名。
  */
 import { useEffect, useState } from 'react'
+import { findGame } from '@/games'
 
 export interface Tier {
   level: number
@@ -66,7 +67,7 @@ function toTier(s: ServerTier): Tier {
   return { ...s, badge: cls.badge, accent: cls.accent }
 }
 
-/** 默认全局曲线（向后兼容 + 首次加载兜底；与后端 holdem 初始阈值一致）。 */
+/** 未指定游戏上下文时的展示默认曲线。 */
 export const TIERS: Tier[] = [
   { level: 5, key: 'master', name: '大师', ...BADGE_BY_KEY.master, min_rating: 2200 },
   { level: 4, key: 'expert', name: '专家', ...BADGE_BY_KEY.expert, min_rating: 2050 },
@@ -100,34 +101,44 @@ export function trendDelta(delta: number | null | undefined): { up: boolean; abs
 // ── per-game 曲线拉取（带缓存）────────────────────────────────
 const _tierCache: Record<string, Tier[]> = {}
 
-/** 拉取并缓存某游戏的段位曲线（从 /api/tiers?game_id=）。失败回退全局曲线。 */
+/** 拉取并缓存某游戏的段位曲线。失败必须显式上抛，不能伪装成另一游戏。 */
 export async function fetchTiers(gameId: string): Promise<Tier[]> {
   if (_tierCache[gameId]) return _tierCache[gameId]
-  try {
-    const r = await fetch(`/api/tiers?game_id=${encodeURIComponent(gameId)}`)
-    if (!r.ok) throw new Error(`tiers ${r.status}`)
-    const data = (await r.json()) as { tiers: ServerTier[] }
-    const tiers = (data.tiers || []).map(toTier)
-    _tierCache[gameId] = tiers
-    return tiers
-  } catch {
-    _tierCache[gameId] = TIERS
-    return TIERS
+  const r = await fetch(`/api/tiers?game_id=${encodeURIComponent(gameId)}`)
+  if (!r.ok) throw new Error(`tiers ${r.status}`)
+  const data = (await r.json()) as { tiers?: ServerTier[]; game_id?: string }
+  if (data.game_id !== gameId || !Array.isArray(data.tiers) || data.tiers.length === 0) {
+    throw new Error('tiers response does not match requested game')
   }
+  const tiers = data.tiers.map(toTier)
+  _tierCache[gameId] = tiers
+  return tiers
 }
 
 /** React hook：按游戏取段位曲线（异步拉取 + 缓存）。 */
-export function useGameTiers(gameId: string | null | undefined): Tier[] {
-  const [tiers, setTiers] = useState<Tier[]>(TIERS)
-  const gid = gameId || 'holdem'
+export function useGameTiers(gameId: string | null | undefined): Tier[] | null {
+  const gid = findGame(gameId)?.id
+  const hasGameContext = gameId !== null && gameId !== undefined && gameId !== ''
+  const [tiers, setTiers] = useState<Tier[] | null>(() => (
+    gid ? _tierCache[gid] ?? null : hasGameContext ? null : TIERS
+  ))
   useEffect(() => {
+    if (!gid) {
+      setTiers(hasGameContext ? null : TIERS)
+      return
+    }
+    setTiers(_tierCache[gid] ?? null)
     let cancelled = false
-    void fetchTiers(gid).then((t) => {
-      if (!cancelled) setTiers(t)
-    })
+    void fetchTiers(gid)
+      .then((t) => {
+        if (!cancelled) setTiers(t)
+      })
+      .catch(() => {
+        if (!cancelled) setTiers(null)
+      })
     return () => {
       cancelled = true
     }
-  }, [gid])
+  }, [gid, hasGameContext])
   return tiers
 }

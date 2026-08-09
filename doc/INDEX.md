@@ -1,6 +1,6 @@
 # 交付文档索引
 
-本目录（`doc/`）存放面向**甲方验收与项目干系人**的正式交付文档。正式交付 6 份 + 历史归档若干。
+本目录（`doc/`）存放面向**甲方验收与项目干系人**的工程文档：6 份核心交付文档，另有 4 份现行专项文档和本索引。
 
 ## 文档导航
 
@@ -13,15 +13,14 @@
 | [TESTING.md](./TESTING.md) | 测得怎么样？ | 测试策略、范围、执行结果、压测分析、缺陷与结论 |
 | [SUMMARY.md](./SUMMARY.md) | 整体交付如何？ | 里程碑、成果指标、验收清单、经验教训、遗留与维护 |
 
-## 历史归档（非交付正文）
+## 专项文档
 
 | 文档 | 说明 |
 |------|------|
-| [PRELIM_FINAL_PLAN.md](./PRELIM_FINAL_PLAN.md) | 预赛/决赛体系实施计划草稿（已落地；现行以 wiki/GUIDE 为准） |
 | [SECURITY.md](./SECURITY.md) | 公网加固运维细节：三文件日志、IP 透传（nginx/frp）、限流、安全响应头、相关环境变量 |
-| [LOADTEST.md](./LOADTEST.md) | QA 压测脚本 `scripts/load_test.py`：批量用户 + 全端点覆盖（含 DB-direct 播种） |
+| [LOADTEST.md](./LOADTEST.md) | QA 多角色关键业务链路与多局测试（含隔离 DB-direct 播种，不声称覆盖全部端点） |
 | [RUNTIME.md](./RUNTIME.md) | 运维侧运行时：Docker 硬限制加固参数、auto_match 配置、admin 运行时配置端点 |
-| [JUDGE_CODE.md](./JUDGE_CODE.md) | 各游戏裁判引擎代码位置、契约、热调参数与改动工作流（面向平台开发者） |
+| [JUDGE_CODE.md](./JUDGE_CODE.md) | 各游戏裁判引擎代码位置、固定规则契约与改动工作流（面向平台开发者） |
 
 ## doc/ 与 wiki/ 的分工
 

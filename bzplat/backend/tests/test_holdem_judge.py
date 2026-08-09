@@ -9,7 +9,7 @@
 - allin 后可 call（修复点 4）
 - split pot 整数 + 奇筹码（修复点 5）
 - history round 键（修复点 6）
-- set_deck_from_str roundtrip（适配层注入路径）
+- set_deck_from_str roundtrip（确定性测试注入路径）
 """
 from __future__ import annotations
 
@@ -185,7 +185,7 @@ def test_terminal_fold_history_has_round_key():
     assert last["action_type"] == "fold"
 
 
-# ── set_deck_from_str roundtrip（适配层注入路径）────────────────────────
+# ── set_deck_from_str roundtrip（确定性测试注入路径）────────────────────
 
 def test_set_deck_from_str_roundtrip():
     """set_deck_from_str 用标准扑克记法注入，deal_cards_and_blind 后 player_cards 正确。"""

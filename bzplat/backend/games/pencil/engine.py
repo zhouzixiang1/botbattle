@@ -18,7 +18,11 @@ from bzplat.backend.games.pencil.pencil_judge import (
     DEFAULT_N,
     PencilBoard,
 )
-from bzplat.backend.runtime.binary_runner import BotCrashedError
+from bzplat.backend.runtime.binary_runner import (
+    BotCrashedError,
+    BotTechnicalError,
+    PlatformRunnerError,
+)
 
 DecideFn = Callable[[int, dict[str, Any]], Any]
 EventFn = Callable[[str, dict[str, Any]], Any]
@@ -89,6 +93,10 @@ class PencilSession:
             )
             try:
                 raw = await self._decide(decide, to_move, req)
+            except PlatformRunnerError:
+                raise
+            except BotTechnicalError:
+                raise
             except BotCrashedError:
                 # 对齐裁判：bot 崩溃不可恢复 → 判负 2-0（不再中止整场）。
                 winner = 1 - to_move

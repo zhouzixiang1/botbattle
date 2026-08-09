@@ -1,119 +1,239 @@
-# 五子棋 (Gomoku)
+# 五子棋
 
-对齐 [Botzone · Gomoku](https://wiki.botzone.org.cn/index.php?title=Gomoku) / [五子棋](https://wiki.botzone.org.cn/index.php?title=%E4%BA%94%E5%AD%90%E6%A3%8B)。  
-本平台 `game_id`：**`gomoku`**。
+本平台 `game_id`：`gomoku`。棋盘与胜负规则固定。
 
 ## 规则
 
-- 棋盘 **15×15**；坐标整数 `x,y`，范围 `[0,14]`，先 x 后 y，原点左上。
-- **黑方先手**（本平台 seat `0`）。
-- 横、竖、斜任一方向 **连续 ≥5** 同色即胜（**长连也算胜**）。
-- **无禁手**（与 Renju-Official 不同）。
-- 非法着（越界 / 占用）或超时 → **判负**。
-- 棋盘下满且无人成五 → **平局**。
+- 棋盘固定 **15×15**，坐标范围 `0..14`，原点左上，先 `x` 后 `y`。
+- 座位 0 为黑方并先手，座位 1 为白方。
+- 横、竖或两条斜线任一方向连续不少于 5 子即胜；长连同样算胜。
+- 无禁手。
+- 棋盘填满且无人连五为平局。
+- 格式正确但越界或落在已占位置，由裁判判负；信封/response 错误或 Bot 超时属于
+  平台技术负。
 
-## Botzone JSON 协议
+## 通信 payload
 
-Request（对方落子）：
-
-```json
-{"x": Number, "y": Number}
-```
-
-黑方首手：`{"x": -1, "y": -1}`。
-
-Response：
+通信必须使用[统一信封](#/wiki?slug=protocol)。请求 payload：
 
 ```json
-{"x": Number, "y": Number}
+{"x":7,"y":7,"me":1}
 ```
 
-Botzone 每回合启停，输入含完整 `requests` / `responses` 历史。状态恢复（C++ 样例逻辑）：
+- `x`,`y` 是对手最近一手；黑方首回合为 `-1,-1`。
+- `me` 为本方座位，`0` 黑、`1` 白。
 
-```cpp
-int turnID = input["responses"].size();
-for (int i = 0; i < turnID; i++) {
-    placeAt(requests[i].x, requests[i].y);   // 对手历史
-    placeAt(responses[i].x, responses[i].y); // 己方历史
-}
-placeAt(requests[turnID].x, requests[turnID].y); // 本回合最新对手着
-```
-
-`placeAt`：仅当 `x>=0 && y>=0` 才落子（跳过首手 `-1,-1`）。
-
-## 本平台长驻行协议（完全照 Botzone）
-
-整场对局进程不退出；裁判每步推送一行 Botzone 信封，Bot 回一行信封。
-
-请求信封（Traditional 完整历史 / LongRunning 单 request）：
-
-```json
-{"request":{"x":7,"y":7,"me":0}}
-```
-
-| 字段 | 含义 |
-|------|------|
-| `x`,`y` | 对方上一手；黑方首手为 `-1,-1` |
-| `me` | 本方座位 `0` 黑 / `1` 白 |
-
-响应信封：
+响应必须是完整对象：
 
 ```json
 {"response":{"x":7,"y":8}}
 ```
 
-完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准（信封 + `{x,y}` 落子）。Botzone 标准 Bot 可直接跑。详见 [协议规范](#/wiki?slug=protocol)。
+顶层裸 `{x,y}` 不合法。Traditional 必须重放全部 `requests[]/responses[]`；
+LongRunning 首响应后必须精确握手，后续按单 request 增量维护棋盘。
 
+## 快速开始
 
-## 事件（观赛 / 回放）
+下面两个程序都能从完整历史重建棋盘，也能在 LongRunning 模式中增量维护棋盘。上传文件
+必须是 Linux x86_64 ELF；Windows、Linux、macOS 的构建命令见
+[Bot 开发指南](#/wiki?slug=bot-dev)。实现自己的策略时请保留这些状态处理要点：
 
-- `match_start`：`size`, `first`
-- `turn` / `move`：落子
-- `illegal`：非法着
-- `match_end`：`winner`, `reason`（`five` / `draw` / `illegal` / `error`）
+- Traditional 每次从完整 `requests[]/responses[]` 重建 15×15 棋盘；
+- LongRunning 在首回合重建棋盘并握手，后续把每个增量 request 落入内存棋盘；
+- 选择响应点前同时排除对手历史着法与自己过去的 response；
+- 策略随机也不能返回已占点、越界点或非整数坐标。
 
-## 裁判判定逻辑
+### 完整 C 示例
 
-服务端裁判判定：15×15 内、该点为空才合法；非法着 / 超时判负。连五判定：
+把以下内容保存为 `bot.c`，再按 [Bot 开发指南](#/wiki?slug=bot-dev)中你的操作系统对应
+的 C 命令构建。
 
-```python
-_DIRS = ((1, 0), (0, 1), (1, 1), (1, -1))  # 横、竖、两斜
+<!-- SAMPLE:gomoku:c -->
+```c
+/* 五子棋随机空点 Bot — 平台唯一 JSON 信封协议。
+ * 请求信封: {"requests":[...]} 或 {"request":{"x":int,"y":int,"me":0|1}}
+ *   - 黑方(me=0)首手 x=y=-1；之后 x,y 为对方上一手
+ * 响应信封: {"response":{"x":int,"y":int}}
+ * Traditional 从完整 requests/responses 重建占用；LongRunning 首响应后严格握手，
+ * 后续按单 request 增量维护。两种模式可使用同一个二进制。
+ */
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
-def check_win(board, x, y, player):
-    for dx, dy in _DIRS:
-        count = 1
-        for sign in (1, -1):
-            cx, cy = x + sign * dx, y + sign * dy
-            while 0 <= cx < 15 and 0 <= cy < 15 and board[cx][cy] == player:
-                count += 1; cx += sign * dx; cy += sign * dy
-        if count >= 5:  # 连续 ≥5（含长连，无禁手）
-            return True
-    return False
+#define SIZE 15
+#define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
+static int board[SIZE][SIZE]; /* 0=空，1=已占 */
+
+static int number_after(const char *s, const char *key, int def) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(s, pat);
+    if (!p) return def;
+    p = strchr(p + strlen(pat), ':');
+    if (!p) return def;
+    return atoi(p + 1);
+}
+
+static void reset_board(void) {
+    memset(board, 0, sizeof(board));
+}
+
+/* 标准历史信封中的 requests[] / responses[] 都只用 x/y 表示落子；
+ * 扫描全部坐标即可恢复占用状态，首手 -1,-1 会自然跳过。 */
+static void replay_all_moves(const char *line) {
+    const char *p = line;
+    while ((p = strstr(p, "\"x\"")) != NULL) {
+        int x = number_after(p, "x", -1);
+        int y = number_after(p, "y", -1);
+        if (x >= 0 && x < SIZE && y >= 0 && y < SIZE)
+            board[x][y] = 1;
+        p += 3;
+    }
+}
+
+int main(void) {
+    srand((unsigned)time(NULL));
+    reset_board();
+    int first_response = 1;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, stdin)) != -1) {
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+            line[--n] = 0;
+        if (n <= 0) continue;
+
+        if (strstr(line, "\"requests\"") != NULL) reset_board();
+        replay_all_moves(line);
+
+        /* 随机选一个空点 */
+        int xs[SIZE * SIZE], ys[SIZE * SIZE], ec = 0;
+        for (int x = 0; x < SIZE; x++)
+            for (int y = 0; y < SIZE; y++)
+                if (board[x][y] == 0) { xs[ec] = x; ys[ec] = y; ec++; }
+        if (ec == 0) {
+            fputs("{\"response\":{\"x\":-1,\"y\":-1}}\n", stdout);
+        } else {
+            int idx = rand() % ec;
+            int x = xs[idx], y = ys[idx];
+            board[x][y] = 1;
+            printf("{\"response\":{\"x\":%d,\"y\":%d}}\n", x, y);
+        }
+        if (first_response) {
+            fputs(KEEP_RUNNING "\n", stdout);
+            first_response = 0;
+        }
+        fflush(stdout);
+    }
+    free(line);
+    return 0;
+}
 ```
 
-> 可用 [`samples/judges/gomoku_judge.py`](../samples/judges/gomoku_judge.py) 在本地自测合法着 / 胜负（`--check` 交互逐手）。
+### 完整 Python 示例
 
-## 样例 Bot
+把以下内容保存为 `bot.py`，再按开发指南使用 Linux amd64
+`python:3.12-bookworm` 容器中的 PyInstaller 打包；不要上传源文件本身。
 
-仓库：`samples/gomokubot.py`（随机空点）；裁判自测见 [`samples/judges/`](../samples/judges/)。
+<!-- SAMPLE:gomoku:python -->
+```python
+#!/usr/bin/env python3
+"""五子棋随机空点样例 Bot（平台唯一 JSON 信封协议）。
 
-## 默认赛制模板
+Traditional 使用完整历史；LongRunning 首回合使用完整历史并严格握手，之后使用单 request。
+请求负载：{x,y,me}；响应信封：{"response": {"x":.., "y":..}}。
+"""
+from __future__ import annotations
 
-| template_id | 管线 |
-|-------------|------|
-| `gomoku_group_drr_ko` | 分组双循环 → rest → 单败 |
-| `gomoku_swiss_ko` | 瑞士 → rest → 单败 |
+import json
+import random
+import sys
 
-评分：`ccgc_2_1_0`（胜 2 / 平 1 / 负 0）。
+SIZE = 15
+KEEP_RUNNING = ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
-## 一手交换五子棋（Gomoku-Swap1）
 
-对齐 Botzone 游戏「一手交换五子棋」——用一手交换削弱黑先优势：黑方下一手后，白方可选择交换（典型 Swap 变体）。
+def make_board() -> list[list[int]]:
+    return [[-1] * SIZE for _ in range(SIZE)]
 
-> **状态**：本地调研未下载到完整 Wiki 规则正文（`allpages` / 游戏列表仅有条目）。引擎**尚未**以独立 `game_id` 实现，当前请使用标准五子棋。规则正文补全后：协议在标准 Gomoku 上增加白方可选 `{"x":-1,"y":-1}` 换手；`game_id` 另议（如 `gomoku_swap1`）。Wiki 标题：[Gomoku-Swap1](https://wiki.botzone.org.cn/index.php?title=Gomoku-Swap1)。
 
-## 参考
+board = make_board()
 
-1. https://wiki.botzone.org.cn/index.php?title=Gomoku  
-2. 本地：`refs/botzone/Gomoku.html`  
-3. 相关：一手交换五子棋（Swap1）见上节
+
+def place(x: int, y: int, p: int) -> None:
+    if 0 <= x < SIZE and 0 <= y < SIZE:
+        board[x][y] = p
+
+
+def _mark_payload(move: object, player: int) -> None:
+    if not isinstance(move, dict):
+        raise ValueError("落子 payload 不是对象")
+    x, y = int(move.get("x", -1)), int(move.get("y", -1))
+    if 0 <= x < SIZE and 0 <= y < SIZE:
+        place(x, y, player)
+
+
+def load_turn(envelope: dict) -> dict:
+    """按所选运行模式的标准信封更新棋盘并返回当前 request。"""
+    global board
+    requests = envelope.get("requests")
+    if isinstance(requests, list):
+        if not requests or not isinstance(requests[-1], dict):
+            raise ValueError("完整历史信封缺少当前 request")
+        board = make_board()
+        me = int(requests[-1].get("me", 0))
+        for request in requests:
+            _mark_payload(request, 1 - me)
+        responses = envelope.get("responses")
+        if not isinstance(responses, list):
+            raise ValueError("完整历史信封缺少 responses")
+        for response in responses:
+            _mark_payload(response, me)
+        return requests[-1]
+
+    request = envelope.get("request")
+    if not isinstance(request, dict):
+        raise ValueError("增量信封缺少 request")
+    me = int(request.get("me", 0))
+    _mark_payload(request, 1 - me)
+    return request
+
+
+def main() -> None:
+    first_response = True
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            env = json.loads(line)
+            if not isinstance(env, dict):
+                raise ValueError("信封不是对象")
+            req = load_turn(env)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            print(json.dumps({"response": {"x": -1, "y": -1}}), flush=True)
+        else:
+            me = int(req.get("me", 0))
+            empties = [
+                (x, y)
+                for x in range(SIZE)
+                for y in range(SIZE)
+                if board[x][y] < 0
+            ]
+            if not empties:
+                x, y = -1, -1
+            else:
+                x, y = random.choice(empties)
+                place(x, y, me)
+            print(json.dumps({"response": {"x": x, "y": y}}), flush=True)
+        if first_response:
+            print(KEEP_RUNNING, flush=True)
+            first_response = False
+
+
+if __name__ == "__main__":
+    main()
+```

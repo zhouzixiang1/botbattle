@@ -83,7 +83,8 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     // seats[i] = SeatState { hole:(string|null)[], chips, bet, folded, allin, isWinner, net, lastAction }
     const vm = reduceHoldemEvents(events)
     const seats = vm.seats ?? []
-    // match_end 若只带 earnings 无 final_chips/winner，用累计 net 兜底判胜
+    // 历史公开回放读取边界若没有 winner，则用逐手累计 net 兜底；
+    // 新写 replay/live 的 canonical deltas 已由 reducer 写入同一 net 字段。
     let matchWinner = vm.matchWinner
     if (vm.matchOver && matchWinner === null) {
       const n0 = seats[0]?.net ?? 0

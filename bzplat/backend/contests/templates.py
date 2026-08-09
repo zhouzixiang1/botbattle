@@ -53,9 +53,8 @@ def _get_default_templates() -> dict[str, dict[str, Any]]:
     return _DEFAULT_TEMPLATES_CACHE
 
 
-# 模块级 __getattr__：让 DEFAULT_TEMPLATES / DEFAULT_MATCH_CONFIG 作为延迟字典属性
-# 访问（保旧 DEFAULT_TEMPLATES["id"] / DEFAULT_MATCH_CONFIG[gid] 字典语法），
-# 避免模块顶部 import 注册表时的循环依赖（games/<game>/templates.py import 本模块取 SCORING_*）。
+# 模块级 __getattr__：让 DEFAULT_TEMPLATES / DEFAULT_MATCH_CONFIG 延迟派生，避免
+# 模块顶部 import 注册表时的循环依赖（games/<game>/templates.py 会导入计分常量）。
 def __getattr__(name: str):
     if name == "DEFAULT_TEMPLATES":
         return _get_default_templates()
@@ -64,15 +63,12 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def default_match_config(game_id: str | None) -> dict[str, Any]:
+def default_match_config(game_id: str) -> dict[str, Any]:
     """返回指定游戏的默认 match_config（深拷贝）。"""
-    gid = (game_id or "holdem").strip().lower()
-    from bzplat.backend.games import registry as _reg
+    from bzplat.backend.games import normalize_game_id, registry as _reg
 
-    try:
-        return copy.deepcopy(_reg.get(gid).default_match_params)
-    except KeyError:
-        return copy.deepcopy(_reg.get("holdem").default_match_params)  # allow-game-fallback: 未知游戏兜底 holdem 默认
+    gid = normalize_game_id(game_id)
+    return copy.deepcopy(_reg.get(gid).default_match_params)
 
 
 def get_template(template_id: str) -> dict[str, Any] | None:
@@ -96,11 +92,17 @@ def resolve_stages(
     若提供 store，优先从 contest_templates 表读模板（含 admin 覆盖）；
     否则回退注册表派生的 DEFAULT_TEMPLATES（供无 store 的测试用）。
     """
-    if stages:
-        tid = template_id or "custom"
-        gid = game_id or "holdem"
+    if stages is not None:
+        if not stages:
+            raise ValueError("自定义 stages 须为非空数组")
+        tid = "custom" if template_id is None else template_id
+        if not isinstance(game_id, str) or not game_id.strip():
+            raise ValueError("自定义阶段必须明确指定 game_id")
+        from bzplat.backend.games import normalize_game_id
+
+        gid = normalize_game_id(game_id)
         return tid, gid, copy.deepcopy(stages)
-    tid = template_id or "holdem_swiss_ko"
+    tid = "holdem_swiss_ko" if template_id is None else template_id
     tpl = None
     if store is not None:
         row = store.get_contest_template(tid)
@@ -116,7 +118,16 @@ def resolve_stages(
         tpl = get_template(tid)
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
-    return tid, game_id or tpl["game_id"], copy.deepcopy(tpl["stages"])
+    from bzplat.backend.games import normalize_game_id
+
+    template_game_id = normalize_game_id(tpl["game_id"])
+    if game_id is not None:
+        requested_game_id = normalize_game_id(game_id)
+        if requested_game_id != template_game_id:
+            raise ValueError(
+                f"模板 {tid} 属于游戏 {template_game_id}，不能用于游戏 {requested_game_id}"
+            )
+    return tid, template_game_id, copy.deepcopy(tpl["stages"])
 
 
 def resolve_template(
@@ -126,7 +137,7 @@ def resolve_template(
     store=None,
 ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
     """返回 (template_id, game_id, stages, match_config)。优先读 store 表。"""
-    tid = template_id or "holdem_swiss_ko"
+    tid = "holdem_swiss_ko" if template_id is None else template_id
     tpl = None
     if store is not None:
         row = store.get_contest_template(tid)
@@ -146,15 +157,30 @@ def resolve_template(
             }
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
-    return tid, game_id or tpl["game_id"], copy.deepcopy(tpl["stages"]), copy.deepcopy(tpl["match_config"])
+    from bzplat.backend.games import normalize_game_id
+
+    template_game_id = normalize_game_id(tpl["game_id"])
+    requested_game_id = normalize_game_id(game_id) if game_id is not None else None
+    if requested_game_id is not None and requested_game_id != template_game_id:
+        raise ValueError(
+            f"模板 {tid} 属于游戏 {template_game_id}，不能用于游戏 {requested_game_id}"
+        )
+    return (
+        tid,
+        template_game_id,
+        copy.deepcopy(tpl["stages"]),
+        copy.deepcopy(tpl["match_config"]),
+    )
 
 
 def points_for_result(scoring: str, winner: int | None, side: int) -> float:
     """side: 0=A, 1=B。"""
     if scoring == SCORING_CCGC:
         win_pts, draw_pts, loss_pts = 2.0, 1.0, 0.0
-    else:
+    elif scoring == SCORING_POKER:
         win_pts, draw_pts, loss_pts = 3.0, 1.0, 0.0
+    else:
+        raise ValueError(f"未知计分规则: {scoring!r}")
     if winner is None:
         return draw_pts
     if winner == side:

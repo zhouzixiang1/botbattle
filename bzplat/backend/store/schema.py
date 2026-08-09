@@ -4,6 +4,14 @@
 """
 from __future__ import annotations
 
+# ── Botzone 运行模式（上传时标明，runner 据此选传输路径）──────────────────
+# traditional: 每回合发完整历史信封；longrunning: 首回合完整 + 精确握手后单 request。
+# 定义在 SCHEMA 之前，使 Python 默认值、fresh SQL schema 与迁移共同引用同一常量。
+RUNTIME_TRADITIONAL = "traditional"
+RUNTIME_LONGRUNNING = "longrunning"
+VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
+DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,19 +43,21 @@ CREATE TABLE IF NOT EXISTS bots (
     name            TEXT    NOT NULL,
     display_name    TEXT    NOT NULL DEFAULT '',
     description     TEXT    NOT NULL DEFAULT '',
-    os              TEXT    NOT NULL DEFAULT '',
-    arch            TEXT    NOT NULL DEFAULT '',
-    format          TEXT    NOT NULL DEFAULT 'unknown',
+    os              TEXT    NOT NULL DEFAULT 'linux',
+    arch            TEXT    NOT NULL DEFAULT 'amd64',
+    format          TEXT    NOT NULL DEFAULT 'elf',
     binary_path     TEXT    NOT NULL DEFAULT '',
     current_version INTEGER NOT NULL DEFAULT 0,
     is_active       INTEGER NOT NULL DEFAULT 1,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
-    runtime_mode    TEXT    NOT NULL DEFAULT 'longrunning',
+    game_id         TEXT    NOT NULL,
+    runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
     UNIQUE(owner_id, name),
-    CONSTRAINT chk_format CHECK (format IN ('elf', 'pe', 'macho', 'unknown')),
+    CONSTRAINT chk_bot_os CHECK (os = 'linux'),
+    CONSTRAINT chk_bot_arch CHECK (arch = 'amd64'),
+    CONSTRAINT chk_format CHECK (format = 'elf'),
     CONSTRAINT chk_runtime CHECK (runtime_mode IN ('traditional', 'longrunning'))
 );
 
@@ -59,12 +69,15 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     upload_note     TEXT    NOT NULL DEFAULT '',
     checksum        TEXT    NOT NULL DEFAULT '',
     size_bytes      INTEGER NOT NULL DEFAULT 0,
-    os              TEXT    NOT NULL DEFAULT '',
-    arch            TEXT    NOT NULL DEFAULT '',
-    format          TEXT    NOT NULL DEFAULT 'unknown',
-    runtime_mode    TEXT    NOT NULL DEFAULT 'longrunning',
+    os              TEXT    NOT NULL DEFAULT 'linux',
+    arch            TEXT    NOT NULL DEFAULT 'amd64',
+    format          TEXT    NOT NULL DEFAULT 'elf',
+    runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
     uploaded_at     TEXT    NOT NULL,
-    UNIQUE(bot_id, version)
+    UNIQUE(bot_id, version),
+    CONSTRAINT chk_bot_version_os CHECK (os = 'linux'),
+    CONSTRAINT chk_bot_version_arch CHECK (arch = 'amd64'),
+    CONSTRAINT chk_bot_version_format CHECK (format = 'elf')
 );
 
 CREATE TABLE IF NOT EXISTS contests (
@@ -77,14 +90,12 @@ CREATE TABLE IF NOT EXISTS contests (
     registration_closes_at  TEXT,
     starts_at               TEXT,
     ends_at                 TEXT,
-    hands_per_match         INTEGER NOT NULL DEFAULT 70,
     created_at              TEXT    NOT NULL,
-    game_id                 TEXT    NOT NULL DEFAULT 'holdem',
+    game_id                 TEXT    NOT NULL,
     stages_json             TEXT    NOT NULL DEFAULT '[]',
     current_stage_idx       INTEGER NOT NULL DEFAULT 0,
     template_id             TEXT    NOT NULL DEFAULT 'holdem_swiss_ko',
     rest_ends_at            TEXT,
-    match_config_json       TEXT    NOT NULL DEFAULT '{}',
     phase                   TEXT    NOT NULL DEFAULT 'standalone',  -- P2: preliminary/final/standalone
     source_contest_id       INTEGER,  -- P2: 软链（预赛→决赛导航，不复制 entry）
     official_results_ready  INTEGER NOT NULL DEFAULT 0,  -- P2: 全员正式名次是否已落库
@@ -106,7 +117,7 @@ CREATE TABLE IF NOT EXISTS matches_holdem (
     reason          TEXT    NOT NULL DEFAULT 'completed',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -130,7 +141,7 @@ CREATE TABLE IF NOT EXISTS matches_gomoku (
     reason          TEXT    NOT NULL DEFAULT 'completed',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
-    game_id         TEXT    NOT NULL DEFAULT 'gomoku',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -154,7 +165,7 @@ CREATE TABLE IF NOT EXISTS matches_pencil (
     reason          TEXT    NOT NULL DEFAULT 'completed',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
-    game_id         TEXT    NOT NULL DEFAULT 'pencil',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -181,9 +192,17 @@ CREATE TABLE IF NOT EXISTS match_replays (
     updated_at      TEXT    NOT NULL
 );
 
+-- 非赛事 Bot 对局的全局评分结算凭据。match completed 与评分写入分属两个
+-- 事务；本表的 claim 与 ratings/history/pair_stats 同事务，保证重试恰好一次。
+-- matches 已按游戏分表，无法声明单一物理 FK；删除对局时由 Store.delete_match 清理。
+CREATE TABLE IF NOT EXISTS match_rating_settlements (
+    match_id        TEXT    PRIMARY KEY,
+    settled_at      TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ratings (
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     rating          REAL    NOT NULL DEFAULT 1500.0,
     rd              REAL    NOT NULL DEFAULT 350.0,
     vol             REAL    NOT NULL DEFAULT 0.06,
@@ -215,7 +234,7 @@ CREATE TABLE IF NOT EXISTS pair_stats (
 CREATE TABLE IF NOT EXISTS rating_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     rating          REAL    NOT NULL,
     rd              REAL    NOT NULL,
     vol             REAL    NOT NULL,
@@ -411,7 +430,7 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 CREATE TABLE IF NOT EXISTS contest_templates (
     id              TEXT    PRIMARY KEY,
     name            TEXT    NOT NULL,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     stages_json     TEXT    NOT NULL DEFAULT '[]',
     is_builtin      INTEGER NOT NULL DEFAULT 0,
@@ -431,6 +450,11 @@ CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(
 CREATE INDEX IF NOT EXISTS idx_contest_templates_game ON contest_templates(game_id);
 """
 
+# SQLite identifiers cannot bind a DEFAULT value as a query parameter. Replacing
+# this private marker keeps the SQL text readable while preventing a second,
+# drifting runtime-mode default literal.
+SCHEMA = SCHEMA.replace("__DEFAULT_RUNTIME_MODE__", DEFAULT_RUNTIME_MODE)
+
 # 角色
 ROLE_USER = "user"
 ROLE_ORGANIZER = "organizer"
@@ -442,12 +466,29 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_ABORTED = "aborted"
 
+# 对外对局技术故障事件（新写 replay / 实时 SSE / 公开读取唯一命名）
+TECHNICAL_INCIDENT_EVENT = "technical_incident"
+TECHNICAL_INCIDENT_MESSAGES = {
+    "invalid_json": "Bot 输出不是合法 JSON",
+    "invalid_envelope": "Bot 响应信封必须是 JSON 对象",
+    "missing_response": "Bot 响应缺少必填 response 字段",
+    "invalid_response": "Bot response 字段不符合本游戏协议",
+    "missing_keep_running": "LongRunning Bot 未输出 KEEP_RUNNING 握手",
+    "invalid_keep_running": "LongRunning Bot 的 KEEP_RUNNING 握手不正确",
+    "decision_timeout": "Bot 未在决策时限内输出完整响应行",
+}
+
 # 对局类型
 TYPE_CHALLENGE = "challenge"
 TYPE_TABLE = "table"
 TYPE_CONTEST = "contest"
 TYPE_LADDER = "ladder"  # 闲时自动对局维护天梯榜（系统发起，无 owner）
 TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 Glicko）
+
+# match_rating_settlements 内部迁移哨兵：旧库首次升级时先把既有 completed
+# 非赛事对局视为已结算，防启动恢复把历史评分全部重复计算。对局 ID 为时间戳前缀，
+# 不会与此前缀冲突；哨兵与回填在同一 Store 初始化事务提交。
+MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL = "__migration__:rating_settlements:v1"
 
 # 比赛状态
 CONTEST_DRAFT = "draft"
@@ -465,17 +506,10 @@ SETTING_CONTEST_SCHEDULER_INTERVAL_SEC = "contest_scheduler_interval_sec"
 # 已注册对战引擎（未注册则 contest start / challenge 拒绝）
 # schema.py 是无 import 的纯常量模块（为破循环依赖不能从 registry 派生），
 # 此字面量是 registry 的镜像——由 games/__init__.py 启动断言 + test_schema_frozensets_match_registry 守护不漂移。
-REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
+REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-registry-definition
 
 # 合法 game_id（与 REGISTERED_ENGINES 镜像，守护测试白名单）
-VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
-
-# ── Botzone 运行模式（上传时标明，runner 据此选传输路径）──────────────────
-# traditional: 每回合发完整历史信封（Bot 自重放）；longrunning: 首回合完整 + 握手后单 request。
-RUNTIME_TRADITIONAL = "traditional"
-RUNTIME_LONGRUNNING = "longrunning"
-VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
-DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL  # 平台默认传统（每回合完整历史，便于调试）
+VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-registry-definition
 
 # ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────
 # 经验奖励：各类活动获得的经验
@@ -521,13 +555,6 @@ SETTING_CONTEST_REST = "contest_default_rest_minutes"
 SETTING_CONTEST_TEMPLATES = "contest_templates"
 SETTING_FULL_RR_MAX_N = "full_rr_max_n"
 
-# 裁判规则参数（admin 可调，热生效：下局即用新值；NULL/缺失则用引擎常量兜底）
-SETTING_JUDGE_GOMOKU_SIZE = "judge_gomoku_board_size"       # 五子棋棋盘边长，默认 15
-SETTING_JUDGE_HOLDEM_STACK = "judge_holdem_starting_stack"  # 德州起始筹码，默认 20000
-SETTING_JUDGE_HOLDEM_SB = "judge_holdem_sb"                 # 德州小盲注，默认 50
-SETTING_JUDGE_HOLDEM_BB = "judge_holdem_bb"                 # 德州大盲注，默认 100
-SETTING_JUDGE_HOLDEM_HANDS = "judge_holdem_default_hands"   # 德州挑战默认手数，默认 70
-
 # 闲时自动对局（维护天梯榜）
 SETTING_AUTO_MATCH_ENABLED = "auto_match_enabled"          # "1"|"0"
 SETTING_AUTO_MATCH_INTERVAL_SEC = "auto_match_interval_sec"  # 轮询间隔
@@ -539,11 +566,28 @@ SETTING_AUTO_MATCH_PLACEMENT_GAMES = "auto_match_placement_games"  # 新 bot 定
 SETTING_AUTO_MATCH_MAX_PER_ROUND = "auto_match_max_per_round"  # 每轮最多补几场
 SETTING_AUTO_MATCH_DAILY_CAP = "auto_match_daily_cap"      # 每日后台对局总量上限
 
-# 二进制格式
+# 唯一可执行目标。PE/Mach-O/脚本及其他 ELF 架构仅可作为历史元数据读取，
+# 不属于现行 schema 的可写值，也绝不能进入 runner。
 FMT_ELF = "elf"
-FMT_PE = "pe"
-FMT_MACHO = "macho"
-FMT_UNKNOWN = "unknown"
+SUPPORTED_BINARY_FORMAT = FMT_ELF
+SUPPORTED_BINARY_OS = "linux"
+SUPPORTED_BINARY_ARCH = "amd64"
+SUPPORTED_BINARY_ERROR = "仅支持 Linux x86_64 ELF64（小端）"
+
+
+def is_supported_binary_metadata(fmt: str, os_: str, arch: str) -> bool:
+    """Whether persisted metadata names the platform's sole runnable target."""
+    return (
+        fmt == SUPPORTED_BINARY_FORMAT
+        and os_ == SUPPORTED_BINARY_OS
+        and arch == SUPPORTED_BINARY_ARCH
+    )
+
+
+def require_supported_binary_metadata(fmt: str, os_: str, arch: str) -> None:
+    """Reject new/executable references outside the platform's sole target."""
+    if not is_supported_binary_metadata(fmt, os_, arch):
+        raise ValueError(SUPPORTED_BINARY_ERROR)
 
 # 邮件模板
 TPL_VERIFY_EMAIL = "verify_email"

@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.store import Store
 from fastapi.testclient import TestClient
@@ -152,14 +154,14 @@ def test_contest_require_real_name_register_check(tmp_path):
     s.add_contest_entry(c, ub, bb)
     # register 校验：未填实名 → 拒
     try:
-        cm.register(c, ua, ba)
+        asyncio.run(cm.register(c, ua, ba))
         assert False, "未填实名应被拒"
     except ValueError as e:
         assert "实名" in str(e)
     # 已填实名 → 接受（但已报名会因去重拒，先删 entry 再测）
     s.delete_entry(c, ua)
     s.update_user(ua, real_name="孙八", phone="13400134000", school="补填大学", student_id="2024006")
-    result = cm.register(c, ua, ba)
+    result = asyncio.run(cm.register(c, ua, ba))
     assert result is not None  # 注册成功
     s.close()
 

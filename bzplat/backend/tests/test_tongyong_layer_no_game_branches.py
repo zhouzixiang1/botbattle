@@ -9,9 +9,9 @@ notifications/）禁止：
   - `registry.get("holdem")` / `all_tiers("holdem")` 等硬指某游戏的调用（应经变量）
   - `from bzplat.backend.games.holdem import` 直接 import 具体游戏模块（应经 registry）
 
-豁免：纯默认值兜底（如 `game_id: str = "holdem"`、`c.get("game_id", "holdem")`、
-`or "holdem"`、`except KeyError: ...holdem`）是 normalize_game_id 的合法语义，不算分支。
-用 `# allow-game-fallback` 注释标记豁免点（守护测试跳过该行）。
+产品创建入口可以通过请求模型默认值或显式 ``if game_id is None`` 选择默认游戏；
+运行时 ``or "holdem"`` / ``get("game_id", "holdem")`` 属于静默降级，必须拒绝。
+注册表常量定义里的游戏字面量用 ``# allow-game-registry-definition`` 标记。
 
 触发场景：审计发现 db.py FK 重建曾硬编码 3-game 元组（C1）、manager.py 曾有
 `if gid == "holdem"` 死分支（I1/I2）。本测试防回归。
@@ -57,16 +57,18 @@ _IMPORT_RE = re.compile(
     r'|import\s+bzplat\.backend\.games\.' + _GAMES + r'\b'
 )
 
-# 允许的纯默认值/兜底模式（不算分支）：= "holdem" / , "holdem" / or "holdem" / except KeyError
-# 这些是 normalize_game_id 的合法兜底语义。若某行命中 _BRANCH_RE/_TUPLE_RE 又是兜底，
-# 用 # allow-game-fallback 注释显式豁免。
-_FALLBACK_RE = re.compile(r'#\s*allow-game-fallback')
+# 持久化/运行路径不得把缺失 game_id 猜成某款游戏。
+_SILENT_FALLBACK_RE = re.compile(
+    r'\bor\s*["\']' + _GAMES + r'["\']'
+    r'|\.get\(\s*["\']game_id["\']\s*,\s*["\']' + _GAMES + r'["\']\s*\)'
+)
+_ALLOW_RE = re.compile(r'#\s*allow-game-registry-definition')
 
 
 def _scan_file(py: pathlib.Path) -> list[str]:
     """返回该文件的违规行列表（file:line: content）。
 
-    跳过：注释行、多行/单行 docstring（按三引号切换状态跟踪）、allow-game-fallback 豁免行。
+    跳过：注释行、多行/单行 docstring，以及注册表常量定义行。
     """
     violations: list[str] = []
     try:
@@ -92,11 +94,13 @@ def _scan_file(py: pathlib.Path) -> list[str]:
         if stripped.startswith("#"):
             continue
         # 显式豁免标记
-        if _FALLBACK_RE.search(line):
+        if _ALLOW_RE.search(line):
             continue
         # 检查分支
         if _BRANCH_RE.search(line):
             violations.append(f"{rel}:{i}: game-name 分支 {line.strip()}")
+        if _SILENT_FALLBACK_RE.search(line):
+            violations.append(f"{rel}:{i}: 静默 game_id 兜底 {line.strip()}")
         # 检查硬编码 3-game 元组
         if _TUPLE_RE.search(line):
             violations.append(f"{rel}:{i}: 硬编码 3-game 列表 {line.strip()}")
@@ -128,7 +132,7 @@ def test_tongyong_layer_no_game_branches():
     assert not violations, (
         "通用层不得出现 game-specific 分支或硬编码 3-game 列表（全面解耦不变量）。\n"
         "应经 games 注册表（registry.get / _all_game_ids / VALID_GAME_IDS）派生。\n"
-        "若确为 normalize_game_id 兜底语义，在该行加 # allow-game-fallback 注释豁免。\n"
+        "产品默认须在创建边界显式赋值；运行时不得把缺失/未知游戏猜成另一款。\n"
         "违规：\n" + "\n".join(violations)
     )
 
@@ -138,7 +142,7 @@ def test_guard_regex_catches_branch_variants():
     """PR4：守护正则覆盖各类 game-name 分支变体（防守护测试盲区）。
 
     上一版 _BRANCH_RE 只抓 == "holdem"，漏 != / in / startswith / .get("holdem")。
-    本测试断言各变体都被抓，且合法兜底（= "holdem" / or "holdem"）不被误抓。
+    本测试断言各分支与静默兜底变体都被抓，显式创建默认不被误抓。
     """
     # 应被抓的违规变体（真实调用形式，方法调用带点）
     must_catch = [
@@ -154,19 +158,26 @@ def test_guard_regex_catches_branch_variants():
         '{"holdem","gomoku","pencil"}',   # frozenset 字面量
         'from bzplat.backend.games.holdem import X',
         'import bzplat.backend.games.gomoku',
+        'gid = game_id or "holdem"',
+        'gid = row.get("game_id", "holdem")',
     ]
     for sample in must_catch:
-        assert _BRANCH_RE.search(sample) or _TUPLE_RE.search(sample) or _IMPORT_RE.search(sample), (
+        assert (
+            _BRANCH_RE.search(sample)
+            or _TUPLE_RE.search(sample)
+            or _IMPORT_RE.search(sample)
+            or _SILENT_FALLBACK_RE.search(sample)
+        ), (
             f"守护正则漏抓违规变体: {sample!r}"
         )
-    # 合法兜底不应被抓（这些是 normalize 语义，由 = / or / , 上下文区分，不在 _BRANCH_RE 内）
-    ok_fallbacks = [
+    # 创建边界的显式默认不应被抓。
+    explicit_creation_defaults = [
         'game_id: str = "holdem"',
-        'gid = game_id or "holdem"',
-        'c.get("game_id", "holdem")',
+        'gid = "holdem" if game_id is None else game_id',
     ]
-    for sample in ok_fallbacks:
-        assert not _BRANCH_RE.search(sample), f"守护正则误抓合法兜底: {sample!r}"
+    for sample in explicit_creation_defaults:
+        assert not _BRANCH_RE.search(sample)
+        assert not _SILENT_FALLBACK_RE.search(sample), f"守护正则误抓显式默认: {sample!r}"
 
 
 # ── runner/engine.run_session 不得硬编码游戏专属参数名（PR3：**match_params 透传）──

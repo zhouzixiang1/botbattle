@@ -1,17 +1,17 @@
 # 裁判代码说明
 
-> 描述各游戏裁判引擎的代码位置、规则、可调参数与协议要点。
-> 裁判代码本身在 Web 上**只读**；规则参数可在管理端「裁判」Tab 热调（下一局即生效）。代码逻辑改动需走业务代码流程（git 分支）。
+> 描述各游戏裁判引擎的代码位置、固定规则与协议要点。
+> `/api/judges/{game_id}/source` 按 `GameSpec.source_files` 与 `shared_source_files` 公开纯裁判、适配、协议、结果及其共享实现源码，Web 上**只读**。游戏规则不通过管理后台修改；代码逻辑改动需走业务代码流程（git 分支）。
 
 ## 架构总览
 
-**实现真相在 `bzplat/backend/games/<game>/`**。每游戏自包含：`engine.py`（裁判）+ `protocol.py`（行协议）+ `result.py`（独立结果）+ `tiers.py` + `templates.py` + `spec.py`（装配 `GameSpec`）。
+**实现真相在 `bzplat/backend/games/<game>/`**。每游戏严格分层：`<game>_judge.py` 是纯游戏规则（零平台依赖），`engine.py` 是裁判与平台协议之间的适配层（调用 `decide`、驱动纯裁判并发出事件）；同包还包含 `protocol.py`（行协议）、`result.py`（独立结果）、`tiers.py`、`templates.py` 与装配 `GameSpec` 的 `spec.py`。
 
-| 游戏 | 裁判实现 | Session 类 |
-|------|---------|-----------|
-| 德州扑克 | `games/holdem/engine.py` | `MatchSession` |
-| 五子棋 | `games/gomoku/engine.py` | `GomokuSession` |
-| 点格棋 | `games/pencil/engine.py` | `PencilSession` |
+| 游戏 | 纯裁判规则 | 平台适配 / Session |
+|------|------------|--------------------|
+| 德州扑克 | `games/holdem/holdem_judge.py` | `games/holdem/engine.py` / `MatchSession` |
+| 五子棋 | `games/gomoku/gomoku_judge.py` | `games/gomoku/engine.py` / `GomokuSession` |
+| 点格棋 | `games/pencil/pencil_judge.py` | `games/pencil/engine.py` / `PencilSession` |
 
 统一入口经 **游戏注册表**（`games.registry`）：
 
@@ -20,7 +20,7 @@ games.registry.get(game_id).run_session(decide, **params)
 # 或：from bzplat.backend.games import run_session
 ```
 
-每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。`engine/`/`protocol/`/`_compat/` shim 已删除，真实现全在 `games/`。
+每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。Gomoku/Pencil 的同构 JSON 原语只在 `games/_board_protocol.py` 实现一次并随公开源码返回；两款游戏的 `protocol.py` 分别只导出自身 builder。
 
 ## 解耦契约
 
@@ -31,45 +31,40 @@ games.registry.get(game_id).run_session(decide, **params)
 
 编排层 `matches/orchestrator.py` 与赛制层 `contests/manager.py` **只读这两个字段**（及 `rounds`/`events`/`winner`），不碰扑克的 pot/board/holes 或棋类棋盘。
 
-## 可调规则参数（热生效）
+## 固定规则常量
 
-规则参数存在 `platform_settings`，编排层每局热读，下局立即用新值。默认值与各引擎/GameSpec 常量对齐。
+| 游戏 | 固定规则 |
+|------|----------|
+| Holdem | 70 手；每手起始筹码 20000；小盲 50；大盲 100 |
+| Gomoku | 15×15；黑先；无禁手；连续不少于 5 子即胜 |
+| Pencil | N=6；红先；每方累计棋钟 900 秒 |
 
-| 参数 | 默认 | 范围 | 说明 |
-|------|------|------|------|
-| `judge_holdem_starting_stack` | 20000 | 1000–1000000 | 德州起始筹码 |
-| `judge_holdem_sb` | 50 | 1–10000 | 德州小盲注 |
-| `judge_holdem_bb` | 100 | 2–20000 | 德州大盲注（须 > SB） |
-
-> 游戏规则参数（手数/棋盘边长/点阵边长）已**钉死固定值**，不再是 admin 可调项：
-> holdem 固定 70 手、gomoku 固定 15×15、pencil 固定 6 点。原 `judge_holdem_default_hands` /
-> `judge_gomoku_board_size` 设置项已移除。
-
-参数贯通链路：`platform_settings` → 编排 judge params → `runner.run_binaries()` → `games` 注册表 `run_session` → 各 Session 构造参数。
+这些值不存入 `platform_settings`，不接受 match_config、admin 或直接 `run_session` kwargs 覆盖；未知参数立即报错。Holdem 上传预检与正式首请求均发送 `max_hand=70`。修改规则常量属于游戏规则变更，必须同时修改裁判/契约、测试与 Wiki 并走代码评审。Pencil 棋钟链路为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
 
 ## 各游戏裁判要点
 
-### 德州扑克（`games/holdem/engine.py`）
+### 德州扑克（规则 `holdem_judge.py`，适配 `engine.py`）
 
 - HU NLHE；盲注 SB/BB 交替；Bot 协议 raise response 的正整数 = **额外下注筹码**（raise delta，引擎内部转 raise-to-total 校验，min re-raise-to ≥ 2× 上一 raise-to）。
-- 非法着 / 超时 / 可恢复决策错误 → fold；all-in 后直接发出剩余公共牌结算。
+- 格式正确但下注不合法 → fold；Bot 信封/response 格式错误或超时由平台层在进入裁判前立即技术判负。all-in 后直接发出剩余公共牌结算。
 - **对局中途进程崩溃 / EOF（`BotCrashedError`）** → 引擎内**计分判负**（崩溃方本手全筹码给对手，对局 `completed`，`reason=crash`），不是继续 fold 跑完。
-- **启动失败**由编排层处理：非赛事 `aborted`（`bot_crashed`）；赛事 `technical_loss` completed。
+- **启动失败**由编排层处理：所有 Bot-vs-Bot 类型统一记为 `completed` + `technical_loss`，崩溃方判负；人类对战则记为 `aborted`（`bot_crashed`）。
 - `MatchSession` 一手 = 一轮，按手数循环，最终按累计净筹码判胜。
 
-### 五子棋（`games/gomoku/engine.py`）
+### 五子棋（规则 `gomoku_judge.py`，适配 `engine.py`）
 
-- 15×15（可调 9–19）；黑先（seat 0）；横/竖/斜连续 ≥5 含长连即胜；无禁手。
-- 非法着 / 超时 → 判负；棋盘下满无人成五 → 平局。
+- **固定 15×15**（不可通过 match_config 或 admin 调整）；黑先（seat 0）；横/竖/斜连续 ≥5 含长连即胜；无禁手。
+- 格式正确但非法着 → 裁判判负；Bot 协议错误/超时由平台层技术判负。棋盘下满无人成五 → 平局。
 - 对局中途进程崩溃 → 计分判负（对手胜，`reason=crash`）。
-- Botzone 标准协议：请求信封 `{"request":{"x","y","me"}}`，响应信封 `{"response":{"x","y"}}`（信封包裹见 [协议规范](#/wiki?slug=protocol)）。
+- 唯一现行协议：请求信封 `{"request":{"x","y","me"}}`，响应信封 `{"response":{"x","y"}}`；裸坐标对象不合法（见 [协议规范](#/wiki?slug=protocol)）。
 
-### 点格棋（`games/pencil/engine.py`）
+### 点格棋（规则 `pencil_judge.py`，适配 `engine.py`）
 
-- 默认 **N=6** 点阵 → 交错网格 size=2N-1=11；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
-- pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"x":-1,"y":-1}` 把回合交还。
-- 非法着 / 超时 → 判负；对局中途进程崩溃 → 计分判负（`reason=crash`）。
+- **固定 N=6** 点阵 → 交错网格 size=2N-1=11；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
+- pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"response":{"x":-1,"y":-1}}` 把回合交还。
+- Bot-vs-Bot 与人类对局均为每方累计 900s；决策成功发 `time_used`，总预算耗尽发 `time_out` 并判当前方负。人类侧同时有默认 120s 逐回合防挂机保护。
+- 格式正确但非法着、人类棋钟耗尽 → 裁判判负；Bot 协议错误/棋钟耗尽由平台层技术判负。对局中途进程崩溃 → 计分判负（`reason=crash`）。MatchViewer 玩家卡由事件流显示剩余时间和超时徽章。
 
 ## 改动裁判代码
 
-裁判规则逻辑的修改（非参数）需改 `games/<game>/engine.py`（及相关 protocol/result）源码，按仓库规范：从 `main` 切特性分支 → 改 → 测试（`pytest`）→ GitHub PR 合并 → 删分支。真实现全在 `games/`（旧 `engine/` 包已删除）。Web 上不提供代码编辑能力。
+纯规则逻辑的修改应落在 `games/<game>/<game>_judge.py`；只有协议桥接、`decide` 调度或事件映射才改同包 `engine.py`，协议/结果契约变化再同步 `protocol.py` / `result.py`。按仓库规范：从 `main` 切特性分支 → 修改 → `pytest` → GitHub PR 合并 → 删分支。Web 上不提供代码编辑能力。

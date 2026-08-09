@@ -26,16 +26,8 @@ interface Runtime {
   }
 }
 
-interface Template {
-  id: string
-  name: string
-  game_id: string
-  stages: unknown[]
-}
-
 export default function RuntimeTab() {
   const [rt, setRt] = useState<Runtime | null>(null)
-  const [templates, setTemplates] = useState<Template[]>([])
   const [timeoutSec, setTimeoutSec] = useState(60)
   const [conc, setConc] = useState(1)
   const [restMin, setRestMin] = useState(10)
@@ -57,15 +49,7 @@ export default function RuntimeTab() {
     setLoading(true)
     setError('')
     try {
-      // 用 allSettled：runtime 主数据与模板列表解耦，模板拉取失败不拖垮核心展示
-      const [rRes, tRes] = await Promise.allSettled([
-        apiGet<Runtime>('/api/admin/settings/runtime'),
-        apiGet<{ templates: Template[] }>('/api/admin/templates'),
-      ])
-      if (rRes.status !== 'fulfilled') {
-        throw tRes.status === 'fulfilled' ? tRes.value : new Error('加载失败')
-      }
-      const r = rRes.value
+      const r = await apiGet<Runtime>('/api/admin/settings/runtime')
       setRt(r)
       setTimeoutSec(r.action_timeout_sec)
       setConc(r.max_concurrent_matches)
@@ -80,7 +64,6 @@ export default function RuntimeTab() {
       setAmPlacement(am.placement_games)
       setAmMaxPerRound(am.max_per_round)
       setAmDailyCap(am.daily_cap)
-      setTemplates(tRes.status === 'fulfilled' ? tRes.value.templates || [] : [])
     } catch (e) {
       setError(errMsg(e, '加载失败'))
     } finally {
@@ -274,22 +257,6 @@ export default function RuntimeTab() {
         </p>
       </div>
 
-      <div className="rounded-xl border border-border bg-card p-4">
-        <h3 className="text-sm font-medium text-foreground">赛事模板</h3>
-        <ul className="mt-3 divide-y divide-border text-sm">
-          {templates.map((t) => (
-            <li key={t.id} className="flex flex-wrap items-baseline justify-between gap-2 py-2">
-              <span className="font-medium text-foreground">{t.name}</span>
-              <span className="font-mono text-xs text-muted-foreground">
-                {t.id} · {t.game_id} · {(t.stages || []).length} 阶段
-              </span>
-            </li>
-          ))}
-          {templates.length === 0 && (
-            <li className="py-4 text-muted-foreground">无模板</li>
-          )}
-        </ul>
-      </div>
     </div>
   )
 }

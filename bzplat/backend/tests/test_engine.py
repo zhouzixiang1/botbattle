@@ -19,6 +19,7 @@ from bzplat.backend.games.holdem.engine import (
     STARTING_STACK,
     Action,
     MatchSession,
+    generate_deal_sequence,
 )
 from bzplat.backend.games.holdem.protocol import RESP_ALLIN, RESP_CALL_CHECK, RESP_FOLD
 
@@ -96,8 +97,8 @@ def _passive_bot(player_idx: int, req: dict) -> dict:
 def test_short_match_check_call_bots():
     session = MatchSession(num_hands=2, rng=__import__("random").Random(42))
     result = asyncio.run(session.run_async(_passive_bot))
-    assert result.hands_played == 2
-    assert len(result.hand_results) == 2
+    assert result.rounds_played == 2
+    assert len(result.rounds) == 2
     # Botzone 计分：final_chips = 累计净输赢 net（零和），不再守恒于 2*STARTING_STACK
     assert sum(result.final_chips) == 0
     types = [e["type"] for e in result.events]
@@ -109,6 +110,23 @@ def test_short_match_check_call_bots():
     starts = [e for e in result.events if e["type"] == "hand_start"]
     assert starts[0]["sb"] == 0
     assert starts[1]["sb"] == 1
+
+
+def test_duplicate_deal_sequence_uses_only_canonical_card_encoding():
+    """duplicate 与普通发牌共用 ``0♥1♦2♠3♣`` 整数编码。"""
+    first = generate_deal_sequence(3, seed=20260809)
+    second = generate_deal_sequence(3, seed=20260809)
+    assert first == second
+    assert all(sorted(hand) == list(range(52)) for hand in first)
+
+    # 用顺序牌直接驱动一手：座0 依次收 0=2♥、1=2♦，座1 收
+    # 2=2♠、3=2♣。旧 0♠1♥2♦3♣ 转换路径会使该断言失败。
+    session = MatchSession(num_hands=1, deal_sequence=[list(range(52))])
+    result = asyncio.run(session.run_async(lambda _seat, _req: {"response": RESP_FOLD}))
+    holes = next(event["holes"] for event in result.events if event["type"] == "deal_hole")
+    assert holes == [["2h", "2d"], ["2s", "2c"]]
+    assert result.winner == 1
+    assert result.final_chips == [-SMALL_BLIND, SMALL_BLIND]
 
 
 def test_raise_validation_exact_2x():
@@ -162,11 +180,11 @@ def test_raise_validation_exact_2x():
         return resp("fold")
 
     result = asyncio.run(session.run_async(scripted))
-    assert result.hands_played == 1
-    assert result.hand_results[0].reason == "fold"
+    assert result.rounds_played == 1
+    assert result.rounds[0].reason == "fold"
     # SB raised 200 (put 200 total: already 50 blind + 150), BB raised to 400,
     # SB folded → BB wins 200 (SB's contrib) after uncalled return.
-    assert result.hand_results[0].deltas == [-200, 200]
+    assert result.rounds[0].deltas == [-200, 200]
 
     # Illegal short re-raise (< 2x) → fold
     session2 = MatchSession(num_hands=1, rng=__import__("random").Random(2))
@@ -186,10 +204,10 @@ def test_raise_validation_exact_2x():
         return resp("fold")
 
     result2 = asyncio.run(session2.run_async(scripted2))
-    assert result2.hands_played == 1
+    assert result2.rounds_played == 1
     # BB's illegal raise treated as fold → SB wins
-    assert result2.hand_results[0].winners == [0]
-    assert result2.hand_results[0].reason == "fold"
+    assert result2.rounds[0].winners == [0]
+    assert result2.rounds[0].reason == "fold"
 
 
 def test_fold_ends_hand():
@@ -201,8 +219,8 @@ def test_fold_ends_hand():
         return resp("check")
 
     result = asyncio.run(session.run_async(sb_folds))
-    assert result.hands_played == 1
-    hr = result.hand_results[0]
+    assert result.rounds_played == 1
+    hr = result.rounds[0]
     assert hr.reason == "fold"
     assert hr.winners == [1]
     assert hr.deltas == [-SMALL_BLIND, SMALL_BLIND]
@@ -235,8 +253,8 @@ def test_final_chips_is_cumulative_net():
     session = MatchSession(num_hands=4, rng=__import__("random").Random(42))
     result = asyncio.run(session.run_async(_passive_bot))
     expected_net = [
-        sum(r.deltas[0] for r in result.hand_results),
-        sum(r.deltas[1] for r in result.hand_results),
+        sum(r.deltas[0] for r in result.rounds),
+        sum(r.deltas[1] for r in result.rounds),
     ]
     assert result.final_chips == expected_net, (
         f"final_chips 应为累计净输赢 {expected_net}，实际 {result.final_chips}"
@@ -255,8 +273,8 @@ def test_no_early_exit_on_bust():
 
     session = MatchSession(num_hands=5, rng=__import__("random").Random(7))
     result = asyncio.run(session.run_async(allin_bot))
-    assert result.hands_played == 5, (
-        f"每手复位不应因归零提前结束，应跑完 5 手，实际 {result.hands_played}"
+    assert result.rounds_played == 5, (
+        f"每手复位不应因归零提前结束，应跑完 5 手，实际 {result.rounds_played}"
     )
 
 

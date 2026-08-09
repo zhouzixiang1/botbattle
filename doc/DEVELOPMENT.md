@@ -31,6 +31,9 @@ cd bzplat/frontend && npm install
 | `BZ_HOST` / `BZ_PORT` | 绑定地址/端口 | 127.0.0.1 / 50380 |
 | `BZ_DB_PATH` | SQLite 路径 | botzone.db |
 | `BZ_BOT_LOCAL` | 强制本机跑 ELF（测试） | 未设 |
+| `BZ_QA_INSTANCE` | 标记隔离 QA 实例；启用时启动前拒绝主 checkout/50380 写目标 | 未设 |
+| `BZ_API_TARGET` | Vite REST/SSE/WS 代理目标；50380 被硬拒绝 | 127.0.0.1:50381 |
+| `BZ_AVATAR_DIR` | 头像目录 | avatars |
 | `BZ_RATE_LIMIT` | 启用限流 | 1 |
 | `BZ_TRUST_PROXY` | 信任 X-Forwarded-For（反向代理部署时需开启，否则限流按代理 IP 失效） | 未设 |
 | `BZ_LOG_LEVEL` / `BZ_LOG_DIR` | 日志级别 / 目录 | INFO / logs |
@@ -54,30 +57,55 @@ cd bzplat/frontend && npm run build   # 产物 dist/，由后端 StaticFiles 托
 ```
 > **关键前端依赖**：react 19 / vite 8 / tailwindcss v4 / shadcn(new-york) / recharts。
 > 视觉层另用 `gsap ^3.x`（npm 安装，2025-04 起 100% 免费商用，驱动 canvas 牌桌动画）+
-> Poker.JS（vendor 副本，来源 Tairraos/Poker.JS，经 botzone 使用，canvas 矢量扑克牌绘制）。
+> Poker.JS（vendor 副本，来源 Tairraos/Poker.JS，用于 canvas 矢量扑克牌绘制）。
 
-### 2.3 改完代码必须 rebuild + restart
+### 2.3 构建三游戏样例 Bot
+
+仓库样例只面向平台开发、回归与发布验收。统一脚本构建 Holdem、Gomoku、Pencil 的
+Linux x86_64 ELF，并检查产物类型：
+
+```bash
+bash samples/build_sample.sh
+file samples/{callbot,gomokubot,pencilbot}_linux_amd64
+```
+
+玩家侧跨系统构建说明不依赖仓库脚本，见 `wiki/BOT_DEV.md`。
+
+### 2.4 改完代码必须 rebuild + restart
 ```bash
 bash scripts/rebuild.sh   # npm run build → platform-ctl.sh restart
 ```
 > 前端产物（`dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——**不 rebuild + restart 代码不生效**（常见症状：新路由 405）。
 
-### 2.4 worktree 隔离开发（勿碰线上 50380）
+### 2.5 worktree 隔离开发（勿碰线上 50380）
 
 主目录 `main` 只跑线上服务（默认 `:50380` + 主库）。特性开发在 **git worktree** 中跑**独立**栈，避免污染线上 db/源码：
 
 ```bash
-# 1) 后端：CWD=worktree，端口勿用 50380
-cd .worktrees/<分支名>
-python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50381
+# 1) 主库只读复制到 worktree（必须 cp，不得软链接）
+cp /home/zzx/project/botbattle/botzone.db .worktrees/<分支名>/botzone.db
 
-# 2) 前端：proxy 必须指向 worktree 后端
-cd .worktrees/<分支名>/bzplat/frontend
+# 2) 终端 A：后端（CWD=worktree，显式锁定副本并声明 QA）
+cd .worktrees/<分支名>
+BZ_DB_PATH="$PWD/botzone.db" BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 BZ_SKIP_CAPTCHA=1 \
+  python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50381
+
+# 3) 终端 B：播种三类角色的隔离账号，然后启前端
+cd .worktrees/<分支名>
+python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts
+cd bzplat/frontend
 BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
+
+# 4) 终端 C：首次安装 Chromium，再跑真浏览器回归
+cd .worktrees/<分支名>/bzplat/frontend
+npm run test:e2e:install
+BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 ```
 
 - **严禁**前端 `BZ_API_TARGET` 指向 50380（测试写入线上 db）。
 - **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
+- QA CLI 会在日志 handler、SQLite、上传/头像目录创建前一次性校验端口和全部写目标；拒绝 50380、主 checkout 内任意 DB/运行时路径，以及主 `bot_uploads`/`avatars`/`logs` 的别名或子目录。当前 linked worktree 与 `/tmp` 独立目录仍允许。
+- QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
 - 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
 
 ## 3. 编码规范
@@ -87,7 +115,7 @@ BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 | **Python 包名** | 必须是 `bzplat`，**绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend...` |
 | **常量集中** | 所有状态码/对局类型/`REGISTERED_ENGINES`/`VALID_GAME_IDS`/平台 settings 键名集中在 `store/schema.py`，别散落 |
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
-| **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec` |
+| **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
 | **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，半负载并发 ceiling=`max(1,cpu//4)`，全员循环 `FULL_RR_MAX_N=12`；admin 不可抬高（`runtime/limits.py`） |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |
@@ -106,24 +134,25 @@ BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 
 ## 5. 模块扩展指南
 
-### 5.1 新增一款游戏（赛制/编排层零改动）
+### 5.1 新增一款游戏（赛制/编排主流程不加游戏名分支）
 
 通用层**不得**再加 `if game_id == ...` 分支。权威 checklist 与 [`AGENTS.md`](../AGENTS.md) / [`DESIGN.md`](./DESIGN.md) §2.3 一致：
 
 1. 建 `games/<game>/` 子包：
-   - `engine.py`（裁判 Session，`run_async(decide) → MatchResult`）
-   - `protocol.py`（`dumps_request` / `loads_response` / `fail_response`；棋类可 re-export `games/_board_protocol.py`）
+   - `<game>_judge.py`（纯游戏规则，零平台依赖）
+   - `engine.py`（裁判↔平台协议适配，提供 Session 并驱动纯裁判，`run_async(decide) → MatchResult`）
+   - `protocol.py`（`dumps_request` / `loads_response` / `validate_response_payload` / `fail_response`；只导出本游戏 API；复用 `games/_board_protocol.py` 时在 spec 的 `shared_source_files` 声明公开源码）
    - `result.py`（**独立**定义，满足鸭子契约：`winners` + `deltas`，**不**共享基类）
    - `tiers.py`（段位曲线，查表用 `base.tier_for_in`）
    - `templates.py`（本游戏内置赛事模板）
    - `spec.py`（装配 `GameSpec`）
-2. `store/schema.py`：新增 `matches_<game>` 表（仿现有 per-game 表，FK 用 `ON DELETE SET NULL`）+ 索引；`REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项。
+2. `store/schema.py` 的 `REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项；`Store._migrate()` 根据注册 ID 用同构模板创建 `matches_<game>` 表及索引，不复制静态 DDL。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动时断言 schema 与注册表 ID 集合一致）。
-4. 前端：`src/games/<game>/index.ts`（`GameViewSpec`：Board/reducer/`CanvasRenderer`/configFields）+ 在 `src/games/index.ts` 注册。
-5. **禁止反向依赖**：`games/<game>/` 不得反向 import 已删的 `engine`/`_compat`/`protocol` shim 或通用层；通用层不得 import 具体游戏模块（`test_import_cycles.py` 源码扫描守护，forbidden 含已删 shim 作"防回退"哨兵）。
+4. 前端：`src/games/<game>/index.ts`（`GameViewSpec`：Board/kind/reduce/`CanvasRenderer`）+ 在 `src/games/index.ts` 注册；规则参数固定后已无 `configFields`。
+5. **禁止反向依赖**：`games/<game>/` 不得反向 import 通用层；通用层不得 import 具体游戏模块（`test_import_cycles.py` 源码扫描守护）。
 6. 跑测试：`pytest`（含 `test_result_contract` / `test_import_cycles` / `test_game_registry` / `test_tongyong_layer_no_game_branches`）+ `npm run build`。
 
-> `engine/`/`protocol/`/`_compat/` shim 已删除（真实现全在 `games/`）。新代码直接面向 `games` 注册表，不要在 `matches/runner.py` 加游戏分支。
+> 新代码直接面向 `games` 注册表，不要在 `matches/runner.py` 加游戏分支。`run_session` 的 kwargs 仅供内部复现控制，新增或拼错规则键必须显式失败。
 
 ### 5.2 新增 API 端点
 - 在 `api_routes.py`（或 `auth/routes.py`）加路由，按需用 `require_user`/`require_admin`/`require_organizer` 依赖。
@@ -144,20 +173,28 @@ BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 
 ### 6.3 测试种子账号
 ```bash
-python scripts/seed_test_accounts.py   # 建 tester1/tester2，各上传三游戏样例 Bot（幂等）
+# 只允许隔离 DB；上传目录默认跟随 DB 到 <db.parent>/bot_uploads
+python scripts/seed_test_accounts.py \
+  --db "$PWD/botzone.db" --with-role-accounts
 ```
+
+默认建立 `tester1/tester2` 及三游戏样例 Bot；`--with-role-accounts` 才显式建立
+`qa_organizer/qa_admin`。所有固定凭据账号都按脚本 namespace、精确用户名、邮箱、
+角色和密码校验；任一项不匹配即在激活、验证、提权或上传 Bot 前 fail-closed，绝不
+改写未知同名账号。
 
 ### 6.4 关键脚本
 | 脚本 | 用途 |
 |------|------|
 | `scripts/platform-ctl.sh` | 启停：start/stop/restart/status/logs |
 | `scripts/rebuild.sh` | npm build + restart |
-| `scripts/e2e_smoke.sh` | 端到端冒烟（独立 DB + 端口 50381） |
-| `scripts/load_test.py` | 8 阶段大规模压测（60 用户） |
+| `scripts/e2e_smoke.sh` | 端到端冒烟（`mktemp` 独立 DB/uploads/avatars/logs + 随机非 50380 端口） |
+| `scripts/load_test.py` | 8 阶段大规模压测（60 用户）；只使用可验证的专用 `load_admin` |
 | `scripts/browser_verify.py` | Playwright 浏览器验收 |
 | `scripts/screenshot_verify.py` | 关键页截图验收 |
-| `scripts/api_full_test.py` | HTTP API 全量业务正确性测试（鉴权/上传/挑战/SSE/并发） |
-| `scripts/contest_stress.py` | 赛事大规模对阵压测 |
+| `scripts/api_full_test.py` | HTTP API 关键链路集成测试；SSE 只核对终态 snapshot 与 replay；隔离 DB 播种专用账号 |
+| `scripts/contest_stress.py` | 默认验证赛事 draft 名册容量与静态赛制估算；`--run` 才真跑；只使用专用 `cs_admin` |
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 三游戏样例 Bot） |
+| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 21 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口；全量执行真值见 `TESTING.md`） |
 
 > 返回 [doc/INDEX.md](./INDEX.md)

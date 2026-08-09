@@ -8,19 +8,17 @@
 - validate_match_config / default_match_config 按游戏
 - 段位曲线 per-game
 - schema 的 REGISTERED_ENGINES/VALID_GAME_IDS 与注册表一致
-- judge_games 元信息从注册表派生
+- 公开裁判源码元信息从注册表派生
 """
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from bzplat.backend.games import (
     GAME_LABELS,
-    GAME_GOMOKU,
-    GAME_HOLDEM,
-    GAME_PENCIL,
     normalize_game_id,
     run_session,
 )
@@ -91,13 +89,14 @@ def test_unknown_game_id_raises_in_default_match_config():
         default_match_config("chess")
 
 
-def test_normalize_still_falls_back_to_holdem_for_empty():
-    """旧 normalize_game_id 保留空值兜底 holdem 语义（向后兼容）。
-
-    但 normalize 后若不在注册表（如 'chess'），run_session 仍会经 registry.get 报错。
-    """
-    assert normalize_game_id("") == "holdem"
-    assert normalize_game_id(None) == "holdem"
+def test_normalize_requires_registered_explicit_game():
+    """规范化不猜测游戏；空值和未知值都明确失败。"""
+    with pytest.raises(ValueError, match="不可为空"):
+        normalize_game_id("")
+    with pytest.raises(ValueError, match="不可为空"):
+        normalize_game_id(None)
+    with pytest.raises(ValueError, match="未知游戏"):
+        normalize_game_id("chess")
     assert normalize_game_id("  PENCIL  ") == "pencil"
 
 
@@ -113,10 +112,10 @@ def test_run_session_gomoku_via_registry():
         if player == 0:
             x, y = black_moves[bi]
             bi += 1
-            return {"x": x, "y": y}
+            return {"response": {"x": x, "y": y}}
         x, y = white_moves[wi]
         wi += 1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     result = asyncio.run(run_session("gomoku", decide))
     assert result.winner == 0
@@ -140,42 +139,46 @@ def test_protocol_fail_response_per_game():
 
 
 def test_protocol_dumps_loads_roundtrip():
-    req = {"v": 1, "t": "mv", "x": 5, "y": 6}
-    line = dumps("gomoku", req)
+    response = {"response": {"x": 5, "y": 6}}
+    line = json.dumps(response)
     back = loads("gomoku", line)
-    assert back["x"] == 5 and back["y"] == 6
+    assert back == response
     # holdem 协议
-    hreq = {"a": "c"}
-    hline = dumps("holdem", hreq)
-    assert loads("holdem", hline) == {"a": "c"}
+    holdem_response = {"response": 0}
+    assert loads("holdem", json.dumps(holdem_response)) == holdem_response
 
 
-def test_protocol_loads_board_tolerates_garbage():
-    """棋类协议对空/非法输入返回 {}（不抛），保对局不崩。"""
-    assert loads("gomoku", "") == {}
-    assert loads("gomoku", "not json") == {}
-    assert loads("pencil", "") == {}
+def test_protocol_loads_board_rejects_garbage():
+    """棋类协议不得把空串/坏 JSON/非对象静默降级成非法落子。"""
+    for game_id, line in (
+        ("gomoku", ""),
+        ("gomoku", "not json"),
+        ("pencil", ""),
+    ):
+        with pytest.raises(json.JSONDecodeError):
+            loads(game_id, line)
+    with pytest.raises(ValueError, match="JSON 对象"):
+        loads("gomoku", "[]")
 
 
 # ── validate / default match_config ───────────────────────────
 def test_validate_match_config_holdem():
-    # 手数已钉死 DEFAULT_HANDS，不再接受配置；忽略任何传入字段，返回空 dict。
-    assert validate_match_config("holdem", {"hands": 100}) == {}
     assert validate_match_config("holdem", {}) == {}
-    assert validate_match_config("holdem", {"hands": 0}) == {}  # 不再校验范围
+    with pytest.raises(ValueError, match="游戏规则已固定"):
+        validate_match_config("holdem", {"hands": 100})
 
 
 def test_validate_match_config_pencil():
-    # 点阵边长已钉死 DEFAULT_N（6），不再接受配置；忽略任何传入字段。
-    assert validate_match_config("pencil", {"n_dots": 11}) == {}
     assert validate_match_config("pencil", {}) == {}
-    assert validate_match_config("pencil", {"n_dots": 2}) == {}  # 不再校验范围
+    with pytest.raises(ValueError, match="游戏规则已固定"):
+        validate_match_config("pencil", {"n_dots": 11})
 
 
 def test_validate_match_config_gomoku_no_params():
-    """五子棋单局无可调参数，返回空 dict，忽略任意字段。"""
+    """五子棋单局无可调参数，非空对象显式拒绝。"""
     assert validate_match_config("gomoku", {}) == {}
-    assert validate_match_config("gomoku", {"foo": 1}) == {}
+    with pytest.raises(ValueError, match="游戏规则已固定"):
+        validate_match_config("gomoku", {"foo": 1})
 
 
 def test_default_match_config_per_game():
@@ -216,14 +219,6 @@ def test_all_tiers_per_game():
 
 
 # ── 编排特化函数（spec 上的能力）──────────────────────────────
-def test_rounds_per_match_per_game():
-    # 手数钉死 DEFAULT_HANDS（70），不再读 match_config
-    assert registry.get("holdem").rounds_per_match({"hands": 50}) == 70
-    assert registry.get("holdem").rounds_per_match({}) == 70
-    assert registry.get("gomoku").rounds_per_match({}) == 1
-    assert registry.get("pencil").rounds_per_match({}) == 1
-
-
 def test_normalize_earnings_per_game():
     # holdem 除 100（bb/100）；棋类透传
     assert registry.get("holdem").normalize_earnings(500) == 5.0
@@ -236,27 +231,18 @@ def test_judge_games_derived():
     games = registry.judge_games()
     ids = {g["game_id"] for g in games}
     assert ids == {"holdem", "gomoku", "pencil"}
-    # holdem 有 3 个裁判参数（stack/sb/bb；手数已钉死移除）
-    holdem = next(g for g in games if g["game_id"] == "holdem")
-    assert len(holdem["params"]) == 3
-    # gomoku 0 个（棋盘边长已钉死移除）
-    gomoku = next(g for g in games if g["game_id"] == "gomoku")
-    assert len(gomoku["params"]) == 0
-    # pencil 0 个
-    pencil = next(g for g in games if g["game_id"] == "pencil")
-    assert len(pencil["params"]) == 0
-
-
-def test_judge_param_table():
-    defaults, bounds = registry.judge_param_table()
-    # holdem 的 3 个 setting key 都在（stack/sb/bb；手数已钉死移除）
-    assert schema.SETTING_JUDGE_HOLDEM_STACK in defaults
-    assert defaults[schema.SETTING_JUDGE_HOLDEM_STACK] == 20000
-    # gomoku 棋盘边长已钉死，不在 judge_param_table
-    assert schema.SETTING_JUDGE_GOMOKU_SIZE not in bounds
-    # pencil 无全局 judge 参数
-    pencil_keys = {p.setting_key for p in registry.get("pencil").judge_params}
-    assert pencil_keys == set()
+    # 公开源码清单必须包含真正的纯规则实现；engine.py 只是平台适配层。
+    # 由 GameSpec 按 game_id 派生可避免新增游戏时忘记公开权威规则文件。
+    for game in games:
+        assert game["source_files"] == [
+            f'{game["game_id"]}_judge.py',
+            "engine.py",
+            "protocol.py",
+            "result.py",
+        ]
+        expected_shared = [] if game["game_id"] == "holdem" else ["_board_protocol.py"]
+        assert game["shared_source_files"] == expected_shared
+        assert "params" not in game
 
 
 # ── preflight_check（bot 上传时试跑验证）──────────────────────
@@ -280,8 +266,15 @@ def test_preflight_sample_bots_pass():
         ("pencil", "samples/pencilbot_linux_amd64"),
     ]
     for gid, path in samples:
-        ok, detail = asyncio.run(preflight_bot(gid, path, runner))
-        assert ok, f"{gid} sample 应通过预检，实际: {detail}"
+        ok, detail = asyncio.run(
+            preflight_bot(
+                gid,
+                path,
+                runner,
+                runtime_mode="traditional",
+            )
+        )
+        assert ok, f"{gid}/traditional sample 预检失败: {detail}"
 
 
 # ── GameSpec 接口诚实化（PR2：声明=使用，无死字段）──────────────
@@ -310,14 +303,8 @@ def test_default_scoring_consumed_by_validation_not_hardcoded():
     assert custom["scoring"] == "poker_3_1_0"
 
 
-def test_num_seats_field_present():
-    """GameSpec 声明 num_seats（当前全 2，为 N 人游戏留钩子）。"""
-    for gid in registry.all_ids():
-        assert registry.get(gid).num_seats == 2, f"{gid} 当前应为 2 人"
-
-
 def test_dead_fields_removed():
-    """PR2 删除的死字段不再存在于 GameSpec（eta_per_match_sec/frontend_module/tier_for）。"""
+    """无生产消费者的字段不得继续冒充 GameSpec 契约。"""
     from bzplat.backend.games.base import GameSpec
     import dataclasses
 
@@ -325,6 +312,9 @@ def test_dead_fields_removed():
     assert "eta_per_match_sec" not in field_names, "eta_per_match_sec 是死字段（通用层读 eta_for_match），已删"
     assert "frontend_module" not in field_names, "frontend_module 后端从不读，已删"
     assert "tier_for" not in field_names, "tier_for 字段冗余（registry.tier_for 统一走 tier_for_in），已删"
+    assert "rounds_per_match" not in field_names
+    assert "num_seats" not in field_names
+    assert "judge_params" not in field_names
 
 
 def test_session_factory_protocol_has_on_event():

@@ -135,7 +135,12 @@ def test_allow_large_round_robin_bypasses_guard(tmp_path):
     for i in range(13):
         u = store.create_user(f"lr{i}", f"lr{i}@ex.com", hash_password("pw123456"))["id"]
         store.update_user(u, email_verified=1)
-        b = store.create_bot(u, f"lrb{i}", binary_path="/tmp", format="elf", game_id="holdem")["id"]
+        binary_path = tmp_path / f"large-rr-bot-{i}"
+        binary_path.write_bytes(b"test fixture")
+        store.create_bot(
+            u, f"lrb{i}", binary_path=str(binary_path),
+            format="elf", game_id="holdem",
+        )
         users.append(u)
     c = store.create_contest(
         "P5大RR", organizer_id=o["id"], game_id="holdem",
@@ -144,6 +149,8 @@ def test_allow_large_round_robin_bypasses_guard(tmp_path):
     for uid in users:
         store.add_contest_entry(c, uid, store.get_bot_by_owner_name(uid, f"lrb{users.index(uid)}")["id"])
     orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
+    # 此用例只验证大 RR 门禁；prepare/bind 保留，runner 不在本测试启动。
+    orch.start_prepared_match = lambda _match_id: None  # type: ignore[method-assign]
     cm = ContestManager(store, orch)
     store.update_contest(c, status="open")
     # start 应不抛 _guard_full_rr 错（allow_large_round_robin 旁路）

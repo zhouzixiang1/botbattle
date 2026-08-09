@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -24,50 +25,129 @@ def _app(tmp_path):
     return create_app(db_path=str(tmp_path / "dc.db"))
 
 
-def _setup_contest(app):
+def _setup_contest(app, *, status="running"):
     """建一个 running 赛事 + 1 个 pending pairing（2 bot）。"""
     from bzplat.backend.crypto import hash_password
     store = app.state.store
     org = store.create_user("org", "org@e.com", hash_password("pw123456"))
     store.update_user(org["id"], role="organizer", email_verified=1)
+    player = store.create_user("player", "player@e.com", hash_password("pw123456"))
+    store.update_user(player["id"], email_verified=1)
     b1 = store.create_bot(org["id"], "botA", binary_path="/tmp/a", format="elf", game_id="holdem")
-    b2 = store.create_bot(org["id"], "botB", binary_path="/tmp/b", format="elf", game_id="holdem")
-    cid = store.create_contest("DupTest", organizer_id=org["id"], game_id="holdem", status="running")["id"]
-    with store._tx() as c:
-        c.execute(
-            "INSERT INTO contest_pairings(contest_id, stage_idx, round_num, bot_a_id, bot_b_id, status) "
-            "VALUES(?,0,1,?,?,'pending')",
-            (cid, b1["id"], b2["id"]),
-        )
+    b2 = store.create_bot(player["id"], "botB", binary_path="/tmp/b", format="elf", game_id="holdem")
+    cid = store.create_contest(
+        "DupTest", organizer_id=org["id"], game_id="holdem", status=status,
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )["id"]
+    entry_a = store.add_contest_entry(cid, org["id"], b1["id"])
+    entry_b = store.add_contest_entry(cid, player["id"], b2["id"])
+    store.add_contest_pairing(
+        cid, b1["id"], b2["id"], stage_idx=0, stage_key="rr",
+        entry_a_id=entry_a["id"], entry_b_id=entry_b["id"], status="pending",
+    )
     return store, org, cid, b1, b2
 
 
-@pytest.mark.asyncio
-async def test_dispatch_no_double_under_concurrent_overlap(tmp_path):
+def test_dispatch_no_double_under_concurrent_overlap(tmp_path):
     """并发 _dispatch_pending 调用不应双发——锁串行化，每 pairing 只 1 个 match。"""
-    app = _app(tmp_path)
-    store, org, cid, b1, b2 = _setup_contest(app)
-    mgr = app.state.contest_manager
-    # mock slow challenge 制造让出窗口
-    dispatched: list[str] = []
+    async def exercise():
+        app = _app(tmp_path)
+        store, org, cid, b1, b2 = _setup_contest(app)
+        mgr = app.state.contest_manager
+        # mock slow challenge 制造让出窗口
+        dispatched: list[str] = []
 
-    class _SlowOrch:
-        async def challenge(self, *a, **kw):
-            await asyncio.sleep(0.05)  # 让出控制权，制造交错窗口
-            mid = f"m{len(dispatched)}"
-            dispatched.append(mid)
-            return mid
+        class _SlowOrch:
+            async def challenge(self, *a, **kw):
+                await asyncio.sleep(0.05)  # 让出控制权，制造交错窗口
+                mid = f"m{len(dispatched)}"
+                dispatched.append(mid)
+                return mid
 
-    mgr.orch = _SlowOrch()
-    # 并发两次 _dispatch_pending（模拟 scheduler tick + on_match_done 交错）
-    await asyncio.gather(
-        mgr._dispatch_pending(cid, 0),
-        mgr._dispatch_pending(cid, 0),
-    )
-    # 应只派发 1 次（锁串行化，第二个读到 match_id 已设跳过）
-    assert len(dispatched) == 1, f"双发！期望 1 个 match，实际 {dispatched}"
-    # pairing 只挂 1 个 match_id
-    pairings = store.list_contest_pairings(cid, stage_idx=0)
-    assert len(pairings) == 1
-    assert pairings[0]["match_id"] == dispatched[0]
-    assert pairings[0]["status"] == "running"
+        mgr.orch = _SlowOrch()
+        # 并发两次 _dispatch_pending（模拟 scheduler tick + on_match_done 交错）
+        await asyncio.gather(
+            mgr._dispatch_pending(cid, 0),
+            mgr._dispatch_pending(cid, 0),
+        )
+        # 应只派发 1 次（锁串行化，第二个读到 match_id 已设跳过）
+        assert len(dispatched) == 1, f"双发！期望 1 个 match，实际 {dispatched}"
+        # pairing 只挂 1 个 match_id
+        pairings = store.list_contest_pairings(cid, stage_idx=0)
+        assert len(pairings) == 1
+        assert pairings[0]["match_id"] == dispatched[0]
+        assert pairings[0]["status"] == "running"
+
+    asyncio.run(exercise())
+
+
+def test_cancel_waits_for_dispatch_and_rechecks_running_state(tmp_path):
+    """dispatch 已开始时取消必须等同一把锁；首场成功后取消应被锁内复核拒绝。"""
+    async def exercise():
+        app = _app(tmp_path)
+        store, _org, cid, _b1, _b2 = _setup_contest(app, status="published")
+        mgr = app.state.contest_manager
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        dispatched: list[str] = []
+
+        class _BlockingOrch:
+            async def challenge(self, *args, **kwargs):
+                entered.set()
+                await release.wait()
+                dispatched.append("locked-match")
+                return "locked-match"
+
+        mgr.orch = _BlockingOrch()
+        dispatch_task = asyncio.create_task(mgr._dispatch_pending(cid, 0))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        cancel_task = asyncio.create_task(mgr.cancel(cid))
+        await asyncio.sleep(0)
+        assert not cancel_task.done(), "取消不得在 dispatch 持锁期间穿透并改写状态"
+
+        release.set()
+        await dispatch_task
+        with pytest.raises(ValueError, match="不能取消"):
+            await cancel_task
+
+        assert dispatched == ["locked-match"]
+        assert store.get_contest(cid)["status"] == "running"
+        pairing = store.list_contest_pairings(cid, stage_idx=0)[0]
+        assert pairing["status"] == "running"
+        assert pairing["match_id"] == "locked-match"
+
+    asyncio.run(exercise())
+
+
+def test_cancel_queued_before_dispatch_prevents_dispatch(tmp_path):
+    """取消先取得锁时，后续 dispatch 必须在锁内看到 cancelled 并零派发。"""
+    async def exercise():
+        app = _app(tmp_path)
+        store, _org, cid, _b1, _b2 = _setup_contest(app, status="published")
+        mgr = app.state.contest_manager
+        dispatched: list[str] = []
+
+        class _RecordingOrch:
+            async def challenge(self, *args, **kwargs):
+                dispatched.append("unexpected")
+                return "unexpected"
+
+        mgr.orch = _RecordingOrch()
+        lock = mgr._lock(cid)
+        await lock.acquire()
+        try:
+            cancel_task = asyncio.create_task(mgr.cancel(cid))
+            await asyncio.sleep(0)
+            dispatch_task = asyncio.create_task(mgr._dispatch_pending(cid, 0))
+            await asyncio.sleep(0)
+        finally:
+            lock.release()
+
+        await asyncio.gather(cancel_task, dispatch_task)
+        assert store.get_contest(cid)["status"] == "cancelled"
+        assert dispatched == []
+        pairing = store.list_contest_pairings(cid, stage_idx=0)[0]
+        assert pairing["status"] == "pending"
+        assert pairing["match_id"] is None
+
+    asyncio.run(exercise())

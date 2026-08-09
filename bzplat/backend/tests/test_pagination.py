@@ -343,6 +343,22 @@ def test_admin_users_pagination(tmp_path):
     p2 = c.get("/api/admin/users?page=2&per_page=10", headers=h).json()
     assert {u["id"] for u in p1["users"]}.isdisjoint({u["id"] for u in p2["users"]})
 
+    # 搜索/实名筛选必须在数据库分页前执行；不能只筛当前页而漏掉后页用户。
+    target = store.get_user_by_username("au19")
+    store.update_user(
+        target["id"], real_name="QA", phone="13800138000",
+        school="Test", student_id="S19",
+    )
+    searched = c.get(
+        "/api/admin/users?page=1&per_page=10&q=au19&real_name=true", headers=h,
+    ).json()
+    assert searched["total"] == 1
+    assert [u["username"] for u in searched["users"]] == ["au19"]
+    missing = c.get(
+        "/api/admin/users?page=1&per_page=10&q=au19&real_name=false", headers=h,
+    ).json()
+    assert missing["total"] == 0 and missing["users"] == []
+
     # 旧契约
     old = c.get("/api/admin/users", headers=h).json()
     assert "page" not in old
@@ -361,6 +377,7 @@ def test_admin_bots_pagination_regression(tmp_path):
     assert len(p1["bots"]) == 5
     assert p1["total"] >= 20
     assert p1["page"] == 1 and p1["per_page"] == 5
+    assert all(b.get("owner_name") for b in p1["bots"])
 
     old = c.get("/api/admin/bots", headers=h).json()
     assert "page" not in old

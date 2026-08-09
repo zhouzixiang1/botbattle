@@ -17,7 +17,7 @@ import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/stat
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAuth } from '@/components/useAuth'
 import { apiGet, errMsg } from '@/api'
-import { GAMES, gameLabel, gameIcon, matchTypeBadge, isBoardGame } from '@/lib/games'
+import { GAMES, findGame, gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 
 interface Match {
@@ -29,10 +29,7 @@ interface Match {
   bot_b_name?: string
   bot_a_display?: string
   bot_b_display?: string
-  earnings_a?: number  // 已废弃（result.deltas 取代），保留向后兼容旧 API 响应
-  earnings_b?: number
   created_at?: string
-  match_config?: Record<string, number>
   result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
   game_id?: string
   match_type?: string
@@ -207,6 +204,7 @@ export default function Home() {
                 matches.map((m) => {
                   const tb = matchTypeBadge(m.match_type)
                   const GameIcon = gameIcon(m.game_id)
+                  const gameSpec = findGame(m.game_id)
                   const aName = m.bot_a_display || m.bot_a_name || `#${m.bot_a_id}`
                   const bName = m.bot_b_display || m.bot_b_name || `#${m.bot_b_id}`
                   return (
@@ -248,9 +246,9 @@ export default function Home() {
                         <StatusBadge status={m.status} />
                       </TableCell>
                       <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground">
-                        {isBoardGame(m.game_id)
-                          ? `${m.result?.hands_played ?? 0} 步`
-                          : `${m.result?.hands_played ?? 0} 手`}
+                        {gameSpec
+                          ? `${m.result?.hands_played ?? 0} ${gameSpec.progressUnit === 'move' ? '步' : '手'}`
+                          : '规则不可用'}
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">

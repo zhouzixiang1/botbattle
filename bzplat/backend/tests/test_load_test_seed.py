@@ -12,6 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from bzplat.backend.crypto import hash_password
+from bzplat.backend.store import Store
+
 ROOT = Path(__file__).resolve().parents[3]  # 仓库根
 
 
@@ -141,3 +144,141 @@ def test_seed_rebuild_ctx_consistent(tmp_path):
     assert ctx2["bots"] == ctx["bots"]
     # token 是新生成的（不同于 seed 的），但都有效
     assert ctx2["admin_token"] and ctx2["admin_token"] != ctx["admin_token"]
+
+
+def test_seed_default_upload_root_follows_database(tmp_path):
+    """省略 upload_root 时，所有 Bot 文件必须落在隔离 DB 旁。"""
+    mod = _load_module()
+    db = tmp_path / "runtime" / "load.db"
+    ctx = mod.seed(str(db), 1)
+
+    from bzplat.backend.store import Store
+
+    store = Store(str(db))
+    try:
+        expected = (db.parent / "bot_uploads").resolve()
+        for game_bot_ids in ctx["bots"].values():
+            for bot_id in game_bot_ids.values():
+                binary = Path(store.get_bot(bot_id)["binary_path"]).resolve()
+                assert expected in binary.parents
+    finally:
+        store.close()
+
+
+def test_seed_rejects_primary_checkout_upload_root_before_opening_db(tmp_path):
+    mod = _load_module()
+    from bzplat.backend.qa_safety import primary_checkout_root
+
+    primary = primary_checkout_root(mod.ROOT)
+    assert primary is not None
+    db = tmp_path / "load.db"
+    with pytest.raises(SystemExit, match="bot_uploads"):
+        mod.seed(str(db), 1, str(primary / "bot_uploads"))
+    assert not db.exists()
+
+
+def test_seed_never_reuses_or_mutates_arbitrary_admin(tmp_path):
+    mod = _load_module()
+    db = tmp_path / "load.db"
+    store = Store(str(db))
+    real_admin = store.create_user(
+        "admin",
+        "owner@example.com",
+        hash_password("OwnerSecret1234"),
+        role="admin",
+    )
+    store.update_user(real_admin["id"], is_active=0, email_verified=0)
+    store.close()
+
+    ctx = mod.seed(str(db), 1, str(tmp_path / "uploads"))
+
+    store = Store(str(db))
+    try:
+        untouched = store.get_user(real_admin["id"])
+        assert ctx["admin_name"] == mod.LOAD_ADMIN_NAME
+        assert untouched["is_active"] == 0
+        assert untouched["email_verified"] == 0
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE user_id=?",
+            (real_admin["id"],),
+        ).fetchone()[0] == 0
+        dedicated = store.get_user_by_username(mod.LOAD_ADMIN_NAME)
+        assert dedicated["role"] == "admin"
+        assert dedicated["email"] == f"{mod.LOAD_ADMIN_NAME}@{mod.EMAIL_DOMAIN}"
+    finally:
+        store.close()
+
+
+def test_seed_rejects_conflicting_dedicated_admin_before_other_writes(tmp_path):
+    mod = _load_module()
+    db = tmp_path / "load.db"
+    store = Store(str(db))
+    namesake = store.create_user(
+        mod.LOAD_ADMIN_NAME,
+        "foreign@example.com",
+        hash_password("ForeignSecret1234"),
+        role="admin",
+    )
+    store.update_user(namesake["id"], is_active=0, email_verified=0)
+    store.close()
+
+    with pytest.raises(RuntimeError, match="专用 QA 身份契约不匹配"):
+        mod.seed(str(db), 1, str(tmp_path / "uploads"))
+
+    store = Store(str(db))
+    try:
+        unchanged = store.get_user(namesake["id"])
+        assert unchanged["is_active"] == 0
+        assert unchanged["email_verified"] == 0
+        assert store.get_user_by_username("load_u01") is None
+        assert store._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    finally:
+        store.close()
+
+
+def test_seed_rejects_conflicting_load_user_without_changing_role(tmp_path):
+    mod = _load_module()
+    db = tmp_path / "load.db"
+    store = Store(str(db))
+    namesake = store.create_user(
+        "load_u01",
+        "load_u01@loadtest.local",
+        hash_password(mod.PASSWORD),
+        role="organizer",
+    )
+    store.update_user(namesake["id"], is_active=0, email_verified=0)
+    store.close()
+
+    with pytest.raises(RuntimeError, match="role"):
+        mod.seed(str(db), 1, str(tmp_path / "uploads"))
+
+    store = Store(str(db))
+    try:
+        unchanged = store.get_user(namesake["id"])
+        assert unchanged["role"] == "organizer"
+        assert unchanged["is_active"] == 0
+        assert unchanged["email_verified"] == 0
+    finally:
+        store.close()
+
+
+def test_rebuild_ctx_rejects_tampered_dedicated_admin_before_new_sessions(tmp_path):
+    mod = _load_module()
+    db = tmp_path / "load.db"
+    mod.seed(str(db), 1, str(tmp_path / "uploads"))
+
+    store = Store(str(db))
+    admin = store.get_user_by_username(mod.LOAD_ADMIN_NAME)
+    store.update_user(admin["id"], password_hash=hash_password("Tampered1234"))
+    before = store._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    store.close()
+
+    with pytest.raises(RuntimeError, match="password"):
+        mod._rebuild_ctx(str(db))
+
+    store = Store(str(db))
+    try:
+        after = store._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        assert after == before
+    finally:
+        store.close()

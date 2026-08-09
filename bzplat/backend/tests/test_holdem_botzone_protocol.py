@@ -53,18 +53,16 @@ def test_card_roundtrip_all_52():
 
 def test_raise_delta_conversion():
     """Bot 返回 raise delta；引擎转 raise_to = street_bet + delta。"""
-    # 裸整数 150（raise delta）
-    action, delta = proto.parse_response(150)
-    assert action == "raise" and delta == 150
-    # 信封
     action, delta = proto.parse_response({"response": 150})
     assert action == "raise" and delta == 150
+    with pytest.raises(ValueError):
+        proto.parse_response(150)
 
 
 def test_response_codes():
-    assert proto.parse_response(-1)[0] == "fold"
-    assert proto.parse_response(-2)[0] == "allin"
-    assert proto.parse_response(0)[0] == "call"
+    assert proto.parse_response({"response": -1})[0] == "fold"
+    assert proto.parse_response({"response": -2})[0] == "allin"
+    assert proto.parse_response({"response": 0})[0] == "call"
 
 
 def test_action_to_history_int_raise_delta():
@@ -230,7 +228,7 @@ def test_foldbot_vs_callbot_full_match():
     ))
     # 手数已钉死 DEFAULT_HANDS（70，#123）；num_hands 参数被忽略
     from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
-    assert result.hands_played == DEFAULT_HANDS
+    assert result.rounds_played == DEFAULT_HANDS
     # callbot (seat 1) 应净胜
     assert result.final_chips[1] > result.final_chips[0]
 

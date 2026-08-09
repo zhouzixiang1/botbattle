@@ -2,7 +2,7 @@
 
 PR #88/#93 孤儿清理把 matches_* 的 bot_a_id/bot_b_id 置 NULL（保行不删），
 但读路径原来用 INNER JOIN bots → 孤儿对局被 JOIN 丢弃，从 UI/replay/历史消失。
-本测试验证改 LEFT JOIN 后：孤儿对局在 list/get/matchpack/bracket 都可见。
+本测试验证改 LEFT JOIN 后：孤儿对局在 list/get/bracket 都可见。
 """
 from __future__ import annotations
 
@@ -43,11 +43,6 @@ def test_get_match_detailed_returns_orphaned(tmp_path):
     assert d.get("bot_a_name") is None, f"已删 bot 的 bot_a_name 应为 NULL，实际 {d.get('bot_a_name')}"
     assert d.get("bot_b_name") == "botB"
     s.close()
-
-
-def test_matchpack_count_matches_rows(tmp_path):
-    """数据集下载已下线（matchpack_months/matchpack_rows 已删）——留空占位保持文件结构。"""
-    pass
 
 
 def test_contest_bracket_handles_deleted_bot(tmp_path):

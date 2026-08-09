@@ -223,21 +223,32 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       }
       case 'match_end': {
         matchOver = true
-        // 引擎版：final_chips / hands_played；orchestrator 版：winner/earnings_a/b
+        // 新写 replay/live 只接收平台权威 winner/reason/deltas。
+        // final_chips 分支仅用于不改动的历史公开回放读取边界。
         if (Array.isArray(ev.final_chips)) {
           finalChips = [Number(ev.final_chips[0]), Number(ev.final_chips[1])]
           if (finalChips[0] > finalChips[1]) matchWinner = 0
           else if (finalChips[1] > finalChips[0]) matchWinner = 1
           else matchWinner = null
-        } else if (ev.winner !== undefined && ev.winner !== null) {
-          matchWinner = Number(ev.winner)
-        } else if (ev.earnings_a !== undefined || ev.earnings_b !== undefined) {
-          const ea = Number(ev.earnings_a ?? 0)
-          const eb = Number(ev.earnings_b ?? 0)
-          if (ea > eb) matchWinner = 0
-          else if (eb > ea) matchWinner = 1
-          else matchWinner = null
-        } else if (seats[0].net !== seats[1].net) {
+        }
+        if (Array.isArray(ev.deltas) && ev.deltas.length >= 2) {
+          const da = Number(ev.deltas[0])
+          const db = Number(ev.deltas[1])
+          seats[0].net = da
+          seats[1].net = db
+          if (ev.winner === undefined) {
+            if (da > db) matchWinner = 0
+            else if (db > da) matchWinner = 1
+            else matchWinner = null
+          }
+        }
+        if (ev.winner !== undefined) {
+          matchWinner = ev.winner === null ? null : Number(ev.winner)
+        } else if (
+          !Array.isArray(ev.final_chips)
+          && !Array.isArray(ev.deltas)
+          && seats[0].net !== seats[1].net
+        ) {
           // 无 winner 字段时用累计 net 兜底
           matchWinner = seats[0].net > seats[1].net ? 0 : 1
         }

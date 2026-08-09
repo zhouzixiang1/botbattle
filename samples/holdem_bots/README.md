@@ -1,9 +1,9 @@
-# 德州扑克多策略样例 Bot（Botzone 标准协议）
+# 德州扑克多策略样例 Bot（平台唯一 JSON 协议）
 
 8 种不同策略的 holdem Bot（用于赛事功能验证：策略多样性让对局结果非全是平局，
-能真实排名）。**完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准协议**：
-Botzone 信封（Traditional 完整历史 / LongRunning 单 request + keep_running 握手），
-德州 response 裸整数（`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量），
+能真实排名）。它们使用平台唯一的标准信封：Traditional 完整历史，或 LongRunning
+首回合完整历史 + 精确 keep-running 握手 + 后续单 request；响应对象必须包含
+`response`（其他顶层字段忽略），其值为整数动作码（`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量），
 牌编码 0-51（`%4` 花色 0♥1♦2♠3♣）。详见 [协议规范](../../wiki/PROTOCOL.md)。
 
 | Bot | 策略 | 预期表现 |
@@ -29,21 +29,20 @@ bash samples/holdem_bots/gen.sh
 
 ## 用途
 
-- 生产 Bot 迁移 `scripts/migrate_bots_to_botzone.py`：把旧协议 holdem Bot 批量替换为
-  Botzone 协议样例（8 种风格随机分布，确定性 seed 可复现）。
 - 赛事压测/可行性工具：seed 用户时按策略分布分配这些 Bot，让赛制排名有意义。
 - 手动上传：`POST /api/bots` 上传任一二进制即可参赛。
 
 ## 协议速查
 
-请求信封（平台 → Bot，LongRunning 首回合，严格对齐 Botzone TexasHoldem2p 11 字段）：
+请求信封（平台 → Bot，LongRunning 首回合，固定 11 字段）：
 ```json
 {"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my_cards":[48,0],"public_cards":[],"history":[],"hand":0,"max_hand":70,"total_win_chips":[0,0],"total_win_games":[0,0]}],"responses":[]}
 ```
 后续回合（LongRunning）单 request：`{"request":{...}}`
 
-响应信封（Bot → 平台）：`{"response": <裸整数>}`
+响应信封（Bot → 平台）：`{"response": <整数动作码>}`；平台只读取该字段，忽略其他顶层字段。
 - `-1`=fold `-2`=allin `0`=call/check `>0`=raise **额外下注筹码**（= 目标总额 − 本街已投）
 
-LongRunning 握手：首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`（本平台默认长驻，
-Bot 不输出握手串则每回合都收到完整历史信封——Traditional 等效）。
+这些样例同时支持两种模式，并在首回合响应后输出 LongRunning 握手。本平台默认
+Traditional（逐决策重启）；选择 LongRunning 时必须精确握手，随后改收单 request。
+缺失或错误握手会作为协议故障终止，不会回退到另一种进程模型。

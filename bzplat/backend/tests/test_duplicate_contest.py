@@ -34,9 +34,7 @@ def test_holdem_dup_rr_template_exists():
 
 
 def test_challenge_duplicate_flag_persisted_to_match_config(tmp_path):
-    """challenge_duplicate 落的 match 行 match_config 含 duplicate=True（不真跑 bot）。
-    用 /tmp 伪路径建 match（不 await _run_match），仅校验落库的 config 标志。
-    """
+    """challenge_duplicate 落的 match 行 match_config 含 duplicate=True（不真跑 bot）。"""
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
     from bzplat.backend.matches.runner import MatchRunner
     from bzplat.backend.runtime.binary_runner import BinaryRunner
@@ -45,14 +43,19 @@ def test_challenge_duplicate_flag_persisted_to_match_config(tmp_path):
 
     s = Store(str(tmp_path / "dup_cfg.db"))
     u = s.create_user("orgcfg", "c@e.com", "x")["id"]
-    ba = s.create_bot(u, "cfgbotA", binary_path="/tmp/a", format="elf", game_id="holdem", is_active=1)["id"]
-    bb = s.create_bot(u, "cfgbotB", binary_path="/tmp/b", format="elf", game_id="holdem", is_active=1)["id"]
+    path_a = tmp_path / "cfg-a"
+    path_b = tmp_path / "cfg-b"
+    path_a.write_bytes(b"test fixture")
+    path_b.write_bytes(b"test fixture")
+    ba = s.create_bot(u, "cfgbotA", binary_path=str(path_a), format="elf", game_id="holdem", is_active=1)["id"]
+    bb = s.create_bot(u, "cfgbotB", binary_path=str(path_b), format="elf", game_id="holdem", is_active=1)["id"]
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
 
     async def _go():
-        # challenge_duplicate 立即返回（建 match 行 + 起 task）；不 await task 避免 bot 崩
-        mid = await orch.challenge_duplicate(ba, bb, u, duplicate_seed=42)
-        # 取刚建的 match 行（task 可能已在跑，但 match_config 已落库）
+        # defer_start 只建 match 行，不创建后台 task；本用例仅校验持久化 config。
+        mid = await orch.challenge_duplicate(
+            ba, bb, u, duplicate_seed=42, defer_start=True
+        )
         m = s.get_match(mid)
         return m
 
@@ -62,9 +65,6 @@ def test_challenge_duplicate_flag_persisted_to_match_config(tmp_path):
         mc = _json.loads(mc or "{}")
     assert mc.get("duplicate") is True, "challenge_duplicate 落的 match_config 应含 duplicate=True"
     assert m.get("match_seed") == 42, "duplicate_seed 应落 match_seed 列"
-    # 取消后台 task，避免 bot 崩污染日志
-    for t in list(orch._tasks.values()):
-        t.cancel()
     s.close()
 
 
@@ -205,17 +205,12 @@ def test_duplicate_standings_two_legs_accumulated(tmp_path):
     s.close()
 
 
-def test_duplicate_flag_ignored_for_non_holdem(tmp_path):
-    """棋类（无 build_match_plan）即便误标 duplicate 也走单 leg（不破坏现有赛制）。
-
-    用伪 bot（不真跑）+ 直接验 challenge_duplicate 内部降级：返回的 match_config
-    不含 duplicate（spec.build_match_plan is None → 降级）。
-    """
+def test_duplicate_flag_rejected_for_game_without_plan(tmp_path):
+    """棋类没有 duplicate 计划时创建入口明确拒绝且不落 match。"""
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
     from bzplat.backend.matches.runner import MatchRunner
     from bzplat.backend.runtime.binary_runner import BinaryRunner
     from bzplat.backend.store import Store
-    import json as _json
 
     s = Store(str(tmp_path / "dup_nongame.db"))
     # 注册棋类 spec（若未注册则跳过——取决于测试环境是否注册 gomoku/pencil）
@@ -228,22 +223,15 @@ def test_duplicate_flag_ignored_for_non_holdem(tmp_path):
         pytest.skip("no non-holdem game registered (build_match_plan is None)")
 
     u = s.create_user("ngorg", "ng@e.com", "x")["id"]
-    ba = s.create_bot(u, "ngA", binary_path="/tmp/a", format="elf", game_id=non_holdem, is_active=1)["id"]
-    bb = s.create_bot(u, "ngB", binary_path="/tmp/b", format="elf", game_id=non_holdem, is_active=1)["id"]
+    path_a = tmp_path / "unsupported-a"
+    path_b = tmp_path / "unsupported-b"
+    path_a.write_bytes(b"test fixture")
+    path_b.write_bytes(b"test fixture")
+    ba = s.create_bot(u, "ngA", binary_path=str(path_a), format="elf", game_id=non_holdem, is_active=1)["id"]
+    bb = s.create_bot(u, "ngB", binary_path=str(path_b), format="elf", game_id=non_holdem, is_active=1)["id"]
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
 
-    async def _go():
-        mid = await orch.challenge_duplicate(ba, bb, u, game_id=non_holdem)
-        return s.get_match(mid)
-
-    m = asyncio.run(_go())
-    mc = m["match_config"]
-    if isinstance(mc, str):
-        mc = _json.loads(mc or "{}")
-    # 棋类不支持 duplicate → challenge 内部降级（duplicate=False），match_config 不含 duplicate 标志
-    assert not mc.get("duplicate"), (
-        f"棋类 {non_holdem} 不支持 duplicate，应降级为单 leg，match_config={mc}"
-    )
-    for t in list(orch._tasks.values()):
-        t.cancel()
+    with pytest.raises(ValueError, match="不支持 duplicate"):
+        asyncio.run(orch.challenge_duplicate(ba, bb, u, game_id=non_holdem))
+    assert s.list_matches() == []
     s.close()

@@ -110,7 +110,7 @@ def test_swap_bot_keeps_history_points(tmp_path):
     # 建对应 match（completed, botA 赢）
     for i, p in enumerate(s.list_contest_pairings(c, stage_idx=0)):
         mid = f"p0swap-{i}"
-        s.create_match(mid, ba, bb, game_id="holdem", contest_id=c, match_config={"hands": 2})
+        s.create_match(mid, ba, bb, game_id="holdem", contest_id=c, match_config={})
         s.update_match(mid, status="completed", winner=0,
                        result={"hands_played": 2, "deltas": [100, -100]},
                        reason="completed")
@@ -165,7 +165,7 @@ def test_bot_active_references_detects_pending_match(tmp_path):
     s = _store(tmp_path)
     u = s.create_user("user1a", "u1a@e.com", "x")["id"]
     b = s.create_bot(u, "bot1a", binary_path="/tmp", format="elf", game_id="holdem")["id"]
-    s.create_match("m-active", b, b, owner_id=u, match_config={"hands": 1},
+    s.create_match("m-active", b, b, owner_id=u, match_config={},
                    match_type="challenge", game_id="holdem")
     refs = s.bot_active_references(b)
     assert refs["matches"] >= 1, "pending 对局应被检测到"
@@ -208,7 +208,7 @@ def test_admin_delete_bot_blocked_by_api_when_active(tmp_path):
     store.update_user(u, email_verified=1)
     b = store.create_bot(u, "delbotX", binary_path="/tmp", format="elf", game_id="holdem")["id"]
     # pending 对局 → 活跃引用
-    store.create_match("m-api-active", b, b, owner_id=u, match_config={"hands": 1},
+    store.create_match("m-api-active", b, b, owner_id=u, match_config={},
                        match_type="challenge", game_id="holdem")
     _, atok = app.state.auth.authenticate("deladmin", "pw123456")
     h = {"Authorization": f"Bearer {atok}"}
@@ -217,3 +217,226 @@ def test_admin_delete_bot_blocked_by_api_when_active(tmp_path):
     assert r.status_code == 409, f"活跃引用应 409 拒绝，实际 {r.status_code} {r.text}"
     # bot 仍在（未删）
     assert store.get_bot(b) is not None
+    store.update_match(
+        "m-api-active",
+        status="completed",
+        winner=0,
+        result={"deltas": [1, -1]},
+        reason="completed",
+    )
+    r_done = client.delete(f"/api/admin/bots/{b}", headers=h)
+    assert r_done.status_code == 200, r_done.text
+    assert store.get_bot(b) is None
+
+
+def test_admin_delete_user_rejects_active_bot_references(tmp_path):
+    """删用户不得借 users→bots CASCADE 绕过活跃 Bot 引用保护。"""
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+    from fastapi.testclient import TestClient
+
+    app = create_app(
+        db_path=str(tmp_path / "delete-user-active.db"),
+        upload_root=tmp_path / "uploads-active",
+    )
+    store = app.state.store
+    admin = store.create_user(
+        "userdeladmin", "userdeladmin@example.com", hash_password("pw123456"), role="admin"
+    )
+    victim = store.create_user(
+        "userdelvictim", "userdelvictim@example.com", hash_password("pw123456")
+    )
+    store.update_user(admin["id"], email_verified=1)
+    bot = store.create_bot(
+        victim["id"], "victimbot", binary_path="/tmp/victim", format="elf", game_id="gomoku"
+    )
+    store.create_match(
+        "delete-user-active-match",
+        bot["id"],
+        bot["id"],
+        owner_id=victim["id"],
+        match_type="challenge",
+        game_id="gomoku",
+    )
+
+    _, token = app.state.auth.authenticate("userdeladmin", "pw123456")
+    response = TestClient(app).delete(
+        f"/api/admin/users/{victim['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert store.get_user(victim["id"]) is not None
+    assert store.get_bot(bot["id"]) is not None
+    match = store.get_match("delete-user-active-match")
+    assert match is not None and match["status"] == "pending"
+    assert match["bot_a_id"] == bot["id"] and match["bot_b_id"] == bot["id"]
+
+
+def test_admin_delete_human_player_rejects_foreign_bot_match(tmp_path):
+    """人类使用他人 Bot 时也按 owner_id/human_user_id 阻止删除参与者。"""
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+    from fastapi.testclient import TestClient
+
+    app = create_app(
+        db_path=str(tmp_path / "delete-human-player.db"),
+        upload_root=tmp_path / "uploads-human-player",
+    )
+    store = app.state.store
+    admin = store.create_user(
+        "humandeladmin", "humandeladmin@example.com", hash_password("pw123456"), role="admin"
+    )
+    human = store.create_user(
+        "humanvictim", "humanvictim@example.com", hash_password("pw123456")
+    )
+    bot_owner = store.create_user(
+        "foreignowner", "foreignowner@example.com", hash_password("pw123456")
+    )
+    store.update_user(admin["id"], email_verified=1)
+    foreign_bot = store.create_bot(
+        bot_owner["id"], "foreignbot", binary_path="/tmp/foreign", format="elf", game_id="gomoku"
+    )
+    store.create_match(
+        "delete-human-active-match",
+        foreign_bot["id"],
+        foreign_bot["id"],
+        owner_id=human["id"],
+        human_user_id=human["id"],
+        human_seat=1,
+        match_type="human",
+        game_id="gomoku",
+    )
+    store.update_match("delete-human-active-match", status="running")
+
+    _, token = app.state.auth.authenticate("humandeladmin", "pw123456")
+    response = TestClient(app).delete(
+        f"/api/admin/users/{human['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert store.get_user(human["id"]) is not None
+    match = store.get_match("delete-human-active-match")
+    assert match is not None and match["status"] == "running"
+    assert match["owner_id"] == human["id"]
+    assert match["human_user_id"] == human["id"]
+
+
+def test_admin_delete_bot_owner_rejects_mismatched_active_entry(tmp_path):
+    """即使脏名册把 Bot 绑给另一用户，也不能级联破坏 published entry。"""
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+    from fastapi.testclient import TestClient
+
+    app = create_app(
+        db_path=str(tmp_path / "delete-mismatched-entry.db"),
+        upload_root=tmp_path / "uploads-mismatched-entry",
+    )
+    store = app.state.store
+    admin = store.create_user(
+        "entrydeladmin", "entrydeladmin@example.com", hash_password("pw123456"), role="admin"
+    )
+    organizer = store.create_user(
+        "entrydelorg", "entrydelorg@example.com", hash_password("pw123456"), role="organizer"
+    )
+    bot_owner = store.create_user(
+        "entrybotowner", "entrybotowner@example.com", hash_password("pw123456")
+    )
+    entrant = store.create_user(
+        "differententrant", "differententrant@example.com", hash_password("pw123456")
+    )
+    store.update_user(admin["id"], email_verified=1)
+    bot = store.create_bot(
+        bot_owner["id"], "entryownedbot", binary_path="/tmp/entry", format="elf", game_id="holdem"
+    )
+    contest = store.create_contest(
+        "mismatched entry guard", organizer_id=organizer["id"], game_id="holdem"
+    )
+    store.add_contest_entry(contest["id"], entrant["id"], bot["id"])
+    store.update_contest(contest["id"], status="published")
+
+    _, token = app.state.auth.authenticate("entrydeladmin", "pw123456")
+    response = TestClient(app).delete(
+        f"/api/admin/users/{bot_owner['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert store.get_user(bot_owner["id"]) is not None
+    entry = store.get_entry(contest["id"], entrant["id"])
+    assert entry is not None and entry["bot_id"] == bot["id"]
+
+
+def test_admin_delete_user_rejects_contest_organizer_without_500(tmp_path):
+    """contests.organizer_id 是 NO ACTION；端点应给 409 而不是泄漏 IntegrityError 500。"""
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+    from fastapi.testclient import TestClient
+
+    app = create_app(
+        db_path=str(tmp_path / "delete-organizer.db"),
+        upload_root=tmp_path / "uploads-organizer",
+    )
+    store = app.state.store
+    admin = store.create_user(
+        "orgdeladmin", "orgdeladmin@example.com", hash_password("pw123456"), role="admin"
+    )
+    organizer = store.create_user(
+        "orgdelvictim",
+        "orgdelvictim@example.com",
+        hash_password("pw123456"),
+        role="organizer",
+    )
+    store.update_user(admin["id"], email_verified=1)
+    contest = store.create_contest(
+        "organizer delete guard", organizer_id=organizer["id"], game_id="gomoku"
+    )
+
+    _, token = app.state.auth.authenticate("orgdeladmin", "pw123456")
+    response = TestClient(app).delete(
+        f"/api/admin/users/{organizer['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert store.get_user(organizer["id"]) is not None
+    assert store.get_contest(contest["id"]) is not None
+
+
+def test_admin_delete_user_purges_unreferenced_bot_files(tmp_path):
+    """安全硬删仍可用，并清理级联删除 Bot 的磁盘目录。"""
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+    from fastapi.testclient import TestClient
+
+    upload_root = tmp_path / "uploads-safe"
+    app = create_app(
+        db_path=str(tmp_path / "delete-user-safe.db"),
+        upload_root=upload_root,
+    )
+    store = app.state.store
+    admin = store.create_user(
+        "safedeladmin", "safedeladmin@example.com", hash_password("pw123456"), role="admin"
+    )
+    victim = store.create_user(
+        "safedelvictim", "safedelvictim@example.com", hash_password("pw123456")
+    )
+    store.update_user(admin["id"], email_verified=1)
+    bot = store.create_bot(
+        victim["id"], "safedelbot", binary_path="/tmp/safe", format="elf", game_id="pencil"
+    )
+    bot_dir = upload_root / str(bot["id"]) / "v1"
+    bot_dir.mkdir(parents=True)
+    (bot_dir / "bot.bin").write_bytes(b"qa")
+
+    _, token = app.state.auth.authenticate("safedeladmin", "pw123456")
+    response = TestClient(app).delete(
+        f"/api/admin/users/{victim['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert store.get_user(victim["id"]) is None
+    assert store.get_bot(bot["id"]) is None
+    assert not (upload_root / str(bot["id"])).exists()

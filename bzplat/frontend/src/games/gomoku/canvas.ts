@@ -4,7 +4,6 @@
  */
 import type { RawEvent } from '@/games/base'
 import { fitText, scaleFactor } from '@/games/base'
-import { getGame } from '@/games'
 import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
 
@@ -112,7 +111,7 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     ctx.fillStyle = '#5b4413'
     ctx.font = `bold ${Math.round(15 * s)}px "DM Sans", sans-serif`
     ctx.textAlign = 'left'
-    const sc = getGame('gomoku').seatColors ?? ['黑', '白']
+    const sc = ['黑', '白']
     const name0 = seatShort(opts.seats?.[0], sc[0] ?? '黑')
     const name1 = seatShort(opts.seats?.[1], sc[1] ?? '白')
     const turnLabel = next.matchOver

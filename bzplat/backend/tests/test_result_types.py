@@ -113,7 +113,7 @@ def test_gomoku_session_returns_gomoku_result():
         else:
             x, y = white[wi]
             wi += 1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     result = asyncio.run(GomokuSession().run_async(decide))
     # PR4 起 result 不再共享基类——断言鸭子契约字段（通用层只读这些）

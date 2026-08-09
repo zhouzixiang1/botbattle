@@ -12,7 +12,6 @@ from bzplat.backend.games.base import (
     EventFn,
     GameRegistry,
     GameSpec,
-    JudgeParamSpec,
     ProtocolSpec,
     SessionFactory,
     TierDef,
@@ -40,24 +39,14 @@ assert _reg_ids == _schema.REGISTERED_ENGINES == _schema.VALID_GAME_IDS, (
     "新增游戏须同时改 games/<game>/spec + 注册 + schema 两个 frozenset。"
 )
 
-# ── 向后兼容常量（替代 engine/registry.py 的 GAME_* 字面量）──
-GAME_HOLDEM = "holdem"
-GAME_GOMOKU = "gomoku"
-GAME_PENCIL = "pencil"
-
-
-def _legacy_normalize(game_id: str | None) -> str:
-    """旧 normalize_game_id 语义：空值兜底 holdem（保向后兼容）。
-
-    注意：registry.get() 本身不兜底（未知抛 KeyError）；此函数仅供仍需"空=holdem"
-    兜底语义的旧调用点用。新代码应直接 registry.get(gid) 让未知显式报错。
-    """
+def normalize_game_id(game_id: str | None) -> str:
+    """返回已注册的规范 game_id；空值和未知值都显式拒绝。"""
     gid = GameRegistry.normalize(game_id)
-    return gid if gid else GAME_HOLDEM
-
-
-# normalize_game_id：空值兜底 holdem（保旧语义；通用层 import 自本包）
-normalize_game_id = _legacy_normalize
+    if not gid:
+        raise ValueError("game_id 不可为空")
+    if not registry.is_registered(gid):
+        raise ValueError(f"未知游戏: {gid!r}（合法: {sorted(registry.all_ids())}）")
+    return gid
 
 
 # ── 便捷函数（通用层经这些函数调用，而非 import 具体游戏）──
@@ -70,7 +59,8 @@ async def run_session(
 ) -> Any:
     """统一入口：按 game_id 取 spec 并 run_session。
 
-    规则参数（num_hands/n_dots/board_size/starting_stack/sb/bb/rng）按游戏透传。
+    平台规则由各游戏 spec 固定；``params`` 只供引擎内部复现控制（如 rng、
+    duplicate deal_sequence），不构成公开可配置规则。
     未知 game_id 抛 KeyError（行为修正：不再静默跑 holdem）。
     """
     return await registry.get(game_id).run_session(decide, on_event=on_event, **params)
@@ -87,7 +77,7 @@ def loads(game_id: str, line: str) -> dict[str, Any]:
 
 
 def fail_response(game_id: str) -> Any:
-    """按游戏返回超时/异常兜底响应（holdem→裸 int；棋类→dict）。"""
+    """按游戏返回人类超时等游戏内兜底（Bot 技术故障禁止使用）。"""
     return registry.get(game_id).protocol.fail_response()
 
 
@@ -100,8 +90,18 @@ def all_ids() -> frozenset[str]:
 
 
 def validate_match_config(game_id: str, cfg: Any) -> dict[str, Any]:
-    """按游戏校验并规整 match_config（替代 contests/validation.py 的 if-chain）。"""
-    return registry.get(game_id).validate_match_params(cfg)
+    """校验赛事内部 match_config；现行固定规则只允许空对象。
+
+    ``match_config`` 仍作为数据库内部快照容器存在，但公开规则已经固定，调用者
+    不能再通过此入口覆盖手数、棋盘或时限。未知游戏仍由注册表显式拒绝。
+    """
+    registry.get(game_id)
+    if not isinstance(cfg, dict):
+        raise ValueError("match_config 必须是 JSON 对象")
+    if cfg:
+        fields = ", ".join(sorted(str(key) for key in cfg))
+        raise ValueError(f"游戏规则已固定，不接受 match_config 字段：{fields}")
+    return {}
 
 
 def default_match_config(game_id: str) -> dict[str, Any]:
@@ -112,22 +112,6 @@ def default_match_config(game_id: str) -> dict[str, Any]:
 
 def game_label(game_id: str) -> str:
     return registry.get(game_id).label
-
-
-# ── 段位便捷函数（模块级，默认 holdem；取代旧 engine.tiers 全局 API）──
-def tier_for(rating: float | int | None, game_id: str = "holdem"):
-    """按 rating 查段位（默认 holdem 曲线）。旧 engine.tiers.tier_for 语义。"""
-    return registry.tier_for(game_id, rating)
-
-
-def tier_dict(rating: float | int | None, game_id: str = "holdem") -> dict:
-    """段位字典（默认 holdem）。旧 engine.tiers.tier_dict 语义。"""
-    return registry.tier_dict(game_id, rating)
-
-
-def all_tiers(game_id: str = "holdem") -> list[dict]:
-    """该游戏的全部段位曲线（默认 holdem）。旧 engine.tiers.all_tiers 语义。"""
-    return registry.all_tiers(game_id)
 
 
 def _build_game_labels() -> dict[str, str]:
@@ -147,17 +131,25 @@ def __dir__() -> list[str]:
 
 
 async def preflight_bot(
-    game_id: str, binary_path: str, binary_runner: Any, *, timeout: float = 8.0
+    game_id: str,
+    binary_path: str,
+    binary_runner: Any,
+    *,
+    runtime_mode: str,
+    timeout: float = 8.0,
 ) -> tuple[bool, str]:
-    """Bot 预检：试跑 bot，发首个请求，验证响应合法。
+    """Bot 预检：按用户选择的运行模式执行正式协议首回合。
 
-    经该游戏的 spec.preflight_check 执行；若 spec 未定义 preflight_check 则跳过（返回 ok）。
+    经该游戏必备的 spec.preflight_check 执行，不存在“未定义即放行”路径。
     返回 (ok, detail)。ok=False 时上传/API 应拒绝该 bot。
     """
     spec = registry.get(game_id)
-    if spec.preflight_check is None:
-        return True, "该游戏未定义预检"
-    return await spec.preflight_check(binary_path, binary_runner, timeout=timeout)
+    return await spec.preflight_check(
+        binary_path,
+        binary_runner,
+        runtime_mode=runtime_mode,
+        timeout=timeout,
+    )
 
 
 __all__ = [
@@ -165,12 +157,8 @@ __all__ = [
     "GameRegistry",
     "GameSpec",
     "TierDef",
-    "JudgeParamSpec",
     "ProtocolSpec",
     "SessionFactory",
-    "GAME_HOLDEM",
-    "GAME_GOMOKU",
-    "GAME_PENCIL",
     "normalize_game_id",
     "run_session",
     "dumps",
@@ -181,8 +169,5 @@ __all__ = [
     "validate_match_config",
     "default_match_config",
     "game_label",
-    "tier_for",
-    "tier_dict",
-    "all_tiers",
     "GAME_LABELS",
 ]

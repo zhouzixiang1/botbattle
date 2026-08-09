@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,7 @@ logger = logging.getLogger(__name__)
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.stages import estimate_match_count
 from bzplat.backend.contests.validation import validate_stage, validate_template
+from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.limits import (
     ACTION_TIMEOUT_MAX,
@@ -36,8 +39,18 @@ from bzplat.backend.runtime.limits import (
     concurrent_ceiling,
     cpu_count,
 )
+from bzplat.backend.runtime.binary_runner import PlatformRunnerError
 from bzplat.backend.store.schema import (
+    CONTEST_CANCELLED,
+    CONTEST_DRAFT,
+    CONTEST_FINISHED,
+    CONTEST_OPEN,
+    CONTEST_PUBLISHED,
+    CONTEST_REST,
+    CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
+    ROLE_ADMIN,
+    ROLE_ORGANIZER,
     SETTING_ACTION_TIMEOUT,
     SETTING_AUTO_MATCH_BOT_COOLDOWN,
     SETTING_AUTO_MATCH_DAILY_CAP,
@@ -49,10 +62,11 @@ from bzplat.backend.store.schema import (
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     SETTING_AUTO_MATCH_STALE_SEC,
     SETTING_CONTEST_REST,
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
     SETTING_MAX_CONCURRENT,
+    SUPPORTED_BINARY_ERROR,
+    STATUS_ABORTED,
+    STATUS_COMPLETED,
+    is_supported_binary_metadata,
 )
 router = APIRouter()
 
@@ -65,12 +79,47 @@ def _bots(request: Request) -> BotManager:
     return request.app.state.bot_manager
 
 
+def _with_bot_runnable(bot: dict) -> dict:
+    """Expose current executability without rewriting legacy metadata."""
+    public = dict(bot)
+    runnable = is_supported_binary_metadata(
+        str(public.get("format") or ""),
+        str(public.get("os") or ""),
+        str(public.get("arch") or ""),
+    )
+    public["runnable"] = runnable
+    public["unsupported_reason"] = None if runnable else SUPPORTED_BINARY_ERROR
+    return public
+
+
+def _new_preflight_runner(request: Request):
+    """Return one upload-owned runner; never share match subprocess state."""
+    factory = getattr(request.app.state, "preflight_runner_factory", None)
+    if factory is not None:
+        return factory()
+    # Compatibility for narrowly constructed test apps; create_app always installs
+    # the factory above.
+    return getattr(request.app.state, "binary_runner", None)
+
+
 def _contests(request: Request) -> ContestManager:
     return request.app.state.contest_manager
 
 
 def _store(request: Request):
     return request.app.state.store
+
+
+def _is_terminal_stream_event(ev: object) -> bool:
+    if not isinstance(ev, dict):
+        return False
+    if ev.get("type") in ("match_end", "error"):
+        return True
+    return (
+        ev.get("type") == "snapshot"
+        and (ev.get("match") or {}).get("status")
+        in (STATUS_COMPLETED, STATUS_ABORTED)
+    )
 
 
 def _with_seat_info(m: dict, store=None) -> dict:
@@ -101,7 +150,10 @@ def my_bots(
     )
     # 裁响应死字段（对抗审计：created_at/updated_at 前端 MyBots 不消费；
     # 不动 owner_id/is_builtin——共享 list_bots 喂 /api/bots/public + /api/admin/bots）。
-    items = result["items"] if isinstance(result, dict) else result
+    items = [
+        _with_bot_runnable(bot)
+        for bot in (result["items"] if isinstance(result, dict) else result)
+    ]
     for b in items:
         b.pop("created_at", None)
         b.pop("updated_at", None)
@@ -122,7 +174,7 @@ def public_bots(
     )
     bots = result["items"] if isinstance(result, dict) else result
     # 脱敏敏感字段（binary_path/runtime_mode）——非 owner/admin 不可见（审计 P1-B）
-    bots = [_sanitize_bot(b, user) for b in bots]
+    bots = [_sanitize_bot(_with_bot_runnable(b), user) for b in bots]
     # 附带 owner_name/owner_display（供对手选择弹窗展示）
     store = _store(request)
     owner_ids = {b["owner_id"] for b in bots if b.get("owner_id") is not None}
@@ -250,13 +302,15 @@ def user_bots(
     u = store.get_user_by_username(username)
     if not u:
         raise HTTPException(404, "用户不存在")
-    result = store.list_bots(owner_id=u["id"], page=page, per_page=per_page)
+    result = store.list_bots(
+        owner_id=u["id"], runnable_only=True, page=page, per_page=per_page
+    )
     if isinstance(result, dict):
         # 脱敏敏感字段（审计 P1-B）
-        items = [_sanitize_bot(b, user) for b in result["items"]]
+        items = [_sanitize_bot(_with_bot_runnable(b), user) for b in result["items"]]
         return {"bots": items, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"bots": [_sanitize_bot(b, user) for b in result]}
+    return {"bots": [_sanitize_bot(_with_bot_runnable(b), user) for b in result]}
 
 
 @router.get("/api/search")
@@ -269,7 +323,7 @@ def global_search(
 ):
     """全局搜索：type=users|bots|matches（默认 users）。
 
-    bots 按 name/display_name 模糊；matches 按 bot 名模糊；users 沿用前缀搜索。
+    bots 按 name/display_name 模糊；matches 按对局 ID/bot 名模糊；users 沿用前缀搜索。
     game_id 可选过滤（仅对 bots/matches 有效）。
     """
     store = _store(request)
@@ -277,7 +331,12 @@ def global_search(
     lim = max(1, min(limit, 50))
     t = (type or "users").lower()
     if t == "bots":
-        return {"bots": store.search_bots(ql, limit=lim, game_id=game_id)}
+        return {
+            "bots": [
+                _with_bot_runnable(bot)
+                for bot in store.search_bots(ql, limit=lim, game_id=game_id)
+            ]
+        }
     if t == "matches":
         return {"matches": store.search_matches(ql, limit=lim, game_id=game_id)}
     # 默认 users
@@ -302,7 +361,7 @@ def get_bot(bot_id: int, request: Request, user=Depends(optional_user)):
     bot = _bots(request).get(bot_id)
     if not bot:
         raise HTTPException(404, "bot 不存在")
-    return {"bot": _sanitize_bot(bot, user)}
+    return {"bot": _sanitize_bot(_with_bot_runnable(bot), user)}
 
 
 @router.get("/api/bots/{bot_id}/profile")
@@ -318,6 +377,7 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
     )
     if not is_privileged:
         p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
+    p = _with_bot_runnable(p)
     # 裁响应死字段（对抗审计验证：vol/net_chips/rated_at/is_builtin/updated_at 前端不消费；
     # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
     for k in ("vol", "net_chips", "rated_at", "is_builtin", "updated_at"):
@@ -384,17 +444,23 @@ async def upload_bot(
 ):
     raw = await file.read()
     try:
-        bot = _bots(request).create_from_upload(
-            user["id"], name, raw,
+        bot = await asyncio.to_thread(
+            _bots(request).create_from_upload,
+            user["id"],
+            name,
+            raw,
             display_name=display_name, description=description,
             upload_note=upload_note,
             game_id=game_id,
             runtime_mode=runtime_mode,
-            binary_runner=getattr(request.app.state, "binary_runner", None),
+            binary_runner=_new_preflight_runner(request),
         )
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
+    except PlatformRunnerError:
+        audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail="sandbox_unavailable")
+        raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
     audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={len(raw)}")
     return {"bot": bot}
 
@@ -410,14 +476,21 @@ async def upload_bot_version(
 ):
     raw = await file.read()
     try:
-        bot = _bots(request).upload_version(
-            bot_id, user["id"], raw, upload_note=upload_note,
+        bot = await asyncio.to_thread(
+            _bots(request).upload_version,
+            bot_id,
+            user["id"],
+            raw,
+            upload_note=upload_note,
             runtime_mode=runtime_mode or None,
-            binary_runner=getattr(request.app.state, "binary_runner", None),
+            binary_runner=_new_preflight_runner(request),
         )
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
+    except PlatformRunnerError:
+        audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail="sandbox_unavailable")
+        raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
     audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={len(raw)}")
     return {"bot": bot}
 
@@ -435,8 +508,9 @@ def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_use
     if not bot:
         raise HTTPException(404, "bot 不存在")
     is_owner = bot["owner_id"] == user["id"] or user.get("role") == "admin"
-    versions = store.list_bot_versions(bot_id)
+    versions = [_with_bot_runnable(v) for v in store.list_bot_versions(bot_id)]
     if not is_owner:
+        versions = [v for v in versions if v["runnable"]]
         # 公开视图：脱敏（不含 binary_path/runtime_mode 等敏感字段）。
         # 保留 id：挑战页选某版本对战时，my_bot_version_id/opponent_bot_version_id
         # 解析的是 bot_versions.id（主键），非 version 号——故必须回传 id 才能选版本。
@@ -447,6 +521,8 @@ def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_use
                 "upload_note": v.get("upload_note") or "",
                 "created_at": v.get("created_at") or v.get("uploaded_at") or "",
                 "size_bytes": v.get("size_bytes") or 0,
+                "runnable": True,
+                "unsupported_reason": None,
             }
             for v in versions
         ]
@@ -461,15 +537,17 @@ def rollback_bot_version(
 
     不删除其他版本，仅切换 current_version + 镜像（binary_path/runtime_mode/...）。
     """
-    store = _store(request)
-    bot = store.get_bot(bot_id)
-    if not bot:
-        raise HTTPException(404, "bot 不存在")
-    if bot["owner_id"] != user["id"]:
-        raise HTTPException(403, "无权修改他人的 Bot")
-    result = store.set_current_version(bot_id, version)
-    if result is None:
-        raise HTTPException(404, f"版本 {version} 不存在")
+    try:
+        result = _bots(request).activate_version(bot_id, user["id"], version)
+    except BotError as e:
+        status = {
+            "forbidden": 403,
+            "not_found": 404,
+            "version_not_found": 404,
+            "unsupported_binary": 409,
+            "version_unavailable": 409,
+        }.get(e.code, 400)
+        raise HTTPException(status, detail={"code": e.code, "message": e.message})
     audit_log(request, "bot_version_rollback", result="ok", user=user.get("username"), target=bot_id, detail=f"v{version}")
     return {"bot": result}
 
@@ -481,7 +559,13 @@ def set_bot_active(
     try:
         bot = _bots(request).set_active(bot_id, user["id"], active)
     except BotError as e:
-        raise HTTPException(400, detail={"code": e.code, "message": e.message})
+        status = (
+            404 if e.code == "not_found"
+            else 403 if e.code == "forbidden"
+            else 409 if e.code in {"unsupported_binary", "version_unavailable"}
+            else 400
+        )
+        raise HTTPException(status, detail={"code": e.code, "message": e.message})
     return {"bot": bot}
 
 
@@ -490,21 +574,35 @@ def update_my_bot(
     bot_id: int, body: dict, request: Request, user=Depends(require_user)
 ):
     """Bot 拥有者改 display_name/description/is_active（受限白名单）。"""
-    store = _store(request)
-    bot = store.get_bot(bot_id)
-    if not bot:
-        raise HTTPException(404, "bot 不存在")
-    if bot["owner_id"] != user["id"]:
-        raise HTTPException(403, "无权修改他人的 Bot")
     allowed = {"display_name", "description", "is_active"}
-    fields = {
-        k: (1 if v is True else 0 if v is False else str(v)[:200] if k in ("display_name",) else str(v)[:2000])
-        for k, v in body.items() if k in allowed
-    }
+    unknown = set(body).difference(allowed)
+    if unknown:
+        raise HTTPException(422, f"不支持的字段：{', '.join(sorted(unknown))}")
+    if "is_active" in body and not isinstance(body["is_active"], bool):
+        raise HTTPException(422, "is_active 必须是布尔值")
+    fields: dict[str, Any] = {}
+    if "display_name" in body:
+        fields["display_name"] = str(body["display_name"])[:200]
+    if "description" in body:
+        fields["description"] = str(body["description"])[:2000]
+    if "is_active" in body:
+        fields["is_active"] = 1 if body["is_active"] else 0
     if not fields:
         raise HTTPException(400, "无可更新字段")
-    b = store.update_bot(bot_id, **fields)
-    return {"bot": b}
+    try:
+        bot = _bots(request).patch_owner(bot_id, user["id"], **fields)
+    except BotError as exc:
+        status = (
+            404 if exc.code == "not_found"
+            else 403 if exc.code == "forbidden"
+            else 409
+            if exc.code in {"unsupported_binary", "version_unavailable"}
+            else 400
+        )
+        raise HTTPException(
+            status, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+    return {"bot": _with_bot_runnable(bot)}
 
 
 @router.delete("/api/bots/{bot_id}")
@@ -522,17 +620,71 @@ def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
 
 # ── matches ───────────────────────────────────────────────────
 
+_FIXED_RULE_OVERRIDE_FIELDS = frozenset({
+    "match_config",
+    "hands",
+    "num_hands",
+    "hands_per_match",
+    "max_hand",
+    "total_hands",
+    "maxHands",
+    "numHands",
+    "n_dots",
+    "board_size",
+    "boardSize",
+    "grid_size",
+    "nDots",
+    "starting_stack",
+    "startingStack",
+    "small_blind",
+    "smallBlind",
+    "big_blind",
+    "bigBlind",
+    "sb",
+    "bb",
+    "stack",
+    "initial_stack",
+    "time_limit",
+    "timeLimit",
+    "time_limit_per_side",
+    "timeLimitPerSide",
+    "time_budget_per_side",
+    "timeBudgetPerSide",
+})
+
+
+def _find_fixed_rule_overrides(value: Any) -> set[str]:
+    """查找嵌在通用阶段字典中的非现行规则字段。"""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        found.update(_FIXED_RULE_OVERRIDE_FIELDS.intersection(value))
+        for child in value.values():
+            found.update(_find_fixed_rule_overrides(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.update(_find_fixed_rule_overrides(child))
+    return found
+
+
+def _reject_fixed_rule_overrides(value: Any) -> None:
+    fields = _find_fixed_rule_overrides(value)
+    if fields:
+        raise HTTPException(
+            400,
+            "游戏规则为平台固定契约，不允许覆盖字段: "
+            + ", ".join(sorted(fields)),
+        )
+
+
 class ChallengeBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     my_bot_id: int
     opponent_bot_id: int
     # 版本快照（可选）：指定各座位跑哪个版本。缺省/None=当前激活版本。
     # 自博弈（my_bot_id == opponent_bot_id）允许——用于同 bot 新旧版本对比。
     my_bot_version_id: int | None = None
     opponent_bot_version_id: int | None = None
-    # 对局级配置（如 {"hands":70}/{"n_dots":6}）；缺省/空用 spec.default_match_params。
-    # 取代散落的 hands/n_dots 具名字段——第 4 游戏带新参数无需改本 Body。范围校验交
-    # spec.validate_match_params（holdem 1-500；棋类忽略 hands）。
-    match_config: dict = Field(default_factory=dict)
     game_id: str | None = None
 
 
@@ -552,7 +704,6 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             body.my_bot_id,
             body.opponent_bot_id,
             user["id"],
-            match_config=body.match_config,
             game_id=body.game_id,
             bot_a_version_id=body.my_bot_version_id,
             bot_b_version_id=body.opponent_bot_version_id,
@@ -565,11 +716,11 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
 
 
 class HumanChallengeBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     bot_id: int
     human_seat: int = 1  # 0 或 1，人类坐哪位
     game_id: str | None = None
-    # 对局级配置（同 ChallengeBody.match_config）；缺省用 spec 默认。
-    match_config: dict = Field(default_factory=dict)
 
 
 @router.post("/api/matches/human")
@@ -583,7 +734,6 @@ async def challenge_human(body: HumanChallengeBody, request: Request, user=Depen
             user["id"],
             human_seat=body.human_seat,
             game_id=body.game_id,
-            match_config=body.match_config,
         )
     except ValueError as e:
         audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))
@@ -612,40 +762,63 @@ async def play_websocket(websocket: WebSocket, match_id: str):
         await websocket.close()
         return
     await websocket.accept()
-    # 订阅事件流（subscribe 会再推一条带 seats 的 snapshot，此处先发一份便于立即渲染）
+    # subscribe 入队一条带 seats 与完整回放的权威 snapshot；pump 随即发送。
+    # 不在路由重复发送，否则每次连接都会收到两份相同快照，造成前端重复归约。
     q = orch.subscribe(match_id)
-    from bzplat.backend.matches.seat_info import match_for_viewer
-
-    replay = store.get_replay(match_id) or {}
-    try:
-        await websocket.send_json({
-            "type": "snapshot",
-            "match": match_for_viewer(store, match_id) or m,
-            "events": json.loads(replay.get("events_json") or "[]"),
-        })
-    except Exception:
-        pass
     human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
+    try:
+        protocol = game_registry.get(m.get("game_id")).protocol
+    except KeyError:
+        await websocket.send_json({"type": "error", "message": "对局游戏协议不存在"})
+        await websocket.close()
+        orch.unsubscribe(match_id, q)
+        return
 
     async def pump_events():
         while True:
             ev = await q.get()
             await websocket.send_json(ev)
-            if isinstance(ev, dict) and ev.get("type") in ("match_end", "error"):
+            if _is_terminal_stream_event(ev):
                 return
 
-    task = asyncio.create_task(pump_events())
-    try:
+    async def receive_actions():
         while True:
             msg = await websocket.receive_json()
-            # 解析人类落子
-            move = msg if isinstance(msg, dict) else {}
+            if not isinstance(msg, dict) or set(msg) != {"response"}:
+                await websocket.send_json({
+                    "type": "reject",
+                    "message": "动作协议错误：消息必须恰好包含 response 字段",
+                })
+                continue
+            try:
+                payload = protocol.validate_response_payload(msg["response"])
+            except (TypeError, ValueError) as exc:
+                await websocket.send_json({
+                    "type": "reject",
+                    "message": f"动作协议错误：{exc}",
+                })
+                continue
+            move = {"response": payload}
             if not orch.resolve_human_turn(match_id, human_seat, move):
                 await websocket.send_json({"type": "reject", "message": "当前非你的回合或动作非法"})
-    except WebSocketDisconnect:
-        pass
+
+    sender = asyncio.create_task(pump_events())
+    receiver = asyncio.create_task(receive_actions())
+    try:
+        done, _ = await asyncio.wait(
+            {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
+        )
+        # A terminal event must close the server side even if an old or malicious
+        # client never sends another frame. Otherwise receive_json + subscription leak.
+        if sender in done and not receiver.done():
+            try:
+                await websocket.close(code=1000)
+            except (RuntimeError, WebSocketDisconnect):
+                pass
     finally:
-        task.cancel()
+        sender.cancel()
+        receiver.cancel()
+        await asyncio.gather(sender, receiver, return_exceptions=True)
         orch.unsubscribe(match_id, q)
 
 
@@ -654,14 +827,30 @@ def list_matches(
     request: Request,
     status: str | None = None,
     game_id: str | None = None,
+    has_technical_incidents: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
+    retired_filters = tuple(
+        name
+        for name in ("has_bot_incidents", "has_bot_errors")
+        if name in request.query_params
+    )
+    if retired_filters:
+        raise HTTPException(
+            400,
+            f"{', '.join(retired_filters)} 已移除；"
+            "请使用 has_technical_incidents",
+        )
     store = _store(request)
     lim = max(1, min(limit, 100))
     off = max(0, offset)
     rows = store.list_matches(
-        status=status, game_id=game_id, limit=lim, offset=off
+        status=status,
+        game_id=game_id,
+        has_technical_incidents=has_technical_incidents,
+        limit=lim,
+        offset=off,
     )
     # 裁列表响应死字段（对抗审计：started_at/ended_at/human_user_id/human_seat/
     # likes_count/views_count/owner_id 列表不消费；
@@ -671,7 +860,11 @@ def list_matches(
     for m in rows:
         for k in _MATCH_LIST_DEAD:
             m.pop(k, None)
-    total = store.count_matches(status=status, game_id=game_id)
+    total = store.count_matches(
+        status=status,
+        game_id=game_id,
+        has_technical_incidents=has_technical_incidents,
+    )
     return {"matches": rows, "total": total, "limit": lim, "offset": off}
 
 
@@ -688,7 +881,7 @@ def match_detail(match_id: str, request: Request):
     m = store.get_match_detailed(match_id)
     if not m:
         raise HTTPException(404, "对局不存在")
-    replay = _store(request).get_replay(match_id) or {}
+    replay = store.get_public_replay(match_id) or {}
     return {"match": _with_seat_info(m, store=store), "replay": replay}
 
 
@@ -709,7 +902,7 @@ async def match_events(match_id: str, request: Request):
                     continue
                 payload = json.dumps(ev, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
-                if ev.get("type") in ("match_end", "error"):
+                if _is_terminal_stream_event(ev):
                     break
         finally:
             orch.unsubscribe(match_id, q)
@@ -743,19 +936,17 @@ def leaderboard(
 
 
 @router.get("/api/tiers")
-def tiers(game_id: str | None = None):
+def tiers(game_id: str):
     """段位定义（公开，前端镜像校验用）。
 
-    段位与游戏挂钩（PR2）：传 game_id 返回该游戏的段位曲线；不传则返回 holdem
-    的曲线作为默认（向后兼容旧前端无参调用）。经 games 注册表取 per-game 曲线。
+    game_id 是必填维度；缺失或未知都明确拒绝，不得伪装成另一款游戏的段位。
     """
     from bzplat.backend.games import registry as _game_registry
-    gid = (game_id or "holdem").strip().lower()
+    gid = game_id.strip().lower()
     try:
         return {"tiers": _game_registry.all_tiers(gid), "game_id": gid}
-    except KeyError:
-        # 未知 game_id 回退 holdem（保公开端点容错）
-        return {"tiers": _game_registry.all_tiers("holdem"), "game_id": "holdem"}  # allow-game-fallback
+    except KeyError as exc:
+        raise HTTPException(400, f"未知游戏: {gid!r}") from exc
 
 
 @router.get("/api/levels/info")
@@ -1000,13 +1191,13 @@ def update_notif_prefs(
 # ── contests ──────────────────────────────────────────────────
 
 class ContestCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     title: str
     description: str = ""
-    hands_per_match: int = 70
     template_id: str | None = None
     game_id: str | None = None
     stages: list[dict[str, Any]] | None = None
-    match_config: dict[str, Any] | None = None
     phase: str = "standalone"  # P5: preliminary/final/standalone
     source_contest_id: int | None = None  # P5: 软链（预赛→决赛导航）
     require_real_name: bool = False  # 报名是否要求实名
@@ -1024,27 +1215,64 @@ class ContestDispatch(BaseModel):
     bot_id: int
 
 
+def _template_for_api(template: dict[str, Any]) -> dict[str, Any]:
+    """Keep template match_config as storage-only metadata, never an editable API field."""
+    public = dict(template)
+    public.pop("match_config", None)
+    return public
+
+
+def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
+    """仅输出现行赛事契约；数据库迁移列不进入 REST 响应。"""
+    public = dict(contest)
+    public.pop("hands_per_match", None)
+    public.pop("match_config_json", None)
+    return public
+
+
 @router.get("/api/contests/templates")
 def contest_templates(request: Request, game: str | None = None):
     # 从 contest_templates 表读（与 admin 同源，含覆盖；修复原读代码默认的不一致）
-    return {"templates": _store(request).list_contest_templates(game_id=game)}
+    return {
+        "templates": [
+            _template_for_api(t)
+            for t in _store(request).list_contest_templates(game_id=game)
+        ]
+    }
 
 
-# 访客/普通用户不可见的赛事状态（草稿/取消）——组织者/admin 可见全部（审计 P1-E）。
-_CONTEST_HIDDEN_STATUSES = ["draft", "cancelled"]
+# 未发布/已取消赛事仅该赛事组织者与管理员可见。使用 schema 常量，避免
+# API 层另造一套状态字面量；显式 ``?status=draft`` 也不得绕过可见性。
+_CONTEST_HIDDEN_STATUSES = (CONTEST_DRAFT, CONTEST_CANCELLED)
+
+
+def _can_view_hidden_contest(contest: dict, user: dict | None) -> bool:
+    return bool(
+        user
+        and (
+            user.get("role") == ROLE_ADMIN
+            or contest.get("organizer_id") == user.get("id")
+        )
+    )
 
 
 @router.get("/api/contests")
 def list_contests(request: Request, status: str | None = None, game_id: str | None = None,
                   page: int | None = None, per_page: int = 20,
                   user=Depends(optional_user)):
-    # 非 organizer/admin 且未显式指定 status 时，默认排除 draft/cancelled
-    # （组织者未发布的赛事结构不应提前暴露给访客）。显式传 status 则尊重调用方。
-    is_privileged = user is not None and user.get("role") in ("organizer", "admin")
-    exclude = None if (is_privileged or status) else _CONTEST_HIDDEN_STATUSES
+    # admin 全见；组织者额外看到自己的隐藏赛事；其他调用方始终排除隐藏状态。
+    # 过滤在 Store 的分页 SQL 内完成，避免 total/页数泄漏或页内裁剪错位。
+    is_admin = user is not None and user.get("role") == ROLE_ADMIN
+    exclude = None if is_admin else list(_CONTEST_HIDDEN_STATUSES)
+    hidden_owner_id = (
+        int(user["id"])
+        if user is not None and user.get("role") == ROLE_ORGANIZER
+        else None
+    )
     result = _store(request).list_contests(status=status, game_id=game_id,
                                            page=page, per_page=per_page,
-                                           exclude_statuses=exclude)
+                                           exclude_statuses=exclude,
+                                           hidden_owner_id=hidden_owner_id)
     # 裁列表响应死字段（对抗审计：match_config_json/hands_per_match/phase/source_contest_id
     # 列表视图不消费；不动 organizer_id/stages_json/rest_ends_at/current_stage_idx/
     # official_results_ready——共享 list_contests 喂 /api/contests/{id} + 后端内部读取）。
@@ -1060,16 +1288,15 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
 
 @router.post("/api/contests")
 def create_contest(body: ContestCreate, request: Request, user=Depends(require_organizer)):
+    _reject_fixed_rule_overrides(body.stages)
     try:
         c = _contests(request).create(
             user["id"],
             body.title,
             description=body.description,
-            hands_per_match=body.hands_per_match,
             template_id=body.template_id,
             game_id=body.game_id,
             stages=body.stages,
-            match_config=body.match_config,
             phase=body.phase,
             source_contest_id=body.source_contest_id,
             require_real_name=int(body.require_real_name),
@@ -1078,9 +1305,20 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             starts_at=body.starts_at,
         )
     except ValueError as e:
+        audit_log(
+            request, "contest_create", result="fail",
+            user=user.get("username"), target=body.title, detail=str(e),
+        )
         raise HTTPException(400, str(e))
-    audit_log(request, "contest_create", result="ok", user=user.get("username"), target=c["id"], detail=body.title)
-    return {"contest": c}
+    audit_log(
+        request, "contest_create", result="ok",
+        user=user.get("username"), target=c["id"],
+        detail=(
+            f"title={body.title}; opens={c.get('registration_opens_at')}; "
+            f"closes={c.get('registration_closes_at')}; starts={c.get('starts_at')}"
+        ),
+    )
+    return {"contest": _contest_for_api(c)}
 
 
 @router.get("/api/contests/{contest_id}")
@@ -1092,11 +1330,11 @@ def contest_detail(
     c = _store(request).get_contest(contest_id)
     if not c:
         raise HTTPException(404, "比赛不存在")
-    # draft/cancelled 赛事仅 organizer/admin 可见（与 list_contests 口径一致；审计 P1-E）
-    is_privileged = user is not None and (
-        c.get("organizer_id") == user.get("id") or user.get("role") in ("organizer", "admin")
-    )
-    if c.get("status") in _CONTEST_HIDDEN_STATUSES and not is_privileged:
+    # hidden 赛事仅本赛事 organizer/admin 可见（不是任意 organizer）。
+    if (
+        c.get("status") in _CONTEST_HIDDEN_STATUSES
+        and not _can_view_hidden_contest(c, user)
+    ):
         raise HTTPException(404, "比赛不存在")
     store = _store(request)
     # entries 可单列分页（115 报名场景）：提供 entries_page 时返回分页元信息，
@@ -1135,7 +1373,10 @@ def contest_detail(
         u = request.app.state.auth.verify_session(token) if token else None
         if u:
             my_entry = store.get_entry(contest_id, u["id"])
-            is_organizer = c.get("organizer_id") == u.get("id") or u.get("role") == "admin"
+            is_organizer = (
+                c.get("organizer_id") == u.get("id")
+                or u.get("role") == ROLE_ADMIN
+            )
     except Exception:
         pass
     # 非组织者脱敏实名字段（隐私保护——实名仅组织者用于线下核对/上报）
@@ -1157,6 +1398,8 @@ def contest_detail(
     for p in pairings:
         for k in _PAIRING_DEAD:
             p.pop(k, None)
+    # 旧库列仅作历史存储；现行 API 不再暴露可覆盖的规则配置。
+    c = _contest_for_api(c)
     resp = {
         "contest": c,
         "entries": entries,
@@ -1171,21 +1414,29 @@ def contest_detail(
 
 
 @router.get("/api/contests/{contest_id}/bracket")
-def contest_bracket(contest_id: int, request: Request):
-    """对阵图数据（带 bot 名/owner 名/winner，公开）。"""
-    if not _store(request).get_contest(contest_id):
+def contest_bracket(
+    contest_id: int, request: Request, user=Depends(optional_user)
+):
+    """对阵图数据；隐藏赛事沿用 detail 的 owner/admin 可见性。"""
+    contest = _store(request).get_contest(contest_id)
+    if not contest:
+        raise HTTPException(404, "比赛不存在")
+    if (
+        contest.get("status") in _CONTEST_HIDDEN_STATUSES
+        and not _can_view_hidden_contest(contest, user)
+    ):
         raise HTTPException(404, "比赛不存在")
     return {"pairings": _store(request).contest_bracket(contest_id)}
 
 
 def _require_contest_organizer(c: dict, user: dict) -> None:
     """校验当前用户是该场赛事组织者或 admin（与 open/start 同权限模型）。"""
-    if c.get("organizer_id") != user.get("id") and user.get("role") != "admin":
+    if c.get("organizer_id") != user.get("id") and user.get("role") != ROLE_ADMIN:
         raise HTTPException(403, "仅该场赛事组织者或管理员可操作")
 
 
 @router.post("/api/contests/{contest_id}/entries")
-def organizer_add_entry(
+async def organizer_add_entry(
     contest_id: int, body: dict, request: Request, user=Depends(require_organizer)
 ):
     """P5 组织者名单：单条加人（draft/open 允许）。
@@ -1199,9 +1450,6 @@ def organizer_add_entry(
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    if c["status"] not in ("draft", "open"):
-        raise HTTPException(400, "开赛后不可改名册")
-    from bzplat.backend.games import normalize_game_id
     raw_uid = body.get("user_id")
     raw_bid = body.get("bot_id")
     if raw_uid is None or raw_bid is None:
@@ -1210,22 +1458,15 @@ def organizer_add_entry(
         uid, bid = int(raw_uid), int(raw_bid)
     except (TypeError, ValueError):
         raise HTTPException(400, "user_id / bot_id 必须是整数")
-    if not store.get_user(uid):
-        raise HTTPException(400, f"user {uid} 不存在")
-    b = store.get_bot(bid)
-    if not b or not b.get("is_active") or not b.get("binary_path"):
-        raise HTTPException(400, "bot 不可用")
-    cgid = normalize_game_id(c.get("game_id"))
-    if normalize_game_id(b.get("game_id")) != cgid:
-        raise HTTPException(400, f"bot 游戏 {b.get('game_id')} ≠ 赛事 {cgid}")
-    if store.get_entry(contest_id, uid):
-        raise HTTPException(400, "该用户已报名")
-    store.add_contest_entry(contest_id, uid, bid)
+    try:
+        await _contests(request).add_roster_entry(contest_id, uid, bid)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"ok": True}
 
 
 @router.post("/api/contests/{contest_id}/entries/bulk")
-def organizer_assign_entries(
+async def organizer_assign_entries(
     contest_id: int, body: AdminAssignEntries, request: Request, user=Depends(require_organizer)
 ):
     """P5 组织者名单：批量加人（迁移自 admin bulk，assign_all + 显式列表两模式）。"""
@@ -1234,15 +1475,15 @@ def organizer_assign_entries(
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    if c["status"] not in ("draft", "open"):
-        raise HTTPException(400, "开赛后不可改名册")
     from bzplat.backend.games import normalize_game_id
     cgid = normalize_game_id(c.get("game_id"))
     if body.assign_all:
-        gid = normalize_game_id(body.game_id or cgid)
+        gid = normalize_game_id(cgid if body.game_id is None else body.game_id)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
-        bots = store.list_bots(active_only=True, game_id=gid)
+        bots = store.list_bots(
+            active_only=True, runnable_only=True, game_id=gid
+        )
         if body.name_prefix:
             np = body.name_prefix.lower()
             bots = [b for b in bots if np in (b.get("name") or "").lower()]
@@ -1255,29 +1496,21 @@ def organizer_assign_entries(
             seen_users.add(uid)
             target.append((uid, b["id"]))
     else:
-        target = [(int(e.get("user_id")), int(e.get("bot_id"))) for e in body.entries or []]
-    added = 0
-    skipped: list[str] = []
-    existing = {e["user_id"] for e in store.list_entries(contest_id)}
-    for uid, bid in target:
-        if uid in existing:
-            skipped.append(f"user {uid} 已报名，跳过")
-            continue
-        b = store.get_bot(bid)
-        if not b or not b.get("is_active") or not b.get("binary_path"):
-            skipped.append(f"bot {bid} 不可用，跳过")
-            continue
-        if normalize_game_id(b.get("game_id")) != cgid:
-            skipped.append(f"bot {bid} 游戏 {b.get('game_id')} ≠ 赛事 {cgid}，跳过")
-            continue
-        store.add_contest_entry(contest_id, uid, bid)
-        existing.add(uid)
-        added += 1
-    return {"added": added, "skipped": skipped, "total_entries": len(existing)}
+        try:
+            target = [
+                (int(e.get("user_id")), int(e.get("bot_id")))
+                for e in body.entries or []
+            ]
+        except (TypeError, ValueError):
+            raise HTTPException(400, "user_id / bot_id 必须是整数")
+    try:
+        return await _contests(request).assign_roster_entries(contest_id, target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.delete("/api/contests/{contest_id}/entries/{user_id}")
-def organizer_delete_entry(
+async def organizer_delete_entry(
     contest_id: int, user_id: int, request: Request, user=Depends(require_organizer)
 ):
     """P5 组织者名单：删人（draft/open 允许）。"""
@@ -1286,9 +1519,11 @@ def organizer_delete_entry(
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    if c["status"] not in ("draft", "open"):
-        raise HTTPException(400, "开赛后不可改名册")
-    if not store.delete_entry(contest_id, user_id):
+    try:
+        deleted = await _contests(request).delete_roster_entry(contest_id, user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "报名记录不存在")
     return {"ok": True}
 
@@ -1415,20 +1650,24 @@ def contest_export(contest_id: int, request: Request, format: str = "csv"):
 
 
 @router.post("/api/contests/{contest_id}/open")
-def open_contest(contest_id: int, request: Request, user=Depends(require_organizer)):
+async def open_contest(contest_id: int, request: Request, user=Depends(require_organizer)):
     c = _store(request).get_contest(contest_id)
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    return {"contest": _contests(request).open_registration(contest_id)}
+    try:
+        contest = await _contests(request).open_registration(contest_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/register")
-def register_contest(
+async def register_contest(
     contest_id: int, body: ContestRegister, request: Request, user=Depends(require_user)
 ):
     try:
-        entry = _contests(request).register(
+        entry = await _contests(request).register(
             contest_id, user["id"], body.bot_id, role=user.get("role", "")
         )
     except ValueError as e:
@@ -1464,7 +1703,7 @@ async def start_contest(
         contest = await _contests(request).start(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/publish")
@@ -1485,7 +1724,7 @@ async def publish_contest(
     except ValueError as e:
         raise HTTPException(400, str(e))
     audit_log(request, "contest_publish", result="ok", user=user.get("username"), target=contest_id)
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/resume")
@@ -1500,7 +1739,7 @@ async def resume_contest(
         contest = await _contests(request).resume(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/advance")
@@ -1515,7 +1754,7 @@ async def advance_contest(
         contest = await _contests(request).advance(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/finish")
@@ -1531,17 +1770,20 @@ async def finish_contest(
         contest = await _contests(request).finish(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 # ── admin ─────────────────────────────────────────────────────
 
 @router.get("/api/admin/users")
 def admin_users(
-    request: Request, page: int | None = None, per_page: int = 50,
+    request: Request, q: str | None = None, real_name: bool | None = None,
+    page: int | None = None, per_page: int = 50,
     _admin=Depends(require_admin),
 ):
-    result = _store(request).list_users(page=page, per_page=per_page)
+    result = _store(request).list_users(
+        q=q, real_name=real_name, page=page, per_page=per_page,
+    )
     if isinstance(result, dict):
         return {"users": result["items"], "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
@@ -1590,8 +1832,17 @@ def admin_patch_user(
 def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admin)):
     if admin["id"] == user_id:
         raise HTTPException(400, "不能删除自己")
-    if not _store(request).delete_user(user_id):
+    result = _store(request).delete_user_if_safe(user_id)
+    if not result["found"]:
         raise HTTPException(404, "用户不存在")
+    if not result["deleted"]:
+        raise HTTPException(
+            409,
+            "用户存在活跃对局/赛事引用或仍是赛事组织者，不能硬删："
+            f"{result['blockers']}（请先中止对局并删除或转移其赛事）",
+        )
+    for bot_id in result["bot_ids"]:
+        _bots(request).purge_bot_files(bot_id)
     audit_log(request, "admin_delete_user", result="ok", user=admin.get("username"), target=user_id)
     return {"ok": True}
 
@@ -1619,7 +1870,7 @@ class AdminMatchPatch(BaseModel):
 
 
 @router.patch("/api/admin/matches/{match_id}")
-def admin_patch_match(
+async def admin_patch_match(
     match_id: str, body: AdminMatchPatch, request: Request, _admin=Depends(require_admin)
 ):
     """管理员强制修正对局状态（如中止卡住的对局）。"""
@@ -1627,14 +1878,30 @@ def admin_patch_match(
     if body.status is not None:
         if body.status not in ("pending", "running", "completed", "aborted"):
             raise HTTPException(400, "非法对局状态")
+        # 活跃对局的生命周期由 orchestrator/runner 独占。后台若直接把 running
+        # 改成 pending/completed，正在运行的 task 仍会继续并再次覆写结果、评分和
+        # 赛事回调；pending/running 也不能作为“手工修复”入口伪造。管理员唯一
+        # 支持的状态动作是经 abort_match cancel + drain 后中止。
+        if body.status != "aborted":
+            raise HTTPException(409, "管理员仅可中止对局，不能手工伪造运行或完成状态")
         fields["status"] = body.status
     if body.reason is not None:
         fields["reason"] = body.reason
     if not fields:
         raise HTTPException(400, "无更新字段")
-    m = _store(request).update_match(match_id, **fields)
-    if not m:
+    if body.status == "aborted":
+        try:
+            match = await _orch(request).abort_match(
+                match_id, reason=body.reason or "admin_aborted"
+            )
+        except ValueError as exc:
+            code = 404 if "不存在" in str(exc) else 409
+            raise HTTPException(code, str(exc)) from exc
+        return {"match": match}
+    before = _store(request).get_match(match_id)
+    if not before:
         raise HTTPException(404, "对局不存在")
+    m = _store(request).update_match(match_id, **fields)
     return {"match": m}
 
 
@@ -1650,7 +1917,8 @@ def admin_bots(
     per_page: int = 50,
     _admin=Depends(require_admin),
 ):
-    rows = _store(request).list_bots(
+    store = _store(request)
+    rows = store.list_bots(
         active_only=bool(active) if active is not None else False,
         game_id=game_id,
     )
@@ -1664,8 +1932,18 @@ def admin_bots(
         pp = max(1, min(200, per_page))
         offset = (max(1, page) - 1) * pp
         rows = rows[offset:offset + pp]
-        return {"bots": rows, "page": page, "per_page": pp, "total": total}
-    return {"bots": rows}
+    # 管理端所有者链接走 /user/:username，不能把数值 owner_id 填进用户名路由。
+    enriched = []
+    for row in rows:
+        owner = store.get_user(row.get("owner_id")) if row.get("owner_id") else None
+        enriched.append({
+            **_with_bot_runnable(row),
+            "owner_name": owner.get("username") if owner else None,
+            "owner_display": owner.get("display_name") if owner else None,
+        })
+    if page is not None:
+        return {"bots": enriched, "page": page, "per_page": pp, "total": total}
+    return {"bots": enriched}
 
 
 @router.patch("/api/admin/bots/{bot_id}")
@@ -1673,14 +1951,33 @@ def admin_patch_bot(
     bot_id: int, body: dict, request: Request, _admin=Depends(require_admin)
 ):
     allowed = {"is_active", "is_builtin", "display_name", "description"}
-    fields = {k: (1 if v is True else 0 if v is False else v)
-              for k, v in body.items() if k in allowed}
+    unknown = set(body).difference(allowed)
+    if unknown:
+        raise HTTPException(422, f"不支持的字段：{', '.join(sorted(unknown))}")
+    for key in ("is_active", "is_builtin"):
+        if key in body and not isinstance(body[key], bool):
+            raise HTTPException(422, f"{key} 必须是布尔值")
+    fields: dict[str, Any] = {}
+    if "is_active" in body:
+        fields["is_active"] = 1 if body["is_active"] else 0
+    if "is_builtin" in body:
+        fields["is_builtin"] = 1 if body["is_builtin"] else 0
+    if "display_name" in body:
+        fields["display_name"] = str(body["display_name"])[:200]
+    if "description" in body:
+        fields["description"] = str(body["description"])[:2000]
     if not fields:
         raise HTTPException(400, "无可更新字段")
-    b = _store(request).update_bot(bot_id, **fields)
-    if not b:
-        raise HTTPException(404, "bot 不存在")
-    return {"bot": b}
+    try:
+        bot = _bots(request).patch_admin(bot_id, **fields)
+    except BotError as exc:
+        status = 404 if exc.code == "not_found" else 409 if exc.code in {
+            "unsupported_binary", "version_unavailable",
+        } else 400
+        raise HTTPException(
+            status, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+    return {"bot": _with_bot_runnable(bot)}
 
 
 @router.delete("/api/admin/bots/{bot_id}")
@@ -1691,14 +1988,15 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
     # 进行中赛事(published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→
     # _apply_ratings(None) 崩；②进行中赛事对阵/报名的 bot_id 变 NULL→对阵表残缺。
     # 此时应改用停用（is_active=0，用户路径）。
-    refs = store.bot_active_references(bot_id)
-    if any(v > 0 for v in refs.values()):
+    result = store.delete_bot_if_safe(bot_id)
+    if not result["found"]:
+        raise HTTPException(404, "bot 不存在")
+    refs = result["references"]
+    if not result["deleted"]:
         raise HTTPException(
             409,
             f"bot 存在活跃引用，不能硬删：{refs}（进行中对局/赛事；请改用停用 is_active=0）",
         )
-    if not store.delete_bot(bot_id):
-        raise HTTPException(404, "bot 不存在")
     # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
     _bots(request).purge_bot_files(bot_id)
     audit_log(request, "admin_delete_bot", result="ok", user=admin.get("username"), target=bot_id)
@@ -1709,7 +2007,14 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
 def admin_bot_versions(
     bot_id: int, request: Request, _admin=Depends(require_admin)
 ):
-    return {"versions": _store(request).list_bot_versions(bot_id)}
+    if not _store(request).get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
+    return {
+        "versions": [
+            _with_bot_runnable(version)
+            for version in _store(request).list_bot_versions(bot_id)
+        ]
+    }
 
 
 # ── admin: stats / dashboard ──────────────────────────────────
@@ -1722,9 +2027,10 @@ def admin_stats(request: Request, _admin=Depends(require_admin)):
 # ── admin: contests ───────────────────────────────────────────
 
 class AdminContestPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
     status: str | None = None
     title: str | None = None
-    hands_per_match: int | None = None
     # 时间编排（admin 可改时间窗口）
     registration_opens_at: str | None = None
     registration_closes_at: str | None = None
@@ -1740,67 +2046,144 @@ def admin_contests(
     result = _store(request).list_contests(status=status, game_id=game_id,
                                            page=page, per_page=per_page)
     if isinstance(result, dict):
-        return {"contests": result["items"], "page": result["page"],
+        return {"contests": [_contest_for_api(c) for c in result["items"]], "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"contests": result}
+    return {"contests": [_contest_for_api(c) for c in result]}
 
 
 @router.patch("/api/admin/contests/{contest_id}")
 async def admin_patch_contest(
-    contest_id: int, body: AdminContestPatch, request: Request, _admin=Depends(require_admin)
+    contest_id: int, body: AdminContestPatch, request: Request, admin=Depends(require_admin)
 ):
     fields: dict[str, Any] = {}
-    if body.status is not None:
-        # open → running 必须走真正 start，禁止静默改状态
-        if body.status == "running":
-            c0 = _store(request).get_contest(contest_id)
-            if not c0:
-                raise HTTPException(404, "比赛不存在")
-            if c0["status"] in ("open", "draft", "published"):
-                try:
-                    contest = await _contests(request).start(contest_id)
-                except ValueError as e:
-                    raise HTTPException(400, str(e))
-                return {"contest": contest}
-        if body.status not in (
-            "draft", "open", "published", "running", "rest", "finished", "cancelled"
-        ):
-            raise HTTPException(400, "非法比赛状态")
-        fields["status"] = body.status
     if body.title is not None:
         fields["title"] = body.title
-    if body.hands_per_match is not None:
-        fields["hands_per_match"] = body.hands_per_match
     # 时间编排字段（admin 可改）
     for tk in ("registration_opens_at", "registration_closes_at", "starts_at"):
-        tv = getattr(body, tk)
-        if tv is not None:
-            fields[tk] = tv
+        # ``null`` 显式清空可选时间；未提交的字段由 Store 合并旧值后校验。
+        if tk in body.model_fields_set:
+            fields[tk] = getattr(body, tk)
+
+    if body.status is not None:
+        if body.status not in {
+            CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED, CONTEST_RUNNING,
+            CONTEST_REST, CONTEST_FINISHED, CONTEST_CANCELLED,
+        }:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id,
+                detail=f"非法比赛状态: {body.status}",
+            )
+            raise HTTPException(400, "非法比赛状态")
+        if fields:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id,
+                detail="状态推进不能与其他字段修改同时提交",
+            )
+            raise HTTPException(400, "状态推进不能与其他字段修改同时提交")
+
+        store = _store(request)
+        before = store.get_contest(contest_id)
+        if not before:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id,
+                detail="比赛不存在",
+            )
+            raise HTTPException(404, "比赛不存在")
+        old_status = before["status"]
+        target = body.status
+        try:
+            if target == old_status:
+                contest = before
+            elif target == CONTEST_OPEN and old_status == CONTEST_DRAFT:
+                contest = await _contests(request).open_registration(contest_id)
+            elif target == CONTEST_PUBLISHED and old_status in (CONTEST_DRAFT, CONTEST_OPEN):
+                contest = await _contests(request).publish(contest_id)
+            elif target == CONTEST_RUNNING and old_status in (
+                CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
+            ):
+                contest = await _contests(request).start(contest_id)
+            elif target == CONTEST_FINISHED and old_status in (CONTEST_RUNNING, CONTEST_REST):
+                contest = await _contests(request).finish(contest_id)
+            elif target == CONTEST_CANCELLED and old_status in (
+                CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
+            ):
+                contest = await _contests(request).cancel(contest_id)
+            else:
+                raise ValueError(f"不支持赛事从 {old_status} 推进到 {target}")
+        except ValueError as exc:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id, detail=str(exc),
+            )
+            raise HTTPException(400, str(exc)) from exc
+
+        if target != old_status:
+            audit_log(
+                request, "admin_patch_contest_status", result="ok",
+                user=admin.get("username"), target=contest_id,
+                detail=f"status={old_status}->{target}",
+            )
+        return {"contest": _contest_for_api(contest)}
+
     if not fields:
         raise HTTPException(400, "无更新字段")
     try:
         c = _store(request).update_contest(contest_id, **fields)
     except ValueError as e:
-        # 状态机校验拒绝（终态不可变 / 非法转换）
+        audit_log(
+            request, "admin_patch_contest_fields", result="fail",
+            user=admin.get("username"), target=contest_id, detail=str(e),
+        )
         raise HTTPException(400, str(e))
     if not c:
-        raise HTTPException(404, "比赛不存在")
-    # 审计日志：状态变更（尤其 cancelled）必须可追溯（原无审计，曾导致赛事被改
-    # cancelled 却无从查证谁操作）。非状态字段更新不打审计避免噪音。
-    if "status" in fields:
         audit_log(
-            request, "admin_patch_contest_status", result="ok",
+            request, "admin_patch_contest_fields", result="fail",
             user=admin.get("username"), target=contest_id,
-            detail=fields["status"],
+            detail="比赛不存在",
         )
-    return {"contest": c}
+        raise HTTPException(404, "比赛不存在")
+    audit_log(
+        request, "admin_patch_contest_fields", result="ok",
+        user=admin.get("username"), target=contest_id,
+        detail="; ".join(
+            f"{key}={c.get(key)}" if key != "title" else "title=changed"
+            for key in sorted(fields)
+        ),
+    )
+    return {"contest": _contest_for_api(c)}
 
 
 @router.delete("/api/admin/contests/{contest_id}")
-def admin_delete_contest(contest_id: int, request: Request, admin=Depends(require_admin)):
-    if not _store(request).delete_contest(contest_id):
+async def admin_delete_contest(contest_id: int, request: Request, admin=Depends(require_admin)):
+    before = _store(request).get_contest(contest_id)
+    try:
+        deleted = await _contests(request).delete(contest_id)
+    except ValueError as exc:
+        audit_log(
+            request, "admin_delete_contest", result="fail",
+            user=admin.get("username"), target=contest_id, detail=str(exc),
+        )
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
+        audit_log(
+            request, "admin_delete_contest", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail="比赛不存在",
+        )
         raise HTTPException(404, "比赛不存在")
-    audit_log(request, "admin_delete_contest", result="ok", user=admin.get("username"), target=contest_id)
+    previous_status = (before or {}).get("status") or "unknown"
+    mode = (
+        "cancel_published_schedule_then_delete"
+        if previous_status == CONTEST_PUBLISHED else "delete_prestart"
+    )
+    audit_log(
+        request, "admin_delete_contest", result="ok",
+        user=admin.get("username"), target=contest_id,
+        detail=f"previous_status={previous_status}; mode={mode}",
+    )
     return {"ok": True}
 
 
@@ -1808,7 +2191,7 @@ def admin_delete_contest(contest_id: int, request: Request, admin=Depends(requir
 def admin_contest_entries(
     contest_id: int, request: Request, _admin=Depends(require_admin)
 ):
-    return {"entries": _store(request).list_entries(contest_id)}
+    return {"entries": _store(request).contest_entries_named(contest_id)}
 
 
 class AdminAssignEntries(BaseModel):
@@ -1826,7 +2209,7 @@ class AdminAssignEntries(BaseModel):
 
 
 @router.post("/api/admin/contests/{contest_id}/entries/bulk")
-def admin_assign_entries(
+async def admin_assign_entries(
     contest_id: int, body: AdminAssignEntries, request: Request, _admin=Depends(require_admin)
 ):
     """管理员批量指派参赛者+Bot。绕开 register() 的 CONTEST_OPEN + owner 校验（admin 专享）。
@@ -1840,10 +2223,12 @@ def admin_assign_entries(
 
     # 解析目标 entries 列表
     if body.assign_all:
-        gid = normalize_game_id(body.game_id or cgid)
+        gid = normalize_game_id(cgid if body.game_id is None else body.game_id)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
-        bots = store.list_bots(active_only=True, game_id=gid)
+        bots = store.list_bots(
+            active_only=True, runnable_only=True, game_id=gid
+        )
         if body.name_prefix:
             np = body.name_prefix.lower()
             bots = [b for b in bots if np in (b.get("name") or "").lower()]
@@ -1858,39 +2243,55 @@ def admin_assign_entries(
             target.append((uid, b["id"]))
     else:
         target = []
-        for e in body.entries or []:
-            uid = int(e.get("user_id"))
-            bid = int(e.get("bot_id"))
-            target.append((uid, bid))
+        try:
+            for e in body.entries or []:
+                uid = int(e.get("user_id"))
+                bid = int(e.get("bot_id"))
+                target.append((uid, bid))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "user_id / bot_id 必须是整数")
 
-    added = 0
-    skipped: list[str] = []
-    existing = {e["user_id"] for e in store.list_entries(contest_id)}
-    for uid, bid in target:
-        if uid in existing:
-            skipped.append(f"user {uid} 已报名，跳过")
-            continue
-        b = store.get_bot(bid)
-        if not b or not b.get("is_active") or not b.get("binary_path"):
-            skipped.append(f"bot {bid} 不可用，跳过")
-            continue
-        if normalize_game_id(b.get("game_id")) != cgid:
-            skipped.append(f"bot {bid} 游戏 {b.get('game_id')} ≠ 赛事 {cgid}，跳过")
-            continue
-        store.add_contest_entry(contest_id, uid, bid)
-        existing.add(uid)
-        added += 1
+    try:
+        result = await _contests(request).assign_roster_entries(contest_id, target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     audit_log(request, "admin_assign_entries", result="ok", target=contest_id,
-              detail=f"added={added} skipped={len(skipped)}")
-    return {"added": added, "skipped": skipped, "total_entries": len(existing)}
+              detail=f"added={result['added']} skipped={len(result['skipped'])}")
+    return result
 
 
 @router.delete("/api/admin/contests/{contest_id}/entries/{user_id}")
-def admin_delete_entry(
-    contest_id: int, user_id: int, request: Request, _admin=Depends(require_admin)
+async def admin_delete_entry(
+    contest_id: int, user_id: int, request: Request, admin=Depends(require_admin)
 ):
-    if not _store(request).delete_entry(contest_id, user_id):
+    if not _store(request).get_contest(contest_id):
+        audit_log(
+            request, "admin_delete_contest_entry", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail=f"user_id={user_id}; reason=比赛不存在",
+        )
+        raise HTTPException(404, "比赛不存在")
+    try:
+        deleted = await _contests(request).delete_roster_entry(contest_id, user_id)
+    except ValueError as exc:
+        audit_log(
+            request, "admin_delete_contest_entry", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail=f"user_id={user_id}; reason={exc}",
+        )
+        raise HTTPException(400, str(exc)) from exc
+    if not deleted:
+        audit_log(
+            request, "admin_delete_contest_entry", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail=f"user_id={user_id}; reason=报名记录不存在",
+        )
         raise HTTPException(404, "报名记录不存在")
+    audit_log(
+        request, "admin_delete_contest_entry", result="ok",
+        user=admin.get("username"), target=contest_id,
+        detail=f"user_id={user_id}",
+    )
     return {"ok": True}
 
 
@@ -2043,131 +2444,144 @@ def admin_patch_site(
     }}
 
 
+def _validated_runtime_patch(
+    body: RuntimeSettingsPatch, *, ceiling: int
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Validate the complete request without persistence or hot side effects."""
+    settings: dict[str, str] = {}
+    updated: dict[str, Any] = {}
+
+    def add(key: str, response_key: str, value: Any, stored: str | None = None) -> None:
+        settings[key] = str(value) if stored is None else stored
+        updated[response_key] = value
+
+    if body.bot_cpus is not None or body.bot_memory_mb is not None:
+        raise ValueError("bot_cpus / bot_memory_mb 为只读硬限制，不可修改")
+
+    if body.max_concurrent_matches is not None:
+        value = int(body.max_concurrent_matches)
+        if value > ceiling:
+            raise ValueError(
+                f"max_concurrent_matches={value} 超过半负载硬顶 ceiling={ceiling}"
+                f"（机器 {cpu_count()} 核）"
+            )
+        if value < 1:
+            raise ValueError("max_concurrent_matches 至少为 1")
+        add(SETTING_MAX_CONCURRENT, "max_concurrent_matches", value)
+
+    if body.action_timeout_sec is not None:
+        value = float(body.action_timeout_sec)
+        if (
+            not math.isfinite(value)
+            or value < ACTION_TIMEOUT_MIN
+            or value > ACTION_TIMEOUT_MAX
+        ):
+            raise ValueError(
+                f"action_timeout_sec 须在 {ACTION_TIMEOUT_MIN}–{ACTION_TIMEOUT_MAX}"
+            )
+        add(SETTING_ACTION_TIMEOUT, "action_timeout_sec", value)
+
+    if body.contest_default_rest_minutes is not None:
+        value = int(body.contest_default_rest_minutes)
+        if value < 0 or value > 120:
+            raise ValueError("contest_default_rest_minutes 须在 0–120")
+        add(SETTING_CONTEST_REST, "contest_default_rest_minutes", value)
+
+    if body.auto_match_enabled is not None:
+        add(
+            SETTING_AUTO_MATCH_ENABLED,
+            "auto_match_enabled",
+            body.auto_match_enabled,
+            "1" if body.auto_match_enabled else "0",
+        )
+    integer_fields = (
+        ("auto_match_interval_sec", SETTING_AUTO_MATCH_INTERVAL_SEC, 1, 3600,
+         "auto_match_interval_sec 须在 1–3600"),
+        ("auto_match_min_idle_sec", SETTING_AUTO_MATCH_MIN_IDLE_SEC, 0, 600,
+         "auto_match_min_idle_sec 须在 0–600"),
+        ("auto_match_bot_cooldown", SETTING_AUTO_MATCH_BOT_COOLDOWN, 0, 86400,
+         "auto_match_bot_cooldown 须在 0–86400"),
+        ("auto_match_stale_sec", SETTING_AUTO_MATCH_STALE_SEC, 0, 604800,
+         "auto_match_stale_sec 须在 0–604800（0=不限）"),
+        ("auto_match_reserve_slots", SETTING_AUTO_MATCH_RESERVE_SLOTS, 0, ceiling,
+         "auto_match_reserve_slots 须在 0–ceiling"),
+        ("auto_match_placement_games", SETTING_AUTO_MATCH_PLACEMENT_GAMES, 0, 100,
+         "auto_match_placement_games 须在 0–100（0=禁用）"),
+        ("auto_match_max_per_round", SETTING_AUTO_MATCH_MAX_PER_ROUND, 1, 50,
+         "auto_match_max_per_round 须在 1–50"),
+        ("auto_match_daily_cap", SETTING_AUTO_MATCH_DAILY_CAP, 0, 100000,
+         "auto_match_daily_cap 须在 0–100000（0=不限）"),
+    )
+    for field, setting_key, minimum, maximum, error in integer_fields:
+        raw = getattr(body, field)
+        if raw is None:
+            continue
+        value = int(raw)
+        if value < minimum or value > maximum:
+            raise ValueError(error)
+        add(setting_key, field, value)
+
+    if not updated:
+        raise ValueError("无更新字段")
+    return settings, updated
+
+
 @router.patch("/api/admin/settings/runtime")
 def admin_patch_runtime(
-    body: RuntimeSettingsPatch, request: Request, _admin=Depends(require_admin)
+    body: RuntimeSettingsPatch, request: Request, admin=Depends(require_admin)
 ):
     store = _store(request)
     orch = _orch(request)
-    ceiling = concurrent_ceiling()
-    updated: dict[str, Any] = {}
-
-    if body.bot_cpus is not None or body.bot_memory_mb is not None:
-        raise HTTPException(400, "bot_cpus / bot_memory_mb 为只读硬限制，不可修改")
-
-    if body.max_concurrent_matches is not None:
-        req = int(body.max_concurrent_matches)
-        if req > ceiling:
-            raise HTTPException(
-                400,
-                f"max_concurrent_matches={req} 超过半负载硬顶 ceiling={ceiling}"
-                f"（机器 {cpu_count()} 核）",
-            )
-        if req < 1:
-            raise HTTPException(400, "max_concurrent_matches 至少为 1")
-        store.set_setting(SETTING_MAX_CONCURRENT, str(req))
-        orch.rebuild_concurrency(req)
-        updated["max_concurrent_matches"] = req
-
-    if body.action_timeout_sec is not None:
-        t = float(body.action_timeout_sec)
-        if t < ACTION_TIMEOUT_MIN or t > ACTION_TIMEOUT_MAX:
-            raise HTTPException(
-                400,
-                f"action_timeout_sec 须在 {ACTION_TIMEOUT_MIN}–{ACTION_TIMEOUT_MAX}",
-            )
-        store.set_setting(SETTING_ACTION_TIMEOUT, str(t))
-        orch.set_action_timeout(t)
-        updated["action_timeout_sec"] = t
-
-    if body.contest_default_rest_minutes is not None:
-        m = int(body.contest_default_rest_minutes)
-        if m < 0 or m > 120:
-            raise HTTPException(400, "contest_default_rest_minutes 须在 0–120")
-        store.set_setting(SETTING_CONTEST_REST, str(m))
-        updated["contest_default_rest_minutes"] = m
-
-    # 闲时自动对局（写 settings 即热更新：调度器每轮重读）
-    if body.auto_match_enabled is not None:
-        store.set_setting(SETTING_AUTO_MATCH_ENABLED, "1" if body.auto_match_enabled else "0")
-        updated["auto_match_enabled"] = body.auto_match_enabled
-    if body.auto_match_interval_sec is not None:
-        v = int(body.auto_match_interval_sec)
-        if v < 1 or v > 3600:
-            raise HTTPException(400, "auto_match_interval_sec 须在 1–3600")
-        store.set_setting(SETTING_AUTO_MATCH_INTERVAL_SEC, str(v))
-        updated["auto_match_interval_sec"] = v
-    if body.auto_match_min_idle_sec is not None:
-        v = int(body.auto_match_min_idle_sec)
-        if v < 0 or v > 600:
-            raise HTTPException(400, "auto_match_min_idle_sec 须在 0–600")
-        store.set_setting(SETTING_AUTO_MATCH_MIN_IDLE_SEC, str(v))
-        updated["auto_match_min_idle_sec"] = v
-    if body.auto_match_bot_cooldown is not None:
-        v = int(body.auto_match_bot_cooldown)
-        if v < 0 or v > 86400:
-            raise HTTPException(400, "auto_match_bot_cooldown 须在 0–86400")
-        store.set_setting(SETTING_AUTO_MATCH_BOT_COOLDOWN, str(v))
-        updated["auto_match_bot_cooldown"] = v
-    if body.auto_match_stale_sec is not None:
-        v = int(body.auto_match_stale_sec)
-        if v < 0 or v > 604800:  # 0=不限
-            raise HTTPException(400, "auto_match_stale_sec 须在 0–604800（0=不限）")
-        store.set_setting(SETTING_AUTO_MATCH_STALE_SEC, str(v))
-        updated["auto_match_stale_sec"] = v
-    if body.auto_match_reserve_slots is not None:
-        v = int(body.auto_match_reserve_slots)
-        if v < 0 or v > ceiling:
-            raise HTTPException(400, "auto_match_reserve_slots 须在 0–ceiling")
-        store.set_setting(SETTING_AUTO_MATCH_RESERVE_SLOTS, str(v))
-        updated["auto_match_reserve_slots"] = v
-    if body.auto_match_placement_games is not None:
-        v = int(body.auto_match_placement_games)
-        if v < 0 or v > 100:
-            raise HTTPException(400, "auto_match_placement_games 须在 0–100（0=禁用）")
-        store.set_setting(SETTING_AUTO_MATCH_PLACEMENT_GAMES, str(v))
-        updated["auto_match_placement_games"] = v
-    if body.auto_match_max_per_round is not None:
-        v = int(body.auto_match_max_per_round)
-        if v < 1 or v > 50:
-            raise HTTPException(400, "auto_match_max_per_round 须在 1–50")
-        store.set_setting(SETTING_AUTO_MATCH_MAX_PER_ROUND, str(v))
-        updated["auto_match_max_per_round"] = v
-    if body.auto_match_daily_cap is not None:
-        v = int(body.auto_match_daily_cap)
-        if v < 0 or v > 100000:
-            raise HTTPException(400, "auto_match_daily_cap 须在 0–100000（0=不限）")
-        store.set_setting(SETTING_AUTO_MATCH_DAILY_CAP, str(v))
-        updated["auto_match_daily_cap"] = v
-
-    if not updated:
-        raise HTTPException(400, "无更新字段")
-    return {"updated": updated, "runtime": admin_get_runtime(request, _admin)}
-
-
-# ── admin: 裁判引擎（规则参数热调 + 代码只读） ────────────────────
-# 裁判规则参数存 platform_settings，orchestrator 每局热读，下局即生效。
-# PR2：三张表（JUDGE_PARAM_BOUNDS/JUDGE_PARAM_DEFAULTS/JUDGE_GAMES）全部从
-# games 注册表派生——消除第 4 个并行游戏元数据来源，单一真相。
-from bzplat.backend.games import registry as _game_registry
-
-JUDGE_PARAM_DEFAULTS, JUDGE_PARAM_BOUNDS = _game_registry.judge_param_table()
-JUDGE_GAMES: list[dict[str, Any]] = _game_registry.judge_games()
-
-
-def _engine_docstring(rel_path: str) -> str:
-    """读引擎源码首段 docstring（只读展示）。rel_path 形如 bzplat/backend/engine/gomoku.py。"""
     try:
-        # api_routes.py 在 bzplat/backend/ 下；剥离前缀后相对该目录定位
-        backend_dir = Path(__file__).resolve().parent
-        rel = rel_path.replace("bzplat/backend/", "", 1)
-        text = (backend_dir / rel).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    if not text.startswith('"""'):
-        return ""
-    end = text.find('"""', 3)
-    return text[3:end].strip() if end > 0 else ""
+        settings, updated = _validated_runtime_patch(
+            body, ceiling=concurrent_ceiling()
+        )
+    except ValueError as exc:
+        audit_log(
+            request, "admin_patch_runtime", result="fail",
+            user=admin.get("username"), target="runtime", detail=str(exc),
+        )
+        raise HTTPException(400, str(exc)) from exc
+
+    # All validation completed.  Persist the batch atomically; only after the
+    # transaction commits may process-local hot state observe the new values.
+    try:
+        store.set_settings(settings)
+    except Exception as exc:
+        audit_log(
+            request, "admin_patch_runtime", result="fail",
+            user=admin.get("username"), target="runtime",
+            detail=f"write_failed={type(exc).__name__}",
+        )
+        raise HTTPException(500, "运行时配置保存失败") from exc
+
+    try:
+        if "max_concurrent_matches" in updated:
+            orch.rebuild_concurrency(updated["max_concurrent_matches"])
+        if "action_timeout_sec" in updated:
+            orch.set_action_timeout(updated["action_timeout_sec"])
+    except Exception as exc:
+        audit_log(
+            request, "admin_patch_runtime", result="fail",
+            user=admin.get("username"), target="runtime",
+            detail=(
+                f"committed={','.join(sorted(updated))}; "
+                f"hot_reload_failed={type(exc).__name__}"
+            ),
+        )
+        raise HTTPException(500, "运行时配置已保存，但热更新失败；请重启服务") from exc
+
+    audit_log(
+        request, "admin_patch_runtime", result="ok",
+        user=admin.get("username"), target="runtime",
+        detail="; ".join(f"{key}={value}" for key, value in updated.items()),
+    )
+    return {"updated": updated, "runtime": admin_get_runtime(request, admin)}
+
+
+# ── 公开裁判引擎（只读） ──────────────────────────────
+# 现行规则只读：公开裁判元数据仅从游戏注册表派生。
+JUDGE_GAMES: list[dict[str, Any]] = game_registry.judge_games()
 
 
 # ── 公开：裁判规则与源码（对全体玩家透明，可审计） ──────────────────
@@ -2187,6 +2601,7 @@ def public_get_judges(request: Request):
                 "code_path": g["code_path"],
                 "summary": g["summary"],
                 "source_files": g["source_files"],
+                "shared_source_files": g["shared_source_files"],
             }
             for g in JUDGE_GAMES
         ]
@@ -2200,7 +2615,7 @@ def public_get_judge_source(game_id: str, request: Request):
     无需登录——任意访客可查。裁判源码透明是平台公正性的基础。
     """
     try:
-        spec = _game_registry.get(game_id)
+        spec = game_registry.get(game_id)
     except KeyError:
         raise HTTPException(404, f"未注册的游戏: {game_id!r}")
     backend_dir = Path(__file__).resolve().parent
@@ -2216,6 +2631,16 @@ def public_get_judge_source(game_id: str, request: Request):
         except OSError:
             continue
         files.append({"name": rel, "path": str(path.relative_to(backend_dir.parent)), "source": text})
+    shared_dir = backend_dir / "games"
+    for rel in spec.shared_source_files:
+        path = shared_dir / rel
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        files.append({"name": rel, "path": str(path.relative_to(backend_dir.parent)), "source": text})
     return {
         "game_id": spec.game_id,
         "label": spec.label,
@@ -2224,82 +2649,19 @@ def public_get_judge_source(game_id: str, request: Request):
     }
 
 
-@router.get("/api/admin/judges")
-def admin_get_judges(request: Request, _admin=Depends(require_admin)):
-    store = _store(request)
-    games = []
-    for g in JUDGE_GAMES:
-        params = []
-        for prm in g["params"]:
-            key = prm["key"]
-            raw = store.get_setting(key)
-            try:
-                value = int(raw) if raw not in (None, "") else JUDGE_PARAM_DEFAULTS[key]
-            except (TypeError, ValueError):
-                value = JUDGE_PARAM_DEFAULTS[key]
-            lo, hi = JUDGE_PARAM_BOUNDS[key]
-            params.append({**prm, "value": value, "min": lo, "max": hi})
-        games.append({
-            "game_id": g["game_id"],
-            "label": g["label"],
-            "code_path": g["code_path"],
-            "summary": g["summary"],
-            "params": params,
-            "docstring": _engine_docstring(g["code_path"]),
-        })
-    # 裁判代码说明（JUDGE_CODE.md 已移至 doc/——面向开发者；玩家经 /api/judges/{game}/source 看源码）
-    judge_code_path = _wiki_dir().parent / "doc" / "JUDGE_CODE.md"
-    markdown = (
-        judge_code_path.read_text(encoding="utf-8") if judge_code_path.is_file() else ""
-    )
-    return {"games": games, "markdown": markdown}
-
-
-class JudgeParamsPatch(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    params: dict[str, int]
-
-
-@router.patch("/api/admin/judges/params")
-def admin_patch_judge_params(
-    body: JudgeParamsPatch, request: Request, _admin=Depends(require_admin)
-):
-    store = _store(request)
-    if not body.params:
-        raise HTTPException(400, "无更新字段")
-    updated: dict[str, Any] = {}
-    for key, value in body.params.items():
-        if key not in JUDGE_PARAM_BOUNDS:
-            raise HTTPException(400, f"未知裁判参数: {key}")
-        lo, hi = JUDGE_PARAM_BOUNDS[key]
-        v = int(value)
-        if v < lo or v > hi:
-            raise HTTPException(400, f"{key} 须在 {lo}–{hi}")
-        updated[key] = v
-    # bb > sb 一致性校验（若两者有任一被改，需综合校验）
-    def _cur(k: str) -> int:
-        return int(updated.get(k, store.get_setting(k)) or JUDGE_PARAM_DEFAULTS[k])
-    sb = _cur(SETTING_JUDGE_HOLDEM_SB)
-    bb = _cur(SETTING_JUDGE_HOLDEM_BB)
-    if bb <= sb:
-        raise HTTPException(400, f"大盲({bb})必须大于小盲({sb})")
-    for key, v in updated.items():
-        store.set_setting(key, str(v))
-    # 返回最新裁判总览
-    return {"updated": updated, "judges": admin_get_judges(request, _admin)}
-
-
 # ── admin: 赛制模板 CRUD ──────────────────────────────────────
 class TemplateBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     id: str
     name: str
     game_id: str
-    match_config: dict[str, Any] = {}
     stages: list[dict[str, Any]]
 
 
 class TemplatePreviewBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     stages: list[dict[str, Any]]
     n: int = 8
     game_id: str = "holdem"
@@ -2309,7 +2671,12 @@ class TemplatePreviewBody(BaseModel):
 def admin_list_templates(
     request: Request, game: str | None = None, _admin=Depends(require_admin)
 ):
-    return {"templates": _store(request).list_contest_templates(game_id=game)}
+    return {
+        "templates": [
+            _template_for_api(t)
+            for t in _store(request).list_contest_templates(game_id=game)
+        ]
+    }
 
 
 @router.post("/api/admin/templates")
@@ -2319,15 +2686,16 @@ def admin_create_template(
     store = _store(request)
     if store.get_contest_template(body.id) is not None:
         raise HTTPException(409, f"模板 id 已存在：{body.id}")
+    _reject_fixed_rule_overrides(body.stages)
     try:
-        norm = validate_template(body.id, body.name, body.game_id, body.match_config, body.stages)
+        norm = validate_template(body.id, body.name, body.game_id, {}, body.stages)
     except ValueError as e:
         raise HTTPException(400, str(e))
     t = store.upsert_contest_template(
         norm["id"], name=norm["name"], game_id=norm["game_id"],
         match_config=norm["match_config"], stages=norm["stages"], is_builtin=False,
     )
-    return {"template": t}
+    return {"template": _template_for_api(t)}
 
 
 @router.put("/api/admin/templates/{tid}")
@@ -2340,8 +2708,9 @@ def admin_update_template(
     existing = store.get_contest_template(tid)
     if existing is None:
         raise HTTPException(404, f"模板不存在：{tid}")
+    _reject_fixed_rule_overrides(body.stages)
     try:
-        norm = validate_template(body.id, body.name, body.game_id, body.match_config, body.stages)
+        norm = validate_template(body.id, body.name, body.game_id, {}, body.stages)
     except ValueError as e:
         raise HTTPException(400, str(e))
     t = store.upsert_contest_template(
@@ -2349,7 +2718,7 @@ def admin_update_template(
         match_config=norm["match_config"], stages=norm["stages"],
         is_builtin=bool(existing.get("is_builtin")),
     )
-    return {"template": t}
+    return {"template": _template_for_api(t)}
 
 
 @router.delete("/api/admin/templates/{tid}")
@@ -2370,6 +2739,7 @@ def admin_preview_template(
     body: TemplatePreviewBody, request: Request, _admin=Depends(require_admin)
 ):
     """dry-run：给定 stages + 人数 n → 各阶段 / 总场数预估。"""
+    _reject_fixed_rule_overrides(body.stages)
     try:
         norm_stages = [validate_stage(s, i, body.game_id) for i, s in enumerate(body.stages)]
     except ValueError as e:
@@ -2380,6 +2750,33 @@ def admin_preview_template(
 
 
 # ── admin: 日志查看 ────────────────────────────────────────────
+_LOG_HEADER_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})? "
+    r"(?P<level>[A-Z]+) \[[^\]]+\] "
+)
+
+
+def _group_log_records(raw_lines: list[str]) -> list[tuple[str | None, list[str]]]:
+    """把 logging 的异常续行归入其结构化首行。
+
+    ``logging`` 只会给一条记录的首行加时间/级别/模块前缀；traceback、Bot
+    stderr 等多行消息的后续行没有此前缀。筛选必须作用于整条记录，否则按
+    ERROR/关键字过滤时会丢掉最有诊断价值的堆栈和对局上下文。
+    """
+    records: list[tuple[str | None, list[str]]] = []
+    for raw in raw_lines:
+        line = raw.rstrip("\r\n")
+        header = _LOG_HEADER_RE.match(line)
+        if header:
+            records.append((header.group("level"), [line]))
+        elif records and records[-1][0] is not None:
+            records[-1][1].append(line)
+        else:
+            # 兼容旧日志/截断尾部首行：没有可归属首行时作为独立记录返回。
+            records.append((None, [line]))
+    return records
+
+
 @router.get("/api/admin/logs")
 def admin_logs(
     request: Request,
@@ -2389,9 +2786,11 @@ def admin_logs(
     file: str = "app",
     _admin=Depends(require_admin),
 ):
-    """读 logs/{app,access,audit}.log 末尾 N 行，按级别/关键字过滤。
+    """读当前 logs/{app,access,audit}.log 的有界尾部，按记录过滤。
 
     file: app（业务/系统）、access（HTTP 访问，含真实 IP）、audit（安全审计）。
+    多行异常按结构化首行分组，命中筛选时返回完整 traceback；``limit`` 是
+    期望的最大物理行数，但单条完整记录不会被截断。
     """
     # 白名单：只允许读这三个日志文件，防路径穿越
     allowed = {"app": "app.log", "access": "access.log", "audit": "audit.log"}
@@ -2399,19 +2798,32 @@ def admin_logs(
     log_path = Path(os.environ.get("BZ_LOG_DIR", "logs")) / fname
     lines: list[str] = []
     if log_path.is_file():
-        # 读末尾（最多 ~8000 行，取后 limit 行）
+        # 只读当前轮转文件末尾最多 8000 行；历史轮转文件分页另行处理。
         with log_path.open("r", encoding="utf-8", errors="replace") as fh:
             tail = fh.readlines()[-8000:]
         level_upper = level.upper() if level else None
         kw = (q or "").lower()
-        for ln in tail:
-            if level_upper and f" {level_upper} " not in f" {ln} ":
+        matched: list[list[str]] = []
+        for record_level, record_lines in _group_log_records(tail):
+            if level_upper and record_level != level_upper:
                 continue
-            if kw and kw not in ln.lower():
+            if kw and not any(kw in ln.lower() for ln in record_lines):
                 continue
-            lines.append(ln.rstrip("\n"))
-        lines = lines[-limit:]
-    return {"lines": lines, "path": str(log_path)}
+            matched.append(record_lines)
+
+        # 从最新记录向前取，达到行数上限后停止；不切断一条多行异常记录。
+        bounded_limit = max(1, min(limit, 2000))
+        selected: list[list[str]] = []
+        selected_line_count = 0
+        for record_lines in reversed(matched):
+            selected.append(record_lines)
+            selected_line_count += len(record_lines)
+            if selected_line_count >= bounded_limit:
+                break
+        for record_lines in reversed(selected):
+            lines.extend(record_lines)
+    # 不向浏览器泄漏服务端绝对路径；source 是白名单中的安全文件名。
+    return {"lines": lines, "source": fname}
 
 
 # ── wiki ──────────────────────────────────────────────────────
@@ -2419,12 +2831,12 @@ def admin_logs(
 # slug 为文件名（去 .md）。索引按固定顺序排列，缺失文件自动跳过。
 # 精简为 7 页（核心 = 3 游戏；功能说明统一进 GUIDE）。
 WIKI_PAGES: list[dict[str, str]] = [
-    {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "站内文档导航与 Botzone 差异总览"},
-    {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "Botzone 标准对局协议、信封、两模式、卡牌编码"},
+    {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "玩家快速上手、协议与游戏规则导航"},
+    {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "请求/响应信封、两种运行模式与动作编码"},
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
-    {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "Botzone 规则摘要与本平台协议对照"},
-    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议、样例 + 一手交换变体"},
-    {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "交错网格、pass 连走与协议"},
+    {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
+    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议与 C/Python 示例"},
+    {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},
     {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/段位/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
 ]
 

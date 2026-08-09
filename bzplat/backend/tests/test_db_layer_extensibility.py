@@ -116,7 +116,7 @@ def test_union_query_param_count_matches_subquery_count(tmp_path, fake_fourth_ga
     """
     s = Store(str(tmp_path / "union.db"))
     # 无需插数据——空库也能跑 SELECT，参数数不对会直接 ProgrammingError
-    # search_matches 跨游戏分支：params=[q]*4，UNION 4 子查询 → 需 4*4=16 + [lim]
+    # search_matches 跨游戏分支：params=[q]*5，UNION 4 子查询 → 需 5*4=20 + [lim]
     results = s.search_matches("anything", limit=5)
     assert results == [], "空库搜索应返回空列表（重点是没崩 Incorrect number of bindings）"
     s.close()

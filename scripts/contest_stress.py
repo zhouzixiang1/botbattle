@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""赛事功能可行性 + 多赛制验证工具（不是纯压测）。
+"""赛事名册容量造数 + 赛制静态估算，可选小规模真跑。
 
 种子 N 个模拟用户 + 每人 1 个 holdem Bot（6 种策略分布），建赛事（指定模板），
-admin 批量指派全部，生成赛程表（打印各轮场次/估计时长），可选真跑（--run）。
+admin 批量指派全部，并按模板公式打印轮次/场次估算；可选真跑（--run）。
 
 用法：
   python scripts/contest_stress.py --users 500 --template holdem_swiss_ko
   python scripts/contest_stress.py --users 16 --template holdem_rr --run   # 小规模真跑验证排名
 
-默认 dry-run：只建/指派/生成赛程表，不真跑对局（验证建/指派/展示可行性）。
---run 才真执行对局（带进度+超时，大规模如 swiss@500 约几小时，慎用）。
+默认 dry-run：只建 draft 赛事、批量指派名册并读取详情；不会 publish/start，
+因此不会生成 pairings，也不验证真实排期或吞吐。--run 才启动并等待真实对局
+（带进度+超时，大规模如 swiss@500 约几小时，慎用）。
 
-前置：dev 服务在线（scripts/platform-ctl.sh status）。
+前置：worktree dev 服务在线；50380 与主 checkout botzone.db 会被硬拒绝。
 """
 from __future__ import annotations
 
 import argparse
 import math
 import os
-import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -29,13 +29,27 @@ import httpx
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from bzplat.backend.crypto import hash_password, new_session_token, session_expires  # noqa: E402
+from bzplat.backend.crypto import new_session_token, session_expires  # noqa: E402
 from bzplat.backend.store import Store  # noqa: E402
 from bzplat.backend.bots.manager import BotManager  # noqa: E402
+from bzplat.backend.store.schema import ROLE_ADMIN, ROLE_USER  # noqa: E402
+from scripts._qa_accounts import (  # noqa: E402
+    QaAccountSpec,
+    get_or_create_dedicated_account,
+    preflight_dedicated_accounts,
+)
+from scripts._qa_target import (  # noqa: E402
+    assert_qa_instance,
+    ensure_qa_base,
+    qa_db_path,
+    qa_upload_root,
+)
 
 PASSWORD = "Stress1234"
 EMAIL_DOMAIN = "contest.local"
 PREFIX = "cs"  # 用户名前缀（便于识别清理）
+CONTEST_ACCOUNT_NAMESPACE = "contest-stress-v1"
+CONTEST_ADMIN_NAME = f"{PREFIX}_admin"
 # 6 种策略 Bot 二进制（均匀分布）
 STRATEGY_BOTS = [
     "samples/holdem_bots/foldbot",
@@ -48,22 +62,52 @@ STRATEGY_BOTS = [
 ]
 
 
-def seed(db_path: str, n_users: int) -> tuple[dict[str, int], int, str]:
+def contest_account_spec(username: str, role: str) -> QaAccountSpec:
+    return QaAccountSpec(
+        CONTEST_ACCOUNT_NAMESPACE,
+        username,
+        f"{username}@{EMAIL_DOMAIN}",
+        PASSWORD,
+        role,
+    )
+
+
+def seed(
+    db_path: str,
+    n_users: int,
+    upload_root: str | None = None,
+) -> tuple[dict[str, int], int, str]:
     """seed n_users 用户 + 每人 1 个 holdem Bot（策略均匀分布）。返回 (user_id→bot_id, admin_id, admin_token)。"""
-    store = Store(db_path)
+    resolved_db = qa_db_path(db_path, ROOT)
+    resolved_uploads = qa_upload_root(upload_root, resolved_db, ROOT)
+    resolved_db.parent.mkdir(parents=True, exist_ok=True)
+    store = Store(str(resolved_db))
     store._conn.execute("PRAGMA busy_timeout=10000")
-    bm = BotManager(store, upload_root="bot_uploads")
-    bin_bytes = [Path(b).read_bytes() for b in STRATEGY_BOTS if Path(b).is_file()]
+    user_specs = [
+        contest_account_spec(f"{PREFIX}_u{i:03d}", ROLE_USER)
+        for i in range(1, n_users + 1)
+    ]
+    admin_spec = contest_account_spec(CONTEST_ADMIN_NAME, ROLE_ADMIN)
+    try:
+        preflight_dedicated_accounts(store, [*user_specs, admin_spec])
+    except Exception:
+        store.close()
+        raise
+    bm = BotManager(store, upload_root=resolved_uploads)
+    bin_bytes = [
+        (ROOT / rel).read_bytes()
+        for rel in STRATEGY_BOTS
+        if (ROOT / rel).is_file()
+    ]
     if not bin_bytes:
         raise SystemExit("找不到策略 Bot 二进制，先跑 bash samples/holdem_bots/gen.sh")
 
     uid2bot: dict[str, int] = {}
     for i in range(1, n_users + 1):
         uname = f"{PREFIX}_u{i:03d}"
-        u = store.get_user_by_username(uname)
-        if not u:
-            u = store.create_user(uname, f"{uname}@{EMAIL_DOMAIN}", hash_password(PASSWORD), display_name=uname)
-            store.update_user(u["id"], email_verified=1)
+        u = get_or_create_dedicated_account(
+            store, contest_account_spec(uname, ROLE_USER)
+        )
         # 每用户 1 个 holdem bot，策略按 i 轮转分布
         raw = bin_bytes[(i - 1) % len(bin_bytes)]
         bname = f"{uname}_holdem"
@@ -75,20 +119,15 @@ def seed(db_path: str, n_users: int) -> tuple[dict[str, int], int, str]:
         store.ensure_rating(b["id"])
         uid2bot[uname] = b["id"]
 
-    # admin（复用现有或建 cs_admin）
-    admin = None
-    for cand in ("admin", "load_admin", f"{PREFIX}_admin"):
-        u = store.get_user_by_username(cand)
-        if u and u.get("role") == "admin":
-            admin = u
-            break
-    if not admin:
-        admin = store.create_user(f"{PREFIX}_admin", f"{PREFIX}_admin@{EMAIL_DOMAIN}", hash_password(PASSWORD), role="admin")
-        store.update_user(admin["id"], email_verified=1)
+    # 仅使用脚本自己的 cs_admin，绝不复用 copied DB 的任意管理员。
+    admin = get_or_create_dedicated_account(store, admin_spec)
     tok = new_session_token()
     store.add_session(tok, admin["id"], session_expires())
     store.close()
-    print(f"=== 种子完成：{n_users} 用户 × 1 holdem Bot（{len(bin_bytes)} 种策略分布），admin={admin['username']}")
+    print(
+        f"=== 种子完成：{n_users} 用户 × 1 holdem Bot（{len(bin_bytes)} 种策略分布），"
+        f"admin={admin['username']} uploads={resolved_uploads}"
+    )
     return uid2bot, admin["id"], tok
 
 
@@ -114,33 +153,42 @@ def estimate(template: str, n: int) -> dict[str, Any]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="赛事功能可行性 + 多赛制验证")
-    ap.add_argument("--base", default="http://127.0.0.1:50380")
-    ap.add_argument("--db", default="botzone.db")
+    ap = argparse.ArgumentParser(description="赛事名册容量造数 + 赛制静态估算；可选真跑")
+    ap.add_argument("--base", default="http://127.0.0.1:50381")
+    ap.add_argument("--db", default=os.environ.get("BZ_DB_PATH", "botzone.db"))
     ap.add_argument("--users", type=int, default=500)
+    ap.add_argument(
+        "--upload-root",
+        default=None,
+        help="Bot 产物目录（默认 <db.parent>/bot_uploads；相对路径也基于 db.parent）",
+    )
     ap.add_argument("--template", default="holdem_swiss_ko",
                     choices=["holdem_swiss_ko", "holdem_rr"])
-    ap.add_argument("--run", action="store_true", help="真跑对局（默认 dry-run 只生成赛程表）")
+    ap.add_argument(
+        "--run",
+        action="store_true",
+        help="真跑对局（默认 dry-run 只验证 draft 名册容量，不生成 pairings）",
+    )
     ap.add_argument("--timeout", type=int, default=3600, help="--run 时的总超时秒数")
     args = ap.parse_args()
 
-    print(f"\n=== 1. 种子 {args.users} 用户 ===")
-    uid2bot, admin_id, tok = seed(args.db, args.users)
+    base = ensure_qa_base(args.base)
+    db_path = qa_db_path(args.db, ROOT)
+    assert_qa_instance(base)
 
-    base = args.base.rstrip("/")
+    print(f"\n=== 1. 种子 {args.users} 用户 ===")
+    uid2bot, admin_id, tok = seed(str(db_path), args.users, args.upload_root)
+
     H = {"Authorization": f"Bearer {tok}"}
     c = httpx.Client(base_url=base, timeout=60, headers=H)
 
-    print(f"\n=== 2. 赛制可行性估算（template={args.template}, n={args.users}）===")
+    print(f"\n=== 2. 赛制静态估算（template={args.template}, n={args.users}）===")
     est = estimate(args.template, args.users)
     print(f"  赛制：{est['format']}")
     print(f"  轮次：{est['rounds']}")
     print(f"  场次：{est['matches']}")
     if est["note"]:
         print(f"  注意：{est['note']}")
-    if isinstance(est["matches"], int):
-        print(f"  @8并发 ≈ {est['matches'] // 8} 批（每批 holdem 70 手约数分钟）")
-
     print(f"\n=== 3. 建赛事（template={args.template}）===")
     body: dict[str, Any] = {"title": f"压测赛 {args.users}人 {args.template}", "game_id": "holdem", "template_id": args.template}
     r = c.post("/api/contests", json=body)
@@ -158,8 +206,8 @@ def main():
     print(f"  指派完成：added={r.json()['added']} total_entries={r.json()['total_entries']} skipped={len(r.json().get('skipped', []))}")
 
     if not args.run:
-        print(f"\n=== 5. dry-run：查看赛程表（不真跑）===")
-        print("  如需真跑加 --run（大规模 swiss@500 约几小时）")
+        print("\n=== 5. dry-run：验证 draft 名册容量（不发布、不生成 pairings）===")
+        print("  上述场次仅为公式估算；如需生成并执行真实对阵，请加 --run")
         r = c.get(f"/api/contests/{cid}")
         if r.status_code == 200:
             d = r.json()

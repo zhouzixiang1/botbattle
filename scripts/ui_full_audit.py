@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """全站 UI/功能巡检：访客 + 登录用户 + admin，多视口，截图 + console + 轻量交互。
 
-用法（服务须在 127.0.0.1:50380）：
+用法（worktree Vite 默认在 127.0.0.1:5173）：
     source .venv/bin/activate
-    python scripts/ui_full_audit.py
+    BZ_E2E_BASE_URL=http://127.0.0.1:5173 python scripts/ui_full_audit.py
 
 产物：
     browser_shots/full_audit/*.png
@@ -20,8 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from _qa_target import assert_qa_instance, qa_base
 
-BASE = "http://127.0.0.1:50380"
+BASE = qa_base()
+assert_qa_instance(BASE)
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "browser_shots" / "full_audit"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -97,7 +99,6 @@ def page_routes(match_id, bot_id, username, contest_id):
         ("leaderboard", "/leaderboard"),
         ("wiki", "/wiki"),
         ("search", "/search?q=test"),
-        ("data", "/data"),
         ("contests", "/contests"),
         ("contest_detail", f"/contests/{contest_id}"),
         ("match", f"/match/{match_id}"),

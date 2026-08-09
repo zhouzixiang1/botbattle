@@ -1,103 +1,166 @@
-"""Botzone 标准 JSON 信封传输层（全游戏共享）。
+"""全游戏唯一的 Botzone JSON 信封协议。
 
-Botzone 协议（参考 https://wiki.botzone.org.cn/index.php?title=Bot）有两套运行模式：
+Traditional 与 LongRunning 只是进程生命周期不同，二者共享同一份 JSON
+契约：Traditional（以及 LongRunning 首回合）接收完整历史信封，LongRunning
+握手后的回合接收单 request 信封；Bot 的每个响应都必须是包含
+``response`` 的 JSON 对象。平台只消费 ``response``，其余顶层字段忽略。
 
-- **Traditional（传统）**：每回合进程重启，平台每次发**完整历史**信封
-  ``{"requests":[...], "responses":[...], "data":..., "globaldata":...}``，
-  Bot 自己重放历史重建状态。Bot 回 ``{"response":..., "data":..., "debug":...}``。
-- **LongRunning（长驻）**：进程长驻不重启。**首回合**仍用 Traditional 完整历史信封；
-  Bot 首回合响应后额外输出一行握手串 ``>>>BOTZONE_REQUEST_KEEP_RUNNING<<<``
-  （前后各带换行）声明它想长驻。之后每回合平台只发**单条 request** 信封
-  ``{"request":...}``，Bot 自行在内存里维护状态。握手后 ``data``/``globaldata``/``debug``
-  字段失效。
-
-本平台默认长驻模式（进程不重启，每回合一行）——这正好对应 Botzone LongRunning，
-但**首回合也只发单 request**（我们不像 Botzone 那样冷启动重放历史）。
-因此平台对两种 Bot 的兼容方式是：
-
-- Traditional Bot：平台每回合给它发**累积完整历史**信封（requests[]/responses[]），
-  Bot 自己重放。平台内部仍维护同一进程——对 Traditional Bot 来说每回合的 requests
-  足够它重建状态（它不依赖进程重启）。
-- LongRunning Bot：首回合发完整历史信封，Bot 回完响应后回读握手串；之后每回合
-  发单 request 信封。
-
-各游戏不直接处理信封——它只产出/消费**游戏负载**（holdem 的 act request dict、
-棋类的 {x,y}）。本模块负责把负载包进/取出信封。各游戏的 ``protocol.py`` 调用本模块。
+这里同时提供正式对局与上传预检复用的严格响应解码和 LongRunning 握手校验，
+避免各游戏维护一套更宽松的“预检协议”。游戏模块只负责校验 ``response``
+负载本身的类型与形状。
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
-# 运行模式常量（上传时标明，runner 据此选传输路径）。
-RUNTIME_TRADITIONAL = "traditional"
-RUNTIME_LONGRUNNING = "longrunning"
-RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
+from bzplat.backend.store.schema import (
+    DEFAULT_RUNTIME_MODE,
+    RUNTIME_LONGRUNNING,
+    RUNTIME_TRADITIONAL,
+    TECHNICAL_INCIDENT_MESSAGES,
+    VALID_RUNTIME_MODES,
+)
 
-# LongRunning 握手串（Bot 首回合响应后输出此行声明长驻；前后各带换行）。
-# 参考 Botzone wiki：note that there should be newline characters before and after.
+# 对外保留协议模块的常量入口，但值只来自 schema.py 这一处真相源。
+RUNTIME_MODES = VALID_RUNTIME_MODES
+
+# LongRunning 首回合响应后的精确握手行（换行符由行传输层剥离）。
 KEEP_RUNNING_SIGNAL = ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 
+class ResponseProtocolError(ValueError):
+    """响应信封或 LongRunning 握手违反唯一现行协议。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def _compact(obj: Any) -> str:
-    """单行紧凑 JSON（separators 去空白，非 ASCII 原样输出）。"""
+    """单行紧凑 JSON（非 ASCII 原样输出）。"""
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
 
-# ── 信封构造 ──────────────────────────────────────────────────────────────
-
-def dumps_traditional(
-    requests: list[Any],
-    responses: list[Any],
-    *,
-    data: Any = None,
-    globaldata: Any = None,
-) -> str:
-    """Traditional 信封：完整历史（requests[] + responses[]）。
-
-    用于 Traditional Bot 的每一回合，以及 LongRunning Bot 的**首回合**。
-    """
-    envelope: dict[str, Any] = {"requests": requests, "responses": responses}
-    if data is not None:
-        envelope["data"] = data
-    if globaldata is not None:
-        envelope["globaldata"] = globaldata
-    return _compact(envelope)
+def dumps_traditional(requests: list[Any], responses: list[Any]) -> str:
+    """构造完整历史信封；顶层字段固定为 requests / responses。"""
+    return _compact({"requests": requests, "responses": responses})
 
 
-def dumps_longrunning_single(request: Any, *, data: Any = None) -> str:
-    """LongRunning 单条 request 信封（首回合握手之后用）。
+def dumps_longrunning_single(request: Any) -> str:
+    """构造 LongRunning 握手成功后的单 request 信封。"""
+    return _compact({"request": request})
 
-    Botzone wiki：subsequent rounds "only have one round of game information (request)"。
-    """
-    envelope: dict[str, Any] = {"request": request}
-    if data is not None:
-        envelope["data"] = data
-    return _compact(envelope)
-
-
-# ── 信封解析 ──────────────────────────────────────────────────────────────
 
 def loads_response(line: str) -> dict[str, Any]:
-    """解析 Bot 输出的一行 JSON 信封 → ``{"response":..., "data":..., "debug":...}``。
-
-    不要求字段齐全——只保证返回 dict（供 :func:`extract_response_payload` 取负载）。
-    """
-    return json.loads(line)
+    """解码响应顶层并丢弃平台不消费的扩展字段。"""
+    envelope = json.loads(line)
+    return {"response": extract_response_payload(envelope)}
 
 
-def extract_response_payload(envelope: dict[str, Any]) -> Any:
-    """从信封取 ``response`` 字段（Bot 本回合的决策负载）。
+def extract_response_payload(envelope: Any) -> Any:
+    """从唯一合法响应信封中取 payload。
 
-    Botzone 信封里 ``response`` 是必填字段；缺它视为协议违规（交给上游兜底）。
-    平台全面对齐 Botzone 标准协议，不兼容旧 ``{"a":...}`` 格式。
+    顶层必须包含 ``response``；裸响应或缺少该字段仍拒绝。Bot 可附带
+    ``debug`` 等扩展字段，平台不读取、不持久化，也不让它们影响裁判。
     """
     if not isinstance(envelope, dict):
-        raise ValueError("响应信封不是对象")
+        raise ResponseProtocolError(
+            "invalid_envelope", TECHNICAL_INCIDENT_MESSAGES["invalid_envelope"]
+        )
+    if "response" not in envelope:
+        raise ResponseProtocolError(
+            "missing_response", TECHNICAL_INCIDENT_MESSAGES["missing_response"]
+        )
     return envelope["response"]
 
 
-def is_keep_running_signal(line: str) -> bool:
-    """判断一行是否为 LongRunning 握手串。"""
-    return line.strip() == KEEP_RUNNING_SIGNAL
+def decode_response_payload(
+    line: str,
+    validate_payload: Callable[[Any], Any],
+) -> Any:
+    """按唯一协议解码一行 Bot 响应，并校验游戏 payload。"""
+    try:
+        envelope = loads_response(line)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ResponseProtocolError(
+            "invalid_json", TECHNICAL_INCIDENT_MESSAGES["invalid_json"]
+        ) from exc
+    payload = extract_response_payload(envelope)
+    try:
+        payload = validate_payload(payload)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ResponseProtocolError(
+            "invalid_response", TECHNICAL_INCIDENT_MESSAGES["invalid_response"]
+        ) from exc
+    return payload
+
+
+def is_keep_running_signal(line: str | None) -> bool:
+    """只接受逐字符一致的 LongRunning 握手行。"""
+    return line == KEEP_RUNNING_SIGNAL
+
+
+def require_keep_running_signal(line: str | None) -> None:
+    """验证 LongRunning 首回合后的必需握手。"""
+    if line is None:
+        raise ResponseProtocolError(
+            "missing_keep_running",
+            TECHNICAL_INCIDENT_MESSAGES["missing_keep_running"],
+        )
+    if not is_keep_running_signal(line):
+        raise ResponseProtocolError(
+            "invalid_keep_running",
+            TECHNICAL_INCIDENT_MESSAGES["invalid_keep_running"],
+        )
+
+
+async def preflight_exchange(
+    binary_path: str,
+    binary_runner: Any,
+    request: dict[str, Any],
+    validate_payload: Callable[[Any], Any],
+    *,
+    runtime_mode: str,
+    timeout: float,
+) -> Any:
+    """按所选运行模式执行与正式对局一致的首回合交换。
+
+    两种模式的首回合都发送完整历史信封；LongRunning 还必须在响应后输出
+    精确握手。返回已经过信封和游戏 payload 双重校验的 ``response`` 值。
+    """
+    if runtime_mode not in VALID_RUNTIME_MODES:
+        raise ValueError(f"未知运行模式: {runtime_mode}")
+    sid = await binary_runner.start_session(binary_path, runtime_mode=runtime_mode)
+    try:
+        response_line = await binary_runner.send(
+            sid,
+            dumps_traditional([request], []),
+            timeout=timeout,
+        )
+        payload = decode_response_payload(response_line, validate_payload)
+        if runtime_mode == RUNTIME_LONGRUNNING:
+            extra = await binary_runner.read_extra_line(sid, timeout=1.0)
+            require_keep_running_signal(extra)
+        return payload
+    finally:
+        await binary_runner.stop_session(sid)
+
+
+__all__ = [
+    "DEFAULT_RUNTIME_MODE",
+    "RUNTIME_TRADITIONAL",
+    "RUNTIME_LONGRUNNING",
+    "RUNTIME_MODES",
+    "KEEP_RUNNING_SIGNAL",
+    "ResponseProtocolError",
+    "dumps_traditional",
+    "dumps_longrunning_single",
+    "loads_response",
+    "extract_response_payload",
+    "decode_response_payload",
+    "is_keep_running_signal",
+    "require_keep_running_signal",
+    "preflight_exchange",
+]
