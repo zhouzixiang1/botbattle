@@ -852,9 +852,19 @@ class MatchOrchestrator:
         except (Exception, asyncio.CancelledError):
             # The runner task has already been cancelled.  If the authoritative
             # Store transition itself fails, the normal post-commit handoff below
-            # is intentionally skipped; nevertheless no task/admission/SSE/live
-            # prefix may remain owned by this process.  Reconciliation can later
-            # recover the still-active DB row without duplicate contest callbacks.
+            # is intentionally skipped.  Existing stream consumers still need a
+            # terminal, generic signal before their registry entry is removed;
+            # otherwise SSE/WS generators would wait forever on an orphaned queue.
+            # Reconciliation can later recover the still-active DB row without
+            # duplicate contest callbacks or exposing the Store exception.
+            self._broadcast(
+                match_id,
+                {
+                    "type": "error",
+                    "reason": "abort_failed",
+                    "message": "对局中止未能完成，请稍后刷新",
+                },
+            )
             self._tasks.pop(match_id, None)
             self._release_bot_slot(match_id)
             self._sse.pop(match_id, None)

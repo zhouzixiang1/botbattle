@@ -1122,6 +1122,13 @@ def test_admin_abort_store_failure_releases_all_in_memory_state(
         assert match_id not in orch._active_replay_events
         assert match_id not in orch._sse
         assert callbacks == []
+        terminal = queue.get_nowait()
+        assert terminal == {
+            "type": "error",
+            "reason": "abort_failed",
+            "message": "对局中止未能完成，请稍后刷新",
+        }
+        assert "controlled" not in terminal["message"]
 
     asyncio.run(exercise())
 
