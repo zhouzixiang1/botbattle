@@ -77,7 +77,7 @@
 | 前端页面 | 顶层业务页面均 lazy 分包；精确数量以目标提交的路由盘点为准 |
 | 自动化测试 | 后端 pytest + Playwright；最终数量以目标提交重新收集为准 |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
-| 浏览器验收 | Playwright **4 个 spec / 33 条**；本轮 Chromium 单 worker 完整执行 `33 passed`（2.8m），当前目标提交真值以 `TESTING.md` 为准；最终整合候选仍须在运行产物完整的隔离栈复验日志；另有 browser/screenshot 辅助脚本 |
+| 浏览器验收 | Playwright **4 个 spec / 34 条**；本轮 Chromium 单 worker 完整执行为 `33 passed / 1 failed`（失败是业务断言完成后的临时 Bot 清理与后台 auto-match 竞态），当前目标提交真值以 `TESTING.md` 为准；最终整合候选仍须在运行产物完整的隔离栈重跑并复验日志；另有 browser/screenshot 辅助脚本 |
 | 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
@@ -93,7 +93,7 @@
 | 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
 | 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
-| 浏览器验收 | ⏳ 本分支 4 spec / 33 条浏览器断言通过；最终整合候选须在完整隔离运行产物上重跑并确认后端日志洁净 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
+| 浏览器验收 | ⏳ 本分支 4 spec / 34 条中 33 条通过，1 条在业务断言通过后的清理阶段受后台 auto-match 竞态影响；最终整合候选须在完整隔离运行产物上全量重跑并确认后端日志洁净 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |
 
 ## 5. 经验教训

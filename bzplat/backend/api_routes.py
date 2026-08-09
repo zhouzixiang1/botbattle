@@ -2129,7 +2129,10 @@ async def admin_patch_contest(
     if not fields:
         raise HTTPException(400, "无更新字段")
     try:
-        c = _store(request).update_contest(contest_id, **fields)
+        # 时间修改须进入 ContestManager 的 per-contest 锁。published 调整
+        # starts_at 时，manager 会按原发布公式重算 pending pairing，并由
+        # Store 在同一事务写入赛事与逐场排期。
+        c = await _contests(request).revise_schedule(contest_id, fields)
     except ValueError as e:
         audit_log(
             request, "admin_patch_contest_fields", result="fail",

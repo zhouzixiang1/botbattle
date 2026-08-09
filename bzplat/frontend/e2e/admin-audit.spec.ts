@@ -319,16 +319,73 @@ for (const viewport of ADMIN_VIEWPORTS) {
   })
 }
 
+test('admin manual schedule persists in the isolated DB and emits an audit record', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  let contestId: number | null = null
+  await withCleanup(async () => {
+    await loginThroughUi(page, ADMIN)
+    const title = `PW Admin schedule DB ${Date.now()}`
+    const create = await page.request.post('/api/contests', {
+      data: {
+        title,
+        game_id: 'holdem',
+        starts_at: '2099-12-01T12:00:00',
+      },
+    })
+    expect(create.status(), await create.text()).toBe(200)
+    contestId = ((await create.json()) as { contest: { id: number } }).contest.id
+
+    await page.goto('/#/admin?tab=contests')
+    const row = page.getByRole('row').filter({ hasText: title })
+    await expect(row).toBeVisible()
+    await row.getByRole('button', { name: '编辑时间', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: '编辑赛事时间' })
+    const autoStart = dialog.getByRole('switch', { name: '按时间自动开赛' })
+    await expect(autoStart).toBeChecked()
+    await autoStart.click()
+    const patchResponse = page.waitForResponse((response) =>
+      response.request().method() === 'PATCH' &&
+      new URL(response.url()).pathname === `/api/admin/contests/${contestId}`,
+    )
+    await dialog.getByRole('button', { name: '保存时间', exact: true }).click()
+    const saved = await patchResponse
+    expect(saved.status(), await saved.text()).toBe(200)
+    expect((await saved.json() as { contest: { starts_at: string | null } }).contest.starts_at).toBeNull()
+
+    await page.reload()
+    const reloadedRow = page.getByRole('row').filter({ hasText: title })
+    await expect(reloadedRow.getByText('比赛开始：手动', { exact: true })).toBeVisible()
+    const detail = await page.request.get(`/api/contests/${contestId}`)
+    expect(detail.status(), await detail.text()).toBe(200)
+    expect((await detail.json() as { contest: { starts_at: string | null } }).contest.starts_at).toBeNull()
+
+    const query = encodeURIComponent(`target=${contestId}`)
+    const audit = await page.request.get(`/api/admin/logs?file=audit&limit=300&q=${query}`)
+    expect(audit.status(), await audit.text()).toBe(200)
+    const lines = (await audit.json() as { lines: string[] }).lines
+    expect(lines.some((line) =>
+      line.includes('action=admin_patch_contest_fields') &&
+      line.includes('result=ok') &&
+      line.includes(`target=${contestId}`),
+    )).toBe(true)
+    await monitor.expectClean()
+  }, async () => {
+    if (contestId === null) return
+    const remove = await page.request.delete(`/api/admin/contests/${contestId}`)
+    expect(remove.status(), await remove.text()).toBe(200)
+  })
+})
+
 test('contest admin exposes only phase-appropriate actions and flags invalid schedules', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, ADMIN)
   const base = {
     organizer_id: 1,
-    created_at: '2026-08-09T09:00:00',
+    created_at: '2099-08-09T09:00:00',
     ends_at: null,
-    registration_opens_at: '2026-08-09T10:00:00',
-    registration_closes_at: '2026-08-09T11:00:00',
-    starts_at: '2026-08-09T12:00:00',
+    registration_opens_at: '2099-08-09T10:00:00',
+    registration_closes_at: '2099-08-09T11:00:00',
+    starts_at: '2099-08-09T12:00:00',
     template_id: 'holdem_rr',
     game_id: 'holdem',
   }
@@ -343,7 +400,7 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
       id: 906,
       title: '阶段矩阵-已完成',
       status: 'finished',
-      registration_closes_at: '2026-08-09T13:00:00',
+      registration_closes_at: '2099-08-09T13:00:00',
     },
     { ...base, id: 907, title: '阶段矩阵-已取消', status: 'cancelled' },
     {
@@ -357,6 +414,7 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
     },
   ]
   let schedulePatch: Record<string, string | null> | undefined
+  let schedulePatchAttempts = 0
   await page.route('**/api/admin/contests?page=1&per_page=20', async (route) => {
     await route.fulfill({
       status: 200,
@@ -366,7 +424,16 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
   })
   await page.route('**/api/admin/contests/901', async (route) => {
     expect(route.request().method()).toBe('PATCH')
+    schedulePatchAttempts += 1
     schedulePatch = route.request().postDataJSON() as Record<string, string | null>
+    if (schedulePatchAttempts === 1) {
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: '模拟事务拒绝：对阵已派发' }),
+      })
+      return
+    }
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -383,21 +450,33 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
   await expect(row('阶段矩阵-已发布').getByRole('button', { name: '开始比赛', exact: true })).toBeVisible()
   await expect(row('阶段矩阵-进行中').getByRole('button', { name: '恢复性结束', exact: true })).toBeVisible()
   await expect(row('阶段矩阵-进行中').getByRole('button', { name: '取消赛事', exact: true })).toHaveCount(0)
+  await expect(row('阶段矩阵-进行中').getByRole('button', { name: /编辑时间|修正时间/ })).toHaveCount(0)
   await expect(row('阶段矩阵-休息').getByRole('button', { name: '进入下一阶段', exact: true })).toBeVisible()
   await expect(row('阶段矩阵-休息').getByRole('button', { name: '恢复性结束', exact: true })).toBeVisible()
+  await expect(row('阶段矩阵-休息').getByRole('button', { name: /编辑时间|修正时间/ })).toHaveCount(0)
+
+  const open = row('阶段矩阵-报名')
+  await open.getByRole('button', { name: '编辑时间', exact: true }).click()
+  const openDialog = page.getByRole('dialog', { name: '编辑赛事时间' })
+  await expect(openDialog.locator('#admin-registration-opens-at')).toHaveCount(0)
+  await expect(openDialog.getByText('开放报名（已生效，只读）', { exact: true })).toBeVisible()
+  await expect(openDialog.locator('#admin-registration-closes-at')).toBeVisible()
+  await openDialog.getByRole('button', { name: '取消', exact: true }).click()
+
+  const published = row('阶段矩阵-已发布')
+  await published.getByRole('button', { name: '编辑时间', exact: true }).click()
+  const publishedDialog = page.getByRole('dialog', { name: '编辑赛事时间' })
+  await expect(publishedDialog.locator('#admin-registration-opens-at')).toHaveCount(0)
+  await expect(publishedDialog.locator('#admin-registration-closes-at')).toHaveCount(0)
+  await expect(publishedDialog.getByText('报名截止（已发布，只读）', { exact: true })).toBeVisible()
+  await expect(publishedDialog.getByLabel('比赛开始')).toBeVisible()
+  await publishedDialog.getByRole('button', { name: '取消', exact: true }).click()
 
   const finished = row('阶段矩阵-已完成')
   await expect(finished.getByText('成绩已归档 · 只读', { exact: true })).toBeVisible()
   await expect(finished.getByRole('button', { name: /取消赛事|删除草稿|清理已取消赛事|开始比赛|恢复性结束/ })).toHaveCount(0)
   await expect(finished.getByText('报名截止晚于比赛开始', { exact: true })).toBeVisible()
-  await finished.getByRole('button', { name: '修正时间', exact: true }).click()
-  const scheduleDialog = page.getByRole('dialog', { name: '编辑赛事时间' })
-  await expect(scheduleDialog.getByText('报名截止晚于比赛开始', { exact: true })).toBeVisible()
-  await expect(scheduleDialog.getByRole('button', { name: '保存时间', exact: true })).toBeDisabled()
-  await scheduleDialog.getByLabel('报名截止').fill('2026-08-09T11:00')
-  await expect(scheduleDialog.getByText('报名截止晚于比赛开始', { exact: true })).toHaveCount(0)
-  await expect(scheduleDialog.getByRole('button', { name: '保存时间', exact: true })).toBeEnabled()
-  await scheduleDialog.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(finished.getByRole('button', { name: /编辑时间|修正时间/ })).toHaveCount(0)
 
   const manual = row('阶段矩阵-纯手动')
   await expect(manual.getByText('开放报名：手动', { exact: true })).toBeVisible()
@@ -421,19 +500,29 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
   await expect(scheduledAutoStart).toBeChecked()
   await scheduledAutoStart.click()
   await scheduledDialog.getByRole('button', { name: '保存时间', exact: true }).click()
+  await expect(scheduledDialog.getByText('模拟事务拒绝：对阵已派发', { exact: true })).toBeVisible()
+  await expect(scheduledDialog).toBeVisible()
+  await scheduledDialog.getByRole('button', { name: '保存时间', exact: true }).click()
   await expect.poll(() => schedulePatch).toEqual({
-    registration_opens_at: '2026-08-09T10:00:00',
-    registration_closes_at: '2026-08-09T11:00:00',
+    registration_opens_at: '2099-08-09T10:00:00',
+    registration_closes_at: '2099-08-09T11:00:00',
     starts_at: null,
   })
+  expect(schedulePatchAttempts).toBe(2)
   await expect(scheduledDialog).toHaveCount(0)
 
   const cancelled = row('阶段矩阵-已取消')
   await expect(cancelled.getByText('已取消 · 可清理', { exact: true })).toBeVisible()
   await expect(cancelled.getByRole('button', { name: '清理已取消赛事', exact: true })).toBeVisible()
   await expect(cancelled.getByRole('button', { name: '取消赛事', exact: true })).toHaveCount(0)
+  await expect(cancelled.getByRole('button', { name: /编辑时间|修正时间/ })).toHaveCount(0)
   await expect(page.getByText('React 19 · Tailwind v4 · shadcn/ui', { exact: true })).toHaveCount(0)
-  await monitor.expectClean()
+  await monitor.expectClean([{
+    kind: 'http',
+    method: 'PATCH',
+    status: 400,
+    pathname: '/api/admin/contests/901',
+  }])
 })
 
 test('contest detail changes its primary content and actions with lifecycle stage', async ({ page }) => {

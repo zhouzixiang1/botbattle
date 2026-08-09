@@ -1,6 +1,9 @@
 """管理员赛事状态接口必须复用 ContestManager 生命周期，而非直接改状态列。"""
 from __future__ import annotations
 
+import json
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,6 +22,45 @@ def _setup(tmp_path):
     store.add_session(token, admin["id"], session_expires())
     contest = store.create_contest("状态回归赛", organizer_id=admin["id"], game_id="holdem")
     return app, store, contest["id"], {"Authorization": f"Bearer {token}"}
+
+
+def _published_pairings(store, contest_id):
+    """构造带 round stagger 的最小 published 当前阶段。"""
+    owner = store.get_user_by_username("statusadmin")
+    bot_a = store.create_bot(owner["id"], f"schedule-a-{contest_id}")
+    bot_b = store.create_bot(owner["id"], f"schedule-b-{contest_id}")
+    store.update_contest(
+        contest_id,
+        status="published",
+        registration_opens_at="2099-01-01T00:00:00",
+        registration_closes_at="2099-01-02T00:00:00",
+        starts_at="2099-01-03T10:00:00",
+        current_stage_idx=0,
+        stages_json=json.dumps([{
+            "key": "rr",
+            "type": "round_robin",
+            "round_stagger_minutes": 15,
+        }]),
+    )
+    first = store.add_contest_pairing(
+        contest_id,
+        bot_a["id"],
+        bot_b["id"],
+        round_num=1,
+        stage_idx=0,
+        stage_key="rr",
+        scheduled_at="2099-01-03T10:00:00",
+    )
+    third = store.add_contest_pairing(
+        contest_id,
+        bot_b["id"],
+        bot_a["id"],
+        round_num=3,
+        stage_idx=0,
+        stage_key="rr",
+        scheduled_at="2099-01-03T10:30:00",
+    )
+    return bot_a, bot_b, first, third
 
 
 def test_admin_finish_uses_manager_and_returns_success(tmp_path):
@@ -203,6 +245,176 @@ def test_admin_time_patch_can_clear_or_set_equal_optional_times(tmp_path):
     )
     assert manual.status_code == 200, manual.text
     assert manual.json()["contest"]["starts_at"] is None
+    assert store.get_contest(contest_id)["starts_at"] is None
+
+
+def test_admin_open_schedule_only_accepts_future_close_and_start(tmp_path):
+    app, store, contest_id, headers = _setup(tmp_path)
+    store.update_contest(
+        contest_id,
+        status="open",
+        registration_opens_at="2020-01-01T00:00:00",
+        registration_closes_at="2099-01-02T00:00:00",
+        starts_at="2099-01-03T00:00:00",
+    )
+    client = TestClient(app)
+
+    frozen_open = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"registration_opens_at": "2099-01-01T00:00:00"},
+        headers=headers,
+    )
+    assert frozen_open.status_code == 400
+    assert store.get_contest(contest_id)["registration_opens_at"] == "2020-01-01T00:00:00"
+
+    past_close = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"registration_closes_at": "2020-01-02T00:00:00"},
+        headers=headers,
+    )
+    assert past_close.status_code == 400
+    assert "晚于当前时间" in past_close.json()["detail"]
+
+    future = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={
+            "registration_closes_at": "2099-02-01T00:00:00",
+            "starts_at": "2099-02-02T00:00:00",
+        },
+        headers=headers,
+    )
+    assert future.status_code == 200, future.text
+
+    manual = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"registration_closes_at": None, "starts_at": None},
+        headers=headers,
+    )
+    assert manual.status_code == 200, manual.text
+    saved = store.get_contest(contest_id)
+    assert saved["registration_closes_at"] is None
+    assert saved["starts_at"] is None
+
+
+def test_admin_published_start_recomputes_pending_round_schedule_and_can_clear(tmp_path):
+    app, store, contest_id, headers = _setup(tmp_path)
+    _published_pairings(store, contest_id)
+    client = TestClient(app)
+
+    frozen_close = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"registration_closes_at": "2099-02-01T00:00:00"},
+        headers=headers,
+    )
+    assert frozen_close.status_code == 400
+    assert "不能修改报名截止时间" in frozen_close.json()["detail"]
+
+    rescheduled = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"starts_at": "2099-03-01T12:00:00"},
+        headers=headers,
+    )
+    assert rescheduled.status_code == 200, rescheduled.text
+    assert rescheduled.json()["contest"]["starts_at"] == "2099-03-01T12:00:00"
+    assert [
+        pairing["scheduled_at"]
+        for pairing in store.list_contest_pairings(contest_id, stage_idx=0)
+    ] == ["2099-03-01T12:00:00", "2099-03-01T12:30:00"]
+
+    manual = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"starts_at": None},
+        headers=headers,
+    )
+    assert manual.status_code == 200, manual.text
+    assert store.get_contest(contest_id)["starts_at"] is None
+    assert all(
+        pairing["scheduled_at"] is None
+        for pairing in store.list_contest_pairings(contest_id, stage_idx=0)
+    )
+
+
+def test_admin_published_start_rejects_any_bound_match_without_partial_write(tmp_path):
+    app, store, contest_id, headers = _setup(tmp_path)
+    bot_a, bot_b, first, _third = _published_pairings(store, contest_id)
+    store.create_match(
+        f"bound-{contest_id}",
+        bot_a["id"],
+        bot_b["id"],
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_contest_pairing(first["id"], match_id=f"bound-{contest_id}")
+    before = store.get_contest(contest_id)
+    before_schedules = [
+        pairing["scheduled_at"] for pairing in store.list_contest_pairings(contest_id)
+    ]
+
+    response = TestClient(app).patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"title": "不得先写标题", "starts_at": "2099-04-01T00:00:00"},
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "已有对局被派发" in response.json()["detail"]
+    saved = store.get_contest(contest_id)
+    assert saved["title"] == before["title"]
+    assert saved["starts_at"] == before["starts_at"]
+    assert [
+        pairing["scheduled_at"] for pairing in store.list_contest_pairings(contest_id)
+    ] == before_schedules
+
+
+def test_store_published_schedule_update_rolls_back_contest_when_pairing_write_fails(tmp_path):
+    _app, store, contest_id, _headers = _setup(tmp_path)
+    _bot_a, _bot_b, first, _third = _published_pairings(store, contest_id)
+    before = store.get_contest(contest_id)
+    before_schedules = [
+        pairing["scheduled_at"] for pairing in store.list_contest_pairings(contest_id)
+    ]
+    store._conn.execute(
+        "CREATE TRIGGER fail_schedule_update BEFORE UPDATE OF scheduled_at "
+        "ON contest_pairings WHEN OLD.id=%d BEGIN "
+        "SELECT RAISE(ABORT, 'forced schedule failure'); END" % first["id"]
+    )
+    store._conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced schedule failure"):
+        store.update_published_contest_schedule(
+            contest_id,
+            {"starts_at": "2099-05-01T00:00:00"},
+            stage_idx=0,
+            pending_pairing_schedules=[
+                {
+                    "id": pairing["id"],
+                    "round_num": pairing["round_num"],
+                    "scheduled_at": "2099-05-01T00:00:00",
+                }
+                for pairing in store.list_contest_pairings(contest_id)
+            ],
+        )
+
+    assert store.get_contest(contest_id)["starts_at"] == before["starts_at"]
+    assert [
+        pairing["scheduled_at"] for pairing in store.list_contest_pairings(contest_id)
+    ] == before_schedules
+
+
+@pytest.mark.parametrize("status", ["running", "rest", "finished", "cancelled"])
+def test_admin_active_and_terminal_schedule_is_read_only(tmp_path, status):
+    app, store, contest_id, headers = _setup(tmp_path)
+    store.update_contest(contest_id, status=status)
+
+    response = TestClient(app).patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"starts_at": "2099-01-01T00:00:00"},
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "时间编排只读" in response.json()["detail"]
     assert store.get_contest(contest_id)["starts_at"] is None
 
 

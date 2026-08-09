@@ -72,6 +72,12 @@ const PRIMARY_ACTION: Record<string, LifecycleAction> = {
 const ROSTER_MUTABLE = new Set(['draft', 'open'])
 const CANCELLABLE = new Set(['draft', 'open', 'published'])
 const DELETABLE = new Set(['draft', 'cancelled'])
+type ScheduleField = 'registration_opens_at' | 'registration_closes_at' | 'starts_at'
+const SCHEDULE_EDITABLE: Record<string, ReadonlySet<ScheduleField>> = {
+  draft: new Set(['registration_opens_at', 'registration_closes_at', 'starts_at']),
+  open: new Set(['registration_closes_at', 'starts_at']),
+  published: new Set(['starts_at']),
+}
 
 function scheduleIssue(contest: {
   registration_opens_at?: string | null
@@ -359,9 +365,11 @@ export default function ContestsTab() {
                         <Button type="button" variant="outline" size="sm" onClick={() => showEntries(contest)}>
                           {mutableRoster ? '管理名册' : '查看名册'}
                         </Button>
-                        <Button type="button" variant="outline" size="sm" onClick={() => setScheduleContest(contest)}>
-                          <CalendarClock className="size-3.5" />{timeIssue ? '修正时间' : '编辑时间'}
-                        </Button>
+                        {SCHEDULE_EDITABLE[contest.status] && (
+                          <Button type="button" variant="outline" size="sm" onClick={() => setScheduleContest(contest)}>
+                            <CalendarClock className="size-3.5" />{timeIssue ? '修正时间' : '编辑时间'}
+                          </Button>
+                        )}
                         {DELETABLE.has(contest.status) && (
                           <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void del(contest)}>
                             {contest.status === 'cancelled' ? '清理已取消赛事' : '删除草稿'}
@@ -466,30 +474,52 @@ function ScheduleDialog({
   onClose: () => void
   onSave: (fields: Record<string, string | null>) => Promise<void>
 }) {
+  const editable = SCHEDULE_EDITABLE[contest.status] || new Set<ScheduleField>()
   const [opensAt, setOpensAt] = useState(toInputValue(contest.registration_opens_at))
   const [closesAt, setClosesAt] = useState(toInputValue(contest.registration_closes_at))
   const [startsAt, setStartsAt] = useState(toInputValue(contest.starts_at))
   const [autoStart, setAutoStart] = useState(Boolean(contest.starts_at))
-  const candidate = {
+  const [saveError, setSaveError] = useState('')
+  const fullCandidate: Record<ScheduleField, string | null> = {
     registration_opens_at: toIso(opensAt),
     registration_closes_at: toIso(closesAt),
     starts_at: autoStart ? toIso(startsAt) : null,
   }
+  const candidate = Object.fromEntries(
+    [...editable].map((field) => [field, fullCandidate[field]]),
+  ) as Record<string, string | null>
+  const orderIssue = scheduleIssue({ ...contest, ...fullCandidate })
+  const futureIssue = contest.status === 'open'
+    ? [
+        ['报名截止', fullCandidate.registration_closes_at],
+        ['比赛开始', fullCandidate.starts_at],
+      ].find((entry) => entry[1] && new Date(entry[1]).getTime() <= Date.now())?.[0]
+    : undefined
   const issue = autoStart && !startsAt
     ? '选择自动开赛后必须填写比赛开始时间'
-    : scheduleIssue(candidate)
+    : futureIssue
+      ? `报名中赛事的${futureIssue}必须晚于当前时间，或清空为手动`
+      : orderIssue
+
+  const updateValue = (setter: (value: string) => void, value: string) => {
+    setSaveError('')
+    setter(value)
+  }
 
   const save = async () => {
     if (issue) return
     // onSave already surfaces API failures in the parent error panel. Keep the
     // dialog open for correction, but do not leak a rejected promise from the
     // fire-and-forget button handler into the browser console.
+    setSaveError('')
     try {
-      // 三个字段组成一张完整排期表。空输入必须显式发送 null；若过滤为空值，
-      // 管理员就无法清除旧时间，starts_at 也会继续被 scheduler 当成自动开赛。
+      // 只发送当前阶段仍可修改的字段；其中空输入必须显式发送 null，
+      // 否则管理员无法把自动开赛恢复为手动。
       await onSave(candidate)
-    } catch {
-      // Parent owns the user-facing error state.
+    } catch (cause) {
+      // 页面顶层保留聚合错误，同时 Dialog 内直接显示，避免管理员在长表格
+      // 底部保存失败后还要退出弹窗才能发现原因。
+      setSaveError(errMsg(cause, '保存失败'))
     }
   }
 
@@ -499,18 +529,36 @@ function ScheduleDialog({
         <DialogHeader>
           <DialogTitle>编辑赛事时间</DialogTitle>
           <DialogDescription>
-            {contest.title} · 空的报名时间表示对应阶段由组织者手动推进。自动开赛时应满足“开放报名 ≤ 报名截止 ≤ 比赛开始”。已有终态赛事仅修正展示元数据，不改变状态或成绩。
+            {contest.title} · 空时间表示对应阶段由组织者手动推进。已生效的阶段时间只读；自动开赛时应满足“开放报名 ≤ 报名截止 ≤ 比赛开始”。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="admin-registration-opens-at">开放报名</Label>
-            <Input id="admin-registration-opens-at" type="datetime-local" value={opensAt} onChange={(event) => setOpensAt(event.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="admin-registration-closes-at">报名截止</Label>
-            <Input id="admin-registration-closes-at" type="datetime-local" value={closesAt} onChange={(event) => setClosesAt(event.target.value)} />
-          </div>
+          {editable.has('registration_opens_at') ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-registration-opens-at">开放报名</Label>
+              <Input id="admin-registration-opens-at" type="datetime-local" value={opensAt} onChange={(event) => updateValue(setOpensAt, event.target.value)} />
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <Label>开放报名（已生效，只读）</Label>
+              <p className="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+                {contest.registration_opens_at ? fmtTime(contest.registration_opens_at) : '手动开放'}
+              </p>
+            </div>
+          )}
+          {editable.has('registration_closes_at') ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="admin-registration-closes-at">报名截止</Label>
+              <Input id="admin-registration-closes-at" type="datetime-local" value={closesAt} onChange={(event) => updateValue(setClosesAt, event.target.value)} />
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <Label>报名截止（已发布，只读）</Label>
+              <p className="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+                {contest.registration_closes_at ? fmtTime(contest.registration_closes_at) : '手动截止'}
+              </p>
+            </div>
+          )}
           <div className="space-y-3 rounded-lg border border-border p-3">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
@@ -522,7 +570,10 @@ function ScheduleDialog({
               <Switch
                 id="admin-auto-start"
                 checked={autoStart}
-                onCheckedChange={setAutoStart}
+                onCheckedChange={(checked) => {
+                  setSaveError('')
+                  setAutoStart(checked)
+                }}
                 disabled={busy}
               />
             </div>
@@ -533,7 +584,7 @@ function ScheduleDialog({
                   id="admin-starts-at"
                   type="datetime-local"
                   value={startsAt}
-                  onChange={(event) => setStartsAt(event.target.value)}
+                  onChange={(event) => updateValue(setStartsAt, event.target.value)}
                 />
               </div>
             ) : (
@@ -545,6 +596,7 @@ function ScheduleDialog({
           {issue && (
             <p className="flex items-center gap-1.5 text-sm text-destructive"><AlertTriangle className="size-4" />{issue}</p>
           )}
+          <ErrorMsg msg={saveError} />
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>取消</Button>
