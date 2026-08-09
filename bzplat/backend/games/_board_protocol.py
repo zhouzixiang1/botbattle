@@ -21,21 +21,22 @@ def dumps_request(req: dict[str, Any]) -> str:
 
 
 def loads_response(line: str) -> dict[str, Any]:
-    """严格解析唯一现行响应信封。"""
+    """解析响应信封并只返回平台消费的规范化坐标。"""
     from bzplat.backend.games import _botzone_protocol as envelope_protocol
 
     obj = json.loads(line)
     payload = envelope_protocol.extract_response_payload(obj)
-    validate_response_payload(payload)
-    return obj
+    payload = validate_response_payload(payload)
+    return {"response": payload}
 
 
 def parse_xy(raw: dict[str, Any] | None) -> tuple[int | None, int | None]:
     """从响应取落子坐标 ``(x, y)``。
 
-    只接受唯一现行信封 ``{"response":{"x":int,"y":int}}``。
+    唯一现行信封必须包含 ``response``；其他顶层字段忽略。游戏 payload
+    仍严格为整数 ``x/y``，避免把另一套落子结构带入裁判。
     """
-    if not isinstance(raw, dict) or set(raw) != {"response"}:
+    if not isinstance(raw, dict) or "response" not in raw:
         return None, None
     payload = raw["response"]
     if not isinstance(payload, dict) or set(payload) != {"x", "y"}:
@@ -65,7 +66,7 @@ def validate_response_payload(payload: Any) -> Any:
         or not isinstance(y, int)
     ):
         raise ValueError("response.x/response.y 必须是整数")
-    return payload
+    return {"x": x, "y": y}
 
 
 def build_gomoku_request(*, x: int, y: int, me: int) -> dict[str, Any]:

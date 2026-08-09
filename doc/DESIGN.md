@@ -58,7 +58,7 @@ graph TB
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
 | 游戏注册 | `games/` | **赛制/编排契约解耦入口（裁判/协议分离）**：base.py（GameSpec / GameRegistry）+ 共享 Traditional / LongRunning 信封实现 + `_board_protocol.py`（棋类共享 payload 工具）+ 各 `games/<game>/` 子包。`<game>_judge.py` 是 0 平台依赖的纯规则；engine 是平台适配层；protocol 的 `validate_response_payload` 只校验 response 值，游戏内合法性仍归裁判。赛制/编排主流程经 registry/spec 调用，不按游戏名分支；这不表示整个前后端对新增游戏零接入工作。 |
-| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；赛事两阶段创建；先持久化终态结果，再单次广播权威 `match_end {winner,reason,deltas}`；崩溃与启动失败按明确技术结果处理；Bot 协议错误/超时分别为 `completed + protocol_error/timeout + technical_loss`，Bot-vs-Bot 计分、人机局不评分；平台故障 `aborted + platform_error`）+ runner（按 runtime_mode 传 Traditional 完整历史或 LongRunning 增量请求；顶层响应只允许 `response`，LongRunning 严格握手且不回退；首个故障写有界 `technical_incident` 后终止；Bot-vs-Bot 与人类对战双方统一消费累计棋钟）+ auto_matcher（闲时自动） |
+| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；赛事两阶段创建；先持久化终态结果，再单次广播权威 `match_end {winner,reason,deltas}`；崩溃与启动失败按明确技术结果处理；Bot 协议错误/超时分别为 `completed + protocol_error/timeout + technical_loss`，Bot-vs-Bot 计分、人机局不评分；平台故障 `aborted + platform_error`）+ runner（按 runtime_mode 传 Traditional 完整历史或 LongRunning 增量请求；顶层响应必须包含 `response`，额外顶层字段在解析边界丢弃；LongRunning 严格握手且不回退；首个故障写有界 `technical_incident` 后终止；Bot-vs-Bot 与人类对战双方统一消费累计棋钟）+ auto_matcher（闲时自动） |
 | 赛制 | `contests/` | templates/stages/manager/scheduler/ranking/validation。状态机 `draft→open→published→running→rest→finished`；时间写入统一满足 `registration_opens_at <= registration_closes_at <= starts_at`；手动推进按实际时刻盖戳；终态不可互转；报名、派发、完整阶段/轮次、正式榜均以锁和事务守护，aborted 无裁决对局不积分/不晋级。 |
 | 沙箱 | `runtime/` | Linux x86_64 ELF BinaryRunner（docker/local）+ limits（资源硬顶）；其他可执行格式在上传时拒绝。Docker 镜像检查/拉取是独立平台准备阶段，在上传首响应与游戏累计棋钟开始前完成；容器固定 `--pull=never --entrypoint /app/bot`，禁止计时中隐式拉镜像或继承自定义入口 |
 | 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈；赛事时间候选在 create/update 安全写入口统一校验；`set_settings` 批量配置单事务提交）+ schema.py（常量唯一来源） |
@@ -85,7 +85,7 @@ graph LR
 
 1. **GameSpec 注册表（`games/`，契约入口）**：每款游戏声明 `game_id`/`label`/`session_factory`/`protocol`（含 `validate_response_payload`）/配置校验/计分与 ETA/段位/模板/源码元信息/预检/多 leg 计划/累计棋钟等，所有字段均有生产消费者；`rounds_per_match`、`num_seats` 与 judge 参数描述等无消费者元数据已删除。游戏规则直接由每游戏代码常量定义，不存在 admin 裁判参数或对局级规则覆盖。`run_session` 只接受内部复现参数（Holdem 的 `rng`/`deal_sequence`，棋类的 `rng`），其他键立即报错。通用赛制与编排路径经 `registry.get(game_id)` 取 spec，禁止增加游戏名分支；已存实体缺失/未知 `game_id` 必须失败，产品默认仅在创建边界明确赋值。
 
-   **传输唯一性**：上传预检与正式首回合共用 runner 的信封构造、严格响应解析和所选 runtime_mode；Holdem 两条路径的首请求都声明固定 `max_hand=70`。Traditional 每次完整历史；LongRunning 首回合完整历史、精确握手后才允许单 request。顶层整数、裸坐标、`{a}`、额外响应字段及缺失/错误握手均直接拒绝。
+   **传输唯一性**：上传预检与正式首回合共用 runner 的信封构造、响应解析和所选 runtime_mode；Holdem 两条路径的首请求都声明固定 `max_hand=70`。Traditional 每次完整历史；LongRunning 首回合完整历史、精确握手后才允许单 request。响应对象必须包含 `response`；平台只提交该字段，忽略 `debug` 等额外顶层字段。顶层整数、裸坐标、缺少 `response` 的 `{a}` 及缺失/错误握手仍直接拒绝；游戏 payload 的类型与形状继续由各 GameSpec 严格校验。
 
 2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。赛制代码依赖公共结果字段，不读取扑克 pot/board/holes。Holdem 的权威胜者是 `result.winner`（按累计 `final_chips`），正常结束时原始 `match_end` 事件的 `winner` 目前可能为 `null`；持久化与编排不得用该事件覆盖结果胜者。`tests/test_result_contract.py` 与 runtime 回归覆盖此约束。
 

@@ -291,7 +291,7 @@ docker run --rm -i --platform linux/amd64 \
 
 1. 拒绝不是 Linux x86_64 ELF 的文件；
 2. 使用与正式对局首回合相同的完整历史信封；
-3. 要求响应是只含 `response` 的对象；
+3. 要求响应对象包含 `response`，忽略其他顶层字段；
 4. 校验本游戏的 response payload 类型；
 5. LongRunning 额外要求精确握手。
 
@@ -311,7 +311,7 @@ docker run --rm -i --platform linux/amd64 \
 | 忘记换行或 flush | 决策超时并技术判负 | 每次输出完整行后立即 flush |
 | 顶层输出 `0` | `protocol_error` | 输出 `{"response":0}` |
 | 棋类输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
-| 附加 `debug/data/globaldata` | `protocol_error` | 响应对象只保留 `response` |
+| 附加 `debug/data/globaldata` | 平台忽略 | 只有 `response` 参与对局与历史重放 |
 | LongRunning 未精确握手 | `protocol_error`，不回退 | 首响应后立即输出固定握手行 |
 | Holdem 把正数当目标总额 | 游戏动作错误 | 正数是本次额外投入筹码 |
 | Traditional 不重放棋类历史 | 后续可能重复落子 | 重放全部 `requests[]/responses[]` |

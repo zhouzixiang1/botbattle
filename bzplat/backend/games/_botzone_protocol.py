@@ -2,8 +2,8 @@
 
 Traditional 与 LongRunning 只是进程生命周期不同，二者共享同一份 JSON
 契约：Traditional（以及 LongRunning 首回合）接收完整历史信封，LongRunning
-握手后的回合接收单 request 信封；Bot 的每个响应都必须是只含
-``response`` 的 JSON 对象。
+握手后的回合接收单 request 信封；Bot 的每个响应都必须是包含
+``response`` 的 JSON 对象。平台只消费 ``response``，其余顶层字段忽略。
 
 这里同时提供正式对局与上传预检复用的严格响应解码和 LongRunning 握手校验，
 避免各游戏维护一套更宽松的“预检协议”。游戏模块只负责校验 ``response``
@@ -54,16 +54,16 @@ def dumps_longrunning_single(request: Any) -> str:
 
 
 def loads_response(line: str) -> dict[str, Any]:
-    """解码并验证唯一响应顶层；游戏 payload 由调用方继续校验。"""
+    """解码响应顶层并丢弃平台不消费的扩展字段。"""
     envelope = json.loads(line)
-    extract_response_payload(envelope)
-    return envelope
+    return {"response": extract_response_payload(envelope)}
 
 
 def extract_response_payload(envelope: Any) -> Any:
     """从唯一合法响应信封中取 payload。
 
-    顶层必须恰好为 ``{"response": ...}``；裸响应或任何其他字段一律拒绝。
+    顶层必须包含 ``response``；裸响应或缺少该字段仍拒绝。Bot 可附带
+    ``debug`` 等扩展字段，平台不读取、不持久化，也不让它们影响裁判。
     """
     if not isinstance(envelope, dict):
         raise ResponseProtocolError(
@@ -72,11 +72,6 @@ def extract_response_payload(envelope: Any) -> Any:
     if "response" not in envelope:
         raise ResponseProtocolError(
             "missing_response", TECHNICAL_INCIDENT_MESSAGES["missing_response"]
-        )
-    extra_fields = set(envelope) - {"response"}
-    if extra_fields:
-        raise ResponseProtocolError(
-            "unexpected_fields", TECHNICAL_INCIDENT_MESSAGES["unexpected_fields"]
         )
     return envelope["response"]
 
@@ -94,7 +89,7 @@ def decode_response_payload(
         ) from exc
     payload = extract_response_payload(envelope)
     try:
-        validate_payload(payload)
+        payload = validate_payload(payload)
     except (TypeError, ValueError, KeyError) as exc:
         raise ResponseProtocolError(
             "invalid_response", TECHNICAL_INCIDENT_MESSAGES["invalid_response"]

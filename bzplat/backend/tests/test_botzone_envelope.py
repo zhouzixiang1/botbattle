@@ -77,10 +77,8 @@ def test_extract_payload_missing_response_raises():
 
 
 @pytest.mark.parametrize("field", ["debug", "data", "globaldata", "a"])
-def test_response_envelope_rejects_every_non_response_field(field):
-    with pytest.raises(bz.ResponseProtocolError) as raised:
-        bz.extract_response_payload({"response": 0, field: "obsolete"})
-    assert raised.value.code == "unexpected_fields"
+def test_response_envelope_ignores_every_non_response_field(field):
+    assert bz.extract_response_payload({"response": 0, field: "ignored"}) == 0
 
 
 def test_loads_response_invalid_raises():
@@ -88,10 +86,16 @@ def test_loads_response_invalid_raises():
         bz.loads_response("not json")
 
 
-@pytest.mark.parametrize("line", ["0", "[]", "{}", '{"response":0,"debug":1}'])
+@pytest.mark.parametrize("line", ["0", "[]", "{}"])
 def test_loads_response_itself_enforces_the_unique_top_level(line):
     with pytest.raises(bz.ResponseProtocolError):
         bz.loads_response(line)
+
+
+def test_loads_response_normalizes_away_ignored_top_level_fields():
+    assert bz.loads_response('{"response":0,"debug":"visible only to bot"}') == {
+        "response": 0
+    }
 
 
 def test_traditional_vs_longrunning_envelope_difference():

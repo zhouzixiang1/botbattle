@@ -47,14 +47,15 @@ ARM64 ELF 和原始 `.py` 都不属于可运行格式。跨系统构建见
 
 - 平台的每个请求信封占一行。
 - Bot 的每个响应必须是一个 JSON 对象，占一行并立即 flush stdout。
-- 响应对象只允许一个顶层字段 `response`：
+- 响应对象必须包含顶层字段 `response`：
 
 ```json
 {"response":<本游戏的响应 payload>}
 ```
 
 `response` 的值由游戏决定：Holdem 是整数动作码；Gomoku / Pencil 是含 `x`、`y`
-整数坐标的对象。整个响应不能直接输出整数或坐标对象，也不能附加其他字段。
+整数坐标的对象。整个响应不能直接输出整数或坐标对象。可附带 `debug` 等其他顶层
+字段，平台会忽略它们；真正参与历史重放和裁判的只有 `response`。
 
 上传预检使用所选运行模式的同一首回合信封和同一响应校验；LongRunning 预检也必须
 完成握手。预检采用独立的 **8 秒首回合健康检查**，只用于确认程序能启动并完成一次通信，
@@ -166,10 +167,11 @@ card = (点数 - 2) * 4 + 花色
 | 情况 | 处理 |
 |------|------|
 | 非法 JSON、顶层非对象 | `protocol_error` 技术判负 |
-| 缺少 `response`、额外顶层字段、response 类型错误 | `protocol_error` 技术判负 |
+| 缺少 `response` 或 response 类型错误 | `protocol_error` 技术判负 |
+| 附带 `debug` 等额外顶层字段 | 忽略额外字段，只处理 `response` |
 | 顶层整数或裸 `{x,y}` | `protocol_error` 技术判负 |
-| LongRunning 握手缺失或错误 | `protocol_error` 技术判负，不回退 |
-| 决策或握手超时 | `timeout` / 协议技术负，首个故障即结束 |
+| Bot 决策超时 | `timeout` 技术判负，首个故障即结束 |
+| LongRunning 握手缺失、超时或内容错误 | `protocol_error` 技术判负，不回退 |
 | 响应格式正确，但加注或落子违反游戏规则 | 交给对应游戏裁判处理 |
 | 平台沙箱自身故障 | 对局中止，不评分 |
 

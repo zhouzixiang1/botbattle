@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PlatformHoldemResponseEnvelope",
-  "description": "平台唯一现行 Holdem 响应信封。顶层只能包含 response；-1=fold，-2=all-in，0=call/check，正整数=额外投入筹码。",
+  "description": "平台唯一现行 Holdem 响应信封。顶层必须包含 response；平台忽略其他字段。-1=fold，-2=all-in，0=call/check，正整数=额外投入筹码。",
   "type": "object",
   "required": ["response"],
-  "additionalProperties": false,
+  "additionalProperties": true,
   "properties": {
     "response": {
       "type": "integer",

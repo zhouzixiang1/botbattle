@@ -76,7 +76,6 @@ class _ScriptedTransport:
         ("{}", "missing_response"),
         ("not-json", "invalid_json"),
         ("[]", "invalid_envelope"),
-        ('{"response":0,"debug":"retired"}', "unexpected_fields"),
         ('{"response":"0"}', "invalid_response"),
     ],
 )
@@ -104,6 +103,27 @@ def test_botzone_response_faults_are_not_committed_or_defaulted(line, code):
     assert session.responses == []
     assert session.turn == 0
     assert "/private" not in str(raised.value)
+
+
+def test_botzone_decide_ignores_extra_top_level_fields_and_commits_only_response():
+    transport = _ScriptedTransport('{"response":0,"debug":"attachment output"}')
+    session = _TransportSession("/private/bot.bin", "traditional")
+    transport._sessions["bot"] = session
+
+    move = asyncio.run(
+        _botzone_decide(
+            transport,
+            "bot",
+            {"hand": 0},
+            game_id="holdem",
+            action_timeout=1,
+            failed_seat=0,
+        )
+    )
+
+    assert move == {"response": 0}
+    assert session.responses == [0]
+    assert session.turn == 1
 
 
 @pytest.mark.parametrize("runtime_mode", ["longrunning", "traditional"])

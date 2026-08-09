@@ -6,7 +6,7 @@
 - **Request 负载字段全名**：``num_players`` / ``dealer_id`` / ``my_id`` / ``my_chips``
   / ``my_cards``(0-51) / ``public_cards``(0-51) / ``history``(对象数组) / ``hand``
   / ``max_hand`` / ``total_win_chips`` / ``total_win_games``。
-- **Response 信封唯一为 ``{"response": int}``**：其中整数 payload 的
+- **Response 信封必须包含 ``{"response": int}``**；平台忽略其他顶层字段。其中整数 payload 的
   ``-1``=fold, ``-2``=allin, ``0``=call/check, ``>0``=raise **额外加注量**
   （=「需要额外下注的筹码」= raise_to_total - 当前已下注额）。
 - **牌编码 0-51**：``card % 4`` = 花色（0♥ 1♦ 2♠ 3♣），``card // 4 + 2`` = 点数（2..14）。
@@ -146,13 +146,13 @@ def action_to_history_int(action: str, raise_extra: int | None) -> int:
 def parse_response(raw: Any) -> tuple[str, int | None]:
     """解析 Bot 输出 → ``(action_name, raise_delta | None)``。
 
-    只接受唯一现行信封 ``{"response": <整数>}``；裸值或任何其他顶层字段
-    都不是合法通信输入。
+    唯一现行信封必须包含 ``{"response": <整数>}``；裸值或缺少该字段
+    不是合法通信输入，其他顶层字段不参与动作解析。
 
     返回：raise 时第二个元素是 **raise delta**（额外量，非 raise-to-total）。
     """
-    if not isinstance(raw, dict) or set(raw) != {"response"}:
-        raise ValueError('响应必须是且仅是 {"response": int} 信封')
+    if not isinstance(raw, dict) or "response" not in raw:
+        raise ValueError('响应必须包含 {"response": int} 信封')
     payload = raw["response"]
     if isinstance(payload, bool) or not isinstance(payload, int):
         raise ValueError(f"response 必须是整数，得到 {payload!r}")
@@ -174,13 +174,13 @@ def dumps_request(req: dict[str, Any]) -> str:
 
 
 def loads_response(line: str) -> dict[str, Any]:
-    """严格解析唯一现行响应信封。"""
+    """解析响应信封并只返回平台消费的 ``response``。"""
     from bzplat.backend.games import _botzone_protocol as envelope_protocol
 
     obj = json.loads(line)
     payload = envelope_protocol.extract_response_payload(obj)
-    validate_response_payload(payload)
-    return obj
+    payload = validate_response_payload(payload)
+    return {"response": payload}
 
 
 def validate_response_payload(payload: Any) -> Any:

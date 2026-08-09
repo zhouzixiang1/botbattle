@@ -17,7 +17,7 @@ Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 和 `.py` 源文件不能上�
 
 ## 协议速查
 
-- Bot 每次输出 `{"response":...}`，顶层只能有 `response`。
+- Bot 每次输出包含 `{"response":...}` 的对象；平台忽略其他顶层字段。
 - Traditional 每回合收到完整 `{"requests":[...],"responses":[...]}` 信封。
 - LongRunning 首回合同样收到完整信封，首个响应后必须输出精确握手；握手失败不会降级。
 - stdin 与 stdout 均为一行一条消息，Bot 输出后必须立即 flush。

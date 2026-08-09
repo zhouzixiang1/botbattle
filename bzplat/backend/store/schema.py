@@ -472,7 +472,6 @@ TECHNICAL_INCIDENT_MESSAGES = {
     "invalid_json": "Bot 输出不是合法 JSON",
     "invalid_envelope": "Bot 响应信封必须是 JSON 对象",
     "missing_response": "Bot 响应缺少必填 response 字段",
-    "unexpected_fields": "Bot 响应信封只允许 response 字段",
     "invalid_response": "Bot response 字段不符合本游戏协议",
     "missing_keep_running": "LongRunning Bot 未输出 KEEP_RUNNING 握手",
     "invalid_keep_running": "LongRunning Bot 的 KEEP_RUNNING 握手不正确",

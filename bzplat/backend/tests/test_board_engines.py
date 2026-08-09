@@ -143,10 +143,11 @@ def test_board_protocol_roundtrip():
     assert "t" not in g  # Botzone 化后无 t 字段
     p = build_pencil_request(x=1, y=0, pass_=1, me=1, scores=[2, 1])
     assert p["pass"] == 1 and p["scores"] == [2, 1]
-    # 只接受唯一 response 信封；裸坐标与额外字段均拒绝。
+    # response 必填；顶层调试字段忽略，游戏 payload 仍严格只有 x/y。
     assert parse_xy({"x": 3, "y": 4}) == (None, None)
     assert parse_xy({"response": {"x": 5, "y": 10}}) == (5, 10)
-    assert parse_xy({"response": {"x": 5, "y": 10}, "debug": "x"}) == (None, None)
+    assert parse_xy({"response": {"x": 5, "y": 10}, "debug": "x"}) == (5, 10)
+    assert parse_xy({"response": {"x": 5, "y": 10, "debug": "x"}}) == (None, None)
     assert parse_xy({}) == (None, None)
     assert parse_xy({"response": {}}) == (None, None)
 

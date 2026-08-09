@@ -101,7 +101,7 @@ def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
 
 @pytest.mark.parametrize("game_id", ["holdem", "gomoku", "pencil"])
 @pytest.mark.parametrize("runtime_mode", ["traditional", "longrunning"])
-def test_preflight_rejects_extra_response_fields_in_every_game_and_mode(
+def test_preflight_ignores_extra_top_level_response_fields_in_every_mode(
     game_id, runtime_mode
 ):
     payload = json.loads(VALID_LINES[game_id])["response"]
@@ -117,8 +117,8 @@ def test_preflight_rejects_extra_response_fields_in_every_game_and_mode(
             runtime_mode=runtime_mode,
         )
     )
-    assert not ok
-    assert "只允许 response" in detail
+    assert ok, detail
+    assert transport.stopped == ["s0"]
 
 
 @pytest.mark.parametrize("handshake", [None, "KEEP_RUNNING", " KEEP_RUNNING "])

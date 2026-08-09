@@ -2,8 +2,8 @@
 
 8 种不同策略的 holdem Bot（用于赛事功能验证：策略多样性让对局结果非全是平局，
 能真实排名）。它们使用平台唯一的标准信封：Traditional 完整历史，或 LongRunning
-首回合完整历史 + 精确 keep-running 握手 + 后续单 request；响应对象只能包含
-`response`，其值为整数动作码（`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量），
+首回合完整历史 + 精确 keep-running 握手 + 后续单 request；响应对象必须包含
+`response`（其他顶层字段忽略），其值为整数动作码（`-1` fold / `-2` allin / `0` call-check / `>0` raise 额外量），
 牌编码 0-51（`%4` 花色 0♥1♦2♠3♣）。详见 [协议规范](../../wiki/PROTOCOL.md)。
 
 | Bot | 策略 | 预期表现 |
@@ -40,7 +40,7 @@ bash samples/holdem_bots/gen.sh
 ```
 后续回合（LongRunning）单 request：`{"request":{...}}`
 
-响应信封（Bot → 平台）：`{"response": <整数动作码>}`，顶层只允许该字段。
+响应信封（Bot → 平台）：`{"response": <整数动作码>}`；平台只读取该字段，忽略其他顶层字段。
 - `-1`=fold `-2`=allin `0`=call/check `>0`=raise **额外下注筹码**（= 目标总额 − 本街已投）
 
 这些样例同时支持两种模式，并在首回合响应后输出 LongRunning 握手。本平台默认

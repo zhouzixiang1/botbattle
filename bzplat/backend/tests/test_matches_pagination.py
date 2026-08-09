@@ -141,7 +141,7 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
         }
         for turn, code in enumerate(
             (
-                "unexpected_fields",
+                "invalid_response",
                 "missing_keep_running",
                 "invalid_keep_running",
             ),
@@ -178,7 +178,7 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
     assert {
         sample["code"]
         for sample in by_id["mh2"]["result"]["technical_incident_samples"]
-    } == {"unexpected_fields", "missing_keep_running", "invalid_keep_running"}
+    } == {"invalid_response", "missing_keep_running", "invalid_keep_running"}
     assert all(
         "历史记录" not in sample["error"]
         for sample in by_id["mh2"]["result"]["technical_incident_samples"]

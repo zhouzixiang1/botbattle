@@ -2831,12 +2831,12 @@ def admin_logs(
 # slug 为文件名（去 .md）。索引按固定顺序排列，缺失文件自动跳过。
 # 精简为 7 页（核心 = 3 游戏；功能说明统一进 GUIDE）。
 WIKI_PAGES: list[dict[str, str]] = [
-    {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "站内文档导航与 Botzone 差异总览"},
-    {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "Botzone 标准对局协议、信封、两模式、卡牌编码"},
+    {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "玩家快速上手、协议与游戏规则导航"},
+    {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "请求/响应信封、两种运行模式与动作编码"},
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
-    {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "Botzone 规则摘要与本平台协议对照"},
-    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议、样例 + 一手交换变体"},
-    {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "交错网格、pass 连走与协议"},
+    {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
+    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议与 C/Python 示例"},
+    {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},
     {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/段位/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
 ]
 
