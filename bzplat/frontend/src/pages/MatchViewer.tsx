@@ -507,6 +507,7 @@ export default function MatchViewer() {
             : status === 'connecting' ? '连接中'
             : '回放'
           const variant = showLive ? STATUS_VARIANT['live']
+            : status === 'error' ? STATUS_VARIANT['error']
             : dbStatus ? (STATUS_VARIANT[dbStatus] ?? 'secondary')
             : (STATUS_VARIANT[status] ?? 'secondary')
           return (
