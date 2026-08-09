@@ -57,8 +57,8 @@ interface Props {
 }
 
 const RUNTIME_MODES = [
-  { value: 'longrunning', label: 'LongRunning（长驻，推荐）', desc: '进程整场不重启；首回合完整历史 + 握手后单 request。适合有昂贵初始化（如神经网络）的 Bot。' },
-  { value: 'traditional', label: 'Traditional（传统）', desc: '每回合发完整历史信封，Bot 自重放重建状态。适合无状态、易调试的 Bot。' },
+  { value: 'traditional', label: 'Traditional（默认）', desc: '每个决策点重启进程并发送完整历史信封，Bot 须自行重放。' },
+  { value: 'longrunning', label: 'LongRunning（严格长驻）', desc: '进程整场不重启；首回合响应后必须输出 KEEP_RUNNING 握手，之后接收单 request。缺少握手会被拒绝。' },
 ]
 
 function fmtSize(n: number): string {

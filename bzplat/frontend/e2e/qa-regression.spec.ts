@@ -792,6 +792,8 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await botRow.getByRole('button', { name: '版本', exact: true }).click()
   const manager = page.getByRole('dialog').filter({ hasText: `版本管理 · ${primaryBot.name}` })
   await expect(manager.getByText('版本历史', { exact: true })).toBeVisible()
+  await expect(manager.getByRole('combobox').filter({ hasText: 'Traditional（默认）' })).toBeVisible()
+  await expect(manager.getByText(/每个决策点重启进程并发送完整历史信封/)).toBeVisible()
   await expect(manager.getByText(/^v\d+$/).first()).toBeVisible()
   releaseSlow()
   await page.waitForTimeout(200)

@@ -201,14 +201,14 @@ export default function MyBots() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="longrunning">LongRunning（长驻，推荐）</SelectItem>
-                  <SelectItem value="traditional">Traditional（传统）</SelectItem>
+                  <SelectItem value="traditional">Traditional（默认）</SelectItem>
+                  <SelectItem value="longrunning">LongRunning（严格长驻）</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
                 {runtimeMode === 'longrunning'
-                  ? '进程整场不重启；首回合完整历史 + 握手后单 request。'
-                  : '每回合发完整历史信封，Bot 自重放重建状态。'}
+                  ? '进程整场不重启；首回合响应后必须输出 KEEP_RUNNING 握手，之后接收单 request。缺少握手会被拒绝。'
+                  : '平台默认模式；每个决策点重启进程并发送完整历史信封，Bot 须自行重放。'}
               </p>
             </div>
             <div className="space-y-1.5">
