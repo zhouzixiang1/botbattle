@@ -87,7 +87,7 @@ def main() -> int:
         if opp:
             d2 = req(base, "POST", "/api/matches/challenge", token=t, body={
                 "game_id": "holdem", "my_bot_id": holdem["id"],
-                "opponent_bot_id": opp["id"], "match_config": {"hands": 10},
+                "opponent_bot_id": opp["id"],
             })
             mid = d2.get("match_id") or d2.get("id")
             check("发起挑战", bool(mid), str(mid or d2.get("_body", ""))[:60])
@@ -105,7 +105,7 @@ def main() -> int:
     dc = req(base, "POST", "/api/contests", token=to, body={
         "title": "smoke 赛事", "description": "脚本测试",
         "template_id": "holdem_swiss_ko", "game_id": "holdem",
-        "match_config": {"hands": 70}, "require_real_name": False,
+        "require_real_name": False,
     })
     contest = dc.get("contest") or dc
     check("创建赛事", bool(contest.get("id")), str(contest.get("id") or dc.get("_body", ""))[:60])
@@ -121,7 +121,7 @@ def main() -> int:
     # 玩家不能建赛事
     r = req(base, "POST", "/api/contests", token=t, body={
         "title": "x", "template_id": "holdem_swiss_ko", "game_id": "holdem",
-        "match_config": {"hands": 70}, "require_real_name": False,
+        "require_real_name": False,
     })
     check("玩家建赛事被拒(403)", r.get("_status") == 403, f"status={r.get('_status')}")
     # 玩家不能访问 admin 接口

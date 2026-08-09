@@ -19,6 +19,7 @@ from bzplat.backend.games.holdem.engine import (
     STARTING_STACK,
     Action,
     MatchSession,
+    generate_deal_sequence,
 )
 from bzplat.backend.games.holdem.protocol import RESP_ALLIN, RESP_CALL_CHECK, RESP_FOLD
 
@@ -109,6 +110,23 @@ def test_short_match_check_call_bots():
     starts = [e for e in result.events if e["type"] == "hand_start"]
     assert starts[0]["sb"] == 0
     assert starts[1]["sb"] == 1
+
+
+def test_duplicate_deal_sequence_uses_only_canonical_card_encoding():
+    """duplicate 与普通发牌共用 ``0♥1♦2♠3♣`` 整数编码。"""
+    first = generate_deal_sequence(3, seed=20260809)
+    second = generate_deal_sequence(3, seed=20260809)
+    assert first == second
+    assert all(sorted(hand) == list(range(52)) for hand in first)
+
+    # 用顺序牌直接驱动一手：座0 依次收 0=2♥、1=2♦，座1 收
+    # 2=2♠、3=2♣。旧 0♠1♥2♦3♣ 转换路径会使该断言失败。
+    session = MatchSession(num_hands=1, deal_sequence=[list(range(52))])
+    result = asyncio.run(session.run_async(lambda _seat, _req: {"response": RESP_FOLD}))
+    holes = next(event["holes"] for event in result.events if event["type"] == "deal_hole")
+    assert holes == [["2h", "2d"], ["2s", "2c"]]
+    assert result.winner == 1
+    assert result.final_chips == [-SMALL_BLIND, SMALL_BLIND]
 
 
 def test_raise_validation_exact_2x():

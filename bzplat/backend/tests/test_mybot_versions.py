@@ -588,7 +588,7 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
 
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
     orch = MatchOrchestrator(store, runner=_FakeRunner(), max_concurrent=1)
-    mid = asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 2}, game_id="holdem"))
+    mid = asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], game_id="holdem"))
     # 等对局完成
     for _ in range(40):
         import time

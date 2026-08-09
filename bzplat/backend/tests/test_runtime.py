@@ -422,7 +422,7 @@ def test_orchestrator_resolves_holdem_winner_non_null():
         import asyncio
 
         async def _run():
-            mid = await orch.challenge(ba["id"], bb["id"], u["id"], match_config={"hands": 10}, game_id="holdem")
+            mid = await orch.challenge(ba["id"], bb["id"], u["id"], game_id="holdem")
             task = orch._tasks.get(mid)
             if task:
                 await asyncio.wait_for(task, timeout=60)
@@ -438,34 +438,11 @@ def test_orchestrator_resolves_holdem_winner_non_null():
         store.close()
 
 
-def test_challenge_validates_match_params_per_game():
-    """#123：游戏规则参数（手数等）已钉死固定值，challenge 的 match_config 不再控制手数。
-
-    旧测试断言 hands=999/hands=0 触发 ValueError；现手数固定 DEFAULT_HANDS（70），
-    match_config 里的 hands 字段被忽略（不校验、不生效）。本测试验证：传任意 hands
-    不再触发校验错误（challenge 成功建 match 或因 /dev/null 崩，但非校验失败）。
-    """
-    import os
-    import tempfile
+def test_orchestrator_has_no_external_match_config_argument():
+    """内部编排 API 不再保留会静默忽略的旧规则入口。"""
+    import inspect
 
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
-    from bzplat.backend.store import Store
 
-    os.environ.setdefault("BZ_BOT_LOCAL", "1")
-    with tempfile.TemporaryDirectory() as td:
-        store = Store(str(td + "/v.db"))
-        u = store.create_user("vtest", "v@e.com", "x")
-        ba = store.create_bot(u["id"], "vbotA", binary_path="/dev/null", format="elf", game_id="holdem")
-        bb = store.create_bot(u["id"], "vbotB", binary_path="/dev/null", format="elf", game_id="holdem")
-        store.ensure_rating(ba["id"]); store.ensure_rating(bb["id"])
-        orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
-
-        # hands 参数被忽略（手数固定），不触发校验错误
-        for cfg in ({"hands": 999}, {"hands": 0}, {"hands": 100}, {}):
-            try:
-                asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], match_config=cfg, game_id="holdem"))
-            except ValueError as e:
-                assert "match 参数非法" not in str(e), f"cfg={cfg} 不应触发校验失败（手数固定）"
-            except Exception:
-                pass  # /dev/null 跑不起来是预期的，校验已过即可
-        store.close()
+    assert "match_config" not in inspect.signature(MatchOrchestrator.challenge).parameters
+    assert "match_config" not in inspect.signature(MatchOrchestrator.challenge_human).parameters

@@ -727,7 +727,6 @@ def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
             await bot_task
         human_mid = await orch.challenge_human(
             ba["id"], owner["id"], human_seat=1, game_id="gomoku",
-            match_config={"hands": 999, "n_dots": 999},  # 兼容参数明确忽略
         )
         human_task = orch._tasks.get(human_mid)
         if human_task is not None:

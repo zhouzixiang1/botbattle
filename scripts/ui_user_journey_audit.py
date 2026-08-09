@@ -398,7 +398,7 @@ def main() -> int:
     code, ch = api(
         "POST",
         "/api/matches/challenge",
-        {"my_bot_id": 787, "opponent_bot_id": 790, "game_id": "holdem", "hands": 4},
+        {"my_bot_id": 787, "opponent_bot_id": 790, "game_id": "holdem"},
         token=utoken,
     )
     print(f"  challenge create: {code} {str(ch)[:120]}")

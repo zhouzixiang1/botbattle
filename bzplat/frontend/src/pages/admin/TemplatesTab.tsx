@@ -30,7 +30,6 @@ interface Template {
   id: string
   name: string
   game_id: GameId
-  match_config: Record<string, number>
   stages: Stage[]
   is_builtin?: number | boolean
 }
@@ -54,7 +53,6 @@ const emptyTemplate = (): Template => ({
   id: '',
   name: '',
   game_id: 'holdem',
-  match_config: {},
   stages: [emptyStage(0)],
 })
 
@@ -87,10 +85,9 @@ export default function TemplatesTab() {
     void load()
   }, [load])
 
-  // 切换 game：规则参数已钉死，match_config 恒空
   const changeGame = (gid: GameId) => {
     if (!editing) return
-    setEditing({ ...editing, game_id: gid, match_config: {} })
+    setEditing({ ...editing, game_id: gid })
   }
 
   const patchStage = (i: number, patch: Partial<Stage>) => {
@@ -179,7 +176,7 @@ export default function TemplatesTab() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">赛制模板：阶段对阵 + 计分 + 对局参数。内置模板可改不可删。</p>
+        <p className="text-xs text-muted-foreground">赛制模板：阶段对阵 + 计分。游戏规则固定，内置模板可改不可删。</p>
         <div className="flex gap-2">
           <RefreshBtn onClick={load} />
           <button
@@ -214,7 +211,7 @@ export default function TemplatesTab() {
                 type="button"
                 onClick={() => {
                   setIsNew(false)
-                  setEditing({ ...t, match_config: t.match_config || {} })
+                  setEditing({ ...t })
                   setPreview(null)
                 }}
                 className="rounded-lg border border-input bg-card px-3 py-1 text-xs text-muted-foreground hover:bg-accent"

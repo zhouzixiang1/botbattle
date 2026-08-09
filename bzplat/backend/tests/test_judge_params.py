@@ -1,8 +1,4 @@
-"""裁判规则参数（settings → 引擎）贯通测试。
-
-验证：settings 写入后 `_judge_params` 能读到、`run_session` 用新参数构造 Session、
-缺失/非法 settings 时用引擎常量兜底；admin 端点 GET/PATCH 的鉴权与范围校验。
-"""
+"""固定裁判规则回归：旧 settings/admin 入口不再影响现行引擎。"""
 from __future__ import annotations
 
 import asyncio
@@ -18,11 +14,6 @@ from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import (
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
-)
 
 
 @pytest.fixture()
@@ -36,42 +27,39 @@ def orch(store):
     return MatchOrchestrator(store, runner=runner, max_concurrent=1)
 
 
-# ── _judge_params 读取与兜底（per-game，PR2 起 _judge_params(gid)）─────────
+def test_legacy_judge_settings_are_not_read_by_orchestrator(store):
+    """存量 platform_settings 可留在旧库，但不得再注入任何对局。"""
+    store.set_setting("judge_holdem_starting_stack", "5000")
+    store.set_setting("judge_holdem_sb", "25")
+    store.set_setting("judge_holdem_bb", "50")
+    user = store.create_user("fixedrules", "fixed@example.com", "x")
+    a = store.create_bot(user["id"], "fixed_a", binary_path="/tmp/a", format="elf", game_id="holdem")
+    b = store.create_bot(user["id"], "fixed_b", binary_path="/tmp/b", format="elf", game_id="holdem")
+    store.ensure_rating(a["id"])
+    store.ensure_rating(b["id"])
+    captured: dict = {}
 
-def test_judge_params_defaults_when_unset(orch):
-    """未写 settings 时该游戏字段返回 None（交由引擎常量兜底）。
+    class FixedRunner:
+        async def run_binaries(self, *args, **kwargs):
+            captured.update(kwargs)
 
-    游戏规则参数（手数/棋盘/点阵）已钉死，不在 judge_params 声明；
-    holdem 仅 stack/sb/bb 三个字段。
-    """
-    # holdem：3 个字段全 None（手数已钉死，移除 num_hands）
-    jp_h = orch._judge_params("holdem")
-    assert jp_h == {"starting_stack": None, "sb": None, "bb": None}
-    # gomoku：棋盘边长已钉死，无 judge 参数
-    jp_g = orch._judge_params("gomoku")
-    assert jp_g == {}
-    # pencil：无 judge 参数
-    jp_p = orch._judge_params("pencil")
-    assert jp_p == {}
+            class Result:
+                rounds_played = 0
+                rounds = []
+                winner = None
+                events = []
 
+            return Result()
 
-def test_judge_params_reads_settings(orch, store):
-    """写入合法 settings 后 _judge_params(gid) 读到对应值（按游戏分组）。"""
-    store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "5000")
-    store.set_setting(SETTING_JUDGE_HOLDEM_SB, "25")
-    store.set_setting(SETTING_JUDGE_HOLDEM_BB, "50")
-    h = orch._judge_params("holdem")
-    assert h["starting_stack"] == 5000 and h["sb"] == 25 and h["bb"] == 50
-    # num_hands 已钉死，不再作为 judge 参数返回
+    orchestrator = MatchOrchestrator(store, runner=FixedRunner(), max_concurrent=1)
 
+    async def exercise():
+        mid = await orchestrator.challenge(a["id"], b["id"], user["id"], game_id="holdem")
+        await orchestrator._tasks[mid]
 
-def test_judge_params_bad_values_fall_back(orch, store):
-    """非法值（负数/非数字/空串）返回 None，由引擎兜底。"""
-    store.set_setting(SETTING_JUDGE_HOLDEM_STACK, "0")
-    store.set_setting(SETTING_JUDGE_HOLDEM_BB, "-5")
-    store.set_setting(SETTING_JUDGE_HOLDEM_SB, "")
-    h = orch._judge_params("holdem")
-    assert h["starting_stack"] is None and h["sb"] is None and h["bb"] is None
+    asyncio.run(exercise())
+    assert not {"starting_stack", "sb", "bb"}.intersection(captured)
+    assert not hasattr(orchestrator, "_judge_params")
 
 
 # ── run_session 用新参数构造 Session ──────────────────────────────
@@ -224,100 +212,23 @@ def _admin_client(tmp_path):
     return client, app
 
 
-def _plain_client(tmp_path):
-    """普通用户客户端（用于验证 403）。"""
-    db = str(tmp_path / "judge_plain.db")
-    app = create_app(db_path=db, max_concurrent=1)
-    store: Store = app.state.store
-    u = store.create_user("plain", "p@ex.com", hash_password("password12"), role="user")
-    store.update_user(u["id"], email_verified=1)
-    _, token = app.state.auth.authenticate("plain", "password12")
-    client = TestClient(app)
-    client.headers["Authorization"] = f"Bearer {token}"
-    return client
-
-
-def test_get_judges_returns_all_games(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.get("/api/admin/judges")
+def test_public_judges_is_the_only_rules_listing(tmp_path):
+    client, app = _admin_client(tmp_path)
+    r = client.get("/api/judges")
     assert r.status_code == 200
     data = r.json()
     gids = [g["game_id"] for g in data["games"]]
     assert gids == ["holdem", "gomoku", "pencil"]
-    # 每款游戏带代码位置与 docstring
     for g in data["games"]:
         assert g["code_path"].endswith(".py")
-        assert isinstance(g["docstring"], str)
-    # holdem 有 4 个参数，gomoku 1 个，pencil/reversi 0 个
-    holdem = next(g for g in data["games"] if g["game_id"] == "holdem")
-    gomoku = next(g for g in data["games"] if g["game_id"] == "gomoku")
-    pencil = next(g for g in data["games"] if g["game_id"] == "pencil")
-    # holdem 3 个（stack/sb/bb；手数已钉死）；gomoku 0 个（棋盘已钉死）；pencil 0 个
-    assert len(holdem["params"]) == 3
-    assert len(gomoku["params"]) == 0
-    assert pencil["params"] == []
-
-
-def test_get_judges_non_admin_forbidden(tmp_path):
-    client = _plain_client(tmp_path)
-    r = client.get("/api/admin/judges")
-    assert r.status_code == 403
-
-
-def test_patch_judge_params_updates_and_hot(tmp_path):
-    client, app = _admin_client(tmp_path)
-    # gomoku 棋盘边长已钉死，不再可调；仅 patch holdem 的 sb
-    r = client.patch(
+    assert client.get("/api/admin/judges").status_code == 404
+    assert client.patch(
         "/api/admin/judges/params",
         json={"params": {"judge_holdem_sb": 25}},
-    )
-    assert r.status_code == 200, r.text
-    updated = r.json()["updated"]
-    assert updated["judge_holdem_sb"] == 25
-    # 热生效：_judge_params(gid) 立即读到新值
-    jp_holdem = app.state.orch._judge_params("holdem")
-    assert jp_holdem["sb"] == 25
-    # 返回的 judges 总览也反映新值
-    holdem = next(g for g in r.json()["judges"]["games"] if g["game_id"] == "holdem")
-    sb_param = next(p for p in holdem["params"] if p["key"] == "judge_holdem_sb")
-    assert sb_param["value"] == 25
-
-
-def test_patch_judge_params_out_of_bounds_rejected(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_holdem_bb": 1}},  # 下限 2
-    )
-    assert r.status_code == 400
-
-
-def test_patch_judge_params_bb_le_sb_rejected(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_holdem_sb": 100, "judge_holdem_bb": 100}},
-    )
-    assert r.status_code == 400
-    assert "盲" in r.json()["detail"]
-
-
-def test_patch_judge_params_unknown_key_rejected(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_unknown": 1}},
-    )
-    assert r.status_code == 400
-
-
-def test_patch_judge_params_non_admin_forbidden(tmp_path):
-    client = _plain_client(tmp_path)
-    r = client.patch(
-        "/api/admin/judges/params",
-        json={"params": {"judge_holdem_sb": 50}},
-    )
-    assert r.status_code == 403
+    ).status_code == 404
+    assert app.state.store.get_setting("judge_holdem_starting_stack") is None
+    assert app.state.store.get_setting("judge_holdem_sb") is None
+    assert app.state.store.get_setting("judge_holdem_bb") is None
 
 
 def test_time_budget_only_pencil():

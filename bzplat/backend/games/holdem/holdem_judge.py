@@ -66,8 +66,8 @@ class Card:
     """一张扑克牌。suit 见 Suit（0♥1♦2♠3♣，恰与 Botzone 线协议编码一致）；
     number 2..14（2=2,…,10=T,11=J,12=Q,13=K,14=A）。
 
-    str(Card) → "Ts"/"Ah"（rank 字符 + suit 字符），与平台原 cards.py 输出一致，
-    事件 payload / 前端 reducer 都依赖此格式。
+    str(Card) → "Ts"/"Ah"（rank 字符 + suit 字符），事件 payload / 前端
+    reducer 都依赖此展示格式；整数输入输出统一使用上面的 Botzone 编码。
     """
     __slots__ = ("suit", "number")
 
@@ -302,10 +302,7 @@ class Holdem:
         self.deck = [Card.from_int(card_int) for card_int in deck_array]
 
     def set_deck_from_str(self, card_strs):
-        """用 'Ts','Ah' 字符串列表设置牌序（适配层用；LIFO pop）。
-
-        字符串路径绕开内部花色编码差异——同物理牌在两种 Card 模型里都是同一字符串。
-        """
+        """用 ``'Ts'``/``'Ah'`` 字符串列表设置牌序（测试注入；LIFO pop）。"""
         self.deck = [_parse_card_str(s) for s in card_strs]
 
     def _next_player(self):

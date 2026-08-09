@@ -16,7 +16,6 @@ interface Match {
   game_id?: string
   status: string
   match_type: string
-  match_config?: Record<string, number>
   result?: {
     hands_played?: number
     deltas?: number[]

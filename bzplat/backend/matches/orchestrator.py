@@ -310,14 +310,12 @@ class MatchOrchestrator:
         *,
         human_seat: int = 1,
         game_id: str | None = None,
-        match_config: dict[str, Any] | None = None,
     ) -> str:
         """人类 vs bot：human_seat 为人类坐位（0/1），另一侧为 bot_id。
 
         人类侧无 bot/binary，走 runner.run_bot_vs_human（人类 decide 经 Future
         等待 WS 回传）。不计 Glicko；占用独立 _human_sem（不占 bot 对局槽）。
 
-        match_config 仅为兼容旧调用保留；游戏规则已固定，传入字段会被忽略。
         """
         bot = self.store.get_bot(bot_id)
         if not bot:
@@ -394,7 +392,6 @@ class MatchOrchestrator:
         match_type: str = TYPE_CHALLENGE,
         contest_id: int | None = None,
         game_id: str | None = None,
-        match_config: dict[str, Any] | None = None,
         bot_a_version_id: int | None = None,
         bot_b_version_id: int | None = None,
         duplicate: bool = False,
@@ -579,7 +576,6 @@ class MatchOrchestrator:
         match_type: str = TYPE_CHALLENGE,
         contest_id: int | None = None,
         game_id: str | None = None,
-        match_config: dict[str, Any] | None = None,
         bot_a_version_id: int | None = None,
         bot_b_version_id: int | None = None,
         duplicate_seed: int | None = None,
@@ -587,7 +583,8 @@ class MatchOrchestrator:
     ) -> str:
         """复式赛制（duplicate）对局：跑 2 leg（同副牌交换座位）合并 net 判胜负。
 
-        签名与 challenge 一致，区别仅在于 match_config 标 duplicate=True。
+        签名与 challenge 一致，duplicate 标志只在编排层内部写入
+        match_config，不是对外游戏规则配置。
         内部走 runner.run_duplicate（每 leg 同 deal_sequence，seat_swap 翻转 deltas
         累加到物理 bot）。游戏不支持 duplicate（spec.build_match_plan is None）时
         自动降级为单 leg（challenge 内部兜底，不抛错）。
@@ -602,7 +599,6 @@ class MatchOrchestrator:
             match_type=match_type,
             contest_id=contest_id,
             game_id=game_id,
-            match_config=match_config,
             bot_a_version_id=bot_a_version_id,
             bot_b_version_id=bot_b_version_id,
             duplicate=True,
@@ -753,14 +749,7 @@ class MatchOrchestrator:
                 self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
         try:
-            # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死，不再从 match_config 读取。
-            # 此处仅注入 admin judge_params（holdem 的 starting_stack/sb/bb）给 runner。
-            # duplicate=True 时透传该标志 + seed 给 runner（build_match_plan 据此生成 2 leg）。
-            mc: dict[str, Any] = {
-                k: v for k, v in self._judge_params(gid).items() if v is not None
-            }
             if want_duplicate:
-                mc["duplicate"] = True
                 result = await self.runner.run_duplicate(
                     path_a,
                     path_b,
@@ -769,7 +758,7 @@ class MatchOrchestrator:
                     seed=dup_seed,
                     runtime_modes=(mode_a, mode_b),
                     time_budget_per_side=spec.time_budget_per_side,
-                    **mc,
+                    duplicate=True,
                 )
             else:
                 result = await self.runner.run_binaries(
@@ -779,7 +768,6 @@ class MatchOrchestrator:
                     on_event=on_event,
                     runtime_modes=(mode_a, mode_b),
                     time_budget_per_side=spec.time_budget_per_side,
-                    **mc,
                 )
             # duplicate：每 leg 独立判胜负（result.legs），不把净筹码合并判 1 场。
             # 胜负完全由 standings/ranking 读 result.legs 决定；match.winner 留 None。
@@ -1271,11 +1259,7 @@ class MatchOrchestrator:
                     self._human_turns.pop((match_id, player_idx), None)
 
             try:
-                # 游戏规则参数已由 GameSpec 钉死，仅注入 admin judge_params（同 _run_match）。
                 spec = game_registry.get(gid)
-                mc: dict[str, Any] = {
-                    k: v for k, v in self._judge_params(gid).items() if v is not None
-                }
                 result = await self.runner.run_bot_vs_human(
                     bot_path,
                     bot_seat=bot_seat,
@@ -1284,7 +1268,6 @@ class MatchOrchestrator:
                     on_event=on_event,
                     runtime_mode=bot_mode,
                     time_budget_per_side=spec.time_budget_per_side,
-                    **mc,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)
                 eb = sum(r.deltas[1] for r in result.rounds)
@@ -1387,30 +1370,6 @@ class MatchOrchestrator:
                 self._release_human_match_state(
                     match_id, m.get("human_user_id")
                 )
-
-    def _judge_params(self, gid: str) -> dict[str, int | None]:
-        """从 platform_settings 读裁判规则参数（热生效）；缺失或非法时用 spec 默认兜底。
-
-        经 games 注册表取该游戏的 judge_params 声明（消除 if game_id）。
-        返回 {field: value}，field 对应 run_session 的 kwarg（如 holdem 的
-        starting_stack/sb/bb），value=None 表示用引擎默认。
-        游戏规则参数（手数/棋盘/点阵）已钉死，不在 judge_params 声明，故不在此返回。
-        """
-
-        def _int(key: str, default: int) -> int | None:
-            raw = self.store.get_setting(key)
-            if raw is None or raw == "":
-                return None
-            try:
-                v = int(raw)
-            except (TypeError, ValueError):
-                return None
-            return v if v > 0 else None
-
-        out: dict[str, int | None] = {}
-        for p in game_registry.get(gid).judge_params:
-            out[p.field] = _int(p.setting_key, p.default)
-        return out
 
     def _rating_lock_for(self, bot_id: int, game_id: str) -> asyncio.Lock:
         """获取/创建某 (bot, game) 的评分串行化锁（防同 bot 并发评分 lost-update）。

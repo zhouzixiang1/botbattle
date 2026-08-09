@@ -43,11 +43,6 @@ DEFAULT_HANDS = 70
 DecideFn = Callable[[int, dict[str, Any]], Any]  # sync or async → response dict
 EventFn = Callable[[str, dict[str, Any]], Any]
 
-# 平台内部花色编码（0♠ 1♥ 2♦ 3♣）→ suit 字符（deal_sequence int 转裁判 Card 字符串用）
-_PLATFORM_SUIT_CHAR = "shdc"
-_PLATFORM_RANK_CHAR = "23456789TJQKA"
-
-
 class Action(str, Enum):
     FOLD = "fold"
     CHECK = "check"
@@ -67,12 +62,10 @@ class Street(str, Enum):
 def generate_deal_sequence(num_hands: int, seed: int) -> list[list[int]]:
     """P4 duplicate：用 seed 确定性生成 num_hands 手的牌序。
 
-    每手是 52 张牌的洗牌序列（平台编码 rank*4+platform_suit，rank 0-12，suit 0♠1♥2♦3♣）。
+    每手是 52 张牌的洗牌序列，使用唯一的 Botzone 整数编码：
+    ``card = (rank - 2) * 4 + suit``，``suit = 0♥1♦2♠3♣``。
     同 seed → 同序列，两 leg（A-vs-B / B-vs-A）用同 deal_sequence 复现同牌局，
     净筹码相加判胜负（消除运气）。
-
-    注：这里的 int 用平台花色编码（旧 cards.py 语义），适配层 _deal_seq_to_card_strs
-    负责转成裁判 Card 字符串（绕开花色编码差异）。
     """
     rng = random.Random(seed)
     out: list[list[int]] = []
@@ -81,20 +74,6 @@ def generate_deal_sequence(num_hands: int, seed: int) -> list[list[int]]:
         rng.shuffle(cards)
         out.append(cards)
     return out
-
-
-def _deal_seq_to_card_strs(seq: list[int]) -> list[str]:
-    """deal_sequence int（平台编码 c%4=0♠1♥2♦3♣，c//4=rank 0-12）→ 裁判 Card 字符串列表。
-
-    用标准扑克记法（rank 字符 + suit 字符）绕开两套花色整数编码差异——同物理牌在
-    两种模型里都是同一字符串。返回顺序不变（调用方需自行 reversed 适配裁判 LIFO pop）。
-    """
-    return [
-        _PLATFORM_RANK_CHAR[c // 4] + _PLATFORM_SUIT_CHAR[c % 4]
-        for c in seq
-    ]
-
-
 class MatchSession:
     """Run N hands between two seats via decide(player_idx, request) → response.
 
@@ -202,16 +181,16 @@ class MatchSession:
             small_blind=self.sb,
             big_blind=self.bb,
         )
-        # 注入牌序：P4 duplicate 用预生成 deal_sequence（绕开 rng 漂移），否则用 rng 生成
+        # 注入牌序：duplicate 用预生成 deal_sequence（绕开 rng 漂移），
+        # 否则用 rng 生成。两条路径都直接交给 Card.from_int，整个引擎只有
+        # 0♥1♦2♠3♣ 一套花色整数编码。
         if self.deal_sequence is not None and hand_index < len(self.deal_sequence):
-            # 裁判 LIFO pop（deck.pop 取末尾），旧 engine FIFO deal（取头部）→ reversed 对齐
-            strs = _deal_seq_to_card_strs(self.deal_sequence[hand_index])
-            judge.set_deck_from_str(list(reversed(strs)))
+            # 裁判 LIFO pop（deck.pop 取末尾），deal_sequence 按头部先发，故反转。
+            judge.set_deck_array(list(reversed(self.deal_sequence[hand_index])))
         else:
             cards = list(range(52))
             self.rng.shuffle(cards)
-            strs = _deal_seq_to_card_strs(cards)
-            judge.set_deck_from_str(list(reversed(strs)))
+            judge.set_deck_array(list(reversed(cards)))
 
         # 发牌 + 下盲注（修复后庄家=SB）
         judge.deal_cards_and_blind()

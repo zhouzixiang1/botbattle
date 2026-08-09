@@ -21,10 +21,6 @@ interface RuntimeState {
   }
 }
 
-interface JudgesState {
-  games: Array<{ params: Array<{ key: string; value: number }> }>
-}
-
 function runtimePatch(state: RuntimeState) {
   return {
     action_timeout_sec: state.action_timeout_sec,
@@ -40,12 +36,6 @@ function runtimePatch(state: RuntimeState) {
     auto_match_max_per_round: state.auto_match.max_per_round,
     auto_match_daily_cap: state.auto_match.daily_cap,
   }
-}
-
-function judgeValues(state: JudgesState): Record<string, number> {
-  return Object.fromEntries(
-    state.games.flatMap((game) => game.params.map((param) => [param.key, param.value])),
-  )
 }
 
 async function expectNoRootOverflow(page: Page, label: string) {
@@ -66,10 +56,9 @@ for (const viewport of [
   { name: 'laptop', width: 1280, height: 720, interactive: false },
   { name: 'mobile', width: 390, height: 844, interactive: false },
 ] as const) {
-  test(`admin loads all ten tabs without runtime/network/layout errors (${viewport.name})`, async ({ page }) => {
+  test(`admin loads all nine tabs without runtime/network/layout errors (${viewport.name})`, async ({ page }) => {
     test.setTimeout(viewport.interactive ? 150_000 : 90_000)
     let runtimeSnapshot: RuntimeState | null = null
-    let judgeSnapshot: Record<string, number> | null = null
     await withCleanup(async () => {
       await page.setViewportSize(viewport)
       const monitor = monitorBrowser(page)
@@ -78,9 +67,6 @@ for (const viewport of [
         const runtimeResponse = await page.request.get('/api/admin/settings/runtime')
         expect(runtimeResponse.status(), await runtimeResponse.text()).toBe(200)
         runtimeSnapshot = await runtimeResponse.json() as RuntimeState
-        const judgesResponse = await page.request.get('/api/admin/judges')
-        expect(judgesResponse.status(), await judgesResponse.text()).toBe(200)
-        judgeSnapshot = judgeValues(await judgesResponse.json() as JudgesState)
       }
       await page.goto('/#/admin')
 
@@ -244,25 +230,6 @@ for (const viewport of [
     }
     await expectNoRootOverflow(page, 'runtime')
 
-    await page.getByRole('button', { name: '裁判', exact: true }).click()
-    await expect(page.getByRole('button', { name: '保存参数', exact: true })).toBeVisible()
-    if (viewport.interactive) {
-      const input = page.getByRole('spinbutton').first()
-      const original = Number(await input.inputValue())
-      const min = Number(await input.getAttribute('min'))
-      const max = Number(await input.getAttribute('max'))
-      const changed = original < max ? original + 1 : Math.max(min, original - 1)
-      await input.fill(String(changed))
-      const responsePromise = page.waitForResponse(
-        (response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname === '/api/admin/judges/params',
-      )
-      await page.getByRole('button', { name: '保存参数', exact: true }).click()
-      expect((await responsePromise).status()).toBe(200)
-      await expect(page.getByText(/已保存并热生效/)).toBeVisible()
-
-    }
-    await expectNoRootOverflow(page, 'judges')
-
     await page.getByRole('button', { name: '日志', exact: true }).click()
     const logSearch = page.getByPlaceholder('对局 ID / Bot ID / 模块 / IP / 操作')
     await expect(logSearch).toBeVisible()
@@ -307,21 +274,6 @@ for (const viewport of [
       await monitor.expectClean()
     }, async () => {
       const tasks: Array<{ label: string; run: () => Promise<void> }> = []
-      if (judgeSnapshot) {
-        const originalJudges = judgeSnapshot
-        tasks.push({
-          label: 'restore judge parameters',
-          run: async () => {
-            const restore = await page.request.patch('/api/admin/judges/params', {
-              data: { params: originalJudges },
-            })
-            expect(restore.status(), await restore.text()).toBe(200)
-            const verify = await page.request.get('/api/admin/judges')
-            expect(verify.status(), await verify.text()).toBe(200)
-            expect(judgeValues(await verify.json() as JudgesState)).toEqual(originalJudges)
-          },
-        })
-      }
       if (runtimeSnapshot) {
         const originalRuntime = runtimeSnapshot
         tasks.push({

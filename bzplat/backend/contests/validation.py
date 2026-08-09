@@ -34,9 +34,15 @@ def validate_template_id(tid: str) -> None:
 
 
 def validate_match_config(cfg: Any, game_id: str) -> dict:
-    """校验并返回规整后的 match_config（经 games 注册表，消除 if game_id）。"""
+    """赛制模板不接受游戏规则覆盖；仅空对象是合法内部结构。"""
     gid = (game_id or "holdem").strip().lower()
-    return _reg.get(gid).validate_match_params(cfg)
+    _reg.get(gid)  # 同时校验 game_id
+    if not isinstance(cfg, dict):
+        raise ValueError("match_config 必须是对象")
+    if cfg:
+        fields = ", ".join(sorted(str(key) for key in cfg))
+        raise ValueError(f"游戏规则已固定，不接受 match_config 字段：{fields}")
+    return {}
 
 
 def validate_stage(stage: dict, idx: int, game_id: str = "") -> dict:

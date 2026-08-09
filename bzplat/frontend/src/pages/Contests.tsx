@@ -23,11 +23,9 @@ interface Contest {
   title: string
   status: string
   description?: string
-  hands_per_match?: number
   created_at?: string
   template_id?: string
   game_id?: string
-  match_config_json?: string
   require_real_name?: number
   registration_opens_at?: string | null
   registration_closes_at?: string | null

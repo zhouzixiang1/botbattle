@@ -54,7 +54,7 @@ async def main():
 
     c = cm.create(
         org["id"], "E2E预赛16人v2", template_id="holdem_prelim_swiss",
-        hands_per_match=4, game_id="holdem",
+        game_id="holdem",
     )
     cid = c["id"]
     print(f"已建预赛 contest id={cid} phase={c.get('phase')}")

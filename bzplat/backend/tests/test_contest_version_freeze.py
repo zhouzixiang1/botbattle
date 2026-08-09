@@ -45,7 +45,7 @@ def test_published_pairing_snapshot_version(tmp_path):
         for i, uid in enumerate(users)
     ]
     c = s.create_contest(
-        "P1冻结", organizer_id=u, game_id="holdem", hands_per_match=1,
+        "P1冻结", organizer_id=u, game_id="holdem",
         stages_json='[{"key":"s1","type":"round_robin","scoring":"poker_3_1_0"}]',
     )["id"]
     for uid, bid in zip(users, bots):
@@ -89,7 +89,7 @@ def test_dispatch_does_not_change_published_pairing(tmp_path):
     s.add_bot_version(ba, binary_path="/tmp/v_a", version=1)
     s.add_bot_version(bb, binary_path="/tmp/v_b", version=1)
     c = s.create_contest(
-        "P1dispatch", organizer_id=u, game_id="holdem", hands_per_match=1,
+        "P1dispatch", organizer_id=u, game_id="holdem",
         stages_json='[{"key":"s1","type":"double_round_robin","scoring":"poker_3_1_0","allow_bot_swap_in_rest":true}]',
     )["id"]
     s.add_contest_entry(c, ua, ba)

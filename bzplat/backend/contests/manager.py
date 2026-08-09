@@ -61,14 +61,6 @@ def _parse_stages(c: dict) -> list[dict]:
         return []
 
 
-def _match_config(c: dict) -> dict:
-    """赛事对局配置。游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死固定值，
-    不再从 match_config_json/hands_per_match 读取；此处保留空 dict 占位
-    （orchestrator.challenge 不再消费游戏规则参数，仅用版本快照等内部键）。
-    """
-    return {}
-
-
 def _estimate_sec_per_match(gid: str, cfg: dict) -> int:
     """粗估每场时长（秒）：经 spec.eta_for_match（各游戏已钉死固定 ETA）。"""
     return game_registry.get(gid).eta_for_match(cfg)
@@ -103,11 +95,9 @@ class ContestManager:
         title: str,
         *,
         description: str = "",
-        hands_per_match: int = 70,
         template_id: str | None = None,
         game_id: str | None = None,
         stages: list[dict] | None = None,
-        match_config: dict | None = None,
         phase: str = "standalone",
         source_contest_id: int | None = None,
         require_real_name: int = 0,
@@ -141,22 +131,17 @@ class ContestManager:
             tpl = get_template(tid)
             if tpl and tpl.get("phase"):
                 phase = tpl["phase"]
-        # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死，赛事不再存 match_config；
-        # match_config_json 落空 dict（DB 列保留向后兼容，但不再承载游戏规则）。
-        cfg: dict = {}
         # 时间校验：开放报名 <= 截止报名 <= 开赛（相同秒合法）
         _validate_contest_times(registration_opens_at, registration_closes_at, starts_at)
         return self.store.create_contest(
             title,
             organizer_id,
             description=description,
-            hands_per_match=hands_per_match,
             status="draft",
             game_id=gid,
             template_id=tid,
             stages_json=json.dumps(stage_list, ensure_ascii=False),
             current_stage_idx=0,
-            match_config_json=json.dumps(cfg, ensure_ascii=False),
             phase=phase,
             source_contest_id=source_contest_id,
             require_real_name=require_real_name,
@@ -1211,7 +1196,6 @@ class ContestManager:
         if c["status"] == CONTEST_PUBLISHED:
             self._ensure_published_pairings_locked(contest_id, stage_idx)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
-        cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         gid = c.get("game_id") or "holdem"
         now = _now()
         # P2 residual：阶段配置 duplicate=True 且游戏 spec 支持 build_match_plan（仅 holdem）
@@ -1221,8 +1205,6 @@ class ContestManager:
         stage_cfg = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
         spec = game_registry.get(gid) if gid in REGISTERED_ENGINES else None
         want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
-        # cfg 的键就是该游戏的 match_config 字段（holdem→{"hands"}, pencil→{"n_dots"},
-        # 第 4 游戏自带其字段）。challenge() 透传整包，无需按字段名逐条硬判断。
         # ``running`` 或已有 match_id 表示本批次前已有真实进度。此时某一场准备失败
         # 不能把整个 start API 报成“全失败”：保留已启动场，失败 pairing 仍 pending，
         # 记录日志并让 scheduler 后续重试。仅 published 且零进度的首场失败向上抛。
@@ -1252,8 +1234,6 @@ class ContestManager:
                 technical_adjudicated = True
                 continue
             # 冻结快照已在 pairing 行；直接开打
-            # cfg 是该游戏的 match_config（holdem→{"hands"}, pencil→{"n_dots"}），
-            # 整包传给 challenge(match_config=...)，无需按字段名逐条具名传递。
             # duplicate=True 时用对阵 pair 派生的确定性 seed（pairing.id 稳定），
             # 保证两 leg 同副牌可复现。
             try:
@@ -1261,7 +1241,6 @@ class ContestManager:
                     c,
                     p,
                     gid=gid,
-                    cfg=cfg,
                     want_duplicate=want_duplicate,
                     activate_running=(
                         c.get("status") == CONTEST_PUBLISHED and not had_progress
@@ -1289,7 +1268,6 @@ class ContestManager:
         pairing: dict,
         *,
         gid: str,
-        cfg: dict,
         want_duplicate: bool,
         activate_running: bool,
     ) -> str:
@@ -1303,7 +1281,6 @@ class ContestManager:
             "match_type": TYPE_CONTEST,
             "contest_id": contest["id"],
             "game_id": gid,
-            "match_config": cfg,
             "bot_a_version_id": pairing.get("bot_a_version_id"),
             "bot_b_version_id": pairing.get("bot_b_version_id"),
             "defer_start": True,
@@ -1811,7 +1788,6 @@ class ContestManager:
         # 锁内必须重检，终态不得再派发或制造 aborted 占位对局。
         if not c or c["status"] != CONTEST_RUNNING:
             return
-        cfg = _match_config(c)
         gid = c.get("game_id") or "holdem"
         # 复式赛制判断（与 _dispatch_pending_locked 一致）——reconcile 重派也保留
         # duplicate 标志（复审 P2-2），否则同赛事出现 duplicate/单 leg 混合。
@@ -1835,7 +1811,6 @@ class ContestManager:
                     c,
                     p,
                     gid=gid,
-                    cfg=cfg,
                     want_duplicate=want_duplicate,
                     activate_running=False,
                 )
@@ -2249,8 +2224,7 @@ class ContestManager:
             conc = 2
         # 粗估每场时长：经 spec.eta_for_match（消除 if game_id）
         gid = c.get("game_id") or "holdem"
-        cfg = _match_config(c)
-        sec_per = _estimate_sec_per_match(gid, cfg)
+        sec_per = _estimate_sec_per_match(gid, {})
         eta_sec = (total / conc) * sec_per if conc else 0
         return {
             "entries": n,

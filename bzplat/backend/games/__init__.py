@@ -70,7 +70,8 @@ async def run_session(
 ) -> Any:
     """统一入口：按 game_id 取 spec 并 run_session。
 
-    规则参数（num_hands/n_dots/board_size/starting_stack/sb/bb/rng）按游戏透传。
+    平台规则由各游戏 spec 固定；``params`` 只供引擎内部复现控制（如 rng、
+    duplicate deal_sequence），不构成公开可配置规则。
     未知 game_id 抛 KeyError（行为修正：不再静默跑 holdem）。
     """
     return await registry.get(game_id).run_session(decide, on_event=on_event, **params)
@@ -100,8 +101,18 @@ def all_ids() -> frozenset[str]:
 
 
 def validate_match_config(game_id: str, cfg: Any) -> dict[str, Any]:
-    """按游戏校验并规整 match_config（替代 contests/validation.py 的 if-chain）。"""
-    return registry.get(game_id).validate_match_params(cfg)
+    """校验赛事内部 match_config；现行固定规则只允许空对象。
+
+    ``match_config`` 仍作为数据库内部快照容器存在，但公开规则已经固定，调用者
+    不能再通过此入口覆盖手数、棋盘或时限。未知游戏仍由注册表显式拒绝。
+    """
+    registry.get(game_id)
+    if not isinstance(cfg, dict):
+        raise ValueError("match_config 必须是 JSON 对象")
+    if cfg:
+        fields = ", ".join(sorted(str(key) for key in cfg))
+        raise ValueError(f"游戏规则已固定，不接受 match_config 字段：{fields}")
+    return {}
 
 
 def default_match_config(game_id: str) -> dict[str, Any]:

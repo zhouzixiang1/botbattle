@@ -61,9 +61,6 @@ from bzplat.backend.store.schema import (
     SETTING_CONTEST_SCHEDULER_INTERVAL_SEC,
     SETTING_CONTEST_TEMPLATES,
     SETTING_FULL_RR_MAX_N,
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
     SETTING_MAX_CONCURRENT,
 )
 
@@ -99,11 +96,6 @@ def _seed_runtime_settings(store: Store, env_max: int | None) -> int:
     store.seed_setting_if_absent(SETTING_BOT_MEMORY, str(BOT_MEMORY_MB))
     store.seed_setting_if_absent(SETTING_CONTEST_REST, "10")
     store.seed_setting_if_absent(SETTING_FULL_RR_MAX_N, "12")
-    # 裁判规则参数默认值（与各引擎常量对齐；admin 可在 Web 上热调）
-    # 注：手数(holdem)/棋盘边长(gomoku)/点阵(pencil) 已钉死固定值，不再作为 admin 可调项 seed。
-    store.seed_setting_if_absent(SETTING_JUDGE_HOLDEM_STACK, "20000")
-    store.seed_setting_if_absent(SETTING_JUDGE_HOLDEM_SB, "50")
-    store.seed_setting_if_absent(SETTING_JUDGE_HOLDEM_BB, "100")
     store.seed_setting_if_absent(
         SETTING_CONTEST_TEMPLATES,
         json.dumps(list_templates(), ensure_ascii=False),

@@ -57,8 +57,6 @@ export default function Challenge() {
   const [pickingSeat, setPickingSeat] = useState<'s1' | 's2' | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  // 对局级配置（游戏无关，当前规则参数已钉死固定值，恒空对象）。
-  const matchCfg: Record<string, number> = {}
 
   const resetSeatsOnGameChange = useCallback(() => {
     setSeats([{ ...EMPTY_SEAT }, { ...EMPTY_SEAT }])
@@ -164,7 +162,6 @@ export default function Challenge() {
         const body: Record<string, unknown> = {
           bot_id: seats[0].bot.id,
           human_seat: 1, // 固定：人类 = 后端座 1 = 后手/白
-          match_config: { ...matchCfg },
           game_id: gameId,
         }
         // 注：HumanChallengeBody 不接受 bot_version_id，故座位 1 选版本时人类对战忽略版本。
@@ -177,7 +174,6 @@ export default function Challenge() {
       const body: Record<string, unknown> = {
         my_bot_id: seats[0].bot.id,
         opponent_bot_id: seats[1].bot.id,
-        match_config: { ...matchCfg },
         game_id: gameId,
       }
       if (seats[0].versionId !== undefined) body.my_bot_version_id = seats[0].versionId

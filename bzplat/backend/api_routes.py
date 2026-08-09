@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.stages import estimate_match_count
 from bzplat.backend.contests.validation import validate_stage, validate_template
+from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.limits import (
     ACTION_TIMEOUT_MAX,
@@ -61,9 +62,6 @@ from bzplat.backend.store.schema import (
     SETTING_AUTO_MATCH_RESERVE_SLOTS,
     SETTING_AUTO_MATCH_STALE_SEC,
     SETTING_CONTEST_REST,
-    SETTING_JUDGE_HOLDEM_BB,
-    SETTING_JUDGE_HOLDEM_SB,
-    SETTING_JUDGE_HOLDEM_STACK,
     SETTING_MAX_CONCURRENT,
     STATUS_ABORTED,
     STATUS_COMPLETED,
@@ -567,17 +565,59 @@ def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
 
 # ── matches ───────────────────────────────────────────────────
 
+_FIXED_RULE_OVERRIDE_FIELDS = frozenset({
+    "match_config",
+    "hands",
+    "num_hands",
+    "hands_per_match",
+    "n_dots",
+    "board_size",
+    "grid_size",
+    "starting_stack",
+    "small_blind",
+    "big_blind",
+    "sb",
+    "bb",
+    "stack",
+    "initial_stack",
+    "time_limit",
+    "time_limit_per_side",
+    "time_budget_per_side",
+})
+
+
+def _find_fixed_rule_overrides(value: Any) -> set[str]:
+    """Find legacy rule keys nested in generic stage dictionaries."""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        found.update(_FIXED_RULE_OVERRIDE_FIELDS.intersection(value))
+        for child in value.values():
+            found.update(_find_fixed_rule_overrides(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.update(_find_fixed_rule_overrides(child))
+    return found
+
+
+def _reject_fixed_rule_overrides(value: Any) -> None:
+    fields = _find_fixed_rule_overrides(value)
+    if fields:
+        raise HTTPException(
+            400,
+            "游戏规则为平台固定契约，不允许覆盖字段: "
+            + ", ".join(sorted(fields)),
+        )
+
+
 class ChallengeBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     my_bot_id: int
     opponent_bot_id: int
     # 版本快照（可选）：指定各座位跑哪个版本。缺省/None=当前激活版本。
     # 自博弈（my_bot_id == opponent_bot_id）允许——用于同 bot 新旧版本对比。
     my_bot_version_id: int | None = None
     opponent_bot_version_id: int | None = None
-    # 对局级配置（如 {"hands":70}/{"n_dots":6}）；缺省/空用 spec.default_match_params。
-    # 取代散落的 hands/n_dots 具名字段——第 4 游戏带新参数无需改本 Body。范围校验交
-    # spec.validate_match_params（holdem 1-500；棋类忽略 hands）。
-    match_config: dict = Field(default_factory=dict)
     game_id: str | None = None
 
 
@@ -597,7 +637,6 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             body.my_bot_id,
             body.opponent_bot_id,
             user["id"],
-            match_config=body.match_config,
             game_id=body.game_id,
             bot_a_version_id=body.my_bot_version_id,
             bot_b_version_id=body.opponent_bot_version_id,
@@ -610,11 +649,11 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
 
 
 class HumanChallengeBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     bot_id: int
     human_seat: int = 1  # 0 或 1，人类坐哪位
     game_id: str | None = None
-    # 对局级配置（同 ChallengeBody.match_config）；缺省用 spec 默认。
-    match_config: dict = Field(default_factory=dict)
 
 
 @router.post("/api/matches/human")
@@ -628,7 +667,6 @@ async def challenge_human(body: HumanChallengeBody, request: Request, user=Depen
             user["id"],
             human_seat=body.human_seat,
             game_id=body.game_id,
-            match_config=body.match_config,
         )
     except ValueError as e:
         audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))
@@ -661,6 +699,13 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     # 不在路由重复发送，否则每次连接都会收到两份相同快照，造成前端重复归约。
     q = orch.subscribe(match_id)
     human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
+    try:
+        protocol = game_registry.get(m.get("game_id") or "").protocol
+    except KeyError:
+        await websocket.send_json({"type": "error", "message": "对局游戏协议不存在"})
+        await websocket.close()
+        orch.unsubscribe(match_id, q)
+        return
 
     async def pump_events():
         while True:
@@ -672,7 +717,21 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     async def receive_actions():
         while True:
             msg = await websocket.receive_json()
-            move = msg if isinstance(msg, dict) else {}
+            if not isinstance(msg, dict) or set(msg) != {"response"}:
+                await websocket.send_json({
+                    "type": "reject",
+                    "message": "动作协议错误：消息必须恰好包含 response 字段",
+                })
+                continue
+            try:
+                payload = protocol.validate_response_payload(msg["response"])
+            except (TypeError, ValueError) as exc:
+                await websocket.send_json({
+                    "type": "reject",
+                    "message": f"动作协议错误：{exc}",
+                })
+                continue
+            move = {"response": payload}
             if not orch.resolve_human_turn(match_id, human_seat, move):
                 await websocket.send_json({"type": "reject", "message": "当前非你的回合或动作非法"})
 
@@ -1061,13 +1120,13 @@ def update_notif_prefs(
 # ── contests ──────────────────────────────────────────────────
 
 class ContestCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     title: str
     description: str = ""
-    hands_per_match: int = 70
     template_id: str | None = None
     game_id: str | None = None
     stages: list[dict[str, Any]] | None = None
-    match_config: dict[str, Any] | None = None
     phase: str = "standalone"  # P5: preliminary/final/standalone
     source_contest_id: int | None = None  # P5: 软链（预赛→决赛导航）
     require_real_name: bool = False  # 报名是否要求实名
@@ -1085,10 +1144,30 @@ class ContestDispatch(BaseModel):
     bot_id: int
 
 
+def _template_for_api(template: dict[str, Any]) -> dict[str, Any]:
+    """Keep template match_config as storage-only metadata, never an editable API field."""
+    public = dict(template)
+    public.pop("match_config", None)
+    return public
+
+
+def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
+    """Hide legacy fixed-rule columns while preserving them in historical storage."""
+    public = dict(contest)
+    public.pop("hands_per_match", None)
+    public.pop("match_config_json", None)
+    return public
+
+
 @router.get("/api/contests/templates")
 def contest_templates(request: Request, game: str | None = None):
     # 从 contest_templates 表读（与 admin 同源，含覆盖；修复原读代码默认的不一致）
-    return {"templates": _store(request).list_contest_templates(game_id=game)}
+    return {
+        "templates": [
+            _template_for_api(t)
+            for t in _store(request).list_contest_templates(game_id=game)
+        ]
+    }
 
 
 # 未发布/已取消赛事仅该赛事组织者与管理员可见。使用 schema 常量，避免
@@ -1138,16 +1217,15 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
 
 @router.post("/api/contests")
 def create_contest(body: ContestCreate, request: Request, user=Depends(require_organizer)):
+    _reject_fixed_rule_overrides(body.stages)
     try:
         c = _contests(request).create(
             user["id"],
             body.title,
             description=body.description,
-            hands_per_match=body.hands_per_match,
             template_id=body.template_id,
             game_id=body.game_id,
             stages=body.stages,
-            match_config=body.match_config,
             phase=body.phase,
             source_contest_id=body.source_contest_id,
             require_real_name=int(body.require_real_name),
@@ -1169,7 +1247,7 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             f"closes={c.get('registration_closes_at')}; starts={c.get('starts_at')}"
         ),
     )
-    return {"contest": c}
+    return {"contest": _contest_for_api(c)}
 
 
 @router.get("/api/contests/{contest_id}")
@@ -1249,6 +1327,8 @@ def contest_detail(
     for p in pairings:
         for k in _PAIRING_DEAD:
             p.pop(k, None)
+    # 旧库列仅作历史存储；现行 API 不再暴露可覆盖的规则配置。
+    c = _contest_for_api(c)
     resp = {
         "contest": c,
         "entries": entries,
@@ -1506,7 +1586,7 @@ async def open_contest(contest_id: int, request: Request, user=Depends(require_o
         contest = await _contests(request).open_registration(contest_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/register")
@@ -1550,7 +1630,7 @@ async def start_contest(
         contest = await _contests(request).start(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/publish")
@@ -1571,7 +1651,7 @@ async def publish_contest(
     except ValueError as e:
         raise HTTPException(400, str(e))
     audit_log(request, "contest_publish", result="ok", user=user.get("username"), target=contest_id)
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/resume")
@@ -1586,7 +1666,7 @@ async def resume_contest(
         contest = await _contests(request).resume(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/advance")
@@ -1601,7 +1681,7 @@ async def advance_contest(
         contest = await _contests(request).advance(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 @router.post("/api/contests/{contest_id}/finish")
@@ -1617,7 +1697,7 @@ async def finish_contest(
         contest = await _contests(request).finish(contest_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"contest": contest}
+    return {"contest": _contest_for_api(contest)}
 
 
 # ── admin ─────────────────────────────────────────────────────
@@ -1848,9 +1928,10 @@ def admin_stats(request: Request, _admin=Depends(require_admin)):
 # ── admin: contests ───────────────────────────────────────────
 
 class AdminContestPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
     status: str | None = None
     title: str | None = None
-    hands_per_match: int | None = None
     # 时间编排（admin 可改时间窗口）
     registration_opens_at: str | None = None
     registration_closes_at: str | None = None
@@ -1866,9 +1947,9 @@ def admin_contests(
     result = _store(request).list_contests(status=status, game_id=game_id,
                                            page=page, per_page=per_page)
     if isinstance(result, dict):
-        return {"contests": result["items"], "page": result["page"],
+        return {"contests": [_contest_for_api(c) for c in result["items"]], "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"contests": result}
+    return {"contests": [_contest_for_api(c) for c in result]}
 
 
 @router.patch("/api/admin/contests/{contest_id}")
@@ -1878,8 +1959,6 @@ async def admin_patch_contest(
     fields: dict[str, Any] = {}
     if body.title is not None:
         fields["title"] = body.title
-    if body.hands_per_match is not None:
-        fields["hands_per_match"] = body.hands_per_match
     # 时间编排字段（admin 可改）
     for tk in ("registration_opens_at", "registration_closes_at", "starts_at"):
         # ``null`` 显式清空可选时间；未提交的字段由 Store 合并旧值后校验。
@@ -1948,7 +2027,7 @@ async def admin_patch_contest(
                 user=admin.get("username"), target=contest_id,
                 detail=f"status={old_status}->{target}",
             )
-        return {"contest": contest}
+        return {"contest": _contest_for_api(contest)}
 
     if not fields:
         raise HTTPException(400, "无更新字段")
@@ -1975,7 +2054,7 @@ async def admin_patch_contest(
             for key in sorted(fields)
         ),
     )
-    return {"contest": c}
+    return {"contest": _contest_for_api(c)}
 
 
 @router.delete("/api/admin/contests/{contest_id}")
@@ -2399,29 +2478,9 @@ def admin_patch_runtime(
     return {"updated": updated, "runtime": admin_get_runtime(request, admin)}
 
 
-# ── admin: 裁判引擎（规则参数热调 + 代码只读） ────────────────────
-# 裁判规则参数存 platform_settings，orchestrator 每局热读，下局即生效。
-# PR2：三张表（JUDGE_PARAM_BOUNDS/JUDGE_PARAM_DEFAULTS/JUDGE_GAMES）全部从
-# games 注册表派生——消除第 4 个并行游戏元数据来源，单一真相。
-from bzplat.backend.games import registry as _game_registry
-
-JUDGE_PARAM_DEFAULTS, JUDGE_PARAM_BOUNDS = _game_registry.judge_param_table()
-JUDGE_GAMES: list[dict[str, Any]] = _game_registry.judge_games()
-
-
-def _engine_docstring(rel_path: str) -> str:
-    """读引擎源码首段 docstring（只读展示）。rel_path 形如 bzplat/backend/engine/gomoku.py。"""
-    try:
-        # api_routes.py 在 bzplat/backend/ 下；剥离前缀后相对该目录定位
-        backend_dir = Path(__file__).resolve().parent
-        rel = rel_path.replace("bzplat/backend/", "", 1)
-        text = (backend_dir / rel).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    if not text.startswith('"""'):
-        return ""
-    end = text.find('"""', 3)
-    return text[3:end].strip() if end > 0 else ""
+# ── 公开裁判引擎（只读） ──────────────────────────────
+# 现行规则只读：公开裁判元数据仅从游戏注册表派生。
+JUDGE_GAMES: list[dict[str, Any]] = game_registry.judge_games()
 
 
 # ── 公开：裁判规则与源码（对全体玩家透明，可审计） ──────────────────
@@ -2454,7 +2513,7 @@ def public_get_judge_source(game_id: str, request: Request):
     无需登录——任意访客可查。裁判源码透明是平台公正性的基础。
     """
     try:
-        spec = _game_registry.get(game_id)
+        spec = game_registry.get(game_id)
     except KeyError:
         raise HTTPException(404, f"未注册的游戏: {game_id!r}")
     backend_dir = Path(__file__).resolve().parent
@@ -2478,82 +2537,19 @@ def public_get_judge_source(game_id: str, request: Request):
     }
 
 
-@router.get("/api/admin/judges")
-def admin_get_judges(request: Request, _admin=Depends(require_admin)):
-    store = _store(request)
-    games = []
-    for g in JUDGE_GAMES:
-        params = []
-        for prm in g["params"]:
-            key = prm["key"]
-            raw = store.get_setting(key)
-            try:
-                value = int(raw) if raw not in (None, "") else JUDGE_PARAM_DEFAULTS[key]
-            except (TypeError, ValueError):
-                value = JUDGE_PARAM_DEFAULTS[key]
-            lo, hi = JUDGE_PARAM_BOUNDS[key]
-            params.append({**prm, "value": value, "min": lo, "max": hi})
-        games.append({
-            "game_id": g["game_id"],
-            "label": g["label"],
-            "code_path": g["code_path"],
-            "summary": g["summary"],
-            "params": params,
-            "docstring": _engine_docstring(g["code_path"]),
-        })
-    # 裁判代码说明（JUDGE_CODE.md 已移至 doc/——面向开发者；玩家经 /api/judges/{game}/source 看源码）
-    judge_code_path = _wiki_dir().parent / "doc" / "JUDGE_CODE.md"
-    markdown = (
-        judge_code_path.read_text(encoding="utf-8") if judge_code_path.is_file() else ""
-    )
-    return {"games": games, "markdown": markdown}
-
-
-class JudgeParamsPatch(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    params: dict[str, int]
-
-
-@router.patch("/api/admin/judges/params")
-def admin_patch_judge_params(
-    body: JudgeParamsPatch, request: Request, _admin=Depends(require_admin)
-):
-    store = _store(request)
-    if not body.params:
-        raise HTTPException(400, "无更新字段")
-    updated: dict[str, Any] = {}
-    for key, value in body.params.items():
-        if key not in JUDGE_PARAM_BOUNDS:
-            raise HTTPException(400, f"未知裁判参数: {key}")
-        lo, hi = JUDGE_PARAM_BOUNDS[key]
-        v = int(value)
-        if v < lo or v > hi:
-            raise HTTPException(400, f"{key} 须在 {lo}–{hi}")
-        updated[key] = v
-    # bb > sb 一致性校验（若两者有任一被改，需综合校验）
-    def _cur(k: str) -> int:
-        return int(updated.get(k, store.get_setting(k)) or JUDGE_PARAM_DEFAULTS[k])
-    sb = _cur(SETTING_JUDGE_HOLDEM_SB)
-    bb = _cur(SETTING_JUDGE_HOLDEM_BB)
-    if bb <= sb:
-        raise HTTPException(400, f"大盲({bb})必须大于小盲({sb})")
-    for key, v in updated.items():
-        store.set_setting(key, str(v))
-    # 返回最新裁判总览
-    return {"updated": updated, "judges": admin_get_judges(request, _admin)}
-
-
 # ── admin: 赛制模板 CRUD ──────────────────────────────────────
 class TemplateBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     id: str
     name: str
     game_id: str
-    match_config: dict[str, Any] = {}
     stages: list[dict[str, Any]]
 
 
 class TemplatePreviewBody(BaseModel):
+    model_config = {"extra": "forbid"}
+
     stages: list[dict[str, Any]]
     n: int = 8
     game_id: str = "holdem"
@@ -2563,7 +2559,12 @@ class TemplatePreviewBody(BaseModel):
 def admin_list_templates(
     request: Request, game: str | None = None, _admin=Depends(require_admin)
 ):
-    return {"templates": _store(request).list_contest_templates(game_id=game)}
+    return {
+        "templates": [
+            _template_for_api(t)
+            for t in _store(request).list_contest_templates(game_id=game)
+        ]
+    }
 
 
 @router.post("/api/admin/templates")
@@ -2573,15 +2574,16 @@ def admin_create_template(
     store = _store(request)
     if store.get_contest_template(body.id) is not None:
         raise HTTPException(409, f"模板 id 已存在：{body.id}")
+    _reject_fixed_rule_overrides(body.stages)
     try:
-        norm = validate_template(body.id, body.name, body.game_id, body.match_config, body.stages)
+        norm = validate_template(body.id, body.name, body.game_id, {}, body.stages)
     except ValueError as e:
         raise HTTPException(400, str(e))
     t = store.upsert_contest_template(
         norm["id"], name=norm["name"], game_id=norm["game_id"],
         match_config=norm["match_config"], stages=norm["stages"], is_builtin=False,
     )
-    return {"template": t}
+    return {"template": _template_for_api(t)}
 
 
 @router.put("/api/admin/templates/{tid}")
@@ -2594,8 +2596,9 @@ def admin_update_template(
     existing = store.get_contest_template(tid)
     if existing is None:
         raise HTTPException(404, f"模板不存在：{tid}")
+    _reject_fixed_rule_overrides(body.stages)
     try:
-        norm = validate_template(body.id, body.name, body.game_id, body.match_config, body.stages)
+        norm = validate_template(body.id, body.name, body.game_id, {}, body.stages)
     except ValueError as e:
         raise HTTPException(400, str(e))
     t = store.upsert_contest_template(
@@ -2603,7 +2606,7 @@ def admin_update_template(
         match_config=norm["match_config"], stages=norm["stages"],
         is_builtin=bool(existing.get("is_builtin")),
     )
-    return {"template": t}
+    return {"template": _template_for_api(t)}
 
 
 @router.delete("/api/admin/templates/{tid}")
@@ -2624,6 +2627,7 @@ def admin_preview_template(
     body: TemplatePreviewBody, request: Request, _admin=Depends(require_admin)
 ):
     """dry-run：给定 stages + 人数 n → 各阶段 / 总场数预估。"""
+    _reject_fixed_rule_overrides(body.stages)
     try:
         norm_stages = [validate_stage(s, i, body.game_id) for i, s in enumerate(body.stages)]
     except ValueError as e:

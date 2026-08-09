@@ -47,7 +47,6 @@ interface Contest {
   description?: string
   status: string
   organizer_id: number
-  hands_per_match?: number
   template_id?: string
   /** 可选：后端/模板表解析出的可读名 */
   template_name?: string

@@ -2,13 +2,13 @@
 
 验证通用层的 if game_id 分支已被 spec 能力取代：
 - orchestrator 用 spec.rounds_per_match / spec.normalize_earnings（不再 GAME_HOLDEM）
-- _judge_params(gid) per-game（只返回该游戏字段）
 - contests estimate 经 spec.eta_for_match
-- validate_match_config 经 spec.validate_match_params
+- validate_match_config 对固定规则只接受空对象
 - 段位 per-game：/api/tiers?game_id= 返回该游戏曲线；bot_profile/leaderboard 按 bot 的 game_id 取段位
 """
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.games import registry
@@ -61,17 +61,18 @@ def test_estimate_gomoku_fixed():
     assert a == b > 0
 
 
-# ── validate_match_config 经 spec（已钉死，忽略配置）─────────────
-def test_validate_match_config_delegates_to_spec():
+# ── validate_match_config 固定规则拒绝旧配置 ────────────────────
+def test_validate_match_config_rejects_nonempty_config():
     from bzplat.backend.contests.validation import validate_match_config
 
-    # holdem：手数钉死，忽略 hands 字段，返回空
-    assert validate_match_config({"hands": 100}, "holdem") == {}
+    for game_id, config in (
+        ("holdem", {"hands": 100}),
+        ("pencil", {"n_dots": 9}),
+        ("gomoku", {"board_size": 19}),
+    ):
+        with pytest.raises(ValueError, match="游戏规则已固定"):
+            validate_match_config(config, game_id)
     assert validate_match_config({}, "holdem") == {}
-    # pencil：n_dots 钉死，返回空
-    assert validate_match_config({"n_dots": 9}, "pencil") == {}
-    # gomoku 无参数
-    assert validate_match_config({"x": 1}, "gomoku") == {}
 
 
 # ── DEFAULT_MATCH_CONFIG 从注册表派生 ──────────────────────────
@@ -147,11 +148,7 @@ def test_leaderboard_tier_uses_game_id(tmp_path):
 
 # ── admin JUDGE_GAMES 从注册表派生 ─────────────────────────────
 def test_judge_games_derived_from_registry():
-    from bzplat.backend.api_routes import JUDGE_GAMES, JUDGE_PARAM_BOUNDS, JUDGE_PARAM_DEFAULTS
+    from bzplat.backend.api_routes import JUDGE_GAMES
 
     gids = {g["game_id"] for g in JUDGE_GAMES}
     assert gids == registry.all_ids()
-    # 与 registry.judge_param_table 一致
-    d, b = registry.judge_param_table()
-    assert JUDGE_PARAM_DEFAULTS == d
-    assert JUDGE_PARAM_BOUNDS == b

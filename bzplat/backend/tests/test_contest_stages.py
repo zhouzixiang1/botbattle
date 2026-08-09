@@ -186,7 +186,6 @@ def test_swiss_ko_smoke_pairings(store: Store):
         game_id=gid,
         template_id=tid,
         stages_json=json.dumps(stages),
-        hands_per_match=1,
     )
     for u, b in zip(users, bots):
         store.add_contest_entry(c["id"], u["id"], b["id"])
@@ -199,7 +198,7 @@ def test_swiss_ko_smoke_pairings(store: Store):
 
         async def challenge(
             self, a, b, owner_user_id, *, match_type="contest", contest_id=None,
-            game_id=None, match_config=None, **k
+            game_id=None, **k
         ):
             self.n += 1
             mid = f"fake-match-{self.n}"
@@ -211,7 +210,7 @@ def test_swiss_ko_smoke_pairings(store: Store):
                 contest_id=contest_id,
                 match_type=match_type,
                 game_id=game_id,
-                match_config=match_config,
+                match_config={},
             )
             return mid
 
@@ -307,8 +306,8 @@ def test_full_rr_rejects_large_n(store: Store):
     asyncio.run(run())
 
 
-def test_match_config_hands_dispatched_for_holdem(store: Store):
-    """holdem 比赛：match_config.hands 透传到 challenge。"""
+def test_legacy_holdem_contest_config_is_not_dispatched(store: Store):
+    """旧库 match_config_json 即使含 hands，也不得进入现行对局。"""
     users, bots = _mk_bots(store, 2)
     org = users[0]
     c = store.create_contest(
@@ -326,11 +325,11 @@ def test_match_config_hands_dispatched_for_holdem(store: Store):
 
     class FakeOrch:
         async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                            contest_id=None, game_id=None, match_config=None, **k):
-            seen["match_config"] = match_config
+                            contest_id=None, game_id=None, **k):
+            seen["kwargs"] = k
             seen["game_id"] = game_id
             store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               match_type=match_type, game_id=game_id, match_config=match_config)
+                               match_type=match_type, game_id=game_id, match_config={})
             return "m1"
 
     mgr = ContestManager(store, FakeOrch())  # type: ignore
@@ -339,13 +338,12 @@ def test_match_config_hands_dispatched_for_holdem(store: Store):
         await mgr._dispatch_pending(c["id"], 0)
 
     asyncio.run(run())
-    # #123：hands 钉死固定，match_config 不再含 hands
-    assert seen["match_config"] == {}
+    assert "match_config" not in seen["kwargs"]
     assert seen["game_id"] == "holdem"
 
 
-def test_match_config_n_dots_dispatched_for_pencil(store: Store):
-    """pencil 比赛：match_config.n_dots 透传到 challenge。"""
+def test_legacy_pencil_contest_config_is_not_dispatched(store: Store):
+    """旧库 match_config_json 即使含 n_dots，也不得进入现行对局。"""
     users, bots = _mk_bots(store, 2, game_id="pencil")
     org = users[0]
     c = store.create_contest(
@@ -362,11 +360,11 @@ def test_match_config_n_dots_dispatched_for_pencil(store: Store):
 
     class FakeOrch:
         async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                            contest_id=None, game_id=None, match_config=None, **k):
-            seen["match_config"] = match_config
+                            contest_id=None, game_id=None, **k):
+            seen["kwargs"] = k
             seen["game_id"] = game_id
             store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               match_type=match_type, game_id=game_id, match_config=match_config)
+                               match_type=match_type, game_id=game_id, match_config={})
             return "m1"
 
     mgr = ContestManager(store, FakeOrch())  # type: ignore
@@ -375,8 +373,7 @@ def test_match_config_n_dots_dispatched_for_pencil(store: Store):
         await mgr._dispatch_pending(c["id"], 0)
 
     asyncio.run(run())
-    # #123：n_dots 钉死固定，match_config 不再含 n_dots
-    assert seen["match_config"] == {}
+    assert "match_config" not in seen["kwargs"]
     assert seen["game_id"] == "pencil"
 
 
@@ -403,12 +400,12 @@ class _FakeOrch:
         self.n = 0
 
     async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                        contest_id=None, game_id=None, match_config=None, **k):
+                        contest_id=None, game_id=None, **k):
         self.n += 1
         mid = f"fake-match-{contest_id}-{self.n}"
         self.store.create_match(
             mid, a, b, owner_id=owner_user_id, contest_id=contest_id,
-            match_type=match_type, game_id=game_id, match_config=match_config or {},
+            match_type=match_type, game_id=game_id, match_config={},
         )
         return mid
 

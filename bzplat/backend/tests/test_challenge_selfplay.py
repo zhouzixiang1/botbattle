@@ -30,7 +30,7 @@ def test_selfplay_same_bot_allowed(tmp_path):
     s.ensure_rating(b["id"])
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
     # 旧逻辑会 raise "不能与自己对战"；现允许
-    mid = asyncio.run(orch.challenge(b["id"], b["id"], u, match_config={"hands": 1}, game_id="holdem"))
+    mid = asyncio.run(orch.challenge(b["id"], b["id"], u, game_id="holdem"))
     assert mid, "自博弈应成功建 match"
     m = s.get_match(mid)
     assert m["bot_a_id"] == b["id"] and m["bot_b_id"] == b["id"], "自博弈双方都是同 bot"
@@ -50,7 +50,7 @@ def test_challenge_version_pinning(tmp_path):
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
     mid = asyncio.run(orch.challenge(
         ba["id"], bb["id"], u,
-        match_config={"hands": 1}, game_id="holdem",
+        game_id="holdem",
         bot_a_version_id=va2["id"], bot_b_version_id=vb2["id"],
     ))
     m = s.get_match(mid)
@@ -76,7 +76,7 @@ def test_challenge_wrong_version_rejected(tmp_path):
     with pytest.raises(ValueError, match="座位1 指定的版本"):
         asyncio.run(orch.challenge(
             ba["id"], bb["id"], u,
-            match_config={"hands": 1}, game_id="holdem",
+            game_id="holdem",
             bot_b_version_id=va_other["id"],  # 属于 ba 不属于 bb
         ))
     s.close()

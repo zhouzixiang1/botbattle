@@ -8,7 +8,7 @@
 - validate_match_config / default_match_config 按游戏
 - 段位曲线 per-game
 - schema 的 REGISTERED_ENGINES/VALID_GAME_IDS 与注册表一致
-- judge_games 元信息从注册表派生
+- 公开裁判源码元信息从注册表派生
 """
 from __future__ import annotations
 
@@ -166,23 +166,22 @@ def test_protocol_loads_board_rejects_garbage():
 
 # ── validate / default match_config ───────────────────────────
 def test_validate_match_config_holdem():
-    # 手数已钉死 DEFAULT_HANDS，不再接受配置；忽略任何传入字段，返回空 dict。
-    assert validate_match_config("holdem", {"hands": 100}) == {}
     assert validate_match_config("holdem", {}) == {}
-    assert validate_match_config("holdem", {"hands": 0}) == {}  # 不再校验范围
+    with pytest.raises(ValueError, match="游戏规则已固定"):
+        validate_match_config("holdem", {"hands": 100})
 
 
 def test_validate_match_config_pencil():
-    # 点阵边长已钉死 DEFAULT_N（6），不再接受配置；忽略任何传入字段。
-    assert validate_match_config("pencil", {"n_dots": 11}) == {}
     assert validate_match_config("pencil", {}) == {}
-    assert validate_match_config("pencil", {"n_dots": 2}) == {}  # 不再校验范围
+    with pytest.raises(ValueError, match="游戏规则已固定"):
+        validate_match_config("pencil", {"n_dots": 11})
 
 
 def test_validate_match_config_gomoku_no_params():
-    """五子棋单局无可调参数，返回空 dict，忽略任意字段。"""
+    """五子棋单局无可调参数，非空对象显式拒绝。"""
     assert validate_match_config("gomoku", {}) == {}
-    assert validate_match_config("gomoku", {"foo": 1}) == {}
+    with pytest.raises(ValueError, match="游戏规则已固定"):
+        validate_match_config("gomoku", {"foo": 1})
 
 
 def test_default_match_config_per_game():
@@ -252,27 +251,6 @@ def test_judge_games_derived():
             "protocol.py",
             "result.py",
         ]
-    # holdem 有 3 个裁判参数（stack/sb/bb；手数已钉死移除）
-    holdem = next(g for g in games if g["game_id"] == "holdem")
-    assert len(holdem["params"]) == 3
-    # gomoku 0 个（棋盘边长已钉死移除）
-    gomoku = next(g for g in games if g["game_id"] == "gomoku")
-    assert len(gomoku["params"]) == 0
-    # pencil 0 个
-    pencil = next(g for g in games if g["game_id"] == "pencil")
-    assert len(pencil["params"]) == 0
-
-
-def test_judge_param_table():
-    defaults, bounds = registry.judge_param_table()
-    # holdem 的 3 个 setting key 都在（stack/sb/bb；手数已钉死移除）
-    assert schema.SETTING_JUDGE_HOLDEM_STACK in defaults
-    assert defaults[schema.SETTING_JUDGE_HOLDEM_STACK] == 20000
-    # gomoku 棋盘边长已钉死，不在 judge_param_table
-    assert schema.SETTING_JUDGE_GOMOKU_SIZE not in bounds
-    # pencil 无全局 judge 参数
-    pencil_keys = {p.setting_key for p in registry.get("pencil").judge_params}
-    assert pencil_keys == set()
 
 
 # ── preflight_check（bot 上传时试跑验证）──────────────────────

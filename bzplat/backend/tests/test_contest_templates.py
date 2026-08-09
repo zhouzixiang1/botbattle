@@ -71,10 +71,9 @@ def test_list_filter_by_game(store: Store):
 def test_validate_template_ok():
     norm = validate_template(
         "cup1", "杯赛", "pencil",
-        {"n_dots": 9}, [{"key": "g", "type": "group_double_round_robin", "group_count": 2}],
+        {}, [{"key": "g", "type": "group_double_round_robin", "group_count": 2}],
     )
     assert norm["game_id"] == "pencil"
-    # n_dots 已钉死，match_config 规整为空（传入值被忽略）
     assert norm["match_config"] == {}
     assert norm["stages"][0]["group_count"] == 2
 
@@ -94,19 +93,18 @@ def test_validate_rejects_group_count_on_non_group():
         validate_stage({"type": "swiss", "group_count": 4}, 0)
 
 
-def test_validate_match_config_holdem_ignored():
-    # 手数已钉死，validate 忽略任何 hands 字段，返回空 dict（不再校验范围）
-    assert validate_match_config({"hands": 1}, "holdem") == {}
-    assert validate_match_config({"hands": 500}, "holdem") == {}
-    assert validate_match_config({"hands": 0}, "holdem") == {}  # 不再抛 ValueError
-    assert validate_match_config({"hands": 999}, "holdem") == {}
+def test_validate_match_config_holdem_rejects_old_fields():
+    assert validate_match_config({}, "holdem") == {}
+    for config in ({"hands": 1}, {"num_hands": 70}, {"starting_stack": 20_000}):
+        with pytest.raises(ValueError, match="游戏规则已固定"):
+            validate_match_config(config, "holdem")
 
 
-def test_validate_match_config_pencil_ignored():
-    # 点阵边长已钉死，validate 忽略任何 n_dots 字段，返回空 dict
-    assert validate_match_config({"n_dots": 3}, "pencil") == {}
-    assert validate_match_config({"n_dots": 15}, "pencil") == {}
-    assert validate_match_config({"n_dots": 2}, "pencil") == {}  # 不再抛 ValueError
+def test_validate_match_config_pencil_rejects_old_fields():
+    assert validate_match_config({}, "pencil") == {}
+    for config in ({"n_dots": 3}, {"time_limit": 900}):
+        with pytest.raises(ValueError, match="游戏规则已固定"):
+            validate_match_config(config, "pencil")
 
 
 def test_validate_template_id_format():
@@ -126,13 +124,13 @@ def test_validate_rejects_bad_game_id():
 def test_resolve_template_reads_table(store: Store):
     # admin 覆盖内置模板的 stages
     store.upsert_contest_template(
-        "holdem_swiss_ko", name="改", game_id="holdem", match_config={"hands": 30},
+        "holdem_swiss_ko", name="改", game_id="holdem", match_config={},
         stages=[{"key": "x", "type": "round_robin"}], is_builtin=True,
     )
     tid, gid, stages, mc = resolve_template("holdem_swiss_ko", store=store)
     assert tid == "holdem_swiss_ko" and gid == "holdem"
     assert stages == [{"key": "x", "type": "round_robin"}]
-    assert mc == {"hands": 30}  # 读到覆盖值而非代码默认 70
+    assert mc == {}
 
 
 def test_create_rejects_template_game_mismatch(store: Store):

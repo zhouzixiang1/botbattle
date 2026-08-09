@@ -32,7 +32,6 @@ interface Match {
   earnings_a?: number  // 已废弃（result.deltas 取代），保留向后兼容旧 API 响应
   earnings_b?: number
   created_at?: string
-  match_config?: Record<string, number>
   result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
   game_id?: string
   match_type?: string

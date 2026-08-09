@@ -430,6 +430,75 @@ def test_completed_human_websocket_closes_after_one_snapshot(store: Store):
     assert mid not in app.state.orch._sse
 
 
+def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(store: Store):
+    """非 ``{"response": ...}`` 或带额外键的消息不得解析 Future。
+
+    只有通过当前游戏 ``validate_response_payload`` 的唯一信封才进
+    ``resolve_human_turn``；因而用户可在同一回合重试，不会被静默折成默认动作。
+    """
+    from fastapi.testclient import TestClient
+
+    from bzplat.backend.main import create_app
+
+    app = create_app(db_path=store.path)
+    mid = "20260809-human-strict-protocol"
+    resolved: list[dict] = []
+
+    def record_resolve(match_id, seat, move):
+        resolved.append({"match_id": match_id, "seat": seat, "move": move})
+        return False
+
+    app.state.orch.resolve_human_turn = record_resolve
+
+    with TestClient(app) as client:
+        # Lifespan 会先清理上次进程遗留的 pending 对局；本用例须在该清理完成后
+        # 创建活跃对局，避免把启动恢复行为误当作 WS 协议行为。
+        s = app.state.store
+        user = s.create_user("strictws", "strictws@example.com", hash_password("password1"))
+        s.update_user(user["id"], email_verified=1)
+        bot = s.create_bot(
+            user["id"], "strictws_bot", binary_path="/tmp/strictws", format="elf",
+            game_id="gomoku",
+        )
+        s.create_match(
+            mid,
+            bot["id"],
+            bot["id"],
+            owner_id=user["id"],
+            match_type="human",
+            game_id="gomoku",
+            human_user_id=user["id"],
+            human_seat=1,
+        )
+        _, token = app.state.auth.authenticate("strictws", "password1")
+        with client.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
+            assert ws.receive_json()["type"] == "snapshot"
+
+            for invalid in (
+                {"x": 7, "y": 7},
+                {"response": {"x": 7, "y": 7}, "debug": "legacy"},
+                {"response": 7},
+            ):
+                ws.send_json(invalid)
+                rejection = ws.receive_json()
+                assert rejection["type"] == "reject"
+                assert "动作协议错误" in rejection["message"]
+                assert resolved == []
+
+            ws.send_json({"response": {"x": 7, "y": 7}})
+            current_turn = ws.receive_json()
+            assert current_turn["type"] == "reject"
+            assert "当前非你的回合" in current_turn["message"]
+
+    assert resolved == [
+        {
+            "match_id": mid,
+            "seat": 1,
+            "move": {"response": {"x": 7, "y": 7}},
+        }
+    ]
+
+
 # ── Bot 启动崩溃快速失败（PR-G1 治本）──────────────────────────
 def test_bot_crashed_aborts_human_match_quickly(store: Store):
     """Bot 启动即崩（不存在的二进制）→ BotCrashedError 向上传播 → 对局快速 abort，
@@ -541,7 +610,7 @@ def test_consecutive_human_timeouts_aborts_match(store: Store):
 
     async def run():
         mid = await orch.challenge_human(
-            b["id"], u["id"], human_seat=1, game_id="holdem", match_config={"hands": 70},
+            b["id"], u["id"], human_seat=1, game_id="holdem",
         )
         # 从不响应 → 每手弃牌超时 → 连续达阈值应中止
         for _ in range(400):

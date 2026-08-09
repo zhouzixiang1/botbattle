@@ -10,8 +10,6 @@ export interface MatchSeatRow {
   game_id?: string
   bot_a_id?: number
   bot_b_id?: number
-  /** 对局级配置 JSON（如 {hands:70}/{n_dots:6}），游戏无关。 */
-  match_config?: Record<string, number>
   /** 对局结果详情 JSON（{hands_played, deltas:[ea,eb], net_bb}）。 */
   result?: {
     hands_played?: number

@@ -883,19 +883,16 @@ def _human_move(game: str, req: dict) -> dict:
     # 棋类：req 含 x/y（对方上一手）+ me；回一个合法空位
     # 简化策略：gomoku 下中心附近；pencil 下一条边
     if game == "gomoku":
-        size = req.get("size") or 15
-        cx = cy = size // 2
+        cx = cy = 15 // 2
         # 若中心被占，就近找空位（无法查盘，赌概率）
-        return {"x": cx, "y": cy}
+        return {"response": {"x": cx, "y": cy}}
     if game == "pencil":
         # pass=1 时必须回 pass
         if req.get("pass") == 1:
-            return {"x": -1, "y": -1}
-        # 否则下一条边：n_dots 决定交错网格
-        n = req.get("n_dots") or 6
+            return {"response": {"x": -1, "y": -1}}
         # 下一合法边（水平），赌不重复
-        return {"x": 1, "y": 0}
-    return {"x": 0, "y": 0}
+        return {"response": {"x": 1, "y": 0}}
+    return {"response": {"x": 0, "y": 0}}
 
 
 # ── 阶段 5：赛事全生命周期 ────────────────────────────────────
@@ -909,7 +906,6 @@ def phase5_contest(api: Api, ctx: dict[str, Any]) -> None:
     contests = []
     r = api.authed(org1_tok, "POST", "/api/contests", json={
         "title": "LoadTest Holdem Swiss-KO", "template_id": "holdem_swiss_ko", "game_id": "holdem",
-        "match_config": {},
     })
     check("org1 创建 holdem Swiss-KO 赛事", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
     if r.status_code == 200:
@@ -1102,7 +1098,6 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
         ("/api/admin/contests", "contests"),
         ("/api/admin/email/templates", "email templates"),
         ("/api/admin/email/outbox?limit=5", "email outbox"),
-        ("/api/admin/judges", "judges"),
         ("/api/admin/templates", "templates"),
         ("/api/admin/logs?limit=5", "logs"),
         ("/api/admin/settings/runtime", "runtime settings"),
@@ -1193,20 +1188,9 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     else:
         warn(f"email template welcome 不可读 {r.status_code}（跳过 PUT）")
 
-    # GET/PATCH /api/admin/judges：棋盘/手数等规则已由 GameSpec 钉死；这里只验证
-    # 当前仍可调的 holdem 盲注关系校验，避免压测依赖已删除的 gomoku size 参数。
-    r = api.authed(tok, "GET", "/api/admin/judges")
-    check("GET /api/admin/judges", r.status_code == 200 and "games" in r.json(), r.text[:80])
-
-    # 验 judges bb≤sb 报错（key=judge_holdem_sb / judge_holdem_bb）
-    r = api.authed(tok, "PATCH", "/api/admin/judges/params",
-                   json={"params": {"judge_holdem_sb": 100, "judge_holdem_bb": 50}})
-    check("PATCH judges bb<sb 被拒", r.status_code == 400, f"{r.status_code} {r.text[:60]}")
-
     # GET/POST/PUT/DELETE /api/admin/templates：建自定义模板→preview→删
     r = api.authed(tok, "POST", "/api/admin/templates", json={
         "id": "loadtest_custom", "name": "LoadTest Custom", "game_id": "holdem",
-        "match_config": {},
         "stages": [{"key": "s1", "type": "round_robin", "scoring": "poker_3_1_0"}],
     })
     check("POST /api/admin/templates（建自定义）", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
@@ -1218,7 +1202,6 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     # PUT
     r = api.authed(tok, "PUT", "/api/admin/templates/loadtest_custom", json={
         "id": "loadtest_custom", "name": "LoadTest Custom v2", "game_id": "holdem",
-        "match_config": {},
         "stages": [{"key": "s1", "type": "round_robin", "scoring": "poker_3_1_0"}],
     })
     check("PUT /api/admin/templates/{tid}", r.status_code == 200, f"{r.status_code} {r.text[:60]}")

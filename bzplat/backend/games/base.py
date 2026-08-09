@@ -146,7 +146,7 @@ class GameSpec:
     # 编排特化（消除 orchestrator 里的 holdem if 分支）
     default_match_params: dict[str, Any]
     validate_match_params: Callable[[dict[str, Any]], dict[str, Any]]
-    rounds_per_match: Callable[[dict[str, Any]], int]      # holdem=match_config["hands"]；棋类=1
+    rounds_per_match: Callable[[dict[str, Any]], int]      # 各游戏固定现行局/手数
     normalize_earnings: Callable[[int], float]             # holdem: ea/100.0；棋类: float(ea)
     eta_for_match: Callable[[dict[str, Any]], int]         # 按 match_config 算每场秒数（取代 if game_id 缩放分支）
     judge_params: list[JudgeParamSpec] = field(default_factory=list)

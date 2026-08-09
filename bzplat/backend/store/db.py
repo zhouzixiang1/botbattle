@@ -366,7 +366,7 @@ CREATE TABLE matches_{suffix} (
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL DEFAULT '{gdef}',
-    match_config    TEXT    NOT NULL DEFAULT '{{}}',  -- 对局级配置 JSON（hands/n_dots 等），游戏无关；{{}} 经 .format 转义为字面空 JSON
+    match_config    TEXT    NOT NULL DEFAULT '{{}}',  -- 内部快照 JSON（Bot 版本/duplicate）；{{}} 经 .format 转义为字面空 JSON
     result          TEXT    NOT NULL DEFAULT '{{}}',  -- 对局结果详情 JSON（hands_played/deltas/net_bb）
     human_user_id   INTEGER,
     human_seat      INTEGER,
@@ -1130,20 +1130,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, _tbl, "match_seed", "INTEGER")
         _add_col(conn, _tbl, "technical_loss", "INTEGER NOT NULL DEFAULT 0")
         # match_config + result 双 JSON 通路收敛（删 total_hands/n_dots/hands_played/
-        # earnings_a/earnings_b/net_bb_a 6 个游戏专属固定列）。旧数据整理进 JSON 再 DROP
-        # （复用 db.py:398-402 bots.is_public 的 DROP COLUMN 模式）。幂等：列已不存在则跳过。
+        # earnings_a/earnings_b/net_bb_a 6 个旧列）。历史规则值仅归档进 JSON 后 DROP，
+        # 现行编排不会读取或应用它们；幂等：列已不存在则跳过。
         _add_col(conn, _tbl, "match_config", "TEXT NOT NULL DEFAULT '{}'")
         _add_col(conn, _tbl, "result", "TEXT NOT NULL DEFAULT '{}'")
         _mcols = _table_cols(conn, _tbl)
         if "total_hands" in _mcols:
-            # 配置：total_hands → match_config.hands（按行原值）
+            # 历史归档：total_hands → match_config.hands（按行原值，不再作为规则输入）
             conn.execute(
                 f"UPDATE {_tbl} SET match_config=json_set(match_config,'$.hands',total_hands) "
                 "WHERE total_hands IS NOT NULL"
             )
             conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN total_hands")
         if "n_dots" in _mcols:
-            # 配置：n_dots → match_config.n_dots（pencil 专属，按行原值）
+            # 历史归档：n_dots → match_config.n_dots（按行原值，不再作为规则输入）
             conn.execute(
                 f"UPDATE {_tbl} SET match_config=json_set(match_config,'$.n_dots',n_dots) "
                 "WHERE n_dots IS NOT NULL"
