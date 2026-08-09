@@ -196,6 +196,6 @@ python scripts/seed_test_accounts.py \
 | `scripts/api_full_test.py` | HTTP API 关键链路集成测试；SSE 只核对终态 snapshot 与 replay；隔离 DB 播种专用账号 |
 | `scripts/contest_stress.py` | 默认验证赛事 draft 名册容量与静态赛制估算；`--run` 才真跑；只使用专用 `cs_admin` |
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 三游戏样例 Bot） |
-| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 21 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口；全量执行真值见 `TESTING.md`） |
+| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 30 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口；全量执行真值见 `TESTING.md`） |
 
 > 返回 [doc/INDEX.md](./INDEX.md)

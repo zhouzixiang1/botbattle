@@ -15,6 +15,12 @@ from bzplat.backend.games import registry as game_registry
 from bzplat.backend.games import normalize_game_id
 from bzplat.backend.matches.runner import MatchRunner, _fail_response
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
+from bzplat.backend.runtime.config import (
+    HUMAN_ACTION_TIMEOUT_SEC,
+    HUMAN_MAX_CONCURRENT_MATCHES,
+    HUMAN_MAX_CONSECUTIVE_TIMEOUTS,
+    MAX_CONCURRENT_MATCHES,
+)
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotCrashedError,
@@ -23,6 +29,7 @@ from bzplat.backend.runtime.binary_runner import (
 )
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
+    BOT_CAPACITY_EXHAUSTED_REASON,
     DEFAULT_RUNTIME_MODE,
     REGISTERED_ENGINES,
     STATUS_ABORTED,
@@ -260,7 +267,7 @@ class BotVersionUnavailableError(ValueError):
 class BotCapacityError(ValueError):
     """No global Bot execution slot is available for a new match."""
 
-    code = "bot_capacity_exhausted"
+    code = BOT_CAPACITY_EXHAUSTED_REASON
 
     def __init__(self) -> None:
         super().__init__("Bot 对局并发已满，请稍后重试")
@@ -272,7 +279,7 @@ class MatchOrchestrator:
         store: Store,
         *,
         runner: MatchRunner | None = None,
-        max_concurrent: int = 2,
+        max_concurrent: int = MAX_CONCURRENT_MATCHES,
     ) -> None:
         self.store = store
         self.runner = runner or MatchRunner(BinaryRunner())
@@ -311,16 +318,16 @@ class MatchOrchestrator:
         # 通知管理器（由 main.py 注入；对局完成时通知双方 owner）
         self.notifier = None
         # ── 人类对战（独立并发，不占 bot 对局槽）──────────────────
-        self.human_max_concurrent = 4
+        self.human_max_concurrent = HUMAN_MAX_CONCURRENT_MATCHES
         self._human_sem = asyncio.Semaphore(self.human_max_concurrent)
         # (match_id, player_idx) → pending 人类回合 {request, future, ts}
         self._human_turns: dict[tuple[str, int], dict] = {}
         # 每 user 同时进行的人类局 ≤ 1（节流，防挂机占满人类槽）
         self._human_active_users: set[int] = set()
-        self.human_action_timeout = 120.0  # 人类决策超时（秒）
+        self.human_action_timeout = HUMAN_ACTION_TIMEOUT_SEC
         # 连续超时阈值：人类连续 N 次不响应则中止对局（避免 70 手最长 2.3h 死磕，
         # 占用人类槽 + 锁死 _human_active_users）。棋类一手非法即结束，仅 holdem 触发。
-        self.human_max_consecutive_timeouts = 5
+        self.human_max_consecutive_timeouts = HUMAN_MAX_CONSECUTIVE_TIMEOUTS
 
     def rebuild_concurrency(self, max_concurrent: int) -> None:
         """热更新并发上限。

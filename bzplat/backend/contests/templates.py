@@ -92,12 +92,8 @@ def resolve_stages(
     stages: list[dict[str, Any]] | None = None,
     *,
     game_id: str | None = None,
-    store=None,
 ) -> tuple[str, str, list[dict[str, Any]]]:
-    """返回 (template_id, game_id, stages)。
-
-    ``store`` 暂仅维持调用签名；模板始终从游戏注册表中的代码定义解析。
-    """
+    """返回代码模板的 (template_id, game_id, stages)。"""
     if stages is not None:
         if not stages:
             raise ValueError("自定义 stages 须为非空数组")
@@ -109,7 +105,6 @@ def resolve_stages(
         gid = normalize_game_id(game_id)
         return tid, gid, copy.deepcopy(stages)
     tid = "holdem_swiss_ko" if template_id is None else template_id
-    del store
     tpl = get_template(tid)
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
@@ -129,11 +124,9 @@ def resolve_template(
     template_id: str | None,
     *,
     game_id: str | None = None,
-    store=None,
 ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
     """返回代码模板的 (template_id, game_id, stages, match_config)。"""
     tid = "holdem_swiss_ko" if template_id is None else template_id
-    del store
     tpl = None
     base = get_template(tid)
     if base:

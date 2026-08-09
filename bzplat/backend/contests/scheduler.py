@@ -17,14 +17,16 @@ import asyncio
 import logging
 from typing import Any
 
+from bzplat.backend.runtime.config import (
+    CONTEST_SCHEDULER_CONFIG,
+    ContestSchedulerConfig,
+)
 from bzplat.backend.store.schema import (
     CONTEST_DRAFT,
     CONTEST_OPEN,
     CONTEST_PUBLISHED,
     CONTEST_REST,
     CONTEST_RUNNING,
-    SETTING_CONTEST_SCHEDULER_ENABLED,
-    SETTING_CONTEST_SCHEDULER_INTERVAL_SEC,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,22 +40,19 @@ def _now() -> str:
 class ContestScheduler:
     """赛事时间调度器（后台周期扫描，到点推进赛事阶段）。"""
 
-    def __init__(self, manager: Any, store: Any) -> None:
+    def __init__(
+        self,
+        manager: Any,
+        store: Any,
+        *,
+        config: ContestSchedulerConfig = CONTEST_SCHEDULER_CONFIG,
+    ) -> None:
         self.manager = manager
         self.store = store
+        self.config = config
 
     def _cfg(self) -> dict[str, Any]:
-        s = self.store.get_settings(
-            [SETTING_CONTEST_SCHEDULER_ENABLED, SETTING_CONTEST_SCHEDULER_INTERVAL_SEC]
-        )
-        try:
-            interval = int(s.get(SETTING_CONTEST_SCHEDULER_INTERVAL_SEC) or 15)
-        except (TypeError, ValueError):
-            interval = 15
-        return {
-            "enabled": (s.get(SETTING_CONTEST_SCHEDULER_ENABLED) or "1") in ("1", "true", "True"),
-            "interval": max(5, interval),  # 下限 5s，避免过频
-        }
+        return self.config.as_dict()
 
     async def loop(self) -> None:
         """周期扫描：到点的赛事自动推进阶段。"""

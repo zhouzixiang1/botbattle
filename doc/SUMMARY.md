@@ -77,7 +77,7 @@
 | 前端页面 | 顶层业务页面均 lazy 分包；精确数量以目标提交的路由盘点为准 |
 | 自动化测试 | 后端 pytest + Playwright；最终数量以目标提交重新收集为准 |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
-| 浏览器验收 | Playwright **4 个 spec / 21 条 collected**；当前目标提交 Chromium 全量 `21 passed`（2.3m）；另有 browser/screenshot 辅助脚本 |
+| 浏览器验收 | Playwright **4 个 spec / 30 条 collected**；新增回归前 Chromium 基线为 `21 passed`（2.3m），当前整合套件完整执行状态以 `TESTING.md` 为准；另有 browser/screenshot 辅助脚本 |
 | 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
@@ -93,7 +93,7 @@
 | 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
 | 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
-| 浏览器验收 | ✅ 4 spec / 21 条 Chromium 全量通过（2.3m；Console/Network/SSE/WS 与三视口） | `bzplat/frontend/e2e/` |
+| 浏览器验收 | ⏳ 4 spec / 30 条已收集；当前整合套件待完整执行（Console/Network/SSE/WS 与三视口） | `bzplat/frontend/e2e/` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |
 
 ## 5. 经验教训

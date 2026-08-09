@@ -88,7 +88,7 @@ effective  = min(configured, ceiling)
 **触发条件**（全部满足才安排）：
 
 1. 代码配置 `enabled=True`；
-2. 有空闲并发槽：`max_concurrent - reserve_slots - 当前运行数 > 0`；
+2. 有空闲并发槽：`全局尚未占用的 admission - reserve_slots > 0`；已接纳但等待执行的任务也占位；
    `reserve_slots`（默认 1）为用户主动挑战**预留**的槽位，避免抢占；
 3. 连续空闲达 `auto_match_min_idle_sec`（默认 5 秒），即真正闲时。
 

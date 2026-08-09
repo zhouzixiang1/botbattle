@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.games import registry as game_registry
-from bzplat.backend.matches import MatchOrchestrator
+from bzplat.backend.matches import BotCapacityError, MatchOrchestrator
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
     AUTO_MATCH_CONFIG,
@@ -698,6 +698,9 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             bot_a_version_id=body.my_bot_version_id,
             bot_b_version_id=body.opponent_bot_version_id,
         )
+    except BotCapacityError as e:
+        audit_log(request, "match_challenge", result="busy", user=user.get("username"), detail=str(e))
+        raise HTTPException(429, str(e))
     except ValueError as e:
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))

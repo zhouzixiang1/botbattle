@@ -195,7 +195,7 @@ def test_resolve_template_ignores_legacy_table_override(store: Store):
         stages=[{"key": "x", "type": "round_robin"}],
         is_builtin=True,
     )
-    tid, gid, stages, mc = resolve_template("holdem_swiss_ko", store=store)
+    tid, gid, stages, mc = resolve_template("holdem_swiss_ko")
     assert tid == "holdem_swiss_ko" and gid == "holdem"
     assert stages == get_template("holdem_swiss_ko")["stages"]
     assert stages != [{"key": "x", "type": "round_robin"}]
@@ -215,7 +215,7 @@ def test_malformed_legacy_template_row_cannot_poison_code_template(store: Store)
         conn.execute(
             "UPDATE contest_templates SET game_id='unknown' WHERE id='holdem_swiss_ko'"
         )
-    tid, gid, _stages, _mc = resolve_template("holdem_swiss_ko", store=store)
+    tid, gid, _stages, _mc = resolve_template("holdem_swiss_ko")
     assert tid == "holdem_swiss_ko"
     assert gid == "holdem"
 

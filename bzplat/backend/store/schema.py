@@ -469,6 +469,7 @@ STATUS_ABORTED = "aborted"
 
 # 对外对局技术故障事件（新写 replay / 实时 SSE / 公开读取唯一命名）
 TECHNICAL_INCIDENT_EVENT = "technical_incident"
+BOT_CAPACITY_EXHAUSTED_REASON = "bot_capacity_exhausted"
 TECHNICAL_INCIDENT_MESSAGES = {
     "invalid_json": "Bot 输出不是合法 JSON",
     "invalid_envelope": "Bot 响应信封必须是 JSON 对象",

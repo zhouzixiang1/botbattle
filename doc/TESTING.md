@@ -40,7 +40,7 @@ pytest
 | **二进制目标闸门** | `test_runtime`、`test_binary_visibility`、`test_frozen_version_failclosed` 覆盖仅 ELF64/小端/Linux/x86-64 可写与可执行；真实 x64 PE 必须在镜像检查及 Docker 启动前拒绝且不建立 session；Linux 镜像缺失只允许在 Bot 计时前单飞拉取并复核 `linux/amd64`，registry/拉取超时归平台故障，`docker run` 固定 `--pull=never --entrypoint /app/bot`；历史 PE 及主库同形态 `elf/空/空 + version unknown/空/空` 不迁移但 owner/admin 标记不可运行，并从公开候选、搜索、排行榜、自动匹配及赛事候选过滤；owner/admin 激活与版本回滚均 409 且 DB 不被改写；无 checksum/size 的旧版本缺文件也在建局前 `version_unavailable`；Playwright 还用真实 PE 上传验证服务端 400 与 UI 错误态 |
 | **代码唯一配置** | `test_runtime_settings`、`test_auto_matcher`、`test_contest_templates`、`test_contest_template_seed`：旧 runtime KV 不能覆盖启动值，fresh app 不再 seed 同名键，runtime PATCH/admin template CRUD 为 404，只读诊断和公开模板均标记 `source=code/mutable=false`；历史模板表不 seed/对账且无法覆盖注册表；auto-match 使用冻结配置并把已接纳等待任务计入全局 admission |
 | **测试产物隔离** | `test_logging` 断言从 repo CWD + tmp DB 运行时日志落临时目录，`create_app` 默认 upload root 落 DB 同目录，主 checkout 的 `bot_uploads/logs` 不接收测试标记；测试不得手写相对 `bot_uploads` |
-| **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、时间线 `opens<=closes<=starts`（含等时刻/部分 PATCH/旧脏数据/零部分写）、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
+| **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、时间线 `opens<=closes<=starts`（含等时刻/部分 PATCH/旧脏数据/零部分写）、`starts_at=NULL` 的手动开赛闸门、全局 admission 下整轮只创建可用槽数量且完成一场补一场、Match 完成后 Pairing 逐场回写、历史空 starts_at/假 running 状态幂等修复、match_id 单 pairing 唯一绑定、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
 | **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot/赛事存在活跃引用时拒绝硬删；批量指派做字段与归属校验 |
 | **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员 |
 | **社交/通知/成长/站点** | `test_notifications`、`test_comments_likes`、`test_social`、`test_xp_level`、`test_tiers`、`test_load_test_seed`、`test_wiki_pages` |
@@ -49,7 +49,7 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 28 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 30 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
@@ -87,13 +87,12 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 |------|----------|-----------|
 | 隔离端到端冒烟 | **ALL PASSED** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **28 条 / 4 spec** | `npx playwright test --list` 实测 |
+| Playwright 收集 | **30 条 / 4 spec** | `npx playwright test --list` 实测 |
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
 | 权威终态后端定向回归 | **72 passed / 1 warning（32.87s）** | `test_authoritative_terminal_events` + 技术故障 + human + audit：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
-| 后端协议/文档分支门禁 | **873 passed / 1 skipped / 1 warning（226.48s）** | 独立 worktree 完整执行；skip 因该 worktree 未构建 `frontend/dist`，warning 为既有 Starlette/httpx deprecation；最终整合提交仍须重跑 |
-| 后端本分支完整 pytest | **951 passed / 1 warning（240.26s）** | 使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation。后续合并其他分支后仍须在最终整合提交重采集 |
-| Playwright 完整执行 | **新增回归前基线 21 passed；28 条整合套件待重跑** | Chromium 单 worker 的旧基线为 2.3m；新增未知游戏、动作契约、PE 拒绝与 canonical 终态回归后，必须在最终整合栈重新执行全部 28 条 |
+| 后端整合提交完整 pytest | **1020 passed / 1 warning（291.67s）** | 使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
+| Playwright 完整执行 | **新增回归前基线 21 passed；30 条整合套件待重跑** | Chromium 单 worker 的旧基线为 2.3m；新增未知游戏、动作契约、PE 拒绝、canonical 终态与观赛回归后，必须在最终整合栈重新执行全部 30 条 |
 | 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2560 modules transformed |
 
 ## 5. 可靠性与恢复专项

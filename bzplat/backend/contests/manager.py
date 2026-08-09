@@ -24,7 +24,7 @@ from bzplat.backend.matches.orchestrator import (
     require_binary_file_integrity,
 )
 from bzplat.backend.games import normalize_game_id, registry as game_registry
-from bzplat.backend.runtime.limits import FULL_RR_MAX_N
+from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
 from bzplat.backend.store import Store
 from bzplat.backend.store.db import match_deltas
 from bzplat.backend.store.validation import (
@@ -39,7 +39,6 @@ from bzplat.backend.store.schema import (
     CONTEST_REST,
     CONTEST_RUNNING,
     REGISTERED_ENGINES,
-    SETTING_FULL_RR_MAX_N,
     STATUS_ABORTED,
     STATUS_COMPLETED,
     STATUS_PENDING,
@@ -121,7 +120,7 @@ class ContestManager:
         registration_closes_at: str | None = None,
         starts_at: str | None = None,
     ) -> dict:
-        # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages
+        # 自定义 stages 直接用；否则只从游戏注册表中的代码模板解析 stages。
         if stages is not None:
             if not stages:
                 raise ValueError("自定义 stages 须为非空数组")
@@ -131,9 +130,7 @@ class ContestManager:
             # 即使调用方同时传入自定义 stages，也不能借此把一个具名模板标成
             # 另一款游戏。该组合会污染赛事快照，后续按 gid 启动错误裁判。
             if template_id:
-                declared_template = (
-                    self.store.get_contest_template(template_id) or get_template(template_id)
-                )
+                declared_template = get_template(template_id)
                 if declared_template:
                     template_gid = str(declared_template["game_id"]).strip().lower()
                     if gid != template_gid:
@@ -143,9 +140,9 @@ class ContestManager:
             stage_list = stages
         else:
             tid, gid, stage_list, _tpl_mc = resolve_template(
-                template_id, game_id=game_id, store=self.store
+                template_id, game_id=game_id
             )
-        # 无论来自 API 自定义内容还是数据库模板，都通过同一严格 schema。未知键、
+        # 无论来自 API 自定义内容还是代码模板，都通过同一严格 schema。未知键、
         # 错拼字段和不属于该阶段类型的配置必须在落赛事快照前失败。
         from bzplat.backend.contests.validation import validate_stage
 
@@ -439,11 +436,7 @@ class ContestManager:
         return updated
 
     def _full_rr_max_n(self) -> int:
-        raw = self.store.get_setting(SETTING_FULL_RR_MAX_N)
-        try:
-            return int(raw) if raw else FULL_RR_MAX_N
-        except ValueError:
-            return FULL_RR_MAX_N
+        return FULL_RR_MAX_N
 
     def _guard_full_rr(self, stages: list[dict], n: int) -> None:
         """人数护栏：防止超大规模循环赛静默生成海量对局（@500 全员单循环=124750 场）。
@@ -2355,11 +2348,13 @@ class ContestManager:
             ac = st.get("advance_count")
             if ac and int(ac) > 0:
                 cur_n = int(ac)
-        conc_raw = self.store.get_setting("max_concurrent_matches")
-        try:
-            conc = max(1, int(conc_raw or 2))
-        except ValueError:
-            conc = 2
+        # Production uses MatchOrchestrator.max_concurrent.  Lightweight
+        # read-only estimators/test doubles need no execution interface, so
+        # fall back to the same immutable code policy instead of a DB setting.
+        conc = max(
+            1,
+            int(getattr(self.orch, "max_concurrent", MAX_CONCURRENT_MATCHES)),
+        )
         # 粗估每场时长：经 spec.eta_for_match（消除 if game_id）
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         sec_per = _estimate_sec_per_match(gid, {})
