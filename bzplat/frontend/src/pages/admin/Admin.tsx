@@ -7,11 +7,9 @@ import BotsTab from './BotsTab'
 import MatchesTab from './MatchesTab'
 import ContestsTab from './ContestsTab'
 import EmailTab from './EmailTab'
-import RuntimeTab from './RuntimeTab'
-import TemplatesTab from './TemplatesTab'
 import LogsTab from './LogsTab'
 
-type TabKey = 'dashboard' | 'users' | 'bots' | 'matches' | 'contests' | 'templates' | 'runtime' | 'logs' | 'email'
+type TabKey = 'dashboard' | 'users' | 'bots' | 'matches' | 'contests' | 'logs' | 'email'
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'dashboard', label: '仪表盘' },
@@ -19,8 +17,6 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'bots', label: 'Bot' },
   { key: 'matches', label: '对局记录' },
   { key: 'contests', label: '锦标赛' },
-  { key: 'templates', label: '赛制模板' },
-  { key: 'runtime', label: '运行时' },
   { key: 'logs', label: '日志' },
   { key: 'email', label: '邮件' },
 ]
@@ -89,8 +85,6 @@ export default function Admin() {
         {tab === 'bots' && <BotsTab />}
         {tab === 'matches' && <MatchesTab />}
         {tab === 'contests' && <ContestsTab />}
-        {tab === 'templates' && <TemplatesTab />}
-        {tab === 'runtime' && <RuntimeTab />}
         {tab === 'logs' && <LogsTab />}
         {tab === 'email' && <EmailTab />}
       </div>

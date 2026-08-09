@@ -117,6 +117,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
 | **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，半负载并发 ceiling=`max(1,cpu//4)`，全员循环 `FULL_RR_MAX_N=12`；admin 不可抬高（`runtime/limits.py`） |
+| **运行参数** | `runtime/config.py` 是 action timeout、默认并发、auto-match、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |
 | **前端组件** | 用 `@/components/ui/*` 共享原语，禁内联重复样式 |
@@ -195,6 +196,6 @@ python scripts/seed_test_accounts.py \
 | `scripts/api_full_test.py` | HTTP API 关键链路集成测试；SSE 只核对终态 snapshot 与 replay；隔离 DB 播种专用账号 |
 | `scripts/contest_stress.py` | 默认验证赛事 draft 名册容量与静态赛制估算；`--run` 才真跑；只使用专用 `cs_admin` |
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 三游戏样例 Bot） |
-| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 21 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口；全量执行真值见 `TESTING.md`） |
+| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 30 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口；全量执行真值见 `TESTING.md`） |
 
 > 返回 [doc/INDEX.md](./INDEX.md)

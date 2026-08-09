@@ -29,7 +29,7 @@
 | **通知系统** | 站内通知 + 可选邮件提醒（对局完成/被关注/赛事/评论） |
 | **用户体系** | 注册/登录/邮箱验证、个人主页、资料编辑、头像、经验与等级 |
 | **全局搜索** | Cmd+K 命令面板，聚合搜索 Bot / 用户 / 对局 |
-| **管理后台** | 9 个 Tab：仪表盘、用户/Bot/对局/赛事管理、邮件、运行时热配置、赛制模板设计器、日志查看 |
+| **管理后台** | 7 个 Tab：仪表盘、用户/Bot/对局/赛事管理、日志、邮件；运行参数与赛制模板均由代码唯一配置，不提供网页编辑器 |
 | **闲时自动对局** | 后台自动调度 ladder 对局维护天梯（陈旧度优先 + 定级赛优先） |
 | **站点可配置** | 站名 / Logo / 公告 / 关于（admin 可配） |
 
@@ -59,7 +59,7 @@ botbattle/
 │   │   ├── auth/              # 认证（13 路由 + 验证码 + 依赖）
 │   │   ├── games/             # 【游戏单一真相】GameSpec + registry + holdem/gomoku/pencil 自包含子包
 │   │   ├── store/             # SQLite（Store + schema.py 常量唯一来源；matches 按游戏分表）
-│   │   ├── runtime/           # Linux ELF 沙箱 BinaryRunner（docker/local）+ limits 资源硬顶
+│   │   ├── runtime/           # Linux ELF 沙箱 + config 不可变运行配置 + limits 资源硬顶
 │   │   ├── matches/           # 编排 orchestrator + runner + auto_matcher
 │   │   ├── contests/          # 赛制 templates/stages/manager/ranking（模板由 games 聚合）
 │   │   ├── notifications/     # 站内通知 + 邮件偏好

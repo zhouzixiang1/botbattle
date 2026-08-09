@@ -76,8 +76,15 @@ def get_template(template_id: str) -> dict[str, Any] | None:
     return copy.deepcopy(t) if t else None
 
 
-def list_templates() -> list[dict[str, Any]]:
-    return [copy.deepcopy(t) for t in _get_default_templates().values()]
+def list_templates(*, game_id: str | None = None) -> list[dict[str, Any]]:
+    """列出代码注册表中的内置模板；不读取历史数据库模板表。"""
+    templates = _get_default_templates().values()
+    if game_id is not None:
+        from bzplat.backend.games import normalize_game_id
+
+        gid = normalize_game_id(game_id)
+        templates = (t for t in templates if t.get("game_id") == gid)
+    return [copy.deepcopy(t) for t in templates]
 
 
 def resolve_stages(
@@ -85,13 +92,8 @@ def resolve_stages(
     stages: list[dict[str, Any]] | None = None,
     *,
     game_id: str | None = None,
-    store=None,
 ) -> tuple[str, str, list[dict[str, Any]]]:
-    """返回 (template_id, game_id, stages)。
-
-    若提供 store，优先从 contest_templates 表读模板（含 admin 覆盖）；
-    否则回退注册表派生的 DEFAULT_TEMPLATES（供无 store 的测试用）。
-    """
+    """返回代码模板的 (template_id, game_id, stages)。"""
     if stages is not None:
         if not stages:
             raise ValueError("自定义 stages 须为非空数组")
@@ -103,19 +105,7 @@ def resolve_stages(
         gid = normalize_game_id(game_id)
         return tid, gid, copy.deepcopy(stages)
     tid = "holdem_swiss_ko" if template_id is None else template_id
-    tpl = None
-    if store is not None:
-        row = store.get_contest_template(tid)
-        if row:
-            tpl = {
-                "id": row["id"],
-                "name": row["name"],
-                "game_id": row["game_id"],
-                "stages": row.get("stages") or [],
-                "match_config": row.get("match_config") or {},
-            }
-    if tpl is None:
-        tpl = get_template(tid)
+    tpl = get_template(tid)
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
     from bzplat.backend.games import normalize_game_id
@@ -134,27 +124,17 @@ def resolve_template(
     template_id: str | None,
     *,
     game_id: str | None = None,
-    store=None,
 ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
-    """返回 (template_id, game_id, stages, match_config)。优先读 store 表。"""
+    """返回代码模板的 (template_id, game_id, stages, match_config)。"""
     tid = "holdem_swiss_ko" if template_id is None else template_id
     tpl = None
-    if store is not None:
-        row = store.get_contest_template(tid)
-        if row:
-            tpl = {
-                "game_id": row["game_id"],
-                "stages": row.get("stages") or [],
-                "match_config": row.get("match_config") or {},
-            }
-    if tpl is None:
-        base = get_template(tid)
-        if base:
-            tpl = {
-                "game_id": base["game_id"],
-                "stages": base["stages"],
-                "match_config": default_match_config(base["game_id"]),
-            }
+    base = get_template(tid)
+    if base:
+        tpl = {
+            "game_id": base["game_id"],
+            "stages": base["stages"],
+            "match_config": default_match_config(base["game_id"]),
+        }
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
     from bzplat.backend.games import normalize_game_id

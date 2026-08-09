@@ -19,7 +19,7 @@
 |------|------|
 | [SECURITY.md](./SECURITY.md) | 公网加固运维细节：三文件日志、IP 透传（nginx/frp）、限流、安全响应头、相关环境变量 |
 | [LOADTEST.md](./LOADTEST.md) | QA 多角色关键业务链路与多局测试（含隔离 DB-direct 播种，不声称覆盖全部端点） |
-| [RUNTIME.md](./RUNTIME.md) | 运维侧运行时：Docker 硬限制加固参数、auto_match 配置、admin 运行时配置端点 |
+| [RUNTIME.md](./RUNTIME.md) | 运维侧运行时：Docker 硬限制、代码配置、并发与 auto-match |
 | [JUDGE_CODE.md](./JUDGE_CODE.md) | 各游戏裁判引擎代码位置、固定规则契约与改动工作流（面向平台开发者） |
 
 ## doc/ 与 wiki/ 的分工

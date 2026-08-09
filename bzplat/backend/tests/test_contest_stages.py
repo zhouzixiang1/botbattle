@@ -281,9 +281,11 @@ def test_gomoku_engine_registered(store: Store):
     assert "pencil" in REGISTERED_ENGINES
 
 
-def test_full_rr_rejects_large_n(store: Store):
-    users, bots = _mk_bots(store, 4)
-    store.set_setting("full_rr_max_n", "2")
+def test_full_rr_rejects_code_limit_and_ignores_legacy_setting(store: Store):
+    users, bots = _mk_bots(store, 13)
+    # Historical runtime settings are audit-only and cannot raise the code
+    # policy.  FULL_RR_MAX_N is 12, so 13 entrants must still be rejected.
+    store.set_setting("full_rr_max_n", "999")
     stages = [{"key": "rr", "type": "round_robin"}]
     c = store.create_contest(
         "big",

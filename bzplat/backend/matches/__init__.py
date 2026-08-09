@@ -1,4 +1,4 @@
-from .orchestrator import MatchOrchestrator
+from .orchestrator import BotCapacityError, MatchOrchestrator
 from .runner import MatchRunner
 
-__all__ = ["MatchOrchestrator", "MatchRunner"]
+__all__ = ["BotCapacityError", "MatchOrchestrator", "MatchRunner"]

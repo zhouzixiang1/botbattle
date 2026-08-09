@@ -17,14 +17,16 @@ import asyncio
 import logging
 from typing import Any
 
+from bzplat.backend.runtime.config import (
+    CONTEST_SCHEDULER_CONFIG,
+    ContestSchedulerConfig,
+)
 from bzplat.backend.store.schema import (
     CONTEST_DRAFT,
     CONTEST_OPEN,
     CONTEST_PUBLISHED,
     CONTEST_REST,
     CONTEST_RUNNING,
-    SETTING_CONTEST_SCHEDULER_ENABLED,
-    SETTING_CONTEST_SCHEDULER_INTERVAL_SEC,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,22 +40,19 @@ def _now() -> str:
 class ContestScheduler:
     """赛事时间调度器（后台周期扫描，到点推进赛事阶段）。"""
 
-    def __init__(self, manager: Any, store: Any) -> None:
+    def __init__(
+        self,
+        manager: Any,
+        store: Any,
+        *,
+        config: ContestSchedulerConfig = CONTEST_SCHEDULER_CONFIG,
+    ) -> None:
         self.manager = manager
         self.store = store
+        self.config = config
 
     def _cfg(self) -> dict[str, Any]:
-        s = self.store.get_settings(
-            [SETTING_CONTEST_SCHEDULER_ENABLED, SETTING_CONTEST_SCHEDULER_INTERVAL_SEC]
-        )
-        try:
-            interval = int(s.get(SETTING_CONTEST_SCHEDULER_INTERVAL_SEC) or 15)
-        except (TypeError, ValueError):
-            interval = 15
-        return {
-            "enabled": (s.get(SETTING_CONTEST_SCHEDULER_ENABLED) or "1") in ("1", "true", "True"),
-            "interval": max(5, interval),  # 下限 5s，避免过频
-        }
+        return self.config.as_dict()
 
     async def loop(self) -> None:
         """周期扫描：到点的赛事自动推进阶段。"""
@@ -107,6 +106,12 @@ class ContestScheduler:
         # 3. published：到点开打（scheduled_at<=now 的 pairing 才 dispatch）
         for c in snapshot[CONTEST_PUBLISHED]:
             if c["id"] in processed:
+                continue
+            # ``starts_at`` 为空表示只发布排期、等待组织者手动开始，绝不能
+            # 偷换成“报名截止后立即开打”。有计划开赛时间时也必须先过赛事
+            # 级闸门，再检查逐场 scheduled_at。
+            starts_at = c.get("starts_at")
+            if not starts_at or now < starts_at:
                 continue
             try:
                 stage_idx = int(c.get("current_stage_idx") or 0)

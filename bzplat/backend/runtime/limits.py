@@ -7,14 +7,11 @@ from __future__ import annotations
 
 import os
 
+from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
+
 # 硬编码只读资源（admin 不可抬高）
 BOT_CPUS = 1.0
 BOT_MEMORY_MB = 512
-
-ACTION_TIMEOUT_MIN = 1
-ACTION_TIMEOUT_MAX = 300
-FULL_RR_MAX_N = 12  # 全员单/双循环人数上限
-
 
 def cpu_count() -> int:
     return os.cpu_count() or 1
@@ -30,4 +27,4 @@ def clamp_concurrent(requested: int) -> int:
 
 
 def default_max_concurrent() -> int:
-    return min(2, concurrent_ceiling())
+    return min(MAX_CONCURRENT_MATCHES, concurrent_ceiling())

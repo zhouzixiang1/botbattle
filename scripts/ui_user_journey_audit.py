@@ -651,7 +651,7 @@ def main() -> int:
         ctx.close()
 
         # ═══════════════════════════════════════════
-        # ROLE 3: ADMIN — 10 tabs + 脏配置/模板/赛事
+        # ROLE 3: ADMIN — 7 个只保留业务管理的 Tab
         # ═══════════════════════════════════════════
         print("\n== ADMIN journey (desk) ==")
         ctx = browser.new_context(viewport={"width": 1440, "height": 900}, locale="zh-CN")
@@ -665,10 +665,7 @@ def main() -> int:
             if "仅管理员" in sample:
                 add_issue("P0", "admin", "01_admin_home", "功能", "admin 账号无法进入管理端", "admin_01_admin_home.png")
             else:
-                tabs = [
-                    "仪表盘", "用户", "Bot", "对局", "比赛",
-                    "赛制模板", "运行时", "裁判", "日志", "邮件",
-                ]
+                tabs = ["仪表盘", "用户", "Bot", "对局记录", "锦标赛", "日志", "邮件"]
                 for tab in tabs:
                     try:
                         page.get_by_role("button", name=tab, exact=True).click(timeout=2500)
@@ -712,45 +709,6 @@ def main() -> int:
                 except Exception as e:
                     print("  admin users dirty", e)
 
-                # 运行时 Tab：改一个数字再恢复（脏边界）
-                try:
-                    page.get_by_role("button", name="运行时", exact=True).click(timeout=2000)
-                    page.wait_for_timeout(500)
-                    nums = page.locator('input[type="number"]')
-                    if nums.count():
-                        old = nums.first.input_value()
-                        nums.first.fill("99999", timeout=1000)  # dirty high
-                        shot(page, "admin_runtime_dirty_high")
-                        try_click(page, "保存")
-                        page.wait_for_timeout(600)
-                        shot(page, "admin_runtime_after_save")
-                        # restore mild
-                        nums.first.fill(old or "4", timeout=1000)
-                        try_click(page, "保存")
-                except Exception as e:
-                    print("  admin runtime dirty", e)
-
-                # 赛制模板：打开新建/预览
-                try:
-                    page.get_by_role("button", name="赛制模板", exact=True).click(timeout=2000)
-                    page.wait_for_timeout(500)
-                    shot(page, "admin_templates_main")
-                    try_click(page, "新建", "新增", "创建模板")
-                    page.wait_for_timeout(500)
-                    shot(page, "admin_templates_new")
-                    # fill dirty
-                    for loc in page.locator("input").all()[:3]:
-                        try:
-                            t = loc.get_attribute("type") or "text"
-                            if t in ("hidden", "checkbox", "number"):
-                                continue
-                            loc.fill("dirty_tpl_" + str(int(time.time()))[-4:], timeout=800)
-                        except Exception:
-                            pass
-                    shot(page, "admin_templates_dirty_filled")
-                except Exception as e:
-                    print("  admin templates dirty", e)
-
                 # 日志三文件
                 try:
                     page.get_by_role("button", name="日志", exact=True).click(timeout=2000)
@@ -771,9 +729,9 @@ def main() -> int:
                 except Exception:
                     pass
 
-                # 比赛管理
+                # 锦标赛管理
                 try:
-                    page.get_by_role("button", name="比赛", exact=True).click(timeout=2000)
+                    page.get_by_role("button", name="锦标赛", exact=True).click(timeout=2000)
                     page.wait_for_timeout(600)
                     shot(page, "admin_contests_tab")
                 except Exception:
@@ -793,7 +751,7 @@ def main() -> int:
         if login_spa(page, *ADMIN):
             visit(page, "admin", "m01_admin", "/admin", cons, perrs)
             visit(page, "admin", "m02_contests", "/contests", cons, perrs)
-            for tab in ("用户", "对局", "日志"):
+            for tab in ("用户", "对局记录", "日志"):
                 try:
                     page.goto(f"{BASE}/#/admin", wait_until="networkidle", timeout=20000)
                     page.wait_for_timeout(400)
@@ -816,7 +774,7 @@ def main() -> int:
         f"- time: {datetime.now(timezone.utc).isoformat()}",
         f"- base: {BASE}",
         f"- identities: guest / tester1(user) / tester2(user) / auditadmin(admin)",
-        f"- dirty data: profile/bio/comment/contest/search/register/runtime 已注入",
+        f"- dirty data: profile/bio/comment/contest/search/register 已注入",
         f"- ids: match={match_id} bot={bot_id} contest={contest_id} live_match={live_match}",
         f"- steps: {len(results)}  OK: {ok}/{len(results)}  issues: {len(issues)}",
         "",

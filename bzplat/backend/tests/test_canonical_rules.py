@@ -134,7 +134,7 @@ def test_human_and_contest_creation_reject_legacy_rule_fields(tmp_path):
     assert "非空" in empty_stages.json()["detail"]
 
 
-def test_admin_contest_and_template_apis_do_not_reintroduce_rule_editors(tmp_path):
+def test_admin_has_no_contest_template_editor_api(tmp_path):
     client, app, user = _client(tmp_path)
     contest = app.state.contest_manager.create(
         user["id"], "管理端固定规则", template_id="holdem_swiss_ko"
@@ -145,45 +145,25 @@ def test_admin_contest_and_template_apis_do_not_reintroduce_rule_editors(tmp_pat
     )
     assert patch.status_code == 422
 
-    removed_field_template = client.post(
-        "/api/admin/templates",
-        json={
-            "id": "removed_rules",
-            "name": "Removed Rules",
-            "game_id": "holdem",
-            "match_config": {},
-            "stages": [{"type": "round_robin"}],
-        },
-    )
-    assert removed_field_template.status_code == 422
+    template = {
+        "id": "removed_rules",
+        "name": "Removed Rules",
+        "game_id": "holdem",
+        "stages": [{"type": "round_robin"}],
+    }
+    assert client.get("/api/admin/templates").status_code == 404
+    assert client.post("/api/admin/templates", json=template).status_code == 404
+    assert client.post("/api/admin/templates/preview", json=template).status_code == 404
+    assert client.put("/api/admin/templates/removed_rules", json=template).status_code == 404
+    assert client.delete("/api/admin/templates/removed_rules").status_code == 404
 
-    nested_template = client.post(
-        "/api/admin/templates",
-        json={
-            "id": "nested_rules",
-            "name": "Nested Rules",
-            "game_id": "pencil",
-            "stages": [{"type": "round_robin", "n_dots": 4}],
-        },
-    )
-    assert nested_template.status_code == 400
-    assert "n_dots" in nested_template.json()["detail"]
-
-    for field in ("max_hand", "maxHand", "roundz"):
-        response = client.post(
-            "/api/admin/templates",
-            json={
-                "id": f"bad_{field.lower()}",
-                "name": "非法字段",
-                "game_id": "holdem",
-                "stages": [{"type": "round_robin", field: 1}],
-            },
-        )
-        assert response.status_code == 400, response.text
-        assert field in response.json()["detail"]
-
-    templates = client.get("/api/admin/templates").json()["templates"]
+    public = client.get("/api/contests/templates")
+    assert public.status_code == 200
+    assert public.json()["source"] == "code"
+    assert public.json()["mutable"] is False
+    templates = public.json()["templates"]
     assert templates and all("match_config" not in row for row in templates)
+    assert all(row["source"] == "code" for row in templates)
     contests = client.get("/api/admin/contests").json()["contests"]
     assert contests and all("hands_per_match" not in row for row in contests)
     assert all("match_config_json" not in row for row in contests)

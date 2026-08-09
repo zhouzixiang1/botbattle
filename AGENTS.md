@@ -92,9 +92,9 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 ## 关键约束（容易踩坑）
 
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
-- **所有常量集中在 `bzplat/backend/store/schema.py`**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）、`platform_settings` 键名。新增常量加这里，别散落。
+- **常量按职责集中**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）及历史 `platform_settings` 键名集中在 `bzplat/backend/store/schema.py`；生产运行参数集中在 `bzplat/backend/runtime/config.py`，资源硬顶及机器 ceiling 计算集中在 `runtime/limits.py`。禁止在消费者中散落同义字面量。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
-- **资源硬顶**（`runtime/limits.py`，admin 不可抬高）：每 Bot `--cpus=1` / `--memory=512m`；半负载并发 ceiling = `max(1, cpu//4)`；全员单/双循环人数上限 `FULL_RR_MAX_N=12`（阶段可设 `allow_large_round_robin` 旁路，仅白名单内置决赛模板如 `holdem_final_ranked`）。
+- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定默认对局并发 2（再由 `runtime/limits.py` 按 `max(1, cpu//4)` ceiling 钳制）、action timeout、auto-match、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；`runtime/limits.py` 固定每 Bot `--cpus=1` / `--memory=512m`。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
 
 ## 架构分层（编辑时切勿越界）
 
@@ -122,7 +122,7 @@ games/      游戏注册表（赛制/编排契约解耦的单一入口）：base
             通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
             站点配置：GET /api/site/info
-runtime/    沙箱：Linux x86_64 ELF BinaryRunner(docker/local) + limits；PE/Mach-O/ARM64/脚本在上传时拒绝；Docker 镜像在 Bot 计时前完成 linux/amd64 检查/拉取，实际运行固定 `--pull=never --entrypoint /app/bot`
+runtime/    沙箱与代码配置：config.py(生产运行参数唯一真相源)+ Linux x86_64 ELF BinaryRunner(docker/local) + limits(资源硬顶/机器 ceiling)；PE/Mach-O/ARM64/脚本在上传时拒绝；Docker 镜像在 Bot 计时前完成 linux/amd64 检查/拉取，实际运行固定 `--pull=never --entrypoint /app/bot`
 store/      SQLite + schema.py(常量唯一来源；fresh 实体 game_id 必填且无 DB 默认值)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
@@ -178,7 +178,7 @@ src/pages/                 顶层路由全部用 React.lazy 代码分割（每�
 
 **座位编号约定**：**展示层从 1 开始**（座位 1/2），**内部 0-indexed**（后端 `winner`/`human_seat` 为 0/1，DB CHECK `winner IN (0,1)`）。前端显示 `+1`（Challenge/HumanPlay/MatchViewer/match-seats/canvas 共 7 处）。
 
-**赛制阶段状态机**：`draft→open→published→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。`published` 是「排期已发布、等待开赛」中间态（报名截止→出排期→到点开打的两阶段）。`ContestScheduler`（`contests/scheduler.py`，挂 main.py lifespan）后台周期扫描赛事 `*_at` 字段，到点自动推进阶段（开放报名/截止报名出排期/到点 dispatch pairing/rest 恢复）；组织者手动按钮始终可提前触发。逐场排期：`contest_pairings.scheduled_at`（NULL=立即可打），`_dispatch_pending` 只 dispatch 到点的 pairing。新阶段首批 pairing（版本快照/bye/排期）与 `current_stage_idx/status` 必须经 Store 单事务批量提交；正式榜清旧/全量写入/`official_results_ready=1` 也必须同事务，启动对账负责补算 `finished+ready=0`。
+**赛制阶段状态机**：`draft→open→published→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。`published` 是「排期已发布、等待开赛」中间态（报名截止→出排期→到点开打的两阶段）；`starts_at=NULL` 明确表示等待组织者手动开始，任何 scheduler/reconcile 路径都不得偷换为立即开赛。`ContestScheduler`（`contests/scheduler.py`，挂 main.py lifespan）后台周期扫描赛事 `*_at` 字段，到点自动推进阶段（开放报名/截止报名出排期/到点 dispatch pairing/rest 恢复）；组织者手动按钮始终可提前触发。逐场排期：运行态 `contest_pairings.scheduled_at=NULL` 才表示立即可打，published 还必须先通过赛事级 `starts_at` 闸门。Bot 对局统一先占 orchestrator 全局 admission；赛事只为剩余槽创建/绑定 match，其余 pairing 保持 `pending + match_id=NULL`，单场完成立即回写 pairing 并补一个空槽。新阶段首批 pairing（版本快照/bye/排期）与 `current_stage_idx/status` 必须经 Store 单事务批量提交；正式榜清旧/全量写入/`official_results_ready=1` 也必须同事务，启动对账负责补算 `finished+ready=0`。
 
 **组织者实名 + 导出**：`require_real_name` 赛事报名时校验用户实名（`users.real_name/phone/school/student_id`）。`contest_entries_named` JOIN 实名字段，但 `contest_detail` 对**非组织者脱敏**（剔除 real_name/phone/school/student_id）+ 返回 `is_organizer` 标志。`GET /api/contests/{id}/export?format=csv`（**组织者 gated**）：合并导出报名名单（含实名）+ 结果排名 + 战绩一行 CSV（UTF-8 BOM 供 Excel）；任何状态可导出（未完赛 rank 列空）。前端赛程：BracketTree（SVG 连接线，`bracket_slot//2` 拓扑）+ ScheduleTable（一览表）+ 阶段 Tab 显示中文标签 + 进度。
 

@@ -1,7 +1,8 @@
-"""运行时 ceiling / settings 测试。"""
+"""代码唯一运行配置与只读诊断端点测试。"""
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import FrozenInstanceError
 from unittest import mock
 
 import pytest
@@ -9,10 +10,21 @@ from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
-from bzplat.backend.runtime.limits import clamp_concurrent, concurrent_ceiling
+from bzplat.backend.runtime.config import (
+    ACTION_TIMEOUT_SEC,
+    AUTO_MATCH_CONFIG,
+    CONFIGURATION_SOURCE,
+)
+from bzplat.backend.runtime.limits import (
+    clamp_concurrent,
+    concurrent_ceiling,
+    default_max_concurrent,
+)
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     SETTING_ACTION_TIMEOUT,
+    SETTING_AUTO_MATCH_ENABLED,
+    SETTING_AUTO_MATCH_INTERVAL_SEC,
     SETTING_CONTEST_REST,
     SETTING_MAX_CONCURRENT,
 )
@@ -27,178 +39,102 @@ def test_ceiling_formula():
         assert concurrent_ceiling() == 4
         assert clamp_concurrent(99) == 4
         assert clamp_concurrent(2) == 2
+        assert default_max_concurrent() == 2
 
 
-def _admin_client(tmp_path):
+def _admin_client(tmp_path, *, max_concurrent: int | None = 1):
     db = str(tmp_path / "t.db")
-    app = create_app(db_path=db, max_concurrent=1)
+    app = create_app(db_path=db, max_concurrent=max_concurrent)
     store: Store = app.state.store
-    u = store.create_user(
+    user = store.create_user(
         "admin", "a@ex.com", hash_password("password12"), role="admin"
     )
-    store.update_user(u["id"], email_verified=1)
+    store.update_user(user["id"], email_verified=1)
     _, token = app.state.auth.authenticate("admin", "password12")
     client = TestClient(app)
     client.headers["Authorization"] = f"Bearer {token}"
     return client, app
 
 
-def test_patch_concurrent_over_ceiling_rejected(tmp_path):
-    client, _app = _admin_client(tmp_path)
-    ceiling = concurrent_ceiling()
-    r = client.patch(
-        "/api/admin/settings/runtime",
-        json={"max_concurrent_matches": ceiling + 100},
-    )
-    assert r.status_code == 400
-    detail = r.json()["detail"]
-    assert "ceiling" in detail.lower() or "硬顶" in detail
+def test_runtime_diagnostics_are_explicitly_code_owned(tmp_path):
+    client, app = _admin_client(tmp_path)
+    response = client.get("/api/admin/settings/runtime")
 
-
-def test_patch_bot_cpus_rejected(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch("/api/admin/settings/runtime", json={"bot_cpus": 8})
-    assert r.status_code == 400
-
-
-def test_get_runtime_ok(tmp_path):
-    client, _app = _admin_client(tmp_path)
-    r = client.get("/api/admin/settings/runtime")
-    assert r.status_code == 200
-    data = r.json()
-    assert data["ceiling"] == concurrent_ceiling()
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source"] == CONFIGURATION_SOURCE
+    assert data["mutable"] is False
+    assert data["action_timeout_sec"] == ACTION_TIMEOUT_SEC
+    assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == 1
     assert data["bot_cpus"] == 1
     assert data["bot_memory_mb"] == 512
-    assert data["max_concurrent_matches"] <= data["ceiling"]
+    assert data["auto_match"]["enabled"] is AUTO_MATCH_CONFIG.enabled
+    assert data["auto_match"]["interval_sec"] == AUTO_MATCH_CONFIG.interval
+    assert data["contest_scheduler"] == {"enabled": True, "interval": 15}
+    assert "auto_match" in data["readonly"]
 
 
-def test_runtime_returns_auto_match_block(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.get("/api/admin/settings/runtime")
-    am = r.json()["auto_match"]
-    assert set(am) == {
-        "enabled", "interval_sec", "min_idle_sec",
-        "bot_cooldown", "stale_sec", "reserve_slots",
-        "placement_games", "max_per_round", "daily_cap", "daily_count",
-    }
-    assert am["enabled"] is True
-    assert am["placement_games"] == 10
-    assert am["daily_cap"] == 200
-    assert am["daily_count"] == 0
-
-
-def test_patch_auto_match_updates_and_hot_reloads(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/settings/runtime",
-        json={"auto_match_enabled": False, "auto_match_interval_sec": 60},
-    )
-    assert r.status_code == 200
-    am = r.json()["runtime"]["auto_match"]
-    assert am["enabled"] is False
-    assert am["interval_sec"] == 60
-
-
-def test_patch_auto_match_validates_bounds(tmp_path):
-    client, _ = _admin_client(tmp_path)
-    r = client.patch(
-        "/api/admin/settings/runtime",
-        json={"auto_match_interval_sec": 0},
-    )
-    assert r.status_code == 400
-
-
-def test_runtime_multifield_validation_has_no_db_or_hot_partial_effect(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"max_concurrent_matches": 1},
+        {"action_timeout_sec": 1},
+        {"contest_default_rest_minutes": 0},
+        {"auto_match_enabled": False},
+        {"bot_cpus": 8},
+    ],
+)
+def test_runtime_patch_route_does_not_exist(tmp_path, payload):
     client, app = _admin_client(tmp_path)
-    store = app.state.store
-    before = {
-        SETTING_MAX_CONCURRENT: store.get_setting(SETTING_MAX_CONCURRENT),
-        SETTING_CONTEST_REST: store.get_setting(SETTING_CONTEST_REST),
+    before = app.state.store.get_settings()
+    response = client.patch("/api/admin/settings/runtime", json=payload)
+
+    assert response.status_code == 404
+    assert app.state.store.get_settings() == before
+    assert app.state.orch.max_concurrent == 1
+    assert app.state.orch.runner.action_timeout == ACTION_TIMEOUT_SEC
+
+
+def test_startup_ignores_legacy_runtime_rows_and_does_not_rewrite_them(tmp_path):
+    db = str(tmp_path / "legacy.db")
+    legacy = {
+        SETTING_ACTION_TIMEOUT: "1",
+        SETTING_MAX_CONCURRENT: "999",
+        SETTING_CONTEST_REST: "99",
+        SETTING_AUTO_MATCH_ENABLED: "0",
+        SETTING_AUTO_MATCH_INTERVAL_SEC: "1",
     }
-    hot_calls: list[tuple[str, float]] = []
-    monkeypatch.setattr(
-        app.state.orch,
-        "rebuild_concurrency",
-        lambda value: hot_calls.append(("concurrency", value)),
-    )
+    store = Store(db)
+    store.set_settings(legacy)
+    store.close()
 
-    response = client.patch(
-        "/api/admin/settings/runtime",
-        json={
-            "max_concurrent_matches": 1,
-            "contest_default_rest_minutes": 12,
-            "auto_match_interval_sec": 0,
-        },
-    )
+    app = create_app(db_path=db)
 
-    assert response.status_code == 400
-    assert store.get_setting(SETTING_MAX_CONCURRENT) == before[SETTING_MAX_CONCURRENT]
-    assert store.get_setting(SETTING_CONTEST_REST) == before[SETTING_CONTEST_REST]
-    assert hot_calls == []
+    assert app.state.orch.max_concurrent == default_max_concurrent()
+    assert app.state.orch.runner.action_timeout == ACTION_TIMEOUT_SEC
+    assert app.state.auto_matcher._cfg() == AUTO_MATCH_CONFIG.as_dict()
+    assert app.state.store.get_settings(list(legacy)) == legacy
 
 
-def test_runtime_batch_commits_before_hot_reload_and_is_audited(tmp_path, monkeypatch):
-    client, app = _admin_client(tmp_path)
-    store = app.state.store
-    order: list[str] = []
-    audits: list[dict] = []
-    original_set_settings = store.set_settings
-
-    def record_commit(values):
-        original_set_settings(values)
-        order.append("commit")
-
-    def record_concurrency(value):
-        assert store.get_setting(SETTING_MAX_CONCURRENT) == str(value)
-        order.append("concurrency")
-
-    def record_timeout(value):
-        assert store.get_setting(SETTING_ACTION_TIMEOUT) == str(value)
-        order.append("timeout")
-
-    monkeypatch.setattr(store, "set_settings", record_commit)
-    monkeypatch.setattr(app.state.orch, "rebuild_concurrency", record_concurrency)
-    monkeypatch.setattr(app.state.orch, "set_action_timeout", record_timeout)
-    monkeypatch.setattr(
-        "bzplat.backend.api_routes.audit_log",
-        lambda _request, action, **fields: audits.append({"action": action, **fields}),
-    )
-
-    response = client.patch(
-        "/api/admin/settings/runtime",
-        json={"max_concurrent_matches": 1, "action_timeout_sec": 30},
-    )
-
-    assert response.status_code == 200, response.text
-    assert order == ["commit", "concurrency", "timeout"]
-    assert audits == [{
-        "action": "admin_patch_runtime",
-        "result": "ok",
-        "user": "admin",
-        "target": "runtime",
-        "detail": "max_concurrent_matches=1; action_timeout_sec=30.0",
-    }]
+def test_fresh_app_does_not_seed_legacy_runtime_settings(tmp_path):
+    app = create_app(db_path=str(tmp_path / "fresh.db"))
+    keys = [
+        SETTING_ACTION_TIMEOUT,
+        SETTING_MAX_CONCURRENT,
+        SETTING_CONTEST_REST,
+        SETTING_AUTO_MATCH_ENABLED,
+        SETTING_AUTO_MATCH_INTERVAL_SEC,
+    ]
+    assert app.state.store.get_settings(keys) == {}
 
 
-def test_runtime_validation_failure_is_audited(tmp_path, monkeypatch):
-    client, _app = _admin_client(tmp_path)
-    audits: list[dict] = []
-    monkeypatch.setattr(
-        "bzplat.backend.api_routes.audit_log",
-        lambda _request, action, **fields: audits.append({"action": action, **fields}),
-    )
-
-    response = client.patch(
-        "/api/admin/settings/runtime",
-        json={"contest_default_rest_minutes": 10, "auto_match_interval_sec": 0},
-    )
-
-    assert response.status_code == 400
-    assert audits[0]["action"] == "admin_patch_runtime"
-    assert audits[0]["result"] == "fail"
+def test_code_configuration_is_immutable():
+    with pytest.raises(FrozenInstanceError):
+        AUTO_MATCH_CONFIG.interval = 1  # type: ignore[misc]
 
 
 def test_store_set_settings_rolls_back_whole_batch_on_statement_failure(tmp_path):
+    """保留通用 KV 的事务保障；站点文案仍使用该设施。"""
     store = Store(str(tmp_path / "settings-atomic.db"))
     store._conn.execute(
         "CREATE TRIGGER reject_setting BEFORE INSERT ON platform_settings "

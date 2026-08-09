@@ -741,104 +741,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ):
             _add_col(conn, "pair_stats", col, decl)
 
-    # 赛制模板：表为空时从代码默认 + 旧 blob 导入
-    if "contest_templates" in tables or True:  # 新库也会建表
-        # 懒导入避免循环
-        from bzplat.backend.contests.templates import (
-            DEFAULT_TEMPLATES,
-            default_match_config,
-        )
-
-        ntpl = conn.execute("SELECT COUNT(*) FROM contest_templates").fetchone()[0]
-        if ntpl == 0:
-            # 先看旧 platform_settings blob（admin 历史覆盖）
-            blob_row = conn.execute(
-                "SELECT value FROM platform_settings WHERE key='contest_templates'"
-            ).fetchone()
-            imported_ids: set[str] = set()
-            now = _now()
-            if blob_row and blob_row[0]:
-                try:
-                    blob = json.loads(blob_row[0])
-                    if isinstance(blob, list):
-                        for t in blob:
-                            if not isinstance(t, dict):
-                                continue
-                            tid = str(t.get("id") or "").strip()
-                            if not tid or tid in imported_ids:
-                                continue
-                            gid = t.get("game_id")
-                            try:
-                                gid = _registered_game_id(gid)
-                            except ValueError:
-                                # 无法确定所属游戏的旧模板不能猜成 holdem；代码内置
-                                # 同名模板仍会在下方按其权威 game_id 补入。
-                                continue
-                            imported_ids.add(tid)
-                            conn.execute(
-                                "INSERT OR REPLACE INTO contest_templates"
-                                "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
-                                "VALUES(?,?,?,?,?,?,?)",
-                                (
-                                    tid,
-                                    str(t.get("name") or tid),
-                                    gid,
-                                    json.dumps(t.get("match_config") or default_match_config(gid)),
-                                    json.dumps(t.get("stages") or [], ensure_ascii=False),
-                                    0,
-                                    now,
-                                ),
-                            )
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            # 再补代码默认模板（未被 blob 覆盖的）
-            for tid, t in DEFAULT_TEMPLATES.items():
-                if tid in imported_ids:
-                    continue
-                gid = _registered_game_id(t.get("game_id"))
-                conn.execute(
-                    "INSERT OR REPLACE INTO contest_templates"
-                    "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (
-                        tid,
-                        t.get("name") or tid,
-                        gid,
-                        json.dumps(default_match_config(gid)),
-                        json.dumps(t.get("stages") or [], ensure_ascii=False),
-                        1,
-                        now,
-                    ),
-                )
-
-        # 对账：补齐代码定义但 DB 缺失的内置模板。生产库 PR#74 前创建时 seed 只在
-        # 表空时跑一次（上方 if ntpl==0 守卫），导致之后新增的内置模板（如预赛/决赛）
-        # 永远不会入库——前端 GET /api/contests/templates 读 DB 表 → 缺失 → UI 看不到。
-        # 每次 _migrate 都跑：仅 INSERT 缺失项，绝不覆盖已有行（尊重 admin 覆盖/旧 blob
-        # 导入的 is_builtin=0 行）。幂等：已存在的跳过。
-        now2 = _now()
-        for tid, t in DEFAULT_TEMPLATES.items():
-            exists = conn.execute(
-                "SELECT 1 FROM contest_templates WHERE id=?", (tid,)
-            ).fetchone()
-            if exists:
-                continue
-            gid = _registered_game_id(t.get("game_id"))
-            conn.execute(
-                "INSERT INTO contest_templates"
-                "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (
-                    tid,
-                    t.get("name") or tid,
-                    gid,
-                    json.dumps(default_match_config(gid)),
-                    json.dumps(t.get("stages") or [], ensure_ascii=False),
-                    1,
-                    now2,
-                ),
-            )
-
     # ── ratings / rating_history 加 game_id 维度（全面解耦 PR3）──────────
     # 旧库 ratings PK = bot_id（无 game_id 列）；rating_history 无 game_id 列。
     # 迁移：加 game_id 列，按 bots.game_id 回填，重建表改 PK 为 (bot_id, game_id)。
@@ -1233,6 +1135,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, "contest_pairings", "bot_b_version_id", "INTEGER")
         _add_col(conn, "contest_pairings", "pairing_seed", "INTEGER")
         _add_col(conn, "contest_pairings", "published_at", "TEXT")
+        duplicate_binding = conn.execute(
+            "SELECT match_id, COUNT(*) AS n FROM contest_pairings "
+            "WHERE match_id IS NOT NULL GROUP BY match_id HAVING COUNT(*)>1 "
+            "LIMIT 1"
+        ).fetchone()
+        if duplicate_binding:
+            raise RuntimeError(
+                "contest_pairings 存在重复 match_id 绑定，必须先修复: "
+                f"{duplicate_binding['match_id']} ({duplicate_binding['n']} rows)"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_contest_pairings_match_unique "
+            "ON contest_pairings(match_id) WHERE match_id IS NOT NULL"
+        )
 
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
     # 升级前的 completed 对局大多已经由旧后处理更新过 ratings，但没有 marker。
@@ -4673,6 +4589,12 @@ class Store:
             allowed = ("published", "running")
             if not contest or contest["status"] not in allowed:
                 raise ValueError("赛事状态已变化，不能绑定对局")
+            already_bound = c.execute(
+                "SELECT id FROM contest_pairings WHERE match_id=? AND id<>? LIMIT 1",
+                (match_id, pairing_id),
+            ).fetchone()
+            if already_bound:
+                raise ValueError("同一对局不能绑定到多个赛事对阵")
             cur = c.execute(
                 "UPDATE contest_pairings SET match_id=?, status='running' "
                 "WHERE id=? AND contest_id=? AND status='pending' AND match_id IS NULL",
@@ -4682,9 +4604,10 @@ class Store:
                 raise ValueError("对阵已被派发或状态已变化")
             if activate_running:
                 cur = c.execute(
-                    "UPDATE contests SET status='running' "
+                    "UPDATE contests SET status='running', "
+                    "starts_at=COALESCE(starts_at, ?) "
                     "WHERE id=? AND status='published'",
-                    (contest_id,),
+                    (_now(), contest_id),
                 )
                 if cur.rowcount != 1:
                     raise ValueError("赛事已不处于 published 状态")
@@ -4693,6 +4616,138 @@ class Store:
                     "SELECT * FROM contest_pairings WHERE id=?", (pairing_id,)
                 ).fetchone()
             )
+
+    def complete_contest_pairing_for_match(
+        self, contest_id: int, match_id: str
+    ) -> dict | None:
+        """Atomically mirror one adjudicated match into its pairing status.
+
+        The match row remains the scoring authority.  This method only updates
+        the presentation/scheduling state after proving that the exact bound
+        match belongs to the contest and is ``completed``; pending, running and
+        aborted matches can never be mislabeled as completed.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            table = self._match_table_of(c, match_id)
+            if not table:
+                return None
+            match = c.execute(
+                f"SELECT status, contest_id FROM {table} WHERE id=?", (match_id,)
+            ).fetchone()
+            if (
+                not match
+                or match["status"] != STATUS_COMPLETED
+                or match["contest_id"] != contest_id
+            ):
+                return None
+            pairings = c.execute(
+                "SELECT id FROM contest_pairings "
+                "WHERE contest_id=? AND match_id=?",
+                (contest_id, match_id),
+            ).fetchall()
+            if not pairings:
+                return None
+            if len(pairings) != 1:
+                raise RuntimeError(
+                    f"match {match_id} 绑定了 {len(pairings)} 个赛事对阵"
+                )
+            pairing = pairings[0]
+            c.execute(
+                "UPDATE contest_pairings SET status=? "
+                "WHERE id=? AND contest_id=? AND match_id=?",
+                (STATUS_COMPLETED, pairing["id"], contest_id, match_id),
+            )
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_pairings WHERE id=?", (pairing["id"],)
+                ).fetchone()
+            )
+
+    def backfill_contest_actual_start(self, contest_id: int) -> str | None:
+        """Backfill a missing starts_at from an owned, actually-started match.
+
+        Only already-started lifecycle states are eligible.  Published contests
+        intentionally keep NULL as the manual-start gate, so corrupt historical
+        pairings can never make them start automatically during reconciliation.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status, starts_at, registration_closes_at, ends_at "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if (
+                not contest
+                or contest["starts_at"]
+                or contest["status"] not in (
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                    CONTEST_FINISHED,
+                )
+            ):
+                return None
+
+            candidates: list[tuple[datetime, str]] = []
+            rows = c.execute(
+                "SELECT match_id FROM contest_pairings "
+                "WHERE contest_id=? AND match_id IS NOT NULL",
+                (contest_id,),
+            ).fetchall()
+            for row in rows:
+                match_id = row["match_id"]
+                table = self._match_table_of(c, match_id)
+                if not table:
+                    continue
+                match = c.execute(
+                    f"SELECT contest_id, status, started_at FROM {table} WHERE id=?",
+                    (match_id,),
+                ).fetchone()
+                if (
+                    not match
+                    or match["contest_id"] != contest_id
+                    or match["status"] == STATUS_PENDING
+                    or not match["started_at"]
+                ):
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(str(match["started_at"]))
+                except ValueError:
+                    logger.error(
+                        "contest %s match %s has invalid started_at",
+                        contest_id,
+                        match_id,
+                    )
+                    continue
+                candidates.append((parsed, str(match["started_at"])))
+
+            if not candidates:
+                return None
+            _, actual = min(candidates, key=lambda item: item[0])
+            actual_dt = datetime.fromisoformat(actual)
+            closes = contest["registration_closes_at"]
+            ends = contest["ends_at"]
+            try:
+                if closes and datetime.fromisoformat(str(closes)) > actual_dt:
+                    return None
+                if ends and actual_dt > datetime.fromisoformat(str(ends)):
+                    return None
+            except ValueError:
+                return None
+            cur = c.execute(
+                "UPDATE contests SET starts_at=? "
+                "WHERE id=? AND starts_at IS NULL "
+                "AND status IN (?,?,?)",
+                (
+                    actual,
+                    contest_id,
+                    CONTEST_RUNNING,
+                    CONTEST_REST,
+                    CONTEST_FINISHED,
+                ),
+            )
+            return actual if cur.rowcount == 1 else None
 
     def unbind_prepared_contest_match(
         self,
@@ -4914,7 +4969,7 @@ class Store:
             ).fetchall()
             return [_row(r) for r in rows]
 
-    # ── contest_templates（赛制模板）──────────────────────────
+    # ── contest_templates（历史只读；运行模板来自代码注册表）──
 
     def list_contest_templates(self, *, game_id: str | None = None) -> list[dict]:
         with self._tx() as c:
@@ -4942,52 +4997,6 @@ class Store:
         r["stages"] = _loads_json(r.get("stages_json"), default=[])
         r["match_config"] = _loads_json(r.get("match_config"), default={})
         return r
-
-    def upsert_contest_template(
-        self,
-        tid: str,
-        *,
-        name: str,
-        game_id: str,
-        match_config: dict | str,
-        stages: list | str,
-        is_builtin: bool = False,
-    ) -> dict:
-        gid = _registered_game_id(game_id)
-        mc_json = (
-            match_config if isinstance(match_config, str) else json.dumps(match_config)
-        )
-        st_json = stages if isinstance(stages, str) else json.dumps(stages, ensure_ascii=False)
-        with self._tx() as c:
-            c.execute(
-                "INSERT INTO contest_templates(id, name, game_id, match_config, "
-                "stages_json, is_builtin, updated_at) VALUES(?,?,?,?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
-                "game_id=excluded.game_id, match_config=excluded.match_config, "
-                "stages_json=excluded.stages_json, updated_at=excluded.updated_at",
-                (tid, name, gid, mc_json, st_json, 1 if is_builtin else 0, _now()),
-            )
-            r = _row(
-                c.execute(
-                    "SELECT * FROM contest_templates WHERE id=?", (tid,)
-                ).fetchone()
-            )
-        r["stages"] = _loads_json(r.get("stages_json"), default=[])
-        r["match_config"] = _loads_json(r.get("match_config"), default={})
-        return r
-
-    def delete_contest_template(self, tid: str) -> bool:
-        """删除非内置模板；内置模板返回 False。"""
-        with self._tx() as c:
-            r = c.execute(
-                "SELECT is_builtin FROM contest_templates WHERE id=?", (tid,)
-            ).fetchone()
-            if not r:
-                return False
-            if r["is_builtin"]:
-                return False
-            cur = c.execute("DELETE FROM contest_templates WHERE id=?", (tid,))
-            return cur.rowcount > 0
 
     # ── platform_settings ─────────────────────────────────────
 

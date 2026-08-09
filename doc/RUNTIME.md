@@ -37,7 +37,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 则在每�
 
 ## 决策超时
 
-- `GameSpec.time_budget_per_side=None` 的游戏（当前 holdem / gomoku）沿用单次决策超时：默认 **60 秒 / 决策**，管理员可在「运行时」面板改为 1–300 秒。
+- `GameSpec.time_budget_per_side=None` 的游戏（当前 holdem / gomoku）使用代码常量 **60 秒 / 决策**；管理端、数据库和环境变量均不能覆盖。
 - Pencil 的 `GameSpec.time_budget_per_side=900`：双方各有一只独立、固定 **900 秒（15 分钟）累计棋钟**，Bot-vs-Bot 与人类对战走同一契约；每次等待只使用该座位的剩余时间，不能靠多回合重置。该固定规则不读取 `action_timeout_sec`，admin 不可改。
 - Bot 单步超时或 Pencil 累计棋钟耗尽在第一次发生时即终止对局，持久化为 `completed + reason=timeout + technical_loss=1`；不会生成代替动作继续对局。Bot-vs-Bot 技术结果进入评分/赛事积分，人机局由人类获胜但不计 Glicko。人类侧逐回合/累计超时仍走人类 inactivity 与游戏裁判逻辑。
 - 人类对战的 `human_action_timeout` 默认仍为 **120 秒 / 回合**，用于等待 WebSocket 落子的内层保护；Pencil 同时受外层 900 秒累计棋钟约束，以先到的限制为准。
@@ -45,8 +45,8 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 则在每�
 - **故障语义**（详见 [对局](#/wiki?slug=guide)）：Bot 信封/response 格式错误 → `completed + reason=protocol_error + technical_loss=1`；Bot 决策超时 → `completed + reason=timeout + technical_loss=1`。两者在首个故障终止，回放写 `technical_incident`，结果只公开 `technical_incident_count`、`technical_incidents_by_seat` 与最多 3 条 `technical_incident_samples`；结构化日志带 `match_id/bot_id/version_id/runtime/seat/turn` 且不记录原始 stdout/私有路径。历史回放中的旧错误事件只在服务端读取时归一化，不作为新写入或对外字段。Bot-vs-Bot 评分，人机局不评分；格式正确但游戏内非法动作仍归裁判。中途崩溃由引擎计分判负；Bot-vs-Bot 启动失败结算为 `completed + technical_loss`，human 启动失败为 `aborted + bot_crashed`。Docker 125 等平台沙箱故障为 `aborted + platform_error`、不评分；上传在 worker 中按所选 runtime_mode 使用正式首回合同一信封与握手预检，平台故障返回 503，不改变原激活版本，也不阻塞主事件循环。
 - 本平台默认 Traditional（每个决策点重启进程）；显式选择 LongRunning 并完成精确握手后才整场长驻。两种模式使用相同 stdin/stdout 单行 JSON 信封；缺失/错误握手立即协议判负，不回退。
 
-平台不按编程语言调整时限。无累计棋钟的游戏统一使用管理员配置的
-`action_timeout_sec`；Pencil 使用 GameSpec 固定的每方 900 秒累计预算。
+平台不按编程语言调整时限。无累计棋钟的游戏统一使用
+`runtime/config.py::ACTION_TIMEOUT_SEC`；Pencil 使用 GameSpec 固定的每方 900 秒累计预算。
 
 ## 并发半负载
 
@@ -56,11 +56,15 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 则在每�
 cpu_count = os.cpu_count()          # 真实核数，禁止伪造
 full      = max(1, cpu_count // 2)  # 满载对局数
 ceiling   = max(1, full // 2)       # = max(1, cpu_count // 4)
-effective = min(admin_requested, ceiling)
+configured = 2                       # runtime/config.py 代码常量
+effective  = min(configured, ceiling)
 ```
 
-- Admin 设置的 `max_concurrent_matches` **不得超过 ceiling**；超过则 API 返回 **400**。
+- 生效并发固定取代码值 2 与机器 ceiling 的较小值，不读取旧
+  `platform_settings.max_concurrent_matches`，也不存在管理写接口或环境变量覆盖。
 - 为何一场占两核：双方各一容器且 `--cpus=1`。
+- 全局 admission 会把已经接纳但尚未真正运行的赛事/挑战也计入占位；auto-match 只能使用
+  `available_bot_slots()` 的剩余量再扣用户预留槽，不能只看当前容器数继续堆积任务。
 
 ## 运行模式边界
 
@@ -83,8 +87,8 @@ effective = min(admin_requested, ceiling)
 
 **触发条件**（全部满足才安排）：
 
-1. `auto_match_enabled = 1`（默认开，admin 可关）；
-2. 有空闲并发槽：`max_concurrent - reserve_slots - 当前运行数 > 0`；
+1. 代码配置 `enabled=True`；
+2. 有空闲并发槽：`全局尚未占用的 admission - reserve_slots > 0`；已接纳但等待执行的任务也占位；
    `reserve_slots`（默认 1）为用户主动挑战**预留**的槽位，避免抢占；
 3. 连续空闲达 `auto_match_min_idle_sec`（默认 5 秒），即真正闲时。
 
@@ -97,29 +101,33 @@ effective = min(admin_requested, ceiling)
 `match_type=ladder`，`owner` 为空（系统发起），**计入全局 Glicko-2 评分**
 （比赛 contest 对局不计全局，见 [对局](#/wiki?slug=guide)）。
 
-| 配置项 | 默认 | 含义 |
+| 代码字段 | 固定值 | 含义 |
 |--------|------|------|
-| `auto_match_enabled` | 1 | 启用 |
-| `auto_match_interval_sec` | 30 | 轮询间隔 |
-| `auto_match_min_idle_sec` | 5 | 连续空闲触发秒数 |
-| `auto_match_bot_cooldown` | 600 | 同 bot 两场间隔下限（秒） |
-| `auto_match_stale_sec` | 3600 | 仅调度陈旧超此阈值（秒）的 bot；0=不限 |
-| `auto_match_reserve_slots` | 1 | 为用户挑战预留的并发槽 |
-| `auto_match_placement_games` | 10 | 新 bot 定级赛场次（前 N 场优先，0=禁用） |
-| `auto_match_max_per_round` | 2 | 每轮最多补几场 |
-| `auto_match_daily_cap` | 200 | 每日后台对局总量上限（0=不限） |
+| `enabled` | `True` | 启用 |
+| `interval` | 30 | 轮询间隔（秒） |
+| `min_idle` | 5 | 连续空闲触发秒数 |
+| `cooldown` | 600 | 同 bot 两场间隔下限（秒） |
+| `stale` | 3600 | 仅调度陈旧超此阈值（秒）的 bot；0=不限 |
+| `reserve` | 1 | 为用户挑战预留的并发槽 |
+| `placement_games` | 10 | 新 bot 定级赛场次（前 N 场优先，0=禁用） |
+| `max_per_round` | 2 | 每轮最多补几场 |
+| `daily_cap` | 200 | 每日后台对局总量上限（0=不限） |
 
-配置写入即**热更新**（调度器每轮重读 settings），无需重启。admin「运行时」Tab 可见
-「今日后台对局 N/上限」实时计数。
+这些字段由 `runtime/config.py::AUTO_MATCH_CONFIG` 的冻结对象提供，只能经代码评审和重新
+发布修改。调度器不读取同名历史 settings。今日后台对局计数只作为进程内诊断值返回。
 
 > **可见性**：后台 ladder 对局会出现在首页「最新对局」（带「后台」徽章），便于观察天梯维护。
 
-## 管理员配置
+## 代码配置与只读诊断
 
-`GET/PATCH /api/admin/settings/runtime`：
+`bzplat/backend/runtime/config.py` 是运行参数的唯一真相源，集中声明决策超时、默认并发、
+循环赛人数护栏、auto-match 与赛事 scheduler 参数。阶段休息时间直接属于各代码模板。修改须走代码评审、测试、
+部署；旧 `platform_settings` 同名记录只作为历史数据保留，启动不 seed、不读取、不回写。
 
-- 可改：`action_timeout_sec`、`max_concurrent_matches`（≤ ceiling）、`contest_default_rest_minutes`、
-  上述全部 `auto_match_*`
-- 只读：`bot_cpus=1`、`bot_memory_mb=512`
-- 原子更新：多字段 PATCH 先校验整包，随后在一个 SQLite 事务内写入；任一字段非法或写入失败都不保留部分新值
-- 热更新：数据库事务提交后才重建 Semaphore / 单步决策超时；自动对局参数由调度器每轮读取。Pencil 900 秒棋钟是固定游戏规则，不受该设置影响
+`GET /api/admin/settings/runtime` 仅供诊断，响应明确包含 `source="code"`、
+`mutable=false`、当前机器 ceiling、实际生效并发、队列计数和冻结配置。不存在
+`PATCH /api/admin/settings/runtime`，管理端也不展示“运行时”Tab。
+
+赛制模板同样由 `games/<game>/templates.py` 通过游戏注册表聚合。公开
+`GET /api/contests/templates` 返回 `source="code"`、`mutable=false`；历史
+`contest_templates` 表不再 seed/对账或参与解析，不存在 `/api/admin/templates*`。

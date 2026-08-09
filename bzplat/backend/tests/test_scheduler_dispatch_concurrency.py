@@ -37,6 +37,7 @@ def _setup_contest(app, *, status="running"):
     b2 = store.create_bot(player["id"], "botB", binary_path="/tmp/b", format="elf", game_id="holdem")
     cid = store.create_contest(
         "DupTest", organizer_id=org["id"], game_id="holdem", status=status,
+        starts_at="2000-01-01T00:00:00" if status == "published" else None,
         stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
     )["id"]
     entry_a = store.add_contest_entry(cid, org["id"], b1["id"])

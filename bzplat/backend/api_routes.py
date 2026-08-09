@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import re
 from pathlib import Path
@@ -26,16 +25,19 @@ from bzplat.backend.bots import BotError, BotManager
 
 logger = logging.getLogger(__name__)
 from bzplat.backend.contests import ContestManager
-from bzplat.backend.contests.stages import estimate_match_count
-from bzplat.backend.contests.validation import validate_stage, validate_template
+from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.games import registry as game_registry
-from bzplat.backend.matches import MatchOrchestrator
+from bzplat.backend.matches import BotCapacityError, MatchOrchestrator
+from bzplat.backend.runtime.config import (
+    ACTION_TIMEOUT_SEC,
+    AUTO_MATCH_CONFIG,
+    CONFIGURATION_SOURCE,
+    CONTEST_SCHEDULER_CONFIG,
+    FULL_RR_MAX_N,
+)
 from bzplat.backend.runtime.limits import (
-    ACTION_TIMEOUT_MAX,
-    ACTION_TIMEOUT_MIN,
     BOT_CPUS,
     BOT_MEMORY_MB,
-    clamp_concurrent,
     concurrent_ceiling,
     cpu_count,
 )
@@ -51,18 +53,6 @@ from bzplat.backend.store.schema import (
     DEFAULT_RUNTIME_MODE,
     ROLE_ADMIN,
     ROLE_ORGANIZER,
-    SETTING_ACTION_TIMEOUT,
-    SETTING_AUTO_MATCH_BOT_COOLDOWN,
-    SETTING_AUTO_MATCH_DAILY_CAP,
-    SETTING_AUTO_MATCH_ENABLED,
-    SETTING_AUTO_MATCH_INTERVAL_SEC,
-    SETTING_AUTO_MATCH_MAX_PER_ROUND,
-    SETTING_AUTO_MATCH_MIN_IDLE_SEC,
-    SETTING_AUTO_MATCH_PLACEMENT_GAMES,
-    SETTING_AUTO_MATCH_RESERVE_SLOTS,
-    SETTING_AUTO_MATCH_STALE_SEC,
-    SETTING_CONTEST_REST,
-    SETTING_MAX_CONCURRENT,
     SUPPORTED_BINARY_ERROR,
     STATUS_ABORTED,
     STATUS_COMPLETED,
@@ -708,6 +698,9 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             bot_a_version_id=body.my_bot_version_id,
             bot_b_version_id=body.opponent_bot_version_id,
         )
+    except BotCapacityError as e:
+        audit_log(request, "match_challenge", result="busy", user=user.get("username"), detail=str(e))
+        raise HTTPException(429, str(e))
     except ValueError as e:
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
@@ -1216,9 +1209,11 @@ class ContestDispatch(BaseModel):
 
 
 def _template_for_api(template: dict[str, Any]) -> dict[str, Any]:
-    """Keep template match_config as storage-only metadata, never an editable API field."""
+    """Return the read-only public shape of one code-owned template."""
     public = dict(template)
     public.pop("match_config", None)
+    public["is_builtin"] = True
+    public["source"] = CONFIGURATION_SOURCE
     return public
 
 
@@ -1232,12 +1227,15 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/api/contests/templates")
 def contest_templates(request: Request, game: str | None = None):
-    # 从 contest_templates 表读（与 admin 同源，含覆盖；修复原读代码默认的不一致）
+    del request
+    try:
+        templates = list_templates(game_id=game)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {
-        "templates": [
-            _template_for_api(t)
-            for t in _store(request).list_contest_templates(game_id=game)
-        ]
+        "templates": [_template_for_api(t) for t in templates],
+        "source": CONFIGURATION_SOURCE,
+        "mutable": False,
     }
 
 
@@ -2340,73 +2338,51 @@ def admin_outbox(
     return {"outbox": rows, "total": len(rows)}
 
 
-# ── admin: runtime settings ───────────────────────────────────
-
-class RuntimeSettingsPatch(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    action_timeout_sec: float | None = None
-    max_concurrent_matches: int | None = None
-    contest_default_rest_minutes: int | None = None
-    bot_cpus: float | None = None
-    bot_memory_mb: int | None = None
-    # 闲时自动对局
-    auto_match_enabled: bool | None = None
-    auto_match_interval_sec: int | None = None
-    auto_match_min_idle_sec: int | None = None
-    auto_match_bot_cooldown: int | None = None
-    auto_match_stale_sec: int | None = None
-    auto_match_reserve_slots: int | None = None
-    auto_match_placement_games: int | None = None
-    auto_match_max_per_round: int | None = None
-    auto_match_daily_cap: int | None = None
-
-
+# ── admin: runtime diagnostics（代码配置，只读）───────────────
 @router.get("/api/admin/settings/runtime")
 def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
     store = _store(request)
     orch = _orch(request)
-    ceiling = concurrent_ceiling()
-    raw_conc = store.get_setting(SETTING_MAX_CONCURRENT) or str(orch.max_concurrent)
-    try:
-        admin_conc = int(raw_conc)
-    except ValueError:
-        admin_conc = orch.max_concurrent
-    timeout = store.get_setting(SETTING_ACTION_TIMEOUT) or "60"
-    rest = store.get_setting(SETTING_CONTEST_REST) or "10"
     stats = store.count_stats()
-
-    def _sett(key: str, default: str) -> str:
-        return store.get_setting(key) or default
-
+    cfg = AUTO_MATCH_CONFIG
     am = {
-        "enabled": _sett(SETTING_AUTO_MATCH_ENABLED, "1") in ("1", "true", "yes"),
-        "interval_sec": int(_sett(SETTING_AUTO_MATCH_INTERVAL_SEC, "30")),
-        "min_idle_sec": int(_sett(SETTING_AUTO_MATCH_MIN_IDLE_SEC, "5")),
-        "bot_cooldown": int(_sett(SETTING_AUTO_MATCH_BOT_COOLDOWN, "600")),
-        "stale_sec": int(_sett(SETTING_AUTO_MATCH_STALE_SEC, "3600")),
-        "reserve_slots": int(_sett(SETTING_AUTO_MATCH_RESERVE_SLOTS, "1")),
-        "placement_games": int(_sett(SETTING_AUTO_MATCH_PLACEMENT_GAMES, "10")),
-        "max_per_round": int(_sett(SETTING_AUTO_MATCH_MAX_PER_ROUND, "2")),
-        "daily_cap": int(_sett(SETTING_AUTO_MATCH_DAILY_CAP, "200")),
+        "enabled": cfg.enabled,
+        "interval_sec": cfg.interval,
+        "min_idle_sec": cfg.min_idle,
+        "bot_cooldown": cfg.cooldown,
+        "stale_sec": cfg.stale,
+        "reserve_slots": cfg.reserve,
+        "placement_games": cfg.placement_games,
+        "max_per_round": cfg.max_per_round,
+        "daily_cap": cfg.daily_cap,
         "daily_count": getattr(getattr(request.app.state, "auto_matcher", None), "daily_count", 0),
     }
     return {
+        "source": CONFIGURATION_SOURCE,
+        "mutable": False,
         "cpu_count": cpu_count(),
-        "ceiling": ceiling,
-        "action_timeout_sec": float(timeout),
-        "max_concurrent_matches": clamp_concurrent(admin_conc),
-        "admin_requested": admin_conc,
+        "ceiling": concurrent_ceiling(),
+        "action_timeout_sec": ACTION_TIMEOUT_SEC,
+        "max_concurrent_matches": orch.max_concurrent,
         "effective_concurrent": orch.max_concurrent,
         "bot_cpus": BOT_CPUS,
         "bot_memory_mb": BOT_MEMORY_MB,
-        "contest_default_rest_minutes": int(rest),
+        "full_rr_max_n": FULL_RR_MAX_N,
+        "contest_scheduler": CONTEST_SCHEDULER_CONFIG.as_dict(),
         "queue": {
             "pending": stats.get("matches_pending", 0),
             "running": stats.get("matches_running", 0),
         },
         "auto_match": am,
-        "readonly": ["bot_cpus", "bot_memory_mb"],
+        "readonly": [
+            "action_timeout_sec",
+            "max_concurrent_matches",
+            "bot_cpus",
+            "bot_memory_mb",
+            "full_rr_max_n",
+            "contest_scheduler",
+            "auto_match",
+        ],
     }
 
 
@@ -2442,141 +2418,6 @@ def admin_patch_site(
         "announcement": s.get(SETTING_SITE_ANNOUNCEMENT) or "",
         "about": s.get(SETTING_SITE_ABOUT) or "",
     }}
-
-
-def _validated_runtime_patch(
-    body: RuntimeSettingsPatch, *, ceiling: int
-) -> tuple[dict[str, str], dict[str, Any]]:
-    """Validate the complete request without persistence or hot side effects."""
-    settings: dict[str, str] = {}
-    updated: dict[str, Any] = {}
-
-    def add(key: str, response_key: str, value: Any, stored: str | None = None) -> None:
-        settings[key] = str(value) if stored is None else stored
-        updated[response_key] = value
-
-    if body.bot_cpus is not None or body.bot_memory_mb is not None:
-        raise ValueError("bot_cpus / bot_memory_mb 为只读硬限制，不可修改")
-
-    if body.max_concurrent_matches is not None:
-        value = int(body.max_concurrent_matches)
-        if value > ceiling:
-            raise ValueError(
-                f"max_concurrent_matches={value} 超过半负载硬顶 ceiling={ceiling}"
-                f"（机器 {cpu_count()} 核）"
-            )
-        if value < 1:
-            raise ValueError("max_concurrent_matches 至少为 1")
-        add(SETTING_MAX_CONCURRENT, "max_concurrent_matches", value)
-
-    if body.action_timeout_sec is not None:
-        value = float(body.action_timeout_sec)
-        if (
-            not math.isfinite(value)
-            or value < ACTION_TIMEOUT_MIN
-            or value > ACTION_TIMEOUT_MAX
-        ):
-            raise ValueError(
-                f"action_timeout_sec 须在 {ACTION_TIMEOUT_MIN}–{ACTION_TIMEOUT_MAX}"
-            )
-        add(SETTING_ACTION_TIMEOUT, "action_timeout_sec", value)
-
-    if body.contest_default_rest_minutes is not None:
-        value = int(body.contest_default_rest_minutes)
-        if value < 0 or value > 120:
-            raise ValueError("contest_default_rest_minutes 须在 0–120")
-        add(SETTING_CONTEST_REST, "contest_default_rest_minutes", value)
-
-    if body.auto_match_enabled is not None:
-        add(
-            SETTING_AUTO_MATCH_ENABLED,
-            "auto_match_enabled",
-            body.auto_match_enabled,
-            "1" if body.auto_match_enabled else "0",
-        )
-    integer_fields = (
-        ("auto_match_interval_sec", SETTING_AUTO_MATCH_INTERVAL_SEC, 1, 3600,
-         "auto_match_interval_sec 须在 1–3600"),
-        ("auto_match_min_idle_sec", SETTING_AUTO_MATCH_MIN_IDLE_SEC, 0, 600,
-         "auto_match_min_idle_sec 须在 0–600"),
-        ("auto_match_bot_cooldown", SETTING_AUTO_MATCH_BOT_COOLDOWN, 0, 86400,
-         "auto_match_bot_cooldown 须在 0–86400"),
-        ("auto_match_stale_sec", SETTING_AUTO_MATCH_STALE_SEC, 0, 604800,
-         "auto_match_stale_sec 须在 0–604800（0=不限）"),
-        ("auto_match_reserve_slots", SETTING_AUTO_MATCH_RESERVE_SLOTS, 0, ceiling,
-         "auto_match_reserve_slots 须在 0–ceiling"),
-        ("auto_match_placement_games", SETTING_AUTO_MATCH_PLACEMENT_GAMES, 0, 100,
-         "auto_match_placement_games 须在 0–100（0=禁用）"),
-        ("auto_match_max_per_round", SETTING_AUTO_MATCH_MAX_PER_ROUND, 1, 50,
-         "auto_match_max_per_round 须在 1–50"),
-        ("auto_match_daily_cap", SETTING_AUTO_MATCH_DAILY_CAP, 0, 100000,
-         "auto_match_daily_cap 须在 0–100000（0=不限）"),
-    )
-    for field, setting_key, minimum, maximum, error in integer_fields:
-        raw = getattr(body, field)
-        if raw is None:
-            continue
-        value = int(raw)
-        if value < minimum or value > maximum:
-            raise ValueError(error)
-        add(setting_key, field, value)
-
-    if not updated:
-        raise ValueError("无更新字段")
-    return settings, updated
-
-
-@router.patch("/api/admin/settings/runtime")
-def admin_patch_runtime(
-    body: RuntimeSettingsPatch, request: Request, admin=Depends(require_admin)
-):
-    store = _store(request)
-    orch = _orch(request)
-    try:
-        settings, updated = _validated_runtime_patch(
-            body, ceiling=concurrent_ceiling()
-        )
-    except ValueError as exc:
-        audit_log(
-            request, "admin_patch_runtime", result="fail",
-            user=admin.get("username"), target="runtime", detail=str(exc),
-        )
-        raise HTTPException(400, str(exc)) from exc
-
-    # All validation completed.  Persist the batch atomically; only after the
-    # transaction commits may process-local hot state observe the new values.
-    try:
-        store.set_settings(settings)
-    except Exception as exc:
-        audit_log(
-            request, "admin_patch_runtime", result="fail",
-            user=admin.get("username"), target="runtime",
-            detail=f"write_failed={type(exc).__name__}",
-        )
-        raise HTTPException(500, "运行时配置保存失败") from exc
-
-    try:
-        if "max_concurrent_matches" in updated:
-            orch.rebuild_concurrency(updated["max_concurrent_matches"])
-        if "action_timeout_sec" in updated:
-            orch.set_action_timeout(updated["action_timeout_sec"])
-    except Exception as exc:
-        audit_log(
-            request, "admin_patch_runtime", result="fail",
-            user=admin.get("username"), target="runtime",
-            detail=(
-                f"committed={','.join(sorted(updated))}; "
-                f"hot_reload_failed={type(exc).__name__}"
-            ),
-        )
-        raise HTTPException(500, "运行时配置已保存，但热更新失败；请重启服务") from exc
-
-    audit_log(
-        request, "admin_patch_runtime", result="ok",
-        user=admin.get("username"), target="runtime",
-        detail="; ".join(f"{key}={value}" for key, value in updated.items()),
-    )
-    return {"updated": updated, "runtime": admin_get_runtime(request, admin)}
 
 
 # ── 公开裁判引擎（只读） ──────────────────────────────
@@ -2647,106 +2488,6 @@ def public_get_judge_source(game_id: str, request: Request):
         "summary": spec.summary,
         "files": files,
     }
-
-
-# ── admin: 赛制模板 CRUD ──────────────────────────────────────
-class TemplateBody(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    id: str
-    name: str
-    game_id: str
-    stages: list[dict[str, Any]]
-
-
-class TemplatePreviewBody(BaseModel):
-    model_config = {"extra": "forbid"}
-
-    stages: list[dict[str, Any]]
-    n: int = 8
-    game_id: str = "holdem"
-
-
-@router.get("/api/admin/templates")
-def admin_list_templates(
-    request: Request, game: str | None = None, _admin=Depends(require_admin)
-):
-    return {
-        "templates": [
-            _template_for_api(t)
-            for t in _store(request).list_contest_templates(game_id=game)
-        ]
-    }
-
-
-@router.post("/api/admin/templates")
-def admin_create_template(
-    body: TemplateBody, request: Request, _admin=Depends(require_admin)
-):
-    store = _store(request)
-    if store.get_contest_template(body.id) is not None:
-        raise HTTPException(409, f"模板 id 已存在：{body.id}")
-    _reject_fixed_rule_overrides(body.stages)
-    try:
-        norm = validate_template(body.id, body.name, body.game_id, {}, body.stages)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    t = store.upsert_contest_template(
-        norm["id"], name=norm["name"], game_id=norm["game_id"],
-        match_config=norm["match_config"], stages=norm["stages"], is_builtin=False,
-    )
-    return {"template": _template_for_api(t)}
-
-
-@router.put("/api/admin/templates/{tid}")
-def admin_update_template(
-    tid: str, body: TemplateBody, request: Request, _admin=Depends(require_admin)
-):
-    if tid != body.id:
-        raise HTTPException(400, "路径 id 与 body.id 不一致")
-    store = _store(request)
-    existing = store.get_contest_template(tid)
-    if existing is None:
-        raise HTTPException(404, f"模板不存在：{tid}")
-    _reject_fixed_rule_overrides(body.stages)
-    try:
-        norm = validate_template(body.id, body.name, body.game_id, {}, body.stages)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    t = store.upsert_contest_template(
-        norm["id"], name=norm["name"], game_id=norm["game_id"],
-        match_config=norm["match_config"], stages=norm["stages"],
-        is_builtin=bool(existing.get("is_builtin")),
-    )
-    return {"template": _template_for_api(t)}
-
-
-@router.delete("/api/admin/templates/{tid}")
-def admin_delete_template(tid: str, request: Request, _admin=Depends(require_admin)):
-    store = _store(request)
-    existing = store.get_contest_template(tid)
-    if existing is None:
-        raise HTTPException(404, f"模板不存在：{tid}")
-    if existing.get("is_builtin"):
-        raise HTTPException(400, "内置模板不可删除")
-    if not store.delete_contest_template(tid):
-        raise HTTPException(400, "删除失败")
-    return {"ok": True}
-
-
-@router.post("/api/admin/templates/preview")
-def admin_preview_template(
-    body: TemplatePreviewBody, request: Request, _admin=Depends(require_admin)
-):
-    """dry-run：给定 stages + 人数 n → 各阶段 / 总场数预估。"""
-    _reject_fixed_rule_overrides(body.stages)
-    try:
-        norm_stages = [validate_stage(s, i, body.game_id) for i, s in enumerate(body.stages)]
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    n = max(0, int(body.n))
-    per = [estimate_match_count(st, n) for st in norm_stages]
-    return {"per_stage": per, "total": sum(per), "n": n}
 
 
 # ── admin: 日志查看 ────────────────────────────────────────────

@@ -1,10 +1,14 @@
-"""赛制模板 CRUD / 校验 / 迁移 / preview / 前后端一致性测试。"""
+"""代码内置赛制模板、校验与解析测试。"""
 from __future__ import annotations
+
+import json
 
 import pytest
 
 from bzplat.backend.contests.templates import (
     default_match_config,
+    get_template,
+    list_templates,
     points_for_result,
     resolve_template,
     resolve_stages,
@@ -24,50 +28,42 @@ def store(tmp_path):
     return Store(str(tmp_path / "t.db"))
 
 
-# ── 迁移：内置模板导入 ──────────────────────────────────────────
-def test_builtin_templates_seeded(store: Store):
-    tpls = store.list_contest_templates()
+def _insert_legacy_template(
+    store: Store,
+    tid: str,
+    *,
+    name: str,
+    game_id: str,
+    stages: list[dict],
+    is_builtin: bool = False,
+) -> None:
+    with store._tx() as conn:
+        conn.execute(
+            "INSERT INTO contest_templates"
+            "(id,name,game_id,match_config,stages_json,is_builtin,updated_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                tid,
+                name,
+                game_id,
+                "{}",
+                json.dumps(stages),
+                1 if is_builtin else 0,
+                "2026-08-09T00:00:00",
+            ),
+        )
+
+
+# ── 唯一来源：游戏注册表代码 ────────────────────────────────────
+def test_builtin_templates_come_from_code_registry(store: Store):
+    tpls = list_templates()
     ids = {t["id"] for t in tpls}
     assert {"holdem_swiss_ko", "gomoku_group_drr_ko", "pencil_swiss_ko"}.issubset(ids)
-    # 内置标记
-    by_id = {t["id"]: t for t in tpls}
-    assert by_id["holdem_swiss_ko"]["is_builtin"] in (1, True)
-    # match_config 已钉死（规则参数固定），恒为空 dict
-    assert by_id["holdem_swiss_ko"]["match_config"] == {}
-    assert by_id["gomoku_group_drr_ko"]["match_config"] == {}
-    # stages 已解析
-    assert len(by_id["holdem_swiss_ko"]["stages"]) >= 1
+    assert store.list_contest_templates() == []
 
 
-def test_migration_idempotent(store: Store):
-    n1 = len(store.list_contest_templates())
-    s2 = Store(store.path)  # 再开一次
-    n2 = len(s2.list_contest_templates())
-    assert n1 == n2
-
-
-# ── Store CRUD ─────────────────────────────────────────────────
-def test_crud_create_get_update_delete(store: Store):
-    t = store.upsert_contest_template(
-        "mycup", name="我的杯", game_id="gomoku",
-        match_config={}, stages=[{"key": "rr", "type": "round_robin"}],
-    )
-    assert t["id"] == "mycup" and t["is_builtin"] in (0, False)
-    assert store.get_contest_template("mycup") is not None
-    # 更新
-    t2 = store.upsert_contest_template(
-        "mycup", name="改名", game_id="gomoku", match_config={},
-        stages=[{"key": "rr", "type": "round_robin"}, {"key": "ko", "type": "single_elimination"}],
-    )
-    assert t2["name"] == "改名" and len(t2["stages"]) == 2
-    # 删自定义 OK；删内置拒绝
-    assert store.delete_contest_template("mycup") is True
-    assert store.delete_contest_template("holdem_swiss_ko") is False
-    assert store.get_contest_template("mycup") is None
-
-
-def test_list_filter_by_game(store: Store):
-    gomoku = store.list_contest_templates(game_id="gomoku")
+def test_code_template_list_filters_by_game():
+    gomoku = list_templates(game_id="gomoku")
     assert all(t["game_id"] == "gomoku" for t in gomoku)
     assert any(t["id"] == "gomoku_group_drr_ko" for t in gomoku)
 
@@ -189,26 +185,39 @@ def test_unknown_scoring_does_not_fall_back_to_poker():
         points_for_result("typo", None, 0)
 
 
-# ── resolve 读表（含 admin 覆盖）──────────────────────────────
-def test_resolve_template_reads_table(store: Store):
-    # admin 覆盖内置模板的 stages
-    store.upsert_contest_template(
-        "holdem_swiss_ko", name="改", game_id="holdem", match_config={},
-        stages=[{"key": "x", "type": "round_robin"}], is_builtin=True,
+# ── resolve 始终读取代码，不接受历史表覆盖 ─────────────────────
+def test_resolve_template_ignores_legacy_table_override(store: Store):
+    _insert_legacy_template(
+        store,
+        "holdem_swiss_ko",
+        name="改",
+        game_id="holdem",
+        stages=[{"key": "x", "type": "round_robin"}],
+        is_builtin=True,
     )
-    tid, gid, stages, mc = resolve_template("holdem_swiss_ko", store=store)
+    tid, gid, stages, mc = resolve_template("holdem_swiss_ko")
     assert tid == "holdem_swiss_ko" and gid == "holdem"
-    assert stages == [{"key": "x", "type": "round_robin"}]
+    assert stages == get_template("holdem_swiss_ko")["stages"]
+    assert stages != [{"key": "x", "type": "round_robin"}]
     assert mc == {}
 
 
-def test_stored_template_with_unknown_game_does_not_become_holdem(store: Store):
+def test_malformed_legacy_template_row_cannot_poison_code_template(store: Store):
+    _insert_legacy_template(
+        store,
+        "holdem_swiss_ko",
+        name="旧记录",
+        game_id="holdem",
+        stages=[{"key": "x", "type": "round_robin"}],
+        is_builtin=True,
+    )
     with store._tx() as conn:
         conn.execute(
             "UPDATE contest_templates SET game_id='unknown' WHERE id='holdem_swiss_ko'"
         )
-    with pytest.raises(ValueError, match="未知游戏"):
-        resolve_template("holdem_swiss_ko", store=store)
+    tid, gid, _stages, _mc = resolve_template("holdem_swiss_ko")
+    assert tid == "holdem_swiss_ko"
+    assert gid == "holdem"
 
 
 def test_store_creation_and_rating_reject_invalid_game_ids(store: Store):
@@ -224,14 +233,6 @@ def test_store_creation_and_rating_reject_invalid_game_ids(store: Store):
             )
         with pytest.raises(ValueError, match="game_id"):
             store.create_contest("bad", user_id, game_id=bad)
-        with pytest.raises(ValueError, match="game_id"):
-            store.upsert_contest_template(
-                f"bad_{bad or 'empty'}",
-                name="bad",
-                game_id=bad,
-                match_config={},
-                stages=[{"type": "round_robin"}],
-            )
         with pytest.raises(ValueError, match="game_id"):
             store.create_match("bad", 1, 2, game_id=bad)
 
@@ -273,19 +274,20 @@ def test_create_rejects_template_game_mismatch(store: Store):
     assert store.list_contests() == []
 
 
-def test_resolve_stages_falls_back_to_defaults_without_store():
-    # 不传 store 时回退内存 DEFAULT_TEMPLATES（供无 store 测试）
+def test_resolve_stages_uses_code_templates():
     tid, gid, stages = resolve_stages("gomoku_swiss_ko")
     assert gid == "gomoku" and len(stages) >= 1
 
 
-# ── 前后端一致性：public 与 admin 同源 ─────────────────────────
-def test_public_admin_templates_same_source(store: Store):
-    # 模拟：admin 新增一个模板后，public 端应能看到
-    store.upsert_contest_template(
-        "shared1", name="共享杯", game_id="gomoku", match_config={},
-        stages=[{"type": "round_robin"}], is_builtin=False,
+# ── 历史表内容不进入公开/运行模板集合 ───────────────────────────
+def test_custom_legacy_row_is_not_a_runtime_template(store: Store):
+    _insert_legacy_template(
+        store,
+        "shared1",
+        name="共享杯",
+        game_id="gomoku",
+        stages=[{"type": "round_robin"}],
     )
-    # admin 列表与 public 列表（list_contest_templates）是同一方法
-    admin_ids = {t["id"] for t in store.list_contest_templates()}
-    assert "shared1" in admin_ids
+    assert store.get_contest_template("shared1") is not None
+    assert get_template("shared1") is None
+    assert "shared1" not in {t["id"] for t in list_templates()}

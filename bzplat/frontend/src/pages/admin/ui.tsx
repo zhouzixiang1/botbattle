@@ -7,7 +7,6 @@ export { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 export { MetricCard } from '@/components/ui/metric-card'
 export { EmptyState, Loading, ErrorMsg, StatusBadge, RefreshBtn } from '@/components/ui/status'
 export { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-export { Switch } from '@/components/ui/switch'
 export { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 // 统一表格组件（消除 admin 手搓 <table> 与前台 <Table> 的视觉分裂）
 export { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table'

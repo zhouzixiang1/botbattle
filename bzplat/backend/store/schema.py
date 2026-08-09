@@ -428,6 +428,7 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 );
 
 CREATE TABLE IF NOT EXISTS contest_templates (
+    -- 历史保留表；现行模板来自 games 注册表，运行路径不读取或写入本表。
     id              TEXT    PRIMARY KEY,
     name            TEXT    NOT NULL,
     game_id         TEXT    NOT NULL,
@@ -468,6 +469,7 @@ STATUS_ABORTED = "aborted"
 
 # 对外对局技术故障事件（新写 replay / 实时 SSE / 公开读取唯一命名）
 TECHNICAL_INCIDENT_EVENT = "technical_incident"
+BOT_CAPACITY_EXHAUSTED_REASON = "bot_capacity_exhausted"
 TECHNICAL_INCIDENT_MESSAGES = {
     "invalid_json": "Bot 输出不是合法 JSON",
     "invalid_envelope": "Bot 响应信封必须是 JSON 对象",
@@ -499,7 +501,7 @@ CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
 
-# 赛事时间调度器（后台周期扫描 *_at 字段，到点自动推进阶段）
+# 以下 runtime/auto-match 键只标识旧库历史记录；现行值来自 runtime/config.py。
 SETTING_CONTEST_SCHEDULER_ENABLED = "contest_scheduler_enabled"
 SETTING_CONTEST_SCHEDULER_INTERVAL_SEC = "contest_scheduler_interval_sec"
 
@@ -546,7 +548,7 @@ SETTING_SITE_LOGO = "site_logo"
 SETTING_SITE_ANNOUNCEMENT = "site_announcement"
 SETTING_SITE_ABOUT = "site_about"
 
-# platform_settings keys
+# 历史 platform_settings runtime keys（保留名称供审计/迁移测试，运行路径不消费）
 SETTING_ACTION_TIMEOUT = "action_timeout_sec"
 SETTING_MAX_CONCURRENT = "max_concurrent_matches"
 SETTING_BOT_CPUS = "bot_cpus"
