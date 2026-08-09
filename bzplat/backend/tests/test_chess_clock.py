@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,12 +119,20 @@ class _FakeBinaryRunner:
     def __init__(self) -> None:
         self.stopped: list[str] = []
         self._sessions: dict[str, object] = {}
+        self.runtime_ready_calls = 0
 
     async def start_session(self, _path: str, *, runtime_mode: str) -> str:
-        return f"session-{runtime_mode}"
+        sid = f"session-{runtime_mode}"
+        self._sessions[sid] = SimpleNamespace(runtime_mode=runtime_mode, turn=0)
+        return sid
 
     async def prepare_session(self, _path: str, *, runtime_mode: str) -> str:
-        return f"session-{runtime_mode}"
+        sid = f"session-{runtime_mode}"
+        self._sessions[sid] = SimpleNamespace(runtime_mode=runtime_mode, turn=0)
+        return sid
+
+    async def ensure_runtime_ready(self) -> None:
+        self.runtime_ready_calls += 1
 
     async def stop_session(self, session_id: str) -> None:
         self.stopped.append(session_id)
@@ -170,7 +179,46 @@ def test_pencil_clock_uses_cumulative_remaining_not_fixed_action_timeout(
     )
 
     assert observed_timeouts == pytest.approx([900.0, 899.8])
+    assert binary_runner.runtime_ready_calls == 2
     assert binary_runner.stopped == ["session-traditional", "session-traditional"]
+
+
+def test_traditional_image_refresh_happens_before_pencil_clock_starts(
+    monkeypatch,
+):
+    """中途 cache 失效需重拉时，平台准备仍不得消耗行动方累计时间。"""
+    order: list[str] = []
+
+    class OrderedClock(_ChessClock):
+        def now(self) -> float:
+            order.append("clock")
+            return float(len(order))
+
+    class OrderedRunner(_FakeBinaryRunner):
+        async def ensure_runtime_ready(self) -> None:
+            order.append("image-ready")
+            await asyncio.sleep(0)
+
+    async def fake_bot_decide(*_args, **_kwargs):
+        order.append("bot-decide")
+        return {"response": {"x": 0, "y": 0}}
+
+    async def fake_run_session(_game_id, decide, **_kwargs):
+        await decide(0, {})
+        return object()
+
+    monkeypatch.setattr(runner_module, "_ChessClock", OrderedClock)
+    monkeypatch.setattr(runner_module, "_botzone_decide", fake_bot_decide)
+    monkeypatch.setattr(runner_module, "run_session", fake_run_session)
+    asyncio.run(
+        MatchRunner(OrderedRunner()).run_binaries(
+            "/fake/a",
+            "/fake/b",
+            game_id="pencil",
+            time_budget_per_side=900.0,
+        )
+    )
+    assert order[:3] == ["image-ready", "clock", "bot-decide"]
 
 
 def test_human_runner_clock_accumulates_both_sides_and_emits_time_used(
@@ -216,6 +264,7 @@ def test_human_runner_clock_accumulates_both_sides_and_emits_time_used(
     assert [event["used"] for event in time_used] == [0.2, 0.2, 0.4, 0.4]
     assert [event["remaining"] for event in time_used] == [0.8, 0.8, 0.6, 0.6]
     assert all(event["budget"] == 1.0 for event in time_used)
+    assert binary_runner.runtime_ready_calls == 2
     assert binary_runner.stopped == ["session-traditional"]
 
 

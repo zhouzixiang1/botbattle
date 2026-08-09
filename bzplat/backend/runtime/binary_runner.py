@@ -5,6 +5,8 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -27,8 +29,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_ACTION_TIMEOUT = 60.0
 DEFAULT_MEMORY = "512m"
 DEFAULT_CPUS = "1"
-LINUX_IMAGE = os.environ.get("BZ_LINUX_BOT_IMAGE", "debian:bookworm-slim")
+DEFAULT_LINUX_IMAGE = "debian:bookworm-slim"
+DEFAULT_IMAGE_PREPARE_TIMEOUT = 300.0
+_DOCKER_INSPECT_TIMEOUT_SEC = 15.0
 _STDERR_DRAIN_GRACE_SEC = 0.5
+_IMAGE_READY_LOCK = threading.Lock()
+_IMAGE_READY_KEYS: set[tuple[str, str]] = set()
 
 
 @dataclass
@@ -96,6 +102,155 @@ class PlatformRunnerError(RuntimeError):
     """
 
 
+def _docker_control_command(
+    args: list[str],
+    *,
+    timeout: float,
+    timeout_message: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run one Docker control-plane command outside the Bot decision clock.
+
+    The caller executes this synchronous helper through ``asyncio.to_thread``.
+    Raw registry/daemon stderr is intentionally not returned in public errors.
+    """
+    try:
+        return subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error(
+            "docker image control timeout phase=%s image=%s timeout=%ss",
+            " ".join(args[1:3]),
+            args[-1] if args else "unknown",
+            timeout,
+        )
+        raise PlatformRunnerError(timeout_message) from exc
+    except OSError as exc:
+        logger.error(
+            "docker image control spawn failed phase=%s image=%s error=%s",
+            " ".join(args[1:3]),
+            args[-1] if args else "unknown",
+            type(exc).__name__,
+        )
+        raise PlatformRunnerError(
+            f"无法执行 Docker 镜像命令（{type(exc).__name__}）"
+        ) from exc
+    except subprocess.SubprocessError as exc:
+        logger.error(
+            "docker image control failed phase=%s image=%s error=%s",
+            " ".join(args[1:3]),
+            args[-1] if args else "unknown",
+            type(exc).__name__,
+        )
+        raise PlatformRunnerError(
+            f"Docker 镜像命令失败（{type(exc).__name__}）"
+        ) from exc
+
+
+def _ensure_linux_image_ready_sync(
+    docker_bin: str,
+    image: str,
+    *,
+    prepare_timeout: float,
+) -> None:
+    """Ensure exactly one local linux/amd64 sandbox image per process.
+
+    A module-level threading lock coordinates the orchestrator event loop and
+    upload-preflight worker loops without binding an asyncio primitive to one
+    loop.  The potentially blocking Docker calls always run in a worker thread.
+    """
+    key = (docker_bin, image)
+    with _IMAGE_READY_LOCK:
+        if key in _IMAGE_READY_KEYS:
+            return
+
+        inspect_args = [
+            docker_bin,
+            "image",
+            "inspect",
+            "--format",
+            "{{.Os}}/{{.Architecture}}",
+            image,
+        ]
+        inspect_timeout = min(_DOCKER_INSPECT_TIMEOUT_SEC, prepare_timeout)
+        inspected = _docker_control_command(
+            inspect_args,
+            timeout=inspect_timeout,
+            timeout_message="Linux Bot 沙箱镜像检查超时",
+        )
+        platform = inspected.stdout.strip() if inspected.returncode == 0 else ""
+        if platform != "linux/amd64":
+            logger.info(
+                "linux bot image not ready; pulling image=%s inspect_exit=%s platform=%s",
+                image,
+                inspected.returncode,
+                platform or "unknown",
+            )
+            pulled = _docker_control_command(
+                [
+                    docker_bin,
+                    "pull",
+                    "--platform",
+                    "linux/amd64",
+                    image,
+                ],
+                timeout=prepare_timeout,
+                timeout_message="Linux Bot 沙箱镜像拉取超时",
+            )
+            if pulled.returncode != 0:
+                logger.error(
+                    "linux bot image pull failed image=%s exit=%s stderr=%s",
+                    image,
+                    pulled.returncode,
+                    pulled.stderr[-1000:].strip().replace("\n", " | "),
+                )
+                raise PlatformRunnerError(
+                    "Linux Bot 沙箱镜像拉取失败"
+                    f"（docker pull exit {pulled.returncode}）"
+                )
+            inspected = _docker_control_command(
+                inspect_args,
+                timeout=inspect_timeout,
+                timeout_message="Linux Bot 沙箱镜像检查超时",
+            )
+            if inspected.returncode != 0:
+                logger.error(
+                    "linux bot image inspect failed after pull image=%s exit=%s stderr=%s",
+                    image,
+                    inspected.returncode,
+                    inspected.stderr[-1000:].strip().replace("\n", " | "),
+                )
+                raise PlatformRunnerError(
+                    "Linux Bot 沙箱镜像不可用"
+                    f"（docker image inspect exit {inspected.returncode}）"
+                )
+            platform = inspected.stdout.strip()
+
+        if platform != "linux/amd64":
+            logger.error(
+                "linux bot image architecture mismatch image=%s platform=%s",
+                image,
+                platform or "unknown",
+            )
+            raise PlatformRunnerError(
+                "Linux Bot 沙箱镜像架构不符（需要 linux/amd64）"
+            )
+        _IMAGE_READY_KEYS.add(key)
+        logger.info("linux bot image ready image=%s platform=linux/amd64", image)
+
+
+def _invalidate_linux_image_ready_sync(docker_bin: str, image: str) -> None:
+    with _IMAGE_READY_LOCK:
+        _IMAGE_READY_KEYS.discard((docker_bin, image))
+
+
 class BotTechnicalError(RuntimeError):
     """A terminal, attributable Bot fault with safe structured diagnostics.
 
@@ -154,8 +309,14 @@ class BotDecisionTimeoutError(BotTechnicalError):
 class BinaryRunner:
     """管理 bot 进程/容器的 stdin/stdout 行协议会话。"""
 
-    def __init__(self, *, docker_bin: str = "docker",
-                 prefer_local: bool | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        docker_bin: str = "docker",
+        prefer_local: bool | None = None,
+        linux_image: str | None = None,
+        image_prepare_timeout: float = DEFAULT_IMAGE_PREPARE_TIMEOUT,
+    ) -> None:
         self._docker_bin = docker_bin
         self._sessions: dict[str, BotSession] = {}
         # 测试环境可强制本机跑同架构 ELF
@@ -163,6 +324,12 @@ class BinaryRunner:
             prefer_local = os.environ.get("BZ_BOT_LOCAL", "").lower() in ("1", "true", "yes")
         self._prefer_local = prefer_local
         self._docker_ok = shutil.which(docker_bin) is not None
+        self._linux_image = (
+            linux_image
+            or os.environ.get("BZ_LINUX_BOT_IMAGE", "").strip()
+            or DEFAULT_LINUX_IMAGE
+        )
+        self._image_prepare_timeout = max(0.001, float(image_prepare_timeout))
 
     def _new_session(
         self,
@@ -212,6 +379,10 @@ class BinaryRunner:
             info=info,
             runtime_mode=runtime_mode,
         )
+        if session.mode == "docker":
+            # Traditional 的逻辑会话在游戏 Session/棋钟启动前建立；此处完成
+            # 镜像准备，避免冷拉取时间计入 Pencil 的 900 秒累计棋钟。
+            await self.ensure_runtime_ready()
         self._sessions[session.session_id] = session
         logger.debug(
             "bot protocol session prepared sid=%s path=%s",
@@ -235,6 +406,9 @@ class BinaryRunner:
             if mode == "local":
                 await self._start_local(session)
             else:
+                # 镜像 inspect/pull 属于平台准备阶段，必须先于 Bot 响应计时；
+                # ``docker run --pull=never`` 再保证计时窗口内不会隐式拉镜像。
+                await self.ensure_runtime_ready()
                 await self._start_docker(session)
         except OSError as exc:
             if mode == "docker":
@@ -252,6 +426,27 @@ class BinaryRunner:
         )
         self._sessions[sid] = session
         return sid
+
+    async def _ensure_linux_image_ready(self) -> None:
+        await asyncio.to_thread(
+            _ensure_linux_image_ready_sync,
+            self._docker_bin,
+            self._linux_image,
+            prepare_timeout=self._image_prepare_timeout,
+        )
+
+    async def ensure_runtime_ready(self) -> None:
+        """Prepare the Linux sandbox outside any Bot decision/game clock.
+
+        Local execution is an explicit test-only mode and has no image gate.
+        Callers may safely invoke this before every Traditional decision: the
+        process-wide cache makes the steady-state path a bounded no-op.
+        """
+        if self._prefer_local:
+            return
+        if not self._docker_ok:
+            raise PlatformRunnerError("Linux x86_64 ELF bot 需要 Docker 沙箱")
+        await self._ensure_linux_image_ready()
 
     def _select_mode(self, info: BinaryInfo) -> str:
         require_supported_binary(info)
@@ -286,6 +481,7 @@ class BinaryRunner:
             pass  # 只读挂载/权限不足时忽略（本机路径通常可改）
         cmd = [
             self._docker_bin, "run", "-i", "--rm",
+            "--pull=never",
             "--name", name,
             "--network=none",
             f"--memory={DEFAULT_MEMORY}",
@@ -300,8 +496,10 @@ class BinaryRunner:
             "--platform", "linux/amd64",
             "-v", f"{session.binary_path}:/app/bot:ro",
             "--workdir", "/app",
-            LINUX_IMAGE,
-            "/app/bot",
+            # 忽略自定义镜像自带的 Entrypoint/CMD，直接执行经文件头闸门
+            # 校验的挂载 ELF；镜像只提供 Linux 用户态/动态链接环境。
+            "--entrypoint", "/app/bot",
+            self._linux_image,
         ]
         session.proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -370,6 +568,14 @@ class BinaryRunner:
             returncode=returncode,
         )
         if platform_reason is not None:
+            # ``--pull=never`` makes a concurrently removed image fail fast as
+            # docker exit 125.  Invalidate the readiness cache so the next
+            # attempt can inspect/pull again outside the Bot decision clock.
+            await asyncio.to_thread(
+                _invalidate_linux_image_ready_sync,
+                self._docker_bin,
+                self._linux_image,
+            )
             return PlatformRunnerError(
                 f"sandbox 启动失败（{platform_reason}）"
             )

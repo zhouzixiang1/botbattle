@@ -88,6 +88,25 @@ async def _open_match_session(
         raise
 
 
+async def _ensure_traditional_runtime_ready(
+    runner: BinaryRunner,
+    session_id: str,
+) -> None:
+    """Refresh sandbox readiness before a cumulative game clock starts.
+
+    ``prepare_session`` performs the initial image gate before the game Session
+    exists.  This second, cached check covers an operator removing/invalidating
+    the image during a long Traditional match; a necessary re-pull still stays
+    outside the acting seat's Pencil clock.
+    """
+    session = runner._sessions.get(session_id)
+    if getattr(session, "runtime_mode", None) != _bz.RUNTIME_TRADITIONAL:
+        return
+    ensure_ready = getattr(runner, "ensure_runtime_ready", None)
+    if ensure_ready is not None:
+        await ensure_ready()
+
+
 def _emit_technical_incident(
     on_event: EventSink | None, exc: BotTechnicalError
 ) -> None:
@@ -379,6 +398,7 @@ class MatchRunner:
                         )
                         _emit_technical_incident(on_event, timeout_exc)
                         raise timeout_exc
+                    await _ensure_traditional_runtime_ready(self.runner, sid)
                     effective_timeout = clock.remaining(player_idx)
                 else:
                     effective_timeout = self.action_timeout
@@ -485,6 +505,10 @@ class MatchRunner:
                             raise timeout_exc
                         raise TimeoutError(
                             f"human seat {player_idx} 时间耗尽（{clock.budget}s）"
+                        )
+                    if player_idx == bot_seat:
+                        await _ensure_traditional_runtime_ready(
+                            self.runner, sid_bot
                         )
                     effective_timeout = clock.remaining(player_idx)
                 else:

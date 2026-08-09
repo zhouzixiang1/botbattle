@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import subprocess
 import struct
+import time
 from pathlib import Path
 
 import pytest
@@ -109,6 +112,7 @@ def test_missing_docker_fails_closed_unless_local_mode_is_explicit():
 
 def test_docker_exit_125_is_platform_fault_not_bot_crash(tmp_path):
     """docker run exit 125 is an infrastructure failure and must not rate a Bot."""
+    import bzplat.backend.runtime.binary_runner as runtime_mod
 
     class FakeStdin:
         def write(self, _data):
@@ -134,12 +138,21 @@ def test_docker_exit_125_is_platform_fault_not_bot_crash(tmp_path):
     path.write_bytes(b"unused")
     info = BinaryInfo("elf", "linux", "amd64", True)
 
-    infra = BinaryRunner(prefer_local=False)
+    infra = BinaryRunner(
+        docker_bin="docker-exit-125-cache-test",
+        prefer_local=False,
+        linux_image="test.invalid/exit-125:latest",
+    )
+    cache_key = (infra._docker_bin, infra._linux_image)
+    with runtime_mod._IMAGE_READY_LOCK:
+        runtime_mod._IMAGE_READY_KEYS.add(cache_key)
     infra._sessions["infra"] = BotSession(
         "infra", info, path, proc=FakeProc(125), mode="docker",
     )
     with pytest.raises(PlatformRunnerError, match="docker exit 125"):
         asyncio.run(infra.send("infra", "{}"))
+    with runtime_mod._IMAGE_READY_LOCK:
+        assert cache_key not in runtime_mod._IMAGE_READY_KEYS
 
     bot_fault = BinaryRunner(prefer_local=False)
     bot_fault._sessions["bot"] = BotSession(
@@ -206,6 +219,7 @@ def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path, monk
     asyncio.run(runner._start_docker(elf_session))
     assert len(captured) == 1
     args = captured[0]
+    assert "--pull=never" in args
     assert "--network=none" in args
     assert "--read-only" in args
     assert "--cap-drop=ALL" in args
@@ -221,6 +235,315 @@ def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path, monk
     )
     mounts = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-v"]
     assert mounts and all(mount.endswith(":ro") for mount in mounts)
+    assert ("--entrypoint", "/app/bot") == (
+        args[args.index("--entrypoint")], args[args.index("--entrypoint") + 1]
+    )
+    assert args[-1] == runner._linux_image
+
+
+def test_linux_image_gate_pulls_once_across_worker_event_loops(monkeypatch):
+    """两个上传 worker/事件循环共享一次镜像准备，且不依赖 asyncio 锁。"""
+    import bzplat.backend.runtime.binary_runner as runtime_mod
+
+    calls: list[tuple[str, ...]] = []
+    inspect_count = 0
+
+    def fake_run(args, **_kwargs):
+        nonlocal inspect_count
+        argv = tuple(args)
+        calls.append(argv)
+        if argv[1:3] == ("image", "inspect"):
+            inspect_count += 1
+            if inspect_count == 1:
+                return subprocess.CompletedProcess(args, 1, "", "missing")
+            return subprocess.CompletedProcess(args, 0, "linux/amd64\n", "")
+        assert argv[1:4] == ("pull", "--platform", "linux/amd64")
+        time.sleep(0.02)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    image = "test-registry.invalid/bot-image:pull-once"
+    first = BinaryRunner(
+        docker_bin="docker-image-gate-test",
+        prefer_local=False,
+        linux_image=image,
+    )
+    second = BinaryRunner(
+        docker_bin="docker-image-gate-test",
+        prefer_local=False,
+        linux_image=image,
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(lambda r=runner: asyncio.run(r._ensure_linux_image_ready()))
+            for runner in (first, second)
+        ]
+        for future in futures:
+            future.result(timeout=2)
+    asyncio.run(first._ensure_linux_image_ready())
+    assert sum(argv[1] == "pull" for argv in calls) == 1
+    assert sum(argv[1:3] == ("image", "inspect") for argv in calls) == 2
+
+
+def test_cached_linux_amd64_image_never_pulls(monkeypatch):
+    import bzplat.backend.runtime.binary_runner as runtime_mod
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(args, **_kwargs):
+        argv = tuple(args)
+        calls.append(argv)
+        assert argv[1:3] == ("image", "inspect")
+        return subprocess.CompletedProcess(args, 0, "linux/amd64\n", "")
+
+    monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    runner = BinaryRunner(
+        docker_bin="docker-cached-image-test",
+        prefer_local=False,
+        linux_image="test.invalid/cached-linux-amd64:latest",
+    )
+    asyncio.run(runner._ensure_linux_image_ready())
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("pull_effect", "message"),
+    [
+        (subprocess.CompletedProcess([], 1, "", "registry EOF"), "镜像拉取失败"),
+        (subprocess.TimeoutExpired(["docker", "pull"], 0.01), "镜像拉取超时"),
+    ],
+    ids=["registry-failure", "pull-timeout"],
+)
+def test_linux_image_prepare_failure_is_platform_fault_before_container_start(
+    monkeypatch, pull_effect, message, caplog
+):
+    """registry/镜像故障不得算 Bot 慢，也不得创建物理 session。"""
+    import bzplat.backend.runtime.binary_runner as runtime_mod
+
+    docker_starts = 0
+
+    def fake_run(args, **_kwargs):
+        if args[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(args, 1, "", "missing")
+        if isinstance(pull_effect, BaseException):
+            raise pull_effect
+        return subprocess.CompletedProcess(
+            args,
+            pull_effect.returncode,
+            pull_effect.stdout,
+            pull_effect.stderr,
+        )
+
+    monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    runner = BinaryRunner(
+        docker_bin=f"docker-image-failure-{message}",
+        prefer_local=False,
+        linux_image=f"test.invalid/{message}:latest",
+        image_prepare_timeout=0.01,
+    )
+    runner._docker_ok = True
+
+    async def should_not_start(_session):
+        nonlocal docker_starts
+        docker_starts += 1
+
+    monkeypatch.setattr(runner, "_start_docker", should_not_start)
+    with caplog.at_level("ERROR"), pytest.raises(PlatformRunnerError, match=message):
+        asyncio.run(runner.start_session(ELF, runtime_mode="traditional"))
+    assert docker_starts == 0
+    assert runner._sessions == {}
+    assert f"image=test.invalid/{message}:latest" in caplog.text
+    if not isinstance(pull_effect, BaseException):
+        assert "registry EOF" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("inspect_effect", "message"),
+    [
+        (
+            subprocess.TimeoutExpired(["docker", "image", "inspect"], 0.01),
+            "镜像检查超时",
+        ),
+        (OSError("docker daemon unavailable"), "无法执行 Docker 镜像命令"),
+    ],
+    ids=["inspect-timeout", "inspect-spawn-failure"],
+)
+def test_linux_image_initial_inspect_failure_never_starts_container(
+    monkeypatch, inspect_effect, message
+):
+    """初次 inspect 自身失败也是平台故障，不能进入 pull/run 或 Bot 计时。"""
+    import bzplat.backend.runtime.binary_runner as runtime_mod
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(tuple(args))
+        raise inspect_effect
+
+    monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    runner = BinaryRunner(
+        docker_bin=f"docker-initial-inspect-{message}",
+        prefer_local=False,
+        linux_image=f"test.invalid/initial-inspect-{message}:latest",
+        image_prepare_timeout=0.01,
+    )
+    runner._docker_ok = True
+    docker_starts = 0
+
+    async def should_not_start(_session):
+        nonlocal docker_starts
+        docker_starts += 1
+
+    monkeypatch.setattr(runner, "_start_docker", should_not_start)
+    with pytest.raises(PlatformRunnerError, match=message):
+        asyncio.run(runner.start_session(ELF, runtime_mode="traditional"))
+    assert calls and all(argv[1:3] == ("image", "inspect") for argv in calls)
+    assert docker_starts == 0
+    assert runner._sessions == {}
+
+
+def test_linux_image_final_inspect_failure_never_starts_container(
+    monkeypatch, caplog
+):
+    """pull 成功仍须二次 inspect 成功，不能凭 pull exit=0 直接运行。"""
+    import bzplat.backend.runtime.binary_runner as runtime_mod
+
+    inspect_count = 0
+    docker_starts = 0
+
+    def fake_run(args, **_kwargs):
+        nonlocal inspect_count
+        if args[1:3] == ["image", "inspect"]:
+            inspect_count += 1
+            return subprocess.CompletedProcess(
+                args,
+                1,
+                "",
+                "missing" if inspect_count == 1 else "manifest EOF",
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    runner = BinaryRunner(
+        docker_bin="docker-final-inspect-failure",
+        prefer_local=False,
+        linux_image="test.invalid/final-inspect-failure:latest",
+    )
+    runner._docker_ok = True
+
+    async def should_not_start(_session):
+        nonlocal docker_starts
+        docker_starts += 1
+
+    monkeypatch.setattr(runner, "_start_docker", should_not_start)
+    with caplog.at_level("ERROR"), pytest.raises(
+        PlatformRunnerError, match="镜像不可用"
+    ):
+        asyncio.run(runner.start_session(ELF, runtime_mode="traditional"))
+    assert inspect_count == 2
+    assert "manifest EOF" in caplog.text
+    assert docker_starts == 0
+    assert runner._sessions == {}
+
+
+def test_linux_image_wrong_arch_after_pull_is_platform_fault(monkeypatch, caplog):
+    import bzplat.backend.runtime.binary_runner as runtime_mod
+
+    def fake_run(args, **_kwargs):
+        if args[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(args, 0, "linux/arm64\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    runner = BinaryRunner(
+        docker_bin="docker-wrong-arch-test",
+        prefer_local=False,
+        linux_image="test.invalid/wrong-arch:latest",
+    )
+    with caplog.at_level("ERROR"), pytest.raises(
+        PlatformRunnerError, match="镜像架构不符"
+    ):
+        asyncio.run(runner._ensure_linux_image_ready())
+    assert "platform=linux/arm64" in caplog.text
+
+
+def test_preflight_image_prepare_precedes_eight_second_bot_timeout():
+    """镜像准备结束后才调用 send；上传健康检查仍获得完整 8 秒。"""
+    from bzplat.backend.games import preflight_bot
+
+    class OrderedRunner(BinaryRunner):
+        def __init__(self):
+            super().__init__(prefer_local=False)
+            self._docker_ok = True
+            self.events: list[str] = []
+            self.send_timeouts: list[float] = []
+
+        async def _ensure_linux_image_ready(self):
+            self.events.append("image-prepare")
+            await asyncio.sleep(0.01)
+
+        async def _start_docker(self, _session):
+            self.events.append("container-start")
+
+        async def send(self, _session_id, _line, *, timeout):
+            self.events.append("bot-send")
+            self.send_timeouts.append(timeout)
+            return '{"response":{"x":0,"y":1}}'
+
+    runner = OrderedRunner()
+    ok, detail = asyncio.run(
+        preflight_bot(
+            "pencil",
+            str(SAMPLES / "pencilbot_linux_amd64"),
+            runner,
+            runtime_mode="traditional",
+        )
+    )
+    assert ok, detail
+    assert runner.events == ["image-prepare", "container-start", "bot-send"]
+    assert runner.send_timeouts == [8.0]
+
+
+def test_traditional_logical_session_prepares_image_before_game_clock(monkeypatch):
+    """正式 Traditional 会话建成前先完成镜像准备，棋钟尚未启动。"""
+    runner = BinaryRunner(prefer_local=False)
+    runner._docker_ok = True
+    image_checks = 0
+
+    async def image_ready():
+        nonlocal image_checks
+        image_checks += 1
+
+    monkeypatch.setattr(runner, "_ensure_linux_image_ready", image_ready)
+    sid = asyncio.run(runner.prepare_session(ELF, runtime_mode="traditional"))
+    assert image_checks == 1
+    asyncio.run(runner.stop_session(sid))
+
+
+def test_local_test_mode_never_checks_or_pulls_docker_image(monkeypatch):
+    runner = BinaryRunner(prefer_local=True)
+    image_checks = 0
+
+    async def forbidden_image_check():
+        nonlocal image_checks
+        image_checks += 1
+
+    async def fake_local_start(_session):
+        return None
+
+    monkeypatch.setattr(runner, "_ensure_linux_image_ready", forbidden_image_check)
+    monkeypatch.setattr(runner, "_start_local", fake_local_start)
+    sid = asyncio.run(runner.start_session(ELF, runtime_mode="traditional"))
+    assert image_checks == 0
+    asyncio.run(runner.stop_session(sid))
+
+
+def test_linux_image_env_is_read_when_runner_is_created(monkeypatch):
+    """create_app 加载环境后创建 runner，镜像配置不得冻结在 import 时。"""
+    monkeypatch.setenv("BZ_LINUX_BOT_IMAGE", "registry.example/bots/linux:v2")
+    runner = BinaryRunner(prefer_local=True)
+    assert runner._linux_image == "registry.example/bots/linux:v2"
 
 
 @pytest.mark.parametrize(
@@ -284,7 +607,12 @@ def test_windows_pe_is_rejected_before_any_docker_start(tmp_path):
     class SpyRunner(BinaryRunner):
         def __init__(self) -> None:
             super().__init__(prefer_local=False)
+            self.image_checks = 0
             self.docker_starts = 0
+
+        async def _ensure_linux_image_ready(self):
+            self.image_checks += 1
+            raise AssertionError("PE 不应进入 Docker 镜像检查路径")
 
         async def _start_docker(self, session):
             self.docker_starts += 1
@@ -305,6 +633,7 @@ def test_windows_pe_is_rejected_before_any_docker_start(tmp_path):
 
     assert not ok
     assert "Windows PE 不受支持" in detail
+    assert runner.image_checks == 0
     assert runner.docker_starts == 0
     assert runner._sessions == {}
 
@@ -466,6 +795,10 @@ def test_docker_spawn_oserror_is_sanitized_platform_fault(monkeypatch):
     async def fail_spawn(_session):
         raise OSError("/private/server/path: too many open files")
 
+    async def image_ready():
+        return None
+
+    monkeypatch.setattr(runner, "_ensure_linux_image_ready", image_ready)
     monkeypatch.setattr(runner, "_start_docker", fail_spawn)
     with pytest.raises(PlatformRunnerError) as failure:
         asyncio.run(runner.start_session(ELF))

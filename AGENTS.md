@@ -122,7 +122,7 @@ games/      游戏注册表（赛制/编排契约解耦的单一入口）：base
             通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
             站点配置：GET /api/site/info
-runtime/    沙箱：Linux x86_64 ELF BinaryRunner(docker/local) + limits；PE/Mach-O/ARM64/脚本在上传时拒绝
+runtime/    沙箱：Linux x86_64 ELF BinaryRunner(docker/local) + limits；PE/Mach-O/ARM64/脚本在上传时拒绝；Docker 镜像在 Bot 计时前完成 linux/amd64 检查/拉取，实际运行固定 `--pull=never --entrypoint /app/bot`
 store/      SQLite + schema.py(常量唯一来源；fresh 实体 game_id 必填且无 DB 默认值)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）

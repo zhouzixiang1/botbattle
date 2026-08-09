@@ -10,6 +10,10 @@
 
 - 平台只接受 Linux x86_64 ELF Bot，公共镜像为 `debian:bookworm-slim`（可用
   `BZ_LINUX_BOT_IMAGE` 覆盖）；PE、Mach-O、ARM64 ELF 与脚本在上传校验阶段拒绝。
+- 首次启动 Bot 前，平台在独立的平台准备阶段检查镜像；缺失时只拉取
+  `linux/amd64`，并在完成后再次核对 OS/架构。镜像检查/拉取不计入上传的 8 秒
+  首回合健康检查，也不计入 Pencil 的 900 秒累计棋钟。registry、daemon、拉取超时
+  或架构不符统一归为平台故障，不判 Bot 超时或技术负。
 - 测试无 Docker 时：仅兼容的 Linux x86_64 主机可用 `BZ_BOT_LOCAL=1` 直接本机跑
   ELF（降级，不施加容器限制；不得用于生产）。
 
@@ -25,6 +29,8 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 则在每�
 | `--cap-drop=ALL` | 丢弃全部 Linux capabilities |
 | `--security-opt no-new-privileges` | 禁止提权 |
 | `--user 65534:65534` | 以 nobody 身份运行 |
+| `--pull=never` | Bot 计时窗口内禁止 `docker run` 隐式拉取镜像 |
+| `--entrypoint /app/bot` | 忽略基础镜像自带 Entrypoint/CMD，直接执行已校验 ELF |
 | `--rm` | 退出即销毁容器 |
 
 所有参数均为**只读硬限制**，admin 面板不可抬高 CPU/内存。
