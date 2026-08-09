@@ -137,7 +137,7 @@ docker run --rm --platform linux/amd64 \
   --mount "type=bind,source=$PWD,target=/work" \
   -w /work python:3.12-bookworm bash -lc '
     python -m pip install --no-cache-dir pyinstaller &&
-    pyinstaller --clean --onefile \
+    pyinstaller --noconfirm --clean --onefile \
       --name bot_py_linux_amd64 \
       --distpath /work \
       --workpath /tmp/pyinstaller \
@@ -175,7 +175,7 @@ docker run --rm --platform linux/amd64 `
   --mount "type=bind,source=$($PWD.Path),target=/work" `
   -w /work python:3.12-bookworm bash -lc '
     python -m pip install --no-cache-dir pyinstaller &&
-    pyinstaller --clean --onefile \
+    pyinstaller --noconfirm --clean --onefile \
       --name bot_py_linux_amd64 \
       --distpath /work \
       --workpath /tmp/pyinstaller \
@@ -216,7 +216,7 @@ docker run --rm --platform linux/amd64 \
   --mount "type=bind,source=$PWD,target=/work" \
   -w /work python:3.12-bookworm bash -lc '
     python -m pip install --no-cache-dir pyinstaller &&
-    pyinstaller --clean --onefile \
+    pyinstaller --noconfirm --clean --onefile \
       --name bot_py_linux_amd64 \
       --distpath /work \
       --workpath /tmp/pyinstaller \

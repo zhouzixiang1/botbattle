@@ -73,10 +73,10 @@ botbattle/
 │           ├── games/             # 前端 GameViewSpec 注册表 + 每游戏 canvas/reducer
 │           ├── pages/             # lazy 页面模块（含 admin）
 │           └── lib/               # tiers / utils / markdown 等
-├── doc/                       # 本目录：6 份核心交付文档 + 专项/历史文档 + INDEX
+├── doc/                       # 本目录：6 份核心交付文档 + 现行专项文档 + INDEX
 ├── wiki/                      # 面向 Bot 玩家的规则/协议/开发指南文档
 ├── contracts/                 # 协议 JSON Schema
-├── samples/                   # 三游戏样例 Bot 源码 + 参考裁判脚本
+├── samples/                   # 与现行协议逐字绑定的三游戏 C / Python 样例 Bot
 ├── scripts/                   # 运维脚本（启停/重建/冒烟/压测/浏览器验收/种子）
 ├── deploy/                    # systemd unit
 ├── pyproject.toml             # Python 包定义 + 依赖 + pytest 配置

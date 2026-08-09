@@ -123,7 +123,13 @@ def test_wiki_samples_are_the_runner_regression_sources() -> None:
 def test_retired_protocol_mutators_and_binary_are_absent() -> None:
     assert not (ROOT / "samples/callbot_bin").exists()
     assert not (ROOT / "scripts/migrate_bots_to_botzone.py").exists()
+    assert not (ROOT / "scripts/e2e_prelim_16.py").exists()
     assert not (ROOT / "bzplat/backend/tests/test_migrate_bots_to_botzone.py").exists()
+    assert not (ROOT / "samples/judges").exists()
+    assert not (ROOT / "refs/botzone").exists()
+    assert not (ROOT / "E2E_TEST_REPORT.md").exists()
+    assert not (ROOT / "gui-test-screenshots/REPORT.md").exists()
+    assert not (ROOT / "doc/PRELIM_FINAL_PLAN.md").exists()
 
     build_script = (ROOT / "samples/build_sample.sh").read_text(encoding="utf-8")
     for binary in (

@@ -297,13 +297,12 @@ def test_pencil_match_end_has_box_owners():
 
 
 
-# ─── SAU 点格棋规则形式化对齐（pencil_judge 独立单测）──────────────────────
-# 对齐 SAU Game Platform 2.1.0 DotsAndBoxes（refs/SAU_Game_Platform_2.1.0_r3）。
-# 规则逐条断言：6×6 点→25 格、捕获连走、多数胜 13、不 pass、归属追踪。
+# ─── 本站唯一点格棋规则形式化守护（pencil_judge 独立单测）──────────────────
+# 逐条断言：6×6 点→25 格、捕获连走、多数胜 13、一步一边、归属追踪。
 
 
-def test_sau_grid_6x6_yields_25_boxes():
-    """SAU: 6×6 点阵 → 交错 size=11 → (N-1)²=25 格（Box[5][5]）。"""
+def test_canonical_grid_6x6_yields_25_boxes():
+    """6×6 点阵 → 交错 size=11 → (N-1)²=25 格。"""
     from bzplat.backend.games.pencil.pencil_judge import PencilBoard, DEFAULT_N
 
     assert DEFAULT_N == 6
@@ -314,8 +313,8 @@ def test_sau_grid_6x6_yields_25_boxes():
     assert g.min_win() == 25 // 2 + 1  # ⌈25/2⌉ = 13（多数胜阈值）
 
 
-def test_sau_capture_continues_turn():
-    """SAU: 占边围成格 → 得分并连走（curr_player 不变）。"""
+def test_canonical_capture_continues_turn():
+    """占边围成格 → 得分并连走（curr_player 不变）。"""
     from bzplat.backend.games.pencil.pencil_judge import PencilBoard
 
     g = PencilBoard(2)  # 1 格，好控制
@@ -332,8 +331,8 @@ def test_sau_capture_continues_turn():
     assert g.curr_player == 0
 
 
-def test_sau_majority_win_threshold_13():
-    """SAU hasPlayerWon: 先到 ⌈boxes/2⌉=13 立即胜。"""
+def test_canonical_majority_win_threshold_13():
+    """先到 ⌈boxes/2⌉=13 立即胜。"""
     from bzplat.backend.games.pencil.pencil_judge import PencilBoard
 
     g = PencilBoard(6)
@@ -346,8 +345,8 @@ def test_sau_majority_win_threshold_13():
     assert g.scores[0] >= g.min_win()
 
 
-def test_sau_single_edge_per_move_no_pass_on_capture():
-    """SAU 非 Botzone: 一步占 1 边（不传 num+多线）。捕获格时也只占 1 边。"""
+def test_canonical_single_edge_per_move():
+    """一步只占 1 条边，捕获格时仍然如此。"""
     from bzplat.backend.games.pencil.pencil_judge import PencilBoard
 
     g = PencilBoard(3)  # 4 格
@@ -356,13 +355,13 @@ def test_sau_single_edge_per_move_no_pass_on_capture():
     closed = g.do_action(0, 1)  # 占 1 边
     after = g.remaining_edges()
     assert before - after == 1  # 每手恰好 1 边
-    # 即便闭合格（连走），本手仍只占 1 边（SAU 多线 vs Botzone 单边的区别）
+    # 即便闭合格（连走），本手仍只占 1 边。
     # do_action 返回的是「本手新闭合格」，不是多线列表
     assert isinstance(closed, list)
 
 
-def test_sau_box_ownership_grid_tracks_players():
-    """SAU: 格归属追踪（前端着色用）——红/蓝/未占三态。"""
+def test_canonical_box_ownership_grid_tracks_players():
+    """格归属追踪（前端着色用）——红/蓝/未占三态。"""
     from bzplat.backend.games.pencil.pencil_judge import PencilBoard
 
     g = PencilBoard(2)  # 1 格

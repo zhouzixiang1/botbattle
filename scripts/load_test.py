@@ -877,8 +877,8 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
 def _human_move(game: str, req: dict) -> dict:
     """根据游戏与引擎 request 生成合法人类着。"""
     if game == "holdem":
-        # Botzone TexasHoldem2p 协议：裸整数或 {"response": int}；
-        # 0 = check/call。旧 {"a":"c"} 会被协议层判为非法动作。
+        # 唯一 Human WS 动作对象：顶层只允许 {"response": int}。
+        # 0 = check/call。顶层整数与旧 {"a":"c"} 都会被协议层拒绝。
         return {"response": 0}
     # 棋类：req 含 x/y（对方上一手）+ me；回一个合法空位
     # 简化策略：gomoku 下中心附近；pencil 下一条边

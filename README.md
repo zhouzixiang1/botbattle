@@ -90,10 +90,10 @@ botzone create-admin alice alice@example.com 'password123'
 │   ├── backend/          # FastAPI：games(注册表) / matches / contests / store / runtime /
 │   │                     # auth / bots / notifications / rating / mail
 │   └── frontend/         # React 19 + Vite 8 + Tailwind v4 + shadcn/ui（src/games 注册表 + canvas）
-├── doc/                  # 工程交付文档（6 份核心文档 + 专项/历史文档 + INDEX）
+├── doc/                  # 工程交付文档（6 份核心文档 + 现行专项文档 + INDEX）
 ├── wiki/                 # Bot 玩家文档（规则/协议/Bot 开发指南）
 ├── contracts/            # 协议 JSON Schema
-├── samples/              # 样例 Bot（C / Python 源码 + 参考裁判脚本）
+├── samples/              # 与现行协议逐字绑定的三游戏 C / Python 样例 Bot
 ├── scripts/              # 启停、重建、冒烟、压测、浏览器验收、种子
 └── deploy/               # systemd unit
 ```

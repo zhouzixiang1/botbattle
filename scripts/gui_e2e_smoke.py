@@ -2,7 +2,7 @@
 """GUI 端到端冒烟测试的 API 验证脚本。
 
 验证三角色（玩家/组织者/管理员）的核心业务路径在 API 层端到端通畅。
-不依赖浏览器（浏览器 GUI 登录见 E2E_TEST_REPORT.md 的 IAB 说明），
+不依赖浏览器（真实 Chromium 回归与隔离要求见 doc/TESTING.md），
 聚焦后端功能闭环与角色边界。
 
 用法（在 worktree 根目录，worktree 后端已起在 50381 且 BZ_SKIP_CAPTCHA=1）：

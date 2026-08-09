@@ -27,7 +27,7 @@ from typing import Any, Sequence
 
 from bzplat.backend.games.holdem.holdem_judge import Card, Suit
 
-# ── Botzone 裸整数 response 码 ─────────────────────────────────────────────
+# ── 唯一信封内 response 整数动作码 ────────────────────────────────────────
 RESP_FOLD = -1
 RESP_ALLIN = -2
 RESP_CALL_CHECK = 0
@@ -48,7 +48,7 @@ ACTION_TO_ATYPE = {
 }
 ATYPE_TO_ACTION = {v: k for k, v in ACTION_TO_ATYPE.items()}
 
-# 裸整数 → 动作名（>0 是 raise delta，具体量由调用方取）。
+# response 字段整数 → 动作名（>0 是 raise delta，具体量由调用方取）。
 _INT_TO_ACTION = {
     RESP_FOLD: "fold",
     RESP_ALLIN: "allin",
@@ -160,7 +160,7 @@ def parse_response(raw: Any) -> tuple[str, int | None]:
 
 
 def _int_to_action(n: int) -> str:
-    """裸整数 → 动作名（0 优先当 call；引擎按合法集把非法 call 折成 check/fold）。"""
+    """response 字段整数 → 动作名（0 优先当 call；裁判再判断 call/check）。"""
     if n in _INT_TO_ACTION:
         return _INT_TO_ACTION[n]
     if n > 0:
@@ -196,5 +196,5 @@ def validate_response_payload(payload: Any) -> Any:
 
 
 def fail_response() -> int:
-    """供人类超时等游戏内兜底使用：fold（Botzone 裸整数 -1）。"""
+    """供内部裁判兜底使用的 response payload：fold（整数 -1）。"""
     return RESP_FOLD

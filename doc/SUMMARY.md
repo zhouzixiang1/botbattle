@@ -89,7 +89,7 @@
 | 甲方交付文档（6 份） | ✅ | `doc/` |
 | 规则/协议文档 | ✅ | `wiki/` |
 | 协议 JSON Schema | ✅ | `contracts/` |
-| 样例 Bot + 参考裁判 | ✅ | `samples/` |
+| 三游戏样例 Bot | ✅ C / Python 均与唯一现行协议绑定 | `samples/` |
 | 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
 | 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |

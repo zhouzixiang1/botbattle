@@ -8,7 +8,8 @@
 本层只管平台特有：事件序列（6 类事件 dict 键不变）、decide 调用、跨手 Botzone 计分
 （每手复位筹码，比累计净输赢 net）、BotCrashedError 处理、P4 duplicate（deal_sequence）。
 
-协议：Botzone TexasHoldem2p 标准（response 裸整数；raise=「额外加注量」= delta）。
+协议：唯一响应信封为 ``{"response": int}``；其中 response 字段的整数采用
+TexasHoldem2p 动作编码，raise=「额外加注量」= delta。
 
 Rules summary（对齐 holdem_judge）：
 - HU NLHE; default 70 hands; 庄家=SB 交替（hand_index % 2）

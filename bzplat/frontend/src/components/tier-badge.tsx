@@ -3,8 +3,8 @@ import { tierFor, tierByKey, useGameTiers, type Tier } from '@/lib/tiers'
 
 /** 段位徽章：评级 → 彩色 badge（浅/暗双色自适应，无紫色）。
  *
- * 全面解耦 PR-C：支持 per-game 段位曲线。传 gameId 时按该游戏曲线取 badge 配色
- * （后端 /api/tiers?game_id=）；不传则用全局曲线（向后兼容）。
+ * 支持 per-game 段位曲线。传 gameId 时按该游戏曲线取 badge 配色
+ * （后端按游戏返回）；不传游戏时才使用展示默认曲线。
  * 优先用 tierKey（后端已返回 tier_key 时精确匹配），否则按 rating 推导。
  */
 export function TierBadge({
@@ -25,7 +25,21 @@ export function TierBadge({
   tierKey?: string | null
 }) {
   const tiers = useGameTiers(gameId)
-  const t = tier ?? (tierKey ? tierByKey(tierKey, tiers) : tierFor(rating, tiers))
+  const t = tier ?? (tiers
+    ? tierKey ? tierByKey(tierKey, tiers) : tierFor(rating, tiers)
+    : null)
+  if (!t) {
+    return (
+      <span
+        className={cn(
+          'inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground',
+          className,
+        )}
+      >
+        {label || '段位不可用'}
+      </span>
+    )
+  }
   return (
     <span
       className={cn(
