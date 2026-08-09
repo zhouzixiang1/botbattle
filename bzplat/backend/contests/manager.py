@@ -20,7 +20,10 @@ from bzplat.backend.contests.templates import (
     resolve_stages,
     resolve_template,
 )
-from bzplat.backend.matches.orchestrator import MatchOrchestrator
+from bzplat.backend.matches.orchestrator import (
+    MatchOrchestrator,
+    require_binary_file_integrity,
+)
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.runtime.limits import FULL_RR_MAX_N
 from bzplat.backend.store import Store
@@ -1096,6 +1099,13 @@ class ContestManager:
                 )
             except ValueError as exc:
                 raise ValueError(f"bot {bid} unsupported_binary：{exc}") from exc
+            path = str(binary.get("binary_path") or "").strip()
+            if not path:
+                raise ValueError(f"bot {bid} version_unavailable")
+            try:
+                require_binary_file_integrity(binary, path)
+            except (OSError, TypeError, ValueError) as exc:
+                raise ValueError(f"bot {bid} version_unavailable") from exc
             if v:
                 out[key] = v["id"]
         return out

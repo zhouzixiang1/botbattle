@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from bzplat.backend.games import registry as game_registry
@@ -32,10 +34,81 @@ from bzplat.backend.store.schema import (
     TYPE_HUMAN,
     TYPE_TABLE,
     VALID_GAME_IDS,
+    VALID_RUNTIME_MODES,
     require_supported_binary_metadata,
 )
 
 logger = logging.getLogger(__name__)
+
+
+_BinaryIntegrityCacheKey = tuple[str, str, int, int, int, int, int, int]
+VERSION_UNAVAILABLE_REASON = "version_unavailable"
+
+
+def require_binary_file_integrity(
+    runtime: dict,
+    path: str,
+    *,
+    cache: set[_BinaryIntegrityCacheKey] | None = None,
+) -> None:
+    """Validate persisted size/SHA metadata without exposing ``path`` in errors.
+
+    Empty checksum plus zero size identifies a pre-integrity historical row and
+    intentionally performs no file check.  Any supplied integrity field is
+    authoritative.  Cache identity includes device, inode, size, mtime and ctime,
+    so replacement or in-place modification cannot reuse an earlier digest merely
+    by restoring the old mtime.
+    """
+
+    expected_checksum = str(runtime.get("checksum") or "").strip().lower()
+    expected_size = int(runtime.get("size_bytes") or 0)
+    if expected_size < 0:
+        raise ValueError(VERSION_UNAVAILABLE_REASON)
+    if not expected_checksum and expected_size == 0:
+        return
+
+    binary_path = Path(path)
+    stat_before = binary_path.stat()
+    signature = (
+        int(stat_before.st_dev),
+        int(stat_before.st_ino),
+        int(stat_before.st_size),
+        int(stat_before.st_mtime_ns),
+        int(stat_before.st_ctime_ns),
+    )
+    if expected_size > 0 and stat_before.st_size != expected_size:
+        raise ValueError(VERSION_UNAVAILABLE_REASON)
+    if not expected_checksum:
+        return
+
+    cache_key: _BinaryIntegrityCacheKey = (
+        path,
+        expected_checksum,
+        expected_size,
+        *signature,
+    )
+    if cache is not None and cache_key in cache:
+        return
+
+    digest = hashlib.sha256()
+    with binary_path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    stat_after = binary_path.stat()
+    signature_after = (
+        int(stat_after.st_dev),
+        int(stat_after.st_ino),
+        int(stat_after.st_size),
+        int(stat_after.st_mtime_ns),
+        int(stat_after.st_ctime_ns),
+    )
+    if signature_after != signature or digest.hexdigest().lower() != expected_checksum:
+        raise ValueError(VERSION_UNAVAILABLE_REASON)
+
+    if cache is not None:
+        if len(cache) >= 1024:
+            cache.pop()
+        cache.add(cache_key)
 
 
 def _now() -> str:
@@ -130,6 +203,29 @@ class HumanInactive(Exception):
     """
 
 
+class BotVersionUnavailableError(ValueError):
+    """A frozen Bot version cannot be resolved to its original runtime.
+
+    This is a platform data-integrity failure, not a Bot game result.  Keep the
+    exception message deliberately generic: it may be forwarded to a live
+    client and therefore must never contain a private binary path.
+    """
+
+    code = VERSION_UNAVAILABLE_REASON
+
+    def __init__(
+        self,
+        *,
+        bot_id: int | None,
+        version_id: int | None,
+        seat: int | None,
+    ) -> None:
+        super().__init__(self.code)
+        self.bot_id = bot_id
+        self.version_id = version_id
+        self.seat = seat
+
+
 class MatchOrchestrator:
     def __init__(
         self,
@@ -162,6 +258,9 @@ class MatchOrchestrator:
         # 后来对局必须先补齐 (created_at, id) 更早的缺口，不得越过它
         # 在旧 rating 快照上结算。per-bot 锁仍作为单场双边快照的内层防线。
         self._rating_settlement_order_lock = asyncio.Lock()
+        # Immutable upload verification cache.  A cache hit still performs stat;
+        # device/inode/size/mtime/ctime changes force a fresh SHA-256 read.
+        self._binary_integrity_cache: set[_BinaryIntegrityCacheKey] = set()
         # 对局完成后的回调（由外部注入，如比赛归档）。签名: (match_id, contest_id|None) -> None
         self.on_match_done: "Callable[[str, int | None], None] | None" = None
         # 通知管理器（由 main.py 注入；对局完成时通知双方 owner）
@@ -204,6 +303,7 @@ class MatchOrchestrator:
     ) -> None:
         """Release all in-memory ownership for one human match."""
         self._tasks.pop(match_id, None)
+        self._sse.pop(match_id, None)
         self._human_turns = {
             key: value for key, value in self._human_turns.items()
             if key[0] != match_id
@@ -235,13 +335,14 @@ class MatchOrchestrator:
             if not version or version.get("bot_id") != bot_id:
                 raise ValueError(f"{seat_label} 指定的版本不存在或不属于该 bot")
 
-        # Historical rows remain readable, but no new match may snapshot a PE,
-        # Mach-O, script or non-amd64 ELF. Check the immutable version when one
-        # exists; pre-version rows use the bot mirror. This occurs before
-        # create_match, so challenge/human/contest dispatch fail without orphans.
-        binary = version or self.store.get_bot(bot_id)
-        if not binary:
+        # Resolve through the same fail-closed runtime boundary before creating
+        # the match.  This includes canonical metadata plus non-empty persisted
+        # checksum/size, so a known-corrupt upload cannot first create an orphan
+        # task and only fail after entering the queue.
+        bot = self.store.get_bot(bot_id)
+        if not bot:
             raise ValueError(f"{seat_label} bot 不存在")
+        binary = version or bot
         try:
             require_supported_binary_metadata(
                 str(binary.get("format") or ""),
@@ -250,39 +351,126 @@ class MatchOrchestrator:
             )
         except ValueError as exc:
             raise ValueError(f"{seat_label} unsupported_binary：{exc}") from exc
+        self._runtime_for_bot_version(
+            bot,
+            int(version["id"]) if version is not None else None,
+        )
         return version
 
     def _runtime_for_bot_version(
         self,
         bot: dict,
         version_id: int | None,
+        *,
+        seat: int | None = None,
     ) -> tuple[str, str]:
-        """Return the frozen version's path/mode, with a legacy-bot fallback."""
-        path = bot["binary_path"]
-        mode = bot.get("runtime_mode") or DEFAULT_RUNTIME_MODE
+        """Resolve exactly one immutable runtime or fail closed.
+
+        A non-null ``version_id`` is authoritative: missing rows, cross-Bot
+        references and incomplete/non-canonical rows must never fall back to the
+        mutable ``bots`` mirror.  ``None`` is accepted only for a genuine
+        pre-version Bot (``current_version=0`` and no version rows), and that
+        mirror is subjected to the same canonical binary/runtime validation.
+        """
+        bot_id_raw = bot.get("id")
+        bot_id = int(bot_id_raw) if bot_id_raw is not None else None
+
         if version_id is None:
-            return path, mode
-
-        version = self.store.get_bot_version(version_id)
-        if (
-            version
-            and version.get("bot_id") == bot.get("id")
-            and version.get("binary_path")
-        ):
-            return (
-                version["binary_path"],
-                version.get("runtime_mode") or mode,
+            has_version_history = (
+                bot_id is None
+                or int(bot.get("current_version") or 0) != 0
+                or self.store.get_latest_bot_version(bot_id) is not None
             )
+            if has_version_history:
+                raise BotVersionUnavailableError(
+                    bot_id=bot_id, version_id=None, seat=seat
+                )
+            runtime = bot
+        else:
+            version = self.store.get_bot_version(version_id)
+            if not version or version.get("bot_id") != bot_id:
+                raise BotVersionUnavailableError(
+                    bot_id=bot_id, version_id=version_id, seat=seat
+                )
+            runtime = version
 
-        # A historical/corrupt match may reference a version row that has since
-        # disappeared.  Never cross-load another bot's private binary; retain the
-        # pre-version-schema compatibility behavior instead of crashing recovery.
-        logger.warning(
-            "match version %s is unavailable for bot %s; falling back to bot mirror",
-            version_id,
-            bot.get("id"),
+        path = str(runtime.get("binary_path") or "").strip()
+        mode = str(runtime.get("runtime_mode") or DEFAULT_RUNTIME_MODE)
+        try:
+            require_supported_binary_metadata(
+                str(runtime.get("format") or ""),
+                str(runtime.get("os") or ""),
+                str(runtime.get("arch") or ""),
+            )
+        except ValueError as exc:
+            raise BotVersionUnavailableError(
+                bot_id=bot_id, version_id=version_id, seat=seat
+            ) from exc
+        if not path or mode not in VALID_RUNTIME_MODES:
+            raise BotVersionUnavailableError(
+                bot_id=bot_id, version_id=version_id, seat=seat
+            )
+        self._verify_runtime_binary_integrity(
+            runtime,
+            path=path,
+            bot_id=bot_id,
+            version_id=version_id,
+            seat=seat,
         )
         return path, mode
+
+    def _verify_runtime_binary_integrity(
+        self,
+        runtime: dict,
+        *,
+        path: str,
+        bot_id: int | None,
+        version_id: int | None,
+        seat: int | None,
+    ) -> None:
+        """Verify immutable upload metadata when the historical row provides it.
+
+        Pre-checksum rows have both fields empty/zero and remain runnable.  Newer
+        uploads carry both fields; a missing file, size mismatch, checksum mismatch
+        or file mutation during hashing is a ``version_unavailable`` integrity
+        failure and never reaches the runner.
+        """
+
+        try:
+            require_binary_file_integrity(
+                runtime, path, cache=self._binary_integrity_cache
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise BotVersionUnavailableError(
+                bot_id=bot_id, version_id=version_id, seat=seat
+            ) from exc
+
+    def _abort_version_unavailable(
+        self,
+        match_id: str,
+        exc: BotVersionUnavailableError,
+        events: list[dict],
+    ) -> None:
+        """Persist one non-adjudicated terminal result without exposing paths."""
+        logger.error(
+            "match version unavailable match_id=%s bot_id=%s version_id=%s seat=%s",
+            match_id,
+            exc.bot_id,
+            exc.version_id,
+            exc.seat,
+        )
+        self.store.abort_match_if_active(
+            match_id, reason=BotVersionUnavailableError.code
+        )
+        self._safe_flush_terminal_replay(match_id, events)
+        self._broadcast(
+            match_id,
+            {
+                "type": "error",
+                "reason": BotVersionUnavailableError.code,
+                "message": "对局所需的 Bot 版本不可用，对局已中止",
+            },
+        )
 
     async def shutdown(self) -> None:
         """Cancel and await every in-flight match while the event loop is alive.
@@ -738,8 +926,6 @@ class MatchOrchestrator:
                     mc = {}
             version_a_id = mc.get("_bot_a_version_id")
             version_b_id = mc.get("_bot_b_version_id")
-        path_a, mode_a = self._runtime_for_bot_version(bot_a, version_a_id)
-        path_b, mode_b = self._runtime_for_bot_version(bot_b, version_b_id)
         gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
         # P2 residual：复式赛制（duplicate）——match_config.duplicate=True 且游戏 spec
         # 支持 build_match_plan（仅 holdem）时，走 run_duplicate（2 leg 同副牌交换座位，
@@ -754,13 +940,6 @@ class MatchOrchestrator:
         want_duplicate = bool(stored_mc.get("duplicate")) and spec.build_match_plan is not None
         # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
         dup_seed = int(stored_mc.get("duplicate_seed")) if stored_mc.get("duplicate_seed") is not None else None
-        logger.info(
-            "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s) duplicate=%s",
-            match_id, gid, m.get("match_type"),
-            m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
-            want_duplicate,
-        )
-        self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
         events: list[dict] = []
 
         def on_event(kind: str, ev: dict) -> None:
@@ -770,6 +949,21 @@ class MatchOrchestrator:
                 self.store.upsert_replay(match_id, json.dumps(events, ensure_ascii=False), "[]")
 
         try:
+            path_a, mode_a = self._runtime_for_bot_version(
+                bot_a, version_a_id, seat=0
+            )
+            path_b, mode_b = self._runtime_for_bot_version(
+                bot_b, version_b_id, seat=1
+            )
+            logger.info(
+                "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s) duplicate=%s",
+                match_id, gid, m.get("match_type"),
+                m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
+                want_duplicate,
+            )
+            self.store.update_match(
+                match_id, status=STATUS_RUNNING, started_at=_now()
+            )
             if want_duplicate:
                 result = await self.runner.run_duplicate(
                     path_a,
@@ -839,6 +1033,8 @@ class MatchOrchestrator:
                 match_id, winner, result.rounds_played, ea, eb,
                 m["match_type"] != TYPE_CONTEST,
             )
+        except BotVersionUnavailableError as exc:
+            self._abort_version_unavailable(match_id, exc, events)
         except BotTechnicalError as exc:
             # Bot stdout protocol faults and Bot decision timeouts are attributable,
             # terminal failures.  Score one deterministic technical loss instead of
@@ -1239,9 +1435,18 @@ class MatchOrchestrator:
             version_id = stored_mc.get(
                 "_bot_a_version_id" if bot_seat == 0 else "_bot_b_version_id"
             )
-            bot_path, bot_mode = self._runtime_for_bot_version(bot, version_id)
-            self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
             events: list[dict] = []
+            try:
+                bot_path, bot_mode = self._runtime_for_bot_version(
+                    bot, version_id, seat=bot_seat
+                )
+            except BotVersionUnavailableError as exc:
+                self._abort_version_unavailable(match_id, exc, events)
+                self._release_human_match_state(
+                    match_id, m.get("human_user_id")
+                )
+                return
+            self.store.update_match(match_id, status=STATUS_RUNNING, started_at=_now())
             consecutive_timeouts = {"n": 0}  # 闭包内可变计数器
 
             def on_event(kind: str, ev: dict) -> None:
