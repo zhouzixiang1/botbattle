@@ -47,7 +47,7 @@ const FILES = [
   { key: 'audit', label: '审计日志', description: '管理员与安全操作' },
 ] as const
 
-const STRUCTURED_LOG = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\[([^\]]+)]\s*(.*)$/
+const STRUCTURED_LOG = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:,\d{3})?)\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\[([^\]]+)]\s*([^\n]*)(?:\n([\s\S]*))?$/
 
 function parseLine(raw: string): ParsedLine {
   const match = raw.match(STRUCTURED_LOG)
@@ -57,7 +57,7 @@ function parseLine(raw: string): ParsedLine {
     timestamp: match[1],
     level: match[2] as ParsedLine['level'],
     module: match[3],
-    message: match[4],
+    message: match[5] ? `${match[4]}\n${match[5]}` : match[4],
   }
 }
 
