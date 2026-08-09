@@ -183,7 +183,7 @@ for (const viewport of [
           url.pathname === '/api/matches' &&
           url.search === '?status=completed&limit=20&offset=0'
       })
-      await page.getByRole('combobox').click()
+      await page.getByRole('combobox').filter({ hasText: '全部状态' }).click()
       await page.getByRole('option', { name: '已完成', exact: true }).click()
       const completedMatchesResponse = await completedMatchesPromise
       expect(completedMatchesResponse.status(), await completedMatchesResponse.text()).toBe(200)
@@ -194,6 +194,27 @@ for (const viewport of [
       expect(completedMatches.matches.every((match) => match.status === 'completed')).toBe(true)
       await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(completedMatches.matches.length)
       await expect(page.getByText(/共 \d+ 局/)).toBeVisible()
+
+      const abnormalMatchesPromise = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'GET' &&
+          url.pathname === '/api/matches' &&
+          url.search === '?status=completed&has_bot_errors=true&limit=20&offset=0'
+      })
+      await page.getByRole('combobox').filter({ hasText: '全部质量' }).click()
+      await page.getByRole('option', { name: '有 Bot 响应异常', exact: true }).click()
+      const abnormalMatchesResponse = await abnormalMatchesPromise
+      expect(abnormalMatchesResponse.status(), await abnormalMatchesResponse.text()).toBe(200)
+      const abnormalMatches = await abnormalMatchesResponse.json() as {
+        matches: Array<{ result?: { bot_decide_errors?: Record<string, number> } }>
+      }
+      expect(abnormalMatches.matches.length).toBeGreaterThan(0)
+      expect(abnormalMatches.matches.every((match) =>
+        Object.values(match.result?.bot_decide_errors || {})
+          .reduce((sum, value) => sum + Number(value || 0), 0) > 0,
+      )).toBe(true)
+      await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(abnormalMatches.matches.length)
+      await expect(page.getByText(/Bot 响应错误 \d+ 次/).first()).toBeVisible()
     }
     await expectNoRootOverflow(page, 'matches')
 

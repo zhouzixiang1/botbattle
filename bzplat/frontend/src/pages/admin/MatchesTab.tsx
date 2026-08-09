@@ -37,6 +37,12 @@ const STATUSES = [
   { value: 'aborted', label: '已中止' },
 ]
 
+const QUALITY_FILTERS = [
+  { value: '', label: '全部质量' },
+  { value: 'true', label: '有 Bot 响应异常' },
+  { value: 'false', label: '无 Bot 响应异常' },
+]
+
 const MATCH_TYPE_LABEL: Record<string, string> = {
   challenge: '挑战',
   ladder: '天梯',
@@ -69,6 +75,7 @@ export default function MatchesTab() {
   const [confirm, confirmDialog] = useConfirm()
   const [matches, setMatches] = useState<Match[]>([])
   const [status, setStatus] = useState('')
+  const [hasBotErrors, setHasBotErrors] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -84,6 +91,7 @@ export default function MatchesTab() {
       const offset = (page - 1) * perPage
       const params = new URLSearchParams()
       if (status) params.set('status', status)
+      if (hasBotErrors) params.set('has_bot_errors', hasBotErrors)
       params.set('limit', String(perPage))
       params.set('offset', String(offset))
       const d = await apiGet<{ matches: Match[]; total?: number }>(`/api/matches?${params.toString()}`)
@@ -94,11 +102,16 @@ export default function MatchesTab() {
     } finally {
       setLoading(false)
     }
-  }, [status, page])
+  }, [status, hasBotErrors, page])
 
   // 状态筛选切换 → 回到第 1 页
   const onStatusChange = (v: string) => {
     setStatus(v === 'all' ? '' : v)
+    setPage(1)
+  }
+
+  const onQualityChange = (v: string) => {
+    setHasBotErrors(v === 'all' ? '' : v)
     setPage(1)
   }
 
@@ -136,6 +149,18 @@ export default function MatchesTab() {
             {STATUSES.map((s) => (
               <SelectItem key={s.value || 'all'} value={s.value || 'all'}>
                 {s.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={hasBotErrors || 'all'} onValueChange={onQualityChange}>
+          <SelectTrigger size="sm" className="h-9 w-[11rem]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {QUALITY_FILTERS.map((item) => (
+              <SelectItem key={item.value || 'all'} value={item.value || 'all'}>
+                {item.label}
               </SelectItem>
             ))}
           </SelectContent>
