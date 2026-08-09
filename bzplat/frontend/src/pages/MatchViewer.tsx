@@ -44,6 +44,7 @@ const REASON_LABELS: Record<string, string> = {
   version_unavailable: 'Bot 版本不可用',
   platform_error: '平台运行异常',
   admin_aborted: '管理员中止',
+  abort_failed: '中止未完成',
 }
 
 function reasonLabel(reason: unknown): string {
@@ -198,9 +199,17 @@ export default function MatchViewer() {
                 // 回写权威终态，避免顶栏一直停在直播中的旧快照。
                 setMatch((prev) => {
                   if (!prev) return prev
+                  const abortPersistenceFailed =
+                    ev.type === 'error' && ev.reason === 'abort_failed'
                   const patch: MatchRow = {
                     ...prev,
-                    status: ev.type === 'error' ? 'aborted' : 'completed',
+                    // abort_failed means the runner was cancelled but the Store
+                    // transition did not commit.  Preserve the authoritative
+                    // running row until reconciliation instead of claiming an
+                    // aborted state that the REST API cannot corroborate.
+                    status: abortPersistenceFailed
+                      ? prev.status
+                      : ev.type === 'error' ? 'aborted' : 'completed',
                   }
                   if (ev.winner !== undefined) patch.winner = ev.winner as number | null
                   // live match_end 唯一结果字段是 canonical result.deltas；不再

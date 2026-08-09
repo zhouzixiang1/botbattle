@@ -1094,6 +1094,30 @@ test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns
   await page.reload()
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
   await expect(page.locator('main')).toContainText('Bot 技术判负')
+
+  // If admin abort persistence fails, the live stream closes with a generic
+  // terminal error but the authoritative DB row is still running.  The page
+  // must explain the failure without falsely claiming that abort committed.
+  await page.unroute(`**/api/matches/${matchId}`)
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as { match: { status?: string; reason?: string } }
+    body.match.status = 'running'
+    delete body.match.reason
+    await route.fulfill({ response, json: body })
+  })
+  await page.route(`**/api/matches/${matchId}/events`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: 'data: {"type":"error","reason":"abort_failed","message":"对局中止未能完成，请稍后刷新"}\n\n',
+    })
+  })
+  await page.reload()
+  await expect(page.getByText('出错', { exact: true })).toBeVisible()
+  await expect(page.getByText('对局进行中', { exact: true })).toBeVisible()
+  await expect(page.getByText('中止未完成', { exact: true })).toBeVisible()
+  await expect(page.getByText('已中止', { exact: true })).toHaveCount(0)
   await monitor.expectClean()
 })
 

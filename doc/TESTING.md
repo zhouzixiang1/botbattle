@@ -94,7 +94,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 观赛审查修复定向回归 | **5 passed（40.8s）** | 在上述完整观赛回归后追加：自动追到当前尾部时仍使用数值游标；同帧增量与终局逐条补播；首回合技术终局不显示伪 `1/70` 或播放控件；运行期 snapshot 与持久化回放共用脱敏/最多 3 条事故边界；admin abort 落库失败仍释放任务、SSE 与运行期前缀。该行只记录受影响用例，最终整合提交仍须重跑全部 Playwright。 |
 | 运行期完整 snapshot 后端定向回归 | **4 passed / 1 warning** | 运行期完整前缀、终态提交/收尾窗口、shutdown 与真实 Holdem 终态定向执行；Store 落后时 snapshot 仍含未持久化事件，终态订阅改读 canonical replay，收尾释放引用。warning 为既有 Starlette/httpx deprecation |
 | 权威终态后端定向回归 | **72 passed / 1 warning（32.87s）** | `test_authoritative_terminal_events` + 技术故障 + human + audit：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
-| 后端整合提交完整 pytest | **1024 passed / 1 warning（212.84s）** | 使用项目 `.venv/bin/python -m pytest -q` 在观赛审查修复精确工作树实测；warning 为既有 Starlette/httpx deprecation |
+| 后端整合提交完整 pytest | **1024 passed / 1 warning（223.63s）** | 使用项目 `.venv/bin/python -m pytest -q` 在观赛审查修复精确工作树实测；warning 为既有 Starlette/httpx deprecation |
 | Playwright 完整执行 | **31 passed（2.4m）** | 隔离 50382/5174 栈、Chromium 单 worker 实测；覆盖 4 个 spec，Console/Network 监控与各测试的业务清理均通过 |
 | 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |
 
