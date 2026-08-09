@@ -545,13 +545,6 @@ SETTING_CONTEST_REST = "contest_default_rest_minutes"
 SETTING_CONTEST_TEMPLATES = "contest_templates"
 SETTING_FULL_RR_MAX_N = "full_rr_max_n"
 
-# 存量 platform_settings 曾使用的键名；现行程序不 seed、不读、不改写。
-# 暂保留下列三个标识仅因 GameSpec 仍声明存量元数据；运行时规则固定为
-# stack=20000 / SB=50 / BB=100，管理 API 会拒绝修改。
-SETTING_JUDGE_HOLDEM_STACK = "judge_holdem_starting_stack"
-SETTING_JUDGE_HOLDEM_SB = "judge_holdem_sb"
-SETTING_JUDGE_HOLDEM_BB = "judge_holdem_bb"
-
 # 闲时自动对局（维护天梯榜）
 SETTING_AUTO_MATCH_ENABLED = "auto_match_enabled"          # "1"|"0"
 SETTING_AUTO_MATCH_INTERVAL_SEC = "auto_match_interval_sec"  # 轮询间隔
@@ -572,13 +565,18 @@ SUPPORTED_BINARY_ARCH = "amd64"
 SUPPORTED_BINARY_ERROR = "仅支持 Linux x86_64 ELF64（小端）"
 
 
+def is_supported_binary_metadata(fmt: str, os_: str, arch: str) -> bool:
+    """Whether persisted metadata names the platform's sole runnable target."""
+    return (
+        fmt == SUPPORTED_BINARY_FORMAT
+        and os_ == SUPPORTED_BINARY_OS
+        and arch == SUPPORTED_BINARY_ARCH
+    )
+
+
 def require_supported_binary_metadata(fmt: str, os_: str, arch: str) -> None:
     """Reject new/executable references outside the platform's sole target."""
-    if (
-        fmt != SUPPORTED_BINARY_FORMAT
-        or os_ != SUPPORTED_BINARY_OS
-        or arch != SUPPORTED_BINARY_ARCH
-    ):
+    if not is_supported_binary_metadata(fmt, os_, arch):
         raise ValueError(SUPPORTED_BINARY_ERROR)
 
 # 邮件模板

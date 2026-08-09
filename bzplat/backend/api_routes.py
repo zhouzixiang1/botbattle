@@ -63,8 +63,10 @@ from bzplat.backend.store.schema import (
     SETTING_AUTO_MATCH_STALE_SEC,
     SETTING_CONTEST_REST,
     SETTING_MAX_CONCURRENT,
+    SUPPORTED_BINARY_ERROR,
     STATUS_ABORTED,
     STATUS_COMPLETED,
+    is_supported_binary_metadata,
 )
 router = APIRouter()
 
@@ -75,6 +77,19 @@ def _orch(request: Request) -> MatchOrchestrator:
 
 def _bots(request: Request) -> BotManager:
     return request.app.state.bot_manager
+
+
+def _with_bot_runnable(bot: dict) -> dict:
+    """Expose current executability without rewriting legacy metadata."""
+    public = dict(bot)
+    runnable = is_supported_binary_metadata(
+        str(public.get("format") or ""),
+        str(public.get("os") or ""),
+        str(public.get("arch") or ""),
+    )
+    public["runnable"] = runnable
+    public["unsupported_reason"] = None if runnable else SUPPORTED_BINARY_ERROR
+    return public
 
 
 def _new_preflight_runner(request: Request):
@@ -135,7 +150,10 @@ def my_bots(
     )
     # 裁响应死字段（对抗审计：created_at/updated_at 前端 MyBots 不消费；
     # 不动 owner_id/is_builtin——共享 list_bots 喂 /api/bots/public + /api/admin/bots）。
-    items = result["items"] if isinstance(result, dict) else result
+    items = [
+        _with_bot_runnable(bot)
+        for bot in (result["items"] if isinstance(result, dict) else result)
+    ]
     for b in items:
         b.pop("created_at", None)
         b.pop("updated_at", None)
@@ -156,7 +174,7 @@ def public_bots(
     )
     bots = result["items"] if isinstance(result, dict) else result
     # 脱敏敏感字段（binary_path/runtime_mode）——非 owner/admin 不可见（审计 P1-B）
-    bots = [_sanitize_bot(b, user) for b in bots]
+    bots = [_sanitize_bot(_with_bot_runnable(b), user) for b in bots]
     # 附带 owner_name/owner_display（供对手选择弹窗展示）
     store = _store(request)
     owner_ids = {b["owner_id"] for b in bots if b.get("owner_id") is not None}
@@ -284,13 +302,15 @@ def user_bots(
     u = store.get_user_by_username(username)
     if not u:
         raise HTTPException(404, "用户不存在")
-    result = store.list_bots(owner_id=u["id"], page=page, per_page=per_page)
+    result = store.list_bots(
+        owner_id=u["id"], runnable_only=True, page=page, per_page=per_page
+    )
     if isinstance(result, dict):
         # 脱敏敏感字段（审计 P1-B）
-        items = [_sanitize_bot(b, user) for b in result["items"]]
+        items = [_sanitize_bot(_with_bot_runnable(b), user) for b in result["items"]]
         return {"bots": items, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"bots": [_sanitize_bot(b, user) for b in result]}
+    return {"bots": [_sanitize_bot(_with_bot_runnable(b), user) for b in result]}
 
 
 @router.get("/api/search")
@@ -311,7 +331,12 @@ def global_search(
     lim = max(1, min(limit, 50))
     t = (type or "users").lower()
     if t == "bots":
-        return {"bots": store.search_bots(ql, limit=lim, game_id=game_id)}
+        return {
+            "bots": [
+                _with_bot_runnable(bot)
+                for bot in store.search_bots(ql, limit=lim, game_id=game_id)
+            ]
+        }
     if t == "matches":
         return {"matches": store.search_matches(ql, limit=lim, game_id=game_id)}
     # 默认 users
@@ -336,7 +361,7 @@ def get_bot(bot_id: int, request: Request, user=Depends(optional_user)):
     bot = _bots(request).get(bot_id)
     if not bot:
         raise HTTPException(404, "bot 不存在")
-    return {"bot": _sanitize_bot(bot, user)}
+    return {"bot": _sanitize_bot(_with_bot_runnable(bot), user)}
 
 
 @router.get("/api/bots/{bot_id}/profile")
@@ -352,6 +377,7 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
     )
     if not is_privileged:
         p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
+    p = _with_bot_runnable(p)
     # 裁响应死字段（对抗审计验证：vol/net_chips/rated_at/is_builtin/updated_at 前端不消费；
     # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
     for k in ("vol", "net_chips", "rated_at", "is_builtin", "updated_at"):
@@ -482,8 +508,9 @@ def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_use
     if not bot:
         raise HTTPException(404, "bot 不存在")
     is_owner = bot["owner_id"] == user["id"] or user.get("role") == "admin"
-    versions = store.list_bot_versions(bot_id)
+    versions = [_with_bot_runnable(v) for v in store.list_bot_versions(bot_id)]
     if not is_owner:
+        versions = [v for v in versions if v["runnable"]]
         # 公开视图：脱敏（不含 binary_path/runtime_mode 等敏感字段）。
         # 保留 id：挑战页选某版本对战时，my_bot_version_id/opponent_bot_version_id
         # 解析的是 bot_versions.id（主键），非 version 号——故必须回传 id 才能选版本。
@@ -494,6 +521,8 @@ def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_use
                 "upload_note": v.get("upload_note") or "",
                 "created_at": v.get("created_at") or v.get("uploaded_at") or "",
                 "size_bytes": v.get("size_bytes") or 0,
+                "runnable": True,
+                "unsupported_reason": None,
             }
             for v in versions
         ]
@@ -511,8 +540,14 @@ def rollback_bot_version(
     try:
         result = _bots(request).activate_version(bot_id, user["id"], version)
     except BotError as e:
-        status = 403 if e.code == "forbidden" else 404
-        raise HTTPException(status, e.message)
+        status = {
+            "forbidden": 403,
+            "not_found": 404,
+            "version_not_found": 404,
+            "unsupported_binary": 409,
+            "version_unavailable": 409,
+        }.get(e.code, 400)
+        raise HTTPException(status, detail={"code": e.code, "message": e.message})
     audit_log(request, "bot_version_rollback", result="ok", user=user.get("username"), target=bot_id, detail=f"v{version}")
     return {"bot": result}
 
@@ -524,7 +559,13 @@ def set_bot_active(
     try:
         bot = _bots(request).set_active(bot_id, user["id"], active)
     except BotError as e:
-        raise HTTPException(400, detail={"code": e.code, "message": e.message})
+        status = (
+            404 if e.code == "not_found"
+            else 403 if e.code == "forbidden"
+            else 409 if e.code in {"unsupported_binary", "version_unavailable"}
+            else 400
+        )
+        raise HTTPException(status, detail={"code": e.code, "message": e.message})
     return {"bot": bot}
 
 
@@ -533,21 +574,35 @@ def update_my_bot(
     bot_id: int, body: dict, request: Request, user=Depends(require_user)
 ):
     """Bot 拥有者改 display_name/description/is_active（受限白名单）。"""
-    store = _store(request)
-    bot = store.get_bot(bot_id)
-    if not bot:
-        raise HTTPException(404, "bot 不存在")
-    if bot["owner_id"] != user["id"]:
-        raise HTTPException(403, "无权修改他人的 Bot")
     allowed = {"display_name", "description", "is_active"}
-    fields = {
-        k: (1 if v is True else 0 if v is False else str(v)[:200] if k in ("display_name",) else str(v)[:2000])
-        for k, v in body.items() if k in allowed
-    }
+    unknown = set(body).difference(allowed)
+    if unknown:
+        raise HTTPException(422, f"不支持的字段：{', '.join(sorted(unknown))}")
+    if "is_active" in body and not isinstance(body["is_active"], bool):
+        raise HTTPException(422, "is_active 必须是布尔值")
+    fields: dict[str, Any] = {}
+    if "display_name" in body:
+        fields["display_name"] = str(body["display_name"])[:200]
+    if "description" in body:
+        fields["description"] = str(body["description"])[:2000]
+    if "is_active" in body:
+        fields["is_active"] = 1 if body["is_active"] else 0
     if not fields:
         raise HTTPException(400, "无可更新字段")
-    b = store.update_bot(bot_id, **fields)
-    return {"bot": b}
+    try:
+        bot = _bots(request).patch_owner(bot_id, user["id"], **fields)
+    except BotError as exc:
+        status = (
+            404 if exc.code == "not_found"
+            else 403 if exc.code == "forbidden"
+            else 409
+            if exc.code in {"unsupported_binary", "version_unavailable"}
+            else 400
+        )
+        raise HTTPException(
+            status, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+    return {"bot": _with_bot_runnable(bot)}
 
 
 @router.delete("/api/bots/{bot_id}")
@@ -1410,7 +1465,9 @@ async def organizer_assign_entries(
         gid = normalize_game_id(body.game_id or cgid)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
-        bots = store.list_bots(active_only=True, game_id=gid)
+        bots = store.list_bots(
+            active_only=True, runnable_only=True, game_id=gid
+        )
         if body.name_prefix:
             np = body.name_prefix.lower()
             bots = [b for b in bots if np in (b.get("name") or "").lower()]
@@ -1864,7 +1921,7 @@ def admin_bots(
     for row in rows:
         owner = store.get_user(row.get("owner_id")) if row.get("owner_id") else None
         enriched.append({
-            **row,
+            **_with_bot_runnable(row),
             "owner_name": owner.get("username") if owner else None,
             "owner_display": owner.get("display_name") if owner else None,
         })
@@ -1878,14 +1935,33 @@ def admin_patch_bot(
     bot_id: int, body: dict, request: Request, _admin=Depends(require_admin)
 ):
     allowed = {"is_active", "is_builtin", "display_name", "description"}
-    fields = {k: (1 if v is True else 0 if v is False else v)
-              for k, v in body.items() if k in allowed}
+    unknown = set(body).difference(allowed)
+    if unknown:
+        raise HTTPException(422, f"不支持的字段：{', '.join(sorted(unknown))}")
+    for key in ("is_active", "is_builtin"):
+        if key in body and not isinstance(body[key], bool):
+            raise HTTPException(422, f"{key} 必须是布尔值")
+    fields: dict[str, Any] = {}
+    if "is_active" in body:
+        fields["is_active"] = 1 if body["is_active"] else 0
+    if "is_builtin" in body:
+        fields["is_builtin"] = 1 if body["is_builtin"] else 0
+    if "display_name" in body:
+        fields["display_name"] = str(body["display_name"])[:200]
+    if "description" in body:
+        fields["description"] = str(body["description"])[:2000]
     if not fields:
         raise HTTPException(400, "无可更新字段")
-    b = _store(request).update_bot(bot_id, **fields)
-    if not b:
-        raise HTTPException(404, "bot 不存在")
-    return {"bot": b}
+    try:
+        bot = _bots(request).patch_admin(bot_id, **fields)
+    except BotError as exc:
+        status = 404 if exc.code == "not_found" else 409 if exc.code in {
+            "unsupported_binary", "version_unavailable",
+        } else 400
+        raise HTTPException(
+            status, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+    return {"bot": _with_bot_runnable(bot)}
 
 
 @router.delete("/api/admin/bots/{bot_id}")
@@ -1915,7 +1991,14 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
 def admin_bot_versions(
     bot_id: int, request: Request, _admin=Depends(require_admin)
 ):
-    return {"versions": _store(request).list_bot_versions(bot_id)}
+    if not _store(request).get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
+    return {
+        "versions": [
+            _with_bot_runnable(version)
+            for version in _store(request).list_bot_versions(bot_id)
+        ]
+    }
 
 
 # ── admin: stats / dashboard ──────────────────────────────────
@@ -2127,7 +2210,9 @@ async def admin_assign_entries(
         gid = normalize_game_id(body.game_id or cgid)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
-        bots = store.list_bots(active_only=True, game_id=gid)
+        bots = store.list_bots(
+            active_only=True, runnable_only=True, game_id=gid
+        )
         if body.name_prefix:
             np = body.name_prefix.lower()
             bots = [b for b in bots if np in (b.get("name") or "").lower()]

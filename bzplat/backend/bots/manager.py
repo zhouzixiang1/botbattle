@@ -359,18 +359,68 @@ class BotManager:
         self, *, game_id: str | None = None, owner_id: int | None = None,
         page: int | None = None, per_page: int = 50,
     ) -> list[dict] | dict:
-        # 私有 bot 功能已下线——所有 bot 都是公开的。保留方法名为兼容旧调用方，
-        # 直接转发到 list_bots（不再有 public_only 过滤）。
+        # 私有 Bot 功能已下线；公开候选只能包含现行可执行目标。
         return self.store.list_bots(
-            game_id=game_id, owner_id=owner_id, page=page, per_page=per_page,
+            game_id=game_id,
+            owner_id=owner_id,
+            runnable_only=True,
+            page=page,
+            per_page=per_page,
         )
 
     def get(self, bot_id: int) -> dict | None:
         return self.store.get_bot(bot_id)
 
+    @staticmethod
+    def _require_activatable(bot: dict) -> None:
+        """Validate the current mirror before any owner/admin activation."""
+        from bzplat.backend.store.schema import (
+            SUPPORTED_BINARY_ARCH,
+            SUPPORTED_BINARY_ERROR,
+            SUPPORTED_BINARY_FORMAT,
+            SUPPORTED_BINARY_OS,
+        )
+        if (
+            bot.get("format") != SUPPORTED_BINARY_FORMAT
+            or bot.get("os") != SUPPORTED_BINARY_OS
+            or bot.get("arch") != SUPPORTED_BINARY_ARCH
+        ):
+            raise BotError("unsupported_binary", SUPPORTED_BINARY_ERROR)
+        try:
+            with Path(bot["binary_path"]).open("rb") as binary:
+                require_supported_binary(classify_binary(binary.read(4096)))
+        except BinaryRejectError as exc:
+            raise BotError("unsupported_binary", str(exc)) from exc
+        except OSError as exc:
+            raise BotError("version_unavailable", "Bot 二进制文件不可用") from exc
+
     def set_active(self, bot_id: int, owner_id: int, active: bool) -> dict:
-        bot = self.store.get_bot(bot_id)
-        if not bot or bot["owner_id"] != owner_id:
-            raise BotError("not_found", "bot 不存在")
-        self.store.update_bot(bot_id, is_active=1 if active else 0)
-        return self.store.get_bot(bot_id)
+        return self.patch_owner(bot_id, owner_id, is_active=1 if active else 0)
+
+    def patch_owner(self, bot_id: int, owner_id: int, **fields) -> dict:
+        """Apply an owner edit without allowing activation of an unsupported file."""
+        with self._bot_version_lock(bot_id):
+            bot = self.store.get_bot(bot_id)
+            if not bot:
+                raise BotError("not_found", "bot 不存在")
+            if bot["owner_id"] != owner_id:
+                raise BotError("forbidden", "无权修改他人的 Bot")
+            if bool(fields.get("is_active")):
+                self._require_activatable(bot)
+            result = self.store.update_bot(bot_id, **fields)
+            if result is None:
+                raise BotError("not_found", "bot 不存在")
+            return result
+
+    def patch_admin(self, bot_id: int, **fields) -> dict:
+        """Apply an admin edit without bypassing the executable-target gate."""
+        with self._bot_version_lock(bot_id):
+            bot = self.store.get_bot(bot_id)
+            if not bot:
+                raise BotError("not_found", "bot 不存在")
+            if bool(fields.get("is_active")):
+                self._require_activatable(bot)
+            result = self.store.update_bot(bot_id, **fields)
+            if result is None:
+                raise BotError("not_found", "bot 不存在")
+            return result

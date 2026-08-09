@@ -1431,9 +1431,16 @@ class Store:
                 "FROM bots b LEFT JOIN users u ON b.owner_id=u.id "
                 "LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE b.is_active=1 "
+                "AND b.format=? AND b.os=? AND b.arch=? "
                 "AND (LOWER(b.name) LIKE ? OR LOWER(b.display_name) LIKE ?)"
             )
-            params: list[Any] = [ql, ql]
+            params: list[Any] = [
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+                SUPPORTED_BINARY_ARCH,
+                ql,
+                ql,
+            ]
             if game_id:
                 sql += " AND b.game_id=?"
                 params.append(game_id)
@@ -1837,6 +1844,7 @@ class Store:
             "binary_path",
             "current_version",
             "is_active",
+            "is_builtin",
             "game_id",
             "runtime_mode",
             "updated_at",
@@ -1955,6 +1963,7 @@ class Store:
         *,
         active_only: bool = True,
         include_builtin: bool = True,
+        runnable_only: bool = False,
         game_id: str | None = None,
         page: int | None = None,
         per_page: int = 50,
@@ -1969,6 +1978,13 @@ class Store:
                 params.append(owner_id)
             if active_only:
                 sql += " AND is_active=1"
+            if runnable_only:
+                sql += " AND format=? AND os=? AND arch=?"
+                params.extend((
+                    SUPPORTED_BINARY_FORMAT,
+                    SUPPORTED_BINARY_OS,
+                    SUPPORTED_BINARY_ARCH,
+                ))
             if not include_builtin:
                 sql += " AND is_builtin=0"
             if game_id:
