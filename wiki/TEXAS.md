@@ -1,7 +1,7 @@
 # 德州扑克
 
-本平台 `game_id`：`holdem`。本页只描述平台现行规则；Bot 通信格式以
-[唯一现行协议](#/wiki?slug=protocol)为准。
+本平台 `game_id`：`holdem`。规则参数固定，Bot 通信使用
+[统一信封](#/wiki?slug=protocol)。
 
 ## 1. 赛局参数
 
@@ -90,16 +90,9 @@ suit = card % 4
 
 花色：`0` 红心、`1` 方块、`2` 黑桃、`3` 梅花。例如 `48` 是 A♥，`50` 是 A♠。
 
-## 7. 两种进程模式
+## 7. 快速开始
 
-- Traditional 每次收到完整 `requests[]/responses[]`，应重放到当前状态。
-- LongRunning 首回合收到完整历史并必须精确握手；后续只收到 `request`。
-
-两种模式的 Holdem payload 和响应对象完全相同。缺少 LongRunning 握手会协议判负，
-不会降级或切换模式。
-
-## 8. 构建与上传
-
-上传文件只能是 Linux x86_64 ELF，不接受 `.py`、Windows `.exe` 或 macOS 可执行文件。
-[Bot 开发指南](#/wiki?slug=bot-dev)提供完整的 C / Python call-check 源码，以及 Windows、
-Linux、macOS 分别构建和验证 ELF 的可复制命令。
+最简单的合法策略始终返回 `{"response":0}`，即在可过牌时过牌、需要跟注时跟注。
+[Bot 开发指南](#/wiki?slug=bot-dev)提供可直接复制的完整 C / Python 程序，以及在 Windows、
+Linux、macOS 上构建 Linux x86_64 ELF 的命令。上传时选择的运行模式必须与程序处理信封的
+方式一致。

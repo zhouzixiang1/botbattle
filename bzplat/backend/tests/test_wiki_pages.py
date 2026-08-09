@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +17,7 @@ from bzplat.backend.main import create_app
 
 # tests/ → backend → bzplat → <repo_root>
 _WIKI_DIR = pathlib.Path(__file__).resolve().parents[3] / "wiki"
+_WIKI_LINK_RE = re.compile(r"\]\(#/wiki\?slug=([a-z0-9-]+)\)")
 
 
 def test_wiki_pages_registered_files_exist():
@@ -32,6 +34,17 @@ def test_wiki_pages_no_orphan_md_files():
     actual_files = {f.name for f in _WIKI_DIR.glob("*.md")}
     orphans = actual_files - registered_files
     assert not orphans, f"wiki/ 下有未注册的 .md 文件（前端 GET /api/wiki 看不到）: {sorted(orphans)}"
+
+
+def test_wiki_internal_links_target_registered_slugs():
+    """玩家文档中的 Wiki 链接必须指向已注册页面。"""
+    registered_slugs = {p["slug"] for p in WIKI_PAGES}
+    broken: list[str] = []
+    for path in _WIKI_DIR.glob("*.md"):
+        for slug in _WIKI_LINK_RE.findall(path.read_text(encoding="utf-8")):
+            if slug not in registered_slugs:
+                broken.append(f"{path.name} -> {slug}")
+    assert not broken, f"Wiki 内链指向未注册页面: {broken}"
 
 
 def test_every_slug_returns_real_content(tmp_path):
@@ -56,4 +69,3 @@ def test_wiki_slug_unregistered_returns_placeholder(tmp_path):
     r = c.get("/api/wiki?slug=this-slug-does-not-exist")
     assert r.status_code == 200
     assert "暂无内容" in r.json()["markdown"]
-

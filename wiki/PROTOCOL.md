@@ -1,15 +1,11 @@
-# 对局通信协议（唯一现行规范）
+# 对局通信协议
 
-平台与 Bot 只通过 stdin/stdout 的**单行 JSON 信封**通信。本页是唯一现行协议；
-代码、样例、上传预检和正式对局都必须服从这里的同一套格式。
+平台与 Bot 只通过 stdin/stdout 的**单行消息**通信。请求和响应使用本页定义的唯一 JSON
+信封；上传预检与正式对局的首回合格式完全相同。
 
 Bot 上传文件的唯一格式是 Linux x86_64 ELF；Windows PE / `.exe`、macOS Mach-O、
 ARM64 ELF 和原始 `.py` 都不属于可运行格式。跨系统构建见
 [Bot 开发指南](#/wiki?slug=bot-dev)。
-
-以下格式均不属于现行协议：顶层整数（如 `0`）、裸坐标对象（如 `{"x":7,"y":8}`）、
-旧 `{"a":...}`、带 `debug` / `data` / `globaldata` 或其他额外字段的响应对象。
-平台不会把旧格式转换成新格式，也不会因运行模式标错而回退。
 
 ## 1. 运行模式
 
@@ -60,8 +56,9 @@ ARM64 ELF 和原始 `.py` 都不属于可运行格式。跨系统构建见
 `response` 的值由游戏决定：Holdem 是整数动作码；Gomoku / Pencil 是含 `x`、`y`
 整数坐标的对象。整个响应不能直接输出整数或坐标对象，也不能附加其他字段。
 
-上传预检使用所选 `runtime_mode` 的同一首回合信封和同一严格响应校验；LongRunning
-预检也必须完成握手。预检不是另一套简化协议。
+上传预检使用所选运行模式的同一首回合信封和同一响应校验；LongRunning 预检也必须
+完成握手。预检采用独立的 **8 秒首回合健康检查**，只用于确认程序能启动并完成一次通信，
+不占用正式对局的思考时间。尤其是 Pencil 的正式对局仍按每方 900 秒累计棋钟计算。
 
 ## 3. Holdem payload
 
@@ -162,7 +159,7 @@ card = (点数 - 2) * 4 + 花色
 {"response":{"x":-1,"y":-1}}
 ```
 
-棋钟事件 `time_used` / `time_out` 只进入回放和 SSE，不会加入 Bot 请求 payload。
+棋钟信息只用于页面展示和回放，不会加入 Bot 请求 payload。
 
 ## 6. 格式故障与规则非法
 
@@ -170,17 +167,14 @@ card = (点数 - 2) * 4 + 花色
 |------|------|
 | 非法 JSON、顶层非对象 | `protocol_error` 技术判负 |
 | 缺少 `response`、额外顶层字段、response 类型错误 | `protocol_error` 技术判负 |
-| 顶层整数、裸 `{x,y}`、旧 `{a}` | `protocol_error` 技术判负 |
+| 顶层整数或裸 `{x,y}` | `protocol_error` 技术判负 |
 | LongRunning 握手缺失或错误 | `protocol_error` 技术判负，不回退 |
 | 决策或握手超时 | `timeout` / 协议技术负，首个故障即结束 |
 | 响应格式正确，但加注或落子违反游戏规则 | 交给对应游戏裁判处理 |
-| 平台沙箱自身故障 | `aborted + platform_error`，不评分 |
+| 平台沙箱自身故障 | 对局中止，不评分 |
 
-Bot-vs-Bot 的技术结果进入评分与赛事积分；人类对战不计 Glicko。现行事件名为
-`technical_incident`；结果/API 只公开 `technical_incident_count`、
-`technical_incidents_by_seat` 与最多 3 条 `technical_incident_samples`，列表过滤参数为
-`has_technical_incidents`。历史旧事件仅在服务端内部只读归一化，不作为新写入或第二套对外
-字段。诊断不保存 Bot 原始 stdout 或服务器私有路径。
+Bot 对战中的 Bot 技术负会进入评分与赛事积分；人类对战不计 Bot 评分。平台自身运行故障
+不会记到任一 Bot 名下。
 
 ## 7. 最小示例
 

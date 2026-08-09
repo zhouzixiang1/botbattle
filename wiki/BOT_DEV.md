@@ -10,8 +10,8 @@
 因此，即使你在 Windows 或 macOS 上开发，最终也必须在 **Linux amd64 环境**中构建。
 最稳妥的方式是使用 Docker，并在命令中固定 `--platform linux/amd64`。
 
-开始前请先阅读[唯一现行协议](#/wiki?slug=protocol)和对应游戏规则。旧 `{a}`、顶层整数、
-裸 `{x,y}` 或带额外字段的响应都不被接受。
+开始前请先阅读[通信协议](#/wiki?slug=protocol)和对应游戏规则。先复制一份完整示例跑通，
+再替换其中的决策函数，通常是最快的上手方式。
 
 ## 1. 选择运行模式
 
@@ -22,6 +22,10 @@
 
 两种模式共用同一游戏 payload 和 `{"response":...}` 响应信封。LongRunning 未完成精确
 握手会直接协议判负，不会回退成 Traditional。
+
+Traditional Bot 可以只读取一行完整信封、输出一行响应后退出；它也可以像下方示例一样
+保持读取循环，由平台在取得该回合响应后结束进程。LongRunning Bot 必须保持进程运行并
+持续读取增量信封。
 
 ## 2. 完整可复制的 C 最小 Bot
 
@@ -291,8 +295,9 @@ docker run --rm -i --platform linux/amd64 \
 4. 校验本游戏的 response payload 类型；
 5. LongRunning 额外要求精确握手。
 
-预检没有裸 payload、旧响应格式或跨平台二进制的兼容旁路。预检通过只证明首回合通信
-成立；上传后仍应创建挑战，验证完整历史重放、增量状态和整场策略。
+预检使用独立的 **8 秒首回合健康检查**。它只证明文件可以启动并完成一次首回合通信；
+上传后仍应创建挑战，验证完整历史重放、增量状态和整场策略。该 8 秒不会计入正式对局，
+也不会改变 Pencil 每方 900 秒累计棋钟。
 
 ## 10. 常见故障
 
@@ -303,7 +308,6 @@ docker run --rm -i --platform linux/amd64 \
 | 忘记换行或 flush | 决策超时并技术判负 | 每次输出完整行后立即 flush |
 | 顶层输出 `0` | `protocol_error` | 输出 `{"response":0}` |
 | 棋类输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
-| 输出旧 `{a:...}` | `protocol_error` | 改用唯一 `response` 字段 |
 | 附加 `debug/data/globaldata` | `protocol_error` | 响应对象只保留 `response` |
 | LongRunning 未精确握手 | `protocol_error`，不回退 | 首响应后立即输出固定握手行 |
 | Holdem 把正数当目标总额 | 游戏动作错误 | 正数是本次额外投入筹码 |
@@ -315,7 +319,7 @@ docker run --rm -i --platform linux/amd64 \
 - 每个 Bot：1 核、512MB、无网络、只读根文件系统；仅 `/tmp` 可写。
 - Holdem / Gomoku 使用平台固定的单步决策时限。
 - Pencil 双方各有固定 900 秒累计棋钟；每次思考消耗同一份总预算。
-- `time_used` / `time_out` 只进入回放/SSE，不改变 Bot 输入协议。
+- 棋钟信息只用于页面展示和回放，不改变 Bot 输入协议。
 
 完整字段与规则：[通信协议](#/wiki?slug=protocol) · [德州扑克](#/wiki?slug=texas) ·
 [五子棋](#/wiki?slug=gomoku) · [点格棋](#/wiki?slug=pencil)。

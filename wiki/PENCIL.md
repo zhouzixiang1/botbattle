@@ -28,7 +28,7 @@
 
 ## 通信 payload
 
-通信必须使用[唯一现行信封](#/wiki?slug=protocol)。请求 payload：
+通信必须使用[统一信封](#/wiki?slug=protocol)。请求 payload：
 
 ```json
 {"x":3,"y":4,"pass":0,"me":0,"scores":[1,0]}
@@ -66,12 +66,16 @@
 ## 棋钟与回放
 
 平台只在某一方实际思考时扣减该方累计预算。成功决策产生 `time_used`，耗尽产生
-`time_out`。这些字段只属于 SSE / 回放事件，不会混入 Bot stdin 请求。
+`time_out`。棋钟信息只用于页面展示和回放，不会混入 Bot stdin 请求。
 
-## Bot 开发要点
+上传时的预检是独立的 **8 秒首回合健康检查**，只确认程序能启动、读取完整首回合信封并
+返回合法响应。这个短时预检不属于正式比赛，也不会替代或扣减双方各 900 秒累计棋钟。
 
-上传文件只能是 Linux x86_64 ELF；C 与 Python 在 Windows、Linux、macOS 上的完整构建
-步骤见 [Bot 开发指南](#/wiki?slug=bot-dev)。点格棋 Bot 还必须注意：
+## 快速开始
+
+下面两个程序会重放完整历史、正确处理 `pass`，并支持两种运行模式。上传文件必须是
+Linux x86_64 ELF；Windows、Linux、macOS 的构建命令见
+[Bot 开发指南](#/wiki?slug=bot-dev)。实现自己的策略时请保留这些状态处理要点：
 
 - Traditional 从完整 `requests[]/responses[]` 重建所有已占边；
 - LongRunning 首回合重建后握手，后续在内存中增量维护边与比分；
@@ -302,12 +306,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
-
-## 默认赛制模板
-
-| template_id | 管线 |
-|-------------|------|
-| `pencil_group_drr_ko` | 分组双循环 → 休息 → 单败 |
-| `pencil_swiss_ko` | 瑞士 → 休息 → 单败 |
-
-默认计分 `ccgc_2_1_0`。

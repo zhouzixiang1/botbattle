@@ -93,7 +93,7 @@ def test_normative_docs_do_not_offer_retired_protocols() -> None:
         assert required in text, f"规范文档缺少唯一现行契约: {required}"
 
 
-def test_player_wiki_has_no_repository_only_instructions() -> None:
+def test_player_wiki_has_no_repository_or_internal_instructions() -> None:
     text = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "wiki").glob("*.md"))
     for internal in (
         "samples/",
@@ -103,8 +103,54 @@ def test_player_wiki_has_no_repository_only_instructions() -> None:
         ".worktrees/",
         "AGENTS.md",
         "../doc/",
+        "/api/",
+        "template_id",
+        "technical_incident_count",
+        "has_technical_incidents",
+        "SSE",
+        "WebSocket",
+        "纯规则源码",
+        "协议适配",
+        "结果定义",
     ):
-        assert internal not in text, f"玩家 Wiki 泄漏仓库开发入口: {internal}"
+        assert internal not in text, f"玩家 Wiki 泄漏工程或内部接口内容: {internal}"
+
+
+def test_player_wiki_is_quickstart_first_and_has_no_comparison_prose() -> None:
+    index = (ROOT / "wiki/INDEX.md").read_text(encoding="utf-8")
+    protocol = (ROOT / "wiki/PROTOCOL.md").read_text(encoding="utf-8")
+    bot_dev = (ROOT / "wiki/BOT_DEV.md").read_text(encoding="utf-8")
+    pencil = (ROOT / "wiki/PENCIL.md").read_text(encoding="utf-8")
+
+    for required in (
+        "## 第一次上传 Bot",
+        '{"requests":[...],"responses":[...]}',
+        "Windows、Linux 和 macOS",
+        "Docker",
+    ):
+        assert required in index, f"Wiki 首页缺少快速上手信息: {required}"
+
+    assert '{"requests":[<请求 payload>,...],"responses":[<本 Bot 过去的 response payload>,...]}' in protocol
+    assert ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<" in protocol
+    assert "不会改发完整历史，也不会切换为 Traditional" in protocol
+    assert "8 秒首回合健康检查" in protocol
+    assert "Pencil 的正式对局仍按每方 900 秒累计棋钟" in protocol
+
+    for platform in ("## 4. Linux", "## 5. Windows", "## 6. macOS"):
+        assert platform in bot_dev
+    assert "C：Alpine 静态编译" in bot_dev
+    assert "Python：Linux PyInstaller 打包" in bot_dev
+    assert "该 8 秒不会计入正式对局" in bot_dev
+    assert "不会替代或扣减双方各 900 秒累计棋钟" in pencil
+
+    wiki_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in (ROOT / "wiki").glob("*.md")
+    )
+    prose_without_required_signal = wiki_text.replace(
+        ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<", ""
+    )
+    assert "botzone" not in prose_without_required_signal.casefold()
+    assert "对比表" not in wiki_text
 
 
 def test_wiki_samples_are_the_runner_regression_sources() -> None:

@@ -1,6 +1,6 @@
 # 五子棋
 
-本平台 `game_id`：`gomoku`。本页只描述当前已实现的标准五子棋。
+本平台 `game_id`：`gomoku`。棋盘与胜负规则固定。
 
 ## 规则
 
@@ -14,7 +14,7 @@
 
 ## 通信 payload
 
-通信必须使用[唯一现行信封](#/wiki?slug=protocol)。请求 payload：
+通信必须使用[统一信封](#/wiki?slug=protocol)。请求 payload：
 
 ```json
 {"x":7,"y":7,"me":1}
@@ -32,17 +32,11 @@
 顶层裸 `{x,y}` 不合法。Traditional 必须重放全部 `requests[]/responses[]`；
 LongRunning 首响应后必须精确握手，后续按单 request 增量维护棋盘。
 
-## 观赛事件
+## 快速开始
 
-- `match_start`：棋盘大小、先手。
-- `turn` / `move`：回合与落子。
-- `illegal`：规则非法落子。
-- `match_end`：胜者与 `five` / `draw` / `illegal` 等原因。
-
-## Bot 开发要点
-
-上传文件只能是 Linux x86_64 ELF；C 与 Python 在 Windows、Linux、macOS 上的完整构建
-步骤见 [Bot 开发指南](#/wiki?slug=bot-dev)。五子棋 Bot 还必须注意：
+下面两个程序都能从完整历史重建棋盘，也能在 LongRunning 模式中增量维护棋盘。上传文件
+必须是 Linux x86_64 ELF；Windows、Linux、macOS 的构建命令见
+[Bot 开发指南](#/wiki?slug=bot-dev)。实现自己的策略时请保留这些状态处理要点：
 
 - Traditional 每次从完整 `requests[]/responses[]` 重建 15×15 棋盘；
 - LongRunning 在首回合重建棋盘并握手，后续把每个增量 request 落入内存棋盘；
@@ -243,12 +237,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
-
-## 默认赛制模板
-
-| template_id | 管线 |
-|-------------|------|
-| `gomoku_group_drr_ko` | 分组双循环 → 休息 → 单败 |
-| `gomoku_swiss_ko` | 瑞士 → 休息 → 单败 |
-
-默认计分 `ccgc_2_1_0`：胜 2、平 1、负 0。
