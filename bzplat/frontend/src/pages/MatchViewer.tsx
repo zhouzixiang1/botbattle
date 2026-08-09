@@ -301,6 +301,7 @@ export default function MatchViewer() {
   const progressText = displayedProgress != null && displayedProgress > 0
     ? `${finished ? '共' : '当前'} ${displayedProgress} ${progressUnitLabel}`
     : null
+  const ReplaySummary = gameSpec?.replay.Summary
   const ReplayHud = gameSpec?.replay.Hud
   const navigation = gameSpec?.replay.navigation
   const typeBadge = matchTypeBadge(match?.match_type)
@@ -552,6 +553,11 @@ export default function MatchViewer() {
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
           <div className="space-y-3">
             {ReplayHud && visibleVm !== null && <ReplayHud vm={visibleVm} seats={seats} />}
+            {ReplaySummary && visibleVm !== null && (
+              <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+                <ReplaySummary vm={visibleVm} seats={seats} />
+              </div>
+            )}
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
             {navigation && bounds.length >= 2 && !staticTechnicalReplay && (
