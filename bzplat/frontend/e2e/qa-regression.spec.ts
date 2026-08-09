@@ -192,6 +192,73 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
   await monitor.expectClean()
 })
 
+test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, USER)
+  await page.goto('/#/my-bots')
+
+  const uniqueName = `pe_reject_${Date.now().toString(36)}`
+  const pe = Buffer.alloc(0x80)
+  pe.write('MZ', 0, 'ascii')
+  pe.writeUInt32LE(0x40, 0x3c)
+  pe.write('PE\0\0', 0x40, 'binary')
+  pe.writeUInt16LE(0x8664, 0x44)
+
+  await page.locator('#upload-name').fill(uniqueName)
+  await page.locator('#upload-file').setInputFiles({
+    name: 'windows-bot.exe',
+    mimeType: 'application/octet-stream',
+    buffer: pe,
+  })
+  const rejected = page.waitForResponse((response) => (
+    response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === '/api/bots'
+  ))
+  await page.locator('form').filter({ has: page.locator('#upload-name') })
+    .getByRole('button', { name: '上传', exact: true })
+    .click()
+  const response = await rejected
+  expect(response.status(), await response.text()).toBe(400)
+  await expect(page.locator('main')).toContainText('仅支持 Linux x86_64 ELF64')
+  await expect(page.getByRole('link', { name: uniqueName, exact: true })).toHaveCount(0)
+
+  await page.route('**/api/bots/mine?**', async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      bots: [{
+        id: 987654321,
+        name: 'historical_windows_bot',
+        display_name: '历史 Windows Bot',
+        game_id: 'holdem',
+        format: 'pe',
+        os: 'windows',
+        arch: 'amd64',
+        current_version: 2,
+        runtime_mode: 'traditional',
+        is_active: 0,
+        runnable: false,
+        unsupported_reason: '仅支持 Linux x86_64 ELF64（小端）',
+      }],
+      page: 1,
+      per_page: 20,
+      total: 1,
+    }),
+  }))
+  await page.reload()
+  const historicalRow = page.getByRole('link', { name: '历史 Windows Bot', exact: true })
+    .locator('xpath=ancestor::li[1]')
+  await expect(historicalRow.getByText('不可运行', { exact: true })).toBeVisible()
+  await expect(historicalRow.getByRole('button', { name: '不可启用', exact: true })).toBeDisabled()
+  await expect(historicalRow).toContainText('仅支持 Linux x86_64 ELF64')
+  await monitor.expectClean([{
+    kind: 'http',
+    method: 'POST',
+    status: 400,
+    pathname: '/api/bots',
+  }])
+})
+
 test('contest game switching cannot submit a stale or mismatched template', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, ORGANIZER)

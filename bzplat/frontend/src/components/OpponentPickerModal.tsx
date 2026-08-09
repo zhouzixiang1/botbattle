@@ -26,6 +26,7 @@ export interface PickBot {
   os?: string
   arch?: string
   is_active?: number
+  runnable?: boolean
 }
 
 interface User {
@@ -78,7 +79,7 @@ export default function OpponentPickerModal({
     params.set('per_page', String(perPage))
     apiGet<{ bots: PickBot[]; total?: number }>(`/api/bots/public?${params.toString()}`)
       .then((d) => {
-        let rows = (d.bots || []).filter((b) => b.is_active !== 0)
+        let rows = (d.bots || []).filter((b) => b.is_active !== 0 && b.runnable !== false)
         if (tab === 'mine' || mineOnly) rows = rows.filter((b) => b.owner_id === myUserId)
         setBots(rows)
         if (d.total !== undefined) setTotal(d.total)

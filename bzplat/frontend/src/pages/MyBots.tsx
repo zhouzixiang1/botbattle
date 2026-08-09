@@ -32,6 +32,8 @@ interface Bot {
   updated_at?: string
   game_id?: string
   runtime_mode?: string
+  runnable?: boolean
+  unsupported_reason?: string | null
 }
 
 export default function MyBots() {
@@ -105,6 +107,10 @@ export default function MyBots() {
   }
 
   const toggleActive = async (bot: Bot) => {
+    if (!bot.is_active && bot.runnable === false) {
+      setError(bot.unsupported_reason || '该历史 Bot 不是 Linux x86_64 ELF，不能重新启用')
+      return
+    }
     try {
       await apiJson(
         `/api/bots/${bot.id}/active?active=${bot.is_active ? 'false' : 'true'}`,
@@ -316,6 +322,7 @@ export default function MyBots() {
                       </Link>
                       <span className="font-mono text-xs text-muted-foreground">#{b.id}</span>
                       <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
+                      {b.runnable === false && <Badge variant="destructive">不可运行</Badge>}
                     </div>
                     {b.description && (
                       <p className="mt-0.5 text-xs text-muted-foreground">{b.description}</p>
@@ -333,12 +340,35 @@ export default function MyBots() {
                       <span>v{b.current_version ?? 0}</span>
                       <span>{b.is_active ? '启用' : '停用'}</span>
                     </div>
+                    {b.runnable === false && (
+                      <p className="mt-1 text-xs text-destructive">
+                        {b.unsupported_reason || '仅保留为历史记录；请上传 Linux x86_64 ELF 新版本。'}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    <Button type="button" variant="outline" size="sm" onClick={() => void toggleActive(b)} className="gap-1">
-                      <Power className="size-3.5" />
-                      {b.is_active ? '停用' : '启用'}
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={!b.is_active && b.runnable === false}
+                            onClick={() => void toggleActive(b)}
+                            className="gap-1"
+                          >
+                            <Power className="size-3.5" />
+                            {b.is_active ? '停用' : b.runnable === false ? '不可启用' : '启用'}
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {!b.is_active && b.runnable === false
+                          ? b.unsupported_reason || '仅支持 Linux x86_64 ELF64（小端）'
+                          : b.is_active ? '停用 Bot' : '启用 Bot'}
+                      </TooltipContent>
+                    </Tooltip>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button

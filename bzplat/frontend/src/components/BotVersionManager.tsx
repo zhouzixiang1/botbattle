@@ -41,6 +41,8 @@ export interface BotVersion {
   format: string
   runtime_mode: string
   uploaded_at: string
+  runnable?: boolean
+  unsupported_reason?: string | null
 }
 
 interface Props {
@@ -182,6 +184,10 @@ export default function BotVersionManager({
 
   const rollback = async (v: BotVersion) => {
     if (botId === null) return
+    if (v.runnable === false) {
+      setError(v.unsupported_reason || '该历史版本不是 Linux x86_64 ELF，不能激活')
+      return
+    }
     const targetBotId = botId
     // 上传/回滚后外层列表的 currentVersion prop 可能尚未刷新；按钮高亮与
     // 防重复判断必须同用本地最新值，否则 v1→v2 后无法在同一弹窗切回 v1。
@@ -309,6 +315,7 @@ export default function BotVersionManager({
                         <Badge variant="secondary" className="font-mono text-[10px]">
                           {v.runtime_mode}
                         </Badge>
+                        {v.runnable === false && <Badge variant="destructive">不可运行</Badge>}
                       </div>
                       <div className="mt-0.5 flex flex-wrap gap-2 text-xs text-muted-foreground">
                         <span>{fmtTime(v.uploaded_at)}</span>
@@ -325,7 +332,7 @@ export default function BotVersionManager({
                           type="button"
                           variant="outline"
                           size="sm"
-                          disabled={busy || isCurrent}
+                          disabled={busy || isCurrent || v.runnable === false}
                           onClick={() => void rollback(v)}
                           className="gap-1"
                         >
@@ -334,7 +341,9 @@ export default function BotVersionManager({
                         </Button>
                       </TooltipTrigger>
                       <TooltipContent>
-                        {isCurrent ? '已是当前版本' : `回滚到 v${v.version}`}
+                        {v.runnable === false
+                          ? v.unsupported_reason || '仅支持 Linux x86_64 ELF64（小端）'
+                          : isCurrent ? '已是当前版本' : `回滚到 v${v.version}`}
                       </TooltipContent>
                     </Tooltip>
                   </li>
