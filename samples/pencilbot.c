@@ -1,4 +1,4 @@
-/* 点格棋随机合法边样例 Bot（Botzone Traditional + LongRunning）。
+/* 点格棋随机合法边样例 Bot（平台 Traditional + LongRunning）。
  *
  * Traditional 每次启动都会收到完整 requests/responses 历史；本程序先从历史重建
  * 已占边，再选择新边。LongRunning 首回合同样重建历史，响应后输出标准握手，后续
@@ -106,8 +106,8 @@ int main(void) {
             }
         }
 
-        /* Traditional runner 读取第一行后停止该进程，因此额外握手无副作用；
-         * LongRunning runner 会读取它并切换为后续单 request。 */
+        /* Traditional 模式读取第一行后停止该进程，因此额外握手无副作用；
+         * LongRunning 模式会校验它并切换为后续单 request。 */
         if (first_response) {
             fputs(KEEP_RUNNING "\n", stdout);
             fflush(stdout);

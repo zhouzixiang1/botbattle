@@ -1,7 +1,7 @@
 # 裁判代码说明
 
-> 描述各游戏裁判引擎的代码位置、规则、可调参数与协议要点。
-> `/api/judges/{game_id}/source` 按 `GameSpec.source_files` 公开纯裁判、适配、协议与结果源码，Web 上**只读**；规则参数可在管理端「裁判」Tab 热调（下一局即生效）。代码逻辑改动需走业务代码流程（git 分支）。
+> 描述各游戏裁判引擎的代码位置、固定规则与协议要点。
+> `/api/judges/{game_id}/source` 按 `GameSpec.source_files` 公开纯裁判、适配、协议与结果源码，Web 上**只读**。游戏规则不通过管理后台修改；代码逻辑改动需走业务代码流程（git 分支）。
 
 ## 架构总览
 
@@ -31,23 +31,15 @@ games.registry.get(game_id).run_session(decide, **params)
 
 编排层 `matches/orchestrator.py` 与赛制层 `contests/manager.py` **只读这两个字段**（及 `rounds`/`events`/`winner`），不碰扑克的 pot/board/holes 或棋类棋盘。
 
-## 可调规则参数（热生效）
+## 固定规则常量
 
-规则参数存在 `platform_settings`，编排层每局热读，下局立即用新值。默认值与各引擎/GameSpec 常量对齐。
+| 游戏 | 固定规则 |
+|------|----------|
+| Holdem | 70 手；每手起始筹码 20000；小盲 50；大盲 100 |
+| Gomoku | 15×15；黑先；无禁手；连续不少于 5 子即胜 |
+| Pencil | N=6；红先；每方累计棋钟 900 秒 |
 
-| 参数 | 默认 | 范围 | 说明 |
-|------|------|------|------|
-| `judge_holdem_starting_stack` | 20000 | 1000–1000000 | 德州起始筹码 |
-| `judge_holdem_sb` | 50 | 1–10000 | 德州小盲注 |
-| `judge_holdem_bb` | 100 | 2–20000 | 德州大盲注（须 > SB） |
-
-> 游戏规则参数（手数/棋盘边长/点阵边长）已**钉死固定值**，不再是 admin 可调项：
-> holdem 固定 70 手、gomoku 固定 15×15、pencil 固定 6 点。原 `judge_holdem_default_hands` /
-> `judge_gomoku_board_size` 设置项已移除。
-
-Pencil 另由 `GameSpec.time_budget_per_side=900.0` 固定每方累计 15 分钟棋钟；这是游戏固有运行契约，不在 `platform_settings` 中热调。
-
-参数贯通链路：`platform_settings` → 编排 judge params → `runner.run_binaries()` → `games` 注册表 `run_session` → 各 Session 构造参数。棋钟链路独立为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
+这些值不存入 `platform_settings`，不接受 match_config 或 admin 覆盖。修改它们属于游戏规则变更，必须同时修改裁判/契约、测试与 Wiki 并走代码评审。Pencil 棋钟链路为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
 
 ## 各游戏裁判要点
 
@@ -64,12 +56,12 @@ Pencil 另由 `GameSpec.time_budget_per_side=900.0` 固定每方累计 15 分钟
 - **固定 15×15**（不可通过 match_config 或 admin 调整）；黑先（seat 0）；横/竖/斜连续 ≥5 含长连即胜；无禁手。
 - 格式正确但非法着 → 裁判判负；Bot 协议错误/超时由平台层技术判负。棋盘下满无人成五 → 平局。
 - 对局中途进程崩溃 → 计分判负（对手胜，`reason=crash`）。
-- Botzone 标准协议：请求信封 `{"request":{"x","y","me"}}`，响应信封 `{"response":{"x","y"}}`（信封包裹见 [协议规范](#/wiki?slug=protocol)）。
+- 唯一现行协议：请求信封 `{"request":{"x","y","me"}}`，响应信封 `{"response":{"x","y"}}`；裸坐标对象不合法（见 [协议规范](#/wiki?slug=protocol)）。
 
 ### 点格棋（规则 `pencil_judge.py`，适配 `engine.py`）
 
 - **固定 N=6** 点阵 → 交错网格 size=2N-1=11；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
-- pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"x":-1,"y":-1}` 把回合交还。
+- pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"response":{"x":-1,"y":-1}}` 把回合交还。
 - Bot-vs-Bot 与人类对局均为每方累计 900s；决策成功发 `time_used`，总预算耗尽发 `time_out` 并判当前方负。人类侧同时有默认 120s 逐回合防挂机保护。
 - 格式正确但非法着、人类棋钟耗尽 → 裁判判负；Bot 协议错误/棋钟耗尽由平台层技术判负。对局中途进程崩溃 → 计分判负（`reason=crash`）。MatchViewer 玩家卡由事件流显示剩余时间和超时徽章。
 

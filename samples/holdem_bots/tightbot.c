@@ -1,6 +1,6 @@
 /* tightbot：保守策略——翻前只玩中等以上底牌（至少一张 ≥10），否则 fold；
  * 翻后若需跟注则 call/check，不加注。避免大损失。
- * Botzone 协议请求含 my_cards（card_int 数组，poker rank = card//4+2，2..14）。
+ * 平台协议请求含 my_cards（card_int 数组，poker rank = card//4+2，2..14）。
  */
 #include "poker_util.h"
 

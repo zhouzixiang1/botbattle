@@ -31,12 +31,12 @@ pytest
 | 类别 | 代表性测试 |
 |------|------------|
 | **架构解耦** | `test_result_contract`、`test_game_registry`、`test_import_cycles`、`test_tongyong_layer_no_game_branches`、`test_db_layer_extensibility` |
-| **固定规则与协议** | `test_engine`、`test_board_engines`、`test_protocol`、`test_judge_params`；holdem=70、gomoku=15×15、pencil=N=6 |
-| **可发布样例 Bot** | `test_sample_bots_runtime`：脚本实际编译 Holdem/Pencil C 源码，两个运行模式分别跑完整 70 手 Holdem 与合法终局 Pencil；另守护 Pencil Python 完整历史重放/握手和六种 Holdem 策略仅依赖标准 history 字段 |
+| **固定规则与协议** | `test_engine`、`test_board_engines`、`test_protocol`、`test_canonical_protocol_docs`、`test_pinned_game_config`；holdem=70+20000+50/100、gomoku=15×15、pencil=N=6+900s；schema 与 Wiki 守护唯一严格信封 |
+| **可发布样例 Bot** | `test_canonical_protocol_docs` 逐字绑定 Wiki 内嵌的三游戏 C/Python 完整示例与回归源码；`test_sample_bots_runtime` 实际构建三款 C ELF 与三款 PyInstaller 单文件 ELF，校验 Linux x86_64，并让两类产物在 Traditional/LongRunning 下分别跑完整 70 手 Holdem 与两款棋类合法终局；另守护完整历史重放、精确握手和六种 Holdem 策略仅依赖标准 history 字段 |
 | **认证/安全/审计** | `test_auth`、`test_store`、`test_security_logging`、`test_logging`、`test_audit_coverage`、`test_real_name`；密码重置覆盖邮箱码/管理员 token、双 Store 并发单赢家、session 删除故障整事务回滚及过期凭据不消费；限流按 IP+方法+路径分桶，版本历史 GET 不得误耗上传 POST 额度 |
 | **编排/实时通信** | `test_human_match`、`test_chess_clock`、`test_auto_matcher`、`test_match_seat_names`；GameSpec 棋钟覆盖 Bot-vs-Bot 与人类双方的累计/超时事件，另含 SSE/WS 终态关闭与 shutdown 收敛 |
 | **崩溃语义** | 中途崩溃（含 human）=`completed + reason=crash`；Bot-vs-Bot 启动失败=`technical_loss`；human 启动失败=`aborted` |
-| **Bot 技术故障** | `test_bot_technical_faults` 覆盖旧 `{a:...}`、缺 response、非法 JSON/类型、超时、三游戏、duplicate、人机隔离、评分政策、bounded result/replay 样本与结构化日志；`test_matches_pagination` 覆盖列表/详情对历史与当前事件的兼容聚合、敏感旧错误脱敏、`has_bot_errors` 跨游戏/状态过滤和 malformed replay；平台故障继续由 `test_audit_coverage` 断言 aborted 且不评分 |
+| **Bot 技术故障** | `test_bot_technical_faults` 覆盖拒绝 `{a:...}`、顶层整数/裸坐标、额外字段、缺 response、非法 JSON/类型、LongRunning 缺失/错误握手、超时、三游戏、duplicate、人机隔离、评分政策、bounded result/replay 样本与结构化日志；预检必须走同一首回合信封。`test_matches_pagination` 覆盖只读归一化历史事件、敏感旧错误脱敏、现行 `technical_incident_*` 字段、`has_bot_incidents` 跨游戏/状态过滤和 malformed replay；平台故障继续由 `test_audit_coverage` 断言 aborted 且不评分 |
 | **测试产物隔离** | `test_logging` 断言从 repo CWD + tmp DB 运行时日志落临时目录，`create_app` 默认 upload root 落 DB 同目录，主 checkout 的 `bot_uploads/logs` 不接收测试标记；测试不得手写相对 `bot_uploads` |
 | **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、时间线 `opens<=closes<=starts`（含等时刻/部分 PATCH/旧脏数据/零部分写）、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
 | **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot/赛事存在活跃引用时拒绝硬删；批量指派做字段与归属校验 |
@@ -54,7 +54,7 @@ pytest
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
 | `qa-regression.spec.ts` | 三 viewport 导航、表单边界、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、点格棋首次计时/首回合超时 UI 契约、异常完成原因展示、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
-| `admin-audit.spec.ts` | admin 10 个 Tab、查询参数/返回数据一致性、关键保存操作与布局 |
+| `admin-audit.spec.ts` | admin 9 个 Tab、查询参数/返回数据一致性、关键保存操作与布局 |
 
 运行前必须是 worktree 隔离实例；`beforeAll` 会校验 `/api/health` 的 `qa_instance=true`，Vite 也会拒绝代理到 50380：
 
@@ -86,7 +86,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 隔离端到端冒烟 | **ALL PASSED** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
 | Playwright 收集 | **21 条 / 4 spec** | `npx playwright test --list` 实测 |
-| 后端子分支门禁 | **样例分支 817 passed / 1 skipped；admin 分支 832 passed / 1 skipped** | 两个隔离 worktree 分别完整执行；唯一 skip 均因该 worktree 未构建 `frontend/dist`，最终整合提交仍须重跑 |
+| 后端协议/文档分支门禁 | **873 passed / 1 skipped / 1 warning（226.48s）** | 独立 worktree 完整执行；skip 因该 worktree 未构建 `frontend/dist`，warning 为既有 Starlette/httpx deprecation；最终整合提交仍须重跑 |
 | 后端整合提交收集/完整 pytest | **待最终重采集** | 不把独立分支数字冒充整合结果；发布前用本节命令回填 |
 | Playwright 完整执行 | **21 passed** | Chromium 单 worker，2.3m；三视口及四角色流程均通过，监控未发现非预期 Console/Network/SSE/WS 异常，包含新增点格棋计时回归 |
 | 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |

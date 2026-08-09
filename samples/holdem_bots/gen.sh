@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 编译全部 holdem 多策略 Bot → 输出 ELF。
 # 用法：bash samples/holdem_bots/gen.sh
-# 8 种风格（Botzone 标准协议）：
+# 8 种风格（平台唯一 JSON 信封协议）：
 #   foldbot / allinbot / raisebot / randombot / tightbot / loosebot（本目录）
 #   callbot / aggressivebot（samples/ 顶层）
 # 产物：各风格的 linux-amd64 ELF（本目录同名文件 + 顶层 *_linux_amd64 / *_bin）。

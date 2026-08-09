@@ -33,9 +33,60 @@ def built_samples(tmp_path_factory: pytest.TempPathFactory) -> Path:
         capture_output=True,
         text=True,
     )
-    for name in ("callbot_linux_amd64", "pencilbot_linux_amd64"):
+    for name in ("callbot_linux_amd64", "gomokubot_linux_amd64", "pencilbot_linux_amd64"):
         raw = (out / name).read_bytes()
         assert raw.startswith(b"\x7fELF")
+    return out
+
+
+@pytest.fixture(scope="module")
+def built_python_samples(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    probe = subprocess.run(
+        [sys.executable, "-m", "PyInstaller", "--version"],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip("PyInstaller unavailable")
+
+    out = tmp_path_factory.mktemp("pyinstaller-sample-bots")
+    work_root = tmp_path_factory.mktemp("pyinstaller-work")
+    for stem in ("callbot", "gomokubot", "pencilbot"):
+        work = work_root / stem
+        work.mkdir()
+        target = f"{stem}_py_linux_amd64"
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "PyInstaller",
+                "--noconfirm",
+                "--clean",
+                "--onefile",
+                "--name",
+                target,
+                "--distpath",
+                str(out),
+                "--workpath",
+                str(work),
+                "--specpath",
+                str(work),
+                str(SAMPLES / f"{stem}.py"),
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        description = subprocess.run(
+            ["file", "-b", str(out / target)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "ELF 64-bit" in description
+        assert "x86-64" in description
     return out
 
 
@@ -46,6 +97,25 @@ def test_compiled_holdem_sample_completes_70_hands(built_samples: Path, mode: st
         MatchRunner(BinaryRunner(prefer_local=True)).run_binaries(
             bot,
             bot,
+            game_id="holdem",
+            runtime_modes=(mode, mode),
+            seed=20260809,
+        )
+    )
+    assert result.rounds_played == DEFAULT_HANDS
+    assert not [e for e in result.events if e.get("reason") == "crash"]
+
+
+@pytest.mark.parametrize("mode", ["traditional", "longrunning"])
+def test_pyinstaller_holdem_wiki_sample_completes_70_hands(
+    built_samples: Path, built_python_samples: Path, mode: str
+) -> None:
+    python_bot = str(built_python_samples / "callbot_py_linux_amd64")
+    c_bot = str(built_samples / "callbot_linux_amd64")
+    result = asyncio.run(
+        MatchRunner(BinaryRunner(prefer_local=True)).run_binaries(
+            python_bot,
+            c_bot,
             game_id="holdem",
             runtime_modes=(mode, mode),
             seed=20260809,
@@ -80,6 +150,70 @@ def test_compiled_pencil_sample_finishes_without_illegal_move(
     assert result.events[-1]["type"] == "match_end"
 
 
+@pytest.mark.parametrize("mode", ["traditional", "longrunning"])
+def test_pyinstaller_pencil_wiki_sample_finishes_without_illegal_move(
+    built_samples: Path, built_python_samples: Path, mode: str
+) -> None:
+    python_bot = str(built_python_samples / "pencilbot_py_linux_amd64")
+    c_bot = str(built_samples / "pencilbot_linux_amd64")
+    result = asyncio.run(
+        MatchRunner(BinaryRunner(prefer_local=True)).run_binaries(
+            python_bot,
+            c_bot,
+            game_id="pencil",
+            runtime_modes=(mode, mode),
+            seed=20260809,
+            time_budget_per_side=900.0,
+        )
+    )
+    assert result.reason in {"majority", "score"}
+    assert not [e for e in result.events if e.get("type") in {"illegal", "time_out"}]
+    assert result.events[-1]["type"] == "match_end"
+
+
+@pytest.mark.parametrize("mode", ["traditional", "longrunning"])
+@pytest.mark.parametrize("artifact", ["fresh_build", "checked_in"])
+def test_compiled_gomoku_sample_finishes_without_illegal_move(
+    built_samples: Path, mode: str, artifact: str
+) -> None:
+    sample_dir = built_samples if artifact == "fresh_build" else SAMPLES
+    bot = str(sample_dir / "gomokubot_linux_amd64")
+    result = asyncio.run(
+        MatchRunner(BinaryRunner(prefer_local=True)).run_binaries(
+            bot,
+            bot,
+            game_id="gomoku",
+            runtime_modes=(mode, mode),
+            seed=20260809,
+        )
+    )
+    assert result.reason in {"five", "draw"}
+    assert not [e for e in result.events if e.get("type") == "illegal"]
+    assert not [e for e in result.events if e.get("reason") == "crash"]
+    assert result.events[-1]["type"] == "match_end"
+
+
+@pytest.mark.parametrize("mode", ["traditional", "longrunning"])
+def test_pyinstaller_gomoku_wiki_sample_finishes_without_illegal_move(
+    built_samples: Path, built_python_samples: Path, mode: str
+) -> None:
+    python_bot = str(built_python_samples / "gomokubot_py_linux_amd64")
+    c_bot = str(built_samples / "gomokubot_linux_amd64")
+    result = asyncio.run(
+        MatchRunner(BinaryRunner(prefer_local=True)).run_binaries(
+            python_bot,
+            c_bot,
+            game_id="gomoku",
+            runtime_modes=(mode, mode),
+            seed=20260809,
+        )
+    )
+    assert result.reason in {"five", "draw"}
+    assert not [e for e in result.events if e.get("type") == "illegal"]
+    assert not [e for e in result.events if e.get("reason") == "crash"]
+    assert result.events[-1]["type"] == "match_end"
+
+
 def test_python_pencil_sample_replays_full_history_and_keeps_running() -> None:
     legal = [(x, y) for x in range(11) for y in range(11) if (x + y) % 2 == 1]
     used, only_free = legal[:-1], legal[-1]
@@ -103,6 +237,27 @@ def test_python_pencil_sample_replays_full_history_and_keeps_running() -> None:
     assert json.loads(lines[0]) == {"response": {"x": only_free[0], "y": only_free[1]}}
     assert lines[1] == ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
     assert json.loads(lines[2]) == {"response": {"x": -1, "y": -1}}
+
+
+def test_python_gomoku_sample_replays_full_history_and_keeps_running() -> None:
+    legal = [(x, y) for x in range(15) for y in range(15)]
+    used, only_free = legal[:-1], legal[-1]
+    requests = [{"x": -1, "y": -1, "me": 0}]
+    requests.extend({"x": x, "y": y, "me": 0} for x, y in used[::2])
+    responses = [{"x": x, "y": y} for x, y in used[1::2]]
+    envelope = {"requests": requests, "responses": responses}
+
+    proc = subprocess.run(
+        [sys.executable, str(SAMPLES / "gomokubot.py")],
+        input=json.dumps(envelope) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    lines = proc.stdout.splitlines()
+    assert json.loads(lines[0]) == {"response": {"x": only_free[0], "y": only_free[1]}}
+    assert lines[1] == ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 
 def test_holdem_strategy_samples_use_standard_history_fields(tmp_path: Path) -> None:

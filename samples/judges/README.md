@@ -3,7 +3,7 @@
 Bot 作者可本地运行的**参考裁判**，逻辑与本平台服务端引擎一致，便于自测
 合法着 / 胜负判定 / 手牌评估，**无需启动平台**。这些脚本独立、无平台依赖。
 
-> 平台真正裁判在服务端 `bzplat/backend/games/<game>/engine.py`；此处仅作参考实现。
+> 平台纯规则裁判在 `bzplat/backend/games/<game>/<game>_judge.py`，`engine.py` 只是协议/事件适配层；此处脚本仅作本地参考实现。
 
 | 脚本 | 游戏 | 能力 |
 |------|------|------|
@@ -18,7 +18,7 @@ Bot 作者可本地运行的**参考裁判**，逻辑与本平台服务端引擎
 python samples/judges/gomoku_judge.py
 python samples/judges/gomoku_judge.py --check
 
-# 点格棋：N=2 成格演示，或 --check 交互占边
+# 点格棋：固定 N=6 的成格演示，或 --check 交互占边
 python samples/judges/pencil_judge.py
 python samples/judges/pencil_judge.py --check
 

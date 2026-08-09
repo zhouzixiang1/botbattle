@@ -6,7 +6,7 @@
 
 ## 对局
 
-对齐 [Botzone · 对局](https://wiki.botzone.org.cn/index.php?title=%E5%AF%B9%E5%B1%80) 概念。一局对局（match）由平台裁判引擎推进，Bot 通过 stdin/stdout 行协议参与。
+一局对局（match）由平台裁判引擎推进，Bot 通过 stdin/stdout 唯一行协议参与。
 
 ### 创建对局
 
@@ -62,7 +62,7 @@
 
 ### 观赛视觉
 
-三游戏的观赛 / 回放 / 人类对战均采用动画渲染（对齐 botzone.org.cn）：
+三游戏的观赛 / 回放 / 人类对战均采用统一动画渲染：
 
 - **holdem**：发牌翻面、动作浮字、下注 / 弃牌 / 全押标记、筹码与**累计净筹码**、每手结算叠层；人类对战仅亮己方底牌。
 - **gomoku**：落子动画 + 最后一手标记；图例含 **BOT 名**。
@@ -75,7 +75,7 @@
 
 ## 裁判
 
-对齐 [Botzone · 裁判](https://wiki.botzone.org.cn/index.php?title=%E8%A3%81%E5%88%A4)。裁判负责接收 Bot 的着法、判定**合法性**、推进局面、判定**胜负**与**计分**。
+裁判负责接收 Bot 的着法、判定**合法性**、推进局面、判定**胜负**与**计分**。
 
 ### 判罚一览
 
@@ -94,21 +94,6 @@
 
 - 网页：顶部导航「裁判」页（`/judges`）
 - API：`GET /api/judges`（列表）、`GET /api/judges/{game_id}/source`（源码全文）
-
-### 参考裁判（可本地自测）
-
-仓库提供**独立、无平台依赖**的参考裁判脚本，可在本地自测合法着 / 胜负 / 计分，逻辑与服务端引擎一致：
-
-| 脚本 | 游戏 | 能力 |
-|------|------|------|
-| [`samples/judges/gomoku_judge.py`](../samples/judges/gomoku_judge.py) | 五子棋 | 合法着、4 方向连五、棋谱回放 |
-| [`samples/judges/pencil_judge.py`](../samples/judges/pencil_judge.py) | 点格棋 | 交错网格、占边、成格连走计分 |
-| [`samples/judges/holdem_judge.py`](../samples/judges/holdem_judge.py) | 德州扑克 | 七牌最佳五牌评估、raise 下限 |
-
-```bash
-python samples/judges/gomoku_judge.py          # 内置演示
-python samples/judges/gomoku_judge.py --check  # 交互逐手判定
-```
 
 ### 各游戏核心判定
 
@@ -148,7 +133,7 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 
 ## 经验与等级
 
-用户通过平台活动获得经验（XP），累积升级（Level）。对标 Botzone 的 level + 活跃度体系。
+用户通过平台活动获得经验（XP），累积升级（Level）。
 
 ### 经验奖励
 
@@ -222,7 +207,7 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 
 | game_id | 固定规则 |
 |---------|----------|
-| holdem | 70 手（`DEFAULT_HANDS=70`） |
+| holdem | 70 手；每手起始筹码 20000、小盲 50、大盲 100 |
 | gomoku | 15×15（`BOARD_SIZE=15`） |
 | pencil | 6 点（`DEFAULT_N=6`，25 格） |
 
@@ -394,14 +379,19 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 
 ### MyBots 管理 `/my-bots`
 
-每个 Bot 卡片可：**启用/停用**、**版本管理**（上传新版本 / 查看历史 / 回滚）、**编辑**（改 display_name/description）、**删除**（软删，历史对局保留）。Bot 名链接 Bot 详情；卡片显示当前 **Botzone 运行模式**徽章 + 版本号。
+每个 Bot 卡片可：**启用/停用**、**版本管理**（上传新版本 / 查看历史 / 回滚）、**编辑**（改 display_name/description）、**删除**（软删，历史对局保留）。Bot 名链接 Bot 详情；卡片显示当前**运行模式**徽章 + 版本号。
 
 #### 上传 Bot / 运行模式
 
-上传时须选择**游戏类型** + **Botzone 运行模式**：
+上传时须选择**游戏类型** + **运行模式**：
 
-- **LongRunning（长驻，可选）**：进程整场不重启；首回合发完整历史信封，Bot 响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` 握手，之后每回合只发单 request。适合有昂贵初始化的 Bot。平台默认仍是 Traditional。
+上传文件格式唯一为 Linux x86_64 ELF；不接受 `.py`、Windows `.exe`、macOS Mach-O 或
+ARM64 ELF。跨系统构建方法见 [Bot 开发指南](#/wiki?slug=bot-dev)。
+
+- **LongRunning（长驻，可选）**：进程整场不重启；首回合发完整历史信封，Bot 响应后必须精确输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`，之后每回合只发单 request。握手缺失或错误立即协议判负，不回退。适合有昂贵初始化的 Bot。平台默认仍是 Traditional。
 - **Traditional（传统）**：每回合发完整历史信封 `{"requests":[...],"responses":[...]}`，Bot 自重放重建状态。适合无状态、易调试的 Bot。
+
+上传预检按所选模式使用与正式首回合相同的信封；响应对象只能包含 `response`。
 
 详见 [协议规范](#/wiki?slug=protocol)。
 

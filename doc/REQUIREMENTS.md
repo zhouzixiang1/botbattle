@@ -5,10 +5,10 @@
 ## 1. 项目背景与目标
 
 ### 1.1 背景
-Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot），由平台托管运行对局并排名。传统方案（如 Botzone 默认）每回合启停进程、聚合请求响应，开销大且不适合长驻对局。
+Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运行对局并排名。平台同时提供逐决策重启与整场长驻两种明确的进程生命周期。
 
 ### 1.2 目标
-构建一个**兼容 Traditional/LongRunning、沙箱隔离、多游戏可扩展**的 Bot 对战平台，提供：
+构建一个**严格支持 Traditional/LongRunning、沙箱隔离、多游戏可扩展**的 Bot 对战平台，提供：
 1. 用户上传 Bot → 平台沙箱安全运行 → 自动判胜与评分。
 2. 实时观赛、完整回放、Glicko-2 排行榜。
 3. 组织者赛事（多赛制）、人类亲自上场、社交互动。
@@ -20,7 +20,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 |------|------|---------|
 | **玩家** | `user` | 上传 Bot、发起挑战、观赛、查看排行与战绩、社交互动 |
 | **组织者** | `organizer` | 创建与管理赛事（赛制模板、报名、推进阶段） |
-| **管理员** | `admin` | 全局管理（用户/Bot/对局/赛事/运行时配置/裁判参数/日志） |
+| **管理员** | `admin` | 全局管理（用户/Bot/对局/赛事/运行时配置/赛制模板/日志） |
 | **访客** | 未登录 | 浏览排行榜、对局回放、Bot/用户主页、Wiki |
 
 ## 3. 功能需求
@@ -36,7 +36,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 ### 3.2 Bot 管理
 | 需求 | 验收标准 |
 |------|---------|
-| 上传 Bot | 支持 ELF/PE 二进制（Mach-O 拒绝），魔数自动识别 os/arch/format，按游戏分类 |
+| 上传 Bot | 唯一接受 Linux x86_64 ELF；PE/`.exe`、Mach-O、ARM64 ELF、原始 `.py` 与脚本全部拒绝；预检按所选 runtime_mode 使用正式首回合同一信封，LongRunning 必须握手 |
 | 版本管理 | 同一 Bot 可上传多版本，可切换激活版本，可删/改名/改简介 |
 | Bot 详情页 | 信息卡（评级/胜率/战绩/段位）+ 对局历史 + 对手战绩 + 评分曲线（recharts）|
 
@@ -50,7 +50,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | 人类 vs Bot | WebSocket 落子回传，独立并发槽（默认 4），per-user ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
 | 自博弈 | 同一 owner 的两个不同 Bot 可对战，走普通挑战 |
 | 崩溃收敛 | 对局中途 Bot 崩溃（含人类局）按游戏结果结算为 `completed` + `reason=crash`；Bot-vs-Bot 启动失败为 `completed` + `technical_loss`，人类局启动失败为 `aborted` |
-| 协议故障收敛 | Bot 非法 JSON/信封/response 首次发生即 `completed + protocol_error + technical_loss`；Bot 超时为 `completed + timeout + technical_loss`。Bot-vs-Bot 计分、人机局不计 Glicko；平台 sandbox 故障始终 aborted 且不评分；格式正确的非法游戏动作仍交裁判。对局列表/详情兼容聚合历史与当前错误字段，支持 `has_bot_errors` 过滤且默认不隐藏历史 completed 异常局 |
+| 协议故障收敛 | 唯一响应对象只允许 `response`；顶层整数/裸坐标/旧 `{a}`/额外字段均拒绝，LongRunning 缺失精确握手不回退。首次协议故障即 `completed + protocol_error + technical_loss`；超时为 `completed + timeout + technical_loss`。Bot-vs-Bot 计分、人机局不计 Glicko；平台 sandbox 故障始终 aborted 且不评分；格式正确的非法游戏动作仍交裁判。结果只公开 `technical_incident_count` / `technical_incidents_by_seat` / `technical_incident_samples`，列表查询使用 `has_bot_incidents`；历史旧事件仅在服务端内部只读归一化 |
 
 ### 3.4 评分与排行
 | 需求 | 验收标准 |
@@ -85,9 +85,8 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 ### 3.8 管理后台
 | 需求 | 验收标准 |
 |------|---------|
-| 10 Tab 后台 | 仪表盘、用户/Bot/对局/赛事管理、邮件模板与发件箱、运行时热配置、裁判参数热调、赛制模板设计器、日志查看 |
+| 9 Tab 后台 | 仪表盘、用户/Bot/对局/赛事管理、邮件模板与发件箱、运行时热配置、赛制模板设计器、日志查看 |
 | 运行时热配置 | 并发上限/超时/auto-match 参数可热改（资源硬顶不可抬高） |
-| 裁判参数热调 | 德州筹码/盲注可热改（手数/棋盘/点阵已钉死固定值，不可调） |
 | 安全中止与删除 | 活跃对局只允许经 orchestrator 取消并收敛为 `aborted`，不得手工伪造 running/completed；用户/Bot/赛事存在活跃引用时拒绝硬删 |
 
 ### 3.9 站点与后台调度

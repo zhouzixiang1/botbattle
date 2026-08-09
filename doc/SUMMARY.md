@@ -16,7 +16,7 @@
 项目经多个阶段交付。早期 **#1–#27** 奠定功能与文档基线；其后继续合并游戏契约收敛、canvas 观赛、安全日志、赛事修复等（见 §2.4）：
 
 ### 2.1 平台功能建设（15 PR：#1–#15）
-对标 Botzone 全量补齐平台功能：
+围绕线上 Bot 对战补齐平台功能：
 | PR | 主题 |
 |----|------|
 | #6 | Bot 详情页（档案/历史/对手战绩/评分曲线） |
@@ -64,17 +64,18 @@
 
 ## 3. 成果指标
 
-> 下列为文档对齐时点（2026-08）的代码盘点；API/测试数字以仓库当前状态为准。
+> 下列为文档对齐时点（2026-08）的代码盘点；易变的路由、页面与测试数量只以最终目标
+> 提交上的自动化收集和执行结果为准，命令与证据见 `TESTING.md`。
 
 | 指标 | 数值 |
 |------|------|
 | 后端代码 | `bzplat/backend` 当前 66 个非测试 `.py`（含 `games/`，以 `rg --files` 为准） |
-| API 路由 | **120 个声明**（api_routes 105 含 WS/SSE + auth 13 + health 1 + API 404 fallback 1） |
+| API 路由 | REST + SSE + WebSocket；精确数量以目标提交的自动化盘点为准 |
 | 数据库表 | **30** 张 + **36** 个具名索引（全新初始化结果；per-game 表/索引由 `_migrate` 模板补齐） |
 | 游戏架构 | `games/` 注册表 + 3 自包含子包（shim 已删，真实现全在 games/） |
 | 前端组件 | 26 个 shadcn 共享原语 |
-| 前端页面 | **21** 个 lazy 页面模块（含 admin 壳）；21 条业务 `<Route>` + fallback（/watch 与 /arena 旧路径已删） |
-| 自动化测试 | 后端 **80 个测试模块 / 812 条 collected**；当前目标提交全量 `812 passed`（1 warning，165.16s） |
+| 前端页面 | 顶层业务页面均 lazy 分包；精确数量以目标提交的路由盘点为准 |
+| 自动化测试 | 后端 pytest + Playwright；最终数量以目标提交重新收集为准 |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
 | 浏览器验收 | Playwright **4 个 spec / 21 条 collected**；当前目标提交 Chromium 全量 `21 passed`（2.3m）；另有 browser/screenshot 辅助脚本 |
 | 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
@@ -89,7 +90,7 @@
 | 规则/协议文档 | ✅ | `wiki/` |
 | 协议 JSON Schema | ✅ | `contracts/` |
 | 样例 Bot + 参考裁判 | ✅ | `samples/` |
-| 测试套件 | ✅ 81 模块 / 818 条，当前工作树全量 `817 passed / 1 skipped`（未构建前端 dist 的 SPA catch-all 用例；1 warning，164.66s） | `bzplat/backend/tests/` |
+| 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
 | 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
 | 浏览器验收 | ✅ 4 spec / 21 条 Chromium 全量通过（2.3m；Console/Network/SSE/WS 与三视口） | `bzplat/frontend/e2e/` |
@@ -123,6 +124,6 @@
 
 ## 7. 结论
 
-botbattle 已形成完整的代码、文档、测试与部署交付面：三游戏核心由 `games/` GameSpec + 结果鸭子契约守护，Pencil 新增了 Bot 与人类一致的每方 900 秒累计棋钟，前端具备 shadcn/ui 双主题、canvas/GSAP 观赛与响应式页面，本轮又补齐 QA 写隔离、恢复一致性和真实浏览器自动化。当前目标提交已实测通过后端 80 模块 / 812 条 pytest（1 warning，165.16s）、Playwright 4 spec / 21 条（2.3m）、前端构建（2558 modules）、隔离冒烟 ALL PASSED 与 API 50 passed / 0 failed；验收结论来自实际执行结果，不以静态盘点替代运行证据。
+botbattle 已形成完整的代码、文档、测试与部署交付面：三游戏核心由 `games/` GameSpec + 结果鸭子契约守护，Pencil 采用 Bot 与人类一致的每方 900 秒累计棋钟，前端具备 shadcn/ui 双主题、canvas/GSAP 观赛与响应式页面，本轮又补齐 QA 写隔离、恢复一致性和真实浏览器自动化。最终验收结论必须来自整合后的目标提交实际执行结果，统一记录在 `TESTING.md`，不以历史手填数字或静态盘点替代运行证据。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

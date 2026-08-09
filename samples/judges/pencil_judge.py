@@ -4,8 +4,8 @@
 Bot 作者可本地运行自测合法着 / 成格计分，逻辑与本平台服务端
 `bzplat/backend/games/pencil/engine.py` 的 PencilSession 裁判一致。
 
-规则：N×N 点（默认 N=6，对齐服务端 engine.py 与 Botzone 官方 grid_size=11
-交错维度 → 6 点 → 交错 size=2N-1=11 → (N-1)²=25 格，奇数无平局）；红先（seat 0）；
+规则：固定 N=6：6 点 → 交错 size=2N-1=11 → (N-1)²=25 格，奇数无平局；
+红先（seat 0）；
 占相邻边；围成格得分并连走；格多者胜；平分则平局。
 非法着（非边 / 已占边）→ 判负。
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sys
 
-DEFAULT_N = 6  # 对齐服务端 engine.py 与 Botzone 官方 grid_size=11（6 点→25 格，奇数无平局）
+DEFAULT_N = 6  # 6 点→25 格，奇数格数保证终局有胜负
 GRID_DOT = 3
 GRID_EDGE = 4
 GRID_EDGE_USED = 5
@@ -25,9 +25,9 @@ _DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
 
 
 class PencilBoard:
-    def __init__(self, n_dots: int = DEFAULT_N) -> None:
-        self.n_dots = n_dots
-        self.size = 2 * n_dots - 1
+    def __init__(self) -> None:
+        self.n_dots = DEFAULT_N
+        self.size = 2 * DEFAULT_N - 1
         self.board = [[0] * self.size for _ in range(self.size)]
         self.scores = [0, 0]
         self.curr_player = 0
@@ -79,10 +79,10 @@ class PencilBoard:
 
 
 def _demo() -> None:
-    """N=2 → 仅 1 格；占第 4 条边成格得分。"""
-    g = PencilBoard(2)
-    assert g.size == 3
-    assert len([1 for r in g.board for c in r if c == GRID_EDGE]) == 4
+    """固定 N=6，在左上角占第 4 条边形成一格。"""
+    g = PencilBoard()
+    assert g.size == 11
+    assert len([1 for r in g.board for c in r if c == GRID_EDGE]) == 60
     g.curr_player = 0
     assert g.do_action(0, 1) is False  # 上边
     assert g.do_action(1, 0) is False  # 左边
@@ -90,8 +90,7 @@ def _demo() -> None:
     assert g.scores == [0, 0]
     assert g.do_action(2, 1) is True   # 下边 → 成格
     assert g.scores == [1, 0]
-    assert g.winner() == 0
-    print(f"N=2 演示：占第 4 边成格 → scores={g.scores}，红胜")
+    print(f"固定 N=6 演示：左上格第 4 边闭合 → scores={g.scores}")
 
 
 def _interactive() -> None:

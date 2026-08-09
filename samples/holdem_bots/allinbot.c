@@ -1,4 +1,4 @@
-/* allinbot：永远全押（极端激进，要么大赢要么大输）。Botzone 协议：response=-2。 */
+/* allinbot：永远全押（极端激进，要么大赢要么大输）。平台协议：response=-2。 */
 #include "poker_util.h"
 
 int main(void) {

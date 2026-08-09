@@ -1,138 +1,313 @@
-# 点格棋 (Pencil)
+# 点格棋
 
-对齐 [Botzone · Pencil](https://botzone.org.cn/game/Pencil) / [Wiki · Pencil](https://wiki.botzone.org.cn/index.php?title=Pencil)。  
-本平台 `game_id`：**`pencil`**（显示名「点格棋」）。裁判引擎 **已注册**。
+本平台 `game_id`：`pencil`。
 
 ## 规则
 
-1. 棋盘由 **N×N 个点**构成；**固定 N=6**（规则钉死，不可配；对齐 Botzone 官方裁判 `grid_size=11` 交错维度 → 6 点 → 交错板 `size=2N-1=11` → `(N-1)²=25` 格，奇数无平局）。
-2. 坐标从 0 开始，**先 x 后 y**，原点左上。
-3. **红方先手**（seat `0`）；轮流占横/竖相邻两点之间的边（不可越点、不可重边）。
-4. 某格四边占满 → **最后占边者得该格**（格属占格者），并 **连走**；未得分则换手。
-5. **多数胜**：先占领多数格（`⌈boxes/2⌉`，N=6 时为 13）的一方立即获胜（对齐裁判 `hasPlayerWon`）；全部占完则格多者胜。
-6. 双方各有独立、固定 **900 秒（15 分钟）累计棋钟**；Bot-vs-Bot 与人类对战使用同一时限，不能靠换回合重置。
-7. 格式正确但非法着、或**人类**棋钟耗尽 → 裁判判对手 2-0 胜；Bot 棋钟耗尽 / 协议错误则由平台立即记 `timeout` / `protocol_error` 技术负。对局中途进程崩溃 → **计分判负**（对手胜，`reason=crash`，对局 `completed`）；启动失败见 [对局](#/wiki?slug=guide)。
+1. 固定 **N=6** 个点，即 6×6 点阵、25 个格子。
+2. 内部使用 11×11 交错坐标板：偶偶位置是点，奇偶/偶奇位置是可占边，奇奇位置是格心。
+3. 坐标从 0 开始，原点左上，先 `x` 后 `y`。
+4. 座位 0 红方先手，座位 1 蓝方后手。
+5. 玩家只能占用尚未使用的相邻点之间的边。
+6. 某格四边补齐时，最后占边者得分并继续行动；未得分则换手。
+7. 一方先到 13 格立即获胜；若走到终局，则格数更多者获胜。
+8. 双方各有固定 **900 秒（15 分钟）累计棋钟**，换回合不会重置。
 
-### 棋钟与界面
+格式正确但占用非法边由裁判判负；Bot 棋钟耗尽为 `timeout` 技术负；信封/response
+错误为 `protocol_error` 技术负。
 
-- 平台只在某一方实际思考时累计该座位的用时。一次决策成功返回后，事件流追加 `time_used {seat,used,remaining,budget}`；900 秒耗尽时追加 `time_out {seat,used,budget}` 并判该方负（着法是否合法仍由裁判另行判断）。
-- 这些是平台回放 / SSE 事件，**不会发进 Bot 的 stdin，也不改变下方 Botzone 请求/响应字段**。
-- 观赛与回放页的双方玩家卡显示剩余时间；第一条计时事件到来时，尚未行动的一方按共同 `budget=900` 初始化，不会误显示 `0:00`；超时方显示 `0:00` 和「超时」标记。
-- 人类对战页仍显示通用的 **120 秒单回合倒计时**；后端同时累计 Pencil 每方 900 秒总预算，以先到的限制为准。
+## 坐标模型
 
-## 交错网格模型（实现必读）
-
-将点、边、格放入边长 `size = 2*N - 1` 的交错板（N=6 → **11×11**，对齐 Botzone 裁判 `grid_size=11`）：
-
-| 条件 | 类型 |
-|------|------|
+| 坐标条件 | 类型 |
+|----------|------|
 | `x%2==0 && y%2==0` | 点 |
-| `(x+y)%2==1` | 边（可占） |
+| `(x+y)%2==1` | 可占边 |
 | `x%2==1 && y%2==1` | 格子中心 |
 
-合法着：该格当前为「未占边」。占边后检查四邻格心是否四边已满。
+合法边坐标范围是 `0..10`，并满足 `(x+y)%2==1`。
 
-> **对齐权威裁判**：Botzone 官方 C++ 裁判的 `grid_size=11` 即此交错维度（6 点 → 25 格）。本平台此前误用 N=11 点（21×21 交错 / 100 格），已纠正为 N=6 点对齐裁判。
+## 通信 payload
 
-## Botzone JSON 协议
-
-Request（对方刚下的边）：
+通信必须使用[唯一现行信封](#/wiki?slug=protocol)。请求 payload：
 
 ```json
-{"x": Number, "y": Number, "pass": Number}
-```
-
-- `pass==1`：对方刚得分还要连走 → 本方必须输出 `{"x":-1,"y":-1}`。
-- `pass==0`：轮到本方真实占边。
-- 红方首手：`{"x":-1,"y":-1,"pass":0}`。
-
-Response：
-
-```json
-{"x": Number, "y": Number}
-```
-
-### Traditional 状态恢复（样例逻辑）
-
-```python
-board = make_empty_board()
-for req in envelope["requests"]:       # 对手已经占过的边（含当前 request）
-    mark_used(req["x"], req["y"])
-for resp in envelope["responses"]:     # 自己过去占过的边
-    mark_used(resp["x"], resp["y"])
-
-current = envelope["requests"][-1]
-if current["pass"] == 1:
-    resp = (-1, -1)
-else:
-    resp = choose_legal_edge()
-```
-
-## 本平台双模式行协议
-
-平台默认 Traditional：每次重启进程并发送完整 `requests[]/responses[]`。显式选择 LongRunning 后，首回合发送完整历史；Bot 响应并输出标准握手后，后续发送单 request：
-
-```json
-{"request":{"x":3,"y":4,"pass":0,"me":0,"scores":[1,0]}}
+{"x":3,"y":4,"pass":0,"me":0,"scores":[1,0]}
 ```
 
 | 字段 | 含义 |
 |------|------|
-| `x`,`y` | 对方上一手边坐标；首手 / 连走后通知为 `-1,-1` |
-| `pass` | `1` 时必须响应 `{"response":{"x":-1,"y":-1}}` |
+| `x`,`y` | 对手最近占用的边；首回合/连走通知为 `-1,-1` |
+| `pass` | 对手是否得分连走 |
 | `me` | 本方座位 |
-| `scores` | 当前红/蓝得分 |
+| `scores` | `[红方得分, 蓝方得分]` |
 
-响应信封：`{"response":{"x":5,"y":4}}`；pass 回合：`{"response":{"x":-1,"y":-1}}`。
+普通响应：
 
-信封与 `{x,y}` 落子兼容 Botzone；`me`、`scores` 是本平台附加状态字段。LongRunning 未握手时平台最多等待 1 秒，然后在同一进程继续发送完整历史作兼容回退；这不等于 Traditional 重启。详见 [协议规范](#/wiki?slug=protocol)。
-
-### 连走时序（与 Botzone 对齐）
-
-1. A 占边并得分 → 向 B 发送该边且 `pass=1`，B 回 `-1,-1`。  
-2. 再向 A 发送 `x=y=-1, pass=0`，A 继续占边。  
-3. 未得分则直接换手，`pass=0`。
-
-## 裁判判定逻辑
-
-服务端裁判判定（对齐 Botzone 官方 C++ 裁判）：
-- 必须是未占的边（`GRID_EDGE`）；格式正确但非法着由裁判判对手 2-0。人类耗尽 900 秒累计棋钟同样由裁判判负；Bot 耗尽则持久化为 `completed + reason=timeout + technical_loss=1`。对局中途进程崩溃 → 计分判负（`reason=crash`）。
-- 占边后检查相邻格心四边是否全占，成格则 **当前玩家得分**（格属该玩家）并连走。
-- **多数胜**：先到 `⌈boxes/2⌉` 分（N=6 时 13）立即胜（不等终局）。
-- **归属追踪**：每条已占边记 `edge_owner`，每个已闭合格记 `box_owner`；`move` 事件带 `closed_boxes`（本手新闭合格+owner），`match_end` 带 `box_owners` 网格——前端据此着色（已占边按玩家红/蓝，已占格按归属淡红/淡蓝）。
-
-```python
-def _box_completed(board, bx, by):
-    for dx, dy in ((-1,0),(1,0),(0,-1),(0,1)):
-        ex, ey = bx + dx, by + dy
-        if board[ex][ey] != GRID_EDGE_USED:  # 四边未全占
-            return False
-    return True  # 成格 → curr_player 得分并连走
+```json
+{"response":{"x":5,"y":4}}
 ```
 
-> 可用 [`samples/judges/pencil_judge.py`](../samples/judges/pencil_judge.py) 在本地自测占边 / 成格计分（`--check` 交互）。
+当 `pass=1`，本方不实际占边，必须响应：
 
-## 样例 Bot
+```json
+{"response":{"x":-1,"y":-1}}
+```
 
-仓库同时提供：
+顶层裸 `{x,y}` 不合法。Traditional 重放全部历史；LongRunning 必须精确握手且后续
+只接收单 request，没有模式回退。
 
-- `samples/pencilbot.c`：可编译的 C 源码；正确重放 Traditional 完整历史，并支持 LongRunning 握手与增量 request。
-- `samples/pencilbot.py`：便于阅读和本地调试的等价 Python 源码，`.py` 文件不能直接上传。
-- `samples/pencilbot_linux_amd64`：执行 `bash samples/build_sample.sh` 后生成的可上传 Linux ELF。上传时游戏选择 `pencil`，Traditional（默认）或 LongRunning 均可。
+## 连走时序
 
-裁判自测见 [`samples/judges/`](../samples/judges/)。
+1. A 占边并成格。
+2. 平台向 B 发送该边且 `pass=1`；B 回 `-1,-1`。
+3. 平台向 A 发送 `x=y=-1, pass=0`；A 继续占边。
+4. 未成格时直接换手并发送 `pass=0`。
+
+## 棋钟与回放
+
+平台只在某一方实际思考时扣减该方累计预算。成功决策产生 `time_used`，耗尽产生
+`time_out`。这些字段只属于 SSE / 回放事件，不会混入 Bot stdin 请求。
+
+## Bot 开发要点
+
+上传文件只能是 Linux x86_64 ELF；C 与 Python 在 Windows、Linux、macOS 上的完整构建
+步骤见 [Bot 开发指南](#/wiki?slug=bot-dev)。点格棋 Bot 还必须注意：
+
+- Traditional 从完整 `requests[]/responses[]` 重建所有已占边；
+- LongRunning 首回合重建后握手，后续在内存中增量维护边与比分；
+- `pass=1` 时不要选择新边，只返回 `-1,-1`；
+- 对手成格后的 pass 通知和自己连走通知都不能误记成实际边。
+
+### 完整 C 示例
+
+把以下内容保存为 `bot.c`，再按 [Bot 开发指南](#/wiki?slug=bot-dev)中你的操作系统对应
+的 C 命令构建。该示例会重放完整历史、处理 pass，并可用于两种运行模式。
+
+<!-- SAMPLE:pencil:c -->
+```c
+/* 点格棋随机合法边样例 Bot（平台 Traditional + LongRunning）。
+ *
+ * Traditional 每次启动都会收到完整 requests/responses 历史；本程序先从历史重建
+ * 已占边，再选择新边。LongRunning 首回合同样重建历史，响应后输出标准握手，后续
+ * 根据单条 request 增量维护棋盘。两种模式可使用同一个二进制。
+ */
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define N 6
+#define SIZE (2 * N - 1)
+#define EDGE 4
+#define EDGE_USED 5
+#define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
+
+static int g[SIZE][SIZE];
+
+static void init_board(void) {
+    for (int x = 0; x < SIZE; x++)
+        for (int y = 0; y < SIZE; y++)
+            g[x][y] = ((x + y) % 2 == 1) ? EDGE : 0;
+}
+
+static int is_legal_edge(int x, int y) {
+    return x >= 0 && x < SIZE && y >= 0 && y < SIZE && g[x][y] == EDGE;
+}
+
+static int number_after(const char *p, const char *key, int def) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    p = strstr(p, pat);
+    if (!p) return def;
+    p = strchr(p + strlen(pat), ':');
+    return p ? atoi(p + 1) : def;
+}
+
+/* 信封里只有 Pencil request/response 对象含 x/y；扫描全部坐标即可同时重放
+ * requests[]（对手边）与 responses[]（自己的边）。重复坐标无害。 */
+static void replay_all_edges(const char *line) {
+    const char *p = line;
+    while ((p = strstr(p, "\"x\"")) != NULL) {
+        int x = number_after(p, "x", -1);
+        int y = number_after(p, "y", -1);
+        if (is_legal_edge(x, y)) g[x][y] = EDGE_USED;
+        p += 3;
+    }
+}
+
+static int last_number(const char *line, const char *key, int def) {
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = line;
+    const char *last = NULL;
+    while ((p = strstr(p, pat)) != NULL) {
+        last = p;
+        p += strlen(pat);
+    }
+    return last ? number_after(last, key, def) : def;
+}
+
+static void emit_move(int x, int y) {
+    printf("{\"response\":{\"x\":%d,\"y\":%d}}\n", x, y);
+    fflush(stdout);
+}
+
+int main(void) {
+    srand((unsigned)time(NULL));
+    init_board();
+    int first_response = 1;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+
+    while ((n = getline(&line, &cap, stdin)) != -1) {
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+            line[--n] = 0;
+        if (n <= 0) continue;
+
+        /* 完整历史是权威状态。Traditional 每回合进程会重启；这里重置也让手工
+         * 连续喂多份完整信封时保持正确。 */
+        if (strstr(line, "\"requests\"") != NULL) init_board();
+        replay_all_edges(line);
+
+        int pass = last_number(line, "pass", 0);
+        if (pass == 1) {
+            emit_move(-1, -1);
+        } else {
+            int xs[SIZE * SIZE], ys[SIZE * SIZE], count = 0;
+            for (int x = 0; x < SIZE; x++)
+                for (int y = 0; y < SIZE; y++)
+                    if (g[x][y] == EDGE) {
+                        xs[count] = x;
+                        ys[count] = y;
+                        count++;
+                    }
+            if (count == 0) {
+                emit_move(-1, -1);
+            } else {
+                int idx = rand() % count;
+                int x = xs[idx], y = ys[idx];
+                g[x][y] = EDGE_USED;
+                emit_move(x, y);
+            }
+        }
+
+        /* Traditional 模式读取第一行后停止该进程，因此额外握手无副作用；
+         * LongRunning 模式会校验它并切换为后续单 request。 */
+        if (first_response) {
+            fputs(KEEP_RUNNING "\n", stdout);
+            fflush(stdout);
+            first_response = 0;
+        }
+    }
+    free(line);
+    return 0;
+}
+```
+
+### 完整 Python 示例
+
+把以下内容保存为 `bot.py`，再按开发指南使用 Linux amd64
+`python:3.12-bookworm` 容器中的 PyInstaller 打包；不要上传源文件本身。
+
+<!-- SAMPLE:pencil:python -->
+```python
+#!/usr/bin/env python3
+"""点格棋随机合法边样例（源码；支持平台 Traditional/LongRunning）。"""
+from __future__ import annotations
+
+import json
+import random
+import sys
+from typing import Any
+
+N = 6
+SIZE = 2 * N - 1
+KEEP_RUNNING = ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
+
+
+def make_board() -> list[list[bool]]:
+    """True 表示尚未占用的合法边。"""
+    return [[(x + y) % 2 == 1 for y in range(SIZE)] for x in range(SIZE)]
+
+
+board = make_board()
+
+
+def mark(move: Any) -> None:
+    if not isinstance(move, dict):
+        return
+    try:
+        x, y = int(move.get("x", -1)), int(move.get("y", -1))
+    except (TypeError, ValueError):
+        return
+    if 0 <= x < SIZE and 0 <= y < SIZE and (x + y) % 2 == 1:
+        board[x][y] = False
+
+
+def load_turn(envelope: dict[str, Any]) -> dict[str, Any]:
+    """返回当前 request，并按完整历史或单 request 更新棋盘。"""
+    global board
+    if isinstance(envelope.get("requests"), list):
+        board = make_board()
+        requests = envelope["requests"]
+        responses = envelope.get("responses") or []
+        for request in requests:
+            mark(request)
+        for response in responses:
+            mark(response)
+        return requests[-1] if requests and isinstance(requests[-1], dict) else {}
+
+    request = envelope.get("request")
+    if not isinstance(request, dict):
+        raise ValueError("增量信封缺少 request")
+    mark(request)
+    return request
+
+
+def choose_move(request: dict[str, Any]) -> tuple[int, int]:
+    if int(request.get("pass") or 0) == 1:
+        return -1, -1
+    legal = [
+        (x, y)
+        for x in range(SIZE)
+        for y in range(SIZE)
+        if board[x][y]
+    ]
+    if not legal:
+        return -1, -1
+    x, y = random.choice(legal)
+    board[x][y] = False
+    return x, y
+
+
+def main() -> None:
+    first_response = True
+    for line in sys.stdin:
+        try:
+            envelope = json.loads(line)
+            if not isinstance(envelope, dict):
+                raise ValueError("信封不是对象")
+            request = load_turn(envelope)
+            x, y = choose_move(request)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            x, y = -1, -1
+        print(json.dumps({"response": {"x": x, "y": y}}, separators=(",", ":")), flush=True)
+        if first_response:
+            print(KEEP_RUNNING, flush=True)
+            first_response = False
+
+
+if __name__ == "__main__":
+    main()
+```
 
 ## 默认赛制模板
 
 | template_id | 管线 |
 |-------------|------|
-| `pencil_group_drr_ko` | 分组双循环 → rest → 单败 |
-| `pencil_swiss_ko` | 瑞士 → rest → 单败 |
+| `pencil_group_drr_ko` | 分组双循环 → 休息 → 单败 |
+| `pencil_swiss_ko` | 瑞士 → 休息 → 单败 |
 
-评分：`ccgc_2_1_0`。小组成绩不带入决赛。
-
-## 参考
-
-1. https://botzone.org.cn/game/Pencil  
-2. https://wiki.botzone.org.cn/index.php?title=Pencil  
-3. 仓库样例与服务端裁判源码（见上文链接）
+默认计分 `ccgc_2_1_0`。

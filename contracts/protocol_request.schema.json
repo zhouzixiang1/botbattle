@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "BotzoneHoldemRequest",
-  "description": "Botzone 标准德州扑克请求负载（信封内 requests[] 元素或 request 字段）。字段严格对齐 Botzone TexasHoldem2p 官方 11 字段（PR#115 移除全部平台扩展字段，本 schema 同步）。additionalProperties: false 防止扩展字段回归。",
+  "title": "PlatformHoldemRequestPayload",
+  "description": "平台唯一现行 Holdem 请求 payload；位于完整历史信封 requests[] 或 LongRunning 增量信封 request 中。字段固定为 11 个，禁止扩展。",
   "type": "object",
   "required": ["num_players", "dealer_id", "my_id", "my_chips", "my_cards", "public_cards", "history", "hand", "max_hand", "total_win_chips", "total_win_games"],
   "additionalProperties": false,
@@ -36,8 +36,8 @@
         }
       }
     },
-    "hand": { "type": "integer", "minimum": 0 },
-    "max_hand": { "type": "integer", "minimum": 1 },
+    "hand": { "type": "integer", "minimum": 0, "maximum": 69 },
+    "max_hand": { "type": "integer", "const": 70 },
     "total_win_chips": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
     "total_win_games": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 }
   }

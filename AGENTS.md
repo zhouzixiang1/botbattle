@@ -92,7 +92,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 ## 关键约束（容易踩坑）
 
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
-- **所有常量集中在 `bzplat/backend/store/schema.py`**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（Botzone traditional/longrunning）、`platform_settings` 键名。新增常量加这里，别散落。
+- **所有常量集中在 `bzplat/backend/store/schema.py`**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）、`platform_settings` 键名。新增常量加这里，别散落。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
 - **资源硬顶**（`runtime/limits.py`，admin 不可抬高）：每 Bot `--cpus=1` / `--memory=512m`；半负载并发 ceiling = `max(1, cpu//4)`；全员单/双循环人数上限 `FULL_RR_MAX_N=12`（阶段可设 `allow_large_round_robin` 旁路，仅白名单内置决赛模板如 `holdem_final_ranked`）。
 
@@ -122,7 +122,7 @@ games/      游戏注册表（赛制/编排契约解耦的单一入口）：base
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
             （engine/ + protocol/ + _compat/ 三层冗余 shim 已删——真实现全在 games/）
             站点配置：GET /api/site/info
-runtime/    沙箱：BinaryRunner(docker/wine/local) + limits
+runtime/    沙箱：Linux x86_64 ELF BinaryRunner(docker/local) + limits；PE/Mach-O/ARM64/脚本在上传时拒绝
 store/      SQLite + schema.py(常量唯一来源)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
@@ -138,7 +138,7 @@ src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadg
 src/components/ui/select.tsx   shadcn Select（Radix）—— 全站下拉框唯一实现，禁裸用原生 <select>
 src/components/shell/      全局 Shell：AppShell（lg+ 侧栏——登录与访客均显示；auth 页除外；窄屏顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
-src/pages/                 21 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
+src/pages/                 顶层路由全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
 ```
 改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
@@ -158,7 +158,7 @@ src/pages/                 21 个顶层路由，全部用 React.lazy 代码分�
 
 **核心游戏契约层**（赛制/编排主流程经统一契约接入游戏；违反契约会在运行时崩）：
 - **结果鸭子类型**（result.py 独立定义，不共享基类）：裁判产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层只依赖公共结果字段，不触碰扑克 pot/board/holes 或棋盘细节。Holdem 多手权威胜者是按累计净筹码计算的 `result.winner`；正常结束时原始 `match_end` 事件的 `winner` 当前可能为 `null`，不得用它覆盖结果胜者。**测试守护**：`tests/test_result_contract.py` 与 runtime 回归守护该契约。
-- **GameSpec 接口**（`games/base.py`）：每款游戏须声明全部字段——`game_id`/`label`、`session_factory`/`protocol`、`default_match_params`/`validate_match_params`、`rounds_per_match`/`normalize_earnings`/`eta_for_match`、`judge_params`、`tiers`、`templates`/`default_scoring`、`code_path`/`summary`、`source_files`、`num_seats`、`preflight_check`、`build_match_plan`、`time_budget_per_side`。`ProtocolSpec.validate_response_payload` 只校验从 Botzone 信封提取出的 `response` 形状/类型；格式正确但规则非法的动作必须留给裁判。`judge_params.field` 须与 session factory kwarg 对齐；`source_files` 是公开裁判源码白名单；`build_match_plan` 承载 duplicate 多 leg 计划；`time_budget_per_side` 是每方累计棋钟，`None` 表示使用通用单步超时，Pencil 固定 `900.0`。其中 `rounds_per_match` 与 `num_seats` 目前是契约元数据/测试约束，尚未被生产路径直接读取，其余字段按调用点消费。Bot 非法 JSON/信封/response 与超时首次发生即技术判负（`protocol_error`/`timeout`），平台故障仍 aborted 且不评分；human WebSocket 输入不得包装为 Bot 协议故障。游戏规则参数（手数/棋盘/点阵）已钉死固定值。通用层经 `registry.get(game_id)` 取 spec，**禁止 `if game_id==` 分支**；架构守护测试覆盖该约束。
+- **GameSpec 接口**（`games/base.py`）：每款游戏须声明全部字段——`game_id`/`label`、`session_factory`/`protocol`、`default_match_params`/`validate_match_params`、`rounds_per_match`/`normalize_earnings`/`eta_for_match`、`tiers`、`templates`/`default_scoring`、`code_path`/`summary`、`source_files`、`num_seats`、`preflight_check`、`build_match_plan`、`time_budget_per_side`。`ProtocolSpec.validate_response_payload` 只校验从唯一标准信封提取出的 `response` 形状/类型；格式正确但规则非法的动作必须留给裁判。传输层只接受顶层恰含 `response` 的对象，拒绝顶层整数、裸坐标、旧 `{a}` 和额外字段；LongRunning 缺失精确握手即技术负，绝不回退；上传预检须按所选 runtime_mode 使用与正式首回合相同的信封和握手。`source_files` 是公开裁判源码白名单；`build_match_plan` 承载 duplicate 多 leg 计划；`time_budget_per_side` 是每方累计棋钟，`None` 表示使用通用单步超时，Pencil 固定 `900.0`。其中 `rounds_per_match` 与 `num_seats` 目前是契约元数据/测试约束，尚未被生产路径直接读取，其余字段按调用点消费。游戏规则全部使用每游戏代码常量：Holdem 固定 70 手/20000 筹码/50-100 盲注，Gomoku 固定 15×15，Pencil 固定 N=6/每方 900 秒；不得通过 admin、match_config 或兼容参数覆盖。Bot 非法 JSON/信封/response 与超时首次发生即技术判负（`protocol_error`/`timeout`），平台故障仍 aborted 且不评分；human WebSocket 输入不得包装为 Bot 协议故障。通用层经 `registry.get(game_id)` 取 spec，**禁止 `if game_id==` 分支**；架构守护测试覆盖该约束。
 - **段位 per-game**：`games/<game>/tiers.py` 声明该游戏段位曲线（查表算法共享 `base.tier_for_in`，曲线数据独立可调）；`registry.tier_for(game_id, rating)` 统一经 `tier_for_in(rating, spec.tiers)`（各游戏无需再声明 `tier_for` 字段）；`/api/tiers?game_id=` 返回对应曲线；前端 `lib/tiers.ts` 的 `useGameTiers(gameId)` 按游戏拉取着色。
 
 **新增一款游戏的成本**（赛制/编排主流程不加游戏名分支）——checklist：
@@ -173,7 +173,7 @@ src/pages/                 21 个顶层路由，全部用 React.lazy 代码分�
 
 **人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局走独立 `_human_sem`（默认 4，不占 bot 对局槽）、`human_action_timeout`（默认 120s 逐回合防挂机）、**不计 Glicko**、per-user 同时 ≤ 1。若 spec 定义累计棋钟，Bot 与真人两侧都计入各自总预算；Pencil 为每方 900s，runner 发出 `time_used/time_out`，与 120s 逐回合保护叠加，较早触发的限制生效。
 
-**挑战对战**（统一入口，参考 Botzone）：挑战页一个入口，两个座位——座位 1（先手/黑）只能选 Bot；座位 2（后手/白）可选 Bot **或「我亲自上场」（人类，固定座位 2=后手，`human_seat=1`）**。座位 1 vs 座位 2 都选 Bot → `POST /api/matches/challenge`（`my_bot_id`/`opponent_bot_id` + 可选版本 `my_bot_version_id`/`opponent_bot_version_id`，**自博弈允许**——同 bot 同/不同版本均可）；座位 2 = 人类 → `POST /api/matches/human`（`bot_id`=座位1 bot，`human_seat=1` 固定）。版本路径解析：非 contest（含 human/ladder）在创建时把显式版本或当时 current 版本冻结进 `match_config._bot_a/b_version_id`，contest 从 `contest_pairings.bot_a/b_version_id` 读；排队期间上传/回滚不改变执行路径，无 `bot_versions` 行的 legacy Bot 才回退 `bots.binary_path`。`GET /api/bots/{id}/versions` 对非 owner 返回脱敏版本列表。
+**挑战对战**（统一入口）：挑战页一个入口，两个座位——座位 1（先手/黑）只能选 Bot；座位 2（后手/白）可选 Bot **或「我亲自上场」（人类，固定座位 2=后手，`human_seat=1`）**。座位 1 vs 座位 2 都选 Bot → `POST /api/matches/challenge`（`my_bot_id`/`opponent_bot_id` + 可选版本 `my_bot_version_id`/`opponent_bot_version_id`，**自博弈允许**——同 bot 同/不同版本均可）；座位 2 = 人类 → `POST /api/matches/human`（`bot_id`=座位1 bot，`human_seat=1` 固定）。版本路径解析：非 contest（含 human/ladder）在创建时把显式版本或当时 current 版本冻结进 `match_config._bot_a/b_version_id`，contest 从 `contest_pairings.bot_a/b_version_id` 读；排队期间上传/回滚不改变执行路径，无 `bot_versions` 行的 legacy Bot 才回退 `bots.binary_path`。`GET /api/bots/{id}/versions` 对非 owner 返回脱敏版本列表。
 
 **座位编号约定**：**展示层从 1 开始**（座位 1/2），**内部 0-indexed**（后端 `winner`/`human_seat` 为 0/1，DB CHECK `winner IN (0,1)`）。前端显示 `+1`（Challenge/HumanPlay/MatchViewer/match-seats/canvas 共 7 处）。
 
@@ -183,8 +183,8 @@ src/pages/                 21 个顶层路由，全部用 React.lazy 代码分�
 
 ## 动手前必读文档
 
-- `wiki/PROTOCOL.md` —— **Botzone 兼容协议**（信封、两模式、德州裸整数 response/raise delta、牌 0-51，以及平台差异）。
+- `wiki/PROTOCOL.md` —— **唯一现行通信协议**（严格信封、两种进程生命周期、response payload、握手与故障语义）。
 - `wiki/BOT_DEV.md` —— Bot 开发指南（编译、上传、调试、运行模式选择）。
-- `wiki/INDEX.md` —— 文档总入口（vs Botzone 对照：本平台 Traditional 默认 / LongRunning 可选、Botzone 信封、手数 70）。
+- `wiki/INDEX.md` —— 文档总入口（固定 70 手 / 15×15 / N=6+900 秒，以及统一信封）。
 - `contracts/` —— 协议 JSON Schema。
 - `samples/` —— 三款游戏样例 Bot 源码。

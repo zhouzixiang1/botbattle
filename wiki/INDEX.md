@@ -1,35 +1,30 @@
 # Wiki 首页
 
-本站文档参考 [Botzone Wiki](https://wiki.botzone.org.cn/) 并按本平台实现修订（Traditional 默认 / LongRunning 可选的 stdin/stdout 行协议）。**核心是三款游戏**，其余功能集中在[平台功能指南](#/wiki?slug=guide)。
+这里是 Bot 作者和平台用户的对外文档。通信协议与游戏规则只以本站当前实现为准，
+不提供旧协议或外部规则的兼容用法。
 
 ## 文档目录
 
 | 页面 | 说明 |
 |------|------|
-| [协议规范](#/wiki?slug=protocol) | Botzone 兼容信封、两模式、德州裸整数 response 与平台扩展 |
-| [Bot 开发指南](#/wiki?slug=bot-dev) | 上传、调试、样例 |
-| [德州扑克](#/wiki?slug=texas) | 对齐 Botzone TexasHoldem2p 全文结构 + 本平台行协议 |
-| [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 + 一手交换变体 |
-| [点格棋 Pencil](#/wiki?slug=pencil) | 规则 + 交错网格 + pass + 每方 15 分钟累计棋钟 |
-| [平台功能指南](#/wiki?slug=guide) | 对局 / 裁判 / 段位 / 等级 / 锦标赛 / Bot详情 / 用户主页 / 社交 / 通知 / 设置——一页看全 |
+| [通信协议](#/wiki?slug=protocol) | 唯一 JSON 信封、Traditional / LongRunning、严格响应与故障语义 |
+| [Bot 开发指南](#/wiki?slug=bot-dev) | 编译、上传、预检、调试和三游戏样例 |
+| [德州扑克](#/wiki?slug=texas) | 固定 70 手、动作码、11 字段请求与牌编码 |
+| [五子棋](#/wiki?slug=gomoku) | 固定 15×15、黑先、无禁手、连五胜 |
+| [点格棋](#/wiki?slug=pencil) | 固定 N=6、成格连走、每方 900 秒累计棋钟 |
+| [平台功能指南](#/wiki?slug=guide) | 对局、裁判、排行、赛事、社交、通知与设置 |
 
-> 前端设计系统与组件库、开发/测试/架构等工程文档在 [`doc/`](../doc/INDEX.md)（面向开发者）。
+## 规则速查
 
-## 本平台 vs Botzone（摘要）
+| 游戏 | game_id | 固定规则 |
+|------|---------|----------|
+| 德州扑克 | `holdem` | 70 手；每手起始 20000、盲注 50/100；按累计净筹码判胜 |
+| 五子棋 | `gomoku` | 15×15；黑先；连续不少于五子即胜；无禁手 |
+| 点格棋 | `pencil` | N=6；25 格；成格连走；每方累计 900 秒 |
 
-| 项 | Botzone | 本平台 |
-|----|---------|--------|
-| 进程模型 | 默认每回合启停；可选长时运行 | **默认 Traditional 每决策重启**；显式 LongRunning 握手后整场长驻 |
-| CPU / 内存 | 1 核 / 默认 256MB | Docker `--cpus=1` / `--memory=512m` |
-| 决策时限 | 默认 1s/回合（首回合×2） | holdem / gomoku 默认 60s/决策（可配）；Pencil 固定 900s/方累计（含人类局） |
-| 游戏 | 站内多游戏 | `holdem` / `gomoku` / `pencil` |
-| 德州协议 | 信封 + 裸整数 response + raise=增量 | 标准 11 字段与动作编码兼容；本平台固定 70 手 |
-| 棋类协议 | 聚合 `requests`/`responses` | Botzone 风格信封 + `{x,y}` 落子；本平台增加 `me`/`scores` 状态字段 |
+三款游戏共用同一个外层协议：响应必须是只含 `response` 的 JSON 对象。上传时选择的
+Traditional / LongRunning 只决定进程生命周期；LongRunning 握手缺失不会回退。
 
-上传 Bot 时请选择正确的 **游戏类型**；挑战与排行榜按 `game_id` 过滤。
-
-## 参考资源
-
-- **参考裁判**（`samples/judges/`）：可在本地自测合法着 / 胜负 / 手牌评估的独立脚本，与服务端引擎逻辑一致。见[功能指南 · 裁判](#/wiki?slug=guide)。
-- **闲时自动对局**：系统空闲时自动安排 bot 对战维护天梯（`match_type=ladder`）。
-- Bot 开发入门见 [Bot 开发指南](#/wiki?slug=bot-dev)。
+平台唯一接受 Linux x86_64 ELF。Windows 与 macOS 玩家也应按
+[Bot 开发指南](#/wiki?slug=bot-dev)在 Linux amd64 容器中构建，不要直接上传 `.exe`、
+Mach-O 或 `.py`。

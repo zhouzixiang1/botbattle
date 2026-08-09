@@ -1,30 +1,51 @@
-/* 五子棋随机空点 bot — Botzone 标准协议（信封）。
+/* 五子棋随机空点 Bot — 平台唯一 JSON 信封协议。
  * 请求信封: {"requests":[...]} 或 {"request":{"x":int,"y":int,"me":0|1}}
  *   - 黑方(me=0)首手 x=y=-1；之后 x,y 为对方上一手
  * 响应信封: {"response":{"x":int,"y":int}}
- * 策略：把对方上一手落到本地棋盘，随机选一个空点返回。
+ * Traditional 从完整 requests/responses 重建占用；LongRunning 首响应后严格握手，
+ * 后续按单 request 增量维护。两种模式可使用同一个二进制。
  */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #define SIZE 15
-static int board[SIZE][SIZE]; /* 0=空 1=黑(me0) 2=白(me1) */
+#define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
+static int board[SIZE][SIZE]; /* 0=空，1=已占 */
 
-/* 从 JSON 行中取 "key":number 的整数值（极简解析，足够本协议）。 */
-static int field_int(const char *s, const char *key) {
+static int number_after(const char *s, const char *key, int def) {
     char pat[32];
     snprintf(pat, sizeof(pat), "\"%s\"", key);
     const char *p = strstr(s, pat);
-    if (!p) return -1;
+    if (!p) return def;
     p = strchr(p + strlen(pat), ':');
-    if (!p) return -1;
+    if (!p) return def;
     return atoi(p + 1);
+}
+
+static void reset_board(void) {
+    memset(board, 0, sizeof(board));
+}
+
+/* 标准历史信封中的 requests[] / responses[] 都只用 x/y 表示落子；
+ * 扫描全部坐标即可恢复占用状态，首手 -1,-1 会自然跳过。 */
+static void replay_all_moves(const char *line) {
+    const char *p = line;
+    while ((p = strstr(p, "\"x\"")) != NULL) {
+        int x = number_after(p, "x", -1);
+        int y = number_after(p, "y", -1);
+        if (x >= 0 && x < SIZE && y >= 0 && y < SIZE)
+            board[x][y] = 1;
+        p += 3;
+    }
 }
 
 int main(void) {
     srand((unsigned)time(NULL));
+    reset_board();
+    int first_response = 1;
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
@@ -33,16 +54,8 @@ int main(void) {
             line[--n] = 0;
         if (n <= 0) continue;
 
-        int me = field_int(line, "me");
-        if (me < 0) me = 0;
-        int my = (me == 0) ? 1 : 2;          /* 我的颜色 */
-        int opp = (my == 1) ? 2 : 1;         /* 对方颜色 */
-
-        /* 落对方上一手 */
-        int ox = field_int(line, "x");
-        int oy = field_int(line, "y");
-        if (ox >= 0 && oy >= 0 && ox < SIZE && oy < SIZE && board[ox][oy] == 0)
-            board[ox][oy] = opp;
+        if (strstr(line, "\"requests\"") != NULL) reset_board();
+        replay_all_moves(line);
 
         /* 随机选一个空点 */
         int xs[SIZE * SIZE], ys[SIZE * SIZE], ec = 0;
@@ -51,16 +64,18 @@ int main(void) {
                 if (board[x][y] == 0) { xs[ec] = x; ys[ec] = y; ec++; }
         if (ec == 0) {
             fputs("{\"response\":{\"x\":-1,\"y\":-1}}\n", stdout);
-            fflush(stdout);
-            continue;
+        } else {
+            int idx = rand() % ec;
+            int x = xs[idx], y = ys[idx];
+            board[x][y] = 1;
+            printf("{\"response\":{\"x\":%d,\"y\":%d}}\n", x, y);
         }
-        int idx = rand() % ec;
-        int x = xs[idx], y = ys[idx];
-        board[x][y] = my;
-        printf("{\"response\":{\"x\":%d,\"y\":%d}}\n", x, y);
+        if (first_response) {
+            fputs(KEEP_RUNNING "\n", stdout);
+            first_response = 0;
+        }
         fflush(stdout);
     }
     free(line);
     return 0;
 }
-

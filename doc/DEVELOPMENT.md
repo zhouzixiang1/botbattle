@@ -57,15 +57,27 @@ cd bzplat/frontend && npm run build   # 产物 dist/，由后端 StaticFiles 托
 ```
 > **关键前端依赖**：react 19 / vite 8 / tailwindcss v4 / shadcn(new-york) / recharts。
 > 视觉层另用 `gsap ^3.x`（npm 安装，2025-04 起 100% 免费商用，驱动 canvas 牌桌动画）+
-> Poker.JS（vendor 副本，来源 Tairraos/Poker.JS，经 botzone 使用，canvas 矢量扑克牌绘制）。
+> Poker.JS（vendor 副本，来源 Tairraos/Poker.JS，用于 canvas 矢量扑克牌绘制）。
 
-### 2.3 改完代码必须 rebuild + restart
+### 2.3 构建三游戏样例 Bot
+
+仓库样例只面向平台开发、回归与发布验收。统一脚本构建 Holdem、Gomoku、Pencil 的
+Linux x86_64 ELF，并检查产物类型：
+
+```bash
+bash samples/build_sample.sh
+file samples/{callbot,gomokubot,pencilbot}_linux_amd64
+```
+
+玩家侧跨系统构建说明不依赖仓库脚本，见 `wiki/BOT_DEV.md`。
+
+### 2.4 改完代码必须 rebuild + restart
 ```bash
 bash scripts/rebuild.sh   # npm run build → platform-ctl.sh restart
 ```
 > 前端产物（`dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——**不 rebuild + restart 代码不生效**（常见症状：新路由 405）。
 
-### 2.4 worktree 隔离开发（勿碰线上 50380）
+### 2.5 worktree 隔离开发（勿碰线上 50380）
 
 主目录 `main` 只跑线上服务（默认 `:50380` + 主库）。特性开发在 **git worktree** 中跑**独立**栈，避免污染线上 db/源码：
 

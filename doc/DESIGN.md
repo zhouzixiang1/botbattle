@@ -14,7 +14,7 @@ graph TB
         FE[React SPA<br/>shadcn/ui + 双主题]
     end
     subgraph 后端 FastAPI 单进程
-        API[REST API<br/>120 个路由声明]
+        API[REST API]
         SSE[SSE 观赛]
         WS[WebSocket 人类对战]
         MW[中间件<br/>限流+安全头]
@@ -28,7 +28,7 @@ graph TB
         AUTO[闲时自动对局<br/>auto_matcher]
     end
     subgraph 沙箱
-        DOCKER[Docker<br/>ELF + PE/Wine]
+        DOCKER[Docker<br/>Linux x86_64 ELF]
     end
     FE -->|HTTP/SSE/WS| MW
     MW --> API & SSE & WS
@@ -54,13 +54,13 @@ graph TB
 
 | 层 | 模块 | 职责 |
 |----|------|------|
-| 接口 | `api_routes.py` | 主 REST（105 个路由声明，含 SSE/WS）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki |
+| 接口 | `api_routes.py` | 主 REST（含 SSE/WS）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki |
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
-| 游戏注册 | `games/` | **赛制/编排契约解耦入口（裁判/协议分离）**：base.py（GameSpec / GameRegistry）+ `_botzone_protocol.py`（Traditional / LongRunning 信封）+ `_board_protocol.py`（棋类共享协议工具）+ 各 `games/<game>/` 子包。`<game>_judge.py` 是 0 平台依赖的纯规则；engine 是平台适配层；protocol 的 `validate_response_payload` 只校验 response 形状，游戏内合法性仍归裁判。赛制/编排主流程经 registry/spec 调用，不按游戏名分支；这不表示整个前后端对新增游戏零接入工作。 |
-| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；赛事两阶段创建；崩溃与启动失败按明确技术结果处理；Bot 协议错误/超时分别为 `completed + protocol_error/timeout + technical_loss`，Bot-vs-Bot 计分、人机局不评分；平台故障 `aborted + platform_error`）+ runner（按 runtime_mode 传 Traditional 完整历史或 LongRunning 增量请求；严格校验信封和 per-game response，首个故障写有界 `bot_technical_error` 后终止；Bot-vs-Bot 与人类对战双方统一消费累计棋钟）+ auto_matcher（闲时自动） |
+| 游戏注册 | `games/` | **赛制/编排契约解耦入口（裁判/协议分离）**：base.py（GameSpec / GameRegistry）+ 共享 Traditional / LongRunning 信封实现 + `_board_protocol.py`（棋类共享 payload 工具）+ 各 `games/<game>/` 子包。`<game>_judge.py` 是 0 平台依赖的纯规则；engine 是平台适配层；protocol 的 `validate_response_payload` 只校验 response 值，游戏内合法性仍归裁判。赛制/编排主流程经 registry/spec 调用，不按游戏名分支；这不表示整个前后端对新增游戏零接入工作。 |
+| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；赛事两阶段创建；崩溃与启动失败按明确技术结果处理；Bot 协议错误/超时分别为 `completed + protocol_error/timeout + technical_loss`，Bot-vs-Bot 计分、人机局不评分；平台故障 `aborted + platform_error`）+ runner（按 runtime_mode 传 Traditional 完整历史或 LongRunning 增量请求；顶层响应只允许 `response`，LongRunning 严格握手且不回退；首个故障写有界 `technical_incident` 后终止；Bot-vs-Bot 与人类对战双方统一消费累计棋钟）+ auto_matcher（闲时自动） |
 | 赛制 | `contests/` | templates/stages/manager/scheduler/ranking/validation。状态机 `draft→open→published→running→rest→finished`；时间写入统一满足 `registration_opens_at <= registration_closes_at <= starts_at`；手动推进按实际时刻盖戳；终态不可互转；报名、派发、完整阶段/轮次、正式榜均以锁和事务守护，aborted 无裁决对局不积分/不晋级。 |
-| 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
+| 沙箱 | `runtime/` | Linux x86_64 ELF BinaryRunner（docker/local）+ limits（资源硬顶）；其他可执行格式在上传时拒绝 |
 | 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈；赛事时间候选在 create/update 安全写入口统一校验；`set_settings` 批量配置单事务提交）+ schema.py（常量唯一来源） |
 | 认证 | `auth/` | routes + auth_manager + captcha + dependencies（require_user/admin/organizer） |
 | 通知 | `notifications/` | NotificationManager（站内通知 + 按 prefs 复用 Mailer 发邮件） |
@@ -83,11 +83,13 @@ graph LR
 
 **两层解耦**：
 
-1. **GameSpec 注册表（`games/`，契约入口）**：每款游戏声明 `game_id`/`label`/`session_factory`/`protocol`（含 `validate_response_payload`）/配置校验/计分与 ETA/裁判参数/段位/模板/源码元信息/预检/多 leg 计划/累计棋钟等。通用赛制与编排路径经 `registry.get(game_id)` 取 spec，禁止增加游戏名分支。`rounds_per_match` 与 `num_seats` 当前是契约元数据和测试约束，生产路径尚未直接消费；不能据此宣称所有字段均已运行时使用。
+1. **GameSpec 注册表（`games/`，契约入口）**：每款游戏声明 `game_id`/`label`/`session_factory`/`protocol`（含 `validate_response_payload`）/配置校验/计分与 ETA/段位/模板/源码元信息/预检/多 leg 计划/累计棋钟等。游戏规则直接由每游戏代码常量定义，不存在 admin 裁判参数或对局级规则覆盖。通用赛制与编排路径经 `registry.get(game_id)` 取 spec，禁止增加游戏名分支。`rounds_per_match` 与 `num_seats` 当前是契约元数据和测试约束，生产路径尚未直接消费；不能据此宣称所有字段均已运行时使用。
+
+   **传输唯一性**：上传预检与正式首回合共用 runner 的信封构造、严格响应解析和所选 runtime_mode。Traditional 每次完整历史；LongRunning 首回合完整历史、精确握手后才允许单 request。顶层整数、裸坐标、旧 `{a}`、额外响应字段及缺失/错误握手均不得在游戏层兼容。
 
 2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。赛制代码依赖公共结果字段，不读取扑克 pot/board/holes。Holdem 的权威胜者是 `result.winner`（按累计 `final_chips`），正常结束时原始 `match_end` 事件的 `winner` 目前可能为 `null`；持久化与编排不得用该事件覆盖结果胜者。`tests/test_result_contract.py` 与 runtime 回归覆盖此约束。
 
-3. **对局配置/结果双 JSON 通路（matches 表收敛）**：对局结果详情走 `result` JSON 列（`{"hands_played":N,"deltas":[ea,eb],"net_bb":float}`）；`match_config` JSON 列保留（向后兼容 + 承载版本快照等内部键），但**游戏规则参数（手数/棋盘/点阵）已钉死固定值**，不再走 match_config 配置（曾因 hands/num_hands key 名不一致导致配置静默失效，已彻底移除配置能力）。普通挑战、天梯和人类对局即使未显式选择版本，也会在创建时把各实际 Bot 的当前激活 `bot_versions.id` 冻结进 `_bot_a/b_version_id`；排队期间上传或回滚不改变 runner 路径/runtime_mode，只有无版本行的 legacy Bot 回退 `bots.binary_path`。链路：`_run_match` 仅注入 admin judge_params（holdem 的 starting_stack/sb/bb）→ runner 透传 → session_factory 用模块常量构造 Session（忽略规则参数）；结果 `update_match(result={...})` 落 result JSON。赛事排名经 `store.db.match_deltas(m)` helper 从 `result.deltas` 取净筹码。守护：`test_tongyong_layer_no_game_branches.py` 的 AST 守护 + `test_pinned_game_config.py` 守护规则参数钉死。
+3. **对局配置/结果双 JSON 通路（matches 表收敛）**：对局结果详情走 `result` JSON 列（`{"hands_played":N,"deltas":[ea,eb],"net_bb":float}`）；`match_config` JSON 列保留（向后兼容 + 承载版本快照等内部键），但**全部游戏规则已钉死代码常量**：Holdem=70 手/20000 筹码/50-100 盲注，Gomoku=15×15，Pencil=N=6/每方 900 秒。规则不走 match_config、platform_settings 或 runner 参数；`session_factory` 直接使用模块常量构造 Session。普通挑战、天梯和人类对局即使未显式选择版本，也会在创建时把各实际 Bot 的当前激活 `bot_versions.id` 冻结进 `_bot_a/b_version_id`；排队期间上传或回滚不改变 runner 路径/runtime_mode，只有无版本行的 legacy Bot 回退 `bots.binary_path`。结果 `update_match(result={...})` 落 result JSON；赛事排名经 `store.db.match_deltas(m)` helper 从 `result.deltas` 取净筹码。`test_pinned_game_config.py` 守护所有规则入口不可覆盖。
 
 4. **累计棋钟契约**：Pencil 在 spec 中固定 `time_budget_per_side=900.0`，Holdem/Gomoku 为 `None`。orchestrator 对 Bot-vs-Bot 和人类对局都把该值传给 runner；runner 分座位累计 Bot subprocess 或人类 Future 的决策耗时，每次成功决策发 `time_used {seat,used,remaining,budget}`，耗尽时发 `time_out {seat,used,budget}`。Bot 耗尽转为 `BotDecisionTimeoutError` 统一技术判负；人类 Future 耗尽仍交裁判判负，不会伪装成 Bot 故障。事件随 SSE/回放持久化，Pencil reducer 用首条事件的 `budget` 初始化未行动方，MatchViewer 玩家卡显示双方剩余时间和超时徽章。人类 `/play` 页仍显示 `human_action_timeout` 默认 120s 的逐回合倒计时；后端同时累计 900s 总棋钟，两层限制中较早触发者生效。
 
@@ -138,7 +140,7 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 
 | 表 | 用途 |
 |----|------|
-| `bot_versions` | Bot 版本管理（多版本 + 切换激活 + runtime_mode per-version；单进程 per-Bot 锁覆盖版本号分配、隐藏临时文件预检、原子替换与 DB 写入；只有预检成功才发布/激活新版本，故障时旧版本始终未改；新 Bot 预检期间为 inactive。上传管理与专用 BinaryRunner 在 worker thread 执行，不阻塞 REST/SSE/WS 事件循环；赛事快照读取当前激活版，历史 `MAX(version)` 仅用于分配下一个版本号） |
+| `bot_versions` | Bot 版本管理（多版本 + 切换激活 + runtime_mode per-version；单进程 per-Bot 锁覆盖版本号分配、隐藏临时文件严格预检、原子替换与 DB 写入；预检按所选模式复用正式首回合信封/响应/握手规则，只有成功才发布/激活新版本，故障时旧版本始终未改；新 Bot 预检期间为 inactive。上传管理与专用 BinaryRunner 在 worker thread 执行，不阻塞 REST/SSE/WS 事件循环；赛事快照读取当前激活版，历史 `MAX(version)` 仅用于分配下一个版本号） |
 | `match_replays` | 对局回放事件存储（events_json） |
 | `sessions` | 会话（token, user_id, expires_at，认证核心） |
 | `platform_settings` | 所有热配置 KV（运行时/站点/裁判/auto-match） |
@@ -158,14 +160,14 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 
 ## 4. 接口设计
 
-**共 120 个 API 路由声明**：`api_routes.py` 105（含 WebSocket 与 SSE）+ `auth/routes.py` 13 + `main.py` 的健康端点与 API 404 fallback 各 1；SPA 静态路由另计。按权限分四类：
+API 按权限分为以下四类；具体路由数以目标提交的代码与自动化盘点为准，SPA 静态路由另计。
 
 ### 4.1 公开端点（无需登录，访客可用）
 - 健康：`GET /api/health`
 - **API 404 兜底**：`@app.api_route("/api/{rest:path}")`（main.py，catch-all 之前注册）——未匹配的 `/api/*` 一律 `raise HTTPException(404)` 返 JSON，**绝不走下方 SPA catch-all 返 HTML**（否则前端 `api.ts` 把 HTML 当返回值解析成静默错误数据）。非 `/api` 的未知路径仍走 SPA fallback 返 `index.html`。
 - Bot 浏览：`GET /api/bots/public`、`/api/bots/{id}`、`/profile`、`/matches`、`/opponents`、`/rating-history`
 - 用户浏览：`GET /api/users`、`/api/users/{name}/profile`、`/bots`、`/followers`、`/following`
-- 对局浏览：`GET /api/matches`（`status` / `game_id` / `has_bot_errors` 过滤；默认全状态）、`/matches/liked-top`、`/matches/{id}`。列表与详情把历史 `bot_decide_error` 和当前 `bot_technical_error` 聚合为按座位计数 + 最多 3 条脱敏样本；公开 replay 同样限制为 3 条安全诊断
+- 对局浏览：`GET /api/matches`（`status` / `game_id` / `has_bot_incidents` 过滤；默认全状态）、`/matches/liked-top`、`/matches/{id}`。列表、详情与公开回放只暴露 `technical_incident_count`、`technical_incidents_by_seat` 与最多 3 条脱敏 `technical_incident_samples`；历史旧事件只在服务端读取时归一化，不形成第二套对外字段或新写入
 - 排行与元数据：`GET /api/leaderboard`、`/api/tiers`、`/api/levels/info`、`/api/site/info`
 - 搜索：`GET /api/search`
 - 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
@@ -191,7 +193,6 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 - Bot/赛事管理：`GET /api/admin/{bots,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`；对局列表走公开 `GET /api/matches`，管理操作为 `PATCH/DELETE /api/admin/matches/{id}`
 - **一致性闸门**：活跃对局的状态只能经 orchestrator 安全中止为 `aborted`，后台不能手工伪造 `pending/running/completed`；赛事 match 中止后保留 aborted 历史，原 pairing 原子复位 pending 供安全重派，无 winner 不得推进阶段；管理员赛事时间 PATCH 与旧值合并后整体验证，非法请求零部分写；删除用户/Bot/赛事前检查活跃对局与赛事引用，`published` 删除表示先取消尚未开打排期再删除，`running/rest`、`finished`、已有正式榜或仍有 active match 时拒绝删除。
 - 配置：`GET /api/admin/settings/runtime`、`PATCH /api/admin/settings/{runtime,site}`；runtime 多字段 PATCH 先整体验证、单事务持久化，提交后才重建进程内并发/超时状态。
-- 裁判：`GET /api/admin/judges`（含可调参数当前值 + docstring，区别于公开 `/api/judges`）、`PATCH /api/admin/judges/params`（热调规则参数）
 - 模板：`GET/POST /api/admin/templates`、`PUT/DELETE /{tid}`、`POST /preview`
 - 邮件：`GET /api/admin/email/{templates,outbox}`、`PUT /templates/{key}`
 - 日志：`GET /api/admin/logs`
@@ -208,7 +209,7 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 - **设计 token**：shadcn v4 OKLCH 双主题（`:root` 浅 / `.dark` 暗），emerald 品牌色系，`@theme inline` 桥接到 Tailwind utility。**刻意无紫色无米色**（规避 AI 默认审美）。
 - **暗色模式**：next-themes class 策略，浅色默认 + 跟随系统，侧栏底部一键切换。
 - **响应式**：sm/md/lg/xl 断点；**lg(1024)+ 桌面侧边栏，<lg 移动端顶栏 + Sheet 汉堡抽屉**；表格窄屏隐藏次要列。
-- **代码分割**：React.lazy + Suspense，21 个顶层业务路由各自独立 chunk；主包 gzip ~115KB，recharts 隔离到 BotDetail chunk。
+- **代码分割**：React.lazy + Suspense，顶层业务路由各自独立 chunk；recharts 隔离到 BotDetail chunk。
 - **路径别名 `@/` → src/**，禁相对路径。
 
 ### 5.2 组件库与页面
@@ -227,7 +228,7 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 
 ### 5.3 Canvas 渲染层（canvas + GSAP 视觉重写）
 
-为对齐 botzone.org.cn 的牌桌观感，新增一层**可选的 canvas 动画渲染层**，现已三游戏全部迁移：
+平台新增一层**可选的 canvas 动画渲染层**，现已三游戏全部迁移：
 
 - **`GameViewSpec.CanvasRenderer`**（`games/base.ts` 可选字段）：每款游戏提供一个 `GameCanvasRenderer<S>`（`games/canvas-types.ts` 定义：`toScene` events→归一化场景（复用现有 reducer）/ `diff` 两帧差分定动画 / `draw` 按 t 在 prev↔next 间逐帧绘制 / `pick` 可选 canvas 坐标→落子坐标（棋类人类对战））。`MatchBoard` 用 CanvasRenderer 绘制；DOM Board 字段保留为 stub。
 - **`<GameCanvas>`**（`components/GameCanvas.tsx`）：通用 canvas 宿主组件，用 **GSAP timeline** 驱动插值动画（发牌翻面、动作浮字、棋子缩放、边连线绘制）；尺寸/DPR 适配与绘制拆为两个 effect（避免无关重渲染清空位图）；支持 `onMove`/`interactive`（经 `pick` 转换）服务人类对战。

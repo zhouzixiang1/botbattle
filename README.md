@@ -1,11 +1,12 @@
 # botbattle
 
-**多游戏 Bot 线上对战平台**：用户上传自行编写的二进制 Bot 程序，平台在安全沙箱（Docker / Wine）中自动运行对局，提供实时观赛、对局回放、Glicko-2 排行榜、组织者赛事、人类亲自上场、社交互动。支持 **德州扑克、五子棋、点格棋** 三款游戏。
+**多游戏 Bot 线上对战平台**：用户上传自行编写的 Linux x86_64 ELF Bot，平台在 Docker 安全沙箱中自动运行对局，提供实时观赛、对局回放、Glicko-2 排行榜、组织者赛事、人类亲自上场、社交互动。支持 **德州扑克、五子棋、点格棋** 三款游戏。
 
 ## 能力一览
 
 **对战核心**
-- 上传 **Linux ELF / Windows PE** 二进制 Bot（macOS Mach-O 拒绝），Docker 硬隔离沙箱执行
+- 唯一上传格式为 **Linux x86_64 ELF**；拒绝 PE/`.exe`、Mach-O、ARM64 ELF 和原始 `.py`，Docker 硬隔离执行
+- 唯一严格 JSON 信封：Traditional / LongRunning 只区分进程生命周期；响应仅允许 `response`，LongRunning 必须握手且不回退
 - 各游戏独立裁判引擎 + 统一 GameSpec/结果契约；赛制与编排主流程无需游戏名分支
 - SSE 实时观赛 + 完整对局回放（播放/暂停/步进/倍速/逐手跳转）
 - 人类 vs Bot（WebSocket 实时交互，独立并发，不计评分）
@@ -21,7 +22,7 @@
 - 通知：站内通知 + 可选邮件提醒（对局完成/被关注/赛事/评论）
 - 经验与等级系统（等级 gating 部分功能）、全局搜索（Cmd+K 命令面板）
 - 站点可配置（站名/Logo/公告）
-- 管理后台（10 Tab：仪表盘/用户/Bot/对局记录/锦标赛/邮件/运行时热配置/裁判参数/赛制模板/日志）
+- 管理后台（9 Tab：仪表盘/用户/Bot/对局记录/锦标赛/邮件/运行时热配置/赛制模板/日志）
 
 **前端**
 - React 19 + shadcn/ui 设计系统，**浅/暗双主题**（OKLCH token，一键切换）
@@ -31,7 +32,7 @@
 
 | 游戏 | game_id | 规则摘要 |
 |------|---------|---------|
-| 德州扑克（HU NLHE） | `holdem` | 70 手 / 盲注 50-100 / 起始 20000 筹码 / raise delta 语义 |
+| 德州扑克（HU NLHE） | `holdem` | 固定 70 手 / 固定盲注 50-100、每手起始 20000 筹码 / raise delta 语义 |
 | 五子棋 | `gomoku` | 15×15 / 黑先 / 五连即胜（含长连）/ 无禁手 |
 | 点格棋（Dots and Boxes） | `pencil` | 固定 N=6 点交错网格 / 成格连走计分 / 每方累计 15 分钟棋钟（Bot 与人类对局同契约） |
 
@@ -61,7 +62,7 @@ botzone create-admin alice alice@example.com 'password123'
 
 ```
 
-浏览器打开 <http://127.0.0.1:50380/>。编译样例 Bot：`samples/build_sample.sh`。端到端冒烟：`bash scripts/e2e_smoke.sh`（自动使用临时数据库与运行时，不写主库）。真浏览器回归的 worktree 启动与 Playwright 命令见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)。
+浏览器打开 <http://127.0.0.1:50380/>。样例构建、隔离冒烟和真浏览器回归命令统一见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)。
 
 > 改完代码必须 `bash scripts/rebuild.sh`（build + restart）才生效。
 
@@ -79,7 +80,7 @@ botzone create-admin alice alice@example.com 'password123'
 - **后端**：Python ≥ 3.12、FastAPI、uvicorn、SQLite、SMTP（captcha + Pillow）
 - **前端**：React 19 + Vite 8 + Tailwind CSS v4（CSS-first）+ shadcn/ui + Radix UI + lucide-react + recharts
 - **暗色模式**：next-themes + OKLCH 双主题 token（浅色默认 + 暗色对等）
-- **运行时**：Docker（必需，ELF: debian-slim / PE: docker-wine）、Wine（Windows Bot）
+- **运行时**：Docker（必需；Linux x86_64 ELF 使用 debian:bookworm-slim）
 - **评分**：Glicko-2（自实现，无外部依赖）
 
 ## 目录结构

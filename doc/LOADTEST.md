@@ -66,7 +66,7 @@ python scripts/load_test.py \
 | **4 人类 vs Bot** | `POST /api/matches/human`；WS `/api/matches/{id}/play`（holdem/gomoku/pencil，收 `your_turn` 回着至 `match_end`，收到 `error` 即失败）；结束后再 GET 断言持久化 `status=completed`，并验 per-user ≤1、match_type=human、**Glicko 不变** | user |
 | **5 赛事** | `POST /api/contests`（template）；`/{id}/{open,register,dispatch,start,resume}`；轮询到 finished；验 standings/pairings/stage_results、contest 对局不更新 Glicko | organizer + user |
 | **6 自动对局** | `GET/PATCH /api/admin/settings/runtime`（催化 auto-match：enabled/min_idle=0/interval=2/reserve=0）；验 daily_count/ladder 对局增长；恢复原设置 | admin |
-| **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,judges,templates,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches,settings/runtime,judges/params,email/templates,contests}`；`POST/PUT/DELETE /api/admin/templates`；`POST /api/admin/users/{id}/role`；`DELETE /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/{users,contests}/{id}/{sessions,entries}`；`POST /api/auth/admin/create-reset-token` | admin |
+| **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,templates,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches,settings/runtime,email/templates,contests}`；`POST/PUT/DELETE /api/admin/templates`；`POST /api/admin/users/{id}/role`；`DELETE /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/{users,contests}/{id}/{sessions,entries}`；`POST /api/auth/admin/create-reset-token` | admin |
 
 ## 测试
 
@@ -85,11 +85,10 @@ pytest bzplat/backend/tests/test_load_test_seed.py -v
 
 ## 注意
 
-- **固定规则**：holdem 始终跑 70 手，gomoku 固定 15×15，pencil 固定 N=6；请求中传 `hands/size/n_dots` 不能缩短规则。阶段 2 目标 `TARGET_MATCHES=12`（三游戏×4），需为真实 70 手对局预留足够时间。
+- **固定规则**：holdem 始终跑 70 手且每手固定 20000 筹码、50/100 盲注，gomoku 固定 15×15，pencil 固定 N=6；请求中传规则字段不能改变规则。阶段 2 目标 `TARGET_MATCHES=12`（三游戏×4），需为真实 70 手对局预留足够时间。
 - **并发硬顶** = `cpu//4`（本机 32 核 → 8 场）；admin 不可抬高（`max_concurrent_matches` 超 ceiling 报 400）。
 - **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。阶段 2 按此节流；`_paced_challenge` / `_paced_human` 遇 429 自动按 `Retry-After` 重试。
 - **验收失败策略**：缺少 Python `websockets` 依赖会让阶段 4 失败；默认未观察到 auto-match 的 `daily_count` 或 ladder 对局增长也会失败。`--allow-auto-match-miss` 只供时序诊断，将未触发降为 warning，启用后的结果不能作为 auto-match 验收证据。
-- **judge 参数**：阶段 7 只验证现有 holdem 盲注关系（`bb < sb` 必须拒绝）；不修改已钉死的棋盘/手数。
 - **资源不调高**：不改 `bot_cpus/bot_memory`（只读硬顶）。
 - **Bot 运行失败不豁免**：可由隔离服务选择 Docker 或 `BZ_BOT_LOCAL=1`；阶段 2 要求三游戏各有 completed，且 completed 多于 aborted，不会把大量 EOF/aborted 只记 warning 后冒充通过。
 

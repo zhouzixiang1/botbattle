@@ -1,7 +1,6 @@
-/* Botzone 德州扑克样例共享工具。
+/* 平台德州扑克样例共享工具。
  *
- * 只依赖官方 11 字段。当前下注状态由 current request 的 history 重放得出，
- * 不读取已删除的平台扩展字段 to_call/street_bet/bb/opp_chips。
+ * 只依赖平台固定 11 字段，当前下注状态由 current request 的 history 重放得出。
  */
 #ifndef POKER_UTIL_H
 #define POKER_UTIL_H
@@ -37,10 +36,10 @@ static inline const char *last_token(const char *s, const char *token) {
     return last;
 }
 
-/* 当前 request 以 num_players 开头；取最后一次出现即可跳过 Traditional 的旧请求。 */
+/* 当前 request 以 num_players 开头；取最后一次出现即可跳过较早的历史请求。 */
 static inline const char *current_request(const char *line) {
     const char *p = last_token(line, "\"num_players\"");
-    return p ? p : line;  /* 上传预检可能直接发送裸 payload。 */
+    return p ? p : line;
 }
 
 static inline long json_long(const char *s, const char *key, long def) {

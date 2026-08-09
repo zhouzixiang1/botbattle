@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""点格棋随机合法边样例（源码；支持 Botzone Traditional/LongRunning）。"""
+"""点格棋随机合法边样例（源码；支持平台 Traditional/LongRunning）。"""
 from __future__ import annotations
 
 import json
@@ -41,16 +41,12 @@ def load_turn(envelope: dict[str, Any]) -> dict[str, Any]:
         for request in requests:
             mark(request)
         for response in responses:
-            # responses[] 是 response payload；兼容误包一层信封的本地输入。
-            if isinstance(response, dict) and "response" in response:
-                response = response["response"]
             mark(response)
         return requests[-1] if requests and isinstance(requests[-1], dict) else {}
 
     request = envelope.get("request")
     if not isinstance(request, dict):
-        # 上传预检当前直接发送裸 request payload；样例也接受该形式。
-        request = envelope
+        raise ValueError("增量信封缺少 request")
     mark(request)
     return request
 

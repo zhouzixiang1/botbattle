@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 编译可直接上传的 Linux ELF 样例 Bot（holdem + pencil）
+# 编译可直接上传的 Linux ELF 样例 Bot（holdem + gomoku + pencil）
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 CC="${CC:-cc}"
@@ -11,12 +11,20 @@ build() {
   "$CC" -O2 -static -o "$out" "$src" 2>/dev/null \
     || "$CC" -O2 -o "$out" "$src"
   chmod +x "$out"
-  file "$out"
+  local description
+  description="$(file -b "$out")"
+  printf '%s: %s\n' "$out" "$description"
+  if [[ "$description" != *"ELF 64-bit"* || "$description" != *"x86-64"* ]]; then
+    echo "error: sample upload must be a Linux x86_64 ELF" >&2
+    return 1
+  fi
 }
 
 build "$ROOT/callbot.c" "$OUT_DIR/callbot_linux_amd64"
+build "$ROOT/gomokubot.c" "$OUT_DIR/gomokubot_linux_amd64"
 build "$ROOT/pencilbot.c" "$OUT_DIR/pencilbot_linux_amd64"
 
 echo "built:"
 echo "  $OUT_DIR/callbot_linux_amd64 (holdem)"
+echo "  $OUT_DIR/gomokubot_linux_amd64 (gomoku)"
 echo "  $OUT_DIR/pencilbot_linux_amd64 (pencil)"
