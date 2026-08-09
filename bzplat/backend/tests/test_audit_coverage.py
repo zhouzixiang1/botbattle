@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 from datetime import datetime
@@ -186,6 +187,114 @@ def test_sse_broadcast_does_not_block_on_full_queue(store: Store):
 
     result = asyncio.run(run())
     assert result == "new", "drop-oldest 后最新事件应可被取到"
+
+
+def test_sse_reconnect_snapshot_uses_complete_active_prefix(store: Store):
+    """运行期 snapshot 不得退回到节流落库点，且终态后释放内存前缀。"""
+
+    class PausingRunner:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run_binaries(self, *args, **kwargs):
+            on_event = kwargs["on_event"]
+            on_event("match_start", {"type": "match_start", "game_id": "gomoku"})
+            # match_start 已触发 Store 快照；下面两条尚未达到每 5 条的节流点。
+            on_event("turn", {"type": "turn", "player": 0})
+            on_event("turn", {"type": "turn", "player": 1})
+            self.started.set()
+            await self.release.wait()
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[1, -1])],
+                winner=0,
+                reason="five",
+            )
+
+    runner = PausingRunner()
+    orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+    owner, bot_a = _user_with_bot(
+        store,
+        name="activeprefixa",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+    _, bot_b = _user_with_bot(
+        store,
+        name="activeprefixb",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+
+    async def run() -> None:
+        match_id = await orch.challenge(
+            bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
+        )
+        await asyncio.wait_for(runner.started.wait(), timeout=2)
+
+        persisted = store.get_public_replay(match_id) or {}
+        assert '"turn"' not in (persisted.get("events_json") or "")
+
+        queue = orch.subscribe(match_id)
+        snapshot = queue.get_nowait()
+        assert [event["type"] for event in snapshot["events"]] == [
+            "match_start",
+            "turn",
+            "turn",
+        ]
+        # snapshot 是独立前缀，后续 append 不应反向修改已经入队的消息。
+        orch._active_replay_events[match_id].append(
+            {"type": "turn", "player": 0}
+        )
+        assert len(snapshot["events"]) == 3
+
+        runner.release.set()
+        await asyncio.wait_for(orch._tasks[match_id], timeout=2)
+        assert match_id not in orch._active_replay_events
+
+    asyncio.run(run())
+
+
+def test_sse_terminal_snapshot_prefers_canonical_persisted_replay(store: Store):
+    """终态提交后、runner 收尾前订阅也必须拿到 canonical match_end。"""
+    orch = _orch(store)
+    owner, bot = _user_with_bot(
+        store,
+        name="terminalprefix",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+    match_id = _new_match_id()
+    store.create_match(
+        match_id,
+        bot["id"],
+        bot["id"],
+        owner_id=owner["id"],
+        match_type="challenge",
+        game_id="gomoku",
+    )
+    stale_runner_events = [
+        {"type": "match_start", "game_id": "gomoku"},
+        {"type": "move", "player": 0, "x": 7, "y": 7},
+    ]
+    terminal_events = [
+        *stale_runner_events,
+        {"type": "match_end", "winner": 0, "reason": "completed", "deltas": [1, -1]},
+    ]
+    orch._active_replay_events[match_id] = stale_runner_events
+    store.upsert_replay(match_id, json.dumps(terminal_events), "[]")
+    store.update_match(
+        match_id,
+        status=STATUS_COMPLETED,
+        winner=0,
+        reason="completed",
+        result={"hands_played": 1, "deltas": [1, -1]},
+    )
+
+    queue = orch.subscribe(match_id)
+    snapshot = queue.get_nowait()
+    assert snapshot["match"]["status"] == STATUS_COMPLETED
+    assert snapshot["events"] == terminal_events
+    orch.unsubscribe(match_id, queue)
+    orch._active_replay_events.pop(match_id, None)
 
 
 # ── 普通双 bot 对局 BotCrashedError → 技术判负（主路径盲区）───────────────

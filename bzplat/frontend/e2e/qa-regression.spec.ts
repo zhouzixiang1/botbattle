@@ -158,6 +158,18 @@ for (const viewport of VIEWPORTS) {
         () => document.documentElement.scrollWidth - window.innerWidth,
       )
       expect(overflow, `${route.path} overflows viewport by ${overflow}px`).toBeLessThanOrEqual(1)
+      // AppShell owns the one site-wide gutter. PageStub must not add a second
+      // px-4/lg:px-8 layer, which previously narrowed every table and game canvas.
+      const gutter = await page.evaluate(() => {
+        const main = document.querySelector('main')
+        const heading = main?.querySelector('h1')
+        if (!(main instanceof HTMLElement) || !(heading instanceof HTMLElement)) return null
+        const mainRect = main.getBoundingClientRect()
+        const headingRect = heading.getBoundingClientRect()
+        return headingRect.left - mainRect.left - Number.parseFloat(getComputedStyle(main).paddingLeft)
+      })
+      expect(gutter, `${route.path} has a nested page gutter`).not.toBeNull()
+      expect(Math.abs(gutter ?? 0), `${route.path} has a nested page gutter`).toBeLessThanOrEqual(1)
       await monitor.settle()
     }
 
@@ -200,6 +212,7 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
 
 test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
   const monitor = monitorBrowser(page)
+  const longBotLabel = `超长展示名-${'x'.repeat(120)}`
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
 
@@ -245,10 +258,24 @@ test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
         is_active: 0,
         runnable: false,
         unsupported_reason: '仅支持 Linux x86_64 ELF64（小端）',
+      }, {
+        id: 987654322,
+        name: 'long_layout_bot',
+        display_name: longBotLabel,
+        description: `不可分割简介-${'d'.repeat(160)}`,
+        game_id: 'holdem',
+        format: `unknown-${'f'.repeat(100)}`,
+        os: 'linux',
+        arch: 'amd64',
+        current_version: 1,
+        runtime_mode: 'traditional',
+        is_active: 0,
+        runnable: false,
+        unsupported_reason: `不可分割原因-${'r'.repeat(160)}`,
       }],
       page: 1,
       per_page: 20,
-      total: 1,
+      total: 2,
     }),
   }))
   await page.reload()
@@ -257,6 +284,10 @@ test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
   await expect(historicalRow.getByText('不可运行', { exact: true })).toBeVisible()
   await expect(historicalRow.getByRole('button', { name: '不可启用', exact: true })).toBeDisabled()
   await expect(historicalRow).toContainText('仅支持 Linux x86_64 ELF64')
+  await expect(page.getByRole('link', { name: longBotLabel, exact: true })).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 844 })
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+  expect(overflow).toBeLessThanOrEqual(1)
   await monitor.expectClean([{
     kind: 'http',
     method: 'POST',
@@ -753,6 +784,177 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await monitor.expectClean()
 })
 
+test('MatchViewer replays live history from event one without terminal jumps and keeps the table prominent', async ({ page }) => {
+  const matchId = 'mock-live-cursor-layout'
+  const initialEvents = [
+    { type: 'match_start', game_id: 'holdem', num_hands: 70 },
+    { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [20000, 20000] },
+    { type: 'deal_hole', hand: 0, holes: [['Ah', 'Kd'], ['Qs', 'Jc']] },
+    { type: 'action', player: 0, action: 'call', amount: 50 },
+  ]
+  const reconnectedEvents = [
+    ...initialEvents,
+    { type: 'settle', hand: 0, winners: [0], deltas: [100, -100], pot: 200, reason: 'showdown' },
+    { type: 'hand_start', hand: 1, sb: 1, bb: 0, chips: [20000, 20000] },
+    { type: 'deal_hole', hand: 1, holes: [['9h', '9d'], ['8s', '8c']] },
+    { type: 'action', player: 1, action: 'raise', amount: 200 },
+  ]
+
+  await page.addInitScript(() => {
+    type Controller = {
+      emit: (event: Record<string, unknown>) => boolean
+      disconnect: () => boolean
+    }
+    class ControlledEventSource {
+      static current: ControlledEventSource | null = null
+      onmessage: ((event: MessageEvent<string>) => void) | null = null
+      onerror: ((event: Event) => void) | null = null
+      closed = false
+
+      constructor(_url: string | URL) {
+        ControlledEventSource.current = this
+      }
+
+      close() {
+        this.closed = true
+      }
+    }
+    const controller: Controller = {
+      emit(event) {
+        const source = ControlledEventSource.current
+        if (!source || source.closed || !source.onmessage) return false
+        source.onmessage(new MessageEvent('message', { data: JSON.stringify(event) }))
+        return true
+      },
+      disconnect() {
+        const source = ControlledEventSource.current
+        if (!source || source.closed || !source.onerror) return false
+        source.onerror(new Event('error'))
+        return true
+      },
+    }
+    Object.defineProperty(window, 'EventSource', {
+      configurable: true,
+      value: ControlledEventSource,
+    })
+    ;(window as typeof window & { __matchSseController?: Controller }).__matchSseController = controller
+  })
+
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'holdem',
+          status: 'running',
+          match_type: 'challenge',
+          bot_a: { name: 'live_alpha', owner_name: 'alpha' },
+          bot_b: { name: 'live_beta', owner_name: 'beta' },
+          result: { hands_played: 0, deltas: [0, 0] },
+        },
+        replay: { events_json: JSON.stringify(initialEvents) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}' })
+  })
+
+  const control = async (method: 'emit' | 'disconnect', event?: Record<string, unknown>) => page.evaluate(
+    ({ method, event }) => {
+      const controller = (window as typeof window & {
+        __matchSseController?: {
+          emit: (value: Record<string, unknown>) => boolean
+          disconnect: () => boolean
+        }
+      }).__matchSseController
+      return method === 'emit'
+        ? controller?.emit(event ?? {}) ?? false
+        : controller?.disconnect() ?? false
+    },
+    { method, event },
+  )
+
+  await page.setViewportSize({ width: 1440, height: 720 })
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  await expect(page.getByText('事件 1/4', { exact: true })).toBeVisible()
+  await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '暂停', exact: true }).click()
+
+  expect(await control('disconnect')).toBe(true)
+  await expect(page.getByText('连接中', { exact: true })).toBeVisible()
+  expect(await control('emit', {
+    type: 'snapshot',
+    match: {
+      id: matchId,
+      game_id: 'holdem',
+      status: 'running',
+      match_type: 'challenge',
+      bot_a: { name: 'live_alpha', owner_name: 'alpha' },
+      bot_b: { name: 'live_beta', owner_name: 'beta' },
+      result: { hands_played: 0, deltas: [0, 0] },
+    },
+    events: reconnectedEvents,
+  })).toBe(true)
+  await expect(page.getByText('直播中', { exact: true })).toBeVisible()
+  await expect(page.getByText('事件 1/8', { exact: true })).toBeVisible()
+  await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
+
+  expect(await control('emit', {
+    type: 'match_end', winner: 0, reason: 'completed', deltas: [100, -100],
+  })).toBe(true)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(page.getByText('事件 1/9', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /已结束 · 剩余 8 个事件 · 跳到结局/ })).toBeVisible()
+  await page.waitForTimeout(850)
+  await expect(page.getByText('事件 1/9', { exact: true })).toBeVisible()
+
+  await page.getByRole('combobox').filter({ hasText: '1x' }).click()
+  await page.getByRole('option', { name: '4x', exact: true }).click()
+  await page.getByRole('button', { name: '播放', exact: true }).click()
+  await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible({ timeout: 4_000 })
+  await expect(page.getByText('第 2/70 手', { exact: true })).toBeVisible()
+
+  // The separate terminal shortcut remains explicit: rewinding must never
+  // silently snap back to the result, while the shortcut can do so on demand.
+  await page.getByRole('button', { name: '上一个事件', exact: true }).click()
+  await expect(page.getByText('事件 8/9', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /已结束 · 剩余 1 个事件 · 跳到结局/ }).click()
+  await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible()
+
+  const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
+  const canvasBox = await canvas.boundingBox()
+  const timelineBox = await page.getByTestId('match-timeline').boundingBox()
+  const resultCardBox = await page.getByTestId('match-result-card').boundingBox()
+  const commentsCardBox = await page.getByTestId('comments-card').boundingBox()
+  expect(canvasBox?.width ?? 0).toBeGreaterThanOrEqual(780)
+  expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
+  expect(timelineBox?.width ?? 0).toBeGreaterThanOrEqual(270)
+  expect(timelineBox?.width ?? 0).toBeLessThanOrEqual(310)
+  expect(resultCardBox?.height ?? 999).toBeLessThanOrEqual(110)
+  expect(commentsCardBox?.height ?? 999).toBeLessThanOrEqual(140)
+
+  await page.evaluate(() => window.scrollTo(0, 360))
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
+  await expect.poll(async () => (await page.getByTestId('match-timeline').boundingBox())?.y ?? -1)
+    .toBeGreaterThanOrEqual(20)
+  expect((await page.getByTestId('match-timeline').boundingBox())?.y ?? 999).toBeLessThanOrEqual(30)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.evaluate(() => window.scrollTo(0, 0))
+  const mobileCanvasBox = await canvas.boundingBox()
+  expect(mobileCanvasBox?.width ?? 0).toBeGreaterThanOrEqual(356)
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+  expect(overflow).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
 test('Pencil clock initializes the untouched seat and renders a first-event timeout', async ({ page }) => {
   const monitor = monitorBrowser(page)
 
@@ -935,6 +1137,7 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   await expect(incident).toContainText('第 1 次决策')
   await expect(incident).toContainText('Bot 响应缺少必填 response 字段')
   await expect(page.locator('main')).not.toContainText('落后')
+  await expect(page.getByText(/\/70 手/)).toHaveCount(0)
   await expect(page.getByRole('button', { name: '播放', exact: true })).toHaveCount(0)
   await expect(page.getByText('手导航（点击跳转）', { exact: true })).toHaveCount(0)
   await expect(page.getByText('对局结束 · 协议错误', { exact: true })).toBeVisible()

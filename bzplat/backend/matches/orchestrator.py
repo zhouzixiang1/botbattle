@@ -302,6 +302,11 @@ class MatchOrchestrator:
         # auto_matcher._is_idle 据此判定空闲，避免大量 pending 任务排队等槽时误判不空闲。
         self._bot_running = 0
         self._sse: dict[str, list[asyncio.Queue]] = {}
+        # 运行中对局的 append-only 事件前缀。Store replay 为崩溃恢复而节流落库，
+        # 可能暂时落后于已经广播的 action；新订阅/重连必须读取同一运行期前缀，
+        # 否则 snapshot 会让浏览器历史倒退。这里只保存 runner 已持有列表的引用，
+        # 不复制事件；终态仍以落库 replay 为权威并在收尾时释放。
+        self._active_replay_events: dict[str, list[dict]] = {}
         self._lock = asyncio.Lock()
         # 评分串行化锁：按 (bot_id, game_id) 维度串行化 _apply_ratings，防同 bot 两场
         # 并发完成时快照读+绝对写 rating/rd/vol 互相覆盖（lost-update，审计 FRAGILE 5a）。
@@ -376,6 +381,7 @@ class MatchOrchestrator:
         # immediately after the broadcast.  All other exits still clean eagerly.
         if match_id not in self._admin_aborting:
             self._sse.pop(match_id, None)
+            self._active_replay_events.pop(match_id, None)
         self._human_turns = {
             key: value for key, value in self._human_turns.items()
             if key[0] != match_id
@@ -567,6 +573,7 @@ class MatchOrchestrator:
         self._human_turns.clear()
         self._human_active_users.clear()
         self._sse.clear()
+        self._active_replay_events.clear()
 
     # ── 人类对战：回合 Future 注册表（供 WS /move 解析）─────────
     def get_human_turn(self, match_id: str, player_idx: int) -> dict | None:
@@ -908,8 +915,20 @@ class MatchOrchestrator:
         from bzplat.backend.matches.seat_info import match_for_viewer
 
         m = match_for_viewer(self.store, match_id)
-        replay = self.store.get_public_replay(match_id) or {}
-        q.put_nowait({"type": "snapshot", "match": m or {}, "events": json.loads(replay.get("events_json") or "[]")})
+        active_events = self._active_replay_events.get(match_id)
+        active_status = (m or {}).get("status") in (STATUS_PENDING, STATUS_RUNNING)
+        if active_events is None or not active_status:
+            # update_match + terminal replay flush precede the final broadcast.
+            # A subscriber can arrive in that short post-processing window while
+            # the runner list is still registered; terminal rows must use the
+            # persisted canonical replay, which already contains match_end/error.
+            replay = self.store.get_public_replay(match_id) or {}
+            snapshot_events = json.loads(replay.get("events_json") or "[]")
+        else:
+            # subscribe() 与 on_event() 同在事件循环内同步执行。先注册队列再复制
+            # 当前前缀，后续广播只会排在 snapshot 之后，不产生订阅窗口。
+            snapshot_events = list(_live_replay_events(active_events))
+        q.put_nowait({"type": "snapshot", "match": m or {}, "events": snapshot_events})
         return q
 
     def unsubscribe(self, match_id: str, q: asyncio.Queue) -> None:
@@ -1064,6 +1083,7 @@ class MatchOrchestrator:
         # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
         dup_seed = int(stored_mc.get("duplicate_seed")) if stored_mc.get("duplicate_seed") is not None else None
         events: list[dict] = []
+        self._active_replay_events[match_id] = events
 
         def on_event(kind: str, ev: dict) -> None:
             events.append(ev)
@@ -1557,6 +1577,7 @@ class MatchOrchestrator:
         # P1-7：对局结束后清 SSE dict 的该 match_id 条目（直播已结束，防无界增长）。
         # 残留订阅者会在 _broadcast 时因 list 为空自然无操作；unsubscribe 也会清空 list。
         self._sse.pop(match_id, None)
+        self._active_replay_events.pop(match_id, None)
         if self.on_match_done is not None:
             try:
                 result = self.on_match_done(match_id, contest_id)
@@ -1604,6 +1625,7 @@ class MatchOrchestrator:
                 "_bot_a_version_id" if bot_seat == 0 else "_bot_b_version_id"
             )
             events: list[dict] = []
+            self._active_replay_events[match_id] = events
             try:
                 bot_path, bot_mode = self._runtime_for_bot_version(
                     bot, version_id, seat=bot_seat
