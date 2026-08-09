@@ -197,6 +197,18 @@ def loads_response(line: str) -> dict[str, Any]:
     return json.loads(line)
 
 
+def validate_response_payload(payload: Any) -> Any:
+    """校验 Botzone ``response`` 负载的协议类型，保留原值供裁判消费。
+
+    正整数加注额即使低于当前最小加注仍是格式合法的响应，后续由裁判按游戏规则
+    处理；负数 ``<-2``、布尔/字符串/对象则不属于德州 Botzone 响应域。
+    """
+    if isinstance(payload, bool) or not isinstance(payload, int):
+        raise ValueError("response 必须是整数")
+    parse_response(payload)
+    return payload
+
+
 def fail_response() -> int:
-    """超时/异常兜底：fold（Botzone 裸整数 -1）。"""
+    """供人类超时等游戏内兜底使用：fold（Botzone 裸整数 -1）。"""
     return RESP_FOLD

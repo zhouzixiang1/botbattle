@@ -44,7 +44,7 @@
 | `bot_versions` 表 | 上传时写入 | 赛事 pairing/match **未冻结**；`_run_match` 读最新 `binary_path` |
 | `standings()` | 按 **`bot_id`**，排序 `(-points,-net_chips)` | 换 Bot 丢分；无 Buchholz 等；无 official 全员榜 |
 | `dispatch()` | 可改 pending pairing 的 bot | 违反「已发布轮冻结」 |
-| 超时/崩溃 | 超时多变为 fold 继续；崩溃常 `aborted` | 需技术判负 + completed |
+| 超时/崩溃 | （历史缺陷）超时多变为 fold 继续；崩溃常 `aborted` | 当时需改为技术判负 + completed；现行政策见 DESIGN / GUIDE |
 | `FULL_RR_MAX_N`（默认 12） | `ContestManager._guard_full_rr` | 决赛全员 RR 会被拒，需模板级 `allow_large_round_robin` |
 | `BOT_CPUS` | 硬顶 `1.0`；ceiling=`cpu//4` | 万人赛 ETA 按此估算；若改 0.5 须同步 AGENTS.md |
 | 内置德州模板 | 仅 `holdem_swiss_ko`、`holdem_rr` | 需新增预赛/决赛模板 |

@@ -57,9 +57,9 @@ graph TB
 | 接口 | `api_routes.py` | 主 REST（105 个路由声明，含 SSE/WS）：bots/matches/users/search/leaderboard/comments/likes/notifications/contests/admin/wiki |
 | 接口 | `auth/routes.py` | 认证 REST（13 路由，prefix `/api/auth`）：注册/登录/验证/重置/profile/avatar |
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
-| 游戏注册 | `games/` | **赛制/编排契约解耦入口（裁判/协议分离）**：base.py（GameSpec 接口 + GameRegistry）+ __init__.py（注册与便捷函数）+ `_botzone_protocol.py`（Traditional / LongRunning 信封）+ `_board_protocol.py`（棋类共享协议工具）+ 各 `games/<game>/` 子包。三层分离：`<game>_judge.py` 是 0 平台依赖的纯规则；`engine.py` 是平台适配层（会使用运行时异常契约）；protocol/result/tiers/templates/spec 封装游戏差异。赛制与编排主流程经 registry/spec 调用，不按游戏名分支；这不表示整个前后端对新增游戏零接入工作。 |
-| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；支持 `defer_start` 的赛事两阶段创建、显式 start/discard；中途崩溃含 human 都保留 `completed + reason=crash`，Bot-vs-Bot 启动失败走 `technical_loss`，human 启动失败走 `aborted`；完成与技术判负共用评分/通知/XP 后处理）+ runner（起 Bot 进程，经 games 注册表路由协议；**`_botzone_decide` 双模式传输**：按 session.runtime_mode 选 Traditional 完整历史 / LongRunning 单 request + keep_running 握手；消费 `GameSpec.time_budget_per_side`，Bot-vs-Bot 与人类对战双方使用同一累计棋钟及 `time_used/time_out` 事件契约）+ auto_matcher（闲时自动） |
-| 赛制 | `contests/` | templates（**10 个内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板；创建时模板 `game_id` 与请求游戏强绑定，不允许用请求字段覆盖混搭）+ stages（按当前阶段/轮次生成对阵；后续轮由比赛结果逐步确定；Swiss 接收按 entry 历史统计的先手次数）+ manager（状态机 `draft→open→published→running→rest→finished`；per-contest 锁串行化报名、推进与派发；时间写入统一满足 `registration_opens_at <= registration_closes_at <= starts_at`，等时刻合法，手动提前推进按实际时刻盖戳；发布/开赛先在锁内复核所有报名 Bot 的 active/binary/游戏一致性；`published` 只保证当前可确定批次，pairing 冻结 Bot/版本/seed；`PairingSpec.color_first` 在持久化前落实为实际 A/B 座位，落库后统一 A=seat0；派发采用“准备 pending match→原子绑定 pairing→启动任务”，失败精确补偿；aborted 无裁决对局保留历史并将 pairing 复位 pending，不积分/不晋级；中途单侧 Bot 不可用落 completed 技术判负，双侧不可用显式阻塞；每个新 stage 的完整 pairing 批次〔版本快照/bye/排期〕与 `current_stage_idx/status` 在 Store 单事务提交，旧版遗留的未绑定下一阶段 partial 可安全替换；Swiss/KO 懒生成的每个后续整轮也经 `BEGIN IMMEDIATE` 单事务追加，锁内复核阶段游标/上一轮/目标轮，失败零 partial、并发重试不重复；启动对账保留首阶段 published 批次恢复，并补算 `finished + ready=0` 的正式榜；正式榜按 pairing 实际座位及 match winner 统计 entry 技术负，完整排名全量替换与 ready 标志同事务；已有真实进度则拒绝猜测覆盖；存在未裁决对阵时拒绝强制固化名次）+ **`scheduler`（扫描 `*_at` 到点推进）** + ranking + validation |
+| 游戏注册 | `games/` | **赛制/编排契约解耦入口（裁判/协议分离）**：base.py（GameSpec / GameRegistry）+ `_botzone_protocol.py`（Traditional / LongRunning 信封）+ `_board_protocol.py`（棋类共享协议工具）+ 各 `games/<game>/` 子包。`<game>_judge.py` 是 0 平台依赖的纯规则；engine 是平台适配层；protocol 的 `validate_response_payload` 只校验 response 形状，游戏内合法性仍归裁判。赛制/编排主流程经 registry/spec 调用，不按游戏名分支；这不表示整个前后端对新增游戏零接入工作。 |
+| 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；赛事两阶段创建；崩溃与启动失败按明确技术结果处理；Bot 协议错误/超时分别为 `completed + protocol_error/timeout + technical_loss`，Bot-vs-Bot 计分、人机局不评分；平台故障 `aborted + platform_error`）+ runner（按 runtime_mode 传 Traditional 完整历史或 LongRunning 增量请求；严格校验信封和 per-game response，首个故障写有界 `bot_technical_error` 后终止；Bot-vs-Bot 与人类对战双方统一消费累计棋钟）+ auto_matcher（闲时自动） |
+| 赛制 | `contests/` | templates/stages/manager/scheduler/ranking/validation。状态机 `draft→open→published→running→rest→finished`；时间写入统一满足 `registration_opens_at <= registration_closes_at <= starts_at`；手动推进按实际时刻盖戳；终态不可互转；报名、派发、完整阶段/轮次、正式榜均以锁和事务守护，aborted 无裁决对局不积分/不晋级。 |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
 | 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈；赛事时间候选在 create/update 安全写入口统一校验；`set_settings` 批量配置单事务提交）+ schema.py（常量唯一来源） |
 | 认证 | `auth/` | routes + auth_manager + captcha + dependencies（require_user/admin/organizer） |
@@ -83,13 +83,13 @@ graph LR
 
 **两层解耦**：
 
-1. **GameSpec 注册表（`games/`，契约入口）**：每款游戏声明 `game_id`/`label`/`session_factory`/`protocol`/配置校验/计分与 ETA/裁判参数/段位/模板/源码元信息/预检/多 leg 计划/累计棋钟等。通用赛制与编排路径经 `registry.get(game_id)` 取 spec，禁止增加游戏名分支。`rounds_per_match` 与 `num_seats` 当前是契约元数据和测试约束，生产路径尚未直接消费；不能据此宣称所有字段均已运行时使用。
+1. **GameSpec 注册表（`games/`，契约入口）**：每款游戏声明 `game_id`/`label`/`session_factory`/`protocol`（含 `validate_response_payload`）/配置校验/计分与 ETA/裁判参数/段位/模板/源码元信息/预检/多 leg 计划/累计棋钟等。通用赛制与编排路径经 `registry.get(game_id)` 取 spec，禁止增加游戏名分支。`rounds_per_match` 与 `num_seats` 当前是契约元数据和测试约束，生产路径尚未直接消费；不能据此宣称所有字段均已运行时使用。
 
 2. **结果鸭子契约（`RoundResult`/`MatchResult`，独立定义不共享基类）**：裁判产出 `winners`(座位号列表，空=平局) + `deltas`(长 2 零和数组)；`MatchResult` 含 `rounds_played` + `rounds` + `events` + `winner`。赛制代码依赖公共结果字段，不读取扑克 pot/board/holes。Holdem 的权威胜者是 `result.winner`（按累计 `final_chips`），正常结束时原始 `match_end` 事件的 `winner` 目前可能为 `null`；持久化与编排不得用该事件覆盖结果胜者。`tests/test_result_contract.py` 与 runtime 回归覆盖此约束。
 
 3. **对局配置/结果双 JSON 通路（matches 表收敛）**：对局结果详情走 `result` JSON 列（`{"hands_played":N,"deltas":[ea,eb],"net_bb":float}`）；`match_config` JSON 列保留（向后兼容 + 承载版本快照等内部键），但**游戏规则参数（手数/棋盘/点阵）已钉死固定值**，不再走 match_config 配置（曾因 hands/num_hands key 名不一致导致配置静默失效，已彻底移除配置能力）。普通挑战、天梯和人类对局即使未显式选择版本，也会在创建时把各实际 Bot 的当前激活 `bot_versions.id` 冻结进 `_bot_a/b_version_id`；排队期间上传或回滚不改变 runner 路径/runtime_mode，只有无版本行的 legacy Bot 回退 `bots.binary_path`。链路：`_run_match` 仅注入 admin judge_params（holdem 的 starting_stack/sb/bb）→ runner 透传 → session_factory 用模块常量构造 Session（忽略规则参数）；结果 `update_match(result={...})` 落 result JSON。赛事排名经 `store.db.match_deltas(m)` helper 从 `result.deltas` 取净筹码。守护：`test_tongyong_layer_no_game_branches.py` 的 AST 守护 + `test_pinned_game_config.py` 守护规则参数钉死。
 
-4. **累计棋钟契约**：Pencil 在 spec 中固定 `time_budget_per_side=900.0`，Holdem/Gomoku 为 `None`。orchestrator 对 Bot-vs-Bot 和人类对局都把该值传给 runner；runner 分座位累计 Bot subprocess 或人类 Future 的决策耗时，每次成功决策发 `time_used {seat,used,remaining,budget}`，耗尽时发 `time_out {seat,used,budget}` 并交给裁判判当前方负。事件随 SSE/回放持久化，Pencil reducer 用首条事件的 `budget` 初始化未行动方，MatchViewer 玩家卡显示双方剩余时间和超时徽章。人类 `/play` 页仍显示 `human_action_timeout` 默认 120s 的逐回合倒计时；后端同时累计 900s 总棋钟，两层限制中较早触发者生效。
+4. **累计棋钟契约**：Pencil 在 spec 中固定 `time_budget_per_side=900.0`，Holdem/Gomoku 为 `None`。orchestrator 对 Bot-vs-Bot 和人类对局都把该值传给 runner；runner 分座位累计 Bot subprocess 或人类 Future 的决策耗时，每次成功决策发 `time_used {seat,used,remaining,budget}`，耗尽时发 `time_out {seat,used,budget}`。Bot 耗尽转为 `BotDecisionTimeoutError` 统一技术判负；人类 Future 耗尽仍交裁判判负，不会伪装成 Bot 故障。事件随 SSE/回放持久化，Pencil reducer 用首条事件的 `budget` 初始化未行动方，MatchViewer 玩家卡显示双方剩余时间和超时徽章。人类 `/play` 页仍显示 `human_action_timeout` 默认 120s 的逐回合倒计时；后端同时累计 900s 总棋钟，两层限制中较早触发者生效。
 
 **DRY 边界**：游戏规则（engine/result/tiers 数据/templates）各游戏独立；平台工具（`_board_protocol.py` 行协议序列化、`base.tier_for_in` 段位查表算法）共享——避免字节级重复的维护隐患。
 
@@ -165,7 +165,7 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 - **API 404 兜底**：`@app.api_route("/api/{rest:path}")`（main.py，catch-all 之前注册）——未匹配的 `/api/*` 一律 `raise HTTPException(404)` 返 JSON，**绝不走下方 SPA catch-all 返 HTML**（否则前端 `api.ts` 把 HTML 当返回值解析成静默错误数据）。非 `/api` 的未知路径仍走 SPA fallback 返 `index.html`。
 - Bot 浏览：`GET /api/bots/public`、`/api/bots/{id}`、`/profile`、`/matches`、`/opponents`、`/rating-history`
 - 用户浏览：`GET /api/users`、`/api/users/{name}/profile`、`/bots`、`/followers`、`/following`
-- 对局浏览：`GET /api/matches`、`/matches/liked-top`、`/matches/{id}`
+- 对局浏览：`GET /api/matches`（`status` / `game_id` / `has_bot_errors` 过滤；默认全状态）、`/matches/liked-top`、`/matches/{id}`。列表与详情把历史 `bot_decide_error` 和当前 `bot_technical_error` 聚合为按座位计数 + 最多 3 条脱敏样本；公开 replay 同样限制为 3 条安全诊断
 - 排行与元数据：`GET /api/leaderboard`、`/api/tiers`、`/api/levels/info`、`/api/site/info`
 - 搜索：`GET /api/search`
 - 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`

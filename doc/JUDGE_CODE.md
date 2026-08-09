@@ -54,7 +54,7 @@ Pencil 另由 `GameSpec.time_budget_per_side=900.0` 固定每方累计 15 分钟
 ### 德州扑克（规则 `holdem_judge.py`，适配 `engine.py`）
 
 - HU NLHE；盲注 SB/BB 交替；Bot 协议 raise response 的正整数 = **额外下注筹码**（raise delta，引擎内部转 raise-to-total 校验，min re-raise-to ≥ 2× 上一 raise-to）。
-- 非法着 / 超时 / 可恢复决策错误 → fold；all-in 后直接发出剩余公共牌结算。
+- 格式正确但下注不合法 → fold；Bot 信封/response 格式错误或超时由平台层在进入裁判前立即技术判负。all-in 后直接发出剩余公共牌结算。
 - **对局中途进程崩溃 / EOF（`BotCrashedError`）** → 引擎内**计分判负**（崩溃方本手全筹码给对手，对局 `completed`，`reason=crash`），不是继续 fold 跑完。
 - **启动失败**由编排层处理：所有 Bot-vs-Bot 类型统一记为 `completed` + `technical_loss`，崩溃方判负；人类对战则记为 `aborted`（`bot_crashed`）。
 - `MatchSession` 一手 = 一轮，按手数循环，最终按累计净筹码判胜。
@@ -62,7 +62,7 @@ Pencil 另由 `GameSpec.time_budget_per_side=900.0` 固定每方累计 15 分钟
 ### 五子棋（规则 `gomoku_judge.py`，适配 `engine.py`）
 
 - **固定 15×15**（不可通过 match_config 或 admin 调整）；黑先（seat 0）；横/竖/斜连续 ≥5 含长连即胜；无禁手。
-- 非法着 / 超时 → 判负；棋盘下满无人成五 → 平局。
+- 格式正确但非法着 → 裁判判负；Bot 协议错误/超时由平台层技术判负。棋盘下满无人成五 → 平局。
 - 对局中途进程崩溃 → 计分判负（对手胜，`reason=crash`）。
 - Botzone 标准协议：请求信封 `{"request":{"x","y","me"}}`，响应信封 `{"response":{"x","y"}}`（信封包裹见 [协议规范](#/wiki?slug=protocol)）。
 
@@ -71,7 +71,7 @@ Pencil 另由 `GameSpec.time_budget_per_side=900.0` 固定每方累计 15 分钟
 - **固定 N=6** 点阵 → 交错网格 size=2N-1=11；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
 - pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"x":-1,"y":-1}` 把回合交还。
 - Bot-vs-Bot 与人类对局均为每方累计 900s；决策成功发 `time_used`，总预算耗尽发 `time_out` 并判当前方负。人类侧同时有默认 120s 逐回合防挂机保护。
-- 非法着 / 超时 → 判负；对局中途进程崩溃 → 计分判负（`reason=crash`）。MatchViewer 玩家卡由事件流显示剩余时间和超时徽章。
+- 格式正确但非法着、人类棋钟耗尽 → 裁判判负；Bot 协议错误/棋钟耗尽由平台层技术判负。对局中途进程崩溃 → 计分判负（`reason=crash`）。MatchViewer 玩家卡由事件流显示剩余时间和超时徽章。
 
 ## 改动裁判代码
 

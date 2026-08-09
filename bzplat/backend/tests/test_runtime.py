@@ -92,6 +92,39 @@ def test_docker_exit_125_is_platform_fault_not_bot_crash(tmp_path):
         asyncio.run(bot_fault.send("bot", "{}"))
 
 
+def test_decision_timeout_log_does_not_expose_bot_stderr_paths(tmp_path, caplog):
+    class FakeStdin:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            return None
+
+    class SlowStdout:
+        async def readline(self):
+            await asyncio.sleep(1)
+            return b""
+
+    class FakeProc:
+        returncode = None
+        stdin = FakeStdin()
+        stdout = SlowStdout()
+
+    path = tmp_path / "bot"
+    path.write_bytes(b"unused")
+    info = BinaryInfo("elf", "linux", "amd64", True)
+    runner = BinaryRunner(prefer_local=False)
+    session = BotSession("timeout-session", info, path, proc=FakeProc(), mode="docker")
+    session._stderr_tail.extend(b"/private/bot_uploads/secret-version")
+    runner._sessions[session.session_id] = session
+
+    with caplog.at_level("WARNING"), pytest.raises(TimeoutError):
+        asyncio.run(runner.send(session.session_id, "{}", timeout=0.001))
+    assert "timeout-session" in caplog.text
+    assert "/private" not in caplog.text
+    assert "secret-version" not in caplog.text
+
+
 def test_container_exit_126_127_require_trusted_runtime_marker(tmp_path):
     """Bot 可自行返回 126/127；普通 stderr 不得用于逃避判负。"""
 

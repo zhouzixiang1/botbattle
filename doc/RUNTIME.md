@@ -36,10 +36,10 @@ tmpfs，`/tmp` 是另一个隔离 tmpfs，对局结束后一并销毁。
 
 - `GameSpec.time_budget_per_side=None` 的游戏（当前 holdem / gomoku）沿用单次决策超时：默认 **60 秒 / 决策**，管理员可在「运行时」面板改为 1–300 秒。
 - Pencil 的 `GameSpec.time_budget_per_side=900`：双方各有一只独立、固定 **900 秒（15 分钟）累计棋钟**，Bot-vs-Bot 与人类对战走同一契约；每次等待只使用该座位的剩余时间，不能靠多回合重置。该固定规则不读取 `action_timeout_sec`，admin 不可改。
-- 无累计棋钟时，单步超时按游戏的失败响应处理（扑克 fold；棋类判负）。Pencil 棋钟耗尽则直接判超时负。
+- Bot 单步超时或 Pencil 累计棋钟耗尽在第一次发生时即终止对局，持久化为 `completed + reason=timeout + technical_loss=1`；不再生成扑克 fallback fold 或棋类伪非法着。Bot-vs-Bot 技术结果进入评分/赛事积分，人机局由人类获胜但不计 Glicko。人类侧逐回合/累计超时仍走人类 inactivity 与游戏裁判逻辑。
 - 人类对战的 `human_action_timeout` 默认仍为 **120 秒 / 回合**，用于等待 WebSocket 落子的内层保护；Pencil 同时受外层 900 秒累计棋钟约束，以先到的限制为准。
 - 棋钟成功决策写入 `time_used {seat,used,remaining,budget}`，耗尽写入 `time_out {seat,used,budget}`；事件进入回放/SSE，点格棋对局页据此展示双方剩余时间和「超时」标记。
-- **崩溃语义**（详见 [对局](#/wiki?slug=guide)）：Bot 在对局**中途**崩溃由引擎计分判负，Bot-vs-Bot 与 human 都持久化为 `completed + reason=crash`；Bot-vs-Bot 启动失败由编排层统一结算为 `completed + technical_loss`（challenge/table/ladder/contest 一致），只有 human 的启动失败记为 `aborted`（`bot_crashed`）。Docker 返回 125（daemon／镜像／挂载／容器 runtime 故障）恒属于**平台沙箱故障**。126/127 同时可能是 Bot 自己的退出码，只有在 Bot `exec` 前由平台 wrapper 产生本会话不可伪造的 runtime/entrypoint 诊断时才归因平台；普通 Bot stderr 不会豁免技术负。平台故障对局记为 `aborted + platform_error`、不评分；上传在 worker 中用专用 runner 对隐藏临时文件预检，成功后才发布版本。平台故障返回 503，既不修改原激活版本，也不阻塞主事件循环。
+- **故障语义**（详见 [对局](#/wiki?slug=guide)）：Bot 信封/response 格式错误 → `completed + reason=protocol_error + technical_loss=1`；Bot 决策超时 → `completed + reason=timeout + technical_loss=1`。两者在首个故障终止，回放写 `bot_technical_error`，结果保留计数与最多 3 个安全样本，结构化日志带 `match_id/bot_id/version_id/runtime/seat/turn` 且不记录原始 stdout/私有路径。Bot-vs-Bot 评分，人机局不评分；格式正确但游戏内非法动作仍归裁判。中途崩溃由引擎计分判负；Bot-vs-Bot 启动失败结算为 `completed + technical_loss`，human 启动失败为 `aborted + bot_crashed`。Docker 125 等平台沙箱故障为 `aborted + platform_error`、不评分；上传在 worker 中对隐藏临时文件预检，平台故障返回 503，不改变原激活版本，也不阻塞主事件循环。
 - 本平台默认 Traditional（每个决策点重启进程）；显式选择 LongRunning 并完成握手后才整场长驻。两种模式使用相同 stdin/stdout 单行 JSON 信封。
 
 ### Botzone 语言时限倍率（对照）

@@ -24,7 +24,11 @@ from bzplat.backend.games.gomoku.gomoku_judge import (
     compute_scores,
     compute_deltas,
 )
-from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
+from bzplat.backend.runtime.binary_runner import (
+    BotCrashedError,
+    BotTechnicalError,
+    PlatformRunnerError,
+)
 
 DecideFn = Callable[[int, dict[str, Any]], Any]
 EventFn = Callable[[str, dict[str, Any]], Any]
@@ -90,6 +94,8 @@ class GomokuSession:
             try:
                 raw = await self._decide(decide, to_move, req)
             except PlatformRunnerError:
+                raise
+            except BotTechnicalError:
                 raise
             except BotCrashedError:
                 # 对齐权威裁判：bot 崩溃不可恢复 → 判负（对手赢），不中止整场。

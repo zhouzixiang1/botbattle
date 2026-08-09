@@ -31,7 +31,8 @@ async def _session_factory(decide, *, on_event=None, **params: Any):
 _PROTOCOL = ProtocolSpec(
     dumps_request=proto.dumps_request,
     loads_response=proto.loads_response,
-    fail_response=lambda: {"x": -99, "y": -99},  # 棋类超时兜底：非法坐标
+    validate_response_payload=proto.validate_response_payload,
+    fail_response=lambda: {"x": -99, "y": -99},  # 人类超时等游戏内兜底
 )
 
 

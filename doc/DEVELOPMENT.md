@@ -129,7 +129,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 1. 建 `games/<game>/` 子包：
    - `<game>_judge.py`（纯游戏规则，零平台依赖）
    - `engine.py`（裁判↔平台协议适配，提供 Session 并驱动纯裁判，`run_async(decide) → MatchResult`）
-   - `protocol.py`（`dumps_request` / `loads_response` / `fail_response`；棋类可 re-export `games/_board_protocol.py`）
+   - `protocol.py`（`dumps_request` / `loads_response` / `validate_response_payload` / `fail_response`；棋类可 re-export `games/_board_protocol.py`）
    - `result.py`（**独立**定义，满足鸭子契约：`winners` + `deltas`，**不**共享基类）
    - `tiers.py`（段位曲线，查表用 `base.tier_for_in`）
    - `templates.py`（本游戏内置赛事模板）

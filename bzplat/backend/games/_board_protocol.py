@@ -23,15 +23,11 @@ def dumps_request(req: dict[str, Any]) -> str:
 
 
 def loads_response(line: str) -> dict[str, Any]:
-    """解析 Bot 输出一行（返回信封 dict，payload 由 parse_xy 取）。"""
-    line = (line or "").strip()
-    if not line:
-        return {}
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        return {}
-    return obj if isinstance(obj, dict) else {}
+    """严格解析 Bot 输出信封；坏 JSON / 非对象由调用方归为协议故障。"""
+    obj = json.loads(line)
+    if not isinstance(obj, dict):
+        raise ValueError("Bot 响应信封必须是 JSON 对象")
+    return obj
 
 
 def parse_xy(raw: dict[str, Any] | None) -> tuple[int | None, int | None]:
@@ -52,6 +48,23 @@ def parse_xy(raw: dict[str, Any] | None) -> tuple[int | None, int | None]:
     except (KeyError, TypeError, ValueError):
         return None, None
     return x, y
+
+
+def validate_response_payload(payload: Any) -> Any:
+    """校验棋类 ``response`` 负载形状，不判坐标对应的游戏内合法性。"""
+    if not isinstance(payload, dict):
+        raise ValueError("response 必须是包含 x/y 的对象")
+    if "x" not in payload or "y" not in payload:
+        raise ValueError("response 缺少 x/y 坐标")
+    x, y = payload["x"], payload["y"]
+    if (
+        isinstance(x, bool)
+        or isinstance(y, bool)
+        or not isinstance(x, int)
+        or not isinstance(y, int)
+    ):
+        raise ValueError("response.x/response.y 必须是整数")
+    return payload
 
 
 def build_gomoku_request(*, x: int, y: int, me: int) -> dict[str, Any]:

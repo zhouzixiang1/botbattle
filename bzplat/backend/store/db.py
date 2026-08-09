@@ -44,6 +44,181 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+_BOT_ERROR_EVENT_TYPES = frozenset({"bot_decide_error", "bot_technical_error"})
+_BOT_ERROR_MESSAGES = {
+    "invalid_json": "Bot 输出不是合法 JSON",
+    "invalid_envelope": "Bot 响应信封必须是 JSON 对象",
+    "missing_response": "Bot 响应缺少必填 response 字段",
+    "invalid_response": "Bot response 字段不符合本游戏协议",
+    "decision_timeout": "Bot 未在决策时限内输出完整响应行",
+}
+
+
+def _safe_bot_error_sample(raw: Any) -> dict[str, Any] | None:
+    """Normalize one public diagnostic without forwarding historical raw errors."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        seat = int(raw.get("seat"))
+    except (TypeError, ValueError):
+        return None
+    if seat not in (0, 1):
+        return None
+    sample: dict[str, Any] = {"seat": seat}
+    code = raw.get("code")
+    if isinstance(code, str) and code in _BOT_ERROR_MESSAGES:
+        sample["code"] = code
+        sample["error"] = _BOT_ERROR_MESSAGES[code]
+    else:
+        # Legacy bot_decide_error stored arbitrary exception text. Never surface it
+        # through newly aggregated API fields because it may contain stdout/paths.
+        sample["error"] = "Bot 响应格式错误（历史记录）"
+    reason = raw.get("reason")
+    if reason in ("protocol_error", "timeout"):
+        sample["reason"] = reason
+    for key in ("turn", "leg"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        try:
+            sample[key] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return sample
+
+
+def _load_replay_bot_error_events(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        events = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(events, list):
+        return []
+    return [
+        event
+        for event in events
+        if isinstance(event, dict) and event.get("type") in _BOT_ERROR_EVENT_TYPES
+    ]
+
+
+def _sanitize_public_replay(replay: dict | None) -> dict | None:
+    """Return a public replay copy with bounded, safe Bot incident events."""
+    if replay is None:
+        return None
+    public = dict(replay)
+    raw_events = public.get("events_json")
+    try:
+        events = json.loads(raw_events) if isinstance(raw_events, str) else []
+    except (TypeError, ValueError):
+        events = []
+    if not isinstance(events, list):
+        events = []
+    sanitized: list[Any] = []
+    incident_samples = 0
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") not in _BOT_ERROR_EVENT_TYPES:
+            sanitized.append(event)
+            continue
+        incident_samples += 1
+        if incident_samples > 3:
+            continue
+        sample = _safe_bot_error_sample(event)
+        if sample is not None:
+            sanitized.append({"type": event["type"], **sample})
+    public["events_json"] = json.dumps(sanitized, ensure_ascii=False)
+    return public
+
+
+def _with_bot_error_diagnostics(m: dict | None) -> dict | None:
+    """Expose one compatibility summary for legacy and current incident formats.
+
+    Old matches persisted ``bot_decide_error`` replay events and sometimes
+    ``result.bot_decide_errors``. Current matches persist ``bot_technical_error``
+    plus ``technical_incident_*``. List/detail consumers use the historical field
+    names, so normalize both sources into per-seat counts and at most three safe
+    samples. Persisted result counts are authoritative to avoid double-counting the
+    same incidents found in replay.
+    """
+    if m is None:
+        return None
+    replay_events = _load_replay_bot_error_events(m.pop("_replay_events_json", None))
+    result = m.get("result")
+    if not isinstance(result, dict):
+        result = {}
+        m["result"] = result
+
+    counts = {0: 0, 1: 0}
+    raw_counts = result.get("bot_decide_errors")
+    if isinstance(raw_counts, dict):
+        for seat in (0, 1):
+            try:
+                value = raw_counts.get(str(seat), raw_counts.get(seat, 0))
+                counts[seat] = max(0, int(value))
+            except (TypeError, ValueError):
+                counts[seat] = 0
+    has_persisted_counts = sum(counts.values()) > 0
+    if not has_persisted_counts:
+        for event in replay_events:
+            sample = _safe_bot_error_sample(event)
+            if sample is not None:
+                counts[sample["seat"]] += 1
+
+        # A bounded replay may retain fewer samples than the total result count.
+        # Attribute the remainder to the first recorded terminal seat.
+        try:
+            total = max(0, int(result.get("technical_incident_count", 0)))
+        except (TypeError, ValueError):
+            total = 0
+        if total > sum(counts.values()):
+            raw_technical = result.get("technical_incident_samples")
+            first = (
+                _safe_bot_error_sample(raw_technical[0])
+                if isinstance(raw_technical, list) and raw_technical
+                else None
+            )
+            if first is not None:
+                counts[first["seat"]] += total - sum(counts.values())
+
+    sample_sources: list[Any] = []
+    for key in ("bot_decide_error_samples", "technical_incident_samples"):
+        source = result.get(key)
+        if isinstance(source, list):
+            sample_sources.extend(source)
+    sample_sources.extend(replay_events)
+    samples: list[dict[str, Any]] = []
+    seen_samples: set[tuple[Any, ...]] = set()
+    for raw in sample_sources:
+        sample = _safe_bot_error_sample(raw)
+        if sample is None:
+            continue
+        sample_key = tuple(
+            sample.get(key) for key in ("reason", "code", "seat", "turn", "leg", "error")
+        )
+        if sample_key not in seen_samples:
+            seen_samples.add(sample_key)
+            samples.append(sample)
+        if len(samples) == 3:
+            break
+
+    if sum(counts.values()) > 0:
+        result["bot_decide_errors"] = counts
+        result["bot_decide_error_samples"] = samples
+    else:
+        result.pop("bot_decide_errors", None)
+        result.pop("bot_decide_error_samples", None)
+    raw_technical_samples = result.get("technical_incident_samples")
+    if isinstance(raw_technical_samples, list):
+        safe_technical_samples = []
+        for raw in raw_technical_samples[:3]:
+            safe = _safe_bot_error_sample(raw)
+            if safe is not None:
+                safe_technical_samples.append(safe)
+        result["technical_incident_samples"] = safe_technical_samples
+    return m
+
+
 def _parse_match_json_cols(m: dict | None) -> dict | None:
     """把 match 行的 match_config/result JSON 字符串列解析成 dict（消费方直接用）。
 
@@ -61,7 +236,28 @@ def _parse_match_json_cols(m: dict | None) -> dict | None:
                 m[k] = {}
         elif m.get(k) is None:
             m[k] = {}
-    return m
+    return _with_bot_error_diagnostics(m)
+
+
+def _bot_error_filter_sql(alias: str = "m") -> str:
+    """SQLite JSON1 predicate covering legacy result/replay and current incidents."""
+    safe_result = (
+        f"CASE WHEN json_valid({alias}.result) THEN {alias}.result ELSE '{{}}' END"
+    )
+    safe_events = (
+        "CASE WHEN json_valid(mr.events_json) THEN mr.events_json ELSE '[]' END"
+    )
+    return (
+        "("
+        f"CAST(COALESCE(json_extract({safe_result}, '$.bot_decide_errors.0'), 0) AS INTEGER) > 0 OR "
+        f"CAST(COALESCE(json_extract({safe_result}, '$.bot_decide_errors.1'), 0) AS INTEGER) > 0 OR "
+        f"CAST(COALESCE(json_extract({safe_result}, '$.technical_incident_count'), 0) AS INTEGER) > 0 OR "
+        "EXISTS (SELECT 1 FROM match_replays mr, "
+        f"json_each({safe_events}) je "
+        f"WHERE mr.match_id={alias}.id AND "
+        "CASE WHEN je.type='object' THEN json_extract(je.value, '$.type') END "
+        "IN ('bot_decide_error','bot_technical_error')))"
+    )
 
 
 def match_deltas(m: dict | None) -> tuple[int, int]:
@@ -2068,7 +2264,9 @@ class Store:
                 "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
                 "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
                 "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
-                "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display"
+                "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
+                "(SELECT mr.events_json FROM match_replays mr "
+                "WHERE mr.match_id=m.id) AS _replay_events_json"
             )
             sql = (
                 f"SELECT {sel} FROM {tbl} m "
@@ -2160,8 +2358,9 @@ class Store:
         *,
         contest_id: int | None = None,
         game_id: str | None = None,
+        has_bot_errors: bool | None = None,
     ) -> list[dict]:
-        """列对局。game_id 指定时只查该游戏表；否则 UNION ALL 三表（跨游戏）。"""
+        """列对局；可跨游戏并按历史/当前 Bot 协议诊断过滤。"""
         with self._tx() as c:
             join_bots = (
                 "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
@@ -2170,7 +2369,9 @@ class Store:
             sel = (
                 "m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
                 "ba.display_name AS bot_a_display, "
-                "bb.display_name AS bot_b_display"
+                "bb.display_name AS bot_b_display, "
+                "(SELECT mr.events_json FROM match_replays mr "
+                "WHERE mr.match_id=m.id) AS _replay_events_json"
             )
             where_parts: list[str] = []
             params: list[Any] = []
@@ -2189,6 +2390,9 @@ class Store:
             if game_id:
                 where_parts.append("m.game_id=?")
                 params.append(game_id)
+            if has_bot_errors is not None:
+                predicate = _bot_error_filter_sql("m")
+                where_parts.append(predicate if has_bot_errors else f"NOT {predicate}")
             where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
             if game_id:
@@ -2279,6 +2483,10 @@ class Store:
                     "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
                 ).fetchone()
             )
+
+    def get_public_replay(self, match_id: str) -> dict | None:
+        """Replay for REST/SSE viewers; internal storage remains unchanged."""
+        return _sanitize_public_replay(self.get_replay(match_id))
 
     # ── ratings（per-game：PK = bot_id + game_id，全面解耦 PR3）─────────
 
@@ -2634,21 +2842,26 @@ class Store:
         status: str | None = None,
         *,
         game_id: str | None = None,
+        has_bot_errors: bool | None = None,
     ) -> int:
-        """按 status/game_id 统计对局数；与 list_matches 对齐——game_id 指定时只查该表，
-        否则跨所有已注册游戏表求和。供分页器算 total 用。"""
+        """按 status/game_id/Bot 错误统计；过滤语义与 list_matches 对齐。"""
         with self._tx() as c:
             where_parts: list[str] = []
             params: list[Any] = []
             if status:
                 where_parts.append("status=?")
                 params.append(status)
+            if has_bot_errors is not None:
+                predicate = _bot_error_filter_sql("m")
+                where_parts.append(predicate if has_bot_errors else f"NOT {predicate}")
             where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
             total = 0
             gids = [game_id] if game_id else _all_game_ids()
             for gid in gids:
                 tbl = _matches_table(gid)
-                row = c.execute(f"SELECT COUNT(*) FROM {tbl}{where_sql}", params).fetchone()
+                row = c.execute(
+                    f"SELECT COUNT(*) FROM {tbl} m{where_sql}", params
+                ).fetchone()
                 total += int(row[0]) if row else 0
             return total
 

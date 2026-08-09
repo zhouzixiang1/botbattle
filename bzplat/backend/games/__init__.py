@@ -87,7 +87,7 @@ def loads(game_id: str, line: str) -> dict[str, Any]:
 
 
 def fail_response(game_id: str) -> Any:
-    """按游戏返回超时/异常兜底响应（holdem→裸 int；棋类→dict）。"""
+    """按游戏返回人类超时等游戏内兜底（Bot 技术故障禁止使用）。"""
     return registry.get(game_id).protocol.fail_response()
 
 

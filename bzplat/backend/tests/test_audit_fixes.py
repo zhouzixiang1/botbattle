@@ -131,7 +131,7 @@ def test_session_state_not_corrupted_on_bad_response():
     """Bot 输出非法 JSON 时，session.requests 不应单独增长（避免 traditional 错位）。"""
     session = _FakeSession(runtime_mode="traditional", turn=0)
     fake = _FakeRunner(session, ["not valid json"])  # Bot 输出垃圾
-    # loads_response 会抛 JSONDecodeError → 异常向上传播（runner decide 包装器吞成 fail_response）
+    # 非法 JSON 必须作为终局协议故障向上传播，不能再吞成 fail_response。
     with pytest.raises(Exception):
         asyncio.run(_botzone_decide(
             fake, "fake", {"hand": 0}, game_id="holdem", action_timeout=5,

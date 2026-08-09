@@ -50,6 +50,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | 人类 vs Bot | WebSocket 落子回传，独立并发槽（默认 4），per-user ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
 | 自博弈 | 同一 owner 的两个不同 Bot 可对战，走普通挑战 |
 | 崩溃收敛 | 对局中途 Bot 崩溃（含人类局）按游戏结果结算为 `completed` + `reason=crash`；Bot-vs-Bot 启动失败为 `completed` + `technical_loss`，人类局启动失败为 `aborted` |
+| 协议故障收敛 | Bot 非法 JSON/信封/response 首次发生即 `completed + protocol_error + technical_loss`；Bot 超时为 `completed + timeout + technical_loss`。Bot-vs-Bot 计分、人机局不计 Glicko；平台 sandbox 故障始终 aborted 且不评分；格式正确的非法游戏动作仍交裁判。对局列表/详情兼容聚合历史与当前错误字段，支持 `has_bot_errors` 过滤且默认不隐藏历史 completed 异常局 |
 
 ### 3.4 评分与排行
 | 需求 | 验收标准 |

@@ -15,6 +15,7 @@ from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotCrashedError,
+    BotTechnicalError,
     PlatformRunnerError,
 )
 from bzplat.backend.store import Store
@@ -39,25 +40,64 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _bot_decide_error_summary(events: list[dict]) -> dict:
-    """从对局 events 统计 bot_decide_error（Bot 响应格式错误等）。
+def _technical_incident_event(exc: BotTechnicalError) -> dict:
+    return {"type": "bot_technical_error", **exc.incident()}
 
-    返回 ``{"bot_decide_errors": {0: N, 1: M}, "bot_decide_error_samples": [...]}``，
-    供前端 Bot 详情/对局记录展示给 Bot 作者调试（"你的 Bot 第 N 手响应缺 response 字段"）。
-    无错误时返回空 dict（不污染 result）。
-    """
-    errors = [e for e in events if e.get("type") == "bot_decide_error"]
-    if not errors:
-        return {}
-    counts: dict[int, int] = {0: 0, 1: 0}
-    samples: list[dict] = []
-    for e in errors:
-        seat = int(e.get("seat", -1))
-        if seat in counts:
-            counts[seat] += 1
-        if len(samples) < 3:  # 最多存 3 条样本错误（防爆 result JSON）
-            samples.append({"seat": seat, "error": e.get("error", ""), "turn": e.get("turn")})
-    return {"bot_decide_errors": counts, "bot_decide_error_samples": samples}
+
+def _ensure_technical_incident(
+    events: list[dict], exc: BotTechnicalError
+) -> None:
+    """Persist exactly one terminal incident even for injected/fake runners."""
+    target = exc.incident()
+    if not any(
+        event.get("type") == "bot_technical_error"
+        and event.get("reason") == target["reason"]
+        and event.get("seat") == target["seat"]
+        and event.get("turn") == target["turn"]
+        for event in events
+    ):
+        events.append(_technical_incident_event(exc))
+
+
+def _technical_incident_summary(events: list[dict]) -> dict:
+    """Bound technical diagnostics kept in result JSON (counts + at most 3 samples)."""
+    incidents = [
+        event for event in events if event.get("type") == "bot_technical_error"
+    ]
+    samples = [
+        {
+            key: event[key]
+            for key in ("reason", "code", "seat", "turn", "leg", "error")
+            if key in event
+        }
+        for event in incidents[:3]
+    ]
+    by_seat = {0: 0, 1: 0}
+    for event in incidents:
+        seat = event.get("seat")
+        if seat in by_seat:
+            by_seat[seat] += 1
+    return {
+        "technical_incident_count": len(incidents),
+        "technical_incident_samples": samples,
+        # Compatibility contract consumed by MatchViewer/admin and backfilled by
+        # list/detail APIs for legacy bot_decide_error replay events.
+        "bot_decide_errors": by_seat,
+        "bot_decide_error_samples": samples,
+    }
+
+
+def _bounded_replay_events(events: list[dict]) -> list[dict]:
+    """Keep the complete game replay but at most three technical diagnostics."""
+    incident_samples = 0
+    bounded: list[dict] = []
+    for event in events:
+        if event.get("type") == "bot_technical_error":
+            incident_samples += 1
+            if incident_samples > 3:
+                continue
+        bounded.append(event)
+    return bounded
 
 
 def _completed_match_reason(result: Any, events: list[dict]) -> str:
@@ -581,7 +621,7 @@ class MatchOrchestrator:
         from bzplat.backend.matches.seat_info import match_for_viewer
 
         m = match_for_viewer(self.store, match_id)
-        replay = self.store.get_replay(match_id) or {}
+        replay = self.store.get_public_replay(match_id) or {}
         q.put_nowait({"type": "snapshot", "match": m or {}, "events": json.loads(replay.get("events_json") or "[]")})
         return q
 
@@ -762,7 +802,6 @@ class MatchOrchestrator:
                         "deltas": [ea, eb],  # 两 leg 累加（net_chips tiebreak）
                         "legs": legs_data,   # 每 leg 独立 winner/deltas（物理 A/B 视角）
                         "net_bb": spec.normalize_earnings(ea),
-                        **_bot_decide_error_summary(events),
                     },
                     ended_at=_now(),
                 )
@@ -783,7 +822,6 @@ class MatchOrchestrator:
                         "hands_played": result.rounds_played,
                         "deltas": [ea, eb],
                         "net_bb": spec.normalize_earnings(ea),
-                        **_bot_decide_error_summary(events),
                     },
                     ended_at=_now(),
                 )
@@ -794,6 +832,59 @@ class MatchOrchestrator:
                 "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
                 match_id, winner, result.rounds_played, ea, eb,
                 m["match_type"] != TYPE_CONTEST,
+            )
+        except BotTechnicalError as exc:
+            # Bot stdout protocol faults and Bot decision timeouts are attributable,
+            # terminal failures.  Score one deterministic technical loss instead of
+            # fabricating 70 fallback folds / illegal board moves.
+            _ensure_technical_incident(events, exc)
+            failed_seat = exc.failed_seat
+            winner = 1 - failed_seat
+            ea, eb = (-1, 1) if failed_seat == 0 else (1, -1)
+            failed_bot_id = m["bot_a_id"] if failed_seat == 0 else m["bot_b_id"]
+            failed_version_id = version_a_id if failed_seat == 0 else version_b_id
+            failed_runtime = mode_a if failed_seat == 0 else mode_b
+            logger.warning(
+                "bot technical failure match_id=%s reason=%s code=%s "
+                "bot_id=%s version_id=%s runtime=%s seat=%s turn=%s leg=%s error=%s",
+                match_id,
+                exc.reason,
+                exc.error_code,
+                failed_bot_id,
+                failed_version_id,
+                failed_runtime,
+                failed_seat,
+                exc.turn,
+                exc.leg,
+                str(exc)[:200],
+            )
+            self.store.update_match(
+                match_id,
+                status=STATUS_COMPLETED,
+                reason=exc.reason,
+                winner=winner,
+                result={
+                    "hands_played": sum(
+                        1 for event in events if event.get("type") == "settle"
+                    ),
+                    "deltas": [ea, eb],
+                    **_technical_incident_summary(events),
+                },
+                technical_loss=1,
+                ended_at=_now(),
+            )
+            self._safe_flush_terminal_replay(match_id, events)
+            await self._safe_postprocess_completed_match(
+                m, match_id, winner, ea, eb
+            )
+            self._broadcast(
+                match_id,
+                {
+                    "type": "match_end",
+                    "winner": winner,
+                    "reason": exc.reason,
+                    "technical_loss": 1,
+                },
             )
         except PlatformRunnerError as exc:
             # Docker daemon/image/runtime failures are platform faults, not Bot
@@ -868,7 +959,9 @@ class MatchOrchestrator:
         """
         try:
             self.store.upsert_replay(
-                match_id, json.dumps(events, ensure_ascii=False), "[]"
+                match_id,
+                json.dumps(_bounded_replay_events(events), ensure_ascii=False),
+                "[]",
             )
         except Exception:
             logger.exception("terminal match final replay flush failed match=%s", match_id)
@@ -1215,6 +1308,53 @@ class MatchOrchestrator:
                 self._safe_flush_terminal_replay(match_id, events)
                 # 人类对战不计 Glicko-2（人类无 rating 行）
                 self._broadcast(match_id, {"type": "match_end", "winner": winner, "earnings_a": ea, "earnings_b": eb})
+            except BotTechnicalError as exc:
+                # Only the subprocess path can construct BotTechnicalError. Human
+                # WebSocket payloads keep their existing game-validation/inactivity
+                # semantics and are never mislabeled as Bot protocol failures.
+                _ensure_technical_incident(events, exc)
+                winner = 1 - bot_seat
+                ea, eb = (-1, 1) if bot_seat == 0 else (1, -1)
+                logger.warning(
+                    "bot technical failure match_id=%s reason=%s code=%s "
+                    "bot_id=%s version_id=%s runtime=%s seat=%s turn=%s leg=%s error=%s",
+                    match_id,
+                    exc.reason,
+                    exc.error_code,
+                    bot.get("id"),
+                    version_id,
+                    bot_mode,
+                    bot_seat,
+                    exc.turn,
+                    exc.leg,
+                    str(exc)[:200],
+                )
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_COMPLETED,
+                    winner=winner,
+                    reason=exc.reason,
+                    result={
+                        "hands_played": sum(
+                            1 for event in events if event.get("type") == "settle"
+                        ),
+                        "deltas": [ea, eb],
+                        **_technical_incident_summary(events),
+                    },
+                    technical_loss=1,
+                    ended_at=_now(),
+                )
+                self._safe_flush_terminal_replay(match_id, events)
+                # Human matches never enter Glicko/pair_stats settlement.
+                self._broadcast(
+                    match_id,
+                    {
+                        "type": "match_end",
+                        "winner": winner,
+                        "reason": exc.reason,
+                        "technical_loss": 1,
+                    },
+                )
             except PlatformRunnerError as exc:
                 logger.error("human match %s sandbox unavailable — %s", match_id, exc)
                 self.store.update_match(

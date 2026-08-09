@@ -19,8 +19,9 @@ def _seed_bot_and_match(c, app):
     store = app.state.store
     u = store.create_user("wl_user", "wl@x.com", hash_password("pw123456"), display_name="wl")
     store.update_user(u["id"], email_verified=1)
-    from bzplat.backend.bots import BotManager
-    bm = BotManager(store, upload_root="bot_uploads")
+    # Reuse create_app's DB-adjacent upload root. A relative "bot_uploads" here
+    # used to write the primary checkout whenever pytest ran from repository CWD.
+    bm = app.state.bot_manager
     from pathlib import Path
     sample = Path(__file__).resolve().parents[3] / "samples" / "callbot_linux_amd64"
     if not sample.is_file():

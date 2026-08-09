@@ -70,7 +70,7 @@ class SessionFactory(Protocol):
 
 @dataclass(frozen=True)
 class ProtocolSpec:
-    """一款游戏的 Bot 行协议（序列化/反序列化/超时兜底响应）。
+    """一款游戏的 Bot 行协议（序列化/反序列化/响应契约/兜底响应）。
 
     各游戏的 protocol.py 独立实现这三个函数（holdem 用紧凑 JSON 动作协议；
     gomoku/pencil 各自一份 board 协议副本，互不共享）。
@@ -78,8 +78,12 @@ class ProtocolSpec:
 
     dumps_request: Callable[[dict[str, Any]], str]
     loads_response: Callable[[str], dict[str, Any]]
-    # fail_response 返回值由各游戏自定（holdem 返裸 int -1=fold；棋类返 dict）。
-    # 调用方（runner）把它传给该游戏的 parse_response/parse_xy，类型在此不强约束。
+    # 校验已从 Botzone 信封提取出的 response payload。只校验协议形状/类型；
+    # 坐标越界、重复落子、加注额不足等游戏内合法性仍由裁判判定。
+    validate_response_payload: Callable[[Any], Any]
+    # fail_response 仅供人类超时等游戏内兜底，返回值由各游戏自定
+    #（holdem 返裸 int -1=fold；棋类返 dict）。Bot 协议/超时故障不得使用它。
+    # 调用方把它传给该游戏的 parse_response/parse_xy，类型在此不强约束。
     fail_response: Callable[[], Any]
 
 

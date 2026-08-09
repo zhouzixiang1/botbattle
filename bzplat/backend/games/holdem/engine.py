@@ -29,7 +29,11 @@ from typing import Any, Callable
 from bzplat.backend.games.holdem.holdem_judge import Holdem
 from bzplat.backend.games.holdem.result import HandResult, MatchResult
 from bzplat.backend.games.holdem import protocol as proto
-from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
+from bzplat.backend.runtime.binary_runner import (
+    BotCrashedError,
+    BotTechnicalError,
+    PlatformRunnerError,
+)
 
 STARTING_STACK = 20_000
 SMALL_BLIND = 50
@@ -151,6 +155,9 @@ class MatchSession:
             try:
                 await self._play_hand(h, decide)
             except PlatformRunnerError:
+                raise
+            except BotTechnicalError:
+                # 协议错误/超时由平台统一落技术判负，不能伪装成一手 fold。
                 raise
             except BotCrashedError:
                 # 对齐权威裁判：bot 崩溃不可恢复 → 判负（本手全筹码输给对手），不中止整场。

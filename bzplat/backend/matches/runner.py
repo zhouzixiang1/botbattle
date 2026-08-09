@@ -3,16 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
+import json
 import time as _time
 from typing import Any, Callable
 
 from bzplat.backend.games import (
     GAME_HOLDEM,
-    dumps as _reg_dumps,
     fail_response as _reg_fail,
-    loads as _reg_loads,
     normalize_game_id,
+    registry as _game_registry,
     run_session,
 )
 # 全面解耦：runner 不再按 game_id 切协议模块，统一委托 games 注册表。
@@ -23,26 +22,79 @@ from bzplat.backend.games import _botzone_protocol as _bz
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotCrashedError,
+    BotDecisionTimeoutError,
+    BotProtocolError,
+    BotTechnicalError,
     PlatformRunnerError,
     DEFAULT_ACTION_TIMEOUT,
 )
 
-logger = logging.getLogger(__name__)
-
 EventSink = Callable[[str, dict[str, Any]], None]
 
 
-def _dumps(game_id: str, request: dict[str, Any]) -> str:
-    return _reg_dumps(game_id, request)
-
-
-def _loads(game_id: str, line: str) -> dict[str, Any]:
-    return _reg_loads(game_id, line)
-
-
 def _fail_response(game_id: str) -> dict[str, Any]:
-    """超时/异常时的兜底响应（按游戏：扑克 fold；棋类非法坐标）。"""
+    """人类输入超时等游戏内兜底（Bot 技术故障禁止再走此路径）。"""
     return _reg_fail(game_id)
+
+
+def _protocol_payload(
+    game_id: str,
+    line: str,
+    *,
+    failed_seat: int,
+    turn: int,
+    leg: int | None,
+) -> Any:
+    """Strictly decode one Botzone response without persisting raw Bot output."""
+    try:
+        envelope = _bz.loads_response(line)
+    except json.JSONDecodeError as exc:
+        raise BotProtocolError(
+            "Bot 输出不是合法 JSON",
+            error_code="invalid_json",
+            failed_seat=failed_seat,
+            turn=turn,
+            leg=leg,
+        ) from exc
+    if not isinstance(envelope, dict):
+        raise BotProtocolError(
+            "Bot 响应信封必须是 JSON 对象",
+            error_code="invalid_envelope",
+            failed_seat=failed_seat,
+            turn=turn,
+            leg=leg,
+        )
+    if "response" not in envelope:
+        raise BotProtocolError(
+            "Bot 响应缺少必填 response 字段",
+            error_code="missing_response",
+            failed_seat=failed_seat,
+            turn=turn,
+            leg=leg,
+        )
+    payload = envelope["response"]
+    try:
+        _game_registry.get(game_id).protocol.validate_response_payload(payload)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise BotProtocolError(
+            "Bot response 字段不符合本游戏协议",
+            error_code="invalid_response",
+            failed_seat=failed_seat,
+            turn=turn,
+            leg=leg,
+        ) from exc
+    return payload
+
+
+def _emit_bot_technical_error(
+    on_event: EventSink | None, exc: BotTechnicalError
+) -> None:
+    if on_event is None:
+        return
+    on_event(
+        "bot_technical_error",
+        {"type": "bot_technical_error", **exc.incident()},
+    )
 
 
 async def _traditional_decide_one_shot(
@@ -50,6 +102,11 @@ async def _traditional_decide_one_shot(
     session: Any,
     request: dict[str, Any],
     action_timeout: float,
+    *,
+    game_id: str,
+    failed_seat: int,
+    turn: int,
+    leg: int | None,
 ) -> dict[str, Any]:
     """Traditional 模式单次决策：启动 Bot → 发完整历史信封 → 读响应 → 停 Bot。
 
@@ -72,8 +129,13 @@ async def _traditional_decide_one_shot(
         resp_line = await runner.send(tmp_sid, line, timeout=action_timeout)
     finally:
         await runner.stop_session(tmp_sid)
-    envelope = _bz.loads_response(resp_line)
-    payload = _bz.extract_response_payload(envelope)
+    payload = _protocol_payload(
+        game_id,
+        resp_line,
+        failed_seat=failed_seat,
+        turn=turn,
+        leg=leg,
+    )
     # 提交会话状态（与 longrunning 路径一致）
     session.requests.append(request)
     session.responses.append(payload)
@@ -88,6 +150,8 @@ async def _botzone_decide(
     *,
     game_id: str,
     action_timeout: float,
+    failed_seat: int = 0,
+    leg: int | None = None,
 ) -> dict[str, Any]:
     """Botzone 标准协议决策：按 session.runtime_mode 选传输路径，返回信封 dict。
 
@@ -101,14 +165,31 @@ async def _botzone_decide(
     非 Botzone 协议的游戏（未来）可不走本函数；当前所有游戏均 Botzone 协议。
     """
     session = runner._sessions[session_id]
+    attempted_turn = session.turn + 1
 
     # Traditional 模式：Bot 是一次性程序（处理一个信封→输出→退出），平台每回合重启。
     # 这是 Botzone 官方 traditional 语义——Bot 无状态，每次从完整历史信封重建。
     # LongRunning 模式 Bot 常驻（session 复用，首回合握手后发单 request）。
     if session.runtime_mode == _bz.RUNTIME_TRADITIONAL:
-        return await _traditional_decide_one_shot(
-            runner, session, request, action_timeout
-        )
+        try:
+            return await _traditional_decide_one_shot(
+                runner,
+                session,
+                request,
+                action_timeout,
+                game_id=game_id,
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            )
+        except asyncio.TimeoutError as exc:
+            raise BotDecisionTimeoutError(
+                "Bot 未在决策时限内输出完整响应行",
+                error_code="decision_timeout",
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            ) from exc
 
     is_first_turn = session.turn == 0
     # 传输格式判定：
@@ -129,7 +210,24 @@ async def _botzone_decide(
         # LongRunning 后续回合：发单 request 信封。
         line = _bz.dumps_longrunning_single(request)
 
-    resp_line = await runner.send(session_id, line, timeout=action_timeout)
+    try:
+        resp_line = await runner.send(session_id, line, timeout=action_timeout)
+    except asyncio.TimeoutError as exc:
+        raise BotDecisionTimeoutError(
+            "Bot 未在决策时限内输出完整响应行",
+            error_code="decision_timeout",
+            failed_seat=failed_seat,
+            turn=attempted_turn,
+            leg=leg,
+        ) from exc
+
+    payload = _protocol_payload(
+        game_id,
+        resp_line,
+        failed_seat=failed_seat,
+        turn=attempted_turn,
+        leg=leg,
+    )
 
     # LongRunning 首回合响应后探测 keep_running 握手。
     if session.runtime_mode == _bz.RUNTIME_LONGRUNNING and is_first_turn:
@@ -137,8 +235,6 @@ async def _botzone_decide(
         if extra is not None and _bz.is_keep_running_signal(extra):
             session.long_running = True
 
-    envelope = _bz.loads_response(resp_line)
-    payload = _bz.extract_response_payload(envelope)
     # 原子提交会话状态：requests/responses/turn 一起更新。若上面的 loads/extract 抛异常
     # （Bot 输出非法 JSON / 缺 response），不提交——避免 requests 比 responses 多一条导致
     # traditional Bot 后续信封错位（requests[i]↔responses[i] 配对重放错乱）。
@@ -253,9 +349,14 @@ class MatchRunner:
                                 "used": round(clock.used(player_idx), 1),
                                 "budget": clock.budget,
                             })
-                        raise TimeoutError(
-                            f"seat {player_idx} 时间耗尽（{clock.budget}s）"
+                        timeout_exc = BotDecisionTimeoutError(
+                            "Bot 累计决策时间已耗尽",
+                            error_code="decision_timeout",
+                            failed_seat=player_idx,
+                            turn=getattr(self.runner._sessions.get(sid), "turn", 0) + 1,
                         )
+                        _emit_bot_technical_error(on_event, timeout_exc)
+                        raise timeout_exc
                     effective_timeout = clock.remaining(player_idx)
                 else:
                     effective_timeout = self.action_timeout
@@ -264,44 +365,24 @@ class MatchRunner:
                     resp = await _botzone_decide(
                         self.runner, sid, request,
                         game_id=gid, action_timeout=effective_timeout,
+                        failed_seat=player_idx,
                     )
-                except (BotCrashedError, PlatformRunnerError):
-                    # Bot 崩溃向上传播判技术负；平台沙箱故障也必须向上传播，
-                    # 由 orchestrator 中止且不评分，绝不能吞成 Bot 默认动作。
-                    raise
-                except asyncio.TimeoutError as exc:
-                    # 象棋钟超时（剩余时间用完）→ 判超时负（非可恢复异常）
-                    if clock.active:
+                except BotTechnicalError as exc:
+                    # 首个协议错误/超时即结束对局；绝不伪造成游戏默认动作继续跑。
+                    if isinstance(exc, BotDecisionTimeoutError) and clock.active:
                         elapsed = clock.now() - t0
-                        # 不在此 record——finally 会统一记录，否则重复累计。
-                        # 事件 payload 用投影值（已用 + 本次），与 finally 记录一致。
                         if on_event is not None:
                             on_event("time_out", {
                                 "type": "time_out", "seat": player_idx,
                                 "used": round(clock.used(player_idx) + elapsed, 1),
                                 "budget": clock.budget,
                             })
-                        raise TimeoutError(
-                            f"seat {player_idx} 时间耗尽（{clock.budget}s）"
-                        ) from exc
-                    # 非象棋钟的单步超时 → 走原可恢复路径
-                    logger.warning("bot %s 决策超时 (%ss)", player_idx, effective_timeout)
-                    if on_event is not None:
-                        on_event("bot_decide_error", {
-                            "type": "bot_decide_error", "seat": player_idx,
-                            "error": str(exc)[:200],
-                            "turn": getattr(self.runner._sessions.get(sid), "turn", None),
-                        })
-                    return _fail_response(gid)
-                except Exception as exc:
-                    logger.warning("bot %s decide failed: %s", player_idx, exc)
-                    if on_event is not None:
-                        on_event("bot_decide_error", {
-                            "type": "bot_decide_error", "seat": player_idx,
-                            "error": str(exc)[:200],
-                            "turn": getattr(self.runner._sessions.get(sid), "turn", None),
-                        })
-                    return _fail_response(gid)
+                    _emit_bot_technical_error(on_event, exc)
+                    raise
+                except (BotCrashedError, PlatformRunnerError):
+                    # Bot 崩溃向上传播判技术负；平台沙箱故障也必须向上传播，
+                    # 由 orchestrator 中止且不评分，绝不能吞成 Bot 默认动作。
+                    raise
                 finally:
                     if clock.active:
                         clock.record(player_idx, clock.now() - t0)
@@ -364,8 +445,19 @@ class MatchRunner:
                                 "used": round(clock.used(player_idx), 1),
                                 "budget": clock.budget,
                             })
+                        if player_idx == bot_seat:
+                            timeout_exc = BotDecisionTimeoutError(
+                                "Bot 累计决策时间已耗尽",
+                                error_code="decision_timeout",
+                                failed_seat=bot_seat,
+                                turn=getattr(
+                                    self.runner._sessions.get(sid_bot), "turn", 0
+                                ) + 1,
+                            )
+                            _emit_bot_technical_error(on_event, timeout_exc)
+                            raise timeout_exc
                         raise TimeoutError(
-                            f"seat {player_idx} 时间耗尽（{clock.budget}s）"
+                            f"human seat {player_idx} 时间耗尽（{clock.budget}s）"
                         )
                     effective_timeout = clock.remaining(player_idx)
                 else:
@@ -376,6 +468,7 @@ class MatchRunner:
                         resp = await _botzone_decide(
                             self.runner, sid_bot, request,
                             game_id=gid, action_timeout=effective_timeout,
+                            failed_seat=bot_seat,
                         )
                     else:
                         # 人类侧：生产实现返回等待 WebSocket Future 的 coroutine。
@@ -388,6 +481,17 @@ class MatchRunner:
                             else:
                                 out = await out
                         resp = out if isinstance(out, dict) else _fail_response(gid)
+                except BotTechnicalError as exc:
+                    if isinstance(exc, BotDecisionTimeoutError) and clock.active:
+                        elapsed = clock.now() - t0
+                        if on_event is not None:
+                            on_event("time_out", {
+                                "type": "time_out", "seat": player_idx,
+                                "used": round(clock.used(player_idx) + elapsed, 1),
+                                "budget": clock.budget,
+                            })
+                    _emit_bot_technical_error(on_event, exc)
+                    raise
                 except (BotCrashedError, PlatformRunnerError):
                     # Bot 崩溃或平台沙箱故障都不可吞成默认动作。
                     raise
@@ -403,17 +507,9 @@ class MatchRunner:
                         raise TimeoutError(
                             f"seat {player_idx} 时间耗尽（{clock.budget}s）"
                         ) from exc
-                    # 无累计棋钟时保持旧语义：Bot 单步超时降级默认动作；
-                    # human_decide 自身异常继续上抛给游戏/编排层。
-                    if player_idx != bot_seat:
-                        raise
-                    logger.warning("bot %s 决策超时 (%ss)", player_idx, effective_timeout)
-                    return _fail_response(gid)
-                except Exception as exc:
-                    if player_idx != bot_seat:
-                        raise
-                    logger.warning("bot %s decide failed: %s", player_idx, exc)
-                    return _fail_response(gid)
+                    # 此分支只可能来自人类 Future；Bot subprocess 的超时已由
+                    # _botzone_decide 转成 BotDecisionTimeoutError。
+                    raise
                 finally:
                     if clock.active:
                         clock.record(player_idx, clock.now() - t0)
@@ -532,16 +628,19 @@ class MatchRunner:
                     else:
                         sid = sid_a if player_idx == 0 else sid_b
                     try:
+                        physical_seat = 1 - player_idx if swap else player_idx
                         return await _botzone_decide(
                             self.runner, sid, request,
                             game_id=gid, action_timeout=self.action_timeout,
+                            failed_seat=physical_seat,
+                            leg=li,
                         )
+                    except BotTechnicalError as exc:
+                        _emit_bot_technical_error(leg_on_event, exc)
+                        raise
                     except (BotCrashedError, PlatformRunnerError):
                         # Bot 崩溃或平台沙箱故障都向上传播（与 run_binaries 一致）。
                         raise
-                    except Exception as exc:
-                        logger.warning("bot decide failed (leg%s seat%s): %s", li, player_idx, exc)
-                        return _fail_response(gid)
 
                 def leg_on_event(kind: str, ev: dict[str, Any]) -> None:
                     ev2 = {**ev, "leg": li}

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -150,11 +151,17 @@ def test_protocol_dumps_loads_roundtrip():
     assert loads("holdem", hline) == {"a": "c"}
 
 
-def test_protocol_loads_board_tolerates_garbage():
-    """棋类协议对空/非法输入返回 {}（不抛），保对局不崩。"""
-    assert loads("gomoku", "") == {}
-    assert loads("gomoku", "not json") == {}
-    assert loads("pencil", "") == {}
+def test_protocol_loads_board_rejects_garbage():
+    """棋类协议不得把空串/坏 JSON/非对象静默降级成非法落子。"""
+    for game_id, line in (
+        ("gomoku", ""),
+        ("gomoku", "not json"),
+        ("pencil", ""),
+    ):
+        with pytest.raises(json.JSONDecodeError):
+            loads(game_id, line)
+    with pytest.raises(ValueError, match="JSON 对象"):
+        loads("gomoku", "[]")
 
 
 # ── validate / default match_config ───────────────────────────

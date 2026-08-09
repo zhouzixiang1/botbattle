@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
@@ -81,3 +83,104 @@ def test_matches_total_filtered_by_status(tmp_path):
     # 组合：holdem + completed
     both = c.get("/api/matches?status=completed&game_id=holdem&limit=100").json()
     assert both["total"] == 7
+
+
+def test_matches_aggregate_and_filter_legacy_and_current_bot_errors(tmp_path):
+    c, store = _app(tmp_path)
+    # Historical completed bug: result already has the authoritative 70-count,
+    # while replay contains the same 70 events. Aggregation must not double it or
+    # expose the historical raw exception/path.
+    legacy_events = [
+        {
+            "type": "bot_decide_error",
+            "seat": 0,
+            "turn": turn + 1,
+            "error": "/private/bot_uploads/secret: missing response",
+        }
+        for turn in range(70)
+    ]
+    store.update_match(
+        "mh0",
+        result={
+            "bot_decide_errors": {"0": 70, "1": 0},
+            "bot_decide_error_samples": [legacy_events[0]],
+        },
+    )
+    store.upsert_replay("mh0", json.dumps(legacy_events), "[]")
+
+    # Another historical row has diagnostics only in replay.
+    store.upsert_replay(
+        "mh1",
+        json.dumps(
+            [
+                {
+                    "type": "bot_technical_error",
+                    "reason": "protocol_error",
+                    "code": "missing_response",
+                    "seat": 1,
+                    "turn": 2,
+                    "error": "safe",
+                }
+            ]
+        ),
+        "[]",
+    )
+
+    # Current bounded replay has fewer samples than its persisted total.
+    current_samples = [
+        {
+            "type": "bot_technical_error",
+            "reason": "protocol_error",
+            "code": "invalid_json",
+            "seat": 0,
+            "turn": turn + 1,
+            "error": "safe",
+        }
+        for turn in range(3)
+    ]
+    store.update_match(
+        "mh2",
+        result={
+            "technical_incident_count": 8,
+            "technical_incident_samples": current_samples,
+        },
+    )
+    store.upsert_replay("mh2", json.dumps(current_samples), "[]")
+
+    # Cross-game + malformed replay coverage for the SQL JSON filter.
+    store.upsert_replay("mg0", json.dumps([legacy_events[0]]), "[]")
+    store.upsert_replay("mg1", "not-json", "[]")
+
+    all_rows = c.get("/api/matches?limit=100").json()
+    assert all_rows["total"] == 10  # default still includes every status/result
+    by_id = {row["id"]: row for row in all_rows["matches"]}
+    assert by_id["mh0"]["result"]["bot_decide_errors"] == {"0": 70, "1": 0}
+    assert len(by_id["mh0"]["result"]["bot_decide_error_samples"]) == 3
+    assert "/private" not in json.dumps(by_id["mh0"]["result"], ensure_ascii=False)
+    assert by_id["mh1"]["result"]["bot_decide_errors"] == {"0": 0, "1": 1}
+    assert by_id["mh2"]["result"]["bot_decide_errors"] == {"0": 8, "1": 0}
+    assert len(by_id["mh2"]["result"]["bot_decide_error_samples"]) == 3
+
+    only_errors = c.get("/api/matches?has_bot_errors=true&limit=100").json()
+    assert only_errors["total"] == 4
+    assert {row["id"] for row in only_errors["matches"]} == {
+        "mh0",
+        "mh1",
+        "mh2",
+        "mg0",
+    }
+    assert c.get("/api/matches?has_bot_errors=false&limit=100").json()["total"] == 6
+    completed_errors = c.get(
+        "/api/matches?status=completed&has_bot_errors=true&limit=100"
+    ).json()
+    assert completed_errors["total"] == 3
+
+    detail_body = c.get("/api/matches/mh1").json()
+    detail = detail_body["match"]
+    assert detail["result"]["bot_decide_errors"] == {"0": 0, "1": 1}
+    assert detail["result"]["bot_decide_error_samples"][0]["code"] == "missing_response"
+
+    legacy_detail = c.get("/api/matches/mh0").json()
+    public_events = json.loads(legacy_detail["replay"]["events_json"])
+    assert len([e for e in public_events if e["type"] == "bot_decide_error"]) == 3
+    assert "/private" not in legacy_detail["replay"]["events_json"]

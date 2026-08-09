@@ -701,6 +701,7 @@ def list_matches(
     request: Request,
     status: str | None = None,
     game_id: str | None = None,
+    has_bot_errors: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
@@ -708,7 +709,11 @@ def list_matches(
     lim = max(1, min(limit, 100))
     off = max(0, offset)
     rows = store.list_matches(
-        status=status, game_id=game_id, limit=lim, offset=off
+        status=status,
+        game_id=game_id,
+        has_bot_errors=has_bot_errors,
+        limit=lim,
+        offset=off,
     )
     # 裁列表响应死字段（对抗审计：started_at/ended_at/human_user_id/human_seat/
     # likes_count/views_count/owner_id 列表不消费；
@@ -718,7 +723,9 @@ def list_matches(
     for m in rows:
         for k in _MATCH_LIST_DEAD:
             m.pop(k, None)
-    total = store.count_matches(status=status, game_id=game_id)
+    total = store.count_matches(
+        status=status, game_id=game_id, has_bot_errors=has_bot_errors
+    )
     return {"matches": rows, "total": total, "limit": lim, "offset": off}
 
 
@@ -735,7 +742,7 @@ def match_detail(match_id: str, request: Request):
     m = store.get_match_detailed(match_id)
     if not m:
         raise HTTPException(404, "对局不存在")
-    replay = _store(request).get_replay(match_id) or {}
+    replay = store.get_public_replay(match_id) or {}
     return {"match": _with_seat_info(m, store=store), "replay": replay}
 
 

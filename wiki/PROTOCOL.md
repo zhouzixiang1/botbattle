@@ -31,7 +31,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 
 - **一行一条**：请求和响应都各占完整一行（以 `\n` 结尾）。响应**必须**以换行结尾并**立即 flush** stdout，否则平台会一直等到当前时限：holdem / gomoku 通常是可配的单步超时（默认 60 秒），Pencil 则是该座位的 900 秒累计棋钟剩余时间。
 - **紧凑格式**：字段间无多余空白（如 `{"response":0}`，不是 `{ "response": 0 }`）。你的响应不强制紧凑，但建议紧凑。
-- **超时 / 非法响应**：holdem / gomoku 使用单步决策时限（默认 **60 秒**，管理员可配）；Pencil 使用每方固定 **900 秒累计棋钟**，Bot-vs-Bot 和人类对战一致。扑克的失败响应视为 fold，棋类非法响应或超时判负。Pencil 的 `time_used` / `time_out` 是回放与 SSE 的平台事件，不属于 Bot stdin/stdout 协议。**对局中途进程崩溃 / 主动 exit / EOF** 由引擎**计分判负**（对局 `completed`）；Bot-vs-Bot 的**启动失败**也统一按 `technical_loss` 完成并判崩溃方负，人类对战启动失败才记为 `aborted`（`bot_crashed`）。见 [对局](#/wiki?slug=guide)。
+- **超时 / 错误分层**：holdem / gomoku 使用单步决策时限（默认 **60 秒**，管理员可配）；Pencil 使用每方固定 **900 秒累计棋钟**。Bot 超时、非法 JSON、非对象信封、缺少 `response` 或 `response` 类型错误，会在**第一次发生时立即技术判负**：对局为 `completed`，原因分别为 `timeout` / `protocol_error`，`technical_loss=1`，并保留座位、决策序号和安全错误码；Bot-vs-Bot 结果计分，人机局由人类获胜但不计 Glicko。只有格式正确、但违反游戏规则的动作（如越界落子、过小加注）才交给裁判按游戏规则判负/fold。平台沙箱故障为 `aborted + platform_error` 且不评分。Pencil 的 `time_used` / `time_out` 是回放与 SSE 的平台事件，不属于 Bot stdin/stdout 协议。**对局中途进程崩溃 / 主动 exit / EOF** 仍由引擎计分判负；启动失败见[对局](#/wiki?slug=guide)。
 
 ## 2. 信封格式
 
@@ -202,12 +202,15 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 
 | 情况 | 平台行为 |
 |------|----------|
-| 超过决策时限未响应 | 本手判 fold（response `-1`） |
-| 输出非法 JSON | 本手判 fold |
-| `response` 不是合法整数 / 缺失 | 本手判 fold |
-| raise 的额外量换算后低于最小加注额 | 本手判 fold |
+| Bot 超过决策时限未响应 | 首次发生即技术判负：`completed + reason=timeout + technical_loss=1`；Bot-vs-Bot 计分 |
+| 输出非法 JSON / 顶层不是对象 | 首次发生即技术判负：`completed + reason=protocol_error + technical_loss=1` |
+| 缺少 `response` / `response` 类型不符 | 同上；旧 `{"a":...}` 不兼容，不能静默当 fold |
+| 格式正确，但 raise 额外量低于最小值 | 交给德州裁判，按非法游戏动作 fold（不是协议故障） |
+| 格式正确，但棋类坐标越界 / 已占用 | 交给棋类裁判判负（不是协议故障） |
 | 对局中途进程崩溃 / 主动退出 / EOF | **计分判负**（对局 `completed`，崩溃方负）；不再吞成默认 fold 继续 |
 | 启动失败（session 起不来） | Bot-vs-Bot → `completed` + `technical_loss`；人类对战 → `aborted`（`bot_crashed`） |
+
+协议/超时技术故障会在回放写一条 `bot_technical_error`，并在结果中保存总数与最多 3 条样本；样本只含 `reason/code/seat/turn/leg/error` 等有界诊断，不保存 Bot 原始输出或服务器路径。`turn` 从 1 开始计数。平台日志另带 `match_id/bot_id/version_id/runtime/seat/turn`，供管理员定位具体版本。
 
 **写作建议**：始终保证输出是单行合法 JSON、以 `\n` 结尾并 flush；遇到无法解析的输入时，回一条最安全的 `{"response":-1}` 比让进程崩溃更稳妥。
 
@@ -244,7 +247,7 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 - `x,y` = 对手最近一手（0-based 坐标，15×15 棋盘）。黑方（`me=0`）首手 `x=y=-1`（无上一手）。
 - `me` = 本方座位（0=黑，1=白）。
 
-响应：`{"response": {"x": <你的落子>, "y": <你的落子>}}`。详见 [五子棋](#/wiki?slug=gomoku)。非法着 / 超时 → **判负**。
+响应：`{"response": {"x": <你的落子>, "y": <你的落子>}}`。详见 [五子棋](#/wiki?slug=gomoku)。格式正确但越界 / 占用的落子由裁判判负；Bot 超时或信封 / response 格式错误由平台立即技术判负。
 
 ### 点格棋（Pencil）
 

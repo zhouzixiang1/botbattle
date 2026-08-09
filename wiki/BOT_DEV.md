@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
 要点：
 
-- `flush=True`（或 `sys.stdout.flush()`）**必不可少**——Python 默认会缓冲 stdout，不刷新平台就读不到你的响应，最终超时判 fold。
+- `flush=True`（或 `sys.stdout.flush()`）**必不可少**——Python 默认会缓冲 stdout，不刷新平台就读不到响应；首次超时会终止对局并将该 Bot 记为技术负（`reason=timeout`）。
 - 解析失败时回一条 `{"response":-1}` 比让进程崩溃更安全。
 - LongRunning 模式下，首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<`。未握手不会让本次动作超时，但会增加最多 1 秒探测等待，并进入同进程完整历史的兼容回退。
 - 德州 `response=0` 既是 call 也是 check——平台按当前下注合法性自动判定为跟注或过牌。
@@ -214,14 +214,16 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 
 | 陷阱 | 后果 | 正确做法 |
 |------|------|----------|
-| 忘了 `flush` stdout | 等到当前时限后失败：扑克 fold，棋类判负；Pencil 会耗尽该方累计棋钟 | 每次输出后 flush（Python `flush=True`、C `fflush`） |
+| 忘了 `flush` stdout | 首次超过时限即 `timeout` 技术判负；Pencil 还会消耗该方累计棋钟 | 每次输出后 flush（Python `flush=True`、C `fflush`） |
 | 输出不带换行 `\n` | 平台可能读不到完整行 | 响应以 `\n` 结尾 |
 | 用 `print` 后进程阻塞缓冲 | 同上 | 显式刷新或关闭缓冲 |
-| response 不是裸整数 | 判 fold（协议违规） | 德州 response 必须是 `-1/-2/0/>0` 整数 |
+| 非法 JSON / 缺 `response` / response 类型错误 | 首次发生即 `protocol_error` 技术判负 | 严格输出一行 `{"response":...}`；旧 `{"a":...}` 已拒绝 |
+| response 不是裸整数 | `protocol_error` 技术判负 | 德州 response 必须是 `-1/-2/0/>0` 整数 |
 | `raise` 的正整数当成「加注到总额」 | 加注额不对被判 fold | 正整数是**额外下注筹码**（= 目标总额 − 本街已投） |
 | `raise` 换算后总额低于最小加注 | 判 fold | 目标总额 ≥ 上次下注的 2 倍 |
 | LongRunning 首回合没输出握手串 | 首个响应后额外等待最多 1 秒，随后在同一进程发送完整历史；状态型 Bot 可能错乱 | 首回合响应后立即输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` |
 | 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负；Bot-vs-Bot 启动失败 → `completed` + `technical_loss`；人类对战启动失败 → `aborted` | 保持进程存活，出错就回安全默认动作（扑克 `{"response":-1}`） |
+| 超过决策时限 | `completed + reason=timeout + technical_loss=1`；Bot-vs-Bot 计分 | 每次完整输出一行并立即 flush；Pencil 还受每方 900 秒累计预算约束 |
 | 上传 macOS 二进制 | 被拒绝 | 交叉编译为 Linux ELF |
 | 依赖联网 / 文件写入 | 调用失败 | 纯计算，只用 stdin/stdout |
 | 依赖 Wine 配置持久化 | 下场对局配置消失 | PE 的 `HOME/WINEPREFIX` 是单场隔离 tmpfs，不持久保存 |

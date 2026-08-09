@@ -11,4 +11,5 @@ from bzplat.backend.games._board_protocol import (  # noqa: F401
     dumps_request,
     loads_response,
     parse_xy,
+    validate_response_payload,
 )

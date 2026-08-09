@@ -80,7 +80,8 @@ def dumps_longrunning_single(request: Any, *, data: Any = None) -> str:
 def loads_response(line: str) -> dict[str, Any]:
     """解析 Bot 输出的一行 JSON 信封 → ``{"response":..., "data":..., "debug":...}``。
 
-    不要求字段齐全——只保证返回 dict（供 :func:`extract_response_payload` 取负载）。
+    本函数只做 JSON 解码；严格入口随后校验顶层对象、必填 ``response`` 与游戏
+    payload。拆开两步可保留精确、安全的协议错误码。
     """
     return json.loads(line)
 

@@ -82,7 +82,8 @@ class BotSession:
 
 class BotCrashedError(RuntimeError):
     """Bot 进程崩溃（启动即退出/EOF），不可恢复。区别于普通的决策超时/格式错误——
-    决策超时是「Bot 慢」，崩溃是「Bot 死了」，后者应快速 abort 对局而非吞成默认动作死磕。"""
+    决策超时是「Bot 慢」，崩溃是「Bot 死了」；两者都必须立即收敛为明确终局，
+    不能吞成默认动作继续。具体 completed/aborted 语义由引擎与编排层按阶段决定。"""
 
     def __init__(self, *args: object, crashed_seat: int | None = None) -> None:
         super().__init__(*args)
@@ -97,6 +98,61 @@ class PlatformRunnerError(RuntimeError):
     This must never be converted into a Bot technical loss: Docker daemon/image/
     invocation failures are platform faults and therefore abort without rating.
     """
+
+
+class BotTechnicalError(RuntimeError):
+    """A terminal, attributable Bot fault with safe structured diagnostics.
+
+    Unlike :class:`PlatformRunnerError`, these failures are caused by the uploaded
+    program and therefore produce a scored technical loss in Bot-vs-Bot matches.
+    ``message`` must be safe for replay/result persistence: never include the raw
+    stdout line, host paths, container arguments, or other private runtime data.
+    """
+
+    reason = "technical_loss"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str,
+        failed_seat: int,
+        turn: int,
+        leg: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        if failed_seat not in (0, 1):
+            raise ValueError(f"failed_seat 必须是 0/1，得到 {failed_seat!r}")
+        self.error_code = error_code
+        self.failed_seat = failed_seat
+        # 1-based attempted decision number for operator/Bot-author diagnostics.
+        self.turn = max(1, int(turn))
+        self.leg = leg
+
+    def incident(self) -> dict[str, int | str]:
+        """Return the bounded, public-safe payload stored in replay/result JSON."""
+        item: dict[str, int | str] = {
+            "reason": self.reason,
+            "code": self.error_code,
+            "seat": self.failed_seat,
+            "turn": self.turn,
+            "error": str(self)[:200],
+        }
+        if self.leg is not None:
+            item["leg"] = int(self.leg)
+        return item
+
+
+class BotProtocolError(BotTechnicalError):
+    """Bot stdout did not satisfy the selected game's response contract."""
+
+    reason = "protocol_error"
+
+
+class BotDecisionTimeoutError(BotTechnicalError):
+    """Bot did not produce one complete response line before its deadline."""
+
+    reason = "timeout"
 
 
 class BinaryRunner:
@@ -294,8 +350,10 @@ class BinaryRunner:
         try:
             raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
         except asyncio.TimeoutError:
-            tail = session.stderr_tail()
-            logger.warning("bot %s 决策超时 (%ss) stderr=%s", session_id, timeout, tail[:500])
+            # stderr is uploaded-program-controlled and may contain host/container
+            # paths. The orchestrator emits the attributable structured record with
+            # match/bot/version/runtime/seat/turn after this typed timeout propagates.
+            logger.warning("bot session %s 决策超时 (%ss)", session_id, timeout)
             raise TimeoutError(f"bot {session_id} 决策超时 ({timeout}s)")
         if not raw:
             raise await self._process_exit_error(session, "stdout EOF")
