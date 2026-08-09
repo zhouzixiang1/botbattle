@@ -57,13 +57,35 @@ def _mk_bots(store: Store, n: int, game_id: str = "holdem", *, base: int = 0):
     return bots
 
 
-def test_disabled_does_not_schedule(store):
+def test_disabled_does_not_schedule(store, monkeypatch):
     _mk_bots(store, 4)
     orch = FakeOrch(max_concurrent=4)
     sched = AutoMatchScheduler(
         orch, store, config=replace(AUTO_MATCH_CONFIG, enabled=False)
     )
     assert sched._cfg()["enabled"] is False
+
+    original_sleep = asyncio.sleep
+    sleeps = 0
+
+    async def stop_after_disabled_iteration(_delay):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+        await original_sleep(0)
+
+    monkeypatch.setattr(
+        "bzplat.backend.matches.auto_matcher.asyncio.sleep",
+        stop_after_disabled_iteration,
+    )
+
+    async def run_loop() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await sched.loop()
+
+    asyncio.run(run_loop())
+    assert orch.calls == []
 
 
 def test_not_idle_when_full(store):

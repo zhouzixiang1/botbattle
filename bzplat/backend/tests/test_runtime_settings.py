@@ -14,6 +14,7 @@ from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
     AUTO_MATCH_CONFIG,
     CONFIGURATION_SOURCE,
+    QA_AUTO_MATCH_CONFIG,
 )
 from bzplat.backend.runtime.limits import (
     clamp_concurrent,
@@ -72,6 +73,24 @@ def test_runtime_diagnostics_are_explicitly_code_owned(tmp_path):
     assert data["auto_match"]["interval_sec"] == AUTO_MATCH_CONFIG.interval
     assert data["contest_scheduler"] == {"enabled": True, "interval": 15}
     assert "auto_match" in data["readonly"]
+
+
+def test_qa_instance_uses_code_disabled_auto_match_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("BZ_QA_INSTANCE", "1")
+    client, app = _admin_client(tmp_path)
+
+    assert AUTO_MATCH_CONFIG.enabled is True
+    assert QA_AUTO_MATCH_CONFIG.enabled is False
+    assert app.state.auto_matcher.config is QA_AUTO_MATCH_CONFIG
+    assert app.state.auto_matcher._cfg() == QA_AUTO_MATCH_CONFIG.as_dict()
+
+    response = client.get("/api/admin/settings/runtime")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source"] == CONFIGURATION_SOURCE
+    assert data["mutable"] is False
+    assert data["auto_match"]["enabled"] is False
+    assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == 1
 
 
 @pytest.mark.parametrize(

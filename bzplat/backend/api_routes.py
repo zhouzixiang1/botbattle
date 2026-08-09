@@ -2347,7 +2347,10 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
     store = _store(request)
     orch = _orch(request)
     stats = store.count_stats()
-    cfg = AUTO_MATCH_CONFIG
+    # 生产使用 AUTO_MATCH_CONFIG；隔离 QA 使用代码持有的 disabled profile。
+    # 诊断必须展示当前进程实际生效值，不能在 QA 中误报生产默认值。
+    auto_matcher = getattr(request.app.state, "auto_matcher", None)
+    cfg = getattr(auto_matcher, "config", AUTO_MATCH_CONFIG)
     am = {
         "enabled": cfg.enabled,
         "interval_sec": cfg.interval,
@@ -2358,7 +2361,7 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
         "placement_games": cfg.placement_games,
         "max_per_round": cfg.max_per_round,
         "daily_cap": cfg.daily_cap,
-        "daily_count": getattr(getattr(request.app.state, "auto_matcher", None), "daily_count", 0),
+        "daily_count": getattr(auto_matcher, "daily_count", 0),
     }
     return {
         "source": CONFIGURATION_SOURCE,

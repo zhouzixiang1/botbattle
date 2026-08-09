@@ -87,7 +87,7 @@ effective  = min(configured, ceiling)
 
 **触发条件**（全部满足才安排）：
 
-1. 代码配置 `enabled=True`；
+1. 生产代码配置 `enabled=True`；隔离 QA profile 固定 `enabled=False`，不运行后台 ladder；
 2. 有空闲并发槽：`全局尚未占用的 admission - reserve_slots > 0`；已接纳但等待执行的任务也占位；
    `reserve_slots`（默认 1）为用户主动挑战**预留**的槽位，避免抢占；
 3. 连续空闲达 `auto_match_min_idle_sec`（默认 5 秒），即真正闲时。
@@ -103,7 +103,7 @@ effective  = min(configured, ceiling)
 
 | 代码字段 | 固定值 | 含义 |
 |--------|------|------|
-| `enabled` | `True` | 启用 |
+| `enabled` | 生产 `True`；隔离 QA `False` | 是否启用后台 ladder |
 | `interval` | 30 | 轮询间隔（秒） |
 | `min_idle` | 5 | 连续空闲触发秒数 |
 | `cooldown` | 600 | 同 bot 两场间隔下限（秒） |
@@ -113,8 +113,10 @@ effective  = min(configured, ceiling)
 | `max_per_round` | 2 | 每轮最多补几场 |
 | `daily_cap` | 200 | 每日后台对局总量上限（0=不限） |
 
-这些字段由 `runtime/config.py::AUTO_MATCH_CONFIG` 的冻结对象提供，只能经代码评审和重新
-发布修改。调度器不读取同名历史 settings。今日后台对局计数只作为进程内诊断值返回。
+这些字段由 `runtime/config.py` 的冻结对象提供：生产使用 `AUTO_MATCH_CONFIG`，隔离
+`BZ_QA_INSTANCE` 使用只把 `enabled` 固定为 `False` 的 `QA_AUTO_MATCH_CONFIG`。profile
+选择和具体值都只能经代码评审与重新发布修改，调度器不读取环境覆盖或同名历史 settings。
+今日后台对局计数只作为进程内诊断值返回；管理端只读端点返回当前实例实际生效 profile。
 
 > **可见性**：后台 ladder 对局会出现在首页「最新对局」（带「后台」徽章），便于观察天梯维护。
 

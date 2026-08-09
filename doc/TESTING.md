@@ -42,7 +42,7 @@ pytest
 | **测试产物隔离** | `test_logging` 断言从 repo CWD + tmp DB 运行时日志落临时目录，`create_app` 默认 upload root 落 DB 同目录，主 checkout 的 `bot_uploads/logs` 不接收测试标记；测试不得手写相对 `bot_uploads` |
 | **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、时间线 `opens<=closes<=starts`（含等时刻/部分 PATCH/旧脏数据/零部分写）、`starts_at=NULL` 的手动开赛闸门、全局 admission 下整轮只创建可用槽数量且完成一场补一场、Match 完成后 Pairing 逐场回写、历史空 starts_at/假 running 状态幂等修复、match_id 单 pairing 唯一绑定、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
 | **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot/赛事存在活跃引用时拒绝硬删；批量指派做字段与归属校验 |
-| **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员 |
+| **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`、`test_runtime_settings`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员；隔离 QA 由代码选择 `enabled=False` 的 auto-match profile，生产 profile 与并发契约不变，只读诊断必须显示实际生效值 |
 | **社交/通知/成长/站点** | `test_notifications`、`test_comments_likes`、`test_social`、`test_xp_level`、`test_tiers`、`test_load_test_seed`、`test_wiki_pages` |
 
 ## 3. Playwright 真浏览器回归
@@ -99,13 +99,14 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
 | 权威终态后端定向回归 | **72 passed / 1 warning（32.87s）** | `test_authoritative_terminal_events` + 技术故障 + human + audit：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
-| 后端整合提交完整 pytest | **1028 passed / 1 warning（231.18s）** | 本分支使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
-| Playwright 完整执行 | **33 passed / 1 failed（2.8m）** | 本分支隔离 QA 栈 `50384/5176`、Chromium 单 worker；唯一失败发生在已通过业务断言后的测试清理：副本后台 auto-match 抢占临时 Bot，导致 admin 删除返回 409。该结果不能写成全绿，最终整合栈须关闭非测试调度或使用完整运行产物后重跑全部 34 条 |
+| 后端整合提交完整 pytest | **1029 passed / 1 warning（214.25s）** | 本分支使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
+| Playwright 完整执行 | **34 passed（2.6m）** | 本分支隔离 QA 栈 `50384/5176`、Chromium 单 worker；四角色、三视口、Console/Network、REST/SSE/WS 与严格 cleanup 全部通过。原 disposable Bot 清理竞态已由 QA 代码 profile 禁用 auto-match 消除；未放宽 DELETE 200/随后 GET 404 断言，三个游戏自 QA 启动后的新增 ladder 均为 0 |
 | Admin 浏览器定向回归 | **9 passed（24.7s）** | `admin-audit.spec.ts` 全量；含状态边界、Dialog 内错误、真实隔离 DB 的手动开赛 `NULL` 重载与成功 audit 证据 |
 | Admin 时间定向后端回归 | **26 passed / 1 warning（8.04s）** | `test_admin_contest_status.py`；覆盖状态边界、发布态轮次错峰重排/清空、已有 match 拒绝、强制 SQLite 写失败整事务回滚；warning 为既有 Starlette/httpx deprecation |
+| QA profile + Admin 联合回归 | **53 passed / 1 warning（12.22s）** | `test_auto_matcher.py` + `test_runtime_settings.py` + `test_admin_contest_status.py`；覆盖 disabled loop 零 challenge、main QA wiring、实际生效只读诊断、生产 profile 不变及赛事时间全部边界 |
 | 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |
-| 浏览器 QA 写隔离 | **通过** | 50384 与 5176 的 `/api/health` 均为 `qa_instance=true`；四个固定 QA 账号只存在 worktree 副本，主库查询为 0。测试期间主库仍被线上 auto-match 正常写入（主日志逐场对应、match 数持续增长），因此不能用“主库 hash 不变”作在线实例的必要条件，改以写目标、账号哨兵和生产日志归因证明未污染 |
-| QA 后端日志 | **待最终整合栈复验** | 本分支按规范复制了数据库，但未复制主目录全部历史 `bot_uploads`；副本 auto-match 扫到缺失的相对二进制路径后记录 `version_unavailable` WARNING/Traceback。该现象不能作为产品日志通过证据；最终候选必须使用完整复制或重新播种的隔离运行产物，重跑后要求日志无非预期 WARNING/ERROR/Traceback |
+| 浏览器 QA 写隔离 | **通过** | 50384 与 5176 的 `/api/health` 均为 `qa_instance=true`；数据库、日志、头像和六个种子 ELF Bot 都位于当前 worktree 或本轮 `/tmp` 日志目录，不引用主 checkout 上传文件。worktree DB 与主库 inode 不同，主库精确查询 `qa_admin/qa_organizer` 固定身份为 0、隔离副本为 2。QA profile 固定禁用 auto-match，三个游戏在整轮验收期间均未新增 ladder；生产 50380/主库未作为测试目标 |
+| QA 后端日志 | **通过（无非预期异常）** | 新日志目录逐项检查 `app/access/audit` 与服务输出：无 5xx、ERROR、Traceback、`version_unavailable`、auto-match 调度或 Bot cleanup 409。仅有精确预期的 SMTP 未配置提示、`/usr/bin/true` 预检 EOF，以及用例主动制造的登录失败、PE 拒绝、版本预检失败和终态赛事删除保护；均有对应浏览器白名单/断言 |
 
 ## 5. 可靠性与恢复专项
 
