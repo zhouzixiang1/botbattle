@@ -49,14 +49,14 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 30 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 33 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航、表单边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航与受保护页面访客门禁（不得先发无意义 401）、表单边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
-| `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；断言不存在运行时/赛制模板 Tab 与对应写 API |
+| `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；赛事时间空值/显式 `NULL`、500+ 字连续长文本、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
 
 运行前必须是 worktree 隔离实例；`beforeAll` 会校验 `/api/health` 的 `qa_instance=true`，Vite 也会拒绝代理到 50380：
 
@@ -69,13 +69,21 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 ### 3.2 角色、视口与观察面
 
+- 完整的角色 × 页面 × 操作清单见 [BROWSER_ACCEPTANCE.md](./BROWSER_ACCEPTANCE.md)；新增页面或角色能力时必须先更新该矩阵，再补自动化落点。
 - 角色：访客、普通玩家、组织者、管理员。
-- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航覆盖三档，admin 至少覆盖桌面与移动端，核心赛事流程另以 laptop 执行。
+- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。
 - UI：主要导航、按钮、Tab、Dialog、筛选、表单合法/非法/超长输入、重复提交、空状态、错误状态、直接子路由、刷新、返回/前进与根元素横向溢出。
 - Console：持续收集 `pageerror` 与 error 级 console；未在精确白名单中的异常直接使测试失败。
 - Network：跟踪 request failed 与 4xx/5xx；负向用例只豁免精确预期的请求/状态，关键写操作断言方法、路径、状态和返回结构。深链 reload/back/forward 在继续导航前须等待目标实体 ID 对应的 detail 200 与普通 HTTP quiet window，避免仅凭通用标题把仍在收尾的 fetch 留给下一段导航。
 - SSE：断言终态 snapshot 转回放且不重连、`error.message` 持久展示且不被误显示为 completed、异常 `completed` 原因可见、服务端终态后流关闭；纯 mock 点格棋流还断言首次 `time_used` 用 `budget` 初始化未行动方，首次事件即 `time_out` 时显示 `0:00 + 超时`。
 - WebSocket：真实人类 Holdem 流程断言单页只建一个连接、发送合法协议并进入终态；admin abort 在取消 runner 后仍须向既有连接送达权威终态，且 runner 不得覆盖 aborted。
+- Admin 赛事时间：无值时控件保持空白并展示手动语义；已有自动开赛时间可通过开关提交显式 `starts_at:null`，与省略字段保留旧值区分；三段时间仍做前后端一致的整体顺序校验。
+
+### 3.3 文档边界审计
+
+公开 `wiki/` 只保留 `INDEX`、统一协议、Bot 上手/编译、平台使用与三游戏规则/示例；未出现 worktree、PR、仓库构建脚本、部署、pytest/npm 等平台工程说明。`BOT_DEV.md` 对 Windows/Linux/macOS 的 C/Python 指南最终都产出 Linux x86_64 ELF，未承诺运行 PE、Mach-O 或源码。协议中的 `BOTZONE_REQUEST_KEEP_RUNNING` 是必须逐字输出的 LongRunning 握手常量，不是新旧平台对比或兼容入口。
+
+工程架构、测试、部署、运行配置、裁判代码位置和本轮清理盘点均在 `doc/`。机器可读 `contracts/` 当前只为 Holdem 提供完整 payload schema；Gomoku/Pencil 仅在 Wiki 与运行时测试中约束 payload，属于 P2 待补的契约覆盖差距，但不代表存在第二套协议。
 
 旧的 `browser_verify.py`、`screenshot_verify.py` 仍可做补充，但不能替代上述真实交互、Console 与 Network 断言。
 
@@ -85,15 +93,18 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 | 检查 | 本轮状态 | 证据/说明 |
 |------|----------|-----------|
-| 隔离端到端冒烟 | **ALL PASSED** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
+| 隔离端到端冒烟 | **ALL PASSED** | 本分支 `bash scripts/e2e_smoke.sh` 在 `/tmp` 临时 DB 与运行时目录完成，退出后回收自己的服务和目录；写目标不在主仓库 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **30 条 / 4 spec** | `npx playwright test --list` 实测 |
+| Playwright 收集 | **33 条 / 4 spec** | 本分支 `npx playwright test --list` 实测 |
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
 | 权威终态后端定向回归 | **72 passed / 1 warning（32.87s）** | `test_authoritative_terminal_events` + 技术故障 + human + audit：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
-| 后端整合提交完整 pytest | **1020 passed / 1 warning（291.67s）** | 使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
-| Playwright 完整执行 | **新增回归前基线 21 passed；30 条整合套件待重跑** | Chromium 单 worker 的旧基线为 2.3m；新增未知游戏、动作契约、PE 拒绝、canonical 终态与观赛回归后，必须在最终整合栈重新执行全部 30 条 |
-| 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2560 modules transformed |
+| 后端整合提交完整 pytest | **1020 passed / 1 warning（211.13s）** | 本分支使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
+| Playwright 完整执行 | **33 passed（2.8m）** | 本分支隔离 QA 栈 `50384/5176`、Chromium 单 worker；四角色、三视口、Console/Network、REST/SSE/WS 与清理全部通过 |
+| Admin 时间定向后端回归 | **18 passed / 1 warning（4.59s）** | `test_admin_contest_status.py`；覆盖省略 `starts_at` 保留旧值、显式 `null` 恢复手动与非法顺序零部分写；warning 为既有 Starlette/httpx deprecation |
+| 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |
+| 浏览器 QA 写隔离 | **通过** | 50384 与 5176 的 `/api/health` 均为 `qa_instance=true`；四个固定 QA 账号只存在 worktree 副本，主库查询为 0。测试期间主库仍被线上 auto-match 正常写入（主日志逐场对应、match 数持续增长），因此不能用“主库 hash 不变”作在线实例的必要条件，改以写目标、账号哨兵和生产日志归因证明未污染 |
+| QA 后端日志 | **待最终整合栈复验** | 本分支按规范复制了数据库，但未复制主目录全部历史 `bot_uploads`；副本 auto-match 扫到缺失的相对二进制路径后记录 `version_unavailable` WARNING/Traceback。该现象不能作为产品日志通过证据；最终候选必须使用完整复制或重新播种的隔离运行产物，重跑后要求日志无非预期 WARNING/ERROR/Traceback |
 
 ## 5. 可靠性与恢复专项
 
@@ -107,6 +118,6 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 ## 6. 发布门槛
 
-最终验收至少需要：完整 `pytest`、`npm run build`、目标提交静态收集出的全部 Playwright、隔离 `e2e_smoke.sh` 全部通过；同时检查浏览器 Console/Network、QA 后端日志、主 DB hash/mtime 与 50380 服务未被触碰。若任一项未执行或失败，结论只能是“待验证”，不能写成“已验收”。
+最终验收至少需要：完整 `pytest`、`npm run build`、目标提交静态收集出的全部 Playwright、隔离 `e2e_smoke.sh` 全部通过；同时检查浏览器 Console/Network、QA 后端日志、QA 写目标与 50380 服务未被测试触碰。线上后台任务会合法改变主 DB hash/mtime，此时必须用主日志、实体哨兵与隔离实例标记归因，不能谎称 hash 未变，也不能把正常线上写误判成 QA 污染。若任一项未执行或失败，结论只能是“待验证”，不能写成“已验收”。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

@@ -1,6 +1,6 @@
 # 交付文档索引
 
-本目录（`doc/`）存放面向**甲方验收与项目干系人**的工程文档：6 份核心交付文档，另有 4 份现行专项文档和本索引。
+本目录（`doc/`）存放面向**甲方验收与项目干系人**的工程文档：6 份核心交付文档，另有 6 份现行专项文档和本索引。
 
 ## 文档导航
 
@@ -21,6 +21,8 @@
 | [LOADTEST.md](./LOADTEST.md) | QA 多角色关键业务链路与多局测试（含隔离 DB-direct 播种，不声称覆盖全部端点） |
 | [RUNTIME.md](./RUNTIME.md) | 运维侧运行时：Docker 硬限制、代码配置、并发与 auto-match |
 | [JUDGE_CODE.md](./JUDGE_CODE.md) | 各游戏裁判引擎代码位置、固定规则契约与改动工作流（面向平台开发者） |
+| [BROWSER_ACCEPTANCE.md](./BROWSER_ACCEPTANCE.md) | 四角色 × 全页面/操作的浏览器验收矩阵、跨视口与 Console/Network 门槛 |
+| [CLEANUP_INVENTORY.md](./CLEANUP_INVENTORY.md) | worktree/分支/备份/缓存/演示数据的只读盘点与保留白名单 |
 
 ## doc/ 与 wiki/ 的分工
 

@@ -140,6 +140,11 @@ for (const viewport of VIEWPORTS) {
       { path: '/contests', heading: '锦标赛', evidence: '组织者发布锦标赛' },
       { path: '/wiki', heading: 'Wiki', evidence: '协议规范、Bot 开发指南' },
       { path: '/judges', heading: '裁判', evidence: '公开可审计' },
+      { path: '/challenge', heading: '发起挑战', evidence: '请先' },
+      { path: '/my-bots', heading: '我的 Bot', evidence: '请先' },
+      { path: '/notifications', heading: '通知', evidence: '请先登录' },
+      { path: '/settings', heading: '设置', evidence: '请先登录' },
+      { path: '/admin', heading: '管理端', evidence: '请先' },
     ]
 
     for (const route of routes) {

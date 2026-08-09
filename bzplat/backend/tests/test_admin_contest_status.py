@@ -186,6 +186,25 @@ def test_admin_time_patch_can_clear_or_set_equal_optional_times(tmp_path):
     )
     assert equal.status_code == 200, equal.text
 
+    # 未提交 starts_at 时保留原值；显式 null 才恢复“手动开赛”。这一区分
+    # 是管理端完整表单与其他 partial PATCH 调用共同依赖的 API 契约。
+    omitted = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"title": "保留自动开赛时间"},
+        headers=headers,
+    )
+    assert omitted.status_code == 200, omitted.text
+    assert omitted.json()["contest"]["starts_at"] == timestamp
+
+    manual = client.patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"starts_at": None},
+        headers=headers,
+    )
+    assert manual.status_code == 200, manual.text
+    assert manual.json()["contest"]["starts_at"] is None
+    assert store.get_contest(contest_id)["starts_at"] is None
+
 
 def test_dirty_legacy_contest_is_readable_but_invalid_time_patch_is_clear_400(tmp_path):
     app, store, contest_id, headers = _setup(tmp_path)
