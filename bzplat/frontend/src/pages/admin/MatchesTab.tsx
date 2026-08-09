@@ -21,8 +21,8 @@ interface Match {
     hands_played?: number
     deltas?: number[]
     net_bb?: number
-    bot_decide_errors?: Record<string, number>
-    bot_decide_error_samples?: Array<{ seat: number; error: string; turn?: number | null }>
+    technical_incidents_by_seat?: Record<string, number>
+    technical_incident_samples?: Array<{ seat: number; error: string; turn?: number | null }>
   }
   reason: string
   created_at: string
@@ -38,9 +38,9 @@ const STATUSES = [
 ]
 
 const QUALITY_FILTERS = [
-  { value: '', label: '全部质量' },
-  { value: 'true', label: '有 Bot 响应异常' },
-  { value: 'false', label: '无 Bot 响应异常' },
+  { value: '', label: '全部诊断结果' },
+  { value: 'true', label: '含 Bot 技术故障' },
+  { value: 'false', label: '不含 Bot 技术故障' },
 ]
 
 const MATCH_TYPE_LABEL: Record<string, string> = {
@@ -60,22 +60,20 @@ const REASON_LABEL: Record<string, string> = {
   protocol_error: 'Bot 响应协议错误',
 }
 
-function responseErrorCount(match: Match): number {
-  return Object.values(match.result?.bot_decide_errors || {})
+function technicalIncidentCount(match: Match): number {
+  return Object.values(match.result?.technical_incidents_by_seat || {})
     .reduce((sum, value) => sum + Number(value || 0), 0)
 }
 
-function responseErrorText(error: string): string {
-  if (error === "'response'" || /response/.test(error)) return '缺少 response 字段'
-  if (/JSON|json|decode/i.test(error)) return '输出不是合法 JSON'
-  return error || '响应格式错误'
+function technicalIncidentText(error: string): string {
+  return error || 'Bot 技术故障'
 }
 
 export default function MatchesTab() {
   const [confirm, confirmDialog] = useConfirm()
   const [matches, setMatches] = useState<Match[]>([])
   const [status, setStatus] = useState('')
-  const [hasBotErrors, setHasBotErrors] = useState('')
+  const [hasTechnicalIncidents, setHasTechnicalIncidents] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -91,7 +89,7 @@ export default function MatchesTab() {
       const offset = (page - 1) * perPage
       const params = new URLSearchParams()
       if (status) params.set('status', status)
-      if (hasBotErrors) params.set('has_bot_errors', hasBotErrors)
+      if (hasTechnicalIncidents) params.set('has_technical_incidents', hasTechnicalIncidents)
       params.set('limit', String(perPage))
       params.set('offset', String(offset))
       const d = await apiGet<{ matches: Match[]; total?: number }>(`/api/matches?${params.toString()}`)
@@ -102,7 +100,7 @@ export default function MatchesTab() {
     } finally {
       setLoading(false)
     }
-  }, [status, hasBotErrors, page])
+  }, [status, hasTechnicalIncidents, page])
 
   // 状态筛选切换 → 回到第 1 页
   const onStatusChange = (v: string) => {
@@ -111,7 +109,7 @@ export default function MatchesTab() {
   }
 
   const onQualityChange = (v: string) => {
-    setHasBotErrors(v === 'all' ? '' : v)
+    setHasTechnicalIncidents(v === 'all' ? '' : v)
     setPage(1)
   }
 
@@ -153,7 +151,7 @@ export default function MatchesTab() {
             ))}
           </SelectContent>
         </Select>
-        <Select value={hasBotErrors || 'all'} onValueChange={onQualityChange}>
+        <Select value={hasTechnicalIncidents || 'all'} onValueChange={onQualityChange}>
           <SelectTrigger size="sm" className="h-9 w-[11rem]">
             <SelectValue />
           </SelectTrigger>
@@ -188,10 +186,10 @@ export default function MatchesTab() {
           </TableHeader>
           <TableBody>
             {matches.map((m) => {
-              const decideErrors = responseErrorCount(m)
-              const sample = m.result?.bot_decide_error_samples?.[0]
+              const incidentCount = technicalIncidentCount(m)
+              const sample = m.result?.technical_incident_samples?.[0]
               return (
-              <TableRow key={m.id} className={decideErrors > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
+              <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</TableCell>
                 <TableCell className="max-w-[16rem] px-3 py-2 text-foreground">
                   <div className="flex min-w-0 items-center gap-1 truncate">
@@ -219,10 +217,10 @@ export default function MatchesTab() {
                       {REASON_LABEL[m.reason] || m.reason}
                     </div>
                   )}
-                  {decideErrors > 0 && (
+                  {incidentCount > 0 && (
                     <div className="mt-1 space-y-0.5 text-[10px] text-destructive">
-                      <Badge variant="destructive" className="text-[10px]">Bot 响应错误 {decideErrors} 次</Badge>
-                      {sample && <div>座位 {sample.seat + 1} · {responseErrorText(sample.error)} · 回合 {sample.turn ?? '未知'}</div>}
+                      <Badge variant="destructive" className="text-[10px]">Bot 技术故障 {incidentCount} 次</Badge>
+                      {sample && <div>座位 {sample.seat + 1} · {technicalIncidentText(sample.error)} · 回合 {sample.turn ?? '未知'}</div>}
                     </div>
                   )}
                 </TableCell>

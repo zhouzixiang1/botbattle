@@ -397,12 +397,12 @@ export default function MatchViewer() {
             原因：{match.reason}
           </span>
         )}
-        {match?.result?.bot_decide_errors && (
+        {match?.result?.technical_incidents_by_seat && (
           <span className="inline-flex items-center gap-1 text-xs text-warning">
             <TriangleAlert className="size-3" />
-            {Object.entries(match.result.bot_decide_errors)
+            {Object.entries(match.result.technical_incidents_by_seat)
               .filter(([, n]) => Number(n) > 0)
-              .map(([seat, n]) => `座位${Number(seat) + 1} ${n} 次响应错误`)
+              .map(([seat, n]) => `座位${Number(seat) + 1} ${n} 次技术故障`)
               .join('，') || ''}
           </span>
         )}

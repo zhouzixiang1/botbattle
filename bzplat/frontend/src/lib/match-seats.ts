@@ -17,8 +17,8 @@ export interface MatchSeatRow {
     hands_played?: number
     deltas?: number[]
     net_bb?: number
-    bot_decide_errors?: Record<number, number>
-    bot_decide_error_samples?: Array<{ seat: number; error: string; turn?: number | null }>
+    technical_incidents_by_seat?: Record<number, number>
+    technical_incident_samples?: Array<{ seat: number; error: string; turn?: number | null }>
   }
   bot_a?: {
     id?: number | null

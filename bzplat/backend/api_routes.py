@@ -701,17 +701,22 @@ def list_matches(
     request: Request,
     status: str | None = None,
     game_id: str | None = None,
-    has_bot_errors: bool | None = None,
+    has_technical_incidents: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
+    if "has_bot_errors" in request.query_params:
+        raise HTTPException(
+            400,
+            "has_bot_errors 已移除；请使用 has_technical_incidents",
+        )
     store = _store(request)
     lim = max(1, min(limit, 100))
     off = max(0, offset)
     rows = store.list_matches(
         status=status,
         game_id=game_id,
-        has_bot_errors=has_bot_errors,
+        has_technical_incidents=has_technical_incidents,
         limit=lim,
         offset=off,
     )
@@ -724,7 +729,9 @@ def list_matches(
         for k in _MATCH_LIST_DEAD:
             m.pop(k, None)
     total = store.count_matches(
-        status=status, game_id=game_id, has_bot_errors=has_bot_errors
+        status=status,
+        game_id=game_id,
+        has_technical_incidents=has_technical_incidents,
     )
     return {"matches": rows, "total": total, "limit": lim, "offset": off}
 

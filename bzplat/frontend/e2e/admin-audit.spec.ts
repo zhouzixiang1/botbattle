@@ -199,22 +199,22 @@ for (const viewport of [
         const url = new URL(response.url())
         return response.request().method() === 'GET' &&
           url.pathname === '/api/matches' &&
-          url.search === '?status=completed&has_bot_errors=true&limit=20&offset=0'
+          url.search === '?status=completed&has_technical_incidents=true&limit=20&offset=0'
       })
-      await page.getByRole('combobox').filter({ hasText: '全部质量' }).click()
-      await page.getByRole('option', { name: '有 Bot 响应异常', exact: true }).click()
+      await page.getByRole('combobox').filter({ hasText: '全部诊断结果' }).click()
+      await page.getByRole('option', { name: '含 Bot 技术故障', exact: true }).click()
       const abnormalMatchesResponse = await abnormalMatchesPromise
       expect(abnormalMatchesResponse.status(), await abnormalMatchesResponse.text()).toBe(200)
       const abnormalMatches = await abnormalMatchesResponse.json() as {
-        matches: Array<{ result?: { bot_decide_errors?: Record<string, number> } }>
+        matches: Array<{ result?: { technical_incidents_by_seat?: Record<string, number> } }>
       }
       expect(abnormalMatches.matches.length).toBeGreaterThan(0)
       expect(abnormalMatches.matches.every((match) =>
-        Object.values(match.result?.bot_decide_errors || {})
+        Object.values(match.result?.technical_incidents_by_seat || {})
           .reduce((sum, value) => sum + Number(value || 0), 0) > 0,
       )).toBe(true)
       await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(abnormalMatches.matches.length)
-      await expect(page.getByText(/Bot 响应错误 \d+ 次/).first()).toBeVisible()
+      await expect(page.getByText(/Bot 技术故障 \d+ 次/).first()).toBeVisible()
     }
     await expectNoRootOverflow(page, 'matches')
 

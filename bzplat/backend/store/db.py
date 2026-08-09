@@ -44,8 +44,8 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
-_BOT_ERROR_EVENT_TYPES = frozenset({"bot_decide_error", "bot_technical_error"})
-_BOT_ERROR_MESSAGES = {
+_BOT_INCIDENT_EVENT_TYPES = frozenset({"bot_decide_error", "bot_technical_error"})
+_BOT_INCIDENT_MESSAGES = {
     "invalid_json": "Bot 输出不是合法 JSON",
     "invalid_envelope": "Bot 响应信封必须是 JSON 对象",
     "missing_response": "Bot 响应缺少必填 response 字段",
@@ -54,7 +54,7 @@ _BOT_ERROR_MESSAGES = {
 }
 
 
-def _safe_bot_error_sample(raw: Any) -> dict[str, Any] | None:
+def _safe_bot_incident_sample(raw: Any) -> dict[str, Any] | None:
     """Normalize one public diagnostic without forwarding historical raw errors."""
     if not isinstance(raw, dict):
         return None
@@ -66,9 +66,9 @@ def _safe_bot_error_sample(raw: Any) -> dict[str, Any] | None:
         return None
     sample: dict[str, Any] = {"seat": seat}
     code = raw.get("code")
-    if isinstance(code, str) and code in _BOT_ERROR_MESSAGES:
+    if isinstance(code, str) and code in _BOT_INCIDENT_MESSAGES:
         sample["code"] = code
-        sample["error"] = _BOT_ERROR_MESSAGES[code]
+        sample["error"] = _BOT_INCIDENT_MESSAGES[code]
     else:
         # Legacy bot_decide_error stored arbitrary exception text. Never surface it
         # through newly aggregated API fields because it may contain stdout/paths.
@@ -87,7 +87,7 @@ def _safe_bot_error_sample(raw: Any) -> dict[str, Any] | None:
     return sample
 
 
-def _load_replay_bot_error_events(raw: Any) -> list[dict[str, Any]]:
+def _load_replay_bot_incident_events(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, str) or not raw:
         return []
     try:
@@ -99,7 +99,7 @@ def _load_replay_bot_error_events(raw: Any) -> list[dict[str, Any]]:
     return [
         event
         for event in events
-        if isinstance(event, dict) and event.get("type") in _BOT_ERROR_EVENT_TYPES
+        if isinstance(event, dict) and event.get("type") in _BOT_INCIDENT_EVENT_TYPES
     ]
 
 
@@ -118,39 +118,43 @@ def _sanitize_public_replay(replay: dict | None) -> dict | None:
     sanitized: list[Any] = []
     incident_samples = 0
     for event in events:
-        if not isinstance(event, dict) or event.get("type") not in _BOT_ERROR_EVENT_TYPES:
+        if not isinstance(event, dict) or event.get("type") not in _BOT_INCIDENT_EVENT_TYPES:
             sanitized.append(event)
             continue
         incident_samples += 1
         if incident_samples > 3:
             continue
-        sample = _safe_bot_error_sample(event)
+        sample = _safe_bot_incident_sample(event)
         if sample is not None:
-            sanitized.append({"type": event["type"], **sample})
+            # Historical replay rows may use ``bot_decide_error``.  That name is
+            # an input-only migration concern; every current API response exposes
+            # the single canonical event type.
+            sanitized.append({"type": "bot_technical_error", **sample})
     public["events_json"] = json.dumps(sanitized, ensure_ascii=False)
     return public
 
 
-def _with_bot_error_diagnostics(m: dict | None) -> dict | None:
-    """Expose one compatibility summary for legacy and current incident formats.
+def _with_technical_incident_diagnostics(m: dict | None) -> dict | None:
+    """Expose one canonical summary while reading historical incident formats.
 
     Old matches persisted ``bot_decide_error`` replay events and sometimes
     ``result.bot_decide_errors``. Current matches persist ``bot_technical_error``
-    plus ``technical_incident_*``. List/detail consumers use the historical field
-    names, so normalize both sources into per-seat counts and at most three safe
-    samples. Persisted result counts are authoritative to avoid double-counting the
-    same incidents found in replay.
+    plus ``technical_incident_*``.  Legacy names are accepted only while reading
+    stored history and are never emitted by current APIs.  Persisted result counts
+    are authoritative to avoid double-counting the same replay incidents.
     """
     if m is None:
         return None
-    replay_events = _load_replay_bot_error_events(m.pop("_replay_events_json", None))
+    replay_events = _load_replay_bot_incident_events(m.pop("_replay_events_json", None))
     result = m.get("result")
     if not isinstance(result, dict):
         result = {}
         m["result"] = result
 
     counts = {0: 0, 1: 0}
-    raw_counts = result.get("bot_decide_errors")
+    raw_counts = result.get("technical_incidents_by_seat")
+    if not isinstance(raw_counts, dict):
+        raw_counts = result.get("bot_decide_errors")
     if isinstance(raw_counts, dict):
         for seat in (0, 1):
             try:
@@ -161,7 +165,7 @@ def _with_bot_error_diagnostics(m: dict | None) -> dict | None:
     has_persisted_counts = sum(counts.values()) > 0
     if not has_persisted_counts:
         for event in replay_events:
-            sample = _safe_bot_error_sample(event)
+            sample = _safe_bot_incident_sample(event)
             if sample is not None:
                 counts[sample["seat"]] += 1
 
@@ -174,7 +178,7 @@ def _with_bot_error_diagnostics(m: dict | None) -> dict | None:
         if total > sum(counts.values()):
             raw_technical = result.get("technical_incident_samples")
             first = (
-                _safe_bot_error_sample(raw_technical[0])
+                _safe_bot_incident_sample(raw_technical[0])
                 if isinstance(raw_technical, list) and raw_technical
                 else None
             )
@@ -190,7 +194,7 @@ def _with_bot_error_diagnostics(m: dict | None) -> dict | None:
     samples: list[dict[str, Any]] = []
     seen_samples: set[tuple[Any, ...]] = set()
     for raw in sample_sources:
-        sample = _safe_bot_error_sample(raw)
+        sample = _safe_bot_incident_sample(raw)
         if sample is None:
             continue
         sample_key = tuple(
@@ -202,17 +206,30 @@ def _with_bot_error_diagnostics(m: dict | None) -> dict | None:
         if len(samples) == 3:
             break
 
-    if sum(counts.values()) > 0:
-        result["bot_decide_errors"] = counts
-        result["bot_decide_error_samples"] = samples
+    total = sum(counts.values())
+    if total > 0:
+        try:
+            persisted_total = max(
+                0, int(result.get("technical_incident_count", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            persisted_total = 0
+        result["technical_incident_count"] = max(
+            total, persisted_total
+        )
+        result["technical_incidents_by_seat"] = counts
+        result["technical_incident_samples"] = samples
     else:
-        result.pop("bot_decide_errors", None)
-        result.pop("bot_decide_error_samples", None)
+        result.pop("technical_incidents_by_seat", None)
+        result.pop("technical_incident_samples", None)
+    # Input-only legacy storage keys must never leak into the current contract.
+    result.pop("bot_decide_errors", None)
+    result.pop("bot_decide_error_samples", None)
     raw_technical_samples = result.get("technical_incident_samples")
     if isinstance(raw_technical_samples, list):
         safe_technical_samples = []
         for raw in raw_technical_samples[:3]:
-            safe = _safe_bot_error_sample(raw)
+            safe = _safe_bot_incident_sample(raw)
             if safe is not None:
                 safe_technical_samples.append(safe)
         result["technical_incident_samples"] = safe_technical_samples
@@ -236,10 +253,10 @@ def _parse_match_json_cols(m: dict | None) -> dict | None:
                 m[k] = {}
         elif m.get(k) is None:
             m[k] = {}
-    return _with_bot_error_diagnostics(m)
+    return _with_technical_incident_diagnostics(m)
 
 
-def _bot_error_filter_sql(alias: str = "m") -> str:
+def _technical_incident_filter_sql(alias: str = "m") -> str:
     """SQLite JSON1 predicate covering legacy result/replay and current incidents."""
     safe_result = (
         f"CASE WHEN json_valid({alias}.result) THEN {alias}.result ELSE '{{}}' END"
@@ -2358,9 +2375,9 @@ class Store:
         *,
         contest_id: int | None = None,
         game_id: str | None = None,
-        has_bot_errors: bool | None = None,
+        has_technical_incidents: bool | None = None,
     ) -> list[dict]:
-        """列对局；可跨游戏并按历史/当前 Bot 协议诊断过滤。"""
+        """列对局；可跨游戏并按归一化后的 Bot 技术故障过滤。"""
         with self._tx() as c:
             join_bots = (
                 "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
@@ -2390,9 +2407,11 @@ class Store:
             if game_id:
                 where_parts.append("m.game_id=?")
                 params.append(game_id)
-            if has_bot_errors is not None:
-                predicate = _bot_error_filter_sql("m")
-                where_parts.append(predicate if has_bot_errors else f"NOT {predicate}")
+            if has_technical_incidents is not None:
+                predicate = _technical_incident_filter_sql("m")
+                where_parts.append(
+                    predicate if has_technical_incidents else f"NOT {predicate}"
+                )
             where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
             if game_id:
@@ -2842,18 +2861,20 @@ class Store:
         status: str | None = None,
         *,
         game_id: str | None = None,
-        has_bot_errors: bool | None = None,
+        has_technical_incidents: bool | None = None,
     ) -> int:
-        """按 status/game_id/Bot 错误统计；过滤语义与 list_matches 对齐。"""
+        """按 status/game_id/Bot 技术故障统计；语义与 list_matches 对齐。"""
         with self._tx() as c:
             where_parts: list[str] = []
             params: list[Any] = []
             if status:
                 where_parts.append("status=?")
                 params.append(status)
-            if has_bot_errors is not None:
-                predicate = _bot_error_filter_sql("m")
-                where_parts.append(predicate if has_bot_errors else f"NOT {predicate}")
+            if has_technical_incidents is not None:
+                predicate = _technical_incident_filter_sql("m")
+                where_parts.append(
+                    predicate if has_technical_incidents else f"NOT {predicate}"
+                )
             where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
             total = 0
             gids = [game_id] if game_id else _all_game_ids()

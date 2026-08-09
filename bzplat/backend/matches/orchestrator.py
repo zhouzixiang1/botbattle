@@ -79,11 +79,8 @@ def _technical_incident_summary(events: list[dict]) -> dict:
             by_seat[seat] += 1
     return {
         "technical_incident_count": len(incidents),
+        "technical_incidents_by_seat": by_seat,
         "technical_incident_samples": samples,
-        # Compatibility contract consumed by MatchViewer/admin and backfilled by
-        # list/detail APIs for legacy bot_decide_error replay events.
-        "bot_decide_errors": by_seat,
-        "bot_decide_error_samples": samples,
     }
 
 

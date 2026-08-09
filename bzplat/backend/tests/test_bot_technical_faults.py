@@ -394,7 +394,9 @@ def test_technical_incident_result_samples_are_bounded():
     ]
     summary = _technical_incident_summary(events)
     assert summary["technical_incident_count"] == 8
+    assert summary["technical_incidents_by_seat"] == {0: 4, 1: 4}
     assert len(summary["technical_incident_samples"]) == 3
+    assert "bot_decide_errors" not in summary
 
 
 def test_technical_incident_replay_samples_are_bounded(store):
@@ -419,6 +421,10 @@ def test_technical_incident_replay_samples_are_bounded(store):
     )
     match = store.get_match(match_id)
     assert match["result"]["technical_incident_count"] == 8
-    assert len(match["result"]["technical_incident_samples"]) == 3
+    assert match["result"]["technical_incidents_by_seat"] == {0: 8, 1: 0}
+    # Identical repeated incidents may be deduplicated, but the public sample set
+    # must stay non-empty and bounded independently from the authoritative count.
+    assert 1 <= len(match["result"]["technical_incident_samples"]) <= 3
+    assert "bot_decide_errors" not in match["result"]
     replay = json.loads(store.get_replay(match_id)["events_json"])
     assert len([e for e in replay if e.get("type") == "bot_technical_error"]) == 3

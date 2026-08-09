@@ -85,7 +85,7 @@ def test_matches_total_filtered_by_status(tmp_path):
     assert both["total"] == 7
 
 
-def test_matches_aggregate_and_filter_legacy_and_current_bot_errors(tmp_path):
+def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
     c, store = _app(tmp_path)
     # Historical completed bug: result already has the authoritative 70-count,
     # while replay contains the same 70 events. Aggregation must not double it or
@@ -154,14 +154,16 @@ def test_matches_aggregate_and_filter_legacy_and_current_bot_errors(tmp_path):
     all_rows = c.get("/api/matches?limit=100").json()
     assert all_rows["total"] == 10  # default still includes every status/result
     by_id = {row["id"]: row for row in all_rows["matches"]}
-    assert by_id["mh0"]["result"]["bot_decide_errors"] == {"0": 70, "1": 0}
-    assert len(by_id["mh0"]["result"]["bot_decide_error_samples"]) == 3
+    assert by_id["mh0"]["result"]["technical_incidents_by_seat"] == {"0": 70, "1": 0}
+    assert len(by_id["mh0"]["result"]["technical_incident_samples"]) == 3
+    assert "bot_decide_errors" not in by_id["mh0"]["result"]
+    assert "bot_decide_error_samples" not in by_id["mh0"]["result"]
     assert "/private" not in json.dumps(by_id["mh0"]["result"], ensure_ascii=False)
-    assert by_id["mh1"]["result"]["bot_decide_errors"] == {"0": 0, "1": 1}
-    assert by_id["mh2"]["result"]["bot_decide_errors"] == {"0": 8, "1": 0}
-    assert len(by_id["mh2"]["result"]["bot_decide_error_samples"]) == 3
+    assert by_id["mh1"]["result"]["technical_incidents_by_seat"] == {"0": 0, "1": 1}
+    assert by_id["mh2"]["result"]["technical_incidents_by_seat"] == {"0": 8, "1": 0}
+    assert len(by_id["mh2"]["result"]["technical_incident_samples"]) == 3
 
-    only_errors = c.get("/api/matches?has_bot_errors=true&limit=100").json()
+    only_errors = c.get("/api/matches?has_technical_incidents=true&limit=100").json()
     assert only_errors["total"] == 4
     assert {row["id"] for row in only_errors["matches"]} == {
         "mh0",
@@ -169,18 +171,22 @@ def test_matches_aggregate_and_filter_legacy_and_current_bot_errors(tmp_path):
         "mh2",
         "mg0",
     }
-    assert c.get("/api/matches?has_bot_errors=false&limit=100").json()["total"] == 6
+    assert c.get("/api/matches?has_technical_incidents=false&limit=100").json()["total"] == 6
     completed_errors = c.get(
-        "/api/matches?status=completed&has_bot_errors=true&limit=100"
+        "/api/matches?status=completed&has_technical_incidents=true&limit=100"
     ).json()
     assert completed_errors["total"] == 3
+    rejected_legacy_filter = c.get("/api/matches?has_bot_errors=true&limit=100")
+    assert rejected_legacy_filter.status_code == 400
+    assert "has_technical_incidents" in rejected_legacy_filter.text
 
     detail_body = c.get("/api/matches/mh1").json()
     detail = detail_body["match"]
-    assert detail["result"]["bot_decide_errors"] == {"0": 0, "1": 1}
-    assert detail["result"]["bot_decide_error_samples"][0]["code"] == "missing_response"
+    assert detail["result"]["technical_incidents_by_seat"] == {"0": 0, "1": 1}
+    assert detail["result"]["technical_incident_samples"][0]["code"] == "missing_response"
 
     legacy_detail = c.get("/api/matches/mh0").json()
     public_events = json.loads(legacy_detail["replay"]["events_json"])
-    assert len([e for e in public_events if e["type"] == "bot_decide_error"]) == 3
+    assert len([e for e in public_events if e["type"] == "bot_technical_error"]) == 3
+    assert not [e for e in public_events if e["type"] == "bot_decide_error"]
     assert "/private" not in legacy_detail["replay"]["events_json"]
