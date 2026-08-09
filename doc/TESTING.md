@@ -18,7 +18,7 @@
 
 ## 2. 后端测试范围
 
-配置由 `pyproject.toml` 指定：`testpaths=["bzplat/backend/tests"]`、`pythonpath=["."]`，必须从仓库根运行。当前工作树静态盘点为 **81 个测试模块 / 818 条 collected**；数量会随分支变化，最终仍以目标提交执行以下命令为准：
+配置由 `pyproject.toml` 指定：`testpaths=["bzplat/backend/tests"]`、`pythonpath=["."]`，必须从仓库根运行。测试模块与用例数量会随分支变化；多个独立修复分支汇合后，必须在目标提交重新执行以下命令，不能把任一子分支数字直接相加当成最终证据：
 
 ```bash
 rg --files bzplat/backend/tests -g 'test_*.py' | wc -l
@@ -36,7 +36,7 @@ pytest
 | **认证/安全/审计** | `test_auth`、`test_store`、`test_security_logging`、`test_logging`、`test_audit_coverage`、`test_real_name`；密码重置覆盖邮箱码/管理员 token、双 Store 并发单赢家、session 删除故障整事务回滚及过期凭据不消费 |
 | **编排/实时通信** | `test_human_match`、`test_chess_clock`、`test_auto_matcher`、`test_match_seat_names`；GameSpec 棋钟覆盖 Bot-vs-Bot 与人类双方的累计/超时事件，另含 SSE/WS 终态关闭与 shutdown 收敛 |
 | **崩溃语义** | 中途崩溃（含 human）=`completed + reason=crash`；Bot-vs-Bot 启动失败=`technical_loss`；human 启动失败=`aborted` |
-| **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
+| **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、时间线 `opens<=closes<=starts`（含等时刻/部分 PATCH/旧脏数据/零部分写）、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
 | **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot/赛事存在活跃引用时拒绝硬删；批量指派做字段与归属校验 |
 | **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员 |
 | **社交/通知/成长/站点** | `test_notifications`、`test_comments_likes`、`test_social`、`test_xp_level`、`test_tiers`、`test_load_test_seed`、`test_wiki_pages` |
@@ -84,8 +84,8 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 隔离端到端冒烟 | **ALL PASSED** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
 | Playwright 收集 | **21 条 / 4 spec** | `npx playwright test --list` 实测 |
-| 后端收集 | **81 个模块 / 818 条** | 当前工作树 `rg --files ... | wc -l` 与 `pytest --collect-only -q` 的静态真值；收集成功不等于全部均已执行 |
-| 后端完整 pytest | **817 passed / 1 skipped** | `python -m pytest -q`，164.66s；唯一 skip 是本隔离 worktree 未构建 `frontend/dist`，故 SPA catch-all 用例不挂载；另有 1 条 Starlette TestClient 上游弃用 warning |
+| 后端子分支门禁 | **样例分支 817 passed / 1 skipped；admin 分支 832 passed / 1 skipped** | 两个隔离 worktree 分别完整执行；唯一 skip 均因该 worktree 未构建 `frontend/dist`，最终整合提交仍须重跑 |
+| 后端整合提交收集/完整 pytest | **待最终重采集** | 不把独立分支数字冒充整合结果；发布前用本节命令回填 |
 | Playwright 完整执行 | **21 passed** | Chromium 单 worker，2.3m；三视口及四角色流程均通过，监控未发现非预期 Console/Network/SSE/WS 异常，包含新增点格棋计时回归 |
 | 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |
 
@@ -96,7 +96,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 - **赛事两阶段派发与阶段推进**：prepare match → 原子绑定 pairing → start task；任一步失败须删除/解绑本次精确对象。服务重启可清理未绑定幽灵、复位死 pairing，并只在整个 published 批次尚未启动时原子重建残缺排期。后续 stage 的全部 pairing（含版本快照、bye、排期）与 `current_stage_idx/status` 同事务提交；Swiss/KO 懒生成的后续轮先构造完整 rows，再在 `BEGIN IMMEDIATE` 内复核 contest/stage/上一轮/目标轮并一次追加。两类批次均须以第二行故障注入验证零 partial，重试只生成一个完整批次。Swiss 还须验证按 entry 累计实际 seat0、`color_first=1` 落库前交换 A/B、challenge 收到同一实际顺序。
 - **正式榜破同分**：从 pairing 的实际 A/B 与 completed match 的 `technical_loss/winner` 识别技术负 entry；其余破同分项相同时，技术负次数较少者必须排前。
 - **正式榜发布恢复**：`contest_official_results` 的清旧、全量插入与 `official_results_ready=1` 同事务；中途注入失败不得留下 partial。若进程在赛事先写 `finished` 后、榜事务提交前退出，启动对账须对 `finished+ready=0` 幂等补算，恢复后公开接口不再返回 409，重复启动不重写已就绪结果。
-- **管理操作**：admin abort 必须先取消并等待 runner 收敛；赛事局保留 aborted 历史同时将 pairing 复位/重派，2 人 KO 不得固定晋级座位 0。直接改 running/completed 被拒绝。硬删除前检查 active match/contest 引用，避免 FK 置空后后台评分或赛事写回崩溃。
+- **管理操作**：admin abort 必须先取消并等待 runner 收敛；赛事局保留 aborted 历史同时将 pairing 复位/重派，2 人 KO 不得固定晋级座位 0。直接改 running/completed 被拒绝。赛事 `finished/cancelled` 终态不可回退或互转；`finished` 与已有正式榜的历史记录不可删除，`published` 删除明确走“取消未开打排期后删除”。runtime 多字段 PATCH 用“整体验证→单事务写→提交后热更新”故障注入验证无部分生效。相关成功/失败管理写（含移除赛事报名）须进入 audit log。日志 API 按结构化记录过滤，ERROR/关键字命中时保留完整 traceback，上送响应不得含服务端绝对路径。
 - **QA 写隔离**：后端 CLI 在 Store、日志和静态目录创建前校验 DB/端口/运行时目标；前端代理与 Playwright health guard 构成第二、第三道保护。
 
 ## 6. 发布门槛

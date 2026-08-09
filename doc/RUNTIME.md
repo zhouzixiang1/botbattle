@@ -138,4 +138,5 @@ Botzone「长时运行」模式：
 - 可改：`action_timeout_sec`、`max_concurrent_matches`（≤ ceiling）、`contest_default_rest_minutes`、
   上述全部 `auto_match_*`
 - 只读：`bot_cpus=1`、`bot_memory_mb=512`
-- 热更新：并发上限（重建 Semaphore）、无累计棋钟游戏的单步决策超时、自动对局参数均为运行时生效；Pencil 900 秒棋钟是固定游戏规则，不受该设置影响
+- 原子更新：多字段 PATCH 先校验整包，随后在一个 SQLite 事务内写入；任一字段非法或写入失败都不保留部分新值
+- 热更新：数据库事务提交后才重建 Semaphore / 单步决策超时；自动对局参数由调度器每轮读取。Pencil 900 秒棋钟是固定游戏规则，不受该设置影响

@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1140,8 +1142,19 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
             starts_at=body.starts_at,
         )
     except ValueError as e:
+        audit_log(
+            request, "contest_create", result="fail",
+            user=user.get("username"), target=body.title, detail=str(e),
+        )
         raise HTTPException(400, str(e))
-    audit_log(request, "contest_create", result="ok", user=user.get("username"), target=c["id"], detail=body.title)
+    audit_log(
+        request, "contest_create", result="ok",
+        user=user.get("username"), target=c["id"],
+        detail=(
+            f"title={body.title}; opens={c.get('registration_opens_at')}; "
+            f"closes={c.get('registration_closes_at')}; starts={c.get('starts_at')}"
+        ),
+    )
     return {"contest": c}
 
 
@@ -1855,22 +1868,37 @@ async def admin_patch_contest(
         fields["hands_per_match"] = body.hands_per_match
     # 时间编排字段（admin 可改）
     for tk in ("registration_opens_at", "registration_closes_at", "starts_at"):
-        tv = getattr(body, tk)
-        if tv is not None:
-            fields[tk] = tv
+        # ``null`` 显式清空可选时间；未提交的字段由 Store 合并旧值后校验。
+        if tk in body.model_fields_set:
+            fields[tk] = getattr(body, tk)
 
     if body.status is not None:
         if body.status not in {
             CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED, CONTEST_RUNNING,
             CONTEST_REST, CONTEST_FINISHED, CONTEST_CANCELLED,
         }:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id,
+                detail=f"非法比赛状态: {body.status}",
+            )
             raise HTTPException(400, "非法比赛状态")
         if fields:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id,
+                detail="状态推进不能与其他字段修改同时提交",
+            )
             raise HTTPException(400, "状态推进不能与其他字段修改同时提交")
 
         store = _store(request)
         before = store.get_contest(contest_id)
         if not before:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id,
+                detail="比赛不存在",
+            )
             raise HTTPException(404, "比赛不存在")
         old_status = before["status"]
         target = body.status
@@ -1894,12 +1922,17 @@ async def admin_patch_contest(
             else:
                 raise ValueError(f"不支持赛事从 {old_status} 推进到 {target}")
         except ValueError as exc:
+            audit_log(
+                request, "admin_patch_contest_status", result="fail",
+                user=admin.get("username"), target=contest_id, detail=str(exc),
+            )
             raise HTTPException(400, str(exc)) from exc
 
         if target != old_status:
             audit_log(
                 request, "admin_patch_contest_status", result="ok",
-                user=admin.get("username"), target=contest_id, detail=target,
+                user=admin.get("username"), target=contest_id,
+                detail=f"status={old_status}->{target}",
             )
         return {"contest": contest}
 
@@ -1908,22 +1941,57 @@ async def admin_patch_contest(
     try:
         c = _store(request).update_contest(contest_id, **fields)
     except ValueError as e:
-        # 状态机校验拒绝（终态不可变 / 非法转换）
+        audit_log(
+            request, "admin_patch_contest_fields", result="fail",
+            user=admin.get("username"), target=contest_id, detail=str(e),
+        )
         raise HTTPException(400, str(e))
     if not c:
+        audit_log(
+            request, "admin_patch_contest_fields", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail="比赛不存在",
+        )
         raise HTTPException(404, "比赛不存在")
+    audit_log(
+        request, "admin_patch_contest_fields", result="ok",
+        user=admin.get("username"), target=contest_id,
+        detail="; ".join(
+            f"{key}={c.get(key)}" if key != "title" else "title=changed"
+            for key in sorted(fields)
+        ),
+    )
     return {"contest": c}
 
 
 @router.delete("/api/admin/contests/{contest_id}")
 async def admin_delete_contest(contest_id: int, request: Request, admin=Depends(require_admin)):
+    before = _store(request).get_contest(contest_id)
     try:
         deleted = await _contests(request).delete(contest_id)
     except ValueError as exc:
+        audit_log(
+            request, "admin_delete_contest", result="fail",
+            user=admin.get("username"), target=contest_id, detail=str(exc),
+        )
         raise HTTPException(409, str(exc)) from exc
     if not deleted:
+        audit_log(
+            request, "admin_delete_contest", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail="比赛不存在",
+        )
         raise HTTPException(404, "比赛不存在")
-    audit_log(request, "admin_delete_contest", result="ok", user=admin.get("username"), target=contest_id)
+    previous_status = (before or {}).get("status") or "unknown"
+    mode = (
+        "cancel_published_schedule_then_delete"
+        if previous_status == CONTEST_PUBLISHED else "delete_prestart"
+    )
+    audit_log(
+        request, "admin_delete_contest", result="ok",
+        user=admin.get("username"), target=contest_id,
+        detail=f"previous_status={previous_status}; mode={mode}",
+    )
     return {"ok": True}
 
 
@@ -1931,7 +1999,7 @@ async def admin_delete_contest(contest_id: int, request: Request, admin=Depends(
 def admin_contest_entries(
     contest_id: int, request: Request, _admin=Depends(require_admin)
 ):
-    return {"entries": _store(request).list_entries(contest_id)}
+    return {"entries": _store(request).contest_entries_named(contest_id)}
 
 
 class AdminAssignEntries(BaseModel):
@@ -2000,16 +2068,36 @@ async def admin_assign_entries(
 
 @router.delete("/api/admin/contests/{contest_id}/entries/{user_id}")
 async def admin_delete_entry(
-    contest_id: int, user_id: int, request: Request, _admin=Depends(require_admin)
+    contest_id: int, user_id: int, request: Request, admin=Depends(require_admin)
 ):
     if not _store(request).get_contest(contest_id):
+        audit_log(
+            request, "admin_delete_contest_entry", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail=f"user_id={user_id}; reason=比赛不存在",
+        )
         raise HTTPException(404, "比赛不存在")
     try:
         deleted = await _contests(request).delete_roster_entry(contest_id, user_id)
     except ValueError as exc:
+        audit_log(
+            request, "admin_delete_contest_entry", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail=f"user_id={user_id}; reason={exc}",
+        )
         raise HTTPException(400, str(exc)) from exc
     if not deleted:
+        audit_log(
+            request, "admin_delete_contest_entry", result="fail",
+            user=admin.get("username"), target=contest_id,
+            detail=f"user_id={user_id}; reason=报名记录不存在",
+        )
         raise HTTPException(404, "报名记录不存在")
+    audit_log(
+        request, "admin_delete_contest_entry", result="ok",
+        user=admin.get("username"), target=contest_id,
+        detail=f"user_id={user_id}",
+    )
     return {"ok": True}
 
 
@@ -2162,106 +2250,139 @@ def admin_patch_site(
     }}
 
 
+def _validated_runtime_patch(
+    body: RuntimeSettingsPatch, *, ceiling: int
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Validate the complete request without persistence or hot side effects."""
+    settings: dict[str, str] = {}
+    updated: dict[str, Any] = {}
+
+    def add(key: str, response_key: str, value: Any, stored: str | None = None) -> None:
+        settings[key] = str(value) if stored is None else stored
+        updated[response_key] = value
+
+    if body.bot_cpus is not None or body.bot_memory_mb is not None:
+        raise ValueError("bot_cpus / bot_memory_mb 为只读硬限制，不可修改")
+
+    if body.max_concurrent_matches is not None:
+        value = int(body.max_concurrent_matches)
+        if value > ceiling:
+            raise ValueError(
+                f"max_concurrent_matches={value} 超过半负载硬顶 ceiling={ceiling}"
+                f"（机器 {cpu_count()} 核）"
+            )
+        if value < 1:
+            raise ValueError("max_concurrent_matches 至少为 1")
+        add(SETTING_MAX_CONCURRENT, "max_concurrent_matches", value)
+
+    if body.action_timeout_sec is not None:
+        value = float(body.action_timeout_sec)
+        if (
+            not math.isfinite(value)
+            or value < ACTION_TIMEOUT_MIN
+            or value > ACTION_TIMEOUT_MAX
+        ):
+            raise ValueError(
+                f"action_timeout_sec 须在 {ACTION_TIMEOUT_MIN}–{ACTION_TIMEOUT_MAX}"
+            )
+        add(SETTING_ACTION_TIMEOUT, "action_timeout_sec", value)
+
+    if body.contest_default_rest_minutes is not None:
+        value = int(body.contest_default_rest_minutes)
+        if value < 0 or value > 120:
+            raise ValueError("contest_default_rest_minutes 须在 0–120")
+        add(SETTING_CONTEST_REST, "contest_default_rest_minutes", value)
+
+    if body.auto_match_enabled is not None:
+        add(
+            SETTING_AUTO_MATCH_ENABLED,
+            "auto_match_enabled",
+            body.auto_match_enabled,
+            "1" if body.auto_match_enabled else "0",
+        )
+    integer_fields = (
+        ("auto_match_interval_sec", SETTING_AUTO_MATCH_INTERVAL_SEC, 1, 3600,
+         "auto_match_interval_sec 须在 1–3600"),
+        ("auto_match_min_idle_sec", SETTING_AUTO_MATCH_MIN_IDLE_SEC, 0, 600,
+         "auto_match_min_idle_sec 须在 0–600"),
+        ("auto_match_bot_cooldown", SETTING_AUTO_MATCH_BOT_COOLDOWN, 0, 86400,
+         "auto_match_bot_cooldown 须在 0–86400"),
+        ("auto_match_stale_sec", SETTING_AUTO_MATCH_STALE_SEC, 0, 604800,
+         "auto_match_stale_sec 须在 0–604800（0=不限）"),
+        ("auto_match_reserve_slots", SETTING_AUTO_MATCH_RESERVE_SLOTS, 0, ceiling,
+         "auto_match_reserve_slots 须在 0–ceiling"),
+        ("auto_match_placement_games", SETTING_AUTO_MATCH_PLACEMENT_GAMES, 0, 100,
+         "auto_match_placement_games 须在 0–100（0=禁用）"),
+        ("auto_match_max_per_round", SETTING_AUTO_MATCH_MAX_PER_ROUND, 1, 50,
+         "auto_match_max_per_round 须在 1–50"),
+        ("auto_match_daily_cap", SETTING_AUTO_MATCH_DAILY_CAP, 0, 100000,
+         "auto_match_daily_cap 须在 0–100000（0=不限）"),
+    )
+    for field, setting_key, minimum, maximum, error in integer_fields:
+        raw = getattr(body, field)
+        if raw is None:
+            continue
+        value = int(raw)
+        if value < minimum or value > maximum:
+            raise ValueError(error)
+        add(setting_key, field, value)
+
+    if not updated:
+        raise ValueError("无更新字段")
+    return settings, updated
+
+
 @router.patch("/api/admin/settings/runtime")
 def admin_patch_runtime(
-    body: RuntimeSettingsPatch, request: Request, _admin=Depends(require_admin)
+    body: RuntimeSettingsPatch, request: Request, admin=Depends(require_admin)
 ):
     store = _store(request)
     orch = _orch(request)
-    ceiling = concurrent_ceiling()
-    updated: dict[str, Any] = {}
+    try:
+        settings, updated = _validated_runtime_patch(
+            body, ceiling=concurrent_ceiling()
+        )
+    except ValueError as exc:
+        audit_log(
+            request, "admin_patch_runtime", result="fail",
+            user=admin.get("username"), target="runtime", detail=str(exc),
+        )
+        raise HTTPException(400, str(exc)) from exc
 
-    if body.bot_cpus is not None or body.bot_memory_mb is not None:
-        raise HTTPException(400, "bot_cpus / bot_memory_mb 为只读硬限制，不可修改")
+    # All validation completed.  Persist the batch atomically; only after the
+    # transaction commits may process-local hot state observe the new values.
+    try:
+        store.set_settings(settings)
+    except Exception as exc:
+        audit_log(
+            request, "admin_patch_runtime", result="fail",
+            user=admin.get("username"), target="runtime",
+            detail=f"write_failed={type(exc).__name__}",
+        )
+        raise HTTPException(500, "运行时配置保存失败") from exc
 
-    if body.max_concurrent_matches is not None:
-        req = int(body.max_concurrent_matches)
-        if req > ceiling:
-            raise HTTPException(
-                400,
-                f"max_concurrent_matches={req} 超过半负载硬顶 ceiling={ceiling}"
-                f"（机器 {cpu_count()} 核）",
-            )
-        if req < 1:
-            raise HTTPException(400, "max_concurrent_matches 至少为 1")
-        store.set_setting(SETTING_MAX_CONCURRENT, str(req))
-        orch.rebuild_concurrency(req)
-        updated["max_concurrent_matches"] = req
+    try:
+        if "max_concurrent_matches" in updated:
+            orch.rebuild_concurrency(updated["max_concurrent_matches"])
+        if "action_timeout_sec" in updated:
+            orch.set_action_timeout(updated["action_timeout_sec"])
+    except Exception as exc:
+        audit_log(
+            request, "admin_patch_runtime", result="fail",
+            user=admin.get("username"), target="runtime",
+            detail=(
+                f"committed={','.join(sorted(updated))}; "
+                f"hot_reload_failed={type(exc).__name__}"
+            ),
+        )
+        raise HTTPException(500, "运行时配置已保存，但热更新失败；请重启服务") from exc
 
-    if body.action_timeout_sec is not None:
-        t = float(body.action_timeout_sec)
-        if t < ACTION_TIMEOUT_MIN or t > ACTION_TIMEOUT_MAX:
-            raise HTTPException(
-                400,
-                f"action_timeout_sec 须在 {ACTION_TIMEOUT_MIN}–{ACTION_TIMEOUT_MAX}",
-            )
-        store.set_setting(SETTING_ACTION_TIMEOUT, str(t))
-        orch.set_action_timeout(t)
-        updated["action_timeout_sec"] = t
-
-    if body.contest_default_rest_minutes is not None:
-        m = int(body.contest_default_rest_minutes)
-        if m < 0 or m > 120:
-            raise HTTPException(400, "contest_default_rest_minutes 须在 0–120")
-        store.set_setting(SETTING_CONTEST_REST, str(m))
-        updated["contest_default_rest_minutes"] = m
-
-    # 闲时自动对局（写 settings 即热更新：调度器每轮重读）
-    if body.auto_match_enabled is not None:
-        store.set_setting(SETTING_AUTO_MATCH_ENABLED, "1" if body.auto_match_enabled else "0")
-        updated["auto_match_enabled"] = body.auto_match_enabled
-    if body.auto_match_interval_sec is not None:
-        v = int(body.auto_match_interval_sec)
-        if v < 1 or v > 3600:
-            raise HTTPException(400, "auto_match_interval_sec 须在 1–3600")
-        store.set_setting(SETTING_AUTO_MATCH_INTERVAL_SEC, str(v))
-        updated["auto_match_interval_sec"] = v
-    if body.auto_match_min_idle_sec is not None:
-        v = int(body.auto_match_min_idle_sec)
-        if v < 0 or v > 600:
-            raise HTTPException(400, "auto_match_min_idle_sec 须在 0–600")
-        store.set_setting(SETTING_AUTO_MATCH_MIN_IDLE_SEC, str(v))
-        updated["auto_match_min_idle_sec"] = v
-    if body.auto_match_bot_cooldown is not None:
-        v = int(body.auto_match_bot_cooldown)
-        if v < 0 or v > 86400:
-            raise HTTPException(400, "auto_match_bot_cooldown 须在 0–86400")
-        store.set_setting(SETTING_AUTO_MATCH_BOT_COOLDOWN, str(v))
-        updated["auto_match_bot_cooldown"] = v
-    if body.auto_match_stale_sec is not None:
-        v = int(body.auto_match_stale_sec)
-        if v < 0 or v > 604800:  # 0=不限
-            raise HTTPException(400, "auto_match_stale_sec 须在 0–604800（0=不限）")
-        store.set_setting(SETTING_AUTO_MATCH_STALE_SEC, str(v))
-        updated["auto_match_stale_sec"] = v
-    if body.auto_match_reserve_slots is not None:
-        v = int(body.auto_match_reserve_slots)
-        if v < 0 or v > ceiling:
-            raise HTTPException(400, "auto_match_reserve_slots 须在 0–ceiling")
-        store.set_setting(SETTING_AUTO_MATCH_RESERVE_SLOTS, str(v))
-        updated["auto_match_reserve_slots"] = v
-    if body.auto_match_placement_games is not None:
-        v = int(body.auto_match_placement_games)
-        if v < 0 or v > 100:
-            raise HTTPException(400, "auto_match_placement_games 须在 0–100（0=禁用）")
-        store.set_setting(SETTING_AUTO_MATCH_PLACEMENT_GAMES, str(v))
-        updated["auto_match_placement_games"] = v
-    if body.auto_match_max_per_round is not None:
-        v = int(body.auto_match_max_per_round)
-        if v < 1 or v > 50:
-            raise HTTPException(400, "auto_match_max_per_round 须在 1–50")
-        store.set_setting(SETTING_AUTO_MATCH_MAX_PER_ROUND, str(v))
-        updated["auto_match_max_per_round"] = v
-    if body.auto_match_daily_cap is not None:
-        v = int(body.auto_match_daily_cap)
-        if v < 0 or v > 100000:
-            raise HTTPException(400, "auto_match_daily_cap 须在 0–100000（0=不限）")
-        store.set_setting(SETTING_AUTO_MATCH_DAILY_CAP, str(v))
-        updated["auto_match_daily_cap"] = v
-
-    if not updated:
-        raise HTTPException(400, "无更新字段")
-    return {"updated": updated, "runtime": admin_get_runtime(request, _admin)}
+    audit_log(
+        request, "admin_patch_runtime", result="ok",
+        user=admin.get("username"), target="runtime",
+        detail="; ".join(f"{key}={value}" for key, value in updated.items()),
+    )
+    return {"updated": updated, "runtime": admin_get_runtime(request, admin)}
 
 
 # ── admin: 裁判引擎（规则参数热调 + 代码只读） ────────────────────
@@ -2499,6 +2620,33 @@ def admin_preview_template(
 
 
 # ── admin: 日志查看 ────────────────────────────────────────────
+_LOG_HEADER_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})? "
+    r"(?P<level>[A-Z]+) \[[^\]]+\] "
+)
+
+
+def _group_log_records(raw_lines: list[str]) -> list[tuple[str | None, list[str]]]:
+    """把 logging 的异常续行归入其结构化首行。
+
+    ``logging`` 只会给一条记录的首行加时间/级别/模块前缀；traceback、Bot
+    stderr 等多行消息的后续行没有此前缀。筛选必须作用于整条记录，否则按
+    ERROR/关键字过滤时会丢掉最有诊断价值的堆栈和对局上下文。
+    """
+    records: list[tuple[str | None, list[str]]] = []
+    for raw in raw_lines:
+        line = raw.rstrip("\r\n")
+        header = _LOG_HEADER_RE.match(line)
+        if header:
+            records.append((header.group("level"), [line]))
+        elif records and records[-1][0] is not None:
+            records[-1][1].append(line)
+        else:
+            # 兼容旧日志/截断尾部首行：没有可归属首行时作为独立记录返回。
+            records.append((None, [line]))
+    return records
+
+
 @router.get("/api/admin/logs")
 def admin_logs(
     request: Request,
@@ -2508,9 +2656,11 @@ def admin_logs(
     file: str = "app",
     _admin=Depends(require_admin),
 ):
-    """读 logs/{app,access,audit}.log 末尾 N 行，按级别/关键字过滤。
+    """读当前 logs/{app,access,audit}.log 的有界尾部，按记录过滤。
 
     file: app（业务/系统）、access（HTTP 访问，含真实 IP）、audit（安全审计）。
+    多行异常按结构化首行分组，命中筛选时返回完整 traceback；``limit`` 是
+    期望的最大物理行数，但单条完整记录不会被截断。
     """
     # 白名单：只允许读这三个日志文件，防路径穿越
     allowed = {"app": "app.log", "access": "access.log", "audit": "audit.log"}
@@ -2518,19 +2668,32 @@ def admin_logs(
     log_path = Path(os.environ.get("BZ_LOG_DIR", "logs")) / fname
     lines: list[str] = []
     if log_path.is_file():
-        # 读末尾（最多 ~8000 行，取后 limit 行）
+        # 只读当前轮转文件末尾最多 8000 行；历史轮转文件分页另行处理。
         with log_path.open("r", encoding="utf-8", errors="replace") as fh:
             tail = fh.readlines()[-8000:]
         level_upper = level.upper() if level else None
         kw = (q or "").lower()
-        for ln in tail:
-            if level_upper and f" {level_upper} " not in f" {ln} ":
+        matched: list[list[str]] = []
+        for record_level, record_lines in _group_log_records(tail):
+            if level_upper and record_level != level_upper:
                 continue
-            if kw and kw not in ln.lower():
+            if kw and not any(kw in ln.lower() for ln in record_lines):
                 continue
-            lines.append(ln.rstrip("\n"))
-        lines = lines[-limit:]
-    return {"lines": lines, "path": str(log_path)}
+            matched.append(record_lines)
+
+        # 从最新记录向前取，达到行数上限后停止；不切断一条多行异常记录。
+        bounded_limit = max(1, min(limit, 2000))
+        selected: list[list[str]] = []
+        selected_line_count = 0
+        for record_lines in reversed(matched):
+            selected.append(record_lines)
+            selected_line_count += len(record_lines)
+            if selected_line_count >= bounded_limit:
+                break
+        for record_lines in reversed(selected):
+            lines.extend(record_lines)
+    # 不向浏览器泄漏服务端绝对路径；source 是白名单中的安全文件名。
+    return {"lines": lines, "source": fname}
 
 
 # ── wiki ──────────────────────────────────────────────────────

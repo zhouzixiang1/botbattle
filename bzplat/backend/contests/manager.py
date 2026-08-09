@@ -25,6 +25,9 @@ from bzplat.backend.games import registry as game_registry
 from bzplat.backend.runtime.limits import FULL_RR_MAX_N
 from bzplat.backend.store import Store
 from bzplat.backend.store.db import match_deltas
+from bzplat.backend.store.validation import (
+    validate_contest_times as _validate_contest_times,
+)
 from bzplat.backend.store.schema import (
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
@@ -46,38 +49,6 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _validate_contest_times(
-    opens_at: str | None, closes_at: str | None, starts_at: str | None
-) -> None:
-    """校验赛事时间窗口逻辑：开放报名 < 截止报名 < 开赛（三者非 None 时）。
-
-    时间是 naive 本地 ISO 字符串，字符串字典序 == 时间序（因格式固定到秒）。
-    """
-    for label, t in (("开放报名", opens_at), ("报名截止", closes_at), ("比赛开始", starts_at)):
-        if t is not None:
-            _validate_iso(t, label)
-    if opens_at and closes_at and opens_at > closes_at:
-        raise ValueError("报名截止时间必须晚于开放报名时间")
-    if closes_at and starts_at and closes_at > starts_at:
-        raise ValueError("比赛开始时间必须晚于报名截止时间")
-
-
-def _validate_iso(t: str, label: str = "时间") -> None:
-    """校验 naive 本地 ISO 字符串格式（YYYY-MM-DDTHH:MM:SS，无时区）。
-
-    非标准格式（带毫秒/时区/非零填充）会破坏字符串字典序比较。规范化到秒级。
-    """
-    if not isinstance(t, str):
-        raise ValueError(f"{label}必须是 ISO 时间字符串")
-    try:
-        dt = datetime.fromisoformat(t)
-    except ValueError:
-        raise ValueError(f"{label}格式非法（需 YYYY-MM-DDTHH:MM:SS）: {t}")
-    # 拒绝带时区的（naive 约定）
-    if dt.tzinfo is not None:
-        raise ValueError(f"{label}不应带时区（平台用 naive 本地时间）: {t}")
 
 
 def _parse_stages(c: dict) -> list[dict]:
@@ -173,7 +144,7 @@ class ContestManager:
         # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死，赛事不再存 match_config；
         # match_config_json 落空 dict（DB 列保留向后兼容，但不再承载游戏规则）。
         cfg: dict = {}
-        # 时间校验：开放报名 < 截止报名 < 开赛（三者非 None 时）
+        # 时间校验：开放报名 <= 截止报名 <= 开赛（相同秒合法）
         _validate_contest_times(registration_opens_at, registration_closes_at, starts_at)
         return self.store.create_contest(
             title,
@@ -203,7 +174,7 @@ class ContestManager:
         """draft→open 的实际逻辑（调用方已持 per-contest 锁）。
 
         重复 open 是幂等读；其他状态不得倒退为 open。若
-        ``registration_opens_at`` 未预设则盖 now，已预设时保留原时间。
+        手动提前开放时，以实际开放时刻覆盖未来计划；已到点的计划时间保留。
         """
         c = self.store.get_contest(contest_id)
         if not c:
@@ -212,7 +183,24 @@ class ContestManager:
             return c
         if c["status"] != CONTEST_DRAFT:
             raise ValueError(f"赛事处于 {c['status']} 态，不能开放报名（仅 draft 可开放）")
-        opens = c.get("registration_opens_at") or _now()
+        now = _now()
+        # Legacy/manual data may only have a past close/start time.  Opening the
+        # contest must not manufacture ``opens > closes/starts``; use the earliest
+        # known lifecycle timestamp.  Registration will then immediately reject
+        # callers when that close time has already elapsed.
+        opens = min(
+            (
+                value
+                for value in (
+                    c.get("registration_opens_at"),
+                    c.get("registration_closes_at"),
+                    c.get("starts_at"),
+                    now,
+                )
+                if value is not None
+            ),
+            key=datetime.fromisoformat,
+        )
         return self.store.update_contest(
             contest_id, status=CONTEST_OPEN, registration_opens_at=opens
         )
@@ -558,12 +546,27 @@ class ContestManager:
             pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
             old_match_ids = {p["id"]: p.get("match_id") for p in pairings}
             old_schedules = {p["id"]: p.get("scheduled_at") for p in pairings}
+            old_opens_at = c.get("registration_opens_at")
+            old_closes_at = c.get("registration_closes_at")
             old_starts_at = c.get("starts_at")
             old_rest_ends_at = c.get("rest_ends_at")
             for p in pairings:
                 if p.get("status") == "pending" and not p.get("match_id"):
                     self.store.update_contest_pairing(p["id"], scheduled_at=now)
-            self.store.update_contest(contest_id, starts_at=now, rest_ends_at=None)
+            planned_opens = c.get("registration_opens_at")
+            opens = (
+                planned_opens
+                if planned_opens
+                and datetime.fromisoformat(planned_opens) <= datetime.fromisoformat(now)
+                else now
+            )
+            self.store.update_contest(
+                contest_id,
+                registration_opens_at=opens,
+                registration_closes_at=now,
+                starts_at=now,
+                rest_ends_at=None,
+            )
             try:
                 await self._dispatch_pending_locked(contest_id, stage_idx)
             except Exception:
@@ -584,6 +587,8 @@ class ContestManager:
                             )
                     self.store.update_contest(
                         contest_id,
+                        registration_opens_at=old_opens_at,
+                        registration_closes_at=old_closes_at,
                         starts_at=old_starts_at,
                         rest_ends_at=old_rest_ends_at,
                     )
@@ -600,12 +605,21 @@ class ContestManager:
 
         snapshot = self._initial_lifecycle_snapshot(c, entries)
         try:
+            now = _now()
+            planned_opens = c.get("registration_opens_at")
+            opens_at = (
+                planned_opens
+                if planned_opens
+                and datetime.fromisoformat(planned_opens) <= datetime.fromisoformat(now)
+                else now
+            )
             self._prepare_initial_contest(
                 contest_id,
                 entries,
                 stages,
-                closes_at=_now(),
-                starts_at=_now(),
+                opens_at=opens_at,
+                closes_at=now,
+                starts_at=now,
             )
             await self._begin_stage(
                 contest_id,
@@ -653,15 +667,38 @@ class ContestManager:
 
         snapshot = self._initial_lifecycle_snapshot(c, entries)
         try:
-            # 截止报名盖戳（用预设的 closes_at 或 now）+ 进 published 态。
+            # 截止报名盖戳：手动提前发布时使用实际时刻；调度器到点发布时
+            # 保留原计划时刻。这样不会留下 closes_at > starts_at 的倒挂时间线。
             # 先完整生成排期、但不 dispatch；这样生成失败可删除本次未启动 pairing
             # 并恢复原状态，不会出现 published/running 空壳赛事。
+            now = _now()
+            planned_opens = c.get("registration_opens_at")
+            planned_closes = c.get("registration_closes_at")
+            now_dt = datetime.fromisoformat(now)
+            opens_at = (
+                planned_opens
+                if planned_opens and datetime.fromisoformat(planned_opens) <= now_dt
+                else now
+            )
+            closes_at = (
+                planned_closes
+                if planned_closes and datetime.fromisoformat(planned_closes) <= now_dt
+                else now
+            )
+            starts_at = c.get("starts_at")
+            if (
+                starts_at is not None
+                and datetime.fromisoformat(starts_at)
+                < datetime.fromisoformat(closes_at)
+            ):
+                starts_at = closes_at
             self._prepare_initial_contest(
                 contest_id,
                 entries,
                 stages,
-                closes_at=c.get("registration_closes_at") or _now(),
-                starts_at=c.get("starts_at"),
+                opens_at=opens_at,
+                closes_at=closes_at,
+                starts_at=starts_at,
             )
             await self._begin_stage(
                 contest_id,
@@ -682,6 +719,7 @@ class ContestManager:
                 key: contest.get(key)
                 for key in (
                     "status",
+                    "registration_opens_at",
                     "registration_closes_at",
                     "starts_at",
                     "stages_json",
@@ -707,6 +745,7 @@ class ContestManager:
         entries: list[dict],
         stages: list[dict],
         *,
+        opens_at: str,
         closes_at: str,
         starts_at: str | None,
     ) -> None:
@@ -718,6 +757,7 @@ class ContestManager:
         self.store.update_contest(
             contest_id,
             status=CONTEST_PUBLISHED,
+            registration_opens_at=opens_at,
             registration_closes_at=closes_at,
             starts_at=starts_at,
             stages_json=json.dumps(stages, ensure_ascii=False),
@@ -1330,12 +1370,18 @@ class ContestManager:
         """安全删除赛事：与 start/dispatch 共锁，拒绝运行态或任何 active match。
 
         published 尚未开打时先转 cancelled 再删除，明确其“取消排期后删除”语义；
-        已完成 match 由数据库保留并把 contest_id 置空，未启动 pairing 随赛事级联删除。
+        running/rest、finished 或任何已有正式榜的赛事一律拒绝，避免抹掉正式赛果。
         """
         async with self._lock(contest_id):
             contest = self.store.get_contest(contest_id)
             if not contest:
                 return False
+            if (
+                contest["status"] == CONTEST_FINISHED
+                or int(contest.get("official_results_ready") or 0)
+                or self.store.list_official_results(contest_id)
+            ):
+                raise ValueError("已完成或已有正式赛果的赛事不能删除")
             if contest["status"] in (CONTEST_RUNNING, CONTEST_REST):
                 raise ValueError("运行中或休息期赛事不能删除，请先完成或中止在途对局")
             if self.store.contest_has_active_matches(contest_id):

@@ -195,6 +195,8 @@ python samples/judges/gomoku_judge.py --check  # 交互逐手判定
 
 **时间调度器**后台周期扫描赛事的 `registration_opens_at` / `registration_closes_at` / `starts_at` / `rest_ends_at` / `scheduled_at` 字段，到点自动推进阶段。组织者手动按钮（`/open` `/publish` `/start` `/resume` `/advance`）始终可用——到点自动 + 手动可提前。
 
+赛事时间始终满足 `registration_opens_at ≤ registration_closes_at ≤ starts_at`；三个时刻允许相同（例如组织者立即开放、截止并开赛）。手动早于计划执行时，平台会把相应字段记录为实际推进时刻，不会保留“报名截止晚于比赛开始”的倒挂时间。管理员只修改其中一个时间时，平台也会合并其余已有时间后整体验证，非法修改不会部分保存。
+
 > **逐场排期**：每场对阵（pairing）有独立的 `scheduled_at`。阶段可配 `round_stagger_minutes`（轮次间错峰分钟数）；`scheduled_at` 到点才 dispatch。**排期在「对阵」Tab 的赛程表（ScheduleTable）里查看**。
 
 ### 阶段类型（6 种）

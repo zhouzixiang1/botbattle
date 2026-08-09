@@ -31,6 +31,7 @@ from .schema import (
     TYPE_CONTEST,
     TYPE_HUMAN,
 )
+from .validation import validate_contest_times
 
 DEFAULT_DB_PATH = "botzone.db"
 
@@ -3428,6 +3429,9 @@ class Store:
         source_contest_id: int | None = None,
         require_real_name: int = 0,
     ) -> dict:
+        validate_contest_times(
+            registration_opens_at, registration_closes_at, starts_at
+        )
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contests(title, description, organizer_id, status, "
@@ -3491,34 +3495,44 @@ class Store:
             "official_results_ready",
             "require_real_name",
         }
-        sets = [f"{k}=?" for k in fields if k in allowed]
-        vals = [v for k, v in fields.items() if k in allowed]
+        clean = {k: v for k, v in fields.items() if k in allowed}
+        sets = [f"{k}=?" for k in clean]
+        vals = list(clean.values())
         with self._tx() as c:
+            current = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not current:
+                return None
+            # A partial time PATCH is only meaningful after merging the stored
+            # values.  Validate that complete candidate before the single UPDATE,
+            # so an invalid schedule cannot partially write another field.
+            time_fields = {
+                "registration_opens_at", "registration_closes_at", "starts_at",
+            }
+            if time_fields.intersection(clean):
+                validate_contest_times(
+                    clean.get("registration_opens_at", current["registration_opens_at"]),
+                    clean.get("registration_closes_at", current["registration_closes_at"]),
+                    clean.get("starts_at", current["starts_at"]),
+                )
             # 状态机校验：status 变更须合法（防止 admin PATCH 把 finished/cancelled
             # 错误改写——曾导致 contest3 已完成 96 场却被改成 cancelled 隐藏全部结果）。
-            if "status" in fields and fields["status"]:
-                from bzplat.backend.store.schema import (
+            if clean.get("status"):
+                cur_status = current["status"]
+                new_status = clean["status"]
+                # 终态不可变（finished/cancelled 是终态，不允许再改）
+                if cur_status in (CONTEST_FINISHED, CONTEST_CANCELLED) and new_status != cur_status:
+                    raise ValueError(
+                        f"赛事已处于终态 {cur_status}，不能改为 {new_status}"
+                    )
+                # cancelled 只能从「未开始」态进入（draft/open/published）
+                if new_status == CONTEST_CANCELLED and cur_status not in (
                     CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
-                    CONTEST_RUNNING, CONTEST_REST, CONTEST_FINISHED, CONTEST_CANCELLED,
-                )
-                cur = c.execute(
-                    "SELECT status FROM contests WHERE id=?", (contest_id,)
-                ).fetchone()
-                if cur:
-                    cur_status = cur["status"]
-                    new_status = fields["status"]
-                    # 终态不可变（finished/cancelled 是终态，不允许再改）
-                    if cur_status in (CONTEST_FINISHED, CONTEST_CANCELLED) and new_status != cur_status:
-                        raise ValueError(
-                            f"赛事已处于终态 {cur_status}，不能改为 {new_status}"
-                        )
-                    # cancelled 只能从「未开始」态进入（draft/open/published）
-                    if new_status == CONTEST_CANCELLED and cur_status not in (
-                        CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
-                    ):
-                        raise ValueError(
-                            f"赛事处于 {cur_status} 态，不能取消（仅 draft/open/published 可取消）"
-                        )
+                ):
+                    raise ValueError(
+                        f"赛事处于 {cur_status} 态，不能取消（仅 draft/open/published 可取消）"
+                    )
             if sets:
                 vals.append(contest_id)
                 c.execute(
@@ -4227,7 +4241,8 @@ class Store:
         with self._tx() as c:
             sql = (
                 "SELECT e.*, b.name AS bot_name, b.display_name AS bot_display, "
-                "b.game_id, u.username AS owner_name, u.display_name AS owner_display, "
+                "b.game_id, u.username AS username, u.username AS owner_name, "
+                "u.display_name AS owner_display, "
                 "u.real_name, u.phone, u.school, u.student_id "
                 "FROM contest_entries e "
                 "LEFT JOIN bots b ON e.bot_id=b.id "
@@ -4659,6 +4674,25 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET "
                 "value=excluded.value, updated_at=excluded.updated_at",
                 (key, value, _now()),
+            )
+
+    def set_settings(self, values: dict[str, str]) -> None:
+        """Upsert a validated settings batch in one transaction.
+
+        Callers must validate the whole batch first.  If any statement fails,
+        ``_tx`` rolls every preceding upsert back, preventing mixed old/new
+        runtime configuration.
+        """
+        if not values:
+            return
+        updated_at = _now()
+        with self._tx() as c:
+            c.executemany(
+                "INSERT INTO platform_settings(key, value, updated_at) "
+                "VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at",
+                [(key, value, updated_at) for key, value in values.items()],
             )
 
     def get_settings(self, keys: list[str] | None = None) -> dict[str, str]:

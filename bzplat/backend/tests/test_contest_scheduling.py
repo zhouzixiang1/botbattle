@@ -83,10 +83,51 @@ def setup(tmp_path, monkeypatch):
 def test_validate_contest_times_order():
     _validate_contest_times(None, None, None)  # 全空 OK
     _validate_contest_times("2026-01-01T00:00:00", "2026-01-02T00:00:00", "2026-01-03T00:00:00")
+    # 相同时间是明确支持的语义：手动立即推进可在同一秒开放、截止、开赛。
+    _validate_contest_times("2026-01-01T00:00:00", "2026-01-01T00:00:00", "2026-01-01T00:00:00")
     with pytest.raises(ValueError):
         _validate_contest_times("2026-01-03T00:00:00", "2026-01-02T00:00:00", None)  # opens>closes
     with pytest.raises(ValueError):
         _validate_contest_times(None, "2026-01-03T00:00:00", "2026-01-02T00:00:00")  # closes>starts
+    with pytest.raises(ValueError):
+        _validate_contest_times("2026-01-03T00:00:00", None, "2026-01-02T00:00:00")
+
+
+def test_store_time_writes_validate_complete_candidate_atomically(setup):
+    store, _mgr, _, users = setup
+    contest = store.create_contest(
+        "Store timeline",
+        users["u1"],
+        registration_opens_at="2099-01-01T00:00:00",
+        registration_closes_at="2099-01-02T00:00:00",
+        starts_at="2099-01-03T00:00:00",
+    )
+
+    with pytest.raises(ValueError, match="允许相同"):
+        store.update_contest(
+            contest["id"],
+            title="不得部分写入",
+            registration_closes_at="2099-01-04T00:00:00",
+        )
+
+    saved = store.get_contest(contest["id"])
+    assert saved["title"] == "Store timeline"
+    assert saved["registration_closes_at"] == "2099-01-02T00:00:00"
+
+
+def test_store_create_rejects_inverted_timeline_before_insert(setup):
+    store, _mgr, _, users = setup
+    before = len(store.list_contests())
+
+    with pytest.raises(ValueError, match="报名截止时间不能早于报名开放时间"):
+        store.create_contest(
+            "Bad timeline",
+            users["u1"],
+            registration_opens_at="2099-01-02T00:00:00",
+            registration_closes_at="2099-01-01T00:00:00",
+        )
+
+    assert len(store.list_contests()) == before
 
 
 def test_create_with_times(setup):
@@ -189,6 +230,32 @@ def test_start_immediate_skips_schedule(setup):
     assert any(p["status"] == "running" for p in store.list_contest_pairings(c["id"]))
 
 
+def test_manual_early_lifecycle_uses_actual_times_without_inversion(setup):
+    """手动提前开放/发布/开赛必须改写未来计划，不能留下截止晚于开赛。"""
+    store, mgr, _, users = setup
+    contest = mgr.create(
+        users["u1"],
+        "Early",
+        template_id="holdem_rr",
+        game_id="holdem",
+        registration_opens_at="2099-01-01T00:00:00",
+        registration_closes_at="2099-01-02T00:00:00",
+        starts_at="2099-01-03T00:00:00",
+    )
+    asyncio.run(mgr.open_registration(contest["id"]))
+    asyncio.run(mgr.register(contest["id"], users["u1"], users["b1"]))
+    asyncio.run(mgr.register(contest["id"], users["u2"], users["b2"]))
+    asyncio.run(mgr.publish(contest["id"]))
+    published = store.get_contest(contest["id"])
+    assert published["registration_opens_at"] <= published["registration_closes_at"]
+    assert published["registration_closes_at"] <= published["starts_at"]
+
+    asyncio.run(mgr.start(contest["id"]))
+    started = store.get_contest(contest["id"])
+    assert started["registration_opens_at"] <= started["registration_closes_at"]
+    assert started["registration_closes_at"] == started["starts_at"]
+
+
 # ── ContestScheduler 自动推进 ───────────────────────────────────────────
 
 def test_scheduler_auto_opens_registration(setup):
@@ -212,7 +279,12 @@ def test_scheduler_auto_publishes_on_deadline(setup):
     asyncio.run(mgr.register(c["id"], users["u1"], users["b1"]))
     asyncio.run(mgr.register(c["id"], users["u2"], users["b2"]))
     # 模拟截止时间已到
-    store.update_contest(c["id"], registration_closes_at="2020-01-01T00:00:00")
+    # 时间流逝模拟须保持新 Store 不变量，成组移动开放/截止时间。
+    store.update_contest(
+        c["id"],
+        registration_opens_at="2019-12-31T00:00:00",
+        registration_closes_at="2020-01-01T00:00:00",
+    )
     asyncio.run(sched._tick())
     assert store.get_contest(c["id"])["status"] == "published"
 

@@ -25,7 +25,7 @@ ip=<真实IP> method=<METHOD> path=<路径> status=<状态码> dt=<耗时ms>
 ip=<真实IP> action=<动作> result=<ok|fail> user=<操作者> target=<目标> detail="<细节>"
 ```
 - `result=fail` 记为 **WARNING** 级别（安全事件优先关注）。
-- 埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、赛事创建、admin 删用户/bot/赛事、改角色、建重置令牌。
+- 埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间字段修改、runtime 配置修改、改角色、建重置令牌。赛事与 runtime 管理写同时记录拒绝原因（`result=fail`），便于按 contest id 或 action 追溯。
 
 ## IP 透传链路（公网必需）
 
@@ -75,7 +75,7 @@ SMTP 未配置时，验证码日志脱敏（`code` 只记前 2 位 + `***`，完
 
 ## 管理员日志查看
 
-`/api/admin/logs?file={app|access|audit}&level=&q=&limit=`（admin only），文件参数白名单防路径穿越。前端 admin「日志」Tab 可切换三文件 + 级别/关键字过滤（如按 IP 或 action 搜）。
+`/api/admin/logs?file={app|access|audit}&level=&q=&limit=`（admin only），文件参数白名单防路径穿越，响应的 `source` 仅为白名单文件名、不返回服务器绝对路径。后端先按 `时间 级别 [模块]` 首行聚合续行，再对完整记录做级别/关键字过滤，因此命中的多行 ERROR 会连同 traceback、Bot stderr 和 match 上下文一起返回；`limit` 不会截断单条记录。当前接口只读取当前轮转文件末尾最多 8000 个物理行，历史轮转文件与分页暂不在本接口范围内。前端 admin「日志」Tab 可切换三文件 + 级别/关键字过滤（如按 IP 或 action 搜）。
 
 ## 相关环境变量
 

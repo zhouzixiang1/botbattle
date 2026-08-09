@@ -59,9 +59,9 @@ graph TB
 | 接口 | `main.py` | 应用工厂 + 中间件装配 + StaticFiles 挂载（dist/wiki-assets/avatars）+ lifespan |
 | 游戏注册 | `games/` | **赛制/编排契约解耦入口（裁判/协议分离）**：base.py（GameSpec 接口 + GameRegistry）+ __init__.py（注册与便捷函数）+ `_botzone_protocol.py`（Traditional / LongRunning 信封）+ `_board_protocol.py`（棋类共享协议工具）+ 各 `games/<game>/` 子包。三层分离：`<game>_judge.py` 是 0 平台依赖的纯规则；`engine.py` 是平台适配层（会使用运行时异常契约）；protocol/result/tiers/templates/spec 封装游戏差异。赛制与编排主流程经 registry/spec 调用，不按游戏名分支；这不表示整个前后端对新增游戏零接入工作。 |
 | 编排 | `matches/` | orchestrator（入队/SSE/评分/人类对战；支持 `defer_start` 的赛事两阶段创建、显式 start/discard；中途崩溃含 human 都保留 `completed + reason=crash`，Bot-vs-Bot 启动失败走 `technical_loss`，human 启动失败走 `aborted`；完成与技术判负共用评分/通知/XP 后处理）+ runner（起 Bot 进程，经 games 注册表路由协议；**`_botzone_decide` 双模式传输**：按 session.runtime_mode 选 Traditional 完整历史 / LongRunning 单 request + keep_running 握手；消费 `GameSpec.time_budget_per_side`，Bot-vs-Bot 与人类对战双方使用同一累计棋钟及 `time_used/time_out` 事件契约）+ auto_matcher（闲时自动） |
-| 赛制 | `contests/` | templates（**10 个内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板；创建时模板 `game_id` 与请求游戏强绑定，不允许用请求字段覆盖混搭）+ stages（按当前阶段/轮次生成对阵；后续轮由比赛结果逐步确定；Swiss 接收按 entry 历史统计的先手次数）+ manager（状态机 `draft→open→published→running→rest→finished`；per-contest 锁串行化报名、推进与派发；发布/开赛先在锁内复核所有报名 Bot 的 active/binary/游戏一致性；`published` 只保证当前可确定批次，pairing 冻结 Bot/版本/seed；`PairingSpec.color_first` 在持久化前落实为实际 A/B 座位，落库后统一 A=seat0；派发采用“准备 pending match→原子绑定 pairing→启动任务”，失败精确补偿；aborted 无裁决对局保留历史并将 pairing 复位 pending，不积分/不晋级；中途单侧 Bot 不可用落 completed 技术判负，双侧不可用显式阻塞；每个新 stage 的完整 pairing 批次〔版本快照/bye/排期〕与 `current_stage_idx/status` 在 Store 单事务提交，旧版遗留的未绑定下一阶段 partial 可安全替换；Swiss/KO 懒生成的每个后续整轮也经 `BEGIN IMMEDIATE` 单事务追加，锁内复核阶段游标/上一轮/目标轮，失败零 partial、并发重试不重复；启动对账保留首阶段 published 批次恢复，并补算 `finished + ready=0` 的正式榜；正式榜按 pairing 实际座位及 match winner 统计 entry 技术负，完整排名全量替换与 ready 标志同事务；已有真实进度则拒绝猜测覆盖；存在未裁决对阵时拒绝强制固化名次）+ **`scheduler`（扫描 `*_at` 到点推进）** + ranking + validation |
+| 赛制 | `contests/` | templates（**10 个内置模板**，由 `games/*/templates.py` 经注册表聚合；含预赛/决赛 phase 模板；创建时模板 `game_id` 与请求游戏强绑定，不允许用请求字段覆盖混搭）+ stages（按当前阶段/轮次生成对阵；后续轮由比赛结果逐步确定；Swiss 接收按 entry 历史统计的先手次数）+ manager（状态机 `draft→open→published→running→rest→finished`；per-contest 锁串行化报名、推进与派发；时间写入统一满足 `registration_opens_at <= registration_closes_at <= starts_at`，等时刻合法，手动提前推进按实际时刻盖戳；发布/开赛先在锁内复核所有报名 Bot 的 active/binary/游戏一致性；`published` 只保证当前可确定批次，pairing 冻结 Bot/版本/seed；`PairingSpec.color_first` 在持久化前落实为实际 A/B 座位，落库后统一 A=seat0；派发采用“准备 pending match→原子绑定 pairing→启动任务”，失败精确补偿；aborted 无裁决对局保留历史并将 pairing 复位 pending，不积分/不晋级；中途单侧 Bot 不可用落 completed 技术判负，双侧不可用显式阻塞；每个新 stage 的完整 pairing 批次〔版本快照/bye/排期〕与 `current_stage_idx/status` 在 Store 单事务提交，旧版遗留的未绑定下一阶段 partial 可安全替换；Swiss/KO 懒生成的每个后续整轮也经 `BEGIN IMMEDIATE` 单事务追加，锁内复核阶段游标/上一轮/目标轮，失败零 partial、并发重试不重复；启动对账保留首阶段 published 批次恢复，并补算 `finished + ready=0` 的正式榜；正式榜按 pairing 实际座位及 match winner 统计 entry 技术负，完整排名全量替换与 ready 标志同事务；已有真实进度则拒绝猜测覆盖；存在未裁决对阵时拒绝强制固化名次）+ **`scheduler`（扫描 `*_at` 到点推进）** + ranking + validation |
 | 沙箱 | `runtime/` | BinaryRunner（docker/wine/local 三模式）+ limits（资源硬顶） |
-| 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈）+ schema.py（常量唯一来源） |
+| 数据 | `store/` | Store 类（SQLite，100+ 方法，含 _migrate 自愈；赛事时间候选在 create/update 安全写入口统一校验；`set_settings` 批量配置单事务提交）+ schema.py（常量唯一来源） |
 | 认证 | `auth/` | routes + auth_manager + captcha + dependencies（require_user/admin/organizer） |
 | 通知 | `notifications/` | NotificationManager（站内通知 + 按 prefs 复用 Mailer 发邮件） |
 | 支撑 | `bots/ rating/ mail/ security.py logging_config.py crypto.py cli.py` | Bot 上传分类 / Glicko-2 / SMTP / 安全头+限流 / 日志 / 密码 hash / CLI |
@@ -189,8 +189,8 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 ### 4.4 管理员端点（require_admin）
 - 用户管理：`GET /api/admin/users`、`POST /role`、`PATCH/DELETE /api/admin/users/{id}`、`/sessions`
 - Bot/赛事管理：`GET /api/admin/{bots,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`；对局列表走公开 `GET /api/matches`，管理操作为 `PATCH/DELETE /api/admin/matches/{id}`
-- **一致性闸门**：活跃对局的状态只能经 orchestrator 安全中止为 `aborted`，后台不能手工伪造 `pending/running/completed`；赛事 match 中止后保留 aborted 历史，原 pairing 原子复位 pending 供安全重派，无 winner 不得推进阶段；删除用户/Bot/赛事前检查活跃对局与赛事引用，`published` 删除先取消排期，`running/rest` 或仍有 active match 时拒绝删除。
-- 配置：`GET /api/admin/settings/runtime`、`PATCH /api/admin/settings/{runtime,site}`
+- **一致性闸门**：活跃对局的状态只能经 orchestrator 安全中止为 `aborted`，后台不能手工伪造 `pending/running/completed`；赛事 match 中止后保留 aborted 历史，原 pairing 原子复位 pending 供安全重派，无 winner 不得推进阶段；管理员赛事时间 PATCH 与旧值合并后整体验证，非法请求零部分写；删除用户/Bot/赛事前检查活跃对局与赛事引用，`published` 删除表示先取消尚未开打排期再删除，`running/rest`、`finished`、已有正式榜或仍有 active match 时拒绝删除。
+- 配置：`GET /api/admin/settings/runtime`、`PATCH /api/admin/settings/{runtime,site}`；runtime 多字段 PATCH 先整体验证、单事务持久化，提交后才重建进程内并发/超时状态。
 - 裁判：`GET /api/admin/judges`（含可调参数当前值 + docstring，区别于公开 `/api/judges`）、`PATCH /api/admin/judges/params`（热调规则参数）
 - 模板：`GET/POST /api/admin/templates`、`PUT/DELETE /{tid}`、`POST /preview`
 - 邮件：`GET /api/admin/email/{templates,outbox}`、`PUT /templates/{key}`
@@ -309,6 +309,6 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 - **`logs/access.log`**：HTTP 访问日志（`AccessLogMiddleware`，含真实 IP + 方法 + 路径 + 状态 + 耗时）。
 - **`logs/audit.log`**：安全审计日志（`audit_log()` 辅助，敏感操作含 actor+IP+action+result；`result=fail` 升 WARNING）。
 
-埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、赛事创建、admin 删用户/bot/赛事、改角色、建重置令牌。管理员可在前端 admin「日志」Tab 切换三文件查看（`/api/admin/logs?file={app|access|audit}`，文件参数白名单防路径穿越）。验证码日志脱敏（SMTP 未配置时不打明文）。
+埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间修改、runtime 配置修改、改角色、建重置令牌。赛事与 runtime 管理写记录成功后的值摘要，拒绝请求记录明确原因。管理员可在前端 admin「日志」Tab 切换三文件查看（`/api/admin/logs?file={app|access|audit}`，文件参数白名单防路径穿越）；后端按结构化首行聚合多行记录后再筛选，确保 ERROR/关键字筛选仍包含 traceback 和对局上下文，响应只返回安全文件名而不泄漏服务器绝对路径。验证码日志脱敏（SMTP 未配置时不打明文）。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

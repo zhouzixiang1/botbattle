@@ -4,7 +4,8 @@
 - logging_config 三 handler（app/access/audit 独立文件 + propagate 隔离）。
 - AccessLogMiddleware 记真实 IP（trust_proxy 开启时读 X-Forwarded-For）。
 - audit_log 辅助函数格式（ip/action/result/user/target/detail）+ result=fail 升 WARNING。
-- admin_logs file 参数（app/access/audit 三文件白名单，防路径穿越）。
+- admin_logs file 参数（app/access/audit 三文件白名单、响应不泄漏绝对路径）。
+- admin_logs 按结构化记录过滤，多行 ERROR 保留 traceback 与对局上下文。
 - 验证码脱敏（SMTP 未配置时不打明文 code 到日志）。
 """
 from __future__ import annotations
@@ -203,7 +204,8 @@ def test_admin_logs_file_access(admin_client):
     assert r.status_code == 200
     lines = r.json()["lines"]
     assert any("ACCESS_LINE_TEST" in ln for ln in lines)
-    assert "access.log" in r.json()["path"]
+    assert r.json()["source"] == "access.log"
+    assert "path" not in r.json()
 
 
 def test_admin_logs_file_audit(admin_client):
@@ -211,14 +213,41 @@ def test_admin_logs_file_audit(admin_client):
     assert r.status_code == 200
     lines = r.json()["lines"]
     assert any("AUDIT_LINE_TEST" in ln for ln in lines)
-    assert "audit.log" in r.json()["path"]
+    assert r.json()["source"] == "audit.log"
+
+
+def test_admin_logs_error_filter_keeps_complete_traceback(admin_client, tmp_path):
+    """ERROR/q 命中整条记录时，续行 traceback 与首行 match 上下文均保留。"""
+    (tmp_path / "logs" / "app.log").write_text(
+        "2026-08-09 10:00:00 ERROR [bzplat.backend.matches] "
+        "match_id=77 bot_id=9 crashed\n"
+        "Traceback (most recent call last):\n"
+        "  File \"runner.py\", line 42, in run\n"
+        "RuntimeError: bot process exited\n"
+        "2026-08-09 10:00:01 INFO [bzplat.backend.matches] match_id=78 completed\n",
+        encoding="utf-8",
+    )
+
+    r = admin_client.get(
+        "/api/admin/logs?file=app&level=ERROR&q=RuntimeError&limit=1"
+    )
+
+    assert r.status_code == 200
+    lines = r.json()["lines"]
+    assert len(lines) == 4  # limit 不切断单条多行记录
+    assert "match_id=77" in lines[0]
+    assert "Traceback (most recent call last)" in lines[1]
+    assert "runner.py" in lines[2]
+    assert "RuntimeError: bot process exited" in lines[3]
+    assert not any("match_id=78" in line for line in lines)
 
 
 def test_admin_logs_rejects_unknown_file(admin_client):
     """file 参数不在白名单 → 回退 app.log（防路径穿越读任意文件）。"""
     r = admin_client.get("/api/admin/logs?file=../../etc/passwd")
     assert r.status_code == 200
-    assert "app.log" in r.json()["path"]  # 回退 app，绝不读 /etc/passwd
+    assert r.json()["source"] == "app.log"  # 回退 app，绝不读 /etc/passwd
+    assert "path" not in r.json()
 
 
 # ── 验证码脱敏：SMTP 未配置时不打明文 code ──────────────────────────────────
