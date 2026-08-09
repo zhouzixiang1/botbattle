@@ -895,6 +895,11 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   const originalVersion = Number((await originalRow.getByText(/^v\d+$/).textContent())?.slice(1))
   expect(originalVersion).toBeGreaterThan(0)
 
+  // A real LongRunning upload must pass the backend's strict first-envelope +
+  // KEEP_RUNNING preflight; this is intentionally not mocked.
+  await manager.getByRole('combobox').filter({ hasText: 'Traditional（默认）' }).click()
+  await page.getByRole('option', { name: 'LongRunning（严格长驻）', exact: true }).click()
+  await expect(manager.getByText(/首回合响应后必须输出 KEEP_RUNNING 握手/)).toBeVisible()
   await manager.locator('#ver-note').fill('Playwright rollback regression')
   // The preceding mocked success clears React state but intentionally does not
   // change the browser-owned file input value. Clear it so selecting the same
@@ -919,6 +924,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   }).toBeGreaterThan(originalVersion)
   const newVersion = Number((await newestCurrent.getByText(/^v\d+$/).textContent())?.slice(1))
   expect(newVersion).toBeGreaterThan(originalVersion)
+  await expect(newestCurrent).toContainText('longrunning')
 
   // The old implementation compared against a stale prop. The final click in this
   // sequence was visibly enabled but silently returned without a network request.
