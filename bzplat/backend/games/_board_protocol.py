@@ -7,7 +7,8 @@
 - 响应信封：``{"response": {"x":.., "y":..}}``（Botzone 标准）。
 
 本模块是**平台协议工具**（请求负载 builder + 响应解析），不是游戏规则——共享安全。
-各游戏 rule/tier/result 仍独立。gomoku/pencil 的 protocol.py 仅 re-export。
+它是棋类同构 JSON 原语的唯一实现，并通过各 GameSpec 的 shared_source_files 随
+公开裁判源码提供；各游戏 protocol.py 只导出本游戏实际使用的 builder。
 """
 from __future__ import annotations
 

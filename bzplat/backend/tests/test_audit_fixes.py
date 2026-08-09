@@ -29,7 +29,7 @@ def test_check_not_folded_when_to_call_zero():
 
     s = MatchSession(num_hands=1, rng=random.Random(42))
     r = asyncio.run(s.run_async(bot))
-    hr = r.hand_results[0]
+    hr = r.rounds[0]
     # 修复前：reason=fold（BB check 被判 fold）。修复后：应到 showdown。
     assert hr.reason != "fold", f"check 被误判 fold！reason={hr.reason}"
     assert hr.reason in ("showdown", "fold"), hr.reason  # 合理终局
@@ -43,7 +43,7 @@ def test_check_call_hand_completes_to_showdown():
     s = MatchSession(num_hands=3, rng=random.Random(7))
     r = asyncio.run(s.run_async(bot))
     # 每手都应到 showdown（无人 fold）
-    for hr in r.hand_results:
+    for hr in r.rounds:
         assert hr.reason == "showdown", f"应 showdown 实际 {hr.reason}"
 
 

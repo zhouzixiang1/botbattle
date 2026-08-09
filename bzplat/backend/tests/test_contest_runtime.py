@@ -40,7 +40,7 @@ def test_generate_deal_sequence_deterministic():
 def test_holdem_build_match_plan_duplicate_returns_two_legs():
     """holdem spec build_match_plan：duplicate=True 返 2 leg（seat_swap False+True）。"""
     spec = registry.get("holdem")
-    legs = spec.build_match_plan(123, {"num_hands": 5, "duplicate": True})
+    legs = spec.build_match_plan(123, {"duplicate": True})
     assert len(legs) == 2
     assert legs[0]["seat_swap"] is False
     assert legs[1]["seat_swap"] is True
@@ -51,9 +51,16 @@ def test_holdem_build_match_plan_duplicate_returns_two_legs():
 def test_holdem_build_match_plan_nonduplicate_single_leg():
     """duplicate=False 返单 leg。"""
     spec = registry.get("holdem")
-    legs = spec.build_match_plan(123, {"num_hands": 5, "duplicate": False})
+    legs = spec.build_match_plan(123, {"duplicate": False})
     assert len(legs) == 1
     assert legs[0]["seat_swap"] is False
+    assert legs[0]["params"] == {}
+
+
+def test_holdem_build_match_plan_rejects_rule_overrides():
+    spec = registry.get("holdem")
+    with pytest.raises(ValueError, match="不接受参数: num_hands"):
+        spec.build_match_plan(123, {"duplicate": True, "num_hands": 5})
 
 
 def test_non_holdem_spec_has_no_build_match_plan():

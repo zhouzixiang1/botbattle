@@ -1,7 +1,7 @@
 """点格棋 GameSpec——引擎/协议/配置/段位/模板统一声明。
 
-PR4：引擎/协议/结果/段位已物理迁入本包（games/pencil/），不再共享基类。
-与 gomoku 各自独立 protocol.py 副本（不共享 board_protocol）。
+引擎/协议/结果/段位已物理迁入本包（games/pencil/）。protocol.py 只公开
+点格棋 API，棋类同构 JSON 原语由公开的 _board_protocol.py 唯一实现。
 """
 from __future__ import annotations
 
@@ -21,7 +21,12 @@ async def _session_factory(decide, *, on_event=None, **params: Any):
     """构造 PencilSession 并 run_async。
 
     点阵边长固定 DEFAULT_N（6）——游戏规则钉死，不接受 match_config 配置。
+    runner 的通用内部 rng 可以传入但本游戏不消费；其他键一律报错。
     """
+    unexpected = set(params) - {"rng"}
+    if unexpected:
+        fields = ", ".join(sorted(unexpected))
+        raise TypeError(f"点格棋 Session 不接受参数: {fields}")
     session = PencilSession(
         n_dots=DEFAULT_N,
         on_event=on_event,
@@ -45,15 +50,12 @@ def _validate_match_params(cfg: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _rounds_per_match(match_config: dict[str, Any]) -> int:
-    return 1
-
-
 def _normalize_earnings(ea: int) -> float:
     return float(ea)
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
+    _validate_match_params(match_config)
     # pencil ETA 固定（N=6 钉死 → 25 格 标定 60s）
     return 60
 
@@ -66,11 +68,10 @@ async def _preflight_check(
     timeout: float = 8.0,
 ) -> tuple[bool, str]:
     """按所选模式发送 canonical 首回合并验证点格棋坐标。"""
-    from bzplat.backend.games._board_protocol import build_pencil_request
     from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
     import asyncio
 
-    req = build_pencil_request(x=-1, y=-1, pass_=0, me=0, scores=[0, 0])
+    req = proto.build_pencil_request(x=-1, y=-1, pass_=0, me=0, scores=[0, 0])
     try:
         payload = await botzone.preflight_exchange(
             binary_path,
@@ -99,10 +100,8 @@ SPEC = GameSpec(
     protocol=_PROTOCOL,
     default_match_params={},  # 点阵边长钉死 DEFAULT_N（6），无对局级可配参数
     validate_match_params=_validate_match_params,
-    rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
     eta_for_match=_eta_for_match,
-    judge_params=[],  # 点阵边长固定，不提供运行时覆盖参数
     tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
@@ -110,4 +109,5 @@ SPEC = GameSpec(
     summary="N=6 点阵（对齐 Botzone grid_size=11 交错→25 格）；红先；占相邻边围格得分并连走；先到多数格（13）或终局格多者胜。",
     preflight_check=_preflight_check,
     time_budget_per_side=900.0,  # 象棋钟：每方累计 15 分钟
+    shared_source_files=("_board_protocol.py",),
 )

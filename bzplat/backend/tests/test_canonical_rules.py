@@ -52,7 +52,7 @@ def test_platform_rule_constants_are_canonical():
 
 
 @pytest.mark.parametrize(
-    "legacy",
+    "removed_rule_field",
     [
         {"match_config": {"hands": 1}},
         {"hands": 1},
@@ -65,7 +65,7 @@ def test_platform_rule_constants_are_canonical():
         {"board_size": 9},
     ],
 )
-def test_challenge_rejects_every_legacy_rule_override(tmp_path, legacy):
+def test_challenge_rejects_every_removed_rule_override(tmp_path, removed_rule_field):
     client, app, user = _client(tmp_path)
     a, b = _two_bots(app, user)
     response = client.post(
@@ -74,7 +74,7 @@ def test_challenge_rejects_every_legacy_rule_override(tmp_path, legacy):
             "my_bot_id": a["id"],
             "opponent_bot_id": b["id"],
             "game_id": "holdem",
-            **legacy,
+            **removed_rule_field,
         },
     )
     assert response.status_code == 422, response.text
@@ -91,14 +91,14 @@ def test_human_and_contest_creation_reject_legacy_rule_fields(tmp_path):
     )
     assert human.status_code == 422
 
-    for legacy in ({"hands_per_match": 1}, {"match_config": {"hands": 1}}):
+    for removed_rule_field in ({"hands_per_match": 1}, {"match_config": {"hands": 1}}):
         contest = client.post(
             "/api/contests",
             json={
                 "title": "固定规则赛事",
                 "game_id": "holdem",
                 "template_id": "holdem_swiss_ko",
-                **legacy,
+                **removed_rule_field,
             },
         )
         assert contest.status_code == 422, contest.text
@@ -114,6 +114,25 @@ def test_human_and_contest_creation_reject_legacy_rule_fields(tmp_path):
     assert nested.status_code == 400
     assert "不允许覆盖字段: hands" in nested.json()["detail"]
 
+    for field in ("max_hand", "maxHand", "roundz"):
+        response = client.post(
+            "/api/contests",
+            json={
+                "title": f"拒绝 {field}",
+                "game_id": "holdem",
+                "stages": [{"type": "round_robin", field: 1}],
+            },
+        )
+        assert response.status_code == 400, response.text
+        assert field in response.json()["detail"]
+
+    empty_stages = client.post(
+        "/api/contests",
+        json={"title": "空阶段", "game_id": "holdem", "stages": []},
+    )
+    assert empty_stages.status_code == 400
+    assert "非空" in empty_stages.json()["detail"]
+
 
 def test_admin_contest_and_template_apis_do_not_reintroduce_rule_editors(tmp_path):
     client, app, user = _client(tmp_path)
@@ -126,17 +145,17 @@ def test_admin_contest_and_template_apis_do_not_reintroduce_rule_editors(tmp_pat
     )
     assert patch.status_code == 422
 
-    legacy_template = client.post(
+    removed_field_template = client.post(
         "/api/admin/templates",
         json={
-            "id": "legacy_rules",
-            "name": "Legacy Rules",
+            "id": "removed_rules",
+            "name": "Removed Rules",
             "game_id": "holdem",
             "match_config": {},
             "stages": [{"type": "round_robin"}],
         },
     )
-    assert legacy_template.status_code == 422
+    assert removed_field_template.status_code == 422
 
     nested_template = client.post(
         "/api/admin/templates",
@@ -149,6 +168,19 @@ def test_admin_contest_and_template_apis_do_not_reintroduce_rule_editors(tmp_pat
     )
     assert nested_template.status_code == 400
     assert "n_dots" in nested_template.json()["detail"]
+
+    for field in ("max_hand", "maxHand", "roundz"):
+        response = client.post(
+            "/api/admin/templates",
+            json={
+                "id": f"bad_{field.lower()}",
+                "name": "非法字段",
+                "game_id": "holdem",
+                "stages": [{"type": "round_robin", field: 1}],
+            },
+        )
+        assert response.status_code == 400, response.text
+        assert field in response.json()["detail"]
 
     templates = client.get("/api/admin/templates").json()["templates"]
     assert templates and all("match_config" not in row for row in templates)
@@ -179,3 +211,42 @@ def test_contest_responses_hide_historical_rule_columns(tmp_path):
     payload = detail.json()["contest"]
     assert "hands_per_match" not in payload
     assert "match_config_json" not in payload
+
+
+def test_fresh_contest_schema_and_store_have_no_rule_columns(tmp_path):
+    client, app, user = _client(tmp_path, role="organizer")
+    del client
+    store = app.state.store
+    with store._tx() as conn:
+        contest_info = {
+            row["name"]: row
+            for row in conn.execute("PRAGMA table_info(contests)").fetchall()
+        }
+        for table in (
+            "bots",
+            "contests",
+            "matches_holdem",
+            "matches_gomoku",
+            "matches_pencil",
+            "ratings",
+            "rating_history",
+            "contest_templates",
+        ):
+            game_column = next(
+                row
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                if row["name"] == "game_id"
+            )
+            assert game_column["notnull"] == 1
+            assert game_column["dflt_value"] is None
+    columns = set(contest_info)
+    assert "hands_per_match" not in columns
+    assert "match_config_json" not in columns
+
+    contest = store.create_contest("唯一规则", user["id"], game_id="holdem")
+    assert "hands_per_match" not in contest
+    assert "match_config_json" not in contest
+    with pytest.raises(ValueError, match="规则字段已移除"):
+        store.update_contest(contest["id"], hands_per_match=1)
+    with pytest.raises(ValueError, match="规则字段已移除"):
+        store.update_contest(contest["id"], match_config_json='{"hands": 1}')

@@ -1,19 +1,19 @@
-"""循环依赖加固 + games/ 自治守护测试。
+"""循环依赖加固 + games/ 契约边界守护测试。
 
-全面解耦后，引擎/协议/结果/段位物理迁入 games/<game>/ 子包（自包含），三层冗余
-shim（engine/ + protocol/ + _compat/）已删除。本测试在**独立子进程**里从多种 import
+裁判/适配器/协议/结果/段位集中在 games/<game>/ 子包，三层冗余 shim
+（engine/ + protocol/ + _compat/）已删除。本测试在**独立子进程**里从多种 import
 顺序断言无 ImportError——若有人在新模块加了反向 import（如通用层 import 具体游戏），
-此测试会捕获。
+此测试会捕获。零平台依赖只保证权威 ``*_judge.py``；engine 可复用 runtime 的统一
+故障类型，统一信封可读取 schema 的运行模式常量。
 
 **为什么用子进程**：直接在 pytest 进程里清空 sys.modules 会污染后续测试（它们依赖
 已加载的模块对象/monkeypatch）。子进程完全隔离，测完即弃。
 
 守护的不变量（文档化于 AGENTS.md）：
-- games/<game>/ 子包（engine/protocol/result/tiers/cards/spec/templates）**不得**反向
+- games/<game>/ 子包（engine/protocol/result/tiers/spec/templates）**不得**反向
   import bzplat.backend.engine / bzplat.backend._compat / bzplat.backend.protocol（已删的
   shim，保留为"防回退"哨兵）或通用层（matches/contests/store/api_routes）——只能 import
-  同包 / bzplat.backend.games.base / bzplat.backend.games._board_protocol /
-  bzplat.backend.store.schema（纯常量）。
+  同包、games 契约/共享协议、runtime 底层错误类型或 store.schema 纯常量。
 """
 from __future__ import annotations
 

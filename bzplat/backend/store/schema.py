@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS bots (
     current_version INTEGER NOT NULL DEFAULT 0,
     is_active       INTEGER NOT NULL DEFAULT 1,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
@@ -90,14 +90,12 @@ CREATE TABLE IF NOT EXISTS contests (
     registration_closes_at  TEXT,
     starts_at               TEXT,
     ends_at                 TEXT,
-    hands_per_match         INTEGER NOT NULL DEFAULT 70,
     created_at              TEXT    NOT NULL,
-    game_id                 TEXT    NOT NULL DEFAULT 'holdem',
+    game_id                 TEXT    NOT NULL,
     stages_json             TEXT    NOT NULL DEFAULT '[]',
     current_stage_idx       INTEGER NOT NULL DEFAULT 0,
     template_id             TEXT    NOT NULL DEFAULT 'holdem_swiss_ko',
     rest_ends_at            TEXT,
-    match_config_json       TEXT    NOT NULL DEFAULT '{}',
     phase                   TEXT    NOT NULL DEFAULT 'standalone',  -- P2: preliminary/final/standalone
     source_contest_id       INTEGER,  -- P2: 软链（预赛→决赛导航，不复制 entry）
     official_results_ready  INTEGER NOT NULL DEFAULT 0,  -- P2: 全员正式名次是否已落库
@@ -119,7 +117,7 @@ CREATE TABLE IF NOT EXISTS matches_holdem (
     reason          TEXT    NOT NULL DEFAULT 'completed',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -143,7 +141,7 @@ CREATE TABLE IF NOT EXISTS matches_gomoku (
     reason          TEXT    NOT NULL DEFAULT 'completed',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
-    game_id         TEXT    NOT NULL DEFAULT 'gomoku',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -167,7 +165,7 @@ CREATE TABLE IF NOT EXISTS matches_pencil (
     reason          TEXT    NOT NULL DEFAULT 'completed',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
-    game_id         TEXT    NOT NULL DEFAULT 'pencil',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -204,7 +202,7 @@ CREATE TABLE IF NOT EXISTS match_rating_settlements (
 
 CREATE TABLE IF NOT EXISTS ratings (
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     rating          REAL    NOT NULL DEFAULT 1500.0,
     rd              REAL    NOT NULL DEFAULT 350.0,
     vol             REAL    NOT NULL DEFAULT 0.06,
@@ -236,7 +234,7 @@ CREATE TABLE IF NOT EXISTS pair_stats (
 CREATE TABLE IF NOT EXISTS rating_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     rating          REAL    NOT NULL,
     rd              REAL    NOT NULL,
     vol             REAL    NOT NULL,
@@ -432,7 +430,7 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 CREATE TABLE IF NOT EXISTS contest_templates (
     id              TEXT    PRIMARY KEY,
     name            TEXT    NOT NULL,
-    game_id         TEXT    NOT NULL DEFAULT 'holdem',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{}',
     stages_json     TEXT    NOT NULL DEFAULT '[]',
     is_builtin      INTEGER NOT NULL DEFAULT 0,
@@ -509,10 +507,10 @@ SETTING_CONTEST_SCHEDULER_INTERVAL_SEC = "contest_scheduler_interval_sec"
 # 已注册对战引擎（未注册则 contest start / challenge 拒绝）
 # schema.py 是无 import 的纯常量模块（为破循环依赖不能从 registry 派生），
 # 此字面量是 registry 的镜像——由 games/__init__.py 启动断言 + test_schema_frozensets_match_registry 守护不漂移。
-REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
+REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-registry-definition
 
 # 合法 game_id（与 REGISTERED_ENGINES 镜像，守护测试白名单）
-VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
+VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-registry-definition
 
 # ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────
 # 经验奖励：各类活动获得的经验

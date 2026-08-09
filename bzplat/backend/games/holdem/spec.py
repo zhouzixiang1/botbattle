@@ -27,8 +27,13 @@ async def _session_factory(decide, *, on_event=None, **params: Any):
 
     手数固定 DEFAULT_HANDS（70）——游戏规则钉死，不接受 match_config 配置
     （曾因 hands/num_hands key 名不一致导致配置静默失效，现彻底移除配置能力）。
-    规则常量全部固定；params 仅消费平台内部的 rng/deal_sequence。
+    规则常量全部固定；params 仅接受平台内部的 rng/deal_sequence。任何其他键
+    都是错误调用，必须显式失败，不能静默按固定规则继续执行。
     """
+    unexpected = set(params) - {"rng", "deal_sequence"}
+    if unexpected:
+        fields = ", ".join(sorted(unexpected))
+        raise TypeError(f"德州扑克 Session 不接受参数: {fields}")
     session = MatchSession(
         num_hands=DEFAULT_HANDS,
         starting_stack=STARTING_STACK,
@@ -57,17 +62,13 @@ def _validate_match_params(cfg: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _rounds_per_match(match_config: dict[str, Any]) -> int:
-    # 手数钉死 70（不再读 match_config）
-    return DEFAULT_HANDS
-
-
 def _normalize_earnings(ea: int) -> float:
     # 德州筹码以"大盲注"为单位展示（bb/100）：除 100
     return ea / 100.0
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
+    _validate_match_params(match_config)
     # holdem ETA ∝ 手数（每手约 2s）；手数钉死 70
     return DEFAULT_HANDS * 2
 
@@ -78,12 +79,16 @@ def _build_match_plan(seed: int, params: dict[str, Any]) -> list[dict[str, Any]]
     消除运气：同 seed 生成 deal_sequence，两 leg 用它发牌，净筹码相加判胜负。
     seed=None 或 params['duplicate']=False 时返回单 leg（普通赛）。
     """
+    unexpected = set(params) - {"duplicate"}
+    if unexpected:
+        fields = ", ".join(sorted(unexpected))
+        raise ValueError(f"复式赛计划不接受参数: {fields}")
     if not params.get("duplicate"):
-        return [{"seat_swap": False, "params": {**params, "match_seed": seed}}]
+        return [{"seat_swap": False, "params": {}}]
     # 手数钉死 DEFAULT_HANDS（不再读 params["num_hands"]）
     from bzplat.backend.games.holdem.engine import generate_deal_sequence
     ds = generate_deal_sequence(DEFAULT_HANDS, seed) if seed is not None else None
-    shared = {**params, "deal_sequence": ds, "match_seed": seed}
+    shared = {"deal_sequence": ds}
     return [
         {"seat_swap": False, "params": shared},  # leg1: A=seat0, B=seat1
         {"seat_swap": True, "params": shared},   # leg2: B=seat0, A=seat1（座位对调）
@@ -105,7 +110,7 @@ async def _preflight_check(
     # 构造最小 act 请求（preflop，seat 0/SB）
     from bzplat.backend.games.holdem.holdem_judge import Card, Suit
     req = build_act_request(
-        hand=0, total_hands=1, my_id=0, dealer_id=0,
+        hand=0, total_hands=DEFAULT_HANDS, my_id=0, dealer_id=0,
         my_cards=[Card(Suit.SPADE, 2), Card(Suit.SPADE, 3)], board=[], history=[],
         my_chips=19950,
     )
@@ -136,10 +141,8 @@ SPEC = GameSpec(
     protocol=_PROTOCOL,
     default_match_params={},  # 手数钉死 DEFAULT_HANDS，无对局级可配参数
     validate_match_params=_validate_match_params,
-    rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
     eta_for_match=_eta_for_match,
-    judge_params=[],
     tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,
     default_scoring="poker_3_1_0",

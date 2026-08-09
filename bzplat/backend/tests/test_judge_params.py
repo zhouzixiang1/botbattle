@@ -27,8 +27,8 @@ def orch(store):
     return MatchOrchestrator(store, runner=runner, max_concurrent=1)
 
 
-def test_legacy_judge_settings_are_not_read_by_orchestrator(store):
-    """存量 platform_settings 可留在旧库，但不得再注入任何对局。"""
+def test_removed_judge_setting_rows_are_not_read_by_orchestrator(store):
+    """数据库中的历史键只是无效数据，不得再注入任何对局。"""
     store.set_setting("judge_holdem_starting_stack", "5000")
     store.set_setting("judge_holdem_sb", "25")
     store.set_setting("judge_holdem_bb", "50")
@@ -101,12 +101,10 @@ def _run_callables(game_id, **kw):
     raise ValueError(f"unsupported game in helper: {game_id}")
 
 
-def test_gomoku_board_size_pinned_to_default():
-    """棋盘边长已钉死 BOARD_SIZE（15），即使传 board_size=9 也被忽略，仍用 15×15。"""
-    result = _run_callables("gomoku", board_size=9)  # 传 9 但 spec 忽略，用固定 15
-    assert result.reason in ("five", "illegal", "draw")
-    # 15×15 固定，回合数上限 15*15+1
-    assert result.rounds_played <= 15 * 15 + 1
+def test_gomoku_board_size_override_is_rejected():
+    """平台入口不接受第二套棋盘规则。"""
+    with pytest.raises(TypeError, match="Session 不接受参数: board_size"):
+        _run_callables("gomoku", board_size=9)
 
 
 def test_gomoku_default_board_size():
@@ -116,19 +114,11 @@ def test_gomoku_default_board_size():
     assert result.rounds_played <= 15 * 15 + 1
 
 
-# ── runner 透传 ───────────────────────────────────────────────────
+# ── runner 规则入口 ───────────────────────────────────────────────
 
-def test_runner_passes_judge_params_to_session(monkeypatch):
-    """run_callables 把 board_size 透传给 run_session（patch run_session 捕获）。"""
-    captured: dict = {}
-
-    async def fake_run_session(game_id, decide, **kw):
-        captured.update(kw)
-        from bzplat.backend.games.base import MatchResult
-        return MatchResult(rounds_played=0)
-
+def test_runner_rejects_removed_rule_params():
+    """通用 runner 透传后由目标 spec 统一拒绝旧规则键。"""
     runner = MatchRunner(BinaryRunner(prefer_local=True))
-    monkeypatch.setattr("bzplat.backend.matches.runner.run_session", fake_run_session)
 
     async def decide_a(req):
         return {"x": 0, "y": 0}
@@ -136,16 +126,12 @@ def test_runner_passes_judge_params_to_session(monkeypatch):
     async def decide_b(req):
         return {"x": 0, "y": 0}
 
-    asyncio.run(
-        runner.run_callables(
-            decide_a, decide_b, game_id="gomoku",
-            board_size=13, starting_stack=10000, sb=25, bb=50,
+    with pytest.raises(TypeError, match="Session 不接受参数"):
+        asyncio.run(
+            runner.run_callables(
+                decide_a, decide_b, game_id="gomoku", board_size=13,
+            )
         )
-    )
-    assert captured["board_size"] == 13
-    assert captured["starting_stack"] == 10000
-    assert captured["sb"] == 25
-    assert captured["bb"] == 50
 
 
 def test_gomoku_check_win_respects_smaller_board():
@@ -169,8 +155,8 @@ def test_gomoku_check_win_respects_smaller_board():
     assert check_win(board2, 7, 8, 0, size) is False
 
 
-def test_gomoku_small_board_full_game_via_runner():
-    """回归：board_size=9 时两合法 bot 能跑完整局不崩（曾因 check_win 越界崩溃）。"""
+def test_gomoku_small_board_cannot_be_selected_via_runner():
+    """纯裁判支持边界单测，不代表平台允许选择 9×9 规则。"""
     runner = MatchRunner(BinaryRunner(prefer_local=True))
     size = 9
 
@@ -191,11 +177,12 @@ def test_gomoku_small_board_full_game_via_runner():
 
         return decide
 
-    result = asyncio.run(
-        runner.run_callables(make_bot(), make_bot(), game_id="gomoku", board_size=size)
-    )
-    assert result.reason in ("five", "draw")
-    assert result.rounds_played <= size * size + 1
+    with pytest.raises(TypeError, match="Session 不接受参数: board_size"):
+        asyncio.run(
+            runner.run_callables(
+                make_bot(), make_bot(), game_id="gomoku", board_size=size,
+            )
+        )
 
 
 # ── admin 端点：鉴权 + 范围校验 + 热生效 ──────────────────────────

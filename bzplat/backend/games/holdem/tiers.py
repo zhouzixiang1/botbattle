@@ -5,7 +5,7 @@ rating → 段位映射。查表算法共享自 base.tier_for_in（PR-D DRY）�
 """
 from __future__ import annotations
 
-from bzplat.backend.games.base import TierDef, tier_for_in
+from bzplat.backend.games.base import TierDef
 
 TIERS: list[TierDef] = [
     TierDef(5, "master", "大师", "text-violet-700", "bg-violet-50", 2200),
@@ -15,8 +15,3 @@ TIERS: list[TierDef] = [
     TierDef(1, "bronze", "进阶", "text-emerald-700", "bg-emerald-50", 1600),
     TierDef(0, "novice", "新手", "text-sky-700", "bg-sky-50", 0),
 ]
-
-
-def tier_for(rating: float | int | None) -> TierDef:
-    """返回 rating 对应的段位（经共享查表算法）。"""
-    return tier_for_in(rating, TIERS)

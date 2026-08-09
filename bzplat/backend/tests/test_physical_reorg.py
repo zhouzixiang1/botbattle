@@ -1,10 +1,9 @@
-"""全面解耦 PR4：物理重组 + 独立转发层测试。
+"""全面解耦 PR4：物理重组测试。
 
 验证：
-1. 各游戏的 engine/protocol/result/tiers 是物理独立的（不共享基类/模块）
+1. 各游戏的 engine/protocol/result/tiers 是各自入口；同构棋类协议原语只有一份公开实现
 2. result 类互相独立（无共享父类），但满足鸭子契约
-3. _compat 转发层保旧 import 路径可用
-4. spec 引用本包 engine/protocol/result/tiers（不再经 engine./protocol. 旧路径）
+3. spec 引用本包 engine/protocol/result/tiers，不存在第二套转发入口
 """
 from __future__ import annotations
 
@@ -73,7 +72,7 @@ def test_holdem_result_has_specific_fields():
 
 # ── 各游戏 protocol 独立 ──────────────────────────────────────
 def test_protocols_are_independent_modules():
-    """gomoku 与 pencil 的 protocol 是独立模块（不共享 board_protocol）。"""
+    """每个 protocol 只暴露本游戏 builder，共享原语引用同一公开实现。"""
     from bzplat.backend.games.gomoku import protocol as gproto
     from bzplat.backend.games.pencil import protocol as pproto
     from bzplat.backend.games.holdem import protocol as hproto
@@ -84,6 +83,12 @@ def test_protocols_are_independent_modules():
     for p in (gproto, pproto, hproto):
         assert callable(p.dumps_request)
         assert callable(p.loads_response)
+    assert hasattr(gproto, "build_gomoku_request")
+    assert not hasattr(gproto, "build_pencil_request")
+    assert hasattr(pproto, "build_pencil_request")
+    assert not hasattr(pproto, "build_gomoku_request")
+    assert gproto.dumps_request is pproto.dumps_request
+    assert gproto.parse_xy is pproto.parse_xy
 
 
 # ── 各游戏 tiers 独立 ─────────────────────────────────────────
@@ -114,19 +119,16 @@ def test_specs_reference_local_package():
 
 # ── run_session 经注册表跑各游戏（端到端）──────────────────────
 def test_run_session_holdem_via_registry():
-    """holdem 经注册表跑（黑盒：不抛错，返回有 rounds_played 的结果）。
-
-    手数已钉死 DEFAULT_HANDS=70，即使传 num_hands=2 也被忽略，仍跑 70 手。
-    """
+    """holdem 经注册表按唯一固定规则跑完整 70 手。"""
     from bzplat.backend.games import run_session
 
     async def decide(player, req):
-        return {"a": "f"}  # 一直 fold
+        return {"response": -1}  # 一直 fold
 
-    result = asyncio.run(run_session("holdem", decide, num_hands=2))
+    result = asyncio.run(run_session("holdem", decide))
     assert hasattr(result, "rounds_played")
     from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
-    assert result.rounds_played == DEFAULT_HANDS  # 钉死 70，忽略 num_hands 参数
+    assert result.rounds_played == DEFAULT_HANDS
 
 
 def test_run_session_gomoku_via_registry():

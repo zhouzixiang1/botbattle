@@ -110,8 +110,9 @@ notifications/ 通知管理器：NotificationManager（写站内通知 + 按 pre
             经验/等级：award_xp 在对局完成/赛事报名/评论/被关注时触发（users.xp/level/last_active_at）
 games/      游戏注册表（赛制/编排契约解耦的单一入口）：base.py(GameSpec 接口 + GameRegistry 单例
             + MatchResult/RoundResult 平台契约基类，仅类型提示/测试用) + __init__.py(注册表
-            单例 + run_session/normalize_game_id/tier_for/tier_dict/all_tiers/GAME_LABELS
-            等模块级便捷函数) + _board_protocol.py(棋类共享行协议工具；gomoku/pencil 的 protocol.py re-export)
+            单例 + run_session/normalize_game_id/preflight_bot/default_match_config/GAME_LABELS
+            等模块级便捷函数) + _board_protocol.py(棋类共享行协议唯一实现，随公开裁判源码提供；
+            gomoku/pencil 的 protocol.py 各自只导出本游戏 API)
             + 每游戏集中放置的子包 games/<game>/：<game>_judge.py(纯裁判=游戏规则，0 平台依赖，可独立审计/复用)
             + engine.py(适配层：裁判↔平台协议桥接，调 decide→驱动裁判→emit 事件) + protocol.py(行协议)
             + result.py(结果，独立定义不共享基类) + tiers.py(per-game 段位)
@@ -120,10 +121,9 @@ games/      游戏注册表（赛制/编排契约解耦的单一入口）：base
             holdem 的 Card 也在裁判模块（holdem_judge.py）——cards.py 已删。
             通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
-            （engine/ + protocol/ + _compat/ 三层冗余 shim 已删——真实现全在 games/）
             站点配置：GET /api/site/info
 runtime/    沙箱：Linux x86_64 ELF BinaryRunner(docker/local) + limits；PE/Mach-O/ARM64/脚本在上传时拒绝
-store/      SQLite + schema.py(常量唯一来源)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game
+store/      SQLite + schema.py(常量唯一来源；fresh 实体 game_id 必填且无 DB 默认值)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
 logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot stderr 捕获），cli serve 接入
@@ -159,11 +159,11 @@ src/pages/                 顶层路由全部用 React.lazy 代码分割（每�
 
 **核心游戏契约层**（赛制/编排主流程经统一契约接入游戏；违反契约会在运行时崩）：
 - **结果鸭子类型**（result.py 独立定义，不共享基类）：裁判产出 `winners`(座位号,空=平局) + `deltas`(长2零和)；编排层与赛制层只依赖公共结果字段，不触碰扑克 pot/board/holes 或棋盘细节。Holdem 多手权威胜者是按累计净筹码计算的 `result.winner`；正常结束时原始 `match_end` 事件的 `winner` 当前可能为 `null`，不得用它覆盖结果胜者。**测试守护**：`tests/test_result_contract.py` 与 runtime 回归守护该契约。
-- **GameSpec 接口**（`games/base.py`）：每款游戏须声明全部字段——`game_id`/`label`、`session_factory`/`protocol`、`default_match_params`/`validate_match_params`、`rounds_per_match`/`normalize_earnings`/`eta_for_match`、`tiers`、`templates`/`default_scoring`、`code_path`/`summary`、`source_files`、`num_seats`、`preflight_check`、`build_match_plan`、`time_budget_per_side`。`ProtocolSpec.validate_response_payload` 只校验从唯一标准信封提取出的 `response` 形状/类型；格式正确但规则非法的动作必须留给裁判。传输层只接受顶层恰含 `response` 的对象，拒绝顶层整数、裸坐标、旧 `{a}` 和额外字段；LongRunning 缺失精确握手即技术负，绝不回退；上传预检须按所选 runtime_mode 使用与正式首回合相同的信封和握手。`source_files` 是公开裁判源码白名单；`build_match_plan` 承载 duplicate 多 leg 计划；`time_budget_per_side` 是每方累计棋钟，`None` 表示使用通用单步超时，Pencil 固定 `900.0`。其中 `rounds_per_match` 与 `num_seats` 目前是契约元数据/测试约束，尚未被生产路径直接读取，其余字段按调用点消费。游戏规则全部使用每游戏代码常量：Holdem 固定 70 手/20000 筹码/50-100 盲注，Gomoku 固定 15×15，Pencil 固定 N=6/每方 900 秒；不得通过 admin、match_config 或兼容参数覆盖。Bot 非法 JSON/信封/response 与超时首次发生即技术判负（`protocol_error`/`timeout`），平台故障仍 aborted 且不评分；human WebSocket 输入不得包装为 Bot 协议故障。通用层经 `registry.get(game_id)` 取 spec，**禁止 `if game_id==` 分支**；架构守护测试覆盖该约束。
-- **段位 per-game**：`games/<game>/tiers.py` 声明该游戏段位曲线（查表算法共享 `base.tier_for_in`，曲线数据独立可调）；`registry.tier_for(game_id, rating)` 统一经 `tier_for_in(rating, spec.tiers)`（各游戏无需再声明 `tier_for` 字段）；`/api/tiers?game_id=` 返回对应曲线；前端 `lib/tiers.ts` 的 `useGameTiers(gameId)` 按游戏拉取着色。
+- **GameSpec 接口**（`games/base.py`）：每款游戏须声明全部字段——`game_id`/`label`、`session_factory`/`protocol`、`default_match_params`/`validate_match_params`、`normalize_earnings`/`eta_for_match`、`tiers`、`templates`/`default_scoring`、`code_path`/`summary`、`source_files`/`shared_source_files`、`preflight_check`、`build_match_plan`、`time_budget_per_side`。这些字段均有生产消费者；禁止添加仅作说明但无人读取的契约字段。`ProtocolSpec.validate_response_payload` 只校验从唯一标准信封提取出的 `response` 形状/类型；格式正确但规则非法的动作必须留给裁判。传输层只接受顶层恰含 `response` 的对象，拒绝顶层整数、裸坐标、`{a}` 和额外字段；LongRunning 缺失精确握手即技术负，绝不回退；上传预检须按所选 runtime_mode 使用与正式首回合相同的信封和握手，Holdem 首请求的 `max_hand` 固定为 70。`source_files` 是游戏包内公开源码白名单；`shared_source_files` 声明必须同时公开的 games 包根目录共享实现。`build_match_plan` 承载 duplicate 多 leg 计划；`time_budget_per_side` 是每方累计棋钟，`None` 表示使用通用单步超时，Pencil 固定 `900.0`。游戏规则全部使用每游戏代码常量：Holdem 固定 70 手/20000 筹码/50-100 盲注，Gomoku 固定 15×15，Pencil 固定 N=6/每方 900 秒；admin、match_config 与直接 `run_session` 都不能覆盖，session_factory 对非内部 `rng`/`deal_sequence` 参数明确报错。赛事阶段按 type 严格校验 allowed keys，未知/错拼/其他阶段字段一律拒绝。Bot 非法 JSON/信封/response 与超时首次发生即技术判负（`protocol_error`/`timeout`），平台故障仍 aborted 且不评分；human WebSocket 输入不得包装为 Bot 协议故障。持久化实体缺失或包含未知 `game_id` 时必须 fail closed，禁止猜成 Holdem；只有产品创建入口可明确提供默认游戏。通用层经 `registry.get(game_id)` 取 spec，**禁止 `if game_id==` 分支**；架构守护测试覆盖该约束。
+- **段位 per-game**：`games/<game>/tiers.py` 声明该游戏段位曲线（查表算法共享 `base.tier_for_in`，曲线数据独立可调）；`registry.tier_for(game_id, rating)` 统一经 `tier_for_in(rating, spec.tiers)`（各游戏无需再声明 `tier_for` 字段）；`GET /api/tiers?game_id=` 的 `game_id` 必填且未知值返回错误；前端 `lib/tiers.ts` 的 `useGameTiers(gameId)` 按游戏拉取着色。
 
 **新增一款游戏的成本**（赛制/编排主流程不加游戏名分支）——checklist：
-1. 建 `games/<game>/` 子包：`<game>_judge.py`(纯裁判=游戏规则，0 平台依赖) + `engine.py`(适配层：裁判↔平台协议桥接) + `protocol.py`(行协议) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec，明确 `time_budget_per_side`；无累计棋钟用 `None`)。棋类协议可 re-export `games/_board_protocol.py`。
+1. 建 `games/<game>/` 子包：`<game>_judge.py`(纯裁判=游戏规则，0 平台依赖) + `engine.py`(适配层：裁判↔平台协议桥接) + `protocol.py`(仅导出本游戏行协议 API) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec，明确 `time_budget_per_side`；无累计棋钟用 `None`)。若复用 `games/_board_protocol.py`，须在 `shared_source_files` 声明以随公开裁判源码提供，且不得导出其他游戏的 builder。
 2. `schema.py` 的 `REGISTERED_ENGINES`/`VALID_GAME_IDS` frozenset 各加该项；`Store._migrate()` 会按注册 ID 用同构模板自动建立 `matches_<game>` 表与索引，无需复制静态 DDL。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
 4. 前端 `src/games/<game>/`：`index.ts` 装配 GameViewSpec（Board/kind/reduce + `winner`/`describeEvent` + `humanPlay` 动作控件与序列化 + `replay` HUD/摘要/进度/分段导航）+ `canvas.ts`（CanvasRenderer）+ `reducer.ts`（事件归约，自包含对标后端 engine.py；启用棋钟时消费 `time_used/time_out`）+ 所需的游戏专属 UI 文件，再在 `src/games/index.ts` 注册一行。规则参数已固定，`configFields` 已删除。`RawEvent`/人类动作/HUD 公共类型在 `src/games/base.ts`；`normalizeGameId` 只规整字符串，`findGame` 对未知 id 返回空并由页面显示 unsupported，禁止回退 Holdem。

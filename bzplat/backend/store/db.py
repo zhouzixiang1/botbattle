@@ -52,6 +52,15 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def _contest_row(row: sqlite3.Row | None) -> dict | None:
+    """返回现行赛事结构；旧表中的规则列只读忽略且不向上层暴露。"""
+    result = _row(row)
+    if result is not None:
+        result.pop("hands_per_match", None)
+        result.pop("match_config_json", None)
+    return result
+
+
 _HISTORICAL_TECHNICAL_INCIDENT_EVENTS = frozenset(
     {"bot_decide_error", "bot_technical_error"}
 )
@@ -59,6 +68,8 @@ _READ_TECHNICAL_INCIDENT_EVENTS = (
     _HISTORICAL_TECHNICAL_INCIDENT_EVENTS
     | {TECHNICAL_INCIDENT_EVENT}
 )
+
+
 def _safe_bot_incident_sample(raw: Any) -> dict[str, Any] | None:
     """Normalize one public diagnostic without forwarding historical raw errors."""
     if not isinstance(raw, dict):
@@ -364,7 +375,7 @@ def _add_col(conn: sqlite3.Connection, table: str, col: str, decl: str) -> None:
 
 
 # 每游戏对局表的建表模板（全面解耦 PR3：matches 拆三表，结构一致）。
-# {suffix} = holdem/gomoku/pencil；{gdef} = 该表 game_id 列的 DEFAULT。
+# {suffix} = 注册 game_id；game_id 本身必须由 Store 创建入口显式写入。
 _CREATE_MATCHES_TABLE_SQL = """
 CREATE TABLE matches_{suffix} (
     id              TEXT    PRIMARY KEY,
@@ -376,7 +387,7 @@ CREATE TABLE matches_{suffix} (
     reason          TEXT    NOT NULL DEFAULT 'completed',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
-    game_id         TEXT    NOT NULL DEFAULT '{gdef}',
+    game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{{}}',  -- 内部快照 JSON（Bot 版本/duplicate）；{{}} 经 .format 转义为字面空 JSON
     result          TEXT    NOT NULL DEFAULT '{{}}',  -- 对局结果详情 JSON（hands_played/deltas/net_bb）
     human_user_id   INTEGER,
@@ -395,11 +406,19 @@ CREATE TABLE matches_{suffix} (
 """
 
 
-def _matches_table(game_id: str) -> str:
-    """game_id → 对应的物理表名（matches_holdem/gomoku/pencil）。"""
-    gid = (game_id or "holdem").strip().lower()
+def _registered_game_id(game_id: Any) -> str:
+    """校验并规整必须存在的 game_id；持久化数据不得猜测默认游戏。"""
+    if not isinstance(game_id, str) or not game_id.strip():
+        raise ValueError("game_id 不可为空")
+    gid = game_id.strip().lower()
     if gid not in _all_game_ids():
         raise ValueError(f"未知 game_id: {game_id!r}（合法: {sorted(_all_game_ids())}）")
+    return gid
+
+
+def _matches_table(game_id: str) -> str:
+    """game_id → 对应的物理表名（matches_holdem/gomoku/pencil）。"""
+    gid = _registered_game_id(game_id)
     return f"matches_{gid}"
 
 
@@ -540,7 +559,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("current_stage_idx", "INTEGER NOT NULL DEFAULT 0"),
         ("template_id", "TEXT NOT NULL DEFAULT 'holdem_swiss_ko'"),
         ("rest_ends_at", "TEXT"),
-        ("match_config_json", "TEXT NOT NULL DEFAULT '{}'"),
         ("phase", "TEXT NOT NULL DEFAULT 'standalone'"),  # P2 预赛/决赛
         ("source_contest_id", "INTEGER"),
         ("official_results_ready", "INTEGER NOT NULL DEFAULT 0"),
@@ -562,14 +580,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 registration_closes_at TEXT,
                 starts_at TEXT,
                 ends_at TEXT,
-                hands_per_match INTEGER NOT NULL DEFAULT 70,
                 created_at TEXT NOT NULL,
-                game_id TEXT NOT NULL DEFAULT 'holdem',
+                game_id TEXT NOT NULL,
                 stages_json TEXT NOT NULL DEFAULT '[]',
                 current_stage_idx INTEGER NOT NULL DEFAULT 0,
                 template_id TEXT NOT NULL DEFAULT 'holdem_swiss_ko',
                 rest_ends_at TEXT,
-                match_config_json TEXT NOT NULL DEFAULT '{}',
                 CONSTRAINT chk_contest_status CHECK (
                     status IN ('draft','open','running','rest','finished','cancelled'))
             )
@@ -578,9 +594,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         all_cols = [
             "id", "title", "description", "organizer_id", "status",
             "registration_opens_at", "registration_closes_at", "starts_at",
-            "ends_at", "hands_per_match", "created_at",
+            "ends_at", "created_at",
             "game_id", "stages_json", "current_stage_idx", "template_id",
-            "rest_ends_at", "match_config_json",
+            "rest_ends_at",
         ]
         present = [c for c in all_cols if c in cols]
         conn.execute(
@@ -610,14 +626,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 registration_closes_at TEXT,
                 starts_at TEXT,
                 ends_at TEXT,
-                hands_per_match INTEGER NOT NULL DEFAULT 70,
                 created_at TEXT NOT NULL,
-                game_id TEXT NOT NULL DEFAULT 'holdem',
+                game_id TEXT NOT NULL,
                 stages_json TEXT NOT NULL DEFAULT '[]',
                 current_stage_idx INTEGER NOT NULL DEFAULT 0,
                 template_id TEXT NOT NULL DEFAULT 'holdem_swiss_ko',
                 rest_ends_at TEXT,
-                match_config_json TEXT NOT NULL DEFAULT '{}',
                 phase TEXT NOT NULL DEFAULT 'standalone',
                 source_contest_id INTEGER,
                 official_results_ready INTEGER NOT NULL DEFAULT 0,
@@ -630,9 +644,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         all_cols = [
             "id", "title", "description", "organizer_id", "status",
             "registration_opens_at", "registration_closes_at", "starts_at",
-            "ends_at", "hands_per_match", "created_at", "game_id",
+            "ends_at", "created_at", "game_id",
             "stages_json", "current_stage_idx", "template_id", "rest_ends_at",
-            "match_config_json", "phase", "source_contest_id",
+            "phase", "source_contest_id",
             "official_results_ready", "require_real_name",
         ]
         present = [c for c in all_cols if c in cols]
@@ -753,8 +767,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
                             tid = str(t.get("id") or "").strip()
                             if not tid or tid in imported_ids:
                                 continue
+                            gid = t.get("game_id")
+                            try:
+                                gid = _registered_game_id(gid)
+                            except ValueError:
+                                # 无法确定所属游戏的旧模板不能猜成 holdem；代码内置
+                                # 同名模板仍会在下方按其权威 game_id 补入。
+                                continue
                             imported_ids.add(tid)
-                            gid = (t.get("game_id") or "holdem").strip().lower()
                             conn.execute(
                                 "INSERT OR REPLACE INTO contest_templates"
                                 "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
@@ -775,7 +795,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             for tid, t in DEFAULT_TEMPLATES.items():
                 if tid in imported_ids:
                     continue
-                gid = t.get("game_id") or "holdem"
+                gid = _registered_game_id(t.get("game_id"))
                 conn.execute(
                     "INSERT OR REPLACE INTO contest_templates"
                     "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
@@ -803,7 +823,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ).fetchone()
             if exists:
                 continue
-            gid = t.get("game_id") or "holdem"
+            gid = _registered_game_id(t.get("game_id"))
             conn.execute(
                 "INSERT INTO contest_templates"
                 "(id, name, game_id, match_config, stages_json, is_builtin, updated_at) "
@@ -920,7 +940,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if _tbl in tables and not _match_fk_has_set_null(conn, _tbl):
             # FK 非 SET NULL → 重建（对局数据丢弃，与分表迁移一致）
             conn.execute(f"DROP TABLE IF EXISTS {_tbl}")
-            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_gid, gdef=_gid))
+            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_gid))
             # 清理 matches_index 中指向该表的残留定位（表已空）
             conn.execute(
                 "DELETE FROM matches_index WHERE game_id=?", (_gid,)
@@ -1131,7 +1151,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for _gid in _all_game_ids():
         _tbl = _matches_table(_gid)
         if _tbl not in tables:
-            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_gid, gdef=_gid))
+            conn.execute(_CREATE_MATCHES_TABLE_SQL.format(suffix=_gid))
     # 重新读取当前物理表集合（上面的建表/FK 重建可能改变了它），再幂等补索引。
     _tables_after = {
         r[0]
@@ -1794,7 +1814,9 @@ class Store:
         binary_path = fields.get("binary_path", "")
         is_builtin = 1 if fields.get("is_builtin") else 0
         is_active = 1 if fields.get("is_active", True) else 0
-        game_id = fields.get("game_id") or "holdem"
+        # 仅缺省字段使用创建入口默认；显式空值/未知值必须失败。
+        requested_game_id = fields["game_id"] if "game_id" in fields else "holdem"
+        game_id = _registered_game_id(requested_game_id)
         runtime_mode = fields.get("runtime_mode") or DEFAULT_RUNTIME_MODE
         if runtime_mode not in VALID_RUNTIME_MODES:
             raise ValueError(f"非法 runtime_mode: {runtime_mode}")
@@ -2185,7 +2207,9 @@ class Store:
             d = _row(row)
             if d is not None:
                 from bzplat.backend.games import registry as _game_registry
-                t = _game_registry.tier_for(d.get("game_id") or "holdem", d.get("rating"))
+                t = _game_registry.tier_for(
+                    _registered_game_id(d.get("game_id")), d.get("rating")
+                )
                 d["tier_level"] = t.level
                 d["tier_key"] = t.key
                 d["tier_name"] = t.name
@@ -2252,7 +2276,7 @@ class Store:
         human_user_id: int | None = None,
         human_seat: int | None = None,
     ) -> dict:
-        gid = (game_id or "holdem").strip().lower()
+        gid = _registered_game_id(game_id)
         tbl = _matches_table(gid)
         mc_json = json.dumps(match_config or {}, ensure_ascii=False)
         with self._tx() as c:
@@ -2547,16 +2571,25 @@ class Store:
     # ── ratings（per-game：PK = bot_id + game_id，全面解耦 PR3）─────────
 
     def _bot_game_id(self, c, bot_id: int) -> str:
-        """取 bot 绑定的 game_id（bot 绑定单一游戏）；缺失回退 holdem。"""
+        """取 bot 绑定的 game_id；Bot/字段缺失或未知时明确失败。"""
         row = c.execute(
             "SELECT game_id FROM bots WHERE id=?", (bot_id,)
         ).fetchone()
-        return (row["game_id"] if row and row["game_id"] else "holdem")
+        if row is None:
+            raise ValueError(f"bot 不存在: {bot_id}")
+        return _registered_game_id(row["game_id"])
+
+    def _rating_game_id(self, c, bot_id: int, game_id: str | None) -> str:
+        return (
+            self._bot_game_id(c, bot_id)
+            if game_id is None
+            else _registered_game_id(game_id)
+        )
 
     def ensure_rating(self, bot_id: int, *, game_id: str | None = None) -> dict:
         """确保 (bot_id, game_id) 评分行存在。game_id 缺省取 bot 的 game_id。"""
         with self._tx() as c:
-            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
+            gid = self._rating_game_id(c, bot_id, game_id)
             existing = c.execute(
                 "SELECT * FROM ratings WHERE bot_id=? AND game_id=?", (bot_id, gid)
             ).fetchone()
@@ -2576,7 +2609,15 @@ class Store:
     def get_rating(self, bot_id: int, *, game_id: str | None = None) -> dict | None:
         """取 (bot_id, game_id) 评分行。game_id 缺省取 bot 的 game_id。"""
         with self._tx() as c:
-            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
+            if game_id is None:
+                bot = c.execute(
+                    "SELECT game_id FROM bots WHERE id=?", (bot_id,)
+                ).fetchone()
+                if bot is None:
+                    return None
+                gid = _registered_game_id(bot["game_id"])
+            else:
+                gid = _registered_game_id(game_id)
             return _row(
                 c.execute(
                     "SELECT * FROM ratings WHERE bot_id=? AND game_id=?",
@@ -2614,7 +2655,7 @@ class Store:
         ]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
-            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
+            gid = self._rating_game_id(c, bot_id, game_id)
             existing = c.execute(
                 "SELECT bot_id FROM ratings WHERE bot_id=? AND game_id=?",
                 (bot_id, gid),
@@ -2661,7 +2702,7 @@ class Store:
         ``settlement_id=None`` 保留旧调用方的行为（不做幂等 claim）；正常对局
         路径必须传 match_id。同 bot 自博弈只提交 marker、不更新天梯。
         """
-        gid = (game_id or "holdem").strip().lower()
+        gid = _registered_game_id(game_id)
         wa = int(winner == 0)
         la = int(winner == 1)
         da = int(winner is None)
@@ -2839,7 +2880,9 @@ class Store:
                     row["rating_delta"] = round(row["rating"] - prev, 2)
                 else:
                     row["rating_delta"] = None
-                t = _game_registry.tier_for(row.get("game_id") or "holdem", row["rating"])
+                t = _game_registry.tier_for(
+                    _registered_game_id(row.get("game_id")), row["rating"]
+                )
                 row["tier_level"] = t.level
                 row["tier_key"] = t.key
                 row["tier_name"] = t.name
@@ -3267,7 +3310,7 @@ class Store:
     ) -> None:
         """落一条评分快照（per-game），并截断保留每 (bot,game) 最近 N 条（N=200）。"""
         with self._tx() as c:
-            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
+            gid = self._rating_game_id(c, bot_id, game_id)
             c.execute(
                 "INSERT INTO rating_history(bot_id, game_id, rating, rd, vol, "
                 "matches_played, reason, created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -3286,7 +3329,7 @@ class Store:
     ) -> list[dict]:
         """返回评分历史时序（旧→新，per-game），用于画曲线。"""
         with self._tx() as c:
-            gid = (game_id or self._bot_game_id(c, bot_id)).strip().lower()
+            gid = self._rating_game_id(c, bot_id, game_id)
             rows = c.execute(
                 "SELECT id, rating, rd, vol, matches_played, reason, created_at "
                 "FROM rating_history WHERE bot_id=? AND game_id=? "
@@ -3689,13 +3732,11 @@ class Store:
         registration_closes_at: str | None = None,
         starts_at: str | None = None,
         ends_at: str | None = None,
-        hands_per_match: int = 70,
         status: str = "draft",
         game_id: str = "holdem",
         stages_json: str = "[]",
         template_id: str = "holdem_swiss_ko",
         current_stage_idx: int = 0,
-        match_config_json: str = "{}",
         phase: str = "standalone",
         source_contest_id: int | None = None,
         require_real_name: int = 0,
@@ -3703,14 +3744,15 @@ class Store:
         validate_contest_times(
             registration_opens_at, registration_closes_at, starts_at
         )
+        gid = _registered_game_id(game_id)
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO contests(title, description, organizer_id, status, "
                 "registration_opens_at, registration_closes_at, starts_at, "
-                "ends_at, hands_per_match, created_at, game_id, stages_json, "
-                "current_stage_idx, template_id, match_config_json, phase, "
+                "ends_at, created_at, game_id, stages_json, "
+                "current_stage_idx, template_id, phase, "
                 "source_contest_id, require_real_name) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     title,
                     description,
@@ -3720,32 +3762,34 @@ class Store:
                     registration_closes_at,
                     starts_at,
                     ends_at,
-                    hands_per_match,
                     _now(),
-                    game_id,
+                    gid,
                     stages_json,
                     current_stage_idx,
                     template_id,
-                    match_config_json,
                     phase,
                     source_contest_id,
                     require_real_name,
                 ),
             )
             cid = cur.lastrowid
-            return _row(
+            return _contest_row(
                 c.execute("SELECT * FROM contests WHERE id=?", (cid,)).fetchone()
             )
 
     def get_contest(self, contest_id: int) -> dict | None:
         with self._tx() as c:
-            return _row(
+            return _contest_row(
                 c.execute(
                     "SELECT * FROM contests WHERE id=?", (contest_id,)
                 ).fetchone()
             )
 
     def update_contest(self, contest_id: int, **fields: Any) -> dict | None:
+        removed_rule_fields = {"hands_per_match", "match_config_json"}.intersection(fields)
+        if removed_rule_fields:
+            names = ", ".join(sorted(removed_rule_fields))
+            raise ValueError(f"赛事规则字段已移除: {names}")
         allowed = {
             "title",
             "description",
@@ -3754,13 +3798,11 @@ class Store:
             "registration_closes_at",
             "starts_at",
             "ends_at",
-            "hands_per_match",
             "game_id",
             "stages_json",
             "current_stage_idx",
             "template_id",
             "rest_ends_at",
-            "match_config_json",
             "phase",
             "source_contest_id",
             "official_results_ready",
@@ -3809,7 +3851,7 @@ class Store:
                 c.execute(
                     f"UPDATE contests SET {','.join(sets)} WHERE id=?", vals
                 )
-            return _row(
+            return _contest_row(
                 c.execute(
                     "SELECT * FROM contests WHERE id=?", (contest_id,)
                 ).fetchone()
@@ -3859,8 +3901,17 @@ class Store:
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
                 rows, total = _paginate(c, sql, tuple(params), page=page, per_page=pp)
+                rows = [
+                    row
+                    for raw in rows
+                    if (row := _contest_row(raw)) is not None
+                ]
                 return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
-            return [_row(r) for r in c.execute(sql, params)]
+            return [
+                row
+                for raw in c.execute(sql, params)
+                if (row := _contest_row(raw)) is not None
+            ]
 
     # ── contest_entries ───────────────────────────────────────
 
@@ -4893,6 +4944,7 @@ class Store:
         stages: list | str,
         is_builtin: bool = False,
     ) -> dict:
+        gid = _registered_game_id(game_id)
         mc_json = (
             match_config if isinstance(match_config, str) else json.dumps(match_config)
         )
@@ -4904,7 +4956,7 @@ class Store:
                 "ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
                 "game_id=excluded.game_id, match_config=excluded.match_config, "
                 "stages_json=excluded.stages_json, updated_at=excluded.updated_at",
-                (tid, name, game_id, mc_json, st_json, 1 if is_builtin else 0, _now()),
+                (tid, name, gid, mc_json, st_json, 1 if is_builtin else 0, _now()),
             )
             r = _row(
                 c.execute(

@@ -106,7 +106,7 @@ class MatchSession:
         # Botzone 计分：每手筹码复位 starting_stack（不跨手累积），
         # 最终比 self.net（各手净输赢累加），不是最终累积筹码。
         self.net = [0, 0]  # 累计净输赢（= 各手 deltas 之和），赛事/编排层据此排名
-        self.hand_results: list[HandResult] = []  # 兼容旧名；即 rounds
+        self.rounds: list[HandResult] = []
         self.events: list[dict[str, Any]] = []
         self._current_actor = 0  # BotCrashedError 时定位崩溃方
 
@@ -149,15 +149,15 @@ class MatchSession:
         self._emit(
             "match_end",
             {
-                "hands_played": len(self.hand_results),
+                "hands_played": len(self.rounds),
                 "final_chips": list(self.net),  # Botzone 计分：累计净输赢
                 "winner": (1 - crash_loser) if crash_loser is not None else None,
                 "reason": "crash" if crash_loser is not None else None,
             },
         )
         return MatchResult(
-            rounds_played=len(self.hand_results),
-            rounds=list(self.hand_results),
+            rounds_played=len(self.rounds),
+            rounds=list(self.rounds),
             final_chips=list(self.net),  # Botzone 计分：累计净输赢
             events=list(self.events),
         )
@@ -281,7 +281,7 @@ class MatchSession:
             folded=[judge.round_player_bet[i] == Holdem.FOLD for i in range(2)],
             reason=reason,
         )
-        self.hand_results.append(hand_result)
+        self.rounds.append(hand_result)
 
         self._emit("settle", {
             "hand": hand_index,
@@ -364,13 +364,13 @@ class MatchSession:
     ) -> dict[str, Any]:
         """构造 Botzone 标准 act 请求（11 字段，严格对齐 Botzone wiki）。"""
         total_win_games = [0, 0]
-        for hr in self.hand_results:
+        for hr in self.rounds:
             if hr.winners:
                 for w in hr.winners:
                     if 0 <= w < 2:
                         total_win_games[w] += 1
         return proto.build_act_request(
-            hand=len(self.hand_results),
+            hand=len(self.rounds),
             total_hands=self.num_hands,
             my_id=actor,
             dealer_id=judge.dealer_idx,

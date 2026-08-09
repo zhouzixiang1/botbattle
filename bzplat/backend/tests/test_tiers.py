@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from bzplat.backend.games import tier_for, tier_dict, all_tiers
+from bzplat.backend.games import registry
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
 
 
 def test_tier_boundaries():
+    tier_for = lambda rating: registry.tier_for("holdem", rating)
     assert tier_for(0).key == "novice"
     assert tier_for(1599).key == "novice"
     assert tier_for(1600).key == "bronze"      # 边界含
@@ -22,14 +23,14 @@ def test_tier_boundaries():
 
 
 def test_tier_dict_structure():
-    d = tier_dict(1800)
+    d = registry.tier_dict("holdem", 1800)
     for k in ("level", "key", "name", "color", "bg", "min_rating"):
         assert k in d
     assert d["name"] == "熟练"
 
 
 def test_all_tiers_descending():
-    ts = all_tiers()
+    ts = registry.all_tiers("holdem")
     assert len(ts) == 6
     # level 降序
     levels = [t["level"] for t in ts]
@@ -81,7 +82,7 @@ def test_bot_profile_includes_tier(tmp_path):
 def test_tiers_endpoint_and_leaderboard_endpoint(tmp_path):
     app = create_app(db_path=str(tmp_path / "app.db"))
     c = TestClient(app)
-    r = c.get("/api/tiers")
+    r = c.get("/api/tiers?game_id=holdem")
     assert r.status_code == 200
     assert len(r.json()["tiers"]) == 6
     r = c.get("/api/leaderboard")

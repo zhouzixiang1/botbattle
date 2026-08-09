@@ -81,7 +81,8 @@ class BotManager:
             )
         from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_GAME_IDS, VALID_RUNTIME_MODES
 
-        gid = (game_id or "holdem").strip().lower()
+        # game_id 缺省时使用上传入口的产品默认；显式空值不得被解释成德州。
+        gid = ("holdem" if game_id is None else game_id).strip().lower()
         if gid not in VALID_GAME_IDS:
             raise BotError("invalid_game", f"未知游戏类型: {gid}")
         rmode = (runtime_mode or DEFAULT_RUNTIME_MODE).strip().lower()
@@ -257,9 +258,15 @@ class BotManager:
                 # bot_versions row or bots.current_version.  A concurrent match can
                 # therefore only snapshot the last validated active version.
                 if binary_runner is not None:
+                    stored_bot = self.store.get_bot(bot_id)
+                    effective_game_id = (
+                        (stored_bot or {}).get("game_id")
+                        if game_id is None
+                        else game_id
+                    )
                     ok, detail = self._run_preflight(
                         bot_id,
-                        game_id or (self.store.get_bot(bot_id) or {}).get("game_id"),
+                        effective_game_id,
                         binary_runner,
                         binary_path=str(temp_dest),
                         runtime_mode=runtime_mode,

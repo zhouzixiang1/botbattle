@@ -31,7 +31,7 @@ def _mgr(tmp_path):
 def _make_contest(store, *, status="draft", stages='[{"key":"s1","type":"swiss","rounds":1,"allow_bot_swap_in_rest":true}]'):
     c = store.create_contest(
         "ff赛", 1, game_id="holdem", template_id="holdem_swiss_ko",
-        stages_json=stages, match_config_json="{}", phase="standalone", status=status,
+        stages_json=stages, phase="standalone", status=status,
     )
     return c["id"]
 

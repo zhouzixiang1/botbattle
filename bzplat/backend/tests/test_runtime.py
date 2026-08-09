@@ -483,10 +483,12 @@ def test_match_two_callbots_short():
     if not ELF.is_file():
         pytest.skip("sample ELF missing")
     runner = MatchRunner(BinaryRunner(prefer_local=True))
-    # 手数已钉死 DEFAULT_HANDS（70，#123 游戏参数固定）——num_hands 参数被忽略
-    result = asyncio.run(runner.run_binaries(str(ELF), str(ELF), seed=1))
+    # game_id 必须显式选择；手数由该游戏唯一固定规则决定。
+    result = asyncio.run(
+        runner.run_binaries(str(ELF), str(ELF), game_id="holdem", seed=1)
+    )
     from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
-    assert result.hands_played == DEFAULT_HANDS
+    assert result.rounds_played == DEFAULT_HANDS
     # Botzone 计分：final_chips = 累计净输赢 net（零和），不再守恒于 2*STARTING_STACK
     assert sum(result.final_chips) == 0
 

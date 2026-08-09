@@ -228,7 +228,7 @@ def test_foldbot_vs_callbot_full_match():
     ))
     # 手数已钉死 DEFAULT_HANDS（70，#123）；num_hands 参数被忽略
     from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
-    assert result.hands_played == DEFAULT_HANDS
+    assert result.rounds_played == DEFAULT_HANDS
     # callbot (seat 1) 应净胜
     assert result.final_chips[1] > result.final_chips[0]
 

@@ -1,7 +1,7 @@
 # 裁判代码说明
 
 > 描述各游戏裁判引擎的代码位置、固定规则与协议要点。
-> `/api/judges/{game_id}/source` 按 `GameSpec.source_files` 公开纯裁判、适配、协议与结果源码，Web 上**只读**。游戏规则不通过管理后台修改；代码逻辑改动需走业务代码流程（git 分支）。
+> `/api/judges/{game_id}/source` 按 `GameSpec.source_files` 与 `shared_source_files` 公开纯裁判、适配、协议、结果及其共享实现源码，Web 上**只读**。游戏规则不通过管理后台修改；代码逻辑改动需走业务代码流程（git 分支）。
 
 ## 架构总览
 
@@ -20,7 +20,7 @@ games.registry.get(game_id).run_session(decide, **params)
 # 或：from bzplat.backend.games import run_session
 ```
 
-每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。`engine/`/`protocol/`/`_compat/` shim 已删除，真实现全在 `games/`。
+每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。Gomoku/Pencil 的同构 JSON 原语只在 `games/_board_protocol.py` 实现一次并随公开源码返回；两款游戏的 `protocol.py` 分别只导出自身 builder。
 
 ## 解耦契约
 
@@ -39,7 +39,7 @@ games.registry.get(game_id).run_session(decide, **params)
 | Gomoku | 15×15；黑先；无禁手；连续不少于 5 子即胜 |
 | Pencil | N=6；红先；每方累计棋钟 900 秒 |
 
-这些值不存入 `platform_settings`，不接受 match_config 或 admin 覆盖。修改它们属于游戏规则变更，必须同时修改裁判/契约、测试与 Wiki 并走代码评审。Pencil 棋钟链路为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
+这些值不存入 `platform_settings`，不接受 match_config、admin 或直接 `run_session` kwargs 覆盖；未知参数立即报错。Holdem 上传预检与正式首请求均发送 `max_hand=70`。修改规则常量属于游戏规则变更，必须同时修改裁判/契约、测试与 Wiki 并走代码评审。Pencil 棋钟链路为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
 
 ## 各游戏裁判要点
 
@@ -67,4 +67,4 @@ games.registry.get(game_id).run_session(decide, **params)
 
 ## 改动裁判代码
 
-纯规则逻辑的修改应落在 `games/<game>/<game>_judge.py`；只有协议桥接、`decide` 调度或事件映射才改同包 `engine.py`，协议/结果契约变化再同步 `protocol.py` / `result.py`。按仓库规范：从 `main` 切特性分支 → 修改 → `pytest` → GitHub PR 合并 → 删分支。真实现全在 `games/`（旧顶层 `engine/` 包已删除），Web 上不提供代码编辑能力。
+纯规则逻辑的修改应落在 `games/<game>/<game>_judge.py`；只有协议桥接、`decide` 调度或事件映射才改同包 `engine.py`，协议/结果契约变化再同步 `protocol.py` / `result.py`。按仓库规范：从 `main` 切特性分支 → 修改 → `pytest` → GitHub PR 合并 → 删分支。Web 上不提供代码编辑能力。

@@ -193,7 +193,7 @@ def test_fail_response_parseable_per_game():
     """
     from bzplat.backend.games import registry
     from bzplat.backend.games.holdem.protocol import parse_response
-    from bzplat.backend.games._board_protocol import parse_xy
+    from bzplat.backend.games.gomoku.protocol import parse_xy
 
     # fail_response 是可信的人类超时 payload；runner 统一包 canonical envelope。
     h = registry.get("holdem").protocol.fail_response()

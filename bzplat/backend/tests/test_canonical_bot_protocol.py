@@ -76,6 +76,11 @@ def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
     assert set(transport.sent[0]) == {"requests", "responses"}
     assert len(transport.sent[0]["requests"]) == 1
     assert transport.sent[0]["responses"] == []
+    if game_id == "holdem":
+        # 上传预检必须与正式第 1 手完全相同；max_hand 不能伪装成 1 手短局。
+        from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
+
+        assert transport.sent[0]["requests"][0]["max_hand"] == DEFAULT_HANDS == 70
     assert transport.extra_reads == (1 if runtime_mode == "longrunning" else 0)
     assert transport.stopped == ["s0"]
 

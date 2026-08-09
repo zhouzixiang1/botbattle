@@ -92,6 +92,6 @@ pytest bzplat/backend/tests/test_load_test_seed.py -v
 - **资源不调高**：不改 `bot_cpus/bot_memory`（只读硬顶）。
 - **Bot 运行失败不豁免**：可由隔离服务选择 Docker 或 `BZ_BOT_LOCAL=1`；阶段 2 要求三游戏各有 completed，且 completed 多于 aborted，不会把大量 EOF/aborted 只记 warning 后冒充通过。
 
-## 历史发现
+## 固定规则回归
 
-本压测脚本曾发现并修复一个真实 bug：`/api/matches/challenge` 不接受 `n_dots`，旧 pencil 路径在 `n_dots=None` 时构造棋盘崩溃（全 aborted）。当前规则已钉死为 N=6：`games/pencil` 的 `GameSpec.validate_match_params` 忽略所有规则字段，Session 始终使用 `DEFAULT_N=6`，通用层无 `if game_id` 分支。回归测试 `test_board_engines.py::test_run_session_pencil_n_dots_none_uses_default`。
+Pencil 规则已钉死为 N=6：`games/pencil` 的 `GameSpec.validate_match_params` 只接受空对象，Session 始终使用 `DEFAULT_N=6`；直接入口传 `n_dots`（包括 `None`）会明确抛错，不能静默忽略。通用层无 `if game_id` 分支。回归测试 `test_board_engines.py::test_run_session_pencil_rejects_removed_rule_params`。

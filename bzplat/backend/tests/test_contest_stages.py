@@ -252,27 +252,18 @@ def test_group_drr_ko_estimate():
     assert len(ko) == 2
 
 
-def test_start_rejects_unregistered_engine(store: Store):
-    users, bots = _mk_bots(store, 2)
-    c = store.create_contest(
-        "g",
-        users[0]["id"],
-        game_id="unknown_game",
-        template_id="gomoku_group_drr_ko",
-        stages_json=json.dumps(
-            [{"key": "g", "type": "group_double_round_robin", "group_count": 1}]
-        ),
-    )
-    for u, b in zip(users, bots):
-        store.add_contest_entry(c["id"], u["id"], b["id"])
-    store.update_contest(c["id"], status="open")
-    mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
-
-    async def run():
-        with pytest.raises(ValueError, match="未注册"):
-            await mgr.start(c["id"])
-
-    asyncio.run(run())
+def test_create_rejects_unregistered_engine(store: Store):
+    users, _ = _mk_bots(store, 2)
+    with pytest.raises(ValueError, match="game_id"):
+        store.create_contest(
+            "g",
+            users[0]["id"],
+            game_id="unknown_game",
+            template_id="gomoku_group_drr_ko",
+            stages_json=json.dumps(
+                [{"key": "g", "type": "group_double_round_robin", "group_count": 1}]
+            ),
+        )
 
 
 def test_gomoku_engine_registered(store: Store):
@@ -306,89 +297,38 @@ def test_full_rr_rejects_large_n(store: Store):
     asyncio.run(run())
 
 
-def test_legacy_holdem_contest_config_is_not_dispatched(store: Store):
-    """旧库 match_config_json 即使含 hands，也不得进入现行对局。"""
-    users, bots = _mk_bots(store, 2)
-    org = users[0]
-    c = store.create_contest(
-        "hcup", org["id"], game_id="holdem", template_id="holdem_rr",
-        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
-        match_config_json=json.dumps({"hands": 20}),
-    )
-    for u, b in zip(users, bots):
-        store.add_contest_entry(c["id"], u["id"], b["id"])
-    # 手工生成一条 pending 配对（等价 _begin_stage 的产物）
-    store.add_contest_pairing(c["id"], bots[0]["id"], bots[1]["id"], status="pending")
-    store.update_contest(c["id"], status="running", current_stage_idx=0)
-
-    seen = {}
-
-    class FakeOrch:
-        async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                            contest_id=None, game_id=None, **k):
-            seen["kwargs"] = k
-            seen["game_id"] = game_id
-            store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               match_type=match_type, game_id=game_id, match_config={})
-            return "m1"
-
-    mgr = ContestManager(store, FakeOrch())  # type: ignore
-
-    async def run():
-        await mgr._dispatch_pending(c["id"], 0)
-
-    asyncio.run(run())
-    assert "match_config" not in seen["kwargs"]
-    assert seen["game_id"] == "holdem"
+@pytest.mark.parametrize(
+    "removed",
+    [
+        {"match_config_json": json.dumps({"hands": 20})},
+        {"hands_per_match": 20},
+    ],
+)
+def test_contest_store_creation_rejects_removed_rule_fields(store: Store, removed):
+    users, _ = _mk_bots(store, 1)
+    with pytest.raises(TypeError):
+        store.create_contest(
+            "removed",
+            users[0]["id"],
+            game_id="holdem",
+            **removed,
+        )
 
 
-def test_legacy_pencil_contest_config_is_not_dispatched(store: Store):
-    """旧库 match_config_json 即使含 n_dots，也不得进入现行对局。"""
-    users, bots = _mk_bots(store, 2, game_id="pencil")
-    org = users[0]
-    c = store.create_contest(
-        "pcup", org["id"], game_id="pencil", template_id="pencil_swiss_ko",
-        stages_json=json.dumps([{"key": "rr", "type": "round_robin", "scoring": "ccgc_2_1_0"}]),
-        match_config_json=json.dumps({"n_dots": 9}),
-    )
-    for u, b in zip(users, bots):
-        store.add_contest_entry(c["id"], u["id"], b["id"])
-    store.add_contest_pairing(c["id"], bots[0]["id"], bots[1]["id"], status="pending")
-    store.update_contest(c["id"], status="running", current_stage_idx=0)
-
-    seen = {}
-
-    class FakeOrch:
-        async def challenge(self, a, b, owner_user_id, *, match_type="contest",
-                            contest_id=None, game_id=None, **k):
-            seen["kwargs"] = k
-            seen["game_id"] = game_id
-            store.create_match("m1", a, b, owner_id=owner_user_id, contest_id=c["id"],
-                               match_type=match_type, game_id=game_id, match_config={})
-            return "m1"
-
-    mgr = ContestManager(store, FakeOrch())  # type: ignore
-
-    async def run():
-        await mgr._dispatch_pending(c["id"], 0)
-
-    asyncio.run(run())
-    assert "match_config" not in seen["kwargs"]
-    assert seen["game_id"] == "pencil"
-
-
-def test_contest_create_uses_template_match_config(store: Store):
-    """ContestManager.create 从模板取自带 match_config（无显式传入时）。"""
+def test_contest_create_does_not_expose_rule_config_columns(store: Store):
+    """新赛事结构不再产生 hands_per_match/match_config_json。"""
     from bzplat.backend.contests.manager import ContestManager
     users, _ = _mk_bots(store, 1)
     mgr = ContestManager(store, MatchOrchestrator(store, max_concurrent=1))
     c = mgr.create(users[0]["id"], "t", template_id="holdem_swiss_ko")
-    # #123：游戏规则参数（hands/n_dots）已钉死固定值，match_config 为空（不再含 hands）
-    assert c["match_config_json"] == "{}"
+    assert "hands_per_match" not in c
+    assert "match_config_json" not in c
     c2 = mgr.create(users[0]["id"], "t2", template_id="gomoku_group_drr_ko")
-    assert c2["match_config_json"] == "{}"
+    assert "hands_per_match" not in c2
+    assert "match_config_json" not in c2
     c3 = mgr.create(users[0]["id"], "t3", template_id="pencil_swiss_ko")
-    assert c3["match_config_json"] == "{}"  # n_dots 钉死固定（不再配置）
+    assert "hands_per_match" not in c3
+    assert "match_config_json" not in c3
 
 
 # ── 多轮赛制推进修复（500 人压测发现的 bug）─────────────────────

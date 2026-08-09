@@ -1,7 +1,7 @@
 """全面解耦 PR2 测试：编排/赛制/段位去特化。
 
 验证通用层的 if game_id 分支已被 spec 能力取代：
-- orchestrator 用 spec.rounds_per_match / spec.normalize_earnings（不再 GAME_HOLDEM）
+- orchestrator 用 spec.normalize_earnings（不再按游戏名分支）
 - contests estimate 经 spec.eta_for_match
 - validate_match_config 对固定规则只接受空对象
 - 段位 per-game：/api/tiers?game_id= 返回该游戏曲线；bot_profile/leaderboard 按 bot 的 game_id 取段位
@@ -24,41 +24,31 @@ def test_normalize_earnings_via_spec():
     assert registry.get("pencil").normalize_earnings(-2) == -2.0
 
 
-def test_rounds_per_match_via_spec():
-    """手数钉死 DEFAULT_HANDS（70），rounds_per_match 忽略 match_config 返回固定值。"""
-    assert registry.get("holdem").rounds_per_match({"hands": 80}) == 70
-    assert registry.get("holdem").rounds_per_match({"hands": 1}) == 70
-    assert registry.get("holdem").rounds_per_match({}) == 70
-    assert registry.get("gomoku").rounds_per_match({}) == 1
-    assert registry.get("pencil").rounds_per_match({}) == 1
-
-
 # ── contests estimate 经 spec ETA（已钉死固定值）─────────────────
 def test_estimate_holdem_fixed(tmp_path):
-    """holdem ETA 固定（手数钉死 70 → 140s），忽略 match_config。"""
+    """holdem ETA 固定（手数钉死 70 → 140s），拒绝规则参数。"""
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
-    assert _estimate_sec_per_match("holdem", {"hands": 70}) == 140
-    assert _estimate_sec_per_match("holdem", {"hands": 35}) == 140  # 忽略，仍 140
     assert _estimate_sec_per_match("holdem", {}) == 140
+    with pytest.raises(ValueError, match="规则固定"):
+        _estimate_sec_per_match("holdem", {"hands": 35})
 
 
 def test_estimate_pencil_fixed(tmp_path):
-    """pencil ETA 固定（N=6 钉死 → 60s），忽略 n_dots。"""
+    """pencil ETA 固定（N=6 钉死 → 60s），拒绝 n_dots。"""
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
-    assert _estimate_sec_per_match("pencil", {"n_dots": 11}) == 60
-    assert _estimate_sec_per_match("pencil", {"n_dots": 5}) == 60
     assert _estimate_sec_per_match("pencil", {}) == 60
+    with pytest.raises(ValueError, match="规则固定"):
+        _estimate_sec_per_match("pencil", {"n_dots": 5})
 
 
 def test_estimate_gomoku_fixed():
     from bzplat.backend.contests.manager import _estimate_sec_per_match
 
-    # gomoku 单局固定 ETA
-    a = _estimate_sec_per_match("gomoku", {})
-    b = _estimate_sec_per_match("gomoku", {"foo": 1})
-    assert a == b > 0
+    assert _estimate_sec_per_match("gomoku", {}) > 0
+    with pytest.raises(ValueError, match="规则固定"):
+        _estimate_sec_per_match("gomoku", {"foo": 1})
 
 
 # ── validate_match_config 固定规则拒绝旧配置 ────────────────────
@@ -87,22 +77,19 @@ def test_default_match_config_derived_from_registry():
 def test_tiers_endpoint_per_game(tmp_path):
     app = create_app(db_path=str(tmp_path / "tiers.db"))
     c = TestClient(app)
-    # 不传 game_id → 默认 holdem（向后兼容）
+    # 不传 game_id 明确拒绝，不能猜测 holdem
     r = c.get("/api/tiers")
-    assert r.status_code == 200
-    data = r.json()
-    assert len(data["tiers"]) == 6
-    assert data["game_id"] == "holdem"
+    assert r.status_code == 422
     # 传 game_id=gomoku
     r = c.get("/api/tiers?game_id=gomoku")
     assert r.status_code == 200
     data = r.json()
     assert data["game_id"] == "gomoku"
     assert len(data["tiers"]) == 6
-    # 未知 game_id 回退 holdem（公开端点容错）
+    # 未知 game_id 明确拒绝，不能伪装成 holdem
     r = c.get("/api/tiers?game_id=chess")
-    assert r.status_code == 200
-    assert r.json()["game_id"] == "holdem"
+    assert r.status_code == 400
+    assert "未知游戏" in r.text
 
 
 def test_tiers_endpoint_per_game_curves_independent(tmp_path):

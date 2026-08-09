@@ -533,7 +533,7 @@ class MatchOrchestrator:
             raise ValueError("bot 不可用")
         if human_user_id in self._human_active_users:
             raise ValueError("你已有一场人类对局进行中，请先结束")
-        gid = normalize_game_id(game_id or bot.get("game_id"))
+        gid = normalize_game_id(bot.get("game_id") if game_id is None else game_id)
         if gid != normalize_game_id(bot.get("game_id")):
             raise ValueError(f"指定游戏 {gid} 与 Bot 游戏 {bot.get('game_id')} 不一致")
         if gid not in VALID_GAME_IDS or gid not in REGISTERED_ENGINES:
@@ -621,7 +621,7 @@ class MatchOrchestrator:
         gb = normalize_game_id(bot_b.get("game_id"))
         if ga != gb:
             raise ValueError(f"双方 Bot 游戏类型不一致：{ga} vs {gb}")
-        gid = normalize_game_id(game_id) if game_id else ga
+        gid = normalize_game_id(game_id) if game_id is not None else ga
         if gid != ga:
             raise ValueError(f"指定游戏 {gid} 与 Bot 游戏 {ga} 不一致")
         if gid not in VALID_GAME_IDS:
@@ -646,8 +646,7 @@ class MatchOrchestrator:
         # __run_match_inner 据此走 run_duplicate（2 leg 合并），并落 match_seed 供回放。
         spec = game_registry.get(gid)
         if duplicate and spec.build_match_plan is None:
-            # 游戏（棋类）不支持 duplicate：降级为单 leg（不抛错，保持容错）。
-            duplicate = False
+            raise ValueError(f"游戏 {gid} 不支持 duplicate 对局")
         mc: dict[str, Any] = {}
         if version_a is not None:
             mc["_bot_a_version_id"] = int(version_a["id"])
@@ -795,8 +794,7 @@ class MatchOrchestrator:
         签名与 challenge 一致，duplicate 标志只在编排层内部写入
         match_config，不是对外游戏规则配置。
         内部走 runner.run_duplicate（每 leg 同 deal_sequence，seat_swap 翻转 deltas
-        累加到物理 bot）。游戏不支持 duplicate（spec.build_match_plan is None）时
-        自动降级为单 leg（challenge 内部兜底，不抛错）。
+        累加到物理 bot）。游戏不支持 duplicate 时创建入口直接拒绝。
 
         match 行落 1 条 merged result（deltas=2 leg 累加、winner 按 merged net 判），
         供 standings/scoring 读取（与单 leg result 鸭子契约一致：result.deltas）。
@@ -926,10 +924,24 @@ class MatchOrchestrator:
                     mc = {}
             version_a_id = mc.get("_bot_a_version_id")
             version_b_id = mc.get("_bot_b_version_id")
-        gid = normalize_game_id(m.get("game_id") or bot_a.get("game_id"))
-        # P2 residual：复式赛制（duplicate）——match_config.duplicate=True 且游戏 spec
-        # 支持 build_match_plan（仅 holdem）时，走 run_duplicate（2 leg 同副牌交换座位，
-        # 合并 net 判胜负）。spec 不支持时退化为单 leg（runner.run_duplicate 内部兜底）。
+        try:
+            gid = normalize_game_id(m.get("game_id"))
+        except ValueError as exc:
+            logger.error("match %s has invalid stored game_id: %s", match_id, exc)
+            self.store.update_match(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_game_id",
+                winner=None,
+                ended_at=_now(),
+            )
+            self._broadcast(
+                match_id,
+                {"type": "error", "reason": "invalid_game_id", "message": str(exc)},
+            )
+            await self._finish_match_task(match_id, m.get("contest_id"))
+            return
+        # match_config.duplicate=True 时必须由 game spec 提供明确的多 leg 计划。
         stored_mc = m.get("match_config") or {}
         if isinstance(stored_mc, str):
             try:
@@ -937,7 +949,26 @@ class MatchOrchestrator:
             except Exception:
                 stored_mc = {}
         spec = game_registry.get(gid)
-        want_duplicate = bool(stored_mc.get("duplicate")) and spec.build_match_plan is not None
+        want_duplicate = bool(stored_mc.get("duplicate"))
+        if want_duplicate and spec.build_match_plan is None:
+            logger.error("match %s has unsupported duplicate config for %s", match_id, gid)
+            self.store.update_match(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_match_config",
+                winner=None,
+                ended_at=_now(),
+            )
+            self._broadcast(
+                match_id,
+                {
+                    "type": "error",
+                    "reason": "invalid_match_config",
+                    "message": f"游戏 {gid} 不支持 duplicate 对局",
+                },
+            )
+            await self._finish_match_task(match_id, m.get("contest_id"))
+            return
         # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
         dup_seed = int(stored_mc.get("duplicate_seed")) if stored_mc.get("duplicate_seed") is not None else None
         events: list[dict] = []
@@ -1352,7 +1383,7 @@ class MatchOrchestrator:
 
         bot_a_id = int(bot_a_id)
         bot_b_id = int(bot_b_id)
-        gid = str(match.get("game_id") or "holdem")
+        gid = normalize_game_id(match.get("game_id"))
         first, second = sorted((bot_a_id, bot_b_id))
         async with self._rating_lock_for(first, gid):
             if first != second:
@@ -1425,7 +1456,23 @@ class MatchOrchestrator:
             bot_seat = 1 - human_seat
             bot_id = m["bot_a_id"] if bot_seat == 0 else m["bot_b_id"]
             bot = self.store.get_bot(bot_id)
-            gid = normalize_game_id(m.get("game_id") or bot.get("game_id"))
+            try:
+                gid = normalize_game_id(m.get("game_id"))
+            except ValueError as exc:
+                logger.error("human match %s has invalid stored game_id: %s", match_id, exc)
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_ABORTED,
+                    reason="invalid_game_id",
+                    winner=None,
+                    ended_at=_now(),
+                )
+                self._broadcast(
+                    match_id,
+                    {"type": "error", "reason": "invalid_game_id", "message": str(exc)},
+                )
+                await self._finish_match_task(match_id, m.get("contest_id"))
+                return
             stored_mc = m.get("match_config") or {}
             if isinstance(stored_mc, str):
                 try:
@@ -1631,10 +1678,11 @@ class MatchOrchestrator:
         # 同一行被写两次（ra/rb 是同一快照），第二次覆盖第一次，导致胜负/评分错乱。
         # 自博弈仅作功能验证/版本对比，不进天梯，但必须原子 claim settlement，
         # 否则启动恢复会反复扫描。同 contest（match_type=contest）不会进这里。
-        gid = game_id
-        if not gid:
+        if game_id is None:
             bot = self.store.get_bot(bot_a_id)
-            gid = str((bot or {}).get("game_id") or "holdem")
+            gid = normalize_game_id((bot or {}).get("game_id"))
+        else:
+            gid = normalize_game_id(game_id)
         if bot_a_id == bot_b_id:
             logger.info("self-play match %s vs %s: skip rating update", bot_a_id, bot_b_id)
             return self.store.apply_match_ratings_atomic(

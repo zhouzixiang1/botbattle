@@ -17,14 +17,13 @@ from bzplat.backend.contests.stages import (
 from bzplat.backend.contests.templates import (
     get_template,
     points_for_result,
-    resolve_stages,
     resolve_template,
 )
 from bzplat.backend.matches.orchestrator import (
     MatchOrchestrator,
     require_binary_file_integrity,
 )
-from bzplat.backend.games import registry as game_registry
+from bzplat.backend.games import normalize_game_id, registry as game_registry
 from bzplat.backend.runtime.limits import FULL_RR_MAX_N
 from bzplat.backend.store import Store
 from bzplat.backend.store.db import match_deltas
@@ -70,6 +69,19 @@ def _estimate_sec_per_match(gid: str, cfg: dict) -> int:
     return game_registry.get(gid).eta_for_match(cfg)
 
 
+def _stored_game_id(row: dict, *, entity: str) -> str:
+    """读取已存实体的游戏维度；缺失/未知必须失败，不能猜成 Holdem。"""
+    raw = row.get("game_id")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{entity} 缺少 game_id")
+    gid = raw.strip().lower()
+    try:
+        game_registry.get(gid)
+    except KeyError as exc:
+        raise ValueError(f"{entity} 使用未注册游戏: {gid!r}") from exc
+    return gid
+
+
 class ContestManager:
     def __init__(self, store: Store, orch: MatchOrchestrator) -> None:
         self.store = store
@@ -110,9 +122,12 @@ class ContestManager:
         starts_at: str | None = None,
     ) -> dict:
         # 自定义 stages 直接用；否则从模板表（含 admin 覆盖）解析 stages
-        if stages:
-            tid = template_id or "custom"
-            gid = (game_id or "holdem").strip().lower()
+        if stages is not None:
+            if not stages:
+                raise ValueError("自定义 stages 须为非空数组")
+            tid = "custom" if template_id is None else template_id
+            # 未指定游戏是创建入口的产品默认；显式空值/未知值不得退化为 holdem。
+            gid = normalize_game_id("holdem" if game_id is None else game_id)
             # 即使调用方同时传入自定义 stages，也不能借此把一个具名模板标成
             # 另一款游戏。该组合会污染赛事快照，后续按 gid 启动错误裁判。
             if template_id:
@@ -130,6 +145,14 @@ class ContestManager:
             tid, gid, stage_list, _tpl_mc = resolve_template(
                 template_id, game_id=game_id, store=self.store
             )
+        # 无论来自 API 自定义内容还是数据库模板，都通过同一严格 schema。未知键、
+        # 错拼字段和不属于该阶段类型的配置必须在落赛事快照前失败。
+        from bzplat.backend.contests.validation import validate_stage
+
+        stage_list = [
+            validate_stage(stage, idx, gid)
+            for idx, stage in enumerate(stage_list)
+        ]
         # P5：phase 优先级：显式传入 > 模板自带 phase > standalone
         if phase == "standalone":
             tpl = get_template(tid)
@@ -236,8 +259,8 @@ class ContestManager:
             raise ValueError("只能派遣自己的 bot")
         if not bot.get("is_active") or not bot.get("binary_path"):
             raise ValueError("bot 不可用")
-        contest_game = (c.get("game_id") or "holdem").lower()
-        bot_game = (bot.get("game_id") or "holdem").lower()
+        contest_game = _stored_game_id(c, entity=f"赛事 #{contest_id}")
+        bot_game = _stored_game_id(bot, entity=f"Bot #{bot_id}")
         if bot_game != contest_game:
             raise ValueError(
                 f"Bot 游戏类型 ({bot_game}) 与比赛 ({contest_game}) 不一致"
@@ -257,8 +280,11 @@ class ContestManager:
             return f"bot {bot_id} 不可用"
         if bot.get("owner_id") != user_id:
             return f"bot {bot_id} 不属于 user {user_id}"
-        contest_game = (contest.get("game_id") or "holdem").strip().lower()
-        bot_game = (bot.get("game_id") or "holdem").strip().lower()
+        try:
+            contest_game = _stored_game_id(contest, entity="赛事")
+            bot_game = _stored_game_id(bot, entity=f"Bot #{bot_id}")
+        except ValueError as exc:
+            return str(exc)
         if bot_game != contest_game:
             return f"bot {bot_id} 游戏 {bot_game} ≠ 赛事 {contest_game}"
         return None
@@ -379,8 +405,8 @@ class ContestManager:
             raise ValueError("只能派遣自己的 bot")
         if not bot.get("is_active") or not bot.get("binary_path"):
             raise ValueError("bot 不可用")
-        contest_game = (c.get("game_id") or "holdem").lower()
-        bot_game = (bot.get("game_id") or "holdem").lower()
+        contest_game = _stored_game_id(c, entity=f"赛事 #{contest_id}")
+        bot_game = _stored_game_id(bot, entity=f"Bot #{bot_id}")
         if bot_game != contest_game:
             raise ValueError(
                 f"Bot 游戏类型 ({bot_game}) 与比赛 ({contest_game}) 不一致"
@@ -471,7 +497,10 @@ class ContestManager:
             return f"Bot #{bot_id} 已停用"
         if not bot.get("binary_path"):
             return f"Bot #{bot_id} 未上传可执行文件"
-        bot_game = str(bot.get("game_id") or "holdem").lower()
+        try:
+            bot_game = _stored_game_id(bot, entity=f"Bot #{bot_id}")
+        except ValueError as exc:
+            return str(exc)
         if bot_game != expected_game:
             return f"Bot #{bot_id} 游戏为 {bot_game}，赛事游戏为 {expected_game}"
         return None
@@ -485,7 +514,7 @@ class ContestManager:
         开赛初始化会重置历史 eliminated 标记，因此校验不能先按该标记
         过滤，否则会把实际将参赛的人漏掉。
         """
-        game_id = str(contest.get("game_id") or "holdem").lower()
+        game_id = _stored_game_id(contest, entity="赛事")
         active_entries = entries
         issues: list[str] = []
         for entry in active_entries:
@@ -517,7 +546,7 @@ class ContestManager:
             raise ValueError("比赛不存在")
         if c["status"] not in (CONTEST_OPEN, CONTEST_DRAFT, CONTEST_PUBLISHED):
             raise ValueError("仅 open/draft/published 可开赛")
-        game_id = c.get("game_id") or "holdem"
+        game_id = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         self._assert_engine(game_id)
 
         # 必须先校验、后改 scheduled_at/status；校验失败时整个
@@ -586,9 +615,7 @@ class ContestManager:
 
         stages = _parse_stages(c)
         if not stages:
-            _, _, stages = resolve_stages(
-                c.get("template_id") or "holdem_swiss_ko", store=self.store
-            )
+            raise ValueError(f"赛事 #{contest_id} 缺少有效阶段快照")
 
         self._guard_full_rr(stages, len(entries))
 
@@ -640,7 +667,7 @@ class ContestManager:
             raise ValueError("比赛不存在")
         if c["status"] not in (CONTEST_OPEN, CONTEST_DRAFT):
             raise ValueError("仅 open/draft 可出排期")
-        game_id = c.get("game_id") or "holdem"
+        game_id = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         self._assert_engine(game_id)
 
         entries = self.store.list_contest_entries(contest_id)
@@ -648,9 +675,7 @@ class ContestManager:
 
         stages = _parse_stages(c)
         if not stages:
-            _, _, stages = resolve_stages(
-                c.get("template_id") or "holdem_swiss_ko", store=self.store
-            )
+            raise ValueError(f"赛事 #{contest_id} 缺少有效阶段快照")
 
         self._guard_full_rr(stages, len(entries))
 
@@ -1218,7 +1243,7 @@ class ContestManager:
         if c["status"] == CONTEST_PUBLISHED:
             self._ensure_published_pairings_locked(contest_id, stage_idx)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
-        gid = c.get("game_id") or "holdem"
+        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         now = _now()
         # P2 residual：阶段配置 duplicate=True 且游戏 spec 支持 build_match_plan（仅 holdem）
         # 时走复式赛制——每对阵跑 1 场 duplicate 对局（2 leg 同副牌交换座位，合并 net 判胜）。
@@ -1397,12 +1422,12 @@ class ContestManager:
         if stage_idx is None:
             stage_idx = int((c or {}).get("current_stage_idx") or 0)
         stage = stages[stage_idx] if stages and 0 <= stage_idx < len(stages) else {}
-        # 默认 scoring 从该游戏 spec 派生（而非硬编码 poker_3_1_0——否则棋类赛事被套 3-1-0）
-        try:
-            default_scoring = game_registry.get((c or {}).get("game_id") or "holdem").default_scoring
-        except Exception:
-            default_scoring = "poker_3_1_0"
-        scoring = stage.get("scoring") or default_scoring
+        if not c:
+            return []
+        # 默认 scoring 只能从赛事声明的已注册游戏派生。
+        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
+        default_scoring = game_registry.get(gid).default_scoring
+        scoring = stage["scoring"] if "scoring" in stage else default_scoring
 
         entries = self.store.list_contest_entries(contest_id)
         # P0：排名/积分键改为 entry.id（换 Bot 不丢历史分）。
@@ -1810,7 +1835,7 @@ class ContestManager:
         # 锁内必须重检，终态不得再派发或制造 aborted 占位对局。
         if not c or c["status"] != CONTEST_RUNNING:
             return
-        gid = c.get("game_id") or "holdem"
+        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         # 复式赛制判断（与 _dispatch_pending_locked 一致）——reconcile 重派也保留
         # duplicate 标志（复审 P2-2），否则同赛事出现 duplicate/单 leg 混合。
         stages = _parse_stages(c)
@@ -1857,11 +1882,8 @@ class ContestManager:
             return
         stages = _parse_stages(c)
         cur_stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
-        gid = (c.get("game_id") or "holdem").lower()
-        try:
-            normalize_earnings = _reg.get(gid).normalize_earnings
-        except Exception:
-            normalize_earnings = None
+        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
+        normalize_earnings = _reg.get(gid).normalize_earnings
 
         def _rank_stage(sidx: int) -> list[dict]:
             standings = self.standings(contest_id, stage_idx=sidx)
@@ -2245,7 +2267,7 @@ class ContestManager:
         except ValueError:
             conc = 2
         # 粗估每场时长：经 spec.eta_for_match（消除 if game_id）
-        gid = c.get("game_id") or "holdem"
+        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         sec_per = _estimate_sec_per_match(gid, {})
         eta_sec = (total / conc) * sec_per if conc else 0
         return {

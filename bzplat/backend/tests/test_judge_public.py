@@ -41,6 +41,9 @@ def test_public_judges_list_no_auth(tmp_path):
             "protocol.py",
             "result.py",
         }
+        assert g["shared_source_files"] == (
+            [] if g["game_id"] == "holdem" else ["_board_protocol.py"]
+        )
         # 公开端点不返回可调参数当前值（那是 admin 能力）
         assert "params" not in g
 
@@ -100,11 +103,17 @@ def test_public_judges_gomoku_pencil(tmp_path):
         files = {f["name"]: f for f in data["files"]}
         assert set(files) == {
             f"{gid}_judge.py", "engine.py", "protocol.py", "result.py",
+            "_board_protocol.py",
         }
         judge = files[f"{gid}_judge.py"]
         assert all(marker in judge["source"] for marker in markers)
         for name, item in files.items():
-            assert item["path"] == f"backend/games/{gid}/{name}"
+            expected_path = (
+                "backend/games/_board_protocol.py"
+                if name == "_board_protocol.py"
+                else f"backend/games/{gid}/{name}"
+            )
+            assert item["path"] == expected_path
             assert not item["path"].startswith("/")
             assert ".." not in item["path"]
         serialized = resp.text
@@ -128,3 +137,20 @@ def test_game_spec_rejects_source_paths_outside_package_root(source_files):
 
     with pytest.raises(ValueError, match="source_files"):
         replace(SPEC, source_files=source_files)
+
+
+@pytest.mark.parametrize(
+    "shared_source_files",
+    [
+        ("../store/schema.py",),
+        ("subdir/protocol.py",),
+        ("..\\store\\schema.py",),
+        ("protocol.txt",),
+        ("_board_protocol.py", "_board_protocol.py"),
+    ],
+)
+def test_game_spec_rejects_unsafe_shared_source_paths(shared_source_files):
+    from bzplat.backend.games.gomoku.spec import SPEC
+
+    with pytest.raises(ValueError, match="shared_source_files"):
+        replace(SPEC, shared_source_files=shared_source_files)

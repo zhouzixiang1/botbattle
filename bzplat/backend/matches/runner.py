@@ -7,7 +7,6 @@ import time as _time
 from typing import Any, Callable
 
 from bzplat.backend.games import (
-    GAME_HOLDEM,
     fail_response as _reg_fail,
     normalize_game_id,
     registry as _game_registry,
@@ -15,8 +14,8 @@ from bzplat.backend.games import (
 )
 # 全面解耦：runner 不再按 game_id 切协议模块，统一委托 games 注册表。
 # 注：不 import 具体游戏模块（审计 P1：通用层不得依赖 games/holdem）。
-# 游戏规则参数（num_hands/n_dots/board_size/...）经 **match_params 透传，runner 不持有
-# 任何游戏专属默认值（第 4 游戏带新参数无需改本签名）。
+# ``match_params`` 只承载游戏 spec 明确允许的平台内部复现参数；固定规则键会在
+# session_factory 入口显式拒绝，runner 不持有任何游戏专属默认值。
 from bzplat.backend.games import _botzone_protocol as _bz
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
@@ -319,18 +318,17 @@ class MatchRunner:
         path_a: str,
         path_b: str,
         *,
-        game_id: str = GAME_HOLDEM,
+        game_id: str,
         on_event: EventSink | None = None,
         seed: int | None = None,
         runtime_modes: tuple[str, str] | None = None,
         time_budget_per_side: float | None = None,
         **match_params: Any,
     ) -> MatchResult:
-        """跑两个二进制 bot。游戏规则参数（num_hands/n_dots/board_size/starting_stack/sb/bb/...）
-        经 **match_params 透传给 run_session——新增第 4 游戏带新参数（如 komi）无需改本签名。
+        """跑两个二进制 bot。
 
-        决定哪些参数、各参数默认值/校验，全在 GameSpec（default_match_params /
-        validate_match_params / judge_params）里声明；runner 不持有任何游戏专属知识。
+        ``game_id`` 必须显式传入；``match_params`` 只透传 spec 允许的平台内部参数。
+        任何非内部规则参数都不会被忽略，而会由目标游戏的 session_factory 明确拒绝。
 
         ``runtime_modes``：(bot_a 的 Botzone 运行模式, bot_b 的)。None → 使用平台
         权威默认模式（Traditional）。
@@ -433,7 +431,7 @@ class MatchRunner:
         *,
         bot_seat: int,
         human_decide,
-        game_id: str = GAME_HOLDEM,
+        game_id: str,
         on_event: EventSink | None = None,
         seed: int | None = None,
         runtime_mode: str | None = None,
@@ -446,7 +444,7 @@ class MatchRunner:
         由调用方实现（通常经 asyncio.Future 等待 WS 回传），超时由其内部处理。
         ``time_budget_per_side`` 启用双方共享契约的累计棋钟；人类 Future 另以
         棋钟剩余时间作外层 deadline，不能靠逐手及时响应绕过累计预算。
-        游戏规则参数经 **match_params 透传（同 run_binaries）。
+        ``match_params`` 只承载 spec 允许的平台内部参数（同 run_binaries）。
         ``runtime_mode``：Bot 的 Botzone 运行模式（None → 平台默认 Traditional）。
         """
         import random
@@ -571,12 +569,12 @@ class MatchRunner:
         decide_a,
         decide_b,
         *,
-        game_id: str = GAME_HOLDEM,
+        game_id: str,
         on_event: EventSink | None = None,
         seed: int | None = None,
         **match_params: Any,
     ) -> MatchResult:
-        """跑两个 callable bot（测试用）。游戏规则参数经 **match_params 透传。"""
+        """跑两个 callable bot（测试用）；固定规则参数仍会被 spec 明确拒绝。"""
         import random
 
         gid = normalize_game_id(game_id)
@@ -601,7 +599,7 @@ class MatchRunner:
         path_a: str,
         path_b: str,
         *,
-        game_id: str = GAME_HOLDEM,
+        game_id: str,
         seed: int | None = None,
         on_event: EventSink | None = None,
         runtime_modes: tuple[str, str] | None = None,
@@ -617,7 +615,7 @@ class MatchRunner:
 
         decide 闭包复用 `_botzone_decide`（与 run_binaries 一致），支持 traditional/
         longrunning 协议与 runtime_modes——真 Botzone bot 在两 leg 中均可正确收发。
-        游戏不支持 duplicate（spec.build_match_plan is None）→ 退化为单 leg run_binaries。
+        游戏未声明 duplicate 计划时明确拒绝，不把请求悄悄改成单 leg。
 
         返回带 ``legs`` 字段的结果（首 leg 的 MatchResult 结构 + legs 列表）。
         final_chips/net 保留两 leg 物理累加（仅作 net_chips tiebreak，不作为胜负判据）。
@@ -626,14 +624,7 @@ class MatchRunner:
 
         spec = _reg.get(game_id)
         if spec.build_match_plan is None:
-            # 游戏不支持 duplicate → 退化为单 leg（透传 time_budget_per_side，
-            # 与 run_binaries 象棋钟路径一致）
-            return await self.run_binaries(
-                path_a, path_b, game_id=game_id, on_event=on_event, seed=seed,
-                runtime_modes=runtime_modes,
-                time_budget_per_side=time_budget_per_side,
-                **match_params,
-            )
+            raise ValueError(f"游戏 {spec.game_id} 不支持 duplicate 对局")
         legs_plan = spec.build_match_plan(seed or 0, match_params)
         # 每 leg 独立胜负（物理 bot A/B 视角）；累加 deltas 仅留作 net_chips tiebreak
         leg_results: list[dict[str, Any]] = []

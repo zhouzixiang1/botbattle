@@ -12,11 +12,8 @@ from bzplat.backend.games.gomoku.engine import (
     in_board,
 )
 from bzplat.backend.games.pencil.engine import PencilBoard, PencilSession
-from bzplat.backend.games._board_protocol import (
-    build_gomoku_request,
-    build_pencil_request,
-    parse_xy,
-)
+from bzplat.backend.games.gomoku.protocol import build_gomoku_request, parse_xy
+from bzplat.backend.games.pencil.protocol import build_pencil_request
 
 
 def test_gomoku_check_win_and_bounds():
@@ -154,30 +151,15 @@ def test_board_protocol_roundtrip():
     assert parse_xy({"response": {}}) == (None, None)
 
 
-def test_run_session_pencil_n_dots_none_uses_default():
-    """registry.run_session 在 n_dots=None 时应兜底 DEFAULT_N（而非崩溃）。
-
-    回归：/api/matches/challenge 不接受 n_dots，match 行 n_dots=NULL，
-    经 orchestrator→runner→run_session(n_dots=None)→PencilBoard(None) 曾抛
-    TypeError: unsupported operand type(s) for *: 'int' and 'NoneType'。
-    """
-    from bzplat.backend.games.pencil.engine import DEFAULT_N
+def test_run_session_pencil_rejects_removed_rule_params():
+    """直接入口不能把 n_dots/num_hands 当成可忽略参数。"""
     from bzplat.backend.games import run_session
 
-    moves = iter([(0, 1), (0, 1), (0, 1), (0, 1)])  # 简单合法边序列（n_dots=3）
+    async def decide(_player, _req):
+        raise AssertionError("非法参数应在开始对局前被拒绝")
 
-    async def decide(player, req):
-        try:
-            x, y = next(moves)
-        except StopIteration:
-            x, y = -1, -1
-        return {"response": {"x": x, "y": y}}
-
-    # n_dots=None 不应抛 TypeError；应使用 DEFAULT_N 跑完整局
-    result = asyncio.run(run_session("pencil", decide, n_dots=None, num_hands=1))
-    assert result is not None
-    # 确认用的是默认 n_dots（DEFAULT_N），盘面非空
-    assert result.rounds_played > 0 or result.moves >= 0  # 至少不崩溃
+    with pytest.raises(TypeError, match="Session 不接受参数"):
+        asyncio.run(run_session("pencil", decide, n_dots=None, num_hands=1))
 
 
 # ── 对齐权威裁判（C++）：25 格 / 多数胜 / 2-0 归一化 / 归属追踪 ──────────

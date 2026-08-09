@@ -12,7 +12,6 @@ from bzplat.backend.games.base import (
     EventFn,
     GameRegistry,
     GameSpec,
-    JudgeParamSpec,
     ProtocolSpec,
     SessionFactory,
     TierDef,
@@ -40,24 +39,14 @@ assert _reg_ids == _schema.REGISTERED_ENGINES == _schema.VALID_GAME_IDS, (
     "新增游戏须同时改 games/<game>/spec + 注册 + schema 两个 frozenset。"
 )
 
-# ── 向后兼容常量（替代 engine/registry.py 的 GAME_* 字面量）──
-GAME_HOLDEM = "holdem"
-GAME_GOMOKU = "gomoku"
-GAME_PENCIL = "pencil"
-
-
-def _legacy_normalize(game_id: str | None) -> str:
-    """旧 normalize_game_id 语义：空值兜底 holdem（保向后兼容）。
-
-    注意：registry.get() 本身不兜底（未知抛 KeyError）；此函数仅供仍需"空=holdem"
-    兜底语义的旧调用点用。新代码应直接 registry.get(gid) 让未知显式报错。
-    """
+def normalize_game_id(game_id: str | None) -> str:
+    """返回已注册的规范 game_id；空值和未知值都显式拒绝。"""
     gid = GameRegistry.normalize(game_id)
-    return gid if gid else GAME_HOLDEM
-
-
-# normalize_game_id：空值兜底 holdem（保旧语义；通用层 import 自本包）
-normalize_game_id = _legacy_normalize
+    if not gid:
+        raise ValueError("game_id 不可为空")
+    if not registry.is_registered(gid):
+        raise ValueError(f"未知游戏: {gid!r}（合法: {sorted(registry.all_ids())}）")
+    return gid
 
 
 # ── 便捷函数（通用层经这些函数调用，而非 import 具体游戏）──
@@ -125,22 +114,6 @@ def game_label(game_id: str) -> str:
     return registry.get(game_id).label
 
 
-# ── 段位便捷函数（模块级，默认 holdem；取代旧 engine.tiers 全局 API）──
-def tier_for(rating: float | int | None, game_id: str = "holdem"):
-    """按 rating 查段位（默认 holdem 曲线）。旧 engine.tiers.tier_for 语义。"""
-    return registry.tier_for(game_id, rating)
-
-
-def tier_dict(rating: float | int | None, game_id: str = "holdem") -> dict:
-    """段位字典（默认 holdem）。旧 engine.tiers.tier_dict 语义。"""
-    return registry.tier_dict(game_id, rating)
-
-
-def all_tiers(game_id: str = "holdem") -> list[dict]:
-    """该游戏的全部段位曲线（默认 holdem）。旧 engine.tiers.all_tiers 语义。"""
-    return registry.all_tiers(game_id)
-
-
 def _build_game_labels() -> dict[str, str]:
     return {gid: registry.get(gid).label for gid in registry.all_ids()}
 
@@ -167,12 +140,10 @@ async def preflight_bot(
 ) -> tuple[bool, str]:
     """Bot 预检：按用户选择的运行模式执行正式协议首回合。
 
-    经该游戏的 spec.preflight_check 执行；若 spec 未定义 preflight_check 则跳过（返回 ok）。
+    经该游戏必备的 spec.preflight_check 执行，不存在“未定义即放行”路径。
     返回 (ok, detail)。ok=False 时上传/API 应拒绝该 bot。
     """
     spec = registry.get(game_id)
-    if spec.preflight_check is None:
-        return True, "该游戏未定义预检"
     return await spec.preflight_check(
         binary_path,
         binary_runner,
@@ -186,12 +157,8 @@ __all__ = [
     "GameRegistry",
     "GameSpec",
     "TierDef",
-    "JudgeParamSpec",
     "ProtocolSpec",
     "SessionFactory",
-    "GAME_HOLDEM",
-    "GAME_GOMOKU",
-    "GAME_PENCIL",
     "normalize_game_id",
     "run_session",
     "dumps",
@@ -202,8 +169,5 @@ __all__ = [
     "validate_match_config",
     "default_match_config",
     "game_label",
-    "tier_for",
-    "tier_dict",
-    "all_tiers",
     "GAME_LABELS",
 ]

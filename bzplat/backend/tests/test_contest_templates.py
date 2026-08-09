@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from bzplat.backend.contests.templates import resolve_template, resolve_stages
+from bzplat.backend.contests.templates import (
+    default_match_config,
+    points_for_result,
+    resolve_template,
+    resolve_stages,
+)
 from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.contests.validation import (
     validate_match_config,
@@ -80,17 +85,65 @@ def test_validate_template_ok():
 
 def test_validate_rejects_bad_type():
     with pytest.raises(ValueError, match="type"):
-        validate_stage({"type": "nope"}, 0)
+        validate_stage({"type": "nope"}, 0, "holdem")
 
 
 def test_validate_rejects_bad_scoring():
     with pytest.raises(ValueError, match="scoring"):
-        validate_stage({"type": "round_robin", "scoring": "xxx"}, 0)
+        validate_stage({"type": "round_robin", "scoring": "xxx"}, 0, "holdem")
 
 
 def test_validate_rejects_group_count_on_non_group():
     with pytest.raises(ValueError, match="group_count"):
-        validate_stage({"type": "swiss", "group_count": 4}, 0)
+        validate_stage({"type": "swiss", "group_count": 4}, 0, "holdem")
+
+
+@pytest.mark.parametrize("field", ["max_hand", "maxHand", "roundz", "board_size"])
+def test_validate_stage_rejects_every_unknown_key(field):
+    with pytest.raises(ValueError, match=field):
+        validate_stage({"type": "round_robin", field: 1}, 0, "holdem")
+
+
+@pytest.mark.parametrize(
+    ("stage", "message"),
+    [
+        ({"type": None}, "type"),
+        ({"type": []}, "type"),
+        ({"type": "round_robin", "scoring": None}, "scoring"),
+        ({"type": "round_robin", "scoring": []}, "scoring"),
+        ({"type": "swiss", "rounds": True}, "rounds"),
+        ({"type": "round_robin", "duplicate": 1}, "duplicate"),
+        ({"type": "round_robin", "duplicate": None}, "duplicate"),
+        ({"type": "round_robin", "allow_large_round_robin": "yes"}, "allow_large"),
+        ({"type": "round_robin", "round_stagger_minutes": 1.5}, "round_stagger"),
+    ],
+)
+def test_validate_stage_rejects_wrong_typed_values(stage, message):
+    with pytest.raises(ValueError, match=message):
+        validate_stage(stage, 0, "holdem")
+
+
+def test_validate_stage_preserves_supported_specialized_fields():
+    duplicate = validate_stage(
+        {"type": "round_robin", "duplicate": True, "allow_large_round_robin": True},
+        0,
+        "holdem",
+    )
+    assert duplicate["duplicate"] is True
+    assert duplicate["allow_large_round_robin"] is True
+    ranked = validate_stage(
+        {
+            "type": "double_round_robin",
+            "ranking_mode": "replace_top",
+            "ranking_scope": 8,
+        },
+        0,
+        "holdem",
+    )
+    assert ranked["ranking_mode"] == "replace_top"
+    assert ranked["ranking_scope"] == 8
+    with pytest.raises(ValueError, match="不支持 duplicate"):
+        validate_stage({"type": "round_robin", "duplicate": True}, 0, "gomoku")
 
 
 def test_validate_match_config_holdem_rejects_old_fields():
@@ -120,6 +173,22 @@ def test_validate_rejects_bad_game_id():
         validate_template("goodid", "n", "unknown", {}, [{"type": "round_robin"}])
 
 
+@pytest.mark.parametrize("game_id", [None, "", "unknown"])
+def test_direct_config_lookup_does_not_guess_holdem(game_id):
+    with pytest.raises((ValueError, KeyError)):
+        default_match_config(game_id)  # type: ignore[arg-type]
+
+
+def test_custom_empty_stages_does_not_resolve_a_default_template():
+    with pytest.raises(ValueError, match="非空"):
+        resolve_stages(None, [], game_id="holdem")
+
+
+def test_unknown_scoring_does_not_fall_back_to_poker():
+    with pytest.raises(ValueError, match="未知计分规则"):
+        points_for_result("typo", None, 0)
+
+
 # ── resolve 读表（含 admin 覆盖）──────────────────────────────
 def test_resolve_template_reads_table(store: Store):
     # admin 覆盖内置模板的 stages
@@ -131,6 +200,52 @@ def test_resolve_template_reads_table(store: Store):
     assert tid == "holdem_swiss_ko" and gid == "holdem"
     assert stages == [{"key": "x", "type": "round_robin"}]
     assert mc == {}
+
+
+def test_stored_template_with_unknown_game_does_not_become_holdem(store: Store):
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE contest_templates SET game_id='unknown' WHERE id='holdem_swiss_ko'"
+        )
+    with pytest.raises(ValueError, match="未知游戏"):
+        resolve_template("holdem_swiss_ko", store=store)
+
+
+def test_store_creation_and_rating_reject_invalid_game_ids(store: Store):
+    user_id = store.create_user("strictgid", "strictgid@example.com", "x")["id"]
+    for bad in ("", "unknown"):
+        with pytest.raises(ValueError, match="game_id"):
+            store.create_bot(
+                user_id,
+                f"bad_{bad or 'empty'}",
+                binary_path="/tmp/bot",
+                format="elf",
+                game_id=bad,
+            )
+        with pytest.raises(ValueError, match="game_id"):
+            store.create_contest("bad", user_id, game_id=bad)
+        with pytest.raises(ValueError, match="game_id"):
+            store.upsert_contest_template(
+                f"bad_{bad or 'empty'}",
+                name="bad",
+                game_id=bad,
+                match_config={},
+                stages=[{"type": "round_robin"}],
+            )
+        with pytest.raises(ValueError, match="game_id"):
+            store.create_match("bad", 1, 2, game_id=bad)
+
+    bot = store.create_bot(
+        user_id,
+        "strict_bot",
+        binary_path="/tmp/bot",
+        format="elf",
+        game_id="gomoku",
+    )
+    with store._tx() as conn:
+        conn.execute("UPDATE bots SET game_id='unknown' WHERE id=?", (bot["id"],))
+    with pytest.raises(ValueError, match="game_id"):
+        store.ensure_rating(bot["id"])
 
 
 def test_create_rejects_template_game_mismatch(store: Store):

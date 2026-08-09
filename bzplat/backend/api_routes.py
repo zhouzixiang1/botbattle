@@ -625,24 +625,36 @@ _FIXED_RULE_OVERRIDE_FIELDS = frozenset({
     "hands",
     "num_hands",
     "hands_per_match",
+    "max_hand",
+    "total_hands",
+    "maxHands",
+    "numHands",
     "n_dots",
     "board_size",
+    "boardSize",
     "grid_size",
+    "nDots",
     "starting_stack",
+    "startingStack",
     "small_blind",
+    "smallBlind",
     "big_blind",
+    "bigBlind",
     "sb",
     "bb",
     "stack",
     "initial_stack",
     "time_limit",
+    "timeLimit",
     "time_limit_per_side",
+    "timeLimitPerSide",
     "time_budget_per_side",
+    "timeBudgetPerSide",
 })
 
 
 def _find_fixed_rule_overrides(value: Any) -> set[str]:
-    """Find legacy rule keys nested in generic stage dictionaries."""
+    """查找嵌在通用阶段字典中的非现行规则字段。"""
     found: set[str] = set()
     if isinstance(value, dict):
         found.update(_FIXED_RULE_OVERRIDE_FIELDS.intersection(value))
@@ -755,7 +767,7 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     q = orch.subscribe(match_id)
     human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
     try:
-        protocol = game_registry.get(m.get("game_id") or "").protocol
+        protocol = game_registry.get(m.get("game_id")).protocol
     except KeyError:
         await websocket.send_json({"type": "error", "message": "对局游戏协议不存在"})
         await websocket.close()
@@ -924,19 +936,17 @@ def leaderboard(
 
 
 @router.get("/api/tiers")
-def tiers(game_id: str | None = None):
+def tiers(game_id: str):
     """段位定义（公开，前端镜像校验用）。
 
-    段位与游戏挂钩（PR2）：传 game_id 返回该游戏的段位曲线；不传则返回 holdem
-    的曲线作为默认（向后兼容旧前端无参调用）。经 games 注册表取 per-game 曲线。
+    game_id 是必填维度；缺失或未知都明确拒绝，不得伪装成另一款游戏的段位。
     """
     from bzplat.backend.games import registry as _game_registry
-    gid = (game_id or "holdem").strip().lower()
+    gid = game_id.strip().lower()
     try:
         return {"tiers": _game_registry.all_tiers(gid), "game_id": gid}
-    except KeyError:
-        # 未知 game_id 回退 holdem（保公开端点容错）
-        return {"tiers": _game_registry.all_tiers("holdem"), "game_id": "holdem"}  # allow-game-fallback
+    except KeyError as exc:
+        raise HTTPException(400, f"未知游戏: {gid!r}") from exc
 
 
 @router.get("/api/levels/info")
@@ -1213,7 +1223,7 @@ def _template_for_api(template: dict[str, Any]) -> dict[str, Any]:
 
 
 def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
-    """Hide legacy fixed-rule columns while preserving them in historical storage."""
+    """仅输出现行赛事契约；数据库迁移列不进入 REST 响应。"""
     public = dict(contest)
     public.pop("hands_per_match", None)
     public.pop("match_config_json", None)
@@ -1468,7 +1478,7 @@ async def organizer_assign_entries(
     from bzplat.backend.games import normalize_game_id
     cgid = normalize_game_id(c.get("game_id"))
     if body.assign_all:
-        gid = normalize_game_id(body.game_id or cgid)
+        gid = normalize_game_id(cgid if body.game_id is None else body.game_id)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
         bots = store.list_bots(
@@ -2213,7 +2223,7 @@ async def admin_assign_entries(
 
     # 解析目标 entries 列表
     if body.assign_all:
-        gid = normalize_game_id(body.game_id or cgid)
+        gid = normalize_game_id(cgid if body.game_id is None else body.game_id)
         if gid != cgid:
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
         bots = store.list_bots(
@@ -2591,6 +2601,7 @@ def public_get_judges(request: Request):
                 "code_path": g["code_path"],
                 "summary": g["summary"],
                 "source_files": g["source_files"],
+                "shared_source_files": g["shared_source_files"],
             }
             for g in JUDGE_GAMES
         ]
@@ -2615,6 +2626,16 @@ def public_get_judge_source(game_id: str, request: Request):
         path = pkg_dir / rel
         if not path.is_file():
             continue  # 游戏未提供该文件则跳过（如某些游戏无独立 result.py）
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        files.append({"name": rel, "path": str(path.relative_to(backend_dir.parent)), "source": text})
+    shared_dir = backend_dir / "games"
+    for rel in spec.shared_source_files:
+        path = shared_dir / rel
+        if not path.is_file():
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:

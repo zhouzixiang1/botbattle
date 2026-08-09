@@ -102,30 +102,16 @@ def test_no_time_budget_emits_no_time_used_events():
     assert not time_used, "未启用象棋钟不应 emit time_used 事件"
 
 
-def test_pencil_time_budget_passthrough_to_run_duplicate():
-    """run_duplicate 接受 time_budget_per_side 并透传给退化单 leg 的 run_binaries。
-
-    pencil 的 spec.build_match_plan is None → run_duplicate 退化为单 leg
-    run_binaries；验证该路径下 time_budget_per_side 仍生效（emit time_used），
-    且参数透传不崩。
-    """
-    if not _PENCIL_BOT.is_file():
-        pytest.skip("pencilbot sample missing")
+def test_pencil_run_duplicate_is_rejected_instead_of_falling_back():
+    """无 duplicate 计划的游戏不能把请求静默改成单 leg。"""
     runner = MatchRunner(BinaryRunner(prefer_local=True))
-    events: list[dict] = []
-
-    def on_event(kind: str, ev: dict) -> None:
-        events.append(ev)
-
-    asyncio.run(runner.run_duplicate(
-        str(_PENCIL_BOT), str(_PENCIL_BOT),
-        game_id="pencil",
-        on_event=on_event,
-        time_budget_per_side=900.0,
-        seed=1,
-    ))
-    time_used = [e for e in events if e.get("type") == "time_used"]
-    assert time_used, "run_duplicate(pencil) 透传 time_budget_per_side 后应 emit time_used"
+    with pytest.raises(ValueError, match="不支持 duplicate"):
+        asyncio.run(runner.run_duplicate(
+            "/not/used/a", "/not/used/b",
+            game_id="pencil",
+            time_budget_per_side=900.0,
+            seed=1,
+        ))
 
 
 class _FakeBinaryRunner:

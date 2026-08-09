@@ -19,9 +19,6 @@ import pytest
 
 from bzplat.backend.games import (
     GAME_LABELS,
-    GAME_GOMOKU,
-    GAME_HOLDEM,
-    GAME_PENCIL,
     normalize_game_id,
     run_session,
 )
@@ -92,13 +89,14 @@ def test_unknown_game_id_raises_in_default_match_config():
         default_match_config("chess")
 
 
-def test_normalize_still_falls_back_to_holdem_for_empty():
-    """旧 normalize_game_id 保留空值兜底 holdem 语义（向后兼容）。
-
-    但 normalize 后若不在注册表（如 'chess'），run_session 仍会经 registry.get 报错。
-    """
-    assert normalize_game_id("") == "holdem"
-    assert normalize_game_id(None) == "holdem"
+def test_normalize_requires_registered_explicit_game():
+    """规范化不猜测游戏；空值和未知值都明确失败。"""
+    with pytest.raises(ValueError, match="不可为空"):
+        normalize_game_id("")
+    with pytest.raises(ValueError, match="不可为空"):
+        normalize_game_id(None)
+    with pytest.raises(ValueError, match="未知游戏"):
+        normalize_game_id("chess")
     assert normalize_game_id("  PENCIL  ") == "pencil"
 
 
@@ -221,14 +219,6 @@ def test_all_tiers_per_game():
 
 
 # ── 编排特化函数（spec 上的能力）──────────────────────────────
-def test_rounds_per_match_per_game():
-    # 手数钉死 DEFAULT_HANDS（70），不再读 match_config
-    assert registry.get("holdem").rounds_per_match({"hands": 50}) == 70
-    assert registry.get("holdem").rounds_per_match({}) == 70
-    assert registry.get("gomoku").rounds_per_match({}) == 1
-    assert registry.get("pencil").rounds_per_match({}) == 1
-
-
 def test_normalize_earnings_per_game():
     # holdem 除 100（bb/100）；棋类透传
     assert registry.get("holdem").normalize_earnings(500) == 5.0
@@ -250,14 +240,9 @@ def test_judge_games_derived():
             "protocol.py",
             "result.py",
         ]
-    # 所有游戏规则均固定，不再提供第二套 admin 覆盖入口。
-    assert all(game["params"] == [] for game in games)
-
-
-def test_judge_param_table():
-    defaults, bounds = registry.judge_param_table()
-    assert defaults == {}
-    assert bounds == {}
+        expected_shared = [] if game["game_id"] == "holdem" else ["_board_protocol.py"]
+        assert game["shared_source_files"] == expected_shared
+        assert "params" not in game
 
 
 # ── preflight_check（bot 上传时试跑验证）──────────────────────
@@ -318,14 +303,8 @@ def test_default_scoring_consumed_by_validation_not_hardcoded():
     assert custom["scoring"] == "poker_3_1_0"
 
 
-def test_num_seats_field_present():
-    """GameSpec 声明 num_seats（当前全 2，为 N 人游戏留钩子）。"""
-    for gid in registry.all_ids():
-        assert registry.get(gid).num_seats == 2, f"{gid} 当前应为 2 人"
-
-
 def test_dead_fields_removed():
-    """PR2 删除的死字段不再存在于 GameSpec（eta_per_match_sec/frontend_module/tier_for）。"""
+    """无生产消费者的字段不得继续冒充 GameSpec 契约。"""
     from bzplat.backend.games.base import GameSpec
     import dataclasses
 
@@ -333,6 +312,9 @@ def test_dead_fields_removed():
     assert "eta_per_match_sec" not in field_names, "eta_per_match_sec 是死字段（通用层读 eta_for_match），已删"
     assert "frontend_module" not in field_names, "frontend_module 后端从不读，已删"
     assert "tier_for" not in field_names, "tier_for 字段冗余（registry.tier_for 统一走 tier_for_in），已删"
+    assert "rounds_per_match" not in field_names
+    assert "num_seats" not in field_names
+    assert "judge_params" not in field_names
 
 
 def test_session_factory_protocol_has_on_event():
