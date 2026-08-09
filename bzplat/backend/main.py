@@ -28,7 +28,11 @@ from bzplat.backend.qa_safety import (
     qa_instance_enabled,
 )
 from bzplat.backend.runtime import BinaryRunner
-from bzplat.backend.runtime.config import ACTION_TIMEOUT_SEC
+from bzplat.backend.runtime.config import (
+    ACTION_TIMEOUT_SEC,
+    AUTO_MATCH_CONFIG,
+    QA_AUTO_MATCH_CONFIG,
+)
 from bzplat.backend.runtime.limits import (
     clamp_concurrent,
     concurrent_ceiling,
@@ -148,8 +152,13 @@ def create_app(
     notifier = NotificationManager(store, mailer=mailer)
     orch.notifier = notifier
 
-    # 闲时自动对局调度器（单进程单事件循环；启动即挂载后台任务）
-    auto_matcher = AutoMatchScheduler(orch, store)
+    # 闲时自动对局调度器（单进程单事件循环；启动即挂载后台任务）。隔离 QA
+    # 使用代码固定的 disabled profile，避免后台 ladder 抢占浏览器用例刚创建、
+    # 尚待清理的实体；生产仍使用同一份 AUTO_MATCH_CONFIG，不接受环境参数覆盖。
+    auto_match_config = QA_AUTO_MATCH_CONFIG if qa_instance else AUTO_MATCH_CONFIG
+    auto_matcher = AutoMatchScheduler(orch, store, config=auto_match_config)
+    if qa_instance:
+        logger.info("隔离 QA 实例已按代码配置禁用 auto-match")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

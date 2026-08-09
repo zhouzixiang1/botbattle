@@ -106,6 +106,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 - **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
 - QA CLI 会在日志 handler、SQLite、上传/头像目录创建前一次性校验端口和全部写目标；拒绝 50380、主 checkout 内任意 DB/运行时路径，以及主 `bot_uploads`/`avatars`/`logs` 的别名或子目录。当前 linked worktree 与 `/tmp` 独立目录仍允许。
 - QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
+- `BZ_QA_INSTANCE=1` 还会选择代码固定的 `QA_AUTO_MATCH_CONFIG(enabled=False)`，使浏览器/API 验收不受后台 ladder 抢占临时 Bot 的竞态影响；它不是可调运行参数，生产 `AUTO_MATCH_CONFIG`、并发与资源限制均不变。管理端只读诊断返回当前实例实际生效的 profile。
 - 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
 
 ## 3. 编码规范
@@ -196,6 +197,6 @@ python scripts/seed_test_accounts.py \
 | `scripts/api_full_test.py` | HTTP API 关键链路集成测试；SSE 只核对终态 snapshot 与 replay；隔离 DB 播种专用账号 |
 | `scripts/contest_stress.py` | 默认验证赛事 draft 名册容量与静态赛制估算；`--run` 才真跑；只使用专用 `cs_admin` |
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 三游戏样例 Bot） |
-| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 30 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口；全量执行真值见 `TESTING.md`） |
+| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 34 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口与长文本滚动；全量执行真值见 `TESTING.md`） |
 
 > 返回 [doc/INDEX.md](./INDEX.md)

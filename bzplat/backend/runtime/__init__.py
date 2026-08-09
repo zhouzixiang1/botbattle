@@ -6,6 +6,7 @@ from .config import (
     CONTEST_SCHEDULER_CONFIG,
     FULL_RR_MAX_N,
     MAX_CONCURRENT_MATCHES,
+    QA_AUTO_MATCH_CONFIG,
 )
 from .limits import BOT_CPUS, BOT_MEMORY_MB, concurrent_ceiling, clamp_concurrent
 
@@ -22,6 +23,7 @@ __all__ = [
     "BOT_MEMORY_MB",
     "FULL_RR_MAX_N",
     "MAX_CONCURRENT_MATCHES",
+    "QA_AUTO_MATCH_CONFIG",
     "concurrent_ceiling",
     "clamp_concurrent",
 ]

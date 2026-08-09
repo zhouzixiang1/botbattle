@@ -174,6 +174,107 @@ class ContestManager:
             starts_at=starts_at,
         )
 
+    async def revise_schedule(
+        self, contest_id: int, fields: dict[str, Any]
+    ) -> dict | None:
+        """按赛事阶段安全修改管理端时间字段。
+
+        draft 可调整完整排期；open 已经发生开放动作，只能调整仍在未来的
+        截止/开赛时间（或清空为手动）；published 已冻结对阵，只能在尚未
+        派发任何 match 时修改 ``starts_at``，并同步重排当前阶段 pending
+        pairing。running/rest/终态的排期均为只读历史。
+
+        ``title`` 是可与时间一起提交的展示元数据；若时间校验或重排失败，
+        Store 仍保证它不会先行写入。
+        """
+        async with self._lock(contest_id):
+            contest = self.store.get_contest(contest_id)
+            if not contest:
+                return None
+            time_fields = {
+                "registration_opens_at", "registration_closes_at", "starts_at",
+            }
+            changed_times = time_fields.intersection(fields)
+            if not changed_times:
+                return self.store.update_contest(contest_id, **fields)
+
+            status = contest["status"]
+            allowed_by_status = {
+                CONTEST_DRAFT: time_fields,
+                CONTEST_OPEN: {"registration_closes_at", "starts_at"},
+                CONTEST_PUBLISHED: {"starts_at"},
+            }
+            allowed = allowed_by_status.get(status)
+            if allowed is None:
+                raise ValueError(f"赛事处于 {status} 态，时间编排只读")
+            forbidden = changed_times.difference(allowed)
+            if forbidden:
+                labels = {
+                    "registration_opens_at": "开放报名时间",
+                    "registration_closes_at": "报名截止时间",
+                    "starts_at": "比赛开始时间",
+                }
+                raise ValueError(
+                    f"赛事处于 {status} 态，不能修改"
+                    + "、".join(labels[key] for key in sorted(forbidden))
+                )
+
+            candidate = {
+                key: fields.get(key, contest.get(key)) for key in time_fields
+            }
+            _validate_contest_times(
+                candidate["registration_opens_at"],
+                candidate["registration_closes_at"],
+                candidate["starts_at"],
+            )
+            if status == CONTEST_OPEN:
+                now = datetime.now()
+                for key in ("registration_closes_at", "starts_at"):
+                    value = candidate[key]
+                    if value is not None and datetime.fromisoformat(value) <= now:
+                        label = (
+                            "报名截止时间"
+                            if key == "registration_closes_at"
+                            else "比赛开始时间"
+                        )
+                        raise ValueError(
+                            f"报名中赛事的{label}必须晚于当前时间，或清空为手动"
+                        )
+
+            if status != CONTEST_PUBLISHED:
+                return self.store.update_contest(contest_id, **fields)
+
+            stage_idx = int(contest.get("current_stage_idx") or 0)
+            stages = _parse_stages(contest)
+            if stage_idx < 0 or stage_idx >= len(stages):
+                raise ValueError("赛事当前阶段不存在，不能重排")
+            pairings = self.store.list_contest_pairings(contest_id)
+            if any(pairing.get("match_id") for pairing in pairings):
+                raise ValueError("赛事已有对局被派发，不能修改比赛开始时间")
+            stage = stages[stage_idx]
+            base = candidate["starts_at"]
+            plans = [
+                {
+                    "id": pairing["id"],
+                    "round_num": int(pairing.get("round_num") or 1),
+                    "scheduled_at": self._stage_scheduled_at(
+                        stage,
+                        int(pairing.get("round_num") or 1),
+                        base,
+                    ),
+                }
+                for pairing in pairings
+                if int(pairing.get("stage_idx") or 0) == stage_idx
+                and pairing.get("status") == STATUS_PENDING
+                and not pairing.get("match_id")
+            ]
+            return self.store.update_published_contest_schedule(
+                contest_id,
+                fields,
+                stage_idx=stage_idx,
+                pending_pairing_schedules=plans,
+            )
+
     async def open_registration(self, contest_id: int) -> dict:
         """手动开放报名；与发布、开赛等生命周期写路径共用赛事锁。"""
         async with self._lock(contest_id):
@@ -909,13 +1010,12 @@ class ContestManager:
             # 排期，scheduler 不得把报名截止误当成开赛；手动 start 会在
             # dispatch 前把 pending pairing 统一盖戳为 now。
             base = c.get("starts_at")
-        stagger_min = max(0, int(stage.get("round_stagger_minutes") or 0))  # 非负
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
         pairing_rows: list[dict[str, Any]] = []
         for sp in specs:
             bot_a_id, bot_b_id = self._materialize_pairing_seats(sp)
-            sched = self._compute_scheduled_at(sp.round_num, base, stagger_min)
+            sched = self._stage_scheduled_at(stage, sp.round_num, base)
             if not sp.requires_match:
                 # 轮空占位：bot_b_id=None、无 match、status=completed（轮空者直接晋级）。
                 pairing_rows.append(
@@ -1051,7 +1151,6 @@ class ContestManager:
             (row.get("published_at") for row in existing if row.get("published_at")),
             None,
         ) or _now()
-        stagger_min = max(0, int(stage.get("round_stagger_minutes") or 0))
         replacement: list[dict] = []
         for spec, shape in zip(specs, expected_shape):
             versions = self._version_snapshot(
@@ -1065,7 +1164,7 @@ class ContestManager:
                     "scheduled_at": (
                         None
                         if not spec.requires_match
-                        else self._compute_scheduled_at(spec.round_num, base, stagger_min)
+                        else self._stage_scheduled_at(stage, spec.round_num, base)
                     ),
                 }
             )
@@ -1081,6 +1180,14 @@ class ContestManager:
             stage_idx,
             len(replacement),
         )
+
+    @staticmethod
+    def _stage_scheduled_at(
+        stage: dict[str, Any], round_num: int, base: str | None
+    ) -> str | None:
+        """用发布/恢复/管理端重排共享的阶段排期公式计算一场时间。"""
+        stagger_min = max(0, int(stage.get("round_stagger_minutes") or 0))
+        return ContestManager._compute_scheduled_at(round_num, base, stagger_min)
 
     @staticmethod
     def _compute_scheduled_at(

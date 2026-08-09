@@ -58,13 +58,14 @@ export default function Settings() {
   const [avatarFileName, setAvatarFileName] = useState('')
 
   useEffect(() => {
+    if (!user) return
     apiGet<{ prefs: Prefs }>('/api/notification-prefs')
       .then((d) => setPrefs(d.prefs))
       .catch(() => {})
     apiGet<{ favorites: FavBot[] }>('/api/auth/me/favorites')
       .then((d) => setFavs(d.favorites || []))
       .catch(() => {})
-  }, [])
+  }, [user])
 
   if (!user) {
     return (

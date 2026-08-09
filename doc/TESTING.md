@@ -42,21 +42,21 @@ pytest
 | **测试产物隔离** | `test_logging` 断言从 repo CWD + tmp DB 运行时日志落临时目录，`create_app` 默认 upload root 落 DB 同目录，主 checkout 的 `bot_uploads/logs` 不接收测试标记；测试不得手写相对 `bot_uploads` |
 | **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、时间线 `opens<=closes<=starts`（含等时刻/部分 PATCH/旧脏数据/零部分写）、`starts_at=NULL` 的手动开赛闸门、全局 admission 下整轮只创建可用槽数量且完成一场补一场、Match 完成后 Pairing 逐场回写、历史空 starts_at/假 running 状态幂等修复、match_id 单 pairing 唯一绑定、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
 | **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot/赛事存在活跃引用时拒绝硬删；批量指派做字段与归属校验 |
-| **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员 |
+| **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`、`test_runtime_settings`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员；隔离 QA 由代码选择 `enabled=False` 的 auto-match profile，生产 profile 与并发契约不变，只读诊断必须显示实际生效值 |
 | **社交/通知/成长/站点** | `test_notifications`、`test_comments_likes`、`test_social`、`test_xp_level`、`test_tiers`、`test_load_test_seed`、`test_wiki_pages` |
 
 ## 3. Playwright 真浏览器回归
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 30 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 34 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航、表单边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航与受保护页面访客门禁（不得先发无意义 401）、表单边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
-| `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；断言不存在运行时/赛制模板 Tab 与对应写 API |
+| `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；赛事时间按状态收口、空值/显式 `NULL`、保存失败原位反馈、真实隔离库重载与 audit、500+ 字连续长文本、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
 
 运行前必须是 worktree 隔离实例；`beforeAll` 会校验 `/api/health` 的 `qa_instance=true`，Vite 也会拒绝代理到 50380：
 
@@ -69,13 +69,21 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 ### 3.2 角色、视口与观察面
 
+- 完整的角色 × 页面 × 操作清单见 [BROWSER_ACCEPTANCE.md](./BROWSER_ACCEPTANCE.md)；新增页面或角色能力时必须先更新该矩阵，再补自动化落点。
 - 角色：访客、普通玩家、组织者、管理员。
-- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航覆盖三档，admin 至少覆盖桌面与移动端，核心赛事流程另以 laptop 执行。
+- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。
 - UI：主要导航、按钮、Tab、Dialog、筛选、表单合法/非法/超长输入、重复提交、空状态、错误状态、直接子路由、刷新、返回/前进与根元素横向溢出。
 - Console：持续收集 `pageerror` 与 error 级 console；未在精确白名单中的异常直接使测试失败。
 - Network：跟踪 request failed 与 4xx/5xx；负向用例只豁免精确预期的请求/状态，关键写操作断言方法、路径、状态和返回结构。深链 reload/back/forward 在继续导航前须等待目标实体 ID 对应的 detail 200 与普通 HTTP quiet window，避免仅凭通用标题把仍在收尾的 fetch 留给下一段导航。
 - SSE：断言终态 snapshot 转回放且不重连、`error.message` 持久展示且不被误显示为 completed、异常 `completed` 原因可见、服务端终态后流关闭；纯 mock 点格棋流还断言首次 `time_used` 用 `budget` 初始化未行动方，首次事件即 `time_out` 时显示 `0:00 + 超时`。
 - WebSocket：真实人类 Holdem 流程断言单页只建一个连接、发送合法协议并进入终态；admin abort 在取消 runner 后仍须向既有连接送达权威终态，且 runner 不得覆盖 aborted。
+- Admin 赛事时间：`draft` 可改开放/截止/开赛，`open` 只可改未来的截止/开赛，`published` 只可改开赛，其余状态只读；无值时控件保持空白并展示手动语义，已有自动开赛时间可通过开关提交显式 `starts_at:null`，与省略字段保留旧值区分。`published` 尚无 `match_id` 时按发布轮次错峰规则在同一事务重排当前阶段 pending pairing；显式 `null` 同步清空，已有绑定或任一写入失败时赛事与逐场排期均不部分更新。Dialog 直接展示保存错误，真实隔离库用例还验证重载后的 `NULL` 与成功 audit 记录。
+
+### 3.3 文档边界审计
+
+公开 `wiki/` 只保留 `INDEX`、统一协议、Bot 上手/编译、平台使用与三游戏规则/示例；未出现 worktree、PR、仓库构建脚本、部署、pytest/npm 等平台工程说明。`BOT_DEV.md` 对 Windows/Linux/macOS 的 C/Python 指南最终都产出 Linux x86_64 ELF，未承诺运行 PE、Mach-O 或源码。协议中的 `BOTZONE_REQUEST_KEEP_RUNNING` 是必须逐字输出的 LongRunning 握手常量，不是新旧平台对比或兼容入口。
+
+工程架构、测试、部署、运行配置、裁判代码位置和本轮清理盘点均在 `doc/`。机器可读 `contracts/` 当前只为 Holdem 提供完整 payload schema；Gomoku/Pencil 仅在 Wiki 与运行时测试中约束 payload，属于 P2 待补的契约覆盖差距，但不代表存在第二套协议。
 
 旧的 `browser_verify.py`、`screenshot_verify.py` 仍可做补充，但不能替代上述真实交互、Console 与 Network 断言。
 
@@ -85,15 +93,20 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 | 检查 | 本轮状态 | 证据/说明 |
 |------|----------|-----------|
-| 隔离端到端冒烟 | **ALL PASSED** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
+| 隔离端到端冒烟 | **ALL PASSED** | 本分支 `bash scripts/e2e_smoke.sh` 在 `/tmp` 临时 DB 与运行时目录完成，退出后回收自己的服务和目录；写目标不在主仓库 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **30 条 / 4 spec** | `npx playwright test --list` 实测 |
+| Playwright 收集 | **34 条 / 4 spec** | 本分支 `npx playwright test --list` 实测 |
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
 | 权威终态后端定向回归 | **72 passed / 1 warning（32.87s）** | `test_authoritative_terminal_events` + 技术故障 + human + audit：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
-| 后端整合提交完整 pytest | **1020 passed / 1 warning（291.67s）** | 使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
-| Playwright 完整执行 | **新增回归前基线 21 passed；30 条整合套件待重跑** | Chromium 单 worker 的旧基线为 2.3m；新增未知游戏、动作契约、PE 拒绝、canonical 终态与观赛回归后，必须在最终整合栈重新执行全部 30 条 |
-| 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2560 modules transformed |
+| 后端整合提交完整 pytest | **1029 passed / 1 warning（214.25s）** | 本分支使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
+| Playwright 完整执行 | **34 passed（2.6m）** | 本分支隔离 QA 栈 `50384/5176`、Chromium 单 worker；四角色、三视口、Console/Network、REST/SSE/WS 与严格 cleanup 全部通过。原 disposable Bot 清理竞态已由 QA 代码 profile 禁用 auto-match 消除；未放宽 DELETE 200/随后 GET 404 断言，三个游戏自 QA 启动后的新增 ladder 均为 0 |
+| Admin 浏览器定向回归 | **9 passed（24.7s）** | `admin-audit.spec.ts` 全量；含状态边界、Dialog 内错误、真实隔离 DB 的手动开赛 `NULL` 重载与成功 audit 证据 |
+| Admin 时间定向后端回归 | **26 passed / 1 warning（8.04s）** | `test_admin_contest_status.py`；覆盖状态边界、发布态轮次错峰重排/清空、已有 match 拒绝、强制 SQLite 写失败整事务回滚；warning 为既有 Starlette/httpx deprecation |
+| QA profile + Admin 联合回归 | **53 passed / 1 warning（12.22s）** | `test_auto_matcher.py` + `test_runtime_settings.py` + `test_admin_contest_status.py`；覆盖 disabled loop 零 challenge、main QA wiring、实际生效只读诊断、生产 profile 不变及赛事时间全部边界 |
+| 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |
+| 浏览器 QA 写隔离 | **通过** | 50384 与 5176 的 `/api/health` 均为 `qa_instance=true`；数据库、日志、头像和六个种子 ELF Bot 都位于当前 worktree 或本轮 `/tmp` 日志目录，不引用主 checkout 上传文件。worktree DB 与主库 inode 不同，主库精确查询 `qa_admin/qa_organizer` 固定身份为 0、隔离副本为 2。QA profile 固定禁用 auto-match，三个游戏在整轮验收期间均未新增 ladder；生产 50380/主库未作为测试目标 |
+| QA 后端日志 | **通过（无非预期异常）** | 新日志目录逐项检查 `app/access/audit` 与服务输出：无 5xx、ERROR、Traceback、`version_unavailable`、auto-match 调度或 Bot cleanup 409。仅有精确预期的 SMTP 未配置提示、`/usr/bin/true` 预检 EOF，以及用例主动制造的登录失败、PE 拒绝、版本预检失败和终态赛事删除保护；均有对应浏览器白名单/断言 |
 
 ## 5. 可靠性与恢复专项
 
@@ -107,6 +120,6 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 ## 6. 发布门槛
 
-最终验收至少需要：完整 `pytest`、`npm run build`、目标提交静态收集出的全部 Playwright、隔离 `e2e_smoke.sh` 全部通过；同时检查浏览器 Console/Network、QA 后端日志、主 DB hash/mtime 与 50380 服务未被触碰。若任一项未执行或失败，结论只能是“待验证”，不能写成“已验收”。
+最终验收至少需要：完整 `pytest`、`npm run build`、目标提交静态收集出的全部 Playwright、隔离 `e2e_smoke.sh` 全部通过；同时检查浏览器 Console/Network、QA 后端日志、QA 写目标与 50380 服务未被测试触碰。线上后台任务会合法改变主 DB hash/mtime，此时必须用主日志、实体哨兵与隔离实例标记归因，不能谎称 hash 未变，也不能把正常线上写误判成 QA 污染。若任一项未执行或失败，结论只能是“待验证”，不能写成“已验收”。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

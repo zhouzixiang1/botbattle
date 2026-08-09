@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import Pagination from '@/components/Pagination'
+import { useAuth } from '@/components/useAuth'
 import { cn } from '@/lib/utils'
 import { apiGet, apiPost, errMsg } from '@/api'
 import { fmtTime } from '@/lib/format'
@@ -30,6 +31,7 @@ const NOTIFICATION_LABELS: Record<string, string> = {
 }
 
 export default function Notifications() {
+  const { user } = useAuth()
   const [items, setItems] = useState<Notification[]>([])
   const [unread, setUnread] = useState(0)
   const [error, setError] = useState('')
@@ -41,6 +43,10 @@ export default function Notifications() {
   const perPage = 20
 
   const load = useCallback(() => {
+    if (!user) {
+      setLoading(false)
+      return
+    }
     setLoading(true)
     apiGet<{ notifications: Notification[]; unread_count: number; total?: number }>(
       `/api/notifications?unread_only=${filter === 'unread'}&page=${page}&per_page=${perPage}`,
@@ -52,11 +58,19 @@ export default function Notifications() {
       })
       .catch((e) => setError(errMsg(e)))
       .finally(() => setLoading(false))
-  }, [filter, page])
+  }, [filter, page, user])
 
   useEffect(() => {
     load()
   }, [load])
+
+  if (!user) {
+    return (
+      <PageStub title="通知">
+        <EmptyState text="请先登录" />
+      </PageStub>
+    )
+  }
 
   // 切换筛选 → 回到第 1 页
   const onFilterChange = (f: 'all' | 'unread') => {

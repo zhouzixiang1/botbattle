@@ -3782,6 +3782,105 @@ class Store:
                 ).fetchone()
             )
 
+    def update_published_contest_schedule(
+        self,
+        contest_id: int,
+        fields: dict[str, Any],
+        *,
+        stage_idx: int,
+        pending_pairing_schedules: list[dict[str, Any]],
+    ) -> dict | None:
+        """原子修改 published 开赛时间与当前阶段待派对阵排期。
+
+        manager 负责用发布时的唯一公式计算 ``scheduled_at``；Store 在
+        ``BEGIN IMMEDIATE`` 后重新核对赛事状态、阶段、pairing ID/轮次及
+        ``match_id``，再把赛事字段和全部 pending pairing 一次提交。这样
+        admin 改 ``starts_at`` 不会留下“赛事新时间 + 对阵旧时间”的半状态，
+        也不会覆盖另一个进程刚刚派发的真实对局。
+        """
+        allowed = {"title", "starts_at"}
+        unknown = set(fields).difference(allowed)
+        if unknown:
+            raise ValueError(
+                f"published 赛事不能修改字段: {', '.join(sorted(unknown))}"
+            )
+        plans = sorted(
+            (
+                int(row["id"]),
+                int(row.get("round_num") or 1),
+                row.get("scheduled_at"),
+            )
+            for row in pending_pairing_schedules
+        )
+        if len({pairing_id for pairing_id, _round, _schedule in plans}) != len(plans):
+            raise ValueError("published 对阵重排计划包含重复 ID")
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not current:
+                return None
+            if current["status"] != CONTEST_PUBLISHED:
+                raise ValueError("仅排期已发布赛事可以重排待开赛对局")
+            if int(current["current_stage_idx"] or 0) != int(stage_idx):
+                raise ValueError("赛事当前阶段已变化，拒绝重排")
+            if c.execute(
+                "SELECT 1 FROM contest_pairings "
+                "WHERE contest_id=? AND match_id IS NOT NULL LIMIT 1",
+                (contest_id,),
+            ).fetchone():
+                raise ValueError("赛事已有对局被派发，不能修改比赛开始时间")
+
+            pending = c.execute(
+                "SELECT id, round_num FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? AND status=? "
+                "AND match_id IS NULL ORDER BY id",
+                (contest_id, stage_idx, STATUS_PENDING),
+            ).fetchall()
+            current_shape = sorted(
+                (int(row["id"]), int(row["round_num"] or 1)) for row in pending
+            )
+            expected_shape = [
+                (pairing_id, round_num)
+                for pairing_id, round_num, _schedule in plans
+            ]
+            if current_shape != expected_shape:
+                raise ValueError("published 对阵在重排期间已变化，拒绝覆盖")
+
+            validate_contest_times(
+                current["registration_opens_at"],
+                current["registration_closes_at"],
+                fields.get("starts_at", current["starts_at"]),
+            )
+            if fields:
+                sets = ",".join(f"{key}=?" for key in fields)
+                c.execute(
+                    f"UPDATE contests SET {sets} WHERE id=?",
+                    [*fields.values(), contest_id],
+                )
+            for pairing_id, _round_num, scheduled_at in plans:
+                updated = c.execute(
+                    "UPDATE contest_pairings SET scheduled_at=? "
+                    "WHERE id=? AND contest_id=? AND stage_idx=? "
+                    "AND status=? AND match_id IS NULL",
+                    (
+                        scheduled_at,
+                        pairing_id,
+                        contest_id,
+                        stage_idx,
+                        STATUS_PENDING,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("published 对阵在重排期间已被派发，拒绝覆盖")
+            return _contest_row(
+                c.execute(
+                    "SELECT * FROM contests WHERE id=?", (contest_id,)
+                ).fetchone()
+            )
+
     def list_contests(
         self, *, status: str | None = None, organizer_id: int | None = None,
         game_id: str | None = None, page: int | None = None, per_page: int = 20,

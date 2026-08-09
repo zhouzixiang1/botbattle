@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 
@@ -53,6 +53,10 @@ class ContestSchedulerConfig:
 
 
 AUTO_MATCH_CONFIG = AutoMatchConfig()
+# 隔离 QA 需要可重复、无后台写竞态的运行时。它仍是代码配置，不接受环境变量
+# 覆盖具体参数；BZ_QA_INSTANCE 只负责选择这个固定 profile。生产 profile 及
+# 并发/资源契约完全不变。
+QA_AUTO_MATCH_CONFIG = replace(AUTO_MATCH_CONFIG, enabled=False)
 CONTEST_SCHEDULER_CONFIG = ContestSchedulerConfig()
 
 
@@ -68,4 +72,5 @@ __all__ = [
     "HUMAN_MAX_CONCURRENT_MATCHES",
     "HUMAN_MAX_CONSECUTIVE_TIMEOUTS",
     "MAX_CONCURRENT_MATCHES",
+    "QA_AUTO_MATCH_CONFIG",
 ]
