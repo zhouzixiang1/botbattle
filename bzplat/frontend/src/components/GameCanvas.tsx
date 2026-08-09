@@ -8,7 +8,7 @@ import type { SeatInfo, Scene } from '@/games/canvas-types'
 /** 默认设计宽高（位图分辨率基线，宽高比 3:2）。 */
 const BASE_W = 900
 const BASE_H = 600
-const ASPECT = BASE_H / BASE_W // 2/3
+const DEFAULT_ASPECT_RATIO = BASE_W / BASE_H
 
 interface Props {
   gameId?: string | null
@@ -32,10 +32,12 @@ export default function GameCanvas({
   gameId, events, seats, revealMode = 'all',
   width: widthProp, height: heightProp, className, onMove, interactive,
 }: Props) {
-  // 响应式位图分辨率：默认沿用设计基线；父容器宽度经 ResizeObserver 回填，
-  // 保持宽高比 3:2（height = width * 2/3）。位图分辨率跟随 → 始终清晰。
+  const spec = findGame(gameId)
+  const aspectRatio = spec?.canvasAspectRatio ?? DEFAULT_ASPECT_RATIO
+  // 响应式位图分辨率：父容器宽度经 ResizeObserver 回填；高度由游戏声明的
+  // 宽高比计算。位图分辨率跟随 → 始终清晰。
   const [width, setWidth] = useState(widthProp ?? BASE_W)
-  const height = heightProp ?? Math.round(width * ASPECT)
+  const height = heightProp ?? Math.round(width / aspectRatio)
 
   const wrapperRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -74,7 +76,6 @@ export default function GameCanvas({
   // 每次 seats 引用变化都清空位图。这是修复的核心：位图永不在无即时重绘时被清。
   useEffect(() => {
     const canvas = canvasRef.current
-    const spec = findGame(gameId)
     if (!canvas || !spec?.CanvasRenderer) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
@@ -89,7 +90,7 @@ export default function GameCanvas({
         width, height, seats, revealMode,
       })
     }
-  }, [width, height, gameId])
+  }, [width, height, spec])
 
   // 主绘制 effect —— events 增长时重算场景并跑 GSAP 动画；
   // events 长度不变（父组件因无关状态重渲染、pause/resume、StrictMode 双调用）时
@@ -97,7 +98,6 @@ export default function GameCanvas({
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const spec = findGame(gameId)
     const renderer = spec?.CanvasRenderer
     if (!renderer) return
     const ctx = canvas.getContext('2d')
@@ -135,7 +135,7 @@ export default function GameCanvas({
     })
     // 每次运行拥有自己的 timeline：cleanup 杀掉本次创建的 tl（StrictMode 双调用安全）
     return () => { tlRef.current?.kill() }
-  }, [gameId, events, seats, revealMode, width, height])
+  }, [spec, events, seats, revealMode, width, height])
 
   // 卸载清理（belt-and-suspenders）
   useEffect(() => () => { tlRef.current?.kill() }, [])
@@ -171,9 +171,9 @@ export default function GameCanvas({
     <div ref={wrapperRef} style={{ width: '100%' }}>
       <canvas
         ref={canvasRef}
-        // 宽度撑满父容器；高度按 3:2 宽高比自动撑开（aspect-ratio + height: auto）。
+        // 宽度撑满父容器；高度按游戏声明的宽高比自动撑开。
         // 位图分辨率由上方 DPR effect 按 width/height 设定，不再用 maxWidth 封顶。
-        style={{ width: '100%', height: 'auto', aspectRatio: '3 / 2', display: 'block' }}
+        style={{ width: '100%', height: 'auto', aspectRatio: String(aspectRatio), display: 'block' }}
         className={`${className ?? ''}${interactive && onMove ? ' cursor-pointer' : ''}`}
         role="img"
         aria-label={`${gameId ?? ''} 对局画面`}

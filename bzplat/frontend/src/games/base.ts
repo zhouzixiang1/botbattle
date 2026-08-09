@@ -126,6 +126,8 @@ export interface GameViewSpec {
   // 的 RawEvent[]，注册时经类型断言适配（结构兼容，运行时无影响）。
   /** canvas 渲染器（可选）。若提供，GameCanvas 优先用它绘制，替代默认 DOM Board。 */
   CanvasRenderer?: GameCanvasRenderer
+  /** 画布宽高比；未声明时使用通用 3:2。牌桌可用更紧凑的 16:9。 */
+  canvasAspectRatio?: number
   /** 座位着色（如 gomoku=['黑','白'], pencil=['红','蓝']）—— 取代渲染层按游戏名分支 */
   seatColors?: string[]
   /** 进度单位：hand=手数(扑克), move=步数(棋类) —— 取代 Home 等页面的游戏名分支 */

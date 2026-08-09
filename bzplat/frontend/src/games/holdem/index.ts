@@ -17,6 +17,7 @@ export const holdemSpec: GameViewSpec = {
   Board: HoldemBoardStub,
   reduce: reduceHoldemEvents as unknown as GameViewSpec['reduce'],
   CanvasRenderer: PokerCanvasRenderer,
+  canvasAspectRatio: 16 / 9,
   progressUnit: 'hand',
   matchFormatLabel: '70 手',
   winner: (vm) => (vm as HoldemViewModel).matchWinner,
@@ -29,7 +30,7 @@ export const holdemSpec: GameViewSpec = {
     endSummary: holdemEndSummary,
   },
   replay: {
-    layout: 'wide',
+    layout: 'with-timeline',
     progress: () => null,
     Summary: HoldemReplaySummary,
     navigation: {

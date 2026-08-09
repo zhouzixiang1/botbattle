@@ -2,7 +2,7 @@
  * 统一对局页（实时观赛 + 历史回放合一）。路由 /match/:id 唯一页。
  *
  * - running/pending → 直播模式：开 SSE，定位到最新后按回放速度推进（DVR 模型），
- *   Bot 瞬间连走则游标落后、显示「落后 N 手」、可「跳到最新」；match_end 到达后
+ *   Bot 瞬间连走则游标落后、显示「落后 N 个事件」、可「跳到最新」；match_end 到达后
  *   游标走完剩余停（不强制跳结局）；已结束对局重开页 → 自动从头播放。
  * - completed/aborted → 回放模式：一次性加载 events_json，从头自动播放。
  * - 座位身份：从 match.bot_a/bot_b（后端 JOIN）构造 SeatInfo 传 canvas。
@@ -33,6 +33,46 @@ import {
 } from '@/lib/match-seats'
 
 type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: string }
+
+const REASON_LABELS: Record<string, string> = {
+  completed: '正常结束',
+  protocol_error: '协议错误',
+  technical_loss: 'Bot 技术判负',
+  timeout: '决策超时',
+  crash: 'Bot 运行异常',
+  invalid_action: '非法动作',
+  version_unavailable: 'Bot 版本不可用',
+  platform_error: '平台运行异常',
+  admin_aborted: '管理员中止',
+}
+
+function reasonLabel(reason: unknown): string {
+  const value = String(reason ?? '').trim()
+  return REASON_LABELS[value] ?? (value.replaceAll('_', ' ') || '未知原因')
+}
+
+function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
+  if (!match) return false
+  if (Number(match.technical_loss || 0) > 0) return true
+  if ((match.result?.technical_incident_samples?.length ?? 0) > 0) return true
+  if (Object.values(match.result?.technical_incidents_by_seat ?? {}).some((n) => Number(n) > 0)) return true
+  return ['protocol_error', 'technical_loss', 'timeout', 'crash', 'invalid_action', 'version_unavailable']
+    .includes(String(match.reason ?? ''))
+}
+
+function describeTimelineEvent(event: RawEvent, gameDescription: string): string {
+  if (event.type === 'technical_incident') {
+    const seat = Number(event.seat)
+    const seatText = Number.isFinite(seat) ? `座位 ${seat + 1}` : 'Bot'
+    const turn = Number(event.turn)
+    const turnText = Number.isFinite(turn) && turn > 0 ? ` · 第 ${turn} 次决策` : ''
+    return `${seatText} 技术故障${turnText}：${String(event.error || reasonLabel(event.reason))}`
+  }
+  if (event.type === 'match_end' && event.reason && event.reason !== 'completed') {
+    return `对局结束 · ${reasonLabel(event.reason)}`
+  }
+  return gameDescription
+}
 
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   connecting: 'secondary', live: 'default', match_end: 'outline', error: 'destructive',
@@ -195,7 +235,11 @@ export default function MatchViewer() {
             setStatus('connecting')
           }
         } else {
-          setStatus('replay'); setStepIdx(evs.length > 0 ? 0 : -1); setPlaying(evs.length > 0)
+          const pinTechnicalTerminal =
+            matchHasTechnicalLoss(m) && Number(m.result?.hands_played ?? 0) <= 0
+          setStatus('replay')
+          setStepIdx(evs.length > 0 ? (pinTechnicalTerminal ? evs.length - 1 : 0) : -1)
+          setPlaying(evs.length > 0 && !pinTechnicalTerminal)
         }
       })
       .catch((e) => { if (!cancelled) { setError(errMsg(e)); setStatus('error') } })
@@ -221,7 +265,9 @@ export default function MatchViewer() {
   const cur = stepIdx < 0 ? Math.max(0, total - 1) : Math.min(stepIdx, total - 1)
   const visible = total > 0 ? events.slice(0, cur + 1) : []
   const atLive = stepIdx < 0
-  const lag = !gameSpec || atLive ? 0 : Math.max(0, total - 1 - cur)
+  const realtime = Boolean(isLiveMatch && (status === 'live' || status === 'connecting'))
+  // 游标差是事件数，不是游戏手数/步数；终态回放永远不显示「落后」。
+  const lag = !gameSpec || atLive || !realtime ? 0 : Math.max(0, total - 1 - cur)
   const seats = seatInfos(match)
   // 当前可见事件只由游戏 reducer 解释，页面不读取具体 ViewModel 字段。
   const visibleVm = useMemo(() => {
@@ -247,12 +293,44 @@ export default function MatchViewer() {
   }
   const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
   const liveProgress = visibleVm && gameSpec ? gameSpec.replay.progress(visibleVm) : null
-  const progressLabel = gameSpec ? (gameSpec.progressUnit === 'move' ? '步数' : '手数') : '进度'
   const progressUnitLabel = gameSpec?.progressUnit === 'move' ? '步' : '手'
-  const ReplaySummary = gameSpec?.replay.Summary
+  const persistedProgress = Number(match?.result?.hands_played)
+  const displayedProgress = finished
+    ? (Number.isFinite(persistedProgress) ? persistedProgress : null)
+    : liveProgress
+  const progressText = displayedProgress != null && displayedProgress > 0
+    ? `${finished ? '共' : '当前'} ${displayedProgress} ${progressUnitLabel}`
+    : null
   const ReplayHud = gameSpec?.replay.Hud
   const navigation = gameSpec?.replay.navigation
   const typeBadge = matchTypeBadge(match?.match_type)
+  const persistedIncidents = match?.result?.technical_incident_samples ?? []
+  const eventIncidents = events
+    .filter((event) => event.type === 'technical_incident')
+    .map((event) => ({
+      seat: Number(event.seat),
+      error: String(event.error || reasonLabel(event.reason)),
+      code: event.code == null ? undefined : String(event.code),
+      reason: event.reason == null ? undefined : String(event.reason),
+      turn: event.turn == null ? null : Number(event.turn),
+    }))
+  const technicalIncidents = persistedIncidents.length ? persistedIncidents : eventIncidents
+  const technicalTerminal = finished && (matchHasTechnicalLoss(match) || technicalIncidents.length > 0)
+  const staticTechnicalReplay = technicalTerminal && (!Number.isFinite(persistedProgress) || persistedProgress <= 0)
+  const failedSeat = (() => {
+    const sampleSeat = Number(technicalIncidents[0]?.seat)
+    if (sampleSeat === 0 || sampleSeat === 1) return sampleSeat
+    const counts = match?.result?.technical_incidents_by_seat ?? {}
+    return ([0, 1] as const).find((seat) => Number(counts[seat] ?? 0) > 0)
+  })()
+
+  // 首个决策即技术终止时直接呈现权威终局。自动从头播放会让“已完成”页面
+  // 暂时停在发牌事件，看起来像仍在正常比赛。
+  useEffect(() => {
+    if (!staticTechnicalReplay || total <= 0) return
+    setStepIdx(total - 1)
+    setPlaying(false)
+  }, [staticTechnicalReplay, total])
 
   // 定速播放定时器（直播+回放共用）：按 SPEEDS 步进；到末尾后直播继续等（保持 playing），
   // 回放则停。直播时游标追上末尾 → 转贴尾(-1)，新事件来了继续推进。
@@ -317,11 +395,42 @@ export default function MatchViewer() {
 
   const GameIcon = gameIcon(gameId)
   const isLive = status === 'live' || isLiveMatch
+  const winnerSeat = match?.winner === 0 || match?.winner === 1
+    ? match.winner
+    : eventWinner === 0 || eventWinner === 1
+      ? eventWinner
+      : null
+  const renderSeat = (seat: 0 | 1) => {
+    if (!match) return null
+    const info = seats?.[seat]
+    const botId = seat === 0 ? match.bot_a_id : match.bot_b_id
+    const name = info?.botName || seatHeaderLabel(match, seat)
+    const isWinner = winnerSeat === seat
+    return (
+      <div className={`min-w-0 rounded-lg border px-3 py-3 ${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}>
+        <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <span>座位 {seat + 1}</span>
+          {gameSpec?.seatColors?.[seat] && <span>· {gameSpec.seatColors[seat]}</span>}
+          {isWinner && <Badge className="ml-auto">胜</Badge>}
+        </div>
+        {botId != null && !info?.isHuman ? (
+          <Link to={`/bot/${botId}`} className="block break-words font-semibold text-foreground hover:text-primary">
+            {name}
+          </Link>
+        ) : (
+          <div className="break-words font-semibold text-foreground">{name}</div>
+        )}
+        {info?.ownerName && !info.isHuman && (
+          <div className="mt-0.5 break-all text-xs text-muted-foreground">@{info.ownerName}</div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <PageStub title={isLive ? '实时观赛' : '对局详情'}>
-      <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
-        <span className="font-mono text-xs text-muted-foreground">{id}</span>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+        <span className="max-w-full break-all font-mono text-xs text-muted-foreground">{id}</span>
         {match && (
           <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
         )}
@@ -351,57 +460,74 @@ export default function MatchViewer() {
             </Badge>
           )
         })()}
-        {match && (
-          <span className="text-muted-foreground">
-            {progressLabel}：
-            <span className="font-mono text-foreground">
-              {String(liveProgress ?? match.result?.hands_played ?? 0)}
-            </span>
-          </span>
-        )}
-        {match && (
-          <span className="text-muted-foreground">
-            胜者：
-            <span className="font-medium text-foreground">{winnerLabel}</span>
-          </span>
-        )}
-        {match?.reason && match.reason !== 'completed' && (
-          <span className="inline-flex items-center gap-1 text-xs text-destructive">
-            <TriangleAlert className="size-3" />
-            原因：{match.reason}
-          </span>
-        )}
-        {match?.result?.technical_incidents_by_seat && (
-          <span className="inline-flex items-center gap-1 text-xs text-warning">
-            <TriangleAlert className="size-3" />
-            {Object.entries(match.result.technical_incidents_by_seat)
-              .filter(([, n]) => Number(n) > 0)
-              .map(([seat, n]) => `座位${Number(seat) + 1} ${n} 次技术故障`)
-              .join('，') || ''}
-          </span>
-        )}
+        {progressText && <Badge variant="outline">{progressText}</Badge>}
         {lag > 0 && (
           <Button variant="outline" size="sm" onClick={jumpToLive} className="gap-1">
-            <Radio className="size-3" />落后 {lag} {progressUnitLabel}·跳最新
+            <Radio className="size-3" />落后 {lag} 个事件 · 跳到最新
           </Button>
         )}
       </div>
 
-      {/* 对阵双方；游戏专属摘要经 replay.Summary 插件挂载。 */}
+      {/* 对阵与结果形成一个稳定层级；身份不再同时散落于标题、摘要和详情链接。 */}
       {match && (
-        <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-          <span className="min-w-0 max-w-[40%] truncate font-medium text-foreground">{seatHeaderLabel(match, 0)}</span>
-          <span className="text-muted-foreground">vs</span>
-          <span className="min-w-0 max-w-[40%] truncate font-medium text-foreground">{seatHeaderLabel(match, 1)}</span>
-          {ReplaySummary && visibleVm !== null && <ReplaySummary vm={visibleVm} seats={seats} />}
-          {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (
-            <span className="text-xs text-muted-foreground">
-              <Link to={`/bot/${match.bot_a_id}`} className="text-primary hover:underline">座1 详情</Link>
-              {' · '}
-              <Link to={`/bot/${match.bot_b_id}`} className="text-primary hover:underline">座2 详情</Link>
-            </span>
-          )}
-        </div>
+        <Card className="mb-4">
+          <CardContent className="grid grid-cols-2 gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,auto)_minmax(0,1fr)] sm:items-center">
+            {renderSeat(0)}
+            <div className="order-3 col-span-2 min-w-0 border-t border-border pt-3 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-4 sm:py-1">
+              <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                {finished ? '对局结果' : '当前状态'}
+              </div>
+              <div className="mt-1 break-words text-sm font-semibold text-foreground">
+                {finished ? winnerLabel : '对局进行中'}
+              </div>
+              {match.reason && (
+                <div className={`mt-1 text-xs ${match.reason === 'completed' ? 'text-muted-foreground' : 'text-destructive'}`}>
+                  {reasonLabel(match.reason)}
+                </div>
+              )}
+            </div>
+            {renderSeat(1)}
+          </CardContent>
+        </Card>
+      )}
+
+      {match && technicalTerminal && (
+        <Card role="alert" className="mb-4 border-destructive/35 bg-destructive/5">
+          <CardContent className="py-4">
+            <div className="flex items-start gap-3">
+              <TriangleAlert className="mt-0.5 size-5 shrink-0 text-destructive" />
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-foreground">Bot 技术判负</div>
+                <p className="mt-1 break-words text-sm text-muted-foreground">
+                  {failedSeat === 0 || failedSeat === 1
+                    ? `${seatHeaderLabel(match, failedSeat)}（座位 ${failedSeat + 1}）发生技术故障`
+                    : '对局因 Bot 技术故障终止'}
+                  {winnerSeat === 0 || winnerSeat === 1
+                    ? `，${seatHeaderLabel(match, winnerSeat)}（座位 ${winnerSeat + 1}）获胜。`
+                    : '。'}
+                </p>
+                {technicalIncidents.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {technicalIncidents.slice(0, 3).map((incident, index) => (
+                      <div key={`${incident.seat}-${incident.turn ?? 'x'}-${index}`} className="rounded-md border border-destructive/20 bg-background/70 px-3 py-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium text-foreground">
+                            座位 {Number(incident.seat) + 1}
+                            {incident.turn != null ? ` · 第 ${incident.turn} 次决策` : ''}
+                          </span>
+                          {incident.code && <Badge variant="outline" className="max-w-full break-all font-mono text-[10px]">{incident.code}</Badge>}
+                        </div>
+                        <p className="mt-1 break-words text-muted-foreground">{incident.error}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-muted-foreground">故障类型：{reasonLabel(match.reason)}</p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {error && <ErrorMsg msg={error} className="mb-4" />}
@@ -428,7 +554,7 @@ export default function MatchViewer() {
             {ReplayHud && visibleVm !== null && <ReplayHud vm={visibleVm} seats={seats} />}
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
-            {navigation && bounds.length >= 2 && (
+            {navigation && bounds.length >= 2 && !staticTechnicalReplay && (
               <div>
                 <div className="mb-1 text-[10px] text-muted-foreground">{navigation.unitLabel}导航（点击跳转）</div>
                 <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto rounded-lg border border-border bg-card p-2">
@@ -442,40 +568,42 @@ export default function MatchViewer() {
               </div>
             )}
 
-            {/* 控制条 */}
-            <Card>
-              <CardContent className="py-3">
-                <div className="flex flex-wrap items-center justify-center gap-1.5">
-                  {navigation && (
-                    <Button variant="outline" size="sm" onClick={() => jumpSegment(-1)} className="gap-1"><SkipBack className="size-3.5" />上一{navigation.unitLabel}</Button>
-                  )}
-                  <Button variant="outline" size="sm" onClick={() => step(-1)} className="gap-1"><ChevronLeft className="size-4" />上一步</Button>
-                  <Button variant="default" size="sm" onClick={togglePlay} className="gap-1.5">
-                    {playing ? <><Pause className="size-4" />暂停</> : <><Play className="size-4" />播放</>}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => step(1)} className="gap-1">下一步<ChevronRight className="size-4" /></Button>
-                  {navigation && (
-                    <Button variant="outline" size="sm" onClick={() => jumpSegment(1)} className="gap-1">下一{navigation.unitLabel}<SkipForward className="size-3.5" /></Button>
-                  )}
-                  <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
-                    <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {SPEEDS.map((s, i) => (<SelectItem key={i} value={String(i)}>{s.label}</SelectItem>))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="mt-3 flex items-center gap-3">
-                  <span className="font-mono text-[10px] text-muted-foreground">步 {cur + 1}/{total}{atLive ? ' ·直播' : ''}</span>
-                  <Slider min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
-                </div>
-              </CardContent>
-            </Card>
+            {/* 技术终止且没有完成一手/一步时，直接定位终局，不展示伪装成正常赛程的播放控制。 */}
+            {!staticTechnicalReplay && (
+              <Card>
+                <CardContent className="py-3">
+                  <div className="flex flex-wrap items-center justify-center gap-1.5">
+                    {navigation && (
+                      <Button variant="outline" size="sm" onClick={() => jumpSegment(-1)} className="gap-1"><SkipBack className="size-3.5" />上一{navigation.unitLabel}</Button>
+                    )}
+                    <Button variant="outline" size="sm" onClick={() => step(-1)} className="gap-1"><ChevronLeft className="size-4" />上一个事件</Button>
+                    <Button variant="default" size="sm" onClick={togglePlay} className="gap-1.5">
+                      {playing ? <><Pause className="size-4" />暂停</> : <><Play className="size-4" />播放</>}
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => step(1)} className="gap-1">下一个事件<ChevronRight className="size-4" /></Button>
+                    {navigation && (
+                      <Button variant="outline" size="sm" onClick={() => jumpSegment(1)} className="gap-1">下一{navigation.unitLabel}<SkipForward className="size-3.5" /></Button>
+                    )}
+                    <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
+                      <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SPEEDS.map((s, i) => (<SelectItem key={i} value={String(i)}>{s.label}</SelectItem>))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="mt-3 flex items-center gap-3">
+                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive ? ' · 直播' : ''}</span>
+                    <Slider min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </div>
 
           {/* 右：动作时序 */}
-          <Card className="flex flex-col">
+          <Card className="flex flex-col self-start">
             <div className="border-b border-border px-4 py-2">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium">
@@ -492,8 +620,8 @@ export default function MatchViewer() {
                   <div key={i} ref={i === cur ? curActionRef : undefined}
                     className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
                     <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
-                    <span className="min-w-0 flex-1 break-words opacity-80" title={String(ev.type || '')}>
-                      {gameSpec?.describeEvent(ev) ?? String(ev.type || '?')}
+                    <span className="min-w-0 flex-1 break-words opacity-80">
+                      {describeTimelineEvent(ev, gameSpec?.describeEvent(ev) ?? String(ev.type || '?'))}
                     </span>
                   </div>
                 ))}

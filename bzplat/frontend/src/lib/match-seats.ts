@@ -8,6 +8,8 @@ export interface MatchSeatRow {
   reason?: string
   status?: string
   game_id?: string
+  /** 1 表示 Bot 故障被判负；平台故障的 aborted 对局不设置。 */
+  technical_loss?: number
   bot_a_id?: number
   bot_b_id?: number
   /** 对局结果详情 JSON（{hands_played, deltas:[ea,eb], net_bb}）。 */
@@ -16,7 +18,14 @@ export interface MatchSeatRow {
     deltas?: number[]
     net_bb?: number
     technical_incidents_by_seat?: Record<number, number>
-    technical_incident_samples?: Array<{ seat: number; error: string; turn?: number | null }>
+    technical_incident_samples?: Array<{
+      seat: number
+      error: string
+      code?: string
+      reason?: string
+      turn?: number | null
+      leg?: number | null
+    }>
   }
   bot_a?: {
     id?: number | null
