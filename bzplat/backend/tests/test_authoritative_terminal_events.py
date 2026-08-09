@@ -29,6 +29,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _user_bot(store: Store, name: str, *, game_id: str = "holdem"):
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    base_path = fixture_dir / f"{name}.bin"
+    version_path = fixture_dir / f"{name}-v1.bin"
+    base_path.write_bytes(b"test fixture")
+    version_path.write_bytes(b"test fixture")
     user = store.create_user(
         name,
         f"{name}@example.test",
@@ -37,14 +43,14 @@ def _user_bot(store: Store, name: str, *, game_id: str = "holdem"):
     bot = store.create_bot(
         user["id"],
         f"{name}-bot",
-        binary_path=f"/private/{name}.bin",
+        binary_path=str(base_path),
         format="elf",
         game_id=game_id,
         runtime_mode="traditional",
     )
     store.add_bot_version(
         bot["id"],
-        binary_path=f"/private/{name}-v1.bin",
+        binary_path=str(version_path),
         version=1,
         runtime_mode="traditional",
     )

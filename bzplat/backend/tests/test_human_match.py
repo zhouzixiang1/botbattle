@@ -9,7 +9,7 @@ import pytest
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
-from bzplat.backend.runtime.binary_runner import BinaryRunner
+from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import TYPE_HUMAN
 
@@ -60,21 +60,28 @@ def test_challenge_human_creates_match(store: Store):
     assert m["human_seat"] == 0
 
 
-def test_human_match_freezes_current_bot_version_before_task_runs(store: Store):
+def test_human_match_freezes_current_bot_version_before_task_runs(
+    store: Store, tmp_path
+):
     """人类局实际 bot 座位也冻结 current；任务排队后切版本不改变路径/模式。"""
     from types import SimpleNamespace
 
+    base_path = tmp_path / "human-base"
+    v1_path = tmp_path / "human-v1"
+    v2_path = tmp_path / "human-v2"
+    for path in (base_path, v1_path, v2_path):
+        path.write_bytes(b"test fixture")
     u = store.create_user("human-pin", "human-pin@e.com", hash_password("password1"))
     bot = store.create_bot(
-        u["id"], "human-pin-bot", binary_path="/tmp/human-base",
+        u["id"], "human-pin-bot", binary_path=str(base_path),
         format="elf", game_id="gomoku",
     )
     v1 = store.add_bot_version(
-        bot["id"], binary_path="/tmp/human-v1", version=1,
+        bot["id"], binary_path=str(v1_path), version=1,
         runtime_mode="traditional",
     )
     store.add_bot_version(
-        bot["id"], binary_path="/tmp/human-v2", version=2,
+        bot["id"], binary_path=str(v2_path), version=2,
         runtime_mode="longrunning",
     )
     store.set_current_version(bot["id"], 1)
@@ -112,7 +119,7 @@ def test_human_match_freezes_current_bot_version_before_task_runs(store: Store):
     mid = asyncio.run(exercise())
     assert store.get_match(mid)["status"] == "completed"
     assert captured == {
-        "path": "/tmp/human-v1",
+        "path": str(v1_path),
         "bot_seat": 1,
         "runtime_mode": "traditional",
     }
@@ -501,16 +508,25 @@ def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(sto
 
 # ── Bot 启动崩溃快速失败（PR-G1 治本）──────────────────────────
 def test_bot_crashed_aborts_human_match_quickly(store: Store):
-    """Bot 启动即崩（不存在的二进制）→ BotCrashedError 向上传播 → 对局快速 abort，
+    """Bot 启动崩溃 → BotCrashedError 向上传播 → 对局快速 abort，
     而非吞成 fold 死磕。验证 _run_human_match 的 abort + 锁清理。"""
-    os.environ.setdefault("BZ_BOT_LOCAL", "1")
+    class CrashingHumanRunner:
+        async def run_bot_vs_human(self, *args, **kwargs):
+            raise BotCrashedError("controlled human-bot startup crash")
+
     u = store.create_user("crashusr", "c@ex.com", hash_password("password1"))
     b = store.create_bot(
-        u["id"], "crashbot", binary_path="/nonexistent/crash_bot", format="elf",
+        u["id"], "crashbot",
+        binary_path=os.path.abspath("samples/gomokubot_linux_amd64"), format="elf",
         game_id="gomoku",
     )
     store.ensure_rating(b["id"])
-    orch = _orch(store, human_timeout=1.0)
+    orch = MatchOrchestrator(
+        store,
+        runner=CrashingHumanRunner(),
+        max_concurrent=2,
+    )
+    orch.set_human_action_timeout(1.0)
 
     async def run():
         mid = await orch.challenge_human(
@@ -535,18 +551,22 @@ def test_bot_crashed_aborts_human_match_quickly(store: Store):
 
 
 def test_bot_crashed_error_not_swallowed_by_runner(store: Store):
-    """run_bot_vs_human 在 Bot 崩溃时应抛 BotCrashedError（而非吞成 _fail_response）。"""
+    """run_bot_vs_human 在 Bot 会话启动崩溃时应原样抛 BotCrashedError。"""
     from bzplat.backend.runtime.binary_runner import BotCrashedError
 
-    _, _ = _setup(store)
-    runner = MatchRunner(BinaryRunner(prefer_local=True))
+    class CrashingBinaryRunner:
+        async def prepare_session(self, *args, **kwargs):
+            raise BotCrashedError("controlled prepare crash")
+
+    runner = MatchRunner(CrashingBinaryRunner())
 
     async def human_decide(player_idx, request):
         return {"x": 0, "y": 0}  # 不会到达（bot 先崩）
 
     async def run():
         return await runner.run_bot_vs_human(
-            "/nonexistent/crash_bot", bot_seat=1, human_decide=human_decide,
+            os.path.abspath("samples/gomokubot_linux_amd64"),
+            bot_seat=1, human_decide=human_decide,
             game_id="gomoku", on_event=lambda k, e: None,
         )
 

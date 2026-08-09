@@ -60,9 +60,12 @@ def _manager_fixture(tmp_path, *, status: str = "draft"):
         store.create_user(f"guard-u{i}", f"guard-u{i}@example.com", "hash")
         for i in range(2)
     ]
+    bot_paths = [tmp_path / f"guard-{i}" for i in range(len(users))]
+    for path in bot_paths:
+        path.write_bytes(b"test fixture")
     bots = [
         store.create_bot(
-            user["id"], f"guard-bot-{i}", binary_path=f"/tmp/guard-{i}",
+            user["id"], f"guard-bot-{i}", binary_path=str(bot_paths[i]),
             format="elf", game_id="holdem",
         )
         for i, user in enumerate(users)

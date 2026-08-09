@@ -12,6 +12,7 @@ import asyncio
 import os
 import secrets
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -46,8 +47,17 @@ def _orch(store: Store) -> MatchOrchestrator:
     )
 
 
+def _fixture_binary(store: Store, name: str) -> str:
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    path = fixture_dir / name
+    path.write_bytes(b"test fixture")
+    return str(path)
+
+
 def _user_with_bot(store: Store, *, name: str, path: str, game: str = "gomoku"):
-    """建一个用户 + 一个 bot（path 可指向不存在文件以模拟崩溃）。"""
+    """建一个用户 + 一个 bot；调用方必须显式提供存在的隔离 fixture。"""
+    assert os.path.isfile(path), f"测试 Bot fixture 不存在: {path}"
     u = store.create_user(name, f"{name}@ex.com", hash_password("password1"))
     b = store.create_bot(
         u["id"], f"{name}_bot", binary_path=path, format="elf", game_id=game
@@ -183,11 +193,17 @@ def test_sse_broadcast_does_not_block_on_full_queue(store: Store):
 
 def test_bot_crashed_is_technical_loss_in_normal_match(store: Store):
     """双 Bot 对局启动崩溃统一结算为技术判负，并保留明确胜者与比分。"""
-    orch = _orch(store)
+    class CrashingRunner:
+        async def run_binaries(self, *args, **kwargs):
+            raise BotCrashedError("controlled startup crash", crashed_seat=1)
+
+    orch = MatchOrchestrator(store, runner=CrashingRunner(), max_concurrent=2)
     ua, ba = _user_with_bot(
         store, name="goodu", path=os.path.abspath("samples/gomokubot_linux_amd64")
     )
-    ub, bb = _user_with_bot(store, name="badu", path="/nonexistent/crash_bot")
+    ub, bb = _user_with_bot(
+        store, name="badu", path=os.path.abspath("samples/gomokubot_linux_amd64")
+    )
 
     async def run():
         mid = await orch.challenge(ba["id"], bb["id"], ua["id"], game_id="gomoku")
@@ -220,8 +236,12 @@ def test_bot_crashed_is_technical_loss_in_normal_match(store: Store):
 
 def test_rating_history_failure_rolls_back_both_ratings_and_pair_stats(store: Store):
     """双边 rating/history/pair_stats 必须同事务；中途失败不得半结算。"""
-    _, ba = _user_with_bot(store, name="atomicra", path="/tmp/atomic-ra")
-    _, bb = _user_with_bot(store, name="atomicrb", path="/tmp/atomic-rb")
+    _, ba = _user_with_bot(
+        store, name="atomicra", path=_fixture_binary(store, "atomic-ra")
+    )
+    _, bb = _user_with_bot(
+        store, name="atomicrb", path=_fixture_binary(store, "atomic-rb")
+    )
     before_a = store.get_rating(ba["id"])
     before_b = store.get_rating(bb["id"])
     with store._tx() as c:
@@ -258,8 +278,12 @@ def test_rating_history_failure_rolls_back_both_ratings_and_pair_stats(store: St
 
 def test_completed_rating_recovery_and_repeated_postprocess_are_exactly_once(store: Store):
     """completed 后评分失败可重启补算；重复恢复/后处理不重复任何评分副作用。"""
-    owner, ba = _user_with_bot(store, name="recoverra", path="/tmp/recover-ra")
-    _, bb = _user_with_bot(store, name="recoverrb", path="/tmp/recover-rb")
+    owner, ba = _user_with_bot(
+        store, name="recoverra", path=_fixture_binary(store, "recover-ra")
+    )
+    _, bb = _user_with_bot(
+        store, name="recoverrb", path=_fixture_binary(store, "recover-rb")
+    )
     mid = "rating-recovery-once"
     store.create_match(
         mid,
@@ -337,13 +361,13 @@ def test_rating_sequence_repairs_earlier_failure_before_settling_target(
     def setup(path):
         case_store = Store(str(path))
         owner_a, bot_a = _user_with_bot(
-            case_store, name="ordera", path="/tmp/order-a"
+            case_store, name="ordera", path=_fixture_binary(case_store, "order-a")
         )
         owner_b, bot_b = _user_with_bot(
-            case_store, name="orderb", path="/tmp/order-b"
+            case_store, name="orderb", path=_fixture_binary(case_store, "order-b")
         )
         owner_c, bot_c = _user_with_bot(
-            case_store, name="orderc", path="/tmp/order-c"
+            case_store, name="orderc", path=_fixture_binary(case_store, "order-c")
         )
         match_1 = _completed_rating_match(
             case_store,
@@ -492,10 +516,14 @@ def test_concurrent_rating_postprocess_is_globally_ordered_and_exactly_once(
     from bzplat.backend.store.schema import XP_MATCH_PARTICIPATE, XP_MATCH_WIN
 
     owner_a, bot_a = _user_with_bot(
-        store, name="concurrentra", path="/tmp/concurrent-ra"
+        store,
+        name="concurrentra",
+        path=_fixture_binary(store, "concurrent-ra"),
     )
     owner_b, bot_b = _user_with_bot(
-        store, name="concurrentrb", path="/tmp/concurrent-rb"
+        store,
+        name="concurrentrb",
+        path=_fixture_binary(store, "concurrent-rb"),
     )
     match_1_id = "rating-concurrent-01"
     match_2_id = "rating-concurrent-02"
@@ -587,8 +615,12 @@ def test_concurrent_rating_postprocess_is_globally_ordered_and_exactly_once(
 
 def test_rating_recovery_excludes_contest_and_human_but_marks_selfplay(store: Store):
     """赛事/人类不进全局评分；自博弈无评分但需 marker 令恢复收敛。"""
-    owner, ba = _user_with_bot(store, name="semanticsa", path="/tmp/semantics-a")
-    _, bb = _user_with_bot(store, name="semanticsb", path="/tmp/semantics-b")
+    owner, ba = _user_with_bot(
+        store, name="semanticsa", path=_fixture_binary(store, "semantics-a")
+    )
+    _, bb = _user_with_bot(
+        store, name="semanticsb", path=_fixture_binary(store, "semantics-b")
+    )
     contest = store.create_contest("rating semantics", owner["id"], status="running")
     cases = (
         ("rating-contest", ba["id"], bb["id"], "contest", contest["id"]),
@@ -636,8 +668,12 @@ def test_completed_result_survives_postprocess_exception(store: Store, monkeypat
                 winner=0,
             )
 
-    ua, ba = _user_with_bot(store, name="postua", path="/tmp/post-a")
-    _, bb = _user_with_bot(store, name="postub", path="/tmp/post-b")
+    ua, ba = _user_with_bot(
+        store, name="postua", path=_fixture_binary(store, "post-a")
+    )
+    _, bb = _user_with_bot(
+        store, name="postub", path=_fixture_binary(store, "post-b")
+    )
     orch = MatchOrchestrator(store, runner=SuccessRunner(), max_concurrent=1)
 
     async def fail_postprocess(*args, **kwargs):
@@ -664,8 +700,12 @@ def test_platform_sandbox_fault_aborts_without_technical_loss_or_rating(store: S
         async def run_binaries(self, *args, **kwargs):
             raise PlatformRunnerError("docker daemon unavailable")
 
-    owner, bot_a = _user_with_bot(store, name="platforma", path="/tmp/a")
-    _, bot_b = _user_with_bot(store, name="platformb", path="/tmp/b")
+    owner, bot_a = _user_with_bot(
+        store, name="platforma", path=_fixture_binary(store, "platform-a")
+    )
+    _, bot_b = _user_with_bot(
+        store, name="platformb", path=_fixture_binary(store, "platform-b")
+    )
     orch = MatchOrchestrator(store, runner=PlatformFailingRunner(), max_concurrent=1)
 
     async def run():
@@ -705,8 +745,12 @@ def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
         async def run_bot_vs_human(self, *args, **kwargs):
             return result
 
-    owner, ba = _user_with_bot(store, name="replayflusha", path="/tmp/replay-a")
-    _, bb = _user_with_bot(store, name="replayflushb", path="/tmp/replay-b")
+    owner, ba = _user_with_bot(
+        store, name="replayflusha", path=_fixture_binary(store, "replay-a")
+    )
+    _, bb = _user_with_bot(
+        store, name="replayflushb", path=_fixture_binary(store, "replay-b")
+    )
     orch = MatchOrchestrator(store, runner=SuccessRunner(), max_concurrent=2)
     original_upsert = store.upsert_replay
 
@@ -793,8 +837,12 @@ def test_admin_abort_cancels_blocking_runner_and_broadcasts_error(tmp_path):
             role="admin",
         )
         store.update_user(admin["id"], email_verified=1)
-        owner_a, bot_a = _user_with_bot(store, name="abort-a", path="/tmp/abort-a")
-        _, bot_b = _user_with_bot(store, name="abort-b", path="/tmp/abort-b")
+        owner_a, bot_a = _user_with_bot(
+            store, name="abort-a", path=_fixture_binary(store, "abort-a")
+        )
+        _, bot_b = _user_with_bot(
+            store, name="abort-b", path=_fixture_binary(store, "abort-b")
+        )
         _, admin_token = app.state.auth.authenticate("abort-admin", "pw123456")
 
         class BlockingRunner:
@@ -849,8 +897,12 @@ def test_admin_abort_cancels_blocking_runner_and_broadcasts_error(tmp_path):
 
 def test_midmatch_crash_reason_is_preserved_for_bot_and_human_matches(store: Store):
     """Engine-adjudicated crashes are scored/completed but remain diagnosable."""
-    owner_a, bot_a = _user_with_bot(store, name="midcrash-a", path="/tmp/a")
-    _, bot_b = _user_with_bot(store, name="midcrash-b", path="/tmp/b")
+    owner_a, bot_a = _user_with_bot(
+        store, name="midcrash-a", path=_fixture_binary(store, "midcrash-a")
+    )
+    _, bot_b = _user_with_bot(
+        store, name="midcrash-b", path=_fixture_binary(store, "midcrash-b")
+    )
 
     result = SimpleNamespace(
         rounds=[SimpleNamespace(deltas=[-1, 1])],
@@ -919,26 +971,28 @@ def test_orchestrator_shutdown_cancels_and_drains_owned_tasks(store: Store):
     asyncio.run(run())
 
 
-# ── 赛事对局崩溃判责（审计 P0-2：start_session 失败应判崩溃方输，非总判 seat0）──
+# ── 赛事对局崩溃判责（typed crashed_seat 应判崩溃方输，非固定座位）──
 
 
 def test_contest_crash_blames_correct_seat_bot_b(store: Store):
-    """赛事对局：bot_b 启动失败（start_session）→ 技术判负 winner=0（bot_a 赢）。
-
-    审计发现原代码总判 winner=1（bot_a 输）即使 bot_b 才是崩溃方。修复后 runner
-    在 bot_b start_session 失败时注解 exc.crashed_seat=1，orchestrator 判 winner=1-1=0。
-    """
+    """赛事对局收到 crashed_seat=1 → 技术判负 winner=0（bot_a 赢）。"""
     from bzplat.backend.store.schema import (
         CONTEST_RUNNING,
 
         TYPE_CONTEST,
     )
 
-    orch = _orch(store)
+    class CrashingRunner:
+        async def run_binaries(self, *args, **kwargs):
+            raise BotCrashedError("controlled startup crash", crashed_seat=1)
+
+    orch = MatchOrchestrator(store, runner=CrashingRunner(), max_concurrent=2)
     ua, ba = _user_with_bot(
         store, name="goodu2", path=os.path.abspath("samples/gomokubot_linux_amd64")
     )
-    ub, bb = _user_with_bot(store, name="badu2", path="/nonexistent/crash_bot")
+    ub, bb = _user_with_bot(
+        store, name="badu2", path=os.path.abspath("samples/gomokubot_linux_amd64")
+    )
 
     # 建一个 running 赛事 + 报名
     cid = store.create_contest(
@@ -970,18 +1024,21 @@ def test_contest_crash_blames_correct_seat_bot_b(store: Store):
 
 
 def test_contest_crash_blames_correct_seat_bot_a(store: Store):
-    """赛事对局：bot_a 启动失败 → 技术判负 winner=1（bot_b 赢）。
-
-    bot_a start_session 失败未注解 crashed_seat（默认 0）→ winner=1-0=1。
-    """
+    """赛事对局收到 crashed_seat=0 → 技术判负 winner=1（bot_b 赢）。"""
     from bzplat.backend.store.schema import (
         CONTEST_RUNNING,
 
         TYPE_CONTEST,
     )
 
-    orch = _orch(store)
-    ua, ba = _user_with_bot(store, name="badu3", path="/nonexistent/crash_bot")
+    class CrashingRunner:
+        async def run_binaries(self, *args, **kwargs):
+            raise BotCrashedError("controlled startup crash", crashed_seat=0)
+
+    orch = MatchOrchestrator(store, runner=CrashingRunner(), max_concurrent=2)
+    ua, ba = _user_with_bot(
+        store, name="badu3", path=os.path.abspath("samples/gomokubot_linux_amd64")
+    )
     ub, bb = _user_with_bot(
         store, name="goodu3", path=os.path.abspath("samples/gomokubot_linux_amd64")
     )

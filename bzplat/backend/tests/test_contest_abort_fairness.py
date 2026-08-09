@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +21,10 @@ class _NeverChallenge:
 
 
 def _user_and_bot(store: Store, suffix: str, *, role: str = "user") -> tuple[dict, dict]:
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    binary_path = fixture_dir / f"fair-{suffix}"
+    binary_path.write_bytes(b"test fixture")
     user = store.create_user(
         f"fair{suffix}",
         f"fair{suffix}@example.com",
@@ -30,7 +35,7 @@ def _user_and_bot(store: Store, suffix: str, *, role: str = "user") -> tuple[dic
     bot = store.create_bot(
         user["id"],
         f"fairbot{suffix}",
-        binary_path=f"/tmp/fair-{suffix}",
+        binary_path=str(binary_path),
         format="elf",
         is_active=1,
         game_id="holdem",

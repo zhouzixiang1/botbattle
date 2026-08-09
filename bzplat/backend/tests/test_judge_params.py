@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,9 +33,15 @@ def test_removed_judge_setting_rows_are_not_read_by_orchestrator(store):
     store.set_setting("judge_holdem_starting_stack", "5000")
     store.set_setting("judge_holdem_sb", "25")
     store.set_setting("judge_holdem_bb", "50")
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    path_a = fixture_dir / "fixed-a"
+    path_b = fixture_dir / "fixed-b"
+    path_a.write_bytes(b"test fixture")
+    path_b.write_bytes(b"test fixture")
     user = store.create_user("fixedrules", "fixed@example.com", "x")
-    a = store.create_bot(user["id"], "fixed_a", binary_path="/tmp/a", format="elf", game_id="holdem")
-    b = store.create_bot(user["id"], "fixed_b", binary_path="/tmp/b", format="elf", game_id="holdem")
+    a = store.create_bot(user["id"], "fixed_a", binary_path=str(path_a), format="elf", game_id="holdem")
+    b = store.create_bot(user["id"], "fixed_b", binary_path=str(path_b), format="elf", game_id="holdem")
     store.ensure_rating(a["id"])
     store.ensure_rating(b["id"])
     captured: dict = {}

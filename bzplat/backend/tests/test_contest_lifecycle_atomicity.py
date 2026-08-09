@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -26,16 +27,24 @@ class _FailingOrch:
         raise RuntimeError("dispatch exploded")
 
 
+def _fixture_file(tmp_path: Path, name: str) -> str:
+    path = tmp_path / name
+    path.write_bytes(b"test fixture")
+    return str(path)
+
+
 def _setup(tmp_path):
     store = Store(str(tmp_path / "contest-atomicity.db"))
     u1 = store.create_user("atomic1", "atomic1@example.com", "hash")
     u2 = store.create_user("atomic2", "atomic2@example.com", "hash")
     b1 = store.create_bot(
-        u1["id"], "atomic-bot-1", binary_path="/tmp/atomic-1", format="elf",
+        u1["id"], "atomic-bot-1",
+        binary_path=_fixture_file(tmp_path, "atomic-1"), format="elf",
         game_id="holdem",
     )
     b2 = store.create_bot(
-        u2["id"], "atomic-bot-2", binary_path="/tmp/atomic-2", format="elf",
+        u2["id"], "atomic-bot-2",
+        binary_path=_fixture_file(tmp_path, "atomic-2"), format="elf",
         game_id="holdem",
     )
     contest = store.create_contest(
@@ -189,7 +198,8 @@ def test_nth_dispatch_failure_keeps_started_progress_and_failed_pairing_retryabl
         store, contest_id = _setup(tmp_path)
         u3 = store.create_user("atomic3", "atomic3@example.com", "hash")
         b3 = store.create_bot(
-            u3["id"], "atomic-bot-3", binary_path="/tmp/atomic-3",
+            u3["id"], "atomic-bot-3",
+            binary_path=_fixture_file(tmp_path, "atomic-3"),
             format="elf", game_id="holdem",
         )
         store.add_contest_entry(contest_id, u3["id"], b3["id"])
@@ -239,7 +249,7 @@ def test_next_stage_batch_is_atomic_and_restart_retry_replaces_legacy_partial(
         store.create_bot(
             user["id"],
             f"stage-bot-{i}",
-            binary_path=f"/tmp/stage-{i}",
+            binary_path=_fixture_file(tmp_path, f"stage-{i}"),
             format="elf",
             game_id="holdem",
         )
@@ -247,7 +257,9 @@ def test_next_stage_batch_is_atomic_and_restart_retry_replaces_legacy_partial(
     ]
     for bot in bots:
         store.add_bot_version(
-            bot["id"], binary_path=f"/tmp/stage-v-{bot['id']}", version=1
+            bot["id"],
+            binary_path=_fixture_file(tmp_path, f"stage-v-{bot['id']}"),
+            version=1,
         )
     contest_id = store.create_contest(
         "Atomic next stage",
@@ -348,7 +360,8 @@ def test_lazy_next_round_batch_failure_rolls_back_and_retry_is_unique(
     ]
     bots = [
         store.create_bot(
-            user["id"], f"lazy-bot-{i}", binary_path=f"/tmp/lazy-{i}",
+            user["id"], f"lazy-bot-{i}",
+            binary_path=_fixture_file(tmp_path, f"lazy-{i}"),
             format="elf", game_id="holdem",
         )
         for i, user in enumerate(users)

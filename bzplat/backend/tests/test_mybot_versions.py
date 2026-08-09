@@ -600,8 +600,12 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
     app = _app(tmp_path)
     store, u = _setup(app)
     # 两个 bot，一个 traditional 一个 longrunning
-    ba = store.create_bot(u["id"], "oba", binary_path="/tmp/a", format="elf", game_id="holdem", runtime_mode="traditional")
-    bb = store.create_bot(u["id"], "obb", binary_path="/tmp/b", format="elf", game_id="holdem", runtime_mode="longrunning")
+    path_a = tmp_path / "runtime-a"
+    path_b = tmp_path / "runtime-b"
+    path_a.write_bytes(b"test fixture")
+    path_b.write_bytes(b"test fixture")
+    ba = store.create_bot(u["id"], "oba", binary_path=str(path_a), format="elf", game_id="holdem", runtime_mode="traditional")
+    bb = store.create_bot(u["id"], "obb", binary_path=str(path_b), format="elf", game_id="holdem", runtime_mode="longrunning")
     captured: dict = {}
 
     class _FakeRunner:
@@ -620,16 +624,13 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
 
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
     orch = MatchOrchestrator(store, runner=_FakeRunner(), max_concurrent=1)
-    mid = asyncio.run(orch.challenge(ba["id"], bb["id"], u["id"], game_id="holdem"))
-    # 等对局完成
-    for _ in range(40):
-        import time
-        time.sleep(0.1)
-        m = store.get_match(mid)
-        if m and m["status"] in ("completed", "aborted"):
-            break
+    async def run():
+        mid = await orch.challenge(ba["id"], bb["id"], u["id"], game_id="holdem")
+        await orch._tasks[mid]
+
+    asyncio.run(run())
     assert captured.get("modes") == ("traditional", "longrunning"), captured
-    assert captured.get("paths") == ("/tmp/a", "/tmp/b")
+    assert captured.get("paths") == (str(path_a), str(path_b))
 
 
 # ── GET /api/bots/{id} 脱敏（审计 P1-B）─────────────────────────────

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -216,20 +217,26 @@ def store(tmp_path):
 
 
 def _user_bot(store: Store, name: str, game_id: str):
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    base_path = fixture_dir / f"{name}.bin"
+    version_path = fixture_dir / f"{name}-v1.bin"
+    base_path.write_bytes(b"test fixture")
+    version_path.write_bytes(b"test fixture")
     user = store.create_user(
         name, f"{name}@example.test", hash_password("password1")
     )
     bot = store.create_bot(
         user["id"],
         f"{name}-bot",
-        binary_path=f"/private/{name}.bin",
+        binary_path=str(base_path),
         format="elf",
         game_id=game_id,
         runtime_mode="traditional",
     )
     version = store.add_bot_version(
         bot["id"],
-        binary_path=f"/private/{name}-v1.bin",
+        binary_path=str(version_path),
         version=1,
         runtime_mode="traditional",
     )

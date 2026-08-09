@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -104,15 +105,19 @@ def store(tmp_path):
 
 
 def _mk_bots(store: Store, n: int = 4, *, game_id: str = "holdem"):
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
     users = []
     bots = []
     for i in range(n):
         u = store.create_user(f"user{i}", f"u{i}@ex.com", hash_password("password1"))
         users.append(u)
+        binary_path = fixture_dir / f"fake{i}"
+        binary_path.write_bytes(b"test fixture")
         b = store.create_bot(
             u["id"],
             f"bot{i}",
-            binary_path=f"/tmp/fake{i}",
+            binary_path=str(binary_path),
             format="elf",
             is_active=1,
             game_id=game_id,
@@ -150,10 +155,12 @@ def test_dispatch_does_not_touch_running_pairings(store: Store):
     p_pend = store.add_contest_pairing(
         c["id"], bots[0]["id"], bots[1]["id"], status="pending"
     )
+    new_binary_path = Path(store.path).resolve().parent / "bot-fixtures" / "fake0b"
+    new_binary_path.write_bytes(b"test fixture")
     b_new = store.create_bot(
         users[0]["id"],
         "bot0b",
-        binary_path="/tmp/fake0b",
+        binary_path=str(new_binary_path),
         format="elf",
         is_active=1,
     )

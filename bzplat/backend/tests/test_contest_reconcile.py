@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -26,15 +27,19 @@ def store(tmp_path):
 
 
 def _mk_bots(store: Store, n: int = 4):
+    fixture_dir = Path(store.path).resolve().parent / "bot-fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
     users = []
     bots = []
     for i in range(n):
         u = store.create_user(f"user{i}", f"u{i}@ex.com", hash_password("password1"))
         users.append(u)
+        binary_path = fixture_dir / f"fake{i}"
+        binary_path.write_bytes(b"test fixture")
         b = store.create_bot(
             u["id"],
             f"bot{i}",
-            binary_path=f"/tmp/fake{i}",
+            binary_path=str(binary_path),
             format="elf",
             is_active=1,
             game_id="holdem",
