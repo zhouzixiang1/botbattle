@@ -33,7 +33,9 @@ class _PreflightTransport:
         self.handshake = handshake
         self.started: list[tuple[str, str]] = []
         self.sent: list[dict] = []
+        self.send_timeouts: list[float] = []
         self.extra_reads = 0
+        self.extra_timeouts: list[float] = []
         self.stopped: list[str] = []
 
     async def start_session(self, path, *, runtime_mode):
@@ -43,10 +45,12 @@ class _PreflightTransport:
 
     async def send(self, _sid, line, *, timeout):
         self.sent.append(json.loads(line))
+        self.send_timeouts.append(timeout)
         return self.response_line
 
     async def read_extra_line(self, _sid, *, timeout):
         self.extra_reads += 1
+        self.extra_timeouts.append(timeout)
         return self.handshake
 
     async def stop_session(self, sid):
@@ -76,12 +80,22 @@ def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
     assert set(transport.sent[0]) == {"requests", "responses"}
     assert len(transport.sent[0]["requests"]) == 1
     assert transport.sent[0]["responses"] == []
+    assert transport.send_timeouts == [8.0]
     if game_id == "holdem":
         # 上传预检必须与正式第 1 手完全相同；max_hand 不能伪装成 1 手短局。
         from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
 
         assert transport.sent[0]["requests"][0]["max_hand"] == DEFAULT_HANDS == 70
+    elif game_id == "pencil":
+        assert transport.sent[0]["requests"][0] == {
+            "x": -1,
+            "y": -1,
+            "pass": 0,
+            "me": 0,
+            "scores": [0, 0],
+        }
     assert transport.extra_reads == (1 if runtime_mode == "longrunning" else 0)
+    assert transport.extra_timeouts == ([1.0] if runtime_mode == "longrunning" else [])
     assert transport.stopped == ["s0"]
 
 

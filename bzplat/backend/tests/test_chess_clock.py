@@ -117,6 +117,7 @@ def test_pencil_run_duplicate_is_rejected_instead_of_falling_back():
 class _FakeBinaryRunner:
     def __init__(self) -> None:
         self.stopped: list[str] = []
+        self._sessions: dict[str, object] = {}
 
     async def start_session(self, _path: str, *, runtime_mode: str) -> str:
         return f"session-{runtime_mode}"
@@ -126,6 +127,50 @@ class _FakeBinaryRunner:
 
     async def stop_session(self, session_id: str) -> None:
         self.stopped.append(session_id)
+
+
+def test_pencil_clock_uses_cumulative_remaining_not_fixed_action_timeout(
+    monkeypatch,
+):
+    """Pencil 每步等待上限来自该座位剩余 900s，而非固定单步 timeout。"""
+
+    class StepClock(_ChessClock):
+        def __init__(self, budget: float | None):
+            super().__init__(budget)
+            self._now = 0.0
+
+        def now(self) -> float:
+            self._now += 0.2
+            return self._now
+
+    observed_timeouts: list[float] = []
+
+    async def fake_bot_decide(*_args, action_timeout, **_kwargs):
+        observed_timeouts.append(action_timeout)
+        return {"response": {"x": 0, "y": 0}}
+
+    async def fake_run_session(_game_id, decide, **_kwargs):
+        await decide(0, {})
+        await decide(0, {})
+        return object()
+
+    monkeypatch.setattr(runner_module, "_ChessClock", StepClock)
+    monkeypatch.setattr(runner_module, "_botzone_decide", fake_bot_decide)
+    monkeypatch.setattr(runner_module, "run_session", fake_run_session)
+    binary_runner = _FakeBinaryRunner()
+    runner = MatchRunner(binary_runner, action_timeout=0.001)
+
+    asyncio.run(
+        runner.run_binaries(
+            "/fake/a",
+            "/fake/b",
+            game_id="pencil",
+            time_budget_per_side=900.0,
+        )
+    )
+
+    assert observed_timeouts == pytest.approx([900.0, 899.8])
+    assert binary_runner.stopped == ["session-traditional", "session-traditional"]
 
 
 def test_human_runner_clock_accumulates_both_sides_and_emits_time_used(
