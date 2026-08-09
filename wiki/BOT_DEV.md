@@ -15,7 +15,7 @@
 | 德州 response | 裸整数 `-1/-2/0/>0` | 同左 |
 | 运行模式 | Traditional / LongRunning | 都支持（上传时标明） |
 | 长时运行握手 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
-| 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB / 默认 60s（可配） |
+| 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB；holdem/gomoku 默认 60s/决策（可配），Pencil 固定 900s/方累计 |
 
 > 差异：本平台 Bot 进程**整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动即可运行（见 [协议](#/wiki?slug=protocol) §10）。手数**固定 70**（Botzone 文档 50，规则钉死不可配）。
 
@@ -199,7 +199,7 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 
 | 陷阱 | 后果 | 正确做法 |
 |------|------|----------|
-| 忘了 `flush` stdout | 60 秒超时判 fold | 每次输出后 flush（Python `flush=True`、C `fflush`） |
+| 忘了 `flush` stdout | 等到当前时限后失败：扑克 fold，棋类判负；Pencil 会耗尽该方累计棋钟 | 每次输出后 flush（Python `flush=True`、C `fflush`） |
 | 输出不带换行 `\n` | 平台可能读不到完整行 | 响应以 `\n` 结尾 |
 | 用 `print` 后进程阻塞缓冲 | 同上 | 显式刷新或关闭缓冲 |
 | response 不是裸整数 | 判 fold（协议违规） | 德州 response 必须是 `-1/-2/0/>0` 整数 |
@@ -226,4 +226,4 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 
 ## 10. 运行时资源
 
-Bot 在 Docker 中运行：单核、512MB 内存、无网络。决策超时默认 60s。
+Bot 在 Docker 中运行：单核、512MB 内存、无网络。holdem / gomoku 单步决策超时默认 60 秒（管理员可配）；Pencil 双方各使用固定 900 秒累计棋钟，每次思考消耗同一份总预算。`time_used` / `time_out` 只进入平台回放和 SSE，不会改变 Bot 的输入协议。

@@ -584,6 +584,67 @@ test('terminal SSE snapshot switches a raced live page to replay without reconne
   await monitor.expectClean()
 })
 
+test('Pencil clock initializes the untouched seat and renders a first-event timeout', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+
+  const openMockClockMatch = async (
+    matchId: string,
+    events: Array<Record<string, unknown>>,
+  ) => {
+    await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+    })
+    await page.route(`**/api/matches/${matchId}/events`, async (route) => {
+      const stream = [...events, { type: 'match_end', winner: 1, reason: 'completed' }]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join('')
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: stream })
+    })
+    await page.route(`**/api/matches/${matchId}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          match: {
+            id: matchId,
+            game_id: 'pencil',
+            status: 'running',
+            match_type: 'challenge',
+            bot_a_name: 'Clock Red',
+            bot_b_name: 'Clock Blue',
+          },
+          replay: { events_json: '[]' },
+        }),
+      })
+    })
+
+    await page.goto(`/#/match/${matchId}`)
+    await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  }
+
+  await openMockClockMatch('qa-clock-first-used', [
+    { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+    { type: 'time_used', seat: 0, used: 1, remaining: 899, budget: 900 },
+  ])
+  await expect(page.getByText('14:59', { exact: true })).toBeVisible()
+  // Seat 1 has not acted yet: its clock must start at the event's full budget,
+  // never at the reducer's tuple default of zero.
+  await expect(page.getByText('15:00', { exact: true })).toBeVisible()
+
+  await openMockClockMatch('qa-clock-first-timeout', [
+    { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+    { type: 'time_out', seat: 0, used: 900, budget: 900 },
+  ])
+  const timeoutBadge = page.getByText('超时', { exact: true })
+  await expect(timeoutBadge).toBeVisible()
+  // The clock and badge share one row, so assert their text together;
+  // an exact `getByText('0:00')` cannot match an element whose full text is
+  // `0:00超时`. Whitespace is layout-only, while both values and their order stay exact.
+  await expect(timeoutBadge.locator('..')).toHaveText(/^\s*0:00\s*超时\s*$/)
+  await expect(page.getByText('15:00', { exact: true })).toBeVisible()
+  await monitor.expectClean()
+})
+
 test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns for abnormal reasons', async ({ page, request }) => {
   const completedResponse = await request.get('/api/matches?status=completed&limit=1')
   const completed = await completedResponse.json() as { matches?: Array<{ id: string }> }

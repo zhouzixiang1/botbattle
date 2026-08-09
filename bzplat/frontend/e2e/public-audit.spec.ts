@@ -58,17 +58,40 @@ test('public deep links, refresh, back/forward, search, and fallback routes work
   const matchLink = page.locator('a[href^="#/match/"]').first()
   await expect(matchLink).toBeVisible()
   const matchHref = await matchLink.getAttribute('href')
+  const matchId = matchHref?.match(/^#\/match\/(.+)$/)?.[1]
+  expect(matchId, `unexpected public match href: ${matchHref}`).toBeTruthy()
+  const waitForMatchDetail = () => page.waitForResponse((response) => {
+    const request = response.request()
+    const url = new URL(response.url())
+    return request.method() === 'GET' &&
+      url.pathname === `/api/matches/${matchId}` &&
+      response.status() === 200
+  })
+
+  const initialDetail = waitForMatchDetail()
   await matchLink.click()
+  await initialDetail
   await expect(page).toHaveURL(new RegExp(`${matchHref!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`))
   await expect(page.getByRole('heading', { name: /^(?:实时观赛|对局详情)$/ })).toBeVisible()
+  await monitor.settle()
+
+  const reloadedDetail = waitForMatchDetail()
   await page.reload()
+  await reloadedDetail
   await expect(page.getByRole('heading', { name: /^(?:实时观赛|对局详情)$/ })).toBeVisible()
+  await monitor.settle()
+
   await page.goBack()
   await expect(page).toHaveURL(/#\/history$/)
   await expect(page.getByRole('heading', { name: '对局历史', exact: true })).toBeVisible()
+  await monitor.settle()
+
+  const forwardedDetail = waitForMatchDetail()
   await page.goForward()
+  await forwardedDetail
   await expect(page).toHaveURL(/#\/match\//)
   await expect(page.getByRole('heading', { name: /^(?:实时观赛|对局详情)$/ })).toBeVisible()
+  await monitor.settle()
 
   await page.goto('/#/contests')
   await expect(page.getByRole('heading', { name: '锦标赛', exact: true })).toBeVisible()

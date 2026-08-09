@@ -463,6 +463,7 @@ export default function MatchViewer() {
                   const vm = visibleVm.vm as PencilViewModel
                   const isActing = !vm.matchOver && vm.toAct === seat
                   const remaining = vm.timeRemaining?.[seat]
+                  const timedOut = vm.timeOut === seat
                   const name = seats?.[seat]?.botName || seats?.[seat]?.ownerName || (seat === 0 ? '红方' : '蓝方')
                   const color = seat === 0 ? 'text-chart-3' : 'text-chart-2'
                   return (
@@ -471,10 +472,10 @@ export default function MatchViewer() {
                         <span className={`font-medium ${color}`}>{name}</span>
                         <span className="font-mono text-lg font-bold">{pencilScores[seat]}</span>
                       </div>
-                      {remaining != null && (
+                      {(remaining != null || timedOut) && (
                         <div className={`mt-1 text-sm ${isActing ? 'text-foreground' : 'text-muted-foreground'}`}>
-                          <Clock className="size-3.5 inline" /> {fmtClock(remaining)}
-                          {vm.timeOut === seat && <Badge variant="destructive" className="ml-1 text-xs">超时</Badge>}
+                          <Clock className="size-3.5 inline" /> {fmtClock(remaining ?? 0)}
+                          {timedOut && <Badge variant="destructive" className="ml-1 text-xs">超时</Badge>}
                         </div>
                       )}
                     </div>

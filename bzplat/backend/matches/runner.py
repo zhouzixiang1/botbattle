@@ -332,12 +332,15 @@ class MatchRunner:
         on_event: EventSink | None = None,
         seed: int | None = None,
         runtime_mode: str | None = None,
+        time_budget_per_side: float | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """Bot vs 人类：bot 侧走 BinaryRunner，人类侧走 human_decide 协程。
 
         bot_seat 为 bot 坐位（0/1）；人类坐另一侧。human_decide(player_idx, request)
         由调用方实现（通常经 asyncio.Future 等待 WS 回传），超时由其内部处理。
+        ``time_budget_per_side`` 启用双方共享契约的累计棋钟；人类 Future 另以
+        棋钟剩余时间作外层 deadline，不能靠逐手及时响应绕过累计预算。
         游戏规则参数经 **match_params 透传（同 run_binaries）。
         ``runtime_mode``：Bot 的 Botzone 运行模式（None → 默认 longrunning）。
         """
@@ -348,25 +351,81 @@ class MatchRunner:
         sid_bot = await self.runner.start_session(bot_path, runtime_mode=rm)
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
+            clock = _ChessClock(time_budget_per_side)
 
             async def decide(player_idx: int, request: dict[str, Any]) -> dict[str, Any]:
-                if player_idx == bot_seat:
-                    try:
-                        return await _botzone_decide(
-                            self.runner, sid_bot, request,
-                            game_id=gid, action_timeout=self.action_timeout,
+                # 与 run_binaries 相同的累计棋钟契约，但同一只钟同时覆盖 Bot
+                # subprocess 与人类 Future 两条决策路径。
+                if clock.active:
+                    if clock.is_exhausted(player_idx):
+                        if on_event is not None:
+                            on_event("time_out", {
+                                "type": "time_out", "seat": player_idx,
+                                "used": round(clock.used(player_idx), 1),
+                                "budget": clock.budget,
+                            })
+                        raise TimeoutError(
+                            f"seat {player_idx} 时间耗尽（{clock.budget}s）"
                         )
-                    except (BotCrashedError, PlatformRunnerError):
-                        # Bot 崩溃或平台沙箱故障都不可吞成默认动作。
+                    effective_timeout = clock.remaining(player_idx)
+                else:
+                    effective_timeout = self.action_timeout
+                t0 = clock.now()
+                try:
+                    if player_idx == bot_seat:
+                        resp = await _botzone_decide(
+                            self.runner, sid_bot, request,
+                            game_id=gid, action_timeout=effective_timeout,
+                        )
+                    else:
+                        # 人类侧：生产实现返回等待 WebSocket Future 的 coroutine。
+                        out = human_decide(player_idx, request)
+                        if inspect.isawaitable(out):
+                            if clock.active:
+                                out = await asyncio.wait_for(
+                                    out, timeout=effective_timeout
+                                )
+                            else:
+                                out = await out
+                        resp = out if isinstance(out, dict) else _fail_response(gid)
+                except (BotCrashedError, PlatformRunnerError):
+                    # Bot 崩溃或平台沙箱故障都不可吞成默认动作。
+                    raise
+                except asyncio.TimeoutError as exc:
+                    if clock.active:
+                        elapsed = clock.now() - t0
+                        if on_event is not None:
+                            on_event("time_out", {
+                                "type": "time_out", "seat": player_idx,
+                                "used": round(clock.used(player_idx) + elapsed, 1),
+                                "budget": clock.budget,
+                            })
+                        raise TimeoutError(
+                            f"seat {player_idx} 时间耗尽（{clock.budget}s）"
+                        ) from exc
+                    # 无累计棋钟时保持旧语义：Bot 单步超时降级默认动作；
+                    # human_decide 自身异常继续上抛给游戏/编排层。
+                    if player_idx != bot_seat:
                         raise
-                    except Exception as exc:
-                        logger.warning("bot %s decide failed: %s", player_idx, exc)
-                        return _fail_response(gid)
-                # 人类侧
-                out = human_decide(player_idx, request)
-                if inspect.isawaitable(out):
-                    out = await out
-                return out if isinstance(out, dict) else _fail_response(gid)
+                    logger.warning("bot %s 决策超时 (%ss)", player_idx, effective_timeout)
+                    return _fail_response(gid)
+                except Exception as exc:
+                    if player_idx != bot_seat:
+                        raise
+                    logger.warning("bot %s decide failed: %s", player_idx, exc)
+                    return _fail_response(gid)
+                finally:
+                    if clock.active:
+                        clock.record(player_idx, clock.now() - t0)
+                # emit 时间更新（前端时钟显示），双方字段与 Bot-vs-Bot 一致。
+                if clock.active and on_event is not None:
+                    on_event("time_used", {
+                        "type": "time_used", "seat": player_idx,
+                        "used": round(clock.used(player_idx), 1),
+                        "remaining": round(clock.remaining(player_idx), 1),
+                        "budget": clock.budget,
+                    })
+                return resp
 
             return await run_session(
                 gid, decide, on_event=on_event, rng=rng, **match_params,

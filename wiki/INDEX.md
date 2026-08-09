@@ -10,7 +10,7 @@
 | [Bot 开发指南](#/wiki?slug=bot-dev) | 上传、调试、样例 |
 | [德州扑克](#/wiki?slug=texas) | 对齐 Botzone TexasHoldem2p 全文结构 + 本平台行协议 |
 | [五子棋 Gomoku](#/wiki?slug=gomoku) | 规则 + 协议 + 样例 + 一手交换变体 |
-| [点格棋 Pencil](#/wiki?slug=pencil) | 规则 + 交错网格 + pass |
+| [点格棋 Pencil](#/wiki?slug=pencil) | 规则 + 交错网格 + pass + 每方 15 分钟累计棋钟 |
 | [平台功能指南](#/wiki?slug=guide) | 对局 / 裁判 / 段位 / 等级 / 锦标赛 / Bot详情 / 用户主页 / 社交 / 通知 / 设置——一页看全 |
 
 > 前端设计系统与组件库、开发/测试/架构等工程文档在 [`doc/`](../doc/INDEX.md)（面向开发者）。
@@ -21,7 +21,7 @@
 |----|---------|--------|
 | 进程模型 | 默认每回合启停；可选长时运行 | **整场对局长驻**（不每回合重启），Botzone 信封一行一条 JSON |
 | CPU / 内存 | 1 核 / 默认 256MB | Docker `--cpus=1` / `--memory=512m` |
-| 决策时限 | 默认 1s/回合（首回合×2） | 管理员可配（默认 60s） |
+| 决策时限 | 默认 1s/回合（首回合×2） | holdem / gomoku 默认 60s/决策（可配）；Pencil 固定 900s/方累计（含人类局） |
 | 游戏 | 站内多游戏 | `holdem` / `gomoku` / `pencil` |
 | 德州协议 | 信封 + 裸整数 response + raise=增量 | **完全照 Botzone**（信封 + 裸整数 `-1/-2/0/>0` + raise=额外量；固定 70 手） |
 | 棋类协议 | 聚合 `requests`/`responses` | 每步推送对方上一手，Botzone 信封 + `{x,y}` 落子（完全照 Botzone） |

@@ -46,7 +46,8 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值），沙箱运行，完成后计 Glicko |
 | 实时观赛 | SSE 推送事件流，前端棋盘/牌桌逐步渲染 |
 | 对局回放 | 完整事件录制，播放/暂停/步进/倍速（0.5x-4x）/逐手跳转/进度拖动 |
-| 人类 vs Bot | WebSocket 落子回传，独立并发槽（默认 4），per-user ≤1，不计 Glicko |
+| Pencil 累计棋钟 | 每方固定 900 秒；Bot-vs-Bot 与人类对战均累计实际决策时间，成功/耗尽分别落 `time_used`/`time_out` 事件，并在点格棋观赛/回放显示剩余时间与超时状态 |
+| 人类 vs Bot | WebSocket 落子回传，独立并发槽（默认 4），per-user ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
 | 自博弈 | 同一 owner 的两个不同 Bot 可对战，走普通挑战 |
 | 崩溃收敛 | 对局中途 Bot 崩溃（含人类局）按游戏结果结算为 `completed` + `reason=crash`；Bot-vs-Bot 启动失败为 `completed` + `technical_loss`，人类局启动失败为 `aborted` |
 
@@ -98,7 +99,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 
 | 类别 | 需求 | 指标 / 实现 |
 |------|------|------------|
-| **性能** | 单场对局低延迟 | Bot 决策默认超时 60s（可配 1-300）；沙箱启动 ~1s；半负载并发 ceiling=`max(1,cpu//4)` |
+| **性能** | 单场对局低延迟 | holdem/gomoku Bot 单步决策默认超时 60s（可配 1-300）；Pencil 每方累计 900s（固定，含人类局）；沙箱启动 ~1s；半负载并发 ceiling=`max(1,cpu//4)` |
 | **性能** | 前端首屏快 | React.lazy 代码分割，主包 gzip ~115KB；recharts 等重依赖隔离到 BotDetail chunk |
 | **安全** | Bot 沙箱隔离 | Docker: `--network=none --memory=512m --cpus=1 --read-only --cap-drop=ALL --user 65534` |
 | **安全** | 接口限流 | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s 等），可 `BZ_RATE_LIMIT` 开关 |
@@ -119,7 +120,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | 账号认证 | `auth/` | test_auth | wiki（功能说明散见） |
 | Bot 管理 | `bots/` + api_routes | test_settings_mybots | wiki/BOT_DEV、BOT_DETAIL |
 | 对局编排 | `matches/orchestrator+runner` | test_engine、test_protocol | wiki/GUIDE |
-| 人类对战 | orchestrator + WS /play | test_human_match | wiki/GUIDE |
+| 人类对战 / 棋钟 | orchestrator + runner + WS /play | test_human_match、test_chess_clock | wiki/GUIDE、PENCIL |
 | 评分排行 | `rating/glicko2` + `games/*/tiers.py` | test_tiers、test_engine | wiki/GUIDE |
 | 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/GUIDE、CONTEST_BRACKET |
 | 社交 | api_routes + store | test_social、test_comments_likes | wiki/GUIDE |

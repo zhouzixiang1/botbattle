@@ -45,7 +45,9 @@ games.registry.get(game_id).run_session(decide, **params)
 > holdem 固定 70 手、gomoku 固定 15×15、pencil 固定 6 点。原 `judge_holdem_default_hands` /
 > `judge_gomoku_board_size` 设置项已移除。
 
-参数贯通链路：`platform_settings` → 编排 judge params → `runner.run_binaries()` → `games` 注册表 `run_session` → 各 Session 构造参数。
+Pencil 另由 `GameSpec.time_budget_per_side=900.0` 固定每方累计 15 分钟棋钟；这是游戏固有运行契约，不在 `platform_settings` 中热调。
+
+参数贯通链路：`platform_settings` → 编排 judge params → `runner.run_binaries()` → `games` 注册表 `run_session` → 各 Session 构造参数。棋钟链路独立为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
 
 ## 各游戏裁判要点
 
@@ -68,7 +70,8 @@ games.registry.get(game_id).run_session(decide, **params)
 
 - **固定 N=6** 点阵 → 交错网格 size=2N-1=11；红先（seat 0）；占相邻边围成格得分并连走；格多者胜。
 - pass 语义：得分连走时通知对方 `pass=1`，对方须响应 `{"x":-1,"y":-1}` 把回合交还。
-- 非法着 / 超时 → 判负；对局中途进程崩溃 → 计分判负（`reason=crash`）。
+- Bot-vs-Bot 与人类对局均为每方累计 900s；决策成功发 `time_used`，总预算耗尽发 `time_out` 并判当前方负。人类侧同时有默认 120s 逐回合防挂机保护。
+- 非法着 / 超时 → 判负；对局中途进程崩溃 → 计分判负（`reason=crash`）。MatchViewer 玩家卡由事件流显示剩余时间和超时徽章。
 
 ## 改动裁判代码
 

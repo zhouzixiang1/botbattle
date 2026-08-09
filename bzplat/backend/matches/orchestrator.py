@@ -1193,6 +1193,7 @@ class MatchOrchestrator:
                     game_id=gid,
                     on_event=on_event,
                     runtime_mode=bot_mode,
+                    time_budget_per_side=spec.time_budget_per_side,
                     **mc,
                 )
                 ea = sum(r.deltas[0] for r in result.rounds)

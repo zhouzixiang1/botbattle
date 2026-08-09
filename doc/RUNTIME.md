@@ -34,10 +34,13 @@ tmpfs，`/tmp` 是另一个隔离 tmpfs，对局结束后一并销毁。
 
 ## 决策超时
 
-- 默认 **60 秒 / 决策**（管理员可在「运行时」面板改，范围 1–300）。
-- 决策超时视为该 Bot **fold / 判负**（扑克弃牌；棋类判负）。
+- `GameSpec.time_budget_per_side=None` 的游戏（当前 holdem / gomoku）沿用单次决策超时：默认 **60 秒 / 决策**，管理员可在「运行时」面板改为 1–300 秒。
+- Pencil 的 `GameSpec.time_budget_per_side=900`：双方各有一只独立、固定 **900 秒（15 分钟）累计棋钟**，Bot-vs-Bot 与人类对战走同一契约；每次等待只使用该座位的剩余时间，不能靠多回合重置。该固定规则不读取 `action_timeout_sec`，admin 不可改。
+- 无累计棋钟时，单步超时按游戏的失败响应处理（扑克 fold；棋类判负）。Pencil 棋钟耗尽则直接判超时负。
+- 人类对战的 `human_action_timeout` 默认仍为 **120 秒 / 回合**，用于等待 WebSocket 落子的内层保护；Pencil 同时受外层 900 秒累计棋钟约束，以先到的限制为准。
+- 棋钟成功决策写入 `time_used {seat,used,remaining,budget}`，耗尽写入 `time_out {seat,used,budget}`；事件进入回放/SSE，点格棋对局页据此展示双方剩余时间和「超时」标记。
 - **崩溃语义**（详见 [对局](#/wiki?slug=guide)）：Bot 在对局**中途**崩溃由引擎计分判负，Bot-vs-Bot 与 human 都持久化为 `completed + reason=crash`；Bot-vs-Bot 启动失败由编排层统一结算为 `completed + technical_loss`（challenge/table/ladder/contest 一致），只有 human 的启动失败记为 `aborted`（`bot_crashed`）。Docker 返回 125（daemon／镜像／挂载／容器 runtime 故障）恒属于**平台沙箱故障**。126/127 同时可能是 Bot 自己的退出码，只有在 Bot `exec` 前由平台 wrapper 产生本会话不可伪造的 runtime/entrypoint 诊断时才归因平台；普通 Bot stderr 不会豁免技术负。平台故障对局记为 `aborted + platform_error`、不评分；上传在 worker 中用专用 runner 对隐藏临时文件预检，成功后才发布版本。平台故障返回 503，既不修改原激活版本，也不阻塞主事件循环。
-- 本平台采用**整场对局长驻**进程（stdin/stdout 行协议），因此超时默认远高于 Botzone 的 1s/回合。
+- 本平台采用**整场对局长驻**进程（stdin/stdout 行协议），因此单步默认或 Pencil 累计预算均高于 Botzone 的 1s/回合。
 
 ### Botzone 语言时限倍率（对照）
 
@@ -49,7 +52,7 @@ tmpfs，`/tmp` 是另一个隔离 tmpfs，对局结束后一并销毁。
 | C# / Python | ×6 |
 | Pascal | ×1 |
 
-本平台**不按语言倍率**调整，统一使用管理员配置的 `action_timeout_sec`。首回合亦无 ×2。
+本平台**不按语言倍率**调整。无累计棋钟的游戏统一使用管理员配置的 `action_timeout_sec`，首回合无 ×2；Pencil 改用 GameSpec 固定的每方 900 秒累计预算。
 
 ## 并发半负载
 
@@ -71,7 +74,7 @@ effective = min(admin_requested, ceiling)
 |----|---------|--------|
 | CPU | 评测机单核 | Docker `--cpus=1` |
 | 内存 | 默认 256MB | **512MB** |
-| 决策时限 | 默认 1s/回合（首回合×2） | 默认 **60s**（可配） |
+| 决策时限 | 默认 1s/回合（首回合×2） | holdem / gomoku 默认 **60s/决策**（可配）；Pencil **900s/方累计**（固定，含人类局） |
 | 进程模型 | 传统每回合启停，或可选长时运行 | **整场长驻**行协议 |
 
 ### 运行模式示意
@@ -135,4 +138,4 @@ Botzone「长时运行」模式：
 - 可改：`action_timeout_sec`、`max_concurrent_matches`（≤ ceiling）、`contest_default_rest_minutes`、
   上述全部 `auto_match_*`
 - 只读：`bot_cpus=1`、`bot_memory_mb=512`
-- 热更新：并发上限（重建 Semaphore）、决策超时、自动对局参数均为运行时生效
+- 热更新：并发上限（重建 Semaphore）、无累计棋钟游戏的单步决策超时、自动对局参数均为运行时生效；Pencil 900 秒棋钟是固定游戏规则，不受该设置影响

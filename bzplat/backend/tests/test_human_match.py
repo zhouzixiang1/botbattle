@@ -118,6 +118,40 @@ def test_human_match_freezes_current_bot_version_before_task_runs(store: Store):
     }
 
 
+def test_pencil_human_match_passes_game_clock_to_runner(store: Store):
+    """人类局也必须消费 GameSpec 的固有累计棋钟，不能只在 Bot-vs-Bot 生效。"""
+    from types import SimpleNamespace
+
+    user, bot = _setup(store, game="pencil")
+    captured: dict = {}
+
+    class CapturingRunner:
+        async def run_bot_vs_human(
+            self, _bot_path, *, time_budget_per_side=None, **_kwargs
+        ):
+            captured["time_budget_per_side"] = time_budget_per_side
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[0, 0])],
+                winner=None,
+                events=[],
+            )
+
+    async def exercise():
+        orch = MatchOrchestrator(store, runner=CapturingRunner(), max_concurrent=1)
+        match_id = await orch.challenge_human(
+            bot["id"], user["id"], human_seat=1, game_id="pencil"
+        )
+        task = orch._tasks.get(match_id)
+        if task is not None:
+            await task
+        return match_id
+
+    match_id = asyncio.run(exercise())
+    assert store.get_match(match_id)["status"] == "completed"
+    assert captured == {"time_budget_per_side": 900.0}
+
+
 def test_challenge_human_replay_failure_removes_pending_match(store: Store, monkeypatch):
     """Replay 初始化失败时，API 未返回的 pending 人类对局不得残留。"""
     u, b = _setup(store)

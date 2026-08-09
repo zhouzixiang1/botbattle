@@ -4,7 +4,7 @@
 1. 新库 schema 正确（三张 per-game 表 + matches_index + ratings 复合 PK + rating_history.game_id）
 2. matches 路由：create/get/update/list/count_stats/like/incr_view 经 matches_index 正确
 3. ratings per-game：ensure/get/update/history 按 (bot_id, game_id)
-4. 跨游戏 UNION 查询（list_matches 无 game_id、count_stats、matchpack_months）正确
+4. 跨游戏 UNION 查询（list_matches 无 game_id、count_stats）正确
 5. 旧库迁移：旧单表 matches 被丢弃（对局数据不保留），用户/bot/赛事数据保留；
    ratings 加 game_id 维度回填；contest_pairings.match_id 清空
 """
