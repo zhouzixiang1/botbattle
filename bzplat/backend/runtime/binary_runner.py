@@ -1,4 +1,4 @@
-"""二进制 Bot 沙箱运行器：Docker（ELF）/ Wine 容器（PE）/ 本机 subprocess（测试）。"""
+"""Linux x86_64 ELF Bot 沙箱运行器（Docker；测试可显式本机执行）。"""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,17 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..bots.classify import BinaryInfo, BinaryRejectError, classify_binary
+from ..bots.classify import (
+    BinaryInfo,
+    BinaryRejectError,
+    classify_binary,
+    require_supported_binary,
+)
+from ..store.schema import (
+    DEFAULT_RUNTIME_MODE,
+    SUPPORTED_BINARY_ERROR,
+    VALID_RUNTIME_MODES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,16 +28,6 @@ DEFAULT_ACTION_TIMEOUT = 60.0
 DEFAULT_MEMORY = "512m"
 DEFAULT_CPUS = "1"
 LINUX_IMAGE = os.environ.get("BZ_LINUX_BOT_IMAGE", "debian:bookworm-slim")
-WINE_IMAGE = os.environ.get("BZ_WINE_BOT_IMAGE", "scottyhardy/docker-wine:stable")
-_RUNTIME_ERROR_PREFIX = "BZPLAT_RUNTIME_ERROR"
-_TRUSTED_RUNTIME_FAILURE_REASONS = frozenset(
-    {
-        "wine_tmpfs_init",
-        "wine_tmpfs_permissions",
-        "wine_not_found",
-        "wine_not_executable",
-    }
-)
 _STDERR_DRAIN_GRACE_SEC = 0.5
 
 
@@ -37,21 +37,17 @@ class BotSession:
     info: BinaryInfo
     binary_path: Path
     proc: asyncio.subprocess.Process | None = None
-    mode: str = "docker"  # docker | wine | local
+    mode: str = "docker"  # docker | local（local 仅 BZ_BOT_LOCAL 测试开关）
     container_name: str = ""
     _buf: bytes = field(default_factory=bytes)
     _stderr_tail: bytearray = field(default_factory=bytearray)  # bot stderr 末尾（排查崩溃用）
     _stderr_task: asyncio.Task | None = None
     # ── Botzone 协议会话状态（传输层维护，runner 读写）──
-    runtime_mode: str = "longrunning"  # "traditional" | "longrunning"
+    runtime_mode: str = DEFAULT_RUNTIME_MODE
     requests: list = field(default_factory=list)   # 累积下发的请求负载（Traditional 重放用）
     responses: list = field(default_factory=list)  # 累积 Bot 响应负载（Traditional 信封 responses[]）
     turn: int = 0                                  # 已完成的回合数（0=首回合尚未握手判定）
     long_running: bool = False  # LongRunning Bot 首回合握手后置 True（之后发单 request 信封）
-    # 只写入容器启动 wrapper，不放入 Bot 环境或 exec 后的 argv。
-    # 据此区分平台 runtime/entrypoint 故障与 Bot 自行伪造的 stderr。
-    runtime_error_token: str = field(default_factory=lambda: uuid.uuid4().hex, repr=False)
-
     def start_stderr_drain(self) -> None:
         """异步读取 bot stderr 到尾部缓冲（保留末尾 4KB，排查崩溃）。"""
         proc = self.proc
@@ -168,17 +164,30 @@ class BinaryRunner:
         self._prefer_local = prefer_local
         self._docker_ok = shutil.which(docker_bin) is not None
 
-    async def start_session(self, binary_path: str | Path, *,
-                            info: BinaryInfo | None = None,
-                            action_timeout: float = DEFAULT_ACTION_TIMEOUT,
-                            runtime_mode: str = "longrunning") -> str:
+    def _new_session(
+        self,
+        binary_path: str | Path,
+        *,
+        info: BinaryInfo | None,
+        runtime_mode: str,
+    ) -> BotSession:
+        """校验二进制并创建逻辑会话；不启动进程。"""
+        if runtime_mode not in VALID_RUNTIME_MODES:
+            raise ValueError(f"未知运行模式: {runtime_mode}")
         path = Path(binary_path).resolve()
         if not path.is_file():
             raise BotCrashedError(f"bot 二进制不存在: {path}")
-        raw = path.read_bytes()[:4096]
-        info = info or classify_binary(raw if len(raw) >= 4 else path.read_bytes())
-        if not info.runnable:
-            raise BinaryRejectError(info.reject_reason or "不可执行的二进制")
+        # 文件内容始终是权威真相：绝不信任数据库历史值或调用方传入的
+        # ``BinaryInfo(runnable=True)``，避免 PE/脚本通过伪造元数据回退到 local。
+        with path.open("rb") as binary:
+            detected = require_supported_binary(classify_binary(binary.read(4096)))
+        if info is not None:
+            require_supported_binary(info)
+            expected = (info.format, info.os, info.arch, info.runnable)
+            actual = (detected.format, detected.os, detected.arch, detected.runnable)
+            if expected != actual:
+                raise BinaryRejectError(f"{SUPPORTED_BINARY_ERROR}；二进制元数据与文件不一致")
+        info = detected
 
         sid = uuid.uuid4().hex[:12]
         mode = self._select_mode(info)
@@ -186,15 +195,49 @@ class BinaryRunner:
             session_id=sid, info=info, binary_path=path, mode=mode,
             runtime_mode=runtime_mode,
         )
+        return session
+
+    async def prepare_session(
+        self,
+        binary_path: str | Path,
+        *,
+        info: BinaryInfo | None = None,
+        runtime_mode: str = DEFAULT_RUNTIME_MODE,
+    ) -> str:
+        """只登记 Traditional 的历史状态，不启动整场闲置 Bot 进程。"""
+        if runtime_mode != DEFAULT_RUNTIME_MODE:
+            raise ValueError("prepare_session 只用于 Traditional 逻辑会话")
+        session = self._new_session(
+            binary_path,
+            info=info,
+            runtime_mode=runtime_mode,
+        )
+        self._sessions[session.session_id] = session
+        logger.debug(
+            "bot protocol session prepared sid=%s path=%s",
+            session.session_id,
+            session.binary_path,
+        )
+        return session.session_id
+
+    async def start_session(self, binary_path: str | Path, *,
+                            info: BinaryInfo | None = None,
+                            action_timeout: float = DEFAULT_ACTION_TIMEOUT,
+                            runtime_mode: str = DEFAULT_RUNTIME_MODE) -> str:
+        session = self._new_session(
+            binary_path,
+            info=info,
+            runtime_mode=runtime_mode,
+        )
+        sid = session.session_id
+        mode = session.mode
         try:
             if mode == "local":
                 await self._start_local(session)
-            elif mode == "wine":
-                await self._start_wine(session)
             else:
                 await self._start_docker(session)
         except OSError as exc:
-            if mode in ("docker", "wine"):
+            if mode == "docker":
                 # Host process/resource failures while invoking the sandbox are
                 # platform faults.  Do not expose absolute paths from OSError to
                 # the public match stream or reject the uploaded Bot as invalid.
@@ -211,20 +254,15 @@ class BinaryRunner:
         return sid
 
     def _select_mode(self, info: BinaryInfo) -> str:
-        if info.format == "pe":
-            if not self._docker_ok:
-                raise PlatformRunnerError("Windows PE bot 需要 Docker + Wine 镜像")
-            return "wine"
-        if info.format == "elf":
-            # Running an uploaded executable directly on the host is an explicit
-            # test-only escape hatch.  Production must fail closed when Docker is
-            # unavailable; silently falling back would bypass every sandbox limit.
-            if self._prefer_local:
-                return "local"
-            if not self._docker_ok:
-                raise PlatformRunnerError("Linux ELF bot 需要 Docker 沙箱")
-            return "docker"
-        raise BinaryRejectError(info.reject_reason or "不支持的格式")
+        require_supported_binary(info)
+        # Running an uploaded executable directly on the host is an explicit
+        # test-only escape hatch.  Production must fail closed when Docker is
+        # unavailable; silently falling back would bypass every sandbox limit.
+        if self._prefer_local:
+            return "local"
+        if not self._docker_ok:
+            raise PlatformRunnerError("Linux x86_64 ELF bot 需要 Docker 沙箱")
+        return "docker"
 
     async def _start_local(self, session: BotSession) -> None:
         path = session.binary_path
@@ -246,11 +284,6 @@ class BinaryRunner:
             session.binary_path.chmod(session.binary_path.stat().st_mode | 0o111)
         except (OSError, PermissionError):
             pass  # 只读挂载/权限不足时忽略（本机路径通常可改）
-        platform = {
-            "amd64": "linux/amd64",
-            "arm64": "linux/arm64",
-            "i386": "linux/386",
-        }.get(session.info.arch, "linux/amd64")
         cmd = [
             self._docker_bin, "run", "-i", "--rm",
             "--name", name,
@@ -264,68 +297,11 @@ class BinaryRunner:
             "--cap-drop=ALL",
             "--security-opt", "no-new-privileges",
             "--user", "65534:65534",
-            "--platform", platform,
+            "--platform", "linux/amd64",
             "-v", f"{session.binary_path}:/app/bot:ro",
             "--workdir", "/app",
             LINUX_IMAGE,
             "/app/bot",
-        ]
-        session.proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
-        )
-
-    async def _start_wine(self, session: BotSession) -> None:
-        name = f"bzbot-wine-{session.session_id}"
-        session.container_name = name
-        # 防御性补执行权限（与 _start_local/_start_docker 对齐：wine 容器内虽不经 host exec 位，
-        # 但保持一致防御，避免某些 wine 版本检查文件 mode）。
-        try:
-            session.binary_path.chmod(session.binary_path.stat().st_mode | 0o111)
-        except (OSError, PermissionError):
-            pass
-        runtime_marker = f"{_RUNTIME_ERROR_PREFIX}:{session.runtime_error_token}:"
-        # 强制绕过公共镜像默认的 root entrypoint，以 nobody 运行固定
-        # wrapper。Wine 需要可写 HOME/WINEPREFIX，它们只落在独立 tmpfs；
-        # 根文件系统仍为只读，Bot 挂载仍为 ro。
-        wine_wrapper = (
-            'runtime_error() { code="$1"; reason="$2"; '
-            f'printf "%s\\n" "{runtime_marker}$reason" >&2; exit "$code"; }}; '
-            'mkdir -p "$WINEPREFIX" "$XDG_RUNTIME_DIR" '
-            '|| runtime_error 126 wine_tmpfs_init; '
-            'chmod 700 "$HOME" "$WINEPREFIX" "$XDG_RUNTIME_DIR" '
-            '|| runtime_error 126 wine_tmpfs_permissions; '
-            'wine_bin="$(command -v wine)" '
-            '|| runtime_error 127 wine_not_found; '
-            '[ -x "$wine_bin" ] '
-            '|| runtime_error 126 wine_not_executable; '
-            'exec "$wine_bin" /app/bot.exe'
-        )
-        cmd = [
-            self._docker_bin, "run", "-i", "--rm",
-            "--name", name,
-            "--network=none",
-            f"--memory={DEFAULT_MEMORY}",
-            f"--cpus={DEFAULT_CPUS}",
-            "--read-only",
-            "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777",
-            # Wine 首次启动会初始化 prefix；size 是上限而非预分配，
-            # 实际占用仍受容器 512 MiB 内存硬限统一约束。
-            "--tmpfs", "/winehome:rw,exec,nosuid,nodev,size=384m,uid=65534,gid=65534,mode=0700",
-            "--cap-drop=ALL",
-            "--security-opt", "no-new-privileges",
-            "--user", "65534:65534",
-            "--env", "HOME=/winehome",
-            "--env", "WINEPREFIX=/winehome/prefix",
-            "--env", "XDG_RUNTIME_DIR=/winehome/runtime",
-            "-v", f"{session.binary_path}:/app/bot.exe:ro",
-            "--workdir", "/tmp",
-            "--entrypoint", "/bin/sh",
-            WINE_IMAGE,
-            "-c", wine_wrapper,
         ]
         session.proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -369,8 +345,8 @@ class BinaryRunner:
                 returncode = await asyncio.wait_for(session.proc.wait(), timeout=0.5)
             except asyncio.TimeoutError:
                 returncode = session.proc.returncode
-        # proc.wait() 可能先于异步 stderr drain 任务收到 EOF；诊断标记
-        # 若在这个窗口丢失，会把 Wine 入口故障错记为 Bot 技术负。
+        # proc.wait() 可能先于异步 stderr drain 任务收到 EOF；短暂等待可保留
+        # 完整的 Bot stderr 尾部供运维诊断，但 stderr 绝不参与责任分类。
         stderr_task = session._stderr_task
         if stderr_task is not None and not stderr_task.done():
             try:
@@ -392,8 +368,6 @@ class BinaryRunner:
         platform_reason = _classify_container_platform_exit(
             mode=session.mode,
             returncode=returncode,
-            stderr_tail=tail,
-            runtime_error_token=session.runtime_error_token,
         )
         if platform_reason is not None:
             return PlatformRunnerError(
@@ -459,28 +433,8 @@ def _classify_container_platform_exit(
     *,
     mode: str,
     returncode: int | None,
-    stderr_tail: str,
-    runtime_error_token: str,
 ) -> str | None:
-    """Return a trusted platform-fault reason, otherwise leave blame on the Bot.
-
-    Docker exit 125 is reserved for the Docker client/daemon failing to launch a
-    container.  Exit 126/127 is ambiguous: a Bot may deliberately return either
-    value, so those codes are platform faults only when the pre-exec wrapper emits
-    this session's unguessable marker.  The marker is not inherited by the Bot.
-    """
-    if mode not in ("docker", "wine"):
-        return None
-    if returncode == 125:
+    """Docker exit 125 is infrastructure; all other exits belong to the Bot."""
+    if mode == "docker" and returncode == 125:
         return "docker exit 125"
-    if returncode not in (126, 127):
-        return None
-
-    marker = f"{_RUNTIME_ERROR_PREFIX}:{runtime_error_token}:"
-    marker_at = stderr_tail.find(marker)
-    if marker_at < 0:
-        return None
-    reason = stderr_tail[marker_at + len(marker):].splitlines()[0].strip()
-    if reason not in _TRUSTED_RUNTIME_FAILURE_REASONS:
-        return None
-    return f"{reason}, exit {returncode}"
+    return None

@@ -42,13 +42,13 @@ def test_gomoku_five_in_a_row_match():
         nonlocal bi
         x, y = black_moves[bi]
         bi += 1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     def decide_b(req):
         nonlocal wi
         x, y = white_moves[wi]
         wi += 1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     async def decide(player, req):
         return decide_a(req) if player == 0 else decide_b(req)
@@ -64,8 +64,8 @@ def test_gomoku_five_in_a_row_match():
 def test_gomoku_illegal_loses():
     async def decide(player, req):
         if player == 0:
-            return {"x": 0, "y": 0}
-        return {"x": 0, "y": 0}  # 占已有点 → 非法
+            return {"response": {"x": 0, "y": 0}}
+        return {"response": {"x": 0, "y": 0}}  # 占已有点 → 非法
 
     result = asyncio.run(GomokuSession().run_async(decide))
     assert result.winner == 0
@@ -95,7 +95,7 @@ def test_pencil_score_and_continue():
 
 def test_pencil_illegal_edge():
     async def decide(player, req):
-        return {"x": 0, "y": 0}  # 点不是边
+        return {"response": {"x": 0, "y": 0}}  # 点不是边
 
     result = asyncio.run(PencilSession(n_dots=3).run_async(decide))
     assert result.reason == "illegal"
@@ -116,13 +116,13 @@ def test_pencil_full_game_randomish():
                 board.curr_player = 1 - int(req["me"])
                 board.do_action(ox, oy)
             if int(req.get("pass") or 0) == 1:
-                return {"x": -1, "y": -1}
+                return {"response": {"x": -1, "y": -1}}
             acts = board.legal_actions()
             assert acts, "no legal edges"
             x, y = acts[0]
             board.curr_player = int(req["me"])
             board.do_action(x, y)
-            return {"x": x, "y": y}
+            return {"response": {"x": x, "y": y}}
 
         return decide
 
@@ -146,9 +146,10 @@ def test_board_protocol_roundtrip():
     assert "t" not in g  # Botzone 化后无 t 字段
     p = build_pencil_request(x=1, y=0, pass_=1, me=1, scores=[2, 1])
     assert p["pass"] == 1 and p["scores"] == [2, 1]
-    # parse_xy 接受 Botzone 信封 {"response": {x,y}} + 裸 {x,y} 两种
-    assert parse_xy({"x": 3, "y": 4}) == (3, 4)
+    # 只接受唯一 response 信封；裸坐标与额外字段均拒绝。
+    assert parse_xy({"x": 3, "y": 4}) == (None, None)
     assert parse_xy({"response": {"x": 5, "y": 10}}) == (5, 10)
+    assert parse_xy({"response": {"x": 5, "y": 10}, "debug": "x"}) == (None, None)
     assert parse_xy({}) == (None, None)
     assert parse_xy({"response": {}}) == (None, None)
 
@@ -170,7 +171,7 @@ def test_run_session_pencil_n_dots_none_uses_default():
             x, y = next(moves)
         except StopIteration:
             x, y = -1, -1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     # n_dots=None 不应抛 TypeError；应使用 DEFAULT_N 跑完整局
     result = asyncio.run(run_session("pencil", decide, n_dots=None, num_hands=1))
@@ -217,7 +218,7 @@ def test_pencil_majority_win_ends_early():
 def test_pencil_illegal_normalizes_2_0():
     """对齐裁判：非法着 → 对手 2-0（scores 归一化，非实时部分分）。"""
     async def decide(player, req):
-        return {"x": 0, "y": 0}  # (0,0) 是点不是边 → 非法
+        return {"response": {"x": 0, "y": 0}}  # (0,0) 是点不是边 → 非法
 
     result = asyncio.run(PencilSession(n_dots=3).run_async(decide))
     assert result.reason == "illegal"
@@ -263,12 +264,12 @@ def test_pencil_move_event_has_closed_boxes():
 
     async def decide(player, req):
         if int(req.get("pass") or 0) == 1:
-            return {"x": -1, "y": -1}
+            return {"response": {"x": -1, "y": -1}}
         try:
             x, y = next(moves)
         except StopIteration:
             x, y = -1, -1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     sess = PencilSession(n_dots=2)
     result = asyncio.run(sess.run_async(decide))
@@ -287,7 +288,7 @@ def test_pencil_move_event_has_closed_boxes():
 def test_pencil_match_end_has_box_owners():
     """match_end 事件带 box_owners 网格（前端最终着色）。"""
     async def decide(player, req):
-        return {"x": 0, "y": 0}  # 非法→快速结束
+        return {"response": {"x": 0, "y": 0}}  # 非法→快速结束
 
     result = asyncio.run(PencilSession(n_dots=3).run_async(decide))
     me = next(e for e in result.events if e.get("type") == "match_end")

@@ -158,9 +158,14 @@ def __dir__() -> list[str]:
 
 
 async def preflight_bot(
-    game_id: str, binary_path: str, binary_runner: Any, *, timeout: float = 8.0
+    game_id: str,
+    binary_path: str,
+    binary_runner: Any,
+    *,
+    runtime_mode: str,
+    timeout: float = 8.0,
 ) -> tuple[bool, str]:
-    """Bot 预检：试跑 bot，发首个请求，验证响应合法。
+    """Bot 预检：按用户选择的运行模式执行正式协议首回合。
 
     经该游戏的 spec.preflight_check 执行；若 spec 未定义 preflight_check 则跳过（返回 ok）。
     返回 (ok, detail)。ok=False 时上传/API 应拒绝该 bot。
@@ -168,7 +173,12 @@ async def preflight_bot(
     spec = registry.get(game_id)
     if spec.preflight_check is None:
         return True, "该游戏未定义预检"
-    return await spec.preflight_check(binary_path, binary_runner, timeout=timeout)
+    return await spec.preflight_check(
+        binary_path,
+        binary_runner,
+        runtime_mode=runtime_mode,
+        timeout=timeout,
+    )
 
 
 __all__ = [

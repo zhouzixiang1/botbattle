@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import time as _time
 from typing import Any, Callable
 
@@ -47,43 +46,43 @@ def _protocol_payload(
 ) -> Any:
     """Strictly decode one Botzone response without persisting raw Bot output."""
     try:
-        envelope = _bz.loads_response(line)
-    except json.JSONDecodeError as exc:
+        return _bz.decode_response_payload(
+            line,
+            _game_registry.get(game_id).protocol.validate_response_payload,
+        )
+    except _bz.ResponseProtocolError as exc:
         raise BotProtocolError(
-            "Bot 输出不是合法 JSON",
-            error_code="invalid_json",
+            str(exc),
+            error_code=exc.code,
             failed_seat=failed_seat,
             turn=turn,
             leg=leg,
         ) from exc
-    if not isinstance(envelope, dict):
-        raise BotProtocolError(
-            "Bot 响应信封必须是 JSON 对象",
-            error_code="invalid_envelope",
-            failed_seat=failed_seat,
-            turn=turn,
-            leg=leg,
-        )
-    if "response" not in envelope:
-        raise BotProtocolError(
-            "Bot 响应缺少必填 response 字段",
-            error_code="missing_response",
-            failed_seat=failed_seat,
-            turn=turn,
-            leg=leg,
-        )
-    payload = envelope["response"]
+
+
+async def _open_match_session(
+    runner: BinaryRunner,
+    binary_path: str,
+    runtime_mode: str,
+    *,
+    failed_seat: int,
+) -> str:
+    """建立一方逻辑会话；Traditional 只登记历史，不预启动闲置进程。"""
     try:
-        _game_registry.get(game_id).protocol.validate_response_payload(payload)
-    except (TypeError, ValueError, KeyError) as exc:
-        raise BotProtocolError(
-            "Bot response 字段不符合本游戏协议",
-            error_code="invalid_response",
-            failed_seat=failed_seat,
-            turn=turn,
-            leg=leg,
-        ) from exc
-    return payload
+        if runtime_mode == _bz.RUNTIME_TRADITIONAL:
+            return await runner.prepare_session(
+                binary_path,
+                runtime_mode=runtime_mode,
+            )
+        if runtime_mode == _bz.RUNTIME_LONGRUNNING:
+            return await runner.start_session(
+                binary_path,
+                runtime_mode=runtime_mode,
+            )
+        raise ValueError(f"未知运行模式: {runtime_mode}")
+    except BotCrashedError as exc:
+        exc.crashed_seat = failed_seat
+        raise
 
 
 def _emit_bot_technical_error(
@@ -122,11 +121,20 @@ async def _traditional_decide_one_shot(
     full_requests = session.requests + [request]
     line = _bz.dumps_traditional(full_requests, session.responses)
     # 启动临时 bot 进程（每回合重启——traditional 语义）
-    tmp_sid = await runner.start_session(
-        session.binary_path, runtime_mode=_bz.RUNTIME_TRADITIONAL,
-    )
     try:
-        resp_line = await runner.send(tmp_sid, line, timeout=action_timeout)
+        tmp_sid = await runner.start_session(
+            session.binary_path,
+            runtime_mode=_bz.RUNTIME_TRADITIONAL,
+        )
+    except BotCrashedError as exc:
+        exc.crashed_seat = failed_seat
+        raise
+    try:
+        try:
+            resp_line = await runner.send(tmp_sid, line, timeout=action_timeout)
+        except BotCrashedError as exc:
+            exc.crashed_seat = failed_seat
+            raise
     finally:
         await runner.stop_session(tmp_sid)
     payload = _protocol_payload(
@@ -192,21 +200,19 @@ async def _botzone_decide(
             ) from exc
 
     is_first_turn = session.turn == 0
-    # 传输格式判定：
-    # - Traditional：每回合发完整历史信封。
-    # - LongRunning：首回合发完整历史信封 + 探测握手；若 Bot 输出 keep_running 握手串
-    #   （session.long_running=True），后续回合发单 request 信封；若未握手（Bot 实际是
-    #   traditional 风格却标了 longrunning），继续发完整历史信封兜底——否则 Bot 收到
-    #   单 request 无法重建状态。
-    send_full_envelope = (
-        session.runtime_mode == _bz.RUNTIME_TRADITIONAL
-        or is_first_turn
-        or not session.long_running
-    )
-    if send_full_envelope:
+    # LongRunning 首回合必须完成握手；不存在“同进程完整历史”兼容模式。
+    if is_first_turn:
         # 完整历史信封（含本轮 request——暂存到 pending_request，解析成功后才提交）。
         line = _bz.dumps_traditional(session.requests + [request], session.responses)
     else:
+        if not session.long_running:
+            raise BotProtocolError(
+                "LongRunning 会话未完成 KEEP_RUNNING 握手",
+                error_code="missing_keep_running",
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            )
         # LongRunning 后续回合：发单 request 信封。
         line = _bz.dumps_longrunning_single(request)
 
@@ -229,11 +235,20 @@ async def _botzone_decide(
         leg=leg,
     )
 
-    # LongRunning 首回合响应后探测 keep_running 握手。
+    # LongRunning 首回合响应后必须精确输出 keep_running 握手。
     if session.runtime_mode == _bz.RUNTIME_LONGRUNNING and is_first_turn:
         extra = await runner.read_extra_line(session_id, timeout=1.0)
-        if extra is not None and _bz.is_keep_running_signal(extra):
-            session.long_running = True
+        try:
+            _bz.require_keep_running_signal(extra)
+        except _bz.ResponseProtocolError as exc:
+            raise BotProtocolError(
+                str(exc),
+                error_code=exc.code,
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            ) from exc
+        session.long_running = True
 
     # 原子提交会话状态：requests/responses/turn 一起更新。若上面的 loads/extract 抛异常
     # （Bot 输出非法 JSON / 缺 response），不提交——避免 requests 比 responses 多一条导致
@@ -241,8 +256,7 @@ async def _botzone_decide(
     session.requests.append(request)
     session.responses.append(payload)
     session.turn += 1
-    # 返回信封 dict（引擎 parse_response 接受 {"response": int} 与裸 int 两种；这里统一
-    # 包成信封以满足引擎「decide 必返回 dict」的契约）。
+    # 返回唯一现行 response 信封，满足引擎的 canonical decide 契约。
     return {"response": payload}
 
 
@@ -314,24 +328,30 @@ class MatchRunner:
         决定哪些参数、各参数默认值/校验，全在 GameSpec（default_match_params /
         validate_match_params / judge_params）里声明；runner 不持有任何游戏专属知识。
 
-        ``runtime_modes``：(bot_a 的 Botzone 运行模式, bot_b 的)。None → 均默认 longrunning。
-        PR-2 将从 bots/runtime_mode 读取后传入；PR-1 默认 longrunning 跑通。
+        ``runtime_modes``：(bot_a 的 Botzone 运行模式, bot_b 的)。None → 使用平台
+        权威默认模式（Traditional）。
         """
         import random
 
         gid = normalize_game_id(game_id)
-        rm_a, rm_b = runtime_modes or (_bz.RUNTIME_LONGRUNNING, _bz.RUNTIME_LONGRUNNING)
-        sid_a = await self.runner.start_session(path_a, runtime_mode=rm_a)
+        rm_a, rm_b = runtime_modes or (
+            _bz.DEFAULT_RUNTIME_MODE,
+            _bz.DEFAULT_RUNTIME_MODE,
+        )
+        sid_a = await _open_match_session(
+            self.runner,
+            path_a,
+            rm_a,
+            failed_seat=0,
+        )
         try:
-            sid_b = await self.runner.start_session(path_b, runtime_mode=rm_b)
-        except BotCrashedError as exc:
-            # 第二个 session（bot_b）启动失败：释放已启动的 bot_a，并注解崩溃方=1
-            # 供 orchestrator 的技术判负判胜方（bot_b 崩 → winner=0）。
-            await self.runner.stop_session(sid_a)
-            exc.crashed_seat = 1
-            raise
+            sid_b = await _open_match_session(
+                self.runner,
+                path_b,
+                rm_b,
+                failed_seat=1,
+            )
         except BaseException:
-            # 其他异常（非 BotCrashedError）：仅释放 bot_a，不注解座位。
             await self.runner.stop_session(sid_a)
             raise
         try:
@@ -423,13 +443,18 @@ class MatchRunner:
         ``time_budget_per_side`` 启用双方共享契约的累计棋钟；人类 Future 另以
         棋钟剩余时间作外层 deadline，不能靠逐手及时响应绕过累计预算。
         游戏规则参数经 **match_params 透传（同 run_binaries）。
-        ``runtime_mode``：Bot 的 Botzone 运行模式（None → 默认 longrunning）。
+        ``runtime_mode``：Bot 的 Botzone 运行模式（None → 平台默认 Traditional）。
         """
         import random
 
         gid = normalize_game_id(game_id)
-        rm = runtime_mode or _bz.RUNTIME_LONGRUNNING
-        sid_bot = await self.runner.start_session(bot_path, runtime_mode=rm)
+        rm = runtime_mode or _bz.DEFAULT_RUNTIME_MODE
+        sid_bot = await _open_match_session(
+            self.runner,
+            bot_path,
+            rm,
+            failed_seat=bot_seat,
+        )
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
             clock = _ChessClock(time_budget_per_side)
@@ -480,7 +505,15 @@ class MatchRunner:
                                 )
                             else:
                                 out = await out
-                        resp = out if isinstance(out, dict) else _fail_response(gid)
+                        # WebSocket 人类动作不是 Bot stdin/stdout 协议：棋类前端发送
+                        # 裸坐标，holdem 前端发送 canonical envelope。进入引擎前统一
+                        # 成同一个 response 信封，不放宽 Bot 传输层。
+                        if isinstance(out, dict) and set(out) == {"response"}:
+                            resp = out
+                        elif isinstance(out, dict):
+                            resp = {"response": out}
+                        else:
+                            resp = {"response": _fail_response(gid)}
                 except BotTechnicalError as exc:
                     if isinstance(exc, BotDecisionTimeoutError) and clock.active:
                         elapsed = clock.now() - t0
@@ -550,7 +583,10 @@ class MatchRunner:
             out = fn(request)
             if hasattr(out, "__await__"):
                 out = await out
-            return out
+            # callable 是可信测试入口；统一包成引擎所消费的 canonical envelope。
+            if isinstance(out, dict) and set(out) == {"response"}:
+                return out
+            return {"response": out}
 
         return await run_session(
             gid, decide, on_event=on_event, rng=rng, **match_params,
@@ -601,16 +637,23 @@ class MatchRunner:
         merged_rounds: list[Any] = []
         merged_events: list[dict[str, Any]] = []
         final_result = None
-        rm_a, rm_b = runtime_modes or (_bz.RUNTIME_LONGRUNNING, _bz.RUNTIME_LONGRUNNING)
-        sid_a = await self.runner.start_session(path_a, runtime_mode=rm_a)
+        rm_a, rm_b = runtime_modes or (
+            _bz.DEFAULT_RUNTIME_MODE,
+            _bz.DEFAULT_RUNTIME_MODE,
+        )
+        sid_a = await _open_match_session(
+            self.runner,
+            path_a,
+            rm_a,
+            failed_seat=0,
+        )
         try:
-            sid_b = await self.runner.start_session(path_b, runtime_mode=rm_b)
-        except BotCrashedError as exc:
-            # 第二个 session（bot_b）启动失败：释放已启动的 bot_a，并注解崩溃方=1
-            # 供 orchestrator 的技术判负判胜方（bot_b 崩 → winner=0）。镜像 run_binaries。
-            await self.runner.stop_session(sid_a)
-            exc.crashed_seat = 1
-            raise
+            sid_b = await _open_match_session(
+                self.runner,
+                path_b,
+                rm_b,
+                failed_seat=1,
+            )
         except BaseException:
             await self.runner.stop_session(sid_a)
             raise

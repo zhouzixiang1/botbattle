@@ -82,7 +82,7 @@ def test_real_gomoku_result_satisfies_contract():
         else:
             x, y = white[wi]
             wi += 1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     result = asyncio.run(GomokuSession().run_async(decide))
     # 契约字段

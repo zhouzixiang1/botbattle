@@ -47,8 +47,15 @@ class _ScriptedTransport:
         self._sessions[sid] = _TransportSession(str(path), runtime_mode)
         return sid
 
+    async def prepare_session(self, path, *, runtime_mode):
+        sid = f"s{self._started}"
+        self._started += 1
+        self._sessions[sid] = _TransportSession(str(path), runtime_mode)
+        return sid
+
     async def send(self, sid, _line, *, timeout=None):
-        if sid in ("s0", "bot"):
+        session = self._sessions[sid]
+        if sid == "bot" or not session.binary_path.endswith("b.bin"):
             if isinstance(self.outcome, BaseException):
                 raise self.outcome
             return self.outcome

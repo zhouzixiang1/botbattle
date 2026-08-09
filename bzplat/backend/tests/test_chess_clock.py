@@ -135,6 +135,9 @@ class _FakeBinaryRunner:
     async def start_session(self, _path: str, *, runtime_mode: str) -> str:
         return f"session-{runtime_mode}"
 
+    async def prepare_session(self, _path: str, *, runtime_mode: str) -> str:
+        return f"session-{runtime_mode}"
+
     async def stop_session(self, session_id: str) -> None:
         self.stopped.append(session_id)
 
@@ -182,7 +185,7 @@ def test_human_runner_clock_accumulates_both_sides_and_emits_time_used(
     assert [event["used"] for event in time_used] == [0.2, 0.2, 0.4, 0.4]
     assert [event["remaining"] for event in time_used] == [0.8, 0.8, 0.6, 0.6]
     assert all(event["budget"] == 1.0 for event in time_used)
-    assert binary_runner.stopped == ["session-longrunning"]
+    assert binary_runner.stopped == ["session-traditional"]
 
 
 @pytest.mark.parametrize("timed_seat", [0, 1], ids=["bot", "human"])
@@ -217,4 +220,4 @@ def test_human_runner_clock_timeout_adjudicates_either_side(
     assert events[0]["type"] == "time_out"
     assert events[0]["seat"] == timed_seat
     assert events[0]["budget"] == 0.01
-    assert binary_runner.stopped == ["session-longrunning"]
+    assert binary_runner.stopped == ["session-traditional"]

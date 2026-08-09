@@ -9,6 +9,8 @@
 本测试断言这些规则参数不可通过 match_config / judge_params / session_factory 参数改变，
 确保「配置钉死」这一设计决策不被后续改动无意中破坏。
 """
+import pytest
+
 from bzplat.backend.games import registry
 from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
 from bzplat.backend.games.gomoku.engine import BOARD_SIZE
@@ -26,13 +28,17 @@ def test_default_match_params_all_empty():
         )
 
 
-def test_validate_ignores_config_fields():
-    """validate_match_params 忽略任何传入字段，返回空 dict（不再校验范围）。"""
-    assert registry.get("holdem").validate_match_params({"hands": 999}) == {}
-    assert registry.get("holdem").validate_match_params({"hands": 0}) == {}  # 不再抛 ValueError
-    assert registry.get("pencil").validate_match_params({"n_dots": 99}) == {}
-    assert registry.get("pencil").validate_match_params({"n_dots": 1}) == {}
-    assert registry.get("gomoku").validate_match_params({"board_size": 5}) == {}
+def test_validate_rejects_config_fields():
+    """固定规则只接受空对象，旧字段不得被静默忽略。"""
+    for game_id, cfg in (
+        ("holdem", {"hands": 999}),
+        ("holdem", {"hands": 0}),
+        ("pencil", {"n_dots": 99}),
+        ("pencil", {"n_dots": 1}),
+        ("gomoku", {"board_size": 5}),
+    ):
+        with pytest.raises(ValueError, match="规则固定"):
+            registry.get(game_id).validate_match_params(cfg)
 
 
 # ── rounds_per_match / eta 返回固定常量 ───────────────────────────

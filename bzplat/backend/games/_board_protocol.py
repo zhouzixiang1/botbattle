@@ -14,38 +14,38 @@ from __future__ import annotations
 import json
 from typing import Any
 
-PROTOCOL_VERSION = 2  # Botzone 标准（v1 是旧的紧凑协议，已废弃）
-
-
 def dumps_request(req: dict[str, Any]) -> str:
     """序列化请求负载为单行 JSON（信封化由 runner 传输层做）。"""
     return json.dumps(req, separators=(",", ":"), ensure_ascii=False)
 
 
 def loads_response(line: str) -> dict[str, Any]:
-    """严格解析 Bot 输出信封；坏 JSON / 非对象由调用方归为协议故障。"""
+    """严格解析唯一现行响应信封。"""
+    from bzplat.backend.games import _botzone_protocol as envelope_protocol
+
     obj = json.loads(line)
-    if not isinstance(obj, dict):
-        raise ValueError("Bot 响应信封必须是 JSON 对象")
+    payload = envelope_protocol.extract_response_payload(obj)
+    validate_response_payload(payload)
     return obj
 
 
 def parse_xy(raw: dict[str, Any] | None) -> tuple[int | None, int | None]:
     """从响应取落子坐标 ``(x, y)``。
 
-    接受两种输入（兼容 Botzone 信封 + 旧裸 ``{x,y}``）：
-    1. Botzone 信封：``{"response": {"x":.., "y":..}}``。
-    2. 裸 ``{"x":.., "y":..}``（测试/兼容）。
+    只接受唯一现行信封 ``{"response":{"x":int,"y":int}}``。
     """
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or set(raw) != {"response"}:
         return None, None
-    # Botzone 信封：先取 response 字段
-    if "response" in raw and isinstance(raw["response"], dict):
-        raw = raw["response"]
-    try:
-        x = int(raw["x"])
-        y = int(raw["y"])
-    except (KeyError, TypeError, ValueError):
+    payload = raw["response"]
+    if not isinstance(payload, dict) or set(payload) != {"x", "y"}:
+        return None, None
+    x, y = payload["x"], payload["y"]
+    if (
+        isinstance(x, bool)
+        or isinstance(y, bool)
+        or not isinstance(x, int)
+        or not isinstance(y, int)
+    ):
         return None, None
     return x, y
 
@@ -54,8 +54,8 @@ def validate_response_payload(payload: Any) -> Any:
     """校验棋类 ``response`` 负载形状，不判坐标对应的游戏内合法性。"""
     if not isinstance(payload, dict):
         raise ValueError("response 必须是包含 x/y 的对象")
-    if "x" not in payload or "y" not in payload:
-        raise ValueError("response 缺少 x/y 坐标")
+    if set(payload) != {"x", "y"}:
+        raise ValueError("response 必须且仅能包含 x/y 坐标")
     x, y = payload["x"], payload["y"]
     if (
         isinstance(x, bool)

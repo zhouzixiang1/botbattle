@@ -6,7 +6,6 @@ import pytest
 
 from bzplat.backend.games.holdem.holdem_judge import Card, Suit
 from bzplat.backend.games.holdem.protocol import (
-    PROTOCOL_VERSION,
     RESP_ALLIN,
     RESP_CALL_CHECK,
     RESP_FOLD,
@@ -103,13 +102,11 @@ def test_build_act_request_botzone_fields():
     assert req["history"][0]["action_type"] == "raise"
 
 
-def test_parse_response_bare_int():
-    """Botzone response 是裸整数。"""
-    assert parse_response(RESP_FOLD) == ("fold", None)
-    assert parse_response(RESP_ALLIN) == ("allin", None)
-    assert parse_response(RESP_CALL_CHECK) == ("call", None)
-    assert parse_response(150) == ("raise", 150)  # raise delta
-    assert parse_response(1) == ("raise", 1)
+@pytest.mark.parametrize("raw", [RESP_FOLD, RESP_ALLIN, RESP_CALL_CHECK, 150, 1])
+def test_parse_response_rejects_bare_int(raw):
+    """动作 payload 是整数，但通信输入必须有唯一 response 信封。"""
+    with pytest.raises(ValueError):
+        parse_response(raw)
 
 
 def test_parse_response_envelope():
@@ -120,14 +117,14 @@ def test_parse_response_envelope():
     assert parse_response({"response": 250}) == ("raise", 250)
 
 
-def test_parse_response_string():
-    assert parse_response("-1") == ("fold", None)
-    assert parse_response("150") == ("raise", 150)
-    assert parse_response('{"response":-2}') == ("allin", None)
+@pytest.mark.parametrize("raw", ["-1", "150", '{"response":-2}'])
+def test_parse_response_rejects_string_values(raw):
+    with pytest.raises(ValueError):
+        parse_response(raw)
 
 
-def test_parse_response_legacy_format_rejected():
-    """旧 {a, x} 格式已废弃（全面对齐 Botzone 标准协议）——拒绝并报错。"""
+def test_parse_response_rejects_non_response_fields():
+    """唯一信封之外的字段组合一律拒绝。"""
     with pytest.raises(ValueError):
         parse_response({"a": "f"})
     with pytest.raises(ValueError):
@@ -156,10 +153,6 @@ def test_action_to_history_int():
         action_to_history_int("raise", 0)
     with pytest.raises(ValueError):
         action_to_history_int("raise", -5)
-
-
-def test_protocol_version():
-    assert PROTOCOL_VERSION == 2
 
 
 def test_protocol_request_schema_matches_engine():
@@ -202,11 +195,11 @@ def test_fail_response_parseable_per_game():
     from bzplat.backend.games.holdem.protocol import parse_response
     from bzplat.backend.games._board_protocol import parse_xy
 
-    # holdem: fail_response 返回值能喂 parse_response
+    # fail_response 是可信的人类超时 payload；runner 统一包 canonical envelope。
     h = registry.get("holdem").protocol.fail_response()
-    parse_response(h)  # 不抛
+    parse_response({"response": h})  # 不抛
 
     # gomoku/pencil: fail_response 返回值能喂 parse_xy
     for gid in ("gomoku", "pencil"):
         g = registry.get(gid).protocol.fail_response()
-        parse_xy(g)  # 不抛
+        assert parse_xy({"response": g}) == (-99, -99)

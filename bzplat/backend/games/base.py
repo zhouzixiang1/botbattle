@@ -172,9 +172,9 @@ class GameSpec:
     # 座位数（2=双人，当前全平台双人；预留 N 人扩展钩子，通用层已声明但 DB/评分仍按 2 人）。
     num_seats: int = 2
 
-    # Bot 预检（上传时试跑：构造首个请求，验证响应合法）——拒绝明显不合格的 bot。
+    # Bot 预检（上传时按所选 runtime_mode 试跑 canonical 首回合）——拒绝不合格的 bot。
     # 返回 (ok: bool, detail: str)。ok=False 时上传被拒（detail 给前端展示）。
-    preflight_check: Callable[[str, Any], Awaitable[tuple[bool, str]]] | None = None
+    preflight_check: Callable[..., Awaitable[tuple[bool, str]]] | None = None
     # P4 duplicate：构造多 leg 对局计划（默认单 leg；holdem 覆写返回 2 leg 同 deal_sequence）。
     # 返回 list[LegSpec]，每 leg 含 seat_swap（是否对调座位）+ 共享 params（deal_sequence 等）。
     build_match_plan: Callable[[int, dict[str, Any]], list[dict[str, Any]]] | None = None

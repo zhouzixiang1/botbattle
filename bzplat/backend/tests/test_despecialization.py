@@ -73,8 +73,6 @@ def test_validate_match_config_rejects_nonempty_config():
         with pytest.raises(ValueError, match="游戏规则已固定"):
             validate_match_config(config, game_id)
     assert validate_match_config({}, "holdem") == {}
-
-
 # ── DEFAULT_MATCH_CONFIG 从注册表派生 ──────────────────────────
 def test_default_match_config_derived_from_registry():
     from bzplat.backend.contests.templates import DEFAULT_MATCH_CONFIG, default_match_config

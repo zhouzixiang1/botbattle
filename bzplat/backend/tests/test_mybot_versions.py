@@ -195,6 +195,38 @@ def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkey
     asyncio.run(exercise())
 
 
+def test_upload_preflight_uses_pending_version_runtime_mode(tmp_path, monkeypatch):
+    """预检必须验证待发布版本的选择，不能沿用当前版本或隐式默认。"""
+    app = _app(tmp_path)
+    _, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    raw = elf.read_bytes()
+    bot = manager.create_from_upload(
+        owner["id"],
+        "mode_preflight",
+        raw,
+        runtime_mode="traditional",
+    )
+    captured: dict = {}
+
+    def capture(*_args, runtime_mode, **_kwargs):
+        captured["runtime_mode"] = runtime_mode
+        return True, "ok"
+
+    monkeypatch.setattr(manager, "_run_preflight", capture)
+    manager.upload_version(
+        bot["id"],
+        owner["id"],
+        raw + b"\nlongrunning-version",
+        runtime_mode="longrunning",
+        binary_runner=object(),
+    )
+    assert captured == {"runtime_mode": "longrunning"}
+
+
 def test_api_list_versions_and_rollback(tmp_path):
     app = _app(tmp_path)
     store, u = _setup(app)

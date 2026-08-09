@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from bzplat.backend.games.base import GameSpec, JudgeParamSpec, ProtocolSpec
+from bzplat.backend.games.base import GameSpec, ProtocolSpec
+from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.pencil.engine import DEFAULT_N, PencilSession
 from bzplat.backend.games.pencil import protocol as proto
 from bzplat.backend.games.pencil import tiers as _tiers_mod
@@ -37,9 +38,10 @@ _PROTOCOL = ProtocolSpec(
 
 
 def _validate_match_params(cfg: dict[str, Any]) -> dict[str, Any]:
-    # 点阵边长已钉死 DEFAULT_N（6），不再接受配置；忽略任何传入字段。
     if not isinstance(cfg, dict):
         raise ValueError("match_config 必须是对象")
+    if cfg:
+        raise ValueError("点格棋规则固定，match_config 不允许包含字段")
     return {}
 
 
@@ -56,37 +58,38 @@ def _eta_for_match(match_config: dict[str, Any]) -> int:
     return 60
 
 
-async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
-    """Bot 预检：发点格棋首手请求（红方 x=y=-1 pass=0），验证响应含合法坐标。"""
-    from bzplat.backend.games._board_protocol import build_pencil_request, dumps_request, loads_response, parse_xy
+async def _preflight_check(
+    binary_path: str,
+    binary_runner: Any,
+    *,
+    runtime_mode: str,
+    timeout: float = 8.0,
+) -> tuple[bool, str]:
+    """按所选模式发送 canonical 首回合并验证点格棋坐标。"""
+    from bzplat.backend.games._board_protocol import build_pencil_request
     from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
     import asyncio
 
     req = build_pencil_request(x=-1, y=-1, pass_=0, me=0, scores=[0, 0])
-    line = dumps_request(req)
     try:
-        sid = await binary_runner.start_session(binary_path)
-    except PlatformRunnerError:
-        raise
-    except Exception as e:
-        return False, f"启动失败: {e}"
-    try:
-        resp_line = await binary_runner.send(sid, line, timeout=timeout)
-        resp = loads_response(resp_line) if isinstance(resp_line, str) else resp_line
-        x, y = parse_xy(resp)
-        if x is None or y is None:
-            return False, f"响应缺 x/y 坐标: {resp_line}"
+        payload = await botzone.preflight_exchange(
+            binary_path,
+            binary_runner,
+            req,
+            proto.validate_response_payload,
+            runtime_mode=runtime_mode,
+            timeout=timeout,
+        )
+        x, y = payload["x"], payload["y"]
         return True, f"响应合法: ({x},{y})"
     except PlatformRunnerError:
         raise
-    except BotCrashedError:
-        return False, "Bot 启动后立即退出（stdout EOF）——不符合长驻协议"
+    except BotCrashedError as exc:
+        return False, f"Bot 进程异常退出: {exc}"
     except asyncio.TimeoutError:
         return False, f"Bot {timeout}s 内未响应"
     except Exception as e:
         return False, f"响应不合法: {e}"
-    finally:
-        await binary_runner.stop_session(sid)
 
 
 SPEC = GameSpec(
@@ -99,7 +102,7 @@ SPEC = GameSpec(
     rounds_per_match=_rounds_per_match,
     normalize_earnings=_normalize_earnings,
     eta_for_match=_eta_for_match,
-    judge_params=[],  # n_dots 走 match 列，非全局 setting
+    judge_params=[],  # 点阵边长固定，不提供运行时覆盖参数
     tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",

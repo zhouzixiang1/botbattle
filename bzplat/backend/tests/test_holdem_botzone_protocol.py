@@ -53,18 +53,16 @@ def test_card_roundtrip_all_52():
 
 def test_raise_delta_conversion():
     """Bot 返回 raise delta；引擎转 raise_to = street_bet + delta。"""
-    # 裸整数 150（raise delta）
-    action, delta = proto.parse_response(150)
-    assert action == "raise" and delta == 150
-    # 信封
     action, delta = proto.parse_response({"response": 150})
     assert action == "raise" and delta == 150
+    with pytest.raises(ValueError):
+        proto.parse_response(150)
 
 
 def test_response_codes():
-    assert proto.parse_response(-1)[0] == "fold"
-    assert proto.parse_response(-2)[0] == "allin"
-    assert proto.parse_response(0)[0] == "call"
+    assert proto.parse_response({"response": -1})[0] == "fold"
+    assert proto.parse_response({"response": -2})[0] == "allin"
+    assert proto.parse_response({"response": 0})[0] == "call"
 
 
 def test_action_to_history_int_raise_delta():

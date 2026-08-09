@@ -142,7 +142,7 @@ def test_run_session_gomoku_via_registry():
             x, y = black[bi]; bi += 1
         else:
             x, y = white[wi]; wi += 1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     result = asyncio.run(run_session("gomoku", decide))
     assert result.winner == 0 and result.reason == "five"

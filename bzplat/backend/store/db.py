@@ -22,14 +22,20 @@ from .schema import (
     CONTEST_PUBLISHED,
     CONTEST_REST,
     CONTEST_RUNNING,
+    DEFAULT_RUNTIME_MODE,
     MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
     SCHEMA,
     STATUS_ABORTED,
     STATUS_COMPLETED,
     STATUS_PENDING,
     STATUS_RUNNING,
+    SUPPORTED_BINARY_ARCH,
+    SUPPORTED_BINARY_FORMAT,
+    SUPPORTED_BINARY_OS,
     TYPE_CONTEST,
     TYPE_HUMAN,
+    VALID_RUNTIME_MODES,
+    require_supported_binary_metadata,
 )
 from .validation import validate_contest_times
 
@@ -659,7 +665,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "bots" in tables:
         _add_col(conn, "bots", "game_id", "TEXT NOT NULL DEFAULT 'holdem'")
         # Botzone 运行模式（上传时标明，runner 据此选传输路径）
-        _add_col(conn, "bots", "runtime_mode", "TEXT NOT NULL DEFAULT 'longrunning'")
+        _add_col(
+            conn,
+            "bots",
+            "runtime_mode",
+            f"TEXT NOT NULL DEFAULT '{DEFAULT_RUNTIME_MODE}'",
+        )
         # 下线私有 bot 功能（全局只有「公开」一种状态）：旧库的 is_public 列先转公开
         # 再 DROP COLUMN（保数据不丢）。幂等：列已不存在则跳过。
         if "is_public" in _table_cols(conn, "bots"):
@@ -668,7 +679,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     # bot_versions 加 runtime_mode（每版本独立标明，回滚时恢复该版本的运行模式）
     if "bot_versions" in tables:
-        _add_col(conn, "bot_versions", "runtime_mode", "TEXT NOT NULL DEFAULT 'longrunning'")
+        _add_col(
+            conn,
+            "bot_versions",
+            "runtime_mode",
+            f"TEXT NOT NULL DEFAULT '{DEFAULT_RUNTIME_MODE}'",
+        )
 
     if "users" in tables:
         _add_col(conn, "users", "bio", "TEXT NOT NULL DEFAULT ''")
@@ -1759,14 +1775,14 @@ class Store:
         name = fields["name"]
         display_name = fields.get("display_name") or name
         description = fields.get("description", "")
-        os_ = fields.get("os", "")
-        arch = fields.get("arch", "")
-        fmt = fields.get("format", "unknown")
+        os_ = fields.get("os", SUPPORTED_BINARY_OS)
+        arch = fields.get("arch", SUPPORTED_BINARY_ARCH)
+        fmt = fields.get("format", SUPPORTED_BINARY_FORMAT)
+        require_supported_binary_metadata(fmt, os_, arch)
         binary_path = fields.get("binary_path", "")
         is_builtin = 1 if fields.get("is_builtin") else 0
         is_active = 1 if fields.get("is_active", True) else 0
         game_id = fields.get("game_id") or "holdem"
-        from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
         runtime_mode = fields.get("runtime_mode") or DEFAULT_RUNTIME_MODE
         if runtime_mode not in VALID_RUNTIME_MODES:
             raise ValueError(f"非法 runtime_mode: {runtime_mode}")
@@ -1975,13 +1991,13 @@ class Store:
         upload_note: str = "",
         checksum: str = "",
         size_bytes: int = 0,
-        os: str = "",
-        arch: str = "",
-        format: str = "unknown",
+        os: str = SUPPORTED_BINARY_OS,
+        arch: str = SUPPORTED_BINARY_ARCH,
+        format: str = SUPPORTED_BINARY_FORMAT,
         runtime_mode: str | None = None,
         version: int | None = None,
     ) -> dict:
-        from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
+        require_supported_binary_metadata(format, os, arch)
         if runtime_mode is None:
             # 沿用 bot 当前的运行模式（回滚/补传时不强制改模式）
             runtime_mode = self.get_bot(bot_id) or {}

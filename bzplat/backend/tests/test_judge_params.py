@@ -48,7 +48,6 @@ def test_legacy_judge_settings_are_not_read_by_orchestrator(store):
                 rounds = []
                 winner = None
                 events = []
-
             return Result()
 
     orchestrator = MatchOrchestrator(store, runner=FixedRunner(), max_concurrent=1)
@@ -72,7 +71,7 @@ def _run_callables(game_id, **kw):
 
     async def make_decide(board_state):
         async def decide(player_idx, request):
-            return board_state[player_idx].play(request)
+            return {"response": board_state[player_idx].play(request)}
         return decide
 
     # gomoku: 每方维护本地棋盘，随机/顺序下空点
@@ -94,7 +93,8 @@ def _run_callables(game_id, **kw):
         sa, sb = GState(), GState()
 
         async def decide(player_idx, request):
-            return sa.play(request) if player_idx == 0 else sb.play(request)
+            payload = sa.play(request) if player_idx == 0 else sb.play(request)
+            return {"response": payload}
 
         return asyncio.run(run_session(game_id, decide, rng=rng, **kw))
 
@@ -221,6 +221,7 @@ def test_public_judges_is_the_only_rules_listing(tmp_path):
     assert gids == ["holdem", "gomoku", "pencil"]
     for g in data["games"]:
         assert g["code_path"].endswith(".py")
+        assert "params" not in g
     assert client.get("/api/admin/judges").status_code == 404
     assert client.patch(
         "/api/admin/judges/params",

@@ -42,6 +42,7 @@ from bzplat.backend.store.schema import (
     STATUS_COMPLETED,
     STATUS_PENDING,
     TYPE_CONTEST,
+    require_supported_binary_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -1084,6 +1085,17 @@ class ContestManager:
             if bid is None:
                 continue
             v = self.store.get_current_bot_version(bid)
+            binary = v or self.store.get_bot(bid)
+            if binary is None:
+                raise ValueError(f"bot {bid} 不存在")
+            try:
+                require_supported_binary_metadata(
+                    str(binary.get("format") or ""),
+                    str(binary.get("os") or ""),
+                    str(binary.get("arch") or ""),
+                )
+            except ValueError as exc:
+                raise ValueError(f"bot {bid} unsupported_binary：{exc}") from exc
             if v:
                 out[key] = v["id"]
         return out

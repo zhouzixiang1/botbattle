@@ -4,6 +4,14 @@
 """
 from __future__ import annotations
 
+# ── Botzone 运行模式（上传时标明，runner 据此选传输路径）──────────────────
+# traditional: 每回合发完整历史信封；longrunning: 首回合完整 + 精确握手后单 request。
+# 定义在 SCHEMA 之前，使 Python 默认值、fresh SQL schema 与迁移共同引用同一常量。
+RUNTIME_TRADITIONAL = "traditional"
+RUNTIME_LONGRUNNING = "longrunning"
+VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
+DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,19 +43,21 @@ CREATE TABLE IF NOT EXISTS bots (
     name            TEXT    NOT NULL,
     display_name    TEXT    NOT NULL DEFAULT '',
     description     TEXT    NOT NULL DEFAULT '',
-    os              TEXT    NOT NULL DEFAULT '',
-    arch            TEXT    NOT NULL DEFAULT '',
-    format          TEXT    NOT NULL DEFAULT 'unknown',
+    os              TEXT    NOT NULL DEFAULT 'linux',
+    arch            TEXT    NOT NULL DEFAULT 'amd64',
+    format          TEXT    NOT NULL DEFAULT 'elf',
     binary_path     TEXT    NOT NULL DEFAULT '',
     current_version INTEGER NOT NULL DEFAULT 0,
     is_active       INTEGER NOT NULL DEFAULT 1,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
     game_id         TEXT    NOT NULL DEFAULT 'holdem',
-    runtime_mode    TEXT    NOT NULL DEFAULT 'longrunning',
+    runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
     UNIQUE(owner_id, name),
-    CONSTRAINT chk_format CHECK (format IN ('elf', 'pe', 'macho', 'unknown')),
+    CONSTRAINT chk_bot_os CHECK (os = 'linux'),
+    CONSTRAINT chk_bot_arch CHECK (arch = 'amd64'),
+    CONSTRAINT chk_format CHECK (format = 'elf'),
     CONSTRAINT chk_runtime CHECK (runtime_mode IN ('traditional', 'longrunning'))
 );
 
@@ -59,12 +69,15 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     upload_note     TEXT    NOT NULL DEFAULT '',
     checksum        TEXT    NOT NULL DEFAULT '',
     size_bytes      INTEGER NOT NULL DEFAULT 0,
-    os              TEXT    NOT NULL DEFAULT '',
-    arch            TEXT    NOT NULL DEFAULT '',
-    format          TEXT    NOT NULL DEFAULT 'unknown',
-    runtime_mode    TEXT    NOT NULL DEFAULT 'longrunning',
+    os              TEXT    NOT NULL DEFAULT 'linux',
+    arch            TEXT    NOT NULL DEFAULT 'amd64',
+    format          TEXT    NOT NULL DEFAULT 'elf',
+    runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
     uploaded_at     TEXT    NOT NULL,
-    UNIQUE(bot_id, version)
+    UNIQUE(bot_id, version),
+    CONSTRAINT chk_bot_version_os CHECK (os = 'linux'),
+    CONSTRAINT chk_bot_version_arch CHECK (arch = 'amd64'),
+    CONSTRAINT chk_bot_version_format CHECK (format = 'elf')
 );
 
 CREATE TABLE IF NOT EXISTS contests (
@@ -439,6 +452,11 @@ CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(
 CREATE INDEX IF NOT EXISTS idx_contest_templates_game ON contest_templates(game_id);
 """
 
+# SQLite identifiers cannot bind a DEFAULT value as a query parameter. Replacing
+# this private marker keeps the SQL text readable while preventing a second,
+# drifting runtime-mode default literal.
+SCHEMA = SCHEMA.replace("__DEFAULT_RUNTIME_MODE__", DEFAULT_RUNTIME_MODE)
+
 # 角色
 ROLE_USER = "user"
 ROLE_ORGANIZER = "organizer"
@@ -482,13 +500,6 @@ REGISTERED_ENGINES = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fal
 
 # 合法 game_id（与 REGISTERED_ENGINES 镜像，守护测试白名单）
 VALID_GAME_IDS = frozenset({"holdem", "gomoku", "pencil"})  # allow-game-fallback
-
-# ── Botzone 运行模式（上传时标明，runner 据此选传输路径）──────────────────
-# traditional: 每回合发完整历史信封（Bot 自重放）；longrunning: 首回合完整 + 握手后单 request。
-RUNTIME_TRADITIONAL = "traditional"
-RUNTIME_LONGRUNNING = "longrunning"
-VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
-DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL  # 平台默认传统（每回合完整历史，便于调试）
 
 # ── 经验/等级体系（对标 Botzone 的 level + 活跃度 gating）───────────────
 # 经验奖励：各类活动获得的经验
@@ -552,11 +563,23 @@ SETTING_AUTO_MATCH_PLACEMENT_GAMES = "auto_match_placement_games"  # 新 bot 定
 SETTING_AUTO_MATCH_MAX_PER_ROUND = "auto_match_max_per_round"  # 每轮最多补几场
 SETTING_AUTO_MATCH_DAILY_CAP = "auto_match_daily_cap"      # 每日后台对局总量上限
 
-# 二进制格式
+# 唯一可执行目标。PE/Mach-O/脚本及其他 ELF 架构仅可作为历史元数据读取，
+# 不属于现行 schema 的可写值，也绝不能进入 runner。
 FMT_ELF = "elf"
-FMT_PE = "pe"
-FMT_MACHO = "macho"
-FMT_UNKNOWN = "unknown"
+SUPPORTED_BINARY_FORMAT = FMT_ELF
+SUPPORTED_BINARY_OS = "linux"
+SUPPORTED_BINARY_ARCH = "amd64"
+SUPPORTED_BINARY_ERROR = "仅支持 Linux x86_64 ELF64（小端）"
+
+
+def require_supported_binary_metadata(fmt: str, os_: str, arch: str) -> None:
+    """Reject new/executable references outside the platform's sole target."""
+    if (
+        fmt != SUPPORTED_BINARY_FORMAT
+        or os_ != SUPPORTED_BINARY_OS
+        or arch != SUPPORTED_BINARY_ARCH
+    ):
+        raise ValueError(SUPPORTED_BINARY_ERROR)
 
 # 邮件模板
 TPL_VERIFY_EMAIL = "verify_email"

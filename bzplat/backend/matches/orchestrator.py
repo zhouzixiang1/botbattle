@@ -31,6 +31,7 @@ from bzplat.backend.store.schema import (
     TYPE_HUMAN,
     TYPE_TABLE,
     VALID_GAME_IDS,
+    require_supported_binary_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -225,10 +226,27 @@ class MatchOrchestrator:
         API so a caller cannot execute another bot's private version by ID.
         """
         if requested_version_id is None:
-            return self.store.get_current_bot_version(bot_id)
-        version = self.store.get_bot_version(requested_version_id)
-        if not version or version.get("bot_id") != bot_id:
-            raise ValueError(f"{seat_label} 指定的版本不存在或不属于该 bot")
+            version = self.store.get_current_bot_version(bot_id)
+        else:
+            version = self.store.get_bot_version(requested_version_id)
+            if not version or version.get("bot_id") != bot_id:
+                raise ValueError(f"{seat_label} 指定的版本不存在或不属于该 bot")
+
+        # Historical rows remain readable, but no new match may snapshot a PE,
+        # Mach-O, script or non-amd64 ELF. Check the immutable version when one
+        # exists; pre-version rows use the bot mirror. This occurs before
+        # create_match, so challenge/human/contest dispatch fail without orphans.
+        binary = version or self.store.get_bot(bot_id)
+        if not binary:
+            raise ValueError(f"{seat_label} bot 不存在")
+        try:
+            require_supported_binary_metadata(
+                str(binary.get("format") or ""),
+                str(binary.get("os") or ""),
+                str(binary.get("arch") or ""),
+            )
+        except ValueError as exc:
+            raise ValueError(f"{seat_label} unsupported_binary：{exc}") from exc
         return version
 
     def _runtime_for_bot_version(

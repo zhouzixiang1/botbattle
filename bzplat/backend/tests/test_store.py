@@ -238,7 +238,7 @@ def test_bots_versions_ratings(tmp_path):
         checksum="abc",
         size_bytes=10,
         os="linux",
-        arch="x86_64",
+        arch="amd64",
         format="elf",
     )
     assert ver["version"] == 1

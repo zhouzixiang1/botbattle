@@ -114,10 +114,10 @@ def test_run_session_gomoku_via_registry():
         if player == 0:
             x, y = black_moves[bi]
             bi += 1
-            return {"x": x, "y": y}
+            return {"response": {"x": x, "y": y}}
         x, y = white_moves[wi]
         wi += 1
-        return {"x": x, "y": y}
+        return {"response": {"x": x, "y": y}}
 
     result = asyncio.run(run_session("gomoku", decide))
     assert result.winner == 0
@@ -141,14 +141,13 @@ def test_protocol_fail_response_per_game():
 
 
 def test_protocol_dumps_loads_roundtrip():
-    req = {"v": 1, "t": "mv", "x": 5, "y": 6}
-    line = dumps("gomoku", req)
+    response = {"response": {"x": 5, "y": 6}}
+    line = json.dumps(response)
     back = loads("gomoku", line)
-    assert back["x"] == 5 and back["y"] == 6
+    assert back == response
     # holdem 协议
-    hreq = {"a": "c"}
-    hline = dumps("holdem", hreq)
-    assert loads("holdem", hline) == {"a": "c"}
+    holdem_response = {"response": 0}
+    assert loads("holdem", json.dumps(holdem_response)) == holdem_response
 
 
 def test_protocol_loads_board_rejects_garbage():
@@ -251,6 +250,14 @@ def test_judge_games_derived():
             "protocol.py",
             "result.py",
         ]
+    # 所有游戏规则均固定，不再提供第二套 admin 覆盖入口。
+    assert all(game["params"] == [] for game in games)
+
+
+def test_judge_param_table():
+    defaults, bounds = registry.judge_param_table()
+    assert defaults == {}
+    assert bounds == {}
 
 
 # ── preflight_check（bot 上传时试跑验证）──────────────────────
@@ -274,8 +281,15 @@ def test_preflight_sample_bots_pass():
         ("pencil", "samples/pencilbot_linux_amd64"),
     ]
     for gid, path in samples:
-        ok, detail = asyncio.run(preflight_bot(gid, path, runner))
-        assert ok, f"{gid} sample 应通过预检，实际: {detail}"
+        ok, detail = asyncio.run(
+            preflight_bot(
+                gid,
+                path,
+                runner,
+                runtime_mode="traditional",
+            )
+        )
+        assert ok, f"{gid}/traditional sample 预检失败: {detail}"
 
 
 # ── GameSpec 接口诚实化（PR2：声明=使用，无死字段）──────────────

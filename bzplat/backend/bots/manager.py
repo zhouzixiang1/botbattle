@@ -11,7 +11,11 @@ from pathlib import Path
 from threading import Lock, RLock
 from typing import Iterator
 
-from ..bots.classify import BinaryRejectError, classify_binary
+from ..bots.classify import (
+    BinaryRejectError,
+    classify_binary,
+    require_supported_binary,
+)
 from ..store import Store
 
 logger = logging.getLogger(__name__)
@@ -26,6 +30,14 @@ class BotError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _classify_upload(raw: bytes):
+    """Classify once at the upload boundary and expose a stable API error."""
+    try:
+        return require_supported_binary(classify_binary(raw))
+    except BinaryRejectError as exc:
+        raise BotError("unsupported_binary", str(exc)) from exc
 
 
 class BotManager:
@@ -77,11 +89,7 @@ class BotManager:
             raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
         if not raw or len(raw) > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
-        info = classify_binary(raw)
-        if info.format == "macho" or not info.runnable:
-            raise BotError(
-                "unsupported_binary", info.reject_reason or "不支持的二进制"
-            )
+        info = _classify_upload(raw)
         if self.store.get_bot_by_owner_name(owner_id, name):
             raise BotError("name_taken", "同名 bot 已存在")
         bot = self.store.create_bot(
@@ -126,11 +134,7 @@ class BotManager:
             raise BotError("not_found", "bot 不存在")
         if not raw or len(raw) > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
-        info = classify_binary(raw)
-        if info.format == "macho" or not info.runnable:
-            raise BotError(
-                "unsupported_binary", info.reject_reason or "不支持的二进制"
-            )
+        info = _classify_upload(raw)
         # 分配版本号、原子落盘、DB 写入和失败回滚必须属于同一 per-bot 临界区。
         # 否则并发上传会写同一个 vN，或预检失败误删另一请求的新版本。
         with self._bot_version_lock(bot_id):
@@ -161,8 +165,9 @@ class BotManager:
         binary_runner,
         *,
         binary_path: str | None = None,
+        runtime_mode: str,
     ) -> tuple[bool, str]:
-        """试跑 bot 验证响应合法（经该游戏的 spec.preflight_check）。"""
+        """按待发布版本所选模式试跑 canonical 首回合协议。"""
         import asyncio
         from bzplat.backend.games import preflight_bot
         from bzplat.backend.runtime.binary_runner import PlatformRunnerError
@@ -170,14 +175,26 @@ class BotManager:
         bot = self.store.get_bot(bot_id)
         path = binary_path or (bot or {}).get("binary_path")
         if not bot or not path:
-            return True, "无二进制路径，跳过"
+            return False, "预检失败：二进制路径缺失"
+        try:
+            with Path(path).open("rb") as binary:
+                require_supported_binary(classify_binary(binary.read(4096)))
+        except (OSError, BinaryRejectError) as exc:
+            return False, f"预检失败：{exc}"
         try:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
                 # Normal API path: BotManager itself runs via asyncio.to_thread,
                 # so this worker owns a fresh event loop and a fresh BinaryRunner.
-                return asyncio.run(preflight_bot(game_id, path, binary_runner))
+                return asyncio.run(
+                    preflight_bot(
+                        game_id,
+                        path,
+                        binary_runner,
+                        runtime_mode=runtime_mode,
+                    )
+                )
             else:
                 # Defensive compatibility for direct synchronous calls made from
                 # an already-running loop: isolate the nested asyncio.run in a worker.
@@ -185,7 +202,12 @@ class BotManager:
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     return pool.submit(
                         lambda: asyncio.run(
-                            preflight_bot(game_id, path, binary_runner)
+                            preflight_bot(
+                                game_id,
+                                path,
+                                binary_runner,
+                                runtime_mode=runtime_mode,
+                            )
                         )
                     ).result()
         except PlatformRunnerError:
@@ -201,11 +223,15 @@ class BotManager:
         info,
         *,
         upload_note: str,
-        runtime_mode: str | None = None,
+        runtime_mode: str,
         game_id: str | None = None,
         binary_runner=None,
     ) -> dict:
         with self._bot_version_lock(bot_id):
+            try:
+                require_supported_binary(info)
+            except BinaryRejectError as exc:
+                raise BotError("unsupported_binary", str(exc)) from exc
             checksum = hashlib.sha256(raw).hexdigest()
             # 回滚只切换当前激活版本，不删除较新的历史版本。新上传必须接在
             # 历史最大版本之后；若用 current_version + 1，v2 -> 回滚 v1 后
@@ -221,9 +247,8 @@ class BotManager:
                 shutil.rmtree(dest_dir)
 
             temp_dir = Path(tempfile.mkdtemp(prefix=f".v{version}-", dir=bot_dir))
-            ext = ".exe" if info.format == "pe" else ".bin"
-            temp_dest = temp_dir / f"bot{ext}"
-            dest = dest_dir / f"bot{ext}"
+            temp_dest = temp_dir / "bot.bin"
+            dest = dest_dir / "bot.bin"
             promoted = False
             try:
                 temp_dest.write_bytes(raw)
@@ -237,6 +262,7 @@ class BotManager:
                         game_id or (self.store.get_bot(bot_id) or {}).get("game_id"),
                         binary_runner,
                         binary_path=str(temp_dest),
+                        runtime_mode=runtime_mode,
                     )
                     if not ok:
                         raise BotError(
@@ -267,14 +293,45 @@ class BotManager:
             return self.store.get_bot(bot_id)
 
     def activate_version(self, bot_id: int, owner_id: int, version: int) -> dict:
-        """Activate an existing version while excluding upload/preflight rollback."""
+        """Activate a current-format version while leaving legacy rows read-only."""
         with self._bot_version_lock(bot_id):
             bot = self.store.get_bot(bot_id)
             if not bot:
                 raise BotError("not_found", "bot 不存在")
             if bot["owner_id"] != owner_id:
                 raise BotError("forbidden", "无权修改他人的 Bot")
+            target = next(
+                (
+                    row
+                    for row in self.store.list_bot_versions(bot_id)
+                    if int(row["version"]) == int(version)
+                ),
+                None,
+            )
+            if target is None:
+                raise BotError("version_not_found", f"版本 {version} 不存在")
+            from bzplat.backend.store.schema import (
+                SUPPORTED_BINARY_ARCH,
+                SUPPORTED_BINARY_ERROR,
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+            )
+            if (
+                target.get("format") != SUPPORTED_BINARY_FORMAT
+                or target.get("os") != SUPPORTED_BINARY_OS
+                or target.get("arch") != SUPPORTED_BINARY_ARCH
+            ):
+                raise BotError("unsupported_binary", SUPPORTED_BINARY_ERROR)
+            try:
+                with Path(target["binary_path"]).open("rb") as binary:
+                    require_supported_binary(classify_binary(binary.read(4096)))
+            except BinaryRejectError as exc:
+                raise BotError("unsupported_binary", str(exc)) from exc
+            except OSError as exc:
+                raise BotError("version_unavailable", "版本二进制文件不可用") from exc
             result = self.store.set_current_version(bot_id, version)
+            # Per-bot lock makes disappearance impossible unless the DB itself was
+            # externally modified; still fail closed rather than returning None.
             if result is None:
                 raise BotError("version_not_found", f"版本 {version} 不存在")
             return result
