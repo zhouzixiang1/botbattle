@@ -148,6 +148,12 @@ for (const viewport of VIEWPORTS) {
       await expect(main.getByRole('heading', { name: route.heading, exact: true })).toBeVisible()
       await expect(main).toContainText(route.evidence)
       await expect(page.locator('body')).not.toContainText('Application error')
+      if (route.path === '/') {
+        await expect(main.getByRole('columnheader', { name: '进度', exact: true })).toHaveCount(0)
+        if (viewport.name === 'mobile') {
+          await expect(main.locator('table')).toBeHidden()
+        }
+      }
       const overflow = await page.evaluate(
         () => document.documentElement.scrollWidth - window.innerWidth,
       )
@@ -737,7 +743,7 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await expect(page.getByText('canonical_a @alpha', { exact: true }).first()).toBeVisible()
   // The viewer intentionally parks on the event before terminal. Step once to
   // prove the game reducer consumes canonical `deltas`, not retired aliases.
-  await page.getByRole('button', { name: '下一步', exact: true }).click()
+  await page.getByRole('button', { name: '下一个事件', exact: true }).click()
   await expect(page.getByText(/累计筹码/)).toContainText('座1 +37')
   await expect(page.getByText(/累计筹码/)).toContainText('座2 -37')
 
@@ -866,7 +872,131 @@ test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns
   })
   await page.reload()
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
-  await expect(page.locator('main')).toContainText('原因：technical_loss')
+  await expect(page.locator('main')).toContainText('Bot 技术判负')
+  await monitor.expectClean()
+})
+
+test('MatchViewer presents a zero-hand protocol loss as a terminal incident', async ({ page }) => {
+  const matchId = 'mock-zero-hand-protocol-loss'
+  const events = [
+    { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+    { type: 'deal_hole', hand: 0, holes: [['3d', 'Th'], ['Qs', '4c']] },
+    {
+      type: 'technical_incident', seat: 0, code: 'missing_response',
+      error: 'Bot 响应缺少必填 response 字段', reason: 'protocol_error', turn: 1,
+    },
+    { type: 'match_end', winner: 1, reason: 'protocol_error', deltas: [-1, 1] },
+  ]
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'holdem',
+          status: 'completed',
+          match_type: 'challenge',
+          winner: 1,
+          reason: 'protocol_error',
+          technical_loss: 1,
+          bot_a_id: 3,
+          bot_b_id: 2,
+          bot_a: { name: 'admin', owner_name: 'zzx' },
+          bot_b: { name: 'zxx02', owner_name: 'zhouzixiang' },
+          result: {
+            hands_played: 0,
+            deltas: [-1, 1],
+            technical_incidents_by_seat: { 0: 1, 1: 0 },
+            technical_incident_samples: [{
+              seat: 0, code: 'missing_response',
+              error: 'Bot 响应缺少必填 response 字段', reason: 'protocol_error', turn: 1,
+            }],
+          },
+        },
+        replay: { events_json: JSON.stringify(events) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}' })
+  })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  const incident = page.getByRole('alert').filter({ hasText: 'Bot 技术判负' })
+  await expect(incident).toContainText('admin @zzx（座位 1）')
+  await expect(incident).toContainText('zxx02 @zhouzixiang（座位 2）获胜')
+  await expect(incident).toContainText('missing_response')
+  await expect(incident).toContainText('第 1 次决策')
+  await expect(incident).toContainText('Bot 响应缺少必填 response 字段')
+  await expect(page.locator('main')).not.toContainText('落后')
+  await expect(page.getByRole('button', { name: '播放', exact: true })).toHaveCount(0)
+  await expect(page.getByText('手导航（点击跳转）', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('对局结束 · 协议错误', { exact: true })).toBeVisible()
+  const canvasBox = await page.locator('canvas').boundingBox()
+  expect(canvasBox).not.toBeNull()
+  expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+  expect(overflow).toBeLessThanOrEqual(1)
+  await expect(page.getByText('admin', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('zxx02', { exact: true }).first()).toBeVisible()
+  await monitor.expectClean()
+})
+
+test('MatchViewer keeps chess history playable after a mid-game technical loss', async ({ page }) => {
+  const matchId = 'mock-gomoku-midgame-protocol-loss'
+  const events = [
+    { type: 'match_start', game_id: 'gomoku', size: 15 },
+    { type: 'move', player: 0, x: 7, y: 7, move_index: 1 },
+    { type: 'move', player: 1, x: 7, y: 8, move_index: 2 },
+    {
+      type: 'technical_incident', seat: 0, code: 'missing_response',
+      error: 'Bot 响应缺少必填 response 字段', reason: 'protocol_error', turn: 3,
+    },
+    { type: 'match_end', winner: 1, reason: 'protocol_error', deltas: [-1, 1] },
+  ]
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'gomoku',
+          status: 'completed',
+          match_type: 'challenge',
+          winner: 1,
+          reason: 'protocol_error',
+          technical_loss: 1,
+          bot_a: { name: 'black_bot', owner_name: 'alpha' },
+          bot_b: { name: 'white_bot', owner_name: 'beta' },
+          // 历史通用字段对棋类为 0；已走步数必须从 replay reducer 取。
+          result: { hands_played: 0, deltas: [-1, 1] },
+        },
+        replay: { events_json: JSON.stringify(events) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}' })
+  })
+
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  await expect(page.getByText('共 2 步', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '播放', exact: true })).toBeVisible()
+  await expect(page.locator('main')).toContainText('动作时序')
+  await expect(page.getByRole('alert')).toContainText('missing_response')
   await monitor.expectClean()
 })
 

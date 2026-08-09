@@ -334,7 +334,13 @@ class MatchOrchestrator:
     ) -> None:
         """Release all in-memory ownership for one human match."""
         self._tasks.pop(match_id, None)
-        self._sse.pop(match_id, None)
+        # Admin abort owns a short terminal-event handoff: cancellation reaches
+        # this cleanup before ``abort_match`` has committed/broadcast its error.
+        # Preserve subscribers during that window so the live human page receives
+        # the authoritative terminal event; ``_finish_match_task`` removes them
+        # immediately after the broadcast.  All other exits still clean eagerly.
+        if match_id not in self._admin_aborting:
+            self._sse.pop(match_id, None)
         self._human_turns = {
             key: value for key, value in self._human_turns.items()
             if key[0] != match_id
