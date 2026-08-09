@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download } from 'lucide-react'
 import PageStub from '@/components/PageStub'
@@ -175,6 +175,15 @@ export default function ContestDetail() {
   // 对阵视图：'tree'（对阵树）/ 'table'（一览表）。淘汰赛默认 tree，其余默认 table，可手动切换。
   const [pairingView, setPairingView] = useState<'tree' | 'table'>('tree')
   const [error, setError] = useState('')
+  const [busyAction, setBusyAction] = useState(false)
+  const actionLockRef = useRef(false)
+  const activeContestIdRef = useRef<string | undefined>(id)
+  const loadGenerationRef = useRef(0)
+  const [confirm, confirmDialog, cancelConfirm] = useConfirm()
+  // Params can change while this component instance is reused. Keep the authority
+  // ref current during render, before effects run, so an old async handler cannot
+  // act in the render-to-effect window of the next contest.
+  activeContestIdRef.current = id
   // 报名列表分页（115 人赛事场景：服务端分页，避免一次性渲染全部）
   const [entriesPage, setEntriesPage] = useState(1)
   const [entriesTotal, setEntriesTotal] = useState(0)
@@ -196,9 +205,13 @@ export default function ContestDetail() {
     [stages, contest?.template_id],
   )
 
-  const load = useCallback(() => {
-    if (!id) return
-    apiGet<{
+  const load = useCallback(async () => {
+    if (!id) return Promise.resolve()
+    const targetId = id
+    const targetEntriesPage = entriesPage
+    const generation = ++loadGenerationRef.current
+    try {
+      const d = await apiGet<{
       contest: Contest
       entries: Entry[]
       pairings: Pairing[]
@@ -208,33 +221,76 @@ export default function ContestDetail() {
       entries_per_page?: number
       entries_total?: number
       my_entry?: Entry | null
-    }>(`/api/contests/${id}?entries_page=${entriesPage}&entries_per_page=${entriesPerPage}`)
-      .then((d) => {
-        setContest(d.contest)
-        setEntries(d.entries || [])
-        setPairings(d.pairings || [])
-        setStandings(d.standings || [])
-        setEstimate(d.estimate || null)
-        setStageTab(d.contest.current_stage_idx ?? 0)
-        setEntriesTotal(d.entries_total ?? d.entries.length)
-        setMyEntry(d.my_entry ?? null)
-      })
-      .catch((e) => setError(errMsg(e)))
+      }>(`/api/contests/${targetId}?entries_page=${targetEntriesPage}&entries_per_page=${entriesPerPage}`)
+      if (
+        activeContestIdRef.current !== targetId ||
+        loadGenerationRef.current !== generation
+      ) return
+      setContest(d.contest)
+      setEntries(d.entries || [])
+      setPairings(d.pairings || [])
+      setStandings(d.standings || [])
+      setEstimate(d.estimate || null)
+      setStageTab(d.contest.current_stage_idx ?? 0)
+      setEntriesTotal(d.entries_total ?? d.entries.length)
+      setMyEntry(d.my_entry ?? null)
+      setError('')
+    } catch (e) {
+      if (
+        activeContestIdRef.current === targetId &&
+        loadGenerationRef.current === generation
+      ) setError(errMsg(e))
+    }
   }, [id, entriesPage, entriesPerPage])
+
+  // React Router reuses this component for /contests/A → /contests/B. Invalidate
+  // every A request/action before B can render, and clear A's privileged controls.
+  useEffect(() => {
+    // Resolve an outstanding confirmation as cancelled. Without this, useConfirm's
+    // state survives the reused route component and the old destructive dialog can
+    // reappear after the next contest finishes loading.
+    cancelConfirm()
+    activeContestIdRef.current = id
+    loadGenerationRef.current += 1
+    setContest(null)
+    setEntries([])
+    setPairings([])
+    setStandings([])
+    setMyEntry(null)
+    setEstimate(null)
+    setBots([])
+    setBotId('')
+    setError('')
+    setEntriesPage(1)
+    setStageTab(0)
+    actionLockRef.current = false
+    setBusyAction(false)
+    return () => {
+      if (activeContestIdRef.current === id) activeContestIdRef.current = undefined
+      loadGenerationRef.current += 1
+    }
+  }, [id, cancelConfirm])
 
   useEffect(() => {
     void load()
   }, [load])
 
   useEffect(() => {
+    let cancelled = false
+    const targetId = id
     if (isLoggedIn && contest?.game_id) {
       apiGet<{ bots: Array<{ id: number; name: string; display_name?: string }> }>(
         `/api/bots/mine?game_id=${contest.game_id}`,
       )
-        .then((d) => setBots(d.bots || []))
+        .then((d) => {
+          if (!cancelled && activeContestIdRef.current === targetId) {
+            setBots(d.bots || [])
+          }
+        })
         .catch(() => undefined)
     }
-  }, [isLoggedIn, contest?.game_id])
+    return () => { cancelled = true }
+  }, [id, isLoggedIn, contest?.game_id])
 
   const isOrg = !!user && !!contest && (user.role === 'admin' || user.id === contest.organizer_id)
   // myEntry 来自后端 my_entry 字段（不分页，休息换 Bot UI 依赖；entries 分页后前端 find 不可靠）
@@ -244,25 +300,39 @@ export default function ContestDetail() {
   )
 
   const act = async (path: string, body?: unknown, okMsg?: string) => {
+    const targetId = id
+    if (!targetId || activeContestIdRef.current !== targetId || actionLockRef.current) return
+    actionLockRef.current = true
+    setBusyAction(true)
     setError('')
     try {
       await apiJson(path, 'POST', body)
+      if (activeContestIdRef.current !== targetId) return
       await load()
       if (okMsg) toast.success(okMsg)
     } catch (e) {
-      setError(errMsg(e))
+      if (activeContestIdRef.current === targetId) setError(errMsg(e))
+    } finally {
+      if (activeContestIdRef.current === targetId) {
+        actionLockRef.current = false
+        setBusyAction(false)
+      }
     }
   }
 
-  const [confirm, confirmDialog] = useConfirm()
   const forceFinish = async () => {
+    const targetId = id
+    if (!targetId) return
     if (!await confirm({
       title: '强制结束赛事？',
-      desc: '这将立即结束赛事（未完成的对阵作废），并按当前结果计算正式名次。此操作不可撤销。',
+      desc: '后端将根据关联对局的实际终态执行恢复性收尾，并计算正式名次；若仍有运行中的对局，请求会被拒绝。此操作不可撤销。',
       danger: true,
       confirmText: '确认结束',
     })) return
-    await act(`/api/contests/${id}/finish`, undefined, '赛事已结束')
+    // Navigation may have reused this component while the non-blocking dialog was
+    // open. The old closure must neither POST its contest nor lock the new page.
+    if (activeContestIdRef.current !== targetId) return
+    await act(`/api/contests/${targetId}/finish`, undefined, '赛事已结束')
   }
 
   const stagePairings = pairings.filter((p) => (p.stage_idx ?? 0) === stageTab)
@@ -365,29 +435,43 @@ export default function ContestDetail() {
       {/* 操作区 */}
       <div className="mt-4 flex flex-wrap gap-2">
         {isOrg && contest.status === 'draft' && (
-          <Button onClick={() => void act(`/api/contests/${id}/open`, undefined, '已开放报名')} className="gap-1.5">
+          <Button disabled={busyAction} onClick={() => void act(`/api/contests/${id}/open`, undefined, '已开放报名')} className="gap-1.5">
             <DoorOpen className="size-4" />开放报名
           </Button>
         )}
         {isOrg && (contest.status === 'open' || contest.status === 'draft') && (
-          <Button variant="outline" onClick={() => void act(`/api/contests/${id}/publish`, undefined, '排期已发布')} className="gap-1.5">
+          <Button variant="outline" disabled={busyAction} onClick={() => void act(`/api/contests/${id}/publish`, undefined, '排期已发布')} className="gap-1.5">
             <ListOrdered className="size-4" />截止报名·出排期
           </Button>
         )}
         {isOrg && (contest.status === 'open' || contest.status === 'draft' || contest.status === 'published') && (
-          <Button variant="outline" onClick={() => void act(`/api/contests/${id}/start`, undefined, '比赛已开始')} className="gap-1.5">
+          <Button variant="outline" disabled={busyAction} onClick={() => void act(`/api/contests/${id}/start`, undefined, '比赛已开始')} className="gap-1.5">
             <Play className="size-4" />立即开赛
           </Button>
         )}
         {isOrg && contest.status === 'rest' && (
-          <Button onClick={() => void act(`/api/contests/${id}/resume`, undefined, '已进入下一阶段')}>结束休息 / 下一阶段</Button>
+          <Button disabled={busyAction} onClick={() => void act(`/api/contests/${id}/resume`, undefined, '已进入下一阶段')}>结束休息 / 下一阶段</Button>
         )}
         {isOrg && (contest.status === 'running' || contest.status === 'rest') && (
-          <Button variant="destructive" onClick={() => void forceFinish()} className="gap-1.5">
-            强制结束赛事
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>
+                <Button
+                  variant="destructive"
+                  disabled={busyAction}
+                  onClick={() => void forceFinish()}
+                  className="gap-1.5"
+                >
+                  强制结束赛事
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              由后端核验关联对局终态并执行恢复性收尾
+            </TooltipContent>
+          </Tooltip>
         )}
-        {isLoggedIn && contest.status === 'open' && (
+        {isLoggedIn && !myEntry && contest.status === 'open' && (
           <div className="flex flex-wrap items-center gap-2">
             {needsRealName && (
               <span className="text-sm text-warning">
@@ -395,7 +479,7 @@ export default function ContestDetail() {
                 <Link to="/settings" className="font-medium underline">填写实名信息</Link>
               </span>
             )}
-            <Select value={botId} onValueChange={setBotId}>
+            <Select value={botId} onValueChange={setBotId} disabled={busyAction}>
               <SelectTrigger className="h-9 w-[12rem]">
                 <SelectValue placeholder="选择我的 Bot" />
               </SelectTrigger>
@@ -403,14 +487,14 @@ export default function ContestDetail() {
                 {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!botId || needsRealName} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) }, '报名成功')}>
+            <Button variant="outline" disabled={busyAction || !botId || needsRealName} onClick={() => void act(`/api/contests/${id}/register`, { bot_id: Number(botId) }, '报名成功')}>
               报名派遣
             </Button>
           </div>
         )}
         {isLoggedIn && myEntry && (contest.status === 'rest' || contest.status === 'draft' || contest.status === 'open' || contest.status === 'published') && (
           <div className="flex flex-wrap items-center gap-2">
-            <Select value={botId} onValueChange={setBotId}>
+            <Select value={botId} onValueChange={setBotId} disabled={busyAction}>
               <SelectTrigger className="h-9 w-[12rem]">
                 <SelectValue placeholder={`更换 Bot（当前 #${myEntry.bot_id}）`} />
               </SelectTrigger>
@@ -418,7 +502,7 @@ export default function ContestDetail() {
                 {bots.map((b) => (<SelectItem key={b.id} value={String(b.id)}>{b.display_name || b.name}</SelectItem>))}
               </SelectContent>
             </Select>
-            <Button variant="outline" disabled={!botId} onClick={() => void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) }, '派遣 Bot 已更换')}>
+            <Button variant="outline" disabled={busyAction || !botId} onClick={() => void act(`/api/contests/${id}/dispatch`, { bot_id: Number(botId) }, '派遣 Bot 已更换')}>
               确认更换
             </Button>
           </div>

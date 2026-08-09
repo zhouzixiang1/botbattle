@@ -2,7 +2,7 @@
 
 覆盖审计发现的 P0/P1 bug 的修复：
 - P0-1: check→fold（to_call==0 时 response 0 应 check 非 call）
-- P0-2: CHECK/CALL 未记录到 history
+- P0-2: CHECK/CALL 未透传到 Botzone history
 - P0-3: 握手死代码（longrunning 未握手时继续发 traditional 信封）
 - P1: runner session.requests 异常时原子提交（不污染 traditional 信封）
 - P1: delete_bot_version 删非当前版本不动镜像
@@ -49,19 +49,7 @@ def test_check_call_hand_completes_to_showdown():
         assert hr.reason == "showdown", f"应 showdown 实际 {hr.reason}"
 
 
-# ── P0-2: CHECK/CALL 记录到 history ────────────────────────────────────
-
-def test_check_call_recorded_in_history():
-    """check/call 必须记录到 history（Botzone 协议要求）。"""
-    def bot(pid, req):
-        return {"response": 0}
-
-    s = MatchSession(num_hands=1, rng=random.Random(1))
-    asyncio.run(s.run_async(bot))
-    # 至少有 call/check 的 history 条目（修复前：history 只有 fold 或空）
-    action_types = {ev["action_type"] for ev in s._hist}
-    assert "call" in action_types or "check" in action_types, f"history 缺 call/check: {s._hist}"
-
+# ── P0-2: CHECK/CALL 透传到 Botzone history ────────────────────────────
 
 def test_bot_receives_history_with_calls():
     """Bot 收到的 history 应含对手的 call/check。"""

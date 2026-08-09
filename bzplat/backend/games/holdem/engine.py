@@ -29,7 +29,7 @@ from typing import Any, Callable
 from bzplat.backend.games.holdem.holdem_judge import Holdem
 from bzplat.backend.games.holdem.result import HandResult, MatchResult
 from bzplat.backend.games.holdem import protocol as proto
-from bzplat.backend.runtime.binary_runner import BotCrashedError
+from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
 
 STARTING_STACK = 20_000
 SMALL_BLIND = 50
@@ -150,6 +150,8 @@ class MatchSession:
             # Botzone 计分：每手筹码复位 starting_stack（不跨手累积，不因归零提前结束）
             try:
                 await self._play_hand(h, decide)
+            except PlatformRunnerError:
+                raise
             except BotCrashedError:
                 # 对齐权威裁判：bot 崩溃不可恢复 → 判负（本手全筹码输给对手），不中止整场。
                 # _call_decide 抛 BotCrashedError 时，_current_actor 是崩溃方。

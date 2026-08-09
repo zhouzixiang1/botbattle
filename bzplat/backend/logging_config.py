@@ -15,6 +15,8 @@ import logging.config
 import os
 from pathlib import Path
 
+from bzplat.backend.qa_safety import qa_instance_enabled
+
 DEFAULT_LOG_DIR = "logs"
 # 统一格式：带时间戳、级别、模块名
 _FMT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
@@ -31,6 +33,11 @@ def setup_logging(log_dir: str | os.PathLike[str] | None = None, level: str = "I
     try:
         ld.mkdir(parents=True, exist_ok=True)
     except OSError:
+        # QA startup has already validated an isolated absolute target. Falling
+        # back to process CWD here could silently create app/access/audit.log in
+        # the primary checkout after that guard passed, so QA must fail closed.
+        if qa_instance_enabled(os.environ.get("BZ_QA_INSTANCE")):
+            raise
         ld = Path(".")
     app_log = str(ld / "app.log")
     access_log = str(ld / "access.log")

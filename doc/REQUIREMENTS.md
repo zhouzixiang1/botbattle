@@ -46,8 +46,10 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值），沙箱运行，完成后计 Glicko |
 | 实时观赛 | SSE 推送事件流，前端棋盘/牌桌逐步渲染 |
 | 对局回放 | 完整事件录制，播放/暂停/步进/倍速（0.5x-4x）/逐手跳转/进度拖动 |
-| 人类 vs Bot | WebSocket 落子回传，独立并发槽（默认 4），per-user ≤1，不计 Glicko |
+| Pencil 累计棋钟 | 每方固定 900 秒；Bot-vs-Bot 与人类对战均累计实际决策时间，成功/耗尽分别落 `time_used`/`time_out` 事件，并在点格棋观赛/回放显示剩余时间与超时状态 |
+| 人类 vs Bot | WebSocket 落子回传，独立并发槽（默认 4），per-user ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
 | 自博弈 | 同一 owner 的两个不同 Bot 可对战，走普通挑战 |
+| 崩溃收敛 | 对局中途 Bot 崩溃（含人类局）按游戏结果结算为 `completed` + `reason=crash`；Bot-vs-Bot 启动失败为 `completed` + `technical_loss`，人类局启动失败为 `aborted` |
 
 ### 3.4 评分与排行
 | 需求 | 验收标准 |
@@ -59,10 +61,10 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 ### 3.5 赛事系统
 | 需求 | 验收标准 |
 |------|---------|
-| 赛制模板 | 6 种阶段（单/双循环、分组单/双循环、瑞士、单败淘汰）+ 2 种计分 + **9 内置模板**（含 `holdem_prelim_swiss` 预赛 / `holdem_final_ranked` 决赛等） |
-| 赛事生命周期 | draft→open→published→running⇄rest→finished，组织者可 open/register/dispatch/publish/start/resume/advance；时间编排（registration_opens_at/closes_at/starts_at）由 ContestScheduler 后台到点自动推进阶段；模板可带 `phase`（`preliminary`/`final`/`standalone`） |
+| 赛制模板 | 6 种阶段（单/双循环、分组单/双循环、瑞士、单败淘汰）+ 2 种计分 + **10 个内置模板**（含 `holdem_prelim_swiss` 预赛 / `holdem_final_ranked` 决赛等） |
+| 赛事生命周期 | draft→open→published→running⇄rest→finished；`published` 只发布当前阶段/当前轮可确定的排期，不承诺一次生成完整赛事对阵；组织者可 open/register/dispatch/publish/start/resume/advance，ContestScheduler 按 registration_opens_at/closes_at/starts_at 到点推进 |
 | 积分榜与对阵图 | 实时积分榜 + 单败淘汰 bracket 树 + 瑞士/循环轮次分组，显示 Bot 名（非裸 ID）；阶段结束可落**正式名次**（破同分，`contests/ranking.py`） |
-| 休息期换 Bot | 阶段间休息期允许选手更换派遣 Bot |
+| 版本冻结与换 Bot | 已发布 pairing 冻结 Bot 与版本；published/rest 换 Bot 只影响尚未发布的后续轮次/阶段，不回写已有排期 |
 
 ### 3.6 社交与互动
 | 需求 | 验收标准 |
@@ -77,7 +79,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 |------|---------|
 | XP 奖励 | 对局参与 +10/胜利 +15、赛事参与 +50、评论 +2、被关注 +3 |
 | 等级 | `xp_for_level(N)=100×N×(N+1)/2`，主页显示等级徽章 + 经验进度条 |
-| 等级 gating | 数据集下载需等级 ≥1 |
+| 等级展示 | 主页显示等级徽章与经验进度，升级阈值由统一公式计算 |
 
 ### 3.8 管理后台
 | 需求 | 验收标准 |
@@ -85,11 +87,11 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | 10 Tab 后台 | 仪表盘、用户/Bot/对局/赛事管理、邮件模板与发件箱、运行时热配置、裁判参数热调、赛制模板设计器、日志查看 |
 | 运行时热配置 | 并发上限/超时/auto-match 参数可热改（资源硬顶不可抬高） |
 | 裁判参数热调 | 德州筹码/盲注可热改（手数/棋盘/点阵已钉死固定值，不可调） |
+| 安全中止与删除 | 活跃对局只允许经 orchestrator 取消并收敛为 `aborted`，不得手工伪造 running/completed；用户/Bot/赛事存在活跃引用时拒绝硬删 |
 
-### 3.9 数据与站点
+### 3.9 站点与后台调度
 | 需求 | 验收标准 |
 |------|---------|
-| 对局数据集下载 | 按游戏×月份打包 gzip JSON 行，等级 ≥1 gating |
 | 站点配置 | 站名/Logo/公告/About 可配（admin） |
 | 闲时自动对局 | 后台自动调度 ladder 对局维护天梯（陈旧度 + 定级赛优先） |
 
@@ -97,12 +99,13 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 
 | 类别 | 需求 | 指标 / 实现 |
 |------|------|------------|
-| **性能** | 单场对局低延迟 | Bot 决策默认超时 60s（可配 1-300）；沙箱启动 ~1s；半负载并发 ceiling=`max(1,cpu//4)` |
+| **性能** | 单场对局低延迟 | holdem/gomoku Bot 单步决策默认超时 60s（可配 1-300）；Pencil 每方累计 900s（固定，含人类局）；沙箱启动 ~1s；半负载并发 ceiling=`max(1,cpu//4)` |
 | **性能** | 前端首屏快 | React.lazy 代码分割，主包 gzip ~115KB；recharts 等重依赖隔离到 BotDetail chunk |
 | **安全** | Bot 沙箱隔离 | Docker: `--network=none --memory=512m --cpus=1 --read-only --cap-drop=ALL --user 65534` |
 | **安全** | 接口限流 | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s 等），可 `BZ_RATE_LIMIT` 开关 |
 | **安全** | 认证 | 密码 hash 存储，session token，cookie `bz_session`，验证码防爆破 |
 | **可靠** | 数据持久 | SQLite 单文件，自带 `_migrate` 自愈（补列/重建表），向后兼容旧库 |
+| **可靠** | 隔离 QA | `BZ_QA_INSTANCE=1` 时拒绝 50380、主库同路径/同 inode 与主 checkout 运行时写目标；Vite 同样拒绝代理到 50380 |
 | **可靠** | 日志可查 | 统一日志 `logs/app.log`（5MB×5 轮转），Bot stderr 尾部 4KB 捕获，admin 网页查看 |
 | **可维护** | 新增游戏低成本 | 赛制/编排层零改动：实现 `games/<game>/`（engine/protocol/result/tiers/templates/spec）+ schema 注册 + 前端 GameViewSpec，**禁止**通用层 `if game_id` 分支 |
 | **可维护** | 常量集中 | 所有状态码/类型/`REGISTERED_ENGINES`/平台 settings 键名集中在 `schema.py` |
@@ -117,7 +120,7 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | 账号认证 | `auth/` | test_auth | wiki（功能说明散见） |
 | Bot 管理 | `bots/` + api_routes | test_settings_mybots | wiki/BOT_DEV、BOT_DETAIL |
 | 对局编排 | `matches/orchestrator+runner` | test_engine、test_protocol | wiki/GUIDE |
-| 人类对战 | orchestrator + WS /play | test_human_match | wiki/GUIDE |
+| 人类对战 / 棋钟 | orchestrator + runner + WS /play | test_human_match、test_chess_clock | wiki/GUIDE、PENCIL |
 | 评分排行 | `rating/glicko2` + `games/*/tiers.py` | test_tiers、test_engine | wiki/GUIDE |
 | 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/GUIDE、CONTEST_BRACKET |
 | 社交 | api_routes + store | test_social、test_comments_likes | wiki/GUIDE |
@@ -126,8 +129,8 @@ Bot 竞赛平台（对标 Botzone）允许用户提交自动化程序（Bot）�
 | 沙箱运行时 | `runtime/` | test_runtime、test_runtime_settings | doc/RUNTIME |
 | 各游戏引擎 | `games/<game>/`（自包含子包，真实现全在 games/） | test_engine、test_board_engines、test_result_contract、test_game_registry、test_import_cycles | wiki/PROTOCOL、GOMOKU、PENCIL、TEXAS、doc/JUDGE_CODE |
 | 架构契约 | games 注册表 + 通用层无游戏分支 | test_tongyong_layer_no_game_branches、test_despecialization、test_physical_reorg | doc/DESIGN、AGENTS.md |
-| 前端 | `frontend/`（`src/games/` 注册表 + canvas） | browser_verify / screenshot_verify | doc/DESIGN §5 |
+| 前端 | `frontend/`（`src/games/` 注册表 + canvas） | Playwright `frontend/e2e/` + browser/screenshot verify | doc/DESIGN §5、doc/TESTING |
 
-> 所有功能需求均有对应的代码实现 + 自动化测试 + wiki 文档，覆盖率完整。
+> 上表给出需求到实现、测试入口与文档的追溯关系；是否通过本次验收，以目标提交上的完整执行结果为准，见 [TESTING.md](./TESTING.md)。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

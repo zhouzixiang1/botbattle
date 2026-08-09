@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Trophy, Plus } from 'lucide-react'
 import PageStub from '@/components/PageStub'
@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label'
 import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { apiGet, apiJson, errMsg } from '@/api'
+import { apiFetch, apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import Countdown from '@/components/Countdown'
@@ -60,13 +60,20 @@ interface Template {
   game_id: string
 }
 
+// Radix Select 必须全生命周期保持受控且不能用空字符串；该值不可能通过后端
+// template id 校验（id 必须以字母开头），仅用于 loading/empty 占位。
+const TEMPLATE_PENDING_VALUE = '__template_pending__'
+
 export default function Contests() {
   const { user, isLoggedIn } = useAuth()
   const [list, setList] = useState<Contest[]>([])
   const [templates, setTemplates] = useState<Template[]>([])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
-  const [templateId, setTemplateId] = useState('holdem_swiss_ko')
+  const [templateId, setTemplateId] = useState('')
+  const [templatesForGame, setTemplatesForGame] = useState('')
+  const [templatesLoading, setTemplatesLoading] = useState(true)
+  const [templateError, setTemplateError] = useState('')
   const [filterGame, setFilterGame] = useState('')
   const [formGameId, setFormGameId] = useState('holdem')
   const [requireRealName, setRequireRealName] = useState(false)
@@ -75,6 +82,10 @@ export default function Contests() {
   const [regClosesAt, setRegClosesAt] = useState('')
   const [startsAt, setStartsAt] = useState('')
   const [error, setError] = useState('')
+  const [creating, setCreating] = useState(false)
+  const creatingRef = useRef(false)
+  const templateRequestSeqRef = useRef(0)
+  const templateAbortRef = useRef<AbortController | null>(null)
   // 分页
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
@@ -99,19 +110,76 @@ export default function Contests() {
 
   useEffect(() => {
     void load()
-    // 模板按建赛表单选中的游戏过滤（后端 ?game= 已支持）
-    apiGet<{ templates: Template[] }>('/api/contests/templates?game=' + formGameId)
-      .then((d) => {
-        const tpls = d.templates || []
-        setTemplates(tpls)
-        // 切游戏后重置 templateId 为该游戏第一个模板（避免 value 指向已不存在的模板）
-        if (tpls.length > 0 && !tpls.some((t) => t.id === templateId)) {
-          setTemplateId(tpls[0].id)
-        }
-      })
-      .catch(() => undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterGame, formGameId, page])
+  }, [filterGame, page])
+
+  useEffect(() => {
+    // 模板按建赛表单选中的游戏过滤（后端 ?game= 已支持）。请求代次 + Abort
+    // 双重防护快速切换时的乱序响应，旧游戏模板不得回填到当前表单。
+    const requestedGame = formGameId
+    const requestSeq = ++templateRequestSeqRef.current
+    const controller = new AbortController()
+    templateAbortRef.current?.abort()
+    templateAbortRef.current = controller
+    setTemplates([])
+    setTemplateId('')
+    setTemplatesForGame('')
+    setTemplateError('')
+    setTemplatesLoading(true)
+
+    // 延后一拍启动：React StrictMode 会同步执行 effect→cleanup→effect。这样首轮
+    // 探测只清 timer，不制造一条无业务意义的 ERR_ABORTED；真实切换仍会 abort
+    // 已经发出的上一代请求。
+    const startTimer = window.setTimeout(() => {
+      void apiFetch<{ templates: Template[] }>(
+        '/api/contests/templates?game=' + encodeURIComponent(requestedGame),
+        { method: 'GET', signal: controller.signal },
+      )
+        .then((d) => {
+          if (controller.signal.aborted || requestSeq !== templateRequestSeqRef.current) return
+          // 即使服务端过滤契约回退，也绝不让异游戏模板进入可提交状态。
+          const tpls = (d.templates || []).filter((t) => t.game_id === requestedGame)
+          setTemplates(tpls)
+          setTemplateId(tpls[0]?.id || '')
+          setTemplatesForGame(requestedGame)
+        })
+        .catch((err: unknown) => {
+          if (controller.signal.aborted || requestSeq !== templateRequestSeqRef.current) return
+          setTemplateError(errMsg(err, '模板加载失败'))
+        })
+        .finally(() => {
+          if (controller.signal.aborted || requestSeq !== templateRequestSeqRef.current) return
+          setTemplatesLoading(false)
+        })
+    }, 0)
+
+    return () => {
+      window.clearTimeout(startTimer)
+      controller.abort()
+      if (templateAbortRef.current === controller) templateAbortRef.current = null
+    }
+  }, [formGameId])
+
+  const onFormGameChange = (nextGame: string) => {
+    if (nextGame === formGameId) return
+    // 在 effect 清理前同步作废旧请求和旧选择，关闭“切游戏后立即提交”的窗口。
+    ++templateRequestSeqRef.current
+    templateAbortRef.current?.abort()
+    setTemplates([])
+    setTemplateId('')
+    setTemplatesForGame('')
+    setTemplateError('')
+    setTemplatesLoading(true)
+    setFormGameId(nextGame)
+  }
+
+  const selectedTemplate = templates.find((t) => t.id === templateId)
+  const templatePlaceholder = templatesLoading ? '模板加载中…'
+    : templateError ? '模板加载失败'
+    : '选择模板'
+  const templateReady = !templatesLoading &&
+    templatesForGame === formGameId &&
+    selectedTemplate?.game_id === formGameId
 
   /** datetime-local 值（如 2026-01-01T14:00）→ ISO 秒级字符串（后端 naive 本地时间约定） */
   const toIso = (v: string): string | undefined => {
@@ -122,6 +190,13 @@ export default function Contests() {
 
   const onCreate = async (e: FormEvent) => {
     e.preventDefault()
+    if (creatingRef.current) return
+    if (!templateReady) {
+      setError(templateError || '请等待当前游戏的模板加载完成后再创建赛事')
+      return
+    }
+    creatingRef.current = true
+    setCreating(true)
     setError('')
     try {
       await apiJson('/api/contests', 'POST', {
@@ -143,6 +218,9 @@ export default function Contests() {
       toast.success('赛事创建成功')
     } catch (err) {
       setError(errMsg(err))
+    } finally {
+      creatingRef.current = false
+      setCreating(false)
     }
   }
 
@@ -178,7 +256,7 @@ export default function Contests() {
               {/* 先选游戏 → 再选该游戏的模板 */}
               <div className="space-y-1.5">
                 <Label>游戏</Label>
-                <Select value={formGameId} onValueChange={setFormGameId}>
+                <Select value={formGameId} onValueChange={onFormGameChange}>
                   <SelectTrigger className="mt-1.5 h-9 w-[8.5rem]">
                     <SelectValue />
                   </SelectTrigger>
@@ -210,9 +288,15 @@ export default function Contests() {
               </div>
               <div className="space-y-1.5">
                 <Label>模板</Label>
-                <Select value={templateId} onValueChange={setTemplateId}>
+                <Select
+                  value={templateId || TEMPLATE_PENDING_VALUE}
+                  onValueChange={(value) => {
+                    if (value && value !== TEMPLATE_PENDING_VALUE) setTemplateId(value)
+                  }}
+                  disabled={templatesLoading || templates.length === 0}
+                >
                   <SelectTrigger className="mt-1.5 h-9 w-full">
-                    <SelectValue placeholder="选择模板" />
+                    <SelectValue>{selectedTemplate?.name || templatePlaceholder}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {templates.map((t) => (
@@ -222,6 +306,9 @@ export default function Contests() {
                     ))}
                   </SelectContent>
                 </Select>
+                {templateError && (
+                  <p className="max-w-56 text-xs text-destructive">{templateError}</p>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <Switch checked={requireRealName} onCheckedChange={setRequireRealName} />
@@ -247,9 +334,9 @@ export default function Contests() {
                   <Input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} className="h-9" />
                 </label>
               </div>
-              <Button type="submit" className="gap-1.5">
+              <Button type="submit" disabled={creating || !templateReady} className="gap-1.5">
                 <Plus className="size-4" />
-                创建比赛
+                {creating ? '创建中…' : '创建比赛'}
               </Button>
             </form>
           </CardContent>

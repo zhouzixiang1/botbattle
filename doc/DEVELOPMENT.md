@@ -31,6 +31,9 @@ cd bzplat/frontend && npm install
 | `BZ_HOST` / `BZ_PORT` | 绑定地址/端口 | 127.0.0.1 / 50380 |
 | `BZ_DB_PATH` | SQLite 路径 | botzone.db |
 | `BZ_BOT_LOCAL` | 强制本机跑 ELF（测试） | 未设 |
+| `BZ_QA_INSTANCE` | 标记隔离 QA 实例；启用时启动前拒绝主 checkout/50380 写目标 | 未设 |
+| `BZ_API_TARGET` | Vite REST/SSE/WS 代理目标；50380 被硬拒绝 | 127.0.0.1:50381 |
+| `BZ_AVATAR_DIR` | 头像目录 | avatars |
 | `BZ_RATE_LIMIT` | 启用限流 | 1 |
 | `BZ_TRUST_PROXY` | 信任 X-Forwarded-For（反向代理部署时需开启，否则限流按代理 IP 失效） | 未设 |
 | `BZ_LOG_LEVEL` / `BZ_LOG_DIR` | 日志级别 / 目录 | INFO / logs |
@@ -67,17 +70,30 @@ bash scripts/rebuild.sh   # npm run build → platform-ctl.sh restart
 主目录 `main` 只跑线上服务（默认 `:50380` + 主库）。特性开发在 **git worktree** 中跑**独立**栈，避免污染线上 db/源码：
 
 ```bash
-# 1) 后端：CWD=worktree，端口勿用 50380
-cd .worktrees/<分支名>
-python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50381
+# 1) 主库只读复制到 worktree（必须 cp，不得软链接）
+cp /home/zzx/project/botbattle/botzone.db .worktrees/<分支名>/botzone.db
 
-# 2) 前端：proxy 必须指向 worktree 后端
-cd .worktrees/<分支名>/bzplat/frontend
+# 2) 终端 A：后端（CWD=worktree，显式锁定副本并声明 QA）
+cd .worktrees/<分支名>
+BZ_DB_PATH="$PWD/botzone.db" BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 BZ_SKIP_CAPTCHA=1 \
+  python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50381
+
+# 3) 终端 B：播种三类角色的隔离账号，然后启前端
+cd .worktrees/<分支名>
+python scripts/seed_test_accounts.py --db "$PWD/botzone.db" --with-role-accounts
+cd bzplat/frontend
 BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
+
+# 4) 终端 C：首次安装 Chromium，再跑真浏览器回归
+cd .worktrees/<分支名>/bzplat/frontend
+npm run test:e2e:install
+BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 ```
 
 - **严禁**前端 `BZ_API_TARGET` 指向 50380（测试写入线上 db）。
 - **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
+- QA CLI 会在日志 handler、SQLite、上传/头像目录创建前一次性校验端口和全部写目标；拒绝 50380、主 checkout 内任意 DB/运行时路径，以及主 `bot_uploads`/`avatars`/`logs` 的别名或子目录。当前 linked worktree 与 `/tmp` 独立目录仍允许。
+- QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
 - 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
 
 ## 3. 编码规范
@@ -111,7 +127,8 @@ BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 通用层**不得**再加 `if game_id == ...` 分支。权威 checklist 与 [`AGENTS.md`](../AGENTS.md) / [`DESIGN.md`](./DESIGN.md) §2.3 一致：
 
 1. 建 `games/<game>/` 子包：
-   - `engine.py`（裁判 Session，`run_async(decide) → MatchResult`）
+   - `<game>_judge.py`（纯游戏规则，零平台依赖）
+   - `engine.py`（裁判↔平台协议适配，提供 Session 并驱动纯裁判，`run_async(decide) → MatchResult`）
    - `protocol.py`（`dumps_request` / `loads_response` / `fail_response`；棋类可 re-export `games/_board_protocol.py`）
    - `result.py`（**独立**定义，满足鸭子契约：`winners` + `deltas`，**不**共享基类）
    - `tiers.py`（段位曲线，查表用 `base.tier_for_in`）
@@ -144,20 +161,28 @@ BZ_API_TARGET=http://127.0.0.1:50381 npm run dev
 
 ### 6.3 测试种子账号
 ```bash
-python scripts/seed_test_accounts.py   # 建 tester1/tester2，各上传三游戏样例 Bot（幂等）
+# 只允许隔离 DB；上传目录默认跟随 DB 到 <db.parent>/bot_uploads
+python scripts/seed_test_accounts.py \
+  --db "$PWD/botzone.db" --with-role-accounts
 ```
+
+默认建立 `tester1/tester2` 及三游戏样例 Bot；`--with-role-accounts` 才显式建立
+`qa_organizer/qa_admin`。所有固定凭据账号都按脚本 namespace、精确用户名、邮箱、
+角色和密码校验；任一项不匹配即在激活、验证、提权或上传 Bot 前 fail-closed，绝不
+改写未知同名账号。
 
 ### 6.4 关键脚本
 | 脚本 | 用途 |
 |------|------|
 | `scripts/platform-ctl.sh` | 启停：start/stop/restart/status/logs |
 | `scripts/rebuild.sh` | npm build + restart |
-| `scripts/e2e_smoke.sh` | 端到端冒烟（独立 DB + 端口 50381） |
-| `scripts/load_test.py` | 8 阶段大规模压测（60 用户） |
+| `scripts/e2e_smoke.sh` | 端到端冒烟（`mktemp` 独立 DB/uploads/avatars/logs + 随机非 50380 端口） |
+| `scripts/load_test.py` | 8 阶段大规模压测（60 用户）；只使用可验证的专用 `load_admin` |
 | `scripts/browser_verify.py` | Playwright 浏览器验收 |
 | `scripts/screenshot_verify.py` | 关键页截图验收 |
-| `scripts/api_full_test.py` | HTTP API 全量业务正确性测试（鉴权/上传/挑战/SSE/并发） |
-| `scripts/contest_stress.py` | 赛事大规模对阵压测 |
+| `scripts/api_full_test.py` | HTTP API 关键链路集成测试；SSE 只核对终态 snapshot 与 replay；隔离 DB 播种专用账号 |
+| `scripts/contest_stress.py` | 默认验证赛事 draft 名册容量与静态赛制估算；`--run` 才真跑；只使用专用 `cs_admin` |
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 三游戏样例 Bot） |
+| `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 21 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口；全量执行真值见 `TESTING.md`） |
 
 > 返回 [doc/INDEX.md](./INDEX.md)

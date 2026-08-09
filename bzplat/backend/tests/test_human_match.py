@@ -42,11 +42,170 @@ def _orch(store: Store, *, human_timeout: float = 120.0) -> MatchOrchestrator:
 def test_challenge_human_creates_match(store: Store):
     u, b = _setup(store)
     orch = _orch(store)
-    mid = asyncio.run(orch.challenge_human(b["id"], u["id"], human_seat=0, game_id="gomoku"))
+
+    async def run():
+        mid = await orch.challenge_human(
+            b["id"], u["id"], human_seat=0, game_id="gomoku"
+        )
+        # challenge_human intentionally starts a background match task.  Drain it
+        # while this loop is alive instead of leaving asyncio.run() to cancel a
+        # subprocess during loop teardown (which can hang in pipe connection).
+        await orch.shutdown()
+        return mid
+
+    mid = asyncio.run(run())
     m = store.get_match(mid)
     assert m["match_type"] == TYPE_HUMAN
     assert m["human_user_id"] == u["id"]
     assert m["human_seat"] == 0
+
+
+def test_human_match_freezes_current_bot_version_before_task_runs(store: Store):
+    """人类局实际 bot 座位也冻结 current；任务排队后切版本不改变路径/模式。"""
+    from types import SimpleNamespace
+
+    u = store.create_user("human-pin", "human-pin@e.com", hash_password("password1"))
+    bot = store.create_bot(
+        u["id"], "human-pin-bot", binary_path="/tmp/human-base",
+        format="elf", game_id="gomoku",
+    )
+    v1 = store.add_bot_version(
+        bot["id"], binary_path="/tmp/human-v1", version=1,
+        runtime_mode="traditional",
+    )
+    store.add_bot_version(
+        bot["id"], binary_path="/tmp/human-v2", version=2,
+        runtime_mode="longrunning",
+    )
+    store.set_current_version(bot["id"], 1)
+    captured: dict = {}
+
+    class CapturingRunner:
+        async def run_bot_vs_human(
+            self, bot_path, *, bot_seat, runtime_mode=None, **_kwargs
+        ):
+            captured.update(
+                path=bot_path, bot_seat=bot_seat, runtime_mode=runtime_mode
+            )
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[0, 0])],
+                winner=None,
+                events=[],
+            )
+
+    async def exercise():
+        orch = MatchOrchestrator(store, runner=CapturingRunner(), max_concurrent=1)
+        # 人类坐座位 0，因此实际 Bot 在座位 1，快照键必须对应 bot_b。
+        mid = await orch.challenge_human(
+            bot["id"], u["id"], human_seat=0, game_id="gomoku"
+        )
+        match = store.get_match(mid)
+        assert match["match_config"] == {"_bot_b_version_id": v1["id"]}
+
+        # create_task 尚未获得执行机会；先切到 v2，再让 human task 运行。
+        store.set_current_version(bot["id"], 2)
+        task = orch._tasks[mid]
+        await task
+        return mid
+
+    mid = asyncio.run(exercise())
+    assert store.get_match(mid)["status"] == "completed"
+    assert captured == {
+        "path": "/tmp/human-v1",
+        "bot_seat": 1,
+        "runtime_mode": "traditional",
+    }
+
+
+def test_pencil_human_match_passes_game_clock_to_runner(store: Store):
+    """人类局也必须消费 GameSpec 的固有累计棋钟，不能只在 Bot-vs-Bot 生效。"""
+    from types import SimpleNamespace
+
+    user, bot = _setup(store, game="pencil")
+    captured: dict = {}
+
+    class CapturingRunner:
+        async def run_bot_vs_human(
+            self, _bot_path, *, time_budget_per_side=None, **_kwargs
+        ):
+            captured["time_budget_per_side"] = time_budget_per_side
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[0, 0])],
+                winner=None,
+                events=[],
+            )
+
+    async def exercise():
+        orch = MatchOrchestrator(store, runner=CapturingRunner(), max_concurrent=1)
+        match_id = await orch.challenge_human(
+            bot["id"], user["id"], human_seat=1, game_id="pencil"
+        )
+        task = orch._tasks.get(match_id)
+        if task is not None:
+            await task
+        return match_id
+
+    match_id = asyncio.run(exercise())
+    assert store.get_match(match_id)["status"] == "completed"
+    assert captured == {"time_budget_per_side": 900.0}
+
+
+def test_challenge_human_replay_failure_removes_pending_match(store: Store, monkeypatch):
+    """Replay 初始化失败时，API 未返回的 pending 人类对局不得残留。"""
+    u, b = _setup(store)
+    orch = _orch(store)
+
+    def fail_replay(*_args, **_kwargs):
+        raise RuntimeError("replay write failed")
+
+    monkeypatch.setattr(store, "upsert_replay", fail_replay)
+    with pytest.raises(RuntimeError, match="replay write failed"):
+        asyncio.run(
+            orch.challenge_human(
+                b["id"], u["id"], human_seat=0, game_id="gomoku"
+            )
+        )
+
+    assert store.list_matches() == []
+    assert orch._tasks == {}
+    assert u["id"] not in orch._human_active_users
+    with store._tx() as c:
+        assert c.execute("SELECT COUNT(*) FROM matches_index").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM match_replays").fetchone()[0] == 0
+
+
+def test_duplicate_seed_failure_removes_unreturned_match(store: Store, monkeypatch):
+    """duplicate seed 第二事务失败也要和 replay 失败走同一补偿边界。"""
+    u, b = _setup(store, game="holdem")
+    orch = _orch(store)
+    original_update = store.update_match
+
+    def fail_seed(match_id, **fields):
+        if "match_seed" in fields:
+            raise RuntimeError("seed write failed")
+        return original_update(match_id, **fields)
+
+    monkeypatch.setattr(store, "update_match", fail_seed)
+    with pytest.raises(RuntimeError, match="seed write failed"):
+        asyncio.run(
+            orch.challenge(
+                b["id"],
+                b["id"],
+                u["id"],
+                game_id="holdem",
+                duplicate=True,
+                duplicate_seed=42,
+                defer_start=True,
+            )
+        )
+
+    assert store.list_matches() == []
+    assert orch._tasks == {}
+    with store._tx() as c:
+        assert c.execute("SELECT COUNT(*) FROM matches_index").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM match_replays").fetchone()[0] == 0
 
 
 def test_human_turn_registry_resolve_and_no_rating(store: Store):
@@ -134,6 +293,46 @@ def test_per_user_throttle_one_concurrent_human(store: Store):
         asyncio.run(orch.challenge_human(b["id"], u["id"], game_id="gomoku"))
 
 
+def test_admin_abort_releases_human_task_queued_on_full_semaphore(store: Store):
+    """A queued human task cancelled before entering _human_sem must release U."""
+    u, b = _setup(store)
+    orch = _orch(store)
+
+    async def exercise():
+        # Zero permits precisely models every configured human slot being occupied,
+        # without starting shared subprocesses in this regression test.
+        orch._human_sem = asyncio.Semaphore(0)
+        first = await orch.challenge_human(
+            b["id"], u["id"], human_seat=0, game_id="gomoku"
+        )
+        await asyncio.sleep(0)
+        first_task = orch._tasks[first]
+        assert not first_task.done()
+        assert u["id"] in orch._human_active_users
+
+        # Also prove all per-match turn state is cleared by the same ownership path.
+        orch._human_turns[(first, 0)] = {
+            "future": asyncio.get_running_loop().create_future()
+        }
+        aborted = await orch.abort_match(first, reason="queued_admin_abort")
+        assert aborted["status"] == "aborted"
+        assert first not in orch._tasks
+        assert not any(key[0] == first for key in orch._human_turns)
+        assert u["id"] not in orch._human_active_users
+
+        # Regression assertion: the leaked set entry formerly rejected this call.
+        second = await orch.challenge_human(
+            b["id"], u["id"], human_seat=0, game_id="gomoku"
+        )
+        await asyncio.sleep(0)
+        await orch.abort_match(second, reason="test_cleanup")
+        return second
+
+    second = asyncio.run(exercise())
+    assert store.get_match(second)["status"] == "aborted"
+    assert u["id"] not in orch._human_active_users
+
+
 def test_human_match_uses_independent_semaphore(store: Store):
     """人类对局走 _human_sem，不占 bot 的 _sem 槽。"""
     u, b = _setup(store)
@@ -159,26 +358,76 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
         format="elf", game_id="gomoku",
     )
     _, token = app.state.auth.authenticate("usr2", "password1")
-    c = TestClient(app)
+    # TestClient 必须作为 context 使用，让 FastAPI lifespan 在退出时调用
+    # orchestrator.shutdown()，收敛本用例创建但尚未完成的人类对局任务。
+    with TestClient(app) as c:
+        # 建人类对局
+        r = c.post(
+            "/api/matches/human", headers={"Authorization": f"Bearer {token}"},
+            json={"bot_id": b["id"], "human_seat": 0, "game_id": "gomoku"},
+        )
+        assert r.status_code == 200
+        mid = r.json()["match_id"]
 
-    # 建人类对局
-    r = c.post(
-        "/api/matches/human", headers={"Authorization": f"Bearer {token}"},
-        json={"bot_id": b["id"], "human_seat": 0, "game_id": "gomoku"},
+        # 无 token → 拒绝
+        with c.websocket_connect(f"/api/matches/{mid}/play") as ws:
+            msg = ws.receive_json()
+        assert msg["type"] == "error"
+
+        # 合法 token → 收 snapshot
+        with c.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
+            snap = ws.receive_json()
+        assert snap["type"] == "snapshot"
+        assert snap["match"]["human_seat"] == 0
+
+        # 该局刻意只读取快照、不落子；退出 client 前它应仍是编排器拥有的
+        # 后台任务，精确覆盖曾导致 pytest 退出挂起的场景。
+        assert mid in app.state.orch._tasks
+
+    # TestClient.__exit__ 必须跑完 lifespan，并在事件循环仍存活时 cancel +
+    # gather 对局任务。仅关闭 WebSocket 不足以收敛 subprocess/Future。
+    assert not app.state.orch._tasks
+    assert not app.state.orch._human_turns
+    assert u["id"] not in app.state.orch._human_active_users
+
+
+def test_completed_human_websocket_closes_after_one_snapshot(store: Store):
+    """A terminal reconnect is server-closed and removed from the SSE registry."""
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from bzplat.backend.main import create_app
+
+    app = create_app(db_path=store.path)
+    s = app.state.store
+    user = s.create_user("donews", "donews@example.com", hash_password("password1"))
+    s.update_user(user["id"], email_verified=1)
+    bot = s.create_bot(
+        user["id"], "donews_bot", binary_path="/tmp/donews", format="elf", game_id="gomoku",
     )
-    assert r.status_code == 200
-    mid = r.json()["match_id"]
+    mid = "20260809-human-terminal"
+    s.create_match(
+        mid,
+        bot["id"],
+        bot["id"],
+        owner_id=user["id"],
+        match_type="human",
+        game_id="gomoku",
+        human_user_id=user["id"],
+        human_seat=1,
+    )
+    s.update_match(mid, status="completed", winner=0)
+    _, token = app.state.auth.authenticate("donews", "password1")
 
-    # 无 token → 拒绝
-    with c.websocket_connect(f"/api/matches/{mid}/play") as ws:
-        msg = ws.receive_json()
-    assert msg["type"] == "error"
-
-    # 合法 token → 收 snapshot
-    with c.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
-        snap = ws.receive_json()
-    assert snap["type"] == "snapshot"
-    assert snap["match"]["human_seat"] == 0
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
+            snapshot = ws.receive_json()
+            assert snapshot["type"] == "snapshot"
+            assert snapshot["match"]["status"] == "completed"
+            with pytest.raises(WebSocketDisconnect) as closed:
+                ws.receive_json()
+            assert closed.value.code == 1000
+    assert mid not in app.state.orch._sse
 
 
 # ── Bot 启动崩溃快速失败（PR-G1 治本）──────────────────────────
@@ -328,13 +577,16 @@ def test_resolve_human_turn_after_done_returns_false(store: Store):
     )
     # 注册一个 pending human turn（用 new_event_loop 创建 Future，避免无运行 loop 报错）
     loop = asyncio.new_event_loop()
-    fut = loop.create_future()
-    orch._human_turns[("m_race", 0)] = {"future": fut}
-    # 第一次 resolve → 成功
-    assert orch.resolve_human_turn("m_race", 0, {"row": 7, "col": 7}) is True
-    assert fut.done()
-    # 第二次（已 done）→ 应返 False，不抛 InvalidStateError
-    assert orch.resolve_human_turn("m_race", 0, {"row": 8, "col": 8}) is False
+    try:
+        fut = loop.create_future()
+        orch._human_turns[("m_race", 0)] = {"future": fut}
+        # 第一次 resolve → 成功
+        assert orch.resolve_human_turn("m_race", 0, {"row": 7, "col": 7}) is True
+        assert fut.done()
+        # 第二次（已 done）→ 应返 False，不抛 InvalidStateError
+        assert orch.resolve_human_turn("m_race", 0, {"row": 8, "col": 8}) is False
+    finally:
+        loop.close()
 
 
 def test_resolve_human_turn_unknown_match_returns_false(store: Store):

@@ -15,7 +15,7 @@
 | 德州 response | 裸整数 `-1/-2/0/>0` | 同左 |
 | 运行模式 | Traditional / LongRunning | 都支持（上传时标明） |
 | 长时运行握手 | `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` | 同左 |
-| 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB / 默认 60s（可配） |
+| 资源 | 1 核 / 256MB / 默认 1s | 1 核 / 512MB；holdem/gomoku 默认 60s/决策（可配），Pencil 固定 900s/方累计 |
 
 > 差异：本平台 Bot 进程**整场长驻**（不每回合重启）；Botzone 标准 Bot 无需改动即可运行（见 [协议](#/wiki?slug=protocol) §10）。手数**固定 70**（Botzone 文档 50，规则钉死不可配）。
 
@@ -181,7 +181,7 @@ x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
 
 - **无网络**：沙箱完全断网，任何联网调用都会失败。
 - **资源限制**：内存上限 **512MB**、CPU **1 核**。
-- **磁盘**：根文件系统只读，**仅 `/tmp` 可写且可执行**（如需写临时文件或 PyInstaller 自解压请放 `/tmp`，勿依赖在 `/tmp` 外写文件）。
+- **磁盘**：根文件系统只读，Linux ELF Bot **仅 `/tmp` 可写且可执行**（如需写临时文件或 PyInstaller 自解压请放 `/tmp`）。Windows PE 除 `/tmp` 外会获得 Wine 自身使用的隔离临时 `HOME/WINEPREFIX`；它同样位于限容 tmpfs、对局后销毁，不是持久磁盘。Bot 不应依赖这些路径保留数据。
 - **最小权限**：以非 root 用户运行，无提权能力。
 
 > 结论：Bot 应是**纯计算**程序，只读 stdin、写 stdout，不要尝试联网或依赖持久可写目录。
@@ -199,16 +199,17 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 
 | 陷阱 | 后果 | 正确做法 |
 |------|------|----------|
-| 忘了 `flush` stdout | 60 秒超时判 fold | 每次输出后 flush（Python `flush=True`、C `fflush`） |
+| 忘了 `flush` stdout | 等到当前时限后失败：扑克 fold，棋类判负；Pencil 会耗尽该方累计棋钟 | 每次输出后 flush（Python `flush=True`、C `fflush`） |
 | 输出不带换行 `\n` | 平台可能读不到完整行 | 响应以 `\n` 结尾 |
 | 用 `print` 后进程阻塞缓冲 | 同上 | 显式刷新或关闭缓冲 |
 | response 不是裸整数 | 判 fold（协议违规） | 德州 response 必须是 `-1/-2/0/>0` 整数 |
 | `raise` 的正整数当成「加注到总额」 | 加注额不对被判 fold | 正整数是**额外下注筹码**（= 目标总额 − 本街已投） |
 | `raise` 换算后总额低于最小加注 | 判 fold | 目标总额 ≥ 上次下注的 2 倍 |
 | LongRunning 首回合没输出握手串 | 平台等待握手行直到超时 | 首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` |
-| 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负（`completed`）；启动失败非赛事 → `aborted`（`bot_crashed`） | 保持进程存活，出错就回安全默认动作（扑克 `{"response":-1}`） |
+| 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负；Bot-vs-Bot 启动失败 → `completed` + `technical_loss`；人类对战启动失败 → `aborted` | 保持进程存活，出错就回安全默认动作（扑克 `{"response":-1}`） |
 | 上传 macOS 二进制 | 被拒绝 | 交叉编译为 Linux ELF |
 | 依赖联网 / 文件写入 | 调用失败 | 纯计算，只用 stdin/stdout |
+| 依赖 Wine 配置持久化 | 下场对局配置消失 | PE 的 `HOME/WINEPREFIX` 是单场隔离 tmpfs，不持久保存 |
 
 ## 9. 进阶：做更聪明的 Bot
 
@@ -225,4 +226,4 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 
 ## 10. 运行时资源
 
-Bot 在 Docker 中运行：单核、512MB 内存、无网络。决策超时默认 60s。
+Bot 在 Docker 中运行：单核、512MB 内存、无网络。holdem / gomoku 单步决策超时默认 60 秒（管理员可配）；Pencil 双方各使用固定 900 秒累计棋钟，每次思考消耗同一份总预算。`time_used` / `time_out` 只进入平台回放和 SSE，不会改变 Bot 的输入协议。

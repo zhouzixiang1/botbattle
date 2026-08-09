@@ -36,8 +36,18 @@ from bzplat.backend.runtime.limits import (
     concurrent_ceiling,
     cpu_count,
 )
+from bzplat.backend.runtime.binary_runner import PlatformRunnerError
 from bzplat.backend.store.schema import (
+    CONTEST_CANCELLED,
+    CONTEST_DRAFT,
+    CONTEST_FINISHED,
+    CONTEST_OPEN,
+    CONTEST_PUBLISHED,
+    CONTEST_REST,
+    CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
+    ROLE_ADMIN,
+    ROLE_ORGANIZER,
     SETTING_ACTION_TIMEOUT,
     SETTING_AUTO_MATCH_BOT_COOLDOWN,
     SETTING_AUTO_MATCH_DAILY_CAP,
@@ -53,6 +63,8 @@ from bzplat.backend.store.schema import (
     SETTING_JUDGE_HOLDEM_SB,
     SETTING_JUDGE_HOLDEM_STACK,
     SETTING_MAX_CONCURRENT,
+    STATUS_ABORTED,
+    STATUS_COMPLETED,
 )
 router = APIRouter()
 
@@ -65,12 +77,34 @@ def _bots(request: Request) -> BotManager:
     return request.app.state.bot_manager
 
 
+def _new_preflight_runner(request: Request):
+    """Return one upload-owned runner; never share match subprocess state."""
+    factory = getattr(request.app.state, "preflight_runner_factory", None)
+    if factory is not None:
+        return factory()
+    # Compatibility for narrowly constructed test apps; create_app always installs
+    # the factory above.
+    return getattr(request.app.state, "binary_runner", None)
+
+
 def _contests(request: Request) -> ContestManager:
     return request.app.state.contest_manager
 
 
 def _store(request: Request):
     return request.app.state.store
+
+
+def _is_terminal_stream_event(ev: object) -> bool:
+    if not isinstance(ev, dict):
+        return False
+    if ev.get("type") in ("match_end", "error"):
+        return True
+    return (
+        ev.get("type") == "snapshot"
+        and (ev.get("match") or {}).get("status")
+        in (STATUS_COMPLETED, STATUS_ABORTED)
+    )
 
 
 def _with_seat_info(m: dict, store=None) -> dict:
@@ -269,7 +303,7 @@ def global_search(
 ):
     """全局搜索：type=users|bots|matches（默认 users）。
 
-    bots 按 name/display_name 模糊；matches 按 bot 名模糊；users 沿用前缀搜索。
+    bots 按 name/display_name 模糊；matches 按对局 ID/bot 名模糊；users 沿用前缀搜索。
     game_id 可选过滤（仅对 bots/matches 有效）。
     """
     store = _store(request)
@@ -384,17 +418,23 @@ async def upload_bot(
 ):
     raw = await file.read()
     try:
-        bot = _bots(request).create_from_upload(
-            user["id"], name, raw,
+        bot = await asyncio.to_thread(
+            _bots(request).create_from_upload,
+            user["id"],
+            name,
+            raw,
             display_name=display_name, description=description,
             upload_note=upload_note,
             game_id=game_id,
             runtime_mode=runtime_mode,
-            binary_runner=getattr(request.app.state, "binary_runner", None),
+            binary_runner=_new_preflight_runner(request),
         )
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
+    except PlatformRunnerError:
+        audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail="sandbox_unavailable")
+        raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
     audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={len(raw)}")
     return {"bot": bot}
 
@@ -410,14 +450,21 @@ async def upload_bot_version(
 ):
     raw = await file.read()
     try:
-        bot = _bots(request).upload_version(
-            bot_id, user["id"], raw, upload_note=upload_note,
+        bot = await asyncio.to_thread(
+            _bots(request).upload_version,
+            bot_id,
+            user["id"],
+            raw,
+            upload_note=upload_note,
             runtime_mode=runtime_mode or None,
-            binary_runner=getattr(request.app.state, "binary_runner", None),
+            binary_runner=_new_preflight_runner(request),
         )
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
+    except PlatformRunnerError:
+        audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail="sandbox_unavailable")
+        raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
     audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={len(raw)}")
     return {"bot": bot}
 
@@ -461,15 +508,11 @@ def rollback_bot_version(
 
     不删除其他版本，仅切换 current_version + 镜像（binary_path/runtime_mode/...）。
     """
-    store = _store(request)
-    bot = store.get_bot(bot_id)
-    if not bot:
-        raise HTTPException(404, "bot 不存在")
-    if bot["owner_id"] != user["id"]:
-        raise HTTPException(403, "无权修改他人的 Bot")
-    result = store.set_current_version(bot_id, version)
-    if result is None:
-        raise HTTPException(404, f"版本 {version} 不存在")
+    try:
+        result = _bots(request).activate_version(bot_id, user["id"], version)
+    except BotError as e:
+        status = 403 if e.code == "forbidden" else 404
+        raise HTTPException(status, e.message)
     audit_log(request, "bot_version_rollback", result="ok", user=user.get("username"), target=bot_id, detail=f"v{version}")
     return {"bot": result}
 
@@ -612,40 +655,42 @@ async def play_websocket(websocket: WebSocket, match_id: str):
         await websocket.close()
         return
     await websocket.accept()
-    # 订阅事件流（subscribe 会再推一条带 seats 的 snapshot，此处先发一份便于立即渲染）
+    # subscribe 入队一条带 seats 与完整回放的权威 snapshot；pump 随即发送。
+    # 不在路由重复发送，否则每次连接都会收到两份相同快照，造成前端重复归约。
     q = orch.subscribe(match_id)
-    from bzplat.backend.matches.seat_info import match_for_viewer
-
-    replay = store.get_replay(match_id) or {}
-    try:
-        await websocket.send_json({
-            "type": "snapshot",
-            "match": match_for_viewer(store, match_id) or m,
-            "events": json.loads(replay.get("events_json") or "[]"),
-        })
-    except Exception:
-        pass
     human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
 
     async def pump_events():
         while True:
             ev = await q.get()
             await websocket.send_json(ev)
-            if isinstance(ev, dict) and ev.get("type") in ("match_end", "error"):
+            if _is_terminal_stream_event(ev):
                 return
 
-    task = asyncio.create_task(pump_events())
-    try:
+    async def receive_actions():
         while True:
             msg = await websocket.receive_json()
-            # 解析人类落子
             move = msg if isinstance(msg, dict) else {}
             if not orch.resolve_human_turn(match_id, human_seat, move):
                 await websocket.send_json({"type": "reject", "message": "当前非你的回合或动作非法"})
-    except WebSocketDisconnect:
-        pass
+
+    sender = asyncio.create_task(pump_events())
+    receiver = asyncio.create_task(receive_actions())
+    try:
+        done, _ = await asyncio.wait(
+            {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
+        )
+        # A terminal event must close the server side even if an old or malicious
+        # client never sends another frame. Otherwise receive_json + subscription leak.
+        if sender in done and not receiver.done():
+            try:
+                await websocket.close(code=1000)
+            except (RuntimeError, WebSocketDisconnect):
+                pass
     finally:
-        task.cancel()
+        sender.cancel()
+        receiver.cancel()
+        await asyncio.gather(sender, receiver, return_exceptions=True)
         orch.unsubscribe(match_id, q)
 
 
@@ -709,7 +754,7 @@ async def match_events(match_id: str, request: Request):
                     continue
                 payload = json.dumps(ev, ensure_ascii=False)
                 yield f"data: {payload}\n\n"
-                if ev.get("type") in ("match_end", "error"):
+                if _is_terminal_stream_event(ev):
                     break
         finally:
             orch.unsubscribe(match_id, q)
@@ -1030,21 +1075,38 @@ def contest_templates(request: Request, game: str | None = None):
     return {"templates": _store(request).list_contest_templates(game_id=game)}
 
 
-# 访客/普通用户不可见的赛事状态（草稿/取消）——组织者/admin 可见全部（审计 P1-E）。
-_CONTEST_HIDDEN_STATUSES = ["draft", "cancelled"]
+# 未发布/已取消赛事仅该赛事组织者与管理员可见。使用 schema 常量，避免
+# API 层另造一套状态字面量；显式 ``?status=draft`` 也不得绕过可见性。
+_CONTEST_HIDDEN_STATUSES = (CONTEST_DRAFT, CONTEST_CANCELLED)
+
+
+def _can_view_hidden_contest(contest: dict, user: dict | None) -> bool:
+    return bool(
+        user
+        and (
+            user.get("role") == ROLE_ADMIN
+            or contest.get("organizer_id") == user.get("id")
+        )
+    )
 
 
 @router.get("/api/contests")
 def list_contests(request: Request, status: str | None = None, game_id: str | None = None,
                   page: int | None = None, per_page: int = 20,
                   user=Depends(optional_user)):
-    # 非 organizer/admin 且未显式指定 status 时，默认排除 draft/cancelled
-    # （组织者未发布的赛事结构不应提前暴露给访客）。显式传 status 则尊重调用方。
-    is_privileged = user is not None and user.get("role") in ("organizer", "admin")
-    exclude = None if (is_privileged or status) else _CONTEST_HIDDEN_STATUSES
+    # admin 全见；组织者额外看到自己的隐藏赛事；其他调用方始终排除隐藏状态。
+    # 过滤在 Store 的分页 SQL 内完成，避免 total/页数泄漏或页内裁剪错位。
+    is_admin = user is not None and user.get("role") == ROLE_ADMIN
+    exclude = None if is_admin else list(_CONTEST_HIDDEN_STATUSES)
+    hidden_owner_id = (
+        int(user["id"])
+        if user is not None and user.get("role") == ROLE_ORGANIZER
+        else None
+    )
     result = _store(request).list_contests(status=status, game_id=game_id,
                                            page=page, per_page=per_page,
-                                           exclude_statuses=exclude)
+                                           exclude_statuses=exclude,
+                                           hidden_owner_id=hidden_owner_id)
     # 裁列表响应死字段（对抗审计：match_config_json/hands_per_match/phase/source_contest_id
     # 列表视图不消费；不动 organizer_id/stages_json/rest_ends_at/current_stage_idx/
     # official_results_ready——共享 list_contests 喂 /api/contests/{id} + 后端内部读取）。
@@ -1092,11 +1154,11 @@ def contest_detail(
     c = _store(request).get_contest(contest_id)
     if not c:
         raise HTTPException(404, "比赛不存在")
-    # draft/cancelled 赛事仅 organizer/admin 可见（与 list_contests 口径一致；审计 P1-E）
-    is_privileged = user is not None and (
-        c.get("organizer_id") == user.get("id") or user.get("role") in ("organizer", "admin")
-    )
-    if c.get("status") in _CONTEST_HIDDEN_STATUSES and not is_privileged:
+    # hidden 赛事仅本赛事 organizer/admin 可见（不是任意 organizer）。
+    if (
+        c.get("status") in _CONTEST_HIDDEN_STATUSES
+        and not _can_view_hidden_contest(c, user)
+    ):
         raise HTTPException(404, "比赛不存在")
     store = _store(request)
     # entries 可单列分页（115 报名场景）：提供 entries_page 时返回分页元信息，
@@ -1135,7 +1197,10 @@ def contest_detail(
         u = request.app.state.auth.verify_session(token) if token else None
         if u:
             my_entry = store.get_entry(contest_id, u["id"])
-            is_organizer = c.get("organizer_id") == u.get("id") or u.get("role") == "admin"
+            is_organizer = (
+                c.get("organizer_id") == u.get("id")
+                or u.get("role") == ROLE_ADMIN
+            )
     except Exception:
         pass
     # 非组织者脱敏实名字段（隐私保护——实名仅组织者用于线下核对/上报）
@@ -1171,21 +1236,29 @@ def contest_detail(
 
 
 @router.get("/api/contests/{contest_id}/bracket")
-def contest_bracket(contest_id: int, request: Request):
-    """对阵图数据（带 bot 名/owner 名/winner，公开）。"""
-    if not _store(request).get_contest(contest_id):
+def contest_bracket(
+    contest_id: int, request: Request, user=Depends(optional_user)
+):
+    """对阵图数据；隐藏赛事沿用 detail 的 owner/admin 可见性。"""
+    contest = _store(request).get_contest(contest_id)
+    if not contest:
+        raise HTTPException(404, "比赛不存在")
+    if (
+        contest.get("status") in _CONTEST_HIDDEN_STATUSES
+        and not _can_view_hidden_contest(contest, user)
+    ):
         raise HTTPException(404, "比赛不存在")
     return {"pairings": _store(request).contest_bracket(contest_id)}
 
 
 def _require_contest_organizer(c: dict, user: dict) -> None:
     """校验当前用户是该场赛事组织者或 admin（与 open/start 同权限模型）。"""
-    if c.get("organizer_id") != user.get("id") and user.get("role") != "admin":
+    if c.get("organizer_id") != user.get("id") and user.get("role") != ROLE_ADMIN:
         raise HTTPException(403, "仅该场赛事组织者或管理员可操作")
 
 
 @router.post("/api/contests/{contest_id}/entries")
-def organizer_add_entry(
+async def organizer_add_entry(
     contest_id: int, body: dict, request: Request, user=Depends(require_organizer)
 ):
     """P5 组织者名单：单条加人（draft/open 允许）。
@@ -1199,9 +1272,6 @@ def organizer_add_entry(
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    if c["status"] not in ("draft", "open"):
-        raise HTTPException(400, "开赛后不可改名册")
-    from bzplat.backend.games import normalize_game_id
     raw_uid = body.get("user_id")
     raw_bid = body.get("bot_id")
     if raw_uid is None or raw_bid is None:
@@ -1210,22 +1280,15 @@ def organizer_add_entry(
         uid, bid = int(raw_uid), int(raw_bid)
     except (TypeError, ValueError):
         raise HTTPException(400, "user_id / bot_id 必须是整数")
-    if not store.get_user(uid):
-        raise HTTPException(400, f"user {uid} 不存在")
-    b = store.get_bot(bid)
-    if not b or not b.get("is_active") or not b.get("binary_path"):
-        raise HTTPException(400, "bot 不可用")
-    cgid = normalize_game_id(c.get("game_id"))
-    if normalize_game_id(b.get("game_id")) != cgid:
-        raise HTTPException(400, f"bot 游戏 {b.get('game_id')} ≠ 赛事 {cgid}")
-    if store.get_entry(contest_id, uid):
-        raise HTTPException(400, "该用户已报名")
-    store.add_contest_entry(contest_id, uid, bid)
+    try:
+        await _contests(request).add_roster_entry(contest_id, uid, bid)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"ok": True}
 
 
 @router.post("/api/contests/{contest_id}/entries/bulk")
-def organizer_assign_entries(
+async def organizer_assign_entries(
     contest_id: int, body: AdminAssignEntries, request: Request, user=Depends(require_organizer)
 ):
     """P5 组织者名单：批量加人（迁移自 admin bulk，assign_all + 显式列表两模式）。"""
@@ -1234,8 +1297,6 @@ def organizer_assign_entries(
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    if c["status"] not in ("draft", "open"):
-        raise HTTPException(400, "开赛后不可改名册")
     from bzplat.backend.games import normalize_game_id
     cgid = normalize_game_id(c.get("game_id"))
     if body.assign_all:
@@ -1255,29 +1316,21 @@ def organizer_assign_entries(
             seen_users.add(uid)
             target.append((uid, b["id"]))
     else:
-        target = [(int(e.get("user_id")), int(e.get("bot_id"))) for e in body.entries or []]
-    added = 0
-    skipped: list[str] = []
-    existing = {e["user_id"] for e in store.list_entries(contest_id)}
-    for uid, bid in target:
-        if uid in existing:
-            skipped.append(f"user {uid} 已报名，跳过")
-            continue
-        b = store.get_bot(bid)
-        if not b or not b.get("is_active") or not b.get("binary_path"):
-            skipped.append(f"bot {bid} 不可用，跳过")
-            continue
-        if normalize_game_id(b.get("game_id")) != cgid:
-            skipped.append(f"bot {bid} 游戏 {b.get('game_id')} ≠ 赛事 {cgid}，跳过")
-            continue
-        store.add_contest_entry(contest_id, uid, bid)
-        existing.add(uid)
-        added += 1
-    return {"added": added, "skipped": skipped, "total_entries": len(existing)}
+        try:
+            target = [
+                (int(e.get("user_id")), int(e.get("bot_id")))
+                for e in body.entries or []
+            ]
+        except (TypeError, ValueError):
+            raise HTTPException(400, "user_id / bot_id 必须是整数")
+    try:
+        return await _contests(request).assign_roster_entries(contest_id, target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.delete("/api/contests/{contest_id}/entries/{user_id}")
-def organizer_delete_entry(
+async def organizer_delete_entry(
     contest_id: int, user_id: int, request: Request, user=Depends(require_organizer)
 ):
     """P5 组织者名单：删人（draft/open 允许）。"""
@@ -1286,9 +1339,11 @@ def organizer_delete_entry(
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    if c["status"] not in ("draft", "open"):
-        raise HTTPException(400, "开赛后不可改名册")
-    if not store.delete_entry(contest_id, user_id):
+    try:
+        deleted = await _contests(request).delete_roster_entry(contest_id, user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "报名记录不存在")
     return {"ok": True}
 
@@ -1415,20 +1470,24 @@ def contest_export(contest_id: int, request: Request, format: str = "csv"):
 
 
 @router.post("/api/contests/{contest_id}/open")
-def open_contest(contest_id: int, request: Request, user=Depends(require_organizer)):
+async def open_contest(contest_id: int, request: Request, user=Depends(require_organizer)):
     c = _store(request).get_contest(contest_id)
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
-    return {"contest": _contests(request).open_registration(contest_id)}
+    try:
+        contest = await _contests(request).open_registration(contest_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"contest": contest}
 
 
 @router.post("/api/contests/{contest_id}/register")
-def register_contest(
+async def register_contest(
     contest_id: int, body: ContestRegister, request: Request, user=Depends(require_user)
 ):
     try:
-        entry = _contests(request).register(
+        entry = await _contests(request).register(
             contest_id, user["id"], body.bot_id, role=user.get("role", "")
         )
     except ValueError as e:
@@ -1538,10 +1597,13 @@ async def finish_contest(
 
 @router.get("/api/admin/users")
 def admin_users(
-    request: Request, page: int | None = None, per_page: int = 50,
+    request: Request, q: str | None = None, real_name: bool | None = None,
+    page: int | None = None, per_page: int = 50,
     _admin=Depends(require_admin),
 ):
-    result = _store(request).list_users(page=page, per_page=per_page)
+    result = _store(request).list_users(
+        q=q, real_name=real_name, page=page, per_page=per_page,
+    )
     if isinstance(result, dict):
         return {"users": result["items"], "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
@@ -1590,8 +1652,17 @@ def admin_patch_user(
 def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admin)):
     if admin["id"] == user_id:
         raise HTTPException(400, "不能删除自己")
-    if not _store(request).delete_user(user_id):
+    result = _store(request).delete_user_if_safe(user_id)
+    if not result["found"]:
         raise HTTPException(404, "用户不存在")
+    if not result["deleted"]:
+        raise HTTPException(
+            409,
+            "用户存在活跃对局/赛事引用或仍是赛事组织者，不能硬删："
+            f"{result['blockers']}（请先中止对局并删除或转移其赛事）",
+        )
+    for bot_id in result["bot_ids"]:
+        _bots(request).purge_bot_files(bot_id)
     audit_log(request, "admin_delete_user", result="ok", user=admin.get("username"), target=user_id)
     return {"ok": True}
 
@@ -1619,7 +1690,7 @@ class AdminMatchPatch(BaseModel):
 
 
 @router.patch("/api/admin/matches/{match_id}")
-def admin_patch_match(
+async def admin_patch_match(
     match_id: str, body: AdminMatchPatch, request: Request, _admin=Depends(require_admin)
 ):
     """管理员强制修正对局状态（如中止卡住的对局）。"""
@@ -1627,14 +1698,30 @@ def admin_patch_match(
     if body.status is not None:
         if body.status not in ("pending", "running", "completed", "aborted"):
             raise HTTPException(400, "非法对局状态")
+        # 活跃对局的生命周期由 orchestrator/runner 独占。后台若直接把 running
+        # 改成 pending/completed，正在运行的 task 仍会继续并再次覆写结果、评分和
+        # 赛事回调；pending/running 也不能作为“手工修复”入口伪造。管理员唯一
+        # 支持的状态动作是经 abort_match cancel + drain 后中止。
+        if body.status != "aborted":
+            raise HTTPException(409, "管理员仅可中止对局，不能手工伪造运行或完成状态")
         fields["status"] = body.status
     if body.reason is not None:
         fields["reason"] = body.reason
     if not fields:
         raise HTTPException(400, "无更新字段")
-    m = _store(request).update_match(match_id, **fields)
-    if not m:
+    if body.status == "aborted":
+        try:
+            match = await _orch(request).abort_match(
+                match_id, reason=body.reason or "admin_aborted"
+            )
+        except ValueError as exc:
+            code = 404 if "不存在" in str(exc) else 409
+            raise HTTPException(code, str(exc)) from exc
+        return {"match": match}
+    before = _store(request).get_match(match_id)
+    if not before:
         raise HTTPException(404, "对局不存在")
+    m = _store(request).update_match(match_id, **fields)
     return {"match": m}
 
 
@@ -1650,7 +1737,8 @@ def admin_bots(
     per_page: int = 50,
     _admin=Depends(require_admin),
 ):
-    rows = _store(request).list_bots(
+    store = _store(request)
+    rows = store.list_bots(
         active_only=bool(active) if active is not None else False,
         game_id=game_id,
     )
@@ -1664,8 +1752,18 @@ def admin_bots(
         pp = max(1, min(200, per_page))
         offset = (max(1, page) - 1) * pp
         rows = rows[offset:offset + pp]
-        return {"bots": rows, "page": page, "per_page": pp, "total": total}
-    return {"bots": rows}
+    # 管理端所有者链接走 /user/:username，不能把数值 owner_id 填进用户名路由。
+    enriched = []
+    for row in rows:
+        owner = store.get_user(row.get("owner_id")) if row.get("owner_id") else None
+        enriched.append({
+            **row,
+            "owner_name": owner.get("username") if owner else None,
+            "owner_display": owner.get("display_name") if owner else None,
+        })
+    if page is not None:
+        return {"bots": enriched, "page": page, "per_page": pp, "total": total}
+    return {"bots": enriched}
 
 
 @router.patch("/api/admin/bots/{bot_id}")
@@ -1691,14 +1789,15 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
     # 进行中赛事(published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→
     # _apply_ratings(None) 崩；②进行中赛事对阵/报名的 bot_id 变 NULL→对阵表残缺。
     # 此时应改用停用（is_active=0，用户路径）。
-    refs = store.bot_active_references(bot_id)
-    if any(v > 0 for v in refs.values()):
+    result = store.delete_bot_if_safe(bot_id)
+    if not result["found"]:
+        raise HTTPException(404, "bot 不存在")
+    refs = result["references"]
+    if not result["deleted"]:
         raise HTTPException(
             409,
             f"bot 存在活跃引用，不能硬删：{refs}（进行中对局/赛事；请改用停用 is_active=0）",
         )
-    if not store.delete_bot(bot_id):
-        raise HTTPException(404, "bot 不存在")
     # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
     _bots(request).purge_bot_files(bot_id)
     audit_log(request, "admin_delete_bot", result="ok", user=admin.get("username"), target=bot_id)
@@ -1747,26 +1846,9 @@ def admin_contests(
 
 @router.patch("/api/admin/contests/{contest_id}")
 async def admin_patch_contest(
-    contest_id: int, body: AdminContestPatch, request: Request, _admin=Depends(require_admin)
+    contest_id: int, body: AdminContestPatch, request: Request, admin=Depends(require_admin)
 ):
     fields: dict[str, Any] = {}
-    if body.status is not None:
-        # open → running 必须走真正 start，禁止静默改状态
-        if body.status == "running":
-            c0 = _store(request).get_contest(contest_id)
-            if not c0:
-                raise HTTPException(404, "比赛不存在")
-            if c0["status"] in ("open", "draft", "published"):
-                try:
-                    contest = await _contests(request).start(contest_id)
-                except ValueError as e:
-                    raise HTTPException(400, str(e))
-                return {"contest": contest}
-        if body.status not in (
-            "draft", "open", "published", "running", "rest", "finished", "cancelled"
-        ):
-            raise HTTPException(400, "非法比赛状态")
-        fields["status"] = body.status
     if body.title is not None:
         fields["title"] = body.title
     if body.hands_per_match is not None:
@@ -1776,6 +1858,51 @@ async def admin_patch_contest(
         tv = getattr(body, tk)
         if tv is not None:
             fields[tk] = tv
+
+    if body.status is not None:
+        if body.status not in {
+            CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED, CONTEST_RUNNING,
+            CONTEST_REST, CONTEST_FINISHED, CONTEST_CANCELLED,
+        }:
+            raise HTTPException(400, "非法比赛状态")
+        if fields:
+            raise HTTPException(400, "状态推进不能与其他字段修改同时提交")
+
+        store = _store(request)
+        before = store.get_contest(contest_id)
+        if not before:
+            raise HTTPException(404, "比赛不存在")
+        old_status = before["status"]
+        target = body.status
+        try:
+            if target == old_status:
+                contest = before
+            elif target == CONTEST_OPEN and old_status == CONTEST_DRAFT:
+                contest = await _contests(request).open_registration(contest_id)
+            elif target == CONTEST_PUBLISHED and old_status in (CONTEST_DRAFT, CONTEST_OPEN):
+                contest = await _contests(request).publish(contest_id)
+            elif target == CONTEST_RUNNING and old_status in (
+                CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
+            ):
+                contest = await _contests(request).start(contest_id)
+            elif target == CONTEST_FINISHED and old_status in (CONTEST_RUNNING, CONTEST_REST):
+                contest = await _contests(request).finish(contest_id)
+            elif target == CONTEST_CANCELLED and old_status in (
+                CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED,
+            ):
+                contest = await _contests(request).cancel(contest_id)
+            else:
+                raise ValueError(f"不支持赛事从 {old_status} 推进到 {target}")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        if target != old_status:
+            audit_log(
+                request, "admin_patch_contest_status", result="ok",
+                user=admin.get("username"), target=contest_id, detail=target,
+            )
+        return {"contest": contest}
+
     if not fields:
         raise HTTPException(400, "无更新字段")
     try:
@@ -1785,20 +1912,16 @@ async def admin_patch_contest(
         raise HTTPException(400, str(e))
     if not c:
         raise HTTPException(404, "比赛不存在")
-    # 审计日志：状态变更（尤其 cancelled）必须可追溯（原无审计，曾导致赛事被改
-    # cancelled 却无从查证谁操作）。非状态字段更新不打审计避免噪音。
-    if "status" in fields:
-        audit_log(
-            request, "admin_patch_contest_status", result="ok",
-            user=admin.get("username"), target=contest_id,
-            detail=fields["status"],
-        )
     return {"contest": c}
 
 
 @router.delete("/api/admin/contests/{contest_id}")
-def admin_delete_contest(contest_id: int, request: Request, admin=Depends(require_admin)):
-    if not _store(request).delete_contest(contest_id):
+async def admin_delete_contest(contest_id: int, request: Request, admin=Depends(require_admin)):
+    try:
+        deleted = await _contests(request).delete(contest_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "比赛不存在")
     audit_log(request, "admin_delete_contest", result="ok", user=admin.get("username"), target=contest_id)
     return {"ok": True}
@@ -1826,7 +1949,7 @@ class AdminAssignEntries(BaseModel):
 
 
 @router.post("/api/admin/contests/{contest_id}/entries/bulk")
-def admin_assign_entries(
+async def admin_assign_entries(
     contest_id: int, body: AdminAssignEntries, request: Request, _admin=Depends(require_admin)
 ):
     """管理员批量指派参赛者+Bot。绕开 register() 的 CONTEST_OPEN + owner 校验（admin 专享）。
@@ -1858,38 +1981,34 @@ def admin_assign_entries(
             target.append((uid, b["id"]))
     else:
         target = []
-        for e in body.entries or []:
-            uid = int(e.get("user_id"))
-            bid = int(e.get("bot_id"))
-            target.append((uid, bid))
+        try:
+            for e in body.entries or []:
+                uid = int(e.get("user_id"))
+                bid = int(e.get("bot_id"))
+                target.append((uid, bid))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "user_id / bot_id 必须是整数")
 
-    added = 0
-    skipped: list[str] = []
-    existing = {e["user_id"] for e in store.list_entries(contest_id)}
-    for uid, bid in target:
-        if uid in existing:
-            skipped.append(f"user {uid} 已报名，跳过")
-            continue
-        b = store.get_bot(bid)
-        if not b or not b.get("is_active") or not b.get("binary_path"):
-            skipped.append(f"bot {bid} 不可用，跳过")
-            continue
-        if normalize_game_id(b.get("game_id")) != cgid:
-            skipped.append(f"bot {bid} 游戏 {b.get('game_id')} ≠ 赛事 {cgid}，跳过")
-            continue
-        store.add_contest_entry(contest_id, uid, bid)
-        existing.add(uid)
-        added += 1
+    try:
+        result = await _contests(request).assign_roster_entries(contest_id, target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     audit_log(request, "admin_assign_entries", result="ok", target=contest_id,
-              detail=f"added={added} skipped={len(skipped)}")
-    return {"added": added, "skipped": skipped, "total_entries": len(existing)}
+              detail=f"added={result['added']} skipped={len(result['skipped'])}")
+    return result
 
 
 @router.delete("/api/admin/contests/{contest_id}/entries/{user_id}")
-def admin_delete_entry(
+async def admin_delete_entry(
     contest_id: int, user_id: int, request: Request, _admin=Depends(require_admin)
 ):
-    if not _store(request).delete_entry(contest_id, user_id):
+    if not _store(request).get_contest(contest_id):
+        raise HTTPException(404, "比赛不存在")
+    try:
+        deleted = await _contests(request).delete_roster_entry(contest_id, user_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not deleted:
         raise HTTPException(404, "报名记录不存在")
     return {"ok": True}
 

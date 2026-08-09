@@ -84,6 +84,21 @@ def test_search_matches_by_bot_name(tmp_path):
     s.close()
 
 
+def test_search_matches_by_match_id(tmp_path):
+    s = _store(tmp_path)
+    u = s.create_user("idowner", "idowner@ex.com", "x")
+    b1 = s.create_bot(u["id"], "idbot_a", binary_path="/tmp/a", format="elf")
+    b2 = s.create_bot(u["id"], "idbot_b", binary_path="/tmp/b", format="elf")
+    match_id = "20260809-searchable-id"
+    s.create_match(match_id, bot_a_id=b1["id"], bot_b_id=b2["id"])
+    s.update_match(match_id, status="completed")
+
+    rows = s.search_matches("searchable-id")
+
+    assert [row["id"] for row in rows] == [match_id]
+    s.close()
+
+
 def test_migration_bio_avatar_columns_idempotent(tmp_path):
     db = str(tmp_path / "mig.db")
     Store(db).close()

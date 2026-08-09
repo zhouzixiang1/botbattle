@@ -121,3 +121,16 @@ def test_admin_assign_contest_not_found(tmp_path):
                json={"assign_all": True, "game_id": "holdem"})
     assert r.status_code == 404
     s.close()
+
+
+def test_admin_assign_rejects_missing_or_non_integer_ids(tmp_path):
+    s, _st, _admin, _users, cid, tok, c = _setup(tmp_path)
+    for entry in ({"user_id": 1}, {"user_id": "x", "bot_id": 2}):
+        r = c.post(
+            f"/api/admin/contests/{cid}/entries/bulk",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"entries": [entry]},
+        )
+        assert r.status_code == 400, r.text
+        assert "必须是整数" in r.text
+    s.close()

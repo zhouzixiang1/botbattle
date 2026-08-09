@@ -4,10 +4,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
 from bzplat.backend.contests.stages import (
+    PairingSpec,
     estimate_match_count,
     generate_stage_pairings,
     swiss_rounds_needed,
@@ -24,6 +26,7 @@ from bzplat.backend.runtime.limits import FULL_RR_MAX_N
 from bzplat.backend.store import Store
 from bzplat.backend.store.db import match_deltas
 from bzplat.backend.store.schema import (
+    CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
     CONTEST_OPEN,
@@ -31,11 +34,10 @@ from bzplat.backend.store.schema import (
     CONTEST_REST,
     CONTEST_RUNNING,
     REGISTERED_ENGINES,
-    ROLE_ADMIN,
-    ROLE_ORGANIZER,
     SETTING_FULL_RR_MAX_N,
     STATUS_ABORTED,
     STATUS_COMPLETED,
+    STATUS_PENDING,
     TYPE_CONTEST,
 )
 
@@ -105,8 +107,9 @@ class ContestManager:
     def __init__(self, store: Store, orch: MatchOrchestrator) -> None:
         self.store = store
         self.orch = orch
-        # per-contest 锁：串行化所有写状态路径（start/publish/resume/advance/maybe_finish/
-        # _dispatch_pending），防止 on_match_done 并发回调 + scheduler 并发导致重复生成轮次。
+        # per-contest 锁：串行化所有写状态路径（start/publish/cancel/resume/advance/
+        # maybe_finish/_dispatch_pending），防止请求与 scheduler/on_match_done 并发导致
+        # 重复生成轮次或取消后继续派发。
         self._locks: dict[int, asyncio.Lock] = {}
 
     def _lock(self, contest_id: int) -> asyncio.Lock:
@@ -145,6 +148,18 @@ class ContestManager:
         if stages:
             tid = template_id or "custom"
             gid = (game_id or "holdem").strip().lower()
+            # 即使调用方同时传入自定义 stages，也不能借此把一个具名模板标成
+            # 另一款游戏。该组合会污染赛事快照，后续按 gid 启动错误裁判。
+            if template_id:
+                declared_template = (
+                    self.store.get_contest_template(template_id) or get_template(template_id)
+                )
+                if declared_template:
+                    template_gid = str(declared_template["game_id"]).strip().lower()
+                    if gid != template_gid:
+                        raise ValueError(
+                            f"模板 {template_id} 属于游戏 {template_gid}，不能用于游戏 {gid}"
+                        )
             stage_list = stages
         else:
             tid, gid, stage_list, _tpl_mc = resolve_template(
@@ -179,17 +194,30 @@ class ContestManager:
             starts_at=starts_at,
         )
 
-    def open_registration(self, contest_id: int) -> dict:
-        """手动开放报名。若 registration_opens_at 未预设则盖 now（手动触发兼容）；
-        已预设则调度器到点自动调本方法。"""
+    async def open_registration(self, contest_id: int) -> dict:
+        """手动开放报名；与发布、开赛等生命周期写路径共用赛事锁。"""
+        async with self._lock(contest_id):
+            return self._open_registration_locked(contest_id)
+
+    def _open_registration_locked(self, contest_id: int) -> dict:
+        """draft→open 的实际逻辑（调用方已持 per-contest 锁）。
+
+        重复 open 是幂等读；其他状态不得倒退为 open。若
+        ``registration_opens_at`` 未预设则盖 now，已预设时保留原时间。
+        """
         c = self.store.get_contest(contest_id)
-        opens = (c or {}).get("registration_opens_at") or _now()
-        self.store.update_contest(
+        if not c:
+            raise ValueError("比赛不存在")
+        if c["status"] == CONTEST_OPEN:
+            return c
+        if c["status"] != CONTEST_DRAFT:
+            raise ValueError(f"赛事处于 {c['status']} 态，不能开放报名（仅 draft 可开放）")
+        opens = c.get("registration_opens_at") or _now()
+        return self.store.update_contest(
             contest_id, status=CONTEST_OPEN, registration_opens_at=opens
         )
-        return self.store.get_contest(contest_id)
 
-    def register(
+    async def register(
         self,
         contest_id: int,
         user_id: int,
@@ -197,6 +225,21 @@ class ContestManager:
         *,
         role: str = "",
     ) -> dict:
+        """报名；与 publish/start 共用赛事锁，杜绝关报名后晚插 entry。"""
+        async with self._lock(contest_id):
+            return self._register_locked(contest_id, user_id, bot_id, role=role)
+
+    def _register_locked(
+        self,
+        contest_id: int,
+        user_id: int,
+        bot_id: int,
+        *,
+        role: str = "",
+    ) -> dict:
+        """register 的锁内实现；Store 写入时还会在同事务复核 open 状态。"""
+        # ``role`` 仅为旧调用签名兼容保留。普通 /register 入口永远是本人操作；
+        # organizer/admin 的代报名必须走已校验赛事归属的 entries 管理接口。
         c = self.store.get_contest(contest_id)
         if not c or c["status"] != CONTEST_OPEN:
             raise ValueError("比赛未开放报名")
@@ -212,8 +255,7 @@ class ContestManager:
         bot = self.store.get_bot(bot_id)
         if not bot:
             raise ValueError("bot 不存在")
-        can_proxy = role in (ROLE_ADMIN, ROLE_ORGANIZER)
-        if bot["owner_id"] != user_id and not can_proxy:
+        if bot["owner_id"] != user_id:
             raise ValueError("只能派遣自己的 bot")
         if not bot.get("is_active") or not bot.get("binary_path"):
             raise ValueError("bot 不可用")
@@ -226,7 +268,90 @@ class ContestManager:
         owner_id = bot["owner_id"]
         if self.store.get_entry(contest_id, owner_id):
             raise ValueError("该用户在此比赛中已报名")
-        return self.store.add_contest_entry(contest_id, owner_id, bot_id)
+        return self.store.add_contest_entry_once(contest_id, owner_id, bot_id)
+
+    def _roster_target_error(
+        self, contest: dict, user_id: int, bot_id: int
+    ) -> str | None:
+        if not self.store.get_user(user_id):
+            return f"user {user_id} 不存在"
+        bot = self.store.get_bot(bot_id)
+        if not bot or not bot.get("is_active") or not bot.get("binary_path"):
+            return f"bot {bot_id} 不可用"
+        if bot.get("owner_id") != user_id:
+            return f"bot {bot_id} 不属于 user {user_id}"
+        contest_game = (contest.get("game_id") or "holdem").strip().lower()
+        bot_game = (bot.get("game_id") or "holdem").strip().lower()
+        if bot_game != contest_game:
+            return f"bot {bot_id} 游戏 {bot_game} ≠ 赛事 {contest_game}"
+        return None
+
+    async def add_roster_entry(
+        self, contest_id: int, user_id: int, bot_id: int
+    ) -> dict:
+        """组织者/admin 单条代报名；仅 draft/open，且与 publish 共用赛事锁。"""
+        async with self._lock(contest_id):
+            contest = self.store.get_contest(contest_id)
+            if not contest:
+                raise ValueError("赛事不存在")
+            if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
+                raise ValueError("开赛后不可改名册")
+            error = self._roster_target_error(contest, user_id, bot_id)
+            if error:
+                raise ValueError(error)
+            added, skipped = self.store.add_contest_roster_entries(
+                contest_id, [(user_id, bot_id)]
+            )
+            if skipped or not added:
+                raise ValueError("该用户已报名")
+            return added[0]
+
+    async def assign_roster_entries(
+        self, contest_id: int, targets: list[tuple[int, int]]
+    ) -> dict:
+        """组织者/admin 批量代报名；校验后整批在 Store 单事务写入。"""
+        async with self._lock(contest_id):
+            contest = self.store.get_contest(contest_id)
+            if not contest:
+                raise ValueError("赛事不存在")
+            if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
+                raise ValueError("开赛后不可改名册")
+
+            skipped: list[str] = []
+            valid: list[tuple[int, int]] = []
+            seen: set[int] = set()
+            for user_id, bot_id in targets:
+                if user_id in seen:
+                    skipped.append(f"user {user_id} 重复，跳过")
+                    continue
+                seen.add(user_id)
+                error = self._roster_target_error(contest, user_id, bot_id)
+                if error:
+                    skipped.append(f"{error}，跳过")
+                    continue
+                valid.append((user_id, bot_id))
+
+            added, duplicate_users = self.store.add_contest_roster_entries(
+                contest_id, valid
+            )
+            skipped.extend(
+                f"user {user_id} 已报名，跳过" for user_id in duplicate_users
+            )
+            return {
+                "added": len(added),
+                "skipped": skipped,
+                "total_entries": len(self.store.list_contest_entries(contest_id)),
+            }
+
+    async def delete_roster_entry(self, contest_id: int, user_id: int) -> bool:
+        """组织者/admin 删名册；仅 draft/open，且与 publish 共用赛事锁。"""
+        async with self._lock(contest_id):
+            contest = self.store.get_contest(contest_id)
+            if not contest:
+                raise ValueError("赛事不存在")
+            if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
+                raise ValueError("开赛后不可改名册")
+            return self.store.delete_contest_roster_entry(contest_id, user_id)
 
     async def dispatch(
         self,
@@ -255,6 +380,8 @@ class ContestManager:
         *,
         role: str = "",
     ) -> dict:
+        # ``role`` 仅为旧调用签名兼容保留。普通 /dispatch 只允许当前用户更新
+        # 自己的 entry；代理名册操作必须走 organizer/admin 专用 entries 接口。
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
@@ -271,8 +398,7 @@ class ContestManager:
         bot = self.store.get_bot(bot_id)
         if not bot:
             raise ValueError("bot 不存在")
-        can_proxy = role in (ROLE_ADMIN, ROLE_ORGANIZER)
-        if bot["owner_id"] != user_id and not can_proxy:
+        if bot["owner_id"] != user_id:
             raise ValueError("只能派遣自己的 bot")
         if not bot.get("is_active") or not bot.get("binary_path"):
             raise ValueError("bot 不可用")
@@ -283,13 +409,9 @@ class ContestManager:
                 f"Bot 游戏类型 ({bot_game}) 与比赛 ({contest_game}) 不一致"
             )
 
-        # proxy（admin/organizer）按 bot owner 查 entry；普通用户 owner_id==user_id（line 207 已保证）
-        owner_id = bot["owner_id"]
-        entry = self.store.get_entry(contest_id, owner_id)
+        entry = self.store.get_entry(contest_id, user_id)
         if not entry:
             raise ValueError("未报名本比赛")
-        if entry["user_id"] != user_id and not can_proxy:
-            raise ValueError("只能更换自己的派遣")
 
         old_bot = entry["bot_id"]
         updated = self.store.update_entry(
@@ -355,6 +477,51 @@ class ContestManager:
                 f"游戏引擎未注册: {game_id}（当前仅支持 {sorted(REGISTERED_ENGINES)}）"
             )
 
+    def _bot_unavailable_reason(
+        self, bot_id: int | None, *, expected_game: str
+    ) -> str | None:
+        """返回赛事 Bot 不可用原因；可用时返回 None。
+
+        发布/开赛与中途重派必须共用同一套判定，否则会出现
+        “发布时看似可用，实际派发时才失败”的空壳赛事。
+        """
+        if bot_id is None:
+            return "Bot 引用已缺失"
+        bot = self.store.get_bot(bot_id)
+        if not bot:
+            return f"Bot #{bot_id} 不存在"
+        if not bot.get("is_active"):
+            return f"Bot #{bot_id} 已停用"
+        if not bot.get("binary_path"):
+            return f"Bot #{bot_id} 未上传可执行文件"
+        bot_game = str(bot.get("game_id") or "holdem").lower()
+        if bot_game != expected_game:
+            return f"Bot #{bot_id} 游戏为 {bot_game}，赛事游戏为 {expected_game}"
+        return None
+
+    def _validate_initial_roster(self, contest: dict, entries: list[dict]) -> None:
+        """发布/开赛前在赛事锁内复核名册可运行性。
+
+        不允许过滤掉坏 entry 后静默开赛：那会让报名者无声消失。
+        只有全部报名 entry 均有 active + binary + 游戏匹配的 Bot，
+        且总数至少 2，才能生成公平的首阶段对阵。
+        开赛初始化会重置历史 eliminated 标记，因此校验不能先按该标记
+        过滤，否则会把实际将参赛的人漏掉。
+        """
+        game_id = str(contest.get("game_id") or "holdem").lower()
+        active_entries = entries
+        issues: list[str] = []
+        for entry in active_entries:
+            reason = self._bot_unavailable_reason(
+                entry.get("bot_id"), expected_game=game_id
+            )
+            if reason:
+                issues.append(f"报名 #{entry.get('id')}: {reason}")
+        if len(active_entries) < 2 or issues:
+            detail = "；".join(issues[:5])
+            suffix = f"：{detail}" if detail else ""
+            raise ValueError(f"至少需要 2 名持有可用 Bot 的参赛者{suffix}")
+
     async def start(self, contest_id: int) -> dict:
         """立即开赛（手动触发，跳过排期等待）。
 
@@ -363,53 +530,94 @@ class ContestManager:
           pairing 的 scheduled_at 改成 now（立即到点）+ dispatch。避免重复生成 pairing。
         若要走两阶段（截止报名→出排期→到开赛时间再开打），用 publish() + 调度器。
         """
+        async with self._lock(contest_id):
+            return await self._start_locked(contest_id)
+
+    async def _start_locked(self, contest_id: int) -> dict:
+        """start 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
-        if c["status"] not in (CONTEST_OPEN, "draft", CONTEST_PUBLISHED):
+        if c["status"] not in (CONTEST_OPEN, CONTEST_DRAFT, CONTEST_PUBLISHED):
             raise ValueError("仅 open/draft/published 可开赛")
         game_id = c.get("game_id") or "holdem"
         self._assert_engine(game_id)
 
+        # 必须先校验、后改 scheduled_at/status；校验失败时整个
+        # start 对赛事状态与已发布排期零副作用。
+        entries = self.store.list_contest_entries(contest_id)
+        self._validate_initial_roster(c, entries)
+
         # published 态：pairing 已存在，直接改 scheduled_at=now 立即开打（不重新生成）
         if c["status"] == CONTEST_PUBLISHED:
             now = _now()
-            for p in self.store.list_contest_pairings(contest_id, stage_idx=int(c.get("current_stage_idx") or 0)):
+            stage_idx = int(c.get("current_stage_idx") or 0)
+            # 硬崩可能留下“有行但只有半批”的首阶段。手动开赛前
+            # 先做完整性对账，不得只把残缺的几场改成 now 就开打。
+            self._ensure_published_pairings_locked(contest_id, stage_idx)
+            pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+            old_match_ids = {p["id"]: p.get("match_id") for p in pairings}
+            old_schedules = {p["id"]: p.get("scheduled_at") for p in pairings}
+            old_starts_at = c.get("starts_at")
+            old_rest_ends_at = c.get("rest_ends_at")
+            for p in pairings:
                 if p.get("status") == "pending" and not p.get("match_id"):
                     self.store.update_contest_pairing(p["id"], scheduled_at=now)
             self.store.update_contest(contest_id, starts_at=now, rest_ends_at=None)
-            await self._dispatch_pending(contest_id, int(c.get("current_stage_idx") or 0))
+            try:
+                await self._dispatch_pending_locked(contest_id, stage_idx)
+            except Exception:
+                # challenge 在首场成功前失败：仍是 published，尚无新 match，可精确恢复
+                # 原排期供组织者修复后重试。若已有 pairing 成功派发，状态已是 running，
+                # 保留已发生的真实进度，剩余 pending 由 scheduler 收敛。
+                current = self.store.get_contest(contest_id)
+                refreshed = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+                started = any(
+                    not old_match_ids.get(q["id"]) and q.get("match_id")
+                    for q in refreshed
+                )
+                if current and current["status"] == CONTEST_PUBLISHED and not started:
+                    for p in refreshed:
+                        if p["id"] in old_schedules and not p.get("match_id"):
+                            self.store.update_contest_pairing(
+                                p["id"], scheduled_at=old_schedules[p["id"]]
+                            )
+                    self.store.update_contest(
+                        contest_id,
+                        starts_at=old_starts_at,
+                        rest_ends_at=old_rest_ends_at,
+                    )
+                raise
             return self.store.get_contest(contest_id)
-
-        entries = self.store.list_contest_entries(contest_id)
-        if len(entries) < 2:
-            raise ValueError("至少需要 2 名参赛")
 
         stages = _parse_stages(c)
         if not stages:
             _, _, stages = resolve_stages(
                 c.get("template_id") or "holdem_swiss_ko", store=self.store
             )
-            self.store.update_contest(
-                contest_id, stages_json=json.dumps(stages, ensure_ascii=False)
-            )
 
         self._guard_full_rr(stages, len(entries))
 
-        # 按报名序赋 seed
-        for i, e in enumerate(entries):
-            self.store.update_entry(contest_id, e["user_id"], seed=i + 1, eliminated=0)
-
-        self.store.update_contest(
-            contest_id,
-            status=CONTEST_RUNNING,
-            starts_at=_now(),
-            registration_closes_at=_now(),
-            current_stage_idx=0,
-            rest_ends_at=None,
-        )
-        async with self._lock(contest_id):
-            await self._begin_stage(contest_id, 0, schedule_immediately=True)
+        snapshot = self._initial_lifecycle_snapshot(c, entries)
+        try:
+            self._prepare_initial_contest(
+                contest_id,
+                entries,
+                stages,
+                closes_at=_now(),
+                starts_at=_now(),
+            )
+            await self._begin_stage(
+                contest_id,
+                0,
+                schedule_immediately=True,
+                dispatch_pending=False,
+                activate_running=False,
+            )
+            await self._dispatch_pending_locked(contest_id, 0)
+        except Exception:
+            self._rollback_initial_lifecycle(contest_id, snapshot)
+            raise
         return self.store.get_contest(contest_id)
 
     async def publish(self, contest_id: int) -> dict:
@@ -419,48 +627,209 @@ class ContestManager:
         调度器到点 dispatch（scheduled_at<=now 的 pairing 才开打）。
         组织者可手动调本方法提前出排期；调度器到 registration_closes_at 自动调。
         """
+        async with self._lock(contest_id):
+            return await self._publish_locked(contest_id)
+
+    async def _publish_locked(self, contest_id: int) -> dict:
+        """publish 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
-        if c["status"] not in (CONTEST_OPEN, "draft"):
+        if c["status"] not in (CONTEST_OPEN, CONTEST_DRAFT):
             raise ValueError("仅 open/draft 可出排期")
         game_id = c.get("game_id") or "holdem"
         self._assert_engine(game_id)
 
         entries = self.store.list_contest_entries(contest_id)
-        if len(entries) < 2:
-            raise ValueError("至少需要 2 名参赛")
+        self._validate_initial_roster(c, entries)
 
         stages = _parse_stages(c)
         if not stages:
             _, _, stages = resolve_stages(
                 c.get("template_id") or "holdem_swiss_ko", store=self.store
             )
-            self.store.update_contest(
-                contest_id, stages_json=json.dumps(stages, ensure_ascii=False)
-            )
 
         self._guard_full_rr(stages, len(entries))
 
-        # 按报名序赋 seed
-        for i, e in enumerate(entries):
-            self.store.update_entry(contest_id, e["user_id"], seed=i + 1, eliminated=0)
+        snapshot = self._initial_lifecycle_snapshot(c, entries)
+        try:
+            # 截止报名盖戳（用预设的 closes_at 或 now）+ 进 published 态。
+            # 先完整生成排期、但不 dispatch；这样生成失败可删除本次未启动 pairing
+            # 并恢复原状态，不会出现 published/running 空壳赛事。
+            self._prepare_initial_contest(
+                contest_id,
+                entries,
+                stages,
+                closes_at=c.get("registration_closes_at") or _now(),
+                starts_at=c.get("starts_at"),
+            )
+            await self._begin_stage(
+                contest_id,
+                0,
+                schedule_immediately=False,
+                dispatch_pending=False,
+                activate_running=False,
+            )
+        except Exception:
+            self._rollback_initial_lifecycle(contest_id, snapshot)
+            raise
+        return self.store.get_contest(contest_id)
 
-        # 截止报名盖戳（用预设的 closes_at 或 now）+ 进 published 态
-        closes = c.get("registration_closes_at") or _now()
+    def _initial_lifecycle_snapshot(self, contest: dict, entries: list[dict]) -> dict:
+        """记录初始阶段会修改的最小字段，供失败补偿。调用方须持赛事锁。"""
+        return {
+            "contest": {
+                key: contest.get(key)
+                for key in (
+                    "status",
+                    "registration_closes_at",
+                    "starts_at",
+                    "stages_json",
+                    "current_stage_idx",
+                    "rest_ends_at",
+                )
+            },
+            "entries": {
+                e["user_id"]: {
+                    "seed": e.get("seed") or 0,
+                    "eliminated": int(e.get("eliminated") or 0),
+                }
+                for e in entries
+            },
+            "pairing_ids": {
+                p["id"] for p in self.store.list_contest_pairings(contest["id"])
+            },
+        }
+
+    def _prepare_initial_contest(
+        self,
+        contest_id: int,
+        entries: list[dict],
+        stages: list[dict],
+        *,
+        closes_at: str,
+        starts_at: str | None,
+    ) -> None:
+        """写入首阶段 seed 与 published 准备态；调用方须持赛事锁。"""
+        for i, entry in enumerate(entries):
+            self.store.update_entry(
+                contest_id, entry["user_id"], seed=i + 1, eliminated=0
+            )
         self.store.update_contest(
             contest_id,
             status=CONTEST_PUBLISHED,
-            registration_closes_at=closes,
+            registration_closes_at=closes_at,
+            starts_at=starts_at,
+            stages_json=json.dumps(stages, ensure_ascii=False),
             current_stage_idx=0,
             rest_ends_at=None,
         )
-        async with self._lock(contest_id):
-            await self._begin_stage(contest_id, 0, schedule_immediately=False)
-        return self.store.get_contest(contest_id)
+
+    def _rollback_initial_lifecycle(self, contest_id: int, snapshot: dict) -> bool:
+        """首阶段生成/首次派发失败时做保守补偿。
+
+        仅当赛事仍为 published 且本次新增 pairing 全部未绑定 match 时回滚；若已有
+        对局成功派发，真实状态应保留为 running，剩余 pending 交给 scheduler 重试。
+        因调用方仍持 per-contest 锁，补偿不会覆盖 cancel/start 等合法生命周期变化。
+        """
+        current = self.store.get_contest(contest_id)
+        original_status = snapshot["contest"]["status"]
+        if not current or current["status"] not in (CONTEST_PUBLISHED, original_status):
+            return False
+        before_ids = snapshot["pairing_ids"]
+        generated = [
+            p for p in self.store.list_contest_pairings(contest_id)
+            if p["id"] not in before_ids
+        ]
+        if any(p.get("match_id") for p in generated):
+            return False
+        generated_ids = [p["id"] for p in generated]
+        deleted = self.store.delete_unstarted_contest_pairings(contest_id, generated_ids)
+        if deleted != len(generated_ids):
+            logger.error(
+                "contest lifecycle rollback refused: contest=%s expected_pairings=%s deleted=%s",
+                contest_id,
+                len(generated_ids),
+                deleted,
+            )
+            return False
+        for user_id, fields in snapshot["entries"].items():
+            self.store.update_entry(contest_id, user_id, **fields)
+        self.store.update_contest(contest_id, **snapshot["contest"])
+        return True
+
+    @staticmethod
+    def _materialize_pairing_seats(spec: PairingSpec) -> tuple[int, int | None]:
+        """Turn PairingSpec.color_first into the durable seat 0/1 A/B order.
+
+        Pairing generators keep a stable conceptual A/B identity while choosing
+        which side should move first.  Persistence and every downstream consumer
+        use A as authoritative seat 0, so a ``color_first=1`` spec is swapped here
+        and stored with the normalized ``color_first=0`` representation.
+        """
+        bot_a_id = spec.bot_a_id
+        bot_b_id = spec.bot_b_id
+        if int(spec.color_first or 0) == 1 and bot_b_id is not None:
+            return bot_b_id, bot_a_id
+        return bot_a_id, bot_b_id
+
+    def _stage_pairing_plan(
+        self, contest: dict, stage_idx: int
+    ) -> tuple[dict, list, dict[int, int]]:
+        """纯计算当前阶段首批 pairing spec，不产生 DB 副作用。
+
+        publish 硬崩恢复必须用与 ``_begin_stage`` 完全相同的规则重算
+        期望批次，否则只按行数判断会把“数量相同但参赛者错了”的
+        损坏数据误当完整。首阶段没有“上一阶段积分”，不读当前残缺
+        pairing 的 standings，避免已落盘 bye 分反过来改变恢复排序。
+        """
+        stages = _parse_stages(contest)
+        if stage_idx < 0 or stage_idx >= len(stages):
+            raise ValueError("赛事当前阶段不存在")
+        stage = stages[stage_idx]
+        entries = [
+            entry
+            for entry in self.store.list_contest_entries(contest["id"])
+            if not entry.get("eliminated")
+        ]
+        prior_scores: dict[int, float] = {}
+        if stage_idx > 0:
+            prior_scores = {
+                row["entry_id"]: row["points"]
+                for row in self.standings(contest["id"], stage_idx=stage_idx - 1)
+            }
+        entries.sort(
+            key=lambda entry: (
+                -prior_scores.get(entry["id"], 0),
+                entry.get("seed") or 0,
+            )
+        )
+        bot_ids = [
+            entry["bot_id"] for entry in entries if entry.get("bot_id") is not None
+        ]
+        bot_to_entry = {
+            entry["bot_id"]: entry["id"]
+            for entry in entries
+            if entry.get("bot_id") is not None
+        }
+        if len(bot_ids) < 2 and stage.get("type") != "single_elimination":
+            return stage, [], bot_to_entry
+        if stage.get("type") == "swiss":
+            rounds = int(stage.get("rounds") or 0) or swiss_rounds_needed(len(bot_ids))
+            stage = {**stage, "rounds": rounds}
+            specs = generate_stage_pairings(stage, bot_ids, swiss_round=1)
+        else:
+            specs = generate_stage_pairings(stage, bot_ids)
+        return stage, specs, bot_to_entry
 
     async def _begin_stage(
-        self, contest_id: int, stage_idx: int, *, schedule_immediately: bool = False
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        schedule_immediately: bool = False,
+        dispatch_pending: bool = True,
+        activate_running: bool = True,
     ) -> None:
         """生成阶段对阵。schedule_immediately=True 时 scheduled_at 全设 now（立即开打）；
         False 时按赛事 starts_at + 轮次 stagger 逐场排期（published 态，等调度器到点 dispatch）。
@@ -472,35 +841,7 @@ class ContestManager:
                 contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
             )
             return
-        stage = stages[stage_idx]
-        entries = [
-            e
-            for e in self.store.list_contest_entries(contest_id)
-            if not e.get("eliminated")
-        ]
-        # 按 seed / 上一阶段积分排序（P0：standings 键改 entry_id，score_map 用 entry_id）
-        standings = self.standings(contest_id, stage_idx=max(0, stage_idx - 1))
-        score_map = {s["entry_id"]: s["points"] for s in standings}
-        entries.sort(
-            key=lambda e: (-score_map.get(e["id"], 0), e.get("seed") or 0)
-        )
-        bot_ids = [e["bot_id"] for e in entries if e.get("bot_id") is not None]
-        # P0：bot_id → entry_id 映射（生成 pairing 时快照 entry 身份）
-        bot_to_entry = {e["bot_id"]: e["id"] for e in entries if e.get("bot_id") is not None}
-        if len(bot_ids) < 2 and stage.get("type") != "single_elimination":
-            self.store.update_contest(
-                contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
-            )
-            return
-
-        stype = stage.get("type")
-        if stype == "swiss":
-            rounds = int(stage.get("rounds") or 0) or swiss_rounds_needed(len(bot_ids))
-            stage = {**stage, "rounds": rounds}
-            # 生成全部瑞士轮（简化：开赛时一次性按当前积分预排第 1 轮；后续轮在 advance 时补）
-            specs = generate_stage_pairings(stage, bot_ids, swiss_round=1)
-        else:
-            specs = generate_stage_pairings(stage, bot_ids)
+        stage, specs, bot_to_entry = self._stage_pairing_plan(c, stage_idx)
         # specs 为空（如 single_elimination 收到 <2 bot → 无对手）：阶段无对阵 →
         # 直接 finished（防 maybe_finish 反复尝试空阶段）。
         if not specs:
@@ -521,50 +862,175 @@ class ContestManager:
         stagger_min = max(0, int(stage.get("round_stagger_minutes") or 0))  # 非负
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
+        pairing_rows: list[dict[str, Any]] = []
         for sp in specs:
+            bot_a_id, bot_b_id = self._materialize_pairing_seats(sp)
             sched = self._compute_scheduled_at(sp.round_num, base, stagger_min)
-            if sp.bot_b_id is None:
+            if not sp.requires_match:
                 # 轮空占位：bot_b_id=None、无 match、status=completed（轮空者直接晋级）。
-                self.store.add_contest_pairing(
-                    contest_id,
-                    sp.bot_a_id,
-                    None,
-                    round_num=sp.round_num,
-                    status="completed",
-                    stage_idx=stage_idx,
-                    stage_key=key,
-                    group_id=sp.group_id,
-                    bracket_slot=sp.bracket_slot,
-                    color_first=sp.color_first,
-                    entry_a_id=bot_to_entry.get(sp.bot_a_id),
-                    entry_b_id=None,
-                    published_at=published_at,
+                pairing_rows.append(
+                    {
+                        "bot_a_id": bot_a_id,
+                        "bot_b_id": None,
+                        "round_num": sp.round_num,
+                        "status": sp.status,
+                        "stage_key": key,
+                        "group_id": sp.group_id,
+                        "bracket_slot": sp.bracket_slot,
+                        "color_first": 0,
+                        "entry_a_id": bot_to_entry.get(bot_a_id),
+                        "entry_b_id": None,
+                        "published_at": published_at,
+                        "scheduled_at": None,
+                    }
                 )
                 continue
-            self.store.add_contest_pairing(
-                contest_id,
-                sp.bot_a_id,
-                sp.bot_b_id,
-                round_num=sp.round_num,
-                status="pending",
-                stage_idx=stage_idx,
-                stage_key=key,
-                group_id=sp.group_id,
-                bracket_slot=sp.bracket_slot,
-                color_first=sp.color_first,
-                entry_a_id=bot_to_entry.get(sp.bot_a_id),
-                entry_b_id=bot_to_entry.get(sp.bot_b_id),
-                published_at=published_at,
-                scheduled_at=sched,
-                **self._version_snapshot(sp.bot_a_id, sp.bot_b_id),
+            pairing_rows.append(
+                {
+                    "bot_a_id": bot_a_id,
+                    "bot_b_id": bot_b_id,
+                    "round_num": sp.round_num,
+                    "status": "pending",
+                    "stage_key": key,
+                    "group_id": sp.group_id,
+                    "bracket_slot": sp.bracket_slot,
+                    "color_first": 0,
+                    "entry_a_id": bot_to_entry.get(bot_a_id),
+                    "entry_b_id": bot_to_entry.get(bot_b_id),
+                    "published_at": published_at,
+                    "scheduled_at": sched,
+                    **self._version_snapshot(bot_a_id, bot_b_id),
+                }
             )
-        # published 态不立即改 status=running（等 dispatch 才 running）；
-        # schedule_immediately 时直接 running（start() 路径）。
-        if schedule_immediately:
-            self.store.update_contest(
-                contest_id, status=CONTEST_RUNNING, current_stage_idx=stage_idx, rest_ends_at=None
+
+        # 完整 pairing 批次 + 阶段游标/状态是一个持久化单元。首阶段 publish/start
+        # 显式传 activate_running=False，仍由首场 bind 把 published 切 running；后续
+        # stage 则在批次提交时离开 rest/推进 current_stage_idx，崩溃后可直接重派。
+        current_idx = int(c.get("current_stage_idx") or 0)
+        transition_to_running = bool(
+            activate_running
+            and (schedule_immediately or stage_idx > current_idx)
+        )
+        self.store.create_contest_stage_pairings(
+            contest_id,
+            stage_idx,
+            pairing_rows,
+            expected_current_stage_idx=current_idx,
+            activate_running=transition_to_running,
+        )
+        if dispatch_pending:
+            await self._dispatch_pending_locked(contest_id, stage_idx)
+
+    async def ensure_published_pairings(self, contest_id: int, stage_idx: int) -> None:
+        """修复 published 空壳/残缺首批对阵；与取消/开赛共用赛事锁。"""
+        async with self._lock(contest_id):
+            self._ensure_published_pairings_locked(contest_id, stage_idx)
+
+    @staticmethod
+    def _pairing_batch_signature(rows: list[dict]) -> Counter:
+        """对阵批次的业务签名（忽略 DB id/时间/版本快照）。"""
+        return Counter(
+            (
+                int(row.get("round_num") or 1),
+                row.get("entry_a_id"),
+                row.get("entry_b_id"),
+                row.get("bot_a_id"),
+                row.get("bot_b_id"),
+                row.get("stage_key") or "",
+                row.get("group_id") or "",
+                row.get("bracket_slot"),
+                int(row.get("color_first") or 0),
+                row.get("status") or "pending",
             )
-        await self._dispatch_pending_locked(contest_id, stage_idx)
+            for row in rows
+        )
+
+    def _ensure_published_pairings_locked(
+        self, contest_id: int, stage_idx: int
+    ) -> None:
+        """锁内校验 published 批次完整性，必要时原子重建。
+
+        不再以“有一行 pairing”当作完整的证据：精确重算首批 spec
+        并比对参赛者/轮次/分组/轮空状态。只有全部未绑定且无 active
+        match 的残缺批次可自动重建；已有真实进度必须报不一致。
+        """
+        contest = self.store.get_contest(contest_id)
+        if not contest or contest["status"] != CONTEST_PUBLISHED:
+            return
+        stage, specs, bot_to_entry = self._stage_pairing_plan(contest, stage_idx)
+        if not specs:
+            raise ValueError("published 赛事无法生成完整对阵")
+
+        existing = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
+        key = stage.get("key") or f"stage{stage_idx}"
+        expected_shape: list[dict] = []
+        for spec in specs:
+            bot_a_id, bot_b_id = self._materialize_pairing_seats(spec)
+            expected_shape.append(
+                {
+                    "round_num": spec.round_num,
+                    "entry_a_id": bot_to_entry.get(bot_a_id),
+                    "entry_b_id": bot_to_entry.get(bot_b_id),
+                    "bot_a_id": bot_a_id,
+                    "bot_b_id": bot_b_id,
+                    "stage_key": key,
+                    "group_id": spec.group_id,
+                    "bracket_slot": spec.bracket_slot,
+                    "color_first": 0,
+                    "status": spec.status,
+                }
+            )
+
+        complete = self._pairing_batch_signature(existing) == self._pairing_batch_signature(
+            expected_shape
+        )
+        if complete:
+            # published 态不应存在任何 active match；即使 pairing 外形完整，
+            # prepare→bind 硬崩留下的未绑定幽灵也不能被静默忽略。
+            if self.store.contest_has_active_matches(contest_id):
+                raise ValueError("published 赛事对阵完整但存在 active 对局，数据不一致")
+            return
+
+        # 尽量保留硬崩前已写入的批次时间；若一行都没有则以
+        # contest.starts_at / 当前时间为恢复基准。
+        base = contest.get("starts_at") or next(
+            (row.get("scheduled_at") for row in existing if row.get("scheduled_at")),
+            None,
+        ) or _now()
+        published_at = next(
+            (row.get("published_at") for row in existing if row.get("published_at")),
+            None,
+        ) or _now()
+        stagger_min = max(0, int(stage.get("round_stagger_minutes") or 0))
+        replacement: list[dict] = []
+        for spec, shape in zip(specs, expected_shape):
+            versions = self._version_snapshot(
+                shape.get("bot_a_id"), shape.get("bot_b_id")
+            )
+            replacement.append(
+                {
+                    **shape,
+                    **versions,
+                    "published_at": published_at,
+                    "scheduled_at": (
+                        None
+                        if not spec.requires_match
+                        else self._compute_scheduled_at(spec.round_num, base, stagger_min)
+                    ),
+                }
+            )
+        self.store.replace_unstarted_contest_stage_pairings(
+            contest_id,
+            stage_idx,
+            replacement,
+            expected_existing_ids=[row["id"] for row in existing],
+        )
+        logger.warning(
+            "published contest %s stage %s pairing batch was incomplete; rebuilt %s rows",
+            contest_id,
+            stage_idx,
+            len(replacement),
+        )
 
     @staticmethod
     def _compute_scheduled_at(round_num: int, base: str, stagger_min: int) -> str:
@@ -592,7 +1058,7 @@ class ContestManager:
         for key, bid in (("bot_a_version_id", bot_a_id), ("bot_b_version_id", bot_b_id)):
             if bid is None:
                 continue
-            v = self.store.get_latest_bot_version(bid)
+            v = self.store.get_current_bot_version(bid)
             if v:
                 out[key] = v["id"]
         return out
@@ -611,13 +1077,99 @@ class ContestManager:
         async with self._lock(contest_id):
             await self._dispatch_pending_locked(contest_id, stage_idx)
 
+    def _adjudicate_unavailable_pairing(
+        self,
+        contest: dict,
+        pairing: dict,
+        *,
+        gid: str,
+        activate_running: bool,
+    ) -> str:
+        """在派发前处理中途变为不可用的 Bot。
+
+        返回 ``ready`` / ``completed`` / ``blocked``：
+        - 双方可用：继续真实派发；
+        - 仅一方不可用：生成有 winner 的 completed 技术判负；
+        - 双方不可用：保留 pending，显式记录阻塞原因。
+
+        绝不用 bot_id=0 伪造 aborted match；0 既违反外键，也没有
+        任何可用于积分/晋级的裁决信息。
+        """
+        reason_a = self._bot_unavailable_reason(
+            pairing.get("bot_a_id"), expected_game=gid
+        )
+        reason_b = self._bot_unavailable_reason(
+            pairing.get("bot_b_id"), expected_game=gid
+        )
+        if reason_a is None and reason_b is None:
+            return "ready"
+        if reason_a is not None and reason_b is not None:
+            logger.error(
+                "contest pairing blocked: contest=%s pairing=%s both bots unavailable "
+                "(a=%s; b=%s)",
+                contest["id"],
+                pairing["id"],
+                reason_a,
+                reason_b,
+            )
+            return "blocked"
+
+        winner = 1 if reason_a is not None else 0
+        ea, eb = ((-1, 1) if winner == 1 else (1, -1))
+        import secrets
+
+        mid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
+        try:
+            self.store.create_match(
+                mid,
+                bot_a_id=pairing.get("bot_a_id"),
+                bot_b_id=pairing.get("bot_b_id"),
+                owner_id=contest.get("organizer_id"),
+                contest_id=contest["id"],
+                match_type=TYPE_CONTEST,
+                game_id=gid,
+                match_config={},
+            )
+            self.store.update_match(
+                mid,
+                status=STATUS_COMPLETED,
+                reason="contest_bot_unavailable",
+                winner=winner,
+                result={"deltas": [ea, eb]},
+                technical_loss=1,
+                ended_at=_now(),
+            )
+            self.store.upsert_replay(mid, "[]", "[]")
+            self.store.bind_contest_pairing_match(
+                contest["id"],
+                pairing["id"],
+                mid,
+                activate_running=activate_running,
+            )
+        except Exception:
+            # 绑定竞态失败时不留下无 pairing 引用的伪对局。
+            self.store.delete_match(mid)
+            raise
+        logger.warning(
+            "contest technical loss: contest=%s pairing=%s match=%s winner=%s "
+            "unavailable=%s",
+            contest["id"],
+            pairing["id"],
+            mid,
+            winner,
+            reason_a or reason_b,
+        )
+        return "completed"
+
     async def _dispatch_pending_locked(self, contest_id: int, stage_idx: int) -> None:
         """_dispatch_pending 的实际逻辑（调用方已持 per-contest 锁）。"""
         c = self.store.get_contest(contest_id)
         # P1-5 修复：锁内重检状态——published 可能在 scheduler snapshot 后被取消，
         # finished/cancelled 的 pending pairing 不应再派发（否则产孤儿对局）。
-        if c["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING):
+        if not c or c["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING):
             return
+        if c["status"] == CONTEST_PUBLISHED:
+            self._ensure_published_pairings_locked(contest_id, stage_idx)
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         cfg = _match_config(c)  # 每游戏对局参数（holdem→hands, pencil→n_dots）
         gid = c.get("game_id") or "holdem"
@@ -631,7 +1183,13 @@ class ContestManager:
         want_duplicate = bool(stage_cfg.get("duplicate")) and spec is not None and spec.build_match_plan is not None
         # cfg 的键就是该游戏的 match_config 字段（holdem→{"hands"}, pencil→{"n_dots"},
         # 第 4 游戏自带其字段）。challenge() 透传整包，无需按字段名逐条硬判断。
-        dispatched_any = False
+        # ``running`` 或已有 match_id 表示本批次前已有真实进度。此时某一场准备失败
+        # 不能把整个 start API 报成“全失败”：保留已启动场，失败 pairing 仍 pending，
+        # 记录日志并让 scheduler 后续重试。仅 published 且零进度的首场失败向上抛。
+        had_progress = c.get("status") == CONTEST_RUNNING or any(
+            p.get("match_id") for p in pairings
+        )
+        technical_adjudicated = False
         for p in pairings:
             if p.get("status") != "pending" or p.get("match_id"):
                 continue
@@ -639,37 +1197,152 @@ class ContestManager:
             sched = p.get("scheduled_at")
             if sched and sched > now:
                 continue
-            # published 态首次 dispatch → 转 running（排期到点开打）
-            if not dispatched_any and c.get("status") == CONTEST_PUBLISHED:
-                self.store.update_contest(contest_id, status=CONTEST_RUNNING)
-                dispatched_any = True
+            unavailable = self._adjudicate_unavailable_pairing(
+                c,
+                p,
+                gid=gid,
+                activate_running=(
+                    c.get("status") == CONTEST_PUBLISHED and not had_progress
+                ),
+            )
+            if unavailable == "blocked":
+                continue
+            if unavailable == "completed":
+                had_progress = True
+                technical_adjudicated = True
+                continue
             # 冻结快照已在 pairing 行；直接开打
             # cfg 是该游戏的 match_config（holdem→{"hands"}, pencil→{"n_dots"}），
             # 整包传给 challenge(match_config=...)，无需按字段名逐条具名传递。
             # duplicate=True 时用对阵 pair 派生的确定性 seed（pairing.id 稳定），
             # 保证两 leg 同副牌可复现。
+            try:
+                await self._prepare_bind_start_pairing(
+                    c,
+                    p,
+                    gid=gid,
+                    cfg=cfg,
+                    want_duplicate=want_duplicate,
+                    activate_running=(
+                        c.get("status") == CONTEST_PUBLISHED and not had_progress
+                    ),
+                )
+                had_progress = True
+            except Exception:
+                if not had_progress:
+                    raise
+                logger.exception(
+                    "contest dispatch partial failure: contest=%s pairing=%s; "
+                    "已有对局继续，失败对阵保持 pending 等待重试",
+                    contest_id,
+                    p["id"],
+                )
+        # 技术判负没有 runner task，也就没有 on_match_done 回调。
+        # 在已持锁的调度链内主动检查阶段，避免“全部是技术结果”
+        # 的赛事永久卡 running。
+        if technical_adjudicated:
+            await self._maybe_finish_locked(contest_id)
+
+    async def _prepare_bind_start_pairing(
+        self,
+        contest: dict,
+        pairing: dict,
+        *,
+        gid: str,
+        cfg: dict,
+        want_duplicate: bool,
+        activate_running: bool,
+    ) -> str:
+        """两阶段派发一场：prepare match → 原子绑定 pairing → 启动 runner。
+
+        MatchOrchestrator 的真实实现支持 defer/start/discard。少量只用于单元测试的
+        legacy fake 没有显式 start/discard 方法时，仍沿用其 challenge 即启动契约。
+        """
+        common = {
+            "owner_user_id": contest["organizer_id"],
+            "match_type": TYPE_CONTEST,
+            "contest_id": contest["id"],
+            "game_id": gid,
+            "match_config": cfg,
+            "bot_a_version_id": pairing.get("bot_a_version_id"),
+            "bot_b_version_id": pairing.get("bot_b_version_id"),
+            "defer_start": True,
+        }
+        mid: str | None = None
+        bound = False
+        try:
             if want_duplicate:
                 mid = await self.orch.challenge_duplicate(
-                    p["bot_a_id"],
-                    p["bot_b_id"],
-                    owner_user_id=c["organizer_id"],
-                    match_type=TYPE_CONTEST,
-                    contest_id=contest_id,
-                    game_id=gid,
-                    match_config=cfg,
-                    duplicate_seed=int(p["id"]) * 7919 + 1,
+                    pairing["bot_a_id"],
+                    pairing["bot_b_id"],
+                    duplicate_seed=int(pairing["id"]) * 7919 + 1,
+                    **common,
                 )
             else:
                 mid = await self.orch.challenge(
-                    p["bot_a_id"],
-                    p["bot_b_id"],
-                    owner_user_id=c["organizer_id"],
-                    match_type=TYPE_CONTEST,
-                    contest_id=contest_id,
-                    game_id=gid,
-                    match_config=cfg,
+                    pairing["bot_a_id"], pairing["bot_b_id"], **common
                 )
-            self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
+            if not mid:
+                raise RuntimeError("challenge 未返回 match_id")
+            self.store.bind_contest_pairing_match(
+                contest["id"],
+                pairing["id"],
+                mid,
+                activate_running=activate_running,
+            )
+            bound = True
+            starter = getattr(self.orch, "start_prepared_match", None)
+            if starter is not None:
+                starter(mid)
+            return mid
+        except Exception:
+            if mid is not None:
+                if bound:
+                    self.store.unbind_prepared_contest_match(
+                        contest["id"],
+                        pairing["id"],
+                        mid,
+                        restore_published=activate_running,
+                    )
+                discard = getattr(self.orch, "discard_prepared_match", None)
+                if discard is not None and not discard(mid):
+                    logger.error(
+                        "prepared match compensation refused: contest=%s pairing=%s match=%s",
+                        contest["id"], pairing["id"], mid,
+                    )
+            raise
+
+    async def cancel(self, contest_id: int) -> dict:
+        """取消未开赛赛事；与 publish/start/dispatch 共用锁并在锁内复核状态。"""
+        async with self._lock(contest_id):
+            c = self.store.get_contest(contest_id)
+            if not c:
+                raise ValueError("比赛不存在")
+            if c["status"] == CONTEST_CANCELLED:
+                return c
+            if c["status"] not in (CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED):
+                raise ValueError(
+                    f"赛事处于 {c['status']} 态，不能取消（仅 draft/open/published 可取消）"
+                )
+            return self.store.update_contest(contest_id, status=CONTEST_CANCELLED)
+
+    async def delete(self, contest_id: int) -> bool:
+        """安全删除赛事：与 start/dispatch 共锁，拒绝运行态或任何 active match。
+
+        published 尚未开打时先转 cancelled 再删除，明确其“取消排期后删除”语义；
+        已完成 match 由数据库保留并把 contest_id 置空，未启动 pairing 随赛事级联删除。
+        """
+        async with self._lock(contest_id):
+            contest = self.store.get_contest(contest_id)
+            if not contest:
+                return False
+            if contest["status"] in (CONTEST_RUNNING, CONTEST_REST):
+                raise ValueError("运行中或休息期赛事不能删除，请先完成或中止在途对局")
+            if self.store.contest_has_active_matches(contest_id):
+                raise ValueError("赛事仍有 pending/running 对局，不能删除")
+            if contest["status"] == CONTEST_PUBLISHED:
+                self.store.update_contest(contest_id, status=CONTEST_CANCELLED)
+            return self.store.delete_contest(contest_id)
 
     def standings(
         self, contest_id: int, *, stage_idx: int | None = None
@@ -709,6 +1382,20 @@ class ContestManager:
         for p in self.store.list_contest_pairings(contest_id, stage_idx=stage_idx):
             mid = p.get("match_id")
             if not mid:
+                # Swiss 奇数轮的 bye 是显式 completed/no-match pairing。
+                # 轮空获得本赛制的“胜场分”，但它不是一场对局：不增
+                # wins/draws/losses、net_chips，也没有对手记录。KO bye
+                # 是直接晋级，不在此计分。
+                if (
+                    stage.get("type") == "swiss"
+                    and p.get("bot_b_id") is None
+                    and p.get("status") == "completed"
+                ):
+                    entry_id = p.get("entry_a_id")
+                    if entry_id in stats:
+                        stats[entry_id]["points"] += points_for_result(
+                            scoring, 0, 0
+                        )
                 continue
             m = self.store.get_match(mid)
             if not m or m["status"] != STATUS_COMPLETED:
@@ -771,13 +1458,20 @@ class ContestManager:
             return False
         for p in pairings:
             # 轮空占位 pairing（bot_b_id=None、无 match、status=completed）视为已完成。
-            if p.get("bot_b_id") is None and not p.get("match_id"):
+            if (
+                p.get("bot_b_id") is None
+                and not p.get("match_id")
+                and p.get("status") == "completed"
+            ):
                 continue
             mid = p.get("match_id")
             if not mid:
                 return False
             m = self.store.get_match(mid)
-            if not m or m["status"] not in (STATUS_COMPLETED, STATUS_ABORTED):
+            # aborted 只表示对局被取消/未产生裁决，绝不是赛制上的
+            # “已完成”。把它算作终态会让 KO 在 winner=None 时固定
+            # 晋级座位 0，也会给 RR/Swiss 静默吞分。
+            if not m or m["status"] != STATUS_COMPLETED:
                 return False
         return True
 
@@ -815,7 +1509,7 @@ class ContestManager:
             if not mid:
                 continue
             m = self.store.get_match(mid)
-            if m and m["status"] in (STATUS_COMPLETED, STATUS_ABORTED):
+            if m and m["status"] == STATUS_COMPLETED:
                 self.store.update_contest_pairing(p["id"], status="completed")
 
     def _advance_participants(self, contest_id: int, stage_idx: int) -> None:
@@ -847,6 +1541,61 @@ class ContestManager:
         for e in self.store.list_contest_entries(contest_id):
             if e["id"] not in advance:
                 self.store.update_entry(contest_id, e["user_id"], eliminated=1)
+
+    async def handle_match_done(
+        self,
+        match_id: str,
+        contest_id: int,
+        *,
+        retry_aborted: bool = False,
+    ) -> dict | None:
+        """赛事对局收尾的唯一回调入口。
+
+        completed 才能进入积分/晋级检查。aborted 对局保留历史行，
+        对应 pairing 原子复位 pending。只有 orchestrator 通过短暂 handoff
+        显式证明是管理员主动中止时，才立即安全重派；platform_error
+        等平台故障不在回调栈里无限快速重试，留给 scheduler/reconcile。
+        """
+        async with self._lock(contest_id):
+            contest = self.store.get_contest(contest_id)
+            match = self.store.get_match(match_id)
+            if not contest or not match:
+                return None
+            if match.get("status") == STATUS_ABORTED:
+                pairing = self.store.reset_aborted_contest_pairing(
+                    contest_id, match_id
+                )
+                if pairing:
+                    if not retry_aborted:
+                        backoff_at = (
+                            datetime.now() + timedelta(seconds=30)
+                        ).isoformat(timespec="seconds")
+                        # 不要把原本更远的排期拉近；平台故障至少退避
+                        # 30 秒，避免 scheduler 每个 tick 立即重创 match。
+                        scheduled_at = max(
+                            str(pairing.get("scheduled_at") or ""), backoff_at
+                        )
+                        pairing = self.store.update_contest_pairing(
+                            pairing["id"], scheduled_at=scheduled_at
+                        ) or pairing
+                    logger.warning(
+                        "contest match aborted without adjudication: contest=%s "
+                        "pairing=%s match=%s reason=%s; reset to pending%s",
+                        contest_id,
+                        pairing["id"],
+                        match_id,
+                        match.get("reason"),
+                        " with backoff" if not retry_aborted else " for admin redispatch",
+                    )
+                    if (
+                        retry_aborted
+                        and contest.get("status") == CONTEST_RUNNING
+                    ):
+                        await self._dispatch_pending_locked(
+                            contest_id, int(pairing.get("stage_idx") or 0)
+                        )
+                return self.store.get_contest(contest_id)
+            return await self._maybe_finish_locked(contest_id)
 
     async def maybe_finish(self, contest_id: int) -> dict | None:
         """对局结束回调：检查当前阶段是否完成，进入 rest 或下一阶段。
@@ -919,7 +1668,7 @@ class ContestManager:
         return self.store.get_contest(contest_id)
 
     async def reconcile_running_contests(self) -> int:
-        """启动对账：让所有 running/rest 的 contest 收敛到正确终态。
+        """启动对账：让 active contest 与缺正式榜的 finished contest 收敛。
 
         解决三类「赛事卡 running」：
         1. match 全完成但 maybe_finish 回调丢失/异常被吞（生产 contest 25）→ 直接 maybe_finish。
@@ -927,19 +1676,26 @@ class ContestManager:
            reset_dead_contest_pairings 复位后重派。
         3. pairing 建了 match 行但 _run_match 从未跑完（pending match，started_at=None）→
            识别为死 pairing 复位重派。
+        4. prepare match 成功但 bind 前硬崩→删除未被 pairing 引用的 pending
+           match/index/replay，保留原 pending pairing 重派。
+        5. published 首阶段只写入部分 pairing 就硬崩→校验完整批次，
+           仅在全部未绑定时原子重建；已有进度则显式报不一致。
+        6. contest 已 finished、正式榜事务尚未提交就硬崩→幂等补算完整榜，
+           避免 official-results 永久 409。
 
         maybe_finish 在 _stage_done=False 时只生成下一轮、不重派 pending pairing，
         所以对账须在 maybe_finish 之后显式 _dispatch_pending 死而复生的 pending pairing。
         返回处理的 contest 数。
         """
-        # 1. 复位死 pairing（status=running 但 match 已 aborted/pending/不存在）→ pending+match_id=NULL
+        # 1. 清理未绑定 prepared 幽灵 + 复位已绑定死 pairing。
         reset_n = self.store.reset_dead_contest_pairings()
         if reset_n:
-            logger.info("启动对账：复位 %d 个死 pairing（待重派或标 aborted）", reset_n)
+            logger.info("启动对账：清理/复位 %d 个幽灵对局或死 pairing", reset_n)
 
         contests = self.store.list_contests_by_status(
-            [CONTEST_RUNNING, CONTEST_REST]
+            [CONTEST_PUBLISHED, CONTEST_RUNNING, CONTEST_REST]
         )
+        contests.extend(self.store.list_unready_finished_contests())
         for c in contests:
             cid = c["id"]
             try:
@@ -950,7 +1706,30 @@ class ContestManager:
         return len(contests)
 
     async def _reconcile_one(self, contest_id: int) -> None:
-        """对账单个 contest：maybe_finish → 重派 pending → 再 maybe_finish。"""
+        """对账单个 contest：恢复 published 批次或收敛 running/rest。"""
+        initial = self.store.get_contest(contest_id)
+        if initial and initial["status"] == CONTEST_FINISHED:
+            # finished 是终态，maybe_finish 不会再进入；正式榜落库若在终态提交后
+            # 失败，只能由启动恢复显式补算。持赛事锁并重读，避免与同进程内的
+            # force-finish/回调竞态；replace_official_results 自身是完整批次事务。
+            async with self._lock(contest_id):
+                latest = self.store.get_contest(contest_id)
+                if (
+                    latest
+                    and latest["status"] == CONTEST_FINISHED
+                    and not int(latest.get("official_results_ready") or 0)
+                ):
+                    stage_idx = int(latest.get("current_stage_idx") or 0)
+                    self._finalize_official_results(contest_id, stage_idx)
+            return
+        if initial and initial["status"] == CONTEST_PUBLISHED:
+            stage_idx = int(initial.get("current_stage_idx") or 0)
+            await self.ensure_published_pairings(contest_id, stage_idx)
+            # 恢复后仅派发 scheduled_at<=now 的场次；未到点的仍保持
+            # published，不把“启动恢复”偷换成“手动立即开赛”。
+            await self._dispatch_pending(contest_id, stage_idx)
+            await self.maybe_finish(contest_id)
+            return
         # 第一轮 maybe_finish：能 finish 的直接 finish（match 全完成的场景）
         await self.maybe_finish(contest_id)
         c = self.store.get_contest(contest_id)
@@ -961,20 +1740,20 @@ class ContestManager:
 
         stage_idx = int(c.get("current_stage_idx") or 0)
         # 第二轮：重派 pending 无 match_id 的 pairing（死而复生 + 新生成轮）。
-        # _dispatch_pending 内部 challenge() 可能抛 ValueError（bot 已删/不可用）——
-        # 此时该 pairing 挂一条 aborted match（_stage_done 接受 aborted），让阶段仍能推进。
+        # 单侧 Bot 不可用时会落 completed 技术判负；双方不可用时
+        # 明确保持 pending 阻塞，不伪造无 winner 的 aborted 结果。
         await self._dispatch_pending_safe(contest_id, stage_idx)
-        # 第三轮：重派/标 aborted 后再 maybe_finish，让阶段真正推进
+        # 第三轮：重派/技术裁决后再 maybe_finish，让阶段真正推进
         await self.maybe_finish(contest_id)
 
     async def _dispatch_pending_safe(
         self, contest_id: int, stage_idx: int
     ) -> None:
-        """重派 pending pairing，对单个 pairing 的 bot 不可用做容错（标 aborted 而非整体崩溃）。
+        """重派 pending pairing，对单个 pairing 的 Bot 不可用做公平裁决。
 
         _dispatch_pending 是批量 dispatch，任一 pairing 的 bot 删了会抛 ValueError 中断后续。
-        此方法逐 pairing try/except：失败则给该 pairing 挂一条 aborted match
-        （reason='contest_bot_unavailable'），保证 _stage_done 仍通过。
+        此方法逐 pairing 隔离其他派发错误；Bot 缺失则与正常派发共用
+        ``_adjudicate_unavailable_pairing`` 的单侧技术判负/双侧阻塞契约。
         """
         async with self._lock(contest_id):
             await self._dispatch_pending_safe_locked(contest_id, stage_idx)
@@ -982,7 +1761,9 @@ class ContestManager:
     async def _dispatch_pending_safe_locked(self, contest_id: int, stage_idx: int) -> None:
         """_dispatch_pending_safe 的实际逻辑（调用方已持锁）。"""
         c = self.store.get_contest(contest_id)
-        if not c:
+        # reconcile 在锁外按 running 快照选中赛事后，可能先被 finish 收尾；
+        # 锁内必须重检，终态不得再派发或制造 aborted 占位对局。
+        if not c or c["status"] != CONTEST_RUNNING:
             return
         cfg = _match_config(c)
         gid = c.get("game_id") or "holdem"
@@ -998,67 +1779,26 @@ class ContestManager:
             if p.get("status") == "pending" and not p.get("match_id")
         ]
         for p in pending:
+            unavailable = self._adjudicate_unavailable_pairing(
+                c, p, gid=gid, activate_running=False
+            )
+            if unavailable != "ready":
+                continue
             try:
-                if want_duplicate:
-                    mid = await self.orch.challenge_duplicate(
-                        p["bot_a_id"],
-                        p["bot_b_id"],
-                        owner_user_id=c["organizer_id"],
-                        match_type=TYPE_CONTEST,
-                        contest_id=contest_id,
-                        game_id=gid,
-                        match_config=cfg,
-                        duplicate_seed=int(p["id"]) * 7919 + 1,
-                    )
-                else:
-                    kw: dict = {
-                        "match_type": TYPE_CONTEST,
-                        "contest_id": contest_id,
-                        "game_id": gid,
-                    }
-                    kw.update({k: int(v) for k, v in cfg.items() if v is not None})
-                    mid = await self.orch.challenge(
-                        p["bot_a_id"],
-                        p["bot_b_id"],
-                        owner_user_id=c["organizer_id"],
-                        **kw,
-                    )
-                self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
-            except Exception as exc:
-                # bot 已删/不可用：建 aborted match 挂回 pairing，让 _stage_done 通过
-                logger.warning(
-                    "reconcile: contest=%s pairing=%s 重派失败，标记 aborted: %s",
-                    contest_id, p["id"], exc,
+                await self._prepare_bind_start_pairing(
+                    c,
+                    p,
+                    gid=gid,
+                    cfg=cfg,
+                    want_duplicate=want_duplicate,
+                    activate_running=False,
                 )
-                mid = self._force_aborted_match_row(
-                    c, p, reason="contest_bot_unavailable"
+            except Exception:
+                logger.exception(
+                    "reconcile: contest=%s pairing=%s 重派失败，保持 pending",
+                    contest_id,
+                    p["id"],
                 )
-                self.store.update_contest_pairing(p["id"], match_id=mid, status="running")
-
-    def _force_aborted_match_row(self, contest: dict, pairing: dict, *, reason: str) -> str:
-        """bot 不可用时建一条 aborted match 行挂回 pairing（绕过 challenge 的 bot 校验）。
-
-        contest 对局的 bot 可能已被删（owner_id 改变/标 inactive）——challenge() 会拒。
-        但赛事要能推进，必须让该 pairing 有终态 match。用 0 占位 bot id 建行后立即标 aborted。
-        """
-        from datetime import datetime
-        import secrets
-        mid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
-        gid = (contest.get("game_id") or "holdem").lower()
-        self.store.create_match(
-            mid,
-            bot_a_id=pairing.get("bot_a_id") or 0,
-            bot_b_id=pairing.get("bot_b_id") or 0,
-            owner_id=contest.get("organizer_id"),
-            contest_id=contest["id"],
-            match_type=TYPE_CONTEST,
-            game_id=gid,
-            match_config={},
-        )
-        self.store.update_match(
-            mid, status=STATUS_ABORTED, reason=reason, ended_at=_now(),
-        )
-        return mid
 
     def _finalize_official_results(self, contest_id: int, stage_idx: int) -> None:
         """计算全员正式名次（破同分）并落库 contest_official_results。
@@ -1111,11 +1851,17 @@ class ContestManager:
         # 当前轮是否全部结束
         cur = [p for p in pairings if int(p.get("round_num") or 1) == max_round]
         for p in cur:
+            if (
+                p.get("bot_b_id") is None
+                and not p.get("match_id")
+                and p.get("status") == "completed"
+            ):
+                continue
             mid = p.get("match_id")
             if not mid:
                 return False
             m = self.store.get_match(mid)
-            if not m or m["status"] not in (STATUS_COMPLETED, STATUS_ABORTED):
+            if not m or m["status"] != STATUS_COMPLETED:
                 return False
         total_rounds = int(stage.get("rounds") or swiss_rounds_needed(
             len(self.store.list_contest_entries(contest_id))
@@ -1142,30 +1888,88 @@ class ContestManager:
             if not s.get("eliminated") and entry_to_bot.get(s["entry_id"]) is not None
         ]
         played: set[tuple[int, int]] = set()
+        bye_counts_by_entry: Counter[int] = Counter()
+        color_counts_by_entry: Counter[int] = Counter()
         for p in pairings:
-            if p.get("bot_a_id") is not None and p.get("bot_b_id") is not None:
-                played.add((min(p["bot_a_id"], p["bot_b_id"]), max(p["bot_a_id"], p["bot_b_id"])))
+            entry_a = p.get("entry_a_id")
+            entry_b = p.get("entry_b_id")
+            if p.get("bot_b_id") is None and not p.get("match_id"):
+                if entry_a is not None:
+                    bye_counts_by_entry[int(entry_a)] += 1
+                continue
+            # Persisted A is the actual seat 0 after color_first materialization.
+            # Count by stable entry identity so a rest-period Bot swap does not
+            # reset that participant's first-move history.
+            if entry_a is not None:
+                color_counts_by_entry[int(entry_a)] += 1
+            # 对手历史以 entry 身份为真相源；休息期换 Bot 后映射到当前
+            # bot_id，避免换版本/换 Bot 后把同两名选手误当“未交手”。
+            current_a = entry_to_bot.get(entry_a)
+            current_b = entry_to_bot.get(entry_b)
+            if current_a is not None and current_b is not None:
+                played.add((min(current_a, current_b), max(current_a, current_b)))
+        bye_counts = {
+            bot_id: int(bye_counts_by_entry.get(entry_id, 0))
+            for bot_id, entry_id in bot_to_entry.items()
+        }
+        color_counts = {
+            bot_id: int(color_counts_by_entry.get(entry_id, 0))
+            for bot_id, entry_id in bot_to_entry.items()
+        }
         specs = generate_stage_pairings(
-            stage, bot_ids, scores=scores, played=played, swiss_round=max_round + 1
+            stage,
+            bot_ids,
+            scores=scores,
+            played=played,
+            swiss_round=max_round + 1,
+            color_counts=color_counts,
+            bye_counts=bye_counts,
         )
         key = stage.get("key") or f"stage{stage_idx}"
         published_at = _now()
+        pairing_rows: list[dict[str, Any]] = []
         for sp in specs:
-            self.store.add_contest_pairing(
-                contest_id,
-                sp.bot_a_id,
-                sp.bot_b_id,
-                round_num=sp.round_num,
-                status="pending",
-                stage_idx=stage_idx,
-                stage_key=key,
-                group_id=sp.group_id,
-                color_first=sp.color_first,
-                entry_a_id=bot_to_entry.get(sp.bot_a_id),
-                entry_b_id=bot_to_entry.get(sp.bot_b_id),
-                published_at=published_at,
-                **self._version_snapshot(sp.bot_a_id, sp.bot_b_id),
+            bot_a_id, bot_b_id = self._materialize_pairing_seats(sp)
+            if not sp.requires_match:
+                pairing_rows.append(
+                    {
+                        "bot_a_id": bot_a_id,
+                        "bot_b_id": None,
+                        "round_num": sp.round_num,
+                        "status": sp.status,
+                        "stage_key": key,
+                        "group_id": sp.group_id,
+                        "bracket_slot": sp.bracket_slot,
+                        "color_first": 0,
+                        "entry_a_id": bot_to_entry.get(bot_a_id),
+                        "entry_b_id": None,
+                        "published_at": published_at,
+                    }
+                )
+                continue
+            pairing_rows.append(
+                {
+                    "bot_a_id": bot_a_id,
+                    "bot_b_id": bot_b_id,
+                    "round_num": sp.round_num,
+                    "status": STATUS_PENDING,
+                    "stage_key": key,
+                    "group_id": sp.group_id,
+                    "bracket_slot": sp.bracket_slot,
+                    "color_first": 0,
+                    "entry_a_id": bot_to_entry.get(bot_a_id),
+                    "entry_b_id": bot_to_entry.get(bot_b_id),
+                    "published_at": published_at,
+                    **self._version_snapshot(bot_a_id, bot_b_id),
+                }
             )
+        self.store.append_contest_round_pairings(
+            contest_id,
+            stage_idx,
+            pairing_rows,
+            expected_current_stage_idx=stage_idx,
+            expected_previous_max_round=max_round,
+        )
         await self._dispatch_pending_locked(contest_id, stage_idx)
         return True
 
@@ -1194,12 +1998,20 @@ class ContestManager:
             if not mid:
                 return False
             m = self.store.get_match(mid)
-            if not m or m["status"] not in (STATUS_COMPLETED, STATUS_ABORTED):
+            if not m or m["status"] != STATUS_COMPLETED:
                 return False
             w = m.get("winner")
             if w is None:
-                # 平局/异常：取 bot_a 兜底（淘汰赛不应平局，但兜底防卡死）
-                w = 0
+                # 淘汰赛没有权威 winner 时不得以座位 0 兜底晋级。
+                # 显式阻塞，等待裁判/管理员按业务规则处理。
+                logger.error(
+                    "elimination pairing has no adjudicated winner: "
+                    "contest=%s pairing=%s match=%s",
+                    contest_id,
+                    p["id"],
+                    mid,
+                )
+                return False
             if w == 0:
                 winners.append((p["bot_a_id"], p.get("entry_a_id")))
             else:
@@ -1212,19 +2024,26 @@ class ContestManager:
         next_round = max_round + 1
         published_at = _now()
         slot = 0
+        pairing_rows: list[dict[str, Any]] = []
         for i in range(0, len(winners), 2):
             a_bot, a_entry = winners[i]
             if i + 1 < len(winners):
                 # 相邻两胜者配对
                 b_bot, b_entry = winners[i + 1]
-                self.store.add_contest_pairing(
-                    contest_id, a_bot, b_bot,
-                    round_num=next_round, status="pending",
-                    stage_idx=stage_idx, stage_key=key,
-                    bracket_slot=slot, color_first=0,
-                    entry_a_id=a_entry, entry_b_id=b_entry,
-                    published_at=published_at,
-                    **self._version_snapshot(a_bot, b_bot),
+                pairing_rows.append(
+                    {
+                        "bot_a_id": a_bot,
+                        "bot_b_id": b_bot,
+                        "round_num": next_round,
+                        "status": STATUS_PENDING,
+                        "stage_key": key,
+                        "bracket_slot": slot,
+                        "color_first": 0,
+                        "entry_a_id": a_entry,
+                        "entry_b_id": b_entry,
+                        "published_at": published_at,
+                        **self._version_snapshot(a_bot, b_bot),
+                    }
                 )
                 slot += 1
             else:
@@ -1233,15 +2052,28 @@ class ContestManager:
                 # winner 固定为 bot_a（轮空者）。这样 _stage_done 把它视为已完成、
                 # _maybe_next_elim_round 能从它收集到轮空胜者，下一轮配对时正常带入——
                 # 确保奇数胜者（非 2 幂人数）无人丢失、阶段能 finish。
-                self.store.add_contest_pairing(
-                    contest_id, a_bot, None,
-                    round_num=next_round, status="completed",
-                    stage_idx=stage_idx, stage_key=key,
-                    bracket_slot=slot, color_first=0,
-                    entry_a_id=a_entry, entry_b_id=None,
-                    published_at=published_at,
+                pairing_rows.append(
+                    {
+                        "bot_a_id": a_bot,
+                        "bot_b_id": None,
+                        "round_num": next_round,
+                        "status": STATUS_COMPLETED,
+                        "stage_key": key,
+                        "bracket_slot": slot,
+                        "color_first": 0,
+                        "entry_a_id": a_entry,
+                        "entry_b_id": None,
+                        "published_at": published_at,
+                    }
                 )
                 slot += 1
+        self.store.append_contest_round_pairings(
+            contest_id,
+            stage_idx,
+            pairing_rows,
+            expected_current_stage_idx=stage_idx,
+            expected_previous_max_round=max_round,
+        )
         await self._dispatch_pending_locked(contest_id, stage_idx)
         return True
 
@@ -1297,15 +2129,24 @@ class ContestManager:
     async def finish(self, contest_id: int) -> dict:
         """组织者/admin 强制结束赛事（running/rest → finished）。
 
-        用于 running 态卡住时（如 bot 不可用 abort 后 pairing 挂起）的手动出口。
-        正常完成走 maybe_finish 自动路径；本方法跳过「阶段全部完成」检查直接收尾，
-        计算当前已有结果的正式名次（未完成阶段的名次为空）。
+        用于所有已派发对局都进入终态、但自动阶段推进卡住时的手动出口。
+        当前 runner 没有 contest-aware abort，因此仍有 pending/running 对局时明确拒绝，
+        避免先写 finished 后后台任务继续晚写结果。
         """
+        async with self._lock(contest_id):
+            return self._finish_locked(contest_id)
+
+    def _finish_locked(self, contest_id: int) -> dict:
+        """finish 的实际逻辑（调用方已持 per-contest 锁并在此重读状态）。"""
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
         if c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
             raise ValueError("仅运行中/休息中的赛事可强制结束")
+        if self._has_unfinished_pairings(contest_id):
+            raise ValueError(
+                "赛事仍有未完成对阵，无法强制结束；请等待对局完成或先安全中止对局"
+            )
         stage_idx = int(c.get("current_stage_idx") or 0)
         self.store.update_contest(
             contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
@@ -1315,6 +2156,30 @@ class ContestManager:
         except Exception:
             logger.exception("force-finish official results failed contest=%s", contest_id)
         return self.store.get_contest(contest_id)
+
+    def _has_unfinished_pairings(self, contest_id: int) -> bool:
+        """强制结束前的安全闸门；调用方须持赛事锁。
+
+        当前 orchestrator 没有能等待 runner 收敛的 contest-aware abort。与其先写
+        finished 后让后台任务晚写结果，保守拒绝任何未绑定、缺失或仍活跃的对阵；
+        同时检查未被 pairing 正确绑定的赛事活跃 match。
+        """
+        if self.store.contest_has_active_matches(contest_id):
+            return True
+        for pairing in self.store.list_contest_pairings(contest_id):
+            if (
+                pairing.get("bot_b_id") is None
+                and not pairing.get("match_id")
+                and pairing.get("status") == STATUS_COMPLETED
+            ):
+                continue
+            match_id = pairing.get("match_id")
+            if not match_id:
+                return True
+            match = self.store.get_match(match_id)
+            if not match or match.get("status") != STATUS_COMPLETED:
+                return True
+        return False
 
     def estimate(self, contest_id: int) -> dict:
         c = self.store.get_contest(contest_id)

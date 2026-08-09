@@ -160,8 +160,10 @@ class GameSpec:
 
     # 公开裁判源码：要对全体玩家公开明文展示的源码文件相对路径（相对 games/<game>/ 包目录）。
     # 裁判是公开可审计的规则定义——源码必须对全体玩家透明（区别于 Bot 的私有黑盒二进制）。
-    # 默认公开三件套（裁判引擎 + 行协议 + 结果契约），GET /api/judges/{game_id}/source 返回。
-    source_files: tuple[str, ...] = ("engine.py", "protocol.py", "result.py")
+    # 默认由 game_id 派生权威纯规则文件 + 三件套（适配引擎 / 行协议 /
+    # 结果契约），GET /api/judges/{game_id}/source 返回。显式覆写仍必须包含
+    # <game_id>_judge.py，且只允许包根目录内的 Python 文件名，防止路径穿越。
+    source_files: tuple[str, ...] = ()
 
     # 座位数（2=双人，当前全平台双人；预留 N 人扩展钩子，通用层已声明但 DB/评分仍按 2 人）。
     num_seats: int = 2
@@ -175,6 +177,37 @@ class GameSpec:
     # 每方总时间预算（秒）；None=不限时（走原单步 action_timeout 超时）。
     # 仅 pencil 设 900.0（象棋钟：每方累计 15 分钟，超时判负）。
     time_budget_per_side: float | None = None
+
+    def __post_init__(self) -> None:
+        """派生并校验公开裁判源码白名单。
+
+        公开接口会直接按 ``source_files`` 读取游戏包中的文件，因此安全边界
+        收敛在 GameSpec：清单项必须是不含目录分隔符的 ``.py`` 文件名，且必须
+        公开该游戏的权威纯规则 ``<game_id>_judge.py``。这既不在通用层枚举
+        游戏名，也避免新游戏遗漏真正的规则实现。
+        """
+        judge_file = f"{self.game_id}_judge.py"
+        files = tuple(self.source_files) or (
+            judge_file,
+            "engine.py",
+            "protocol.py",
+            "result.py",
+        )
+        for rel in files:
+            if (
+                not isinstance(rel, str)
+                or not rel
+                or rel in {".", ".."}
+                or "/" in rel
+                or "\\" in rel
+                or not rel.endswith(".py")
+            ):
+                raise ValueError(f"source_files 只允许游戏包根目录的 Python 文件名: {rel!r}")
+        if judge_file not in files:
+            raise ValueError(f"source_files 必须包含权威纯裁判源码: {judge_file}")
+        if len(files) != len(set(files)):
+            raise ValueError("source_files 不允许重复文件")
+        object.__setattr__(self, "source_files", files)
 
     def run_session(
         self, decide: DecideFn, *, on_event: EventFn | None = None, **params: Any

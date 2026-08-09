@@ -58,6 +58,40 @@ def test_tiebreak_buchholz_breaks_tie():
     assert by_entry[1]["rank"] == 2
 
 
+def test_tiebreak_fewer_technical_losses_ranks_first():
+    """其余破同分项相同时，从 pairing+winner 识别的技术负更少者优先。"""
+    standings = [
+        {"entry_id": 1, "bot_id": 10, "user_id": 100, "points": 3.0,
+         "net_chips": 0, "seed": 1},
+        {"entry_id": 2, "bot_id": 20, "user_id": 200, "points": 3.0,
+         "net_chips": 0, "seed": 2},
+        {"entry_id": 3, "bot_id": 30, "user_id": 300, "points": 0.0,
+         "net_chips": 0, "seed": 3},
+        {"entry_id": 4, "bot_id": 40, "user_id": 400, "points": 0.0,
+         "net_chips": 0, "seed": 4},
+    ]
+    pairings = [
+        {"entry_a_id": 1, "entry_b_id": 3, "match_id": "technical"},
+        {"entry_a_id": 2, "entry_b_id": 4, "match_id": "normal"},
+    ]
+    matches = {
+        "technical": {
+            "status": "completed", "winner": 1, "technical_loss": 1,
+            "result": {"deltas": [0, 0]},
+        },
+        "normal": {
+            "status": "completed", "winner": 1, "technical_loss": 0,
+            "result": {"deltas": [0, 0]},
+        },
+    }
+
+    rows = ranking.compute_official_ranking(standings, pairings, matches)
+    by_entry = {row["entry_id"]: row for row in rows}
+    assert by_entry[1]["tiebreaks"]["technical_losses"] == 1
+    assert by_entry[2]["tiebreaks"]["technical_losses"] == 0
+    assert by_entry[2]["rank"] < by_entry[1]["rank"]
+
+
 def test_merge_replace_top():
     """决赛合成榜：1..scope 取 stage2，scope+1..N 取 stage1 未晋级。"""
     stage1 = [

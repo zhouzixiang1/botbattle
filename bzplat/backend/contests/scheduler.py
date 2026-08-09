@@ -87,7 +87,7 @@ class ContestScheduler:
             opens = c.get("registration_opens_at")
             if opens and now >= opens:
                 try:
-                    self.manager.open_registration(c["id"])
+                    await self.manager.open_registration(c["id"])
                     processed.add(c["id"])
                     logger.info("scheduler: contest %s auto-opened (was draft)", c["id"])
                 except Exception:
@@ -114,7 +114,7 @@ class ContestScheduler:
                 pairings = self.manager.store.list_contest_pairings(c["id"], stage_idx=stage_idx)
                 if not pairings:
                     logger.warning("scheduler: published contest %s has 0 pairings, regenerating", c["id"])
-                    await self.manager._begin_stage(c["id"], stage_idx, schedule_immediately=False)
+                    await self.manager.ensure_published_pairings(c["id"], stage_idx)
                 await self.manager._dispatch_pending(c["id"], stage_idx)
                 await self.manager.maybe_finish(c["id"])
             except Exception:

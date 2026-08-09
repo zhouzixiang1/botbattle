@@ -9,7 +9,7 @@
     python scripts/gui_e2e_smoke.py --base http://127.0.0.1:50381
 
 前置：scripts/seed_test_accounts.py 已跑（tester1/tester2 各 3 bot），
-      且已建 e2e_organizer(organizer) / e2e_admin(admin) 账号。
+      且 seed 脚本已建 qa_organizer(organizer) / qa_admin(admin) 账号。
 """
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ import json
 import sys
 import urllib.request
 import urllib.error
+
+from _qa_target import assert_qa_instance, ensure_qa_base
 
 PASS = "\033[32m✓\033[0m"
 FAIL = "\033[31m✗\033[0m"
@@ -62,10 +64,11 @@ def main() -> int:
     ap.add_argument("--base", default="http://127.0.0.1:50381")
     ap.add_argument("--player", default="tester1")
     ap.add_argument("--player-pw", default="Test1234")
-    ap.add_argument("--organizer", default="e2e_organizer")
-    ap.add_argument("--admin", default="e2e_admin")
+    ap.add_argument("--organizer", default="qa_organizer")
+    ap.add_argument("--admin", default="qa_admin")
     args = ap.parse_args()
-    base = args.base.rstrip("/")
+    base = ensure_qa_base(args.base)
+    assert_qa_instance(base)
 
     print("=== 视角 A：普通玩家 ===")
     t = login(base, args.player, args.player_pw)
@@ -92,7 +95,8 @@ def main() -> int:
             check("发起挑战", False, "找不到对手 bot")
 
     check("收藏 Bot", req(base, "POST", "/api/bots/1/favorite", token=t).get("ok"))
-    check("改资料", bool(req(base, "PUT", "/api/auth/profile", token=t, body={"display_name": "E2E"}).get("id") or True))
+    profile = req(base, "PUT", "/api/auth/profile", token=t, body={"display_name": "E2E"})
+    check("改资料", profile.get("user", {}).get("display_name") == "E2E", str(profile)[:80])
 
     print("\n=== 视角 B：组织者 ===")
     to = login(base, args.organizer, "Test1234")
@@ -109,7 +113,8 @@ def main() -> int:
     print("\n=== 视角 C：管理员 ===")
     ta = login(base, args.admin, "Test1234")
     check("登录", True)
-    check("admin 统计", bool(req(base, "GET", "/api/admin/stats", token=ta).get("users") is not None or True))
+    stats = req(base, "GET", "/api/admin/stats", token=ta)
+    check("admin 统计", stats.get("users") is not None, str(stats)[:80])
     check("admin 用户列表", isinstance(req(base, "GET", "/api/admin/users", token=ta).get("users"), list))
 
     print("\n=== 角色边界（403 守卫）===")

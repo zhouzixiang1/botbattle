@@ -21,6 +21,14 @@ interface Notification {
   created_at: string
 }
 
+const NOTIFICATION_LABELS: Record<string, string> = {
+  match_done: '对局',
+  followed: '关注',
+  contest: '赛事',
+  comment: '评论',
+  system: '系统',
+}
+
 export default function Notifications() {
   const [items, setItems] = useState<Notification[]>([])
   const [unread, setUnread] = useState(0)
@@ -128,7 +136,7 @@ export default function Notifications() {
                       <span className="size-2 shrink-0 rounded-full bg-primary" />
                     )}
                     <span className="font-medium text-foreground">{n.title}</span>
-                    {n.type && <Badge variant="secondary">{n.type}</Badge>}
+                    {n.type && <Badge variant="secondary">{NOTIFICATION_LABELS[n.type] || '系统'}</Badge>}
                   </div>
                   {n.body && <p className="mt-1 text-sm text-muted-foreground">{n.body}</p>}
                   <p className="mt-1 text-xs text-muted-foreground">

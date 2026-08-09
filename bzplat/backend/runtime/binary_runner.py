@@ -19,6 +19,16 @@ DEFAULT_MEMORY = "512m"
 DEFAULT_CPUS = "1"
 LINUX_IMAGE = os.environ.get("BZ_LINUX_BOT_IMAGE", "debian:bookworm-slim")
 WINE_IMAGE = os.environ.get("BZ_WINE_BOT_IMAGE", "scottyhardy/docker-wine:stable")
+_RUNTIME_ERROR_PREFIX = "BZPLAT_RUNTIME_ERROR"
+_TRUSTED_RUNTIME_FAILURE_REASONS = frozenset(
+    {
+        "wine_tmpfs_init",
+        "wine_tmpfs_permissions",
+        "wine_not_found",
+        "wine_not_executable",
+    }
+)
+_STDERR_DRAIN_GRACE_SEC = 0.5
 
 
 @dataclass
@@ -38,6 +48,9 @@ class BotSession:
     responses: list = field(default_factory=list)  # 累积 Bot 响应负载（Traditional 信封 responses[]）
     turn: int = 0                                  # 已完成的回合数（0=首回合尚未握手判定）
     long_running: bool = False  # LongRunning Bot 首回合握手后置 True（之后发单 request 信封）
+    # 只写入容器启动 wrapper，不放入 Bot 环境或 exec 后的 argv。
+    # 据此区分平台 runtime/entrypoint 故障与 Bot 自行伪造的 stderr。
+    runtime_error_token: str = field(default_factory=lambda: uuid.uuid4().hex, repr=False)
 
     def start_stderr_drain(self) -> None:
         """异步读取 bot stderr 到尾部缓冲（保留末尾 4KB，排查崩溃）。"""
@@ -78,6 +91,14 @@ class BotCrashedError(RuntimeError):
         self.crashed_seat = crashed_seat
 
 
+class PlatformRunnerError(RuntimeError):
+    """Sandbox/container infrastructure failed before the Bot could be judged.
+
+    This must never be converted into a Bot technical loss: Docker daemon/image/
+    invocation failures are platform faults and therefore abort without rating.
+    """
+
+
 class BinaryRunner:
     """管理 bot 进程/容器的 stdin/stdout 行协议会话。"""
 
@@ -109,12 +130,22 @@ class BinaryRunner:
             session_id=sid, info=info, binary_path=path, mode=mode,
             runtime_mode=runtime_mode,
         )
-        if mode == "local":
-            await self._start_local(session)
-        elif mode == "wine":
-            await self._start_wine(session)
-        else:
-            await self._start_docker(session)
+        try:
+            if mode == "local":
+                await self._start_local(session)
+            elif mode == "wine":
+                await self._start_wine(session)
+            else:
+                await self._start_docker(session)
+        except OSError as exc:
+            if mode in ("docker", "wine"):
+                # Host process/resource failures while invoking the sandbox are
+                # platform faults.  Do not expose absolute paths from OSError to
+                # the public match stream or reject the uploaded Bot as invalid.
+                raise PlatformRunnerError(
+                    f"无法启动 {mode} 沙箱（{type(exc).__name__}）"
+                ) from exc
+            raise
         session.start_stderr_drain()
         logger.info(
             "bot session started sid=%s mode=%s path=%s fmt=%s/%s-%s",
@@ -126,11 +157,16 @@ class BinaryRunner:
     def _select_mode(self, info: BinaryInfo) -> str:
         if info.format == "pe":
             if not self._docker_ok:
-                raise RuntimeError("Windows PE bot 需要 Docker + Wine 镜像")
+                raise PlatformRunnerError("Windows PE bot 需要 Docker + Wine 镜像")
             return "wine"
         if info.format == "elf":
-            if self._prefer_local or not self._docker_ok:
+            # Running an uploaded executable directly on the host is an explicit
+            # test-only escape hatch.  Production must fail closed when Docker is
+            # unavailable; silently falling back would bypass every sandbox limit.
+            if self._prefer_local:
                 return "local"
+            if not self._docker_ok:
+                raise PlatformRunnerError("Linux ELF bot 需要 Docker 沙箱")
             return "docker"
         raise BinaryRejectError(info.reject_reason or "不支持的格式")
 
@@ -195,16 +231,45 @@ class BinaryRunner:
             session.binary_path.chmod(session.binary_path.stat().st_mode | 0o111)
         except (OSError, PermissionError):
             pass
+        runtime_marker = f"{_RUNTIME_ERROR_PREFIX}:{session.runtime_error_token}:"
+        # 强制绕过公共镜像默认的 root entrypoint，以 nobody 运行固定
+        # wrapper。Wine 需要可写 HOME/WINEPREFIX，它们只落在独立 tmpfs；
+        # 根文件系统仍为只读，Bot 挂载仍为 ro。
+        wine_wrapper = (
+            'runtime_error() { code="$1"; reason="$2"; '
+            f'printf "%s\\n" "{runtime_marker}$reason" >&2; exit "$code"; }}; '
+            'mkdir -p "$WINEPREFIX" "$XDG_RUNTIME_DIR" '
+            '|| runtime_error 126 wine_tmpfs_init; '
+            'chmod 700 "$HOME" "$WINEPREFIX" "$XDG_RUNTIME_DIR" '
+            '|| runtime_error 126 wine_tmpfs_permissions; '
+            'wine_bin="$(command -v wine)" '
+            '|| runtime_error 127 wine_not_found; '
+            '[ -x "$wine_bin" ] '
+            '|| runtime_error 126 wine_not_executable; '
+            'exec "$wine_bin" /app/bot.exe'
+        )
         cmd = [
             self._docker_bin, "run", "-i", "--rm",
             "--name", name,
             "--network=none",
             f"--memory={DEFAULT_MEMORY}",
             f"--cpus={DEFAULT_CPUS}",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777",
+            # Wine 首次启动会初始化 prefix；size 是上限而非预分配，
+            # 实际占用仍受容器 512 MiB 内存硬限统一约束。
+            "--tmpfs", "/winehome:rw,exec,nosuid,nodev,size=384m,uid=65534,gid=65534,mode=0700",
             "--cap-drop=ALL",
+            "--security-opt", "no-new-privileges",
+            "--user", "65534:65534",
+            "--env", "HOME=/winehome",
+            "--env", "WINEPREFIX=/winehome/prefix",
+            "--env", "XDG_RUNTIME_DIR=/winehome/runtime",
             "-v", f"{session.binary_path}:/app/bot.exe:ro",
+            "--workdir", "/tmp",
+            "--entrypoint", "/bin/sh",
             WINE_IMAGE,
-            "wine", "/app/bot.exe",
+            "-c", wine_wrapper,
         ]
         session.proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -221,8 +286,11 @@ class BinaryRunner:
             raise RuntimeError(f"session {session_id} 不可用")
         if not line.endswith("\n"):
             line = line + "\n"
-        session.proc.stdin.write(line.encode("utf-8"))
-        await session.proc.stdin.drain()
+        try:
+            session.proc.stdin.write(line.encode("utf-8"))
+            await session.proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            raise await self._process_exit_error(session, "stdin 已关闭") from exc
         try:
             raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -230,13 +298,52 @@ class BinaryRunner:
             logger.warning("bot %s 决策超时 (%ss) stderr=%s", session_id, timeout, tail[:500])
             raise TimeoutError(f"bot {session_id} 决策超时 ({timeout}s)")
         if not raw:
-            tail = session.stderr_tail()
-            logger.warning("bot %s stdout EOF（进程退出码=%s）stderr=%s",
-                           session_id, session.proc.returncode, tail[:500])
-            raise BotCrashedError(
-                f"bot {session_id} stdout EOF（进程退出码={session.proc.returncode}）"
-            )
+            raise await self._process_exit_error(session, "stdout EOF")
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+    async def _process_exit_error(
+        self, session: BotSession, context: str
+    ) -> RuntimeError:
+        """Classify a dead transport consistently for stdin and stdout races."""
+        returncode = session.proc.returncode if session.proc is not None else None
+        if returncode is None and session.proc is not None:
+            try:
+                returncode = await asyncio.wait_for(session.proc.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                returncode = session.proc.returncode
+        # proc.wait() 可能先于异步 stderr drain 任务收到 EOF；诊断标记
+        # 若在这个窗口丢失，会把 Wine 入口故障错记为 Bot 技术负。
+        stderr_task = session._stderr_task
+        if stderr_task is not None and not stderr_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(stderr_task), timeout=_STDERR_DRAIN_GRACE_SEC
+                )
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                pass
+        tail = session.stderr_tail()
+        logger.warning(
+            "bot %s %s（进程退出码=%s）stderr=%s",
+            session.session_id,
+            context,
+            returncode,
+            tail[:500],
+        )
+        platform_reason = _classify_container_platform_exit(
+            mode=session.mode,
+            returncode=returncode,
+            stderr_tail=tail,
+            runtime_error_token=session.runtime_error_token,
+        )
+        if platform_reason is not None:
+            return PlatformRunnerError(
+                f"sandbox 启动失败（{platform_reason}）"
+            )
+        return BotCrashedError(
+            f"bot {session.session_id} {context}（进程退出码={returncode}）"
+        )
 
     async def read_extra_line(self, session_id: str, *,
                               timeout: float = 1.0) -> str | None:
@@ -288,3 +395,34 @@ class BinaryRunner:
                 )
             except Exception:
                 logger.debug("docker rm failed", exc_info=True)
+
+
+def _classify_container_platform_exit(
+    *,
+    mode: str,
+    returncode: int | None,
+    stderr_tail: str,
+    runtime_error_token: str,
+) -> str | None:
+    """Return a trusted platform-fault reason, otherwise leave blame on the Bot.
+
+    Docker exit 125 is reserved for the Docker client/daemon failing to launch a
+    container.  Exit 126/127 is ambiguous: a Bot may deliberately return either
+    value, so those codes are platform faults only when the pre-exec wrapper emits
+    this session's unguessable marker.  The marker is not inherited by the Bot.
+    """
+    if mode not in ("docker", "wine"):
+        return None
+    if returncode == 125:
+        return "docker exit 125"
+    if returncode not in (126, 127):
+        return None
+
+    marker = f"{_RUNTIME_ERROR_PREFIX}:{runtime_error_token}:"
+    marker_at = stderr_tail.find(marker)
+    if marker_at < 0:
+        return None
+    reason = stderr_tail[marker_at + len(marker):].splitlines()[0].strip()
+    if reason not in _TRUSTED_RUNTIME_FAILURE_REASONS:
+        return None
+    return f"{reason}, exit {returncode}"

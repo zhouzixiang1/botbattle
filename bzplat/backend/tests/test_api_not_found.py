@@ -63,10 +63,32 @@ def test_spa_fallback_preserved_for_frontend_routes(tmp_path):
     )
 
 
-def test_api_health_still_works(tmp_path):
+def test_api_health_still_works(tmp_path, monkeypatch):
     """回归保护：已注册的 /api/health 正常返 JSON（fallback 不影响真实路由）。"""
+    monkeypatch.setenv("BZ_QA_INSTANCE", "1")
     c = _client(tmp_path)
     r = c.get("/api/health")
     assert r.status_code == 200
     assert "application/json" in r.headers.get("content-type", "")
-    assert r.json()["ok"] is True
+    body = r.json()
+    assert body["ok"] is True
+    assert body["qa_instance"] is True
+    assert "db" not in body  # 公开健康检查不得泄漏服务器绝对路径
+    assert c.app.state.bot_manager.upload_root == (tmp_path / "bot_uploads").resolve()
+
+
+def test_qa_database_guard_runs_before_store_open(tmp_path, monkeypatch):
+    """A forged QA marker must fail before Store can create/migrate the target."""
+    import bzplat.backend.main as main_module
+
+    target = tmp_path / "must-not-exist.db"
+    monkeypatch.setenv("BZ_QA_INSTANCE", "1")
+
+    def reject(_db_path, _source_root):
+        assert not target.exists()
+        raise RuntimeError("unsafe primary DB")
+
+    monkeypatch.setattr(main_module, "assert_qa_database_isolated", reject)
+    with pytest.raises(RuntimeError, match="unsafe primary DB"):
+        main_module.create_app(db_path=str(target))
+    assert not target.exists()

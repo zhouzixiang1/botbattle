@@ -8,7 +8,7 @@
 - 多视口 desk/tab/mob 覆盖更多页面
 - 输出 browser_shots/visual_audit/{REPORT.md,results.json,*.png}
 
-用法（50380 须在线）：
+用法（worktree Vite 默认在 5173）：
     source .venv/bin/activate
     python scripts/ui_visual_audit.py
 """
@@ -22,8 +22,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from _qa_target import assert_qa_instance, qa_base
 
-BASE = "http://127.0.0.1:50380"
+BASE = qa_base()
+assert_qa_instance(BASE)
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "browser_shots" / "visual_audit"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -262,7 +264,6 @@ def main() -> int:
         ("leaderboard", "/leaderboard"),
         ("wiki", "/wiki"),
         ("search", "/search?q=test"),
-        ("data", "/data"),
         ("contests", "/contests"),
         ("contest_detail", f"/contests/{contest_id}"),
         ("match", f"/match/{match_id}"),
@@ -409,7 +410,6 @@ def main() -> int:
         print("== user desk ==")
         for label, path in user_pages + [
             ("contest_detail", f"/contests/{contest_id}"),
-            ("data", "/data"),
             ("search", "/search?q=bot"),
         ]:
             visit(label, path, "user", "desk", creds=("tester1", "Test1234"))

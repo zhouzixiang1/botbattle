@@ -30,7 +30,9 @@
 
 ## 2. 现状（代码事实）
 
-基于当前仓库实现（`ContestManager` / `schema` / `limits` / `api_routes`）：
+> 本节是预赛/决赛能力开发前的**历史差距基线**，用于解释设计动机，不代表当前实现。当前真值请以 [DESIGN.md](./DESIGN.md)、[TESTING.md](./TESTING.md) 与玩家 [GUIDE](../wiki/GUIDE.md) 为准。
+
+基于当时仓库实现（`ContestManager` / `schema` / `limits` / `api_routes`）：
 
 | 能力 | 现状 | 差距 |
 |------|------|------|

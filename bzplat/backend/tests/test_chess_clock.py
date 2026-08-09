@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 
 import pytest
 
+import bzplat.backend.matches.runner as runner_module
 from bzplat.backend.matches.runner import _ChessClock, MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 
@@ -39,8 +39,8 @@ def test_chess_clock_used():
 
 
 @pytest.fixture(autouse=True)
-def _local_bot():
-    os.environ["BZ_BOT_LOCAL"] = "1"
+def _local_bot(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
 
 
 def test_pencil_match_emits_time_used_events():
@@ -126,3 +126,95 @@ def test_pencil_time_budget_passthrough_to_run_duplicate():
     ))
     time_used = [e for e in events if e.get("type") == "time_used"]
     assert time_used, "run_duplicate(pencil) 透传 time_budget_per_side 后应 emit time_used"
+
+
+class _FakeBinaryRunner:
+    def __init__(self) -> None:
+        self.stopped: list[str] = []
+
+    async def start_session(self, _path: str, *, runtime_mode: str) -> str:
+        return f"session-{runtime_mode}"
+
+    async def stop_session(self, session_id: str) -> None:
+        self.stopped.append(session_id)
+
+
+def test_human_runner_clock_accumulates_both_sides_and_emits_time_used(
+    monkeypatch,
+):
+    """Bot 与真人决策共用每方独立累计钟，且都产出同一事件契约。"""
+
+    class StepClock(_ChessClock):
+        def __init__(self, budget: float | None):
+            super().__init__(budget)
+            self._now = 0.0
+
+        def now(self) -> float:
+            self._now += 0.2
+            return self._now
+
+    async def fake_bot_decide(*_args, **_kwargs):
+        return {"response": {"x": 0, "y": 0}}
+
+    async def fake_run_session(_game_id, decide, **_kwargs):
+        for seat in (0, 1, 0, 1):
+            await decide(seat, {})
+        return object()
+
+    async def human_decide(_seat, _request):
+        return {"x": 0, "y": 0}
+
+    monkeypatch.setattr(runner_module, "_ChessClock", StepClock)
+    monkeypatch.setattr(runner_module, "_botzone_decide", fake_bot_decide)
+    monkeypatch.setattr(runner_module, "run_session", fake_run_session)
+    binary_runner = _FakeBinaryRunner()
+    runner = MatchRunner(binary_runner)
+    events: list[dict] = []
+
+    asyncio.run(runner.run_bot_vs_human(
+        "/fake/bot", bot_seat=0, human_decide=human_decide,
+        game_id="pencil", on_event=lambda _kind, ev: events.append(ev),
+        time_budget_per_side=1.0,
+    ))
+
+    time_used = [event for event in events if event["type"] == "time_used"]
+    assert [event["seat"] for event in time_used] == [0, 1, 0, 1]
+    assert [event["used"] for event in time_used] == [0.2, 0.2, 0.4, 0.4]
+    assert [event["remaining"] for event in time_used] == [0.8, 0.8, 0.6, 0.6]
+    assert all(event["budget"] == 1.0 for event in time_used)
+    assert binary_runner.stopped == ["session-longrunning"]
+
+
+@pytest.mark.parametrize("timed_seat", [0, 1], ids=["bot", "human"])
+def test_human_runner_clock_timeout_adjudicates_either_side(
+    monkeypatch, timed_seat,
+):
+    """Bot 或真人耗尽累计预算都 emit time_out 并抛给裁判判当前方负。"""
+
+    async def fake_bot_decide(*_args, action_timeout, **_kwargs):
+        await asyncio.wait_for(asyncio.Event().wait(), timeout=action_timeout)
+
+    async def fake_run_session(_game_id, decide, **_kwargs):
+        return await decide(timed_seat, {})
+
+    async def human_decide(_seat, _request):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner_module, "_botzone_decide", fake_bot_decide)
+    monkeypatch.setattr(runner_module, "run_session", fake_run_session)
+    binary_runner = _FakeBinaryRunner()
+    runner = MatchRunner(binary_runner)
+    events: list[dict] = []
+
+    with pytest.raises(TimeoutError, match=f"seat {timed_seat} 时间耗尽"):
+        asyncio.run(runner.run_bot_vs_human(
+            "/fake/bot", bot_seat=0, human_decide=human_decide,
+            game_id="pencil", on_event=lambda _kind, ev: events.append(ev),
+            time_budget_per_side=0.01,
+        ))
+
+    assert len(events) == 1
+    assert events[0]["type"] == "time_out"
+    assert events[0]["seat"] == timed_seat
+    assert events[0]["budget"] == 0.01
+    assert binary_runner.stopped == ["session-longrunning"]

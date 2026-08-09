@@ -12,6 +12,7 @@ import time
 
 from bzplat.backend.contests.stages import (
     estimate_match_count,
+    generate_stage_pairings,
     swiss_pairings,
     swiss_rounds_needed,
 )
@@ -31,17 +32,14 @@ def test_swiss_4_players_avoids_repeat():
 
 
 def test_swiss_odd_count_bye():
-    """奇数 N：最低分者 bye（不出现在配对里）。"""
+    """奇数 N：最低分者以显式 completed/no-match pairing 记录 bye。"""
     bots = [1, 2, 3, 4, 5]
     r1 = swiss_pairings(bots, scores={b: 0 for b in bots}, played=set())
-    # 5 人 → 2 对 + 1 bye，bye 是最低分（id 最大=5）
-    paired = set()
-    for p in r1:
-        paired.add(p.bot_a_id)
-        paired.add(p.bot_b_id)
-    assert len(r1) == 2, "5 人应 2 对 + 1 bye"
-    bye = set(bots) - paired
-    assert bye == {5}, f"bye 应是最低分 5，实际 {bye}"
+    matches = [pairing for pairing in r1 if pairing.requires_match]
+    byes = [pairing for pairing in r1 if not pairing.requires_match]
+    assert len(matches) == 2 and len(byes) == 1, "5 人应 2 对 + 1 bye"
+    assert byes[0].bot_a_id == 5
+    assert byes[0].bot_b_id is None and byes[0].status == "completed"
 
 
 def test_swiss_color_balance():
@@ -53,6 +51,18 @@ def test_swiss_color_balance():
     )
     assert len(r) == 1
     assert r[0].color_first == 1, "先手累计少者（2）本轮应先手（color_first=1）"
+
+
+def test_generate_stage_pairings_forwards_swiss_color_counts():
+    """统一阶段入口不能丢掉 manager 统计出的历史先手次数。"""
+    pairings = generate_stage_pairings(
+        {"type": "swiss"},
+        [1, 2],
+        color_counts={1: 4, 2: 0},
+        swiss_round=2,
+    )
+    assert len(pairings) == 1
+    assert pairings[0].color_first == 1
 
 
 def test_swiss_8_players_correctness():

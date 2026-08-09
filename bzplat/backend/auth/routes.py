@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-import re
+from pathlib import Path
 
 from fastapi import (
     APIRouter,
@@ -16,14 +16,11 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field, field_validator
 
-from .auth_manager import COOKIE_NAME, AuthError, AuthManager
+from .auth_manager import COOKIE_NAME, AuthError, AuthManager, validate_phone
 from .captcha import CAPTCHA_TTL_SEC, CaptchaStore, png_to_data_url
 from .dependencies import require_admin, require_user
 from bzplat.backend.security import audit_log, client_ip
 from bzplat.backend.security import _env_bool
-
-# 中国大陆手机号格式（空值跳过——实名信息可选）
-_PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -138,6 +135,7 @@ def _err(exc: AuthError) -> HTTPException:
         "mail_not_configured": 503,
         "no_user": 404,
         "invalid_captcha": 400,
+        "invalid_phone": 400,
     }
     return HTTPException(
         status_code=code_to_status.get(exc.code, 400), detail=exc.message
@@ -172,6 +170,7 @@ async def get_captcha(request: Request) -> dict:
 async def register(req: RegisterReq, request: Request) -> dict:
     _require_captcha(request, req.captcha_id, req.captcha_answer)
     auth: AuthManager = request.app.state.auth
+    user: dict | None = None
     try:
         user = auth.register(
             req.username,
@@ -185,6 +184,10 @@ async def register(req: RegisterReq, request: Request) -> dict:
         )
         auth.send_verify_code(user)
     except AuthError as exc:
+        # 注册与首封验证邮件对用户应呈现原子语义：发信失败时补偿删除刚创建的
+        # 未验证账号，避免页面提示失败、重试却遇到用户名/邮箱已占用。
+        if user is not None:
+            auth.store.delete_user(user["id"])
         audit_log(request, "register", result="fail", target=req.username, detail=exc.code)
         raise _err(exc) from exc
     audit_log(request, "register", result="ok", user=user.get("username"))
@@ -305,9 +308,10 @@ async def update_profile(
         fields["real_name"] = req.real_name.strip()[:32]
     if req.phone is not None:
         phone = req.phone.strip()
-        if phone and not _PHONE_RE.match(phone):
-            from fastapi import HTTPException
-            raise HTTPException(400, "手机号格式不正确")
+        try:
+            validate_phone(phone)
+        except AuthError as exc:
+            raise _err(exc) from exc
         fields["phone"] = phone[:20]
     if req.school is not None:
         fields["school"] = req.school.strip()[:64]
@@ -341,16 +345,15 @@ async def upload_avatar(
     ext = ext_map.get(ctype)
     if not ext:
         raise HTTPException(400, "仅支持 png/jpeg/webp/gif")
-    avatars_dir = os.environ.get("BZ_AVATAR_DIR", "avatars")
-    os.makedirs(avatars_dir, exist_ok=True)
+    avatars_dir = Path(request.app.state.avatar_dir)
+    avatars_dir.mkdir(parents=True, exist_ok=True)
     # 覆盖旧头像（删其他扩展名的同名文件）
     uid = user["id"]
     for old in ("png", "jpg", "webp", "gif"):
-        old_path = os.path.join(avatars_dir, f"{uid}.{old}")
-        if os.path.exists(old_path):
-            os.remove(old_path)
-    path = os.path.join(avatars_dir, f"{uid}.{ext}")
-    with open(path, "wb") as f:
+        old_path = avatars_dir / f"{uid}.{old}"
+        old_path.unlink(missing_ok=True)
+    path = avatars_dir / f"{uid}.{ext}"
+    with path.open("wb") as f:
         f.write(raw)
     store = request.app.state.store
     rel = f"{uid}.{ext}"
