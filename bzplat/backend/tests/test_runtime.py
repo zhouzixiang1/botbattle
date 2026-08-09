@@ -277,6 +277,38 @@ def test_preflight_rejects_non_elf_identically_for_every_game_and_mode(
     assert "仅支持 Linux x86_64 ELF" in detail
 
 
+def test_windows_pe_is_rejected_before_any_docker_start(tmp_path):
+    """PE 的文件头闸门必须早于 Docker；不得再触发 Wine/镜像拉取。"""
+    from bzplat.backend.games import preflight_bot
+
+    class SpyRunner(BinaryRunner):
+        def __init__(self) -> None:
+            super().__init__(prefer_local=False)
+            self.docker_starts = 0
+
+        async def _start_docker(self, session):
+            self.docker_starts += 1
+            raise AssertionError("PE 不应进入 Docker 启动路径")
+
+    path = tmp_path / "windows-x64.exe"
+    path.write_bytes(_valid_pe())
+    runner = SpyRunner()
+
+    ok, detail = asyncio.run(
+        preflight_bot(
+            "pencil",
+            str(path),
+            runner,
+            runtime_mode="traditional",
+        )
+    )
+
+    assert not ok
+    assert "Windows PE 不受支持" in detail
+    assert runner.docker_starts == 0
+    assert runner._sessions == {}
+
+
 def test_fresh_store_accepts_only_current_binary_metadata(tmp_path):
     from bzplat.backend.store import Store
 
