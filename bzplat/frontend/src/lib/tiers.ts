@@ -12,6 +12,7 @@
  * 每档提供浅/暗双色 badge 类名。
  */
 import { useEffect, useState } from 'react'
+import { findGame } from '@/games'
 
 export interface Tier {
   level: number
@@ -119,8 +120,12 @@ export async function fetchTiers(gameId: string): Promise<Tier[]> {
 /** React hook：按游戏取段位曲线（异步拉取 + 缓存）。 */
 export function useGameTiers(gameId: string | null | undefined): Tier[] {
   const [tiers, setTiers] = useState<Tier[]>(TIERS)
-  const gid = gameId || 'holdem'
+  const gid = findGame(gameId)?.id
   useEffect(() => {
+    if (!gid) {
+      setTiers(TIERS)
+      return
+    }
     let cancelled = false
     void fetchTiers(gid).then((t) => {
       if (!cancelled) setTiers(t)

@@ -1,6 +1,5 @@
 import { useMemo } from 'react'
-import { getGame } from '@/games'
-import { normalizeGameId } from '@/lib/games'
+import { findGame, normalizeGameId, unsupportedGameLabel } from '@/games'
 import GameCanvas from './GameCanvas'
 import type { SeatInfo } from '@/games/canvas-types'
 import type { RawEvent } from '@/games/base'
@@ -24,7 +23,21 @@ export default function MatchBoard({
   seats?: SeatInfo[]
 }) {
   const gid = normalizeGameId(gameId)
-  const spec = getGame(gid)
+  const spec = findGame(gid)
+
+  // Hook 必须在所有渲染路径保持同一顺序；canvas 与 DOM renderer 切换也不能条件调用。
+  const vm = useMemo(
+    () => (spec && !spec.CanvasRenderer && events.length ? spec.reduce(events) : null),
+    [spec, events],
+  )
+
+  if (!spec) {
+    return (
+      <div role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+        无法显示对局：{unsupportedGameLabel(gameId)}
+      </div>
+    )
+  }
 
   // 该游戏已接入 canvas 渲染器 → 优先用 canvas 绘制（三游戏都走这）
   if (spec.CanvasRenderer) {
@@ -43,9 +56,6 @@ export default function MatchBoard({
   // 回退 DOM Board（gomoku/pencil 暂时走这，PR-B/C 加 CanvasRenderer 后自动切）
   // 仅在交互模式且有 onMove 时启用点击
   const handler = interactive && onMove ? onMove : undefined
-
-  // 经注册表归约（消除 per-game if-chain 与各自 useMemo）
-  const vm = useMemo(() => (events.length ? spec.reduce(events) : null), [spec, events])
 
   if (!vm) return null
   const Board = spec.Board

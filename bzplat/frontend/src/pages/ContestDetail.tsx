@@ -24,7 +24,7 @@ import { useConfirm } from '@/hooks/use-confirm'
 import { useAuth } from '@/components/useAuth'
 import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
-import { gameLabel, isBoardGame } from '@/lib/games'
+import { findGame, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import { toast } from 'sonner'
 
@@ -431,6 +431,7 @@ export default function ContestDetail() {
   }
 
   const contestScheduleIssue = scheduleIssue(contest)
+  const contestGame = findGame(contest.game_id)
   const showMatchups = pairings.length > 0 || ['published', 'running', 'rest', 'finished'].includes(contest.status)
   const showStandings = standings.length > 0 || ['running', 'rest', 'finished'].includes(contest.status)
   const showOfficial = contest.status === 'finished'
@@ -453,12 +454,8 @@ export default function ContestDetail() {
                 <span className="max-w-full truncate" title={contest.template_id || undefined}>
                   模板 {contest.template_name || contest.template_id || '—'}
                 </span>
-                <span>· 游戏 {gameLabel(contest.game_id || 'holdem')}</span>
-                {isBoardGame(contest.game_id) ? (
-                  <span>· 单局决胜</span>
-                ) : (
-                  <span>· 每场 70 手</span>
-                )}
+                <span>· 游戏 {gameLabel(contest.game_id)}</span>
+                <span>· {contestGame ? contestGame.matchFormatLabel : '规则不可用'}</span>
                 {isDuplicate && (
                   <Badge variant="secondary" className="text-[10px]">复式赛制</Badge>
                 )}

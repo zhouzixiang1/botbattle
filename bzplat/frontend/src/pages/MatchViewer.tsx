@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Clock } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import MatchBoard from '@/components/MatchBoard'
 import { Card, CardContent } from '@/components/ui/card'
@@ -21,18 +21,15 @@ import { ErrorMsg, Loading, EmptyState } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, apiPost, errMsg } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/games'
-import { isBoardGame } from '@/games'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
-import { getGame } from '@/games'
+import { findGame, unsupportedGameLabel } from '@/games'
 import type { RawEvent } from '@/games/base'
-import type { PencilViewModel } from '@/games/pencil/reducer'
 import {
   type MatchSeatRow,
   seatInfos,
   seatHeaderLabel,
   resolveWinnerLabel,
-  fmtNet,
 } from '@/lib/match-seats'
 
 type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: string }
@@ -40,22 +37,6 @@ type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: str
 const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   connecting: 'secondary', live: 'default', match_end: 'outline', error: 'destructive',
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
-}
-
-/** 秒 → mm:ss 格式（象棋钟显示用）。 */
-function fmtClock(sec: number): string {
-  const s = Math.max(0, Math.floor(sec))
-  const m = Math.floor(s / 60)
-  const r = s % 60
-  return `${m}:${r.toString().padStart(2, '0')}`
-}
-
-/** 找德州每手起始事件索引（逐手跳转用）。 */
-function handBoundaries(events: RawEvent[]): number[] {
-  const bounds: number[] = []
-  events.forEach((ev, i) => { if (ev.type === 'hand_start') bounds.push(i) })
-  if (events.length) bounds.push(events.length)
-  return bounds
 }
 
 export default function MatchViewer() {
@@ -233,53 +214,43 @@ export default function MatchViewer() {
   }, [])
 
   const gameId = normalizeGameId(match?.game_id)
-  const isBoard = isBoardGame(gameId)
+  const gameSpec = match ? findGame(gameId) : undefined
   const total = events.length
   // cur：当前显示到第几步。-1 = 贴尾（直播跟随/回放启动前）
   const cur = stepIdx < 0 ? Math.max(0, total - 1) : Math.min(stepIdx, total - 1)
   const visible = total > 0 ? events.slice(0, cur + 1) : []
   const atLive = stepIdx < 0
-  const lag = atLive ? 0 : Math.max(0, total - 1 - cur)
+  const lag = !gameSpec || atLive ? 0 : Math.max(0, total - 1 - cur)
   const seats = seatInfos(match)
-  // 当前可见事件归约：经注册表 spec.reduce（消除 gameId=== if-chain）。
-  // kind 区分仍保留用于下方 VM 字段分流（扑克 matchWinner vs 棋类 winner）。
+  // 当前可见事件只由游戏 reducer 解释，页面不读取具体 ViewModel 字段。
   const visibleVm = useMemo(() => {
-    if (total === 0) return null
+    if (total === 0 || !gameSpec) return null
     const slice = events.slice(0, cur + 1)
-    const kind = getGame(gameId).kind
-    const vm = getGame(gameId).reduce(slice as RawEvent[])
-    return { kind, vm } as
-      | { kind: 'cards'; vm: { matchWinner: number | null; seats?: { net: number }[] } }
-      | { kind: 'board'; vm: { winner: number | null; moveCount?: number; scores?: number[] } }
-  }, [gameId, events, cur, total])
+    return gameSpec.reduce(slice as RawEvent[])
+  }, [gameSpec, events, cur, total])
   const finished =
     match?.status === 'completed' ||
     match?.status === 'aborted' ||
     status === 'match_end' ||
     status === 'replay'
-  const eventWinner =
-    visibleVm?.kind === 'cards' ? visibleVm.vm.matchWinner
-      : visibleVm?.kind === 'board' ? visibleVm.vm.winner
-        : undefined
+  const eventWinner = visibleVm && gameSpec ? gameSpec.winner(visibleVm) : undefined
   const colorLabel = (seat: number) => {
     // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
     if (!match) return `座位 ${seat + 1}`
     // 棋类座位着色（黑白/红蓝）经 spec.seatColors 取（消除游戏名分支）
-    const seatColors = getGame(gameId).seatColors
+    const seatColors = gameSpec?.seatColors
     if (seatColors && seatColors[seat]) {
       return `${seatHeaderLabel(match, seat as 0 | 1)}（${seatColors[seat]}）`
     }
     return seatHeaderLabel(match, seat as 0 | 1)
   }
   const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
-  const netA = visibleVm?.kind === 'cards'
-    ? visibleVm.vm.seats?.[0]?.net ?? null
-    : typeof match?.result?.deltas?.[0] === 'number' ? match.result.deltas[0] : null
-  const netB = visibleVm?.kind === 'cards'
-    ? visibleVm.vm.seats?.[1]?.net ?? null
-    : typeof match?.result?.deltas?.[1] === 'number' ? match.result.deltas[1] : null
-  const liveSteps = visibleVm?.kind === 'board' ? visibleVm.vm.moveCount ?? null : null
-  const pencilScores = getGame(gameId).showScores && visibleVm?.kind === 'board' ? visibleVm.vm.scores ?? null : null
+  const liveProgress = visibleVm && gameSpec ? gameSpec.replay.progress(visibleVm) : null
+  const progressLabel = gameSpec ? (gameSpec.progressUnit === 'move' ? '步数' : '手数') : '进度'
+  const progressUnitLabel = gameSpec?.progressUnit === 'move' ? '步' : '手'
+  const ReplaySummary = gameSpec?.replay.Summary
+  const ReplayHud = gameSpec?.replay.Hud
+  const navigation = gameSpec?.replay.navigation
   const typeBadge = matchTypeBadge(match?.match_type)
 
   // 定速播放定时器（直播+回放共用）：按 SPEEDS 步进；到末尾后直播继续等（保持 playing），
@@ -321,9 +292,9 @@ export default function MatchViewer() {
     setPlaying((p) => !p)
   }
 
-  // 德州逐手跳转
-  const bounds = useMemo(() => handBoundaries(events), [events])
-  const jumpHand = (delta: number) => {
+  // 可选的游戏分段导航（当前德州按手）；边界算法由游戏包提供。
+  const bounds = useMemo(() => navigation?.boundaries(events) ?? [], [events, navigation])
+  const jumpSegment = (delta: number) => {
     pause()
     if (!bounds.length) return
     let hIdx = 0
@@ -331,7 +302,7 @@ export default function MatchViewer() {
     const target = Math.max(0, Math.min(bounds.length - 2, hIdx + delta))
     setStepIdx(bounds[target] ?? 0)
   }
-  const curHandIdx = (() => { for (let i = 0; i < bounds.length - 1; i++) if (cur >= bounds[i] && cur < bounds[i + 1]) return i; return bounds.length >= 2 ? bounds.length - 2 : 0 })()
+  const curSegmentIdx = (() => { for (let i = 0; i < bounds.length - 1; i++) if (cur >= bounds[i] && cur < bounds[i + 1]) return i; return bounds.length >= 2 ? bounds.length - 2 : 0 })()
 
   // 动作日志自动滚动到当前步
   useEffect(() => {
@@ -350,7 +321,9 @@ export default function MatchViewer() {
     <PageStub title={isLive ? '实时观赛' : '对局详情'}>
       <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
         <span className="font-mono text-xs text-muted-foreground">{id}</span>
-        <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
+        {match && (
+          <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
+        )}
         {typeBadge && (
           <Badge variant="outline" className={`text-[10px] ${typeBadge.cls}`}>{typeBadge.label}</Badge>
         )}
@@ -379,9 +352,9 @@ export default function MatchViewer() {
         })()}
         {match && (
           <span className="text-muted-foreground">
-            {isBoard ? '步数' : '手数'}：
+            {progressLabel}：
             <span className="font-mono text-foreground">
-              {String(liveSteps ?? match.result?.hands_played ?? 0)}
+              {String(liveProgress ?? match.result?.hands_played ?? 0)}
             </span>
           </span>
         )}
@@ -408,29 +381,18 @@ export default function MatchViewer() {
         )}
         {lag > 0 && (
           <Button variant="outline" size="sm" onClick={jumpToLive} className="gap-1">
-            <Radio className="size-3" />落后 {lag} 手·跳最新
+            <Radio className="size-3" />落后 {lag} {progressUnitLabel}·跳最新
           </Button>
         )}
       </div>
 
-      {/* 对阵双方 + 累计筹码 / 点格比分 */}
+      {/* 对阵双方；游戏专属摘要经 replay.Summary 插件挂载。 */}
       {match && (
         <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
           <span className="min-w-0 max-w-[40%] truncate font-medium text-foreground">{seatHeaderLabel(match, 0)}</span>
           <span className="text-muted-foreground">vs</span>
           <span className="min-w-0 max-w-[40%] truncate font-medium text-foreground">{seatHeaderLabel(match, 1)}</span>
-          {!isBoard && netA != null && netB != null && (
-            <span className="font-mono text-xs text-muted-foreground">
-              累计筹码{' '}
-              <span className={netA >= 0 ? 'text-success' : 'text-destructive'}>
-                座1 {fmtNet(netA)}
-              </span>
-              {' · '}
-              <span className={netB >= 0 ? 'text-success' : 'text-destructive'}>
-                座2 {fmtNet(netB)}
-              </span>
-            </span>
-          )}
+          {ReplaySummary && visibleVm !== null && <ReplaySummary vm={visibleVm} seats={seats} />}
           {match.bot_a_id != null && match.bot_b_id != null && match.match_type !== 'human' && (
             <span className="text-xs text-muted-foreground">
               <Link to={`/bot/${match.bot_a_id}`} className="text-primary hover:underline">座1 详情</Link>
@@ -442,57 +404,36 @@ export default function MatchViewer() {
       )}
 
       {error && <ErrorMsg msg={error} className="mb-4" />}
+      {match && !gameSpec && (
+        <ErrorMsg msg={`无法显示该对局：${unsupportedGameLabel(match.game_id)}`} className="mb-4" />
+      )}
 
       {loading ? (
         <Loading text="加载中…" />
+      ) : match && !gameSpec ? (
+        <Card><EmptyState
+          text={`回放不可用：${unsupportedGameLabel(match.game_id)}`}
+          icon={<TriangleAlert className="size-7 opacity-40" />}
+        /></Card>
       ) : visible.length === 0 ? (
         <Card><EmptyState
           text={match?.status === 'aborted' ? '此对局已中止，无回放数据' : '暂无事件'}
           icon={<History className="size-7 opacity-40" />}
         /></Card>
       ) : (
-        // 德州扑克（!isBoard）：canvas 单栏全宽 + 时序栏移下方（牌桌是主视觉，需更大）；
-        // 棋类（isBoard）：保留双栏（棋盘 + 时序并排）；桌面端折叠时序栏时棋盘获全宽。
-        <div className={!isBoard ? "space-y-4" : timelineCollapsed ? "grid gap-4" : "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]"}>
+        <div className={gameSpec?.replay.layout === 'wide' ? "space-y-4" : timelineCollapsed ? "grid gap-4" : "grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]"}>
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
           <div className="space-y-3">
-            {/* 点格棋玩家卡：双方名字+比分+剩余时间（象棋钟）；当前方高亮 */}
-            {pencilScores && visibleVm?.kind === 'board' && (
-              <div className="grid grid-cols-2 gap-2">
-                {([0, 1] as const).map((seat) => {
-                  const vm = visibleVm.vm as PencilViewModel
-                  const isActing = !vm.matchOver && vm.toAct === seat
-                  const remaining = vm.timeRemaining?.[seat]
-                  const timedOut = vm.timeOut === seat
-                  const name = seats?.[seat]?.botName || seats?.[seat]?.ownerName || (seat === 0 ? '红方' : '蓝方')
-                  const color = seat === 0 ? 'text-chart-3' : 'text-chart-2'
-                  return (
-                    <div key={seat} className={`rounded-lg border p-3 ${isActing ? 'ring-2 ring-primary' : 'border-border'}`}>
-                      <div className={`flex items-center justify-between`}>
-                        <span className={`font-medium ${color}`}>{name}</span>
-                        <span className="font-mono text-lg font-bold">{pencilScores[seat]}</span>
-                      </div>
-                      {(remaining != null || timedOut) && (
-                        <div className={`mt-1 text-sm ${isActing ? 'text-foreground' : 'text-muted-foreground'}`}>
-                          <Clock className="size-3.5 inline" /> {fmtClock(remaining ?? 0)}
-                          {timedOut && <Badge variant="destructive" className="ml-1 text-xs">超时</Badge>}
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
+            {ReplayHud && visibleVm !== null && <ReplayHud vm={visibleVm} seats={seats} />}
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
-            {/* 德州手导航器 */}
-            {!isBoard && bounds.length >= 2 && (
+            {navigation && bounds.length >= 2 && (
               <div>
-                <div className="mb-1 text-[10px] text-muted-foreground">手导航（点击跳转）</div>
+                <div className="mb-1 text-[10px] text-muted-foreground">{navigation.unitLabel}导航（点击跳转）</div>
                 <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto rounded-lg border border-border bg-card p-2">
                   {Array.from({ length: bounds.length - 1 }, (_, h) => (
                     <button key={h} type="button" onClick={() => seek(bounds[h] ?? 0)}
-                      className={`size-7 shrink-0 rounded text-[10px] font-medium transition ${h === curHandIdx ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'}`}>
+                      className={`size-7 shrink-0 rounded text-[10px] font-medium transition ${h === curSegmentIdx ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'}`}>
                       {h + 1}
                     </button>
                   ))}
@@ -504,16 +445,16 @@ export default function MatchViewer() {
             <Card>
               <CardContent className="py-3">
                 <div className="flex flex-wrap items-center justify-center gap-1.5">
-                  {!isBoard && (
-                    <Button variant="outline" size="sm" onClick={() => jumpHand(-1)} className="gap-1"><SkipBack className="size-3.5" />上一手</Button>
+                  {navigation && (
+                    <Button variant="outline" size="sm" onClick={() => jumpSegment(-1)} className="gap-1"><SkipBack className="size-3.5" />上一{navigation.unitLabel}</Button>
                   )}
                   <Button variant="outline" size="sm" onClick={() => step(-1)} className="gap-1"><ChevronLeft className="size-4" />上一步</Button>
                   <Button variant="default" size="sm" onClick={togglePlay} className="gap-1.5">
                     {playing ? <><Pause className="size-4" />暂停</> : <><Play className="size-4" />播放</>}
                   </Button>
                   <Button variant="outline" size="sm" onClick={() => step(1)} className="gap-1">下一步<ChevronRight className="size-4" /></Button>
-                  {!isBoard && (
-                    <Button variant="outline" size="sm" onClick={() => jumpHand(1)} className="gap-1">下一手<SkipForward className="size-3.5" /></Button>
+                  {navigation && (
+                    <Button variant="outline" size="sm" onClick={() => jumpSegment(1)} className="gap-1">下一{navigation.unitLabel}<SkipForward className="size-3.5" /></Button>
                   )}
                   <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
                     <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs">
@@ -551,7 +492,7 @@ export default function MatchViewer() {
                     className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
                     <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
                     <span className="min-w-0 flex-1 break-words opacity-80" title={String(ev.type || '')}>
-                      {eventDesc(ev)}
+                      {gameSpec?.describeEvent(ev) ?? String(ev.type || '?')}
                     </span>
                   </div>
                 ))}
@@ -567,27 +508,4 @@ export default function MatchViewer() {
       {id && <Comments targetType="match" targetId={id} />}
     </PageStub>
   )
-}
-
-function eventDesc(ev: RawEvent): string {
-  const ACTION: Record<string, string> = { fold: '弃牌', check: '过牌', call: '跟注', raise: '加注', allin: '全押' }
-  if (ev.type === 'action') return `座${displaySeat(ev.player)} · ${ACTION[String(ev.action)] ?? ev.action}${ev.amount ? ' ' + String(ev.amount) : ''}`
-  if (ev.type === 'move') return `座${displaySeat(ev.player)} · (${ev.x},${ev.y})${ev.scored ? ' · 得分连走' : ''}`
-  if (ev.type === 'settle') {
-    const winners = (ev.winners as unknown[] | undefined)?.map(displaySeat).join('/') || '?'
-    return `赢家 座${winners} · 底池 ${ev.pot}`
-  }
-  if (ev.type === 'hand_start') return `第 ${(Number(ev.hand) || 0) + 1} 手开始`
-  if (ev.type === 'deal_board') return `${ev.street}: ${(ev.dealt as string[] | undefined)?.join(' ')}`
-  if (ev.type === 'deal_hole') return '发底牌'
-  if (ev.type === 'match_start') return '对局开始'
-  if (ev.type === 'match_end') return `结束 · 胜者 ${ev.winner == null ? '平' : `座${displaySeat(ev.winner)}`}`
-  if (ev.type === 'turn') return `轮到座${displaySeat(ev.player)}`
-  return ev.type || '?'
-}
-
-function displaySeat(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '?'
-  const n = Number(value)
-  return Number.isFinite(n) ? String(n + 1) : '?'
 }

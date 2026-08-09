@@ -31,7 +31,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useConfirm } from '@/hooks/use-confirm'
 import { fmtTime } from '@/lib/format'
-import { gameLabel } from '@/lib/games'
+import { findGame, gameLabel } from '@/lib/games'
 
 interface Contest {
   id: number
@@ -313,7 +313,7 @@ export default function ContestsTab() {
                       <Link to={`/contests/${contest.id}`} className="text-primary hover:underline">{contest.title}</Link>
                     </TableCell>
                     <TableCell className="px-3 py-2 text-xs text-muted-foreground">
-                      <div className="text-foreground">{gameLabel(contest.game_id || 'holdem')}</div>
+                      <div className="text-foreground">{gameLabel(contest.game_id)}</div>
                       <div className="font-mono">{contest.template_id || '未指定模板'}</div>
                     </TableCell>
                     <TableCell className="px-3 py-2"><StatusBadge status={contest.status} /></TableCell>
@@ -525,15 +525,20 @@ function AssignPanel({ contestId, gameId, onDone }: { contestId: number; gameId?
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const gameSpec = findGame(gameId)
 
   const assignAll = async () => {
+    if (!gameSpec) {
+      setMessage('该赛事的游戏类型不受支持，无法批量指派。')
+      return
+    }
     setBusy(true)
     setMessage('')
     try {
       const response = await apiJson<{ added: number; skipped: string[]; total_entries: number }>(
         `/api/admin/contests/${contestId}/entries/bulk`,
         'POST',
-        { assign_all: true, game_id: gameId || 'holdem', name_prefix: query || undefined },
+        { assign_all: true, game_id: gameSpec.id, name_prefix: query || undefined },
       )
       setMessage(`已指派 ${response.added} 人（共 ${response.total_entries} 人${response.skipped.length ? `，跳过 ${response.skipped.length}` : ''}）`)
       onDone()
@@ -554,8 +559,8 @@ function AssignPanel({ contestId, gameId, onDone }: { contestId: number; gameId?
         onChange={(event) => setQuery(event.target.value)}
         className="h-9 w-64"
       />
-      <Button type="button" size="sm" onClick={() => void assignAll()} disabled={busy}>
-        {busy ? '指派中…' : `指派全部 ${gameLabel(gameId || 'holdem')} Bot`}
+      <Button type="button" size="sm" onClick={() => void assignAll()} disabled={busy || !gameSpec}>
+        {busy ? '指派中…' : `指派全部 ${gameLabel(gameId)} Bot`}
       </Button>
       {message && <span className="text-muted-foreground">{message}</span>}
     </div>

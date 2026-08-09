@@ -684,7 +684,6 @@ test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns
       body: 'data: {"type":"error","message":"qa simulated failure"}\n\n',
     })
   })
-
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   await expect(page.getByText('已中止', { exact: true })).toBeVisible()
@@ -1200,6 +1199,86 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
     }
     await runCleanupTasks(tasks)
   })
+})
+
+test('unknown match game is an explicit unsupported state, never a Holdem replay', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-unsupported-game'
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'future_chess',
+          status: 'completed',
+          winner: 0,
+          result: { hands_played: 1, deltas: [1, -1] },
+        },
+        replay: { events_json: JSON.stringify([{ type: 'match_start' }, { type: 'match_end', winner: 0 }]) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ comments: [], count: 0, total: 0 }),
+    })
+  })
+
+  await page.goto(`/#/match/${matchId}`)
+  await expect(page.getByText('不支持的游戏（future_chess）').first()).toBeVisible()
+  await expect(page.getByText('回放不可用：不支持的游戏（future_chess）')).toBeVisible()
+  await expect(page.getByRole('img', { name: /holdem 对局画面/ })).toHaveCount(0)
+  await monitor.expectClean()
+})
+
+test('Gomoku human canvas serializes its canonical response envelope', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-gomoku-human-action'
+  let sentAction: Record<string, unknown> | null = null
+
+  await page.routeWebSocket((url) => url.pathname === `/api/matches/${matchId}/play`, (socket) => {
+    socket.onMessage((message) => {
+      sentAction = JSON.parse(String(message)) as Record<string, unknown>
+    })
+    setTimeout(() => {
+      socket.send(JSON.stringify({
+        type: 'snapshot',
+        match: {
+          id: matchId,
+          game_id: 'gomoku',
+          status: 'running',
+          match_type: 'human',
+          human_seat: 1,
+          bot_a: { name: 'mock_bot', owner_name: 'tester1' },
+          bot_b: { owner_name: 'tester2', is_human: true },
+        },
+        events: [
+          { type: 'match_start', size: 15 },
+          { type: 'turn', player: 1 },
+          { type: 'your_turn', player: 1, request: { x: -1, y: -1, me: 1 } },
+        ],
+      }))
+    }, 0)
+  })
+
+  await page.goto(`/#/play/${matchId}`)
+  await expect(page.getByText('轮到你落子')).toBeVisible()
+  const canvas = page.getByRole('img', { name: 'gomoku 对局画面' })
+  await expect(canvas).toBeVisible()
+  await canvas.click({ position: { x: 300, y: 240 } })
+  await expect.poll(() => sentAction).not.toBeNull()
+  expect(Object.keys(sentAction!)).toEqual(['response'])
+  expect(Object.keys(sentAction!.response as Record<string, unknown>).sort()).toEqual(['x', 'y'])
+  expect(Number.isInteger((sentAction!.response as Record<string, unknown>).x)).toBe(true)
+  expect(Number.isInteger((sentAction!.response as Record<string, unknown>).y)).toBe(true)
+  await monitor.expectClean()
 })
 
 test('human Holdem uses one WebSocket per load, sends legal protocol, and finishes', async ({

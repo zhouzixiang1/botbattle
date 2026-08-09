@@ -11,12 +11,11 @@ import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { apiFetch, apiGet, apiJson, errMsg } from '@/api'
-import { GAMES, gameLabel } from '@/lib/games'
+import { GAMES, findGame, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import Countdown from '@/components/Countdown'
 import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
-import { isBoardGame } from '@/games'
 
 interface Contest {
   id: number
@@ -48,8 +47,7 @@ function scheduleHint(c: Contest): { label: string; time?: string | null } | nul
 
 /** 比赛对局参数概要（游戏规则已钉死固定值：holdem 70 手、棋类单局）。 */
 function matchConfigSummary(c: Contest): string {
-  const gid = c.game_id || 'holdem'
-  return isBoardGame(gid) ? '单局' : '70 手'
+  return findGame(c.game_id)?.matchFormatLabel ?? '规则不可用'
 }
 
 interface Template {

@@ -47,12 +47,12 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 21 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 26 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航、表单边界、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、点格棋首次计时/首回合超时 UI 契约、异常完成原因展示、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航、表单边界、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 9 个 Tab、查询参数/返回数据一致性、关键保存操作与布局 |
 
@@ -85,11 +85,12 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 |------|----------|-----------|
 | 隔离端到端冒烟 | **ALL PASSED** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **21 条 / 4 spec** | `npx playwright test --list` 实测 |
+| Playwright 收集 | **26 条 / 4 spec** | `npx playwright test --list` 实测 |
+| 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 后端协议/文档分支门禁 | **873 passed / 1 skipped / 1 warning（226.48s）** | 独立 worktree 完整执行；skip 因该 worktree 未构建 `frontend/dist`，warning 为既有 Starlette/httpx deprecation；最终整合提交仍须重跑 |
 | 后端整合提交收集/完整 pytest | **待最终重采集** | 不把独立分支数字冒充整合结果；发布前用本节命令回填 |
-| Playwright 完整执行 | **21 passed** | Chromium 单 worker，2.3m；三视口及四角色流程均通过，监控未发现非预期 Console/Network/SSE/WS 异常，包含新增点格棋计时回归 |
-| 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |
+| Playwright 完整执行 | **新增回归前基线 21 passed；26 条整合套件待重跑** | Chromium 单 worker 的旧基线为 2.3m；新增未知游戏与动作契约回归后，必须在最终整合栈重新执行全部 26 条 |
+| 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2560 modules transformed |
 
 ## 5. 可靠性与恢复专项
 

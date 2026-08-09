@@ -5,7 +5,7 @@ import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Badge, E
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
-import { gameLabel } from '@/lib/games'
+import { findGame, gameLabel } from '@/lib/games'
 
 interface Match {
   id: string
@@ -187,6 +187,7 @@ export default function MatchesTab() {
             {matches.map((m) => {
               const incidentCount = technicalIncidentCount(m)
               const sample = m.result?.technical_incident_samples?.[0]
+              const gameSpec = findGame(m.game_id)
               return (
               <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</TableCell>
@@ -198,16 +199,16 @@ export default function MatchesTab() {
                   </div>
                 </TableCell>
                 <TableCell className="px-3 py-2 text-xs text-muted-foreground">
-                  <div>{gameLabel(m.game_id || 'holdem')}</div>
+                  <div>{gameLabel(m.game_id)}</div>
                   <div>{MATCH_TYPE_LABEL[m.match_type] || m.match_type}</div>
                 </TableCell>
                 <TableCell className="px-3 py-2">
                   <StatusBadge status={m.status} />
                 </TableCell>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                  {m.game_id === 'holdem' || !m.game_id
-                    ? `${m.result?.hands_played ?? 0} / 70 手牌`
-                    : `${m.result?.hands_played ?? 0} 步`}
+                  {gameSpec
+                    ? `${m.result?.hands_played ?? 0} ${gameSpec.progressUnit === 'move' ? '步' : '手'}`
+                    : '规则不可用'}
                 </TableCell>
                 <TableCell className="max-w-[18rem] px-3 py-2 font-mono text-xs text-muted-foreground">
                   <div>{m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</div>
