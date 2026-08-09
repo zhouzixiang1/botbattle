@@ -819,10 +819,16 @@ def list_matches(
     limit: int = 50,
     offset: int = 0,
 ):
-    if "has_bot_errors" in request.query_params:
+    retired_filters = tuple(
+        name
+        for name in ("has_bot_incidents", "has_bot_errors")
+        if name in request.query_params
+    )
+    if retired_filters:
         raise HTTPException(
             400,
-            "has_bot_errors 已移除；请使用 has_technical_incidents",
+            f"{', '.join(retired_filters)} 已移除；"
+            "请使用 has_technical_incidents",
         )
     store = _store(request)
     lim = max(1, min(limit, 100))

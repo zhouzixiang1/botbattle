@@ -75,6 +75,7 @@ class _ScriptedTransport:
         ("{}", "missing_response"),
         ("not-json", "invalid_json"),
         ("[]", "invalid_envelope"),
+        ('{"response":0,"debug":"retired"}', "unexpected_fields"),
         ('{"response":"0"}', "invalid_response"),
     ],
 )
@@ -172,9 +173,14 @@ def test_first_missing_response_stops_every_game_before_fake_completion(game_id)
         )
 
     assert raised.value.failed_seat == 0
-    incidents = [event for event in events if event["type"] == "bot_technical_error"]
+    incidents = [event for event in events if event["type"] == "technical_incident"]
     assert len(incidents) == 1
     assert incidents[0]["code"] == "missing_response"
+    assert not [
+        event
+        for event in events
+        if event.get("type") in {"bot_decide_error", "bot_technical_error"}
+    ]
     # The old Hold'em bug emitted 70 settle events after silently folding each hand.
     assert not [event for event in events if event["type"] == "settle"]
 
@@ -197,7 +203,7 @@ def test_protocol_valid_but_game_illegal_move_stays_with_the_judge():
 
     assert result.reason == "illegal"
     assert result.winner == 1
-    assert not [event for event in events if event["type"] == "bot_technical_error"]
+    assert not [event for event in events if event["type"] == "technical_incident"]
 
 
 @pytest.fixture
@@ -242,8 +248,8 @@ class _TechnicalRunner:
         if on_event is not None:
             for _ in range(self.repeats):
                 on_event(
-                    "bot_technical_error",
-                    {"type": "bot_technical_error", **self.exc.incident()},
+                    "technical_incident",
+                    {"type": "technical_incident", **self.exc.incident()},
                 )
         raise self.exc
 
@@ -310,7 +316,12 @@ def test_protocol_fault_is_scored_technical_loss_for_every_bot_game(
         }
     ]
     replay = json.loads(store.get_replay(match_id)["events_json"])
-    assert len([e for e in replay if e.get("type") == "bot_technical_error"]) == 1
+    assert len([e for e in replay if e.get("type") == "technical_incident"]) == 1
+    assert not [
+        e
+        for e in replay
+        if e.get("type") in {"bot_decide_error", "bot_technical_error"}
+    ]
     # Attributable technical losses are intentionally scored for non-contest bots.
     assert store.get_rating(bot_a["id"], game_id=game_id)["matches_played"] == 1
     assert store.get_rating(bot_b["id"], game_id=game_id)["matches_played"] == 1
@@ -390,7 +401,7 @@ def test_bot_protocol_fault_in_human_match_blames_only_the_bot(store):
 def test_technical_incident_result_samples_are_bounded():
     events = [
         {
-            "type": "bot_technical_error",
+            "type": "technical_incident",
             "reason": "protocol_error",
             "code": "invalid_json",
             "seat": i % 2,
@@ -434,4 +445,9 @@ def test_technical_incident_replay_samples_are_bounded(store):
     assert 1 <= len(match["result"]["technical_incident_samples"]) <= 3
     assert "bot_decide_errors" not in match["result"]
     replay = json.loads(store.get_replay(match_id)["events_json"])
-    assert len([e for e in replay if e.get("type") == "bot_technical_error"]) == 3
+    assert len([e for e in replay if e.get("type") == "technical_incident"]) == 3
+    assert not [
+        e
+        for e in replay
+        if e.get("type") in {"bot_decide_error", "bot_technical_error"}
+    ]

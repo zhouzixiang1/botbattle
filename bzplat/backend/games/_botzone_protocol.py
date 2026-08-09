@@ -19,6 +19,7 @@ from bzplat.backend.store.schema import (
     DEFAULT_RUNTIME_MODE,
     RUNTIME_LONGRUNNING,
     RUNTIME_TRADITIONAL,
+    TECHNICAL_INCIDENT_MESSAGES,
     VALID_RUNTIME_MODES,
 )
 
@@ -65,13 +66,17 @@ def extract_response_payload(envelope: Any) -> Any:
     顶层必须恰好为 ``{"response": ...}``；裸响应或任何其他字段一律拒绝。
     """
     if not isinstance(envelope, dict):
-        raise ResponseProtocolError("invalid_envelope", "Bot 响应信封必须是 JSON 对象")
+        raise ResponseProtocolError(
+            "invalid_envelope", TECHNICAL_INCIDENT_MESSAGES["invalid_envelope"]
+        )
     if "response" not in envelope:
-        raise ResponseProtocolError("missing_response", "Bot 响应缺少必填 response 字段")
+        raise ResponseProtocolError(
+            "missing_response", TECHNICAL_INCIDENT_MESSAGES["missing_response"]
+        )
     extra_fields = set(envelope) - {"response"}
     if extra_fields:
         raise ResponseProtocolError(
-            "unexpected_fields", "Bot 响应信封只允许 response 字段"
+            "unexpected_fields", TECHNICAL_INCIDENT_MESSAGES["unexpected_fields"]
         )
     return envelope["response"]
 
@@ -84,13 +89,15 @@ def decode_response_payload(
     try:
         envelope = loads_response(line)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise ResponseProtocolError("invalid_json", "Bot 输出不是合法 JSON") from exc
+        raise ResponseProtocolError(
+            "invalid_json", TECHNICAL_INCIDENT_MESSAGES["invalid_json"]
+        ) from exc
     payload = extract_response_payload(envelope)
     try:
         validate_payload(payload)
     except (TypeError, ValueError, KeyError) as exc:
         raise ResponseProtocolError(
-            "invalid_response", "Bot response 字段不符合本游戏协议"
+            "invalid_response", TECHNICAL_INCIDENT_MESSAGES["invalid_response"]
         ) from exc
     return payload
 
@@ -104,11 +111,13 @@ def require_keep_running_signal(line: str | None) -> None:
     """验证 LongRunning 首回合后的必需握手。"""
     if line is None:
         raise ResponseProtocolError(
-            "missing_keep_running", "LongRunning Bot 未输出 KEEP_RUNNING 握手"
+            "missing_keep_running",
+            TECHNICAL_INCIDENT_MESSAGES["missing_keep_running"],
         )
     if not is_keep_running_signal(line):
         raise ResponseProtocolError(
-            "invalid_keep_running", "LongRunning Bot 的 KEEP_RUNNING 握手不正确"
+            "invalid_keep_running",
+            TECHNICAL_INCIDENT_MESSAGES["invalid_keep_running"],
         )
 
 

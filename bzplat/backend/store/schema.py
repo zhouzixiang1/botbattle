@@ -468,6 +468,19 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_ABORTED = "aborted"
 
+# 对外对局技术故障事件（新写 replay / 实时 SSE / 公开读取唯一命名）
+TECHNICAL_INCIDENT_EVENT = "technical_incident"
+TECHNICAL_INCIDENT_MESSAGES = {
+    "invalid_json": "Bot 输出不是合法 JSON",
+    "invalid_envelope": "Bot 响应信封必须是 JSON 对象",
+    "missing_response": "Bot 响应缺少必填 response 字段",
+    "unexpected_fields": "Bot 响应信封只允许 response 字段",
+    "invalid_response": "Bot response 字段不符合本游戏协议",
+    "missing_keep_running": "LongRunning Bot 未输出 KEEP_RUNNING 握手",
+    "invalid_keep_running": "LongRunning Bot 的 KEEP_RUNNING 握手不正确",
+    "decision_timeout": "Bot 未在决策时限内输出完整响应行",
+}
+
 # 对局类型
 TYPE_CHALLENGE = "challenge"
 TYPE_TABLE = "table"

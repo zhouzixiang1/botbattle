@@ -179,7 +179,7 @@ card = (点数 - 2) * 4 + 花色
 Bot-vs-Bot 的技术结果进入评分与赛事积分；人类对战不计 Glicko。现行事件名为
 `technical_incident`；结果/API 只公开 `technical_incident_count`、
 `technical_incidents_by_seat` 与最多 3 条 `technical_incident_samples`，列表过滤参数为
-`has_bot_incidents`。历史旧事件仅在服务端内部只读归一化，不作为新写入或第二套对外
+`has_technical_incidents`。历史旧事件仅在服务端内部只读归一化，不作为新写入或第二套对外
 字段。诊断不保存 Bot 原始 stdout 或服务器私有路径。
 
 ## 7. 最小示例

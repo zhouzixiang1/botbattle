@@ -77,7 +77,7 @@ def test_normative_docs_do_not_offer_retired_protocols() -> None:
         "响应对象只允许一个顶层字段 `response`",
         "LongRunning 缺失精确握手不回退",
         "technical_incident_count",
-        "has_bot_incidents",
+        "has_technical_incidents",
         "固定 **70 手**",
         "起始筹码固定 20000",
         "小盲固定 50",

@@ -26,6 +26,7 @@ from bzplat.backend.store.schema import (
     STATUS_COMPLETED,
     STATUS_PENDING,
     STATUS_RUNNING,
+    TECHNICAL_INCIDENT_EVENT,
     TYPE_CHALLENGE,
     TYPE_CONTEST,
     TYPE_HUMAN,
@@ -42,7 +43,7 @@ def _now() -> str:
 
 
 def _technical_incident_event(exc: BotTechnicalError) -> dict:
-    return {"type": "bot_technical_error", **exc.incident()}
+    return {"type": TECHNICAL_INCIDENT_EVENT, **exc.incident()}
 
 
 def _ensure_technical_incident(
@@ -51,7 +52,7 @@ def _ensure_technical_incident(
     """Persist exactly one terminal incident even for injected/fake runners."""
     target = exc.incident()
     if not any(
-        event.get("type") == "bot_technical_error"
+        event.get("type") == TECHNICAL_INCIDENT_EVENT
         and event.get("reason") == target["reason"]
         and event.get("seat") == target["seat"]
         and event.get("turn") == target["turn"]
@@ -63,7 +64,9 @@ def _ensure_technical_incident(
 def _technical_incident_summary(events: list[dict]) -> dict:
     """Bound technical diagnostics kept in result JSON (counts + at most 3 samples)."""
     incidents = [
-        event for event in events if event.get("type") == "bot_technical_error"
+        event
+        for event in events
+        if event.get("type") == TECHNICAL_INCIDENT_EVENT
     ]
     samples = [
         {
@@ -90,7 +93,7 @@ def _bounded_replay_events(events: list[dict]) -> list[dict]:
     incident_samples = 0
     bounded: list[dict] = []
     for event in events:
-        if event.get("type") == "bot_technical_error":
+        if event.get("type") == TECHNICAL_INCIDENT_EVENT:
             incident_samples += 1
             if incident_samples > 3:
                 continue

@@ -27,6 +27,10 @@ from bzplat.backend.runtime.binary_runner import (
     PlatformRunnerError,
     DEFAULT_ACTION_TIMEOUT,
 )
+from bzplat.backend.store.schema import (
+    TECHNICAL_INCIDENT_EVENT,
+    TECHNICAL_INCIDENT_MESSAGES,
+)
 
 EventSink = Callable[[str, dict[str, Any]], None]
 
@@ -85,14 +89,14 @@ async def _open_match_session(
         raise
 
 
-def _emit_bot_technical_error(
+def _emit_technical_incident(
     on_event: EventSink | None, exc: BotTechnicalError
 ) -> None:
     if on_event is None:
         return
     on_event(
-        "bot_technical_error",
-        {"type": "bot_technical_error", **exc.incident()},
+        TECHNICAL_INCIDENT_EVENT,
+        {"type": TECHNICAL_INCIDENT_EVENT, **exc.incident()},
     )
 
 
@@ -192,7 +196,7 @@ async def _botzone_decide(
             )
         except asyncio.TimeoutError as exc:
             raise BotDecisionTimeoutError(
-                "Bot 未在决策时限内输出完整响应行",
+                TECHNICAL_INCIDENT_MESSAGES["decision_timeout"],
                 error_code="decision_timeout",
                 failed_seat=failed_seat,
                 turn=attempted_turn,
@@ -207,7 +211,7 @@ async def _botzone_decide(
     else:
         if not session.long_running:
             raise BotProtocolError(
-                "LongRunning 会话未完成 KEEP_RUNNING 握手",
+                TECHNICAL_INCIDENT_MESSAGES["missing_keep_running"],
                 error_code="missing_keep_running",
                 failed_seat=failed_seat,
                 turn=attempted_turn,
@@ -220,7 +224,7 @@ async def _botzone_decide(
         resp_line = await runner.send(session_id, line, timeout=action_timeout)
     except asyncio.TimeoutError as exc:
         raise BotDecisionTimeoutError(
-            "Bot 未在决策时限内输出完整响应行",
+            TECHNICAL_INCIDENT_MESSAGES["decision_timeout"],
             error_code="decision_timeout",
             failed_seat=failed_seat,
             turn=attempted_turn,
@@ -375,7 +379,7 @@ class MatchRunner:
                             failed_seat=player_idx,
                             turn=getattr(self.runner._sessions.get(sid), "turn", 0) + 1,
                         )
-                        _emit_bot_technical_error(on_event, timeout_exc)
+                        _emit_technical_incident(on_event, timeout_exc)
                         raise timeout_exc
                     effective_timeout = clock.remaining(player_idx)
                 else:
@@ -397,7 +401,7 @@ class MatchRunner:
                                 "used": round(clock.used(player_idx) + elapsed, 1),
                                 "budget": clock.budget,
                             })
-                    _emit_bot_technical_error(on_event, exc)
+                    _emit_technical_incident(on_event, exc)
                     raise
                 except (BotCrashedError, PlatformRunnerError):
                     # Bot 崩溃向上传播判技术负；平台沙箱故障也必须向上传播，
@@ -479,7 +483,7 @@ class MatchRunner:
                                     self.runner._sessions.get(sid_bot), "turn", 0
                                 ) + 1,
                             )
-                            _emit_bot_technical_error(on_event, timeout_exc)
+                            _emit_technical_incident(on_event, timeout_exc)
                             raise timeout_exc
                         raise TimeoutError(
                             f"human seat {player_idx} 时间耗尽（{clock.budget}s）"
@@ -523,7 +527,7 @@ class MatchRunner:
                                 "used": round(clock.used(player_idx) + elapsed, 1),
                                 "budget": clock.budget,
                             })
-                    _emit_bot_technical_error(on_event, exc)
+                    _emit_technical_incident(on_event, exc)
                     raise
                 except (BotCrashedError, PlatformRunnerError):
                     # Bot 崩溃或平台沙箱故障都不可吞成默认动作。
@@ -679,7 +683,7 @@ class MatchRunner:
                             leg=li,
                         )
                     except BotTechnicalError as exc:
-                        _emit_bot_technical_error(leg_on_event, exc)
+                        _emit_technical_incident(leg_on_event, exc)
                         raise
                     except (BotCrashedError, PlatformRunnerError):
                         # Bot 崩溃或平台沙箱故障都向上传播（与 run_binaries 一致）。

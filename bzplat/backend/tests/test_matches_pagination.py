@@ -6,11 +6,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from bzplat.backend.crypto import hash_password
+from bzplat.backend.api_routes import match_events, router
 from bzplat.backend.main import create_app
 
 
@@ -126,17 +129,24 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
         "[]",
     )
 
-    # Current bounded replay has fewer samples than its persisted total.
+    # Canonical bounded replay has fewer samples than its persisted total.
     current_samples = [
         {
-            "type": "bot_technical_error",
+            "type": "technical_incident",
             "reason": "protocol_error",
-            "code": "invalid_json",
+            "code": code,
             "seat": 0,
-            "turn": turn + 1,
+            "turn": turn,
             "error": "safe",
         }
-        for turn in range(3)
+        for turn, code in enumerate(
+            (
+                "unexpected_fields",
+                "missing_keep_running",
+                "invalid_keep_running",
+            ),
+            start=1,
+        )
     ]
     store.update_match(
         "mh2",
@@ -146,6 +156,9 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
         },
     )
     store.upsert_replay("mh2", json.dumps(current_samples), "[]")
+    # Canonical replay-only rows must also participate in the SQL filter; this
+    # guards against recognizing only result counts or historical event names.
+    store.upsert_replay("mh3", json.dumps([current_samples[0]]), "[]")
 
     # Cross-game + malformed replay coverage for the SQL JSON filter.
     store.upsert_replay("mg0", json.dumps([legacy_events[0]]), "[]")
@@ -162,23 +175,50 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
     assert by_id["mh1"]["result"]["technical_incidents_by_seat"] == {"0": 0, "1": 1}
     assert by_id["mh2"]["result"]["technical_incidents_by_seat"] == {"0": 8, "1": 0}
     assert len(by_id["mh2"]["result"]["technical_incident_samples"]) == 3
+    assert {
+        sample["code"]
+        for sample in by_id["mh2"]["result"]["technical_incident_samples"]
+    } == {"unexpected_fields", "missing_keep_running", "invalid_keep_running"}
+    assert all(
+        "历史记录" not in sample["error"]
+        for sample in by_id["mh2"]["result"]["technical_incident_samples"]
+    )
+    assert by_id["mh3"]["result"]["technical_incident_count"] == 1
+    assert by_id["mh3"]["result"]["technical_incidents_by_seat"] == {"0": 1, "1": 0}
 
     only_errors = c.get("/api/matches?has_technical_incidents=true&limit=100").json()
-    assert only_errors["total"] == 4
+    assert only_errors["total"] == 5
     assert {row["id"] for row in only_errors["matches"]} == {
         "mh0",
         "mh1",
         "mh2",
+        "mh3",
         "mg0",
     }
-    assert c.get("/api/matches?has_technical_incidents=false&limit=100").json()["total"] == 6
+    assert c.get("/api/matches?has_technical_incidents=false&limit=100").json()["total"] == 5
     completed_errors = c.get(
         "/api/matches?status=completed&has_technical_incidents=true&limit=100"
     ).json()
-    assert completed_errors["total"] == 3
-    rejected_legacy_filter = c.get("/api/matches?has_bot_errors=true&limit=100")
-    assert rejected_legacy_filter.status_code == 400
-    assert "has_technical_incidents" in rejected_legacy_filter.text
+    assert completed_errors["total"] == 4
+    for retired_name in ("has_bot_incidents", "has_bot_errors"):
+        rejected_legacy_filter = c.get(
+            f"/api/matches?{retired_name}=true&limit=100"
+        )
+        assert rejected_legacy_filter.status_code == 400
+        assert retired_name in rejected_legacy_filter.text
+        assert "has_technical_incidents" in rejected_legacy_filter.text
+
+    match_route = next(
+        route
+        for route in router.routes
+        if getattr(route, "path", None) == "/api/matches"
+        and "GET" in getattr(route, "methods", set())
+    )
+    match_query_parameters = {
+        parameter.name for parameter in match_route.dependant.query_params
+    }
+    assert "has_technical_incidents" in match_query_parameters
+    assert not {"has_bot_incidents", "has_bot_errors"} & match_query_parameters
 
     detail_body = c.get("/api/matches/mh1").json()
     detail = detail_body["match"]
@@ -187,6 +227,32 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
 
     legacy_detail = c.get("/api/matches/mh0").json()
     public_events = json.loads(legacy_detail["replay"]["events_json"])
-    assert len([e for e in public_events if e["type"] == "bot_technical_error"]) == 3
-    assert not [e for e in public_events if e["type"] == "bot_decide_error"]
+    assert len([e for e in public_events if e["type"] == "technical_incident"]) == 3
+    assert not [
+        e
+        for e in public_events
+        if e["type"] in {"bot_decide_error", "bot_technical_error"}
+    ]
     assert "/private" not in legacy_detail["replay"]["events_json"]
+
+    # A terminal SSE subscription must use the same public read boundary. This
+    # exercises the actual route generator, not only Store.get_public_replay().
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/matches/mh1/events",
+            "headers": [],
+            "app": c.app,
+        }
+    )
+
+    async def consume_terminal_snapshot() -> list[str]:
+        response = await match_events("mh1", request)
+        return [chunk async for chunk in response.body_iterator]
+
+    chunks = asyncio.run(consume_terminal_snapshot())
+    assert len(chunks) == 1
+    assert '"type": "technical_incident"' in chunks[0]
+    assert '"type": "bot_decide_error"' not in chunks[0]
+    assert '"type": "bot_technical_error"' not in chunks[0]
