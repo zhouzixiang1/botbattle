@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, errMsg } from '../../api'
 import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn } from './ui'
+import { fmtTime } from '@/lib/format'
 
 interface Stats {
   users: number
@@ -18,6 +19,12 @@ interface Stats {
   contests_running: number
   active_sessions: number
   recent_users: { id: number; username: string; email: string; role: string; created_at: string }[]
+}
+
+const ROLE_LABEL: Record<string, string> = {
+  user: '普通用户',
+  organizer: '组织者',
+  admin: '管理员',
 }
 
 export default function Dashboard() {
@@ -46,7 +53,8 @@ export default function Dashboard() {
   if (error && !stats) return <ErrorMsg msg={error} />
   if (!stats) return <EmptyState text="无数据" />
 
-  const abnormal = stats.matches_aborted + stats.matches_running
+  // running 是健康的活跃状态，不能计入异常；历史 Bot 响应异常在对局记录中单独展示。
+  const abnormal = stats.matches_aborted
 
   return (
     <div>
@@ -61,7 +69,7 @@ export default function Dashboard() {
         <MetricCard label="Bot" value={stats.bots} hint={`活跃 ${stats.bots_active}`} />
         <MetricCard label="对局" value={stats.matches} hint={`完成 ${stats.matches_completed}`} />
         <MetricCard label="异常对局" value={abnormal} danger={abnormal > 0}
-          hint={`中止 ${stats.matches_aborted} · 运行中 ${stats.matches_running}`} />
+          hint={`已中止 ${stats.matches_aborted} · 运行中 ${stats.matches_running}`} />
         <MetricCard label="比赛" value={stats.contests} hint={`进行中 ${stats.contests_running}`} />
         <MetricCard label="在线会话" value={stats.active_sessions} />
       </div>
@@ -83,8 +91,8 @@ export default function Dashboard() {
                     {u.username}
                   </Link>
                   <span className="text-xs text-muted-foreground">
-                    <span className="mr-2">{u.role}</span>
-                    {u.created_at}
+                    <span className="mr-2">{ROLE_LABEL[u.role] || u.role}</span>
+                    {fmtTime(u.created_at)}
                   </span>
                 </li>
               ))}

@@ -1,16 +1,43 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { AlertTriangle, CalendarClock } from 'lucide-react'
+
 import { apiGet, apiJson, errMsg } from '../../api'
-import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge } from './ui'
-import { useConfirm } from '@/hooks/use-confirm'
+import {
+  Badge,
+  Button,
+  EmptyState,
+  ErrorMsg,
+  Loading,
+  RefreshBtn,
+  StatusBadge,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from './ui'
 import Pagination from '@/components/Pagination'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { useConfirm } from '@/hooks/use-confirm'
 import { fmtTime } from '@/lib/format'
+import { gameLabel } from '@/lib/games'
 
 interface Contest {
   id: number
   title: string
   organizer_id: number
   status: string
-  hands_per_match?: number  // 已钉死固定值，不再展示；保留字段兼容 API 响应
   created_at: string
   starts_at: string | null
   ends_at: string | null
@@ -19,20 +46,59 @@ interface Contest {
   template_id?: string
   game_id?: string
 }
+
 interface Entry {
   id: number
   contest_id: number
   user_id: number
   bot_id: number
+  username?: string
+  bot_name?: string
   registered_at: string
 }
 
-const NEXT_STATUS: Record<string, string> = {
-  draft: 'open',
-  open: 'published',
-  published: 'running',
-  running: 'finished',
-  rest: 'finished',
+interface LifecycleAction {
+  label: string
+  target: string
+}
+
+const PRIMARY_ACTION: Record<string, LifecycleAction> = {
+  draft: { label: '开放报名', target: 'open' },
+  open: { label: '截止报名并发布排期', target: 'published' },
+  published: { label: '开始比赛', target: 'running' },
+}
+
+const ROSTER_MUTABLE = new Set(['draft', 'open'])
+const CANCELLABLE = new Set(['draft', 'open', 'published'])
+const DELETABLE = new Set(['draft', 'cancelled'])
+
+function scheduleIssue(contest: {
+  registration_opens_at?: string | null
+  registration_closes_at?: string | null
+  starts_at?: string | null
+}): string | null {
+  const opens = contest.registration_opens_at
+  const closes = contest.registration_closes_at
+  const starts = contest.starts_at
+  if (opens && closes && new Date(opens).getTime() > new Date(closes).getTime()) {
+    return '报名截止早于报名开放'
+  }
+  if (closes && starts && new Date(closes).getTime() > new Date(starts).getTime()) {
+    return '报名截止晚于比赛开始'
+  }
+  if (opens && starts && new Date(opens).getTime() > new Date(starts).getTime()) {
+    return '报名开放晚于比赛开始'
+  }
+  return null
+}
+
+function toInputValue(value?: string | null): string {
+  return value ? value.slice(0, 16) : ''
+}
+
+function toIso(value: string): string | undefined {
+  if (!value) return undefined
+  return value.length === 16 ? `${value}:00` : value
 }
 
 export default function ContestsTab() {
@@ -43,7 +109,9 @@ export default function ContestsTab() {
   const [busyId, setBusyId] = useState<number | null>(null)
   const [expand, setExpand] = useState<number | null>(null)
   const [entries, setEntries] = useState<Entry[]>([])
-  // 分页
+  const [entriesLoading, setEntriesLoading] = useState(false)
+  const [scheduleContest, setScheduleContest] = useState<Contest | null>(null)
+  const entriesRequestSeq = useRef(0)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const perPage = 20
@@ -52,13 +120,13 @@ export default function ContestsTab() {
     setLoading(true)
     setError('')
     try {
-      const d = await apiGet<{ contests: Contest[]; total?: number }>(
+      const response = await apiGet<{ contests: Contest[]; total?: number }>(
         `/api/admin/contests?page=${page}&per_page=${perPage}`,
       )
-      setContests(d.contests || [])
-      if (d.total !== undefined) setTotal(d.total)
-    } catch (e) {
-      setError(errMsg(e, '加载失败'))
+      setContests(response.contests || [])
+      if (response.total !== undefined) setTotal(response.total)
+    } catch (cause) {
+      setError(errMsg(cause, '加载失败'))
     } finally {
       setLoading(false)
     }
@@ -74,247 +142,422 @@ export default function ContestsTab() {
     try {
       await apiJson(`/api/admin/contests/${id}`, 'PATCH', fields)
       await load()
-    } catch (e) {
-      setError(errMsg(e, '操作失败'))
+    } catch (cause) {
+      setError(errMsg(cause, '操作失败'))
+      throw cause
     } finally {
       setBusyId(null)
     }
   }
 
-  const del = async (id: number) => {
-    if (!await confirm({
-      title: '删除比赛',
-      desc: `确认删除比赛 #${id}？`,
+  const runPrimary = async (contest: Contest) => {
+    const action = PRIMARY_ACTION[contest.status]
+    if (!action) return
+    if (action.target === 'running') {
+      const ok = await confirm({
+        title: '开始比赛',
+        desc: `将立即派发「${contest.title}」已到排期的对局。确认开始？`,
+        confirmText: '开始比赛',
+      })
+      if (!ok) return
+    }
+    await patch(contest.id, { status: action.target }).catch(() => undefined)
+  }
+
+  const cancelContest = async (contest: Contest) => {
+    const ok = await confirm({
+      title: '取消锦标赛',
+      desc: `取消「${contest.title}」后不能恢复；已完成和进行中的赛事不允许取消。`,
+      confirmText: '取消赛事',
+      danger: true,
+    })
+    if (!ok) return
+    await patch(contest.id, { status: 'cancelled' }).catch(() => undefined)
+  }
+
+  const forceFinish = async (contest: Contest) => {
+    const ok = await confirm({
+      title: '恢复性结束赛事',
+      desc: '仅用于全部关联对局已经终态、但自动推进未收敛的故障恢复。仍有活跃对局时后端会拒绝。',
+      confirmText: '确认结束',
+      danger: true,
+    })
+    if (!ok) return
+    await patch(contest.id, { status: 'finished' }).catch(() => undefined)
+  }
+
+  const resumeContest = async (contest: Contest) => {
+    setBusyId(contest.id)
+    setError('')
+    try {
+      await apiJson(`/api/contests/${contest.id}/resume`, 'POST')
+      await load()
+    } catch (cause) {
+      setError(errMsg(cause, '进入下一阶段失败'))
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const del = async (contest: Contest) => {
+    const ok = await confirm({
+      title: '删除锦标赛草稿',
+      desc: `仅删除未产生正式成绩的「${contest.title}」。已完成赛事必须永久保留。`,
       confirmText: '删除',
       danger: true,
-    })) return
-    setBusyId(id)
+    })
+    if (!ok) return
+    setBusyId(contest.id)
+    setError('')
     try {
-      await apiJson(`/api/admin/contests/${id}`, 'DELETE')
+      await apiJson(`/api/admin/contests/${contest.id}`, 'DELETE')
       await load()
-    } catch (e) {
-      setError(errMsg(e, '删除失败'))
+    } catch (cause) {
+      setError(errMsg(cause, '删除失败'))
     } finally {
       setBusyId(null)
     }
   }
 
-  const loadEntries = async (cid: number) => {
+  const loadEntries = async (contestId: number) => {
+    const seq = ++entriesRequestSeq.current
+    setEntriesLoading(true)
     try {
-      const d = await apiGet<{ entries: Entry[] }>(`/api/admin/contests/${cid}/entries`)
-      setEntries(d.entries || [])
-    } catch (e) {
-      setError(errMsg(e, '加载报名失败'))
+      const response = await apiGet<{ entries: Entry[] }>(`/api/admin/contests/${contestId}/entries`)
+      if (seq === entriesRequestSeq.current && expand === contestId) {
+        setEntries(response.entries || [])
+      }
+    } catch (cause) {
+      if (seq === entriesRequestSeq.current) setError(errMsg(cause, '加载名册失败'))
+    } finally {
+      if (seq === entriesRequestSeq.current) setEntriesLoading(false)
     }
   }
 
-  const showEntries = async (c: Contest) => {
-    if (expand === c.id) {
+  const showEntries = (contest: Contest) => {
+    if (expand === contest.id) {
+      ++entriesRequestSeq.current
       setExpand(null)
+      setEntries([])
       return
     }
-    setExpand(c.id)
+    setExpand(contest.id)
     setEntries([])
-    await loadEntries(c.id)
+    // React state 尚未提交，loadEntries 的 authority 不能依赖旧 expand 值；本次 ID
+    // 由 request sequence 保证，响应时再用 ref-less状态会丢首个结果，因此直接加载并
+    // 在调用处提交。后续快速切换仍由 sequence 丢弃旧响应。
+    const seq = ++entriesRequestSeq.current
+    setEntriesLoading(true)
+    void apiGet<{ entries: Entry[] }>(`/api/admin/contests/${contest.id}/entries`)
+      .then((response) => {
+        if (seq === entriesRequestSeq.current) setEntries(response.entries || [])
+      })
+      .catch((cause) => {
+        if (seq === entriesRequestSeq.current) setError(errMsg(cause, '加载名册失败'))
+      })
+      .finally(() => {
+        if (seq === entriesRequestSeq.current) setEntriesLoading(false)
+      })
   }
 
-  const removeEntry = async (cid: number, uid: number) => {
-    if (!await confirm({
+  const removeEntry = async (contestId: number, userId: number) => {
+    const ok = await confirm({
       title: '移除报名',
-      desc: `移除用户 #${uid} 的报名？`,
+      desc: `从当前名册移除用户 #${userId}？`,
       confirmText: '移除',
       danger: true,
-    })) return
+    })
+    if (!ok) return
     try {
-      await apiJson(`/api/admin/contests/${cid}/entries/${uid}`, 'DELETE')
-      const d = await apiGet<{ entries: Entry[] }>(`/api/admin/contests/${cid}/entries`)
-      setEntries(d.entries || [])
-    } catch (e) {
-      setError(errMsg(e, '移除失败'))
+      await apiJson(`/api/admin/contests/${contestId}/entries/${userId}`, 'DELETE')
+      await loadEntries(contestId)
+    } catch (cause) {
+      setError(errMsg(cause, '移除失败'))
     }
   }
 
   if (loading && !contests.length) return <Loading />
   return (
     <div>
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">
-          共 {total || contests.length} 个比赛（切到 running 会真正调用 start）
+          共 {total || contests.length} 个锦标赛；生命周期操作会经过后端状态机校验。
         </span>
         <RefreshBtn onClick={load} />
       </div>
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <Table className="min-w-[48rem]">
+        <Table className="min-w-[64rem]">
           <TableHeader>
             <TableRow>
               <TableHead className="px-3 py-2.5">ID</TableHead>
               <TableHead className="px-3 py-2.5">标题</TableHead>
-              <TableHead className="px-3 py-2.5">模板/游戏</TableHead>
+              <TableHead className="px-3 py-2.5">游戏 / 模板</TableHead>
               <TableHead className="px-3 py-2.5">状态</TableHead>
               <TableHead className="px-3 py-2.5">时间编排</TableHead>
               <TableHead className="px-3 py-2.5">创建时间</TableHead>
-              <TableHead className="px-3 py-2.5">操作</TableHead>
+              <TableHead className="px-3 py-2.5">当前阶段操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {contests.map((c) => (
-              <Fragment key={c.id}>
-                <TableRow className="hover:bg-accent">
-                  <TableCell className="px-3 py-2 font-mono text-muted-foreground">{c.id}</TableCell>
-                  <TableCell className="px-3 py-2 font-medium text-foreground">{c.title}</TableCell>
-                  <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                    {c.template_id || '—'} / {c.game_id || 'holdem'}
-                  </TableCell>
-                  <TableCell className="px-3 py-2">
-                    <StatusBadge status={c.status} />
-                  </TableCell>
-                  <TableCell className="px-3 py-2 text-xs text-muted-foreground">
-                    {c.registration_opens_at && <div>报名: {fmtTime(c.registration_opens_at)}</div>}
-                    {c.registration_closes_at && <div>截止: {fmtTime(c.registration_closes_at)}</div>}
-                    {c.starts_at && <div className="font-medium text-foreground">开赛: {fmtTime(c.starts_at)}</div>}
-                    {!c.registration_opens_at && !c.registration_closes_at && !c.starts_at && <span>—</span>}
-                  </TableCell>
-                  <TableCell className="px-3 py-2 text-xs text-muted-foreground">{c.created_at}</TableCell>
-                  <TableCell className="px-3 py-2">
-                    <div className="flex flex-wrap gap-1">
-                      {NEXT_STATUS[c.status] && (
-                        <button
-                          type="button"
-                          disabled={busyId === c.id}
-                          onClick={() => void patch(c.id, { status: NEXT_STATUS[c.status] })}
-                          className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          推进到 {NEXT_STATUS[c.status]}
-                        </button>
-                      )}
-                      {c.status === 'rest' && (
-                        <button
-                          type="button"
-                          disabled={busyId === c.id}
-                          onClick={() =>
-                            void apiJson(`/api/contests/${c.id}/resume`, 'POST')
-                              .then(load)
-                              .catch((e) => setError(errMsg(e, '结束休息失败')))
-                          }
-                          className="inline-flex h-8 items-center rounded-md border border-primary/30 bg-primary/10 px-3 text-xs text-primary hover:bg-primary/20 focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          结束休息
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => void showEntries(c)}
-                        className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        报名
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId === c.id}
-                        onClick={() => void del(c.id)}
-                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-                {expand === c.id && (
-                  <TableRow key={`${c.id}-e`} className="bg-muted/60">
-                    <TableCell colSpan={7} className="px-6 py-3">
-                      {/* 批量指派（测试期 admin 派遣参赛者+Bot；正式版用户自己报名） */}
-                      <AssignPanel contestId={c.id} gameId={c.game_id} onDone={() => void loadEntries(c.id)} />
-                      {entries.length === 0 ? (
-                        <EmptyState text="无报名" />
-                      ) : (
-                        <Table className="min-w-[48rem]">
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead className="px-2 py-1 text-left">用户</TableHead>
-                              <TableHead className="px-2 py-1 text-left">Bot</TableHead>
-                              <TableHead className="px-2 py-1 text-left">报名时间</TableHead>
-                              <TableHead className="px-2 py-1 text-left">操作</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {entries.map((e) => (
-                              <TableRow key={e.id} className="font-mono text-muted-foreground">
-                                <TableCell className="px-2 py-1">#{e.user_id}</TableCell>
-                                <TableCell className="px-2 py-1">#{e.bot_id}</TableCell>
-                                <TableCell className="px-2 py-1">{e.registered_at}</TableCell>
-                                <TableCell className="px-2 py-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => void removeEntry(c.id, e.user_id)}
-                                    className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
-                                  >
-                                    移除
-                                  </button>
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
+            {contests.map((contest) => {
+              const primary = PRIMARY_ACTION[contest.status]
+              const mutableRoster = ROSTER_MUTABLE.has(contest.status)
+              const timeIssue = scheduleIssue(contest)
+              return (
+                <Fragment key={contest.id}>
+                  <TableRow className={timeIssue ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
+                    <TableCell className="px-3 py-2 font-mono text-muted-foreground">{contest.id}</TableCell>
+                    <TableCell className="px-3 py-2 font-medium text-foreground">
+                      <Link to={`/contests/${contest.id}`} className="text-primary hover:underline">{contest.title}</Link>
+                    </TableCell>
+                    <TableCell className="px-3 py-2 text-xs text-muted-foreground">
+                      <div className="text-foreground">{gameLabel(contest.game_id || 'holdem')}</div>
+                      <div className="font-mono">{contest.template_id || '未指定模板'}</div>
+                    </TableCell>
+                    <TableCell className="px-3 py-2"><StatusBadge status={contest.status} /></TableCell>
+                    <TableCell className="px-3 py-2 text-xs text-muted-foreground">
+                      {contest.registration_opens_at && <div>开放报名：{fmtTime(contest.registration_opens_at)}</div>}
+                      {contest.registration_closes_at && <div>报名截止：{fmtTime(contest.registration_closes_at)}</div>}
+                      {contest.starts_at && <div className="font-medium text-foreground">比赛开始：{fmtTime(contest.starts_at)}</div>}
+                      {!contest.registration_opens_at && !contest.registration_closes_at && !contest.starts_at && <span>手动推进</span>}
+                      {timeIssue && (
+                        <div className="mt-1 flex items-center gap-1 text-destructive">
+                          <AlertTriangle className="size-3.5" />{timeIssue}
+                        </div>
                       )}
                     </TableCell>
+                    <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(contest.created_at)}</TableCell>
+                    <TableCell className="px-3 py-2">
+                      <div className="flex flex-wrap gap-1.5">
+                        {primary && (
+                          <Button type="button" size="sm" disabled={busyId === contest.id} onClick={() => void runPrimary(contest)}>
+                            {primary.label}
+                          </Button>
+                        )}
+                        {contest.status === 'rest' && (
+                          <Button type="button" size="sm" disabled={busyId === contest.id} onClick={() => void resumeContest(contest)}>
+                            进入下一阶段
+                          </Button>
+                        )}
+                        {(contest.status === 'running' || contest.status === 'rest') && (
+                          <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void forceFinish(contest)}>
+                            恢复性结束
+                          </Button>
+                        )}
+                        {CANCELLABLE.has(contest.status) && (
+                          <Button type="button" variant="outline" size="sm" disabled={busyId === contest.id} onClick={() => void cancelContest(contest)} className="text-destructive">
+                            取消赛事
+                          </Button>
+                        )}
+                        <Button type="button" variant="outline" size="sm" onClick={() => showEntries(contest)}>
+                          {mutableRoster ? '管理名册' : '查看名册'}
+                        </Button>
+                        <Button type="button" variant="outline" size="sm" onClick={() => setScheduleContest(contest)}>
+                          <CalendarClock className="size-3.5" />{timeIssue ? '修正时间' : '编辑时间'}
+                        </Button>
+                        {DELETABLE.has(contest.status) && (
+                          <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void del(contest)}>
+                            删除草稿
+                          </Button>
+                        )}
+                        {contest.status === 'finished' && (
+                          <Badge variant="secondary" className="self-center">成绩已归档 · 只读</Badge>
+                        )}
+                        {contest.status === 'cancelled' && (
+                          <Badge variant="secondary" className="self-center">已取消 · 可清理</Badge>
+                        )}
+                      </div>
+                    </TableCell>
                   </TableRow>
-                )}
-              </Fragment>
-            ))}
+                  {expand === contest.id && (
+                    <TableRow key={`${contest.id}-entries`} className="bg-muted/60">
+                      <TableCell colSpan={7} className="px-6 py-4">
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h3 className="text-sm font-medium text-foreground">参赛名册</h3>
+                            <p className="text-xs text-muted-foreground">
+                              {mutableRoster ? '草稿和报名阶段可以调整；发布排期后名册只读。' : '当前阶段名册只读，避免已发布对阵与参赛者不一致。'}
+                            </p>
+                          </div>
+                          <Link to={`/contests/${contest.id}`} className="text-xs text-primary hover:underline">查看赛事详情</Link>
+                        </div>
+                        {mutableRoster && (
+                          <AssignPanel contestId={contest.id} gameId={contest.game_id} onDone={() => void loadEntries(contest.id)} />
+                        )}
+                        {entriesLoading ? (
+                          <Loading text="加载名册…" />
+                        ) : entries.length === 0 ? (
+                          <EmptyState text="暂无报名" />
+                        ) : (
+                          <Table className="min-w-[48rem]">
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead className="px-2 py-1">用户</TableHead>
+                                <TableHead className="px-2 py-1">Bot</TableHead>
+                                <TableHead className="px-2 py-1">报名时间</TableHead>
+                                {mutableRoster && <TableHead className="px-2 py-1">操作</TableHead>}
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {entries.map((entry) => (
+                                <TableRow key={entry.id} className="text-muted-foreground">
+                                  <TableCell className="px-2 py-1">
+                                    {entry.username
+                                      ? <Link to={`/user/${encodeURIComponent(entry.username)}`} className="text-primary hover:underline">{entry.username}</Link>
+                                      : `用户 #${entry.user_id}`}
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1">
+                                    <Link to={`/bot/${entry.bot_id}`} className="text-primary hover:underline">{entry.bot_name || `Bot #${entry.bot_id}`}</Link>
+                                  </TableCell>
+                                  <TableCell className="px-2 py-1">{fmtTime(entry.registered_at)}</TableCell>
+                                  {mutableRoster && (
+                                    <TableCell className="px-2 py-1">
+                                      <Button type="button" variant="destructive" size="xs" onClick={() => void removeEntry(contest.id, entry.user_id)}>移除</Button>
+                                    </TableCell>
+                                  )}
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </Fragment>
+              )
+            })}
           </TableBody>
         </Table>
-        {contests.length === 0 && <EmptyState text="无比赛" />}
+        {contests.length === 0 && <EmptyState text="暂无锦标赛" />}
       </div>
       <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+      {scheduleContest && (
+        <ScheduleDialog
+          key={scheduleContest.id}
+          contest={scheduleContest}
+          busy={busyId === scheduleContest.id}
+          onClose={() => setScheduleContest(null)}
+          onSave={async (fields) => {
+            await patch(scheduleContest.id, fields)
+            setScheduleContest(null)
+          }}
+        />
+      )}
       {confirmDialog}
     </div>
   )
 }
 
-/** 批量指派面板（admin 派遣参赛者+Bot）。assign_all 模式按 game_id 全选，
- * 可选 name_prefix 过滤（如 "load_"/"cs_" 前缀的测试用户）。 */
+function ScheduleDialog({
+  contest,
+  busy,
+  onClose,
+  onSave,
+}: {
+  contest: Contest
+  busy: boolean
+  onClose: () => void
+  onSave: (fields: Record<string, string>) => Promise<void>
+}) {
+  const [opensAt, setOpensAt] = useState(toInputValue(contest.registration_opens_at))
+  const [closesAt, setClosesAt] = useState(toInputValue(contest.registration_closes_at))
+  const [startsAt, setStartsAt] = useState(toInputValue(contest.starts_at))
+  const candidate = {
+    registration_opens_at: toIso(opensAt),
+    registration_closes_at: toIso(closesAt),
+    starts_at: toIso(startsAt),
+  }
+  const issue = scheduleIssue(candidate)
+
+  const save = async () => {
+    if (issue) return
+    const fields = Object.fromEntries(
+      Object.entries(candidate).filter((entry): entry is [string, string] => Boolean(entry[1])),
+    )
+    // onSave already surfaces API failures in the parent error panel. Keep the
+    // dialog open for correction, but do not leak a rejected promise from the
+    // fire-and-forget button handler into the browser console.
+    try {
+      await onSave(fields)
+    } catch {
+      // Parent owns the user-facing error state.
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose() }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>编辑赛事时间</DialogTitle>
+          <DialogDescription>
+            {contest.title} · 应满足“开放报名 ≤ 报名截止 ≤ 比赛开始”。已有终态赛事仅修正展示元数据，不改变状态或成绩。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="admin-registration-opens-at">开放报名</Label>
+            <Input id="admin-registration-opens-at" type="datetime-local" value={opensAt} onChange={(event) => setOpensAt(event.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="admin-registration-closes-at">报名截止</Label>
+            <Input id="admin-registration-closes-at" type="datetime-local" value={closesAt} onChange={(event) => setClosesAt(event.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="admin-starts-at">比赛开始</Label>
+            <Input id="admin-starts-at" type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} />
+          </div>
+          {issue && (
+            <p className="flex items-center gap-1.5 text-sm text-destructive"><AlertTriangle className="size-4" />{issue}</p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose} disabled={busy}>取消</Button>
+          <Button type="button" onClick={() => void save()} disabled={busy || Boolean(issue)}>{busy ? '保存中…' : '保存时间'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function AssignPanel({ contestId, gameId, onDone }: { contestId: number; gameId?: string; onDone: () => void }) {
-  const [prefix, setPrefix] = useState('')
+  const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState('')
+  const [message, setMessage] = useState('')
 
   const assignAll = async () => {
-    setBusy(true); setMsg('')
+    setBusy(true)
+    setMessage('')
     try {
-      const d = await apiJson<{ added: number; skipped: string[]; total_entries: number }>(
-        `/api/admin/contests/${contestId}/entries/bulk`, 'POST',
-        { assign_all: true, game_id: gameId || 'holdem', name_prefix: prefix || undefined },
+      const response = await apiJson<{ added: number; skipped: string[]; total_entries: number }>(
+        `/api/admin/contests/${contestId}/entries/bulk`,
+        'POST',
+        { assign_all: true, game_id: gameId || 'holdem', name_prefix: query || undefined },
       )
-      setMsg(`已指派 ${d.added} 人（共 ${d.total_entries} 报名${d.skipped.length ? `，跳过 ${d.skipped.length}` : ''}）`)
+      setMessage(`已指派 ${response.added} 人（共 ${response.total_entries} 人${response.skipped.length ? `，跳过 ${response.skipped.length}` : ''}）`)
       onDone()
-    } catch (e) {
-      setMsg(errMsg(e))
+    } catch (cause) {
+      setMessage(errMsg(cause))
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div className="mb-3 flex flex-wrap items-center gap-2 rounded border border-border bg-card p-2 text-xs">
-      <span className="font-medium text-foreground">批量指派：</span>
-      <input
+    <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-3 text-xs">
+      <span className="font-medium text-foreground">批量指派</span>
+      <Input
         type="text"
-        placeholder="用户/Bot 名前缀（可选，如 load_）"
-        value={prefix}
-        onChange={(e) => setPrefix(e.target.value)}
-        className="h-9 w-56 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring outline-none"
+        placeholder="按 Bot 名关键字过滤（可选）"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        className="h-9 w-64"
       />
-      <button
-        type="button"
-        onClick={() => void assignAll()}
-        disabled={busy}
-        className="rounded bg-primary px-3 py-1 font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-      >
-        {busy ? '指派中…' : `指派全部 ${gameId || 'holdem'} 用户`}
-      </button>
-      {msg && <span className="text-muted-foreground">{msg}</span>}
+      <Button type="button" size="sm" onClick={() => void assignAll()} disabled={busy}>
+        {busy ? '指派中…' : `指派全部 ${gameLabel(gameId || 'holdem')} Bot`}
+      </Button>
+      {message && <span className="text-muted-foreground">{message}</span>}
     </div>
   )
 }

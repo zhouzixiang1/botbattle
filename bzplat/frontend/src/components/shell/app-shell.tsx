@@ -333,9 +333,8 @@ export function AppShell() {
 
         {/* 页脚（跟随主体宽度，不跨侧栏） */}
         <footer className="border-t border-border">
-          <div className="flex w-full flex-col items-center justify-between gap-2 px-4 py-5 text-xs text-muted-foreground sm:flex-row lg:px-8">
+          <div className="flex w-full items-center px-4 py-5 text-xs text-muted-foreground lg:px-8">
             <span>Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
-            <span className="opacity-70">React 19 · Tailwind v4 · shadcn/ui</span>
           </div>
         </footer>
       </div>

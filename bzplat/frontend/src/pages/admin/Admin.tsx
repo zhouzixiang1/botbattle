@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import PageStub from '../../components/PageStub'
 import { useAuth } from '../../components/useAuth'
 import Dashboard from './Dashboard'
@@ -30,7 +29,18 @@ const TABS: { key: TabKey; label: string }[] = [
 
 export default function Admin() {
   const { user, isLoggedIn } = useAuth()
-  const [tab, setTab] = useState<TabKey>('dashboard')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedTab = searchParams.get('tab')
+  const tab: TabKey = TABS.some((item) => item.key === requestedTab)
+    ? requestedTab as TabKey
+    : 'dashboard'
+
+  const selectTab = (next: TabKey) => {
+    const params = new URLSearchParams(searchParams)
+    if (next === 'dashboard') params.delete('tab')
+    else params.set('tab', next)
+    setSearchParams(params, { replace: false })
+  }
 
   if (!isLoggedIn) {
     return (
@@ -63,7 +73,7 @@ export default function Admin() {
           <button
             key={t.key}
             type="button"
-            onClick={() => setTab(t.key)}
+            onClick={() => selectTab(t.key)}
             className={`-mb-px shrink-0 whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium transition ${
               tab === t.key
                 ? 'border-primary text-primary'
