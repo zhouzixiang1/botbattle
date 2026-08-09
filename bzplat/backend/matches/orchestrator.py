@@ -213,16 +213,22 @@ def _authoritative_match_end(
 
 
 def _completed_match_reason(result: Any, events: list[dict]) -> str:
-    """Preserve an engine-adjudicated mid-match crash in the persisted match.
+    """Preserve a game's adjudicated terminal reason without game-name branches.
 
-    Board results expose ``reason`` directly; Hold'em records it on the terminal
-    ``match_end`` event.  A process that started successfully but later crashed is
-    still a completed, scored match, but calling it a generic ``completed`` loses
-    the diagnostic contract shown to Bot authors.  Other normal/illegal outcomes
-    retain the platform's existing generic completed reason.
+    Board games expose ``five/draw/illegal/...`` directly on their result. Dropping
+    those to the generic ``completed`` makes persisted state and replay disagree
+    with the public judge. Hold'em has no match-level normal reason and therefore
+    keeps ``completed``; its mid-match crash remains available on the engine event.
     """
-    if getattr(result, "reason", None) == "crash":
-        return "crash"
+    reason = getattr(result, "reason", None)
+    if (
+        isinstance(reason, str)
+        and reason
+        and len(reason) <= 32
+        and reason.replace("_", "").isalnum()
+        and reason[0].isalpha()
+    ):
+        return reason
     result_events = getattr(result, "events", None)
     sources = result_events if isinstance(result_events, list) else events
     for event in reversed(sources):
@@ -1363,7 +1369,7 @@ class MatchOrchestrator:
 
         if self.notifier is not None and bot_a_id is not None and bot_b_id is not None:
             try:
-                wl = "平局" if winner is None else f"座位 {winner} 胜"
+                wl = "平局" if winner is None else f"座位 {winner + 1} 胜"
                 self.notifier.notify_both_owners(
                     bot_a_id,
                     bot_b_id,

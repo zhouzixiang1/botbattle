@@ -69,6 +69,7 @@ def test_pair_stats_win_loss_accumulation_and_head_to_head(tmp_path):
     assert h_b1["a_wins"] == 2
     assert h_b1["a_losses"] == 1
     assert h_b1["draws"] == 1
+    assert h_b1["samples"] == 4
 
     # b2 视角看 b1：胜负翻转
     h_b2 = s.head_to_head(b2["id"], b1["id"])
@@ -76,6 +77,16 @@ def test_pair_stats_win_loss_accumulation_and_head_to_head(tmp_path):
     assert h_b2["a_wins"] == 1
     assert h_b2["a_losses"] == 2
     assert h_b2["draws"] == 1
+    assert h_b2["samples"] == 4
+    s.close()
+
+
+def test_pair_stats_rejects_ambiguous_legacy_sample_count(tmp_path):
+    s = _store(tmp_path)
+    _, b1, b2 = _seed_two_bots(s)
+    with pytest.raises(ValueError, match="samples"):
+        s.upsert_pair_stats(b1["id"], b2["id"], 0.0, None, None, 70)
+    assert s.head_to_head(b1["id"], b2["id"]) is None
     s.close()
 
 
@@ -100,7 +111,34 @@ def test_bot_opponents_stats_resolves_names_and_view(tmp_path):
     assert o["opponent_name"] == "botB"
     assert o["wins"] == 3
     assert o["losses"] == 0
+    assert o["samples"] == 3
     s.close()
+
+
+def test_pair_stats_migration_repairs_legacy_zero_samples(tmp_path):
+    db = str(tmp_path / "pair-samples.db")
+    s = Store(db)
+    _, b1, b2 = _seed_two_bots(s)
+    lo, hi = sorted((b1["id"], b2["id"]))
+    s.upsert_pair_stats(
+        lo, hi, 0.0, None, None, 0,
+        a_wins_delta=2, a_losses_delta=1, draws_delta=1,
+    )
+    with s._tx() as c:
+        c.execute(
+            "UPDATE pair_stats SET samples=0 WHERE bot_a_id=? AND bot_b_id=?",
+            (lo, hi),
+        )
+    s.close()
+
+    repaired = Store(db)
+    assert repaired.head_to_head(lo, hi)["samples"] == 4
+    with repaired._tx() as c:
+        assert c.execute(
+            "SELECT samples FROM pair_stats WHERE bot_a_id=? AND bot_b_id=?",
+            (lo, hi),
+        ).fetchone()["samples"] == 4
+    repaired.close()
 
 
 def test_rating_history_append_and_truncate(tmp_path):

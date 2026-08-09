@@ -135,8 +135,8 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 | `rating_history` | 评分变化时序（**per-game**，bot_id+game_id；段位趋势曲线，每 bot×game 截断保留） |
 | `follows` | 关注关系（follower_id, followee_id） |
 | `favorites` | 收藏 Bot（user_id, bot_id） |
-| `comments` | 评论（target_type=match/bot, target_id, user_id, body） |
-| `likes` | 点赞（user_id, target_type, target_id） |
+| `comments` | 评论（target_type=match/bot, target_id, user_id, body）；写入前在同一事务验证目标存在，删目标级联清理 |
+| `likes` | 点赞（user_id, target_type=match/bot/comment, target_id）；写入前验证目标，删目标/评论级联清理 |
 | `notifications` | 通知（user_id, type, title, body, link, is_read） |
 | `notification_prefs` | 通知邮件偏好（email_match_done/email_followed/email_contest/email_comment） |
 
@@ -152,10 +152,12 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表
 | `contest_entries` | 赛事报名（user_id, bot_id SET NULL, group_id, seed）—— **P0：排名/积分键为 entry.id（换 Bot 不丢分）**；bot FK = SET NULL（删 Bot 留报名） |
 | `contest_pairings` | 赛事对阵（entry_a_id/entry_b_id 身份键 + bot_a_id/bot_b_id SET NULL）—— P0：pairing 快照 entry 身份 |
 | `contest_stage_results` | 阶段成绩（entry_id 唯一键 + bot_id SET NULL）—— P0：唯一键 (contest_id, stage_idx, entry_id) |
-| `pair_stats` | 对手战绩统计（a_wins/a_losses/draws） |
+| `pair_stats` | 对手战绩统计（a_wins/a_losses/draws/samples）；`samples` 的权威值恒等于胜+负+平 |
 
 ### 3.4 迁移机制
 `Store._migrate()` 在每次建连时自愈：为旧库补新增列（game_id/xp/level/bio/avatar/likes_count 等），必要时重建表放宽 CHECK 约束（纳入 rest/ladder/human 等新状态）。**向后兼容，不破坏现有数据**（除对局数据——见下）。
+迁移还会删除多态社交表中已失去用户或目标的孤儿行、按真实 likes 重算每场对局的
+`likes_count` 缓存，并把历史 `pair_stats.samples` 修正为胜负平之和。
 
 **matches 拆 per-game 表 + ratings 加 game_id 维度的迁移**：
 - **对局数据不保留**（用户决策）：检测旧单表 `matches` → 先清 `contest_pairings.match_id`（置 NULL），再 DROP `matches`+`match_replays`；新三表（`matches_holdem/gomoku/pencil`）+ `matches_index` 由 SCHEMA `IF NOT EXISTS` 建。对局可后续跑种子脚本（`scripts/seed_test_accounts.py`）重建。
@@ -173,7 +175,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - Bot 浏览：`GET /api/bots/public`、`/api/bots/{id}`、`/profile`、`/matches`、`/opponents`、`/rating-history`
 - 用户浏览：`GET /api/users`、`/api/users/{name}/profile`、`/bots`、`/followers`、`/following`
 - 对局浏览：`GET /api/matches`（`status` / `game_id` / `has_technical_incidents` 过滤；默认全状态）、`/matches/liked-top`、`/matches/{id}`。新写回放、实时 SSE 与历史公开回放的唯一事件名均为 `technical_incident`；列表、详情只暴露 `technical_incident_count`、`technical_incidents_by_seat` 与最多 3 条脱敏 `technical_incident_samples`。历史库中的 `bot_decide_error` / `bot_technical_error` 仅在 Store 读取边界归一化，不形成第二套对外字段或新写入
-- 排行与元数据：`GET /api/leaderboard`、`/api/tiers`、`/api/levels/info`、`/api/site/info`
+- 排行与元数据：`GET /api/leaderboard`、`/api/tiers`、`/api/levels/info`、`/api/site/info`。定级阈值唯一读取 `runtime/config.py`，tiers 返回 `placement_required`；排行榜与 Bot profile 返回 `is_placement/placement_required/placement_remaining`，并把已定级 Bot 排在定级 Bot 之前
 - 搜索：`GET /api/search`
 - 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
 - Wiki：`GET /api/wiki`
@@ -181,9 +183,9 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 ### 4.2 鉴权端点（require_user，登录玩家）
 - Bot 管理：`POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`
-- 对局：`POST /api/matches/challenge`（两座位各选 bot + 可选版本快照，**自博弈允许**——同 bot 同/不同版本）、`/api/matches/human`
-- 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`
-- 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`
+- 对局：`POST /api/matches/challenge`（两座位各选 bot + 可选版本快照，**自博弈允许**——同 bot 同/不同版本）、`/api/matches/human`（公开契约固定 `human_seat=1`，即展示座位 2/白方）
+- 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；读写不存在的目标统一 404
+- 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`；评论/点赞请求使用严格 target 枚举且必须引用当前存在的实体，通知排除行为发起者本人
 - 通知：`GET /api/notifications`、`POST /read`、`/read-all`、`GET/PUT /api/notification-prefs`
 - 赛事：`POST /api/contests/{id}/register`
 - 认证：`GET /api/auth/me`、`POST /logout`、`/change-password`、`PUT /profile`、`POST /avatar`

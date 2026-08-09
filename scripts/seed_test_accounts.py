@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """种子脚本：建普通用户、组织者、管理员测试账号及普通用户样例 Bot。
 
-便于人工/自动对战与人类对战测试。可重复运行（幂等：用户/bot 已存在则跳过）。
+便于人工/自动对战与人类对战测试。可重复运行：专用账号严格校验，Bot 按当前样例
+ELF 内容幂等；样例更新或现有文件漂移时自动发布并激活新版本。
 
 用法：
     source .venv/bin/activate
@@ -28,6 +29,7 @@ from scripts._qa_accounts import (  # noqa: E402
     get_or_create_dedicated_account,
     preflight_dedicated_accounts,
 )
+from scripts._qa_bots import ensure_qa_sample_bot  # noqa: E402
 from scripts._qa_target import (  # noqa: E402
     primary_checkout_root,
     qa_db_path,
@@ -119,14 +121,9 @@ def resolve_seed_paths(
 
 
 def get_or_create_bot(bm: BotManager, owner_id: int, name: str, game_id: str, path: Path) -> dict | None:
-    existing = bm.store.get_bot_by_owner_name(owner_id, name)
-    if existing:
-        return existing
     raw = path.read_bytes()
     try:
-        return bm.create_from_upload(
-            owner_id, name, raw, display_name=name, game_id=game_id,
-        )
+        return ensure_qa_sample_bot(bm, owner_id, name, game_id, raw)
     except BotError as e:
         print(f"  ! 上传 {name}({game_id}) 失败：{e.code} {e.message}", file=sys.stderr)
         return None

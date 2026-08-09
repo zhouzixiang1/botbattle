@@ -487,6 +487,11 @@ TYPE_CONTEST = "contest"
 TYPE_LADDER = "ladder"  # 闲时自动对局维护天梯榜（系统发起，无 owner）
 TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 Glicko）
 
+# 社交目标类型。comments / likes 是多态引用，SQLite 无法为 target_id 声明
+# 跨表外键，因此合法类型集中在这里，并由 Store 在同一写事务内校验目标存在。
+COMMENT_TARGET_TYPES = frozenset({"match", "bot"})
+LIKE_TARGET_TYPES = frozenset({"match", "bot", "comment"})
+
 # match_rating_settlements 内部迁移哨兵：旧库首次升级时先把既有 completed
 # 非赛事对局视为已结算，防启动恢复把历史评分全部重复计算。对局 ID 为时间戳前缀，
 # 不会与此前缀冲突；哨兵与回填在同一 Store 初始化事务提交。

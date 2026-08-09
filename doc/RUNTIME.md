@@ -95,6 +95,9 @@ effective  = min(configured, ceiling)
 **配对策略**：陈旧度优先（`last_played_at` 最旧 / 从未赛）+ rating 就近（Swiss 式）。
 **新 bot 定级优先**：`matches_played < auto_match_placement_games`（默认 10）的「定级期」bot 排最前，
 且用更短 cooldown（cooldown÷10，最少 30s）加快定级；打满后回归陈旧度调度。
+同一个 `auto_match_placement_games` 还驱动 `/api/tiers`、排行榜和 Bot profile 的
+`placement_required/is_placement/placement_remaining`，前端不得另写阈值；排行榜先排正式 Bot，
+再排定级 Bot，组内才按 rating 排序。
 **节流**：同一 bot 两场间隔不低于 `auto_match_bot_cooldown`（默认 600 秒）；
 近期已配对组合短期不再重复。**每轮**最多补 `auto_match_max_per_round`（默认 2）场；
 **每日**总量上限 `auto_match_daily_cap`（默认 200，0=不限，达上限当日停）。

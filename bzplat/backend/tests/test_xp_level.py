@@ -95,7 +95,13 @@ def test_user_profile_includes_xp_level(tmp_path):
 
 def test_comment_awards_xp(tmp_path):
     c, store, uid, t1 = _app(tmp_path)
+    bot = store.create_bot(uid, "xp-comment-target", game_id="holdem")
     h1 = {"Authorization": f"Bearer {t1}"}
-    c.post("/api/comments", json={"target_type": "bot", "target_id": "1", "body": "hi"}, headers=h1)
+    response = c.post(
+        "/api/comments",
+        json={"target_type": "bot", "target_id": str(bot["id"]), "body": "hi"},
+        headers=h1,
+    )
+    assert response.status_code == 200
     u = c.get("/api/auth/me", headers=h1).json()["user"]
     assert u["xp"] == XP_COMMENT

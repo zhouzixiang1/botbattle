@@ -7,6 +7,7 @@ load_test.py 的 HTTP 阶段（对局/赛事/admin）是端到端脚本，由 sc
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import sys
 from pathlib import Path
 
@@ -54,6 +55,51 @@ def test_seed_idempotent(tmp_path):
 
     # org_tokens 数量
     assert len(ctx1["org_tokens"]) == 2
+
+
+def test_seed_refreshes_stale_named_bot_by_sample_checksum(tmp_path):
+    """同名 QA Bot 不能让旧协议二进制永久存活；内容漂移时发布新版本。"""
+    mod = _load_module()
+    db = str(tmp_path / "load.db")
+    upload_root = str(tmp_path / "uploads")
+    first = mod.seed(db, 1, upload_root)
+    bot_id = first["bots"]["load_u01"]["gomoku"]
+
+    store = Store(db)
+    stale = store.get_current_bot_version(bot_id)
+    assert stale is not None and stale["version"] == 1
+    # 用另一款合法 ELF 模拟名字相同、内容仍停在旧协议的历史产物。
+    Path(stale["binary_path"]).write_bytes((ROOT / "samples/callbot_linux_amd64").read_bytes())
+    store.close()
+
+    second = mod.seed(db, 1, upload_root)
+    assert second["bots"]["load_u01"]["gomoku"] == bot_id
+    repaired = Store(db)
+    current = repaired.get_current_bot_version(bot_id)
+    expected = (ROOT / "samples/gomokubot_linux_amd64").read_bytes()
+    assert current["version"] == 2
+    assert current["checksum"] == hashlib.sha256(expected).hexdigest()
+    assert Path(current["binary_path"]).read_bytes() == expected
+    repaired.close()
+
+
+def test_seed_reactivates_valid_dedicated_qa_bot_without_new_version(tmp_path):
+    mod = _load_module()
+    db = str(tmp_path / "load.db")
+    upload_root = str(tmp_path / "uploads")
+    first = mod.seed(db, 1, upload_root)
+    bot_id = first["bots"]["load_u01"]["gomoku"]
+    store = Store(db)
+    assert store.update_bot(bot_id, is_active=0)["is_active"] == 0
+    assert len(store.list_bot_versions(bot_id)) == 1
+    store.close()
+
+    second = mod.seed(db, 1, upload_root)
+    assert second["bots"]["load_u01"]["gomoku"] == bot_id
+    restored = Store(db)
+    assert restored.get_bot(bot_id)["is_active"] == 1
+    assert len(restored.list_bot_versions(bot_id)) == 1
+    restored.close()
 
 
 def test_seed_token_is_valid_session(tmp_path):

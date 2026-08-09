@@ -15,6 +15,7 @@ from bzplat.backend.mail import seed_email_templates
 
 from .schema import (
     CODE_RESET,
+    COMMENT_TARGET_TYPES,
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
@@ -36,6 +37,7 @@ from .schema import (
     TECHNICAL_INCIDENT_MESSAGES,
     TYPE_CONTEST,
     TYPE_HUMAN,
+    LIKE_TARGET_TYPES,
     VALID_RUNTIME_MODES,
     require_supported_binary_metadata,
 )
@@ -50,6 +52,66 @@ def _now() -> str:
 
 def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
+
+
+def _delete_comment_likes_for(
+    conn: sqlite3.Connection,
+    where_sql: str,
+    params: tuple[Any, ...],
+) -> None:
+    """Delete likes of comments selected by a trusted internal predicate."""
+    conn.execute(
+        "DELETE FROM likes WHERE target_type='comment' AND target_id IN ("
+        f"SELECT CAST(id AS TEXT) FROM comments WHERE {where_sql})",
+        params,
+    )
+
+
+def _delete_social_target(
+    conn: sqlite3.Connection,
+    target_type: str,
+    target_id: str | int,
+) -> None:
+    """Remove one polymorphic target's comments/likes without leaving orphans."""
+    tid = str(target_id)
+    _delete_comment_likes_for(
+        conn,
+        "target_type=? AND target_id=?",
+        (target_type, tid),
+    )
+    conn.execute(
+        "DELETE FROM comments WHERE target_type=? AND target_id=?",
+        (target_type, tid),
+    )
+    conn.execute(
+        "DELETE FROM likes WHERE target_type=? AND target_id=?",
+        (target_type, tid),
+    )
+
+
+def _delete_user_likes(conn: sqlite3.Connection, user_id: int) -> None:
+    """Delete one user's likes and keep per-match cached counts exact."""
+    match_ids = [
+        str(row["target_id"])
+        for row in conn.execute(
+            "SELECT DISTINCT target_id FROM likes "
+            "WHERE user_id=? AND target_type='match'",
+            (user_id,),
+        ).fetchall()
+    ]
+    conn.execute("DELETE FROM likes WHERE user_id=?", (user_id,))
+    for match_id in match_ids:
+        indexed = conn.execute(
+            "SELECT game_id FROM matches_index WHERE id=?", (match_id,)
+        ).fetchone()
+        if not indexed or indexed["game_id"] not in _all_game_ids():
+            continue
+        table = _matches_table(indexed["game_id"])
+        conn.execute(
+            f"UPDATE {table} SET likes_count=(SELECT COUNT(*) FROM likes "
+            "WHERE target_type='match' AND target_id=?) WHERE id=?",
+            (match_id, match_id),
+        )
 
 
 def _contest_row(row: sqlite3.Row | None) -> dict | None:
@@ -740,6 +802,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ("draws", "INTEGER NOT NULL DEFAULT 0"),
         ):
             _add_col(conn, "pair_stats", col, decl)
+        # samples 的现行唯一语义是「双方已结算的对局数」。旧写入路径长期把它
+        # 固定为 0，真实库因此无法按交手次数排序。胜/负/平已经是逐场、恰好一次
+        # 结算的数据，直接以三者之和幂等回填即可。
+        conn.execute(
+            "UPDATE pair_stats SET samples=a_wins+a_losses+draws "
+            "WHERE samples<>a_wins+a_losses+draws"
+        )
 
     # ── ratings / rating_history 加 game_id 维度（全面解耦 PR3）──────────
     # 旧库 ratings PK = bot_id（无 game_id 列）；rating_history 无 game_id 列。
@@ -1107,6 +1176,67 @@ def _migrate(conn: sqlite3.Connection) -> None:
             for _dead in ("hands_played", "earnings_a", "earnings_b", "net_bb_a"):
                 if _dead in _table_cols(conn, _tbl):
                     conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN {_dead}")
+
+    # comments/likes 使用跨表多态 target_id，无法声明数据库外键。升级时删除旧版
+    # 留下的未知类型和悬空目标，并以 likes 真相重算每场缓存计数。删完悬空
+    # comment 后再清理 comment-like，避免「评论已删但点赞永存」。
+    if "comments" in _tables_after and "likes" in _tables_after:
+        valid_match_ids_sql = " UNION ALL ".join(
+            f"SELECT id FROM {_matches_table(gid)}"
+            for gid in sorted(_all_game_ids())
+            if _matches_table(gid) in _tables_after
+        )
+        conn.execute(
+            "DELETE FROM comments WHERE target_type NOT IN ('match','bot')"
+        )
+        conn.execute(
+            "DELETE FROM comments WHERE user_id NOT IN (SELECT id FROM users)"
+        )
+        conn.execute(
+            "DELETE FROM comments WHERE target_type='bot' AND target_id NOT IN "
+            "(SELECT CAST(id AS TEXT) FROM bots)"
+        )
+        if valid_match_ids_sql:
+            conn.execute(
+                "DELETE FROM comments WHERE target_type='match' AND target_id NOT IN ("
+                f"{valid_match_ids_sql})"
+            )
+        conn.execute(
+            "DELETE FROM likes WHERE target_type NOT IN ('match','bot','comment')"
+        )
+        conn.execute(
+            "DELETE FROM likes WHERE user_id NOT IN (SELECT id FROM users)"
+        )
+        conn.execute(
+            "DELETE FROM likes WHERE target_type='bot' AND target_id NOT IN "
+            "(SELECT CAST(id AS TEXT) FROM bots)"
+        )
+        conn.execute(
+            "DELETE FROM likes WHERE target_type='comment' AND target_id NOT IN "
+            "(SELECT CAST(id AS TEXT) FROM comments)"
+        )
+        if valid_match_ids_sql:
+            conn.execute(
+                "DELETE FROM likes WHERE target_type='match' AND target_id NOT IN ("
+                f"{valid_match_ids_sql})"
+            )
+        for _gid in _all_game_ids():
+            _tbl = _matches_table(_gid)
+            if _tbl in _tables_after:
+                conn.execute(
+                    f"UPDATE {_tbl} SET likes_count=(SELECT COUNT(*) FROM likes "
+                    f"WHERE target_type='match' AND target_id={_tbl}.id)"
+                )
+    if "follows" in _tables_after:
+        conn.execute(
+            "DELETE FROM follows WHERE follower_id NOT IN (SELECT id FROM users) "
+            "OR followee_id NOT IN (SELECT id FROM users)"
+        )
+    if "favorites" in _tables_after:
+        conn.execute(
+            "DELETE FROM favorites WHERE user_id NOT IN (SELECT id FROM users) "
+            "OR bot_id NOT IN (SELECT id FROM bots)"
+        )
 
     # ── 去重：删 schema.py 旧字面索引（与上面 _PER_GAME_INDEX_COLS 循环建的重复）─────
     # 旧索引名后缀 bot_a/bot_b/owner/contest/time（无 _id/_at）；
@@ -1810,6 +1940,9 @@ class Store:
         # 本方法保持纯 store 行为：直接删，FK ON DELETE SET NULL（matches，保历史）/ CASCADE
         # （contest_pairings）由 DB 处理。管理端须改调 delete_bot_if_safe() 原子判断。
         with self._tx() as c:
+            if not c.execute("SELECT 1 FROM bots WHERE id=?", (bot_id,)).fetchone():
+                return False
+            _delete_social_target(c, "bot", bot_id)
             return c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
 
     def delete_bot_if_safe(self, bot_id: int) -> dict:
@@ -1856,6 +1989,7 @@ class Store:
             }
             if any(refs.values()):
                 return {"found": True, "deleted": False, "references": refs}
+            _delete_social_target(c, "bot", bot_id)
             deleted = c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
             return {"found": True, "deleted": deleted, "references": refs}
 
@@ -2143,10 +2277,12 @@ class Store:
             # bot 可能在 bot_a 或 bot_b 位
             rows = c.execute(
                 "SELECT ps.bot_a_id, ps.bot_b_id, ps.a_wins, ps.a_losses, "
-                "ps.draws, ps.samples, ps.last_played_at "
+                "ps.draws, (ps.a_wins+ps.a_losses+ps.draws) AS samples, "
+                "ps.last_played_at "
                 "FROM pair_stats ps "
                 "WHERE ps.bot_a_id=? OR ps.bot_b_id=? "
-                "ORDER BY ps.samples DESC LIMIT ?",
+                "ORDER BY samples DESC, ps.last_played_at DESC, "
+                "ps.bot_a_id, ps.bot_b_id LIMIT ?",
                 (bot_id, bot_id, max(1, min(limit, 100))),
             ).fetchall()
             out: list[dict] = []
@@ -2331,6 +2467,7 @@ class Store:
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return False
+            _delete_social_target(c, "match", match_id)
             cur = c.execute(f"DELETE FROM {tbl} WHERE id=?", (match_id,))
             deleted = cur.rowcount > 0
             if deleted:
@@ -2691,11 +2828,12 @@ class Store:
                 "ON CONFLICT(bot_a_id, bot_b_id) DO UPDATE SET "
                 "bb_per_100_mean=excluded.bb_per_100_mean, "
                 "ci_low=excluded.ci_low, ci_high=excluded.ci_high, "
-                "samples=excluded.samples, last_played_at=excluded.last_played_at, "
+                "samples=pair_stats.samples+excluded.samples, "
+                "last_played_at=excluded.last_played_at, "
                 "a_wins=pair_stats.a_wins+excluded.a_wins, "
                 "a_losses=pair_stats.a_losses+excluded.a_losses, "
                 "draws=pair_stats.draws+excluded.draws",
-                (lo, hi, 0.0, None, None, 0, now, aw, al, dd),
+                (lo, hi, 0.0, None, None, 1, now, aw, al, dd),
             )
             return True
 
@@ -2742,6 +2880,7 @@ class Store:
     def list_leaderboard(
         self, limit: int = 50, *, game_id: str | None = None,
         page: int | None = None, per_page: int = 50,
+        placement_games: int | None = None,
     ) -> list[dict] | dict:
         with self._tx() as c:
             # rating_delta = 当前 rating - 上一条历史评分（升降趋势）；无历史则 NULL
@@ -2774,7 +2913,17 @@ class Store:
                 " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id "
                 " ORDER BY rh.id DESC LIMIT 1 OFFSET 1) AS prev_rating "
             )
-            order = " ORDER BY r.rating DESC"
+            placement_required = (
+                max(0, int(placement_games)) if placement_games is not None else None
+            )
+            # 正式榜排在定级中 Bot 之前；组内按 rating、场次、bot_id 稳定排序。
+            # placement_required 来自代码配置并先转 int，不接受 SQL 输入。
+            order = " ORDER BY "
+            if placement_required:
+                order += (
+                    f"(r.matches_played >= {placement_required}) DESC, "
+                )
+            order += "r.rating DESC, r.matches_played DESC, r.bot_id ASC"
             if page is not None:
                 # 显式 COUNT（_paginate 启发在此查询上不可靠）
                 count_sql = f"SELECT COUNT(*) {base_from}"
@@ -2806,6 +2955,15 @@ class Store:
                 row["tier_level"] = t.level
                 row["tier_key"] = t.key
                 row["tier_name"] = t.name
+                if placement_required is not None:
+                    played = max(0, int(row.get("matches_played") or 0))
+                    row["placement_required"] = placement_required
+                    row["placement_remaining"] = max(
+                        0, placement_required - played
+                    )
+                    row["is_placement"] = (
+                        placement_required > 0 and played < placement_required
+                    )
             if page is not None:
                 return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
             return rows
@@ -3053,6 +3211,7 @@ class Store:
                 ).fetchall()
                 for ghost in ghosts:
                     match_id = str(ghost["id"])
+                    _delete_social_target(c, "match", match_id)
                     c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
                     c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                     c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
@@ -3088,6 +3247,7 @@ class Store:
                 if not match or not table:
                     continue
                 if match["status"] == STATUS_PENDING:
+                    _delete_social_target(c, "match", match_id)
                     c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
                     c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                     c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
@@ -3167,8 +3327,17 @@ class Store:
         """记录双方对战统计。a_wins/a_losses 从 bot_a 视角计；
 
         bb_per_100_mean/ci 为 holdem 期望盈亏（可选，旧接口保留）；
-        胜负计数增量式累加（a_wins_delta 等）。
+        samples 只保留为调用契约校验项：可传 0（自动推导）或与本次胜负平
+        增量之和相同的值，禁止再赋予「手数/统计样本」等第二种语义。
         """
+        outcome_delta = (
+            max(0, int(a_wins_delta))
+            + max(0, int(a_losses_delta))
+            + max(0, int(draws_delta))
+        )
+        if int(samples) not in (0, outcome_delta):
+            raise ValueError("samples 必须为 0 或等于胜负平增量之和")
+        sample_delta = outcome_delta
         with self._tx() as c:
             c.execute(
                 "INSERT INTO pair_stats(bot_a_id, bot_b_id, bb_per_100_mean, "
@@ -3177,7 +3346,7 @@ class Store:
                 "ON CONFLICT(bot_a_id, bot_b_id) DO UPDATE SET "
                 "bb_per_100_mean=excluded.bb_per_100_mean, "
                 "ci_low=excluded.ci_low, ci_high=excluded.ci_high, "
-                "samples=excluded.samples, "
+                "samples=pair_stats.samples+excluded.samples, "
                 "last_played_at=excluded.last_played_at, "
                 "a_wins=pair_stats.a_wins+excluded.a_wins, "
                 "a_losses=pair_stats.a_losses+excluded.a_losses, "
@@ -3188,7 +3357,7 @@ class Store:
                     bb_per_100_mean,
                     ci_low,
                     ci_high,
-                    samples,
+                    sample_delta,
                     _now(),
                     max(0, a_wins_delta),
                     max(0, a_losses_delta),
@@ -3204,7 +3373,8 @@ class Store:
         lo, hi = sorted((bot_a_id, bot_b_id))
         with self._tx() as c:
             row = c.execute(
-                "SELECT a_wins, a_losses, draws, samples, last_played_at "
+                "SELECT a_wins, a_losses, draws, "
+                "(a_wins+a_losses+draws) AS samples, last_played_at "
                 "FROM pair_stats WHERE bot_a_id=? AND bot_b_id=?",
                 (lo, hi),
             ).fetchone()
@@ -3264,10 +3434,52 @@ class Store:
             return [_row(r) for r in reversed(rows)]
 
     # ── comments（评论）───────────────────────────────────────
+    def _social_target_exists_tx(
+        self,
+        c: sqlite3.Connection,
+        target_type: str,
+        target_id: str | int,
+    ) -> bool:
+        """Validate a polymorphic social target on the caller's transaction."""
+        tid = str(target_id)
+        if target_type == "match":
+            table = self._match_table_of(c, tid)
+            return bool(
+                table
+                and c.execute(
+                    f"SELECT 1 FROM {table} WHERE id=?", (tid,)
+                ).fetchone()
+            )
+        if target_type in {"bot", "comment"}:
+            try:
+                numeric_id = int(tid)
+            except (TypeError, ValueError):
+                return False
+            if numeric_id <= 0 or str(numeric_id) != tid:
+                return False
+            table = "bots" if target_type == "bot" else "comments"
+            return c.execute(
+                f"SELECT 1 FROM {table} WHERE id=?", (numeric_id,)
+            ).fetchone() is not None
+        raise ValueError(f"不支持的社交目标类型: {target_type!r}")
+
+    def social_target_exists(
+        self, target_type: str, target_id: str | int
+    ) -> bool:
+        """Public read-side target check used by comments/likes API routes."""
+        if target_type not in LIKE_TARGET_TYPES:
+            raise ValueError(f"不支持的社交目标类型: {target_type!r}")
+        with self._tx() as c:
+            return self._social_target_exists_tx(c, target_type, target_id)
+
     def add_comment(
         self, user_id: int, target_type: str, target_id: str, body: str
     ) -> dict:
+        if target_type not in COMMENT_TARGET_TYPES:
+            raise ValueError(f"评论不支持目标类型: {target_type!r}")
         with self._tx() as c:
+            if not self._social_target_exists_tx(c, target_type, target_id):
+                raise LookupError("评论目标不存在")
             cur = c.execute(
                 "INSERT INTO comments(target_type, target_id, user_id, body, "
                 "created_at) VALUES(?,?,?,?,?)",
@@ -3312,6 +3524,9 @@ class Store:
             ).fetchone()
             if not row:
                 return False
+            if int(row["user_id"]) != int(user_id):
+                return False
+            _delete_social_target(c, "comment", comment_id)
             cur = c.execute(
                 "DELETE FROM comments WHERE id=? AND user_id=?",
                 (comment_id, user_id),
@@ -3321,6 +3536,11 @@ class Store:
     def delete_comment_admin(self, comment_id: int) -> bool:
         """admin 强删任意评论（无视作者）；返回是否删除成功（False=评论不存在）。"""
         with self._tx() as c:
+            if not c.execute(
+                "SELECT 1 FROM comments WHERE id=?", (comment_id,)
+            ).fetchone():
+                return False
+            _delete_social_target(c, "comment", comment_id)
             cur = c.execute("DELETE FROM comments WHERE id=?", (comment_id,))
             return cur.rowcount > 0
 
@@ -3343,8 +3563,12 @@ class Store:
         self, user_id: int, target_type: str, target_id: str
     ) -> bool:
         """点赞；返回 True 表示新建。"""
+        if target_type not in LIKE_TARGET_TYPES:
+            raise ValueError(f"点赞不支持目标类型: {target_type!r}")
         tid = str(target_id)
         with self._tx() as c:
+            if not self._social_target_exists_tx(c, target_type, tid):
+                raise LookupError("点赞目标不存在")
             existing = c.execute(
                 "SELECT 1 FROM likes WHERE user_id=? AND target_type=? AND target_id=?",
                 (user_id, target_type, tid),
@@ -3369,8 +3593,12 @@ class Store:
     def unlike(
         self, user_id: int, target_type: str, target_id: str
     ) -> bool:
+        if target_type not in LIKE_TARGET_TYPES:
+            raise ValueError(f"点赞不支持目标类型: {target_type!r}")
         tid = str(target_id)
         with self._tx() as c:
+            if not self._social_target_exists_tx(c, target_type, tid):
+                raise LookupError("点赞目标不存在")
             cur = c.execute(
                 "DELETE FROM likes WHERE user_id=? AND target_type=? AND target_id=?",
                 (user_id, target_type, tid),
@@ -5353,6 +5581,12 @@ class Store:
                     "blockers": blockers,
                 }
 
+            # users→comments/bots 会级联，但 likes.target_id 是多态文本列，不具备
+            # DB 外键。先清该用户所写评论收到的赞，再清其每个 Bot 的社交目标。
+            _delete_comment_likes_for(c, "user_id=?", (user_id,))
+            _delete_user_likes(c, user_id)
+            for bot_id in bot_ids:
+                _delete_social_target(c, "bot", bot_id)
             deleted = c.execute("DELETE FROM users WHERE id=?", (user_id,)).rowcount > 0
             return {
                 "found": True,
@@ -5363,6 +5597,14 @@ class Store:
 
     def delete_user(self, user_id: int) -> bool:
         with self._tx() as c:
+            if not c.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
+                return False
+            _delete_comment_likes_for(c, "user_id=?", (user_id,))
+            _delete_user_likes(c, user_id)
+            for row in c.execute(
+                "SELECT id FROM bots WHERE owner_id=?", (user_id,)
+            ).fetchall():
+                _delete_social_target(c, "bot", int(row["id"]))
             cur = c.execute("DELETE FROM users WHERE id=?", (user_id,))
             return cur.rowcount > 0
 

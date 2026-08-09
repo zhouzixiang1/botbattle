@@ -81,6 +81,12 @@ def test_notification_manager_notify_both_owners_dedup(tmp_path):
     b3 = s.create_bot(u1["id"], "botC", binary_path="/tmp", format="elf", game_id="holdem")
     nm.notify_both_owners(b1["id"], b3["id"], type="match_done", title="自博弈")
     assert s.unread_notification_count(u1["id"]) == 2  # 第二条
+    nm.notify_both_owners(
+        b1["id"], b2["id"], type="comment", title="评论",
+        exclude_user_ids={u1["id"]},
+    )
+    assert s.unread_notification_count(u1["id"]) == 2
+    assert s.unread_notification_count(u2["id"]) == 2
     s.close()
 
 
@@ -132,6 +138,16 @@ def test_notification_prefs_endpoints(tmp_path):
     assert r.json()["prefs"]["email_match_done"] == 0
     r = c.put("/api/notification-prefs", json={"email_match_done": True})
     assert r.json()["prefs"]["email_match_done"] == 1
+    r = c.put("/api/notification-prefs", json={"email_match_done": False})
+    assert r.status_code == 200
+    assert r.json()["prefs"]["email_match_done"] == 0
+    assert c.put("/api/notification-prefs", json={}).status_code == 400
+    assert c.put(
+        "/api/notification-prefs", json={"unknown_preference": True}
+    ).status_code == 422
+    assert c.put(
+        "/api/notification-prefs", json={"email_match_done": "false"}
+    ).status_code == 422
 
 
 def test_notification_endpoints_require_auth(tmp_path):

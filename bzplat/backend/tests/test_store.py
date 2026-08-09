@@ -274,7 +274,10 @@ def test_matches_replays_pair_stats(tmp_path):
 
     s.upsert_replay("m1", events_json='[{"t":1}]', hands_json="[]")
     assert '"t": 1' in s.get_replay("m1")["events_json"] or '"t":1' in s.get_replay("m1")["events_json"]
-    s.upsert_pair_stats(a["id"], b["id"], 1.5, 0.1, 2.0, 3)
+    s.upsert_pair_stats(
+        a["id"], b["id"], 1.5, 0.1, 2.0, 3,
+        a_wins_delta=2, a_losses_delta=1,
+    )
 
     # count_matches：与 list_matches 语义对齐（status / game_id 过滤）
     assert s.count_matches() == 1

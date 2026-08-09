@@ -94,6 +94,10 @@ def test_follow_endpoints(tmp_path):
     # bob 取关 alice
     r = c.delete(f"/api/users/{u1}/follow", headers=h2)
     assert r.status_code == 200 and r.json()["following"] is False
+    assert c.get("/api/users/99999/followers").status_code == 404
+    assert c.get("/api/users/99999/following").status_code == 404
+    assert c.get("/api/users/99999/follow-status", headers=h1).status_code == 404
+    assert c.delete("/api/users/99999/follow", headers=h1).status_code == 404
 
 
 def test_favorite_endpoints(tmp_path):
@@ -107,6 +111,8 @@ def test_favorite_endpoints(tmp_path):
     assert len(r.json()["favorites"]) == 1
     r = c.delete(f"/api/bots/{bid}/favorite", headers=h2)
     assert r.json()["favorited"] is False
+    assert c.get("/api/bots/99999/favorite-status", headers=h2).status_code == 404
+    assert c.delete("/api/bots/99999/favorite", headers=h2).status_code == 404
 
 
 def test_follow_triggers_notification(tmp_path):

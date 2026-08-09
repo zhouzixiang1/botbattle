@@ -550,9 +550,11 @@ def test_concurrent_rating_postprocess_is_globally_ordered_and_exactly_once(
     class RecordingNotifier:
         def __init__(self):
             self.links: list[str] = []
+            self.titles: list[str] = []
 
         def notify_both_owners(self, *_args, **kwargs):
             self.links.append(str(kwargs["link"]))
+            self.titles.append(str(kwargs["title"]))
 
     notifier = RecordingNotifier()
     orch.notifier = notifier
@@ -604,6 +606,7 @@ def test_concurrent_rating_postprocess_is_globally_ordered_and_exactly_once(
     assert max_active_settlers == 1
     assert apply_order == [match_1_id, match_2_id]
     assert notifier.links == [f"/match/{match_1_id}", f"/match/{match_2_id}"]
+    assert notifier.titles == ["对局完成：座位 1 胜", "对局完成：座位 2 胜"]
     assert store.get_rating(bot_a["id"])["matches_played"] == 2
     assert store.get_rating(bot_b["id"])["matches_played"] == 2
     assert len(store.list_rating_history(bot_a["id"], game_id="gomoku")) == 2

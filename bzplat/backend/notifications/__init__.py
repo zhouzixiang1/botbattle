@@ -73,13 +73,15 @@ class NotificationManager:
         body: str = "",
         link: str = "",
         send_email: bool = False,
+        exclude_user_ids: set[int] | None = None,
     ) -> None:
-        """对局完成等场景：通知双方 Bot 的 owner（去重）。"""
+        """通知双方 Bot 的 owner（去重，可排除触发动作的用户）。"""
         owner_ids: set[int] = set()
         for bid in (bot_a_id, bot_b_id):
             b = self.store.get_bot(bid)
             if b and b.get("owner_id"):
                 owner_ids.add(int(b["owner_id"]))
+        owner_ids.difference_update(exclude_user_ids or set())
         for uid in owner_ids:
             self.notify(
                 uid, type=type, title=title, body=body, link=link, send_email=send_email

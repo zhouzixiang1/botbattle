@@ -183,7 +183,8 @@ python scripts/seed_test_accounts.py \
 默认建立 `tester1/tester2` 及三游戏样例 Bot；`--with-role-accounts` 才显式建立
 `qa_organizer/qa_admin`。所有固定凭据账号都按脚本 namespace、精确用户名、邮箱、
 角色和密码校验；任一项不匹配即在激活、验证、提权或上传 Bot 前 fail-closed，绝不
-改写未知同名账号。
+改写未知同名账号。专用 QA Bot 按样例 ELF 的 checksum、大小、平台元数据与磁盘内容
+幂等：内容一致才复用，样例更新或文件漂移时发布并激活一个新版本。
 
 ### 6.4 关键脚本
 | 脚本 | 用途 |
@@ -196,7 +197,7 @@ python scripts/seed_test_accounts.py \
 | `scripts/screenshot_verify.py` | 关键页截图验收 |
 | `scripts/api_full_test.py` | HTTP API 关键链路集成测试；SSE 只核对终态 snapshot 与 replay；隔离 DB 播种专用账号 |
 | `scripts/contest_stress.py` | 默认验证赛事 draft 名册容量与静态赛制估算；`--run` 才真跑；只使用专用 `cs_admin` |
-| `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 三游戏样例 Bot） |
+| `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 按内容同步的三游戏样例 Bot） |
 | `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 4 spec / 34 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口与长文本滚动；全量执行真值见 `TESTING.md`） |
 
 > 返回 [doc/INDEX.md](./INDEX.md)

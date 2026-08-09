@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 import pytest
@@ -224,12 +225,29 @@ def test_human_turn_registry_resolve_and_no_rating(store: Store):
     orch = _orch(store)
     done = asyncio.Event()
 
+    occupied: set[tuple[int, int]] = set()
+
     async def solver():
-        """模拟 WS /move：每次 orchestrator 注册 pending 回合就立即解析。"""
+        """模拟 WS：重建棋盘并始终提交 canonical 的合法空点。"""
         for _ in range(500):
             for (mid, pidx), entry in list(orch._human_turns.items()):
                 if mid == mid_ref["id"] and not entry["future"].done():
-                    orch.resolve_human_turn(mid, pidx, {"x": 7, "y": 7})
+                    request = entry["request"]
+                    last = (int(request.get("x", -1)), int(request.get("y", -1)))
+                    if last[0] >= 0 and last[1] >= 0:
+                        occupied.add(last)
+                    move = next(
+                        (x, y)
+                        for x in range(15)
+                        for y in range(15)
+                        if (x, y) not in occupied
+                    )
+                    occupied.add(move)
+                    orch.resolve_human_turn(
+                        mid,
+                        pidx,
+                        {"response": {"x": move[0], "y": move[1]}},
+                    )
             if done.is_set():
                 return
             await asyncio.sleep(0.05)
@@ -237,7 +255,7 @@ def test_human_turn_registry_resolve_and_no_rating(store: Store):
     mid_ref: dict = {}
 
     async def run():
-        mid = await orch.challenge_human(b["id"], u["id"], human_seat=0, game_id="gomoku")
+        mid = await orch.challenge_human(b["id"], u["id"], human_seat=1, game_id="gomoku")
         mid_ref["id"] = mid
         await asyncio.gather(
             solver(),
@@ -247,6 +265,14 @@ def test_human_turn_registry_resolve_and_no_rating(store: Store):
 
     mm = asyncio.run(run())
     assert mm["status"] == "completed"
+    assert mm["reason"] in {"five", "draw"}
+    assert mm["result"]["hands_played"] >= 9
+    replay = store.get_replay(mm["id"])
+    replay_events = json.loads(replay["events_json"])
+    assert not [ev for ev in replay_events if ev.get("type") == "illegal"]
+    terminals = [ev for ev in replay_events if ev.get("type") == "match_end"]
+    assert len(terminals) == 1
+    assert terminals[0]["reason"] == mm["reason"]
     # 人类对战不计 Glicko
     r = store.get_rating(b["id"])
     assert r["matches_played"] == 0
@@ -377,10 +403,16 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
     # TestClient 必须作为 context 使用，让 FastAPI lifespan 在退出时调用
     # orchestrator.shutdown()，收敛本用例创建但尚未完成的人类对局任务。
     with TestClient(app) as c:
+        # 产品入口固定人类为座位 2（白方）；内部 seat 0 不对外开放。
+        rejected = c.post(
+            "/api/matches/human", headers={"Authorization": f"Bearer {token}"},
+            json={"bot_id": b["id"], "human_seat": 0, "game_id": "gomoku"},
+        )
+        assert rejected.status_code == 422
         # 建人类对局
         r = c.post(
             "/api/matches/human", headers={"Authorization": f"Bearer {token}"},
-            json={"bot_id": b["id"], "human_seat": 0, "game_id": "gomoku"},
+            json={"bot_id": b["id"], "human_seat": 1, "game_id": "gomoku"},
         )
         assert r.status_code == 200
         mid = r.json()["match_id"]
@@ -394,7 +426,7 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
         with c.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
             snap = ws.receive_json()
         assert snap["type"] == "snapshot"
-        assert snap["match"]["human_seat"] == 0
+        assert snap["match"]["human_seat"] == 1
 
         # 该局刻意只读取快照、不落子；退出 client 前它应仍是编排器拥有的
         # 后台任务，精确覆盖曾导致 pytest 退出挂起的场景。

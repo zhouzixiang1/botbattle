@@ -4,7 +4,7 @@
  */
 import type { RawEvent } from '@/games/base'
 import { fitText, scaleFactor } from '@/games/base'
-import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
+import { gomokuReasonLabel, reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
 
 interface GomokuScene extends Scene {
@@ -117,7 +117,7 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     const turnLabel = next.matchOver
       ? (next.winner === null
         ? '平局'
-        : `${next.winner === 0 ? name0 : name1}胜${next.reason ? `（${next.reason}）` : ''}`)
+        : `${next.winner === 0 ? name0 : name1}胜${next.reason ? `（${gomokuReasonLabel(next.reason)}）` : ''}`)
       : `待行：${next.toAct === 0 ? name0 : next.toAct === 1 ? name1 : '—'}`
     ctx.fillText(fitText(ctx, `五子棋 · ${size}×${size} · 第 ${next.moveCount} 手 · ${turnLabel}`, W - 24 * s), 12 * s, 24 * s)
     ctx.font = `${Math.round(12 * s)}px "DM Sans", sans-serif`
