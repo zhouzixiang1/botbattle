@@ -344,7 +344,7 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
 
   const finished = row('阶段矩阵-已完成')
   await expect(finished.getByText('成绩已归档 · 只读', { exact: true })).toBeVisible()
-  await expect(finished.getByRole('button', { name: /取消赛事|删除草稿|开始比赛|恢复性结束/ })).toHaveCount(0)
+  await expect(finished.getByRole('button', { name: /取消赛事|删除草稿|清理已取消赛事|开始比赛|恢复性结束/ })).toHaveCount(0)
   await expect(finished.getByText('报名截止晚于比赛开始', { exact: true })).toBeVisible()
   await finished.getByRole('button', { name: '修正时间', exact: true }).click()
   const scheduleDialog = page.getByRole('dialog', { name: '编辑赛事时间' })
@@ -357,7 +357,7 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
 
   const cancelled = row('阶段矩阵-已取消')
   await expect(cancelled.getByText('已取消 · 可清理', { exact: true })).toBeVisible()
-  await expect(cancelled.getByRole('button', { name: '删除草稿', exact: true })).toBeVisible()
+  await expect(cancelled.getByRole('button', { name: '清理已取消赛事', exact: true })).toBeVisible()
   await expect(cancelled.getByRole('button', { name: '取消赛事', exact: true })).toHaveCount(0)
   await expect(page.getByText('React 19 · Tailwind v4 · shadcn/ui', { exact: true })).toHaveCount(0)
   await monitor.expectClean()

@@ -200,10 +200,13 @@ export default function ContestsTab() {
   }
 
   const del = async (contest: Contest) => {
+    const cancelled = contest.status === 'cancelled'
     const ok = await confirm({
-      title: '删除锦标赛草稿',
-      desc: `仅删除未产生正式成绩的「${contest.title}」。已完成赛事必须永久保留。`,
-      confirmText: '删除',
+      title: cancelled ? '清理已取消赛事' : '删除锦标赛草稿',
+      desc: cancelled
+        ? `将清理未产生正式成绩的已取消赛事「${contest.title}」。该操作不能撤销。`
+        : `将删除尚未发布排期的草稿「${contest.title}」。该操作不能撤销。`,
+      confirmText: cancelled ? '清理赛事' : '删除草稿',
       danger: true,
     })
     if (!ok) return
@@ -359,7 +362,7 @@ export default function ContestsTab() {
                         </Button>
                         {DELETABLE.has(contest.status) && (
                           <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void del(contest)}>
-                            删除草稿
+                            {contest.status === 'cancelled' ? '清理已取消赛事' : '删除草稿'}
                           </Button>
                         )}
                         {contest.status === 'finished' && (
