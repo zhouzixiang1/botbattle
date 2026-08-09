@@ -301,7 +301,7 @@ def test_per_user_throttle_one_concurrent_human(store: Store):
 
 
 def test_admin_abort_releases_human_task_queued_on_full_semaphore(store: Store):
-    """A queued human task cancelled before entering _human_sem must release U."""
+    """Queued human abort releases ownership and delivers the terminal event."""
     u, b = _setup(store)
     orch = _orch(store)
 
@@ -316,6 +316,8 @@ def test_admin_abort_releases_human_task_queued_on_full_semaphore(store: Store):
         first_task = orch._tasks[first]
         assert not first_task.done()
         assert u["id"] in orch._human_active_users
+        queue = orch.subscribe(first)
+        assert queue.get_nowait()["type"] == "snapshot"
 
         # Also prove all per-match turn state is cleared by the same ownership path.
         orch._human_turns[(first, 0)] = {
@@ -326,6 +328,13 @@ def test_admin_abort_releases_human_task_queued_on_full_semaphore(store: Store):
         assert first not in orch._tasks
         assert not any(key[0] == first for key in orch._human_turns)
         assert u["id"] not in orch._human_active_users
+        terminal = queue.get_nowait()
+        assert terminal == {
+            "type": "error",
+            "message": "queued_admin_abort",
+            "reason": "queued_admin_abort",
+        }
+        assert first not in orch._sse
 
         # Regression assertion: the leaked set entry formerly rejected this call.
         second = await orch.challenge_human(
