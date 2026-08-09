@@ -236,6 +236,15 @@ def test_judge_games_derived():
     games = registry.judge_games()
     ids = {g["game_id"] for g in games}
     assert ids == {"holdem", "gomoku", "pencil"}
+    # 公开源码清单必须包含真正的纯规则实现；engine.py 只是平台适配层。
+    # 由 GameSpec 按 game_id 派生可避免新增游戏时忘记公开权威规则文件。
+    for game in games:
+        assert game["source_files"] == [
+            f'{game["game_id"]}_judge.py',
+            "engine.py",
+            "protocol.py",
+            "result.py",
+        ]
     # holdem 有 3 个裁判参数（stack/sb/bb；手数已钉死移除）
     holdem = next(g for g in games if g["game_id"] == "holdem")
     assert len(holdem["params"]) == 3

@@ -146,7 +146,18 @@ def resolve_template(
             }
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
-    return tid, game_id or tpl["game_id"], copy.deepcopy(tpl["stages"]), copy.deepcopy(tpl["match_config"])
+    template_game_id = str(tpl["game_id"]).strip().lower()
+    requested_game_id = str(game_id).strip().lower() if game_id is not None else None
+    if requested_game_id and requested_game_id != template_game_id:
+        raise ValueError(
+            f"模板 {tid} 属于游戏 {template_game_id}，不能用于游戏 {requested_game_id}"
+        )
+    return (
+        tid,
+        template_game_id,
+        copy.deepcopy(tpl["stages"]),
+        copy.deepcopy(tpl["match_config"]),
+    )
 
 
 def points_for_result(scoring: str, winner: int | None, side: int) -> float:

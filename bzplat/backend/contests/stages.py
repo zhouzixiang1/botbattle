@@ -14,6 +14,8 @@ class PairingSpec:
     group_id: str = ""
     bracket_slot: int | None = None
     color_first: int = 0  # 0 = a 先手/座位0；1 = b 先手
+    status: str = "pending"
+    requires_match: bool = True
 
 
 def round_robin(bot_ids: list[int], *, double: bool = False) -> list[PairingSpec]:
@@ -42,8 +44,8 @@ def round_robin(bot_ids: list[int], *, double: bool = False) -> list[PairingSpec
     if double:
         flipped = [
             PairingSpec(
-                p.bot_b_id,
                 p.bot_a_id,
+                p.bot_b_id,
                 round_num=p.round_num + rounds,
                 group_id=p.group_id,
                 color_first=1,
@@ -120,7 +122,15 @@ def single_elimination(bot_ids: list[int]) -> list[PairingSpec]:
             # bye：生成 bot_b_id=None 的轮空占位 spec（调用方据此标 completed）
             advancer = a if a is not None else b
             out.append(
-                PairingSpec(advancer, None, round_num=1, bracket_slot=slot, color_first=0)
+                PairingSpec(
+                    advancer,
+                    None,
+                    round_num=1,
+                    bracket_slot=slot,
+                    color_first=0,
+                    status="completed",
+                    requires_match=False,
+                )
             )
             slot += 1
             continue
@@ -162,23 +172,36 @@ def swiss_pairings(
     played: set[tuple[int, int]] | None = None,
     round_num: int = 1,
     color_counts: dict[int, int] | None = None,
+    bye_counts: dict[int, int] | None = None,
 ) -> list[PairingSpec]:
     """Dutch-Swiss 配对（O(N log N)，万人赛单轮秒级）。
 
     - 按 scores 降序分组（同分组内配对，跨组只在偶数补缺时）
     - 避开已交手（played set）；组内全交手过则跨组找
     - 座位平衡（color_first 轮换：历史先手多的本轮后手）
-    - 奇数 N：最低分者 bye（不生成 pairing，上层记轮空分）
+    - 奇数 N：优先选历史 bye 最少者，其次选最低分者；返回显式
+      ``completed`` / ``requires_match=False`` 轮空占位，上层可持久化积分
     """
     scores = scores or {b: 0.0 for b in bot_ids}
     played = played or set()
     color_counts = color_counts or {}  # bot_id → 累计先手次数（正=先手多）
+    bye_counts = bye_counts or {}
     # 按 (-score, bot_id) 排序（确定性，积分同按 id）
     ordered = sorted(bot_ids, key=lambda b: (-scores.get(b, 0.0), b))
-    # 奇数 N：移除最低分者作 bye（返回的 out 不含它）
+    # 奇数 N：先轮换历史 bye 最少者，再按低分/当前排序末位决定。
+    # ``ordered`` 同分时 bot_id 升序，原逻辑 pop() 会选最大 id；用 -id
+    # 保留这个确定性兜底。
     bye_bot = None
     if len(ordered) % 2 == 1:
-        bye_bot = ordered.pop()  # 最低分（排序末尾）
+        bye_bot = min(
+            ordered,
+            key=lambda b: (
+                int(bye_counts.get(b, 0)),
+                float(scores.get(b, 0.0)),
+                -b,
+            ),
+        )
+        ordered.remove(bye_bot)
     out: list[PairingSpec] = []
     unpaired = list(ordered)
     idx = 0
@@ -193,14 +216,13 @@ def swiss_pairings(
                 partner = j
                 break
         if partner is None:
-            # 组内全交手过 → 在剩余未配对里选「重复次数最少」的（P1-6 修复：原硬取 idx+1
-            # 可能产出重复配对——小场多轮时所有 pair 都打过，强配会产生同 pair 二次对局
-            # 导致 standings 双计）。选最少重复的降低重复概率；全重复时仍取首个避免卡死。
+            # 组内全交手过 → played 的契约是 set，只能判断是否交手、没有重复次数。
+            # 此时所有候选都已交手，稳定取剩余首个避免卡死；不得对 set 调 .get。
             best_j = -1
             best_repeat = None
             for j in range(idx + 1, len(unpaired)):
                 b = unpaired[j]
-                rep = played.get((min(a, b), max(a, b)), 0)
+                rep = int((min(a, b), max(a, b)) in played)
                 if best_repeat is None or rep < best_repeat:
                     best_repeat = rep
                     best_j = j
@@ -215,6 +237,16 @@ def swiss_pairings(
         color_first = 0 if ca <= cb else 1
         out.append(PairingSpec(a, b, round_num=round_num, color_first=color_first))
         idx += 1
+    if bye_bot is not None:
+        out.append(
+            PairingSpec(
+                bye_bot,
+                None,
+                round_num=round_num,
+                status="completed",
+                requires_match=False,
+            )
+        )
     return out
 
 
@@ -232,6 +264,8 @@ def generate_stage_pairings(
     scores: dict[int, float] | None = None,
     played: set[tuple[int, int]] | None = None,
     swiss_round: int = 1,
+    color_counts: dict[int, int] | None = None,
+    bye_counts: dict[int, int] | None = None,
 ) -> list[PairingSpec]:
     stype = stage.get("type") or "round_robin"
     if stype == "round_robin":
@@ -252,7 +286,12 @@ def generate_stage_pairings(
         )
     if stype == "swiss":
         return swiss_pairings(
-            bot_ids, scores=scores, played=played, round_num=swiss_round
+            bot_ids,
+            scores=scores,
+            played=played,
+            round_num=swiss_round,
+            color_counts=color_counts,
+            bye_counts=bye_counts,
         )
     if stype == "single_elimination":
         return single_elimination(bot_ids)

@@ -1,0 +1,1269 @@
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Browser,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from '@playwright/test'
+
+import {
+  loginThroughUi,
+  monitorBrowser,
+  runCleanupTasks,
+  versionRow,
+  withCleanup,
+} from './helpers'
+
+const USER = process.env.BZ_E2E_USER || 'tester1'
+const OTHER_USER = process.env.BZ_E2E_OTHER_USER || 'tester2'
+const ORGANIZER = process.env.BZ_E2E_ORGANIZER || 'qa_organizer'
+const ADMIN = process.env.BZ_E2E_ADMIN || 'qa_admin'
+const HOLDEM_SAMPLE = fileURLToPath(
+  new URL('../../../samples/callbot_linux_amd64', import.meta.url),
+)
+const PREFLIGHT_FAILURE_SAMPLE = process.env.BZ_E2E_BAD_BOT || '/usr/bin/true'
+
+async function createDisposableBot(page: Page, name: string) {
+  const response = await page.request.post('/api/bots', {
+    multipart: {
+      name,
+      display_name: name,
+      description: 'Disposable Playwright entity; hard-deleted in test cleanup',
+      upload_note: 'initial disposable version',
+      game_id: 'holdem',
+      runtime_mode: 'traditional',
+      file: {
+        name: 'callbot_linux_amd64',
+        mimeType: 'application/octet-stream',
+        buffer: await readFile(HOLDEM_SAMPLE),
+      },
+    },
+  })
+  const text = await response.text()
+  const data = JSON.parse(text) as { bot?: { id?: number; name?: string } }
+  expect(response.status(), text).toBe(200)
+  expect(data.bot?.id).toBeGreaterThan(0)
+  expect(data.bot?.name).toBe(name)
+  return data.bot as { id: number; name: string }
+}
+
+async function hardDeleteBots(
+  browser: Browser,
+  baseURL: string,
+  botIds: readonly number[],
+) {
+  if (!botIds.length) return
+  const context = await browser.newContext({ baseURL, viewport: { width: 1280, height: 720 } })
+  const page = await context.newPage()
+  try {
+    await loginThroughUi(page, ADMIN)
+    await runCleanupTasks([...new Set(botIds)].reverse().map((botId) => ({
+      label: `hard-delete Bot ${botId}`,
+      run: async () => {
+        const remove = await page.request.delete(`/api/admin/bots/${botId}`)
+        expect(remove.status(), await remove.text()).toBe(200)
+        const verify = await page.request.get(`/api/bots/${botId}`)
+        expect(verify.status(), await verify.text()).toBe(404)
+      },
+    })))
+  } finally {
+    await context.close()
+  }
+}
+
+/**
+ * There is deliberately no public/admin match-delete API: match history is an
+ * audit record. Cleanup therefore fail-closes only this captured ID to an
+ * authoritative terminal state, aborting it through the supported admin route
+ * when an assertion exits early while its runner is still active.
+ */
+async function ensureMatchTerminal(
+  browser: Browser,
+  baseURL: string,
+  request: APIRequestContext,
+  matchId: string,
+) {
+  const initial = await request.get(`/api/matches/${matchId}`)
+  expect(initial.status(), await initial.text()).toBe(200)
+  const initialBody = await initial.json() as { match: { status: string } }
+  if (initialBody.match.status === 'pending' || initialBody.match.status === 'running') {
+    const context = await browser.newContext({ baseURL, viewport: { width: 1280, height: 720 } })
+    const adminPage = await context.newPage()
+    try {
+      await loginThroughUi(adminPage, ADMIN)
+      const abort = await adminPage.request.patch(`/api/admin/matches/${matchId}`, {
+        data: { status: 'aborted', reason: 'e2e-fail-closed-cleanup' },
+      })
+      expect(abort.status(), await abort.text()).toBe(200)
+    } finally {
+      await context.close()
+    }
+  } else {
+    expect(['completed', 'aborted']).toContain(initialBody.match.status)
+  }
+  const verify = await request.get(`/api/matches/${matchId}`)
+  expect(verify.status(), await verify.text()).toBe(200)
+  const finalBody = await verify.json() as { match: { status: string } }
+  expect(['completed', 'aborted']).toContain(finalBody.match.status)
+}
+
+const VIEWPORTS = [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'laptop', width: 1280, height: 720 },
+  { name: 'mobile', width: 390, height: 844 },
+] as const
+
+test.beforeAll(async ({ request }) => {
+  const response = await request.get('/api/health')
+  expect(response.status(), await response.text()).toBe(200)
+  const health = await response.json() as { qa_instance?: boolean; db?: unknown }
+  expect(
+    health.qa_instance,
+    'Refusing browser writes: start the isolated backend with BZ_QA_INSTANCE=1',
+  ).toBe(true)
+  expect(health).not.toHaveProperty('db')
+})
+
+for (const viewport of VIEWPORTS) {
+  test(`guest navigation has no severe layout or runtime error (${viewport.name})`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height })
+    const monitor = monitorBrowser(page)
+    const routes = [
+      { path: '/', heading: '首页', evidence: '多游戏 Bot 竞赛平台' },
+      { path: '/leaderboard', heading: '排行榜', evidence: 'Glicko-2 评分，按游戏过滤' },
+      { path: '/history', heading: '对局历史', evidence: '全部对局记录，可按状态与游戏筛选' },
+      { path: '/contests', heading: '锦标赛', evidence: '组织者发布锦标赛' },
+      { path: '/wiki', heading: 'Wiki', evidence: '协议规范、Bot 开发指南' },
+      { path: '/judges', heading: '裁判', evidence: '公开可审计' },
+    ]
+
+    for (const route of routes) {
+      await page.goto(`/#${route.path}`)
+      const main = page.locator('main')
+      await expect(main.getByRole('heading', { name: route.heading, exact: true })).toBeVisible()
+      await expect(main).toContainText(route.evidence)
+      await expect(page.locator('body')).not.toContainText('Application error')
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      )
+      expect(overflow, `${route.path} overflows viewport by ${overflow}px`).toBeLessThanOrEqual(1)
+      await monitor.settle()
+    }
+
+    if (viewport.name === 'mobile') {
+      await page.getByRole('button', { name: '菜单' }).click()
+      await expect(page.getByRole('link', { name: '排行榜', exact: true })).toBeVisible()
+      await page.getByRole('link', { name: '排行榜', exact: true }).click()
+      await expect(page).toHaveURL(/#\/leaderboard$/)
+    }
+    await monitor.expectClean()
+  })
+}
+
+test('browser-native validation matches backend phone and Bot-name contracts', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await page.goto('/#/register')
+  const phone = page.locator('#reg-phone')
+  await phone.fill('abc')
+  expect(await phone.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(false)
+  await phone.fill('13800138000')
+  expect(await phone.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
+
+  await loginThroughUi(page, USER)
+  await page.goto('/#/my-bots')
+  const name = page.locator('#upload-name')
+  for (const invalid of ['a', '1bot', 'a-b']) {
+    await name.fill(invalid)
+    expect(
+      await name.evaluate((input: HTMLInputElement) => input.checkValidity()),
+      `${invalid} must be rejected before upload`,
+    ).toBe(false)
+  }
+  await name.fill(`a${'x'.repeat(32)}`)
+  expect(await name.inputValue()).toHaveLength(32) // maxLength blocks the 33rd character
+  expect(await name.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
+  await name.fill('ab')
+  expect(await name.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
+  await monitor.expectClean()
+})
+
+test('contest game switching cannot submit a stale or mismatched template', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, ORGANIZER)
+
+  let markGomokuRequested!: () => void
+  const gomokuRequested = new Promise<void>((resolve) => { markGomokuRequested = resolve })
+  let releaseGomokuResponse!: () => void
+  const gomokuResponseGate = new Promise<void>((resolve) => { releaseGomokuResponse = resolve })
+
+  await page.route('**/api/contests/templates?game=*', async (route) => {
+    const game = new URL(route.request().url()).searchParams.get('game')
+    if (game === 'gomoku') {
+      markGomokuRequested()
+      await gomokuResponseGate
+      // AbortController may already have cancelled this deliberately stale request.
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          templates: [{ id: 'gomoku_stale', name: '不应回填的五子棋模板', game_id: 'gomoku' }],
+        }),
+      }).catch(() => undefined)
+      return
+    }
+    const templates = game === 'pencil'
+      ? [
+          // A malformed server response must not make a cross-game template submittable.
+          { id: 'gomoku_leak', name: '错误混入模板', game_id: 'gomoku' },
+          { id: 'pencil_race_safe', name: '点格棋竞态模板', game_id: 'pencil' },
+        ]
+      : [{ id: 'holdem_race_safe', name: '德州初始模板', game_id: 'holdem' }]
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ templates }),
+    })
+  })
+
+  let submitted: Record<string, unknown> | undefined
+  await page.route('**/api/contests', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    submitted = route.request().postDataJSON() as Record<string, unknown>
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ contest: { id: 987_654_322, ...submitted } }),
+    })
+  })
+
+  await page.goto('/#/contests')
+  const form = page.locator('form')
+  const gameSelect = form.getByRole('combobox').nth(0)
+  const templateSelect = form.getByRole('combobox').nth(1)
+  const createButton = form.getByRole('button', { name: '创建比赛', exact: true })
+  await expect(templateSelect).toContainText('德州初始模板')
+
+  await gameSelect.click()
+  await page.getByRole('option', { name: '五子棋', exact: true }).last().click()
+  await gomokuRequested
+  await expect(templateSelect).toContainText('模板加载中…')
+  await expect(createButton).toBeDisabled()
+
+  // 在旧响应仍悬空时再次切换；后返回的 gomoku 结果不得覆盖 pencil。
+  await gameSelect.click()
+  await page.getByRole('option', { name: '点格棋', exact: true }).last().click()
+  await expect(templateSelect).toContainText('点格棋竞态模板')
+  await expect(templateSelect).not.toContainText('错误混入模板')
+  await expect(createButton).toBeEnabled()
+  releaseGomokuResponse()
+  await page.waitForTimeout(150)
+  await expect(templateSelect).toContainText('点格棋竞态模板')
+
+  await page.locator('#contest-title').fill('模板竞态回归')
+  const createResponse = page.waitForResponse((response) => (
+    response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === '/api/contests'
+  ))
+  await createButton.click()
+  expect((await createResponse).status()).toBe(200)
+  expect(submitted).toMatchObject({
+    game_id: 'pencil',
+    template_id: 'pencil_race_safe',
+  })
+  await expect(page.getByText('赛事创建成功', { exact: true })).toBeVisible()
+
+  await monitor.expectClean([{
+    kind: 'requestfailed',
+    method: 'GET',
+    pathname: '/api/contests/templates',
+    search: '?game=gomoku',
+    errorText: 'net::ERR_ABORTED',
+  }])
+})
+
+test('contest recovery finish trusts terminal matches when pairing status is stale', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, ADMIN)
+  const contestId = 987_654_321
+  let contestStatus = 'running'
+  let finishRequests = 0
+  let releaseFinishResponse!: () => void
+  const finishResponseGate = new Promise<void>((resolve) => {
+    releaseFinishResponse = resolve
+  })
+
+  await page.route(`**/api/contests/${contestId}?**`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        contest: {
+          id: contestId,
+          title: 'QA force-finish guard',
+          status: contestStatus,
+          organizer_id: -1,
+          game_id: 'gomoku',
+          current_stage_idx: 0,
+          stages_json: JSON.stringify([{ key: 'final', type: 'round_robin' }]),
+        },
+        entries: [],
+        pairings: [{
+          id: 1,
+          bot_a_id: 1,
+          bot_b_id: 2,
+          // The pairing projection is stale, while its associated match is
+          // already terminal. The finish endpoint is authoritative here.
+          status: 'running',
+          match_id: 'completed-match-1',
+          stage_idx: 0,
+          round_num: 1,
+        }],
+        standings: [],
+        entries_total: 0,
+        my_entry: null,
+      }),
+    })
+  })
+  await page.route(`**/api/contests/${contestId}/finish`, async (route) => {
+    expect(route.request().method()).toBe('POST')
+    finishRequests += 1
+    await finishResponseGate
+    contestStatus = 'finished'
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ contest: { id: contestId, status: 'finished' } }),
+    })
+  })
+
+  await page.goto(`/#/contests/${contestId}`)
+  const finish = page.getByRole('button', { name: '强制结束赛事', exact: true })
+  await expect(finish).toBeEnabled()
+  await finish.locator('xpath=..').hover()
+  await expect(page.getByRole('tooltip')).toContainText('由后端核验关联对局终态')
+
+  await finish.click()
+  const finishRequest = page.waitForRequest((request) => (
+    request.method() === 'POST' && request.url().endsWith(`/api/contests/${contestId}/finish`)
+  ))
+  await page.getByRole('dialog').getByRole('button', { name: '确认结束', exact: true }).click()
+  await finishRequest
+  await expect(finish).toBeDisabled()
+  expect(finishRequests).toBe(1)
+  releaseFinishResponse()
+  await expect(page.getByRole('main').getByText('已结束', { exact: true })).toBeVisible()
+  expect(finishRequests).toBe(1)
+  await monitor.expectClean()
+})
+
+test('contest detail ignores a stale response after navigating to another contest', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, ORGANIZER)
+  const organizerId = await page.evaluate(() => {
+    const raw = localStorage.getItem('bzplat_user')
+    return raw ? Number((JSON.parse(raw) as { id?: number }).id) : 0
+  })
+  expect(organizerId).toBeGreaterThan(0)
+
+  const slowContestId = 987_654_310
+  const targetContestId = 987_654_311
+  let staleFinishRequests = 0
+  let releaseSlow!: () => void
+  const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
+  let observeSlow!: () => void
+  const slowObserved = new Promise<void>((resolve) => { observeSlow = resolve })
+  const detailBody = (id: number, title: string, status: string) => ({
+    contest: {
+      id,
+      title,
+      status,
+      organizer_id: organizerId,
+      game_id: 'gomoku',
+      current_stage_idx: 0,
+      stages_json: JSON.stringify([{ key: 'main', type: 'round_robin' }]),
+    },
+    entries: [],
+    pairings: [],
+    standings: [],
+    entries_total: 0,
+    my_entry: null,
+  })
+
+  await page.route(
+    new RegExp(`/api/contests/${slowContestId}\\?entries_page=1&entries_per_page=20$`),
+    async (route) => {
+      observeSlow()
+      await slowGate
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(detailBody(slowContestId, 'stale contest A', 'running')),
+      })
+    },
+  )
+  await page.route(
+    new RegExp(`/api/contests/${targetContestId}\\?entries_page=1&entries_per_page=20$`),
+    async (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(detailBody(targetContestId, 'target contest B', 'running')),
+    }),
+  )
+  await page.route(`**/api/contests/${slowContestId}/finish`, async (route) => {
+    staleFinishRequests += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ contest: { id: slowContestId, status: 'finished' } }),
+    })
+  })
+
+  await page.goto(`/#/contests/${slowContestId}`)
+  await slowObserved
+  await page.goto(`/#/contests/${targetContestId}`)
+  await expect(page.getByRole('heading', { name: 'target contest B', exact: true })).toBeVisible()
+  releaseSlow()
+  await page.waitForTimeout(250)
+  await expect(page).toHaveURL(new RegExp(`/#/contests/${targetContestId}$`))
+  await expect(page.getByRole('heading', { name: 'target contest B', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'stale contest A', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '开放报名', exact: true })).toHaveCount(0)
+
+  // A non-blocking destructive confirmation is hook state, so it survives a
+  // reused route component unless the id transition explicitly cancels it.
+  // It must neither reappear on B nor retain an async closure that can POST A.
+  await page.goto(`/#/contests/${slowContestId}`)
+  await expect(page.getByRole('heading', { name: 'stale contest A', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '强制结束赛事', exact: true }).click()
+  const staleConfirm = page.getByRole('dialog').filter({ hasText: '强制结束赛事？' })
+  await expect(staleConfirm).toBeVisible()
+  await page.goto(`/#/contests/${targetContestId}`)
+  await expect(page.getByRole('heading', { name: 'target contest B', exact: true })).toBeVisible()
+  // On a regression, click the resurfaced dialog through the mocked endpoint so
+  // the assertion below proves the stale continuation really is fenced off.
+  if (await staleConfirm.isVisible().catch(() => false)) {
+    await staleConfirm.getByRole('button', { name: '确认结束', exact: true }).click()
+  }
+  await expect(staleConfirm).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '强制结束赛事', exact: true })).toBeEnabled()
+  expect(staleFinishRequests).toBe(0)
+  await monitor.expectClean()
+})
+
+async function chooseBot(page: Page, trigger: Locator, query: string, mineOnly: boolean) {
+  await trigger.click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  if (mineOnly) {
+    await expect(dialog.getByRole('button', { name: '全部 Bot', exact: true })).toHaveCount(0)
+  }
+  const input = dialog.getByPlaceholder(
+    mineOnly ? '搜索我的 Bot 名称…' : '搜索 Bot 名称…',
+  )
+  await input.fill(query)
+  await dialog.locator('li').filter({ hasText: query }).getByRole('button').click()
+}
+
+test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggregates results', async ({
+  page,
+  browser,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const createdBotIds: number[] = []
+  let matchId: string | null = null
+  await withCleanup(async () => {
+    const monitor = monitorBrowser(page)
+    await loginThroughUi(page, USER)
+    const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
+    const disposable = await createDisposableBot(page, `pwch_${suffix}`)
+    createdBotIds.push(disposable.id)
+    await page.goto('/#/challenge')
+
+    await chooseBot(
+      page,
+      page.getByRole('button', { name: '选择我的 Bot', exact: true }),
+      disposable.name,
+      true,
+    )
+    await chooseBot(
+      page,
+      page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
+      disposable.name,
+      false,
+    )
+
+    let challengePosts = 0
+    page.on('request', (browserRequest) => {
+      if (
+        browserRequest.method() === 'POST' &&
+        new URL(browserRequest.url()).pathname === '/api/matches/challenge'
+      ) challengePosts += 1
+    })
+    const responsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/matches/challenge',
+    )
+    await page.getByRole('button', { name: '开始对局', exact: true }).dblclick()
+    const response = await responsePromise
+    const responseText = await response.text()
+    const started = JSON.parse(responseText) as { match_id?: string }
+    if (started.match_id) matchId = started.match_id
+    expect(response.status(), responseText).toBe(200)
+    expect(matchId).toBeTruthy()
+    await expect(page).toHaveURL(/\/#\/match\//)
+    expect(challengePosts).toBe(1)
+
+    await expect(page.getByText('已完成', { exact: true })).toBeVisible({ timeout: 45_000 })
+    await expect(page.locator('main')).not.toContainText('座0')
+
+    await page.keyboard.press('Control+K')
+    const searchDialogs = page.getByRole('dialog')
+    await expect(searchDialogs).toHaveCount(1)
+    const search = searchDialogs.getByPlaceholder('搜索 Bot、用户、对局…')
+    await search.fill(disposable.name)
+    await expect(searchDialogs.getByText('Bot', { exact: true })).toBeVisible()
+    await expect(searchDialogs.getByText('对局', { exact: true })).toBeVisible()
+    await monitor.expectClean()
+  }, async () => {
+    const tasks: Array<{ label: string; run: () => Promise<void> }> = []
+    if (matchId) {
+      const createdMatchId = matchId
+      tasks.push({
+        label: `settle challenge ${createdMatchId}`,
+        run: () => ensureMatchTerminal(browser, baseURL!, request, createdMatchId),
+      })
+    }
+    tasks.push({
+      label: 'delete disposable challenge Bots',
+      run: () => hardDeleteBots(browser, baseURL!, createdBotIds),
+    })
+    await runCleanupTasks(tasks)
+  })
+})
+
+test('terminal SSE snapshot switches a raced live page to replay without reconnecting', async ({ page, request }) => {
+  const completedResponse = await request.get('/api/matches?status=completed&limit=1')
+  expect(completedResponse.status(), await completedResponse.text()).toBe(200)
+  const completed = await completedResponse.json() as { matches?: Array<{ id: string }> }
+  const matchId = completed.matches?.[0]?.id
+  expect(matchId).toBeTruthy()
+
+  // Reproduce the precise race: the initial detail probe still says `running`, while
+  // subscribe() observes the already completed row and sends one terminal snapshot.
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as { match: { status?: string } }
+    body.match.status = 'running'
+    await route.fulfill({ response, json: body })
+  })
+
+  let eventRequests = 0
+  page.on('request', (browserRequest) => {
+    if (new URL(browserRequest.url()).pathname === `/api/matches/${matchId}/events`) {
+      eventRequests += 1
+    }
+  })
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  // Native EventSource reconnect delay is normally about three seconds. Stay past
+  // that window so a server-side terminal snapshot regression cannot false-pass.
+  await page.waitForTimeout(4_000)
+  expect(eventRequests).toBe(1)
+  await monitor.expectClean()
+})
+
+test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns for abnormal reasons', async ({ page, request }) => {
+  const completedResponse = await request.get('/api/matches?status=completed&limit=1')
+  const completed = await completedResponse.json() as { matches?: Array<{ id: string }> }
+  const matchId = completed.matches?.[0]?.id
+  expect(matchId).toBeTruthy()
+
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as { match: { status?: string } }
+    body.match.status = 'running'
+    await route.fulfill({ response, json: body })
+  })
+  let eventRequests = 0
+  await page.route(`**/api/matches/${matchId}/events`, async (route) => {
+    eventRequests += 1
+    if (eventRequests === 1) {
+      // A finite non-terminal stream reproduces a proxy/network interruption.
+      // Native EventSource must be allowed to reconnect instead of being closed
+      // permanently by the page's onerror callback.
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: 'data: {"type":"match_start","game_id":"holdem"}\n\n',
+      })
+      return
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: 'data: {"type":"error","message":"qa simulated failure"}\n\n',
+    })
+  })
+
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  await expect(page.getByText('已中止', { exact: true })).toBeVisible()
+  await expect(page.locator('main')).toContainText('qa simulated failure')
+  expect(eventRequests).toBe(2)
+  // The second stream delivered an explicit terminal error and must close. Stay
+  // beyond Chromium's retry window so terminal reconnects cannot false-pass.
+  await page.waitForTimeout(4_250)
+  expect(eventRequests).toBe(2)
+
+  // A scored technical loss is completed, but its non-generic reason remains a
+  // user-visible warning after a direct refresh (not only during live SSE).
+  await page.unroute(`**/api/matches/${matchId}`)
+  await page.unroute(`**/api/matches/${matchId}/events`)
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as { match: { status?: string; reason?: string } }
+    body.match.status = 'completed'
+    body.match.reason = 'technical_loss'
+    await route.fulfill({ response, json: body })
+  })
+  await page.reload()
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(page.locator('main')).toContainText('原因：technical_loss')
+  await monitor.expectClean()
+})
+
+async function activateVersion(page: Page, manager: Locator, botId: number, version: number) {
+  const row = versionRow(manager, version)
+  await row.getByRole('button', { name: '回滚', exact: true }).click()
+  const confirmation = page.getByRole('dialog').filter({ hasText: `回滚到 v${version}?` })
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `/api/bots/${botId}/versions/${version}/activate`,
+  )
+  await confirmation.getByRole('button', { name: '确认', exact: true }).click()
+  const response = await responsePromise
+  expect(response.status(), await response.text()).toBe(200)
+  await expect(row.getByText('当前', { exact: true })).toBeVisible()
+}
+
+test('version dialog ignores stale Bot responses and repeated rollback stays correct', async ({
+  page,
+  browser,
+  baseURL,
+}) => {
+  expect(baseURL).toBeTruthy()
+  const createdBotIds: number[] = []
+  await withCleanup(async () => {
+    const monitor = monitorBrowser(page)
+    await loginThroughUi(page, USER)
+    const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
+    const primaryBot = await createDisposableBot(page, `pwv_a_${suffix}`)
+    createdBotIds.push(primaryBot.id)
+    const slowBot = await createDisposableBot(page, `pwv_b_${suffix}`)
+    createdBotIds.push(slowBot.id)
+    await page.goto('/#/my-bots')
+
+    const botLink = page.getByRole('link', { name: primaryBot.name, exact: true })
+    const botRow = botLink.locator('xpath=ancestor::li[1]')
+    const botId = primaryBot.id
+    await expect(botRow.getByText(`#${botId}`, { exact: true })).toBeVisible()
+
+  // Reuse the dialog A→B while A's response is held back. A late response used
+  // to replace B's version rows and could activate A's version number on B.
+  const slowBotRow = page
+    .getByRole('link', { name: slowBot.name, exact: true })
+    .locator('xpath=ancestor::li[1]')
+  const slowBotId = slowBot.id
+  await expect(slowBotRow.getByText(`#${slowBotId}`, { exact: true })).toBeVisible()
+  let releaseSlow!: () => void
+  const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
+  let observeSlow!: () => void
+  const slowObserved = new Promise<void>((resolve) => { observeSlow = resolve })
+  const slowPattern = `**/api/bots/${slowBotId}/versions`
+  await page.route(slowPattern, async (route) => {
+    observeSlow()
+    await slowGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        current_version: 999,
+        versions: [{
+          id: 999999,
+          version: 999,
+          binary_path: '/qa/stale-response',
+          upload_note: 'must never appear in the next Bot dialog',
+          size_bytes: 1,
+          os: 'linux',
+          arch: 'amd64',
+          format: 'elf',
+          runtime_mode: 'traditional',
+          uploaded_at: '2026-01-01T00:00:00Z',
+        }],
+      }),
+    })
+  })
+  await slowBotRow.getByRole('button', { name: '版本', exact: true }).click()
+  await slowObserved
+  await expect(page.getByRole('dialog').filter({ hasText: `版本管理 · ${slowBot.name}` })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await botRow.getByRole('button', { name: '版本', exact: true }).click()
+  const manager = page.getByRole('dialog').filter({ hasText: `版本管理 · ${primaryBot.name}` })
+  await expect(manager.getByText('版本历史', { exact: true })).toBeVisible()
+  await expect(manager.getByText(/^v\d+$/).first()).toBeVisible()
+  releaseSlow()
+  await page.waitForTimeout(200)
+  await expect(manager.getByText('v999', { exact: true })).toHaveCount(0)
+  await page.unroute(slowPattern)
+
+  // Replacing a valid selection with an oversized file must clear React state as
+  // well as the native input; otherwise the next submit silently uploads the old
+  // binary even though the user just selected a different file.
+  const versionFile = manager.locator('#ver-file')
+  await versionFile.setInputFiles(HOLDEM_SAMPLE)
+  await expect(manager.getByText('callbot_linux_amd64', { exact: true })).toBeVisible()
+  await versionFile.evaluate((element) => {
+    const input = element as HTMLInputElement
+    const file = new File(['oversized'], 'too-large.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(file, 'size', { value: 50 * 1024 * 1024 + 1 })
+    const transfer = new DataTransfer()
+    transfer.items.add(file)
+    input.files = transfer.files
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await expect(manager.getByText('未选择文件', { exact: true })).toBeVisible()
+
+  // Hold an upload on A, reuse the dialog for B, then start B's upload. A's late
+  // failure must not surface in B or clear B's busy lock (which would permit a
+  // duplicate submit). Both writes are mocked, so this regression adds no DB row.
+  let releaseStaleUpload!: () => void
+  const staleUploadGate = new Promise<void>((resolve) => { releaseStaleUpload = resolve })
+  let observeStaleUpload!: () => void
+  const staleUploadObserved = new Promise<void>((resolve) => { observeStaleUpload = resolve })
+  let releaseCurrentUpload!: () => void
+  const currentUploadGate = new Promise<void>((resolve) => { releaseCurrentUpload = resolve })
+  let observeCurrentUpload!: () => void
+  const currentUploadObserved = new Promise<void>((resolve) => { observeCurrentUpload = resolve })
+  const currentPattern = `**/api/bots/${botId}/versions`
+  await page.route(slowPattern, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    observeStaleUpload()
+    await staleUploadGate
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'stale A upload failure' }),
+    })
+  })
+  await page.route(currentPattern, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    observeCurrentUpload()
+    await currentUploadGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ bot: { id: botId } }),
+    })
+  })
+
+  await page.keyboard.press('Escape')
+  await slowBotRow.getByRole('button', { name: '版本', exact: true }).click()
+  const staleManager = page.getByRole('dialog').filter({ hasText: `版本管理 · ${slowBot.name}` })
+  await expect(staleManager.getByText(/^v\d+$/).first()).toBeVisible()
+  await staleManager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
+  await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
+  await staleUploadObserved
+  await page.keyboard.press('Escape')
+
+  await botRow.getByRole('button', { name: '版本', exact: true }).click()
+  await expect(manager.getByText(/^v\d+$/).first()).toBeVisible()
+  await manager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
+  await manager.getByRole('button', { name: '上传新版本', exact: true }).click()
+  await currentUploadObserved
+  await expect(manager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+
+  const staleFailureResponse = page.waitForResponse((response) => (
+    response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === `/api/bots/${slowBotId}/versions`
+  ))
+  releaseStaleUpload()
+  expect((await staleFailureResponse).status()).toBe(400)
+  await expect(manager).not.toContainText('stale A upload failure')
+  await expect(manager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+
+  const currentSuccessResponse = page.waitForResponse((response) => (
+    response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === `/api/bots/${botId}/versions`
+  ))
+  releaseCurrentUpload()
+  expect((await currentSuccessResponse).status()).toBe(200)
+  await expect(manager.getByRole('button', { name: '上传新版本', exact: true })).toBeEnabled()
+  await page.unroute(slowPattern)
+  await page.unroute(currentPattern)
+
+  const originalRow = manager.getByText('当前', { exact: true }).locator('xpath=ancestor::li[1]')
+  const originalVersion = Number((await originalRow.getByText(/^v\d+$/).textContent())?.slice(1))
+  expect(originalVersion).toBeGreaterThan(0)
+
+  await manager.locator('#ver-note').fill('Playwright rollback regression')
+  // The preceding mocked success clears React state but intentionally does not
+  // change the browser-owned file input value. Clear it so selecting the same
+  // fixture emits a real change event for the existing upload regression below.
+  await manager.locator('#ver-file').setInputFiles([])
+  await manager.locator('#ver-file').setInputFiles(
+    HOLDEM_SAMPLE,
+  )
+  const uploadResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `/api/bots/${botId}/versions`,
+  )
+  await manager.getByRole('button', { name: '上传新版本', exact: true }).click()
+  const uploaded = await uploadResponse
+  expect(uploaded.status(), await uploaded.text()).toBe(200)
+
+  const newestCurrent = manager.getByText('当前', { exact: true }).locator('xpath=ancestor::li[1]')
+  await expect.poll(async () => {
+    const text = await newestCurrent.getByText(/^v\d+$/).textContent()
+    return Number(text?.slice(1))
+  }).toBeGreaterThan(originalVersion)
+  const newVersion = Number((await newestCurrent.getByText(/^v\d+$/).textContent())?.slice(1))
+  expect(newVersion).toBeGreaterThan(originalVersion)
+
+  // The old implementation compared against a stale prop. The final click in this
+  // sequence was visibly enabled but silently returned without a network request.
+  await activateVersion(page, manager, botId, originalVersion)
+  await activateVersion(page, manager, botId, newVersion)
+  await activateVersion(page, manager, botId, originalVersion) // restore test state
+
+  // Exercise the same context fence for rollback's catch/finally: a late failed
+  // rollback on B must not unlock an upload already running in reused dialog A.
+  let releaseStaleRollback!: () => void
+  const staleRollbackGate = new Promise<void>((resolve) => { releaseStaleRollback = resolve })
+  let observeStaleRollback!: () => void
+  const staleRollbackObserved = new Promise<void>((resolve) => { observeStaleRollback = resolve })
+  const staleRollbackPattern = `**/api/bots/${botId}/versions/${newVersion}/activate`
+  await page.route(staleRollbackPattern, async (route) => {
+    observeStaleRollback()
+    await staleRollbackGate
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'stale B rollback failure' }),
+    })
+  })
+  await versionRow(manager, newVersion).getByRole('button', { name: '回滚', exact: true }).click()
+  await page.getByRole('dialog')
+    .filter({ hasText: `回滚到 v${newVersion}?` })
+    .getByRole('button', { name: '确认', exact: true })
+    .click()
+  await staleRollbackObserved
+  // Close the manager explicitly: an Escape sent while the nested confirmation
+  // is finishing its exit animation can be consumed by that already-confirmed
+  // dialog and leave the manager modal blocking the underlying Bot row.
+  await manager.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(manager).not.toBeVisible()
+
+  let releaseNextUpload!: () => void
+  const nextUploadGate = new Promise<void>((resolve) => { releaseNextUpload = resolve })
+  let observeNextUpload!: () => void
+  const nextUploadObserved = new Promise<void>((resolve) => { observeNextUpload = resolve })
+  await page.route(slowPattern, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue()
+      return
+    }
+    observeNextUpload()
+    await nextUploadGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ bot: { id: slowBotId } }),
+    })
+  })
+  await slowBotRow.getByRole('button', { name: '版本', exact: true }).click()
+  await expect(staleManager.getByText(/^v\d+$/).first()).toBeVisible()
+  await staleManager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
+  await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
+  await nextUploadObserved
+  await expect(staleManager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+
+  const staleRollbackResponse = page.waitForResponse((response) => (
+    response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === `/api/bots/${botId}/versions/${newVersion}/activate`
+  ))
+  releaseStaleRollback()
+  expect((await staleRollbackResponse).status()).toBe(500)
+  await expect(staleManager).not.toContainText('stale B rollback failure')
+  await expect(staleManager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+
+  const nextUploadResponse = page.waitForResponse((response) => (
+    response.request().method() === 'POST' &&
+    new URL(response.url()).pathname === `/api/bots/${slowBotId}/versions`
+  ))
+  releaseNextUpload()
+  expect((await nextUploadResponse).status()).toBe(200)
+  await expect(staleManager.getByRole('button', { name: '上传新版本', exact: true })).toBeEnabled()
+  await page.unroute(staleRollbackPattern)
+  await page.unroute(slowPattern)
+
+  await page.keyboard.press('Escape')
+  await botRow.getByRole('button', { name: '版本', exact: true }).click()
+  await expect(versionRow(manager, originalVersion).getByText('当前', { exact: true })).toBeVisible()
+
+  // A runnable ELF that exits immediately passes binary classification but fails
+  // protocol preflight. The failed upload must not silently activate the greatest
+  // historical version when the user had deliberately rolled back to an older one.
+  await manager.locator('#ver-note').fill('intentional preflight failure')
+  await manager.locator('#ver-file').setInputFiles(PREFLIGHT_FAILURE_SAMPLE)
+  const failedUploadPromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `/api/bots/${botId}/versions`,
+  )
+  await manager.getByRole('button', { name: '上传新版本', exact: true }).click()
+  const failedUpload = await failedUploadPromise
+  expect(failedUpload.status(), await failedUpload.text()).toBe(400)
+  await expect(manager.getByText(/Bot 预检失败/)).toBeVisible()
+  await expect(versionRow(manager, originalVersion).getByText('当前', { exact: true })).toBeVisible()
+
+  await monitor.expectClean([
+    {
+      kind: 'http',
+      method: 'POST',
+      status: 400,
+      pathname: `/api/bots/${slowBotId}/versions`,
+    },
+    {
+      kind: 'http',
+      method: 'POST',
+      status: 400,
+      pathname: `/api/bots/${botId}/versions`,
+    },
+    {
+      kind: 'http',
+      method: 'POST',
+      status: 500,
+      pathname: `/api/bots/${botId}/versions/${newVersion}/activate`,
+    },
+  ])
+  }, async () => {
+    await hardDeleteBots(browser, baseURL!, createdBotIds)
+  })
+})
+
+test('organizer has no dead admin navigation while admin owner links use usernames', async ({ browser, baseURL }) => {
+  expect(baseURL).toBeTruthy()
+  const organizerContext = await browser.newContext({ baseURL, viewport: { width: 1440, height: 900 } })
+  const organizerPage = await organizerContext.newPage()
+  const organizerMonitor = monitorBrowser(organizerPage)
+  await loginThroughUi(organizerPage, ORGANIZER)
+  await organizerPage.goto('/#/')
+  await expect(organizerPage.getByRole('link', { name: '管理端', exact: true })).toHaveCount(0)
+  await organizerPage.goto('/#/admin')
+  await expect(organizerPage.getByText('仅管理员可访问管理端。', { exact: false })).toBeVisible()
+  await organizerMonitor.expectClean()
+  await organizerContext.close()
+
+  const adminContext = await browser.newContext({ baseURL, viewport: { width: 1440, height: 900 } })
+  const adminPage = await adminContext.newPage()
+  const adminMonitor = monitorBrowser(adminPage)
+  await loginThroughUi(adminPage, ADMIN)
+  await adminPage.goto('/#/admin')
+  await adminPage.getByRole('button', { name: 'Bot', exact: true }).click()
+  const botQuery = `${USER}_holdem`
+  const filteredBotsPromise = adminPage.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' &&
+      url.pathname === '/api/admin/bots' &&
+      url.search === `?page=1&per_page=20&q=${encodeURIComponent(botQuery)}`
+  })
+  await adminPage.getByRole('textbox', { name: '搜索 Bot 名称', exact: true }).fill(botQuery)
+  const filteredBotsResponse = await filteredBotsPromise
+  expect(filteredBotsResponse.status(), await filteredBotsResponse.text()).toBe(200)
+  const filteredBots = await filteredBotsResponse.json() as {
+    bots: Array<{ name: string; display_name?: string; owner_name?: string }>
+  }
+  expect(filteredBots.bots.length).toBeGreaterThan(0)
+  expect(filteredBots.bots.every((bot) =>
+    `${bot.name} ${bot.display_name || ''}`.toLowerCase().includes(botQuery.toLowerCase()),
+  )).toBe(true)
+  const owner = adminPage.locator(`a[href="#/user/${USER}"]`).first()
+  await expect(owner).toHaveAttribute('href', `#/user/${USER}`)
+  await expect(adminPage.getByRole('table').locator('tbody tr')).toHaveCount(filteredBots.bots.length)
+  await adminMonitor.expectClean()
+  await adminContext.close()
+})
+
+test('admin abort cancels a live human match and cannot be overwritten by the runner', async ({
+  page,
+  browser,
+  baseURL,
+  request,
+}) => {
+  expect(baseURL).toBeTruthy()
+  let matchId: string | null = null
+  let adminContext: BrowserContext | null = null
+  await withCleanup(async () => {
+    const humanMonitor = monitorBrowser(page)
+    await loginThroughUi(page, OTHER_USER)
+    await page.goto('/#/challenge')
+  await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+  await chooseBot(
+    page,
+    page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
+    `${OTHER_USER}_holdem`,
+    false,
+  )
+  const startResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/matches/human',
+  )
+  await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
+  const startResponse = await startResponsePromise
+  const startResponseText = await startResponse.text()
+  const started = JSON.parse(startResponseText) as { match_id: string; status: string }
+  const createdMatchId = started.match_id
+  matchId = createdMatchId
+  expect(startResponse.status(), startResponseText).toBe(200)
+  expect(started.status).toBe('pending')
+  await expect(page.getByRole('button', { name: '弃牌', exact: true })).toBeEnabled({
+    timeout: 20_000,
+  })
+
+  adminContext = await browser.newContext({
+    baseURL,
+    viewport: { width: 1440, height: 900 },
+  })
+  const adminPage = await adminContext.newPage()
+  const adminMonitor = monitorBrowser(adminPage)
+  await loginThroughUi(adminPage, ADMIN)
+  await adminPage.goto('/#/admin')
+  await adminPage.getByRole('button', { name: '对局记录', exact: true }).click()
+  const runningResponsePromise = adminPage.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' &&
+      url.pathname === '/api/matches' &&
+      url.search === '?status=running&limit=20&offset=0'
+  })
+  await adminPage.getByRole('combobox').click()
+  await adminPage.getByRole('option', { name: 'running', exact: true }).click()
+  const runningResponse = await runningResponsePromise
+  expect(runningResponse.status(), await runningResponse.text()).toBe(200)
+  const runningMatches = await runningResponse.json() as {
+    matches: Array<{ id: string; status: string }>
+  }
+  expect(runningMatches.matches.every((match) => match.status === 'running')).toBe(true)
+  expect(runningMatches.matches.some((match) => match.id === createdMatchId)).toBe(true)
+  const matchRow = adminPage
+    .getByText(`${createdMatchId.slice(0, 16)}…`, { exact: true })
+    .locator('xpath=ancestor::tr[1]')
+  await expect(matchRow).toBeVisible()
+
+  const abortResponsePromise = adminPage.waitForResponse(
+    (response) =>
+      response.request().method() === 'PATCH' &&
+      new URL(response.url()).pathname === `/api/admin/matches/${createdMatchId}`,
+  )
+  await matchRow.getByRole('button', { name: '中止', exact: true }).click()
+  const confirmation = adminPage.getByRole('dialog').filter({ hasText: createdMatchId })
+  await confirmation.getByRole('button', { name: '中止', exact: true }).click()
+  const abortResponse = await abortResponsePromise
+  expect(abortResponse.status(), await abortResponse.text()).toBe(200)
+
+  await expect(page.getByText(/对局结束/)).toBeVisible()
+  await expect(page.locator('main')).toContainText('admin-abort')
+  await expect.poll(async () => {
+    const response = await request.get(`/api/matches/${createdMatchId}`)
+    const body = await response.json() as { match?: { status?: string } }
+    return body.match?.status
+  }).toBe('aborted')
+  // Stay past the local runner cancellation/cleanup turn; the old direct DB patch
+  // briefly showed aborted and was then overwritten to completed with ratings.
+  await page.waitForTimeout(750)
+  const finalResponse = await request.get(`/api/matches/${createdMatchId}`)
+  expect((await finalResponse.json() as { match: { status: string } }).match.status).toBe('aborted')
+
+  await humanMonitor.expectClean()
+  await adminMonitor.expectClean()
+  await adminContext.close()
+  adminContext = null
+  }, async () => {
+    const tasks: Array<{ label: string; run: () => Promise<void> }> = []
+    if (matchId) {
+      const createdMatchId = matchId
+      tasks.push({
+        label: `settle human match ${createdMatchId}`,
+        run: () => ensureMatchTerminal(browser, baseURL!, request, createdMatchId),
+      })
+    }
+    if (adminContext) {
+      const context = adminContext
+      tasks.push({ label: 'close human-abort admin context', run: () => context.close() })
+    }
+    await runCleanupTasks(tasks)
+  })
+})
+
+test('human Holdem uses one WebSocket per load, sends legal protocol, and finishes', async ({
+  page,
+  request,
+  browser,
+  baseURL,
+}) => {
+  test.setTimeout(150_000)
+  expect(baseURL).toBeTruthy()
+  let matchId: string | null = null
+  await withCleanup(async () => {
+    const monitor = monitorBrowser(page)
+    await loginThroughUi(page, OTHER_USER)
+    await page.goto('/#/challenge')
+  await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+  await chooseBot(
+    page,
+    page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
+    `${OTHER_USER}_holdem`,
+    false,
+  )
+  await expect(page.getByText('人类对战使用该 Bot 的当前激活版本')).toBeVisible()
+  await expect(page.getByRole('combobox')).toHaveCount(1) // only game; no ignored version selector
+
+  // Switching back keeps an owned seat-1 Bot and must lazily populate its history;
+  // selecting it first in human mode previously left the version cache empty.
+  await page.getByRole('button', { name: '选 Bot', exact: true }).click()
+  await expect(page.getByRole('combobox')).toHaveCount(2)
+  await page.getByRole('combobox').nth(1).click()
+  await expect(page.getByRole('option', { name: /v\d+/ }).first()).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+  await expect(page.getByRole('combobox')).toHaveCount(1)
+
+  const sockets: Array<{ sent: string[]; received: string[]; closed: boolean }> = []
+  page.on('websocket', (socket) => {
+    // Vite opens its own `/?token=...` HMR socket on every reload. Count only the
+    // human-play business channel, otherwise one reload looks like two app sockets.
+    if (!/^\/api\/matches\/[^/]+\/play$/.test(new URL(socket.url()).pathname)) return
+    const record = { sent: [] as string[], received: [] as string[], closed: false }
+    sockets.push(record)
+    socket.on('framesent', (event) => record.sent.push(String(event.payload)))
+    socket.on('framereceived', (event) => record.received.push(String(event.payload)))
+    socket.on('close', () => { record.closed = true })
+  })
+  const startResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/matches/human',
+  )
+  await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
+  const startedResponse = await startResponse
+  const startedResponseText = await startedResponse.text()
+  const started = JSON.parse(startedResponseText) as { match_id: string; status: string }
+  const createdMatchId = started.match_id
+  matchId = createdMatchId
+  expect(startedResponse.status(), startedResponseText).toBe(200)
+  expect(started.status).toBe('pending')
+  await expect(page).toHaveURL(/\/#\/play\//)
+
+  const fold = page.getByRole('button', { name: '弃牌', exact: true })
+  const sentFoldCount = () => sockets
+    .flatMap((socket) => socket.sent)
+    .filter((frame) => frame.includes('"response":-1')).length
+  const receivedActionCount = () => sockets
+    .flatMap((socket) => socket.received)
+    .filter((frame) => frame.includes('"type":"action"')).length
+  const sendOneFold = async () => {
+    await expect(fold).toBeEnabled({ timeout: 20_000 })
+    const sentBefore = sentFoldCount()
+    const actionsBefore = receivedActionCount()
+    await fold.click()
+    await expect.poll(sentFoldCount).toBe(sentBefore + 1)
+    // Wait until the engine has consumed this turn. Merely waiting for disabled is
+    // racy with a local fast Bot: the next your_turn can re-enable before assertion.
+    await expect.poll(receivedActionCount).toBeGreaterThan(actionsBefore)
+    expect(sentFoldCount()).toBe(sentBefore + 1)
+  }
+  const sendRapidDoubleFold = async () => {
+    await expect(fold).toBeEnabled({ timeout: 20_000 })
+    const sentBefore = sentFoldCount()
+    const actionsBefore = receivedActionCount()
+    // Two native clicks in one browser task reproduce the same-render race: React
+    // state alone has not necessarily committed before the second handler runs.
+    await fold.evaluate((element) => {
+      const button = element as HTMLButtonElement
+      button.click()
+      button.click()
+    })
+    await expect.poll(sentFoldCount).toBe(sentBefore + 1)
+    await expect.poll(receivedActionCount).toBeGreaterThan(actionsBefore)
+    // A duplicate frame can be rejected only after the accepted frame advances
+    // the engine, so assert again after the authoritative action arrives.
+    expect(sentFoldCount()).toBe(sentBefore + 1)
+  }
+  await expect(fold).toBeEnabled({ timeout: 20_000 })
+  await sendRapidDoubleFold()
+  await page.reload()
+  await expect(fold).toBeEnabled({ timeout: 20_000 })
+
+  let folds = 1
+  const deadline = Date.now() + 70_000
+  while (Date.now() < deadline && !(await page.getByText(/对局结束/).isVisible())) {
+    if (await fold.isEnabled()) {
+      await sendOneFold()
+      folds += 1
+    } else {
+      await page.waitForTimeout(25)
+    }
+  }
+  await expect(page.getByText(/对局结束/)).toBeVisible()
+  expect(folds).toBeGreaterThan(1)
+  expect(sockets).toHaveLength(2)
+  await expect.poll(() => sockets[1]?.closed).toBe(true)
+  for (const socket of sockets) {
+    expect(socket.received.filter((frame) => frame.includes('"type":"snapshot"'))).toHaveLength(1)
+  }
+  expect(sockets.flatMap((socket) => socket.sent).some((frame) => frame.includes('"response":-1'))).toBe(true)
+  await expect(page.locator('main')).not.toContainText('座0')
+
+  // The UI terminal message is not sufficient evidence: verify the authoritative
+  // persisted row reached completed before testing refresh restoration.
+  await expect.poll(async () => {
+    const response = await request.get(`/api/matches/${createdMatchId}`)
+    if (response.status() !== 200) return `http-${response.status()}`
+    return (await response.json() as { match?: { status?: string } }).match?.status
+  }, { timeout: 30_000, intervals: [250, 500, 1_000] }).toBe('completed')
+
+  // A completed match must restore its terminal state from the snapshot and close
+  // cleanly instead of showing "waiting" forever with a leaked subscription.
+  await page.reload()
+  await expect(page.getByText(/对局结束/)).toBeVisible()
+  expect(sockets).toHaveLength(3)
+  await expect.poll(() => sockets[2]?.closed).toBe(true)
+  expect(sockets[2].received.filter((frame) => frame.includes('"type":"snapshot"'))).toHaveLength(1)
+  await monitor.expectClean()
+  }, async () => {
+    if (matchId) {
+      await ensureMatchTerminal(browser, baseURL!, request, matchId)
+    }
+  })
+})

@@ -9,7 +9,7 @@
  *
  * 遵循 AGENTS.md 前端规范：shadcn Dialog/Select + useConfirm + toast。
  */
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Upload, History, RotateCcw } from 'lucide-react'
 import { fmtTime } from '@/lib/format'
 import {
@@ -88,38 +88,65 @@ export default function BotVersionManager({
   const [note, setNote] = useState('')
   const [mode, setMode] = useState(currentRuntimeMode || 'traditional')
   const [file, setFile] = useState<File | null>(null)
+  // Dialog 在 A→关闭→B 时会复用同一组件；A 的慢响应不得回灌 B。
+  const activeBotIdRef = useRef<number | null>(botId)
+  const requestGenerationRef = useRef(0)
+  const mutationGenerationRef = useRef(0)
+  // Prop changes are authoritative during render, before the reset effect. This
+  // closes the narrow render-to-effect window in which A could otherwise still
+  // look current after the parent has already reused the dialog for B.
+  activeBotIdRef.current = botId
+
+  const isCurrentMutation = (targetBotId: number, generation: number) => (
+    activeBotIdRef.current === targetBotId &&
+    mutationGenerationRef.current === generation
+  )
 
   const load = useCallback(async () => {
     if (botId === null) return
+    const targetBotId = botId
+    const generation = ++requestGenerationRef.current
     setLoading(true)
     setError('')
     try {
       const d = await apiGet<{ versions: BotVersion[]; current_version: number }>(
-        `/api/bots/${botId}/versions`,
+        `/api/bots/${targetBotId}/versions`,
       )
+      if (
+        activeBotIdRef.current !== targetBotId ||
+        requestGenerationRef.current !== generation
+      ) return
       setVersions(d.versions || [])
       setCurVer(d.current_version)
     } catch (e) {
+      if (
+        activeBotIdRef.current !== targetBotId ||
+        requestGenerationRef.current !== generation
+      ) return
       setError(errMsg(e, '加载版本历史失败'))
     } finally {
-      setLoading(false)
+      if (
+        activeBotIdRef.current === targetBotId &&
+        requestGenerationRef.current === generation
+      ) setLoading(false)
     }
   }, [botId])
 
-  useEffect(() => {
-    if (open) void load()
-  }, [open, load])
-
   // 切换 Bot 时重置所有本地状态（busy 泄漏会导致新 Bot 对话框按钮被禁用）
   useEffect(() => {
+    activeBotIdRef.current = botId
+    requestGenerationRef.current += 1 // 立即使上一个 Bot 的在途响应失效
+    mutationGenerationRef.current += 1 // 上传/回滚的 catch/finally 也必须立刻失效
     setVersions([])
     setCurVer(undefined)
+    setLoading(false)
     setBusy(false)
     setMode(currentRuntimeMode || 'traditional')
     setNote('')
     setFile(null)
     setError('')
-  }, [botId, currentRuntimeMode])
+    if (botId !== null) void load()
+  }, [botId, currentRuntimeMode, load])
 
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
@@ -127,45 +154,60 @@ export default function BotVersionManager({
       setError('请选择二进制文件')
       return
     }
+    const targetBotId = botId
+    const generation = ++mutationGenerationRef.current
     setBusy(true)
     setError('')
     try {
-      await apiForm(`/api/bots/${botId}/versions`, 'POST', {
+      await apiForm(`/api/bots/${targetBotId}/versions`, 'POST', {
         upload_note: note,
         runtime_mode: mode,
         file,
       })
+      if (!isCurrentMutation(targetBotId, generation)) return
       toast.success(`已上传新版本`)
       setNote('')
       setFile(null)
       await load()
+      if (!isCurrentMutation(targetBotId, generation)) return
       onChanged?.()
     } catch (err) {
-      setError(errMsg(err, '上传失败'))
+      if (isCurrentMutation(targetBotId, generation)) {
+        setError(errMsg(err, '上传失败'))
+      }
     } finally {
-      setBusy(false)
+      if (isCurrentMutation(targetBotId, generation)) setBusy(false)
     }
   }
 
   const rollback = async (v: BotVersion) => {
     if (botId === null) return
-    if (v.version === currentVersion) return
+    const targetBotId = botId
+    // 上传/回滚后外层列表的 currentVersion prop 可能尚未刷新；按钮高亮与
+    // 防重复判断必须同用本地最新值，否则 v1→v2 后无法在同一弹窗切回 v1。
+    if (v.version === (curVer ?? currentVersion)) return
     const ok = await confirm({
       title: `回滚到 v${v.version}?`,
       desc: `将把当前版本切换为 v${v.version}（运行模式: ${v.runtime_mode}）。其他版本保留，可随时再切回。`,
       danger: true,
     })
-    if (!ok) return
+    // 用户确认期间可能已经关掉 A 并打开 B；绝不能把 A 的版本号发给 B。
+    if (!ok || activeBotIdRef.current !== targetBotId) return
+    const generation = ++mutationGenerationRef.current
     setBusy(true)
     try {
-      await apiJson(`/api/bots/${botId}/versions/${v.version}/activate`, 'POST')
+      await apiJson(`/api/bots/${targetBotId}/versions/${v.version}/activate`, 'POST')
+      if (!isCurrentMutation(targetBotId, generation)) return
       toast.success(`已回滚到 v${v.version}`)
       await load()
+      if (!isCurrentMutation(targetBotId, generation)) return
       onChanged?.()
     } catch (e) {
-      setError(errMsg(e, '回滚失败'))
+      if (isCurrentMutation(targetBotId, generation)) {
+        setError(errMsg(e, '回滚失败'))
+      }
     } finally {
-      setBusy(false)
+      if (isCurrentMutation(targetBotId, generation)) setBusy(false)
     }
   }
 
@@ -223,6 +265,7 @@ export default function BotVersionManager({
                   // 客户端 50MB 预检（与 MyBots 上传一致），避免大文件传完才被服务端拒
                   if (f && f.size > 50 * 1024 * 1024) {
                     toast.error('文件超过 50MB 上限')
+                    setFile(null)
                     e.target.value = ''
                     return
                   }

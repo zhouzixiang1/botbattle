@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from bzplat.backend.contests.templates import resolve_template, resolve_stages
+from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.contests.validation import (
     validate_match_config,
     validate_stage,
@@ -132,6 +133,31 @@ def test_resolve_template_reads_table(store: Store):
     assert tid == "holdem_swiss_ko" and gid == "holdem"
     assert stages == [{"key": "x", "type": "round_robin"}]
     assert mc == {"hands": 30}  # 读到覆盖值而非代码默认 70
+
+
+def test_create_rejects_template_game_mismatch(store: Store):
+    """请求 game_id 不能覆盖模板所属游戏，避免跨游戏 stages 混搭。"""
+    manager = ContestManager(store, object())  # create 不消费 orchestrator
+
+    with pytest.raises(ValueError, match=r"holdem.*不能用于游戏 gomoku"):
+        manager.create(
+            1,
+            "错误混搭",
+            template_id="holdem_swiss_ko",
+            game_id="gomoku",
+        )
+
+    # 显式 stages 也不能绕过具名模板的所属游戏约束。
+    with pytest.raises(ValueError, match=r"holdem.*不能用于游戏 gomoku"):
+        manager.create(
+            1,
+            "自定义阶段绕过",
+            template_id="holdem_swiss_ko",
+            game_id="gomoku",
+            stages=[{"key": "rr", "type": "round_robin"}],
+        )
+
+    assert store.list_contests() == []
 
 
 def test_resolve_stages_falls_back_to_defaults_without_store():

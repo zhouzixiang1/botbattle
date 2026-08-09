@@ -82,6 +82,128 @@ def test_challenge_wrong_version_rejected(tmp_path):
     s.close()
 
 
+def test_default_versions_are_frozen_before_deferred_runner_start(tmp_path):
+    """未显式选版本也应在建局时冻结 current，排队后回滚不改变 runner 路径。"""
+    from types import SimpleNamespace
+
+    class CapturingRunner:
+        def __init__(self):
+            self.calls: list[tuple[str, str, tuple[str, str] | None]] = []
+
+        async def run_binaries(self, path_a, path_b, *, runtime_modes=None, **_kwargs):
+            self.calls.append((path_a, path_b, runtime_modes))
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[0, 0])],
+                winner=None,
+                events=[],
+            )
+
+    async def exercise():
+        s = _store(tmp_path)
+        uid = s.create_user("default-pin", "default-pin@e.com", "x")["id"]
+        ba = s.create_bot(
+            uid, "default-a", binary_path="/tmp/a-base", format="elf",
+            game_id="holdem",
+        )
+        bb = s.create_bot(
+            uid, "default-b", binary_path="/tmp/b-base", format="elf",
+            game_id="holdem",
+        )
+        s.ensure_rating(ba["id"])
+        s.ensure_rating(bb["id"])
+        a1 = s.add_bot_version(
+            ba["id"], binary_path="/tmp/a-v1", version=1,
+            runtime_mode="traditional",
+        )
+        s.add_bot_version(
+            ba["id"], binary_path="/tmp/a-v2", version=2,
+            runtime_mode="longrunning",
+        )
+        b1 = s.add_bot_version(
+            bb["id"], binary_path="/tmp/b-v1", version=1,
+            runtime_mode="traditional",
+        )
+        s.add_bot_version(
+            bb["id"], binary_path="/tmp/b-v2", version=2,
+            runtime_mode="longrunning",
+        )
+        s.set_current_version(ba["id"], 1)
+        s.set_current_version(bb["id"], 1)
+
+        runner = CapturingRunner()
+        orch = MatchOrchestrator(s, runner=runner, max_concurrent=1)
+        mid = await orch.challenge(
+            ba["id"], bb["id"], uid, game_id="holdem", defer_start=True,
+        )
+        match = s.get_match(mid)
+        assert match["match_config"]["_bot_a_version_id"] == a1["id"]
+        assert match["match_config"]["_bot_b_version_id"] == b1["id"]
+
+        # 模拟 match 已排队但尚未获得 runner：此时 owner 上传/回滚到 v2。
+        s.set_current_version(ba["id"], 2)
+        s.set_current_version(bb["id"], 2)
+        orch.start_prepared_match(mid)
+        task = orch._tasks[mid]
+        await task
+
+        assert s.get_match(mid)["status"] == "completed"
+        assert runner.calls == [
+            ("/tmp/a-v1", "/tmp/b-v1", ("traditional", "traditional"))
+        ]
+        s.close()
+
+    asyncio.run(exercise())
+
+
+def test_legacy_bots_without_version_rows_fall_back_to_binary_path(tmp_path):
+    """旧 bot 没有 bot_versions 行时仍可执行，不因默认版本快照为空而崩溃。"""
+    from types import SimpleNamespace
+
+    class CapturingRunner:
+        def __init__(self):
+            self.paths: list[tuple[str, str]] = []
+
+        async def run_binaries(self, path_a, path_b, **_kwargs):
+            self.paths.append((path_a, path_b))
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[0, 0])],
+                winner=None,
+                events=[],
+            )
+
+    async def exercise():
+        s = _store(tmp_path)
+        uid = s.create_user("legacy-pin", "legacy-pin@e.com", "x")["id"]
+        ba = s.create_bot(
+            uid, "legacy-a", binary_path="/tmp/legacy-a", format="elf",
+            game_id="holdem",
+        )
+        bb = s.create_bot(
+            uid, "legacy-b", binary_path="/tmp/legacy-b", format="elf",
+            game_id="holdem",
+        )
+        s.ensure_rating(ba["id"])
+        s.ensure_rating(bb["id"])
+        runner = CapturingRunner()
+        orch = MatchOrchestrator(s, runner=runner, max_concurrent=1)
+
+        mid = await orch.challenge(
+            ba["id"], bb["id"], uid, game_id="holdem", defer_start=True,
+        )
+        assert s.get_match(mid)["match_config"] == {}
+        orch.start_prepared_match(mid)
+        task = orch._tasks[mid]
+        await task
+
+        assert s.get_match(mid)["status"] == "completed"
+        assert runner.paths == [("/tmp/legacy-a", "/tmp/legacy-b")]
+        s.close()
+
+    asyncio.run(exercise())
+
+
 def test_selfplay_skips_rating_update(tmp_path):
     """自博弈完成不更新 Glicko 评分（防 _apply_ratings 同行双写损坏）。"""
     import os, tempfile

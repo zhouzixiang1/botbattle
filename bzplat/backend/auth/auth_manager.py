@@ -34,6 +34,7 @@ _DEFAULT_CODE_TTL_MIN = 30
 
 _USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,31}$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_RE = re.compile(r"^1[3-9][0-9]{9}$")
 _MIN_PASSWORD_LEN = 8
 
 
@@ -60,6 +61,12 @@ def _validate_email(email: str) -> None:
 def _validate_password(password: str) -> None:
     if not password or len(password) < _MIN_PASSWORD_LEN:
         raise AuthError("weak_password", f"密码至少 {_MIN_PASSWORD_LEN} 个字符")
+
+
+def validate_phone(phone: str) -> None:
+    """校验选填的中国大陆手机号；空值表示未填写。"""
+    if phone and not _PHONE_RE.fullmatch(phone):
+        raise AuthError("invalid_phone", "手机号格式不正确")
 
 
 class AuthManager:
@@ -92,6 +99,8 @@ class AuthManager:
         _validate_username(username)
         _validate_email(email)
         _validate_password(password)
+        phone = phone.strip()
+        validate_phone(phone)
         if self.store.get_user_by_username(username):
             raise AuthError("username_taken", "用户名已被占用")
         if self.store.get_user_by_email(email):
@@ -310,12 +319,19 @@ class AuthManager:
         try:
             if datetime.fromisoformat(row["expires_at"]) < datetime.now():
                 raise AuthError("expired_code", "验证码已过期,请重新获取")
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise AuthError("invalid_code", "验证码无效") from exc
-        self.store.mark_email_code_used(row["id"])
-        self.store.update_user(user["id"], password_hash=hash_password(new_password))
-        self.store.delete_sessions_for_user(user["id"])
-        return _safe_user(user)
+        result = self.store.reset_password_with_credential(
+            user["id"],
+            hash_password(new_password),
+            email_code_id=row["id"],
+            email_code=row["code"],
+        )
+        if result == "expired":
+            raise AuthError("expired_code", "验证码已过期,请重新获取")
+        if result != "ok":
+            raise AuthError("invalid_code", "验证码无效或已使用")
+        return _safe_user(self.store.get_user(user["id"]))
 
     reset_password_with_code = reset_password
 
@@ -326,17 +342,20 @@ class AuthManager:
             raise AuthError("invalid_reset_token", "重置链接无效或已使用")
         try:
             if datetime.fromisoformat(r["expires_at"]) < datetime.now():
-                self.store.mark_password_reset_used(token)
                 raise AuthError("expired_reset_token", "重置链接已过期,请重新申请")
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise AuthError("invalid_reset_token", "重置链接无效") from exc
         user = self.store.get_user(r["user_id"])
         if not user:
             raise AuthError("no_user", "用户不存在")
-        self.store.update_user(user["id"], password_hash=hash_password(new_password))
-        self.store.mark_password_reset_used(token)
-        self.store.delete_sessions_for_user(user["id"])
-        return _safe_user(user)
+        result = self.store.reset_password_with_credential(
+            user["id"], hash_password(new_password), reset_token=token
+        )
+        if result == "expired":
+            raise AuthError("expired_reset_token", "重置链接已过期,请重新申请")
+        if result != "ok":
+            raise AuthError("invalid_reset_token", "重置链接无效或已使用")
+        return _safe_user(self.store.get_user(user["id"]))
 
     def admin_create_reset_token(
         self, username_or_email: str

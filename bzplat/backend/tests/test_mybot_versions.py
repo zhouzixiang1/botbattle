@@ -9,14 +9,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 
 import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
+from bzplat.backend.bots.manager import BotError
+from bzplat.backend.runtime.binary_runner import PlatformRunnerError
 from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
@@ -142,6 +147,54 @@ def test_api_upload_bot_with_runtime_mode(tmp_path):
     assert bot["runtime_mode"] == "traditional"
 
 
+def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkeypatch):
+    """A slow/unresponsive Bot upload must not freeze health, SSE or WebSocket tasks."""
+    from httpx import ASGITransport, AsyncClient
+
+    app = _app(tmp_path)
+    _, owner = _setup(app)
+    entered = Event()
+    release = Event()
+
+    def blocking_create(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(timeout=3)
+        return {
+            "id": 999,
+            "owner_id": owner["id"],
+            "name": "nonblocking",
+            "current_version": 1,
+        }
+
+    monkeypatch.setattr(app.state.bot_manager, "create_from_upload", blocking_create)
+
+    async def exercise():
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            upload = asyncio.create_task(
+                client.post(
+                    "/api/bots",
+                    headers=_login(app),
+                    data={"name": "nonblocking", "game_id": "holdem"},
+                    files={"file": ("bot.bin", b"fake", "application/octet-stream")},
+                )
+            )
+            try:
+                assert await asyncio.wait_for(
+                    asyncio.to_thread(entered.wait, 2), timeout=2.5
+                )
+                # This times out on the old synchronous route while .result()
+                # blocks Uvicorn's only event loop.
+                health = await asyncio.wait_for(client.get("/api/health"), timeout=0.5)
+                assert health.status_code == 200
+            finally:
+                release.set()
+            response = await asyncio.wait_for(upload, timeout=2)
+            assert response.status_code == 200, response.text
+
+    asyncio.run(exercise())
+
+
 def test_api_list_versions_and_rollback(tmp_path):
     app = _app(tmp_path)
     store, u = _setup(app)
@@ -186,6 +239,291 @@ def test_api_list_versions_and_rollback(tmp_path):
     assert r4.status_code == 200, r4.text
     assert r4.json()["bot"]["current_version"] == 1
     assert r4.json()["bot"]["runtime_mode"] == "traditional"
+
+    # 回滚只改变当前激活版本，v2 仍保留；后续上传必须从历史最大版本
+    # 继续生成 v3，不能按 current_version + 1 重复插入 v2 而 500。
+    with open(elf, "rb") as f:
+        r5 = client.post(
+            f"/api/bots/{bot_id}/versions",
+            headers=h,
+            data={"upload_note": "v3 after rollback", "runtime_mode": "traditional"},
+            files={"file": ("bot.bin", f, "application/octet-stream")},
+        )
+    assert r5.status_code == 200, r5.text
+    assert r5.json()["bot"]["current_version"] == 3
+    assert [v["version"] for v in store.list_bot_versions(bot_id)] == [3, 2, 1]
+
+
+def test_concurrent_version_uploads_keep_unique_files_and_checksums(tmp_path):
+    """Two tabs uploading together must allocate distinct versions atomically.
+
+    The old read-MAX/write-file/INSERT sequence let both requests overwrite v2;
+    one DB insert then failed while the surviving row could point at mismatched bytes.
+    """
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    base = elf.read_bytes()
+    bot = manager.create_from_upload(owner["id"], "parallel_bot", base, game_id="holdem")
+    payloads = [base + b"\nparallel-a", base + b"\nparallel-b"]
+    barrier = Barrier(2)
+
+    def upload(raw: bytes):
+        barrier.wait(timeout=3)
+        return manager.upload_version(bot["id"], owner["id"], raw)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(upload, payloads))
+
+    assert all(result["id"] == bot["id"] for result in results)
+    versions = store.list_bot_versions(bot["id"])
+    assert [row["version"] for row in versions] == [3, 2, 1]
+    uploaded = []
+    for row in versions[:2]:
+        actual = Path(row["binary_path"]).read_bytes()
+        assert hashlib.sha256(actual).hexdigest() == row["checksum"]
+        assert len(actual) == row["size_bytes"]
+        uploaded.append(actual)
+    assert set(uploaded) == set(payloads)
+
+
+def test_failed_preflight_restores_exact_pre_upload_activation(tmp_path, monkeypatch):
+    """v1 active + historical v2 + failed v3 must remain on v1, not max(v2)."""
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    raw = elf.read_bytes()
+
+    bot = manager.create_from_upload(
+        owner["id"], "preflight_restore", raw,
+        game_id="holdem", runtime_mode="traditional",
+    )
+    manager.upload_version(
+        bot["id"], owner["id"], raw + b"\nv2", runtime_mode="longrunning",
+    )
+    manager.activate_version(bot["id"], owner["id"], 1)
+    before = store.get_bot(bot["id"])
+    assert before["current_version"] == 1
+    assert before["runtime_mode"] == "traditional"
+
+    monkeypatch.setattr(
+        manager, "_run_preflight", lambda *_args, **_kwargs: (False, "qa failure"),
+    )
+    with pytest.raises(BotError, match="预检失败") as failed:
+        manager.upload_version(
+            bot["id"], owner["id"], raw + b"\nv3", binary_runner=object(),
+        )
+    assert failed.value.code == "preflight_failed"
+
+    after = store.get_bot(bot["id"])
+    assert after["current_version"] == 1
+    assert after["binary_path"] == before["binary_path"]
+    assert after["runtime_mode"] == "traditional"
+    assert [row["version"] for row in store.list_bot_versions(bot["id"])] == [2, 1]
+    assert not (manager.upload_root / str(bot["id"]) / "v3").exists()
+
+
+def test_failed_initial_preflight_removes_database_row_and_files(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    monkeypatch.setattr(
+        manager, "_run_preflight", lambda *_args, **_kwargs: (False, "qa failure"),
+    )
+
+    with pytest.raises(BotError, match="预检失败"):
+        manager.create_from_upload(
+            owner["id"], "preflight_new", elf.read_bytes(),
+            game_id="holdem", binary_runner=object(),
+        )
+
+    assert store.get_bot_by_owner_name(owner["id"], "preflight_new") is None
+    assert list(manager.upload_root.iterdir()) == []
+
+
+def test_platform_preflight_failure_restores_activation_and_api_returns_503(
+    tmp_path, monkeypatch
+):
+    """Sandbox outage must roll back upload atomically and never blame the Bot."""
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    raw = elf.read_bytes()
+
+    bot = manager.create_from_upload(
+        owner["id"], "platform_restore", raw,
+        game_id="holdem", runtime_mode="traditional",
+    )
+    manager.upload_version(
+        bot["id"], owner["id"], raw + b"\nv2", runtime_mode="longrunning",
+    )
+    manager.activate_version(bot["id"], owner["id"], 1)
+    before = store.get_bot(bot["id"])
+
+    def sandbox_down(*_args, **_kwargs):
+        raise PlatformRunnerError("docker daemon unavailable")
+
+    monkeypatch.setattr(manager, "_run_preflight", sandbox_down)
+    with pytest.raises(PlatformRunnerError, match="daemon unavailable"):
+        manager.upload_version(
+            bot["id"], owner["id"], raw + b"\nv3", binary_runner=object(),
+        )
+    after = store.get_bot(bot["id"])
+    assert after["current_version"] == 1
+    assert after["binary_path"] == before["binary_path"]
+    assert after["runtime_mode"] == "traditional"
+    assert [row["version"] for row in store.list_bot_versions(bot["id"])] == [2, 1]
+    assert not (manager.upload_root / str(bot["id"]) / "v3").exists()
+
+    client = TestClient(app)
+    with open(elf, "rb") as binary:
+        response = client.post(
+            "/api/bots",
+            headers=_login(app),
+            data={"name": "platform_new", "game_id": "holdem"},
+            files={"file": ("bot.bin", binary, "application/octet-stream")},
+        )
+    assert response.status_code == 503, response.text
+    assert store.get_bot_by_owner_name(owner["id"], "platform_new") is None
+    assert not any(
+        row["name"] == "platform_new" for row in store.list_bots(owner_id=owner["id"])
+    )
+
+
+def test_version_is_not_published_until_blocking_preflight_succeeds(
+    tmp_path, monkeypatch
+):
+    """A queued match may only snapshot the last validated active version."""
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    raw = elf.read_bytes()
+    bot = manager.create_from_upload(owner["id"], "staged_version", raw)
+
+    entered = Event()
+    release = Event()
+
+    def blocking_preflight(*_args, binary_path=None, **_kwargs):
+        assert binary_path and ".v2-" in binary_path
+        entered.set()
+        assert release.wait(timeout=3)
+        return True, "ok"
+
+    monkeypatch.setattr(manager, "_run_preflight", blocking_preflight)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            manager.upload_version,
+            bot["id"],
+            owner["id"],
+            raw + b"\nstaged-v2",
+            binary_runner=object(),
+        )
+        assert entered.wait(timeout=3)
+        during = store.get_bot(bot["id"])
+        assert during["current_version"] == 1
+        assert [row["version"] for row in store.list_bot_versions(bot["id"])] == [1]
+        release.set()
+        result = future.result(timeout=3)
+
+    assert result["current_version"] == 2
+    assert [row["version"] for row in store.list_bot_versions(bot["id"])] == [2, 1]
+
+
+def test_new_bot_stays_inactive_and_unversioned_during_preflight(
+    tmp_path, monkeypatch
+):
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    raw = elf.read_bytes()
+    entered = Event()
+    release = Event()
+
+    def blocking_preflight(*_args, binary_path=None, **_kwargs):
+        assert binary_path and ".v1-" in binary_path
+        entered.set()
+        assert release.wait(timeout=3)
+        return True, "ok"
+
+    monkeypatch.setattr(manager, "_run_preflight", blocking_preflight)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            manager.create_from_upload,
+            owner["id"],
+            "staged_new",
+            raw,
+            binary_runner=object(),
+        )
+        assert entered.wait(timeout=3)
+        staged = store.get_bot_by_owner_name(owner["id"], "staged_new")
+        assert staged["is_active"] == 0
+        assert staged["current_version"] == 0
+        assert staged["binary_path"] == ""
+        assert store.list_bot_versions(staged["id"]) == []
+        assert staged["id"] not in {
+            row["id"] for row in store.list_bots(owner_id=owner["id"])
+        }
+        release.set()
+        result = future.result(timeout=3)
+
+    assert result["is_active"] == 1
+    assert result["current_version"] == 1
+
+
+def test_legacy_bot_image_survives_platform_failure_before_first_version(
+    tmp_path, monkeypatch
+):
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    manager = app.state.bot_manager
+    elf = _bot_binary()
+    if elf is None:
+        pytest.skip("callbot binary missing")
+    raw = elf.read_bytes()
+    legacy = store.create_bot(
+        owner["id"],
+        "legacy_platform",
+        binary_path="/legacy/original.bin",
+        os="linux",
+        arch="amd64",
+        format="elf",
+        runtime_mode="traditional",
+    )
+
+    def sandbox_down(*_args, **_kwargs):
+        raise PlatformRunnerError("docker daemon unavailable")
+
+    monkeypatch.setattr(manager, "_run_preflight", sandbox_down)
+    with pytest.raises(PlatformRunnerError):
+        manager.upload_version(
+            legacy["id"], owner["id"], raw, binary_runner=object()
+        )
+
+    after = store.get_bot(legacy["id"])
+    for field in (
+        "current_version", "binary_path", "os", "arch", "format", "runtime_mode"
+    ):
+        assert after[field] == legacy[field]
+    assert store.list_bot_versions(legacy["id"]) == []
+    assert not (manager.upload_root / str(legacy["id"]) / "v1").exists()
 
 
 def test_api_versions_owner_only(tmp_path):

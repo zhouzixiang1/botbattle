@@ -35,13 +35,46 @@ def serve(
     """启动 Web 服务。"""
     _load_dotenv()
 
+    host = host or os.environ.get("BZ_HOST", "127.0.0.1")
+    port = port or int(os.environ.get("BZ_PORT", "50380"))
+
+    # QA 模式必须在任何日志 handler、数据库连接或运行时目录创建之前
+    # 一次性验证全部写目标。普通 main 服务仍可按约定绑定 50380。
+    from bzplat.backend.qa_safety import qa_instance_enabled
+
+    qa_instance = qa_instance_enabled(os.environ.get("BZ_QA_INSTANCE"))
+    if qa_instance:
+        from bzplat.backend.qa_safety import assert_qa_server_startup_isolated
+
+        cwd = Path.cwd()
+        db_raw = os.environ.get("BZ_DB_PATH") or "botzone.db"
+        db_candidate = Path(db_raw).expanduser()
+        if not db_candidate.is_absolute():
+            db_candidate = cwd / db_candidate
+        runtime_parent = db_candidate.resolve().parent
+        log_raw = os.environ.get("BZ_LOG_DIR") or runtime_parent / "logs"
+        avatar_raw = os.environ.get("BZ_AVATAR_DIR") or runtime_parent / "avatars"
+        try:
+            database, logs, avatars = assert_qa_server_startup_isolated(
+                port=port,
+                db_path=db_raw,
+                log_dir=log_raw,
+                avatar_dir=avatar_raw,
+                source_root=Path(__file__).resolve().parents[2],
+                cwd=cwd,
+            )
+        except RuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        # Pin every downstream consumer to the exact paths that were validated.
+        os.environ["BZ_DB_PATH"] = str(database)
+        os.environ["BZ_LOG_DIR"] = str(logs)
+        os.environ["BZ_AVATAR_DIR"] = str(avatars)
+
     # 统一日志：文件 + 控制台（uvicorn.run 前生效，确保所有模块落 app.log）
     from bzplat.backend.logging_config import setup_logging
     setup_logging(level=os.environ.get("BZ_LOG_LEVEL", "INFO"))
     logging.getLogger(__name__).info("botbattle 启动 host=%s port=%s reload=%s", host, port, reload)
 
-    host = host or os.environ.get("BZ_HOST", "127.0.0.1")
-    port = port or int(os.environ.get("BZ_PORT", "50380"))
     uvicorn.run(
         "bzplat.backend.main:create_app",
         factory=True,

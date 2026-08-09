@@ -26,14 +26,17 @@
 | `--user 65534:65534` | 以 nobody 身份运行 |
 | `--rm` | 退出即销毁容器 |
 
-Windows PE 走 Wine 容器时 CPU/内存/断网/cap-drop 对齐，但保留写权限（Wine 需要）。
+Windows PE 走 Wine 容器时也强制上表的只读根文件系统、断网、cap-drop、
+`no-new-privileges` 与 `65534:65534` 非 root 用户。Wine 必需的可写状态不会放开根
+文件系统：`HOME=/winehome` 与 `WINEPREFIX=/winehome/prefix` 位于独立、限容的
+tmpfs，`/tmp` 是另一个隔离 tmpfs，对局结束后一并销毁。
 所有参数均为**只读硬限制**，admin 面板不可抬高 CPU/内存。
 
 ## 决策超时
 
 - 默认 **60 秒 / 决策**（管理员可在「运行时」面板改，范围 1–300）。
 - 决策超时视为该 Bot **fold / 判负**（扑克弃牌；棋类判负）。
-- **崩溃语义**（详见 [对局](#/wiki?slug=guide)）：对局**中途** `BotCrashedError` 由引擎**计分判负**（`completed`）；**启动失败**非赛事 → `aborted`（`bot_crashed`），赛事 → `completed` + `technical_loss`。
+- **崩溃语义**（详见 [对局](#/wiki?slug=guide)）：Bot 在对局**中途**崩溃由引擎计分判负，Bot-vs-Bot 与 human 都持久化为 `completed + reason=crash`；Bot-vs-Bot 启动失败由编排层统一结算为 `completed + technical_loss`（challenge/table/ladder/contest 一致），只有 human 的启动失败记为 `aborted`（`bot_crashed`）。Docker 返回 125（daemon／镜像／挂载／容器 runtime 故障）恒属于**平台沙箱故障**。126/127 同时可能是 Bot 自己的退出码，只有在 Bot `exec` 前由平台 wrapper 产生本会话不可伪造的 runtime/entrypoint 诊断时才归因平台；普通 Bot stderr 不会豁免技术负。平台故障对局记为 `aborted + platform_error`、不评分；上传在 worker 中用专用 runner 对隐藏临时文件预检，成功后才发布版本。平台故障返回 503，既不修改原激活版本，也不阻塞主事件循环。
 - 本平台采用**整场对局长驻**进程（stdin/stdout 行协议），因此超时默认远高于 Botzone 的 1s/回合。
 
 ### Botzone 语言时限倍率（对照）

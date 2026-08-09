@@ -95,7 +95,7 @@ def _build_match_plan(seed: int, params: dict[str, Any]) -> list[dict[str, Any]]
 async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
     """Bot 预检：发一个德州 act 请求，验证响应含合法 action。"""
     from bzplat.backend.games.holdem.protocol import build_act_request, parse_response, dumps_request
-    from bzplat.backend.runtime.binary_runner import BotCrashedError
+    from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
     import asyncio
 
     # 构造最小 act 请求（preflop，seat 0/SB）
@@ -108,12 +108,16 @@ async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: flo
     line = dumps_request(req)
     try:
         sid = await binary_runner.start_session(binary_path)
+    except PlatformRunnerError:
+        raise
     except Exception as e:
         return False, f"启动失败: {e}"
     try:
         resp_line = await binary_runner.send(sid, line, timeout=timeout)
         parse_response(resp_line)  # 抛 ValueError = 不合法
         return True, "响应合法"
+    except PlatformRunnerError:
+        raise
     except BotCrashedError:
         return False, "Bot 启动后立即退出（stdout EOF）——不符合长驻协议"
     except asyncio.TimeoutError:

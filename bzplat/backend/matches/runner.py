@@ -20,7 +20,12 @@ from bzplat.backend.games import (
 # 游戏规则参数（num_hands/n_dots/board_size/...）经 **match_params 透传，runner 不持有
 # 任何游戏专属默认值（第 4 游戏带新参数无需改本签名）。
 from bzplat.backend.games import _botzone_protocol as _bz
-from bzplat.backend.runtime.binary_runner import BinaryRunner, BotCrashedError, DEFAULT_ACTION_TIMEOUT
+from bzplat.backend.runtime.binary_runner import (
+    BinaryRunner,
+    BotCrashedError,
+    PlatformRunnerError,
+    DEFAULT_ACTION_TIMEOUT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +265,9 @@ class MatchRunner:
                         self.runner, sid, request,
                         game_id=gid, action_timeout=effective_timeout,
                     )
-                except BotCrashedError:
+                except (BotCrashedError, PlatformRunnerError):
+                    # Bot 崩溃向上传播判技术负；平台沙箱故障也必须向上传播，
+                    # 由 orchestrator 中止且不评分，绝不能吞成 Bot 默认动作。
                     raise
                 except asyncio.TimeoutError as exc:
                     # 象棋钟超时（剩余时间用完）→ 判超时负（非可恢复异常）
@@ -349,8 +356,8 @@ class MatchRunner:
                             self.runner, sid_bot, request,
                             game_id=gid, action_timeout=self.action_timeout,
                         )
-                    except BotCrashedError:
-                        # Bot 进程已死——向上传播触发对局 abort
+                    except (BotCrashedError, PlatformRunnerError):
+                        # Bot 崩溃或平台沙箱故障都不可吞成默认动作。
                         raise
                     except Exception as exc:
                         logger.warning("bot %s decide failed: %s", player_idx, exc)
@@ -470,8 +477,8 @@ class MatchRunner:
                             self.runner, sid, request,
                             game_id=gid, action_timeout=self.action_timeout,
                         )
-                    except BotCrashedError:
-                        # Bot 进程已死——向上传播触发对局 abort（与 run_binaries 一致）
+                    except (BotCrashedError, PlatformRunnerError):
+                        # Bot 崩溃或平台沙箱故障都向上传播（与 run_binaries 一致）。
                         raise
                     except Exception as exc:
                         logger.warning("bot decide failed (leg%s seat%s): %s", li, player_idx, exc)

@@ -181,6 +181,14 @@ CREATE TABLE IF NOT EXISTS match_replays (
     updated_at      TEXT    NOT NULL
 );
 
+-- 非赛事 Bot 对局的全局评分结算凭据。match completed 与评分写入分属两个
+-- 事务；本表的 claim 与 ratings/history/pair_stats 同事务，保证重试恰好一次。
+-- matches 已按游戏分表，无法声明单一物理 FK；删除对局时由 Store.delete_match 清理。
+CREATE TABLE IF NOT EXISTS match_rating_settlements (
+    match_id        TEXT    PRIMARY KEY,
+    settled_at      TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ratings (
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     game_id         TEXT    NOT NULL DEFAULT 'holdem',
@@ -448,6 +456,11 @@ TYPE_TABLE = "table"
 TYPE_CONTEST = "contest"
 TYPE_LADDER = "ladder"  # 闲时自动对局维护天梯榜（系统发起，无 owner）
 TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 Glicko）
+
+# match_rating_settlements 内部迁移哨兵：旧库首次升级时先把既有 completed
+# 非赛事对局视为已结算，防启动恢复把历史评分全部重复计算。对局 ID 为时间戳前缀，
+# 不会与此前缀冲突；哨兵与回填在同一 Store 初始化事务提交。
+MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL = "__migration__:rating_settlements:v1"
 
 # 比赛状态
 CONTEST_DRAFT = "draft"

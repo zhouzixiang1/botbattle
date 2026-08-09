@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""通过 HTTP API 接口做完整测试：验证业务正确性与对局稳定性。
+"""通过 HTTP API 做关键业务链路集成测试。
 
 覆盖：
-  1. 完整鉴权流程（验证码 → 注册 → 邮箱验证 → 登录 → /me）
+  1. 无 SMTP 注册回滚契约 + 隔离 DB 专用账号播种 → 验证码登录 → /me
   2. Bot 上传 / 版本 / 上架 / 公开列表
   3. 挑战对局 + 结果完整性（零和、winner、净筹码）
-  4. SSE 实时事件流 vs 落盘回放 events_json 一致性
+  4. 已完成对局的 SSE 终态 snapshot vs 落盘回放 events_json 一致性
   5. 并发多局对局稳定性（同时跑 N 局，互不串味/不崩溃/不超时）
   6. 排行榜 Glicko-2 更新、组织者比赛循环赛
 
 前置：
   - 后端以 BZ_TEST_CAPTCHA=1 启动（captcha 接口返回 answer）
-  - SMTP 可未配置（邮箱验证码走日志/库；本脚本直接读取 email_codes 表）
+  - 后端以 BZ_QA_INSTANCE=1 标记为隔离 QA 实例
+  - 不发送测试邮件：账号在隔离 DB 幂等播种；无 SMTP 注册原子性在独立临时 app 验证
   - BZ_BOT_LOCAL=1（本地跑 ELF，无需 Docker）
 
 用法：
@@ -24,17 +25,46 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from bzplat.backend.crypto import hash_password, verify_password  # noqa: E402
+from bzplat.backend.store import Store  # noqa: E402
+from bzplat.backend.store.schema import ROLE_ADMIN, ROLE_ORGANIZER, ROLE_USER  # noqa: E402
+from scripts._qa_target import (  # noqa: E402
+    assert_qa_instance,
+    ensure_qa_base,
+    qa_db_path,
+    qa_runtime_path,
+)
 
 PASS = 0
 FAIL = 0
 FAILS: list[str] = []
+PASSWORD = "ApiQa1234"
+QA_ACCOUNTS = {
+    "admin": ("apiqa_admin", "apiqa_admin@test.invalid", ROLE_ADMIN, True),
+    "alice": ("apiqa_alice", "apiqa_alice@test.invalid", ROLE_USER, True),
+    "bob": ("apiqa_bob", "apiqa_bob@test.invalid", ROLE_USER, True),
+    "carol": ("apiqa_carol", "apiqa_carol@test.invalid", ROLE_USER, True),
+    "org1": ("apiqa_org1", "apiqa_org1@test.invalid", ROLE_ORGANIZER, True),
+    "unverified": (
+        "apiqa_unverified",
+        "apiqa_unverified@test.invalid",
+        ROLE_USER,
+        False,
+    ),
+}
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -57,37 +87,6 @@ class Api:
     # ── 鉴权 ───────────────────────────────────────────────
     def captcha(self) -> dict:
         r = self.client.get("/api/auth/captcha")
-        r.raise_for_status()
-        return r.json()
-
-    def register(self, username: str, email: str, password: str) -> dict:
-        cap = self.captcha()
-        r = self.client.post("/api/auth/register", json={
-            "username": username, "email": email, "password": password,
-            "captcha_id": cap["captcha_id"], "captcha_answer": cap["answer"],
-        })
-        r.raise_for_status()
-        return r.json()
-
-    def latest_email_code(self, username: str, purpose: str) -> str:
-        """从 DB 读最新验证码（绕过 SMTP）。"""
-        con = sqlite3.connect(self.db_path)
-        con.row_factory = sqlite3.Row
-        u = con.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
-        assert u, f"用户 {username} 不存在"
-        row = con.execute(
-            "SELECT code FROM email_codes WHERE user_id=? AND purpose=? AND used_at IS NULL "
-            "ORDER BY id DESC LIMIT 1", (u["id"], purpose)
-        ).fetchone()
-        con.close()
-        assert row, f"无 {purpose} 验证码 for {username}"
-        return row["code"]
-
-    def verify_email(self, username: str) -> dict:
-        code = self.latest_email_code(username, "verify")
-        r = self.client.post("/api/auth/verify-email", json={
-            "email_or_username": username, "code": code,
-        })
         r.raise_for_status()
         return r.json()
 
@@ -126,47 +125,157 @@ def multipart(fields: dict[str, Any], file_field: str, filename: str, data: byte
     return {"Content-Type": f"multipart/form-data; boundary={boundary}"}, b"".join(parts)
 
 
+def verify_no_smtp_registration_rollback() -> tuple[bool, str]:
+    """Exercise the HTTP registration compensation contract without real SMTP.
+
+    This uses a disposable app/runtime, explicitly forces ``mailer=None`` and runs
+    the same request twice.  It cannot send mail or mutate the target QA database.
+    """
+    from fastapi.testclient import TestClient
+    from bzplat.backend.main import create_app
+
+    with tempfile.TemporaryDirectory(prefix="botbattle-api-register-") as raw_runtime:
+        runtime = Path(raw_runtime)
+        db_path = runtime / "register.db"
+        env = {
+            "BZ_QA_INSTANCE": "1",
+            "BZ_SKIP_CAPTCHA": "1",
+            "BZ_DB_PATH": str(db_path),
+            "BZ_AVATAR_DIR": str(runtime / "avatars"),
+            "BZ_LOG_DIR": str(runtime / "logs"),
+            "SMTP_HOST": "",
+            "SMTP_USER": "",
+            "SMTP_PASSWORD": "",
+            "SMTP_FROM": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            app = create_app(
+                db_path=str(db_path),
+                upload_root=runtime / "bot_uploads",
+            )
+            app.state.auth.mailer = None
+            client = TestClient(app)
+            payload = {
+                "username": "apirollback",
+                "email": "apirollback@test.invalid",
+                "password": PASSWORD,
+                "captcha_id": "skip",
+                "captcha_answer": "skip",
+            }
+            statuses: list[int] = []
+            remains: list[bool] = []
+            try:
+                for _ in range(2):
+                    response = client.post("/api/auth/register", json=payload)
+                    statuses.append(response.status_code)
+                    remains.append(
+                        app.state.store.get_user_by_username("apirollback") is not None
+                    )
+            finally:
+                client.close()
+                app.state.store.close()
+    ok = statuses == [503, 503] and remains == [False, False]
+    return ok, f"statuses={statuses} user_remains={remains}"
+
+
+def seed_qa_accounts(db_path: str) -> dict[str, str]:
+    """Idempotently seed dedicated accounts into an already-isolated QA DB."""
+    resolved_db = qa_db_path(db_path, ROOT)
+    resolved_db.parent.mkdir(parents=True, exist_ok=True)
+    store = Store(str(resolved_db))
+    usernames: dict[str, str] = {}
+    try:
+        for logical, (username, email, role, verified) in QA_ACCOUNTS.items():
+            existing = store.get_user_by_username(username)
+            if existing:
+                if (
+                    existing.get("email") != email
+                    or existing.get("role") != role
+                    or not verify_password(PASSWORD, existing.get("password_hash") or "")
+                ):
+                    raise RuntimeError(
+                        f"拒绝改写已有专用账号 {username!r}：邮箱、角色或密码不匹配"
+                    )
+                user = existing
+            else:
+                user = store.create_user(
+                    username,
+                    email,
+                    hash_password(PASSWORD),
+                    display_name=username,
+                    role=role,
+                )
+            store.update_user(
+                user["id"],
+                email_verified=1 if verified else 0,
+                is_active=1,
+            )
+            usernames[logical] = username
+    finally:
+        store.close()
+    return usernames
+
+
+def bot_artifacts_are_isolated(api: Api, bot_ids: list[int]) -> tuple[bool, str]:
+    """Verify the target service did not persist uploaded binaries in main runtime dirs."""
+    con = sqlite3.connect(f"file:{api.db_path}?mode=ro", uri=True)
+    try:
+        placeholders = ",".join("?" for _ in bot_ids)
+        rows = con.execute(
+            f"SELECT id, binary_path FROM bots WHERE id IN ({placeholders})",
+            bot_ids,
+        ).fetchall()
+    finally:
+        con.close()
+    if len(rows) != len(bot_ids):
+        return False, f"expected={len(bot_ids)} rows={len(rows)}"
+    try:
+        for _bot_id, binary_path in rows:
+            if not binary_path:
+                return False, f"bot {_bot_id} binary_path 为空"
+            qa_runtime_path(str(Path(binary_path).resolve().parent), api.db_path, ROOT, "bot_uploads")
+    except SystemExit as exc:
+        return False, str(exc)
+    return True, ""
+
+
+def match_hands_played(match: dict[str, Any]) -> int:
+    """Read the post-migration result contract, never a removed top-level column."""
+    raw = (match.get("result") or {}).get("hands_played")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def qa_contest_payload(run_id: str) -> dict[str, Any]:
+    """Pin the flow to the single-stage round-robin contract it asserts."""
+    return {
+        "title": f"API QA Cup {run_id}",
+        "template_id": "holdem_rr",
+        "game_id": "holdem",
+    }
+
+
 # ─────────────────────────────────────────────────────────────
 def test_auth_flow(api: Api) -> dict[str, str]:
-    print("\n[1/6] 鉴权流程：验证码 → 注册 → 邮箱验证 → 登录")
+    print("\n[1/6] 鉴权流程：无 SMTP 回滚 → 隔离播种 → 验证码登录")
     users: dict[str, str] = {}
+    rollback_ok, rollback_detail = verify_no_smtp_registration_rollback()
+    check("无 SMTP 注册失败会删除用户且可安全重试", rollback_ok, rollback_detail)
 
-    # 先用 CLI 建一个 admin（跳过邮箱验证），用于后续提权 org1
-    import subprocess
-    subprocess.run(
-        [sys.executable, "-m", "bzplat.backend.cli", "create-admin",
-         "adminroot", "admin@test.local", "Password123!", "--db", api.db_path],
-        check=True, cwd=str(Path(__file__).resolve().parent.parent),
-        capture_output=True,
-    )
-    users["admin"] = api.login("adminroot", "Password123!")
-    check("admin 登录", bool(users["admin"]), "无 token")
+    usernames = seed_qa_accounts(api.db_path)
+    for logical in ("admin", "alice", "bob", "carol", "org1"):
+        token = api.login(usernames[logical], PASSWORD)
+        check(f"专用账号登录 {logical}", bool(token), "无 token")
+        users[logical] = token
 
-    for name in ("alice", "bob", "carol", "org1"):
-        email = f"{name}@test.local"
-        res = api.register(name, email, "Password123!")
-        check(f"注册 {name}", res.get("need_verify") is True, str(res)[:80])
-        res = api.verify_email(name)
-        check(f"邮箱验证 {name}", res.get("ok") is True, str(res)[:80])
-        tok = api.login(name, "Password123!")
-        check(f"登录 {name}", bool(tok), "无 token")
-        users[name] = tok
-
-    # admin 提权 org1 为 organizer
-    con = sqlite3.connect(api.db_path)
-    org1_id = con.execute("SELECT id FROM users WHERE username='org1'").fetchone()[0]
-    con.close()
-    r = api.authed(users["admin"], "POST", "/api/admin/users/%d/role?role=organizer" % org1_id)
-    check("提权 org1 为 organizer", r.status_code == 200 and r.json().get("user", {}).get("role") == "organizer",
-          f"{r.status_code} {r.text[:80]}")
-
-    # 未验证用户不可登录
-    api.register("unverified", "unverified@test.local", "Password123!")
+    # 未验证用户不可登录（该账号由隔离 DB 播种，不调用发信接口）
     # 不验证邮箱直接登录应失败
     try:
         cap = api.captcha()
         r = api.client.post("/api/auth/login", json={
-            "username": "unverified", "password": "Password123!",
+            "username": usernames["unverified"], "password": PASSWORD,
             "captcha_id": cap["captcha_id"], "captcha_answer": cap["answer"],
         })
         check("未验证邮箱登录被拒", r.status_code == 403, f"status={r.status_code}")
@@ -175,19 +284,43 @@ def test_auth_flow(api: Api) -> dict[str, str]:
 
     # /me
     r = api.authed(users["alice"], "GET", "/api/auth/me")
-    check("/me 返回当前用户", r.json().get("user", {}).get("username") == "alice", r.text[:80])
+    check(
+        "/me 返回当前用户",
+        r.json().get("user", {}).get("username") == usernames["alice"],
+        r.text[:80],
+    )
     return users
 
 
-def test_bots(api: Api, users: dict[str, str]) -> dict[str, int]:
+def test_bots(api: Api, users: dict[str, str], run_id: str) -> dict[str, int]:
     print("\n[2/6] Bot 上传 / 版本 / 上架")
     elf = read_sample("samples/callbot_linux_amd64")
     bot_ids: dict[str, int] = {}
+    bot_names = {
+        "AliceBot": f"ApiAlice_{run_id}",
+        "BobBot": f"ApiBob_{run_id}",
+        "CarolBot": f"ApiCarol_{run_id}",
+    }
     for name, tag in (("alice", "AliceBot"), ("bob", "BobBot"), ("carol", "CarolBot")):
-        headers, body = multipart({"name": tag, "is_public": "true"}, "file", "bot.bin", elf)
+        upload_name = bot_names[tag]
+        headers, body = multipart(
+            {"name": upload_name, "is_public": "true"},
+            "file",
+            "bot.bin",
+            elf,
+        )
         r = api.authed(users[name], "POST", "/api/bots", headers=headers, content=body)
-        check(f"上传 {tag}", r.status_code == 200 and "bot" in r.json(), f"{r.status_code} {r.text[:80]}")
+        check(
+            f"上传 {tag} ({upload_name})",
+            r.status_code == 200 and "bot" in r.json(),
+            f"{r.status_code} {r.text[:80]}",
+        )
         bot_ids[tag] = r.json()["bot"]["id"]
+
+    artifacts_ok, artifacts_detail = bot_artifacts_are_isolated(
+        api, list(bot_ids.values())
+    )
+    check("上传文件未落入 primary checkout 运行时目录", artifacts_ok, artifacts_detail)
 
     # 上传第二版本
     headers, body = multipart({"upload_note": "v2"}, "file", "bot.bin", elf)
@@ -219,32 +352,44 @@ def wait_match(api: Api, token: str, mid: str, timeout: float = 90) -> dict:
 def test_single_match(api: Api, users: dict[str, str], bot_ids: dict[str, int]) -> str:
     print("\n[3/6] 单局对局 + 结果完整性")
     r = api.authed(users["alice"], "POST", "/api/matches/challenge", json={
-        "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["BobBot"], "hands": 10,
+        "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["BobBot"],
     })
     check("发起挑战", r.status_code == 200 and "match_id" in r.json(), f"{r.status_code} {r.text[:80]}")
     mid = r.json()["match_id"]
     m = wait_match(api, users["alice"], mid)
     check("对局完成(非 aborted)", m["status"] == "completed", f"status={m['status']} reason={m.get('reason')}")
 
-    # 完整性：earnings 零和
-    ea, eb = int(m["earnings_a"]), int(m["earnings_b"])
-    check("earnings 零和 (ea+eb==0)", ea + eb == 0, f"ea={ea} eb={eb}")
-    # winner 与 earnings 一致
+    # 完整性：三游戏统一结果契约为 result.deltas（旧物理列已删除）。
+    result = m.get("result") or {}
+    deltas = result.get("deltas")
+    valid_deltas = isinstance(deltas, list) and len(deltas) >= 2
+    check("result.deltas 含双方结果", valid_deltas, str(result)[:120])
+    if not valid_deltas:
+        return mid
+    ea, eb = int(deltas[0]), int(deltas[1])
+    check("deltas 零和 (ea+eb==0)", ea + eb == 0, f"ea={ea} eb={eb}")
+    # winner 与 deltas 一致
     if m["winner"] == 0:
         check("winner=0 时 ea>eb", ea > eb, f"ea={ea} eb={eb} winner={m['winner']}")
     elif m["winner"] == 1:
         check("winner=1 时 eb>ea", eb > ea, f"ea={ea} eb={eb} winner={m['winner']}")
     else:
         check("平局 ea==eb", ea == eb, f"ea={ea} eb={eb}")
-    check("net_bb_a == ea/100", abs(m["net_bb_a"] - ea / 100.0) < 1e-6, f"net_bb_a={m['net_bb_a']}")
+    net_bb = result.get("net_bb")
+    check(
+        "result.net_bb == ea/100",
+        net_bb is not None and abs(float(net_bb) - ea / 100.0) < 1e-6,
+        f"net_bb={net_bb}",
+    )
     return mid
 
 
 def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int]) -> None:
-    print("\n[4/6] SSE 事件流 vs 落盘回放一致性")
-    # 发起一局，并在对局完成前尽早订阅 SSE，验证 snapshot 历史是 replay 的前缀
+    print("\n[4/6] SSE 终态 snapshot vs 落盘回放一致性")
+    # 发起并等待一局完成，再订阅 SSE。这里验证终态 snapshot 的完整历史，
+    # 不订阅运行中对局，也不声称覆盖 snapshot 之后的实时增量。
     r = api.authed(users["alice"], "POST", "/api/matches/challenge", json={
-        "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["CarolBot"], "hands": 6,
+        "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["CarolBot"],
     })
     mid = r.json()["match_id"]
 
@@ -259,17 +404,20 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
     check("replay 非空", len(replay) > 0, "空")
     check("replay 以 hand_start 开头", rep_types[:1] == ["hand_start"], str(rep_types[:3]))
     check("replay 以 match_end 结尾", rep_types[-1:] == ["match_end"], str(rep_types[-2:]))
-    # 结构完整性：hand_start 数 == settle 数 == hands_played
+    # 结构完整性：hand_start 数 == settle 数 == result.hands_played
     hs = rep_types.count("hand_start")
     st = rep_types.count("settle")
-    check("replay hand_start==settle==hands_played", hs == st == int(m["hands_played"]),
-          f"hs={hs} settle={st} hands_played={m['hands_played']}")
+    hands_played = match_hands_played(m)
+    check(
+        "replay hand_start==settle==result.hands_played",
+        hands_played > 0 and hs == st == hands_played,
+        f"hs={hs} settle={st} hands_played={hands_played}",
+    )
     # 每手都有 deal_hole
     dh = rep_types.count("deal_hole")
     check("replay deal_hole==hand_start", dh == hs, f"deal_hole={dh} hand_start={hs}")
 
-    # 验证 SSE snapshot 前缀一致性：重新订阅一个已完成的对局，
-    # snapshot 应携带与 replay 完全一致的全部历史事件。
+    # 重新订阅已完成对局；终态 snapshot 应携带与 replay 完全一致的历史事件。
     sse_first: list[dict] = []
     url = f"{api.base}/api/matches/{mid}/events"
     token = users["alice"]
@@ -338,7 +486,7 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
         try:
             barrier.wait()  # 尽量同时发起
             r = api.authed(tok, "POST", "/api/matches/challenge", json={
-                "my_bot_id": a, "opponent_bot_id": b, "hands": 8,
+                "my_bot_id": a, "opponent_bot_id": b,
             })
             if r.status_code != 200:
                 errors[i] = f"challenge {r.status_code} {r.text[:60]}"
@@ -362,14 +510,25 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
     check(f"全部 {n} 局 completed", len(completed) == n,
           f"completed={len(completed)} aborted={sum(1 for m in results.values() if m['status']=='aborted')}")
     # 每局零和
-    zero_sum = all(int(m["earnings_a"]) + int(m["earnings_b"]) == 0 for m in results.values())
-    check("每局 earnings 零和", zero_sum, "存在非零和对局")
+    zero_sum = all(
+        isinstance((m.get("result") or {}).get("deltas"), list)
+        and len((m.get("result") or {})["deltas"]) >= 2
+        and int((m.get("result") or {})["deltas"][0])
+        + int((m.get("result") or {})["deltas"][1]) == 0
+        for m in results.values()
+    )
+    check("每局 result.deltas 零和", zero_sum, "存在缺失或非零和对局")
     # 无重复 match_id
     check("无超时(<120s 总)", dt < 125, f"耗时 {dt:.1f}s")
     print(f"    {n} 局并发总耗时 {dt:.1f}s")
 
 
-def test_leaderboard_and_contest(api: Api, users: dict[str, str], bot_ids: dict[str, int]) -> None:
+def test_leaderboard_and_contest(
+    api: Api,
+    users: dict[str, str],
+    bot_ids: dict[str, int],
+    run_id: str,
+) -> None:
     print("\n[6/6] 排行榜 Glicko + 组织者比赛")
     # 排行榜
     r = api.client.get("/api/leaderboard?limit=20")
@@ -384,7 +543,12 @@ def test_leaderboard_and_contest(api: Api, users: dict[str, str], bot_ids: dict[
         check("存在已参赛 bot", len(played) > 0, "全部 matches_played=0")
 
     # 比赛循环赛
-    r = api.authed(users["org1"], "POST", "/api/contests", json={"title": "API Test Cup", "hands_per_match": 6})
+    r = api.authed(
+        users["org1"],
+        "POST",
+        "/api/contests",
+        json=qa_contest_payload(run_id),
+    )
     check("创建比赛", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
     cid = r.json()["contest"]["id"]
 
@@ -450,8 +614,11 @@ def main() -> int:
         print("✗ 需要指定 --db 或 BZ_DB_PATH（读取验证码表）", file=sys.stderr)
         return 2
 
-    print(f"API 完整测试  base={args.base}  db={args.db}")
-    api = Api(args.base, args.db)
+    base = ensure_qa_base(args.base)
+    db_path = str(qa_db_path(args.db, ROOT))
+    assert_qa_instance(base)
+    print(f"API 关键链路集成测试  base={base}  db={db_path}")
+    api = Api(base, db_path)
 
     # 健康检查
     try:
@@ -462,12 +629,16 @@ def main() -> int:
         print(f"✗ 后端不可达: {e}", file=sys.stderr)
         return 2
 
-    users = test_auth_flow(api)
-    bot_ids = test_bots(api, users)
-    test_single_match(api, users, bot_ids)
-    test_sse_vs_replay(api, users, bot_ids)
-    test_concurrent_matches(api, users, bot_ids, n=4)
-    test_leaderboard_and_contest(api, users, bot_ids)
+    run_id = uuid.uuid4().hex[:8]
+    try:
+        users = test_auth_flow(api)
+        bot_ids = test_bots(api, users, run_id)
+        test_single_match(api, users, bot_ids)
+        test_sse_vs_replay(api, users, bot_ids)
+        test_concurrent_matches(api, users, bot_ids, n=4)
+        test_leaderboard_and_contest(api, users, bot_ids, run_id)
+    finally:
+        api.client.close()
 
     print("\n" + "=" * 60)
     print(f"结果：{PASS} 通过 / {FAIL} 失败")
@@ -476,7 +647,7 @@ def main() -> int:
         for f in FAILS:
             print(f"  - {f}")
         return 1
-    print("✅ ALL API TESTS PASSED")
+    print("✅ ALL CONFIGURED API CHECKS PASSED")
     return 0
 
 

@@ -103,7 +103,8 @@ contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) →
 matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runner(起Bot进程,按game_id路由)
             人类对战：orchestrator.challenge_human/_run_human_match + runner.run_bot_vs_human
             （人类侧经 _human_turns Future + WebSocket /api/matches/{id}/play 回传落子，独立 _human_sem，不计 Glicko）
-            评分副作用：_apply_ratings 在更新 ratings 时顺带落 rating_history（段位趋势）+ 累积 pair_stats 胜负（Bot 详情对手战绩）
+            评分副作用：_apply_ratings 通过 match_rating_settlements 对每场 match 恰好一次结算，
+            在同一事务更新双方 ratings + rating_history（段位趋势）+ pair_stats；启动时补算 completed 未结算场次
             通知副作用：对局完成（非 contest）经 orch.notifier.notify_both_owners 通知双方 owner
 notifications/ 通知管理器：NotificationManager（写站内通知 + 按 prefs 复用 Mailer 发邮件）；表 notifications/notification_prefs
             经验/等级：award_xp 在对局完成/赛事报名/评论/被关注时触发（users.xp/level/last_active_at）
@@ -120,7 +121,7 @@ games/      游戏注册表（全面解耦的单一真相）：base.py(GameSpec 
             通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
             （engine/ + protocol/ + _compat/ 三层冗余 shim 已删——真实现全在 games/）
-            数据集：GET /api/matchpacks[/download]（gzip，等级 gating）+ 站点配置 GET /api/site/info
+            站点配置：GET /api/site/info
 runtime/    沙箱：BinaryRunner(docker/wine/local) + limits
 store/      SQLite + schema.py(常量唯一来源)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
@@ -137,7 +138,7 @@ src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadg
 src/components/ui/select.tsx   shadcn Select（Radix）—— 全站下拉框唯一实现，禁裸用原生 <select>
 src/components/shell/      全局 Shell：AppShell（lg+ 侧栏——登录与访客均显示；auth 页除外；窄屏顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
-src/pages/                 20 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
+src/pages/                 21 个顶层路由，全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
 ```
 改前端务必遵循 [doc/DESIGN.md](doc/DESIGN.md) §5 前端架构：用 `@/components/ui/*` + 语义 token（bg-background/text-primary 等），不裸 hex 不硬编码 slate/brand 颜色。
@@ -172,11 +173,11 @@ src/pages/                 20 个顶层路由，全部用 React.lazy 代码分�
 
 **人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局走独立 `_human_sem`（默认 4，不占 bot 对局槽）、`human_action_timeout`（默认 120s）、**不计 Glicko**、per-user 同时 ≤ 1。
 
-**挑战对战**（统一入口，参考 Botzone）：挑战页一个入口，两个座位——座位 1（先手/黑）只能选 Bot；座位 2（后手/白）可选 Bot **或「我亲自上场」（人类，固定座位 2=后手，`human_seat=1`）**。座位 1 vs 座位 2 都选 Bot → `POST /api/matches/challenge`（`my_bot_id`/`opponent_bot_id` + 可选版本 `my_bot_version_id`/`opponent_bot_version_id`，**自博弈允许**——同 bot 同/不同版本均可）；座位 2 = 人类 → `POST /api/matches/human`（`bot_id`=座位1 bot，`human_seat=1` 固定）。版本路径解析：非 contest 对局从 `match_config._bot_a/b_version_id` 读；contest 从 `contest_pairings.bot_a/b_version_id` 读。`GET /api/bots/{id}/versions` 对非 owner 返回脱敏版本列表。
+**挑战对战**（统一入口，参考 Botzone）：挑战页一个入口，两个座位——座位 1（先手/黑）只能选 Bot；座位 2（后手/白）可选 Bot **或「我亲自上场」（人类，固定座位 2=后手，`human_seat=1`）**。座位 1 vs 座位 2 都选 Bot → `POST /api/matches/challenge`（`my_bot_id`/`opponent_bot_id` + 可选版本 `my_bot_version_id`/`opponent_bot_version_id`，**自博弈允许**——同 bot 同/不同版本均可）；座位 2 = 人类 → `POST /api/matches/human`（`bot_id`=座位1 bot，`human_seat=1` 固定）。版本路径解析：非 contest（含 human/ladder）在创建时把显式版本或当时 current 版本冻结进 `match_config._bot_a/b_version_id`，contest 从 `contest_pairings.bot_a/b_version_id` 读；排队期间上传/回滚不改变执行路径，无 `bot_versions` 行的 legacy Bot 才回退 `bots.binary_path`。`GET /api/bots/{id}/versions` 对非 owner 返回脱敏版本列表。
 
 **座位编号约定**：**展示层从 1 开始**（座位 1/2），**内部 0-indexed**（后端 `winner`/`human_seat` 为 0/1，DB CHECK `winner IN (0,1)`）。前端显示 `+1`（Challenge/HumanPlay/MatchViewer/match-seats/canvas 共 7 处）。
 
-**赛制阶段状态机**：`draft→open→published→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。`published` 是「排期已发布、等待开赛」中间态（报名截止→出排期→到点开打的两阶段）。`ContestScheduler`（`contests/scheduler.py`，挂 main.py lifespan）后台周期扫描赛事 `*_at` 字段，到点自动推进阶段（开放报名/截止报名出排期/到点 dispatch pairing/rest 恢复）；组织者手动按钮始终可提前触发。逐场排期：`contest_pairings.scheduled_at`（NULL=立即可打），`_dispatch_pending` 只 dispatch 到点的 pairing。
+**赛制阶段状态机**：`draft→open→published→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。`published` 是「排期已发布、等待开赛」中间态（报名截止→出排期→到点开打的两阶段）。`ContestScheduler`（`contests/scheduler.py`，挂 main.py lifespan）后台周期扫描赛事 `*_at` 字段，到点自动推进阶段（开放报名/截止报名出排期/到点 dispatch pairing/rest 恢复）；组织者手动按钮始终可提前触发。逐场排期：`contest_pairings.scheduled_at`（NULL=立即可打），`_dispatch_pending` 只 dispatch 到点的 pairing。新阶段首批 pairing（版本快照/bye/排期）与 `current_stage_idx/status` 必须经 Store 单事务批量提交；正式榜清旧/全量写入/`official_results_ready=1` 也必须同事务，启动对账负责补算 `finished+ready=0`。
 
 **组织者实名 + 导出**：`require_real_name` 赛事报名时校验用户实名（`users.real_name/phone/school/student_id`）。`contest_entries_named` JOIN 实名字段，但 `contest_detail` 对**非组织者脱敏**（剔除 real_name/phone/school/student_id）+ 返回 `is_organizer` 标志。`GET /api/contests/{id}/export?format=csv`（**组织者 gated**）：合并导出报名名单（含实名）+ 结果排名 + 战绩一行 CSV（UTF-8 BOM 供 Excel）；任何状态可导出（未完赛 rank 列空）。前端赛程：BracketTree（SVG 连接线，`bracket_slot//2` 拓扑）+ ScheduleTable（一览表）+ 阶段 Tab 显示中文标签 + 进度。
 

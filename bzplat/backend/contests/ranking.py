@@ -73,6 +73,33 @@ def _entry_opponents_map(
     return out
 
 
+def _technical_losses_map(
+    pairings: list[dict], matches: dict[str, dict]
+) -> dict[int, int]:
+    """Count adjudicated technical losses by durable entry identity."""
+    losses: dict[int, int] = {}
+    for pairing in pairings:
+        match_id = pairing.get("match_id")
+        match = matches.get(match_id) if match_id else None
+        if (
+            not match
+            or match.get("status") != "completed"
+            or not int(match.get("technical_loss") or 0)
+        ):
+            continue
+        winner = match.get("winner")
+        if winner == 0:
+            losing_entry = pairing.get("entry_b_id")
+        elif winner == 1:
+            losing_entry = pairing.get("entry_a_id")
+        else:
+            continue
+        if losing_entry is not None:
+            entry_id = int(losing_entry)
+            losses[entry_id] = losses.get(entry_id, 0) + 1
+    return losses
+
+
 def compute_official_ranking(
     standings: list[dict],
     pairings: list[dict],
@@ -91,6 +118,7 @@ def compute_official_ranking(
     # points 查表（entry_id → points）
     pts = {s["entry_id"]: float(s.get("points") or 0) for s in standings}
     opp_map = _entry_opponents_map(pairings, matches)
+    technical_losses = _technical_losses_map(pairings, matches)
 
     rows: list[dict] = []
     for s in standings:
@@ -121,7 +149,7 @@ def compute_official_ranking(
             "sonneborn_berger": sonneborn,
             "head_to_head": h2h_rate,
             "net_bb_per_100": net_bb,
-            "technical_losses": 0,  # P4 落 technical_loss 后填
+            "technical_losses": technical_losses.get(eid, 0),
             "seed": int(s.get("seed") or 0),
         }
         rows.append({**s, "tiebreaks": tiebreaks})
@@ -169,22 +197,24 @@ def persist_official_results(
     stage_idx: int = 0,
     awarded_fn=None,
 ) -> None:
-    """把全员正式名次落库到 contest_official_results（清旧重写，幂等）。"""
-    store.clear_official_results(contest_id)
+    """把全员正式名次作为完整批次原子落库（幂等替换）。"""
+    result_rows: list[dict] = []
     for r in ranking:
-        eid = r["entry_id"]
         awarded = ""
         if awarded_fn:
             awarded = awarded_fn(r) or ""
-        store.upsert_official_result(
-            contest_id,
-            eid,
-            r["rank"],
-            stage_idx=stage_idx,
-            points=r["tiebreaks"]["points"],
-            bot_id=r.get("bot_id"),
-            user_id=r.get("user_id"),
-            tiebreaks_json=json.dumps(r["tiebreaks"], ensure_ascii=False),
-            awarded=awarded,
+        result_rows.append(
+            {
+                "entry_id": r["entry_id"],
+                "rank": r["rank"],
+                "stage_idx": stage_idx,
+                "points": r["tiebreaks"]["points"],
+                "bot_id": r.get("bot_id"),
+                "user_id": r.get("user_id"),
+                "tiebreaks_json": json.dumps(
+                    r["tiebreaks"], ensure_ascii=False
+                ),
+                "awarded": awarded,
+            }
         )
-    store.update_contest(contest_id, official_results_ready=1)
+    store.replace_official_results(contest_id, result_rows)

@@ -19,8 +19,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from _qa_target import assert_qa_instance, qa_base
 
-BASE = "http://127.0.0.1:50380"
+BASE = qa_base("http://127.0.0.1:50381")
+assert_qa_instance(BASE)
 PASS = 0
 FAIL = 0
 RESULTS: list[tuple[str, str, str]] = []  # (name, status, detail)

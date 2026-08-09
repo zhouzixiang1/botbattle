@@ -33,7 +33,6 @@ const NEXT_STATUS: Record<string, string> = {
   published: 'running',
   running: 'finished',
   rest: 'finished',
-  finished: 'cancelled',
 }
 
 export default function ContestsTab() {

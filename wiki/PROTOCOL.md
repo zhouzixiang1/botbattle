@@ -28,7 +28,7 @@ Botzone 有两种运行模式，**上传时标明你的 Bot 用哪一种**：
 
 - **一行一条**：请求和响应都各占完整一行（以 `\n` 结尾）。响应**必须**以换行结尾并**立即 flush** stdout，否则平台会等到超时（60 秒）后判 fold。
 - **紧凑格式**：字段间无多余空白（如 `{"response":0}`，不是 `{ "response": 0 }`）。你的响应不强制紧凑，但建议紧凑。
-- **超时 / 非法响应**：每个决策限时 **60 秒**（管理员可配）。超时、输出非法 JSON 或非法动作，本手判 **fold**（弃牌，response `-1`）。**对局中途进程崩溃 / 主动 exit / EOF** 由引擎**计分判负**（对局 `completed`）；**启动失败**才可能 `aborted`（`bot_crashed`）或赛事 `technical_loss`，见 [对局](#/wiki?slug=guide)。
+- **超时 / 非法响应**：每个决策限时 **60 秒**（管理员可配）。超时、输出非法 JSON 或非法动作，本手判 **fold**（弃牌，response `-1`）。**对局中途进程崩溃 / 主动 exit / EOF** 由引擎**计分判负**（对局 `completed`）；Bot-vs-Bot 的**启动失败**也统一按 `technical_loss` 完成并判崩溃方负，人类对战启动失败才记为 `aborted`（`bot_crashed`）。见 [对局](#/wiki?slug=guide)。
 
 ## 2. 信封格式
 
@@ -204,7 +204,7 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 | `response` 不是合法整数 / 缺失 | 本手判 fold |
 | raise 的额外量换算后低于最小加注额 | 本手判 fold |
 | 对局中途进程崩溃 / 主动退出 / EOF | **计分判负**（对局 `completed`，崩溃方负）；不再吞成默认 fold 继续 |
-| 启动失败（session 起不来） | 非赛事 → `aborted`（`bot_crashed`）；赛事 → `completed` + `technical_loss` |
+| 启动失败（session 起不来） | Bot-vs-Bot → `completed` + `technical_loss`；人类对战 → `aborted`（`bot_crashed`） |
 
 **写作建议**：始终保证输出是单行合法 JSON、以 `\n` 结尾并 flush；遇到无法解析的输入时，回一条最安全的 `{"response":-1}` 比让进程崩溃更稳妥。
 
@@ -251,4 +251,3 @@ char suitCh = "hdsc"[suit]; /* h=♥ d=♦ s=♠ c=♣ */
 - `scores` = [红方得分, 蓝方得分]。
 
 响应：`{"response": {"x": <边的坐标>, "y": <边的坐标>}}`。详见 [点格棋](#/wiki?slug=pencil)。
-

@@ -4,7 +4,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import shutil
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock, RLock
+from typing import Iterator
 
 from ..bots.classify import BinaryRejectError, classify_binary
 from ..store import Store
@@ -30,6 +35,20 @@ class BotManager:
         self.store = store
         self.upload_root = Path(upload_root)
         self.upload_root.mkdir(parents=True, exist_ok=True)
+        self._bot_locks_guard = Lock()
+        self._bot_locks: dict[int, RLock] = {}
+
+    @contextmanager
+    def _bot_version_lock(self, bot_id: int) -> Iterator[None]:
+        """Serialize one Bot's file + DB version transaction within this server.
+
+        Uvicorn serves sync and async endpoints from different execution contexts;
+        a state-only UI guard cannot protect API clients or concurrent browser tabs.
+        """
+        with self._bot_locks_guard:
+            lock = self._bot_locks.setdefault(bot_id, RLock())
+        with lock:
+            yield
 
     def create_from_upload(
         self,
@@ -75,18 +94,26 @@ class BotManager:
             format=info.format,
             game_id=gid,
             runtime_mode=rmode,
+            # Hide the row until its staged binary has passed preflight and the
+            # version commit succeeds.  Otherwise another request can challenge
+            # an unverified upload while this request is still running.
+            is_active=False,
         )
         try:
-            self._write_version(bot["id"], raw, info, upload_note=upload_note, runtime_mode=rmode)
+            self._write_version(
+                bot["id"],
+                raw,
+                info,
+                upload_note=upload_note,
+                runtime_mode=rmode,
+                game_id=gid,
+                binary_runner=binary_runner,
+            )
+            self.store.update_bot(bot["id"], is_active=1)
         except Exception:
+            self.purge_bot_files(bot["id"])
             self.store.delete_bot(bot["id"])
             raise
-        # 预检：试跑 bot 验证响应合法（拒绝明显不合格的二进制）
-        if binary_runner is not None:
-            ok, detail = self._run_preflight(bot["id"], gid, binary_runner)
-            if not ok:
-                self.store.delete_bot(bot["id"])
-                raise BotError("preflight_failed", f"Bot 预检失败：{detail}")
         return self.store.get_bot(bot["id"])
 
     def upload_version(
@@ -97,10 +124,6 @@ class BotManager:
         bot = self.store.get_bot(bot_id)
         if not bot or bot["owner_id"] != owner_id:
             raise BotError("not_found", "bot 不存在")
-        # runtime_mode 缺省沿用 bot 当前模式
-        rmode = (runtime_mode or bot.get("runtime_mode") or DEFAULT_RUNTIME_MODE).strip().lower()
-        if rmode not in VALID_RUNTIME_MODES:
-            raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
         if not raw or len(raw) > MAX_BYTES:
             raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
         info = classify_binary(raw)
@@ -108,82 +131,153 @@ class BotManager:
             raise BotError(
                 "unsupported_binary", info.reject_reason or "不支持的二进制"
             )
-        result = self._write_version(bot_id, raw, info, upload_note=upload_note, runtime_mode=rmode)
-        # 预检
-        if binary_runner is not None:
-            ok, detail = self._run_preflight(bot_id, bot["game_id"], binary_runner)
-            if not ok:
-                # 回滚到上一个版本（删除刚写的版本）
-                self._rollback_version(bot_id)
-                raise BotError("preflight_failed", f"Bot 预检失败：{detail}")
-        return result
+        # 分配版本号、原子落盘、DB 写入和失败回滚必须属于同一 per-bot 临界区。
+        # 否则并发上传会写同一个 vN，或预检失败误删另一请求的新版本。
+        with self._bot_version_lock(bot_id):
+            # Re-read after taking the lock: another tab may have activated a
+            # different version while this request was classifying its payload.
+            bot = self.store.get_bot(bot_id)
+            if not bot or bot["owner_id"] != owner_id:
+                raise BotError("not_found", "bot 不存在")
+            rmode = (
+                runtime_mode or bot.get("runtime_mode") or DEFAULT_RUNTIME_MODE
+            ).strip().lower()
+            if rmode not in VALID_RUNTIME_MODES:
+                raise BotError("invalid_runtime_mode", f"未知运行模式: {rmode}")
+            return self._write_version(
+                bot_id,
+                raw,
+                info,
+                upload_note=upload_note,
+                runtime_mode=rmode,
+                game_id=bot["game_id"],
+                binary_runner=binary_runner,
+            )
 
-    def _run_preflight(self, bot_id: int, game_id: str, binary_runner) -> tuple[bool, str]:
+    def _run_preflight(
+        self,
+        bot_id: int,
+        game_id: str,
+        binary_runner,
+        *,
+        binary_path: str | None = None,
+    ) -> tuple[bool, str]:
         """试跑 bot 验证响应合法（经该游戏的 spec.preflight_check）。"""
         import asyncio
         from bzplat.backend.games import preflight_bot
+        from bzplat.backend.runtime.binary_runner import PlatformRunnerError
 
         bot = self.store.get_bot(bot_id)
-        if not bot or not bot.get("binary_path"):
+        path = binary_path or (bot or {}).get("binary_path")
+        if not bot or not path:
             return True, "无二进制路径，跳过"
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 在已有事件循环中（如 FastAPI）——用 ensure_future
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # Normal API path: BotManager itself runs via asyncio.to_thread,
+                # so this worker owns a fresh event loop and a fresh BinaryRunner.
+                return asyncio.run(preflight_bot(game_id, path, binary_runner))
+            else:
+                # Defensive compatibility for direct synchronous calls made from
+                # an already-running loop: isolate the nested asyncio.run in a worker.
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     return pool.submit(
                         lambda: asyncio.run(
-                            preflight_bot(game_id, bot["binary_path"], binary_runner)
+                            preflight_bot(game_id, path, binary_runner)
                         )
                     ).result()
-            return asyncio.run(preflight_bot(game_id, bot["binary_path"], binary_runner))
+        except PlatformRunnerError:
+            raise
         except Exception as e:
             logger.warning("preflight bot %s failed: %s", bot_id, e)
             return False, f"预检异常: {e}"
 
-    def _rollback_version(self, bot_id: int) -> None:
-        """删除最新版本，回退到上一版本（预检失败时）。"""
-        bot = self.store.get_bot(bot_id)
-        if not bot:
-            return
-        cur_ver = int(bot.get("current_version") or 0)
-        if cur_ver <= 1:
-            return  # 第一版无法回滚
-        # 删除最新版本目录 + DB 记录
-        import shutil
-        dest_dir = self.upload_root / str(bot_id) / f"v{cur_ver}"
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir, ignore_errors=True)
-        self.store.delete_bot_version(bot_id, cur_ver)
-
     def _write_version(
-        self, bot_id: int, raw: bytes, info, *, upload_note: str, runtime_mode: str | None = None
+        self,
+        bot_id: int,
+        raw: bytes,
+        info,
+        *,
+        upload_note: str,
+        runtime_mode: str | None = None,
+        game_id: str | None = None,
+        binary_runner=None,
     ) -> dict:
-        checksum = hashlib.sha256(raw).hexdigest()
-        bot = self.store.get_bot(bot_id)
-        version = int(bot["current_version"]) + 1
-        dest_dir = self.upload_root / str(bot_id) / f"v{version}"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        ext = ".exe" if info.format == "pe" else ".bin"
-        dest = dest_dir / f"bot{ext}"
-        dest.write_bytes(raw)
-        dest.chmod(0o755)
-        self.store.add_bot_version(
-            bot_id,
-            binary_path=str(dest),
-            upload_note=upload_note,
-            checksum=checksum,
-            size_bytes=len(raw),
-            os=info.os,
-            arch=info.arch,
-            format=info.format,
-            runtime_mode=runtime_mode,
-            version=version,
-        )
-        if not self.store.get_rating(bot_id):
-            self.store.ensure_rating(bot_id)
-        return self.store.get_bot(bot_id)
+        with self._bot_version_lock(bot_id):
+            checksum = hashlib.sha256(raw).hexdigest()
+            # 回滚只切换当前激活版本，不删除较新的历史版本。新上传必须接在
+            # 历史最大版本之后；若用 current_version + 1，v2 -> 回滚 v1 后
+            # 再上传会重复插入 v2，触发 bot_versions 唯一约束并返回 500。
+            latest = self.store.get_latest_bot_version(bot_id)
+            version = int(latest["version"]) + 1 if latest else 1
+            bot_dir = self.upload_root / str(bot_id)
+            bot_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir = bot_dir / f"v{version}"
+            if dest_dir.exists():
+                # DB 没有 vN（否则 latest 会包含它），因此这是上次崩溃留下的孤儿。
+                logger.warning("remove orphan bot version directory bot=%s version=%s", bot_id, version)
+                shutil.rmtree(dest_dir)
+
+            temp_dir = Path(tempfile.mkdtemp(prefix=f".v{version}-", dir=bot_dir))
+            ext = ".exe" if info.format == "pe" else ".bin"
+            temp_dest = temp_dir / f"bot{ext}"
+            dest = dest_dir / f"bot{ext}"
+            promoted = False
+            try:
+                temp_dest.write_bytes(raw)
+                temp_dest.chmod(0o755)
+                # Preflight the hidden temporary file before publishing either a
+                # bot_versions row or bots.current_version.  A concurrent match can
+                # therefore only snapshot the last validated active version.
+                if binary_runner is not None:
+                    ok, detail = self._run_preflight(
+                        bot_id,
+                        game_id or (self.store.get_bot(bot_id) or {}).get("game_id"),
+                        binary_runner,
+                        binary_path=str(temp_dest),
+                    )
+                    if not ok:
+                        raise BotError(
+                            "preflight_failed", f"Bot 预检失败：{detail}"
+                        )
+                temp_dir.replace(dest_dir)
+                promoted = True
+                self.store.add_bot_version(
+                    bot_id,
+                    binary_path=str(dest),
+                    upload_note=upload_note,
+                    checksum=checksum,
+                    size_bytes=len(raw),
+                    os=info.os,
+                    arch=info.arch,
+                    format=info.format,
+                    runtime_mode=runtime_mode,
+                    version=version,
+                )
+            except Exception:
+                if promoted:
+                    shutil.rmtree(dest_dir, ignore_errors=True)
+                raise
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            if not self.store.get_rating(bot_id):
+                self.store.ensure_rating(bot_id)
+            return self.store.get_bot(bot_id)
+
+    def activate_version(self, bot_id: int, owner_id: int, version: int) -> dict:
+        """Activate an existing version while excluding upload/preflight rollback."""
+        with self._bot_version_lock(bot_id):
+            bot = self.store.get_bot(bot_id)
+            if not bot:
+                raise BotError("not_found", "bot 不存在")
+            if bot["owner_id"] != owner_id:
+                raise BotError("forbidden", "无权修改他人的 Bot")
+            result = self.store.set_current_version(bot_id, version)
+            if result is None:
+                raise BotError("version_not_found", f"版本 {version} 不存在")
+            return result
 
     def purge_bot_files(self, bot_id: int) -> None:
         """删除 bot 的全部上传文件目录（bot_uploads/<id>/）。
@@ -191,10 +285,10 @@ class BotManager:
         用于硬删 bot（admin_delete_bot）时清理磁盘——避免 DB 行 CASCADE 删了但文件
         留在磁盘变孤儿。软删（is_active=0）不调本方法（保留文件供恢复/历史对局）。
         """
-        import shutil
-        dest = self.upload_root / str(bot_id)
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
+        with self._bot_version_lock(bot_id):
+            dest = self.upload_root / str(bot_id)
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
 
     def list_mine(
         self, owner_id: int, *, game_id: str | None = None,

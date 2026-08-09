@@ -181,7 +181,7 @@ x86_64-w64-mingw32-gcc -O2 -o mybot.exe callbot.c
 
 - **无网络**：沙箱完全断网，任何联网调用都会失败。
 - **资源限制**：内存上限 **512MB**、CPU **1 核**。
-- **磁盘**：根文件系统只读，**仅 `/tmp` 可写且可执行**（如需写临时文件或 PyInstaller 自解压请放 `/tmp`，勿依赖在 `/tmp` 外写文件）。
+- **磁盘**：根文件系统只读，Linux ELF Bot **仅 `/tmp` 可写且可执行**（如需写临时文件或 PyInstaller 自解压请放 `/tmp`）。Windows PE 除 `/tmp` 外会获得 Wine 自身使用的隔离临时 `HOME/WINEPREFIX`；它同样位于限容 tmpfs、对局后销毁，不是持久磁盘。Bot 不应依赖这些路径保留数据。
 - **最小权限**：以非 root 用户运行，无提权能力。
 
 > 结论：Bot 应是**纯计算**程序，只读 stdin、写 stdout，不要尝试联网或依赖持久可写目录。
@@ -206,9 +206,10 @@ echo '{"requests":[{"num_players":2,"dealer_id":0,"my_id":0,"my_chips":19950,"my
 | `raise` 的正整数当成「加注到总额」 | 加注额不对被判 fold | 正整数是**额外下注筹码**（= 目标总额 − 本街已投） |
 | `raise` 换算后总额低于最小加注 | 判 fold | 目标总额 ≥ 上次下注的 2 倍 |
 | LongRunning 首回合没输出握手串 | 平台等待握手行直到超时 | 首回合响应后输出 `>>>BOTZONE_REQUEST_KEEP_RUNNING<<<` |
-| 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负（`completed`）；启动失败非赛事 → `aborted`（`bot_crashed`） | 保持进程存活，出错就回安全默认动作（扑克 `{"response":-1}`） |
+| 进程崩溃 / 主动 exit | 中途崩溃 → 计分判负；Bot-vs-Bot 启动失败 → `completed` + `technical_loss`；人类对战启动失败 → `aborted` | 保持进程存活，出错就回安全默认动作（扑克 `{"response":-1}`） |
 | 上传 macOS 二进制 | 被拒绝 | 交叉编译为 Linux ELF |
 | 依赖联网 / 文件写入 | 调用失败 | 纯计算，只用 stdin/stdout |
+| 依赖 Wine 配置持久化 | 下场对局配置消失 | PE 的 `HOME/WINEPREFIX` 是单场隔离 tmpfs，不持久保存 |
 
 ## 9. 进阶：做更聪明的 Bot
 

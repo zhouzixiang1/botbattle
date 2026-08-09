@@ -11,8 +11,10 @@
 """
 import sys, json
 from pathlib import Path
+from _qa_target import assert_qa_instance, qa_base
 
-BASE = "http://127.0.0.1:50380"
+BASE = qa_base()
+assert_qa_instance(BASE)
 SHOT_DIR = Path("/tmp/bz_shots")
 SHOT_DIR.mkdir(exist_ok=True)
 for f in SHOT_DIR.glob("*.png"):
@@ -31,7 +33,6 @@ PAGES = [
     ("/challenge", 1280, True, "挑战"),
     ("/contests", 1280, True, "赛事"),
     ("/my-bots", 1280, True, "我的Bot"),
-    ("/data", 1280, True, "数据下载"),
     ("/history", 1280, True, "对局历史"),
     ("/notifications", 1280, True, "通知"),
     ("/settings", 1280, True, "设置"),

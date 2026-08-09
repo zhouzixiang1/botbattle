@@ -20,8 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from _qa_target import assert_qa_instance, qa_base
 
-BASE = "http://127.0.0.1:50380"
+BASE = qa_base()
+assert_qa_instance(BASE)
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "browser_shots" / "journey_audit"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -433,7 +435,6 @@ def main() -> int:
         visit(page, "guest", "07_match", f"/match/{match_id}", cons, perrs)
         visit(page, "guest", "08_bot", f"/bot/{bot_id}", cons, perrs)
         visit(page, "guest", "09_user", f"/user/{uname}", cons, perrs)
-        visit(page, "guest", "10_data", "/data", cons, perrs)
         visit(page, "guest", "11_history", "/history", cons, perrs)
 
         # gated pages as guest
@@ -616,7 +617,6 @@ def main() -> int:
 
             visit(page, "user", "11_user_profile", f"/user/{USER[0]}", cons, perrs)
             visit(page, "user", "12_search", "/search?q=tester", cons, perrs)
-            visit(page, "user", "13_data", "/data", cons, perrs)
             visit(page, "user", "14_leaderboard", "/leaderboard", cons, perrs)
             if live_match:
                 visit(page, "user", "16_live_match", f"/match/{live_match}", cons, perrs)

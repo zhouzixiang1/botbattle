@@ -22,6 +22,40 @@ import type { RawEvent } from '@/games/base'
 
 type Ev = Record<string, unknown> & { type?: string }
 
+const TURN_CLOSING_EVENTS = new Set([
+  'move',
+  'action',
+  'pass',
+  'settle',
+  'match_end',
+  'error',
+])
+
+/** Locate the latest human turn in an authoritative replay snapshot.
+ *
+ * The ordinal gives a stable identity to a turn across WebSocket reconnects. It
+ * lets the client keep an already-submitted turn locked when the same snapshot
+ * is replayed, while still unlocking when the snapshot contains a genuinely new
+ * `your_turn` that was missed during the disconnect.
+ */
+function humanTurnCursor(events: Ev[], humanSeat: number): { ordinal: number; pending: boolean } {
+  let ordinal = 0
+  let pending = false
+  for (const ev of events) {
+    if (ev.type === 'your_turn') {
+      if (Number(ev.player) === humanSeat) {
+        ordinal += 1
+        pending = true
+      } else if (pending) {
+        pending = false
+      }
+    } else if (pending && ev.type && TURN_CLOSING_EVENTS.has(ev.type)) {
+      pending = false
+    }
+  }
+  return { ordinal, pending }
+}
+
 /** 默认人类超时（与后端 human_action_timeout 默认 120s 对齐，仅 UI 提示） */
 const HUMAN_TIMEOUT_SEC = 120
 
@@ -103,32 +137,85 @@ export default function HumanPlay() {
   const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
   const [nowTs, setNowTs] = useState(() => Date.now())
   const wsRef = useRef<WebSocket | null>(null)
+  // state drives disabled styling; the ref closes the same-render double-click
+  // window synchronously before React has committed the state update.
+  const [actionSubmitted, setActionSubmitted] = useState(false)
+  const actionSubmittedRef = useRef(false)
+  const turnOrdinalRef = useRef(0)
+  const activeTurnOrdinalRef = useRef<number | null>(null)
   // 重连：网络断开时自动重连（指数退避，≤5 次）。match 结束或组件卸载后停止。
   const overRef = useRef(false)
-  const unmountedRef = useRef(false)
   const [reconnecting, setReconnecting] = useState(false)
 
   useEffect(() => {
     if (!id) return
     overRef.current = false
-    unmountedRef.current = false
+    actionSubmittedRef.current = false
+    activeTurnOrdinalRef.current = null
+    turnOrdinalRef.current = 0
+    setActionSubmitted(false)
+    // 每次 effect 独立的失效标记。不能用共享 ref：React StrictMode cleanup 后新 effect
+    // 会把 ref 重置，旧 socket 的延迟 close 随即误判为仍存活并启动重连风暴。
+    let disposed = false
     let attempt = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
     const connect = () => {
-      if (overRef.current || unmountedRef.current) return
+      if (overRef.current || disposed) return
       if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
       const ws = new WebSocket(playWsUrl(id))
       wsRef.current = ws
       ws.onmessage = (e) => {
+        if (disposed) return
         try {
           const ev = JSON.parse(e.data)
           if (ev.type === 'snapshot') {
             // 重连后服务端重发 snapshot：resync 状态（含已发生事件）
-            setMatch(ev.match || {})
-            setEvents(ev.events || [])
+            attempt = 0
+            const snapshotMatch = (ev.match || {}) as MatchSeatRow
+            const history = (Array.isArray(ev.events) ? ev.events : []) as Ev[]
+            const terminal = history.slice().reverse().find(
+              (item) => item.type === 'match_end' || item.type === 'error',
+            )
+            const terminalStatus = snapshotMatch.status === 'completed' || snapshotMatch.status === 'aborted'
+            const snapshotHumanSeat = snapshotMatch.human_seat ?? 1
+            const cursor = humanTurnCursor(history, snapshotHumanSeat)
+            turnOrdinalRef.current = cursor.ordinal
+            setMatch(snapshotMatch)
+            setEvents(history)
             setReconnecting(false)
+            if (terminal || terminalStatus) {
+              actionSubmittedRef.current = true
+              setActionSubmitted(true)
+              setOver(true)
+              overRef.current = true
+              setTurnDeadline(null)
+              setEndInfo({
+                winner: (terminal?.winner ?? snapshotMatch.winner) as number | null | undefined,
+                reason: String(terminal?.reason || terminal?.message || snapshotMatch.reason || ''),
+              })
+              // 服务端 pump 在 terminal event 后结束，但 handler 仍等待 receive_json；
+              // 客户端确认快照为终态后主动关闭，触发后端 finally 取消订阅。
+              ws.close(1000, 'match complete')
+            } else {
+              setOver(false)
+              setEndInfo(null)
+              if (cursor.pending && activeTurnOrdinalRef.current !== cursor.ordinal) {
+                // First authoritative view of this turn (initial load or a turn
+                // missed while disconnected): the user must be able to act.
+                activeTurnOrdinalRef.current = cursor.ordinal
+                actionSubmittedRef.current = false
+                setActionSubmitted(false)
+                setError('')
+              } else if (!cursor.pending) {
+                // No action is currently legal. Preserve the submitted lock; the
+                // next live `your_turn` is the only normal path that unlocks it.
+                activeTurnOrdinalRef.current = cursor.ordinal
+              }
+            }
           } else if (ev.type === 'match_end' || ev.type === 'error') {
+            actionSubmittedRef.current = true
+            setActionSubmitted(true)
             setEvents((prev) => [...prev, ev])
             setOver(true)
             overRef.current = true
@@ -139,7 +226,7 @@ export default function HumanPlay() {
             })
             setMatch((prev) => prev ? {
               ...prev,
-              status: 'completed',
+              status: ev.type === 'error' ? 'aborted' : 'completed',
               winner: ev.winner as number | null | undefined,
               result: {
                 ...(prev.result || {}),
@@ -149,21 +236,35 @@ export default function HumanPlay() {
                 ],
               },
             } : prev)
+            setReconnecting(false)
+            // 终态后不再需要双向通道；主动关闭令后端 receive_json 退出并 unsubscribe。
+            ws.close(1000, 'match complete')
           } else {
             setEvents((prev) => [...prev, ev])
             setReconnecting(false)
             if (ev.type === 'your_turn') {
+              turnOrdinalRef.current += 1
+              activeTurnOrdinalRef.current = turnOrdinalRef.current
+              actionSubmittedRef.current = false
+              setActionSubmitted(false)
+              setError('')
               setTurnDeadline(Date.now() + HUMAN_TIMEOUT_SEC * 1000)
+            } else if (ev.type === 'reject') {
+              // The backend explicitly did not consume this frame, so this same
+              // turn may be retried. Do not unlock for ordinary action/move events.
+              actionSubmittedRef.current = false
+              setActionSubmitted(false)
+              setError(String(ev.message || '动作未被接受，请重试。'))
             }
           }
         } catch {
           /* ignore parse error */
         }
       }
-      ws.onerror = () => setError('连接异常')
+      ws.onerror = () => { if (!disposed) setError('连接异常') }
       ws.onclose = () => {
         // match 结束后服务端正常关闭；否则尝试重连
-        if (overRef.current || unmountedRef.current) return
+        if (overRef.current || disposed) return
         attempt += 1
         if (attempt > 5) {
           setError('连接已断开，重连失败。请刷新页面。')
@@ -176,9 +277,11 @@ export default function HumanPlay() {
         reconnectTimer = setTimeout(connect, delay)
       }
     }
-    connect()
+    // 推迟到当前任务结束：StrictMode 的探测性首轮 effect 会先 cleanup 并取消定时器，
+    // 避免创建后立即关闭 CONNECTING socket 所产生的 Console warning。
+    reconnectTimer = setTimeout(connect, 0)
     return () => {
-      unmountedRef.current = true
+      disposed = true
       if (reconnectTimer) clearTimeout(reconnectTimer)
       if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     }
@@ -197,22 +300,7 @@ export default function HumanPlay() {
 
   const myTurn = useMemo(() => {
     if (over) return false
-    let pendingIdx = -1
-    for (let i = 0; i < events.length; i++) {
-      const ev = events[i]
-      if (ev.type === 'your_turn' && Number(ev.player) === humanSeat) {
-        pendingIdx = i
-      } else if (pendingIdx >= 0) {
-        if (
-          ev.type === 'move' || ev.type === 'action' || ev.type === 'pass' ||
-          ev.type === 'settle' || ev.type === 'match_end' || ev.type === 'error' ||
-          ev.type === 'your_turn'
-        ) {
-          pendingIdx = -1
-        }
-      }
-    }
-    return pendingIdx >= 0
+    return humanTurnCursor(events, humanSeat).pending
   }, [events, humanSeat, over])
 
   // 最近 your_turn.request（德州合法动作 / to_call）
@@ -228,17 +316,29 @@ export default function HumanPlay() {
   }, [events, humanSeat, myTurn])
 
   const sendMove = (move: Record<string, unknown>) => {
-    if (!myTurn) return
+    if (!myTurn || actionSubmittedRef.current) return
     // 检查连接状态：socket 已关闭时给明确反馈，否则动作被静默吞掉（用户以为出了牌）。
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('连接已断开，动作未发送。请刷新页面重连。')
       return
     }
-    wsRef.current.send(JSON.stringify(move))
-    setTurnDeadline(null)
+    actionSubmittedRef.current = true
+    setActionSubmitted(true)
+    setError('')
+    try {
+      wsRef.current.send(JSON.stringify(move))
+      setTurnDeadline(null)
+    } catch {
+      // OPEN can race with a transport close. No frame was accepted, so keep the
+      // current turn retryable and surface a concrete connection error.
+      actionSubmittedRef.current = false
+      setActionSubmitted(false)
+      setError('连接已断开，动作未发送。请刷新页面重连。')
+    }
   }
 
   const isBoard = isBoardGame(gameId)
+  const canSubmitAction = myTurn && !actionSubmitted
   const remainSec = turnDeadline ? Math.max(0, Math.ceil((turnDeadline - nowTs) / 1000)) : null
 
   // 结局摘要：经注册表 spec.reduce（消除 gameId=== if-chain）
@@ -275,7 +375,7 @@ export default function HumanPlay() {
               对局结束 · 胜者：{winnerLabel}
               {endInfo?.reason ? `（${endInfo.reason}）` : ''}
             </span>
-          ) : myTurn ? (
+          ) : canSubmitAction ? (
             <span className="flex items-center gap-1 font-medium text-success">
               <PlayCircle className="size-4" />
               轮到你落子
@@ -285,6 +385,8 @@ export default function HumanPlay() {
                 </span>
               )}
             </span>
+          ) : actionSubmitted && myTurn ? (
+            <span className="text-muted-foreground">动作已提交，等待裁判处理…</span>
           ) : (
             <span className="text-muted-foreground">等待中…</span>
           )}
@@ -316,7 +418,7 @@ export default function HumanPlay() {
               events={events}
               seats={seats}
               onMove={(x, y) => sendMove({ x, y })}
-              interactive={myTurn}
+              interactive={canSubmitAction}
             />
           </div>
           <EventLogCard id={id} events={events} />
@@ -334,8 +436,8 @@ export default function HumanPlay() {
             revealMode="showdown"
           />
           <HoldemActions
-            disabled={!myTurn || over}
-            legal={myTurn}
+            disabled={!canSubmitAction || over}
+            legal={canSubmitAction}
             request={turnRequest}
             onAct={(a, x) => {
               // 人类德州动作 → Botzone 标准整数（协议层只接受 -1/-2/0/>0）。
@@ -375,12 +477,12 @@ function EventLogCard({ id, events }: { id?: string; events: Ev[] }) {
             <div key={i} className="flex items-center gap-2 rounded px-2 py-1 text-muted-foreground">
               <span className="w-16 shrink-0 opacity-60">{ev.type}</span>
               <span className="min-w-0 flex-1 truncate opacity-80">
-                {ev.type === 'action' ? `座${ev.player} · ${ev.action}` : ''}
-                {ev.type === 'move' ? `座${ev.player} · (${ev.x},${ev.y})` : ''}
+                {ev.type === 'action' ? `座${displaySeat(ev.player)} · ${ev.action}` : ''}
+                {ev.type === 'move' ? `座${displaySeat(ev.player)} · (${ev.x},${ev.y})` : ''}
                 {ev.type === 'your_turn' ? '轮到你' : ''}
-                {ev.type === 'settle' ? `赢家 座${(ev.winners as number[] | undefined)?.join('/')}` : ''}
+                {ev.type === 'settle' ? `赢家 座${(ev.winners as unknown[] | undefined)?.map(displaySeat).join('/') || '?'}` : ''}
                 {ev.type === 'hand_start' ? `第 ${(Number(ev.hand) || 0) + 1} 手` : ''}
-                {ev.type === 'match_end' ? `结束 · 胜者 ${ev.winner ?? '平'}` : ''}
+                {ev.type === 'match_end' ? `结束 · 胜者 ${ev.winner == null ? '平' : `座${displaySeat(ev.winner)}`}` : ''}
                 {ev.type === 'error' ? String(ev.message || '') : ''}
               </span>
             </div>
@@ -392,6 +494,12 @@ function EventLogCard({ id, events }: { id?: string; events: Ev[] }) {
       </Button>
     </Card>
   )
+}
+
+function displaySeat(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '?'
+  const n = Number(value)
+  return Number.isFinite(n) ? String(n + 1) : '?'
 }
 
 function HoldemActions({
@@ -439,6 +547,7 @@ function HoldemActions({
           max={myChips}
           className="w-24"
           value={raiseTo}
+          disabled={dis}
           onChange={(e) => setRaiseTo(Number(e.target.value))}
         />
       </Label>

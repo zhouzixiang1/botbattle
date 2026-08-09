@@ -64,7 +64,7 @@ const AUTH_PATHS = ['/login', '/register', '/verify-email', '/reset-password']
 /** 主导航列表（桌面侧栏与移动抽屉共用）。 */
 function navItemsFor(user?: { role?: string } | null): NavItem[] {
   const items = [...NAV_ITEMS]
-  if (user?.role === 'admin' || user?.role === 'organizer') items.push(ADMIN_NAV)
+  if (user?.role === 'admin') items.push(ADMIN_NAV)
   return items
 }
 
@@ -287,7 +287,7 @@ export function AppShell() {
             <div className={cn('flex items-center gap-1', isAuthPage ? 'ml-auto' : 'ml-auto')}>
               {!isAuthPage && (
                 <div className="hidden sm:block">
-                  <GlobalSearch />
+                  <GlobalSearch hotkey />
                 </div>
               )}
               <ThemeToggle />

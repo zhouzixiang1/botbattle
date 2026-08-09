@@ -78,6 +78,10 @@ export default function MatchViewer() {
   // 避免在 setEvents updater 内部触发 setStepIdx（React updater 须为纯函数；
   // 审计 P1-D 反模式修复）。
   const eventsLenRef = useRef(0)
+  // Bot 对局可能在一个渲染帧内产生数百条 SSE 消息。逐条 setEvents 会触发
+  // React 的 nested-update 保护；先入队、每帧合并一次，match_end 到达时同步冲刷。
+  const pendingEventsRef = useRef<RawEvent[]>([])
+  const flushFrameRef = useRef<number | null>(null)
 
   // 直播 SSE / 回放加载（一次性探测状态，决定模式）
   const isLiveMatch = match?.status === 'running' || match?.status === 'pending'
@@ -90,7 +94,34 @@ export default function MatchViewer() {
     setStepIdx(-1)
     setPlaying(false)
     let cancelled = false
+    let terminalClosed = false
     let es: EventSource | null = null
+
+    const cancelFlush = () => {
+      if (flushFrameRef.current !== null) cancelAnimationFrame(flushFrameRef.current)
+      flushFrameRef.current = null
+    }
+    const takePending = () => {
+      cancelFlush()
+      const batch = pendingEventsRef.current
+      pendingEventsRef.current = []
+      return batch
+    }
+    const flushPending = () => {
+      flushFrameRef.current = null
+      if (cancelled) return
+      const batch = pendingEventsRef.current
+      pendingEventsRef.current = []
+      if (!batch.length) return
+      eventsLenRef.current += batch.length
+      setEvents((prev) => [...prev, ...batch])
+    }
+    const queueEvent = (ev: RawEvent) => {
+      pendingEventsRef.current.push(ev)
+      if (flushFrameRef.current === null) {
+        flushFrameRef.current = requestAnimationFrame(flushPending)
+      }
+    }
 
     // 浏览计数（公开，失败忽略）
     void apiPost(`/api/matches/${encodeURIComponent(id)}/view`, 'POST', {}).catch(() => undefined)
@@ -111,26 +142,45 @@ export default function MatchViewer() {
             try {
               const ev = JSON.parse(msg.data) as RawEvent
               if (ev.type === 'snapshot') {
-                if (ev.match) setMatch(ev.match as MatchRow)
+                takePending()
+                const snapshotMatch = ev.match as MatchRow | undefined
+                if (snapshotMatch) setMatch(snapshotMatch)
                 const hist = Array.isArray(ev.events) ? (ev.events as RawEvent[]) : []
                 const sliced = hist.slice(-4000)
                 eventsLenRef.current = sliced.length
                 setEvents(sliced)
-                setStepIdx(-1); setPlaying(true)
+                const terminal = snapshotMatch?.status === 'completed' || snapshotMatch?.status === 'aborted'
+                if (terminal) {
+                  // 初始详情仍是 live、订阅瞬间已结束：snapshot 是唯一终态信号。
+                  // 切换到普通回放并主动关闭 EventSource，避免浏览器自动重连。
+                  setStatus('replay')
+                  setStepIdx(sliced.length > 0 ? 0 : -1)
+                  setPlaying(sliced.length > 0)
+                  terminalClosed = true
+                  es?.close()
+                } else {
+                  setStatus('live')
+                  setStepIdx(-1); setPlaying(true)
+                }
               } else if (ev.type === 'match_end' || ev.type === 'error') {
                 // match_end/error 时游标停当前位置（不跳尾）：
                 // 在追加该事件前，把游标钉在当时看到的最后一条；停止自动播放。
                 // 否则 stepIdx=-1(贴尾) 会因 match_end 入列 total+1 而跳到尾部结局。
                 // 用 ref 读「追加前长度」算游标，避免在 setEvents updater 内部
                 // 触发 setStepIdx（React updater 须为纯函数；审计 P1-D）。
-                if (eventsLenRef.current > 0) setStepIdx(eventsLenRef.current - 1)
-                eventsLenRef.current += 1
-                setEvents((prev) => [...prev, ev])
+                const queued = takePending()
+                const beforeEnd = eventsLenRef.current + queued.length
+                if (beforeEnd > 0) setStepIdx(beforeEnd - 1)
+                eventsLenRef.current = beforeEnd + 1
+                setEvents((prev) => [...prev, ...queued, ev])
                 setPlaying(false)
                 // 回写胜者/earnings 到 match，避免顶栏一直「—」
                 setMatch((prev) => {
                   if (!prev) return prev
-                  const patch: MatchRow = { ...prev, status: 'completed' }
+                  const patch: MatchRow = {
+                    ...prev,
+                    status: ev.type === 'error' ? 'aborted' : 'completed',
+                  }
                   if (ev.winner !== undefined) patch.winner = ev.winner as number | null
                   // match_end 事件的 earnings_a/b 回写进 result.deltas（取代旧 earnings_a/b 列）
                   if (ev.earnings_a !== undefined || ev.earnings_b !== undefined) {
@@ -142,18 +192,26 @@ export default function MatchViewer() {
                       ],
                     }
                   }
-                  if (ev.reason) patch.reason = String(ev.reason)
+                  const eventReason = ev.reason ?? ev.message
+                  if (eventReason) patch.reason = String(eventReason)
                   return patch
                 })
-                setStatus(String(ev.type)); es?.close()
+                setStatus(String(ev.type))
+                terminalClosed = true
+                es?.close()
               } else {
-                // 常规事件（落子/判决等）：追加
-                eventsLenRef.current += 1
-                setEvents((prev) => [...prev, ev])
+                // 常规事件（落子/判决等）：逐帧批量追加，避免瞬时对局触发深度更新告警。
+                queueEvent(ev)
               }
             } catch { /* ignore */ }
           }
-          es.onerror = () => { setStatus((s) => (s === 'match_end' ? s : 'error')); es?.close() }
+          es.onerror = () => {
+            if (cancelled || terminalClosed) return
+            // Native EventSource reconnects automatically after a transient
+            // transport failure. Keep it alive and expose a connecting state;
+            // the next authoritative snapshot restores `live` above.
+            setStatus('connecting')
+          }
         } else {
           setStatus('replay'); setStepIdx(evs.length > 0 ? 0 : -1); setPlaying(evs.length > 0)
         }
@@ -161,7 +219,12 @@ export default function MatchViewer() {
       .catch((e) => { if (!cancelled) { setError(errMsg(e)); setStatus('error') } })
       .finally(() => { if (!cancelled) setLoading(false) })
 
-    return () => { cancelled = true; es?.close() }
+    return () => {
+      cancelled = true
+      cancelFlush()
+      pendingEventsRef.current = []
+      es?.close()
+    }
   }, [id])
 
   // 窄屏默认折叠时序面板（不影响桌面布局）
@@ -328,8 +391,11 @@ export default function MatchViewer() {
             <span className="font-medium text-foreground">{winnerLabel}</span>
           </span>
         )}
-        {match?.reason && (match.status === 'aborted' || status === 'error') && (
-          <span className="text-xs text-destructive">原因：{match.reason}</span>
+        {match?.reason && match.reason !== 'completed' && (
+          <span className="inline-flex items-center gap-1 text-xs text-destructive">
+            <TriangleAlert className="size-3" />
+            原因：{match.reason}
+          </span>
         )}
         {match?.result?.bot_decide_errors && (
           <span className="inline-flex items-center gap-1 text-xs text-warning">
@@ -504,14 +570,23 @@ export default function MatchViewer() {
 
 function eventDesc(ev: RawEvent): string {
   const ACTION: Record<string, string> = { fold: '弃牌', check: '过牌', call: '跟注', raise: '加注', allin: '全押' }
-  if (ev.type === 'action') return `座${ev.player} · ${ACTION[String(ev.action)] ?? ev.action}${ev.amount ? ' ' + String(ev.amount) : ''}`
-  if (ev.type === 'move') return `座${ev.player} · (${ev.x},${ev.y})${ev.scored ? ' · 得分连走' : ''}`
-  if (ev.type === 'settle') return `赢家 座${(ev.winners as number[] | undefined)?.join('/') ?? '?'} · 底池 ${ev.pot}`
+  if (ev.type === 'action') return `座${displaySeat(ev.player)} · ${ACTION[String(ev.action)] ?? ev.action}${ev.amount ? ' ' + String(ev.amount) : ''}`
+  if (ev.type === 'move') return `座${displaySeat(ev.player)} · (${ev.x},${ev.y})${ev.scored ? ' · 得分连走' : ''}`
+  if (ev.type === 'settle') {
+    const winners = (ev.winners as unknown[] | undefined)?.map(displaySeat).join('/') || '?'
+    return `赢家 座${winners} · 底池 ${ev.pot}`
+  }
   if (ev.type === 'hand_start') return `第 ${(Number(ev.hand) || 0) + 1} 手开始`
   if (ev.type === 'deal_board') return `${ev.street}: ${(ev.dealt as string[] | undefined)?.join(' ')}`
   if (ev.type === 'deal_hole') return '发底牌'
   if (ev.type === 'match_start') return '对局开始'
-  if (ev.type === 'match_end') return `结束 · 胜者 ${ev.winner ?? '平'}`
-  if (ev.type === 'turn') return `轮到座${ev.player}`
+  if (ev.type === 'match_end') return `结束 · 胜者 ${ev.winner == null ? '平' : `座${displaySeat(ev.winner)}`}`
+  if (ev.type === 'turn') return `轮到座${displaySeat(ev.player)}`
   return ev.type || '?'
+}
+
+function displaySeat(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '?'
+  const n = Number(value)
+  return Number.isFinite(n) ? String(n + 1) : '?'
 }

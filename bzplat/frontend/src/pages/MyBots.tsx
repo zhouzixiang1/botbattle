@@ -218,8 +218,11 @@ export default function MyBots() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 required
-                pattern="[A-Za-z0-9_\-]+"
+                minLength={2}
+                maxLength={32}
+                pattern="[A-Za-z][A-Za-z0-9_]{1,31}"
               />
+              <p className="text-xs text-muted-foreground">2–32 位，字母开头，仅可含字母、数字和下划线</p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="upload-display">显示名</Label>

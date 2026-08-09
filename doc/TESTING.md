@@ -1,106 +1,104 @@
 # 测试文档
 
-> 本文档包含测试计划（策略/范围/用例设计）与测试报告（执行结果/缺陷/结论），证明平台满足验收准则。
+> 本文档同时记录测试策略与本轮 QA 证据。测试数量随分支持续变化；发布前的权威数字必须来自目标提交上的 `pytest --collect-only -q` 与 `npm run test:e2e -- --list`，不得沿用历史手填数量。
 
 ## 1. 测试策略
 
-采用**多层测试金字塔**，从单元到端到端全覆盖：
+采用从契约到真实浏览器的多层验证：
 
 | 层级 | 工具 | 范围 | 目的 |
 |------|------|------|------|
-| **单元测试** | pytest | 后端模块（Store/引擎/协议/赛制/通知/社交/评分） | 验证各模块逻辑正确 |
-| **集成测试** | pytest + TestClient | API 端点（鉴权/请求/响应/状态码） | 验证模块间协作 |
-| **架构契约** | pytest 源码扫描 + AST + 导入序 | 游戏解耦 / 结果鸭子类型 / 无循环依赖 / match_config+result 双 JSON 通路 | 防止通用层重新耦合 + 死列/具名参数回退 |
-| **端到端冒烟** | `scripts/e2e_smoke.sh` | 完整流程（注册→上传→挑战→赛事） | 验证核心链路打通 |
-| **API 全量测试** | `scripts/api_full_test.py` | HTTP API 业务正确性（鉴权/上传/挑战/SSE 一致性/并发） | 验证 API 层端到端正确 |
-| **大规模压测** | `scripts/load_test.py` | 60 用户 × 8 阶段全端点 | 验证功能正确性 + 并发承受 |
-| **浏览器验收** | `scripts/browser_verify.py` / `screenshot_verify.py` | 路由渲染 + 暗色 + 移动端 + 截图 | 验证前端渲染与交互 |
+| **单元测试** | pytest | Store、裁判/适配层、协议、评分、通知、社交、赛制 | 验证底层逻辑与边界 |
+| **集成测试** | pytest + TestClient | 鉴权、REST、SSE、WebSocket、生命周期与持久化 | 验证模块协作和错误状态 |
+| **架构契约** | pytest 源码扫描 + AST + 导入序 | 游戏注册表、结果鸭子类型、无循环依赖、通用层无游戏分支 | 防止解耦架构回退 |
+| **隔离端到端冒烟** | `scripts/e2e_smoke.sh` | 临时 DB/uploads/avatars/logs 下的上传→挑战→赛事；挑战必须 `completed` 且 `result.deltas` 为双数值零和 | 验证核心链路且不写 checkout/主库，`aborted` 不得假通过 |
+| **API 关键链路脚本** | `scripts/api_full_test.py` | 注册回滚、播种、上传、挑战、SSE 终态 snapshot、并发、循环赛 | 验证所列 HTTP 业务链路可重复运行；不声称覆盖实时 SSE 增量或全部端点 |
+| **真浏览器回归** | Playwright + Chromium | 访客/玩家/组织者/admin 的导航、表单、CRUD、赛事、实时通信 | 用真实 DOM、Console、Network 验证用户行为 |
+| **多局/赛事容量脚本** | `scripts/load_test.py` / `contest_stress.py` | 多用户、多游戏、多局终态；draft 名册容量与赛制估算 | 验证所列链路与容量；默认不证明持续打满并发或真实大赛排期 |
 
-## 2. 测试范围
+## 2. 后端测试范围
 
-### 2.1 后端单元/集成测试（55 个 `test_*.py`）
+配置由 `pyproject.toml` 指定：`testpaths=["bzplat/backend/tests"]`、`pythonpath=["."]`，必须从仓库根运行。当前模块与用例总数不在文档中写死，最终以以下命令为准：
 
-配置：`pyproject.toml` 设 `testpaths=["bzplat/backend/tests"]`，`pythonpath=["."]`，**须从仓库根运行 `pytest`**。
-（`tests/` 为预留路径，当前用例均在 `bzplat/backend/tests/`。）
+```bash
+rg --files bzplat/backend/tests -g 'test_*.py' | wc -l
+pytest --collect-only -q
+pytest
+```
 
-| 类别 | 测试文件 |
-|------|----------|
-| **架构契约（解耦守护）** | `test_result_contract`、`test_game_registry`、`test_import_cycles`、`test_tongyong_layer_no_game_branches`、`test_despecialization`、`test_physical_reorg`、`test_db_layer_extensibility` |
-| **数据层 / 迁移** | `test_store`、`test_db_migration`（含 FK 全局开 + 孤儿清理 + 去重索引 + 删孤儿表） |
-| **认证 / 安全** | `test_auth`、`test_security_logging`、`test_logging`、`test_audit_coverage`（含赛事崩溃判责）、`test_real_name`、`test_no_private_bot` |
-| **引擎 / 协议** | `test_engine`、`test_board_engines`、`test_result_types`、`test_protocol`、`test_judge_params` |
-| **运行时** | `test_runtime`、`test_runtime_settings` |
-| **编排 / 人类** | `test_human_match`（含 resolve_human_turn 竞态）、`test_auto_matcher`、`test_match_seat_names`、`test_matches_pagination`、`test_api_game_filter`、`test_organizer_add_entry` |
-| **赛事** | `test_contest_templates`、`test_contest_stages`、`test_contest_bracket`、`test_contest_entry_identity`、`test_contest_ranking`、`test_contest_runtime`、`test_contest_template_seed`、`test_contest_version_freeze`、`test_game_templates`、`test_admin_assign_entries`、`test_prelim_final`、`test_swiss_scale` |
-| **社交 / 通知 / 成长** | `test_notifications`、`test_comments_likes`、`test_social`、`test_user_profile_search`、`test_user_search`、`test_bot_profile`、`test_xp_level`、`test_tiers`、`test_settings_mybots` |
-| **数据与站点** | `test_matchpacks_site`、`test_load_test_seed`、`test_wiki_pages` |
+主要守护面：
 
-### 2.2 大规模压测 8 阶段覆盖矩阵（`scripts/load_test.py`）
+| 类别 | 代表性测试 |
+|------|------------|
+| **架构解耦** | `test_result_contract`、`test_game_registry`、`test_import_cycles`、`test_tongyong_layer_no_game_branches`、`test_db_layer_extensibility` |
+| **固定规则与协议** | `test_engine`、`test_board_engines`、`test_protocol`、`test_judge_params`；holdem=70、gomoku=15×15、pencil=N=6 |
+| **认证/安全/审计** | `test_auth`、`test_store`、`test_security_logging`、`test_logging`、`test_audit_coverage`、`test_real_name`；密码重置覆盖邮箱码/管理员 token、双 Store 并发单赢家、session 删除故障整事务回滚及过期凭据不消费 |
+| **编排/实时通信** | `test_human_match`、`test_auto_matcher`、`test_match_seat_names`、SSE/WS 终态关闭与 shutdown 收敛 |
+| **崩溃语义** | 中途崩溃（含 human）=`completed + reason=crash`；Bot-vs-Bot 启动失败=`technical_loss`；human 启动失败=`aborted` |
+| **赛事一致性** | `test_contest_*`、`test_scheduler_*`、`test_swiss_scale`：并发报名/派发、发布/开赛 Bot 可用性闸门、版本冻结、两阶段 prepare→bind→start 补偿、admin abort 复位 pairing 且不晋级、单侧缺 Bot 技术判负/双侧缺 Bot 阻塞、published 残缺批次恢复、后续 stage 与 Swiss/KO 后续整轮批次原子提交、Swiss 实际座位轮换、正式榜技术负破同分/完整替换与 `finished+ready=0` 重启补算、安全 finish/delete |
+| **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot/赛事存在活跃引用时拒绝硬删；批量指派做字段与归属校验 |
+| **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员 |
+| **社交/通知/成长/站点** | `test_notifications`、`test_comments_likes`、`test_social`、`test_xp_level`、`test_tiers`、`test_load_test_seed`、`test_wiki_pages` |
 
-| 阶段 | 内容 |
+## 3. Playwright 真浏览器回归
+
+### 3.1 套件结构
+
+`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 20 条浏览器测试：
+
+| Spec | 重点 |
 |------|------|
-| 0 基础 | 公开读 + 鉴权 + 通知 + 评论/点赞/浏览 + 改密码 |
-| 1 Bot | 上传/版本/激活/更新/删除 + profile/opponents/rating-history |
-| 2 对局 | 三游戏（holdem/gomoku/pencil）混跑 + 自博弈 |
-| 3 SSE | 实时观赛事件流（snapshot + 增量） |
-| 4 人类 | WebSocket /play 三游戏 + 不计 Glicko + per-user ≤1 |
-| 5 赛事 | create/open/register/dispatch/start/finished/detail/bracket 全生命周期 |
-| 6 auto-match | ladder 闲时调度（admin 开关 + 催化配置） |
-| 7 Admin | users/bots/matches/contests/settings/judges/templates/email/logs 全端点 |
+| `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
+| `qa-regression.spec.ts` | 三 viewport 导航、表单边界、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、异常完成原因展示、人类 Holdem WebSocket、admin abort 回归 |
+| `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
+| `admin-audit.spec.ts` | admin 10 个 Tab、查询参数/返回数据一致性、关键保存操作与布局 |
 
-## 3. 测试执行结果（最新核对）
+运行前必须是 worktree 隔离实例；`beforeAll` 会校验 `/api/health` 的 `qa_instance=true`，Vite 也会拒绝代理到 50380：
 
-> 数字会随开发演进；下列为文档对齐时点（2026-08）的实测/收集结果。合并前请以本机 `pytest` 为准。
-
-### 3.1 后端 pytest
-```
-pytest --collect-only → 462 tests collected（随游戏/功能增长）
-pytest 须从仓库根运行；54 个 test_*.py 模块
-```
-（含人类对战、审计、安全日志、游戏注册表/结果契约/通用层无分支等守护测试。）
-
-### 3.2 大规模压测（60 用户）
-```
-历史基线：152 passed / 0 failed / 1 warns（约 40.9s）
-```
-- 全 8 阶段执行，无任何阶段跳过。
-- 唯一 soft-warn：auto-match scheduler 在压测时序下可能未触发（逻辑由 `test_auto_matcher.py` 单测覆盖）。
-- 方法：`BZ_RATE_LIMIT=0` 关限流 + `--no-throttle` + `BZ_BOT_LOCAL=1`。
-
-### 3.3 浏览器验收
-```
-browser_verify / screenshot_verify：关键路由 + 明暗主题 + 移动端布局
+```bash
+cd bzplat/frontend
+npm run test:e2e:install                  # 首次安装 Chromium
+BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --list
+BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 ```
 
-### 3.4 前端构建
-```
-✓ npm run build（tsc -b && vite build；主包 gzip 量级约百 KB，recharts 等重依赖分 chunk）
-```
+### 3.2 角色、视口与观察面
 
-## 4. 压测专项分析
+- 角色：访客、普通玩家、组织者、管理员。
+- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航覆盖三档，admin 至少覆盖桌面与移动端，核心赛事流程另以 laptop 执行。
+- UI：主要导航、按钮、Tab、Dialog、筛选、表单合法/非法/超长输入、重复提交、空状态、错误状态、直接子路由、刷新、返回/前进与根元素横向溢出。
+- Console：持续收集 `pageerror` 与 error 级 console；未在精确白名单中的异常直接使测试失败。
+- Network：跟踪 request failed 与 4xx/5xx；负向用例只豁免精确预期的请求/状态，关键写操作断言方法、路径、状态和返回结构。
+- SSE：断言终态 snapshot 转回放且不重连、`error.message` 持久展示且不被误显示为 completed、异常 `completed` 原因可见、服务端终态后流关闭。
+- WebSocket：真实人类 Holdem 流程断言单页只建一个连接、发送合法协议并进入终态；admin abort 后 runner 不得覆盖 aborted。
 
-### 4.1 并发承受
-- 60 用户同时活跃，多 Bot；三游戏对局并发。
-- 人类对战 WebSocket 三游戏可并发完成。
+旧的 `browser_verify.py`、`screenshot_verify.py` 仍可做补充，但不能替代上述真实交互、Console 与 Network 断言。
 
-### 4.2 瓶颈与优化
-- **挑战限流**：同 IP 共享 `/api/matches/challenge` = 8 req/60s。压测用 `BZ_RATE_LIMIT=0`（生产应开启）。
-- **Bot 执行**：Docker 启动或本机 subprocess 是单场主要耗时；压测可用 `BZ_BOT_LOCAL=1`。
-- **代码分割**：前端 lazy 路由 + 重依赖隔离。
+## 4. 本轮 QA 执行证据
 
-## 5. 缺陷与结论
+以下只记录实际已执行的证据，不把“已收集”写成“已通过”：
 
-### 5.1 已知非阻塞项
-| 项 | 说明 | 处理 |
-|----|------|------|
-| auto-match scheduler 时序 | 压测环境后台 idle 计时不稳定 | 软断言；单测 `test_auto_matcher.py` 覆盖 |
-| 多 worker 限流 | 内存滑动窗口仅单进程有效 | 多 worker 需换 Redis 等共享存储 |
+| 检查 | 本轮状态 | 证据/说明 |
+|------|----------|-----------|
+| 隔离端到端冒烟 | **已通过** | `bash scripts/e2e_smoke.sh` 在临时 DB 与运行时目录完成，未留下服务/临时产物，主文件未变 |
+| API 关键链路脚本 | **50/50 通过** | 隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚与所列核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
+| Playwright 收集 | **20 条 / 4 spec** | `npx playwright test --list` 实测 |
+| 后端完整 pytest | **783 passed** | `python -m pytest -q`，158.24s；唯一提示为 Starlette TestClient 上游弃用警告 |
+| Playwright 完整执行 | **20 passed** | Chromium 单 worker，1.8m；三视口及四角色流程均通过，监控未发现非预期 Console/Network/SSE/WS 异常 |
+| 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2558 modules transformed |
 
-### 5.2 测试结论
-**平台功能完整、架构契约有自动化守护，满足验收准则**：
-- 后端测试模块 55 个、用例规模 462（以 `pytest --collect-only` 为准）。
-- 解耦契约由专用测试守护（结果鸭子类型 / 注册表 = schema / 无反向 import / 通用层无 game 分支）。
-- 压测与浏览器脚本覆盖核心业务路径。
-- 功能需求（账号/Bot/对局/观赛/回放/人类对战/排行/赛事/社交/通知/经验/管理/数据集）均有对应测试入口。
+## 5. 可靠性与恢复专项
+
+- **对局重启恢复**：上一进程遗留的 running 与非赛事 pending 对局统一中止；活跃赛事 pending 由 pairing 对账精确恢复，避免把可重派赛事粗暴 abort。
+- **评分恰好一次 + 顺序屏障**：`match_rating_settlements` 的 claim 与双方 rating/history/pair_stats 同事务；失败整体回滚。覆盖 M1 评分事务失败后 M2 触发补算，必须严格按 `(created_at,id)` 得到与 M1→M2 正常路径完全一致的 rating/history；并发后处理不越序且通知/XP 不重复。启动恢复共用同一顺序机制，只补评分，任一早场失败即停止，重复调用无副作用。
+- **赛事两阶段派发与阶段推进**：prepare match → 原子绑定 pairing → start task；任一步失败须删除/解绑本次精确对象。服务重启可清理未绑定幽灵、复位死 pairing，并只在整个 published 批次尚未启动时原子重建残缺排期。后续 stage 的全部 pairing（含版本快照、bye、排期）与 `current_stage_idx/status` 同事务提交；Swiss/KO 懒生成的后续轮先构造完整 rows，再在 `BEGIN IMMEDIATE` 内复核 contest/stage/上一轮/目标轮并一次追加。两类批次均须以第二行故障注入验证零 partial，重试只生成一个完整批次。Swiss 还须验证按 entry 累计实际 seat0、`color_first=1` 落库前交换 A/B、challenge 收到同一实际顺序。
+- **正式榜破同分**：从 pairing 的实际 A/B 与 completed match 的 `technical_loss/winner` 识别技术负 entry；其余破同分项相同时，技术负次数较少者必须排前。
+- **正式榜发布恢复**：`contest_official_results` 的清旧、全量插入与 `official_results_ready=1` 同事务；中途注入失败不得留下 partial。若进程在赛事先写 `finished` 后、榜事务提交前退出，启动对账须对 `finished+ready=0` 幂等补算，恢复后公开接口不再返回 409，重复启动不重写已就绪结果。
+- **管理操作**：admin abort 必须先取消并等待 runner 收敛；赛事局保留 aborted 历史同时将 pairing 复位/重派，2 人 KO 不得固定晋级座位 0。直接改 running/completed 被拒绝。硬删除前检查 active match/contest 引用，避免 FK 置空后后台评分或赛事写回崩溃。
+- **QA 写隔离**：后端 CLI 在 Store、日志和静态目录创建前校验 DB/端口/运行时目标；前端代理与 Playwright health guard 构成第二、第三道保护。
+
+## 6. 发布门槛
+
+最终验收至少需要：完整 `pytest`、`npm run build`、20 条 Playwright、隔离 `e2e_smoke.sh` 全部通过；同时检查浏览器 Console/Network、QA 后端日志、主 DB hash/mtime 与 50380 服务未被触碰。若任一项未执行或失败，结论只能是“待验证”，不能写成“已验收”。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

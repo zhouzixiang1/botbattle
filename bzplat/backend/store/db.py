@@ -13,7 +13,24 @@ from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
 
-from .schema import SCHEMA
+from .schema import (
+    CODE_RESET,
+    CONTEST_CANCELLED,
+    CONTEST_DRAFT,
+    CONTEST_FINISHED,
+    CONTEST_OPEN,
+    CONTEST_PUBLISHED,
+    CONTEST_REST,
+    CONTEST_RUNNING,
+    MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
+    SCHEMA,
+    STATUS_ABORTED,
+    STATUS_COMPLETED,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    TYPE_CONTEST,
+    TYPE_HUMAN,
+)
 
 DEFAULT_DB_PATH = "botzone.db"
 
@@ -772,6 +789,103 @@ def _migrate(conn: sqlite3.Connection) -> None:
         elif _ctable == "contest_stage_results":
             conn.execute("CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c ON contest_stage_results(contest_id)")
 
+    # Legacy contest_entries tables sometimes had only a plain contest_id index.
+    # Concurrent registration uses ON CONFLICT(contest_id, user_id), which SQLite
+    # rejects unless a real UNIQUE constraint/index exists.  Keep this after every
+    # contest-table rebuild because rebuilding also drops the fresh-schema inline
+    # UNIQUE constraint.
+    if "contest_entries" in {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }:
+        # Historical duplicate registrations are corruption, but must not make an
+        # upgrade impossible.  Preserve the earliest entry and repoint every durable
+        # entry identity before removing duplicates.
+        conn.execute("DROP TABLE IF EXISTS temp._contest_entry_dedup")
+        conn.execute(
+            "CREATE TEMP TABLE _contest_entry_dedup AS "
+            "SELECT e.id AS drop_id, k.keep_id "
+            "FROM contest_entries e "
+            "JOIN (SELECT contest_id, user_id, MIN(id) AS keep_id "
+            "      FROM contest_entries GROUP BY contest_id, user_id HAVING COUNT(*) > 1) k "
+            "ON k.contest_id=e.contest_id AND k.user_id=e.user_id "
+            "WHERE e.id<>k.keep_id"
+        )
+        _current_tables = {
+            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "contest_pairings" in _current_tables:
+            for _entry_col in ("entry_a_id", "entry_b_id"):
+                if _entry_col in _table_cols(conn, "contest_pairings"):
+                    conn.execute(
+                        f"UPDATE contest_pairings SET {_entry_col}=("
+                        "SELECT keep_id FROM _contest_entry_dedup d "
+                        f"WHERE d.drop_id=contest_pairings.{_entry_col}) "
+                        f"WHERE {_entry_col} IN (SELECT drop_id FROM _contest_entry_dedup)"
+                    )
+        if (
+            "contest_stage_results" in _current_tables
+            and "entry_id" in _table_cols(conn, "contest_stage_results")
+        ):
+            # Resolve every row to its final keeper identity before the bulk UPDATE.
+            # With 3+ duplicate entries, two drop rows may both have a result while
+            # the keeper has none; checking only for an existing keeper row leaves
+            # both rows alive and the UPDATE then violates the table UNIQUE key.
+            # Prefer an existing keeper row, otherwise preserve the earliest result.
+            conn.execute(
+                "DELETE FROM contest_stage_results AS duplicate "
+                "WHERE duplicate.entry_id IN (SELECT drop_id FROM _contest_entry_dedup) "
+                "AND EXISTS (SELECT 1 FROM contest_stage_results preferred "
+                "LEFT JOIN _contest_entry_dedup preferred_map "
+                "ON preferred_map.drop_id=preferred.entry_id "
+                "JOIN _contest_entry_dedup duplicate_map "
+                "ON duplicate_map.drop_id=duplicate.entry_id "
+                "WHERE preferred.contest_id=duplicate.contest_id "
+                "AND preferred.stage_idx=duplicate.stage_idx "
+                "AND COALESCE(preferred_map.keep_id, preferred.entry_id)="
+                "duplicate_map.keep_id "
+                "AND (preferred.entry_id=duplicate_map.keep_id "
+                "OR preferred.id<duplicate.id))"
+            )
+            conn.execute(
+                "UPDATE contest_stage_results SET entry_id=("
+                "SELECT keep_id FROM _contest_entry_dedup d "
+                "WHERE d.drop_id=contest_stage_results.entry_id) "
+                "WHERE entry_id IN (SELECT drop_id FROM _contest_entry_dedup)"
+            )
+        if (
+            "contest_official_results" in _current_tables
+            and "entry_id" in _table_cols(conn, "contest_official_results")
+        ):
+            conn.execute(
+                "DELETE FROM contest_official_results AS duplicate "
+                "WHERE duplicate.entry_id IN (SELECT drop_id FROM _contest_entry_dedup) "
+                "AND EXISTS (SELECT 1 FROM contest_official_results preferred "
+                "LEFT JOIN _contest_entry_dedup preferred_map "
+                "ON preferred_map.drop_id=preferred.entry_id "
+                "JOIN _contest_entry_dedup duplicate_map "
+                "ON duplicate_map.drop_id=duplicate.entry_id "
+                "WHERE preferred.contest_id=duplicate.contest_id "
+                "AND COALESCE(preferred_map.keep_id, preferred.entry_id)="
+                "duplicate_map.keep_id "
+                "AND (preferred.entry_id=duplicate_map.keep_id "
+                "OR preferred.id<duplicate.id))"
+            )
+            conn.execute(
+                "UPDATE contest_official_results SET entry_id=("
+                "SELECT keep_id FROM _contest_entry_dedup d "
+                "WHERE d.drop_id=contest_official_results.entry_id) "
+                "WHERE entry_id IN (SELECT drop_id FROM _contest_entry_dedup)"
+            )
+        conn.execute(
+            "DELETE FROM contest_entries "
+            "WHERE id IN (SELECT drop_id FROM _contest_entry_dedup)"
+        )
+        conn.execute("DROP TABLE temp._contest_entry_dedup")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_contest_entries_contest_user "
+            "ON contest_entries(contest_id, user_id)"
+        )
+
     # ── per-game matches 表自动建（解耦审计：让"新增第 4 游戏"真正零改动 DB）────────
     # schema.py 里 matches_holdem/gomoku/pencil 三张表是字面 CREATE 语句；新增注册游戏
     # （如 reversi）后 SCHEMA executescript 不会建 matches_<new>，create_match 会崩
@@ -864,6 +978,34 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, "contest_pairings", "bot_b_version_id", "INTEGER")
         _add_col(conn, "contest_pairings", "pairing_seed", "INTEGER")
         _add_col(conn, "contest_pairings", "published_at", "TEXT")
+
+    # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
+    # 升级前的 completed 对局大多已经由旧后处理更新过 ratings，但没有 marker。
+    # 若直接让启动恢复扫描它们，会把全部历史评分重复计算。首次迁移先把既有
+    # completed 非赛事/非 human 对局回填为已结算，再写哨兵；二者随外层事务
+    # 一起提交，失败可安全重试。新库首次初始化时没有对局，只写哨兵。
+    migrated = conn.execute(
+        "SELECT 1 FROM match_rating_settlements WHERE match_id=?",
+        (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+    ).fetchone()
+    if not migrated:
+        migrated_at = _now()
+        for _gid in _all_game_ids():
+            _tbl = _matches_table(_gid)
+            # 新游戏注册与物理表漂移由 Store.__init__ 的既有一致性断言给出
+            # 明确诊断；迁移回填不能抢先以 no-such-table 模糊该错误。
+            if _tbl not in _tables_after:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO match_rating_settlements(match_id, settled_at) "
+                f"SELECT id, COALESCE(ended_at, created_at, ?) FROM {_tbl} "
+                "WHERE status=? AND match_type NOT IN (?,?)",
+                (migrated_at, STATUS_COMPLETED, TYPE_CONTEST, TYPE_HUMAN),
+            )
+        conn.execute(
+            "INSERT INTO match_rating_settlements(match_id, settled_at) VALUES(?,?)",
+            (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL, migrated_at),
+        )
 
 
 class Store:
@@ -1076,7 +1218,7 @@ class Store:
         limit: int = 20,
         game_id: str | None = None,
     ) -> list[dict]:
-        """按 bot 名/owner 名模糊搜索已完成对局。"""
+        """按对局 ID 或 bot 名模糊搜索已完成对局。"""
         ql = f"%{q.lower()}%" if q else "%"
         with self._tx() as c:
             sel = (
@@ -1089,10 +1231,10 @@ class Store:
             )
             where_sql = (
                 " WHERE m.status='completed' "
-                "AND (LOWER(ba.name) LIKE ? OR LOWER(bb.name) LIKE ? "
+                "AND (LOWER(m.id) LIKE ? OR LOWER(ba.name) LIKE ? OR LOWER(bb.name) LIKE ? "
                 "OR LOWER(ba.display_name) LIKE ? OR LOWER(bb.display_name) LIKE ?)"
             )
-            params: list[Any] = [ql, ql, ql, ql]
+            params: list[Any] = [ql, ql, ql, ql, ql]
             if game_id:
                 where_sql += " AND m.game_id=?"
                 params.append(game_id)
@@ -1151,6 +1293,7 @@ class Store:
 
     def list_users(
         self, *, role: str | None = None, active_only: bool = False,
+        q: str | None = None, real_name: bool | None = None,
         page: int | None = None, per_page: int = 50,
     ) -> list[dict] | dict:
         with self._tx() as c:
@@ -1161,6 +1304,18 @@ class Store:
                 params.append(role)
             if active_only:
                 sql += " AND is_active=1"
+            if q:
+                sql += " AND (LOWER(username) LIKE ? OR LOWER(email) LIKE ?)"
+                like = f"%{q.strip().lower()}%"
+                params.extend((like, like))
+            if real_name is not None:
+                complete = (
+                    "TRIM(COALESCE(real_name,''))<>'' AND "
+                    "TRIM(COALESCE(phone,''))<>'' AND "
+                    "TRIM(COALESCE(school,''))<>'' AND "
+                    "TRIM(COALESCE(student_id,''))<>''"
+                )
+                sql += f" AND ({complete})" if real_name else f" AND NOT ({complete})"
             sql += " ORDER BY created_at"
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
@@ -1281,6 +1436,99 @@ class Store:
                 (_now(), token),
             )
 
+    def reset_password_with_credential(
+        self,
+        user_id: int,
+        password_hash: str,
+        *,
+        email_code_id: int | None = None,
+        email_code: str | None = None,
+        reset_token: str | None = None,
+    ) -> str:
+        """原子消费一次性凭据、更新密码并撤销该用户的全部会话。
+
+        邮箱验证码与管理员重置 token 二选一。返回 ``ok``、``invalid`` 或
+        ``expired``；``invalid`` 同时涵盖不存在、已使用和最终 CAS 竞争失败。
+        凭据 CAS、密码更新与 session 删除共享同一个 ``BEGIN IMMEDIATE``
+        事务，后两步异常时凭据消费也会随事务回滚。
+        """
+        email_selected = email_code_id is not None or email_code is not None
+        token_selected = reset_token is not None
+        if email_selected == token_selected:
+            raise ValueError("邮箱验证码和重置 token 必须且只能提供一种")
+        if email_selected and (email_code_id is None or email_code is None):
+            raise ValueError("邮箱验证码 id 与 code 必须同时提供")
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            used_at = _now()
+            checked_at = datetime.now()
+            expiry_cutoff = checked_at.isoformat(timespec="microseconds")
+            if email_selected:
+                credential = c.execute(
+                    "SELECT user_id, expires_at, used_at FROM email_codes "
+                    "WHERE id=? AND user_id=? AND purpose=? AND code=?",
+                    (email_code_id, user_id, CODE_RESET, email_code),
+                ).fetchone()
+                if not credential or credential["used_at"] is not None:
+                    return "invalid"
+                try:
+                    expired = (
+                        datetime.fromisoformat(credential["expires_at"])
+                        < checked_at
+                    )
+                except (TypeError, ValueError):
+                    return "invalid"
+                if expired:
+                    return "expired"
+                consume = c.execute(
+                    "UPDATE email_codes SET used_at=? "
+                    "WHERE id=? AND user_id=? AND purpose=? AND code=? "
+                    "AND used_at IS NULL AND expires_at>=?",
+                    (
+                        used_at,
+                        email_code_id,
+                        user_id,
+                        CODE_RESET,
+                        email_code,
+                        expiry_cutoff,
+                    ),
+                )
+            else:
+                credential = c.execute(
+                    "SELECT user_id, expires_at, used_at FROM password_resets "
+                    "WHERE token=? AND user_id=?",
+                    (reset_token, user_id),
+                ).fetchone()
+                if not credential or credential["used_at"] is not None:
+                    return "invalid"
+                try:
+                    expired = (
+                        datetime.fromisoformat(credential["expires_at"])
+                        < checked_at
+                    )
+                except (TypeError, ValueError):
+                    return "invalid"
+                if expired:
+                    return "expired"
+                consume = c.execute(
+                    "UPDATE password_resets SET used_at=? "
+                    "WHERE token=? AND user_id=? AND used_at IS NULL "
+                    "AND expires_at>=?",
+                    (used_at, reset_token, user_id, expiry_cutoff),
+                )
+
+            if consume.rowcount != 1:
+                return "invalid"
+            updated = c.execute(
+                "UPDATE users SET password_hash=? WHERE id=?",
+                (password_hash, user_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("重置密码时用户记录不存在")
+            c.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            return "ok"
+
     # ── bots ──────────────────────────────────────────────────
 
     def create_bot(
@@ -1302,6 +1550,7 @@ class Store:
         fmt = fields.get("format", "unknown")
         binary_path = fields.get("binary_path", "")
         is_builtin = 1 if fields.get("is_builtin") else 0
+        is_active = 1 if fields.get("is_active", True) else 0
         game_id = fields.get("game_id") or "holdem"
         from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE, VALID_RUNTIME_MODES
         runtime_mode = fields.get("runtime_mode") or DEFAULT_RUNTIME_MODE
@@ -1311,8 +1560,8 @@ class Store:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO bots(owner_id, name, display_name, description, "
-                "os, arch, format, binary_path, is_builtin, game_id, runtime_mode, "
-                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "os, arch, format, binary_path, is_builtin, is_active, game_id, runtime_mode, "
+                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     owner_id,
                     name,
@@ -1323,6 +1572,7 @@ class Store:
                     fmt,
                     binary_path,
                     is_builtin,
+                    is_active,
                     game_id,
                     runtime_mode,
                     now,
@@ -1358,6 +1608,7 @@ class Store:
             "current_version",
             "is_active",
             "game_id",
+            "runtime_mode",
             "updated_at",
         }
         sets = [f"{k}=?" for k in fields if k in allowed]
@@ -1376,9 +1627,56 @@ class Store:
     def delete_bot(self, bot_id: int) -> bool:
         # 注意：此处不做「活跃引用」业务校验——那是 admin_delete_bot 端点的职责（业务规则）。
         # 本方法保持纯 store 行为：直接删，FK ON DELETE SET NULL（matches，保历史）/ CASCADE
-        # （contest_pairings）由 DB 处理。bot_active_references() 供端点层调用判断是否阻拦。
+        # （contest_pairings）由 DB 处理。管理端须改调 delete_bot_if_safe() 原子判断。
         with self._tx() as c:
             return c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
+
+    def delete_bot_if_safe(self, bot_id: int) -> dict:
+        """在一个写事务内检查活跃引用并硬删 Bot，消除 check→delete 竞态。"""
+        active_contest_statuses = (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+            CONTEST_REST,
+        )
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not c.execute("SELECT id FROM bots WHERE id=?", (bot_id,)).fetchone():
+                return {"found": False, "deleted": False, "references": {}}
+
+            match_count = 0
+            for gid in _all_game_ids():
+                table = _matches_table(gid)
+                row = c.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} "
+                    "WHERE (bot_a_id=? OR bot_b_id=?) AND status IN (?,?)",
+                    (bot_id, bot_id, STATUS_PENDING, STATUS_RUNNING),
+                ).fetchone()
+                match_count += int(row["n"] if row else 0)
+
+            status_marks = ",".join("?" for _ in active_contest_statuses)
+            pairing_row = c.execute(
+                "SELECT COUNT(*) AS n FROM contest_pairings pairing "
+                "JOIN contests contest ON contest.id=pairing.contest_id "
+                "WHERE (pairing.bot_a_id=? OR pairing.bot_b_id=?) "
+                f"AND contest.status IN ({status_marks})",
+                (bot_id, bot_id, *active_contest_statuses),
+            ).fetchone()
+            entry_row = c.execute(
+                "SELECT COUNT(*) AS n FROM contest_entries entry "
+                "JOIN contests contest ON contest.id=entry.contest_id "
+                "WHERE entry.bot_id=? "
+                f"AND contest.status IN ({status_marks})",
+                (bot_id, *active_contest_statuses),
+            ).fetchone()
+            refs = {
+                "matches": match_count,
+                "pairings": int(pairing_row["n"] if pairing_row else 0)
+                + int(entry_row["n"] if entry_row else 0),
+            }
+            if any(refs.values()):
+                return {"found": True, "deleted": False, "references": refs}
+            deleted = c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
+            return {"found": True, "deleted": deleted, "references": refs}
 
     def bot_active_references(self, bot_id: int) -> dict:
         """检查 bot 是否被**活跃**对局/赛事引用（会因此被破坏才拒绝）。
@@ -1589,12 +1887,29 @@ class Store:
             )
 
     def get_latest_bot_version(self, bot_id: int) -> dict | None:
-        """该 bot 的最新版本行（current_version 对应）。P1：发布轮冻结时取此快照。"""
+        """该 bot 历史中版本号最大的版本行（不一定是当前激活版本）。"""
         with self._tx() as c:
             return _row(
                 c.execute(
                     "SELECT * FROM bot_versions WHERE bot_id=? "
                     "ORDER BY version DESC LIMIT 1",
+                    (bot_id,),
+                ).fetchone()
+            )
+
+    def get_current_bot_version(self, bot_id: int) -> dict | None:
+        """取 ``bots.current_version`` 当前激活版本对应的版本行。
+
+        与 ``get_latest_bot_version``（历史最大版本，用于下一个上传版本号）语义
+        刻意分离：用户回滚后，赛事发布必须冻结当前激活版本而非历史最大版本。
+        """
+        with self._tx() as c:
+            return _row(
+                c.execute(
+                    "SELECT v.* FROM bots b "
+                    "JOIN bot_versions v "
+                    "ON v.bot_id=b.id AND v.version=b.current_version "
+                    "WHERE b.id=?",
                     (bot_id,),
                 ).fetchone()
             )
@@ -1795,8 +2110,26 @@ class Store:
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
 
+    def abort_match_if_active(self, match_id: str, *, reason: str) -> dict | None:
+        """仅把 pending/running 对局原子推进为 aborted；终态绝不倒退。"""
+        with self._tx() as c:
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return None
+            c.execute(
+                f"UPDATE {tbl} SET status=?, reason=?, ended_at=? "
+                "WHERE id=? AND status IN (?,?)",
+                (
+                    STATUS_ABORTED, reason, _now(), match_id,
+                    STATUS_PENDING, STATUS_RUNNING,
+                ),
+            )
+            return _parse_match_json_cols(_row(
+                c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
+            ))
+
     def delete_match(self, match_id: str) -> bool:
-        """删除对局（经 matches_index 定位）：删 per-game 表行 + matches_index + replay。
+        """删除对局：删 per-game 行、索引、回放和评分结算凭据。
 
         统一删除入口，保 matches_index 与 per-game 表不漂移（审计 P0：matches_index
         无清理会导致 like/view 计数静默 drift）。返回是否删到了行。
@@ -1810,6 +2143,10 @@ class Store:
             if deleted:
                 c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                 c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+                c.execute(
+                    "DELETE FROM match_rating_settlements WHERE match_id=?",
+                    (match_id,),
+                )
             return deleted
 
     def list_matches(
@@ -1875,6 +2212,20 @@ class Store:
             sql = f"SELECT * FROM ({union}) ORDER BY created_at DESC LIMIT ? OFFSET ?"
             all_params.extend([limit, offset])
             return [_parse_match_json_cols(_row(r)) for r in c.execute(sql, all_params)]
+
+    def contest_has_active_matches(self, contest_id: int) -> bool:
+        """赛事是否仍有 pending/running 对局（跨所有已注册游戏表）。"""
+        with self._tx() as c:
+            for gid in _all_game_ids():
+                table = _matches_table(gid)
+                row = c.execute(
+                    f"SELECT 1 FROM {table} WHERE contest_id=? "
+                    "AND status IN (?,?) LIMIT 1",
+                    (contest_id, STATUS_PENDING, STATUS_RUNNING),
+                ).fetchone()
+                if row:
+                    return True
+            return False
 
     def list_liked_top_matches(self, limit: int = 10) -> list[dict]:
         """对局点赞排行榜（跨三表 UNION ALL，likes_count>0 的已完成对局）。"""
@@ -2020,6 +2371,151 @@ class Store:
                     (bot_id, gid),
                 ).fetchone()
             )
+
+    def apply_match_ratings_atomic(
+        self,
+        bot_a_id: int,
+        bot_b_id: int,
+        *,
+        game_id: str,
+        rating_a: tuple[float, float, float],
+        rating_b: tuple[float, float, float],
+        winner: int | None,
+        earnings_a: int,
+        earnings_b: int,
+        reason: str = "",
+        settlement_id: str | None = None,
+    ) -> bool:
+        """恰好一次地落双边 rating/history、pair_stats 与结算凭据。
+
+        调用方已按 bot 获取评分锁并用同一快照算出 Glicko 新值；本接口把所有
+        持久化副作用收进一个 SQLite 事务，任一步失败都会整体回滚（包括最先
+        claim 的 settlement marker，因此后续可重试）。同一 ``settlement_id``
+        已存在时不产生任何评分副作用并返回 False。
+
+        ``settlement_id=None`` 保留旧调用方的行为（不做幂等 claim）；正常对局
+        路径必须传 match_id。同 bot 自博弈只提交 marker、不更新天梯。
+        """
+        gid = (game_id or "holdem").strip().lower()
+        wa = int(winner == 0)
+        la = int(winner == 1)
+        da = int(winner is None)
+        wb, lb, db = la, wa, da
+        now = _now()
+        with self._tx() as c:
+            if settlement_id is not None:
+                claimed = c.execute(
+                    "INSERT OR IGNORE INTO match_rating_settlements(match_id, settled_at) "
+                    "VALUES(?,?)",
+                    (settlement_id, now),
+                )
+                if claimed.rowcount == 0:
+                    return False
+
+            # 自博弈没有可用于 Glicko 的对手信息。marker 仍须落盘，否则启动
+            # 恢复会在每次重启反复扫描同一 completed 对局。
+            if bot_a_id == bot_b_id:
+                return True
+
+            for bot_id in (bot_a_id, bot_b_id):
+                c.execute(
+                    "INSERT OR IGNORE INTO ratings(bot_id, game_id) VALUES(?, ?)",
+                    (bot_id, gid),
+                )
+            for bot_id, values, wins, losses, draws, earnings in (
+                (bot_a_id, rating_a, wa, la, da, earnings_a),
+                (bot_b_id, rating_b, wb, lb, db, earnings_b),
+            ):
+                c.execute(
+                    "UPDATE ratings SET rating=?, rd=?, vol=?, "
+                    "wins=wins+?, losses=losses+?, draws=draws+?, "
+                    "net_chips=net_chips+?, matches_played=matches_played+1, "
+                    "last_played_at=? WHERE bot_id=? AND game_id=?",
+                    (
+                        values[0], values[1], values[2], wins, losses, draws,
+                        earnings, now, bot_id, gid,
+                    ),
+                )
+                row = c.execute(
+                    "SELECT rating, rd, vol, matches_played FROM ratings "
+                    "WHERE bot_id=? AND game_id=?",
+                    (bot_id, gid),
+                ).fetchone()
+                c.execute(
+                    "INSERT INTO rating_history(bot_id, game_id, rating, rd, vol, "
+                    "matches_played, reason, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        bot_id, gid, row["rating"], row["rd"], row["vol"],
+                        row["matches_played"], reason, now,
+                    ),
+                )
+                c.execute(
+                    "DELETE FROM rating_history "
+                    "WHERE bot_id=? AND game_id=? AND id NOT IN "
+                    "(SELECT id FROM rating_history WHERE bot_id=? AND game_id=? "
+                    "ORDER BY id DESC LIMIT 200)",
+                    (bot_id, gid, bot_id, gid),
+                )
+
+            lo, hi = sorted((bot_a_id, bot_b_id))
+            if bot_a_id == lo:
+                aw, al, dd = wa, la, da
+            else:
+                aw, al, dd = wb, lb, db
+            c.execute(
+                "INSERT INTO pair_stats(bot_a_id, bot_b_id, bb_per_100_mean, "
+                "ci_low, ci_high, samples, last_played_at, a_wins, a_losses, draws) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(bot_a_id, bot_b_id) DO UPDATE SET "
+                "bb_per_100_mean=excluded.bb_per_100_mean, "
+                "ci_low=excluded.ci_low, ci_high=excluded.ci_high, "
+                "samples=excluded.samples, last_played_at=excluded.last_played_at, "
+                "a_wins=pair_stats.a_wins+excluded.a_wins, "
+                "a_losses=pair_stats.a_losses+excluded.a_losses, "
+                "draws=pair_stats.draws+excluded.draws",
+                (lo, hi, 0.0, None, None, 0, now, aw, al, dd),
+            )
+            return True
+
+    def mark_match_rating_settled(self, match_id: str) -> bool:
+        """原子写入无评分副作用的结算 marker；已存在返回 False。
+
+        仅用于 completed 行已失去 Bot 外键、无法重算评分的收敛场景。自博弈
+        仍走 :meth:`apply_match_ratings_atomic` 的同 bot 分支。
+        """
+        with self._tx() as c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO match_rating_settlements(match_id, settled_at) "
+                "VALUES(?,?)",
+                (match_id, _now()),
+            )
+            return cur.rowcount > 0
+
+    def is_match_rating_settled(self, match_id: str) -> bool:
+        with self._tx() as c:
+            return c.execute(
+                "SELECT 1 FROM match_rating_settlements WHERE match_id=?",
+                (match_id,),
+            ).fetchone() is not None
+
+    def list_unsettled_completed_rating_matches(self) -> list[dict]:
+        """列出需启动补算的 completed Bot 对局（跨游戏、排除赛事/人类）。"""
+        with self._tx() as c:
+            matches: list[dict] = []
+            for gid in _all_game_ids():
+                tbl = _matches_table(gid)
+                rows = c.execute(
+                    f"SELECT m.* FROM {tbl} m "
+                    "LEFT JOIN match_rating_settlements settled ON settled.match_id=m.id "
+                    "WHERE m.status=? AND m.match_type NOT IN (?,?) "
+                    "AND settled.match_id IS NULL ORDER BY m.created_at, m.id",
+                    (STATUS_COMPLETED, TYPE_CONTEST, TYPE_HUMAN),
+                ).fetchall()
+                matches.extend(
+                    _parse_match_json_cols(_row(row)) for row in rows
+                )
+            matches.sort(key=lambda m: (m.get("created_at") or "", m.get("id") or ""))
+            return matches
 
     def list_leaderboard(
         self, limit: int = 50, *, game_id: str | None = None,
@@ -2180,9 +2676,14 @@ class Store:
         遍历三张 per-game 表清理。返回受影响行数。
 
         同时清理孤儿 pending 赛事对局：
+        - 所有非 contest pending（challenge/table/ladder/human 等）：进程重启后
+          已无对应内存 Task/Future，统一标 ``orphan_pending_after_restart`` aborted；
         - contest_id=NULL AND match_type='contest' AND status='pending'（e2e 残留等无主）；
         - contest 已终态（finished/cancelled）但仍 pending 的赛事对局（排期积压后赛事已结束，
           这些 pending 永不会被打，堵 orchestrator._tasks → auto_matcher 误判不空闲）。
+
+        活跃赛事的 pending contest match 不在本方法粗暴标 aborted：已绑定/
+        未绑定的两阶段派发中断由 ``reset_dead_contest_pairings`` 精确删除并重派。
         """
         from bzplat.backend.store.schema import STATUS_ABORTED
 
@@ -2191,56 +2692,90 @@ class Store:
             for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 row = c.execute(
-                    f"SELECT COUNT(*) FROM {tbl} WHERE status='running'"
+                    f"SELECT COUNT(*) FROM {tbl} WHERE status=?",
+                    (STATUS_RUNNING,),
                 ).fetchone()
                 cnt = int(row[0]) if row else 0
                 if cnt:
                     c.execute(
                         f"UPDATE {tbl} SET status=?, reason='orphan_after_restart', "
-                        "ended_at=datetime('now') WHERE status='running'",
-                        (STATUS_ABORTED,),
+                        "ended_at=datetime('now') WHERE status=?",
+                        (STATUS_ABORTED, STATUS_RUNNING),
                     )
                     n += cnt
+                # 非赛事 pending 也依赖上一进程的内存 task/future；重启后
+                # 不可能继续。contest pending 必须留给后续 pairing 对账精确恢复。
+                non_contest_pending = c.execute(
+                    f"SELECT COUNT(*) FROM {tbl} "
+                    "WHERE status=? AND match_type<>?",
+                    (STATUS_PENDING, TYPE_CONTEST),
+                ).fetchone()
+                pending_count = int(non_contest_pending[0]) if non_contest_pending else 0
+                if pending_count:
+                    c.execute(
+                        f"UPDATE {tbl} SET status=?, "
+                        "reason='orphan_pending_after_restart', ended_at=? "
+                        "WHERE status=? AND match_type<>?",
+                        (
+                            STATUS_ABORTED,
+                            _now(),
+                            STATUS_PENDING,
+                            TYPE_CONTEST,
+                        ),
+                    )
+                    n += pending_count
                 # 清理孤儿 pending 赛事对局（无 contest 归属的 type=contest pending）
                 row2 = c.execute(
                     f"SELECT COUNT(*) FROM {tbl} "
-                    f"WHERE status='pending' AND match_type='contest' "
-                    f"AND contest_id IS NULL"
+                    f"WHERE status=? AND match_type=? "
+                    f"AND contest_id IS NULL",
+                    (STATUS_PENDING, TYPE_CONTEST),
                 ).fetchone()
                 cnt2 = int(row2[0]) if row2 else 0
                 if cnt2:
                     c.execute(
                         f"UPDATE {tbl} SET status=?, reason='orphan_pending_no_contest', "
                         "ended_at=datetime('now') "
-                        f"WHERE status='pending' AND match_type='contest' "
+                        f"WHERE status=? AND match_type=? "
                         f"AND contest_id IS NULL",
-                        (STATUS_ABORTED,),
+                        (STATUS_ABORTED, STATUS_PENDING, TYPE_CONTEST),
                     )
                     n += cnt2
                 # 清理已终态赛事的残留 pending 对局（赛事 finished/cancelled 但 match 仍 pending）
                 row3 = c.execute(
                     f"SELECT COUNT(*) FROM {tbl} m "
-                    f"WHERE m.status='pending' AND m.contest_id IS NOT NULL "
+                    f"WHERE m.status=? AND m.contest_id IS NOT NULL "
                     f"AND m.contest_id IN (SELECT id FROM contests "
-                    f"WHERE status IN ('finished','cancelled'))"
+                    f"WHERE status IN (?,?))",
+                    (STATUS_PENDING, CONTEST_FINISHED, CONTEST_CANCELLED),
                 ).fetchone()
                 cnt3 = int(row3[0]) if row3 else 0
                 if cnt3:
                     c.execute(
                         f"UPDATE {tbl} SET status=?, reason='contest_ended_pending_orphan', "
                         "ended_at=datetime('now') "
-                        f"WHERE status='pending' AND contest_id IS NOT NULL "
+                        f"WHERE status=? AND contest_id IS NOT NULL "
                         f"AND contest_id IN (SELECT id FROM contests "
-                        f"WHERE status IN ('finished','cancelled'))",
-                        (STATUS_ABORTED,),
+                        f"WHERE status IN (?,?))",
+                        (
+                            STATUS_ABORTED,
+                            STATUS_PENDING,
+                            CONTEST_FINISHED,
+                            CONTEST_CANCELLED,
+                        ),
                     )
                     n += cnt3
             return n
 
     def reset_dead_contest_pairings(self) -> int:
-        """启动对账辅助：把 contest_pairings 里 status='running' 但对应 match 已终态
-        非 completed（aborted/orphan 或不存在）的 pairing，重置为 status='pending' +
-        match_id=NULL，供 ContestManager.maybe_finish/_dispatch_pending 重派。
+        """启动对账辅助：清理两阶段派发中断留下的死状态。
+
+        1. prepare match 已插入，但进程在 bind pairing 前退出：活跃赛事中会留下
+           没有任何 pairing 引用的 pending contest match。这类幽灵对局必须连同
+           物理 match 行、matches_index 和 replay 在同一事务内删除。
+        2. contest_pairings 里 status='running' 但对应 match 已终态非
+           completed（aborted/orphan/pending 或不存在）：复位为 pending +
+           match_id=NULL，供 ContestManager.maybe_finish/_dispatch_pending 重派。
 
         completed 的 pairing 不动（保留真实比赛结果，防误伤）。
         对应 recover_orphan_matches 把 running match 标 aborted 后的赛事善后——
@@ -2249,30 +2784,80 @@ class Store:
         所以 status=running+match_id=aborted 的死 pairing 永远不会被重派 → 赛事卡死）。
         返回重置行数。
         """
-        from bzplat.backend.store.schema import STATUS_COMPLETED
-
-        n = 0
-        # 收集每个游戏表里「已终态非 completed」的 match_id（按 match_id 反查 pairing）。
-        # contest_pairings.match_id 跨游戏共享同一 id 空间（create_match 用全局时间戳+hex）。
+        # pairing bind 已提交、runner 尚未 start 时进程可能退出：该 match 仍 pending。
+        # 解绑它时必须在同一事务删除物理 match + index + replay，否则随后重派会留下
+        # ghost pending match，阻塞 force-finish 并重复占用数据。
         with self._tx() as c:
-            dead_match_ids: set[str] = set()
-            for gid in _all_game_ids():
-                tbl = _matches_table(gid)
-                for row in c.execute(
-                    f"SELECT id FROM {tbl} WHERE status != ?", (STATUS_COMPLETED,)
-                ):
-                    dead_match_ids.add(str(row["id"]))
-            if not dead_match_ids:
-                return 0
-            placeholders = ",".join("?" for _ in dead_match_ids)
-            cur = c.execute(
-                "UPDATE contest_pairings SET status='pending', match_id=NULL "
-                f"WHERE status='running' AND match_id IS NOT NULL "
-                f"AND match_id IN ({placeholders})",
-                tuple(dead_match_ids),
+            c.execute("BEGIN IMMEDIATE")
+            recovered = 0
+            active_statuses = (
+                CONTEST_PUBLISHED,
+                CONTEST_RUNNING,
+                CONTEST_REST,
             )
-            n = int(cur.rowcount or 0)
-            return n
+            status_marks = ",".join("?" for _ in active_statuses)
+            # prepare 成功、bind 前硬崩：match 的 contest_id 已写入，但没有
+            # pairing.match_id 指向它。这里只在启动对账入口调用，内存中已无
+            # 可能继续 bind 的 prepared map，因此删除是唯一可恢复收敛。
+            for gid in _all_game_ids():
+                table = _matches_table(gid)
+                ghosts = c.execute(
+                    f"SELECT m.id FROM {table} m "
+                    "JOIN contests contest ON contest.id=m.contest_id "
+                    "WHERE m.status=? AND m.match_type=? "
+                    f"AND contest.status IN ({status_marks}) "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM contest_pairings pairing WHERE pairing.match_id=m.id"
+                    ")",
+                    (STATUS_PENDING, TYPE_CONTEST, *active_statuses),
+                ).fetchall()
+                for ghost in ghosts:
+                    match_id = str(ghost["id"])
+                    c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
+                    c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
+                    c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+                    recovered += 1
+
+            pairings = c.execute(
+                "SELECT id, match_id FROM contest_pairings "
+                "WHERE status=? AND match_id IS NOT NULL",
+                (STATUS_RUNNING,),
+            ).fetchall()
+            for pairing in pairings:
+                match_id = str(pairing["match_id"])
+                indexed = c.execute(
+                    "SELECT game_id FROM matches_index WHERE id=?", (match_id,)
+                ).fetchone()
+                table = _matches_table(indexed["game_id"]) if indexed else None
+                match = (
+                    c.execute(
+                        f"SELECT status FROM {table} WHERE id=?", (match_id,)
+                    ).fetchone()
+                    if table else None
+                )
+                if match and match["status"] == STATUS_COMPLETED:
+                    continue
+                cur = c.execute(
+                    "UPDATE contest_pairings SET status=?, match_id=NULL "
+                    "WHERE id=? AND status=? AND match_id=?",
+                    (STATUS_PENDING, pairing["id"], STATUS_RUNNING, match_id),
+                )
+                if cur.rowcount != 1:
+                    continue
+                recovered += 1
+                if not match or not table:
+                    continue
+                if match["status"] == STATUS_PENDING:
+                    c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
+                    c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
+                    c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+                elif match["status"] == STATUS_RUNNING:
+                    c.execute(
+                        f"UPDATE {table} SET status=?, reason='orphan_after_restart', "
+                        "ended_at=? WHERE id=? AND status=?",
+                        (STATUS_ABORTED, _now(), match_id, STATUS_RUNNING),
+                    )
+            return recovered
 
     def list_contests_by_status(self, statuses: list[str]) -> list[dict]:
         """返回 status 在给定集合内的 contest（启动对账 reconcile_running_contests 用）。"""
@@ -2286,6 +2871,16 @@ class Store:
                 tuple(statuses),
             ).fetchall()
             return [_row(r) for r in rows]
+
+    def list_unready_finished_contests(self) -> list[dict]:
+        """Return terminal contests whose durable official ranking is incomplete."""
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT * FROM contests WHERE status=? "
+                "AND COALESCE(official_results_ready, 0)=0 ORDER BY id",
+                (CONTEST_FINISHED,),
+            ).fetchall()
+            return [_row(row) for row in rows]
 
     def upsert_rating(
         self,
@@ -2939,7 +3534,17 @@ class Store:
         self, *, status: str | None = None, organizer_id: int | None = None,
         game_id: str | None = None, page: int | None = None, per_page: int = 20,
         exclude_statuses: list[str] | None = None,
+        hidden_owner_id: int | None = None,
     ) -> list[dict] | dict:
+        """列赛事，并在分页 SQL 内完成隐藏状态的可见性过滤。
+
+        ``exclude_statuses`` 非空时，匿名/普通用户（``hidden_owner_id=None``）
+        始终排除这些状态，即使同时传了显式 ``status`` 也不能绕过。
+        组织者传自己的 user id，则可额外看到“自己主办”的隐藏赛事，
+        不会因 organizer 角色而看到他人草稿/已取消赛事。admin 调用方
+        不传 ``exclude_statuses`` 即保持全见。条件必须在 SQL 分页前应用，
+        不得拉取一页后再用 Python 裁剪（会使 total/页数泄漏且错位）。
+        """
         with self._tx() as c:
             sql = "SELECT * FROM contests WHERE 1=1"
             params: list[Any] = []
@@ -2952,11 +3557,19 @@ class Store:
             if game_id:
                 sql += " AND game_id=?"
                 params.append(game_id)
-            # 排除某些状态（如访客不见 draft/cancelled；审计 P1-E）。与 status 互斥使用。
+            # 隐藏状态过滤与显式 status 可同时存在：例如访客显式查
+            # draft 仍必须得到空集；组织者则只能看自己的 draft。
             if exclude_statuses:
                 placeholders = ",".join("?" for _ in exclude_statuses)
-                sql += f" AND status NOT IN ({placeholders})"
+                if hidden_owner_id is None:
+                    sql += f" AND status NOT IN ({placeholders})"
+                else:
+                    sql += (
+                        f" AND (status NOT IN ({placeholders}) OR organizer_id=?)"
+                    )
                 params.extend(exclude_statuses)
+                if hidden_owner_id is not None:
+                    params.append(hidden_owner_id)
             sql += " ORDER BY created_at DESC"
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
@@ -2981,6 +3594,79 @@ class Store:
             )
 
     add_contest_entry = add_entry
+
+    def add_contest_entry_once(
+        self, contest_id: int, user_id: int, bot_id: int
+    ) -> dict:
+        """原子新增一条用户报名，重复报名统一抛业务 ``ValueError``。
+
+        ``ContestManager.register`` 的资格校验与写入之间可能被另一请求穿插；
+        这里在单个 Store 事务内用唯一键冲突策略收口，避免并发重复报名把
+        ``sqlite3.IntegrityError`` 泄漏成 500。调用方只有拿到新行后才可执行 XP 等
+        后续副作用。
+        """
+        with self._tx() as c:
+            contest = c.execute(
+                "SELECT status FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not contest or contest["status"] != CONTEST_OPEN:
+                raise ValueError("比赛未开放报名")
+            cur = c.execute(
+                "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(contest_id, user_id) DO NOTHING",
+                (contest_id, user_id, bot_id, _now()),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("该用户在此比赛中已报名")
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_entries WHERE id=?", (cur.lastrowid,)
+                ).fetchone()
+            )
+
+    def add_contest_roster_entries(
+        self, contest_id: int, entries: list[tuple[int, int]]
+    ) -> tuple[list[dict], list[int]]:
+        """组织者/admin 批量新增名册；状态复核与整批写入同一事务。"""
+        with self._tx() as c:
+            contest = c.execute(
+                "SELECT status FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not contest:
+                raise ValueError("赛事不存在")
+            if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
+                raise ValueError("开赛后不可改名册")
+            added: list[dict] = []
+            skipped: list[int] = []
+            for user_id, bot_id in entries:
+                cur = c.execute(
+                    "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at) "
+                    "VALUES(?,?,?,?) ON CONFLICT(contest_id, user_id) DO NOTHING",
+                    (contest_id, user_id, bot_id, _now()),
+                )
+                if cur.rowcount != 1:
+                    skipped.append(user_id)
+                    continue
+                added.append(_row(c.execute(
+                    "SELECT * FROM contest_entries WHERE id=?", (cur.lastrowid,)
+                ).fetchone()))
+            return added, skipped
+
+    def delete_contest_roster_entry(self, contest_id: int, user_id: int) -> bool:
+        """组织者/admin 删除名册；状态复核与 DELETE 同一事务。"""
+        with self._tx() as c:
+            contest = c.execute(
+                "SELECT status FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not contest:
+                raise ValueError("赛事不存在")
+            if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
+                raise ValueError("开赛后不可改名册")
+            cur = c.execute(
+                "DELETE FROM contest_entries WHERE contest_id=? AND user_id=?",
+                (contest_id, user_id),
+            )
+            return cur.rowcount > 0
 
     def update_entry(self, contest_id: int, user_id: int, **fields: Any) -> dict | None:
         allowed = {"bot_id", "group_id", "seed", "eliminated", "dispatched_at"}
@@ -3086,6 +3772,263 @@ class Store:
 
     add_contest_pairing = add_pairing
 
+    def create_contest_stage_pairings(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        pairing_rows: list[dict[str, Any]],
+        *,
+        expected_current_stage_idx: int,
+        activate_running: bool = False,
+    ) -> list[dict]:
+        """Atomically persist one complete stage pairing batch and its state move.
+
+        A stage is a single durability unit: no caller can observe only the first
+        few pairings, and advancing ``current_stage_idx``/leaving ``rest`` is
+        committed together with the complete batch.  ``BEGIN IMMEDIATE`` plus the
+        expected-index check also protects against another process advancing the
+        same contest after the manager's read.
+
+        A pre-upgrade crash could have left an unbound partial batch for the *next*
+        stage while the contest still points at the previous stage.  That exact
+        shape is safe to replace inside this transaction.  Rows with a bound match
+        or any other progress are rejected rather than silently overwritten.
+        """
+        if not pairing_rows:
+            raise ValueError("赛事阶段对阵批次不能为空")
+        columns = (
+            "contest_id",
+            "round_num",
+            "entry_a_id",
+            "entry_b_id",
+            "bot_a_id",
+            "bot_b_id",
+            "bot_a_version_id",
+            "bot_b_version_id",
+            "pairing_seed",
+            "published_at",
+            "scheduled_at",
+            "match_id",
+            "status",
+            "stage_idx",
+            "stage_key",
+            "group_id",
+            "bracket_slot",
+            "color_first",
+        )
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status, current_stage_idx FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if not contest:
+                raise ValueError("赛事不存在")
+            if contest["status"] in (CONTEST_FINISHED, CONTEST_CANCELLED):
+                raise ValueError("终态赛事不能生成新阶段对阵")
+            current_idx = int(contest["current_stage_idx"] or 0)
+            if current_idx != int(expected_current_stage_idx):
+                raise ValueError("赛事当前阶段已变化，拒绝重复生成对阵")
+            if stage_idx not in (current_idx, current_idx + 1):
+                raise ValueError("赛事阶段只能生成当前阶段或紧邻的下一阶段")
+
+            existing = c.execute(
+                "SELECT id, match_id, status, bot_b_id FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? ORDER BY id",
+                (contest_id, stage_idx),
+            ).fetchall()
+            if existing and stage_idx == current_idx:
+                raise ValueError("当前阶段对阵已存在，拒绝重复生成")
+            if existing:
+                if any(row["match_id"] is not None for row in existing):
+                    raise ValueError("下一阶段已有绑定对局，不能覆盖")
+                if any(
+                    row["status"] not in (STATUS_PENDING, STATUS_COMPLETED)
+                    or (
+                        row["status"] == STATUS_COMPLETED
+                        and row["bot_b_id"] is not None
+                    )
+                    for row in existing
+                ):
+                    raise ValueError("下一阶段已有运行进度，不能覆盖")
+                c.execute(
+                    "DELETE FROM contest_pairings WHERE contest_id=? AND stage_idx=?",
+                    (contest_id, stage_idx),
+                )
+
+            inserted: list[dict] = []
+            placeholders = ",".join("?" for _ in columns)
+            for source in pairing_rows:
+                row = {
+                    "contest_id": contest_id,
+                    "round_num": int(source.get("round_num") or 1),
+                    "entry_a_id": source.get("entry_a_id"),
+                    "entry_b_id": source.get("entry_b_id"),
+                    "bot_a_id": source.get("bot_a_id"),
+                    "bot_b_id": source.get("bot_b_id"),
+                    "bot_a_version_id": source.get("bot_a_version_id"),
+                    "bot_b_version_id": source.get("bot_b_version_id"),
+                    "pairing_seed": source.get("pairing_seed"),
+                    "published_at": source.get("published_at"),
+                    "scheduled_at": source.get("scheduled_at"),
+                    "match_id": None,
+                    "status": source.get("status") or STATUS_PENDING,
+                    "stage_idx": stage_idx,
+                    "stage_key": source.get("stage_key") or "",
+                    "group_id": source.get("group_id") or "",
+                    "bracket_slot": source.get("bracket_slot"),
+                    "color_first": int(source.get("color_first") or 0),
+                }
+                cur = c.execute(
+                    f"INSERT INTO contest_pairings({','.join(columns)}) "
+                    f"VALUES({placeholders})",
+                    tuple(row[column] for column in columns),
+                )
+                inserted.append(
+                    _row(
+                        c.execute(
+                            "SELECT * FROM contest_pairings WHERE id=?",
+                            (cur.lastrowid,),
+                        ).fetchone()
+                    )
+                )
+
+            if activate_running:
+                c.execute(
+                    "UPDATE contests SET status=?, current_stage_idx=?, "
+                    "rest_ends_at=NULL WHERE id=?",
+                    (CONTEST_RUNNING, stage_idx, contest_id),
+                )
+            elif stage_idx != current_idx:
+                c.execute(
+                    "UPDATE contests SET current_stage_idx=? WHERE id=?",
+                    (stage_idx, contest_id),
+                )
+            return inserted
+
+    def append_contest_round_pairings(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        pairing_rows: list[dict[str, Any]],
+        *,
+        expected_current_stage_idx: int,
+        expected_previous_max_round: int,
+    ) -> list[dict]:
+        """Atomically append one complete lazy-generated Swiss/KO round.
+
+        The caller computes every row, including seat order and version snapshots,
+        before entering this method.  ``BEGIN IMMEDIATE`` then revalidates the
+        durable contest/stage cursor and previous maximum round.  A concurrent or
+        retried writer cannot append the same target round twice, and any INSERT
+        failure rolls the whole round back.
+        """
+        if not pairing_rows:
+            raise ValueError("赛事轮次对阵批次不能为空")
+        previous_round = int(expected_previous_max_round)
+        target_round = previous_round + 1
+        if any(
+            int(source.get("round_num") or 0) != target_round
+            for source in pairing_rows
+        ):
+            raise ValueError("赛事轮次批次必须全部属于紧邻的目标轮")
+
+        columns = (
+            "contest_id",
+            "round_num",
+            "entry_a_id",
+            "entry_b_id",
+            "bot_a_id",
+            "bot_b_id",
+            "bot_a_version_id",
+            "bot_b_version_id",
+            "pairing_seed",
+            "published_at",
+            "scheduled_at",
+            "match_id",
+            "status",
+            "stage_idx",
+            "stage_key",
+            "group_id",
+            "bracket_slot",
+            "color_first",
+        )
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status, current_stage_idx FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if not contest:
+                raise ValueError("赛事不存在")
+            if contest["status"] != CONTEST_RUNNING:
+                raise ValueError("仅运行中的赛事可追加后续轮次")
+            if int(contest["current_stage_idx"] or 0) != int(
+                expected_current_stage_idx
+            ):
+                raise ValueError("赛事当前阶段已变化，拒绝追加轮次")
+            if int(stage_idx) != int(expected_current_stage_idx):
+                raise ValueError("只能向赛事当前阶段追加轮次")
+
+            round_state = c.execute(
+                "SELECT MAX(round_num) AS max_round FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=?",
+                (contest_id, stage_idx),
+            ).fetchone()
+            actual_max = (
+                int(round_state["max_round"])
+                if round_state and round_state["max_round"] is not None
+                else 0
+            )
+            if actual_max != previous_round:
+                raise ValueError("赛事上一轮已变化，拒绝重复或跨轮追加")
+            target_exists = c.execute(
+                "SELECT 1 FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? AND round_num=? LIMIT 1",
+                (contest_id, stage_idx, target_round),
+            ).fetchone()
+            if target_exists:
+                raise ValueError("赛事目标轮已存在，拒绝重复生成")
+
+            inserted: list[dict] = []
+            placeholders = ",".join("?" for _ in columns)
+            for source in pairing_rows:
+                row = {
+                    "contest_id": contest_id,
+                    "round_num": target_round,
+                    "entry_a_id": source.get("entry_a_id"),
+                    "entry_b_id": source.get("entry_b_id"),
+                    "bot_a_id": source.get("bot_a_id"),
+                    "bot_b_id": source.get("bot_b_id"),
+                    "bot_a_version_id": source.get("bot_a_version_id"),
+                    "bot_b_version_id": source.get("bot_b_version_id"),
+                    "pairing_seed": source.get("pairing_seed"),
+                    "published_at": source.get("published_at"),
+                    "scheduled_at": source.get("scheduled_at"),
+                    "match_id": None,
+                    "status": source.get("status") or STATUS_PENDING,
+                    "stage_idx": stage_idx,
+                    "stage_key": source.get("stage_key") or "",
+                    "group_id": source.get("group_id") or "",
+                    "bracket_slot": source.get("bracket_slot"),
+                    # A/B have already been materialized as actual seat 0/1.
+                    "color_first": 0,
+                }
+                cur = c.execute(
+                    f"INSERT INTO contest_pairings({','.join(columns)}) "
+                    f"VALUES({placeholders})",
+                    tuple(row[column] for column in columns),
+                )
+                inserted.append(
+                    _row(
+                        c.execute(
+                            "SELECT * FROM contest_pairings WHERE id=?",
+                            (cur.lastrowid,),
+                        ).fetchone()
+                    )
+                )
+            return inserted
+
     def list_pairings(
         self, contest_id: int, *, stage_idx: int | None = None
     ) -> list[dict]:
@@ -3099,6 +4042,147 @@ class Store:
             return [_row(r) for r in c.execute(sql, params)]
 
     list_contest_pairings = list_pairings
+
+    def delete_unstarted_contest_pairings(
+        self, contest_id: int, pairing_ids: list[int]
+    ) -> int:
+        """删除一次失败的阶段生成所留下、且尚未绑定对局的 pairing。
+
+        这是赛事生命周期补偿专用的窄接口：调用方必须传入本次生成前后差集得到的
+        精确 ID；SQL 再同时约束 contest_id 与 match_id IS NULL，避免误删并发产生或
+        已经派发的合法对阵。返回实际删除行数，供调用方决定是否可安全回滚状态。
+        """
+        ids = sorted({int(pid) for pid in pairing_ids})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._tx() as c:
+            cur = c.execute(
+                f"DELETE FROM contest_pairings WHERE contest_id=? "
+                f"AND match_id IS NULL AND id IN ({placeholders})",
+                [contest_id, *ids],
+            )
+            return int(cur.rowcount)
+
+    def replace_unstarted_contest_stage_pairings(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        pairing_rows: list[dict[str, Any]],
+        *,
+        expected_existing_ids: list[int],
+    ) -> list[dict]:
+        """published 首阶段硬崩恢复：原子替换未启动的残缺对阵批次。
+
+        这是一个有意窄化的恢复入口，只允许当前仍为 ``published``、
+        ``current_stage_idx`` 未改变，且现有 pairing 全部未绑定 match 时重建。
+        已绑定、已进入 running/completed，或赛事存在任何 active match
+        都是不可自动推断的不一致，必须显式报错而不能静默续跑。
+
+        ``expected_existing_ids`` 是 manager 在同一 per-contest 锁内看到的快照；
+        ``BEGIN IMMEDIATE`` 后再比对一次，阻止多进程/外部写在
+        check→replace 窗口中被覆盖。
+        """
+        expected_ids = sorted({int(pairing_id) for pairing_id in expected_existing_ids})
+        columns = (
+            "contest_id",
+            "round_num",
+            "entry_a_id",
+            "entry_b_id",
+            "bot_a_id",
+            "bot_b_id",
+            "bot_a_version_id",
+            "bot_b_version_id",
+            "pairing_seed",
+            "published_at",
+            "scheduled_at",
+            "match_id",
+            "status",
+            "stage_idx",
+            "stage_key",
+            "group_id",
+            "bracket_slot",
+            "color_first",
+        )
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT status, current_stage_idx FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if not contest or contest["status"] != CONTEST_PUBLISHED:
+                raise ValueError("published 赛事状态已变化，拒绝重建对阵")
+            if int(contest["current_stage_idx"] or 0) != int(stage_idx):
+                raise ValueError("published 赛事当前阶段已变化，拒绝重建对阵")
+
+            current = c.execute(
+                "SELECT id, match_id, status, bot_b_id FROM contest_pairings "
+                "WHERE contest_id=? AND stage_idx=? ORDER BY id",
+                (contest_id, stage_idx),
+            ).fetchall()
+            current_ids = [int(row["id"]) for row in current]
+            if current_ids != expected_ids:
+                raise ValueError("published 对阵在恢复期间已变化，拒绝覆盖")
+            if any(row["match_id"] is not None for row in current):
+                raise ValueError("published 对阵已绑定对局，不能自动重建")
+            if any(
+                row["status"] not in (STATUS_PENDING, STATUS_COMPLETED)
+                or (row["status"] == STATUS_COMPLETED and row["bot_b_id"] is not None)
+                for row in current
+            ):
+                raise ValueError("published 对阵已有运行进度，不能自动重建")
+
+            for gid in _all_game_ids():
+                table = _matches_table(gid)
+                active = c.execute(
+                    f"SELECT 1 FROM {table} WHERE contest_id=? "
+                    "AND status IN (?,?) LIMIT 1",
+                    (contest_id, STATUS_PENDING, STATUS_RUNNING),
+                ).fetchone()
+                if active:
+                    raise ValueError("published 赛事已有 active 对局，不能自动重建")
+
+            c.execute(
+                "DELETE FROM contest_pairings WHERE contest_id=? AND stage_idx=?",
+                (contest_id, stage_idx),
+            )
+            inserted: list[dict] = []
+            placeholders = ",".join("?" for _ in columns)
+            for source in pairing_rows:
+                row = {
+                    "contest_id": contest_id,
+                    "round_num": int(source.get("round_num") or 1),
+                    "entry_a_id": source.get("entry_a_id"),
+                    "entry_b_id": source.get("entry_b_id"),
+                    "bot_a_id": source.get("bot_a_id"),
+                    "bot_b_id": source.get("bot_b_id"),
+                    "bot_a_version_id": source.get("bot_a_version_id"),
+                    "bot_b_version_id": source.get("bot_b_version_id"),
+                    "pairing_seed": source.get("pairing_seed"),
+                    "published_at": source.get("published_at"),
+                    "scheduled_at": source.get("scheduled_at"),
+                    "match_id": None,
+                    "status": source.get("status") or STATUS_PENDING,
+                    "stage_idx": stage_idx,
+                    "stage_key": source.get("stage_key") or "",
+                    "group_id": source.get("group_id") or "",
+                    "bracket_slot": source.get("bracket_slot"),
+                    "color_first": int(source.get("color_first") or 0),
+                }
+                cur = c.execute(
+                    f"INSERT INTO contest_pairings({','.join(columns)}) "
+                    f"VALUES({placeholders})",
+                    tuple(row[column] for column in columns),
+                )
+                inserted.append(
+                    _row(
+                        c.execute(
+                            "SELECT * FROM contest_pairings WHERE id=?",
+                            (cur.lastrowid,),
+                        ).fetchone()
+                    )
+                )
+            return inserted
 
     def contest_bracket(self, contest_id: int) -> list[dict]:
         """返回对阵（带 bot 名/owner 名 + 对局 winner），便于前端画对阵图。
@@ -3222,7 +4306,123 @@ class Store:
 
     update_contest_pairing = update_pairing
 
+    def bind_contest_pairing_match(
+        self,
+        contest_id: int,
+        pairing_id: int,
+        match_id: str,
+        *,
+        activate_running: bool = False,
+    ) -> dict:
+        """原子绑定 prepared match，并可在同一事务把 published 赛事转 running。
+
+        只接受仍属该赛事、仍为 pending 且 ``match_id IS NULL`` 的 pairing；这样
+        challenge 准备成功后若绑定/提交失败，调用方可安全删除尚未启动的 match，
+        不会留下 pairing 与 contest 状态的半提交。
+        """
+        with self._tx() as c:
+            contest = c.execute(
+                "SELECT status FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            allowed = ("published", "running")
+            if not contest or contest["status"] not in allowed:
+                raise ValueError("赛事状态已变化，不能绑定对局")
+            cur = c.execute(
+                "UPDATE contest_pairings SET match_id=?, status='running' "
+                "WHERE id=? AND contest_id=? AND status='pending' AND match_id IS NULL",
+                (match_id, pairing_id, contest_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("对阵已被派发或状态已变化")
+            if activate_running:
+                cur = c.execute(
+                    "UPDATE contests SET status='running' "
+                    "WHERE id=? AND status='published'",
+                    (contest_id,),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("赛事已不处于 published 状态")
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_pairings WHERE id=?", (pairing_id,)
+                ).fetchone()
+            )
+
+    def unbind_prepared_contest_match(
+        self,
+        contest_id: int,
+        pairing_id: int,
+        match_id: str,
+        *,
+        restore_published: bool = False,
+    ) -> bool:
+        """prepared match 启动失败时精确撤销刚完成的 pairing 绑定。"""
+        with self._tx() as c:
+            cur = c.execute(
+                "UPDATE contest_pairings SET match_id=NULL, status='pending' "
+                "WHERE id=? AND contest_id=? AND match_id=? AND status='running'",
+                (pairing_id, contest_id, match_id),
+            )
+            if cur.rowcount != 1:
+                return False
+            if restore_published:
+                other = c.execute(
+                    "SELECT 1 FROM contest_pairings "
+                    "WHERE contest_id=? AND match_id IS NOT NULL LIMIT 1",
+                    (contest_id,),
+                ).fetchone()
+                if not other:
+                    c.execute(
+                        "UPDATE contests SET status='published' "
+                        "WHERE id=? AND status='running'",
+                        (contest_id,),
+                    )
+            return True
+
     # ── contest_stage_results ─────────────────────────────────
+
+    def reset_aborted_contest_pairing(
+        self, contest_id: int, match_id: str
+    ) -> dict | None:
+        """把一场无裁决的 aborted 赛事局从 pairing 上解绑。
+
+        aborted match 行保留为审计/回放历史；只将仍精确绑定该
+        match_id 的 pairing 原子复位为 pending，供后续安全重派。
+        completed 或已被别的 match 取代的 pairing 绝不会被改写。
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            table = self._match_table_of(c, match_id)
+            if not table:
+                return None
+            match = c.execute(
+                f"SELECT status, contest_id FROM {table} WHERE id=?", (match_id,)
+            ).fetchone()
+            if (
+                not match
+                or match["status"] != STATUS_ABORTED
+                or match["contest_id"] != contest_id
+            ):
+                return None
+            pairing = c.execute(
+                "SELECT * FROM contest_pairings "
+                "WHERE contest_id=? AND match_id=? LIMIT 1",
+                (contest_id, match_id),
+            ).fetchone()
+            if not pairing:
+                return None
+            cur = c.execute(
+                "UPDATE contest_pairings SET match_id=NULL, status=? "
+                "WHERE id=? AND contest_id=? AND match_id=?",
+                (STATUS_PENDING, pairing["id"], contest_id, match_id),
+            )
+            if cur.rowcount != 1:
+                return None
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_pairings WHERE id=?", (pairing["id"],)
+                ).fetchone()
+            )
 
     def upsert_stage_result(
         self,
@@ -3273,6 +4473,50 @@ class Store:
             return [_row(r) for r in c.execute(sql, params)]
 
     # ── contest_official_results（P2 全员正式名次）─────────────
+
+    def replace_official_results(
+        self,
+        contest_id: int,
+        result_rows: list[dict[str, Any]],
+    ) -> None:
+        """Atomically replace the complete official ranking and publish readiness.
+
+        ``DELETE`` + every replacement row + ``official_results_ready=1`` are one
+        transaction.  A constraint error or process failure therefore preserves
+        the previous complete ranking (or leaves a new contest at ready=0) instead
+        of exposing a partial table behind a ready flag.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not c.execute(
+                "SELECT 1 FROM contests WHERE id=?", (contest_id,)
+            ).fetchone():
+                raise ValueError("赛事不存在")
+            c.execute(
+                "DELETE FROM contest_official_results WHERE contest_id=?",
+                (contest_id,),
+            )
+            for row in result_rows:
+                c.execute(
+                    "INSERT INTO contest_official_results"
+                    "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
+                    "tiebreaks_json, awarded) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        contest_id,
+                        row["entry_id"],
+                        int(row.get("stage_idx") or 0),
+                        row["rank"],
+                        row.get("points") or 0,
+                        row.get("bot_id"),
+                        row.get("user_id"),
+                        row.get("tiebreaks_json") or "{}",
+                        row.get("awarded") or "",
+                    ),
+                )
+            c.execute(
+                "UPDATE contests SET official_results_ready=1 WHERE id=?",
+                (contest_id,),
+            )
 
     def clear_official_results(self, contest_id: int) -> None:
         with self._tx() as c:
@@ -3548,6 +4792,100 @@ class Store:
             return [_row(r) for r in c.execute(sql, params)]
 
     # ── 删除（管理端，schema 均 ON DELETE CASCADE） ─────────
+
+    def delete_user_if_safe(self, user_id: int) -> dict:
+        """原子拒绝会破坏活跃对局/赛事的管理员用户硬删。
+
+        删除用户会经 ``users → bots`` 级联，不能只依赖 Bot 删除端点的保护。
+        本方法在 ``BEGIN IMMEDIATE`` 事务内先汇总该用户全部 Bot 的活跃引用及
+        其组织的赛事，再决定是否删除；这样另一个连接也不能在检查和 DELETE
+        之间插入新的引用。完成态历史仍按 schema 的 SET NULL/CASCADE 契约保留。
+
+        返回 ``found/deleted/bot_ids/blockers``；成功时调用方可用删除前保存的
+        ``bot_ids`` 清理对应上传目录。
+        """
+        active_contest_statuses = (
+            CONTEST_PUBLISHED,
+            CONTEST_RUNNING,
+            CONTEST_REST,
+        )
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            user = c.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+            if not user:
+                return {
+                    "found": False,
+                    "deleted": False,
+                    "bot_ids": [],
+                    "blockers": {},
+                }
+
+            bot_ids = [
+                int(row["id"])
+                for row in c.execute(
+                    "SELECT id FROM bots WHERE owner_id=? ORDER BY id", (user_id,)
+                ).fetchall()
+            ]
+            match_count = 0
+            for gid in _all_game_ids():
+                table = _matches_table(gid)
+                row = c.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} "
+                    "WHERE status IN (?,?) AND ("
+                    "bot_a_id IN (SELECT id FROM bots WHERE owner_id=?) OR "
+                    "bot_b_id IN (SELECT id FROM bots WHERE owner_id=?) OR "
+                    "owner_id=? OR human_user_id=?)",
+                    (
+                        STATUS_PENDING,
+                        STATUS_RUNNING,
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                    ),
+                ).fetchone()
+                match_count += int(row["n"] if row else 0)
+
+            status_marks = ",".join("?" for _ in active_contest_statuses)
+            pairing_row = c.execute(
+                "SELECT COUNT(*) AS n FROM contest_pairings cp "
+                "JOIN contests contest ON contest.id=cp.contest_id "
+                f"WHERE contest.status IN ({status_marks}) AND ("
+                "cp.bot_a_id IN (SELECT id FROM bots WHERE owner_id=?) OR "
+                "cp.bot_b_id IN (SELECT id FROM bots WHERE owner_id=?))",
+                (*active_contest_statuses, user_id, user_id),
+            ).fetchone()
+            entry_row = c.execute(
+                "SELECT COUNT(*) AS n FROM contest_entries entry "
+                "JOIN contests contest ON contest.id=entry.contest_id "
+                f"WHERE contest.status IN ({status_marks}) AND (entry.user_id=? OR "
+                "entry.bot_id IN (SELECT id FROM bots WHERE owner_id=?))",
+                (*active_contest_statuses, user_id, user_id),
+            ).fetchone()
+            organized_row = c.execute(
+                "SELECT COUNT(*) AS n FROM contests WHERE organizer_id=?", (user_id,)
+            ).fetchone()
+            blockers = {
+                "matches": match_count,
+                "contest_pairings": int(pairing_row["n"] if pairing_row else 0),
+                "contest_entries": int(entry_row["n"] if entry_row else 0),
+                "organized_contests": int(organized_row["n"] if organized_row else 0),
+            }
+            if any(blockers.values()):
+                return {
+                    "found": True,
+                    "deleted": False,
+                    "bot_ids": bot_ids,
+                    "blockers": blockers,
+                }
+
+            deleted = c.execute("DELETE FROM users WHERE id=?", (user_id,)).rowcount > 0
+            return {
+                "found": True,
+                "deleted": deleted,
+                "bot_ids": bot_ids,
+                "blockers": blockers,
+            }
 
     def delete_user(self, user_id: int) -> bool:
         with self._tx() as c:

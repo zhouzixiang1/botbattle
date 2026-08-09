@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""大规模系统压测：打已运行的 dev 服务（127.0.0.1:50380，主库 botzone.db）。
+"""大规模系统压测：仅打隔离 worktree 服务与数据库副本。
 
-批量创建用户（DB-direct 绕验证码/SMTP）+ 模拟真实行为，全面覆盖每一个角色与端点。
+批量创建用户（DB-direct 绕验证码/SMTP）+ 模拟真实行为，覆盖主要角色与业务端点。
 
 设计要点（调研结论）：
   - dev 服务 .env 配了真实 SMTP 且未设 BZ_TEST_CAPTCHA=1 → HTTP /register 的验证码无法被脚本
@@ -9,18 +9,19 @@
     与 e2e_smoke.sh 的模式），登录态用 **DB 直写 sessions 表** 生成不透明 Bearer token
     （`store.add_session(new_session_token(), uid, session_expires())`）—— 服务端从同一 botzone.db
     读 sessions，Bearer 真正打通 require_user/admin/organizer 全链路。
-  - Bot 执行走 dev 服务现状的 Docker 沙箱（不需 BZ_BOT_LOCAL）。
-  - 并发硬顶 = cpu//4；holdem 用 hands=8 加速，棋类单局。
+  - Bot 执行方式由被测服务决定：生产式 Docker 沙箱，或 QA 服务显式设置 BZ_BOT_LOCAL=1。
+  - 并发硬顶 = cpu//4；三款游戏均使用 GameSpec 固定规则（holdem 固定 70 手）。
   - 所有用户名/邮箱/Bot 名均 load_* 前缀，可一键识别清理；seed 幂等可重复跑。
 
 8 个阶段覆盖矩阵：
-  0 基础(公开读 + 鉴权)   1 Bot 端点   2 对局(三游戏×并发+自博弈)
-  3 SSE 观赛             4 人类 vs Bot(WS /play)   5 赛事全生命周期
-  6 自动对局(ladder)     7 Admin 全端点
+  0 基础(公开读 + 鉴权)   1 Bot 端点   2 对局(三游戏多局+自博弈)
+  3 SSE snapshot         4 人类 vs Bot(WS /play)   5 赛事全生命周期
+  6 自动对局(ladder)     7 Admin 关键端点
 
 用法：
-  python scripts/load_test.py [--base http://127.0.0.1:50380] [--db botzone.db] [--users 60]
-前置：dev 服务在线（scripts/platform-ctl.sh status）。退出码：0=全过，1=有失败。
+  python scripts/load_test.py [--base http://127.0.0.1:50381] [--db botzone.db] [--users 60]
+前置：worktree dev 服务在线。50380 与主 checkout botzone.db 会被硬拒绝。
+退出码：0=全过，1=有失败。
 """
 from __future__ import annotations
 
@@ -45,6 +46,18 @@ from bzplat.backend.crypto import hash_password, new_session_token, session_expi
 from bzplat.backend.store import Store  # noqa: E402
 from bzplat.backend.store.schema import ROLE_ADMIN, ROLE_ORGANIZER, ROLE_USER  # noqa: E402
 from bzplat.backend.bots.manager import BotManager  # noqa: E402
+from scripts._qa_accounts import (  # noqa: E402
+    QaAccountSpec,
+    get_or_create_dedicated_account,
+    inspect_dedicated_account,
+    preflight_dedicated_accounts,
+)
+from scripts._qa_target import (  # noqa: E402
+    assert_qa_instance,
+    ensure_qa_base,
+    qa_db_path,
+    qa_upload_root,
+)
 
 PASS = 0
 FAIL = 0
@@ -56,15 +69,39 @@ PASSWORD = "LoadTest1234"          # 所有 load 账号统一密码
 EMAIL_DOMAIN = "loadtest.local"
 N_USERS = 60                       # 普通用户数（可被 --users 覆盖）
 N_ORGS = 2                         # 组织者数
-CONCURRENCY = 8                    # 并发对局数（= cpu//4 硬顶）
 TARGET_MATCHES = 12                # 阶段 2 目标对局总数（三游戏×4，配合关限流可在 ~60s 完成）
-HOLDEM_HANDS = 4                   # holdem 加速手数（默认 70 太慢，压测用 4）
 SAMPLE_BINARIES = {
     "holdem": "samples/callbot_linux_amd64",
     "gomoku": "samples/gomokubot_linux_amd64",
     "pencil": "samples/pencilbot_linux_amd64",
 }
 GAMES = ("holdem", "gomoku", "pencil")
+LOAD_ACCOUNT_NAMESPACE = "load-test-v1"
+LOAD_ADMIN_NAME = "load_admin"
+
+
+def load_account_spec(username: str, email: str, role: str) -> QaAccountSpec:
+    return QaAccountSpec(
+        LOAD_ACCOUNT_NAMESPACE, username, email, PASSWORD, role
+    )
+
+
+def load_user_spec(username: str) -> QaAccountSpec:
+    return load_account_spec(username, f"{username}@{EMAIL_DOMAIN}", ROLE_USER)
+
+
+def load_org_spec(username: str) -> QaAccountSpec:
+    return load_account_spec(
+        username, f"{username}@{EMAIL_DOMAIN}", ROLE_ORGANIZER
+    )
+
+
+def load_admin_spec() -> QaAccountSpec:
+    return load_account_spec(
+        LOAD_ADMIN_NAME,
+        f"{LOAD_ADMIN_NAME}@{EMAIL_DOMAIN}",
+        ROLE_ADMIN,
+    )
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -126,28 +163,42 @@ def multipart(fields: dict[str, Any], file_field: str, filename: str, data: byte
 
 
 # ── 种子（DB-direct，幂等）────────────────────────────────────
-def seed(db_path: str, n_users: int, upload_root: str) -> dict[str, Any]:
+def seed(
+    db_path: str,
+    n_users: int,
+    upload_root: str | None = None,
+) -> dict[str, Any]:
     """批量建 load_* 用户 + Bot + organizer + admin，直写 sessions 表生成 Bearer token。
 
     返回 {tokens:{username→token}, bots:{username→{game→bot_id}}, admin_token, org_tokens:[...],
           user_names:[...], admin_name}。幂等：已存在的用户/bot 跳过。
     """
+    resolved_db = qa_db_path(db_path, ROOT)
+    resolved_uploads = qa_upload_root(upload_root, resolved_db, ROOT)
     print(f"\n=== 种子：{n_users} 用户 × 3 Bot + {N_ORGS} 组织者 + admin（DB-direct）===")
-    store = Store(db_path)
+    print(f"  db={resolved_db} uploads={resolved_uploads}")
+    resolved_db.parent.mkdir(parents=True, exist_ok=True)
+    store = Store(str(resolved_db))
     # 错峰：写前给该连接设 busy_timeout，规避与运行服务的锁竞争
     store._conn.execute("PRAGMA busy_timeout=10000")
-    bm = BotManager(store, upload_root=upload_root)
+    user_specs = [load_user_spec(f"load_u{i:02d}") for i in range(1, n_users + 1)]
+    org_specs = [load_org_spec(f"load_org{i}") for i in range(1, N_ORGS + 1)]
+    admin_spec = load_admin_spec()
+    try:
+        preflight_dedicated_accounts(
+            store, [*user_specs, *org_specs, admin_spec]
+        )
+    except Exception:
+        store.close()
+        raise
+    bm = BotManager(store, upload_root=resolved_uploads)
 
     sample_bytes = {gid: (ROOT / rel).read_bytes() for gid, rel in SAMPLE_BINARIES.items()}
 
     def get_or_create_user(username: str, email: str, role: str = ROLE_USER) -> dict:
-        u = store.get_user_by_username(username)
-        if u:
-            store.update_user(u["id"], email_verified=1, is_active=1, role=role)
-            return store.get_user(u["id"])
-        u = store.create_user(username, email, hash_password(PASSWORD), display_name=username, role=role)
-        store.update_user(u["id"], email_verified=1)  # 绕邮箱验证
-        return store.get_user(u["id"])
+        return get_or_create_dedicated_account(
+            store, load_account_spec(username, email, role)
+        )
 
     def get_or_create_bot(owner_id: int, name: str, game_id: str, raw: bytes) -> dict:
         existing = store.get_bot_by_owner_name(owner_id, name)
@@ -182,17 +233,9 @@ def seed(db_path: str, n_users: int, upload_root: str) -> dict[str, Any]:
         get_or_create_user(uname, email, role=ROLE_ORGANIZER)
         org_names.append(uname)
 
-    # admin：复用现有 admin，否则建 load_admin
-    admin_name: str | None = None
-    for candidate in ("load_admin", "admin", "adminroot"):
-        u = store.get_user_by_username(candidate)
-        if u and u.get("role") == ROLE_ADMIN:
-            store.update_user(u["id"], email_verified=1, is_active=1)
-            admin_name = candidate
-            break
-    if admin_name is None:
-        admin_name = "load_admin"
-        get_or_create_user(admin_name, f"{admin_name}@{EMAIL_DOMAIN}", role=ROLE_ADMIN)
+    # admin：仅允许脚本自己的 load_admin；绝不复用 copied DB 的任意管理员。
+    admin_name = LOAD_ADMIN_NAME
+    get_or_create_dedicated_account(store, admin_spec)
 
     # 生成 Bearer token（DB 直写 sessions 表，服务端从同一库读）
     for uname in user_names + org_names + [admin_name]:
@@ -237,11 +280,9 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     # 经验/等级体系（PR-9）
     r = api.client.get("/api/levels/info")
     check("GET /api/levels/info", r.status_code == 200 and "thresholds" in r.json(), r.text[:80])
-    # 站点信息 + 数据集列表（PR-10）
+    # 站点信息（PR-10）
     r = api.client.get("/api/site/info")
     check("GET /api/site/info", r.status_code == 200 and "name" in r.json(), r.text[:80])
-    r = api.client.get("/api/matchpacks")
-    check("GET /api/matchpacks", r.status_code == 200 and "packs" in r.json(), r.text[:80])
 
     r = api.client.get("/api/contests/templates")
     check("GET /api/contests/templates", r.status_code == 200 and "templates" in r.json(), r.text[:80])
@@ -301,7 +342,7 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     rc = _paced_challenge
     if rc:
         rr = rc(api, tok, {"my_bot_id": ctx["bots"][ctx["user_names"][0]]["holdem"],
-                           "opponent_bot_id": ctx["bots"][u2]["holdem"], "game_id": "holdem", "hands": 8})
+                           "opponent_bot_id": ctx["bots"][u2]["holdem"], "game_id": "holdem"})
         if rr.status_code == 200:
             tmid = rr.json()["match_id"]
             # 评论
@@ -451,7 +492,7 @@ def _user_id(db_path: str, username: str) -> int:
         con.close()
 
 
-# ── 阶段 2：对局（三游戏 × 并发 + 自博弈）────────────────────
+# ── 阶段 2：对局（三游戏多局 + 自博弈）────────────────────────
 # dev 服务按 IP 限流：/api/matches/challenge = 8 req/60s（同一 IP 共享）。
 # 压测时建议重启服务设 BZ_RATE_LIMIT=0 关闭限流，则挑战无需节流、可快速并发。
 # 若限流开启，所有请求来自 127.0.0.1，挑战需节流：每窗口最多 8 个，间隔 ~7.6s。
@@ -462,8 +503,8 @@ NO_THROTTLE = False          # --no-throttle 标志（服务端关限流时跳�
 
 
 def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
-    print(f"\n=== 阶段 2：对局（三游戏混跑，目标 {TARGET_MATCHES} 场，"
-          f"挑战节流 {CHALLENGE_RATE}/{int(RATE_WINDOW)}s）===")
+    print(f"\n=== 阶段 2：对局（三游戏混跑，目标 {TARGET_MATCHES} 场；"
+          f"顺序提交、并行等待，挑战节流 {CHALLENGE_RATE}/{int(RATE_WINDOW)}s）===")
     user_names = ctx["user_names"]
 
     # 构造对局对：跨用户对战 + 自博弈（同 owner 两不同 bot）
@@ -503,7 +544,8 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
 
     def wait_one(mid: str, game: str, owner_tok: str) -> None:
         try:
-            m = api.wait_match(owner_tok, mid, timeout=90)
+            # Hold'em 规则固定为 70 手，不能靠请求参数缩短；给真实整场留足时间。
+            m = api.wait_match(owner_tok, mid, timeout=240)
             with lock:
                 results.append({"match": m, "game": game})
                 done[0] += 1
@@ -513,16 +555,15 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
             with lock:
                 errors.append(f"wait {game}: {e}")
 
-    # 节流发起挑战 + 并发等待：单一线程按节流间隔发挑战，每个挑战立即起一个 waiter 线程
+    # 单一线程顺序发起挑战；每个成功请求立即起 waiter 线程并行等待终态。
+    # 这里不控制或断言服务端同时运行的对局数，也不声称持续打满并发 ceiling。
     t0 = time.time()
     waiters: list[threading.Thread] = []
     for idx, (my_bid, opp_bid, game) in enumerate(pairs):
         owner_tok = ctx["tokens"][user_names[idx % len(user_names)]]
         payload: dict[str, Any] = {"my_bot_id": my_bid, "opponent_bot_id": opp_bid, "game_id": game}
-        if game == "holdem":
-            payload["hands"] = HOLDEM_HANDS
         # 节流：距上次挑战不足 interval 则等待（首个不等待）。
-        # --no-throttle 时（服务端关限流）跳过此 sleep，挑战可快速并发。
+        # --no-throttle 时（服务端关限流）跳过此 sleep，挑战可快速连续提交。
         if idx > 0 and not NO_THROTTLE:
             elapsed = time.time() - t0
             expected = idx * CHALLENGE_INTERVAL
@@ -560,22 +601,19 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
         n = sum(1 for r in completed if r["game"] == g)
         check(f"{g} 有 completed 对局", n > 0, f"completed {n}")
 
-    # 零和校验（holdem）+ winner 校验（棋类）
+    # 三游戏统一结果契约：match.result.deltas（旧 earnings_a/b 物理列已删除）。
     for r in completed:
         m = r["match"]
-        if r["game"] == "holdem":
-            ea, eb = int(m["earnings_a"]), int(m["earnings_b"])
-            if ea + eb != 0:
-                check("holdem earnings 零和", False, f"mid ea={ea} eb={eb}")
-                break
-        else:
-            # 棋类可平局（双方同分），winner 允许 None；非法只有 earnings 非零和
-            ea, eb = int(m["earnings_a"]), int(m["earnings_b"])
-            if ea + eb != 0:
-                check(f"{r['game']} earnings 零和", False, f"mid ea={ea} eb={eb}")
-                break
+        deltas = (m.get("result") or {}).get("deltas")
+        if not isinstance(deltas, list) or len(deltas) < 2:
+            check(f"{r['game']} result.deltas 存在", False, f"match={m.get('id')}")
+            break
+        ea, eb = int(deltas[0]), int(deltas[1])
+        if ea + eb != 0:
+            check(f"{r['game']} deltas 零和", False, f"mid ea={ea} eb={eb}")
+            break
     else:
-        check("全部 completed 对局结果合法（零和/winner）", True)
+        check("全部 completed 对局 result.deltas 合法且零和", True)
 
     # replay 非空（抽 1 场）。match 行用 id 字段（字符串 match_id）
     if completed:
@@ -641,20 +679,22 @@ def _bot_id_by_name(db_path: str, name: str) -> int:
         con.close()
 
 
-# ── 阶段 3：SSE 观赛 ──────────────────────────────────────────
+# ── 阶段 3：SSE snapshot ──────────────────────────────────────
 def phase3_sse(api: Api, ctx: dict[str, Any]) -> None:
-    print("\n=== 阶段 3：SSE 观赛 ===")
+    print("\n=== 阶段 3：SSE 连接与 snapshot 恢复 ===")
     u1, u2 = ctx["user_names"][0], ctx["user_names"][1]
     tok = ctx["tokens"][u1]
     # 发起一局 holdem，订阅 SSE
     r = _paced_challenge(api, tok, {
         "my_bot_id": ctx["bots"][u1]["holdem"], "opponent_bot_id": ctx["bots"][u2]["holdem"],
-        "game_id": "holdem", "hands": HOLDEM_HANDS,
+        "game_id": "holdem",
     })
     check("发起 SSE 观赛对局", r.status_code == 200, r.text[:80])
     mid = r.json()["match_id"]
 
-    # 订阅 SSE，收到 snapshot + 至少 1 个非 ping 事件后退出
+    # 订阅并收集非 ping 事件；正常契约下首帧 snapshot 会令线程立即退出。
+    # 此阶段只证明连接可建立、首帧 snapshot 结构可用；不等待也不声称验证
+    # snapshot 之后的实时增量事件。
     sse_events: list[dict] = []
     stop = {"flag": False}
 
@@ -704,15 +744,28 @@ def phase3_sse(api: Api, ctx: dict[str, Any]) -> None:
         check("snapshot 含 events 历史列表", "events" in snap and isinstance(snap["events"], list), str(snap.keys()))
 
 
+def _websocket_dependencies():
+    """Return the optional WS client modules, or ``None`` when unavailable."""
+    try:
+        import asyncio
+        import websockets
+    except ImportError:
+        return None
+    return websockets, asyncio
+
+
 # ── 阶段 4：人类 vs Bot（WebSocket /play）─────────────────────
 def phase4_human(api: Api, ctx: dict[str, Any]) -> None:
     print("\n=== 阶段 4：人类 vs Bot（WebSocket /play）===")
-    try:
-        import websockets
-        import asyncio
-    except ImportError:
-        warn("websockets 库不可用，跳过人类对战阶段")
+    dependencies = _websocket_dependencies()
+    if dependencies is None:
+        check(
+            "人类对战 WebSocket 客户端依赖可用",
+            False,
+            "缺少 Python websockets 包；未执行三游戏 /play，验收不得通过",
+        )
         return
+    websockets, asyncio = dependencies
 
     human_user = ctx["user_names"][2]
     htok = ctx["tokens"][human_user]
@@ -721,9 +774,9 @@ def phase4_human(api: Api, ctx: dict[str, Any]) -> None:
     opp_user = ctx["user_names"][3]
     human_users = [ctx["user_names"][2], ctx["user_names"][4], ctx["user_names"][5]]
     scenarios = [
-        ("holdem", opp_user, {"hands": HOLDEM_HANDS, "human_seat": 1}, human_users[0]),
+        ("holdem", opp_user, {"human_seat": 1}, human_users[0]),
         ("gomoku", opp_user, {"human_seat": 1}, human_users[1]),
-        ("pencil", opp_user, {"human_seat": 1, "n_dots": 7}, human_users[2]),
+        ("pencil", opp_user, {"human_seat": 1}, human_users[2]),
     ]
 
     # 赛前 Glicko 快照（人类局不应更新 rating）
@@ -749,9 +802,20 @@ def phase4_human(api: Api, ctx: dict[str, Any]) -> None:
         ok = _play_human_match(api, websockets, asyncio, mid, hu_tok, game)
         check(f"人类对战 {game} WS 对局完成", ok, "未正常结束")
 
-        # 校验 match_type=human 且 Glicko 不变
-        r = api.client.get(f"/api/matches/{mid}")
-        m = r.json()["match"]
+        # WS match_end 可能略早于最终 DB commit；经 GET 短暂轮询终态后仍必须是 completed。
+        try:
+            m = api.wait_match(hu_tok, mid, timeout=30)
+            persisted = True
+            persist_detail = f"status={m.get('status')}"
+        except Exception as exc:
+            m = {}
+            persisted = False
+            persist_detail = str(exc)
+        check(
+            f"人类对战 {game} 持久化 status=completed",
+            persisted and m.get("status") == "completed",
+            persist_detail,
+        )
         check(f"人类对战 {game} match_type=human", m.get("match_type") == "human", f"mt={m.get('match_type')}")
 
     # 赛后 Glicko 对比（人类局不更新）
@@ -784,7 +848,6 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
     async def play() -> bool:
         try:
             async with websockets.connect(url, max_size=None, open_timeout=20) as ws:
-                got_turn = False
                 while True:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=180)
@@ -795,13 +858,15 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
                     if et == "snapshot":
                         continue
                     if et == "your_turn":
-                        got_turn = True
                         req = ev.get("request", {})
                         move = _human_move(game, req)
                         await ws.send(json.dumps(move))
                         continue
-                    if et in ("match_end", "error"):
-                        return got_turn or et == "match_end"
+                    if et == "error":
+                        warn(f"WS {game} 返回 error: {ev.get('message') or ev}")
+                        return False
+                    if et == "match_end":
+                        return True
         except Exception as e:
             warn(f"WS {game} 异常: {e}")
             return False
@@ -812,7 +877,9 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
 def _human_move(game: str, req: dict) -> dict:
     """根据游戏与引擎 request 生成合法人类着。"""
     if game == "holdem":
-        return {"a": "c"}  # call/check
+        # Botzone TexasHoldem2p 协议：裸整数或 {"response": int}；
+        # 0 = check/call。旧 {"a":"c"} 会被协议层判为非法动作。
+        return {"response": 0}
     # 棋类：req 含 x/y（对方上一手）+ me；回一个合法空位
     # 简化策略：gomoku 下中心附近；pencil 下一条边
     if game == "gomoku":
@@ -825,7 +892,7 @@ def _human_move(game: str, req: dict) -> dict:
         if req.get("pass") == 1:
             return {"x": -1, "y": -1}
         # 否则下一条边：n_dots 决定交错网格
-        n = req.get("n_dots") or 7
+        n = req.get("n_dots") or 6
         # 下一合法边（水平），赌不重复
         return {"x": 1, "y": 0}
     return {"x": 0, "y": 0}
@@ -842,7 +909,7 @@ def phase5_contest(api: Api, ctx: dict[str, Any]) -> None:
     contests = []
     r = api.authed(org1_tok, "POST", "/api/contests", json={
         "title": "LoadTest Holdem Swiss-KO", "template_id": "holdem_swiss_ko", "game_id": "holdem",
-        "match_config": {"hands": HOLDEM_HANDS},
+        "match_config": {},
     })
     check("org1 创建 holdem Swiss-KO 赛事", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
     if r.status_code == 200:
@@ -925,7 +992,12 @@ def phase5_contest(api: Api, ctx: dict[str, Any]) -> None:
 
 
 # ── 阶段 6：自动对局（ladder）─────────────────────────────────
-def phase6_auto_match(api: Api, ctx: dict[str, Any]) -> None:
+def phase6_auto_match(
+    api: Api,
+    ctx: dict[str, Any],
+    *,
+    allow_miss: bool = False,
+) -> None:
     print("\n=== 阶段 6：自动对局（ladder）===")
     admin_tok = ctx["admin_token"]
 
@@ -954,8 +1026,7 @@ def phase6_auto_match(api: Api, ctx: dict[str, Any]) -> None:
     })
     check("PATCH runtime 催化 auto-match", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
 
-    # 等待 auto-match 触发（_is_idle 需连续两轮 interval，min_idle=0、interval=2 下约 2 个 interval ≈ 4-8s）
-    # 用软断言：auto-match 触发依赖后台 scheduler 时序，压测环境可能不触发（不作为硬失败）
+    # 等待 auto-match 触发（_is_idle 需连续两轮 interval，min_idle=0、interval=2 下约 2 个 interval ≈ 4-8s）。
     time.sleep(25)
 
     after_count = api.authed(admin_tok, "GET", "/api/admin/settings/runtime").json()["auto_match"]["daily_count"]
@@ -970,16 +1041,43 @@ def phase6_auto_match(api: Api, ctx: dict[str, Any]) -> None:
         "auto_match_bot_cooldown": orig["auto_match_bot_cooldown"],
     })
 
+    _record_auto_match_outcome(
+        before_count,
+        after_count,
+        before_ladder,
+        after_ladder,
+        allow_miss=allow_miss,
+    )
+
+
+def _record_auto_match_outcome(
+    before_count: int,
+    after_count: int,
+    before_ladder: int,
+    after_ladder: int,
+    *,
+    allow_miss: bool = False,
+) -> None:
+    """Record an auto-match observation without allowing silent false coverage."""
     grew = after_count > before_count or after_ladder > before_ladder
-    # auto-match 触发依赖后台 scheduler 的连续 idle 计时 + 无并发槽占用；压测环境里
-    # 刚跑完 phase2/5 的 bot 可能仍有遗留 task 占槽，或 scheduler 未连续两轮 idle，
-    # 故此处为「软」断言：触发则 PASS，未触发仅 WARN（scheduler 逻辑由 test_auto_matcher 覆盖）。
+    detail = (
+        f"daily_count {before_count}→{after_count}; "
+        f"ladder {before_ladder}→{after_ladder}"
+    )
     if grew:
         check("auto-match 触发（daily_count 或 ladder 对局增长）", True,
-              f"count {before_count}→{after_count} ladder {before_ladder}→{after_ladder}")
+              detail)
+    elif allow_miss:
+        warn(
+            f"auto-match 未触发（{detail}）；已显式启用 --allow-auto-match-miss，"
+            "本次运行只能用于诊断，不能作为 auto-match 验收证据"
+        )
     else:
-        warn(f"auto-match 未触发（count {before_count}→{after_count} ladder {before_ladder}→{after_ladder}）；"
-             "scheduler 逻辑由 test_auto_matcher.py 单测覆盖，此处仅验证 admin 开关端点")
+        check(
+            "auto-match 触发（daily_count 或 ladder 对局增长）",
+            False,
+            f"{detail}；默认验收要求观察到真实 ladder 增长",
+        )
 
 
 def _count_ladder_matches(db_path: str) -> int:
@@ -991,9 +1089,9 @@ def _count_ladder_matches(db_path: str) -> int:
         con.close()
 
 
-# ── 阶段 7：Admin 全端点 ──────────────────────────────────────
+# ── 阶段 7：Admin 关键端点 ────────────────────────────────────
 def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
-    print("\n=== 阶段 7：Admin 全端点 ===")
+    print("\n=== 阶段 7：Admin 关键端点 ===")
     tok = ctx["admin_token"]
 
     # GET 列表类
@@ -1059,7 +1157,7 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     # PATCH /api/admin/matches/{id}（强制一场 pending→aborted）：先发起一场，立即 abort
     r = _paced_challenge(api, ctx["tokens"][u1], {
         "my_bot_id": ctx["bots"][u1]["holdem"], "opponent_bot_id": ctx["bots"][ctx["user_names"][1]]["holdem"],
-        "game_id": "holdem", "hands": HOLDEM_HANDS,
+        "game_id": "holdem",
     })
     if r.status_code == 200:
         amid = r.json()["match_id"]
@@ -1095,28 +1193,10 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     else:
         warn(f"email template welcome 不可读 {r.status_code}（跳过 PUT）")
 
-    # GET/PATCH /api/admin/judges：改 gomoku size→13 再跑 1 场验生效，再改回 15；验 bb≤sb 报错
+    # GET/PATCH /api/admin/judges：棋盘/手数等规则已由 GameSpec 钉死；这里只验证
+    # 当前仍可调的 holdem 盲注关系校验，避免压测依赖已删除的 gomoku size 参数。
     r = api.authed(tok, "GET", "/api/admin/judges")
-    judge_games = {g["game_id"]: g for g in r.json().get("games", [])}
-    # 从 params 列表取 gomoku size 当前值（key=judge_gomoku_board_size）
-    gomoku_params = {p["key"]: p for p in judge_games.get("gomoku", {}).get("params", [])}
-    orig_size = gomoku_params.get("judge_gomoku_board_size", {}).get("value", 15)
-    r = api.authed(tok, "PATCH", "/api/admin/judges/params",
-                   json={"params": {"judge_gomoku_board_size": 13}})
-    check("PATCH judges gomoku_board_size=13", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
-    # 跑 1 场 gomoku 验生效（13×13 盘）
-    gu = ctx["user_names"][10] if len(ctx["user_names"]) > 10 else ctx["user_names"][0]
-    go = ctx["user_names"][11] if len(ctx["user_names"]) > 11 else ctx["user_names"][1]
-    r = _paced_challenge(api, ctx["tokens"][gu], {
-        "my_bot_id": ctx["bots"][gu]["gomoku"], "opponent_bot_id": ctx["bots"][go]["gomoku"],
-        "game_id": "gomoku",
-    })
-    if r.status_code == 200:
-        gm = api.wait_match(ctx["tokens"][gu], r.json()["match_id"], timeout=120)
-        check("gomoku size=13 下对局正常结束", gm["status"] in ("completed", "aborted"), f"{gm['status']}")
-    # 改回
-    api.authed(tok, "PATCH", "/api/admin/judges/params",
-               json={"params": {"judge_gomoku_board_size": orig_size}})
+    check("GET /api/admin/judges", r.status_code == 200 and "games" in r.json(), r.text[:80])
 
     # 验 judges bb≤sb 报错（key=judge_holdem_sb / judge_holdem_bb）
     r = api.authed(tok, "PATCH", "/api/admin/judges/params",
@@ -1126,7 +1206,7 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     # GET/POST/PUT/DELETE /api/admin/templates：建自定义模板→preview→删
     r = api.authed(tok, "POST", "/api/admin/templates", json={
         "id": "loadtest_custom", "name": "LoadTest Custom", "game_id": "holdem",
-        "match_config": {"hands": HOLDEM_HANDS},
+        "match_config": {},
         "stages": [{"key": "s1", "type": "round_robin", "scoring": "poker_3_1_0"}],
     })
     check("POST /api/admin/templates（建自定义）", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
@@ -1138,7 +1218,7 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     # PUT
     r = api.authed(tok, "PUT", "/api/admin/templates/loadtest_custom", json={
         "id": "loadtest_custom", "name": "LoadTest Custom v2", "game_id": "holdem",
-        "match_config": {"hands": HOLDEM_HANDS},
+        "match_config": {},
         "stages": [{"key": "s1", "type": "round_robin", "scoring": "poker_3_1_0"}],
     })
     check("PUT /api/admin/templates/{tid}", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
@@ -1163,13 +1243,25 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
 def main() -> int:
     global PASS, FAIL
     ap = argparse.ArgumentParser(description="botbattle 大规模系统压测")
-    ap.add_argument("--base", default=os.environ.get("BZ_TEST_BASE", "http://127.0.0.1:50380"))
+    ap.add_argument("--base", default=os.environ.get("BZ_TEST_BASE", "http://127.0.0.1:50381"))
     ap.add_argument("--db", default=os.environ.get("BZ_DB_PATH", "botzone.db"))
     ap.add_argument("--users", type=int, default=N_USERS)
-    ap.add_argument("--upload-root", default="bot_uploads")
+    ap.add_argument(
+        "--upload-root",
+        default=None,
+        help="Bot 产物目录（默认 <db.parent>/bot_uploads；相对路径也基于 db.parent）",
+    )
     ap.add_argument("--skip-seed", action="store_true", help="跳过种子（假设已种好）")
     ap.add_argument("--no-throttle", action="store_true",
                     help="跳过挑战节流（用于服务端已设 BZ_RATE_LIMIT=0 关限流时，大幅加速阶段 2/3）")
+    ap.add_argument(
+        "--allow-auto-match-miss",
+        action="store_true",
+        help=(
+            "仅诊断：auto-match 未触发时记 warning 而非失败；"
+            "启用后的结果不能作为 auto-match 验收证据"
+        ),
+    )
     args = ap.parse_args()
 
     global NO_THROTTLE
@@ -1177,20 +1269,30 @@ def main() -> int:
     if NO_THROTTLE:
         print("  ⚡ 已启用 --no-throttle（假设服务端 BZ_RATE_LIMIT=0）；挑战将不节流")
 
-    db_path = str(Path(args.db).resolve())
-    print(f"botbattle 大规模系统压测\n  base={args.base}  db={db_path}  users={args.users}")
+    base = ensure_qa_base(args.base)
+    db_path = str(qa_db_path(args.db, ROOT))
+    assert_qa_instance(base)
+    print(f"botbattle 大规模系统压测\n  base={base}  db={db_path}  users={args.users}")
 
     # 健康检查
-    api = Api(args.base, db_path)
+    api = Api(base, db_path)
     try:
         h = api.client.get("/api/health")
         if h.status_code != 200:
-            print(f"✗ dev 服务不可达：{h.status_code} {h.text[:80]}")
-            print("  请先启动：bash scripts/platform-ctl.sh start")
+            print(f"✗ QA 服务不可达：{h.status_code} {h.text[:80]}")
+            print(
+                "  请先在 linked worktree 启动："
+                "BZ_DB_PATH=$PWD/botzone.db BZ_QA_INSTANCE=1 "
+                "python -m bzplat.backend.cli serve --port 50381"
+            )
             return 2
     except Exception as e:
-        print(f"✗ dev 服务不可达：{e}")
-        print("  请先启动：bash scripts/platform-ctl.sh start")
+        print(f"✗ QA 服务不可达：{e}")
+        print(
+            "  请先在 linked worktree 启动："
+            "BZ_DB_PATH=$PWD/botzone.db BZ_QA_INSTANCE=1 "
+            "python -m bzplat.backend.cli serve --port 50381"
+        )
         return 2
     print(f"  服务在线：{h.json()}")
 
@@ -1210,7 +1312,7 @@ def main() -> int:
         phase3_sse(api, ctx)
         phase4_human(api, ctx)
         phase5_contest(api, ctx)
-        phase6_auto_match(api, ctx)
+        phase6_auto_match(api, ctx, allow_miss=args.allow_auto_match_miss)
         phase7_admin(api, ctx)
     except KeyboardInterrupt:
         print("\n中断")
@@ -1231,45 +1333,76 @@ def main() -> int:
 
 
 def _rebuild_ctx(db_path: str) -> dict[str, Any]:
-    """从 DB 重建压测上下文（--skip-seed 时用）。"""
+    """从 DB 重建压测上下文；只给已验证的专用账号签发 token。"""
+    db_path = str(qa_db_path(db_path, ROOT))
     store = Store(db_path)
     store._conn.execute("PRAGMA busy_timeout=10000")
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    user_names = [r["username"] for r in con.execute(
-        "SELECT username FROM users WHERE username LIKE 'load_u%' ORDER BY username")]
-    org_names = [r["username"] for r in con.execute(
-        "SELECT username FROM users WHERE username LIKE 'load_org%' ORDER BY username")]
-    admin_name = None
-    for cand in ("load_admin", "admin", "adminroot"):
-        row = con.execute("SELECT username FROM users WHERE username=? AND role='admin'", (cand,)).fetchone()
-        if row:
-            admin_name = row["username"]
-            break
-    con.close()
+    try:
+        rows = store._conn.execute(
+            "SELECT username FROM users WHERE username LIKE 'load\\_%' ESCAPE '\\' "
+            "ORDER BY username"
+        ).fetchall()
+        names = [row["username"] for row in rows]
+        user_names = [
+            name
+            for name in names
+            if name.startswith("load_u")
+            and name.removeprefix("load_u").isdigit()
+        ]
+        org_names = [
+            f"load_org{i}"
+            for i in range(1, N_ORGS + 1)
+            if f"load_org{i}" in names
+        ]
+        admin_name = LOAD_ADMIN_NAME if LOAD_ADMIN_NAME in names else None
+        if not user_names or len(org_names) != N_ORGS or admin_name is None:
+            raise RuntimeError(
+                "--skip-seed 需要完整的专用 load_* 账号集合；请先安全运行 seed"
+            )
 
-    tokens: dict[str, str] = {}
-    bots: dict[str, dict[str, int]] = {}
-    for uname in user_names + org_names + ([admin_name] if admin_name else []):
-        u = store.get_user_by_username(uname)
-        tok = new_session_token()
-        store.add_session(tok, u["id"], session_expires())
-        tokens[uname] = tok
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    for uname in user_names:
-        for gid in GAMES:
-            bname = f"{uname}_{gid}"
-            row = con.execute("SELECT id FROM bots WHERE name=?", (bname,)).fetchone()
-            if row:
-                bots.setdefault(uname, {})[gid] = row["id"]
-    con.close()
-    store.close()
-    return {
-        "tokens": tokens, "bots": bots, "user_names": user_names, "org_names": org_names,
-        "admin_name": admin_name, "admin_token": tokens.get(admin_name) if admin_name else None,
-        "org_tokens": [tokens[n] for n in org_names],
-    }
+        specs = [load_user_spec(name) for name in user_names]
+        specs.extend(load_org_spec(name) for name in org_names)
+        specs.append(load_admin_spec())
+        preflight_dedicated_accounts(store, specs)
+
+        validated_users: list[tuple[QaAccountSpec, dict]] = []
+        for spec in specs:
+            user = inspect_dedicated_account(store, spec)
+            assert user is not None
+            if not user.get("is_active") or not user.get("email_verified"):
+                raise RuntimeError(
+                    f"拒绝为未激活/未验证的专用 QA 账号 {spec.username!r} 签发会话"
+                )
+            validated_users.append((spec, user))
+
+        tokens: dict[str, str] = {}
+        bots: dict[str, dict[str, int]] = {}
+        for spec, user in validated_users:
+            token = new_session_token()
+            store.add_session(token, user["id"], session_expires())
+            tokens[spec.username] = token
+
+        for uname in user_names:
+            user = store.get_user_by_username(uname)
+            for gid in GAMES:
+                bname = f"{uname}_{gid}"
+                row = store._conn.execute(
+                    "SELECT id FROM bots WHERE owner_id=? AND name=?",
+                    (user["id"], bname),
+                ).fetchone()
+                if row:
+                    bots.setdefault(uname, {})[gid] = row["id"]
+        return {
+            "tokens": tokens,
+            "bots": bots,
+            "user_names": user_names,
+            "org_names": org_names,
+            "admin_name": admin_name,
+            "admin_token": tokens[admin_name],
+            "org_tokens": [tokens[name] for name in org_names],
+        }
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

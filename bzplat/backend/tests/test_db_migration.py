@@ -63,6 +63,118 @@ def test_contest_pairings_match_id_no_db_fk(tmp_path):
     assert not any("matches" in t for t in ref_tables)
 
 
+def test_legacy_contest_entries_gain_unique_registration_index(tmp_path):
+    """A legacy copied DB without UNIQUE(contest_id,user_id) must accept the
+    modern ON CONFLICT registration path instead of returning HTTP 500.
+
+    Three or more duplicate historical rows are collapsed to the earliest entry;
+    pairing and result identities are deduplicated before the unique index is
+    installed.
+    """
+    import sqlite3
+
+    db = str(tmp_path / "legacy-contest-entry-unique.db")
+    initial = Store(db)
+    owner = initial.create_user("owner", "owner@example.com", "hash")
+    entrant = initial.create_user("entrant", "entrant@example.com", "hash")
+    bot = initial.create_bot(entrant["id"], "entrant_bot", game_id="holdem")
+    contest = initial.create_contest(
+        "legacy registration",
+        owner["id"],
+        status="open",
+    )
+    initial.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("ALTER TABLE contest_entries RENAME TO contest_entries_current")
+    conn.execute(
+        "CREATE TABLE contest_entries ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "contest_id INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE, "
+        "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+        "bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "
+        "registered_at TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', "
+        "seed INTEGER NOT NULL DEFAULT 0, eliminated INTEGER NOT NULL DEFAULT 0, "
+        "dispatched_at TEXT)"
+    )
+    first = conn.execute(
+        "INSERT INTO contest_entries(contest_id,user_id,bot_id,registered_at) "
+        "VALUES(?,?,?,'2026-01-01T00:00:00Z')",
+        (contest["id"], entrant["id"], bot["id"]),
+    ).lastrowid
+    duplicate = conn.execute(
+        "INSERT INTO contest_entries(contest_id,user_id,bot_id,registered_at) "
+        "VALUES(?,?,?,'2026-01-02T00:00:00Z')",
+        (contest["id"], entrant["id"], bot["id"]),
+    ).lastrowid
+    second_duplicate = conn.execute(
+        "INSERT INTO contest_entries(contest_id,user_id,bot_id,registered_at) "
+        "VALUES(?,?,?,'2026-01-03T00:00:00Z')",
+        (contest["id"], entrant["id"], bot["id"]),
+    ).lastrowid
+    conn.execute("DROP TABLE contest_entries_current")
+    conn.execute(
+        "INSERT INTO contest_pairings(contest_id,entry_a_id,bot_a_id,status) "
+        "VALUES(?,?,?,'pending')",
+        (contest["id"], second_duplicate, bot["id"]),
+    )
+    # The keeper has no result row.  Both dropped identities do, so a naive
+    # entry_id rewrite would collapse them onto the same UNIQUE key.
+    conn.executemany(
+        "INSERT INTO contest_stage_results"
+        "(contest_id,stage_idx,entry_id,bot_id,points) VALUES(?,?,?,?,?)",
+        [
+            (contest["id"], 0, duplicate, bot["id"], 3.0),
+            (contest["id"], 0, second_duplicate, bot["id"], 1.0),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO contest_official_results"
+        "(contest_id,entry_id,stage_idx,rank,points,bot_id,user_id) "
+        "VALUES(?,?,?,?,?,?,?)",
+        [
+            (contest["id"], duplicate, 0, 1, 3.0, bot["id"], entrant["id"]),
+            (contest["id"], second_duplicate, 0, 2, 1.0, bot["id"], entrant["id"]),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = Store(db)
+    with migrated._tx() as c:
+        rows = c.execute(
+            "SELECT id FROM contest_entries WHERE contest_id=? AND user_id=?",
+            (contest["id"], entrant["id"]),
+        ).fetchall()
+        assert [row[0] for row in rows] == [first]
+        pairing_entry = c.execute(
+            "SELECT entry_a_id FROM contest_pairings WHERE contest_id=?",
+            (contest["id"],),
+        ).fetchone()[0]
+        assert pairing_entry == first
+        stage_results = c.execute(
+            "SELECT entry_id, points FROM contest_stage_results "
+            "WHERE contest_id=? AND stage_idx=0",
+            (contest["id"],),
+        ).fetchall()
+        assert [(row[0], row[1]) for row in stage_results] == [(first, 3.0)]
+        official_results = c.execute(
+            "SELECT entry_id, rank FROM contest_official_results WHERE contest_id=?",
+            (contest["id"],),
+        ).fetchall()
+        assert [(row[0], row[1]) for row in official_results] == [(first, 1)]
+        unique_indexes = {
+            row[1]
+            for row in c.execute("PRAGMA index_list(contest_entries)")
+            if row[2]
+        }
+        assert "uq_contest_entries_contest_user" in unique_indexes
+    with pytest.raises(ValueError, match="已报名"):
+        migrated.add_contest_entry_once(contest["id"], entrant["id"], bot["id"])
+    migrated.close()
+
+
 # ── matches 路由（经 matches_index）────────────────────────────
 @pytest.fixture()
 def store_with_matches(tmp_path):
@@ -606,5 +718,3 @@ def test_migrate_cleans_contest_side_orphans_and_passes_fk_check(tmp_path):
         violations = c.execute("PRAGMA foreign_key_check").fetchall()
         assert violations == [], f"FK 违规残留：{violations}"
     s.close()
-
-

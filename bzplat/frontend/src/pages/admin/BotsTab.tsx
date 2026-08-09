@@ -8,6 +8,8 @@ import Pagination from '@/components/Pagination'
 interface Bot {
   id: number
   owner_id: number
+  owner_name?: string
+  owner_display?: string
   name: string
   display_name: string
   os: string
@@ -48,7 +50,7 @@ export default function BotsTab() {
     setError('')
     try {
       const d = await apiGet<{ bots: Bot[]; total?: number }>(
-        `/api/admin/bots?page=${page}&per_page=${perPage}`,
+        `/api/admin/bots?page=${page}&per_page=${perPage}${q ? `&q=${encodeURIComponent(q)}` : ''}`,
       )
       setBots(d.bots || [])
       if (d.total !== undefined) setTotal(d.total)
@@ -57,7 +59,7 @@ export default function BotsTab() {
     } finally {
       setLoading(false)
     }
-  }, [page])
+  }, [page, q])
 
   useEffect(() => {
     void load()
@@ -119,7 +121,10 @@ export default function BotsTab() {
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => {
+            setQ(e.target.value)
+            setPage(1)
+          }}
           placeholder="搜索 Bot 名称"
           className="h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring outline-none"
         />
@@ -155,9 +160,11 @@ export default function BotsTab() {
                     {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
                   </TableCell>
                   <TableCell className="px-3 py-2">
-                    <Link to={`/user/${b.owner_id}`} className="text-primary hover:underline">
-                      #{b.owner_id}
-                    </Link>
+                    {b.owner_name ? (
+                      <Link to={`/user/${encodeURIComponent(b.owner_name)}`} className="text-primary hover:underline">
+                        {b.owner_display || b.owner_name}
+                      </Link>
+                    ) : <span className="text-muted-foreground">#{b.owner_id}</span>}
                   </TableCell>
                   <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                     {b.format}/{b.arch}

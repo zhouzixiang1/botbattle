@@ -92,6 +92,11 @@ export default function Challenge() {
 
   // 选定某座位的 bot（来自弹窗）：写入 bot + 重置版本为「当前」+ 拉版本列表。
   const pickBotFor = (slot: 's1' | 's2', bot: PickBot) => {
+    if (slot === 's1' && seat2Kind === 'bot' && bot.owner_id !== user?.id) {
+      setError('Bot 对战的座位 1 只能使用自己的 Bot')
+      setPickingSeat(null)
+      return
+    }
     const idx = slot === 's1' ? 0 : 1
     setSeats((s) => {
       const next: [SeatState, SeatState] = [s[0], s[1]]
@@ -99,7 +104,7 @@ export default function Challenge() {
       return next
     })
     setPickingSeat(null)
-    void loadVersions(bot.id)
+    if (!(slot === 's1' && seat2Kind === 'human')) void loadVersions(bot.id)
   }
 
   const clearSeat = (slot: 's1' | 's2') => {
@@ -116,6 +121,30 @@ export default function Challenge() {
     setSeats((s) => {
       const next: [SeatState, SeatState] = [s[0], s[1]]
       next[idx] = { ...next[idx], versionId: vId }
+      return next
+    })
+  }
+
+  const chooseSeat2Kind = (kind: 'bot' | 'human') => {
+    const seat1Bot = seats[0].bot
+    setSeat2Kind(kind)
+    if (kind === 'bot' && seat1Bot && seat1Bot.owner_id !== user?.id) {
+      setError('已切换为 Bot 对战，请为座位 1 选择自己的 Bot')
+    } else {
+      setError('')
+      // 人类模式不展示版本，首次选 Bot 时不会拉历史；切回 Bot 模式且
+      // 保留的是自己的 Bot 时补拉，避免版本下拉只剩“当前版本”。
+      if (kind === 'bot' && seat1Bot) void loadVersions(seat1Bot.id)
+    }
+    setSeats((s) => {
+      const next: [SeatState, SeatState] = [s[0], s[1]]
+      if (kind === 'human') {
+        // 人类 API 固定使用 Bot 当前激活版本，清掉不会被提交的历史版本状态。
+        next[0] = { ...next[0], versionId: undefined }
+      } else if (next[0].bot && next[0].bot.owner_id !== user?.id) {
+        // 人类模式允许挑战任意 Bot；切回 Bot-vs-Bot 后 my_bot_id 必须重新选自己的。
+        next[0] = { ...EMPTY_SEAT }
+      }
       return next
     })
   }
@@ -182,6 +211,8 @@ export default function Challenge() {
     const seat = seats[idx]
     const seatLabel = slot === 's1' ? '座位 1（先手 / 黑）' : '座位 2（后手 / 白）'
     const vc = seat.bot ? versionCache[seat.bot.id] : undefined
+    const mineOnly = slot === 's1' && seat2Kind === 'bot'
+    const versionsEnabled = !(slot === 's1' && seat2Kind === 'human')
     return (
       <div className="space-y-2">
         <div className="flex items-center justify-between">
@@ -213,7 +244,7 @@ export default function Challenge() {
           ) : (
             <>
               <Plus className="size-4" />
-              选择 Bot（搜索 / 我的 / 按用户）
+              {mineOnly ? '选择我的 Bot' : '选择 Bot（搜索 / 我的 / 按用户）'}
             </>
           )}
         </button>
@@ -222,7 +253,7 @@ export default function Challenge() {
             「当前/激活版本」用 'current' 哨兵而非空串——Radix Select 把 value=""
             当作未选中/占位状态，空串会导致选中后触发器仍显示 placeholder
             而非「当前版本 (vN)」（审计 P1-C）。与项目 Select 规范一致（空值用非空哨兵）。 */}
-        {seat.bot && (
+        {seat.bot && versionsEnabled && (
           <Select
             value={seat.versionId === undefined ? 'current' : String(seat.versionId)}
             onValueChange={(v) => setSeatVersion(slot, v === 'current' ? undefined : Number(v))}
@@ -246,6 +277,9 @@ export default function Challenge() {
               })}
             </SelectContent>
           </Select>
+        )}
+        {seat.bot && !versionsEnabled && (
+          <p className="text-xs text-muted-foreground">人类对战使用该 Bot 的当前激活版本</p>
         )}
       </div>
     )
@@ -297,7 +331,7 @@ export default function Challenge() {
                     <div className="inline-flex rounded-lg border border-input p-0.5 text-xs">
                       <button
                         type="button"
-                        onClick={() => setSeat2Kind('bot')}
+                        onClick={() => chooseSeat2Kind('bot')}
                         className={cn(
                           'inline-flex items-center gap-1 rounded-md px-2 py-1',
                           seat2Kind === 'bot'
@@ -310,7 +344,7 @@ export default function Challenge() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => setSeat2Kind('human')}
+                        onClick={() => chooseSeat2Kind('human')}
                         className={cn(
                           'inline-flex items-center gap-1 rounded-md px-2 py-1',
                           seat2Kind === 'human'
@@ -426,6 +460,7 @@ export default function Challenge() {
         <OpponentPickerModal
           gameId={gameId}
           myUserId={user?.id}
+          mineOnly={pickingSeat === 's1' && seat2Kind === 'bot'}
           onClose={() => setPickingSeat(null)}
           onPick={(b) => pickBotFor(pickingSeat, b)}
         />

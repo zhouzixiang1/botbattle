@@ -58,13 +58,15 @@ def _eta_for_match(match_config: dict[str, Any]) -> int:
 async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: float = 8.0) -> tuple[bool, str]:
     """Bot 预检：发点格棋首手请求（红方 x=y=-1 pass=0），验证响应含合法坐标。"""
     from bzplat.backend.games._board_protocol import build_pencil_request, dumps_request, loads_response, parse_xy
-    from bzplat.backend.runtime.binary_runner import BotCrashedError
+    from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
     import asyncio
 
     req = build_pencil_request(x=-1, y=-1, pass_=0, me=0, scores=[0, 0])
     line = dumps_request(req)
     try:
         sid = await binary_runner.start_session(binary_path)
+    except PlatformRunnerError:
+        raise
     except Exception as e:
         return False, f"启动失败: {e}"
     try:
@@ -74,6 +76,8 @@ async def _preflight_check(binary_path: str, binary_runner: Any, *, timeout: flo
         if x is None or y is None:
             return False, f"响应缺 x/y 坐标: {resp_line}"
         return True, f"响应合法: ({x},{y})"
+    except PlatformRunnerError:
+        raise
     except BotCrashedError:
         return False, "Bot 启动后立即退出（stdout EOF）——不符合长驻协议"
     except asyncio.TimeoutError:

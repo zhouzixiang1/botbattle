@@ -1,37 +1,97 @@
 #!/usr/bin/env bash
-# 端到端冒烟：起服务 → 注册/验证 → 上传 bot → 挑战 → 查排行榜
+# 端到端冒烟：独立临时运行时 → 上传 bot → 挑战 → 查排行榜
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-export BZ_BOT_LOCAL=1
-export BZ_DB_PATH="$ROOT/.e2e_botzone.db"
-export BZ_HOST=127.0.0.1
-export BZ_PORT=50381
-rm -f "$BZ_DB_PATH"
+PY="${BZ_PYTHON:-$ROOT/.venv/bin/python}"
+if [[ ! -x "$PY" ]]; then
+  GIT_COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$GIT_COMMON" ]] && [[ -x "$(dirname "$GIT_COMMON")/.venv/bin/python" ]]; then
+    PY="$(dirname "$GIT_COMMON")/.venv/bin/python"
+  fi
+fi
+if [[ ! -x "$PY" ]]; then
+  echo "缺少可用 Python venv；可用 BZ_PYTHON 显式指定" >&2
+  exit 2
+fi
 
-source .venv/bin/activate
-pip install -e '.[dev]' -q
+RUNTIME_PARENT="$(cd "${TMPDIR:-/tmp}" && pwd)"
+RUNTIME="$(mktemp -d "$RUNTIME_PARENT/botbattle-e2e.XXXXXX")"
+PID=""
+cleanup() {
+  if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+    kill "$PID" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+      kill -0 "$PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$PID" 2>/dev/null; then
+      kill -9 "$PID" 2>/dev/null || true
+    fi
+    wait "$PID" 2>/dev/null || true
+  fi
+  case "$RUNTIME" in
+    "$RUNTIME_PARENT"/botbattle-e2e.*) rm -rf -- "$RUNTIME" ;;
+    *) echo "拒绝清理非预期临时目录：$RUNTIME" >&2 ;;
+  esac
+}
+trap cleanup EXIT
+export BZ_BOT_LOCAL=1
+export BZ_QA_INSTANCE=1
+export BZ_SKIP_CAPTCHA=1
+export BZ_TEST_CAPTCHA=1
+export BZ_DB_PATH="$RUNTIME/botzone.db"
+export BZ_AVATAR_DIR="$RUNTIME/avatars"
+export BZ_LOG_DIR="$RUNTIME/logs"
+# 阻止仓库 .env 的真实 SMTP 配置被开发冒烟误用。
+export SMTP_HOST="" SMTP_USER="" SMTP_PASSWORD="" SMTP_FROM=""
+export BZ_HOST=127.0.0.1
+if [[ -n "${BZ_E2E_PORT:-}" ]]; then
+  export BZ_PORT="$BZ_E2E_PORT"
+else
+  export BZ_PORT="$($PY - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)"
+fi
+if [[ ! "$BZ_PORT" =~ ^[0-9]+$ ]] || [[ "$BZ_PORT" == "50380" ]]; then
+  echo "拒绝无效/主服务端口：$BZ_PORT" >&2
+  exit 2
+fi
+export BZ_E2E_BASE_URL="http://$BZ_HOST:$BZ_PORT"
+mkdir -p "$BZ_AVATAR_DIR" "$BZ_LOG_DIR"
 
 # 后台启动
-.venv/bin/python -m bzplat.backend.cli serve --host "$BZ_HOST" --port "$BZ_PORT" \
-  >"$ROOT/logs/e2e.log" 2>&1 &
+"$PY" -m bzplat.backend.cli serve --host "$BZ_HOST" --port "$BZ_PORT" \
+  >"$BZ_LOG_DIR/e2e-server.log" 2>&1 &
 PID=$!
-mkdir -p logs
-cleanup() { kill $PID 2>/dev/null || true; }
-trap cleanup EXIT
 
 for i in $(seq 1 30); do
-  if curl -sf "http://$BZ_HOST:$BZ_PORT/api/health" >/dev/null; then break; fi
+  if curl -sf "$BZ_E2E_BASE_URL/api/health" >/dev/null; then break; fi
+  if ! kill -0 "$PID" 2>/dev/null; then
+    echo "隔离 E2E 服务启动失败：" >&2
+    tail -n 80 "$BZ_LOG_DIR/e2e-server.log" >&2 || true
+    exit 1
+  fi
   sleep 0.3
 done
-curl -sf "http://$BZ_HOST:$BZ_PORT/api/health" | tee /tmp/bz_health.json
+curl -sf "$BZ_E2E_BASE_URL/api/health" | tee "$RUNTIME/health.json"
+"$PY" - "$RUNTIME/health.json" <<'PY'
+import json
+import sys
+health = json.loads(open(sys.argv[1], encoding="utf-8").read())
+if health.get("ok") is not True or health.get("qa_instance") is not True:
+    raise SystemExit(f"health 未确认隔离 QA 实例：{health}")
+PY
 
-PY=.venv/bin/python
-$PY <<'PY'
-import json, urllib.request, http.cookiejar, ssl
+"$PY" <<'PY'
+import json, os, urllib.request, http.cookiejar
 from pathlib import Path
 
-BASE = "http://127.0.0.1:50381"
+BASE = os.environ["BZ_E2E_BASE_URL"]
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 
@@ -70,7 +130,7 @@ print("captcha ok", bool(cap.get("captcha_id")))
 PY
 
 # 用 CLI 建两个用户并验证邮箱
-.venv/bin/python - <<PY
+"$PY" - <<'PY'
 from bzplat.backend.store import Store
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.store.schema import ROLE_ORGANIZER
@@ -85,14 +145,15 @@ for name, email, role in [
     if not u:
         u = store.create_user(name, email, hash_password("password123"), role=role, display_name=name)
     store.update_user(u["id"], email_verified=1, role=role, is_active=1)
+store.close()
 print("seeded users")
 PY
 
-.venv/bin/python - <<'PY'
+"$PY" - <<'PY'
 import json, urllib.request, http.cookiejar, os
 from pathlib import Path
 
-BASE = "http://127.0.0.1:50381"
+BASE = os.environ["BZ_E2E_BASE_URL"]
 ELF = Path("samples/callbot_linux_amd64").read_bytes()
 
 def session():
@@ -179,30 +240,42 @@ print("bots", ba["bot"]["id"], bb["bot"]["id"])
 ch = api_auth(ta, "POST", "/api/matches/challenge", data={
     "my_bot_id": ba["bot"]["id"],
     "opponent_bot_id": bb["bot"]["id"],
-    "hands": 2,
 })
 print("challenge", ch)
 import time
 mid = ch["match_id"]
 for _ in range(60):
     d = api_auth(ta, "GET", f"/api/matches/{mid}")
-    if d["match"]["status"] in ("completed", "aborted"):
-        print("match done", d["match"]["status"], "earnings", d["match"]["earnings_a"], d["match"]["earnings_b"])
+    status = d["match"]["status"]
+    if status == "aborted":
+        raise SystemExit(f"match aborted: {d['match'].get('reason')}")
+    if status == "completed":
         break
     time.sleep(0.5)
 else:
     raise SystemExit("match timeout")
 
+result = d["match"].get("result")
+deltas = result.get("deltas") if isinstance(result, dict) else None
+if not isinstance(deltas, list) or len(deltas) != 2:
+    raise SystemExit(f"completed match has invalid result.deltas: {deltas!r}")
+if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in deltas):
+    raise SystemExit(f"completed match has non-numeric result.deltas: {deltas!r}")
+if deltas[0] + deltas[1] != 0:
+    raise SystemExit(f"completed match result.deltas is not zero-sum: {deltas!r}")
+print("match completed", "deltas", deltas)
+
 lb = api_auth(ta, "GET", "/api/leaderboard")
 print("leaderboard size", len(lb.get("leaderboard") or []))
 
-c = api_auth(to, "POST", "/api/contests", data={"title": "E2E Cup", "hands_per_match": 2})
+c = api_auth(to, "POST", "/api/contests", data={"title": "E2E Cup"})
 cid = c["contest"]["id"]
 api_auth(to, "POST", f"/api/contests/{cid}/open")
 api_auth(ta, "POST", f"/api/contests/{cid}/register", data={"bot_id": ba["bot"]["id"]})
 api_auth(tb, "POST", f"/api/contests/{cid}/register", data={"bot_id": bb["bot"]["id"]})
 st = api_auth(to, "POST", f"/api/contests/{cid}/start")
 print("contest started", st["contest"]["status"])
+store.close()
 print("E2E OK")
 PY
 
