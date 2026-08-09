@@ -87,10 +87,9 @@ export default function MatchViewer() {
   const [status, setStatus] = useState<string>('connecting')  // connecting|live|match_end|error|replay
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  // 事件游标与“跟随实时”分开建模。初始化必须从事件 1 播放，不能再用 -1
-  // 同时表达“尚未开始”和“贴尾”，否则 live snapshot 会直接跳到当前进度。
+  // 游标始终是具体事件索引。初始化从事件 1 播放；即使已经追到实时尾部，
+  // 后续事件也只增加缓冲长度，再由定时器逐条推进。
   const [cursor, setCursor] = useState(0)
-  const [followingLive, setFollowingLive] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [speedIdx, setSpeedIdx] = useState(1)
   // 时序面板折叠态（窄屏默认折叠，棋盘获全宽）
@@ -115,7 +114,6 @@ export default function MatchViewer() {
     pendingEventsRef.current = []
     setEvents([])
     setCursor(0)
-    setFollowingLive(false)
     setPlaying(false)
     let cancelled = false
     let terminalClosed = false
@@ -160,7 +158,7 @@ export default function MatchViewer() {
         setEvents(evs)
         const live = m.status === 'running' || m.status === 'pending'
         if (live) {
-          setStatus('live'); setCursor(0); setFollowingLive(false); setPlaying(true)
+          setStatus('live'); setCursor(0); setPlaying(true)
           es = new EventSource(`/api/matches/${encodeURIComponent(id)}/events`)
           es.onmessage = (msg) => {
             try {
@@ -241,7 +239,6 @@ export default function MatchViewer() {
             matchHasTechnicalLoss(m) && Number(m.result?.hands_played ?? 0) <= 0
           setStatus('replay')
           setCursor(evs.length > 0 ? (pinTechnicalTerminal ? evs.length - 1 : 0) : 0)
-          setFollowingLive(false)
           setPlaying(evs.length > 0 && !pinTechnicalTerminal)
         }
       })
@@ -256,17 +253,25 @@ export default function MatchViewer() {
     }
   }, [id])
 
-  // 窄屏默认折叠时序面板（不影响桌面布局）
+  // 窄屏默认折叠时序面板，并在旋转/调整窗口跨过 xl 断点时同步。
+  // matchMedia 只在断点变化时触发，不会覆盖用户在同一布局内的手动折叠选择。
   useEffect(() => {
-    if (window.innerWidth < 1280) setTimelineCollapsed(true)
+    const media = window.matchMedia('(max-width: 1279px)')
+    const syncBreakpoint = () => setTimelineCollapsed(media.matches)
+    syncBreakpoint()
+    media.addEventListener('change', syncBreakpoint)
+    return () => media.removeEventListener('change', syncBreakpoint)
   }, [])
 
   const gameId = normalizeGameId(match?.game_id)
   const gameSpec = match ? findGame(gameId) : undefined
   const total = events.length
-  const cur = followingLive ? Math.max(0, total - 1) : Math.min(cursor, Math.max(0, total - 1))
+  // The cursor is always a concrete event index.  Reaching the current live tail
+  // does not turn it into a sticky sentinel: a later RAF batch must still be
+  // consumed one event per playback tick rather than teleporting to its end.
+  const cur = Math.min(cursor, Math.max(0, total - 1))
   const visible = total > 0 ? events.slice(0, cur + 1) : []
-  const atLive = followingLive
+  const atLive = total > 0 && cur >= total - 1
   const realtime = Boolean(isLiveMatch && (status === 'live' || status === 'connecting'))
   // 游标差是事件数，不是游戏手数/步数；终态回放永远不显示「落后」。
   const lag = !gameSpec || atLive || !realtime ? 0 : Math.max(0, total - 1 - cur)
@@ -320,14 +325,6 @@ export default function MatchViewer() {
     : Number.isFinite(persistedProgress)
       ? persistedProgress
       : null
-  const hideProgressForZeroTechnicalReplay = status === 'replay' &&
-    visibleProgressTotal != null && matchHasTechnicalLoss(match) &&
-    Number.isFinite(persistedProgress) && persistedProgress <= 0
-  const progressText = !hideProgressForZeroTechnicalReplay && displayedProgress != null && displayedProgress > 0
-    ? visibleProgressTotal != null && Number.isFinite(visibleProgressTotal) && visibleProgressTotal > 0
-      ? `第 ${Math.min(displayedProgress, visibleProgressTotal)}/${visibleProgressTotal} ${progressUnitLabel}`
-      : `${finished ? '共' : '当前'} ${displayedProgress} ${progressUnitLabel}`
-    : null
   const ReplaySummary = gameSpec?.replay.Summary
   const ReplayHud = gameSpec?.replay.Hud
   const navigation = gameSpec?.replay.navigation
@@ -344,12 +341,20 @@ export default function MatchViewer() {
     }))
   const technicalIncidents = persistedIncidents.length ? persistedIncidents : eventIncidents
   const technicalTerminal = finished && (matchHasTechnicalLoss(match) || technicalIncidents.length > 0)
+  // A live first-decision Hold'em fault has a hand_start but no completed hand;
+  // counting settle events avoids briefly presenting it as a normal "1/70" game
+  // before a refresh supplies result.hands_played=0.
   const completedProgress = gameSpec?.progressUnit === 'hand'
-    ? persistedProgress
+    ? events.filter((event) => event.type === 'settle').length
     : fullReplayProgress
-  const staticTechnicalReplay = status === 'replay' && technicalTerminal && (
+  const zeroProgressTechnicalTerminal = technicalTerminal && (
     completedProgress == null || !Number.isFinite(completedProgress) || completedProgress <= 0
   )
+  const progressText = !zeroProgressTechnicalTerminal && displayedProgress != null && displayedProgress > 0
+    ? visibleProgressTotal != null && Number.isFinite(visibleProgressTotal) && visibleProgressTotal > 0
+      ? `第 ${Math.min(displayedProgress, visibleProgressTotal)}/${visibleProgressTotal} ${progressUnitLabel}`
+      : `${finished ? '共' : '当前'} ${displayedProgress} ${progressUnitLabel}`
+    : null
   const failedSeat = (() => {
     const sampleSeat = Number(technicalIncidents[0]?.seat)
     if (sampleSeat === 0 || sampleSeat === 1) return sampleSeat
@@ -360,51 +365,44 @@ export default function MatchViewer() {
   // 首个决策即技术终止时直接呈现权威终局。自动从头播放会让“已完成”页面
   // 暂时停在发牌事件，看起来像仍在正常比赛。
   useEffect(() => {
-    if (!staticTechnicalReplay || total <= 0) return
+    if (!zeroProgressTechnicalTerminal || total <= 0) return
     setCursor(total - 1)
-    setFollowingLive(false)
     setPlaying(false)
-  }, [staticTechnicalReplay, total])
+  }, [zeroProgressTechnicalTerminal, total])
 
-  // 定速播放定时器（直播+回放共用）：顺序消费缓冲。追上仍在运行的直播后
-  // 才进入 followingLive；收到终局时 realtime=false，现有游标继续排空到结局。
+  // 定速播放定时器（直播+回放共用）：顺序消费缓冲。追上仍在运行的直播时
+  // 保持 numeric cursor + playing；新批次增加 total 后，本 effect 才逐条推进。
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
-    if (!playing || total === 0 || followingLive) return
+    if (!playing || total === 0) return
     if (cur >= total - 1) {
-      if (realtime) setFollowingLive(true)
-      else setPlaying(false)
+      if (!realtime) setPlaying(false)
       return
     }
     timerRef.current = setTimeout(() => {
       setCursor((value) => Math.min(total - 1, value + 1))
     }, SPEEDS[speedIdx].ms)
     return () => { if (timerRef.current) clearTimeout(timerRef.current) }
-  }, [playing, followingLive, cur, total, speedIdx, realtime])
+  }, [playing, cur, total, speedIdx, realtime])
 
   const pause = () => {
     setCursor(cur)
-    setFollowingLive(false)
     setPlaying(false)
   }
   const step = (delta: number) => {
     setPlaying(false)
-    setFollowingLive(false)
     setCursor(Math.max(0, Math.min(Math.max(0, total - 1), cur + delta)))
   }
   const seek = (idx: number) => {
     setPlaying(false)
-    setFollowingLive(false)
     setCursor(Math.max(0, Math.min(Math.max(0, total - 1), idx)))
   }
   const jumpToLive = () => {
     setCursor(Math.max(0, total - 1))
-    setFollowingLive(true)
     setPlaying(true)
   }
   const jumpToTerminal = () => {
     setCursor(Math.max(0, total - 1))
-    setFollowingLive(false)
     setPlaying(false)
   }
   const togglePlay = () => {
@@ -413,11 +411,8 @@ export default function MatchViewer() {
       return
     }
     if (cur >= total - 1) {
-      if (realtime) {
-        setFollowingLive(true)
-      } else {
+      if (!realtime) {
         setCursor(0)
-        setFollowingLive(false)
       }
     }
     setPlaying(true)
@@ -623,7 +618,7 @@ export default function MatchViewer() {
             <MatchBoard gameId={gameId} events={visible} seats={seats} revealMode="all" />
 
             {/* 技术终止且没有完成一手/一步时，直接定位终局，不展示伪装成正常赛程的播放控制。 */}
-            {!staticTechnicalReplay && (
+            {!zeroProgressTechnicalTerminal && (
               <Card className="gap-0 py-0">
                 <CardContent className="px-3 py-2.5">
                   <div className="flex flex-wrap items-center justify-center gap-1.5">
@@ -665,7 +660,7 @@ export default function MatchViewer() {
                     </Select>
                   </div>
                   <div className="mt-2.5 flex items-center gap-3">
-                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive ? ' · 直播' : ''}</span>
+                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
                     <Slider min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
                   </div>
                 </CardContent>

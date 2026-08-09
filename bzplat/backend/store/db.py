@@ -120,18 +120,17 @@ def _load_replay_bot_incident_events(raw: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _sanitize_public_replay(replay: dict | None) -> dict | None:
-    """Return a public replay copy with bounded, safe Bot incident events."""
-    if replay is None:
-        return None
-    public = dict(replay)
-    raw_events = public.get("events_json")
-    try:
-        events = json.loads(raw_events) if isinstance(raw_events, str) else []
-    except (TypeError, ValueError):
-        events = []
+def sanitize_public_replay_events(events: Any) -> list[Any]:
+    """Normalize one event list at the public replay/SSE boundary.
+
+    Persisted replays and the in-memory running prefix must expose exactly the
+    same incident contract: historical event names are read-only inputs, raw
+    exception text is never forwarded, and at most three diagnostic samples are
+    public.  Keeping this as one shared function prevents live subscriptions from
+    bypassing the Store read boundary while a match is still running.
+    """
     if not isinstance(events, list):
-        events = []
+        return []
     sanitized: list[Any] = []
     incident_samples = 0
     for event in events:
@@ -150,6 +149,20 @@ def _sanitize_public_replay(replay: dict | None) -> dict | None:
             # names are input-only storage concerns: every current API response
             # exposes the single canonical event type.
             sanitized.append({"type": TECHNICAL_INCIDENT_EVENT, **sample})
+    return sanitized
+
+
+def _sanitize_public_replay(replay: dict | None) -> dict | None:
+    """Return a public replay copy with bounded, safe Bot incident events."""
+    if replay is None:
+        return None
+    public = dict(replay)
+    raw_events = public.get("events_json")
+    try:
+        events = json.loads(raw_events) if isinstance(raw_events, str) else []
+    except (TypeError, ValueError):
+        events = []
+    sanitized = sanitize_public_replay_events(events)
     public["events_json"] = json.dumps(sanitized, ensure_ascii=False)
     return public
 

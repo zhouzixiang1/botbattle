@@ -885,6 +885,16 @@ test('MatchViewer replays live history from event one without terminal jumps and
   await page.goto(`/#/match/${matchId}`)
   await expect(page.getByText('事件 1/4', { exact: true })).toBeVisible()
   await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
+
+  // Reach the current live tail while autoplay remains enabled. A newly
+  // received event must increase only the denominator first, then advance on
+  // the selected playback tick; sticky-tail sentinels would jump to 5/5 here.
+  await page.getByRole('combobox').filter({ hasText: '1x' }).click()
+  await page.getByRole('option', { name: '0.5x', exact: true }).click()
+  await expect(page.getByText('事件 4/4 · 直播', { exact: true })).toBeVisible({ timeout: 6_000 })
+  expect(await control('emit', reconnectedEvents[4])).toBe(true)
+  await expect(page.getByText('事件 4/5', { exact: true })).toBeVisible()
+  await expect(page.getByText('事件 5/5 · 直播', { exact: true })).toBeVisible({ timeout: 2_500 })
   await page.getByRole('button', { name: '暂停', exact: true }).click()
 
   expect(await control('disconnect')).toBe(true)
@@ -903,23 +913,32 @@ test('MatchViewer replays live history from event one without terminal jumps and
     events: reconnectedEvents,
   })).toBe(true)
   await expect(page.getByText('直播中', { exact: true })).toBeVisible()
-  await expect(page.getByText('事件 1/8', { exact: true })).toBeVisible()
+  await expect(page.getByText('事件 5/8', { exact: true })).toBeVisible()
   await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
 
   expect(await control('emit', {
     type: 'match_end', winner: 0, reason: 'completed', deltas: [100, -100],
   })).toBe(true)
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
-  await expect(page.getByText('事件 1/9', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: /已结束 · 剩余 8 个事件 · 跳到结局/ })).toBeVisible()
+  await expect(page.getByText('事件 5/9', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /已结束 · 剩余 4 个事件 · 跳到结局/ })).toBeVisible()
   await page.waitForTimeout(850)
-  await expect(page.getByText('事件 1/9', { exact: true })).toBeVisible()
+  await expect(page.getByText('事件 5/9', { exact: true })).toBeVisible()
 
-  await page.getByRole('combobox').filter({ hasText: '1x' }).click()
-  await page.getByRole('option', { name: '4x', exact: true }).click()
   await page.getByRole('button', { name: '播放', exact: true }).click()
-  await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible({ timeout: 4_000 })
+  await expect(page.getByText('事件 6/9', { exact: true })).toBeVisible({ timeout: 2_500 })
+  await expect(page.getByText('事件 7/9', { exact: true })).toBeVisible({ timeout: 2_500 })
+  await expect(page.getByText('事件 8/9', { exact: true })).toBeVisible({ timeout: 2_500 })
+  await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible({ timeout: 2_500 })
   await expect(page.getByText('第 2/70 手', { exact: true })).toBeVisible()
+
+  // A completed replay at the tail can be played again from event one.
+  await expect(page.getByRole('button', { name: '播放', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '播放', exact: true }).click()
+  await expect(page.getByText('事件 1/9', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '暂停', exact: true }).click()
+  await page.getByRole('button', { name: /已结束 · 剩余 8 个事件 · 跳到结局/ }).click()
+  await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible()
 
   // The separate terminal shortcut remains explicit: rewinding must never
   // silently snap back to the result, while the shortcut can do so on demand.
@@ -1080,46 +1099,50 @@ test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns
 
 test('MatchViewer presents a zero-hand protocol loss as a terminal incident', async ({ page }) => {
   const matchId = 'mock-zero-hand-protocol-loss'
-  const events = [
+  const initialEvents = [
     { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
     { type: 'deal_hole', hand: 0, holes: [['3d', 'Th'], ['Qs', '4c']] },
+  ]
+  const terminalEvents = [
     {
       type: 'technical_incident', seat: 0, code: 'missing_response',
       error: 'Bot 响应缺少必填 response 字段', reason: 'protocol_error', turn: 1,
     },
     { type: 'match_end', winner: 1, reason: 'protocol_error', deltas: [-1, 1] },
   ]
+  const runningMatch = {
+    id: matchId,
+    game_id: 'holdem',
+    status: 'running',
+    match_type: 'challenge',
+    technical_loss: 0,
+    bot_a_id: 3,
+    bot_b_id: 2,
+    bot_a: { name: 'admin', owner_name: 'zzx' },
+    bot_b: { name: 'zxx02', owner_name: 'zhouzixiang' },
+    result: { hands_played: 0, deltas: [0, 0] },
+  }
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}/events`, async (route) => {
+    const messages = [
+      { type: 'snapshot', match: runningMatch, events: initialEvents },
+      ...terminalEvents,
+    ]
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: messages.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+    })
   })
   await page.route(`**/api/matches/${matchId}`, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        match: {
-          id: matchId,
-          game_id: 'holdem',
-          status: 'completed',
-          match_type: 'challenge',
-          winner: 1,
-          reason: 'protocol_error',
-          technical_loss: 1,
-          bot_a_id: 3,
-          bot_b_id: 2,
-          bot_a: { name: 'admin', owner_name: 'zzx' },
-          bot_b: { name: 'zxx02', owner_name: 'zhouzixiang' },
-          result: {
-            hands_played: 0,
-            deltas: [-1, 1],
-            technical_incidents_by_seat: { 0: 1, 1: 0 },
-            technical_incident_samples: [{
-              seat: 0, code: 'missing_response',
-              error: 'Bot 响应缺少必填 response 字段', reason: 'protocol_error', turn: 1,
-            }],
-          },
-        },
-        replay: { events_json: JSON.stringify(events) },
+        match: runningMatch,
+        replay: { events_json: JSON.stringify(initialEvents) },
       }),
     })
   })
@@ -1130,6 +1153,7 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   await page.setViewportSize({ width: 1440, height: 900 })
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
   const incident = page.getByRole('alert').filter({ hasText: 'Bot 技术判负' })
   await expect(incident).toContainText('admin @zzx（座位 1）')
   await expect(incident).toContainText('zxx02 @zhouzixiang（座位 2）获胜')

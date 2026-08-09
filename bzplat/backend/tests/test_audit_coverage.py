@@ -254,6 +254,75 @@ def test_sse_reconnect_snapshot_uses_complete_active_prefix(store: Store):
     asyncio.run(run())
 
 
+def test_sse_active_snapshot_uses_public_incident_boundary(store: Store):
+    """Running snapshots share persisted replay sanitizing and sample limits."""
+    orch = _orch(store)
+    owner, bot = _user_with_bot(
+        store,
+        name="activepublic",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+    match_id = _new_match_id()
+    store.create_match(
+        match_id,
+        bot["id"],
+        bot["id"],
+        owner_id=owner["id"],
+        match_type="challenge",
+        game_id="gomoku",
+    )
+    store.update_match(match_id, status=STATUS_RUNNING)
+    orch._active_replay_events[match_id] = [
+        {"type": "move", "player": 0, "x": 7, "y": 7},
+        {
+            "type": "technical_incident",
+            "seat": 0,
+            "turn": 1,
+            "code": "missing_response",
+            "reason": "protocol_error",
+            "error": "/private/runner stderr secret",
+        },
+        {
+            "type": "bot_decide_error",
+            "seat": 1,
+            "turn": 2,
+            "error": "legacy /private/path secret",
+        },
+        {
+            "type": "bot_technical_error",
+            "seat": 0,
+            "turn": 3,
+            "code": "decision_timeout",
+            "reason": "timeout",
+            "error": "raw timeout /private/path",
+        },
+        {
+            "type": "technical_incident",
+            "seat": 1,
+            "turn": 4,
+            "code": "invalid_json",
+            "reason": "protocol_error",
+            "error": "fourth sample must be dropped",
+        },
+    ]
+
+    queue = orch.subscribe(match_id)
+    snapshot = queue.get_nowait()
+    incidents = [
+        event for event in snapshot["events"]
+        if event.get("type") == "technical_incident"
+    ]
+    assert len(incidents) == 3
+    assert [event["turn"] for event in incidents] == [1, 2, 3]
+    assert all("/private" not in event["error"] for event in incidents)
+    assert not [
+        event for event in snapshot["events"]
+        if event.get("type") in {"bot_decide_error", "bot_technical_error"}
+    ]
+    orch.unsubscribe(match_id, queue)
+    orch._active_replay_events.pop(match_id, None)
+
+
 def test_sse_terminal_snapshot_prefers_canonical_persisted_replay(store: Store):
     """终态提交后、runner 收尾前订阅也必须拿到 canonical match_end。"""
     orch = _orch(store)
@@ -1000,6 +1069,59 @@ def test_admin_abort_cancels_blocking_runner_and_broadcasts_error(tmp_path):
         assert event["reason"] == "admin_test_abort"
         assert store.get_rating(bot_a["id"])["matches_played"] == 0
         assert store.get_rating(bot_b["id"])["matches_played"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_admin_abort_store_failure_releases_all_in_memory_state(
+    store: Store, monkeypatch,
+):
+    """A failed DB transition cannot leak a cancelled task or live prefix."""
+
+    class BlockingRunner:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+
+        async def run_binaries(self, *args, **kwargs):
+            self.entered.set()
+            await asyncio.Future()
+
+    runner = BlockingRunner()
+    orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+    owner, bot_a = _user_with_bot(
+        store, name="abortfaila", path=_fixture_binary(store, "abortfaila")
+    )
+    _, bot_b = _user_with_bot(
+        store, name="abortfailb", path=_fixture_binary(store, "abortfailb")
+    )
+    callbacks: list[tuple[str, int | None]] = []
+    orch.on_match_done = lambda mid, cid: callbacks.append((mid, cid))
+
+    async def exercise() -> None:
+        match_id = await orch.challenge(
+            bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
+        )
+        await asyncio.wait_for(runner.entered.wait(), timeout=1)
+        queue = orch.subscribe(match_id)
+        assert queue.get_nowait()["type"] == "snapshot"
+        assert match_id in orch._tasks
+        assert match_id in orch._bot_admitted
+        assert match_id in orch._active_replay_events
+        assert match_id in orch._sse
+
+        def fail_transition(*args, **kwargs):
+            raise RuntimeError("controlled abort write failure")
+
+        monkeypatch.setattr(store, "abort_match_if_active", fail_transition)
+        with pytest.raises(RuntimeError, match="controlled abort write failure"):
+            await orch.abort_match(match_id, reason="admin_test_abort")
+
+        assert store.get_match(match_id)["status"] == STATUS_RUNNING
+        assert match_id not in orch._tasks
+        assert match_id not in orch._bot_admitted
+        assert match_id not in orch._active_replay_events
+        assert match_id not in orch._sse
+        assert callbacks == []
 
     asyncio.run(exercise())
 

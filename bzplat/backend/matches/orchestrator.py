@@ -27,7 +27,7 @@ from bzplat.backend.runtime.binary_runner import (
     BotTechnicalError,
     PlatformRunnerError,
 )
-from bzplat.backend.store import Store
+from bzplat.backend.store import Store, sanitize_public_replay_events
 from bzplat.backend.store.schema import (
     BOT_CAPACITY_EXHAUSTED_REASON,
     DEFAULT_RUNTIME_MODE,
@@ -849,6 +849,21 @@ class MatchOrchestrator:
                     match_id,
                     {"type": "error", "message": reason, "reason": reason},
                 )
+        except (Exception, asyncio.CancelledError):
+            # The runner task has already been cancelled.  If the authoritative
+            # Store transition itself fails, the normal post-commit handoff below
+            # is intentionally skipped; nevertheless no task/admission/SSE/live
+            # prefix may remain owned by this process.  Reconciliation can later
+            # recover the still-active DB row without duplicate contest callbacks.
+            self._tasks.pop(match_id, None)
+            self._release_bot_slot(match_id)
+            self._sse.pop(match_id, None)
+            self._active_replay_events.pop(match_id, None)
+            if match.get("match_type") == TYPE_HUMAN:
+                self._release_human_match_state(
+                    match_id, match.get("human_user_id")
+                )
+            raise
         finally:
             self._admin_aborting.discard(match_id)
 
@@ -927,7 +942,9 @@ class MatchOrchestrator:
         else:
             # subscribe() 与 on_event() 同在事件循环内同步执行。先注册队列再复制
             # 当前前缀，后续广播只会排在 snapshot 之后，不产生订阅窗口。
-            snapshot_events = list(_live_replay_events(active_events))
+            snapshot_events = sanitize_public_replay_events(
+                list(_live_replay_events(active_events))
+            )
         q.put_nowait({"type": "snapshot", "match": m or {}, "events": snapshot_events})
         return q
 
