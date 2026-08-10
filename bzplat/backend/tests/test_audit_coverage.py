@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 from datetime import datetime
@@ -110,6 +111,74 @@ def test_sse_subscribe_maxsize_is_2000(store: Store):
     assert q.get_nowait()["type"] == "snapshot"
 
 
+def test_sse_subscribe_failure_never_registers_an_orphan_queue(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+):
+    """快照读取失败时调用方拿不到 queue，因此必须在注册前失败。"""
+    orch = _orch(store)
+    _, bot = _user_with_bot(
+        store,
+        name="sse-subscribe-fault",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+    mid = _new_match_id()
+    store.create_match(mid, bot["id"], bot["id"], game_id="gomoku")
+
+    def fail_replay(*_args, **_kwargs):
+        raise RuntimeError("simulated replay read failure")
+
+    monkeypatch.setattr(store, "get_public_replay", fail_replay)
+    with pytest.raises(RuntimeError, match="simulated replay read failure"):
+        orch.subscribe(mid)
+
+    assert mid not in orch._sse
+    assert orch._sse_human_views == {}
+
+
+def test_sse_missing_visibility_metadata_fails_closed(store: Store):
+    """内部元数据缺失不得使公开订阅泄露底牌或人类请求。"""
+    orch = _orch(store)
+    q: asyncio.Queue = asyncio.Queue()
+    mid = _new_match_id()
+    orch._sse[mid] = [q]
+
+    orch._broadcast(
+        mid,
+        {"type": "deal_hole", "hand": 0, "holes": [["As", "Ah"], ["Ks", "Kh"]]},
+    )
+    orch._broadcast(
+        mid,
+        {"type": "your_turn", "player": 1, "request": {"my_cards": [1, 2]}},
+    )
+
+    assert q.get_nowait() == {"type": "deal_hole", "hand": 0, "holes": [[], []]}
+    assert q.empty()
+
+
+def test_sse_error_boundary_keeps_only_one_stable_reason(store: Store):
+    orch = _orch(store)
+    _, bot = _user_with_bot(
+        store,
+        name="sse-error-contract",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+    mid = _new_match_id()
+    store.create_match(mid, bot["id"], bot["id"], game_id="gomoku")
+    q = orch.subscribe(mid)
+    q.get_nowait()
+
+    orch._broadcast(
+        mid,
+        {
+            "type": "error",
+            "message": "completed /private/bot.bin",
+            "reason": "unknown_private_code",
+            "stderr": "secret",
+        },
+    )
+    assert q.get_nowait() == {"type": "error", "reason": "platform_error"}
+
+
 @pytest.mark.parametrize("terminal_status", [STATUS_COMPLETED, STATUS_ABORTED])
 def test_sse_terminal_snapshot_closes_and_unsubscribes(store: Store, terminal_status: str):
     """详情判断 live 后、真正订阅前若对局已终结，terminal snapshot 必须收流。
@@ -153,17 +222,17 @@ def test_sse_broadcast_drops_oldest_when_full(store: Store):
     # （_broadcast 对任意 asyncio.Queue 生效，与 subscribe 的 maxsize 解耦）
     q: asyncio.Queue = asyncio.Queue(maxsize=2)
     orch._sse[mid] = [q]
-    q.put_nowait({"type": "e", "seq": 1})
-    q.put_nowait({"type": "e", "seq": 2})
+    q.put_nowait({"type": "move", "move_index": 1})
+    q.put_nowait({"type": "move", "move_index": 2})
 
     # 队列已满（2/2），广播第 3 条 → 应丢最旧（seq=1）、保最新（seq=3）
-    orch._broadcast(mid, {"type": "e", "seq": 3})
+    orch._broadcast(mid, {"type": "move", "move_index": 3})
 
     assert q.qsize() == 2, "drop-oldest 后队列应仍为 maxsize，不应增长也不应空"
     drained = []
     while not q.empty():
         drained.append(q.get_nowait())
-    seqs = [e["seq"] for e in drained]
+    seqs = [e["move_index"] for e in drained]
     assert seqs == [2, 3], f"应丢最旧(seq=1)保最新(seq=3)，实际 {seqs}"
     # 最旧的 seq=1 被丢弃
     assert 1 not in seqs
@@ -181,11 +250,18 @@ def test_sse_broadcast_does_not_block_on_full_queue(store: Store):
         orch._sse[mid] = [q]
         q.put_nowait({"type": "full"})
         # 满队列下广播——若误用阻塞 put 会卡住，wait_for 必须秒级返回
-        await asyncio.wait_for(asyncio.to_thread(orch._broadcast, mid, {"type": "new"}), timeout=2.0)
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                orch._broadcast,
+                mid,
+                {"type": "move", "player": 0, "x": 1, "y": 2},
+            ),
+            timeout=2.0,
+        )
         return q.get_nowait()["type"]
 
     result = asyncio.run(run())
-    assert result == "new", "drop-oldest 后最新事件应可被取到"
+    assert result == "move", "drop-oldest 后最新事件应可被取到"
 
 
 # ── 普通双 bot 对局 BotCrashedError → 技术判负（主路径盲区）───────────────
@@ -878,22 +954,159 @@ def test_admin_abort_cancels_blocking_runner_and_broadcasts_error(tmp_path):
                 assert rejected.status_code == 409, rejected.text
                 assert store.get_match(match_id)["status"] == STATUS_RUNNING
 
-            response = await client.patch(
+            injected = await client.patch(
                 f"/api/admin/matches/{match_id}",
                 json={"status": "aborted", "reason": "admin_test_abort"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            assert injected.status_code == 422, injected.text
+            assert store.get_match(match_id)["status"] == STATUS_RUNNING
+
+            response = await client.patch(
+                f"/api/admin/matches/{match_id}",
+                json={"status": "aborted"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
         assert response.status_code == 200, response.text
         match = store.get_match(match_id)
         assert match["status"] == STATUS_ABORTED
-        assert match["reason"] == "admin_test_abort"
+        assert match["reason"] == "admin_aborted"
         assert match_id not in app.state.orch._tasks
         event = queue.get_nowait()
-        assert event["type"] == "error"
-        assert event["reason"] == "admin_test_abort"
+        assert event == {"type": "error", "reason": "admin_aborted"}
+        replay = json.loads(store.get_public_replay(match_id)["events_json"])
+        assert replay[-1] == event
         assert store.get_rating(bot_a["id"])["matches_played"] == 0
         assert store.get_rating(bot_b["id"])["matches_played"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_admin_abort_store_failure_keeps_owned_task_and_subscribers(
+    store: Store, monkeypatch,
+):
+    """A failed terminal DB commit must not strand a cancelled running match."""
+    owner, bot_a = _user_with_bot(
+        store, name="abort-store-a", path=_fixture_binary(store, "abort-store-a")
+    )
+    _, bot_b = _user_with_bot(
+        store, name="abort-store-b", path=_fixture_binary(store, "abort-store-b")
+    )
+
+    class BlockingRunner:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+
+        async def run_binaries(self, *args, **kwargs):
+            self.entered.set()
+            await asyncio.Future()
+
+    async def exercise():
+        runner = BlockingRunner()
+        orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+        match_id = await orch.challenge(
+            bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
+        )
+        await asyncio.wait_for(runner.entered.wait(), timeout=1)
+        task = orch._tasks[match_id]
+        queue = orch.subscribe(match_id)
+        queue.get_nowait()
+        original_abort = store.abort_match_if_active
+
+        def fail_abort(*args, **kwargs):
+            raise RuntimeError("simulated sqlite failure")
+
+        monkeypatch.setattr(store, "abort_match_if_active", fail_abort)
+        with pytest.raises(RuntimeError, match="simulated sqlite failure"):
+            await orch.abort_match(match_id)
+
+        assert store.get_match(match_id)["status"] == STATUS_RUNNING
+        assert orch._tasks.get(match_id) is task
+        assert not task.done()
+        assert queue in orch._sse.get(match_id, [])
+        assert match_id not in orch._admin_aborting
+
+        # Restore the Store method and use the supported path to release the
+        # fixture. The same subscriber must receive the authoritative terminal.
+        monkeypatch.setattr(store, "abort_match_if_active", original_abort)
+        await orch.abort_match(match_id)
+        assert queue.get_nowait() == {
+            "type": "error",
+            "reason": "admin_aborted",
+        }
+
+    asyncio.run(exercise())
+
+
+def test_admin_abort_replay_read_failure_still_hands_off_terminal_state(
+    store: Store, monkeypatch,
+):
+    """A post-commit replay fault cannot strand SSE or contest progression."""
+    owner, bot_a = _user_with_bot(
+        store, name="abort-replay-a", path=_fixture_binary(store, "abort-replay-a")
+    )
+    _, bot_b = _user_with_bot(
+        store, name="abort-replay-b", path=_fixture_binary(store, "abort-replay-b")
+    )
+
+    class BlockingRunner:
+        def __init__(self) -> None:
+            self.entered = asyncio.Event()
+
+        async def run_binaries(self, *args, **kwargs):
+            self.entered.set()
+            await asyncio.Future()
+
+    async def exercise():
+        runner = BlockingRunner()
+        handoffs: list[tuple[str, int | None]] = []
+
+        async def on_match_done(match_id: str, contest_id: int | None):
+            handoffs.append((match_id, contest_id))
+
+        orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+        orch.on_match_done = on_match_done
+        match_id = await orch.challenge(
+            bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
+        )
+        await asyncio.wait_for(runner.entered.wait(), timeout=1)
+        queue = orch.subscribe(match_id)
+        queue.get_nowait()
+        prior_event = {
+            "type": "move",
+            "player": 0,
+            "x": 7,
+            "y": 7,
+            "move_index": 1,
+        }
+        store.upsert_replay(match_id, json.dumps([prior_event]), "[]")
+        original_get_replay = store.get_replay
+
+        def fail_get_replay(*_args, **_kwargs):
+            raise RuntimeError("simulated post-commit replay read failure")
+
+        monkeypatch.setattr(store, "get_replay", fail_get_replay)
+        updated = await orch.abort_match(match_id)
+
+        assert updated["status"] == STATUS_ABORTED
+        assert updated["reason"] == "admin_aborted"
+        assert queue.get_nowait() == {
+            "type": "error",
+            "reason": "admin_aborted",
+        }
+        assert handoffs == [(match_id, None)]
+        assert match_id not in orch._tasks
+        assert match_id not in orch._sse
+        assert match_id not in orch._admin_aborting
+        assert match_id not in orch._admin_abort_handoffs
+        raw_replay = json.loads(original_get_replay(match_id)["events_json"])
+        assert raw_replay == [prior_event]
+        public_replay = json.loads(store.get_public_replay(match_id)["events_json"])
+        assert public_replay == [
+            prior_event,
+            {"type": "error", "reason": "admin_aborted"},
+        ]
 
     asyncio.run(exercise())
 

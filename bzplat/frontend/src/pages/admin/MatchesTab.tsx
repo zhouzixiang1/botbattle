@@ -116,7 +116,7 @@ export default function MatchesTab() {
     })) return
     setBusyId(id)
     try {
-      await apiJson(`/api/admin/matches/${id}`, 'PATCH', { status: 'aborted', reason: 'admin-abort' })
+      await apiJson(`/api/admin/matches/${id}`, 'PATCH', { status: 'aborted' })
       await load()
     } catch (e) {
       setError(errMsg(e, '中止失败'))
@@ -182,6 +182,7 @@ export default function MatchesTab() {
               const terminalReason = gameSpec
                 ? gameSpec.terminalReason(m.reason, m.status)
                 : resolveTerminalReason(m.reason, m.status)
+              const hasTerminalStatus = m.status === 'completed' || m.status === 'aborted'
               return (
               <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</TableCell>
@@ -206,7 +207,7 @@ export default function MatchesTab() {
                 </TableCell>
                 <TableCell className="max-w-[18rem] px-3 py-2 font-mono text-xs text-muted-foreground">
                   <div>{m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</div>
-                  {m.reason && (
+                  {hasTerminalStatus && m.reason && (
                     <div
                       data-testid="terminal-reason"
                       data-tone={terminalReason.tone}

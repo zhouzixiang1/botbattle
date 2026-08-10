@@ -13,8 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from bzplat.backend.bots.manager import BotManager
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.store import Store
+from scripts._qa_bots import ensure_qa_sample_bot
 
 ROOT = Path(__file__).resolve().parents[3]  # 仓库根
 
@@ -100,6 +102,68 @@ def test_seed_reactivates_valid_dedicated_qa_bot_without_new_version(tmp_path):
     assert restored.get_bot(bot_id)["is_active"] == 1
     assert len(restored.list_bot_versions(bot_id)) == 1
     restored.close()
+
+
+def _direct_sample_bot(tmp_path, *, upload_name="uploads"):
+    store = Store(str(tmp_path / "direct.db"))
+    owner = store.create_user("qa_owner", "qa@example.com", "x")
+    manager = BotManager(store, upload_root=tmp_path / upload_name)
+    raw = (ROOT / "samples/gomokubot_linux_amd64").read_bytes()
+    bot = ensure_qa_sample_bot(manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    return store, owner, manager, raw, bot
+
+
+def test_qa_sample_never_reuses_a_binary_from_another_upload_root(tmp_path):
+    store, owner, first_manager, raw, bot = _direct_sample_bot(tmp_path, upload_name="root-a")
+    assert store.get_current_bot_version(bot["id"])["version"] == 1
+
+    second_manager = BotManager(store, upload_root=tmp_path / "root-b")
+    synced = ensure_qa_sample_bot(
+        second_manager, owner["id"], "qa_gomoku", "gomoku", raw,
+    )
+    current = store.get_current_bot_version(bot["id"])
+    expected = (tmp_path / "root-b" / str(bot["id"]) / "v2" / "bot.bin").resolve()
+    assert synced["id"] == bot["id"]
+    assert current["version"] == 2
+    assert Path(current["binary_path"]).resolve() == expected
+    assert expected.read_bytes() == raw
+
+    ensure_qa_sample_bot(second_manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    assert len(store.list_bot_versions(bot["id"])) == 2
+    store.close()
+
+
+def test_qa_sample_republishes_a_non_executable_current_file(tmp_path):
+    store, owner, manager, raw, bot = _direct_sample_bot(tmp_path)
+    first = store.get_current_bot_version(bot["id"])
+    Path(first["binary_path"]).chmod(0o644)
+
+    ensure_qa_sample_bot(manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    current = store.get_current_bot_version(bot["id"])
+    assert current["version"] == 2
+    assert Path(current["binary_path"]).stat().st_mode & 0o001
+    store.close()
+
+
+def test_qa_sample_republishes_a_drifted_bot_mirror_before_activation(tmp_path):
+    store, owner, manager, raw, bot = _direct_sample_bot(tmp_path)
+    foreign = tmp_path / "foreign" / "bot.bin"
+    foreign.parent.mkdir()
+    foreign.write_bytes(raw)
+    foreign.chmod(0o755)
+    store.update_bot(
+        bot["id"], binary_path=str(foreign), runtime_mode="longrunning", is_active=0,
+    )
+
+    synced = ensure_qa_sample_bot(manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    current = store.get_current_bot_version(bot["id"])
+    expected = (tmp_path / "uploads" / str(bot["id"]) / "v2" / "bot.bin").resolve()
+    assert synced["is_active"] == 1
+    assert current["version"] == 2
+    assert Path(current["binary_path"]).resolve() == expected
+    assert Path(synced["binary_path"]).resolve() == expected
+    assert synced["runtime_mode"] == current["runtime_mode"]
+    store.close()
 
 
 def test_seed_token_is_valid_session(tmp_path):

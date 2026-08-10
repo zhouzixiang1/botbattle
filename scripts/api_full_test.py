@@ -6,7 +6,7 @@
   2. Bot 上传 / 版本 / 上架 / 公开列表
   3. 挑战对局 + 结果完整性（零和、winner、净筹码）
   4. 已完成对局的 SSE 终态 snapshot vs 落盘回放 events_json 一致性
-  5. 并发多局对局稳定性（同时跑 N 局，互不串味/不崩溃/不超时）
+  5. 全局 admission 与补槽（首波只接纳代码并发上限，超额 429，释放后补齐）
   6. 排行榜 Glicko-2 更新、组织者比赛循环赛
 
 前置：
@@ -468,7 +468,7 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
 
 
 def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, int], n: int = 4) -> None:
-    print(f"\n[5/6] 并发 {n} 局对局稳定性")
+    print(f"\n[5/6] 并发 admission + 补槽（总计 {n} 局）")
     # 不同 bot 对，避免冲突：Alice vs Bob, Alice vs Carol, Carol vs Bob, Bob vs Carol
     pairs = [
         (bot_ids["AliceBot"], bot_ids["BobBot"], users["alice"]),
@@ -478,37 +478,102 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
     ]
     pairs = (pairs * ((n + 3) // 4))[:n]
 
+    health = api.client.get("/api/health").json()
+    capacity = max(1, int(health.get("max_concurrent") or 1))
+    expected_first_wave = min(n, capacity)
     results: dict[int, dict] = {}
+    first_match_ids: dict[int, str] = {}
+    rejected: dict[int, tuple[int, int, str]] = {}
     errors: dict[int, str] = {}
     barrier = threading.Barrier(n)
 
-    def run(i: int, a: int, b: int, tok: str):
+    def submit_first_wave(i: int, a: int, b: int, tok: str):
         try:
             barrier.wait()  # 尽量同时发起
             r = api.authed(tok, "POST", "/api/matches/challenge", json={
                 "my_bot_id": a, "opponent_bot_id": b,
             })
-            if r.status_code != 200:
-                errors[i] = f"challenge {r.status_code} {r.text[:60]}"
+            if r.status_code == 200:
+                first_match_ids[i] = r.json()["match_id"]
                 return
-            mid = r.json()["match_id"]
-            m = wait_match(api, tok, mid, timeout=120)
-            results[i] = m
+            if r.status_code == 429 and "并发已满" in r.text:
+                rejected[i] = (a, b, tok)
+                return
+            errors[i] = f"challenge {r.status_code} {r.text[:80]}"
         except Exception as e:
             errors[i] = str(e)
 
-    threads = [threading.Thread(target=run, args=(i, a, b, t)) for i, (a, b, t) in enumerate(pairs)]
+    threads = [
+        threading.Thread(target=submit_first_wave, args=(i, a, b, t))
+        for i, (a, b, t) in enumerate(pairs)
+    ]
     t0 = time.time()
     for th in threads:
         th.start()
     for th in threads:
         th.join()
-    dt = time.time() - t0
 
-    check(f"全部 {n} 局成功发起", len(errors) == 0, "; ".join(f"#{k}:{v}" for k, v in errors.items()))
+    first_wave_ok = (
+        not errors
+        and len(first_match_ids) == expected_first_wave
+        and len(rejected) == n - expected_first_wave
+    )
+    check(
+        f"首波精确接纳 {expected_first_wave} 局，超额请求明确 429",
+        first_wave_ok,
+        (
+            f"accepted={len(first_match_ids)} rejected={len(rejected)} "
+            + "; ".join(f"#{k}:{v}" for k, v in errors.items())
+        ),
+    )
+
+    # 先等首波释放全局槽位，再把明确因 admission 拒绝的请求
+    # 按同一 capacity 分批补进。这才是代码配置为 2 时的真实契约，
+    # 不应把任意数量的 pending task 塞进 semaphore 后再声称“并发成功”。
+    for i, mid in sorted(first_match_ids.items()):
+        try:
+            results[i] = wait_match(api, pairs[i][2], mid, timeout=120)
+        except Exception as exc:
+            errors[i] = str(exc)
+
+    retry_items = sorted(rejected.items())
+    for start in range(0, len(retry_items), capacity):
+        batch = retry_items[start : start + capacity]
+        retry_barrier = threading.Barrier(len(batch))
+
+        def retry(i: int, a: int, b: int, tok: str) -> None:
+            try:
+                retry_barrier.wait()
+                r = api.authed(tok, "POST", "/api/matches/challenge", json={
+                    "my_bot_id": a, "opponent_bot_id": b,
+                })
+                if r.status_code != 200:
+                    errors[i] = f"retry challenge {r.status_code} {r.text[:80]}"
+                    return
+                results[i] = wait_match(api, tok, r.json()["match_id"], timeout=120)
+            except Exception as exc:
+                errors[i] = str(exc)
+
+        retry_threads = [
+            threading.Thread(target=retry, args=(i, a, b, tok))
+            for i, (a, b, tok) in batch
+        ]
+        for th in retry_threads:
+            th.start()
+        for th in retry_threads:
+            th.join()
+
+    dt = time.time() - t0
     completed = [m for m in results.values() if m["status"] == "completed"]
-    check(f"全部 {n} 局 completed", len(completed) == n,
-          f"completed={len(completed)} aborted={sum(1 for m in results.values() if m['status']=='aborted')}")
+    check(
+        f"补槽后全部 {n} 局 completed",
+        len(completed) == n and not errors,
+        (
+            f"completed={len(completed)} "
+            f"aborted={sum(1 for m in results.values() if m['status']=='aborted')} "
+            + "; ".join(f"#{k}:{v}" for k, v in errors.items())
+        ),
+    )
     # 每局零和
     zero_sum = all(
         isinstance((m.get("result") or {}).get("deltas"), list)

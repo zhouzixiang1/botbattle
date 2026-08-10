@@ -69,15 +69,15 @@
 
 | 指标 | 数值 |
 |------|------|
-| 后端代码 | `bzplat/backend` 当前 66 个非测试 `.py`（含 `games/`，以 `rg --files` 为准） |
+| 后端代码 | `bzplat/backend` 当前 69 个非测试 `.py`（含 `games/`，以 `rg --files` 为准） |
 | API 路由 | REST + SSE + WebSocket；精确数量以目标提交的自动化盘点为准 |
-| 数据库表 | **30** 张 + **36** 个具名索引（全新初始化结果；per-game 表/索引由 `_migrate` 模板补齐） |
+| 数据库表 | **30** 张 + **37** 个具名索引（全新初始化结果；per-game 表/索引由 `_migrate` 模板补齐） |
 | 游戏架构 | `games/` 注册表 + 3 自包含子包（shim 已删，真实现全在 games/） |
 | 前端组件 | 26 个 shadcn 共享原语 |
 | 前端页面 | 顶层业务页面均 lazy 分包；精确数量以目标提交的路由盘点为准 |
 | 自动化测试 | 后端 pytest + Playwright；最终数量以目标提交重新收集为准 |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
-| 浏览器验收 | Playwright **4 个 spec / 34 条**；本轮 Chromium 单 worker 完整执行 `34 passed`（2.6m），严格 cleanup 与日志审计通过；隔离 QA 由代码禁用 auto-match，生产 profile/并发契约不变。当前目标提交真值以 `TESTING.md` 为准；多 PR 最终整合候选仍须重跑；另有 browser/screenshot 辅助脚本 |
+| 浏览器验收 | Playwright **4 个 spec / 39 条**；当前目标提交的完整执行结果以 `TESTING.md` 为准；隔离 QA 由代码禁用 auto-match，生产 profile/并发契约不变；另有 browser/screenshot 辅助脚本 |
 | 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
@@ -93,7 +93,7 @@
 | 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
 | 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
-| 浏览器验收 | ✅ 本分支 4 spec / 34 条全部通过，完整 worktree 运行产物下无非预期日志；多 PR 最终整合候选仍须在同一提交重跑 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
+| 浏览器验收 | ✅ 本分支 4 spec / 39 条全部通过，完整 worktree 运行产物下无非预期日志；多 PR 最终整合候选仍须在同一提交重跑 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |
 
 ## 5. 经验教训

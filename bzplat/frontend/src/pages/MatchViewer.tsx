@@ -24,6 +24,7 @@ import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/game
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { findGame, resolveTerminalReason, unsupportedGameLabel } from '@/games'
+import { describePlatformEvent } from '@/games/reasons'
 import type { RawEvent } from '@/games/base'
 import {
   type MatchSeatRow,
@@ -39,7 +40,7 @@ function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
   if (Number(match.technical_loss || 0) > 0) return true
   if ((match.result?.technical_incident_samples?.length ?? 0) > 0) return true
   if (Object.values(match.result?.technical_incidents_by_seat ?? {}).some((n) => Number(n) > 0)) return true
-  return ['protocol_error', 'technical_loss', 'timeout', 'crash', 'invalid_action', 'version_unavailable']
+  return ['protocol_error', 'technical_loss', 'timeout', 'crash', 'version_unavailable']
     .includes(String(match.reason ?? ''))
 }
 
@@ -52,6 +53,8 @@ function describeTimelineEvent(event: RawEvent, gameDescription: string): string
     const reason = resolveTerminalReason(event.reason, 'completed').label
     return `${seatText} 技术故障${turnText}：${String(event.error || reason)}`
   }
+  const platformDescription = describePlatformEvent(event)
+  if (platformDescription) return platformDescription
   // match_end 的裁判原因属于游戏契约；不得在通用时间线覆盖 describeEvent。
   return gameDescription
 }
@@ -196,7 +199,7 @@ export default function MatchViewer() {
                       ],
                     }
                   }
-                  const eventReason = ev.reason ?? ev.message
+                  const eventReason = ev.reason ?? (ev.type === 'error' ? 'platform_error' : undefined)
                   if (eventReason) patch.reason = String(eventReason)
                   return patch
                 })
@@ -302,6 +305,8 @@ export default function MatchViewer() {
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(match?.reason, match?.status)
     : resolveTerminalReason(match?.reason, match?.status)
+  const hasPersistedTerminalStatus =
+    match?.status === 'completed' || match?.status === 'aborted'
   const persistedIncidents = match?.result?.technical_incident_samples ?? []
   const eventIncidents = events
     .filter((event) => event.type === 'technical_incident')
@@ -478,7 +483,7 @@ export default function MatchViewer() {
               <div className="mt-1 break-words text-sm font-semibold text-foreground">
                 {finished ? winnerLabel : '对局进行中'}
               </div>
-              {match.reason && (
+              {hasPersistedTerminalStatus && match.reason && (
                 <div
                   data-testid="terminal-reason"
                   data-tone={terminalReason.tone}

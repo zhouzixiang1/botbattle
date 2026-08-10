@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS matches_holdem (
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     winner          INTEGER,
-    reason          TEXT    NOT NULL DEFAULT 'completed',
+    reason          TEXT    NOT NULL DEFAULT '',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS matches_gomoku (
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     winner          INTEGER,
-    reason          TEXT    NOT NULL DEFAULT 'completed',
+    reason          TEXT    NOT NULL DEFAULT '',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS matches_pencil (
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     winner          INTEGER,
-    reason          TEXT    NOT NULL DEFAULT 'completed',
+    reason          TEXT    NOT NULL DEFAULT '',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
@@ -479,6 +479,47 @@ TECHNICAL_INCIDENT_MESSAGES = {
     "invalid_keep_running": "LongRunning Bot 的 KEEP_RUNNING 握手不正确",
     "decision_timeout": "Bot 未在决策时限内输出完整响应行",
 }
+
+# 公开 completed/match_end 唯一允许的稳定裁决码。游戏裁判与平台技术判负
+# 只能从这里选择；未知历史文本在读取/迁移边界统一为 completed。
+PUBLIC_MATCH_COMPLETED_REASONS = frozenset(
+    {
+        "bot_deleted",
+        "completed",
+        "contest_bot_unavailable",
+        "crash",
+        "draw",
+        "error",
+        "five",
+        "illegal",
+        "majority",
+        "protocol_error",
+        "score",
+        "technical_loss",
+        "timeout",
+    }
+)
+
+# 公开 match ``error`` 终局唯一允许的稳定原因码。任意内部异常文本、旧自定义
+# 管理员 reason 或未知值在公共边界一律归一为 platform_error；诊断详情只进日志。
+PUBLIC_MATCH_ERROR_REASONS = frozenset(
+    {
+        "admin_aborted",
+        "bot_crashed",
+        "contest_bot_unavailable",
+        "contest_both_bots_unavailable",
+        "contest_ended_pending_orphan",
+        "human_inactive",
+        "invalid_game_id",
+        "invalid_match_config",
+        "orphan_after_restart",
+        "orphan_pending_after_restart",
+        "orphan_pending_no_contest",
+        "platform_error",
+        "version_unavailable",
+    }
+)
+PUBLIC_MATCH_ERROR_FALLBACK = "platform_error"
 
 # 对局类型
 TYPE_CHALLENGE = "challenge"

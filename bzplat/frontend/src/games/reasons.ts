@@ -1,4 +1,5 @@
 import type {
+  RawEvent,
   TerminalReasonPresentation,
   TerminalReasonResolver,
 } from '@/games/base'
@@ -19,14 +20,11 @@ export const PLATFORM_TERMINAL_REASONS: ReasonMap = {
   crash: danger('Bot 运行异常'),
   illegal: danger('非法动作'),
   error: danger('决策异常'),
-  invalid_action: danger('Bot 动作无效'),
   version_unavailable: danger('Bot 版本不可用'),
   bot_deleted: danger('Bot 已删除'),
   bot_crashed: danger('Bot 启动失败'),
   platform_error: danger('平台运行异常'),
   admin_aborted: danger('管理员中止'),
-  'admin-abort': danger('管理员中止'),
-  queued_admin_abort: danger('管理员中止'),
   contest_bot_unavailable: danger('赛事 Bot 不可用'),
   contest_both_bots_unavailable: danger('赛事双方 Bot 均不可用'),
   contest_ended_pending_orphan: danger('赛事结束时仍有孤立对局'),
@@ -57,4 +55,15 @@ export function resolveTerminalReason(
 
 export function createTerminalReasonResolver(gameReasons: ReasonMap): TerminalReasonResolver {
   return (reason, status) => resolveTerminalReason(reason, status, gameReasons)
+}
+
+/**
+ * 平台产生的通用事件由平台层统一中文化；游戏包只负责裁判事件。
+ * 返回 null 表示应继续交给具体游戏的 describeEvent。
+ */
+export function describePlatformEvent(event: RawEvent): string | null {
+  if (event.type === 'error') {
+    return resolveTerminalReason(event.reason || 'platform_error', 'aborted').label
+  }
+  return null
 }

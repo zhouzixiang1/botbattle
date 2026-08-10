@@ -290,6 +290,64 @@ def test_matches_replays_pair_stats(tmp_path):
     assert s.count_matches(status="completed", game_id="gomoku") == 0
 
 
+def test_active_match_has_no_terminal_reason_and_migration_repairs_legacy_default(tmp_path):
+    db = str(tmp_path / "active-reason.db")
+    store = Store(db)
+    user = store.create_user("reason_owner", "reason@example.com", "x")
+    first = store.create_bot(user["id"], "first", game_id="holdem")
+    second = store.create_bot(user["id"], "second", game_id="holdem")
+
+    pending = store.create_match("pending-reason", first["id"], second["id"])
+    assert pending["status"] == "pending"
+    assert pending["reason"] == ""
+    store.update_match(
+        "pending-reason",
+        status="running",
+        reason="error:/private/running traceback",
+    )
+
+    store.create_match("completed-reason", first["id"], second["id"])
+    store.update_match(
+        "completed-reason", status="completed", reason="completed", winner=0,
+    )
+    store.create_match("legacy-completed-ascii", first["id"], second["id"])
+    store.update_match(
+        "legacy-completed-ascii",
+        status="completed",
+        reason="privateadapterfailure",
+        winner=0,
+    )
+    store.create_match("legacy-completed-unicode", first["id"], second["id"])
+    store.update_match(
+        "legacy-completed-unicode",
+        status="completed",
+        reason="内部异常路径",
+        winner=0,
+    )
+    store.create_match("legacy-admin-reason", first["id"], second["id"])
+    store.update_match(
+        "legacy-admin-reason", status="aborted", reason="admin-abort",
+    )
+    store.create_match("legacy-private-reason", first["id"], second["id"])
+    store.update_match(
+        "legacy-private-reason",
+        status="aborted",
+        reason="error:/private/runtime traceback",
+    )
+    store.close()
+
+    repaired = Store(db)
+    try:
+        assert repaired.get_match("pending-reason")["reason"] == ""
+        assert repaired.get_match("completed-reason")["reason"] == "completed"
+        assert repaired.get_match("legacy-completed-ascii")["reason"] == "completed"
+        assert repaired.get_match("legacy-completed-unicode")["reason"] == "completed"
+        assert repaired.get_match("legacy-admin-reason")["reason"] == "admin_aborted"
+        assert repaired.get_match("legacy-private-reason")["reason"] == "platform_error"
+    finally:
+        repaired.close()
+
+
 def test_recover_orphan_matches(tmp_path):
     """重启后 running + 非赛事 pending 已无内存任务，均标 aborted。
 

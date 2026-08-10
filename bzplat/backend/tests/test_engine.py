@@ -312,6 +312,11 @@ def test_allin_runout_emits_deal_board_for_all_streets():
 
     session = MatchSession(num_hands=1, rng=_r.Random(7))
     result = asyncio.run(session.run_async(allin_both))
+    actions = [e for e in result.events if e["type"] == "action"]
+    assert [e["amount"] for e in actions[:2]] == [STARTING_STACK, STARTING_STACK], (
+        "all-in event amount must be the total street contribution (raise-to), "
+        "including the blind already posted"
+    )
     boards = [e for e in result.events if e["type"] == "deal_board"]
     # all-in runout 应发 flop(3) + turn(1) + river(1) = 3 个 deal_board 事件
     assert len(boards) == 3, f"all-in runout 应发 3 个 deal_board，实际 {len(boards)}"

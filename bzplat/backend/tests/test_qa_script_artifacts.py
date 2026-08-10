@@ -251,7 +251,12 @@ def test_load_human_websocket_error_is_failure_and_match_end_is_success():
 
     failed = module._play_human_match(
         api,
-        _FakeWebSockets([{"type": "your_turn", "request": {}}, {"type": "error", "message": "boom"}]),
+        _FakeWebSockets(
+            [
+                {"type": "your_turn", "request": {}},
+                {"type": "error", "reason": "platform_error"},
+            ]
+        ),
         asyncio,
         "match-1",
         "token",
@@ -268,6 +273,7 @@ def test_load_human_websocket_error_is_failure_and_match_end_is_success():
 
     assert failed is False
     assert completed is True
+    assert module.WARN == ["WS holdem 返回 error: platform_error"]
 
 
 def test_load_human_phase_checks_persisted_completed_status():
@@ -311,6 +317,9 @@ def test_qa_script_claims_match_the_observed_coverage():
     assert "snapshot 之后的实时增量事件" in load_source
     assert "SSE 实时事件流" not in api_source
     assert "终态 snapshot" in api_source
+    assert "首波精确接纳" in api_source
+    assert "超额请求明确 429" in api_source
+    assert "全部 {n} 局成功发起" not in api_source
     assert "持续打满并发对局（8 场）" not in load_doc
     assert "全端点覆盖" not in doc_index
     assert "生成赛程表" not in contest_source

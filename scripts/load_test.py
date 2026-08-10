@@ -872,7 +872,8 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
                         await ws.send(json.dumps(move))
                         continue
                     if et == "error":
-                        warn(f"WS {game} 返回 error: {ev.get('message') or ev}")
+                        reason = str(ev.get("reason") or "platform_error")
+                        warn(f"WS {game} 返回 error: {reason}")
                         return False
                     if et == "match_end":
                         return True
@@ -1113,7 +1114,7 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     })
     if r.status_code == 200:
         amid = r.json()["match_id"]
-        r = api.authed(tok, "PATCH", f"/api/admin/matches/{amid}", json={"status": "aborted", "reason": "loadtest-abort"})
+        r = api.authed(tok, "PATCH", f"/api/admin/matches/{amid}", json={"status": "aborted"})
         check("PATCH /api/admin/matches/{id}（强制 aborted）", r.status_code == 200 and r.json()["match"]["status"] == "aborted", r.text[:80])
     else:
         warn(f"阶段7 强制 abort 对局发起失败 {r.status_code}")

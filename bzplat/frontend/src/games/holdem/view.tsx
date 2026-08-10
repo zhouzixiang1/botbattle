@@ -37,7 +37,6 @@ export function describeHoldemEvent(event: RawEvent): string {
   }
   if (event.type === 'turn') return `轮到座${displaySeat(event.player)}`
   if (event.type === 'your_turn') return '轮到你'
-  if (event.type === 'error') return String(event.message || '对局异常')
   return event.type || '?'
 }
 

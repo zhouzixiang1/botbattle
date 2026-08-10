@@ -23,7 +23,6 @@ function describeGomokuEvent(event: RawEvent): string {
     const reason = gomokuTerminalReason(event.reason, 'completed').label
     return `结束 · ${outcome}${reason ? ` · ${reason}` : ''}`
   }
-  if (event.type === 'error') return String(event.message || '对局异常')
   return event.type || '?'
 }
 

@@ -349,17 +349,13 @@ def test_admin_abort_releases_human_task_queued_on_full_semaphore(store: Store):
         orch._human_turns[(first, 0)] = {
             "future": asyncio.get_running_loop().create_future()
         }
-        aborted = await orch.abort_match(first, reason="queued_admin_abort")
+        aborted = await orch.abort_match(first)
         assert aborted["status"] == "aborted"
         assert first not in orch._tasks
         assert not any(key[0] == first for key in orch._human_turns)
         assert u["id"] not in orch._human_active_users
         terminal = queue.get_nowait()
-        assert terminal == {
-            "type": "error",
-            "message": "queued_admin_abort",
-            "reason": "queued_admin_abort",
-        }
+        assert terminal == {"type": "error", "reason": "admin_aborted"}
         assert first not in orch._sse
 
         # Regression assertion: the leaked set entry formerly rejected this call.
@@ -367,7 +363,7 @@ def test_admin_abort_releases_human_task_queued_on_full_semaphore(store: Store):
             b["id"], u["id"], human_seat=0, game_id="gomoku"
         )
         await asyncio.sleep(0)
-        await orch.abort_match(second, reason="test_cleanup")
+        await orch.abort_match(second)
         return second
 
     second = asyncio.run(exercise())
@@ -420,7 +416,8 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
         # 无 token → 拒绝
         with c.websocket_connect(f"/api/matches/{mid}/play") as ws:
             msg = ws.receive_json()
-        assert msg["type"] == "error"
+        assert msg["type"] == "reject"
+        assert msg["reason"] == "forbidden"
 
         # 合法 token → 收 snapshot
         with c.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:

@@ -28,6 +28,12 @@ from bzplat.backend.runtime.binary_runner import (
     PlatformRunnerError,
 )
 from bzplat.backend.store import Store
+from bzplat.backend.store.public_contract import (
+    canonical_public_completed_reason,
+    canonical_public_error_reason,
+    sanitize_public_event,
+    sanitize_public_match,
+)
 from bzplat.backend.store.schema import (
     BOT_CAPACITY_EXHAUSTED_REASON,
     DEFAULT_RUNTIME_MODE,
@@ -195,7 +201,11 @@ def _live_replay_events(events: list[dict]) -> list[dict]:
     match row/result commit, the final replay replaces all of them with the same
     single canonical terminal event used by the live transport.
     """
-    return [event for event in events if event.get("type") != "match_end"]
+    return [
+        event
+        for event in events
+        if event.get("type") not in {"match_end", "error"}
+    ]
 
 
 def _authoritative_match_end(
@@ -212,6 +222,11 @@ def _authoritative_match_end(
     }
 
 
+def _authoritative_error(reason: str) -> dict[str, str]:
+    """Build the single public aborted terminal event (diagnostics stay in logs)."""
+    return {"type": "error", "reason": canonical_public_error_reason(reason)}
+
+
 def _completed_match_reason(result: Any, events: list[dict]) -> str:
     """Preserve a game's adjudicated terminal reason without game-name branches.
 
@@ -221,14 +236,9 @@ def _completed_match_reason(result: Any, events: list[dict]) -> str:
     keeps ``completed``; its mid-match crash remains available on the engine event.
     """
     reason = getattr(result, "reason", None)
-    if (
-        isinstance(reason, str)
-        and reason
-        and len(reason) <= 32
-        and reason.replace("_", "").isalnum()
-        and reason[0].isalpha()
-    ):
-        return reason
+    canonical_reason = canonical_public_completed_reason(reason)
+    if canonical_reason != "completed" or reason == "completed":
+        return canonical_reason
     result_events = getattr(result, "events", None)
     sources = result_events if isinstance(result_events, list) else events
     for event in reversed(sources):
@@ -308,6 +318,10 @@ class MatchOrchestrator:
         # auto_matcher._is_idle 据此判定空闲，避免大量 pending 任务排队等槽时误判不空闲。
         self._bot_running = 0
         self._sse: dict[str, list[asyncio.Queue]] = {}
+        # Per-subscriber visibility for active human poker. Public spectators
+        # receive no hole cards/turn request; the authenticated human receives
+        # only their own cards and decision request.
+        self._sse_human_views: dict[asyncio.Queue, tuple[bool, int | None]] = {}
         self._lock = asyncio.Lock()
         # 评分串行化锁：按 (bot_id, game_id) 维度串行化 _apply_ratings，防同 bot 两场
         # 并发完成时快照读+绝对写 rating/rd/vol 互相覆盖（lost-update，审计 FRAGILE 5a）。
@@ -381,7 +395,8 @@ class MatchOrchestrator:
         # the authoritative terminal event; ``_finish_match_task`` removes them
         # immediately after the broadcast.  All other exits still clean eagerly.
         if match_id not in self._admin_aborting:
-            self._sse.pop(match_id, None)
+            for queue in self._sse.pop(match_id, []):
+                self._sse_human_views.pop(queue, None)
         self._human_turns = {
             key: value for key, value in self._human_turns.items()
             if key[0] != match_id
@@ -540,15 +555,9 @@ class MatchOrchestrator:
         self.store.abort_match_if_active(
             match_id, reason=BotVersionUnavailableError.code
         )
-        self._safe_flush_terminal_replay(match_id, events)
-        self._broadcast(
-            match_id,
-            {
-                "type": "error",
-                "reason": BotVersionUnavailableError.code,
-                "message": "对局所需的 Bot 版本不可用，对局已中止",
-            },
-        )
+        terminal_event = _authoritative_error(BotVersionUnavailableError.code)
+        self._safe_flush_terminal_replay(match_id, events, terminal_event)
+        self._broadcast(match_id, terminal_event)
 
     async def shutdown(self) -> None:
         """Cancel and await every in-flight match while the event loop is alive.
@@ -573,6 +582,7 @@ class MatchOrchestrator:
         self._human_turns.clear()
         self._human_active_users.clear()
         self._sse.clear()
+        self._sse_human_views.clear()
 
     # ── 人类对战：回合 Future 注册表（供 WS /move 解析）─────────
     def get_human_turn(self, match_id: str, player_idx: int) -> dict | None:
@@ -803,8 +813,9 @@ class MatchOrchestrator:
             self._release_bot_slot(match_id)
         return deleted
 
-    async def abort_match(self, match_id: str, *, reason: str = "admin_aborted") -> dict:
+    async def abort_match(self, match_id: str) -> dict:
         """取消/drain 编排器拥有的任务并稳定落 aborted，终态不可倒退。"""
+        reason = "admin_aborted"
         match = self.store.get_match(match_id)
         if not match:
             raise ValueError("对局不存在")
@@ -815,24 +826,14 @@ class MatchOrchestrator:
 
         terminal_error: ValueError | None = None
         updated: dict | None = None
+        handoff_required = False
+        task = self._tasks.get(match_id)
         self._admin_aborting.add(match_id)
         try:
-            task = self._tasks.get(match_id)
-            if task is not None and not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            # The done callback above normally runs before gather resumes.  Keep
-            # this identity-guarded fallback for alternate event-loop scheduling;
-            # it cannot clear a newer match because match_id keys are immutable.
-            if (
-                match.get("match_type") == TYPE_HUMAN
-                and task is not None
-                and self._tasks.get(match_id) is task
-            ):
-                self._release_human_match_state(
-                    match_id, match.get("human_user_id")
-                )
-
+            # Commit the terminal state before cancelling the owned task.  This
+            # synchronous Store call cannot race the task on the same event loop;
+            # if SQLite fails, the task and its subscribers remain intact instead
+            # of being cancelled into a permanently ``running`` orphan.
             updated = self.store.abort_match_if_active(match_id, reason=reason)
             if not updated:
                 raise ValueError("对局不存在")
@@ -844,22 +845,62 @@ class MatchOrchestrator:
                     f"对局处于 {updated.get('status')} 态，不能中止"
                 )
             else:
-                self._broadcast(
-                    match_id,
-                    {"type": "error", "message": reason, "reason": reason},
-                )
+                # From this point the aborted row is authoritative. Even if a
+                # best-effort replay/transport step fails, the cancelled task
+                # cannot perform its own cleanup while _admin_aborting is set;
+                # the handoff in finally therefore becomes mandatory.
+                handoff_required = True
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                # The cancelled task normally releases human ownership in its
+                # finally block. Keep this identity-guarded fallback for alternate
+                # event-loop scheduling; match_id keys are immutable.
+                if (
+                    match.get("match_type") == TYPE_HUMAN
+                    and task is not None
+                    and self._tasks.get(match_id) is task
+                ):
+                    self._release_human_match_state(
+                        match_id, match.get("human_user_id")
+                    )
+                try:
+                    replay = self.store.get_replay(match_id) or {}
+                except Exception:
+                    logger.exception(
+                        "admin abort replay read failed; preserving stored replay match=%s",
+                        match_id,
+                    )
+                    replay_events = None
+                else:
+                    try:
+                        replay_events = json.loads(replay.get("events_json") or "[]")
+                    except (TypeError, ValueError):
+                        replay_events = []
+                    if not isinstance(replay_events, list):
+                        replay_events = []
+                terminal_event = _authoritative_error(reason)
+                # Never replace a possibly complete replay with terminal-only
+                # data after a transient read failure. Public reads synthesize
+                # the authoritative error from the already-aborted match row.
+                if replay_events is not None:
+                    self._safe_flush_terminal_replay(
+                        match_id, replay_events, terminal_event
+                    )
+                self._broadcast(match_id, terminal_event)
         finally:
             self._admin_aborting.discard(match_id)
-
-        # 被取消 task 的 finally 在 admin 接管期间跳过了清理/回调；现在终态已落稳，
-        # 统一清 SSE 并触发赛事推进一次。prepared pending（无 task）也走同一路径。
-        is_aborted = (updated or match).get("status") == STATUS_ABORTED
-        if is_aborted:
-            self._admin_abort_handoffs.add(match_id)
-        try:
-            await self._finish_match_task(match_id, (updated or match).get("contest_id"))
-        finally:
-            self._admin_abort_handoffs.discard(match_id)
+            # The cancelled task's finally deliberately yields ownership while
+            # admin abort is active. Once the terminal row exists, this handoff
+            # must run even when replay reading/flushing/broadcasting raises.
+            if handoff_required:
+                self._admin_abort_handoffs.add(match_id)
+                try:
+                    await self._finish_match_task(
+                        match_id, (updated or match).get("contest_id")
+                    )
+                finally:
+                    self._admin_abort_handoffs.discard(match_id)
         if terminal_error is not None:
             raise terminal_error
         return self.store.get_match(match_id)
@@ -906,35 +947,74 @@ class MatchOrchestrator:
             defer_start=defer_start,
         )
 
-    def subscribe(self, match_id: str) -> asyncio.Queue:
-        # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
-        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
-        self._sse.setdefault(match_id, []).append(q)
+    def subscribe(
+        self,
+        match_id: str,
+        *,
+        human_viewer_seat: int | None = None,
+    ) -> asyncio.Queue:
         # 统一 detailed + 嵌套 seats（含人类座真人用户名）
         from bzplat.backend.matches.seat_info import match_for_viewer
 
-        m = match_for_viewer(self.store, match_id)
-        replay = self.store.get_public_replay(match_id) or {}
-        q.put_nowait({"type": "snapshot", "match": m or {}, "events": json.loads(replay.get("events_json") or "[]")})
+        m = sanitize_public_match(match_for_viewer(self.store, match_id))
+        active_human = bool(
+            m
+            and m.get("match_type") == TYPE_HUMAN
+            and m.get("status") in {STATUS_PENDING, STATUS_RUNNING}
+        )
+        replay = self.store.get_public_replay(
+            match_id,
+            human_viewer_seat=human_viewer_seat,
+        ) or {}
+        snapshot = {
+            "type": "snapshot",
+            "match": m or {},
+            "events": json.loads(replay.get("events_json") or "[]"),
+        }
+
+        # 快照与可见性全部构造成功后再注册队列。否则 DB/JSON 异常会
+        # 留下调用方永远拿不到、也无法 unsubscribe 的孤儿订阅。
+        # maxsize=2000：减少 Bot 决策极快时丢事件（原 500 太小）；满时 drop oldest 见 _broadcast
+        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
+        self._sse_human_views[q] = (active_human, human_viewer_seat)
+        self._sse.setdefault(match_id, []).append(q)
+        try:
+            q.put_nowait(snapshot)
+        except BaseException:
+            self.unsubscribe(match_id, q)
+            raise
         return q
 
     def unsubscribe(self, match_id: str, q: asyncio.Queue) -> None:
         lst = self._sse.get(match_id) or []
         if q in lst:
             lst.remove(q)
+        self._sse_human_views.pop(q, None)
         # P1-7 修复：列表空时清 key，防 _sse dict 无界增长（每个曾观看的 match_id 永留空 list）。
         if not lst:
             self._sse.pop(match_id, None)
 
     def _broadcast(self, match_id: str, event: dict[str, Any]) -> None:
         for q in list(self._sse.get(match_id) or []):
+            redact_active_human, human_viewer_seat = self._sse_human_views.get(
+                # 可见性元数据丢失时 fail closed：隐藏底牌与人类请求，
+                # 绝不能把缺省解释为“可公开”。
+                q, (True, None)
+            )
+            public_event = sanitize_public_event(
+                event,
+                redact_active_human=redact_active_human,
+                human_viewer_seat=human_viewer_seat,
+            )
+            if public_event is None:
+                continue
             try:
-                q.put_nowait(event)
+                q.put_nowait(public_event)
             except asyncio.QueueFull:
                 # 队列满：丢最旧事件腾位，保最新（避免观赛画面卡在最旧处）
                 try:
                     q.get_nowait()
-                    q.put_nowait(event)
+                    q.put_nowait(public_event)
                 except (asyncio.QueueEmpty, asyncio.QueueFull):
                     pass
 
@@ -974,14 +1054,11 @@ class MatchOrchestrator:
                     winner=None,
                     ended_at=_now(),
                 )
-                self._broadcast(
-                    match_id,
-                    {
-                        "type": "error",
-                        "message": "双方 Bot 均不可用，对局无法裁决",
-                        "reason": "contest_both_bots_unavailable",
-                    },
+                terminal_event = _authoritative_error(
+                    "contest_both_bots_unavailable"
                 )
+                self._safe_flush_terminal_replay(match_id, [], terminal_event)
+                self._broadcast(match_id, terminal_event)
                 await self._finish_match_task(match_id, m.get("contest_id"))
                 return
             winner = 1 if bot_a is None else 0  # 缺失方判负，存活方赢
@@ -1033,10 +1110,9 @@ class MatchOrchestrator:
                 winner=None,
                 ended_at=_now(),
             )
-            self._broadcast(
-                match_id,
-                {"type": "error", "reason": "invalid_game_id", "message": str(exc)},
-            )
+            terminal_event = _authoritative_error("invalid_game_id")
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._broadcast(match_id, terminal_event)
             await self._finish_match_task(match_id, m.get("contest_id"))
             return
         # match_config.duplicate=True 时必须由 game spec 提供明确的多 leg 计划。
@@ -1057,14 +1133,9 @@ class MatchOrchestrator:
                 winner=None,
                 ended_at=_now(),
             )
-            self._broadcast(
-                match_id,
-                {
-                    "type": "error",
-                    "reason": "invalid_match_config",
-                    "message": f"游戏 {gid} 不支持 duplicate 对局",
-                },
-            )
+            terminal_event = _authoritative_error("invalid_match_config")
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._broadcast(match_id, terminal_event)
             await self._finish_match_task(match_id, m.get("contest_id"))
             return
         # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
@@ -1072,15 +1143,18 @@ class MatchOrchestrator:
         events: list[dict] = []
 
         def on_event(kind: str, ev: dict) -> None:
-            events.append(ev)
             # The engine terminal is an internal result signal, not a public
             # transport/replay terminal: result/status have not committed yet.
             # This is especially important for duplicate matches, whose every
             # leg emits a game-level match_end while the platform match remains
             # running. The final flush replaces all of them with one canonical
             # platform terminal.
-            if kind == "match_end":
+            if kind in {"match_end", "error"} or ev.get("type") in {
+                "match_end",
+                "error",
+            }:
                 return
+            events.append(ev)
             self._broadcast(match_id, ev)
             if kind in ("settle", "hand_start", "move", "match_start") or len(events) % 5 == 0:
                 self.store.upsert_replay(
@@ -1240,11 +1314,9 @@ class MatchOrchestrator:
                 reason="platform_error",
                 ended_at=_now(),
             )
-            self._safe_flush_terminal_replay(match_id, events)
-            self._broadcast(
-                match_id,
-                {"type": "error", "reason": "platform_error", "message": "Bot 沙箱暂不可用"},
-            )
+            terminal_event = _authoritative_error("platform_error")
+            self._safe_flush_terminal_replay(match_id, events, terminal_event)
+            self._broadcast(match_id, terminal_event)
         except BotCrashedError as exc:
             logger.warning("match %s bot crashed — %s", match_id, exc)
             # Bot 启动崩溃 → 技术判负（completed + winner=对手 + technical_loss=1）。
@@ -1273,11 +1345,12 @@ class MatchOrchestrator:
             self.store.update_match(
                 match_id,
                 status=STATUS_ABORTED,
-                reason=f"error:{exc}",
+                reason="platform_error",
                 ended_at=_now(),
             )
-            self._safe_flush_terminal_replay(match_id, events)
-            self._broadcast(match_id, {"type": "error", "message": str(exc)})
+            terminal_event = _authoritative_error("platform_error")
+            self._safe_flush_terminal_replay(match_id, events, terminal_event)
+            self._broadcast(match_id, terminal_event)
         finally:
             await self._finish_match_task(match_id, m.get("contest_id"))
 
@@ -1562,7 +1635,8 @@ class MatchOrchestrator:
             return
         # P1-7：对局结束后清 SSE dict 的该 match_id 条目（直播已结束，防无界增长）。
         # 残留订阅者会在 _broadcast 时因 list 为空自然无操作；unsubscribe 也会清空 list。
-        self._sse.pop(match_id, None)
+        for queue in self._sse.pop(match_id, []):
+            self._sse_human_views.pop(queue, None)
         if self.on_match_done is not None:
             try:
                 result = self.on_match_done(match_id, contest_id)
@@ -1594,10 +1668,9 @@ class MatchOrchestrator:
                     winner=None,
                     ended_at=_now(),
                 )
-                self._broadcast(
-                    match_id,
-                    {"type": "error", "reason": "invalid_game_id", "message": str(exc)},
-                )
+                terminal_event = _authoritative_error("invalid_game_id")
+                self._safe_flush_terminal_replay(match_id, [], terminal_event)
+                self._broadcast(match_id, terminal_event)
                 await self._finish_match_task(match_id, m.get("contest_id"))
                 return
             stored_mc = m.get("match_config") or {}
@@ -1624,12 +1697,15 @@ class MatchOrchestrator:
             consecutive_timeouts = {"n": 0}  # 闭包内可变计数器
 
             def on_event(kind: str, ev: dict) -> None:
-                events.append(ev)
                 # See the Bot-vs-Bot path above: a game-level match_end is an
                 # internal result signal, not permission to close WebSocket or
                 # create a second public replay contract before the result commits.
-                if kind == "match_end":
+                if kind in {"match_end", "error"} or ev.get("type") in {
+                    "match_end",
+                    "error",
+                }:
                     return
+                events.append(ev)
                 self._broadcast(match_id, ev)
                 if kind in ("settle", "hand_start", "move", "match_start", "turn") or len(events) % 5 == 0:
                     self.store.upsert_replay(
@@ -1759,30 +1835,44 @@ class MatchOrchestrator:
                     reason="platform_error",
                     ended_at=_now(),
                 )
-                self._safe_flush_terminal_replay(match_id, events)
-                self._broadcast(
-                    match_id,
-                    {"type": "error", "reason": "platform_error", "message": "Bot 沙箱暂不可用"},
+                terminal_event = _authoritative_error("platform_error")
+                self._safe_flush_terminal_replay(
+                    match_id, events, terminal_event
                 )
+                self._broadcast(match_id, terminal_event)
             except BotCrashedError as exc:
                 # Bot 启动即崩/EOF——快速 abort，广播清晰错误（而非吞成默认动作死磕数小时）
                 logger.warning("human match %s aborted: bot crashed — %s", match_id, exc)
                 self.store.update_match(match_id, status=STATUS_ABORTED, reason="bot_crashed", ended_at=_now())
-                self._safe_flush_terminal_replay(match_id, events)
-                self._broadcast(match_id, {"type": "error", "message": "Bot 启动失败或已崩溃，对局已中止"})
+                terminal_event = _authoritative_error("bot_crashed")
+                self._safe_flush_terminal_replay(
+                    match_id, events, terminal_event
+                )
+                self._broadcast(match_id, terminal_event)
             except HumanInactive as exc:
                 # 人类连续超时不响应 → 中止对局，释放人类槽（避免死磕占用 + 锁死用户）
                 logger.warning("human match %s aborted: human inactive — %s", match_id, exc)
                 self.store.update_match(
                     match_id, status=STATUS_ABORTED, reason="human_inactive", ended_at=_now(),
                 )
-                self._safe_flush_terminal_replay(match_id, events)
-                self._broadcast(match_id, {"type": "error", "message": "你长时间未响应，对局已中止"})
+                terminal_event = _authoritative_error("human_inactive")
+                self._safe_flush_terminal_replay(
+                    match_id, events, terminal_event
+                )
+                self._broadcast(match_id, terminal_event)
             except Exception as exc:
                 logger.exception("human match %s failed", match_id)
-                self.store.update_match(match_id, status=STATUS_ABORTED, reason=f"error:{exc}", ended_at=_now())
-                self._safe_flush_terminal_replay(match_id, events)
-                self._broadcast(match_id, {"type": "error", "message": str(exc)})
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_ABORTED,
+                    reason="platform_error",
+                    ended_at=_now(),
+                )
+                terminal_event = _authoritative_error("platform_error")
+                self._safe_flush_terminal_replay(
+                    match_id, events, terminal_event
+                )
+                self._broadcast(match_id, terminal_event)
             finally:
                 self._release_human_match_state(
                     match_id, m.get("human_user_id")

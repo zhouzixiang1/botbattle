@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { ErrorMsg } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
 import { findGame, gameLabel, normalizeGameId, resolveTerminalReason, unsupportedGameLabel } from '@/games'
+import { describePlatformEvent } from '@/games/reasons'
 import {
   type MatchSeatRow,
   seatInfos,
@@ -120,7 +121,10 @@ export default function HumanPlay() {
               setTurnDeadline(null)
               setEndInfo({
                 winner: (terminal?.winner ?? snapshotMatch.winner) as number | null | undefined,
-                reason: String(terminal?.reason || terminal?.message || snapshotMatch.reason || ''),
+                reason: String(
+                  terminal?.reason ||
+                  (terminal?.type === 'error' ? 'platform_error' : snapshotMatch.reason || ''),
+                ),
               })
               // 服务端 pump 在 terminal event 后结束，但 handler 仍等待 receive_json；
               // 客户端确认快照为终态后主动关闭，触发后端 finally 取消订阅。
@@ -150,7 +154,7 @@ export default function HumanPlay() {
             setTurnDeadline(null)
             setEndInfo({
               winner: ev.winner as number | null | undefined,
-              reason: ev.reason || ev.message,
+              reason: String(ev.reason || (ev.type === 'error' ? 'platform_error' : '')),
             })
             setMatch((prev) => {
               if (!prev) return prev
@@ -407,6 +411,18 @@ function EventLogCard({
   events: Ev[]
   describeEvent: (event: RawEvent) => string
 }) {
+  const describe = (event: Ev) => {
+    if (event.type === 'technical_incident') {
+      const seat = Number(event.seat)
+      const seatText = Number.isFinite(seat) ? `座位 ${seat + 1}` : 'Bot'
+      const turn = Number(event.turn)
+      const turnText = Number.isFinite(turn) && turn > 0 ? ` · 第 ${turn} 次决策` : ''
+      return `${seatText} 技术故障${turnText}：${String(event.error || 'Bot 响应异常')}`
+    }
+    const platformDescription = describePlatformEvent(event)
+    if (platformDescription) return platformDescription
+    return describeEvent(event)
+  }
   return (
     <Card className="flex flex-col">
       <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
@@ -418,9 +434,9 @@ function EventLogCard({
         ) : (
           events.slice().reverse().map((ev, i) => (
             <div key={i} className="flex items-center gap-2 rounded px-2 py-1 text-muted-foreground">
-              <span className="w-16 shrink-0 opacity-60">{ev.type}</span>
-              <span className="min-w-0 flex-1 truncate opacity-80">
-                {describeEvent(ev)}
+              <span className="w-10 shrink-0 font-mono opacity-60">#{events.length - i}</span>
+              <span className="min-w-0 flex-1 break-words opacity-80">
+                {describe(ev)}
               </span>
             </div>
           ))

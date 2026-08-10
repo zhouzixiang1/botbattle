@@ -1,6 +1,9 @@
 """评论 + 点赞 + 浏览测试（PR-7）。"""
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
@@ -190,6 +193,111 @@ def test_social_writes_reject_unknown_or_missing_targets(tmp_path):
         "/api/comments?target_type=match&target_id=missing"
     ).status_code == 404
     assert c.app.state.store.get_user_by_username("alice")["xp"] == before_xp
+
+
+@pytest.mark.parametrize("operation", ["comment", "like", "unlike"])
+def test_social_writes_lock_actor_and_target_in_one_transaction(
+    tmp_path, monkeypatch, operation,
+):
+    """A second Store cannot delete either side between validation and DML."""
+    db = str(tmp_path / f"social-{operation}.db")
+    writer = Store(db)
+    deleter = Store(db)
+    owner = writer.create_user("owner", "owner@example.com", "x")
+    actor = writer.create_user("actor", "actor@example.com", "x")
+    bot = writer.create_bot(
+        owner["id"], "target", binary_path="/tmp/target", format="elf",
+        game_id="holdem",
+    )
+    target_id = str(bot["id"])
+    if operation == "unlike":
+        assert writer.like(actor["id"], "bot", target_id) is True
+
+    deleter._conn.execute("PRAGMA busy_timeout=0")
+    actor_checks: list[bool] = []
+    target_checks: list[bool] = []
+    original_actor_check = writer._social_actor_exists_tx
+    original_target_check = writer._social_target_exists_tx
+
+    def locked_actor_check(conn, user_id):
+        actor_checks.append(conn.in_transaction)
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            deleter.delete_user(user_id)
+        return original_actor_check(conn, user_id)
+
+    def locked_target_check(conn, target_type, checked_target_id):
+        target_checks.append(conn.in_transaction)
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            deleter.delete_bot(int(checked_target_id))
+        return original_target_check(conn, target_type, checked_target_id)
+
+    monkeypatch.setattr(writer, "_social_actor_exists_tx", locked_actor_check)
+    monkeypatch.setattr(writer, "_social_target_exists_tx", locked_target_check)
+    try:
+        if operation == "comment":
+            writer.add_comment(actor["id"], "bot", target_id, "safe")
+        elif operation == "like":
+            assert writer.like(actor["id"], "bot", target_id) is True
+        else:
+            assert writer.unlike(actor["id"], "bot", target_id) is True
+        assert actor_checks == [True]
+        assert target_checks == [True]
+        assert writer.get_user(actor["id"]) is not None
+        assert writer.get_bot(bot["id"]) is not None
+    finally:
+        deleter.close()
+        writer.close()
+
+
+@pytest.mark.parametrize("operation", ["comment", "like", "unlike"])
+def test_social_api_actor_delete_race_returns_404(
+    tmp_path, monkeypatch, operation,
+):
+    """The authenticated actor can disappear after dependency resolution."""
+    client, match_id, _bot_id, token, _other = _app(tmp_path)
+    headers = {"Authorization": f"Bearer {token}"}
+    store = client.app.state.store
+    actor_id = int(store.get_user_by_username("alice")["id"])
+    if operation == "unlike":
+        assert store.like(actor_id, "match", match_id) is True
+    other = Store(store.path)
+    method_name = {
+        "comment": "add_comment",
+        "like": "like",
+        "unlike": "unlike",
+    }[operation]
+    original = getattr(store, method_name)
+
+    def delete_actor_then_write(user_id, *args):
+        assert other.delete_user(user_id) is True
+        return original(user_id, *args)
+
+    monkeypatch.setattr(store, method_name, delete_actor_then_write)
+    try:
+        if operation == "comment":
+            response = client.post(
+                "/api/comments",
+                json={"target_type": "match", "target_id": match_id, "body": "race"},
+                headers=headers,
+            )
+        elif operation == "like":
+            response = client.post(
+                "/api/likes",
+                json={"target_type": "match", "target_id": match_id},
+                headers=headers,
+            )
+        else:
+            response = client.request(
+                "DELETE", "/api/likes",
+                json={"target_type": "match", "target_id": match_id},
+                headers=headers,
+            )
+        assert response.status_code == 404
+        assert store.comment_count("match", match_id) == 0
+        assert store.like_count("match", match_id) == 0
+        assert store.get_match(match_id)["likes_count"] == 0
+    finally:
+        other.close()
 
 
 def test_target_deletion_cleans_comments_likes_and_cached_count(tmp_path):

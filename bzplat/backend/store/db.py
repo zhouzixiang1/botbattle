@@ -13,6 +13,14 @@ from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
 
+from .public_contract import (
+    READ_TECHNICAL_INCIDENT_EVENTS,
+    canonical_public_completed_reason,
+    sanitize_public_event,
+    sanitize_public_incident,
+    sanitize_public_match,
+)
+
 from .schema import (
     CODE_RESET,
     COMMENT_TARGET_TYPES,
@@ -25,6 +33,9 @@ from .schema import (
     CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
     MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
+    PUBLIC_MATCH_COMPLETED_REASONS,
+    PUBLIC_MATCH_ERROR_FALLBACK,
+    PUBLIC_MATCH_ERROR_REASONS,
     SCHEMA,
     STATUS_ABORTED,
     STATUS_COMPLETED,
@@ -34,7 +45,6 @@ from .schema import (
     SUPPORTED_BINARY_FORMAT,
     SUPPORTED_BINARY_OS,
     TECHNICAL_INCIDENT_EVENT,
-    TECHNICAL_INCIDENT_MESSAGES,
     TYPE_CONTEST,
     TYPE_HUMAN,
     LIKE_TARGET_TYPES,
@@ -123,48 +133,6 @@ def _contest_row(row: sqlite3.Row | None) -> dict | None:
     return result
 
 
-_HISTORICAL_TECHNICAL_INCIDENT_EVENTS = frozenset(
-    {"bot_decide_error", "bot_technical_error"}
-)
-_READ_TECHNICAL_INCIDENT_EVENTS = (
-    _HISTORICAL_TECHNICAL_INCIDENT_EVENTS
-    | {TECHNICAL_INCIDENT_EVENT}
-)
-
-
-def _safe_bot_incident_sample(raw: Any) -> dict[str, Any] | None:
-    """Normalize one public diagnostic without forwarding historical raw errors."""
-    if not isinstance(raw, dict):
-        return None
-    try:
-        seat = int(raw.get("seat"))
-    except (TypeError, ValueError):
-        return None
-    if seat not in (0, 1):
-        return None
-    sample: dict[str, Any] = {"seat": seat}
-    code = raw.get("code")
-    if isinstance(code, str) and code in TECHNICAL_INCIDENT_MESSAGES:
-        sample["code"] = code
-        sample["error"] = TECHNICAL_INCIDENT_MESSAGES[code]
-    else:
-        # Legacy bot_decide_error stored arbitrary exception text. Never surface it
-        # through newly aggregated API fields because it may contain stdout/paths.
-        sample["error"] = "Bot 响应格式错误（历史记录）"
-    reason = raw.get("reason")
-    if reason in ("protocol_error", "timeout"):
-        sample["reason"] = reason
-    for key in ("turn", "leg"):
-        value = raw.get(key)
-        if value is None:
-            continue
-        try:
-            sample[key] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return sample
-
-
 def _load_replay_bot_incident_events(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, str) or not raw:
         return []
@@ -178,15 +146,66 @@ def _load_replay_bot_incident_events(raw: Any) -> list[dict[str, Any]]:
         event
         for event in events
         if isinstance(event, dict)
-        and event.get("type") in _READ_TECHNICAL_INCIDENT_EVENTS
+        and event.get("type") in READ_TECHNICAL_INCIDENT_EVENTS
     ]
 
 
-def _sanitize_public_replay(replay: dict | None) -> dict | None:
-    """Return a public replay copy with bounded, safe Bot incident events."""
-    if replay is None:
+def _canonical_public_match_end(
+    match: dict[str, Any], raw_events: list[Any]
+) -> dict[str, Any]:
+    """Project one completed row into the only public completion event."""
+    result = match.get("result")
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            result = {}
+    if not isinstance(result, dict):
+        result = {}
+
+    candidates: list[Any] = [result.get("deltas")]
+    for event in reversed(raw_events):
+        if not isinstance(event, dict) or event.get("type") != "match_end":
+            continue
+        candidates.extend((event.get("deltas"), event.get("final_chips")))
+    deltas = [0, 0]
+    for candidate in candidates:
+        if not isinstance(candidate, (list, tuple)) or len(candidate) != 2:
+            continue
+        try:
+            deltas = [int(candidate[0]), int(candidate[1])]
+        except (TypeError, ValueError):
+            continue
+        break
+
+    winner = match.get("winner")
+    try:
+        winner = int(winner) if winner is not None else None
+    except (TypeError, ValueError):
+        winner = None
+    if winner not in (0, 1):
+        winner = None
+    return {
+        "type": "match_end",
+        "winner": winner,
+        "reason": canonical_public_completed_reason(match.get("reason")),
+        "deltas": deltas,
+    }
+
+
+def _sanitize_public_replay(
+    replay: dict | None,
+    match: dict | None,
+    *,
+    human_viewer_seat: int | None = None,
+) -> dict | None:
+    """Return a replay whose terminal is derived from the authoritative row."""
+    if replay is None and match is None:
         return None
-    public = dict(replay)
+    public = dict(replay or {})
+    if match is not None:
+        public.setdefault("match_id", match.get("id"))
+    public.setdefault("hands_json", "[]")
     raw_events = public.get("events_json")
     try:
         events = json.loads(raw_events) if isinstance(raw_events, str) else []
@@ -196,22 +215,41 @@ def _sanitize_public_replay(replay: dict | None) -> dict | None:
         events = []
     sanitized: list[Any] = []
     incident_samples = 0
+    redact_active_human = bool(
+        match
+        and match.get("match_type") == TYPE_HUMAN
+        and match.get("status") in {STATUS_PENDING, STATUS_RUNNING}
+    )
     for event in events:
-        if (
-            not isinstance(event, dict)
-            or event.get("type") not in _READ_TECHNICAL_INCIDENT_EVENTS
-        ):
-            sanitized.append(event)
+        if not isinstance(event, dict):
             continue
-        incident_samples += 1
-        if incident_samples > 3:
+        if event.get("type") in {"match_end", "error"}:
+            # Engine/historical terminals never decide the public outcome. The
+            # match row below contributes exactly one authoritative terminal.
             continue
-        sample = _safe_bot_incident_sample(event)
-        if sample is not None:
-            # Historical replay rows may use either retired event name. Those
-            # names are input-only storage concerns: every current API response
-            # exposes the single canonical event type.
-            sanitized.append({"type": TECHNICAL_INCIDENT_EVENT, **sample})
+        if event.get("type") in READ_TECHNICAL_INCIDENT_EVENTS:
+            incident_samples += 1
+            if incident_samples > 3:
+                continue
+        public_event = sanitize_public_event(
+            event,
+            redact_active_human=redact_active_human,
+            human_viewer_seat=human_viewer_seat,
+        )
+        if public_event is not None:
+            sanitized.append(public_event)
+
+    authoritative = sanitize_public_match(match)
+    if authoritative is not None:
+        status = authoritative.get("status")
+        if status == STATUS_COMPLETED:
+            sanitized.append(_canonical_public_match_end(authoritative, events))
+        elif status == STATUS_ABORTED:
+            sanitized.append(
+                sanitize_public_event(
+                    {"type": "error", "reason": authoritative.get("reason")}
+                )
+            )
     public["events_json"] = json.dumps(sanitized, ensure_ascii=False)
     return public
 
@@ -248,7 +286,7 @@ def _with_technical_incident_diagnostics(m: dict | None) -> dict | None:
     has_persisted_counts = sum(counts.values()) > 0
     if not has_persisted_counts:
         for event in replay_events:
-            sample = _safe_bot_incident_sample(event)
+            sample = sanitize_public_incident(event)
             if sample is not None:
                 counts[sample["seat"]] += 1
 
@@ -261,7 +299,7 @@ def _with_technical_incident_diagnostics(m: dict | None) -> dict | None:
         if total > sum(counts.values()):
             raw_technical = result.get("technical_incident_samples")
             first = (
-                _safe_bot_incident_sample(raw_technical[0])
+                sanitize_public_incident(raw_technical[0])
                 if isinstance(raw_technical, list) and raw_technical
                 else None
             )
@@ -277,7 +315,7 @@ def _with_technical_incident_diagnostics(m: dict | None) -> dict | None:
     samples: list[dict[str, Any]] = []
     seen_samples: set[tuple[Any, ...]] = set()
     for raw in sample_sources:
-        sample = _safe_bot_incident_sample(raw)
+        sample = sanitize_public_incident(raw)
         if sample is None:
             continue
         sample_key = tuple(
@@ -312,7 +350,7 @@ def _with_technical_incident_diagnostics(m: dict | None) -> dict | None:
     if isinstance(raw_technical_samples, list):
         safe_technical_samples = []
         for raw in raw_technical_samples[:3]:
-            safe = _safe_bot_incident_sample(raw)
+            safe = sanitize_public_incident(raw)
             if safe is not None:
                 safe_technical_samples.append(safe)
         result["technical_incident_samples"] = safe_technical_samples
@@ -446,7 +484,7 @@ CREATE TABLE matches_{suffix} (
     owner_id        INTEGER REFERENCES users(id) ON DELETE SET NULL,
     contest_id      INTEGER REFERENCES contests(id) ON DELETE SET NULL,
     winner          INTEGER,
-    reason          TEXT    NOT NULL DEFAULT 'completed',
+    reason          TEXT    NOT NULL DEFAULT '',
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
@@ -915,6 +953,44 @@ def _migrate(conn: sqlite3.Connection) -> None:
             # 清理 matches_index 中指向该表的残留定位（表已空）
             conn.execute(
                 "DELETE FROM matches_index WHERE game_id=?", (_gid,)
+            )
+
+    # Active rows do not have an adjudication result yet.  Older schemas filled
+    # `reason='completed'` at INSERT time, and other damaged rows may contain
+    # arbitrary diagnostics. Active rows have no adjudication yet, so clear any
+    # non-empty value. Terminal rows are normalized separately to explicit
+    # completed/error allow-lists below.
+    for _gid in _all_game_ids():
+        _tbl = _matches_table(_gid)
+        if _tbl in tables:
+            conn.execute(
+                f"UPDATE {_tbl} SET reason='' "
+                "WHERE status IN (?,?) AND reason<>''",
+                (STATUS_PENDING, STATUS_RUNNING),
+            )
+            # Retired free-form/admin codes and ``error:<exception>`` strings
+            # must not remain a second public terminal contract. Normalize the
+            # one former admin spelling first, then map every unknown aborted
+            # reason to the stable platform fallback. Completed rows likewise
+            # retain only the explicit game/platform adjudication allow-list.
+            conn.execute(
+                f"UPDATE {_tbl} SET reason='admin_aborted' "
+                "WHERE status=? AND reason='admin-abort'",
+                (STATUS_ABORTED,),
+            )
+            allowed = tuple(sorted(PUBLIC_MATCH_ERROR_REASONS))
+            placeholders = ",".join("?" for _ in allowed)
+            conn.execute(
+                f"UPDATE {_tbl} SET reason=? WHERE status=? "
+                f"AND reason NOT IN ({placeholders})",
+                (PUBLIC_MATCH_ERROR_FALLBACK, STATUS_ABORTED, *allowed),
+            )
+            completed_allowed = tuple(sorted(PUBLIC_MATCH_COMPLETED_REASONS))
+            completed_placeholders = ",".join("?" for _ in completed_allowed)
+            conn.execute(
+                f"UPDATE {_tbl} SET reason='completed' WHERE status=? "
+                f"AND reason NOT IN ({completed_placeholders})",
+                (STATUS_COMPLETED, *completed_allowed),
             )
 
     # ── contest_* 表 bot FK 改 SET NULL + entry 身份列（预赛/决赛 P0：删 bot 不得抹成绩）──
@@ -1530,7 +1606,9 @@ class Store:
         ql = f"%{q.lower()}%" if q else "%"
         with self._tx() as c:
             sel = (
-                "m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
+                "m.id, m.game_id, m.status, m.winner, m.reason, "
+                "m.match_type, m.created_at, "
+                "ba.name AS bot_a_name, bb.name AS bot_b_name, "
                 "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display"
             )
             join_bots = (
@@ -1940,6 +2018,7 @@ class Store:
         # 本方法保持纯 store 行为：直接删，FK ON DELETE SET NULL（matches，保历史）/ CASCADE
         # （contest_pairings）由 DB 处理。管理端须改调 delete_bot_if_safe() 原子判断。
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             if not c.execute("SELECT 1 FROM bots WHERE id=?", (bot_id,)).fetchone():
                 return False
             _delete_social_target(c, "bot", bot_id)
@@ -2334,15 +2413,16 @@ class Store:
         with self._tx() as c:
             c.execute(
                 f"INSERT INTO {tbl}(id, bot_a_id, bot_b_id, owner_id, "
-                "contest_id, match_type, status, game_id, match_config, "
+                "contest_id, reason, match_type, status, game_id, match_config, "
                 "human_user_id, human_seat, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     bot_a_id,
                     bot_b_id,
                     owner_id,
                     contest_id,
+                    "",
                     match_type,
                     "pending",
                     gid,
@@ -2464,6 +2544,7 @@ class Store:
         无清理会导致 like/view 计数静默 drift）。返回是否删到了行。
         """
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return False
@@ -2617,9 +2698,36 @@ class Store:
                 ).fetchone()
             )
 
-    def get_public_replay(self, match_id: str) -> dict | None:
-        """Replay for REST/SSE viewers; internal storage remains unchanged."""
-        return _sanitize_public_replay(self.get_replay(match_id))
+    def get_public_replay(
+        self,
+        match_id: str,
+        *,
+        human_viewer_seat: int | None = None,
+    ) -> dict | None:
+        """Replay for REST/SSE viewers; terminal derives from the match row.
+
+        Read match + replay in one SQLite snapshot so a viewer cannot observe a
+        completed/aborted row paired with a terminal from the previous state.
+        Internal replay storage remains unchanged.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN")
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return None
+            match = _parse_match_json_cols(
+                _row(c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone())
+            )
+            replay = _row(
+                c.execute(
+                    "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
+                ).fetchone()
+            )
+            return _sanitize_public_replay(
+                replay,
+                match,
+                human_viewer_seat=human_viewer_seat,
+            )
 
     # ── ratings（per-game：PK = bot_id + game_id，全面解耦 PR3）─────────
 
@@ -3463,6 +3571,13 @@ class Store:
             ).fetchone() is not None
         raise ValueError(f"不支持的社交目标类型: {target_type!r}")
 
+    @staticmethod
+    def _social_actor_exists_tx(c: sqlite3.Connection, user_id: int) -> bool:
+        """Validate the authenticated actor inside the caller's write lock."""
+        return c.execute(
+            "SELECT 1 FROM users WHERE id=?", (user_id,)
+        ).fetchone() is not None
+
     def social_target_exists(
         self, target_type: str, target_id: str | int
     ) -> bool:
@@ -3478,6 +3593,13 @@ class Store:
         if target_type not in COMMENT_TARGET_TYPES:
             raise ValueError(f"评论不支持目标类型: {target_type!r}")
         with self._tx() as c:
+            # `_tx()` only serializes one Store object.  Acquire SQLite's write
+            # reservation before validating either side so another Store/process
+            # cannot delete the authenticated actor or polymorphic target between
+            # the SELECT and INSERT.
+            c.execute("BEGIN IMMEDIATE")
+            if not self._social_actor_exists_tx(c, user_id):
+                raise LookupError("评论用户不存在")
             if not self._social_target_exists_tx(c, target_type, target_id):
                 raise LookupError("评论目标不存在")
             cur = c.execute(
@@ -3519,6 +3641,7 @@ class Store:
     def delete_comment(self, comment_id: int, user_id: int) -> bool:
         """仅作者或 admin 可删；返回是否删除成功。"""
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             row = c.execute(
                 "SELECT user_id FROM comments WHERE id=?", (comment_id,)
             ).fetchone()
@@ -3536,6 +3659,7 @@ class Store:
     def delete_comment_admin(self, comment_id: int) -> bool:
         """admin 强删任意评论（无视作者）；返回是否删除成功（False=评论不存在）。"""
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             if not c.execute(
                 "SELECT 1 FROM comments WHERE id=?", (comment_id,)
             ).fetchone():
@@ -3567,6 +3691,9 @@ class Store:
             raise ValueError(f"点赞不支持目标类型: {target_type!r}")
         tid = str(target_id)
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._social_actor_exists_tx(c, user_id):
+                raise LookupError("点赞用户不存在")
             if not self._social_target_exists_tx(c, target_type, tid):
                 raise LookupError("点赞目标不存在")
             existing = c.execute(
@@ -3597,6 +3724,9 @@ class Store:
             raise ValueError(f"点赞不支持目标类型: {target_type!r}")
         tid = str(target_id)
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._social_actor_exists_tx(c, user_id):
+                raise LookupError("点赞用户不存在")
             if not self._social_target_exists_tx(c, target_type, tid):
                 raise LookupError("点赞目标不存在")
             cur = c.execute(
@@ -5627,6 +5757,7 @@ class Store:
 
     def delete_user(self, user_id: int) -> bool:
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             if not c.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
                 return False
             _delete_comment_likes_for(c, "user_id=?", (user_id,))

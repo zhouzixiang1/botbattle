@@ -88,6 +88,144 @@ def test_matches_total_filtered_by_status(tmp_path):
     assert both["total"] == 7
 
 
+def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
+    c, store = _app(tmp_path)
+    private = "error:/private/bot_uploads/secret traceback"
+    store.update_match("mg0", status="aborted", reason=private)
+    store.upsert_replay(
+        "mg0",
+        json.dumps(
+            [
+                {"type": "match_start", "game_id": "gomoku"},
+                {"type": "match_end", "winner": 0, "reason": "completed"},
+                {"type": "error", "reason": "version_unavailable", "message": private},
+                {
+                    "type": "error",
+                    "reason": "unknown_private_code",
+                    "message": private,
+                    "path": "/private/bot.bin",
+                },
+            ]
+        ),
+        "[]",
+    )
+
+    listed = c.get("/api/matches?status=aborted&limit=100").json()["matches"]
+    assert next(row for row in listed if row["id"] == "mg0")["reason"] == "platform_error"
+    detail = c.get("/api/matches/mg0").json()
+    assert detail["match"]["reason"] == "platform_error"
+    public_events = json.loads(detail["replay"]["events_json"])
+    assert public_events == [
+        {"type": "match_start", "game_id": "gomoku"},
+        {"type": "error", "reason": "platform_error"},
+    ]
+    assert "/private" not in json.dumps(detail, ensure_ascii=False)
+
+    # Public reads are projections only; the raw historical storage is retained
+    # for administrator log/data repair and is not silently rewritten here.
+    assert private in store.get_replay("mg0")["events_json"]
+
+    # The authoritative match row, not whichever terminal happened to be last
+    # in a historical replay, decides the public outcome. A completed row drops
+    # stale errors and repairs the old winner=null/final_chips terminal shape.
+    store.update_match(
+        "mh0",
+        status="completed",
+        winner=1,
+        reason="completed",
+        result={"deltas": [-5250, 5250]},
+    )
+    store.upsert_replay(
+        "mh0",
+        json.dumps(
+            [
+                {"type": "match_start", "game_id": "holdem"},
+                {"type": "error", "message": private},
+                {
+                    "type": "match_end",
+                    "winner": None,
+                    "reason": None,
+                    "final_chips": [-5250, 5250],
+                },
+            ]
+        ),
+        "[]",
+    )
+    completed = c.get("/api/matches/mh0").json()
+    assert json.loads(completed["replay"]["events_json"]) == [
+        {"type": "match_start", "game_id": "holdem"},
+        {
+            "type": "match_end",
+            "winner": 1,
+            "reason": "completed",
+            "deltas": [-5250, 5250],
+        },
+    ]
+
+    # Active rows never have a terminal reason/event, even if a corrupted old
+    # row/replay contains private text before the startup migration repairs it.
+    source = store.get_match("mh0")
+    store.create_match(
+        "active-private",
+        bot_a_id=source["bot_a_id"],
+        bot_b_id=source["bot_b_id"],
+        owner_id=source["owner_id"],
+        game_id="holdem",
+    )
+    store.update_match(
+        "active-private", status="running", reason=private,
+    )
+    store.upsert_replay(
+        "active-private",
+        json.dumps([{"type": "error", "message": private}]),
+        "[]",
+    )
+    active = c.get("/api/matches/active-private").json()
+    assert active["match"]["reason"] == ""
+    assert json.loads(active["replay"]["events_json"]) == []
+    assert "/private" not in json.dumps(active, ensure_ascii=False)
+
+    # Global match search is a minimal public projection. It must not return the
+    # raw result/match_config blobs or a free-form completed reason.
+    store.update_match(
+        "mh1",
+        status="completed",
+        reason="privateadapterfailure",
+        result={"deltas": [1, -1], "diagnostic": private},
+    )
+    searched = c.get("/api/search?type=matches&q=mh1").json()["matches"]
+    assert len(searched) == 1
+    assert searched[0]["id"] == "mh1"
+    assert searched[0]["reason"] == "completed"
+    assert "result" not in searched[0]
+    assert "match_config" not in searched[0]
+    assert "/private" not in json.dumps(searched, ensure_ascii=False)
+
+    detail = c.get("/api/matches/mh1").json()["match"]
+    assert detail["result"] == {"deltas": [1, -1]}
+    assert "match_config" not in detail
+    listed = c.get("/api/matches?limit=100").json()["matches"]
+    listed_mh1 = next(row for row in listed if row["id"] == "mh1")
+    assert listed_mh1["result"] == {"deltas": [1, -1]}
+    assert "match_config" not in listed_mh1
+    bot_history = c.get(
+        f"/api/bots/{source['bot_a_id']}/matches?limit=100"
+    ).json()["matches"]
+    history_mh1 = next(row for row in bot_history if row["id"] == "mh1")
+    assert history_mh1["result"] == {"deltas": [1, -1]}
+    assert "match_config" not in history_mh1
+    assert "/private" not in json.dumps(
+        {"detail": detail, "listed": listed_mh1, "history": history_mh1},
+        ensure_ascii=False,
+    )
+
+    store.update_match("mh2", status="completed", reason="内部异常路径")
+    chinese_private = c.get("/api/matches/mh2").json()
+    assert chinese_private["match"]["reason"] == "completed"
+    assert json.loads(chinese_private["replay"]["events_json"])[-1]["reason"] == "completed"
+    assert "内部异常路径" not in json.dumps(chinese_private, ensure_ascii=False)
+
+
 def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
     c, store = _app(tmp_path)
     # Historical completed bug: result already has the authoritative 70-count,

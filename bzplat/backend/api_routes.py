@@ -60,6 +60,7 @@ from bzplat.backend.store.schema import (
     STATUS_COMPLETED,
     is_supported_binary_metadata,
 )
+from bzplat.backend.store.public_contract import sanitize_public_match
 router = APIRouter()
 
 
@@ -147,13 +148,18 @@ def _with_seat_info(m: dict, store=None) -> dict:
     """观赛座位身份：委托 matches.seat_info（人类座改写真人用户名）。"""
     from bzplat.backend.matches.seat_info import with_seat_info
 
+    public_match = sanitize_public_match(m) or m
     human_user = None
-    if store is not None and m and m.get("match_type") == "human" and m.get("human_user_id") is not None:
+    if store is not None and public_match and public_match.get("match_type") == "human" and public_match.get("human_user_id") is not None:
         try:
-            human_user = store.get_user(int(m["human_user_id"]))
+            human_user = store.get_user(int(public_match["human_user_id"]))
         except Exception:
             human_user = None
-    return with_seat_info(m, human_user=human_user) or m
+    return with_seat_info(public_match, human_user=human_user) or public_match
+
+
+def _public_match_rows(rows: list[dict]) -> list[dict]:
+    return [sanitize_public_match(row) or row for row in rows]
 
 
 # ── bots ──────────────────────────────────────────────────────
@@ -390,7 +396,11 @@ def global_search(
             ]
         }
     if t == "matches":
-        return {"matches": store.search_matches(ql, limit=lim, game_id=game_id)}
+        return {
+            "matches": _public_match_rows(
+                store.search_matches(ql, limit=lim, game_id=game_id)
+            )
+        }
     # 默认 users
     return {"users": store.search_users(ql, limit=lim)}
 
@@ -453,11 +463,15 @@ def bot_matches(
     if page is not None:
         pp = max(1, min(200, per_page))
         off = (max(1, page) - 1) * pp
-        rows = store.list_matches(limit=pp, offset=off, bot_id=bot_id)
+        rows = _public_match_rows(
+            store.list_matches(limit=pp, offset=off, bot_id=bot_id)
+        )
         total = store.count_bot_matches(bot_id)
         return {"matches": rows, "page": max(1, page), "per_page": pp, "total": total}
-    rows = store.list_matches(
-        bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
+    rows = _public_match_rows(
+        store.list_matches(
+            bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
+        )
     )
     return {"matches": rows}
 
@@ -811,18 +825,26 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     m = store.get_match(match_id)
     if not user or not m or m.get("human_user_id") != user["id"]:
         await websocket.accept()
-        await websocket.send_json({"type": "error", "message": "无权访问该对局"})
+        await websocket.send_json({
+            "type": "reject",
+            "reason": "forbidden",
+            "message": "无权访问该对局",
+        })
         await websocket.close()
         return
     await websocket.accept()
     # subscribe 入队一条带 seats 与完整回放的权威 snapshot；pump 随即发送。
     # 不在路由重复发送，否则每次连接都会收到两份相同快照，造成前端重复归约。
-    q = orch.subscribe(match_id)
     human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
+    q = orch.subscribe(match_id, human_viewer_seat=human_seat)
     try:
         protocol = game_registry.get(m.get("game_id")).protocol
     except KeyError:
-        await websocket.send_json({"type": "error", "message": "对局游戏协议不存在"})
+        await websocket.send_json({
+            "type": "reject",
+            "reason": "invalid_game_id",
+            "message": "对局游戏协议不存在",
+        })
         await websocket.close()
         orch.unsubscribe(match_id, q)
         return
@@ -898,12 +920,14 @@ def list_matches(
     store = _store(request)
     lim = max(1, min(limit, 100))
     off = max(0, offset)
-    rows = store.list_matches(
-        status=status,
-        game_id=game_id,
-        has_technical_incidents=has_technical_incidents,
-        limit=lim,
-        offset=off,
+    rows = _public_match_rows(
+        store.list_matches(
+            status=status,
+            game_id=game_id,
+            has_technical_incidents=has_technical_incidents,
+            limit=lim,
+            offset=off,
+        )
     )
     # 裁列表响应死字段（对抗审计：started_at/ended_at/human_user_id/human_seat/
     # likes_count/views_count/owner_id 列表不消费；
@@ -925,7 +949,7 @@ def list_matches(
 def liked_top_matches(request: Request, limit: int = 10):
     """对局点赞排行榜（对标 Botzone，首页用）。必须在 {match_id} 路由前注册。"""
     store = _store(request)
-    return {"matches": store.list_liked_top_matches(limit)}
+    return {"matches": _public_match_rows(store.list_liked_top_matches(limit))}
 
 
 @router.get("/api/matches/{match_id}")
@@ -1998,44 +2022,62 @@ def admin_revoke_sessions(
 # ── admin: matches ─────────────────────────────────────────────
 
 class AdminMatchPatch(BaseModel):
+    model_config = {"extra": "forbid"}
     status: str | None = None
-    reason: str | None = None
 
 
 @router.patch("/api/admin/matches/{match_id}")
 async def admin_patch_match(
-    match_id: str, body: AdminMatchPatch, request: Request, _admin=Depends(require_admin)
+    match_id: str, body: AdminMatchPatch, request: Request, admin=Depends(require_admin)
 ):
-    """管理员强制修正对局状态（如中止卡住的对局）。"""
-    fields: dict[str, Any] = {}
-    if body.status is not None:
-        if body.status not in ("pending", "running", "completed", "aborted"):
-            raise HTTPException(400, "非法对局状态")
-        # 活跃对局的生命周期由 orchestrator/runner 独占。后台若直接把 running
-        # 改成 pending/completed，正在运行的 task 仍会继续并再次覆写结果、评分和
-        # 赛事回调；pending/running 也不能作为“手工修复”入口伪造。管理员唯一
-        # 支持的状态动作是经 abort_match cancel + drain 后中止。
-        if body.status != "aborted":
-            raise HTTPException(409, "管理员仅可中止对局，不能手工伪造运行或完成状态")
-        fields["status"] = body.status
-    if body.reason is not None:
-        fields["reason"] = body.reason
-    if not fields:
+    """管理员只能经编排器中止活跃对局；原因固定为 admin_aborted。"""
+    if body.status is None:
         raise HTTPException(400, "无更新字段")
-    if body.status == "aborted":
-        try:
-            match = await _orch(request).abort_match(
-                match_id, reason=body.reason or "admin_aborted"
-            )
-        except ValueError as exc:
-            code = 404 if "不存在" in str(exc) else 409
-            raise HTTPException(code, str(exc)) from exc
-        return {"match": match}
-    before = _store(request).get_match(match_id)
-    if not before:
-        raise HTTPException(404, "对局不存在")
-    m = _store(request).update_match(match_id, **fields)
-    return {"match": m}
+    # 活跃对局的生命周期由 orchestrator/runner 独占。后台不能伪造
+    # pending/running/completed，也不能让客户端注入第二套自由 reason。
+    if body.status != "aborted":
+        audit_log(
+            request,
+            "admin_abort_match",
+            result="fail",
+            user=admin.get("username"),
+            target=match_id,
+            detail=f"unsupported_status={body.status}",
+        )
+        raise HTTPException(409, "管理员仅可中止对局，不能手工伪造运行或完成状态")
+    try:
+        match = await _orch(request).abort_match(match_id)
+    except ValueError as exc:
+        audit_log(
+            request,
+            "admin_abort_match",
+            result="fail",
+            user=admin.get("username"),
+            target=match_id,
+            detail=str(exc),
+        )
+        code = 404 if "不存在" in str(exc) else 409
+        raise HTTPException(code, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("admin abort failed match=%s", match_id)
+        audit_log(
+            request,
+            "admin_abort_match",
+            result="fail",
+            user=admin.get("username"),
+            target=match_id,
+            detail="internal_error",
+        )
+        raise HTTPException(500, "中止对局失败") from exc
+    audit_log(
+        request,
+        "admin_abort_match",
+        result="ok",
+        user=admin.get("username"),
+        target=match_id,
+        detail=f"reason={match.get('reason') or 'platform_error'}",
+    )
+    return {"match": match}
 
 
 # ── admin: bots ───────────────────────────────────────────────

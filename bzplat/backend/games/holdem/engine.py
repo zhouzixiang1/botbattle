@@ -409,7 +409,7 @@ class MatchSession:
                 if "call" in allowed:
                     return Holdem.CALL, "call", to_call
                 if "allin" in allowed and to_call >= chips:
-                    return Holdem.ALLIN, "allin", chips
+                    return Holdem.ALLIN, "allin", street_bet + chips
                 return Holdem.FOLD, "fold", 0
             return Holdem.CALL, "check", 0  # check = call(0) in judge
 
@@ -418,16 +418,16 @@ class MatchSession:
                 if "check" in allowed:
                     return Holdem.CALL, "check", 0
                 if "allin" in allowed and to_call >= chips:
-                    return Holdem.ALLIN, "allin", chips
+                    return Holdem.ALLIN, "allin", street_bet + chips
                 return Holdem.FOLD, "fold", 0
             return Holdem.CALL, "call", to_call
 
         if action == "allin":
             if "allin" not in allowed and "raise" not in allowed:
                 if to_call > 0 and chips > 0:
-                    return Holdem.ALLIN, "allin", chips
+                    return Holdem.ALLIN, "allin", street_bet + chips
                 return Holdem.FOLD, "fold", 0
-            return Holdem.ALLIN, "allin", chips
+            return Holdem.ALLIN, "allin", street_bet + chips
 
         if action == "raise":
             if x is None:
@@ -439,7 +439,7 @@ class MatchSession:
             max_to = legal["max_raise_to"]
             min_to = legal["min_raise_to"]
             if raise_to >= max_to:
-                return Holdem.ALLIN, "allin", chips  # treat as all-in
+                return Holdem.ALLIN, "allin", street_bet + chips  # raise-to total
             if raise_to < min_to:
                 return Holdem.FOLD, "fold", 0
             if raise_to <= legal["current_bet"]:

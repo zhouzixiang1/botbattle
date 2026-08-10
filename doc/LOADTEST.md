@@ -44,8 +44,10 @@ python scripts/load_test.py \
 - 所有账号/Bot 名均 `load_` 前缀、邮箱 `@loadtest.local`，可一键识别清理；**不动既有非 load 数据**。
 - seed **幂等且 fail-closed**：已有账号只有在 namespace、精确用户名、邮箱、角色、
   固定密码全部匹配时才可复用并激活/验证；冲突会在任何用户/Bot/session 写入前失败。
-  Bot 幂等性按当前样例 ELF 的 checksum、大小、平台元数据与磁盘内容判断：完全一致才复用，
-  样例变化或文件漂移会为专用 QA Bot 发布并激活新版本。文件只写隔离 DB 旁的 uploads。
+  Bot 幂等性还要求当前版本精确位于本实例
+  `upload_root/<bot_id>/vN/bot.bin`、具备执行位，且 `bots` 镜像与版本元数据一致；只有
+  checksum、大小、平台元数据、磁盘内容和上述归属全部一致才复用。样例变化、复制库外部路径、
+  权限或镜像漂移都会在 per-Bot 锁内发布并激活当前隔离目录的新版本。
 - `--skip-seed` 同样重新验证全部账号，并要求其已激活、已验证；验证完成前不会给任何
   用户（尤其是管理员）签发新 session。
 
@@ -73,7 +75,7 @@ python scripts/load_test.py \
 
 `bzplat/backend/tests/test_load_test_seed.py` 是 `seed()` 的纯单测（不依赖运行服务）：
 
-- 幂等：样例内容不变时 seed 跑两次用户/Bot/版本数不变；样例或现有文件不一致时只新增并激活一个正确版本
+- 幂等：同一隔离 upload root 且路径/权限/元数据/镜像/内容全部一致时重复 seed 不增版本；跨 root、无执行位、样例或 bots 镜像漂移时只新增并激活一个当前实例的正确版本
 - token 是 sessions 表合法行（可 `get_session` 验证）
 - 用户名/Bot 名均 `load_` 前缀
 - 每个 bot 有 rating 行（Glicko 默认 1500）
