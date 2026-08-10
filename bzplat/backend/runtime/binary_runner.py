@@ -43,6 +43,7 @@ _DOCKER_INSPECT_TIMEOUT_SEC = 15.0
 _STDERR_DRAIN_GRACE_SEC = 0.5
 _AUTO_EXECUTION_LABEL = "bzplat.auto_execution"
 _AUTO_EXECUTION_CLEANUP_POLLS = 6
+_AUTO_EXECUTION_CLEANUP_ZERO_POLLS = 2
 _AUTO_EXECUTION_VISIBILITY_POLL_SEC = 0.05
 _IMAGE_READY_LOCK = threading.Lock()
 _IMAGE_READY_KEYS: set[tuple[str, str]] = set()
@@ -61,9 +62,14 @@ class ExecutionScope:
     token: str
     launch_lock_path: str
     fence_check: Callable[[], None]
+    recovery_mark: Callable[[str], None] | None = None
 
     def assert_current(self) -> None:
         self.fence_check()
+
+    def mark_recovery_pending(self, reason: str) -> None:
+        if self.recovery_mark is not None:
+            self.recovery_mark(reason)
 
     @asynccontextmanager
     async def launch_guard(self) -> AsyncIterator[None]:
@@ -645,9 +651,34 @@ class BinaryRunner:
             return
         while True:
             if session.proc.returncode is not None:
-                # The CLI failed/exited before a persistent container became
-                # visible.  No future daemon creation can be initiated by it.
-                return
+                # CLI exit alone is not proof: the daemon may already have
+                # accepted the create request.  Still under the launch flock,
+                # clean by the exact scope and require a zero-container proof.
+                # Remove by the exact deterministic name first (covers a
+                # container whose label query has not become observable yet),
+                # then also sweep by immutable scope label.
+                try:
+                    await asyncio.to_thread(
+                        _docker_control_command,
+                        [self._docker_bin, "rm", "-f", session.container_name],
+                        timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+                        timeout_message="Docker 延迟启动容器清理超时",
+                    )
+                except PlatformRunnerError:
+                    pass
+                cleanup = await self._force_stop_execution_unlocked(
+                    scope.token,
+                    execution_backend="docker",
+                    allow_local_ack=True,
+                )
+                if cleanup.get("confirmed"):
+                    return
+                reason = str(
+                    cleanup.get("reason")
+                    or "Docker CLI 退出后无法确认执行范围已清理"
+                )
+                scope.mark_recovery_pending(reason)
+                raise PlatformRunnerError(reason)
             try:
                 visible_scope = await self._docker_container_execution_label(
                     session.container_name
@@ -765,7 +796,7 @@ class BinaryRunner:
         return raw.decode("utf-8", errors="replace").rstrip("\r\n") or None
 
     async def stop_session(self, session_id: str) -> None:
-        session = self._sessions.pop(session_id, None)
+        session = self._sessions.get(session_id)
         if not session:
             return
         # 取消 stderr drain 任务
@@ -797,6 +828,7 @@ class BinaryRunner:
                 await cleanup.wait()
             except Exception:
                 logger.debug("docker rm failed", exc_info=True)
+        self._sessions.pop(session_id, None)
 
     async def _docker_execution_container_ids(self, token: str) -> list[str]:
         result = await asyncio.to_thread(
@@ -836,68 +868,94 @@ class BinaryRunner:
                 "reason": "未知执行后端，无法确认清理",
             }
         async with _execution_file_lock(launch_lock_path):
-            matching = [
+            return await self._force_stop_execution_unlocked(
+                token,
+                execution_backend=execution_backend,
+                allow_local_ack=allow_local_ack,
+            )
+
+    async def _force_stop_execution_unlocked(
+        self,
+        token: str,
+        *,
+        execution_backend: str,
+        allow_local_ack: bool,
+    ) -> dict[str, object]:
+        """Cleanup implementation; caller must hold the per-database flock."""
+        matching = [
                 sid
                 for sid, session in list(self._sessions.items())
                 if session.execution_scope is not None
                 and session.execution_scope.token == token
-            ]
-            for sid in matching:
+        ]
+        for sid in matching:
+            try:
                 await self.stop_session(sid)
+            except Exception as exc:
+                return {
+                    "confirmed": False,
+                    "backend": execution_backend,
+                    "reason": f"执行会话停止失败（{type(exc).__name__}）",
+                }
 
-            if execution_backend == "local":
-                if not allow_local_ack:
+        if execution_backend == "local":
+            if not allow_local_ack:
+                return {
+                    "confirmed": False,
+                    "backend": "local",
+                    "reason": "本地模式无法跨进程确认旧 Bot 已退出",
+                }
+            remaining = any(
+                session.execution_scope is not None
+                and session.execution_scope.token == token
+                for session in self._sessions.values()
+            )
+            return {
+                "confirmed": not remaining,
+                "backend": "local",
+                "reason": "" if not remaining else "本地 Bot 会话仍在运行",
+            }
+
+        try:
+            ids = await self._docker_execution_container_ids(token)
+            if ids:
+                removed = await asyncio.to_thread(
+                    _docker_control_command,
+                    [self._docker_bin, "rm", "-f", *ids],
+                    timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+                    timeout_message="Docker 执行隔离清理超时",
+                )
+                if removed.returncode != 0:
                     return {
                         "confirmed": False,
-                        "backend": "local",
-                        "reason": "本地模式无法跨进程确认旧 Bot 已退出",
+                        "backend": "docker",
+                        "reason": "Docker 执行隔离清理失败",
                     }
-                remaining = any(
-                    session.execution_scope is not None
-                    and session.execution_scope.token == token
-                    for session in self._sessions.values()
-                )
-                return {
-                    "confirmed": not remaining,
-                    "backend": "local",
-                    "reason": "" if not remaining else "本地 Bot 会话仍在运行",
-                }
-
-            try:
-                ids = await self._docker_execution_container_ids(token)
-                if ids:
-                    removed = await asyncio.to_thread(
-                        _docker_control_command,
-                        [self._docker_bin, "rm", "-f", *ids],
-                        timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
-                        timeout_message="Docker 执行隔离清理超时",
-                    )
-                    if removed.returncode != 0:
-                        return {
-                            "confirmed": False,
-                            "backend": "docker",
-                            "reason": "Docker 执行隔离清理失败",
-                        }
-                # A successful ``docker rm`` is not the acknowledgement.  Re-query
-                # the label until the daemon proves the scope has zero containers.
-                for attempt in range(_AUTO_EXECUTION_CLEANUP_POLLS):
-                    remaining = await self._docker_execution_container_ids(token)
-                    if not remaining:
+            # A successful ``docker rm`` is not the acknowledgement.  Re-query
+            # the label until the daemon proves the scope has zero containers.
+            zero_polls = 0
+            for attempt in range(_AUTO_EXECUTION_CLEANUP_POLLS):
+                remaining = await self._docker_execution_container_ids(token)
+                if not remaining:
+                    zero_polls += 1
+                    if zero_polls >= _AUTO_EXECUTION_CLEANUP_ZERO_POLLS:
                         return {"confirmed": True, "backend": "docker", "reason": ""}
-                    if attempt + 1 < _AUTO_EXECUTION_CLEANUP_POLLS:
-                        await asyncio.sleep(0.05)
-                return {
-                    "confirmed": False,
-                    "backend": "docker",
-                    "reason": "Docker 执行隔离清理后仍有容器存活",
-                }
-            except PlatformRunnerError as exc:
-                logger.error("auto execution cleanup failed token=%s error=%s", token, exc)
-                return {
-                    "confirmed": False,
-                    "backend": "docker",
-                    "reason": str(exc),
-                }
+                else:
+                    zero_polls = 0
+                if attempt + 1 < _AUTO_EXECUTION_CLEANUP_POLLS:
+                    await asyncio.sleep(0.05)
+            return {
+                "confirmed": False,
+                "backend": "docker",
+                "reason": "Docker 执行隔离清理后仍有容器存活",
+            }
+        except PlatformRunnerError as exc:
+            logger.error("auto execution cleanup failed token=%s error=%s", token, exc)
+            return {
+                "confirmed": False,
+                "backend": "docker",
+                "reason": str(exc),
+            }
 
 
 def _classify_container_platform_exit(

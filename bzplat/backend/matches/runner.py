@@ -442,6 +442,35 @@ class MatchRunner:
             allow_local_ack=allow_local_ack,
         )
 
+    async def _close_execution_sessions(
+        self,
+        session_ids: tuple[str, ...],
+        execution_scope: ExecutionScope | None,
+    ) -> None:
+        """Stop every session and prove a scoped execution has no worker left."""
+        first_error: BaseException | None = None
+        for session_id in session_ids:
+            try:
+                await self.runner.stop_session(session_id)
+            except BaseException as exc:  # cleanup must continue for the other seat
+                if first_error is None:
+                    first_error = exc
+        if execution_scope is not None:
+            result = await self.force_stop_execution(
+                execution_scope.token,
+                launch_lock_path=execution_scope.launch_lock_path,
+                execution_backend=self.execution_backend,
+                allow_local_ack=True,
+            )
+            if not result.get("confirmed"):
+                reason = str(
+                    result.get("reason") or "无法确认自动对局执行单元已停止"
+                )
+                execution_scope.mark_recovery_pending(reason)
+                raise PlatformRunnerError(reason)
+        if first_error is not None:
+            raise first_error
+
     async def run_binaries(
         self,
         path_a: str,
@@ -487,7 +516,7 @@ class MatchRunner:
                 execution_scope=execution_scope,
             )
         except BaseException:
-            await self.runner.stop_session(sid_a)
+            await self._close_execution_sessions((sid_a,), execution_scope)
             raise
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
@@ -557,8 +586,9 @@ class MatchRunner:
                 gid, decide, on_event=on_event, rng=rng, **match_params,
             )
         finally:
-            await self.runner.stop_session(sid_a)
-            await self.runner.stop_session(sid_b)
+            await self._close_execution_sessions(
+                (sid_a, sid_b), execution_scope
+            )
 
     async def run_bot_vs_human(
         self,
@@ -794,7 +824,7 @@ class MatchRunner:
                 execution_scope=execution_scope,
             )
         except BaseException:
-            await self.runner.stop_session(sid_a)
+            await self._close_execution_sessions((sid_a,), execution_scope)
             raise
         gid = normalize_game_id(game_id)
         try:
@@ -859,8 +889,9 @@ class MatchRunner:
                     leg_winner = None  # 平局
                 leg_results.append({"winner": leg_winner, "deltas": list(leg_deltas)})
         finally:
-            await self.runner.stop_session(sid_a)
-            await self.runner.stop_session(sid_b)
+            await self._close_execution_sessions(
+                (sid_a, sid_b), execution_scope
+            )
         # 构造结果：首 leg 结构 + legs 字段（每 leg 独立胜负）+ 累加 deltas（tiebreak 用）
         if final_result is not None:
             try:

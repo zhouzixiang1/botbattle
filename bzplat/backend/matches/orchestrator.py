@@ -1282,10 +1282,20 @@ class MatchOrchestrator:
                     scope_token,
                 )
 
+            def mark_execution_recovery(reason: str) -> None:
+                self.store.mark_auto_match_execution_recovery_pending(
+                    match_id,
+                    auto_fence[0],
+                    auto_fence[1],
+                    scope_token,
+                    reason,
+                )
+
             execution_scope = ExecutionScope(
                 token=scope_token,
                 launch_lock_path=self.store.auto_match_execution_launch_lock_path,
                 fence_check=assert_execution_current,
+                recovery_mark=mark_execution_recovery,
             )
         want_duplicate = bool(stored_mc.get("duplicate"))
         if want_duplicate and spec.build_match_plan is None:

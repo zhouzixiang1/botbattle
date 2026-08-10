@@ -3860,6 +3860,47 @@ class Store:
                     f"auto-match execution scope lost for match {match_id}"
                 )
 
+    def mark_auto_match_execution_recovery_pending(
+        self,
+        match_id: str,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
+        execution_scope: str,
+        reason: str,
+    ) -> None:
+        """Fail closed when the original worker cannot prove sandbox cleanup."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = self._require_auto_match_fence_tx(
+                c,
+                match_id,
+                dispatcher_token,
+                dispatcher_epoch,
+                require_claim_fence=True,
+            )
+            if str(row["execution_scope"] or "") != execution_scope:
+                raise AutoMatchFenceLost(
+                    f"auto-match execution scope lost for match {match_id}"
+                )
+            message = str(reason or "execution cleanup not confirmed")[:500]
+            requested_at = _now()
+            changed = c.execute(
+                "UPDATE auto_match_queue SET execution_state='recovery_pending',"
+                "cleanup_requested_at=?,cleanup_ack_at=NULL,cleanup_error=? "
+                "WHERE id=? AND execution_state IN ('claimed','running')",
+                (requested_at, message, int(row["id"])),
+            )
+            if changed.rowcount != 1:
+                raise AutoMatchFenceLost(
+                    f"auto-match execution recovery CAS lost for match {match_id}"
+                )
+            c.execute(
+                "UPDATE auto_match_decisions SET execution_state='recovery_pending',"
+                "cleanup_requested_at=?,cleanup_ack_at=NULL,cleanup_error=? "
+                "WHERE id=? AND lifecycle='dispatched'",
+                (requested_at, message, int(row["decision_id"])),
+            )
+
     def acquire_auto_match_dispatcher(
         self, dispatcher_token: str, *, lease_seconds: int = 30
     ) -> dict:

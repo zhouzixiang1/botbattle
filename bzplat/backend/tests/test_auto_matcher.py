@@ -10,12 +10,14 @@ import pytest
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
+from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime import binary_runner as binary_runtime
 from bzplat.backend.runtime.binary_runner import (
     BinaryInfo,
     BinaryRunner,
     BotSession,
     ExecutionScope,
+    PlatformRunnerError,
 )
 from bzplat.backend.store import (
     AutoMatchFenceLost,
@@ -544,9 +546,10 @@ def test_takeover_retains_global_slot_until_physical_cleanup_ack(store: Store):
         dispatcher_token=token_a,
         dispatcher_epoch=epoch_a,
     )
-    assert store.claim_next_auto_match(
+    claimed = store.claim_next_auto_match(
         "fenced-match", dispatcher_token=token_a, dispatcher_epoch=epoch_a
-    )["outcome"] == "claimed"
+    )
+    assert claimed["outcome"] == "claimed"
     store.update_match(
         "fenced-match",
         auto_dispatcher_token=token_a,
@@ -554,6 +557,16 @@ def test_takeover_retains_global_slot_until_physical_cleanup_ack(store: Store):
         status="running",
         started_at="2026-08-10T12:00:00",
     )
+    store.mark_auto_match_execution_recovery_pending(
+        "fenced-match",
+        token_a,
+        epoch_a,
+        claimed["execution_scope"],
+        "normal cleanup not confirmed",
+    )
+    assert store.reconcile_auto_match_queue(
+        dispatcher_token=token_a, dispatcher_epoch=epoch_a
+    )["recovery_pending"] == 1
     with store._tx() as conn:
         conn.execute(
             "UPDATE auto_match_dispatcher SET lease_until='2000-01-01T00:00:00' "
@@ -646,6 +659,7 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
     cli_spawned = asyncio.Event()
     label_visible = asyncio.Event()
     lock_path = str(tmp_path / "auto-launch.lock")
+    recovery_reasons: list[str] = []
 
     def assert_fence() -> None:
         if not fence_current:
@@ -655,6 +669,7 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         token="scope-a",
         launch_lock_path=lock_path,
         fence_check=assert_fence,
+        recovery_mark=recovery_reasons.append,
     )
     runner = BinaryRunner(prefer_local=False)
     binary_path = tmp_path / "bot"
@@ -726,6 +741,24 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         with pytest.raises(AutoMatchFenceLost):
             async with scope.launch_guard():
                 raise AssertionError("stale worker must not enter spawn section")
+
+        # Normal (non-takeover) terminal cleanup must also prove scope=0.
+        # Otherwise it marks durable recovery before surfacing platform_error,
+        # so queue reconciliation cannot release the dispatched barrier.
+        active_containers.append("leftover-container")
+
+        def failed_remove(_args, **_kwargs):
+            class Result:
+                returncode = 1
+
+            return Result()
+
+        monkeypatch.setattr(binary_runtime, "_docker_control_command", failed_remove)
+        with pytest.raises(PlatformRunnerError):
+            await MatchRunner(runner)._close_execution_sessions(
+                ("already-closed",), scope
+            )
+        assert recovery_reasons
 
     asyncio.run(exercise())
 
