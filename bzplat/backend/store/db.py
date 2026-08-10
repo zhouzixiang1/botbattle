@@ -6337,41 +6337,85 @@ class Store:
             def one(sql: str, *p: Any) -> int:
                 return int(c.execute(sql, p).fetchone()[0])
 
+            def visible_user(column: str) -> str:
+                return (
+                    "NOT EXISTS (SELECT 1 FROM contests sc "
+                    f"WHERE sc.showcase_key IS NOT NULL AND sc.organizer_id={column}) "
+                    "AND NOT EXISTS (SELECT 1 FROM contest_entries sce "
+                    "JOIN contests sc ON sc.id=sce.contest_id "
+                    f"WHERE sc.showcase_key IS NOT NULL AND sce.user_id={column})"
+                )
+
+            def visible_bot(column: str) -> str:
+                return (
+                    "NOT EXISTS (SELECT 1 FROM contest_entries sce "
+                    "JOIN contests sc ON sc.id=sce.contest_id "
+                    f"WHERE sc.showcase_key IS NOT NULL AND sce.bot_id={column}) "
+                    "AND NOT EXISTS (SELECT 1 FROM contest_pairings scp "
+                    "JOIN contests sc ON sc.id=scp.contest_id "
+                    "WHERE sc.showcase_key IS NOT NULL "
+                    f"AND (scp.bot_a_id={column} OR scp.bot_b_id={column}))"
+                )
+
+            match_visible = (
+                "NOT EXISTS (SELECT 1 FROM contests sc "
+                "WHERE sc.id=m.contest_id AND sc.showcase_key IS NOT NULL)"
+            )
+
             def match_count(status: str | None = None) -> int:
                 """跨三表统计对局数（可选 status 过滤）。"""
                 total = 0
                 for gid in _all_game_ids():
                     tbl = _matches_table(gid)
                     if status:
-                        total += one(f"SELECT COUNT(*) FROM {tbl} WHERE status=?", status)
+                        total += one(
+                            f"SELECT COUNT(*) FROM {tbl} m "
+                            f"WHERE {match_visible} AND m.status=?",
+                            status,
+                        )
                     else:
-                        total += one(f"SELECT COUNT(*) FROM {tbl}")
+                        total += one(
+                            f"SELECT COUNT(*) FROM {tbl} m WHERE {match_visible}"
+                        )
                 return total
 
             stats = {
-                "users": one("SELECT COUNT(*) FROM users"),
-                "users_active": one("SELECT COUNT(*) FROM users WHERE is_active=1"),
-                "users_verified": one("SELECT COUNT(*) FROM users WHERE email_verified=1"),
-                "bots": one("SELECT COUNT(*) FROM bots"),
-                "bots_active": one("SELECT COUNT(*) FROM bots WHERE is_active=1"),
+                "users": one(f"SELECT COUNT(*) FROM users u WHERE {visible_user('u.id')}"),
+                "users_active": one(
+                    f"SELECT COUNT(*) FROM users u WHERE u.is_active=1 "
+                    f"AND {visible_user('u.id')}"
+                ),
+                "users_verified": one(
+                    f"SELECT COUNT(*) FROM users u WHERE u.email_verified=1 "
+                    f"AND {visible_user('u.id')}"
+                ),
+                "bots": one(f"SELECT COUNT(*) FROM bots b WHERE {visible_bot('b.id')}"),
+                "bots_active": one(
+                    f"SELECT COUNT(*) FROM bots b WHERE b.is_active=1 "
+                    f"AND {visible_bot('b.id')}"
+                ),
                 "matches": match_count(),
                 "matches_completed": match_count("completed"),
                 "matches_aborted": match_count("aborted"),
                 "matches_running": match_count("running"),
                 "matches_pending": match_count("pending"),
-                "contests": one("SELECT COUNT(*) FROM contests"),
+                "contests": one(
+                    "SELECT COUNT(*) FROM contests WHERE showcase_key IS NULL"
+                ),
                 "contests_running": one(
                     "SELECT COUNT(*) FROM contests "
                     "WHERE status='running' AND showcase_key IS NULL"
                 ),
                 "active_sessions": one(
-                    "SELECT COUNT(*) FROM sessions WHERE expires_at > ?",
+                    f"SELECT COUNT(*) FROM sessions s WHERE s.expires_at > ? "
+                    f"AND {visible_user('s.user_id')}",
                     _now(),
                 ),
             }
             # 按对局状态分组（跨三表 UNION ALL 再聚合）
             subs = [
-                f"SELECT status, COUNT(*) AS n FROM {_matches_table(gid)} GROUP BY status"
+                f"SELECT m.status, COUNT(*) AS n FROM {_matches_table(gid)} m "
+                f"WHERE {match_visible} GROUP BY m.status"
                 for gid in _all_game_ids()
             ]
             rows = c.execute(
@@ -6382,8 +6426,9 @@ class Store:
             # 最近 7 天每日新对局数（跨三表）
             subs_recent = [
                 f"SELECT substr(created_at,1,10) AS d, COUNT(*) AS n "
-                f"FROM {_matches_table(gid)} WHERE created_at >= date('now','-7 days') "
-                "GROUP BY substr(created_at,1,10)"
+                f"FROM {_matches_table(gid)} m "
+                f"WHERE m.created_at >= date('now','-7 days') AND {match_visible} "
+                "GROUP BY substr(m.created_at,1,10)"
                 for gid in _all_game_ids()
             ]
             recent = c.execute(
@@ -6395,8 +6440,9 @@ class Store:
             ]
             # 最近 5 个用户
             recent_users = c.execute(
-                "SELECT id, username, email, role, created_at FROM users "
-                "ORDER BY created_at DESC LIMIT 5"
+                "SELECT u.id, u.username, u.email, u.role, u.created_at FROM users u "
+                f"WHERE {visible_user('u.id')} "
+                "ORDER BY u.created_at DESC LIMIT 5"
             ).fetchall()
             stats["recent_users"] = [_row(r) for r in recent_users]
             return stats

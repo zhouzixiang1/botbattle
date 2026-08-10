@@ -108,6 +108,15 @@ def build_stage_summaries(
     persisted_by_stage: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in manager.store.list_stage_results(int(contest["id"])):
         persisted_by_stage[int(row.get("stage_idx") or 0)].append(row)
+    persisted_bot_ids = {
+        int(row["bot_id"])
+        for stage_rows in persisted_by_stage.values()
+        for row in stage_rows
+        if row.get("bot_id") is not None
+    }
+    persisted_bots = {
+        bot_id: manager.store.get_bot(bot_id) for bot_id in persisted_bot_ids
+    }
 
     result: list[dict[str, Any]] = []
     for stage_idx, stage in enumerate(stages):
@@ -130,11 +139,27 @@ def build_stage_summaries(
             if entry_id is None or int(entry_id) not in participant_ids:
                 continue
             entry = entry_by_id.get(int(entry_id), {})
+            if source == "persisted":
+                historical_bot_id = source_row.get("bot_id")
+                historical_bot = (
+                    persisted_bots.get(int(historical_bot_id))
+                    if historical_bot_id is not None
+                    else None
+                )
+                bot_id = historical_bot_id
+                bot_name = (
+                    historical_bot.get("display_name")
+                    or historical_bot.get("name")
+                    or "历史 Bot"
+                ) if historical_bot else "历史 Bot（已删除）"
+            else:
+                bot_id = entry.get("bot_id")
+                bot_name = entry.get("bot_display") or entry.get("bot_name")
             rows.append(
                 {
                     "entry_id": int(entry_id),
-                    "bot_id": source_row.get("bot_id") or entry.get("bot_id"),
-                    "bot_name": entry.get("bot_display") or entry.get("bot_name"),
+                    "bot_id": bot_id,
+                    "bot_name": bot_name,
                     "owner_name": entry.get("owner_name") or entry.get("username"),
                     "owner_display": entry.get("owner_display"),
                     "points": float(source_row.get("points") or 0),

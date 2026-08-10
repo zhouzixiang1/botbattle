@@ -28,6 +28,7 @@ from bzplat.backend.contests.showcase_seed import (  # noqa: E402
     ShowcaseSeedError,
     rollback_showcases,
     seed_showcases,
+    validate_showcase_upload_target,
     verify_showcases,
 )
 from bzplat.backend.qa_safety import primary_checkout_root  # noqa: E402
@@ -126,11 +127,9 @@ def main() -> int:
             if args.upload_root
             else db_path.parent / "bot_uploads_showcase"
         )
-        if not upload_root.is_absolute():
-            raise ShowcaseSeedError("--upload-root 必须使用绝对路径")
-        if upload_root.is_symlink():
-            raise ShowcaseSeedError("--upload-root 不得为符号链接")
-        upload_root = upload_root.resolve()
+        upload_root = validate_showcase_upload_target(
+            upload_root, db_path=db_path, checkout_root=ROOT
+        )
         primary_upload = _is_primary_upload_root(upload_root)
         if (
             args.action in ("seed", "rollback")
@@ -165,15 +164,16 @@ def main() -> int:
                     sample,
                     max_concurrent=args.max_concurrent,
                     timeout_per_contest=args.timeout_per_contest,
+                    emit=print,
                 )
             )
         else:
             store = Store(str(db_path))
             try:
                 result = (
-                    verify_showcases(store)
+                    verify_showcases(store, upload_root)
                     if args.action == "verify"
-                    else rollback_showcases(store, upload_root)
+                    else rollback_showcases(store, upload_root, emit=print)
                 )
             finally:
                 store.close()

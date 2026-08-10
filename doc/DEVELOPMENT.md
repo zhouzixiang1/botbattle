@@ -196,7 +196,10 @@ python scripts/seed_test_accounts.py \
 ### 6.4 长期客户演示快照
 
 `seed_contest_showcase.py` 维护六个明确标注的合成只读赛事。数据库路径必须是已存在的绝对路径；
-默认 Bot 目录是同目录的 `bot_uploads_showcase/`，与普通上传隔离。开发验收先在 worktree 副本执行：
+默认 Bot 目录是同目录的 `bot_uploads_showcase/`，与普通上传隔离。目录 basename 固定且必须含
+seed 创建的 namespace marker；只允许数据库声明的 `<bot_id>/vN/bot.bin`，任何额外文件、符号链接、
+普通 `bot_uploads/` 子树、仓库根、数据库父目录或 home/root 目标都会 fail-closed。开发验收先在
+worktree 副本执行：
 
 ```bash
 python scripts/seed_contest_showcase.py seed \
@@ -211,6 +214,9 @@ python scripts/seed_contest_showcase.py verify \
 `starts_at=NULL`、0 Match；running 12 人、真实 completed 与未绑定 pending 并存、0 active；
 rest 24 场真实小组赛；finished 24 场分组双循环 + 7 场 Top 8 淘汰。完整集合共 59 个互不复用的
 真实 Match，所有回放经 canonical LongRunning Linux ELF、正式 Manager/Orchestrator/GameSpec 裁判生成。
+验收逐场要求 `technical_loss=0`、原因仅 `five/draw`、无故障事件，且回放只有一个与数据库胜者/原因
+一致的末尾 canonical `match_end`。六个 key 已完整时二次 seed 先严格验收并跳过 provisioning；12 个
+专用 Bot 最终全部 inactive（历史详情仍可按 ID 查看），不会进入五子棋榜单或自动匹配。
 
 部署到主库属于显式运维写操作，只能在代码已评审、主库已备份且 50380 已停服后执行；独立 seed
 进程不能与线上 orchestrator 叠加并发：
@@ -228,9 +234,11 @@ python scripts/seed_contest_showcase.py verify \
 bash scripts/platform-ctl.sh start
 ```
 
-seed 中断后只恢复专用 marker 赛事，不调用全平台 orphan/reconcile；非演示活动赛事不会被接管。
+seed 中断后只恢复专用 marker 赛事，不调用全平台 orphan/reconcile；已绑定的 pending/running 中断局
+会先精确解绑并删除 match/index/replay，随后只经正常排期闸门重派，未来 `scheduled_at` 不会提前启动；
+非演示活动赛事不会被接管。管理员统计和最近趋势会排除快照关联的 6 赛事、59 对局、13 用户与 12 Bot。
 回滚必须同样停服、先备份，再执行下列白名单命令。它会在删除前整体核对 6 个 key/marker、专用
-账号邮箱与角色、每个 Bot 的版本路径、非白名单赛事报名/对局；任一漂移都拒绝，避免部分清理：
+账号邮箱与角色、每个 Bot 的版本路径、全游戏对局归属及目录精确白名单；任一漂移都拒绝，避免部分清理：
 
 ```bash
 python scripts/seed_contest_showcase.py rollback \
