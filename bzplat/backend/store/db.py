@@ -2567,15 +2567,9 @@ class Store:
                     "(match_id, local_day, created_at) VALUES(?,?,?)",
                     (match_id, auto_match_local_day, created_at),
                 )
-            created = _row(
+            return _row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
-            if created is not None and auto_match_local_day is not None:
-                # Transient internal metadata lets the orchestrator log the day
-                # actually chosen under the DB write lock; it is not persisted
-                # on or exposed by the public match contract.
-                created["_auto_match_local_day"] = auto_match_local_day
-            return created
 
     def _match_table_of(self, c, match_id: str) -> str | None:
         """经 matches_index 定位 match_id 所在的物理表；不存在返回 None。"""

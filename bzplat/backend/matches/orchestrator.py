@@ -750,7 +750,7 @@ class MatchOrchestrator:
         match_id = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
         self._reserve_bot_slot(match_id)
         try:
-            created_match = self.store.create_match(
+            self.store.create_match(
                 match_id,
                 bot_a_id=challenger_bot_id,
                 bot_b_id=opponent_bot_id,
@@ -761,13 +761,6 @@ class MatchOrchestrator:
                 match_config=mc,
                 auto_match_daily_cap=auto_match_daily_cap,
             )
-            if auto_match_daily_cap is not None:
-                logger.info(
-                    "auto-match quota claimed: match=%s day=%s cap=%s",
-                    match_id,
-                    created_match.get("_auto_match_local_day"),
-                    auto_match_daily_cap,
-                )
             # duplicate 落 match_seed（确定性回放/复现用）。create_match 后的
             # 两次写都必须处在同一补偿边界内；任一步失败，调用方都尚未拿到 id。
             if duplicate and duplicate_seed is not None:
