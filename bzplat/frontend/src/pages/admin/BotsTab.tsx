@@ -140,13 +140,12 @@ export default function BotsTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <Table className="min-w-[48rem]">
+        <Table className="min-w-[42rem]">
           <TableHeader>
             <TableRow>
               <TableHead className="px-3 py-2.5">ID</TableHead>
               <TableHead className="px-3 py-2.5">名称</TableHead>
               <TableHead className="px-3 py-2.5">所有者</TableHead>
-              <TableHead className="px-3 py-2.5">格式/架构</TableHead>
               <TableHead className="px-3 py-2.5">版本</TableHead>
               <TableHead className="px-3 py-2.5">状态</TableHead>
               <TableHead className="px-3 py-2.5">操作</TableHead>
@@ -162,6 +161,11 @@ export default function BotsTab() {
                       {b.display_name || b.name}
                     </span>
                     {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
+                    {b.runnable === false && (
+                      <span className="mt-0.5 block break-all font-mono text-[10px] font-normal text-destructive">
+                        诊断：{b.format}/{b.os}-{b.arch}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="px-3 py-2">
                     {b.owner_name ? (
@@ -169,9 +173,6 @@ export default function BotsTab() {
                         {b.owner_display || b.owner_name}
                       </Link>
                     ) : <span className="text-muted-foreground">#{b.owner_id}</span>}
-                  </TableCell>
-                  <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                    {b.format}/{b.arch}
                   </TableCell>
                   <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">v{b.current_version}</TableCell>
                   <TableCell className="px-3 py-2">
@@ -210,16 +211,15 @@ export default function BotsTab() {
                 </TableRow>
                 {expand === b.id && (
                   <TableRow key={`${b.id}-v`} className="bg-muted/60">
-                    <TableCell colSpan={7} className="px-6 py-3">
+                    <TableCell colSpan={6} className="px-6 py-3">
                       {versions.length === 0 ? (
                         <EmptyState text="无版本" />
                       ) : (
-                        <Table className="min-w-[48rem]">
+                        <Table className="min-w-[36rem]">
                           <TableHeader>
                             <TableRow>
                               <TableHead className="px-2 py-1 text-left">版本</TableHead>
                               <TableHead className="px-2 py-1 text-left">大小</TableHead>
-                              <TableHead className="px-2 py-1 text-left">格式/架构</TableHead>
                               <TableHead className="px-2 py-1 text-left">校验和</TableHead>
                               <TableHead className="px-2 py-1 text-left">上传时间</TableHead>
                             </TableRow>
@@ -227,14 +227,15 @@ export default function BotsTab() {
                           <TableBody>
                             {versions.map((v) => (
                               <TableRow key={v.id} className="font-mono text-muted-foreground">
-                                <TableCell className="px-2 py-1">v{v.version}</TableCell>
-                                <TableCell className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</TableCell>
                                 <TableCell className="px-2 py-1">
-                                  {v.format}/{v.arch}
+                                  v{v.version}
                                   {v.runnable === false && (
-                                    <Badge variant="destructive" className="ml-2 text-[10px]">不可运行</Badge>
+                                    <span className="mt-0.5 block break-all text-[10px] text-destructive">
+                                      诊断：{v.format}/{v.os}-{v.arch}
+                                    </span>
                                   )}
                                 </TableCell>
+                                <TableCell className="px-2 py-1">{(v.size_bytes / 1024).toFixed(1)} KB</TableCell>
                                 <TableCell className="px-2 py-1">
                                   <Tooltip>
                                     <TooltipTrigger asChild>

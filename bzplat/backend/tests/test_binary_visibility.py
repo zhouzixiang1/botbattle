@@ -60,7 +60,8 @@ def test_blank_legacy_metadata_is_excluded_from_every_public_selector(tmp_path):
     }
     assert bot["id"] not in {row["id"] for row in store.search_bots("blank")}
     assert bot["id"] not in {
-        row["bot_id"] for row in store.list_leaderboard(game_id="holdem")
+        row["bot_id"]
+        for row in store.list_leaderboard(game_id="holdem")["items"]
     }
     assert bot["id"] not in {
         row["bot_id"] for row in store.least_recently_played("holdem")
@@ -120,7 +121,8 @@ def test_legacy_pe_is_owner_visible_but_never_public_or_reactivated(tmp_path):
     # surfaces too.  A historical PE must not appear in either, even when its
     # stale row is still active and has a rating.
     assert bot["id"] not in {
-        row["bot_id"] for row in store.list_leaderboard(game_id="holdem")
+        row["bot_id"]
+        for row in store.list_leaderboard(game_id="holdem")["items"]
     }
     assert bot["id"] not in {
         row["bot_id"] for row in store.least_recently_played("holdem")

@@ -125,7 +125,7 @@ def test_leaderboard_tier_uses_game_id(tmp_path):
     b = s.create_bot(u["id"], "penBot", binary_path="/tmp", format="elf", game_id="pencil")
     s.ensure_rating(b["id"])
     s.update_rating_row(b["id"], rating=1900)
-    lb = s.list_leaderboard(game_id="pencil")
+    lb = s.list_leaderboard(game_id="pencil")["items"]
     assert len(lb) == 1
     assert lb[0]["tier_name"] == "高手"  # 1900 → gold
     s.close()

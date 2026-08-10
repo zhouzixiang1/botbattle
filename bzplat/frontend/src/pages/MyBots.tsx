@@ -328,12 +328,11 @@ export default function MyBots() {
                       <p className="mt-0.5 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{b.description}</p>
                     )}
                     <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <span className="max-w-full break-all rounded bg-muted px-1.5 py-0.5">
-                        {b.os || '—'} / {b.arch || '—'}
-                      </span>
-                      <span className="max-w-full break-all rounded bg-muted px-1.5 py-0.5">
-                        format: {b.format || 'unknown'}
-                      </span>
+                      {b.runnable === false && (
+                        <span className="max-w-full break-all rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
+                          诊断：{b.format || 'unknown'} / {b.os || 'unknown'}-{b.arch || 'unknown'}
+                        </span>
+                      )}
                       <span className="max-w-full break-all rounded bg-muted px-1.5 py-0.5 font-mono">
                         {b.runtime_mode || 'traditional'}
                       </span>

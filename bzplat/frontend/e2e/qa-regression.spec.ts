@@ -362,7 +362,7 @@ for (const viewport of VIEWPORTS) {
     const monitor = monitorBrowser(page)
     const routes = [
       { path: '/', heading: '首页', evidence: '多游戏 Bot 竞赛平台' },
-      { path: '/leaderboard', heading: '排行榜', evidence: 'Glicko-2 评分，按游戏过滤' },
+      { path: '/leaderboard', heading: '排行榜', evidence: '每款游戏独立使用 Glicko-2 评级' },
       { path: '/history', heading: '对局历史', evidence: '全部对局记录，可按状态与游戏筛选' },
       { path: '/contests', heading: '锦标赛', evidence: '组织者发布锦标赛' },
       { path: '/wiki', heading: 'Wiki', evidence: '协议规范、Bot 开发指南' },

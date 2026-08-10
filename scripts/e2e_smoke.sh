@@ -265,7 +265,7 @@ if deltas[0] + deltas[1] != 0:
     raise SystemExit(f"completed match result.deltas is not zero-sum: {deltas!r}")
 print("match completed", "deltas", deltas)
 
-lb = api_auth(ta, "GET", "/api/leaderboard")
+lb = api_auth(ta, "GET", "/api/leaderboard?game_id=holdem")
 print("leaderboard size", len(lb.get("leaderboard") or []))
 
 c = api_auth(to, "POST", "/api/contests", data={"title": "E2E Cup"})

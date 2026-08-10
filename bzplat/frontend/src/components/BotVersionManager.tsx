@@ -320,7 +320,11 @@ export default function BotVersionManager({
                       <div className="mt-0.5 flex flex-wrap gap-2 text-xs text-muted-foreground">
                         <span>{fmtTime(v.uploaded_at)}</span>
                         <span>{fmtSize(v.size_bytes)}</span>
-                        <span>{v.os}/{v.arch}</span>
+                        {v.runnable === false && (
+                          <span className="text-destructive">
+                            诊断：{v.format}/{v.os}-{v.arch}
+                          </span>
+                        )}
                       </div>
                       {v.upload_note && (
                         <p className="mt-0.5 truncate text-xs text-muted-foreground">{v.upload_note}</p>

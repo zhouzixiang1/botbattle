@@ -201,7 +201,10 @@ def public_bots(
     )
     bots = result["items"] if isinstance(result, dict) else result
     # 脱敏敏感字段（binary_path/runtime_mode）——非 owner/admin 不可见（审计 P1-B）
-    bots = [_sanitize_bot(_with_bot_runnable(b), user) for b in bots]
+    bots = [
+        _public_bot_identity(_sanitize_bot(_with_bot_runnable(b), user))
+        for b in bots
+    ]
     # 附带 owner_name/owner_display（供对手选择弹窗展示）
     store = _store(request)
     owner_ids = {b["owner_id"] for b in bots if b.get("owner_id") is not None}
@@ -365,10 +368,18 @@ def user_bots(
     )
     if isinstance(result, dict):
         # 脱敏敏感字段（审计 P1-B）
-        items = [_sanitize_bot(_with_bot_runnable(b), user) for b in result["items"]]
+        items = [
+            _public_bot_identity(_sanitize_bot(_with_bot_runnable(b), user))
+            for b in result["items"]
+        ]
         return {"bots": items, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"bots": [_sanitize_bot(_with_bot_runnable(b), user) for b in result]}
+    return {
+        "bots": [
+            _public_bot_identity(_sanitize_bot(_with_bot_runnable(b), user))
+            for b in result
+        ]
+    }
 
 
 @router.get("/api/search")
@@ -391,7 +402,7 @@ def global_search(
     if t == "bots":
         return {
             "bots": [
-                _with_bot_runnable(bot)
+                _public_bot_identity(_with_bot_runnable(bot))
                 for bot in store.search_bots(ql, limit=lim, game_id=game_id)
             ]
         }
@@ -409,6 +420,7 @@ def global_search(
 # 与 /api/bots/{id}/versions 的脱敏口径一致：binary_path 暴露磁盘布局，
 # runtime_mode 是内部运行配置，均不应泄漏给访客（审计 P1-B）。
 _BOT_SENSITIVE_FIELDS = ("binary_path", "runtime_mode")
+_PUBLIC_CANONICAL_PLATFORM_FIELDS = ("format", "os", "arch")
 
 
 def _sanitize_bot(bot: dict, user: dict | None) -> dict:
@@ -418,12 +430,28 @@ def _sanitize_bot(bot: dict, user: dict | None) -> dict:
     return {k: v for k, v in bot.items() if k not in _BOT_SENSITIVE_FIELDS}
 
 
+def _public_bot_identity(bot: dict) -> dict:
+    """公开浏览面不重复发送恒定的 Linux x86_64 ELF 三元组。
+
+    可运行性必须先由 ``_with_bot_runnable`` 计算；owner/admin 的 MyBots、版本和
+    管理接口仍保留原始字段，供不可运行历史记录诊断。
+    """
+    public = dict(bot)
+    for field in _PUBLIC_CANONICAL_PLATFORM_FIELDS:
+        public.pop(field, None)
+    return public
+
+
 @router.get("/api/bots/{bot_id}")
 def get_bot(bot_id: int, request: Request, user=Depends(optional_user)):
     bot = _bots(request).get(bot_id)
     if not bot:
         raise HTTPException(404, "bot 不存在")
-    return {"bot": _sanitize_bot(_with_bot_runnable(bot), user)}
+    return {
+        "bot": _public_bot_identity(
+            _sanitize_bot(_with_bot_runnable(bot), user)
+        )
+    }
 
 
 @router.get("/api/bots/{bot_id}/profile")
@@ -440,6 +468,7 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
     if not is_privileged:
         p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
     p = _with_bot_runnable(p)
+    p = _public_bot_identity(p)
     # 裁响应死字段（对抗审计验证：vol/rated_at/is_builtin/updated_at 前端不消费；
     # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
     for k in ("vol", "rated_at", "is_builtin", "updated_at"):
@@ -991,34 +1020,39 @@ async def match_events(match_id: str, request: Request):
 
 @router.get("/api/leaderboard")
 def leaderboard(
-    request: Request, limit: int = 50, game_id: str | None = None,
+    request: Request, game_id: str, limit: int = 50,
     page: int | None = None, per_page: int = 50,
 ):
-    normalized_game_id = game_id
-    if game_id:
-        normalized_game_id = game_id.strip().lower()
-        try:
-            game_registry.get(normalized_game_id)
-        except (KeyError, AttributeError) as exc:
-            raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
+    normalized_game_id = game_id.strip().lower()
+    try:
+        game_registry.get(normalized_game_id)
+    except (KeyError, AttributeError) as exc:
+        raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
     result = _store(request).list_leaderboard(
-        limit=max(1, min(limit, 200)), game_id=normalized_game_id, page=page,
+        game_id=normalized_game_id, limit=max(1, min(limit, 200)), page=page,
         per_page=per_page, placement_games=AUTO_MATCH_CONFIG.placement_games,
     )
-    # 响应白名单投影：只返回前端 Leaderboard.tsx 消费的字段（裁死字段 vol/last_played_at/
-    # is_builtin/owner_display；留 tier_level——test_tiers 断言）。
-    items = result["items"] if isinstance(result, dict) else result
+    # 响应白名单投影：平台三元组、game_id 重复列、内部累计分差和波动率都不属于
+    # 排行阅读信息；游戏维度只在响应顶层返回一次。
+    items = result["items"]
     keep = {
-        "bot_id", "rating", "rd", "wins", "losses", "draws",
-        "matches_played", "bot_name", "bot_display", "format", "os", "arch",
-        "game_id", "owner_name", "rating_delta", "tier_level", "tier_key", "tier_name",
+        "rank", "bot_id", "rating", "rd", "wins", "losses", "draws",
+        "matches_played", "bot_name", "bot_display", "owner_name",
+        "rating_delta", "tier_level", "tier_key", "tier_name",
         "placement_required", "placement_remaining", "is_placement",
+        "last_match_id", "last_match_at",
     }
     proj = [{k: row[k] for k in keep if k in row} for row in items]
-    if isinstance(result, dict):
-        return {"leaderboard": proj, "page": result["page"],
-                "per_page": result["per_page"], "total": result["total"]}
-    return {"leaderboard": proj}
+    response = {
+        "leaderboard": proj,
+        "game_id": result["game_id"],
+        "placement_required": result["placement_required"],
+        "summary": result["summary"],
+        "total": result["total"],
+    }
+    if page is not None:
+        response.update({"page": result["page"], "per_page": result["per_page"]})
+    return response
 
 
 @router.get("/api/tiers")

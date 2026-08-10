@@ -597,7 +597,7 @@ def test_leaderboard_and_contest(
 ) -> None:
     print("\n[6/6] 排行榜 Glicko + 组织者比赛")
     # 排行榜
-    r = api.client.get("/api/leaderboard?limit=20")
+    r = api.client.get("/api/leaderboard?game_id=holdem&limit=20")
     lb = r.json().get("leaderboard", [])
     check("排行榜非空", len(lb) > 0, "空")
     if lb:

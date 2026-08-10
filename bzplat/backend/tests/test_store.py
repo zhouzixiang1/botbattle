@@ -251,8 +251,8 @@ def test_bots_versions_ratings(tmp_path):
     assert rating["rating"] == 1500.0
     s.update_rating_row(bot["id"], rating=1600.0, wins=1, matches_played=1)
     assert s.get_rating(bot["id"])["rating"] == 1600.0
-    board = s.list_leaderboard(10)
-    assert any(r["bot_id"] == bot["id"] for r in board)
+    board = s.list_leaderboard(game_id="holdem", limit=10)
+    assert any(r["bot_id"] == bot["id"] for r in board["items"])
 
     s.update_bot(bot["id"], display_name="My Bot")
     assert s.get_bot(bot["id"])["display_name"] == "My Bot"

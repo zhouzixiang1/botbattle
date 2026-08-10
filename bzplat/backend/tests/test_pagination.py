@@ -157,7 +157,10 @@ def _seed_ratings(app, count=12, game_id="holdem", prefix="usr"):
     _, bots = _seed_bots(app, count=count, game_id=game_id, prefix=prefix)
     for i, b in enumerate(bots):
         store.ensure_rating(b["id"])
-        store.upsert_rating(b["id"], rating=1500.0 + i, rd=200.0, vol=0.06)
+        store.upsert_rating(
+            b["id"], rating=1500.0 + i, rd=200.0, vol=0.06,
+            matches_played=10,
+        )
 
 
 def test_leaderboard_pagination(tmp_path):
@@ -165,21 +168,23 @@ def test_leaderboard_pagination(tmp_path):
     _seed_ratings(app, count=12)
     c = TestClient(app)
 
-    p1 = c.get("/api/leaderboard?page=1&per_page=5").json()
+    p1 = c.get("/api/leaderboard?game_id=holdem&page=1&per_page=5").json()
     assert p1["total"] == 12
     assert len(p1["leaderboard"]) == 5
     assert p1["page"] == 1 and p1["per_page"] == 5
+    assert [row["rank"] for row in p1["leaderboard"]] == [1, 2, 3, 4, 5]
     # tier/delta 后处理仍作用于分页行
     assert "tier_name" in p1["leaderboard"][0]
     assert "rating_delta" in p1["leaderboard"][0]
 
-    p2 = c.get("/api/leaderboard?page=2&per_page=5").json()
+    p2 = c.get("/api/leaderboard?game_id=holdem&page=2&per_page=5").json()
     assert {r["bot_id"] for r in p1["leaderboard"]}.isdisjoint(
         {r["bot_id"] for r in p2["leaderboard"]}
     )
+    assert [row["rank"] for row in p2["leaderboard"]] == [6, 7, 8, 9, 10]
 
     # 旧契约：limit 生效
-    old = c.get("/api/leaderboard?limit=200").json()
+    old = c.get("/api/leaderboard?game_id=holdem&limit=200").json()
     assert "page" not in old
     assert len(old["leaderboard"]) == 12
 
@@ -192,7 +197,8 @@ def test_leaderboard_pagination_game_filter(tmp_path):
 
     holdem = c.get("/api/leaderboard?game_id=holdem&page=1&per_page=50").json()
     assert holdem["total"] == 6
-    assert all(r["game_id"] == "holdem" for r in holdem["leaderboard"])
+    assert holdem["game_id"] == "holdem"
+    assert all("game_id" not in r for r in holdem["leaderboard"])
     gomoku = c.get("/api/leaderboard?game_id=gomoku&page=1&per_page=50").json()
     assert gomoku["total"] == 4
 
