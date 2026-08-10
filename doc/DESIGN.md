@@ -66,6 +66,10 @@ graph TB
 | 通知 | `notifications/` | NotificationManager（站内通知 + 按 prefs 复用 Mailer 发邮件） |
 | 支撑 | `bots/ rating/ mail/ security.py logging_config.py crypto.py cli.py` | Bot 上传分类 / Glicko-2 / SMTP / 安全头+限流 / 日志 / 密码 hash / CLI |
 
+邮件层以 `Botbattle` 为默认发件人名称，邮箱验证、密码重置和欢迎信共享同一多游戏品牌口径；
+欢迎信明确覆盖德州扑克、五子棋与点格棋，且只在邮箱验证完成后发送。三条官方模板仅在 key
+缺失时播种，管理后台保存的模板属于持久化配置，服务重启不得静默覆盖。
+
 ### 2.2 核心解耦契约
 
 ```mermaid
