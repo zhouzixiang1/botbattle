@@ -39,6 +39,25 @@ def _apply_reviewed(db, plan, backup):
     )
 
 
+def _mark_projection_verified(store: Store) -> None:
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        live = rating_projection_digests(conn)
+        assert live["issues"] == []
+        conn.execute(
+            "UPDATE rating_projection_state SET policy_version='owner-neutral-v2',"
+            "source_settlement_count=?,source_last_settled_order=?,source_digest=?,"
+            "projection_digest=?,plan_digest=? WHERE singleton=1",
+            (
+                live["source_settlement_count"],
+                live["source_last_settled_order"],
+                live["source_digest"],
+                live["projection_digest"],
+                live["plan_digest"],
+            ),
+        )
+
+
 def _bot(store: Store, username: str, *, owner_id: int | None = None) -> dict:
     if owner_id is None:
         owner = store.create_user(
@@ -543,6 +562,101 @@ def test_apply_rejects_changed_bot_universe_plan_digest(tmp_path):
         _apply_reviewed(db, reviewed, backup)
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("is_active", 0),
+        ("format", "pe"),
+        ("os", "windows"),
+        ("arch", "arm64"),
+    ],
+)
+def test_apply_rejects_leaderboard_visibility_change_in_plan_digest(
+    tmp_path, column, value
+):
+    db = (tmp_path / f"visibility-{column}.db").resolve()
+    store = Store(str(db))
+    bot = _bot(store, f"visibility-{column}")
+    store.close()
+
+    # Production only accepts Linux/amd64 ELF, but legacy/corrupt databases can
+    # lack those CHECKs.  Remove only the three metadata CHECK clauses before
+    # taking the reviewed baseline so the apply path still runs integrity_check.
+    with sqlite3.connect(db) as conn:
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='bots'"
+        ).fetchone()[0]
+        relaxed = schema
+        for clause in (
+            "    CONSTRAINT chk_bot_os CHECK (os = 'linux'),\n",
+            "    CONSTRAINT chk_bot_arch CHECK (arch = 'amd64'),\n",
+            "    CONSTRAINT chk_format CHECK (format = 'elf'),\n",
+        ):
+            relaxed = relaxed.replace(clause, "")
+        assert relaxed != schema
+        version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+        conn.execute("PRAGMA writable_schema=ON")
+        conn.execute(
+            "UPDATE sqlite_schema SET sql=? WHERE type='table' AND name='bots'",
+            (relaxed,),
+        )
+        conn.execute("PRAGMA writable_schema=OFF")
+        conn.execute(f"PRAGMA schema_version={version + 1}")
+
+    reviewed = build_rebuild_plan(db)
+    backup = (tmp_path / f"visibility-{column}.cold.db").resolve()
+    shutil.copy2(db, backup)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            f"UPDATE bots SET {column}=? WHERE id=?", (value, bot["id"])
+        )
+
+    current = build_rebuild_plan(db)
+    assert current.report["source_digest"] == reviewed.report["source_digest"]
+    assert (
+        current.report["rebuilt_projection_digest"]
+        == reviewed.report["rebuilt_projection_digest"]
+    )
+    assert current.report["bot_universe_digest"] != reviewed.report[
+        "bot_universe_digest"
+    ]
+    assert current.report["plan_digest"] != reviewed.report["plan_digest"]
+    with pytest.raises(RuntimeError, match="评分重建摘要已变化.*plan"):
+        _apply_reviewed(db, reviewed, backup)
+
+
+def test_rebuild_is_no_go_while_auto_match_queue_is_nonempty(tmp_path):
+    db = (tmp_path / "queued-generation.db").resolve()
+    store = Store(str(db))
+    _bot(store, "queued-generation-a")
+    _bot(store, "queued-generation-b")
+    _mark_projection_verified(store)
+    token = "queued-generation-leader"
+    lease = store.acquire_auto_match_dispatcher(token, lease_seconds=30)
+    assert lease["owned"] is True
+    refill = store.refill_auto_match_queue(
+        target_queued=1,
+        placement_required=10,
+        dispatcher_token=token,
+        dispatcher_epoch=int(lease["lease_epoch"]),
+    )
+    assert refill["inserted"] == 1
+    assert store.release_auto_match_dispatcher(
+        token, int(lease["lease_epoch"])
+    )
+    store.close()
+
+    plan = build_rebuild_plan(db)
+    assert plan.report["auto_match_queue_count"] == 1
+    assert plan.report["ready_to_apply"] is False
+    assert any("auto_match_queue 非空" in issue for issue in plan.report["issues"])
+
+    backup = (tmp_path / "queued-generation.cold.db").resolve()
+    shutil.copy2(db, backup)
+    with pytest.raises(RuntimeError, match="No-Go: auto_match_queue 非空"):
+        _apply_reviewed(db, plan, backup)
+
+
 @pytest.mark.parametrize("corrupt_target", [False, True])
 def test_apply_requires_zero_foreign_key_violations_on_backup_and_target(
     tmp_path, corrupt_target
@@ -565,6 +679,72 @@ def test_apply_requires_zero_foreign_key_violations_on_backup_and_target(
         _apply_reviewed(db, reviewed, backup)
 
 
+@pytest.mark.parametrize(
+    ("bad_result", "policy_update", "issue_text"),
+    [
+        ({"deltas": [1, -1, 0]}, None, "exactly two integers"),
+        ({"deltas": [True, -1]}, None, "non-boolean integers"),
+        ({"deltas": [1.0, -1.0]}, None, "non-boolean integers"),
+        ({"deltas": [1, 1]}, None, "zero-sum"),
+        ({"deltas": [1, -1]}, (1, "same_owner"), "rated/rating_reason mismatch"),
+        ({"deltas": [1, -1]}, (0, "eligible"), "rated/rating_reason mismatch"),
+    ],
+)
+def test_rebuild_rejects_noncanonical_rated_source_contract(
+    tmp_path, bad_result, policy_update, issue_text
+):
+    db = (tmp_path / "invalid-rated-source.db").resolve()
+    store = Store(str(db))
+    bot_a = _bot(store, "invalid-source-a")
+    bot_b = _bot(store, "invalid-source-b")
+    orch = MatchOrchestrator(store)
+    match_id = "invalid-rated-source"
+    _complete(
+        store,
+        orch,
+        match_id,
+        bot_a["id"],
+        bot_b["id"],
+        winner=0,
+        ended_at="2026-08-10T18:00:00",
+    )
+    store.close()
+
+    # Corrupt immutable evidence only inside this isolated fixture to prove the
+    # rebuild's independent fail-closed audit, not merely the write trigger.
+    with sqlite3.connect(db) as conn:
+        if policy_update is None:
+            conn.execute(
+                "DROP TRIGGER trg_matches_gomoku_rating_source_update"
+            )
+            conn.execute(
+                "UPDATE matches_gomoku SET result=? WHERE id=?",
+                (json.dumps(bad_result), match_id),
+            )
+        else:
+            conn.execute("DROP TRIGGER trg_match_rating_policy_source_immutable")
+            conn.execute(
+                "UPDATE match_rating_policies SET rated=?,rating_reason=? "
+                "WHERE match_id=?",
+                (*policy_update, match_id),
+            )
+
+    plan = build_rebuild_plan(db)
+    assert plan.report["ready_to_apply"] is False
+    assert any(issue_text in issue for issue in plan.report["issues"])
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        assert any(
+            issue_text in issue
+            for issue in rating_projection_digests(conn)["issues"]
+        )
+
+    backup = (tmp_path / "invalid-rated-source.cold.db").resolve()
+    shutil.copy2(db, backup)
+    with pytest.raises(ValueError, match="backup rating source is incomplete"):
+        _apply_reviewed(db, plan, backup)
+
+
 def test_match_detail_exposes_marker_truth_across_rating_lifecycle(tmp_path):
     app = create_app(db_path=str(tmp_path / "rating-detail.db"), max_concurrent=1)
     store = app.state.store
@@ -577,7 +757,9 @@ def test_match_detail_exposes_marker_truth_across_rating_lifecycle(tmp_path):
     pending = client.get(f"/api/matches/{match_id}").json()["match"]
     assert pending["rated"] is True
     assert pending["rating_settled"] is False
+    assert "rating_settled_order" not in pending
     assert "_rating_settled_order" not in pending
+    assert "rating_settlement_status" not in pending
 
     store.update_match(
         match_id,

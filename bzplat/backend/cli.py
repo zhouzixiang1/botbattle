@@ -228,8 +228,10 @@ def rating_rebuild(
             )
         if not report["ready_to_apply"]:
             raise typer.BadParameter(
-                f"评分源未收敛，拒绝 apply: {report['issues']} "
-                f"running={report['running_match_count']}"
+                f"评分重建 No-Go: issues={report['issues']} "
+                f"running={report['running_match_count']} "
+                f"auto_match_queue={report['auto_match_queue_count']} "
+                f"dispatcher_lease={report['dispatcher_lease_live']}"
             )
         report = apply_rebuild_plan(
             database,

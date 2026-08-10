@@ -19,7 +19,11 @@ from typing import Any
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.config import AUTO_MATCH_PLACEMENT_REQUIRED
-from bzplat.backend.store import rating_projection_digest, rating_projection_digests
+from bzplat.backend.store import (
+    rating_projection_digest,
+    rating_projection_digests,
+    rating_source_input_issues,
+)
 from bzplat.backend.store.schema import (
     MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
     STATUS_COMPLETED,
@@ -181,6 +185,17 @@ def _load_bot_universe(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return bots
 
 
+def _auto_match_queue_issues(
+    conn: sqlite3.Connection,
+) -> tuple[int, list[str]]:
+    count = int(conn.execute("SELECT COUNT(*) FROM auto_match_queue").fetchone()[0])
+    if count == 0:
+        return 0, []
+    return count, [
+        f"auto_match_queue 非空（{count} 行）；必须先排空旧评分代际队列"
+    ]
+
+
 def _tables(conn: sqlite3.Connection) -> set[str]:
     return {
         str(row[0])
@@ -200,6 +215,8 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
         "match_rating_settlements",
         "rating_projection_state",
         "rating_settlement_sequence",
+        "auto_match_queue",
+        "auto_match_dispatcher",
     }
     missing = sorted(required - _tables(conn))
     if missing:
@@ -297,13 +314,21 @@ def _load_source(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[s
         try:
             result = json.loads(match["result"] or "{}")
         except (TypeError, ValueError):
-            result = {}
+            issues.append(f"rating source result invalid: {match_id}")
+            continue
         rated = bool(int(policy["rated"]))
-        deltas = result.get("deltas")
+        input_issues = rating_source_input_issues(
+            match_id=match_id,
+            rated=policy["rated"],
+            rating_reason=policy["rating_reason"],
+            result=result,
+        )
+        if input_issues:
+            issues.extend(input_issues)
+            continue
+        deltas = result.get("deltas") if isinstance(result, dict) else None
         if rated and (
-            not isinstance(deltas, list)
-            or len(deltas) < 2
-            or policy.get("bot_a_id") is None
+            policy.get("bot_a_id") is None
             or policy.get("bot_b_id") is None
         ):
             issues.append(f"rated settlement 缺 Bot/结果输入: {match_id}")
@@ -629,7 +654,10 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
             _validate_database_health(conn, label="target")
             live = rating_projection_digests(conn)
             source, replay_issues = _load_source(conn)
-            issues = sorted(set([*live["issues"], *replay_issues]))
+            auto_match_queue_count, queue_issues = _auto_match_queue_issues(conn)
+            issues = sorted(
+                set([*live["issues"], *replay_issues, *queue_issues])
+            )
             bot_universe = _load_bot_universe(conn)
             rebuilt_ratings, rebuilt_history, rebuilt_pairs = _replay(
                 source, bot_universe
@@ -742,6 +770,7 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
                 "changed_bots": changes,
                 "issues": sorted(set(issues)),
                 "running_match_count": running,
+                "auto_match_queue_count": auto_match_queue_count,
                 "dispatcher_lease_live": dispatcher_lease_live,
                 "ready_to_apply": (
                     not issues and running == 0 and not dispatcher_lease_live
@@ -866,6 +895,9 @@ def apply_rebuild_plan(
         _validate_database_health(conn, label="target")
         live = rating_projection_digests(conn)
         source, replay_issues = _load_source(conn)
+        auto_match_queue_count, queue_issues = _auto_match_queue_issues(conn)
+        if auto_match_queue_count:
+            raise RuntimeError(f"评分重建 No-Go: {queue_issues[0]}")
         issues = sorted(set([*live["issues"], *replay_issues]))
         if issues:
             raise RuntimeError(f"评分源不完整，拒绝重建: {issues}")

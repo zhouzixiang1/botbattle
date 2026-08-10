@@ -643,6 +643,37 @@ def rating_plan_digest(source_digest: str, bot_universe_digest: str) -> str:
     )
 
 
+def rating_source_input_issues(
+    *,
+    match_id: str,
+    rated: Any,
+    rating_reason: Any,
+    result: Any,
+) -> list[str]:
+    """Validate the frozen replay policy/result contract for one source row."""
+    issues: list[str] = []
+    rated_flag = bool(int(rated or 0))
+    reason = str(rating_reason or "")
+    if rated_flag != (reason == "eligible"):
+        issues.append(
+            f"rating source rated/rating_reason mismatch: {match_id}"
+        )
+    if not rated_flag:
+        return issues
+    deltas = result.get("deltas") if isinstance(result, dict) else None
+    if not isinstance(deltas, list) or len(deltas) != 2:
+        issues.append(
+            f"rated source deltas must contain exactly two integers: {match_id}"
+        )
+    elif any(type(value) is not int for value in deltas):
+        issues.append(
+            f"rated source deltas must be non-boolean integers: {match_id}"
+        )
+    elif deltas[0] + deltas[1] != 0:
+        issues.append(f"rated source deltas must be zero-sum: {match_id}")
+    return issues
+
+
 def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
     """Return live source/projection/plan digests plus sequence violations.
 
@@ -727,6 +758,14 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
                 match_row["result"] = json.loads(match_row.get("result") or "{}")
             except (TypeError, ValueError):
                 issues.append(f"rating source result invalid: {match_id}")
+        issues.extend(
+            rating_source_input_issues(
+                match_id=match_id,
+                rated=policy.get("rated"),
+                rating_reason=policy.get("rating_reason"),
+                result=match_row.get("result") if match_row else None,
+            )
+        )
         source_rows.append(
             {
                 "match_id": match_id,
@@ -759,9 +798,21 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
         dict(row) for row in conn.execute("SELECT * FROM rating_history").fetchall()
     ]
     pairs = [dict(row) for row in conn.execute("SELECT * FROM pair_stats").fetchall()]
+    # Keep this universe in exact lockstep with list_leaderboard eligibility:
+    # identity/game plus every Bot visibility/binary-metadata predicate it reads.
     bots = [
-        {"id": int(row["id"]), "game_id": str(row["game_id"])}
-        for row in conn.execute("SELECT id,game_id FROM bots ORDER BY game_id,id").fetchall()
+        {
+            "id": int(row["id"]),
+            "game_id": str(row["game_id"]),
+            "is_active": int(row["is_active"]),
+            "format": str(row["format"]),
+            "os": str(row["os"]),
+            "arch": str(row["arch"]),
+        }
+        for row in conn.execute(
+            "SELECT id,game_id,is_active,format,os,arch FROM bots "
+            "ORDER BY game_id,id"
+        ).fetchall()
     ]
     source_digest = _canonical_digest(source_rows)
     bot_universe_digest = _canonical_digest(bots)

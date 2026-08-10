@@ -5,6 +5,7 @@ from .db import (
     rating_plan_digest,
     rating_projection_digest,
     rating_projection_digests,
+    rating_source_input_issues,
 )
 from .schema import (
     CODE_RESET,
@@ -36,6 +37,7 @@ __all__ = [
     "rating_plan_digest",
     "rating_projection_digest",
     "rating_projection_digests",
+    "rating_source_input_issues",
     "ROLE_USER",
     "ROLE_ORGANIZER",
     "ROLE_ADMIN",
