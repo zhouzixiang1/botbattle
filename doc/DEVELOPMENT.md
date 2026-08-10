@@ -116,7 +116,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 - **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
 - QA CLI 会在日志 handler、SQLite、上传/头像目录创建前一次性校验端口和全部写目标；拒绝 50380、主 checkout 内任意 DB/运行时路径，以及主 `bot_uploads`/`avatars`/`logs` 的别名或子目录。当前 linked worktree 与 `/tmp` 独立目录仍允许。
 - QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
-- `BZ_QA_INSTANCE=1` 还会选择代码固定的 `QA_AUTO_MATCH_CONFIG(enabled=False)`，使浏览器/API 验收不受后台 ladder 抢占临时 Bot 的竞态影响；它不是可调运行参数，生产 `AUTO_MATCH_CONFIG`、并发与资源限制均不变。管理端只读诊断返回当前实例实际生效的 profile。
+- `BZ_QA_INSTANCE=1` 通过独立代码能力门强制禁用自动排位；复制库中的管理员开关即使为开也无效，API 尝试开启返回 409。生产只保留 `auto_match_control` 的管理员总开关，不存在 QA/生产两套参数 profile。
 - 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
 
 ## 3. 编码规范
@@ -128,7 +128,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
 | **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，半负载并发 ceiling=`max(1,cpu//4)`，全员循环 `FULL_RR_MAX_N=12`；admin 不可抬高（`runtime/limits.py`） |
-| **运行参数** | `runtime/config.py` 是 action timeout、默认并发、auto-match、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
+| **运行参数** | `runtime/config.py` 是 action timeout、默认并发、自动排位定级阈值、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。自动排位只有独立管理员总开关可变；`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |
 | **前端组件** | 用 `@/components/ui/*` 共享原语，禁内联重复样式 |
@@ -277,5 +277,15 @@ python scripts/seed_contest_showcase.py rollback \
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 按内容同步的三游戏样例 Bot） |
 | `scripts/seed_contest_showcase.py` | 生成/验收/白名单回滚六个长期只读赛事快照；绝对 DB 路径必填，主运行时另需停服确认 |
 | `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 5 spec / 56 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口、长文本滚动、排行榜密度及 3 条 Holdem HUD/复式/真人公开信息回归；最终同一代码 HEAD 全量执行真值见 `TESTING.md`） |
+
+### 6.5 评分投影维护命令
+
+`python -m bzplat.backend.cli rating-rebuild --db /absolute/path.db` 默认只读 dry-run；
+`--verify` 只读核对投影 hash 与水位，任何不一致退出 1。`--apply` 是长期维护入口，不是一次性
+修复脚本：必须停服、提供独立冷备、逐字确认绝对 DB、回填刚审核的 `source_hash`，并显式给出
+两项确认；冷备评分源也必须与该 hash 一致，实现还会在 `BEGIN EXCLUSIVE` 内复核源、水位、
+running match 与 dispatcher lease，并在提交前复核重建投影 hash。
+完整命令和生产 No-Go 清单见 [RUNTIME.md](./RUNTIME.md#排行榜重建与上线-no-go)。禁止按
+`created_at` 自制重放脚本，也禁止直接清空 policies/settlements 来“通过”验证。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

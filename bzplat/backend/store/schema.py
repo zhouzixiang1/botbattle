@@ -197,16 +197,199 @@ CREATE TABLE IF NOT EXISTS match_replays (
 -- matches 已按游戏分表，无法声明单一物理 FK；删除对局时由 Store.delete_match 清理。
 CREATE TABLE IF NOT EXISTS match_rating_settlements (
     match_id        TEXT    PRIMARY KEY,
-    settled_at      TEXT    NOT NULL
+    settled_at      TEXT    NOT NULL,
+    settled_order   INTEGER
 );
 
--- 系统 auto-match 的持久化每日配额凭据。matches 已按游戏分表，无法声明单一
--- 物理 FK；创建/删除对局时由 Store 在同一事务维护。本表只记录 auto_matcher
--- 显式创建的系统 ladder，普通用户对局不会进入。
-CREATE TABLE IF NOT EXISTS auto_match_daily_claims (
+-- 每场对局在创建/首次 v2 迁移时冻结的评分资格。它是后续全量重建排行榜的
+-- 稳定输入，不依赖 Bot 以后软删/硬删；matches 按游戏分表，故 match_id 由 Store
+-- 维护逻辑引用。迁移只分类，不自动重放或改写既有 ratings/history/settlements。
+CREATE TABLE IF NOT EXISTS match_rating_policies (
     match_id        TEXT    PRIMARY KEY,
-    local_day       TEXT    NOT NULL,
-    created_at      TEXT    NOT NULL
+    game_id         TEXT    NOT NULL,
+    bot_a_id        INTEGER,
+    bot_b_id        INTEGER,
+    settled_order   INTEGER,
+    rated           INTEGER NOT NULL CHECK (rated IN (0,1)),
+    rating_reason   TEXT    NOT NULL,
+    source          TEXT    NOT NULL,
+    classified_at   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_match_rating_policies_reason
+    ON match_rating_policies(source,rating_reason,match_id);
+
+-- 排行榜投影是否已经按当前评分资格真值完整重建。升级只负责识别旧污染，
+-- 不会擅自重放历史；维护重建必须在同一事务刷新四类投影后再把此哨兵推进到
+-- owner-neutral-v2，并记录它覆盖到的 settlement 序号。
+CREATE TABLE IF NOT EXISTS rating_projection_state (
+    singleton                   INTEGER PRIMARY KEY CHECK (singleton=1),
+    policy_version              TEXT    NOT NULL,
+    rebuilt_at                  TEXT,
+    source_settlement_count     INTEGER NOT NULL DEFAULT 0 CHECK (source_settlement_count>=0),
+    source_last_settled_order   INTEGER NOT NULL DEFAULT 0 CHECK (source_last_settled_order>=0)
+);
+INSERT OR IGNORE INTO rating_projection_state(
+    singleton,policy_version,rebuilt_at,source_settlement_count,
+    source_last_settled_order
+) VALUES(1,'legacy-unverified',NULL,0,0);
+
+-- completed 事务先冻结全局结算序号；实际评分事务随后用同一序号写 settlement。
+-- 这样崩溃恢复不必再猜 created_at/ended_at 顺序。
+CREATE TABLE IF NOT EXISTS rating_settlement_sequence (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
+    next_order      INTEGER NOT NULL CHECK (next_order>=1)
+);
+INSERT OR IGNORE INTO rating_settlement_sequence(singleton,next_order) VALUES(1,1);
+
+-- 系统自动排位的永久选择审计。活跃队列终态后会删除，但选择时的游标、lane、
+-- owner/Bot/配对服务计数、Rating 差、先后手债务和冻结版本必须长期保留，才能
+-- 复核公平策略。Bot/用户/版本 ID 故意是审计快照而非 FK，实体硬删后证据仍在。
+CREATE TABLE IF NOT EXISTS auto_match_decisions (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_version              TEXT    NOT NULL,
+    state_revision              INTEGER NOT NULL,
+    cursor_game_idx             INTEGER NOT NULL,
+    requested_lane              TEXT    NOT NULL,
+    actual_lane                 TEXT    NOT NULL,
+    fallback_reason             TEXT    NOT NULL DEFAULT '',
+    game_id                     TEXT    NOT NULL,
+    bot_a_id                    INTEGER NOT NULL,
+    bot_b_id                    INTEGER NOT NULL,
+    owner_a_id                  INTEGER NOT NULL,
+    owner_b_id                  INTEGER NOT NULL,
+    bot_a_version_id            INTEGER NOT NULL,
+    bot_b_version_id            INTEGER NOT NULL,
+    owner_a_service_before      INTEGER NOT NULL,
+    owner_b_service_before      INTEGER NOT NULL,
+    bot_a_service_before        INTEGER NOT NULL,
+    bot_b_service_before        INTEGER NOT NULL,
+    bot_pair_count_before       INTEGER NOT NULL,
+    owner_pair_count_before     INTEGER NOT NULL,
+    rating_gap                  REAL    NOT NULL,
+    bot_a_seat_debt_before      INTEGER NOT NULL,
+    bot_b_seat_debt_before      INTEGER NOT NULL,
+    selection_reason            TEXT    NOT NULL,
+    lifecycle                   TEXT    NOT NULL DEFAULT 'queued',
+    match_id                    TEXT,
+    attempt_count               INTEGER NOT NULL DEFAULT 0,
+    last_attempt_error          TEXT    NOT NULL DEFAULT '',
+    created_at                  TEXT    NOT NULL,
+    dispatched_at               TEXT,
+    terminal_at                 TEXT,
+    terminal_reason             TEXT    NOT NULL DEFAULT '',
+    settlement_order            INTEGER,
+    CONSTRAINT chk_auto_decision_bots CHECK (bot_a_id <> bot_b_id),
+    CONSTRAINT chk_auto_decision_owners CHECK (owner_a_id <> owner_b_id),
+    CONSTRAINT chk_auto_decision_lane CHECK (
+        requested_lane IN ('placement','formal') AND
+        actual_lane IN ('placement','formal')
+    ),
+    CONSTRAINT chk_auto_decision_lifecycle CHECK (
+        lifecycle IN ('queued','dispatched','completed','aborted','cancelled')
+    )
+);
+
+-- 活跃公平队列只保留 queued/dispatched 两个生命周期；completed 且评分结算
+-- 落稳，或 aborted 终态落稳后即删除。match_id 因 matches 按游戏分表而不声明
+-- 物理 FK，由 Store 在同一 BEGIN IMMEDIATE 事务维护。
+CREATE TABLE IF NOT EXISTS auto_match_queue (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id         INTEGER NOT NULL UNIQUE
+                            REFERENCES auto_match_decisions(id) ON DELETE RESTRICT,
+    game_id             TEXT    NOT NULL,
+    bot_a_id            INTEGER NOT NULL REFERENCES bots(id) ON DELETE RESTRICT,
+    bot_b_id            INTEGER NOT NULL REFERENCES bots(id) ON DELETE RESTRICT,
+    bot_a_version_id    INTEGER NOT NULL REFERENCES bot_versions(id) ON DELETE RESTRICT,
+    bot_b_version_id    INTEGER NOT NULL REFERENCES bot_versions(id) ON DELETE RESTRICT,
+    status              TEXT    NOT NULL DEFAULT 'queued',
+    match_id            TEXT,
+    dispatcher_token    TEXT,
+    selection_reason    TEXT    NOT NULL DEFAULT '',
+    created_at          TEXT    NOT NULL,
+    dispatched_at       TEXT,
+    CONSTRAINT chk_auto_queue_bots CHECK (bot_a_id <> bot_b_id),
+    CONSTRAINT chk_auto_queue_status CHECK (status IN ('queued','dispatched')),
+    CONSTRAINT chk_auto_queue_lifecycle CHECK (
+        (status='queued' AND match_id IS NULL AND dispatcher_token IS NULL
+                         AND dispatched_at IS NULL) OR
+        (status='dispatched' AND match_id IS NOT NULL AND dispatcher_token IS NOT NULL
+                             AND dispatched_at IS NOT NULL)
+    )
+);
+
+-- v2 独立单例控制面。它与历史 platform_settings 的同名键无关，首次升级始终
+-- 默认开启，之后只有管理员严格布尔 API 可改 enabled。
+CREATE TABLE IF NOT EXISTS auto_match_control (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
+    enabled         INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+    updated_at      TEXT    NOT NULL
+);
+INSERT OR IGNORE INTO auto_match_control(singleton,enabled,updated_at)
+VALUES(1,1,CURRENT_TIMESTAMP);
+
+-- 调度 owner lease 防多个服务进程互相派发/恢复。lease 只是内部协调状态，不是
+-- 管理员参数；过期后新进程可接管，未过期时其他进程只读队列。
+CREATE TABLE IF NOT EXISTS auto_match_dispatcher (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
+    owner_token     TEXT,
+    lease_until     TEXT,
+    heartbeat_at    TEXT
+);
+INSERT OR IGNORE INTO auto_match_dispatcher(singleton) VALUES(1);
+
+-- 持久公平游标与平台故障 circuit breaker。next_lane: 0=placement, 1=formal。
+CREATE TABLE IF NOT EXISTS auto_match_fair_state (
+    singleton           INTEGER PRIMARY KEY CHECK (singleton=1),
+    next_game_idx       INTEGER NOT NULL DEFAULT 0 CHECK (next_game_idx>=0),
+    next_lane           INTEGER NOT NULL DEFAULT 0 CHECK (next_lane IN (0,1)),
+    revision            INTEGER NOT NULL DEFAULT 0 CHECK (revision>=0),
+    bootstrap_version   INTEGER NOT NULL DEFAULT 0 CHECK (bootstrap_version>=0),
+    platform_failures   INTEGER NOT NULL DEFAULT 0 CHECK (platform_failures>=0),
+    not_before          TEXT,
+    updated_at          TEXT    NOT NULL
+);
+INSERT OR IGNORE INTO auto_match_fair_state(
+    singleton,next_game_idx,next_lane,revision,bootstrap_version,
+    platform_failures,not_before,updated_at
+) VALUES(1,0,0,0,0,0,NULL,CURRENT_TIMESTAMP);
+
+-- 公平选择只读这些 auto 专属计数，绝不借用可被前台挑战影响的 ratings/
+-- pair_stats。所有计数按游戏隔离；owner 全局活跃唯一由 queue trigger 保证。
+CREATE TABLE IF NOT EXISTS auto_match_owner_service (
+    owner_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    game_id                TEXT    NOT NULL,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    last_served_revision   INTEGER NOT NULL DEFAULT 0 CHECK (last_served_revision>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(owner_id,game_id)
+);
+CREATE TABLE IF NOT EXISTS auto_match_bot_service (
+    bot_id                 INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    game_id                TEXT    NOT NULL,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    seat_a_count           INTEGER NOT NULL DEFAULT 0 CHECK (seat_a_count>=0),
+    seat_b_count           INTEGER NOT NULL DEFAULT 0 CHECK (seat_b_count>=0),
+    last_served_revision   INTEGER NOT NULL DEFAULT 0 CHECK (last_served_revision>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(bot_id,game_id)
+);
+CREATE TABLE IF NOT EXISTS auto_match_bot_pair_service (
+    game_id                TEXT    NOT NULL,
+    bot_lo_id              INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    bot_hi_id              INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(game_id,bot_lo_id,bot_hi_id),
+    CONSTRAINT chk_auto_bot_pair_order CHECK (bot_lo_id < bot_hi_id)
+);
+CREATE TABLE IF NOT EXISTS auto_match_owner_pair_service (
+    game_id                TEXT    NOT NULL,
+    owner_lo_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    owner_hi_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(game_id,owner_lo_id,owner_hi_id),
+    CONSTRAINT chk_auto_owner_pair_order CHECK (owner_lo_id < owner_hi_id)
 );
 
 CREATE TABLE IF NOT EXISTS ratings (
@@ -446,7 +629,140 @@ CREATE TABLE IF NOT EXISTS contest_templates (
 
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bot_versions_bot ON bot_versions(bot_id);
-CREATE INDEX IF NOT EXISTS idx_auto_match_claims_day ON auto_match_daily_claims(local_day);
+CREATE INDEX IF NOT EXISTS idx_auto_match_queue_order
+    ON auto_match_queue(status, id);
+CREATE INDEX IF NOT EXISTS idx_auto_match_queue_game
+    ON auto_match_queue(game_id, status, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_queue_match
+    ON auto_match_queue(match_id) WHERE match_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_decisions_match
+    ON auto_match_decisions(match_id) WHERE match_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_auto_match_decisions_created
+    ON auto_match_decisions(id DESC);
+-- 整个平台最多一场系统自动排位处于 dispatched；多进程共同受 SQLite 唯一索引约束。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_queue_one_dispatched
+    ON auto_match_queue(status) WHERE status='dispatched';
+
+-- 一个 Bot 在 queued/dispatched 活跃队列中只能出现一次。跨列唯一性无法用普通
+-- UNIQUE 表达，写事务内的触发器在 SQLite 串行写锁下提供数据库级硬约束。
+CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_bot_insert
+BEFORE INSERT ON auto_match_queue
+WHEN EXISTS (
+    SELECT 1 FROM auto_match_queue q
+    WHERE NEW.bot_a_id IN (q.bot_a_id, q.bot_b_id)
+       OR NEW.bot_b_id IN (q.bot_a_id, q.bot_b_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'auto-match bot already queued');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_bot_update
+BEFORE UPDATE OF bot_a_id,bot_b_id ON auto_match_queue
+WHEN EXISTS (
+    SELECT 1 FROM auto_match_queue q
+    WHERE q.id<>OLD.id AND (
+        NEW.bot_a_id IN (q.bot_a_id, q.bot_b_id)
+        OR NEW.bot_b_id IN (q.bot_a_id, q.bot_b_id)
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'auto-match bot already queued');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_owner_insert
+BEFORE INSERT ON auto_match_queue
+WHEN EXISTS (
+    SELECT 1 FROM auto_match_queue q
+    JOIN bots qa ON qa.id=q.bot_a_id
+    JOIN bots qb ON qb.id=q.bot_b_id
+    JOIN bots na ON na.id=NEW.bot_a_id
+    JOIN bots nb ON nb.id=NEW.bot_b_id
+    WHERE na.owner_id IN (qa.owner_id,qb.owner_id)
+       OR nb.owner_id IN (qa.owner_id,qb.owner_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'auto-match owner already queued');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_owner_update
+BEFORE UPDATE OF bot_a_id,bot_b_id ON auto_match_queue
+WHEN EXISTS (
+    SELECT 1 FROM auto_match_queue q
+    JOIN bots qa ON qa.id=q.bot_a_id
+    JOIN bots qb ON qb.id=q.bot_b_id
+    JOIN bots na ON na.id=NEW.bot_a_id
+    JOIN bots nb ON nb.id=NEW.bot_b_id
+    WHERE q.id<>OLD.id AND (
+        na.owner_id IN (qa.owner_id,qb.owner_id)
+        OR nb.owner_id IN (qa.owner_id,qb.owner_id)
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'auto-match owner already queued');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_identity_insert
+BEFORE INSERT ON auto_match_queue
+WHEN NOT EXISTS (
+    SELECT 1 FROM bots a JOIN users ua ON ua.id=a.owner_id JOIN bots b
+      ON a.id=NEW.bot_a_id AND b.id=NEW.bot_b_id
+    JOIN users ub ON ub.id=b.owner_id
+    JOIN bot_versions va ON va.id=NEW.bot_a_version_id AND va.bot_id=a.id
+    JOIN bot_versions vb ON vb.id=NEW.bot_b_version_id AND vb.bot_id=b.id
+    JOIN auto_match_decisions d ON d.id=NEW.decision_id
+    WHERE a.game_id=NEW.game_id AND b.game_id=NEW.game_id
+      AND a.owner_id<>b.owner_id
+      AND a.is_active=1 AND b.is_active=1
+      AND ua.is_active=1 AND ub.is_active=1
+      AND a.is_builtin=0 AND b.is_builtin=0
+      AND a.format='elf' AND b.format='elf'
+      AND a.os='linux' AND b.os='linux'
+      AND a.arch='amd64' AND b.arch='amd64'
+      AND va.format='elf' AND vb.format='elf'
+      AND va.os='linux' AND vb.os='linux'
+      AND va.arch='amd64' AND vb.arch='amd64'
+      AND va.binary_path<>'' AND vb.binary_path<>''
+      AND d.game_id=NEW.game_id
+      AND d.bot_a_id=NEW.bot_a_id AND d.bot_b_id=NEW.bot_b_id
+      AND d.bot_a_version_id=NEW.bot_a_version_id
+      AND d.bot_b_version_id=NEW.bot_b_version_id
+      AND d.lifecycle='queued'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid auto-match queue identity');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_identity_update
+BEFORE UPDATE OF decision_id,game_id,bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id
+ON auto_match_queue
+WHEN NOT EXISTS (
+    SELECT 1 FROM bots a JOIN users ua ON ua.id=a.owner_id JOIN bots b
+      ON a.id=NEW.bot_a_id AND b.id=NEW.bot_b_id
+    JOIN users ub ON ub.id=b.owner_id
+    JOIN bot_versions va ON va.id=NEW.bot_a_version_id AND va.bot_id=a.id
+    JOIN bot_versions vb ON vb.id=NEW.bot_b_version_id AND vb.bot_id=b.id
+    JOIN auto_match_decisions d ON d.id=NEW.decision_id
+    WHERE a.game_id=NEW.game_id AND b.game_id=NEW.game_id
+      AND a.owner_id<>b.owner_id
+      AND a.is_active=1 AND b.is_active=1
+      AND ua.is_active=1 AND ub.is_active=1
+      AND a.is_builtin=0 AND b.is_builtin=0
+      AND a.format='elf' AND b.format='elf'
+      AND a.os='linux' AND b.os='linux'
+      AND a.arch='amd64' AND b.arch='amd64'
+      AND va.format='elf' AND vb.format='elf'
+      AND va.os='linux' AND vb.os='linux'
+      AND va.arch='amd64' AND vb.arch='amd64'
+      AND va.binary_path<>'' AND vb.binary_path<>''
+      AND d.game_id=NEW.game_id
+      AND d.bot_a_id=NEW.bot_a_id AND d.bot_b_id=NEW.bot_b_id
+      AND d.bot_a_version_id=NEW.bot_a_version_id
+      AND d.bot_b_version_id=NEW.bot_b_version_id
+      AND d.lifecycle='queued'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid auto-match queue identity');
+END;
 -- 每游戏对局表的索引由 db.py _migrate 的 _PER_GAME_INDEX_COLS 循环建（注册表派生，
 -- 覆盖第 4 游戏），不在此字面硬编码（避免重复索引 + 加游戏漏建）。
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -532,7 +848,7 @@ PUBLIC_MATCH_ERROR_FALLBACK = "platform_error"
 TYPE_CHALLENGE = "challenge"
 TYPE_TABLE = "table"
 TYPE_CONTEST = "contest"
-TYPE_LADDER = "ladder"  # 闲时自动对局维护天梯榜（系统发起，无 owner）
+TYPE_LADDER = "ladder"  # 持续自动排位维护天梯榜（系统发起，无 owner）
 TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 Glicko）
 
 # 社交目标类型。comments / likes 是多态引用，SQLite 无法为 target_id 声明
@@ -545,11 +861,6 @@ LIKE_TARGET_TYPES = frozenset({"match", "bot", "comment"})
 # 不会与此前缀冲突；哨兵与回填在同一 Store 初始化事务提交。
 MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL = "__migration__:rating_settlements:v1"
 
-# auto_match_daily_claims 首次升级回填哨兵：只在表首次启用时把历史上唯一的
-# ``owner_id IS NULL + match_type='ladder'`` 系统自动对局纳入当日配额；后续仅
-# 显式 auto-match 创建路径写 claim，避免把其他内部/测试 ladder 误计。
-AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL = "__migration__:auto_match_daily_claims:v1"
-
 # 比赛状态
 CONTEST_DRAFT = "draft"
 CONTEST_OPEN = "open"
@@ -559,7 +870,7 @@ CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
 
-# 以下 runtime/auto-match 键只标识旧库历史记录；现行值来自 runtime/config.py。
+# 以下 runtime 键只标识旧库历史记录；现行值来自 runtime/config.py。
 SETTING_CONTEST_SCHEDULER_ENABLED = "contest_scheduler_enabled"
 SETTING_CONTEST_SCHEDULER_INTERVAL_SEC = "contest_scheduler_interval_sec"
 
@@ -615,16 +926,6 @@ SETTING_CONTEST_REST = "contest_default_rest_minutes"
 SETTING_CONTEST_TEMPLATES = "contest_templates"
 SETTING_FULL_RR_MAX_N = "full_rr_max_n"
 
-# 闲时自动对局（维护天梯榜）
-SETTING_AUTO_MATCH_ENABLED = "auto_match_enabled"          # "1"|"0"
-SETTING_AUTO_MATCH_INTERVAL_SEC = "auto_match_interval_sec"  # 轮询间隔
-SETTING_AUTO_MATCH_MIN_IDLE_SEC = "auto_match_min_idle_sec"  # 连续空闲 N 秒才触发
-SETTING_AUTO_MATCH_BOT_COOLDOWN = "auto_match_bot_cooldown"  # 同 Bot 两场间隔下限(秒)
-SETTING_AUTO_MATCH_STALE_SEC = "auto_match_stale_sec"      # last_played_at 超此视为陈旧（0=不限）
-SETTING_AUTO_MATCH_RESERVE_SLOTS = "auto_match_reserve_slots"  # 为用户挑战预留并发槽
-SETTING_AUTO_MATCH_PLACEMENT_GAMES = "auto_match_placement_games"  # 新 bot 定级赛场次（前N场优先）
-SETTING_AUTO_MATCH_MAX_PER_ROUND = "auto_match_max_per_round"  # 每轮最多补几场
-SETTING_AUTO_MATCH_DAILY_CAP = "auto_match_daily_cap"      # 每日后台对局总量上限
 
 # 唯一可执行目标。PE/Mach-O/脚本及其他 ELF 架构仅可作为历史元数据读取，
 # 不属于现行 schema 的可写值，也绝不能进入 runner。

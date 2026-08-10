@@ -9,6 +9,9 @@ export interface MatchSeatRow {
   reason?: string
   status?: string
   game_id?: string
+  /** 创建事务冻结的天梯资格；中性局也会有 settlement marker。 */
+  rated?: boolean
+  rating_reason?: string
   /** 1 表示 Bot 故障被判负；平台故障的 aborted 对局不设置。 */
   technical_loss?: number
   bot_a_id?: number

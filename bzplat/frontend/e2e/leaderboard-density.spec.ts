@@ -84,6 +84,52 @@ function mockedLeaderboard(gameId: string) {
   }
 }
 
+function mockedAutoMatchQueue(gameId: string) {
+  const bot = (index: number) => ({
+    id: 90_000 + index,
+    name: `${gameId}-queue-${index}`,
+    display_name: index % 2 === 1
+      ? `自动排位超长 Bot-${'队列长文本'.repeat(18)}`
+      : `${gameId.toUpperCase()} Queue Bot ${index}`,
+    owner: {
+      username: index % 2 === 1 ? `queue_${'long_owner_'.repeat(10)}` : `queue-owner-${index}`,
+      display_name: '',
+    },
+    rating: 1600 + index * 12,
+    matches_played: index % 2 === 1 ? 4 : 20,
+    is_placement: index % 2 === 1,
+    placement_remaining: index % 2 === 1 ? 6 : 0,
+  })
+  const row = (id: number, status: 'queued' | 'dispatched', position: number) => ({
+    id,
+    status,
+    position,
+    game_id: gameId,
+    match_id: status === 'dispatched' ? `${gameId}-active-auto-match` : null,
+    match_status: status === 'dispatched' ? 'running' : null,
+    started_at: status === 'dispatched' ? '2026-08-10T12:31:00' : null,
+    created_at: '2026-08-10T12:30:00',
+    reason: `正式通道 · owner/Bot 轮转 · ${'公平说明'.repeat(8)}`,
+    bot_a: bot(id * 2),
+    bot_b: bot(id * 2 + 1),
+  })
+  return {
+    game_id: gameId,
+    enabled: true,
+    effective_enabled: true,
+    capability_enabled: true,
+    paused: false,
+    pause_reason: '',
+    rating_projection_ready: true,
+    dispatcher_leader: true,
+    placement_required: 10,
+    policy: { serial: true, lookahead: 6, foreground_slot_reserved: true },
+    active: row(1, 'dispatched', 0),
+    active_game_id: gameId,
+    upcoming: [row(2, 'queued', 1), row(3, 'queued', 2)],
+  }
+}
+
 async function openAs(browser: Browser, baseURL: string, role: Role, viewport: { width: number; height: number }) {
   const context = await browser.newContext({
     baseURL,
@@ -108,6 +154,7 @@ for (const viewport of VIEWPORTS) {
       const { context, page } = await openAs(browser, baseURL!, role, viewport)
       const monitor = monitorBrowser(page)
       const leaderboardRequests = new Map<string, number>()
+      const queueRequests = new Map<string, number>()
       const tierRequests = new Map<string, number>()
 
       await page.route('**/api/leaderboard?**', async (route) => {
@@ -129,6 +176,16 @@ for (const viewport of VIEWPORTS) {
         const gameId = new URL(route.request().url()).searchParams.get('game_id') || ''
         tierRequests.set(gameId, (tierRequests.get(gameId) ?? 0) + 1)
         await route.continue()
+      })
+      await page.route('**/api/auto-match/queue?**', async (route) => {
+        const gameId = new URL(route.request().url()).searchParams.get('game_id') || ''
+        expect(['holdem', 'gomoku', 'pencil']).toContain(gameId)
+        queueRequests.set(gameId, (queueRequests.get(gameId) ?? 0) + 1)
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(mockedAutoMatchQueue(gameId)),
+        })
       })
 
       const authProbe = page.waitForResponse((response) => {
@@ -158,6 +215,14 @@ for (const viewport of VIEWPORTS) {
       await expect(main).toContainText('正式榜')
       await expect(main).toContainText('定级中')
       await expect(main).toContainText('最近更新')
+      const queuePanel = page.getByTestId('auto-match-queue-panel')
+      await expect(queuePanel).toBeVisible()
+      await expect(queuePanel).toContainText('正在进行 · 德州扑克')
+      await expect(queuePanel).toContainText('即将进行')
+      await expect(queuePanel.getByRole('link', { name: '进入观赛' })).toHaveAttribute(
+        'href',
+        '#/match/holdem-active-auto-match',
+      )
       const totalValue = main.getByText('Bot 总数', { exact: true }).locator('..').locator('dd')
       await expect(totalValue).toHaveText('12')
       const holdemTab = page.getByRole('tab', { name: '德州扑克', exact: true })
@@ -217,10 +282,15 @@ for (const viewport of VIEWPORTS) {
       await expect(holdemTab).toHaveAttribute('aria-selected', 'false')
       await expect(totalValue).toHaveText('12')
       await expect(activeLayout.getByText('GOMOKU Bot 2', { exact: true })).toBeVisible()
+      await expect(queuePanel).toContainText('正在进行 · 五子棋')
+      await expect(queuePanel).not.toContainText('正在进行 · 德州扑克')
+      await assertNoHorizontalOverflow(page, `${role}/${viewport.name}/queue-switched`)
       await monitor.settle()
 
       expect(leaderboardRequests.get('holdem')).toBeGreaterThanOrEqual(1)
       expect(leaderboardRequests.get('gomoku')).toBeGreaterThanOrEqual(1)
+      expect(queueRequests.get('holdem')).toBeGreaterThanOrEqual(1)
+      expect(queueRequests.get('gomoku')).toBeGreaterThanOrEqual(1)
       expect(tierRequests.get('holdem'), `${role} holdem tiers should be singleflight`).toBe(1)
       expect(tierRequests.get('gomoku'), `${role} gomoku tiers should be singleflight`).toBe(1)
       await monitor.expectClean()

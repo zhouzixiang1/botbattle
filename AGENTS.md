@@ -94,7 +94,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
 - **常量按职责集中**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）及历史 `platform_settings` 键名集中在 `bzplat/backend/store/schema.py`；生产运行参数集中在 `bzplat/backend/runtime/config.py`，资源硬顶及机器 ceiling 计算集中在 `runtime/limits.py`。禁止在消费者中散落同义字面量。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
-- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定默认对局并发 2（再由 `runtime/limits.py` 按 `max(1, cpu//4)` ceiling 钳制）、action timeout、auto-match、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；`runtime/limits.py` 固定每 Bot `--cpus=1` / `--memory=512m`。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
+- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定默认对局并发 2（再由 `runtime/limits.py` 按 `max(1, cpu//4)` ceiling 钳制）、action timeout、自动排位定级阈值、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；自动排位仅 `auto_match_control` 管理员总开关可变，公平策略/队列长度/退避不是运行时参数；`runtime/limits.py` 固定每 Bot `--cpus=1` / `--memory=512m`。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
 
 ## 架构分层（编辑时切勿越界）
 
@@ -128,7 +128,7 @@ store/      SQLite + schema.py(常量唯一来源；fresh 实体 game_id 必填�
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
 logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot stderr 捕获），cli serve 接入
-matches/    后台对局：auto_matcher（闲时自动调度，ladder 类型，stale/placement/daily-cap 增强）
+matches/    后台对局：auto_matcher（持久公平队列、全局串行 ladder、游戏/通道/owner/Bot 轮转、单一管理员总开关）
 ```
 
 **前端架构（bzplat/frontend，React 19 + Vite 8 + Tailwind v4 + shadcn/ui）**：

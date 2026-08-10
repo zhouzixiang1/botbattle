@@ -1,231 +1,362 @@
-"""闲时自动对局调度器：系统空闲时自动安排 bot 对战以维护天梯榜。
+"""Persistent, fair and globally serial automatic ranking queue.
 
-设计：
-- 单进程单事件循环（uvicorn factory，无 workers），后台 asyncio 任务周期轮询。
-- 仅当存在空闲并发槽（已为用户挑战预留 reserve_slots）且连续空闲达 min_idle_sec 才触发。
-- 配对策略：陈旧度优先（last_played_at 最旧 / 从未赛）+ rating 就近（Swiss 式）。
-- 节流：同一 bot 两场间隔不低于 bot_cooldown；内存 recent_pairs 去重近期配对。
-- owner_user_id=None（系统发起，无 owner）；match_type=ladder，更新全局 Glicko-2 评分。
-
-不与 orchestrator 的并发上限冲突：只使用全局 admission 的剩余槽位，已接纳但尚未
-开始执行的对局同样占位，不能在信号量外继续堆积任务。
+The scheduler continuously maintains a small lookahead queue and dispatches at
+most one automatic ladder match.  Foreground challenges/contests still use the
+orchestrator's existing global admission, with one slot permanently left free
+for them.  SQLite owns queue identity, cross-process dispatch exclusivity and
+match creation; the asyncio task only drives that durable state machine.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
+import secrets
+from datetime import datetime
 from typing import Any
 
-from bzplat.backend.runtime.config import (
-    AUTO_MATCH_CONFIG,
-    AutoMatchConfig,
-)
-from bzplat.backend.store import AutoMatchDailyCapReached
-from bzplat.backend.store.schema import TYPE_LADDER, VALID_GAME_IDS
+from bzplat.backend.runtime.config import AUTO_MATCH_PLACEMENT_REQUIRED
 
 logger = logging.getLogger(__name__)
 
+# Fixed product policy, deliberately private and not a runtime settings surface.
+_QUEUE_LOOKAHEAD = 6
+_FOREGROUND_RESERVED_SLOTS = 1
+_FAILSAFE_WAKE_SECONDS = 1.0
+_DISPATCHER_LEASE_SECONDS = 30
+
 
 class AutoMatchScheduler:
-    """后台闲时自动对局调度器。"""
+    """Drive the durable queue; ``capability_enabled=False`` is the QA guard."""
 
     def __init__(
         self,
         orch: Any,
         store: Any,
         *,
-        config: AutoMatchConfig = AUTO_MATCH_CONFIG,
+        capability_enabled: bool = True,
     ) -> None:
         self.orch = orch
         self.store = store
-        self.config = config
-        # 内存节流状态
-        self._bot_last_scheduled: dict[int, float] = {}  # bot_id -> monotonic ts
-        self._recent_pairs: dict[tuple[int, int], float] = {}  # (min,max) -> ts
-        # 连续空闲计时（monotonic）
-        self._idle_since: float | None = None
+        self.capability_enabled = bool(capability_enabled)
+        self._wake = asyncio.Event()
+        self._last_pause_reason = ""
+        self._dispatcher_token = secrets.token_hex(24)
+        self._leader = False
+
     @property
-    def daily_count(self) -> int:
-        """今日系统 auto-match 场数（DB 权威，供 admin 可见性展示）。"""
-        return self.store.auto_match_daily_status()[1]
+    def configured_enabled(self) -> bool:
+        return bool(self.store.get_auto_match_enabled())
 
-    # ------------------------------------------------------------------ config
-    def _cfg(self) -> dict[str, Any]:
-        """Return the immutable code configuration used by this scheduler."""
-        return self.config.as_dict()
+    @property
+    def effective_enabled(self) -> bool:
+        return self.capability_enabled and self.configured_enabled
 
-    def _free_slots(self, reserve: int) -> int:
-        """Return slots eligible for background work after the user reserve.
+    def wake(self) -> None:
+        """Wake promptly after a match finishes or the administrator toggles."""
+        self._wake.set()
 
-        New orchestrators expose ``available_bot_slots`` as the global admission
-        source, including work already admitted but still waiting for execution.
-        The fallback is deliberately conservative for older/test orchestrators:
-        every tracked task counts as admitted, so background scheduling cannot
-        pile up merely because ``_bot_running`` has not increased yet.
-        """
+    def close(self) -> None:
+        """Release an idle lease; an active claim keeps it until natural expiry."""
+        if not self._leader:
+            return
+        if any(
+            row.get("status") == "dispatched"
+            for row in self.store.list_auto_match_queue()
+        ):
+            return
+        self.store.release_auto_match_dispatcher(self._dispatcher_token)
+        self._leader = False
+
+    def _available_bot_slots(self) -> int:
         available = getattr(self.orch, "available_bot_slots", None)
         if callable(available):
-            slots = int(available())
-        else:
-            running = int(getattr(self.orch, "_bot_running", 0) or 0)
-            tasks = getattr(self.orch, "_tasks", {}) or {}
-            admitted = max(running, len(tasks))
-            slots = int(self.orch.max_concurrent) - admitted
-        return max(0, slots - max(0, int(reserve)))
+            return max(0, int(available()))
+        tasks = getattr(self.orch, "_tasks", {}) or {}
+        admitted = max(int(getattr(self.orch, "_bot_running", 0) or 0), len(tasks))
+        return max(0, int(getattr(self.orch, "max_concurrent", 0)) - admitted)
 
-    # ------------------------------------------------------------------ loop
+    def _has_dispatch_capacity(self) -> bool:
+        # The automatic queue never consumes the foreground reserve.  With a
+        # one-slot machine this correctly pauses instead of starving users.
+        return self._available_bot_slots() > _FOREGROUND_RESERVED_SLOTS
+
+    @staticmethod
+    def _new_match_id() -> str:
+        return datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
+
     async def loop(self) -> None:
-        """周期轮询：闲时则挑配对并 challenge。"""
+        """Event-driven loop with a one-second crash/race fail-safe."""
         while True:
+            # Clear before work so a completion/toggle arriving during run_once
+            # remains set and starts the next convergence turn immediately.
+            # Clearing after run_once would lose precisely that wake and turn the
+            # one-second fail-safe back into the normal dispatch latency.
+            self._wake.clear()
             try:
-                cfg = self._cfg()
-                await asyncio.sleep(max(1, cfg["interval"]))
-                if not cfg["enabled"]:
-                    self._idle_since = None
-                    continue
-                idle = self._is_idle(cfg)
-                if idle:
-                    await self._schedule_some(cfg)
-                # 注意：不在 else 里重置 _idle_since——_is_idle 内部管理：
-                # free<=0 时重置（真忙）；计时中（第一轮）保留供下一轮判断。
+                await self.run_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - 调度器不得因单轮异常退出
-                logger.exception("auto-match loop iteration failed")
-
-    def _is_idle(self, cfg: dict[str, Any]) -> bool:
-        """有预留后的空闲并发槽，且连续空闲达 min_idle 秒。
-
-        使用 orchestrator 的全局 admission 可用槽，而非只看已开始运行数。赛事或
-        用户挑战已接纳但尚未占用执行槽时也必须计入，否则 auto-match 会继续超额入队。
-        """
-        free = self._free_slots(cfg["reserve"])
-        if free <= 0:
-            self._idle_since = None
-            return False
-        now = time.monotonic()
-        if self._idle_since is None:
-            self._idle_since = now
-            return False  # 本轮开始计时，下一轮才可能触发
-        return (now - self._idle_since) >= cfg["min_idle"]
-
-    async def _schedule_some(self, cfg: dict[str, Any]) -> int:
-        """在空闲槽内尽量安排对局；返回本轮安排场数。"""
-        _local_day, daily_count = self.store.auto_match_daily_status()
-        # 每日总量上限
-        if cfg["daily_cap"] > 0 and daily_count >= cfg["daily_cap"]:
-            logger.info("auto-match daily cap reached %d/%d，今日停止", daily_count, cfg["daily_cap"])
-            return 0
-        free = self._free_slots(cfg["reserve"])
-        if free <= 0:
-            return 0
-        # 本轮上限：空闲槽、每轮上限、每日剩余 取最小
-        max_this_round = min(free, cfg["max_per_round"] if cfg["max_per_round"] > 0 else free)
-        if cfg["daily_cap"] > 0:
-            max_this_round = min(max_this_round, cfg["daily_cap"] - daily_count)
-        if max_this_round <= 0:
-            return 0
-        now = time.monotonic()
-        placement = cfg["placement_games"]
-        # 定级期 bot 用更短 cooldown，加快定级
-        placement_cd = max(30, cfg["cooldown"] // 10)
-        scheduled = 0
-        for gid in VALID_GAME_IDS:
-            if scheduled >= max_this_round:
-                break
-            candidates = self.store.least_recently_played(
-                gid,
-                limit=64,
-                stale_since=cfg["stale"] if cfg["stale"] > 0 else None,
-                placement_games=placement if placement > 0 else None,
-            )
-            if len(candidates) < 2:
-                continue
-            # 过滤：cooldown 内的 bot 跳过（定级期 bot 用短 cooldown）
-            def _cd_for(b: dict) -> int:
-                in_placement = placement > 0 and int(b.get("matches_played") or 0) < placement
-                return placement_cd if in_placement else cfg["cooldown"]
-
-            avail = [
-                b for b in candidates
-                if (now - self._bot_last_scheduled.get(b["bot_id"], 0.0)) >= _cd_for(b)
-            ]
-            if len(avail) < 2:
-                continue
-            # 取最优先的 A（avail 已按定级优先+陈旧度排序），按 rating 就近选 B
-            a = avail[0]
-            partner = self._pick_partner(a, avail[1:], now, cfg["cooldown"])
-            if partner is None:
-                continue
+            except Exception:  # noqa: BLE001 - one bad turn must not kill service
+                self._last_pause_reason = "调度器本轮异常，正在重试"
+                logger.exception("auto-match fair queue iteration failed")
             try:
-                await self.orch.challenge(
-                    a["bot_id"],
-                    partner["bot_id"],
-                    owner_user_id=None,
-                    match_type=TYPE_LADDER,
-                    game_id=gid,
-                    auto_match_daily_cap=cfg["daily_cap"],
+                await asyncio.wait_for(
+                    self._wake.wait(), timeout=_FAILSAFE_WAKE_SECONDS
                 )
-            except AutoMatchDailyCapReached as exc:
-                logger.info(
-                    "auto-match daily cap reached %d/%d (%s)，今日停止",
-                    exc.count,
-                    exc.cap,
-                    exc.local_day,
-                )
-                return scheduled
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "auto-match challenge failed %s vs %s",
-                    a.get("bot_name"),
-                    partner.get("bot_name"),
-                    exc_info=True,
-                )
-                continue
-            self._bot_last_scheduled[a["bot_id"]] = now
-            self._bot_last_scheduled[partner["bot_id"]] = now
-            self._recent_pairs[
-                (min(a["bot_id"], partner["bot_id"]), max(a["bot_id"], partner["bot_id"]))
-            ] = now
-            self._evict_recent(now, cfg["cooldown"])
-            scheduled += 1
-            _actual_day, daily_count = self.store.auto_match_daily_status()
-            a_pl = int(a.get("matches_played") or 0) < placement if placement > 0 else False
-            logger.info(
-                "auto-match scheduled: %s(%s) vs %s(%s) [%s] placement=%s daily=%d/%d",
-                a.get("bot_name"), a["bot_id"], partner.get("bot_name"), partner["bot_id"],
-                gid, a_pl, daily_count, cfg["daily_cap"],
+            except TimeoutError:
+                pass
+
+    def _ensure_dispatcher_leadership(self) -> dict:
+        lease = self.store.acquire_auto_match_dispatcher(
+            self._dispatcher_token,
+            lease_seconds=_DISPATCHER_LEASE_SECONDS,
+        )
+        self._leader = bool(lease.get("owned"))
+        if self._leader and lease.get("changed_owner"):
+            lease["takeover"] = self.store.recover_auto_match_dispatcher_takeover(
+                dispatcher_token=self._dispatcher_token
             )
-        return scheduled
+        return lease
 
-    def _pick_partner(
-        self, a: dict, rest: list[dict], now: float, cooldown: int
-    ) -> dict | None:
-        """从 rest 中按 rating 就近选 B，跳过近期已配对与自身。"""
-        best: dict | None = None
-        best_gap = float("inf")
-        key_a = a["bot_id"]
-        a_rating = float(a.get("rating") or 1500.0)
-        for b in rest:
-            # P2-12 修复：显式排除自身（原依赖 rest 不含 a 的隐式假设，防御性加固）。
-            if b["bot_id"] == key_a:
-                continue
-            pair = (min(key_a, b["bot_id"]), max(key_a, b["bot_id"]))
-            last = self._recent_pairs.get(pair)
-            if last is not None and (now - last) < cooldown:
-                continue
-            gap = abs(a_rating - float(b.get("rating") or 1500.0))
-            if gap < best_gap:
-                best_gap = gap
-                best = b
-        return best
+    async def _converge_terminal_rows(self) -> dict:
+        state = self.store.reconcile_auto_match_queue(
+            dispatcher_token=self._dispatcher_token
+        )
+        if state.get("outcome") == "not_leader":
+            return state
+        if int(state.get("waiting_settlement") or 0) > 0:
+            # Uses the orchestrator's existing global settlement order lock and
+            # exactly-once marker transaction.  A queue row is never deleted
+            # merely because the match says completed.
+            await self.orch.recover_unsettled_match_ratings()
+            state = self.store.reconcile_auto_match_queue(
+                dispatcher_token=self._dispatcher_token
+            )
+        return state
 
-    def _evict_recent(self, now: float, cooldown: int) -> None:
-        """清理过期的 recent_pairs 条目，避免无界增长。"""
-        stale = [k for k, t in self._recent_pairs.items() if (now - t) > cooldown * 4]
-        for k in stale:
-            self._recent_pairs.pop(k, None)
+    async def run_once(self) -> dict:
+        """Converge, refill and (if capacity permits) dispatch exactly one match."""
+        if not self.capability_enabled:
+            self._last_pause_reason = "隔离 QA 实例强制关闭自动排位"
+            return {"outcome": "qa_disabled"}
+        lease = self._ensure_dispatcher_leadership()
+        if not lease.get("owned"):
+            self._last_pause_reason = "另一服务进程持有自动排位调度租约"
+            return {"outcome": "standby", "lease": lease}
+        reconciled = await self._converge_terminal_rows()
+        if not self.configured_enabled:
+            self._last_pause_reason = "管理员已关闭自动排位"
+            return {"outcome": "disabled", "reconciled": reconciled}
+
+        refill = self.store.refill_auto_match_queue(
+            target_queued=_QUEUE_LOOKAHEAD,
+            placement_required=AUTO_MATCH_PLACEMENT_REQUIRED,
+            dispatcher_token=self._dispatcher_token,
+        )
+        if refill.get("outcome") in {
+            "disabled", "backoff", "not_leader", "rating_unverified"
+        }:
+            self._last_pause_reason = (
+                "管理员已关闭自动排位"
+                if refill.get("outcome") == "disabled"
+                else "排行榜投影尚未完成离线重建与验证"
+                if refill.get("outcome") == "rating_unverified"
+                else "平台故障退避中"
+                if refill.get("outcome") == "backoff"
+                else "另一服务进程持有自动排位调度租约"
+            )
+            return {
+                "outcome": refill.get("outcome"),
+                "refill": refill,
+                "reconciled": reconciled,
+            }
+        rows = self.store.list_auto_match_queue()
+        if any(row.get("status") == "dispatched" for row in rows):
+            self._last_pause_reason = ""
+            return {"outcome": "active", "refill": refill, "reconciled": reconciled}
+        if not any(row.get("status") == "queued" for row in rows):
+            self._last_pause_reason = "同游戏、不同所有者的可用 Bot 不足"
+            return {"outcome": "insufficient_pool", "refill": refill}
+        if not self._has_dispatch_capacity():
+            self._last_pause_reason = "正在为用户挑战或赛事保留执行容量"
+            return {"outcome": "capacity", "refill": refill}
+
+        match_id = self._new_match_id()
+        # Admission is the first authoritative claim.  No foreground coroutine
+        # can take this token between DB creation and start_prepared_match.
+        try:
+            self.orch.reserve_prepared_match_slot(
+                match_id, keep_free=_FOREGROUND_RESERVED_SLOTS
+            )
+        except Exception:
+            self._last_pause_reason = "正在为用户挑战或赛事保留执行容量"
+            return {"outcome": "capacity_race", "refill": refill}
+        try:
+            claim = self.store.claim_next_auto_match(
+                match_id, dispatcher_token=self._dispatcher_token
+            )
+        except Exception:
+            self.orch.release_prepared_match_slot(match_id)
+            raise
+        if claim.get("outcome") != "claimed":
+            self.orch.release_prepared_match_slot(match_id)
+            self._last_pause_reason = str(claim.get("reason") or "队列等待中")
+            return {"outcome": claim.get("outcome"), "claim": claim, "refill": refill}
+        try:
+            # claim already atomically created pending match/index/replay.  This
+            # call reserves the in-process admission token and starts its task.
+            self.orch.start_prepared_match(match_id)
+        except Exception:
+            logger.exception("auto-match claimed match could not start match=%s", match_id)
+            rolled_back = self.store.rollback_auto_match_claim(
+                match_id,
+                dispatcher_token=self._dispatcher_token,
+                reason="start_failure",
+            )
+            self.orch.release_prepared_match_slot(match_id)
+            if not rolled_back:
+                raise
+            self._last_pause_reason = "启动失败，自动排位已进入退避"
+            return {
+                "outcome": "start_failure",
+                "match_id": match_id,
+                "reconciled": reconciled,
+            }
+
+        # Keep a fixed upcoming horizon while the claimed Bots remain represented
+        # by the dispatched row and therefore cannot be selected again.
+        refill_after = self.store.refill_auto_match_queue(
+            target_queued=_QUEUE_LOOKAHEAD,
+            placement_required=AUTO_MATCH_PLACEMENT_REQUIRED,
+            dispatcher_token=self._dispatcher_token,
+        )
+        self._last_pause_reason = ""
+        logger.info(
+            "auto-match dispatched queue_id=%s match=%s game=%s upcoming=%s",
+            claim.get("queue_id"),
+            match_id,
+            claim.get("game_id"),
+            refill_after.get("queued"),
+        )
+        return {
+            "outcome": "claimed",
+            "claim": claim,
+            "refill": refill_after,
+            "reconciled": reconciled,
+        }
+
+    async def on_match_done(self, match_id: str) -> None:
+        """Converge an auto terminal, and always wake for newly freed capacity."""
+        # ``_finish_match_task`` invokes this after completed post-processing and
+        # after releasing global admission.  For non-auto matches reconciliation
+        # is a cheap no-op but the wake avoids waiting for the fail-safe tick.
+        if self.capability_enabled:
+            lease = self._ensure_dispatcher_leadership()
+            if lease.get("owned"):
+                await self._converge_terminal_rows()
+        self.wake()
+
+    @staticmethod
+    def _public_bot(row: dict, seat: str) -> dict:
+        played = max(0, int(row.get(f"bot_{seat}_matches_played") or 0))
+        return {
+            "id": int(row[f"bot_{seat}_id"]),
+            "name": row.get(f"bot_{seat}_name") or "",
+            "display_name": row.get(f"bot_{seat}_display") or "",
+            "owner": {
+                "username": row.get(f"bot_{seat}_owner") or "",
+                "display_name": row.get(f"bot_{seat}_owner_display") or "",
+            },
+            "rating": float(row.get(f"bot_{seat}_rating") or 1500.0),
+            "matches_played": played,
+            "is_placement": played < AUTO_MATCH_PLACEMENT_REQUIRED,
+            "placement_remaining": max(0, AUTO_MATCH_PLACEMENT_REQUIRED - played),
+        }
+
+    @classmethod
+    def _public_row(cls, row: dict) -> dict:
+        return {
+            "id": int(row["id"]),
+            "status": row["status"],
+            "position": int(row.get("position") or 0),
+            "game_id": row["game_id"],
+            "match_id": row.get("match_id"),
+            "match_status": row.get("match_status"),
+            "started_at": row.get("match_started_at"),
+            "created_at": row.get("created_at"),
+            "reason": row.get("selection_reason") or "公平队列",
+            "requested_lane": row.get("requested_lane"),
+            "lane": row.get("actual_lane"),
+            "fallback_reason": row.get("fallback_reason") or "",
+            "bot_a": cls._public_bot(row, "a"),
+            "bot_b": cls._public_bot(row, "b"),
+        }
+
+    def public_snapshot(self, *, game_id: str | None = None) -> dict:
+        all_rows = self.store.list_auto_match_queue()
+        fair_state = self.store.get_auto_match_fair_state()
+        rating_projection = self.store.rating_projection_status()
+        selected = [
+            row for row in all_rows
+            if game_id is None or row.get("game_id") == game_id
+        ]
+        active_global = next(
+            (row for row in all_rows if row.get("status") == "dispatched"), None
+        )
+        active_selected = next(
+            (row for row in selected if row.get("status") == "dispatched"), None
+        )
+        upcoming = [row for row in selected if row.get("status") == "queued"]
+        configured = self.configured_enabled
+        effective = self.capability_enabled and configured
+        if not self.capability_enabled:
+            paused = True
+            pause_reason = "隔离 QA 实例强制关闭自动排位"
+        elif not configured:
+            paused = True
+            pause_reason = "管理员已关闭自动排位"
+        elif not rating_projection.get("ready"):
+            paused = True
+            pause_reason = "排行榜投影尚未完成离线重建与验证"
+        elif fair_state.get("not_before") and str(fair_state["not_before"]) > datetime.now().isoformat(timespec="seconds"):
+            paused = True
+            pause_reason = "平台故障退避中，将自动恢复"
+        elif active_global is not None:
+            paused = False
+            pause_reason = ""
+        elif not upcoming and game_id is not None:
+            paused = True
+            pause_reason = "当前游戏暂无满足公平条件的待赛对局"
+        elif not all_rows:
+            paused = True
+            pause_reason = self._last_pause_reason or "可用 Bot 不足"
+        elif not self._has_dispatch_capacity():
+            paused = True
+            pause_reason = "正在为用户挑战或赛事保留执行容量"
+        else:
+            paused = False
+            pause_reason = ""
+        return {
+            "game_id": game_id,
+            "enabled": configured,
+            "effective_enabled": effective,
+            "capability_enabled": self.capability_enabled,
+            "dispatcher_leader": self._leader,
+            "paused": paused,
+            "pause_reason": pause_reason,
+            "not_before": fair_state.get("not_before"),
+            "platform_failures": int(fair_state.get("platform_failures") or 0),
+            "rating_projection_ready": bool(rating_projection.get("ready")),
+            "placement_required": AUTO_MATCH_PLACEMENT_REQUIRED,
+            "policy": {
+                "serial": True,
+                "lookahead": _QUEUE_LOOKAHEAD,
+                "foreground_slot_reserved": True,
+            },
+            "active": self._public_row(active_selected) if active_selected else None,
+            "active_game_id": active_global.get("game_id") if active_global else None,
+            "upcoming": [self._public_row(row) for row in upcoming],
+        }
 
 
 __all__ = ["AutoMatchScheduler"]

@@ -64,6 +64,16 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
 }
 
+const RATING_REASON_LABEL: Record<string, string> = {
+  eligible: '计入天梯',
+  same_owner: '同所有者调试 · 不计天梯',
+  self_play: '自博弈调试 · 不计天梯',
+  human: '人机对局 · 不计天梯',
+  contest: '赛事积分 · 不计天梯',
+  bot_missing: '历史 Bot 缺失 · 不计天梯',
+  owner_missing: '历史所有者缺失 · 不计天梯',
+}
+
 export default function MatchViewer() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -476,6 +486,11 @@ export default function MatchViewer() {
         )}
         {typeBadge && (
           <Badge variant="outline" className={`text-[10px] ${typeBadge.cls}`}>{typeBadge.label}</Badge>
+        )}
+        {typeof match?.rated === 'boolean' && (
+          <Badge variant={match.rated ? 'default' : 'secondary'} className="max-w-full whitespace-normal text-[10px]">
+            {RATING_REASON_LABEL[match.rating_reason || ''] || (match.rated ? '计入天梯' : '不计天梯')}
+          </Badge>
         )}
         {/* 状态徽标：优先用 DB 权威字段 match.status（completed/aborted/running/pending），
             回退到本地连接态（connecting/live/match_end/error/replay）。

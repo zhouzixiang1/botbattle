@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Activity,
@@ -12,6 +12,10 @@ import {
   Trophy,
 } from 'lucide-react'
 import PageStub from '@/components/PageStub'
+import {
+  AutoMatchQueuePanel,
+  type AutoMatchQueueSnapshot,
+} from '@/components/auto-match-queue'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -292,6 +296,10 @@ export default function Leaderboard() {
   const [gameId, setGameId] = useState<GameId>('holdem')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
+  const [queue, setQueue] = useState<AutoMatchQueueSnapshot | null>(null)
+  const [queueLoading, setQueueLoading] = useState(true)
+  const [queueError, setQueueError] = useState('')
+  const queueRequest = useRef(0)
   const perPage = 50
 
   useEffect(() => {
@@ -327,6 +335,35 @@ export default function Leaderboard() {
     }
   }, [gameId, page])
 
+  useEffect(() => {
+    let disposed = false
+    const loadQueue = async (initial = false) => {
+      const requestId = ++queueRequest.current
+      if (initial) setQueueLoading(true)
+      try {
+        const data = await apiGet<AutoMatchQueueSnapshot>(
+          `/api/auto-match/queue?game_id=${encodeURIComponent(gameId)}`,
+        )
+        if (disposed || requestId !== queueRequest.current) return
+        if (data.game_id !== gameId) throw new Error('自动排位队列游戏维度不一致')
+        setQueue(data)
+        setQueueError('')
+      } catch (reason) {
+        if (disposed || requestId !== queueRequest.current) return
+        setQueueError(errMsg(reason, '自动排位队列加载失败'))
+      } finally {
+        if (!disposed && requestId === queueRequest.current) setQueueLoading(false)
+      }
+    }
+    void loadQueue(true)
+    const timer = window.setInterval(() => { void loadQueue(false) }, 3_000)
+    return () => {
+      disposed = true
+      queueRequest.current += 1
+      window.clearInterval(timer)
+    }
+  }, [gameId])
+
   const changeGame = (next: GameId) => {
     if (next === gameId) return
     // 游戏维度切换时旧概览不再具有任何语义。先同步清空再发新请求，避免
@@ -335,6 +372,10 @@ export default function Leaderboard() {
     setSummary(EMPTY_SUMMARY)
     setPlacementRequired(0)
     setTotal(0)
+    setQueue(null)
+    setQueueError('')
+    setQueueLoading(true)
+    queueRequest.current += 1
     setError('')
     setLoading(true)
     setGameId(next)
@@ -391,6 +432,14 @@ export default function Leaderboard() {
           />
         </dl>
       </Card>
+
+      <AutoMatchQueuePanel
+        snapshot={queue}
+        loading={queueLoading}
+        error={queueError}
+        maxUpcoming={4}
+        className="mb-3"
+      />
 
       {loading ? (
         <Card className="py-4"><Loading /></Card>

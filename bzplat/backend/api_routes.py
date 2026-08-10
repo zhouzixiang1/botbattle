@@ -37,7 +37,7 @@ from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches import BotCapacityError, MatchOrchestrator
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
-    AUTO_MATCH_CONFIG,
+    AUTO_MATCH_PLACEMENT_REQUIRED,
     CONFIGURATION_SOURCE,
     CONTEST_SCHEDULER_CONFIG,
     FULL_RR_MAX_N,
@@ -95,7 +95,7 @@ def _with_bot_runnable(bot: dict) -> dict:
 def _with_placement_status(row: dict) -> dict:
     """Attach the code-owned placement contract to one rating-bearing row."""
     public = dict(row)
-    required = max(0, int(AUTO_MATCH_CONFIG.placement_games))
+    required = max(0, int(AUTO_MATCH_PLACEMENT_REQUIRED))
     played = max(0, int(public.get("matches_played") or 0))
     public["placement_required"] = required
     public["placement_remaining"] = max(0, required - played)
@@ -817,7 +817,8 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
     audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=mid, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
-    return {"match_id": mid, "status": "pending"}
+    policy = _store(request).match_rating_policy(_store(request).get_match(mid) or {})
+    return {"match_id": mid, "status": "pending", **policy}
 
 
 class HumanChallengeBody(BaseModel):
@@ -1037,7 +1038,7 @@ def leaderboard(
         raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
     result = _store(request).list_leaderboard(
         game_id=normalized_game_id, limit=max(1, min(limit, 200)), page=page,
-        per_page=per_page, placement_games=AUTO_MATCH_CONFIG.placement_games,
+        per_page=per_page, placement_games=AUTO_MATCH_PLACEMENT_REQUIRED,
     )
     # 响应白名单投影：平台三元组、game_id 重复列、内部累计分差和波动率都不属于
     # 排行阅读信息；游戏维度只在响应顶层返回一次。
@@ -1062,6 +1063,24 @@ def leaderboard(
     return response
 
 
+@router.get("/api/auto-match/queue")
+def auto_match_queue(request: Request, game_id: str | None = None):
+    """Public, sanitized active/upcoming automatic-ranking queue."""
+    normalized: str | None = None
+    if game_id is not None:
+        normalized = game_id.strip().lower()
+        if not normalized:
+            raise HTTPException(400, "game_id 不可为空")
+        try:
+            game_registry.get(normalized)
+        except (KeyError, AttributeError) as exc:
+            raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
+    auto_matcher = getattr(request.app.state, "auto_matcher", None)
+    if auto_matcher is None:
+        raise HTTPException(503, "自动排位调度器未就绪")
+    return auto_matcher.public_snapshot(game_id=normalized)
+
+
 @router.get("/api/tiers")
 def tiers(game_id: str):
     """段位定义（公开，前端镜像校验用）。
@@ -1074,7 +1093,7 @@ def tiers(game_id: str):
         return {
             "tiers": _game_registry.all_tiers(gid),
             "game_id": gid,
-            "placement_required": AUTO_MATCH_CONFIG.placement_games,
+            "placement_required": AUTO_MATCH_PLACEMENT_REQUIRED,
         }
     except KeyError as exc:
         raise HTTPException(400, f"未知游戏: {gid!r}") from exc
@@ -2222,7 +2241,7 @@ def admin_patch_bot(
 @router.delete("/api/admin/bots/{bot_id}")
 def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)):
     store = _store(request)
-    # 业务规则：硬删前检查活跃引用。bots 表 FK 是 ON DELETE SET NULL（matches 与
+    # 业务规则：硬删前检查活跃/待结算引用。bots 表 FK 是 ON DELETE SET NULL（matches 与
     # contest_pairings/entries 均为 SET NULL，保历史）。硬删正在打(pending/running)对局或
     # 进行中赛事(published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→
     # _apply_ratings(None) 崩；②进行中赛事对阵/报名的 bot_id 变 NULL→对阵表残缺。
@@ -2234,7 +2253,7 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
     if not result["deleted"]:
         raise HTTPException(
             409,
-            f"bot 存在活跃引用，不能硬删：{refs}（进行中对局/赛事；请改用停用 is_active=0）",
+            f"bot 存在活跃或待结算引用，不能硬删：{refs}（对局/赛事；请改用停用 is_active=0）",
         )
     # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
     _bots(request).purge_bot_files(bot_id)
@@ -2583,28 +2602,23 @@ def admin_outbox(
     return {"outbox": rows, "total": len(rows)}
 
 
-# ── admin: runtime diagnostics（代码配置，只读）───────────────
+# ── admin: runtime diagnostics + 唯一自动排位总开关 ─────────
 @router.get("/api/admin/settings/runtime")
 def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
     store = _store(request)
     orch = _orch(request)
     stats = store.count_stats()
-    # 生产使用 AUTO_MATCH_CONFIG；隔离 QA 使用代码持有的 disabled profile。
-    # 诊断必须展示当前进程实际生效值，不能在 QA 中误报生产默认值。
     auto_matcher = getattr(request.app.state, "auto_matcher", None)
-    cfg = getattr(auto_matcher, "config", AUTO_MATCH_CONFIG)
-    am = {
-        "enabled": cfg.enabled,
-        "interval_sec": cfg.interval,
-        "min_idle_sec": cfg.min_idle,
-        "bot_cooldown": cfg.cooldown,
-        "stale_sec": cfg.stale,
-        "reserve_slots": cfg.reserve,
-        "placement_games": cfg.placement_games,
-        "max_per_round": cfg.max_per_round,
-        "daily_cap": cfg.daily_cap,
-        "daily_count": getattr(auto_matcher, "daily_count", 0),
+    am = auto_matcher.public_snapshot() if auto_matcher is not None else {
+        "enabled": False,
+        "effective_enabled": False,
+        "capability_enabled": False,
+        "paused": True,
+        "pause_reason": "调度器未就绪",
+        "active": None,
+        "upcoming": [],
     }
+    am["mutable"] = True
     return {
         "source": CONFIGURATION_SOURCE,
         "mutable": False,
@@ -2622,6 +2636,7 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
             "running": stats.get("matches_running", 0),
         },
         "auto_match": am,
+        "rating_integrity": store.rating_integrity_diagnostics(),
         "readonly": [
             "action_timeout_sec",
             "max_concurrent_matches",
@@ -2629,9 +2644,52 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
             "bot_memory_mb",
             "full_rr_max_n",
             "contest_scheduler",
-            "auto_match",
         ],
     }
+
+
+class AutoMatchToggle(BaseModel):
+    enabled: StrictBool
+
+    model_config = {"extra": "forbid"}
+
+
+@router.put("/api/admin/auto-match")
+async def admin_toggle_auto_match(
+    body: AutoMatchToggle,
+    request: Request,
+    admin=Depends(require_admin),
+):
+    scheduler = getattr(request.app.state, "auto_matcher", None)
+    if scheduler is None:
+        audit_log(
+            request,
+            "admin_auto_match_toggle",
+            result="fail",
+            user=admin.get("username"),
+            detail="scheduler_unavailable",
+        )
+        raise HTTPException(503, "自动排位调度器未就绪")
+    if body.enabled and not scheduler.capability_enabled:
+        audit_log(
+            request,
+            "admin_auto_match_toggle",
+            result="deny",
+            user=admin.get("username"),
+            detail="qa_capability_guard",
+        )
+        raise HTTPException(409, "隔离 QA 实例禁止开启自动排位")
+    previous = _store(request).get_auto_match_enabled()
+    _store(request).set_auto_match_enabled(bool(body.enabled))
+    scheduler.wake()
+    audit_log(
+        request,
+        "admin_auto_match_toggle",
+        result="ok",
+        user=admin.get("username"),
+        detail=f"enabled={int(bool(body.enabled))} previous={int(previous)}",
+    )
+    return scheduler.public_snapshot()
 
 
 class SiteSettingsPatch(BaseModel):

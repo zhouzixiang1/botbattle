@@ -6,27 +6,11 @@
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
 from typing import Any
-from zoneinfo import ZoneInfo
 
 
 CONFIGURATION_SOURCE = "code"
-PLATFORM_TIMEZONE_NAME = "Asia/Shanghai"
-
-
-def platform_local_day(now: datetime | None = None) -> str:
-    """Return the platform calendar day for durable daily limits.
-
-    ``now`` is injectable for boundary tests.  Production uses an aware UTC
-    instant and converts it explicitly instead of depending on the host's
-    process timezone.
-    """
-    instant = now or datetime.now(timezone.utc)
-    if instant.tzinfo is None:
-        raise ValueError("platform_local_day requires a timezone-aware datetime")
-    return instant.astimezone(ZoneInfo(PLATFORM_TIMEZONE_NAME)).date().isoformat()
 
 # 对局/赛事通用运行参数。
 ACTION_TIMEOUT_SEC = 60.0
@@ -39,22 +23,10 @@ HUMAN_ACTION_TIMEOUT_SEC = 120.0
 HUMAN_MAX_CONSECUTIVE_TIMEOUTS = 5
 
 
-@dataclass(frozen=True, slots=True)
-class AutoMatchConfig:
-    """闲时天梯调度的不可变代码配置。"""
-
-    enabled: bool = True
-    interval: int = 30
-    min_idle: int = 5
-    cooldown: int = 600
-    stale: int = 3600
-    reserve: int = 1
-    placement_games: int = 10
-    max_per_round: int = 2
-    daily_cap: int = 200
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+# 自动排位只有一个管理员可变总开关；定级阈值是产品契约，不是调度参数。
+# 队列长度、串行执行和公平选择策略属于 auto_matcher 的内部算法常量，不能从
+# platform_settings、环境变量或管理端请求形成第二套运行时配置。
+AUTO_MATCH_PLACEMENT_REQUIRED = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,18 +40,12 @@ class ContestSchedulerConfig:
         return asdict(self)
 
 
-AUTO_MATCH_CONFIG = AutoMatchConfig()
-# 隔离 QA 需要可重复、无后台写竞态的运行时。它仍是代码配置，不接受环境变量
-# 覆盖具体参数；BZ_QA_INSTANCE 只负责选择这个固定 profile。生产 profile 及
-# 并发/资源契约完全不变。
-QA_AUTO_MATCH_CONFIG = replace(AUTO_MATCH_CONFIG, enabled=False)
 CONTEST_SCHEDULER_CONFIG = ContestSchedulerConfig()
 
 
 __all__ = [
     "ACTION_TIMEOUT_SEC",
-    "AUTO_MATCH_CONFIG",
-    "AutoMatchConfig",
+    "AUTO_MATCH_PLACEMENT_REQUIRED",
     "CONFIGURATION_SOURCE",
     "CONTEST_SCHEDULER_CONFIG",
     "ContestSchedulerConfig",
@@ -88,7 +54,4 @@ __all__ = [
     "HUMAN_MAX_CONCURRENT_MATCHES",
     "HUMAN_MAX_CONSECUTIVE_TIMEOUTS",
     "MAX_CONCURRENT_MATCHES",
-    "PLATFORM_TIMEZONE_NAME",
-    "QA_AUTO_MATCH_CONFIG",
-    "platform_local_day",
 ]

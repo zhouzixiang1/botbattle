@@ -1581,6 +1581,58 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
   await monitor.expectClean()
 })
 
+test('MatchViewer explains frozen rated and same-owner neutral policies', async ({ page }) => {
+  const fixtures = [
+    {
+      id: 'mock-rating-policy-neutral',
+      rated: false,
+      ratingReason: 'same_owner',
+      label: '同所有者调试 · 不计天梯',
+    },
+    {
+      id: 'mock-rating-policy-eligible',
+      rated: true,
+      ratingReason: 'eligible',
+      label: '计入天梯',
+    },
+  ] as const
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+  for (const fixture of fixtures) {
+    await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: '{"ok":true}',
+    }))
+    await page.route(`**/api/matches/${fixture.id}`, async (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: fixture.id,
+          game_id: 'gomoku',
+          status: 'completed',
+          reason: 'five',
+          winner: 0,
+          match_type: 'challenge',
+          rated: fixture.rated,
+          rating_reason: fixture.ratingReason,
+          bot_a: { name: 'policy_alpha', owner_name: 'owner-a' },
+          bot_b: { name: 'policy_beta', owner_name: 'owner-b' },
+          result: { rounds_played: 9, deltas: [1, -1], normalized_delta: 1 },
+        },
+        replay: { events_json: JSON.stringify([{ type: 'match_end', winner: 0, reason: 'five' }]) },
+      }),
+    }))
+  }
+
+  const monitor = monitorBrowser(page)
+  for (const fixture of fixtures) {
+    await page.goto(`/#/match/${fixture.id}`)
+    await expect(page.getByText(fixture.label, { exact: true })).toBeVisible()
+  }
+  await monitor.expectClean()
+})
+
 test('MatchViewer replays live history sequentially and stays compact across viewports', async ({ page }) => {
   const matchId = 'mock-live-cursor-layout'
   const initialEvents = [

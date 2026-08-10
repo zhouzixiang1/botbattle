@@ -71,13 +71,13 @@
 |------|------|
 | 后端代码 | `bzplat/backend` 当前 70 个非测试 `.py`（含 `games/`，以 `rg --files` 为准） |
 | API 路由 | REST + SSE + WebSocket；精确数量以目标提交的自动化盘点为准 |
-| 数据库表 | **31** 张 + **38** 个具名索引（全新初始化结果；含系统 auto-match 每日 claim；per-game 表/索引由 `_migrate` 模板补齐） |
+| 数据库表 | SQLite 业务表 + per-game 对局表；自动排位使用 control/queue/decision/fair-state/lease/auto 专属服务计数，评分使用 immutable policy/settlement/sequence/projection state；具体数量由当前 schema 回归断言 |
 | 游戏架构 | `games/` 注册表 + 3 自包含子包（shim 已删，真实现全在 games/） |
 | 前端组件 | 26 个 shadcn 共享原语 |
 | 前端页面 | 顶层业务页面均 lazy 分包；精确数量以目标提交的路由盘点为准 |
 | 自动化测试 | 后端 pytest + Playwright；最终数量以目标提交重新收集为准 |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
-| 浏览器验收 | Playwright **4 个 spec / 50 条**；当前目标提交的完整执行结果以 `TESTING.md` 为准；隔离 QA 由代码禁用 auto-match，生产 profile/并发契约不变；另有 browser/screenshot 辅助脚本 |
+| 浏览器验收 | 当前目标提交的完整执行结果以 `TESTING.md` 为准；隔离 QA 能力门强制禁用 auto-match，生产只保留管理员总开关；另有 browser/screenshot 辅助脚本 |
 | 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
@@ -112,7 +112,7 @@
 ### 6.1 已知遗留
 | 项 | 影响 | 建议 |
 |----|------|------|
-| auto-match scheduler 时序 | 压测环境后台触发受 idle 窗口影响 | 验收模式未触发时硬失败；仅显式诊断参数可降级为 warning，且不得作为验收证据 |
+| 自动排位调度时序 | 队列持续运行会与压测实体竞争 | 隔离 QA 能力门强制禁用；公平/串行/开关/恢复由 DB 定向并发回归验证，生产不靠缩短轮询参数催化 |
 | 多 worker 限流 | 内存限流单进程有效 | 多 worker 部署需换 Redis 共享限流状态 |
 | `.env` 敏感信息 | SMTP 明文密码已提交历史 | 建议轮换凭据 + `git filter-branch` 清理历史 + 确认 `.gitignore` |
 

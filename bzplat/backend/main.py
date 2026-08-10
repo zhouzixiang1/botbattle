@@ -30,8 +30,6 @@ from bzplat.backend.qa_safety import (
 from bzplat.backend.runtime import BinaryRunner
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
-    AUTO_MATCH_CONFIG,
-    QA_AUTO_MATCH_CONFIG,
 )
 from bzplat.backend.runtime.limits import (
     clamp_concurrent,
@@ -135,16 +133,31 @@ def create_app(
     match_runner = MatchRunner(binary_runner, action_timeout=ACTION_TIMEOUT_SEC)
     orch = MatchOrchestrator(store, runner=match_runner, max_concurrent=effective_conc)
     contest_manager = ContestManager(store, orch)
+    # QA capability guard is independent from the persisted administrator switch:
+    # a copied production DB may say enabled, but an isolated QA process must never
+    # write background ladder matches.
+    auto_matcher = AutoMatchScheduler(
+        orch,
+        store,
+        capability_enabled=not qa_instance,
+    )
 
     async def _on_match_done(match_id: str, contest_id: int | None) -> None:
-        if contest_id is not None:
-            # 必须传 match_id：completed 才能进积分/晋级；aborted
-            # 需先精确复位其 pairing 供重派，不能当作已裁决终态。
-            await contest_manager.handle_match_done(
-                match_id,
-                contest_id,
-                retry_aborted=orch.is_admin_abort_handoff(match_id),
-            )
+        try:
+            if contest_id is not None:
+                # 必须传 match_id：completed 才能进积分/晋级；aborted
+                # 需先精确复位其 pairing 供重派，不能当作已裁决终态。
+                await contest_manager.handle_match_done(
+                    match_id,
+                    contest_id,
+                    retry_aborted=orch.is_admin_abort_handoff(match_id),
+                )
+        finally:
+            # Every Bot completion releases admission.  Auto rows are removed only
+            # after terminal/settlement convergence; foreground completions merely
+            # wake the next queued automatic match immediately.  A contest callback
+            # failure must not suppress this independent capacity signal.
+            await auto_matcher.on_match_done(match_id)
 
     orch.on_match_done = _on_match_done
 
@@ -152,13 +165,8 @@ def create_app(
     notifier = NotificationManager(store, mailer=mailer)
     orch.notifier = notifier
 
-    # 闲时自动对局调度器（单进程单事件循环；启动即挂载后台任务）。隔离 QA
-    # 使用代码固定的 disabled profile，避免后台 ladder 抢占浏览器用例刚创建、
-    # 尚待清理的实体；生产仍使用同一份 AUTO_MATCH_CONFIG，不接受环境参数覆盖。
-    auto_match_config = QA_AUTO_MATCH_CONFIG if qa_instance else AUTO_MATCH_CONFIG
-    auto_matcher = AutoMatchScheduler(orch, store, config=auto_match_config)
     if qa_instance:
-        logger.info("隔离 QA 实例已按代码配置禁用 auto-match")
+        logger.info("隔离 QA 实例已由 capability guard 强制禁用 auto-match")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -200,6 +208,7 @@ def create_app(
                 await task
             except asyncio.CancelledError:
                 pass
+            auto_matcher.close()
             try:
                 await sched_task
             except asyncio.CancelledError:

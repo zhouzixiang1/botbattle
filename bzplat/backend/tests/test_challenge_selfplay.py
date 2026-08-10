@@ -227,13 +227,22 @@ def test_legacy_bots_without_version_rows_fall_back_to_binary_path(tmp_path):
         mid = await orch.challenge(
             ba["id"], bb["id"], uid, game_id="holdem", defer_start=True,
         )
-        assert s.get_match(mid)["match_config"] == {}
+        assert s.get_match(mid)["match_config"] == {
+            "_rating_eligible": False,
+            "_rating_reason": "same_owner",
+        }
         orch.start_prepared_match(mid)
         task = orch._tasks[mid]
         await task
 
         assert s.get_match(mid)["status"] == "completed"
         assert runner.paths == [(path_a, path_b)]
+        assert s.is_match_rating_settled(mid) is True
+        assert s.get_rating(ba["id"])["matches_played"] == 0
+        assert s.get_rating(bb["id"])["matches_played"] == 0
+        assert s.list_rating_history(ba["id"]) == []
+        assert s.list_rating_history(bb["id"]) == []
+        assert s.head_to_head(ba["id"], bb["id"]) is None
         s.close()
 
     asyncio.run(exercise())
@@ -258,3 +267,38 @@ def test_selfplay_skips_rating_update(tmp_path):
         assert r_after["wins"] == r_before["wins"], "自博弈不应改 wins"
         assert r_after["matches_played"] == r_before["matches_played"], "自博弈不应改 matches_played"
         s.close()
+
+
+def test_different_owner_challenge_remains_rated(tmp_path):
+    """只有不同拥有者的普通挑战进入 Glicko 与 pair/history 投影。"""
+    async def exercise():
+        s = _store(tmp_path)
+        owner_a = s.create_user("rated-a", "rated-a@e.com", "x")["id"]
+        owner_b = s.create_user("rated-b", "rated-b@e.com", "x")["id"]
+        path_a = _fixture_file(tmp_path, "rated-a")
+        path_b = _fixture_file(tmp_path, "rated-b")
+        bot_a = s.create_bot(
+            owner_a, "rated-a", binary_path=path_a, format="elf", game_id="holdem"
+        )
+        bot_b = s.create_bot(
+            owner_b, "rated-b", binary_path=path_b, format="elf", game_id="holdem"
+        )
+        s.ensure_rating(bot_a["id"])
+        s.ensure_rating(bot_b["id"])
+        orch = MatchOrchestrator(s, runner=_NoopRunner(), max_concurrent=1)
+        match_id = await orch.challenge(
+            bot_a["id"], bot_b["id"], owner_a,
+            game_id="holdem", defer_start=True,
+        )
+        assert s.get_match(match_id)["match_config"]["_rating_eligible"] is True
+        orch.start_prepared_match(match_id)
+        await orch._tasks[match_id]
+
+        assert s.is_match_rating_settled(match_id) is True
+        assert s.get_rating(bot_a["id"])["matches_played"] == 1
+        assert s.get_rating(bot_b["id"])["matches_played"] == 1
+        assert len(s.list_rating_history(bot_a["id"])) == 1
+        assert s.head_to_head(bot_a["id"], bot_b["id"])["samples"] == 1
+        s.close()
+
+    asyncio.run(exercise())

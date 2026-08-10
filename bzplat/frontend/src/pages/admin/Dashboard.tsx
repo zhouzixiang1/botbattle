@@ -1,7 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { apiGet, errMsg } from '../../api'
+import { toast } from 'sonner'
+import { apiGet, apiJson, errMsg } from '@/api'
 import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn } from './ui'
+import {
+  AutoMatchQueuePanel,
+  type AutoMatchQueueSnapshot,
+} from '@/components/auto-match-queue'
+import { Switch } from '@/components/ui/switch'
 import { fmtTime } from '@/lib/format'
 
 interface Stats {
@@ -31,23 +37,61 @@ export default function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [queue, setQueue] = useState<AutoMatchQueueSnapshot | null>(null)
+  const [savingAutoMatch, setSavingAutoMatch] = useState(false)
+  const requestRevision = useRef(0)
+  const toggleInFlight = useRef(false)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError('')
+  const load = useCallback(async (showLoading = true) => {
+    if (toggleInFlight.current) return
+    const revision = ++requestRevision.current
+    if (showLoading) setLoading(true)
     try {
-      const d = await apiGet<Stats>('/api/admin/stats')
-      setStats(d)
+      const [d, q] = await Promise.all([
+        apiGet<Stats>('/api/admin/stats'),
+        apiGet<AutoMatchQueueSnapshot>('/api/auto-match/queue'),
+      ])
+      if (revision === requestRevision.current) {
+        setStats(d)
+        setQueue(q)
+        setError('')
+      }
     } catch (e) {
-      setError(errMsg(e, '加载失败'))
+      if (revision === requestRevision.current) setError(errMsg(e, '加载失败'))
     } finally {
-      setLoading(false)
+      if (showLoading && revision === requestRevision.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void load()
+    void load(true)
+    const timer = window.setInterval(() => { void load(false) }, 5_000)
+    return () => window.clearInterval(timer)
   }, [load])
+
+  const toggleAutoMatch = async (enabled: boolean) => {
+    if (toggleInFlight.current || (!queue?.capability_enabled && enabled)) return
+    const revision = ++requestRevision.current
+    toggleInFlight.current = true
+    setSavingAutoMatch(true)
+    try {
+      const updated = await apiJson<AutoMatchQueueSnapshot>(
+        '/api/admin/auto-match',
+        'PUT',
+        { enabled },
+      )
+      if (revision !== requestRevision.current) return
+      setQueue(updated)
+      toast.success(enabled ? '自动排位已开启，队列将继续运行' : '自动排位已暂停，当前对局会正常结束')
+    } catch (e) {
+      if (revision === requestRevision.current) {
+        toast.error(errMsg(e, '更新自动排位总开关失败'))
+      }
+    } finally {
+      toggleInFlight.current = false
+      setSavingAutoMatch(false)
+    }
+  }
 
   if (loading && !stats) return <Loading />
   if (error && !stats) return <ErrorMsg msg={error} />
@@ -60,7 +104,7 @@ export default function Dashboard() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">平台总览统计</p>
-        <RefreshBtn onClick={load} />
+        <RefreshBtn onClick={() => { void load(true) }} />
       </div>
       <ErrorMsg msg={error} />
 
@@ -74,6 +118,28 @@ export default function Dashboard() {
         <MetricCard label="在线会话" value={stats.active_sessions} />
       </div>
 
+      <AutoMatchQueuePanel
+        snapshot={queue}
+        maxUpcoming={6}
+        className="mt-5"
+        action={queue ? (
+          <div className="flex shrink-0 items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5">
+            <div className="text-right">
+              <div className="text-xs font-medium">总开关</div>
+              <div className="text-[10px] text-muted-foreground">
+                {queue.capability_enabled ? '生产调度能力可用' : 'QA 安全门已锁定'}
+              </div>
+            </div>
+            <Switch
+              checked={queue.enabled}
+              disabled={savingAutoMatch || (!queue.capability_enabled && !queue.enabled)}
+              onCheckedChange={(checked) => { void toggleAutoMatch(checked) }}
+              aria-label="自动排位总开关"
+            />
+          </div>
+        ) : null}
+      />
+
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader><CardTitle>最近注册用户</CardTitle></CardHeader>
@@ -86,7 +152,6 @@ export default function Dashboard() {
                   <Link
                     to={`/user/${encodeURIComponent(u.username)}`}
                     className="min-w-0 max-w-[10rem] truncate font-medium text-primary hover:underline"
-                    title={u.username}
                   >
                     {u.username}
                   </Link>

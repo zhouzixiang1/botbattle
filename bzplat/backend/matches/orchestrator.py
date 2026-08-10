@@ -337,7 +337,7 @@ class MatchOrchestrator:
         # 并发完成时快照读+绝对写 rating/rd/vol 互相覆盖（lost-update，审计 FRAGILE 5a）。
         self._rating_locks: dict[tuple[int, str], asyncio.Lock] = {}
         # 全局评分结算顺序锁：completed 业务结果与评分事务之间若失败，
-        # 后来对局必须先补齐 (created_at, id) 更早的缺口，不得越过它
+        # 后来对局必须先补齐已冻结 settled_order 更早的缺口，不得越过它
         # 在旧 rating 快照上结算。per-bot 锁仍作为单场双边快照的内层防线。
         self._rating_settlement_order_lock = asyncio.Lock()
         # Immutable upload verification cache.  A cache hit still performs stat;
@@ -382,6 +382,29 @@ class MatchOrchestrator:
 
     def _release_bot_slot(self, match_id: str) -> None:
         self._bot_admitted.discard(match_id)
+
+    def reserve_prepared_match_slot(
+        self, match_id: str, *, keep_free: int = 0
+    ) -> None:
+        """Reserve admission before an external atomic prepared-match claim.
+
+        Automatic ranking uses this before its Store transaction.  The claim can
+        therefore never create a pending DB row and only then discover that a
+        foreground request took the last slot. ``keep_free`` makes the foreground
+        reserve part of the same synchronous admission operation instead of a
+        separate capacity observation. ``start_prepared_match`` is idempotent for
+        the already-held token.
+        """
+        if match_id in self._bot_admitted:
+            return
+        if self.available_bot_slots() <= max(0, int(keep_free)):
+            raise BotCapacityError()
+        self._bot_admitted.add(match_id)
+
+    def release_prepared_match_slot(self, match_id: str) -> None:
+        """Compensate a reservation when the external Store claim did not win."""
+        if match_id not in self._tasks:
+            self._release_bot_slot(match_id)
 
     def rebuild_human_concurrency(self, max_concurrent: int) -> None:
         """热更新人类对局独立并发上限。"""
@@ -707,7 +730,6 @@ class MatchOrchestrator:
         duplicate: bool = False,
         duplicate_seed: int | None = None,
         defer_start: bool = False,
-        auto_match_daily_cap: int | None = None,
     ) -> str:
         # 自博弈（同 bot 对战）：允许——用于对比同 bot 的不同版本（如 v1 vs v2），
         # 或同 bot 同版本的对阵。仅 challenge 路径放开（contest 仍各自走 pairing）。
@@ -771,7 +793,6 @@ class MatchOrchestrator:
                 match_type=match_type,
                 game_id=gid,
                 match_config=mc,
-                auto_match_daily_cap=auto_match_daily_cap,
             )
             # duplicate 落 match_seed（确定性回放/复现用）。create_match 后的
             # 两次写都必须处在同一补偿边界内；任一步失败，调用方都尚未拿到 id。
@@ -1441,7 +1462,7 @@ class MatchOrchestrator:
         对局仍只计赛事积分，人类对局也不计 Glicko，二者均不走本后处理。
 
         rating settlement marker 同评分事务提交；全局顺序屏障会先补齐
-        ``(created_at, id) <= 当前对局`` 的所有缺口。重复调用在 marker
+        ``settled_order <= 当前对局`` 的所有缺口。重复调用在 marker
         claim 处返回，避免 rating/history/pair_stats 及通知/XP 重复执行。
         """
         if match.get("match_type") in (TYPE_CONTEST, TYPE_HUMAN):
@@ -1450,7 +1471,9 @@ class MatchOrchestrator:
         # winner/ea/eb 是运行时便捷参数；顺序补算必须以 DB 中已落稳的
         # completed result 为真相源，才能对早场与当前场走同一条恢复路径。
         del winner, ea, eb
-        target = {**match, "id": match_id}
+        target = self.store.get_match(match_id)
+        if target is None:
+            raise RuntimeError(f"completed match disappeared before settlement: {match_id}")
         _, target_settled = await self._settle_rating_sequence_through(
             target_match=target,
             emit_side_effects=True,
@@ -1496,9 +1519,14 @@ class MatchOrchestrator:
             logger.debug("award_xp failed", exc_info=True)
 
     @staticmethod
-    def _rating_settlement_order_key(match: dict) -> tuple[str, str]:
-        """与 Store.list_unsettled_completed_rating_matches 的全局排序一致。"""
-        return (str(match.get("created_at") or ""), str(match.get("id") or ""))
+    def _rating_settlement_order_key(match: dict) -> tuple[int, str]:
+        """Use the completion-frozen global order, never a timestamp guess."""
+        order = match.get("_rating_settled_order")
+        if order is None:
+            raise ValueError(
+                f"match {match.get('id')} lacks frozen rating settlement order"
+            )
+        return (int(order), str(match.get("id") or ""))
 
     @staticmethod
     def _persisted_rating_inputs(match: dict) -> tuple[int | None, int, int]:
@@ -1598,6 +1626,14 @@ class MatchOrchestrator:
         eb: int,
     ) -> bool:
         """在稳定锁顺序下结算一场 Bot 对局；重复 settlement 返回 False。"""
+        rating_policy = self.store.match_rating_policy(match)
+        if not rating_policy.get("rated"):
+            logger.info(
+                "rating-neutral match=%s reason=%s",
+                match_id,
+                rating_policy.get("rating_reason"),
+            )
+            return self.store.mark_match_rating_settled(match_id)
         bot_a_id = match.get("bot_a_id")
         bot_b_id = match.get("bot_b_id")
         if bot_a_id is None or bot_b_id is None:

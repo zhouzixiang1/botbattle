@@ -83,60 +83,83 @@ effective  = min(configured, ceiling)
 
 ![德州扑克牌型](/wiki-assets/TexasHoldemHandType.jpg)
 
-## 闲时自动对局（维护天梯榜）
+## 持续自动排位（维护天梯榜）
 
-平台在**系统空闲**时自动安排 bot 对战，使 Glicko-2 排行榜保持新鲜。
-单进程单事件循环后台任务（`bzplat/backend/matches/auto_matcher.py`），随服务启动即挂载。
+`AutoMatchScheduler` 随服务启动，持续维护固定 6 场的持久预告队列；不再有每日场次上限、
+空闲等待、Bot 冷却、陈旧阈值或“每轮最多几场”。自动排位本身**全局串行**，任何时刻最多
+一场 `dispatched`；挑战和赛事仍共用原有全局 admission，自动排位原子占位时必须再留下
+1 个前台槽。前台容量不足时队列原位等待，不丢配对，也不创建未启动的垃圾对局。
 
-**触发条件**（全部满足才安排）：
+唯一可变运行项是管理员总开关：独立单例表 `auto_match_control` 首次升级默认开启，
+`PUT /api/admin/auto-match` 只接受严格 boolean 并写审计日志。关闭后不再补队或派发，当前局
+自然完成、预告队列保留；再次开启立即续跑。`BZ_QA_INSTANCE=1` 另有不可绕过的代码能力门，
+即使复制的生产库开关为开也不能调度，管理员尝试开启返回 409。旧 `platform_settings` 的
+auto-match 键及 `auto_match_daily_claims` 在迁移中幂等删除，不存在第二套开关或额度真值。
 
-1. 生产代码配置 `enabled=True`；隔离 QA profile 固定 `enabled=False`，不运行后台 ladder；
-2. 有空闲并发槽：`全局尚未占用的 admission - reserve_slots > 0`；已接纳但等待执行的任务也占位；
-   `reserve_slots`（默认 1）为用户主动挑战**预留**的槽位，避免抢占；
-3. 连续空闲达 `auto_match_min_idle_sec`（默认 5 秒），即真正闲时。
+公平选择由 SQLite 持久状态推进，不依赖可被前台挑战影响的 `ratings.last_played_at` 或
+`pair_stats`：
 
-**配对策略**：陈旧度优先（`last_played_at` 最旧 / 从未赛）+ rating 就近（Swiss 式）。
-**新 bot 定级优先**：`matches_played < auto_match_placement_games`（默认 10）的「定级期」bot 排最前，
-且用更短 cooldown（cooldown÷10，最少 30s）加快定级；打满后回归陈旧度调度。
-同一个 `auto_match_placement_games` 还驱动 `/api/tiers`、排行榜和 Bot profile 的
-`placement_required/is_placement/placement_remaining`，前端不得另写阈值；排行榜先排正式 Bot，
-再排定级 Bot，组内才按 rating 排序。
-**节流**：同一 bot 两场间隔不低于 `auto_match_bot_cooldown`（默认 600 秒）；
-近期已配对组合短期不再重复。**每轮**最多补 `auto_match_max_per_round`（默认 2）场；
-**每日**总量上限 `auto_match_daily_cap`（默认 200，0=不限，达上限当日停）。自然日固定按
-`Asia/Shanghai` 计算，不依赖宿主机时区。系统调度只向 Store 传代码 cap，不传调用方预先
-计算的日期；Store 取得 `BEGIN IMMEDIATE` 写锁后才读取当前日期和 `auto_match_daily_claims`、
-校验 cap，并在同一事务写入 match、索引与 claim；即使等待写锁期间跨过 00:00，也只会
-占用新自然日额度。
-因此服务重启、多个 Store/服务实例同时抢最后名额都不能绕过上限。升级时只首次把历史上
-唯一的系统身份（`match_type=ladder`、owner/contest/human 均为空）回填为 claim，之后仅
-auto_matcher 的显式创建路径写 claim，普通用户对局不计入。
-`match_type=ladder`，`owner` 为空（系统发起），**计入全局 Glicko-2 评分**
-（比赛 contest 对局不计全局，见 [对局](#/wiki?slug=guide)）。
+1. 游戏按固定游标轮转，只跳过当前没有合法配对的游戏；不同游戏不比较原始场数。
+2. 定级/正式通道持久交替；只有一个定级所有者时才允许匹配正式 Bot，并记录 fallback。
+3. 先按每游戏 auto 专属的所有者服务次数/最近服务轮次排序；同一所有者在全局活跃队列最多
+   占一席，拥有多个 Bot 不会获得多倍份额；所有者内部再轮转服务最少的 Bot。
+4. 对手依次按 Bot 对次数、所有者对次数、Rating 距离、服务债务和稳定 ID 决定；座位使用
+   auto 专属先后手计数最小化双方债务。双方必须同游戏、不同 Bot、不同所有者。
+5. 队列冻结双方当前版本；派发事务再次验证用户/Bot 活跃、Linux x86_64 ELF、版本归属与
+   “没有另一场计分生命周期”。版本在 queued/dispatched 期间受外键 RESTRICT 保护。
 
-| 代码字段 | 固定值 | 含义 |
-|--------|------|------|
-| `enabled` | 生产 `True`；隔离 QA `False` | 是否启用后台 ladder |
-| `interval` | 30 | 轮询间隔（秒） |
-| `min_idle` | 5 | 连续空闲触发秒数 |
-| `cooldown` | 600 | 同 bot 两场间隔下限（秒） |
-| `stale` | 3600 | 仅调度陈旧超此阈值（秒）的 bot；0=不限 |
-| `reserve` | 1 | 为用户挑战预留的并发槽 |
-| `placement_games` | 10 | 新 bot 定级赛场次（前 N 场优先，0=禁用） |
-| `max_per_round` | 2 | 每轮最多补几场 |
-| `daily_cap` | 200 | 每日后台对局总量上限（0=不限） |
+队列的 `queued → dispatched → completed+settled/aborted` 全生命周期由 `BEGIN IMMEDIATE`、
+CAS 和部分唯一索引守护；claim 与 match/index/replay/评分资格同事务。启动前失败会精确删除
+未启动对象并恢复原队列位置；平台故障不评分、不计服务，并进入持久指数退避，Bot 协议错误、
+超时或崩溃仍是合法技术负并计分。dispatcher 使用持久 lease，活跃进程不会被另一实例误恢复。
+每次选择的策略版本、游标、通道、服务计数、配对次数、Rating 差、座位债务、冻结版本和终态
+永久写入 `auto_match_decisions`，队列终态删除也不丢公平证据。
 
-这些字段由 `runtime/config.py` 的冻结对象提供：生产使用 `AUTO_MATCH_CONFIG`，隔离
-`BZ_QA_INSTANCE` 使用只把 `enabled` 固定为 `False` 的 `QA_AUTO_MATCH_CONFIG`。profile
-选择和具体值都只能经代码评审与重新发布修改，调度器不读取环境覆盖或同名历史 settings。
-今日后台对局计数直接读取 DB 权威 claim；管理端只读端点返回该计数与当前实例实际生效 profile。
+定级阈值只有代码常量 `AUTO_MATCH_PLACEMENT_REQUIRED=10`，同时驱动 `/api/tiers`、排行榜、
+Bot profile 和队列通道；它不是管理员参数。公开 `GET /api/auto-match/queue?game_id=` 返回脱敏的
+正在进行/即将进行、全局位置和暂停原因；排行榜按当前游戏展示，管理首页展示全局队列与唯一开关。
 
-> **可见性**：后台 ladder 对局会出现在首页「最新对局」（带「后台」徽章），便于观察天梯维护。
+### 排行榜重建与上线 No-Go
+
+挑战创建事务会冻结评分资格：不同所有者 Bot 挑战/ladder 计分；同 Bot、自有不同 Bot、人机与
+赛事均为中性局。中性局完成后仍写 exactly-once settlement marker，但不改 ratings、历史、胜负或
+pair_stats；对局详情明确返回 `rated/rating_reason`。历史结算首次迁移按
+`(COALESCE(ended_at, settled_at), match_id)` 固化为连续 `settled_order=1..N`，以后完成事务先冻结
+单调序号，恢复和离线重放只认该序号，绝不能再按 `created_at` 猜顺序。
+
+旧库不会在启动迁移时冒险自动重放。`rating_projection_state` 未经当前策略验证或落后于 settlement
+水位时，自动排位一律暂停。生产升级前必须在停服维护窗完成以下流程，否则是发布 **No-Go**：
+
+```bash
+# 1. 默认只读 dry-run；保存并人工审核 source_hash、全榜 diff 与 rebuilt_projection_hash
+python -m bzplat.backend.cli rating-rebuild --db /absolute/path/botzone.db
+
+# 2. 停止 API/worker/scheduler，制作并校验冷备后，回填刚审核的 source_hash
+python -m bzplat.backend.cli rating-rebuild \
+  --db /absolute/path/botzone.db --apply \
+  --source-digest <reviewed-source-hash> \
+  --confirm-db /absolute/path/botzone.db \
+  --backup /absolute/path/botzone.cold-backup.db \
+  --confirm-service-stopped --confirm-cold-backup
+
+# 3. 仍在停服窗口验证；退出码必须为 0
+python -m bzplat.backend.cli rating-rebuild --db /absolute/path/botzone.db --verify
+```
+
+dry-run/verify 用 SQLite 只读 URI，不改变文件字节或 mtime。apply 除绝对路径二次确认、冷备完整性、
+冷备评分源与已审核 source digest 一致、停服声明和目标 source digest 外，还在 `BEGIN EXCLUSIVE` 内
+复核无 running match、无活跃 dispatcher lease且源未变化，并在提交前复核投影 hash 与水位；故障整事务
+回滚。它只重建 `ratings`、每 Bot 最近 200 条 `rating_history`、`pair_stats`
+和 projection state，不删除、不重排 `match_rating_policies` 或 settlements；已删除 Bot 仍在内存中参与
+Glicko 传播，但不会写回带 FK 的投影表。直接命中的污染 Bot 不是完整影响范围，是否可上线必须以
+全榜重建 hash、Rating 与名次 diff 为准。
+
+> **可见性**：自动 ladder 对局会出现在首页最新对局和排行榜队列，可直接进入观赛。
 
 ## 代码配置与只读诊断
 
 `bzplat/backend/runtime/config.py` 是运行参数的唯一真相源，集中声明决策超时、默认并发、
-循环赛人数护栏、auto-match 与赛事 scheduler 参数。阶段休息时间直接属于各代码模板。修改须走代码评审、测试、
+自动排位定级阈值与赛事 scheduler 参数。阶段休息时间直接属于各代码模板。修改须走代码评审、测试、
 部署；旧 `platform_settings` 同名记录只作为历史数据保留，启动不 seed、不读取、不回写。
 
 `GET /api/admin/settings/runtime` 仅供诊断，响应明确包含 `source="code"`、

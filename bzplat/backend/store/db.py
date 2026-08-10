@@ -8,8 +8,8 @@ import contextlib
 import json
 import sqlite3
 import threading
-from datetime import date, datetime
-from typing import Any, Callable
+from datetime import datetime, timedelta
+from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
 
@@ -23,7 +23,6 @@ from .public_contract import (
 )
 
 from .schema import (
-    AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL,
     CODE_RESET,
     COMMENT_TARGET_TYPES,
     CONTEST_CANCELLED,
@@ -58,29 +57,28 @@ from .validation import validate_contest_times
 
 DEFAULT_DB_PATH = "botzone.db"
 
-
-class AutoMatchDailyCapReached(RuntimeError):
-    """The durable system auto-match quota is already exhausted."""
-
-    def __init__(self, *, local_day: str, count: int, cap: int) -> None:
-        super().__init__(f"auto-match daily cap reached {count}/{cap} ({local_day})")
-        self.local_day = local_day
-        self.count = count
-        self.cap = cap
-
-
-def _require_iso_day(local_day: Any) -> str:
-    try:
-        parsed = date.fromisoformat(local_day)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("auto-match local_day 必须是 YYYY-MM-DD") from exc
-    if parsed.isoformat() != local_day:
-        raise ValueError("auto-match local_day 必须是 YYYY-MM-DD")
-    return local_day
+_AUTO_MATCH_FAIR_BOOTSTRAP_VERSION = 1
+_AUTO_MATCH_POLICY_VERSION = "owner-game-lane-v2"
+_RATING_PROJECTION_POLICY_VERSION = "owner-neutral-v2"
+_RATING_PROJECTION_LEGACY_VERSION = "legacy-unverified"
+_AUTO_MATCH_PLATFORM_ABORT_REASONS = frozenset(
+    {
+        "platform_error",
+        "version_unavailable",
+        "orphan_after_restart",
+        "orphan_pending_after_restart",
+    }
+)
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _after_seconds(seconds: int | float) -> str:
+    return (datetime.now() + timedelta(seconds=float(seconds))).isoformat(
+        timespec="seconds"
+    )
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -539,6 +537,449 @@ def _all_game_ids() -> frozenset[str]:
     from bzplat.backend.games import registry as _reg
 
     return _reg.all_ids()
+
+
+def _rating_eligible_sql(alias: str) -> str:
+    """SQL expression for the immutable rating policy of one match row.
+
+    The database trigger deliberately derives ownership from canonical Bot rows
+    instead of trusting JSON supplied by a caller.  ``match_config`` still
+    freezes the same result for public explanation and post-processing.
+    """
+    return (
+        f"({alias}.match_type NOT IN ('{TYPE_CONTEST}','{TYPE_HUMAN}') "
+        f"AND {alias}.bot_a_id IS NOT NULL AND {alias}.bot_b_id IS NOT NULL "
+        f"AND {alias}.bot_a_id<>{alias}.bot_b_id AND EXISTS ("
+        "SELECT 1 FROM bots rating_a JOIN bots rating_b "
+        f"ON rating_a.id={alias}.bot_a_id AND rating_b.id={alias}.bot_b_id "
+        "WHERE rating_a.owner_id<>rating_b.owner_id))"
+    )
+
+
+def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
+    """Enforce one rating-bearing lifecycle per Bot at the SQLite boundary."""
+    for gid in sorted(_all_game_ids()):
+        table = _matches_table(gid)
+        new_rated = _rating_eligible_sql("NEW")
+        existing_rated = _rating_eligible_sql("m")
+        overlap = (
+            f"SELECT 1 FROM {table} m WHERE m.id<>NEW.id "
+            f"AND ({existing_rated}) "
+            "AND (m.bot_a_id IN (NEW.bot_a_id,NEW.bot_b_id) "
+            "OR m.bot_b_id IN (NEW.bot_a_id,NEW.bot_b_id)) "
+            "AND (m.status IN ('pending','running') OR "
+            "(m.status='completed' AND NOT EXISTS ("
+            "SELECT 1 FROM match_rating_settlements settled "
+            "WHERE settled.match_id=m.id))) LIMIT 1"
+        )
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rated_overlap_insert")
+        conn.execute(
+            f"CREATE TRIGGER trg_{table}_rated_overlap_insert "
+            f"BEFORE INSERT ON {table} "
+            "WHEN NEW.status IN ('pending','running') "
+            f"AND ({new_rated}) AND EXISTS ({overlap}) "
+            "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END"
+        )
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rated_overlap_update")
+        conn.execute(
+            f"CREATE TRIGGER trg_{table}_rated_overlap_update "
+            f"BEFORE UPDATE OF bot_a_id,bot_b_id,match_type,status ON {table} "
+            "WHEN NEW.status IN ('pending','running') "
+            f"AND ({new_rated}) AND EXISTS ({overlap}) "
+            "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END"
+        )
+
+
+def _install_rating_source_guards(conn: sqlite3.Connection) -> None:
+    """Make every settled replay input immutable at the SQLite boundary."""
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_source_immutable "
+        "BEFORE UPDATE OF game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+        "classified_at ON match_rating_policies WHEN "
+        "OLD.game_id IS NOT NEW.game_id OR OLD.bot_a_id IS NOT NEW.bot_a_id OR "
+        "OLD.bot_b_id IS NOT NEW.bot_b_id OR OLD.rated IS NOT NEW.rated OR "
+        "OLD.rating_reason IS NOT NEW.rating_reason OR OLD.source IS NOT NEW.source OR "
+        "OLD.classified_at IS NOT NEW.classified_at BEGIN "
+        "SELECT RAISE(ABORT,'rating policy source immutable'); END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_settled_delete "
+        "BEFORE DELETE ON match_rating_policies WHEN OLD.settled_order IS NOT NULL OR "
+        "EXISTS(SELECT 1 FROM match_rating_settlements s WHERE s.match_id=OLD.match_id) "
+        "BEGIN SELECT RAISE(ABORT,'settled rating policy immutable'); END"
+    )
+    for gid in sorted(_all_game_ids()):
+        table = _matches_table(gid)
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rating_source_update")
+        conn.execute(
+            f"CREATE TRIGGER trg_{table}_rating_source_update "
+            f"BEFORE UPDATE OF winner,result,ended_at,status ON {table} WHEN "
+            "EXISTS(SELECT 1 FROM match_rating_settlements s WHERE s.match_id=OLD.id) "
+            "AND (OLD.winner IS NOT NEW.winner OR OLD.result IS NOT NEW.result OR "
+            "OLD.ended_at IS NOT NEW.ended_at OR OLD.status IS NOT NEW.status) "
+            "BEGIN SELECT RAISE(ABORT,'settled match rating source immutable'); END"
+        )
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rating_source_delete")
+        conn.execute(
+            f"CREATE TRIGGER trg_{table}_rating_source_delete BEFORE DELETE ON {table} "
+            "WHEN EXISTS(SELECT 1 FROM match_rating_settlements s "
+            "WHERE s.match_id=OLD.id) BEGIN "
+            "SELECT RAISE(ABORT,'settled match rating source immutable'); END"
+        )
+
+
+def _bootstrap_auto_match_fairness(conn: sqlite3.Connection) -> None:
+    """Seed auto-only service counters once from canonical completed ladders.
+
+    The retired daily-claim table carried quota accounting, not a trustworthy
+    fairness projection.  Completed system-owned ``ladder`` matches are the
+    durable source.  Foreground challenges never enter these counters.
+    """
+    state = conn.execute(
+        "SELECT bootstrap_version,revision FROM auto_match_fair_state "
+        "WHERE singleton=1"
+    ).fetchone()
+    if state is None:
+        raise RuntimeError("auto_match_fair_state singleton missing")
+    if int(state["bootstrap_version"] or 0) >= _AUTO_MATCH_FAIR_BOOTSTRAP_VERSION:
+        return
+
+    history: list[dict[str, Any]] = []
+    game_ids = sorted(_all_game_ids())
+    for gid in game_ids:
+        table = _matches_table(gid)
+        rows = conn.execute(
+            f"SELECT m.id,m.game_id,m.bot_a_id,m.bot_b_id,m.created_at,m.ended_at,"
+            "a.owner_id AS owner_a_id,b.owner_id AS owner_b_id "
+            f"FROM {table} m JOIN bots a ON a.id=m.bot_a_id "
+            "JOIN bots b ON b.id=m.bot_b_id "
+            "WHERE m.status=? AND m.match_type=? AND m.owner_id IS NULL "
+            "AND m.contest_id IS NULL AND m.human_user_id IS NULL "
+            "AND m.bot_a_id<>m.bot_b_id AND a.owner_id<>b.owner_id",
+            (STATUS_COMPLETED, TYPE_LADDER),
+        ).fetchall()
+        history.extend(dict(row) for row in rows)
+    history.sort(key=lambda row: (str(row.get("ended_at") or ""), str(row["id"])))
+
+    revision = int(state["revision"] or 0)
+    for row in history:
+        revision += 1
+        gid = str(row["game_id"])
+        served_at = str(row.get("ended_at") or row.get("created_at") or _now())
+        for owner_id in (int(row["owner_a_id"]), int(row["owner_b_id"])):
+            conn.execute(
+                "INSERT INTO auto_match_owner_service("
+                "owner_id,game_id,served_count,last_served_revision,last_served_at) "
+                "VALUES(?,?,1,?,?) ON CONFLICT(owner_id,game_id) DO UPDATE SET "
+                "served_count=auto_match_owner_service.served_count+1,"
+                "last_served_revision=excluded.last_served_revision,"
+                "last_served_at=excluded.last_served_at",
+                (owner_id, gid, revision, served_at),
+            )
+        for bot_id, seat_a, seat_b in (
+            (int(row["bot_a_id"]), 1, 0),
+            (int(row["bot_b_id"]), 0, 1),
+        ):
+            conn.execute(
+                "INSERT INTO auto_match_bot_service("
+                "bot_id,game_id,served_count,seat_a_count,seat_b_count,"
+                "last_served_revision,last_served_at) VALUES(?,?,1,?,?,?,?) "
+                "ON CONFLICT(bot_id,game_id) DO UPDATE SET "
+                "served_count=auto_match_bot_service.served_count+1,"
+                "seat_a_count=auto_match_bot_service.seat_a_count+excluded.seat_a_count,"
+                "seat_b_count=auto_match_bot_service.seat_b_count+excluded.seat_b_count,"
+                "last_served_revision=excluded.last_served_revision,"
+                "last_served_at=excluded.last_served_at",
+                (bot_id, gid, seat_a, seat_b, revision, served_at),
+            )
+        bot_lo, bot_hi = sorted((int(row["bot_a_id"]), int(row["bot_b_id"])))
+        owner_lo, owner_hi = sorted(
+            (int(row["owner_a_id"]), int(row["owner_b_id"]))
+        )
+        conn.execute(
+            "INSERT INTO auto_match_bot_pair_service("
+            "game_id,bot_lo_id,bot_hi_id,served_count,last_served_at) "
+            "VALUES(?,?,?,1,?) ON CONFLICT(game_id,bot_lo_id,bot_hi_id) "
+            "DO UPDATE SET served_count=auto_match_bot_pair_service.served_count+1,"
+            "last_served_at=excluded.last_served_at",
+            (gid, bot_lo, bot_hi, served_at),
+        )
+        conn.execute(
+            "INSERT INTO auto_match_owner_pair_service("
+            "game_id,owner_lo_id,owner_hi_id,served_count,last_served_at) "
+            "VALUES(?,?,?,1,?) ON CONFLICT(game_id,owner_lo_id,owner_hi_id) "
+            "DO UPDATE SET served_count=auto_match_owner_pair_service.served_count+1,"
+            "last_served_at=excluded.last_served_at",
+            (gid, owner_lo, owner_hi, served_at),
+        )
+
+    game_count = max(1, len(game_ids))
+    conn.execute(
+        "UPDATE auto_match_fair_state SET next_game_idx=?,next_lane=?,revision=?,"
+        "bootstrap_version=?,updated_at=? WHERE singleton=1",
+        (
+            revision % game_count,
+            revision % 2,
+            revision,
+            _AUTO_MATCH_FAIR_BOOTSTRAP_VERSION,
+            _now(),
+        ),
+    )
+
+
+def _ensure_match_rating_policy_identity(conn: sqlite3.Connection) -> None:
+    """Backfill immutable game/Bot identities needed by offline replay."""
+    _add_col(conn, "match_rating_policies", "game_id", "TEXT")
+    _add_col(conn, "match_rating_policies", "bot_a_id", "INTEGER")
+    _add_col(conn, "match_rating_policies", "bot_b_id", "INTEGER")
+    _add_col(conn, "match_rating_policies", "settled_order", "INTEGER")
+    for gid in sorted(_all_game_ids()):
+        table = _matches_table(gid)
+        conn.execute(
+            "UPDATE match_rating_policies SET "
+            "game_id=COALESCE(game_id,?),"
+            f"bot_a_id=COALESCE(bot_a_id,(SELECT m.bot_a_id FROM {table} m "
+            "WHERE m.id=match_rating_policies.match_id)),"
+            f"bot_b_id=COALESCE(bot_b_id,(SELECT m.bot_b_id FROM {table} m "
+            "WHERE m.id=match_rating_policies.match_id)) "
+            f"WHERE EXISTS(SELECT 1 FROM {table} m "
+            "WHERE m.id=match_rating_policies.match_id)",
+            (gid,),
+        )
+    valid_games = ",".join(f"'{gid}'" for gid in sorted(_all_game_ids()))
+    for action in ("INSERT", "UPDATE OF game_id,bot_a_id,bot_b_id,rated"):
+        suffix = "insert" if action == "INSERT" else "update"
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_identity_{suffix} "
+            f"BEFORE {action} ON match_rating_policies WHEN "
+            f"NEW.game_id IS NULL OR NEW.game_id NOT IN ({valid_games}) OR "
+            "(NEW.rated=1 AND (NEW.bot_a_id IS NULL OR NEW.bot_b_id IS NULL)) "
+            "BEGIN SELECT RAISE(ABORT,'rating policy identity invalid'); END"
+        )
+
+
+def _classify_legacy_match_rating_policies(conn: sqlite3.Connection) -> None:
+    """Freeze v1 history policy without changing any rating projection."""
+    classified_at = _now()
+    for gid in sorted(_all_game_ids()):
+        table = _matches_table(gid)
+        rows = conn.execute(
+            f"SELECT m.id,m.match_type,m.bot_a_id,m.bot_b_id,"
+            "a.owner_id AS owner_a_id,b.owner_id AS owner_b_id "
+            f"FROM {table} m LEFT JOIN bots a ON a.id=m.bot_a_id "
+            "LEFT JOIN bots b ON b.id=m.bot_b_id "
+            "LEFT JOIN match_rating_policies policy ON policy.match_id=m.id "
+            "WHERE policy.match_id IS NULL"
+        ).fetchall()
+        for row in rows:
+            if row["match_type"] == TYPE_CONTEST:
+                rated, reason = False, "contest"
+            elif row["match_type"] == TYPE_HUMAN:
+                rated, reason = False, "human"
+            elif row["bot_a_id"] is None or row["bot_b_id"] is None:
+                rated, reason = False, "bot_missing"
+            elif int(row["bot_a_id"]) == int(row["bot_b_id"]):
+                rated, reason = False, "self_play"
+            elif row["owner_a_id"] is None or row["owner_b_id"] is None:
+                rated, reason = False, "owner_missing"
+            elif int(row["owner_a_id"]) == int(row["owner_b_id"]):
+                rated, reason = False, "same_owner"
+            else:
+                rated, reason = True, "eligible"
+            conn.execute(
+                "INSERT INTO match_rating_policies("
+                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+                "classified_at) VALUES(?,?,?,?,?,?,'legacy_migration',?)",
+                (
+                    row["id"], gid, row["bot_a_id"], row["bot_b_id"],
+                    1 if rated else 0, reason, classified_at,
+                ),
+            )
+
+
+def _ensure_rating_settlement_sequence(conn: sqlite3.Connection) -> None:
+    """Give every real settlement an immutable, globally monotonic order.
+
+    Historical v1 rows did not record a sequence.  Production verification
+    established that replaying them by ``(ended_at, id)`` reproduces the live
+    Glicko projection exactly, while ``created_at`` does not.  The first v2
+    migration therefore assigns that canonical order once.  New rows allocate
+    their sequence in the same transaction as the settlement side effects.
+    """
+    _add_col(conn, "match_rating_settlements", "settled_order", "INTEGER")
+    if "auto_match_decisions" in {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }:
+        _add_col(conn, "auto_match_decisions", "settlement_order", "INTEGER")
+
+    conn.execute(
+        "UPDATE match_rating_settlements SET settled_order=0 "
+        "WHERE match_id=? AND settled_order IS NULL",
+        (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+    )
+    existing = conn.execute(
+        "SELECT COUNT(*) AS n,COALESCE(MAX(settled_order),0) AS max_order "
+        "FROM match_rating_settlements WHERE match_id<>? "
+        "AND settled_order IS NOT NULL",
+        (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+    ).fetchone()
+    next_order = int(existing["max_order"] or 0) + 1
+
+    pending: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for gid in sorted(_all_game_ids()):
+        table = _matches_table(gid)
+        rows = conn.execute(
+            "SELECT settled.match_id,"
+            "COALESCE(m.ended_at,settled.settled_at,'') AS order_at "
+            "FROM match_rating_settlements settled "
+            f"JOIN {table} m ON m.id=settled.match_id "
+            "WHERE settled.match_id<>? AND settled.settled_order IS NULL",
+            (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+        ).fetchall()
+        for row in rows:
+            match_id = str(row["match_id"])
+            pending.append((str(row["order_at"] or ""), match_id))
+            seen.add(match_id)
+    # Defensive orphan handling: an old marker without a match must still get
+    # an auditable order, after all rows whose authoritative terminal exists.
+    for row in conn.execute(
+        "SELECT match_id,settled_at FROM match_rating_settlements "
+        "WHERE match_id<>? AND settled_order IS NULL ORDER BY settled_at,match_id",
+        (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+    ).fetchall():
+        match_id = str(row["match_id"])
+        if match_id not in seen:
+            pending.append((str(row["settled_at"] or ""), match_id))
+    for _, match_id in sorted(pending):
+        conn.execute(
+            "UPDATE match_rating_settlements SET settled_order=? "
+            "WHERE match_id=? AND settled_order IS NULL",
+            (next_order, match_id),
+        )
+        next_order += 1
+
+    actual_orders = [
+        int(row[0])
+        for row in conn.execute(
+            "SELECT settled_order FROM match_rating_settlements "
+            "WHERE match_id<>? ORDER BY settled_order",
+            (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+        )
+    ]
+    if actual_orders != list(range(1, len(actual_orders) + 1)):
+        raise RuntimeError(
+            "match_rating_settlements.settled_order 必须是连续 1..N"
+        )
+    conn.execute(
+        "UPDATE match_rating_policies SET settled_order=("
+        "SELECT settled.settled_order FROM match_rating_settlements settled "
+        "WHERE settled.match_id=match_rating_policies.match_id) "
+        "WHERE EXISTS(SELECT 1 FROM match_rating_settlements settled "
+        "WHERE settled.match_id=match_rating_policies.match_id)"
+    )
+    reserved_orders = [
+        int(row[0])
+        for row in conn.execute(
+            "SELECT policy.settled_order FROM match_rating_policies policy "
+            "LEFT JOIN match_rating_settlements settled "
+            "ON settled.match_id=policy.match_id "
+            "WHERE policy.settled_order IS NOT NULL "
+            "AND settled.match_id IS NULL ORDER BY policy.settled_order"
+        )
+    ]
+    expected_reserved = list(
+        range(len(actual_orders) + 1, len(actual_orders) + len(reserved_orders) + 1)
+    )
+    if reserved_orders != expected_reserved:
+        raise RuntimeError(
+            "未结算 match_rating_policies.settled_order 必须紧接已结算序号"
+        )
+    next_reserved = len(actual_orders) + len(reserved_orders) + 1
+    pending: list[tuple[str, str]] = []
+    for gid in sorted(_all_game_ids()):
+        table = _matches_table(gid)
+        pending.extend(
+            (str(row["ended_at"] or ""), str(row["id"]))
+            for row in conn.execute(
+                f"SELECT m.id,m.ended_at FROM {table} m "
+                "JOIN match_rating_policies policy ON policy.match_id=m.id "
+                "WHERE m.status=? AND policy.settled_order IS NULL "
+                "AND policy.rating_reason NOT IN ('contest','human')",
+                (STATUS_COMPLETED,),
+            ).fetchall()
+        )
+    for _, match_id in sorted(pending):
+        conn.execute(
+            "UPDATE match_rating_policies SET settled_order=? "
+            "WHERE match_id=? AND settled_order IS NULL",
+            (next_reserved, match_id),
+        )
+        next_reserved += 1
+    conn.execute(
+        "UPDATE rating_settlement_sequence SET next_order=? WHERE singleton=1",
+        (next_reserved,),
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_match_rating_policy_settled_order "
+        "ON match_rating_policies(settled_order) WHERE settled_order IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_order_immutable "
+        "BEFORE UPDATE OF settled_order ON match_rating_policies "
+        "WHEN OLD.settled_order IS NOT NULL AND OLD.settled_order IS NOT NEW.settled_order "
+        "BEGIN SELECT RAISE(ABORT,'rating policy settled_order immutable'); END"
+    )
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_match_rating_settled_order "
+        "ON match_rating_settlements(settled_order) "
+        "WHERE settled_order IS NOT NULL AND settled_order>0"
+    )
+    sentinel = MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL.replace("'", "''")
+    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_settlement_order_insert")
+    conn.execute(
+        "CREATE TRIGGER trg_match_rating_settlement_order_insert "
+        "BEFORE INSERT ON match_rating_settlements "
+        f"WHEN NEW.match_id<>'{sentinel}' AND ("
+        "NEW.settled_order IS NULL OR NEW.settled_order<=0 OR "
+        "NEW.settled_order<>(SELECT COALESCE(MAX(settled_order),0)+1 "
+        "FROM match_rating_settlements WHERE settled_order>0)) BEGIN "
+        "SELECT RAISE(ABORT,'rating settlement order must be next'); END"
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_settlement_order_immutable")
+    conn.execute(
+        "CREATE TRIGGER trg_match_rating_settlement_order_immutable "
+        "BEFORE UPDATE OF match_id,settled_at,settled_order "
+        "ON match_rating_settlements WHEN OLD.match_id IS NOT NEW.match_id OR "
+        "OLD.settled_at IS NOT NEW.settled_at OR "
+        "OLD.settled_order IS NOT NEW.settled_order BEGIN "
+        "SELECT RAISE(ABORT,'rating settlement source immutable'); END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_settlement_delete_immutable "
+        "BEFORE DELETE ON match_rating_settlements WHEN OLD.settled_order>0 BEGIN "
+        "SELECT RAISE(ABORT,'rating settlement source immutable'); END"
+    )
+    current_policy = _RATING_PROJECTION_POLICY_VERSION.replace("'", "''")
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_projection_advance "
+        "AFTER INSERT ON match_rating_settlements WHEN NEW.settled_order>0 BEGIN "
+        "UPDATE rating_projection_state SET "
+        "source_settlement_count=source_settlement_count+1,"
+        "source_last_settled_order=NEW.settled_order "
+        f"WHERE singleton=1 AND policy_version='{current_policy}'; END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_projection_dirty_on_delete "
+        "AFTER DELETE ON match_rating_settlements WHEN OLD.settled_order>0 BEGIN "
+        "UPDATE rating_projection_state SET policy_version='projection-dirty',"
+        "rebuilt_at=NULL WHERE singleton=1; END"
+    )
+    _install_rating_source_guards(conn)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -1681,34 +2122,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ON contest_pairings(match_id) WHERE match_id IS NOT NULL"
         )
 
-    # ── 系统 auto-match 每日配额凭据（跨重启/跨 Store 实例）────────────
-    # 旧实现只在 AutoMatchScheduler 内存计数，服务重启即归零。首次升级时，按
-    # 旧架构的唯一生产身份（ladder + owner NULL + 非赛事/非 human）回填历史；
-    # 哨兵写入后，今后的 claim 只允许显式 auto-match 创建路径同事务写入，避免
-    # 把普通用户或其他内部 ladder 误计入配额。
-    auto_match_claims_migrated = conn.execute(
-        "SELECT 1 FROM auto_match_daily_claims WHERE match_id=?",
-        (AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL,),
-    ).fetchone()
-    if not auto_match_claims_migrated:
-        migrated_at = _now()
-        for _gid in _all_game_ids():
-            _tbl = _matches_table(_gid)
-            if _tbl not in _tables_after:
-                continue
-            conn.execute(
-                "INSERT OR IGNORE INTO auto_match_daily_claims"
-                "(match_id, local_day, created_at) "
-                f"SELECT id, substr(created_at,1,10), created_at FROM {_tbl} "
-                "WHERE match_type=? AND owner_id IS NULL AND contest_id IS NULL "
-                "AND human_user_id IS NULL AND length(substr(created_at,1,10))=10",
-                (TYPE_LADDER,),
-            )
-        conn.execute(
-            "INSERT OR IGNORE INTO auto_match_daily_claims(match_id, local_day, created_at) "
-            "VALUES(?,?,?)",
-            (AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL, "", migrated_at),
-        )
+    # ── 自动排位 v2：每日配额下线，单一持久公平队列接管 ────────────────
+    # 公平计数只从历史 completed system ladder 一次性引导；此后仅由 queue
+    # terminal transaction 更新，绝不读取可被前台挑战影响的 ratings/pair_stats。
+    _bootstrap_auto_match_fairness(conn)
+    _ensure_match_rating_policy_identity(conn)
+    _classify_legacy_match_rating_policies(conn)
+    conn.execute("DROP TABLE IF EXISTS auto_match_daily_claims")
+    # 唯一可变项只保留 enabled。旧调参记录若继续存在，会让运维误以为仍生效。
+    conn.execute(
+        "DELETE FROM platform_settings WHERE key IN ("
+        "'auto_match_interval_sec','auto_match_min_idle_sec',"
+        "'auto_match_bot_cooldown','auto_match_stale_sec',"
+        "'auto_match_reserve_slots','auto_match_placement_games',"
+        "'auto_match_max_per_round','auto_match_daily_cap','auto_match_enabled')"
+    )
+    _install_rated_overlap_triggers(conn)
 
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
     # 升级前的 completed 对局大多已经由旧后处理更新过 ratings，但没有 marker。
@@ -1737,27 +2166,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "INSERT INTO match_rating_settlements(match_id, settled_at) VALUES(?,?)",
             (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL, migrated_at),
         )
+    _ensure_rating_settlement_sequence(conn)
 
 
 class Store:
     """SQLite 存储。线程安全；持久连接 check_same_thread=False。"""
 
-    def __init__(
-        self,
-        path: str | None = None,
-        *,
-        auto_match_day_provider: Callable[[], str] | None = None,
-    ) -> None:
+    def __init__(self, path: str | None = None) -> None:
         self.path = path or DEFAULT_DB_PATH
         self._lock = threading.Lock()
-        if auto_match_day_provider is None:
-            # Lazy import keeps Store's module import independent from the
-            # runtime package while retaining runtime/config.py as the code
-            # truth for Asia/Shanghai calendar semantics.
-            from bzplat.backend.runtime.config import platform_local_day
-
-            auto_match_day_provider = platform_local_day
-        self._auto_match_day_provider = auto_match_day_provider
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         # FK 强制是 SQLite 的连接级设置（默认 OFF）。在连接处一次性开启，覆盖所有
         # 访问路径（_tx / 直接 _conn / 脚本 / 备份恢复）——_tx() 内的重复开启是冗余
@@ -2407,12 +2824,29 @@ class Store:
             match_count = 0
             for gid in _all_game_ids():
                 table = _matches_table(gid)
+                rated = _rating_eligible_sql("m")
                 row = c.execute(
-                    f"SELECT COUNT(*) AS n FROM {table} "
-                    "WHERE (bot_a_id=? OR bot_b_id=?) AND status IN (?,?)",
-                    (bot_id, bot_id, STATUS_PENDING, STATUS_RUNNING),
+                    f"SELECT COUNT(*) AS n FROM {table} m "
+                    "WHERE (m.bot_a_id=? OR m.bot_b_id=?) AND ("
+                    "m.status IN (?,?) OR (m.status=? AND "
+                    f"({rated}) AND NOT EXISTS ("
+                    "SELECT 1 FROM match_rating_settlements settled "
+                    "WHERE settled.match_id=m.id)))",
+                    (
+                        bot_id,
+                        bot_id,
+                        STATUS_PENDING,
+                        STATUS_RUNNING,
+                        STATUS_COMPLETED,
+                    ),
                 ).fetchone()
                 match_count += int(row["n"] if row else 0)
+            queued_row = c.execute(
+                "SELECT COUNT(*) AS n FROM auto_match_queue "
+                "WHERE bot_a_id=? OR bot_b_id=?",
+                (bot_id, bot_id),
+            ).fetchone()
+            match_count += int(queued_row["n"] if queued_row else 0)
 
             status_marks = ",".join("?" for _ in active_contest_statuses)
             pairing_row = c.execute(
@@ -2460,6 +2894,13 @@ class Store:
                 ).fetchone()
                 if row and row["n"]:
                     out["matches"] += int(row["n"])
+            queued = c.execute(
+                "SELECT COUNT(*) AS n FROM auto_match_queue "
+                "WHERE bot_a_id=? OR bot_b_id=?",
+                (bot_id, bot_id),
+            ).fetchone()
+            if queued and queued["n"]:
+                out["matches"] += int(queued["n"])
             # 进行中赛事（running/published/rest）的报名/对阵：硬删会破坏对阵表（CASCADE）。
             # draft/open 的报名可重建（用户重新报名），不阻拦；finished 的历史 SET NULL 保留。
             row = c.execute(
@@ -2590,6 +3031,17 @@ class Store:
                 "SELECT current_version FROM bots WHERE id=?", (bot_id,)
             ).fetchone()
             is_current = cur_bot and cur_bot["current_version"] == version
+
+            version_row = c.execute(
+                "SELECT id FROM bot_versions WHERE bot_id=? AND version=?",
+                (bot_id, version),
+            ).fetchone()
+            if version_row and c.execute(
+                "SELECT 1 FROM auto_match_queue WHERE bot_a_version_id=? "
+                "OR bot_b_version_id=? LIMIT 1",
+                (version_row["id"], version_row["id"]),
+            ).fetchone():
+                raise ValueError("该版本已被冻结到自动排位队列，暂不可删除")
 
             cur = c.execute(
                 "DELETE FROM bot_versions WHERE bot_id=? AND version=?",
@@ -2761,25 +3213,1112 @@ class Store:
 
     # ── matches（全面解耦 PR3：拆每游戏一张表 + matches_index 定位）─────
 
-    def count_auto_matches_for_day(self, local_day: str) -> int:
-        """Return durable system auto-match claims for one platform local day."""
-        local_day = _require_iso_day(local_day)
-        with self._tx() as c:
-            row = c.execute(
-                "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
-                (local_day,),
-            ).fetchone()
-            return int(row[0]) if row else 0
+    @staticmethod
+    def _bot_has_active_rated_match_tx(
+        c: sqlite3.Connection,
+        bot_id: int,
+        *,
+        game_id: str | None = None,
+    ) -> bool:
+        """Return whether a Bot is already in a rating-bearing active match.
 
-    def auto_match_daily_status(self) -> tuple[str, int]:
-        """Return the Store-authoritative current platform day and claim count."""
-        with self._tx() as c:
-            local_day = _require_iso_day(self._auto_match_day_provider())
+        Pending/running and completed-but-unsettled are one rating lifecycle.
+        Contest, human, self-play and same-owner comparisons are neutral and do
+        not block.  Callers hold the same SQLite transaction used for selection
+        or creation; per-game triggers enforce the same rule for every writer.
+        """
+        gids = (game_id,) if game_id is not None else tuple(_all_game_ids())
+        for gid in gids:
+            tbl = _matches_table(gid)
+            rated = _rating_eligible_sql("m")
             row = c.execute(
-                "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
-                (local_day,),
+                f"SELECT 1 FROM {tbl} m WHERE ({rated}) "
+                "AND (m.bot_a_id=? OR m.bot_b_id=?) AND ("
+                "m.status IN (?,?) OR (m.status=? AND NOT EXISTS ("
+                "SELECT 1 FROM match_rating_settlements settled "
+                "WHERE settled.match_id=m.id))) LIMIT 1",
+                (
+                    bot_id,
+                    bot_id,
+                    STATUS_PENDING,
+                    STATUS_RUNNING,
+                    STATUS_COMPLETED,
+                ),
             ).fetchone()
-            return local_day, int(row[0]) if row else 0
+            if row is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _auto_queue_identity_tx(
+        c: sqlite3.Connection,
+        row: sqlite3.Row | dict,
+    ) -> dict | None:
+        """Validate one frozen queue identity against current executable state."""
+        q = dict(row)
+        identity = c.execute(
+            "SELECT a.id AS a_id, a.owner_id AS a_owner_id, a.game_id AS a_game_id, "
+            "a.is_active AS a_active, a.is_builtin AS a_builtin, "
+            "a.format AS a_format, a.os AS a_os, a.arch AS a_arch, "
+            "ua.is_active AS a_owner_active, "
+            "b.id AS b_id, b.owner_id AS b_owner_id, b.game_id AS b_game_id, "
+            "b.is_active AS b_active, b.is_builtin AS b_builtin, "
+            "b.format AS b_format, b.os AS b_os, b.arch AS b_arch, "
+            "ub.is_active AS b_owner_active, "
+            "va.id AS a_version_id, va.binary_path AS a_version_path, "
+            "va.format AS a_version_format, va.os AS a_version_os, "
+            "va.arch AS a_version_arch, va.runtime_mode AS a_version_runtime, "
+            "vb.id AS b_version_id, vb.binary_path AS b_version_path, "
+            "vb.format AS b_version_format, vb.os AS b_version_os, "
+            "vb.arch AS b_version_arch, vb.runtime_mode AS b_version_runtime, "
+            "d.lifecycle AS decision_lifecycle,d.game_id AS decision_game_id,"
+            "d.bot_a_id AS decision_bot_a_id,d.bot_b_id AS decision_bot_b_id,"
+            "d.bot_a_version_id AS decision_version_a_id,"
+            "d.bot_b_version_id AS decision_version_b_id,"
+            "ra.game_id AS a_rating_game, rb.game_id AS b_rating_game "
+            "FROM bots a JOIN users ua ON ua.id=a.owner_id "
+            "JOIN bots b ON b.id=? JOIN users ub ON ub.id=b.owner_id "
+            "JOIN bot_versions va ON va.id=? AND va.bot_id=a.id "
+            "JOIN bot_versions vb ON vb.id=? AND vb.bot_id=b.id "
+            "JOIN auto_match_decisions d ON d.id=? "
+            "JOIN ratings ra ON ra.bot_id=a.id AND ra.game_id=a.game_id "
+            "JOIN ratings rb ON rb.bot_id=b.id AND rb.game_id=b.game_id "
+            "WHERE a.id=?",
+            (
+                int(q["bot_b_id"]),
+                int(q["bot_a_version_id"]),
+                int(q["bot_b_version_id"]),
+                int(q["decision_id"]),
+                int(q["bot_a_id"]),
+            ),
+        ).fetchone()
+        if identity is None:
+            return None
+        data = dict(identity)
+        gid = str(q.get("game_id") or "")
+        if (
+            int(data["a_id"]) == int(data["b_id"])
+            or int(data["a_owner_id"]) == int(data["b_owner_id"])
+            or data["a_game_id"] != gid
+            or data["b_game_id"] != gid
+            or data["a_rating_game"] != gid
+            or data["b_rating_game"] != gid
+            or not int(data["a_active"])
+            or not int(data["b_active"])
+            or not int(data["a_owner_active"])
+            or not int(data["b_owner_active"])
+            or int(data["a_builtin"])
+            or int(data["b_builtin"])
+            or data["decision_game_id"] != gid
+            or int(data["decision_bot_a_id"]) != int(q["bot_a_id"])
+            or int(data["decision_bot_b_id"]) != int(q["bot_b_id"])
+            or int(data["decision_version_a_id"]) != int(q["bot_a_version_id"])
+            or int(data["decision_version_b_id"]) != int(q["bot_b_version_id"])
+            or data["decision_lifecycle"] != (
+                "queued" if q.get("status") == "queued" else "dispatched"
+            )
+        ):
+            return None
+        for prefix in ("a", "b"):
+            if (
+                data[f"{prefix}_format"] != SUPPORTED_BINARY_FORMAT
+                or data[f"{prefix}_os"] != SUPPORTED_BINARY_OS
+                or data[f"{prefix}_arch"] != SUPPORTED_BINARY_ARCH
+                or data[f"{prefix}_version_format"] != SUPPORTED_BINARY_FORMAT
+                or data[f"{prefix}_version_os"] != SUPPORTED_BINARY_OS
+                or data[f"{prefix}_version_arch"] != SUPPORTED_BINARY_ARCH
+                or data[f"{prefix}_version_runtime"] not in VALID_RUNTIME_MODES
+                or not str(data[f"{prefix}_version_path"] or "")
+            ):
+                return None
+        return data
+
+    @staticmethod
+    def _auto_dispatcher_owned_tx(
+        c: sqlite3.Connection, dispatcher_token: str
+    ) -> bool:
+        now = _now()
+        row = c.execute(
+            "SELECT owner_token,lease_until FROM auto_match_dispatcher WHERE singleton=1"
+        ).fetchone()
+        return bool(
+            row
+            and str(row["owner_token"] or "") == dispatcher_token
+            and str(row["lease_until"] or "") > now
+        )
+
+    def acquire_auto_match_dispatcher(
+        self, dispatcher_token: str, *, lease_seconds: int = 30
+    ) -> dict:
+        """Acquire/renew the single dispatcher lease with a write-linearized CAS."""
+        if not dispatcher_token:
+            raise ValueError("dispatcher token required")
+        now = _now()
+        lease_until = _after_seconds(max(5, int(lease_seconds)))
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute(
+                "SELECT owner_token,lease_until FROM auto_match_dispatcher "
+                "WHERE singleton=1"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("auto_match_dispatcher singleton missing")
+            previous = str(row["owner_token"] or "")
+            expired = not row["lease_until"] or str(row["lease_until"]) <= now
+            if previous == dispatcher_token or not previous or expired:
+                changed_owner = previous != dispatcher_token
+                c.execute(
+                    "UPDATE auto_match_dispatcher SET owner_token=?,lease_until=?,"
+                    "heartbeat_at=? WHERE singleton=1",
+                    (dispatcher_token, lease_until, now),
+                )
+                return {
+                    "owned": True,
+                    "changed_owner": changed_owner,
+                    "previous_owner": previous,
+                    "lease_until": lease_until,
+                }
+            return {
+                "owned": False,
+                "changed_owner": False,
+                "previous_owner": previous,
+                "lease_until": row["lease_until"],
+            }
+
+    def release_auto_match_dispatcher(self, dispatcher_token: str) -> bool:
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            cur = c.execute(
+                "UPDATE auto_match_dispatcher SET owner_token=NULL,lease_until=NULL,"
+                "heartbeat_at=? WHERE singleton=1 AND owner_token=?",
+                (_now(), dispatcher_token),
+            )
+            return cur.rowcount == 1
+
+    def auto_match_dispatcher_state(self) -> dict:
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT owner_token,lease_until,heartbeat_at FROM auto_match_dispatcher "
+                "WHERE singleton=1"
+            ).fetchone()
+            return dict(row) if row else {}
+
+    @staticmethod
+    def _rating_projection_status_tx(c: sqlite3.Connection) -> dict:
+        state = c.execute(
+            "SELECT * FROM rating_projection_state WHERE singleton=1"
+        ).fetchone()
+        source = c.execute(
+            "SELECT COUNT(*) AS n,COALESCE(MAX(settled_order),0) AS last_order "
+            "FROM match_rating_settlements WHERE settled_order>0"
+        ).fetchone()
+        state_data = dict(state) if state else {}
+        source_count = int(source["n"] or 0)
+        source_last = int(source["last_order"] or 0)
+        ready = bool(
+            state_data.get("policy_version") == _RATING_PROJECTION_POLICY_VERSION
+            and int(state_data.get("source_settlement_count") or 0) == source_count
+            and int(state_data.get("source_last_settled_order") or 0) == source_last
+        )
+        return {
+            "ready": ready,
+            "required_policy_version": _RATING_PROJECTION_POLICY_VERSION,
+            "source_settlement_count": source_count,
+            "source_last_settled_order": source_last,
+            "state": state_data,
+        }
+
+    def rating_projection_status(self) -> dict:
+        with self._tx() as c:
+            return self._rating_projection_status_tx(c)
+
+    @staticmethod
+    def _auto_backoff_tx(c: sqlite3.Connection, reason: str) -> dict:
+        state = c.execute(
+            "SELECT platform_failures FROM auto_match_fair_state WHERE singleton=1"
+        ).fetchone()
+        failures = int(state["platform_failures"] or 0) + 1 if state else 1
+        delay = min(300, 2 ** min(failures - 1, 8))
+        not_before = _after_seconds(delay)
+        c.execute(
+            "UPDATE auto_match_fair_state SET platform_failures=?,not_before=?,"
+            "updated_at=? WHERE singleton=1",
+            (failures, not_before, _now()),
+        )
+        return {"failures": failures, "not_before": not_before, "reason": reason}
+
+    @staticmethod
+    def _auto_reset_backoff_tx(c: sqlite3.Connection) -> None:
+        c.execute(
+            "UPDATE auto_match_fair_state SET platform_failures=0,not_before=NULL,"
+            "updated_at=? WHERE singleton=1",
+            (_now(),),
+        )
+
+    @staticmethod
+    def _auto_cancel_queue_row_tx(
+        c: sqlite3.Connection, row: sqlite3.Row | dict, reason: str
+    ) -> None:
+        q = dict(row)
+        now = _now()
+        c.execute(
+            "UPDATE auto_match_decisions SET lifecycle='cancelled',terminal_at=?,"
+            "terminal_reason=? WHERE id=? AND lifecycle IN ('queued','dispatched')",
+            (now, reason, int(q["decision_id"])),
+        )
+        c.execute("DELETE FROM auto_match_queue WHERE id=?", (int(q["id"]),))
+
+    def _auto_queue_candidates_tx(self, c: sqlite3.Connection) -> list[dict]:
+        rows = c.execute(
+            "SELECT b.id AS bot_id,b.owner_id,b.game_id,b.name AS bot_name,"
+            "b.display_name AS bot_display,u.username AS owner_name,"
+            "u.display_name AS owner_display,v.id AS version_id,r.rating,r.rd,"
+            "r.matches_played,COALESCE(os.served_count,0) AS owner_service,"
+            "COALESCE(os.last_served_revision,0) AS owner_last_revision,"
+            "COALESCE(bs.served_count,0) AS bot_service,"
+            "COALESCE(bs.last_served_revision,0) AS bot_last_revision,"
+            "COALESCE(bs.seat_a_count,0) AS seat_a_count,"
+            "COALESCE(bs.seat_b_count,0) AS seat_b_count "
+            "FROM bots b JOIN users u ON u.id=b.owner_id "
+            "JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
+            "JOIN bot_versions v ON v.bot_id=b.id AND v.version=b.current_version "
+            "LEFT JOIN auto_match_owner_service os "
+            "ON os.owner_id=b.owner_id AND os.game_id=b.game_id "
+            "LEFT JOIN auto_match_bot_service bs "
+            "ON bs.bot_id=b.id AND bs.game_id=b.game_id "
+            "WHERE b.is_active=1 AND b.is_builtin=0 AND u.is_active=1 "
+            "AND b.binary_path<>'' AND v.binary_path<>'' "
+            "AND b.binary_path=v.binary_path AND b.runtime_mode=v.runtime_mode "
+            "AND b.format=? AND b.os=? AND b.arch=? "
+            "AND v.format=? AND v.os=? AND v.arch=? "
+            "AND NOT EXISTS (SELECT 1 FROM auto_match_queue q "
+            "WHERE b.id IN (q.bot_a_id,q.bot_b_id)) "
+            "AND NOT EXISTS (SELECT 1 FROM auto_match_queue q "
+            "JOIN bots qa ON qa.id=q.bot_a_id JOIN bots qb ON qb.id=q.bot_b_id "
+            "WHERE b.owner_id IN (qa.owner_id,qb.owner_id))",
+            (
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+                SUPPORTED_BINARY_ARCH,
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+                SUPPORTED_BINARY_ARCH,
+            ),
+        ).fetchall()
+        return [
+            dict(row)
+            for row in rows
+            if not self._bot_has_active_rated_match_tx(
+                c, int(row["bot_id"]), game_id=str(row["game_id"])
+            )
+        ]
+
+    @staticmethod
+    def _auto_bot_key(bot: dict) -> tuple[int, int, int]:
+        return (
+            int(bot.get("bot_service") or 0),
+            int(bot.get("bot_last_revision") or 0),
+            int(bot["bot_id"]),
+        )
+
+    @staticmethod
+    def _auto_owner_key(bot: dict) -> tuple[int, int, int]:
+        return (
+            int(bot.get("owner_service") or 0),
+            int(bot.get("owner_last_revision") or 0),
+            int(bot["owner_id"]),
+        )
+
+    @staticmethod
+    def _auto_pair_counts_tx(
+        c: sqlite3.Connection, anchor: dict, partner: dict
+    ) -> tuple[int, int]:
+        gid = str(anchor["game_id"])
+        bot_lo, bot_hi = sorted((int(anchor["bot_id"]), int(partner["bot_id"])))
+        owner_lo, owner_hi = sorted(
+            (int(anchor["owner_id"]), int(partner["owner_id"]))
+        )
+        bot_row = c.execute(
+            "SELECT served_count FROM auto_match_bot_pair_service "
+            "WHERE game_id=? AND bot_lo_id=? AND bot_hi_id=?",
+            (gid, bot_lo, bot_hi),
+        ).fetchone()
+        owner_row = c.execute(
+            "SELECT served_count FROM auto_match_owner_pair_service "
+            "WHERE game_id=? AND owner_lo_id=? AND owner_hi_id=?",
+            (gid, owner_lo, owner_hi),
+        ).fetchone()
+        return (
+            int(bot_row["served_count"] or 0) if bot_row else 0,
+            int(owner_row["served_count"] or 0) if owner_row else 0,
+        )
+
+    @staticmethod
+    def _auto_queue_seat_debt_tx(
+        c: sqlite3.Connection, bot: dict
+    ) -> int:
+        queued = c.execute(
+            "SELECT SUM(CASE WHEN bot_a_id=? THEN 1 ELSE 0 END) AS seat_a,"
+            "SUM(CASE WHEN bot_b_id=? THEN 1 ELSE 0 END) AS seat_b "
+            "FROM auto_match_queue WHERE bot_a_id=? OR bot_b_id=?",
+            (bot["bot_id"], bot["bot_id"], bot["bot_id"], bot["bot_id"]),
+        ).fetchone()
+        return (
+            int(bot.get("seat_a_count") or 0)
+            - int(bot.get("seat_b_count") or 0)
+            + int(queued["seat_a"] or 0)
+            - int(queued["seat_b"] or 0)
+        )
+
+    def _auto_choose_pair_tx(
+        self,
+        c: sqlite3.Connection,
+        candidates: list[dict],
+        *,
+        game_id: str,
+        lane: str,
+        placement_required: int,
+    ) -> tuple[dict, dict, str, int, int, float] | None:
+        game = [bot for bot in candidates if bot["game_id"] == game_id]
+        if len({int(bot["owner_id"]) for bot in game}) < 2:
+            return None
+        for bot in game:
+            bot["_lane"] = (
+                "placement"
+                if int(bot.get("matches_played") or 0) < placement_required
+                else "formal"
+            )
+        lane_bots = [bot for bot in game if bot["_lane"] == lane]
+        if not lane_bots:
+            return None
+
+        # One representative Bot per owner.  Owner service is the first layer;
+        # within the owner, the least auto-served Bot rotates.
+        owner_best: dict[int, dict] = {}
+        for bot in lane_bots:
+            owner = int(bot["owner_id"])
+            current = owner_best.get(owner)
+            if current is None or self._auto_bot_key(bot) < self._auto_bot_key(current):
+                owner_best[owner] = bot
+        anchors = sorted(owner_best.values(), key=lambda bot: (
+            self._auto_owner_key(bot), self._auto_bot_key(bot)
+        ))
+
+        for anchor in anchors:
+            exact = [
+                bot for bot in game
+                if int(bot["owner_id"]) != int(anchor["owner_id"])
+                and bot["_lane"] == lane
+            ]
+            widened = False
+            partners = exact
+            if not partners and lane == "placement":
+                # The sole placement owner still receives calibration service,
+                # but never against itself; a formal owner is the auditable fallback.
+                partners = [
+                    bot for bot in game
+                    if int(bot["owner_id"]) != int(anchor["owner_id"])
+                    and bot["_lane"] == "formal"
+                ]
+                widened = bool(partners)
+            if not partners:
+                continue
+
+            partner_owner_best: dict[int, dict] = {}
+            for bot in partners:
+                owner = int(bot["owner_id"])
+                current = partner_owner_best.get(owner)
+                if current is None or self._auto_bot_key(bot) < self._auto_bot_key(current):
+                    partner_owner_best[owner] = bot
+            partners = list(partner_owner_best.values())
+
+            def partner_key(bot: dict) -> tuple:
+                bot_pair, owner_pair = self._auto_pair_counts_tx(c, anchor, bot)
+                return (
+                    bot_pair,
+                    owner_pair,
+                    abs(float(anchor.get("rating") or 1500.0)
+                        - float(bot.get("rating") or 1500.0)),
+                    self._auto_owner_key(bot),
+                    self._auto_bot_key(bot),
+                    int(bot["owner_id"]),
+                    int(bot["bot_id"]),
+                )
+
+            partner = min(partners, key=partner_key)
+            bot_pair, owner_pair = self._auto_pair_counts_tx(c, anchor, partner)
+            rating_gap = abs(
+                float(anchor.get("rating") or 1500.0)
+                - float(partner.get("rating") or 1500.0)
+            )
+            return (
+                anchor,
+                partner,
+                "single_placement_owner" if widened else "",
+                bot_pair,
+                owner_pair,
+                rating_gap,
+            )
+        return None
+
+    def refill_auto_match_queue(
+        self,
+        *,
+        target_queued: int,
+        placement_required: int,
+        dispatcher_token: str,
+    ) -> dict:
+        """Fill fixed lookahead under the persistent game/lane/owner policy."""
+        target = max(0, int(target_queued))
+        placement = max(0, int(placement_required))
+        inserted = 0
+        removed_invalid = 0
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+                return {"outcome": "not_leader", "inserted": 0}
+            switch = c.execute(
+                "SELECT enabled FROM auto_match_control WHERE singleton=1"
+            ).fetchone()
+            if not switch or int(switch["enabled"]) != 1:
+                return {"outcome": "disabled", "inserted": 0}
+            projection = self._rating_projection_status_tx(c)
+            if not projection["ready"]:
+                return {
+                    "outcome": "rating_unverified",
+                    "inserted": 0,
+                    "rating_projection": projection,
+                }
+            fair = c.execute(
+                "SELECT * FROM auto_match_fair_state WHERE singleton=1"
+            ).fetchone()
+            if fair is None:
+                raise RuntimeError("auto_match_fair_state singleton missing")
+            if fair["not_before"] and str(fair["not_before"]) > _now():
+                return {
+                    "outcome": "backoff",
+                    "inserted": 0,
+                    "not_before": fair["not_before"],
+                    "platform_failures": int(fair["platform_failures"] or 0),
+                }
+
+            for row in c.execute(
+                "SELECT * FROM auto_match_queue WHERE status='queued' ORDER BY id"
+            ).fetchall():
+                if self._auto_queue_identity_tx(c, row) is None:
+                    self._auto_cancel_queue_row_tx(c, row, "identity_invalid")
+                    removed_invalid += 1
+
+            queued_row = c.execute(
+                "SELECT COUNT(*) AS n FROM auto_match_queue WHERE status='queued'"
+            ).fetchone()
+            queued_count = int(queued_row["n"] if queued_row else 0)
+            game_ids = sorted(_all_game_ids())
+            while queued_count < target:
+                candidates = self._auto_queue_candidates_tx(c)
+                state = c.execute(
+                    "SELECT * FROM auto_match_fair_state WHERE singleton=1"
+                ).fetchone()
+                cursor = int(state["next_game_idx"] or 0) % max(1, len(game_ids))
+                requested_lane = (
+                    "placement" if int(state["next_lane"] or 0) == 0 else "formal"
+                )
+                rotated = game_ids[cursor:] + game_ids[:cursor]
+                selected = None
+                selected_game_idx = cursor
+                actual_lane = requested_lane
+                lane_fallback = ""
+                for candidate_lane in (requested_lane, (
+                    "formal" if requested_lane == "placement" else "placement"
+                )):
+                    for gid in rotated:
+                        choice = self._auto_choose_pair_tx(
+                            c,
+                            candidates,
+                            game_id=gid,
+                            lane=candidate_lane,
+                            placement_required=placement,
+                        )
+                        if choice is not None:
+                            selected = choice
+                            selected_game_idx = game_ids.index(gid)
+                            actual_lane = candidate_lane
+                            if candidate_lane != requested_lane:
+                                lane_fallback = "requested_lane_empty"
+                            break
+                    if selected is not None:
+                        break
+                if selected is None:
+                    break
+
+                anchor, partner, partner_fallback, bot_pair, owner_pair, rating_gap = selected
+                anchor_debt = self._auto_queue_seat_debt_tx(c, anchor)
+                partner_debt = self._auto_queue_seat_debt_tx(c, partner)
+                normal_cost = abs(anchor_debt + 1) + abs(partner_debt - 1)
+                reverse_cost = abs(anchor_debt - 1) + abs(partner_debt + 1)
+                if reverse_cost < normal_cost:
+                    bot_a, bot_b = partner, anchor
+                    debt_a, debt_b = partner_debt, anchor_debt
+                elif normal_cost < reverse_cost:
+                    bot_a, bot_b = anchor, partner
+                    debt_a, debt_b = anchor_debt, partner_debt
+                elif int(anchor["bot_id"]) <= int(partner["bot_id"]):
+                    bot_a, bot_b = anchor, partner
+                    debt_a, debt_b = anchor_debt, partner_debt
+                else:
+                    bot_a, bot_b = partner, anchor
+                    debt_a, debt_b = partner_debt, anchor_debt
+
+                fallback = ",".join(
+                    part for part in (lane_fallback, partner_fallback) if part
+                )
+                reason = (
+                    ("定级通道" if actual_lane == "placement" else "正式通道")
+                    + f" · owner/Bot 轮转 · Bot交手 {bot_pair} · "
+                    + f"owner交手 {owner_pair} · Rating差 {rating_gap:.0f} · 先后手平衡"
+                )
+                now = _now()
+                decision = c.execute(
+                    "INSERT INTO auto_match_decisions("
+                    "policy_version,state_revision,cursor_game_idx,requested_lane,"
+                    "actual_lane,fallback_reason,game_id,bot_a_id,bot_b_id,"
+                    "owner_a_id,owner_b_id,bot_a_version_id,bot_b_version_id,"
+                    "owner_a_service_before,owner_b_service_before,"
+                    "bot_a_service_before,bot_b_service_before,bot_pair_count_before,"
+                    "owner_pair_count_before,rating_gap,bot_a_seat_debt_before,"
+                    "bot_b_seat_debt_before,selection_reason,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        _AUTO_MATCH_POLICY_VERSION,
+                        int(state["revision"] or 0),
+                        cursor,
+                        requested_lane,
+                        actual_lane,
+                        fallback,
+                        bot_a["game_id"],
+                        int(bot_a["bot_id"]),
+                        int(bot_b["bot_id"]),
+                        int(bot_a["owner_id"]),
+                        int(bot_b["owner_id"]),
+                        int(bot_a["version_id"]),
+                        int(bot_b["version_id"]),
+                        int(bot_a.get("owner_service") or 0),
+                        int(bot_b.get("owner_service") or 0),
+                        int(bot_a.get("bot_service") or 0),
+                        int(bot_b.get("bot_service") or 0),
+                        bot_pair,
+                        owner_pair,
+                        rating_gap,
+                        debt_a,
+                        debt_b,
+                        reason,
+                        now,
+                    ),
+                )
+                c.execute(
+                    "INSERT INTO auto_match_queue("
+                    "decision_id,game_id,bot_a_id,bot_b_id,bot_a_version_id,"
+                    "bot_b_version_id,status,selection_reason,created_at) "
+                    "VALUES(?,?,?,?,?,?,'queued',?,?)",
+                    (
+                        int(decision.lastrowid),
+                        bot_a["game_id"],
+                        int(bot_a["bot_id"]),
+                        int(bot_b["bot_id"]),
+                        int(bot_a["version_id"]),
+                        int(bot_b["version_id"]),
+                        reason,
+                        now,
+                    ),
+                )
+                c.execute(
+                    "UPDATE auto_match_fair_state SET next_game_idx=?,next_lane=?,"
+                    "revision=revision+1,updated_at=? WHERE singleton=1",
+                    (
+                        (selected_game_idx + 1) % max(1, len(game_ids)),
+                        1 - int(state["next_lane"] or 0),
+                        now,
+                    ),
+                )
+                queued_count += 1
+                inserted += 1
+
+            return {
+                "outcome": "ok",
+                "inserted": inserted,
+                "removed_invalid": removed_invalid,
+                "queued": queued_count,
+                "remaining_eligible": len(self._auto_queue_candidates_tx(c)),
+            }
+
+    def list_auto_match_queue(self, *, game_id: str | None = None) -> list[dict]:
+        """Return active/upcoming rows with public Bot identity and global position."""
+        gid = _registered_game_id(game_id) if game_id is not None else None
+        with self._tx() as c:
+            rows = c.execute(
+                "SELECT q.*,d.requested_lane,d.actual_lane,d.fallback_reason, "
+                "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+                "ua.username AS bot_a_owner, ua.display_name AS bot_a_owner_display, "
+                "ra.rating AS bot_a_rating, ra.matches_played AS bot_a_matches_played, "
+                "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
+                "ub.username AS bot_b_owner, ub.display_name AS bot_b_owner_display, "
+                "rb.rating AS bot_b_rating, rb.matches_played AS bot_b_matches_played "
+                "FROM auto_match_queue q JOIN auto_match_decisions d ON d.id=q.decision_id "
+                "JOIN bots ba ON ba.id=q.bot_a_id JOIN users ua ON ua.id=ba.owner_id "
+                "JOIN ratings ra ON ra.bot_id=ba.id AND ra.game_id=q.game_id "
+                "JOIN bots bb ON bb.id=q.bot_b_id JOIN users ub ON ub.id=bb.owner_id "
+                "JOIN ratings rb ON rb.bot_id=bb.id AND rb.game_id=q.game_id "
+                "ORDER BY CASE q.status WHEN 'dispatched' THEN 0 ELSE 1 END, q.id"
+            ).fetchall()
+            projected: list[dict] = []
+            queued_position = 0
+            for raw in rows:
+                item = dict(raw)
+                if item["status"] == "queued":
+                    queued_position += 1
+                    item["position"] = queued_position
+                else:
+                    item["position"] = 0
+                    tbl = self._match_table_of(c, str(item.get("match_id") or ""))
+                    match = (
+                        c.execute(
+                            f"SELECT status,reason,started_at,created_at FROM {tbl} "
+                            "WHERE id=?",
+                            (item["match_id"],),
+                        ).fetchone()
+                        if tbl
+                        else None
+                    )
+                    item["match_status"] = match["status"] if match else None
+                    item["match_reason"] = match["reason"] if match else None
+                    item["match_started_at"] = match["started_at"] if match else None
+                if gid is None or item["game_id"] == gid:
+                    projected.append(item)
+            return projected
+
+    def claim_next_auto_match(
+        self, match_id: str, *, dispatcher_token: str
+    ) -> dict:
+        """Atomically claim the global head and create its match/index/replay.
+
+        The partial unique index permits at most one dispatched row across all
+        processes.  Switch, lease, frozen versions and rating lifecycle are all
+        re-read after BEGIN IMMEDIATE, so an acknowledged ``off`` cannot race a
+        later dispatch.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+                return {"outcome": "not_leader", "reason": "调度租约不属于当前进程"}
+            switch = c.execute(
+                "SELECT enabled FROM auto_match_control WHERE singleton=1"
+            ).fetchone()
+            if not switch or int(switch["enabled"]) != 1:
+                return {"outcome": "disabled", "reason": "管理员已关闭自动排位"}
+            projection = self._rating_projection_status_tx(c)
+            if not projection["ready"]:
+                return {
+                    "outcome": "rating_unverified",
+                    "reason": "排行榜投影尚未按当前评分策略验证",
+                    "rating_projection": projection,
+                }
+            fair = c.execute(
+                "SELECT not_before,platform_failures FROM auto_match_fair_state "
+                "WHERE singleton=1"
+            ).fetchone()
+            if fair and fair["not_before"] and str(fair["not_before"]) > _now():
+                return {
+                    "outcome": "backoff",
+                    "reason": "平台故障退避中",
+                    "not_before": fair["not_before"],
+                    "platform_failures": int(fair["platform_failures"] or 0),
+                }
+            if c.execute(
+                "SELECT 1 FROM auto_match_queue WHERE status='dispatched' LIMIT 1"
+            ).fetchone():
+                return {"outcome": "busy", "reason": "已有自动排位正在进行"}
+            row = c.execute(
+                "SELECT * FROM auto_match_queue WHERE status='queued' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return {"outcome": "empty", "reason": "暂无可配对 Bot"}
+            identity = self._auto_queue_identity_tx(c, row)
+            if identity is None:
+                self._auto_cancel_queue_row_tx(c, row, "identity_invalid_at_claim")
+                return {"outcome": "invalid", "reason": "队首 Bot 或冻结版本已失效"}
+            gid = _registered_game_id(row["game_id"])
+            for bot_id in (int(row["bot_a_id"]), int(row["bot_b_id"])):
+                if self._bot_has_active_rated_match_tx(c, bot_id, game_id=gid):
+                    return {
+                        "outcome": "blocked",
+                        "reason": "队首 Bot 正在其他计分对局中",
+                    }
+
+            tbl = _matches_table(gid)
+            created_at = _now()
+            match_config = json.dumps(
+                {
+                    "_bot_a_version_id": int(row["bot_a_version_id"]),
+                    "_bot_b_version_id": int(row["bot_b_version_id"]),
+                    "_auto_match_queue_id": int(row["id"]),
+                    "_auto_match_decision_id": int(row["decision_id"]),
+                    "_rating_eligible": True,
+                    "_rating_reason": "eligible",
+                },
+                ensure_ascii=False,
+            )
+            c.execute(
+                f"INSERT INTO {tbl}(id,bot_a_id,bot_b_id,owner_id,contest_id,reason,"
+                "match_type,status,game_id,match_config,human_user_id,human_seat,created_at) "
+                "VALUES(?,?,?,NULL,NULL,'',?,'pending',?,?,NULL,NULL,?)",
+                (
+                    match_id,
+                    int(row["bot_a_id"]),
+                    int(row["bot_b_id"]),
+                    TYPE_LADDER,
+                    gid,
+                    match_config,
+                    created_at,
+                ),
+            )
+            c.execute(
+                "INSERT INTO match_rating_policies("
+                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+                "classified_at) VALUES(?,?,?,?,1,'eligible','auto_v2',?)",
+                (
+                    match_id,
+                    gid,
+                    int(row["bot_a_id"]),
+                    int(row["bot_b_id"]),
+                    created_at,
+                ),
+            )
+            c.execute(
+                "INSERT INTO matches_index(id,game_id) VALUES(?,?)",
+                (match_id, gid),
+            )
+            c.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?, '[]', ?)",
+                (match_id, created_at),
+            )
+            c.execute(
+                "UPDATE auto_match_queue SET status='dispatched', match_id=?, "
+                "dispatcher_token=?,dispatched_at=? WHERE id=? AND status='queued'",
+                (match_id, dispatcher_token, created_at, row["id"]),
+            )
+            if c.execute("SELECT changes()").fetchone()[0] != 1:
+                raise RuntimeError("auto-match queue claim CAS lost")
+            updated = c.execute(
+                "UPDATE auto_match_decisions SET lifecycle='dispatched',match_id=?,"
+                "attempt_count=attempt_count+1,last_attempt_error='',dispatched_at=? "
+                "WHERE id=? AND lifecycle='queued'",
+                (match_id, created_at, int(row["decision_id"])),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("auto-match decision claim CAS lost")
+            return {
+                "outcome": "claimed",
+                "match_id": match_id,
+                "queue_id": int(row["id"]),
+                "game_id": gid,
+            }
+
+    def rollback_auto_match_claim(
+        self,
+        match_id: str,
+        *,
+        dispatcher_token: str,
+        reason: str = "start_failure",
+    ) -> bool:
+        """Delete an unstarted claim and restore the exact queue row atomically."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+                return False
+            row = c.execute(
+                "SELECT * FROM auto_match_queue WHERE status='dispatched' "
+                "AND match_id=? AND dispatcher_token=?",
+                (match_id, dispatcher_token),
+            ).fetchone()
+            if row is None:
+                return False
+            table = self._match_table_of(c, match_id)
+            match = (
+                c.execute(f"SELECT status FROM {table} WHERE id=?", (match_id,)).fetchone()
+                if table else None
+            )
+            if match is None or match["status"] != STATUS_PENDING:
+                return False
+            c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+            c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
+            c.execute("DELETE FROM match_rating_policies WHERE match_id=?", (match_id,))
+            c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
+            c.execute(
+                "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
+                "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                (int(row["id"]),),
+            )
+            c.execute(
+                "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
+                "dispatched_at=NULL,last_attempt_error=? WHERE id=? "
+                "AND lifecycle='dispatched'",
+                (reason, int(row["decision_id"])),
+            )
+            self._auto_backoff_tx(c, reason)
+            return True
+
+    def recover_auto_match_dispatcher_takeover(
+        self, *, dispatcher_token: str
+    ) -> dict:
+        """Recover only claims whose previous dispatcher lease has expired.
+
+        Pending means the runner never established a durable running state and
+        is compensated back to the same queue row.  Running cannot be resumed;
+        it becomes an explicit platform abort.  A live lease owner is never
+        touched by another process.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+                return {"outcome": "not_leader"}
+            row = c.execute(
+                "SELECT * FROM auto_match_queue WHERE status='dispatched' LIMIT 1"
+            ).fetchone()
+            if row is None or row["dispatcher_token"] == dispatcher_token:
+                return {"outcome": "clean"}
+            match_id = str(row["match_id"] or "")
+            table = _matches_table(str(row["game_id"]))
+            match = c.execute(
+                f"SELECT status FROM {table} WHERE id=?", (match_id,)
+            ).fetchone()
+            if match is None or match["status"] == STATUS_PENDING:
+                c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+                c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
+                c.execute(
+                    "DELETE FROM match_rating_policies WHERE match_id=?", (match_id,)
+                )
+                if match is not None:
+                    c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
+                c.execute(
+                    "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
+                    "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                    (int(row["id"]),),
+                )
+                c.execute(
+                    "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
+                    "dispatched_at=NULL,last_attempt_error='dispatcher_lost_before_start' "
+                    "WHERE id=? AND lifecycle='dispatched'",
+                    (int(row["decision_id"]),),
+                )
+                backoff = self._auto_backoff_tx(c, "dispatcher_lost_before_start")
+                return {"outcome": "requeued_pending", "backoff": backoff}
+            if match["status"] == STATUS_RUNNING:
+                c.execute(
+                    f"UPDATE {table} SET status=?,reason='orphan_after_restart',"
+                    "ended_at=? WHERE id=? AND status=?",
+                    (STATUS_ABORTED, _now(), match_id, STATUS_RUNNING),
+                )
+                return {"outcome": "aborted_running", "match_id": match_id}
+            return {"outcome": "terminal", "match_id": match_id}
+
+    @staticmethod
+    def _auto_complete_service_tx(
+        c: sqlite3.Connection, decision: sqlite3.Row | dict, terminal_at: str
+    ) -> None:
+        d = dict(decision)
+        revision = int(d["state_revision"]) + 1
+        gid = str(d["game_id"])
+        for owner_id in (int(d["owner_a_id"]), int(d["owner_b_id"])):
+            c.execute(
+                "INSERT INTO auto_match_owner_service("
+                "owner_id,game_id,served_count,last_served_revision,last_served_at) "
+                "VALUES(?,?,1,?,?) ON CONFLICT(owner_id,game_id) DO UPDATE SET "
+                "served_count=auto_match_owner_service.served_count+1,"
+                "last_served_revision=excluded.last_served_revision,"
+                "last_served_at=excluded.last_served_at",
+                (owner_id, gid, revision, terminal_at),
+            )
+        for bot_id, seat_a, seat_b in (
+            (int(d["bot_a_id"]), 1, 0),
+            (int(d["bot_b_id"]), 0, 1),
+        ):
+            c.execute(
+                "INSERT INTO auto_match_bot_service("
+                "bot_id,game_id,served_count,seat_a_count,seat_b_count,"
+                "last_served_revision,last_served_at) VALUES(?,?,1,?,?,?,?) "
+                "ON CONFLICT(bot_id,game_id) DO UPDATE SET "
+                "served_count=auto_match_bot_service.served_count+1,"
+                "seat_a_count=auto_match_bot_service.seat_a_count+excluded.seat_a_count,"
+                "seat_b_count=auto_match_bot_service.seat_b_count+excluded.seat_b_count,"
+                "last_served_revision=excluded.last_served_revision,"
+                "last_served_at=excluded.last_served_at",
+                (bot_id, gid, seat_a, seat_b, revision, terminal_at),
+            )
+        bot_lo, bot_hi = sorted((int(d["bot_a_id"]), int(d["bot_b_id"])))
+        owner_lo, owner_hi = sorted((int(d["owner_a_id"]), int(d["owner_b_id"])))
+        c.execute(
+            "INSERT INTO auto_match_bot_pair_service("
+            "game_id,bot_lo_id,bot_hi_id,served_count,last_served_at) "
+            "VALUES(?,?,?,1,?) ON CONFLICT(game_id,bot_lo_id,bot_hi_id) "
+            "DO UPDATE SET served_count=auto_match_bot_pair_service.served_count+1,"
+            "last_served_at=excluded.last_served_at",
+            (gid, bot_lo, bot_hi, terminal_at),
+        )
+        c.execute(
+            "INSERT INTO auto_match_owner_pair_service("
+            "game_id,owner_lo_id,owner_hi_id,served_count,last_served_at) "
+            "VALUES(?,?,?,1,?) ON CONFLICT(game_id,owner_lo_id,owner_hi_id) "
+            "DO UPDATE SET served_count=auto_match_owner_pair_service.served_count+1,"
+            "last_served_at=excluded.last_served_at",
+            (gid, owner_lo, owner_hi, terminal_at),
+        )
+
+    def reconcile_auto_match_queue(self, *, dispatcher_token: str) -> dict:
+        """Converge terminal rows; service counters change exactly once."""
+        removed_terminal = 0
+        reset_missing = 0
+        removed_invalid = 0
+        waiting_settlement = 0
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+                return {"outcome": "not_leader"}
+            for row in c.execute(
+                "SELECT * FROM auto_match_queue ORDER BY id"
+            ).fetchall():
+                if row["status"] == "queued":
+                    if self._auto_queue_identity_tx(c, row) is None:
+                        self._auto_cancel_queue_row_tx(c, row, "identity_invalid")
+                        removed_invalid += 1
+                    continue
+                match_id = str(row["match_id"] or "")
+                tbl = self._match_table_of(c, match_id)
+                if not tbl:
+                    c.execute(
+                        "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
+                        "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                        (row["id"],),
+                    )
+                    c.execute(
+                        "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
+                        "dispatched_at=NULL,last_attempt_error='missing_match' WHERE id=?",
+                        (row["decision_id"],),
+                    )
+                    self._auto_backoff_tx(c, "missing_match")
+                    reset_missing += 1
+                    continue
+                match = c.execute(
+                    f"SELECT status,reason,ended_at FROM {tbl} WHERE id=?", (match_id,)
+                ).fetchone()
+                if not match:
+                    c.execute(
+                        "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
+                        "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                        (row["id"],),
+                    )
+                    c.execute(
+                        "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
+                        "dispatched_at=NULL,last_attempt_error='missing_match' WHERE id=?",
+                        (row["decision_id"],),
+                    )
+                    self._auto_backoff_tx(c, "missing_match")
+                    reset_missing += 1
+                elif match["status"] == STATUS_ABORTED:
+                    terminal_at = str(match["ended_at"] or _now())
+                    reason = str(match["reason"] or "aborted")
+                    c.execute(
+                        "UPDATE auto_match_decisions SET lifecycle='aborted',"
+                        "terminal_at=?,terminal_reason=? WHERE id=? "
+                        "AND lifecycle='dispatched'",
+                        (terminal_at, reason, row["decision_id"]),
+                    )
+                    c.execute("DELETE FROM auto_match_queue WHERE id=?", (row["id"],))
+                    if reason in _AUTO_MATCH_PLATFORM_ABORT_REASONS:
+                        self._auto_backoff_tx(c, reason)
+                    removed_terminal += 1
+                elif match["status"] == STATUS_COMPLETED:
+                    settled = c.execute(
+                        "SELECT settled_order FROM match_rating_settlements "
+                        "WHERE match_id=?",
+                        (match_id,),
+                    ).fetchone()
+                    if settled:
+                        terminal_at = str(match["ended_at"] or _now())
+                        decision = c.execute(
+                            "SELECT * FROM auto_match_decisions WHERE id=?",
+                            (row["decision_id"],),
+                        ).fetchone()
+                        changed = c.execute(
+                            "UPDATE auto_match_decisions SET lifecycle='completed',"
+                            "terminal_at=?,terminal_reason=?,settlement_order=? "
+                            "WHERE id=? "
+                            "AND lifecycle='dispatched'",
+                            (
+                                terminal_at,
+                                str(match["reason"] or "completed"),
+                                int(settled["settled_order"]),
+                                row["decision_id"],
+                            ),
+                        )
+                        if changed.rowcount == 1 and decision is not None:
+                            self._auto_complete_service_tx(c, decision, terminal_at)
+                            self._auto_reset_backoff_tx(c)
+                        c.execute("DELETE FROM auto_match_queue WHERE id=?", (row["id"],))
+                        removed_terminal += 1
+                    else:
+                        waiting_settlement += 1
+            return {
+                "outcome": "ok",
+                "removed_terminal": removed_terminal,
+                "reset_missing": reset_missing,
+                "removed_invalid": removed_invalid,
+                "waiting_settlement": waiting_settlement,
+            }
+
+    @staticmethod
+    def _match_rating_policy_tx(
+        c: sqlite3.Connection, match: dict
+    ) -> tuple[bool, str]:
+        match_id = str(match.get("id") or "")
+        if match_id:
+            frozen = c.execute(
+                "SELECT rated,rating_reason FROM match_rating_policies "
+                "WHERE match_id=?",
+                (match_id,),
+            ).fetchone()
+            if frozen is not None:
+                return bool(int(frozen["rated"])), str(frozen["rating_reason"])
+        match_type = str(match.get("match_type") or "")
+        if match_type == TYPE_CONTEST:
+            return False, "contest"
+        if match_type == TYPE_HUMAN:
+            return False, "human"
+        bot_a_id = match.get("bot_a_id")
+        bot_b_id = match.get("bot_b_id")
+        if bot_a_id is None or bot_b_id is None:
+            config = match.get("match_config") or {}
+            if isinstance(config, dict) and type(config.get("_rating_eligible")) is bool:
+                return bool(config["_rating_eligible"]), str(
+                    config.get("_rating_reason") or "eligible"
+                )
+            return False, "bot_missing"
+        if int(bot_a_id) == int(bot_b_id):
+            return False, "self_play"
+        owners = c.execute(
+            "SELECT id,owner_id FROM bots WHERE id IN (?,?)",
+            (int(bot_a_id), int(bot_b_id)),
+        ).fetchall()
+        owner_by_bot = {int(row["id"]): int(row["owner_id"]) for row in owners}
+        if len(owner_by_bot) != 2:
+            return False, "bot_missing"
+        if owner_by_bot[int(bot_a_id)] == owner_by_bot[int(bot_b_id)]:
+            return False, "same_owner"
+        return True, "eligible"
+
+    def match_rating_policy(self, match: dict) -> dict:
+        with self._tx() as c:
+            rated, reason = self._match_rating_policy_tx(c, match)
+            return {"rated": rated, "rating_reason": reason}
 
     def create_match(
         self,
@@ -2794,48 +4333,63 @@ class Store:
         match_config: dict | None = None,
         human_user_id: int | None = None,
         human_seat: int | None = None,
-        auto_match_daily_cap: int | None = None,
     ) -> dict:
         gid = _registered_game_id(game_id)
         tbl = _matches_table(gid)
-        mc_json = json.dumps(match_config or {}, ensure_ascii=False)
-        is_auto_match = auto_match_daily_cap is not None
-        if is_auto_match:
-            assert auto_match_daily_cap is not None
-            auto_match_daily_cap = int(auto_match_daily_cap)
-            if auto_match_daily_cap < 0:
-                raise ValueError("auto-match daily_cap 不可为负数")
-            if (
-                match_type != TYPE_LADDER
-                or owner_id is not None
-                or contest_id is not None
-                or human_user_id is not None
-                or human_seat is not None
-            ):
-                raise ValueError("auto-match claim 仅允许系统非赛事 ladder 对局")
-        auto_match_local_day: str | None = None
         with self._tx() as c:
-            if is_auto_match:
-                # Serialize the read/check/write sequence across independent
-                # Store connections/processes.  The platform day is deliberately
-                # obtained only *after* this write lock: a day computed by the
-                # scheduler before waiting here could cross midnight and charge
-                # a new-day match against yesterday's quota.
-                c.execute("BEGIN IMMEDIATE")
-                auto_match_local_day = _require_iso_day(
-                    self._auto_match_day_provider()
-                )
-                row = c.execute(
-                    "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
-                    (auto_match_local_day,),
+            c.execute("BEGIN IMMEDIATE")
+            identities = c.execute(
+                "SELECT id,owner_id,game_id FROM bots WHERE id IN (?,?) ORDER BY id",
+                (bot_a_id, bot_b_id),
+            ).fetchall()
+            by_id = {int(row["id"]): row for row in identities}
+            if bot_a_id not in by_id or bot_b_id not in by_id:
+                raise ValueError("Bot 不存在")
+            if by_id[bot_a_id]["game_id"] != gid or by_id[bot_b_id]["game_id"] != gid:
+                raise ValueError("Bot 与对局游戏不一致")
+            if match_type == TYPE_CONTEST:
+                rating_reason = "contest"
+            elif match_type == TYPE_HUMAN:
+                rating_reason = "human"
+            elif bot_a_id == bot_b_id:
+                rating_reason = "self_play"
+            elif int(by_id[bot_a_id]["owner_id"]) == int(by_id[bot_b_id]["owner_id"]):
+                rating_reason = "same_owner"
+            else:
+                rating_reason = "eligible"
+            rated_pair = rating_reason == "eligible"
+            config = dict(match_config or {})
+            # Rating policy is internal and canonical; callers cannot override it.
+            config["_rating_eligible"] = rated_pair
+            config["_rating_reason"] = rating_reason
+            mc_json = json.dumps(config, ensure_ascii=False)
+            if rated_pair:
+                # A dispatched row remains authoritative until an aborted terminal
+                # or completed+settled terminal converges.  Starting another rated
+                # match in that window could reorder Glicko snapshots.
+                reserved = c.execute(
+                    "SELECT 1 FROM auto_match_queue WHERE status='dispatched' "
+                    "AND (? IN (bot_a_id,bot_b_id) OR ? IN (bot_a_id,bot_b_id)) "
+                    "LIMIT 1",
+                    (bot_a_id, bot_b_id),
                 ).fetchone()
-                current = int(row[0]) if row else 0
-                assert auto_match_daily_cap is not None
-                if auto_match_daily_cap > 0 and current >= auto_match_daily_cap:
-                    raise AutoMatchDailyCapReached(
-                        local_day=auto_match_local_day,
-                        count=current,
-                        cap=auto_match_daily_cap,
+                if reserved:
+                    raise ValueError("Bot 正在自动排位结算中，请稍后重试")
+                if self._bot_has_active_rated_match_tx(c, bot_a_id, game_id=gid):
+                    raise ValueError("座位 1 Bot 正在其他计分对局中")
+                if self._bot_has_active_rated_match_tx(c, bot_b_id, game_id=gid):
+                    raise ValueError("座位 2 Bot 正在其他计分对局中")
+                # Foreground rated work has priority.  Remove any not-yet-dispatched
+                # lookahead pairs that froze either Bot; the scheduler refills from
+                # the new rating/last-service truth after this match completes.
+                queued = c.execute(
+                    "SELECT * FROM auto_match_queue WHERE status='queued' "
+                    "AND (? IN (bot_a_id,bot_b_id) OR ? IN (bot_a_id,bot_b_id))",
+                    (bot_a_id, bot_b_id),
+                ).fetchall()
+                for queue_row in queued:
+                    self._auto_cancel_queue_row_tx(
+                        c, queue_row, "foreground_rated_priority"
                     )
             created_at = _now()
             c.execute(
@@ -2859,18 +4413,26 @@ class Store:
                     created_at,
                 ),
             )
+            c.execute(
+                "INSERT INTO match_rating_policies("
+                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+                "classified_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    match_id,
+                    gid,
+                    bot_a_id,
+                    bot_b_id,
+                    1 if rated_pair else 0,
+                    rating_reason,
+                    "creation_v2",
+                    created_at,
+                ),
+            )
             # 维护定位表
             c.execute(
                 "INSERT OR REPLACE INTO matches_index(id, game_id) VALUES(?, ?)",
                 (match_id, gid),
             )
-            if is_auto_match:
-                assert auto_match_local_day is not None
-                c.execute(
-                    "INSERT INTO auto_match_daily_claims"
-                    "(match_id, local_day, created_at) VALUES(?,?,?)",
-                    (match_id, auto_match_local_day, created_at),
-                )
             return _row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
@@ -2884,14 +4446,84 @@ class Store:
             return None
         return _matches_table(row["game_id"])
 
+    @staticmethod
+    def _reserve_rating_settlement_order_tx(
+        c: sqlite3.Connection, match_id: str
+    ) -> int | None:
+        policy = c.execute(
+            "SELECT rating_reason,settled_order FROM match_rating_policies "
+            "WHERE match_id=?",
+            (match_id,),
+        ).fetchone()
+        if policy is None or policy["rating_reason"] in {"contest", "human"}:
+            return None
+        if policy["settled_order"] is not None:
+            return int(policy["settled_order"])
+        sequence = c.execute(
+            "SELECT next_order FROM rating_settlement_sequence WHERE singleton=1"
+        ).fetchone()
+        if sequence is None:
+            raise RuntimeError("rating_settlement_sequence singleton missing")
+        order = int(sequence["next_order"])
+        changed = c.execute(
+            "UPDATE match_rating_policies SET settled_order=? "
+            "WHERE match_id=? AND settled_order IS NULL",
+            (order, match_id),
+        )
+        if changed.rowcount != 1:
+            row = c.execute(
+                "SELECT settled_order FROM match_rating_policies WHERE match_id=?",
+                (match_id,),
+            ).fetchone()
+            return int(row["settled_order"]) if row and row["settled_order"] else None
+        c.execute(
+            "UPDATE rating_settlement_sequence SET next_order=? WHERE singleton=1",
+            (order + 1,),
+        )
+        return order
+
+    @classmethod
+    def _rating_settlement_order_for_insert_tx(
+        cls, c: sqlite3.Connection, match_id: str
+    ) -> int:
+        order = cls._reserve_rating_settlement_order_tx(c, match_id)
+        if order is not None:
+            return order
+        # Only legacy low-level fault-injection callers can lack a policy.  A
+        # successful production settlement always has one; reserving here keeps
+        # the insertion transaction deterministic and lets a later source audit
+        # fail closed if such a marker were ever committed.
+        sequence = c.execute(
+            "SELECT next_order FROM rating_settlement_sequence WHERE singleton=1"
+        ).fetchone()
+        if sequence is None:
+            raise RuntimeError("rating_settlement_sequence singleton missing")
+        order = int(sequence["next_order"])
+        c.execute(
+            "UPDATE rating_settlement_sequence SET next_order=? WHERE singleton=1",
+            (order + 1,),
+        )
+        return order
+
     def get_match(self, match_id: str) -> dict | None:
         with self._tx() as c:
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return None
-            return _parse_match_json_cols(_row(
+            result = _parse_match_json_cols(_row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             ))
+            if result is not None:
+                policy = c.execute(
+                    "SELECT settled_order FROM match_rating_policies WHERE match_id=?",
+                    (match_id,),
+                ).fetchone()
+                result["_rating_settled_order"] = (
+                    int(policy["settled_order"])
+                    if policy and policy["settled_order"] is not None
+                    else None
+                )
+            return result
 
     def get_match_detailed(self, match_id: str) -> dict | None:
         """get_match + JOIN bots(ba/bb 名/display) + users(owner 名/display)。
@@ -2920,7 +4552,23 @@ class Store:
                 "LEFT JOIN users ub ON bb.owner_id=ub.id "
                 "WHERE m.id=?"
             )
-            return _parse_match_json_cols(_row(c.execute(sql, (match_id,)).fetchone()))
+            result = _parse_match_json_cols(
+                _row(c.execute(sql, (match_id,)).fetchone())
+            )
+            if result is not None:
+                rated, rating_reason = self._match_rating_policy_tx(c, result)
+                result["rated"] = rated
+                result["rating_reason"] = rating_reason
+                policy = c.execute(
+                    "SELECT settled_order FROM match_rating_policies WHERE match_id=?",
+                    (match_id,),
+                ).fetchone()
+                result["_rating_settled_order"] = (
+                    int(policy["settled_order"])
+                    if policy and policy["settled_order"] is not None
+                    else None
+                )
+            return result
 
     def update_match(self, match_id: str, **fields: Any) -> dict | None:
         allowed = {
@@ -2943,15 +4591,29 @@ class Store:
             if k in allowed
         ]
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return None
             if sets:
                 vals.append(match_id)
                 c.execute(f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?", vals)
-            return _row(
+            if fields.get("status") == STATUS_COMPLETED:
+                self._reserve_rating_settlement_order_tx(c, match_id)
+            result = _row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
+            if result is not None:
+                policy = c.execute(
+                    "SELECT settled_order FROM match_rating_policies WHERE match_id=?",
+                    (match_id,),
+                ).fetchone()
+                result["_rating_settled_order"] = (
+                    int(policy["settled_order"])
+                    if policy and policy["settled_order"] is not None
+                    else None
+                )
+            return result
 
     def abort_match_if_active(self, match_id: str, *, reason: str) -> dict | None:
         """仅把 pending/running 对局原子推进为 aborted；终态绝不倒退。"""
@@ -2972,16 +4634,25 @@ class Store:
             ))
 
     def delete_match(self, match_id: str) -> bool:
-        """删除对局：删 per-game 行、索引、回放和评分结算凭据。
+        """删除未结算对局；评分源已冻结/已结算时 fail closed。
 
         统一删除入口，保 matches_index 与 per-game 表不漂移（审计 P0：matches_index
-        无清理会导致 like/view 计数静默 drift）。返回是否删到了行。
+        无清理会导致 like/view 计数静默 drift）。未结算行会同步删除 policy；
+        settlement 与已分配序号是不可删除的永久审计证据。返回是否删到了行。
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return False
+            if c.execute(
+                "SELECT 1 FROM match_rating_settlements settled "
+                "WHERE settled.match_id=? UNION ALL "
+                "SELECT 1 FROM match_rating_policies policy "
+                "WHERE policy.match_id=? AND policy.settled_order IS NOT NULL",
+                (match_id, match_id),
+            ).fetchone():
+                raise ValueError("已结算对局是评分审计证据，禁止删除")
             _delete_social_target(c, "match", match_id)
             cur = c.execute(f"DELETE FROM {tbl} WHERE id=?", (match_id,))
             deleted = cur.rowcount > 0
@@ -2989,9 +4660,13 @@ class Store:
                 c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                 c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
                 c.execute(
-                    "DELETE FROM auto_match_daily_claims WHERE match_id=?",
-                    (match_id,),
+                    "DELETE FROM match_rating_policies WHERE match_id=?", (match_id,)
                 )
+                auto_row = c.execute(
+                    "SELECT * FROM auto_match_queue WHERE match_id=?", (match_id,)
+                ).fetchone()
+                if auto_row is not None:
+                    self._auto_cancel_queue_row_tx(c, auto_row, "match_deleted")
                 c.execute(
                     "DELETE FROM match_rating_settlements WHERE match_id=?",
                     (match_id,),
@@ -3306,11 +4981,15 @@ class Store:
         wb, lb, db = la, wa, da
         now = _now()
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             if settlement_id is not None:
+                settlement_order = self._rating_settlement_order_for_insert_tx(
+                    c, settlement_id
+                )
                 claimed = c.execute(
-                    "INSERT OR IGNORE INTO match_rating_settlements(match_id, settled_at) "
-                    "VALUES(?,?)",
-                    (settlement_id, now),
+                    "INSERT OR IGNORE INTO match_rating_settlements("
+                    "match_id,settled_at,settled_order) VALUES(?,?,?)",
+                    (settlement_id, now, settlement_order),
                 )
                 if claimed.rowcount == 0:
                     return False
@@ -3385,10 +5064,12 @@ class Store:
         仍走 :meth:`apply_match_ratings_atomic` 的同 bot 分支。
         """
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            settlement_order = self._rating_settlement_order_for_insert_tx(c, match_id)
             cur = c.execute(
-                "INSERT OR IGNORE INTO match_rating_settlements(match_id, settled_at) "
-                "VALUES(?,?)",
-                (match_id, _now()),
+                "INSERT OR IGNORE INTO match_rating_settlements("
+                "match_id,settled_at,settled_order) VALUES(?,?,?)",
+                (match_id, _now(), settlement_order),
             )
             return cur.rowcount > 0
 
@@ -3406,16 +5087,25 @@ class Store:
             for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 rows = c.execute(
-                    f"SELECT m.* FROM {tbl} m "
+                    f"SELECT m.*,policy.settled_order AS _rating_settled_order "
+                    f"FROM {tbl} m "
+                    "JOIN match_rating_policies policy ON policy.match_id=m.id "
                     "LEFT JOIN match_rating_settlements settled ON settled.match_id=m.id "
                     "WHERE m.status=? AND m.match_type NOT IN (?,?) "
-                    "AND settled.match_id IS NULL ORDER BY m.created_at, m.id",
+                    "AND settled.match_id IS NULL "
+                    "AND policy.settled_order IS NOT NULL "
+                    "ORDER BY policy.settled_order,m.id",
                     (STATUS_COMPLETED, TYPE_CONTEST, TYPE_HUMAN),
                 ).fetchall()
                 matches.extend(
                     _parse_match_json_cols(_row(row)) for row in rows
                 )
-            matches.sort(key=lambda m: (m.get("created_at") or "", m.get("id") or ""))
+            matches.sort(
+                key=lambda m: (
+                    int(m.get("_rating_settled_order") or 0),
+                    m.get("id") or "",
+                )
+            )
             return matches
 
     def list_leaderboard(
@@ -3690,7 +5380,9 @@ class Store:
                 row = c.execute(
                     f"SELECT COUNT(*) FROM {tbl} WHERE status=? "
                     "AND (contest_id IS NULL OR contest_id NOT IN ("
-                    "SELECT id FROM contests WHERE showcase_key IS NOT NULL))",
+                    "SELECT id FROM contests WHERE showcase_key IS NOT NULL)) "
+                    "AND id NOT IN (SELECT match_id FROM auto_match_queue "
+                    "WHERE match_id IS NOT NULL)",
                     (STATUS_RUNNING,),
                 ).fetchone()
                 cnt = int(row[0]) if row else 0
@@ -3699,7 +5391,9 @@ class Store:
                         f"UPDATE {tbl} SET status=?, reason='orphan_after_restart', "
                         "ended_at=datetime('now') WHERE status=? "
                         "AND (contest_id IS NULL OR contest_id NOT IN ("
-                        "SELECT id FROM contests WHERE showcase_key IS NOT NULL))",
+                        "SELECT id FROM contests WHERE showcase_key IS NOT NULL)) "
+                        "AND id NOT IN (SELECT match_id FROM auto_match_queue "
+                        "WHERE match_id IS NOT NULL)",
                         (STATUS_ABORTED, STATUS_RUNNING),
                     )
                     n += cnt
@@ -3707,7 +5401,9 @@ class Store:
                 # 不可能继续。contest pending 必须留给后续 pairing 对账精确恢复。
                 non_contest_pending = c.execute(
                     f"SELECT COUNT(*) FROM {tbl} "
-                    "WHERE status=? AND match_type<>?",
+                    "WHERE status=? AND match_type<>? "
+                    "AND id NOT IN (SELECT match_id FROM auto_match_queue "
+                    "WHERE match_id IS NOT NULL)",
                     (STATUS_PENDING, TYPE_CONTEST),
                 ).fetchone()
                 pending_count = int(non_contest_pending[0]) if non_contest_pending else 0
@@ -3715,7 +5411,9 @@ class Store:
                     c.execute(
                         f"UPDATE {tbl} SET status=?, "
                         "reason='orphan_pending_after_restart', ended_at=? "
-                        "WHERE status=? AND match_type<>?",
+                        "WHERE status=? AND match_type<>? "
+                        "AND id NOT IN (SELECT match_id FROM auto_match_queue "
+                        "WHERE match_id IS NOT NULL)",
                         (
                             STATUS_ABORTED,
                             _now(),
@@ -3819,7 +5517,11 @@ class Store:
                     c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                     c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
                     c.execute(
-                        "DELETE FROM auto_match_daily_claims WHERE match_id=?",
+                        "DELETE FROM match_rating_policies WHERE match_id=?",
+                        (match_id,),
+                    )
+                    c.execute(
+                        "DELETE FROM auto_match_queue WHERE match_id=?",
                         (match_id,),
                     )
                     recovered += 1
@@ -3861,7 +5563,11 @@ class Store:
                     c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                     c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
                     c.execute(
-                        "DELETE FROM auto_match_daily_claims WHERE match_id=?",
+                        "DELETE FROM match_rating_policies WHERE match_id=?",
+                        (match_id,),
+                    )
+                    c.execute(
+                        "DELETE FROM auto_match_queue WHERE match_id=?",
                         (match_id,),
                     )
                 elif match["status"] == STATUS_RUNNING:
@@ -6030,6 +7736,112 @@ class Store:
         return r
 
     # ── platform_settings ─────────────────────────────────────
+
+    def get_auto_match_enabled(self) -> bool:
+        """Return the v2 singleton switch (independent from legacy settings)."""
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT enabled FROM auto_match_control WHERE singleton=1"
+            ).fetchone()
+            # SCHEMA always seeds the singleton.  Missing/corrupt state fails closed.
+            return bool(row and int(row["enabled"]) == 1)
+
+    def set_auto_match_enabled(self, enabled: bool) -> bool:
+        if type(enabled) is not bool:  # bool is deliberately strict at Store boundary.
+            raise ValueError("自动排位总开关必须是布尔值")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            changed = c.execute(
+                "UPDATE auto_match_control SET enabled=?,updated_at=? WHERE singleton=1",
+                (1 if enabled else 0, _now()),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("自动排位控制单例缺失")
+        return enabled
+
+    def get_auto_match_fair_state(self) -> dict:
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT next_game_idx,next_lane,revision,platform_failures,"
+                "not_before,updated_at FROM auto_match_fair_state WHERE singleton=1"
+            ).fetchone()
+            return dict(row) if row else {}
+
+    def rating_integrity_diagnostics(self) -> dict:
+        """Read-only No-Go audit for legacy eligibility and projection state.
+
+        ``direct_polluted_bot_ids`` only names Bots in the invalid same-owner
+        matches.  It deliberately does *not* claim to be the full impact set:
+        Glicko propagation can change every later opponent, so only the offline
+        rebuild dry-run's whole-leaderboard diff/hash is authoritative.
+        """
+        with self._tx() as c:
+            matches: list[dict[str, Any]] = []
+            direct_polluted: set[int] = set()
+            for gid in sorted(_all_game_ids()):
+                table = _matches_table(gid)
+                rows = c.execute(
+                    f"SELECT m.id,m.game_id,policy.bot_a_id,policy.bot_b_id,"
+                    "m.created_at,m.ended_at,policy.rating_reason,"
+                    "settled.settled_order,"
+                    "a.owner_id AS owner_a_id,b.owner_id AS owner_b_id "
+                    f"FROM {table} m "
+                    "JOIN match_rating_policies policy ON policy.match_id=m.id "
+                    "JOIN match_rating_settlements settled ON settled.match_id=m.id "
+                    "LEFT JOIN bots a ON a.id=policy.bot_a_id "
+                    "LEFT JOIN bots b ON b.id=policy.bot_b_id "
+                    "WHERE policy.source='legacy_migration' "
+                    "AND policy.rating_reason IN ('same_owner','self_play') "
+                    "AND m.status=? ORDER BY settled.settled_order,m.ended_at,m.id",
+                    (STATUS_COMPLETED,),
+                ).fetchall()
+                for row in rows:
+                    item = dict(row)
+                    matches.append(item)
+                    if item["rating_reason"] == "same_owner":
+                        for key in ("bot_a_id", "bot_b_id"):
+                            if item.get(key) is not None:
+                                direct_polluted.add(int(item[key]))
+            matches.sort(
+                key=lambda item: (
+                    int(item.get("settled_order") or 0),
+                    str(item.get("ended_at") or ""),
+                    str(item["id"]),
+                )
+            )
+            polluted = [
+                row for row in matches if row["rating_reason"] == "same_owner"
+            ]
+            neutral_self = [
+                row for row in matches if row["rating_reason"] == "self_play"
+            ]
+            state_row = c.execute(
+                "SELECT * FROM rating_projection_state WHERE singleton=1"
+            ).fetchone()
+            state = dict(state_row) if state_row else {
+                "policy_version": _RATING_PROJECTION_LEGACY_VERSION,
+                "rebuilt_at": None,
+                "source_settlement_count": 0,
+                "source_last_settled_order": 0,
+            }
+            projection = self._rating_projection_status_tx(c)
+            rebuild_required = not bool(projection["ready"])
+            return {
+                "rebuild_required": rebuild_required,
+                "required_policy_version": _RATING_PROJECTION_POLICY_VERSION,
+                "projection_state": state,
+                "source_settlement_count": projection["source_settlement_count"],
+                "source_last_settled_order": projection["source_last_settled_order"],
+                "legacy_same_owner_polluted_count": len(polluted),
+                "legacy_self_play_neutral_count": len(neutral_self),
+                # Compatibility name remains explicit about being direct-only.
+                "legacy_same_owner_settled_count": len(polluted),
+                "direct_polluted_bot_ids": sorted(direct_polluted),
+                "affected_bot_ids": sorted(direct_polluted),
+                "projected_impact_scope": "full_leaderboard_dry_run_required",
+                "authoritative_rebuild_order": "settled_order",
+                "matches": matches,
+            }
 
     def get_setting(self, key: str) -> str | None:
         with self._tx() as c:

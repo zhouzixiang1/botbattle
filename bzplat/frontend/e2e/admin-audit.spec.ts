@@ -238,6 +238,93 @@ for (const viewport of ADMIN_VIEWPORTS) {
   })
 }
 
+test('admin queue switch is a single boolean control and survives polling', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, ADMIN)
+  let enabled = true
+  const payloads: boolean[] = []
+  const snapshot = () => ({
+    game_id: null,
+    enabled,
+    effective_enabled: enabled,
+    capability_enabled: true,
+    paused: !enabled,
+    pause_reason: enabled ? '' : '管理员已关闭自动排位',
+    rating_projection_ready: true,
+    dispatcher_leader: true,
+    placement_required: 10,
+    policy: { serial: true, lookahead: 6, foreground_slot_reserved: true },
+    active: null,
+    active_game_id: null,
+    upcoming: [{
+      id: 7001,
+      status: 'queued',
+      position: 1,
+      game_id: 'holdem',
+      match_id: null,
+      reason: `正式通道 · ${'公平队列长说明'.repeat(12)}`,
+      bot_a: {
+        id: 7101,
+        name: 'admin-queue-a',
+        display_name: `管理端长 Bot-${'长名称'.repeat(18)}`,
+        owner: { username: `owner_${'long_'.repeat(18)}`, display_name: '' },
+        rating: 1666,
+        matches_played: 20,
+        is_placement: false,
+        placement_remaining: 0,
+      },
+      bot_b: {
+        id: 7102,
+        name: 'admin-queue-b',
+        display_name: '管理端 Bot B',
+        owner: { username: 'owner-b', display_name: '' },
+        rating: 1555,
+        matches_played: 5,
+        is_placement: true,
+        placement_remaining: 5,
+      },
+    }],
+  })
+  await page.route('**/api/auto-match/queue', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(snapshot()),
+    })
+  })
+  await page.route('**/api/admin/auto-match', async (route) => {
+    expect(route.request().method()).toBe('PUT')
+    const body = route.request().postDataJSON() as { enabled?: unknown }
+    expect(typeof body.enabled).toBe('boolean')
+    expect(Object.keys(body)).toEqual(['enabled'])
+    enabled = body.enabled as boolean
+    payloads.push(enabled)
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(snapshot()),
+    })
+  })
+
+  await page.goto('/#/admin')
+  const panel = page.getByTestId('auto-match-queue-panel')
+  const toggle = page.getByRole('switch', { name: '自动排位总开关' })
+  await expect(panel).toContainText('即将进行')
+  await expect(toggle).toBeChecked()
+  await expectNoRootOverflow(page, 'admin auto queue enabled')
+
+  await toggle.click()
+  await expect(toggle).not.toBeChecked()
+  await expect(page.getByText('自动排位已暂停，当前对局会正常结束', { exact: true })).toBeVisible()
+  await expect(panel).toContainText('已暂停')
+  await toggle.click()
+  await expect(toggle).toBeChecked()
+  await expect(page.getByText('自动排位已开启，队列将继续运行', { exact: true })).toBeVisible()
+  expect(payloads).toEqual([false, true])
+  await expectNoRootOverflow(page, 'admin auto queue re-enabled')
+  await monitor.expectClean()
+})
+
 for (const viewport of ADMIN_VIEWPORTS) {
   test(`manual contest schedule stays explicit and scrollable with long text (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport)
