@@ -7,10 +7,26 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 CONFIGURATION_SOURCE = "code"
+PLATFORM_TIMEZONE_NAME = "Asia/Shanghai"
+
+
+def platform_local_day(now: datetime | None = None) -> str:
+    """Return the platform calendar day for durable daily limits.
+
+    ``now`` is injectable for boundary tests.  Production uses an aware UTC
+    instant and converts it explicitly instead of depending on the host's
+    process timezone.
+    """
+    instant = now or datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        raise ValueError("platform_local_day requires a timezone-aware datetime")
+    return instant.astimezone(ZoneInfo(PLATFORM_TIMEZONE_NAME)).date().isoformat()
 
 # 对局/赛事通用运行参数。
 ACTION_TIMEOUT_SEC = 60.0
@@ -72,5 +88,7 @@ __all__ = [
     "HUMAN_MAX_CONCURRENT_MATCHES",
     "HUMAN_MAX_CONSECUTIVE_TIMEOUTS",
     "MAX_CONCURRENT_MATCHES",
+    "PLATFORM_TIMEZONE_NAME",
     "QA_AUTO_MATCH_CONFIG",
+    "platform_local_day",
 ]

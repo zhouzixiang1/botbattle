@@ -200,6 +200,15 @@ CREATE TABLE IF NOT EXISTS match_rating_settlements (
     settled_at      TEXT    NOT NULL
 );
 
+-- 系统 auto-match 的持久化每日配额凭据。matches 已按游戏分表，无法声明单一
+-- 物理 FK；创建/删除对局时由 Store 在同一事务维护。本表只记录 auto_matcher
+-- 显式创建的系统 ladder，普通用户对局不会进入。
+CREATE TABLE IF NOT EXISTS auto_match_daily_claims (
+    match_id        TEXT    PRIMARY KEY,
+    local_day       TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ratings (
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     game_id         TEXT    NOT NULL,
@@ -440,6 +449,7 @@ CREATE TABLE IF NOT EXISTS contest_templates (
 
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bot_versions_bot ON bot_versions(bot_id);
+CREATE INDEX IF NOT EXISTS idx_auto_match_claims_day ON auto_match_daily_claims(local_day);
 -- 每游戏对局表的索引由 db.py _migrate 的 _PER_GAME_INDEX_COLS 循环建（注册表派生，
 -- 覆盖第 4 游戏），不在此字面硬编码（避免重复索引 + 加游戏漏建）。
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -537,6 +547,11 @@ LIKE_TARGET_TYPES = frozenset({"match", "bot", "comment"})
 # 非赛事对局视为已结算，防启动恢复把历史评分全部重复计算。对局 ID 为时间戳前缀，
 # 不会与此前缀冲突；哨兵与回填在同一 Store 初始化事务提交。
 MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL = "__migration__:rating_settlements:v1"
+
+# auto_match_daily_claims 首次升级回填哨兵：只在表首次启用时把历史上唯一的
+# ``owner_id IS NULL + match_type='ladder'`` 系统自动对局纳入当日配额；后续仅
+# 显式 auto-match 创建路径写 claim，避免把其他内部/测试 ladder 误计。
+AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL = "__migration__:auto_match_daily_claims:v1"
 
 # 比赛状态
 CONTEST_DRAFT = "draft"

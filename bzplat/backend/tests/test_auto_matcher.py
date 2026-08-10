@@ -3,29 +3,48 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timezone
+from threading import Barrier
 
 import pytest
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
-from bzplat.backend.runtime.config import AUTO_MATCH_CONFIG
-from bzplat.backend.store import Store
+from bzplat.backend.runtime.config import AUTO_MATCH_CONFIG, platform_local_day
+from bzplat.backend.store import AutoMatchDailyCapReached, Store
 from bzplat.backend.store.schema import TYPE_LADDER
 
 
 class FakeOrch:
     """计数 challenge 调用；模拟 _tasks / max_concurrent。"""
 
-    def __init__(self, *, max_concurrent: int = 4) -> None:
+    def __init__(self, store: Store | None = None, *, max_concurrent: int = 4) -> None:
+        self.store = store
         self.max_concurrent = max_concurrent
         self._tasks: dict[str, object] = {}
         self._bot_running = 0  # 旧 orchestrator fallback 的实际运行计数
         self.calls: list[dict] = []
 
     async def challenge(self, a, b, owner_user_id, *, match_type="challenge",
-                        contest_id=None, game_id=None, match_config=None):
+                        contest_id=None, game_id=None, match_config=None,
+                        auto_match_local_day=None, auto_match_daily_cap=None):
         mid = f"m{len(self.calls)}"
+        if auto_match_local_day is not None:
+            assert self.store is not None
+            self.store.create_match(
+                mid,
+                a,
+                b,
+                owner_id=owner_user_id,
+                contest_id=contest_id,
+                match_type=match_type,
+                game_id=game_id,
+                match_config=match_config,
+                auto_match_local_day=auto_match_local_day,
+                auto_match_daily_cap=auto_match_daily_cap,
+            )
         self._tasks[mid] = object()
         self.calls.append(
             {"a": a, "b": b, "owner": owner_user_id, "type": match_type, "game": game_id}
@@ -59,7 +78,7 @@ def _mk_bots(store: Store, n: int, game_id: str = "holdem", *, base: int = 0):
 
 def test_disabled_does_not_schedule(store, monkeypatch):
     _mk_bots(store, 4)
-    orch = FakeOrch(max_concurrent=4)
+    orch = FakeOrch(store, max_concurrent=4)
     sched = AutoMatchScheduler(
         orch, store, config=replace(AUTO_MATCH_CONFIG, enabled=False)
     )
@@ -90,7 +109,7 @@ def test_disabled_does_not_schedule(store, monkeypatch):
 
 def test_not_idle_when_full(store):
     _mk_bots(store, 4)
-    orch = FakeOrch(max_concurrent=2)
+    orch = FakeOrch(store, max_concurrent=2)
     orch._bot_running = 2  # 满（reserve=1 → free = 2-1-2 = -1）
     sched = AutoMatchScheduler(orch, store)
     assert sched._is_idle(sched._cfg()) is False
@@ -98,7 +117,7 @@ def test_not_idle_when_full(store):
 
 def test_admitted_waiting_task_consumes_global_slot(store):
     """尚未进入 _bot_running 的已接纳任务也不能被 auto-match 越过。"""
-    orch = FakeOrch(max_concurrent=2)
+    orch = FakeOrch(store, max_concurrent=2)
     orch._tasks["contest-waiting"] = object()
     sched = AutoMatchScheduler(orch, store)
 
@@ -115,14 +134,14 @@ def test_legacy_auto_match_rows_cannot_override_code_config(store):
             "auto_match_reserve_slots": "99",
         }
     )
-    sched = AutoMatchScheduler(FakeOrch(), store)
+    sched = AutoMatchScheduler(FakeOrch(store), store)
 
     assert sched._cfg() == AUTO_MATCH_CONFIG.as_dict()
 
 
 def test_idle_respects_reserve_slots(store):
     _mk_bots(store, 4)
-    orch = FakeOrch(max_concurrent=2)
+    orch = FakeOrch(store, max_concurrent=2)
     orch._bot_running = 1  # 1 running；reserve=1 → free=0 → 非闲
     sched = AutoMatchScheduler(orch, store)
     assert sched._is_idle(sched._cfg()) is False
@@ -140,7 +159,7 @@ def test_idle_respects_reserve_slots(store):
 
 def test_schedules_stale_pair_same_game(store):
     bs = _mk_bots(store, 4, "holdem")
-    orch = FakeOrch(max_concurrent=4)
+    orch = FakeOrch(store, max_concurrent=4)
     sched = AutoMatchScheduler(orch, store)
     sched._idle_since = time.monotonic() - 10  # 已连续空闲
     n = asyncio.run(sched._schedule_some(sched._cfg()))
@@ -155,7 +174,7 @@ def test_schedules_stale_pair_same_game(store):
 
 def test_cooldown_skips_recently_scheduled_bot(store):
     _mk_bots(store, 2, "holdem")  # 只有 2 个 bot
-    orch = FakeOrch(max_concurrent=4)
+    orch = FakeOrch(store, max_concurrent=4)
     sched = AutoMatchScheduler(orch, store)
     sched._idle_since = time.monotonic() - 10
     # 第一轮应安排
@@ -170,7 +189,7 @@ def test_cooldown_skips_recently_scheduled_bot(store):
 def test_no_cross_game_pairing(store):
     holdem = _mk_bots(store, 2, "holdem", base=0)
     gomoku = _mk_bots(store, 2, "gomoku", base=10)
-    orch = FakeOrch(max_concurrent=4)
+    orch = FakeOrch(store, max_concurrent=4)
     sched = AutoMatchScheduler(orch, store)
     sched._idle_since = time.monotonic() - 10
     asyncio.run(sched._schedule_some(sched._cfg()))
@@ -243,7 +262,7 @@ def test_least_recently_played_placement_priority(store: Store):
 def test_daily_cap_stops_scheduling(store: Store):
     """达每日上限后本轮不再调度。"""
     bs = _mk_bots(store, 2, "holdem")
-    orch = FakeOrch(max_concurrent=4)
+    orch = FakeOrch(store, max_concurrent=4)
     sched = AutoMatchScheduler(
         orch, store, config=replace(AUTO_MATCH_CONFIG, daily_cap=1)
     )
@@ -259,10 +278,105 @@ def test_daily_cap_stops_scheduling(store: Store):
 def test_max_per_round_limits(store: Store):
     """每轮上限：max_per_round=1 即使空闲槽更多也只补 1 场。"""
     bs = _mk_bots(store, 4, "holdem")
-    orch = FakeOrch(max_concurrent=8)
+    orch = FakeOrch(store, max_concurrent=8)
     sched = AutoMatchScheduler(
         orch, store, config=replace(AUTO_MATCH_CONFIG, max_per_round=1)
     )
     sched._idle_since = time.monotonic() - 10
     n = asyncio.run(sched._schedule_some(sched._cfg()))
     assert n == 1
+
+
+def test_daily_cap_survives_scheduler_restart(store: Store):
+    """新 scheduler 实例仍从 DB 看到当天已创建的系统 auto-match。"""
+    _mk_bots(store, 2, "holdem")
+    config = replace(AUTO_MATCH_CONFIG, daily_cap=1)
+    first = AutoMatchScheduler(FakeOrch(store), store, config=config)
+    assert asyncio.run(first._schedule_some(first._cfg())) == 1
+
+    restarted = AutoMatchScheduler(FakeOrch(store), store, config=config)
+    assert restarted.daily_count == 1
+    assert asyncio.run(restarted._schedule_some(restarted._cfg())) == 0
+
+
+def test_daily_cap_is_atomic_across_store_instances(tmp_path):
+    """多个进程等价的独立 SQLite 连接不能同时抢到最后一个配额。"""
+    db_path = tmp_path / "shared.db"
+    setup = Store(str(db_path))
+    bots = _mk_bots(setup, 2, "holdem")
+    setup.close()
+    stores = [Store(str(db_path)) for _ in range(6)]
+    barrier = Barrier(len(stores))
+
+    def attempt(index: int) -> bool:
+        barrier.wait()
+        try:
+            stores[index].create_match(
+                f"atomic-{index}",
+                bots[0]["id"],
+                bots[1]["id"],
+                owner_id=None,
+                match_type=TYPE_LADDER,
+                game_id="holdem",
+                auto_match_local_day="2026-08-10",
+                auto_match_daily_cap=2,
+            )
+        except AutoMatchDailyCapReached:
+            return False
+        return True
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(stores)) as pool:
+            accepted = list(pool.map(attempt, range(len(stores))))
+        assert accepted.count(True) == 2
+        assert stores[0].count_auto_matches_for_day("2026-08-10") == 2
+    finally:
+        for shared_store in stores:
+            shared_store.close()
+
+
+def test_platform_day_uses_asia_shanghai_boundary():
+    just_before = datetime(2026, 8, 10, 15, 59, 59, tzinfo=timezone.utc)
+    at_midnight = datetime(2026, 8, 10, 16, 0, 0, tzinfo=timezone.utc)
+    assert platform_local_day(just_before) == "2026-08-10"
+    assert platform_local_day(at_midnight) == "2026-08-11"
+
+
+def test_new_platform_day_gets_fresh_quota(store: Store):
+    bots = _mk_bots(store, 2, "holdem")
+    for day, match_id in (("2026-08-10", "day-1"), ("2026-08-11", "day-2")):
+        store.create_match(
+            match_id,
+            bots[0]["id"],
+            bots[1]["id"],
+            owner_id=None,
+            match_type=TYPE_LADDER,
+            game_id="holdem",
+            auto_match_local_day=day,
+            auto_match_daily_cap=1,
+        )
+    assert store.count_auto_matches_for_day("2026-08-10") == 1
+    assert store.count_auto_matches_for_day("2026-08-11") == 1
+
+
+def test_non_auto_ladder_is_not_counted(store: Store):
+    """只有显式系统 claim 计数，owner 非空/无 claim 的 ladder 均不误计。"""
+    bots = _mk_bots(store, 2, "holdem")
+    owner = store.get_bot(bots[0]["id"])["owner_id"]
+    store.create_match(
+        "user-ladder",
+        bots[0]["id"],
+        bots[1]["id"],
+        owner_id=owner,
+        match_type=TYPE_LADDER,
+        game_id="holdem",
+    )
+    store.create_match(
+        "internal-unclaimed-ladder",
+        bots[0]["id"],
+        bots[1]["id"],
+        owner_id=None,
+        match_type=TYPE_LADDER,
+        game_id="holdem",
+    )
+    assert store.count_auto_matches_for_day(platform_local_day()) == 0

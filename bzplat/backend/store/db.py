@@ -8,7 +8,7 @@ import contextlib
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
@@ -22,6 +22,7 @@ from .public_contract import (
 )
 
 from .schema import (
+    AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL,
     CODE_RESET,
     COMMENT_TARGET_TYPES,
     CONTEST_CANCELLED,
@@ -47,6 +48,7 @@ from .schema import (
     TECHNICAL_INCIDENT_EVENT,
     TYPE_CONTEST,
     TYPE_HUMAN,
+    TYPE_LADDER,
     LIKE_TARGET_TYPES,
     VALID_RUNTIME_MODES,
     require_supported_binary_metadata,
@@ -54,6 +56,16 @@ from .schema import (
 from .validation import validate_contest_times
 
 DEFAULT_DB_PATH = "botzone.db"
+
+
+class AutoMatchDailyCapReached(RuntimeError):
+    """The durable system auto-match quota is already exhausted."""
+
+    def __init__(self, *, local_day: str, count: int, cap: int) -> None:
+        super().__init__(f"auto-match daily cap reached {count}/{cap} ({local_day})")
+        self.local_day = local_day
+        self.count = count
+        self.cap = cap
 
 
 def _now() -> str:
@@ -1356,6 +1368,35 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ON contest_pairings(match_id) WHERE match_id IS NOT NULL"
         )
 
+    # ── 系统 auto-match 每日配额凭据（跨重启/跨 Store 实例）────────────
+    # 旧实现只在 AutoMatchScheduler 内存计数，服务重启即归零。首次升级时，按
+    # 旧架构的唯一生产身份（ladder + owner NULL + 非赛事/非 human）回填历史；
+    # 哨兵写入后，今后的 claim 只允许显式 auto-match 创建路径同事务写入，避免
+    # 把普通用户或其他内部 ladder 误计入配额。
+    auto_match_claims_migrated = conn.execute(
+        "SELECT 1 FROM auto_match_daily_claims WHERE match_id=?",
+        (AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL,),
+    ).fetchone()
+    if not auto_match_claims_migrated:
+        migrated_at = _now()
+        for _gid in _all_game_ids():
+            _tbl = _matches_table(_gid)
+            if _tbl not in _tables_after:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO auto_match_daily_claims"
+                "(match_id, local_day, created_at) "
+                f"SELECT id, substr(created_at,1,10), created_at FROM {_tbl} "
+                "WHERE match_type=? AND owner_id IS NULL AND contest_id IS NULL "
+                "AND human_user_id IS NULL AND length(substr(created_at,1,10))=10",
+                (TYPE_LADDER,),
+            )
+        conn.execute(
+            "INSERT INTO auto_match_daily_claims(match_id, local_day, created_at) "
+            "VALUES(?,?,?)",
+            (AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL, "", migrated_at),
+        )
+
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
     # 升级前的 completed 对局大多已经由旧后处理更新过 ratings，但没有 marker。
     # 若直接让启动恢复扫描它们，会把全部历史评分重复计算。首次迁移先把既有
@@ -2393,6 +2434,21 @@ class Store:
 
     # ── matches（全面解耦 PR3：拆每游戏一张表 + matches_index 定位）─────
 
+    def count_auto_matches_for_day(self, local_day: str) -> int:
+        """Return durable system auto-match claims for one platform local day."""
+        try:
+            parsed = date.fromisoformat(local_day)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("auto-match local_day 必须是 YYYY-MM-DD") from exc
+        if parsed.isoformat() != local_day:
+            raise ValueError("auto-match local_day 必须是 YYYY-MM-DD")
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
+                (local_day,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
     def create_match(
         self,
         match_id: str,
@@ -2406,11 +2462,54 @@ class Store:
         match_config: dict | None = None,
         human_user_id: int | None = None,
         human_seat: int | None = None,
+        auto_match_local_day: str | None = None,
+        auto_match_daily_cap: int | None = None,
     ) -> dict:
         gid = _registered_game_id(game_id)
         tbl = _matches_table(gid)
         mc_json = json.dumps(match_config or {}, ensure_ascii=False)
+        is_auto_match = (
+            auto_match_local_day is not None or auto_match_daily_cap is not None
+        )
+        if is_auto_match:
+            if auto_match_local_day is None or auto_match_daily_cap is None:
+                raise ValueError("auto-match 日期与每日上限必须同时提供")
+            try:
+                parsed_day = date.fromisoformat(auto_match_local_day)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("auto-match local_day 必须是 YYYY-MM-DD") from exc
+            if parsed_day.isoformat() != auto_match_local_day:
+                raise ValueError("auto-match local_day 必须是 YYYY-MM-DD")
+            auto_match_daily_cap = int(auto_match_daily_cap)
+            if auto_match_daily_cap < 0:
+                raise ValueError("auto-match daily_cap 不可为负数")
+            if (
+                match_type != TYPE_LADDER
+                or owner_id is not None
+                or contest_id is not None
+                or human_user_id is not None
+                or human_seat is not None
+            ):
+                raise ValueError("auto-match claim 仅允许系统非赛事 ladder 对局")
+        created_at = _now()
         with self._tx() as c:
+            if is_auto_match:
+                # Serialize the read/check/write sequence across independent
+                # Store connections/processes.  A deferred SELECT followed by
+                # INSERT would let two schedulers both observe the last slot.
+                c.execute("BEGIN IMMEDIATE")
+                row = c.execute(
+                    "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
+                    (auto_match_local_day,),
+                ).fetchone()
+                current = int(row[0]) if row else 0
+                assert auto_match_daily_cap is not None
+                if auto_match_daily_cap > 0 and current >= auto_match_daily_cap:
+                    raise AutoMatchDailyCapReached(
+                        local_day=auto_match_local_day,
+                        count=current,
+                        cap=auto_match_daily_cap,
+                    )
             c.execute(
                 f"INSERT INTO {tbl}(id, bot_a_id, bot_b_id, owner_id, "
                 "contest_id, reason, match_type, status, game_id, match_config, "
@@ -2429,7 +2528,7 @@ class Store:
                     mc_json,
                     human_user_id,
                     human_seat,
-                    _now(),
+                    created_at,
                 ),
             )
             # 维护定位表
@@ -2437,6 +2536,12 @@ class Store:
                 "INSERT OR REPLACE INTO matches_index(id, game_id) VALUES(?, ?)",
                 (match_id, gid),
             )
+            if is_auto_match:
+                c.execute(
+                    "INSERT INTO auto_match_daily_claims"
+                    "(match_id, local_day, created_at) VALUES(?,?,?)",
+                    (match_id, auto_match_local_day, created_at),
+                )
             return _row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
@@ -2554,6 +2659,10 @@ class Store:
             if deleted:
                 c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                 c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+                c.execute(
+                    "DELETE FROM auto_match_daily_claims WHERE match_id=?",
+                    (match_id,),
+                )
                 c.execute(
                     "DELETE FROM match_rating_settlements WHERE match_id=?",
                     (match_id,),
@@ -3323,6 +3432,10 @@ class Store:
                     c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
                     c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                     c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+                    c.execute(
+                        "DELETE FROM auto_match_daily_claims WHERE match_id=?",
+                        (match_id,),
+                    )
                     recovered += 1
 
             pairings = c.execute(
@@ -3359,6 +3472,10 @@ class Store:
                     c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
                     c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
                     c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
+                    c.execute(
+                        "DELETE FROM auto_match_daily_claims WHERE match_id=?",
+                        (match_id,),
+                    )
                 elif match["status"] == STATUS_RUNNING:
                     c.execute(
                         f"UPDATE {table} SET status=?, reason='orphan_after_restart', "

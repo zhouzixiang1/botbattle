@@ -17,7 +17,12 @@ import logging
 import time
 from typing import Any
 
-from bzplat.backend.runtime.config import AUTO_MATCH_CONFIG, AutoMatchConfig
+from bzplat.backend.runtime.config import (
+    AUTO_MATCH_CONFIG,
+    AutoMatchConfig,
+    platform_local_day,
+)
+from bzplat.backend.store import AutoMatchDailyCapReached
 from bzplat.backend.store.schema import TYPE_LADDER, VALID_GAME_IDS
 
 logger = logging.getLogger(__name__)
@@ -41,23 +46,10 @@ class AutoMatchScheduler:
         self._recent_pairs: dict[tuple[int, int], float] = {}  # (min,max) -> ts
         # 连续空闲计时（monotonic）
         self._idle_since: float | None = None
-        # 每日计数（按本地日期串重置）
-        self._daily_count: int = 0
-        self._daily_date: str = ""
-
     @property
     def daily_count(self) -> int:
-        """今日已调度场数（供 admin 可见性展示）。"""
-        self._maybe_reset_daily()
-        return self._daily_count
-
-    def _maybe_reset_daily(self) -> None:
-        from datetime import date
-
-        today = date.today().isoformat()
-        if self._daily_date != today:
-            self._daily_date = today
-            self._daily_count = 0
+        """今日系统 auto-match 场数（DB 权威，供 admin 可见性展示）。"""
+        return self.store.count_auto_matches_for_day(platform_local_day())
 
     # ------------------------------------------------------------------ config
     def _cfg(self) -> dict[str, Any]:
@@ -121,10 +113,11 @@ class AutoMatchScheduler:
 
     async def _schedule_some(self, cfg: dict[str, Any]) -> int:
         """在空闲槽内尽量安排对局；返回本轮安排场数。"""
-        self._maybe_reset_daily()
+        local_day = platform_local_day()
+        daily_count = self.store.count_auto_matches_for_day(local_day)
         # 每日总量上限
-        if cfg["daily_cap"] > 0 and self._daily_count >= cfg["daily_cap"]:
-            logger.info("auto-match daily cap reached %d/%d，今日停止", self._daily_count, cfg["daily_cap"])
+        if cfg["daily_cap"] > 0 and daily_count >= cfg["daily_cap"]:
+            logger.info("auto-match daily cap reached %d/%d，今日停止", daily_count, cfg["daily_cap"])
             return 0
         free = self._free_slots(cfg["reserve"])
         if free <= 0:
@@ -132,7 +125,7 @@ class AutoMatchScheduler:
         # 本轮上限：空闲槽、每轮上限、每日剩余 取最小
         max_this_round = min(free, cfg["max_per_round"] if cfg["max_per_round"] > 0 else free)
         if cfg["daily_cap"] > 0:
-            max_this_round = min(max_this_round, cfg["daily_cap"] - self._daily_count)
+            max_this_round = min(max_this_round, cfg["daily_cap"] - daily_count)
         if max_this_round <= 0:
             return 0
         now = time.monotonic()
@@ -168,13 +161,25 @@ class AutoMatchScheduler:
             if partner is None:
                 continue
             try:
+                # Recompute immediately before the atomic DB claim so a loop
+                # crossing Asia/Shanghai midnight records the new calendar day.
+                local_day = platform_local_day()
                 await self.orch.challenge(
                     a["bot_id"],
                     partner["bot_id"],
                     owner_user_id=None,
                     match_type=TYPE_LADDER,
                     game_id=gid,
+                    auto_match_local_day=local_day,
+                    auto_match_daily_cap=cfg["daily_cap"],
                 )
+            except AutoMatchDailyCapReached as exc:
+                logger.info(
+                    "auto-match daily cap reached %d/%d，今日停止",
+                    exc.count,
+                    exc.cap,
+                )
+                return scheduled
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "auto-match challenge failed %s vs %s",
@@ -190,12 +195,12 @@ class AutoMatchScheduler:
             ] = now
             self._evict_recent(now, cfg["cooldown"])
             scheduled += 1
-            self._daily_count += 1
+            daily_count = self.store.count_auto_matches_for_day(local_day)
             a_pl = int(a.get("matches_played") or 0) < placement if placement > 0 else False
             logger.info(
                 "auto-match scheduled: %s(%s) vs %s(%s) [%s] placement=%s daily=%d/%d",
                 a.get("bot_name"), a["bot_id"], partner.get("bot_name"), partner["bot_id"],
-                gid, a_pl, self._daily_count, cfg["daily_cap"],
+                gid, a_pl, daily_count, cfg["daily_cap"],
             )
         return scheduled
 
