@@ -49,12 +49,12 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 39 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 40 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航与受保护页面访客门禁（不得先发无意义 401）、表单边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、SSE 终态/错误原因、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/暂停重连/终局不跳/显式跳转与德州 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；赛事时间按状态收口、空值/显式 `NULL`、保存失败原位反馈、真实隔离库重载与 audit、500+ 字连续长文本、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
 
@@ -75,7 +75,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 - UI：主要导航、按钮、Tab、Dialog、筛选、表单合法/非法/超长输入、重复提交、空状态、错误状态、直接子路由、刷新、返回/前进与根元素横向溢出。
 - Console：持续收集 `pageerror` 与 error 级 console；未在精确白名单中的异常直接使测试失败。
 - Network：跟踪 request failed 与 4xx/5xx；负向用例只豁免精确预期的请求/状态，关键写操作断言方法、路径、状态和返回结构。深链 reload/back/forward 在继续导航前须等待目标实体 ID 对应的 detail 200 与普通 HTTP quiet window，避免仅凭通用标题把仍在收尾的 fetch 留给下一段导航。
-- SSE：断言终态 snapshot 转回放且不重连、公开 error 只按稳定 reason 显示中文且恶意/缺失 reason 的 message 不参与语义、运行态空 reason 不预称 completed、异常 completed 原因可见、服务端终态后流关闭；纯 mock 点格棋流还断言首次 `time_used` 用 `budget` 初始化未行动方，首次事件即 `time_out` 时显示 `0:00 + 超时`。
+- SSE：除终态 snapshot 转回放且不重连外，以可控 EventSource 批次断言初始停在事件 1、新事件先增加分母再逐条播放、暂停与较长重连 snapshot 不改变游标、终局不跳尾且可继续顺播、显式跳结局/重播从事件 1 生效；德州同时断言当前 reducer 进度为 X/70。后端重连测试须证明运行 snapshot 来自完整内存前缀而非节流落库点，经过与 REST 相同的字段投影/真人座位脱敏；终态状态必须忽略尚未释放的旧前缀并从 Store 合成唯一终局。另断言公开 error 只按稳定 reason 显示中文且恶意/缺失 reason 的 message 不参与语义、运行态空 reason 不预称 completed、异常 completed 原因可见、服务端终态后流关闭；纯 mock 点格棋流还断言首次 `time_used` 用 `budget` 初始化未行动方，首次事件即 `time_out` 时显示 `0:00 + 超时`。
 - WebSocket：真实人类 Holdem 流程断言单页只建一个连接、发送合法协议并进入终态；admin abort 在取消 runner 后仍须向既有连接送达权威终态，且 runner 不得覆盖 aborted。
 - Admin 赛事时间：`draft` 可改开放/截止/开赛，`open` 只可改未来的截止/开赛，`published` 只可改开赛，其余状态只读；无值时控件保持空白并展示手动语义，已有自动开赛时间可通过开关提交显式 `starts_at:null`，与省略字段保留旧值区分。`published` 尚无 `match_id` 时按发布轮次错峰规则在同一事务重排当前阶段 pending pairing；显式 `null` 同步清空，已有绑定或任一写入失败时赛事与逐场排期均不部分更新。Dialog 直接展示保存错误，真实隔离库用例还验证重载后的 `NULL` 与成功 audit 记录。
 
@@ -95,17 +95,19 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 |------|----------|-----------|
 | 隔离端到端冒烟 | **ALL PASSED** | 本分支 `bash scripts/e2e_smoke.sh` 在 `/tmp` 临时 DB 与运行时目录完成，退出后回收自己的服务和目录；写目标不在主仓库 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 全新临时库隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚、全局并发上限精确接纳、超额 429 与释放后补槽等核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **39 条 / 4 spec** | 本分支 `npx playwright test --list` 实测 |
+| Playwright 收集 | **40 条 / 4 spec** | 本分支 `npx playwright test --list` 实测；新增 1 条可控 EventSource 的直播游标与多视口布局回归 |
+| 观赛/视觉定向浏览器回归 | **10/10 passed** | 隔离 QA backend `50386` + worktree Vite `5178`；三 viewport 单层 gutter、MyBots 超长连续文本与真实 PE 拒绝、终态 snapshot/canonical deltas、直播从事件 1 顺播、暂停重连不丢位置、终局不跳、X/70、牌桌 16:9 与占比、sticky 时序、零手技术负及棋类历史均通过。首轮 9 项通过，缺少标准 tester1 的隔离副本经仓库种子脚本补齐后，第 10 项通过；未写主库 |
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
 | 权威终态后端定向回归 | **70 passed / 1 warning（29.94s）** | `test_authoritative_terminal_events` + `test_audit_coverage` + `test_human_match` + `test_engine`：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
-| 后端完整 pytest | **1076 passed / 1 skipped / 1 warning（240.01s）** | 本目标代码使用项目 `.venv/bin/python -m pytest -q` 实测；随后仅移除 Store 返回行的临时日志字段并完成定向回归；skip 为未构建 `frontend/dist` 时 SPA catch-all 不挂载的现有条件项，warning 为既有 Starlette/httpx deprecation |
-| Playwright 完整执行 | **39 passed（3.3m，既有基线）** | 本次仅修改后端/SQLite auto-match 配额，未重跑浏览器；保留上一轮隔离 QA 栈 `50384/5176`、Chromium 单 worker 的四角色/三视口/Console/Network/REST/SSE/WS 与严格 cleanup 证据，不作为本目标提交的新执行结果 |
+| daily-cap 后端完整 pytest | **1076 passed / 1 skipped / 1 warning（240.01s）** | main 的 SQLite auto-match 配额目标使用项目 `.venv/bin/python -m pytest -q` 实测；随后仅移除 Store 返回行的临时日志字段并完成定向回归；skip 为未构建 `frontend/dist` 时 SPA catch-all 不挂载的现有条件项，warning 为既有 Starlette/httpx deprecation |
+| 后端完整 pytest（当前提交） | **1072 passed / 1 warning（234.01s）** | 重基到 `ca5d7d1` 后使用项目 `.venv/bin/python -m pytest -q` 实测；已构建 `frontend/dist`，故 main 基线曾条件 skip 的 SPA catch-all 项本轮实际执行；含活动前缀/终态旧引用新增回归，warning 为既有 Starlette/httpx deprecation |
+| 合入基线完整 Playwright | **39 passed（3.3m）** | 当前 main 基线曾在隔离 QA 栈以 Chromium 单 worker 完整通过；本修复新增后静态收集为 40 条，本轮按改动风险执行上列 10 条定向回归，不把未执行的 40 条全量写成已通过 |
 | Admin 浏览器定向回归 | **9 passed（24.7s）** | `admin-audit.spec.ts` 全量；含状态边界、Dialog 内错误、真实隔离 DB 的手动开赛 `NULL` 重载与成功 audit 证据 |
 | Admin 时间定向后端回归 | **26 passed / 1 warning（8.04s）** | `test_admin_contest_status.py`；覆盖状态边界、发布态轮次错峰重排/清空、已有 match 拒绝、强制 SQLite 写失败整事务回滚；warning 为既有 Starlette/httpx deprecation |
 | QA profile + Admin 联合回归 | **53 passed / 1 warning（12.22s）** | `test_auto_matcher.py` + `test_runtime_settings.py` + `test_admin_contest_status.py`；覆盖 disabled loop 零 challenge、main QA wiring、实际生效只读诊断、生产 profile 不变及赛事时间全部边界 |
 | 前端构建 | **已通过** | `npm run build`（`tsc -b && vite build`），2561 modules transformed |
-| 浏览器 QA 写隔离 | **通过** | 50384 与 5176 的 `/api/health` 均为 `qa_instance=true`；数据库、日志、头像和六个种子 ELF Bot 都位于当前 worktree 或本轮 `/tmp` 日志目录，不引用主 checkout 上传文件。worktree DB 与主库 inode 不同，主库精确查询 `qa_admin/qa_organizer` 固定身份为 0、隔离副本为 2。QA profile 固定禁用 auto-match，三个游戏在整轮验收期间均未新增 ladder；生产 50380/主库未作为测试目标 |
+| 浏览器 QA 写隔离 | **通过** | 50386 与 5178 的 `/api/health` 均返回 `qa_instance=true`；worktree DB 与主库 inode 不同，标准 tester1/tester2 及六个种子 ELF Bot 只写入 worktree 副本和其 `bot_uploads/`。QA profile 固定禁用 auto-match；生产 50380/主库未作为测试目标，验证后仅停止本轮两个独立服务 |
 | QA 后端日志 | **通过（无非预期异常）** | 新日志目录逐项检查 `app/access/audit` 与服务输出：无 5xx、ERROR、Traceback、`version_unavailable`、auto-match 调度或 Bot cleanup 409。仅有精确预期的 SMTP 未配置提示、`/usr/bin/true` 预检 EOF，以及用例主动制造的登录失败、PE 拒绝、版本预检失败和终态赛事删除保护；均有对应浏览器白名单/断言 |
 
 ## 5. 可靠性与恢复专项

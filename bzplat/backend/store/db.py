@@ -17,6 +17,7 @@ from .public_contract import (
     READ_TECHNICAL_INCIDENT_EVENTS,
     canonical_public_completed_reason,
     sanitize_public_event,
+    sanitize_public_event_prefix,
     sanitize_public_incident,
     sanitize_public_match,
 )
@@ -235,31 +236,16 @@ def _sanitize_public_replay(
         events = []
     if not isinstance(events, list):
         events = []
-    sanitized: list[Any] = []
-    incident_samples = 0
     redact_active_human = bool(
         match
         and match.get("match_type") == TYPE_HUMAN
         and match.get("status") in {STATUS_PENDING, STATUS_RUNNING}
     )
-    for event in events:
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") in {"match_end", "error"}:
-            # Engine/historical terminals never decide the public outcome. The
-            # match row below contributes exactly one authoritative terminal.
-            continue
-        if event.get("type") in READ_TECHNICAL_INCIDENT_EVENTS:
-            incident_samples += 1
-            if incident_samples > 3:
-                continue
-        public_event = sanitize_public_event(
-            event,
-            redact_active_human=redact_active_human,
-            human_viewer_seat=human_viewer_seat,
-        )
-        if public_event is not None:
-            sanitized.append(public_event)
+    sanitized = sanitize_public_event_prefix(
+        events,
+        redact_active_human=redact_active_human,
+        human_viewer_seat=human_viewer_seat,
+    )
 
     authoritative = sanitize_public_match(match)
     if authoritative is not None:

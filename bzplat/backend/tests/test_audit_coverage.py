@@ -264,6 +264,120 @@ def test_sse_broadcast_does_not_block_on_full_queue(store: Store):
     assert result == "move", "drop-oldest 后最新事件应可被取到"
 
 
+def test_sse_reconnect_snapshot_uses_complete_active_prefix(store: Store):
+    """运行 snapshot 不退回节流落库点，终态收尾释放内存前缀。"""
+
+    class PausingRunner:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run_binaries(self, *args, **kwargs):
+            on_event = kwargs["on_event"]
+            on_event("match_start", {"type": "match_start", "game_id": "gomoku"})
+            # match_start 已落库；下面两条尚未达到每 5 条的节流点。
+            on_event("turn", {"type": "turn", "player": 0})
+            on_event("turn", {"type": "turn", "player": 1})
+            self.started.set()
+            await self.release.wait()
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[1, -1])],
+                events=[],
+                winner=0,
+                reason="five",
+            )
+
+    runner = PausingRunner()
+    orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
+    owner, bot_a = _user_with_bot(
+        store,
+        name="activeprefixa",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+    _, bot_b = _user_with_bot(
+        store,
+        name="activeprefixb",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+
+    async def run() -> None:
+        match_id = await orch.challenge(
+            bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
+        )
+        task = orch._tasks[match_id]
+        await asyncio.wait_for(runner.started.wait(), timeout=2)
+
+        persisted = store.get_public_replay(match_id) or {}
+        assert '"turn"' not in (persisted.get("events_json") or "")
+
+        queue = orch.subscribe(match_id)
+        snapshot = queue.get_nowait()
+        assert [event["type"] for event in snapshot["events"]] == [
+            "match_start",
+            "turn",
+            "turn",
+        ]
+        orch._active_replay_events[match_id].append(
+            {"type": "turn", "player": 0}
+        )
+        assert len(snapshot["events"]) == 3
+
+        runner.release.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert match_id not in orch._active_replay_events
+
+    asyncio.run(run())
+
+
+def test_sse_terminal_snapshot_ignores_stale_active_prefix(store: Store):
+    """终态提交是快照权威边界，runner 收尾前的旧内存引用不能遮住终局。"""
+    orch = _orch(store)
+    owner, bot = _user_with_bot(
+        store,
+        name="terminalprefix",
+        path=os.path.abspath("samples/gomokubot_linux_amd64"),
+    )
+    match_id = _new_match_id()
+    store.create_match(
+        match_id,
+        bot["id"],
+        bot["id"],
+        owner_id=owner["id"],
+        game_id="gomoku",
+        match_type="challenge",
+    )
+    store.save_replay(
+        match_id,
+        events_json=json.dumps(
+            [
+                {"type": "match_start", "game_id": "gomoku"},
+                {"type": "match_end", "winner": 1, "reason": "forged"},
+            ]
+        ),
+        hands_json="[]",
+    )
+    store.update_match(
+        match_id,
+        status=STATUS_COMPLETED,
+        winner=0,
+        reason="five",
+        result={"deltas": [1, -1]},
+    )
+    orch._active_replay_events[match_id] = [
+        {"type": "match_start", "game_id": "gomoku"},
+        {"type": "turn", "player": 0},
+        {"type": "turn", "player": 1},
+    ]
+
+    snapshot = orch.subscribe(match_id).get_nowait()
+    assert snapshot["match"]["status"] == STATUS_COMPLETED
+    assert snapshot["events"] == [
+        {"type": "match_start", "game_id": "gomoku"},
+        {"type": "match_end", "winner": 0, "reason": "five", "deltas": [1, -1]},
+    ]
+
+
 # ── 普通双 bot 对局 BotCrashedError → 技术判负（主路径盲区）───────────────
 
 

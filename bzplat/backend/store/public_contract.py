@@ -329,3 +329,39 @@ def sanitize_public_event(
         if human_viewer_seat not in (0, 1) or public.get("player") != human_viewer_seat:
             return None
     return public
+
+
+def sanitize_public_event_prefix(
+    raw_events: Any,
+    *,
+    redact_active_human: bool = False,
+    human_viewer_seat: int | None = None,
+) -> list[dict[str, Any]]:
+    """Project one non-terminal replay prefix onto the public event contract.
+
+    Persisted replays and the orchestrator's in-memory running prefix must cross
+    the same boundary. Engine/historical terminal events are excluded because
+    the authoritative match row contributes exactly one terminal after commit;
+    technical-incident samples stay bounded to the public result limit.
+    """
+    if not isinstance(raw_events, list):
+        return []
+    sanitized: list[dict[str, Any]] = []
+    incident_samples = 0
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") in {"match_end", "error"}:
+            continue
+        if event.get("type") in READ_TECHNICAL_INCIDENT_EVENTS:
+            incident_samples += 1
+            if incident_samples > 3:
+                continue
+        public_event = sanitize_public_event(
+            event,
+            redact_active_human=redact_active_human,
+            human_viewer_seat=human_viewer_seat,
+        )
+        if public_event is not None:
+            sanitized.append(public_event)
+    return sanitized
