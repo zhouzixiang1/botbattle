@@ -2,7 +2,7 @@
 """通过 HTTP API 做关键业务链路集成测试。
 
 覆盖：
-  1. 无 SMTP 注册回滚契约 + 隔离 DB 专用账号播种 → 验证码登录 → /me
+  1. 无 SMTP 注册持久化 + queued 投递契约 + 隔离 DB 专用账号播种 → 验证码登录 → /me
   2. Bot 上传 / 版本 / 上架 / 公开列表
   3. 挑战对局 + 结果完整性（零和、winner、净筹码）
   4. 已完成对局的 SSE 终态 snapshot vs 落盘回放 events_json 一致性
@@ -12,7 +12,7 @@
 前置：
   - 后端以 BZ_TEST_CAPTCHA=1 启动（captcha 接口返回 answer）
   - 后端以 BZ_QA_INSTANCE=1 标记为隔离 QA 实例
-  - 不发送测试邮件：账号在隔离 DB 幂等播种；无 SMTP 注册原子性在独立临时 app 验证
+  - 不发送测试邮件：账号在隔离 DB 幂等播种；无 SMTP queued 契约在独立临时 app 验证
   - BZ_BOT_LOCAL=1（本地跑 ELF，无需 Docker）
 
 用法：
@@ -130,11 +130,12 @@ def multipart(fields: dict[str, Any], file_field: str, filename: str, data: byte
     return {"Content-Type": f"multipart/form-data; boundary={boundary}"}, b"".join(parts)
 
 
-def verify_no_smtp_registration_rollback() -> tuple[bool, str]:
-    """Exercise the HTTP registration compensation contract without real SMTP.
+def verify_no_smtp_registration_persistence() -> tuple[bool, str]:
+    """Exercise queued registration persistence without real SMTP.
 
-    This uses a disposable app/runtime, explicitly forces ``mailer=None`` and runs
-    the same request twice.  It cannot send mail or mutate the target QA database.
+    This uses a disposable app/runtime and runs the same request twice.  It cannot
+    send mail or mutate the target QA database.  The first call must persist the
+    user, short-lived code and opaque delivery; the duplicate call remains a 409.
     """
     from fastapi.testclient import TestClient
     from bzplat.backend.main import create_app
@@ -167,20 +168,40 @@ def verify_no_smtp_registration_rollback() -> tuple[bool, str]:
                 "captcha_id": "skip",
                 "captcha_answer": "skip",
             }
-            statuses: list[int] = []
+            responses: list[httpx.Response] = []
             remains: list[bool] = []
             try:
                 for _ in range(2):
                     response = client.post("/api/auth/register", json=payload)
-                    statuses.append(response.status_code)
+                    responses.append(response)
                     remains.append(
                         app.state.store.get_user_by_username("apirollback") is not None
                     )
+                code_row = app.state.store._conn.execute(
+                    "SELECT code FROM email_codes ORDER BY id LIMIT 1"
+                ).fetchone()
+                delivery = app.state.store._conn.execute(
+                    "SELECT status,payload_json FROM deliveries ORDER BY id LIMIT 1"
+                ).fetchone()
             finally:
                 client.close()
                 app.state.store.close()
-    ok = statuses == [503, 503] and remains == [False, False]
-    return ok, f"statuses={statuses} user_remains={remains}"
+    statuses = [response.status_code for response in responses]
+    first_body = responses[0].json() if responses and responses[0].status_code == 200 else {}
+    payload_text = str(delivery["payload_json"] if delivery else "")
+    ok = (
+        statuses == [200, 409]
+        and remains == [True, True]
+        and first_body.get("delivery_status") == "queued"
+        and code_row is not None
+        and delivery is not None
+        and delivery["status"] in {"queued", "sending"}
+        and str(code_row["code"]) not in payload_text
+    )
+    return ok, (
+        f"statuses={statuses} user_remains={remains} "
+        f"delivery_status={delivery['status'] if delivery else None}"
+    )
 
 
 def seed_qa_accounts(db_path: str) -> dict[str, str]:
@@ -264,10 +285,10 @@ def qa_contest_payload(run_id: str) -> dict[str, Any]:
 
 # ─────────────────────────────────────────────────────────────
 def test_auth_flow(api: Api) -> dict[str, str]:
-    print("\n[1/6] 鉴权流程：无 SMTP 回滚 → 隔离播种 → 验证码登录")
+    print("\n[1/6] 鉴权流程：无 SMTP queued 持久化 → 隔离播种 → 验证码登录")
     users: dict[str, str] = {}
-    rollback_ok, rollback_detail = verify_no_smtp_registration_rollback()
-    check("无 SMTP 注册失败会删除用户且可安全重试", rollback_ok, rollback_detail)
+    queued_ok, queued_detail = verify_no_smtp_registration_persistence()
+    check("无 SMTP 注册保留账号/验证码并排队投递", queued_ok, queued_detail)
 
     usernames = seed_qa_accounts(api.db_path)
     for logical in ("admin", "alice", "bob", "carol", "org1"):

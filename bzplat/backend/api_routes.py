@@ -2781,6 +2781,8 @@ async def admin_delete_entry(
 # ── admin: email templates & outbox ───────────────────────────
 
 class TemplateUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     subject: str
     body_html: str = ""
     body_text: str = ""
@@ -2788,27 +2790,72 @@ class TemplateUpdate(BaseModel):
 
 @router.get("/api/admin/email/templates")
 def admin_templates(request: Request, _admin=Depends(require_admin)):
-    return {"templates": _store(request).list_templates()}
+    from bzplat.backend.communications.templates import list_templates
+
+    legacy = {row["key"]: row for row in _store(request).list_templates()}
+    templates = []
+    for item in list_templates():
+        old = legacy.get(item.key)
+        customized = bool(old and (
+            old["subject"] != item.subject
+            or old["body_html"] != item.body_html
+            or old["body_text"] != item.body_text
+        ))
+        templates.append({
+            "key": item.key,
+            "version": item.version,
+            "subject": item.subject,
+            "body_html": item.body_html,
+            "body_text": item.body_text,
+            "secret": item.secret,
+            "source": "code",
+            "mutable": False,
+            "legacy_customization_preserved": customized,
+        })
+    return {
+        "source": "code",
+        "mutable": False,
+        "legacy_rows_preserved": True,
+        "templates": templates,
+    }
 
 
 @router.get("/api/admin/email/templates/{key}")
 def admin_template(key: str, request: Request, _admin=Depends(require_admin)):
-    t = _store(request).get_template(key)
-    if not t:
+    from bzplat.backend.communications.templates import get_template
+
+    try:
+        item = get_template(key)
+    except KeyError:
         raise HTTPException(404, "模板不存在")
-    return {"template": t}
+    return {"template": {
+        "key": item.key,
+        "version": item.version,
+        "subject": item.subject,
+        "body_html": item.body_html,
+        "body_text": item.body_text,
+        "secret": item.secret,
+        "source": "code",
+        "mutable": False,
+    }}
 
 
 @router.put("/api/admin/email/templates/{key}")
 def admin_update_template(
-    key: str, body: TemplateUpdate, request: Request, _admin=Depends(require_admin)
+    key: str, body: TemplateUpdate, request: Request, admin=Depends(require_admin)
 ):
-    t = _store(request).update_template(
-        key, subject=body.subject, body_html=body.body_html, body_text=body.body_text
+    audit_log(
+        request,
+        "admin_email_template_update",
+        result="fail",
+        user=admin.get("username"),
+        target=key,
+        detail="code_owned",
     )
-    if not t:
-        raise HTTPException(404, "模板不存在")
-    return {"template": t}
+    raise HTTPException(
+        409,
+        "事务邮件模板由代码版本管理；旧 email_templates 自定义记录已保留但不再执行",
+    )
 
 
 @router.get("/api/admin/email/outbox")

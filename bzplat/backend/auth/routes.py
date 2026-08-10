@@ -131,8 +131,6 @@ def _err(exc: AuthError) -> HTTPException:
         "expired_reset_token": 400,
         "invalid_code": 400,
         "expired_code": 400,
-        "mail_failed": 502,
-        "mail_not_configured": 503,
         "no_user": 404,
         "invalid_captcha": 400,
         "invalid_phone": 400,
@@ -170,7 +168,6 @@ async def get_captcha(request: Request) -> dict:
 async def register(req: RegisterReq, request: Request) -> dict:
     _require_captcha(request, req.captcha_id, req.captcha_answer)
     auth: AuthManager = request.app.state.auth
-    user: dict | None = None
     try:
         user = auth.register(
             req.username,
@@ -184,16 +181,13 @@ async def register(req: RegisterReq, request: Request) -> dict:
         )
         auth.send_verify_code(user)
     except AuthError as exc:
-        # 注册与首封验证邮件对用户应呈现原子语义：发信失败时补偿删除刚创建的
-        # 未验证账号，避免页面提示失败、重试却遇到用户名/邮箱已占用。
-        if user is not None:
-            auth.store.delete_user(user["id"])
         audit_log(request, "register", result="fail", target=req.username, detail=exc.code)
         raise _err(exc) from exc
     audit_log(request, "register", result="ok", user=user.get("username"))
     return {
         "user": user,
-        "message": "注册成功,验证码已发送到邮箱,请完成验证后再登录",
+        "message": "注册成功，验证码邮件已进入发送队列，请完成验证后再登录",
+        "delivery_status": "queued",
         "need_verify": True,
     }
 
@@ -222,7 +216,11 @@ async def resend_verify(req: ResendVerifyReq, request: Request) -> dict:
             auth.send_verify_code(user)
         except AuthError as exc:
             raise _err(exc) from exc
-    return {"ok": True, "message": "若账号存在且未验证,验证码已重新发送"}
+    return {
+        "ok": True,
+        "message": "若账号存在且未验证，验证码邮件已进入发送队列",
+        "delivery_status": "queued",
+    }
 
 
 @router.post("/login")
@@ -373,14 +371,11 @@ def _safe_user_out(u: dict | None) -> dict:
 async def request_reset(req: RequestResetReq, request: Request) -> dict:
     _require_captcha(request, req.captcha_id, req.captcha_answer)
     auth: AuthManager = request.app.state.auth
-    try:
-        auth.request_reset(req.email_or_username)
-    except AuthError as exc:
-        if exc.code == "mail_failed":
-            raise _err(exc) from exc
+    auth.request_reset(req.email_or_username)
     return {
         "ok": True,
-        "message": "若账号存在,重置验证码已发送到邮箱",
+        "message": "若账号存在，重置验证码邮件已进入发送队列",
+        "delivery_status": "queued",
         "token": None,
     }
 

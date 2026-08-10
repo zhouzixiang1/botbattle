@@ -26,6 +26,7 @@ _AUTH_STRICT = (20, 60)
 _CAPTCHA_LIMIT = (60, 60)
 _UPLOAD_STRICT = (6, 60)
 _CHALLENGE_STRICT = (8, 60)
+_FEEDBACK_STRICT = (5, 60)
 _API_DEFAULT = (120, 60)
 _STATIC_SKIP_EXT = (
     ".js",
@@ -181,6 +182,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return _UPLOAD_STRICT
         if path == "/api/matches/challenge":
             return _CHALLENGE_STRICT
+        if method == "POST" and (
+            path == "/api/feedback/bugs"
+            or (path.startswith("/api/feedback/bugs/") and path.endswith("/attachments"))
+        ):
+            return _FEEDBACK_STRICT
         if path.startswith("/api/"):
             return _API_DEFAULT
         return None

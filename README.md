@@ -22,10 +22,10 @@
 **平台功能**
 - 账号体系：注册/登录/邮箱验证/重置密码、个人主页、资料/头像编辑
 - 社交：关注用户、收藏 Bot、评论、点赞、浏览计数、点赞榜
-- 通知：站内通知 + 可选邮件提醒（对局完成/被关注/赛事/评论）
+- 通信：站内消息为真相、邮件异步投递；保留旧通知铃铛，并支持用户/admin 线程、固定受众广播与可追踪 Bug 反馈
 - 经验与等级系统（等级 gating 部分功能）、全局搜索（Cmd+K 命令面板）
 - 站点可配置（站名/Logo/公告）
-- 管理后台（7 Tab：仪表盘/用户/Bot/对局记录/锦标赛/日志/邮件）；运行参数与赛制模板随代码评审发布，不提供网页写入口
+- 管理后台 API 支持通信收发箱、广播二次批准、失败投递与 Bug 处理；事务邮件模板随代码版本发布，历史数据库自定义只读保留
 
 **前端**
 - React 19 + shadcn/ui 设计系统，**浅/暗双主题**（OKLCH token，一键切换）
@@ -51,7 +51,7 @@ pip install -e '.[dev]'
 # 前端
 (cd bzplat/frontend && npm install && npm run build)
 
-# 配置环境（SMTP_* 未配时现有账号仍可使用，但注册/重置会返回 503）
+# 配置环境（SMTP_* 未配时邮件仍会排队并重试；注册/重置业务请求不阻塞）
 cp .env.example .env
 
 # 本地无 Docker 时用本机跑 ELF（仅测试；必须在启动服务前设置）
@@ -80,7 +80,7 @@ botzone create-admin alice alice@example.com 'password123'
 
 ## 技术栈
 
-- **后端**：Python ≥ 3.12、FastAPI、uvicorn、SQLite、SMTP（captcha + Pillow）
+- **后端**：Python ≥ 3.12、FastAPI、uvicorn、SQLite、异步 SMTP delivery worker（captcha + Pillow）
 - **前端**：React 19 + Vite 8 + Tailwind CSS v4（CSS-first）+ shadcn/ui + Radix UI + lucide-react + recharts
 - **暗色模式**：next-themes + OKLCH 双主题 token（浅色默认 + 暗色对等）
 - **运行时**：Docker（必需；Linux x86_64 ELF 使用 debian:bookworm-slim）；本机 canonical socket + 实例/请求/attempt/座位标签构成精确清理边界
@@ -91,7 +91,7 @@ botzone create-admin alice alice@example.com 'password123'
 ```
 ├── bzplat/
 │   ├── backend/          # FastAPI：games(注册表) / matches / contests / store / runtime /
-│   │                     # auth / bots / notifications / rating / mail
+│   │                     # auth / bots / communications / notifications(兼容投影) / rating / mail
 │   └── frontend/         # React 19 + Vite 8 + Tailwind v4 + shadcn/ui（src/games 注册表 + canvas）
 ├── doc/                  # 工程交付文档（6 份核心文档 + 现行专项文档 + INDEX）
 ├── wiki/                 # Bot 玩家文档（规则/协议/Bot 开发指南）

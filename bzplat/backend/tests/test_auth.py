@@ -54,18 +54,22 @@ def test_register_authenticate_logout(tmp_path):
     assert ei.value.code == "email_unverified"
 
     auth.send_verify_code(user)
-    assert len(mailer.sent) == 1
-    assert mailer.sent[0]["subject"] == "【Botbattle】邮箱验证码"
-    assert "A，你好" in mailer.sent[0]["body_text"]
+    queued = auth.store._conn.execute(
+        "SELECT template_key,status,payload_json FROM deliveries ORDER BY id"
+    ).fetchall()
+    assert [(row["template_key"], row["status"]) for row in queued] == [
+        ("verify_email", "queued")
+    ]
     code_row = auth.store.get_latest_email_code(user["id"], CODE_VERIFY)
+    assert code_row["code"] not in queued[0]["payload_json"]
     verified = auth.verify_email("alice", code_row["code"])
     assert verified["email_verified"] == 1
-    assert len(mailer.sent) == 2
-    assert mailer.sent[1]["subject"] == "【Botbattle】欢迎加入多游戏 Bot 竞赛平台"
-    assert all(
-        game_name in mailer.sent[1]["body_text"]
-        for game_name in ("德州扑克", "五子棋", "点格棋")
-    )
+    assert [
+        row["template_key"]
+        for row in auth.store._conn.execute(
+            "SELECT template_key FROM deliveries ORDER BY id"
+        )
+    ] == ["verify_email", "welcome"]
 
     safe, token = auth.authenticate("alice", "password12")
     assert safe["username"] == "alice"
@@ -75,15 +79,19 @@ def test_register_authenticate_logout(tmp_path):
     assert auth.verify_session(token) is None
 
 
-def test_mailer_none_rejects_send(tmp_path):
+def test_mailer_none_still_queues_without_blocking_request(tmp_path):
     auth, _ = _auth(tmp_path, mailer=False)
     user = auth.register("bob", "bob@ex.com", "password12")
-    with pytest.raises(AuthError) as ei:
-        auth.send_verify_code(user)
-    assert ei.value.code == "mail_not_configured"
-    # 验证码仍入库，管理员可手工查库或配置 SMTP 后重发
+    auth.send_verify_code(user)
+    # 验证码与高优先级 delivery 均入库；SMTP 配置/重试属于 worker。
     code_row = auth.store.get_latest_email_code(user["id"], CODE_VERIFY)
     assert code_row is not None
+    delivery = auth.store._conn.execute(
+        "SELECT status,priority,payload_json FROM deliveries"
+    ).fetchone()
+    assert delivery["status"] == "queued"
+    assert delivery["priority"] == 100
+    assert code_row["code"] not in delivery["payload_json"]
     auth.verify_email("bob@ex.com", code_row["code"])
     safe, _token = auth.authenticate("bob", "password12")
     assert safe["email_verified"] == 1
@@ -124,14 +132,13 @@ def test_register_rejects_invalid_phone(tmp_path):
     assert auth.store.get_user(user["id"])["phone"] == "13800138000"
 
 
-def test_register_route_rolls_back_user_when_verify_mail_fails(tmp_path, monkeypatch):
-    """首封验证邮件失败时，HTTP 注册不能留下占用用户名的半成品账号。"""
+def test_register_route_queues_mail_even_when_smtp_is_unconfigured(tmp_path, monkeypatch):
+    """SMTP 不属于注册事务；用户和验证码不能因 provider 不可用而回滚。"""
     from fastapi.testclient import TestClient
     from bzplat.backend.main import create_app
 
     monkeypatch.setenv("BZ_SKIP_CAPTCHA", "1")
     app = create_app(db_path=str(tmp_path / "register-atomic.db"))
-    app.state.auth.mailer = None
     client = TestClient(app)
     payload = {
         "username": "atomicuser",
@@ -142,13 +149,13 @@ def test_register_route_rolls_back_user_when_verify_mail_fails(tmp_path, monkeyp
         "captcha_answer": "skip",
     }
     first = client.post("/api/auth/register", json=payload)
-    assert first.status_code == 503, first.text
-    assert app.state.store.get_user_by_username("atomicuser") is None
+    assert first.status_code == 200, first.text
+    assert first.json()["delivery_status"] == "queued"
+    assert app.state.store.get_user_by_username("atomicuser") is not None
 
-    # 重试仍进入发信路径（503），而非用户名/邮箱已占用（409）。
+    # 重试按正常用户名唯一约束拒绝，而不是制造第二个用户。
     second = client.post("/api/auth/register", json=payload)
-    assert second.status_code == 503, second.text
-    assert app.state.store.get_user_by_username("atomicuser") is None
+    assert second.status_code == 409, second.text
 
 
 def test_change_password(tmp_path):
@@ -169,7 +176,9 @@ def test_request_reset_and_reset_password(tmp_path):
     _, old_session = auth.authenticate("erin", "password12")
     ok, _ = auth.request_reset("e@ex.com")
     assert ok
-    assert any("重置" in m["subject"] or "reset" in m["subject"].lower() for m in mailer.sent)
+    assert auth.store._conn.execute(
+        "SELECT COUNT(*) FROM deliveries WHERE template_key='reset_password'"
+    ).fetchone()[0] == 1
     code = auth.store.get_latest_email_code(user["id"], CODE_RESET)["code"]
     auth.reset_password("erin", code, "brandnew1")
     assert auth.verify_session(old_session) is None

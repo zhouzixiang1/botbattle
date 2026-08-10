@@ -24,16 +24,17 @@ graph TB
         GAMES[游戏注册表 games/<br/>GameSpec ×3]
         CONTEST[赛制层<br/>templates/stages/manager]
         STORE[数据层<br/>Store + SQLite]
-        NOTIFY[通知层]
         EXEC[全来源执行队列<br/>durable jobs + dispatcher]
         AUTO[自动公平生产者]
+        COMM[通信真相层<br/>communications]
+        WORKER[投递 worker<br/>SMTP 异步重试]
     end
     subgraph 沙箱
         DOCKER[Docker<br/>Linux x86_64 ELF]
     end
     FE -->|HTTP/SSE/WS| MW
     MW --> API & SSE & WS
-    API --> ORCH & CONTEST & STORE & NOTIFY
+    API --> ORCH & CONTEST & STORE & COMM
     ORCH --> GAMES
     ORCH --> DOCKER
     ORCH --> STORE
@@ -43,17 +44,19 @@ graph TB
     CONTEST --> EXEC
     AUTO --> EXEC
     EXEC --> ORCH
+    COMM --> STORE
+    WORKER --> COMM
     GAMES -.->|MatchResult winners+deltas| ORCH
 ```
 
 ### 1.2 运行模型
 - **单进程 uvicorn factory**（`main:create_app`），默认 `127.0.0.1:50380`。
-- **lifespan** 启动顺序：① 获取数据库邻接 OS flock；② 以绝对 DB 路径 hash 或 `BZ_INSTANCE_KEY` 得到精确 Docker namespace，并在共享 launch flock 下删除该 namespace 全部容器、连续确认 label/name/token 为 0、闭合 `docker_launch_journal`；③ 在单事务补偿 `starting/running/settling` execution attempt；④ 收敛未纳入队列的历史 orphan Match；⑤ 按 `settled_order` 补算评分；⑥ 对账赛事并启动唯一 `ExecutionDispatcher` 与 `ContestScheduler`。execution 与上传预检的每次 create 都先持久化 token/确定性名称/host boot id，再向本机 daemon 发送请求；同 boot 的未 ACK create 不能凭瞬时双零自动放行，须保持 `manual:` 暂停，直到观察并删除精确 token 容器，或 host boot 改变后取得完整双零证明。其他 Docker 控制结果不确定时保持持久 `paused`，不执行步骤③以后内容；可证明安全的故障有界重试，管理员恢复也必须重新清场。停服先置 `accepting=0`，再停止调度、取消/等待本进程 attempt 并尽力清理，崩溃由下一次启动统一恢复。
+- **lifespan** 启动顺序：① 获取数据库邻接 OS flock；② 以绝对 DB 路径 hash 或 `BZ_INSTANCE_KEY` 得到精确 Docker namespace，并在共享 launch flock 下删除该 namespace 全部容器、连续确认 label/name/token 为 0、闭合 `docker_launch_journal`；③ 在单事务补偿 `starting/running/settling` execution attempt；④ 收敛未纳入队列的历史 orphan Match；⑤ 按 `settled_order` 补算评分；⑥ 对账赛事并启动唯一 `ExecutionDispatcher`、`ContestScheduler` 与 `DeliveryWorker`。execution 与上传预检的每次 create 都先持久化 token/确定性名称/host boot id，再向本机 daemon 发送请求；同 boot 的未 ACK create 不能凭瞬时双零自动放行，须保持 `manual:` 暂停，直到观察并删除精确 token 容器，或 host boot 改变后取得完整双零证明。其他 Docker 控制结果不确定时保持持久 `paused`，不执行步骤③以后内容；可证明安全的故障有界重试，管理员恢复也必须重新清场。通信 worker 启动时恢复中断的 sending/processing claim，再按优先级处理事务邮件、普通邮件与广播批次。停服先置 `accepting=0`，再停止调度与投递 worker、取消/等待本进程 attempt 并尽力清理，崩溃由下一次启动统一恢复。
 - **并发控制**：`manual/human/contest/auto` 全部先写 `execution_jobs.queued`，没有来源可直接创建或启动 Match。claim 的 `BEGIN IMMEDIATE` 同时检查全局实际 running Match 数、活跃 match slots 和 sandbox units；Bot-vs-Bot 为 `1+2`，人机为 `1+1`。`starting/running/settling` 均占容量，直到 exact job/attempt label 清零。人工/人机有 per-user 活跃/排队上限，赛事有共享份额；source priority 配合无上限 aging，自动来源不永久饥饿。rated claim 另受 projection readiness 与同 Bot 未结算 rated-overlap 门禁。
 - **重试所有权**：运行期基础设施中断在 Match 终态且 label 清零后，用户拥有的 manual/human 标为 `interrupted + retryable=1`；auto/contest 始终 `retryable=0`，但同一持久 job 以 `failure_count/next_attempt_at` 做 1、2、4…60 秒退避，contest 同步延后 pairing。通用 `/retry` 不得复活后台来源，普通无错误重启则即时恢复，以免产生重复 active job 或每秒 attempt 热循环。
 - **限流**：内存滑动窗口 IP 限流（单进程；多 worker 部署需换 Redis）。
 
-## 2. 模块设计（12 层）
+## 2. 模块设计
 
 ### 2.1 模块树与职责
 
@@ -68,12 +71,13 @@ graph TB
 | 沙箱/运行配置 | `runtime/` | `config.py` 是运行参数的不可变代码唯一来源；`docker_supervisor` 只连 canonical local Unix socket，构造确定性 container 名与 instance/job/attempt/slot labels，并统一施加 network/read-only/tmpfs/cap/user/cpu/memory/swap/pids/ulimit/log-driver/image 硬约束；Linux x86_64 ELF BinaryRunner 只执行 supervisor 建立的 scope。其他格式在上传时拒绝 |
 | 数据 | `store/` | Store 类（SQLite，含 `_migrate` 自愈）+ `execution.py`（通用 job/attempt/control、公平 producer、双资源容量、原子 claim 与恢复状态机）+ 自动公平 decision/fair-state/service 审计；评分 policy/settlement/终局输入不可变，投影可由离线 CLI 按 settled_order 确定性重建；schema.py 是状态/类型常量唯一来源 |
 | 认证 | `auth/` | routes + auth_manager + captcha + dependencies（require_user/admin/organizer） |
-| 通知 | `notifications/` | NotificationManager（站内通知 + 按 prefs 复用 Mailer 发邮件） |
+| 通信 | `communications/` | conversation/message 真相、participant 权限、站内/邮件 delivery、广播快照与小白式 Bug 反馈；`worker.py` 独占 SMTP 调用边界 |
+| 通知兼容 | `notifications/` | `NotificationManager` 仅作旧调用门面；新写入先落 communications，再在同事务生成 `notifications` 兼容投影 |
 | 支撑 | `bots/ rating/ mail/ security.py logging_config.py crypto.py cli.py` | Bot 上传分类 / Glicko-2 / SMTP / 安全头+限流 / 日志 / 密码 hash / CLI |
 
-邮件层以 `Botbattle` 为默认发件人名称，邮箱验证、密码重置和欢迎信共享同一多游戏品牌口径；
-欢迎信明确覆盖德州扑克、五子棋与点格棋，且只在邮箱验证完成后发送。三条官方模板仅在 key
-缺失时播种，管理后台保存的模板属于持久化配置，服务重启不得静默覆盖。
+邮件层以 `Botbattle` 为默认发件人名称。邮箱验证、密码重置和欢迎信是代码拥有、显式版本化的安全模板；旧 `email_templates` 行仅保留作历史审计，启动仍只 `INSERT OR IGNORE`，不覆盖旧自定义，但运行时不再读取这些正文。注册、重置与邮箱验证事务只写高优先级 delivery 并返回 `queued`，SMTP 成败不回滚用户、验证码或密码变更。验证/重置码只存于短期 `email_codes` 行，delivery 仅保存模板版本与该行引用；worker 发送时才在内存渲染，过期、已使用或已被更新的码直接 `cancelled`。
+
+通信状态机只有以下权威转移：conversation 为 `open→closed/archived`；delivery 为 `queued→sending→sent`，可重试失败指数退避回 `queued`，达上限后 `failed`，过期/取消为 `cancelled`；broadcast 为 `draft→scheduled→running→completed`，完成前可转 `cancelled`。取消立即停止未 claim 的受众与 queued 邮件；已进入当前固定批或 SMTP 的工作可能在竞态窗口内完成，不声称可撤回。SMTP 存在“供应商已接收、DB 尚未写 sent”的崩溃窗口，因此语义是有界的 **at-least-once**，不声称 exactly-once；唯一 idempotency key 与确定性 `Message-ID` 用于支持合作供应商去重。
 
 ### 2.2 核心解耦契约
 
@@ -125,7 +129,7 @@ graph LR
 
 ## 3. 数据库设计
 
-SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **33 张表**、**39** 个具名索引；per-game 表与索引由 `_migrate` 按注册表模板补齐。状态码、类型、`REGISTERED_ENGINES` 与历史配置键名集中在 `store/schema.py`，生产运行参数及时区集中在 `runtime/config.py`，资源硬顶集中在 `runtime/limits.py`。
+SQLite 单文件（默认 `botzone.db`）；fresh schema 同时包含全局执行队列、通信/广播/Bug 反馈、私有调试与既有业务表，per-game 表与索引由 `_migrate` 按注册表模板补齐。状态码、类型、`REGISTERED_ENGINES` 与历史配置键名集中在 `store/schema.py`，生产运行参数及时区集中在 `runtime/config.py`，资源硬顶集中在 `runtime/limits.py`。
 
 ### 3.1 核心表（选录）
 
@@ -163,8 +167,21 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **33 张表
 | `favorites` | 收藏 Bot（user_id, bot_id）；写入/删除在同一 `BEGIN IMMEDIATE` 事务内复核用户与 Bot，竞态删除统一 404 |
 | `comments` | 评论（target_type=match/bot, target_id, user_id, body）；`BEGIN IMMEDIATE` 后同时验证 actor 与多态 target，删目标级联清理 |
 | `likes` | 点赞（user_id, target_type=match/bot/comment, target_id）；点赞/取消点赞均在 `BEGIN IMMEDIATE` 后验证 actor 与多态 target，删目标/评论级联清理并同步缓存 |
-| `notifications` | 通知（user_id, type, title, body, link, is_read） |
+| `notifications` | 旧通知读兼容投影（新行带 `communication_message_public_id`，旧行保持 NULL） |
 | `notification_prefs` | 通知邮件偏好（email_match_done/email_followed/email_contest/email_comment）；DB 保持 0/1，公开 GET/PUT 请求与响应只使用 boolean |
+
+### 3.2.1 通信与 Bug 反馈表
+
+| 表 | 用途 / 关键约束 |
+|----|------|
+| `conversations` | 平台/admin↔user 线程，以不可枚举 `public_id` 对外；首期无用户任意私信创建入口 |
+| `conversation_participants` | 参与者与已读水位；用户 thread API 必须命中自己的 participant |
+| `messages` | 纯文本真相、服务端生成的转义 HTML、`reply_to` 与公开 ID；认证码永不进入正文 |
+| `deliveries` | `in_app/email` 渠道副作用；唯一 `idempotency_key`、地址快照、优先级、尝试次数/下次时间/脱敏错误码/供应商 Message-ID |
+| `broadcasts` / `broadcast_recipients` | 受众过滤条件、去重用户快照、内容绑定 hash、短期批准令牌、调度/取消与固定批处理状态 |
+| `bug_reports` / `bug_report_events` | 反馈主体与追加式状态/回复/附件事件；每条反馈唯一绑定 conversation |
+| `diagnostic_bundles` | 严格白名单诊断 JSON，每条反馈最多一份 |
+| `bug_attachments` | 图片元数据与 SHA-256；内部隔离路径不进入对外读模型 |
 
 ### 3.3 支撑表（选录）
 
@@ -188,6 +205,8 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **33 张表
 
 ### 3.4 迁移机制
 `Store._migrate()` 在每次建连时自愈：为旧库补新增列（game_id/xp/level/bio/avatar/likes_count 等），必要时重建表放宽 CHECK 约束（纳入 rest/ladder/human 等新状态）。**向后兼容，不破坏现有数据**（除对局数据——见下）。
+
+**communications 增量迁移**：只新建上述 10 张表，并为 `notifications` 补一个可空投影列/部分唯一索引。不回填、不改写、不删除任何旧 `notifications`、`email_templates`、`email_outbox` 或其他业务行，也不把旧通知伪造为新 conversation。旧模板自定义正文原样保留；官方 verify/reset/welcome 的新执行路径固定使用代码版本。迁移必须以二次打开、`integrity_check`、`foreign_key_check` 和旧表全行哈希/行数不变作为验收边界。
 迁移还会删除多态社交表中已失去用户或目标的孤儿行、按真实 likes 重算每场对局的
 `likes_count` 缓存，并把历史 `pair_stats.samples` 修正为胜负平之和。新建
 pending/running 对局的 `reason` 固定为空；迁移清空活跃旧行的任何非空 reason，并把
@@ -255,6 +274,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 搜索：`GET /api/search`
 - 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
 - Wiki：`GET /api/wiki`
+- Bug 反馈：`POST /api/feedback/bugs`；访客必须通过图形验证码与独立 IP 限流。请求是严格 JSON，附件不得 base64 混入，只能在创建后用独立 multipart 端点上传
 - **裁判公开**：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（裁判源码全文）——裁判是公开可审计的规则定义（区别于 Bot 私有黑盒），源码对全体玩家透明
 
 ### 4.2 鉴权端点（require_user，登录玩家）
@@ -264,7 +284,8 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 私有调试：`GET /api/matches/{id}/debug`；必须登录且通过 Store 终态/owner/赛事角色授权，成功与拒绝均 `Cache-Control: private, no-store`，读取记审计但不记录内容
 - 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；API 预检用于友好提示，Store 的关注、收藏、评论、点赞与取消点赞仍在 `BEGIN IMMEDIATE` 写事务内复核 actor/target，竞态删除或不存在统一 404；删除实体使用同级写锁清理多态关系与缓存，避免检查后删除造成孤儿或 500
 - 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`；评论/点赞请求使用严格 target 枚举且必须引用当前存在的实体，通知排除行为发起者本人
-- 通知：`GET /api/notifications`、`POST /read`、`/read-all`、`GET/PUT /api/notification-prefs`；偏好 REST 四字段唯一类型为 boolean，PUT 可只提交一个变化字段，SQLite 0/1 不穿透到前端
+- 通信：`GET /api/communications/{inbox,sent}`、`GET /api/communications/threads/{public_id}`、`POST .../{read,reply}`；只允许已登录用户读取/回复自己的 participant thread，无用户任意私信创建 API。旧 `GET /api/notifications`、`POST /read`、`/read-all` 继续读兼容投影；`GET/PUT /api/notification-prefs` 四字段唯一类型为 boolean
+- Bug 追踪：`GET /api/feedback/bugs`、`GET /api/feedback/bugs/{public_id}`；登录用户只能读自己提交的反馈。`POST /api/feedback/bugs/{public_id}/attachments` 是独立 multipart 路由，登录 owner/admin 或持创建时一次性返回追踪令牌的访客才可上传
 - 赛事：`POST /api/contests/{id}/register`
 - 认证：`GET /api/auth/me`、`POST /logout`、`/change-password`、`PUT /profile`、`POST /avatar`
 
@@ -279,7 +300,10 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - **一致性闸门**：活跃对局的状态只能经 orchestrator 安全中止为 `aborted`，后台不能手工伪造 `pending/running/completed`；赛事 match 中止后保留 aborted 历史，原 pairing 原子复位 pending 供安全重派，无 winner 不得推进阶段。管理员赛事时间按状态收口：`draft` 可改开放/截止/开赛时间，`open` 只能改未来的截止/开赛时间，`published` 只能改开赛时间，其余状态只读；所有 PATCH 与旧值合并后整体验证，非法请求零部分写。`published` 改开赛时间时，只有尚未有任何 `match_id` 才可在同一事务中按发布时的轮次错峰规则重排当前阶段 pending pairing；显式 `starts_at:null` 同步清空逐场排期，一旦有对局绑定即拒绝整次修改。管理端排期表不为缺失字段生成当前时间等假默认值，空报名时间显式保存为 `NULL`；“按时间自动开赛”关闭时必须提交 `starts_at: null`，与未提交该字段（保留旧值）严格区分。删除用户/Bot/赛事前检查活跃对局与赛事引用，`published` 删除表示先取消尚未开打排期再删除，`running/rest`、`finished`、已有正式榜或仍有 active match 时拒绝删除。
 - 配置：`GET /api/admin/settings/runtime` 仅返回 `source=code, mutable=false` 的只读诊断；`PUT /api/admin/auto-match` 只改 `execution_control.auto_enabled`，从而控制 auto job 的生成与 claim eligibility，不能影响 manual/human/contest 或在途局；`POST /api/admin/execution-queue/resume` 触发实际 namespace 清场与恢复，不能凭标志跳过。两者均写审计，QA 开启 auto 返回 409；站点文案仍由 `PATCH /api/admin/settings/site` 管理。不存在 runtime PATCH。
 - 模板：只保留公开 `GET /api/contests/templates`，响应来自游戏注册表并标记 `source=code, mutable=false`；不存在 `/api/admin/templates*` CRUD/预览路由。
-- 邮件：`GET /api/admin/email/{templates,outbox}`、`PUT /templates/{key}`
+- 平台通信：`GET /api/admin/communications/{inbox,sent,drafts,failed}`、`GET /api/admin/communications/threads/{public_id}`、`POST .../reply`。失败投递读模型只返回 public ID、公开用户名和脱敏错误码，不返回收件地址或内部主键
+- 广播：`POST /api/admin/communications/broadcasts/preview`、`POST /create`、`POST /{public_id}/cancel`、`GET /{public_id}/deliveries`。preview 先去重解析 active users / role / game Bot owners / contest entrants / selected public usernames，并把用户快照、subject/body/channels 绑定到短期 token/hash；approve 重新执行 admin 权限校验，但不重算或暗改受众
+- Bug 处理：`GET /api/admin/bug-reports[/{public_id}]`、`PATCH /api/admin/bug-reports/{public_id}/status`；管理员回复使用同一 communication thread。状态机为 `new→acknowledged/needs_info/in_progress→resolved/duplicate/wont_fix`，终态不可回退
+- 邮件：`GET /api/admin/email/{templates,outbox}`；官方模板返回 `source=code, mutable=false, version`。旧 `PUT /templates/{key}` 为明确的兼容拒绝入口（409 + audit），不再改变运行时模板
 - 日志：`GET /api/admin/logs`
 - 认证辅助：`POST /api/auth/admin/create-reset-token`（生成密码重置 token）
 

@@ -18,6 +18,10 @@ from bzplat.backend.auth.captcha import CaptchaStore
 from bzplat.backend.auth.routes import router as auth_router
 from bzplat.backend.bots import BotManager
 from bzplat.backend.contests import ContestManager
+from bzplat.backend.communications.api import router as communications_router
+from bzplat.backend.communications.feedback import FeedbackService
+from bzplat.backend.communications.service import CommunicationService
+from bzplat.backend.communications.worker import DeliveryWorker
 from bzplat.backend.mail import Mailer
 from bzplat.backend.matches import MatchOrchestrator, MatchRunner
 from bzplat.backend.matches.execution_queue import ExecutionDispatcher
@@ -104,6 +108,7 @@ def create_app(
             else Path("avatars")
         )
     )
+    bug_attachments_dir = Path(db_path).expanduser().resolve().parent / "bug_attachments"
     if upload_root is None:
         # Explicit/temporary DBs must not silently share the caller's production
         # bot_uploads directory. For the normal CWD botzone.db this remains ./bot_uploads.
@@ -119,6 +124,11 @@ def create_app(
             source_root,
             purpose="BZ_QA_INSTANCE 头像目录",
         )
+        bug_attachments_dir = assert_qa_runtime_path_isolated(
+            bug_attachments_dir,
+            source_root,
+            purpose="BZ_QA_INSTANCE Bug 附件目录",
+        )
     prefer_local = os.environ.get("BZ_BOT_LOCAL", "").lower() in ("1", "true", "yes")
     if not prefer_local:
         # Reject remote/custom production configuration before Store can create
@@ -129,12 +139,12 @@ def create_app(
     effective_conc = _effective_max_concurrent(max_concurrent)
 
     mailer = Mailer()
+    communications = CommunicationService(store)
     if mailer.config.configured:
-        logger.info("SMTP configured host=%s user=%s", mailer.config.host, mailer.config.user)
-        auth = AuthManager(store, mailer=mailer)
+        logger.info("SMTP configured host=%s", mailer.config.host)
     else:
-        logger.warning("SMTP 未配置：注册/重置密码将无法发信（请设置 SMTP_*）")
-        auth = AuthManager(store, mailer=None)
+        logger.warning("SMTP 未配置：邮件会排队并按退避策略失败，不阻断业务请求")
+    auth = AuthManager(store, mailer=mailer, communications=communications)
     captcha = CaptchaStore()
     bot_manager = BotManager(store, upload_root=upload_root)
     execution_dispatcher: ExecutionDispatcher | None = None
@@ -201,9 +211,11 @@ def create_app(
 
     orch.on_match_done = _on_match_done
 
-    # 通知管理器（写站内通知 + 按用户 prefs 可选发邮件）
-    notifier = NotificationManager(store, mailer=mailer)
+    # 旧通知门面（写 communications 真相 + 兼容投影；邮件只排队）
+    notifier = NotificationManager(store, communications=communications)
     orch.notifier = notifier
+    feedback = FeedbackService(store, bug_attachments_dir)
+    delivery_worker = DeliveryWorker(communications.repository, mailer)
 
     if qa_instance:
         logger.info("隔离 QA 实例已由 capability guard 强制禁用 auto-match")
@@ -230,18 +242,28 @@ def create_app(
         sched_task = asyncio.create_task(contest_scheduler.loop(), name="contest-scheduler")
         _app.state.contest_scheduler = contest_scheduler
         _app.state._contest_sched_task = sched_task
+        delivery_task = asyncio.create_task(
+            delivery_worker.loop(), name="communications-delivery"
+        )
+        _app.state.delivery_worker = delivery_worker
+        _app.state._delivery_worker_task = delivery_task
         try:
             yield
         finally:
             await execution_dispatcher.stop()
             task.cancel()
             sched_task.cancel()
+            delivery_task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
             try:
                 await sched_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await delivery_task
             except asyncio.CancelledError:
                 pass
             # Match tasks can be inside asyncio subprocess pipe setup.  Drain
@@ -272,6 +294,9 @@ def create_app(
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer
+    app.state.communications = communications
+    app.state.feedback = feedback
+    app.state.delivery_worker = delivery_worker
     app.state.notifier = notifier
     app.state.execution_dispatcher = execution_dispatcher
     # Avatar writes and StaticFiles must share the exact preflight-validated path.
@@ -285,6 +310,7 @@ def create_app(
     app.add_middleware(AccessLogMiddleware)
     app.include_router(auth_router)
     app.include_router(api_router)
+    app.include_router(communications_router)
 
     @app.get("/api/health")
     def health():

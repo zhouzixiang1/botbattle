@@ -57,6 +57,25 @@ DISPATCHER_RUNNING = "running"
 DISPATCHER_PAUSED = "paused"
 DISPATCHER_STOPPING = "stopping"
 
+# ── 平台通信状态（communications/ 唯一持久化契约）────────────────────
+# 站内 conversation/message 是普通平台通信的真相；邮件只是异步 delivery。
+# 验证码/重置码属于 transactional delivery，出于安全原因不写普通消息正文。
+CONVERSATION_KINDS = frozenset({
+    "notification", "support", "bug_report", "broadcast", "auth", "system",
+})
+CONVERSATION_STATUSES = frozenset({"open", "closed", "archived"})
+DELIVERY_CHANNELS = frozenset({"in_app", "email"})
+DELIVERY_STATUSES = frozenset({
+    "queued", "sending", "sent", "failed", "cancelled",
+})
+BROADCAST_STATES = frozenset({
+    "draft", "scheduled", "running", "completed", "cancelled",
+})
+BUG_REPORT_STATUSES = frozenset({
+    "new", "acknowledged", "needs_info", "in_progress", "resolved",
+    "duplicate", "wont_fix",
+})
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -677,6 +696,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     body            TEXT    NOT NULL DEFAULT '',
     link            TEXT    NOT NULL DEFAULT '',   -- 前端路由（如 /match/:id）
     is_read         INTEGER NOT NULL DEFAULT 0,
+    communication_message_public_id TEXT,         -- 新通信真相的兼容投影；旧行保持 NULL
     created_at      TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, id DESC);
@@ -735,6 +755,221 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     error           TEXT    NOT NULL DEFAULT '',
     created_at      TEXT    NOT NULL
 );
+
+-- ── communications：平台/admin ↔ 单个用户；不开放任意用户私信 ──────────
+CREATE TABLE IF NOT EXISTS broadcasts (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id               TEXT    NOT NULL UNIQUE,
+    state                   TEXT    NOT NULL DEFAULT 'draft',
+    created_by_user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    audience_kind           TEXT    NOT NULL,
+    audience_filter_json    TEXT    NOT NULL DEFAULT '{}',
+    audience_snapshot_hash  TEXT    NOT NULL,
+    audience_count          INTEGER NOT NULL DEFAULT 0,
+    subject                 TEXT    NOT NULL,
+    body_text               TEXT    NOT NULL,
+    sanitized_html          TEXT    NOT NULL,
+    channels_json           TEXT    NOT NULL DEFAULT '["in_app"]',
+    approval_token_hash     TEXT    NOT NULL,
+    preview_expires_at      TEXT    NOT NULL,
+    scheduled_at            TEXT,
+    approved_at             TEXT,
+    started_at              TEXT,
+    completed_at            TEXT,
+    cancelled_at            TEXT,
+    created_at              TEXT    NOT NULL,
+    updated_at              TEXT    NOT NULL,
+    CONSTRAINT chk_broadcast_state CHECK (
+        state IN ('draft','scheduled','running','completed','cancelled')),
+    CONSTRAINT chk_broadcast_count CHECK (audience_count >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_broadcast_state_schedule
+    ON broadcasts(state, scheduled_at, id);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    kind                TEXT    NOT NULL,
+    subject             TEXT    NOT NULL DEFAULT '',
+    status              TEXT    NOT NULL DEFAULT 'open',
+    created_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_by_kind     TEXT    NOT NULL DEFAULT 'platform',
+    broadcast_id        INTEGER REFERENCES broadcasts(id) ON DELETE SET NULL,
+    created_at          TEXT    NOT NULL,
+    updated_at          TEXT    NOT NULL,
+    closed_at           TEXT,
+    CONSTRAINT chk_conversation_kind CHECK (
+        kind IN ('notification','support','bug_report','broadcast','auth','system')),
+    CONSTRAINT chk_conversation_status CHECK (
+        status IN ('open','closed','archived')),
+    CONSTRAINT chk_conversation_creator CHECK (
+        created_by_kind IN ('user','admin','platform'))
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated
+    ON conversations(updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_broadcast
+    ON conversations(broadcast_id);
+
+CREATE TABLE IF NOT EXISTS conversation_participants (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id               TEXT    NOT NULL UNIQUE,
+    conversation_id         INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    user_id                 INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    participant_kind        TEXT    NOT NULL,
+    last_read_message_id    INTEGER,
+    joined_at               TEXT    NOT NULL,
+    CONSTRAINT chk_participant_kind CHECK (
+        participant_kind IN ('user','admin','platform'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_participant_user
+    ON conversation_participants(conversation_id, user_id)
+    WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_participant_platform
+    ON conversation_participants(conversation_id, participant_kind)
+    WHERE user_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_conversation_participant_lookup
+    ON conversation_participants(user_id, conversation_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    conversation_id     INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    reply_to_id         INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    author_user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    author_kind         TEXT    NOT NULL,
+    body_text           TEXT    NOT NULL,
+    sanitized_html      TEXT    NOT NULL,
+    metadata_json       TEXT    NOT NULL DEFAULT '{}',
+    created_at          TEXT    NOT NULL,
+    CONSTRAINT chk_message_author CHECK (
+        author_kind IN ('user','admin','platform'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation
+    ON messages(conversation_id, id);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id               TEXT    NOT NULL UNIQUE,
+    message_id              INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+    broadcast_id            INTEGER REFERENCES broadcasts(id) ON DELETE SET NULL,
+    channel                 TEXT    NOT NULL,
+    recipient_user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    address_snapshot        TEXT    NOT NULL DEFAULT '',
+    status                  TEXT    NOT NULL DEFAULT 'queued',
+    priority                INTEGER NOT NULL DEFAULT 0,
+    attempt_count           INTEGER NOT NULL DEFAULT 0,
+    max_attempts            INTEGER NOT NULL DEFAULT 5,
+    next_attempt_at         TEXT    NOT NULL,
+    last_error              TEXT    NOT NULL DEFAULT '',
+    provider                TEXT    NOT NULL DEFAULT '',
+    provider_message_id     TEXT    NOT NULL DEFAULT '',
+    idempotency_key         TEXT    NOT NULL UNIQUE,
+    template_key            TEXT    NOT NULL DEFAULT '',
+    template_version        INTEGER NOT NULL DEFAULT 0,
+    payload_json            TEXT    NOT NULL DEFAULT '{}',
+    claimed_at              TEXT,
+    sent_at                 TEXT,
+    cancelled_at            TEXT,
+    created_at              TEXT    NOT NULL,
+    updated_at              TEXT    NOT NULL,
+    CONSTRAINT chk_delivery_channel CHECK (channel IN ('in_app','email')),
+    CONSTRAINT chk_delivery_status CHECK (
+        status IN ('queued','sending','sent','failed','cancelled')),
+    CONSTRAINT chk_delivery_attempts CHECK (
+        attempt_count >= 0 AND max_attempts > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_due
+    ON deliveries(status, next_attempt_at, priority DESC, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_recipient
+    ON deliveries(recipient_user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_deliveries_broadcast
+    ON deliveries(broadcast_id, status);
+
+CREATE TABLE IF NOT EXISTS broadcast_recipients (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    broadcast_id        INTEGER NOT NULL REFERENCES broadcasts(id) ON DELETE CASCADE,
+    user_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    state               TEXT    NOT NULL DEFAULT 'pending',
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    max_attempts        INTEGER NOT NULL DEFAULT 5,
+    next_attempt_at     TEXT    NOT NULL DEFAULT '',
+    last_error          TEXT    NOT NULL DEFAULT '',
+    conversation_id     INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    created_at          TEXT    NOT NULL,
+    processed_at        TEXT,
+    CONSTRAINT chk_broadcast_recipient_state CHECK (
+        state IN ('pending','processing','delivered','cancelled','failed')),
+    CONSTRAINT chk_broadcast_recipient_attempts CHECK (
+        attempt_count >= 0 AND max_attempts > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_broadcast_recipient_user
+    ON broadcast_recipients(broadcast_id, user_id)
+    WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_broadcast_recipient_work
+    ON broadcast_recipients(broadcast_id, state, id);
+
+-- 小白式 Bug 反馈复用 conversation；状态变化只追加 event，不改历史事件。
+CREATE TABLE IF NOT EXISTS bug_reports (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    conversation_id     INTEGER NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    reporter_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    tracking_token_hash TEXT    NOT NULL DEFAULT '',
+    category            TEXT    NOT NULL,
+    impact              TEXT    NOT NULL,
+    title               TEXT    NOT NULL,
+    current_route       TEXT    NOT NULL DEFAULT '',
+    status              TEXT    NOT NULL DEFAULT 'new',
+    duplicate_of_id     INTEGER REFERENCES bug_reports(id) ON DELETE SET NULL,
+    created_at          TEXT    NOT NULL,
+    updated_at          TEXT    NOT NULL,
+    CONSTRAINT chk_bug_status CHECK (
+        status IN ('new','acknowledged','needs_info','in_progress','resolved','duplicate','wont_fix'))
+);
+CREATE INDEX IF NOT EXISTS idx_bug_reports_status
+    ON bug_reports(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bug_reports_reporter
+    ON bug_reports(reporter_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS bug_report_events (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    bug_report_id       INTEGER NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+    event_type          TEXT    NOT NULL,
+    actor_user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    from_status         TEXT    NOT NULL DEFAULT '',
+    to_status           TEXT    NOT NULL DEFAULT '',
+    note                TEXT    NOT NULL DEFAULT '',
+    created_at          TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bug_report_events
+    ON bug_report_events(bug_report_id, id);
+
+CREATE TABLE IF NOT EXISTS diagnostic_bundles (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    bug_report_id       INTEGER NOT NULL UNIQUE REFERENCES bug_reports(id) ON DELETE CASCADE,
+    schema_version      INTEGER NOT NULL DEFAULT 1,
+    bundle_json         TEXT    NOT NULL,
+    created_at          TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bug_attachments (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    bug_report_id       INTEGER NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+    uploaded_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    original_name       TEXT    NOT NULL,
+    media_type          TEXT    NOT NULL,
+    size_bytes          INTEGER NOT NULL,
+    sha256              TEXT    NOT NULL,
+    storage_path        TEXT    NOT NULL UNIQUE,
+    created_at          TEXT    NOT NULL,
+    CONSTRAINT chk_bug_attachment_size CHECK (size_bytes > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_bug_attachments_report
+    ON bug_attachments(bug_report_id, id);
 
 CREATE TABLE IF NOT EXISTS contest_entries (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

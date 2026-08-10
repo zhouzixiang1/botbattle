@@ -1,30 +1,28 @@
-"""通知管理器：写站内通知 + 按用户偏好可选发邮件。
-
-邮件复用 Mailer（main.py 注入）；落库 email_outbox 记录由调用方/Mailer 负责。
-本模块只做「写 notifications 表 + 按 prefs 触发邮件」。
-"""
+"""Legacy notification facade backed by the communications truth model."""
 from __future__ import annotations
 
-import logging
 from typing import Any
 
+from bzplat.backend.communications.service import CommunicationService
 from bzplat.backend.store import Store
-
-logger = logging.getLogger(__name__)
-
-# 通知类型 → prefs 字段映射（决定是否发邮件）
-_TYPE_TO_PREF = {
-    "match_done": "email_match_done",
-    "followed": "email_followed",
-    "contest": "email_contest",
-    "comment": "email_comment",
-}
 
 
 class NotificationManager:
-    def __init__(self, store: Store, mailer: Any = None) -> None:
+    """Keep business call sites stable while routing every new write centrally.
+
+    ``mailer`` is accepted only for source compatibility and is never called.  SMTP is
+    exclusively owned by the lifespan delivery worker.
+    """
+
+    def __init__(
+        self,
+        store: Store,
+        mailer: Any = None,
+        *,
+        communications: CommunicationService | None = None,
+    ) -> None:
         self.store = store
-        self.mailer = mailer
+        self.communications = communications or CommunicationService(store)
 
     def notify(
         self,
@@ -36,32 +34,14 @@ class NotificationManager:
         link: str = "",
         send_email: bool = False,
     ) -> dict | None:
-        """写一条站内通知；send_email=True 时按用户 prefs 决定是否发邮件。
-
-        返回新建的 notification dict（用户不存在则 None）。
-        """
-        user = self.store.get_user(user_id)
-        if not user:
-            return None
-        notif = self.store.add_notification(
-            user_id, type=type, title=title, body=body, link=link
+        return self.communications.notify_user(
+            user_id,
+            type=type,
+            title=title,
+            body=body,
+            link=link,
+            send_email=send_email,
         )
-        if send_email and self.mailer is not None and self.mailer.config.configured:
-            pref_key = _TYPE_TO_PREF.get(type)
-            should_email = True
-            if pref_key:
-                prefs = self.store.get_notification_prefs(user_id)
-                should_email = bool(prefs.get(pref_key, 0))
-            if should_email:
-                try:
-                    self.mailer.send(
-                        user["email"],
-                        f"【通知】{title}" if title else "【通知】",
-                        body_text=body or title,
-                    )
-                except Exception as e:  # noqa: BLE001 - 邮件失败不阻断通知
-                    logger.warning("notify email failed user=%s type=%s: %s", user_id, type, e)
-        return notif
 
     def notify_both_owners(
         self,
@@ -75,14 +55,18 @@ class NotificationManager:
         send_email: bool = False,
         exclude_user_ids: set[int] | None = None,
     ) -> None:
-        """通知双方 Bot 的 owner（去重，可排除触发动作的用户）。"""
         owner_ids: set[int] = set()
-        for bid in (bot_a_id, bot_b_id):
-            b = self.store.get_bot(bid)
-            if b and b.get("owner_id"):
-                owner_ids.add(int(b["owner_id"]))
+        for bot_id in (bot_a_id, bot_b_id):
+            bot = self.store.get_bot(bot_id)
+            if bot and bot.get("owner_id"):
+                owner_ids.add(int(bot["owner_id"]))
         owner_ids.difference_update(exclude_user_ids or set())
-        for uid in owner_ids:
+        for user_id in owner_ids:
             self.notify(
-                uid, type=type, title=title, body=body, link=link, send_email=send_email
+                user_id,
+                type=type,
+                title=title,
+                body=body,
+                link=link,
+                send_email=send_email,
             )

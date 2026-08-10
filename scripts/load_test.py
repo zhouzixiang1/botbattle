@@ -1222,14 +1222,18 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     r = api.authed(tok, "PATCH", "/api/admin/settings/site", json={"announcement": "loadtest 公告"})
     check("PATCH /api/admin/settings/site", r.status_code == 200 and r.json()["site"]["announcement"] == "loadtest 公告", r.text[:80])
 
-    # GET/PUT /api/admin/email/templates/{key}
+    # 事务邮件模板由代码持有：GET 可审计，旧 PUT 显式拒绝。
     r = api.authed(tok, "GET", "/api/admin/email/templates/welcome")
     if r.status_code == 200:
         tpl = r.json().get("template", {})
         subj = tpl.get("subject", "欢迎")
         r = api.authed(tok, "PUT", "/api/admin/email/templates/welcome",
                        json={"subject": subj, "body_html": "<p>loadtest</p>", "body_text": "loadtest"})
-        check("PUT /api/admin/email/templates/welcome", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
+        check(
+            "PUT /api/admin/email/templates/welcome 代码模板拒绝写入",
+            tpl.get("mutable") is False and r.status_code == 409,
+            f"{r.status_code} {r.text[:60]}",
+        )
     else:
         warn(f"email template welcome 不可读 {r.status_code}（跳过 PUT）")
 

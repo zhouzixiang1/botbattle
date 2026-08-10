@@ -1518,6 +1518,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "contests" not in tables:
         return
 
+    # 旧 notifications 仅作为 communications 站内消息的兼容读投影。
+    # 既有行保持 NULL，不反向伪造成新会话；新写入在 communication 事务里带 public id。
+    if "notifications" in tables:
+        _add_col(conn, "notifications", "communication_message_public_id", "TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_communication_message "
+            "ON notifications(communication_message_public_id) "
+            "WHERE communication_message_public_id IS NOT NULL"
+        )
+    if "messages" in tables:
+        _add_col(conn, "messages", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+    if "broadcast_recipients" in tables:
+        _add_col(conn, "broadcast_recipients", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        _add_col(conn, "broadcast_recipients", "max_attempts", "INTEGER NOT NULL DEFAULT 5")
+        _add_col(conn, "broadcast_recipients", "next_attempt_at", "TEXT NOT NULL DEFAULT ''")
+        _add_col(conn, "broadcast_recipients", "last_error", "TEXT NOT NULL DEFAULT ''")
+        work_index = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='idx_broadcast_recipient_work'"
+        ).fetchone()
+        if work_index is None or "next_attempt_at" not in str(work_index[0] or ""):
+            conn.execute("DROP INDEX IF EXISTS idx_broadcast_recipient_work")
+            conn.execute(
+                "CREATE INDEX idx_broadcast_recipient_work ON broadcast_recipients("
+                "broadcast_id,state,next_attempt_at,id)"
+            )
+
     # ── 孤儿 FK 行清理（审计 P0：生产 9943 条孤儿源于连接期 FK=OFF，删 bot/user 未级联）──
     # 一次性清理存量孤儿。幂等：DELETE/UPDATE 0 行代价极低，每次迁移都跑。
     # 放在 _migrate 开头（新库早返之后）保证所有后续表重建 INSERT 只看到干净数据
@@ -6863,12 +6890,17 @@ class Store:
         title: str = "",
         body: str = "",
         link: str = "",
+        communication_message_public_id: str | None = None,
     ) -> dict:
         with self._tx() as c:
             cur = c.execute(
                 "INSERT INTO notifications(user_id, type, title, body, link, "
-                "is_read, created_at) VALUES(?,?,?,?,?,?,?)",
-                (user_id, type, title, body, link, 0, _now()),
+                "is_read, communication_message_public_id, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    user_id, type, title, body, link, 0,
+                    communication_message_public_id, _now(),
+                ),
             )
             nid = cur.lastrowid
             return _row(
@@ -6910,10 +6942,28 @@ class Store:
 
     def mark_notification_read(self, notif_id: int, user_id: int) -> bool:
         with self._tx() as c:
+            projection = c.execute(
+                "SELECT communication_message_public_id FROM notifications "
+                "WHERE id=? AND user_id=?",
+                (notif_id, user_id),
+            ).fetchone()
             cur = c.execute(
                 "UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?",
                 (notif_id, user_id),
             )
+            if projection and projection["communication_message_public_id"]:
+                message = c.execute(
+                    "SELECT id,conversation_id FROM messages WHERE public_id=?",
+                    (projection["communication_message_public_id"],),
+                ).fetchone()
+                if message:
+                    c.execute(
+                        "UPDATE conversation_participants SET last_read_message_id="
+                        "CASE WHEN COALESCE(last_read_message_id,0)<? THEN ? "
+                        "ELSE last_read_message_id END "
+                        "WHERE conversation_id=? AND user_id=?",
+                        (message["id"], message["id"], message["conversation_id"], user_id),
+                    )
             return cur.rowcount > 0
 
     def mark_all_notifications_read(self, user_id: int) -> int:
@@ -6921,6 +6971,17 @@ class Store:
             cur = c.execute(
                 "UPDATE notifications SET is_read=1 WHERE user_id=? AND is_read=0",
                 (user_id,),
+            )
+            c.execute(
+                "UPDATE conversation_participants AS cp SET last_read_message_id=MAX("
+                "COALESCE(last_read_message_id,0),COALESCE((SELECT MAX(m.id) "
+                "FROM messages m JOIN notifications n "
+                "ON n.communication_message_public_id=m.public_id "
+                "WHERE n.user_id=? AND m.conversation_id=cp.conversation_id),0)) "
+                "WHERE cp.user_id=? AND EXISTS(SELECT 1 FROM messages m "
+                "JOIN notifications n ON n.communication_message_public_id=m.public_id "
+                "WHERE n.user_id=? AND m.conversation_id=cp.conversation_id)",
+                (user_id, user_id, user_id),
             )
             return cur.rowcount
 

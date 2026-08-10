@@ -63,13 +63,16 @@ class Mailer:
         *,
         body_text: str = "",
         body_html: str = "",
-    ) -> None:
+        message_id: str = "",
+    ) -> str:
         if not self.config.configured:
             raise RuntimeError("SMTP 未配置（检查 SMTP_USER/SMTP_PASSWORD）")
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = formataddr((self.config.from_name, self.config.from_addr))
         msg["To"] = to_addr
+        if message_id:
+            msg["Message-ID"] = message_id
         if body_text:
             msg.attach(MIMEText(body_text, "plain", "utf-8"))
         if body_html:
@@ -80,55 +83,15 @@ class Mailer:
         ) as server:
             server.login(self.config.user, self.config.password)
             server.sendmail(self.config.from_addr, [to_addr], msg.as_string())
-        logger.info("mail sent to=%s subject=%s", to_addr, subject)
+        logger.info("mail sent message_id=%s", message_id or "provider-generated")
+        return message_id
 
 
 def default_email_templates() -> list[tuple[str, str, str, str]]:
     """返回默认邮件模板 (key, subject, body_html, body_text)。"""
-    return [
-        (
-            TPL_VERIFY_EMAIL,
-            "【Botbattle】邮箱验证码",
-            "<p>{{username}}，你好：</p>"
-            "<p>你正在验证 Botbattle 账号邮箱，验证码为 "
-            "<strong>{{code}}</strong>。验证码在 {{expires_minutes}} 分钟内有效。</p>"
-            "<p>如非本人操作，请忽略本邮件，且不要向任何人透露验证码。</p>"
-            "<p>Botbattle 多游戏 Bot 竞赛平台</p>",
-            "{{username}}，你好：\n"
-            "你正在验证 Botbattle 账号邮箱，验证码为 {{code}}。"
-            "验证码在 {{expires_minutes}} 分钟内有效。\n"
-            "如非本人操作，请忽略本邮件，且不要向任何人透露验证码。\n"
-            "Botbattle 多游戏 Bot 竞赛平台",
-        ),
-        (
-            TPL_RESET_PASSWORD,
-            "【Botbattle】密码重置验证码",
-            "<p>{{username}}，你好：</p>"
-            "<p>你正在申请重置 Botbattle 账号密码，验证码为 "
-            "<strong>{{code}}</strong>。验证码在 {{expires_minutes}} 分钟内有效。</p>"
-            "<p>如非本人操作，请忽略本邮件并及时检查账号安全。</p>"
-            "<p>Botbattle 多游戏 Bot 竞赛平台</p>",
-            "{{username}}，你好：\n"
-            "你正在申请重置 Botbattle 账号密码，验证码为 {{code}}。"
-            "验证码在 {{expires_minutes}} 分钟内有效。\n"
-            "如非本人操作，请忽略本邮件并及时检查账号安全。\n"
-            "Botbattle 多游戏 Bot 竞赛平台",
-        ),
-        (
-            TPL_WELCOME,
-            "【Botbattle】欢迎加入多游戏 Bot 竞赛平台",
-            "<p>{{username}}，你好：</p>"
-            "<p>欢迎加入 Botbattle 多游戏 Bot 竞赛平台。你的邮箱已验证完成。</p>"
-            "<p>平台支持德州扑克、五子棋和点格棋；你可以上传 Bot、发起挑战、"
-            "参加锦标赛并查看对局回放。</p>"
-            "<p>开始前请在 Wiki 查看对应游戏规则与唯一现行通信协议。</p>",
-            "{{username}}，你好：\n"
-            "欢迎加入 Botbattle 多游戏 Bot 竞赛平台。你的邮箱已验证完成。\n"
-            "平台支持德州扑克、五子棋和点格棋；你可以上传 Bot、发起挑战、"
-            "参加锦标赛并查看对局回放。\n"
-            "开始前请在 Wiki 查看对应游戏规则与唯一现行通信协议。",
-        ),
-    ]
+    from bzplat.backend.communications.templates import legacy_seed_rows
+
+    return legacy_seed_rows()
 
 
 def seed_email_templates(conn, now: str) -> None:

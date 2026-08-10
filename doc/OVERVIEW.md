@@ -28,10 +28,10 @@
 | **Glicko-2 数值排行榜** | 按游戏分别排名；展示 1-based 名次/百分位、Rating、RD、95% 置信区间、不同对手数、变化量、最近对局与无名次计分样本 |
 | **赛事系统** | 6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰）+ 10 个内置模板（含预赛/决赛），完整生命周期（草稿→报名→发布当前阶段排期→进行→休息→结束），积分榜 + 对阵图 + 正式名次；可部署六个明确标注、不可写的客户演示快照，回放仍由真实裁判链生成 |
 | **社交与互动** | 关注用户、收藏 Bot、对局/Bot 评论、点赞、浏览计数、点赞榜 |
-| **通知系统** | 站内通知 + 可选邮件提醒（对局完成/被关注/赛事/评论） |
+| **平台通信** | conversation/message 作为站内真相，邮件为异步 delivery；旧通知 API 兼容投影、用户/admin 线程、固定快照广播、Bug 反馈与诊断附件 |
 | **用户体系** | 注册/登录/邮箱验证、个人主页、资料编辑、头像、经验与等级 |
 | **全局搜索** | Cmd+K 命令面板，聚合搜索 Bot / 用户 / 对局 |
-| **管理后台** | 7 个 Tab：仪表盘、用户/Bot/对局/赛事管理、日志、邮件；运行参数与赛制模板均由代码唯一配置，不提供网页编辑器 |
+| **管理后台** | 统一信息架构覆盖仪表盘、用户/Bot/对局/赛事、日志、邮箱/广播与 Bug 处理；运行参数、赛制模板和事务邮件模板均由代码唯一配置，不提供网页编辑器 |
 | **持续公平自动排位** | 仅作为全局执行队列的 `source=auto` producer；游戏/bootstrap/established 通道、所有者与 Bot 轮转，平衡配对与先后手并公开正在/即将请求；唯一开关不影响人工、人机和赛事 |
 | **站点可配置** | 站名 / Logo / 公告 / 关于（admin 可配） |
 
@@ -43,7 +43,7 @@
 | **CLI** | typer | 入口 `botzone`（serve / create-admin） |
 | **评分** | Glicko-2（自实现，无外部依赖） | — |
 | **沙箱** | Docker（Linux x86_64 ELF: debian:bookworm-slim） | 必须，`BZ_BOT_LOCAL=1` 可在兼容 Linux 主机退回本机（仅测试） |
-| **邮件** | SMTP（注册验证 / 密码重置 / 通知） | python 标准库 smtplib |
+| **邮件** | lifespan delivery worker 异步 SMTP（注册验证 / 密码重置高优先级，普通通知/广播可选） | python 标准库 smtplib；有界指数退避、确定性 Message-ID |
 | **前端** | React + Vite + Tailwind CSS v4 + shadcn/ui | React 19 / Vite 8 / Tailwind v4（CSS-first） |
 | **UI 组件** | shadcn/ui（new-york）+ Radix UI + lucide-react + recharts | 26 个共享原语 |
 | **暗色模式** | next-themes（class 策略）+ OKLCH 双主题 token | 浅色默认 + 暗色对等 |
@@ -64,7 +64,8 @@ botbattle/
 │   │   ├── runtime/           # Linux ELF 沙箱 + 本地 Docker namespace supervisor + config/limits
 │   │   ├── matches/           # execution_queue dispatcher + orchestrator + runner
 │   │   ├── contests/          # 赛制 templates/stages/manager/ranking（模板由 games 聚合）
-│   │   ├── notifications/     # 站内通知 + 邮件偏好
+│   │   ├── communications/    # 会话/消息/delivery、广播、Bug 反馈、诊断与 worker
+│   │   ├── notifications/     # 旧业务 facade + 通知偏好（写入委托 communications）
 │   │   ├── bots/ rating/ mail/
 │   │   ├── security.py / logging_config.py / crypto.py / cli.py
 │   │   └── tests/             # 后端 pytest（含架构契约、并发与恢复守护）

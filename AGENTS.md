@@ -109,7 +109,10 @@ matches/    编排：execution_queue(全来源持久 job/attempt、双资源 cla
             评分副作用：_apply_ratings 通过 match_rating_settlements 对每场 match 恰好一次结算，
             在同一事务更新双方 ratings + rating_history（评分趋势）+ pair_stats；启动时补算 completed 未结算场次
             通知副作用：对局完成（非 contest）经 orch.notifier.notify_both_owners 通知双方 owner
-notifications/ 通知管理器：NotificationManager（写站内通知 + 按 prefs 复用 Mailer 发邮件）；表 notifications/notification_prefs
+communications/ 平台通信真相：conversation/participant/message + delivery 异步投影；用户/admin 收发箱、固定快照广播、
+            Bug 反馈/诊断白名单/图片附件；DeliveryWorker 在 main lifespan 批量展开广播并异步 SMTP 重试
+notifications/ 旧业务门面：NotificationManager 全部委托 communications；notifications 表仅作旧 API 兼容投影，
+            notification_prefs 继续决定普通通知是否排队邮件，业务请求不得直接 SMTP
             经验/等级：award_xp 在对局完成/赛事报名/评论/被关注时触发（users.xp/level/last_active_at）
 games/      游戏注册表（赛制/编排契约解耦的单一入口）：base.py(GameSpec 接口 + GameRegistry 单例
             + MatchResult/RoundResult 平台契约基类，仅类型提示/测试用) + __init__.py(注册表

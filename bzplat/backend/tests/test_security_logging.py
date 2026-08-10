@@ -280,7 +280,7 @@ def test_admin_logs_rejects_unknown_file(admin_client):
 
 
 def test_captcha_not_logged_in_plaintext(tmp_path, caplog):
-    """SMTP 未配置时，验证码日志应脱敏（不含完整 code）。"""
+    """排队路径不记录验证码明文（SMTP 未配置也不在请求线程报错）。"""
     from bzplat.backend.auth.auth_manager import AuthManager
     from bzplat.backend.store import Store
 
@@ -290,8 +290,7 @@ def test_captcha_not_logged_in_plaintext(tmp_path, caplog):
     # mailer=None 模拟 SMTP 未配置
     am = AuthManager(store, mailer=None)
     with caplog.at_level(logging.WARNING):
-        with pytest.raises(Exception):
-            am.send_verify_code(store.get_user(user["id"]))
+        am.send_verify_code(store.get_user(user["id"]))
     # 收集所有日志消息，不应含完整 6 位验证码
     full_text = " ".join(r.getMessage() for r in caplog.records)
     # 脱敏后只出现 code=XX*** 形式，不应出现连续 6 位数字的明文 code
@@ -301,3 +300,5 @@ def test_captcha_not_logged_in_plaintext(tmp_path, caplog):
     if m:
         val = m.group(1)
         assert not re.fullmatch(r"\d{6}", val), f"验证码明文泄漏到日志: code={val}"
+    code = store.get_latest_email_code(user["id"], "verify")["code"]
+    assert code not in full_text

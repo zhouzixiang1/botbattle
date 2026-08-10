@@ -1,7 +1,6 @@
 """认证管理器：注册 / 登录 / 邮箱验证 / 重置密码。"""
 from __future__ import annotations
 
-import logging
 import re
 import secrets
 from datetime import datetime, timedelta
@@ -12,7 +11,8 @@ from bzplat.backend.crypto import (
     session_expires,
     verify_password,
 )
-from bzplat.backend.mail import Mailer, render_template
+from bzplat.backend.communications.service import CommunicationService
+from bzplat.backend.mail import Mailer
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     CODE_RESET,
@@ -20,12 +20,7 @@ from bzplat.backend.store.schema import (
     ROLE_ADMIN,
     ROLE_ORGANIZER,
     ROLE_USER,
-    TPL_RESET_PASSWORD,
-    TPL_VERIFY_EMAIL,
-    TPL_WELCOME,
 )
-
-logger = logging.getLogger(__name__)
 
 SESSION_TTL_SEC = 7 * 24 * 3600
 PASSWORD_RESET_TTL_SEC = 24 * 3600
@@ -72,12 +67,21 @@ def validate_phone(phone: str) -> None:
 class AuthManager:
     """注册 / 登录 / 邮箱验证 / 重置密码。
 
-    ``mailer`` 可为 ``None``（测试跳过 SMTP）或自定义 mock。
+    ``mailer`` 仅保留验证码 TTL 配置兼容；本类绝不调用 SMTP。
     """
 
-    def __init__(self, store: Store, mailer: Mailer | None = None) -> None:
+    def __init__(
+        self,
+        store: Store,
+        mailer: Mailer | None = None,
+        *,
+        communications: CommunicationService | None = None,
+    ) -> None:
         self.store = store
+        # ``mailer`` only supplies the TTL compatibility setting.  It is never called;
+        # all SMTP is owned by the lifespan DeliveryWorker.
         self.mailer = mailer
+        self.communications = communications or CommunicationService(store)
 
     def _code_ttl_minutes(self) -> int:
         if self.mailer is not None and getattr(self.mailer, "config", None):
@@ -189,7 +193,7 @@ class AuthManager:
         self.request_email_code(user, CODE_VERIFY)
 
     def request_email_code(self, user: dict, purpose: str) -> None:
-        """生成并邮件发送验证码。purpose: verify|reset。"""
+        """生成验证码并排入高优先级事务邮件；请求线程绝不连接 SMTP。"""
         if purpose not in (CODE_VERIFY, CODE_RESET):
             raise AuthError("invalid_purpose", "无效的验证码用途")
         code = self._gen_code()
@@ -197,56 +201,12 @@ class AuthManager:
         expires = (datetime.now() + timedelta(minutes=ttl_min)).isoformat(
             timespec="seconds"
         )
-        self.store.add_email_code(user["id"], purpose, code, expires)
-        tpl_key = (
-            TPL_VERIFY_EMAIL if purpose == CODE_VERIFY else TPL_RESET_PASSWORD
+        self.communications.queue_email_code(
+            user,
+            purpose=purpose,
+            code=code,
+            expires_at=expires,
         )
-        tpl = self.store.get_template(tpl_key)
-        if not tpl:
-            raise AuthError("no_template", f"缺少邮件模板 {tpl_key}")
-        ctx = {
-            "username": user.get("display_name") or user.get("username") or "",
-            "code": code,
-            "expires_minutes": ttl_min,
-        }
-        subject = render_template(tpl["subject"], ctx)
-        html = render_template(tpl["body_html"], ctx)
-        text = render_template(tpl["body_text"], ctx)
-        if self.mailer is None:
-            # 验证码脱敏：只记前 2 位 + ***（避免明文泄漏到日志；完整验证码存 DB outbox 可查）
-            masked = code[:2] + "***" if code else "***"
-            logger.warning(
-                "SMTP 未配置，验证码未发信 purpose=%s user=%s email=%s code=%s",
-                purpose,
-                user.get("username"),
-                user.get("email"),
-                masked,
-            )
-            self.store.add_outbox(
-                user["email"], subject, template_key=tpl_key, status="skipped",
-                error="SMTP 未配置",
-            )
-            # 未配置邮件时明确失败，避免前端提示「已发送」却收不到
-            raise AuthError(
-                "mail_not_configured",
-                "邮件服务未配置，无法发送验证码。请管理员配置 SMTP_* 环境变量后重试。",
-            )
-        try:
-            self.mailer.send(
-                user["email"], subject, body_text=text, body_html=html
-            )
-            self.store.add_outbox(
-                user["email"], subject, template_key=tpl_key, status="sent"
-            )
-        except Exception as exc:
-            self.store.add_outbox(
-                user["email"],
-                subject,
-                template_key=tpl_key,
-                status="failed",
-                error=str(exc)[:500],
-            )
-            raise AuthError("mail_failed", f"邮件发送失败: {exc}") from exc
 
     send_email_code = request_email_code
 
@@ -267,27 +227,8 @@ class AuthManager:
             raise AuthError("invalid_code", "验证码无效") from exc
         self.store.mark_email_code_used(row["id"])
         self.store.update_user(user["id"], email_verified=1)
-        if self.mailer is not None:
-            try:
-                tpl = self.store.get_template(TPL_WELCOME)
-                if tpl:
-                    ctx = {
-                        "username": user.get("display_name") or user["username"],
-                        "code": "",
-                        "expires_minutes": 0,
-                    }
-                    subject = render_template(tpl["subject"], ctx)
-                    self.mailer.send(
-                        user["email"],
-                        subject,
-                        body_text=render_template(tpl["body_text"], ctx),
-                        body_html=render_template(tpl["body_html"], ctx),
-                    )
-                    self.store.add_outbox(
-                        user["email"], subject, template_key=TPL_WELCOME
-                    )
-            except Exception:
-                logger.debug("welcome mail skipped", exc_info=True)
+        # Welcome is also queued; verification success is never rolled back by SMTP.
+        self.communications.queue_welcome(user)
         return _safe_user(self.store.get_user(user["id"]))
 
     verify_email_code = verify_email

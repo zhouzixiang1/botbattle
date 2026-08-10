@@ -13,6 +13,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 2. 实时观赛、完整回放、Glicko-2 排行榜。
 3. 组织者赛事（多赛制）、人类亲自上场、社交互动。
 4. 三款游戏（德州扑克/五子棋/点格棋），且赛制/编排主流程通过统一契约接入游戏，不新增游戏名分支。
+5. 可追踪的平台↔用户站内通信、可恢复邮件投递、安全广播与小白式 Bug 反馈。
 
 ## 2. 用户角色
 
@@ -20,7 +21,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 |------|------|---------|
 | **玩家** | `user` | 上传 Bot、发起挑战、观赛、查看排行与战绩、社交互动 |
 | **组织者** | `organizer` | 创建与管理赛事（赛制模板、报名、推进阶段） |
-| **管理员** | `admin` | 全局管理（用户/Bot/对局/赛事/日志/邮件）；运行参数与赛制模板由代码持有，不提供管理写入口 |
+| **管理员** | `admin` | 全局管理（用户/Bot/对局/赛事/日志/通信/广播/Bug）；运行参数、赛制模板与官方事务邮件模板由代码持有，不提供管理写入口 |
 | **访客** | 未登录 | 浏览排行榜、对局回放、Bot/用户主页、Wiki |
 
 ## 3. 功能需求
@@ -29,8 +30,8 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 需求 | 验收标准 |
 |------|---------|
 | 注册 / 登录 / 登出 | 用户名 `^[a-zA-Z][a-zA-Z0-9_]{2,31}$`，密码 ≥8，session 7 天，图形验证码防爆破 |
-| 邮箱验证 | 注册后发验证码（TTL 30 分钟），验证后方可登录 |
-| 密码重置 | 邮件重置链接，防枚举（不存在也返回成功语义） |
+| 邮箱验证 | 注册后创建 TTL 30 分钟验证码与高优先级邮件 delivery，API 返回 `queued`；SMTP 不参与注册事务，失败不回滚用户/验证码，验证后方可登录 |
+| 密码重置 | 邮件重置验证码，防枚举（不存在也返回成功语义）；发信异步排队，不因 SMTP 失败回滚业务 |
 | 个人资料 | 改显示名 / 简介 / 头像（png/jpeg/webp/gif ≤2MB，存本地 `avatars/`）/ 改密码 |
 
 ### 3.2 Bot 管理
@@ -75,8 +76,20 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 |------|---------|
 | 关注 / 收藏 | 关注用户、收藏 Bot，触发通知（被关注） |
 | 评论 / 点赞 | 对局与 Bot 可评论（删自己的/admin 可删任何）、点赞、浏览计数、点赞榜 |
-| 通知 | 站内通知（对局完成/被关注/赛事/评论）+ 可选邮件（按偏好开关）+ 铃铛未读提醒 |
+| 平台通信 | conversation/message 是站内真相，支持收件箱/已发/线程/已读/回复；用户只能访问自己的 participant thread，首期只开放平台/admin↔user，不开放任意私信 |
+| 通知兼容 | 对局完成/被关注/赛事/评论的新写入经 communications 生成站内消息，再原子生成旧 `notifications` 读投影；旧行不回填成新会话 |
+| 邮件投递 | 邮件仅是 delivery；业务请求不直连 SMTP，单进程 worker 可停止/恢复、优先验证/重置、指数退避并限定尝试。唯一 key+确定性 Message-ID 支持去重，语义明确为有界 at-least-once |
+| 管理员广播 | 受众可选 active users / role / game Bot owners / contest entrants / selected public users；预览返回去重 dry-run count 与短期批准 token，token 绑定受众快照 hash+subject/body/channel；二次批准、固定批次、取消、重试与投递统计均可审计 |
 | 全局搜索 | Cmd+K 命令面板，聚合搜 Bot/用户/对局 |
+
+### 3.6.1 Bug 反馈
+
+| 需求 | 验收标准 |
+|------|---------|
+| 小白式表单 | category/impact/title/body/current route 字段明确；访客经 captcha+独立限流可提交，登录用户可列出/读取自己的反馈 |
+| 通信复用 | 每个 bug_report 绑定同一 conversation，管理员与报告者在同一 thread 追问/回复；状态为 new/acknowledged/needs_info/in_progress/resolved/duplicate/wont_fix，状态变化与回复事件追加保存 |
+| 诊断隐私 | 只保存 build/route/服务端 role/粗粒度 browser+OS/viewport/locale/timezone、失败 API 模板/status/trace ID 与公开 match/contest/queue 摘要；拒绝 raw UA、cookie/token/email/实名/路径/raw stderr/private debug/底牌 |
+| 可选附件 | 不接受 JSON base64；独立 multipart 仅允许图片，同时校验 magic+MIME+尺寸/像素/帧数，单个 ≤5 MiB、每报告 ≤5，SHA-256 与隔离路径元数据入库，路径不对外 |
 
 ### 3.7 经验与等级
 | 需求 | 验收标准 |
@@ -88,7 +101,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 ### 3.8 管理后台
 | 需求 | 验收标准 |
 |------|---------|
-| 7 Tab 后台 | 仪表盘、用户/Bot/对局/赛事管理、日志、邮件模板与发件箱；不展示运行时/赛制模板编辑器 |
+| 统一后台 | 仪表盘、用户/Bot/对局/赛事管理、日志、邮箱/广播与 Bug 处理使用一致信息架构；广播预览后持令牌二次批准，不展示运行时/赛制/事务邮件模板编辑器 |
 | 代码唯一配置 | 双资源容量/aging/用户上限/超时/自动公平策略/scheduler/循环赛护栏与内置赛制模板只随代码评审发布；旧数据库值和前端请求不能覆盖；唯一可变自动开关为 `execution_control.auto_enabled` |
 | 安全中止与删除 | 活跃对局只允许经 orchestrator 取消并收敛为 `aborted`，不得手工伪造 running/completed；用户/Bot/赛事存在活跃引用时拒绝硬删 |
 
@@ -110,6 +123,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | **安全** | 认证 | 密码 hash 存储，session token，cookie `bz_session`，验证码防爆破 |
 | **可靠** | 数据持久 | SQLite 单文件，自带 `_migrate` 自愈（补列/重建表），向后兼容旧库 |
 | **可靠** | 本地 supervisor | 同 DB 由邻接 flock 保证单 dispatcher；Docker 固定 canonical 本机 socket，以稳定 `BZ_INSTANCE_KEY` 和 job/attempt/slot label 精确清理；旧 active 状态与控制结果不确定均 fail closed |
+| **可靠** | 通信副作用可恢复 | 站内消息先持久化，邮件后投递；worker 启动恢复中断 claim，广播受众固定，不让 SMTP 阻塞/回滚 API 事务 |
 | **可靠** | 隔离 QA | `BZ_QA_INSTANCE=1` 时拒绝 50380、主库同路径/同 inode 与主 checkout 运行时写目标；Vite 同样拒绝代理到 50380 |
 | **可靠** | 日志可查 | 统一日志 `logs/app.log`（5MB×5 轮转），Bot stderr 尾部 4KB 捕获，admin 网页查看 |
 | **可维护** | 新增游戏低成本 | 实现 `games/<game>/`（engine/protocol/result/templates/spec）+ 常量/注册 + 前端 GameViewSpec；同构对局表由迁移模板创建，赛制/编排主流程禁止增加 `if game_id` 分支 |
@@ -129,7 +143,8 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 评分排行 | `rating/glicko2` + `store/db.py` 数值投影 | test_numeric_ranking、test_leaderboard_density、test_rating_rebuild | wiki/GUIDE |
 | 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/GUIDE、CONTEST_BRACKET |
 | 社交 | api_routes + store | test_social、test_comments_likes | wiki/GUIDE |
-| 通知 | `notifications/` | test_notifications | wiki/GUIDE |
+| 通信/通知 | `communications/` + `notifications/` 兼容门面 | test_communications_feedback、test_notifications、test_auth | wiki/GUIDE、doc/DESIGN/SECURITY |
+| Bug 反馈 | `communications/feedback.py` + `communications/api.py` | test_communications_feedback | wiki/GUIDE、doc/SECURITY |
 | 经验等级 | store + api_routes | test_xp_level | wiki/GUIDE |
 | 沙箱运行时 | `runtime/` | test_runtime、test_runtime_settings | doc/RUNTIME |
 | 各游戏引擎 | `games/<game>/`（自包含子包，真实现全在 games/） | test_engine、test_board_engines、test_result_contract、test_game_registry、test_import_cycles | wiki/PROTOCOL、GOMOKU、PENCIL、TEXAS、doc/JUDGE_CODE |

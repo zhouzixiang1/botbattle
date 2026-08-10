@@ -25,7 +25,7 @@ ip=<真实IP> method=<METHOD> path=<路径> status=<状态码> dt=<耗时ms>
 ip=<真实IP> action=<动作> result=<ok|fail> user=<操作者> target=<目标> detail="<细节>"
 ```
 - `result=fail` 记为 **WARNING** 级别（安全事件优先关注）。
-- 埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、私有 Bot debug 读取、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间字段修改、改角色、建重置令牌。debug 读取只记 actor、match、成功/拒绝和成功条数，绝不写入内容；拒绝统一记 `result=fail`。
+- 埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、私有 Bot debug 读取、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间字段修改、广播预览/批准/取消、管理员通信回复、Bug 创建/附件/状态修改、代码模板写拒绝、runtime 配置修改、改角色、建重置令牌。debug 读取只记 actor、match、成功/拒绝和成功条数，绝不写入内容；广播审计只记受众类型/数量与 public ID，不记正文、批准令牌或地址；投递错误只记稳定脱敏码，拒绝统一记 `result=fail`。
 
 ## 私有 Bot debug 边界
 
@@ -41,7 +41,6 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 接口返回 `private, no-store`，拒绝不暴露记录存在性。内容不进入
 `responses[]`、Bot 请求、result、REST replay、SSE/WS、通知或任何日志；前端只用文本节点/
 安全 JSON 渲染，不解释 HTML、Markdown 或链接。
-
 ## IP 透传链路（公网必需）
 
 ```
@@ -73,6 +72,7 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 | `/api/auth/captcha` | 60 次/60s |
 | `POST /api/bots`、`POST /api/bots/{id}/versions` | 6 次/60s |
 | `/api/matches/challenge` | 8 次/60s |
+| `POST /api/feedback/bugs`、`POST /api/feedback/bugs/{id}/attachments` | 5 次/60s（独立反馈桶） |
 | 其它 `/api/*` | 120 次/60s |
 | 静态资源、`/api/health`、`/` | 不限 |
 
@@ -84,9 +84,17 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 
 `SecurityHeadersMiddleware`（`security.py`）：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy`、`Permissions-Policy`。HSTS 仅 `BZ_HSTS=1` 时加。
 
-## 验证码脱敏
+## 验证码与投递脱敏
 
-SMTP 未配置时，验证码日志脱敏（`code` 只记前 2 位 + `***`，完整验证码存 DB outbox 表可查），避免明文泄漏。
+验证/重置码仅保存在有 TTL 的 `email_codes` 行。高优先级 delivery 仅保存模板 key/version、purpose 与 code-row 引用，不保存码、邮件正文或 HTML；也不创建 conversation/message，因而普通收件箱和 Admin thread API 无法读到码。worker 只在 SMTP 调用前从未过期、未使用且仍为最新的 code row 渲染内存正文；失效后直接取消。日志、audit、`last_error` 和旧 outbox 兼容投影均不记明文码、收件地址或供应商异常文本。
+
+所有 SMTP 只能由 lifespan `DeliveryWorker` 调用，API/业务事务不建 SMTP 连接。每条邮件使用唯一 idempotency key 派生确定性 `Message-ID`，并有指数退避与最大尝试次数。由于 SMTP 接收后到 DB 提交前仍有崩溃窗口，这是有界 at-least-once，不是 exactly-once。
+
+## Bug 诊断与附件隐私边界
+
+诊断包不接受原始 User-Agent，浏览器/操作系统只允许粗粒度枚举。服务端白名单仅包含 build、去 query/fragment 的站内 route、服务端角色、viewport、locale/timezone、失败 API 模板/status/trace ID，以及公开 match/contest/queue 摘要。明确不读取或保存 cookie、session/token、email、实名、二进制路径、raw stderr、private debug、回放全文或底牌。
+
+附件不属于 Bug JSON，只接受独立 multipart 上传的 PNG/JPEG/WebP/GIF。服务端同时核验声明 MIME、图片 magic/可解码性、像素/帧数、单文件 5 MiB 与每报告 5 个上限，再计算 SHA-256。文件以 `0700` 专属目录/`0600` 随机名保存在 DB 同级 `bug_attachments/` 隔离树；对外 API 只返回元数据，不返回内部路径。访客附件需创建时一次性返回的随机追踪令牌，库内只存其 SHA-256。
 
 ## 管理员日志查看
 
