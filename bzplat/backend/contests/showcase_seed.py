@@ -79,21 +79,24 @@ TITLE = {
     "contest_lifecycle_rest": "【合成演示】05 小组赛结束·晋级确认",
     "contest_lifecycle_finished": "【合成演示】06 完整赛事·正式名次",
 }
-SHOWCASE_PROFILE_SPECS: dict[str, dict[str, str]] = {
+SHOWCASE_PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "tactical": {
         "label": "战术型",
         "filename": "gomoku_showcase_tactical_linux_amd64",
         "checksum": "ade0b2135d997925a66eead6312a9445f5fa22bc154770a2a5f62f250f284963",
+        "size": 785616,
     },
     "steady": {
         "label": "稳健型",
         "filename": "gomoku_showcase_steady_linux_amd64",
         "checksum": "39c3b1ecc86c77f6f600d5a6a9862e47e003ceb12efc997560b97b97258d0106",
+        "size": 785616,
     },
     "foundation": {
         "label": "基础型",
         "filename": "gomoku_showcase_foundation_linux_amd64",
         "checksum": "7ea63c34bdd092a0bed86a4165829b18a3a0b7d6d846cffef2f216d6214c3f5f",
+        "size": 785616,
     },
 }
 SHOWCASE_PLAYER_PROFILES = (
@@ -121,7 +124,7 @@ def _log_emit(message: str) -> None:
     logger.info("%s", message)
 
 
-def _profile_for_player(index: int) -> tuple[str, dict[str, str]]:
+def _profile_for_player(index: int) -> tuple[str, dict[str, Any]]:
     try:
         name = SHOWCASE_PLAYER_PROFILES[index - 1]
         return name, SHOWCASE_PROFILE_SPECS[name]
@@ -146,10 +149,11 @@ def _load_showcase_profile_binaries(profile_dir: Path) -> dict[str, bytes]:
             raise ShowcaseSeedError(f"演示 Bot profile 文件非法: {path}")
         raw = path.read_bytes()
         checksum = hashlib.sha256(raw).hexdigest()
-        if checksum != spec["checksum"]:
+        if checksum != spec["checksum"] or len(raw) != int(spec["size"]):
             raise ShowcaseSeedError(
-                f"演示 Bot profile checksum 不匹配: {name} "
-                f"(expected={spec['checksum']}, actual={checksum})"
+                f"演示 Bot profile checksum/size 不匹配: {name} "
+                f"(expected={spec['checksum']}/{spec['size']}, "
+                f"actual={checksum}/{len(raw)})"
             )
         binaries[name] = raw
     return binaries
@@ -399,9 +403,21 @@ def _validate_showcase_upload_rollback_scope(
         if configured_bot:
             bot_path = Path(os.path.abspath(Path(configured_bot).expanduser()))
             if bot_path not in version_paths:
-                raise ShowcaseSeedError(
-                    f"专用演示 Bot #{bot_id} 当前路径不属于版本白名单"
+                current_version = int(bot.get("current_version") or 0)
+                expected_current = (
+                    bot_dir / f"v{current_version}" / "bot.bin"
+                    if current_version > 0
+                    else None
                 )
+                if expected_current is None or bot_path != expected_current:
+                    raise ShowcaseSeedError(
+                        f"专用演示 Bot #{bot_id} 当前路径不属于版本白名单"
+                    )
+                # The bot_versions row may already be missing after a partial
+                # cleanup/corruption.  Its canonical current mirror is still
+                # safely scoped to this reserved Bot directory.
+                allowed_dirs.add(expected_current.parent)
+                allowed_files.add(expected_current)
 
     actual_dirs = {root}
     actual_files: set[Path] = set()
@@ -552,6 +568,67 @@ def _verify_pairing_identity_graph(
             ):
                 raise ShowcaseSeedError(
                     f"赛事 #{contest_id} pairing/match {side.upper()} 座位或版本错绑"
+                )
+
+
+def _verify_pairing_rollback_scope(
+    store: Store,
+    contest_id: int,
+    entries: list[dict[str, Any]],
+    pairings: list[dict[str, Any]],
+    matches: list[dict[str, Any]],
+    expected_user_bot: dict[int, int],
+) -> None:
+    """Verify existing rollback objects while tolerating already-deleted rows.
+
+    A previous rollback may have committed one match deletion before exiting.
+    Missing match/version rows are therefore recovery state, not evidence of a
+    foreign object.  Every row that still exists must remain exactly bound to
+    the dedicated entry/Bot graph.
+    """
+    expected_by_entry: dict[int, int] = {}
+    for entry in entries:
+        expected_bot = expected_user_bot.get(int(entry.get("user_id") or 0))
+        if expected_bot is None or int(entry.get("bot_id") or 0) != expected_bot:
+            raise ShowcaseSeedError(f"赛事 #{contest_id} entry/Bot 身份错绑")
+        expected_by_entry[int(entry["id"])] = expected_bot
+
+    match_by_id = {str(match["id"]): match for match in matches}
+    for pairing in pairings:
+        sides: list[tuple[str, int, int]] = []
+        for side in ("a", "b"):
+            entry_id = int(pairing.get(f"entry_{side}_id") or 0)
+            bot_id = int(pairing.get(f"bot_{side}_id") or 0)
+            if expected_by_entry.get(entry_id) != bot_id:
+                raise ShowcaseSeedError(
+                    f"赛事 #{contest_id} pairing #{pairing['id']} "
+                    f"entry/{side.upper()} Bot 错绑"
+                )
+            version_id = int(pairing.get(f"bot_{side}_version_id") or 0)
+            version = store.get_bot_version(version_id) if version_id else None
+            if version is not None and int(version.get("bot_id") or 0) != bot_id:
+                raise ShowcaseSeedError(
+                    f"赛事 #{contest_id} pairing #{pairing['id']} 冻结版本错绑"
+                )
+            sides.append((side, bot_id, version_id))
+
+        match_id = pairing.get("match_id")
+        if not match_id:
+            continue
+        match = match_by_id.get(str(match_id))
+        if match is None:
+            continue
+        config = match.get("match_config")
+        if not isinstance(config, dict):
+            raise ShowcaseSeedError(f"演示对局冻结版本配置损坏: {match_id}")
+        for side, bot_id, version_id in sides:
+            if int(match.get(f"bot_{side}_id") or 0) != bot_id:
+                raise ShowcaseSeedError(
+                    f"赛事 #{contest_id} pairing/match {side.upper()} 座位错绑"
+                )
+            if version_id and int(config.get(f"_bot_{side}_version_id") or 0) != version_id:
+                raise ShowcaseSeedError(
+                    f"赛事 #{contest_id} pairing/match {side.upper()} 版本错绑"
                 )
 
 
@@ -740,15 +817,22 @@ def _find_seed_contest(store: Store, organizer_id: int, key: str) -> dict[str, A
     return candidates[0] if candidates else None
 
 
-def _has_showcase_seed_records(store: Store) -> bool:
-    return any(
+def _showcase_seed_records(store: Store) -> list[dict[str, Any]]:
+    return [
+        contest
+        for contest in store.list_contests()
+        if (
         contest.get("showcase_key") in SHOWCASE_KEYS
         or any(
             _marker(key) in str(contest.get("description") or "")
             for key in SHOWCASE_KEYS
         )
-        for contest in store.list_contests()
-    )
+        )
+    ]
+
+
+def _has_showcase_seed_records(store: Store) -> bool:
+    return bool(_showcase_seed_records(store))
 
 
 def _running_stages() -> list[dict[str, Any]]:
@@ -1087,7 +1171,18 @@ async def seed_showcases(
             # place would mix the old strategy with this manifest, so a
             # strategy-version change must be rolled back and reseeded fresh.
             try:
-                _verify_showcase_profile_quality(store, upload_root)
+                expected_by_bot = _verify_showcase_profile_quality(
+                    store, upload_root
+                )
+                partial_integrity = {
+                    "showcases": {
+                        str(contest["id"]): {"contest_id": int(contest["id"])}
+                        for contest in _showcase_seed_records(store)
+                    }
+                }
+                _verify_frozen_profile_versions(
+                    store, upload_root, partial_integrity, expected_by_bot
+                )
             except ShowcaseSeedError as exc:
                 raise ShowcaseSeedError(
                     "检测到使用旧策略 manifest 的未完成演示图；"
@@ -1303,11 +1398,12 @@ def _verify_showcase_integrity(store: Store, upload_root: Path) -> dict[str, Any
 def _verify_showcase_profile_quality(
     store: Store,
     upload_root: Path,
-) -> None:
+) -> dict[int, dict[str, Any]]:
     """Require the exact reviewed profile assignment used by the current seed."""
     _organizer, players, bots = _reserved_identity_graph(
         store, require_complete=True
     )
+    expected_by_bot: dict[int, dict[str, Any]] = {}
     for index, (player, bot) in enumerate(zip(players, bots), 1):
         profile_name, profile = _profile_for_player(index)
         profile_marker = (
@@ -1325,6 +1421,52 @@ def _verify_showcase_profile_quality(
                 f"演示 Bot {index:02d} 未使用审核锁定的 {profile_name} profile；"
                 "旧策略数据请先 rollback 后重新 seed"
             )
+        expected_by_bot[int(bot["id"])] = profile
+    return expected_by_bot
+
+
+def _verify_frozen_profile_versions(
+    store: Store,
+    upload_root: Path,
+    integrity: dict[str, Any],
+    expected_by_bot: dict[int, dict[str, Any]],
+) -> None:
+    """Bind every actual pairing seat to its reviewed manifest artifact."""
+    root = upload_root.resolve()
+    for item in integrity["showcases"].values():
+        contest_id = int(item["contest_id"])
+        for pairing in store.list_contest_pairings(contest_id):
+            for side in ("a", "b"):
+                bot_id = int(pairing.get(f"bot_{side}_id") or 0)
+                version_id = int(pairing.get(f"bot_{side}_version_id") or 0)
+                profile = expected_by_bot.get(bot_id)
+                version = store.get_bot_version(version_id) if version_id else None
+                if profile is None or version is None:
+                    raise ShowcaseSeedError(
+                        f"赛事 #{contest_id} pairing #{pairing['id']} "
+                        f"{side.upper()} 缺少 manifest 冻结版本"
+                    )
+                expected_path = (
+                    root / str(bot_id) / f"v{int(version['version'])}" / "bot.bin"
+                )
+                configured = Path(str(version.get("binary_path") or "")).expanduser()
+                if (
+                    int(version.get("bot_id") or 0) != bot_id
+                    or version.get("runtime_mode") != "longrunning"
+                    or version.get("checksum") != profile["checksum"]
+                    or int(version.get("size_bytes") or -1) != int(profile["size"])
+                    or not configured.is_absolute()
+                    or Path(os.path.abspath(configured)) != expected_path
+                    or configured.is_symlink()
+                    or not configured.is_file()
+                    or configured.stat().st_size != int(profile["size"])
+                    or hashlib.sha256(configured.read_bytes()).hexdigest()
+                    != profile["checksum"]
+                ):
+                    raise ShowcaseSeedError(
+                        f"赛事 #{contest_id} pairing #{pairing['id']} "
+                        f"{side.upper()} 冻结版本不属于审核 manifest"
+                    )
 
 
 def _verify_group_stage_distribution(
@@ -1424,7 +1566,10 @@ def _verify_showcase_presentation_quality(
     integrity: dict[str, Any],
 ) -> None:
     """Apply strict, non-destructive customer-demo quality gates."""
-    _verify_showcase_profile_quality(store, upload_root)
+    expected_by_bot = _verify_showcase_profile_quality(store, upload_root)
+    _verify_frozen_profile_versions(
+        store, upload_root, integrity, expected_by_bot
+    )
     for item in integrity["showcases"].values():
         for match in store.list_matches(
             limit=1000, contest_id=int(item["contest_id"])
@@ -1547,7 +1692,7 @@ def rollback_showcases(
             for match in matches
         ):
             raise ShowcaseSeedError(f"赛事 #{contest['id']} 含非预期身份/游戏/类型对局")
-        _verify_pairing_identity_graph(
+        _verify_pairing_rollback_scope(
             store,
             int(contest["id"]),
             entries,
@@ -1600,7 +1745,7 @@ def rollback_showcases(
             raise ShowcaseSeedError(f"专用演示 Bot 元数据异常: {expected_name}")
         bot_root = resolved_upload_root / str(bot["id"])
         versions = store.list_bot_versions(int(bot["id"]))
-        if not versions or any(
+        if any(
             Path(os.path.abspath(str(version.get("binary_path") or ""))).parent.parent
             != bot_root
             for version in versions
@@ -1617,9 +1762,20 @@ def rollback_showcases(
 
     player_ids = {int(player["id"]) for player, _bot in player_bots}
     bot_ids = {int(bot["id"]) for _player, bot in player_bots if bot is not None}
+    if any(
+        (
+            int(match.get("owner_id") or 0) in player_ids
+            or int(match.get("human_user_id") or 0) in player_ids
+        )
+        and int(match.get("contest_id") or 0) not in candidate_ids
+        for match in store.list_matches(limit=100000)
+    ):
+        raise ShowcaseSeedError("专用演示账号存在非白名单对局身份引用，拒绝回滚")
     for contest in store.list_contests():
         if int(contest["id"]) in candidate_ids:
             continue
+        if int(contest.get("source_contest_id") or 0) in candidate_ids:
+            raise ShowcaseSeedError("非白名单赛事引用演示来源赛事，拒绝回滚")
         if any(
             int(entry.get("user_id") or 0) in player_ids
             or int(entry.get("bot_id") or 0) in bot_ids
