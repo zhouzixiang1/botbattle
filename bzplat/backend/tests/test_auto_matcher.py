@@ -24,6 +24,7 @@ from bzplat.backend.store import (
     Store,
     rating_projection_digests,
 )
+from bzplat.backend.store import db as store_db
 
 
 @pytest.fixture
@@ -565,7 +566,7 @@ def test_takeover_retains_global_slot_until_physical_cleanup_ack(store: Store):
         claimed["execution_scope"],
         "creating",
         "bzbot-current-create",
-        "boot:test-boot;daemon:101:1",
+        "transport:unix;locality:local;boot:test-boot;daemon:101:1",
     )
     store.mark_auto_match_execution_recovery_pending(
         "fenced-match",
@@ -979,7 +980,7 @@ def test_docker_start_confirmation_timeout_releases_task_and_launch_flock(
     monkeypatch.setattr(
         binary_runtime,
         "_docker_daemon_incarnation",
-        lambda: "boot:test-boot;daemon:101:1",
+        lambda: "transport:unix;locality:local;boot:test-boot;daemon:101:1",
     )
     monkeypatch.setattr(binary_runtime, "_docker_control_command", lambda *_a, **_k: Result())
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_cli)
@@ -1023,7 +1024,9 @@ def test_ambiguous_create_requires_daemon_incarnation_change_to_converge(
         dispatcher_token=token_a,
         dispatcher_epoch=epoch_a,
     )
-    incarnation_a = "boot:test-boot;daemon:101:1"
+    incarnation_a = (
+        "transport:unix;locality:local;boot:test-boot;daemon:101:1"
+    )
     store.mark_auto_match_execution_launch_state(
         "incarnation-match",
         token_a,
@@ -1082,12 +1085,56 @@ def test_ambiguous_create_requires_daemon_incarnation_change_to_converge(
     assert "需重启 Docker 或主机" in same["reason"]
     assert store.list_auto_match_queue()[0]["execution_launch_state"] == "creating"
 
-    orch.incarnation = "boot:test-boot;daemon:202:2"
+    orch.incarnation = (
+        "transport:unix;locality:local;boot:test-boot;daemon:202:2"
+    )
     changed = asyncio.run(scheduler._recover_physical_execution())
     assert changed["outcome"] == "cleanup_confirmed"
     assert changed["confirmed"] is True
     assert store.get_match("incarnation-match")["status"] == "aborted"
     assert store.list_auto_match_queue()[0]["execution_launch_state"] == "created"
+
+
+def test_daemon_incarnation_requires_verified_local_dockerd(monkeypatch):
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    monkeypatch.delenv("DOCKER_CONTEXT", raising=False)
+    monkeypatch.setattr(binary_runtime, "_host_boot_id", lambda: "boot-a")
+    monkeypatch.setattr(binary_runtime, "_candidate_dockerd_pids", lambda: [1])
+    monkeypatch.setattr(
+        binary_runtime, "_validated_dockerd_identity", lambda _pid: None
+    )
+    proxy = binary_runtime._docker_daemon_incarnation()
+    assert proxy == (
+        "transport:unix;locality:unknown;boot:unknown;daemon:unknown"
+    )
+
+    monkeypatch.setattr(
+        binary_runtime, "_candidate_dockerd_pids", lambda: [2918]
+    )
+    monkeypatch.setattr(
+        binary_runtime,
+        "_validated_dockerd_identity",
+        lambda pid: "2918:123" if pid == 2918 else None,
+    )
+    local_before = binary_runtime._docker_daemon_incarnation()
+    local_after = (
+        "transport:unix;locality:local;boot:boot-a;daemon:3020:456"
+    )
+    assert store_db._daemon_incarnation_changed(local_before, local_after)
+
+    remote_before = (
+        "transport:tcp;locality:remote;boot:client-a;daemon:unknown"
+    )
+    remote_after = (
+        "transport:tcp;locality:remote;boot:client-b;daemon:unknown"
+    )
+    assert not store_db._daemon_incarnation_changed(
+        remote_before, remote_after
+    )
+    monkeypatch.setenv("DOCKER_HOST", "tcp://docker.example:2376")
+    assert binary_runtime._docker_daemon_incarnation() == (
+        "transport:tcp;locality:remote;boot:unknown;daemon:unknown"
+    )
 
 
 def test_auto_seats_flip_after_each_completed_service(store: Store):

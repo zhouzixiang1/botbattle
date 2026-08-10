@@ -93,6 +93,15 @@ def _daemon_incarnation_changed(previous: str, current: str) -> bool:
 
     before = parse(previous)
     after = parse(current)
+    if (
+        before.get("transport") != "unix"
+        or after.get("transport") != "unix"
+        or before.get("locality") != "local"
+        or after.get("locality") != "local"
+    ):
+        # A client-host reboot says nothing about an in-flight request owned by
+        # a remote daemon or an unaudited Unix-socket proxy.
+        return False
     before_boot = before.get("boot", "unknown")
     after_boot = after.get("boot", "unknown")
     if (
@@ -2585,7 +2594,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "execution_backend='local',execution_state='recovery_pending',"
         "execution_launch_state='creating',"
         "execution_launch_token='legacy-' || id,"
-        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
+        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
+        "boot:unknown;daemon:unknown',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy active claim requires operator recovery' "
         "WHERE status='dispatched' AND execution_scope IS NULL",
@@ -2597,7 +2607,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "execution_backend='local',execution_state='recovery_pending',"
         "execution_launch_state='creating',"
         "execution_launch_token='legacy-' || id,"
-        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
+        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
+        "boot:unknown;daemon:unknown',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy active claim requires operator recovery' "
         "WHERE lifecycle='dispatched' AND execution_scope IS NULL "
@@ -2610,7 +2621,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE auto_match_queue SET execution_launch_state='creating',"
         "execution_launch_token='legacy-launch-' || id,"
-        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
+        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
+        "boot:unknown;daemon:unknown',"
         "execution_state='recovery_pending',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy launch acknowledgement is unprovable' "
@@ -2635,7 +2647,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "UPDATE auto_match_queue SET "
-        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
+        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
+        "boot:unknown;daemon:unknown',"
         "execution_state='recovery_pending',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy daemon incarnation is unprovable' "

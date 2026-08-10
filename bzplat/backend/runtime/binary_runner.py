@@ -8,8 +8,6 @@ import json
 import logging
 import os
 import shutil
-import socket
-import struct
 import subprocess
 import threading
 import time
@@ -64,36 +62,97 @@ def _host_boot_id() -> str:
     return value or "unknown"
 
 
-def _docker_daemon_incarnation() -> str:
-    """Identify the local daemon without relying on Docker API availability."""
-    boot_id = _host_boot_id()
-    daemon = "unknown"
-    docker_host = os.environ.get("DOCKER_HOST", "").strip()
-    socket_path: str | None
-    if not docker_host:
-        socket_path = "/var/run/docker.sock"
-    elif docker_host.startswith("unix://"):
-        socket_path = docker_host.removeprefix("unix://")
-    else:
-        socket_path = None
-    if socket_path:
-        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+def _validated_dockerd_identity(pid: int) -> str | None:
+    """Return PID/starttime only when proc identity is unequivocally dockerd."""
+    if pid <= 0:
+        return None
+    try:
+        exe_name = Path(os.readlink(f"/proc/{pid}/exe")).name.lower()
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        command_name = Path(cmdline[0].decode("utf-8", "replace")).name.lower()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        tail = stat.rsplit(") ", 1)[1].split()
+        starttime = tail[19]
+    except (OSError, IndexError, ValueError):
+        return None
+    if exe_name != "dockerd" or command_name != "dockerd":
+        return None
+    if not starttime.isdigit():
+        return None
+    return f"{pid}:{starttime}"
+
+
+def _systemd_dockerd_main_pid(*, user: bool) -> int | None:
+    command = ["systemctl"]
+    if user:
+        command.append("--user")
+    command.extend(["show", "docker.service", "--property=MainPID", "--value"])
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=0.5,
+            check=False,
+        )
+        pid = int(result.stdout.strip()) if result.returncode == 0 else 0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return pid if pid > 0 else None
+
+
+def _candidate_dockerd_pids() -> list[int]:
+    candidates: list[int] = []
+    for pid_file in (Path("/run/docker.pid"), Path("/var/run/docker.pid")):
         try:
-            peer.settimeout(0.5)
-            peer.connect(socket_path)
-            raw = peer.getsockopt(
-                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if pid > 0 and pid not in candidates:
+            candidates.append(pid)
+    for user in (False, True):
+        pid = _systemd_dockerd_main_pid(user=user)
+        if pid is not None and pid not in candidates:
+            candidates.append(pid)
+    return candidates
+
+
+def _docker_daemon_incarnation() -> str:
+    """Return only comparable, locality-qualified Docker incarnation evidence."""
+    docker_host = os.environ.get("DOCKER_HOST", "").strip()
+    docker_context = os.environ.get("DOCKER_CONTEXT", "").strip()
+    if docker_context and docker_context != "default":
+        return "transport:context;locality:unknown;boot:unknown;daemon:unknown"
+    if docker_host and not docker_host.startswith("unix://"):
+        transport = docker_host.split(":", 1)[0].lower() or "unknown"
+        locality = "remote" if transport in {"tcp", "ssh", "http", "https"} else "unknown"
+        return (
+            f"transport:{transport};locality:{locality};"
+            "boot:unknown;daemon:unknown"
+        )
+    socket_path = (
+        docker_host.removeprefix("unix://")
+        if docker_host
+        else "/var/run/docker.sock"
+    )
+    if os.path.normpath(socket_path) not in {
+        "/run/docker.sock",
+        "/var/run/docker.sock",
+    }:
+        return "transport:unix;locality:unknown;boot:unknown;daemon:unknown"
+    for pid in _candidate_dockerd_pids():
+        daemon = _validated_dockerd_identity(pid)
+        if daemon is not None:
+            return (
+                "transport:unix;locality:local;"
+                f"boot:{_host_boot_id()};daemon:{daemon}"
             )
-            pid, _uid, _gid = struct.unpack("3i", raw)
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            # After the final ') ' the first token is field 3; starttime is 22.
-            tail = stat.rsplit(") ", 1)[1].split()
-            daemon = f"{pid}:{tail[19]}"
-        except (OSError, IndexError, ValueError):
-            daemon = "unknown"
-        finally:
-            peer.close()
-    return f"boot:{boot_id};daemon:{daemon}"
+    # socket activation commonly exposes systemd as SO_PEERCRED.  Never use
+    # that proxy PID or the local boot-id without a validated dockerd process.
+    return "transport:unix;locality:unknown;boot:unknown;daemon:unknown"
 
 
 @dataclass(frozen=True)
@@ -595,6 +654,7 @@ class BinaryRunner:
                         execution_scope.mark_launch_state(
                             "creating",
                             sid,
+                            "transport:process;locality:local;"
                             f"boot:{_host_boot_id()};daemon:local",
                         )
                     try:
@@ -717,8 +777,10 @@ class BinaryRunner:
             ) -> None:
                 refreshed = await asyncio.to_thread(_docker_daemon_incarnation)
                 if not control_thread_terminal:
-                    boot = refreshed.split(";", 1)[0]
-                    refreshed = f"{boot};daemon:unknown"
+                    refreshed = (
+                        refreshed.rsplit(";daemon:", 1)[0]
+                        + ";daemon:unknown"
+                    )
                 scope.mark_ambiguous_incarnation(launch_token, refreshed)
 
             options[5:5] = [
@@ -1177,7 +1239,10 @@ class BinaryRunner:
             current_incarnation = (
                 await asyncio.to_thread(_docker_daemon_incarnation)
                 if execution_backend == "docker"
-                else f"boot:{_host_boot_id()};daemon:local"
+                else (
+                    "transport:process;locality:local;"
+                    f"boot:{_host_boot_id()};daemon:local"
+                )
             )
             result = await self._force_stop_execution_unlocked(
                 token,
