@@ -55,9 +55,17 @@ def test_register_authenticate_logout(tmp_path):
 
     auth.send_verify_code(user)
     assert len(mailer.sent) == 1
+    assert mailer.sent[0]["subject"] == "【Botbattle】邮箱验证码"
+    assert "A，你好" in mailer.sent[0]["body_text"]
     code_row = auth.store.get_latest_email_code(user["id"], CODE_VERIFY)
     verified = auth.verify_email("alice", code_row["code"])
     assert verified["email_verified"] == 1
+    assert len(mailer.sent) == 2
+    assert mailer.sent[1]["subject"] == "【Botbattle】欢迎加入多游戏 Bot 竞赛平台"
+    assert all(
+        game_name in mailer.sent[1]["body_text"]
+        for game_name in ("德州扑克", "五子棋", "点格棋")
+    )
 
     safe, token = auth.authenticate("alice", "password12")
     assert safe["username"] == "alice"

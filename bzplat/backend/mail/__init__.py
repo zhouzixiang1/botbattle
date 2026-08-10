@@ -19,6 +19,9 @@ TPL_WELCOME = "welcome"
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_SENDER_NAME = "Botbattle"
+
+
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
 
@@ -39,7 +42,7 @@ class MailConfig:
         self.user = os.environ.get("SMTP_USER", "")
         self.password = os.environ.get("SMTP_PASSWORD", "")
         self.from_addr = os.environ.get("SMTP_FROM", self.user)
-        self.from_name = os.environ.get("SMTP_FROM_NAME", "botzone-platform")
+        self.from_name = os.environ.get("SMTP_FROM_NAME", DEFAULT_SENDER_NAME)
         self.code_ttl_minutes = int(os.environ.get("EMAIL_CODE_TTL_MINUTES", "30"))
 
     @property
@@ -85,30 +88,45 @@ def default_email_templates() -> list[tuple[str, str, str, str]]:
     return [
         (
             TPL_VERIFY_EMAIL,
-            "【botzone-platform】邮箱验证码",
-            "<p>你好 {{username}},</p>"
-            "<p>你的邮箱验证码是 <strong>{{code}}</strong>,"
-            "{{expires_minutes}} 分钟内有效。</p>"
-            "<p>如非本人操作请忽略本邮件。</p>",
-            "你好 {{username}},\n你的邮箱验证码是 {{code}},"
-            "{{expires_minutes}} 分钟内有效。\n如非本人操作请忽略。",
+            "【Botbattle】邮箱验证码",
+            "<p>{{username}}，你好：</p>"
+            "<p>你正在验证 Botbattle 账号邮箱，验证码为 "
+            "<strong>{{code}}</strong>。验证码在 {{expires_minutes}} 分钟内有效。</p>"
+            "<p>如非本人操作，请忽略本邮件，且不要向任何人透露验证码。</p>"
+            "<p>Botbattle 多游戏 Bot 竞赛平台</p>",
+            "{{username}}，你好：\n"
+            "你正在验证 Botbattle 账号邮箱，验证码为 {{code}}。"
+            "验证码在 {{expires_minutes}} 分钟内有效。\n"
+            "如非本人操作，请忽略本邮件，且不要向任何人透露验证码。\n"
+            "Botbattle 多游戏 Bot 竞赛平台",
         ),
         (
             TPL_RESET_PASSWORD,
-            "【botzone-platform】密码重置验证码",
-            "<p>你好 {{username}},</p>"
-            "<p>你正在重置密码,验证码 <strong>{{code}}</strong>,"
-            "{{expires_minutes}} 分钟内有效。</p>"
-            "<p>如非本人操作请立即忽略并检查账号安全。</p>",
-            "你好 {{username}},\n你正在重置密码,验证码 {{code}},"
-            "{{expires_minutes}} 分钟内有效。",
+            "【Botbattle】密码重置验证码",
+            "<p>{{username}}，你好：</p>"
+            "<p>你正在申请重置 Botbattle 账号密码，验证码为 "
+            "<strong>{{code}}</strong>。验证码在 {{expires_minutes}} 分钟内有效。</p>"
+            "<p>如非本人操作，请忽略本邮件并及时检查账号安全。</p>"
+            "<p>Botbattle 多游戏 Bot 竞赛平台</p>",
+            "{{username}}，你好：\n"
+            "你正在申请重置 Botbattle 账号密码，验证码为 {{code}}。"
+            "验证码在 {{expires_minutes}} 分钟内有效。\n"
+            "如非本人操作，请忽略本邮件并及时检查账号安全。\n"
+            "Botbattle 多游戏 Bot 竞赛平台",
         ),
         (
             TPL_WELCOME,
-            "【botzone-platform】欢迎加入",
-            "<p>你好 {{username}},欢迎加入 botzone-platform 德州扑克竞赛平台!</p>"
-            "<p>请先完成邮箱验证,然后上传 bot 并发起对战。</p>",
-            "你好 {{username}},欢迎加入 botzone-platform!\n请先完成邮箱验证。",
+            "【Botbattle】欢迎加入多游戏 Bot 竞赛平台",
+            "<p>{{username}}，你好：</p>"
+            "<p>欢迎加入 Botbattle 多游戏 Bot 竞赛平台。你的邮箱已验证完成。</p>"
+            "<p>平台支持德州扑克、五子棋和点格棋；你可以上传 Bot、发起挑战、"
+            "参加锦标赛并查看对局回放。</p>"
+            "<p>开始前请在 Wiki 查看对应游戏规则与唯一现行通信协议。</p>",
+            "{{username}}，你好：\n"
+            "欢迎加入 Botbattle 多游戏 Bot 竞赛平台。你的邮箱已验证完成。\n"
+            "平台支持德州扑克、五子棋和点格棋；你可以上传 Bot、发起挑战、"
+            "参加锦标赛并查看对局回放。\n"
+            "开始前请在 Wiki 查看对应游戏规则与唯一现行通信协议。",
         ),
     ]
 
@@ -125,6 +143,7 @@ def seed_email_templates(conn, now: str) -> None:
 
 
 __all__ = [
+    "DEFAULT_SENDER_NAME",
     "MailConfig",
     "Mailer",
     "render_template",

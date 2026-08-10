@@ -38,9 +38,14 @@ cd bzplat/frontend && npm install
 | `BZ_TRUST_PROXY` | 信任 X-Forwarded-For（反向代理部署时需开启，否则限流按代理 IP 失效） | 未设 |
 | `BZ_LOG_LEVEL` / `BZ_LOG_DIR` | 日志级别 / 目录 | INFO / logs |
 | `SMTP_HOST/PORT/USER/PASSWORD/FROM` | SMTP（邮箱验证/重置/通知） | 未配则注册/重置返回 503 |
+| `SMTP_FROM_NAME` | 邮件显示的发件人名称 | Botbattle |
 | `EMAIL_CODE_TTL_MINUTES` | 验证码 TTL | 30 |
 
 > ⚠️ **敏感信息警示**：`.env` 含 SMTP 明文密码，**绝不提交**。`.gitignore` 应排除 `.env`。文档中不回写真实凭据。
+
+邮件模块只提供一套 Botbattle 多游戏平台默认文案：邮箱验证、密码重置和验证完成欢迎信。
+新库通过 `INSERT OR IGNORE` 播种这三条模板，因此管理后台已经保存的自定义模板不会在重启时
+被覆盖；历史库如需恢复官方文案，必须先备份，再对这三个精确 key 做受控数据更新。
 
 ## 2. 构建与运行
 
