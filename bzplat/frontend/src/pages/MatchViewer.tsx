@@ -221,7 +221,7 @@ export default function MatchViewer() {
           }
         } else {
           const pinTechnicalTerminal =
-            matchHasTechnicalLoss(m) && Number(m.result?.hands_played ?? 0) <= 0
+            matchHasTechnicalLoss(m) && Number(m.result?.rounds_played ?? 0) <= 0
           setStatus('replay')
           setCursor(evs.length > 0 ? (pinTechnicalTerminal ? evs.length - 1 : 0) : 0)
           setPlaying(evs.length > 0 && !pinTechnicalTerminal)
@@ -296,9 +296,9 @@ export default function MatchViewer() {
     : null
   const fullReplayProgress = fullVm && gameSpec ? gameSpec.replay.progress(fullVm) : null
   const progressUnitLabel = gameSpec?.progressUnit === 'move' ? '步' : '手'
-  const persistedProgress = Number(match?.result?.hands_played)
+  const persistedProgress = Number(match?.result?.rounds_played)
   // 声明总量的游戏展示当前画面的 X/总量；未声明总量的棋类终态仍显示
-  // “共 N 步”。持久化字段只用于缺少可归约事件的兼容兜底。
+  // “共 N 步”。持久化字段用于缺少可归约事件时的权威兜底。
   const progressFromReplay = visibleProgressTotal != null && Number.isFinite(visibleProgressTotal)
     ? visibleProgress
     : finished

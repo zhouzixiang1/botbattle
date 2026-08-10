@@ -10,7 +10,10 @@
 """
 from __future__ import annotations
 
+import gc
+import json
 import os
+import sqlite3
 
 import pytest
 
@@ -52,6 +55,23 @@ def test_new_db_rating_history_has_game_id(tmp_path):
     assert "game_id" in cols
 
 
+def test_new_db_uses_only_neutral_persistence_columns(tmp_path):
+    s = Store(str(tmp_path / "neutral.db"))
+    with s._tx() as c:
+        ratings = {row[1] for row in c.execute("PRAGMA table_info(ratings)")}
+        stage = {
+            row[1] for row in c.execute("PRAGMA table_info(contest_stage_results)")
+        }
+        pair = {row[1] for row in c.execute("PRAGMA table_info(pair_stats)")}
+        replay = {row[1] for row in c.execute("PRAGMA table_info(match_replays)")}
+    s.close()
+
+    assert "delta_total" in ratings and "net_chips" not in ratings
+    assert "delta_total" in stage and "net_chips" not in stage
+    assert {"bb_per_100_mean", "ci_low", "ci_high"}.isdisjoint(pair)
+    assert "hands_json" not in replay
+
+
 def test_contest_pairings_match_id_no_db_fk(tmp_path):
     """contest_pairings.match_id 无 DB 级 FK（逻辑外键，避免引用已删除的 matches 表）。"""
     s = Store(str(tmp_path / "new.db"))
@@ -61,6 +81,402 @@ def test_contest_pairings_match_id_no_db_fk(tmp_path):
     # 不应有引用 matches_holdem/gomoku/pencil 或 matches 的 FK
     ref_tables = {r[2] for r in fk_rows}  # r[2] = referenced table
     assert not any("matches" in t for t in ref_tables)
+
+
+def _make_legacy_neutral_contract_db(tmp_path, name: str) -> tuple[str, dict[str, int]]:
+    """Build one valid current DB, then downgrade only the contract surfaces."""
+    db = str(tmp_path / name)
+    store = Store(db)
+    owner = store.create_user("owner", f"owner-{name}@example.com", "hash")
+    entrant = store.create_user("entrant", f"entrant-{name}@example.com", "hash")
+    holdem_a = store.create_bot(owner["id"], "holdem-a", game_id="holdem")
+    holdem_b = store.create_bot(entrant["id"], "holdem-b", game_id="holdem")
+    gomoku = store.create_bot(owner["id"], "gomoku-a", game_id="gomoku")
+    pencil = store.create_bot(owner["id"], "pencil-a", game_id="pencil")
+
+    matches = {
+        "holdem": ("legacy-holdem", holdem_a["id"]),
+        "gomoku": ("legacy-gomoku", gomoku["id"]),
+        "pencil": ("legacy-pencil", pencil["id"]),
+    }
+    for game_id, (match_id, bot_id) in matches.items():
+        store.create_match(match_id, bot_id, bot_id, game_id=game_id)
+        store.update_match(
+            match_id,
+            status="completed",
+            winner=0,
+            result={
+                "rounds_played": 1,
+                "deltas": [1, -1],
+                "normalized_delta": 1.0,
+            },
+        )
+        store.upsert_replay(match_id, '[{"type":"match_start"}]')
+    store.create_match(
+        "legacy-aborted", holdem_a["id"], holdem_b["id"], game_id="holdem"
+    )
+    store.update_match("legacy-aborted", status="aborted")
+
+    store.ensure_rating(holdem_a["id"])
+    store.update_rating_row(holdem_a["id"], delta_total=37)
+    store.upsert_pair_stats(
+        holdem_a["id"], holdem_b["id"], a_wins_delta=1
+    )
+    contest = store.create_contest(
+        "legacy contract", owner["id"], game_id="holdem"
+    )
+    entry_a = store.add_contest_entry(contest["id"], owner["id"], holdem_a["id"])
+    entry_b = store.add_contest_entry(
+        contest["id"], entrant["id"], holdem_b["id"]
+    )
+    store.upsert_stage_result(
+        contest["id"],
+        0,
+        entry_a["id"],
+        bot_id=holdem_a["id"],
+        points=3,
+        wins=1,
+        delta_total=321,
+    )
+    store.replace_official_results(
+        contest["id"],
+        [
+            {
+                "entry_id": entry_a["id"],
+                "rank": 1,
+                "points": 3,
+                "bot_id": holdem_a["id"],
+                "user_id": owner["id"],
+                "tiebreaks_json": json.dumps({"normalized_delta": 5.0}),
+            },
+            {
+                "entry_id": entry_b["id"],
+                "rank": 2,
+                "points": 0,
+                "bot_id": holdem_b["id"],
+                "user_id": entrant["id"],
+                "tiebreaks_json": json.dumps({"normalized_delta": -5.0}),
+            },
+        ],
+    )
+    store.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    # 三种历史 result：旧键、与新键冲突、新键缺 normalized。
+    conn.execute(
+        "UPDATE matches_holdem SET result=? WHERE id='legacy-holdem'",
+        (json.dumps({"hands_played": 70, "deltas": [500, -500], "net_bb": 5.0}),),
+    )
+    conn.execute(
+        "UPDATE matches_gomoku SET result=? WHERE id='legacy-gomoku'",
+        (
+            json.dumps(
+                {
+                    "rounds_played": 9,
+                    "hands_played": 3,
+                    "deltas": [1, -1],
+                    "normalized_delta": 999.0,
+                    "net_bb": 123.0,
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        "UPDATE matches_pencil SET result=? WHERE id='legacy-pencil'",
+        (json.dumps({"hands_played": 12, "deltas": [-2, 2]}),),
+    )
+    conn.execute(
+        "UPDATE matches_holdem SET result=? WHERE id='legacy-aborted'",
+        (
+            json.dumps(
+                {
+                    "hands_played": 8,
+                    "deltas": [100, -100],
+                    "net_bb": 1.0,
+                    "internal_marker": "keep",
+                }
+            ),
+        ),
+    )
+    # 正式榜冲突时保留新值；只有旧键时做纯改名，rank 不重算。
+    conn.execute(
+        "UPDATE contest_official_results SET tiebreaks_json=? WHERE rank=1",
+        (json.dumps({"net_bb_per_100": 5.0, "buchholz": 2.0}),),
+    )
+    conn.execute(
+        "UPDATE contest_official_results SET tiebreaks_json=? WHERE rank=2",
+        (
+            json.dumps(
+                {"normalized_delta": -7.0, "net_bb_per_100": -99.0}
+            ),
+        ),
+    )
+    conn.execute("ALTER TABLE ratings RENAME COLUMN delta_total TO net_chips")
+    conn.execute(
+        "ALTER TABLE contest_stage_results RENAME COLUMN delta_total TO net_chips"
+    )
+    conn.execute(
+        "ALTER TABLE pair_stats ADD COLUMN bb_per_100_mean REAL NOT NULL DEFAULT 0"
+    )
+    conn.execute("ALTER TABLE pair_stats ADD COLUMN ci_low REAL NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE pair_stats ADD COLUMN ci_high REAL NOT NULL DEFAULT 0")
+    conn.execute(
+        "UPDATE pair_stats SET bb_per_100_mean=12.5,ci_low=1.0,ci_high=20.0"
+    )
+    conn.execute(
+        "ALTER TABLE match_replays ADD COLUMN hands_json TEXT NOT NULL DEFAULT '[]'"
+    )
+    conn.execute("UPDATE match_replays SET hands_json='[1,2,3]'")
+    conn.commit()
+    conn.close()
+    return db, {
+        "contest_id": contest["id"],
+        "entry_a": entry_a["id"],
+        "entry_b": entry_b["id"],
+        "holdem_a": holdem_a["id"],
+    }
+
+
+def test_neutral_contract_migration_preserves_data_and_is_idempotent(tmp_path):
+    db, ids = _make_legacy_neutral_contract_db(tmp_path, "legacy-neutral.db")
+
+    before = sqlite3.connect(db)
+    before_counts = {
+        table: before.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in (
+            "matches_holdem",
+            "matches_gomoku",
+            "matches_pencil",
+            "ratings",
+            "pair_stats",
+            "match_replays",
+            "contest_stage_results",
+            "contest_official_results",
+        )
+    }
+    before_rank_order = before.execute(
+        "SELECT entry_id,rank FROM contest_official_results ORDER BY rank"
+    ).fetchall()
+    before.close()
+
+    migrated = Store(db)
+    migrated.close()
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    after_counts = {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in before_counts
+    }
+    assert after_counts == before_counts
+    assert [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT entry_id,rank FROM contest_official_results ORDER BY rank"
+        ).fetchall()
+    ] == before_rank_order
+
+    column_sets = {
+        table: {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for table in (
+            "ratings",
+            "pair_stats",
+            "match_replays",
+            "contest_stage_results",
+        )
+    }
+    assert "delta_total" in column_sets["ratings"]
+    assert "net_chips" not in column_sets["ratings"]
+    assert "delta_total" in column_sets["contest_stage_results"]
+    assert "net_chips" not in column_sets["contest_stage_results"]
+    assert {"bb_per_100_mean", "ci_low", "ci_high"}.isdisjoint(
+        column_sets["pair_stats"]
+    )
+    assert "hands_json" not in column_sets["match_replays"]
+    assert conn.execute(
+        "SELECT delta_total FROM ratings WHERE bot_id=?",
+        (ids["holdem_a"],),
+    ).fetchone()[0] == 37
+    assert conn.execute(
+        "SELECT delta_total FROM contest_stage_results WHERE contest_id=?",
+        (ids["contest_id"],),
+    ).fetchone()[0] == 321
+
+    results = {
+        game_id: json.loads(
+            conn.execute(
+                f"SELECT result FROM matches_{game_id} WHERE id=?",
+                (f"legacy-{game_id}",),
+            ).fetchone()[0]
+        )
+        for game_id in ("holdem", "gomoku", "pencil")
+    }
+    assert results["holdem"] == {
+        "rounds_played": 70,
+        "deltas": [500, -500],
+        "normalized_delta": 5.0,
+    }
+    assert results["gomoku"] == {
+        "rounds_played": 9,
+        "deltas": [1, -1],
+        "normalized_delta": 1.0,
+    }
+    assert results["pencil"] == {
+        "rounds_played": 12,
+        "deltas": [-2, 2],
+        "normalized_delta": -2.0,
+    }
+    aborted_result = json.loads(
+        conn.execute(
+            "SELECT result FROM matches_holdem WHERE id='legacy-aborted'"
+        ).fetchone()[0]
+    )
+    assert aborted_result == {"internal_marker": "keep"}
+    tiebreaks = [
+        json.loads(row[0])
+        for row in conn.execute(
+            "SELECT tiebreaks_json FROM contest_official_results ORDER BY rank"
+        )
+    ]
+    assert tiebreaks == [
+        {"buchholz": 2.0, "normalized_delta": 5.0},
+        {"normalized_delta": -7.0},
+    ]
+
+    first_snapshot = {
+        "results": results,
+        "tiebreaks": tiebreaks,
+        "counts": after_counts,
+    }
+    conn.close()
+    Store(db).close()
+    reopened = sqlite3.connect(db)
+    second_snapshot = {
+        "results": {
+            game_id: json.loads(
+                reopened.execute(
+                    f"SELECT result FROM matches_{game_id} WHERE id=?",
+                    (f"legacy-{game_id}",),
+                ).fetchone()[0]
+            )
+            for game_id in ("holdem", "gomoku", "pencil")
+        },
+        "tiebreaks": [
+            json.loads(row[0])
+            for row in reopened.execute(
+                "SELECT tiebreaks_json FROM contest_official_results ORDER BY rank"
+            )
+        ],
+        "counts": {
+            table: reopened.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in before_counts
+        },
+    }
+    reopened.close()
+    assert second_snapshot == first_snapshot
+
+
+def test_neutral_column_migration_prefers_existing_new_values(tmp_path):
+    db = str(tmp_path / "new-and-legacy-columns.db")
+    store = Store(db)
+    owner = store.create_user("owner", "owner@example.com", "hash")
+    entrant = store.create_user("entrant", "entrant@example.com", "hash")
+    bot_a = store.create_bot(owner["id"], "a", game_id="holdem")
+    bot_b = store.create_bot(entrant["id"], "b", game_id="holdem")
+    store.ensure_rating(bot_a["id"])
+    store.update_rating_row(bot_a["id"], delta_total=88)
+    contest = store.create_contest("contract", owner["id"], game_id="holdem")
+    entry = store.add_contest_entry(contest["id"], owner["id"], bot_a["id"])
+    store.add_contest_entry(contest["id"], entrant["id"], bot_b["id"])
+    store.upsert_stage_result(
+        contest["id"],
+        0,
+        entry["id"],
+        bot_id=bot_a["id"],
+        delta_total=654,
+    )
+    store.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "ALTER TABLE ratings ADD COLUMN net_chips INTEGER NOT NULL DEFAULT 0"
+    )
+    conn.execute("UPDATE ratings SET net_chips=37")
+    conn.execute(
+        "ALTER TABLE contest_stage_results "
+        "ADD COLUMN net_chips INTEGER NOT NULL DEFAULT 0"
+    )
+    conn.execute("UPDATE contest_stage_results SET net_chips=321")
+    conn.commit()
+    conn.close()
+
+    Store(db).close()
+    migrated = sqlite3.connect(db)
+    rating_cols = {
+        row[1] for row in migrated.execute("PRAGMA table_info(ratings)")
+    }
+    stage_cols = {
+        row[1]
+        for row in migrated.execute("PRAGMA table_info(contest_stage_results)")
+    }
+    assert "net_chips" not in rating_cols
+    assert "net_chips" not in stage_cols
+    assert migrated.execute(
+        "SELECT delta_total FROM ratings WHERE bot_id=?", (bot_a["id"],)
+    ).fetchone()[0] == 88
+    assert migrated.execute(
+        "SELECT delta_total FROM contest_stage_results WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == 654
+    assert migrated.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert migrated.execute("PRAGMA foreign_key_check").fetchall() == []
+    migrated.close()
+
+
+def test_neutral_contract_schema_and_json_migrate_in_one_transaction(
+    tmp_path, monkeypatch
+):
+    db, _ids = _make_legacy_neutral_contract_db(tmp_path, "rollback-neutral.db")
+    from bzplat.backend.matches import result_contract
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            result_contract,
+            "build_result_payload",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced result migration failure")
+            ),
+        )
+        with pytest.raises(RuntimeError, match="forced result migration failure"):
+            Store(db)
+    gc.collect()
+
+    conn = sqlite3.connect(db)
+    assert "net_chips" in {
+        row[1] for row in conn.execute("PRAGMA table_info(ratings)")
+    }
+    assert "net_chips" in {
+        row[1] for row in conn.execute("PRAGMA table_info(contest_stage_results)")
+    }
+    assert "bb_per_100_mean" in {
+        row[1] for row in conn.execute("PRAGMA table_info(pair_stats)")
+    }
+    assert "hands_json" in {
+        row[1] for row in conn.execute("PRAGMA table_info(match_replays)")
+    }
+    raw_result = json.loads(
+        conn.execute(
+            "SELECT result FROM matches_holdem WHERE id='legacy-holdem'"
+        ).fetchone()[0]
+    )
+    assert "hands_played" in raw_result and "rounds_played" not in raw_result
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    conn.close()
+
+    # 故障解除后同一副本可完整升级，证明没有 _new 残表或半迁移状态。
+    Store(db).close()
 
 
 def test_legacy_contest_entries_gain_unique_registration_index(tmp_path):
@@ -216,9 +632,19 @@ def test_get_match_routes_via_index(store_with_matches):
 def test_update_match_routes_via_index(store_with_matches):
     s, u, bh, bg, bp = store_with_matches
     s.create_match("mg1", bg, bg, game_id="gomoku")
-    s.update_match("mg1", status="completed", winner=0, result={"hands_played": 9, "deltas": [1, -1]})
+    s.update_match(
+        "mg1",
+        status="completed",
+        winner=0,
+        result={"rounds_played": 9, "deltas": [1, -1], "normalized_delta": 1.0},
+    )
     m = s.get_match("mg1")
-    assert m["status"] == "completed" and m["winner"] == 0 and m["result"]["hands_played"] == 9
+    assert m["status"] == "completed" and m["winner"] == 0
+    assert m["result"] == {
+        "rounds_played": 9,
+        "deltas": [1, -1],
+        "normalized_delta": 1.0,
+    }
 
 
 def test_list_matches_cross_game_union(store_with_matches):
@@ -405,7 +831,7 @@ def test_delete_match_cleans_index_and_replay(store_with_matches):
     """delete_match 删 per-game 行 + matches_index + replay（保 index 不漂移）。"""
     s, u, bh, bg, bp = store_with_matches
     s.create_match("mg1", bg, bg, game_id="gomoku")
-    s.upsert_replay("mg1", '[{"type":"move"}]', "[]")
+    s.upsert_replay("mg1", '[{"type":"move"}]')
     # 删前都在
     assert s.get_match("mg1") is not None
     assert s.get_replay("mg1") is not None

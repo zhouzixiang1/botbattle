@@ -244,7 +244,7 @@ def main():
             standings = d.get("standings", [])
             print("  前 10 名：")
             for i, s in enumerate(standings[:10], 1):
-                print(f"    {i}. {s.get('bot_name','?')} 积分={s.get('points',0)} W{ s.get('wins',0)}-D{s.get('draws',0)}-L{s.get('losses',0)} 净筹码={s.get('net_chips',0)}")
+                print(f"    {i}. {s.get('bot_name','?')} 积分={s.get('points',0)} W{ s.get('wins',0)}-D{s.get('draws',0)}-L{s.get('losses',0)} 累计分差={s.get('delta_total',0)}")
             print(f"\n  赛事页：{base}/#/contests/{cid}")
             return 0
         time.sleep(5)

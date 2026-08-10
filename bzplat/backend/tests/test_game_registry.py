@@ -219,11 +219,11 @@ def test_all_tiers_per_game():
 
 
 # ── 编排特化函数（spec 上的能力）──────────────────────────────
-def test_normalize_earnings_per_game():
-    # holdem 除 100（bb/100）；棋类透传
-    assert registry.get("holdem").normalize_earnings(500) == 5.0
-    assert registry.get("gomoku").normalize_earnings(1) == 1.0
-    assert registry.get("pencil").normalize_earnings(-1) == -1.0
+def test_normalize_delta_per_game():
+    # Holdem 筹码差除以大盲 100，得到整场大盲分差；棋类透传。
+    assert registry.get("holdem").normalize_delta(500) == 5.0
+    assert registry.get("gomoku").normalize_delta(1) == 1.0
+    assert registry.get("pencil").normalize_delta(-1) == -1.0
 
 
 # ── judge 元信息从注册表派生 ──────────────────────────────────

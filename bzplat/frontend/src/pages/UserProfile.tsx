@@ -33,7 +33,6 @@ interface UserProfileData {
     losses: number
     draws: number
     matches_played: number
-    net_chips: number
     rated_bots: number
   }
   bot_count: number

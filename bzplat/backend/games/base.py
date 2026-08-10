@@ -131,10 +131,11 @@ class GameSpec:
     # Bot 行协议（对外入口仅暴露本游戏 API；同构底层原语可共享一份公开实现）
     protocol: ProtocolSpec
 
-    # 编排特化（消除 orchestrator 里的 holdem if 分支）
+    # 编排特化（消除 orchestrator 里的具体游戏分支）
     default_match_params: dict[str, Any]
     validate_match_params: Callable[[dict[str, Any]], dict[str, Any]]
-    normalize_earnings: Callable[[int], float]             # holdem: ea/100.0；棋类: float(ea)
+    normalize_delta: Callable[[int], float]                # 将座位 0 原始分差换算为本游戏展示单位
+    progress_from_events: Callable[[list[dict[str, Any]]], int]  # 技术终局已完成轮数
     eta_for_match: Callable[[dict[str, Any]], int]         # 按 match_config 算每场秒数（取代 if game_id 缩放分支）
 
     # 段位曲线（完全 per-game，替代全局 engine/tiers.py）。查表算法共享 base.tier_for_in。

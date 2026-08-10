@@ -63,7 +63,7 @@ def _user_bot(store: Store, name: str, *, game_id: str = "holdem"):
 def _normal_result(*, deltas: tuple[int, int] = (37, -37), winner: int = 0):
     engine_end = {
         "type": "match_end",
-        "hands_played": 1,
+        "rounds_played": 1,
         "final_chips": list(deltas),
         # Hold'em's game replay event is deliberately not the platform winner.
         "winner": None,
@@ -165,7 +165,6 @@ def test_public_events_are_strictly_projected_for_replay_and_live(tmp_path):
     store.upsert_replay(
         match_id,
         json.dumps([diagnostic, raw_move, {"type": "match_end"}]),
-        "[]",
     )
     public_events = json.loads(store.get_public_replay(match_id)["events_json"])
     assert public_events == [
@@ -218,7 +217,7 @@ def test_active_human_holdem_hides_opponent_cards_from_public_streams(tmp_path):
             "max_hand": 70,
         },
     }
-    store.upsert_replay(match_id, json.dumps([deal, turn]), "[]")
+    store.upsert_replay(match_id, json.dumps([deal, turn]))
 
     spectator_events = json.loads(store.get_public_replay(match_id)["events_json"])
     assert spectator_events == [

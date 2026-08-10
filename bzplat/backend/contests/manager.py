@@ -23,6 +23,7 @@ from bzplat.backend.matches.orchestrator import (
     MatchOrchestrator,
     require_binary_file_integrity,
 )
+from bzplat.backend.matches.result_contract import build_result_payload
 from bzplat.backend.games import normalize_game_id, registry as game_registry
 from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
 from bzplat.backend.store import Store
@@ -1314,11 +1315,15 @@ class ContestManager:
                 status=STATUS_COMPLETED,
                 reason="contest_bot_unavailable",
                 winner=winner,
-                result={"deltas": [ea, eb]},
+                result=build_result_payload(
+                    game_registry.get(gid),
+                    rounds_played=0,
+                    deltas=[ea, eb],
+                ),
                 technical_loss=1,
                 ended_at=_now(),
             )
-            self.store.upsert_replay(mid, "[]", "[]")
+            self.store.upsert_replay(mid, "[]")
             self.store.bind_contest_pairing_match(
                 contest["id"],
                 pairing["id"],
@@ -1576,7 +1581,7 @@ class ContestManager:
                 "wins": 0,
                 "draws": 0,
                 "losses": 0,
-                "net_chips": 0,
+                "delta_total": 0,
                 "group_id": e.get("group_id") or "",
                 "eliminated": int(e.get("eliminated") or 0),
             }
@@ -1587,7 +1592,7 @@ class ContestManager:
             if not mid:
                 # Swiss 奇数轮的 bye 是显式 completed/no-match pairing。
                 # 轮空获得本赛制的“胜场分”，但它不是一场对局：不增
-                # wins/draws/losses、net_chips，也没有对手记录。KO bye
+                # wins/draws/losses、delta_total，也没有对手记录。KO bye
                 # 是直接晋级，不在此计分。
                 if (
                     stage.get("type") == "swiss"
@@ -1612,12 +1617,12 @@ class ContestManager:
             result = m.get("result") or {}
             legs_data = result.get("legs") if isinstance(result, dict) else None
             if legs_data:
-                # 复式：逐 leg 累加 points/wins/draws/losses/net_chips
+                # 复式：逐 leg 累加 points/wins/draws/losses/delta_total
                 for lg in legs_data:
                     lg_winner = lg.get("winner")
                     lg_deltas = lg.get("deltas") or [0, 0]
-                    stats[ea_id]["net_chips"] += int(lg_deltas[0])
-                    stats[eb_id]["net_chips"] += int(lg_deltas[1])
+                    stats[ea_id]["delta_total"] += int(lg_deltas[0])
+                    stats[eb_id]["delta_total"] += int(lg_deltas[1])
                     stats[ea_id]["points"] += points_for_result(scoring, lg_winner, 0)
                     stats[eb_id]["points"] += points_for_result(scoring, lg_winner, 1)
                     if lg_winner == 0:
@@ -1632,8 +1637,8 @@ class ContestManager:
             else:
                 # 普通赛制：单场胜负累加
                 ea_earn, eb_earn = match_deltas(m)
-                stats[ea_id]["net_chips"] += ea_earn
-                stats[eb_id]["net_chips"] += eb_earn
+                stats[ea_id]["delta_total"] += ea_earn
+                stats[eb_id]["delta_total"] += eb_earn
                 wa = points_for_result(scoring, m["winner"], 0)
                 wb = points_for_result(scoring, m["winner"], 1)
                 stats[ea_id]["points"] += wa
@@ -1652,7 +1657,7 @@ class ContestManager:
                 stats[ea_id]["group_id"] = gid
                 stats[eb_id]["group_id"] = gid
         rows = list(stats.values())
-        rows.sort(key=lambda r: (-r["points"], -r["net_chips"]))
+        rows.sort(key=lambda r: (-r["points"], -r["delta_total"]))
         return rows
 
     def _stage_done(self, contest_id: int, stage_idx: int) -> bool:
@@ -1695,7 +1700,7 @@ class ContestManager:
                 wins=s["wins"],
                 draws=s["draws"],
                 losses=s["losses"],
-                net_chips=s["net_chips"],
+                delta_total=s["delta_total"],
                 group_id=s.get("group_id") or "",
                 rank_in_group=i + 1,
             )
@@ -2077,7 +2082,7 @@ class ContestManager:
         stages = _parse_stages(c)
         cur_stage = stages[stage_idx] if 0 <= stage_idx < len(stages) else {}
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
-        normalize_earnings = _reg.get(gid).normalize_earnings
+        normalize_delta = _reg.get(gid).normalize_delta
 
         def _rank_stage(sidx: int) -> list[dict]:
             standings = self.standings(contest_id, stage_idx=sidx)
@@ -2086,7 +2091,7 @@ class ContestManager:
             matches = {mid: self.store.get_match(mid) for mid in match_ids if mid}
             matches = {k: v for k, v in matches.items() if v}
             return _ranking.compute_official_ranking(
-                standings, pairings, matches, normalize_earnings=normalize_earnings
+                standings, pairings, matches, normalize_delta=normalize_delta
             )
 
         ranking_rows = _rank_stage(stage_idx)

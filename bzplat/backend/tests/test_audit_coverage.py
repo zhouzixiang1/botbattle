@@ -89,7 +89,7 @@ def _completed_rating_match(
         match_id,
         status=STATUS_COMPLETED,
         winner=winner,
-        result={"deltas": deltas, "hands_played": 1},
+        result={"deltas": deltas, "rounds_played": 1},
     )
     return store.get_match(match_id)
 
@@ -355,7 +355,6 @@ def test_sse_terminal_snapshot_ignores_stale_active_prefix(store: Store):
                 {"type": "match_end", "winner": 1, "reason": "forged"},
             ]
         ),
-        hands_json="[]",
     )
     store.update_match(
         match_id,
@@ -449,15 +448,15 @@ def test_rating_history_failure_rolls_back_both_ratings_and_pair_stats(store: St
             rating_a=(1510.0, 300.0, 0.06),
             rating_b=(1490.0, 300.0, 0.06),
             winner=0,
-            earnings_a=1,
-            earnings_b=-1,
+            delta_a=1,
+            delta_b=-1,
             reason="fault-injection",
             settlement_id="fault-injection-match",
         )
 
     after_a = store.get_rating(ba["id"])
     after_b = store.get_rating(bb["id"])
-    for key in ("rating", "rd", "vol", "wins", "losses", "draws", "net_chips", "matches_played"):
+    for key in ("rating", "rd", "vol", "wins", "losses", "draws", "delta_total", "matches_played"):
         assert after_a[key] == before_a[key]
         assert after_b[key] == before_b[key]
     assert store.list_rating_history(ba["id"], game_id="gomoku") == []
@@ -487,7 +486,7 @@ def test_completed_rating_recovery_and_repeated_postprocess_are_exactly_once(sto
         mid,
         status=STATUS_COMPLETED,
         winner=0,
-        result={"deltas": [1, -1], "hands_played": 1},
+        result={"deltas": [1, -1], "rounds_played": 1},
     )
     match = store.get_match(mid)
     with store._tx() as c:
@@ -596,7 +595,7 @@ def test_rating_sequence_repairs_earlier_failure_before_settling_target(
             "wins",
             "losses",
             "draws",
-            "net_chips",
+            "delta_total",
             "matches_played",
         )
         history_fields = ("rating", "rd", "vol", "matches_played", "reason")
@@ -947,11 +946,11 @@ def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
     orch = MatchOrchestrator(store, runner=SuccessRunner(), max_concurrent=2)
     original_upsert = store.upsert_replay
 
-    def fail_only_after_terminal(match_id, events_json, hands_json):
+    def fail_only_after_terminal(match_id, events_json):
         match = store.get_match(match_id)
         if match and match.get("status") in (STATUS_COMPLETED, STATUS_ABORTED):
             raise RuntimeError("final replay flush exploded")
-        return original_upsert(match_id, events_json, hands_json)
+        return original_upsert(match_id, events_json)
 
     monkeypatch.setattr(store, "upsert_replay", fail_only_after_terminal)
 
@@ -1194,7 +1193,7 @@ def test_admin_abort_replay_read_failure_still_hands_off_terminal_state(
             "y": 7,
             "move_index": 1,
         }
-        store.upsert_replay(match_id, json.dumps([prior_event]), "[]")
+        store.upsert_replay(match_id, json.dumps([prior_event]))
         original_get_replay = store.get_replay
 
         def fail_get_replay(*_args, **_kwargs):

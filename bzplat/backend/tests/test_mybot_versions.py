@@ -618,7 +618,7 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
                 deltas = [0, 0]
                 winner = None
                 final_chips = [0, 0]
-                hands_played = 0
+                rounds_played = 0
                 events = []
             return _R()
 

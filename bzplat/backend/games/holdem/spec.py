@@ -62,9 +62,16 @@ def _validate_match_params(cfg: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _normalize_earnings(ea: int) -> float:
-    # 德州筹码以"大盲注"为单位展示（bb/100）：除 100
-    return ea / 100.0
+def _normalize_delta(delta: int) -> float:
+    """将筹码分差换算为大盲注。
+
+    这是整场累计分差的单位换算，不是每 100 手统计量。
+    """
+    return delta / BIG_BLIND
+
+
+def _progress_from_events(events: list[dict[str, Any]]) -> int:
+    return sum(1 for event in events if event.get("type") == "settle")
 
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
@@ -141,7 +148,8 @@ SPEC = GameSpec(
     protocol=_PROTOCOL,
     default_match_params={},  # 手数钉死 DEFAULT_HANDS，无对局级可配参数
     validate_match_params=_validate_match_params,
-    normalize_earnings=_normalize_earnings,
+    normalize_delta=_normalize_delta,
+    progress_from_events=_progress_from_events,
     eta_for_match=_eta_for_match,
     tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,

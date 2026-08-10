@@ -12,11 +12,11 @@ export interface MatchSeatRow {
   technical_loss?: number
   bot_a_id?: number
   bot_b_id?: number
-  /** 对局结果详情 JSON（{hands_played, deltas:[ea,eb], net_bb}）。 */
+  /** 对局结果唯一公共契约。 */
   result?: {
-    hands_played?: number
+    rounds_played?: number
     deltas?: number[]
-    net_bb?: number
+    normalized_delta?: number
     technical_incidents_by_seat?: Record<number, number>
     technical_incident_samples?: Array<{
       seat: number

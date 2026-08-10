@@ -359,7 +359,7 @@ def test_holdem_event_contract_keys():
         "deal_board": {"hand", "street", "board", "dealt"},
         "action": {"hand", "player", "action", "amount"},
         "settle": {"hand", "winners", "deltas", "chips", "net", "pot", "board", "reason"},
-        "match_end": {"hands_played", "final_chips", "winner", "reason"},
+        "match_end": {"rounds_played", "final_chips", "winner", "reason"},
     }
     for etype, required in key_contract.items():
         for ev in by_type[etype]:

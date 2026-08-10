@@ -266,7 +266,7 @@ def test_human_turn_registry_resolve_and_no_rating(store: Store):
     mm = asyncio.run(run())
     assert mm["status"] == "completed"
     assert mm["reason"] in {"five", "draw"}
-    assert mm["result"]["hands_played"] >= 9
+    assert mm["result"]["rounds_played"] >= 9
     replay = store.get_replay(mm["id"])
     replay_events = json.loads(replay["events_json"])
     assert not [ev for ev in replay_events if ev.get("type") == "illegal"]
@@ -657,7 +657,7 @@ def test_consecutive_human_timeouts_aborts_match(store: Store):
     """人类连续多次超时不响应 → 应中止对局，而非死磕 70 手最长 2.3 小时。
     否则对局永久卡在 running，占 _human_active_users，用户无法再开新对局。
     用 holdem（超时=弃牌，对局会持续），棋类一手非法即结束不适用此场景。
-    复现对局 20260802132013-7eb5087b：holdem 卡 running，hands_played=0，8 手全弃牌。
+    复现对局 20260802132013-7eb5087b：holdem 卡 running，rounds_played=0，8 手全弃牌。
     """
     os.environ.setdefault("BZ_BOT_LOCAL", "1")
     u = store.create_user("touser", "t@ex.com", hash_password("password1"))

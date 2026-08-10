@@ -440,9 +440,9 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
     if not is_privileged:
         p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
     p = _with_bot_runnable(p)
-    # 裁响应死字段（对抗审计验证：vol/net_chips/rated_at/is_builtin/updated_at 前端不消费；
+    # 裁响应死字段（对抗审计验证：vol/rated_at/is_builtin/updated_at 前端不消费；
     # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
-    for k in ("vol", "net_chips", "rated_at", "is_builtin", "updated_at"):
+    for k in ("vol", "rated_at", "is_builtin", "updated_at"):
         p.pop(k, None)
     return {"profile": _with_placement_status(p)}
 
@@ -1009,7 +1009,7 @@ def leaderboard(
     # is_builtin/owner_display；留 tier_level——test_tiers 断言）。
     items = result["items"] if isinstance(result, dict) else result
     keep = {
-        "bot_id", "rating", "rd", "wins", "losses", "draws", "net_chips",
+        "bot_id", "rating", "rd", "wins", "losses", "draws",
         "matches_played", "bot_name", "bot_display", "format", "os", "arch",
         "game_id", "owner_name", "rating_delta", "tier_level", "tier_key", "tier_name",
         "placement_required", "placement_remaining", "is_placement",

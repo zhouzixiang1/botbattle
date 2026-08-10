@@ -158,17 +158,17 @@ def sanitize_public_result(raw: Any) -> dict[str, Any]:
         return {}
     public: dict[str, Any] = {}
 
-    hands_played = raw.get("hands_played")
-    if isinstance(hands_played, int) and not isinstance(hands_played, bool):
-        public["hands_played"] = max(0, hands_played)
+    rounds_played = raw.get("rounds_played")
+    if isinstance(rounds_played, int) and not isinstance(rounds_played, bool):
+        public["rounds_played"] = max(0, rounds_played)
 
     deltas = _public_deltas(raw.get("deltas"))
     if deltas is not None:
         public["deltas"] = deltas
 
-    net_bb = _public_number(raw.get("net_bb"))
-    if net_bb is not None:
-        public["net_bb"] = net_bb
+    normalized_delta = _public_number(raw.get("normalized_delta"))
+    if normalized_delta is not None:
+        public["normalized_delta"] = normalized_delta
 
     raw_legs = raw.get("legs")
     if isinstance(raw_legs, list):

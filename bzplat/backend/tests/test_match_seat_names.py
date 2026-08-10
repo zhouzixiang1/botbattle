@@ -68,7 +68,7 @@ def test_match_detail_route_returns_nested_seat_info(tmp_path):
 
 
 def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
-    """观赛页顶栏胜者/累计筹码依赖 match.winner + earnings_a/b 字段。"""
+    """观赛页顶栏胜者/累计分差依赖 match.winner + result.deltas。"""
     s = _store(tmp_path)
     app = create_app(db_path=s.path)
     st = app.state.store
@@ -81,7 +81,7 @@ def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
     st.create_match(mid, bot_a_id=ba["id"], bot_b_id=bb["id"], owner_id=ua["id"], game_id="holdem")
     st.update_match(
         mid, status="completed", winner=0,
-        result={"hands_played": 70, "deltas": [1500, -1500]},
+        result={"rounds_played": 70, "deltas": [1500, -1500]},
         reason="completed",
     )
     c = TestClient(app)

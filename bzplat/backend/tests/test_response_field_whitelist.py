@@ -71,7 +71,7 @@ def test_bot_profile_drops_dead_fields(tmp_path):
         r = c.get(f"/api/bots/{b['id']}/profile")
         assert r.status_code == 200
         p = r.json()["profile"]
-        for dead in ("vol", "net_chips", "rated_at", "is_builtin", "updated_at"):
+        for dead in ("vol", "delta_total", "rated_at", "is_builtin", "updated_at"):
             assert dead not in p, f"bot_profile 仍含死字段 {dead}"
         # 守护：测试依赖字段保留
         for keep in ("matches_played", "tier_level", "owner_id"):

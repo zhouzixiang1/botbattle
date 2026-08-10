@@ -239,9 +239,9 @@ def bot_artifacts_are_isolated(api: Api, bot_ids: list[int]) -> tuple[bool, str]
     return True, ""
 
 
-def match_hands_played(match: dict[str, Any]) -> int:
-    """Read the post-migration result contract, never a removed top-level column."""
-    raw = (match.get("result") or {}).get("hands_played")
+def match_rounds_played(match: dict[str, Any]) -> int:
+    """Read the unique persisted progress field from the result contract."""
+    raw = (match.get("result") or {}).get("rounds_played")
     try:
         return int(raw)
     except (TypeError, ValueError):
@@ -375,11 +375,12 @@ def test_single_match(api: Api, users: dict[str, str], bot_ids: dict[str, int]) 
         check("winner=1 时 eb>ea", eb > ea, f"ea={ea} eb={eb} winner={m['winner']}")
     else:
         check("平局 ea==eb", ea == eb, f"ea={ea} eb={eb}")
-    net_bb = result.get("net_bb")
+    normalized_delta = result.get("normalized_delta")
     check(
-        "result.net_bb == ea/100",
-        net_bb is not None and abs(float(net_bb) - ea / 100.0) < 1e-6,
-        f"net_bb={net_bb}",
+        "result.normalized_delta == ea/100（Holdem 大盲单位）",
+        normalized_delta is not None
+        and abs(float(normalized_delta) - ea / 100.0) < 1e-6,
+        f"normalized_delta={normalized_delta}",
     )
     return mid
 
@@ -404,14 +405,14 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
     check("replay 非空", len(replay) > 0, "空")
     check("replay 以 hand_start 开头", rep_types[:1] == ["hand_start"], str(rep_types[:3]))
     check("replay 以 match_end 结尾", rep_types[-1:] == ["match_end"], str(rep_types[-2:]))
-    # 结构完整性：hand_start 数 == settle 数 == result.hands_played
+    # 结构完整性：hand_start 数 == settle 数 == result.rounds_played
     hs = rep_types.count("hand_start")
     st = rep_types.count("settle")
-    hands_played = match_hands_played(m)
+    rounds_played = match_rounds_played(m)
     check(
-        "replay hand_start==settle==result.hands_played",
-        hands_played > 0 and hs == st == hands_played,
-        f"hs={hs} settle={st} hands_played={hands_played}",
+        "replay hand_start==settle==result.rounds_played",
+        rounds_played > 0 and hs == st == rounds_played,
+        f"hs={hs} settle={st} rounds_played={rounds_played}",
     )
     # 每手都有 deal_hole
     dh = rep_types.count("deal_hole")
@@ -663,10 +664,10 @@ def test_leaderboard_and_contest(
           f"got {len(pairings)}")
     check("standings 非空", len(standings) > 0, "空")
     if standings:
-        # 积分按 (points desc, net_chips desc) 排序
+        # 积分按 (points desc, delta_total desc) 排序
         pts = [s.get("points", 0) for s in standings]
         check("standings 按积分降序", pts == sorted(pts, reverse=True), str(pts))
-        check("standings 含 net_chips", "net_chips" in standings[0], str(standings[0])[:80])
+        check("standings 含 delta_total", "delta_total" in standings[0], str(standings[0])[:80])
 
 
 def main() -> int:

@@ -1,7 +1,7 @@
 """赛事正式排名 + 破同分（预赛/决赛 P2）。
 
 基于 ContestManager.standings（P0 已改 entry_id 键），计算全员唯一连续正式名次，
-破同分链：points → buchholz_cut1 → sonneborn_berger → head_to_head → net_bb_per_100
+破同分链：points → buchholz_cut1 → sonneborn_berger → head_to_head → normalized_delta
 → technical_losses → entry.seed。
 
 各破同分项（基于该阶段所有已完成对局）：
@@ -9,7 +9,7 @@
 - Buchholz Cut1：去掉最高对手分后的 Buchholz（减少一场极端对手的影响）
 - Sonneborn-Berger：该 entry 击败的对手 points 之和（胜场对手强度加权）
 - Head-to-head：同分者之间直接对战胜率
-- net_bb_per_100：holdem bb/100 净筹码（通用层 normalize_earnings）
+- normalized_delta：本游戏的座位 0 归一化分差（Holdem 为大盲注）
 - technical_losses：技术负次数（越少越好，P4 落 technical_loss 后用）
 - entry.seed：报名序（最后兜底，确定性）
 """
@@ -105,14 +105,14 @@ def compute_official_ranking(
     pairings: list[dict],
     matches: dict[str, dict],
     *,
-    normalize_earnings=None,
+    normalize_delta=None,
 ) -> list[dict]:
     """计算全员唯一连续正式名次（含破同分明细）。
 
-    standings: ContestManager.standings() 返回（每行含 entry_id/bot_id/points/net_chips/seed/...）。
+    standings: ContestManager.standings() 返回（每行含 entry_id/bot_id/points/delta_total/seed/...）。
     pairings: 该阶段对阵（含 entry_a_id/entry_b_id/match_id）。
     matches: match_id → match dict。
-    normalize_earnings: GameSpec.normalize_earnings（holdem: ea/100 → bb/100；棋类透传）。
+    normalize_delta: GameSpec.normalize_delta（Holdem: 筹码差/BB；棋类透传）。
     返回排序后的列表，每行加 rank + tiebreaks（dict）。
     """
     # points 查表（entry_id → points）
@@ -139,16 +139,20 @@ def compute_official_ranking(
         h2h_wins = sum(o["won"] for o in same_pts_opps)
         h2h_total = len(same_pts_opps)
         h2h_rate = h2h_wins / h2h_total if h2h_total else 0.0
-        # net_bb_per_100：归一化净筹码
-        net_chips = int(s.get("net_chips") or 0)
-        net_bb = normalize_earnings(net_chips) if normalize_earnings else float(net_chips)
+        # 原始分差经当前游戏 spec 换算为可比较的单位。
+        delta_total = int(s.get("delta_total") or 0)
+        normalized = (
+            normalize_delta(delta_total)
+            if normalize_delta
+            else float(delta_total)
+        )
         tiebreaks = {
             "points": pts.get(eid, 0),
             "buchholz": buchholz,
             "buchholz_cut1": buchholz_cut1,
             "sonneborn_berger": sonneborn,
             "head_to_head": h2h_rate,
-            "net_bb_per_100": net_bb,
+            "normalized_delta": normalized,
             "technical_losses": technical_losses.get(eid, 0),
             "seed": int(s.get("seed") or 0),
         }
@@ -161,7 +165,7 @@ def compute_official_ranking(
             -r["tiebreaks"]["buchholz_cut1"],
             -r["tiebreaks"]["sonneborn_berger"],
             -r["tiebreaks"]["head_to_head"],
-            -r["tiebreaks"]["net_bb_per_100"],
+            -r["tiebreaks"]["normalized_delta"],
             r["tiebreaks"]["technical_losses"],  # 升序
             r["tiebreaks"]["seed"],  # 升序（确定性兜底）
         )
