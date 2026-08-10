@@ -1,6 +1,8 @@
 """邮件默认品牌与种子模板回归。"""
 from __future__ import annotations
 
+from pathlib import Path
+
 from bzplat.backend.mail import (
     DEFAULT_SENDER_NAME,
     MailConfig,
@@ -29,6 +31,13 @@ def test_mail_config_uses_official_sender_name_by_default(monkeypatch):
 
     monkeypatch.setenv("SMTP_FROM_NAME", "赛事组委会")
     assert MailConfig().from_name == "赛事组委会"
+
+
+def test_env_example_uses_the_same_official_sender_name():
+    env_example = (Path(__file__).parents[3] / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    assert "SMTP_FROM_NAME=Botbattle" in env_example.splitlines()
 
 
 def test_default_templates_use_one_multigame_botbattle_identity():
