@@ -435,6 +435,72 @@ def test_neutral_column_migration_prefers_existing_new_values(tmp_path):
     migrated.close()
 
 
+def test_physical_result_columns_only_backfill_missing_new_json_keys(tmp_path):
+    """新 JSON 键优先于旧物理列；非法 JSON 可先规范化再安全回填。"""
+    db = str(tmp_path / "physical-and-json-results.db")
+    store = Store(db)
+    owner = store.create_user("owner", "owner@example.com", "hash")
+    bot = store.create_bot(owner["id"], "gomoku", game_id="gomoku")
+    for match_id in ("result-conflict", "result-invalid"):
+        store.create_match(match_id, bot["id"], bot["id"], game_id="gomoku")
+        store.update_match(match_id, status="completed", winner=0)
+    store.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE matches_gomoku ADD COLUMN hands_played INTEGER")
+    conn.execute("ALTER TABLE matches_gomoku ADD COLUMN earnings_a INTEGER")
+    conn.execute("ALTER TABLE matches_gomoku ADD COLUMN earnings_b INTEGER")
+    conn.execute(
+        "UPDATE matches_gomoku SET hands_played=99,earnings_a=77,earnings_b=-77,"
+        "result=? WHERE id='result-conflict'",
+        (
+            json.dumps(
+                {
+                    "rounds_played": 9,
+                    "deltas": [1, -1],
+                    "normalized_delta": 999.0,
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        "UPDATE matches_gomoku SET hands_played=7,earnings_a=4,earnings_b=-4,"
+        "result='not-json' WHERE id='result-invalid'"
+    )
+    conn.commit()
+    conn.close()
+
+    Store(db).close()
+    migrated = sqlite3.connect(db)
+    conflict = json.loads(
+        migrated.execute(
+            "SELECT result FROM matches_gomoku WHERE id='result-conflict'"
+        ).fetchone()[0]
+    )
+    invalid = json.loads(
+        migrated.execute(
+            "SELECT result FROM matches_gomoku WHERE id='result-invalid'"
+        ).fetchone()[0]
+    )
+    columns = {
+        row[1] for row in migrated.execute("PRAGMA table_info(matches_gomoku)")
+    }
+    assert conflict == {
+        "rounds_played": 9,
+        "deltas": [1, -1],
+        "normalized_delta": 1.0,
+    }
+    assert invalid == {
+        "rounds_played": 7,
+        "deltas": [4, -4],
+        "normalized_delta": 4.0,
+    }
+    assert {"hands_played", "earnings_a", "earnings_b"}.isdisjoint(columns)
+    assert migrated.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert migrated.execute("PRAGMA foreign_key_check").fetchall() == []
+    migrated.close()
+
+
 def test_neutral_contract_schema_and_json_migrate_in_one_transaction(
     tmp_path, monkeypatch
 ):

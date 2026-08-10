@@ -1636,9 +1636,9 @@ class ContestManager:
                         stats[eb_id]["draws"] += 1
             else:
                 # 普通赛制：单场胜负累加
-                ea_earn, eb_earn = match_deltas(m)
-                stats[ea_id]["delta_total"] += ea_earn
-                stats[eb_id]["delta_total"] += eb_earn
+                delta_a, delta_b = match_deltas(m)
+                stats[ea_id]["delta_total"] += delta_a
+                stats[eb_id]["delta_total"] += delta_b
                 wa = points_for_result(scoring, m["winner"], 0)
                 wb = points_for_result(scoring, m["winner"], 1)
                 stats[ea_id]["points"] += wa

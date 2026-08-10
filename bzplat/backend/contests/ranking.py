@@ -24,10 +24,8 @@ def _entry_opponents_map(
 ) -> dict[int, list[dict]]:
     """entry_id → 该阶段它打过的所有对手记录 [{opp_entry, won, draw, opp_points}]。
 
-    matches: match_id → match dict（含 status/winner/result.deltas）。
+    matches: match_id → match dict（含 status/winner）。
     """
-    from bzplat.backend.store.db import match_deltas
-
     out: dict[int, list[dict]] = {}
     for p in pairings:
         mid = p.get("match_id")
@@ -47,28 +45,25 @@ def _entry_opponents_map(
         if legs_data:
             for lg in legs_data:
                 w = lg.get("winner")
-                ld = lg.get("deltas") or [0, 0]
-                ea_earn, eb_earn = int(ld[0]), int(ld[1])
-                for me, opp, side, my_earn in (
-                    (ea, eb, 0, ea_earn),
-                    (eb, ea, 1, eb_earn),
+                for me, opp, side in (
+                    (ea, eb, 0),
+                    (eb, ea, 1),
                 ):
                     won = 1 if w == side else 0
                     draw = 1 if w is None else 0
                     out.setdefault(me, []).append(
-                        {"opp_entry": opp, "won": won, "draw": draw, "earn": my_earn}
+                        {"opp_entry": opp, "won": won, "draw": draw}
                     )
         else:
             w = m.get("winner")
-            ea_earn, eb_earn = match_deltas(m)  # 从 result.deltas 取（取代旧 earnings_a/b 列）
-            for me, opp, side, my_earn in (
-                (ea, eb, 0, ea_earn),
-                (eb, ea, 1, eb_earn),
+            for me, opp, side in (
+                (ea, eb, 0),
+                (eb, ea, 1),
             ):
                 won = 1 if w == side else 0
                 draw = 1 if w is None else 0
                 out.setdefault(me, []).append(
-                    {"opp_entry": opp, "won": won, "draw": draw, "earn": my_earn}
+                    {"opp_entry": opp, "won": won, "draw": draw}
                 )
     return out
 

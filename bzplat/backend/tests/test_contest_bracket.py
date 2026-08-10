@@ -1,6 +1,7 @@
 """赛事对阵图 + 显示 Bot 名测试（PR-6）。"""
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
@@ -37,6 +38,34 @@ def test_contest_bracket_resolves_names(tmp_path):
     assert row["bot_b_name"] == "botB"
     assert row["owner_a_name"] == "alice"
     assert row["owner_b_name"] == "bob"
+    s.close()
+
+
+@pytest.mark.parametrize("persisted_game_id", ["", "unknown-game"])
+def test_contest_bracket_rejects_invalid_persisted_game_id(
+    tmp_path, persisted_game_id
+):
+    """赛事持久化 game_id 不可缺失或静默猜成 Holdem。"""
+    s = _store(tmp_path)
+    organizer = s.create_user("org", "o@ex.com", "x", role="organizer")
+    contest_id = s.create_contest(
+        "Cup", organizer_id=organizer["id"], game_id="holdem"
+    )["id"]
+    with s._tx() as conn:
+        conn.execute(
+            "UPDATE contests SET game_id=? WHERE id=?",
+            (persisted_game_id, contest_id),
+        )
+    with pytest.raises(ValueError, match="game_id"):
+        s.contest_bracket(contest_id)
+    s.close()
+
+
+def test_contest_bracket_rejects_missing_contest_identity(tmp_path):
+    """不存在的赛事也不得借默认游戏查询错表。"""
+    s = _store(tmp_path)
+    with pytest.raises(ValueError, match="game_id"):
+        s.contest_bracket(999_999)
     s.close()
 
 

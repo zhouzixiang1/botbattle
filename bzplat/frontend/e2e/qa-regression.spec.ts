@@ -241,6 +241,23 @@ test.beforeAll(async ({ request }) => {
 for (const viewport of VIEWPORTS) {
   test(`guest navigation has no severe layout or runtime error (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height })
+    const tierRequests = new Map<string, number>()
+    let injectedTierMismatch: string | null = null
+    await page.route('**/api/tiers?**', async (route) => {
+      const url = new URL(route.request().url())
+      const gameId = url.searchParams.get('game_id') ?? ''
+      tierRequests.set(gameId, (tierRequests.get(gameId) ?? 0) + 1)
+      if (viewport.name === 'mobile' && injectedTierMismatch === null) {
+        injectedTierMismatch = gameId
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ game_id: `${gameId}-mismatch`, tiers: [] }),
+        })
+        return
+      }
+      await route.continue()
+    })
     const monitor = monitorBrowser(page)
     const routes = [
       { path: '/', heading: '首页', evidence: '多游戏 Bot 竞赛平台' },
@@ -290,6 +307,15 @@ for (const viewport of VIEWPORTS) {
       await expect(page.getByRole('link', { name: '排行榜', exact: true })).toBeVisible()
       await page.getByRole('link', { name: '排行榜', exact: true }).click()
       await expect(page).toHaveURL(/#\/leaderboard$/)
+      await monitor.settle()
+    }
+    expect(tierRequests.size, '排行榜应拉取至少一款游戏的段位曲线').toBeGreaterThan(0)
+    for (const [gameId, count] of tierRequests) {
+      const expected = viewport.name === 'mobile' && gameId === injectedTierMismatch ? 2 : 1
+      expect(
+        count,
+        `${gameId} concurrent TierBadge hooks must share one request; failed request may retry once`,
+      ).toBe(expected)
     }
     await monitor.expectClean()
   })

@@ -1394,6 +1394,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, _tbl, "match_config", "TEXT NOT NULL DEFAULT '{}'")
         _add_col(conn, _tbl, "result", "TEXT NOT NULL DEFAULT '{}'")
         _mcols = _table_cols(conn, _tbl)
+        # 历史库可能绕过了现行 schema，留下非法 JSON 或非 object JSON。先把它们
+        # 规范为空对象，避免下面的 json_set/json_type 在迁移中途抛错。物理旧列仅
+        # 用于补齐 JSON 尚不存在的新键；若新键已存在（即使值为 JSON null），新
+        # 契约值始终优先，绝不能被旧列覆盖。
+        conn.execute(
+            f"UPDATE {_tbl} SET result='{{}}' "
+            "WHERE result IS NULL OR json_valid(result)=0"
+        )
+        conn.execute(
+            f"UPDATE {_tbl} SET result='{{}}' "
+            "WHERE COALESCE(json_type(result),'') <> 'object'"
+        )
         if "total_hands" in _mcols:
             # 历史归档：total_hands → match_config.hands（按行原值，不再作为规则输入）
             conn.execute(
@@ -1412,7 +1424,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             # 旧物理进度列先归档到唯一中性键；零轮技术判负也必须保留。
             conn.execute(
                 f"UPDATE {_tbl} SET result=json_set(result,'$.rounds_played',hands_played) "
-                "WHERE hands_played IS NOT NULL"
+                "WHERE hands_played IS NOT NULL "
+                "AND json_type(result,'$.rounds_played') IS NULL"
             )
         if "earnings_a" in _mcols or "earnings_b" in _mcols:
             _earnings_a_source = "earnings_a" if "earnings_a" in _mcols else "0"
@@ -1425,7 +1438,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"UPDATE {_tbl} SET result=json_set(result,'$.deltas',"
                 f"json_array({_earnings_a_source},{_earnings_b_source})) "
-                f"WHERE {_earnings_where}"
+                f"WHERE ({_earnings_where}) "
+                "AND json_type(result,'$.deltas') IS NULL"
             )
         if {
             "hands_played",
@@ -2281,7 +2295,10 @@ class Store:
         is_builtin = 1 if fields.get("is_builtin") else 0
         is_active = 1 if fields.get("is_active", True) else 0
         # 仅缺省字段使用创建入口默认；显式空值/未知值必须失败。
-        requested_game_id = fields["game_id"] if "game_id" in fields else "holdem"
+        if "game_id" in fields:
+            requested_game_id = fields["game_id"]
+        else:
+            requested_game_id = "holdem"
         game_id = _registered_game_id(requested_game_id)
         runtime_mode = fields.get("runtime_mode") or DEFAULT_RUNTIME_MODE
         if runtime_mode not in VALID_RUNTIME_MODES:
@@ -5341,7 +5358,7 @@ class Store:
             ct = c.execute(
                 "SELECT game_id FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
-            gid = (ct["game_id"] if ct and ct["game_id"] else "holdem").strip().lower()
+            gid = _registered_game_id(ct["game_id"] if ct else None)
             tbl = _matches_table(gid)
             rows = c.execute(
                 "SELECT p.*, ba.name AS bot_a_name, ba.display_name AS bot_a_display, "

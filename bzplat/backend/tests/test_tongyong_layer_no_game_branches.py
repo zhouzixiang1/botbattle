@@ -61,6 +61,7 @@ _IMPORT_RE = re.compile(
 _SILENT_FALLBACK_RE = re.compile(
     r'\bor\s*["\']' + _GAMES + r'["\']'
     r'|\.get\(\s*["\']game_id["\']\s*,\s*["\']' + _GAMES + r'["\']\s*\)'
+    r'|\bif\b[^\n]*\belse\s*["\']' + _GAMES + r'["\']'
 )
 _ALLOW_RE = re.compile(r'#\s*allow-game-registry-definition')
 
@@ -160,6 +161,7 @@ def test_guard_regex_catches_branch_variants():
         'import bzplat.backend.games.gomoku',
         'gid = game_id or "holdem"',
         'gid = row.get("game_id", "holdem")',
+        'gid = row["game_id"] if row and row["game_id"] else "holdem"',
     ]
     for sample in must_catch:
         assert (

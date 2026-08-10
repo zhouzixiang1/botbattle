@@ -239,6 +239,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 ### 5.2 组件库与页面
 - **26 个 shadcn 共享原语**（`src/components/ui/`）：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart/Sheet/Slider 等，是全项目唯一组件抽象层。
 - **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、tier-badge.tsx、BrandMark.tsx（平台品牌标识）、AuthShell.tsx（登录/注册/重置/验证的居中壳：品牌头部 + 居中 Card，解决空旷）、use-playback.ts（仅导出 SPEEDS 速度档常量；MatchViewer 内联实现事件 buffer/数值 cursor/playing/speed/稳定 interval 节拍的回放与直播 DVR 逻辑；节拍只依赖播放态和速度，通过 ref 读取最新事件长度，持续高频 SSE 不会反复重置 timer 而饿死游标）。
+- **段位请求缓存**：`lib/tiers.ts` 按 `game_id` 同时缓存已解析曲线与 in-flight Promise；排行榜同页数十个 `TierBadge` 与 React StrictMode effect 重放只发一次 `/api/tiers`。请求失败会清除 singleflight 但不伪造其他游戏曲线，下次进入可正常重试；成功后同一 SPA 再访直接命中已解析缓存。
 - **全局 Shell**：app-shell.tsx 按登录态分两套 chrome：
   - **已登录**：**lg+ 桌面左侧边栏**（Logo + compact 搜索 + 垂直导航 + 底部用户区/主题/通知）；**<lg 移动端顶栏 + Sheet 抽屉**。
   - **访客（未登录）**：**全断点顶栏**（BrandMark + 公开导航 + 主题切换 + **登录/注册**；窄屏用 Sheet 抽屉放导航与 CTA）。侧栏仅登录后出现，避免访客桌面无入口。
