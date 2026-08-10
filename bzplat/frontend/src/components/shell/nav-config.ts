@@ -20,7 +20,7 @@ export interface NavItem {
   end?: boolean
 }
 
-/** 主导航：桌面端水平展示，移动端进抽屉 */
+/** 主导航：xl+ 侧栏纵向展示，较窄视口进入 Sheet 抽屉。 */
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: '首页', icon: Home, end: true },
   { to: '/challenge', label: '挑战', icon: Swords },

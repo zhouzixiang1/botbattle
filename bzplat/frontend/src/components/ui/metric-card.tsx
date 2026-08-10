@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
+import { OverflowText } from '@/components/ui/overflow-text'
 
 /* ── 指标卡：用于 Dashboard / Bot 详情 / 用户主页的数值展示 ──
  * plain=true 时不渲染外层 Card（无边框无阴影），用于嵌套进另一个 Card 的指标网格
@@ -27,21 +28,21 @@ export function MetricCard({
   const body = (
     <div className="flex items-start justify-between gap-2">
       <div className="min-w-0 flex-1">
-        <div className="truncate text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <OverflowText className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {label}
-        </div>
-        <div
+        </OverflowText>
+        <OverflowText
           className={cn(
-            'mt-1 w-full truncate font-mono text-base font-bold tabular-nums sm:text-lg lg:text-xl',
+            'mt-1 w-full font-mono text-base font-bold tabular-nums sm:text-lg lg:text-xl',
             danger ? 'text-destructive' : 'text-foreground'
           )}
-          title={typeof value === 'string' || typeof value === 'number' ? String(value) : undefined}
+          tooltip={typeof value === 'string' || typeof value === 'number' ? String(value) : false}
         >
           {value}
-        </div>
-        {hint && <div className="mt-0.5 truncate text-xs text-muted-foreground" title={hint}>{hint}</div>}
+        </OverflowText>
+        {hint && <OverflowText className="mt-0.5 text-xs text-muted-foreground">{hint}</OverflowText>}
       </div>
-      {icon && <div className="shrink-0 text-muted-foreground opacity-70">{icon}</div>}
+      {icon && <div aria-hidden="true" className="shrink-0 text-muted-foreground opacity-70">{icon}</div>}
     </div>
   )
   if (plain) {

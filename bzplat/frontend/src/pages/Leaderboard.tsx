@@ -391,7 +391,7 @@ export default function Leaderboard() {
           data-testid="leaderboard-game-tabs"
           className={cn(
             'sticky z-30 mb-3 grid h-auto w-full grid-cols-3 gap-1 rounded-lg border border-border bg-background/95 p-1 shadow-sm backdrop-blur',
-            'top-14 lg:top-0',
+            'top-14 xl:top-0',
           )}
         >
           {GAMES.map((game) => {
@@ -451,7 +451,7 @@ export default function Leaderboard() {
         <Card className="gap-0 py-0">
           <div className="hidden md:block" data-testid="leaderboard-desktop">
             <Table className="table-fixed" containerClassName="overflow-visible">
-              <TableHeader className="sticky top-[6.75rem] z-20 bg-background/95 backdrop-blur lg:top-[3.25rem]">
+              <TableHeader className="sticky top-[6.75rem] z-20 bg-background/95 backdrop-blur xl:top-[3.25rem]">
                 <TableRow>
                   <TableHead className="w-10 px-2">名次</TableHead>
                   <TableHead className="w-[30%]">Bot / 所有者</TableHead>

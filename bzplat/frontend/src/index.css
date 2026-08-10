@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=JetBrains+Mono:wght@400;500;600&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
 
@@ -11,6 +10,37 @@
  */
 :root {
   --radius: 0.625rem;
+
+  /*
+   * Data-Dense Dashboard 密度契约。
+   * 页面 gutter 按 12 / 16 / 20px 递进；标准控件桌面 32px、触屏 40px；
+   * 表头 / 数据行桌面 36 / 40px、触屏 40 / 44px。
+   */
+  --page-gutter: 0.75rem;
+  --page-section-gap: 1rem;
+  --control-height: 2rem;
+  --control-height-compact: 1.75rem;
+  --control-height-lg: 2.5rem;
+  --table-header-height: 2.25rem;
+  --table-row-height: 2.5rem;
+
+  /* Shell / sticky / layer 契约：共享组件只引用这些变量，不散落 magic number。 */
+  --shell-header-height: 3.5rem;
+  --shell-sidebar-width: 14rem;
+  --shell-sidebar-collapsed-width: 3.5rem;
+  --sticky-shell-offset: var(--shell-header-height);
+  --sticky-page-gap: 0.75rem;
+  --sticky-page-offset: calc(var(--sticky-shell-offset) + var(--sticky-page-gap));
+  --sticky-toolbar-height: 0px;
+  --sticky-toolbar-gap: 0px;
+  --sticky-table-offset: calc(var(--sticky-page-offset) + var(--sticky-toolbar-height) + var(--sticky-toolbar-gap));
+  --z-base: 0;
+  --z-sticky: 30;
+  --z-navigation: 40;
+  --z-modal: 60;
+  /* Radix 浮层 portal 到 body，须高于可能触发它的 Dialog/Sheet。 */
+  --z-popover: 70;
+  --z-toast: 80;
 
   /* 基础表面：纯白底 + 近黑文字（中性灰，无色相，干净） */
   --background: oklch(0.99 0.002 247);
@@ -106,9 +136,10 @@
      1536/1600px 仍优先保证主画面尺寸。 */
   --breakpoint-3xl: 110rem;
 
-  --font-sans: "DM Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-display: "Source Serif 4", "Noto Serif SC", Georgia, serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* 中文优先使用系统无衬线字族，避免远程字体阻塞与中西文字形割裂。 */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-display: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -182,13 +213,18 @@
     min-height: 100%;
   }
   html {
-    scroll-padding-top: 5rem;
+    scroll-padding-top: var(--sticky-table-offset);
+    scrollbar-gutter: stable;
   }
   body {
+    min-width: 20rem;
     font-family: var(--font-sans);
+    font-size: 1rem;
+    line-height: 1.5;
     background: var(--background);
     color: var(--color-foreground);
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
     /* 浅色：顶部一抹 emerald 微光；暗色：纯净深底 */
     background-image: radial-gradient(
       ellipse 120% 80% at 50% -20%,
@@ -206,6 +242,23 @@
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
+    touch-action: manipulation;
+  }
+  :focus-visible {
+    scroll-margin-block: var(--sticky-table-offset) 1rem;
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 24%, transparent);
+    color: var(--foreground);
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  /* flex/grid 的直接子项必须允许收缩，长中文名与标识符不再撑破布局。 */
+  :where([class~="flex"], [class~="inline-flex"], [class~="grid"]) > * {
+    min-width: 0;
   }
   /* 移动端防聚焦缩放 */
   @media screen and (max-width: 767px) {
@@ -214,6 +267,55 @@
     textarea {
       font-size: 16px !important;
     }
+  }
+}
+
+@media (min-width: 40rem) {
+  :root {
+    --page-gutter: 1rem;
+  }
+}
+
+@media (min-width: 80rem) {
+  :root {
+    --page-gutter: 1.25rem;
+  }
+
+  /* xl+ 非认证页面由 sticky sidebar 导航，不再保留移动顶栏高度。 */
+  html:has([data-app-shell][data-sidebar-visible="true"]),
+  [data-app-shell][data-sidebar-visible="true"] {
+    --sticky-shell-offset: 0px;
+  }
+}
+
+@media (pointer: coarse) {
+  :root {
+    --control-height: 2.5rem;
+    --control-height-compact: 2.5rem;
+    --control-height-lg: 2.75rem;
+    --table-header-height: 2.5rem;
+    --table-row-height: 2.75rem;
+  }
+
+  :where(
+    [data-slot="button"],
+    [data-slot="input"],
+    [data-slot="select-trigger"],
+    [data-slot="tabs-trigger"]
+  ) {
+    min-width: var(--control-height);
+    min-height: var(--control-height);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
@@ -230,7 +332,8 @@
   .page-title {
     font-family: var(--font-display);
     font-weight: 700;
-    letter-spacing: -0.02em;
+    line-height: 1.2;
+    letter-spacing: -0.025em;
   }
 
   /* 浅色卡片（过渡用，新代码请用 <Card> 组件） */
@@ -239,6 +342,10 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: var(--shadow-card);
+  }
+
+  [data-sonner-toaster] {
+    z-index: var(--z-toast) !important;
   }
 }
 

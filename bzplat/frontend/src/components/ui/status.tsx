@@ -18,12 +18,13 @@ export function EmptyState({
 }) {
   return (
     <div
+      data-slot="empty-state"
       className={cn(
         'flex flex-col items-center justify-center gap-2 py-10 text-sm text-muted-foreground',
         className
       )}
     >
-      {icon ?? <Inbox className="size-7 opacity-40" />}
+      <span aria-hidden="true">{icon ?? <Inbox className="size-7 opacity-40" />}</span>
       <span>{text}</span>
     </div>
   )
@@ -33,12 +34,15 @@ export function EmptyState({
 export function Loading({ text = '加载中…', className }: { text?: string; className?: string }) {
   return (
     <div
+      data-slot="loading-state"
+      role="status"
+      aria-live="polite"
       className={cn(
         'flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground',
         className
       )}
     >
-      <Loader2 className="size-4 animate-spin" />
+      <Loader2 aria-hidden="true" className="size-4 animate-spin" />
       <span>{text}</span>
     </div>
   )
@@ -48,12 +52,14 @@ export function Loading({ text = '加载中…', className }: { text?: string; c
 export function ErrorMsg({ msg, className }: { msg?: string; className?: string }) {
   return msg ? (
     <p
+      data-slot="error-message"
+      role="alert"
       className={cn(
         'flex items-center gap-1.5 text-sm text-destructive',
         className
       )}
     >
-      <AlertCircle className="size-4 shrink-0" />
+      <AlertCircle aria-hidden="true" className="size-4 shrink-0" />
       {msg}
     </p>
   ) : null
@@ -69,7 +75,7 @@ export function RefreshBtn({ onClick, className }: { onClick: () => void; classN
       onClick={onClick}
       className={cn('gap-1.5', className)}
     >
-      <RefreshCw className="size-3.5" />
+      <RefreshCw aria-hidden="true" className="size-3.5" />
       刷新
     </Button>
   )
