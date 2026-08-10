@@ -22,9 +22,6 @@ export interface PickBot {
   owner_name?: string
   owner_display?: string
   game_id?: string
-  format?: string
-  os?: string
-  arch?: string
   is_active?: number
   runnable?: boolean
 }
@@ -206,7 +203,7 @@ export default function OpponentPickerModal({
                             {tab === 'mine' && <Badge variant="outline" className="ml-2 text-[10px]">自博弈</Badge>}
                           </span>
                           <span className="text-xs text-muted-foreground">
-                            {b.owner_display || b.owner_name || `#${b.owner_id}`} · {b.format}/{b.os}-{b.arch}
+                            {b.owner_display || b.owner_name || `用户 #${b.owner_id}`}
                           </span>
                         </button>
                       </li>

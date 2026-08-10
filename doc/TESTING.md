@@ -45,12 +45,13 @@ pytest
 | **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot/赛事存在活跃引用时拒绝硬删；批量指派做字段与归属校验 |
 | **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`、`test_runtime_settings`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；固定凭据账号须精确匹配 namespace/用户名/邮箱/角色/密码，压测不得复用任意管理员；隔离 QA 由代码选择 `enabled=False` 的 auto-match profile，生产 profile 与并发契约不变，只读诊断必须显示实际生效值；同名 QA Bot 只有在当前 `upload_root/<bot>/vN/bot.bin` 的规范路径、执行位、ELF 元数据、checksum/size/磁盘内容与 bots 镜像全部一致时才复用，否则在 per-Bot 锁内发布并激活当前运行时的新版本，绝不执行复制库指向主 checkout 的文件 |
 | **社交/通知/成长/站点** | `test_notifications`、`test_comments_likes`、`test_social`、`test_xp_level`、`test_tiers`、`test_load_test_seed`、`test_wiki_pages`；覆盖 actor/target 不存在或在 API 预检后竞态删除时，关注/收藏/评论/点赞/取消点赞都由 `BEGIN IMMEDIATE` 写事务稳定返回 404，XP 与通知无副作用；删实体/用户清孤儿且即时同步对局点赞缓存；自评论不通知自己；通知使用展示层 1-based 座位；偏好 REST 严格 boolean，浏览器忽略迟到初始 GET、按字段串行合并快速点击并让最后一次操作成为服务端/UI 真值；以及统一 10 场定级阈值与正式榜优先排序 |
+| **单游戏排行榜契约** | `test_leaderboard_density`、`test_tiers`、`test_pagination`、`test_response_field_whitelist`；Store/API 缺失或未知 `game_id` 必须拒绝，正式 rank 与定级分段/概览由后端权威生成，分页名次保持全局连续，rating 变化只读同游戏前一历史快照；最近对局必须同时存在于历史 reason、同 game 索引和物理 completed 行，且该 Bot 确为任一座位参赛方。公开行不返回内部累计分差、重复 game_id 或恒定平台三元组 |
 
 ## 3. Playwright 真浏览器回归
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 4 个 spec，Playwright 静态收集为 50 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 5 个 spec，Playwright 静态收集为 53 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
@@ -58,6 +59,7 @@ pytest
 | `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、`move/pass/turn` 逐事件行动方与强制让行真值、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/844/1024/1312/1600/1920/2048/2560 多比例方形棋盘与滚动/时序协作、局面概览数值、Safari 截图同尺寸的 2048×1024/1152 Chromium 布局回归（观赛与真人完整棋盘、长时序独立滚动）、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；赛事时间按状态收口、空值/显式 `NULL`、保存失败原位反馈、真实隔离库重载与 audit、500+ 字连续长文本、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
+| `leaderboard-density.spec.ts` | 访客/普通用户/组织者/admin × Desktop/Laptop/Mobile；每个 context 精确断言 `/api/auth/me` 的匿名状态或 username/role，非访客三类各只登录一次并复用独立 storageState；长 Bot/用户名折行、桌面六列表头、移动列表卡、正式/定级分段、滚动中可操作的 Radix tabs/表头 sticky、慢响应切游戏立即清旧概览、根元素零横溢出、三游戏显式请求、tiers 同 game singleflight 与 Console/Network clean |
 
 运行前必须是 worktree 隔离实例；`beforeAll` 会校验 `/api/health` 的 `qa_instance=true`，Vite 也会拒绝代理到 50380：
 
@@ -109,6 +111,8 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 重基最终完整 pytest | **1093 passed / 1 warning（226.20s）** | Pencil 提交重基到 `main@5a2662f` 后，在同一最终代码 HEAD 完整执行；warning 为既有 Starlette/httpx deprecation |
 | 重基最终完整 Playwright | **50/50 passed（3.4m）** | 隔离 QA backend `50382` + worktree Vite `5174`、Chromium 单 worker；覆盖 PR154 的 tiers 同键 singleflight/失败重试、中性结果契约，以及 Pencil 事故链路、无效命中零请求、强制让行、键盘、多视口和 Console/Network |
 | Pencil 响应式仪表盘最终门禁 | **pytest 1093 passed / 1 warning（231.60s）；Playwright 50/50 passed（3.9m）；build 2562 modules** | 基于 `main@fffdd9c` 的独立 QA backend `50384` + Vite `5176`，主库复制为独立 inode；真实事故对局 `20260810143624-4149d6a3` 的 54 步/206 事件 fixture 与技术终局 fixture 覆盖 2560/2048/1920/1600/1536/1366/1312/1024/844/390/320 多比例、实际格子归属、连边构成、三栏顶部对齐且概览不越出棋盘、短屏双栏、折叠回收空轨、手机堆叠、页面滚动与时序内部滚动；完整 50 条含四角色与三游戏，warning 为既有 Starlette/httpx deprecation |
+| 排行榜重构最终完整 pytest / build | **1096 passed / 1 warning（228.65s）；build 2562 modules** | 排行榜提交重基到 `main@22c4c645` 后，在同一最终代码 HEAD 完整执行；包含上述 Pencil 响应式仪表盘、中性结果基线及新增的单游戏排行榜、分页全局名次、相邻评分变化、recent-match game/物理表/completed/实际参赛方四重校验回归；warning 为既有 Starlette/httpx deprecation |
+| 排行榜重构最终完整 Playwright | **53/53 passed（3.8m）** | 隔离 QA backend `50382` + worktree Vite `5174`、Chromium 单 worker。保留全部 Pencil/中性结果/响应式仪表盘基线并新增 Desktop `1440×900`、Laptop `1024×768`、Mobile `390×844` 三条密度回归；每条逐一覆盖访客、普通用户、组织者、管理员，并精确断言 `/api/auth/me`：访客为 401 且无本地会话，另外三类 username/role 与账号一致、各真实登录一次后复用独立 storageState。页面/请求/滚动中切 tabs/慢网清旧概览/sticky/长文本/无横溢出/singleflight/Console/Network 断言不降级 |
 | Admin 浏览器定向回归 | **9 passed（24.7s）** | `admin-audit.spec.ts` 全量；含状态边界、Dialog 内错误、真实隔离 DB 的手动开赛 `NULL` 重载与成功 audit 证据 |
 | Admin 时间定向后端回归 | **26 passed / 1 warning（8.04s）** | `test_admin_contest_status.py`；覆盖状态边界、发布态轮次错峰重排/清空、已有 match 拒绝、强制 SQLite 写失败整事务回滚；warning 为既有 Starlette/httpx deprecation |
 | QA profile + Admin 联合回归 | **53 passed / 1 warning（12.22s）** | `test_auto_matcher.py` + `test_runtime_settings.py` + `test_admin_contest_status.py`；覆盖 disabled loop 零 challenge、main QA wiring、实际生效只读诊断、生产 profile 不变及赛事时间全部边界 |

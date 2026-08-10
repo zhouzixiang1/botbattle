@@ -57,7 +57,10 @@ def test_leaderboard_drops_dead_fields(tmp_path):
             return  # 无数据则无可测（对局可能 aborted）
         row = lb[0]
         # 裁剪的死字段
-        for dead in ("vol", "last_played_at", "is_builtin", "owner_display"):
+        for dead in (
+            "vol", "last_played_at", "is_builtin", "owner_display",
+            "format", "os", "arch", "game_id", "delta_total", "net_chips",
+        ):
             assert dead not in row, f"leaderboard 仍含死字段 {dead}"
         # 守护：tier_level 保留（test_tiers + 段位渲染依赖）
         assert "tier_level" in row
@@ -71,7 +74,10 @@ def test_bot_profile_drops_dead_fields(tmp_path):
         r = c.get(f"/api/bots/{b['id']}/profile")
         assert r.status_code == 200
         p = r.json()["profile"]
-        for dead in ("vol", "delta_total", "rated_at", "is_builtin", "updated_at"):
+        for dead in (
+            "vol", "delta_total", "rated_at", "is_builtin", "updated_at",
+            "format", "os", "arch",
+        ):
             assert dead not in p, f"bot_profile 仍含死字段 {dead}"
         # 守护：测试依赖字段保留
         for keep in ("matches_played", "tier_level", "owner_id"):

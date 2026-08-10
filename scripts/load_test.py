@@ -268,7 +268,7 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     r = api.client.get("/api/wiki?slug=protocol")
     check("GET /api/wiki?slug=protocol", r.status_code == 200 and "markdown" in r.json(), r.text[:80])
 
-    r = api.client.get("/api/leaderboard?limit=20")
+    r = api.client.get("/api/leaderboard?game_id=holdem&limit=20")
     check("GET /api/leaderboard", r.status_code == 200 and "leaderboard" in r.json(), r.text[:80])
 
     # 段位定义（PR-5）
@@ -621,7 +621,7 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
         check("replay events 非空", len(events) > 0, "空")
 
     # 排行榜 Glicko 已更新（challenge 类型会更新）
-    r = api.client.get("/api/leaderboard?limit=50")
+    r = api.client.get("/api/leaderboard?game_id=holdem&limit=50")
     lb = r.json().get("leaderboard", [])
     played = [x for x in lb if x.get("matches_played", 0) > 0]
     check("排行榜存在已参赛 bot（Glicko 更新）", len(played) > 0, f"played={len(played)}")

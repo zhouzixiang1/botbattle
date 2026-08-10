@@ -39,9 +39,6 @@ interface BotProfile {
   owner_name?: string
   owner_display?: string
   is_active: number | boolean
-  format?: string
-  os?: string
-  arch?: string
   current_version?: number
   created_at?: string
   rating?: number
@@ -306,7 +303,6 @@ export default function BotDetail() {
                 )}
               </span>
               <span>版本 v{profile.current_version ?? 1}</span>
-              <span className="max-w-full break-all font-mono">{profile.format}/{profile.os}-{profile.arch}</span>
               {profile.created_at && <span>创建于 {fmtDate(profile.created_at)}</span>}
             </div>
             {user && (

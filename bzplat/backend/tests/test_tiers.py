@@ -46,9 +46,9 @@ def test_leaderboard_includes_tier_and_delta(tmp_path):
     # 落两条历史：prev=1700, current=1850 → delta=+150
     s.add_rating_history(b["id"], 1700, 80, 0.06, 1)
     s.add_rating_history(b["id"], 1850, 80, 0.06, 2)
-    lb = s.list_leaderboard()
-    assert len(lb) == 1
-    row = lb[0]
+    lb = s.list_leaderboard(game_id="holdem")
+    assert len(lb["items"]) == 1
+    row = lb["items"][0]
     assert row["tier_name"] == "熟练"
     assert row["tier_level"] == 2
     assert row["rating_delta"] == 150.0
@@ -61,9 +61,9 @@ def test_leaderboard_no_history_delta_none(tmp_path):
     b = s.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
     s.ensure_rating(b["id"])
     s.update_rating_row(b["id"], rating=1500)
-    lb = s.list_leaderboard()
-    assert lb[0]["rating_delta"] is None
-    assert lb[0]["tier_name"] == "新手"
+    lb = s.list_leaderboard(game_id="holdem")
+    assert lb["items"][0]["rating_delta"] is None
+    assert lb["items"][0]["tier_name"] == "新手"
     s.close()
 
 
@@ -87,8 +87,10 @@ def test_tiers_endpoint_and_leaderboard_endpoint(tmp_path):
     assert len(r.json()["tiers"]) == 6
     assert r.json()["placement_required"] == 10
     r = c.get("/api/leaderboard")
+    assert r.status_code == 422
+    r = c.get("/api/leaderboard?game_id=holdem")
     assert r.status_code == 200
-    # 空榜单也应 200
+    # 显式游戏维度下空榜单也应 200
     assert "leaderboard" in r.json()
 
 
@@ -143,7 +145,9 @@ def test_disabled_placement_contract_does_not_hide_tier_or_reorder(tmp_path):
         store.ensure_rating(bot["id"])
     store.update_rating_row(lower["id"], rating=1400, matches_played=20)
     store.update_rating_row(higher["id"], rating=2000, matches_played=0)
-    rows = store.list_leaderboard(game_id="holdem", placement_games=0)
+    rows = store.list_leaderboard(
+        game_id="holdem", placement_games=0,
+    )["items"]
     assert [row["bot_id"] for row in rows] == [higher["id"], lower["id"]]
     assert all(row["placement_required"] == 0 for row in rows)
     assert all(row["is_placement"] is False for row in rows)

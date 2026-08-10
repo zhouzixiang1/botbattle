@@ -93,7 +93,7 @@
 | 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
 | 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
-| 浏览器验收 | ✅ PR154 中性结果与 Pencil 修复重基整合后的同一最终代码 HEAD 静态收集 4 spec / 50 条并完整通过 50/50；隔离 worktree 运行产物下无非预期日志 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
+| 浏览器验收 | ✅ 中性结果、Pencil 响应式仪表盘与排行榜重构整合后的同一最终代码 HEAD 静态收集 5 spec / 53 条并完整通过 53/53；隔离 worktree 运行产物下无非预期日志 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |
 
 ## 5. 经验教训

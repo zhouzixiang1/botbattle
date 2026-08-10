@@ -64,7 +64,7 @@ python scripts/load_test.py \
 |------|----------|------|
 | **0 基础** | `GET /api/{health,wiki,leaderboard,contests,contests/templates,matches,users,auth/captcha}`；`GET /api/auth/me`；`POST /api/auth/change-password`（验旧 session 失效） | 公开 + user |
 | **1 Bot** | `GET /api/bots/{mine,public,{id}}`；`POST /api/bots`（HTTP 上传）；`POST /api/bots/{id}/versions`；`POST /api/bots/{id}/active` | user |
-| **2 对局** | `POST /api/matches/challenge`（三游戏混跑 + 自博弈，目标 `TARGET_MATCHES=12` 场；客户端顺序提交、线程并行等待终态）；`GET /api/matches`；`GET /api/matches/{id}`；`GET /api/leaderboard`（验 Glicko 更新） | user |
+| **2 对局** | `POST /api/matches/challenge`（三游戏混跑 + 自博弈，目标 `TARGET_MATCHES=12` 场；客户端顺序提交、线程并行等待终态）；`GET /api/matches`；`GET /api/matches/{id}`；`GET /api/leaderboard?game_id=<id>`（验对应游戏 Glicko 更新） | user |
 | **3 SSE snapshot** | `GET /api/matches/{id}/events`（只验首个非 ping 帧为 snapshot，且含 match + 历史列表；不覆盖后续实时增量） | 公开 |
 | **4 人类 vs Bot** | `POST /api/matches/human`（固定座位 2）；WS `/api/matches/{id}/play`（holdem/gomoku/pencil，按 snapshot/move 维护已占位置，收 `your_turn` 只回合法未占动作直至 `match_end`，收到 `error` 即失败）；结束后再 GET 断言持久化 `status=completed`，并验 per-user ≤1、match_type=human、**Glicko 不变** | user |
 | **5 赛事** | `POST /api/contests`（template）；`/{id}/{open,register,dispatch,start,resume}`；轮询到 finished；验 standings/pairings/stage_results、contest 对局不更新 Glicko | organizer + user |

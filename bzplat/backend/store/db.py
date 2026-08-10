@@ -3410,70 +3410,115 @@ class Store:
             return matches
 
     def list_leaderboard(
-        self, limit: int = 50, *, game_id: str | None = None,
+        self, *, game_id: str, limit: int = 50,
         page: int | None = None, per_page: int = 50,
         placement_games: int | None = None,
-    ) -> list[dict] | dict:
+    ) -> dict:
+        """返回单一游戏的正式榜、定级区和紧凑概览。
+
+        Glicko-2 评分池按游戏隔离，因此 ``game_id`` 是不可省略的维度；Store
+        也必须 fail closed，不能只依赖 API 层阻止跨游戏混排。最近对局只接受
+        同时存在于 rating_history、matches_index 和对应游戏物理表的 completed
+        对局，避免损坏/漂移索引生成错误链接。
+        """
+        gid = _registered_game_id(game_id)
+        match_table = _matches_table(gid)
         with self._tx() as c:
             # rating_delta = 当前 rating - 上一条历史评分（升降趋势）；无历史则 NULL
-            # ratings/rating_history 现按 (bot_id, game_id) 复合键——join/subquery 都
-            # 加 game_id 谓词（bot 绑定单一游戏，r.game_id=b.game_id 恰一行）。
+            # ratings/rating_history 现按 (bot_id, game_id) 复合键——所有 join/subquery
+            # 都加 game_id 谓词，绝不把其他游戏的历史当作“上次变化”。
             #
-            # 注意：SELECT 中含 prev_rating 子查询（含自己的 FROM），_paginate 的
-            # "首个 FROM" 启发会被子查询骗到。故分页时显式写 COUNT（不含子查询），
-            # 行查询交由 _paginate 自动加 LIMIT/OFFSET。
-            base_from = (
+            # SELECT 中含 prev_rating 与 recent-match 子查询；总数/分段概览使用
+            # 独立 eligibility 查询，行查询再追加窗口名次与分页，避免子查询影响 COUNT。
+            eligibility_from = (
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
-                "WHERE b.is_active=1 AND b.format=? AND b.os=? AND b.arch=?"
+                "WHERE b.is_active=1 AND b.format=? AND b.os=? AND b.arch=? "
+                "AND b.game_id=?"
             )
-            params: list[Any] = [
+            eligibility_params: tuple[Any, ...] = (
                 SUPPORTED_BINARY_FORMAT,
                 SUPPORTED_BINARY_OS,
                 SUPPORTED_BINARY_ARCH,
-            ]
-            if game_id:
-                base_from += " AND b.game_id=?"
-                params.append(game_id)
-            sel = (
-                "SELECT r.bot_id, r.rating, r.rd, r.vol, r.wins, r.losses, "
-                "r.draws, r.delta_total, r.matches_played, r.last_played_at, "
-                "b.name AS bot_name, b.display_name AS bot_display, "
-                "b.format, b.os, b.arch, b.is_builtin, b.game_id, "
-                "u.username AS owner_name, u.display_name AS owner_display, "
-                "(SELECT rh.rating FROM rating_history rh "
-                " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id "
-                " ORDER BY rh.id DESC LIMIT 1 OFFSET 1) AS prev_rating "
+                gid,
             )
             placement_required = (
-                max(0, int(placement_games)) if placement_games is not None else None
+                max(0, int(placement_games)) if placement_games is not None else 0
+            )
+            formal_condition = (
+                f"r.matches_played >= {placement_required}"
+                if placement_required > 0 else "1=1"
+            )
+
+            summary_row = c.execute(
+                "SELECT COUNT(*) AS total, "
+                f"SUM(CASE WHEN {formal_condition} THEN 1 ELSE 0 END) AS ranked, "
+                f"SUM(CASE WHEN {formal_condition} THEN 0 ELSE 1 END) AS placement, "
+                f"MAX(r.last_played_at) AS last_rated_at {eligibility_from}",
+                eligibility_params,
+            ).fetchone()
+            summary = {
+                "total": int(summary_row["total"] or 0),
+                "ranked": int(summary_row["ranked"] or 0),
+                "placement": int(summary_row["placement"] or 0),
+                "last_rated_at": summary_row["last_rated_at"],
+            }
+
+            # last_rh 只接纳三处一致的 completed 对局。rating_history.reason 中
+            # 的非 match 原因、错误 game_id 索引和缺失物理行都会被自然跳过。
+            item_from = (
+                f"FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
+                "LEFT JOIN users u ON b.owner_id=u.id "
+                "LEFT JOIN rating_history last_rh ON last_rh.id=("
+                " SELECT rh.id FROM rating_history rh "
+                " JOIN matches_index mi ON mi.id=rh.reason AND mi.game_id=rh.game_id "
+                f" JOIN {match_table} lm ON lm.id=mi.id AND lm.game_id=mi.game_id "
+                " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id AND lm.status=? "
+                " AND (lm.bot_a_id=r.bot_id OR lm.bot_b_id=r.bot_id) "
+                " ORDER BY rh.id DESC LIMIT 1"
+                ") "
+                "WHERE b.is_active=1 AND b.format=? AND b.os=? AND b.arch=? "
+                "AND b.game_id=?"
+            )
+            item_params: tuple[Any, ...] = (
+                STATUS_COMPLETED,
+                *eligibility_params,
+            )
+            sel = (
+                "SELECT r.bot_id, r.rating, r.rd, r.wins, r.losses, "
+                "r.draws, r.matches_played, "
+                "b.name AS bot_name, b.display_name AS bot_display, "
+                "u.username AS owner_name, "
+                "(SELECT rh.rating FROM rating_history rh "
+                " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id "
+                " ORDER BY rh.id DESC LIMIT 1 OFFSET 1) AS prev_rating, "
+                "last_rh.reason AS last_match_id, "
+                "last_rh.created_at AS last_match_at, "
+                f"ROW_NUMBER() OVER (PARTITION BY CASE WHEN {formal_condition} "
+                "THEN 1 ELSE 0 END ORDER BY r.rating DESC, r.matches_played DESC, "
+                "r.bot_id ASC) AS group_rank "
             )
             # 正式榜排在定级中 Bot 之前；组内按 rating、场次、bot_id 稳定排序。
             # placement_required 来自代码配置并先转 int，不接受 SQL 输入。
-            order = " ORDER BY "
-            if placement_required:
-                order += (
-                    f"(r.matches_played >= {placement_required}) DESC, "
-                )
-            order += "r.rating DESC, r.matches_played DESC, r.bot_id ASC"
+            order = (
+                f" ORDER BY ({formal_condition}) DESC, r.rating DESC, "
+                "r.matches_played DESC, r.bot_id ASC"
+            )
             if page is not None:
-                # 显式 COUNT（_paginate 启发在此查询上不可靠）
-                count_sql = f"SELECT COUNT(*) {base_from}"
-                total = int(c.execute(count_sql, tuple(params)).fetchone()[0])
                 pp = max(1, min(200, int(per_page)))
                 off = (max(1, int(page)) - 1) * pp
-                sql = f"{sel}{base_from}{order} LIMIT ? OFFSET ?"
+                sql = f"{sel}{item_from}{order} LIMIT ? OFFSET ?"
                 rows = [_row(r) for r in c.execute(
-                    sql, tuple(params) + (pp, off)
+                    sql, item_params + (pp, off)
                 ).fetchall()]
             else:
-                sql = f"{sel}{base_from}{order} LIMIT ?"
+                pp = max(1, min(limit, 200))
+                sql = f"{sel}{item_from}{order} LIMIT ?"
                 rows = [_row(r) for r in c.execute(
-                    sql, tuple(params) + (max(1, min(limit, 200)),)
+                    sql, item_params + (pp,)
                 )]
-                total = None  # 旧契约不返回 total
             # 计算并补 tier + delta（应用层，避免 SQL 嵌套过深）
-            # 段位 per-game：按该 bot 的 game_id 取对应曲线（经 games 注册表）
+            # 段位 per-game：整个结果集已经钉死 gid，不从行数据猜游戏。
             from bzplat.backend.games import registry as _game_registry
             for row in rows:
                 prev = row.pop("prev_rating", None)
@@ -3481,24 +3526,36 @@ class Store:
                     row["rating_delta"] = round(row["rating"] - prev, 2)
                 else:
                     row["rating_delta"] = None
-                t = _game_registry.tier_for(
-                    _registered_game_id(row.get("game_id")), row["rating"]
-                )
+                t = _game_registry.tier_for(gid, row["rating"])
                 row["tier_level"] = t.level
                 row["tier_key"] = t.key
                 row["tier_name"] = t.name
-                if placement_required is not None:
-                    played = max(0, int(row.get("matches_played") or 0))
-                    row["placement_required"] = placement_required
-                    row["placement_remaining"] = max(
-                        0, placement_required - played
-                    )
-                    row["is_placement"] = (
-                        placement_required > 0 and played < placement_required
-                    )
+                played = max(0, int(row.get("matches_played") or 0))
+                row["placement_required"] = placement_required
+                row["placement_remaining"] = max(
+                    0, placement_required - played
+                )
+                row["is_placement"] = (
+                    placement_required > 0 and played < placement_required
+                )
+                group_rank = row.pop("group_rank", None)
+                row["rank"] = (
+                    None if row["is_placement"] else int(group_rank or 0)
+                )
+
+            result: dict[str, Any] = {
+                "items": rows,
+                "total": summary["total"],
+                "summary": summary,
+                "game_id": gid,
+                "placement_required": placement_required,
+            }
             if page is not None:
-                return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
-            return rows
+                result.update({
+                    "page": max(1, int(page)),
+                    "per_page": pp,
+                })
+            return result
 
     leaderboard = list_leaderboard
 
