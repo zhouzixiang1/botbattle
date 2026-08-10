@@ -55,7 +55,7 @@ pytest
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/1312 方形棋盘与滚动/时序协作、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/1312 方形棋盘与滚动/时序协作、Safari 截图同尺寸的 2048×1024/1152 Chromium 布局回归（观赛与真人完整棋盘、长时序独立滚动）、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；赛事时间按状态收口、空值/显式 `NULL`、保存失败原位反馈、真实隔离库重载与 audit、500+ 字连续长文本、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
 
@@ -72,7 +72,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 - 完整的角色 × 页面 × 操作清单见 [BROWSER_ACCEPTANCE.md](./BROWSER_ACCEPTANCE.md)；新增页面或角色能力时必须先更新该矩阵，再补自动化落点。
 - 角色：访客、普通玩家、组织者、管理员。
-- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。Pencil 观赛/人机另覆盖 `1312×700`、`390×700`、`320×568`，断言方形 canvas、根元素零横向溢出及上下滚动后时序仍可用。
+- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。Pencil 观赛/人机另用 Chromium 覆盖 Safari 截图同尺寸的 `2048×1024`、`2048×1152`，以及 `1312×700`、`390×700`、`320×568`；断言宽屏短视口中的完整方形 canvas、长时序栏不越出视口且可独立滚动、根元素零横向溢出及上下滚动后 sticky 时序仍可用。真实 Safari/WebKit 仍列为人工视觉抽查，不把 Chromium 结果冒充 Safari 引擎证据。
 - UI：主要导航、按钮、Tab、Dialog、筛选、表单合法/非法/超长输入、重复提交、空状态、错误状态、直接子路由、刷新、返回/前进与根元素横向溢出。
 - Console：持续收集 `pageerror` 与 error 级 console；未在精确白名单中的异常直接使测试失败。
 - Network：跟踪 request failed 与 4xx/5xx；负向用例只豁免精确预期的请求/状态，关键写操作断言方法、路径、状态和返回结构。深链 reload/back/forward 在继续导航前须等待目标实体 ID 对应的 detail 200 与普通 HTTP quiet window，避免仅凭通用标题把仍在收尾的 fetch 留给下一段导航。
@@ -102,6 +102,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
 | 权威终态后端定向回归 | **70 passed / 1 warning（29.94s）** | `test_authoritative_terminal_events` + `test_audit_coverage` + `test_human_match` + `test_engine`：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
 | Pencil 重基最终定向回归 | **浏览器 7/7 passed（15.4s）** | 基于 `main@5a2662f` 的最终整合提交；覆盖几何、生产事故夹具、强制让行、键盘合法边、等长 snapshot/父级重渲染动画、回放布局与真实裁判多步。后端规则与协议回归同时包含在本表的最终完整 pytest 中 |
+| Pencil 宽屏短视口最终门禁 | **pytest 1093 passed / 1 warning（222.70s）；Playwright 50/50 passed（3.5m）；build 2562 modules** | 基于 `main@b210067` 的独立副本栈 `50384/5176`；附件对局 `20260810143624-4149d6a3` 绑定的回归覆盖 2048×1024/1152 观赛与真人首屏、640px 完整方形棋盘、206 条长时序内部滚动、外圈边 1px DPR 取整容差及 320/390/1312 既有布局。完整浏览器套件含四角色；warning 为既有 Starlette/httpx deprecation |
 | PR154 中性结果 pytest 基线 | **1091 passed / 1 warning（220.72s）** | `main@5a2662f` 合并前的中性结果契约目标提交完整实测；公共结果、迁移与正式榜契约均保留，warning 为既有 Starlette/httpx deprecation |
 | PR154 中性结果 Playwright 基线 | **43/43 passed（3.2m）** | 隔离 QA 栈 `50383/5175`、Chromium 单 worker。曾由 37/39 精确暴露排行榜每行 `TierBadge` 的同键 tiers 请求风暴；PR154 已按 game_id 合并 in-flight Promise，失败后可重试，三视口定向 3/3 证明每游戏并发首请求只 1 次。该行不冒充点格棋重基结果 |
 | 生产副本中性迁移 | **通过** | 2026-08-10 15:03 +08:00 从主库只读 `cp` 到独立 inode（12748789 → 4197548），用 PR154 代码迁移并二次打开：integrity=`ok`、FK=0；三对局表 523/441/453、completed 519/441/453，ratings 76、pair 209、replay 1895、stage/official 33、settlement 1194 行均不变。正式排名投影 `contest_id,entry_id,stage_idx,rank` hash 前后均为 `d1d5a83c2ed4d1dc240556668cc739b4bd3f61f81f280bee4f7921587509f620`，settlement 按物理列全行 hash 前后均为 `43f8de1554cdecaa8b673361ebdd65fc4785a97a510d1e013eaf9ec1f1918931`。完成结果缺字段/旧键/归一值错误、非完成态伪公共字段、正式榜旧键均为 0；新中性列存在，pair/replay 与旧筹码列均删除 |

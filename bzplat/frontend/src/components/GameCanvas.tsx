@@ -38,6 +38,7 @@ export default function GameCanvas({
 }: Props) {
   const spec = findGame(gameId)
   const aspectRatio = spec?.canvasAspectRatio ?? DEFAULT_ASPECT_RATIO
+  const viewportFit = spec?.canvasFit === 'viewport'
   // 响应式位图分辨率：父容器宽度经 ResizeObserver 回填；高度由游戏声明的
   // 宽高比计算。位图分辨率跟随 → 始终清晰。
   const [width, setWidth] = useState(widthProp ?? BASE_W)
@@ -348,7 +349,10 @@ export default function GameCanvas({
     : `${gameId ?? ''} 对局画面${interactive && onMove ? '，点击棋盘选择动作' : ''}`
 
   return (
-    <div ref={wrapperRef} style={{ width: '100%' }}>
+    <div
+      ref={wrapperRef}
+      className={viewportFit ? 'mx-auto w-full max-w-[40rem]' : 'w-full'}
+    >
       <canvas
         ref={canvasRef}
         // 宽度撑满父容器；高度按游戏声明的宽高比自动撑开。

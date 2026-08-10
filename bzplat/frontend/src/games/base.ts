@@ -149,6 +149,11 @@ export interface GameViewSpec {
   CanvasRenderer?: GameCanvasRenderer
   /** 画布宽高比；未声明时使用通用 3:2。牌桌可用更紧凑的 16:9。 */
   canvasAspectRatio?: number
+  /**
+   * 画布在页面中的尺寸策略。container 默认铺满内容列；viewport 用于方形大棋盘，
+   * 将主画面约束在短视口首屏可读范围内，避免宽屏把高度无限放大。
+   */
+  canvasFit?: 'container' | 'viewport'
   /** 座位着色（如 gomoku=['黑','白'], pencil=['红','蓝']）—— 取代渲染层按游戏名分支 */
   seatColors?: string[]
   /** 进度单位：hand=手数(扑克), move=步数(棋类) —— 取代 Home 等页面的游戏名分支 */

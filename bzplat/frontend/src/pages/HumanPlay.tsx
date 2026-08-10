@@ -299,6 +299,7 @@ export default function HumanPlay() {
   )
   const endSummary = endVm ? gameSpec?.humanPlay.endSummary?.(endVm) : null
   const ActionPanel = gameSpec?.humanPlay.ActionPanel
+  const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
   const turnLabel = gameSpec?.humanPlay.turnLabelForRequest?.(turnRequest)
     ?? gameSpec?.humanPlay.turnLabel
     ?? '轮到你操作'
@@ -379,8 +380,10 @@ export default function HumanPlay() {
 
       {/* 排布、动作控件和 WS 序列化均由当前游戏规格提供。 */}
       {gameSpec?.humanPlay.layout === 'canvas-with-log' && (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
-          <div className="space-y-3">
+        <div className={viewportFitCanvas
+          ? 'grid items-start justify-center gap-4 xl:grid-cols-[minmax(0,40rem)_22rem]'
+          : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}>
+          <div className={`space-y-3 ${viewportFitCanvas ? 'w-full max-w-[40rem] justify-self-center' : ''}`}>
             <MatchBoard
               gameId={gameSpec.id}
               events={events}
@@ -451,7 +454,7 @@ function EventLogCard({
     return describeEvent(event)
   }
   return (
-    <Card className="flex flex-col">
+    <Card data-testid="human-event-log" className="flex flex-col">
       <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
         对局进程 <span className="text-xs font-normal text-muted-foreground">({events.length})</span>
       </div>

@@ -57,6 +57,7 @@ export const pencilSpec: GameViewSpec = {
   reduce: reducePencilEvents as unknown as GameViewSpec['reduce'],
   CanvasRenderer: PencilCanvasRenderer,
   canvasAspectRatio: 1,
+  canvasFit: 'viewport',
   seatColors: ['红', '蓝'],
   progressUnit: 'move',
   matchFormatLabel: '单局',
