@@ -2,6 +2,7 @@
 import type { SeatInfo } from '@/games/canvas-types'
 
 export interface MatchSeatRow {
+  id?: string
   match_type?: string
   human_seat?: number | null
   winner?: number | null

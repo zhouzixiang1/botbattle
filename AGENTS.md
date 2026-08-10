@@ -138,7 +138,7 @@ src/components/ui/         共享 UI 原语库（shadcn new-york：Button/Input/
 src/components/ui/status.tsx   EmptyState/Loading/ErrorMsg/RefreshBtn/StatusBadge（前台+管理端共用）
 src/components/ui/select.tsx   shadcn Select（Radix）—— 全站下拉框唯一实现，禁裸用原生 <select>
 src/components/shell/      全局 Shell：AppShell（lg+ 侧栏——登录与访客均显示；auth 页除外；窄屏顶栏含登录注册 + 导航 + 页脚）+ nav-config + GlobalSearch（Cmd+K Command 面板）
-src/games/                 前端游戏注册表：GameViewSpec 集中声明 reducer/canvas、胜者/事件描述、humanPlay 动作控件与唯一 WS 信封、replay HUD/摘要/进度/分段导航；页面不得 import 具体游戏 ViewModel
+src/games/                 前端游戏注册表：GameViewSpec 集中声明 reducer/canvas（含交互 canvas 的 keyboardPicks 合法动作）、胜者/事件描述、humanPlay 动作控件与唯一 WS 信封（含 request 驱动的画布启停/行动标签）、replay HUD/摘要/进度/分段导航；页面不得 import 具体游戏 ViewModel
 theme-provider/toggle      next-themes 暗色（class 策略，light 默认 + system）+ 太阳/月亮切换
 src/pages/                 顶层路由全部用 React.lazy 代码分割（每页独立 chunk，recharts 等重依赖隔离）
 路径别名 @/ → src/          新代码一律用 @/，禁相对路径；图标统一 lucide-react（无 emoji）
@@ -167,7 +167,7 @@ src/pages/                 顶层路由全部用 React.lazy 代码分割（每�
 1. 建 `games/<game>/` 子包：`<game>_judge.py`(纯裁判=游戏规则，0 平台依赖) + `engine.py`(适配层：裁判↔平台协议桥接) + `protocol.py`(仅导出本游戏行协议 API) + `result.py`(独立结果，满足鸭子契约) + `tiers.py`(段位曲线) + `templates.py`(赛事模板) + `spec.py`(装配 GameSpec，明确 `time_budget_per_side`；无累计棋钟用 `None`)。若复用 `games/_board_protocol.py`，须在 `shared_source_files` 声明以随公开裁判源码提供，且不得导出其他游戏的 builder。
 2. `schema.py` 的 `REGISTERED_ENGINES`/`VALID_GAME_IDS` frozenset 各加该项；`Store._migrate()` 会按注册 ID 用同构模板自动建立 `matches_<game>` 表与索引，无需复制静态 DDL。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动断言 schema 与注册表一致）。
-4. 前端 `src/games/<game>/`：`index.ts` 装配 GameViewSpec（Board/kind/reduce + `winner`/`describeEvent` + `humanPlay` 动作控件与序列化 + `replay` HUD/摘要/进度/分段导航）+ `canvas.ts`（CanvasRenderer）+ `reducer.ts`（事件归约，自包含对标后端 engine.py；启用棋钟时消费 `time_used/time_out`）+ 所需的游戏专属 UI 文件，再在 `src/games/index.ts` 注册一行。规则参数已固定，`configFields` 已删除。`RawEvent`/人类动作/HUD 公共类型在 `src/games/base.ts`；`normalizeGameId` 只规整字符串，`findGame` 对未知 id 返回空并由页面显示 unsupported，禁止回退 Holdem。
+4. 前端 `src/games/<game>/`：`index.ts` 装配 GameViewSpec（Board/kind/reduce + `winner`/`describeEvent` + `humanPlay` 动作控件与序列化；协议特殊回合经 `canPickBoard(request)`/`turnLabelForRequest(request)` 声明，禁止通用页判断游戏名 + `replay` HUD/摘要/进度/分段导航）+ `canvas.ts`（CanvasRenderer；需要键盘等价操作时以 `keyboardPicks(scene)` 暴露与 pointer pick 同源的合法动作，供键盘/读屏操作）+ `reducer.ts`（事件归约，自包含对标后端 engine.py；启用棋钟时消费 `time_used/time_out`）+ 所需的游戏专属 UI 文件，再在 `src/games/index.ts` 注册一行。规则参数已固定，`configFields` 已删除。`RawEvent`/人类动作/HUD 公共类型在 `src/games/base.ts`；`normalizeGameId` 只规整字符串，`findGame` 对未知 id 返回空并由页面显示 unsupported，禁止回退 Holdem。
 5. **不得**反向：`games/<game>/` 不得 import `bzplat.backend.engine`/`_compat`（循环依赖，`test_import_cycles.py` 守护）；通用层（matches/contests/store/api_routes）不得 import 具体游戏模块（经注册表）。
 6. 跑测试：`pytest`（含 `test_result_contract`/`test_import_cycles`/`test_game_registry`，时限行为加 runner 回归）+ `npm run build` + `npm run test:e2e`；`screenshot_verify.py` 仅作补充。
 

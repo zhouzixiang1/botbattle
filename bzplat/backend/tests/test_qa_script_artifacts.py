@@ -325,3 +325,19 @@ def test_qa_script_claims_match_the_observed_coverage():
     assert "生成赛程表" not in contest_source
     assert "查看赛程表" not in contest_source
     assert "不生成 pairings" in contest_source
+
+
+def test_pencil_browser_regression_stays_bound_to_the_production_incident():
+    """The browser suite must retain both the real incident and judge-backed replay."""
+    source = (
+        ROOT / "bzplat" / "frontend" / "e2e" / "qa-regression.spec.ts"
+    ).read_text(encoding="utf-8")
+
+    assert "20260810140318-a8752705" in source
+    assert "productionBoxClick" in source
+    assert "sentActions).toHaveLength(0)" in source
+    assert "real Pencil human play accepts several canvas-picked edges" in source
+    assert "Pencil human pass request disables the board" in source
+    assert "Pencil human canvas exposes legal edges to keyboard" in source
+    assert "response: { x: -1, y: -1 }" in source
+    assert "event.type === 'illegal'" in source

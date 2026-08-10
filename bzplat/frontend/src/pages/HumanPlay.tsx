@@ -78,6 +78,14 @@ export default function HumanPlay() {
 
   useEffect(() => {
     if (!id) return
+    // Hash 参数切换时先丢弃旧局 UI；不能让同游戏、同事件数的旧 canvas 继续可点。
+    setMatch(null)
+    setEvents([])
+    setOver(false)
+    setError('')
+    setEndInfo(null)
+    setTurnDeadline(null)
+    setReconnecting(false)
     overRef.current = false
     actionSubmittedRef.current = false
     activeTurnOrdinalRef.current = null
@@ -291,9 +299,20 @@ export default function HumanPlay() {
   )
   const endSummary = endVm ? gameSpec?.humanPlay.endSummary?.(endVm) : null
   const ActionPanel = gameSpec?.humanPlay.ActionPanel
+  const turnLabel = gameSpec?.humanPlay.turnLabelForRequest?.(turnRequest)
+    ?? gameSpec?.humanPlay.turnLabel
+    ?? '轮到你操作'
+  const boardInteractive = canSubmitAction
+    && Boolean(gameSpec?.humanPlay.serializeBoardPick)
+    && (gameSpec?.humanPlay.canPickBoard?.(turnRequest) ?? true)
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(endInfo?.reason, match?.status)
     : resolveTerminalReason(endInfo?.reason, match?.status)
+
+  // useEffect 在提交后清状态；这一同步 guard 还会挡住路由切换后的首个 render。
+  if (match?.id && String(match.id) !== id) {
+    return <PageStub title="人类对战"><div className="text-sm text-muted-foreground">正在切换对局…</div></PageStub>
+  }
 
   return (
     <PageStub title="人类对战">
@@ -324,7 +343,7 @@ export default function HumanPlay() {
           ) : canSubmitAction ? (
             <span className="flex items-center gap-1 font-medium text-success">
               <PlayCircle className="size-4" />
-              {gameSpec?.humanPlay.turnLabel ?? '轮到你操作'}
+              {turnLabel}
               {remainSec != null && (
                 <span className="ml-1 inline-flex items-center gap-0.5 text-xs text-muted-foreground">
                   <Clock className="size-3" />{remainSec}s
@@ -371,8 +390,16 @@ export default function HumanPlay() {
                 const action = gameSpec.humanPlay.serializeBoardPick?.(x, y)
                 if (action) sendMove(action)
               }}
-              interactive={canSubmitAction && Boolean(gameSpec.humanPlay.serializeBoardPick)}
+              interactive={boardInteractive}
             />
+            {ActionPanel && (
+              <ActionPanel
+                disabled={!canSubmitAction || over}
+                legal={canSubmitAction}
+                request={turnRequest}
+                onSubmit={sendMove}
+              />
+            )}
           </div>
           <EventLogCard id={id} events={events} describeEvent={gameSpec.describeEvent} />
         </div>

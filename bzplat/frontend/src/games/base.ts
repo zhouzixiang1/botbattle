@@ -55,10 +55,16 @@ export interface HumanPlayViewSpec {
   /** 画面与日志的排布由游戏声明，不能由通用页猜测 board/cards。 */
   layout: 'canvas-with-log' | 'canvas-controls-log'
   turnLabel: string
+  /** 少数协议回合需展示不同动作语义；未声明时始终使用 turnLabel。 */
+  turnLabelForRequest?: (request: Record<string, unknown> | null) => string
   revealMode?: 'all' | 'showdown'
   /** 有画布点击动作的游戏必须把坐标封装成自己的完整 WS 动作。 */
   serializeBoardPick?: (x: number, y: number) => HumanActionEnvelope
-  /** 非画布动作（如扑克）由游戏包提供完整输入组件及序列化。 */
+  /** 当前请求是否允许画布动作；未声明时只要可提交就启用画布。 */
+  canPickBoard?: (request: Record<string, unknown> | null) => boolean
+  /** 交互画布点击到无效区域时的非阻塞提示；空值表示无需提示。 */
+  invalidBoardPickMessage?: string
+  /** 非画布动作（如扑克，或棋类协议的让行）由游戏包提供完整输入组件及序列化。 */
   ActionPanel?: ComponentType<HumanActionPanelProps>
   /** 终局附加摘要；返回 null 表示该游戏无需额外摘要。 */
   endSummary?: (vm: unknown) => string | null

@@ -49,6 +49,7 @@ export default function MatchBoard({
         revealMode={revealMode}
         onMove={interactive ? onMove : undefined}
         interactive={interactive}
+        invalidPickMessage={spec.humanPlay.invalidBoardPickMessage}
       />
     )
   }

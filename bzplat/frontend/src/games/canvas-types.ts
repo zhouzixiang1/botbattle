@@ -26,6 +26,11 @@ export interface DrawOpts {
    * - showdown：仅摊牌/对局结束/人类己方亮（人类对战防透视）
    */
   revealMode?: 'all' | 'showdown'
+  /**
+   * 当前鼠标命中的合法画布动作。仅交互态存在；游戏 renderer 可用它绘制
+   * hover 预览，但不得据此改变权威场景。
+   */
+  hoverPick?: { x: number; y: number } | null
 }
 export interface SeatInfo {
   botName?: string
@@ -37,6 +42,9 @@ export interface SeatInfo {
  * scene 形参为宽 Scene 类型，实现内部按需 cast（规避 GameCanvasRenderer<Scene> 赋值时的逆变不兼容）。 */
 export type PickFn = (canvasX: number, canvasY: number, scene: Scene, opts: DrawOpts) => { x: number; y: number } | null
 
+/** 当前场景中可由键盘选择的合法动作；顺序即方向键轮转顺序。 */
+export type KeyboardPicksFn = (scene: Scene) => Array<{ x: number; y: number }>
+
 /** 每游戏 canvas 渲染器统一接口（canvas↔React 桥接契约）。 */
 export interface GameCanvasRenderer<S extends Scene = Scene> {
   /** events → 归一化场景（通常复用现有 reducer）。 */
@@ -47,4 +55,6 @@ export interface GameCanvasRenderer<S extends Scene = Scene> {
   draw(ctx: CanvasRenderingContext2D, prev: S | null, next: S, t: number, opts: DrawOpts): void
   /** 可选：canvas 坐标 → 落子坐标（棋类人类对战点击用；扑克不实现）。 */
   pick?: PickFn
+  /** 可选：键盘/读屏可遍历的合法动作（交互 canvas 需与 pick 使用同一规则）。 */
+  keyboardPicks?: KeyboardPicksFn
 }
