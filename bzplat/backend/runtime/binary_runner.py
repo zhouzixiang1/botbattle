@@ -43,6 +43,7 @@ _DOCKER_INSPECT_TIMEOUT_SEC = 15.0
 _STDERR_DRAIN_GRACE_SEC = 0.5
 _AUTO_EXECUTION_LABEL = "bzplat.auto_execution"
 _AUTO_EXECUTION_CLEANUP_POLLS = 6
+_AUTO_EXECUTION_VISIBILITY_POLL_SEC = 0.05
 _IMAGE_READY_LOCK = threading.Lock()
 _IMAGE_READY_KEYS: set[tuple[str, str]] = set()
 
@@ -605,6 +606,57 @@ class BinaryRunner:
             stderr=asyncio.subprocess.PIPE,
             limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
         )
+        if session.execution_scope is not None:
+            await self._wait_for_execution_container_visible(session)
+
+    async def _docker_container_execution_label(
+        self, container_name: str
+    ) -> str | None:
+        result = await asyncio.to_thread(
+            _docker_control_command,
+            [
+                self._docker_bin,
+                "inspect",
+                "--format",
+                f'{{{{ index .Config.Labels "{_AUTO_EXECUTION_LABEL}" }}}}',
+                container_name,
+            ],
+            timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+            timeout_message="Docker 执行隔离标签检查超时",
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    async def _wait_for_execution_container_visible(
+        self, session: BotSession
+    ) -> None:
+        """Keep the launch flock until Docker proves the scope label exists.
+
+        ``create_subprocess_exec('docker run', ...)`` only proves that the CLI
+        process was forked; the daemon may not have created the container yet.
+        Releasing the flock at that point lets takeover observe zero containers
+        and finalize before the delayed CLI creates one.  There is intentionally
+        no timeout that releases the lock on uncertainty: a stuck daemon fails
+        closed until the service process is restarted (flock then auto-releases).
+        """
+        scope = session.execution_scope
+        if scope is None or not session.container_name or session.proc is None:
+            return
+        while True:
+            if session.proc.returncode is not None:
+                # The CLI failed/exited before a persistent container became
+                # visible.  No future daemon creation can be initiated by it.
+                return
+            try:
+                visible_scope = await self._docker_container_execution_label(
+                    session.container_name
+                )
+            except PlatformRunnerError:
+                visible_scope = None
+            if visible_scope == scope.token:
+                return
+            await asyncio.sleep(_AUTO_EXECUTION_VISIBILITY_POLL_SEC)
 
     async def send(self, session_id: str, line: str, *,
                    timeout: float = DEFAULT_ACTION_TIMEOUT) -> str:

@@ -11,7 +11,12 @@ import pytest
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
 from bzplat.backend.runtime import binary_runner as binary_runtime
-from bzplat.backend.runtime.binary_runner import BinaryRunner, ExecutionScope
+from bzplat.backend.runtime.binary_runner import (
+    BinaryInfo,
+    BinaryRunner,
+    BotSession,
+    ExecutionScope,
+)
 from bzplat.backend.store import (
     AutoMatchFenceLost,
     Store,
@@ -638,8 +643,8 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
 ):
     active_containers: list[str] = []
     fence_current = True
-    entered = asyncio.Event()
-    release_spawn = asyncio.Event()
+    cli_spawned = asyncio.Event()
+    label_visible = asyncio.Event()
     lock_path = str(tmp_path / "auto-launch.lock")
 
     def assert_fence() -> None:
@@ -652,6 +657,25 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         fence_check=assert_fence,
     )
     runner = BinaryRunner(prefer_local=False)
+    binary_path = tmp_path / "bot"
+    binary_path.write_bytes(b"unused")
+    session = BotSession(
+        "scope-session",
+        BinaryInfo("elf", "linux", "amd64", True),
+        binary_path,
+        mode="docker",
+        execution_scope=scope,
+    )
+
+    class FakeProc:
+        returncode = None
+
+    async def spawn_cli(*_args, **_kwargs):
+        cli_spawned.set()
+        return FakeProc()
+
+    async def visible_scope(_container_name: str) -> str | None:
+        return "scope-a" if label_visible.is_set() else None
 
     async def container_ids(token: str) -> list[str]:
         assert token == "scope-a"
@@ -667,17 +691,19 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         return Result()
 
     monkeypatch.setattr(runner, "_docker_execution_container_ids", container_ids)
+    monkeypatch.setattr(runner, "_docker_container_execution_label", visible_scope)
     monkeypatch.setattr(binary_runtime, "_docker_control_command", docker_control)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_cli)
 
     async def exercise() -> None:
         async def stale_spawn() -> None:
             async with scope.launch_guard():
-                entered.set()
-                await release_spawn.wait()
-                active_containers.append("container-a")
+                await runner._start_docker(session)
 
         spawn_task = asyncio.create_task(stale_spawn())
-        await entered.wait()
+        # The docker CLI process exists, but the daemon has not made the scope
+        # label visible yet.  The launch flock must still be held here.
+        await cli_spawned.wait()
         cleanup_task = asyncio.create_task(
             runner.force_stop_execution(
                 "scope-a",
@@ -688,7 +714,8 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         )
         await asyncio.sleep(0.02)
         assert cleanup_task.done() is False
-        release_spawn.set()
+        active_containers.append("container-a")
+        label_visible.set()
         await spawn_task
         result = await cleanup_task
         assert result["confirmed"] is True
