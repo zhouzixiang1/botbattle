@@ -695,6 +695,7 @@ class MatchOrchestrator:
         duplicate: bool = False,
         duplicate_seed: int | None = None,
         defer_start: bool = False,
+        auto_match_daily_cap: int | None = None,
     ) -> str:
         # 自博弈（同 bot 对战）：允许——用于对比同 bot 的不同版本（如 v1 vs v2），
         # 或同 bot 同版本的对阵。仅 challenge 路径放开（contest 仍各自走 pairing）。
@@ -758,6 +759,7 @@ class MatchOrchestrator:
                 match_type=match_type,
                 game_id=gid,
                 match_config=mc,
+                auto_match_daily_cap=auto_match_daily_cap,
             )
             # duplicate 落 match_seed（确定性回放/复现用）。create_match 后的
             # 两次写都必须处在同一补偿边界内；任一步失败，调用方都尚未拿到 id。

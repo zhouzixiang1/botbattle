@@ -1,5 +1,5 @@
 """SQLite 存储层导出。"""
-from .db import Store
+from .db import AutoMatchDailyCapReached, Store
 from .schema import (
     CODE_RESET,
     CODE_VERIFY,
@@ -26,6 +26,7 @@ from .schema import (
 
 __all__ = [
     "Store",
+    "AutoMatchDailyCapReached",
     "ROLE_USER",
     "ROLE_ORGANIZER",
     "ROLE_ADMIN",

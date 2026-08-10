@@ -103,7 +103,14 @@ effective  = min(configured, ceiling)
 再排定级 Bot，组内才按 rating 排序。
 **节流**：同一 bot 两场间隔不低于 `auto_match_bot_cooldown`（默认 600 秒）；
 近期已配对组合短期不再重复。**每轮**最多补 `auto_match_max_per_round`（默认 2）场；
-**每日**总量上限 `auto_match_daily_cap`（默认 200，0=不限，达上限当日停）。
+**每日**总量上限 `auto_match_daily_cap`（默认 200，0=不限，达上限当日停）。自然日固定按
+`Asia/Shanghai` 计算，不依赖宿主机时区。系统调度只向 Store 传代码 cap，不传调用方预先
+计算的日期；Store 取得 `BEGIN IMMEDIATE` 写锁后才读取当前日期和 `auto_match_daily_claims`、
+校验 cap，并在同一事务写入 match、索引与 claim；即使等待写锁期间跨过 00:00，也只会
+占用新自然日额度。
+因此服务重启、多个 Store/服务实例同时抢最后名额都不能绕过上限。升级时只首次把历史上
+唯一的系统身份（`match_type=ladder`、owner/contest/human 均为空）回填为 claim，之后仅
+auto_matcher 的显式创建路径写 claim，普通用户对局不计入。
 `match_type=ladder`，`owner` 为空（系统发起），**计入全局 Glicko-2 评分**
 （比赛 contest 对局不计全局，见 [对局](#/wiki?slug=guide)）。
 
@@ -122,7 +129,7 @@ effective  = min(configured, ceiling)
 这些字段由 `runtime/config.py` 的冻结对象提供：生产使用 `AUTO_MATCH_CONFIG`，隔离
 `BZ_QA_INSTANCE` 使用只把 `enabled` 固定为 `False` 的 `QA_AUTO_MATCH_CONFIG`。profile
 选择和具体值都只能经代码评审与重新发布修改，调度器不读取环境覆盖或同名历史 settings。
-今日后台对局计数只作为进程内诊断值返回；管理端只读端点返回当前实例实际生效 profile。
+今日后台对局计数直接读取 DB 权威 claim；管理端只读端点返回该计数与当前实例实际生效 profile。
 
 > **可见性**：后台 ladder 对局会出现在首页「最新对局」（带「后台」徽章），便于观察天梯维护。
 
