@@ -233,10 +233,40 @@ def test_active_human_holdem_hides_opponent_cards_from_public_streams(tmp_path):
     ]
 
     orch = MatchOrchestrator(store, runner=object(), max_concurrent=1)
+    unpersisted_action = {
+        "type": "action",
+        "hand": 0,
+        "player": 0,
+        "action": "call",
+        "amount": 50,
+        "debug": "/private/live-prefix",
+    }
+    # Running subscriptions use the complete in-memory prefix, not the lagging
+    # persisted replay, while retaining the same viewer-specific redaction.
+    orch._active_replay_events[match_id] = [deal, turn, unpersisted_action]
     spectator = orch.subscribe(match_id)
     player = orch.subscribe(match_id, human_viewer_seat=1)
-    assert spectator.get_nowait()["events"] == spectator_events
-    assert player.get_nowait()["events"] == player_events
+    assert spectator.get_nowait()["events"] == [
+        {"type": "deal_hole", "hand": 0, "holes": [[], []]},
+        {
+            "type": "action",
+            "hand": 0,
+            "player": 0,
+            "action": "call",
+            "amount": 50,
+        },
+    ]
+    assert player.get_nowait()["events"] == [
+        {"type": "deal_hole", "hand": 0, "holes": [[], ["Ks", "Kh"]]},
+        turn,
+        {
+            "type": "action",
+            "hand": 0,
+            "player": 0,
+            "action": "call",
+            "amount": 50,
+        },
+    ]
 
     orch._broadcast(match_id, deal)
     orch._broadcast(match_id, turn)
@@ -252,6 +282,9 @@ def test_active_human_holdem_hides_opponent_cards_from_public_streams(tmp_path):
         "holes": [[], ["Ks", "Kh"]],
     }
     assert player.get_nowait() == turn
+    orch.unsubscribe(match_id, spectator)
+    orch.unsubscribe(match_id, player)
+    orch._active_replay_events.pop(match_id, None)
     store.close()
 
 

@@ -72,8 +72,10 @@ export interface ReplayNavigationSpec {
 export interface ReplayViewSpec {
   /** 回放主画面与时序的排布由游戏声明。 */
   layout: 'wide' | 'with-timeline'
-  /** 从该游戏 ViewModel 读取当前进度；null 时由持久化结果兜底。 */
+  /** 从该游戏 ViewModel 读取当前可见进度；null 时由持久化结果兜底。 */
   progress: (vm: unknown) => number | null
+  /** 可选固定/动态总进度；例如 Holdem 的 70 手。 */
+  progressTotal?: (vm: unknown) => number | null
   /** 可选的对阵摘要（例如德州累计筹码）。 */
   Summary?: ComponentType<GameAuxiliaryProps>
   /** 可选的画面辅助 HUD（例如点格棋比分与棋钟）。 */

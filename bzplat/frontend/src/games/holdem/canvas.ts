@@ -24,7 +24,7 @@ import { ensurePokerJS } from '@/lib/pokerjs'
 // 棋类仍保留通用 3:2；纵向半径同时受实际高度约束，避免裁切。
 const W0 = 900
 const L_RATIO = 0.22        // 座位/牌堆横向间距系数
-const R_RATIO = 0.28        // 3:2 下的最大椭圆半轴系数
+const R_RATIO = 0.29        // 宽屏牌桌尽量吃满画布，减少四周无意义留白
 const CARD_RATIO = 100 / W0 // 牌尺寸系数
 const POINT = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
 const SUIT_BY_CODE: Record<string, 'h' | 'd' | 's' | 'c'> = { h: 'h', d: 'd', s: 's', c: 'c' }
@@ -32,7 +32,7 @@ const SUIT_BY_CODE: Record<string, 'h' | 'd' | 's' | 'c'> = { h: 'h', d: 'd', s:
 /** 按当前位图宽 W 计算布局尺寸（W 跟随父容器响应式变化）。 */
 const layout = (W: number, H: number) => ({
   L: L_RATIO * W,
-  R: Math.min(R_RATIO * W, H * 0.42),
+  R: Math.min(R_RATIO * W, H * 0.46),
   CARD_SIZE: Math.max(CARD_RATIO * W, W < 520 ? 42 : 0),
   /** 缩放因子：W/基线宽，用于把固定像素的 fitText maxWidth 等比放大。 */
   s: W / W0,
@@ -157,8 +157,8 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     ctx.fillStyle = '#0f5132'
     ctx.fill()
 
-    // 牌桌顶栏：把手数/阶段/底池放到椭圆上方，不再挤在左侧狭窄区域。
-    // 旧布局的 `轮: preflop` 只有约 58px 可用，会稳定被截成 `轮: pr…`。
+    // 牌桌状态放在绿色桌面内沿。白字若画在椭圆上方的页面背景上，浅色主题
+    // 几乎不可见，也会被误认为牌桌上方留白。
     const pot = prev && prev.pot !== next.pot ? Math.round(prev.pot + (next.pot - prev.pot) * t) : next.pot
     ctx.font = `bold ${Math.max(11, Math.round(15 * s))}px "DM Sans", sans-serif`
     ctx.fillStyle = '#fff'
@@ -167,9 +167,8 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌',
     }
     const tableStatus = `第 ${(next.hand || 0) + 1} 手 · ${streetLabels[next.street] ?? next.street} · 底池 ${pot.toLocaleString('en-US')}`
-    if (!next.matchOver) {
-      ctx.fillText(fitText(ctx, tableStatus, W * 0.72), W / 2, Math.max(14, H / 2 - R - 12 * s))
-    }
+    const statusY = H / 2 - R + Math.max(17, 24 * s)
+    if (!next.matchOver) ctx.fillText(fitText(ctx, tableStatus, W * 0.72), W / 2, statusY)
 
     // 座位（上=座1, 下=座0）
     drawSeat(ctx, X(-0.75), Y0, 1, next, prev, t, opts.seats, s)
@@ -243,7 +242,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
       ctx.fillText(
         fitText(ctx, `对局结束 · ${winnerTxt}`, W * 0.72),
         X(0),
-        Math.max(14, H / 2 - R - 12 * s),
+        statusY,
       )
       ctx.restore()
     }
@@ -277,7 +276,7 @@ function drawSeat(
   const isToAct = next.toAct === idx && !next.matchOver
   const isMatchWinner = next.matchOver && next.matchWinner === idx
   const name = seatDisplayName(info, idx)
-  const compact = s < 0.58
+  const compact = s < 0.72
   // 座位块横向半宽（用于截断名字/数值，避免长文本越出椭圆桌或与公共牌重叠）
   const seatW = 130 * s
   ctx.textAlign = 'center'

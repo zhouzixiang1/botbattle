@@ -32,6 +32,7 @@ from bzplat.backend.store.public_contract import (
     canonical_public_completed_reason,
     canonical_public_error_reason,
     sanitize_public_event,
+    sanitize_public_event_prefix,
     sanitize_public_match,
 )
 from bzplat.backend.store.schema import (
@@ -322,6 +323,10 @@ class MatchOrchestrator:
         # receive no hole cards/turn request; the authenticated human receives
         # only their own cards and decision request.
         self._sse_human_views: dict[asyncio.Queue, tuple[bool, int | None]] = {}
+        # Runner 正在追加的事件列表引用。运行 replay 为崩溃恢复而节流落库，
+        # 新订阅必须读取这份完整前缀，不能永久漏掉最近 1–4 条事件。前缀
+        # 仍在 subscribe() 按观看者身份经过公开投影与真人底牌脱敏。
+        self._active_replay_events: dict[str, list[dict]] = {}
         self._lock = asyncio.Lock()
         # 评分串行化锁：按 (bot_id, game_id) 维度串行化 _apply_ratings，防同 bot 两场
         # 并发完成时快照读+绝对写 rating/rd/vol 互相覆盖（lost-update，审计 FRAGILE 5a）。
@@ -397,6 +402,7 @@ class MatchOrchestrator:
         if match_id not in self._admin_aborting:
             for queue in self._sse.pop(match_id, []):
                 self._sse_human_views.pop(queue, None)
+            self._active_replay_events.pop(match_id, None)
         self._human_turns = {
             key: value for key, value in self._human_turns.items()
             if key[0] != match_id
@@ -583,6 +589,7 @@ class MatchOrchestrator:
         self._human_active_users.clear()
         self._sse.clear()
         self._sse_human_views.clear()
+        self._active_replay_events.clear()
 
     # ── 人类对战：回合 Future 注册表（供 WS /move 解析）─────────
     def get_human_turn(self, match_id: str, player_idx: int) -> dict | None:
@@ -964,14 +971,28 @@ class MatchOrchestrator:
             and m.get("match_type") == TYPE_HUMAN
             and m.get("status") in {STATUS_PENDING, STATUS_RUNNING}
         )
-        replay = self.store.get_public_replay(
-            match_id,
-            human_viewer_seat=human_viewer_seat,
-        ) or {}
+        active_events = self._active_replay_events.get(match_id)
+        active_status = bool(
+            m and m.get("status") in {STATUS_PENDING, STATUS_RUNNING}
+        )
+        if active_events is not None and active_status:
+            snapshot_events = sanitize_public_event_prefix(
+                list(_live_replay_events(active_events)),
+                redact_active_human=active_human,
+                human_viewer_seat=human_viewer_seat,
+            )
+        else:
+            # 终态提交后、runner 收尾前也可能仍有内存引用；此时必须从
+            # Store 读取由权威 match 行合成唯一终局的公开 replay。
+            replay = self.store.get_public_replay(
+                match_id,
+                human_viewer_seat=human_viewer_seat,
+            ) or {}
+            snapshot_events = json.loads(replay.get("events_json") or "[]")
         snapshot = {
             "type": "snapshot",
             "match": m or {},
-            "events": json.loads(replay.get("events_json") or "[]"),
+            "events": snapshot_events,
         }
 
         # 快照与可见性全部构造成功后再注册队列。否则 DB/JSON 异常会
@@ -1143,6 +1164,7 @@ class MatchOrchestrator:
         # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
         dup_seed = int(stored_mc.get("duplicate_seed")) if stored_mc.get("duplicate_seed") is not None else None
         events: list[dict] = []
+        self._active_replay_events[match_id] = events
 
         def on_event(kind: str, ev: dict) -> None:
             # The engine terminal is an internal result signal, not a public
@@ -1639,6 +1661,7 @@ class MatchOrchestrator:
         # 残留订阅者会在 _broadcast 时因 list 为空自然无操作；unsubscribe 也会清空 list。
         for queue in self._sse.pop(match_id, []):
             self._sse_human_views.pop(queue, None)
+        self._active_replay_events.pop(match_id, None)
         if self.on_match_done is not None:
             try:
                 result = self.on_match_done(match_id, contest_id)
@@ -1685,6 +1708,7 @@ class MatchOrchestrator:
                 "_bot_a_version_id" if bot_seat == 0 else "_bot_b_version_id"
             )
             events: list[dict] = []
+            self._active_replay_events[match_id] = events
             try:
                 bot_path, bot_mode = self._runtime_for_bot_version(
                     bot, version_id, seat=bot_seat

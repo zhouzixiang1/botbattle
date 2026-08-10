@@ -287,7 +287,7 @@ export default function MyBots() {
       </Card>
       </div>{/* /左栏 sticky */}
 
-      <div className="mt-6 lg:mt-0">
+      <div className="mt-6 min-w-0 lg:mt-0">
       <div className="mb-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           筛选游戏
@@ -317,7 +317,7 @@ export default function MyBots() {
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
-                      <Link to={`/bot/${b.id}`} className="hover:text-primary">
+                      <Link to={`/bot/${b.id}`} className="min-w-0 break-words [overflow-wrap:anywhere] hover:text-primary">
                         {b.display_name || b.name}
                       </Link>
                       <span className="font-mono text-xs text-muted-foreground">#{b.id}</span>
@@ -325,23 +325,23 @@ export default function MyBots() {
                       {b.runnable === false && <Badge variant="destructive">不可运行</Badge>}
                     </div>
                     {b.description && (
-                      <p className="mt-0.5 text-xs text-muted-foreground">{b.description}</p>
+                      <p className="mt-0.5 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{b.description}</p>
                     )}
                     <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <span className="rounded bg-muted px-1.5 py-0.5">
+                      <span className="max-w-full break-all rounded bg-muted px-1.5 py-0.5">
                         {b.os || '—'} / {b.arch || '—'}
                       </span>
-                      <span className="rounded bg-muted px-1.5 py-0.5">
+                      <span className="max-w-full break-all rounded bg-muted px-1.5 py-0.5">
                         format: {b.format || 'unknown'}
                       </span>
-                      <span className="rounded bg-muted px-1.5 py-0.5 font-mono">
+                      <span className="max-w-full break-all rounded bg-muted px-1.5 py-0.5 font-mono">
                         {b.runtime_mode || 'traditional'}
                       </span>
                       <span>v{b.current_version ?? 0}</span>
                       <span>{b.is_active ? '启用' : '停用'}</span>
                     </div>
                     {b.runnable === false && (
-                      <p className="mt-1 text-xs text-destructive">
+                      <p className="mt-1 break-words text-xs text-destructive [overflow-wrap:anywhere]">
                         {b.unsupported_reason || '仅保留为历史记录；请上传 Linux x86_64 ELF 新版本。'}
                       </p>
                     )}
@@ -402,14 +402,14 @@ export default function MyBots() {
                   </div>
                 </div>
                 {editing === b.id && (
-                  <div className="mt-2 flex flex-wrap items-end gap-2 rounded-lg bg-muted p-3">
-                    <label className="space-y-1 text-xs text-muted-foreground">
+                  <div className="mt-2 flex min-w-0 flex-wrap items-end gap-2 rounded-lg bg-muted p-3">
+                    <label className="min-w-0 flex-[1_1_12rem] space-y-1 text-xs text-muted-foreground">
                       显示名
-                      <Input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64} className="h-8" />
+                      <Input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64} className="h-8 w-full max-w-full" />
                     </label>
-                    <label className="block space-y-1 text-xs text-muted-foreground">
+                    <label className="min-w-0 flex-[1_1_12rem] space-y-1 text-xs text-muted-foreground">
                       简介
-                      <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500} className="h-8 w-64" />
+                      <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500} className="h-8 w-full max-w-full" />
                     </label>
                     <Button type="button" size="sm" onClick={() => void saveEdit(b)} className="gap-1">
                       <Save className="size-3.5" />保存
