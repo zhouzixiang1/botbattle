@@ -21,6 +21,8 @@ export interface PencilViewModel {
   boxOwner: number[][]
   /** 连走指示：true=当前手刚得分、本方将继续走 */
   extraTurn: boolean
+  /** 当前 turn 是否要求对方强制让行；非 turn 帧为 false。 */
+  mustPass: boolean
   /** 每方已用秒（象棋钟）；null=不限时 */
   timeUsed: [number, number] | null
   /** 每方剩余秒 */
@@ -67,7 +69,7 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
   let grid = emptyGrid(size)
   let scores: [number, number] = [0, 0]
   let lastEdge: { x: number; y: number } | null = null
-  let toAct: number | null = 0
+  let toAct: number | null = null
   let matchOver = false
   let winner: number | null = null
   let reason = ''
@@ -76,6 +78,7 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
   let edgeOwner: Record<string, number> = {}
   let boxOwner: number[][] = emptyBoxOwner(size)
   let extraTurn = false
+  let mustPass = false
   let timeUsed: [number, number] | null = null
   let timeRemaining: [number, number] | null = null
   let timeOut: number | null = null
@@ -91,11 +94,13 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
       grid = emptyGrid(size)
       boxOwner = emptyBoxOwner(size)
       scores = [0, 0]
-      toAct = 0
+      toAct = null
       edgeOwner = {}
       extraTurn = false
+      mustPass = false
     } else if (t === 'turn') {
       toAct = typeof ev.player === 'number' ? ev.player : toAct
+      mustPass = Number(ev.pass_) === 1
       if (Array.isArray(ev.scores) && ev.scores.length >= 2) {
         scores = [Number(ev.scores[0]), Number(ev.scores[1])]
       }
@@ -112,6 +117,10 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
         scores = [Number(ev.scores[0]), Number(ev.scores[1])]
       }
       moveCount = Number(ev.move_index) || moveCount + 1
+      // move 与下一条权威 turn 之间不推测行动方；非得分手已换人，得分手
+      // 还需等待对方 pass，均由随后的 turn 事件给出唯一真值。
+      toAct = null
+      mustPass = false
       // 消费 closed_boxes（本手新闭合格 + owner）——前端按归属着色
       const scored = !!ev.scored
       extraTurn = scored
@@ -127,12 +136,21 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     } else if (t === 'pass') {
       // 对方正确 pass（连走方将再次行棋）——清 extraTurn
       extraTurn = false
+      toAct = null
+      mustPass = false
+    } else if (t === 'illegal' || t === 'technical_incident') {
+      // 决策已被裁判/平台接收，终局事件尚未到达；不得继续把该座位标成行动中。
+      toAct = null
+      mustPass = false
+      extraTurn = false
     } else if (t === 'match_end') {
       matchOver = true
       winner = ev.winner === null || ev.winner === undefined ? null : Number(ev.winner)
       reason = String(ev.reason || '')
       status = 'match_end'
       extraTurn = false
+      toAct = null
+      mustPass = false
       if (Array.isArray(ev.scores) && ev.scores.length >= 2) {
         scores = [Number(ev.scores[0]), Number(ev.scores[1])]
       } else if (
@@ -157,6 +175,8 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     } else if (t === 'error') {
       status = 'error'
       matchOver = true
+      toAct = null
+      mustPass = false
     } else if (t === 'time_used') {
       const seat = Number(ev.seat)
       if (seat !== 0 && seat !== 1) continue
@@ -167,6 +187,8 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
       if (!timeRemaining) timeRemaining = [budget, budget]
       timeUsed[seat] = Number(ev.used) || 0
       timeRemaining[seat] = Number(ev.remaining) || 0
+      toAct = null
+      mustPass = false
     } else if (t === 'time_out') {
       const seat = Number(ev.seat)
       if (seat !== 0 && seat !== 1) continue
@@ -176,6 +198,9 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
       timeUsed[seat] = Number(ev.used) || budget
       timeRemaining[seat] = 0
       timeOut = seat
+      toAct = null
+      mustPass = false
+      extraTurn = false
     }
   }
 
@@ -194,6 +219,7 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
     edgeOwner,
     boxOwner,
     extraTurn,
+    mustPass,
     timeUsed,
     timeRemaining,
     timeOut,

@@ -284,11 +284,13 @@ export default function HumanPlay() {
   const canSubmitAction = myTurn && !actionSubmitted
   const remainSec = turnDeadline ? Math.max(0, Math.ceil((turnDeadline - nowTs) / 1000)) : null
 
-  // 结局摘要：经注册表 spec.reduce（消除 gameId=== if-chain）
-  const endVm = useMemo(() => {
-    if (!over || !events.length) return null
+  // 当前局面与结局摘要都经注册表 spec.reduce；点格棋等游戏可把同一权威
+  // ViewModel 用于局面概览，通用页不读取游戏专属字段。
+  const currentVm = useMemo(() => {
+    if (!events.length) return null
     return gameSpec?.reduce(events as RawEvent[]) ?? null
-  }, [over, events, gameSpec])
+  }, [events, gameSpec])
+  const endVm = over ? currentVm : null
 
   const winnerLabel = resolveWinnerLabel(
     match,
@@ -299,7 +301,9 @@ export default function HumanPlay() {
   )
   const endSummary = endVm ? gameSpec?.humanPlay.endSummary?.(endVm) : null
   const ActionPanel = gameSpec?.humanPlay.ActionPanel
+  const GameHud = gameSpec?.replay.Hud
   const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
+  const viewportDashboard = viewportFitCanvas && Boolean(GameHud)
   const turnLabel = gameSpec?.humanPlay.turnLabelForRequest?.(turnRequest)
     ?? gameSpec?.humanPlay.turnLabel
     ?? '轮到你操作'
@@ -380,10 +384,17 @@ export default function HumanPlay() {
 
       {/* 排布、动作控件和 WS 序列化均由当前游戏规格提供。 */}
       {gameSpec?.humanPlay.layout === 'canvas-with-log' && (
-        <div className={viewportFitCanvas
-          ? 'grid items-start justify-center gap-4 xl:grid-cols-[minmax(0,40rem)_22rem]'
+        <div className={viewportDashboard
+          ? 'grid items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
+          : viewportFitCanvas
+            ? 'grid items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_22rem]'
           : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}>
-          <div className={`space-y-3 ${viewportFitCanvas ? 'w-full max-w-[40rem] justify-self-center' : ''}`}>
+          {viewportDashboard && GameHud && currentVm !== null && (
+            <div className="min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1">
+              <GameHud vm={currentVm} seats={seats} />
+            </div>
+          )}
+          <div className={`space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1' : ''}`}>
             <MatchBoard
               gameId={gameSpec.id}
               events={events}
@@ -404,7 +415,9 @@ export default function HumanPlay() {
               />
             )}
           </div>
-          <EventLogCard id={id} events={events} describeEvent={gameSpec.describeEvent} />
+          <div className={viewportDashboard ? 'md:col-span-2 md:col-start-1 md:row-start-2 xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1' : ''}>
+            <EventLogCard id={id} events={events} describeEvent={gameSpec.describeEvent} />
+          </div>
         </div>
       )}
 

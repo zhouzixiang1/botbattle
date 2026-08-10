@@ -55,7 +55,7 @@ pytest
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/1312 方形棋盘与滚动/时序协作、Safari 截图同尺寸的 2048×1024/1152 Chromium 布局回归（观赛与真人完整棋盘、长时序独立滚动）、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、`move/pass/turn` 逐事件行动方与强制让行真值、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/844/1024/1312/1600/1920/2048/2560 多比例方形棋盘与滚动/时序协作、局面概览数值、Safari 截图同尺寸的 2048×1024/1152 Chromium 布局回归（观赛与真人完整棋盘、长时序独立滚动）、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；赛事时间按状态收口、空值/显式 `NULL`、保存失败原位反馈、真实隔离库重载与 audit、500+ 字连续长文本、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
 
@@ -72,7 +72,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 - 完整的角色 × 页面 × 操作清单见 [BROWSER_ACCEPTANCE.md](./BROWSER_ACCEPTANCE.md)；新增页面或角色能力时必须先更新该矩阵，再补自动化落点。
 - 角色：访客、普通玩家、组织者、管理员。
-- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。Pencil 观赛/人机另用 Chromium 覆盖 Safari 截图同尺寸的 `2048×1024`、`2048×1152`，以及 `1312×700`、`390×700`、`320×568`；断言宽屏短视口中的完整方形 canvas、长时序栏不越出视口且可独立滚动、根元素零横向溢出及上下滚动后 sticky 时序仍可用。真实 Safari/WebKit 仍列为人工视觉抽查，不把 Chromium 结果冒充 Safari 引擎证据。
+- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。Pencil 观赛/人机另用 Chromium 覆盖 `2560×1080`、`1920×1080`、`2048×1024/1152`、`1600×900`、`1536×1080`、`1366×768`、`1312×700`、`1024×768`、`844×390`、`390×700`、`320×568`；断言 21:9、16:9、4:3、短横屏和手机竖屏按三栏/双栏/堆叠重排，方形 canvas 同时受可用宽高约束，局面概览数值与当前事件一致且不高于棋盘、长时序独立滚动、折叠后不保留空右轨、根元素零横向溢出且页面上下滚动后仍可用。真实 Safari/WebKit 仍列为人工视觉抽查，不把同尺寸 Chromium 结果冒充 Safari 引擎证据。
 - UI：主要导航、按钮、Tab、Dialog、筛选、表单合法/非法/超长输入、重复提交、空状态、错误状态、直接子路由、刷新、返回/前进与根元素横向溢出。
 - Console：持续收集 `pageerror` 与 error 级 console；未在精确白名单中的异常直接使测试失败。
 - Network：跟踪 request failed 与 4xx/5xx；负向用例只豁免精确预期的请求/状态，关键写操作断言方法、路径、状态和返回结构。深链 reload/back/forward 在继续导航前须等待目标实体 ID 对应的 detail 200 与普通 HTTP quiet window，避免仅凭通用标题把仍在收尾的 fetch 留给下一段导航。
@@ -108,6 +108,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 生产副本中性迁移 | **通过** | 2026-08-10 15:03 +08:00 从主库只读 `cp` 到独立 inode（12748789 → 4197548），用 PR154 代码迁移并二次打开：integrity=`ok`、FK=0；三对局表 523/441/453、completed 519/441/453，ratings 76、pair 209、replay 1895、stage/official 33、settlement 1194 行均不变。正式排名投影 `contest_id,entry_id,stage_idx,rank` hash 前后均为 `d1d5a83c2ed4d1dc240556668cc739b4bd3f61f81f280bee4f7921587509f620`，settlement 按物理列全行 hash 前后均为 `43f8de1554cdecaa8b673361ebdd65fc4785a97a510d1e013eaf9ec1f1918931`。完成结果缺字段/旧键/归一值错误、非完成态伪公共字段、正式榜旧键均为 0；新中性列存在，pair/replay 与旧筹码列均删除 |
 | 重基最终完整 pytest | **1093 passed / 1 warning（226.20s）** | Pencil 提交重基到 `main@5a2662f` 后，在同一最终代码 HEAD 完整执行；warning 为既有 Starlette/httpx deprecation |
 | 重基最终完整 Playwright | **50/50 passed（3.4m）** | 隔离 QA backend `50382` + worktree Vite `5174`、Chromium 单 worker；覆盖 PR154 的 tiers 同键 singleflight/失败重试、中性结果契约，以及 Pencil 事故链路、无效命中零请求、强制让行、键盘、多视口和 Console/Network |
+| Pencil 响应式仪表盘最终门禁 | **pytest 1093 passed / 1 warning（231.60s）；Playwright 50/50 passed（3.9m）；build 2562 modules** | 基于 `main@fffdd9c` 的独立 QA backend `50384` + Vite `5176`，主库复制为独立 inode；真实事故对局 `20260810143624-4149d6a3` 的 54 步/206 事件 fixture 与技术终局 fixture 覆盖 2560/2048/1920/1600/1536/1366/1312/1024/844/390/320 多比例、实际格子归属、连边构成、三栏顶部对齐且概览不越出棋盘、短屏双栏、折叠回收空轨、手机堆叠、页面滚动与时序内部滚动；完整 50 条含四角色与三游戏，warning 为既有 Starlette/httpx deprecation |
 | Admin 浏览器定向回归 | **9 passed（24.7s）** | `admin-audit.spec.ts` 全量；含状态边界、Dialog 内错误、真实隔离 DB 的手动开赛 `NULL` 重载与成功 audit 证据 |
 | Admin 时间定向后端回归 | **26 passed / 1 warning（8.04s）** | `test_admin_contest_status.py`；覆盖状态边界、发布态轮次错峰重排/清空、已有 match 拒绝、强制 SQLite 写失败整事务回滚；warning 为既有 Starlette/httpx deprecation |
 | QA profile + Admin 联合回归 | **53 passed / 1 warning（12.22s）** | `test_auto_matcher.py` + `test_runtime_settings.py` + `test_admin_contest_status.py`；覆盖 disabled loop 零 challenge、main QA wiring、实际生效只读诊断、生产 profile 不变及赛事时间全部边界 |
