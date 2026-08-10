@@ -7,6 +7,8 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -2434,6 +2436,34 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_col(conn, "auto_match_queue", "dispatcher_epoch", "INTEGER")
     _add_col(conn, "auto_match_decisions", "claim_dispatcher_token", "TEXT")
     _add_col(conn, "auto_match_decisions", "claim_dispatcher_epoch", "INTEGER")
+    for table in ("auto_match_queue", "auto_match_decisions"):
+        _add_col(conn, table, "execution_scope", "TEXT")
+        _add_col(conn, table, "execution_backend", "TEXT")
+        _add_col(conn, table, "execution_state", "TEXT")
+        _add_col(conn, table, "cleanup_requested_at", "TEXT")
+        _add_col(conn, table, "cleanup_ack_at", "TEXT")
+        _add_col(conn, table, "cleanup_error", "TEXT NOT NULL DEFAULT ''")
+    # A pre-upgrade active claim has no provable container label.  Preserve its
+    # one-dispatched barrier as local/unconfirmable instead of releasing it.
+    conn.execute(
+        "UPDATE auto_match_queue SET execution_scope='legacy-' || id,"
+        "execution_backend='local',execution_state='recovery_pending',"
+        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
+        "cleanup_error='legacy active claim requires operator recovery' "
+        "WHERE status='dispatched' AND execution_scope IS NULL",
+        (_now(),),
+    )
+    conn.execute(
+        "UPDATE auto_match_decisions SET execution_scope=(SELECT q.execution_scope "
+        "FROM auto_match_queue q WHERE q.decision_id=auto_match_decisions.id),"
+        "execution_backend='local',execution_state='recovery_pending',"
+        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
+        "cleanup_error='legacy active claim requires operator recovery' "
+        "WHERE lifecycle='dispatched' AND execution_scope IS NULL "
+        "AND EXISTS(SELECT 1 FROM auto_match_queue q "
+        "WHERE q.decision_id=auto_match_decisions.id AND q.status='dispatched')",
+        (_now(),),
+    )
     _add_col(conn, "rating_projection_state", "source_digest", "TEXT NOT NULL DEFAULT ''")
     _add_col(conn, "rating_projection_state", "projection_digest", "TEXT NOT NULL DEFAULT ''")
     _add_col(conn, "rating_projection_state", "plan_digest", "TEXT NOT NULL DEFAULT ''")
@@ -2443,23 +2473,35 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "BEFORE INSERT ON auto_match_queue WHEN "
         "(NEW.status='queued' AND (NEW.match_id IS NOT NULL OR "
         "NEW.dispatcher_token IS NOT NULL OR NEW.dispatcher_epoch IS NOT NULL OR "
-        "NEW.dispatched_at IS NOT NULL)) OR "
+        "NEW.dispatched_at IS NOT NULL OR NEW.execution_scope IS NOT NULL OR "
+        "NEW.execution_backend IS NOT NULL OR NEW.execution_state IS NOT NULL OR "
+        "NEW.cleanup_requested_at IS NOT NULL OR NEW.cleanup_ack_at IS NOT NULL OR "
+        "NEW.cleanup_error<>'')) OR "
         "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
         "NEW.dispatcher_token IS NULL OR NEW.dispatcher_epoch IS NULL OR "
-        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL)) BEGIN "
+        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL OR "
+        "NEW.execution_scope IS NULL OR NEW.execution_backend IS NULL OR "
+        "NEW.execution_state IS NULL)) BEGIN "
         "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
     )
     conn.execute("DROP TRIGGER IF EXISTS trg_auto_match_queue_fence_update")
     conn.execute(
         "CREATE TRIGGER trg_auto_match_queue_fence_update "
-        "BEFORE UPDATE OF status,match_id,dispatcher_token,dispatcher_epoch,dispatched_at "
+        "BEFORE UPDATE OF status,match_id,dispatcher_token,dispatcher_epoch,dispatched_at,"
+        "execution_scope,execution_backend,execution_state,cleanup_requested_at,"
+        "cleanup_ack_at,cleanup_error "
         "ON auto_match_queue WHEN "
         "(NEW.status='queued' AND (NEW.match_id IS NOT NULL OR "
         "NEW.dispatcher_token IS NOT NULL OR NEW.dispatcher_epoch IS NOT NULL OR "
-        "NEW.dispatched_at IS NOT NULL)) OR "
+        "NEW.dispatched_at IS NOT NULL OR NEW.execution_scope IS NOT NULL OR "
+        "NEW.execution_backend IS NOT NULL OR NEW.execution_state IS NOT NULL OR "
+        "NEW.cleanup_requested_at IS NOT NULL OR NEW.cleanup_ack_at IS NOT NULL OR "
+        "NEW.cleanup_error<>'')) OR "
         "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
         "NEW.dispatcher_token IS NULL OR NEW.dispatcher_epoch IS NULL OR "
-        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL)) BEGIN "
+        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL OR "
+        "NEW.execution_scope IS NULL OR NEW.execution_backend IS NULL OR "
+        "NEW.execution_state IS NULL)) BEGIN "
         "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
     )
     # 公平计数只从历史 completed system ladder 一次性引导；此后仅由 queue
@@ -3787,6 +3829,37 @@ class Store:
                 require_claim_fence=True,
             )
 
+    @property
+    def auto_match_execution_launch_lock_path(self) -> str:
+        """Stable cross-process lock shared by every auto execution for this DB."""
+        digest = hashlib.sha256(os.path.abspath(self.path).encode("utf-8")).hexdigest()
+        return f"/tmp/botbattle-auto-launch-{digest[:24]}.lock"
+
+    def assert_auto_match_execution_fence(
+        self,
+        match_id: str,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
+        execution_scope: str,
+    ) -> None:
+        """Fence every physical spawn/decision against takeover recovery."""
+        with self._tx() as c:
+            c.execute("BEGIN")
+            row = self._require_auto_match_fence_tx(
+                c,
+                match_id,
+                dispatcher_token,
+                dispatcher_epoch,
+                require_claim_fence=True,
+            )
+            if (
+                str(row["execution_scope"] or "") != execution_scope
+                or row["execution_state"] not in ("claimed", "running")
+            ):
+                raise AutoMatchFenceLost(
+                    f"auto-match execution scope lost for match {match_id}"
+                )
+
     def acquire_auto_match_dispatcher(
         self, dispatcher_token: str, *, lease_seconds: int = 30
     ) -> dict:
@@ -4417,6 +4490,7 @@ class Store:
         *,
         dispatcher_token: str,
         dispatcher_epoch: int,
+        execution_backend: str = "docker",
     ) -> dict:
         """Atomically claim the global head and create its match/index/replay.
 
@@ -4425,6 +4499,9 @@ class Store:
         re-read after BEGIN IMMEDIATE, so an acknowledged ``off`` cannot race a
         later dispatch.
         """
+        if execution_backend not in {"docker", "local"}:
+            raise ValueError("unknown auto-match execution backend")
+        execution_scope = secrets.token_hex(24)
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             if not self._auto_dispatcher_owned_tx(
@@ -4485,6 +4562,7 @@ class Store:
                     "_auto_match_decision_id": int(row["decision_id"]),
                     "_auto_match_claim_token": dispatcher_token,
                     "_auto_match_claim_epoch": int(dispatcher_epoch),
+                    "_auto_match_execution_scope": execution_scope,
                     "_rating_eligible": True,
                     "_rating_reason": "eligible",
                 },
@@ -4526,13 +4604,17 @@ class Store:
             )
             c.execute(
                 "UPDATE auto_match_queue SET status='dispatched', match_id=?, "
-                "dispatcher_token=?,dispatcher_epoch=?,dispatched_at=? "
+                "dispatcher_token=?,dispatcher_epoch=?,dispatched_at=?,"
+                "execution_scope=?,execution_backend=?,execution_state='claimed',"
+                "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
                 "WHERE id=? AND status='queued'",
                 (
                     match_id,
                     dispatcher_token,
                     int(dispatcher_epoch),
                     created_at,
+                    execution_scope,
+                    execution_backend,
                     row["id"],
                 ),
             )
@@ -4541,13 +4623,17 @@ class Store:
             updated = c.execute(
                 "UPDATE auto_match_decisions SET lifecycle='dispatched',match_id=?,"
                 "attempt_count=attempt_count+1,last_attempt_error='',dispatched_at=?,"
-                "claim_dispatcher_token=?,claim_dispatcher_epoch=? "
+                "claim_dispatcher_token=?,claim_dispatcher_epoch=?,"
+                "execution_scope=?,execution_backend=?,execution_state='claimed',"
+                "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
                 "WHERE id=? AND lifecycle='queued'",
                 (
                     match_id,
                     created_at,
                     dispatcher_token,
                     int(dispatcher_epoch),
+                    execution_scope,
+                    execution_backend,
                     int(row["decision_id"]),
                 ),
             )
@@ -4560,6 +4646,9 @@ class Store:
                 "game_id": gid,
                 "dispatcher_token": dispatcher_token,
                 "dispatcher_epoch": int(dispatcher_epoch),
+                "execution_scope": execution_scope,
+                "execution_backend": execution_backend,
+                "launch_lock_path": self.auto_match_execution_launch_lock_path,
             }
 
     def rollback_auto_match_claim(
@@ -4597,13 +4686,17 @@ class Store:
             c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
             c.execute(
                 "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
+                "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
+                "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
+                "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                 (int(row["id"]),),
             )
             c.execute(
                 "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
                 "dispatched_at=NULL,last_attempt_error=?,claim_dispatcher_token=NULL,"
-                "claim_dispatcher_epoch=NULL WHERE id=? "
+                "claim_dispatcher_epoch=NULL,execution_scope=NULL,"
+                "execution_backend=NULL,execution_state=NULL,cleanup_requested_at=NULL,"
+                "cleanup_ack_at=NULL,cleanup_error='' WHERE id=? "
                 "AND lifecycle='dispatched'",
                 (reason, int(row["decision_id"])),
             )
@@ -4613,12 +4706,13 @@ class Store:
     def recover_auto_match_dispatcher_takeover(
         self, *, dispatcher_token: str, dispatcher_epoch: int
     ) -> dict:
-        """Recover only claims whose previous dispatcher lease has expired.
+        """Adopt a stale claim but retain the global slot until physical cleanup.
 
-        Pending means the runner never established a durable running state and
-        is compensated back to the same queue row.  Running cannot be resumed;
-        it becomes an explicit platform abort.  A live lease owner is never
-        touched by another process.
+        Epoch takeover fences all old Store writes first.  This transaction only
+        advances the durable claim to ``recovery_pending``; it deliberately does
+        not abort/delete/requeue anything.  The scheduler must acquire the shared
+        launch flock, force-stop the persisted scope, prove zero containers, and
+        call :meth:`finalize_auto_match_execution_cleanup` separately.
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -4629,33 +4723,175 @@ class Store:
             row = c.execute(
                 "SELECT * FROM auto_match_queue WHERE status='dispatched' LIMIT 1"
             ).fetchone()
-            if row is None or (
+            if row is None:
+                return {"outcome": "clean"}
+            if (
                 row["dispatcher_token"] == dispatcher_token
                 and int(row["dispatcher_epoch"] or 0) == int(dispatcher_epoch)
             ):
+                if row["execution_state"] == "recovery_pending":
+                    return {
+                        "outcome": "recovery_pending",
+                        "match_id": str(row["match_id"]),
+                        "execution_scope": str(row["execution_scope"]),
+                        "execution_backend": str(row["execution_backend"]),
+                        "launch_lock_path": self.auto_match_execution_launch_lock_path,
+                        "cleanup_error": str(row["cleanup_error"] or ""),
+                    }
                 return {"outcome": "clean"}
             match_id = str(row["match_id"] or "")
-            table = _matches_table(str(row["game_id"]))
-            match = c.execute(
-                f"SELECT status FROM {table} WHERE id=?", (match_id,)
+            scope = str(row["execution_scope"] or "")
+            backend = str(row["execution_backend"] or "")
+            if not scope or backend not in {"docker", "local"}:
+                raise RuntimeError("stale auto-match claim lacks execution identity")
+            requested_at = _now()
+            changed = c.execute(
+                "UPDATE auto_match_queue SET dispatcher_token=?,dispatcher_epoch=?,"
+                "execution_state='recovery_pending',cleanup_requested_at=?,"
+                "cleanup_ack_at=NULL,cleanup_error='' "
+                "WHERE id=? AND status='dispatched'",
+                (
+                    dispatcher_token,
+                    int(dispatcher_epoch),
+                    requested_at,
+                    int(row["id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("auto-match takeover CAS lost")
+            c.execute(
+                "UPDATE auto_match_decisions SET execution_state='recovery_pending',"
+                "cleanup_requested_at=?,cleanup_ack_at=NULL,cleanup_error='' "
+                "WHERE id=? AND lifecycle='dispatched'",
+                (requested_at, int(row["decision_id"])),
+            )
+            return {
+                "outcome": "recovery_pending",
+                "match_id": match_id,
+                "execution_scope": scope,
+                "execution_backend": backend,
+                "launch_lock_path": self.auto_match_execution_launch_lock_path,
+                "cleanup_error": "",
+            }
+
+    def get_auto_match_execution_recovery(
+        self, *, dispatcher_token: str, dispatcher_epoch: int
+    ) -> dict | None:
+        """Return the current owner's durable recovery scope, if any."""
+        with self._tx() as c:
+            c.execute("BEGIN")
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
+                return None
+            row = c.execute(
+                "SELECT * FROM auto_match_queue WHERE status='dispatched' "
+                "AND dispatcher_token=? AND dispatcher_epoch=? "
+                "AND execution_state='recovery_pending' LIMIT 1",
+                (dispatcher_token, int(dispatcher_epoch)),
             ).fetchone()
+            if row is None:
+                return None
+            return {
+                "match_id": str(row["match_id"]),
+                "execution_scope": str(row["execution_scope"]),
+                "execution_backend": str(row["execution_backend"]),
+                "launch_lock_path": self.auto_match_execution_launch_lock_path,
+                "cleanup_error": str(row["cleanup_error"] or ""),
+            }
+
+    def record_auto_match_execution_cleanup_failure(
+        self,
+        match_id: str,
+        *,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
+        execution_scope: str,
+        reason: str,
+    ) -> bool:
+        """Persist a failed proof while retaining the one-dispatched slot."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
+                return False
+            message = str(reason or "execution cleanup not confirmed")[:500]
+            changed = c.execute(
+                "UPDATE auto_match_queue SET cleanup_error=? WHERE match_id=? "
+                "AND status='dispatched' AND dispatcher_token=? AND dispatcher_epoch=? "
+                "AND execution_scope=? AND execution_state='recovery_pending'",
+                (
+                    message,
+                    match_id,
+                    dispatcher_token,
+                    int(dispatcher_epoch),
+                    execution_scope,
+                ),
+            )
+            if changed.rowcount != 1:
+                return False
+            c.execute(
+                "UPDATE auto_match_decisions SET cleanup_error=? WHERE match_id=? "
+                "AND execution_scope=? AND execution_state='recovery_pending'",
+                (message, match_id, execution_scope),
+            )
+            return True
+
+    def finalize_auto_match_execution_cleanup(
+        self,
+        match_id: str,
+        *,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
+        execution_scope: str,
+    ) -> dict:
+        """Acknowledge zero physical workers, then converge the recovered claim."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
+                return {"outcome": "not_leader"}
+            row = c.execute(
+                "SELECT * FROM auto_match_queue WHERE match_id=? "
+                "AND status='dispatched' AND dispatcher_token=? AND dispatcher_epoch=? "
+                "AND execution_scope=? AND execution_state='recovery_pending'",
+                (
+                    match_id,
+                    dispatcher_token,
+                    int(dispatcher_epoch),
+                    execution_scope,
+                ),
+            ).fetchone()
+            if row is None:
+                return {"outcome": "stale"}
+            table = self._match_table_of(c, match_id)
+            match = (
+                c.execute(f"SELECT status FROM {table} WHERE id=?", (match_id,)).fetchone()
+                if table else None
+            )
+            ack_at = _now()
             if match is None or match["status"] == STATUS_PENDING:
                 c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
                 c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
-                c.execute(
-                    "DELETE FROM match_rating_policies WHERE match_id=?", (match_id,)
-                )
-                if match is not None:
+                c.execute("DELETE FROM match_rating_policies WHERE match_id=?", (match_id,))
+                if match is not None and table is not None:
                     c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
                 c.execute(
-                "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                    "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
+                    "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
+                    "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
+                    "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
+                    "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
+                    "WHERE id=?",
                     (int(row["id"]),),
                 )
                 c.execute(
                     "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
                     "dispatched_at=NULL,last_attempt_error='dispatcher_lost_before_start',"
-                    "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL "
+                    "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
+                    "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
+                    "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
                     "WHERE id=? AND lifecycle='dispatched'",
                     (int(row["decision_id"]),),
                 )
@@ -4665,23 +4901,19 @@ class Store:
                 c.execute(
                     f"UPDATE {table} SET status=?,reason='orphan_after_restart',"
                     "ended_at=? WHERE id=? AND status=?",
-                    (STATUS_ABORTED, _now(), match_id, STATUS_RUNNING),
+                    (STATUS_ABORTED, ack_at, match_id, STATUS_RUNNING),
                 )
-                return {"outcome": "aborted_running", "match_id": match_id}
-            if match["status"] == STATUS_COMPLETED:
-                changed = c.execute(
-                    "UPDATE auto_match_queue SET dispatcher_token=?,dispatcher_epoch=? "
-                    "WHERE id=? AND status='dispatched'",
-                    (
-                        dispatcher_token,
-                        int(dispatcher_epoch),
-                        int(row["id"]),
-                    ),
-                )
-                if changed.rowcount != 1:
-                    raise RuntimeError("auto-match terminal takeover CAS lost")
-                return {"outcome": "adopted_terminal", "match_id": match_id}
-            return {"outcome": "terminal", "match_id": match_id}
+            c.execute(
+                "UPDATE auto_match_queue SET execution_state='cleanup_confirmed',"
+                "cleanup_ack_at=?,cleanup_error='' WHERE id=?",
+                (ack_at, int(row["id"])),
+            )
+            c.execute(
+                "UPDATE auto_match_decisions SET execution_state='cleanup_confirmed',"
+                "cleanup_ack_at=?,cleanup_error='' WHERE id=?",
+                (ack_at, int(row["decision_id"])),
+            )
+            return {"outcome": "cleanup_confirmed", "match_id": match_id}
 
     @staticmethod
     def _auto_complete_service_tx(
@@ -4743,6 +4975,7 @@ class Store:
         reset_missing = 0
         removed_invalid = 0
         waiting_settlement = 0
+        recovery_pending = 0
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             if not self._auto_dispatcher_owned_tx(
@@ -4757,18 +4990,28 @@ class Store:
                         self._auto_cancel_queue_row_tx(c, row, "identity_invalid")
                         removed_invalid += 1
                     continue
+                if row["execution_state"] == "recovery_pending":
+                    # A terminal/missing match row is not proof that an old
+                    # Docker container has stopped.  Only explicit cleanup ack
+                    # may advance this durable global-serial barrier.
+                    recovery_pending += 1
+                    continue
                 match_id = str(row["match_id"] or "")
                 tbl = self._match_table_of(c, match_id)
                 if not tbl:
                     c.execute(
                         "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
+                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
+                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
+                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["id"],),
                     )
                     c.execute(
                         "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
                         "dispatched_at=NULL,last_attempt_error='missing_match',"
-                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL WHERE id=?",
+                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
+                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
+                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["decision_id"],),
                     )
                     self._auto_backoff_tx(c, "missing_match")
@@ -4780,13 +5023,17 @@ class Store:
                 if not match:
                     c.execute(
                         "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
+                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
+                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
+                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["id"],),
                     )
                     c.execute(
                         "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
                         "dispatched_at=NULL,last_attempt_error='missing_match',"
-                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL WHERE id=?",
+                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
+                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
+                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["decision_id"],),
                     )
                     self._auto_backoff_tx(c, "missing_match")
@@ -4841,6 +5088,7 @@ class Store:
                 "reset_missing": reset_missing,
                 "removed_invalid": removed_invalid,
                 "waiting_settlement": waiting_settlement,
+                "recovery_pending": recovery_pending,
             }
 
     @staticmethod
@@ -5237,6 +5485,17 @@ class Store:
                 if fenced and changed.rowcount != 1:
                     raise AutoMatchFenceLost(
                         f"auto-match terminal/state CAS lost for match {match_id}"
+                    )
+                if fenced and status == STATUS_RUNNING:
+                    c.execute(
+                        "UPDATE auto_match_queue SET execution_state='running' "
+                        "WHERE match_id=? AND execution_state='claimed'",
+                        (match_id,),
+                    )
+                    c.execute(
+                        "UPDATE auto_match_decisions SET execution_state='running' "
+                        "WHERE match_id=? AND execution_state='claimed'",
+                        (match_id,),
                     )
             if fields.get("status") == STATUS_COMPLETED:
                 self._reserve_rating_settlement_order_tx(c, match_id)

@@ -320,6 +320,18 @@ CREATE TABLE IF NOT EXISTS auto_match_decisions (
     claim_dispatcher_epoch      INTEGER CHECK (
         claim_dispatcher_epoch IS NULL OR claim_dispatcher_epoch>0
     ),
+    execution_scope             TEXT,
+    execution_backend           TEXT CHECK (
+        execution_backend IS NULL OR execution_backend IN ('docker','local')
+    ),
+    execution_state             TEXT CHECK (
+        execution_state IS NULL OR execution_state IN (
+            'claimed','running','recovery_pending','cleanup_confirmed'
+        )
+    ),
+    cleanup_requested_at        TEXT,
+    cleanup_ack_at              TEXT,
+    cleanup_error               TEXT NOT NULL DEFAULT '',
     CONSTRAINT chk_auto_decision_bots CHECK (bot_a_id <> bot_b_id),
     CONSTRAINT chk_auto_decision_owners CHECK (owner_a_id <> owner_b_id),
     CONSTRAINT chk_auto_decision_lane CHECK (
@@ -331,6 +343,10 @@ CREATE TABLE IF NOT EXISTS auto_match_decisions (
     ),
     CONSTRAINT chk_auto_decision_fence_pair CHECK (
         (claim_dispatcher_token IS NULL) = (claim_dispatcher_epoch IS NULL)
+    ),
+    CONSTRAINT chk_auto_decision_execution_pair CHECK (
+        (execution_scope IS NULL) = (execution_backend IS NULL) AND
+        (execution_scope IS NULL) = (execution_state IS NULL)
     )
 );
 
@@ -352,6 +368,18 @@ CREATE TABLE IF NOT EXISTS auto_match_queue (
     dispatcher_epoch    INTEGER CHECK (
         dispatcher_epoch IS NULL OR dispatcher_epoch>0
     ),
+    execution_scope     TEXT,
+    execution_backend   TEXT CHECK (
+        execution_backend IS NULL OR execution_backend IN ('docker','local')
+    ),
+    execution_state     TEXT CHECK (
+        execution_state IS NULL OR execution_state IN (
+            'claimed','running','recovery_pending','cleanup_confirmed'
+        )
+    ),
+    cleanup_requested_at TEXT,
+    cleanup_ack_at      TEXT,
+    cleanup_error       TEXT NOT NULL DEFAULT '',
     selection_reason    TEXT    NOT NULL DEFAULT '',
     created_at          TEXT    NOT NULL,
     dispatched_at       TEXT,
@@ -359,9 +387,15 @@ CREATE TABLE IF NOT EXISTS auto_match_queue (
     CONSTRAINT chk_auto_queue_status CHECK (status IN ('queued','dispatched')),
     CONSTRAINT chk_auto_queue_lifecycle CHECK (
         (status='queued' AND match_id IS NULL AND dispatcher_token IS NULL
-                         AND dispatcher_epoch IS NULL AND dispatched_at IS NULL) OR
+                         AND dispatcher_epoch IS NULL AND dispatched_at IS NULL
+                         AND execution_scope IS NULL AND execution_backend IS NULL
+                         AND execution_state IS NULL
+                         AND cleanup_requested_at IS NULL AND cleanup_ack_at IS NULL) OR
         (status='dispatched' AND match_id IS NOT NULL AND dispatcher_token IS NOT NULL
-                             AND dispatcher_epoch IS NOT NULL AND dispatched_at IS NOT NULL)
+                             AND dispatcher_epoch IS NOT NULL AND dispatched_at IS NOT NULL
+                             AND execution_scope IS NOT NULL
+                             AND execution_backend IS NOT NULL
+                             AND execution_state IS NOT NULL)
     )
 );
 

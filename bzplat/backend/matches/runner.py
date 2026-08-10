@@ -26,6 +26,7 @@ from bzplat.backend.runtime.binary_runner import (
     BotResponseLineTooLargeError,
     BotTechnicalError,
     PlatformRunnerError,
+    ExecutionScope,
     DEFAULT_ACTION_TIMEOUT,
 )
 from bzplat.backend.store.schema import (
@@ -106,18 +107,26 @@ async def _open_match_session(
     runtime_mode: str,
     *,
     failed_seat: int,
+    execution_scope: ExecutionScope | None = None,
 ) -> str:
     """建立一方逻辑会话；Traditional 只登记历史，不预启动闲置进程。"""
     try:
+        scope_kwargs = (
+            {"execution_scope": execution_scope}
+            if execution_scope is not None
+            else {}
+        )
         if runtime_mode == _bz.RUNTIME_TRADITIONAL:
             return await runner.prepare_session(
                 binary_path,
                 runtime_mode=runtime_mode,
+                **scope_kwargs,
             )
         if runtime_mode == _bz.RUNTIME_LONGRUNNING:
             return await runner.start_session(
                 binary_path,
                 runtime_mode=runtime_mode,
+                **scope_kwargs,
             )
         raise ValueError(f"未知运行模式: {runtime_mode}")
     except BotCrashedError as exc:
@@ -182,9 +191,12 @@ async def _traditional_decide_one_shot(
     line = _bz.dumps_traditional(full_requests, session.responses)
     # 启动临时 bot 进程（每回合重启——traditional 语义）
     try:
+        scope = getattr(session, "execution_scope", None)
+        scope_kwargs = {"execution_scope": scope} if scope is not None else {}
         tmp_sid = await runner.start_session(
             session.binary_path,
             runtime_mode=_bz.RUNTIME_TRADITIONAL,
+            **scope_kwargs,
         )
     except BotCrashedError as exc:
         exc.crashed_seat = failed_seat
@@ -411,6 +423,25 @@ class MatchRunner:
         self.runner = runner or BinaryRunner()
         self.action_timeout = action_timeout
 
+    @property
+    def execution_backend(self) -> str:
+        return str(getattr(self.runner, "execution_backend", "docker"))
+
+    async def force_stop_execution(
+        self,
+        token: str,
+        *,
+        launch_lock_path: str,
+        execution_backend: str,
+        allow_local_ack: bool,
+    ) -> dict[str, object]:
+        return await self.runner.force_stop_execution(
+            token,
+            launch_lock_path=launch_lock_path,
+            execution_backend=execution_backend,
+            allow_local_ack=allow_local_ack,
+        )
+
     async def run_binaries(
         self,
         path_a: str,
@@ -422,6 +453,7 @@ class MatchRunner:
         seed: int | None = None,
         runtime_modes: tuple[str, str] | None = None,
         time_budget_per_side: float | None = None,
+        execution_scope: ExecutionScope | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """跑两个二进制 bot。
@@ -444,6 +476,7 @@ class MatchRunner:
             path_a,
             rm_a,
             failed_seat=0,
+            execution_scope=execution_scope,
         )
         try:
             sid_b = await _open_match_session(
@@ -451,6 +484,7 @@ class MatchRunner:
                 path_b,
                 rm_b,
                 failed_seat=1,
+                execution_scope=execution_scope,
             )
         except BaseException:
             await self.runner.stop_session(sid_a)
@@ -710,6 +744,7 @@ class MatchRunner:
         on_debug: DebugSink | None = None,
         runtime_modes: tuple[str, str] | None = None,
         time_budget_per_side: float | None = None,
+        execution_scope: ExecutionScope | None = None,
         **match_params: Any,
     ) -> Any:
         """P4 duplicate：跑多 leg（经 spec.build_match_plan），**每 leg 独立判胜负**。
@@ -748,6 +783,7 @@ class MatchRunner:
             path_a,
             rm_a,
             failed_seat=0,
+            execution_scope=execution_scope,
         )
         try:
             sid_b = await _open_match_session(
@@ -755,6 +791,7 @@ class MatchRunner:
                 path_b,
                 rm_b,
                 failed_seat=1,
+                execution_scope=execution_scope,
             )
         except BaseException:
             await self.runner.stop_session(sid_a)

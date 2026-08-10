@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
 import logging
 import os
 import shutil
@@ -9,8 +11,11 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import AsyncIterator
 
 from bzplat.backend.runtime.config import ACTION_TIMEOUT_SEC
 from bzplat.backend.runtime.limits import MAX_BOT_RESPONSE_LINE_BYTES
@@ -36,8 +41,66 @@ DEFAULT_LINUX_IMAGE = "debian:bookworm-slim"
 DEFAULT_IMAGE_PREPARE_TIMEOUT = 300.0
 _DOCKER_INSPECT_TIMEOUT_SEC = 15.0
 _STDERR_DRAIN_GRACE_SEC = 0.5
+_AUTO_EXECUTION_LABEL = "bzplat.auto_execution"
+_AUTO_EXECUTION_CLEANUP_POLLS = 6
 _IMAGE_READY_LOCK = threading.Lock()
 _IMAGE_READY_KEYS: set[tuple[str, str]] = set()
+
+
+@dataclass(frozen=True)
+class ExecutionScope:
+    """Cross-process auto-match execution identity and spawn fence.
+
+    The cross-process file lock spans the final Store fence check and actual
+    subprocess spawn.  A takeover first changes epoch and then takes the same
+    lock before cleanup, closing the otherwise possible check/spawn race without
+    holding SQLite's synchronous lock across an ``await``.
+    """
+
+    token: str
+    launch_lock_path: str
+    fence_check: Callable[[], None]
+
+    def assert_current(self) -> None:
+        self.fence_check()
+
+    @asynccontextmanager
+    async def launch_guard(self) -> AsyncIterator[None]:
+        async with _execution_file_lock(self.launch_lock_path):
+            # This is the only check inside the launch critical section.  It is
+            # a short Store transaction and has completed before spawn awaits.
+            self.fence_check()
+            yield
+
+
+@asynccontextmanager
+async def _execution_file_lock(path: str) -> AsyncIterator[None]:
+    """Cancellation-safe async wrapper around the per-database ``flock``."""
+
+    def acquire() -> int:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    acquire_task = asyncio.create_task(asyncio.to_thread(acquire))
+    try:
+        fd = await asyncio.shield(acquire_task)
+    except asyncio.CancelledError:
+        # ``to_thread`` cannot be stopped while blocked in flock.  Wait for it
+        # to acquire, then release, so cancellation never leaks the global lock.
+        fd = await acquire_task
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        raise
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 @dataclass
@@ -57,6 +120,7 @@ class BotSession:
     responses: list = field(default_factory=list)  # 累积 Bot 响应负载（Traditional 信封 responses[]）
     turn: int = 0                                  # 已完成的回合数（0=首回合尚未握手判定）
     long_running: bool = False  # LongRunning Bot 首回合握手后置 True（之后发单 request 信封）
+    execution_scope: ExecutionScope | None = None
     def start_stderr_drain(self) -> None:
         """异步读取 bot stderr 到尾部缓冲（保留末尾 4KB，排查崩溃）。"""
         proc = self.proc
@@ -338,14 +402,22 @@ class BinaryRunner:
         )
         self._image_prepare_timeout = max(0.001, float(image_prepare_timeout))
 
+    @property
+    def execution_backend(self) -> str:
+        """Persisted backend used to decide whether takeover cleanup is provable."""
+        return "local" if self._prefer_local else "docker"
+
     def _new_session(
         self,
         binary_path: str | Path,
         *,
         info: BinaryInfo | None,
         runtime_mode: str,
+        execution_scope: ExecutionScope | None = None,
     ) -> BotSession:
         """校验二进制并创建逻辑会话；不启动进程。"""
+        if execution_scope is not None:
+            execution_scope.assert_current()
         if runtime_mode not in VALID_RUNTIME_MODES:
             raise ValueError(f"未知运行模式: {runtime_mode}")
         path = Path(binary_path).resolve()
@@ -367,7 +439,7 @@ class BinaryRunner:
         mode = self._select_mode(info)
         session = BotSession(
             session_id=sid, info=info, binary_path=path, mode=mode,
-            runtime_mode=runtime_mode,
+            runtime_mode=runtime_mode, execution_scope=execution_scope,
         )
         return session
 
@@ -377,6 +449,7 @@ class BinaryRunner:
         *,
         info: BinaryInfo | None = None,
         runtime_mode: str = DEFAULT_RUNTIME_MODE,
+        execution_scope: ExecutionScope | None = None,
     ) -> str:
         """只登记 Traditional 的历史状态，不启动整场闲置 Bot 进程。"""
         if runtime_mode != DEFAULT_RUNTIME_MODE:
@@ -385,6 +458,7 @@ class BinaryRunner:
             binary_path,
             info=info,
             runtime_mode=runtime_mode,
+            execution_scope=execution_scope,
         )
         if session.mode == "docker":
             # Traditional 的逻辑会话在游戏 Session/棋钟启动前建立；此处完成
@@ -401,22 +475,31 @@ class BinaryRunner:
     async def start_session(self, binary_path: str | Path, *,
                             info: BinaryInfo | None = None,
                             action_timeout: float = DEFAULT_ACTION_TIMEOUT,
-                            runtime_mode: str = DEFAULT_RUNTIME_MODE) -> str:
+                            runtime_mode: str = DEFAULT_RUNTIME_MODE,
+                            execution_scope: ExecutionScope | None = None) -> str:
         session = self._new_session(
             binary_path,
             info=info,
             runtime_mode=runtime_mode,
+            execution_scope=execution_scope,
         )
         sid = session.session_id
         mode = session.mode
         try:
-            if mode == "local":
-                await self._start_local(session)
-            else:
+            if mode == "docker":
                 # 镜像 inspect/pull 属于平台准备阶段，必须先于 Bot 响应计时；
                 # ``docker run --pull=never`` 再保证计时窗口内不会隐式拉镜像。
                 await self.ensure_runtime_ready()
-                await self._start_docker(session)
+            guard = (
+                execution_scope.launch_guard()
+                if execution_scope is not None
+                else contextlib.AsyncExitStack()
+            )
+            async with guard:
+                if mode == "local":
+                    await self._start_local(session)
+                else:
+                    await self._start_docker(session)
         except OSError as exc:
             if mode == "docker":
                 # Host process/resource failures while invoking the sandbox are
@@ -510,6 +593,11 @@ class BinaryRunner:
             "--entrypoint", "/app/bot",
             self._linux_image,
         ]
+        if session.execution_scope is not None:
+            cmd[8:8] = [
+                "--label",
+                f"{_AUTO_EXECUTION_LABEL}={session.execution_scope.token}",
+            ]
         session.proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -523,6 +611,8 @@ class BinaryRunner:
         session = self._sessions.get(session_id)
         if not session or not session.proc or not session.proc.stdin or not session.proc.stdout:
             raise RuntimeError(f"session {session_id} 不可用")
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         if not line.endswith("\n"):
             line = line + "\n"
         try:
@@ -544,6 +634,8 @@ class BinaryRunner:
             raise BotResponseLineTooLargeError("Bot stdout 响应行超过硬顶") from exc
         if not raw:
             raise await self._process_exit_error(session, "stdout EOF")
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
     async def _process_exit_error(
@@ -606,6 +698,8 @@ class BinaryRunner:
         session = self._sessions.get(session_id)
         if not session or not session.proc or not session.proc.stdout:
             return None
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         try:
             raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -614,6 +708,8 @@ class BinaryRunner:
             raise BotResponseLineTooLargeError("Bot stdout 握手行超过硬顶") from exc
         if not raw:
             return None
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         return raw.decode("utf-8", errors="replace").rstrip("\r\n") or None
 
     async def stop_session(self, session_id: str) -> None:
@@ -641,13 +737,115 @@ class BinaryRunner:
                 pass
         if session.container_name and self._docker_ok:
             try:
-                await asyncio.create_subprocess_exec(
+                cleanup = await asyncio.create_subprocess_exec(
                     self._docker_bin, "rm", "-f", session.container_name,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
+                await cleanup.wait()
             except Exception:
                 logger.debug("docker rm failed", exc_info=True)
+
+    async def _docker_execution_container_ids(self, token: str) -> list[str]:
+        result = await asyncio.to_thread(
+            _docker_control_command,
+            [
+                self._docker_bin,
+                "ps",
+                "-aq",
+                "--filter",
+                f"label={_AUTO_EXECUTION_LABEL}={token}",
+            ],
+            timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+            timeout_message="Docker 执行隔离查询超时",
+        )
+        if result.returncode != 0:
+            raise PlatformRunnerError("Docker 执行隔离查询失败")
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    async def force_stop_execution(
+        self,
+        token: str,
+        *,
+        launch_lock_path: str,
+        execution_backend: str,
+        allow_local_ack: bool,
+    ) -> dict[str, object]:
+        """Stop one logical auto execution and prove its sandbox is gone.
+
+        Docker proof is label based and therefore survives process death.  Host
+        subprocesses have no equally trustworthy cross-process identity; a
+        takeover must keep the durable recovery slot occupied instead.
+        """
+        if execution_backend not in {"docker", "local"}:
+            return {
+                "confirmed": False,
+                "backend": execution_backend,
+                "reason": "未知执行后端，无法确认清理",
+            }
+        async with _execution_file_lock(launch_lock_path):
+            matching = [
+                sid
+                for sid, session in list(self._sessions.items())
+                if session.execution_scope is not None
+                and session.execution_scope.token == token
+            ]
+            for sid in matching:
+                await self.stop_session(sid)
+
+            if execution_backend == "local":
+                if not allow_local_ack:
+                    return {
+                        "confirmed": False,
+                        "backend": "local",
+                        "reason": "本地模式无法跨进程确认旧 Bot 已退出",
+                    }
+                remaining = any(
+                    session.execution_scope is not None
+                    and session.execution_scope.token == token
+                    for session in self._sessions.values()
+                )
+                return {
+                    "confirmed": not remaining,
+                    "backend": "local",
+                    "reason": "" if not remaining else "本地 Bot 会话仍在运行",
+                }
+
+            try:
+                ids = await self._docker_execution_container_ids(token)
+                if ids:
+                    removed = await asyncio.to_thread(
+                        _docker_control_command,
+                        [self._docker_bin, "rm", "-f", *ids],
+                        timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+                        timeout_message="Docker 执行隔离清理超时",
+                    )
+                    if removed.returncode != 0:
+                        return {
+                            "confirmed": False,
+                            "backend": "docker",
+                            "reason": "Docker 执行隔离清理失败",
+                        }
+                # A successful ``docker rm`` is not the acknowledgement.  Re-query
+                # the label until the daemon proves the scope has zero containers.
+                for attempt in range(_AUTO_EXECUTION_CLEANUP_POLLS):
+                    remaining = await self._docker_execution_container_ids(token)
+                    if not remaining:
+                        return {"confirmed": True, "backend": "docker", "reason": ""}
+                    if attempt + 1 < _AUTO_EXECUTION_CLEANUP_POLLS:
+                        await asyncio.sleep(0.05)
+                return {
+                    "confirmed": False,
+                    "backend": "docker",
+                    "reason": "Docker 执行隔离清理后仍有容器存活",
+                }
+            except PlatformRunnerError as exc:
+                logger.error("auto execution cleanup failed token=%s error=%s", token, exc)
+                return {
+                    "confirmed": False,
+                    "backend": "docker",
+                    "reason": str(exc),
+                }
 
 
 def _classify_container_platform_exit(

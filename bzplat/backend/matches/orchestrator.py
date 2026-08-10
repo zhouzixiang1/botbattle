@@ -31,6 +31,7 @@ from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotCrashedError,
     BotTechnicalError,
+    ExecutionScope,
     PlatformRunnerError,
 )
 from bzplat.backend.store import AutoMatchFenceLost, Store
@@ -375,6 +376,26 @@ class MatchOrchestrator:
     def available_bot_slots(self) -> int:
         """Return globally reservable Bot slots (human matches are separate)."""
         return max(0, int(self.max_concurrent) - len(self._bot_admitted))
+
+    @property
+    def execution_backend(self) -> str:
+        return self.runner.execution_backend
+
+    async def force_stop_auto_execution(
+        self,
+        execution_scope: str,
+        *,
+        launch_lock_path: str,
+        execution_backend: str,
+    ) -> dict[str, object]:
+        return await self.runner.force_stop_execution(
+            execution_scope,
+            launch_lock_path=launch_lock_path,
+            execution_backend=execution_backend,
+            # Only the original in-process owner could prove local PIDs.  A
+            # dispatcher takeover is cross-process by definition and fails shut.
+            allow_local_ack=False,
+        )
 
     def _reserve_bot_slot(self, match_id: str) -> None:
         if match_id in self._bot_admitted:
@@ -1245,6 +1266,27 @@ class MatchOrchestrator:
                 stored_mc = json.loads(stored_mc)
             except Exception:
                 stored_mc = {}
+        execution_scope: ExecutionScope | None = None
+        if auto_fence is not None:
+            scope_token = str(stored_mc.get("_auto_match_execution_scope") or "")
+            if not scope_token:
+                raise AutoMatchFenceLost(
+                    f"auto-match execution scope missing for match {match_id}"
+                )
+
+            def assert_execution_current() -> None:
+                self.store.assert_auto_match_execution_fence(
+                    match_id,
+                    auto_fence[0],
+                    auto_fence[1],
+                    scope_token,
+                )
+
+            execution_scope = ExecutionScope(
+                token=scope_token,
+                launch_lock_path=self.store.auto_match_execution_launch_lock_path,
+                fence_check=assert_execution_current,
+            )
         want_duplicate = bool(stored_mc.get("duplicate"))
         if want_duplicate and spec.build_match_plan is None:
             logger.error("match %s has unsupported duplicate config for %s", match_id, gid)
@@ -1340,6 +1382,7 @@ class MatchOrchestrator:
                     seed=dup_seed,
                     runtime_modes=(mode_a, mode_b),
                     time_budget_per_side=spec.time_budget_per_side,
+                    execution_scope=execution_scope,
                     duplicate=True,
                 )
             else:
@@ -1351,6 +1394,7 @@ class MatchOrchestrator:
                     on_debug=on_debug,
                     runtime_modes=(mode_a, mode_b),
                     time_budget_per_side=spec.time_budget_per_side,
+                    execution_scope=execution_scope,
                 )
             # duplicate：每 leg 独立判胜负（result.legs），不把净筹码合并判 1 场。
             # 胜负完全由 standings/ranking 读 result.legs 决定；match.winner 留 None。

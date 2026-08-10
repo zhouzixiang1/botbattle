@@ -124,6 +124,42 @@ class AutoMatchScheduler:
             )
         return lease
 
+    async def _recover_physical_execution(self) -> dict:
+        """Keep the dispatched barrier until sandbox cleanup is proved."""
+        recovery = self.store.get_auto_match_execution_recovery(
+            dispatcher_token=self._dispatcher_token,
+            dispatcher_epoch=self._dispatcher_epoch,
+        )
+        if recovery is None:
+            return {"outcome": "clean"}
+        result = await self.orch.force_stop_auto_execution(
+            recovery["execution_scope"],
+            launch_lock_path=recovery["launch_lock_path"],
+            execution_backend=recovery["execution_backend"],
+        )
+        if not result.get("confirmed"):
+            reason = str(result.get("reason") or "旧执行单元清理尚未确认")
+            self.store.record_auto_match_execution_cleanup_failure(
+                recovery["match_id"],
+                dispatcher_token=self._dispatcher_token,
+                dispatcher_epoch=self._dispatcher_epoch,
+                execution_scope=recovery["execution_scope"],
+                reason=reason,
+            )
+            return {
+                "outcome": "recovery_pending",
+                "confirmed": False,
+                "reason": reason,
+                "match_id": recovery["match_id"],
+            }
+        finalized = self.store.finalize_auto_match_execution_cleanup(
+            recovery["match_id"],
+            dispatcher_token=self._dispatcher_token,
+            dispatcher_epoch=self._dispatcher_epoch,
+            execution_scope=recovery["execution_scope"],
+        )
+        return {**finalized, "confirmed": True}
+
     async def _converge_terminal_rows(self) -> dict:
         state = self.store.reconcile_auto_match_queue(
             dispatcher_token=self._dispatcher_token,
@@ -153,6 +189,10 @@ class AutoMatchScheduler:
         if not lease.get("owned"):
             self._last_pause_reason = "另一服务进程持有自动排位调度租约"
             return {"outcome": "standby", "lease": lease}
+        recovery = await self._recover_physical_execution()
+        if recovery.get("outcome") == "recovery_pending":
+            self._last_pause_reason = str(recovery.get("reason") or "正在清理旧执行单元")
+            return {"outcome": "recovery_pending", "lease": lease, "recovery": recovery}
         reconciled = await self._converge_terminal_rows()
         if not self.configured_enabled:
             self._last_pause_reason = "管理员已关闭自动排位"
@@ -207,6 +247,9 @@ class AutoMatchScheduler:
                 match_id,
                 dispatcher_token=self._dispatcher_token,
                 dispatcher_epoch=self._dispatcher_epoch,
+                execution_backend=str(
+                    getattr(self.orch, "execution_backend", "docker")
+                ),
             )
         except Exception:
             self.orch.release_prepared_match_slot(match_id)
@@ -272,7 +315,9 @@ class AutoMatchScheduler:
         if self.capability_enabled:
             lease = self._ensure_dispatcher_leadership()
             if lease.get("owned"):
-                await self._converge_terminal_rows()
+                recovery = await self._recover_physical_execution()
+                if recovery.get("outcome") != "recovery_pending":
+                    await self._converge_terminal_rows()
         self.wake()
 
     @staticmethod
@@ -340,6 +385,14 @@ class AutoMatchScheduler:
         elif fair_state.get("not_before") and str(fair_state["not_before"]) > datetime.now().isoformat(timespec="seconds"):
             paused = True
             pause_reason = "平台故障退避中，将自动恢复"
+        elif (
+            active_global is not None
+            and active_global.get("execution_state") == "recovery_pending"
+        ):
+            paused = True
+            pause_reason = str(
+                active_global.get("cleanup_error") or "正在清理旧执行单元"
+            )
         elif active_global is not None:
             paused = False
             pause_reason = ""

@@ -10,6 +10,8 @@ import pytest
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
+from bzplat.backend.runtime import binary_runner as binary_runtime
+from bzplat.backend.runtime.binary_runner import BinaryRunner, ExecutionScope
 from bzplat.backend.store import (
     AutoMatchFenceLost,
     Store,
@@ -527,7 +529,7 @@ def test_live_dispatcher_lease_prevents_other_process_recovery(store: Store):
         contender.close()
 
 
-def test_expired_worker_cannot_resurrect_or_settle_after_epoch_takeover(store: Store):
+def test_takeover_retains_global_slot_until_physical_cleanup_ack(store: Store):
     bots = [_mk_bot(store, f"fence-{index}") for index in range(2)]
     token_a = _leader(store, "fence-a")
     epoch_a = _epoch(store, token_a)
@@ -556,9 +558,26 @@ def test_expired_worker_cannot_resurrect_or_settle_after_epoch_takeover(store: S
     epoch_b = int(lease_b["lease_epoch"])
     assert lease_b["owned"] is True
     assert epoch_b > epoch_a
-    assert store.recover_auto_match_dispatcher_takeover(
+    recovery = store.recover_auto_match_dispatcher_takeover(
         dispatcher_token="fence-b", dispatcher_epoch=epoch_b
-    )["outcome"] == "aborted_running"
+    )
+    assert recovery["outcome"] == "recovery_pending"
+    assert store.get_match("fenced-match")["status"] == "running"
+    queued = store.list_auto_match_queue()
+    assert len(queued) == 1
+    assert queued[0]["status"] == "dispatched"
+    assert queued[0]["execution_state"] == "recovery_pending"
+    assert store.reconcile_auto_match_queue(
+        dispatcher_token="fence-b", dispatcher_epoch=epoch_b
+    )["recovery_pending"] == 1
+    assert store.record_auto_match_execution_cleanup_failure(
+        "fenced-match",
+        dispatcher_token="fence-b",
+        dispatcher_epoch=epoch_b,
+        execution_scope=recovery["execution_scope"],
+        reason="daemon unavailable",
+    )
+    assert store.list_auto_match_queue()[0]["cleanup_error"] == "daemon unavailable"
 
     with pytest.raises(AutoMatchFenceLost):
         store.update_match(
@@ -597,10 +616,91 @@ def test_expired_worker_cannot_resurrect_or_settle_after_epoch_takeover(store: S
             auto_dispatcher_token=token_a,
             auto_dispatcher_epoch=epoch_a,
         )
-    assert store.get_match("fenced-match")["status"] == "aborted"
+    assert store.get_match("fenced-match")["status"] == "running"
     assert store.is_match_rating_settled("fenced-match") is False
     assert store.get_rating(bots[0]["id"])["matches_played"] == 0
     assert store.get_rating(bots[1]["id"])["matches_played"] == 0
+    assert store.finalize_auto_match_execution_cleanup(
+        "fenced-match",
+        dispatcher_token="fence-b",
+        dispatcher_epoch=epoch_b,
+        execution_scope=recovery["execution_scope"],
+    )["outcome"] == "cleanup_confirmed"
+    assert store.get_match("fenced-match")["status"] == "aborted"
+    assert store.reconcile_auto_match_queue(
+        dispatcher_token="fence-b", dispatcher_epoch=epoch_b
+    )["removed_terminal"] == 1
+    assert store.list_auto_match_queue() == []
+
+
+def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
+    tmp_path, monkeypatch
+):
+    active_containers: list[str] = []
+    fence_current = True
+    entered = asyncio.Event()
+    release_spawn = asyncio.Event()
+    lock_path = str(tmp_path / "auto-launch.lock")
+
+    def assert_fence() -> None:
+        if not fence_current:
+            raise AutoMatchFenceLost("stale epoch")
+
+    scope = ExecutionScope(
+        token="scope-a",
+        launch_lock_path=lock_path,
+        fence_check=assert_fence,
+    )
+    runner = BinaryRunner(prefer_local=False)
+
+    async def container_ids(token: str) -> list[str]:
+        assert token == "scope-a"
+        return list(active_containers)
+
+    def docker_control(args, **_kwargs):
+        assert args[1:3] == ["rm", "-f"]
+        active_containers.clear()
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(runner, "_docker_execution_container_ids", container_ids)
+    monkeypatch.setattr(binary_runtime, "_docker_control_command", docker_control)
+
+    async def exercise() -> None:
+        async def stale_spawn() -> None:
+            async with scope.launch_guard():
+                entered.set()
+                await release_spawn.wait()
+                active_containers.append("container-a")
+
+        spawn_task = asyncio.create_task(stale_spawn())
+        await entered.wait()
+        cleanup_task = asyncio.create_task(
+            runner.force_stop_execution(
+                "scope-a",
+                launch_lock_path=lock_path,
+                execution_backend="docker",
+                allow_local_ack=False,
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert cleanup_task.done() is False
+        release_spawn.set()
+        await spawn_task
+        result = await cleanup_task
+        assert result["confirmed"] is True
+        assert active_containers == []
+
+        nonlocal fence_current
+        fence_current = False
+        with pytest.raises(AutoMatchFenceLost):
+            async with scope.launch_guard():
+                raise AssertionError("stale worker must not enter spawn section")
+
+    asyncio.run(exercise())
 
 
 def test_auto_seats_flip_after_each_completed_service(store: Store):
