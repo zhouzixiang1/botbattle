@@ -1392,7 +1392,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 (TYPE_LADDER,),
             )
         conn.execute(
-            "INSERT INTO auto_match_daily_claims(match_id, local_day, created_at) "
+            "INSERT OR IGNORE INTO auto_match_daily_claims(match_id, local_day, created_at) "
             "VALUES(?,?,?)",
             (AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL, "", migrated_at),
         )

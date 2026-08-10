@@ -14,7 +14,10 @@ from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
 from bzplat.backend.runtime.config import AUTO_MATCH_CONFIG, platform_local_day
 from bzplat.backend.store import AutoMatchDailyCapReached, Store
-from bzplat.backend.store.schema import TYPE_LADDER
+from bzplat.backend.store.schema import (
+    AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL,
+    TYPE_LADDER,
+)
 
 
 class FakeOrch:
@@ -380,3 +383,43 @@ def test_non_auto_ladder_is_not_counted(store: Store):
         game_id="holdem",
     )
     assert store.count_auto_matches_for_day(platform_local_day()) == 0
+
+
+def test_concurrent_first_migration_is_idempotent(tmp_path):
+    """两个 Store 同时首次升级旧库，均成功且回填/哨兵不重复。"""
+    db_path = tmp_path / "legacy-shared.db"
+    legacy = Store(str(db_path))
+    bots = _mk_bots(legacy, 2, "holdem")
+    legacy.create_match(
+        "legacy-auto",
+        bots[0]["id"],
+        bots[1]["id"],
+        owner_id=None,
+        match_type=TYPE_LADDER,
+        game_id="holdem",
+    )
+    with legacy._tx() as conn:
+        conn.execute("DROP TABLE auto_match_daily_claims")
+    legacy.close()
+
+    barrier = Barrier(2)
+
+    def initialize(_index: int) -> Store:
+        barrier.wait()
+        return Store(str(db_path))
+
+    opened: list[Store] = []
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            opened = list(pool.map(initialize, range(2)))
+        conn = opened[0]._conn
+        assert conn.execute(
+            "SELECT COUNT(*) FROM auto_match_daily_claims WHERE match_id=?",
+            (AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM auto_match_daily_claims WHERE match_id='legacy-auto'"
+        ).fetchone()[0] == 1
+    finally:
+        for migrated_store in opened:
+            migrated_store.close()
