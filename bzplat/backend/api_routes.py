@@ -162,7 +162,14 @@ def _with_seat_info(m: dict, store=None) -> dict:
             human_user = store.get_user(int(public_match["human_user_id"]))
         except Exception:
             human_user = None
-    return with_seat_info(public_match, human_user=human_user) or public_match
+    result = with_seat_info(public_match, human_user=human_user) or public_match
+    if store is not None and result.get("id"):
+        # Eligibility is frozen at creation, but it does not prove the derived
+        # rating transaction committed.  Only the exactly-once marker does.
+        result["rating_settled"] = bool(
+            store.is_match_rating_settled(str(result["id"]))
+        )
+    return result
 
 
 def _public_match_rows(rows: list[dict]) -> list[dict]:
@@ -818,7 +825,12 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
         raise HTTPException(400, str(e))
     audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=mid, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
     policy = _store(request).match_rating_policy(_store(request).get_match(mid) or {})
-    return {"match_id": mid, "status": "pending", **policy}
+    return {
+        "match_id": mid,
+        "status": "pending",
+        **policy,
+        "rating_settled": False,
+    }
 
 
 class HumanChallengeBody(BaseModel):
@@ -843,7 +855,15 @@ async def challenge_human(body: HumanChallengeBody, request: Request, user=Depen
         audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
     audit_log(request, "match_human", result="ok", user=user.get("username"), target=mid, detail=f"bot={body.bot_id} seat={body.human_seat}")
-    return {"match_id": mid, "status": "pending"}
+    policy = _store(request).match_rating_policy(
+        _store(request).get_match(mid) or {}
+    )
+    return {
+        "match_id": mid,
+        "status": "pending",
+        **policy,
+        "rating_settled": False,
+    }
 
 
 @router.websocket("/api/matches/{match_id}/play")

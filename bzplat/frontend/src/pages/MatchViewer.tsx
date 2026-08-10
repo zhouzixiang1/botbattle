@@ -74,6 +74,28 @@ const RATING_REASON_LABEL: Record<string, string> = {
   owner_missing: '历史所有者缺失 · 不计天梯',
 }
 
+function ratingBadge(match: MatchRow): {
+  label: string
+  variant: 'default' | 'secondary' | 'destructive' | 'outline'
+} | null {
+  if (match.status === 'aborted') {
+    return { label: '已中止未计分', variant: 'destructive' }
+  }
+  if (match.rated !== true) {
+    if (match.rated !== false) return null
+    return {
+      label: RATING_REASON_LABEL[match.rating_reason || ''] || '不计天梯',
+      variant: 'secondary',
+    }
+  }
+  if (match.status === 'completed') {
+    return match.rating_settled === true
+      ? { label: '已计分', variant: 'default' }
+      : { label: '待结算', variant: 'secondary' }
+  }
+  return { label: '预计计分', variant: 'outline' }
+}
+
 export default function MatchViewer() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -139,6 +161,16 @@ export default function MatchViewer() {
         flushFrameRef.current = requestAnimationFrame(flushPending)
       }
     }
+    const refreshTerminalMatch = () => {
+      void apiGet<{ match: MatchRow }>(`/api/matches/${encodeURIComponent(id)}`)
+        .then((detail) => {
+          if (cancelled) return
+          if (detail.match.status === 'completed' || detail.match.status === 'aborted') {
+            setMatch(detail.match)
+          }
+        })
+        .catch(() => undefined)
+    }
 
     // 浏览计数（公开，失败忽略）
     void apiPost(`/api/matches/${encodeURIComponent(id)}/view`, 'POST', {}).catch(() => undefined)
@@ -180,6 +212,7 @@ export default function MatchViewer() {
                   setStatus('replay')
                   terminalClosed = true
                   es?.close()
+                  refreshTerminalMatch()
                 } else {
                   setStatus('live')
                 }
@@ -216,6 +249,7 @@ export default function MatchViewer() {
                 setStatus(String(ev.type))
                 terminalClosed = true
                 es?.close()
+                refreshTerminalMatch()
               } else {
                 // 常规事件（落子/判决等）：逐帧批量追加，避免瞬时对局触发深度更新告警。
                 queueEvent(ev)
@@ -326,6 +360,7 @@ export default function MatchViewer() {
   const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
   const compactViewportDashboard = viewportDashboard && timelineCollapsed
   const typeBadge = matchTypeBadge(match?.match_type)
+  const ratingStateBadge = match ? ratingBadge(match) : null
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(match?.reason, match?.status)
     : resolveTerminalReason(match?.reason, match?.status)
@@ -487,9 +522,13 @@ export default function MatchViewer() {
         {typeBadge && (
           <Badge variant="outline" className={`text-[10px] ${typeBadge.cls}`}>{typeBadge.label}</Badge>
         )}
-        {typeof match?.rated === 'boolean' && (
-          <Badge variant={match.rated ? 'default' : 'secondary'} className="max-w-full whitespace-normal text-[10px]">
-            {RATING_REASON_LABEL[match.rating_reason || ''] || (match.rated ? '计入天梯' : '不计天梯')}
+        {ratingStateBadge && (
+          <Badge
+            data-testid="rating-state"
+            variant={ratingStateBadge.variant}
+            className="max-w-full whitespace-normal text-[10px]"
+          >
+            {ratingStateBadge.label}
           </Badge>
         )}
         {/* 状态徽标：优先用 DB 权威字段 match.status（completed/aborted/running/pending），

@@ -123,7 +123,9 @@ Bot profile 和队列通道；它不是管理员参数。公开 `GET /api/auto-m
 
 挑战创建事务会冻结评分资格：不同所有者 Bot 挑战/ladder 计分；同 Bot、自有不同 Bot、人机与
 赛事均为中性局。中性局完成后仍写 exactly-once settlement marker，但不改 ratings、历史、胜负或
-pair_stats；对局详情明确返回 `rated/rating_reason`。历史结算首次迁移按
+pair_stats；对局详情同时返回创建时资格 `rated/rating_reason` 与 marker 真值 `rating_settled`，两者
+不可互相代替。符合资格的在途、完成未落 marker、完成已落 marker、中止对局分别显示“预计计分”、
+“待结算”、“已计分”、“已中止未计分”。历史结算首次迁移按
 `(COALESCE(ended_at, settled_at), match_id)` 固化为连续 `settled_order=1..N`，以后完成事务先冻结
 单调序号，恢复和离线重放只认该序号，绝不能再按 `created_at` 猜顺序。
 
@@ -131,13 +133,15 @@ pair_stats；对局详情明确返回 `rated/rating_reason`。历史结算首次
 水位时，自动排位一律暂停。生产升级前必须在停服维护窗完成以下流程，否则是发布 **No-Go**：
 
 ```bash
-# 1. 默认只读 dry-run；保存并人工审核 source_hash、全榜 diff 与 rebuilt_projection_hash
+# 1. 默认只读 dry-run；保存同一只读快照的三项摘要与全榜 diff
 python -m bzplat.backend.cli rating-rebuild --db /absolute/path/botzone.db
 
-# 2. 停止 API/worker/scheduler，制作并校验冷备后，回填刚审核的 source_hash
+# 2. 停止 API/worker/scheduler，逐字节 cp 冷备后回填三项摘要
 python -m bzplat.backend.cli rating-rebuild \
   --db /absolute/path/botzone.db --apply \
-  --source-digest <reviewed-source-hash> \
+  --expect-source-digest <reviewed-source-digest> \
+  --expect-plan-digest <reviewed-plan-digest> \
+  --expect-rebuilt-projection-digest <reviewed-rebuilt-projection-digest> \
   --confirm-db /absolute/path/botzone.db \
   --backup /absolute/path/botzone.cold-backup.db \
   --confirm-service-stopped --confirm-cold-backup
@@ -146,10 +150,15 @@ python -m bzplat.backend.cli rating-rebuild \
 python -m bzplat.backend.cli rating-rebuild --db /absolute/path/botzone.db --verify
 ```
 
-dry-run/verify 用 SQLite 只读 URI，不改变文件字节或 mtime。apply 除绝对路径二次确认、冷备完整性、
-冷备评分源与已审核 source digest 一致、停服声明和目标 source digest 外，还在 `BEGIN EXCLUSIVE` 内
-复核无 running match、无活跃 dispatcher lease且源未变化，并在提交前复核投影 hash 与水位；故障整事务
-回滚。它只重建 `ratings`、每 Bot 最近 200 条 `rating_history`、`pair_stats`
+dry-run/verify 用 SQLite 只读 URI，并显式 `BEGIN` 固定单一读快照，不改变文件字节或 mtime；该快照同时
+产生 immutable source、Bot universe plan 与 rebuilt projection 三项 digest。全榜 diff 复用线上榜的
+active Linux/amd64 ELF eligibility、10 场正式/定级分段、`rating → matches_played → bot_id` 排序和
+per-game tier 曲线，未定级 Bot 的正式 rank 始终为空。apply 除绝对路径二次确认和停服声明外，要求冷备
+与目标双方 `integrity_check=ok`、`foreign_key_check=0`，并在首个 DML 前同时核对三项已审核 digest、
+完整业务 digest 和数据库文件 digest；旧业务备份即使评分源相同也不能通过。上述检查在
+`BEGIN EXCLUSIVE` 内对目标再次执行，并复核无 running match、无活跃 dispatcher lease；故障整事务
+回滚。语义投影与验证水位都已一致时，二次 apply 直接 rollback，保持数据库字节、mtime 与 rebuilt_at
+不变，是真正 zero-write no-op。它只重建 `ratings`、每 Bot 最近 200 条 `rating_history`、`pair_stats`
 和 projection state，不删除、不重排 `match_rating_policies` 或 settlements；已删除 Bot 仍在内存中参与
 Glicko 传播，但不会写回带 FK 的投影表。直接命中的污染 Bot 不是完整影响范围，是否可上线必须以
 全榜重建 hash、Rating 与名次 diff 为准。

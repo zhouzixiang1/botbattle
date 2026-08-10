@@ -12,6 +12,8 @@ export interface MatchSeatRow {
   /** 创建事务冻结的天梯资格；中性局也会有 settlement marker。 */
   rated?: boolean
   rating_reason?: string
+  /** exactly-once marker 真值；rated 只是创建时资格，不能替代本字段。 */
+  rating_settled?: boolean
   /** 1 表示 Bot 故障被判负；平台故障的 aborted 对局不设置。 */
   technical_loss?: number
   bot_a_id?: number

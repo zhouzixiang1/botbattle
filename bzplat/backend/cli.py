@@ -143,8 +143,21 @@ def rating_rebuild(
     db: str = typer.Option(..., "--db", help="待审计数据库的绝对路径"),
     apply: bool = typer.Option(False, "--apply", help="提交重建；默认只读 dry-run"),
     verify: bool = typer.Option(False, "--verify", help="只读校验，不一致时退出码 1"),
-    source_digest: str | None = typer.Option(
-        None, "--source-digest", help="apply 必须回填刚审核的 dry-run source_hash"
+    expect_source_digest: str | None = typer.Option(
+        None,
+        "--expect-source-digest",
+        "--source-digest",
+        help="apply 必须回填刚审核的 dry-run source_digest",
+    ),
+    expect_plan_digest: str | None = typer.Option(
+        None,
+        "--expect-plan-digest",
+        help="apply 必须回填同一 dry-run 的 plan_digest（Bot universe）",
+    ),
+    expect_rebuilt_projection_digest: str | None = typer.Option(
+        None,
+        "--expect-rebuilt-projection-digest",
+        help="apply 必须回填同一 dry-run 的 rebuilt_projection_digest",
     ),
     confirm_db: str | None = typer.Option(
         None, "--confirm-db", help="apply 时逐字确认目标数据库绝对路径"
@@ -189,9 +202,29 @@ def rating_rebuild(
             raise typer.BadParameter("--confirm-db 文件不存在") from exc
         if confirmed != database:
             raise typer.BadParameter("--confirm-db 与 --db 不是同一个目标")
-        if source_digest != report["source_hash"]:
+        reviewed_digests = {
+            "--expect-source-digest": (
+                expect_source_digest,
+                report["source_digest"],
+            ),
+            "--expect-plan-digest": (
+                expect_plan_digest,
+                report["plan_digest"],
+            ),
+            "--expect-rebuilt-projection-digest": (
+                expect_rebuilt_projection_digest,
+                report["rebuilt_projection_digest"],
+            ),
+        }
+        mismatched = [
+            flag
+            for flag, (supplied, current) in reviewed_digests.items()
+            if supplied != current
+        ]
+        if mismatched:
             raise typer.BadParameter(
-                "--source-digest 与当前只读 dry-run 不一致；请重新审核报告"
+                f"{', '.join(mismatched)} 缺失或与当前单快照 dry-run 不一致；"
+                "请重新审核三项摘要"
             )
         if not report["ready_to_apply"]:
             raise typer.BadParameter(
@@ -200,7 +233,9 @@ def rating_rebuild(
             )
         report = apply_rebuild_plan(
             database,
-            source_digest,
+            expect_source_digest,
+            expect_plan_digest,
+            expect_rebuilt_projection_digest,
             confirmed_database=confirmed,
             backup_path=cold_backup,
             service_stopped=confirm_service_stopped,

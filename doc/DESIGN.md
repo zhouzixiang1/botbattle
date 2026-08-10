@@ -199,7 +199,9 @@ aborted 的自由文本/旧管理员码归一到稳定原因码，避免运行�
 默认开启且不继承旧值；历史系统 ladder 只用于一次性引导 auto 专属公平计数。迁移按终局时间
 与 match ID 为旧 settlement 固化连续序号，分类每局评分资格但绝不自动重放；投影初始保持
 `legacy-unverified`。长期 `rating-rebuild` 命令按 immutable policy + settled_order 离线 dry-run/
-apply/verify，只在停服、冷备、源 digest 和独占事务门禁全部满足时替换派生投影。具体 No-Go
+apply/verify；单一只读快照生成 source、Bot universe plan、rebuilt projection 三摘要，apply 在独占事务
+内复核三者，并要求冷备/目标完整性、外键、完整业务与文件摘要一致。语义一致的二次 apply 不执行 DML。
+只有全部门禁满足时才替换派生投影。具体 No-Go
 流程见 [RUNTIME.md](./RUNTIME.md#排行榜重建与上线-no-go)。
 
 **第 4 游戏扩展性**：`schema.py` 的字面 DDL 只覆盖 holdem/gomoku/pencil 三表；新增注册游戏（如 reversi）后 SCHEMA 不会自动建 `matches_<new>` 表。`_migrate()` 末尾对 `registry.all_ids()` 里**每个**已注册游戏幂等执行 `CREATE TABLE IF NOT EXISTS matches_<game>`（用 `_CREATE_MATCHES_TABLE_SQL` 模板）+ 6 条统一索引（bot_a_id/bot_b_id/owner_id/contest_id/status/created_at）。`Store.__init__` 在建库后断言"每个注册游戏的物理表都存在"——注册了但表没建出来的 drift 在启动即报（而非 create_match 时才崩 `no such table`）。跨游戏 `UNION ALL` 聚合的 WHERE 参数数 = 子查询数（= 已注册游戏数），不得硬编码 `* 3`（否则第 4 游戏触发 `Incorrect number of bindings`）。**结论：新增一款游戏的 DB 成本 = `schema.py` 两个 frozenset 各加 id（仅做启动一致性断言）+ `games/__init__.py` 注册；无需手写 DDL。**
@@ -222,7 +224,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 ### 4.2 鉴权端点（require_user，登录玩家）
 - Bot 管理：`POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`
-- 对局：`POST /api/matches/challenge`（两座位各选 bot + 可选版本快照，**自博弈允许**——同 bot 同/不同版本；响应与详情返回冻结的 `rated/rating_reason`，同所有者与自博弈明确中性）、`/api/matches/human`（公开契约固定 `human_seat=1`，即展示座位 2/白方）
+- 对局：`POST /api/matches/challenge`（两座位各选 bot + 可选版本快照，**自博弈允许**——同 bot 同/不同版本；响应与详情返回冻结的 `rated/rating_reason`，详情另返回 settlement marker 权威布尔 `rating_settled`，禁止把 eligibility 当作已计分；同所有者与自博弈明确中性）、`/api/matches/human`（公开契约固定 `human_seat=1`，即展示座位 2/白方）
 - 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；API 预检用于友好提示，Store 的关注、收藏、评论、点赞与取消点赞仍在 `BEGIN IMMEDIATE` 写事务内复核 actor/target，竞态删除或不存在统一 404；删除实体使用同级写锁清理多态关系与缓存，避免检查后删除造成孤儿或 500
 - 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`；评论/点赞请求使用严格 target 枚举且必须引用当前存在的实体，通知排除行为发起者本人
 - 通知：`GET /api/notifications`、`POST /read`、`/read-all`、`GET/PUT /api/notification-prefs`；偏好 REST 四字段唯一类型为 boolean，PUT 可只提交一个变化字段，SQLite 0/1 不穿透到前端

@@ -16,12 +16,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from bzplat.backend.games import registry as game_registry
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
+from bzplat.backend.runtime.config import AUTO_MATCH_PLACEMENT_REQUIRED
+from bzplat.backend.store import rating_projection_digest, rating_projection_digests
 from bzplat.backend.store.schema import (
     MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
     STATUS_COMPLETED,
     STATUS_RUNNING,
     VALID_GAME_IDS,
+    is_supported_binary_metadata,
 )
 
 CURRENT_POLICY_VERSION = "owner-neutral-v2"
@@ -41,11 +45,18 @@ _RATING_FIELDS = (
 @dataclass(frozen=True)
 class RebuildPlan:
     source: list[dict[str, Any]]
+    bot_universe: list[dict[str, Any]]
     ratings: list[dict[str, Any]]
     history: list[dict[str, Any]]
     pairs: list[dict[str, Any]]
     settlements: list[dict[str, Any]]
     report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _DatabaseFingerprint:
+    business_digest: str
+    file_digest: str
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
@@ -55,34 +66,119 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _canonical_hash(value: Any) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as database_file:
+        for chunk in iter(lambda: database_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def _source_semantic(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return every immutable input that can affect replay or its audit trail."""
-    fields = (
-        "settled_order",
-        "settled_at",
-        "match_id",
-        "game_id",
-        "bot_a_id",
-        "bot_b_id",
-        "rated",
-        "rating_reason",
-        "winner",
-        "delta_a",
-        "delta_b",
-        "ended_at",
-    )
-    return [{key: row[key] for key in fields} for row in source]
+def _sql_value(value: Any) -> Any:
+    """Return one typed, JSON-safe SQLite value for the full-business digest."""
+    if isinstance(value, bytes):
+        return {"type": "blob", "hex": value.hex()}
+    if isinstance(value, float):
+        return {"type": "float", "value": value.hex()}
+    if value is None:
+        return {"type": "null"}
+    return {"type": type(value).__name__, "value": value}
+
+
+def _quoted_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _database_business_digest(conn: sqlite3.Connection) -> str:
+    """Hash the complete logical schema and every application row.
+
+    The rating source alone is deliberately insufficient backup evidence: an
+    older database can have the same settlements while losing newer users,
+    contests, notifications, or other business rows.  This digest is streamed
+    from the same SQLite transaction as the rebuild plan.
+    """
+    digest = hashlib.sha256()
+
+    def add(value: Any) -> None:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+
+    schema_rows = conn.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_schema "
+        "WHERE name NOT LIKE 'sqlite_autoindex_%' ORDER BY type,name"
+    ).fetchall()
+    add({"schema": [list(row) for row in schema_rows]})
+
+    tables = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' "
+            "AND (name NOT LIKE 'sqlite_%' OR name='sqlite_sequence') "
+            "ORDER BY name"
+        )
+    ]
+    for table in tables:
+        columns = [
+            dict(row)
+            for row in conn.execute("SELECT * FROM pragma_table_info(?)", (table,))
+        ]
+        names = [str(column["name"]) for column in columns]
+        primary_key = [
+            str(column["name"])
+            for column in sorted(columns, key=lambda column: int(column["pk"] or 0))
+            if int(column["pk"] or 0) > 0
+        ]
+        order_by = primary_key or names
+        select_columns = ",".join(_quoted_identifier(name) for name in names)
+        order_columns = ",".join(_quoted_identifier(name) for name in order_by)
+        query = (
+            f"SELECT {select_columns} FROM {_quoted_identifier(table)}"
+            + (f" ORDER BY {order_columns}" if order_columns else "")
+        )
+        add({"table": table, "columns": names})
+        for row in conn.execute(query):
+            add([_sql_value(value) for value in row])
+    return digest.hexdigest()
+
+
+def _validate_database_health(
+    conn: sqlite3.Connection, *, label: str
+) -> None:
+    integrity = [str(row[0]) for row in conn.execute("PRAGMA integrity_check")]
+    if integrity != ["ok"]:
+        raise ValueError(f"{label} integrity_check failed: {integrity[:10]}")
+    foreign_keys = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if foreign_keys:
+        sample = [list(row) for row in foreign_keys[:10]]
+        raise ValueError(
+            f"{label} foreign_key_check failed: count={len(foreign_keys)} "
+            f"sample={sample}"
+        )
+
+
+def _load_bot_universe(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    bots = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id,game_id,is_active,format,os,arch FROM bots "
+            "ORDER BY game_id,id"
+        )
+    ]
+    invalid = [
+        (int(row["id"]), str(row.get("game_id") or ""))
+        for row in bots
+        if str(row.get("game_id") or "") not in VALID_GAME_IDS
+    ]
+    if invalid:
+        raise RuntimeError(f"Bot universe 含非法 game_id: {invalid[:20]}")
+    return bots
 
 
 def _tables(conn: sqlite3.Connection) -> set[str]:
@@ -103,6 +199,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
         "match_rating_policies",
         "match_rating_settlements",
         "rating_projection_state",
+        "rating_settlement_sequence",
     }
     missing = sorted(required - _tables(conn))
     if missing:
@@ -110,9 +207,31 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
     for table, columns in (
         (
             "match_rating_policies",
-            {"game_id", "bot_a_id", "bot_b_id", "rated", "rating_reason"},
+            {
+                "game_id",
+                "bot_a_id",
+                "bot_b_id",
+                "rated",
+                "rating_reason",
+                "source",
+                "classified_at",
+                "settled_order",
+            },
         ),
-        ("match_rating_settlements", {"settled_order"}),
+        ("match_rating_settlements", {"match_id", "settled_at", "settled_order"}),
+        (
+            "rating_projection_state",
+            {
+                "policy_version",
+                "rebuilt_at",
+                "source_settlement_count",
+                "source_last_settled_order",
+                "source_digest",
+                "projection_digest",
+                "plan_digest",
+            },
+        ),
+        ("rating_settlement_sequence", {"next_order"}),
     ):
         actual = {
             str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
@@ -150,6 +269,12 @@ def _load_source(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[s
         policy = policies.get(match_id)
         if policy is None:
             issues.append(f"settlement 缺 rating policy: {match_id}")
+            continue
+        if int(policy.get("settled_order") or 0) != order:
+            issues.append(
+                f"policy/settlement settled_order 不一致: {match_id} "
+                f"policy={policy.get('settled_order')} settlement={order}"
+            )
             continue
         game_id = str(policy.get("game_id") or "")
         if game_id not in VALID_GAME_IDS:
@@ -203,6 +328,18 @@ def _load_source(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[s
     # A stopped maintenance window must not omit a completed match merely
     # because settlement crashed just before its marker transaction.
     settled_ids = {str(row["match_id"]) for row in settlements}
+    if seen_orders:
+        expected_orders = set(range(1, max(seen_orders) + 1))
+        missing_orders = sorted(expected_orders - seen_orders)
+        if missing_orders:
+            issues.append(f"settled_order 不连续，缺少: {missing_orders[:20]}")
+    for match_id, policy in policies.items():
+        policy_order = int(policy.get("settled_order") or 0)
+        if policy_order > 0 and match_id not in settled_ids:
+            issues.append(
+                f"已冻结 settled_order 但缺 settlement marker: "
+                f"{match_id} order={policy_order}"
+            )
     for game_id in sorted(VALID_GAME_IDS):
         table = f"matches_{game_id}"
         rows = conn.execute(
@@ -234,12 +371,12 @@ def _default_rating(bot_id: int, game_id: str) -> dict[str, Any]:
 
 
 def _replay(
-    conn: sqlite3.Connection,
     source: list[dict[str, Any]],
+    bot_universe: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     current_bots = {
         int(row["id"]): str(row["game_id"])
-        for row in conn.execute("SELECT id,game_id FROM bots")
+        for row in bot_universe
     }
     states: dict[tuple[int, str], dict[str, Any]] = {
         (bot_id, game_id): _default_rating(bot_id, game_id)
@@ -332,98 +469,140 @@ def _replay(
     return ratings, history, [pairs[key] for key in sorted(pairs)]
 
 
-def _semantic_projection(
+def _current_projection_rows(
+    conn: sqlite3.Connection,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    return (
+        [dict(row) for row in conn.execute("SELECT * FROM ratings")],
+        [dict(row) for row in conn.execute("SELECT * FROM rating_history")],
+        [dict(row) for row in conn.execute("SELECT * FROM pair_stats")],
+    )
+
+
+def _projection_state_current(
+    state: dict[str, Any], live: dict[str, Any]
+) -> bool:
+    """Mirror Store.rating_projection_status without a second connection."""
+    return bool(
+        state.get("policy_version") == CURRENT_POLICY_VERSION
+        and int(state.get("source_settlement_count") or 0)
+        == int(live["source_settlement_count"])
+        and int(state.get("source_last_settled_order") or 0)
+        == int(live["source_last_settled_order"])
+        and str(state.get("source_digest") or "") == live["source_digest"]
+        and str(state.get("projection_digest") or "")
+        == live["projection_digest"]
+        and str(state.get("plan_digest") or "") == live["plan_digest"]
+        and not live["issues"]
+    )
+
+
+def _leaderboard_projection(
     ratings: list[dict[str, Any]],
-    history: list[dict[str, Any]],
-    pairs: list[dict[str, Any]],
-    settlements: list[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "ratings": [
-            {key: row[key] for key in ("bot_id", "game_id", *_RATING_FIELDS)}
-            for row in sorted(ratings, key=lambda item: (item["game_id"], item["bot_id"]))
-        ],
-        "rating_history": [
-            {
-                key: row[key]
-                for key in (
-                    "bot_id", "game_id", "rating", "rd", "vol",
-                    "matches_played", "reason", "created_at",
-                )
-            }
-            for row in sorted(
-                history,
-                key=lambda item: (
-                    item["game_id"], item["bot_id"],
-                    item["matches_played"], item["reason"],
-                ),
+    bot_universe: list[dict[str, Any]],
+) -> dict[tuple[int, str], dict[str, Any]]:
+    """Project ratings with the production leaderboard's exact public scope.
+
+    ``Store.list_leaderboard`` admits only active Linux/amd64 ELF Bots whose
+    rating game matches the Bot game.  Formal rows require the code-owned match
+    threshold and are ordered by rating, matches played, then Bot ID.  Placement
+    rows remain eligible but deliberately have no formal rank.
+    """
+    bots = {int(row["id"]): row for row in bot_universe}
+    projected: dict[tuple[int, str], dict[str, Any]] = {}
+    formal_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for rating in ratings:
+        bot_id = int(rating["bot_id"])
+        game_id = str(rating["game_id"])
+        bot = bots.get(bot_id)
+        if (
+            bot is None
+            or str(bot.get("game_id") or "") != game_id
+            or int(bot.get("is_active") or 0) != 1
+            or not is_supported_binary_metadata(
+                str(bot.get("format") or ""),
+                str(bot.get("os") or ""),
+                str(bot.get("arch") or ""),
             )
-        ],
-        "pair_stats": [
-            {
-                key: row[key]
-                for key in (
-                    "bot_a_id", "bot_b_id", "samples", "a_wins",
-                    "a_losses", "draws", "last_played_at",
-                )
-            }
-            for row in sorted(pairs, key=lambda item: (item["bot_a_id"], item["bot_b_id"]))
-        ],
-        "settlements": [
-            {"match_id": row["match_id"], "settled_order": row["settled_order"]}
-            for row in sorted(settlements, key=lambda item: item["settled_order"])
-        ],
-    }
-
-
-def _current_projection(conn: sqlite3.Connection) -> dict[str, Any]:
-    ratings = [dict(row) for row in conn.execute("SELECT * FROM ratings")]
-    history = [dict(row) for row in conn.execute("SELECT * FROM rating_history")]
-    pairs = [dict(row) for row in conn.execute("SELECT * FROM pair_stats")]
-    settlements = [
-        dict(row)
-        for row in conn.execute(
-            "SELECT match_id,settled_at,settled_order "
-            "FROM match_rating_settlements WHERE settled_order>0"
+        ):
+            continue
+        matches_played = max(0, int(rating.get("matches_played") or 0))
+        is_placement = (
+            AUTO_MATCH_PLACEMENT_REQUIRED > 0
+            and matches_played < AUTO_MATCH_PLACEMENT_REQUIRED
         )
-    ]
-    return _semantic_projection(ratings, history, pairs, settlements)
+        tier = game_registry.tier_for(game_id, rating.get("rating"))
+        item = {
+            "rank": None,
+            "is_placement": is_placement,
+            "tier": {
+                "level": tier.level,
+                "key": tier.key,
+                "name": tier.name,
+            },
+            "rating": float(rating["rating"]),
+            "matches_played": matches_played,
+            "bot_id": bot_id,
+        }
+        projected[(bot_id, game_id)] = item
+        if not is_placement:
+            formal_by_game[game_id].append(item)
 
-
-def _rank_map(ratings: list[dict[str, Any]]) -> dict[tuple[int, str], int]:
-    result: dict[tuple[int, str], int] = {}
-    games = sorted({str(row["game_id"]) for row in ratings})
-    for game_id in games:
-        rows = sorted(
-            (row for row in ratings if row["game_id"] == game_id),
-            key=lambda row: (-float(row["rating"]), int(row["bot_id"])),
+    for rows in formal_by_game.values():
+        rows.sort(
+            key=lambda row: (
+                -float(row["rating"]),
+                -int(row["matches_played"]),
+                int(row["bot_id"]),
+            )
         )
         for rank, row in enumerate(rows, 1):
-            result[(int(row["bot_id"]), game_id)] = rank
-    return result
+            row["rank"] = rank
+    return projected
 
 
 def _rating_diff(
-    current: list[dict[str, Any]], rebuilt: list[dict[str, Any]]
+    current: list[dict[str, Any]],
+    rebuilt: list[dict[str, Any]],
+    bot_universe: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     before = {(int(row["bot_id"]), str(row["game_id"])): row for row in current}
     after = {(int(row["bot_id"]), str(row["game_id"])): row for row in rebuilt}
-    before_rank, after_rank = _rank_map(current), _rank_map(rebuilt)
+    before_board = _leaderboard_projection(current, bot_universe)
+    after_board = _leaderboard_projection(rebuilt, bot_universe)
     changes: list[dict[str, Any]] = []
     for key in sorted(set(before) | set(after), key=lambda item: (item[1], item[0])):
         old = before.get(key, _default_rating(*key))
         new = after.get(key, _default_rating(*key))
-        if all(old.get(field) == new.get(field) for field in _RATING_FIELDS):
+        old_board = before_board.get(key)
+        new_board = after_board.get(key)
+        projection_changed = (
+            key not in before
+            or key not in after
+            or any(old.get(field) != new.get(field) for field in _RATING_FIELDS)
+        )
+        if not projection_changed and old_board == new_board:
             continue
         changes.append(
             {
                 "bot_id": key[0],
                 "game_id": key[1],
+                "projection_changed": projection_changed,
                 "rating_before": float(old["rating"]),
                 "rating_after": float(new["rating"]),
                 "rating_delta": float(new["rating"]) - float(old["rating"]),
-                "rank_before": before_rank.get(key),
-                "rank_after": after_rank.get(key),
+                "leaderboard_eligible_before": old_board is not None,
+                "leaderboard_eligible_after": new_board is not None,
+                "is_placement_before": (
+                    old_board["is_placement"] if old_board is not None else None
+                ),
+                "is_placement_after": (
+                    new_board["is_placement"] if new_board is not None else None
+                ),
+                "rank_before": old_board["rank"] if old_board is not None else None,
+                "rank_after": new_board["rank"] if new_board is not None else None,
+                "tier_before": old_board["tier"] if old_board is not None else None,
+                "tier_after": new_board["tier"] if new_board is not None else None,
                 "matches_before": int(old["matches_played"]),
                 "matches_after": int(new["matches_played"]),
                 "wld_before": [int(old["wins"]), int(old["losses"]), int(old["draws"])],
@@ -441,98 +620,157 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
         raise ValueError("评分维护命令只接受显式绝对 --db 路径")
     path = path.resolve(strict=True)
     with _connect_readonly(path) as conn:
-        _validate_schema(conn)
-        source, issues = _load_source(conn)
-        rebuilt_ratings, rebuilt_history, rebuilt_pairs = _replay(conn, source)
-        settlements = [
-            {
-                "match_id": row["match_id"],
-                "settled_at": row["settled_at"],
-                "settled_order": int(row["settled_order"]),
-            }
-            for row in source
-        ]
-        current = _current_projection(conn)
-        rebuilt = _semantic_projection(
-            rebuilt_ratings, rebuilt_history, rebuilt_pairs, settlements
-        )
-        current_ratings = current["ratings"]
-        changes = _rating_diff(current_ratings, rebuilt_ratings)
-        running = 0
-        for game_id in sorted(VALID_GAME_IDS):
-            running += int(
-                conn.execute(
-                    f"SELECT COUNT(*) FROM matches_{game_id} WHERE status=?",
-                    (STATUS_RUNNING,),
-                ).fetchone()[0]
+        # Python's sqlite3 does not start a transaction for SELECT statements.
+        # Begin explicitly so source, Bot universe, current projection, rebuilt
+        # projection and the complete-business digest are one immutable snapshot.
+        conn.execute("BEGIN")
+        try:
+            _validate_schema(conn)
+            _validate_database_health(conn, label="target")
+            live = rating_projection_digests(conn)
+            source, replay_issues = _load_source(conn)
+            issues = sorted(set([*live["issues"], *replay_issues]))
+            bot_universe = _load_bot_universe(conn)
+            rebuilt_ratings, rebuilt_history, rebuilt_pairs = _replay(
+                source, bot_universe
             )
-        source_semantic = _source_semantic(source)
-        last_order = max(
-            (int(row["settled_order"]) for row in source), default=0
-        )
-        projection_state_row = conn.execute(
-            "SELECT * FROM rating_projection_state WHERE singleton=1"
-        ).fetchone()
-        projection_state = dict(projection_state_row) if projection_state_row else {}
-        projection_state_current = bool(
-            projection_state.get("policy_version") == CURRENT_POLICY_VERSION
-            and int(projection_state.get("source_settlement_count") or 0) == len(source)
-            and int(projection_state.get("source_last_settled_order") or 0) == last_order
-        )
-        dispatcher = conn.execute(
-            "SELECT owner_token,lease_until FROM auto_match_dispatcher WHERE singleton=1"
-        ).fetchone()
-        dispatcher_lease_live = bool(
-            dispatcher
-            and dispatcher["owner_token"]
-            and str(dispatcher["lease_until"] or "")
-            > datetime.now().isoformat(timespec="seconds")
-        )
-        report = {
-            "db_path": str(path),
-            "mode": "dry-run",
-            "policy_version": CURRENT_POLICY_VERSION,
-            "authoritative_order": "settled_order",
-            "legacy_fallback_order": "ended_at,id",
-            "source_settlement_count": len(source),
-            "source_last_settled_order": last_order,
-            "rated_source_count": sum(1 for row in source if row["rated"]),
-            "neutral_source_count": sum(1 for row in source if not row["rated"]),
-            "source_hash": _canonical_hash(source_semantic),
-            "current_projection_hash": _canonical_hash(current),
-            "rebuilt_projection_hash": _canonical_hash(rebuilt),
-            "projection_matches": current == rebuilt,
-            "projection_state": projection_state,
-            "projection_state_current": projection_state_current,
-            "changed_bot_count": len(changes),
-            "rank_changed_bot_count": sum(
-                1 for row in changes if row["rank_before"] != row["rank_after"]
-            ),
-            "changed_bots": changes,
-            "issues": sorted(set(issues)),
-            "running_match_count": running,
-            "dispatcher_lease_live": dispatcher_lease_live,
-            "ready_to_apply": not issues and running == 0 and not dispatcher_lease_live,
-        }
-        return RebuildPlan(
-            source=source,
-            ratings=rebuilt_ratings,
-            history=rebuilt_history,
-            pairs=rebuilt_pairs,
-            settlements=settlements,
-            report=report,
-        )
+            settlements = [
+                {
+                    "match_id": row["match_id"],
+                    "settled_at": row["settled_at"],
+                    "settled_order": int(row["settled_order"]),
+                }
+                for row in source
+            ]
+            current_ratings, _, _ = _current_projection_rows(conn)
+            changes = _rating_diff(
+                current_ratings, rebuilt_ratings, bot_universe
+            )
+            running = sum(
+                int(
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM matches_{game_id} WHERE status=?",
+                        (STATUS_RUNNING,),
+                    ).fetchone()[0]
+                )
+                for game_id in sorted(VALID_GAME_IDS)
+            )
+            projection_state_row = conn.execute(
+                "SELECT * FROM rating_projection_state WHERE singleton=1"
+            ).fetchone()
+            projection_state = (
+                dict(projection_state_row) if projection_state_row else {}
+            )
+            projection_state_current = _projection_state_current(
+                projection_state, live
+            )
+            dispatcher = conn.execute(
+                "SELECT owner_token,lease_until FROM auto_match_dispatcher "
+                "WHERE singleton=1"
+            ).fetchone()
+            dispatcher_lease_live = bool(
+                dispatcher
+                and dispatcher["owner_token"]
+                and str(dispatcher["lease_until"] or "")
+                > datetime.now().isoformat(timespec="seconds")
+            )
+            source_digest = str(live["source_digest"])
+            plan_digest = str(live["plan_digest"])
+            current_projection_digest = str(live["projection_digest"])
+            rebuilt_projection_digest = rating_projection_digest(
+                rebuilt_ratings, rebuilt_history, rebuilt_pairs
+            )
+            business_digest = _database_business_digest(conn)
+            file_digest = _file_digest(path)
+            eligible_rebuilt = _leaderboard_projection(
+                rebuilt_ratings, bot_universe
+            )
+            report = {
+                "db_path": str(path),
+                "mode": "dry-run",
+                "policy_version": CURRENT_POLICY_VERSION,
+                "authoritative_order": "settled_order",
+                "legacy_migration_order": (
+                    "coalesce(ended_at,settled_at),match_id"
+                ),
+                "source_settlement_count": int(
+                    live["source_settlement_count"]
+                ),
+                "source_last_settled_order": int(
+                    live["source_last_settled_order"]
+                ),
+                "sequence_next_order": int(live["sequence_next_order"]),
+                "rated_source_count": sum(1 for row in source if row["rated"]),
+                "neutral_source_count": sum(
+                    1 for row in source if not row["rated"]
+                ),
+                "bot_universe_count": len(bot_universe),
+                "bot_universe_digest": str(live["bot_universe_digest"]),
+                "leaderboard_eligible_bot_count": len(eligible_rebuilt),
+                "source_digest": source_digest,
+                "plan_digest": plan_digest,
+                "current_projection_digest": current_projection_digest,
+                "rebuilt_projection_digest": rebuilt_projection_digest,
+                # Keep the original report keys for machine consumers while the
+                # guarded CLI moves to explicit --expect-*-digest options.
+                "source_hash": source_digest,
+                "current_projection_hash": current_projection_digest,
+                "rebuilt_projection_hash": rebuilt_projection_digest,
+                "business_digest": business_digest,
+                "database_file_digest": file_digest,
+                "integrity_check": "ok",
+                "foreign_key_violation_count": 0,
+                "projection_matches": (
+                    current_projection_digest == rebuilt_projection_digest
+                ),
+                "projection_state": projection_state,
+                "projection_state_current": projection_state_current,
+                "changed_bot_count": len(changes),
+                "projection_changed_bot_count": sum(
+                    1 for row in changes if row["projection_changed"]
+                ),
+                "rank_changed_bot_count": sum(
+                    1
+                    for row in changes
+                    if row["rank_before"] != row["rank_after"]
+                ),
+                "tier_changed_bot_count": sum(
+                    1
+                    for row in changes
+                    if row["tier_before"] != row["tier_after"]
+                ),
+                "changed_bots": changes,
+                "issues": sorted(set(issues)),
+                "running_match_count": running,
+                "dispatcher_lease_live": dispatcher_lease_live,
+                "ready_to_apply": (
+                    not issues and running == 0 and not dispatcher_lease_live
+                ),
+            }
+            return RebuildPlan(
+                source=source,
+                bot_universe=bot_universe,
+                ratings=rebuilt_ratings,
+                history=rebuilt_history,
+                pairs=rebuilt_pairs,
+                settlements=settlements,
+                report=report,
+            )
+        finally:
+            conn.rollback()
 
 
 def _validate_apply_authorization(
     database: Path,
     *,
-    expected_source_hash: str,
+    expected_source_digest: str,
+    expected_plan_digest: str,
+    expected_rebuilt_projection_digest: str,
     confirmed_database: str | Path,
     backup_path: str | Path,
     service_stopped: bool,
     cold_backup_confirmed: bool,
-) -> Path:
+) -> _DatabaseFingerprint:
     if not service_stopped or not cold_backup_confirmed:
         raise ValueError("apply requires explicit stopped-service and cold-backup confirmations")
     confirmed = Path(confirmed_database)
@@ -545,24 +783,57 @@ def _validate_apply_authorization(
     if not backup.is_file() or backup.stat().st_size <= 0 or backup.samefile(database):
         raise ValueError("backup must be a distinct non-empty file")
     with _connect_readonly(backup) as backup_conn:
-        integrity = backup_conn.execute("PRAGMA integrity_check").fetchone()
-        _validate_schema(backup_conn)
-        backup_source, backup_issues = _load_source(backup_conn)
-    if not integrity or integrity[0] != "ok":
-        raise ValueError(f"backup integrity_check failed: {integrity}")
-    if backup_issues:
-        raise ValueError(f"backup rating source is incomplete: {backup_issues}")
-    backup_hash = _canonical_hash(_source_semantic(backup_source))
-    if backup_hash != expected_source_hash:
-        raise ValueError(
-            "backup rating source does not match the reviewed target source"
-        )
-    return backup
+        backup_conn.execute("BEGIN")
+        try:
+            _validate_schema(backup_conn)
+            _validate_database_health(backup_conn, label="backup")
+            backup_live = rating_projection_digests(backup_conn)
+            backup_source, replay_issues = _load_source(backup_conn)
+            backup_issues = sorted(
+                set([*backup_live["issues"], *replay_issues])
+            )
+            if backup_issues:
+                raise ValueError(
+                    f"backup rating source is incomplete: {backup_issues}"
+                )
+            backup_bots = _load_bot_universe(backup_conn)
+            backup_ratings, backup_history, backup_pairs = _replay(
+                backup_source, backup_bots
+            )
+            backup_rebuilt_digest = rating_projection_digest(
+                backup_ratings,
+                backup_history,
+                backup_pairs,
+            )
+            actual = (
+                backup_live["source_digest"],
+                backup_live["plan_digest"],
+                backup_rebuilt_digest,
+            )
+            expected = (
+                expected_source_digest,
+                expected_plan_digest,
+                expected_rebuilt_projection_digest,
+            )
+            if actual != expected:
+                raise ValueError(
+                    "backup source/plan/rebuilt projection digests do not "
+                    "match the reviewed dry-run"
+                )
+            fingerprint = _DatabaseFingerprint(
+                business_digest=_database_business_digest(backup_conn),
+                file_digest=_file_digest(backup),
+            )
+        finally:
+            backup_conn.rollback()
+    return fingerprint
 
 
 def apply_rebuild_plan(
     db_path: str | Path,
-    expected_source_hash: str,
+    expected_source_digest: str,
+    expected_plan_digest: str,
+    expected_rebuilt_projection_digest: str,
     *,
     confirmed_database: str | Path,
     backup_path: str | Path,
@@ -574,9 +845,11 @@ def apply_rebuild_plan(
     if not raw_path.is_absolute():
         raise ValueError("评分维护命令只接受显式绝对 --db 路径")
     path = raw_path.resolve(strict=True)
-    _validate_apply_authorization(
+    backup_fingerprint = _validate_apply_authorization(
         path,
-        expected_source_hash=expected_source_hash,
+        expected_source_digest=expected_source_digest,
+        expected_plan_digest=expected_plan_digest,
+        expected_rebuilt_projection_digest=expected_rebuilt_projection_digest,
         confirmed_database=confirmed_database,
         backup_path=backup_path,
         service_stopped=service_stopped,
@@ -586,12 +859,17 @@ def apply_rebuild_plan(
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
+    no_op = False
     try:
         conn.execute("BEGIN EXCLUSIVE")
         _validate_schema(conn)
-        source, issues = _load_source(conn)
+        _validate_database_health(conn, label="target")
+        live = rating_projection_digests(conn)
+        source, replay_issues = _load_source(conn)
+        issues = sorted(set([*live["issues"], *replay_issues]))
         if issues:
             raise RuntimeError(f"评分源不完整，拒绝重建: {issues}")
+        bot_universe = _load_bot_universe(conn)
         running = sum(
             int(
                 conn.execute(
@@ -614,93 +892,138 @@ def apply_rebuild_plan(
             raise RuntimeError(
                 f"服务未完全停止: running_matches={running} dispatcher_lease={lease_live}"
             )
-        source_semantic = _source_semantic(source)
-        if _canonical_hash(source_semantic) != expected_source_hash:
-            raise RuntimeError("dry-run 后评分源已变化，必须重新 dry-run")
-        ratings, history, pairs = _replay(conn, source)
-        settlements = [
-            {
-                "match_id": row["match_id"],
-                "settled_at": row["settled_at"],
-                "settled_order": int(row["settled_order"]),
-            }
-            for row in source
-        ]
-
-        conn.execute("DELETE FROM rating_history")
-        conn.execute("DELETE FROM pair_stats")
-        conn.execute("DELETE FROM ratings")
-        conn.executemany(
-            "INSERT INTO ratings(bot_id,game_id,rating,rd,vol,wins,losses,draws,"
-            "delta_total,matches_played,last_played_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            [
-                tuple(row[key] for key in (
-                    "bot_id", "game_id", "rating", "rd", "vol", "wins", "losses",
-                    "draws", "delta_total", "matches_played", "last_played_at",
-                ))
-                for row in ratings
-            ],
+        ratings, history, pairs = _replay(source, bot_universe)
+        rebuilt_projection_digest = rating_projection_digest(
+            ratings, history, pairs
         )
-        conn.executemany(
-            "INSERT INTO rating_history(bot_id,game_id,rating,rd,vol,matches_played,"
-            "reason,created_at) VALUES(?,?,?,?,?,?,?,?)",
-            [
-                tuple(row[key] for key in (
-                    "bot_id", "game_id", "rating", "rd", "vol",
-                    "matches_played", "reason", "created_at",
-                ))
-                for row in history
-            ],
+        actual_digests = (
+            live["source_digest"],
+            live["plan_digest"],
+            rebuilt_projection_digest,
         )
-        conn.executemany(
-            "INSERT INTO pair_stats(bot_a_id,bot_b_id,samples,last_played_at,"
-            "a_wins,a_losses,draws) VALUES(?,?,?,?,?,?,?)",
-            [
-                tuple(row[key] for key in (
-                    "bot_a_id", "bot_b_id", "samples", "last_played_at",
-                    "a_wins", "a_losses", "draws",
-                ))
-                for row in pairs
-            ],
+        expected_digests = (
+            expected_source_digest,
+            expected_plan_digest,
+            expected_rebuilt_projection_digest,
         )
-        # Policies and settlement rows are immutable source evidence.  Rebuild
-        # only replaces their derived projections; it never clears/reorders the
-        # source merely to make a verification pass.
-        conn.execute(
-            "UPDATE rating_projection_state SET policy_version=?,rebuilt_at=?,"
-            "source_settlement_count=?,source_last_settled_order=? WHERE singleton=1",
-            (
-                CURRENT_POLICY_VERSION,
-                datetime.now().isoformat(timespec="seconds"),
-                len(settlements),
-                max((row["settled_order"] for row in settlements), default=0),
-            ),
-        )
-        expected_projection = _semantic_projection(
-            ratings, history, pairs, settlements
-        )
-        if _current_projection(conn) != expected_projection:
+        if actual_digests != expected_digests:
+            names = ("source", "plan", "rebuilt_projection")
+            changed = [
+                name
+                for name, actual, expected in zip(
+                    names, actual_digests, expected_digests, strict=True
+                )
+                if actual != expected
+            ]
             raise RuntimeError(
-                "评分重建事务内 hash 验证失败；已回滚，未替换排行榜投影"
+                f"dry-run 后评分重建摘要已变化: {changed}；必须重新 dry-run"
             )
+
+        # A cold backup is evidence for the entire stopped database, not merely
+        # the rating source.  Both the logical business image and exact file
+        # bytes must match the target before the first write statement.
+        target_business_digest = _database_business_digest(conn)
+        target_file_digest = _file_digest(path)
+        if target_business_digest != backup_fingerprint.business_digest:
+            raise RuntimeError(
+                "cold backup does not match target complete business digest"
+            )
+        if target_file_digest != backup_fingerprint.file_digest:
+            raise RuntimeError(
+                "cold backup does not match target database file digest"
+            )
+
         state = conn.execute(
-            "SELECT policy_version,source_settlement_count,"
-            "source_last_settled_order FROM rating_projection_state "
-            "WHERE singleton=1"
+            "SELECT * FROM rating_projection_state WHERE singleton=1"
         ).fetchone()
-        expected_last = max(
-            (row["settled_order"] for row in settlements), default=0
+        state_current = _projection_state_current(
+            dict(state) if state else {}, live
         )
         if (
-            state is None
-            or state["policy_version"] != CURRENT_POLICY_VERSION
-            or int(state["source_settlement_count"] or 0) != len(settlements)
-            or int(state["source_last_settled_order"] or 0) != expected_last
+            live["projection_digest"] == rebuilt_projection_digest
+            and state_current
         ):
-            raise RuntimeError(
-                "评分重建事务内水位验证失败；已回滚，未替换排行榜投影"
+            # BEGIN EXCLUSIVE itself is read-only until a DML statement. Roll
+            # back explicitly so a second semantic apply is a true zero-write:
+            # no delete/insert churn and no rebuilt_at/mtime movement.
+            no_op = True
+            conn.rollback()
+        else:
+            conn.execute("DELETE FROM rating_history")
+            conn.execute("DELETE FROM pair_stats")
+            conn.execute("DELETE FROM ratings")
+            conn.executemany(
+                "INSERT INTO ratings(bot_id,game_id,rating,rd,vol,wins,losses,draws,"
+                "delta_total,matches_played,last_played_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    tuple(row[key] for key in (
+                        "bot_id", "game_id", "rating", "rd", "vol", "wins", "losses",
+                        "draws", "delta_total", "matches_played", "last_played_at",
+                    ))
+                    for row in ratings
+                ],
             )
-        conn.commit()
+            conn.executemany(
+                "INSERT INTO rating_history(bot_id,game_id,rating,rd,vol,matches_played,"
+                "reason,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                [
+                    tuple(row[key] for key in (
+                        "bot_id", "game_id", "rating", "rd", "vol",
+                        "matches_played", "reason", "created_at",
+                    ))
+                    for row in history
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO pair_stats(bot_a_id,bot_b_id,samples,last_played_at,"
+                "a_wins,a_losses,draws) VALUES(?,?,?,?,?,?,?)",
+                [
+                    tuple(row[key] for key in (
+                        "bot_a_id", "bot_b_id", "samples", "last_played_at",
+                        "a_wins", "a_losses", "draws",
+                    ))
+                    for row in pairs
+                ],
+            )
+            # Policies and settlement rows are immutable source evidence. Rebuild
+            # replaces only derived projections and its verification watermark.
+            rebuilt_live = rating_projection_digests(conn)
+            if (
+                rebuilt_live["issues"]
+                or rebuilt_live["source_digest"] != expected_source_digest
+                or rebuilt_live["plan_digest"] != expected_plan_digest
+                or rebuilt_live["projection_digest"]
+                != expected_rebuilt_projection_digest
+            ):
+                raise RuntimeError(
+                    "评分重建事务内 digest 验证失败；已回滚，未替换排行榜投影"
+                )
+            conn.execute(
+                "UPDATE rating_projection_state SET policy_version=?,rebuilt_at=?,"
+                "source_settlement_count=?,source_last_settled_order=?,"
+                "source_digest=?,projection_digest=?,plan_digest=? "
+                "WHERE singleton=1",
+                (
+                    CURRENT_POLICY_VERSION,
+                    datetime.now().isoformat(timespec="seconds"),
+                    int(rebuilt_live["source_settlement_count"]),
+                    int(rebuilt_live["source_last_settled_order"]),
+                    rebuilt_live["source_digest"],
+                    rebuilt_live["projection_digest"],
+                    rebuilt_live["plan_digest"],
+                ),
+            )
+            state = conn.execute(
+                "SELECT * FROM rating_projection_state WHERE singleton=1"
+            ).fetchone()
+            if not _projection_state_current(
+                dict(state) if state else {}, rebuilt_live
+            ):
+                raise RuntimeError(
+                    "评分重建事务内水位验证失败；已回滚，未替换排行榜投影"
+                )
+            _validate_database_health(conn, label="rebuilt target")
+            conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -710,6 +1033,9 @@ def apply_rebuild_plan(
     verified = build_rebuild_plan(path)
     result = dict(verified.report)
     result["mode"] = "apply"
+    result["applied"] = not no_op
+    result["no_op"] = no_op
+    result["rows_written"] = 0 if no_op else None
     result["verified_after_apply"] = bool(
         result["projection_matches"]
         and result["projection_state_current"]

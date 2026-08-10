@@ -281,10 +281,11 @@ python scripts/seed_contest_showcase.py rollback \
 ### 6.5 评分投影维护命令
 
 `python -m bzplat.backend.cli rating-rebuild --db /absolute/path.db` 默认只读 dry-run；
-`--verify` 只读核对投影 hash 与水位，任何不一致退出 1。`--apply` 是长期维护入口，不是一次性
-修复脚本：必须停服、提供独立冷备、逐字确认绝对 DB、回填刚审核的 `source_hash`，并显式给出
-两项确认；冷备评分源也必须与该 hash 一致，实现还会在 `BEGIN EXCLUSIVE` 内复核源、水位、
-running match 与 dispatcher lease，并在提交前复核重建投影 hash。
+`--verify` 只读核对投影 digest 与水位，任何不一致退出 1。`--apply` 是长期维护入口，不是一次性
+修复脚本：必须停服、提供逐字节独立冷备、逐字确认绝对 DB，并回填同一 dry-run 的
+`source_digest`、`plan_digest`、`rebuilt_projection_digest` 三项摘要。冷备与目标都必须通过完整性、
+外键、全业务与文件摘要门禁；实现还会在 `BEGIN EXCLUSIVE` 内复核三摘要、running match 与
+dispatcher lease，并在提交前复核重建投影。语义已经一致的再次 apply 为 zero-write no-op。
 完整命令和生产 No-Go 清单见 [RUNTIME.md](./RUNTIME.md#排行榜重建与上线-no-go)。禁止按
 `created_at` 自制重放脚本，也禁止直接清空 policies/settlements 来“通过”验证。
 

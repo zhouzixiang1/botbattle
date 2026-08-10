@@ -222,6 +222,9 @@ def sanitize_public_match(match: dict | None) -> dict | None:
     # match_config stores frozen version ids and duplicate seeds for execution;
     # it is not part of the public match contract.
     public.pop("match_config", None)
+    # The reserved order is internal sequencing evidence, not settlement truth.
+    # REST adds the public boolean from the actual settlement marker instead.
+    public.pop("_rating_settled_order", None)
     if "result" in public:
         public["result"] = sanitize_public_result(public.get("result"))
     status = public.get("status")
