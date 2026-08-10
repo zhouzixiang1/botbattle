@@ -137,7 +137,8 @@ pair_stats；对局详情同时返回创建时资格 `rated/rating_reason` 与�
 DML 都由数据库递增前者；只有写前完整可信的显式 mutation guard 才能在同一事务同步后者和全部
 摘要。completed 后合法、连续的未结算尾部可跨重启继续，但任何 stale 状态都不能被后续
 ensure/评分/中性 marker/可见性写“洗白”；通用硬删、换 `game_id` 与无 marker 的低层评分写必须走
-下述离线 rebuild 才能恢复自动排位。
+下述离线 rebuild 才能恢复自动排位。该认证从 `owner-neutral-v3` 起生效；升级前遗留的 v2 标记
+没有可信 mutation lineage，即使摘要吻合也必须先离线重建。
 
 ```bash
 # 1. 默认只读 dry-run；保存同一只读快照的三项摘要与全榜 diff

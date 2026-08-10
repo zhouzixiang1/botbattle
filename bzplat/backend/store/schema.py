@@ -255,7 +255,8 @@ CREATE INDEX IF NOT EXISTS idx_match_rating_policies_reason
 
 -- 排行榜投影是否已经按当前评分资格真值完整重建。升级只负责识别旧污染，
 -- 不会擅自重放历史；维护重建必须在同一事务刷新四类投影后再把此哨兵推进到
--- owner-neutral-v2，并记录它覆盖到的 settlement 序号。
+-- owner-neutral-v3，并记录它覆盖到的 settlement 序号和可信 mutation 链。
+-- v2 没有 mutation lineage，升级后必须离线重建，不能沿用其“已验证”标记。
 CREATE TABLE IF NOT EXISTS rating_projection_state (
     singleton                   INTEGER PRIMARY KEY CHECK (singleton=1),
     policy_version              TEXT    NOT NULL,
@@ -270,9 +271,8 @@ CREATE TABLE IF NOT EXISTS rating_projection_state (
 );
 INSERT OR IGNORE INTO rating_projection_state(
     singleton,policy_version,rebuilt_at,source_settlement_count,
-    source_last_settled_order,source_digest,projection_digest,plan_digest,
-    mutation_revision,trusted_mutation_revision
-) VALUES(1,'legacy-unverified',NULL,0,0,'','','',0,0);
+    source_last_settled_order,source_digest,projection_digest,plan_digest
+) VALUES(1,'legacy-unverified',NULL,0,0,'','','');
 
 -- completed 事务先冻结全局结算序号；实际评分事务随后用同一序号写 settlement。
 -- 这样崩溃恢复不必再猜 created_at/ended_at 顺序。

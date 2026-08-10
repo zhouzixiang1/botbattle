@@ -47,7 +47,7 @@ def _mark_projection_verified(store: Store) -> None:
         live = rating_projection_digests(conn)
         assert live["issues"] == []
         conn.execute(
-            "UPDATE rating_projection_state SET policy_version='owner-neutral-v2',"
+            "UPDATE rating_projection_state SET policy_version='owner-neutral-v3',"
             "source_settlement_count=?,source_last_settled_order=?,source_digest=?,"
             "projection_digest=?,plan_digest=?,"
             "trusted_mutation_revision=mutation_revision WHERE singleton=1",
@@ -461,6 +461,71 @@ def test_unreviewed_projection_mutations_remain_fail_closed(tmp_path, mutation):
 
     assert store.rating_projection_status()["ready"] is False
     store.close()
+
+
+def test_v2_projection_state_upgrade_requires_v3_offline_rebuild(tmp_path):
+    db = (tmp_path / "projection-v2-upgrade.db").resolve()
+    store = Store(str(db))
+    _bot(store, "projection-v2-upgrade")
+    _mark_projection_verified(store)
+    assert store.rating_projection_status()["ready"] is True
+    store.close()
+
+    # Recreate the exact pre-lineage state table: matching v2 summaries but no
+    # mutation revision columns.  This is indistinguishable from a state that
+    # the retired blind refresh incorrectly marked current.
+    with sqlite3.connect(db) as legacy:
+        trigger_names = [
+            str(row[0])
+            for row in legacy.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND instr(COALESCE(sql,''),'mutation_revision')>0"
+            )
+        ]
+        for name in trigger_names:
+            assert name.replace("_", "").isalnum()
+            legacy.execute(f"DROP TRIGGER {name}")
+        legacy.execute(
+            "ALTER TABLE rating_projection_state "
+            "DROP COLUMN trusted_mutation_revision"
+        )
+        legacy.execute(
+            "ALTER TABLE rating_projection_state DROP COLUMN mutation_revision"
+        )
+        legacy.execute(
+            "UPDATE rating_projection_state SET policy_version='owner-neutral-v2' "
+            "WHERE singleton=1"
+        )
+        columns = {
+            str(row[1])
+            for row in legacy.execute("PRAGMA table_info(rating_projection_state)")
+        }
+        assert "mutation_revision" not in columns
+
+    upgraded = Store(str(db))
+    status = upgraded.rating_projection_status()
+    assert status["ready"] is False
+    assert status["required_policy_version"] == "owner-neutral-v3"
+    assert status["state"]["policy_version"] == "owner-neutral-v2"
+    assert status["state"]["mutation_revision"] == 0
+    assert status["state"]["trusted_mutation_revision"] == 0
+    upgraded.close()
+
+    plan = build_rebuild_plan(db)
+    backup = (tmp_path / "projection-v2-upgrade.cold.db").resolve()
+    shutil.copy2(db, backup)
+    applied = _apply_reviewed(db, plan, backup)
+    assert applied["verified_after_apply"] is True
+    assert applied["applied"] is True
+
+    rebuilt = Store(str(db))
+    rebuilt_status = rebuilt.rating_projection_status()
+    assert rebuilt_status["ready"] is True
+    assert rebuilt_status["state"]["policy_version"] == "owner-neutral-v3"
+    assert rebuilt_status["state"]["mutation_revision"] == (
+        rebuilt_status["state"]["trusted_mutation_revision"]
+    )
+    rebuilt.close()
 
 
 def test_rating_rebuild_cli_defaults_readonly_and_gates_apply(tmp_path):

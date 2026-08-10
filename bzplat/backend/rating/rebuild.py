@@ -32,7 +32,7 @@ from bzplat.backend.store.schema import (
     is_supported_binary_metadata,
 )
 
-CURRENT_POLICY_VERSION = "owner-neutral-v2"
+CURRENT_POLICY_VERSION = "owner-neutral-v3"
 _RATING_FIELDS = (
     "rating",
     "rd",
