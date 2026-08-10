@@ -7,11 +7,11 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from bzplat.backend.auth.dependencies import (
     _extract_token,
@@ -43,6 +43,7 @@ from bzplat.backend.runtime.limits import (
 )
 from bzplat.backend.runtime.binary_runner import PlatformRunnerError
 from bzplat.backend.store.schema import (
+    COMMENT_TARGET_TYPES,
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
@@ -51,6 +52,7 @@ from bzplat.backend.store.schema import (
     CONTEST_REST,
     CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
+    LIKE_TARGET_TYPES,
     ROLE_ADMIN,
     ROLE_ORGANIZER,
     SUPPORTED_BINARY_ERROR,
@@ -58,6 +60,7 @@ from bzplat.backend.store.schema import (
     STATUS_COMPLETED,
     is_supported_binary_metadata,
 )
+from bzplat.backend.store.public_contract import sanitize_public_match
 router = APIRouter()
 
 
@@ -82,6 +85,17 @@ def _with_bot_runnable(bot: dict) -> dict:
     return public
 
 
+def _with_placement_status(row: dict) -> dict:
+    """Attach the code-owned placement contract to one rating-bearing row."""
+    public = dict(row)
+    required = max(0, int(AUTO_MATCH_CONFIG.placement_games))
+    played = max(0, int(public.get("matches_played") or 0))
+    public["placement_required"] = required
+    public["placement_remaining"] = max(0, required - played)
+    public["is_placement"] = required > 0 and played < required
+    return public
+
+
 def _new_preflight_runner(request: Request):
     """Return one upload-owned runner; never share match subprocess state."""
     factory = getattr(request.app.state, "preflight_runner_factory", None)
@@ -100,6 +114,24 @@ def _store(request: Request):
     return request.app.state.store
 
 
+def _require_social_target(
+    store,
+    target_type: str,
+    target_id: str,
+    *,
+    allowed_types: frozenset[str],
+) -> None:
+    """Fail closed for polymorphic comments/likes targets."""
+    if target_type not in allowed_types:
+        raise HTTPException(400, f"不支持的目标类型: {target_type!r}")
+    try:
+        exists = store.social_target_exists(target_type, target_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not exists:
+        raise HTTPException(404, "互动目标不存在")
+
+
 def _is_terminal_stream_event(ev: object) -> bool:
     if not isinstance(ev, dict):
         return False
@@ -116,13 +148,18 @@ def _with_seat_info(m: dict, store=None) -> dict:
     """观赛座位身份：委托 matches.seat_info（人类座改写真人用户名）。"""
     from bzplat.backend.matches.seat_info import with_seat_info
 
+    public_match = sanitize_public_match(m) or m
     human_user = None
-    if store is not None and m and m.get("match_type") == "human" and m.get("human_user_id") is not None:
+    if store is not None and public_match and public_match.get("match_type") == "human" and public_match.get("human_user_id") is not None:
         try:
-            human_user = store.get_user(int(m["human_user_id"]))
+            human_user = store.get_user(int(public_match["human_user_id"]))
         except Exception:
             human_user = None
-    return with_seat_info(m, human_user=human_user) or m
+    return with_seat_info(public_match, human_user=human_user) or public_match
+
+
+def _public_match_rows(rows: list[dict]) -> list[dict]:
+    return [sanitize_public_match(row) or row for row in rows]
 
 
 # ── bots ──────────────────────────────────────────────────────
@@ -202,12 +239,18 @@ def user_profile(username: str, request: Request):
 
 @router.get("/api/users/{user_id}/followers")
 def user_followers(user_id: int, request: Request, limit: int = 50):
-    return {"followers": _store(request).list_followers(user_id, limit=limit)}
+    store = _store(request)
+    if not store.get_user(user_id):
+        raise HTTPException(404, "用户不存在")
+    return {"followers": store.list_followers(user_id, limit=limit)}
 
 
 @router.get("/api/users/{user_id}/following")
 def user_following(user_id: int, request: Request, limit: int = 50):
-    return {"following": _store(request).list_following(user_id, limit=limit)}
+    store = _store(request)
+    if not store.get_user(user_id):
+        raise HTTPException(404, "用户不存在")
+    return {"following": store.list_following(user_id, limit=limit)}
 
 
 @router.post("/api/users/{user_id}/follow")
@@ -218,7 +261,12 @@ def follow_user(user_id: int, request: Request, user=Depends(require_user)):
         raise HTTPException(404, "用户不存在")
     if user["id"] == user_id:
         raise HTTPException(400, "不能关注自己")
-    created = store.follow(user["id"], user_id)
+    try:
+        # Store 在同一写事务内再次确认两端仍存在；这里处理预检查与写入之间
+        # 被管理员删除的竞态，不能把底层 FK/LookupError 泄漏成 500。
+        created = store.follow(user["id"], user_id)
+    except LookupError:
+        raise HTTPException(404, "用户不存在") from None
     # 关注时通知被关注者 + 被关注者经验
     notifier = getattr(request.app.state, "notifier", None)
     if created:
@@ -240,13 +288,21 @@ def follow_user(user_id: int, request: Request, user=Depends(require_user)):
 
 @router.delete("/api/users/{user_id}/follow")
 def unfollow_user(user_id: int, request: Request, user=Depends(require_user)):
-    _store(request).unfollow(user["id"], user_id)
+    store = _store(request)
+    if not store.get_user(user_id):
+        raise HTTPException(404, "用户不存在")
+    try:
+        store.unfollow(user["id"], user_id)
+    except LookupError:
+        raise HTTPException(404, "用户不存在") from None
     return {"ok": True, "following": False}
 
 
 @router.get("/api/users/{user_id}/follow-status")
 def follow_status(user_id: int, request: Request, user=Depends(require_user)):
     store = _store(request)
+    if not store.get_user(user_id):
+        raise HTTPException(404, "用户不存在")
     return {
         "following": store.is_following(user["id"], user_id),
         "follower_count": store.follower_count(user_id),
@@ -256,21 +312,33 @@ def follow_status(user_id: int, request: Request, user=Depends(require_user)):
 
 @router.post("/api/bots/{bot_id}/favorite")
 def favorite_bot(bot_id: int, request: Request, user=Depends(require_user)):
-    if not _store(request).get_bot(bot_id):
+    store = _store(request)
+    if not store.get_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
-    created = _store(request).favorite(user["id"], bot_id)
+    try:
+        created = store.favorite(user["id"], bot_id)
+    except LookupError:
+        raise HTTPException(404, "bot 不存在") from None
     return {"ok": True, "favorited": True, "created": created}
 
 
 @router.delete("/api/bots/{bot_id}/favorite")
 def unfavorite_bot(bot_id: int, request: Request, user=Depends(require_user)):
-    _store(request).unfavorite(user["id"], bot_id)
+    store = _store(request)
+    if not store.get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
+    try:
+        store.unfavorite(user["id"], bot_id)
+    except LookupError:
+        raise HTTPException(404, "bot 不存在") from None
     return {"ok": True, "favorited": False}
 
 
 @router.get("/api/bots/{bot_id}/favorite-status")
 def favorite_status(bot_id: int, request: Request, user=Depends(require_user)):
     store = _store(request)
+    if not store.get_bot(bot_id):
+        raise HTTPException(404, "bot 不存在")
     return {
         "favorited": store.is_favorite(user["id"], bot_id),
         "favorite_count": store.favorite_count(bot_id),
@@ -328,7 +396,11 @@ def global_search(
             ]
         }
     if t == "matches":
-        return {"matches": store.search_matches(ql, limit=lim, game_id=game_id)}
+        return {
+            "matches": _public_match_rows(
+                store.search_matches(ql, limit=lim, game_id=game_id)
+            )
+        }
     # 默认 users
     return {"users": store.search_users(ql, limit=lim)}
 
@@ -372,7 +444,7 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
     # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
     for k in ("vol", "net_chips", "rated_at", "is_builtin", "updated_at"):
         p.pop(k, None)
-    return {"profile": p}
+    return {"profile": _with_placement_status(p)}
 
 
 @router.get("/api/bots/{bot_id}/matches")
@@ -391,11 +463,15 @@ def bot_matches(
     if page is not None:
         pp = max(1, min(200, per_page))
         off = (max(1, page) - 1) * pp
-        rows = store.list_matches(limit=pp, offset=off, bot_id=bot_id)
+        rows = _public_match_rows(
+            store.list_matches(limit=pp, offset=off, bot_id=bot_id)
+        )
         total = store.count_bot_matches(bot_id)
         return {"matches": rows, "page": max(1, page), "per_page": pp, "total": total}
-    rows = store.list_matches(
-        bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
+    rows = _public_match_rows(
+        store.list_matches(
+            bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
+        )
     )
     return {"matches": rows}
 
@@ -712,15 +788,13 @@ class HumanChallengeBody(BaseModel):
     model_config = {"extra": "forbid"}
 
     bot_id: int
-    human_seat: int = 1  # 0 或 1，人类坐哪位
+    human_seat: Literal[1] = 1  # 产品契约：人类固定座位 2（内部索引 1）
     game_id: str | None = None
 
 
 @router.post("/api/matches/human")
 async def challenge_human(body: HumanChallengeBody, request: Request, user=Depends(require_user)):
     """人类 vs bot：当前登录用户作为人类玩家对战指定 bot。"""
-    if body.human_seat not in (0, 1):
-        raise HTTPException(400, "human_seat 须为 0 或 1")
     try:
         mid = await _orch(request).challenge_human(
             body.bot_id,
@@ -751,18 +825,26 @@ async def play_websocket(websocket: WebSocket, match_id: str):
     m = store.get_match(match_id)
     if not user or not m or m.get("human_user_id") != user["id"]:
         await websocket.accept()
-        await websocket.send_json({"type": "error", "message": "无权访问该对局"})
+        await websocket.send_json({
+            "type": "reject",
+            "reason": "forbidden",
+            "message": "无权访问该对局",
+        })
         await websocket.close()
         return
     await websocket.accept()
     # subscribe 入队一条带 seats 与完整回放的权威 snapshot；pump 随即发送。
     # 不在路由重复发送，否则每次连接都会收到两份相同快照，造成前端重复归约。
-    q = orch.subscribe(match_id)
     human_seat = int(m.get("human_seat")) if m.get("human_seat") is not None else 1
+    q = orch.subscribe(match_id, human_viewer_seat=human_seat)
     try:
         protocol = game_registry.get(m.get("game_id")).protocol
     except KeyError:
-        await websocket.send_json({"type": "error", "message": "对局游戏协议不存在"})
+        await websocket.send_json({
+            "type": "reject",
+            "reason": "invalid_game_id",
+            "message": "对局游戏协议不存在",
+        })
         await websocket.close()
         orch.unsubscribe(match_id, q)
         return
@@ -838,12 +920,14 @@ def list_matches(
     store = _store(request)
     lim = max(1, min(limit, 100))
     off = max(0, offset)
-    rows = store.list_matches(
-        status=status,
-        game_id=game_id,
-        has_technical_incidents=has_technical_incidents,
-        limit=lim,
-        offset=off,
+    rows = _public_match_rows(
+        store.list_matches(
+            status=status,
+            game_id=game_id,
+            has_technical_incidents=has_technical_incidents,
+            limit=lim,
+            offset=off,
+        )
     )
     # 裁列表响应死字段（对抗审计：started_at/ended_at/human_user_id/human_seat/
     # likes_count/views_count/owner_id 列表不消费；
@@ -865,7 +949,7 @@ def list_matches(
 def liked_top_matches(request: Request, limit: int = 10):
     """对局点赞排行榜（对标 Botzone，首页用）。必须在 {match_id} 路由前注册。"""
     store = _store(request)
-    return {"matches": store.list_liked_top_matches(limit)}
+    return {"matches": _public_match_rows(store.list_liked_top_matches(limit))}
 
 
 @router.get("/api/matches/{match_id}")
@@ -910,8 +994,16 @@ def leaderboard(
     request: Request, limit: int = 50, game_id: str | None = None,
     page: int | None = None, per_page: int = 50,
 ):
+    normalized_game_id = game_id
+    if game_id:
+        normalized_game_id = game_id.strip().lower()
+        try:
+            game_registry.get(normalized_game_id)
+        except (KeyError, AttributeError) as exc:
+            raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
     result = _store(request).list_leaderboard(
-        limit=max(1, min(limit, 200)), game_id=game_id, page=page, per_page=per_page,
+        limit=max(1, min(limit, 200)), game_id=normalized_game_id, page=page,
+        per_page=per_page, placement_games=AUTO_MATCH_CONFIG.placement_games,
     )
     # 响应白名单投影：只返回前端 Leaderboard.tsx 消费的字段（裁死字段 vol/last_played_at/
     # is_builtin/owner_display；留 tier_level——test_tiers 断言）。
@@ -920,6 +1012,7 @@ def leaderboard(
         "bot_id", "rating", "rd", "wins", "losses", "draws", "net_chips",
         "matches_played", "bot_name", "bot_display", "format", "os", "arch",
         "game_id", "owner_name", "rating_delta", "tier_level", "tier_key", "tier_name",
+        "placement_required", "placement_remaining", "is_placement",
     }
     proj = [{k: row[k] for k in keep if k in row} for row in items]
     if isinstance(result, dict):
@@ -937,7 +1030,11 @@ def tiers(game_id: str):
     from bzplat.backend.games import registry as _game_registry
     gid = game_id.strip().lower()
     try:
-        return {"tiers": _game_registry.all_tiers(gid), "game_id": gid}
+        return {
+            "tiers": _game_registry.all_tiers(gid),
+            "game_id": gid,
+            "placement_required": AUTO_MATCH_CONFIG.placement_games,
+        }
     except KeyError as exc:
         raise HTTPException(400, f"未知游戏: {gid!r}") from exc
 
@@ -983,26 +1080,33 @@ def site_info(request: Request):
 # ── comments / likes ──────────────────────────────────────────
 
 class CommentCreate(BaseModel):
-    target_type: str  # 'match' | 'bot'
-    target_id: str
+    model_config = {"extra": "forbid"}
+
+    target_type: Literal["match", "bot"]
+    target_id: str = Field(..., min_length=1, max_length=128)
     body: str = Field(..., min_length=1, max_length=2000)
 
 
 class LikeReq(BaseModel):
-    target_type: str  # 'match' | 'bot' | 'comment'
-    target_id: str
+    model_config = {"extra": "forbid"}
+
+    target_type: Literal["match", "bot", "comment"]
+    target_id: str = Field(..., min_length=1, max_length=128)
 
 
 @router.get("/api/comments")
 def list_comments(
     request: Request,
-    target_type: str,
+    target_type: Literal["match", "bot"],
     target_id: str,
     limit: int = 100,
     page: int | None = None,
     per_page: int = 50,
 ):
     store = _store(request)
+    _require_social_target(
+        store, target_type, target_id, allowed_types=COMMENT_TARGET_TYPES
+    )
     lim = max(1, min(limit, 500))  # clamp（评论可能很多，但 500 已够看）
     result = store.list_comments(
         target_type, target_id, limit=lim, page=page, per_page=per_page,
@@ -1026,7 +1130,14 @@ def create_comment(
     body = req.body.strip()
     if not body:
         raise HTTPException(400, "评论内容不能为空")
-    c = store.add_comment(user["id"], req.target_type, req.target_id, body)
+    _require_social_target(
+        store, req.target_type, req.target_id, allowed_types=COMMENT_TARGET_TYPES
+    )
+    try:
+        c = store.add_comment(user["id"], req.target_type, req.target_id, body)
+    except LookupError as exc:
+        # 目标可能在只读校验与写事务之间被管理员删除；仍须 fail closed。
+        raise HTTPException(404, "互动目标不存在") from exc
     # 评论经验（活跃度）
     from bzplat.backend.store.schema import XP_COMMENT
     store.award_xp(user["id"], XP_COMMENT)
@@ -1041,17 +1152,28 @@ def create_comment(
                         m["bot_a_id"], m["bot_b_id"], type="comment",
                         title="你的对局有新评论",
                         body=body[:80], link=f"/match/{req.target_id}",
+                        exclude_user_ids={int(user["id"])},
                     )
             elif req.target_type == "bot":
                 b = store.get_bot(int(req.target_id))
-                if b and b.get("owner_id"):
+                if (
+                    b
+                    and b.get("owner_id")
+                    and int(b["owner_id"]) != int(user["id"])
+                ):
                     notifier.notify(
                         b["owner_id"], type="comment",
                         title="你的 Bot 有新评论",
                         body=body[:80], link=f"/bot/{req.target_id}",
                     )
         except Exception:
-            pass
+            logger.warning(
+                "comment notify failed target_type=%s target_id=%s user=%s",
+                req.target_type,
+                req.target_id,
+                user.get("id"),
+                exc_info=True,
+            )
     return {"comment": c}
 
 
@@ -1075,24 +1197,41 @@ def delete_comment(comment_id: int, request: Request, user=Depends(require_user)
 
 @router.post("/api/likes")
 def like_target(req: LikeReq, request: Request, user=Depends(require_user)):
-    created = _store(request).like(user["id"], req.target_type, req.target_id)
+    store = _store(request)
+    _require_social_target(
+        store, req.target_type, req.target_id, allowed_types=LIKE_TARGET_TYPES
+    )
+    try:
+        created = store.like(user["id"], req.target_type, req.target_id)
+    except LookupError as exc:
+        raise HTTPException(404, "互动目标不存在") from exc
     return {"ok": True, "liked": True, "created": created}
 
 
 @router.delete("/api/likes")
 def unlike_target(req: LikeReq, request: Request, user=Depends(require_user)):
-    _store(request).unlike(user["id"], req.target_type, req.target_id)
+    store = _store(request)
+    _require_social_target(
+        store, req.target_type, req.target_id, allowed_types=LIKE_TARGET_TYPES
+    )
+    try:
+        store.unlike(user["id"], req.target_type, req.target_id)
+    except LookupError as exc:
+        raise HTTPException(404, "互动目标不存在") from exc
     return {"ok": True, "liked": False}
 
 
 @router.get("/api/likes/status")
 def like_status(
     request: Request,
-    target_type: str,
+    target_type: Literal["match", "bot", "comment"],
     target_id: str,
     user=Depends(require_user),
 ):
     store = _store(request)
+    _require_social_target(
+        store, target_type, target_id, allowed_types=LIKE_TARGET_TYPES
+    )
     return {
         "liked": store.is_liked(user["id"], target_type, target_id),
         "count": store.like_count(target_type, target_id),
@@ -1112,7 +1251,26 @@ def record_view(match_id: str, request: Request):
 # ── notifications ─────────────────────────────────────────────
 
 class NotifReadReq(BaseModel):
+    model_config = {"extra": "forbid"}
+
     id: int
+
+
+class NotificationPrefsUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    email_match_done: StrictBool | None = None
+    email_followed: StrictBool | None = None
+    email_contest: StrictBool | None = None
+    email_comment: StrictBool | None = None
+
+
+_NOTIFICATION_PREF_FIELDS = tuple(NotificationPrefsUpdate.model_fields)
+
+
+def _public_notification_prefs(stored: dict[str, Any]) -> dict[str, bool]:
+    """Project SQLite's 0/1 storage values onto the public boolean contract."""
+    return {field: bool(stored.get(field, 0)) for field in _NOTIFICATION_PREF_FIELDS}
 
 
 @router.get("/api/notifications")
@@ -1165,20 +1323,21 @@ def read_all_notifications(request: Request, user=Depends(require_user)):
 
 @router.get("/api/notification-prefs")
 def get_notif_prefs(request: Request, user=Depends(require_user)):
-    return {"prefs": _store(request).get_notification_prefs(user["id"])}
+    stored = _store(request).get_notification_prefs(user["id"])
+    return {"prefs": _public_notification_prefs(stored)}
 
 
 @router.put("/api/notification-prefs")
 def update_notif_prefs(
-    prefs: dict, request: Request, user=Depends(require_user)
+    prefs: NotificationPrefsUpdate,
+    request: Request,
+    user=Depends(require_user),
 ):
-    allowed = {
-        "email_match_done", "email_followed", "email_contest", "email_comment",
-    }
-    clean = {k: v for k, v in prefs.items() if k in allowed}
+    clean = prefs.model_dump(exclude_none=True)
     if not clean:
         raise HTTPException(400, "无可更新字段")
-    return {"prefs": _store(request).update_notification_prefs(user["id"], **clean)}
+    stored = _store(request).update_notification_prefs(user["id"], **clean)
+    return {"prefs": _public_notification_prefs(stored)}
 
 
 # ── contests ──────────────────────────────────────────────────
@@ -1863,44 +2022,62 @@ def admin_revoke_sessions(
 # ── admin: matches ─────────────────────────────────────────────
 
 class AdminMatchPatch(BaseModel):
+    model_config = {"extra": "forbid"}
     status: str | None = None
-    reason: str | None = None
 
 
 @router.patch("/api/admin/matches/{match_id}")
 async def admin_patch_match(
-    match_id: str, body: AdminMatchPatch, request: Request, _admin=Depends(require_admin)
+    match_id: str, body: AdminMatchPatch, request: Request, admin=Depends(require_admin)
 ):
-    """管理员强制修正对局状态（如中止卡住的对局）。"""
-    fields: dict[str, Any] = {}
-    if body.status is not None:
-        if body.status not in ("pending", "running", "completed", "aborted"):
-            raise HTTPException(400, "非法对局状态")
-        # 活跃对局的生命周期由 orchestrator/runner 独占。后台若直接把 running
-        # 改成 pending/completed，正在运行的 task 仍会继续并再次覆写结果、评分和
-        # 赛事回调；pending/running 也不能作为“手工修复”入口伪造。管理员唯一
-        # 支持的状态动作是经 abort_match cancel + drain 后中止。
-        if body.status != "aborted":
-            raise HTTPException(409, "管理员仅可中止对局，不能手工伪造运行或完成状态")
-        fields["status"] = body.status
-    if body.reason is not None:
-        fields["reason"] = body.reason
-    if not fields:
+    """管理员只能经编排器中止活跃对局；原因固定为 admin_aborted。"""
+    if body.status is None:
         raise HTTPException(400, "无更新字段")
-    if body.status == "aborted":
-        try:
-            match = await _orch(request).abort_match(
-                match_id, reason=body.reason or "admin_aborted"
-            )
-        except ValueError as exc:
-            code = 404 if "不存在" in str(exc) else 409
-            raise HTTPException(code, str(exc)) from exc
-        return {"match": match}
-    before = _store(request).get_match(match_id)
-    if not before:
-        raise HTTPException(404, "对局不存在")
-    m = _store(request).update_match(match_id, **fields)
-    return {"match": m}
+    # 活跃对局的生命周期由 orchestrator/runner 独占。后台不能伪造
+    # pending/running/completed，也不能让客户端注入第二套自由 reason。
+    if body.status != "aborted":
+        audit_log(
+            request,
+            "admin_abort_match",
+            result="fail",
+            user=admin.get("username"),
+            target=match_id,
+            detail=f"unsupported_status={body.status}",
+        )
+        raise HTTPException(409, "管理员仅可中止对局，不能手工伪造运行或完成状态")
+    try:
+        match = await _orch(request).abort_match(match_id)
+    except ValueError as exc:
+        audit_log(
+            request,
+            "admin_abort_match",
+            result="fail",
+            user=admin.get("username"),
+            target=match_id,
+            detail=str(exc),
+        )
+        code = 404 if "不存在" in str(exc) else 409
+        raise HTTPException(code, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("admin abort failed match=%s", match_id)
+        audit_log(
+            request,
+            "admin_abort_match",
+            result="fail",
+            user=admin.get("username"),
+            target=match_id,
+            detail="internal_error",
+        )
+        raise HTTPException(500, "中止对局失败") from exc
+    audit_log(
+        request,
+        "admin_abort_match",
+        result="ok",
+        user=admin.get("username"),
+        target=match_id,
+        detail=f"reason={match.get('reason') or 'platform_error'}",
+    )
+    return {"match": match}
 
 
 # ── admin: bots ───────────────────────────────────────────────

@@ -23,6 +23,7 @@ from bzplat.backend.runtime.binary_runner import (
     PlatformRunnerError,
 )
 from bzplat.backend.store import Store
+from bzplat.backend.store.public_contract import sanitize_public_event
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -78,6 +79,182 @@ def _normal_result(*, deltas: tuple[int, int] = (37, -37), winner: int = 0):
     return result, engine_end
 
 
+def test_public_events_are_strictly_projected_for_replay_and_live(tmp_path):
+    """Unknown diagnostics and private extra fields never cross public paths."""
+    store = Store(str(tmp_path / "public-events.db"))
+    private = "/private/adapter.py: secret stderr"
+    raw_move = {
+        "type": "move",
+        "player": 0,
+        "x": 3,
+        "y": 4,
+        "move_index": 1,
+        "message": private,
+        "path": private,
+        "debug": {"stderr": private},
+    }
+    safe_move = {
+        "type": "move",
+        "player": 0,
+        "x": 3,
+        "y": 4,
+        "move_index": 1,
+    }
+    diagnostic = {
+        "type": "diagnostic",
+        "message": private,
+        "path": private,
+        "stderr": private,
+    }
+    assert sanitize_public_event(raw_move) == safe_move
+    assert sanitize_public_event(diagnostic) is None
+    assert sanitize_public_event(
+        {
+            "type": "your_turn",
+            "player": 1,
+            "request": {
+                "num_players": 2,
+                "my_id": 1,
+                "history": [
+                    {
+                        "round": 0,
+                        "player_id": 0,
+                        "action": 0,
+                        "action_type": "call",
+                        "path": private,
+                    }
+                ],
+                "debug": private,
+            },
+            "message": private,
+        }
+    ) == {
+        "type": "your_turn",
+        "player": 1,
+        "request": {
+            "num_players": 2,
+            "my_id": 1,
+            "history": [
+                {
+                    "round": 0,
+                    "player_id": 0,
+                    "action": 0,
+                    "action_type": "call",
+                }
+            ],
+        },
+    }
+
+    owner, bot_a = _user_bot(store, "public-event-a", game_id="gomoku")
+    _, bot_b = _user_bot(store, "public-event-b", game_id="gomoku")
+    match_id = "public-event-projection"
+    store.create_match(
+        match_id,
+        bot_a["id"],
+        bot_b["id"],
+        owner_id=owner["id"],
+        game_id="gomoku",
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        reason="completed",
+        winner=0,
+        result={"deltas": [1, -1]},
+    )
+    store.upsert_replay(
+        match_id,
+        json.dumps([diagnostic, raw_move, {"type": "match_end"}]),
+        "[]",
+    )
+    public_events = json.loads(store.get_public_replay(match_id)["events_json"])
+    assert public_events == [
+        safe_move,
+        {"type": "match_end", "winner": 0, "reason": "completed", "deltas": [1, -1]},
+    ]
+    assert private not in json.dumps(public_events)
+
+    orch = MatchOrchestrator(store, runner=object(), max_concurrent=1)
+    queue: asyncio.Queue = asyncio.Queue()
+    orch._sse[match_id] = [queue]
+    orch._broadcast(match_id, diagnostic)
+    assert queue.empty()
+    orch._broadcast(match_id, raw_move)
+    assert queue.get_nowait() == safe_move
+    store.close()
+
+
+def test_active_human_holdem_hides_opponent_cards_from_public_streams(tmp_path):
+    """Spectators see no live hole cards; the authenticated human sees only theirs."""
+    store = Store(str(tmp_path / "human-card-visibility.db"))
+    human, bot = _user_bot(store, "human-card-visibility")
+    match_id = "active-human-card-visibility"
+    store.create_match(
+        match_id,
+        bot["id"],
+        bot["id"],
+        owner_id=human["id"],
+        match_type="human",
+        game_id="holdem",
+        human_user_id=human["id"],
+        human_seat=1,
+    )
+    store.update_match(match_id, status="running")
+    deal = {
+        "type": "deal_hole",
+        "hand": 0,
+        "holes": [["As", "Ah"], ["Ks", "Kh"]],
+    }
+    turn = {
+        "type": "your_turn",
+        "player": 1,
+        "request": {
+            "num_players": 2,
+            "my_id": 1,
+            "my_cards": [44, 45],
+            "public_cards": [],
+            "history": [],
+            "hand": 0,
+            "max_hand": 70,
+        },
+    }
+    store.upsert_replay(match_id, json.dumps([deal, turn]), "[]")
+
+    spectator_events = json.loads(store.get_public_replay(match_id)["events_json"])
+    assert spectator_events == [
+        {"type": "deal_hole", "hand": 0, "holes": [[], []]},
+    ]
+    player_events = json.loads(
+        store.get_public_replay(match_id, human_viewer_seat=1)["events_json"]
+    )
+    assert player_events == [
+        {"type": "deal_hole", "hand": 0, "holes": [[], ["Ks", "Kh"]]},
+        turn,
+    ]
+
+    orch = MatchOrchestrator(store, runner=object(), max_concurrent=1)
+    spectator = orch.subscribe(match_id)
+    player = orch.subscribe(match_id, human_viewer_seat=1)
+    assert spectator.get_nowait()["events"] == spectator_events
+    assert player.get_nowait()["events"] == player_events
+
+    orch._broadcast(match_id, deal)
+    orch._broadcast(match_id, turn)
+    assert spectator.get_nowait() == {
+        "type": "deal_hole",
+        "hand": 0,
+        "holes": [[], []],
+    }
+    assert spectator.empty()
+    assert player.get_nowait() == {
+        "type": "deal_hole",
+        "hand": 0,
+        "holes": [[], ["Ks", "Kh"]],
+    }
+    assert player.get_nowait() == turn
+    store.close()
+
+
 class _ActualHoldemRunner:
     async def run_binaries(self, *_args, **kwargs):
         # Exercise the real 70-hand Hold'em engine. Both players always
@@ -119,6 +296,27 @@ class _DuplicateEngineTerminalRunner:
         )
 
 
+class _PrivateCompletedReasonRunner:
+    async def run_binaries(self, *_args, **kwargs):
+        on_event = kwargs["on_event"]
+        start = {"type": "match_start"}
+        engine_end = {
+            "type": "match_end",
+            "winner": 0,
+            "reason": "privateadapterfailure",
+            "message": "内部异常路径",
+        }
+        on_event("match_start", start)
+        on_event("match_end", engine_end)
+        return SimpleNamespace(
+            rounds_played=1,
+            rounds=[SimpleNamespace(deltas=[3, -3])],
+            events=[start, engine_end],
+            winner=0,
+            reason="privateadapterfailure",
+        )
+
+
 class _FailureRunner:
     def __init__(self, error: BaseException) -> None:
         self.error = error
@@ -129,6 +327,28 @@ class _FailureRunner:
             on_event(
                 "technical_incident",
                 {"type": "technical_incident", **self.error.incident()},
+            )
+        elif isinstance(self.error, RuntimeError) and on_event is not None:
+            # A future/third-party game adapter must not be able to terminate the
+            # public stream early or expose its diagnostic payload.
+            on_event(
+                "diagnostic",
+                {
+                    "type": "error",
+                    "reason": "private_adapter_failure",
+                    "message": str(self.error),
+                    "path": "/private/adapter.py",
+                },
+            )
+            # Guard the reverse mismatch too: terminal semantics can arrive in
+            # ``kind`` even when an adapter mislabels the event dictionary.
+            on_event(
+                "error",
+                {
+                    "type": "diagnostic",
+                    "message": str(self.error),
+                    "path": "/private/reverse-adapter.py",
+                },
             )
         raise self.error
 
@@ -272,6 +492,37 @@ def test_duplicate_leg_terminals_stay_internal_and_public_replay_closes_once(tmp
     store.close()
 
 
+def test_unknown_completed_reason_is_normalized_before_live_and_storage(tmp_path):
+    store = Store(str(tmp_path / "private-completed-reason.db"))
+    owner, bot_a = _user_bot(store, "private-completed-a")
+    _, bot_b = _user_bot(store, "private-completed-b")
+    orch = MatchOrchestrator(
+        store,
+        runner=_PrivateCompletedReasonRunner(),
+        max_concurrent=1,
+    )
+
+    match_id, live_events, _ = asyncio.run(
+        _run_prepared_match(
+            store,
+            orch,
+            bot_a["id"],
+            bot_b["id"],
+            owner["id"],
+        )
+    )
+    terminal = [event for event in live_events if event.get("type") == "match_end"]
+    assert terminal == [
+        {"type": "match_end", "winner": 0, "reason": "completed", "deltas": [3, -3]}
+    ]
+    detail = match_detail(match_id, _api_request(store, match_id))
+    assert detail["match"]["reason"] == "completed"
+    assert json.loads(detail["replay"]["events_json"])[-1] == terminal[0]
+    assert "privateadapterfailure" not in json.dumps(detail, ensure_ascii=False)
+    assert "内部异常路径" not in json.dumps(detail, ensure_ascii=False)
+    store.close()
+
+
 @pytest.mark.parametrize(
     ("error", "expected_type", "expected_status", "expected_reason", "expected_deltas"),
     [
@@ -296,6 +547,13 @@ def test_duplicate_leg_terminals_stay_internal_and_public_replay_closes_once(tmp
         ),
         (
             PlatformRunnerError("sandbox unavailable"),
+            "error",
+            "aborted",
+            "platform_error",
+            None,
+        ),
+        (
+            RuntimeError("generic failure at /private/bot_uploads/secret"),
             "error",
             "aborted",
             "platform_error",
@@ -337,6 +595,12 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
     assert observations[0]["store"]["status"] == expected_status
     assert observations[0]["api"]["status"] == expected_status
     assert observations[0]["store"]["reason"] == expected_reason
+    match_id = observations[0]["store"]["id"]
+    replay = json.loads(store.get_public_replay(match_id)["events_json"])
+    replay_terminals = [
+        event for event in replay if event.get("type") in {"match_end", "error"}
+    ]
+    assert replay_terminals == terminal
     if expected_deltas is not None:
         assert terminal[0] == {
             "type": "match_end",
@@ -345,11 +609,10 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
             "deltas": expected_deltas,
         }
         assert observations[0]["api"]["result"]["deltas"] == expected_deltas
-        match_id = observations[0]["store"]["id"]
-        replay = json.loads(store.get_replay(match_id)["events_json"])
-        assert [
-            event for event in replay if event.get("type") == "match_end"
-        ] == terminal
+    else:
+        assert terminal == [{"type": "error", "reason": expected_reason}]
+        public_detail = match_detail(match_id, _api_request(store, match_id))
+        assert "/private" not in json.dumps(public_detail, ensure_ascii=False)
     store.close()
 
 
@@ -364,6 +627,14 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
         async def run_bot_vs_human(self, *_args, **kwargs):
             on_event = kwargs["on_event"]
             on_event("match_start", {"type": "match_start", "num_hands": 1})
+            on_event(
+                "error",
+                {
+                    "type": "diagnostic",
+                    "message": "human private adapter failure",
+                    "path": "/private/human-adapter.py",
+                },
+            )
             on_event("match_end", engine_end)
             self.engine_end_emitted.set()
             while not self.release_result.is_set():
@@ -401,6 +672,7 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
                 for event in snapshot["events"]
                 if event.get("type") == "match_end"
             ]
+            assert "/private" not in json.dumps(snapshot, ensure_ascii=False)
 
             runner.release_result.set()
             terminal = websocket.receive_json()
@@ -417,6 +689,7 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
             assert body["match"]["status"] == "completed"
             assert body["match"]["winner"] == 0
             assert body["match"]["result"]["deltas"] == [23, -23]
+            assert "/private" not in json.dumps(body, ensure_ascii=False)
             with pytest.raises(WebSocketDisconnect) as closed:
                 websocket.receive_json()
             assert closed.value.code == 1000
@@ -436,3 +709,15 @@ def test_frontend_live_terminal_has_no_retired_earnings_contract():
     )
     assert "earnings_a" not in source
     assert "earnings_b" not in source
+
+
+def test_game_event_describers_do_not_consume_private_error_messages():
+    """Platform errors are reason-only; game packages cannot revive message."""
+    game_sources = (
+        REPO_ROOT / "bzplat/frontend/src/games/holdem/view.tsx",
+        REPO_ROOT / "bzplat/frontend/src/games/gomoku/index.ts",
+        REPO_ROOT / "bzplat/frontend/src/games/pencil/index.ts",
+    )
+    for path in game_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "event.message" not in source

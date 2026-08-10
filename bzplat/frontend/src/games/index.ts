@@ -19,7 +19,11 @@ export type {
   GameAuxiliaryProps,
   HumanActionEnvelope,
   HumanActionPanelProps,
+  TerminalReasonPresentation,
+  TerminalReasonResolver,
+  TerminalReasonTone,
 } from './base'
+export { resolveTerminalReason } from './reasons'
 
 /** 全部已注册游戏规格。 */
 export const GAMES: GameViewSpec[] = [holdemSpec, gomokuSpec, pencilSpec]

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle2, Star } from 'lucide-react'
 import PageStub from '@/components/PageStub'
@@ -18,10 +18,22 @@ import { gameLabel } from '@/lib/games'
 import { fmtRating } from '@/lib/format'
 
 interface Prefs {
-  email_match_done: number
-  email_followed: number
-  email_contest: number
-  email_comment: number
+  email_match_done: boolean
+  email_followed: boolean
+  email_contest: boolean
+  email_comment: boolean
+}
+const PREF_KEYS = [
+  'email_match_done',
+  'email_followed',
+  'email_contest',
+  'email_comment',
+] as const satisfies readonly (keyof Prefs)[]
+const DEFAULT_PREFS: Prefs = {
+  email_match_done: false,
+  email_followed: false,
+  email_contest: false,
+  email_comment: false,
 }
 interface FavBot {
   id: number
@@ -50,22 +62,58 @@ export default function Settings() {
   const [oldPw, setOldPw] = useState('')
   const [newPw, setNewPw] = useState('')
   // prefs
-  const [prefs, setPrefs] = useState<Prefs>({
-    email_match_done: 0, email_followed: 0, email_contest: 0, email_comment: 0,
+  const [prefs, setPrefs] = useState<Prefs>({ ...DEFAULT_PREFS })
+  const desiredPrefsRef = useRef<Prefs>({ ...DEFAULT_PREFS })
+  const confirmedPrefsRef = useRef<Prefs>({ ...DEFAULT_PREFS })
+  const prefRevisionsRef = useRef<Record<keyof Prefs, number>>({
+    email_match_done: 0,
+    email_followed: 0,
+    email_contest: 0,
+    email_comment: 0,
   })
+  const prefInFlightRef = useRef<Partial<Record<keyof Prefs, boolean>>>({})
+  const prefEpochRef = useRef(0)
+  const [pendingPrefs, setPendingPrefs] = useState<Partial<Record<keyof Prefs, boolean>>>({})
   // favorites
   const [favs, setFavs] = useState<FavBot[]>([])
   const [avatarFileName, setAvatarFileName] = useState('')
 
   useEffect(() => {
+    const epoch = ++prefEpochRef.current
+    desiredPrefsRef.current = { ...DEFAULT_PREFS }
+    confirmedPrefsRef.current = { ...DEFAULT_PREFS }
+    prefInFlightRef.current = {}
+    for (const key of PREF_KEYS) prefRevisionsRef.current[key] += 1
+    setPrefs({ ...DEFAULT_PREFS })
+    setPendingPrefs({})
     if (!user) return
+    const revisionsAtStart = { ...prefRevisionsRef.current }
     apiGet<{ prefs: Prefs }>('/api/notification-prefs')
-      .then((d) => setPrefs(d.prefs))
+      .then((d) => {
+        if (prefEpochRef.current !== epoch) return
+        setPrefs((current) => {
+          const next = { ...current }
+          for (const key of PREF_KEYS) {
+            // A user action after this GET started is authoritative.  The stale
+            // snapshot may initialize untouched switches but must never undo it.
+            if (prefRevisionsRef.current[key] !== revisionsAtStart[key]) continue
+            const value = Boolean(d.prefs[key])
+            confirmedPrefsRef.current[key] = value
+            desiredPrefsRef.current[key] = value
+            next[key] = value
+          }
+          return next
+        })
+      })
       .catch(() => {})
+  }, [user?.id])
+
+  useEffect(() => {
+    if (!user) return
     apiGet<{ favorites: FavBot[] }>('/api/auth/me/favorites')
       .then((d) => setFavs(d.favorites || []))
       .catch(() => {})
-  }, [user])
+  }, [user?.id])
 
   if (!user) {
     return (
@@ -119,14 +167,78 @@ export default function Settings() {
       .catch((e) => setError(errMsg(e)))
   }
 
-  function togglePref(key: keyof Prefs) {
-    const prev = prefs
-    const next = { ...prefs, [key]: prefs[key] ? 0 : 1 }
-    setPrefs(next)
-    apiJson('/api/notification-prefs', 'PUT', next).catch((e) => {
-      setPrefs(prev) // 失败回滚开关到原状态，避免 UI 与服务端不一致
-      setError(errMsg(e))
+  function applyPrefValue(key: keyof Prefs, value: boolean) {
+    desiredPrefsRef.current = { ...desiredPrefsRef.current, [key]: value }
+    setPrefs((current) => ({ ...current, [key]: value }))
+  }
+
+  function flushPrefQueue(key: keyof Prefs, epoch: number) {
+    if (prefInFlightRef.current[key]) return
+    prefInFlightRef.current[key] = true
+    setPendingPrefs((current) => ({ ...current, [key]: true }))
+
+    void (async () => {
+      while (prefEpochRef.current === epoch) {
+        const revision = prefRevisionsRef.current[key]
+        const target = desiredPrefsRef.current[key]
+        try {
+          const { prefs: saved } = await apiJson<{ prefs: Prefs }>(
+            '/api/notification-prefs', 'PUT', { [key]: target },
+          )
+          if (prefEpochRef.current !== epoch) return
+          const savedValue = Boolean(saved[key])
+          confirmedPrefsRef.current[key] = savedValue
+          if (prefRevisionsRef.current[key] === revision) {
+            applyPrefValue(key, savedValue)
+            setError('')
+            return
+          }
+          // More clicks arrived while this request was in flight.  If the last
+          // desired value already equals the committed value, the queue is done;
+          // otherwise loop and persist only the newest value, in order.
+          if (desiredPrefsRef.current[key] === savedValue) return
+        } catch (requestError) {
+          if (prefEpochRef.current !== epoch) return
+          if (prefRevisionsRef.current[key] !== revision) continue
+          setError(errMsg(requestError))
+          // The request outcome is unknown.  Refresh the one public source of
+          // truth before rolling back the optimistic switch.
+          try {
+            const refreshed = await apiGet<{ prefs: Prefs }>('/api/notification-prefs')
+            if (
+              prefEpochRef.current !== epoch ||
+              prefRevisionsRef.current[key] !== revision
+            ) return
+            const serverValue = Boolean(refreshed.prefs[key])
+            confirmedPrefsRef.current[key] = serverValue
+            applyPrefValue(key, serverValue)
+          } catch {
+            if (
+              prefEpochRef.current === epoch &&
+              prefRevisionsRef.current[key] === revision
+            ) applyPrefValue(key, confirmedPrefsRef.current[key])
+          }
+          return
+        }
+      }
+    })().finally(() => {
+      if (prefEpochRef.current !== epoch) return
+      prefInFlightRef.current[key] = false
+      setPendingPrefs((current) => ({ ...current, [key]: false }))
+      // A click can land between the last response and this finally callback.
+      if (desiredPrefsRef.current[key] !== confirmedPrefsRef.current[key]) {
+        flushPrefQueue(key, epoch)
+      }
     })
+  }
+
+  function togglePref(key: keyof Prefs, checked: boolean) {
+    const epoch = prefEpochRef.current
+    prefRevisionsRef.current[key] += 1
+    applyPrefValue(key, checked)
+    // Different keys may save concurrently; one key is serialized/coalesced so
+    // the server and UI both end at the user's last click.
+    flushPrefQueue(key, epoch)
   }
 
   const [avatarVer, setAvatarVer] = useState(0)
@@ -286,8 +398,10 @@ export default function Settings() {
               <div key={key} className="flex items-center justify-between gap-2 text-sm">
                 <span className="text-foreground">{label} 邮件提醒</span>
                 <Switch
-                  checked={!!prefs[key]}
-                  onCheckedChange={() => togglePref(key)}
+                  aria-label={`${label}邮件提醒`}
+                  aria-busy={Boolean(pendingPrefs[key])}
+                  checked={prefs[key]}
+                  onCheckedChange={(checked) => togglePref(key, checked)}
                 />
               </div>
             ))}

@@ -95,7 +95,7 @@ def test_admin_abort_keeps_history_and_redispatches_without_ko_advance(tmp_path)
     app.state.orch.start_prepared_match = lambda _mid: None
     response = TestClient(app).patch(
         f"/api/admin/matches/{old_match_id}",
-        json={"status": "aborted", "reason": "admin_test_abort"},
+        json={"status": "aborted"},
         headers={"Authorization": f"Bearer {token}"},
     )
 

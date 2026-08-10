@@ -11,7 +11,8 @@
     读 sessions，Bearer 真正打通 require_user/admin/organizer 全链路。
   - Bot 执行方式由被测服务决定：生产式 Docker 沙箱，或 QA 服务显式设置 BZ_BOT_LOCAL=1。
   - 并发硬顶 = cpu//4；三款游戏均使用 GameSpec 固定规则（holdem 固定 70 手）。
-  - 所有用户名/邮箱/Bot 名均 load_* 前缀，可一键识别清理；seed 幂等可重复跑。
+  - 所有用户名/邮箱/Bot 名均 load_* 前缀，可一键识别清理；seed 按样例 ELF 内容幂等，
+    样例更新或文件漂移时发布并激活新版本。
 
 8 个阶段覆盖矩阵：
   0 基础(公开读 + 鉴权)   1 Bot 端点   2 对局(三游戏多局+自博弈)
@@ -52,6 +53,7 @@ from scripts._qa_accounts import (  # noqa: E402
     inspect_dedicated_account,
     preflight_dedicated_accounts,
 )
+from scripts._qa_bots import ensure_qa_sample_bot  # noqa: E402
 from scripts._qa_target import (  # noqa: E402
     assert_qa_instance,
     ensure_qa_base,
@@ -171,7 +173,7 @@ def seed(
     """批量建 load_* 用户 + Bot + organizer + admin，直写 sessions 表生成 Bearer token。
 
     返回 {tokens:{username→token}, bots:{username→{game→bot_id}}, admin_token, org_tokens:[...],
-          user_names:[...], admin_name}。幂等：已存在的用户/bot 跳过。
+          user_names:[...], admin_name}。账号严格复核；Bot 按当前样例 ELF 内容幂等同步。
     """
     resolved_db = qa_db_path(db_path, ROOT)
     resolved_uploads = qa_upload_root(upload_root, resolved_db, ROOT)
@@ -201,12 +203,7 @@ def seed(
         )
 
     def get_or_create_bot(owner_id: int, name: str, game_id: str, raw: bytes) -> dict:
-        existing = store.get_bot_by_owner_name(owner_id, name)
-        if existing:
-            return existing
-        return bm.create_from_upload(
-            owner_id, name, raw, display_name=name, game_id=game_id
-        )
+        return ensure_qa_sample_bot(bm, owner_id, name, game_id, raw)
 
     tokens: dict[str, str] = {}
     bots: dict[str, dict[str, int]] = {}
@@ -275,7 +272,7 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     check("GET /api/leaderboard", r.status_code == 200 and "leaderboard" in r.json(), r.text[:80])
 
     # 段位定义（PR-5）
-    r = api.client.get("/api/tiers")
+    r = api.client.get("/api/tiers?game_id=holdem")
     check("GET /api/tiers", r.status_code == 200 and len(r.json().get("tiers", [])) >= 6, r.text[:80])
     # 经验/等级体系（PR-9）
     r = api.client.get("/api/levels/info")
@@ -846,6 +843,7 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
     url = f"{ws_base}/api/matches/{mid}/play?token={token}"
 
     async def play() -> bool:
+        occupied: set[tuple[int, int]] = set()
         try:
             async with websockets.connect(url, max_size=None, open_timeout=20) as ws:
                 while True:
@@ -856,14 +854,26 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
                     ev = json.loads(raw) if isinstance(raw, str) else raw
                     et = ev.get("type")
                     if et == "snapshot":
+                        for prior in ev.get("events", []):
+                            if isinstance(prior, dict) and prior.get("type") == "move":
+                                occupied.add((int(prior["x"]), int(prior["y"])))
+                        continue
+                    if et == "move":
+                        occupied.add((int(ev["x"]), int(ev["y"])))
                         continue
                     if et == "your_turn":
                         req = ev.get("request", {})
-                        move = _human_move(game, req)
+                        move = _human_move(game, req, occupied)
+                        payload = move.get("response")
+                        if isinstance(payload, dict):
+                            x, y = int(payload.get("x", -1)), int(payload.get("y", -1))
+                            if x >= 0 and y >= 0:
+                                occupied.add((x, y))
                         await ws.send(json.dumps(move))
                         continue
                     if et == "error":
-                        warn(f"WS {game} 返回 error: {ev.get('message') or ev}")
+                        reason = str(ev.get("reason") or "platform_error")
+                        warn(f"WS {game} 返回 error: {reason}")
                         return False
                     if et == "match_end":
                         return True
@@ -874,24 +884,34 @@ def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game:
     return asyncio.run(play())
 
 
-def _human_move(game: str, req: dict) -> dict:
+def _human_move(
+    game: str, req: dict, occupied: set[tuple[int, int]] | None = None
+) -> dict:
     """根据游戏与引擎 request 生成合法人类着。"""
+    occupied = occupied if occupied is not None else set()
     if game == "holdem":
         # 唯一 Human WS 动作对象：顶层只允许 {"response": int}。
         # 0 = check/call。顶层整数与旧 {"a":"c"} 都会被协议层拒绝。
         return {"response": 0}
-    # 棋类：req 含 x/y（对方上一手）+ me；回一个合法空位
-    # 简化策略：gomoku 下中心附近；pencil 下一条边
+    # 棋类：维护已见 move 集合，不能每回合重复猜同一个点。
+    last = (int(req.get("x", -1)), int(req.get("y", -1)))
+    if last[0] >= 0 and last[1] >= 0:
+        occupied.add(last)
     if game == "gomoku":
-        cx = cy = 15 // 2
-        # 若中心被占，就近找空位（无法查盘，赌概率）
-        return {"response": {"x": cx, "y": cy}}
+        for x in range(15):
+            for y in range(15):
+                if (x, y) not in occupied:
+                    return {"response": {"x": x, "y": y}}
+        return {"response": {"x": -1, "y": -1}}
     if game == "pencil":
         # pass=1 时必须回 pass
         if req.get("pass") == 1:
             return {"response": {"x": -1, "y": -1}}
-        # 下一合法边（水平），赌不重复
-        return {"response": {"x": 1, "y": 0}}
+        for x in range(11):
+            for y in range(11):
+                if (x + y) % 2 == 1 and (x, y) not in occupied:
+                    return {"response": {"x": x, "y": y}}
+        return {"response": {"x": -1, "y": -1}}
     return {"response": {"x": 0, "y": 0}}
 
 
@@ -1094,7 +1114,7 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     })
     if r.status_code == 200:
         amid = r.json()["match_id"]
-        r = api.authed(tok, "PATCH", f"/api/admin/matches/{amid}", json={"status": "aborted", "reason": "loadtest-abort"})
+        r = api.authed(tok, "PATCH", f"/api/admin/matches/{amid}", json={"status": "aborted"})
         check("PATCH /api/admin/matches/{id}（强制 aborted）", r.status_code == 200 and r.json()["match"]["status"] == "aborted", r.text[:80])
     else:
         warn(f"阶段7 强制 abort 对局发起失败 {r.status_code}")

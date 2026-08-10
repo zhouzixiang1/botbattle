@@ -174,7 +174,6 @@ def test_bot_match_never_falls_back_from_invalid_frozen_version(
             {
                 "type": "error",
                 "reason": "version_unavailable",
-                "message": "对局所需的 Bot 版本不可用，对局已中止",
             }
         ]
         assert str(tmp_path) not in json.dumps(errors, ensure_ascii=False)

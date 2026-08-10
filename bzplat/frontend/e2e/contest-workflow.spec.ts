@@ -58,7 +58,7 @@ async function ensureCreatedContestSettled(
       const match = await matchResponse.json() as { match: { status: string } }
       if (match.match.status === 'pending' || match.match.status === 'running') {
         const abort = await admin.page.request.patch(`/api/admin/matches/${matchId}`, {
-          data: { status: 'aborted', reason: 'e2e-contest-cleanup' },
+          data: { status: 'aborted' },
         })
         expect(abort.status(), await abort.text()).toBe(200)
       } else {

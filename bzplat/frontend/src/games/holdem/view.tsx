@@ -1,5 +1,6 @@
 import type { GameAuxiliaryProps, RawEvent } from '@/games/base'
 import type { HoldemViewModel } from './reducer'
+import { resolveTerminalReason } from '@/games/reasons'
 
 function displaySeat(value: unknown): string {
   const seat = Number(value)
@@ -30,10 +31,12 @@ export function describeHoldemEvent(event: RawEvent): string {
   if (event.type === 'deal_board') return `${String(event.street ?? '')}: ${(event.dealt as string[] | undefined)?.join(' ') ?? ''}`
   if (event.type === 'deal_hole') return '发底牌'
   if (event.type === 'match_start') return '对局开始'
-  if (event.type === 'match_end') return `结束 · 胜者 ${event.winner == null ? '平' : `座${displaySeat(event.winner)}`}`
+  if (event.type === 'match_end') {
+    const outcome = event.winner == null ? '平局' : `座${displaySeat(event.winner)}获胜`
+    return `结束 · ${outcome} · ${resolveTerminalReason(event.reason, 'completed').label}`
+  }
   if (event.type === 'turn') return `轮到座${displaySeat(event.player)}`
   if (event.type === 'your_turn') return '轮到你'
-  if (event.type === 'error') return String(event.message || '对局异常')
   return event.type || '?'
 }
 

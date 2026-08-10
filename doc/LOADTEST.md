@@ -44,7 +44,10 @@ python scripts/load_test.py \
 - 所有账号/Bot 名均 `load_` 前缀、邮箱 `@loadtest.local`，可一键识别清理；**不动既有非 load 数据**。
 - seed **幂等且 fail-closed**：已有账号只有在 namespace、精确用户名、邮箱、角色、
   固定密码全部匹配时才可复用并激活/验证；冲突会在任何用户/Bot/session 写入前失败。
-  新建 Bot 文件只写隔离 DB 旁的 uploads。
+  Bot 幂等性还要求当前版本精确位于本实例
+  `upload_root/<bot_id>/vN/bot.bin`、具备执行位，且 `bots` 镜像与版本元数据一致；只有
+  checksum、大小、平台元数据、磁盘内容和上述归属全部一致才复用。样例变化、复制库外部路径、
+  权限或镜像漂移都会在 per-Bot 锁内发布并激活当前隔离目录的新版本。
 - `--skip-seed` 同样重新验证全部账号，并要求其已激活、已验证；验证完成前不会给任何
   用户（尤其是管理员）签发新 session。
 
@@ -63,7 +66,7 @@ python scripts/load_test.py \
 | **1 Bot** | `GET /api/bots/{mine,public,{id}}`；`POST /api/bots`（HTTP 上传）；`POST /api/bots/{id}/versions`；`POST /api/bots/{id}/active` | user |
 | **2 对局** | `POST /api/matches/challenge`（三游戏混跑 + 自博弈，目标 `TARGET_MATCHES=12` 场；客户端顺序提交、线程并行等待终态）；`GET /api/matches`；`GET /api/matches/{id}`；`GET /api/leaderboard`（验 Glicko 更新） | user |
 | **3 SSE snapshot** | `GET /api/matches/{id}/events`（只验首个非 ping 帧为 snapshot，且含 match + 历史列表；不覆盖后续实时增量） | 公开 |
-| **4 人类 vs Bot** | `POST /api/matches/human`；WS `/api/matches/{id}/play`（holdem/gomoku/pencil，收 `your_turn` 回着至 `match_end`，收到 `error` 即失败）；结束后再 GET 断言持久化 `status=completed`，并验 per-user ≤1、match_type=human、**Glicko 不变** | user |
+| **4 人类 vs Bot** | `POST /api/matches/human`（固定座位 2）；WS `/api/matches/{id}/play`（holdem/gomoku/pencil，按 snapshot/move 维护已占位置，收 `your_turn` 只回合法未占动作直至 `match_end`，收到 `error` 即失败）；结束后再 GET 断言持久化 `status=completed`，并验 per-user ≤1、match_type=human、**Glicko 不变** | user |
 | **5 赛事** | `POST /api/contests`（template）；`/{id}/{open,register,dispatch,start,resume}`；轮询到 finished；验 standings/pairings/stage_results、contest 对局不更新 Glicko | organizer + user |
 | **6 代码配置边界** | `GET /api/admin/settings/runtime` 验 `source=code/mutable=false`；确认 runtime PATCH 与 admin template CRUD 均 404；公开模板列表标记代码只读 | admin + 公开 |
 | **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches,email/templates,contests}`；`POST /api/admin/users/{id}/role`；`DELETE /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/{users,contests}/{id}/{sessions,entries}`；`POST /api/auth/admin/create-reset-token` | admin |
@@ -72,7 +75,7 @@ python scripts/load_test.py \
 
 `bzplat/backend/tests/test_load_test_seed.py` 是 `seed()` 的纯单测（不依赖运行服务）：
 
-- 幂等：seed 跑两次用户/Bot 数不变
+- 幂等：同一隔离 upload root 且路径/权限/元数据/镜像/内容全部一致时重复 seed 不增版本；跨 root、无执行位、样例或 bots 镜像漂移时只新增并激活一个当前实例的正确版本
 - token 是 sessions 表合法行（可 `get_session` 验证）
 - 用户名/Bot 名均 `load_` 前缀
 - 每个 bot 有 rating 行（Glicko 默认 1500）

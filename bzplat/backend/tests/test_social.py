@@ -39,6 +39,29 @@ def test_no_self_follow(tmp_path):
     s.close()
 
 
+def test_follow_and_favorite_recheck_both_ends_inside_transaction(tmp_path):
+    s = _store(tmp_path)
+    user = s.create_user("alice", "a@ex.com", "x")
+    other = s.create_user("bob", "b@ex.com", "x")
+    bot = s.create_bot(other["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
+
+    for operation in (
+        lambda: s.follow(99999, other["id"]),
+        lambda: s.follow(user["id"], 99999),
+        lambda: s.unfollow(99999, other["id"]),
+        lambda: s.favorite(99999, bot["id"]),
+        lambda: s.favorite(user["id"], 99999),
+        lambda: s.unfavorite(user["id"], 99999),
+    ):
+        try:
+            operation()
+        except LookupError:
+            pass
+        else:  # pragma: no cover - keeps the assertion failure explicit
+            raise AssertionError("missing actor/target must fail closed")
+    s.close()
+
+
 def test_favorite_unfavorite_and_count(tmp_path):
     s = _store(tmp_path)
     u1 = s.create_user("alice", "a@ex.com", "x")
@@ -94,6 +117,10 @@ def test_follow_endpoints(tmp_path):
     # bob 取关 alice
     r = c.delete(f"/api/users/{u1}/follow", headers=h2)
     assert r.status_code == 200 and r.json()["following"] is False
+    assert c.get("/api/users/99999/followers").status_code == 404
+    assert c.get("/api/users/99999/following").status_code == 404
+    assert c.get("/api/users/99999/follow-status", headers=h1).status_code == 404
+    assert c.delete("/api/users/99999/follow", headers=h1).status_code == 404
 
 
 def test_favorite_endpoints(tmp_path):
@@ -107,6 +134,8 @@ def test_favorite_endpoints(tmp_path):
     assert len(r.json()["favorites"]) == 1
     r = c.delete(f"/api/bots/{bid}/favorite", headers=h2)
     assert r.json()["favorited"] is False
+    assert c.get("/api/bots/99999/favorite-status", headers=h2).status_code == 404
+    assert c.delete("/api/bots/99999/favorite", headers=h2).status_code == 404
 
 
 def test_follow_triggers_notification(tmp_path):
@@ -119,3 +148,41 @@ def test_follow_triggers_notification(tmp_path):
     r = c.get("/api/notifications?unread_only=true", headers=h1)
     notifs = r.json()["notifications"]
     assert any(n["type"] == "followed" for n in notifs)
+
+
+def test_follow_target_deleted_after_api_precheck_returns_404(tmp_path, monkeypatch):
+    c, bid, u1, u2, t1, t2 = _app(tmp_path)
+    store = c.app.state.store
+    original = store.follow
+
+    def delete_then_follow(follower_id: int, followee_id: int):
+        assert store.delete_user(followee_id) is True
+        return original(follower_id, followee_id)
+
+    monkeypatch.setattr(store, "follow", delete_then_follow)
+    response = c.post(
+        f"/api/users/{u1}/follow",
+        headers={"Authorization": f"Bearer {t2}"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "用户不存在"
+    assert store.following_count(u2) == 0
+
+
+def test_favorite_target_deleted_after_api_precheck_returns_404(tmp_path, monkeypatch):
+    c, bid, u1, u2, t1, t2 = _app(tmp_path)
+    store = c.app.state.store
+    original = store.favorite
+
+    def delete_then_favorite(user_id: int, bot_id: int):
+        assert store.delete_bot(bot_id) is True
+        return original(user_id, bot_id)
+
+    monkeypatch.setattr(store, "favorite", delete_then_favorite)
+    response = c.post(
+        f"/api/bots/{bid}/favorite",
+        headers={"Authorization": f"Bearer {t2}"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "bot 不存在"
+    assert store.list_favorites(u2) == []

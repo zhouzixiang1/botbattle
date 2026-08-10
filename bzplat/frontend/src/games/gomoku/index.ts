@@ -3,6 +3,7 @@ import { Grid3x3 } from 'lucide-react'
 import type { GameViewSpec, RawEvent } from '../base'
 import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import { GomokuCanvasRenderer } from './canvas'
+import { gomokuTerminalReason } from './reasons'
 
 const GomokuBoardStub = () => null  // canvas 接管，DOM Board 不再用
 
@@ -15,9 +16,13 @@ function describeGomokuEvent(event: RawEvent): string {
   if (event.type === 'move') return `座${displaySeat(event.player)} · (${String(event.x)},${String(event.y)})`
   if (event.type === 'turn') return `轮到座${displaySeat(event.player)}`
   if (event.type === 'your_turn') return '轮到你'
+  if (event.type === 'illegal') return `座${displaySeat(event.player)} · 非法落子`
   if (event.type === 'match_start') return '对局开始'
-  if (event.type === 'match_end') return `结束 · 胜者 ${event.winner == null ? '平' : `座${displaySeat(event.winner)}`}`
-  if (event.type === 'error') return String(event.message || '对局异常')
+  if (event.type === 'match_end') {
+    const outcome = event.winner == null ? '平局' : `座${displaySeat(event.winner)}获胜`
+    const reason = gomokuTerminalReason(event.reason, 'completed').label
+    return `结束 · ${outcome}${reason ? ` · ${reason}` : ''}`
+  }
   return event.type || '?'
 }
 
@@ -34,6 +39,7 @@ export const gomokuSpec: GameViewSpec = {
   matchFormatLabel: '单局',
   winner: (vm) => (vm as GomokuViewModel).winner,
   describeEvent: describeGomokuEvent,
+  terminalReason: gomokuTerminalReason,
   humanPlay: {
     layout: 'canvas-with-log',
     turnLabel: '轮到你落子',

@@ -7,13 +7,16 @@ load_test.py 的 HTTP 阶段（对局/赛事/admin）是端到端脚本，由 sc
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import sys
 from pathlib import Path
 
 import pytest
 
+from bzplat.backend.bots.manager import BotManager
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.store import Store
+from scripts._qa_bots import ensure_qa_sample_bot
 
 ROOT = Path(__file__).resolve().parents[3]  # 仓库根
 
@@ -54,6 +57,113 @@ def test_seed_idempotent(tmp_path):
 
     # org_tokens 数量
     assert len(ctx1["org_tokens"]) == 2
+
+
+def test_seed_refreshes_stale_named_bot_by_sample_checksum(tmp_path):
+    """同名 QA Bot 不能让旧协议二进制永久存活；内容漂移时发布新版本。"""
+    mod = _load_module()
+    db = str(tmp_path / "load.db")
+    upload_root = str(tmp_path / "uploads")
+    first = mod.seed(db, 1, upload_root)
+    bot_id = first["bots"]["load_u01"]["gomoku"]
+
+    store = Store(db)
+    stale = store.get_current_bot_version(bot_id)
+    assert stale is not None and stale["version"] == 1
+    # 用另一款合法 ELF 模拟名字相同、内容仍停在旧协议的历史产物。
+    Path(stale["binary_path"]).write_bytes((ROOT / "samples/callbot_linux_amd64").read_bytes())
+    store.close()
+
+    second = mod.seed(db, 1, upload_root)
+    assert second["bots"]["load_u01"]["gomoku"] == bot_id
+    repaired = Store(db)
+    current = repaired.get_current_bot_version(bot_id)
+    expected = (ROOT / "samples/gomokubot_linux_amd64").read_bytes()
+    assert current["version"] == 2
+    assert current["checksum"] == hashlib.sha256(expected).hexdigest()
+    assert Path(current["binary_path"]).read_bytes() == expected
+    repaired.close()
+
+
+def test_seed_reactivates_valid_dedicated_qa_bot_without_new_version(tmp_path):
+    mod = _load_module()
+    db = str(tmp_path / "load.db")
+    upload_root = str(tmp_path / "uploads")
+    first = mod.seed(db, 1, upload_root)
+    bot_id = first["bots"]["load_u01"]["gomoku"]
+    store = Store(db)
+    assert store.update_bot(bot_id, is_active=0)["is_active"] == 0
+    assert len(store.list_bot_versions(bot_id)) == 1
+    store.close()
+
+    second = mod.seed(db, 1, upload_root)
+    assert second["bots"]["load_u01"]["gomoku"] == bot_id
+    restored = Store(db)
+    assert restored.get_bot(bot_id)["is_active"] == 1
+    assert len(restored.list_bot_versions(bot_id)) == 1
+    restored.close()
+
+
+def _direct_sample_bot(tmp_path, *, upload_name="uploads"):
+    store = Store(str(tmp_path / "direct.db"))
+    owner = store.create_user("qa_owner", "qa@example.com", "x")
+    manager = BotManager(store, upload_root=tmp_path / upload_name)
+    raw = (ROOT / "samples/gomokubot_linux_amd64").read_bytes()
+    bot = ensure_qa_sample_bot(manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    return store, owner, manager, raw, bot
+
+
+def test_qa_sample_never_reuses_a_binary_from_another_upload_root(tmp_path):
+    store, owner, first_manager, raw, bot = _direct_sample_bot(tmp_path, upload_name="root-a")
+    assert store.get_current_bot_version(bot["id"])["version"] == 1
+
+    second_manager = BotManager(store, upload_root=tmp_path / "root-b")
+    synced = ensure_qa_sample_bot(
+        second_manager, owner["id"], "qa_gomoku", "gomoku", raw,
+    )
+    current = store.get_current_bot_version(bot["id"])
+    expected = (tmp_path / "root-b" / str(bot["id"]) / "v2" / "bot.bin").resolve()
+    assert synced["id"] == bot["id"]
+    assert current["version"] == 2
+    assert Path(current["binary_path"]).resolve() == expected
+    assert expected.read_bytes() == raw
+
+    ensure_qa_sample_bot(second_manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    assert len(store.list_bot_versions(bot["id"])) == 2
+    store.close()
+
+
+def test_qa_sample_republishes_a_non_executable_current_file(tmp_path):
+    store, owner, manager, raw, bot = _direct_sample_bot(tmp_path)
+    first = store.get_current_bot_version(bot["id"])
+    Path(first["binary_path"]).chmod(0o644)
+
+    ensure_qa_sample_bot(manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    current = store.get_current_bot_version(bot["id"])
+    assert current["version"] == 2
+    assert Path(current["binary_path"]).stat().st_mode & 0o001
+    store.close()
+
+
+def test_qa_sample_republishes_a_drifted_bot_mirror_before_activation(tmp_path):
+    store, owner, manager, raw, bot = _direct_sample_bot(tmp_path)
+    foreign = tmp_path / "foreign" / "bot.bin"
+    foreign.parent.mkdir()
+    foreign.write_bytes(raw)
+    foreign.chmod(0o755)
+    store.update_bot(
+        bot["id"], binary_path=str(foreign), runtime_mode="longrunning", is_active=0,
+    )
+
+    synced = ensure_qa_sample_bot(manager, owner["id"], "qa_gomoku", "gomoku", raw)
+    current = store.get_current_bot_version(bot["id"])
+    expected = (tmp_path / "uploads" / str(bot["id"]) / "v2" / "bot.bin").resolve()
+    assert synced["is_active"] == 1
+    assert current["version"] == 2
+    assert Path(current["binary_path"]).resolve() == expected
+    assert Path(synced["binary_path"]).resolve() == expected
+    assert synced["runtime_mode"] == current["runtime_mode"]
+    store.close()
 
 
 def test_seed_token_is_valid_session(tmp_path):

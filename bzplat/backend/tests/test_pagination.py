@@ -204,6 +204,10 @@ def test_comments_pagination(tmp_path):
     store = app.state.store
     u = store.create_user("cmt", "c@ex.com", hash_password("pw123456"))
     store.update_user(u["id"], email_verified=1)
+    bot = store.create_bot(
+        u["id"], "cmtbot", binary_path="/tmp/cmt", format="elf", game_id="holdem"
+    )
+    store.create_match("mX", bot["id"], bot["id"], game_id="holdem")
     for i in range(18):
         store.add_comment(u["id"], "match", "mX", f"comment {i}")
 

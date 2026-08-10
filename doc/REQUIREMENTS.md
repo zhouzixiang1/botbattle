@@ -52,6 +52,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 自博弈 | 同一 owner 的两个不同 Bot 可对战，走普通挑战 |
 | 崩溃收敛 | 对局中途 Bot 崩溃（含人类局）按游戏结果结算为 `completed` + `reason=crash`；Bot-vs-Bot 启动失败为 `completed` + `technical_loss`，人类局启动失败为 `aborted` |
 | 协议故障收敛 | 唯一响应对象必须包含 `response`，平台忽略其他顶层字段；顶层整数/裸坐标/缺少 `response` 的旧 `{a}` 仍拒绝，LongRunning 缺失精确握手不回退。首次协议故障即 `completed + protocol_error + technical_loss`；超时为 `completed + timeout + technical_loss`。Bot-vs-Bot 计分、人机局不计 Glicko；平台 sandbox 故障始终 aborted 且不评分；格式正确的非法游戏动作仍交裁判。新写回放和 SSE 只使用 `technical_incident`；结果只公开 `technical_incident_count` / `technical_incidents_by_seat` / `technical_incident_samples`，列表查询唯一使用 `has_technical_incidents`；历史旧事件仅在服务端读取边界归一化，不形成新写或第二套对外合约 |
+| 中止终局契约 | REST replay、SSE 与人类 WS 共用唯一 `error {reason}` 两字段终局；reason 只允许平台稳定码，未知值归一 `platform_error`，不公开 message/异常/路径。先持久化 aborted 再写回放并广播；管理员只可请求中止，原因固定 `admin_aborted` |
 
 ### 3.4 评分与排行
 | 需求 | 验收标准 |

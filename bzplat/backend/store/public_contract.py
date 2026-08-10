@@ -1,0 +1,331 @@
+"""Public match/event projection shared by REST, SSE and human WebSocket.
+
+Internal logs may retain diagnostic text. Public transports expose only stable
+reason codes and bounded, translated technical-incident fields.
+"""
+from __future__ import annotations
+
+import math
+from typing import Any
+
+from .schema import (
+    PUBLIC_MATCH_COMPLETED_REASONS,
+    PUBLIC_MATCH_ERROR_FALLBACK,
+    PUBLIC_MATCH_ERROR_REASONS,
+    STATUS_ABORTED,
+    STATUS_COMPLETED,
+    STATUS_PENDING,
+    STATUS_RUNNING,
+    TECHNICAL_INCIDENT_EVENT,
+    TECHNICAL_INCIDENT_MESSAGES,
+)
+
+HISTORICAL_TECHNICAL_INCIDENT_EVENTS = frozenset(
+    {"bot_decide_error", "bot_technical_error"}
+)
+READ_TECHNICAL_INCIDENT_EVENTS = (
+    HISTORICAL_TECHNICAL_INCIDENT_EVENTS | {TECHNICAL_INCIDENT_EVENT}
+)
+
+# Replay/live events are a public protocol, not an arbitrary JSON transport.
+# Keep the complete set here so a future game/adapter must deliberately extend
+# the public projection before a new event type or field can cross REST/SSE/WS.
+_PUBLIC_EVENT_FIELDS: dict[str, frozenset[str]] = {
+    "match_start": frozenset(
+        {"game_id", "num_hands", "n_dots", "size", "first", "scores", "leg"}
+    ),
+    "turn": frozenset({"player", "last", "pass_", "scores", "leg"}),
+    "move": frozenset(
+        {"player", "x", "y", "move_index", "scored", "scores", "closed_boxes", "leg"}
+    ),
+    "illegal": frozenset({"player", "move", "why", "leg"}),
+    "pass": frozenset({"player", "leg"}),
+    "hand_start": frozenset({"hand", "sb", "bb", "chips", "leg"}),
+    "deal_hole": frozenset({"hand", "holes", "leg"}),
+    "action": frozenset({"hand", "player", "action", "amount", "leg"}),
+    "deal_board": frozenset({"hand", "street", "board", "dealt", "leg"}),
+    "settle": frozenset(
+        {"hand", "winners", "deltas", "chips", "net", "pot", "board", "reason", "leg"}
+    ),
+    "time_out": frozenset({"seat", "used", "budget", "leg"}),
+    "time_used": frozenset({"seat", "used", "remaining", "budget", "leg"}),
+    "your_turn": frozenset({"player", "request", "leg"}),
+}
+_PUBLIC_NESTED_EVENT_FIELDS = frozenset(
+    {"x", "y", "owner", "round", "player_id", "action", "action_type"}
+)
+_PUBLIC_REQUEST_FIELDS = frozenset(
+    {
+        "x",
+        "y",
+        "pass",
+        "me",
+        "scores",
+        "num_players",
+        "dealer_id",
+        "my_id",
+        "my_chips",
+        "my_cards",
+        "public_cards",
+        "history",
+        "hand",
+        "max_hand",
+        "total_win_chips",
+        "total_win_games",
+    }
+)
+
+
+def canonical_public_error_reason(raw: Any) -> str:
+    """Return one allowed public terminal-error reason without text inference."""
+    reason = str(raw or "").strip()
+    if reason in PUBLIC_MATCH_ERROR_REASONS:
+        return reason
+    return PUBLIC_MATCH_ERROR_FALLBACK
+
+
+def canonical_public_completed_reason(raw: Any) -> str:
+    """Return one allowed completion reason; hide every free-form value."""
+    reason = str(raw or "").strip()
+    if reason in PUBLIC_MATCH_COMPLETED_REASONS:
+        return reason
+    return "completed"
+
+
+def _public_number(raw: Any) -> int | float | None:
+    """Return one finite JSON number; booleans are not result numbers."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if isinstance(raw, float) and not math.isfinite(raw):
+        return None
+    return raw
+
+
+def _public_deltas(raw: Any) -> list[int | float] | None:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    first = _public_number(raw[0])
+    second = _public_number(raw[1])
+    if first is None or second is None:
+        return None
+    return [first, second]
+
+
+def _public_event_value(raw: Any, *, nested: bool = False) -> Any:
+    """Return bounded JSON data for one already allow-listed event field."""
+    if raw is None or isinstance(raw, bool):
+        return raw
+    number = _public_number(raw)
+    if number is not None:
+        return number
+    if isinstance(raw, str):
+        # Public event strings are short codes, card labels, or street names.
+        # Reject diagnostic prose instead of truncating it into a second truth.
+        return raw if len(raw) <= 64 else None
+    if isinstance(raw, (list, tuple)):
+        return [
+            value
+            for item in list(raw)[:512]
+            if (value := _public_event_value(item, nested=True)) is not None
+        ]
+    if isinstance(raw, dict) and nested:
+        return {
+            key: value
+            for key, item in raw.items()
+            if key in _PUBLIC_NESTED_EVENT_FIELDS
+            if (value := _public_event_value(item, nested=True)) is not None
+        }
+    return None
+
+
+def _sanitize_public_request(raw: Any) -> dict[str, Any] | None:
+    """Project a human-turn request onto the three canonical game payloads."""
+    if not isinstance(raw, dict):
+        return None
+    public: dict[str, Any] = {}
+    for key in _PUBLIC_REQUEST_FIELDS:
+        if key not in raw:
+            continue
+        value = _public_event_value(raw[key], nested=True)
+        if value is not None:
+            public[key] = value
+    return public
+
+
+def sanitize_public_result(raw: Any) -> dict[str, Any]:
+    """Project persisted results onto the fields consumed by public clients."""
+    if not isinstance(raw, dict):
+        return {}
+    public: dict[str, Any] = {}
+
+    hands_played = raw.get("hands_played")
+    if isinstance(hands_played, int) and not isinstance(hands_played, bool):
+        public["hands_played"] = max(0, hands_played)
+
+    deltas = _public_deltas(raw.get("deltas"))
+    if deltas is not None:
+        public["deltas"] = deltas
+
+    net_bb = _public_number(raw.get("net_bb"))
+    if net_bb is not None:
+        public["net_bb"] = net_bb
+
+    raw_legs = raw.get("legs")
+    if isinstance(raw_legs, list):
+        legs: list[dict[str, Any]] = []
+        for raw_leg in raw_legs:
+            if not isinstance(raw_leg, dict):
+                continue
+            leg_deltas = _public_deltas(raw_leg.get("deltas"))
+            if leg_deltas is None:
+                continue
+            winner = raw_leg.get("winner")
+            if winner not in (None, 0, 1) or isinstance(winner, bool):
+                continue
+            legs.append({"winner": winner, "deltas": leg_deltas})
+        if legs:
+            public["legs"] = legs
+
+    raw_counts = raw.get("technical_incidents_by_seat")
+    if isinstance(raw_counts, dict):
+        counts: dict[str, int] = {}
+        for seat in (0, 1):
+            value = raw_counts.get(str(seat), raw_counts.get(seat))
+            if isinstance(value, int) and not isinstance(value, bool):
+                counts[str(seat)] = max(0, value)
+        if counts:
+            public["technical_incidents_by_seat"] = counts
+
+    count = raw.get("technical_incident_count")
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        public["technical_incident_count"] = count
+
+    samples = raw.get("technical_incident_samples")
+    if isinstance(samples, list):
+        safe_samples = []
+        for sample in samples:
+            safe = sanitize_public_incident(sample)
+            if safe is not None:
+                safe_samples.append(safe)
+            if len(safe_samples) == 3:
+                break
+        if safe_samples:
+            public["technical_incident_samples"] = safe_samples
+    return public
+
+
+def sanitize_public_match(match: dict | None) -> dict | None:
+    """Copy one match and expose only public result/config semantics."""
+    if match is None:
+        return None
+    public = dict(match)
+    # match_config stores frozen version ids and duplicate seeds for execution;
+    # it is not part of the public match contract.
+    public.pop("match_config", None)
+    if "result" in public:
+        public["result"] = sanitize_public_result(public.get("result"))
+    status = public.get("status")
+    if status in {STATUS_PENDING, STATUS_RUNNING}:
+        # Active rows have no adjudicated result. Historical/default/free-form
+        # values are never meaningful to a viewer and may contain diagnostics.
+        public["reason"] = ""
+    elif status == STATUS_COMPLETED:
+        public["reason"] = canonical_public_completed_reason(public.get("reason"))
+    elif status == STATUS_ABORTED:
+        public["reason"] = canonical_public_error_reason(public.get("reason"))
+    return public
+
+
+def sanitize_public_incident(raw: Any) -> dict[str, Any] | None:
+    """Normalize one technical incident without exposing raw Bot output/paths."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        seat = int(raw.get("seat"))
+    except (TypeError, ValueError):
+        return None
+    if seat not in (0, 1):
+        return None
+    sample: dict[str, Any] = {"seat": seat}
+    code = raw.get("code")
+    if isinstance(code, str) and code in TECHNICAL_INCIDENT_MESSAGES:
+        sample["code"] = code
+        sample["error"] = TECHNICAL_INCIDENT_MESSAGES[code]
+    else:
+        sample["error"] = "Bot 响应格式错误（历史记录）"
+    reason = raw.get("reason")
+    if reason in ("protocol_error", "timeout"):
+        sample["reason"] = reason
+    for key in ("turn", "leg"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        try:
+            sample[key] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return sample
+
+
+def sanitize_public_event(
+    raw: Any,
+    *,
+    redact_active_human: bool = False,
+    human_viewer_seat: int | None = None,
+) -> dict[str, Any] | None:
+    """Copy one canonical public event, stripping all private error metadata."""
+    if not isinstance(raw, dict):
+        return None
+    event_type = raw.get("type")
+    if event_type == "error":
+        return {
+            "type": "error",
+            "reason": canonical_public_error_reason(raw.get("reason")),
+        }
+    if event_type == "match_end":
+        winner = raw.get("winner")
+        if winner not in (None, 0, 1) or isinstance(winner, bool):
+            winner = None
+        return {
+            "type": "match_end",
+            "winner": winner,
+            "reason": canonical_public_completed_reason(raw.get("reason")),
+            "deltas": _public_deltas(raw.get("deltas")) or [0, 0],
+        }
+    if event_type in READ_TECHNICAL_INCIDENT_EVENTS:
+        sample = sanitize_public_incident(raw)
+        if sample is None:
+            return None
+        return {"type": TECHNICAL_INCIDENT_EVENT, **sample}
+    allowed = _PUBLIC_EVENT_FIELDS.get(event_type)
+    if allowed is None:
+        # Unknown/diagnostic events are internal by default. A new public event
+        # must add an explicit field projection above and corresponding tests.
+        return None
+    public: dict[str, Any] = {"type": event_type}
+    for key in allowed:
+        if key not in raw:
+            continue
+        if key == "request":
+            request = _sanitize_public_request(raw[key])
+            if request is not None:
+                public[key] = request
+            continue
+        value = _public_event_value(raw[key], nested=True)
+        if value is not None:
+            public[key] = value
+    if redact_active_human and event_type == "deal_hole":
+        holes = public.get("holes")
+        redacted: list[list[Any]] = [[], []]
+        if (
+            human_viewer_seat in (0, 1)
+            and isinstance(holes, list)
+            and len(holes) > human_viewer_seat
+            and isinstance(holes[human_viewer_seat], list)
+        ):
+            redacted[human_viewer_seat] = list(holes[human_viewer_seat])
+        public["holes"] = redacted
+    if redact_active_human and event_type == "your_turn":
+        if human_viewer_seat not in (0, 1) or public.get("player") != human_viewer_seat:
+            return None
+    return public

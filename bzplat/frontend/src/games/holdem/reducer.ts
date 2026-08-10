@@ -42,7 +42,6 @@ export interface HoldemViewModel {
   } | null
   matchOver: boolean
   matchWinner: number | null
-  finalChips: [number, number] | null
   status: string // 'idle'|'connecting'|'live'|'match_end'|'error'
 }
 
@@ -56,6 +55,8 @@ const EMPTY_SEAT: SeatState = {
   lastAction: null,
   net: 0,
 }
+
+const STARTING_STACK = 20000
 
 function freshSeats(chips: [number, number] = [20000, 20000]): [SeatState, SeatState] {
   return [
@@ -77,7 +78,6 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
   let lastSettle: HoldemViewModel['lastSettle'] = null
   let matchOver = false
   let matchWinner: number | null = null
-  let finalChips: [number, number] | null = null
 
   for (const ev of events) {
     switch (ev.type) {
@@ -97,7 +97,6 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
           lastSettle = sub.lastSettle
           matchOver = sub.matchOver
           matchWinner = sub.matchWinner
-          finalChips = sub.finalChips
         }
         break
       }
@@ -112,9 +111,14 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
         )
         seats[0].net = prevNet[0]
         seats[1].net = prevNet[1]
+        // hand_start.chips is post-blind. Reconstruct each blind as the
+        // difference from the fixed starting stack so pot/current bets are
+        // already correct before the first voluntary action.
+        seats[0].bet = Math.max(0, STARTING_STACK - seats[0].chips)
+        seats[1].bet = Math.max(0, STARTING_STACK - seats[1].chips)
         street = 'preflop'
         board = []
-        pot = 0
+        pot = seats[0].bet + seats[1].bet
         lastSettle = null
         // 翻前 SB 先行动
         toAct = sbSeat
@@ -223,35 +227,16 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       }
       case 'match_end': {
         matchOver = true
-        // 新写 replay/live 只接收平台权威 winner/reason/deltas。
-        // final_chips 分支仅用于不改动的历史公开回放读取边界。
-        if (Array.isArray(ev.final_chips)) {
-          finalChips = [Number(ev.final_chips[0]), Number(ev.final_chips[1])]
-          if (finalChips[0] > finalChips[1]) matchWinner = 0
-          else if (finalChips[1] > finalChips[0]) matchWinner = 1
-          else matchWinner = null
-        }
+        // 公开 replay/live 只有平台权威 winner/reason/deltas 一套终局。
         if (Array.isArray(ev.deltas) && ev.deltas.length >= 2) {
           const da = Number(ev.deltas[0])
           const db = Number(ev.deltas[1])
           seats[0].net = da
           seats[1].net = db
-          if (ev.winner === undefined) {
-            if (da > db) matchWinner = 0
-            else if (db > da) matchWinner = 1
-            else matchWinner = null
-          }
         }
-        if (ev.winner !== undefined) {
-          matchWinner = ev.winner === null ? null : Number(ev.winner)
-        } else if (
-          !Array.isArray(ev.final_chips)
-          && !Array.isArray(ev.deltas)
-          && seats[0].net !== seats[1].net
-        ) {
-          // 无 winner 字段时用累计 net 兜底
-          matchWinner = seats[0].net > seats[1].net ? 0 : 1
-        }
+        matchWinner = ev.winner === null || ev.winner === undefined
+          ? null
+          : Number(ev.winner)
         break
       }
       default:
@@ -278,7 +263,6 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
     lastSettle,
     matchOver,
     matchWinner,
-    finalChips,
     status: 'live',
   }
 }

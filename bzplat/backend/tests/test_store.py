@@ -274,7 +274,10 @@ def test_matches_replays_pair_stats(tmp_path):
 
     s.upsert_replay("m1", events_json='[{"t":1}]', hands_json="[]")
     assert '"t": 1' in s.get_replay("m1")["events_json"] or '"t":1' in s.get_replay("m1")["events_json"]
-    s.upsert_pair_stats(a["id"], b["id"], 1.5, 0.1, 2.0, 3)
+    s.upsert_pair_stats(
+        a["id"], b["id"], 1.5, 0.1, 2.0, 3,
+        a_wins_delta=2, a_losses_delta=1,
+    )
 
     # count_matches：与 list_matches 语义对齐（status / game_id 过滤）
     assert s.count_matches() == 1
@@ -285,6 +288,64 @@ def test_matches_replays_pair_stats(tmp_path):
     assert s.count_matches(game_id="gomoku") == 0
     assert s.count_matches(status="completed", game_id="holdem") == 1
     assert s.count_matches(status="completed", game_id="gomoku") == 0
+
+
+def test_active_match_has_no_terminal_reason_and_migration_repairs_legacy_default(tmp_path):
+    db = str(tmp_path / "active-reason.db")
+    store = Store(db)
+    user = store.create_user("reason_owner", "reason@example.com", "x")
+    first = store.create_bot(user["id"], "first", game_id="holdem")
+    second = store.create_bot(user["id"], "second", game_id="holdem")
+
+    pending = store.create_match("pending-reason", first["id"], second["id"])
+    assert pending["status"] == "pending"
+    assert pending["reason"] == ""
+    store.update_match(
+        "pending-reason",
+        status="running",
+        reason="error:/private/running traceback",
+    )
+
+    store.create_match("completed-reason", first["id"], second["id"])
+    store.update_match(
+        "completed-reason", status="completed", reason="completed", winner=0,
+    )
+    store.create_match("legacy-completed-ascii", first["id"], second["id"])
+    store.update_match(
+        "legacy-completed-ascii",
+        status="completed",
+        reason="privateadapterfailure",
+        winner=0,
+    )
+    store.create_match("legacy-completed-unicode", first["id"], second["id"])
+    store.update_match(
+        "legacy-completed-unicode",
+        status="completed",
+        reason="内部异常路径",
+        winner=0,
+    )
+    store.create_match("legacy-admin-reason", first["id"], second["id"])
+    store.update_match(
+        "legacy-admin-reason", status="aborted", reason="admin-abort",
+    )
+    store.create_match("legacy-private-reason", first["id"], second["id"])
+    store.update_match(
+        "legacy-private-reason",
+        status="aborted",
+        reason="error:/private/runtime traceback",
+    )
+    store.close()
+
+    repaired = Store(db)
+    try:
+        assert repaired.get_match("pending-reason")["reason"] == ""
+        assert repaired.get_match("completed-reason")["reason"] == "completed"
+        assert repaired.get_match("legacy-completed-ascii")["reason"] == "completed"
+        assert repaired.get_match("legacy-completed-unicode")["reason"] == "completed"
+        assert repaired.get_match("legacy-admin-reason")["reason"] == "admin_aborted"
+        assert repaired.get_match("legacy-private-reason")["reason"] == "platform_error"
+    finally:
+        repaired.close()
 
 
 def test_recover_orphan_matches(tmp_path):

@@ -5,7 +5,7 @@ import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Badge, E
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
-import { findGame, gameLabel } from '@/lib/games'
+import { findGame, gameLabel, resolveTerminalReason } from '@/games'
 
 interface Match {
   id: string
@@ -48,15 +48,6 @@ const MATCH_TYPE_LABEL: Record<string, string> = {
   contest: '锦标赛',
   human: '人机',
   table: '房间',
-}
-
-const REASON_LABEL: Record<string, string> = {
-  crash: 'Bot 运行中崩溃',
-  technical_loss: 'Bot 技术判负',
-  platform_error: '平台运行时故障',
-  'admin-abort': '管理员中止',
-  bot_deleted: 'Bot 已删除',
-  protocol_error: 'Bot 响应协议错误',
 }
 
 function technicalIncidentCount(match: Match): number {
@@ -125,7 +116,7 @@ export default function MatchesTab() {
     })) return
     setBusyId(id)
     try {
-      await apiJson(`/api/admin/matches/${id}`, 'PATCH', { status: 'aborted', reason: 'admin-abort' })
+      await apiJson(`/api/admin/matches/${id}`, 'PATCH', { status: 'aborted' })
       await load()
     } catch (e) {
       setError(errMsg(e, '中止失败'))
@@ -188,6 +179,10 @@ export default function MatchesTab() {
               const incidentCount = technicalIncidentCount(m)
               const sample = m.result?.technical_incident_samples?.[0]
               const gameSpec = findGame(m.game_id)
+              const terminalReason = gameSpec
+                ? gameSpec.terminalReason(m.reason, m.status)
+                : resolveTerminalReason(m.reason, m.status)
+              const hasTerminalStatus = m.status === 'completed' || m.status === 'aborted'
               return (
               <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</TableCell>
@@ -212,9 +207,13 @@ export default function MatchesTab() {
                 </TableCell>
                 <TableCell className="max-w-[18rem] px-3 py-2 font-mono text-xs text-muted-foreground">
                   <div>{m.result?.deltas?.[0] ?? 0} / {m.result?.deltas?.[1] ?? 0}</div>
-                  {m.reason && m.reason !== 'completed' && (
-                    <div className="mt-1 text-[10px] text-destructive">
-                      {REASON_LABEL[m.reason] || m.reason}
+                  {hasTerminalStatus && m.reason && (
+                    <div
+                      data-testid="terminal-reason"
+                      data-tone={terminalReason.tone}
+                      className={`mt-1 text-[10px] ${terminalReason.tone === 'danger' ? 'text-destructive' : 'text-muted-foreground'}`}
+                    >
+                      {terminalReason.label}
                     </div>
                   )}
                   {incidentCount > 0 && (

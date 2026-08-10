@@ -135,6 +135,15 @@ export function reducePencilEvents(events: RawEvent[]): PencilViewModel {
       extraTurn = false
       if (Array.isArray(ev.scores) && ev.scores.length >= 2) {
         scores = [Number(ev.scores[0]), Number(ev.scores[1])]
+      } else if (
+        winner !== null
+        && (reason === 'illegal' || reason === 'error' || reason === 'crash')
+      ) {
+        // The platform terminal is game-neutral and intentionally carries no
+        // engine-only scores. Pencil's judge normalizes these adjudications to
+        // 2:0, so reconstruct that visible result without inventing a score for
+        // protocol/timeout platform faults.
+        scores = winner === 0 ? [2, 0] : [0, 2]
       }
       // 消费 box_owners（最终归属网格，权威来源）
       if (Array.isArray(ev.box_owners)) {

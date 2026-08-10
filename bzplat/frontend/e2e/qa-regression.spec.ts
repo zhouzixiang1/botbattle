@@ -28,7 +28,11 @@ const HOLDEM_SAMPLE = fileURLToPath(
 )
 const PREFLIGHT_FAILURE_SAMPLE = process.env.BZ_E2E_BAD_BOT || '/usr/bin/true'
 
-async function createDisposableBot(page: Page, name: string) {
+async function createDisposableBot(
+  page: Page,
+  name: string,
+  runtimeMode: 'traditional' | 'longrunning' = 'traditional',
+) {
   const response = await page.request.post('/api/bots', {
     multipart: {
       name,
@@ -36,7 +40,7 @@ async function createDisposableBot(page: Page, name: string) {
       description: 'Disposable Playwright entity; hard-deleted in test cleanup',
       upload_note: 'initial disposable version',
       game_id: 'holdem',
-      runtime_mode: 'traditional',
+      runtime_mode: runtimeMode,
       file: {
         name: 'callbot_linux_amd64',
         mimeType: 'application/octet-stream',
@@ -45,10 +49,13 @@ async function createDisposableBot(page: Page, name: string) {
     },
   })
   const text = await response.text()
-  const data = JSON.parse(text) as { bot?: { id?: number; name?: string } }
+  const data = JSON.parse(text) as {
+    bot?: { id?: number; name?: string; runtime_mode?: string }
+  }
   expect(response.status(), text).toBe(200)
   expect(data.bot?.id).toBeGreaterThan(0)
   expect(data.bot?.name).toBe(name)
+  expect(data.bot?.runtime_mode).toBe(runtimeMode)
   return data.bot as { id: number; name: string }
 }
 
@@ -97,7 +104,7 @@ async function ensureMatchTerminal(
     try {
       await loginThroughUi(adminPage, ADMIN)
       const abort = await adminPage.request.patch(`/api/admin/matches/${matchId}`, {
-        data: { status: 'aborted', reason: 'e2e-fail-closed-cleanup' },
+        data: { status: 'aborted' },
       })
       expect(abort.status(), await abort.text()).toBe(200)
     } finally {
@@ -200,6 +207,147 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
   expect(await name.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
   await name.fill('ab')
   expect(await name.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
+  await monitor.expectClean()
+})
+
+test('notification preference sends one boolean field and survives a refresh', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  let initial = false
+  let changed = false
+
+  await loginThroughUi(page, USER)
+  await withCleanup(async () => {
+    const initialResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/notification-prefs',
+    )
+    await page.goto('/#/settings')
+    const initialResponse = await initialResponsePromise
+    const initialBody = await initialResponse.json() as {
+      prefs: Record<string, unknown>
+    }
+    expect(Object.values(initialBody.prefs).every((value) => typeof value === 'boolean')).toBe(true)
+
+    await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+    const matchDone = page.getByRole('switch', { name: '对局完成邮件提醒', exact: true })
+    initial = await matchDone.isChecked()
+
+    const requestPromise = page.waitForRequest((request) =>
+      request.method() === 'PUT' &&
+      new URL(request.url()).pathname === '/api/notification-prefs',
+    )
+    const responsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'PUT' &&
+      new URL(response.url()).pathname === '/api/notification-prefs',
+    )
+    await matchDone.click()
+    changed = true
+    const updateRequest = await requestPromise
+    expect(updateRequest.postDataJSON()).toEqual({ email_match_done: !initial })
+    const updateResponse = await responsePromise
+    expect(updateResponse.status(), await updateResponse.text()).toBe(200)
+    expect((await updateResponse.json() as { prefs: { email_match_done: unknown } })
+      .prefs.email_match_done).toBe(!initial)
+
+    const refreshedResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/notification-prefs',
+    )
+    await page.reload()
+    const refreshedResponse = await refreshedResponsePromise
+    expect((await refreshedResponse.json() as { prefs: { email_match_done: unknown } })
+      .prefs.email_match_done).toBe(!initial)
+    await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+    await expect(matchDone).toBeChecked({ checked: !initial })
+  }, async () => {
+    if (!changed) return
+    await page.goto('/#/settings')
+    await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+    const matchDone = page.getByRole('switch', { name: '对局完成邮件提醒', exact: true })
+    if (await matchDone.isChecked() !== initial) {
+      const restored = page.waitForResponse((response) =>
+        response.request().method() === 'PUT' &&
+        new URL(response.url()).pathname === '/api/notification-prefs',
+      )
+      await matchDone.click()
+      expect((await restored).status()).toBe(200)
+    }
+  })
+  await monitor.expectClean()
+})
+
+test('notification preference ignores a stale load and serializes rapid changes', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  let releaseInitialGet!: () => void
+  let releaseFirstPut!: () => void
+  const initialGetGate = new Promise<void>((resolve) => { releaseInitialGet = resolve })
+  const firstPutGate = new Promise<void>((resolve) => { releaseFirstPut = resolve })
+  const putValues: boolean[] = []
+  let getCount = 0
+  let serverValue = false
+
+  await loginThroughUi(page, USER)
+  await page.route('**/api/notification-prefs', async (route) => {
+    const request = route.request()
+    if (request.method() === 'GET') {
+      getCount += 1
+      if (getCount === 1) await initialGetGate
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          prefs: {
+            email_match_done: serverValue,
+            email_followed: false,
+            email_contest: false,
+            email_comment: false,
+          },
+        }),
+      })
+      return
+    }
+    const body = request.postDataJSON() as { email_match_done: boolean }
+    putValues.push(body.email_match_done)
+    if (putValues.length === 1) await firstPutGate
+    serverValue = body.email_match_done
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        prefs: {
+          email_match_done: serverValue,
+          email_followed: false,
+          email_contest: false,
+          email_comment: false,
+        },
+      }),
+    })
+  })
+
+  await page.goto('/#/settings')
+  await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+  const matchDone = page.getByRole('switch', { name: '对局完成邮件提醒', exact: true })
+  await expect(matchDone).not.toBeChecked()
+
+  await matchDone.click()
+  await expect(matchDone).toBeChecked()
+  await expect.poll(() => putValues).toEqual([true])
+  releaseInitialGet()
+  await expect(matchDone).toBeChecked()
+
+  // The second click updates the UI immediately but must not overtake the first
+  // write on the wire; otherwise a late first response can win in the database.
+  await matchDone.click()
+  await expect(matchDone).not.toBeChecked()
+  await expect.poll(() => putValues).toEqual([true])
+  releaseFirstPut()
+  await expect.poll(() => putValues).toEqual([true, false])
+  await expect(matchDone).not.toBeChecked()
+
+  await page.reload()
+  await page.getByRole('tab', { name: '通知偏好', exact: true }).click()
+  await expect(matchDone).not.toBeChecked()
+  expect(serverValue).toBe(false)
   await monitor.expectClean()
 })
 
@@ -570,7 +718,11 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     const monitor = monitorBrowser(page)
     await loginThroughUi(page, USER)
     const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
-    const disposable = await createDisposableBot(page, `pwch_${suffix}`)
+    // This case verifies the challenge/UI lifecycle rather than Traditional's
+    // per-decision container startup. The sample implements the canonical
+    // KEEP_RUNNING handshake, so LongRunning keeps the real 70-hand match
+    // comfortably inside the browser-test budget without weakening assertions.
+    const disposable = await createDisposableBot(page, `pwch_${suffix}`, 'longrunning')
     createdBotIds.push(disposable.id)
     await page.goto('/#/challenge')
 
@@ -609,6 +761,17 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     await expect(page).toHaveURL(/\/#\/match\//)
     expect(challengePosts).toBe(1)
 
+    await expect.poll(async () => {
+      const detail = await page.request.get(`/api/matches/${matchId}`)
+      const body = await detail.json() as {
+        match?: { status?: string; reason?: string; result?: { hands_played?: number } }
+      }
+      return [
+        body.match?.status,
+        body.match?.reason,
+        Number(body.match?.result?.hands_played ?? 0),
+      ]
+    }, { timeout: 45_000 }).toEqual(['completed', 'completed', 70])
     await expect(page.getByText('已完成', { exact: true })).toBeVisible({ timeout: 45_000 })
     await expect(page.locator('main')).not.toContainText('座0')
 
@@ -758,8 +921,235 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await monitor.expectClean()
 })
 
+test('terminal reason presentation keeps normal adjudication neutral and faults dangerous', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const viewerFixtures = [
+    {
+      id: 'mock-reason-five', gameId: 'gomoku', reason: 'five',
+      label: '连成五子', tone: 'neutral', winner: 0,
+      events: [{ type: 'match_end', winner: 0, reason: 'five' }],
+    },
+    {
+      id: 'mock-reason-protocol', gameId: 'gomoku', reason: 'protocol_error',
+      label: 'Bot 响应协议错误', tone: 'danger', winner: 1,
+      events: [{ type: 'match_end', winner: 1, reason: 'protocol_error' }],
+    },
+    {
+      id: 'mock-reason-legacy', gameId: 'gomoku', reason: 'legacy_internal_reason',
+      label: '已完成', tone: 'neutral', winner: 0,
+      events: [{ type: 'match_end', winner: 0, reason: 'legacy_internal_reason' }],
+    },
+    {
+      id: 'mock-reason-pencil-illegal', gameId: 'pencil', reason: 'illegal',
+      label: '非法连边', tone: 'danger', winner: 1,
+      events: [
+        { type: 'match_start', n_dots: 6, size: 11 },
+        { type: 'time_used', seat: 0, used: 1.2, remaining: 898.8, budget: 900 },
+        { type: 'illegal', player: 0, why: 'pass' },
+        { type: 'match_end', winner: 1, reason: 'illegal', scores: [0, 0] },
+      ],
+    },
+  ] as const
+  const humanFixtures = {
+    'mock-human-score': {
+      gameId: 'pencil', reason: 'score', label: '按最终得分判定', tone: 'neutral', winner: 1,
+    },
+    'mock-human-illegal': {
+      gameId: 'pencil', reason: 'illegal', label: '非法连边', tone: 'danger', winner: 0,
+    },
+  } as const
+
+  // WebSocket interception must be installed before the first Vite navigation.
+  await page.routeWebSocket(
+    (url) => Object.hasOwn(humanFixtures, url.pathname.split('/').at(-2) || ''),
+    (socket) => {
+      const id = new URL(socket.url()).pathname.split('/').at(-2) as keyof typeof humanFixtures
+      const fixture = humanFixtures[id]
+      setTimeout(() => socket.send(JSON.stringify({
+        type: 'snapshot',
+        match: {
+          id,
+          game_id: fixture.gameId,
+          status: 'completed',
+          reason: fixture.reason,
+          match_type: 'human',
+          human_seat: 1,
+          winner: fixture.winner,
+          bot_a: { name: 'reason_bot', owner_name: 'alpha' },
+          bot_b: { owner_name: 'human_player', is_human: true },
+          result: { hands_played: 1, deltas: fixture.winner === 0 ? [1, -1] : [-1, 1] },
+        },
+        events: [
+          ...(id === 'mock-human-illegal' ? [
+            { type: 'time_used', seat: 0, used: 2, remaining: 898, budget: 900 },
+            { type: 'illegal', player: 0, why: 'illegal_move' },
+          ] : []),
+          {
+            type: 'match_end',
+            winner: fixture.winner,
+            reason: fixture.reason,
+            scores: fixture.gameId === 'pencil' ? [4, 9] : undefined,
+          },
+        ],
+      })), 0)
+    },
+  )
+
+  for (const fixture of viewerFixtures) {
+    await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: '{"ok":true}',
+    }))
+    await page.route(`**/api/matches/${fixture.id}`, async (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: fixture.id,
+          game_id: fixture.gameId,
+          status: 'completed',
+          reason: fixture.reason,
+          winner: fixture.winner,
+          match_type: 'challenge',
+          bot_a: { name: 'reason_a', owner_name: 'alpha' },
+          bot_b: { name: 'reason_b', owner_name: 'beta' },
+          result: {
+            hands_played: 1,
+            deltas: fixture.winner === 0 ? [1, -1] : [-1, 1],
+          },
+        },
+        replay: {
+          events_json: JSON.stringify(fixture.events),
+        },
+      }),
+    }))
+  }
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ comments: [], count: 0, total: 0 }),
+  }))
+
+  for (const fixture of viewerFixtures) {
+    await page.goto(`/#/match/${fixture.id}`)
+    const reason = page.getByTestId('terminal-reason')
+    await expect(reason).toHaveText(fixture.label)
+    await expect(reason).toHaveAttribute('data-tone', fixture.tone)
+    await expect(page.locator('main')).not.toContainText('legacy_internal_reason')
+    if (fixture.reason === 'five') {
+      // The generic timeline must retain the game's richer match_end description.
+      await expect(page.getByText('结束 · 座1获胜 · 连成五子', { exact: true })).toBeVisible()
+    }
+    if (fixture.id === 'mock-reason-pencil-illegal') {
+      for (let index = 1; index < fixture.events.length; index += 1) {
+        await page.getByRole('button', { name: '下一个事件', exact: true }).click()
+      }
+      await expect(page.getByText('座1 · 已用 1.2 秒 · 剩余 898.8 秒', { exact: true })).toBeVisible()
+      await expect(page.getByText('座1 · 错误让行', { exact: true })).toBeVisible()
+      await expect(page.getByText('illegal', { exact: true })).toHaveCount(0)
+      await expect(page.getByText('time_used', { exact: true })).toHaveCount(0)
+    }
+  }
+
+  // Active rows historically carried the storage default reason='completed'.
+  // Status is authoritative: a running match must not claim normal completion.
+  const runningViewerId = 'mock-reason-running-default'
+  const runningMatch = {
+    id: runningViewerId,
+    game_id: 'gomoku',
+    status: 'running',
+    reason: 'completed',
+    winner: null,
+    match_type: 'challenge',
+    bot_a: { name: 'running_a', owner_name: 'alpha' },
+    bot_b: { name: 'running_b', owner_name: 'beta' },
+    result: { hands_played: 0, deltas: [0, 0] },
+  }
+  await page.route(`**/api/matches/${runningViewerId}/view`, async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"ok":true}',
+  }))
+  await page.route(`**/api/matches/${runningViewerId}/events`, async (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/event-stream',
+    headers: { 'cache-control': 'no-cache' },
+    body: `data: ${JSON.stringify({ type: 'snapshot', match: runningMatch, events: [] })}\n\n`,
+  }))
+  await page.route(`**/api/matches/${runningViewerId}`, async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ match: runningMatch, replay: { events_json: '[]' } }),
+  }))
+  await page.goto(`/#/match/${runningViewerId}`)
+  await expect(page.getByText('对局进行中', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('terminal-reason')).toHaveCount(0)
+  await expect(page.locator('main')).not.toContainText('正常结束')
+
+  for (const [id, fixture] of Object.entries(humanFixtures)) {
+    // Stay in the same SPA document: reloading the Vite document tears down its
+    // routed sockets before the second mocked human channel can deliver a snapshot.
+    await page.evaluate((matchId) => { window.location.hash = `#/play/${matchId}` }, id)
+    await expect(page).toHaveURL(new RegExp(`#\\/play\\/${id}$`))
+    const reason = page.getByTestId('terminal-reason')
+    await expect(reason).toHaveText(`（${fixture.label}）`)
+    await expect(reason).toHaveAttribute('data-tone', fixture.tone)
+    if (id === 'mock-human-illegal') {
+      await expect(page.getByText('座1 · 非法连边', { exact: true })).toBeVisible()
+      await expect(page.getByText('座1 · 已用 2 秒 · 剩余 898 秒', { exact: true })).toBeVisible()
+      await expect(page.getByText('illegal', { exact: true })).toHaveCount(0)
+      await expect(page.getByText('time_used', { exact: true })).toHaveCount(0)
+    }
+  }
+
+  await loginThroughUi(page, ADMIN)
+  await page.route('**/api/matches?*', async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      matches: [
+        {
+          id: 'admin-normal-majority', game_id: 'pencil', status: 'completed',
+          reason: 'majority', match_type: 'contest', winner: 0,
+          bot_a_id: 1, bot_b_id: 2, bot_a_name: 'normal_a', bot_b_name: 'normal_b',
+          result: { hands_played: 12, deltas: [1, -1] }, created_at: '2026-08-09T12:00:00Z',
+          contest_id: 1,
+        },
+        {
+          id: 'admin-danger-platform', game_id: 'holdem', status: 'aborted',
+          reason: 'platform_error', match_type: 'challenge', winner: null,
+          bot_a_id: 3, bot_b_id: 4, bot_a_name: 'fault_a', bot_b_name: 'fault_b',
+          result: { hands_played: 0, deltas: [0, 0] }, created_at: '2026-08-09T12:01:00Z',
+          contest_id: null,
+        },
+        {
+          id: 'admin-running-default', game_id: 'gomoku', status: 'running',
+          reason: 'completed', match_type: 'challenge', winner: null,
+          bot_a_id: 5, bot_b_id: 6, bot_a_name: 'running_default_a', bot_b_name: 'running_default_b',
+          result: { hands_played: 4, deltas: [0, 0] }, created_at: '2026-08-09T12:02:00Z',
+          contest_id: null,
+        },
+      ],
+      total: 3,
+    }),
+  }))
+  await page.goto('/#/admin?tab=matches')
+  await expect(page.getByTestId('terminal-reason').filter({ hasText: '已取得过半格子' }))
+    .toHaveAttribute('data-tone', 'neutral')
+  await expect(page.getByTestId('terminal-reason').filter({ hasText: '平台运行异常' }))
+    .toHaveAttribute('data-tone', 'danger')
+  const runningRow = page.getByRole('row').filter({ hasText: 'running_default_a' })
+  await expect(runningRow.getByTestId('terminal-reason')).toHaveCount(0)
+  await expect(runningRow).not.toContainText('正常结束')
+  await monitor.expectClean()
+})
+
 test('Pencil clock initializes the untouched seat and renders a first-event timeout', async ({ page }) => {
   const monitor = monitorBrowser(page)
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: '{"comments":[],"count":0,"total":0}',
+    })
+  })
 
   const openMockClockMatch = async (
     matchId: string,
@@ -822,17 +1212,35 @@ test('Pencil clock initializes the untouched seat and renders a first-event time
   await monitor.expectClean()
 })
 
-test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns for abnormal reasons', async ({ page, request }) => {
-  const completedResponse = await request.get('/api/matches?status=completed&limit=1')
-  const completed = await completedResponse.json() as { matches?: Array<{ id: string }> }
-  const matchId = completed.matches?.[0]?.id
-  expect(matchId).toBeTruthy()
-
+test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns for abnormal reasons', async ({ page }) => {
+  const matchId = 'mock-reconnect-terminal-error'
+  const runningMatch = {
+    id: matchId,
+    game_id: 'holdem',
+    status: 'running',
+    reason: '',
+    match_type: 'challenge',
+    winner: null,
+    bot_a: { name: 'Reconnect A', owner_name: 'alpha' },
+    bot_b: { name: 'Reconnect B', owner_name: 'beta' },
+    result: { hands_played: 0, deltas: [0, 0] },
+  }
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: '{"comments":[],"count":0,"total":0}',
+    })
+  })
   await page.route(`**/api/matches/${matchId}`, async (route) => {
-    const response = await route.fetch()
-    const body = await response.json() as { match: { status?: string } }
-    body.match.status = 'running'
-    await route.fulfill({ response, json: body })
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ match: runningMatch, replay: { events_json: '[]' } }),
+    })
   })
   let eventRequests = 0
   await page.route(`**/api/matches/${matchId}/events`, async (route) => {
@@ -851,13 +1259,21 @@ test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns
     await route.fulfill({
       status: 200,
       contentType: 'text/event-stream',
-      body: 'data: {"type":"error","message":"qa simulated failure"}\n\n',
+      // A diagnostic-looking extra field must never become the public reason.
+      // In particular, "completed" must not turn an aborted match into
+      // the contradictory label "正常结束".
+      body: 'data: {"type":"error","message":"completed"}\n\n',
     })
   })
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   await expect(page.getByText('已中止', { exact: true })).toBeVisible()
-  await expect(page.locator('main')).toContainText('qa simulated failure')
+  await expect(page.locator('main')).toContainText('平台运行异常')
+  await expect(page.locator('main')).not.toContainText('正常结束')
+  // The terminal event is retained behind the pinned cursor. Advancing exposes
+  // the same canonical public description, never the private diagnostic text.
+  await page.getByRole('button', { name: '下一个事件', exact: true }).click()
+  await expect(page.getByText('平台运行异常', { exact: true })).toHaveCount(2)
   expect(eventRequests).toBe(2)
   // The second stream delivered an explicit terminal error and must close. Stay
   // beyond Chromium's retry window so terminal reconnects cannot false-pass.
@@ -869,16 +1285,61 @@ test('MatchViewer reconnects transient SSE, preserves terminal errors, and warns
   await page.unroute(`**/api/matches/${matchId}`)
   await page.unroute(`**/api/matches/${matchId}/events`)
   await page.route(`**/api/matches/${matchId}`, async (route) => {
-    const response = await route.fetch()
-    const body = await response.json() as { match: { status?: string; reason?: string } }
-    body.match.status = 'completed'
-    body.match.reason = 'technical_loss'
-    await route.fulfill({ response, json: body })
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          ...runningMatch,
+          status: 'completed',
+          reason: 'technical_loss',
+          winner: 1,
+          technical_loss: 1,
+          result: { hands_played: 0, deltas: [-1, 1] },
+        },
+        replay: {
+          events_json: JSON.stringify([
+            { type: 'match_end', winner: 1, reason: 'technical_loss', deltas: [-1, 1] },
+          ]),
+        },
+      }),
+    })
   })
   await page.reload()
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
   await expect(page.locator('main')).toContainText('Bot 技术判负')
   await monitor.expectClean()
+})
+
+test('Holdem replay state includes blinds and treats all-in amount as raise-to', async ({ page }) => {
+  await page.goto('/')
+  const state = await page.evaluate(async () => {
+    const module = await import('/src/games/holdem/reducer.ts')
+    return module.reduceHoldemEvents([
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+      { type: 'action', hand: 0, player: 0, action: 'call', amount: 50 },
+      { type: 'action', hand: 0, player: 1, action: 'allin', amount: 20000 },
+    ])
+  })
+  expect(state.pot).toBe(20100)
+  expect(state.seats.map((seat) => seat.bet)).toEqual([100, 20000])
+  expect(state.seats.map((seat) => seat.chips)).toEqual([19900, 0])
+  expect(state.seats[1].allin).toBe(true)
+})
+
+test('Pencil replay reconstructs the judge score for an illegal terminal', async ({ page }) => {
+  await page.goto('/')
+  const state = await page.evaluate(async () => {
+    const module = await import('/src/games/pencil/reducer.ts')
+    return module.reducePencilEvents([
+      { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+      { type: 'illegal', player: 0, move: { x: -1, y: -1 }, why: 'illegal_move' },
+      { type: 'match_end', winner: 1, reason: 'illegal', deltas: [-2, 2] },
+    ])
+  })
+  expect(state.scores).toEqual([0, 2])
+  expect(state.winner).toBe(1)
+  expect(state.reason).toBe('illegal')
 })
 
 test('MatchViewer presents a zero-hand protocol loss as a terminal incident', async ({ page }) => {
@@ -942,7 +1403,7 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   await expect(page.locator('main')).not.toContainText('落后')
   await expect(page.getByRole('button', { name: '播放', exact: true })).toHaveCount(0)
   await expect(page.getByText('手导航（点击跳转）', { exact: true })).toHaveCount(0)
-  await expect(page.getByText('对局结束 · 协议错误', { exact: true })).toBeVisible()
+  await expect(page.getByText('结束 · 座2获胜 · Bot 响应协议错误', { exact: true })).toBeVisible()
   const canvasBox = await page.locator('canvas').boundingBox()
   expect(canvasBox).not.toBeNull()
   expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
@@ -1462,7 +1923,8 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
   expect(abortResponse.status(), await abortResponse.text()).toBe(200)
 
   await expect(page.getByText(/对局结束/)).toBeVisible()
-  await expect(page.locator('main')).toContainText('admin-abort')
+  await expect(page.locator('main')).toContainText('管理员中止')
+  await expect(page.locator('main')).not.toContainText('admin-abort')
   await expect.poll(async () => {
     const response = await request.get(`/api/matches/${createdMatchId}`)
     const body = await response.json() as { match?: { status?: string } }

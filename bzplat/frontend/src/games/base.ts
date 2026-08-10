@@ -82,6 +82,19 @@ export interface ReplayViewSpec {
   navigation?: ReplayNavigationSpec
 }
 
+export type TerminalReasonTone = 'neutral' | 'danger'
+
+/** status 表示平台状态，reason 是游戏裁判或平台提供的终局细节。 */
+export interface TerminalReasonPresentation {
+  label: string
+  tone: TerminalReasonTone
+}
+
+export type TerminalReasonResolver = (
+  reason: unknown,
+  status?: string,
+) => TerminalReasonPresentation
+
 /**
  * Canvas 渲染共享工具（holdem/gomoku/pencil 统一用）。
  */
@@ -138,6 +151,8 @@ export interface GameViewSpec {
   winner: (vm: unknown) => number | null | undefined
   /** 游戏事件的人类可读描述；通用页不解释扑克/棋类专属事件字段。 */
   describeEvent: (event: RawEvent) => string
+  /** 游戏裁判 reason + 平台 reason 的唯一终局展示契约。 */
+  terminalReason: TerminalReasonResolver
   /** 人类对战输入与布局契约。 */
   humanPlay: HumanPlayViewSpec
   /** 观赛/回放辅助展示契约。 */

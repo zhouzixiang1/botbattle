@@ -81,6 +81,12 @@ def test_notification_manager_notify_both_owners_dedup(tmp_path):
     b3 = s.create_bot(u1["id"], "botC", binary_path="/tmp", format="elf", game_id="holdem")
     nm.notify_both_owners(b1["id"], b3["id"], type="match_done", title="自博弈")
     assert s.unread_notification_count(u1["id"]) == 2  # 第二条
+    nm.notify_both_owners(
+        b1["id"], b2["id"], type="comment", title="评论",
+        exclude_user_ids={u1["id"]},
+    )
+    assert s.unread_notification_count(u1["id"]) == 2
+    assert s.unread_notification_count(u2["id"]) == 2
     s.close()
 
 
@@ -129,9 +135,36 @@ def test_notification_prefs_endpoints(tmp_path):
     c, store, uid, token = _app(tmp_path)
     r = c.get("/api/notification-prefs")
     assert r.status_code == 200
-    assert r.json()["prefs"]["email_match_done"] == 0
+    assert r.json()["prefs"] == {
+        "email_match_done": False,
+        "email_followed": False,
+        "email_contest": False,
+        "email_comment": False,
+    }
     r = c.put("/api/notification-prefs", json={"email_match_done": True})
-    assert r.json()["prefs"]["email_match_done"] == 1
+    assert r.json()["prefs"]["email_match_done"] is True
+    # REST 始终是 boolean；SQLite 仍使用受约束的 0/1 存储。
+    raw = store._conn.execute(
+        "SELECT email_match_done FROM notification_prefs WHERE user_id=?", (uid,)
+    ).fetchone()
+    assert raw["email_match_done"] == 1
+    refreshed = c.get("/api/notification-prefs")
+    assert refreshed.json()["prefs"]["email_match_done"] is True
+    r = c.put("/api/notification-prefs", json={"email_match_done": False})
+    assert r.status_code == 200
+    assert r.json()["prefs"]["email_match_done"] is False
+    raw = store._conn.execute(
+        "SELECT email_match_done FROM notification_prefs WHERE user_id=?", (uid,)
+    ).fetchone()
+    assert raw["email_match_done"] == 0
+    assert c.get("/api/notification-prefs").json()["prefs"]["email_match_done"] is False
+    assert c.put("/api/notification-prefs", json={}).status_code == 400
+    assert c.put(
+        "/api/notification-prefs", json={"unknown_preference": True}
+    ).status_code == 422
+    assert c.put(
+        "/api/notification-prefs", json={"email_match_done": "false"}
+    ).status_code == 422
 
 
 def test_notification_endpoints_require_auth(tmp_path):

@@ -40,6 +40,9 @@ interface Row {
   rating_delta?: number | null
   tier_name?: string
   tier_key?: string
+  is_placement?: boolean
+  placement_required?: number
+  placement_remaining?: number
 }
 
 export default function Leaderboard() {
@@ -130,11 +133,12 @@ export default function Leaderboard() {
               rows.map((r, i) => {
                 const td = trendDelta(r.rating_delta)
                 const GameIcon = gameIcon(r.game_id)
-                const totalGames = (r.wins ?? 0) + (r.losses ?? 0) + (r.draws ?? 0)
+                const played = r.matches_played ?? ((r.wins ?? 0) + (r.losses ?? 0) + (r.draws ?? 0))
+                const placementRequired = r.placement_required ?? 0
                 return (
                   <TableRow key={r.bot_id}>
                     <TableCell className="font-mono text-xs text-muted-foreground">
-                      {(page - 1) * perPage + i + 1}
+                      {r.is_placement ? '—' : (page - 1) * perPage + i + 1}
                     </TableCell>
                     <TableCell className="max-w-[10rem]">
                       <Link
@@ -164,8 +168,10 @@ export default function Leaderboard() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {totalGames < 5 ? (
-                        <Badge variant="secondary" className="text-muted-foreground">定级中</Badge>
+                      {r.is_placement ? (
+                        <Badge variant="secondary" className="whitespace-nowrap text-muted-foreground">
+                          定级中 {played}/{placementRequired}
+                        </Badge>
                       ) : (
                         <TierBadge rating={r.rating} label={r.tier_name} gameId={r.game_id} tierKey={r.tier_key} />
                       )}

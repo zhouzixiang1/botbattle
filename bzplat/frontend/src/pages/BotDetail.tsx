@@ -56,6 +56,9 @@ interface BotProfile {
   tier_level?: number
   tier_key?: string
   tier_name?: string
+  is_placement?: boolean
+  placement_required?: number
+  placement_remaining?: number
 }
 
 interface MatchRow {
@@ -261,7 +264,7 @@ export default function BotDetail() {
   }
 
   const wr = winRate(profile)
-  // 总场次优先用后端 matches_played（store 聚合，含未评分类对局），否则本地兜底。
+  // 定级只计算会进入 Glicko 的对局；优先使用后端权威 matches_played。
   const total = profile.matches_played ?? ((profile.wins ?? 0) + (profile.losses ?? 0) + (profile.draws ?? 0))
   const GameIcon = gameIcon(profile.game_id)
 
@@ -275,9 +278,13 @@ export default function BotDetail() {
               <h2 className="max-w-full break-words text-xl font-bold text-foreground [overflow-wrap:anywhere]">
                 {profile.display_name || profile.name}
               </h2>
-              {profile.tier_name && (
+              {profile.is_placement ? (
+                <Badge variant="secondary" className="whitespace-nowrap text-muted-foreground">
+                  定级中 {total}/{profile.placement_required ?? 0}
+                </Badge>
+              ) : profile.tier_name ? (
                 <TierBadge rating={profile.rating} label={profile.tier_name} gameId={profile.game_id} tierKey={profile.tier_key} />
-              )}
+              ) : null}
               {!profile.is_active && <Badge variant="secondary">已停用</Badge>}
             </div>
             <p className="text-sm text-muted-foreground">@{profile.name}</p>
@@ -319,7 +326,14 @@ export default function BotDetail() {
 
           {/* 指标（plain：嵌套在本 Card 内，无边框避免 Card 套 Card） */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[32rem] lg:shrink-0">
-            <MetricCard plain label="Rating" value={fmtRating(profile.rating)} hint={profile.rd != null ? `rd ${Number(profile.rd).toFixed(0)}` : undefined} />
+            <MetricCard
+              plain
+              label="Rating"
+              value={fmtRating(profile.rating)}
+              hint={profile.is_placement
+                ? `再完成 ${profile.placement_remaining ?? 0} 场完成定级`
+                : profile.rd != null ? `RD ${Number(profile.rd).toFixed(0)}` : undefined}
+            />
             <MetricCard plain label="胜率" value={fmtPct(wr)} hint={`共 ${total} 场`} />
             <MetricCard plain label="胜" value={profile.wins ?? 0} danger={false} />
             <MetricCard plain label="负/平" value={profile.losses ?? 0} hint={`平 ${profile.draws ?? 0}`} danger />
@@ -439,7 +453,7 @@ export default function BotDetail() {
                             {o.opponent_display || o.opponent_name || `#${o.opponent_id}`}
                           </Link>
                         </TableCell>
-                        <TableCell className="text-muted-foreground">{o.samples || t}</TableCell>
+                        <TableCell className="text-muted-foreground">{o.samples}</TableCell>
                         <TableCell className="text-success">{o.wins}</TableCell>
                         <TableCell className="text-destructive">{o.losses}</TableCell>
                         <TableCell className="text-muted-foreground">{o.draws}</TableCell>
