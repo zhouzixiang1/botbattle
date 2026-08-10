@@ -845,6 +845,9 @@ def test_migrate_old_db_drops_matches_keeps_users(tmp_path):
     assert s2.get_user_by_email("a@ex.com") is not None
     assert s2.get_bot(1) is not None
     assert s2.get_bot(1)["name"] == "botH"
+    migrated_contest = s2.get_contest(1)
+    assert migrated_contest["title"] == "old"
+    assert migrated_contest["showcase_key"] is None
     # 对局数据丢弃
     assert s2.get_match("m1") is None
     # ratings game_id 回填

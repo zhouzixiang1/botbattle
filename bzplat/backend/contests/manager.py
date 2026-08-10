@@ -19,6 +19,7 @@ from bzplat.backend.contests.templates import (
     points_for_result,
     resolve_template,
 )
+from bzplat.backend.contests.showcase import is_showcase, require_mutable
 from bzplat.backend.matches.orchestrator import (
     MatchOrchestrator,
     require_binary_file_integrity,
@@ -192,6 +193,7 @@ class ContestManager:
             contest = self.store.get_contest(contest_id)
             if not contest:
                 return None
+            require_mutable(contest)
             time_fields = {
                 "registration_opens_at", "registration_closes_at", "starts_at",
             }
@@ -290,6 +292,7 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
+        require_mutable(c)
         if c["status"] == CONTEST_OPEN:
             return c
         if c["status"] != CONTEST_DRAFT:
@@ -340,7 +343,10 @@ class ContestManager:
         # ``role`` 仅为旧调用签名兼容保留。普通 /register 入口永远是本人操作；
         # organizer/admin 的代报名必须走已校验赛事归属的 entries 管理接口。
         c = self.store.get_contest(contest_id)
-        if not c or c["status"] != CONTEST_OPEN:
+        if not c:
+            raise ValueError("比赛不存在")
+        require_mutable(c)
+        if c["status"] != CONTEST_OPEN:
             raise ValueError("比赛未开放报名")
         # 报名截止时间校验：若 registration_closes_at 已预设且当前已过，拒绝报名
         closes = c.get("registration_closes_at")
@@ -396,6 +402,7 @@ class ContestManager:
             contest = self.store.get_contest(contest_id)
             if not contest:
                 raise ValueError("赛事不存在")
+            require_mutable(contest)
             if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
                 raise ValueError("开赛后不可改名册")
             error = self._roster_target_error(contest, user_id, bot_id)
@@ -416,6 +423,7 @@ class ContestManager:
             contest = self.store.get_contest(contest_id)
             if not contest:
                 raise ValueError("赛事不存在")
+            require_mutable(contest)
             if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
                 raise ValueError("开赛后不可改名册")
 
@@ -451,6 +459,7 @@ class ContestManager:
             contest = self.store.get_contest(contest_id)
             if not contest:
                 raise ValueError("赛事不存在")
+            require_mutable(contest)
             if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
                 raise ValueError("开赛后不可改名册")
             return self.store.delete_contest_roster_entry(contest_id, user_id)
@@ -487,6 +496,7 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
+        require_mutable(c)
         # 换人时机：开赛前（draft/open/published）+ 中场休息（rest，受 allow_bot_swap_in_rest 控制）。
         # 不允许 running 态换人（与赛程对齐：比赛中途换 Bot 影响公平性）。
         if c["status"] not in (CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED, CONTEST_REST):
@@ -639,6 +649,7 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
+        require_mutable(c)
         if c["status"] not in (CONTEST_OPEN, CONTEST_DRAFT, CONTEST_PUBLISHED):
             raise ValueError("仅 open/draft/published 可开赛")
         game_id = _stored_game_id(c, entity=f"赛事 #{contest_id}")
@@ -760,6 +771,7 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
+        require_mutable(c)
         if c["status"] not in (CONTEST_OPEN, CONTEST_DRAFT):
             raise ValueError("仅 open/draft 可出排期")
         game_id = _stored_game_id(c, entity=f"赛事 #{contest_id}")
@@ -984,6 +996,7 @@ class ContestManager:
         False 时按赛事 starts_at + 轮次 stagger 逐场排期（published 态，等调度器到点 dispatch）。
         """
         c = self.store.get_contest(contest_id)
+        require_mutable(c)
         stages = _parse_stages(c)
         if stage_idx < 0 or stage_idx >= len(stages):
             self.store.update_contest(
@@ -1108,6 +1121,7 @@ class ContestManager:
         contest = self.store.get_contest(contest_id)
         if not contest or contest["status"] != CONTEST_PUBLISHED:
             return
+        require_mutable(contest)
         stage, specs, bot_to_entry = self._stage_pairing_plan(contest, stage_idx)
         if not specs:
             raise ValueError("published 赛事无法生成完整对阵")
@@ -1363,6 +1377,7 @@ class ContestManager:
         # finished/cancelled 的 pending pairing 不应再派发（否则产孤儿对局）。
         if not c or c["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING):
             return
+        require_mutable(c)
         now = _now()
         if c["status"] == CONTEST_PUBLISHED:
             # ``starts_at`` 为空表示发布后等待组织者手动开赛；未来时间则
@@ -1520,6 +1535,7 @@ class ContestManager:
             c = self.store.get_contest(contest_id)
             if not c:
                 raise ValueError("比赛不存在")
+            require_mutable(c)
             if c["status"] == CONTEST_CANCELLED:
                 return c
             if c["status"] not in (CONTEST_DRAFT, CONTEST_OPEN, CONTEST_PUBLISHED):
@@ -1538,6 +1554,7 @@ class ContestManager:
             contest = self.store.get_contest(contest_id)
             if not contest:
                 return False
+            require_mutable(contest)
             if (
                 contest["status"] == CONTEST_FINISHED
                 or int(contest.get("official_results_ready") or 0)
@@ -1687,9 +1704,14 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         stages = _parse_stages(c)
         key = ""
+        grouped = False
         if 0 <= stage_idx < len(stages):
             key = stages[stage_idx].get("key") or f"stage{stage_idx}"
+            grouped = str(stages[stage_idx].get("type") or "").startswith("group_")
+        group_ranks: Counter = Counter()
         for i, s in enumerate(self.standings(contest_id, stage_idx=stage_idx)):
+            group_key = s.get("group_id") or "_"
+            group_ranks[group_key] += 1
             self.store.upsert_stage_result(
                 contest_id,
                 stage_idx,
@@ -1702,7 +1724,7 @@ class ContestManager:
                 losses=s["losses"],
                 delta_total=s["delta_total"],
                 group_id=s.get("group_id") or "",
-                rank_in_group=i + 1,
+                rank_in_group=(group_ranks[group_key] if grouped else i + 1),
             )
 
     def _mark_stage_pairings_done(self, contest_id: int, stage_idx: int) -> None:
@@ -1803,6 +1825,8 @@ class ContestManager:
             match = self.store.get_match(match_id)
             if not contest or not match:
                 return None
+            if is_showcase(contest):
+                return contest
             if match.get("status") == STATUS_ABORTED:
                 pairing = self.store.reset_aborted_contest_pairing(
                     contest_id, match_id
@@ -1863,6 +1887,8 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c or c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
             return None
+        if is_showcase(c):
+            return c
         if c["status"] == CONTEST_REST:
             return await self._maybe_auto_resume(contest_id)
 
@@ -1943,6 +1969,8 @@ class ContestManager:
         # 0. 修复旧版本留下的观测时间线。此步骤幂等，覆盖 finished
         # 历史赛事以及当前 running 赛事，不改任何裁决结果。
         for contest in self.store.list_contests():
+            if is_showcase(contest):
+                continue
             self._backfill_actual_start(contest)
             stage_indices = {
                 int(pairing.get("stage_idx") or 0)
@@ -2365,6 +2393,7 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
+        require_mutable(c)
         if c["status"] != CONTEST_REST:
             raise ValueError("当前不在休息期")
         stage_idx = int(c.get("current_stage_idx") or 0)
@@ -2383,6 +2412,7 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
+        require_mutable(c)
         if c["status"] == CONTEST_REST:
             return await self.resume(contest_id)
         stage_idx = int(c.get("current_stage_idx") or 0)
@@ -2405,6 +2435,7 @@ class ContestManager:
         c = self.store.get_contest(contest_id)
         if not c:
             raise ValueError("比赛不存在")
+        require_mutable(c)
         if c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
             raise ValueError("仅运行中/休息中的赛事可强制结束")
         if self._has_unfinished_pairings(contest_id):

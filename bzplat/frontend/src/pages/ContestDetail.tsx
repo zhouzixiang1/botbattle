@@ -61,6 +61,7 @@ interface Contest {
   starts_at?: string | null
   ends_at?: string | null
   official_results_ready?: number
+  showcase_key?: string | null
 }
 interface Stage {
   key?: string
@@ -122,6 +123,31 @@ interface Standing {
   delta_total: number
   group_id?: string
   bot_name?: string
+}
+interface StageStandingRow {
+  entry_id: number
+  bot_id?: number | null
+  bot_name?: string
+  owner_name?: string
+  owner_display?: string
+  points: number
+  wins: number
+  draws: number
+  losses: number
+  delta_total: number
+  group_id?: string
+  rank: number
+  advancement?: 'advanced' | 'in_zone' | 'eliminated' | 'outside_zone' | null
+}
+interface StageStandingSummary {
+  stage_idx: number
+  stage_key: string
+  status: string
+  source: 'persisted' | 'live' | 'scheduled' | 'pending'
+  completed_pairings: number
+  total_pairings: number
+  advancement_final: boolean
+  rows: StageStandingRow[]
 }
 interface OfficialResult {
   rank: number
@@ -190,6 +216,7 @@ export default function ContestDetail() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [pairings, setPairings] = useState<Pairing[]>([])
   const [standings, setStandings] = useState<Standing[]>([])
+  const [stageStandings, setStageStandings] = useState<StageStandingSummary[]>([])
   const [officialResults, setOfficialResults] = useState<OfficialResult[]>([])
   const [myEntry, setMyEntry] = useState<Entry | null>(null)
   const [estimate, setEstimate] = useState<{ estimated_matches?: number; eta_seconds?: number } | null>(null)
@@ -241,6 +268,7 @@ export default function ContestDetail() {
         entries: Entry[]
         pairings: Pairing[]
         standings: Standing[]
+        stage_standings: StageStandingSummary[]
         estimate?: { estimated_matches?: number; eta_seconds?: number }
         entries_page?: number
         entries_per_page?: number
@@ -267,6 +295,7 @@ export default function ContestDetail() {
       setEntries(d.entries || [])
       setPairings(d.pairings || [])
       setStandings(d.standings || [])
+      setStageStandings(d.stage_standings || [])
       setOfficialResults(nextOfficialResults)
       setEstimate(d.estimate || null)
       setStageTab(d.contest.current_stage_idx ?? 0)
@@ -305,6 +334,7 @@ export default function ContestDetail() {
     setEntries([])
     setPairings([])
     setStandings([])
+    setStageStandings([])
     setOfficialResults([])
     setMyEntry(null)
     setEstimate(null)
@@ -331,7 +361,7 @@ export default function ContestDetail() {
   useEffect(() => {
     let cancelled = false
     const targetId = id
-    if (isLoggedIn && contest?.game_id) {
+    if (isLoggedIn && contest?.game_id && !contest.showcase_key) {
       apiGet<{ bots: Array<{ id: number; name: string; display_name?: string }> }>(
         `/api/bots/mine?game_id=${contest.game_id}`,
       )
@@ -343,7 +373,7 @@ export default function ContestDetail() {
         .catch(() => undefined)
     }
     return () => { cancelled = true }
-  }, [id, isLoggedIn, contest?.game_id])
+  }, [id, isLoggedIn, contest?.game_id, contest?.showcase_key])
 
   const isOrg = !!user && !!contest && (user.role === 'admin' || user.id === contest.organizer_id)
   // myEntry 来自后端 my_entry 字段（不分页，休息换 Bot UI 依赖；entries 分页后前端 find 不可靠）
@@ -389,6 +419,7 @@ export default function ContestDetail() {
   }
 
   const stagePairings = pairings.filter((p) => (p.stage_idx ?? 0) === stageTab)
+  const selectedStageStanding = stageStandings.find((stage) => stage.stage_idx === stageTab)
   const curStageType = stages[stageTab]?.type as string | undefined
   const isElimStage = curStageType === 'single_elimination' || curStageType === 'double_elimination'
   // 阶段切换时，按赛制重置对阵视图默认值（淘汰→对阵树；swiss/循环→一览表），用户仍可手动切换
@@ -432,6 +463,7 @@ export default function ContestDetail() {
 
   const contestScheduleIssue = scheduleIssue(contest)
   const contestGame = findGame(contest.game_id)
+  const isShowcase = Boolean(contest.showcase_key)
   const showMatchups = pairings.length > 0 || ['published', 'running', 'rest', 'finished'].includes(contest.status)
   const showStandings = standings.length > 0 || ['running', 'rest', 'finished'].includes(contest.status)
   const showOfficial = contest.status === 'finished'
@@ -451,6 +483,9 @@ export default function ContestDetail() {
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <StatusBadge status={contest.status} />
+                {isShowcase && (
+                  <Badge variant="secondary" className="text-[10px]">演示快照</Badge>
+                )}
                 <span className="max-w-full truncate" title={contest.template_id || undefined}>
                   模板 {contest.template_name || contest.template_id || '—'}
                 </span>
@@ -473,10 +508,16 @@ export default function ContestDetail() {
               <TooltipContent>刷新</TooltipContent>
             </Tooltip>
           </div>
-          {contest.status === 'rest' && contest.rest_ends_at && (
+          {contest.status === 'rest' && (isShowcase || contest.rest_ends_at) && (
             <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
               <Timer className="size-4 text-warning" />
-              阶段休息中，倒计时 <Countdown endsAt={contest.rest_ends_at} className="text-warning" />（可更换派遣 Bot）
+              {isShowcase ? (
+                <span>小组赛已结束，等待进入下一阶段；演示快照不会自动倒计时推进。</span>
+              ) : (
+                <>
+                  阶段休息中，倒计时 <Countdown endsAt={contest.rest_ends_at!} className="text-warning" />（可更换派遣 Bot）
+                </>
+              )}
             </div>
           )}
           {/* 时间编排：报名窗口 / 开赛 / 比赛时间 */}
@@ -496,6 +537,13 @@ export default function ContestDetail() {
 
       {/* 操作区 */}
       <div className="mt-4 flex flex-wrap gap-2">
+        {isShowcase ? (
+          <div className="flex w-full items-start gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-primary" />
+            <span><span className="font-medium text-foreground">合成演示 · 只读。</span> 此页面用于展示赛事生命周期，报名、换 Bot、时间和阶段推进均已冻结。</span>
+          </div>
+        ) : (
+          <>
         {isOrg && contest.status === 'draft' && (
           <Button disabled={busyAction} onClick={() => void act(`/api/contests/${id}/open`, undefined, '已开放报名')} className="gap-1.5">
             <DoorOpen className="size-4" />开放报名
@@ -569,11 +617,13 @@ export default function ContestDetail() {
             </Button>
           </div>
         )}
+          </>
+        )}
       </div>
 
       {/* 内容区按赛事阶段展示，避免草稿期出现空对阵、完赛后仍以临时积分为主。 */}
       <Tabs value={contentTab} onValueChange={(v) => setContentTab(v as typeof contentTab)} className="mt-4">
-        <TabsList>
+        <TabsList className="max-w-full justify-start overflow-x-auto">
           {showMatchups && (
             <TabsTrigger value="matchups" className="gap-1.5">
               <Swords className="size-4" />对阵
@@ -653,7 +703,8 @@ export default function ContestDetail() {
             </div>
           )}
 
-          {/* 对阵区（BracketTree/PairedFoldedList 能吃满宽） */}
+          {/* 宽屏把对阵与阶段榜并排，窄屏自然上下排列。 */}
+          <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-semibold text-foreground">
@@ -700,6 +751,8 @@ export default function ContestDetail() {
               <PairingFoldedList pairings={stagePairings} />
             )}
           </div>
+          <StageStandingPanel summary={selectedStageStanding} />
+          </div>
 
         </TabsContent>
 
@@ -708,7 +761,7 @@ export default function ContestDetail() {
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-semibold text-foreground">报名（{entriesTotal}）</h3>
-              {isOrg && (contest.status === 'draft' || contest.status === 'open') && (
+              {isOrg && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -754,7 +807,7 @@ export default function ContestDetail() {
                         {e.seed ? <span className="text-xs text-muted-foreground">种子 {e.seed}</span> : ''}
                         {e.group_id && <Badge variant="secondary" className="max-w-[8rem] truncate text-[10px]">{e.group_id}</Badge>}
                         {e.eliminated ? <Badge variant="destructive" className="text-[10px]">淘汰</Badge> : ''}
-                        {isOrg && (contest.status === 'draft' || contest.status === 'open') && (
+                        {isOrg && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -906,6 +959,80 @@ export default function ContestDetail() {
       </Tabs>
       {confirmDialog}
     </PageStub>
+  )
+}
+
+function StageStandingPanel({ summary }: { summary?: StageStandingSummary }) {
+  const sourceLabel = summary?.source === 'persisted'
+    ? '阶段结果已固化'
+    : summary?.source === 'live'
+      ? '实时积分'
+      : summary?.source === 'scheduled'
+        ? '排期名单'
+        : '等待本阶段'
+  const advancementLabel = (value: StageStandingRow['advancement']) => {
+    if (value === 'advanced') return <Badge className="text-[9px]">已晋级</Badge>
+    if (value === 'in_zone') return <Badge variant="outline" className="text-[9px] text-primary">暂列晋级区</Badge>
+    if (value === 'eliminated') return <span className="text-[10px] text-muted-foreground">未晋级</span>
+    if (value === 'outside_zone') return <span className="text-[10px] text-muted-foreground">暂列区外</span>
+    return null
+  }
+
+  return (
+    <Card className="min-w-0 self-start overflow-hidden xl:sticky xl:top-4">
+      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">阶段排名与晋级</h3>
+          <p className="text-[11px] text-muted-foreground">{sourceLabel}</p>
+        </div>
+        {summary && summary.total_pairings > 0 && (
+          <Badge variant="outline" className="text-[9px]">
+            {summary.completed_pairings}/{summary.total_pairings} 场
+          </Badge>
+        )}
+      </div>
+      {!summary || summary.rows.length === 0 ? (
+        <EmptyState text="本阶段暂无排名" className="py-8" />
+      ) : (
+        <div className="max-h-[32rem] overflow-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10 px-2">#</TableHead>
+                <TableHead className="px-2">Bot</TableHead>
+                <TableHead className="w-14 px-2 text-right">积分</TableHead>
+                <TableHead className="w-20 px-2 text-right">晋级</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {summary.rows.map((row) => (
+                <TableRow key={row.entry_id}>
+                  <TableCell className="px-2 py-2 font-mono text-xs text-muted-foreground">
+                    {row.group_id ? `${row.group_id}-${row.rank}` : row.rank}
+                  </TableCell>
+                  <TableCell className="max-w-0 px-2 py-2">
+                    {row.bot_id ? (
+                      <Link to={`/bot/${row.bot_id}`} className="block truncate text-xs font-medium text-foreground hover:text-primary">
+                        {row.bot_name || `#${row.bot_id}`}
+                      </Link>
+                    ) : <span className="text-xs text-muted-foreground">已删除 Bot</span>}
+                    <span className="block truncate text-[10px] text-muted-foreground">
+                      {row.owner_name ? `@${row.owner_display || row.owner_name}` : `${row.wins}/${row.draws}/${row.losses}`}
+                    </span>
+                  </TableCell>
+                  <TableCell className="px-2 py-2 text-right font-mono text-xs font-semibold text-primary">
+                    {row.points}
+                  </TableCell>
+                  <TableCell className="px-2 py-2 text-right">
+                    {advancementLabel(row.advancement)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </Card>
   )
 }
 

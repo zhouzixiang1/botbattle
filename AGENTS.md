@@ -99,7 +99,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 ## 架构分层（编辑时切勿越界）
 
 ```
-contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) → manager(阶段状态机) → ranking(正式名次/破同分) + scheduler(时间调度器，到点自动推进阶段)
+contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) → manager(阶段状态机) → ranking(正式名次/破同分) + scheduler(时间调度器，到点自动推进阶段)；presentation(逐阶段排名/晋级读模型)；showcase/showcase_seed(长期只读演示快照及真实裁判数据生成)
 matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runner(起Bot进程,按game_id路由)
             + result_contract(持久化结果唯一 builder：rounds_played/deltas/normalized_delta)
             人类对战：orchestrator.challenge_human/_run_human_match + runner.run_bot_vs_human

@@ -25,6 +25,13 @@ from bzplat.backend.bots import BotError, BotManager
 
 logger = logging.getLogger(__name__)
 from bzplat.backend.contests import ContestManager
+from bzplat.backend.contests.presentation import build_stage_summaries
+from bzplat.backend.contests.showcase import (
+    ShowcaseReadOnlyError,
+    public_description as contest_public_description,
+    require_mutable as require_mutable_contest,
+    template_name as contest_template_name,
+)
 from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches import BotCapacityError, MatchOrchestrator
@@ -1415,7 +1422,18 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
     public = dict(contest)
     public.pop("hands_per_match", None)
     public.pop("match_config_json", None)
+    public["template_name"] = contest_template_name(public)
+    if public.get("showcase_key"):
+        public["description"] = contest_public_description(public)
     return public
+
+
+def _contest_write_http_error(exc: ValueError) -> HTTPException:
+    """Map immutable showcase writes to conflict, preserving normal 400s."""
+    return HTTPException(
+        409 if isinstance(exc, ShowcaseReadOnlyError) else 400,
+        str(exc),
+    )
 
 
 @router.get("/api/contests/templates")
@@ -1467,7 +1485,10 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
     # 裁列表响应死字段（对抗审计：match_config_json/hands_per_match/phase/source_contest_id
     # 列表视图不消费；不动 organizer_id/stages_json/rest_ends_at/current_stage_idx/
     # official_results_ready——共享 list_contests 喂 /api/contests/{id} + 后端内部读取）。
-    items = result["items"] if isinstance(result, dict) else result
+    items = [
+        _contest_for_api(contest)
+        for contest in (result["items"] if isinstance(result, dict) else result)
+    ]
     for c in items:
         for k in ("match_config_json", "hands_per_match", "phase", "source_contest_id"):
             c.pop(k, None)
@@ -1544,6 +1565,14 @@ def contest_detail(
         entries = entries_result
         entries_meta = {}
     pairings = store.contest_bracket(contest_id)
+    stage_entries = (
+        entries
+        if not isinstance(entries_result, dict)
+        else store.contest_entries_named(contest_id)
+    )
+    stage_summaries = build_stage_summaries(
+        _contests(request), c, stage_entries, pairings
+    )
     standings = _contests(request).standings(contest_id)
     # 给 standings 补 bot 名（standings 只有 bot_id）
     for s in standings:
@@ -1596,6 +1625,7 @@ def contest_detail(
         "entries": entries,
         "pairings": pairings,
         "standings": standings,
+        "stage_standings": stage_summaries,
         "estimate": estimate,
         "my_entry": my_entry,
         "is_organizer": is_organizer,
@@ -1652,7 +1682,7 @@ async def organizer_add_entry(
     try:
         await _contests(request).add_roster_entry(contest_id, uid, bid)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise _contest_write_http_error(exc) from exc
     return {"ok": True}
 
 
@@ -1697,7 +1727,7 @@ async def organizer_assign_entries(
     try:
         return await _contests(request).assign_roster_entries(contest_id, target)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise _contest_write_http_error(exc) from exc
 
 
 @router.delete("/api/contests/{contest_id}/entries/{user_id}")
@@ -1713,7 +1743,7 @@ async def organizer_delete_entry(
     try:
         deleted = await _contests(request).delete_roster_entry(contest_id, user_id)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise _contest_write_http_error(exc) from exc
     if not deleted:
         raise HTTPException(404, "报名记录不存在")
     return {"ok": True}
@@ -1849,7 +1879,7 @@ async def open_contest(contest_id: int, request: Request, user=Depends(require_o
     try:
         contest = await _contests(request).open_registration(contest_id)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise _contest_write_http_error(exc) from exc
     return {"contest": _contest_for_api(contest)}
 
 
@@ -1862,7 +1892,7 @@ async def register_contest(
             contest_id, user["id"], body.bot_id, role=user.get("role", "")
         )
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     # 赛事报名经验
     from bzplat.backend.store.schema import XP_CONTEST_PARTICIPATE
     _store(request).award_xp(user["id"], XP_CONTEST_PARTICIPATE)
@@ -1878,7 +1908,7 @@ async def dispatch_contest(
             contest_id, user["id"], body.bot_id, role=user.get("role", "")
         )
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     return {"entry": entry}
 
 
@@ -1893,7 +1923,7 @@ async def start_contest(
     try:
         contest = await _contests(request).start(contest_id)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     return {"contest": _contest_for_api(contest)}
 
 
@@ -1913,7 +1943,7 @@ async def publish_contest(
     try:
         contest = await _contests(request).publish(contest_id)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     audit_log(request, "contest_publish", result="ok", user=user.get("username"), target=contest_id)
     return {"contest": _contest_for_api(contest)}
 
@@ -1929,7 +1959,7 @@ async def resume_contest(
     try:
         contest = await _contests(request).resume(contest_id)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     return {"contest": _contest_for_api(contest)}
 
 
@@ -1944,7 +1974,7 @@ async def advance_contest(
     try:
         contest = await _contests(request).advance(contest_id)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     return {"contest": _contest_for_api(contest)}
 
 
@@ -1960,7 +1990,7 @@ async def finish_contest(
     try:
         contest = await _contests(request).finish(contest_id)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     return {"contest": _contest_for_api(contest)}
 
 
@@ -2304,6 +2334,7 @@ async def admin_patch_contest(
         old_status = before["status"]
         target = body.status
         try:
+            require_mutable_contest(before)
             if target == old_status:
                 contest = before
             elif target == CONTEST_OPEN and old_status == CONTEST_DRAFT:
@@ -2327,7 +2358,7 @@ async def admin_patch_contest(
                 request, "admin_patch_contest_status", result="fail",
                 user=admin.get("username"), target=contest_id, detail=str(exc),
             )
-            raise HTTPException(400, str(exc)) from exc
+            raise _contest_write_http_error(exc) from exc
 
         if target != old_status:
             audit_log(
@@ -2349,7 +2380,7 @@ async def admin_patch_contest(
             request, "admin_patch_contest_fields", result="fail",
             user=admin.get("username"), target=contest_id, detail=str(e),
         )
-        raise HTTPException(400, str(e))
+        raise _contest_write_http_error(e) from e
     if not c:
         audit_log(
             request, "admin_patch_contest_fields", result="fail",
@@ -2466,7 +2497,7 @@ async def admin_assign_entries(
     try:
         result = await _contests(request).assign_roster_entries(contest_id, target)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise _contest_write_http_error(exc) from exc
     audit_log(request, "admin_assign_entries", result="ok", target=contest_id,
               detail=f"added={result['added']} skipped={len(result['skipped'])}")
     return result
@@ -2491,7 +2522,7 @@ async def admin_delete_entry(
             user=admin.get("username"), target=contest_id,
             detail=f"user_id={user_id}; reason={exc}",
         )
-        raise HTTPException(400, str(exc)) from exc
+        raise _contest_write_http_error(exc) from exc
     if not deleted:
         audit_log(
             request, "admin_delete_contest_entry", result="fail",
