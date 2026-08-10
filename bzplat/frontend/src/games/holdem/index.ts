@@ -34,7 +34,12 @@ export const holdemSpec: GameViewSpec = {
   },
   replay: {
     layout: 'with-timeline',
-    progress: (vm) => (vm as HoldemViewModel).hand + 1,
+    progress: (vm) => {
+      const state = vm as HoldemViewModel
+      return state.events.some((event) => event.type === 'hand_start')
+        ? state.hand + 1
+        : null
+    },
     progressTotal: (vm) => (vm as HoldemViewModel).totalHands,
     Summary: HoldemReplaySummary,
     navigation: {

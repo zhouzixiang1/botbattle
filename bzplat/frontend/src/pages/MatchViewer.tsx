@@ -153,14 +153,14 @@ export default function MatchViewer() {
                 const snapshotMatch = ev.match as MatchRow | undefined
                 if (snapshotMatch) setMatch(snapshotMatch)
                 const hist = Array.isArray(ev.events) ? (ev.events as RawEvent[]) : []
-                const sliced = hist.slice(-4000)
                 const localLength = eventsLenRef.current + queued.length
-                // 活动 snapshot 提供完整公开前缀；仍防御旧代理缓存返回较短
-                // snapshot，绝不让已经看到的历史、暂停态或游标倒退。
-                eventsLenRef.current = Math.max(localLength, sliced.length)
+                // 活动 snapshot 提供完整公开前缀。不能只保留后 4000 条：一旦
+                // 本地已有 >4000 条，增长后的重连快照会因裁剪后更短而被忽略，
+                // 既丢新增事件也让事件 1 永久消失。仍防御旧代理返回较短快照。
+                eventsLenRef.current = Math.max(localLength, hist.length)
                 setEvents((prev) => {
                   const local = queued.length ? [...prev, ...queued] : prev
-                  return sliced.length >= local.length ? sliced : local
+                  return hist.length >= local.length ? hist : local
                 })
                 const terminal = snapshotMatch?.status === 'completed' || snapshotMatch?.status === 'aborted'
                 if (terminal) {
@@ -331,7 +331,8 @@ export default function MatchViewer() {
   const technicalIncidents = persistedIncidents.length ? persistedIncidents : eventIncidents
   const technicalTerminal = finished && (matchHasTechnicalLoss(match) || technicalIncidents.length > 0)
   // 首决策德扑故障已经有 hand_start，但没有完成一手；只数 settle，避免终局
-  // 到达、REST 尚未刷新时短暂显示伪造的“第 1/70 手”。
+  // 到达、REST 尚未刷新时短暂显示伪造的“第 1/70 手”。没有 hand_start 的
+  // admin/platform 中止则由 Holdem progress 返回 null，同样不显示假进度。
   const completedProgress = gameSpec?.progressUnit === 'hand'
     ? events.filter((event) => event.type === 'settle').length
     : fullReplayProgress
@@ -358,20 +359,25 @@ export default function MatchViewer() {
     setPlaying(false)
   }, [zeroProgressTechnicalTerminal, total])
 
-  // 定速播放定时器（直播+回放共用）：顺序消费缓冲。追上仍在运行的直播时
-  // 保持 numeric cursor + playing；新批次增加 total 后，本 effect 才逐条推进。
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 定速播放节拍（直播+回放共用）：只由播放态/速度控制生命周期。不能依赖
+  // total；高频 SSE 每次增加 total 都会清理并重建 timeout，事件间隔持续短于
+  // 播放速度时游标会被永久饿死。interval 每个稳定节拍读取最新长度 ref。
   useEffect(() => {
-    if (!playing || total === 0) return
-    if (cur >= total - 1) {
-      if (!realtime) setPlaying(false)
-      return
-    }
-    timerRef.current = setTimeout(() => {
-      setCursor((value) => Math.min(total - 1, value + 1))
+    if (!playing) return
+    const timer = window.setInterval(() => {
+      setCursor((value) => Math.min(
+        Math.max(0, eventsLenRef.current - 1),
+        value + 1,
+      ))
     }, SPEEDS[speedIdx].ms)
-    return () => { if (timerRef.current) clearTimeout(timerRef.current) }
-  }, [playing, cur, total, speedIdx, realtime])
+    return () => window.clearInterval(timer)
+  }, [playing, speedIdx])
+
+  // 终态缓冲消费完毕后停止；直播追到当前尾部则保留 playing，让稳定节拍
+  // 等待下一批事件。这个 effect 不拥有 timer，因此 total 变化不会重置节拍。
+  useEffect(() => {
+    if (playing && total > 0 && !realtime && cur >= total - 1) setPlaying(false)
+  }, [playing, total, realtime, cur])
 
   const pause = () => {
     setCursor(cur)
@@ -648,7 +654,7 @@ export default function MatchViewer() {
                     </Select>
                   </div>
                   <div className="mt-2.5 flex items-center gap-3">
-                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
+                    <span data-testid="playback-position" className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
                     <Slider min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
                   </div>
                 </CardContent>

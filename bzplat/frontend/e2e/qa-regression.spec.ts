@@ -125,6 +125,108 @@ const VIEWPORTS = [
   { name: 'mobile', width: 390, height: 844 },
 ] as const
 
+async function installControlledEventSource(page: Page) {
+  await page.addInitScript(() => {
+    type WireEvent = Record<string, unknown>
+    type Controller = {
+      emit: (event: WireEvent) => boolean
+      disconnect: () => boolean
+      stream: (events: WireEvent[], intervalMs: number) => boolean
+      sent: () => number
+    }
+    type ControlledWindow = typeof window & {
+      __matchSseController?: Controller
+      __matchSseStreamSent?: number
+    }
+    class ControlledEventSource {
+      static current: ControlledEventSource | null = null
+      onmessage: ((event: MessageEvent<string>) => void) | null = null
+      onerror: ((event: Event) => void) | null = null
+      closed = false
+
+      constructor(_url: string | URL) {
+        ControlledEventSource.current = this
+      }
+
+      close() {
+        this.closed = true
+      }
+    }
+    const controlledWindow = window as ControlledWindow
+    const controller: Controller = {
+      emit(event) {
+        const source = ControlledEventSource.current
+        if (!source || source.closed || !source.onmessage) return false
+        source.onmessage(new MessageEvent('message', { data: JSON.stringify(event) }))
+        return true
+      },
+      disconnect() {
+        const source = ControlledEventSource.current
+        if (!source || source.closed || !source.onerror) return false
+        source.onerror(new Event('error'))
+        return true
+      },
+      stream(events, intervalMs) {
+        const source = ControlledEventSource.current
+        if (!source || source.closed || !source.onmessage) return false
+        controlledWindow.__matchSseStreamSent = 0
+        let index = 0
+        const timer = window.setInterval(() => {
+          if (index >= events.length) {
+            window.clearInterval(timer)
+            return
+          }
+          controller.emit(events[index])
+          index += 1
+          controlledWindow.__matchSseStreamSent = index
+          if (index >= events.length) window.clearInterval(timer)
+        }, intervalMs)
+        return true
+      },
+      sent() {
+        return controlledWindow.__matchSseStreamSent ?? 0
+      },
+    }
+    Object.defineProperty(window, 'EventSource', {
+      configurable: true,
+      value: ControlledEventSource,
+    })
+    controlledWindow.__matchSseController = controller
+  })
+
+  const invoke = <T>(method: 'emit' | 'disconnect' | 'stream' | 'sent', arg?: T) => page.evaluate(
+    ({ method, arg }) => {
+      type Controller = {
+        emit: (event: Record<string, unknown>) => boolean
+        disconnect: () => boolean
+        stream: (events: Record<string, unknown>[], intervalMs: number) => boolean
+        sent: () => number
+      }
+      const controller = (window as typeof window & {
+        __matchSseController?: Controller
+      }).__matchSseController
+      if (!controller) return false
+      if (method === 'emit') return controller.emit((arg ?? {}) as Record<string, unknown>)
+      if (method === 'disconnect') return controller.disconnect()
+      if (method === 'stream') {
+        const stream = arg as { events: Record<string, unknown>[]; intervalMs: number }
+        return controller.stream(stream.events, stream.intervalMs)
+      }
+      return controller.sent()
+    },
+    { method, arg },
+  )
+
+  return {
+    emit: (event: Record<string, unknown>) => invoke('emit', event),
+    disconnect: () => invoke('disconnect'),
+    stream: (events: Record<string, unknown>[], intervalMs: number) => (
+      invoke('stream', { events, intervalMs })
+    ),
+    sent: () => invoke('sent'),
+  }
+}
+
 test.beforeAll(async ({ request }) => {
   const response = await request.get('/api/health')
   expect(response.status(), await response.text()).toBe(200)
@@ -435,8 +537,15 @@ test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
   await expect(historicalRow.getByText('不可运行', { exact: true })).toBeVisible()
   await expect(historicalRow.getByRole('button', { name: '不可启用', exact: true })).toBeDisabled()
   await expect(historicalRow).toContainText('仅支持 Linux x86_64 ELF64')
-  await expect(page.getByRole('link', { name: longBotLabel, exact: true })).toBeVisible()
-  await page.setViewportSize({ width: 390, height: 844 })
+  const longRow = page.getByRole('link', { name: longBotLabel, exact: true })
+    .locator('xpath=ancestor::li[1]')
+  await expect(longRow).toBeVisible()
+  await page.setViewportSize({ width: 320, height: 844 })
+  await longRow.getByRole('button', { name: '编辑', exact: true }).click()
+  await expect(longRow.getByLabel('显示名', { exact: true })).toBeVisible()
+  await expect(longRow.getByLabel('简介', { exact: true })).toBeVisible()
+  const editDescriptionBox = await longRow.getByLabel('简介', { exact: true }).boundingBox()
+  expect(editDescriptionBox?.width ?? 999).toBeLessThanOrEqual(230)
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
   expect(overflow).toBeLessThanOrEqual(1)
   await monitor.expectClean([{
@@ -966,45 +1075,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
     { type: 'action', player: 1, action: 'raise', amount: 200 },
   ]
 
-  await page.addInitScript(() => {
-    type Controller = {
-      emit: (event: Record<string, unknown>) => boolean
-      disconnect: () => boolean
-    }
-    class ControlledEventSource {
-      static current: ControlledEventSource | null = null
-      onmessage: ((event: MessageEvent<string>) => void) | null = null
-      onerror: ((event: Event) => void) | null = null
-      closed = false
-
-      constructor(_url: string | URL) {
-        ControlledEventSource.current = this
-      }
-
-      close() {
-        this.closed = true
-      }
-    }
-    const controller: Controller = {
-      emit(event) {
-        const source = ControlledEventSource.current
-        if (!source || source.closed || !source.onmessage) return false
-        source.onmessage(new MessageEvent('message', { data: JSON.stringify(event) }))
-        return true
-      },
-      disconnect() {
-        const source = ControlledEventSource.current
-        if (!source || source.closed || !source.onerror) return false
-        source.onerror(new Event('error'))
-        return true
-      },
-    }
-    Object.defineProperty(window, 'EventSource', {
-      configurable: true,
-      value: ControlledEventSource,
-    })
-    ;(window as typeof window & { __matchSseController?: Controller }).__matchSseController = controller
-  })
+  const sse = await installControlledEventSource(page)
 
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
@@ -1038,21 +1109,6 @@ test('MatchViewer replays live history sequentially and stays compact across vie
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}' })
   })
 
-  const control = async (method: 'emit' | 'disconnect', event?: Record<string, unknown>) => page.evaluate(
-    ({ method, event }) => {
-      const controller = (window as typeof window & {
-        __matchSseController?: {
-          emit: (value: Record<string, unknown>) => boolean
-          disconnect: () => boolean
-        }
-      }).__matchSseController
-      return method === 'emit'
-        ? controller?.emit(event ?? {}) ?? false
-        : controller?.disconnect() ?? false
-    },
-    { method, event },
-  )
-
   await page.setViewportSize({ width: 1440, height: 720 })
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
@@ -1064,14 +1120,14 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await page.getByRole('combobox').filter({ hasText: '1x' }).click()
   await page.getByRole('option', { name: '0.5x', exact: true }).click()
   await expect(page.getByText('事件 4/4 · 直播', { exact: true })).toBeVisible({ timeout: 6_000 })
-  expect(await control('emit', reconnectedEvents[4])).toBe(true)
+  expect(await sse.emit(reconnectedEvents[4])).toBe(true)
   await expect(page.getByText('事件 4/5', { exact: true })).toBeVisible()
   await expect(page.getByText('事件 5/5 · 直播', { exact: true })).toBeVisible({ timeout: 2_500 })
   await page.getByRole('button', { name: '暂停', exact: true }).click()
 
-  expect(await control('disconnect')).toBe(true)
+  expect(await sse.disconnect()).toBe(true)
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
-  expect(await control('emit', {
+  expect(await sse.emit({
     type: 'snapshot',
     match: {
       id: matchId,
@@ -1088,7 +1144,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await expect(page.getByText('事件 5/8', { exact: true })).toBeVisible()
   await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
 
-  expect(await control('emit', {
+  expect(await sse.emit({
     type: 'match_end', winner: 0, reason: 'completed', deltas: [100, -100],
   })).toBe(true)
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
@@ -1139,6 +1195,177 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   expect(mobileCanvasBox?.width ?? 0).toBeGreaterThanOrEqual(356)
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
   expect(overflow).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('MatchViewer playback clock cannot be starved by continuous SSE traffic', async ({ page }) => {
+  const matchId = 'mock-live-continuous-clock'
+  const initialEvents = [
+    { type: 'match_start', game_id: 'holdem', num_hands: 70 },
+    { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+  ]
+  const streamEvents = Array.from({ length: 40 }, (_, index) => ({
+    type: 'action',
+    player: index % 2,
+    action: 'check',
+    amount: 0,
+  }))
+  const sse = await installControlledEventSource(page)
+  let releaseMatchResponse!: () => void
+  const matchResponseGate = new Promise<void>((resolve) => {
+    releaseMatchResponse = resolve
+  })
+
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"ok":true}',
+  }))
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await matchResponseGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'holdem',
+          status: 'running',
+          match_type: 'challenge',
+          bot_a: { name: 'clock_alpha', owner_name: 'alpha' },
+          bot_b: { name: 'clock_beta', owner_name: 'beta' },
+          result: { hands_played: 0, deltas: [0, 0] },
+        },
+        replay: { events_json: JSON.stringify(initialEvents) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  releaseMatchResponse()
+  const position = page.getByTestId('playback-position')
+  await expect(position).toHaveText('事件 1/2')
+  expect(await sse.stream(streamEvents, 50)).toBe(true)
+  await expect.poll(async () => Number(await sse.sent()), { timeout: 2_000 })
+    .toBeGreaterThanOrEqual(18)
+  const duringStream = Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0)
+  expect(Number(await sse.sent())).toBeLessThan(40)
+  expect(duringStream, 'playback cursor must advance while SSE still changes total').toBeGreaterThan(1)
+  await expect.poll(async () => Number(await sse.sent()), { timeout: 3_000 })
+    .toBe(40)
+  await monitor.expectClean()
+})
+
+test('MatchViewer preserves more than 4000 events across reconnect snapshots', async ({ page }) => {
+  const matchId = 'mock-live-long-prefix'
+  const initialEvents = [
+    { type: 'match_start', game_id: 'holdem', num_hands: 70 },
+    ...Array.from({ length: 4_100 }, (_, index) => ({
+      type: 'action', player: index % 2, action: 'check', amount: 0,
+    })),
+  ]
+  const grownEvents = [
+    ...initialEvents,
+    ...Array.from({ length: 250 }, (_, index) => ({
+      type: 'action', player: index % 2, action: 'check', amount: 0,
+    })),
+  ]
+  const sse = await installControlledEventSource(page)
+  let releaseMatchResponse!: () => void
+  const matchResponseGate = new Promise<void>((resolve) => {
+    releaseMatchResponse = resolve
+  })
+  const runningMatch = {
+    id: matchId,
+    game_id: 'holdem',
+    status: 'running',
+    match_type: 'challenge',
+    bot_a: { name: 'long_alpha', owner_name: 'alpha' },
+    bot_b: { name: 'long_beta', owner_name: 'beta' },
+    result: { hands_played: 0, deltas: [0, 0] },
+  }
+
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"ok":true}',
+  }))
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await matchResponseGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: runningMatch,
+        replay: { events_json: '[]' },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+
+  const monitor = monitorBrowser(page)
+  await page.goto(`/#/match/${matchId}`)
+  releaseMatchResponse()
+  await expect(page.getByText('直播中', { exact: true })).toBeVisible()
+  expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
+  const position = page.getByTestId('playback-position')
+  await expect(position).toHaveText('事件 1/4101')
+  await page.getByRole('button', { name: '暂停', exact: true }).click()
+  const cursorBeforeReconnect = Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0)
+  expect(await sse.disconnect()).toBe(true)
+  await expect(page.getByText('连接中', { exact: true })).toBeVisible()
+  expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: grownEvents })).toBe(true)
+  await expect(position).toHaveText(`事件 ${cursorBeforeReconnect}/4351`)
+  await expect(page.getByText('动作时序 (1/4351)', { exact: true })).toBeVisible()
+  await monitor.expectClean()
+})
+
+test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page }) => {
+  const fixtures = [
+    { id: 'mock-zero-hand-admin-abort', reason: 'admin_aborted' },
+    { id: 'mock-zero-hand-platform-abort', reason: 'platform_error' },
+  ] as const
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+  for (const fixture of fixtures) {
+    await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
+      status: 200, contentType: 'application/json', body: '{"ok":true}',
+    }))
+    await page.route(`**/api/matches/${fixture.id}`, async (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: fixture.id,
+          game_id: 'holdem',
+          status: 'aborted',
+          reason: fixture.reason,
+          match_type: 'challenge',
+          bot_a: { name: 'abort_alpha', owner_name: 'alpha' },
+          bot_b: { name: 'abort_beta', owner_name: 'beta' },
+          result: { hands_played: 0, deltas: [0, 0] },
+        },
+        replay: {
+          events_json: JSON.stringify([
+            { type: 'match_start', game_id: 'holdem', num_hands: 70 },
+            { type: 'error', reason: fixture.reason },
+          ]),
+        },
+      }),
+    }))
+  }
+
+  const monitor = monitorBrowser(page)
+  for (const fixture of fixtures) {
+    await page.goto(`/#/match/${fixture.id}`)
+    await expect(page.getByText('已中止', { exact: true })).toBeVisible()
+    await expect(page.getByText(/\/70 手/)).toHaveCount(0)
+    await page.getByRole('button', { name: '下一个事件', exact: true }).click()
+    await expect(page.getByText(/\/70 手/)).toHaveCount(0)
+  }
   await monitor.expectClean()
 })
 

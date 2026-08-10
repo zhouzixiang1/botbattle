@@ -402,14 +402,14 @@ export default function MyBots() {
                   </div>
                 </div>
                 {editing === b.id && (
-                  <div className="mt-2 flex flex-wrap items-end gap-2 rounded-lg bg-muted p-3">
-                    <label className="space-y-1 text-xs text-muted-foreground">
+                  <div className="mt-2 flex min-w-0 flex-wrap items-end gap-2 rounded-lg bg-muted p-3">
+                    <label className="min-w-0 flex-[1_1_12rem] space-y-1 text-xs text-muted-foreground">
                       显示名
-                      <Input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64} className="h-8" />
+                      <Input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64} className="h-8 w-full max-w-full" />
                     </label>
-                    <label className="block space-y-1 text-xs text-muted-foreground">
+                    <label className="min-w-0 flex-[1_1_12rem] space-y-1 text-xs text-muted-foreground">
                       简介
-                      <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500} className="h-8 w-64" />
+                      <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500} className="h-8 w-full max-w-full" />
                     </label>
                     <Button type="button" size="sm" onClick={() => void saveEdit(b)} className="gap-1">
                       <Save className="size-3.5" />保存
