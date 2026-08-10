@@ -768,6 +768,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_contests_org ON contests(organizer_id)"
         )
 
+    # Long-lived customer-demo contests are explicit immutable snapshots.  Add
+    # this only after every legacy contests-table rebuild above, otherwise an old
+    # CHECK migration could immediately drop the newly added column again.
+    _add_col(conn, "contests", "showcase_key", "TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_contests_showcase_key "
+        "ON contests(showcase_key) WHERE showcase_key IS NOT NULL"
+    )
+
     if "contest_entries" in tables:
         for col, decl in (
             ("group_id", "TEXT NOT NULL DEFAULT ''"),
@@ -3679,14 +3688,18 @@ class Store:
             for gid in _all_game_ids():
                 tbl = _matches_table(gid)
                 row = c.execute(
-                    f"SELECT COUNT(*) FROM {tbl} WHERE status=?",
+                    f"SELECT COUNT(*) FROM {tbl} WHERE status=? "
+                    "AND (contest_id IS NULL OR contest_id NOT IN ("
+                    "SELECT id FROM contests WHERE showcase_key IS NOT NULL))",
                     (STATUS_RUNNING,),
                 ).fetchone()
                 cnt = int(row[0]) if row else 0
                 if cnt:
                     c.execute(
                         f"UPDATE {tbl} SET status=?, reason='orphan_after_restart', "
-                        "ended_at=datetime('now') WHERE status=?",
+                        "ended_at=datetime('now') WHERE status=? "
+                        "AND (contest_id IS NULL OR contest_id NOT IN ("
+                        "SELECT id FROM contests WHERE showcase_key IS NOT NULL))",
                         (STATUS_ABORTED, STATUS_RUNNING),
                     )
                     n += cnt
@@ -3733,7 +3746,7 @@ class Store:
                     f"SELECT COUNT(*) FROM {tbl} m "
                     f"WHERE m.status=? AND m.contest_id IS NOT NULL "
                     f"AND m.contest_id IN (SELECT id FROM contests "
-                    f"WHERE status IN (?,?))",
+                    f"WHERE status IN (?,?) AND showcase_key IS NULL)",
                     (STATUS_PENDING, CONTEST_FINISHED, CONTEST_CANCELLED),
                 ).fetchone()
                 cnt3 = int(row3[0]) if row3 else 0
@@ -3743,7 +3756,7 @@ class Store:
                         "ended_at=datetime('now') "
                         f"WHERE status=? AND contest_id IS NOT NULL "
                         f"AND contest_id IN (SELECT id FROM contests "
-                        f"WHERE status IN (?,?))",
+                        f"WHERE status IN (?,?) AND showcase_key IS NULL)",
                         (
                             STATUS_ABORTED,
                             STATUS_PENDING,
@@ -3793,6 +3806,7 @@ class Store:
                     "JOIN contests contest ON contest.id=m.contest_id "
                     "WHERE m.status=? AND m.match_type=? "
                     f"AND contest.status IN ({status_marks}) "
+                    "AND contest.showcase_key IS NULL "
                     "AND NOT EXISTS ("
                     "SELECT 1 FROM contest_pairings pairing WHERE pairing.match_id=m.id"
                     ")",
@@ -3811,8 +3825,10 @@ class Store:
                     recovered += 1
 
             pairings = c.execute(
-                "SELECT id, match_id FROM contest_pairings "
-                "WHERE status=? AND match_id IS NOT NULL",
+                "SELECT pairing.id, pairing.match_id FROM contest_pairings pairing "
+                "JOIN contests contest ON contest.id=pairing.contest_id "
+                "WHERE pairing.status=? AND pairing.match_id IS NOT NULL "
+                "AND contest.showcase_key IS NULL",
                 (STATUS_RUNNING,),
             ).fetchall()
             for pairing in pairings:
@@ -3857,13 +3873,14 @@ class Store:
             return recovered
 
     def list_contests_by_status(self, statuses: list[str]) -> list[dict]:
-        """返回 status 在给定集合内的 contest（启动对账 reconcile_running_contests 用）。"""
+        """返回可推进的 active contest；只读演示快照永不进入调度/对账。"""
         if not statuses:
             return []
         with self._tx() as c:
             placeholders = ",".join("?" for _ in statuses)
             rows = c.execute(
                 f"SELECT * FROM contests WHERE status IN ({placeholders}) "
+                "AND showcase_key IS NULL "
                 "ORDER BY id",
                 tuple(statuses),
             ).fetchall()
@@ -3874,7 +3891,8 @@ class Store:
         with self._tx() as c:
             rows = c.execute(
                 "SELECT * FROM contests WHERE status=? "
-                "AND COALESCE(official_results_ready, 0)=0 ORDER BY id",
+                "AND COALESCE(official_results_ready, 0)=0 "
+                "AND showcase_key IS NULL ORDER BY id",
                 (CONTEST_FINISHED,),
             ).fetchall()
             return [_row(row) for row in rows]
@@ -4564,6 +4582,60 @@ class Store:
 
     def get_contest(self, contest_id: int) -> dict | None:
         with self._tx() as c:
+            return _contest_row(
+                c.execute(
+                    "SELECT * FROM contests WHERE id=?", (contest_id,)
+                ).fetchone()
+            )
+
+    def get_contest_by_showcase_key(self, showcase_key: str) -> dict | None:
+        """Resolve one synthetic snapshot by its durable idempotency key."""
+        with self._tx() as c:
+            return _contest_row(
+                c.execute(
+                    "SELECT * FROM contests WHERE showcase_key=?", (showcase_key,)
+                ).fetchone()
+            )
+
+    def freeze_contest_showcase(self, contest_id: int, showcase_key: str) -> dict:
+        """Atomically mark a fully generated contest graph as a read-only snapshot.
+
+        The seed must first let Manager/Orchestrator reach the desired state.  A
+        snapshot cannot be frozen while it owns an active match, because normal
+        startup recovery intentionally ignores frozen graphs afterwards.
+        """
+        key = str(showcase_key).strip()
+        if not key or len(key) > 80:
+            raise ValueError("showcase_key 必须为 1..80 个字符")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            contest = c.execute(
+                "SELECT * FROM contests WHERE id=?", (contest_id,)
+            ).fetchone()
+            if not contest:
+                raise ValueError("赛事不存在")
+            current_key = contest["showcase_key"]
+            if current_key and current_key != key:
+                raise ValueError("赛事已绑定其他 showcase_key")
+            duplicate = c.execute(
+                "SELECT id FROM contests WHERE showcase_key=? AND id<>? LIMIT 1",
+                (key, contest_id),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("showcase_key 已被其他赛事占用")
+            for gid in _all_game_ids():
+                table = _matches_table(gid)
+                active = c.execute(
+                    f"SELECT 1 FROM {table} WHERE contest_id=? "
+                    "AND status IN (?,?) LIMIT 1",
+                    (contest_id, STATUS_PENDING, STATUS_RUNNING),
+                ).fetchone()
+                if active:
+                    raise ValueError("赛事仍有活跃对局，不能冻结为演示快照")
+            c.execute(
+                "UPDATE contests SET showcase_key=? WHERE id=?",
+                (key, contest_id),
+            )
             return _contest_row(
                 c.execute(
                     "SELECT * FROM contests WHERE id=?", (contest_id,)
@@ -6288,7 +6360,10 @@ class Store:
                 "matches_running": match_count("running"),
                 "matches_pending": match_count("pending"),
                 "contests": one("SELECT COUNT(*) FROM contests"),
-                "contests_running": one("SELECT COUNT(*) FROM contests WHERE status='running'"),
+                "contests_running": one(
+                    "SELECT COUNT(*) FROM contests "
+                    "WHERE status='running' AND showcase_key IS NULL"
+                ),
                 "active_sessions": one(
                     "SELECT COUNT(*) FROM sessions WHERE expires_at > ?",
                     _now(),

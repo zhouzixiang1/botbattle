@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS contests (
     source_contest_id       INTEGER,  -- P2: 软链（预赛→决赛导航，不复制 entry）
     official_results_ready  INTEGER NOT NULL DEFAULT 0,  -- P2: 全员正式名次是否已落库
     require_real_name       INTEGER NOT NULL DEFAULT 0,  -- 报名是否要求实名
+    showcase_key            TEXT,  -- 非空=长期只读的合成演示快照（由专用 seed 管理）
     CONSTRAINT chk_contest_status CHECK (
         status IN ('draft','open','published','running','rest','finished','cancelled'))
 );

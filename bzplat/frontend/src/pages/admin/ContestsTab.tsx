@@ -45,7 +45,9 @@ interface Contest {
   registration_opens_at?: string | null
   registration_closes_at?: string | null
   template_id?: string
+  template_name?: string
   game_id?: string
+  showcase_key?: string | null
 }
 
 interface Entry {
@@ -312,8 +314,9 @@ export default function ContestsTab() {
           </TableHeader>
           <TableBody>
             {contests.map((contest) => {
-              const primary = PRIMARY_ACTION[contest.status]
-              const mutableRoster = ROSTER_MUTABLE.has(contest.status)
+              const isShowcase = Boolean(contest.showcase_key)
+              const primary = isShowcase ? undefined : PRIMARY_ACTION[contest.status]
+              const mutableRoster = !isShowcase && ROSTER_MUTABLE.has(contest.status)
               const timeIssue = scheduleIssue(contest)
               return (
                 <Fragment key={contest.id}>
@@ -324,9 +327,14 @@ export default function ContestsTab() {
                     </TableCell>
                     <TableCell className="px-3 py-2 text-xs text-muted-foreground">
                       <div className="text-foreground">{gameLabel(contest.game_id)}</div>
-                      <div className="font-mono">{contest.template_id || '未指定模板'}</div>
+                      <div>{contest.template_name || contest.template_id || '未指定模板'}</div>
                     </TableCell>
-                    <TableCell className="px-3 py-2"><StatusBadge status={contest.status} /></TableCell>
+                    <TableCell className="px-3 py-2">
+                      <div className="flex flex-wrap gap-1">
+                        <StatusBadge status={contest.status} />
+                        {isShowcase && <Badge variant="secondary">演示快照</Badge>}
+                      </div>
+                    </TableCell>
                     <TableCell className="px-3 py-2 text-xs text-muted-foreground">
                       <div>开放报名：{contest.registration_opens_at ? fmtTime(contest.registration_opens_at) : '手动'}</div>
                       <div>报名截止：{contest.registration_closes_at ? fmtTime(contest.registration_closes_at) : '手动'}</div>
@@ -347,17 +355,17 @@ export default function ContestsTab() {
                             {primary.label}
                           </Button>
                         )}
-                        {contest.status === 'rest' && (
+                        {!isShowcase && contest.status === 'rest' && (
                           <Button type="button" size="sm" disabled={busyId === contest.id} onClick={() => void resumeContest(contest)}>
                             进入下一阶段
                           </Button>
                         )}
-                        {(contest.status === 'running' || contest.status === 'rest') && (
+                        {!isShowcase && (contest.status === 'running' || contest.status === 'rest') && (
                           <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void forceFinish(contest)}>
                             恢复性结束
                           </Button>
                         )}
-                        {CANCELLABLE.has(contest.status) && (
+                        {!isShowcase && CANCELLABLE.has(contest.status) && (
                           <Button type="button" variant="outline" size="sm" disabled={busyId === contest.id} onClick={() => void cancelContest(contest)} className="text-destructive">
                             取消赛事
                           </Button>
@@ -365,12 +373,12 @@ export default function ContestsTab() {
                         <Button type="button" variant="outline" size="sm" onClick={() => showEntries(contest)}>
                           {mutableRoster ? '管理名册' : '查看名册'}
                         </Button>
-                        {SCHEDULE_EDITABLE[contest.status] && (
+                        {!isShowcase && SCHEDULE_EDITABLE[contest.status] && (
                           <Button type="button" variant="outline" size="sm" onClick={() => setScheduleContest(contest)}>
                             <CalendarClock className="size-3.5" />{timeIssue ? '修正时间' : '编辑时间'}
                           </Button>
                         )}
-                        {DELETABLE.has(contest.status) && (
+                        {!isShowcase && DELETABLE.has(contest.status) && (
                           <Button type="button" variant="destructive" size="sm" disabled={busyId === contest.id} onClick={() => void del(contest)}>
                             {contest.status === 'cancelled' ? '清理已取消赛事' : '删除草稿'}
                           </Button>
@@ -380,6 +388,9 @@ export default function ContestsTab() {
                         )}
                         {contest.status === 'cancelled' && (
                           <Badge variant="secondary" className="self-center">已取消 · 可清理</Badge>
+                        )}
+                        {isShowcase && (
+                          <Badge variant="outline" className="self-center">合成演示 · 所有写操作已禁用</Badge>
                         )}
                       </div>
                     </TableCell>
@@ -391,7 +402,7 @@ export default function ContestsTab() {
                           <div>
                             <h3 className="text-sm font-medium text-foreground">参赛名册</h3>
                             <p className="text-xs text-muted-foreground">
-                              {mutableRoster ? '草稿和报名阶段可以调整；发布排期后名册只读。' : '当前阶段名册只读，避免已发布对阵与参赛者不一致。'}
+                              {isShowcase ? '演示快照名册只读；仅可查看和导出。' : mutableRoster ? '草稿和报名阶段可以调整；发布排期后名册只读。' : '当前阶段名册只读，避免已发布对阵与参赛者不一致。'}
                             </p>
                           </div>
                           <Link to={`/contests/${contest.id}`} className="text-xs text-primary hover:underline">查看赛事详情</Link>

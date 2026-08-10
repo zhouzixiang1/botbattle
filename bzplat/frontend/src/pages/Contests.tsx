@@ -5,6 +5,7 @@ import PageStub from '@/components/PageStub'
 import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
@@ -24,6 +25,8 @@ interface Contest {
   description?: string
   created_at?: string
   template_id?: string
+  template_name?: string
+  showcase_key?: string | null
   game_id?: string
   require_real_name?: number
   registration_opens_at?: string | null
@@ -355,10 +358,11 @@ export default function Contests() {
                     {c.title}
                   </Link>
                   <StatusBadge status={c.status} />
+                  {c.showcase_key && <Badge variant="secondary" className="text-[10px]">演示快照</Badge>}
                 </div>
                 <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                   <span className="max-w-full truncate" title={c.template_id || undefined}>
-                    {templates.find((t) => t.id === c.template_id)?.name || c.template_id || '—'}
+                    {c.template_name || templates.find((t) => t.id === c.template_id)?.name || c.template_id || '—'}
                   </span>
                   <span>·</span>
                   <span>{gameLabel(c.game_id)}</span>
