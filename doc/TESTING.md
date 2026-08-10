@@ -99,7 +99,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |
 | 权威终态后端定向回归 | **70 passed / 1 warning（29.94s）** | `test_authoritative_terminal_events` + `test_audit_coverage` + `test_human_match` + `test_engine`：真实 70 手 Holdem、duplicate、协议技术负、启动崩溃、平台错误、SSE 队列与真实 TestClient WebSocket；replay/live 各一条相同 canonical 终态，广播时 Store/GET 已完成。warning 为既有 Starlette/httpx deprecation |
-| 后端整合提交完整 pytest | **1065 passed / 1 warning（221.78s）** | 本分支使用项目 `.venv/bin/python -m pytest -q` 实测；warning 为既有 Starlette/httpx deprecation |
+| 后端完整 pytest | **1069 passed / 1 skipped / 1 warning（220.90s）** | 本分支使用项目 `.venv/bin/python -m pytest -q` 实测；skip 为未构建 `frontend/dist` 时 SPA catch-all 不挂载的现有条件项，warning 为既有 Starlette/httpx deprecation |
 | Playwright 完整执行 | **39 passed（3.3m）** | 本分支隔离 QA 栈 `50384/5176`、Chromium 单 worker；四角色、三视口、Console/Network、REST/SSE/WS 与严格 cleanup 全部通过。原 disposable Bot 清理竞态已由 QA 代码 profile 禁用 auto-match 消除；未放宽 DELETE 200/随后 GET 404 断言，三个游戏自 QA 启动后的新增 ladder 均为 0 |
 | Admin 浏览器定向回归 | **9 passed（24.7s）** | `admin-audit.spec.ts` 全量；含状态边界、Dialog 内错误、真实隔离 DB 的手动开赛 `NULL` 重载与成功 audit 证据 |
 | Admin 时间定向后端回归 | **26 passed / 1 warning（8.04s）** | `test_admin_contest_status.py`；覆盖状态边界、发布态轮次错峰重排/清空、已有 match 拒绝、强制 SQLite 写失败整事务回滚；warning 为既有 Starlette/httpx deprecation |
