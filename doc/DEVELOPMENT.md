@@ -215,7 +215,7 @@ python scripts/seed_contest_showcase.py verify \
 rest 24 场真实小组赛；finished 24 场分组双循环 + 7 场 Top 8 淘汰。完整集合共 59 个互不复用的
 真实 Match，所有回放经 canonical LongRunning Linux ELF、正式 Manager/Orchestrator/GameSpec 裁判生成。
 验收逐场要求 `technical_loss=0`、原因仅 `five/draw`、无故障事件，且回放只有一个与数据库胜者/原因
-一致的末尾 canonical `match_end`。六个 key 已完整时二次 seed 先严格验收并跳过 provisioning；12 个
+及结果分差一致的末尾 canonical `match_end`。六个 key 已完整时二次 seed 先严格验收并跳过 provisioning；12 个
 专用 Bot 最终全部 inactive（历史详情仍可按 ID 查看），不会进入五子棋榜单或自动匹配。
 
 部署到主库属于显式运维写操作，只能在代码已评审、主库已备份且 50380 已停服后执行；独立 seed

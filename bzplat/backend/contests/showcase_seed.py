@@ -286,6 +286,17 @@ def _deactivate_showcase_bots(store: Store, *, strict: bool) -> None:
         logger.exception("failed to deactivate validated showcase Bots during cleanup")
 
 
+def _deactivate_tracked_bots(store: Store, bot_ids: set[int]) -> None:
+    """Best-effort cleanup for Bots activated by this exact seed invocation."""
+    for bot_id in sorted(bot_ids):
+        try:
+            bot = store.get_bot(bot_id)
+            if bot and bot.get("is_active"):
+                store.update_bot(bot_id, is_active=0)
+        except Exception:
+            logger.exception("failed to deactivate tracked showcase Bot %s", bot_id)
+
+
 def _verify_match_replay_quality(store: Store, match: dict[str, Any]) -> None:
     """Require a clean, canonical Gomoku result suitable for customer demos."""
     match_id = str(match["id"])
@@ -314,9 +325,12 @@ def _verify_match_replay_quality(store: Store, match: dict[str, Any]) -> None:
     if terminal_indices != [len(events) - 1]:
         raise ShowcaseSeedError(f"演示对局必须仅有一个末尾 canonical match_end: {match_id}")
     terminal = events[-1]
+    result = match.get("result")
     if (
         terminal.get("reason") != reason
         or terminal.get("winner") != match.get("winner")
+        or not isinstance(result, dict)
+        or terminal.get("deltas") != result.get("deltas")
         or not any(event.get("type") == "move" for event in events)
     ):
         raise ShowcaseSeedError(f"演示对局终局事件与数据库不一致: {match_id}")
@@ -467,6 +481,7 @@ def provision_showcase_identities(
     sample_binary: Path,
     *,
     emit: Callable[[str], None] = _log_emit,
+    activated_bot_ids: set[int] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     if not sample_binary.is_file():
         raise ShowcaseSeedError(f"五子棋样例 ELF 不存在: {sample_binary}")
@@ -510,6 +525,8 @@ def provision_showcase_identities(
                 runtime_mode="longrunning",
                 binary_runner=preflight,
             )
+            if activated_bot_ids is not None:
+                activated_bot_ids.add(int(bot["id"]))
             emit(f"Bot {index:02d}/12：已创建 #{bot['id']}")
         else:
             if bot.get("game_id") != SHOWCASE_GAME_ID or int(bot.get("owner_id") or 0) != int(player["id"]):
@@ -526,6 +543,8 @@ def provision_showcase_identities(
                 emit(f"Bot {index:02d}/12：已刷新 canonical LongRunning 版本")
             if not bot.get("is_active"):
                 bot = manager.set_active(int(bot["id"]), int(player["id"]), True)
+                if activated_bot_ids is not None:
+                    activated_bot_ids.add(int(bot["id"]))
         bots.append(store.get_bot(int(bot["id"])))
     return organizer, players, bots
 
@@ -862,6 +881,7 @@ async def seed_showcases(
 ) -> dict[str, Any]:
     store = Store(str(db_path))
     orch: MatchOrchestrator | None = None
+    activated_bot_ids: set[int] = set()
     try:
         validate_showcase_upload_namespace(store, upload_root, create=True)
         if all(store.get_contest_by_showcase_key(key) for key in SHOWCASE_KEYS):
@@ -875,7 +895,11 @@ async def seed_showcases(
             emit("六个演示快照已完整：跳过 Bot provisioning，仅执行严格验收")
             return verify_showcases(store, upload_root)
         organizer, players, bots = provision_showcase_identities(
-            store, upload_root, sample_binary, emit=emit
+            store,
+            upload_root,
+            sample_binary,
+            emit=emit,
+            activated_bot_ids=activated_bot_ids,
         )
         validate_showcase_upload_namespace(
             store, upload_root, require_complete=True
@@ -917,6 +941,10 @@ async def seed_showcases(
     finally:
         if orch is not None:
             await orch.shutdown()
+        # This cleanup must run before graph-wide validation: a later reserved
+        # identity may be corrupt, but that must not strand an earlier Bot that
+        # this invocation successfully activated.
+        _deactivate_tracked_bots(store, activated_bot_ids)
         _deactivate_showcase_bots(store, strict=False)
         store.close()
 

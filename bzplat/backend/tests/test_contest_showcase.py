@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from bzplat.backend.contests import showcase_seed as showcase_seed_module
 from bzplat.backend.contests.scheduler import ContestScheduler
 from bzplat.backend.contests.showcase_seed import (
     ShowcaseSeedError,
@@ -454,6 +456,79 @@ def test_showcase_quality_rejects_fault_event_even_with_completed_row(tmp_path):
     ]))
     with pytest.raises(ShowcaseSeedError, match="故障事件"):
         _verify_match_replay_quality(store, match)
+    match = store.update_match(
+        "quality-fault",
+        result={"rounds_played": 1, "deltas": [1, -1], "normalized_delta": 1},
+    )
+    store.upsert_replay("quality-fault", json.dumps([
+        {"type": "match_start", "game_id": "gomoku"},
+        {"type": "move", "player": 0, "x": 0, "y": 0},
+        {"type": "match_end", "winner": 0, "reason": "five", "deltas": [-1, 1]},
+    ]))
+    with pytest.raises(ShowcaseSeedError, match="终局事件与数据库不一致"):
+        _verify_match_replay_quality(store, match)
+
+
+def test_seed_deactivates_earlier_tracked_bot_when_later_identity_conflicts(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / "tracked-cleanup.db"
+    upload_root = tmp_path / "bot_uploads_showcase"
+    upload_root.mkdir()
+    sample = Path(__file__).parents[3] / "samples" / "gomokubot_linux_amd64"
+    raw = sample.read_bytes()
+    store = create_app(db_path=str(db_path), max_concurrent=1).state.store
+    players = []
+    for index in (1, 2):
+        player = store.create_user(
+            f"showcase_player_{index:02d}",
+            f"showcase-player-{index:02d}@invalid.example",
+            hash_password(PASSWORD),
+            role="user",
+        )
+        players.append(store.update_user(player["id"], email_verified=1))
+
+    first = store.create_bot(
+        players[0]["id"], "showcase_gomoku_01",
+        display_name="演示棋手 01",
+        description="合成演示 LongRunning 五子棋 Bot",
+        binary_path="", format="elf", os="linux", arch="amd64",
+        game_id="gomoku", runtime_mode="longrunning", is_active=0,
+    )
+    binary = upload_root / str(first["id"]) / "v1" / "bot.bin"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(raw)
+    binary.chmod(0o755)
+    store.add_bot_version(
+        first["id"], version=1, binary_path=str(binary),
+        checksum=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw),
+        runtime_mode="longrunning",
+    )
+    store.create_bot(
+        players[1]["id"], "showcase_gomoku_02",
+        description="合成演示但元数据冲突",
+        binary_path="/tmp/conflict", format="elf",
+        game_id="holdem", runtime_mode="traditional", is_active=0,
+    )
+    store.close()
+
+    # Model a conflict introduced after the namespace precheck.  The important
+    # contract is that the first Bot was activated by this invocation before the
+    # later identity fails, and finally cleans it without validating the whole graph.
+    monkeypatch.setattr(
+        showcase_seed_module,
+        "validate_showcase_upload_namespace",
+        lambda *_args, **_kwargs: {"bots": 0, "files": 0},
+    )
+    with pytest.raises(ShowcaseSeedError, match="专用演示 Bot 冲突"):
+        asyncio.run(
+            showcase_seed_module.seed_showcases(
+                db_path, upload_root, sample, emit=lambda _message: None,
+            )
+        )
+    reopened = create_app(db_path=str(db_path), max_concurrent=1).state.store
+    assert reopened.get_bot(first["id"])["is_active"] == 0
+    reopened.close()
 
 
 def test_showcase_pairing_rejects_cross_bound_dedicated_bot(tmp_path):
