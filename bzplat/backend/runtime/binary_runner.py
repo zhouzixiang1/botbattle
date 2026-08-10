@@ -660,7 +660,7 @@ class BinaryRunner:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    limit=1024 * 1024,
+                    limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
                 )
             except BaseException:
                 await self._cleanup_created_scope_unlocked(
