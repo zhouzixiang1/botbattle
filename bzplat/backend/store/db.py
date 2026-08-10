@@ -9,7 +9,7 @@ import json
 import sqlite3
 import threading
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Callable
 
 from bzplat.backend.mail import seed_email_templates
 
@@ -66,6 +66,16 @@ class AutoMatchDailyCapReached(RuntimeError):
         self.local_day = local_day
         self.count = count
         self.cap = cap
+
+
+def _require_iso_day(local_day: Any) -> str:
+    try:
+        parsed = date.fromisoformat(local_day)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("auto-match local_day 必须是 YYYY-MM-DD") from exc
+    if parsed.isoformat() != local_day:
+        raise ValueError("auto-match local_day 必须是 YYYY-MM-DD")
+    return local_day
 
 
 def _now() -> str:
@@ -1429,9 +1439,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
 class Store:
     """SQLite 存储。线程安全；持久连接 check_same_thread=False。"""
 
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(
+        self,
+        path: str | None = None,
+        *,
+        auto_match_day_provider: Callable[[], str] | None = None,
+    ) -> None:
         self.path = path or DEFAULT_DB_PATH
         self._lock = threading.Lock()
+        if auto_match_day_provider is None:
+            # Lazy import keeps Store's module import independent from the
+            # runtime package while retaining runtime/config.py as the code
+            # truth for Asia/Shanghai calendar semantics.
+            from bzplat.backend.runtime.config import platform_local_day
+
+            auto_match_day_provider = platform_local_day
+        self._auto_match_day_provider = auto_match_day_provider
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         # FK 强制是 SQLite 的连接级设置（默认 OFF）。在连接处一次性开启，覆盖所有
         # 访问路径（_tx / 直接 _conn / 脚本 / 备份恢复）——_tx() 内的重复开启是冗余
@@ -2436,18 +2459,23 @@ class Store:
 
     def count_auto_matches_for_day(self, local_day: str) -> int:
         """Return durable system auto-match claims for one platform local day."""
-        try:
-            parsed = date.fromisoformat(local_day)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("auto-match local_day 必须是 YYYY-MM-DD") from exc
-        if parsed.isoformat() != local_day:
-            raise ValueError("auto-match local_day 必须是 YYYY-MM-DD")
+        local_day = _require_iso_day(local_day)
         with self._tx() as c:
             row = c.execute(
                 "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
                 (local_day,),
             ).fetchone()
             return int(row[0]) if row else 0
+
+    def auto_match_daily_status(self) -> tuple[str, int]:
+        """Return the Store-authoritative current platform day and claim count."""
+        with self._tx() as c:
+            local_day = _require_iso_day(self._auto_match_day_provider())
+            row = c.execute(
+                "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
+                (local_day,),
+            ).fetchone()
+            return local_day, int(row[0]) if row else 0
 
     def create_match(
         self,
@@ -2462,24 +2490,14 @@ class Store:
         match_config: dict | None = None,
         human_user_id: int | None = None,
         human_seat: int | None = None,
-        auto_match_local_day: str | None = None,
         auto_match_daily_cap: int | None = None,
     ) -> dict:
         gid = _registered_game_id(game_id)
         tbl = _matches_table(gid)
         mc_json = json.dumps(match_config or {}, ensure_ascii=False)
-        is_auto_match = (
-            auto_match_local_day is not None or auto_match_daily_cap is not None
-        )
+        is_auto_match = auto_match_daily_cap is not None
         if is_auto_match:
-            if auto_match_local_day is None or auto_match_daily_cap is None:
-                raise ValueError("auto-match 日期与每日上限必须同时提供")
-            try:
-                parsed_day = date.fromisoformat(auto_match_local_day)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("auto-match local_day 必须是 YYYY-MM-DD") from exc
-            if parsed_day.isoformat() != auto_match_local_day:
-                raise ValueError("auto-match local_day 必须是 YYYY-MM-DD")
+            assert auto_match_daily_cap is not None
             auto_match_daily_cap = int(auto_match_daily_cap)
             if auto_match_daily_cap < 0:
                 raise ValueError("auto-match daily_cap 不可为负数")
@@ -2491,13 +2509,18 @@ class Store:
                 or human_seat is not None
             ):
                 raise ValueError("auto-match claim 仅允许系统非赛事 ladder 对局")
-        created_at = _now()
+        auto_match_local_day: str | None = None
         with self._tx() as c:
             if is_auto_match:
                 # Serialize the read/check/write sequence across independent
-                # Store connections/processes.  A deferred SELECT followed by
-                # INSERT would let two schedulers both observe the last slot.
+                # Store connections/processes.  The platform day is deliberately
+                # obtained only *after* this write lock: a day computed by the
+                # scheduler before waiting here could cross midnight and charge
+                # a new-day match against yesterday's quota.
                 c.execute("BEGIN IMMEDIATE")
+                auto_match_local_day = _require_iso_day(
+                    self._auto_match_day_provider()
+                )
                 row = c.execute(
                     "SELECT COUNT(*) FROM auto_match_daily_claims WHERE local_day=?",
                     (auto_match_local_day,),
@@ -2510,6 +2533,7 @@ class Store:
                         count=current,
                         cap=auto_match_daily_cap,
                     )
+            created_at = _now()
             c.execute(
                 f"INSERT INTO {tbl}(id, bot_a_id, bot_b_id, owner_id, "
                 "contest_id, reason, match_type, status, game_id, match_config, "
@@ -2537,14 +2561,21 @@ class Store:
                 (match_id, gid),
             )
             if is_auto_match:
+                assert auto_match_local_day is not None
                 c.execute(
                     "INSERT INTO auto_match_daily_claims"
                     "(match_id, local_day, created_at) VALUES(?,?,?)",
                     (match_id, auto_match_local_day, created_at),
                 )
-            return _row(
+            created = _row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
+            if created is not None and auto_match_local_day is not None:
+                # Transient internal metadata lets the orchestrator log the day
+                # actually chosen under the DB write lock; it is not persisted
+                # on or exposed by the public match contract.
+                created["_auto_match_local_day"] = auto_match_local_day
+            return created
 
     def _match_table_of(self, c, match_id: str) -> str | None:
         """经 matches_index 定位 match_id 所在的物理表；不存在返回 None。"""

@@ -104,8 +104,10 @@ effective  = min(configured, ceiling)
 **节流**：同一 bot 两场间隔不低于 `auto_match_bot_cooldown`（默认 600 秒）；
 近期已配对组合短期不再重复。**每轮**最多补 `auto_match_max_per_round`（默认 2）场；
 **每日**总量上限 `auto_match_daily_cap`（默认 200，0=不限，达上限当日停）。自然日固定按
-`Asia/Shanghai` 计算，不依赖宿主机时区。系统调度创建 match 时，Store 在同一个
-`BEGIN IMMEDIATE` 事务内读取 `auto_match_daily_claims`、校验 cap，并写入 match、索引与 claim；
+`Asia/Shanghai` 计算，不依赖宿主机时区。系统调度只向 Store 传代码 cap，不传调用方预先
+计算的日期；Store 取得 `BEGIN IMMEDIATE` 写锁后才读取当前日期和 `auto_match_daily_claims`、
+校验 cap，并在同一事务写入 match、索引与 claim；即使等待写锁期间跨过 00:00，也只会
+占用新自然日额度。
 因此服务重启、多个 Store/服务实例同时抢最后名额都不能绕过上限。升级时只首次把历史上
 唯一的系统身份（`match_type=ladder`、owner/contest/human 均为空）回填为 claim，之后仅
 auto_matcher 的显式创建路径写 claim，普通用户对局不计入。

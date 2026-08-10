@@ -20,7 +20,6 @@ from typing import Any
 from bzplat.backend.runtime.config import (
     AUTO_MATCH_CONFIG,
     AutoMatchConfig,
-    platform_local_day,
 )
 from bzplat.backend.store import AutoMatchDailyCapReached
 from bzplat.backend.store.schema import TYPE_LADDER, VALID_GAME_IDS
@@ -49,7 +48,7 @@ class AutoMatchScheduler:
     @property
     def daily_count(self) -> int:
         """今日系统 auto-match 场数（DB 权威，供 admin 可见性展示）。"""
-        return self.store.count_auto_matches_for_day(platform_local_day())
+        return self.store.auto_match_daily_status()[1]
 
     # ------------------------------------------------------------------ config
     def _cfg(self) -> dict[str, Any]:
@@ -113,8 +112,7 @@ class AutoMatchScheduler:
 
     async def _schedule_some(self, cfg: dict[str, Any]) -> int:
         """在空闲槽内尽量安排对局；返回本轮安排场数。"""
-        local_day = platform_local_day()
-        daily_count = self.store.count_auto_matches_for_day(local_day)
+        _local_day, daily_count = self.store.auto_match_daily_status()
         # 每日总量上限
         if cfg["daily_cap"] > 0 and daily_count >= cfg["daily_cap"]:
             logger.info("auto-match daily cap reached %d/%d，今日停止", daily_count, cfg["daily_cap"])
@@ -161,23 +159,20 @@ class AutoMatchScheduler:
             if partner is None:
                 continue
             try:
-                # Recompute immediately before the atomic DB claim so a loop
-                # crossing Asia/Shanghai midnight records the new calendar day.
-                local_day = platform_local_day()
                 await self.orch.challenge(
                     a["bot_id"],
                     partner["bot_id"],
                     owner_user_id=None,
                     match_type=TYPE_LADDER,
                     game_id=gid,
-                    auto_match_local_day=local_day,
                     auto_match_daily_cap=cfg["daily_cap"],
                 )
             except AutoMatchDailyCapReached as exc:
                 logger.info(
-                    "auto-match daily cap reached %d/%d，今日停止",
+                    "auto-match daily cap reached %d/%d (%s)，今日停止",
                     exc.count,
                     exc.cap,
+                    exc.local_day,
                 )
                 return scheduled
             except Exception:  # noqa: BLE001
@@ -195,7 +190,7 @@ class AutoMatchScheduler:
             ] = now
             self._evict_recent(now, cfg["cooldown"])
             scheduled += 1
-            daily_count = self.store.count_auto_matches_for_day(local_day)
+            _actual_day, daily_count = self.store.auto_match_daily_status()
             a_pl = int(a.get("matches_played") or 0) < placement if placement > 0 else False
             logger.info(
                 "auto-match scheduled: %s(%s) vs %s(%s) [%s] placement=%s daily=%d/%d",

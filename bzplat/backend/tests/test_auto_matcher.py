@@ -32,9 +32,9 @@ class FakeOrch:
 
     async def challenge(self, a, b, owner_user_id, *, match_type="challenge",
                         contest_id=None, game_id=None, match_config=None,
-                        auto_match_local_day=None, auto_match_daily_cap=None):
+                        auto_match_daily_cap=None):
         mid = f"m{len(self.calls)}"
-        if auto_match_local_day is not None:
+        if auto_match_daily_cap is not None:
             assert self.store is not None
             self.store.create_match(
                 mid,
@@ -45,7 +45,6 @@ class FakeOrch:
                 match_type=match_type,
                 game_id=game_id,
                 match_config=match_config,
-                auto_match_local_day=auto_match_local_day,
                 auto_match_daily_cap=auto_match_daily_cap,
             )
         self._tasks[mid] = object()
@@ -308,7 +307,10 @@ def test_daily_cap_is_atomic_across_store_instances(tmp_path):
     setup = Store(str(db_path))
     bots = _mk_bots(setup, 2, "holdem")
     setup.close()
-    stores = [Store(str(db_path)) for _ in range(6)]
+    stores = [
+        Store(str(db_path), auto_match_day_provider=lambda: "2026-08-10")
+        for _ in range(6)
+    ]
     barrier = Barrier(len(stores))
 
     def attempt(index: int) -> bool:
@@ -321,7 +323,6 @@ def test_daily_cap_is_atomic_across_store_instances(tmp_path):
                 owner_id=None,
                 match_type=TYPE_LADDER,
                 game_id="holdem",
-                auto_match_local_day="2026-08-10",
                 auto_match_daily_cap=2,
             )
         except AutoMatchDailyCapReached:
@@ -345,9 +346,15 @@ def test_platform_day_uses_asia_shanghai_boundary():
     assert platform_local_day(at_midnight) == "2026-08-11"
 
 
-def test_new_platform_day_gets_fresh_quota(store: Store):
+def test_new_platform_day_gets_fresh_quota(tmp_path):
+    current_day = ["2026-08-10"]
+    store = Store(
+        str(tmp_path / "day-boundary.db"),
+        auto_match_day_provider=lambda: current_day[0],
+    )
     bots = _mk_bots(store, 2, "holdem")
     for day, match_id in (("2026-08-10", "day-1"), ("2026-08-11", "day-2")):
+        current_day[0] = day
         store.create_match(
             match_id,
             bots[0]["id"],
@@ -355,11 +362,53 @@ def test_new_platform_day_gets_fresh_quota(store: Store):
             owner_id=None,
             match_type=TYPE_LADDER,
             game_id="holdem",
-            auto_match_local_day=day,
             auto_match_daily_cap=1,
         )
     assert store.count_auto_matches_for_day("2026-08-10") == 1
     assert store.count_auto_matches_for_day("2026-08-11") == 1
+
+
+def test_store_resolves_day_after_write_lock_crossing_midnight(tmp_path):
+    """调用前的旧日期无权威性；拿写锁后必须按新日 claim/cap。"""
+    current_day = ["2026-08-10"]
+    holder: dict[str, Store] = {}
+
+    def day_after_lock() -> str:
+        store = holder["store"]
+        assert store._conn.in_transaction is True
+        return current_day[0]
+
+    store = Store(
+        str(tmp_path / "midnight-lock.db"),
+        auto_match_day_provider=day_after_lock,
+    )
+    holder["store"] = store
+    bots = _mk_bots(store, 2, "holdem")
+    common = {
+        "bot_a_id": bots[0]["id"],
+        "bot_b_id": bots[1]["id"],
+        "owner_id": None,
+        "match_type": TYPE_LADDER,
+        "game_id": "holdem",
+        "auto_match_daily_cap": 1,
+    }
+    store.create_match("old-day-full", **common)
+
+    # Scheduler/caller observed 23:59:59, then waited; Store gets the write
+    # lock after Asia/Shanghai midnight and must ignore that stale observation.
+    observed_before_lock = platform_local_day(
+        datetime(2026, 8, 10, 15, 59, 59, tzinfo=timezone.utc)
+    )
+    assert observed_before_lock == "2026-08-10"
+    current_day[0] = "2026-08-11"
+    store.create_match("new-day-first", **common)
+
+    assert store.count_auto_matches_for_day("2026-08-10") == 1
+    assert store.count_auto_matches_for_day("2026-08-11") == 1
+    with pytest.raises(AutoMatchDailyCapReached) as exc_info:
+        store.create_match("new-day-over-cap", **common)
+    assert exc_info.value.local_day == "2026-08-11"
+    assert store.get_match("new-day-over-cap") is None
 
 
 def test_non_auto_ladder_is_not_counted(store: Store):
