@@ -119,7 +119,7 @@ graph LR
 
 ## 3. 数据库设计
 
-SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **30 张表**、**37** 个具名索引；per-game 表与索引由 `_migrate` 按注册表模板补齐。所有常量（状态码/类型/`REGISTERED_ENGINES`/配置键名）集中在 `store/schema.py`。
+SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **31 张表**、**38** 个具名索引；per-game 表与索引由 `_migrate` 按注册表模板补齐。状态码、类型、`REGISTERED_ENGINES` 与历史配置键名集中在 `store/schema.py`，生产运行参数及时区集中在 `runtime/config.py`。
 
 ### 3.1 核心表（选录）
 
