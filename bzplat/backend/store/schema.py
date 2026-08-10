@@ -226,12 +226,15 @@ CREATE TABLE IF NOT EXISTS rating_projection_state (
     policy_version              TEXT    NOT NULL,
     rebuilt_at                  TEXT,
     source_settlement_count     INTEGER NOT NULL DEFAULT 0 CHECK (source_settlement_count>=0),
-    source_last_settled_order   INTEGER NOT NULL DEFAULT 0 CHECK (source_last_settled_order>=0)
+    source_last_settled_order   INTEGER NOT NULL DEFAULT 0 CHECK (source_last_settled_order>=0),
+    source_digest               TEXT    NOT NULL DEFAULT '',
+    projection_digest           TEXT    NOT NULL DEFAULT '',
+    plan_digest                 TEXT    NOT NULL DEFAULT ''
 );
 INSERT OR IGNORE INTO rating_projection_state(
     singleton,policy_version,rebuilt_at,source_settlement_count,
-    source_last_settled_order
-) VALUES(1,'legacy-unverified',NULL,0,0);
+    source_last_settled_order,source_digest,projection_digest,plan_digest
+) VALUES(1,'legacy-unverified',NULL,0,0,'','','');
 
 -- completed 事务先冻结全局结算序号；实际评分事务随后用同一序号写 settlement。
 -- 这样崩溃恢复不必再猜 created_at/ended_at 顺序。
@@ -278,6 +281,10 @@ CREATE TABLE IF NOT EXISTS auto_match_decisions (
     terminal_at                 TEXT,
     terminal_reason             TEXT    NOT NULL DEFAULT '',
     settlement_order            INTEGER,
+    claim_dispatcher_token      TEXT,
+    claim_dispatcher_epoch      INTEGER CHECK (
+        claim_dispatcher_epoch IS NULL OR claim_dispatcher_epoch>0
+    ),
     CONSTRAINT chk_auto_decision_bots CHECK (bot_a_id <> bot_b_id),
     CONSTRAINT chk_auto_decision_owners CHECK (owner_a_id <> owner_b_id),
     CONSTRAINT chk_auto_decision_lane CHECK (
@@ -286,6 +293,9 @@ CREATE TABLE IF NOT EXISTS auto_match_decisions (
     ),
     CONSTRAINT chk_auto_decision_lifecycle CHECK (
         lifecycle IN ('queued','dispatched','completed','aborted','cancelled')
+    ),
+    CONSTRAINT chk_auto_decision_fence_pair CHECK (
+        (claim_dispatcher_token IS NULL) = (claim_dispatcher_epoch IS NULL)
     )
 );
 
@@ -304,6 +314,9 @@ CREATE TABLE IF NOT EXISTS auto_match_queue (
     status              TEXT    NOT NULL DEFAULT 'queued',
     match_id            TEXT,
     dispatcher_token    TEXT,
+    dispatcher_epoch    INTEGER CHECK (
+        dispatcher_epoch IS NULL OR dispatcher_epoch>0
+    ),
     selection_reason    TEXT    NOT NULL DEFAULT '',
     created_at          TEXT    NOT NULL,
     dispatched_at       TEXT,
@@ -311,9 +324,9 @@ CREATE TABLE IF NOT EXISTS auto_match_queue (
     CONSTRAINT chk_auto_queue_status CHECK (status IN ('queued','dispatched')),
     CONSTRAINT chk_auto_queue_lifecycle CHECK (
         (status='queued' AND match_id IS NULL AND dispatcher_token IS NULL
-                         AND dispatched_at IS NULL) OR
+                         AND dispatcher_epoch IS NULL AND dispatched_at IS NULL) OR
         (status='dispatched' AND match_id IS NOT NULL AND dispatcher_token IS NOT NULL
-                             AND dispatched_at IS NOT NULL)
+                             AND dispatcher_epoch IS NOT NULL AND dispatched_at IS NOT NULL)
     )
 );
 
@@ -332,10 +345,11 @@ VALUES(1,1,CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS auto_match_dispatcher (
     singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
     owner_token     TEXT,
+    lease_epoch     INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch>=0),
     lease_until     TEXT,
     heartbeat_at    TEXT
 );
-INSERT OR IGNORE INTO auto_match_dispatcher(singleton) VALUES(1);
+INSERT OR IGNORE INTO auto_match_dispatcher(singleton,lease_epoch) VALUES(1,0);
 
 -- 持久公平游标与平台故障 circuit breaker。next_lane: 0=placement, 1=formal。
 CREATE TABLE IF NOT EXISTS auto_match_fair_state (

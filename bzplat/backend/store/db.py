@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import sqlite3
 import threading
@@ -69,6 +70,10 @@ _AUTO_MATCH_PLATFORM_ABORT_REASONS = frozenset(
         "orphan_pending_after_restart",
     }
 )
+
+
+class AutoMatchFenceLost(RuntimeError):
+    """The automatic-match worker no longer owns its durable dispatch epoch."""
 
 
 def _now() -> str:
@@ -539,6 +544,239 @@ def _all_game_ids() -> frozenset[str]:
     return _reg.all_ids()
 
 
+def _canonical_digest(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+_RATING_PROJECTION_FIELDS = (
+    "rating",
+    "rd",
+    "vol",
+    "wins",
+    "losses",
+    "draws",
+    "delta_total",
+    "matches_played",
+    "last_played_at",
+)
+
+
+def rating_projection_digest(
+    ratings: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    pairs: list[dict[str, Any]],
+) -> str:
+    """Hash the semantic rating projection, excluding surrogate row ids."""
+    semantic = {
+        "ratings": [
+            {key: row.get(key) for key in ("bot_id", "game_id", *_RATING_PROJECTION_FIELDS)}
+            for row in sorted(
+                ratings,
+                key=lambda item: (str(item.get("game_id") or ""), int(item["bot_id"])),
+            )
+        ],
+        "rating_history": [
+            {
+                key: row.get(key)
+                for key in (
+                    "bot_id",
+                    "game_id",
+                    "rating",
+                    "rd",
+                    "vol",
+                    "matches_played",
+                    "reason",
+                    "created_at",
+                )
+            }
+            for row in sorted(
+                history,
+                key=lambda item: (
+                    str(item.get("game_id") or ""),
+                    int(item["bot_id"]),
+                    int(item.get("matches_played") or 0),
+                    str(item.get("reason") or ""),
+                    str(item.get("created_at") or ""),
+                    float(item.get("rating") or 0.0),
+                ),
+            )
+        ],
+        "pair_stats": [
+            {
+                key: row.get(key)
+                for key in (
+                    "bot_a_id",
+                    "bot_b_id",
+                    "samples",
+                    "last_played_at",
+                    "a_wins",
+                    "a_losses",
+                    "draws",
+                )
+            }
+            for row in sorted(
+                pairs,
+                key=lambda item: (int(item["bot_a_id"]), int(item["bot_b_id"])),
+            )
+        ],
+    }
+    return _canonical_digest(semantic)
+
+
+def rating_plan_digest(source_digest: str, bot_universe_digest: str) -> str:
+    """Hash inputs that determine an offline projection rebuild plan."""
+    return _canonical_digest(
+        {
+            "policy_version": _RATING_PROJECTION_POLICY_VERSION,
+            "replay_semantics": "glicko2-settled-order-v2",
+            "history_limit": 200,
+            "source_digest": source_digest,
+            "bot_universe_digest": bot_universe_digest,
+        }
+    )
+
+
+def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return live source/projection/plan digests plus sequence violations.
+
+    This function is shared by the online fail-closed gate and the offline
+    rebuild command so the two paths cannot silently diverge on hash semantics.
+    """
+    issues: list[str] = []
+    sentinel = conn.execute(
+        "SELECT match_id,settled_at,settled_order FROM match_rating_settlements "
+        "WHERE match_id=?",
+        (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+    ).fetchall()
+    if len(sentinel) != 1 or sentinel[0]["settled_order"] is None or int(
+        sentinel[0]["settled_order"]
+    ) != 0:
+        issues.append("rating settlement sentinel must exist exactly once at order 0")
+
+    settlements = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT match_id,settled_at,settled_order "
+            "FROM match_rating_settlements WHERE match_id<>? "
+            "ORDER BY settled_order,match_id",
+            (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,),
+        ).fetchall()
+    ]
+    orders = [
+        int(row["settled_order"])
+        for row in settlements
+        if row.get("settled_order") is not None
+    ]
+    if len(orders) != len(settlements) or orders != list(range(1, len(orders) + 1)):
+        issues.append("rating settlements must have strict contiguous order 1..N")
+
+    policies = {
+        str(row["match_id"]): dict(row)
+        for row in conn.execute(
+            "SELECT match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,"
+            "source,classified_at,settled_order FROM match_rating_policies"
+        ).fetchall()
+    }
+    settlement_by_id = {str(row["match_id"]): row for row in settlements}
+    source_rows: list[dict[str, Any]] = []
+    source_ids = sorted(
+        set(settlement_by_id)
+        | {
+            match_id
+            for match_id, policy in policies.items()
+            if policy.get("settled_order") is not None
+        },
+        key=lambda match_id: (
+            int((policies.get(match_id) or {}).get("settled_order") or 0),
+            match_id,
+        ),
+    )
+    for match_id in source_ids:
+        policy = policies.get(match_id)
+        settlement = settlement_by_id.get(match_id)
+        if policy is None:
+            issues.append(f"settlement missing rating policy: {match_id}")
+            source_rows.append({"match_id": match_id, "settlement": settlement})
+            continue
+        policy_order = policy.get("settled_order")
+        settlement_order = settlement.get("settled_order") if settlement else None
+        if settlement is None:
+            issues.append(f"rating policy reserved but unsettled: {match_id}")
+        elif int(policy_order or -1) != int(settlement_order or -2):
+            issues.append(f"rating policy/settlement order mismatch: {match_id}")
+        game_id = str(policy.get("game_id") or "")
+        match_row: dict[str, Any] | None = None
+        if game_id in _all_game_ids():
+            raw = conn.execute(
+                f"SELECT id,status,winner,result,ended_at FROM {_matches_table(game_id)} "
+                "WHERE id=?",
+                (match_id,),
+            ).fetchone()
+            match_row = dict(raw) if raw else None
+        if match_row is None:
+            issues.append(f"rating source match missing: {match_id}")
+        else:
+            try:
+                match_row["result"] = json.loads(match_row.get("result") or "{}")
+            except (TypeError, ValueError):
+                issues.append(f"rating source result invalid: {match_id}")
+        source_rows.append(
+            {
+                "match_id": match_id,
+                "game_id": policy.get("game_id"),
+                "bot_a_id": policy.get("bot_a_id"),
+                "bot_b_id": policy.get("bot_b_id"),
+                "rated": int(policy.get("rated") or 0),
+                "rating_reason": policy.get("rating_reason"),
+                "source": policy.get("source"),
+                "classified_at": policy.get("classified_at"),
+                "settled_order": policy_order,
+                "settlement": settlement,
+                "match": match_row,
+            }
+        )
+
+    max_policy_order = max(
+        (int(row["settled_order"]) for row in policies.values() if row.get("settled_order") is not None),
+        default=0,
+    )
+    sequence = conn.execute(
+        "SELECT next_order FROM rating_settlement_sequence WHERE singleton=1"
+    ).fetchone()
+    next_order = int(sequence["next_order"] or 0) if sequence else 0
+    if next_order != max_policy_order + 1:
+        issues.append("rating settlement sequence watermark mismatch")
+
+    ratings = [dict(row) for row in conn.execute("SELECT * FROM ratings").fetchall()]
+    history = [
+        dict(row) for row in conn.execute("SELECT * FROM rating_history").fetchall()
+    ]
+    pairs = [dict(row) for row in conn.execute("SELECT * FROM pair_stats").fetchall()]
+    bots = [
+        {"id": int(row["id"]), "game_id": str(row["game_id"])}
+        for row in conn.execute("SELECT id,game_id FROM bots ORDER BY game_id,id").fetchall()
+    ]
+    source_digest = _canonical_digest(source_rows)
+    bot_universe_digest = _canonical_digest(bots)
+    return {
+        "source_digest": source_digest,
+        "projection_digest": rating_projection_digest(ratings, history, pairs),
+        "bot_universe_digest": bot_universe_digest,
+        "plan_digest": rating_plan_digest(source_digest, bot_universe_digest),
+        "source_settlement_count": len(settlements),
+        "source_last_settled_order": max(orders, default=0),
+        "sequence_next_order": next_order,
+        "issues": sorted(set(issues)),
+    }
+
+
 def _rating_eligible_sql(alias: str) -> str:
     """SQL expression for the immutable rating policy of one match row.
 
@@ -592,11 +830,13 @@ def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
 
 def _install_rating_source_guards(conn: sqlite3.Connection) -> None:
     """Make every settled replay input immutable at the SQLite boundary."""
+    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_policy_source_immutable")
     conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_source_immutable "
-        "BEFORE UPDATE OF game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+        "CREATE TRIGGER trg_match_rating_policy_source_immutable "
+        "BEFORE UPDATE OF match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
         "classified_at ON match_rating_policies WHEN "
-        "OLD.game_id IS NOT NEW.game_id OR OLD.bot_a_id IS NOT NEW.bot_a_id OR "
+        "OLD.match_id IS NOT NEW.match_id OR OLD.game_id IS NOT NEW.game_id OR "
+        "OLD.bot_a_id IS NOT NEW.bot_a_id OR "
         "OLD.bot_b_id IS NOT NEW.bot_b_id OR OLD.rated IS NOT NEW.rated OR "
         "OLD.rating_reason IS NOT NEW.rating_reason OR OLD.source IS NOT NEW.source OR "
         "OLD.classified_at IS NOT NEW.classified_at BEGIN "
@@ -613,9 +853,10 @@ def _install_rating_source_guards(conn: sqlite3.Connection) -> None:
         conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rating_source_update")
         conn.execute(
             f"CREATE TRIGGER trg_{table}_rating_source_update "
-            f"BEFORE UPDATE OF winner,result,ended_at,status ON {table} WHEN "
+            f"BEFORE UPDATE OF id,winner,result,ended_at,status ON {table} WHEN "
             "EXISTS(SELECT 1 FROM match_rating_settlements s WHERE s.match_id=OLD.id) "
-            "AND (OLD.winner IS NOT NEW.winner OR OLD.result IS NOT NEW.result OR "
+            "AND (OLD.id IS NOT NEW.id OR OLD.winner IS NOT NEW.winner OR "
+            "OLD.result IS NOT NEW.result OR "
             "OLD.ended_at IS NOT NEW.ended_at OR OLD.status IS NOT NEW.status) "
             "BEGIN SELECT RAISE(ABORT,'settled match rating source immutable'); END"
         )
@@ -959,9 +1200,11 @@ def _ensure_rating_settlement_sequence(conn: sqlite3.Connection) -> None:
         "OLD.settled_order IS NOT NEW.settled_order BEGIN "
         "SELECT RAISE(ABORT,'rating settlement source immutable'); END"
     )
+    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_settlement_delete_immutable")
     conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_settlement_delete_immutable "
-        "BEFORE DELETE ON match_rating_settlements WHEN OLD.settled_order>0 BEGIN "
+        "CREATE TRIGGER trg_match_rating_settlement_delete_immutable "
+        "BEFORE DELETE ON match_rating_settlements "
+        "WHEN OLD.settled_order IS NOT NULL BEGIN "
         "SELECT RAISE(ABORT,'rating settlement source immutable'); END"
     )
     current_policy = _RATING_PROJECTION_POLICY_VERSION.replace("'", "''")
@@ -1979,6 +2222,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 _migrated_result = _extras
 
             if _migrated_result != _raw_result:
+                # Once a settlement exists these bytes are immutable replay
+                # source.  Legacy normalization may report a cosmetic delta,
+                # but must never rewrite an already-settled event in place.
+                if conn.execute(
+                    "SELECT 1 FROM match_rating_settlements WHERE match_id=?",
+                    (_match_row["id"],),
+                ).fetchone():
+                    continue
                 conn.execute(
                     f"UPDATE {_tbl} SET result=? WHERE id=?",
                     (
@@ -2123,6 +2374,38 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
 
     # ── 自动排位 v2：每日配额下线，单一持久公平队列接管 ────────────────
+    _add_col(conn, "auto_match_dispatcher", "lease_epoch", "INTEGER NOT NULL DEFAULT 0")
+    _add_col(conn, "auto_match_queue", "dispatcher_epoch", "INTEGER")
+    _add_col(conn, "auto_match_decisions", "claim_dispatcher_token", "TEXT")
+    _add_col(conn, "auto_match_decisions", "claim_dispatcher_epoch", "INTEGER")
+    _add_col(conn, "rating_projection_state", "source_digest", "TEXT NOT NULL DEFAULT ''")
+    _add_col(conn, "rating_projection_state", "projection_digest", "TEXT NOT NULL DEFAULT ''")
+    _add_col(conn, "rating_projection_state", "plan_digest", "TEXT NOT NULL DEFAULT ''")
+    conn.execute("DROP TRIGGER IF EXISTS trg_auto_match_queue_fence_insert")
+    conn.execute(
+        "CREATE TRIGGER trg_auto_match_queue_fence_insert "
+        "BEFORE INSERT ON auto_match_queue WHEN "
+        "(NEW.status='queued' AND (NEW.match_id IS NOT NULL OR "
+        "NEW.dispatcher_token IS NOT NULL OR NEW.dispatcher_epoch IS NOT NULL OR "
+        "NEW.dispatched_at IS NOT NULL)) OR "
+        "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
+        "NEW.dispatcher_token IS NULL OR NEW.dispatcher_epoch IS NULL OR "
+        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL)) BEGIN "
+        "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_auto_match_queue_fence_update")
+    conn.execute(
+        "CREATE TRIGGER trg_auto_match_queue_fence_update "
+        "BEFORE UPDATE OF status,match_id,dispatcher_token,dispatcher_epoch,dispatched_at "
+        "ON auto_match_queue WHEN "
+        "(NEW.status='queued' AND (NEW.match_id IS NOT NULL OR "
+        "NEW.dispatcher_token IS NOT NULL OR NEW.dispatcher_epoch IS NOT NULL OR "
+        "NEW.dispatched_at IS NOT NULL)) OR "
+        "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
+        "NEW.dispatcher_token IS NULL OR NEW.dispatcher_epoch IS NULL OR "
+        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL)) BEGIN "
+        "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
+    )
     # 公平计数只从历史 completed system ladder 一次性引导；此后仅由 queue
     # terminal transaction 更新，绝不读取可被前台挑战影响的 ratings/pair_stats。
     _bootstrap_auto_match_fairness(conn)
@@ -3335,17 +3618,118 @@ class Store:
 
     @staticmethod
     def _auto_dispatcher_owned_tx(
-        c: sqlite3.Connection, dispatcher_token: str
+        c: sqlite3.Connection,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
     ) -> bool:
         now = _now()
         row = c.execute(
-            "SELECT owner_token,lease_until FROM auto_match_dispatcher WHERE singleton=1"
+            "SELECT owner_token,lease_epoch,lease_until FROM auto_match_dispatcher "
+            "WHERE singleton=1"
         ).fetchone()
         return bool(
             row
             and str(row["owner_token"] or "") == dispatcher_token
+            and int(row["lease_epoch"] or 0) == int(dispatcher_epoch)
             and str(row["lease_until"] or "") > now
         )
+
+    @classmethod
+    def _auto_match_fence_owned_tx(
+        cls,
+        c: sqlite3.Connection,
+        match_id: str,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
+        *,
+        require_claim_fence: bool,
+    ) -> sqlite3.Row | None:
+        """Return the dispatched queue row only for the live fenced owner."""
+        if not cls._auto_dispatcher_owned_tx(
+            c, dispatcher_token, dispatcher_epoch
+        ):
+            return None
+        row = c.execute(
+            "SELECT q.*,d.claim_dispatcher_token,d.claim_dispatcher_epoch "
+            "FROM auto_match_queue q JOIN auto_match_decisions d ON d.id=q.decision_id "
+            "WHERE q.status='dispatched' AND q.match_id=? "
+            "AND q.dispatcher_token=? AND q.dispatcher_epoch=?",
+            (match_id, dispatcher_token, int(dispatcher_epoch)),
+        ).fetchone()
+        if row is None:
+            return None
+        if require_claim_fence and (
+            str(row["claim_dispatcher_token"] or "") != dispatcher_token
+            or int(row["claim_dispatcher_epoch"] or 0) != int(dispatcher_epoch)
+        ):
+            return None
+        return row
+
+    @classmethod
+    def _require_auto_match_fence_tx(
+        cls,
+        c: sqlite3.Connection,
+        match_id: str,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
+        *,
+        require_claim_fence: bool,
+    ) -> sqlite3.Row:
+        row = cls._auto_match_fence_owned_tx(
+            c,
+            match_id,
+            dispatcher_token,
+            dispatcher_epoch,
+            require_claim_fence=require_claim_fence,
+        )
+        if row is None:
+            raise AutoMatchFenceLost(
+                f"auto-match dispatch fence lost for match {match_id}"
+            )
+        if require_claim_fence:
+            indexed = c.execute(
+                "SELECT game_id FROM matches_index WHERE id=?", (match_id,)
+            ).fetchone()
+            if indexed is None:
+                raise AutoMatchFenceLost(
+                    f"auto-match match disappeared for fence {match_id}"
+                )
+            table = _matches_table(indexed["game_id"])
+            match = c.execute(
+                f"SELECT match_config FROM {table} WHERE id=?", (match_id,)
+            ).fetchone()
+            if match is None:
+                raise AutoMatchFenceLost(
+                    f"auto-match match disappeared for fence {match_id}"
+                )
+            try:
+                config = json.loads(match["match_config"] or "{}")
+            except (TypeError, ValueError):
+                config = {}
+            if (
+                str(config.get("_auto_match_claim_token") or "")
+                != dispatcher_token
+                or int(config.get("_auto_match_claim_epoch") or 0)
+                != int(dispatcher_epoch)
+            ):
+                raise AutoMatchFenceLost(
+                    f"auto-match frozen claim fence mismatch for match {match_id}"
+                )
+        return row
+
+    def assert_auto_match_claim_fence(
+        self, match_id: str, dispatcher_token: str, dispatcher_epoch: int
+    ) -> None:
+        """Fail closed unless ``match_id`` is owned by the live claimed epoch."""
+        with self._tx() as c:
+            c.execute("BEGIN")
+            self._require_auto_match_fence_tx(
+                c,
+                match_id,
+                dispatcher_token,
+                dispatcher_epoch,
+                require_claim_fence=True,
+            )
 
     def acquire_auto_match_dispatcher(
         self, dispatcher_token: str, *, lease_seconds: int = 30
@@ -3358,7 +3742,7 @@ class Store:
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             row = c.execute(
-                "SELECT owner_token,lease_until FROM auto_match_dispatcher "
+                "SELECT owner_token,lease_epoch,lease_until FROM auto_match_dispatcher "
                 "WHERE singleton=1"
             ).fetchone()
             if row is None:
@@ -3366,39 +3750,48 @@ class Store:
             previous = str(row["owner_token"] or "")
             expired = not row["lease_until"] or str(row["lease_until"]) <= now
             if previous == dispatcher_token or not previous or expired:
-                changed_owner = previous != dispatcher_token
+                # Expiry is a fencing boundary even when the same process token
+                # later reacquires.  Its pre-expiry worker must not inherit the
+                # renewed epoch after an event-loop stall.
+                changed_owner = previous != dispatcher_token or expired
+                epoch = int(row["lease_epoch"] or 0) + (1 if changed_owner else 0)
                 c.execute(
-                    "UPDATE auto_match_dispatcher SET owner_token=?,lease_until=?,"
+                    "UPDATE auto_match_dispatcher SET owner_token=?,lease_epoch=?,lease_until=?,"
                     "heartbeat_at=? WHERE singleton=1",
-                    (dispatcher_token, lease_until, now),
+                    (dispatcher_token, epoch, lease_until, now),
                 )
                 return {
                     "owned": True,
                     "changed_owner": changed_owner,
                     "previous_owner": previous,
+                    "lease_epoch": epoch,
                     "lease_until": lease_until,
                 }
             return {
                 "owned": False,
                 "changed_owner": False,
                 "previous_owner": previous,
+                "lease_epoch": int(row["lease_epoch"] or 0),
                 "lease_until": row["lease_until"],
             }
 
-    def release_auto_match_dispatcher(self, dispatcher_token: str) -> bool:
+    def release_auto_match_dispatcher(
+        self, dispatcher_token: str, dispatcher_epoch: int
+    ) -> bool:
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             cur = c.execute(
                 "UPDATE auto_match_dispatcher SET owner_token=NULL,lease_until=NULL,"
-                "heartbeat_at=? WHERE singleton=1 AND owner_token=?",
-                (_now(), dispatcher_token),
+                "heartbeat_at=? WHERE singleton=1 AND owner_token=? AND lease_epoch=?",
+                (_now(), dispatcher_token, int(dispatcher_epoch)),
             )
             return cur.rowcount == 1
 
     def auto_match_dispatcher_state(self) -> dict:
         with self._tx() as c:
             row = c.execute(
-                "SELECT owner_token,lease_until,heartbeat_at FROM auto_match_dispatcher "
+                "SELECT owner_token,lease_epoch,lease_until,heartbeat_at "
+                "FROM auto_match_dispatcher "
                 "WHERE singleton=1"
             ).fetchone()
             return dict(row) if row else {}
@@ -3408,25 +3801,58 @@ class Store:
         state = c.execute(
             "SELECT * FROM rating_projection_state WHERE singleton=1"
         ).fetchone()
-        source = c.execute(
-            "SELECT COUNT(*) AS n,COALESCE(MAX(settled_order),0) AS last_order "
-            "FROM match_rating_settlements WHERE settled_order>0"
-        ).fetchone()
         state_data = dict(state) if state else {}
-        source_count = int(source["n"] or 0)
-        source_last = int(source["last_order"] or 0)
+        live = rating_projection_digests(c)
+        source_count = int(live["source_settlement_count"])
+        source_last = int(live["source_last_settled_order"])
         ready = bool(
             state_data.get("policy_version") == _RATING_PROJECTION_POLICY_VERSION
             and int(state_data.get("source_settlement_count") or 0) == source_count
             and int(state_data.get("source_last_settled_order") or 0) == source_last
+            and str(state_data.get("source_digest") or "")
+            == live["source_digest"]
+            and str(state_data.get("projection_digest") or "")
+            == live["projection_digest"]
+            and str(state_data.get("plan_digest") or "") == live["plan_digest"]
+            and not live["issues"]
         )
         return {
             "ready": ready,
             "required_policy_version": _RATING_PROJECTION_POLICY_VERSION,
             "source_settlement_count": source_count,
             "source_last_settled_order": source_last,
+            "source_digest": live["source_digest"],
+            "projection_digest": live["projection_digest"],
+            "plan_digest": live["plan_digest"],
+            "bot_universe_digest": live["bot_universe_digest"],
+            "sequence_next_order": live["sequence_next_order"],
+            "issues": live["issues"],
             "state": state_data,
         }
+
+    @staticmethod
+    def _refresh_rating_projection_state_tx(c: sqlite3.Connection) -> None:
+        """Advance verified projection digests after one trusted live mutation."""
+        state = c.execute(
+            "SELECT policy_version FROM rating_projection_state WHERE singleton=1"
+        ).fetchone()
+        if not state or state["policy_version"] != _RATING_PROJECTION_POLICY_VERSION:
+            return
+        live = rating_projection_digests(c)
+        if live["issues"]:
+            return
+        c.execute(
+            "UPDATE rating_projection_state SET source_settlement_count=?,"
+            "source_last_settled_order=?,source_digest=?,projection_digest=?,"
+            "plan_digest=? WHERE singleton=1",
+            (
+                int(live["source_settlement_count"]),
+                int(live["source_last_settled_order"]),
+                live["source_digest"],
+                live["projection_digest"],
+                live["plan_digest"],
+            ),
+        )
 
     def rating_projection_status(self) -> dict:
         with self._tx() as c:
@@ -3610,7 +4036,7 @@ class Store:
                 if int(bot["owner_id"]) != int(anchor["owner_id"])
                 and bot["_lane"] == lane
             ]
-            widened = False
+            widened_reason = ""
             partners = exact
             if not partners and lane == "placement":
                 # The sole placement owner still receives calibration service,
@@ -3620,7 +4046,20 @@ class Store:
                     if int(bot["owner_id"]) != int(anchor["owner_id"])
                     and bot["_lane"] == "formal"
                 ]
-                widened = bool(partners)
+                if partners:
+                    widened_reason = "single_placement_owner"
+            elif not partners and lane == "formal":
+                placement_partners = [
+                    bot for bot in game
+                    if int(bot["owner_id"]) != int(anchor["owner_id"])
+                    and bot["_lane"] == "placement"
+                ]
+                # A lone formal owner must still receive formal-lane service.
+                # Require at least two placement owners so the fallback does not
+                # degenerate into one permanently repeated cross-lane pair.
+                if len({int(bot["owner_id"]) for bot in placement_partners}) >= 2:
+                    partners = placement_partners
+                    widened_reason = "single_formal_owner"
             if not partners:
                 continue
 
@@ -3632,6 +4071,24 @@ class Store:
                     partner_owner_best[owner] = bot
             partners = list(partner_owner_best.values())
 
+            # Waiting debt is an owner-level admission layer, not a late
+            # tie-break.  A frequently served owner can never jump ahead merely
+            # because its pair count or rating gap is smaller.
+            oldest_owner_layer = min(
+                (
+                    int(bot.get("owner_service") or 0),
+                    int(bot.get("owner_last_revision") or 0),
+                )
+                for bot in partners
+            )
+            partners = [
+                bot for bot in partners
+                if (
+                    int(bot.get("owner_service") or 0),
+                    int(bot.get("owner_last_revision") or 0),
+                ) == oldest_owner_layer
+            ]
+
             def partner_key(bot: dict) -> tuple:
                 bot_pair, owner_pair = self._auto_pair_counts_tx(c, anchor, bot)
                 return (
@@ -3639,7 +4096,6 @@ class Store:
                     owner_pair,
                     abs(float(anchor.get("rating") or 1500.0)
                         - float(bot.get("rating") or 1500.0)),
-                    self._auto_owner_key(bot),
                     self._auto_bot_key(bot),
                     int(bot["owner_id"]),
                     int(bot["bot_id"]),
@@ -3654,7 +4110,7 @@ class Store:
             return (
                 anchor,
                 partner,
-                "single_placement_owner" if widened else "",
+                widened_reason,
                 bot_pair,
                 owner_pair,
                 rating_gap,
@@ -3667,6 +4123,7 @@ class Store:
         target_queued: int,
         placement_required: int,
         dispatcher_token: str,
+        dispatcher_epoch: int,
     ) -> dict:
         """Fill fixed lookahead under the persistent game/lane/owner policy."""
         target = max(0, int(target_queued))
@@ -3675,7 +4132,9 @@ class Store:
         removed_invalid = 0
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
                 return {"outcome": "not_leader", "inserted": 0}
             switch = c.execute(
                 "SELECT enabled FROM auto_match_control WHERE singleton=1"
@@ -3897,7 +4356,11 @@ class Store:
             return projected
 
     def claim_next_auto_match(
-        self, match_id: str, *, dispatcher_token: str
+        self,
+        match_id: str,
+        *,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
     ) -> dict:
         """Atomically claim the global head and create its match/index/replay.
 
@@ -3908,7 +4371,9 @@ class Store:
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
                 return {"outcome": "not_leader", "reason": "调度租约不属于当前进程"}
             switch = c.execute(
                 "SELECT enabled FROM auto_match_control WHERE singleton=1"
@@ -3962,6 +4427,8 @@ class Store:
                     "_bot_b_version_id": int(row["bot_b_version_id"]),
                     "_auto_match_queue_id": int(row["id"]),
                     "_auto_match_decision_id": int(row["decision_id"]),
+                    "_auto_match_claim_token": dispatcher_token,
+                    "_auto_match_claim_epoch": int(dispatcher_epoch),
                     "_rating_eligible": True,
                     "_rating_reason": "eligible",
                 },
@@ -4003,16 +4470,30 @@ class Store:
             )
             c.execute(
                 "UPDATE auto_match_queue SET status='dispatched', match_id=?, "
-                "dispatcher_token=?,dispatched_at=? WHERE id=? AND status='queued'",
-                (match_id, dispatcher_token, created_at, row["id"]),
+                "dispatcher_token=?,dispatcher_epoch=?,dispatched_at=? "
+                "WHERE id=? AND status='queued'",
+                (
+                    match_id,
+                    dispatcher_token,
+                    int(dispatcher_epoch),
+                    created_at,
+                    row["id"],
+                ),
             )
             if c.execute("SELECT changes()").fetchone()[0] != 1:
                 raise RuntimeError("auto-match queue claim CAS lost")
             updated = c.execute(
                 "UPDATE auto_match_decisions SET lifecycle='dispatched',match_id=?,"
-                "attempt_count=attempt_count+1,last_attempt_error='',dispatched_at=? "
+                "attempt_count=attempt_count+1,last_attempt_error='',dispatched_at=?,"
+                "claim_dispatcher_token=?,claim_dispatcher_epoch=? "
                 "WHERE id=? AND lifecycle='queued'",
-                (match_id, created_at, int(row["decision_id"])),
+                (
+                    match_id,
+                    created_at,
+                    dispatcher_token,
+                    int(dispatcher_epoch),
+                    int(row["decision_id"]),
+                ),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("auto-match decision claim CAS lost")
@@ -4021,6 +4502,8 @@ class Store:
                 "match_id": match_id,
                 "queue_id": int(row["id"]),
                 "game_id": gid,
+                "dispatcher_token": dispatcher_token,
+                "dispatcher_epoch": int(dispatcher_epoch),
             }
 
     def rollback_auto_match_claim(
@@ -4028,17 +4511,20 @@ class Store:
         match_id: str,
         *,
         dispatcher_token: str,
+        dispatcher_epoch: int,
         reason: str = "start_failure",
     ) -> bool:
         """Delete an unstarted claim and restore the exact queue row atomically."""
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
                 return False
             row = c.execute(
                 "SELECT * FROM auto_match_queue WHERE status='dispatched' "
-                "AND match_id=? AND dispatcher_token=?",
-                (match_id, dispatcher_token),
+                "AND match_id=? AND dispatcher_token=? AND dispatcher_epoch=?",
+                (match_id, dispatcher_token, int(dispatcher_epoch)),
             ).fetchone()
             if row is None:
                 return False
@@ -4055,12 +4541,13 @@ class Store:
             c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
             c.execute(
                 "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
                 (int(row["id"]),),
             )
             c.execute(
                 "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                "dispatched_at=NULL,last_attempt_error=? WHERE id=? "
+                "dispatched_at=NULL,last_attempt_error=?,claim_dispatcher_token=NULL,"
+                "claim_dispatcher_epoch=NULL WHERE id=? "
                 "AND lifecycle='dispatched'",
                 (reason, int(row["decision_id"])),
             )
@@ -4068,7 +4555,7 @@ class Store:
             return True
 
     def recover_auto_match_dispatcher_takeover(
-        self, *, dispatcher_token: str
+        self, *, dispatcher_token: str, dispatcher_epoch: int
     ) -> dict:
         """Recover only claims whose previous dispatcher lease has expired.
 
@@ -4079,12 +4566,17 @@ class Store:
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
                 return {"outcome": "not_leader"}
             row = c.execute(
                 "SELECT * FROM auto_match_queue WHERE status='dispatched' LIMIT 1"
             ).fetchone()
-            if row is None or row["dispatcher_token"] == dispatcher_token:
+            if row is None or (
+                row["dispatcher_token"] == dispatcher_token
+                and int(row["dispatcher_epoch"] or 0) == int(dispatcher_epoch)
+            ):
                 return {"outcome": "clean"}
             match_id = str(row["match_id"] or "")
             table = _matches_table(str(row["game_id"]))
@@ -4100,13 +4592,14 @@ class Store:
                 if match is not None:
                     c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
                 c.execute(
-                    "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                    "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
+                    "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
                     (int(row["id"]),),
                 )
                 c.execute(
                     "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                    "dispatched_at=NULL,last_attempt_error='dispatcher_lost_before_start' "
+                    "dispatched_at=NULL,last_attempt_error='dispatcher_lost_before_start',"
+                    "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL "
                     "WHERE id=? AND lifecycle='dispatched'",
                     (int(row["decision_id"]),),
                 )
@@ -4119,6 +4612,19 @@ class Store:
                     (STATUS_ABORTED, _now(), match_id, STATUS_RUNNING),
                 )
                 return {"outcome": "aborted_running", "match_id": match_id}
+            if match["status"] == STATUS_COMPLETED:
+                changed = c.execute(
+                    "UPDATE auto_match_queue SET dispatcher_token=?,dispatcher_epoch=? "
+                    "WHERE id=? AND status='dispatched'",
+                    (
+                        dispatcher_token,
+                        int(dispatcher_epoch),
+                        int(row["id"]),
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise RuntimeError("auto-match terminal takeover CAS lost")
+                return {"outcome": "adopted_terminal", "match_id": match_id}
             return {"outcome": "terminal", "match_id": match_id}
 
     @staticmethod
@@ -4173,7 +4679,9 @@ class Store:
             (gid, owner_lo, owner_hi, terminal_at),
         )
 
-    def reconcile_auto_match_queue(self, *, dispatcher_token: str) -> dict:
+    def reconcile_auto_match_queue(
+        self, *, dispatcher_token: str, dispatcher_epoch: int
+    ) -> dict:
         """Converge terminal rows; service counters change exactly once."""
         removed_terminal = 0
         reset_missing = 0
@@ -4181,7 +4689,9 @@ class Store:
         waiting_settlement = 0
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(c, dispatcher_token):
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
                 return {"outcome": "not_leader"}
             for row in c.execute(
                 "SELECT * FROM auto_match_queue ORDER BY id"
@@ -4196,12 +4706,13 @@ class Store:
                 if not tbl:
                     c.execute(
                         "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                        "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
                         (row["id"],),
                     )
                     c.execute(
                         "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                        "dispatched_at=NULL,last_attempt_error='missing_match' WHERE id=?",
+                        "dispatched_at=NULL,last_attempt_error='missing_match',"
+                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL WHERE id=?",
                         (row["decision_id"],),
                     )
                     self._auto_backoff_tx(c, "missing_match")
@@ -4213,12 +4724,13 @@ class Store:
                 if not match:
                     c.execute(
                         "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                        "dispatcher_token=NULL,dispatched_at=NULL WHERE id=?",
+                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL WHERE id=?",
                         (row["id"],),
                     )
                     c.execute(
                         "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                        "dispatched_at=NULL,last_attempt_error='missing_match' WHERE id=?",
+                        "dispatched_at=NULL,last_attempt_error='missing_match',"
+                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL WHERE id=?",
                         (row["decision_id"],),
                     )
                     self._auto_backoff_tx(c, "missing_match")
@@ -4505,6 +5017,48 @@ class Store:
         )
         return order
 
+    @staticmethod
+    def _attach_rating_settlement_state_tx(
+        c: sqlite3.Connection, match: dict
+    ) -> None:
+        """Expose creation eligibility separately from the final settlement."""
+        match_id = str(match.get("id") or "")
+        policy = c.execute(
+            "SELECT rated,rating_reason,settled_order FROM match_rating_policies "
+            "WHERE match_id=?",
+            (match_id,),
+        ).fetchone()
+        marker = c.execute(
+            "SELECT settled_order FROM match_rating_settlements WHERE match_id=?",
+            (match_id,),
+        ).fetchone()
+        rated = bool(int(policy["rated"])) if policy else False
+        reason = str(policy["rating_reason"] or "unclassified") if policy else "unclassified"
+        settled = marker is not None
+        order = (
+            int(policy["settled_order"])
+            if policy is not None and policy["settled_order"] is not None
+            else None
+        )
+        status = str(match.get("status") or "")
+        if status == STATUS_ABORTED:
+            settlement_status = "aborted_not_rated"
+        elif status == STATUS_COMPLETED:
+            if settled:
+                settlement_status = "settled" if rated else "settled_neutral"
+            else:
+                settlement_status = (
+                    "pending_settlement" if rated else "pending_neutral_settlement"
+                )
+        else:
+            settlement_status = "eligible" if rated else "rating_neutral"
+        match["rated"] = rated
+        match["rating_reason"] = reason
+        match["rating_settled"] = settled
+        match["rating_settled_order"] = order
+        match["rating_settlement_status"] = settlement_status
+        match["_rating_settled_order"] = order
+
     def get_match(self, match_id: str) -> dict | None:
         with self._tx() as c:
             tbl = self._match_table_of(c, match_id)
@@ -4514,15 +5068,7 @@ class Store:
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             ))
             if result is not None:
-                policy = c.execute(
-                    "SELECT settled_order FROM match_rating_policies WHERE match_id=?",
-                    (match_id,),
-                ).fetchone()
-                result["_rating_settled_order"] = (
-                    int(policy["settled_order"])
-                    if policy and policy["settled_order"] is not None
-                    else None
-                )
+                self._attach_rating_settlement_state_tx(c, result)
             return result
 
     def get_match_detailed(self, match_id: str) -> dict | None:
@@ -4556,21 +5102,17 @@ class Store:
                 _row(c.execute(sql, (match_id,)).fetchone())
             )
             if result is not None:
-                rated, rating_reason = self._match_rating_policy_tx(c, result)
-                result["rated"] = rated
-                result["rating_reason"] = rating_reason
-                policy = c.execute(
-                    "SELECT settled_order FROM match_rating_policies WHERE match_id=?",
-                    (match_id,),
-                ).fetchone()
-                result["_rating_settled_order"] = (
-                    int(policy["settled_order"])
-                    if policy and policy["settled_order"] is not None
-                    else None
-                )
+                self._attach_rating_settlement_state_tx(c, result)
             return result
 
-    def update_match(self, match_id: str, **fields: Any) -> dict | None:
+    def update_match(
+        self,
+        match_id: str,
+        *,
+        auto_dispatcher_token: str | None = None,
+        auto_dispatcher_epoch: int | None = None,
+        **fields: Any,
+    ) -> dict | None:
         allowed = {
             "winner",
             "reason",
@@ -4590,14 +5132,56 @@ class Store:
             for k, v in fields.items()
             if k in allowed
         ]
+        fenced = auto_dispatcher_token is not None or auto_dispatcher_epoch is not None
+        if fenced and (
+            not auto_dispatcher_token or auto_dispatcher_epoch is None
+        ):
+            raise ValueError("auto-match write fence requires token and epoch")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             tbl = self._match_table_of(c, match_id)
             if not tbl:
+                if fenced:
+                    raise AutoMatchFenceLost(
+                        f"auto-match match disappeared for write {match_id}"
+                    )
                 return None
+            match_config_row = c.execute(
+                f"SELECT match_config FROM {tbl} WHERE id=?", (match_id,)
+            ).fetchone()
+            try:
+                persisted_config = json.loads(
+                    (match_config_row["match_config"] if match_config_row else "") or "{}"
+                )
+            except (TypeError, ValueError):
+                persisted_config = {}
+            if persisted_config.get("_auto_match_claim_epoch") and not fenced:
+                raise AutoMatchFenceLost(
+                    f"auto-match write requires frozen fence for match {match_id}"
+                )
+            if fenced:
+                self._require_auto_match_fence_tx(
+                    c,
+                    match_id,
+                    str(auto_dispatcher_token),
+                    int(auto_dispatcher_epoch),
+                    require_claim_fence=True,
+                )
             if sets:
                 vals.append(match_id)
-                c.execute(f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?", vals)
+                status = fields.get("status")
+                status_guard = ""
+                if fenced and status == STATUS_RUNNING:
+                    status_guard = " AND status='pending'"
+                elif fenced and status in (STATUS_COMPLETED, STATUS_ABORTED):
+                    status_guard = " AND status IN ('pending','running')"
+                changed = c.execute(
+                    f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?{status_guard}", vals
+                )
+                if fenced and changed.rowcount != 1:
+                    raise AutoMatchFenceLost(
+                        f"auto-match terminal/state CAS lost for match {match_id}"
+                    )
             if fields.get("status") == STATUS_COMPLETED:
                 self._reserve_rating_settlement_order_tx(c, match_id)
             result = _row(
@@ -4788,8 +5372,41 @@ class Store:
         self,
         match_id: str,
         events_json: str = "[]",
+        *,
+        auto_dispatcher_token: str | None = None,
+        auto_dispatcher_epoch: int | None = None,
     ) -> None:
+        fenced = auto_dispatcher_token is not None or auto_dispatcher_epoch is not None
+        if fenced and (
+            not auto_dispatcher_token or auto_dispatcher_epoch is None
+        ):
+            raise ValueError("auto-match replay fence requires token and epoch")
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            table = self._match_table_of(c, match_id)
+            if table is not None:
+                match_config_row = c.execute(
+                    f"SELECT match_config FROM {table} WHERE id=?", (match_id,)
+                ).fetchone()
+                try:
+                    persisted_config = json.loads(
+                        (match_config_row["match_config"] if match_config_row else "")
+                        or "{}"
+                    )
+                except (TypeError, ValueError):
+                    persisted_config = {}
+                if persisted_config.get("_auto_match_claim_epoch") and not fenced:
+                    raise AutoMatchFenceLost(
+                        f"auto-match replay requires frozen fence for match {match_id}"
+                    )
+            if fenced:
+                self._require_auto_match_fence_tx(
+                    c,
+                    match_id,
+                    str(auto_dispatcher_token),
+                    int(auto_dispatcher_epoch),
+                    require_claim_fence=True,
+                )
             c.execute(
                 "INSERT INTO match_replays(match_id, events_json, updated_at) "
                 "VALUES(?,?,?) "
@@ -4871,6 +5488,7 @@ class Store:
                 "INSERT INTO ratings(bot_id, game_id) VALUES(?, ?)",
                 (bot_id, gid),
             )
+            self._refresh_rating_projection_state_tx(c)
             return _row(
                 c.execute(
                     "SELECT * FROM ratings WHERE bot_id=? AND game_id=?",
@@ -4950,6 +5568,45 @@ class Store:
                 ).fetchone()
             )
 
+    def _require_auto_settlement_fence_tx(
+        self,
+        c: sqlite3.Connection,
+        match_id: str,
+        dispatcher_token: str | None,
+        dispatcher_epoch: int | None,
+    ) -> None:
+        """Require the current leader for a frozen auto-match settlement.
+
+        A takeover may adopt a completed match, so settlement validates the
+        queue's current owner/epoch but deliberately does not require the
+        original claim token recorded in the immutable decision/config.
+        """
+        table = self._match_table_of(c, match_id)
+        if table is None:
+            return
+        match = c.execute(
+            f"SELECT match_config FROM {table} WHERE id=?", (match_id,)
+        ).fetchone()
+        if match is None:
+            return
+        try:
+            config = json.loads(match["match_config"] or "{}")
+        except (TypeError, ValueError):
+            config = {}
+        if not config.get("_auto_match_claim_epoch"):
+            return
+        if not dispatcher_token or dispatcher_epoch is None:
+            raise AutoMatchFenceLost(
+                f"auto-match settlement lacks current fence for match {match_id}"
+            )
+        self._require_auto_match_fence_tx(
+            c,
+            match_id,
+            dispatcher_token,
+            int(dispatcher_epoch),
+            require_claim_fence=False,
+        )
+
     def apply_match_ratings_atomic(
         self,
         bot_a_id: int,
@@ -4963,6 +5620,8 @@ class Store:
         delta_b: int,
         reason: str = "",
         settlement_id: str | None = None,
+        auto_dispatcher_token: str | None = None,
+        auto_dispatcher_epoch: int | None = None,
     ) -> bool:
         """恰好一次地落双边 rating/history、pair_stats 与结算凭据。
 
@@ -4983,20 +5642,33 @@ class Store:
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             if settlement_id is not None:
+                # Check idempotency before computing/reserving an order.  SQLite
+                # runs BEFORE INSERT triggers even for INSERT OR IGNORE, so a
+                # duplicate must never reach the strict next-order trigger.
+                if c.execute(
+                    "SELECT 1 FROM match_rating_settlements WHERE match_id=?",
+                    (settlement_id,),
+                ).fetchone():
+                    return False
+                self._require_auto_settlement_fence_tx(
+                    c,
+                    settlement_id,
+                    auto_dispatcher_token,
+                    auto_dispatcher_epoch,
+                )
                 settlement_order = self._rating_settlement_order_for_insert_tx(
                     c, settlement_id
                 )
-                claimed = c.execute(
-                    "INSERT OR IGNORE INTO match_rating_settlements("
+                c.execute(
+                    "INSERT INTO match_rating_settlements("
                     "match_id,settled_at,settled_order) VALUES(?,?,?)",
                     (settlement_id, now, settlement_order),
                 )
-                if claimed.rowcount == 0:
-                    return False
 
             # 自博弈没有可用于 Glicko 的对手信息。marker 仍须落盘，否则启动
             # 恢复会在每次重启反复扫描同一 completed 对局。
             if bot_a_id == bot_b_id:
+                self._refresh_rating_projection_state_tx(c)
                 return True
 
             for bot_id in (bot_a_id, bot_b_id):
@@ -5055,9 +5727,16 @@ class Store:
                 "draws=pair_stats.draws+excluded.draws",
                 (lo, hi, 1, now, aw, al, dd),
             )
+            self._refresh_rating_projection_state_tx(c)
             return True
 
-    def mark_match_rating_settled(self, match_id: str) -> bool:
+    def mark_match_rating_settled(
+        self,
+        match_id: str,
+        *,
+        auto_dispatcher_token: str | None = None,
+        auto_dispatcher_epoch: int | None = None,
+    ) -> bool:
         """原子写入无评分副作用的结算 marker；已存在返回 False。
 
         仅用于 completed 行已失去 Bot 外键、无法重算评分的收敛场景。自博弈
@@ -5065,13 +5744,34 @@ class Store:
         """
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            if c.execute(
+                "SELECT 1 FROM match_rating_settlements WHERE match_id=?",
+                (match_id,),
+            ).fetchone():
+                return False
+            self._require_auto_settlement_fence_tx(
+                c,
+                match_id,
+                auto_dispatcher_token,
+                auto_dispatcher_epoch,
+            )
+            policy = c.execute(
+                "SELECT rated FROM match_rating_policies WHERE match_id=?",
+                (match_id,),
+            ).fetchone()
             settlement_order = self._rating_settlement_order_for_insert_tx(c, match_id)
-            cur = c.execute(
-                "INSERT OR IGNORE INTO match_rating_settlements("
+            c.execute(
+                "INSERT INTO match_rating_settlements("
                 "match_id,settled_at,settled_order) VALUES(?,?,?)",
                 (match_id, _now(), settlement_order),
             )
-            return cur.rowcount > 0
+            # Neutral markers have no derived rating mutation.  A rated match
+            # marked without rating rows (only the deleted-Bot recovery path)
+            # intentionally leaves the projection gate stale until offline
+            # replay verifies the propagated leaderboard.
+            if policy is not None and int(policy["rated"] or 0) == 0:
+                self._refresh_rating_projection_state_tx(c)
+            return True
 
     def is_match_rating_settled(self, match_id: str) -> bool:
         with self._tx() as c:

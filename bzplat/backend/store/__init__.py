@@ -1,5 +1,11 @@
 """SQLite 存储层导出。"""
-from .db import Store
+from .db import (
+    AutoMatchFenceLost,
+    Store,
+    rating_plan_digest,
+    rating_projection_digest,
+    rating_projection_digests,
+)
 from .schema import (
     CODE_RESET,
     CODE_VERIFY,
@@ -26,6 +32,10 @@ from .schema import (
 
 __all__ = [
     "Store",
+    "AutoMatchFenceLost",
+    "rating_plan_digest",
+    "rating_projection_digest",
+    "rating_projection_digests",
     "ROLE_USER",
     "ROLE_ORGANIZER",
     "ROLE_ADMIN",

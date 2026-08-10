@@ -41,6 +41,7 @@ class AutoMatchScheduler:
         self._wake = asyncio.Event()
         self._last_pause_reason = ""
         self._dispatcher_token = secrets.token_hex(24)
+        self._dispatcher_epoch = 0
         self._leader = False
 
     @property
@@ -64,7 +65,9 @@ class AutoMatchScheduler:
             for row in self.store.list_auto_match_queue()
         ):
             return
-        self.store.release_auto_match_dispatcher(self._dispatcher_token)
+        self.store.release_auto_match_dispatcher(
+            self._dispatcher_token, self._dispatcher_epoch
+        )
         self._leader = False
 
     def _available_bot_slots(self) -> int:
@@ -112,15 +115,19 @@ class AutoMatchScheduler:
             lease_seconds=_DISPATCHER_LEASE_SECONDS,
         )
         self._leader = bool(lease.get("owned"))
+        if self._leader:
+            self._dispatcher_epoch = int(lease.get("lease_epoch") or 0)
         if self._leader and lease.get("changed_owner"):
             lease["takeover"] = self.store.recover_auto_match_dispatcher_takeover(
-                dispatcher_token=self._dispatcher_token
+                dispatcher_token=self._dispatcher_token,
+                dispatcher_epoch=self._dispatcher_epoch,
             )
         return lease
 
     async def _converge_terminal_rows(self) -> dict:
         state = self.store.reconcile_auto_match_queue(
-            dispatcher_token=self._dispatcher_token
+            dispatcher_token=self._dispatcher_token,
+            dispatcher_epoch=self._dispatcher_epoch,
         )
         if state.get("outcome") == "not_leader":
             return state
@@ -128,9 +135,12 @@ class AutoMatchScheduler:
             # Uses the orchestrator's existing global settlement order lock and
             # exactly-once marker transaction.  A queue row is never deleted
             # merely because the match says completed.
-            await self.orch.recover_unsettled_match_ratings()
+            await self.orch.recover_unsettled_match_ratings(
+                auto_fence=(self._dispatcher_token, self._dispatcher_epoch)
+            )
             state = self.store.reconcile_auto_match_queue(
-                dispatcher_token=self._dispatcher_token
+                dispatcher_token=self._dispatcher_token,
+                dispatcher_epoch=self._dispatcher_epoch,
             )
         return state
 
@@ -152,6 +162,7 @@ class AutoMatchScheduler:
             target_queued=_QUEUE_LOOKAHEAD,
             placement_required=AUTO_MATCH_PLACEMENT_REQUIRED,
             dispatcher_token=self._dispatcher_token,
+            dispatcher_epoch=self._dispatcher_epoch,
         )
         if refill.get("outcome") in {
             "disabled", "backoff", "not_leader", "rating_unverified"
@@ -193,7 +204,9 @@ class AutoMatchScheduler:
             return {"outcome": "capacity_race", "refill": refill}
         try:
             claim = self.store.claim_next_auto_match(
-                match_id, dispatcher_token=self._dispatcher_token
+                match_id,
+                dispatcher_token=self._dispatcher_token,
+                dispatcher_epoch=self._dispatcher_epoch,
             )
         except Exception:
             self.orch.release_prepared_match_slot(match_id)
@@ -205,12 +218,17 @@ class AutoMatchScheduler:
         try:
             # claim already atomically created pending match/index/replay.  This
             # call reserves the in-process admission token and starts its task.
-            self.orch.start_prepared_match(match_id)
+            self.orch.start_prepared_match(
+                match_id,
+                auto_dispatcher_token=self._dispatcher_token,
+                auto_dispatcher_epoch=self._dispatcher_epoch,
+            )
         except Exception:
             logger.exception("auto-match claimed match could not start match=%s", match_id)
             rolled_back = self.store.rollback_auto_match_claim(
                 match_id,
                 dispatcher_token=self._dispatcher_token,
+                dispatcher_epoch=self._dispatcher_epoch,
                 reason="start_failure",
             )
             self.orch.release_prepared_match_slot(match_id)
@@ -229,6 +247,7 @@ class AutoMatchScheduler:
             target_queued=_QUEUE_LOOKAHEAD,
             placement_required=AUTO_MATCH_PLACEMENT_REQUIRED,
             dispatcher_token=self._dispatcher_token,
+            dispatcher_epoch=self._dispatcher_epoch,
         )
         self._last_pause_reason = ""
         logger.info(

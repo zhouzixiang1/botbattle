@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
+from bzplat.backend.store import rating_projection_digests
 
 
 def _user_and_token(app, username: str, role: str = "user"):
@@ -40,15 +41,20 @@ def _bot(app, owner_id: int, key: str, game_id: str):
 
 def _mark_projection_verified(app) -> None:
     with app.state.store._tx() as conn:
-        source = conn.execute(
-            "SELECT COUNT(*) AS n,COALESCE(MAX(settled_order),0) AS last_order "
-            "FROM match_rating_settlements WHERE settled_order>0"
-        ).fetchone()
+        live = rating_projection_digests(conn)
+        assert live["issues"] == []
         conn.execute(
             "UPDATE rating_projection_state SET policy_version='owner-neutral-v2',"
             "rebuilt_at='test',source_settlement_count=?,"
-            "source_last_settled_order=? WHERE singleton=1",
-            (int(source["n"]), int(source["last_order"])),
+            "source_last_settled_order=?,source_digest=?,projection_digest=?,"
+            "plan_digest=? WHERE singleton=1",
+            (
+                live["source_settlement_count"],
+                live["source_last_settled_order"],
+                live["source_digest"],
+                live["projection_digest"],
+                live["plan_digest"],
+            ),
         )
 
 
@@ -60,9 +66,10 @@ def test_public_queue_is_filterable_ordered_and_sanitized(tmp_path):
             _bot(app, user["id"], f"{game}-{index}", game)
     token = "api-read-leader"
     _mark_projection_verified(app)
-    app.state.store.acquire_auto_match_dispatcher(token, lease_seconds=30)
+    lease = app.state.store.acquire_auto_match_dispatcher(token, lease_seconds=30)
     app.state.store.refill_auto_match_queue(
-        target_queued=2, placement_required=10, dispatcher_token=token
+        target_queued=2, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=int(lease["lease_epoch"]),
     )
     client = TestClient(app)
 

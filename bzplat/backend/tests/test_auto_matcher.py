@@ -10,7 +10,11 @@ import pytest
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
-from bzplat.backend.store import Store
+from bzplat.backend.store import (
+    AutoMatchFenceLost,
+    Store,
+    rating_projection_digests,
+)
 
 
 @pytest.fixture
@@ -23,15 +27,20 @@ def store(tmp_path):
 
 def _mark_projection_verified(store: Store) -> None:
     with store._tx() as conn:
-        source = conn.execute(
-            "SELECT COUNT(*) AS n,COALESCE(MAX(settled_order),0) AS last_order "
-            "FROM match_rating_settlements WHERE settled_order>0"
-        ).fetchone()
+        live = rating_projection_digests(conn)
+        assert live["issues"] == []
         conn.execute(
             "UPDATE rating_projection_state SET policy_version='owner-neutral-v2',"
             "rebuilt_at='test',source_settlement_count=?,"
-            "source_last_settled_order=? WHERE singleton=1",
-            (int(source["n"]), int(source["last_order"])),
+            "source_last_settled_order=?,source_digest=?,projection_digest=?,"
+            "plan_digest=? WHERE singleton=1",
+            (
+                live["source_settlement_count"],
+                live["source_last_settled_order"],
+                live["source_digest"],
+                live["projection_digest"],
+                live["plan_digest"],
+            ),
         )
 
 
@@ -71,6 +80,12 @@ def _leader(store: Store, token: str = "test-leader") -> str:
     return token
 
 
+def _epoch(store: Store, token: str) -> int:
+    state = store.auto_match_dispatcher_state()
+    assert state["owner_token"] == token
+    return int(state["lease_epoch"])
+
+
 class _FakeOrchestrator:
     def __init__(self, *, fail_start: bool = False) -> None:
         self.max_concurrent = 2
@@ -91,12 +106,12 @@ class _FakeOrchestrator:
     def release_prepared_match_slot(self, match_id: str) -> None:
         self.admitted.discard(match_id)
 
-    def start_prepared_match(self, match_id: str) -> None:
+    def start_prepared_match(self, match_id: str, **_kwargs) -> None:
         if self.fail_start:
             raise RuntimeError("create_task failed")
         self.started.append(match_id)
 
-    async def recover_unsettled_match_ratings(self) -> int:
+    async def recover_unsettled_match_ratings(self, **_kwargs) -> int:
         return 0
 
 
@@ -200,11 +215,13 @@ def test_unverified_rating_projection_pauses_refill_and_claim(tmp_path):
     token = "unverified-leader"
     assert store.acquire_auto_match_dispatcher(token, lease_seconds=30)["owned"]
     refill = store.refill_auto_match_queue(
-        target_queued=1, placement_required=10, dispatcher_token=token
+        target_queued=1, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
     )
     assert refill["outcome"] == "rating_unverified"
     assert store.claim_next_auto_match(
-        "must-not-exist", dispatcher_token=token
+        "must-not-exist", dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
     )["outcome"] == "rating_unverified"
     assert store.get_match("must-not-exist") is None
     snapshot = AutoMatchScheduler(_FakeOrchestrator(), store).public_snapshot()
@@ -221,7 +238,8 @@ def test_game_cursor_and_lane_are_persistent_and_fixed(store: Store):
     token = _leader(store)
 
     result = store.refill_auto_match_queue(
-        target_queued=3, placement_required=10, dispatcher_token=token
+        target_queued=3, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
     )
     assert result["inserted"] == 3
     rows = store.list_auto_match_queue()
@@ -245,7 +263,8 @@ def test_placement_and_formal_lanes_alternate_without_starvation(store: Store):
     token = _leader(store)
 
     store.refill_auto_match_queue(
-        target_queued=2, placement_required=10, dispatcher_token=token
+        target_queued=2, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
     )
     rows = store.list_auto_match_queue()
     assert [row["actual_lane"] for row in rows] == ["placement", "formal"]
@@ -262,13 +281,73 @@ def test_single_placement_owner_widens_only_to_formal_other_owner(store: Store):
     formal = _mk_bot(store, "formal-partner", matches_played=20)
     token = _leader(store)
     store.refill_auto_match_queue(
-        target_queued=1, placement_required=10, dispatcher_token=token
+        target_queued=1, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
     )
     row = store.list_auto_match_queue()[0]
     assert {row["bot_a_id"], row["bot_b_id"]} == {
         placement["id"], formal["id"]
     }
     assert row["fallback_reason"] == "single_placement_owner"
+
+
+def test_single_formal_owner_anchors_formal_lane_with_placement_partner(store: Store):
+    formal = _mk_bot(store, "sole-formal", matches_played=20)
+    placement = [_mk_bot(store, f"formal-fallback-{index}") for index in range(3)]
+    token = _leader(store)
+    with store._tx() as conn:
+        conn.execute("UPDATE auto_match_fair_state SET next_lane=1 WHERE singleton=1")
+    store.refill_auto_match_queue(
+        target_queued=1,
+        placement_required=10,
+        dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
+    )
+    row = store.list_auto_match_queue()[0]
+    assert row["actual_lane"] == "formal"
+    assert row["fallback_reason"] == "single_formal_owner"
+    assert formal["id"] in {row["bot_a_id"], row["bot_b_id"]}
+    assert {row["bot_a_id"], row["bot_b_id"]} & {
+        bot["id"] for bot in placement
+    }
+
+
+def test_partner_waiting_service_layer_precedes_pair_and_rating_ties(store: Store):
+    anchor = _mk_bot(store, "service-anchor")
+    oldest_partner = _mk_bot(store, "service-oldest")
+    frequent_partner = _mk_bot(store, "service-frequent")
+    token = _leader(store)
+    with store._tx() as conn:
+        owners = {
+            bot["id"]: int(bot["owner_id"])
+            for bot in (anchor, oldest_partner, frequent_partner)
+        }
+        conn.executemany(
+            "INSERT INTO auto_match_owner_service("
+            "owner_id,game_id,served_count,last_served_revision) VALUES(?,?,?,?)",
+            [
+                (owners[anchor["id"]], "holdem", 0, 0),
+                (owners[oldest_partner["id"]], "holdem", 1, 1),
+                (owners[frequent_partner["id"]], "holdem", 9, 9),
+            ],
+        )
+        lo, hi = sorted((anchor["id"], oldest_partner["id"]))
+        conn.execute(
+            "INSERT INTO auto_match_bot_pair_service("
+            "game_id,bot_lo_id,bot_hi_id,served_count) VALUES('holdem',?,?,100)",
+            (lo, hi),
+        )
+    store.refill_auto_match_queue(
+        target_queued=1,
+        placement_required=10,
+        dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
+    )
+    row = store.list_auto_match_queue()[0]
+    assert {row["bot_a_id"], row["bot_b_id"]} == {
+        anchor["id"],
+        oldest_partner["id"],
+    }
 
 
 def test_owner_with_many_bots_has_only_one_global_queue_share(store: Store):
@@ -281,7 +360,8 @@ def test_owner_with_many_bots_has_only_one_global_queue_share(store: Store):
         _mk_bot(store, f"honest-{index}")
     token = _leader(store)
     store.refill_auto_match_queue(
-        target_queued=4, placement_required=10, dispatcher_token=token
+        target_queued=4, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
     )
 
     rows = store.list_auto_match_queue()
@@ -305,8 +385,10 @@ def test_multi_store_claim_is_exactly_one_and_atomic(tmp_path):
     for index in range(8):
         _mk_bot(setup, f"claim-{index}")
     token = _leader(setup, "shared-process-token")
+    epoch = _epoch(setup, token)
     setup.refill_auto_match_queue(
-        target_queued=4, placement_required=10, dispatcher_token=token
+        target_queued=4, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=epoch,
     )
     setup.close()
 
@@ -316,7 +398,8 @@ def test_multi_store_claim_is_exactly_one_and_atomic(tmp_path):
     def claim(index: int) -> str:
         barrier.wait()
         return stores[index].claim_next_auto_match(
-            f"concurrent-{index}", dispatcher_token=token
+            f"concurrent-{index}", dispatcher_token=token,
+            dispatcher_epoch=epoch,
         )["outcome"]
 
     try:
@@ -347,8 +430,10 @@ def test_switch_off_commit_blocks_refill_and_claim_but_keeps_upcoming(tmp_path):
     for index in range(4):
         _mk_bot(setup, f"switch-{index}")
     token = _leader(setup)
+    epoch = _epoch(setup, token)
     setup.refill_auto_match_queue(
-        target_queued=2, placement_required=10, dispatcher_token=token
+        target_queued=2, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=epoch,
     )
     setup.close()
 
@@ -363,7 +448,7 @@ def test_switch_off_commit_blocks_refill_and_claim_but_keeps_upcoming(tmp_path):
     def claim_after_commit() -> dict:
         committed.wait(timeout=5)
         return claimer.claim_next_auto_match(
-            "after-off", dispatcher_token=token
+            "after-off", dispatcher_token=token, dispatcher_epoch=epoch
         )
 
     try:
@@ -376,11 +461,12 @@ def test_switch_off_commit_blocks_refill_and_claim_but_keeps_upcoming(tmp_path):
         assert claimer.get_match("after-off") is None
         assert len(claimer.list_auto_match_queue()) == 2
         assert claimer.refill_auto_match_queue(
-            target_queued=3, placement_required=10, dispatcher_token=token
+            target_queued=3, placement_required=10, dispatcher_token=token,
+            dispatcher_epoch=epoch,
         )["outcome"] == "disabled"
         toggler.set_auto_match_enabled(True)
         assert claimer.claim_next_auto_match(
-            "after-on", dispatcher_token=token
+            "after-on", dispatcher_token=token, dispatcher_epoch=epoch
         )["outcome"] == "claimed"
     finally:
         toggler.close()
@@ -419,10 +505,14 @@ def test_live_dispatcher_lease_prevents_other_process_recovery(store: Store):
     _mk_bot(store, "lease-a")
     _mk_bot(store, "lease-b")
     token_a = _leader(store, "leader-a")
+    epoch_a = _epoch(store, token_a)
     store.refill_auto_match_queue(
-        target_queued=1, placement_required=10, dispatcher_token=token_a
+        target_queued=1, placement_required=10, dispatcher_token=token_a,
+        dispatcher_epoch=epoch_a,
     )
-    claimed = store.claim_next_auto_match("leased", dispatcher_token=token_a)
+    claimed = store.claim_next_auto_match(
+        "leased", dispatcher_token=token_a, dispatcher_epoch=epoch_a
+    )
     assert claimed["outcome"] == "claimed"
 
     contender = Store(store.path)
@@ -430,27 +520,152 @@ def test_live_dispatcher_lease_prevents_other_process_recovery(store: Store):
         lease = contender.acquire_auto_match_dispatcher("leader-b", lease_seconds=30)
         assert lease["owned"] is False
         assert contender.recover_auto_match_dispatcher_takeover(
-            dispatcher_token="leader-b"
+            dispatcher_token="leader-b", dispatcher_epoch=int(lease["lease_epoch"])
         )["outcome"] == "not_leader"
         assert contender.get_match("leased")["status"] == "pending"
     finally:
         contender.close()
 
 
+def test_expired_worker_cannot_resurrect_or_settle_after_epoch_takeover(store: Store):
+    bots = [_mk_bot(store, f"fence-{index}") for index in range(2)]
+    token_a = _leader(store, "fence-a")
+    epoch_a = _epoch(store, token_a)
+    store.refill_auto_match_queue(
+        target_queued=1,
+        placement_required=10,
+        dispatcher_token=token_a,
+        dispatcher_epoch=epoch_a,
+    )
+    assert store.claim_next_auto_match(
+        "fenced-match", dispatcher_token=token_a, dispatcher_epoch=epoch_a
+    )["outcome"] == "claimed"
+    store.update_match(
+        "fenced-match",
+        auto_dispatcher_token=token_a,
+        auto_dispatcher_epoch=epoch_a,
+        status="running",
+        started_at="2026-08-10T12:00:00",
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_dispatcher SET lease_until='2000-01-01T00:00:00' "
+            "WHERE singleton=1"
+        )
+    lease_b = store.acquire_auto_match_dispatcher("fence-b", lease_seconds=30)
+    epoch_b = int(lease_b["lease_epoch"])
+    assert lease_b["owned"] is True
+    assert epoch_b > epoch_a
+    assert store.recover_auto_match_dispatcher_takeover(
+        dispatcher_token="fence-b", dispatcher_epoch=epoch_b
+    )["outcome"] == "aborted_running"
+
+    with pytest.raises(AutoMatchFenceLost):
+        store.update_match(
+            "fenced-match",
+            auto_dispatcher_token=token_a,
+            auto_dispatcher_epoch=epoch_a,
+            status="completed",
+            winner=0,
+            result={"rounds_played": 1, "deltas": [1, -1], "normalized_delta": 1},
+            ended_at="2026-08-10T12:01:00",
+        )
+    with pytest.raises(AutoMatchFenceLost):
+        store.upsert_replay(
+            "fenced-match",
+            "[]",
+            auto_dispatcher_token=token_a,
+            auto_dispatcher_epoch=epoch_a,
+        )
+    with pytest.raises(AutoMatchFenceLost):
+        store.mark_match_rating_settled(
+            "fenced-match",
+            auto_dispatcher_token=token_a,
+            auto_dispatcher_epoch=epoch_a,
+        )
+    with pytest.raises(AutoMatchFenceLost):
+        store.apply_match_ratings_atomic(
+            bots[0]["id"],
+            bots[1]["id"],
+            game_id="holdem",
+            rating_a=(1500.0, 350.0, 0.06),
+            rating_b=(1500.0, 350.0, 0.06),
+            winner=0,
+            delta_a=1,
+            delta_b=-1,
+            settlement_id="fenced-match",
+            auto_dispatcher_token=token_a,
+            auto_dispatcher_epoch=epoch_a,
+        )
+    assert store.get_match("fenced-match")["status"] == "aborted"
+    assert store.is_match_rating_settled("fenced-match") is False
+    assert store.get_rating(bots[0]["id"])["matches_played"] == 0
+    assert store.get_rating(bots[1]["id"])["matches_played"] == 0
+
+
+def test_auto_seats_flip_after_each_completed_service(store: Store):
+    bots = [_mk_bot(store, f"seat-{index}") for index in range(2)]
+    token = _leader(store)
+    epoch = _epoch(store, token)
+    store.refill_auto_match_queue(
+        target_queued=1,
+        placement_required=10,
+        dispatcher_token=token,
+        dispatcher_epoch=epoch,
+    )
+    first = store.list_auto_match_queue()[0]
+    assert store.claim_next_auto_match(
+        "seat-first", dispatcher_token=token, dispatcher_epoch=epoch
+    )["outcome"] == "claimed"
+    store.update_match(
+        "seat-first",
+        auto_dispatcher_token=token,
+        auto_dispatcher_epoch=epoch,
+        status="completed",
+        winner=0,
+        reason="completed",
+        result={"rounds_played": 1, "deltas": [1, -1], "normalized_delta": 1},
+        ended_at="2026-08-10T12:00:00",
+    )
+    store.mark_match_rating_settled(
+        "seat-first", auto_dispatcher_token=token, auto_dispatcher_epoch=epoch
+    )
+    assert store.reconcile_auto_match_queue(
+        dispatcher_token=token, dispatcher_epoch=epoch
+    )["removed_terminal"] == 1
+    _mark_projection_verified(store)
+    store.refill_auto_match_queue(
+        target_queued=1,
+        placement_required=10,
+        dispatcher_token=token,
+        dispatcher_epoch=epoch,
+    )
+    second = store.list_auto_match_queue()[0]
+    assert {first["bot_a_id"], first["bot_b_id"]} == {
+        bots[0]["id"], bots[1]["id"]
+    }
+    assert second["bot_a_id"] == first["bot_b_id"]
+    assert second["bot_b_id"] == first["bot_a_id"]
+
+
 def test_platform_abort_is_zero_service_and_persistently_backed_off(store: Store):
     bots = [_mk_bot(store, f"platform-{index}") for index in range(2)]
     token = _leader(store)
+    epoch = _epoch(store, token)
     store.refill_auto_match_queue(
-        target_queued=1, placement_required=10, dispatcher_token=token
+        target_queued=1, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=epoch,
     )
     assert store.claim_next_auto_match(
-        "platform-abort", dispatcher_token=token
+        "platform-abort", dispatcher_token=token, dispatcher_epoch=epoch
     )["outcome"] == "claimed"
     store.update_match(
-        "platform-abort", status="aborted", reason="platform_error", ended_at="2026-08-10T12:00:00"
+        "platform-abort", auto_dispatcher_token=token,
+        auto_dispatcher_epoch=epoch, status="aborted", reason="platform_error",
+        ended_at="2026-08-10T12:00:00"
     )
     assert store.reconcile_auto_match_queue(
-        dispatcher_token=token
+        dispatcher_token=token, dispatcher_epoch=epoch
     )["removed_terminal"] == 1
     assert store.list_auto_match_queue() == []
     assert store._conn.execute(
@@ -461,19 +676,26 @@ def test_platform_abort_is_zero_service_and_persistently_backed_off(store: Store
     assert state["platform_failures"] == 1
     assert state["not_before"] is not None
     assert store.refill_auto_match_queue(
-        target_queued=1, placement_required=10, dispatcher_token=token
+        target_queued=1, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=epoch,
     )["outcome"] == "backoff"
 
 
 def test_completed_settled_terminal_updates_auto_service_once(store: Store):
     bots = [_mk_bot(store, f"settled-{index}") for index in range(2)]
     token = _leader(store)
+    epoch = _epoch(store, token)
     store.refill_auto_match_queue(
-        target_queued=1, placement_required=10, dispatcher_token=token
+        target_queued=1, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=epoch,
     )
-    store.claim_next_auto_match("settled", dispatcher_token=token)
+    store.claim_next_auto_match(
+        "settled", dispatcher_token=token, dispatcher_epoch=epoch
+    )
     store.update_match(
         "settled",
+        auto_dispatcher_token=token,
+        auto_dispatcher_epoch=epoch,
         status="completed",
         reason="technical_loss",
         winner=1,
@@ -482,15 +704,17 @@ def test_completed_settled_terminal_updates_auto_service_once(store: Store):
         ended_at="2026-08-10T12:00:00",
     )
     assert store.reconcile_auto_match_queue(
-        dispatcher_token=token
+        dispatcher_token=token, dispatcher_epoch=epoch
     )["waiting_settlement"] == 1
     assert len(store.list_auto_match_queue()) == 1
-    store.mark_match_rating_settled("settled")
+    store.mark_match_rating_settled(
+        "settled", auto_dispatcher_token=token, auto_dispatcher_epoch=epoch
+    )
     assert store.reconcile_auto_match_queue(
-        dispatcher_token=token
+        dispatcher_token=token, dispatcher_epoch=epoch
     )["removed_terminal"] == 1
     assert store.reconcile_auto_match_queue(
-        dispatcher_token=token
+        dispatcher_token=token, dispatcher_epoch=epoch
     )["removed_terminal"] == 0
     counts = store._conn.execute(
         "SELECT bot_id,served_count FROM auto_match_bot_service "
@@ -507,7 +731,8 @@ def test_frozen_queue_version_is_restrict_deleted(store: Store):
     bots = [_mk_bot(store, f"version-{index}") for index in range(2)]
     token = _leader(store)
     store.refill_auto_match_queue(
-        target_queued=1, placement_required=10, dispatcher_token=token
+        target_queued=1, placement_required=10, dispatcher_token=token,
+        dispatcher_epoch=_epoch(store, token),
     )
     queued = store.list_auto_match_queue()[0]
     version = store.get_bot_version(queued["bot_a_version_id"])

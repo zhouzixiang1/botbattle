@@ -32,7 +32,7 @@ from bzplat.backend.runtime.binary_runner import (
     BotTechnicalError,
     PlatformRunnerError,
 )
-from bzplat.backend.store import Store
+from bzplat.backend.store import AutoMatchFenceLost, Store
 from bzplat.backend.store.public_contract import (
     canonical_public_completed_reason,
     canonical_public_error_reason,
@@ -59,6 +59,8 @@ from bzplat.backend.store.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+AutoMatchFence = tuple[str, int] | None
 
 
 _BinaryIntegrityCacheKey = tuple[str, str, int, int, int, int, int, int]
@@ -577,6 +579,7 @@ class MatchOrchestrator:
         match_id: str,
         exc: BotVersionUnavailableError,
         events: list[dict],
+        auto_fence: AutoMatchFence = None,
     ) -> None:
         """Persist one non-adjudicated terminal result without exposing paths."""
         logger.error(
@@ -586,11 +589,17 @@ class MatchOrchestrator:
             exc.version_id,
             exc.seat,
         )
-        self.store.abort_match_if_active(
-            match_id, reason=BotVersionUnavailableError.code
+        self._update_match_owned(
+            match_id,
+            auto_fence,
+            status=STATUS_ABORTED,
+            reason=BotVersionUnavailableError.code,
+            ended_at=_now(),
         )
         terminal_event = _authoritative_error(BotVersionUnavailableError.code)
-        self._safe_flush_terminal_replay(match_id, events, terminal_event)
+        self._safe_flush_terminal_replay(
+            match_id, events, terminal_event, auto_fence=auto_fence
+        )
         self._broadcast(match_id, terminal_event)
 
     async def shutdown(self) -> None:
@@ -810,12 +819,47 @@ class MatchOrchestrator:
             raise
         return match_id
 
-    def start_prepared_match(self, match_id: str) -> None:
+    @staticmethod
+    def _auto_fence_kwargs(auto_fence: AutoMatchFence) -> dict[str, Any]:
+        if auto_fence is None:
+            return {}
+        return {
+            "auto_dispatcher_token": auto_fence[0],
+            "auto_dispatcher_epoch": auto_fence[1],
+        }
+
+    def _update_match_owned(
+        self, match_id: str, auto_fence: AutoMatchFence, **fields: Any
+    ) -> dict | None:
+        return self.store.update_match(
+            match_id, **self._auto_fence_kwargs(auto_fence), **fields
+        )
+
+    def _upsert_replay_owned(
+        self, match_id: str, events_json: str, auto_fence: AutoMatchFence
+    ) -> None:
+        self.store.upsert_replay(
+            match_id, events_json, **self._auto_fence_kwargs(auto_fence)
+        )
+
+    def start_prepared_match(
+        self,
+        match_id: str,
+        *,
+        auto_dispatcher_token: str | None = None,
+        auto_dispatcher_epoch: int | None = None,
+    ) -> None:
         """启动由 ``challenge(..., defer_start=True)`` 准备好的 pending 对局。
 
         赛事调度先准备 match、原子绑定 pairing，再调用本方法；这样 pairing 提交
         失败时 runner 尚未启动，可用 :meth:`discard_prepared_match` 精确补偿。
         """
+        auto_fence: AutoMatchFence = None
+        if auto_dispatcher_token is not None or auto_dispatcher_epoch is not None:
+            if not auto_dispatcher_token or auto_dispatcher_epoch is None:
+                raise ValueError("auto-match start fence requires token and epoch")
+            auto_fence = (auto_dispatcher_token, int(auto_dispatcher_epoch))
+            self.store.assert_auto_match_claim_fence(match_id, *auto_fence)
         if match_id in self._tasks:
             return
         match = self.store.get_match(match_id)
@@ -827,7 +871,10 @@ class MatchOrchestrator:
             raise ValueError(f"仅 pending 对局可启动，当前状态: {match.get('status')}")
         self._reserve_bot_slot(match_id)
         try:
-            task = asyncio.create_task(self._run_match(match_id), name=f"match-{match_id}")
+            task = asyncio.create_task(
+                self._run_match(match_id, auto_fence=auto_fence),
+                name=f"match-{match_id}",
+            )
             self._tasks[match_id] = task
         except Exception:
             self._release_bot_slot(match_id)
@@ -1074,15 +1121,27 @@ class MatchOrchestrator:
                 return p
         return None
 
-    async def _run_match(self, match_id: str) -> None:
+    async def _run_match(
+        self, match_id: str, *, auto_fence: AutoMatchFence = None
+    ) -> None:
         async with self._sem:
             self._bot_running += 1  # 占用槽位（供 auto_matcher._is_idle 准确判定）
             try:
-                return await self.__run_match_inner(match_id)
+                return await self.__run_match_inner(match_id, auto_fence=auto_fence)
+            except AutoMatchFenceLost:
+                logger.warning(
+                    "stale auto-match worker discarded match=%s fence=%s",
+                    match_id,
+                    auto_fence,
+                )
+                if match_id in self._tasks:
+                    await self._finish_match_task(match_id, None)
             finally:
                 self._bot_running = max(0, self._bot_running - 1)
 
-    async def __run_match_inner(self, match_id: str) -> None:
+    async def __run_match_inner(
+        self, match_id: str, *, auto_fence: AutoMatchFence = None
+    ) -> None:
         m = self.store.get_match(match_id)
         if not m:
             await self._finish_match_task(match_id, None)
@@ -1092,15 +1151,18 @@ class MatchOrchestrator:
             spec = game_registry.get(gid)
         except (KeyError, ValueError) as exc:
             logger.error("match %s has invalid stored game_id: %s", match_id, exc)
-            self.store.update_match(
+            self._update_match_owned(
                 match_id,
+                auto_fence,
                 status=STATUS_ABORTED,
                 reason="invalid_game_id",
                 winner=None,
                 ended_at=_now(),
             )
             terminal_event = _authoritative_error("invalid_game_id")
-            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._safe_flush_terminal_replay(
+                match_id, [], terminal_event, auto_fence=auto_fence
+            )
             self._broadcast(match_id, terminal_event)
             await self._finish_match_task(match_id, m.get("contest_id"))
             return
@@ -1113,8 +1175,9 @@ class MatchOrchestrator:
             logger.warning("match %s has null bot (a=%s b=%s) — bot deleted, aborting",
                            match_id, m.get("bot_a_id"), m.get("bot_b_id"))
             if bot_a is None and bot_b is None:
-                self.store.update_match(
+                self._update_match_owned(
                     match_id,
+                    auto_fence,
                     status=STATUS_ABORTED,
                     reason="contest_both_bots_unavailable",
                     winner=None,
@@ -1123,14 +1186,16 @@ class MatchOrchestrator:
                 terminal_event = _authoritative_error(
                     "contest_both_bots_unavailable"
                 )
-                self._safe_flush_terminal_replay(match_id, [], terminal_event)
+                self._safe_flush_terminal_replay(
+                    match_id, [], terminal_event, auto_fence=auto_fence
+                )
                 self._broadcast(match_id, terminal_event)
                 await self._finish_match_task(match_id, m.get("contest_id"))
                 return
             winner = 1 if bot_a is None else 0  # 缺失方判负，存活方赢
             ea, eb = (-1, 1) if winner == 1 else (1, -1)
-            self.store.update_match(
-                match_id, status=STATUS_COMPLETED, reason="bot_deleted",
+            self._update_match_owned(
+                match_id, auto_fence, status=STATUS_COMPLETED, reason="bot_deleted",
                 winner=winner,
                 result=build_result_payload(
                     spec, rounds_played=0, deltas=[ea, eb]
@@ -1140,8 +1205,12 @@ class MatchOrchestrator:
             terminal_event = _authoritative_match_end(
                 winner, "bot_deleted", [ea, eb]
             )
-            self._safe_flush_terminal_replay(match_id, [], terminal_event)
-            await self._safe_postprocess_completed_match(m, match_id, winner, ea, eb)
+            self._safe_flush_terminal_replay(
+                match_id, [], terminal_event, auto_fence=auto_fence
+            )
+            await self._safe_postprocess_completed_match(
+                m, match_id, winner, ea, eb, auto_fence=auto_fence
+            )
             self._broadcast(match_id, terminal_event)
             # P0-1 回归修复：必须走收尾（清 _tasks + on_match_done 触发赛事推进），
             # 不能裸 return 绕过 finally——否则赛事对局卡死。
@@ -1178,15 +1247,18 @@ class MatchOrchestrator:
         want_duplicate = bool(stored_mc.get("duplicate"))
         if want_duplicate and spec.build_match_plan is None:
             logger.error("match %s has unsupported duplicate config for %s", match_id, gid)
-            self.store.update_match(
+            self._update_match_owned(
                 match_id,
+                auto_fence,
                 status=STATUS_ABORTED,
                 reason="invalid_match_config",
                 winner=None,
                 ended_at=_now(),
             )
             terminal_event = _authoritative_error("invalid_match_config")
-            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._safe_flush_terminal_replay(
+                match_id, [], terminal_event, auto_fence=auto_fence
+            )
             self._broadcast(match_id, terminal_event)
             await self._finish_match_task(match_id, m.get("contest_id"))
             return
@@ -1207,12 +1279,15 @@ class MatchOrchestrator:
                 "error",
             }:
                 return
+            if auto_fence is not None:
+                self.store.assert_auto_match_claim_fence(match_id, *auto_fence)
             events.append(ev)
             self._broadcast(match_id, ev)
             if kind in ("settle", "hand_start", "move", "match_start") or len(events) % 5 == 0:
-                self.store.upsert_replay(
+                self._upsert_replay_owned(
                     match_id,
                     json.dumps(_live_replay_events(events), ensure_ascii=False),
+                    auto_fence,
                 )
 
         try:
@@ -1228,8 +1303,8 @@ class MatchOrchestrator:
                 m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
                 want_duplicate,
             )
-            self.store.update_match(
-                match_id, status=STATUS_RUNNING, started_at=_now()
+            self._update_match_owned(
+                match_id, auto_fence, status=STATUS_RUNNING, started_at=_now()
             )
             if want_duplicate:
                 result = await self.runner.run_duplicate(
@@ -1260,8 +1335,9 @@ class MatchOrchestrator:
                 # 破同分用：两 leg 物理 deltas 累加
                 ea = sum(int(lg.get("deltas", [0, 0])[0]) for lg in legs_data) if legs_data else 0
                 eb = sum(int(lg.get("deltas", [0, 0])[1]) for lg in legs_data) if legs_data else 0
-                self.store.update_match(
+                self._update_match_owned(
                     match_id,
+                    auto_fence,
                     status=STATUS_COMPLETED,
                     winner=None,  # 胜负由 standings 读 result.legs 决定
                     reason=terminal_reason,
@@ -1282,8 +1358,9 @@ class MatchOrchestrator:
                 if winner is None:
                     winner = 0 if ea > eb else 1 if eb > ea else None
                 terminal_reason = _completed_match_reason(result, events)
-                self.store.update_match(
+                self._update_match_owned(
                     match_id,
+                    auto_fence,
                     status=STATUS_COMPLETED,
                     winner=winner,
                     reason=terminal_reason,
@@ -1295,16 +1372,24 @@ class MatchOrchestrator:
             terminal_event = _authoritative_match_end(
                 winner, terminal_reason, [ea, eb]
             )
-            self._safe_flush_terminal_replay(match_id, events, terminal_event)
-            await self._safe_postprocess_completed_match(m, match_id, winner, ea, eb)
+            self._safe_flush_terminal_replay(
+                match_id, events, terminal_event, auto_fence=auto_fence
+            )
+            await self._safe_postprocess_completed_match(
+                m, match_id, winner, ea, eb, auto_fence=auto_fence
+            )
             self._broadcast(match_id, terminal_event)
             logger.info(
                 "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
                 match_id, winner, result.rounds_played, ea, eb,
                 m["match_type"] != TYPE_CONTEST,
             )
+        except AutoMatchFenceLost:
+            raise
         except BotVersionUnavailableError as exc:
-            self._abort_version_unavailable(match_id, exc, events)
+            self._abort_version_unavailable(
+                match_id, exc, events, auto_fence=auto_fence
+            )
         except BotTechnicalError as exc:
             # Bot stdout protocol faults and Bot decision timeouts are attributable,
             # terminal failures.  Score one deterministic technical loss instead of
@@ -1330,8 +1415,9 @@ class MatchOrchestrator:
                 exc.leg,
                 str(exc)[:200],
             )
-            self.store.update_match(
+            self._update_match_owned(
                 match_id,
+                auto_fence,
                 status=STATUS_COMPLETED,
                 reason=exc.reason,
                 winner=winner,
@@ -1347,9 +1433,11 @@ class MatchOrchestrator:
             terminal_event = _authoritative_match_end(
                 winner, exc.reason, [ea, eb]
             )
-            self._safe_flush_terminal_replay(match_id, events, terminal_event)
+            self._safe_flush_terminal_replay(
+                match_id, events, terminal_event, auto_fence=auto_fence
+            )
             await self._safe_postprocess_completed_match(
-                m, match_id, winner, ea, eb
+                m, match_id, winner, ea, eb, auto_fence=auto_fence
             )
             self._broadcast(match_id, terminal_event)
         except PlatformRunnerError as exc:
@@ -1357,14 +1445,17 @@ class MatchOrchestrator:
             # behaviour.  Abort without a winner/technical loss and, crucially,
             # without invoking the rating/XP/notification completion pipeline.
             logger.error("match %s sandbox unavailable — %s", match_id, exc)
-            self.store.update_match(
+            self._update_match_owned(
                 match_id,
+                auto_fence,
                 status=STATUS_ABORTED,
                 reason="platform_error",
                 ended_at=_now(),
             )
             terminal_event = _authoritative_error("platform_error")
-            self._safe_flush_terminal_replay(match_id, events, terminal_event)
+            self._safe_flush_terminal_replay(
+                match_id, events, terminal_event, auto_fence=auto_fence
+            )
             self._broadcast(match_id, terminal_event)
         except BotCrashedError as exc:
             logger.warning("match %s bot crashed — %s", match_id, exc)
@@ -1377,8 +1468,8 @@ class MatchOrchestrator:
             crashed_seat = getattr(exc, "crashed_seat", None) or 0
             winner = 1 - crashed_seat
             ea, eb = (-1, 1) if crashed_seat == 0 else (1, -1)
-            self.store.update_match(
-                match_id, status=STATUS_COMPLETED, reason="technical_loss",
+            self._update_match_owned(
+                match_id, auto_fence, status=STATUS_COMPLETED, reason="technical_loss",
                 winner=winner,
                 result=build_technical_result_payload(
                     spec, events, deltas=[ea, eb]
@@ -1388,19 +1479,26 @@ class MatchOrchestrator:
             terminal_event = _authoritative_match_end(
                 winner, "technical_loss", [ea, eb]
             )
-            self._safe_flush_terminal_replay(match_id, events, terminal_event)
-            await self._safe_postprocess_completed_match(m, match_id, winner, ea, eb)
+            self._safe_flush_terminal_replay(
+                match_id, events, terminal_event, auto_fence=auto_fence
+            )
+            await self._safe_postprocess_completed_match(
+                m, match_id, winner, ea, eb, auto_fence=auto_fence
+            )
             self._broadcast(match_id, terminal_event)
         except Exception as exc:
             logger.exception("match %s failed", match_id)
-            self.store.update_match(
+            self._update_match_owned(
                 match_id,
+                auto_fence,
                 status=STATUS_ABORTED,
                 reason="platform_error",
                 ended_at=_now(),
             )
             terminal_event = _authoritative_error("platform_error")
-            self._safe_flush_terminal_replay(match_id, events, terminal_event)
+            self._safe_flush_terminal_replay(
+                match_id, events, terminal_event, auto_fence=auto_fence
+            )
             self._broadcast(match_id, terminal_event)
         finally:
             await self._finish_match_task(match_id, m.get("contest_id"))
@@ -1412,10 +1510,21 @@ class MatchOrchestrator:
         winner: int | None,
         ea: int,
         eb: int,
+        *,
+        auto_fence: AutoMatchFence = None,
     ) -> None:
         """后处理失败只记日志；不得把已落库的 completed 业务结果改写 aborted。"""
         try:
-            await self._postprocess_completed_match(match, match_id, winner, ea, eb)
+            await self._postprocess_completed_match(
+                match,
+                match_id,
+                winner,
+                ea,
+                eb,
+                auto_fence=auto_fence,
+            )
+        except AutoMatchFenceLost:
+            raise
         except Exception:
             logger.exception("completed match postprocess failed match=%s", match_id)
 
@@ -1424,6 +1533,8 @@ class MatchOrchestrator:
         match_id: str,
         events: list[dict],
         terminal_event: dict[str, Any] | None = None,
+        *,
+        auto_fence: AutoMatchFence = None,
     ) -> None:
         """终态后的最后一次 replay flush 失败不得让状态/原因倒退。
 
@@ -1441,10 +1552,13 @@ class MatchOrchestrator:
             replay_events = _bounded_replay_events(_live_replay_events(events))
             if terminal_event is not None:
                 replay_events.append(dict(terminal_event))
-            self.store.upsert_replay(
+            self._upsert_replay_owned(
                 match_id,
                 json.dumps(replay_events, ensure_ascii=False),
+                auto_fence,
             )
+        except AutoMatchFenceLost:
+            raise
         except Exception:
             logger.exception("terminal match final replay flush failed match=%s", match_id)
 
@@ -1455,6 +1569,8 @@ class MatchOrchestrator:
         winner: int | None,
         ea: int,
         eb: int,
+        *,
+        auto_fence: AutoMatchFence = None,
     ) -> None:
         """统一 completed 后处理：评分/pair_stats、通知与 XP。
 
@@ -1478,6 +1594,7 @@ class MatchOrchestrator:
             target_match=target,
             emit_side_effects=True,
             suppress_errors=False,
+            auto_fence=auto_fence,
         )
         if not target_settled:
             logger.info("match rating already settled; skip postprocess match=%s", match_id)
@@ -1555,6 +1672,7 @@ class MatchOrchestrator:
         target_match: dict | None,
         emit_side_effects: bool,
         suppress_errors: bool,
+        auto_fence: AutoMatchFence = None,
     ) -> tuple[int, bool]:
         """按全局稳定顺序结算到 target（含），或 target=None 时全量恢复。
 
@@ -1597,7 +1715,15 @@ class MatchOrchestrator:
                         candidate_winner,
                         candidate_ea,
                         candidate_eb,
+                        auto_fence=auto_fence,
                     )
+                except AutoMatchFenceLost:
+                    if suppress_errors:
+                        logger.warning(
+                            "rating settlement lost auto fence match=%s", candidate_id
+                        )
+                        break
+                    raise
                 except Exception:
                     if suppress_errors:
                         logger.exception(
@@ -1624,6 +1750,8 @@ class MatchOrchestrator:
         winner: int | None,
         ea: int,
         eb: int,
+        *,
+        auto_fence: AutoMatchFence = None,
     ) -> bool:
         """在稳定锁顺序下结算一场 Bot 对局；重复 settlement 返回 False。"""
         rating_policy = self.store.match_rating_policy(match)
@@ -1633,7 +1761,9 @@ class MatchOrchestrator:
                 match_id,
                 rating_policy.get("rating_reason"),
             )
-            return self.store.mark_match_rating_settled(match_id)
+            return self.store.mark_match_rating_settled(
+                match_id, **self._auto_fence_kwargs(auto_fence)
+            )
         bot_a_id = match.get("bot_a_id")
         bot_b_id = match.get("bot_b_id")
         if bot_a_id is None or bot_b_id is None:
@@ -1643,7 +1773,9 @@ class MatchOrchestrator:
                 "completed match %s lost bot reference; mark rating settlement without rating",
                 match_id,
             )
-            return self.store.mark_match_rating_settled(match_id)
+            return self.store.mark_match_rating_settled(
+                match_id, **self._auto_fence_kwargs(auto_fence)
+            )
 
         bot_a_id = int(bot_a_id)
         bot_b_id = int(bot_b_id)
@@ -1661,6 +1793,7 @@ class MatchOrchestrator:
                         reason=match_id,
                         settlement_id=match_id,
                         game_id=gid,
+                        auto_fence=auto_fence,
                     )
             return self._apply_ratings(
                 bot_a_id,
@@ -1671,9 +1804,12 @@ class MatchOrchestrator:
                 reason=match_id,
                 settlement_id=match_id,
                 game_id=gid,
+                auto_fence=auto_fence,
             )
 
-    async def recover_unsettled_match_ratings(self) -> int:
+    async def recover_unsettled_match_ratings(
+        self, *, auto_fence: AutoMatchFence = None
+    ) -> int:
         """启动时补算 completed 非赛事 Bot 对局，且不重复通知或 XP。
 
         completed 结果先于评分提交；进程若在两者之间退出，marker 不存在。
@@ -1684,6 +1820,7 @@ class MatchOrchestrator:
             target_match=None,
             emit_side_effects=False,
             suppress_errors=True,
+            auto_fence=auto_fence,
         )
         return recovered
 
@@ -1969,6 +2106,7 @@ class MatchOrchestrator:
         reason: str = "",
         settlement_id: str | None = None,
         game_id: str | None = None,
+        auto_fence: AutoMatchFence = None,
     ) -> bool:
         # 自博弈（同 bot 对战）：不计 Glicko 评分——同 bot 评分无信息量，且 update_rating_row
         # 同一行被写两次（ra/rb 是同一快照），第二次覆盖第一次，导致胜负/评分错乱。
@@ -1992,11 +2130,17 @@ class MatchOrchestrator:
                 delta_b=eb,
                 reason=reason,
                 settlement_id=settlement_id,
+                **self._auto_fence_kwargs(auto_fence),
             )
-        self.store.ensure_rating(bot_a_id, game_id=gid)
-        self.store.ensure_rating(bot_b_id, game_id=gid)
+        if auto_fence is None:
+            self.store.ensure_rating(bot_a_id, game_id=gid)
+            self.store.ensure_rating(bot_b_id, game_id=gid)
         ra = self.store.get_rating(bot_a_id, game_id=gid)
         rb = self.store.get_rating(bot_b_id, game_id=gid)
+        if ra is None or rb is None:
+            raise RuntimeError(
+                f"rating snapshot missing for match settlement {settlement_id or reason}"
+            )
         sa, sb = match_scores(winner)
         ra_new = update_rating(
             Rating(ra["rating"], ra["rd"], ra["vol"]),
@@ -2017,4 +2161,5 @@ class MatchOrchestrator:
             delta_b=eb,
             reason=reason,
             settlement_id=settlement_id,
+            **self._auto_fence_kwargs(auto_fence),
         )
