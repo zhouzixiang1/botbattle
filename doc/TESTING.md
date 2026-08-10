@@ -51,12 +51,12 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前有 5 个 spec，Playwright 静态收集为 53 条浏览器测试：
+`bzplat/frontend/e2e/` 当前有 5 个 spec，Playwright 静态收集为 56 条浏览器测试：
 
 | Spec | 重点 |
 |------|------|
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
-| `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、`move/pass/turn` 逐事件行动方与强制让行真值、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/844/1024/1312/1600/1920/2048/2560 多比例方形棋盘与滚动/时序协作、局面概览数值、Safari 截图同尺寸的 2048×1024/1152 Chromium 布局回归（观赛与真人完整棋盘、长时序独立滚动）、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
+| `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、生产回放 `20260809205002-ede64ea8` 的 70 手真实结算与末手完整事件 HUD、多比例三列/横排/堆叠/折叠/sticky/零横溢出、复式 140 手/换座/leg 边界与真人 HUD 无底牌文本，Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、`move/pass/turn` 逐事件行动方与强制让行真值、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/844/1024/1312/1600/1920/2048/2560 多比例方形棋盘与滚动/时序协作、局面概览数值、Safari 截图同尺寸的 2048×1024/1152 Chromium 布局回归（观赛与真人完整棋盘、长时序独立滚动）、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；赛事时间按状态收口、空值/显式 `NULL`、保存失败原位反馈、真实隔离库重载与 audit、500+ 字连续长文本、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
 | `leaderboard-density.spec.ts` | 访客/普通用户/组织者/admin × Desktop/Laptop/Mobile；每个 context 精确断言 `/api/auth/me` 的匿名状态或 username/role，非访客三类各只登录一次并复用独立 storageState；长 Bot/用户名折行、桌面六列表头、移动列表卡、正式/定级分段、滚动中可操作的 Radix tabs/表头 sticky、慢响应切游戏立即清旧概览、根元素零横溢出、三游戏显式请求、tiers 同 game singleflight 与 Console/Network clean |
@@ -74,7 +74,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 - 完整的角色 × 页面 × 操作清单见 [BROWSER_ACCEPTANCE.md](./BROWSER_ACCEPTANCE.md)；新增页面或角色能力时必须先更新该矩阵，再补自动化落点。
 - 角色：访客、普通玩家、组织者、管理员。
-- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。Pencil 观赛/人机另用 Chromium 覆盖 `2560×1080`、`1920×1080`、`2048×1024/1152`、`1600×900`、`1536×1080`、`1366×768`、`1312×700`、`1024×768`、`844×390`、`390×700`、`320×568`；断言 21:9、16:9、4:3、短横屏和手机竖屏按三栏/双栏/堆叠重排，方形 canvas 同时受可用宽高约束，局面概览数值与当前事件一致且不高于棋盘、长时序独立滚动、折叠后不保留空右轨、根元素零横向溢出且页面上下滚动后仍可用。真实 Safari/WebKit 仍列为人工视觉抽查，不把同尺寸 Chromium 结果冒充 Safari 引擎证据。
+- 视口：Desktop `1440×900`、Laptop `1280×720`、Mobile `390×844`；访客导航与 admin 七 Tab 均覆盖三档，核心赛事流程另以 laptop 执行。德州生产回放 HUD 另覆盖 `2560×1080`、`1920×1080`、`1760×900`、`1600×900`、`1536×900`、`1366×768`、`1280×800`、`1024×768`、`390×844`、`320×568`；断言自定义 `3xl=1760px` 及以上三列、1280–1759px HUD 横排在牌桌上方且时序在右、窄屏堆叠、16:9、时序折叠/页面滚动 sticky、真人 HUD 无底牌文本和根元素零横向溢出；复式 fixture 另断言 2×70=140 手总进度、第二局物理座位映射、leg 边界不沿用旧动作和无伪整场胜者。Pencil 观赛/人机另用 Chromium 覆盖 `2560×1080`、`1920×1080`、`2048×1024/1152`、`1600×900`、`1536×1080`、`1366×768`、`1312×700`、`1024×768`、`844×390`、`390×700`、`320×568`；断言 21:9、16:9、4:3、短横屏和手机竖屏按三栏/双栏/堆叠重排，方形 canvas 同时受可用宽高约束，局面概览数值与当前事件一致且不高于棋盘、长时序独立滚动、折叠后不保留空右轨、根元素零横向溢出且页面上下滚动后仍可用。真实 Safari/WebKit 仍列为人工视觉抽查，不把同尺寸 Chromium 结果冒充 Safari 引擎证据。
 - UI：主要导航、按钮、Tab、Dialog、筛选、表单合法/非法/超长输入、重复提交、空状态、错误状态、直接子路由、刷新、返回/前进与根元素横向溢出。
 - Console：持续收集 `pageerror` 与 error 级 console；未在精确白名单中的异常直接使测试失败。
 - Network：跟踪 request failed 与 4xx/5xx；负向用例只豁免精确预期的请求/状态，关键写操作断言方法、路径、状态和返回结构。深链 reload/back/forward 在继续导航前须等待目标实体 ID 对应的 detail 200 与普通 HTTP quiet window，避免仅凭通用标题把仍在收尾的 fetch 留给下一段导航。
@@ -98,7 +98,9 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 |------|----------|-----------|
 | 隔离端到端冒烟 | **ALL PASSED** | 本分支 `bash scripts/e2e_smoke.sh` 在 `/tmp` 临时 DB 与运行时目录完成，退出后回收自己的服务和目录；写目标不在主仓库 |
 | API 关键链路脚本 | **50 passed / 0 failed** | 全新临时库隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚、全局并发上限精确接纳、超额 429 与释放后补槽等核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **50 条 / 4 spec** | 本分支 `npx playwright test --list` 实测；在原 43 条基础上新增 7 条 Pencil 回归，覆盖几何与合法命中、生产事故事件夹具、强制让行、键盘操作、等长 snapshot/动画、回放布局与真实人机多步 |
+| Playwright 收集 | **56 条 / 5 spec** | 目标整合 HEAD `npx playwright test --list` 实测；保留排行榜合入后 53 条 / 5 spec 基线，新增 3 条 Holdem 回归：真实 0809 单局回放的多比例 HUD、复式 140 手/换座/leg 边界、真人 HUD 公开信息不泄露底牌 |
+| Holdem 响应式最终整合门禁 | **pytest 1096 passed / 1 warning（234.38s）；Playwright 56/56 passed（4.5m）；build 2563 modules** | 基于 `main@7c63fb843` 的单一整合树；完整浏览器套件含四角色排行榜、Pencil 响应式仪表盘、真实 `20260809205002-ede64ea8` Holdem 回放、复式 140 手与真人脱敏 HUD；Console/Network 监控无非预期异常。warning 为既有 Starlette/httpx deprecation |
+| Holdem 数据库影响 | **无 schema/迁移/业务写路径变更** | 仅前端归约、画布、布局、测试与文档；浏览器写操作全部指向独立 inode 的 worktree 副本库，最终 `integrity_check=ok`、`foreign_key_check=0` |
 | 观赛/视觉复审定向浏览器回归 | **9/9 passed（42.8s）** | 隔离 QA backend `50386` + worktree Vite `5178`；4 条新增/编辑态风险用例与 5 条既有终态/顺播/重连/零手协议故障回归分两组实测，覆盖 320px MyBots、50ms 连续 SSE、4101→4351 无损 snapshot、零手 admin/platform 中止、终局不跳及 Console/Network |
 | 前端游戏契约定向浏览器回归 | **3 passed** | 独立无数据库 fake API + worktree Vite：未知 `game_id` 显示 unsupported 且不创建 Holdem canvas；Gomoku canvas 点击只发送 `{"response":{"x":int,"y":int}}`；点格棋 HUD 移入游戏包后的首回合棋钟/超时回归仍通过。Console/普通 HTTP Network 监控无非预期异常 |
 | 权威终态定向浏览器回归 | **1 passed** | 隔离 QA backend + worktree Vite；mock SSE/WS 只发送 canonical `match_end {winner,reason,deltas}`，MatchViewer 与 HumanPlay 均正确显示胜者和 Holdem 累计净筹码，Console/Network 无非预期异常 |

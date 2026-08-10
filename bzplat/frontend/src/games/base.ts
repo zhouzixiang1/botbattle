@@ -73,6 +73,8 @@ export interface HumanPlayViewSpec {
 export interface ReplayNavigationSpec {
   unitLabel: string
   boundaries: (events: RawEvent[]) => number[]
+  /** 可选分段标签；复式赛等需要同时表达 leg 和局内序号。 */
+  label?: (segment: number, events: RawEvent[]) => string
 }
 
 export interface ReplayViewSpec {

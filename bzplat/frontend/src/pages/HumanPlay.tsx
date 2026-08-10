@@ -284,8 +284,8 @@ export default function HumanPlay() {
   const canSubmitAction = myTurn && !actionSubmitted
   const remainSec = turnDeadline ? Math.max(0, Math.ceil((turnDeadline - nowTs) / 1000)) : null
 
-  // 当前局面与结局摘要都经注册表 spec.reduce；点格棋等游戏可把同一权威
-  // ViewModel 用于局面概览，通用页不读取游戏专属字段。
+  // 当前局面与结局摘要都经注册表 spec.reduce；点格棋、德州等游戏可把
+  // 同一权威 ViewModel 用于 HUD，通用页不读取游戏专属字段。
   const currentVm = useMemo(() => {
     if (!events.length) return null
     return gameSpec?.reduce(events as RawEvent[]) ?? null
@@ -301,9 +301,9 @@ export default function HumanPlay() {
   )
   const endSummary = endVm ? gameSpec?.humanPlay.endSummary?.(endVm) : null
   const ActionPanel = gameSpec?.humanPlay.ActionPanel
-  const GameHud = gameSpec?.replay.Hud
+  const ReplayHud = gameSpec?.replay.Hud
   const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
-  const viewportDashboard = viewportFitCanvas && Boolean(GameHud)
+  const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
   const turnLabel = gameSpec?.humanPlay.turnLabelForRequest?.(turnRequest)
     ?? gameSpec?.humanPlay.turnLabel
     ?? '轮到你操作'
@@ -389,9 +389,9 @@ export default function HumanPlay() {
           : viewportFitCanvas
             ? 'grid items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_22rem]'
           : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}>
-          {viewportDashboard && GameHud && currentVm !== null && (
+          {viewportDashboard && ReplayHud && currentVm !== null && (
             <div className="min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1">
-              <GameHud vm={currentVm} seats={seats} />
+              <ReplayHud vm={currentVm} seats={seats} />
             </div>
           )}
           <div className={`space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1' : ''}`}>
@@ -422,22 +422,35 @@ export default function HumanPlay() {
       )}
 
       {gameSpec?.humanPlay.layout === 'canvas-controls-log' && (
-        <div className="space-y-4">
-          <MatchBoard
-            gameId={gameSpec.id}
-            events={events}
-            seats={seats}
-            revealMode={gameSpec.humanPlay.revealMode}
-          />
-          {ActionPanel && (
-            <ActionPanel
-              disabled={!canSubmitAction || over}
-              legal={canSubmitAction}
-              request={turnRequest}
-              onSubmit={sendMove}
-            />
+        <div className={ReplayHud
+          ? 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem] 3xl:grid-cols-[15rem_minmax(0,1fr)_18rem]'
+          : 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]'}>
+          {ReplayHud && currentVm !== null && (
+            <div className="min-w-0 xl:col-start-1 xl:row-start-1 3xl:col-start-1 3xl:row-start-1">
+              <ReplayHud vm={currentVm} seats={seats} />
+            </div>
           )}
-          <EventLogCard id={id} events={events} describeEvent={gameSpec.describeEvent} />
+          <div className={`min-w-0 space-y-3 ${ReplayHud ? 'xl:col-start-1 xl:row-start-2 3xl:col-start-2 3xl:row-start-1' : ''}`}>
+            <MatchBoard
+              gameId={gameSpec.id}
+              events={events}
+              seats={seats}
+              revealMode={gameSpec.humanPlay.revealMode}
+            />
+            {ActionPanel && (
+              <ActionPanel
+                disabled={!canSubmitAction || over}
+                legal={canSubmitAction}
+                request={turnRequest}
+                onSubmit={sendMove}
+              />
+            )}
+          </div>
+          <div className={`min-w-0 xl:sticky xl:top-6 ${ReplayHud
+            ? 'xl:col-start-2 xl:row-start-1 xl:row-span-2 3xl:col-start-3 3xl:row-start-1 3xl:row-span-1'
+            : 'xl:col-start-2 xl:row-start-1'}`}>
+            <EventLogCard id={id} events={events} describeEvent={gameSpec.describeEvent} />
+          </div>
         </div>
       )}
     </PageStub>

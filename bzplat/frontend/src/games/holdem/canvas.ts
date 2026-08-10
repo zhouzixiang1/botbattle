@@ -16,7 +16,11 @@
 import type { RawEvent } from '@/games/base'
 import { fitText } from '@/games/base'
 import type { SeatState } from './reducer'
-import { reduceHoldemEvents } from './reducer'
+import {
+  holdemPhysicalSeatForEvent,
+  latestHoldemHandAction,
+  reduceHoldemEvents,
+} from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta, SeatInfo } from '@/games/canvas-types'
 import { ensurePokerJS } from '@/lib/pokerjs'
 
@@ -33,13 +37,19 @@ const SUIT_BY_CODE: Record<string, 'h' | 'd' | 's' | 'c'> = { h: 'h', d: 'd', s:
 const layout = (W: number, H: number) => ({
   L: L_RATIO * W,
   R: Math.min(R_RATIO * W, H * 0.46),
-  CARD_SIZE: Math.max(CARD_RATIO * W, W < 520 ? 42 : 0),
+  // 320px 视口的实际内容列只有约 288px；沿用 42px 下限会让五张公共牌
+  // 与上下座位文字互相挤压。极窄画布降到 36px，390px 及以上仍保持 42px。
+  CARD_SIZE: Math.max(CARD_RATIO * W, W < 340 ? 36 : W < 520 ? 42 : 0),
   /** 缩放因子：W/基线宽，用于把固定像素的 fitText maxWidth 等比放大。 */
   s: W / W0,
 })
 
 interface HoldemScene extends Scene {
   hand: number
+  leg: number
+  totalLegs: number
+  isDuplicate: boolean
+  hasStarted: boolean
   chips: [number, number]
   pot: number
   holes: (string[] | null)[]   // 每座手牌 [[card,card],...]
@@ -54,6 +64,7 @@ interface HoldemScene extends Scene {
   handDeltas: [number, number] | null
   handSettleReason: string | null
   matchOver: boolean
+  terminalStatus: 'live' | 'match_end' | 'error'
   /** 整场胜者座位 0/1；平局 null（match_end / final_chips 推导） */
   matchWinner: number | null
   /** 累计净筹码（各手 settle.deltas 累加，对应旧 PokerTable「累计」） */
@@ -83,7 +94,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     // 历史公开回放读取边界若没有 winner，则用逐手累计 net 兜底；
     // 新写 replay/live 的 canonical deltas 已由 reducer 写入同一 net 字段。
     let matchWinner = vm.matchWinner
-    if (vm.matchOver && matchWinner === null) {
+    if (vm.status === 'match_end' && !vm.isDuplicate && matchWinner === null) {
       const n0 = seats[0]?.net ?? 0
       const n1 = seats[1]?.net ?? 0
       if (n0 > n1) matchWinner = 0
@@ -91,6 +102,10 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     }
     return {
       hand: vm.hand ?? 0,
+      leg: vm.leg,
+      totalLegs: vm.totalLegs,
+      isDuplicate: vm.isDuplicate,
+      hasStarted: vm.legStarted,
       chips: [seats[0]?.chips ?? 20000, seats[1]?.chips ?? 20000],
       pot: vm.pot ?? 0,
       holes: seats.map((s: SeatState) => (s?.hole?.[0] ? [s.hole[0], s.hole[1]].filter(Boolean) as string[] : null)),
@@ -103,14 +118,9 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
         // 故同街两人都行动后两座都会带 lastAction，正向遍历恒为座 0（陈旧）。
         // 改从事件流取最近一条 action 事件确定「最近行动者」，再用其 VM 座上权威的
         // lastAction（reducer 已按 call=投入增量 / raise=allin=本街累计做归一化）。
-        let lastPlayer: number | null = null
-        for (let i = events.length - 1; i >= 0; i--) {
-          if (events[i]?.type === 'action') {
-            lastPlayer = Number(events[i].player ?? 0)
-            break
-          }
-        }
-        if (lastPlayer === null) return null
+        const actionEvent = latestHoldemHandAction(events)
+        if (!actionEvent) return null
+        const lastPlayer = holdemPhysicalSeatForEvent(actionEvent.player ?? 0, actionEvent)
         const la = seats[lastPlayer]?.lastAction
         if (!la) return null
         return { player: lastPlayer, action: la.action, amount: la.amount }
@@ -122,6 +132,7 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
         : null,
       handSettleReason: vm.lastSettle?.reason ?? null,
       matchOver: !!vm.matchOver,
+      terminalStatus: vm.status === 'error' ? 'error' : vm.matchOver ? 'match_end' : 'live',
       matchWinner,
       nets: [seats[0]?.net ?? 0, seats[1]?.net ?? 0],
       folded: seats.map((s: SeatState) => !!s?.folded),
@@ -166,9 +177,14 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     const streetLabels: Record<string, string> = {
       preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌',
     }
-    const tableStatus = `第 ${(next.hand || 0) + 1} 手 · ${streetLabels[next.street] ?? next.street} · 底池 ${pot.toLocaleString('en-US')}`
+    const legStatus = next.isDuplicate ? `第 ${next.leg + 1}/${next.totalLegs} 局 · ` : ''
+    const tableStatus = `${legStatus}第 ${(next.hand || 0) + 1} 手 · ${streetLabels[next.street] ?? next.street} · 底池 ${pot.toLocaleString('en-US')}`
     const statusY = H / 2 - R + Math.max(17, 24 * s)
-    if (!next.matchOver) ctx.fillText(fitText(ctx, tableStatus, W * 0.72), W / 2, statusY)
+    // 极窄屏已由 DOM 局面概览呈现手数/阶段/终局；canvas 再画一行会与
+    // 上方座位和底牌重叠。360px 以下保留牌局本体，避免重复信息制造噪声。
+    if (next.hasStarted && !next.matchOver && W >= 360) {
+      ctx.fillText(fitText(ctx, tableStatus, W * 0.72), W / 2, statusY)
+    }
 
     // 座位（上=座1, 下=座0）
     drawSeat(ctx, X(-0.75), Y0, 1, next, prev, t, opts.seats, s)
@@ -228,19 +244,30 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
     }
 
     // 结算覆盖：对局结束 + 胜者（优先 BOT 名）
-    if (next.matchOver) {
+    if (next.matchOver && W >= 360) {
       ctx.save()
       ctx.textAlign = 'center'
       ctx.font = `bold ${Math.max(11, Math.round(17 * s))}px "DM Sans", sans-serif`
       ctx.fillStyle = 'rgba(255,238,88,0.95)'
       ctx.shadowColor = 'black'
       ctx.shadowBlur = 12
-      let winnerTxt = '平局'
-      if (next.matchWinner === 0 || next.matchWinner === 1) {
-        winnerTxt = `胜者：${seatDisplayName(opts.seats?.[next.matchWinner], next.matchWinner)}`
+      let terminalText = next.terminalStatus === 'error'
+        ? '对局已中止'
+        : !next.hasStarted
+          ? '对局结束 · 未完成任何一手'
+          : next.isDuplicate
+            ? '对局结束 · 复式赛完成'
+            : '对局结束 · 平局'
+      if (
+        next.terminalStatus !== 'error'
+        && (next.matchWinner === 0 || next.matchWinner === 1)
+      ) {
+        // matchWinner 只有 0/1；duplicate 权威终局固定为 null。
+        const winnerText = `胜者：${seatDisplayName(opts.seats?.[next.matchWinner], next.matchWinner)}`
+        terminalText = `对局结束 · ${winnerText}`
       }
       ctx.fillText(
-        fitText(ctx, `对局结束 · ${winnerTxt}`, W * 0.72),
+        fitText(ctx, terminalText, W * 0.72),
         X(0),
         statusY,
       )
