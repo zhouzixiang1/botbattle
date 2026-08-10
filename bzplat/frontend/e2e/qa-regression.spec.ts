@@ -28,6 +28,105 @@ const HOLDEM_SAMPLE = fileURLToPath(
 )
 const PREFLIGHT_FAILURE_SAMPLE = process.env.BZ_E2E_BAD_BOT || '/usr/bin/true'
 
+/**
+ * 生产回放 20260809205002-ede64ea8 的可审计局面检查点。
+ *
+ * 前 69 手保留真实赢家、筹码差、底池与终局原因；第 70 手保留数据库中的完整事件
+ * （含四条街、12 次动作、真实公共牌和 -2850/+2850 整场终局）。这不是随机 filler，
+ * 既能稳定覆盖 70 手统计，也避免在测试源码复制 648 条与布局无关的重复发牌动作。
+ */
+const HOLDEM_0809_FIRST_69_SETTLES = [
+  [[1], -100, 200, 'fold'], [[1], -400, 800, 'fold'], [[1], -50, 100, 'fold'], [[0], 50, 100, 'fold'],
+  [[0], 100, 200, 'fold'], [[1], -300, 600, 'showdown'], [[1], -50, 100, 'fold'], [[1], -100, 200, 'fold'],
+  [[1], -50, 100, 'fold'], [[0], 400, 800, 'showdown'], [[0], 400, 800, 'showdown'], [[0], 50, 100, 'fold'],
+  [[1], -50, 100, 'fold'], [[0], 50, 100, 'fold'], [[0], 100, 200, 'fold'], [[0], 50, 100, 'fold'],
+  [[1], -50, 100, 'fold'], [[1], -300, 600, 'showdown'], [[1], -50, 100, 'fold'], [[0], 50, 100, 'fold'],
+  [[1], -50, 100, 'fold'], [[0], 50, 100, 'fold'], [[1], -600, 1200, 'showdown'], [[0], 500, 1000, 'showdown'],
+  [[1], -50, 100, 'fold'], [[0], 400, 800, 'showdown'], [[1], -50, 100, 'fold'], [[1], -100, 200, 'fold'],
+  [[0], 100, 200, 'fold'], [[1], -200, 400, 'fold'], [[1], -300, 600, 'showdown'], [[1], -200, 400, 'fold'],
+  [[1], -400, 800, 'showdown'], [[0], 50, 100, 'fold'], [[1], -50, 100, 'fold'], [[1], -200, 400, 'showdown'],
+  [[1], -100, 200, 'fold'], [[0], 500, 1000, 'showdown'], [[1], -50, 100, 'fold'], [[0], 50, 100, 'fold'],
+  [[1], -400, 800, 'showdown'], [[0], 200, 400, 'showdown'], [[0], 100, 200, 'fold'], [[1], -100, 200, 'fold'],
+  [[1], -200, 400, 'showdown'], [[0], 50, 100, 'fold'], [[0], 100, 200, 'fold'], [[1], -300, 600, 'showdown'],
+  [[0], 500, 1000, 'showdown'], [[1], -200, 400, 'fold'], [[0], 200, 400, 'showdown'], [[0], 50, 100, 'fold'],
+  [[1], -50, 100, 'fold'], [[1], -400, 800, 'showdown'], [[0, 1], 0, 200, 'showdown'], [[0], 50, 100, 'fold'],
+  [[1], -50, 100, 'fold'], [[1], -400, 800, 'showdown'], [[1], -100, 200, 'fold'], [[0], 50, 100, 'fold'],
+  [[1], -300, 600, 'fold'], [[0], 50, 100, 'fold'], [[0], 100, 200, 'fold'], [[0], 300, 600, 'showdown'],
+  [[1], -50, 100, 'fold'], [[1], -100, 200, 'fold'], [[0], 100, 200, 'fold'], [[1], -300, 600, 'showdown'],
+  [[1], -300, 600, 'fold'],
+] as const
+
+function holdemProductionReplay0809(): Array<Record<string, unknown>> {
+  const events: Array<Record<string, unknown>> = [
+    { type: 'match_start', game_id: 'holdem', num_hands: 70 },
+  ]
+  let net = 0
+  HOLDEM_0809_FIRST_69_SETTLES.forEach(([winners, delta, pot, reason], hand) => {
+    const sb = hand % 2
+    net += delta
+    events.push(
+      {
+        type: 'hand_start', hand, sb, bb: 1 - sb,
+        chips: sb === 0 ? [19_950, 19_900] : [19_900, 19_950],
+      },
+      {
+        type: 'settle', hand, winners: [...winners], deltas: [delta, -delta],
+        chips: [20_000 + delta, 20_000 - delta], net: [net, -net], pot, reason,
+      },
+    )
+  })
+  events.push(
+    { type: 'hand_start', hand: 69, sb: 1, bb: 0, chips: [19_900, 19_950] },
+    { type: 'deal_hole', hand: 69, holes: [['6h', '5h'], ['Kh', 'Ts']] },
+    { type: 'action', hand: 69, player: 1, action: 'call', amount: 50 },
+    { type: 'action', hand: 69, player: 0, action: 'raise', amount: 200 },
+    { type: 'action', hand: 69, player: 1, action: 'call', amount: 100 },
+    { type: 'deal_board', hand: 69, street: 'flop', board: ['Tc', 'Ac', '6s'], dealt: ['Tc', 'Ac', '6s'] },
+    { type: 'action', hand: 69, player: 0, action: 'raise', amount: 100 },
+    { type: 'action', hand: 69, player: 1, action: 'call', amount: 100 },
+    { type: 'deal_board', hand: 69, street: 'turn', board: ['Tc', 'Ac', '6s', '6d'], dealt: ['6d'] },
+    { type: 'action', hand: 69, player: 0, action: 'check', amount: 0 },
+    { type: 'action', hand: 69, player: 1, action: 'raise', amount: 100 },
+    { type: 'action', hand: 69, player: 0, action: 'raise', amount: 200 },
+    { type: 'action', hand: 69, player: 1, action: 'call', amount: 100 },
+    { type: 'deal_board', hand: 69, street: 'river', board: ['Tc', 'Ac', '6s', '6d', 'As'], dealt: ['As'] },
+    { type: 'action', hand: 69, player: 0, action: 'check', amount: 0 },
+    { type: 'action', hand: 69, player: 1, action: 'raise', amount: 100 },
+    { type: 'action', hand: 69, player: 0, action: 'fold', amount: 0 },
+    {
+      type: 'settle', hand: 69, winners: [1], deltas: [-500, 500], chips: [19_500, 20_500],
+      net: [-2850, 2850], pot: 1000, board: ['Tc', 'Ac', '6s', '6d', 'As'], reason: 'fold',
+    },
+    { type: 'match_end', winner: 1, reason: 'completed', deltas: [-2850, 2850] },
+  )
+  return events
+}
+
+/** Holdem 复式赛：两局各 70 手，第二局引擎座位与物理 Bot 对调。 */
+function holdemDuplicateReplayFixture(): Array<Record<string, unknown>> {
+  const events: Array<Record<string, unknown>> = []
+  for (const leg of [0, 1] as const) {
+    events.push({ type: 'match_start', game_id: 'holdem', num_hands: 70, leg })
+    for (let hand = 0; hand < 70; hand += 1) {
+      const sb = hand % 2
+      events.push({
+        type: 'hand_start', hand, sb, bb: 1 - sb,
+        chips: sb === 0 ? [19_950, 19_900] : [19_900, 19_950], leg,
+      })
+      // 第二局最后一手：引擎座位 1 弃牌，换座后应展示为物理座位 1。
+      if (leg === 1 && hand === 69) {
+        events.push({ type: 'action', hand, player: 1, action: 'fold', amount: 0, leg })
+      }
+      events.push({
+        type: 'settle', hand, winners: [0], deltas: [100, -100],
+        chips: [20_100, 19_900], pot: 200, reason: hand === 69 && leg === 1 ? 'fold' : 'showdown', leg,
+      })
+    }
+  }
+  events.push({ type: 'match_end', winner: null, reason: 'completed', deltas: [0, 0] })
+  return events
+}
+
 async function createDisposableBot(
   page: Page,
   name: string,
@@ -1187,12 +1286,298 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   // The viewer intentionally parks on the event before terminal. Step once to
   // prove the game reducer consumes canonical `deltas`, not retired aliases.
   await page.getByRole('button', { name: '下一个事件', exact: true }).click()
-  await expect(page.getByText(/累计筹码/)).toContainText('座1 +37')
-  await expect(page.getByText(/累计筹码/)).toContainText('座2 -37')
+  await expect(page.getByTestId('holdem-seat-state-1')).toContainText('+37')
+  await expect(page.getByTestId('holdem-seat-state-2')).toContainText('-37')
 
   await page.goto(`/#/play/${humanId}`)
   await expect(page.getByText(/对局结束 · 胜者：canonical_bot @alpha/)).toBeVisible()
   await expect(page.getByText('累计 +23 / -23', { exact: true })).toBeVisible()
+  await monitor.expectClean()
+})
+
+test('Holdem production replay uses empty space for a responsive current-position dashboard', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = '20260809205002-ede64ea8'
+  const events = holdemProductionReplay0809()
+  expect(events.filter((event) => event.type === 'hand_start')).toHaveLength(70)
+  expect(events.filter((event) => event.type === 'settle')).toHaveLength(70)
+  expect(events.at(-1)).toEqual({ type: 'match_end', winner: 1, reason: 'completed', deltas: [-2850, 2850] })
+
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"ok":true}',
+  }))
+  await page.route(`**/api/matches/${matchId}`, async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      match: {
+        id: matchId,
+        game_id: 'holdem',
+        status: 'completed',
+        winner: 1,
+        reason: 'completed',
+        match_type: 'challenge',
+        bot_a_id: 3,
+        bot_b_id: 4,
+        bot_a: { id: 3, name: 'admin', owner_name: 'zzx' },
+        bot_b: { id: 4, name: 'mybot01', display_name: '测试Bot01', owner_name: 'tester01' },
+        result: { rounds_played: 70, deltas: [-2850, 2850], normalized_delta: -28.5 },
+      },
+      replay: { events_json: JSON.stringify(events) },
+    }),
+  }))
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+
+  await page.setViewportSize({ width: 1536, height: 900 })
+  await page.goto(`/#/match/${matchId}`)
+  const overview = page.getByTestId('holdem-position-overview')
+  const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
+  const timeline = page.getByTestId('match-timeline')
+  await page.getByRole('button', { name: /跳到结局/ }).click()
+  // 回退到终局前的 settle：座位状态必须是本手结果，
+  // 不能在赢家卡上写“等待行动”。fold 瞬时帧则必须等待结算。
+  await page.getByRole('button', { name: '上一个事件', exact: true }).click()
+  await expect(page.getByTestId('holdem-seat-state-1')).toContainText('本手结束')
+  await expect(page.getByTestId('holdem-seat-state-2')).toContainText('本手获胜')
+  await page.getByRole('button', { name: '上一个事件', exact: true }).click()
+  await expect(overview).toContainText('等待本手结算')
+  await expect(overview).not.toContainText('座位 2 行动')
+  await page.getByRole('button', { name: '下一个事件', exact: true }).click()
+  await page.getByRole('button', { name: '下一个事件', exact: true }).click()
+  await expect(overview).toContainText('当前手 70 / 70')
+  await expect(overview).toContainText('已结算 70 手')
+  await expect(overview).toContainText('剩余 0 手')
+  await expect(overview).toContainText('本手底池')
+  await expect(overview).toContainText('1,000')
+  await expect(overview).toContainText('最近动作')
+  await expect(overview).toContainText('座位 1 · 弃牌')
+  await expect(overview).toContainText('胜手 座1 29 · 座2 40 · 平分 1')
+  await expect(page.getByTestId('holdem-seat-state-1')).toContainText('19,500')
+  await expect(page.getByTestId('holdem-seat-state-1')).toContainText('-2,850')
+  await expect(page.getByTestId('holdem-seat-state-2')).toContainText('20,500')
+  await expect(page.getByTestId('holdem-seat-state-2')).toContainText('+2,850')
+  await expect(overview.getByLabel('第 70 手，座位 1 -500')).toBeVisible()
+
+  for (const viewport of [
+    { width: 2560, height: 1080 },
+    { width: 1920, height: 1080 },
+    { width: 1760, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await page.evaluate(() => window.scrollTo(0, 0))
+    const hudBox = await overview.boundingBox()
+    const canvasBox = await canvas.boundingBox()
+    const timelineBox = await timeline.boundingBox()
+    expect(hudBox).not.toBeNull()
+    expect(canvasBox).not.toBeNull()
+    expect(timelineBox).not.toBeNull()
+    expect(hudBox?.x ?? 9999).toBeLessThan(canvasBox?.x ?? 0)
+    expect(canvasBox?.x ?? 9999).toBeLessThan(timelineBox?.x ?? 0)
+    // 两个信息栏按内容自然收口，小于一行的差异不用伪造空高度补齐。
+    expect(Math.abs((hudBox?.height ?? 0) - (timelineBox?.height ?? 0))).toBeLessThanOrEqual(24)
+    expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
+    expect((timelineBox?.y ?? 0) + (timelineBox?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  }
+
+  for (const viewport of [
+    { width: 1600, height: 900 },
+    { width: 1536, height: 900 },
+    { width: 1366, height: 768 },
+    { width: 1280, height: 800 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await page.evaluate(() => window.scrollTo(0, 0))
+    const hudBox = await overview.boundingBox()
+    const canvasBox = await canvas.boundingBox()
+    const timelineBox = await timeline.boundingBox()
+    expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
+    expect(timelineBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
+    expect((timelineBox?.y ?? 0) + (timelineBox?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  }
+
+  for (const viewport of [
+    { width: 1024, height: 768 },
+    { width: 390, height: 844 },
+    { width: 320, height: 568 },
+  ]) {
+    await page.setViewportSize(viewport)
+    await page.evaluate(() => window.scrollTo(0, 0))
+    await expect(timeline.getByRole('button', { name: '展开', exact: true })).toBeVisible()
+    const hudBox = await overview.boundingBox()
+    const canvasBox = await canvas.boundingBox()
+    const timelineBox = await timeline.boundingBox()
+    expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
+    expect(timelineBox?.y ?? 0).toBeGreaterThan((canvasBox?.y ?? 0) + (canvasBox?.height ?? 0))
+    expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  }
+
+  await page.setViewportSize({ width: 1366, height: 768 })
+  await page.evaluate(() => window.scrollTo(0, 360))
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
+  await expect.poll(async () => (await timeline.boundingBox())?.y ?? 999).toBeLessThanOrEqual(30)
+  await page.evaluate(() => window.scrollTo(0, 0))
+
+  await page.setViewportSize({ width: 1600, height: 900 })
+  await timeline.getByRole('button', { name: '折叠', exact: true }).click()
+  const collapsedHud = await overview.boundingBox()
+  const collapsedCanvas = await canvas.boundingBox()
+  const collapsedTimeline = await timeline.boundingBox()
+  expect(collapsedHud?.x ?? 9999).toBeLessThan(collapsedCanvas?.x ?? 0)
+  expect(collapsedTimeline?.y ?? 0).toBeGreaterThan((collapsedCanvas?.y ?? 0) + (collapsedCanvas?.height ?? 0))
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats truthful', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-holdem-duplicate-position-dashboard'
+  const events = holdemDuplicateReplayFixture()
+  expect(events.filter((event) => event.type === 'hand_start')).toHaveLength(140)
+  expect(events.filter((event) => event.type === 'settle')).toHaveLength(140)
+
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"ok":true}',
+  }))
+  await page.route(`**/api/matches/${matchId}`, async (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      match: {
+        id: matchId,
+        game_id: 'holdem',
+        status: 'completed',
+        winner: null,
+        reason: 'completed',
+        match_type: 'contest',
+        bot_a: { id: 31, name: 'physical_alpha', owner_name: 'alpha' },
+        bot_b: { id: 32, name: 'physical_beta', owner_name: 'beta' },
+        result: {
+          rounds_played: 140,
+          deltas: [0, 0],
+          normalized_delta: 0,
+          legs: [
+            { winner: 0, deltas: [7000, -7000] },
+            { winner: 1, deltas: [-7000, 7000] },
+          ],
+        },
+      },
+      replay: { events_json: JSON.stringify(events) },
+    }),
+  }))
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await page.goto(`/#/match/${matchId}`)
+  await page.getByRole('button', { name: /跳到结局/ }).click()
+  const overview = page.getByTestId('holdem-position-overview')
+  await expect(page.getByText('复式赛按分局计分', { exact: true })).toBeVisible()
+  await expect(page.getByText('第 140/140 手', { exact: true })).toBeVisible()
+  await expect(overview).toContainText('第 2/2 局 · 当前手 70 / 70')
+  await expect(overview).toContainText('总计已结算 140 手')
+  await expect(overview).toContainText('剩余 0 手')
+  await expect(overview).toContainText('座位 1 · 弃牌')
+  await expect(overview).toContainText('胜手 座1 70 · 座2 70')
+  await expect(overview.getByRole('progressbar', { name: '已完成手数' })).toHaveAttribute('aria-valuemax', '140')
+  await expect(overview.getByRole('progressbar', { name: '已完成手数' })).toHaveAttribute('aria-valuenow', '140')
+  await expect(overview.getByLabel('第 2 局第 70 手，座位 1 -100')).toBeVisible()
+
+  await expect(page.locator('main')).toContainText('第 2 局 · 座1 · 弃牌')
+  await expect(page.locator('main')).toContainText('结束 · 无单一整场胜者 · 正常结束')
+  await expect(page.locator('main')).not.toContainText('结束 · 平局')
+  await page.getByRole('combobox', { name: '跳转手' }).click()
+  const secondLegFirstHand = page.getByRole('option', { name: '第 2 局 · 第 1 手', exact: true })
+  await expect(secondLegFirstHand).toBeVisible()
+  await secondLegFirstHand.click()
+  await page.getByRole('button', { name: '上一个事件', exact: true }).click()
+  await expect(overview).toContainText('第 2/2 局 · 等待发牌 · 共 140 手')
+  await expect(overview).toContainText('总计已结算 70 手')
+  await expect(overview).toContainText('剩余 70 手')
+  await expect(overview).toContainText('等待首个动作')
+  await expect(overview).toContainText('尚未发牌')
+  await expect(overview).not.toContainText('翻牌前')
+  await expect(overview).not.toContainText('小盲')
+  await expect(overview).not.toContainText('大盲')
+  await expect(overview).not.toContainText('等待行动')
+  await expect(overview).not.toContainText('当前手 70')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await monitor.expectClean()
+})
+
+test('human Holdem reuses the public-position HUD without exposing hole-card text', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-holdem-human-responsive-density'
+  const productionEvents = holdemProductionReplay0809()
+  // 停在真实第 70 手河牌、最后一次加注之后，尚未弃牌和结算。
+  const liveEvents = productionEvents.slice(0, -3)
+
+  await page.routeWebSocket(
+    (url) => url.pathname === `/api/matches/${matchId}/play`,
+    (socket) => {
+      setTimeout(() => socket.send(JSON.stringify({
+        type: 'snapshot',
+        match: {
+          id: matchId,
+          game_id: 'holdem',
+          status: 'running',
+          match_type: 'human',
+          human_seat: 1,
+          bot_a: { name: 'admin', owner_name: 'zzx' },
+          bot_b: { owner_name: 'tester01', is_human: true },
+          result: { rounds_played: 69, deltas: [-2350, 2350] },
+        },
+        events: liveEvents,
+      })), 0)
+    },
+  )
+
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  await page.goto(`/#/play/${matchId}`)
+  const overview = page.getByTestId('holdem-position-overview')
+  const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
+  const eventLog = page.getByTestId('human-event-log')
+  await expect(overview).toContainText('当前手 70 / 70')
+  await expect(overview).toContainText('河牌')
+  await expect(overview).toContainText('座位 2 · 加注至 100')
+  await expect(overview).not.toContainText(/6h|5h|Kh|Ts/)
+
+  let hudBox = await overview.boundingBox()
+  let canvasBox = await canvas.boundingBox()
+  let logBox = await eventLog.boundingBox()
+  expect(hudBox?.x ?? 9999).toBeLessThan(canvasBox?.x ?? 0)
+  expect(canvasBox?.x ?? 9999).toBeLessThan(logBox?.x ?? 0)
+
+  for (const viewport of [
+    { width: 1600, height: 900 },
+    { width: 1536, height: 900 },
+    { width: 1366, height: 768 },
+  ]) {
+    await page.setViewportSize(viewport)
+    hudBox = await overview.boundingBox()
+    canvasBox = await canvas.boundingBox()
+    logBox = await eventLog.boundingBox()
+    expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
+    expect(logBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
+  }
+
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 320, height: 568 },
+  ]) {
+    await page.setViewportSize(viewport)
+    hudBox = await overview.boundingBox()
+    canvasBox = await canvas.boundingBox()
+    logBox = await eventLog.boundingBox()
+    expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
+    expect(logBox?.y ?? 0).toBeGreaterThan((canvasBox?.y ?? 0) + (canvasBox?.height ?? 0))
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  }
   await monitor.expectClean()
 })
 
@@ -1502,6 +1887,8 @@ test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page 
     await expect(page.getByText(/\/70 手/)).toHaveCount(0)
     await page.getByRole('button', { name: '下一个事件', exact: true }).click()
     await expect(page.getByText(/\/70 手/)).toHaveCount(0)
+    await expect(page.getByTestId('holdem-position-overview')).toContainText('未完成任何一手')
+    await expect(page.getByTestId('holdem-position-overview')).not.toContainText('当前手 1')
   }
   await monitor.expectClean()
 })
@@ -2480,18 +2867,102 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
 
 test('Holdem replay state includes blinds and treats all-in amount as raise-to', async ({ page }) => {
   await page.goto('/')
-  const state = await page.evaluate(async () => {
+  const states = await page.evaluate(async () => {
     const module = await import('/src/games/holdem/reducer.ts')
-    return module.reduceHoldemEvents([
+    const canvasModule = await import('/src/games/holdem/canvas.ts')
+    const allin = module.reduceHoldemEvents([
       { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
       { type: 'action', hand: 0, player: 0, action: 'call', amount: 50 },
       { type: 'action', hand: 0, player: 1, action: 'allin', amount: 20000 },
     ])
+    const runout = module.reduceHoldemEvents([
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+      { type: 'action', hand: 0, player: 0, action: 'allin', amount: 20000 },
+      { type: 'action', hand: 0, player: 1, action: 'call', amount: 19900 },
+      { type: 'deal_board', hand: 0, street: 'flop', board: ['Ah', 'Kd', 'Qc'] },
+    ])
+    const folded = module.reduceHoldemEvents([
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+      { type: 'action', hand: 0, player: 0, action: 'fold', amount: 0 },
+    ])
+    const openingCallEvents = [
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+      { type: 'action', hand: 0, player: 0, action: 'call', amount: 50 },
+    ]
+    const openingCall = module.reduceHoldemEvents(openingCallEvents)
+    const preflopCheck = module.reduceHoldemEvents([
+      ...openingCallEvents,
+      { type: 'action', hand: 0, player: 1, action: 'check', amount: 0 },
+    ])
+    const postflopCheck = module.reduceHoldemEvents([
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+      { type: 'deal_board', hand: 0, street: 'flop', board: ['Ah', 'Kd', 'Qc'] },
+      { type: 'action', hand: 0, player: 1, action: 'check', amount: 0 },
+      { type: 'action', hand: 0, player: 0, action: 'check', amount: 0 },
+    ])
+    const postflopCall = module.reduceHoldemEvents([
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+      { type: 'deal_board', hand: 0, street: 'flop', board: ['Ah', 'Kd', 'Qc'] },
+      { type: 'action', hand: 0, player: 1, action: 'raise', amount: 100 },
+      { type: 'action', hand: 0, player: 0, action: 'call', amount: 100 },
+    ])
+    const duplicate = module.reduceHoldemEvents([
+      { type: 'match_start', game_id: 'holdem', num_hands: 1, leg: 0 },
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900], leg: 0 },
+      { type: 'action', hand: 0, player: 0, action: 'fold', amount: 0, leg: 0 },
+      { type: 'settle', hand: 0, winners: [1], deltas: [-50, 50], chips: [19950, 20050], pot: 100, reason: 'fold', leg: 0 },
+      { type: 'match_start', game_id: 'holdem', num_hands: 1, leg: 1 },
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900], leg: 1 },
+      { type: 'action', hand: 0, player: 1, action: 'fold', amount: 0, leg: 1 },
+      { type: 'settle', hand: 0, winners: [0], deltas: [50, -50], chips: [20050, 19950], pot: 100, reason: 'fold', leg: 1 },
+      { type: 'match_end', winner: null, reason: 'completed', deltas: [-100, 100] },
+    ])
+    const abortedEvents = [
+      { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
+      { type: 'settle', hand: 0, winners: [0], deltas: [100, -100], chips: [20100, 19900], pot: 200, reason: 'showdown' },
+      { type: 'error', reason: 'platform_error' },
+    ]
+    return {
+      allin,
+      runout,
+      folded,
+      openingCall,
+      preflopCheck,
+      postflopCheck,
+      postflopCall,
+      duplicate,
+      aborted: module.reduceHoldemEvents(abortedEvents),
+      abortedScene: canvasModule.PokerCanvasRenderer.toScene(abortedEvents),
+    }
   })
-  expect(state.pot).toBe(20100)
-  expect(state.seats.map((seat) => seat.bet)).toEqual([100, 20000])
-  expect(state.seats.map((seat) => seat.chips)).toEqual([19900, 0])
-  expect(state.seats[1].allin).toBe(true)
+  expect(states.allin.pot).toBe(20100)
+  expect(states.allin.seats.map((seat) => seat.bet)).toEqual([100, 20000])
+  expect(states.allin.seats.map((seat) => seat.chips)).toEqual([19900, 0])
+  expect(states.allin.seats[1].allin).toBe(true)
+  expect(states.runout.toAct).toBeNull()
+  expect(states.folded.toAct).toBeNull()
+  expect(states.openingCall.toAct).toBe(1)
+  expect(states.preflopCheck.toAct).toBeNull()
+  expect(states.postflopCheck.toAct).toBeNull()
+  expect(states.postflopCall.toAct).toBeNull()
+  expect(states.duplicate).toMatchObject({
+    isDuplicate: true,
+    leg: 1,
+    totalLegs: 2,
+    totalHands: 70,
+    handsStarted: 2,
+    completedHands: 2,
+    sbSeat: 1,
+    matchWinner: null,
+    status: 'match_end',
+  })
+  expect(states.duplicate.seats.map((seat) => seat.chips)).toEqual([19950, 20050])
+  expect(states.duplicate.seats.map((seat) => seat.net)).toEqual([-100, 100])
+  expect(states.duplicate.lastSettle?.winners).toEqual([1])
+  expect(states.aborted.status).toBe('error')
+  expect(states.aborted.matchWinner).toBeNull()
+  expect(states.abortedScene.terminalStatus).toBe('error')
+  expect(states.abortedScene.matchWinner).toBeNull()
 })
 
 test('Pencil replay reconstructs the judge score for an illegal terminal', async ({ page }) => {

@@ -18,6 +18,8 @@ export interface MatchSeatRow {
     rounds_played?: number
     deltas?: number[]
     normalized_delta?: number
+    /** Holdem duplicate 每个 leg 独立计分；合并 deltas 只用于破同分。 */
+    legs?: Array<{ winner: number | null; deltas: number[] }>
     technical_incidents_by_seat?: Record<number, number>
     technical_incident_samples?: Array<{
       seat: number
@@ -116,6 +118,9 @@ export function resolveWinnerLabel(
   }
   if (m?.winner === 0 || m?.winner === 1) return nameOf(m.winner)
   if (eventWinner === 0 || eventWinner === 1) return nameOf(eventWinner)
+  // Duplicate 没有单一整场胜者：两个 leg 独立计分，合并
+  // deltas 仅供赛事破同分。不得在此把它误判成 Bot A/B 获胜。
+  if (finished && (m?.result?.legs?.length ?? 0) > 1) return '复式赛按分局计分'
   if (m && m.winner === null && finished) {
     const ea = m.result?.deltas?.[0]
     const eb = m.result?.deltas?.[1]

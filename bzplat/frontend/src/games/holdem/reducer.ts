@@ -26,6 +26,18 @@ export interface HoldemViewModel {
   events: RawEvent[]
   hand: number // 当前手号（0-based）
   totalHands: number
+  /** 当前 duplicate leg（0-based）；普通对局固定为 0。 */
+  leg: number
+  /** Holdem duplicate 固定两局同副牌换座；普通对局为 1。 */
+  totalLegs: number
+  isDuplicate: boolean
+  /** 当前 leg 是否已收到 hand_start；换局的 match_start 单帧为 false。 */
+  legStarted: boolean
+  /** 当前可见前缀已开始/已结算的全局手数（跨 leg）。 */
+  handsStarted: number
+  completedHands: number
+  /** 当前街已处理的动作数，用于 snapshot 后继续严格推导行动权。 */
+  streetActions: number
   sbSeat: number // 本手 SB（按钮）座位
   street: Street
   board: string[] // 公共牌
@@ -42,7 +54,40 @@ export interface HoldemViewModel {
   } | null
   matchOver: boolean
   matchWinner: number | null
-  status: string // 'idle'|'connecting'|'live'|'match_end'|'error'
+  status: 'live' | 'match_end' | 'error'
+}
+
+/** 公开 duplicate 事件以 leg=1 表示引擎座位已交换。 */
+export function holdemEventLeg(event: RawEvent): number | null {
+  if (event.leg === null || event.leg === undefined) return null
+  const leg = Number(event.leg)
+  return Number.isInteger(leg) && leg >= 0 ? leg : null
+}
+
+/** 把引擎座位投影回页面顶部的物理 Bot 座位。 */
+export function holdemPhysicalSeatForEvent(value: unknown, event: RawEvent): number {
+  const seat = Number(value)
+  if (seat !== 0 && seat !== 1) return seat
+  return holdemEventLeg(event) === 1 ? 1 - seat : seat
+}
+
+/** 把引擎座位顺序的二元数据投影回物理 Bot 顺序。 */
+export function holdemPhysicalPairForEvent<T>(values: readonly T[], event: RawEvent): [T, T] {
+  return holdemEventLeg(event) === 1
+    ? [values[1], values[0]]
+    : [values[0], values[1]]
+}
+
+/** 最后一个 hand_start 之后的最新动作，绝不跨手沿用旧动作。 */
+export function latestHoldemHandAction(events: RawEvent[]): RawEvent | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.type === 'action') return events[index]
+    // match_start 是 duplicate 换局边界；不得穿过它沿用上一局动作。
+    if (events[index]?.type === 'hand_start' || events[index]?.type === 'match_start') {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 const EMPTY_SEAT: SeatState = {
@@ -69,6 +114,12 @@ function freshSeats(chips: [number, number] = [20000, 20000]): [SeatState, SeatS
 export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
   let hand = 0
   let totalHands = 70
+  let leg = 0
+  let isDuplicate = false
+  let legStarted = false
+  let handsStarted = 0
+  let completedHands = 0
+  let streetActions = 0
   let sbSeat = 0
   let street: Street = 'preflop'
   let board: string[] = []
@@ -78,8 +129,31 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
   let lastSettle: HoldemViewModel['lastSettle'] = null
   let matchOver = false
   let matchWinner: number | null = null
+  let status: HoldemViewModel['status'] = 'live'
 
   for (const ev of events) {
+    const eventLeg = holdemEventLeg(ev)
+    if (eventLeg !== null) {
+      isDuplicate = true
+      if (eventLeg !== leg) {
+        leg = eventLeg
+        legStarted = false
+        streetActions = 0
+        hand = 0
+        sbSeat = 0
+        street = 'preflop'
+        board = []
+        pot = 0
+        toAct = null
+        lastSettle = null
+        // 换局后筹码/盲注由下一个 hand_start 权威覆盖；在两者
+        // 之间的单帧只保留跨局物理 Bot 累计值，不泄漏上局牌面。
+        const cumulativeNet: [number, number] = [seats[0].net, seats[1].net]
+        seats = freshSeats()
+        seats[0].net = cumulativeNet[0]
+        seats[1].net = cumulativeNet[1]
+      }
+    }
     switch (ev.type) {
       case 'snapshot': {
         // 快照：重置后重放其携带的历史事件
@@ -88,6 +162,12 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
           const sub = reduceHoldemEvents(hist)
           hand = sub.hand
           totalHands = sub.totalHands
+          leg = sub.leg
+          isDuplicate = sub.isDuplicate
+          legStarted = sub.legStarted
+          handsStarted = sub.handsStarted
+          completedHands = sub.completedHands
+          streetActions = sub.streetActions
           sbSeat = sub.sbSeat
           street = sub.street
           board = sub.board
@@ -97,17 +177,24 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
           lastSettle = sub.lastSettle
           matchOver = sub.matchOver
           matchWinner = sub.matchWinner
+          status = sub.status
         }
         break
       }
       case 'hand_start': {
+        legStarted = true
+        handsStarted += 1
+        streetActions = 0
         hand = Number(ev.hand ?? hand)
-        sbSeat = Number(ev.sb ?? 0)
+        sbSeat = holdemPhysicalSeatForEvent(ev.sb ?? 0, ev)
         const chips = ev.chips as [number, number] | undefined
         // 每手复位：筹码、bet、folded、allin；net 保持累计
         const prevNet: [number, number] = [seats[0].net, seats[1].net]
+        const physicalChips = chips
+          ? holdemPhysicalPairForEvent(chips, ev).map(Number) as [number, number]
+          : null
         seats = freshSeats(
-          chips ? [Number(chips[0]), Number(chips[1])] : [20000, 20000],
+          physicalChips ?? [20000, 20000],
         )
         seats[0].net = prevNet[0]
         seats[1].net = prevNet[1]
@@ -127,8 +214,9 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       case 'deal_hole': {
         const holes = ev.holes as string[][] | undefined
         if (holes) {
-          seats[0].hole = [holes[0]?.[0] ?? null, holes[0]?.[1] ?? null]
-          seats[1].hole = [holes[1]?.[0] ?? null, holes[1]?.[1] ?? null]
+          const physicalHoles = holdemPhysicalPairForEvent(holes, ev)
+          seats[0].hole = [physicalHoles[0]?.[0] ?? null, physicalHoles[0]?.[1] ?? null]
+          seats[1].hole = [physicalHoles[1]?.[0] ?? null, physicalHoles[1]?.[1] ?? null]
         }
         break
       }
@@ -140,12 +228,14 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
         // 新一条街：重置本街下注
         seats[0].bet = 0
         seats[1].bet = 0
+        streetActions = 0
         // 翻后 BB（非 SB）先行动
-        toAct = 1 - sbSeat
+        // 有人全押后裁判只会自动发完公共牌，新街不再产生决策。
+        toAct = seats.some((seat) => seat.allin) ? null : 1 - sbSeat
         break
       }
       case 'action': {
-        const player = Number(ev.player ?? 0)
+        const player = holdemPhysicalSeatForEvent(ev.player ?? 0, ev)
         const action = String(ev.action ?? '')
         const amount = Number(ev.amount ?? 0)
         const p = seats[player]
@@ -192,20 +282,46 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
           p.allin = true
           p.lastAction = { action, amount: p.bet }
         }
-        toAct = 1 - player
+        // Heads-up 一条街的决策权由动作序列推导：首个 check 轮给
+        // 对手，第二个 check/面对加注的 call 闭合本街。唯一例外是
+        // 翻前 SB 的首个补盲 call，BB 仍保留 check/raise 权。
+        if (action === 'fold') {
+          toAct = null
+        } else if (action === 'raise') {
+          toAct = 1 - player
+        } else if (action === 'allin') {
+          toAct = seats[1 - player].allin ? null : 1 - player
+        } else if (action === 'call') {
+          const openingBlindCall = street === 'preflop'
+            && streetActions === 0
+            && player === sbSeat
+            && !seats[1 - player].allin
+          toAct = openingBlindCall ? 1 - player : null
+        } else if (action === 'check') {
+          toAct = streetActions === 0 ? 1 - player : null
+        } else {
+          toAct = null
+        }
+        streetActions += 1
         break
       }
       case 'settle': {
-        const winners = (ev.winners as number[] | undefined) ?? []
-        const deltas = (ev.deltas as number[] | undefined) ?? [0, 0]
+        completedHands += 1
+        const rawWinners = (ev.winners as number[] | undefined) ?? []
+        const winners = rawWinners.map((winner) => holdemPhysicalSeatForEvent(winner, ev))
+        const deltas = holdemPhysicalPairForEvent(
+          (ev.deltas as number[] | undefined) ?? [0, 0],
+          ev,
+        )
         const chips = ev.chips as [number, number] | undefined
         const reason = String(ev.reason ?? '')
         const b = ev.board as string[] | undefined
         if (b) board = [...b]
         // 同步筹码到权威值，清零本街下注
         if (chips) {
-          seats[0].chips = Number(chips[0])
-          seats[1].chips = Number(chips[1])
+          const physicalChips = holdemPhysicalPairForEvent(chips, ev)
+          seats[0].chips = Number(physicalChips[0])
+          seats[1].chips = Number(physicalChips[1])
         }
         seats[0].bet = 0
         seats[1].bet = 0
@@ -227,6 +343,7 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
       }
       case 'match_end': {
         matchOver = true
+        status = 'match_end'
         // 公开 replay/live 只有平台权威 winner/reason/deltas 一套终局。
         if (Array.isArray(ev.deltas) && ev.deltas.length >= 2) {
           const da = Number(ev.deltas[0])
@@ -237,6 +354,16 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
         matchWinner = ev.winner === null || ev.winner === undefined
           ? null
           : Number(ev.winner)
+        break
+      }
+      case 'error': {
+        // 平台/管理员中止也是终态。它可能发生在首手开始前，或在首个
+        // 决策尚未结算时；HUD 必须据此显示“未完成任何一手”，而不是
+        // 把默认的 hand=0 误读成正在进行第 1 手。
+        matchOver = true
+        matchWinner = null
+        toAct = null
+        status = 'error'
         break
       }
       default:
@@ -254,6 +381,13 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
     events,
     hand,
     totalHands,
+    leg,
+    totalLegs: isDuplicate ? 2 : 1,
+    isDuplicate,
+    legStarted,
+    handsStarted,
+    completedHands,
+    streetActions,
     sbSeat,
     street,
     board,
@@ -263,7 +397,7 @@ export function reduceHoldemEvents(events: RawEvent[]): HoldemViewModel {
     lastSettle,
     matchOver,
     matchWinner,
-    status: 'live',
+    status,
   }
 }
 

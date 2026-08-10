@@ -102,6 +102,10 @@
 
 /* 桥接：把语义变量映射到 Tailwind v4 的 --color-* 命名空间，使 bg-background / text-primary 等 utility 可用 */
 @theme inline {
+  /* 游戏回放只在真正超宽屏分出 HUD/画面/时序三栏；
+     1536/1600px 仍优先保证主画面尺寸。 */
+  --breakpoint-3xl: 110rem;
+
   --font-sans: "DM Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-display: "Source Serif 4", "Noto Serif SC", Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;

@@ -610,10 +610,14 @@ export default function MatchViewer() {
               ? 'grid items-start justify-center gap-3 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))]'
               : 'grid items-start justify-center gap-3 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
             : timelineCollapsed
-              ? 'grid gap-3'
-            : viewportFitCanvas
-              ? 'grid items-start justify-center gap-3 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
-              : 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,19rem)]'}>
+              ? ReplayHud
+                ? 'grid items-start gap-3 xl:grid-cols-[15rem_minmax(0,1fr)]'
+                : 'grid gap-3'
+              : ReplayHud
+                ? 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,19rem)] 3xl:grid-cols-[15rem_minmax(0,1fr)_minmax(17rem,19rem)]'
+                : viewportFitCanvas
+                  ? 'grid items-start justify-center gap-3 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
+                  : 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,19rem)]'}>
           {viewportDashboard && ReplayHud && visibleVm !== null && (
             <div className={compactViewportDashboard
               ? 'min-w-0 md:col-start-1 md:row-start-1'
@@ -621,13 +625,24 @@ export default function MatchViewer() {
               <ReplayHud vm={visibleVm} seats={seats} />
             </div>
           )}
-          {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
+          {!viewportDashboard && ReplayHud && visibleVm !== null && (
+            <div className={`min-w-0 ${timelineCollapsed
+              ? 'xl:col-start-1 xl:row-start-1'
+              : 'xl:col-start-1 xl:row-start-1 3xl:col-start-1 3xl:row-start-1'}`}>
+              <ReplayHud vm={visibleVm} seats={seats} />
+            </div>
+          )}
+
+          {/* 左：canvas 棋盘/牌桌 + 分段导航 + 控制条 */}
           <div className={`min-w-0 space-y-2.5 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]' : ''} ${viewportDashboard
             ? compactViewportDashboard
               ? 'md:col-start-2 md:row-start-1'
               : 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1'
+            : ReplayHud
+              ? timelineCollapsed
+              ? 'xl:col-start-2 xl:row-start-1'
+              : 'xl:col-start-1 xl:row-start-2 3xl:col-start-2 3xl:row-start-1'
             : ''}`}>
-            {!viewportDashboard && ReplayHud && visibleVm !== null && <ReplayHud vm={visibleVm} seats={seats} />}
             {ReplaySummary && visibleVm !== null && (
               <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
                 <ReplaySummary vm={visibleVm} seats={seats} />
@@ -662,7 +677,7 @@ export default function MatchViewer() {
                         <SelectContent>
                           {Array.from({ length: bounds.length - 1 }, (_, segment) => (
                             <SelectItem key={segment} value={String(segment)}>
-                              第 {segment + 1} {navigation.unitLabel}
+                              {navigation.label?.(segment, events) ?? `第 ${segment + 1} ${navigation.unitLabel}`}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -693,9 +708,13 @@ export default function MatchViewer() {
               ? compactViewportDashboard
                 ? 'max-h-[70dvh] md:col-span-2 md:col-start-1 md:row-start-2'
                 : 'max-h-[70dvh] md:col-span-2 md:col-start-1 md:row-start-2 xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1 2xl:max-h-[min(52rem,calc(100dvh-16rem))]'
-              : viewportFitCanvas
-                ? 'max-h-[70dvh]'
-                : 'max-h-[70vh] xl:max-h-[calc(100vh-3rem)]'}`}
+              : ReplayHud
+                ? timelineCollapsed
+                ? 'xl:col-span-2 xl:row-start-2'
+                : 'max-h-[min(70dvh,36rem)] xl:col-start-2 xl:row-start-1 xl:row-span-2 3xl:col-start-3 3xl:row-start-1 3xl:row-span-1'
+                : viewportFitCanvas
+                  ? 'max-h-[70dvh]'
+                  : 'max-h-[70vh] xl:max-h-[calc(100vh-3rem)]'}`}
           >
             <div className="border-b border-border px-4 py-2">
               <div className="flex items-center justify-between">

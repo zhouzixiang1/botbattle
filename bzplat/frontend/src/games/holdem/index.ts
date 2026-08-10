@@ -4,7 +4,8 @@ import type { GameViewSpec } from '../base'
 import { reduceHoldemEvents, type HoldemViewModel } from './reducer'
 import { PokerCanvasRenderer } from './canvas'
 import { HoldemHumanActions, holdemEndSummary } from './human-actions'
-import { describeHoldemEvent, holdemHandBoundaries, HoldemReplaySummary } from './view'
+import { HoldemReplayHud } from './replay-hud'
+import { describeHoldemEvent, holdemHandBoundaries, holdemHandLabel } from './view'
 import { createTerminalReasonResolver } from '@/games/reasons'
 
 // canvas 接管后 DOM Board 不再用于 holdem；GameViewSpec 要求 Board 必填，给一个空 stub。
@@ -36,15 +37,19 @@ export const holdemSpec: GameViewSpec = {
     layout: 'with-timeline',
     progress: (vm) => {
       const state = vm as HoldemViewModel
-      return state.events.some((event) => event.type === 'hand_start')
-        ? state.hand + 1
+      return state.handsStarted > 0
+        ? state.handsStarted
         : null
     },
-    progressTotal: (vm) => (vm as HoldemViewModel).totalHands,
-    Summary: HoldemReplaySummary,
+    progressTotal: (vm) => {
+      const state = vm as HoldemViewModel
+      return state.totalHands * state.totalLegs
+    },
+    Hud: HoldemReplayHud,
     navigation: {
       unitLabel: '手',
       boundaries: holdemHandBoundaries,
+      label: holdemHandLabel,
     },
   },
 }
