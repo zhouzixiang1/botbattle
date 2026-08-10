@@ -175,7 +175,7 @@ SQLite 单文件（默认 `botzone.db`），当前全新初始化为 **33 张表
 | `contest_stage_results` | 阶段成绩（entry_id 唯一键 + bot_id SET NULL + 原始分差累计 `delta_total`）——唯一键 (contest_id, stage_idx, entry_id) |
 | `pair_stats` | 对手战绩统计（a_wins/a_losses/draws/samples）；`samples` 的权威值恒等于胜+负+平 |
 | `match_rating_policies` / `match_rating_settlements` | 创建时冻结评分资格与双方/游戏身份；完成时冻结全局单调 settled_order，marker 与评分副作用 exactly-once。已结算源不可改写/删除 |
-| `rating_projection_state` / `rating_settlement_sequence` | 记录当前投影策略及覆盖水位、分配新结算序号；未验证或落后时自动排位 fail closed |
+| `rating_projection_state` / `rating_settlement_sequence` | 记录当前投影策略、覆盖水位及 `mutation_revision/trusted_mutation_revision`，分配新结算序号；未验证、摘要落后或 mutation 链不可信时自动排位 fail closed |
 | `auto_match_control` / `auto_match_dispatcher` | 唯一管理员 boolean 总开关；跨进程 dispatcher lease（非可调参数） |
 | `auto_match_queue` / `auto_match_decisions` / `auto_match_fair_state` | queued/dispatched 活跃队列、永久公平决策证据、游戏/通道游标与平台退避状态 |
 | `auto_match_*_service` | 每游戏 auto 专属 owner/Bot/owner-pair/Bot-pair/座位服务计数，不受前台挑战操纵 |
@@ -208,6 +208,13 @@ canonical 语义。单一只读快照生成 source、Bot universe plan、rebuilt
 `auto_match_queue` 已完全排空，并要求冷备/目标完整性、外键、完整业务与文件摘要一致。语义一致的二次 apply 不执行 DML。
 只有全部门禁满足时才替换派生投影。具体 No-Go
 流程见 [RUNTIME.md](./RUNTIME.md#排行榜重建与上线-no-go)。
+
+在线写入不凭 `policy_version` 单独推进摘要。SQLite 对 rating 投影、Bot universe、结算 marker/order
+等输入持久递增 mutation revision；`BEGIN IMMEDIATE` 内的显式 guard 只有在写前“已落 marker 的
+canonical 前缀 + 当前 projection/plan + trusted revision”全部吻合时，才在写后同步 trusted revision
+与五项摘要。合法 completed-unsettled 只能作为连续尾部跨重启延续；通用硬删、`game_id` 变更或
+无 marker 的低层评分写会永久保持 stale，直至离线 rebuild。新 Bot 与默认 Rating 原子创建，正常
+`is_active` 开关及严格无引用的失败上传 staging 回滚走可信 guard。
 
 **第 4 游戏扩展性**：`schema.py` 的字面 DDL 只覆盖 holdem/gomoku/pencil 三表；新增注册游戏（如 reversi）后 SCHEMA 不会自动建 `matches_<new>` 表。`_migrate()` 末尾对 `registry.all_ids()` 里**每个**已注册游戏幂等执行 `CREATE TABLE IF NOT EXISTS matches_<game>`（用 `_CREATE_MATCHES_TABLE_SQL` 模板）+ 6 条统一索引（bot_a_id/bot_b_id/owner_id/contest_id/status/created_at）。`Store.__init__` 在建库后断言"每个注册游戏的物理表都存在"——注册了但表没建出来的 drift 在启动即报（而非 create_match 时才崩 `no such table`）。跨游戏 `UNION ALL` 聚合的 WHERE 参数数 = 子查询数（= 已注册游戏数），不得硬编码 `* 3`（否则第 4 游戏触发 `Incorrect number of bindings`）。**结论：新增一款游戏的 DB 成本 = `schema.py` 两个 frozenset 各加 id（仅做启动一致性断言）+ `games/__init__.py` 注册；无需手写 DDL。**
 

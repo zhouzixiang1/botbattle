@@ -246,6 +246,8 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
                 "source_digest",
                 "projection_digest",
                 "plan_digest",
+                "mutation_revision",
+                "trusted_mutation_revision",
             },
         ),
         ("rating_settlement_sequence", {"next_order"}),
@@ -510,6 +512,8 @@ def _projection_state_current(
     """Mirror Store.rating_projection_status without a second connection."""
     return bool(
         state.get("policy_version") == CURRENT_POLICY_VERSION
+        and int(state.get("mutation_revision") or 0)
+        == int(state.get("trusted_mutation_revision") or 0)
         and int(state.get("source_settlement_count") or 0)
         == int(live["source_settlement_count"])
         and int(state.get("source_last_settled_order") or 0)
@@ -1033,7 +1037,8 @@ def apply_rebuild_plan(
             conn.execute(
                 "UPDATE rating_projection_state SET policy_version=?,rebuilt_at=?,"
                 "source_settlement_count=?,source_last_settled_order=?,"
-                "source_digest=?,projection_digest=?,plan_digest=? "
+                "source_digest=?,projection_digest=?,plan_digest=?,"
+                "trusted_mutation_revision=mutation_revision "
                 "WHERE singleton=1",
                 (
                     CURRENT_POLICY_VERSION,

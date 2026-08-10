@@ -264,12 +264,15 @@ CREATE TABLE IF NOT EXISTS rating_projection_state (
     source_last_settled_order   INTEGER NOT NULL DEFAULT 0 CHECK (source_last_settled_order>=0),
     source_digest               TEXT    NOT NULL DEFAULT '',
     projection_digest           TEXT    NOT NULL DEFAULT '',
-    plan_digest                 TEXT    NOT NULL DEFAULT ''
+    plan_digest                 TEXT    NOT NULL DEFAULT '',
+    mutation_revision           INTEGER NOT NULL DEFAULT 0 CHECK (mutation_revision>=0),
+    trusted_mutation_revision   INTEGER NOT NULL DEFAULT 0 CHECK (trusted_mutation_revision>=0)
 );
 INSERT OR IGNORE INTO rating_projection_state(
     singleton,policy_version,rebuilt_at,source_settlement_count,
-    source_last_settled_order,source_digest,projection_digest,plan_digest
-) VALUES(1,'legacy-unverified',NULL,0,0,'','','');
+    source_last_settled_order,source_digest,projection_digest,plan_digest,
+    mutation_revision,trusted_mutation_revision
+) VALUES(1,'legacy-unverified',NULL,0,0,'','','',0,0);
 
 -- completed 事务先冻结全局结算序号；实际评分事务随后用同一序号写 settlement。
 -- 这样崩溃恢复不必再猜 created_at/ended_at 顺序。

@@ -47,7 +47,8 @@ def _mark_projection_verified(app) -> None:
             "UPDATE rating_projection_state SET policy_version='owner-neutral-v2',"
             "rebuilt_at='test',source_settlement_count=?,"
             "source_last_settled_order=?,source_digest=?,projection_digest=?,"
-            "plan_digest=? WHERE singleton=1",
+            "plan_digest=?,trusted_mutation_revision=mutation_revision "
+            "WHERE singleton=1",
             (
                 live["source_settlement_count"],
                 live["source_last_settled_order"],

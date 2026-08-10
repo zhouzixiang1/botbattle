@@ -133,6 +133,12 @@ pair_stats；对局详情同时返回创建时资格 `rated/rating_reason` 与�
 旧库不会在启动迁移时冒险自动重放。`rating_projection_state` 未经当前策略验证或落后于 settlement
 水位时，自动排位一律暂停。生产升级前必须在停服维护窗完成以下流程，否则是发布 **No-Go**：
 
+在线事务还要求 `mutation_revision == trusted_mutation_revision`。评分/Bot universe/source 输入的每次
+DML 都由数据库递增前者；只有写前完整可信的显式 mutation guard 才能在同一事务同步后者和全部
+摘要。completed 后合法、连续的未结算尾部可跨重启继续，但任何 stale 状态都不能被后续
+ensure/评分/中性 marker/可见性写“洗白”；通用硬删、换 `game_id` 与无 marker 的低层评分写必须走
+下述离线 rebuild 才能恢复自动排位。
+
 ```bash
 # 1. 默认只读 dry-run；保存同一只读快照的三项摘要与全榜 diff
 python -m bzplat.backend.cli rating-rebuild --db /absolute/path/botzone.db

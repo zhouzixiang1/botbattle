@@ -121,7 +121,11 @@ class BotManager:
             self.store.update_bot(bot["id"], is_active=1)
         except Exception:
             self.purge_bot_files(bot["id"])
-            self.store.delete_bot(bot["id"])
+            if not self.store.delete_unpublished_bot(bot["id"]):
+                # Unexpected references/side effects must not be blessed by the
+                # narrow staging rollback.  Generic hard delete remains
+                # deliberately fail-closed for the rating projection.
+                self.store.delete_bot(bot["id"])
             raise
         return self.store.get_bot(bot["id"])
 

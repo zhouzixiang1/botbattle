@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,7 @@ from typer.testing import CliRunner
 from bzplat.backend.cli import app as cli_app
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
+from bzplat.backend.bots.manager import BotError, BotManager
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.rating import rebuild as rebuild_module
 from bzplat.backend.rating.rebuild import (
@@ -47,7 +49,8 @@ def _mark_projection_verified(store: Store) -> None:
         conn.execute(
             "UPDATE rating_projection_state SET policy_version='owner-neutral-v2',"
             "source_settlement_count=?,source_last_settled_order=?,source_digest=?,"
-            "projection_digest=?,plan_digest=? WHERE singleton=1",
+            "projection_digest=?,plan_digest=?,"
+            "trusted_mutation_revision=mutation_revision WHERE singleton=1",
             (
                 live["source_settlement_count"],
                 live["source_last_settled_order"],
@@ -280,6 +283,183 @@ def test_completed_matches_freeze_recovery_order_before_settlement(tmp_path):
         "lexically-later", "lexically-earlier"
     ]
     assert [row["_rating_settled_order"] for row in pending] == [1, 2]
+    store.close()
+
+
+def _complete_unsettled(
+    store: Store, match_id: str, bot_a: int, bot_b: int, *, winner: int = 0
+) -> None:
+    deltas = [1, -1] if winner == 0 else [-1, 1]
+    store.create_match(match_id, bot_a, bot_b, game_id="gomoku")
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=winner,
+        result={
+            "rounds_played": 1,
+            "deltas": deltas,
+            "normalized_delta": deltas[0],
+        },
+        ended_at="2026-08-10T11:30:00",
+    )
+
+
+def test_projection_mutation_guard_accepts_verified_reserved_settlement(tmp_path):
+    db = str(tmp_path / "trusted-settlement.db")
+    store = Store(db)
+    bot_a = _bot(store, "trusted-settlement-a")
+    bot_b = _bot(store, "trusted-settlement-b")
+    _mark_projection_verified(store)
+    _complete_unsettled(
+        store, "trusted-settlement", bot_a["id"], bot_b["id"]
+    )
+
+    assert store.rating_projection_status()["ready"] is False
+    store.close()
+    store = Store(db)
+    orch = MatchOrchestrator(store)
+    assert orch._apply_ratings(
+        bot_a["id"], bot_b["id"], 0, 1, -1,
+        reason="trusted-settlement", settlement_id="trusted-settlement",
+        game_id="gomoku",
+    )
+    assert store.rating_projection_status()["ready"] is True
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "mutation", ["ensure", "rated", "selfplay", "neutral"]
+)
+def test_projection_mutation_guard_never_revalidates_stale_state(
+    tmp_path, mutation
+):
+    store = Store(str(tmp_path / f"stale-{mutation}.db"))
+    bot_a = _bot(store, f"stale-{mutation}-a")
+    bot_b = _bot(store, f"stale-{mutation}-b")
+    if mutation == "neutral":
+        bot_b = _bot(
+            store,
+            "stale-neutral-same-owner",
+            owner_id=store.get_bot(bot_a["id"])["owner_id"],
+        )
+    _mark_projection_verified(store)
+
+    if mutation == "ensure":
+        with store._tx() as conn:
+            conn.execute(
+                "DELETE FROM ratings WHERE bot_id=? AND game_id='gomoku'",
+                (bot_a["id"],),
+            )
+        assert store.rating_projection_status()["ready"] is False
+        store.ensure_rating(bot_a["id"], game_id="gomoku")
+    else:
+        match_id = f"stale-{mutation}"
+        if mutation == "selfplay":
+            match_id = "stale-selfplay"
+            _complete_unsettled(store, match_id, bot_a["id"], bot_a["id"])
+        else:
+            _complete_unsettled(store, match_id, bot_a["id"], bot_b["id"])
+        with store._tx() as conn:
+            conn.execute(
+                "UPDATE rating_projection_state SET projection_digest='stale' "
+                "WHERE singleton=1"
+            )
+        if mutation == "neutral":
+            assert store.mark_match_rating_settled(match_id)
+        else:
+            orch = MatchOrchestrator(store)
+            assert orch._apply_ratings(
+                bot_a["id"],
+                bot_a["id"] if mutation == "selfplay" else bot_b["id"],
+                0, 1, -1,
+                reason=match_id, settlement_id=match_id, game_id="gomoku",
+            )
+
+    assert store.rating_projection_status()["ready"] is False
+    store.close()
+
+
+def test_normal_bot_publish_and_visibility_updates_keep_projection_ready(tmp_path):
+    store = Store(str(tmp_path / "bot-publish.db"))
+    owner = store.create_user(
+        "projection-publisher",
+        "projection-publisher@example.com",
+        hash_password("password1"),
+    )
+    _mark_projection_verified(store)
+    sample = (
+        Path(__file__).resolve().parents[3]
+        / "samples"
+        / "gomokubot_linux_amd64"
+    ).read_bytes()
+    manager = BotManager(store, upload_root=tmp_path / "uploads")
+
+    bot = manager.create_from_upload(
+        owner["id"], "projection_bot", sample, game_id="gomoku"
+    )
+    assert store.get_rating(bot["id"], game_id="gomoku") is not None
+    assert store.rating_projection_status()["ready"] is True
+    manager.set_active(bot["id"], owner["id"], False)
+    assert store.rating_projection_status()["ready"] is True
+    manager.set_active(bot["id"], owner["id"], True)
+    assert store.rating_projection_status()["ready"] is True
+    store.close()
+
+
+def test_failed_bot_preflight_rolls_back_staging_projection(
+    monkeypatch, tmp_path
+):
+    store = Store(str(tmp_path / "bot-preflight-rollback.db"))
+    owner = store.create_user(
+        "projection-rejected",
+        "projection-rejected@example.com",
+        hash_password("password1"),
+    )
+    _mark_projection_verified(store)
+    sample = (
+        Path(__file__).resolve().parents[3]
+        / "samples"
+        / "gomokubot_linux_amd64"
+    ).read_bytes()
+    manager = BotManager(store, upload_root=tmp_path / "uploads")
+    monkeypatch.setattr(
+        manager, "_run_preflight", lambda *args, **kwargs: (False, "rejected")
+    )
+
+    with pytest.raises(BotError, match="预检失败"):
+        manager.create_from_upload(
+            owner["id"], "projection_rejected_bot", sample,
+            game_id="gomoku", binary_runner=object(),
+        )
+
+    assert store.get_bot_by_owner_name(
+        owner["id"], "projection_rejected_bot"
+    ) is None
+    assert store.rating_projection_status()["ready"] is True
+    store.close()
+
+
+@pytest.mark.parametrize("mutation", ["game_id", "hard_delete", "legacy_rating"])
+def test_unreviewed_projection_mutations_remain_fail_closed(tmp_path, mutation):
+    store = Store(str(tmp_path / f"fail-closed-{mutation}.db"))
+    bot_a = _bot(store, f"fail-closed-{mutation}-a")
+    bot_b = _bot(store, f"fail-closed-{mutation}-b")
+    _mark_projection_verified(store)
+
+    if mutation == "game_id":
+        store.update_bot(bot_a["id"], game_id="holdem")
+    elif mutation == "hard_delete":
+        assert store.delete_bot(bot_a["id"])
+    else:
+        assert store.apply_match_ratings_atomic(
+            bot_a["id"], bot_b["id"], game_id="gomoku",
+            rating_a=(1510.0, 340.0, 0.06),
+            rating_b=(1490.0, 340.0, 0.06),
+            winner=0, delta_a=1, delta_b=-1,
+            reason="legacy-no-marker", settlement_id=None,
+        )
+
+    assert store.rating_projection_status()["ready"] is False
     store.close()
 
 

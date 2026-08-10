@@ -11,6 +11,7 @@ import os
 import secrets
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -81,6 +82,19 @@ _AUTO_MATCH_PLATFORM_ABORT_REASONS = frozenset(
 
 class AutoMatchFenceLost(RuntimeError):
     """The automatic-match worker no longer owns its durable dispatch epoch."""
+
+
+@dataclass(frozen=True)
+class _RatingProjectionMutationGuard:
+    """Proof that the marker-settled projection was trusted before one write.
+
+    The proof is process-local and is only valid inside the ``BEGIN IMMEDIATE``
+    transaction that created it.  Requiring this explicit value at the advance
+    site prevents a stale projection from being made current merely because its
+    policy-version string happens to match.
+    """
+
+    trusted_before: bool
 
 
 def _now() -> str:
@@ -724,6 +738,7 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
     }
     settlement_by_id = {str(row["match_id"]): row for row in settlements}
     source_rows: list[dict[str, Any]] = []
+    settled_source_rows: list[dict[str, Any]] = []
     source_ids = sorted(
         set(settlement_by_id)
         | {
@@ -741,7 +756,10 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
         settlement = settlement_by_id.get(match_id)
         if policy is None:
             issues.append(f"settlement missing rating policy: {match_id}")
-            source_rows.append({"match_id": match_id, "settlement": settlement})
+            source_row = {"match_id": match_id, "settlement": settlement}
+            source_rows.append(source_row)
+            if settlement is not None:
+                settled_source_rows.append(source_row)
             continue
         policy_order = policy.get("settled_order")
         settlement_order = settlement.get("settled_order") if settlement else None
@@ -773,21 +791,22 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
                 result=match_row.get("result") if match_row else None,
             )
         )
-        source_rows.append(
-            {
-                "match_id": match_id,
-                "game_id": policy.get("game_id"),
-                "bot_a_id": policy.get("bot_a_id"),
-                "bot_b_id": policy.get("bot_b_id"),
-                "rated": int(policy.get("rated") or 0),
-                "rating_reason": policy.get("rating_reason"),
-                "source": policy.get("source"),
-                "classified_at": policy.get("classified_at"),
-                "settled_order": policy_order,
-                "settlement": settlement,
-                "match": match_row,
-            }
-        )
+        source_row = {
+            "match_id": match_id,
+            "game_id": policy.get("game_id"),
+            "bot_a_id": policy.get("bot_a_id"),
+            "bot_b_id": policy.get("bot_b_id"),
+            "rated": int(policy.get("rated") or 0),
+            "rating_reason": policy.get("rating_reason"),
+            "source": policy.get("source"),
+            "classified_at": policy.get("classified_at"),
+            "settled_order": policy_order,
+            "settlement": settlement,
+            "match": match_row,
+        }
+        source_rows.append(source_row)
+        if settlement is not None:
+            settled_source_rows.append(source_row)
 
     max_policy_order = max(
         (int(row["settled_order"]) for row in policies.values() if row.get("settled_order") is not None),
@@ -822,12 +841,21 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
         ).fetchall()
     ]
     source_digest = _canonical_digest(source_rows)
+    settled_source_digest = _canonical_digest(settled_source_rows)
     bot_universe_digest = _canonical_digest(bots)
     return {
         "source_digest": source_digest,
+        # A completed match reserves its immutable order before the settlement
+        # marker/rating transaction.  Online mutation guards compare the stored
+        # verified state with this marker-only prefix, while the public readiness
+        # gate above intentionally continues to see the reserved tail as stale.
+        "settled_source_digest": settled_source_digest,
         "projection_digest": rating_projection_digest(ratings, history, pairs),
         "bot_universe_digest": bot_universe_digest,
         "plan_digest": rating_plan_digest(source_digest, bot_universe_digest),
+        "settled_plan_digest": rating_plan_digest(
+            settled_source_digest, bot_universe_digest
+        ),
         "source_settlement_count": len(settlements),
         "source_last_settled_order": max(orders, default=0),
         "sequence_next_order": next_order,
@@ -924,6 +952,83 @@ def _install_rating_source_guards(conn: sqlite3.Connection) -> None:
             "WHEN EXISTS(SELECT 1 FROM match_rating_settlements s "
             "WHERE s.match_id=OLD.id) BEGIN "
             "SELECT RAISE(ABORT,'settled match rating source immutable'); END"
+        )
+
+
+def _install_rating_projection_mutation_triggers(
+    conn: sqlite3.Connection,
+) -> None:
+    """Persist whether every digest-input mutation followed a trusted guard."""
+    bump = (
+        "UPDATE rating_projection_state SET "
+        "mutation_revision=mutation_revision+1 WHERE singleton=1;"
+    )
+    simple_tables = ("ratings", "rating_history", "pair_stats")
+    for table in simple_tables:
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            name = f"trg_{table}_projection_mutation_{operation.lower()}"
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            conn.execute(
+                f"CREATE TRIGGER {name} AFTER {operation} ON {table} "
+                f"BEGIN {bump} END"
+            )
+
+    conn.execute("DROP TRIGGER IF EXISTS trg_bots_projection_mutation_insert")
+    conn.execute(
+        "CREATE TRIGGER trg_bots_projection_mutation_insert AFTER INSERT ON bots "
+        f"BEGIN {bump} END"
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_bots_projection_mutation_delete")
+    conn.execute(
+        "CREATE TRIGGER trg_bots_projection_mutation_delete AFTER DELETE ON bots "
+        f"BEGIN {bump} END"
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_bots_projection_mutation_update")
+    conn.execute(
+        "CREATE TRIGGER trg_bots_projection_mutation_update "
+        "AFTER UPDATE OF game_id,is_active,format,os,arch ON bots WHEN "
+        "OLD.game_id IS NOT NEW.game_id OR OLD.is_active IS NOT NEW.is_active OR "
+        "OLD.format IS NOT NEW.format OR OLD.os IS NOT NEW.os OR "
+        f"OLD.arch IS NOT NEW.arch BEGIN {bump} END"
+    )
+
+    conn.execute(
+        "DROP TRIGGER IF EXISTS trg_match_rating_policy_projection_mutation_order"
+    )
+    conn.execute(
+        "CREATE TRIGGER trg_match_rating_policy_projection_mutation_order "
+        "AFTER UPDATE OF settled_order ON match_rating_policies WHEN "
+        "OLD.settled_order IS NOT NEW.settled_order "
+        f"BEGIN {bump} END"
+    )
+    conn.execute(
+        "DROP TRIGGER IF EXISTS trg_rating_settlement_sequence_projection_mutation"
+    )
+    conn.execute(
+        "CREATE TRIGGER trg_rating_settlement_sequence_projection_mutation "
+        "AFTER UPDATE OF next_order ON rating_settlement_sequence WHEN "
+        "OLD.next_order IS NOT NEW.next_order "
+        f"BEGIN {bump} END"
+    )
+    conn.execute(
+        "DROP TRIGGER IF EXISTS trg_match_rating_settlement_projection_mutation_insert"
+    )
+    conn.execute(
+        "CREATE TRIGGER trg_match_rating_settlement_projection_mutation_insert "
+        "AFTER INSERT ON match_rating_settlements WHEN NEW.settled_order>0 "
+        f"BEGIN {bump} END"
+    )
+    for game_id in sorted(_all_game_ids()):
+        table = _matches_table(game_id)
+        name = f"trg_{table}_projection_mutation_source"
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        conn.execute(
+            f"CREATE TRIGGER {name} AFTER UPDATE OF id,winner,result,ended_at,status "
+            f"ON {table} WHEN EXISTS(SELECT 1 FROM match_rating_policies policy "
+            "WHERE policy.match_id=OLD.id AND policy.settled_order IS NOT NULL) "
+            "AND (OLD.id IS NOT NEW.id OR OLD.winner IS NOT NEW.winner OR "
+            "OLD.result IS NOT NEW.result OR OLD.ended_at IS NOT NEW.ended_at OR "
+            f"OLD.status IS NOT NEW.status) BEGIN {bump} END"
         )
 
 
@@ -1265,15 +1370,11 @@ def _ensure_rating_settlement_sequence(conn: sqlite3.Connection) -> None:
         "WHEN OLD.settled_order IS NOT NULL BEGIN "
         "SELECT RAISE(ABORT,'rating settlement source immutable'); END"
     )
-    current_policy = _RATING_PROJECTION_POLICY_VERSION.replace("'", "''")
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_projection_advance "
-        "AFTER INSERT ON match_rating_settlements WHEN NEW.settled_order>0 BEGIN "
-        "UPDATE rating_projection_state SET "
-        "source_settlement_count=source_settlement_count+1,"
-        "source_last_settled_order=NEW.settled_order "
-        f"WHERE singleton=1 AND policy_version='{current_policy}'; END"
-    )
+    # Older releases advanced count/last from policy_version alone.  That
+    # partially blessed an already-stale state before the application had
+    # verified the projection/source/plan baseline.  The Store now advances all
+    # five summary fields together behind an explicit pre-mutation guard.
+    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_projection_advance")
     conn.execute(
         "CREATE TRIGGER IF NOT EXISTS trg_match_rating_projection_dirty_on_delete "
         "AFTER DELETE ON match_rating_settlements WHEN OLD.settled_order>0 BEGIN "
@@ -2498,6 +2599,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_col(conn, "rating_projection_state", "source_digest", "TEXT NOT NULL DEFAULT ''")
     _add_col(conn, "rating_projection_state", "projection_digest", "TEXT NOT NULL DEFAULT ''")
     _add_col(conn, "rating_projection_state", "plan_digest", "TEXT NOT NULL DEFAULT ''")
+    _add_col(
+        conn, "rating_projection_state", "mutation_revision",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_col(
+        conn, "rating_projection_state", "trusted_mutation_revision",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
     conn.execute("DROP TRIGGER IF EXISTS trg_auto_match_queue_fence_insert")
     conn.execute(
         "CREATE TRIGGER trg_auto_match_queue_fence_insert "
@@ -2588,6 +2697,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             (MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL, migrated_at),
         )
     _ensure_rating_settlement_sequence(conn)
+    _install_rating_projection_mutation_triggers(conn)
 
 
 class Store:
@@ -3152,6 +3262,8 @@ class Store:
             raise ValueError(f"非法 runtime_mode: {runtime_mode}")
         now = _now()
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            projection_guard = self._rating_projection_mutation_guard_tx(c)
             cur = c.execute(
                 "INSERT INTO bots(owner_id, name, display_name, description, "
                 "os, arch, format, binary_path, is_builtin, is_active, game_id, runtime_mode, "
@@ -3174,6 +3286,14 @@ class Store:
                 ),
             )
             bid = cur.lastrowid
+            # A Bot belongs to the replay universe from the instant it exists.
+            # Create its default projection row in the same guarded transaction;
+            # callers may still use ensure_rating idempotently.
+            c.execute(
+                "INSERT INTO ratings(bot_id, game_id) VALUES(?, ?)",
+                (bid, game_id),
+            )
+            self._advance_rating_projection_state_tx(c, projection_guard)
             return _row(c.execute("SELECT * FROM bots WHERE id=?", (bid,)).fetchone())
 
     def get_bot(self, bot_id: int) -> dict | None:
@@ -3209,12 +3329,23 @@ class Store:
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
+            projection_guard: _RatingProjectionMutationGuard | None = None
+            # Active/inactive is the ordinary reversible leaderboard visibility
+            # mutation.  Identity/game changes remain fail-closed and can only be
+            # reconciled by the offline rebuild workflow.
+            if "is_active" in fields and not {
+                "game_id", "format", "os", "arch"
+            }.intersection(fields):
+                c.execute("BEGIN IMMEDIATE")
+                projection_guard = self._rating_projection_mutation_guard_tx(c)
             if sets:
                 if "updated_at" not in fields:
                     sets.append("updated_at=?")
                     vals.append(_now())
                 vals.append(bot_id)
                 c.execute(f"UPDATE bots SET {','.join(sets)} WHERE id=?", vals)
+            if projection_guard is not None:
+                self._advance_rating_projection_state_tx(c, projection_guard)
             return _row(
                 c.execute("SELECT * FROM bots WHERE id=?", (bot_id,)).fetchone()
             )
@@ -3229,6 +3360,76 @@ class Store:
                 return False
             _delete_social_target(c, "bot", bot_id)
             return c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
+
+    def delete_unpublished_bot(self, bot_id: int) -> bool:
+        """Roll back a failed upload without dirtying a verified projection.
+
+        This is deliberately narrower than either public/admin hard delete: only
+        the hidden, versionless staging row and its untouched default rating may
+        be removed.  Any observable reference or rating side effect falls back
+        to the generic fail-closed deletion path at the caller.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            bot = c.execute(
+                "SELECT id,game_id,is_active,current_version FROM bots WHERE id=?",
+                (bot_id,),
+            ).fetchone()
+            if (
+                bot is None
+                or int(bot["is_active"] or 0) != 0
+                or int(bot["current_version"] or 0) != 0
+                or c.execute(
+                    "SELECT 1 FROM bot_versions WHERE bot_id=? LIMIT 1", (bot_id,)
+                ).fetchone()
+            ):
+                return False
+            rating = c.execute(
+                "SELECT rating,rd,vol,wins,losses,draws,delta_total,"
+                "matches_played,last_played_at FROM ratings "
+                "WHERE bot_id=? AND game_id=?",
+                (bot_id, bot["game_id"]),
+            ).fetchone()
+            if rating is None or tuple(rating) != (
+                1500.0, 350.0, 0.06, 0, 0, 0, 0, 0, None
+            ):
+                return False
+            if c.execute(
+                "SELECT 1 FROM rating_history WHERE bot_id=? LIMIT 1", (bot_id,)
+            ).fetchone() or c.execute(
+                "SELECT 1 FROM pair_stats WHERE bot_a_id=? OR bot_b_id=? LIMIT 1",
+                (bot_id, bot_id),
+            ).fetchone():
+                return False
+            for game_id in _all_game_ids():
+                if c.execute(
+                    f"SELECT 1 FROM {_matches_table(game_id)} "
+                    "WHERE bot_a_id=? OR bot_b_id=? LIMIT 1",
+                    (bot_id, bot_id),
+                ).fetchone():
+                    return False
+            if (
+                c.execute(
+                    "SELECT 1 FROM auto_match_queue "
+                    "WHERE bot_a_id=? OR bot_b_id=? LIMIT 1",
+                    (bot_id, bot_id),
+                ).fetchone()
+                or c.execute(
+                    "SELECT 1 FROM contest_entries WHERE bot_id=? LIMIT 1", (bot_id,)
+                ).fetchone()
+                or c.execute(
+                    "SELECT 1 FROM contest_pairings "
+                    "WHERE bot_a_id=? OR bot_b_id=? LIMIT 1",
+                    (bot_id, bot_id),
+                ).fetchone()
+            ):
+                return False
+            projection_guard = self._rating_projection_mutation_guard_tx(c)
+            _delete_social_target(c, "bot", bot_id)
+            deleted = c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount == 1
+            if deleted:
+                self._advance_rating_projection_state_tx(c, projection_guard)
+            return deleted
 
     def delete_bot_if_safe(self, bot_id: int) -> dict:
         """在一个写事务内检查活跃引用并硬删 Bot，消除 check→delete 竞态。"""
@@ -4152,6 +4353,8 @@ class Store:
         source_last = int(live["source_last_settled_order"])
         ready = bool(
             state_data.get("policy_version") == _RATING_PROJECTION_POLICY_VERSION
+            and int(state_data.get("mutation_revision") or 0)
+            == int(state_data.get("trusted_mutation_revision") or 0)
             and int(state_data.get("source_settlement_count") or 0) == source_count
             and int(state_data.get("source_last_settled_order") or 0) == source_last
             and str(state_data.get("source_digest") or "")
@@ -4176,26 +4379,123 @@ class Store:
         }
 
     @staticmethod
-    def _refresh_rating_projection_state_tx(c: sqlite3.Connection) -> None:
-        """Advance verified projection digests after one trusted live mutation."""
-        state = c.execute(
-            "SELECT policy_version FROM rating_projection_state WHERE singleton=1"
-        ).fetchone()
-        if not state or state["policy_version"] != _RATING_PROJECTION_POLICY_VERSION:
-            return
+    def _rating_projection_mutation_baseline_tx(
+        c: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        """Build the canonical marker-settled prefix for an online mutation.
+
+        Completion freezes ``settled_order`` before the marker transaction.  A
+        valid live database may therefore have a consecutive tail of completed,
+        unsettled policies.  That tail is allowed here but remains intentionally
+        unready in :meth:`rating_projection_status` until it is settled.
+        """
         live = rating_projection_digests(c)
-        if live["issues"]:
+        settled_count = int(live["source_settlement_count"])
+        settled_last = int(live["source_last_settled_order"])
+        reserved = [
+            dict(row)
+            for row in c.execute(
+                "SELECT policy.match_id,policy.game_id,policy.rating_reason,"
+                "policy.settled_order FROM match_rating_policies policy "
+                "LEFT JOIN match_rating_settlements settled "
+                "ON settled.match_id=policy.match_id "
+                "WHERE policy.settled_order IS NOT NULL "
+                "AND settled.match_id IS NULL ORDER BY policy.settled_order"
+            ).fetchall()
+        ]
+        reserved_orders = [int(row["settled_order"]) for row in reserved]
+        expected_orders = list(
+            range(settled_count + 1, settled_count + len(reserved) + 1)
+        )
+        expected_issues = {
+            f"rating policy reserved but unsettled: {row['match_id']}"
+            for row in reserved
+        }
+        shape_valid = bool(
+            settled_last == settled_count
+            and reserved_orders == expected_orders
+            and int(live["sequence_next_order"])
+            == settled_count + len(reserved) + 1
+            and set(live["issues"]) == expected_issues
+        )
+        if shape_valid:
+            for row in reserved:
+                game_id = str(row.get("game_id") or "")
+                if (
+                    game_id not in _all_game_ids()
+                    or row.get("rating_reason") in {"contest", "human"}
+                ):
+                    shape_valid = False
+                    break
+                match = c.execute(
+                    f"SELECT status FROM {_matches_table(game_id)} WHERE id=?",
+                    (row["match_id"],),
+                ).fetchone()
+                if match is None or match["status"] != STATUS_COMPLETED:
+                    shape_valid = False
+                    break
+        return {
+            "valid": shape_valid,
+            "source_settlement_count": settled_count,
+            "source_last_settled_order": settled_last,
+            "source_digest": live["settled_source_digest"],
+            "projection_digest": live["projection_digest"],
+            "plan_digest": live["settled_plan_digest"],
+        }
+
+    @classmethod
+    def _rating_projection_mutation_guard_tx(
+        cls, c: sqlite3.Connection
+    ) -> _RatingProjectionMutationGuard:
+        """Capture full pre-state trust inside the caller's write transaction."""
+        state = c.execute(
+            "SELECT * FROM rating_projection_state WHERE singleton=1"
+        ).fetchone()
+        state_data = dict(state) if state else {}
+        baseline = cls._rating_projection_mutation_baseline_tx(c)
+        trusted = bool(
+            baseline["valid"]
+            and state_data.get("policy_version")
+            == _RATING_PROJECTION_POLICY_VERSION
+            and int(state_data.get("mutation_revision") or 0)
+            == int(state_data.get("trusted_mutation_revision") or 0)
+            and int(state_data.get("source_settlement_count") or 0)
+            == baseline["source_settlement_count"]
+            and int(state_data.get("source_last_settled_order") or 0)
+            == baseline["source_last_settled_order"]
+            and str(state_data.get("source_digest") or "")
+            == baseline["source_digest"]
+            and str(state_data.get("projection_digest") or "")
+            == baseline["projection_digest"]
+            and str(state_data.get("plan_digest") or "")
+            == baseline["plan_digest"]
+        )
+        return _RatingProjectionMutationGuard(trusted_before=trusted)
+
+    @classmethod
+    def _advance_rating_projection_state_tx(
+        cls,
+        c: sqlite3.Connection,
+        guard: _RatingProjectionMutationGuard,
+    ) -> None:
+        """Advance all summaries iff this transaction began from trusted state."""
+        if not guard.trusted_before:
+            return
+        baseline = cls._rating_projection_mutation_baseline_tx(c)
+        if not baseline["valid"]:
             return
         c.execute(
             "UPDATE rating_projection_state SET source_settlement_count=?,"
             "source_last_settled_order=?,source_digest=?,projection_digest=?,"
-            "plan_digest=? WHERE singleton=1",
+            "plan_digest=?,trusted_mutation_revision=mutation_revision "
+            "WHERE singleton=1 AND policy_version=?",
             (
-                int(live["source_settlement_count"]),
-                int(live["source_last_settled_order"]),
-                live["source_digest"],
-                live["projection_digest"],
-                live["plan_digest"],
+                baseline["source_settlement_count"],
+                baseline["source_last_settled_order"],
+                baseline["source_digest"],
+                baseline["projection_digest"],
+                baseline["plan_digest"],
+                _RATING_PROJECTION_POLICY_VERSION,
             ),
         )
 
@@ -5725,6 +6025,11 @@ class Store:
             raise ValueError("auto-match write fence requires token and epoch")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            projection_guard = (
+                self._rating_projection_mutation_guard_tx(c)
+                if fields.get("status") == STATUS_COMPLETED
+                else None
+            )
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 if fenced:
@@ -5781,6 +6086,8 @@ class Store:
                     )
             if fields.get("status") == STATUS_COMPLETED:
                 self._reserve_rating_settlement_order_tx(c, match_id)
+                if projection_guard is not None:
+                    self._advance_rating_projection_state_tx(c, projection_guard)
             result = _row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
@@ -6332,17 +6639,19 @@ class Store:
     def ensure_rating(self, bot_id: int, *, game_id: str | None = None) -> dict:
         """确保 (bot_id, game_id) 评分行存在。game_id 缺省取 bot 的 game_id。"""
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             gid = self._rating_game_id(c, bot_id, game_id)
             existing = c.execute(
                 "SELECT * FROM ratings WHERE bot_id=? AND game_id=?", (bot_id, gid)
             ).fetchone()
             if existing:
                 return _row(existing)
+            projection_guard = self._rating_projection_mutation_guard_tx(c)
             c.execute(
                 "INSERT INTO ratings(bot_id, game_id) VALUES(?, ?)",
                 (bot_id, gid),
             )
-            self._refresh_rating_projection_state_tx(c)
+            self._advance_rating_projection_state_tx(c, projection_guard)
             return _row(
                 c.execute(
                     "SELECT * FROM ratings WHERE bot_id=? AND game_id=?",
@@ -6495,6 +6804,7 @@ class Store:
         now = _now()
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            projection_guard: _RatingProjectionMutationGuard | None = None
             if settlement_id is not None:
                 # Check idempotency before computing/reserving an order.  SQLite
                 # runs BEFORE INSERT triggers even for INSERT OR IGNORE, so a
@@ -6510,6 +6820,7 @@ class Store:
                     auto_dispatcher_token,
                     auto_dispatcher_epoch,
                 )
+                projection_guard = self._rating_projection_mutation_guard_tx(c)
                 settlement_order = self._rating_settlement_order_for_insert_tx(
                     c, settlement_id
                 )
@@ -6522,7 +6833,8 @@ class Store:
             # 自博弈没有可用于 Glicko 的对手信息。marker 仍须落盘，否则启动
             # 恢复会在每次重启反复扫描同一 completed 对局。
             if bot_a_id == bot_b_id:
-                self._refresh_rating_projection_state_tx(c)
+                if projection_guard is not None:
+                    self._advance_rating_projection_state_tx(c, projection_guard)
                 return True
 
             for bot_id in (bot_a_id, bot_b_id):
@@ -6581,7 +6893,8 @@ class Store:
                 "draws=pair_stats.draws+excluded.draws",
                 (lo, hi, 1, now, aw, al, dd),
             )
-            self._refresh_rating_projection_state_tx(c)
+            if projection_guard is not None:
+                self._advance_rating_projection_state_tx(c, projection_guard)
             return True
 
     def mark_match_rating_settled(
@@ -6613,6 +6926,7 @@ class Store:
                 "SELECT rated FROM match_rating_policies WHERE match_id=?",
                 (match_id,),
             ).fetchone()
+            projection_guard = self._rating_projection_mutation_guard_tx(c)
             settlement_order = self._rating_settlement_order_for_insert_tx(c, match_id)
             c.execute(
                 "INSERT INTO match_rating_settlements("
@@ -6624,7 +6938,7 @@ class Store:
             # intentionally leaves the projection gate stale until offline
             # replay verifies the propagated leaderboard.
             if policy is not None and int(policy["rated"] or 0) == 0:
-                self._refresh_rating_projection_state_tx(c)
+                self._advance_rating_projection_state_tx(c, projection_guard)
             return True
 
     def is_match_rating_settled(self, match_id: str) -> bool:
