@@ -112,7 +112,7 @@ def test_swap_bot_keeps_history_points(tmp_path):
         mid = f"p0swap-{i}"
         s.create_match(mid, ba, bb, game_id="holdem", contest_id=c, match_config={})
         s.update_match(mid, status="completed", winner=0,
-                       result={"hands_played": 2, "deltas": [100, -100]},
+                       result={"rounds_played": 2, "deltas": [100, -100]},
                        reason="completed")
         s.update_contest_pairing(p["id"], match_id=mid, status="running")
     class _FakeOrch:

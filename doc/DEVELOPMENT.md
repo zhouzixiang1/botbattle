@@ -152,7 +152,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
    - `result.py`（**独立**定义，满足鸭子契约：`winners` + `deltas`，**不**共享基类）
    - `tiers.py`（段位曲线，查表用 `base.tier_for_in`）
    - `templates.py`（本游戏内置赛事模板）
-   - `spec.py`（装配 `GameSpec`）
+   - `spec.py`（装配 `GameSpec`，声明 `normalize_delta` 与 `progress_from_events`）
 2. `store/schema.py` 的 `REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项；`Store._migrate()` 根据注册 ID 用同构模板创建 `matches_<game>` 表及索引，不复制静态 DDL。
 3. `games/__init__.py`：`registry.register(SPEC)` 一行（启动时断言 schema 与注册表 ID 集合一致）。
 4. 前端：`src/games/<game>/index.ts`（`GameViewSpec`：Board/kind/reduce/`CanvasRenderer`）+ 在 `src/games/index.ts` 注册；规则参数固定后已无 `configFields`。

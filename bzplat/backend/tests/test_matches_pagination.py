@@ -107,7 +107,6 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
                 },
             ]
         ),
-        "[]",
     )
 
     listed = c.get("/api/matches?status=aborted&limit=100").json()["matches"]
@@ -149,7 +148,6 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
                 },
             ]
         ),
-        "[]",
     )
     completed = c.get("/api/matches/mh0").json()
     assert json.loads(completed["replay"]["events_json"]) == [
@@ -178,7 +176,6 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     store.upsert_replay(
         "active-private",
         json.dumps([{"type": "error", "message": private}]),
-        "[]",
     )
     active = c.get("/api/matches/active-private").json()
     assert active["match"]["reason"] == ""
@@ -247,7 +244,7 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
             "bot_decide_error_samples": [legacy_events[0]],
         },
     )
-    store.upsert_replay("mh0", json.dumps(legacy_events), "[]")
+    store.upsert_replay("mh0", json.dumps(legacy_events))
 
     # Another historical row has diagnostics only in replay.
     store.upsert_replay(
@@ -264,7 +261,6 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
                 }
             ]
         ),
-        "[]",
     )
 
     # Canonical bounded replay has fewer samples than its persisted total.
@@ -293,14 +289,14 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
             "technical_incident_samples": current_samples,
         },
     )
-    store.upsert_replay("mh2", json.dumps(current_samples), "[]")
+    store.upsert_replay("mh2", json.dumps(current_samples))
     # Canonical replay-only rows must also participate in the SQL filter; this
     # guards against recognizing only result counts or historical event names.
-    store.upsert_replay("mh3", json.dumps([current_samples[0]]), "[]")
+    store.upsert_replay("mh3", json.dumps([current_samples[0]]))
 
     # Cross-game + malformed replay coverage for the SQL JSON filter.
-    store.upsert_replay("mg0", json.dumps([legacy_events[0]]), "[]")
-    store.upsert_replay("mg1", "not-json", "[]")
+    store.upsert_replay("mg0", json.dumps([legacy_events[0]]))
+    store.upsert_replay("mg1", "not-json")
 
     all_rows = c.get("/api/matches?limit=100").json()
     assert all_rows["total"] == 10  # default still includes every status/result

@@ -593,7 +593,7 @@ test('contest detail changes its primary content and actions with lifecycle stag
           status: 'completed',
           match_winner: 0,
         }] : [],
-        standings: finished ? [{ bot_id: 11, bot_name: 'winner_bot', points: 3, wins: 1, draws: 0, losses: 0, net_chips: 100 }] : [],
+        standings: finished ? [{ bot_id: 11, bot_name: 'winner_bot', points: 3, wins: 1, draws: 0, losses: 0, delta_total: 100 }] : [],
         entries_total: finished ? 1 : 0,
         my_entry: null,
       }),

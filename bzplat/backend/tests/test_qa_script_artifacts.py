@@ -156,8 +156,8 @@ def test_api_account_seed_is_idempotent_in_isolated_database(tmp_path):
 
 def test_api_replay_count_uses_nested_result_contract():
     module = load_script("api_full_test")
-    assert module.match_hands_played({"result": {"hands_played": 70}}) == 70
-    assert module.match_hands_played({"hands_played": 70}) == 0
+    assert module.match_rounds_played({"result": {"rounds_played": 70}}) == 70
+    assert module.match_rounds_played({"rounds_played": 70}) == 0
     assert module.qa_contest_payload("run1")["template_id"] == "holdem_rr"
 
 

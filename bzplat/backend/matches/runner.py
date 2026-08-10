@@ -642,7 +642,7 @@ class MatchRunner:
         游戏未声明 duplicate 计划时明确拒绝，不把请求悄悄改成单 leg。
 
         返回带 ``legs`` 字段的结果（首 leg 的 MatchResult 结构 + legs 列表）。
-        final_chips/net 保留两 leg 物理累加（仅作 net_chips tiebreak，不作为胜负判据）。
+        final_chips/net 保留两 leg 物理累加（仅作分差破同分，不作为胜负判据）。
         """
         from bzplat.backend.games import registry as _reg
 
@@ -650,10 +650,11 @@ class MatchRunner:
         if spec.build_match_plan is None:
             raise ValueError(f"游戏 {spec.game_id} 不支持 duplicate 对局")
         legs_plan = spec.build_match_plan(seed or 0, match_params)
-        # 每 leg 独立胜负（物理 bot A/B 视角）；累加 deltas 仅留作 net_chips tiebreak
+        # 每 leg 独立胜负（物理 bot A/B 视角）；累加 deltas 仅留作分差破同分
         leg_results: list[dict[str, Any]] = []
-        merged_deltas = [0, 0]  # 物理 A/B，仅 net_chips tiebreak 用
+        merged_deltas = [0, 0]  # 物理 A/B，仅破同分用
         merged_rounds: list[Any] = []
+        merged_rounds_played = 0
         merged_events: list[dict[str, Any]] = []
         final_result = None
         rm_a, rm_b = runtime_modes or (
@@ -714,6 +715,7 @@ class MatchRunner:
                 )
                 if final_result is None:
                     final_result = res
+                merged_rounds_played += int(getattr(res, "rounds_played", 0))
                 # 该 leg 的 deltas 翻转到**物理 bot A/B 视角**
                 leg_deltas = [0, 0]
                 for r in getattr(res, "rounds", []):
@@ -743,8 +745,9 @@ class MatchRunner:
         if final_result is not None:
             try:
                 final_result.rounds = merged_rounds
+                final_result.rounds_played = merged_rounds_played
                 final_result.events = merged_events
-                # net/final_chips 留作 net_chips tiebreak（两 leg 物理累加），不作胜负判据
+                # net/final_chips 留作分差破同分（两 leg 物理累加），不作胜负判据
                 if hasattr(final_result, "net"):
                     final_result.net = list(merged_deltas)
                 if hasattr(final_result, "final_chips"):

@@ -1,7 +1,7 @@
 """全面解耦 PR2 测试：编排/赛制/段位去特化。
 
 验证通用层的 if game_id 分支已被 spec 能力取代：
-- orchestrator 用 spec.normalize_earnings（不再按游戏名分支）
+- orchestrator 用 spec.normalize_delta（不再按游戏名分支）
 - contests estimate 经 spec.eta_for_match
 - validate_match_config 对固定规则只接受空对象
 - 段位 per-game：/api/tiers?game_id= 返回该游戏曲线；bot_profile/leaderboard 按 bot 的 game_id 取段位
@@ -17,11 +17,11 @@ from bzplat.backend.store import Store
 
 
 # ── orchestrator 编排特化经 spec ───────────────────────────────
-def test_normalize_earnings_via_spec():
-    """orchestrator 的 net_bb_a 计算经 spec.normalize_earnings（holdem /100；棋类透传）。"""
-    assert registry.get("holdem").normalize_earnings(500) == 5.0
-    assert registry.get("gomoku").normalize_earnings(1) == 1.0
-    assert registry.get("pencil").normalize_earnings(-2) == -2.0
+def test_normalize_delta_via_spec():
+    """持久化 normalized_delta 经 spec 换算（Holdem 为大盲单位；棋类透传）。"""
+    assert registry.get("holdem").normalize_delta(500) == 5.0
+    assert registry.get("gomoku").normalize_delta(1) == 1.0
+    assert registry.get("pencil").normalize_delta(-2) == -2.0
 
 
 # ── contests estimate 经 spec ETA（已钉死固定值）─────────────────

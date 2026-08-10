@@ -61,6 +61,7 @@ _IMPORT_RE = re.compile(
 _SILENT_FALLBACK_RE = re.compile(
     r'\bor\s*["\']' + _GAMES + r'["\']'
     r'|\.get\(\s*["\']game_id["\']\s*,\s*["\']' + _GAMES + r'["\']\s*\)'
+    r'|\bif\b[^\n]*\belse\s*["\']' + _GAMES + r'["\']'
 )
 _ALLOW_RE = re.compile(r'#\s*allow-game-registry-definition')
 
@@ -160,6 +161,7 @@ def test_guard_regex_catches_branch_variants():
         'import bzplat.backend.games.gomoku',
         'gid = game_id or "holdem"',
         'gid = row.get("game_id", "holdem")',
+        'gid = row["game_id"] if row and row["game_id"] else "holdem"',
     ]
     for sample in must_catch:
         assert (
@@ -221,8 +223,21 @@ def test_runner_signatures_use_passthrough_not_named_game_params():
 # orchestrator._run_match/_run_human_match 走 **mc 透传（取代具名传 num_hands/n_dots/...）；
 # store.create_match/update_match 走 match_config/result（取代 total_hands/n_dots/earnings 列）。
 # 这些 AST 守护堵住"签名守护"的盲区——签名守护查函数定义，AST 守护查调用侧 + 表结构。
-_CONFIG_RESULT_PARAM_NAMES = _GAME_PARAM_NAMES | {"total_hands", "hands_played", "earnings_a", "earnings_b", "net_bb_a"}
-_DEAD_MATCH_COLUMNS = {"total_hands", "n_dots", "net_bb_a", "hands_played", "earnings_a", "earnings_b"}
+_CONFIG_RESULT_PARAM_NAMES = _GAME_PARAM_NAMES | {
+    "total_hands",
+    "hands_played",
+    "earnings_a",
+    "earnings_b",
+    "net_bb_a",
+}
+_DEAD_MATCH_COLUMNS = {
+    "total_hands",
+    "n_dots",
+    "net_bb_a",
+    "hands_played",
+    "earnings_a",
+    "earnings_b",
+}
 
 
 def test_orchestrator_uses_match_config_not_named_params():

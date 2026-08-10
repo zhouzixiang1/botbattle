@@ -14,6 +14,11 @@ from typing import Any, Callable
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.games import normalize_game_id
 from bzplat.backend.matches.runner import MatchRunner, _fail_response
+from bzplat.backend.matches.result_contract import (
+    build_engine_result_payload,
+    build_result_payload,
+    build_technical_result_payload,
+)
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.config import (
     HUMAN_ACTION_TIMEOUT_SEC,
@@ -665,7 +670,7 @@ class MatchOrchestrator:
             human_seat=human_seat,
         )
         try:
-            self.store.upsert_replay(match_id, "[]", "[]")
+            self.store.upsert_replay(match_id, "[]")
         except Exception:
             # create_match 与 replay 分属两个 Store 事务。初始化 replay 失败时
             # 调用方不会拿到 match_id，因此必须精确删除 pending 对局及索引，
@@ -772,7 +777,7 @@ class MatchOrchestrator:
             # 两次写都必须处在同一补偿边界内；任一步失败，调用方都尚未拿到 id。
             if duplicate and duplicate_seed is not None:
                 self.store.update_match(match_id, match_seed=int(duplicate_seed))
-            self.store.upsert_replay(match_id, "[]", "[]")
+            self.store.upsert_replay(match_id, "[]")
             if not defer_start:
                 self.start_prepared_match(match_id)
         except Exception:
@@ -1061,6 +1066,23 @@ class MatchOrchestrator:
         if not m:
             await self._finish_match_task(match_id, None)
             return
+        try:
+            gid = normalize_game_id(m.get("game_id"))
+            spec = game_registry.get(gid)
+        except (KeyError, ValueError) as exc:
+            logger.error("match %s has invalid stored game_id: %s", match_id, exc)
+            self.store.update_match(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_game_id",
+                winner=None,
+                ended_at=_now(),
+            )
+            terminal_event = _authoritative_error("invalid_game_id")
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._broadcast(match_id, terminal_event)
+            await self._finish_match_task(match_id, m.get("contest_id"))
+            return
         bot_a = self.store.get_bot(m["bot_a_id"])
         bot_b = self.store.get_bot(m["bot_b_id"])
         # 防护：bot 被删除后（ON DELETE SET NULL → bot_a_id/bot_b_id 为 NULL），
@@ -1088,7 +1110,10 @@ class MatchOrchestrator:
             ea, eb = (-1, 1) if winner == 1 else (1, -1)
             self.store.update_match(
                 match_id, status=STATUS_COMPLETED, reason="bot_deleted",
-                winner=winner, result={"deltas": [ea, eb]},
+                winner=winner,
+                result=build_result_payload(
+                    spec, rounds_played=0, deltas=[ea, eb]
+                ),
                 technical_loss=1, ended_at=_now(),
             )
             terminal_event = _authoritative_match_end(
@@ -1122,22 +1147,6 @@ class MatchOrchestrator:
                     mc = {}
             version_a_id = mc.get("_bot_a_version_id")
             version_b_id = mc.get("_bot_b_version_id")
-        try:
-            gid = normalize_game_id(m.get("game_id"))
-        except ValueError as exc:
-            logger.error("match %s has invalid stored game_id: %s", match_id, exc)
-            self.store.update_match(
-                match_id,
-                status=STATUS_ABORTED,
-                reason="invalid_game_id",
-                winner=None,
-                ended_at=_now(),
-            )
-            terminal_event = _authoritative_error("invalid_game_id")
-            self._safe_flush_terminal_replay(match_id, [], terminal_event)
-            self._broadcast(match_id, terminal_event)
-            await self._finish_match_task(match_id, m.get("contest_id"))
-            return
         # match_config.duplicate=True 时必须由 game spec 提供明确的多 leg 计划。
         stored_mc = m.get("match_config") or {}
         if isinstance(stored_mc, str):
@@ -1145,7 +1154,6 @@ class MatchOrchestrator:
                 stored_mc = json.loads(stored_mc)
             except Exception:
                 stored_mc = {}
-        spec = game_registry.get(gid)
         want_duplicate = bool(stored_mc.get("duplicate"))
         if want_duplicate and spec.build_match_plan is None:
             logger.error("match %s has unsupported duplicate config for %s", match_id, gid)
@@ -1184,7 +1192,6 @@ class MatchOrchestrator:
                 self.store.upsert_replay(
                     match_id,
                     json.dumps(_live_replay_events(events), ensure_ascii=False),
-                    "[]",
                 )
 
         try:
@@ -1229,7 +1236,7 @@ class MatchOrchestrator:
                 winner = None  # 胜负由 standings 读 result.legs 决定（无单一 match 胜者）
                 terminal_reason = "completed"
                 legs_data = getattr(result, "legs", None) or []
-                # net_chips tiebreak 用：两 leg 物理 deltas 累加
+                # 破同分用：两 leg 物理 deltas 累加
                 ea = sum(int(lg.get("deltas", [0, 0])[0]) for lg in legs_data) if legs_data else 0
                 eb = sum(int(lg.get("deltas", [0, 0])[1]) for lg in legs_data) if legs_data else 0
                 self.store.update_match(
@@ -1237,12 +1244,12 @@ class MatchOrchestrator:
                     status=STATUS_COMPLETED,
                     winner=None,  # 胜负由 standings 读 result.legs 决定
                     reason=terminal_reason,
-                    result={
-                        "hands_played": result.rounds_played,
-                        "deltas": [ea, eb],  # 两 leg 累加（net_chips tiebreak）
-                        "legs": legs_data,   # 每 leg 独立 winner/deltas（物理 A/B 视角）
-                        "net_bb": spec.normalize_earnings(ea),
-                    },
+                    result=build_engine_result_payload(
+                        spec,
+                        result,
+                        deltas=[ea, eb],
+                        extra={"legs": legs_data},
+                    ),
                     ended_at=_now(),
                 )
             else:
@@ -1259,11 +1266,9 @@ class MatchOrchestrator:
                     status=STATUS_COMPLETED,
                     winner=winner,
                     reason=terminal_reason,
-                    result={
-                        "hands_played": result.rounds_played,
-                        "deltas": [ea, eb],
-                        "net_bb": spec.normalize_earnings(ea),
-                    },
+                    result=build_engine_result_payload(
+                        spec, result, deltas=[ea, eb]
+                    ),
                     ended_at=_now(),
                 )
             terminal_event = _authoritative_match_end(
@@ -1309,13 +1314,12 @@ class MatchOrchestrator:
                 status=STATUS_COMPLETED,
                 reason=exc.reason,
                 winner=winner,
-                result={
-                    "hands_played": sum(
-                        1 for event in events if event.get("type") == "settle"
-                    ),
-                    "deltas": [ea, eb],
-                    **_technical_incident_summary(events),
-                },
+                result=build_technical_result_payload(
+                    spec,
+                    events,
+                    deltas=[ea, eb],
+                    extra=_technical_incident_summary(events),
+                ),
                 technical_loss=1,
                 ended_at=_now(),
             )
@@ -1355,7 +1359,9 @@ class MatchOrchestrator:
             self.store.update_match(
                 match_id, status=STATUS_COMPLETED, reason="technical_loss",
                 winner=winner,
-                result={"deltas": [ea, eb]},
+                result=build_technical_result_payload(
+                    spec, events, deltas=[ea, eb]
+                ),
                 technical_loss=1, ended_at=_now(),
             )
             terminal_event = _authoritative_match_end(
@@ -1417,7 +1423,6 @@ class MatchOrchestrator:
             self.store.upsert_replay(
                 match_id,
                 json.dumps(replay_events, ensure_ascii=False),
-                "[]",
             )
         except Exception:
             logger.exception("terminal match final replay flush failed match=%s", match_id)
@@ -1737,7 +1742,6 @@ class MatchOrchestrator:
                     self.store.upsert_replay(
                         match_id,
                         json.dumps(_live_replay_events(events), ensure_ascii=False),
-                        "[]",
                     )
                 # 注：your_turn 不经 on_event，由 human_decide 直接 append + 立即落库（见下）
 
@@ -1755,7 +1759,6 @@ class MatchOrchestrator:
                 self.store.upsert_replay(
                     match_id,
                     json.dumps(_live_replay_events(events), ensure_ascii=False),
-                    "[]",
                 )
                 self._broadcast(match_id, yt)   # 实时推送（已连接的 WS 立即点亮）
                 try:
@@ -1794,11 +1797,9 @@ class MatchOrchestrator:
                 self.store.update_match(
                     match_id, status=STATUS_COMPLETED,
                     winner=winner, reason=terminal_reason,
-                    result={
-                        "hands_played": result.rounds_played,
-                        "deltas": [ea, eb],
-                        "net_bb": spec.normalize_earnings(ea),
-                    },
+                    result=build_engine_result_payload(
+                        spec, result, deltas=[ea, eb]
+                    ),
                     ended_at=_now(),
                 )
                 terminal_event = _authoritative_match_end(
@@ -1835,13 +1836,12 @@ class MatchOrchestrator:
                     status=STATUS_COMPLETED,
                     winner=winner,
                     reason=exc.reason,
-                    result={
-                        "hands_played": sum(
-                            1 for event in events if event.get("type") == "settle"
-                        ),
-                        "deltas": [ea, eb],
-                        **_technical_incident_summary(events),
-                    },
+                    result=build_technical_result_payload(
+                        spec,
+                        events,
+                        deltas=[ea, eb],
+                        extra=_technical_incident_summary(events),
+                    ),
                     technical_loss=1,
                     ended_at=_now(),
                 )
@@ -1952,8 +1952,8 @@ class MatchOrchestrator:
                 rating_a=(0.0, 0.0, 0.0),
                 rating_b=(0.0, 0.0, 0.0),
                 winner=winner,
-                earnings_a=ea,
-                earnings_b=eb,
+                delta_a=ea,
+                delta_b=eb,
                 reason=reason,
                 settlement_id=settlement_id,
             )
@@ -1977,8 +1977,8 @@ class MatchOrchestrator:
             rating_a=(ra_new.mu, ra_new.phi, ra_new.sigma),
             rating_b=(rb_new.mu, rb_new.phi, rb_new.sigma),
             winner=winner,
-            earnings_a=ea,
-            earnings_b=eb,
+            delta_a=ea,
+            delta_b=eb,
             reason=reason,
             settlement_id=settlement_id,
         )

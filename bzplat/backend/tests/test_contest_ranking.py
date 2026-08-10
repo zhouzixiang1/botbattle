@@ -20,9 +20,9 @@ def _store(tmp_path):
 def test_compute_ranking_unique_continuous_ranks():
     """rank 唯一连续 1..N（无并列）。"""
     standings = [
-        {"entry_id": 1, "bot_id": 10, "user_id": 100, "points": 6.0, "net_chips": 100, "seed": 1},
-        {"entry_id": 2, "bot_id": 20, "user_id": 200, "points": 6.0, "net_chips": 50, "seed": 2},
-        {"entry_id": 3, "bot_id": 30, "user_id": 300, "points": 3.0, "net_chips": 0, "seed": 3},
+        {"entry_id": 1, "bot_id": 10, "user_id": 100, "points": 6.0, "delta_total": 100, "seed": 1},
+        {"entry_id": 2, "bot_id": 20, "user_id": 200, "points": 6.0, "delta_total": 50, "seed": 2},
+        {"entry_id": 3, "bot_id": 30, "user_id": 300, "points": 3.0, "delta_total": 0, "seed": 3},
     ]
     rows = ranking.compute_official_ranking(standings, [], {})
     ranks = [r["rank"] for r in rows]
@@ -36,10 +36,10 @@ def test_tiebreak_buchholz_breaks_tie():
     e1 只打了 e4（弱）→ buchholz 低；e2 打了 e3（中）→ buchholz 高。
     """
     standings = [
-        {"entry_id": 1, "bot_id": 10, "user_id": 100, "points": 6.0, "net_chips": 0, "seed": 1},
-        {"entry_id": 2, "bot_id": 20, "user_id": 200, "points": 6.0, "net_chips": 0, "seed": 2},
-        {"entry_id": 3, "bot_id": 30, "user_id": 300, "points": 3.0, "net_chips": 0, "seed": 3},
-        {"entry_id": 4, "bot_id": 40, "user_id": 400, "points": 0.0, "net_chips": 0, "seed": 4},
+        {"entry_id": 1, "bot_id": 10, "user_id": 100, "points": 6.0, "delta_total": 0, "seed": 1},
+        {"entry_id": 2, "bot_id": 20, "user_id": 200, "points": 6.0, "delta_total": 0, "seed": 2},
+        {"entry_id": 3, "bot_id": 30, "user_id": 300, "points": 3.0, "delta_total": 0, "seed": 3},
+        {"entry_id": 4, "bot_id": 40, "user_id": 400, "points": 0.0, "delta_total": 0, "seed": 4},
     ]
     # e1 只打 e4（弱）；e2 只打 e3（中）—— e2 对手分更高
     pairings = [
@@ -62,13 +62,13 @@ def test_tiebreak_fewer_technical_losses_ranks_first():
     """其余破同分项相同时，从 pairing+winner 识别的技术负更少者优先。"""
     standings = [
         {"entry_id": 1, "bot_id": 10, "user_id": 100, "points": 3.0,
-         "net_chips": 0, "seed": 1},
+         "delta_total": 0, "seed": 1},
         {"entry_id": 2, "bot_id": 20, "user_id": 200, "points": 3.0,
-         "net_chips": 0, "seed": 2},
+         "delta_total": 0, "seed": 2},
         {"entry_id": 3, "bot_id": 30, "user_id": 300, "points": 0.0,
-         "net_chips": 0, "seed": 3},
+         "delta_total": 0, "seed": 3},
         {"entry_id": 4, "bot_id": 40, "user_id": 400, "points": 0.0,
-         "net_chips": 0, "seed": 4},
+         "delta_total": 0, "seed": 4},
     ]
     pairings = [
         {"entry_a_id": 1, "entry_b_id": 3, "match_id": "technical"},

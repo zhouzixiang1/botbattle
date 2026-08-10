@@ -241,6 +241,23 @@ test.beforeAll(async ({ request }) => {
 for (const viewport of VIEWPORTS) {
   test(`guest navigation has no severe layout or runtime error (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height })
+    const tierRequests = new Map<string, number>()
+    let injectedTierMismatch: string | null = null
+    await page.route('**/api/tiers?**', async (route) => {
+      const url = new URL(route.request().url())
+      const gameId = url.searchParams.get('game_id') ?? ''
+      tierRequests.set(gameId, (tierRequests.get(gameId) ?? 0) + 1)
+      if (viewport.name === 'mobile' && injectedTierMismatch === null) {
+        injectedTierMismatch = gameId
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ game_id: `${gameId}-mismatch`, tiers: [] }),
+        })
+        return
+      }
+      await route.continue()
+    })
     const monitor = monitorBrowser(page)
     const routes = [
       { path: '/', heading: '首页', evidence: '多游戏 Bot 竞赛平台' },
@@ -290,6 +307,15 @@ for (const viewport of VIEWPORTS) {
       await expect(page.getByRole('link', { name: '排行榜', exact: true })).toBeVisible()
       await page.getByRole('link', { name: '排行榜', exact: true }).click()
       await expect(page).toHaveURL(/#\/leaderboard$/)
+      await monitor.settle()
+    }
+    expect(tierRequests.size, '排行榜应拉取至少一款游戏的段位曲线').toBeGreaterThan(0)
+    for (const [gameId, count] of tierRequests) {
+      const expected = viewport.name === 'mobile' && gameId === injectedTierMismatch ? 2 : 1
+      expect(
+        count,
+        `${gameId} concurrent TierBadge hooks must share one request; failed request may retry once`,
+      ).toBe(expected)
     }
     await monitor.expectClean()
   })
@@ -902,12 +928,12 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     await expect.poll(async () => {
       const detail = await page.request.get(`/api/matches/${matchId}`)
       const body = await detail.json() as {
-        match?: { status?: string; reason?: string; result?: { hands_played?: number } }
+        match?: { status?: string; reason?: string; result?: { rounds_played?: number } }
       }
       return [
         body.match?.status,
         body.match?.reason,
-        Number(body.match?.result?.hands_played ?? 0),
+        Number(body.match?.result?.rounds_played ?? 0),
       ]
     }, { timeout: 45_000 }).toEqual(['completed', 'completed', 70])
     await expect(page.getByText('已完成', { exact: true })).toBeVisible({ timeout: 45_000 })
@@ -992,7 +1018,7 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
             human_seat: 1,
             bot_a: { name: 'canonical_bot', owner_name: 'alpha' },
             bot_b: { owner_name: 'human_player', is_human: true },
-            result: { hands_played: 0, deltas: [0, 0] },
+            result: { rounds_played: 0, deltas: [0, 0] },
           },
           events: [{ type: 'match_start', game_id: 'holdem', num_hands: 1 }],
         }))
@@ -1030,7 +1056,7 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
           match_type: 'challenge',
           bot_a: { name: 'canonical_a', owner_name: 'alpha' },
           bot_b: { name: 'canonical_b', owner_name: 'beta' },
-          result: { hands_played: 0, deltas: [0, 0] },
+          result: { rounds_played: 0, deltas: [0, 0] },
         },
         replay: { events_json: '[]' },
       }),
@@ -1099,7 +1125,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
           match_type: 'challenge',
           bot_a: { name: 'live_alpha', owner_name: 'alpha' },
           bot_b: { name: 'live_beta', owner_name: 'beta' },
-          result: { hands_played: 0, deltas: [0, 0] },
+          result: { rounds_played: 0, deltas: [0, 0] },
         },
         replay: { events_json: JSON.stringify(initialEvents) },
       }),
@@ -1136,7 +1162,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
       match_type: 'challenge',
       bot_a: { name: 'live_alpha', owner_name: 'alpha' },
       bot_b: { name: 'live_beta', owner_name: 'beta' },
-      result: { hands_played: 0, deltas: [0, 0] },
+      result: { rounds_played: 0, deltas: [0, 0] },
     },
     events: reconnectedEvents,
   })).toBe(true)
@@ -1232,7 +1258,7 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
           match_type: 'challenge',
           bot_a: { name: 'clock_alpha', owner_name: 'alpha' },
           bot_b: { name: 'clock_beta', owner_name: 'beta' },
-          result: { hands_played: 0, deltas: [0, 0] },
+          result: { rounds_played: 0, deltas: [0, 0] },
         },
         replay: { events_json: JSON.stringify(initialEvents) },
       }),
@@ -1284,7 +1310,7 @@ test('MatchViewer preserves more than 4000 events across reconnect snapshots', a
     match_type: 'challenge',
     bot_a: { name: 'long_alpha', owner_name: 'alpha' },
     bot_b: { name: 'long_beta', owner_name: 'beta' },
-    result: { hands_played: 0, deltas: [0, 0] },
+    result: { rounds_played: 0, deltas: [0, 0] },
   }
 
   await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
@@ -1346,7 +1372,7 @@ test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page 
           match_type: 'challenge',
           bot_a: { name: 'abort_alpha', owner_name: 'alpha' },
           bot_b: { name: 'abort_beta', owner_name: 'beta' },
-          result: { hands_played: 0, deltas: [0, 0] },
+          result: { rounds_played: 0, deltas: [0, 0] },
         },
         replay: {
           events_json: JSON.stringify([
@@ -1425,7 +1451,7 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
           winner: fixture.winner,
           bot_a: { name: 'reason_bot', owner_name: 'alpha' },
           bot_b: { owner_name: 'human_player', is_human: true },
-          result: { hands_played: 1, deltas: fixture.winner === 0 ? [1, -1] : [-1, 1] },
+          result: { rounds_played: 1, deltas: fixture.winner === 0 ? [1, -1] : [-1, 1] },
         },
         events: [
           ...(id === 'mock-human-illegal' ? [
@@ -1461,7 +1487,7 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
           bot_a: { name: 'reason_a', owner_name: 'alpha' },
           bot_b: { name: 'reason_b', owner_name: 'beta' },
           result: {
-            hands_played: 1,
+            rounds_played: 1,
             deltas: fixture.winner === 0 ? [1, -1] : [-1, 1],
           },
         },
@@ -1510,7 +1536,7 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
     match_type: 'challenge',
     bot_a: { name: 'running_a', owner_name: 'alpha' },
     bot_b: { name: 'running_b', owner_name: 'beta' },
-    result: { hands_played: 0, deltas: [0, 0] },
+    result: { rounds_played: 0, deltas: [0, 0] },
   }
   await page.route(`**/api/matches/${runningViewerId}/view`, async (route) => route.fulfill({
     status: 200, contentType: 'application/json', body: '{"ok":true}',
@@ -1557,21 +1583,21 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
           id: 'admin-normal-majority', game_id: 'pencil', status: 'completed',
           reason: 'majority', match_type: 'contest', winner: 0,
           bot_a_id: 1, bot_b_id: 2, bot_a_name: 'normal_a', bot_b_name: 'normal_b',
-          result: { hands_played: 12, deltas: [1, -1] }, created_at: '2026-08-09T12:00:00Z',
+          result: { rounds_played: 12, deltas: [1, -1] }, created_at: '2026-08-09T12:00:00Z',
           contest_id: 1,
         },
         {
           id: 'admin-danger-platform', game_id: 'holdem', status: 'aborted',
           reason: 'platform_error', match_type: 'challenge', winner: null,
           bot_a_id: 3, bot_b_id: 4, bot_a_name: 'fault_a', bot_b_name: 'fault_b',
-          result: { hands_played: 0, deltas: [0, 0] }, created_at: '2026-08-09T12:01:00Z',
+          result: { rounds_played: 0, deltas: [0, 0] }, created_at: '2026-08-09T12:01:00Z',
           contest_id: null,
         },
         {
           id: 'admin-running-default', game_id: 'gomoku', status: 'running',
           reason: 'completed', match_type: 'challenge', winner: null,
           bot_a_id: 5, bot_b_id: 6, bot_a_name: 'running_default_a', bot_b_name: 'running_default_b',
-          result: { hands_played: 4, deltas: [0, 0] }, created_at: '2026-08-09T12:02:00Z',
+          result: { rounds_played: 4, deltas: [0, 0] }, created_at: '2026-08-09T12:02:00Z',
           contest_id: null,
         },
       ],
@@ -1671,7 +1697,7 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
     winner: null,
     bot_a: { name: 'Reconnect A', owner_name: 'alpha' },
     bot_b: { name: 'Reconnect B', owner_name: 'beta' },
-    result: { hands_played: 0, deltas: [0, 0] },
+    result: { rounds_played: 0, deltas: [0, 0] },
   }
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
@@ -1743,7 +1769,7 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
           reason: 'technical_loss',
           winner: 1,
           technical_loss: 1,
-          result: { hands_played: 0, deltas: [-1, 1] },
+          result: { rounds_played: 0, deltas: [-1, 1] },
         },
         replay: {
           events_json: JSON.stringify([
@@ -1822,7 +1848,7 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
           bot_a: { name: 'admin', owner_name: 'zzx' },
           bot_b: { name: 'zxx02', owner_name: 'zhouzixiang' },
           result: {
-            hands_played: 0,
+            rounds_played: 0,
             deltas: [-1, 1],
             technical_incidents_by_seat: { 0: 1, 1: 0 },
             technical_incident_samples: [{
@@ -1896,7 +1922,7 @@ test('MatchViewer keeps chess history playable after a mid-game technical loss',
           bot_a: { name: 'black_bot', owner_name: 'alpha' },
           bot_b: { name: 'white_bot', owner_name: 'beta' },
           // 历史通用字段对棋类为 0；已走步数必须从 replay reducer 取。
-          result: { hands_played: 0, deltas: [-1, 1] },
+          result: { rounds_played: 0, deltas: [-1, 1] },
         },
         replay: { events_json: JSON.stringify(events) },
       }),
@@ -2422,7 +2448,7 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
           game_id: 'future_chess',
           status: 'completed',
           winner: 0,
-          result: { hands_played: 1, deltas: [1, -1] },
+          result: { rounds_played: 1, deltas: [1, -1] },
         },
         replay: {
           events_json: JSON.stringify([

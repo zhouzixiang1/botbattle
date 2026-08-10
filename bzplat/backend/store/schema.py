@@ -188,7 +188,6 @@ CREATE TABLE IF NOT EXISTS matches_index (
 CREATE TABLE IF NOT EXISTS match_replays (
     match_id        TEXT    PRIMARY KEY,
     events_json     TEXT    NOT NULL DEFAULT '[]',
-    hands_json      TEXT    NOT NULL DEFAULT '[]',
     updated_at      TEXT    NOT NULL
 );
 
@@ -218,7 +217,7 @@ CREATE TABLE IF NOT EXISTS ratings (
     wins            INTEGER NOT NULL DEFAULT 0,
     losses          INTEGER NOT NULL DEFAULT 0,
     draws           INTEGER NOT NULL DEFAULT 0,
-    net_chips       INTEGER NOT NULL DEFAULT 0,
+    delta_total     INTEGER NOT NULL DEFAULT 0,
     matches_played  INTEGER NOT NULL DEFAULT 0,
     last_played_at  TEXT,
     PRIMARY KEY (bot_id, game_id)
@@ -227,9 +226,6 @@ CREATE TABLE IF NOT EXISTS ratings (
 CREATE TABLE IF NOT EXISTS pair_stats (
     bot_a_id        INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     bot_b_id        INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-    bb_per_100_mean REAL    NOT NULL DEFAULT 0,
-    ci_low          REAL,
-    ci_high         REAL,
     samples         INTEGER NOT NULL DEFAULT 0,
     last_played_at  TEXT    NOT NULL,
     a_wins          INTEGER NOT NULL DEFAULT 0,
@@ -409,7 +405,7 @@ CREATE TABLE IF NOT EXISTS contest_stage_results (
     wins            INTEGER NOT NULL DEFAULT 0,
     draws           INTEGER NOT NULL DEFAULT 0,
     losses          INTEGER NOT NULL DEFAULT 0,
-    net_chips       INTEGER NOT NULL DEFAULT 0,
+    delta_total     INTEGER NOT NULL DEFAULT 0,
     group_id        TEXT    NOT NULL DEFAULT '',
     rank_in_group   INTEGER,
     payload_json    TEXT    NOT NULL DEFAULT '{}',

@@ -228,7 +228,6 @@ def _sanitize_public_replay(
     public = dict(replay or {})
     if match is not None:
         public.setdefault("match_id", match.get("id"))
-    public.setdefault("hands_json", "[]")
     raw_events = public.get("events_json")
     try:
         events = json.loads(raw_events) if isinstance(raw_events, str) else []
@@ -497,7 +496,7 @@ CREATE TABLE matches_{suffix} (
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
     match_config    TEXT    NOT NULL DEFAULT '{{}}',  -- 内部快照 JSON（Bot 版本/duplicate）；{{}} 经 .format 转义为字面空 JSON
-    result          TEXT    NOT NULL DEFAULT '{{}}',  -- 对局结果详情 JSON（hands_played/deltas/net_bb）
+    result          TEXT    NOT NULL DEFAULT '{{}}',  -- 对局结果详情 JSON（rounds_played/deltas/normalized_delta）
     human_user_id   INTEGER,
     human_seat      INTEGER,
     match_seed      INTEGER,  -- P4：对局确定性 seed（duplicate 复现/回放用）
@@ -863,6 +862,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "ratings" in tables:
         r_cols = _table_cols(conn, "ratings")
         if "game_id" not in r_cols:
+            legacy_delta_source = (
+                "r.delta_total" if "delta_total" in r_cols else "r.net_chips"
+            )
             # 重建 ratings：加 game_id 列 + 复合 PK，按 bots.game_id 回填
             conn.execute(
                 """
@@ -875,7 +877,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                     wins            INTEGER NOT NULL DEFAULT 0,
                     losses          INTEGER NOT NULL DEFAULT 0,
                     draws           INTEGER NOT NULL DEFAULT 0,
-                    net_chips       INTEGER NOT NULL DEFAULT 0,
+                    delta_total     INTEGER NOT NULL DEFAULT 0,
                     matches_played  INTEGER NOT NULL DEFAULT 0,
                     last_played_at  TEXT,
                     PRIMARY KEY (bot_id, game_id)
@@ -885,13 +887,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
             # 回填：每行 game_id 取自 bots.game_id（bot 绑定单一游戏）。
             # 只迁移 bots 表里仍存在的 bot（丢弃孤儿 ratings 行，避免 FK 校验崩溃）。
             conn.execute(
-                """
+                f"""
                 INSERT INTO ratings_new
                     (bot_id, game_id, rating, rd, vol, wins, losses, draws,
-                     net_chips, matches_played, last_played_at)
+                     delta_total, matches_played, last_played_at)
                 SELECT r.bot_id, COALESCE(b.game_id, 'holdem'),
                        r.rating, r.rd, r.vol, r.wins, r.losses, r.draws,
-                       r.net_chips, r.matches_played, r.last_played_at
+                       {legacy_delta_source}, r.matches_played, r.last_played_at
                 FROM ratings r
                 LEFT JOIN bots b ON b.id = r.bot_id
                 WHERE r.bot_id IN (SELECT id FROM bots)
@@ -1049,11 +1051,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "
             "points REAL NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0, "
             "draws INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0, "
-            "net_chips INTEGER NOT NULL DEFAULT 0, group_id TEXT NOT NULL DEFAULT '', "
+            "delta_total INTEGER NOT NULL DEFAULT 0, group_id TEXT NOT NULL DEFAULT '', "
             "rank_in_group INTEGER, payload_json TEXT NOT NULL DEFAULT '{{}}', "
             "UNIQUE(contest_id, stage_idx, entry_id))",
             "id, contest_id, stage_idx, stage_key, bot_id, points, wins, draws, losses, "
-            "net_chips, group_id, rank_in_group, payload_json",
+            "delta_total, group_id, rank_in_group, payload_json",
         ),
     }
     for _ctable, (_ddl_tpl, _cols) in _CONTEST_TABLE_REBUILDS.items():
@@ -1080,12 +1082,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # 取实际存在的列（旧库可能少列），只迁移都有的
         _have = _table_cols(conn, _ctable) if _ctable in tables else set()
         _present = [c.strip() for c in _cols.split(",") if c.strip() in _have]
+        _select = list(_present)
+        # 旧 stage snapshot 在身份/FK 重建时先把历史筹码列映射到中性列，
+        # 避免后续契约重建只能看到默认 0 而永久丢失破同分依据。
+        if (
+            _ctable == "contest_stage_results"
+            and "delta_total" not in _have
+            and "net_chips" in _have
+        ):
+            _present.append("delta_total")
+            _select.append("net_chips")
         _col_list = ", ".join(_present)
+        _select_list = ", ".join(_select)
         conn.execute(_ddl_tpl.format(n=_ctable))
         if _col_list:
             conn.execute(
                 f"INSERT INTO {_ctable}_new ({_col_list}) "
-                f"SELECT {_col_list} FROM {_ctable} "
+                f"SELECT {_select_list} FROM {_ctable} "
                 f"WHERE contest_id IN (SELECT id FROM contests)"
             )
         if _ctable in tables:
@@ -1196,6 +1209,156 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ON contest_entries(contest_id, user_id)"
         )
 
+    # ── 跨游戏中性持久化列收敛 ─────────────────────────────
+    # SQLite 删列与 FK/PK 变更统一用「新表→全量拷贝→换名」，
+    # 并位于 Store.__init__ 的单一事务中；任一语句失败都会回滚，
+    # 不会留下半套 schema。旧名只在此迁移边界读取，运行契约不再兼容。
+    _contract_tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+    if "ratings" in _contract_tables:
+        _rating_cols = _table_cols(conn, "ratings")
+        if "net_chips" in _rating_cols or "delta_total" not in _rating_cols:
+            _delta_source = (
+                "delta_total"
+                if "delta_total" in _rating_cols
+                else "net_chips"
+                if "net_chips" in _rating_cols
+                else "0"
+            )
+            conn.execute("DROP TABLE IF EXISTS ratings_contract_new")
+            conn.execute(
+                """
+                CREATE TABLE ratings_contract_new (
+                    bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    game_id         TEXT    NOT NULL,
+                    rating          REAL    NOT NULL DEFAULT 1500.0,
+                    rd              REAL    NOT NULL DEFAULT 350.0,
+                    vol             REAL    NOT NULL DEFAULT 0.06,
+                    wins            INTEGER NOT NULL DEFAULT 0,
+                    losses          INTEGER NOT NULL DEFAULT 0,
+                    draws           INTEGER NOT NULL DEFAULT 0,
+                    delta_total     INTEGER NOT NULL DEFAULT 0,
+                    matches_played  INTEGER NOT NULL DEFAULT 0,
+                    last_played_at  TEXT,
+                    PRIMARY KEY (bot_id, game_id)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO ratings_contract_new"
+                "(bot_id,game_id,rating,rd,vol,wins,losses,draws,delta_total,"
+                "matches_played,last_played_at) "
+                "SELECT bot_id,game_id,rating,rd,vol,wins,losses,draws,"
+                f"{_delta_source},matches_played,last_played_at FROM ratings"
+            )
+            conn.execute("DROP TABLE ratings")
+            conn.execute("ALTER TABLE ratings_contract_new RENAME TO ratings")
+
+    if "pair_stats" in _contract_tables:
+        _pair_cols = _table_cols(conn, "pair_stats")
+        _retired_pair_cols = {"bb_per_100_mean", "ci_low", "ci_high"}
+        if _retired_pair_cols.intersection(_pair_cols):
+            conn.execute("DROP TABLE IF EXISTS pair_stats_contract_new")
+            conn.execute(
+                """
+                CREATE TABLE pair_stats_contract_new (
+                    bot_a_id       INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    bot_b_id       INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    samples        INTEGER NOT NULL DEFAULT 0,
+                    last_played_at TEXT    NOT NULL,
+                    a_wins         INTEGER NOT NULL DEFAULT 0,
+                    a_losses       INTEGER NOT NULL DEFAULT 0,
+                    draws          INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (bot_a_id, bot_b_id)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO pair_stats_contract_new"
+                "(bot_a_id,bot_b_id,samples,last_played_at,a_wins,a_losses,draws) "
+                "SELECT bot_a_id,bot_b_id,a_wins+a_losses+draws,last_played_at,"
+                "a_wins,a_losses,draws FROM pair_stats"
+            )
+            conn.execute("DROP TABLE pair_stats")
+            conn.execute("ALTER TABLE pair_stats_contract_new RENAME TO pair_stats")
+
+    if "match_replays" in _contract_tables:
+        _replay_cols = _table_cols(conn, "match_replays")
+        if "hands_json" in _replay_cols:
+            conn.execute("DROP TABLE IF EXISTS match_replays_contract_new")
+            conn.execute(
+                """
+                CREATE TABLE match_replays_contract_new (
+                    match_id    TEXT PRIMARY KEY,
+                    events_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at  TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO match_replays_contract_new(match_id,events_json,updated_at) "
+                "SELECT match_id,events_json,updated_at FROM match_replays"
+            )
+            conn.execute("DROP TABLE match_replays")
+            conn.execute(
+                "ALTER TABLE match_replays_contract_new RENAME TO match_replays"
+            )
+
+    if "contest_stage_results" in _contract_tables:
+        _stage_cols = _table_cols(conn, "contest_stage_results")
+        if "net_chips" in _stage_cols or "delta_total" not in _stage_cols:
+            _stage_delta_source = (
+                "delta_total"
+                if "delta_total" in _stage_cols
+                else "net_chips"
+                if "net_chips" in _stage_cols
+                else "0"
+            )
+            conn.execute("DROP TABLE IF EXISTS contest_stage_results_contract_new")
+            conn.execute(
+                """
+                CREATE TABLE contest_stage_results_contract_new (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contest_id     INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+                    stage_idx      INTEGER NOT NULL,
+                    stage_key      TEXT    NOT NULL DEFAULT '',
+                    entry_id       INTEGER,
+                    bot_id         INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+                    points         REAL    NOT NULL DEFAULT 0,
+                    wins           INTEGER NOT NULL DEFAULT 0,
+                    draws          INTEGER NOT NULL DEFAULT 0,
+                    losses         INTEGER NOT NULL DEFAULT 0,
+                    delta_total    INTEGER NOT NULL DEFAULT 0,
+                    group_id       TEXT    NOT NULL DEFAULT '',
+                    rank_in_group  INTEGER,
+                    payload_json   TEXT    NOT NULL DEFAULT '{}',
+                    UNIQUE(contest_id, stage_idx, entry_id)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO contest_stage_results_contract_new"
+                "(id,contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,"
+                "draws,losses,delta_total,group_id,rank_in_group,payload_json) "
+                "SELECT id,contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,"
+                f"draws,losses,{_stage_delta_source},group_id,rank_in_group,payload_json "
+                "FROM contest_stage_results"
+            )
+            conn.execute("DROP TABLE contest_stage_results")
+            conn.execute(
+                "ALTER TABLE contest_stage_results_contract_new "
+                "RENAME TO contest_stage_results"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_contest_stage_results_c "
+                "ON contest_stage_results(contest_id)"
+            )
+
     # ── per-game matches 表自动建（解耦审计：让"新增第 4 游戏"真正零改动 DB）────────
     # schema.py 里 matches_holdem/gomoku/pencil 三张表是字面 CREATE 语句；新增注册游戏
     # （如 reversi）后 SCHEMA executescript 不会建 matches_<new>，create_match 会崩
@@ -1225,12 +1388,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # P4：matches 表加 match_seed + technical_loss 列（幂等）
         _add_col(conn, _tbl, "match_seed", "INTEGER")
         _add_col(conn, _tbl, "technical_loss", "INTEGER NOT NULL DEFAULT 0")
-        # match_config + result 双 JSON 通路收敛（删 total_hands/n_dots/hands_played/
-        # earnings_a/earnings_b/net_bb_a 6 个旧列）。历史规则值仅归档进 JSON 后 DROP，
+        # match_config + result 双 JSON 通路收敛（删 total_hands/n_dots/旧进度列/
+        # earnings_a/earnings_b/旧标准化列）。历史规则值仅归档进 JSON 后 DROP，
         # 现行编排不会读取或应用它们；幂等：列已不存在则跳过。
         _add_col(conn, _tbl, "match_config", "TEXT NOT NULL DEFAULT '{}'")
         _add_col(conn, _tbl, "result", "TEXT NOT NULL DEFAULT '{}'")
         _mcols = _table_cols(conn, _tbl)
+        # 历史库可能绕过了现行 schema，留下非法 JSON 或非 object JSON。先把它们
+        # 规范为空对象，避免下面的 json_set/json_type 在迁移中途抛错。物理旧列仅
+        # 用于补齐 JSON 尚不存在的新键；若新键已存在（即使值为 JSON null），新
+        # 契约值始终优先，绝不能被旧列覆盖。
+        conn.execute(
+            f"UPDATE {_tbl} SET result='{{}}' "
+            "WHERE result IS NULL OR json_valid(result)=0"
+        )
+        conn.execute(
+            f"UPDATE {_tbl} SET result='{{}}' "
+            "WHERE COALESCE(json_type(result),'') <> 'object'"
+        )
         if "total_hands" in _mcols:
             # 历史归档：total_hands → match_config.hands（按行原值，不再作为规则输入）
             conn.execute(
@@ -1245,21 +1420,154 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "WHERE n_dots IS NOT NULL"
             )
             conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN n_dots")
-        if "hands_played" in _mcols or "earnings_a" in _mcols:
-            # 结果：hands_played + earnings_a/b → result.{hands_played,deltas}（按行原值）
-            # 注意：WHERE 只判 IS NOT NULL，保留零值行——零手判负（bot 第一手崩）的
-            # rounds_played=0/earnings=0 行也必须迁移，否则 result 会丢成 '{}'。
+        if "hands_played" in _mcols:
+            # 旧物理进度列先归档到唯一中性键；零轮技术判负也必须保留。
             conn.execute(
-                f"UPDATE {_tbl} SET result=json_set(result,'$.hands_played',hands_played) "
-                "WHERE hands_played IS NOT NULL"
+                f"UPDATE {_tbl} SET result=json_set(result,'$.rounds_played',hands_played) "
+                "WHERE hands_played IS NOT NULL "
+                "AND json_type(result,'$.rounds_played') IS NULL"
+            )
+        if "earnings_a" in _mcols or "earnings_b" in _mcols:
+            _earnings_a_source = "earnings_a" if "earnings_a" in _mcols else "0"
+            _earnings_b_source = "earnings_b" if "earnings_b" in _mcols else "0"
+            _earnings_where = " OR ".join(
+                f"{column} IS NOT NULL"
+                for column in ("earnings_a", "earnings_b")
+                if column in _mcols
             )
             conn.execute(
-                f"UPDATE {_tbl} SET result=json_set(result,'$.deltas',json_array(earnings_a,earnings_b)) "
-                "WHERE earnings_a IS NOT NULL OR earnings_b IS NOT NULL"
+                f"UPDATE {_tbl} SET result=json_set(result,'$.deltas',"
+                f"json_array({_earnings_a_source},{_earnings_b_source})) "
+                f"WHERE ({_earnings_where}) "
+                "AND json_type(result,'$.deltas') IS NULL"
             )
+        if {
+            "hands_played",
+            "earnings_a",
+            "earnings_b",
+            "net_bb_a",
+        }.intersection(_mcols):
             for _dead in ("hands_played", "earnings_a", "earnings_b", "net_bb_a"):
                 if _dead in _table_cols(conn, _tbl):
                     conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN {_dead}")
+
+    # ── 三张对局表 result JSON 收敛为唯一公共契约 ────────────────
+    # 所有游戏走注册表能力和同一 builder；旧键仅在此升级边界被读取，更新后的
+    # JSON 不再残留兼容别名。完成态即使是零轮技术判负也必须拥有三个公共字段。
+    from bzplat.backend.games import registry as _game_registry
+    from bzplat.backend.matches.result_contract import (
+        build_result_payload as _build_result_payload,
+        canonical_deltas as _canonical_deltas,
+    )
+
+    _retired_result_keys = {
+        "hands_played",
+        "net_bb",
+        "net_bb_per_100",
+    }
+    # 结果单位/进度属于 GameSpec 能力；只处理实际装配了 spec 的游戏。
+    # DB 物理表扩展测试可独立模拟 schema ID，而不会迫使迁移猜测一个不存在的游戏契约。
+    for _gid in _game_registry.all_ids():
+        _tbl = _matches_table(_gid)
+        if _tbl not in _tables_after:
+            continue
+        _spec = _game_registry.get(_gid)
+        for _match_row in conn.execute(
+            f"SELECT id,status,winner,result FROM {_tbl}"
+        ).fetchall():
+            _raw_text = _match_row["result"]
+            try:
+                _raw_result = json.loads(_raw_text) if _raw_text else {}
+            except (TypeError, ValueError):
+                _raw_result = {}
+            if not isinstance(_raw_result, dict):
+                _raw_result = {}
+
+            _rounds_candidate = _raw_result.get(
+                "rounds_played", _raw_result.get("hands_played", 0)
+            )
+            if (
+                isinstance(_rounds_candidate, bool)
+                or not isinstance(_rounds_candidate, int)
+                or _rounds_candidate < 0
+            ):
+                _rounds_candidate = 0
+
+            try:
+                _migrated_deltas = _canonical_deltas(_raw_result.get("deltas"))
+            except (TypeError, ValueError):
+                _winner = _match_row["winner"]
+                _migrated_deltas = (
+                    [1, -1]
+                    if _winner == 0
+                    else [-1, 1]
+                    if _winner == 1
+                    else [0, 0]
+                )
+
+            _extras = {
+                key: value
+                for key, value in _raw_result.items()
+                if key
+                not in {
+                    "rounds_played",
+                    "deltas",
+                    "normalized_delta",
+                    *_retired_result_keys,
+                }
+            }
+            if _match_row["status"] == STATUS_COMPLETED:
+                _migrated_result = _build_result_payload(
+                    _spec,
+                    rounds_played=_rounds_candidate,
+                    deltas=_migrated_deltas,
+                    extra=_extras,
+                )
+            else:
+                # pending/running/aborted 没有已裁决公共结果：删除公共/退役键，
+                # 仅保留非公共内部扩展，不能捏造一个完成态结果。
+                _migrated_result = _extras
+
+            if _migrated_result != _raw_result:
+                conn.execute(
+                    f"UPDATE {_tbl} SET result=? WHERE id=?",
+                    (
+                        json.dumps(
+                            _migrated_result,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        _match_row["id"],
+                    ),
+                )
+
+    # 正式榜只换破同分字段名，不重算 rank/points/排序；因此升级前后名次顺序严格不变。
+    if "contest_official_results" in _tables_after:
+        for _official_row in conn.execute(
+            "SELECT id,tiebreaks_json FROM contest_official_results"
+        ).fetchall():
+            try:
+                _tiebreaks = json.loads(_official_row["tiebreaks_json"] or "{}")
+            except (TypeError, ValueError):
+                _tiebreaks = {}
+            if not isinstance(_tiebreaks, dict):
+                _tiebreaks = {}
+            _before_tiebreaks = dict(_tiebreaks)
+            if "normalized_delta" not in _tiebreaks and "net_bb_per_100" in _tiebreaks:
+                _tiebreaks["normalized_delta"] = _tiebreaks["net_bb_per_100"]
+            _tiebreaks.pop("net_bb_per_100", None)
+            if _tiebreaks != _before_tiebreaks:
+                conn.execute(
+                    "UPDATE contest_official_results SET tiebreaks_json=? WHERE id=?",
+                    (
+                        json.dumps(
+                            _tiebreaks,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        _official_row["id"],
+                    ),
+                )
 
     # comments/likes 使用跨表多态 target_id，无法声明数据库外键。升级时删除旧版
     # 留下的未知类型和悬空目标，并以 likes 真相重算每场缓存计数。删完悬空
@@ -1539,7 +1847,7 @@ class Store:
     def user_profile(self, username: str) -> dict | None:
         """用户主页聚合：用户公开信息（不含 password_hash/email）+ 总战绩。
 
-        总战绩 = 该用户所有 bot 的 ratings SUM(wins/losses/draws/net_chips/matches_played)。
+        不聚合分差：不同游戏的原始分差单位不同，横跨游戏相加没有意义。
         Bot 列表与对局历史用单独端点（避免单次返回过大）。
         """
         with self._tx() as c:
@@ -1558,7 +1866,6 @@ class Store:
                 "COALESCE(SUM(r.losses),0) AS losses, "
                 "COALESCE(SUM(r.draws),0) AS draws, "
                 "COALESCE(SUM(r.matches_played),0) AS matches_played, "
-                "COALESCE(SUM(r.net_chips),0) AS net_chips, "
                 "COUNT(r.bot_id) AS rated_bots "
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "WHERE b.owner_id=?",
@@ -1566,7 +1873,7 @@ class Store:
             ).fetchone()
             d["stats"] = _row(agg) if agg else {
                 "wins": 0, "losses": 0, "draws": 0,
-                "matches_played": 0, "net_chips": 0, "rated_bots": 0,
+                "matches_played": 0, "rated_bots": 0,
             }
             d["bot_count"] = c.execute(
                 "SELECT COUNT(*) FROM bots WHERE owner_id=?", (uid,)
@@ -1580,14 +1887,13 @@ class Store:
                 "SELECT COALESCE(SUM(r.wins),0) AS wins, "
                 "COALESCE(SUM(r.losses),0) AS losses, "
                 "COALESCE(SUM(r.draws),0) AS draws, "
-                "COALESCE(SUM(r.matches_played),0) AS matches_played, "
-                "COALESCE(SUM(r.net_chips),0) AS net_chips "
+                "COALESCE(SUM(r.matches_played),0) AS matches_played "
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id WHERE b.owner_id=?",
                 (owner_id,),
             ).fetchone()
             return _row(agg) if agg else {
                 "wins": 0, "losses": 0, "draws": 0,
-                "matches_played": 0, "net_chips": 0,
+                "matches_played": 0,
             }
 
     def award_xp(self, user_id: int, amount: int) -> dict | None:
@@ -1989,7 +2295,10 @@ class Store:
         is_builtin = 1 if fields.get("is_builtin") else 0
         is_active = 1 if fields.get("is_active", True) else 0
         # 仅缺省字段使用创建入口默认；显式空值/未知值必须失败。
-        requested_game_id = fields["game_id"] if "game_id" in fields else "holdem"
+        if "game_id" in fields:
+            requested_game_id = fields["game_id"]
+        else:
+            requested_game_id = "holdem"
         game_id = _registered_game_id(requested_game_id)
         runtime_mode = fields.get("runtime_mode") or DEFAULT_RUNTIME_MODE
         if runtime_mode not in VALID_RUNTIME_MODES:
@@ -2376,7 +2685,7 @@ class Store:
                 "SELECT b.*, u.username AS owner_name, "
                 "u.display_name AS owner_display, "
                 "r.rating, r.rd, r.vol, r.wins, r.losses, r.draws, "
-                "r.net_chips, r.matches_played, r.last_played_at AS rated_at "
+                "r.matches_played, r.last_played_at AS rated_at "
                 "FROM bots b "
                 "LEFT JOIN users u ON b.owner_id=u.id "
                 "LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
@@ -2795,17 +3104,15 @@ class Store:
         self,
         match_id: str,
         events_json: str = "[]",
-        hands_json: str = "[]",
     ) -> None:
         with self._tx() as c:
             c.execute(
-                "INSERT INTO match_replays(match_id, events_json, hands_json, "
-                "updated_at) VALUES(?,?,?,?) "
+                "INSERT INTO match_replays(match_id, events_json, updated_at) "
+                "VALUES(?,?,?) "
                 "ON CONFLICT(match_id) DO UPDATE SET "
                 "events_json=excluded.events_json, "
-                "hands_json=excluded.hands_json, "
                 "updated_at=excluded.updated_at",
-                (match_id, events_json, hands_json, _now()),
+                (match_id, events_json, _now()),
             )
 
     save_replay = upsert_replay
@@ -2911,7 +3218,7 @@ class Store:
     ) -> dict | None:
         """更新 (bot_id, game_id) 评分行；不存在则建。game_id 缺省取 bot 的 game_id。
 
-        累加字段（wins/losses/draws/net_chips/matches_played）用 SQL 原子
+        累加字段（wins/losses/draws/delta_total/matches_played）用 SQL 原子
         ``field = field + ?``（传入增量），防并发 lost-update（审计 P1：同 bot
         并发两局时快照+增量会丢一次）。其余字段（rating/rd/vol/last_played_at）
         是绝对赋值。
@@ -2923,12 +3230,12 @@ class Store:
             "wins",
             "losses",
             "draws",
-            "net_chips",
+            "delta_total",
             "matches_played",
             "last_played_at",
         }
         # 累加字段：传增量，SQL 原子加（防 lost-update）
-        accum = {"wins", "losses", "draws", "net_chips", "matches_played"}
+        accum = {"wins", "losses", "draws", "delta_total", "matches_played"}
         sets = [
             f"{k} = {k} + ?" if k in accum else f"{k}=?"
             for k in fields
@@ -2968,8 +3275,8 @@ class Store:
         rating_a: tuple[float, float, float],
         rating_b: tuple[float, float, float],
         winner: int | None,
-        earnings_a: int,
-        earnings_b: int,
+        delta_a: int,
+        delta_b: int,
         reason: str = "",
         settlement_id: str | None = None,
     ) -> bool:
@@ -3009,18 +3316,18 @@ class Store:
                     "INSERT OR IGNORE INTO ratings(bot_id, game_id) VALUES(?, ?)",
                     (bot_id, gid),
                 )
-            for bot_id, values, wins, losses, draws, earnings in (
-                (bot_a_id, rating_a, wa, la, da, earnings_a),
-                (bot_b_id, rating_b, wb, lb, db, earnings_b),
+            for bot_id, values, wins, losses, draws, delta in (
+                (bot_a_id, rating_a, wa, la, da, delta_a),
+                (bot_b_id, rating_b, wb, lb, db, delta_b),
             ):
                 c.execute(
                     "UPDATE ratings SET rating=?, rd=?, vol=?, "
                     "wins=wins+?, losses=losses+?, draws=draws+?, "
-                    "net_chips=net_chips+?, matches_played=matches_played+1, "
+                    "delta_total=delta_total+?, matches_played=matches_played+1, "
                     "last_played_at=? WHERE bot_id=? AND game_id=?",
                     (
                         values[0], values[1], values[2], wins, losses, draws,
-                        earnings, now, bot_id, gid,
+                        delta, now, bot_id, gid,
                     ),
                 )
                 row = c.execute(
@@ -3050,18 +3357,15 @@ class Store:
             else:
                 aw, al, dd = wb, lb, db
             c.execute(
-                "INSERT INTO pair_stats(bot_a_id, bot_b_id, bb_per_100_mean, "
-                "ci_low, ci_high, samples, last_played_at, a_wins, a_losses, draws) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "INSERT INTO pair_stats(bot_a_id, bot_b_id, samples, last_played_at, "
+                "a_wins, a_losses, draws) VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(bot_a_id, bot_b_id) DO UPDATE SET "
-                "bb_per_100_mean=excluded.bb_per_100_mean, "
-                "ci_low=excluded.ci_low, ci_high=excluded.ci_high, "
                 "samples=pair_stats.samples+excluded.samples, "
                 "last_played_at=excluded.last_played_at, "
                 "a_wins=pair_stats.a_wins+excluded.a_wins, "
                 "a_losses=pair_stats.a_losses+excluded.a_losses, "
                 "draws=pair_stats.draws+excluded.draws",
-                (lo, hi, 0.0, None, None, 1, now, aw, al, dd),
+                (lo, hi, 1, now, aw, al, dd),
             )
             return True
 
@@ -3133,7 +3437,7 @@ class Store:
                 params.append(game_id)
             sel = (
                 "SELECT r.bot_id, r.rating, r.rd, r.vol, r.wins, r.losses, "
-                "r.draws, r.net_chips, r.matches_played, r.last_played_at, "
+                "r.draws, r.delta_total, r.matches_played, r.last_played_at, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
                 "b.format, b.os, b.arch, b.is_builtin, b.game_id, "
                 "u.username AS owner_name, u.display_name AS owner_display, "
@@ -3528,7 +3832,7 @@ class Store:
         wins: int = 0,
         losses: int = 0,
         draws: int = 0,
-        net_chips: int = 0,
+        delta_total: int = 0,
         matches_played: int = 0,
         last_played_at: str | None = None,
     ) -> dict | None:
@@ -3540,7 +3844,7 @@ class Store:
             wins=wins,
             losses=losses,
             draws=draws,
-            net_chips=net_chips,
+            delta_total=delta_total,
             matches_played=matches_played,
             last_played_at=last_played_at or _now(),
         )
@@ -3551,37 +3855,23 @@ class Store:
         self,
         bot_a_id: int,
         bot_b_id: int,
-        bb_per_100_mean: float,
-        ci_low: float | None,
-        ci_high: float | None,
-        samples: int,
         *,
         a_wins_delta: int = 0,
         a_losses_delta: int = 0,
         draws_delta: int = 0,
     ) -> None:
-        """记录双方对战统计。a_wins/a_losses 从 bot_a 视角计；
-
-        bb_per_100_mean/ci 为 holdem 期望盈亏（可选，旧接口保留）；
-        samples 只保留为调用契约校验项：可传 0（自动推导）或与本次胜负平
-        增量之和相同的值，禁止再赋予「手数/统计样本」等第二种语义。
-        """
+        """记录双方对战胜负；a_wins/a_losses 从 bot_a 视角计。"""
         outcome_delta = (
             max(0, int(a_wins_delta))
             + max(0, int(a_losses_delta))
             + max(0, int(draws_delta))
         )
-        if int(samples) not in (0, outcome_delta):
-            raise ValueError("samples 必须为 0 或等于胜负平增量之和")
         sample_delta = outcome_delta
         with self._tx() as c:
             c.execute(
-                "INSERT INTO pair_stats(bot_a_id, bot_b_id, bb_per_100_mean, "
-                "ci_low, ci_high, samples, last_played_at, a_wins, a_losses, draws) "
-                "VALUES(?,?,?,?,?,?,?, ?,?,?) "
+                "INSERT INTO pair_stats(bot_a_id, bot_b_id, samples, last_played_at, "
+                "a_wins, a_losses, draws) VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(bot_a_id, bot_b_id) DO UPDATE SET "
-                "bb_per_100_mean=excluded.bb_per_100_mean, "
-                "ci_low=excluded.ci_low, ci_high=excluded.ci_high, "
                 "samples=pair_stats.samples+excluded.samples, "
                 "last_played_at=excluded.last_played_at, "
                 "a_wins=pair_stats.a_wins+excluded.a_wins, "
@@ -3590,9 +3880,6 @@ class Store:
                 (
                     bot_a_id,
                     bot_b_id,
-                    bb_per_100_mean,
-                    ci_low,
-                    ci_high,
                     sample_delta,
                     _now(),
                     max(0, a_wins_delta),
@@ -5071,7 +5358,7 @@ class Store:
             ct = c.execute(
                 "SELECT game_id FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
-            gid = (ct["game_id"] if ct and ct["game_id"] else "holdem").strip().lower()
+            gid = _registered_game_id(ct["game_id"] if ct else None)
             tbl = _matches_table(gid)
             rows = c.execute(
                 "SELECT p.*, ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
@@ -5131,7 +5418,7 @@ class Store:
                 "u.real_name, u.phone, u.school, u.student_id, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
                 "r.rank, r.points, r.awarded, r.stage_idx, "
-                "sr.wins, sr.draws, sr.losses, sr.net_chips "
+                "sr.wins, sr.draws, sr.losses, sr.delta_total "
                 "FROM contest_entries e "
                 "LEFT JOIN users u ON e.user_id=u.id "
                 "LEFT JOIN bots b ON e.bot_id=b.id "
@@ -5452,7 +5739,7 @@ class Store:
         wins: int = 0,
         draws: int = 0,
         losses: int = 0,
-        net_chips: int = 0,
+        delta_total: int = 0,
         group_id: str = "",
         rank_in_group: int | None = None,
         payload_json: str = "{}",
@@ -5461,17 +5748,17 @@ class Store:
             c.execute(
                 "INSERT INTO contest_stage_results"
                 "(contest_id, stage_idx, stage_key, entry_id, bot_id, points, wins, "
-                "draws, losses, net_chips, group_id, rank_in_group, payload_json) "
+                "draws, losses, delta_total, group_id, rank_in_group, payload_json) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(contest_id, stage_idx, entry_id) DO UPDATE SET "
                 "stage_key=excluded.stage_key, bot_id=excluded.bot_id, "
                 "points=excluded.points, wins=excluded.wins, draws=excluded.draws, "
-                "losses=excluded.losses, net_chips=excluded.net_chips, "
+                "losses=excluded.losses, delta_total=excluded.delta_total, "
                 "group_id=excluded.group_id, rank_in_group=excluded.rank_in_group, "
                 "payload_json=excluded.payload_json",
                 (
                     contest_id, stage_idx, stage_key, entry_id, bot_id, points,
-                    wins, draws, losses, net_chips, group_id, rank_in_group,
+                    wins, draws, losses, delta_total, group_id, rank_in_group,
                     payload_json,
                 ),
             )
@@ -5485,7 +5772,7 @@ class Store:
             if stage_idx is not None:
                 sql += " AND stage_idx=?"
                 params.append(stage_idx)
-            sql += " ORDER BY stage_idx, points DESC, net_chips DESC"
+            sql += " ORDER BY stage_idx, points DESC, delta_total DESC"
             return [_row(r) for r in c.execute(sql, params)]
 
     # ── contest_official_results（P2 全员正式名次）─────────────

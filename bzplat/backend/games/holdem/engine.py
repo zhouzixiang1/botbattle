@@ -149,7 +149,7 @@ class MatchSession:
         self._emit(
             "match_end",
             {
-                "hands_played": len(self.rounds),
+                "rounds_played": len(self.rounds),
                 "final_chips": list(self.net),  # Botzone 计分：累计净输赢
                 "winner": (1 - crash_loser) if crash_loser is not None else None,
                 "reason": "crash" if crash_loser is not None else None,

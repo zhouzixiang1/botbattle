@@ -31,6 +31,11 @@ games.registry.get(game_id).run_session(decide, **params)
 
 编排层 `matches/orchestrator.py` 与赛制层 `contests/manager.py` **只读这两个字段**（及 `rounds`/`events`/`winner`），不碰扑克的 pot/board/holes 或棋类棋盘。
 
+平台落库与公开 API 使用另一层稳定契约：`rounds_played`、`deltas`、`normalized_delta`，只能由
+`matches/result_contract.py` 构造。`GameSpec.progress_from_events` 计算本游戏进度，
+`GameSpec.normalize_delta` 把座位 1 原始分差转换成该游戏可比较的归一值。Holdem 的归一值是
+整场筹码分差除以大盲，并非按固定手数折算的速率；复式对局的 `rounds_played` 累加全部 leg。
+
 ## 固定规则常量
 
 | 游戏 | 固定规则 |

@@ -126,6 +126,7 @@ def test_duplicate_contest_two_legs_independent_scoring(tmp_path):
     result = m.get("result") or {}
     legs = result.get("legs") or []
     assert len(legs) == 2, f"duplicate 应有 2 leg，实有 {len(legs)}（result={result}）"
+    assert result.get("rounds_played") == 140, "Holdem 复式两条 70 手 leg 必须累计为 140 手"
     # 每 leg 有独立 winner + deltas（物理 A/B 视角）
     for lg in legs:
         assert "winner" in lg, f"leg 缺 winner: {lg}"
@@ -133,9 +134,10 @@ def test_duplicate_contest_two_legs_independent_scoring(tmp_path):
     # match.winner 应为 None（胜负由 standings 读 legs 决定，无单一 match 胜者）
     assert m["winner"] is None, f"duplicate match.winner 应 None（由 legs 判），实={m['winner']}"
 
-    # 4. 两 leg 的 deltas 累加零和（net_chips tiebreak 用）
+    # 4. 两 leg 的 deltas 累加零和（delta_total tiebreak 用）
     ea, eb = match_deltas(m)
     assert ea + eb == 0, f"两 leg deltas 累加应零和，实 ea={ea} eb={eb}"
+    assert result.get("normalized_delta") == ea / 100.0
 
     # 5. foldbot 每手弃 → callbot 两 leg 都应赢（winner=1，callbot 是 bot_b=seat1 物理）
     #    leg_winner 按 leg_deltas 比较：callbot 净筹码高 → winner=1
@@ -196,12 +198,12 @@ def test_duplicate_standings_two_legs_accumulated(tmp_path):
     # 胜场数：callbot 2 胜 0 负；foldbot 0 胜 2 负
     assert call_row["wins"] == 2 and call_row["losses"] == 0, f"callbot 应 2胜0负: {call_row}"
     assert fold_row["wins"] == 0 and fold_row["losses"] == 2, f"foldbot 应 0胜2负: {fold_row}"
-    # net_chips：callbot 正、foldbot 负（两 leg 累加）
-    assert call_row["net_chips"] > 0 and fold_row["net_chips"] < 0, (
-        f"callbot 净筹码应正 foldbot 应负: call={call_row['net_chips']} fold={fold_row['net_chips']}"
+    # delta_total：callbot 正、foldbot 负（两 leg 累加）
+    assert call_row["delta_total"] > 0 and fold_row["delta_total"] < 0, (
+        f"callbot 净筹码应正 foldbot 应负: call={call_row['delta_total']} fold={fold_row['delta_total']}"
     )
-    # 零和：两人 net_chips 互为相反数
-    assert call_row["net_chips"] + fold_row["net_chips"] == 0, "双人 net_chips 应零和"
+    # 零和：两人 delta_total 互为相反数
+    assert call_row["delta_total"] + fold_row["delta_total"] == 0, "双人 delta_total 应零和"
     s.close()
 
 

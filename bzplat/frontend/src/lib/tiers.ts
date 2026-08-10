@@ -100,19 +100,39 @@ export function trendDelta(delta: number | null | undefined): { up: boolean; abs
 
 // ── per-game 曲线拉取（带缓存）────────────────────────────────
 const _tierCache: Record<string, Tier[]> = {}
+const _tierRequests: Record<string, Promise<Tier[]> | undefined> = {}
 
-/** 拉取并缓存某游戏的段位曲线。失败必须显式上抛，不能伪装成另一游戏。 */
-export async function fetchTiers(gameId: string): Promise<Tier[]> {
-  if (_tierCache[gameId]) return _tierCache[gameId]
-  const r = await fetch(`/api/tiers?game_id=${encodeURIComponent(gameId)}`)
-  if (!r.ok) throw new Error(`tiers ${r.status}`)
-  const data = (await r.json()) as { tiers?: ServerTier[]; game_id?: string }
-  if (data.game_id !== gameId || !Array.isArray(data.tiers) || data.tiers.length === 0) {
-    throw new Error('tiers response does not match requested game')
-  }
-  const tiers = data.tiers.map(toTier)
-  _tierCache[gameId] = tiers
-  return tiers
+/**
+ * 拉取并缓存某游戏的段位曲线。同一 game_id 的并发首次请求共用一个
+ * in-flight Promise；失败后立即清除 singleflight，下次调用可重试。失败必须
+ * 显式上抛，不能伪装成另一游戏。
+ */
+export function fetchTiers(gameId: string): Promise<Tier[]> {
+  if (_tierCache[gameId]) return Promise.resolve(_tierCache[gameId])
+  const inFlight = _tierRequests[gameId]
+  if (inFlight) return inFlight
+
+  const request = (async () => {
+    const r = await fetch(`/api/tiers?game_id=${encodeURIComponent(gameId)}`)
+    if (!r.ok) throw new Error(`tiers ${r.status}`)
+    const data = (await r.json()) as { tiers?: ServerTier[]; game_id?: string }
+    if (data.game_id !== gameId || !Array.isArray(data.tiers) || data.tiers.length === 0) {
+      throw new Error('tiers response does not match requested game')
+    }
+    const tiers = data.tiers.map(toTier)
+    _tierCache[gameId] = tiers
+    return tiers
+  })()
+  _tierRequests[gameId] = request
+  request.then(
+    () => {
+      if (_tierRequests[gameId] === request) delete _tierRequests[gameId]
+    },
+    () => {
+      if (_tierRequests[gameId] === request) delete _tierRequests[gameId]
+    },
+  )
+  return request
 }
 
 /** React hook：按游戏取段位曲线（异步拉取 + 缓存）。 */

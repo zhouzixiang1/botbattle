@@ -274,10 +274,10 @@ def test_matches_replays_pair_stats(tmp_path):
     listed2 = s.list_matches(limit=10, offset=0, bot_id=a["id"], status="completed")
     assert len(listed2) == 1
 
-    s.upsert_replay("m1", events_json='[{"t":1}]', hands_json="[]")
+    s.upsert_replay("m1", events_json='[{"t":1}]')
     assert '"t": 1' in s.get_replay("m1")["events_json"] or '"t":1' in s.get_replay("m1")["events_json"]
     s.upsert_pair_stats(
-        a["id"], b["id"], 1.5, 0.1, 2.0, 3,
+        a["id"], b["id"],
         a_wins_delta=2, a_losses_delta=1,
     )
 

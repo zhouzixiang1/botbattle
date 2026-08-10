@@ -30,7 +30,7 @@ interface Match {
   bot_a_display?: string
   bot_b_display?: string
   created_at?: string
-  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
+  result?: { rounds_played?: number; deltas?: number[]; normalized_delta?: number }
   game_id?: string
   match_type?: string
   owner_id?: number | null

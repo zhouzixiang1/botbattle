@@ -32,7 +32,6 @@ interface Row {
   losses?: number
   draws?: number
   matches_played?: number
-  net_chips?: number
   format?: string
   os?: string
   arch?: string

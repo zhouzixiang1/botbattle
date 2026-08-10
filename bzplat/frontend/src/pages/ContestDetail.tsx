@@ -119,7 +119,7 @@ interface Standing {
   wins: number
   draws: number
   losses: number
-  net_chips: number
+  delta_total: number
   group_id?: string
   bot_name?: string
 }
@@ -794,7 +794,7 @@ export default function ContestDetail() {
                       <TableHead className="min-w-[6rem]">Bot</TableHead>
                       <TableHead>积分</TableHead>
                       <TableHead className="hidden sm:table-cell">W/D/L</TableHead>
-                      <TableHead className="hidden md:table-cell">净筹码</TableHead>
+                      <TableHead className="hidden md:table-cell">累计分差</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -813,7 +813,7 @@ export default function ContestDetail() {
                           <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
                             <span className="text-success">{s.wins}</span>/{s.draws}/<span className="text-destructive">{s.losses}</span>
                           </TableCell>
-                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.net_chips}</TableCell>
+                          <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.delta_total}</TableCell>
                         </TableRow>
                       ))
                     )}

@@ -17,9 +17,9 @@ interface Match {
   status: string
   match_type: string
   result?: {
-    hands_played?: number
+    rounds_played?: number
     deltas?: number[]
-    net_bb?: number
+    normalized_delta?: number
     technical_incidents_by_seat?: Record<string, number>
     technical_incident_samples?: Array<{ seat: number; error: string; turn?: number | null }>
   }
@@ -202,7 +202,7 @@ export default function MatchesTab() {
                 </TableCell>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">
                   {gameSpec
-                    ? `${m.result?.hands_played ?? 0} ${gameSpec.progressUnit === 'move' ? '步' : '手'}`
+                    ? `${m.result?.rounds_played ?? 0} ${gameSpec.progressUnit === 'move' ? '步' : '手'}`
                     : '规则不可用'}
                 </TableCell>
                 <TableCell className="max-w-[18rem] px-3 py-2 font-mono text-xs text-muted-foreground">

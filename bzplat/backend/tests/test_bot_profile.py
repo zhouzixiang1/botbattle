@@ -60,8 +60,12 @@ def test_pair_stats_win_loss_accumulation_and_head_to_head(tmp_path):
     # b1 视角：2 胜 1 负 1 平
     aw = 2 if is_b1_a else 1
     al = 1 if is_b1_a else 2
-    s.upsert_pair_stats(lo, hi, 0.0, None, None, 0, a_wins_delta=aw, a_losses_delta=al, draws_delta=1)
-    s.upsert_pair_stats(lo, hi, 0.0, None, None, 0, a_wins_delta=0, a_losses_delta=0, draws_delta=0)
+    s.upsert_pair_stats(
+        lo, hi, a_wins_delta=aw, a_losses_delta=al, draws_delta=1
+    )
+    s.upsert_pair_stats(
+        lo, hi, a_wins_delta=0, a_losses_delta=0, draws_delta=0
+    )
 
     # b1 视角看 b2
     h_b1 = s.head_to_head(b1["id"], b2["id"])
@@ -84,7 +88,7 @@ def test_pair_stats_win_loss_accumulation_and_head_to_head(tmp_path):
 def test_pair_stats_rejects_ambiguous_legacy_sample_count(tmp_path):
     s = _store(tmp_path)
     _, b1, b2 = _seed_two_bots(s)
-    with pytest.raises(ValueError, match="samples"):
+    with pytest.raises(TypeError):
         s.upsert_pair_stats(b1["id"], b2["id"], 0.0, None, None, 70)
     assert s.head_to_head(b1["id"], b2["id"]) is None
     s.close()
@@ -103,7 +107,7 @@ def test_bot_opponents_stats_resolves_names_and_view(tmp_path):
     lo, hi = sorted((b1["id"], b2["id"]))
     aw = 3 if b1["id"] == lo else 0
     al = 0 if b1["id"] == lo else 3
-    s.upsert_pair_stats(lo, hi, 0.0, None, None, 0, a_wins_delta=aw, a_losses_delta=al)
+    s.upsert_pair_stats(lo, hi, a_wins_delta=aw, a_losses_delta=al)
     opps = s.bot_opponents_stats(b1["id"])
     assert len(opps) == 1
     o = opps[0]
@@ -121,7 +125,7 @@ def test_pair_stats_migration_repairs_legacy_zero_samples(tmp_path):
     _, b1, b2 = _seed_two_bots(s)
     lo, hi = sorted((b1["id"], b2["id"]))
     s.upsert_pair_stats(
-        lo, hi, 0.0, None, None, 0,
+        lo, hi,
         a_wins_delta=2, a_losses_delta=1, draws_delta=1,
     )
     with s._tx() as c:
@@ -209,7 +213,7 @@ def _app_with_admin(tmp_path):
     store.update_rating_row(b1["id"], rating=1700, wins=2, matches_played=2)
     store.add_rating_history(b1["id"], 1700, 80, 0.06, 2, "test")
     lo, hi = sorted((b1["id"], b2["id"]))
-    store.upsert_pair_stats(lo, hi, 0, None, None, 0, a_wins_delta=2, a_losses_delta=0)
+    store.upsert_pair_stats(lo, hi, a_wins_delta=2, a_losses_delta=0)
     c = TestClient(app)
     c.headers["Authorization"] = f"Bearer {token}"
     return c, b1, b2

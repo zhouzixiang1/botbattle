@@ -50,7 +50,6 @@ interface BotProfile {
   wins?: number
   losses?: number
   draws?: number
-  net_chips?: number
   matches_played?: number
   rated_at?: string
   tier_level?: number
@@ -73,7 +72,7 @@ interface MatchRow {
   bot_b_name: string
   bot_a_display?: string
   bot_b_display?: string
-  result?: { hands_played?: number; deltas?: number[]; net_bb?: number }
+  result?: { rounds_played?: number; deltas?: number[]; normalized_delta?: number }
   created_at?: string
 }
 
