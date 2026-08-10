@@ -565,6 +565,7 @@ def test_takeover_retains_global_slot_until_physical_cleanup_ack(store: Store):
         claimed["execution_scope"],
         "creating",
         "bzbot-current-create",
+        "boot:test-boot;daemon:101:1",
     )
     store.mark_auto_match_execution_recovery_pending(
         "fenced-match",
@@ -692,7 +693,9 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         if not fence_current:
             raise AutoMatchFenceLost("stale epoch")
 
-    def record_launch(state: str, token: str) -> None:
+    def record_launch(
+        state: str, token: str, _incarnation: str | None = None
+    ) -> None:
         if not launch_states or launch_states[-1] != (state, token):
             launch_states.append((state, token))
 
@@ -724,13 +727,15 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         assert args[1:4] == ("start", "-a", "-i")
         return FailedStartProc() if args[-1] == "bzbot-start-fail-session" else FakeProc()
 
-    async def visible_scope(_container_name: str) -> tuple[str, str] | None:
+    async def visible_scope(
+        _container_name: str, **_kwargs
+    ) -> tuple[str, str] | None:
         if _container_name == "bzbot-cancel-session":
             return None
         token = _container_name.removeprefix("bzbot-")
         return ("scope-a", token) if label_visible.is_set() else None
 
-    async def container_state(_container_name: str) -> dict:
+    async def container_state(_container_name: str, **_kwargs) -> dict:
         if _container_name == "bzbot-start-fail-session":
             return {"StartedAt": "0001-01-01T00:00:00Z", "Error": "", "Running": False}
         return {"StartedAt": "2026-08-10T12:00:00Z", "Error": "", "Running": True}
@@ -899,6 +904,190 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         assert recovery_reasons
 
     asyncio.run(exercise())
+
+
+def test_docker_start_confirmation_timeout_releases_task_and_launch_flock(
+    tmp_path, monkeypatch
+):
+    lock_path = str(tmp_path / "confirm-timeout.lock")
+    recovery_reasons: list[str] = []
+    launch_states: list[tuple[str, str]] = []
+
+    def record_launch(
+        state: str, token: str, _incarnation: str | None = None
+    ) -> None:
+        if not launch_states or launch_states[-1] != (state, token):
+            launch_states.append((state, token))
+
+    scope = ExecutionScope(
+        token="timeout-scope",
+        launch_lock_path=lock_path,
+        fence_check=lambda: None,
+        recovery_mark=recovery_reasons.append,
+        launch_mark=record_launch,
+    )
+    runner = BinaryRunner(prefer_local=False)
+    binary_path = tmp_path / "bot"
+    binary_path.write_bytes(b"unused")
+    session = BotSession(
+        "timeout-session",
+        BinaryInfo("elf", "linux", "amd64", True),
+        binary_path,
+        mode="docker",
+        execution_scope=scope,
+    )
+
+    class AttachProc:
+        returncode = None
+        terminated = False
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        async def wait(self):
+            return self.returncode
+
+    attach = AttachProc()
+
+    class Result:
+        returncode = 0
+        stdout = "timeout-container\n"
+
+    async def spawn_cli(*_args, **_kwargs):
+        return attach
+
+    async def labels(_name: str, **_kwargs):
+        return ("timeout-scope", "timeout-session")
+
+    async def state_never_confirms(_name: str, **_kwargs):
+        return None
+
+    async def cleanup_unavailable(*_args, **_kwargs):
+        return {
+            "confirmed": False,
+            "observed_launch": True,
+            "reason": "inspect unavailable",
+        }
+
+    monkeypatch.setattr(
+        binary_runtime, "_AUTO_EXECUTION_CONFIRM_TIMEOUT_SEC", 0.03
+    )
+    monkeypatch.setattr(
+        binary_runtime,
+        "_docker_daemon_incarnation",
+        lambda: "boot:test-boot;daemon:101:1",
+    )
+    monkeypatch.setattr(binary_runtime, "_docker_control_command", lambda *_a, **_k: Result())
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_cli)
+    monkeypatch.setattr(runner, "_docker_container_execution_labels", labels)
+    monkeypatch.setattr(runner, "_docker_container_state", state_never_confirms)
+    monkeypatch.setattr(runner, "_force_stop_execution_unlocked", cleanup_unavailable)
+
+    async def exercise() -> None:
+        with pytest.raises(PlatformRunnerError):
+            async with scope.launch_guard():
+                await asyncio.wait_for(runner._start_docker(session), timeout=0.5)
+        assert attach.terminated is True
+        assert ("created", "timeout-session") in launch_states
+        assert ("started", "timeout-session") not in launch_states
+        assert any("启动确认超时" in reason for reason in recovery_reasons)
+
+        async def acquire_after_timeout() -> None:
+            async with binary_runtime._execution_file_lock(lock_path):
+                return
+
+        await asyncio.wait_for(acquire_after_timeout(), timeout=0.2)
+
+    asyncio.run(exercise())
+
+
+def test_ambiguous_create_requires_daemon_incarnation_change_to_converge(
+    store: Store,
+):
+    _mk_bot(store, "incarnation-a")
+    _mk_bot(store, "incarnation-b")
+    token_a = _leader(store, "incarnation-leader-a")
+    epoch_a = _epoch(store, token_a)
+    store.refill_auto_match_queue(
+        target_queued=1,
+        placement_required=10,
+        dispatcher_token=token_a,
+        dispatcher_epoch=epoch_a,
+    )
+    claim = store.claim_next_auto_match(
+        "incarnation-match",
+        dispatcher_token=token_a,
+        dispatcher_epoch=epoch_a,
+    )
+    incarnation_a = "boot:test-boot;daemon:101:1"
+    store.mark_auto_match_execution_launch_state(
+        "incarnation-match",
+        token_a,
+        epoch_a,
+        claim["execution_scope"],
+        "creating",
+        "ambiguous-launch",
+        incarnation_a,
+    )
+    store.update_match(
+        "incarnation-match",
+        auto_dispatcher_token=token_a,
+        auto_dispatcher_epoch=epoch_a,
+        status="running",
+        started_at="2026-08-10T12:00:00",
+    )
+    store.mark_auto_match_execution_recovery_pending(
+        "incarnation-match",
+        token_a,
+        epoch_a,
+        claim["execution_scope"],
+        "ambiguous docker create",
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_dispatcher SET lease_until='2000-01-01T00:00:00' "
+            "WHERE singleton=1"
+        )
+    lease_b = store.acquire_auto_match_dispatcher(
+        "incarnation-leader-b", lease_seconds=30
+    )
+    epoch_b = int(lease_b["lease_epoch"])
+    store.recover_auto_match_dispatcher_takeover(
+        dispatcher_token="incarnation-leader-b",
+        dispatcher_epoch=epoch_b,
+    )
+
+    class CleanupOrchestrator:
+        incarnation = incarnation_a
+
+        async def force_stop_auto_execution(self, *_args, **_kwargs):
+            return {
+                "confirmed": True,
+                "observed_launch": False,
+                "current_daemon_incarnation": self.incarnation,
+            }
+
+    orch = CleanupOrchestrator()
+    scheduler = AutoMatchScheduler(orch, store)
+    scheduler._dispatcher_token = "incarnation-leader-b"
+    scheduler._dispatcher_epoch = epoch_b
+    scheduler._leader = True
+
+    same = asyncio.run(scheduler._recover_physical_execution())
+    assert same["outcome"] == "recovery_pending"
+    assert "需重启 Docker 或主机" in same["reason"]
+    assert store.list_auto_match_queue()[0]["execution_launch_state"] == "creating"
+
+    orch.incarnation = "boot:test-boot;daemon:202:2"
+    changed = asyncio.run(scheduler._recover_physical_execution())
+    assert changed["outcome"] == "cleanup_confirmed"
+    assert changed["confirmed"] is True
+    assert store.get_match("incarnation-match")["status"] == "aborted"
+    assert store.list_auto_match_queue()[0]["execution_launch_state"] == "created"
 
 
 def test_auto_seats_flip_after_each_completed_service(store: Store):

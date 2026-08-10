@@ -338,6 +338,7 @@ CREATE TABLE IF NOT EXISTS auto_match_decisions (
         )
     ),
     execution_launch_token      TEXT,
+    execution_daemon_incarnation TEXT,
     cleanup_requested_at        TEXT,
     cleanup_ack_at              TEXT,
     cleanup_error               TEXT NOT NULL DEFAULT '',
@@ -357,10 +358,13 @@ CREATE TABLE IF NOT EXISTS auto_match_decisions (
         (execution_scope IS NULL) = (execution_backend IS NULL) AND
         (execution_scope IS NULL) = (execution_state IS NULL) AND
         (execution_scope IS NULL) = (execution_launch_state IS NULL) AND
-        ((execution_launch_state IS NULL AND execution_launch_token IS NULL) OR
-         (execution_launch_state='unstarted' AND execution_launch_token IS NULL) OR
+        ((execution_launch_state IS NULL AND execution_launch_token IS NULL
+          AND execution_daemon_incarnation IS NULL) OR
+         (execution_launch_state='unstarted' AND execution_launch_token IS NULL
+          AND execution_daemon_incarnation IS NULL) OR
          (execution_launch_state IN ('creating','created','started')
-          AND execution_launch_token IS NOT NULL))
+          AND execution_launch_token IS NOT NULL
+          AND execution_daemon_incarnation IS NOT NULL))
     )
 );
 
@@ -397,6 +401,7 @@ CREATE TABLE IF NOT EXISTS auto_match_queue (
         )
     ),
     execution_launch_token TEXT,
+    execution_daemon_incarnation TEXT,
     cleanup_requested_at TEXT,
     cleanup_ack_at      TEXT,
     cleanup_error       TEXT NOT NULL DEFAULT '',
@@ -411,6 +416,7 @@ CREATE TABLE IF NOT EXISTS auto_match_queue (
                          AND execution_scope IS NULL AND execution_backend IS NULL
                          AND execution_state IS NULL AND execution_launch_state IS NULL
                          AND execution_launch_token IS NULL
+                         AND execution_daemon_incarnation IS NULL
                          AND cleanup_requested_at IS NULL AND cleanup_ack_at IS NULL) OR
         (status='dispatched' AND match_id IS NOT NULL AND dispatcher_token IS NOT NULL
                              AND dispatcher_epoch IS NOT NULL AND dispatched_at IS NOT NULL
@@ -418,8 +424,12 @@ CREATE TABLE IF NOT EXISTS auto_match_queue (
                              AND execution_backend IS NOT NULL
                              AND execution_state IS NOT NULL
                              AND execution_launch_state IS NOT NULL
-                             AND ((execution_launch_state='unstarted' AND execution_launch_token IS NULL)
-                                  OR (execution_launch_state<>'unstarted' AND execution_launch_token IS NOT NULL)))
+                             AND ((execution_launch_state='unstarted'
+                                   AND execution_launch_token IS NULL
+                                   AND execution_daemon_incarnation IS NULL)
+                                  OR (execution_launch_state<>'unstarted'
+                                      AND execution_launch_token IS NOT NULL
+                                      AND execution_daemon_incarnation IS NOT NULL)))
     )
 );
 

@@ -1293,7 +1293,11 @@ class MatchOrchestrator:
                     reason,
                 )
 
-            def mark_execution_launch(state: str, launch_token: str) -> None:
+            def mark_execution_launch(
+                state: str,
+                launch_token: str,
+                daemon_incarnation: str | None,
+            ) -> None:
                 if state == "created":
                     if not self.store.record_auto_match_execution_launch_observed(
                         match_id,
@@ -1311,6 +1315,7 @@ class MatchOrchestrator:
                     scope_token,
                     state,
                     launch_token,
+                    daemon_incarnation,
                 )
 
             def mark_execution_cleanup() -> None:
@@ -1321,12 +1326,26 @@ class MatchOrchestrator:
                     scope_token,
                 )
 
+            def mark_ambiguous_incarnation(
+                launch_token: str, daemon_incarnation: str
+            ) -> None:
+                if not self.store.record_auto_match_execution_ambiguous_incarnation(
+                    match_id,
+                    execution_scope=scope_token,
+                    launch_token=launch_token,
+                    daemon_incarnation=daemon_incarnation,
+                ):
+                    raise AutoMatchFenceLost(
+                        f"auto-match ambiguous incarnation lost for {match_id}"
+                    )
+
             execution_scope = ExecutionScope(
                 token=scope_token,
                 launch_lock_path=self.store.auto_match_execution_launch_lock_path,
                 fence_check=assert_execution_current,
                 recovery_mark=mark_execution_recovery,
                 launch_mark=mark_execution_launch,
+                incarnation_mark=mark_ambiguous_incarnation,
                 cleanup_mark=mark_execution_cleanup,
             )
         want_duplicate = bool(stored_mc.get("duplicate"))

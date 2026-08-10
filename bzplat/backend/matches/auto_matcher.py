@@ -166,6 +166,39 @@ class AutoMatchScheduler:
                 "reason": reason,
                 "match_id": recovery["match_id"],
             }
+        if (
+            recovery.get("execution_launch_state") == "creating"
+            and not result.get("observed_launch")
+        ):
+            current_incarnation = str(
+                result.get("current_daemon_incarnation") or ""
+            )
+            restarted = self.store.record_auto_match_execution_daemon_restart(
+                recovery["match_id"],
+                dispatcher_token=self._dispatcher_token,
+                dispatcher_epoch=self._dispatcher_epoch,
+                execution_scope=recovery["execution_scope"],
+                previous_incarnation=recovery["execution_daemon_incarnation"],
+                current_incarnation=current_incarnation,
+            )
+            if not restarted:
+                reason = (
+                    "Docker daemon 实例未变化且容器创建结果不明确；"
+                    "需重启 Docker 或主机后恢复"
+                )
+                self.store.record_auto_match_execution_cleanup_failure(
+                    recovery["match_id"],
+                    dispatcher_token=self._dispatcher_token,
+                    dispatcher_epoch=self._dispatcher_epoch,
+                    execution_scope=recovery["execution_scope"],
+                    reason=reason,
+                )
+                return {
+                    "outcome": "recovery_pending",
+                    "confirmed": False,
+                    "reason": reason,
+                    "match_id": recovery["match_id"],
+                }
         finalized = self.store.finalize_auto_match_execution_cleanup(
             recovery["match_id"],
             dispatcher_token=self._dispatcher_token,

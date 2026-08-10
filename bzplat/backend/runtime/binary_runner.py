@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import shutil
+import socket
+import struct
 import subprocess
 import threading
 import time
@@ -47,8 +49,51 @@ _AUTO_EXECUTION_LAUNCH_LABEL = "bzplat.auto_execution_launch"
 _AUTO_EXECUTION_CLEANUP_POLLS = 6
 _AUTO_EXECUTION_CLEANUP_ZERO_POLLS = 2
 _AUTO_EXECUTION_VISIBILITY_POLL_SEC = 0.05
+_AUTO_EXECUTION_CONFIRM_TIMEOUT_SEC = 10.0
 _IMAGE_READY_LOCK = threading.Lock()
 _IMAGE_READY_KEYS: set[tuple[str, str]] = set()
+
+
+def _host_boot_id() -> str:
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        value = ""
+    return value or "unknown"
+
+
+def _docker_daemon_incarnation() -> str:
+    """Identify the local daemon without relying on Docker API availability."""
+    boot_id = _host_boot_id()
+    daemon = "unknown"
+    docker_host = os.environ.get("DOCKER_HOST", "").strip()
+    socket_path: str | None
+    if not docker_host:
+        socket_path = "/var/run/docker.sock"
+    elif docker_host.startswith("unix://"):
+        socket_path = docker_host.removeprefix("unix://")
+    else:
+        socket_path = None
+    if socket_path:
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            peer.settimeout(0.5)
+            peer.connect(socket_path)
+            raw = peer.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+            )
+            pid, _uid, _gid = struct.unpack("3i", raw)
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            # After the final ') ' the first token is field 3; starttime is 22.
+            tail = stat.rsplit(") ", 1)[1].split()
+            daemon = f"{pid}:{tail[19]}"
+        except (OSError, IndexError, ValueError):
+            daemon = "unknown"
+        finally:
+            peer.close()
+    return f"boot:{boot_id};daemon:{daemon}"
 
 
 @dataclass(frozen=True)
@@ -65,7 +110,8 @@ class ExecutionScope:
     launch_lock_path: str
     fence_check: Callable[[], None]
     recovery_mark: Callable[[str], None] | None = None
-    launch_mark: Callable[[str, str], None] | None = None
+    launch_mark: Callable[[str, str, str | None], None] | None = None
+    incarnation_mark: Callable[[str, str], None] | None = None
     cleanup_mark: Callable[[], None] | None = None
 
     def assert_current(self) -> None:
@@ -75,13 +121,24 @@ class ExecutionScope:
         if self.recovery_mark is not None:
             self.recovery_mark(reason)
 
-    def mark_launch_state(self, state: str, launch_token: str) -> None:
+    def mark_launch_state(
+        self,
+        state: str,
+        launch_token: str,
+        daemon_incarnation: str | None = None,
+    ) -> None:
         if self.launch_mark is not None:
-            self.launch_mark(state, launch_token)
+            self.launch_mark(state, launch_token, daemon_incarnation)
 
     def mark_cleanup_confirmed(self) -> None:
         if self.cleanup_mark is not None:
             self.cleanup_mark()
+
+    def mark_ambiguous_incarnation(
+        self, launch_token: str, daemon_incarnation: str
+    ) -> None:
+        if self.incarnation_mark is not None:
+            self.incarnation_mark(launch_token, daemon_incarnation)
 
     @asynccontextmanager
     async def launch_guard(self) -> AsyncIterator[None]:
@@ -535,7 +592,11 @@ class BinaryRunner:
             async with guard:
                 if mode == "local":
                     if execution_scope is not None:
-                        execution_scope.mark_launch_state("creating", sid)
+                        execution_scope.mark_launch_state(
+                            "creating",
+                            sid,
+                            f"boot:{_host_boot_id()};daemon:local",
+                        )
                     try:
                         await self._start_local(session)
                         if execution_scope is not None:
@@ -644,7 +705,22 @@ class BinaryRunner:
         scope = session.execution_scope
         if scope is not None:
             launch_token = session.session_id
-            scope.mark_launch_state("creating", launch_token)
+            daemon_incarnation = await asyncio.to_thread(
+                _docker_daemon_incarnation
+            )
+            scope.mark_launch_state(
+                "creating", launch_token, daemon_incarnation
+            )
+
+            async def refresh_ambiguous_incarnation(
+                *, control_thread_terminal: bool
+            ) -> None:
+                refreshed = await asyncio.to_thread(_docker_daemon_incarnation)
+                if not control_thread_terminal:
+                    boot = refreshed.split(";", 1)[0]
+                    refreshed = f"{boot};daemon:unknown"
+                scope.mark_ambiguous_incarnation(launch_token, refreshed)
+
             options[5:5] = [
                 "--label",
                 f"{_AUTO_EXECUTION_LABEL}={scope.token}",
@@ -672,41 +748,72 @@ class BinaryRunner:
                     # cancellation during service shutdown.
                     cancellation = cancellation or exc
                     if create_task.cancelled():
+                        await refresh_ambiguous_incarnation(
+                            control_thread_terminal=False
+                        )
                         scope.mark_recovery_pending(
                             "Docker create 控制任务在结果确认前被取消"
                         )
                         raise cancellation
                     continue
                 except PlatformRunnerError as exc:
+                    await refresh_ambiguous_incarnation(
+                        control_thread_terminal=True
+                    )
                     scope.mark_recovery_pending(str(exc))
                     raise
                 except BaseException as exc:
+                    await refresh_ambiguous_incarnation(
+                        control_thread_terminal=True
+                    )
                     scope.mark_recovery_pending(
                         f"Docker create 控制任务异常（{type(exc).__name__}）"
                     )
                     raise
             if created.returncode != 0:
                 reason = f"Docker 自动对局容器创建失败（exit {created.returncode}）"
+                await refresh_ambiguous_incarnation(
+                    control_thread_terminal=True
+                )
                 scope.mark_recovery_pending(reason)
                 if cancellation is not None:
                     raise cancellation
                 raise PlatformRunnerError(reason)
+            confirmation_deadline = (
+                asyncio.get_running_loop().time()
+                + _AUTO_EXECUTION_CONFIRM_TIMEOUT_SEC
+            )
             try:
                 # ``docker create`` success is the daemon acknowledgement.  All
                 # later awaits stay inside one failure envelope: cancellation,
                 # fence loss, inspect failure, and start failure must clean the
                 # exact scope or durably leave its recovery barrier occupied.
+                # Persist that acknowledgement before inspect: even permanent
+                # inspect failure can now safely converge from negative proof.
+                scope.mark_launch_state("created", launch_token)
+                if cancellation is not None:
+                    raise cancellation
                 while True:
+                    remaining = (
+                        confirmation_deadline
+                        - asyncio.get_running_loop().time()
+                    )
+                    if remaining <= 0:
+                        reason = "Docker 自动对局容器标签确认超时"
+                        scope.mark_recovery_pending(reason)
+                        raise PlatformRunnerError(reason)
                     try:
-                        labels = await self._docker_container_execution_labels(name)
+                        labels = await self._docker_container_execution_labels(
+                            name,
+                            timeout=min(_DOCKER_INSPECT_TIMEOUT_SEC, remaining),
+                        )
                     except PlatformRunnerError:
                         labels = None
                     if labels == (scope.token, launch_token):
                         break
-                    await asyncio.sleep(_AUTO_EXECUTION_VISIBILITY_POLL_SEC)
-                scope.mark_launch_state("created", launch_token)
-                if cancellation is not None:
-                    raise cancellation
+                    await asyncio.sleep(
+                        min(_AUTO_EXECUTION_VISIBILITY_POLL_SEC, remaining)
+                    )
                 scope.assert_current()
                 start_cmd = [self._docker_bin, "start", "-a", "-i", name]
                 session.proc = await asyncio.create_subprocess_exec(
@@ -717,8 +824,19 @@ class BinaryRunner:
                     limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
                 )
                 while True:
+                    remaining = (
+                        confirmation_deadline
+                        - asyncio.get_running_loop().time()
+                    )
+                    if remaining <= 0:
+                        reason = "Docker 自动对局容器启动确认超时"
+                        scope.mark_recovery_pending(reason)
+                        raise PlatformRunnerError(reason)
                     try:
-                        state = await self._docker_container_state(name)
+                        state = await self._docker_container_state(
+                            name,
+                            timeout=min(_DOCKER_INSPECT_TIMEOUT_SEC, remaining),
+                        )
                     except PlatformRunnerError:
                         state = None
                     started_at = str((state or {}).get("StartedAt") or "")
@@ -729,7 +847,9 @@ class BinaryRunner:
                     if state_error or session.proc.returncode is not None:
                         reason = state_error or "Docker 容器未成功启动"
                         raise PlatformRunnerError(reason)
-                    await asyncio.sleep(_AUTO_EXECUTION_VISIBILITY_POLL_SEC)
+                    await asyncio.sleep(
+                        min(_AUTO_EXECUTION_VISIBILITY_POLL_SEC, remaining)
+                    )
             except BaseException as launch_exc:
                 cleanup_task = asyncio.create_task(
                     self._cleanup_created_scope_unlocked(
@@ -754,7 +874,10 @@ class BinaryRunner:
         )
 
     async def _docker_container_execution_labels(
-        self, container_name: str
+        self,
+        container_name: str,
+        *,
+        timeout: float = _DOCKER_INSPECT_TIMEOUT_SEC,
     ) -> tuple[str, str] | None:
         result = await asyncio.to_thread(
             _docker_control_command,
@@ -765,7 +888,7 @@ class BinaryRunner:
                 "{{json .Config.Labels}}",
                 container_name,
             ],
-            timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+            timeout=max(0.001, timeout),
             timeout_message="Docker 执行隔离标签检查超时",
         )
         if result.returncode != 0:
@@ -781,7 +904,12 @@ class BinaryRunner:
             str(labels.get(_AUTO_EXECUTION_LAUNCH_LABEL) or ""),
         )
 
-    async def _docker_container_state(self, container_name: str) -> dict | None:
+    async def _docker_container_state(
+        self,
+        container_name: str,
+        *,
+        timeout: float = _DOCKER_INSPECT_TIMEOUT_SEC,
+    ) -> dict | None:
         result = await asyncio.to_thread(
             _docker_control_command,
             [
@@ -791,7 +919,7 @@ class BinaryRunner:
                 "{{json .State}}",
                 container_name,
             ],
-            timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+            timeout=max(0.001, timeout),
             timeout_message="Docker 执行容器启动状态检查超时",
         )
         if result.returncode != 0:
@@ -809,6 +937,20 @@ class BinaryRunner:
         scope = session.execution_scope
         if scope is None or not session.container_name:
             return
+        # ``docker start -a -i`` is only an attach/control process.  A failed
+        # StartedAt confirmation must not leave it holding pipes or delaying
+        # orchestrator shutdown while the labelled container is recovered.
+        proc = session.proc
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=0.5)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                pass
         cleanup = await self._force_stop_execution_unlocked(
             scope.token,
             execution_backend="docker",
@@ -1032,12 +1174,19 @@ class BinaryRunner:
                 "reason": "未知执行后端，无法确认清理",
             }
         async with _execution_file_lock(launch_lock_path):
-            return await self._force_stop_execution_unlocked(
+            current_incarnation = (
+                await asyncio.to_thread(_docker_daemon_incarnation)
+                if execution_backend == "docker"
+                else f"boot:{_host_boot_id()};daemon:local"
+            )
+            result = await self._force_stop_execution_unlocked(
                 token,
                 execution_backend=execution_backend,
                 allow_local_ack=allow_local_ack,
                 execution_launch_token=execution_launch_token,
             )
+            result["current_daemon_incarnation"] = current_incarnation
+            return result
 
     async def _force_stop_execution_unlocked(
         self,
@@ -1137,7 +1286,14 @@ class BinaryRunner:
             zero_polls = 0
             for attempt in range(_AUTO_EXECUTION_CLEANUP_POLLS):
                 remaining = await self._docker_execution_container_ids(token)
-                if not remaining:
+                remaining_launch: list[str] = []
+                if execution_launch_token:
+                    remaining_launch = await self._docker_launch_container_ids(
+                        token, execution_launch_token
+                    )
+                    if remaining_launch:
+                        observed_launch = True
+                if not remaining and not remaining_launch:
                     zero_polls += 1
                     if zero_polls >= _AUTO_EXECUTION_CLEANUP_ZERO_POLLS:
                         return {

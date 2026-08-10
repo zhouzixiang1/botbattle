@@ -80,6 +80,37 @@ _AUTO_MATCH_PLATFORM_ABORT_REASONS = frozenset(
 )
 
 
+def _daemon_incarnation_changed(previous: str, current: str) -> bool:
+    """Return true only for a comparable Docker/host restart proof."""
+
+    def parse(value: str) -> dict[str, str]:
+        return {
+            key: item
+            for part in str(value or "").split(";")
+            if ":" in part
+            for key, item in [part.split(":", 1)]
+        }
+
+    before = parse(previous)
+    after = parse(current)
+    before_boot = before.get("boot", "unknown")
+    after_boot = after.get("boot", "unknown")
+    if (
+        before_boot != "unknown"
+        and after_boot != "unknown"
+        and before_boot != after_boot
+    ):
+        return True
+    before_daemon = before.get("daemon", "unknown")
+    after_daemon = after.get("daemon", "unknown")
+    return (
+        before_boot == after_boot
+        and before_daemon != "unknown"
+        and after_daemon != "unknown"
+        and before_daemon != after_daemon
+    )
+
+
 class AutoMatchFenceLost(RuntimeError):
     """The automatic-match worker no longer owns its durable dispatch epoch."""
 
@@ -2543,6 +2574,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_col(conn, table, "execution_state", "TEXT")
         _add_col(conn, table, "execution_launch_state", "TEXT")
         _add_col(conn, table, "execution_launch_token", "TEXT")
+        _add_col(conn, table, "execution_daemon_incarnation", "TEXT")
         _add_col(conn, table, "cleanup_requested_at", "TEXT")
         _add_col(conn, table, "cleanup_ack_at", "TEXT")
         _add_col(conn, table, "cleanup_error", "TEXT NOT NULL DEFAULT ''")
@@ -2553,6 +2585,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "execution_backend='local',execution_state='recovery_pending',"
         "execution_launch_state='creating',"
         "execution_launch_token='legacy-' || id,"
+        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy active claim requires operator recovery' "
         "WHERE status='dispatched' AND execution_scope IS NULL",
@@ -2564,6 +2597,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "execution_backend='local',execution_state='recovery_pending',"
         "execution_launch_state='creating',"
         "execution_launch_token='legacy-' || id,"
+        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy active claim requires operator recovery' "
         "WHERE lifecycle='dispatched' AND execution_scope IS NULL "
@@ -2576,6 +2610,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE auto_match_queue SET execution_launch_state='creating',"
         "execution_launch_token='legacy-launch-' || id,"
+        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
         "execution_state='recovery_pending',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy launch acknowledgement is unprovable' "
@@ -2588,12 +2623,35 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "WHERE q.decision_id=auto_match_decisions.id),"
         "execution_launch_token=(SELECT q.execution_launch_token FROM auto_match_queue q "
         "WHERE q.decision_id=auto_match_decisions.id),"
+        "execution_daemon_incarnation=(SELECT q.execution_daemon_incarnation "
+        "FROM auto_match_queue q WHERE q.decision_id=auto_match_decisions.id),"
         "execution_state='recovery_pending',"
         "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
         "cleanup_error='legacy launch acknowledgement is unprovable' "
         "WHERE lifecycle='dispatched' AND execution_launch_state IS NULL "
         "AND EXISTS(SELECT 1 FROM auto_match_queue q "
         "WHERE q.decision_id=auto_match_decisions.id AND q.status='dispatched')",
+        (_now(),),
+    )
+    conn.execute(
+        "UPDATE auto_match_queue SET "
+        "execution_daemon_incarnation='boot:unknown;daemon:unknown',"
+        "execution_state='recovery_pending',"
+        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
+        "cleanup_error='legacy daemon incarnation is unprovable' "
+        "WHERE status='dispatched' AND execution_launch_state<>'unstarted' "
+        "AND execution_daemon_incarnation IS NULL",
+        (_now(),),
+    )
+    conn.execute(
+        "UPDATE auto_match_decisions SET "
+        "execution_daemon_incarnation=(SELECT q.execution_daemon_incarnation "
+        "FROM auto_match_queue q WHERE q.decision_id=auto_match_decisions.id),"
+        "execution_state='recovery_pending',"
+        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
+        "cleanup_error='legacy daemon incarnation is unprovable' "
+        "WHERE lifecycle='dispatched' AND execution_launch_state<>'unstarted' "
+        "AND execution_daemon_incarnation IS NULL",
         (_now(),),
     )
     _add_col(conn, "rating_projection_state", "source_digest", "TEXT NOT NULL DEFAULT ''")
@@ -2617,6 +2675,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "NEW.execution_backend IS NOT NULL OR NEW.execution_state IS NOT NULL OR "
         "NEW.execution_launch_state IS NOT NULL OR "
         "NEW.execution_launch_token IS NOT NULL OR "
+        "NEW.execution_daemon_incarnation IS NOT NULL OR "
         "NEW.cleanup_requested_at IS NOT NULL OR NEW.cleanup_ack_at IS NOT NULL OR "
         "NEW.cleanup_error<>'')) OR "
         "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
@@ -2624,8 +2683,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL OR "
         "NEW.execution_scope IS NULL OR NEW.execution_backend IS NULL OR "
         "NEW.execution_state IS NULL OR NEW.execution_launch_state IS NULL OR "
-        "(NEW.execution_launch_state='unstarted' AND NEW.execution_launch_token IS NOT NULL) OR "
-        "(NEW.execution_launch_state<>'unstarted' AND NEW.execution_launch_token IS NULL))) BEGIN "
+        "(NEW.execution_launch_state='unstarted' AND (NEW.execution_launch_token IS NOT NULL OR "
+        "NEW.execution_daemon_incarnation IS NOT NULL)) OR "
+        "(NEW.execution_launch_state<>'unstarted' AND (NEW.execution_launch_token IS NULL OR "
+        "NEW.execution_daemon_incarnation IS NULL)))) BEGIN "
         "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
     )
     conn.execute("DROP TRIGGER IF EXISTS trg_auto_match_queue_fence_update")
@@ -2633,7 +2694,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE TRIGGER trg_auto_match_queue_fence_update "
         "BEFORE UPDATE OF status,match_id,dispatcher_token,dispatcher_epoch,dispatched_at,"
         "execution_scope,execution_backend,execution_state,cleanup_requested_at,"
-        "execution_launch_state,execution_launch_token,"
+        "execution_launch_state,execution_launch_token,execution_daemon_incarnation,"
         "cleanup_ack_at,cleanup_error "
         "ON auto_match_queue WHEN "
         "(NEW.status='queued' AND (NEW.match_id IS NOT NULL OR "
@@ -2642,6 +2703,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "NEW.execution_backend IS NOT NULL OR NEW.execution_state IS NOT NULL OR "
         "NEW.execution_launch_state IS NOT NULL OR "
         "NEW.execution_launch_token IS NOT NULL OR "
+        "NEW.execution_daemon_incarnation IS NOT NULL OR "
         "NEW.cleanup_requested_at IS NOT NULL OR NEW.cleanup_ack_at IS NOT NULL OR "
         "NEW.cleanup_error<>'')) OR "
         "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
@@ -2649,8 +2711,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL OR "
         "NEW.execution_scope IS NULL OR NEW.execution_backend IS NULL OR "
         "NEW.execution_state IS NULL OR NEW.execution_launch_state IS NULL OR "
-        "(NEW.execution_launch_state='unstarted' AND NEW.execution_launch_token IS NOT NULL) OR "
-        "(NEW.execution_launch_state<>'unstarted' AND NEW.execution_launch_token IS NULL))) BEGIN "
+        "(NEW.execution_launch_state='unstarted' AND (NEW.execution_launch_token IS NOT NULL OR "
+        "NEW.execution_daemon_incarnation IS NOT NULL)) OR "
+        "(NEW.execution_launch_state<>'unstarted' AND (NEW.execution_launch_token IS NULL OR "
+        "NEW.execution_daemon_incarnation IS NULL)))) BEGIN "
         "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
     )
     # 公平计数只从历史 completed system ladder 一次性引导；此后仅由 queue
@@ -4125,6 +4189,17 @@ class Store:
                 )
             message = str(reason or "execution cleanup not confirmed")[:500]
             requested_at = _now()
+            if str(row["execution_state"] or "") == "recovery_pending":
+                c.execute(
+                    "UPDATE auto_match_queue SET cleanup_error=? WHERE id=?",
+                    (message, int(row["id"])),
+                )
+                c.execute(
+                    "UPDATE auto_match_decisions SET cleanup_error=? WHERE id=? "
+                    "AND lifecycle='dispatched'",
+                    (message, int(row["decision_id"])),
+                )
+                return
             changed = c.execute(
                 "UPDATE auto_match_queue SET execution_state='recovery_pending',"
                 "cleanup_requested_at=?,cleanup_ack_at=NULL,cleanup_error=? "
@@ -4150,6 +4225,7 @@ class Store:
         execution_scope: str,
         launch_state: str,
         launch_token: str | None,
+        daemon_incarnation: str | None = None,
     ) -> None:
         """Persist daemon-ack launch progress under the current execution fence."""
         transitions = {
@@ -4175,9 +4251,28 @@ class Store:
             current = str(row["execution_launch_state"] or "")
             current_token = str(row["execution_launch_token"] or "")
             token = str(launch_token or "")
+            incarnation = str(daemon_incarnation or "")
             if not token:
                 raise ValueError("auto execution launch token required")
+            if launch_state == "creating" and not incarnation:
+                raise ValueError("auto execution daemon incarnation required")
             if current == launch_state and current_token == token:
+                if launch_state == "creating" and str(
+                    row["execution_daemon_incarnation"] or ""
+                ) != incarnation:
+                    # After an ambiguous CLI terminal result, advancing this
+                    # marker to the then-current daemon is conservative: it can
+                    # only require an additional restart before negative proof.
+                    c.execute(
+                        "UPDATE auto_match_queue SET execution_daemon_incarnation=? "
+                        "WHERE id=?",
+                        (incarnation, int(row["id"])),
+                    )
+                    c.execute(
+                        "UPDATE auto_match_decisions SET execution_daemon_incarnation=? "
+                        "WHERE id=?",
+                        (incarnation, int(row["decision_id"])),
+                    )
                 return
             if current not in transitions[launch_state]:
                 raise AutoMatchFenceLost(
@@ -4185,13 +4280,23 @@ class Store:
                 )
             c.execute(
                 "UPDATE auto_match_queue SET execution_launch_state=?,"
-                "execution_launch_token=? WHERE id=?",
-                (launch_state, token, int(row["id"])),
+                "execution_launch_token=?,execution_daemon_incarnation="
+                "CASE WHEN ?='creating' THEN ? ELSE execution_daemon_incarnation END "
+                "WHERE id=?",
+                (launch_state, token, launch_state, incarnation, int(row["id"])),
             )
             c.execute(
                 "UPDATE auto_match_decisions SET execution_launch_state=?,"
-                "execution_launch_token=? WHERE id=?",
-                (launch_state, token, int(row["decision_id"])),
+                "execution_launch_token=?,execution_daemon_incarnation="
+                "CASE WHEN ?='creating' THEN ? ELSE execution_daemon_incarnation END "
+                "WHERE id=?",
+                (
+                    launch_state,
+                    token,
+                    launch_state,
+                    incarnation,
+                    int(row["decision_id"]),
+                ),
             )
 
     def mark_auto_match_execution_cleanup_confirmed(
@@ -4274,6 +4379,95 @@ class Store:
             c.execute(
                 "UPDATE auto_match_decisions SET execution_launch_state='created' WHERE id=?",
                 (int(row["decision_id"]),),
+            )
+            return True
+
+    def record_auto_match_execution_ambiguous_incarnation(
+        self,
+        match_id: str,
+        *,
+        execution_scope: str,
+        launch_token: str,
+        daemon_incarnation: str,
+    ) -> bool:
+        """Conservatively advance an ambiguous RPC marker across takeover."""
+        if not str(daemon_incarnation or ""):
+            return False
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute(
+                "SELECT * FROM auto_match_queue WHERE match_id=? "
+                "AND status='dispatched' AND execution_scope=?",
+                (match_id, execution_scope),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["execution_launch_state"] or "") != "creating"
+                or str(row["execution_launch_token"] or "") != str(launch_token)
+            ):
+                return False
+            c.execute(
+                "UPDATE auto_match_queue SET execution_daemon_incarnation=? WHERE id=?",
+                (daemon_incarnation, int(row["id"])),
+            )
+            c.execute(
+                "UPDATE auto_match_decisions SET execution_daemon_incarnation=? WHERE id=?",
+                (daemon_incarnation, int(row["decision_id"])),
+            )
+            return True
+
+    def record_auto_match_execution_daemon_restart(
+        self,
+        match_id: str,
+        *,
+        dispatcher_token: str,
+        dispatcher_epoch: int,
+        execution_scope: str,
+        previous_incarnation: str,
+        current_incarnation: str,
+    ) -> bool:
+        """Resolve an ambiguous create only after a comparable daemon restart."""
+        if not _daemon_incarnation_changed(
+            previous_incarnation, current_incarnation
+        ):
+            return False
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not self._auto_dispatcher_owned_tx(
+                c, dispatcher_token, dispatcher_epoch
+            ):
+                return False
+            row = c.execute(
+                "SELECT * FROM auto_match_queue WHERE match_id=? "
+                "AND status='dispatched' AND dispatcher_token=? AND dispatcher_epoch=? "
+                "AND execution_scope=? AND execution_state='recovery_pending'",
+                (
+                    match_id,
+                    dispatcher_token,
+                    int(dispatcher_epoch),
+                    execution_scope,
+                ),
+            ).fetchone()
+            if row is None:
+                return False
+            if str(row["execution_launch_state"] or "") != "creating":
+                return str(row["execution_launch_state"] or "") in {
+                    "created",
+                    "started",
+                }
+            if str(row["execution_daemon_incarnation"] or "") != str(
+                previous_incarnation
+            ):
+                return False
+            c.execute(
+                "UPDATE auto_match_queue SET execution_launch_state='created',"
+                "execution_daemon_incarnation=? WHERE id=?",
+                (current_incarnation, int(row["id"])),
+            )
+            c.execute(
+                "UPDATE auto_match_decisions SET execution_launch_state='created',"
+                "execution_daemon_incarnation=? WHERE id=?",
+                (current_incarnation, int(row["decision_id"])),
             )
             return True
 
@@ -5123,6 +5317,7 @@ class Store:
                 "dispatcher_token=?,dispatcher_epoch=?,dispatched_at=?,"
                 "execution_scope=?,execution_backend=?,execution_state='claimed',"
                 "execution_launch_state='unstarted',execution_launch_token=NULL,"
+                "execution_daemon_incarnation=NULL,"
                 "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
                 "WHERE id=? AND status='queued'",
                 (
@@ -5143,6 +5338,7 @@ class Store:
                 "claim_dispatcher_token=?,claim_dispatcher_epoch=?,"
                 "execution_scope=?,execution_backend=?,execution_state='claimed',"
                 "execution_launch_state='unstarted',execution_launch_token=NULL,"
+                "execution_daemon_incarnation=NULL,"
                 "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
                 "WHERE id=? AND lifecycle='queued'",
                 (
@@ -5211,6 +5407,7 @@ class Store:
                 "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
                 "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
                 "execution_launch_state=NULL,execution_launch_token=NULL,"
+                "execution_daemon_incarnation=NULL,"
                 "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                 (int(row["id"]),),
             )
@@ -5220,6 +5417,7 @@ class Store:
                 "claim_dispatcher_epoch=NULL,execution_scope=NULL,"
                 "execution_backend=NULL,execution_state=NULL,cleanup_requested_at=NULL,"
                 "execution_launch_state=NULL,execution_launch_token=NULL,"
+                "execution_daemon_incarnation=NULL,"
                 "cleanup_ack_at=NULL,cleanup_error='' WHERE id=? "
                 "AND lifecycle='dispatched'",
                 (reason, int(row["decision_id"])),
@@ -5261,6 +5459,9 @@ class Store:
                         "execution_backend": str(row["execution_backend"]),
                         "execution_launch_state": str(row["execution_launch_state"]),
                         "execution_launch_token": str(row["execution_launch_token"] or ""),
+                        "execution_daemon_incarnation": str(
+                            row["execution_daemon_incarnation"] or ""
+                        ),
                         "launch_lock_path": self.auto_match_execution_launch_lock_path,
                         "cleanup_error": str(row["cleanup_error"] or ""),
                     }
@@ -5298,6 +5499,9 @@ class Store:
                 "execution_backend": backend,
                 "execution_launch_state": str(row["execution_launch_state"]),
                 "execution_launch_token": str(row["execution_launch_token"] or ""),
+                "execution_daemon_incarnation": str(
+                    row["execution_daemon_incarnation"] or ""
+                ),
                 "launch_lock_path": self.auto_match_execution_launch_lock_path,
                 "cleanup_error": "",
             }
@@ -5326,6 +5530,9 @@ class Store:
                 "execution_backend": str(row["execution_backend"]),
                 "execution_launch_state": str(row["execution_launch_state"]),
                 "execution_launch_token": str(row["execution_launch_token"] or ""),
+                "execution_daemon_incarnation": str(
+                    row["execution_daemon_incarnation"] or ""
+                ),
                 "launch_lock_path": self.auto_match_execution_launch_lock_path,
                 "cleanup_error": str(row["cleanup_error"] or ""),
             }
@@ -5418,6 +5625,7 @@ class Store:
                     "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
                     "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
                     "execution_launch_state=NULL,execution_launch_token=NULL,"
+                    "execution_daemon_incarnation=NULL,"
                     "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
                     "WHERE id=?",
                     (int(row["id"]),),
@@ -5428,6 +5636,7 @@ class Store:
                     "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
                     "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
                     "execution_launch_state=NULL,execution_launch_token=NULL,"
+                    "execution_daemon_incarnation=NULL,"
                     "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
                     "WHERE id=? AND lifecycle='dispatched'",
                     (int(row["decision_id"]),),
@@ -5578,6 +5787,7 @@ class Store:
                         "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
                         "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
                         "execution_launch_state=NULL,execution_launch_token=NULL,"
+                        "execution_daemon_incarnation=NULL,"
                         "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["id"],),
                     )
@@ -5587,6 +5797,7 @@ class Store:
                         "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
                         "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
                         "execution_launch_state=NULL,execution_launch_token=NULL,"
+                        "execution_daemon_incarnation=NULL,"
                         "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["decision_id"],),
                     )
@@ -5604,6 +5815,7 @@ class Store:
                         "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
                         "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
                         "execution_launch_state=NULL,execution_launch_token=NULL,"
+                        "execution_daemon_incarnation=NULL,"
                         "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["id"],),
                     )
@@ -5613,6 +5825,7 @@ class Store:
                         "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
                         "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
                         "execution_launch_state=NULL,execution_launch_token=NULL,"
+                        "execution_daemon_incarnation=NULL,"
                         "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
                         (row["decision_id"],),
                     )
