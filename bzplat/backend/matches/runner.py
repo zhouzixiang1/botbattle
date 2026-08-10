@@ -434,12 +434,14 @@ class MatchRunner:
         launch_lock_path: str,
         execution_backend: str,
         allow_local_ack: bool,
+        execution_launch_token: str | None = None,
     ) -> dict[str, object]:
         return await self.runner.force_stop_execution(
             token,
             launch_lock_path=launch_lock_path,
             execution_backend=execution_backend,
             allow_local_ack=allow_local_ack,
+            execution_launch_token=execution_launch_token,
         )
 
     async def _close_execution_sessions(
@@ -468,6 +470,7 @@ class MatchRunner:
                 )
                 execution_scope.mark_recovery_pending(reason)
                 raise PlatformRunnerError(reason)
+            execution_scope.mark_cleanup_confirmed()
         if first_error is not None:
             raise first_error
 

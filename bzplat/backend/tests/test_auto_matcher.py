@@ -557,6 +557,14 @@ def test_takeover_retains_global_slot_until_physical_cleanup_ack(store: Store):
         status="running",
         started_at="2026-08-10T12:00:00",
     )
+    store.mark_auto_match_execution_launch_state(
+        "fenced-match",
+        token_a,
+        epoch_a,
+        claimed["execution_scope"],
+        "creating",
+        "bzbot-current-create",
+    )
     store.mark_auto_match_execution_recovery_pending(
         "fenced-match",
         token_a,
@@ -596,6 +604,21 @@ def test_takeover_retains_global_slot_until_physical_cleanup_ack(store: Store):
         reason="daemon unavailable",
     )
     assert store.list_auto_match_queue()[0]["cleanup_error"] == "daemon unavailable"
+
+    # Two zero-label polls cannot release a launch whose create RPC remained
+    # ambiguous.  Only exact current-launch evidence advances the durable state.
+    assert store.finalize_auto_match_execution_cleanup(
+        "fenced-match",
+        dispatcher_token="fence-b",
+        dispatcher_epoch=epoch_b,
+        execution_scope=recovery["execution_scope"],
+    )["outcome"] == "awaiting_scope_observation"
+    assert store.record_auto_match_execution_launch_observed(
+        "fenced-match",
+        execution_scope=recovery["execution_scope"],
+        launch_token="bzbot-current-create",
+    )
+    assert store.list_auto_match_queue()[0]["execution_launch_state"] == "created"
 
     with pytest.raises(AutoMatchFenceLost):
         store.update_match(
@@ -657,19 +680,27 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
     active_containers: list[str] = []
     fence_current = True
     create_returned = Event()
+    cancelled_create_returned = Event()
+    cancelled_create_release = Event()
     label_visible = asyncio.Event()
     lock_path = str(tmp_path / "auto-launch.lock")
     recovery_reasons: list[str] = []
+    launch_states: list[tuple[str, str]] = []
 
     def assert_fence() -> None:
         if not fence_current:
             raise AutoMatchFenceLost("stale epoch")
+
+    def record_launch(state: str, token: str) -> None:
+        if not launch_states or launch_states[-1] != (state, token):
+            launch_states.append((state, token))
 
     scope = ExecutionScope(
         token="scope-a",
         launch_lock_path=lock_path,
         fence_check=assert_fence,
         recovery_mark=recovery_reasons.append,
+        launch_mark=record_launch,
     )
     runner = BinaryRunner(prefer_local=False)
     binary_path = tmp_path / "bot"
@@ -685,16 +716,44 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
     class FakeProc:
         returncode = None
 
+    class FailedStartProc:
+        returncode = 1
+
     async def spawn_cli(*args, **_kwargs):
         assert args[1:4] == ("start", "-a", "-i")
-        return FakeProc()
+        return FailedStartProc() if args[-1] == "bzbot-start-fail-session" else FakeProc()
 
-    async def visible_scope(_container_name: str) -> str | None:
-        return "scope-a" if label_visible.is_set() else None
+    async def visible_scope(_container_name: str) -> tuple[str, str] | None:
+        if _container_name == "bzbot-cancel-session":
+            return None
+        token = _container_name.removeprefix("bzbot-")
+        return ("scope-a", token) if label_visible.is_set() else None
+
+    async def container_state(_container_name: str) -> dict:
+        if _container_name == "bzbot-start-fail-session":
+            return {"StartedAt": "0001-01-01T00:00:00Z", "Error": "", "Running": False}
+        return {"StartedAt": "2026-08-10T12:00:00Z", "Error": "", "Running": True}
 
     async def container_ids(token: str) -> list[str]:
         assert token == "scope-a"
         return list(active_containers)
+
+    exact_queries = 0
+
+    async def launch_container_ids(
+        token: str, launch_token: str
+    ) -> list[str]:
+        nonlocal exact_queries
+        assert token == "scope-a"
+        if launch_token == "cancel-session":
+            return []
+        if launch_token == "start-fail-session":
+            return list(active_containers)
+        assert launch_token == "scope-session"
+        exact_queries += 1
+        # Simulate the delayed create appearing after the first exact query but
+        # before the scope query.  The second exact query before rm must see it.
+        return [] if exact_queries == 1 else list(active_containers)
 
     def docker_control(args, **_kwargs):
         class Result:
@@ -702,9 +761,17 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
             stdout = "container-a\n"
 
         if args[1] == "create":
-            label_pos = args.index("--label")
-            assert args[label_pos + 1] == "bzplat.auto_execution=scope-a"
-            create_returned.set()
+            assert "--rm" not in args
+            assert "bzplat.auto_execution=scope-a" in args
+            if "bzplat.auto_execution_launch=cancel-session" in args:
+                cancelled_create_returned.set()
+                assert cancelled_create_release.wait(timeout=2)
+                Result.returncode = 1
+            elif "bzplat.auto_execution_launch=start-fail-session" in args:
+                active_containers.append("start-fail-container")
+            else:
+                assert "bzplat.auto_execution_launch=scope-session" in args
+                create_returned.set()
             return Result()
         assert args[1:3] == ["rm", "-f"]
         active_containers.clear()
@@ -712,7 +779,9 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         return Result()
 
     monkeypatch.setattr(runner, "_docker_execution_container_ids", container_ids)
-    monkeypatch.setattr(runner, "_docker_container_execution_label", visible_scope)
+    monkeypatch.setattr(runner, "_docker_launch_container_ids", launch_container_ids)
+    monkeypatch.setattr(runner, "_docker_container_execution_labels", visible_scope)
+    monkeypatch.setattr(runner, "_docker_container_state", container_state)
     monkeypatch.setattr(binary_runtime, "_docker_control_command", docker_control)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_cli)
 
@@ -731,6 +800,7 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
                 launch_lock_path=lock_path,
                 execution_backend="docker",
                 allow_local_ack=False,
+                execution_launch_token="scope-session",
             )
         )
         await asyncio.sleep(0.02)
@@ -740,7 +810,68 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         await spawn_task
         result = await cleanup_task
         assert result["confirmed"] is True
+        assert result["observed_launch"] is True
         assert active_containers == []
+        assert launch_states == [
+            ("creating", "scope-session"),
+            ("created", "scope-session"),
+            ("started", "scope-session"),
+        ]
+
+        # Cancellation after daemon create returned but before its exact labels
+        # are observable must not accept two zero queries as cleanup proof.
+        cancelled_session = BotSession(
+            "cancel-session",
+            BinaryInfo("elf", "linux", "amd64", True),
+            binary_path,
+            mode="docker",
+            execution_scope=scope,
+        )
+
+        async def cancelled_spawn() -> None:
+            async with scope.launch_guard():
+                await runner._start_docker(cancelled_session)
+
+        cancelled_task = asyncio.create_task(cancelled_spawn())
+        await asyncio.to_thread(cancelled_create_returned.wait)
+        cancelled_task.cancel()
+        cleanup_during_create = asyncio.create_task(
+            runner.force_stop_execution(
+                "scope-a",
+                launch_lock_path=lock_path,
+                execution_backend="docker",
+                allow_local_ack=False,
+                execution_launch_token="cancel-session",
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert cancelled_task.done() is False
+        assert cleanup_during_create.done() is False
+        cancelled_create_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_task
+        ambiguous_zero = await cleanup_during_create
+        assert ambiguous_zero["confirmed"] is True
+        assert ambiguous_zero["observed_launch"] is False
+        assert launch_states[-1] == ("creating", "cancel-session")
+        assert any("容器创建失败" in reason for reason in recovery_reasons)
+
+        # A docker-start CLI exit is infrastructure failure unless persistent
+        # container state proves StartedAt.  It must be cleaned and never reach
+        # the durable started state (therefore cannot become a rated Bot crash).
+        start_failed_session = BotSession(
+            "start-fail-session",
+            BinaryInfo("elf", "linux", "amd64", True),
+            binary_path,
+            mode="docker",
+            execution_scope=scope,
+        )
+        with pytest.raises(PlatformRunnerError):
+            async with scope.launch_guard():
+                await runner._start_docker(start_failed_session)
+        assert active_containers == []
+        assert ("created", "start-fail-session") in launch_states
+        assert ("started", "start-fail-session") not in launch_states
 
         nonlocal fence_current
         fence_current = False

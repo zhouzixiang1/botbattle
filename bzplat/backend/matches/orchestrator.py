@@ -387,11 +387,13 @@ class MatchOrchestrator:
         *,
         launch_lock_path: str,
         execution_backend: str,
+        execution_launch_token: str | None = None,
     ) -> dict[str, object]:
         return await self.runner.force_stop_execution(
             execution_scope,
             launch_lock_path=launch_lock_path,
             execution_backend=execution_backend,
+            execution_launch_token=execution_launch_token,
             # Only the original in-process owner could prove local PIDs.  A
             # dispatcher takeover is cross-process by definition and fails shut.
             allow_local_ack=False,
@@ -1291,11 +1293,41 @@ class MatchOrchestrator:
                     reason,
                 )
 
+            def mark_execution_launch(state: str, launch_token: str) -> None:
+                if state == "created":
+                    if not self.store.record_auto_match_execution_launch_observed(
+                        match_id,
+                        execution_scope=scope_token,
+                        launch_token=launch_token,
+                    ):
+                        raise AutoMatchFenceLost(
+                            f"auto-match docker create evidence lost for {match_id}"
+                        )
+                    return
+                self.store.mark_auto_match_execution_launch_state(
+                    match_id,
+                    auto_fence[0],
+                    auto_fence[1],
+                    scope_token,
+                    state,
+                    launch_token,
+                )
+
+            def mark_execution_cleanup() -> None:
+                self.store.mark_auto_match_execution_cleanup_confirmed(
+                    match_id,
+                    auto_fence[0],
+                    auto_fence[1],
+                    scope_token,
+                )
+
             execution_scope = ExecutionScope(
                 token=scope_token,
                 launch_lock_path=self.store.auto_match_execution_launch_lock_path,
                 fence_check=assert_execution_current,
                 recovery_mark=mark_execution_recovery,
+                launch_mark=mark_execution_launch,
+                cleanup_mark=mark_execution_cleanup,
             )
         want_duplicate = bool(stored_mc.get("duplicate"))
         if want_duplicate and spec.build_match_plan is None:

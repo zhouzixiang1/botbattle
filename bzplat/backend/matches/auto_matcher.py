@@ -136,7 +136,21 @@ class AutoMatchScheduler:
             recovery["execution_scope"],
             launch_lock_path=recovery["launch_lock_path"],
             execution_backend=recovery["execution_backend"],
+            execution_launch_token=recovery["execution_launch_token"],
         )
+        if result.get("observed_launch"):
+            observed = self.store.record_auto_match_execution_launch_observed(
+                recovery["match_id"],
+                execution_scope=recovery["execution_scope"],
+                launch_token=recovery["execution_launch_token"],
+            )
+            if not observed:
+                return {
+                    "outcome": "recovery_pending",
+                    "confirmed": False,
+                    "reason": "当前启动单元观察证据持久化失败",
+                    "match_id": recovery["match_id"],
+                }
         if not result.get("confirmed"):
             reason = str(result.get("reason") or "旧执行单元清理尚未确认")
             self.store.record_auto_match_execution_cleanup_failure(
@@ -158,6 +172,13 @@ class AutoMatchScheduler:
             dispatcher_epoch=self._dispatcher_epoch,
             execution_scope=recovery["execution_scope"],
         )
+        if finalized.get("outcome") == "awaiting_scope_observation":
+            return {
+                "outcome": "recovery_pending",
+                "confirmed": False,
+                "reason": "容器创建结果未确认，等待观察执行范围",
+                "match_id": recovery["match_id"],
+            }
         return {**finalized, "confirmed": True}
 
     async def _converge_terminal_rows(self) -> dict:
