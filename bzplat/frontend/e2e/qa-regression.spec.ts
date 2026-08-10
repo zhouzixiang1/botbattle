@@ -125,6 +125,39 @@ const VIEWPORTS = [
   { name: 'mobile', width: 390, height: 844 },
 ] as const
 
+/**
+ * 线上人机局 20260810140318-a8752705 在第 11 条合法边后的权威棋盘前缀。
+ * 旧 pick 把下一次格心点击映射为 (5,5)，裁判随后以 illegal_move 结束。
+ */
+const PENCIL_HUMAN_INCIDENT_MOVES = [
+  [0, 3, 8],
+  [1, 4, 7],
+  [0, 1, 8],
+  [1, 6, 7],
+  [0, 10, 5],
+  [1, 8, 7],
+  [0, 5, 8],
+  [1, 8, 5],
+  [0, 4, 1],
+  [1, 6, 5],
+  [0, 1, 2],
+] as const
+
+function pencilHumanIncidentPrefix() {
+  return [
+    { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+    ...PENCIL_HUMAN_INCIDENT_MOVES.map(([player, x, y], index) => ({
+      type: 'move', player, x, y, scored: false, scores: [0, 0],
+      move_index: index + 1, closed_boxes: [],
+    })),
+    { type: 'turn', player: 1, pass_: 0, last: { x: 1, y: 2 }, scores: [0, 0] },
+    {
+      type: 'your_turn', player: 1,
+      request: { x: 1, y: 2, pass: 0, me: 1, scores: [0, 0] },
+    },
+  ]
+}
+
 async function installControlledEventSource(page: Page) {
   await page.addInitScript(() => {
     type WireEvent = Record<string, unknown>
@@ -867,6 +900,16 @@ async function chooseBot(page: Page, trigger: Locator, query: string, mineOnly: 
   )
   await input.fill(query)
   await dialog.locator('li').filter({ hasText: query }).getByRole('button').click()
+}
+
+/** 把 Pencil 交错坐标转换成当前响应式 canvas 内的 CSS 点击位置。 */
+async function pencilCanvasPoint(canvas: Locator, x: number, y: number) {
+  return canvas.evaluate(async (element, coordinate) => {
+    const module = await import('/src/games/pencil/canvas.ts')
+    const rect = element.getBoundingClientRect()
+    const layout = module.pencilCanvasLayout(rect.width, rect.height, 11)
+    return { x: layout.cx(coordinate.x), y: layout.cy(coordinate.y) }
+  }, { x, y })
 }
 
 test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggregates results', async ({
@@ -1683,6 +1726,405 @@ test('Pencil clock initializes the untouched seat and renders a first-event time
   // `0:00超时`. Whitespace is layout-only, while both values and their order stay exact.
   await expect(timeoutBadge.locator('..')).toHaveText(/^\s*0:00\s*超时\s*$/)
   await expect(page.getByText('15:00', { exact: true })).toBeVisible()
+  await monitor.expectClean()
+})
+
+test('Pencil canvas geometry and hit testing match the interleaved judge coordinates', async ({ page }) => {
+  await page.goto('/')
+  const geometry = await page.evaluate(async (events) => {
+    const module = await import('/src/games/pencil/canvas.ts')
+    const layout = module.pencilCanvasLayout(660, 660, 11)
+    const horizontal = module.pencilEdgeSegment(1, 0, 11, layout)
+    const vertical = module.pencilEdgeSegment(0, 1, 11, layout)
+    const box = module.pencilBoxRect(5, 5, layout)
+    const scene = module.PencilCanvasRenderer.toScene(events)
+    const opts = { width: 660, height: 660 }
+    const pick = (x: number, y: number) => module.PencilCanvasRenderer.pick?.(
+      layout.cx(x), layout.cy(y), scene, opts,
+    ) ?? null
+    return {
+      horizontal,
+      vertical,
+      box,
+      point0: { x: layout.cx(0), y: layout.cy(0) },
+      point2: { x: layout.cx(2), y: layout.cy(2) },
+      legal: pick(5, 4),
+      productionBoxClick: pick(5, 5),
+      dot: pick(4, 4),
+      occupied: pick(3, 8),
+      outside: module.PencilCanvasRenderer.pick?.(
+        layout.ox - 1, layout.oy, scene, opts,
+      ) ?? null,
+    }
+  }, pencilHumanIncidentPrefix())
+
+  expect(geometry.horizontal).not.toBeNull()
+  expect(geometry.horizontal).toMatchObject({ horizontal: true })
+  expect(geometry.horizontal?.x1).toBeCloseTo(geometry.point0.x)
+  expect(geometry.horizontal?.x2).toBeCloseTo(geometry.point2.x)
+  expect(geometry.horizontal?.y1).toBeCloseTo(geometry.point0.y)
+  expect(geometry.horizontal?.y2).toBeCloseTo(geometry.point0.y)
+
+  expect(geometry.vertical).not.toBeNull()
+  expect(geometry.vertical).toMatchObject({ horizontal: false })
+  expect(geometry.vertical?.x1).toBeCloseTo(geometry.point0.x)
+  expect(geometry.vertical?.x2).toBeCloseTo(geometry.point0.x)
+  expect(geometry.vertical?.y1).toBeCloseTo(geometry.point0.y)
+  expect(geometry.vertical?.y2).toBeCloseTo(geometry.point2.y)
+
+  expect(geometry.box).not.toBeNull()
+  expect(geometry.box?.width).toBeCloseTo((geometry.point2.x - geometry.point0.x))
+  expect(geometry.box?.height).toBeCloseTo((geometry.point2.y - geometry.point0.y))
+  expect(geometry.legal).toEqual({ x: 5, y: 4 })
+  expect(geometry.productionBoxClick).toBeNull()
+  expect(geometry.dot).toBeNull()
+  expect(geometry.occupied).toBeNull()
+  expect(geometry.outside).toBeNull()
+})
+
+test('Pencil human canvas rejects the production box-center click and stays square at all target widths', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-pencil-production-human-pick'
+  const sentActions: Array<Record<string, unknown>> = []
+
+  await page.routeWebSocket(
+    (url) => url.pathname === `/api/matches/${matchId}/play`,
+    (socket) => {
+      socket.onMessage((message) => {
+        sentActions.push(JSON.parse(String(message)) as Record<string, unknown>)
+      })
+      setTimeout(() => {
+        socket.send(JSON.stringify({
+          type: 'snapshot',
+          match: {
+            id: matchId,
+            game_id: 'pencil',
+            status: 'running',
+            match_type: 'human',
+            human_seat: 1,
+            bot_a: { name: 'pencil_reference', owner_name: 'tester1' },
+            bot_b: { owner_name: 'tester2', is_human: true },
+            result: { rounds_played: 11, deltas: [0, 0] },
+          },
+          events: pencilHumanIncidentPrefix(),
+        }))
+      }, 0)
+    },
+  )
+
+  await page.setViewportSize({ width: 1312, height: 700 })
+  await page.goto(`/#/play/${matchId}`)
+  await expect(page.getByText('轮到你连边', { exact: true })).toBeVisible()
+  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  await expect(canvas).toBeVisible()
+
+  for (const viewport of [
+    { width: 1312, height: 700 },
+    { width: 390, height: 700 },
+    { width: 320, height: 568 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const bounds = await canvas.boundingBox()
+    expect(bounds).not.toBeNull()
+    expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow, `${viewport.width}px human view overflow`).toBeLessThanOrEqual(1)
+  }
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+  await page.evaluate(() => window.scrollTo(0, 0))
+
+  // 线上事故的旧输出是格心 (5,5)。格心、点、已占边、棋盘外四类误点
+  // 现在都只提示，不产生任何 WebSocket 帧。
+  const outsideBoard = await canvas.evaluate(async (element) => {
+    const module = await import('/src/games/pencil/canvas.ts')
+    const rect = element.getBoundingClientRect()
+    const layout = module.pencilCanvasLayout(rect.width, rect.height, 11)
+    return { x: Math.max(1, layout.ox - 4), y: layout.oy + layout.boardPx / 2 }
+  })
+  for (const position of [
+    await pencilCanvasPoint(canvas, 5, 5), // 格心
+    await pencilCanvasPoint(canvas, 4, 4), // 点
+    await pencilCanvasPoint(canvas, 3, 8), // 事故前缀中已占边
+    outsideBoard, // canvas 内、棋盘边框外
+  ]) {
+    await canvas.click({ position })
+    await expect(page.getByText(/请选择一条尚未占用的边/)).toBeVisible()
+    await expect(canvas).toHaveAttribute('data-pick-state', 'invalid')
+  }
+  await page.waitForTimeout(150)
+  expect(sentActions).toHaveLength(0)
+
+  // 相邻合法水平边 (5,4) 必须准确封装为唯一 response 信封。
+  const legalEdge = await pencilCanvasPoint(canvas, 5, 4)
+  await canvas.click({ position: legalEdge })
+  await expect.poll(() => sentActions.length).toBe(1)
+  expect(sentActions[0]).toEqual({ response: { x: 5, y: 4 } })
+  await monitor.expectClean()
+})
+
+test('Pencil human pass request disables the board and submits the only legal pass envelope', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-pencil-human-pass'
+  const sentActions: Array<Record<string, unknown>> = []
+  const passEvents = [
+    { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+    { type: 'move', player: 0, x: 0, y: 1, scored: false, scores: [0, 0], move_index: 1 },
+    { type: 'move', player: 1, x: 4, y: 1, scored: false, scores: [0, 0], move_index: 2 },
+    { type: 'move', player: 0, x: 1, y: 0, scored: false, scores: [0, 0], move_index: 3 },
+    { type: 'move', player: 1, x: 6, y: 1, scored: false, scores: [0, 0], move_index: 4 },
+    { type: 'move', player: 0, x: 1, y: 2, scored: false, scores: [0, 0], move_index: 5 },
+    { type: 'move', player: 1, x: 8, y: 1, scored: false, scores: [0, 0], move_index: 6 },
+    {
+      type: 'move', player: 0, x: 2, y: 1, scored: true, scores: [1, 0], move_index: 7,
+      closed_boxes: [{ x: 1, y: 1, owner: 0 }],
+    },
+    { type: 'turn', player: 1, pass_: 1, last: { x: 2, y: 1 }, scores: [1, 0] },
+    {
+      type: 'your_turn', player: 1,
+      request: { x: 2, y: 1, pass: 1, me: 1, scores: [1, 0] },
+    },
+  ]
+
+  await page.routeWebSocket(
+    (url) => url.pathname === `/api/matches/${matchId}/play`,
+    (socket) => {
+      socket.onMessage((message) => {
+        sentActions.push(JSON.parse(String(message)) as Record<string, unknown>)
+      })
+      setTimeout(() => {
+        socket.send(JSON.stringify({
+          type: 'snapshot',
+          match: {
+            id: matchId,
+            game_id: 'pencil',
+            status: 'running',
+            match_type: 'human',
+            human_seat: 1,
+            bot_a: { name: 'pencil_reference', owner_name: 'tester1' },
+            bot_b: { owner_name: 'tester2', is_human: true },
+          },
+          events: passEvents,
+        }))
+      }, 0)
+    },
+  )
+
+  await page.goto(`/#/play/${matchId}`)
+  await expect(page.getByText('轮到你确认让行', { exact: true })).toBeVisible()
+  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  await expect(canvas).toHaveAttribute('data-pick-state', 'inactive')
+  const edge = await pencilCanvasPoint(canvas, 5, 4)
+  await canvas.click({ position: edge })
+  await page.waitForTimeout(150)
+  expect(sentActions).toHaveLength(0)
+
+  const passAction = page.getByTestId('pencil-pass-action')
+  await expect(passAction).toContainText('对手围成了格，将继续连边')
+  await page.getByRole('button', { name: '确认让行', exact: true }).click()
+  await expect.poll(() => sentActions.length).toBe(1)
+  expect(sentActions[0]).toEqual({ response: { x: -1, y: -1 } })
+  await monitor.expectClean()
+})
+
+test('Pencil human canvas exposes legal edges to keyboard and screen-reader users', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-pencil-keyboard-action'
+  const sentActions: Array<Record<string, unknown>> = []
+
+  await page.routeWebSocket(
+    (url) => url.pathname === `/api/matches/${matchId}/play`,
+    (socket) => {
+      socket.onMessage((message) => {
+        sentActions.push(JSON.parse(String(message)) as Record<string, unknown>)
+      })
+      setTimeout(() => socket.send(JSON.stringify({
+        type: 'snapshot',
+        match: {
+          id: matchId,
+          game_id: 'pencil',
+          status: 'running',
+          match_type: 'human',
+          human_seat: 1,
+          bot_a: { name: 'pencil_reference', owner_name: 'tester1' },
+          bot_b: { owner_name: 'tester2', is_human: true },
+        },
+        events: [
+          { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+          { type: 'turn', player: 1, pass_: 0, last: { x: -1, y: -1 }, scores: [0, 0] },
+          {
+            type: 'your_turn', player: 1,
+            request: { x: -1, y: -1, pass: 0, me: 1, scores: [0, 0] },
+          },
+        ],
+      })), 0)
+    },
+  )
+
+  await page.goto(`/#/play/${matchId}`)
+  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  await expect(canvas).toHaveAttribute('role', 'button')
+  await expect(canvas).toHaveAttribute('tabindex', '0')
+  await canvas.focus()
+  await canvas.press('ArrowRight')
+  await expect(canvas).toHaveAttribute('aria-label', /当前位置 \(0,1\)/)
+  await canvas.press('Enter')
+  await expect.poll(() => sentActions.length).toBe(1)
+  expect(sentActions[0]).toEqual({ response: { x: 0, y: 1 } })
+  await monitor.expectClean()
+})
+
+test('Pencil human canvas replaces an equal-length snapshot and finishes animation through parent rerenders', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-pencil-equal-length-snapshot'
+  const sentActions: Array<Record<string, unknown>> = []
+  let sendServerEvent: (event: Record<string, unknown>) => void = () => {
+    throw new Error('Pencil WebSocket is not connected')
+  }
+  const match = {
+    id: matchId,
+    game_id: 'pencil',
+    status: 'running',
+    match_type: 'human',
+    human_seat: 1,
+    bot_a: { name: 'pencil_reference', owner_name: 'tester1' },
+    bot_b: { owner_name: 'tester2', is_human: true },
+  }
+  const eventsWithEdge = (x: number, y: number) => [
+    { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+    { type: 'move', player: 0, x, y, scored: false, scores: [0, 0], move_index: 1 },
+    { type: 'turn', player: 1, pass_: 0, last: { x, y }, scores: [0, 0] },
+    {
+      type: 'your_turn', player: 1,
+      request: { x, y, pass: 0, me: 1, scores: [0, 0] },
+    },
+  ]
+
+  await page.routeWebSocket(
+    (url) => url.pathname === `/api/matches/${matchId}/play`,
+    (socket) => {
+      sendServerEvent = (event) => socket.send(JSON.stringify(event))
+      socket.onMessage((message) => {
+        sentActions.push(JSON.parse(String(message)) as Record<string, unknown>)
+      })
+      setTimeout(() => socket.send(JSON.stringify({
+        type: 'snapshot',
+        match,
+        // 初始快照尚未轮到真人；随后 live your_turn 会启动 500ms 倒计时重渲染。
+        events: eventsWithEdge(1, 0).slice(0, 3),
+      })), 0)
+    },
+  )
+
+  await page.goto(`/#/play/${matchId}`)
+  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  await expect(canvas).toBeVisible()
+  sendServerEvent(eventsWithEdge(1, 0)[3])
+  await expect(page.getByText('轮到你连边', { exact: false })).toBeVisible()
+
+  // 同长度权威 snapshot 必须重算 scene，不能只凭 length 继续使用旧棋盘。
+  await page.waitForTimeout(300)
+  sendServerEvent({ type: 'snapshot', match, events: eventsWithEdge(5, 4) })
+  // snapshot 已把 (5,4) 标为占用、释放旧 (1,0)。若宿主仍持旧 scene，
+  // 第一次会显示可点并错误发送，第二次则会显示不可点。
+  const newlyOccupied = await pencilCanvasPoint(canvas, 5, 4)
+  await canvas.click({ position: newlyOccupied })
+  await page.waitForTimeout(150)
+  expect(sentActions).toHaveLength(0)
+  const newlyFree = await pencilCanvasPoint(canvas, 1, 0)
+  await canvas.hover({ position: newlyFree })
+  await expect(canvas).toHaveAttribute('data-pick-state', 'valid')
+
+  // 下一次倒计时 tick 会落在这段 0.5s 动画中；父 render 不得 cleanup/freeze timeline。
+  sendServerEvent({
+    type: 'move', player: 1, x: 1, y: 0, scored: false, scores: [0, 0], move_index: 2,
+  })
+  await expect(canvas).toHaveAttribute('data-animation-state', 'running')
+  await expect(canvas).toHaveAttribute('data-animation-state', 'settled', { timeout: 2_000 })
+  await monitor.expectClean()
+})
+
+test('Pencil replay gives the square board priority while the timeline remains usable during page scroll', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const matchId = 'mock-pencil-production-replay-layout'
+  const events = [
+    ...pencilHumanIncidentPrefix(),
+    { type: 'illegal', player: 1, move: { x: 5, y: 5 }, why: 'illegal_move' },
+    { type: 'match_end', winner: 0, reason: 'illegal', deltas: [2, -2] },
+  ]
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'pencil',
+          status: 'completed',
+          match_type: 'human',
+          human_seat: 1,
+          winner: 0,
+          reason: 'illegal',
+          bot_a: { name: 'pencil_reference', owner_name: 'tester1' },
+          bot_b: { owner_name: 'tester2', is_human: true },
+          result: { rounds_played: 11, deltas: [2, -2] },
+        },
+        replay: { events_json: JSON.stringify(events) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: '{"comments":[],"count":0,"total":0}',
+    })
+  })
+
+  await page.setViewportSize({ width: 1312, height: 700 })
+  await page.goto(`/#/match/${matchId}`)
+  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  const timeline = page.getByTestId('match-timeline')
+  await expect(canvas).toBeVisible()
+  await expect(timeline).toBeVisible()
+  await page.getByRole('button', { name: /跳到结局/ }).click()
+
+  const desktopCanvas = await canvas.boundingBox()
+  const desktopTimeline = await timeline.boundingBox()
+  expect(desktopCanvas).not.toBeNull()
+  expect(desktopTimeline).not.toBeNull()
+  expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
+  expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
+
+  await page.evaluate(() => window.scrollTo(0, 360))
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
+  const stickyTimeline = await timeline.boundingBox()
+  expect(stickyTimeline?.y ?? 999).toBeLessThanOrEqual(40)
+  await page.evaluate(() => window.scrollTo(0, 0))
+
+  for (const viewport of [
+    { width: 390, height: 700 },
+    { width: 320, height: 568 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const seatOneScore = page.getByTestId('pencil-seat-score-1')
+    await expect(seatOneScore).toContainText('座位 1 · 红')
+    await expect(seatOneScore).toContainText('2')
+    await expect(seatOneScore).not.toContainText('pencil_reference')
+    await expect(timeline.getByRole('button', { name: '展开', exact: true })).toBeVisible()
+    const bounds = await canvas.boundingBox()
+    expect(bounds).not.toBeNull()
+    expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow, `${viewport.width}px replay overflow`).toBeLessThanOrEqual(1)
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+    await page.evaluate(() => window.scrollTo(0, 0))
+  }
   await monitor.expectClean()
 })
 
@@ -2515,6 +2957,133 @@ test('Gomoku human canvas serializes its canonical response envelope', async ({ 
   expect(Number.isInteger((sentAction!.response as Record<string, unknown>).x)).toBe(true)
   expect(Number.isInteger((sentAction!.response as Record<string, unknown>).y)).toBe(true)
   await monitor.expectClean()
+})
+
+test('real Pencil human play accepts several canvas-picked edges without illegal_move', async ({
+  page,
+  browser,
+  baseURL,
+  request,
+}) => {
+  test.setTimeout(150_000)
+  expect(baseURL).toBeTruthy()
+  let matchId: string | null = null
+
+  await withCleanup(async () => {
+    const monitor = monitorBrowser(page)
+    const received: Array<Record<string, unknown>> = []
+    const sent: Array<Record<string, unknown>> = []
+    await loginThroughUi(page, OTHER_USER)
+    await page.goto('/#/challenge')
+
+    const gameSelect = page.getByRole('combobox').first()
+    await gameSelect.click()
+    await page.getByRole('option', { name: '点格棋', exact: true }).click()
+    await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
+    await chooseBot(
+      page,
+      page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
+      `${OTHER_USER}_pencil`,
+      false,
+    )
+
+    page.on('websocket', (socket) => {
+      if (!/^\/api\/matches\/[^/]+\/play$/.test(new URL(socket.url()).pathname)) return
+      socket.on('framereceived', (frame) => {
+        const event = JSON.parse(String(frame.payload)) as Record<string, unknown>
+        if (event.type === 'snapshot' && Array.isArray(event.events)) {
+          // snapshot 是完整权威前缀，必须替换本地镜像；追加会把重连历史重复
+          // 计算成新 move/your_turn，让未被裁判接受的动作产生假阳性。
+          received.splice(0, received.length, ...event.events as Array<Record<string, unknown>>)
+        } else {
+          received.push(event)
+        }
+      })
+      socket.on('framesent', (frame) => {
+        sent.push(JSON.parse(String(frame.payload)) as Record<string, unknown>)
+      })
+    })
+
+    const startResponsePromise = page.waitForResponse(
+      (response) => response.request().method() === 'POST'
+        && new URL(response.url()).pathname === '/api/matches/human',
+    )
+    await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
+    const startResponse = await startResponsePromise
+    const startBody = await startResponse.text()
+    expect(startResponse.status(), startBody).toBe(200)
+    const started = JSON.parse(startBody) as { match_id: string }
+    matchId = started.match_id
+
+    const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+    await expect(canvas).toBeVisible({ timeout: 20_000 })
+
+    const waitForEdgeTurn = async () => {
+      const passButton = page.getByRole('button', { name: '确认让行', exact: true })
+      for (let passCount = 0; passCount < 25; passCount++) {
+        await expect.poll(async () => (
+          await page.getByText('轮到你连边', { exact: false }).isVisible()
+          || (await passButton.isVisible() && await passButton.isEnabled())
+        ), { timeout: 20_000 }).toBe(true)
+        if (await page.getByText('轮到你连边', { exact: false }).isVisible()) return
+        const sentBeforePass = sent.length
+        await passButton.click()
+        await expect.poll(() => sent.length).toBe(sentBeforePass + 1)
+        expect(sent.at(-1)).toEqual({ response: { x: -1, y: -1 } })
+      }
+      throw new Error('Pencil Bot produced more than 25 consecutive pass turns')
+    }
+
+    // Pick interior edges only. The authoritative received move list is refreshed
+    // before each click, so the real Bot can never race us onto the same edge.
+    for (let turn = 0; turn < 3; turn++) {
+      await waitForEdgeTurn()
+      await expect(canvas).not.toHaveAttribute('data-pick-state', 'inactive', { timeout: 20_000 })
+      const occupied = new Set(received
+        .filter((event) => event.type === 'move')
+        .map((event) => `${Number(event.x)},${Number(event.y)}`))
+      let coordinate: { x: number; y: number } | null = null
+      for (let y = 1; y < 10 && !coordinate; y++) {
+        for (let x = 1; x < 10; x++) {
+          if ((x + y) % 2 !== 1 || occupied.has(`${x},${y}`)) continue
+          coordinate = { x, y }
+          break
+        }
+      }
+      expect(coordinate).not.toBeNull()
+      const sentBefore = sent.length
+      const humanTurnsBefore = received.filter(
+        (event) => event.type === 'your_turn' && Number(event.player) === 1,
+      ).length
+      const position = await pencilCanvasPoint(canvas, coordinate!.x, coordinate!.y)
+      await canvas.click({ position })
+      await expect.poll(() => sent.length).toBe(sentBefore + 1)
+      expect(sent.at(-1)).toEqual({ response: coordinate })
+      await expect.poll(() => received.some(
+        (event) => event.type === 'move'
+          && Number(event.player) === 1
+          && Number(event.x) === coordinate!.x
+          && Number(event.y) === coordinate!.y,
+      ), { timeout: 20_000 }).toBe(true)
+      expect(received.some(
+        (event) => event.type === 'illegal' && Number(event.player) === 1,
+      )).toBe(false)
+      if (turn < 2) {
+        await expect.poll(() => received.filter(
+          (event) => event.type === 'your_turn' && Number(event.player) === 1,
+        ).length, { timeout: 20_000 }).toBeGreaterThan(humanTurnsBefore)
+      }
+    }
+
+    expect(received.filter(
+      (event) => event.type === 'move' && Number(event.player) === 1,
+    ).length).toBeGreaterThanOrEqual(3)
+    await ensureMatchTerminal(browser, baseURL!, request, matchId)
+    await expect(page.getByText(/对局结束/)).toBeVisible({ timeout: 20_000 })
+    await monitor.expectClean()
+  }, async () => {
+    if (matchId) await ensureMatchTerminal(browser, baseURL!, request, matchId)
+  })
 })
 
 test('human Holdem uses one WebSocket per load, sends legal protocol, and finishes', async ({

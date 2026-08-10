@@ -1,10 +1,11 @@
 /** 点格棋前端视图规格（canvas 渲染；DOM PencilBoard 已删）。 */
 import { Circle } from 'lucide-react'
-import type { GameViewSpec, RawEvent } from '../base'
-import { reducePencilEvents, type PencilViewModel } from './reducer'
-import { PencilCanvasRenderer } from './canvas'
-import { PencilReplayHud } from './replay-hud'
-import { pencilTerminalReason } from './reasons'
+import type { GameViewSpec, RawEvent } from '@/games/base'
+import { PencilCanvasRenderer } from '@/games/pencil/canvas'
+import { isPencilPassRequest, PencilHumanActions } from '@/games/pencil/human-actions'
+import { pencilTerminalReason } from '@/games/pencil/reasons'
+import { reducePencilEvents, type PencilViewModel } from '@/games/pencil/reducer'
+import { PencilReplayHud } from '@/games/pencil/replay-hud'
 
 const PencilBoardStub = () => null  // canvas 接管，DOM Board 不再用
 
@@ -55,6 +56,7 @@ export const pencilSpec: GameViewSpec = {
   Board: PencilBoardStub as unknown as GameViewSpec['Board'],
   reduce: reducePencilEvents as unknown as GameViewSpec['reduce'],
   CanvasRenderer: PencilCanvasRenderer,
+  canvasAspectRatio: 1,
   seatColors: ['红', '蓝'],
   progressUnit: 'move',
   matchFormatLabel: '单局',
@@ -64,7 +66,11 @@ export const pencilSpec: GameViewSpec = {
   humanPlay: {
     layout: 'canvas-with-log',
     turnLabel: '轮到你连边',
+    turnLabelForRequest: (request) => isPencilPassRequest(request) ? '轮到你确认让行' : '轮到你连边',
     serializeBoardPick: (x, y) => ({ response: { x, y } }),
+    canPickBoard: (request) => !isPencilPassRequest(request),
+    invalidBoardPickMessage: '请选择一条尚未占用的边；点、格心、已占边和棋盘外区域不会提交。',
+    ActionPanel: PencilHumanActions,
   },
   replay: {
     layout: 'with-timeline',

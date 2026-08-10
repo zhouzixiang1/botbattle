@@ -136,6 +136,46 @@ def test_pencil_full_game_randomish():
     assert result.moves > 0
 
 
+def test_pencil_scoring_turn_requires_and_accepts_the_canonical_pass():
+    """A legal seven-move box closure must expose pass=1 and accept only (-1,-1)."""
+    actions = iter(
+        [
+            (0, 1),  # seat 0: first edge of box (1,1)
+            (4, 1),  # seat 1: unrelated edge
+            (1, 0),
+            (6, 1),
+            (1, 2),
+            (8, 1),
+            (2, 1),  # seat 0 closes box (1,1)
+        ]
+    )
+    requests: list[tuple[int, dict]] = []
+
+    async def decide(player, req):
+        requests.append((player, dict(req)))
+        if int(req.get("pass") or 0) == 1:
+            return {"response": {"x": -1, "y": -1}}
+        try:
+            x, y = next(actions)
+        except StopIteration:
+            # End the test immediately after the pass has been consumed.
+            x, y = 0, 0
+        return {"response": {"x": x, "y": y}}
+
+    result = asyncio.run(PencilSession(n_dots=6).run_async(decide))
+
+    pass_requests = [(player, req) for player, req in requests if req.get("pass") == 1]
+    assert len(pass_requests) == 1
+    assert pass_requests[0][0] == 1
+    assert pass_requests[0][1]["scores"] == [1, 0]
+    pass_events = [event for event in result.events if event.get("type") == "pass"]
+    assert pass_events == [{"type": "pass", "player": 1}]
+    assert not any(
+        event.get("type") == "illegal" and event.get("why") == "pass"
+        for event in result.events
+    )
+
+
 def test_board_protocol_roundtrip():
     # Botzone 标准协议：请求负载 {x,y,me}（信封由传输层包），无 v/t 字段。
     g = build_gomoku_request(x=-1, y=-1, me=0)
