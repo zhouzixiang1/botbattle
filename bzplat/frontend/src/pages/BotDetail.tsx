@@ -2,13 +2,13 @@ import { useEffect, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
-import PageStub from '@/components/PageStub'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
+  DataTable,
   Table,
   TableBody,
   TableCell,
@@ -17,8 +17,8 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
-import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
-import { MetricCard } from '@/components/ui/metric-card'
+import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
+import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { TierBadge } from '@/components/tier-badge'
 import Comments from '@/components/Comments'
 import Pagination from '@/components/Pagination'
@@ -27,6 +27,7 @@ import { toast } from 'sonner'
 import { useAuth } from '@/components/useAuth'
 import { gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
 import { fmtTime, fmtRating, fmtDate } from '@/lib/format'
+import { CopyIdentifier, SummaryMetric } from '@/pages/public-page-ui'
 
 /* ── 类型 ─────────────────────────────────────────────── */
 interface BotProfile {
@@ -63,8 +64,8 @@ interface MatchRow {
   status: string
   winner: number | null
   match_type: string
-  bot_a_id: number
-  bot_b_id: number
+  bot_a_id: number | null
+  bot_b_id: number | null
   bot_a_name: string
   bot_b_name: string
   bot_a_display?: string
@@ -124,7 +125,7 @@ const chartConfig = {
 /* ── 评分曲线（recharts，浅/暗双主题） ────────────────── */
 function RatingChart({ points }: { points: RatingPoint[] }) {
   if (points.length < 2) {
-    return <EmptyState text="评分数据不足，至少需 2 个数据点" icon={<Target className="size-7 opacity-40" />} />
+    return <EmptyState text="评分数据不足，至少需 2 个数据点" icon={<Target className="size-5 opacity-50" />} className="py-8" />
   }
   const data = points.map((p, idx) => ({
     idx: idx + 1,
@@ -161,8 +162,11 @@ export default function BotDetail() {
   const [matches, setMatches] = useState<MatchRow[]>([])
   const [opponents, setOpponents] = useState<OpponentRow[]>([])
   const [history, setHistory] = useState<RatingPoint[]>([])
-  const [error, setError] = useState('')
+  const [profileError, setProfileError] = useState('')
+  const [matchesError, setMatchesError] = useState('')
+  const [actionError, setActionError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [matchesLoading, setMatchesLoading] = useState(true)
   const [favorited, setFavorited] = useState(false)
   const [favCount, setFavCount] = useState(0)
   // 对局历史分页
@@ -171,8 +175,13 @@ export default function BotDetail() {
   const matchesPerPage = 30
 
   useEffect(() => {
-    if (!botId) return
+    if (!Number.isInteger(botId) || botId <= 0) {
+      setProfileError('无效的 Bot 标识')
+      setLoading(false)
+      return
+    }
     setLoading(true)
+    setProfileError('')
     Promise.all([
       apiGet<{ profile: BotProfile }>(`/api/bots/${botId}/profile`),
       apiGet<{ opponents: OpponentRow[] }>(`/api/bots/${botId}/opponents?limit=20`),
@@ -183,7 +192,7 @@ export default function BotDetail() {
         setOpponents(o.opponents || [])
         setHistory(h.history || [])
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((e) => setProfileError(errMsg(e)))
       .finally(() => setLoading(false))
     if (user) {
       apiGet<{ favorited: boolean; favorite_count: number }>(
@@ -199,7 +208,12 @@ export default function BotDetail() {
 
   // 对局历史单独分页（切页只重拉 matches，不重置 profile/opponents/history）
   useEffect(() => {
-    if (!botId) return
+    if (!Number.isInteger(botId) || botId <= 0) {
+      setMatchesLoading(false)
+      return
+    }
+    setMatchesLoading(true)
+    setMatchesError('')
     apiGet<{ matches: MatchRow[]; total?: number }>(
       `/api/bots/${botId}/matches?page=${matchesPage}&per_page=${matchesPerPage}`,
     )
@@ -207,7 +221,8 @@ export default function BotDetail() {
         setMatches(m.matches || [])
         if (m.total !== undefined) setMatchesTotal(m.total)
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((e) => setMatchesError(errMsg(e)))
+      .finally(() => setMatchesLoading(false))
   }, [botId, matchesPage])
 
   function toggleFavorite() {
@@ -215,47 +230,38 @@ export default function BotDetail() {
     const method = favorited ? 'DELETE' : 'POST'
     apiJson(`/api/bots/${botId}/favorite`, method)
       .then(() => {
+        setActionError('')
         setFavorited(!favorited)
         setFavCount((c) => c + (favorited ? -1 : 1))
         toast.success(favorited ? '已取消收藏' : '收藏成功')
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((e) => setActionError(errMsg(e)))
   }
 
   if (loading) {
     return (
-      <PageStub title="Bot 详情">
-        {/* 骨架屏：信息卡 + 指标卡轮廓，避免裸 spinner 布局抖动 */}
-        <Card className="mb-4">
-          <CardContent className="flex flex-col gap-5 py-5 lg:flex-row lg:items-start">
-            <div className="flex-1 space-y-2">
-              <Skeleton className="h-7 w-40" />
-              <Skeleton className="h-4 w-32" />
-              <Skeleton className="h-4 w-48" />
-            </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[32rem]">
-              {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-20" />)}
-            </div>
-          </CardContent>
-        </Card>
-        <Card><CardContent className="py-4"><Skeleton className="h-32" /></CardContent></Card>
-      </PageStub>
+      <PageFrame layout="public-bot-detail-loading">
+        <PageHeader title="Bot 详情" description="正在读取 Bot 资料、评分与对局记录。" />
+        <DataRegion title="Bot 概览" contentClassName="space-y-2 p-4">
+          <Skeleton className="h-6 w-48 max-w-full" />
+          <Skeleton className="h-4 w-32 max-w-full" />
+          <Skeleton className="h-4 w-72 max-w-full" />
+        </DataRegion>
+        <SummaryStrip columns={4}>{[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-14" />)}</SummaryStrip>
+      </PageFrame>
     )
   }
-  if (error || !profile) {
+  if (profileError || !profile) {
     return (
-      <PageStub title="Bot 详情">
-        <ErrorMsg msg={error || 'Bot 不存在'} className="mb-3" />
-        {/* 后退策略：有历史则返回上一页，直接 URL 进入（无历史）fallback 到排行榜 */}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="gap-1"
-          onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/leaderboard'))}
-        >
-          <ArrowLeft className="size-4" /> 返回
-        </Button>
-      </PageStub>
+      <PageFrame width="narrow" layout="public-bot-detail-error">
+        <PageHeader title="Bot 详情" description="无法显示该 Bot 的公开资料。" />
+        <DataRegion title="加载失败" contentClassName="space-y-3 px-4 py-5">
+          <ErrorMsg msg={profileError || 'Bot 不存在'} />
+          <Button variant="outline" size="sm" onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/leaderboard'))}>
+            <ArrowLeft className="size-4" />返回
+          </Button>
+        </DataRegion>
+      </PageFrame>
     )
   }
 
@@ -265,89 +271,73 @@ export default function BotDetail() {
   const GameIcon = gameIcon(profile.game_id)
 
   return (
-    <PageStub title={profile.display_name || profile.name}>
-      {/* 顶部信息卡 */}
-      <Card className="mb-5">
-        <CardContent className="flex flex-col gap-5 py-5 lg:flex-row lg:items-start">
-          <div className="min-w-0 flex-1 space-y-2">
+    <PageFrame layout="public-bot-detail">
+      <PageHeader
+        eyebrow={`@${profile.name}`}
+        title={<EntityName lines={2} tooltip={profile.display_name || profile.name} className="text-2xl font-bold sm:text-[1.75rem]">{profile.display_name || profile.name}</EntityName>}
+        description={<OverflowText lines={2}>{profile.description || '该 Bot 暂未填写简介。'}</OverflowText>}
+        actions={user ? (
+          <Button type="button" variant={favorited ? 'outline' : 'default'} size="sm" onClick={toggleFavorite}>
+            <Star className={`size-4 ${favorited ? 'fill-current' : ''}`} />{favorited ? '已收藏' : '收藏'} {favCount}
+          </Button>
+        ) : undefined}
+      />
+
+      {actionError && <ErrorMsg msg={actionError} />}
+
+      <DataRegion title="Bot 概览" description="公开身份、游戏维度与版本信息" contentClassName="p-4">
+        <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
+          <div className="min-w-0 space-y-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <h2 className="max-w-full break-words text-xl font-bold text-foreground [overflow-wrap:anywhere]">
-                {profile.display_name || profile.name}
-              </h2>
+              <Badge variant="outline"><GameIcon className="size-3.5" />{gameLabel(profile.game_id)}</Badge>
               {profile.is_placement ? (
-                <Badge variant="secondary" className="whitespace-nowrap text-muted-foreground">
-                  定级中 {total}/{profile.placement_required ?? 0}
-                </Badge>
+                <Badge variant="secondary">定级中 {total}/{profile.placement_required ?? 0}</Badge>
               ) : profile.tier_name ? (
                 <TierBadge rating={profile.rating} label={profile.tier_name} gameId={profile.game_id} tierKey={profile.tier_key} />
               ) : null}
               {!profile.is_active && <Badge variant="secondary">已停用</Badge>}
             </div>
-            <p className="text-sm text-muted-foreground">@{profile.name}</p>
-            <Badge variant="outline" className="gap-1.5">
-              <GameIcon className="size-3.5" />
-              {gameLabel(profile.game_id)}
-            </Badge>
-            {profile.description && (
-              <p className="text-sm text-muted-foreground">{profile.description}</p>
-            )}
-            <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1 text-xs text-muted-foreground">
-              <span>
-                所有者：
+            <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span className="inline-flex min-w-0 items-center gap-1">所有者
                 {profile.owner_name ? (
-                  <Link to={`/user/${encodeURIComponent(profile.owner_name)}`} className="text-primary hover:underline">
-                    {profile.owner_display || profile.owner_name}
+                  <Link to={`/user/${encodeURIComponent(profile.owner_name)}`} className="min-w-0 font-medium text-primary">
+                    <OverflowText lines={2} tooltip={false} tooltipFocusable={false}>{profile.owner_display || profile.owner_name}</OverflowText>
                   </Link>
-                ) : (
-                  '—'
-                )}
+                ) : '—'}
               </span>
-              <span>版本 v{profile.current_version ?? 1}</span>
-              {profile.created_at && <span>创建于 {fmtDate(profile.created_at)}</span>}
+              <span>当前版本 v{profile.current_version ?? 1}</span>
+              <span>创建于 {fmtDate(profile.created_at)}</span>
             </div>
-            {user && (
-              <Button
-                type="button"
-                variant={favorited ? 'outline' : 'default'}
-                size="sm"
-                onClick={toggleFavorite}
-                className="mt-1 gap-1.5"
-              >
-                <Star className={`size-3.5 ${favorited ? 'fill-current' : ''}`} />
-                {favorited ? '已收藏' : '收藏'}（{favCount}）
-              </Button>
-            )}
           </div>
+          <CopyIdentifier value={profile.id} />
+        </div>
+      </DataRegion>
 
-          {/* 指标（plain：嵌套在本 Card 内，无边框避免 Card 套 Card） */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:w-[32rem] lg:shrink-0">
-            <MetricCard
-              plain
-              label="Rating"
-              value={fmtRating(profile.rating)}
-              hint={profile.is_placement
-                ? `再完成 ${profile.placement_remaining ?? 0} 场完成定级`
-                : profile.rd != null ? `RD ${Number(profile.rd).toFixed(0)}` : undefined}
-            />
-            <MetricCard plain label="胜率" value={fmtPct(wr)} hint={`共 ${total} 场`} />
-            <MetricCard plain label="胜" value={profile.wins ?? 0} danger={false} />
-            <MetricCard plain label="负/平" value={profile.losses ?? 0} hint={`平 ${profile.draws ?? 0}`} danger />
-          </div>
-        </CardContent>
-      </Card>
+      <SummaryStrip columns={4}>
+        <SummaryMetric label="Rating" value={fmtRating(profile.rating)} detail={profile.is_placement ? `再完成 ${profile.placement_remaining ?? 0} 场完成定级` : profile.rd != null ? `RD ${Number(profile.rd).toFixed(0)}` : '暂无 RD'} />
+        <SummaryMetric label="胜率" value={fmtPct(wr)} detail={`共 ${total} 场`} />
+        <SummaryMetric label="胜" value={profile.wins ?? 0} detail={`负 ${profile.losses ?? 0}`} />
+        <SummaryMetric label="平" value={profile.draws ?? 0} detail={`${opponents.length} 个近期对手`} />
+      </SummaryStrip>
 
       <Tabs defaultValue="history" className="w-full">
-        <TabsList className="w-full">
-          <TabsTrigger value="history" className="min-w-0 gap-1.5"><HistoryIcon className="size-3.5 shrink-0" /><span className="truncate">对局历史</span> <span className="hidden text-xs text-muted-foreground sm:inline">({matchesTotal || matches.length})</span></TabsTrigger>
-          <TabsTrigger value="opponents" className="min-w-0 gap-1.5"><Swords className="size-3.5 shrink-0" /><span className="truncate">对手战绩</span> <span className="hidden text-xs text-muted-foreground sm:inline">({opponents.length})</span></TabsTrigger>
-          <TabsTrigger value="rating" className="min-w-0 gap-1.5"><Target className="size-3.5 shrink-0" /><span className="truncate">评分曲线</span></TabsTrigger>
-        </TabsList>
+        <StickyToolbar label="Bot 详情分区">
+          <TabsList className="w-full sm:w-auto">
+            <TabsTrigger value="history"><HistoryIcon className="size-3.5" />对局历史 <span className="text-xs text-muted-foreground">{matchesTotal || matches.length}</span></TabsTrigger>
+            <TabsTrigger value="opponents"><Swords className="size-3.5" />对手战绩 <span className="text-xs text-muted-foreground">{opponents.length}</span></TabsTrigger>
+            <TabsTrigger value="rating"><Target className="size-3.5" />评分曲线</TabsTrigger>
+          </TabsList>
+        </StickyToolbar>
 
-        {/* 对局历史 */}
         <TabsContent value="history">
-          <Card className="overflow-hidden">
-            <div className="overflow-x-auto">
-            <Table className="min-w-[36rem]">
+          <DataRegion title="对局历史" description={`第 ${matchesPage} 页 · 每页 ${matchesPerPage} 场`}>
+            {matchesError ? (
+              <ErrorMsg msg={matchesError} className="px-4 py-6" />
+            ) : matchesLoading ? (
+              <Loading text="正在加载对局…" />
+            ) : (
+              <DataTable className="rounded-none border-0" scrollLabel="Bot 对局历史">
+                <Table aria-label="Bot 对局历史" className="min-w-[38rem]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
@@ -359,7 +349,7 @@ export default function BotDetail() {
               </TableHeader>
               <TableBody>
                 {matches.length === 0 ? (
-                  <TableRow><TableCell colSpan={5}><EmptyState text="暂无对局" icon={<Swords className="size-7 opacity-40" />} /></TableCell></TableRow>
+                  <TableRow><TableCell colSpan={5}><EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" /></TableCell></TableRow>
                 ) : (
                   matches.map((m) => {
                     const isA = m.bot_a_id === botId
@@ -371,14 +361,13 @@ export default function BotDetail() {
                         <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                           {fmtTime(m.created_at)}
                         </TableCell>
-                        <TableCell className="max-w-[10rem]">
-                          {/* 对手可能已被删除（ON DELETE SET NULL → oppId 为 null）→ 不渲染链接，避免 /bot/null 死链 */}
+                        <TableCell className="max-w-[12rem] whitespace-normal">
                           {oppId != null ? (
-                            <Link to={`/bot/${oppId}`} className="block truncate font-medium text-foreground hover:text-primary" title={oppName || `#${oppId}`}>
-                              {oppName || `#${oppId}`}
+                            <Link to={`/bot/${oppId}`} className="block min-w-0 hover:text-primary">
+                              <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{oppName || '未命名 Bot'}</EntityName>
                             </Link>
                           ) : (
-                            <span className="block truncate text-muted-foreground" title="对手 Bot 已删除">（已删除）</span>
+                            <span className="text-muted-foreground">已删除 Bot</span>
                           )}
                         </TableCell>
                         <TableCell>
@@ -408,22 +397,22 @@ export default function BotDetail() {
                   })
                 )}
               </TableBody>
-            </Table>
-            </div>
+                </Table>
+              </DataTable>
+            )}
             <Pagination
               page={matchesPage}
               perPage={matchesPerPage}
               total={matchesTotal}
               onPageChange={setMatchesPage}
             />
-          </Card>
+          </DataRegion>
         </TabsContent>
 
-        {/* 对手战绩 */}
         <TabsContent value="opponents">
-          <Card className="overflow-hidden">
-            <div className="overflow-x-auto">
-            <Table className="min-w-[32rem]">
+          <DataRegion title="对手战绩" description="近期交手累计结果">
+            <DataTable className="rounded-none border-0" scrollLabel="Bot 对手战绩">
+              <Table aria-label="Bot 对手战绩" className="min-w-[32rem]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="min-w-[6rem]">对手</TableHead>
@@ -443,9 +432,9 @@ export default function BotDetail() {
                     const r = t > 0 ? (o.wins + o.draws * 0.5) / t : 0
                     return (
                       <TableRow key={o.opponent_id}>
-                        <TableCell className="max-w-[10rem]">
-                          <Link to={`/bot/${o.opponent_id}`} className="block truncate font-medium text-foreground hover:text-primary" title={o.opponent_display || o.opponent_name || `#${o.opponent_id}`}>
-                            {o.opponent_display || o.opponent_name || `#${o.opponent_id}`}
+                        <TableCell className="max-w-[12rem] whitespace-normal">
+                          <Link to={`/bot/${o.opponent_id}`} className="block min-w-0 hover:text-primary">
+                            <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{o.opponent_display || o.opponent_name || '未命名 Bot'}</EntityName>
                           </Link>
                         </TableCell>
                         <TableCell className="text-muted-foreground">{o.samples}</TableCell>
@@ -458,28 +447,19 @@ export default function BotDetail() {
                   })
                 )}
               </TableBody>
-            </Table>
-            </div>
-          </Card>
+              </Table>
+            </DataTable>
+          </DataRegion>
         </TabsContent>
 
-        {/* 评分曲线 */}
         <TabsContent value="rating">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Trophy className="size-4 text-primary" />
-                评分变化（Glicko-2，{history.length} 个数据点）
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <RatingChart points={history} />
-            </CardContent>
-          </Card>
+          <DataRegion title="评分变化" description={`Glicko-2 · ${history.length} 个数据点`} actions={<Trophy className="size-4 text-primary" />} contentClassName="p-3">
+            <RatingChart points={history} />
+          </DataRegion>
         </TabsContent>
       </Tabs>
 
       <Comments targetType="bot" targetId={String(botId)} />
-    </PageStub>
+    </PageFrame>
   )
 }

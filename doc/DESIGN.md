@@ -299,18 +299,18 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 ### 5.2 组件库与页面
 - **26 个 shadcn 共享原语**（`src/components/ui/`）：Button/Input/Card/Table/Tabs/Badge/Dialog/Command/Chart/Sheet/Slider 等，是全项目唯一组件抽象层。
-- **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、tier-badge.tsx、BrandMark.tsx（平台品牌标识）、AuthShell.tsx（登录/注册/重置/验证的居中壳：品牌头部 + 居中 Card，解决空旷）、use-playback.ts（仅导出 SPEEDS 速度档常量；MatchViewer 内联实现事件 buffer/数值 cursor/playing/speed/稳定 interval 节拍的回放与直播 DVR 逻辑；节拍只依赖播放态和速度，通过 ref 读取最新事件长度，持续高频 SSE 不会反复重置 timer 而饿死游标）。
+- **项目封装**：status.tsx（EmptyState/Loading/ErrorMsg/StatusBadge）、metric-card.tsx、tier-badge.tsx、BrandMark.tsx（平台品牌标识）、AuthShell.tsx（登录/注册/重置/验证共用的 `PageFrame width="readable"` 紧凑壳：品牌、标题与表单共享全局 gutter 和页面滚动 owner）、use-playback.ts（仅导出 SPEEDS 速度档常量；MatchViewer 内联实现事件 buffer/数值 cursor/playing/speed/稳定 interval 节拍的回放与直播 DVR 逻辑；节拍只依赖播放态和速度，通过 ref 读取最新事件长度，持续高频 SSE 不会反复重置 timer 而饿死游标）。
 - **段位请求缓存**：`lib/tiers.ts` 按 `game_id` 同时缓存已解析曲线与 in-flight Promise；排行榜同页数十个 `TierBadge` 与 React StrictMode effect 重放只发一次 `/api/tiers`。请求失败会清除 singleflight 但不伪造其他游戏曲线，下次进入可正常重试；成功后同一 SPA 再访直接命中已解析缓存。
 - **全局 Shell**：app-shell.tsx 按登录态分两套 chrome：
   - **已登录**：**lg+ 桌面左侧边栏**（Logo + compact 搜索 + 垂直导航 + 底部用户区/主题/通知）；**<lg 移动端顶栏 + Sheet 抽屉**。
   - **访客（未登录）**：**全断点顶栏**（BrandMark + 公开导航 + 主题切换 + **登录/注册**；窄屏用 Sheet 抽屉放导航与 CTA）。侧栏仅登录后出现，避免访客桌面无入口。
   - **auth 页**（登录/注册/重置/验证）：不显示侧栏，内容占满居中；顶栏保留精简条（品牌 + 主题 + 登录/注册）。
-  - nav-config.ts（**7** 项主导航 + 条件显示的 Admin）。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。首页 Hero 对访客额外展示注册/登录 CTA。
+  - nav-config.ts（**7** 项主导航 + 条件显示的 Admin）。GlobalSearch 支持 `compact` 变体适配窄侧栏（铺满宽、截断、无快捷键徽章）。首页使用紧凑 `PageHeader + SummaryStrip + DataRegion`，访客注册/登录 CTA 保留在标题操作区，不再用大 Hero 挤占首屏数据。
   - **统一对局页** `/match/:id`（MatchViewer）：实时 SSE + 回放 DVR；座位身份经 `matches.seat_info.with_seat_info`（人类座真人用户名）；canvas 绘 BOT 名/累计/胜者（旧 `/watch` 与 `/arena?id=` 路径已删，无重定向，请用 `/match/:id` 或从 `/history` 进入）。人类 `/play` 复用 seats + revealMode=showdown。直播与已结束回放都从事件 1 自动顺播，游标始终是具体数值；新批次先扩大事件总数，再由稳定节拍逐条推进。重连 snapshot 保留完整前缀，不做后缀裁剪；本地较长时拒绝旧短快照，服务端前缀增长时整体替换，因此超过 4000 条也不会丢事件 1 或新增尾部。终局到达只追加权威事件并关闭 SSE，不改变暂停/播放态、不强制跳到最后一手；页面另提供“跳到最新/跳到结局”。德州在实际出现 `hand_start` 后才由当前可见 reducer 状态显示“第 X/70 手”，动作时序同时显示“已展示/总事件”；开局前被管理员中止或平台故障不伪报第 1 手。0 完成手/步的技术判负直接定位终局，展示脱敏 `technical_incident_samples` 的座位、code、turn 与 error，并隐藏无意义的进度、分段导航和播放控制。获得私有 debug 权限时另显示默认折叠卡，按座位/turn/leg 分组，内容只以 React 文本或格式化 JSON 渲染，长文本可换行/内部滚动且不产生 HTML、Markdown 或可点击链接；无权限不请求接口也不显示存在性。
 - **前端游戏契约**：`games/base.ts` 的 `GameViewSpec` 除 canvas/reducer 外，还统一声明 `winner`、`describeEvent`、`terminalReason`、`humanPlay`、`replay` 与可选 `canvasAspectRatio/canvasFit`。`terminalReason(reason,status)` 是单一 `{label,tone}` 展示契约：游戏包声明正常/异常裁判原因，平台协议错误、超时和平台故障在共享层集中；未知 completed 原因中性归纳且不裸显内部码。MatchViewer、HumanPlay、admin 对局表共用它，通用时间线不得覆盖游戏 `describeEvent`。德州牌桌声明 16:9、五子棋沿用 3:2、点格棋声明 1:1；方形大棋盘另声明 `canvasFit='viewport'`，通用画布同时受内容宽度与动态视口高度约束：中等横屏使用 `100dvh-6rem`，桌面使用 `100dvh-16rem`，最高 52rem，竖屏手机保持可用宽度。`humanPlay.serializeBoardPick` 把画布坐标封装为该游戏唯一的 WebSocket `response` 信封，`humanPlay.invalidBoardPickMessage` 提供无效画布点击的非阻塞提示，`humanPlay.canPickBoard(request)` 控制协议特殊回合是否允许画布动作，`humanPlay.turnLabelForRequest(request)` 提供对应行动语义，`humanPlay.ActionPanel` 承载非画布动作控件及序列化。Pencil 在 `pass=1` 时据此禁用 canvas，并由游戏包按钮唯一提交 `{"response":{"x":-1,"y":-1}}`；通用页面不判断游戏名。`replay.Hud/Summary/progress/navigation` 承载比分、棋钟、筹码摘要和逐段导航。`HumanPlay`/`MatchViewer` 只挂载这些能力，不 import 或断言具体游戏 ViewModel。依赖方向固定为“页面/通用组件 → 注册表契约 → 游戏包”；游戏动作/HUD 组件仅依赖 `games/base.ts` 类型与共享 UI，不反向 import 页面，避免循环依赖。
 - **德州回放 HUD 契约**：`replay.navigation.label` 由游戏包为分段提供语义标签。德州 HUD 只从当前可见公开事件前缀归约手数、阶段、底池、行动方、双方本街投入/剩余/累计及最近六手，不读取或复制底牌，也不跨手/跨 leg 沿用后续动作。复式德州以两局各 70 手展示“第 X/2 局·当前手 Y/70”和 140 手总进度；第二局按物理 Bot 座位反转事件座位，`result.legs` 表示分局独立计分时不用合并 delta 伪造整场胜者。
 - **未知游戏 fail-closed**：`normalizeGameId` 只做字符串规整；`findGame` 对未注册 id 返回 `undefined`，`getGame` 明确抛错。详情、回放、人类对战与列表展示统一显示“不支持的游戏/规则不可用”，不得把缺失或未来 `game_id` 静默渲染成德州扑克。
-- **页面壳统一**：PageStub.tsx 作为内容页标题区壳——紧凑标题 + `subtitle`（一行说明）+ `actions`（右侧操作槽：筛选/按钮）；水平与垂直 gutter 都只由全局 `<main>` 提供，PageStub 不再叠加第二层 `px-*`，内容宽度封顶 1536px 并居中，避免窄屏空间浪费及 2K/4K 视口无限拉伸；auth 页改用 AuthShell（不套 PageStub）。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
+- **页面壳统一**：公共与账户页统一用 `PageFrame + PageHeader`，水平与垂直 gutter 只由全局 `<main>` 提供，不再叠加 PageStub 的第二层标题/gutter；列表筛选、摘要和正文分别落入 `StickyToolbar`、`SummaryStrip`、`DataRegion`。Auth 页面经 AuthShell 复用同一 PageFrame 契约。PageStub 仅作为尚未迁移的旧工作台兼容层，不得用于新增公共页。表格统一视觉：表头 `bg-muted/40` + 小写弱化字色，行 hover 高亮。
 - **排行榜密度与响应式**：排行榜用共享 Radix Tabs 实现三游戏 sticky tabs（含标准键盘/ARIA 语义），不提供“全部”入口；概览只保留 Bot 总数/正式/定级/最近更新。切换游戏时同步清空旧列表与概览，再等待新维度响应，禁止慢网下把上一游戏数据短暂标成新游戏。`md+` 使用六列 sticky 表头（名次、Bot/所有者、段位、Rating+相邻变化/RD、胜平负+胜率、最近对局），`<md` 改为无横向表格的列表卡；正式榜与定级区独立分段，长 Bot/用户名按词内换行。公开排行、Bot 详情和对手选择不重复展示恒定 Linux/ELF/amd64 三元组，owner/admin 管理面仅为 `runnable=false` 历史记录显示诊断。
 - **观赛/对战页响应式仪表盘**：普通 MatchViewer 在 `xl` 使用 `minmax(0,1fr) + 17–19rem` 紧凑时序栏。声明 viewport-fit 且提供 HUD 的游戏使用按比例重排的仪表盘：`2xl` 为 13–15rem 局面概览 + 高宽双约束棋盘 + 17–19rem 时序三栏；`xl` 为横向概览/棋盘主列 + sticky 时序；`md` 横屏把概览和棋盘并排、时序置于下一行；手机竖向堆叠。Pencil 概览只从当前 ViewModel 推导已连/剩余边、实际已占/未决格、裁判比分、棋钟、行动方、最近连边、5×5 格子归属、红蓝连边构成与过半门槛，不复制 Bot 身份或捏造策略指标；技术终局的裁判比分与实际棋盘占格分开表达。行动方仅由当前可见的权威 `turn` 事件高亮；`move`/`pass` 与下一条 `turn` 之间显示“等待裁判”，强制让行单独标注，不能从上一帧猜测。三栏顶部对齐，概览按内容自然收口且不得高于当前棋盘、时序独立滚动；棋盘同时受剩余宽度与 `dvh` 约束，不用固定高度制造空白或裁掉详情。较窄断点自动折叠时序并回收空右轨，所有断点都允许正常页面上下滚动。HumanPlay 复用相同 HUD 与断点结构，普通画布仍延续 `xl:grid-cols-[minmax(0,1fr)_22rem]`。MatchViewer 合并旧 MatchDetail（回放）逻辑，直播 DVR 模型按 match.status 选入口，但两种模式都从事件 1 顺播；座位身份从 `get_match_detailed`（LEFT JOIN bots+users，孤儿对局容错 NULL）取 BOT 名/@用户名。牌桌维持 16:9、扩大绿色桌面在画布中的占比并把状态文字收回桌内；MatchBoard（canvas 棋盘渲染）经 GSAP timeline 驱动动画。
 - **德州牌桌响应式**：普通 HUD 牌桌在 1280–1759px 把 HUD 横排在主画面上方并让时序跨两行，自定义 `3xl=110rem` 断点（1760px）起才变为 `15rem HUD + 主画面 + 17–19rem 时序` 三列，防止 1536/1600px 视口越宽牌桌反而越小。折叠时序后，宽屏保留 HUD/主画面两列并把时序标题移到下一行，避免空右轨；`<xl` 依次堆叠。德州时序最大高度为 `min(70dvh,36rem)` 且 sticky，长时序不再以自身高度制造牌桌下方大块留白。HumanPlay 使用同一能力规则：`3xl` 三列、`xl` HUD 在画面上方且进程栏在右、窄屏单列。
@@ -329,18 +329,18 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 ### 5.4 页面宽度约定（桌面密度治理）
 
-根因：`app-shell.tsx` 的 `<main>` 与 `PageStub` 外层 div 原本都**无 max-width**，宽屏（≥1536px）下主内容区横向拉满，单列堆叠页面右侧大片留白、内容密度过低（如旧 MyBots 上传表单 `max-w-lg` 右侧 ~844px 留白；旧 ContestDetail 全 `mt-8` 单列长流，全页高达 ~5900px）。
+历史根因：`app-shell.tsx` 的 `<main>` 与旧 `PageStub` 外层 div 原本都**无 max-width**，宽屏（≥1536px）下主内容区横向拉满，单列堆叠页面右侧大片留白、内容密度过低（如旧 MyBots 上传表单 `max-w-lg` 右侧 ~844px 留白；旧 ContestDetail 全 `mt-8` 单列长流，全页高达 ~5900px）。
 
-- **全站收口**：`PageStub` 外层 div 加 `mx-auto max-w-screen-2xl`（Tailwind v4 = 1536px 上限）。超宽屏（2K/4K）收口居中，避免内容横向拉稀；普通屏无感（侧栏后主内容区约 1300-1400px < 1536px）。移动端 `<lg` 无影响。
+- **全站收口**：`PageFrame` 统一提供 `wide/default/narrow/readable` 宽度档与 `mx-auto min-w-0`；公共/账户页按内容选择宽度档，超宽屏收口居中，移动端仍使用全局响应式 gutter。旧 PageStub 的 1536px 收口只用于兼容尚未迁移页面。
 - **桌面双栏（按需）**：内容密集页在 children 内自行 `lg:grid lg:grid-cols-[...]` 双栏，吃满宽度提升密度；`<lg` 自动堆叠为单列（响应式不破坏）：
-  - **MyBots**：`lg:grid-cols-[20rem_minmax(0,1fr)]` —— 左栏上传表单 `lg:sticky lg:top-20` 常驻，右栏筛选 + Bot 列表主区；行内编辑字段用可收缩 flex basis + `w-full max-w-full`，320px 视口也不会被固定 16rem 简介输入框撑出横向滚动。
+  - **MyBots**：`xl:grid-cols-[22rem_minmax(0,1fr)]` —— 左栏上传表单按内容自然收口，右栏筛选 + Bot 列表主区；不创建嵌套纵向滚动或长驻表单，页面全程由全局 main 滚动。行内编辑字段使用 `minmax(0,…)`，窄屏不会被固定宽度撑出横向滚动。
   - **ContestDetail**：头部信息全宽；下方 `lg:grid-cols-[minmax(0,1fr)_22rem]` —— 左主区对阵（BracketTree/PairingFoldedList 吃满宽），右边栏报名 + 积分榜（`lg:sticky` 常驻）。
 - **长列表分页（统一约定）**：行数可能很大的列表页一律用**服务端分页**而非一次全量渲染。统一契约：
   - 后端：`store/db.py` 的 `_paginate(c, base_query, params, page, per_page)` helper（返回 `(rows, total)`，page 从 1 起，per_page clamp `max(1,min(200))`）。列表 store 方法加 `page: int | None = None, per_page: int = 50`——`page is None` 时返回旧的全量 list（向后兼容，内部调用如赛事 manager 需全量）；`page` 传入时返回分页。
   - 端点：加 `page: int | None = None, per_page: int = 50` 查询参数，分页时返回 `{<key>:[...], page, per_page, total}`。已分页端点：`/api/contests`、`/api/leaderboard`、`/api/bots/public`、`/api/bots/{id}/matches`、`/api/contests/{id}`(entries)、`/api/users/{name}/bots`、`/api/bots/mine`、`/api/comments`、`/api/notifications`、`/api/admin/{users,bots,contests,matches}`。
   - 前端：`@/components/Pagination`（页码 + 上一页/下一页 + 共 N 条），各列表页加 `page`/`total` state + fetch 带 `page`/`per_page`，筛选切换重置到第 1 页。默认每页 20-50 条。
   - **避免**：OpponentPickerModal 等搜索弹窗不再前端全量过滤——走服务端 `q` 搜索 + debounce。
-- **约定**：新增内容密集页默认复用 PageStub 收口；需要双栏时用 `lg:grid` + 语义 token（`bg-card/text-foreground/bg-muted`），不裸 hex、不硬编码宽度，移动端务必回落单列；长列表用服务端分页 + 客户端分页器。
+- **约定**：新增内容密集页默认复用 PageFrame 组合件；需要双栏时用 `lg/xl:grid` + `minmax(0,…)` + 语义 token（`bg-card/text-foreground/bg-muted`），不裸 hex、不硬编码颜色，移动端务必回落单列；长列表用服务端分页 + 客户端分页器。
 
 ### 5.5 Worktree 隔离开发（物理隔离）
 
@@ -383,12 +383,13 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 ### 5.8 Data-Dense Dashboard 共享基础层契约
 
-本节是全站共享 UI 基础层的新入口；业务页按页面逐步迁移，既有组件导出与 props 保持兼容。
+本节是全站共享 UI 基础层的新入口；公共与账户页已整体迁移，游戏工作台与管理端按各自交互密度继续分阶段接入，既有组件导出与 props 保持兼容。
 
 - **密度与字体**：`index.css` 统一定义 12/16/20px 响应式 page gutter、桌面 32px/触屏 40px 标准控件、36px 表头与 40–44px 数据行。Card 默认 `p-4 + gap-3`，并提供 `density="compact"`（`p-3 + gap-2`）。标题与正文统一使用本机中文无衬线 fallback，标识符继续用等宽字体；不再依赖远程字体加载。
 - **页面组合件**：新页面使用 `components/layout` 的 `PageFrame → PageHeader → StickyToolbar/SummaryStrip/DataRegion`。`PageFrame` 根固定带 `data-page-layout`；需要独立滚动时才声明 `overflow`，并产生 `data-overflow-allowed` 与 `data-scroll-region`；sticky 区域带 `data-sticky-region`。这些 data 属性同时是截图、遮挡与横向溢出扫描的稳定测试契约。
 - **单滚动 owner**：兼容用 `<Table>` 仍默认自己拥有横向滚动；新宽表用 `<DataTable scrollLabel="…"><Table>…</Table></DataTable>`，context 会关闭内层 Table overflow，禁止再套业务 `overflow-x-auto`。已有外层滚动容器时用 `<Table scrollOwner="parent">`。局部定高双轴表格用 `DataTable overflow="both"` + `TableHeader sticky="region"`；随文档滚动的表头用 `sticky="page"`，其 offset 只读取统一 CSS 变量。
 - **长文本**：实体名、Bot 名使用 `EntityName`，UUID/checksum/版本号使用 `Identifier`，一般截断文本使用 `OverflowText`。截断时才出现可键盘访问的 Radix Tooltip；嵌入 Link/Button 时由外层交互控件担任 TooltipTrigger，禁止回退原生 `title=`。
+- **公共/账户页落地**：Home、History、MyBots、BotDetail、UserProfile、Contests 列表、Wiki、Judges、Search、Notifications、Settings 与认证页均提供独立 `data-page-layout`。自然名称最多两行；内部数据库 ID 不充当列表序号，只在 owner/诊断位以可复制 `Identifier` 展示；列表序号按当前视图从 1 起。页面纵向只由全局 main 滚动，源码、弹窗、Tabs 与宽表等必要局部 overflow 必须同时标记 `data-scroll-region/data-overflow-allowed`。
 - **Shell 与导航**：`xl` 起显示 224px（可折叠为 56px）桌面侧栏，较窄视口使用顶栏 + Sheet；登录用户在移动顶栏和抽屉内均有明确账号入口。全局 main 是页面纵向滚动 owner；HashRouter 跨 pathname 的 PUSH/REPLACE 回顶并聚焦 main，同页筛选/search 更新保留滚动与焦点，POP 恢复对应 history entry 的 window scroll，懒加载恢复期间用户输入可立即中断。
 - **sticky/layer 变量**：Shell、页面工具栏与表头只使用 `--sticky-shell-offset` / `--sticky-page-offset` / `--sticky-toolbar-height` / `--sticky-table-offset`；导航、modal、portal 浮层、toast 只使用 `--z-navigation` / `--z-modal` / `--z-popover` / `--z-toast`，其中 portal 浮层必须高于会触发它的 modal，禁止页面继续写任意大 z-index。
 

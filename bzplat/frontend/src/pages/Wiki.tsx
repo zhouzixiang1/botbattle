@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
-import PageStub from '@/components/PageStub'
-import { Card } from '@/components/ui/card'
-import { ErrorMsg, Loading } from '@/components/ui/status'
-import { cn } from '@/lib/utils'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { BookOpen, FileText } from 'lucide-react'
+
 import { apiGet, errMsg } from '@/api'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { Button } from '@/components/ui/button'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { renderMarkdown } from '@/lib/markdown'
+import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface WikiPage {
   slug: string
@@ -19,34 +21,67 @@ interface WikiResp {
   pages: WikiPage[]
 }
 
+function markWikiScrollRegions(html: string): string {
+  return html
+    .replaceAll(
+      '<pre class="my-3 overflow-x-auto',
+      '<pre data-scroll-region="wiki-code" data-overflow-allowed="x" tabindex="0" class="my-3 overflow-x-auto',
+    )
+    .replaceAll(
+      '<div class="my-3 overflow-x-auto"><table',
+      '<div data-scroll-region="wiki-table" data-overflow-allowed="x" tabindex="0" class="my-3 overflow-x-auto"><table',
+    )
+}
+
 export default function Wiki() {
   const [pages, setPages] = useState<WikiPage[]>([])
   const [slug, setSlug] = useState('')
-  const [md, setMd] = useState('')
+  const [title, setTitle] = useState('')
+  const [markdown, setMarkdown] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+
+  const loadPage = useCallback(async (target: string) => {
+    if (target === slug) return
+    setLoading(true)
+    setError('')
+    try {
+      const data = await apiGet<WikiResp>(`/api/wiki?slug=${encodeURIComponent(target)}`)
+      setSlug(data.slug)
+      setTitle(data.title)
+      setMarkdown(data.markdown || '')
+      if (window.location.hash !== `#/wiki?slug=${target}`) {
+        window.location.hash = `#/wiki?slug=${target}`
+      }
+    } catch (cause) {
+      setError(errMsg(cause, '加载失败'))
+    } finally {
+      setLoading(false)
+    }
+  }, [slug])
 
   useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const d = await apiGet<WikiResp>('/api/wiki')
+        const data = await apiGet<WikiResp>('/api/wiki')
         if (cancelled) return
-        setPages(d.pages || [])
-        // 初始化：若 URL hash 指向某 slug（#/wiki?slug=xxx），优先加载它，否则用首页。
+        setPages(data.pages || [])
         const hashed = window.location.hash.match(/slug=([\w-]+)/)
-        const initial = hashed ? hashed[1] : d.slug
-        if (hashed && initial !== d.slug) {
-          const p = await apiGet<WikiResp>(`/api/wiki?slug=${encodeURIComponent(initial)}`)
+        const initial = hashed ? hashed[1] : data.slug
+        if (hashed && initial !== data.slug) {
+          const page = await apiGet<WikiResp>(`/api/wiki?slug=${encodeURIComponent(initial)}`)
           if (cancelled) return
-          setSlug(p.slug)
-          setMd(p.markdown || '')
+          setSlug(page.slug)
+          setTitle(page.title)
+          setMarkdown(page.markdown || '')
         } else {
-          setSlug(d.slug)
-          setMd(d.markdown || '')
+          setSlug(data.slug)
+          setTitle(data.title)
+          setMarkdown(data.markdown || '')
         }
-      } catch (e) {
-        if (!cancelled) setError(errMsg(e, '加载失败'))
+      } catch (cause) {
+        if (!cancelled) setError(errMsg(cause, '加载失败'))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -56,73 +91,67 @@ export default function Wiki() {
     }
   }, [])
 
-  // 监听 hash 变化：跨页链接（#/wiki?slug=xxx）点击时跳转到对应 wiki 页。
   useEffect(() => {
     const onHash = () => {
-      const m = window.location.hash.match(/slug=([\w-]+)/)
-      if (m && m[1] !== slug) void loadPage(m[1])
+      const match = window.location.hash.match(/slug=([\w-]+)/)
+      if (match) void loadPage(match[1])
     }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
-  }, [slug])
+  }, [loadPage])
 
-  const loadPage = async (target: string) => {
-    if (target === slug) return
-    setLoading(true)
-    setError('')
-    try {
-      const d = await apiGet<WikiResp>(`/api/wiki?slug=${encodeURIComponent(target)}`)
-      setSlug(d.slug)
-      setMd(d.markdown || '')
-      // 同步 URL hash（可分享 / 刷新保持当前页）
-      if (window.location.hash !== `#/wiki?slug=${target}`) {
-        window.location.hash = `#/wiki?slug=${target}`
-      }
-    } catch (e) {
-      setError(errMsg(e, '加载失败'))
-    } finally {
-      setLoading(false)
-    }
-  }
+  const rendered = useMemo(() => markWikiScrollRegions(renderMarkdown(markdown)), [markdown])
+  const current = pages.find((page) => page.slug === slug)
 
   return (
-    <PageStub title="Wiki" subtitle="协议规范、Bot 开发指南、样例与安全说明">
-      {error && <ErrorMsg msg={error} className="mb-3" />}
+    <PageFrame width="default" layout="public-wiki">
+      <PageHeader
+        eyebrow="开发者文档"
+        title="Wiki"
+        description="协议规范、Bot 开发指南、游戏规则、样例与安全说明。"
+      />
 
-      <div className="grid gap-4 lg:grid-cols-[200px_1fr]">
-        {/* 侧栏导航 */}
-        {pages.length > 1 && (
-          <nav className="flex flex-row flex-wrap gap-1 lg:flex-col">
-            {pages.map((p) => (
-              <button
-                key={p.slug}
+      <SummaryStrip columns={3}>
+        <SummaryMetric label="文档页" value={pages.length} detail="当前公开目录" icon={<BookOpen className="size-4" />} />
+        <SummaryMetric label="当前页面" value={title || '—'} detail={current?.summary} mono={false} icon={<FileText className="size-4" />} />
+        <SummaryMetric label="正文规模" value={markdown.length} detail="字符（含代码）" />
+      </SummaryStrip>
+
+      {pages.length > 0 && (
+        <StickyToolbar label="Wiki 文档导航" className="items-stretch">
+          <nav aria-label="Wiki 目录" className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+            {pages.map((page) => (
+              <Button
+                key={page.slug}
                 type="button"
-                onClick={() => void loadPage(p.slug)}
-                className={cn(
-                  'w-full rounded-lg px-3 py-2 text-left text-sm transition lg:w-auto',
-                  p.slug === slug
-                    ? 'bg-primary font-medium text-primary-foreground'
-                    : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                )}
+                size="sm"
+                variant={page.slug === slug ? 'default' : 'ghost'}
+                onClick={() => void loadPage(page.slug)}
+                className="max-w-full"
+                aria-current={page.slug === slug ? 'page' : undefined}
               >
-                <div>{p.title}</div>
-                <div className="mt-0.5 hidden text-xs opacity-80 lg:block">{p.summary}</div>
-              </button>
+                <span className="max-w-48 truncate">{page.title}</span>
+              </Button>
             ))}
           </nav>
-        )}
+        </StickyToolbar>
+      )}
 
-        {/* 正文 */}
-        <div className="min-w-0">
-          {loading && !md ? (
-            <Loading text="加载中…" />
-          ) : (
-            <Card className="p-4 sm:p-6">
-              <article dangerouslySetInnerHTML={{ __html: renderMarkdown(md) }} />
-            </Card>
-          )}
-        </div>
-      </div>
-    </PageStub>
+      <DataRegion
+        title={title || '文档正文'}
+        description={current?.summary}
+        contentClassName="px-4 py-3 sm:px-5 sm:py-4"
+      >
+        {error ? (
+          <ErrorMsg msg={error} className="py-4" />
+        ) : loading ? (
+          <Loading text="正在加载文档…" className="py-10" />
+        ) : !markdown ? (
+          <EmptyState text="暂无可显示的文档" icon={<BookOpen className="size-5 opacity-50" />} className="py-8" />
+        ) : (
+          <article className="min-w-0 break-words" dangerouslySetInnerHTML={{ __html: rendered }} />
+        )}
+      </DataRegion>
+    </PageFrame>
   )
 }

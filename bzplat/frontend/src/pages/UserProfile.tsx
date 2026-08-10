@@ -1,20 +1,22 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams, useNavigate } from 'react-router-dom'
-import { UserPlus, UserCheck, Pencil, Bot as BotIcon, ArrowLeft } from 'lucide-react'
-import PageStub from '@/components/PageStub'
-import { Card, CardContent } from '@/components/ui/card'
-import { Skeleton } from '@/components/ui/skeleton'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { ArrowLeft, Bot as BotIcon, Pencil, UserCheck, UserPlus, Users } from 'lucide-react'
+import { toast } from 'sonner'
+
+import { apiGet, apiJson, errMsg } from '@/api'
+import { DataRegion, PageFrame, PageHeader, SummaryStrip } from '@/components/layout'
+import Pagination from '@/components/Pagination'
+import { useAuth } from '@/components/useAuth'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
-import { EmptyState, ErrorMsg } from '@/components/ui/status'
-import { MetricCard } from '@/components/ui/metric-card'
-import { useAuth } from '@/components/useAuth'
-import Pagination from '@/components/Pagination'
-import { apiGet, apiJson, errMsg } from '@/api'
-import { toast } from 'sonner'
+import { Card, CardContent } from '@/components/ui/card'
+import { EntityName, OverflowText } from '@/components/ui/overflow-text'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { fmtDate } from '@/lib/format'
-import { gameLabel, gameIcon } from '@/lib/games'
+import { gameIcon, gameLabel } from '@/lib/games'
+import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface UserProfileData {
   id: number
@@ -47,108 +49,114 @@ interface BotRow {
   is_active: number | boolean
 }
 
+const PER_PAGE = 20
+
 export default function UserProfile() {
   const { name } = useParams<{ name: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const isSelf = !!user && user.username === name
+  const isSelf = Boolean(user && user.username === name)
 
   const [profile, setProfile] = useState<UserProfileData | null>(null)
   const [bots, setBots] = useState<BotRow[]>([])
-  const [error, setError] = useState('')
+  const [profileError, setProfileError] = useState('')
+  const [botsError, setBotsError] = useState('')
+  const [actionError, setActionError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [botsLoading, setBotsLoading] = useState(true)
   const [following, setFollowing] = useState(false)
   const [followerCount, setFollowerCount] = useState(0)
   const [followingCount, setFollowingCount] = useState(0)
-  // 分页
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const perPage = 20
 
   const loadBots = useCallback(() => {
     if (!name) return Promise.resolve()
-    const params = new URLSearchParams({ page: String(page), per_page: String(perPage) })
+    setBotsLoading(true)
+    setBotsError('')
+    const params = new URLSearchParams({ page: String(page), per_page: String(PER_PAGE) })
     return apiGet<{ bots: BotRow[]; total?: number }>(
       `/api/users/${encodeURIComponent(name)}/bots?${params.toString()}`,
     )
-      .then((b) => {
-        setBots(b.bots || [])
-        if (b.total !== undefined) setTotal(b.total)
+      .then((data) => {
+        setBots(data.bots || [])
+        setTotal(data.total ?? 0)
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((cause) => setBotsError(errMsg(cause)))
+      .finally(() => setBotsLoading(false))
   }, [name, page])
 
   useEffect(() => {
     if (!name) return
     setLoading(true)
-    Promise.all([
-      apiGet<{ profile: UserProfileData }>(`/api/users/${encodeURIComponent(name)}/profile`),
-      loadBots(),
-    ])
-      .then(([p]) => {
-        setProfile(p.profile)
+    setProfileError('')
+    apiGet<{ profile: UserProfileData }>(`/api/users/${encodeURIComponent(name)}/profile`)
+      .then(({ profile: nextProfile }) => {
+        setProfile(nextProfile)
         if (user && user.username !== name) {
           apiGet<{ following: boolean; follower_count: number; following_count: number }>(
-            `/api/users/${p.profile.id}/follow-status`,
+            `/api/users/${nextProfile.id}/follow-status`,
           )
-            .then((fs) => {
-              setFollowing(fs.following)
-              setFollowerCount(fs.follower_count)
-              setFollowingCount(fs.following_count)
+            .then((status) => {
+              setFollowing(status.following)
+              setFollowerCount(status.follower_count)
+              setFollowingCount(status.following_count)
             })
             .catch(() => {})
         }
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((cause) => setProfileError(errMsg(cause)))
       .finally(() => setLoading(false))
-  }, [name, user, loadBots])
+  }, [name, user])
 
-  function toggleFollow() {
+  useEffect(() => {
+    void loadBots()
+  }, [loadBots])
+
+  const toggleFollow = () => {
     if (!profile || !user) return
-    const method = following ? 'DELETE' : 'POST'
-    apiJson(`/api/users/${profile.id}/follow`, method)
+    const wasFollowing = following
+    apiJson(`/api/users/${profile.id}/follow`, wasFollowing ? 'DELETE' : 'POST')
       .then(() => {
-        setFollowing(!following)
-        setFollowerCount((c) => c + (following ? -1 : 1))
-        toast.success(following ? '已取消关注' : '关注成功')
+        setActionError('')
+        setFollowing(!wasFollowing)
+        setFollowerCount((count) => count + (wasFollowing ? -1 : 1))
+        toast.success(wasFollowing ? '已取消关注' : '关注成功')
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((cause) => setActionError(errMsg(cause)))
   }
 
   if (loading) {
     return (
-      <PageStub title="用户资料">
-        {/* 骨架屏：头像+信息块 + 指标卡轮廓 */}
-        <Card className="mb-4">
-          <CardContent className="flex flex-col gap-5 py-5 sm:flex-row sm:items-center">
-            <Skeleton className="size-20 rounded-full" />
-            <div className="flex-1 space-y-2">
-              <Skeleton className="h-6 w-32" />
-              <Skeleton className="h-4 w-24" />
-              <Skeleton className="h-4 w-40" />
-            </div>
-          </CardContent>
-        </Card>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-20" />)}
-        </div>
-      </PageStub>
+      <PageFrame width="default" layout="public-user-profile-loading">
+        <PageHeader title="用户资料" description="正在读取用户资料与公开 Bot。" />
+        <DataRegion title="用户概览" contentClassName="p-4">
+          <div className="flex min-w-0 items-center gap-4">
+            <Skeleton className="size-16 shrink-0 rounded-full" />
+            <div className="min-w-0 flex-1 space-y-2"><Skeleton className="h-5 w-40 max-w-full" /><Skeleton className="h-4 w-28 max-w-full" /><Skeleton className="h-4 w-64 max-w-full" /></div>
+          </div>
+        </DataRegion>
+        <SummaryStrip columns={4}>{[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-14" />)}</SummaryStrip>
+      </PageFrame>
     )
   }
-  if (error || !profile) {
+
+  if (profileError || !profile) {
     return (
-      <PageStub title="用户资料">
-        <ErrorMsg msg={error || '用户不存在或已停用'} className="mb-3" />
-        {/* 后退策略：有历史则返回上一页，直接 URL 进入（无历史）fallback 到排行榜 */}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="gap-1"
-          onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/leaderboard'))}
-        >
-          <ArrowLeft className="size-4" /> 返回
-        </Button>
-      </PageStub>
+      <PageFrame width="narrow" layout="public-user-profile-error">
+        <PageHeader title="用户资料" description="无法显示该用户的公开资料。" />
+        <DataRegion title="加载失败" contentClassName="space-y-3 px-4 py-5">
+          <ErrorMsg msg={profileError || '用户不存在或已停用'} />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => (window.history.length > 1 ? navigate(-1) : navigate('/leaderboard'))}
+          >
+            <ArrowLeft className="size-4" />返回
+          </Button>
+        </DataRegion>
+      </PageFrame>
     )
   }
 
@@ -156,135 +164,92 @@ export default function UserProfile() {
   const avatarUrl = profile.avatar ? `/avatars/${profile.avatar}` : ''
   const totalGames = profile.stats.matches_played || 0
   const wins = profile.stats.wins || 0
-  const wr = totalGames > 0 ? ((wins + (profile.stats.draws || 0) * 0.5) / totalGames) * 100 : 0
+  const winRate = totalGames > 0 ? ((wins + (profile.stats.draws || 0) * 0.5) / totalGames) * 100 : 0
+  const xpProgress = Math.min(100, ((profile.xp ?? 0) % 100) || ((profile.xp ?? 0) > 0 ? 100 : 0))
 
   return (
-    <PageStub title={displayName}>
-      {/* 顶部信息卡 */}
-      <Card className="mb-5">
-        <CardContent className="py-5">
-          <div className="flex flex-wrap items-start gap-4">
-            <Avatar className="size-20 border border-border">
-              {avatarUrl && <AvatarImage src={avatarUrl} alt={displayName} />}
-              <AvatarFallback className="bg-muted text-2xl font-bold text-muted-foreground">
-                {displayName.charAt(0).toUpperCase()}
-              </AvatarFallback>
-            </Avatar>
-            <div className="min-w-0 flex-1 space-y-1.5 overflow-hidden">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <h2
-                  className="max-w-full break-words text-xl font-bold text-foreground [overflow-wrap:anywhere]"
-                  title={displayName}
-                >
-                  {displayName}
-                </h2>
-                {profile.role !== 'user' && (
-                  <Badge variant={profile.role === 'admin' ? 'destructive' : 'secondary'}>
-                    {profile.role === 'admin' ? '管理员' : '组织者'}
-                  </Badge>
-                )}
-                {(profile.level ?? 0) > 0 && (
-                  <Badge variant="outline" className="gap-1 border-warning/40 text-warning">
-                    Lv.{profile.level}
-                  </Badge>
-                )}
-              </div>
-              <p className="text-sm text-muted-foreground">@{profile.username}</p>
-              {profile.bio && (
-                <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-sm text-foreground/80 [overflow-wrap:anywhere]">
-                  {profile.bio}
-                </p>
-              )}
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-xs text-muted-foreground">
-                <span>注册于 {fmtDate(profile.created_at)}</span>
-                {totalGames > 0 && <span>· 参与 {totalGames} 场对局</span>}
-                {user && !isSelf && (
-                  <>
-                    <span>· 关注 {followingCount}</span>
-                    <span>· 粉丝 {followerCount}</span>
-                  </>
-                )}
-              </div>
-              {(profile.xp ?? 0) > 0 && (
-                <div className="max-w-xs pt-1">
-                  <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                    <span>经验 {profile.xp}</span>
-                    <span>Lv.{profile.level ?? 0}</span>
-                  </div>
-                  <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="h-full rounded-full bg-primary"
-                      style={{ width: `${Math.min(100, ((profile.xp ?? 0) % 100) + (((profile.xp ?? 0) % 100) === 0 && (profile.xp ?? 0) > 0 ? 100 : 0))}%` }}
-                    />
-                  </div>
-                </div>
-              )}
+    <PageFrame width="default" layout="public-user-profile">
+      <PageHeader
+        eyebrow={`@${profile.username}`}
+        title={<EntityName lines={2} tooltip={displayName} className="text-2xl font-bold sm:text-[1.75rem]">{displayName}</EntityName>}
+        description={<OverflowText lines={2} className="whitespace-pre-wrap">{profile.bio || '该用户暂未填写个人简介。'}</OverflowText>}
+        actions={
+          isSelf ? (
+            <Button asChild variant="outline" size="sm"><Link to="/settings"><Pencil className="size-4" />编辑资料</Link></Button>
+          ) : user ? (
+            <Button type="button" variant={following ? 'outline' : 'default'} size="sm" onClick={toggleFollow}>
+              {following ? <UserCheck className="size-4" /> : <UserPlus className="size-4" />}
+              {following ? '已关注' : '关注'}
+            </Button>
+          ) : undefined
+        }
+      />
+
+      {actionError && <ErrorMsg msg={actionError} />}
+
+      <DataRegion title="用户概览" description={`注册于 ${fmtDate(profile.created_at)}`} contentClassName="p-4">
+        <div className="grid min-w-0 gap-4 sm:grid-cols-[4rem_minmax(0,1fr)] sm:items-start">
+          <Avatar className="size-16 border">
+            {avatarUrl && <AvatarImage src={avatarUrl} alt={`${displayName} 的头像`} />}
+            <AvatarFallback className="bg-muted text-xl font-bold text-muted-foreground">{displayName.charAt(0).toUpperCase()}</AvatarFallback>
+          </Avatar>
+          <div className="min-w-0 space-y-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {profile.role !== 'user' && <Badge variant={profile.role === 'admin' ? 'destructive' : 'secondary'}>{profile.role === 'admin' ? '管理员' : '组织者'}</Badge>}
+              {(profile.level ?? 0) > 0 && <Badge variant="outline">Lv.{profile.level}</Badge>}
+              {user && !isSelf && <><Badge variant="secondary">关注 {followingCount}</Badge><Badge variant="secondary">粉丝 {followerCount}</Badge></>}
             </div>
-
-            {!isSelf && user && (
-              <Button
-                type="button"
-                variant={following ? 'outline' : 'default'}
-                size="sm"
-                onClick={toggleFollow}
-                className="gap-1.5"
-              >
-                {following ? <UserCheck className="size-3.5" /> : <UserPlus className="size-3.5" />}
-                {following ? '已关注' : '关注'}
-              </Button>
-            )}
-            {isSelf && (
-              <Button asChild variant="outline" size="sm" className="gap-1.5">
-                <Link to="/settings"><Pencil className="size-3.5" />编辑资料</Link>
-              </Button>
+            {(profile.xp ?? 0) > 0 && (
+              <div className="max-w-sm">
+                <div className="flex min-w-0 items-center justify-between text-xs text-muted-foreground"><span>经验 {profile.xp}</span><span>Lv.{profile.level ?? 0}</span></div>
+                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="当前等级经验进度" aria-valuenow={xpProgress} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="h-full rounded-full bg-primary" style={{ width: `${xpProgress}%` }} />
+                </div>
+              </div>
             )}
           </div>
-
-          {/* 总战绩（plain：嵌套在本 Card 内，无边框避免 Card 套 Card） */}
-          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <MetricCard plain label="总胜率" value={`${wr.toFixed(1)}%`} />
-            <MetricCard plain label="胜" value={wins} />
-            <MetricCard plain label="负/平" value={profile.stats.losses || 0} hint={`平 ${profile.stats.draws || 0}`} danger />
-            <MetricCard plain label="Bot 数" value={profile.bot_count} icon={<BotIcon className="size-5" />} />
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Bot 列表 */}
-      <h3 className="mb-3 text-sm font-semibold text-foreground">Bot 列表（{total || bots.length}）</h3>
-      {bots.length === 0 ? (
-        <Card>
-          <EmptyState text="暂无公开 Bot" icon={<BotIcon className="size-7 opacity-40" />} />
-        </Card>
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {bots.map((b) => {
-            const GameIcon = gameIcon(b.game_id)
-            return (
-              <Link key={b.id} to={`/bot/${b.id}`} className="group">
-                <Card className="h-full transition-colors hover:border-primary/40 hover:shadow-lift">
-                  <CardContent className="gap-1 py-4">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="min-w-0 truncate font-medium text-foreground group-hover:text-primary" title={b.display_name || b.name}>
-                        {b.display_name || b.name}
-                      </span>
-                      <Badge variant="secondary" className="gap-1 text-[10px]">
-                        <GameIcon className="size-3" />
-                        {gameLabel(b.game_id)}
-                      </Badge>
-                    </div>
-                    <p className="truncate text-xs text-muted-foreground">@{b.name}</p>
-                    {b.description && (
-                      <p className="line-clamp-2 text-xs text-muted-foreground/80">{b.description}</p>
-                    )}
-                  </CardContent>
-                </Card>
-              </Link>
-            )
-          })}
         </div>
-      )}
-      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
-    </PageStub>
+      </DataRegion>
+
+      <SummaryStrip columns={4}>
+        <SummaryMetric label="总胜率" value={`${winRate.toFixed(1)}%`} detail={`${totalGames} 场计分对局`} />
+        <SummaryMetric label="胜" value={wins} detail={`负 ${profile.stats.losses || 0} · 平 ${profile.stats.draws || 0}`} />
+        <SummaryMetric label="公开 Bot" value={profile.bot_count} detail={`${profile.stats.rated_bots || 0} 个已定级`} icon={<BotIcon className="size-4" />} />
+        <SummaryMetric label="社交" value={user && !isSelf ? followerCount : '—'} detail={user && !isSelf ? '粉丝数' : '登录后可关注'} icon={<Users className="size-4" />} />
+      </SummaryStrip>
+
+      <DataRegion title="公开 Bot" description={`共 ${total || profile.bot_count} 个；当前第 ${page} 页`}>
+        {botsError ? (
+          <ErrorMsg msg={botsError} className="px-4 py-5" />
+        ) : botsLoading ? (
+          <Loading text="正在加载 Bot…" />
+        ) : bots.length === 0 ? (
+          <EmptyState text="暂无公开 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-8" />
+        ) : (
+          <ul className="grid min-w-0 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3">
+            {bots.map((bot) => {
+              const GameIcon = gameIcon(bot.game_id)
+              return (
+                <li key={bot.id} className="min-w-0">
+                  <Link to={`/bot/${bot.id}`} className="group min-w-0">
+                    <Card density="compact" className="h-full transition-colors hover:border-primary/40 hover:bg-accent/30">
+                      <CardContent className="min-w-0 space-y-1">
+                        <div className="flex min-w-0 items-start gap-2">
+                          <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="min-w-0 flex-1 text-sm group-hover:text-primary">{bot.display_name || bot.name}</EntityName>
+                          <Badge variant="secondary" className="shrink-0"><GameIcon className="size-3" />{gameLabel(bot.game_id)}</Badge>
+                        </div>
+                        <OverflowText tooltip={false} className="text-xs text-muted-foreground">@{bot.name}</OverflowText>
+                        {bot.description && <OverflowText lines={2} tooltip={false} className="text-xs text-muted-foreground">{bot.description}</OverflowText>}
+                      </CardContent>
+                    </Card>
+                  </Link>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </DataRegion>
+      <Pagination page={page} perPage={PER_PAGE} total={total} onPageChange={setPage} />
+    </PageFrame>
   )
 }

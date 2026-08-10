@@ -1,35 +1,35 @@
 import type { ReactNode } from 'react'
-import BrandMark from '@/components/BrandMark'
 
-/**
- * auth 页面（登录/注册/重置/验证）的共享壳：
- * - 垂直水平居中，自适应高度（填满 <main> 可用区，避免整页空旷）；
- * - 顶部品牌标识 + 标题/副标题，提供上下文引导；
- * - children 放置表单 Card。
- *
- * 高度策略：用 min-h-[60vh] 作为下限保证视觉居中，但不强占整屏——避免内容多时
- * （如 Register 4 字段 + 验证码）因 calc 高度算错（顶栏实际 h-14=3.5rem + 页脚）
- * 导致整页滚动条或内容被截断。
- */
+import BrandMark from '@/components/BrandMark'
+import { PageFrame, PageHeader } from '@/components/layout'
+
+/** 认证页共享壳：沿用全局 main 的单一 gutter/滚动 owner，只压缩品牌与表单间距。 */
 export default function AuthShell({
+  layout,
   title,
   subtitle,
   children,
 }: {
+  layout: string
   title: string
   subtitle?: string
   children?: ReactNode
 }) {
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center px-4 py-10">
-      <div className="mb-6 flex flex-col items-center gap-3 text-center">
-        <BrandMark size="lg" />
-        <div className="space-y-1">
-          <h1 className="page-title text-2xl text-foreground sm:text-3xl">{title}</h1>
-          {subtitle && <p className="text-sm text-muted-foreground">{subtitle}</p>}
-        </div>
+    <PageFrame
+      width="readable"
+      layout={layout}
+      className="min-h-[calc(100dvh-var(--shell-header-height)-6rem)] justify-center py-2 sm:py-4"
+    >
+      <div className="flex min-w-0 flex-col items-center gap-2 text-center sm:flex-row sm:justify-center sm:text-left">
+        <BrandMark size="md" />
+        <PageHeader
+          title={title}
+          description={subtitle}
+          className="min-w-0 items-center gap-1 text-center sm:flex-col sm:items-start sm:text-left"
+        />
       </div>
       {children}
-    </div>
+    </PageFrame>
   )
 }

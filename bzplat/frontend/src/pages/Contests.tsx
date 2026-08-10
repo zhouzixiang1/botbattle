@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { Trophy, Plus } from 'lucide-react'
-import PageStub from '@/components/PageStub'
+import { CalendarClock, ListFilter, Plus, Trophy, Users } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
-import { Card, CardContent } from '@/components/ui/card'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { EmptyState, ErrorMsg, StatusBadge } from '@/components/ui/status'
+import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
+import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { apiFetch, apiGet, apiJson, errMsg } from '@/api'
@@ -17,6 +17,7 @@ import { fmtTime } from '@/lib/format'
 import Countdown from '@/components/Countdown'
 import Pagination from '@/components/Pagination'
 import { toast } from 'sonner'
+import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface Contest {
   id: number
@@ -80,7 +81,9 @@ export default function Contests() {
   const [regOpensAt, setRegOpensAt] = useState('')
   const [regClosesAt, setRegClosesAt] = useState('')
   const [startsAt, setStartsAt] = useState('')
-  const [error, setError] = useState('')
+  const [listError, setListError] = useState('')
+  const [formError, setFormError] = useState('')
+  const [listLoading, setListLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const creatingRef = useRef(false)
   const templateRequestSeqRef = useRef(0)
@@ -93,6 +96,8 @@ export default function Contests() {
   // 建赛表单：游戏由用户选（不再从模板反推）；规则参数已钉死，无需动态配置 UI。
 
   const load = () => {
+    setListLoading(true)
+    setListError('')
     const params = new URLSearchParams()
     if (filterGame) params.set('game_id', filterGame)
     params.set('page', String(page))
@@ -104,7 +109,8 @@ export default function Contests() {
         setList(d.contests || [])
         if (d.total !== undefined) setTotal(d.total)
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((e) => setListError(errMsg(e)))
+      .finally(() => setListLoading(false))
   }
 
   useEffect(() => {
@@ -191,12 +197,12 @@ export default function Contests() {
     e.preventDefault()
     if (creatingRef.current) return
     if (!templateReady) {
-      setError(templateError || '请等待当前游戏的模板加载完成后再创建赛事')
+      setFormError(templateError || '请等待当前游戏的模板加载完成后再创建赛事')
       return
     }
     creatingRef.current = true
     setCreating(true)
-    setError('')
+    setFormError('')
     try {
       await apiJson('/api/contests', 'POST', {
         title,
@@ -216,181 +222,133 @@ export default function Contests() {
       await load()
       toast.success('赛事创建成功')
     } catch (err) {
-      setError(errMsg(err))
+      setFormError(errMsg(err))
     } finally {
       creatingRef.current = false
       setCreating(false)
     }
   }
 
-  return (
-    <PageStub
-      title="锦标赛"
-      subtitle="组织者发布锦标赛，选手派遣 Bot；默认模板偏 Swiss / 分组，适合校赛规模"
-      actions={
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          游戏
-          <Select value={filterGame || 'all'} onValueChange={(v) => { setFilterGame(v === 'all' ? '' : v); setPage(1) }}>
-            <SelectTrigger className="h-9 w-[8.5rem]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部</SelectItem>
-              {GAMES.map((g) => (
-                <SelectItem key={g.id} value={g.id}>
-                  {g.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      }
-    >
-      {error && <ErrorMsg msg={error} className="mb-3" />}
+  const activeCount = list.filter((contest) => ['open', 'published', 'running', 'rest'].includes(contest.status)).length
+  const realNameCount = list.filter((contest) => Boolean(contest.require_real_name)).length
 
-      {canCreate && isLoggedIn && (
-        <Card className="mb-6">
-          <CardContent>
-            <form onSubmit={(e) => void onCreate(e)} className="flex flex-wrap items-end gap-3">
-              {/* 先选游戏 → 再选该游戏的模板 */}
-              <div className="space-y-1.5">
-                <Label>游戏</Label>
-                <Select value={formGameId} onValueChange={onFormGameChange}>
-                  <SelectTrigger className="mt-1.5 h-9 w-[8.5rem]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {GAMES.map((g) => (
-                      <SelectItem key={g.id} value={g.id}>{g.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+  return (
+    <PageFrame layout="public-contests">
+      <PageHeader
+        title="锦标赛"
+        description="查看公开赛事与排期；组织者可基于代码内置模板创建新赛事。"
+      />
+
+      <SummaryStrip columns={3}>
+        <SummaryMetric label="赛事总数" value={total} detail={filterGame ? gameLabel(filterGame) : '全部游戏'} icon={<Trophy className="size-4" />} />
+        <SummaryMetric label="本页活跃" value={activeCount} detail="报名、排期、进行或休息" icon={<CalendarClock className="size-4" />} />
+        <SummaryMetric label="本页实名" value={realNameCount} detail="要求实名报名" icon={<Users className="size-4" />} />
+      </SummaryStrip>
+
+      {formError && <ErrorMsg msg={formError} />}
+
+      <div className={`grid min-w-0 gap-[var(--page-section-gap)] ${canCreate && isLoggedIn ? 'xl:grid-cols-[minmax(0,1fr)_22rem]' : ''}`}>
+        <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)]">
+          <StickyToolbar label="赛事筛选">
+            <ListFilter className="size-4 shrink-0 text-muted-foreground" />
+            <span className="shrink-0 text-xs font-medium text-muted-foreground">游戏</span>
+            <Select value={filterGame || 'all'} onValueChange={(value) => { setFilterGame(value === 'all' ? '' : value); setPage(1) }}>
+              <SelectTrigger className="w-[8.5rem] max-w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部游戏</SelectItem>
+                {GAMES.map((game) => <SelectItem key={game.id} value={game.id}>{game.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
+          </StickyToolbar>
+
+          <DataRegion title="赛事列表" description="按创建时间与生命周期状态浏览">
+            {listError ? (
+              <ErrorMsg msg={listError} className="px-4 py-6" />
+            ) : listLoading ? (
+              <Loading text="正在加载赛事…" />
+            ) : list.length === 0 ? (
+              <EmptyState text="当前条件下暂无赛事" icon={<Trophy className="size-5 opacity-50" />} className="py-8" />
+            ) : (
+              <ul className="divide-y divide-border">
+                {list.map((contest, index) => {
+                  const hint = scheduleHint(contest)
+                  const templateName = contest.template_name || templates.find((template) => template.id === contest.template_id)?.name
+                  return (
+                    <li key={contest.id} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
+                      <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{(page - 1) * perPage + index + 1}</span>
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <Link to={`/contests/${contest.id}`} className="min-w-0 flex-1 hover:text-primary">
+                            <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{contest.title}</EntityName>
+                          </Link>
+                          <StatusBadge status={contest.status} />
+                          {contest.showcase_key && <Badge variant="secondary">演示快照</Badge>}
+                        </div>
+                        {contest.description && <OverflowText lines={2} tooltip={false} className="mt-1 text-xs text-muted-foreground">{contest.description}</OverflowText>}
+                        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                          {templateName ? <OverflowText className="max-w-48" tooltip={templateName}>{templateName}</OverflowText> : <Identifier>{contest.template_id || '—'}</Identifier>}
+                          <span>{gameLabel(contest.game_id)}</span>
+                          <span>{matchConfigSummary(contest)}</span>
+                          <time className="font-mono tabular-nums">{fmtTime(contest.created_at)}</time>
+                          {hint && <span className="inline-flex min-w-0 items-center gap-1 font-medium text-primary">{hint.label}{hint.time && <Countdown endsAt={hint.time} />}</span>}
+                        </div>
+                      </div>
+                      <Button asChild variant="ghost" size="sm"><Link to={`/contests/${contest.id}`}>查看赛事</Link></Button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </DataRegion>
+          <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+        </div>
+
+        {canCreate && isLoggedIn && (
+          <DataRegion title="创建赛事" description="先选择游戏，再选择该游戏的代码内置模板。" className="self-start">
+            <form onSubmit={(event) => void onCreate(event)} className="min-w-0 space-y-3 p-3">
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                <div className="min-w-0 space-y-1.5">
+                  <Label>游戏</Label>
+                  <Select value={formGameId} onValueChange={onFormGameChange}>
+                    <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent>{GAMES.map((game) => <SelectItem key={game.id} value={game.id}>{game.label}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+                <div className="min-w-0 space-y-1.5">
+                  <Label>模板</Label>
+                  <Select
+                    value={templateId || TEMPLATE_PENDING_VALUE}
+                    onValueChange={(value) => { if (value && value !== TEMPLATE_PENDING_VALUE) setTemplateId(value) }}
+                    disabled={templatesLoading || templates.length === 0}
+                  >
+                    <SelectTrigger className="w-full"><SelectValue>{selectedTemplate?.name || templatePlaceholder}</SelectValue></SelectTrigger>
+                    <SelectContent>{templates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                  {templateError && <ErrorMsg msg={templateError} className="text-xs" />}
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="contest-title">标题</Label>
-                <Input
-                  id="contest-title"
-                  className="w-48"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  required
-                />
+              <div className="space-y-1.5"><Label htmlFor="contest-title">标题</Label><Input id="contest-title" value={title} onChange={(event) => setTitle(event.target.value)} required /></div>
+              <div className="space-y-1.5"><Label htmlFor="contest-desc">说明</Label><Input id="contest-desc" value={description} onChange={(event) => setDescription(event.target.value)} /></div>
+              <div className="flex min-w-0 items-start gap-2 rounded-lg border p-2.5">
+                <Switch id="contest-realname" checked={requireRealName} onCheckedChange={setRequireRealName} />
+                <div className="min-w-0"><Label htmlFor="contest-realname" className="cursor-pointer">要求实名报名</Label><p className="mt-0.5 text-xs text-muted-foreground">报名者须完整填写姓名、手机号、学校与学号。</p></div>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="contest-desc">说明</Label>
-                <Input
-                  id="contest-desc"
-                  className="w-56"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>模板</Label>
-                <Select
-                  value={templateId || TEMPLATE_PENDING_VALUE}
-                  onValueChange={(value) => {
-                    if (value && value !== TEMPLATE_PENDING_VALUE) setTemplateId(value)
-                  }}
-                  disabled={templatesLoading || templates.length === 0}
-                >
-                  <SelectTrigger className="mt-1.5 h-9 w-full">
-                    <SelectValue>{selectedTemplate?.name || templatePlaceholder}</SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {templates.map((t) => (
-                      <SelectItem key={t.id} value={t.id}>
-                        {t.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {templateError && (
-                  <p className="max-w-56 text-xs text-destructive">{templateError}</p>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch checked={requireRealName} onCheckedChange={setRequireRealName} />
-                <Label htmlFor="contest-realname" className="cursor-pointer text-sm">
-                  要求实名报名（报名者须填写姓名/手机号/学校/学号）
-                </Label>
-              </div>
-              {/* 时间编排（可选；留空=手动触发对应阶段） */}
-              <div className="flex flex-wrap items-end gap-3 border-t border-border pt-3">
-                <span className="self-center text-xs font-medium text-muted-foreground">
-                  时间编排（可选，留空=手动）：
-                </span>
-                <label className="space-y-1 text-xs text-muted-foreground">
-                  <span>开放报名时间</span>
-                  <Input type="datetime-local" value={regOpensAt} onChange={(e) => setRegOpensAt(e.target.value)} className="h-9" />
-                </label>
-                <label className="space-y-1 text-xs text-muted-foreground">
-                  <span>报名截止时间</span>
-                  <Input type="datetime-local" value={regClosesAt} onChange={(e) => setRegClosesAt(e.target.value)} className="h-9" />
-                </label>
-                <label className="space-y-1 text-xs text-muted-foreground">
-                  <span>比赛开始时间</span>
-                  <Input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} className="h-9" />
-                </label>
-              </div>
-              <Button type="submit" disabled={creating || !templateReady} className="gap-1.5">
-                <Plus className="size-4" />
-                {creating ? '创建中…' : '创建比赛'}
+              <fieldset className="min-w-0 space-y-2 border-t pt-3">
+                <legend className="px-1 text-xs font-medium text-muted-foreground">时间编排（留空则手动推进）</legend>
+                <div className="grid min-w-0 gap-2 sm:grid-cols-3 xl:grid-cols-1">
+                  <div className="space-y-1"><Label htmlFor="contest-opens" className="text-xs">开放报名</Label><Input id="contest-opens" type="datetime-local" value={regOpensAt} onChange={(event) => setRegOpensAt(event.target.value)} /></div>
+                  <div className="space-y-1"><Label htmlFor="contest-closes" className="text-xs">报名截止</Label><Input id="contest-closes" type="datetime-local" value={regClosesAt} onChange={(event) => setRegClosesAt(event.target.value)} /></div>
+                  <div className="space-y-1"><Label htmlFor="contest-starts" className="text-xs">比赛开始</Label><Input id="contest-starts" type="datetime-local" value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></div>
+                </div>
+              </fieldset>
+              <Button type="submit" disabled={creating || !templateReady} aria-busy={creating} className="w-full">
+                <Plus className="size-4" />{creating ? '创建中…' : '创建比赛'}
               </Button>
             </form>
-          </CardContent>
-        </Card>
-      )}
-
-      <Card className="gap-0 py-0">
-        {list.length === 0 ? (
-          <EmptyState text="暂无比赛" icon={<Trophy className="size-7 opacity-40" />} />
-        ) : (
-          <ul className="divide-y divide-border">
-            {list.map((c) => (
-              <li key={c.id} className="min-w-0 px-4 py-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <Link
-                    to={`/contests/${c.id}`}
-                    className="min-w-0 shrink truncate text-lg font-medium text-primary hover:underline"
-                    title={c.title}
-                  >
-                    {c.title}
-                  </Link>
-                  <StatusBadge status={c.status} />
-                  {c.showcase_key && <Badge variant="secondary" className="text-[10px]">演示快照</Badge>}
-                </div>
-                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                  <span className="max-w-full truncate" title={c.template_id || undefined}>
-                    {c.template_name || templates.find((t) => t.id === c.template_id)?.name || c.template_id || '—'}
-                  </span>
-                  <span>·</span>
-                  <span>{gameLabel(c.game_id)}</span>
-                  <span>·</span>
-                  <span>{matchConfigSummary(c)}</span>
-                  {c.created_at && (
-                    <>
-                      <span>·</span>
-                      <span>{fmtTime(c.created_at)}</span>
-                    </>
-                  )}
-                </div>
-                {(() => {
-                  const hint = scheduleHint(c)
-                  if (!hint) return null
-                  return (
-                    <div className="mt-1 flex items-center gap-1 text-xs text-primary">
-                      <span className="font-medium">{hint.label}</span>
-                      {hint.time && <Countdown endsAt={hint.time} />}
-                    </div>
-                  )
-                })()}
-              </li>
-            ))}
-          </ul>
+          </DataRegion>
         )}
-        <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
-      </Card>
-    </PageStub>
+      </div>
+    </PageFrame>
   )
 }

@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CheckCheck, Bell } from 'lucide-react'
-import PageStub from '@/components/PageStub'
-import { Card } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { Bell, Check, CheckCheck, MailOpen } from 'lucide-react'
+
+import { apiGet, apiPost, errMsg } from '@/api'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
 import Pagination from '@/components/Pagination'
 import { useAuth } from '@/components/useAuth'
-import { cn } from '@/lib/utils'
-import { apiGet, apiPost, errMsg } from '@/api'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { EntityName, OverflowText } from '@/components/ui/overflow-text'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { fmtTime } from '@/lib/format'
+import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface Notification {
   id: number
@@ -30,17 +32,20 @@ const NOTIFICATION_LABELS: Record<string, string> = {
   system: '系统',
 }
 
+const PER_PAGE = 20
+
 export default function Notifications() {
   const { user } = useAuth()
   const [items, setItems] = useState<Notification[]>([])
   const [unread, setUnread] = useState(0)
-  const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
+  const [actionError, setActionError] = useState('')
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<'all' | 'unread'>('all')
-  // 分页
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const perPage = 20
+  const [markingAll, setMarkingAll] = useState(false)
+  const [markingId, setMarkingId] = useState<number | null>(null)
 
   const load = useCallback(() => {
     if (!user) {
@@ -48,15 +53,16 @@ export default function Notifications() {
       return
     }
     setLoading(true)
+    setLoadError('')
     apiGet<{ notifications: Notification[]; unread_count: number; total?: number }>(
-      `/api/notifications?unread_only=${filter === 'unread'}&page=${page}&per_page=${perPage}`,
+      `/api/notifications?unread_only=${filter === 'unread'}&page=${page}&per_page=${PER_PAGE}`,
     )
-      .then((d) => {
-        setItems(d.notifications || [])
-        setUnread(d.unread_count || 0)
-        if (d.total !== undefined) setTotal(d.total)
+      .then((data) => {
+        setItems(data.notifications || [])
+        setUnread(data.unread_count || 0)
+        setTotal(data.total ?? 0)
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((cause) => setLoadError(errMsg(cause)))
       .finally(() => setLoading(false))
   }, [filter, page, user])
 
@@ -64,126 +70,126 @@ export default function Notifications() {
     load()
   }, [load])
 
-  if (!user) {
-    return (
-      <PageStub title="通知">
-        <EmptyState text="请先登录" />
-      </PageStub>
-    )
-  }
-
-  // 切换筛选 → 回到第 1 页
-  const onFilterChange = (f: 'all' | 'unread') => {
-    setFilter(f)
+  const changeFilter = (value: 'all' | 'unread') => {
+    setFilter(value)
     setPage(1)
   }
 
-  function markRead(id: number) {
+  const markRead = (id: number) => {
+    setMarkingId(id)
     apiPost('/api/notifications/read', 'POST', { id })
       .then(() => {
-        setItems((rs) => rs.map((n) => (n.id === id ? { ...n, is_read: 1 } : n)))
-        setUnread((u) => Math.max(0, u - 1))
+        setActionError('')
+        setItems((current) => current.map((item) => item.id === id ? { ...item, is_read: 1 } : item))
+        setUnread((count) => Math.max(0, count - 1))
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((cause) => setActionError(errMsg(cause)))
+      .finally(() => setMarkingId(null))
   }
 
-  function readAll() {
+  const readAll = () => {
+    setMarkingAll(true)
     apiPost('/api/notifications/read-all', 'POST', {})
       .then(() => {
-        setItems((rs) => rs.map((n) => ({ ...n, is_read: 1 })))
+        setActionError('')
+        setItems((current) => current.map((item) => ({ ...item, is_read: 1 })))
         setUnread(0)
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((cause) => setActionError(errMsg(cause)))
+      .finally(() => setMarkingAll(false))
+  }
+
+  if (!user) {
+    return (
+      <PageFrame width="narrow" layout="account-notifications-guest">
+        <PageHeader title="通知" description="登录后查看对局结果、赛事与系统消息。" />
+        <DataRegion title="通知中心"><EmptyState text="请先登录" icon={<Bell className="size-5 opacity-50" />} className="py-8" /></DataRegion>
+      </PageFrame>
+    )
   }
 
   return (
-    <PageStub title="通知" subtitle="你的对局结果、赛事与系统消息">
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-lg border border-border p-1">
-          {(['all', 'unread'] as const).map((f) => (
-            <button
-              key={f}
-              type="button"
-              onClick={() => onFilterChange(f)}
-              className={cn(
-                'rounded-md px-3 py-1 text-sm transition-colors',
-                filter === f
-                  ? 'bg-primary text-primary-foreground'
-                  : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              {f === 'all' ? '全部' : `未读${unread > 0 ? ` (${unread})` : ''}`}
-            </button>
-          ))}
-        </div>
-        {unread > 0 && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={readAll}
-            className="ml-auto gap-1.5"
-          >
-            <CheckCheck className="size-3.5" />
-            全部标记已读
+    <PageFrame width="default" layout="account-notifications">
+      <PageHeader
+        title="通知"
+        description="对局结果、赛事进度、评论与系统消息集中在这里。"
+        actions={unread > 0 ? (
+          <Button type="button" variant="outline" size="sm" onClick={readAll} disabled={markingAll} aria-busy={markingAll}>
+            <CheckCheck className="size-4" />{markingAll ? '处理中…' : '全部标记已读'}
           </Button>
-        )}
-      </div>
-      {error && <ErrorMsg msg={error} className="mb-3" />}
-      {loading ? (
-        <Loading />
-      ) : items.length === 0 ? (
-        <EmptyState text="暂无通知" icon={<Bell className="size-7 opacity-40" />} />
-      ) : (
-        <div className="space-y-2">
-          {items.map((n) => {
-            const inner = (
-              <Card
-                className={cn(
-                  'gap-0 flex-row items-start p-3',
-                  !n.is_read && 'border-primary/40 bg-primary/5',
-                )}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {!n.is_read && (
-                      <span className="size-2 shrink-0 rounded-full bg-primary" />
+        ) : undefined}
+      />
+
+      <SummaryStrip columns={3}>
+        <SummaryMetric label="未读" value={unread} detail="全部通知类型" icon={<Bell className="size-4" />} />
+        <SummaryMetric label="当前结果" value={total} detail={filter === 'unread' ? '仅未读通知' : '全部通知'} icon={<MailOpen className="size-4" />} />
+        <SummaryMetric label="本页" value={items.length} detail={`第 ${page} 页 · 每页 ${PER_PAGE} 条`} />
+      </SummaryStrip>
+
+      <StickyToolbar label="通知筛选">
+        <Tabs value={filter} onValueChange={(value) => changeFilter(value as 'all' | 'unread')} className="min-w-0">
+          <TabsList>
+            <TabsTrigger value="all">全部</TabsTrigger>
+            <TabsTrigger value="unread">未读{unread > 0 ? ` ${unread}` : ''}</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
+      </StickyToolbar>
+
+      {actionError && <ErrorMsg msg={actionError} />}
+
+      <DataRegion title="消息列表" description={filter === 'unread' ? '仅显示仍需处理的通知' : '按时间倒序显示'}>
+        {loadError ? (
+          <ErrorMsg msg={loadError} className="px-4 py-5" />
+        ) : loading ? (
+          <Loading text="正在加载通知…" />
+        ) : items.length === 0 ? (
+          <EmptyState text={filter === 'unread' ? '没有未读通知' : '暂无通知'} icon={<Bell className="size-5 opacity-50" />} className="py-8" />
+        ) : (
+          <ul className="divide-y divide-border">
+            {items.map((item) => {
+              const content = (
+                <span className="min-w-0 flex-1">
+                  <span className="flex min-w-0 flex-wrap items-center gap-2">
+                    {!item.is_read && (
+                      <span className="inline-flex min-w-0 shrink-0 items-center gap-1 text-xs font-medium text-primary">
+                        <span aria-hidden="true" className="size-2 rounded-full bg-primary" />未读
+                      </span>
                     )}
-                    <span className="font-medium text-foreground">{n.title}</span>
-                    {n.type && <Badge variant="secondary">{NOTIFICATION_LABELS[n.type] || '系统'}</Badge>}
-                  </div>
-                  {n.body && <p className="mt-1 text-sm text-muted-foreground">{n.body}</p>}
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {fmtTime(n.created_at)}
-                  </p>
-                </div>
-                {!n.is_read && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="xs"
-                    onClick={(e) => {
-                      e.preventDefault()
-                      markRead(n.id)
-                    }}
-                    className="shrink-0"
-                  >
-                    已读
-                  </Button>
-                )}
-              </Card>
-            )
-            return n.link ? (
-              <Link key={n.id} to={n.link}>
-                {inner}
-              </Link>
-            ) : (
-              <div key={n.id}>{inner}</div>
-            )
-          })}
-        </div>
-      )}
-      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
-    </PageStub>
+                    <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="min-w-0 text-sm">{item.title}</EntityName>
+                    <Badge variant="secondary">{NOTIFICATION_LABELS[item.type] || '系统'}</Badge>
+                  </span>
+                  {item.body && <OverflowText lines={2} tooltip={false} className="mt-1 text-sm text-muted-foreground">{item.body}</OverflowText>}
+                  <time className="mt-1 block font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(item.created_at)}</time>
+                </span>
+              )
+
+              return (
+                <li key={item.id} className={`flex min-w-0 items-start gap-3 px-3 py-2.5 ${item.is_read ? '' : 'bg-primary/5'}`}>
+                  {item.link ? (
+                    <Link to={item.link} className="flex min-w-0 flex-1 hover:text-primary">{content}</Link>
+                  ) : content}
+                  {!item.is_read && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={markingId === item.id}
+                      aria-busy={markingId === item.id}
+                      onClick={() => markRead(item.id)}
+                      className="shrink-0"
+                    >
+                      <Check className="size-3.5" />{markingId === item.id ? '处理中' : '标为已读'}
+                    </Button>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </DataRegion>
+
+      <Pagination page={page} perPage={PER_PAGE} total={total} onPageChange={setPage} />
+    </PageFrame>
   )
 }

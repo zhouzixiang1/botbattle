@@ -39,12 +39,12 @@ export default function Login() {
   }
 
   return (
-    <AuthShell title="登录" subtitle="登录后即可上传 Bot、发起挑战与观赛">
-      <Card className="w-full max-w-md">
-        <CardContent className="py-6">
+    <AuthShell layout="auth-login" title="登录" subtitle="登录后上传 Bot、发起挑战并管理赛事消息">
+      <Card density="compact" className="mx-auto w-full max-w-md">
+        <CardContent>
           <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">
             {sessionTip && (
-              <p className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
+              <p role="status" className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
                 未登录或会话过期，请重新登录
               </p>
             )}
@@ -58,7 +58,7 @@ export default function Login() {
             </div>
             <CaptchaField onChange={setCaptcha} />
             {error && <ErrorMsg msg={error} />}
-            <Button type="submit" disabled={busy} className="w-full gap-1.5">
+            <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
               <LogIn className="size-4" />{busy ? '登录中…' : '登录'}
             </Button>
             <p className="text-center text-sm text-muted-foreground">
