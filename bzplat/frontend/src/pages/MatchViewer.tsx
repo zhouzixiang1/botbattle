@@ -312,6 +312,7 @@ export default function MatchViewer() {
   const ReplaySummary = gameSpec?.replay.Summary
   const ReplayHud = gameSpec?.replay.Hud
   const navigation = gameSpec?.replay.navigation
+  const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
   const typeBadge = matchTypeBadge(match?.match_type)
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(match?.reason, match?.status)
@@ -600,9 +601,15 @@ export default function MatchViewer() {
           icon={<History className="size-7 opacity-40" />}
         /></Card>
       ) : (
-        <div className={gameSpec?.replay.layout === 'wide' ? 'space-y-3' : timelineCollapsed ? 'grid gap-3' : 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,19rem)]'}>
+        <div className={gameSpec?.replay.layout === 'wide'
+          ? 'space-y-3'
+          : timelineCollapsed
+            ? 'grid gap-3'
+            : viewportFitCanvas
+              ? 'grid items-start justify-center gap-3 xl:grid-cols-[minmax(0,40rem)_minmax(17rem,19rem)]'
+              : 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,19rem)]'}>
           {/* 左：canvas 棋盘/牌桌 + 手导航 + 控制条 */}
-          <div className="min-w-0 space-y-2.5">
+          <div className={`min-w-0 space-y-2.5 ${viewportFitCanvas ? 'w-full max-w-[40rem] justify-self-center' : ''}`}>
             {ReplayHud && visibleVm !== null && <ReplayHud vm={visibleVm} seats={seats} />}
             {ReplaySummary && visibleVm !== null && (
               <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
@@ -665,7 +672,9 @@ export default function MatchViewer() {
           {/* 右：动作时序 */}
           <Card
             data-testid="match-timeline"
-            className="flex max-h-[70vh] flex-col gap-0 self-start overflow-hidden py-0 xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)]"
+            className={`flex flex-col gap-0 self-start overflow-hidden py-0 xl:sticky xl:top-6 ${viewportFitCanvas
+              ? 'max-h-[70dvh]'
+              : 'max-h-[70vh] xl:max-h-[calc(100vh-3rem)]'}`}
           >
             <div className="border-b border-border px-4 py-2">
               <div className="flex items-center justify-between">

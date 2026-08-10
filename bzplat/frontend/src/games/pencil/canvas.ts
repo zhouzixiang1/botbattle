@@ -164,11 +164,14 @@ export function pickPencilEdge(
   const layout = pencilCanvasLayout(W, H, size)
   const right = layout.ox + layout.boardPx
   const bottom = layout.oy + layout.boardPx
+  // CSS 像素 → canvas 设计坐标会经过 DPR 与布局缩放；最外圈边中心可能产生
+  // 不足 1px 的浮点/取整误差。只容许 1px，真正位于棋盘外的点击仍被拒绝。
+  const boundaryTolerance = 1
   if (
-    canvasX < layout.ox
-    || canvasX > right
-    || canvasY < layout.oy
-    || canvasY > bottom
+    canvasX < layout.ox - boundaryTolerance
+    || canvasX > right + boundaryTolerance
+    || canvasY < layout.oy - boundaryTolerance
+    || canvasY > bottom + boundaryTolerance
   ) return null
 
   // 点本身不是边；明确留出拒绝半径，避免四向交点的随机吸附。

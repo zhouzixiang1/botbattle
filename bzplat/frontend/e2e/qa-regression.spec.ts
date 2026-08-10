@@ -1749,6 +1749,9 @@ test('Pencil canvas geometry and hit testing match the interleaved judge coordin
       point0: { x: layout.cx(0), y: layout.cy(0) },
       point2: { x: layout.cx(2), y: layout.cy(2) },
       legal: pick(5, 4),
+      subpixelTopEdge: module.PencilCanvasRenderer.pick?.(
+        layout.cx(1), layout.cy(0) - 0.75, scene, opts,
+      ) ?? null,
       productionBoxClick: pick(5, 5),
       dot: pick(4, 4),
       occupied: pick(3, 8),
@@ -1776,6 +1779,7 @@ test('Pencil canvas geometry and hit testing match the interleaved judge coordin
   expect(geometry.box?.width).toBeCloseTo((geometry.point2.x - geometry.point0.x))
   expect(geometry.box?.height).toBeCloseTo((geometry.point2.y - geometry.point0.y))
   expect(geometry.legal).toEqual({ x: 5, y: 4 })
+  expect(geometry.subpixelTopEdge).toEqual({ x: 1, y: 0 })
   expect(geometry.productionBoxClick).toBeNull()
   expect(geometry.dot).toBeNull()
   expect(geometry.occupied).toBeNull()
@@ -1816,9 +1820,12 @@ test('Pencil human canvas rejects the production box-center click and stays squa
   await page.goto(`/#/play/${matchId}`)
   await expect(page.getByText('轮到你连边', { exact: true })).toBeVisible()
   const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  const eventLog = page.getByTestId('human-event-log')
   await expect(canvas).toBeVisible()
 
   for (const viewport of [
+    { width: 2048, height: 1024 },
+    { width: 2048, height: 1152 },
     { width: 1312, height: 700 },
     { width: 390, height: 700 },
     { width: 320, height: 568 },
@@ -1827,6 +1834,15 @@ test('Pencil human canvas rejects the production box-center click and stays squa
     const bounds = await canvas.boundingBox()
     expect(bounds).not.toBeNull()
     expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
+    if (viewport.width === 2048) {
+      expect(bounds?.width ?? 9999).toBeLessThanOrEqual(641)
+      expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(600)
+      expect((bounds?.y ?? 0) + (bounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+      const logBounds = await eventLog.boundingBox()
+      expect(logBounds).not.toBeNull()
+      expect(logBounds?.x ?? 0).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0))
+      expect((logBounds?.y ?? 0) + (logBounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow, `${viewport.width}px human view overflow`).toBeLessThanOrEqual(1)
   }
@@ -2047,9 +2063,14 @@ test('Pencil human canvas replaces an equal-length snapshot and finishes animati
 
 test('Pencil replay gives the square board priority while the timeline remains usable during page scroll', async ({ page }) => {
   const monitor = monitorBrowser(page)
-  const matchId = 'mock-pencil-production-replay-layout'
+  // 线上 Safari 事故 20260810143624-4149d6a3：宽屏方形棋盘按剩余横向空间
+  // 放大到 1200px+，首屏只能看到上半局面；完整时序又把右栏撑出视口。
+  const matchId = 'mock-pencil-production-replay-layout-20260810143624-4149d6a3'
   const events = [
     ...pencilHumanIncidentPrefix(),
+    ...Array.from({ length: 190 }, (_, index) => ({
+      type: 'time_used', seat: index % 2, used: index / 10, remaining: 900 - index / 10,
+    })),
     { type: 'illegal', player: 1, move: { x: 5, y: 5 }, why: 'illegal_move' },
     { type: 'match_end', winner: 0, reason: 'illegal', deltas: [2, -2] },
   ]
@@ -2085,7 +2106,9 @@ test('Pencil replay gives the square board priority while the timeline remains u
     })
   })
 
-  await page.setViewportSize({ width: 1312, height: 700 })
+  // 附件为 2048×1152 Safari 窗口；Chromium 布局回归使用同宽高，并用
+  // 1024px 高度模拟浏览器 chrome 进一步压缩后的网页可用区域。
+  await page.setViewportSize({ width: 2048, height: 1024 })
   await page.goto(`/#/match/${matchId}`)
   const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
   const timeline = page.getByTestId('match-timeline')
@@ -2093,11 +2116,35 @@ test('Pencil replay gives the square board priority while the timeline remains u
   await expect(timeline).toBeVisible()
   await page.getByRole('button', { name: /跳到结局/ }).click()
 
+  for (const viewport of [
+    { width: 2048, height: 1024 },
+    { width: 2048, height: 1152 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const desktopCanvas = await canvas.boundingBox()
+    const desktopTimeline = await timeline.boundingBox()
+    expect(desktopCanvas).not.toBeNull()
+    expect(desktopTimeline).not.toBeNull()
+    expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
+    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(641)
+    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(600)
+    expect((desktopCanvas?.y ?? 0) + (desktopCanvas?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
+    expect((desktopTimeline?.y ?? 0) + (desktopTimeline?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    const timelineScroll = await timeline.locator('div.overflow-y-auto').evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }))
+    expect(timelineScroll.scrollHeight).toBeGreaterThan(timelineScroll.clientHeight)
+  }
+
+  await page.setViewportSize({ width: 1312, height: 700 })
   const desktopCanvas = await canvas.boundingBox()
   const desktopTimeline = await timeline.boundingBox()
   expect(desktopCanvas).not.toBeNull()
   expect(desktopTimeline).not.toBeNull()
   expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
+  expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(641)
   expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
 
   await page.evaluate(() => window.scrollTo(0, 360))
