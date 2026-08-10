@@ -12,6 +12,14 @@ RUNTIME_LONGRUNNING = "longrunning"
 VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
 DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL
 
+# 私有 Bot debug 持久化硬顶。schema CHECK、Store 防御性校验与上层
+# 内存收集器共用，避免三处同义数字漂移。
+MATCH_DEBUG_MAX_ENTRY_BYTES = 4 * 1024
+MATCH_DEBUG_MAX_ENTRIES_PER_SEAT = 512
+MATCH_DEBUG_MAX_BYTES_PER_SEAT = 128 * 1024
+MATCH_DEBUG_MAX_ENTRIES_PER_MATCH = 1024
+MATCH_DEBUG_MAX_BYTES_PER_MATCH = 256 * 1024
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +193,33 @@ CREATE TABLE IF NOT EXISTS matches_index (
     id              TEXT    PRIMARY KEY,
     game_id         TEXT    NOT NULL
 );
+
+-- Bot 顶层 debug sidecar 的私有存储。它不属于公开 replay/result/event 契约，
+-- 只在对局终态后由编排器一次性写入。通过 matches_index 的 FK 保证删除任意
+-- 游戏的对局都会级联清理；Bot/用户删除只清空快照 bot_id，不产生悬空引用。
+CREATE TABLE IF NOT EXISTS match_debug_sessions (
+    match_id        TEXT    PRIMARY KEY REFERENCES matches_index(id) ON DELETE CASCADE,
+    entry_count     INTEGER NOT NULL DEFAULT 0 CHECK (entry_count BETWEEN 0 AND __MATCH_DEBUG_MAX_ENTRIES__),
+    total_bytes     INTEGER NOT NULL DEFAULT 0 CHECK (total_bytes BETWEEN 0 AND __MATCH_DEBUG_MAX_BYTES__),
+    dropped_count   INTEGER NOT NULL DEFAULT 0 CHECK (dropped_count >= 0),
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS match_debug_entries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id        TEXT    NOT NULL REFERENCES match_debug_sessions(match_id) ON DELETE CASCADE,
+    bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    seat            INTEGER NOT NULL CHECK (seat IN (0, 1)),
+    turn            INTEGER NOT NULL CHECK (turn >= 1),
+    leg             INTEGER NOT NULL DEFAULT -1 CHECK (leg >= -1),
+    debug_json      TEXT    NOT NULL CHECK (json_valid(debug_json)),
+    size_bytes      INTEGER NOT NULL CHECK (size_bytes BETWEEN 1 AND __MATCH_DEBUG_MAX_ENTRY_BYTES__),
+    created_at      TEXT    NOT NULL,
+    UNIQUE(match_id, seat, turn, leg)
+);
+CREATE INDEX IF NOT EXISTS idx_match_debug_entries_order
+    ON match_debug_entries(match_id, seat, leg, turn);
 
 CREATE TABLE IF NOT EXISTS match_replays (
     match_id        TEXT    PRIMARY KEY,
@@ -792,6 +827,15 @@ CREATE INDEX IF NOT EXISTS idx_contest_templates_game ON contest_templates(game_
 # this private marker keeps the SQL text readable while preventing a second,
 # drifting runtime-mode default literal.
 SCHEMA = SCHEMA.replace("__DEFAULT_RUNTIME_MODE__", DEFAULT_RUNTIME_MODE)
+SCHEMA = SCHEMA.replace(
+    "__MATCH_DEBUG_MAX_ENTRIES__", str(MATCH_DEBUG_MAX_ENTRIES_PER_MATCH)
+)
+SCHEMA = SCHEMA.replace(
+    "__MATCH_DEBUG_MAX_BYTES__", str(MATCH_DEBUG_MAX_BYTES_PER_MATCH)
+)
+SCHEMA = SCHEMA.replace(
+    "__MATCH_DEBUG_MAX_ENTRY_BYTES__", str(MATCH_DEBUG_MAX_ENTRY_BYTES)
+)
 
 # 角色
 ROLE_USER = "user"
@@ -815,6 +859,7 @@ TECHNICAL_INCIDENT_MESSAGES = {
     "missing_keep_running": "LongRunning Bot 未输出 KEEP_RUNNING 握手",
     "invalid_keep_running": "LongRunning Bot 的 KEEP_RUNNING 握手不正确",
     "decision_timeout": "Bot 未在决策时限内输出完整响应行",
+    "response_line_too_large": "Bot 响应行超过 64 KiB 上限",
 }
 
 # 公开 completed/match_end 唯一允许的稳定裁决码。游戏裁判与平台技术判负

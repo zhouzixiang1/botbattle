@@ -62,7 +62,9 @@ int main(void) {
 }
 ```
 
-把代码完整保存为当前目录下的 `bot.c`。不要向 stdout 打印日志；调试信息只能写 stderr。
+把代码完整保存为当前目录下的 `bot.c`。不要向 stdout 打印独立日志行；想让 Bot 作者在终局后
+查看策略诊断，应把有界信息放进同一 JSON 的顶层 `debug`。stderr 只用于平台运维排查崩溃，
+不会作为作者调试面板的数据源。
 
 ## 3. 完整可复制的 Python 最小 Bot
 
@@ -291,7 +293,7 @@ docker run --rm -i --platform linux/amd64 \
 
 1. 拒绝不是 Linux x86_64 ELF 的文件；
 2. 使用与正式对局首回合相同的完整历史信封；
-3. 要求响应对象包含 `response`，忽略其他顶层字段；
+3. 要求响应对象包含 `response`；预检丢弃可选 `debug`，忽略其他顶层字段；
 4. 校验本游戏的 response payload 类型；
 5. LongRunning 额外要求精确握手。
 
@@ -311,7 +313,9 @@ docker run --rm -i --platform linux/amd64 \
 | 忘记换行或 flush | 决策超时并技术判负 | 每次输出完整行后立即 flush |
 | 顶层输出 `0` | `protocol_error` | 输出 `{"response":0}` |
 | 棋类输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
-| 附加 `debug/data/globaldata` | 平台忽略 | 只有 `response` 参与对局与历史重放 |
+| 附加顶层 `debug` | 正式 Bot 对战终局后按权限私有展示；预检丢弃 | 保持小而结构化，绝不放密码或 token；动作仍只由 `response` 决定 |
+| 附加 `data/globaldata` | 平台忽略 | 只有 `response` 与可选私有 `debug` 有定义 |
+| 单行响应超过 64 KiB | `protocol_error` | 压缩或删减 `debug`，每次只输出一行 JSON |
 | LongRunning 未精确握手 | `protocol_error`，不回退 | 首响应后立即输出固定握手行 |
 | Holdem 把正数当目标总额 | 游戏动作错误 | 正数是本次额外投入筹码 |
 | Traditional 不重放棋类历史 | 后续可能重复落子 | 重放全部 `requests[]/responses[]` |
@@ -323,6 +327,18 @@ docker run --rm -i --platform linux/amd64 \
 - Holdem / Gomoku 使用平台固定的单步决策时限。
 - Pencil 双方各有固定 900 秒累计棋钟；每次思考消耗同一份总预算。
 - 棋钟信息只用于页面展示和回放，不改变 Bot 输入协议。
+
+### 推荐的策略调试格式
+
+调试面板适合记录分支、估值和最终选择，例如：
+
+```json
+{"response":0,"debug":{"phase":"river","equity":0.41,"pot_odds":0.28,"choice":"call"}}
+```
+
+`debug` 可以是字符串、数值、数组或对象；建议用短对象，便于按座位、决策序号和 duplicate
+leg 阅读。平台会截断、清洗并脱敏，不能把它当持久存储或秘密保管箱。应用日志仍写 stderr，
+但 stderr 只供管理员运维排障，不会混入调试面板。
 
 完整字段与规则：[通信协议](#/wiki?slug=protocol) · [德州扑克](#/wiki?slug=texas) ·
 [五子棋](#/wiki?slug=gomoku) · [点格棋](#/wiki?slug=pencil)。

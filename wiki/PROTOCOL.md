@@ -46,7 +46,8 @@ ARM64 ELF 和原始 `.py` 都不属于可运行格式。跨系统构建见
 ## 2. 行与响应信封
 
 - 平台的每个请求信封占一行。
-- Bot 的每个响应必须是一个 JSON 对象，占一行并立即 flush stdout。
+- Bot 的每个响应必须是一个 JSON 对象，占一行并立即 flush stdout；整行不得超过
+  **64 KiB**，超限按 `protocol_error` 技术判负。
 - 响应对象必须包含顶层字段 `response`：
 
 ```json
@@ -54,10 +55,34 @@ ARM64 ELF 和原始 `.py` 都不属于可运行格式。跨系统构建见
 ```
 
 `response` 的值由游戏决定：Holdem 是整数动作码；Gomoku / Pencil 是含 `x`、`y`
-整数坐标的对象。整个响应不能直接输出整数或坐标对象。可附带 `debug` 等其他顶层
-字段，平台会忽略它们；真正参与历史重放和裁判的只有 `response`。
+整数坐标的对象。整个响应不能直接输出整数或坐标对象。真正参与请求历史重放、裁判与
+结果的始终只有 `response`。正式 Bot 对战还可附带一个可选顶层 `debug` sidecar；除
+`response` / `debug` 外的顶层字段全部忽略。
 
-上传预检使用所选运行模式的同一首回合信封和同一响应校验；LongRunning 预检也必须
+### 私有 debug sidecar
+
+Bot 可在同一响应对象中加入任意 JSON 值（顶层 `null` 等同未提供）：
+
+```json
+{"response":0,"debug":{"street":"flop","equity":0.54,"choice":"call"}}
+```
+
+`debug` 不参与动作校验，也不会进入 `responses[]`、后续 Bot 请求、对局 `result`、公共回放、
+公共观赛/人类对战消息或应用日志；LongRunning 的握手行也不是 debug。上传预检始终丢弃 debug。
+调试写入失败只会少一条调试记录，不改变动作、胜负或评分。
+
+平台仅在 Bot-vs-Bot 对局进入终态后批量保存经过清洗的副本：单条最多 4 KiB、深度 4、
+容器 64 项、256 节点；每座位最多 512 条/128 KiB，每场最多 1024 条/256 KiB。文本会做
+NFC 归一化，移除 ANSI、控制字符、双向/不可见格式字符，并对密码、token、cookie、私钥等
+敏感键和值脱敏。请不要把凭据或个人信息写入 debug。
+
+读取不是公开能力：普通非赛事对局终局后，双方 Bot 的 owner 都能查看双方记录；赛事组织者
+和管理员可在单场终局后查看，Bot owner 必须等整个赛事 `finished` 或 `cancelled`；人类对战
+不向 Bot owner 提供记录，管理员可审计空结果。访客和无关用户无权读取，拒绝响应不会透露
+记录是否存在。页面仅按纯文本/安全 JSON 展示，不把内容解释为 HTML、Markdown 或链接。
+
+上传预检使用所选运行模式的同一首回合信封和同一响应校验；其 `debug` 会被丢弃，
+LongRunning 预检也必须
 完成握手。预检采用独立的 **8 秒首回合健康检查**，只用于确认程序能启动并完成一次通信，
 不占用正式对局的思考时间。尤其是 Pencil 的正式对局仍按每方 900 秒累计棋钟计算。
 
@@ -168,7 +193,9 @@ card = (点数 - 2) * 4 + 花色
 |------|------|
 | 非法 JSON、顶层非对象 | `protocol_error` 技术判负 |
 | 缺少 `response` 或 response 类型错误 | `protocol_error` 技术判负 |
-| 附带 `debug` 等额外顶层字段 | 忽略额外字段，只处理 `response` |
+| 附带顶层 `debug` | 只在正式 Bot 对战中作有界私有 sidecar；动作仍只处理 `response` |
+| 附带 `data/globaldata` 等其他顶层字段 | 忽略，只处理 `response` |
+| stdout 响应行超过 64 KiB | `protocol_error` 技术判负 |
 | 顶层整数或裸 `{x,y}` | `protocol_error` 技术判负 |
 | Bot 决策超时 | `timeout` 技术判负，首个故障即结束 |
 | LongRunning 握手缺失、超时或内容错误 | `protocol_error` 技术判负，不回退 |

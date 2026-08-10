@@ -1812,6 +1812,168 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await monitor.expectClean()
 })
 
+test('private Bot debug stays folded, safe, bounded on mobile, and hidden when unauthorized', async ({ page }) => {
+  await loginThroughUi(page, USER)
+  const monitor = monitorBrowser(page)
+  const allowedId = 'mock-private-debug-allowed'
+  const deniedId = 'mock-private-debug-denied'
+  const staleId = 'mock-private-debug-stale'
+  const longToken = `LONG_${'A'.repeat(3_950)}`
+  const replay = [
+    { type: 'match_start', game_id: 'holdem', num_hands: 70 },
+    { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [20000, 20000] },
+    { type: 'match_end', winner: 0, reason: 'completed', deltas: [100, -100] },
+  ]
+
+  const detail = (id: string, allowed: boolean) => ({
+    match: {
+      id,
+      game_id: 'holdem',
+      status: 'completed',
+      match_type: 'challenge',
+      winner: 0,
+      reason: 'completed',
+      can_view_debug: allowed,
+      bot_a: { name: 'debug_alpha', owner_name: 'alpha' },
+      bot_b: { name: 'debug_beta', owner_name: 'beta' },
+      result: { rounds_played: 1, deltas: [100, -100], normalized_delta: 1 },
+    },
+    replay: { events_json: JSON.stringify(replay) },
+  })
+
+  for (const id of [allowedId, deniedId, staleId]) {
+    await page.route(`**/api/matches/${id}/view`, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+    })
+  }
+  await page.route(`**/api/matches/${allowedId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(detail(allowedId, true)),
+    })
+  })
+  let deniedDetailRequests = 0
+  let releaseDeniedDetail!: () => void
+  const deniedDetailGate = new Promise<void>((resolve) => { releaseDeniedDetail = resolve })
+  await page.route(`**/api/matches/${deniedId}`, async (route) => {
+    deniedDetailRequests += 1
+    await deniedDetailGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(detail(deniedId, false)),
+    })
+  })
+  await page.route(`**/api/matches/${staleId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(detail(staleId, true)),
+    })
+  })
+  let allowedDebugRequests = 0
+  await page.route(`**/api/matches/${allowedId}/debug`, async (route) => {
+    allowedDebugRequests += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match_id: allowedId,
+        entries: [
+          {
+            seat: 0,
+            turn: 1,
+            leg: null,
+            debug: `${longToken}<img src=x onerror="window.__debugXss=true"> https://evil.test/`,
+          },
+          { seat: 1, turn: 2, leg: 1, debug: { branch: 'defend', score: 0.73 } },
+        ],
+        entry_count: 2,
+        total_bytes: 4_096,
+        dropped_count: 3,
+        updated_at: '2026-08-10T12:00:00',
+      }),
+    })
+  })
+  let deniedDebugRequests = 0
+  await page.route(`**/api/matches/${deniedId}/debug`, async (route) => {
+    deniedDebugRequests += 1
+    await route.fulfill({ status: 403, contentType: 'application/json', body: '{"detail":"denied"}' })
+  })
+  let staleDebugRequests = 0
+  let releaseStaleDebug!: () => void
+  const staleDebugGate = new Promise<void>((resolve) => { releaseStaleDebug = resolve })
+  await page.route(`**/api/matches/${staleId}/debug`, async (route) => {
+    staleDebugRequests += 1
+    await staleDebugGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match_id: staleId,
+        entries: [{ seat: 0, turn: 9, leg: null, debug: 'STALE_PRIVATE_CONTENT' }],
+        entry_count: 1,
+        total_bytes: 21,
+        dropped_count: 0,
+        updated_at: '2026-08-10T12:00:00',
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}' })
+  })
+  await page.route('**/api/likes/status?target_type=match&target_id=*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"liked":false}' })
+  })
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(`/#/match/${allowedId}`)
+  const panel = page.getByTestId('bot-debug-panel')
+  await expect(panel).toBeVisible()
+  const longDebug = panel.locator('pre').filter({ hasText: 'LONG_AAAAA' })
+  await expect(longDebug).not.toBeVisible()
+  await page.getByRole('button', { name: '展开 Bot 调试信息', exact: true }).click()
+  await expect(longDebug).toBeVisible()
+  await expect(longDebug).toContainText(longToken.slice(0, 64))
+  await expect(panel).toContainText('有 3 条内容因安全或容量上限未保存')
+  expect(allowedDebugRequests).toBe(1)
+  expect(await panel.locator('a').count()).toBe(0)
+  expect(await panel.locator('img').count()).toBe(0)
+  expect(await page.evaluate(() => Boolean((window as Window & { __debugXss?: boolean }).__debugXss))).toBe(false)
+
+  await page.getByRole('tab', { name: /座位 2/ }).click()
+  await expect(panel.getByText('"branch": "defend"', { exact: false })).toBeVisible()
+  await page.getByRole('tab', { name: /座位 1/ }).click()
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await panel.scrollIntoViewIfNeeded()
+  const panelBox = await panel.boundingBox()
+  expect(panelBox?.width ?? 999).toBeLessThanOrEqual(390)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+    .toBeLessThanOrEqual(1)
+  await page.evaluate(() => window.scrollBy(0, 220))
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+    .toBeLessThanOrEqual(1)
+
+  // 上一局的私有响应在路由切换后才返回，不得渲染到新对局。
+  await page.goto(`/#/match/${staleId}`)
+  await expect.poll(() => staleDebugRequests).toBe(1)
+  await page.goto(`/#/match/${deniedId}`)
+  await expect.poll(() => deniedDetailRequests).toBe(1)
+  // 新路由的权限详情尚未返回时，旧对局 panel 也必须同步从 DOM 消失。
+  await expect(page.getByTestId('bot-debug-panel')).toHaveCount(0)
+  releaseStaleDebug()
+  await expect(page.getByText('STALE_PRIVATE_CONTENT', { exact: true })).toHaveCount(0)
+  releaseDeniedDetail()
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('bot-debug-panel')).toHaveCount(0)
+  await expect(page.getByText('STALE_PRIVATE_CONTENT', { exact: true })).toHaveCount(0)
+  await page.waitForTimeout(150)
+  expect(deniedDebugRequests).toBe(0)
+  await monitor.expectClean()
+})
+
 test('MatchViewer playback clock cannot be starved by continuous SSE traffic', async ({ page }) => {
   const matchId = 'mock-live-continuous-clock'
   const initialEvents = [

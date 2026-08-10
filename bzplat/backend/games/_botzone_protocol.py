@@ -3,7 +3,8 @@
 Traditional 与 LongRunning 只是进程生命周期不同，二者共享同一份 JSON
 契约：Traditional（以及 LongRunning 首回合）接收完整历史信封，LongRunning
 握手后的回合接收单 request 信封；Bot 的每个响应都必须是包含
-``response`` 的 JSON 对象。平台只消费 ``response``，其余顶层字段忽略。
+``response`` 的 JSON 对象。平台只用 ``response`` 驱动动作；正式 Bot 对战的
+调用方可另取可选 ``debug`` 私有 sidecar，其余顶层字段忽略。
 
 这里同时提供正式对局与上传预检复用的严格响应解码和 LongRunning 握手校验，
 避免各游戏维护一套更宽松的“预检协议”。游戏模块只负责校验 ``response``
@@ -62,8 +63,9 @@ def loads_response(line: str) -> dict[str, Any]:
 def extract_response_payload(envelope: Any) -> Any:
     """从唯一合法响应信封中取 payload。
 
-    顶层必须包含 ``response``；裸响应或缺少该字段仍拒绝。Bot 可附带
-    ``debug`` 等扩展字段，平台不读取、不持久化，也不让它们影响裁判。
+    顶层必须包含 ``response``；裸响应或缺少该字段仍拒绝。此函数只提取
+    动作，不读取任何扩展字段；正式对局的 ``debug`` 由
+    :func:`decode_response_with_debug` 在独立 sidecar 边界处理。
     """
     if not isinstance(envelope, dict):
         raise ResponseProtocolError(
@@ -81,9 +83,27 @@ def decode_response_payload(
     validate_payload: Callable[[Any], Any],
 ) -> Any:
     """按唯一协议解码一行 Bot 响应，并校验游戏 payload。"""
+    payload, _debug = decode_response_with_debug(line, validate_payload)
+    return payload
+
+
+def decode_response_with_debug(
+    line: str,
+    validate_payload: Callable[[Any], Any],
+) -> tuple[Any, Any | None]:
+    """解码动作，并仅提取可选顶层 ``debug`` sidecar。
+
+    ``response`` 仍是唯一裁判输入；除 ``debug`` 外的所有顶层扩展字段都被
+    忽略。调用方若不显式消费第二个返回值（上传预检即如此），调试内容会
+    立即丢弃。JSON ``null`` 与未提供 ``debug`` 语义相同。
+    """
     try:
-        envelope = loads_response(line)
-    except (json.JSONDecodeError, TypeError) as exc:
+        envelope = json.loads(line)
+    # 64 KiB 传输硬顶限制总量，但恶意 JSON 仍可用极深容器触发
+    # ``RecursionError``，或用超长整数触发 Python 的数字位数 ``ValueError``。
+    # 二者都属于 Bot 响应不可解码，必须是可归责 protocol_error，不能冒充
+    # 平台故障进入通用异常日志。
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ResponseProtocolError(
             "invalid_json", TECHNICAL_INCIDENT_MESSAGES["invalid_json"]
         ) from exc
@@ -94,7 +114,8 @@ def decode_response_payload(
         raise ResponseProtocolError(
             "invalid_response", TECHNICAL_INCIDENT_MESSAGES["invalid_response"]
         ) from exc
-    return payload
+    debug = envelope.get("debug") if isinstance(envelope, dict) else None
+    return payload, debug
 
 
 def is_keep_running_signal(line: str | None) -> bool:
@@ -160,6 +181,7 @@ __all__ = [
     "loads_response",
     "extract_response_payload",
     "decode_response_payload",
+    "decode_response_with_debug",
     "is_keep_running_signal",
     "require_keep_running_signal",
     "preflight_exchange",

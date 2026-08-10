@@ -12,6 +12,9 @@ from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
 # 硬编码只读资源（admin 不可抬高）
 BOT_CPUS = 1.0
 BOT_MEMORY_MB = 512
+# 单次 Bot stdout 响应行的传输硬顶。StreamReader 与协议解析共用同一常量，
+# 防止超长无换行输出先撑大进程内存、随后才在业务层判错。
+MAX_BOT_RESPONSE_LINE_BYTES = 64 * 1024
 
 def cpu_count() -> int:
     return os.cpu_count() or 1

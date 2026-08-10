@@ -6,9 +6,10 @@
 
 **对战核心**
 - 唯一上传格式为 **Linux x86_64 ELF**；拒绝 PE/`.exe`、Mach-O、ARM64 ELF 和原始 `.py`，Docker 硬隔离执行
-- 唯一 JSON 信封：Traditional / LongRunning 只区分进程生命周期；响应必须包含 `response`，其他顶层字段忽略；LongRunning 必须握手且不回退
+- 唯一 JSON 信封：Traditional / LongRunning 只区分进程生命周期；响应必须包含 `response`，可选 `debug` 走独立私有 sidecar，其余顶层字段忽略；LongRunning 必须握手且不回退
 - 各游戏独立裁判引擎 + 统一 GameSpec/结果契约；赛制与编排主流程无需游戏名分支
 - SSE 实时观赛 + 完整对局回放（播放/暂停/步进/倍速/逐手跳转）
+- 终局私有 Bot debug sidecar：双方作者对称调试，赛事延迟授权，公开回放零泄漏
 - 人类 vs Bot（WebSocket 实时交互，独立并发，不计评分）
 
 **赛事与排行**

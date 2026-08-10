@@ -12,7 +12,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
 import PageStub from '@/components/PageStub'
+import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
+import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -33,7 +35,13 @@ import {
   resolveWinnerLabel,
 } from '@/lib/match-seats'
 
-type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: string }
+type MatchRow = MatchSeatRow & {
+  id?: string
+  game_id?: string
+  status?: string
+  reason?: string
+  can_view_debug?: boolean
+}
 
 function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
   if (!match) return false
@@ -99,7 +107,10 @@ function ratingBadge(match: MatchRow): {
 export default function MatchViewer() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { user } = useAuth()
   const [match, setMatch] = useState<MatchRow | null>(null)
+  const [botDebug, setBotDebug] = useState<BotDebugPayload | null>(null)
+  const [debugPermissionScope, setDebugPermissionScope] = useState<string | null>(null)
   const [events, setEvents] = useState<RawEvent[]>([])
   const [status, setStatus] = useState<string>('connecting')  // connecting|live|match_end|error|replay
   const [error, setError] = useState('')
@@ -120,6 +131,9 @@ export default function MatchViewer() {
   // React 的 nested-update 保护；先入队、每帧合并一次，match_end 到达时同步冲刷。
   const pendingEventsRef = useRef<RawEvent[]>([])
   const flushFrameRef = useRef<number | null>(null)
+  const debugPermissionRefreshRef = useRef<string | null>(null)
+  const debugFetchedRef = useRef<string | null>(null)
+  const debugLoadGenerationRef = useRef(0)
 
   // 直播 SSE / 回放加载（一次性探测状态，决定模式）
   const isLiveMatch = match?.status === 'running' || match?.status === 'pending'
@@ -281,6 +295,71 @@ export default function MatchViewer() {
       es?.close()
     }
   }, [id])
+
+  // 私有 debug 只在终态且详情明确授予当前身份时读取。
+  // 每个 match+user 权限域必须独立刷新详情；路由或账号切换会通过
+  // generation 废弃旧响应，防止上一局/上一身份的私有内容短暂渲染。
+  useEffect(() => {
+    const generation = ++debugLoadGenerationRef.current
+    const current = () => debugLoadGenerationRef.current === generation
+    if (!id || !user) {
+      setBotDebug(null)
+      setDebugPermissionScope(null)
+      debugPermissionRefreshRef.current = null
+      debugFetchedRef.current = null
+      return
+    }
+    if (match?.id !== id) {
+      setBotDebug(null)
+      setDebugPermissionScope(null)
+      debugPermissionRefreshRef.current = null
+      debugFetchedRef.current = null
+      return
+    }
+    const terminal = match?.status === 'completed' || match?.status === 'aborted'
+    if (!terminal) {
+      setBotDebug(null)
+      setDebugPermissionScope(null)
+      debugPermissionRefreshRef.current = null
+      debugFetchedRef.current = null
+      return
+    }
+
+    const permissionKey = `${id}:${user.id}`
+    if (debugPermissionScope !== permissionKey) {
+      if (debugPermissionRefreshRef.current !== permissionKey) {
+        debugPermissionRefreshRef.current = permissionKey
+        debugFetchedRef.current = null
+        setBotDebug(null)
+        void apiGet<{ match: MatchRow }>(`/api/matches/${encodeURIComponent(id)}`)
+          .then((detail) => {
+            if (current() && detail.match.id === id) {
+              setMatch(detail.match)
+              setDebugPermissionScope(permissionKey)
+            }
+          })
+          .catch(() => {
+            if (current()) debugPermissionRefreshRef.current = null
+          })
+      }
+      return
+    }
+
+    if (!match?.can_view_debug) {
+      setBotDebug(null)
+      return
+    }
+    const fetchKey = permissionKey
+    if (debugFetchedRef.current === fetchKey) return
+    debugFetchedRef.current = fetchKey
+    void apiGet<BotDebugPayload>(`/api/matches/${encodeURIComponent(id)}/debug`)
+      .then((payload) => {
+        if (current() && payload.match_id === id) setBotDebug(payload)
+      })
+      .catch(() => {
+        if (current()) setBotDebug(null)
+      })
+  }, [id, user?.id, match?.id, match?.status, match?.can_view_debug, debugPermissionScope])
 
   // 窄屏默认折叠时序面板，并在旋转/调整窗口跨过 xl 断点时同步。
   // 同一布局内的手动折叠选择不会被 resize 覆盖。
@@ -637,6 +716,19 @@ export default function MatchViewer() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {user
+        && match
+        && match.id === id
+        && debugPermissionScope === `${id}:${user.id}`
+        && match.can_view_debug
+        && botDebug
+        && botDebug.match_id === match.id && (
+        <BotDebugPanel
+          payload={botDebug}
+          seatNames={[seatHeaderLabel(match, 0), seatHeaderLabel(match, 1)]}
+        />
       )}
 
       {error && <ErrorMsg msg={error} className="mb-4" />}

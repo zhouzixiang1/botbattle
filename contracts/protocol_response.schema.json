@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PlatformHoldemResponseEnvelope",
-  "description": "平台唯一现行 Holdem 响应信封。顶层必须包含 response；平台忽略其他字段。-1=fold，-2=all-in，0=call/check，正整数=额外投入筹码。",
+  "description": "平台唯一现行 Holdem 响应信封。顶层必须包含 response；可选 debug 只作正式 Bot 对战终局后的有界私有 sidecar，其他字段忽略。只有 response 进入历史与裁判。-1=fold，-2=all-in，0=call/check，正整数=额外投入筹码。",
   "type": "object",
   "required": ["response"],
   "additionalProperties": true,
@@ -10,6 +10,9 @@
       "type": "integer",
       "minimum": -2,
       "description": "-1 fold / -2 all-in / 0 call-check / 正整数为 raise delta"
+    },
+    "debug": {
+      "description": "可选任意 JSON 值；不参与动作、历史或结果。预检丢弃，正式 Bot 对战终局后才可能私有保存。"
     }
   }
 }

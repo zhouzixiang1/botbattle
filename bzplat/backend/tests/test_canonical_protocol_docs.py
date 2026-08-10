@@ -19,14 +19,17 @@ def _wiki_sample(relative: str, marker: str, language: str) -> str:
     return text.split(prefix, 1)[1].split("\n```", 1)[0] + "\n"
 
 
-def test_holdem_response_schema_requires_response_and_allows_ignored_metadata() -> None:
+def test_holdem_response_schema_requires_response_and_declares_private_debug() -> None:
     schema = _json("contracts/protocol_response.schema.json")
     assert schema["type"] == "object"
     assert schema["required"] == ["response"]
     assert schema["additionalProperties"] is True
-    assert set(schema["properties"]) == {"response"}
+    assert set(schema["properties"]) == {"response", "debug"}
     assert schema["properties"]["response"]["type"] == "integer"
     assert schema["properties"]["response"]["minimum"] == -2
+    # 无 type 约束表示 debug 可取任意 JSON 值；运行时负责私有清洗/限额，
+    # additionalProperties 继续允许并丢弃 data/globaldata 等未知 metadata。
+    assert set(schema["properties"]["debug"]) == {"description"}
 
 
 def test_holdem_request_schema_pins_70_and_envelopes_are_closed() -> None:

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bzplat.backend.runtime.config import ACTION_TIMEOUT_SEC
+from bzplat.backend.runtime.limits import MAX_BOT_RESPONSE_LINE_BYTES
 
 from ..bots.classify import (
     BinaryInfo,
@@ -94,6 +95,10 @@ class BotCrashedError(RuntimeError):
         # 崩溃方座位号（0=bot_a, 1=bot_b）；None=未知（如 start_session 阶段未注解）。
         # 由 runner 在 start_session 失败时注解，供 orchestrator 判技术判负的胜方。
         self.crashed_seat = crashed_seat
+
+
+class BotResponseLineTooLargeError(RuntimeError):
+    """Bot stdout 在传输层超过单行硬顶；runner 将其归责为协议故障。"""
 
 
 class PlatformRunnerError(RuntimeError):
@@ -469,7 +474,9 @@ class BinaryRunner:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
+            # 多留一个字节容纳合法上限后的换行；超限时 readline 会抛
+            # ValueError，由 send/read_extra_line 转成不携带原文的类型错误。
+            limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
         )
 
     async def _start_docker(self, session: BotSession) -> None:
@@ -508,7 +515,7 @@ class BinaryRunner:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
+            limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
         )
 
     async def send(self, session_id: str, line: str, *,
@@ -531,6 +538,10 @@ class BinaryRunner:
             # match/bot/version/runtime/seat/turn after this typed timeout propagates.
             logger.warning("bot session %s 决策超时 (%ss)", session_id, timeout)
             raise TimeoutError(f"bot {session_id} 决策超时 ({timeout}s)")
+        except ValueError as exc:
+            # StreamReader.readline 将 LimitOverrunError 规范化为 ValueError。
+            # 不记录 Bot 控制的原始 stdout，也不把它误判成平台故障。
+            raise BotResponseLineTooLargeError("Bot stdout 响应行超过硬顶") from exc
         if not raw:
             raise await self._process_exit_error(session, "stdout EOF")
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -599,6 +610,8 @@ class BinaryRunner:
             raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
         except asyncio.TimeoutError:
             return None
+        except ValueError as exc:
+            raise BotResponseLineTooLargeError("Bot stdout 握手行超过硬顶") from exc
         if not raw:
             return None
         return raw.decode("utf-8", errors="replace").rstrip("\r\n") or None

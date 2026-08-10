@@ -25,7 +25,22 @@ ip=<真实IP> method=<METHOD> path=<路径> status=<状态码> dt=<耗时ms>
 ip=<真实IP> action=<动作> result=<ok|fail> user=<操作者> target=<目标> detail="<细节>"
 ```
 - `result=fail` 记为 **WARNING** 级别（安全事件优先关注）。
-- 埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间字段修改、runtime 配置修改、改角色、建重置令牌。赛事与 runtime 管理写同时记录拒绝原因（`result=fail`），便于按 contest id 或 action 追溯。
+- 埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、对局创建、人类对战、私有 Bot debug 读取、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间字段修改、改角色、建重置令牌。debug 读取只记 actor、match、成功/拒绝和成功条数，绝不写入内容；拒绝统一记 `result=fail`。
+
+## 私有 Bot debug 边界
+
+Bot stdout 顶层 `debug` 是独立于动作/回放的私有 sidecar：单行传输 64 KiB 硬顶，收集阶段再做
+单条 4 KiB、深度 4、容器 64 项、256 节点、每座位 512 条/128 KiB、整场
+1024 条/256 KiB 的多级限制。文本先 NFC 归一化，移除 ANSI、控制字符、双向与不可见格式字符，
+再脱敏 password/token/cookie/authorization/session/private-key 等敏感键和值；`Cookie`/`Set-Cookie`
+从字段起整段遮蔽，避免分号后的复合 cookie 泄漏。容量已满时先做 O(1) 闸门，不再遍历 Bot 控制内容。
+
+sidecar 只在 Bot-vs-Bot 终态后原子写独立表；写失败不回滚对局。普通双方 Bot owner 可对称读取，
+赛事 organizer/admin 可在单场终态读取，参赛 Bot owner 等整赛 `finished/cancelled`；人类对战仅
+admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不一致时，非 admin 一律 fail-closed。
+接口返回 `private, no-store`，拒绝不暴露记录存在性。内容不进入
+`responses[]`、Bot 请求、result、REST replay、SSE/WS、通知或任何日志；前端只用文本节点/
+安全 JSON 渲染，不解释 HTML、Markdown 或链接。
 
 ## IP 透传链路（公网必需）
 

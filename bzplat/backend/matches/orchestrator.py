@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.games import normalize_game_id
+from bzplat.backend.matches.bot_debug import BotDebugCollector
 from bzplat.backend.matches.runner import MatchRunner, _fail_response
 from bzplat.backend.matches.result_contract import (
     build_engine_result_payload,
@@ -1265,7 +1266,30 @@ class MatchOrchestrator:
         # duplicate 用确定性 seed（落库供回放/复现；单 leg 不强制 seed，沿用随机）。
         dup_seed = int(stored_mc.get("duplicate_seed")) if stored_mc.get("duplicate_seed") is not None else None
         events: list[dict] = []
+        debug_collector = BotDebugCollector()
+        debug_persisted = False
         self._active_replay_events[match_id] = events
+
+        def persist_debug() -> None:
+            """终局广播前落 sidecar，避免授权页面先读到一次性空快照。"""
+            nonlocal debug_persisted
+            if not debug_persisted:
+                debug_persisted = self._safe_persist_bot_debug(
+                    match_id, debug_collector, auto_fence=auto_fence
+                )
+
+        def on_debug(
+            seat: int,
+            turn: int,
+            leg: int | None,
+            debug: Any,
+        ) -> None:
+            debug_collector.capture(
+                seat=seat,
+                turn=turn,
+                leg=leg,
+                debug=debug,
+            )
 
         def on_event(kind: str, ev: dict) -> None:
             # The engine terminal is an internal result signal, not a public
@@ -1312,6 +1336,7 @@ class MatchOrchestrator:
                     path_b,
                     game_id=gid,
                     on_event=on_event,
+                    on_debug=on_debug,
                     seed=dup_seed,
                     runtime_modes=(mode_a, mode_b),
                     time_budget_per_side=spec.time_budget_per_side,
@@ -1323,6 +1348,7 @@ class MatchOrchestrator:
                     path_b,
                     game_id=gid,
                     on_event=on_event,
+                    on_debug=on_debug,
                     runtime_modes=(mode_a, mode_b),
                     time_budget_per_side=spec.time_budget_per_side,
                 )
@@ -1372,6 +1398,7 @@ class MatchOrchestrator:
             terminal_event = _authoritative_match_end(
                 winner, terminal_reason, [ea, eb]
             )
+            persist_debug()
             self._safe_flush_terminal_replay(
                 match_id, events, terminal_event, auto_fence=auto_fence
             )
@@ -1433,6 +1460,7 @@ class MatchOrchestrator:
             terminal_event = _authoritative_match_end(
                 winner, exc.reason, [ea, eb]
             )
+            persist_debug()
             self._safe_flush_terminal_replay(
                 match_id, events, terminal_event, auto_fence=auto_fence
             )
@@ -1453,6 +1481,7 @@ class MatchOrchestrator:
                 ended_at=_now(),
             )
             terminal_event = _authoritative_error("platform_error")
+            persist_debug()
             self._safe_flush_terminal_replay(
                 match_id, events, terminal_event, auto_fence=auto_fence
             )
@@ -1479,6 +1508,7 @@ class MatchOrchestrator:
             terminal_event = _authoritative_match_end(
                 winner, "technical_loss", [ea, eb]
             )
+            persist_debug()
             self._safe_flush_terminal_replay(
                 match_id, events, terminal_event, auto_fence=auto_fence
             )
@@ -1496,12 +1526,45 @@ class MatchOrchestrator:
                 ended_at=_now(),
             )
             terminal_event = _authoritative_error("platform_error")
+            persist_debug()
             self._safe_flush_terminal_replay(
                 match_id, events, terminal_event, auto_fence=auto_fence
             )
             self._broadcast(match_id, terminal_event)
         finally:
+            persist_debug()
             await self._finish_match_task(match_id, m.get("contest_id"))
+
+    def _safe_persist_bot_debug(
+        self,
+        match_id: str,
+        collector: BotDebugCollector,
+        *,
+        auto_fence: AutoMatchFence = None,
+    ) -> bool:
+        """终局后尽力批量写私有 sidecar；失败不得改变对局状态。"""
+        try:
+            return self.store.replace_match_debug(
+                match_id,
+                collector.entries,
+                dropped_count=collector.dropped_count,
+                **self._auto_fence_kwargs(auto_fence),
+            )
+        except AutoMatchFenceLost:
+            # Store 已拒绝 stale worker；debug 是终局旁路，不能因这里再次
+            # 抛错而跳过 finally 中的本地 task/subscriber 清理。权威终局、
+            # replay 与评分写仍各自保留严格 fence 并会终止 stale worker。
+            return False
+        except Exception:
+            # 仅记录 match id 和计数；不记录 traceback/异常文本，
+            # 避免底层驱动将绑定值（Bot 内容）嵌入异常消息。
+            logger.warning(
+                "match debug persistence failed match=%s entries=%s dropped=%s",
+                match_id,
+                len(collector.entries),
+                collector.dropped_count,
+            )
+            return False
 
     async def _safe_postprocess_completed_match(
         self,

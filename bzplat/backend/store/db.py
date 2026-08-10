@@ -51,6 +51,11 @@ from .schema import (
     TYPE_HUMAN,
     TYPE_LADDER,
     LIKE_TARGET_TYPES,
+    MATCH_DEBUG_MAX_BYTES_PER_MATCH,
+    MATCH_DEBUG_MAX_BYTES_PER_SEAT,
+    MATCH_DEBUG_MAX_ENTRIES_PER_MATCH,
+    MATCH_DEBUG_MAX_ENTRIES_PER_SEAT,
+    MATCH_DEBUG_MAX_ENTRY_BYTES,
     VALID_RUNTIME_MODES,
     require_supported_binary_metadata,
 )
@@ -5507,6 +5512,263 @@ class Store:
                 match,
                 human_viewer_seat=human_viewer_seat,
             )
+
+    # ── 私有 Bot debug sidecar ───────────────────────────────
+
+    def _match_debug_access(
+        self,
+        c: sqlite3.Connection,
+        match_id: str,
+        *,
+        user_id: int,
+        is_admin: bool,
+    ) -> dict[str, bool]:
+        """在调用方事务内执行唯一一份 debug 授权规则。"""
+        tbl = self._match_table_of(c, match_id)
+        if not tbl:
+            return {"found": False, "allowed": False}
+        match = c.execute(
+            f"SELECT m.status,m.match_type,m.contest_id,"
+            "ba.owner_id AS bot_a_owner_id,bb.owner_id AS bot_b_owner_id "
+            f"FROM {tbl} m "
+            "LEFT JOIN bots ba ON ba.id=m.bot_a_id "
+            "LEFT JOIN bots bb ON bb.id=m.bot_b_id "
+            "WHERE m.id=?",
+            (match_id,),
+        ).fetchone()
+        if not match:
+            return {"found": False, "allowed": False}
+
+        terminal = match["status"] in (STATUS_COMPLETED, STATUS_ABORTED)
+        allowed = False
+        if terminal:
+            if is_admin:
+                allowed = True
+            elif match["match_type"] == TYPE_HUMAN:
+                allowed = False
+            elif (
+                match["match_type"] == TYPE_CONTEST
+                or match["contest_id"] is not None
+            ):
+                # 赛事身份或外键任一侧异常都 fail closed。不能把
+                # ``TYPE_CONTEST + contest_id=NULL``（例如赛事删除后的
+                # ON DELETE SET NULL / 旧库漂移）误当普通对局，绕过整赛终态闸门。
+                contest = None
+                if (
+                    match["match_type"] == TYPE_CONTEST
+                    and match["contest_id"] is not None
+                ):
+                    contest = c.execute(
+                        "SELECT organizer_id,status FROM contests WHERE id=?",
+                        (match["contest_id"],),
+                    ).fetchone()
+                if contest and contest["organizer_id"] == user_id:
+                    allowed = True
+                elif contest and contest["status"] in (
+                    CONTEST_FINISHED,
+                    CONTEST_CANCELLED,
+                ):
+                    allowed = user_id in {
+                        match["bot_a_owner_id"],
+                        match["bot_b_owner_id"],
+                    }
+            else:
+                allowed = user_id in {
+                    match["bot_a_owner_id"],
+                    match["bot_b_owner_id"],
+                }
+        return {"found": True, "allowed": allowed}
+
+    def can_read_match_debug(
+        self,
+        match_id: str,
+        *,
+        user_id: int,
+        is_admin: bool,
+    ) -> dict[str, bool]:
+        """只做授权探测；不加载任何私有 debug 内容。"""
+        with self._tx() as c:
+            c.execute("BEGIN")
+            return self._match_debug_access(
+                c,
+                match_id,
+                user_id=user_id,
+                is_admin=is_admin,
+            )
+
+    def replace_match_debug(
+        self,
+        match_id: str,
+        entries: list[dict[str, Any]],
+        *,
+        dropped_count: int = 0,
+        auto_dispatcher_token: str | None = None,
+        auto_dispatcher_epoch: int | None = None,
+    ) -> bool:
+        """在 Bot-vs-Bot 对局终态后原子替换整场调试批次。
+
+        运行中和人类对局 fail closed；调用方的写入失败只应记录到私有日志，
+        不得回滚已经提交的对局结果。单条/整场硬上限由 collector 与表 CHECK
+        双重约束。
+        """
+        fenced = auto_dispatcher_token is not None or auto_dispatcher_epoch is not None
+        if fenced and (
+            not auto_dispatcher_token or auto_dispatcher_epoch is None
+        ):
+            raise ValueError("auto-match debug fence requires token and epoch")
+        now = _now()
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if fenced:
+                self._require_auto_match_fence_tx(
+                    c,
+                    match_id,
+                    str(auto_dispatcher_token),
+                    int(auto_dispatcher_epoch),
+                    require_claim_fence=True,
+                )
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return False
+            match = c.execute(
+                f"SELECT status,match_type,bot_a_id,bot_b_id FROM {tbl} WHERE id=?",
+                (match_id,),
+            ).fetchone()
+            if (
+                not match
+                or match["status"] not in (STATUS_COMPLETED, STATUS_ABORTED)
+                or match["match_type"] == TYPE_HUMAN
+            ):
+                return False
+
+            if len(entries) > MATCH_DEBUG_MAX_ENTRIES_PER_MATCH:
+                raise ValueError("Bot debug 超过单场条数上限")
+            normalized: list[tuple[int, int, int, str, int]] = []
+            seen: set[tuple[int, int, int]] = set()
+            seat_counts = [0, 0]
+            seat_bytes = [0, 0]
+            total_bytes = 0
+            for entry in entries:
+                seat = int(entry["seat"])
+                turn = int(entry["turn"])
+                leg = int(entry.get("leg", -1))
+                debug_json = entry["debug_json"]
+                if seat not in (0, 1) or turn < 1 or leg < -1:
+                    raise ValueError("Bot debug 座位/回合/leg 不合法")
+                identity = (seat, turn, leg)
+                if identity in seen:
+                    raise ValueError("Bot debug 座位/回合/leg 重复")
+                seen.add(identity)
+                if not isinstance(debug_json, str):
+                    raise ValueError("Bot debug 必须是已清洗 JSON 文本")
+                # 先由 Python 拒绝非 JSON，再由表 json_valid CHECK 作持久层
+                # 第二道闸门。容量以实际 UTF-8 长度计算，绝不信任调用方
+                # 传入的 size_bytes。
+                json.loads(debug_json)
+                actual_size = len(debug_json.encode("utf-8"))
+                if not 1 <= actual_size <= MATCH_DEBUG_MAX_ENTRY_BYTES:
+                    raise ValueError("Bot debug 超过单条容量上限")
+                if int(entry.get("size_bytes", actual_size)) != actual_size:
+                    raise ValueError("Bot debug size_bytes 与实际内容不一致")
+                seat_counts[seat] += 1
+                seat_bytes[seat] += actual_size
+                total_bytes += actual_size
+                if (
+                    seat_counts[seat] > MATCH_DEBUG_MAX_ENTRIES_PER_SEAT
+                    or seat_bytes[seat] > MATCH_DEBUG_MAX_BYTES_PER_SEAT
+                ):
+                    raise ValueError("Bot debug 超过单座位上限")
+                if total_bytes > MATCH_DEBUG_MAX_BYTES_PER_MATCH:
+                    raise ValueError("Bot debug 超过单场容量上限")
+                normalized.append((seat, turn, leg, debug_json, actual_size))
+            c.execute(
+                "INSERT INTO match_debug_sessions("
+                "match_id,entry_count,total_bytes,dropped_count,created_at,updated_at"
+                ") VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(match_id) DO UPDATE SET "
+                "entry_count=excluded.entry_count,total_bytes=excluded.total_bytes,"
+                "dropped_count=excluded.dropped_count,updated_at=excluded.updated_at",
+                (
+                    match_id,
+                    len(entries),
+                    total_bytes,
+                    max(0, int(dropped_count)),
+                    now,
+                    now,
+                ),
+            )
+            c.execute("DELETE FROM match_debug_entries WHERE match_id=?", (match_id,))
+            for seat, turn, leg, debug_json, actual_size in normalized:
+                bot_id = match["bot_a_id"] if seat == 0 else match["bot_b_id"]
+                c.execute(
+                    "INSERT INTO match_debug_entries("
+                    "match_id,bot_id,seat,turn,leg,debug_json,size_bytes,created_at"
+                    ") VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        match_id,
+                        bot_id,
+                        seat,
+                        turn,
+                        leg,
+                        debug_json,
+                        actual_size,
+                        now,
+                    ),
+                )
+            return True
+
+    def get_match_debug_for_user(
+        self,
+        match_id: str,
+        *,
+        user_id: int,
+        is_admin: bool,
+    ) -> dict[str, Any]:
+        """在一个 SQLite 快照内完成权限判定与私有内容读取。
+
+        返回 ``found/allowed``，拒绝响应不携带调试记录是否存在的信息。
+        非赛事双方 Bot owner 在单场终态后可见；赛事 owner 必须等整个赛事
+        终态，赛事组织者与管理员只需该单场终态。人类对局仅管理员可审计。
+        """
+        with self._tx() as c:
+            c.execute("BEGIN")
+            access = self._match_debug_access(
+                c,
+                match_id,
+                user_id=user_id,
+                is_admin=is_admin,
+            )
+            if not access["allowed"]:
+                return access
+
+            session = c.execute(
+                "SELECT entry_count,total_bytes,dropped_count,updated_at "
+                "FROM match_debug_sessions WHERE match_id=?",
+                (match_id,),
+            ).fetchone()
+            rows = c.execute(
+                "SELECT seat,turn,leg,debug_json FROM match_debug_entries "
+                "WHERE match_id=? ORDER BY seat,leg,turn,id",
+                (match_id,),
+            ).fetchall()
+            entries: list[dict[str, Any]] = []
+            for row in rows:
+                entries.append(
+                    {
+                        "seat": int(row["seat"]),
+                        "turn": int(row["turn"]),
+                        "leg": None if int(row["leg"]) < 0 else int(row["leg"]),
+                        "debug": json.loads(row["debug_json"]),
+                    }
+                )
+            return {
+                **access,
+                "entries": entries,
+                "entry_count": int(session["entry_count"]) if session else 0,
+                "total_bytes": int(session["total_bytes"]) if session else 0,
+                "dropped_count": int(session["dropped_count"]) if session else 0,
+                "updated_at": session["updated_at"] if session else None,
+            }
 
     # ── ratings（per-game：PK = bot_id + game_id，全面解耦 PR3）─────────
 

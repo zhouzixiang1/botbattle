@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
@@ -24,6 +24,11 @@ from bzplat.backend.security import audit_log
 from bzplat.backend.bots import BotError, BotManager
 
 logger = logging.getLogger(__name__)
+_DEBUG_NO_STORE_HEADERS = {
+    "Cache-Control": "private, no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Vary": "Authorization, Cookie",
+}
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.presentation import build_stage_summaries
 from bzplat.backend.contests.showcase import (
@@ -1010,13 +1015,107 @@ def liked_top_matches(request: Request, limit: int = 10):
 
 
 @router.get("/api/matches/{match_id}")
-def match_detail(match_id: str, request: Request):
+def match_detail(
+    match_id: str,
+    request: Request,
+    response: Response = None,
+    user: dict | None = Depends(optional_user),
+):
+    # 当前身份决定 can_view_debug；共享缓存必须按认证上下文分离。
+    if response is not None:
+        response.headers["Vary"] = "Authorization, Cookie"
     store = _store(request)
     m = store.get_match_detailed(match_id)
     if not m:
         raise HTTPException(404, "对局不存在")
     replay = store.get_public_replay(match_id) or {}
-    return {"match": _with_seat_info(m, store=store), "replay": replay}
+    public_match = _with_seat_info(m, store=store)
+    # 只暴露“当前身份是否具备读取权限”，不暴露调试记录是否存在、数量或内容。
+    # MatchViewer 据此避免让无关登录用户产生预期内的 403 请求噪声。
+    public_match["can_view_debug"] = False
+    # 权威终局回归会直接调用本函数观察广播时的 API 快照；
+    # 该调用无 FastAPI 依赖注入，因而 Depends 默认值不得被当成已登录用户。
+    if isinstance(user, dict):
+        access = store.can_read_match_debug(
+            match_id,
+            user_id=int(user["id"]),
+            is_admin=user.get("role") == ROLE_ADMIN,
+        )
+        public_match["can_view_debug"] = bool(access.get("allowed"))
+    return {"match": public_match, "replay": replay}
+
+
+@router.get("/api/matches/{match_id}/debug")
+def match_debug(
+    match_id: str,
+    request: Request,
+    response: Response,
+    user: dict | None = Depends(optional_user),
+):
+    """终态 Bot debug 私有读取；拒绝响应不泄漏记录是否存在。"""
+    response.headers.update(_DEBUG_NO_STORE_HEADERS)
+    if not isinstance(user, dict):
+        audit_log(
+            request,
+            "match_debug_read",
+            result="fail",
+            target=match_id,
+            detail="unauthenticated",
+        )
+        raise HTTPException(
+            401,
+            "未登录或会话过期",
+            headers=_DEBUG_NO_STORE_HEADERS,
+        )
+    result = _store(request).get_match_debug_for_user(
+        match_id,
+        user_id=int(user["id"]),
+        is_admin=user.get("role") == ROLE_ADMIN,
+    )
+    if not result.get("found"):
+        audit_log(
+            request,
+            "match_debug_read",
+            result="fail",
+            user=user.get("username") or user.get("id"),
+            target=match_id,
+            detail="not_found",
+        )
+        raise HTTPException(
+            404,
+            "对局不存在",
+            headers=_DEBUG_NO_STORE_HEADERS,
+        )
+    if not result.get("allowed"):
+        audit_log(
+            request,
+            "match_debug_read",
+            result="fail",
+            user=user.get("username") or user.get("id"),
+            target=match_id,
+            detail="denied",
+        )
+        raise HTTPException(
+            403,
+            "无权查看该对局的调试信息",
+            headers=_DEBUG_NO_STORE_HEADERS,
+        )
+    entries = result.get("entries") or []
+    audit_log(
+        request,
+        "match_debug_read",
+        user=user.get("username") or user.get("id"),
+        target=match_id,
+        detail=f"entries={len(entries)}",
+    )
+    return {
+        "match_id": match_id,
+        "entries": entries,
+        "entry_count": int(result.get("entry_count") or 0),
+        "total_bytes": int(result.get("total_bytes") or 0),
+        "dropped_count": int(result.get("dropped_count") or 0),
+        "updated_at": result.get("updated_at"),
+    }
 
 
 @router.get("/api/matches/{match_id}/events")

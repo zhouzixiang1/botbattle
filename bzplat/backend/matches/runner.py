@@ -17,11 +17,13 @@ from bzplat.backend.games import (
 # ``match_params`` 只承载游戏 spec 明确允许的平台内部复现参数；固定规则键会在
 # session_factory 入口显式拒绝，runner 不持有任何游戏专属默认值。
 from bzplat.backend.games import _botzone_protocol as _bz
+from bzplat.backend.matches.bot_debug import MAX_RESPONSE_LINE_BYTES
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotCrashedError,
     BotDecisionTimeoutError,
     BotProtocolError,
+    BotResponseLineTooLargeError,
     BotTechnicalError,
     PlatformRunnerError,
     DEFAULT_ACTION_TIMEOUT,
@@ -32,6 +34,7 @@ from bzplat.backend.store.schema import (
 )
 
 EventSink = Callable[[str, dict[str, Any]], None]
+DebugSink = Callable[[int, int, int | None, Any], None]
 
 
 def _fail_response(game_id: str) -> dict[str, Any]:
@@ -46,10 +49,18 @@ def _protocol_payload(
     failed_seat: int,
     turn: int,
     leg: int | None,
-) -> Any:
+) -> tuple[Any, Any | None]:
     """Strictly decode one Botzone response without persisting raw Bot output."""
+    if len(line.encode("utf-8")) > MAX_RESPONSE_LINE_BYTES:
+        raise BotProtocolError(
+            TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+            error_code="response_line_too_large",
+            failed_seat=failed_seat,
+            turn=turn,
+            leg=leg,
+        )
     try:
-        return _bz.decode_response_payload(
+        return _bz.decode_response_with_debug(
             line,
             _game_registry.get(game_id).protocol.validate_response_payload,
         )
@@ -61,6 +72,32 @@ def _protocol_payload(
             turn=turn,
             leg=leg,
         ) from exc
+
+
+def _capture_debug(
+    sink: DebugSink | None,
+    *,
+    seat: int,
+    turn: int,
+    leg: int | None,
+    debug: Any,
+) -> None:
+    """调试采集是尽力 sidecar；异常绝不能改变已校验的 Bot 动作。"""
+    if sink is None or debug is None:
+        return
+    try:
+        sink(seat, turn, leg, debug)
+    except Exception:
+        # 不记录 traceback/异常文本：即使未来的 sink 把 Bot 内容
+        # 放进异常消息，日志也只保留结构化上下文。
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "bot debug collector failed seat=%s turn=%s leg=%s",
+            seat,
+            turn,
+            leg,
+        )
 
 
 async def _open_match_session(
@@ -128,6 +165,7 @@ async def _traditional_decide_one_shot(
     failed_seat: int,
     turn: int,
     leg: int | None,
+    on_debug: DebugSink | None,
 ) -> dict[str, Any]:
     """Traditional 模式单次决策：启动 Bot → 发完整历史信封 → 读响应 → 停 Bot。
 
@@ -159,7 +197,7 @@ async def _traditional_decide_one_shot(
             raise
     finally:
         await runner.stop_session(tmp_sid)
-    payload = _protocol_payload(
+    payload, debug = _protocol_payload(
         game_id,
         resp_line,
         failed_seat=failed_seat,
@@ -170,6 +208,13 @@ async def _traditional_decide_one_shot(
     session.requests.append(request)
     session.responses.append(payload)
     session.turn += 1
+    _capture_debug(
+        on_debug,
+        seat=failed_seat,
+        turn=turn,
+        leg=leg,
+        debug=debug,
+    )
     return {"response": payload}
 
 
@@ -182,6 +227,7 @@ async def _botzone_decide(
     action_timeout: float,
     failed_seat: int = 0,
     leg: int | None = None,
+    on_debug: DebugSink | None = None,
 ) -> dict[str, Any]:
     """Botzone 标准协议决策：按 session.runtime_mode 选传输路径，返回信封 dict。
 
@@ -211,11 +257,20 @@ async def _botzone_decide(
                 failed_seat=failed_seat,
                 turn=attempted_turn,
                 leg=leg,
+                on_debug=on_debug,
             )
         except asyncio.TimeoutError as exc:
             raise BotDecisionTimeoutError(
                 TECHNICAL_INCIDENT_MESSAGES["decision_timeout"],
                 error_code="decision_timeout",
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            ) from exc
+        except BotResponseLineTooLargeError as exc:
+            raise BotProtocolError(
+                TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+                error_code="response_line_too_large",
                 failed_seat=failed_seat,
                 turn=attempted_turn,
                 leg=leg,
@@ -248,8 +303,16 @@ async def _botzone_decide(
             turn=attempted_turn,
             leg=leg,
         ) from exc
+    except BotResponseLineTooLargeError as exc:
+        raise BotProtocolError(
+            TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+            error_code="response_line_too_large",
+            failed_seat=failed_seat,
+            turn=attempted_turn,
+            leg=leg,
+        ) from exc
 
-    payload = _protocol_payload(
+    payload, debug = _protocol_payload(
         game_id,
         resp_line,
         failed_seat=failed_seat,
@@ -259,7 +322,16 @@ async def _botzone_decide(
 
     # LongRunning 首回合响应后必须精确输出 keep_running 握手。
     if session.runtime_mode == _bz.RUNTIME_LONGRUNNING and is_first_turn:
-        extra = await runner.read_extra_line(session_id, timeout=1.0)
+        try:
+            extra = await runner.read_extra_line(session_id, timeout=1.0)
+        except BotResponseLineTooLargeError as exc:
+            raise BotProtocolError(
+                TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+                error_code="response_line_too_large",
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            ) from exc
         try:
             _bz.require_keep_running_signal(extra)
         except _bz.ResponseProtocolError as exc:
@@ -278,6 +350,13 @@ async def _botzone_decide(
     session.requests.append(request)
     session.responses.append(payload)
     session.turn += 1
+    _capture_debug(
+        on_debug,
+        seat=failed_seat,
+        turn=attempted_turn,
+        leg=leg,
+        debug=debug,
+    )
     # 返回唯一现行 response 信封，满足引擎的 canonical decide 契约。
     return {"response": payload}
 
@@ -339,6 +418,7 @@ class MatchRunner:
         *,
         game_id: str,
         on_event: EventSink | None = None,
+        on_debug: DebugSink | None = None,
         seed: int | None = None,
         runtime_modes: tuple[str, str] | None = None,
         time_budget_per_side: float | None = None,
@@ -408,6 +488,7 @@ class MatchRunner:
                         self.runner, sid, request,
                         game_id=gid, action_timeout=effective_timeout,
                         failed_seat=player_idx,
+                        on_debug=on_debug,
                     )
                 except BotTechnicalError as exc:
                     # 首个协议错误/超时即结束对局；绝不伪造成游戏默认动作继续跑。
@@ -626,6 +707,7 @@ class MatchRunner:
         game_id: str,
         seed: int | None = None,
         on_event: EventSink | None = None,
+        on_debug: DebugSink | None = None,
         runtime_modes: tuple[str, str] | None = None,
         time_budget_per_side: float | None = None,
         **match_params: Any,
@@ -697,6 +779,7 @@ class MatchRunner:
                             game_id=gid, action_timeout=self.action_timeout,
                             failed_seat=physical_seat,
                             leg=li,
+                            on_debug=on_debug,
                         )
                     except BotTechnicalError as exc:
                         _emit_technical_incident(leg_on_event, exc)
