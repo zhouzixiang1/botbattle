@@ -351,7 +351,9 @@ export default function GameCanvas({
   return (
     <div
       ref={wrapperRef}
-      className={viewportFit ? 'mx-auto w-full max-w-[40rem]' : 'w-full'}
+      className={viewportFit
+        ? 'mx-auto w-full md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]'
+        : 'w-full'}
     >
       <canvas
         ref={canvasRef}

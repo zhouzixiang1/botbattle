@@ -41,6 +41,10 @@
   --warning-foreground: oklch(0.27 0.06 70);
   --success: oklch(0.62 0.15 162);
 
+  /* 对局座位色：与棋盘画布的红/蓝双方保持一致，不借用危险或图表语义。 */
+  --seat-1: oklch(0.577 0.245 27.325);
+  --seat-2: oklch(0.546 0.245 262.881);
+
   /* 边框 / 输入 / 聚焦环 */
   --border: oklch(0.92 0.004 247);
   --input: oklch(0.92 0.004 247);
@@ -80,6 +84,9 @@
   --warning: oklch(0.78 0.16 70);
   --warning-foreground: oklch(0.2 0.05 70);
   --success: oklch(0.72 0.17 162);
+
+  --seat-1: oklch(0.704 0.191 22.216);
+  --seat-2: oklch(0.707 0.165 254.624);
 
   /* 暗色边框用白色低透明（v4 标准做法） */
   --border: oklch(1 0 0 / 10%);
@@ -123,6 +130,8 @@
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
   --color-success: var(--success);
+  --color-seat-1: var(--seat-1);
+  --color-seat-2: var(--seat-2);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);

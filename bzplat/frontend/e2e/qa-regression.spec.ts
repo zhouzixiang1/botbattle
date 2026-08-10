@@ -158,6 +158,74 @@ function pencilHumanIncidentPrefix() {
   ]
 }
 
+type PencilReplayMove = readonly [
+  player: 0 | 1,
+  x: number,
+  y: number,
+  score0: number,
+  score1: number,
+  closedBoxes: readonly (readonly [x: number, y: number])[],
+]
+
+/**
+ * 生产对局 20260810143624-4149d6a3 的 54 步权威轨迹。坐标、逐步比分和闭格
+ * 均从隔离主库副本提取；turn/time_used/pass 信封在测试中按裁判规则确定性重建，
+ * 因此保持原对局 206 个公开事件，同时不依赖会变化的生产数据库。
+ */
+const PENCIL_REPLAY_143624_MOVES = [
+  [0, 8, 3, 0, 0, []], [1, 3, 2, 0, 0, []], [0, 3, 8, 0, 0, []],
+  [1, 1, 10, 0, 0, []], [0, 6, 3, 0, 0, []], [1, 2, 1, 0, 0, []],
+  [0, 9, 4, 0, 0, []], [1, 5, 10, 0, 0, []], [0, 2, 9, 0, 0, []],
+  [1, 0, 7, 0, 0, []], [0, 7, 6, 0, 0, []], [1, 9, 6, 0, 0, []],
+  [0, 0, 3, 0, 0, []], [1, 7, 4, 0, 0, []], [0, 6, 1, 0, 0, []],
+  [1, 3, 6, 0, 0, []], [0, 1, 8, 0, 0, []], [1, 1, 2, 0, 0, []],
+  [0, 2, 5, 0, 0, []], [1, 1, 6, 0, 0, []], [0, 10, 9, 0, 0, []],
+  [1, 4, 1, 0, 0, []], [0, 2, 3, 0, 0, []], [1, 0, 9, 0, 1, [[1, 9]]],
+  [1, 7, 8, 0, 1, []], [0, 10, 3, 0, 1, []], [1, 1, 0, 0, 1, []],
+  [0, 4, 9, 0, 1, []], [1, 5, 0, 0, 1, []], [0, 3, 4, 0, 1, []],
+  [1, 7, 0, 0, 1, []], [0, 1, 4, 1, 1, [[1, 3]]], [0, 6, 5, 1, 1, []],
+  [1, 5, 6, 1, 1, []], [0, 0, 1, 2, 1, [[1, 1]]], [0, 9, 10, 2, 1, []],
+  [1, 9, 8, 2, 1, []], [0, 10, 1, 2, 1, []], [1, 3, 0, 2, 2, [[3, 1]]],
+  [1, 7, 2, 2, 3, [[7, 3]]], [1, 8, 9, 2, 4, [[9, 9]]], [1, 6, 7, 2, 4, []],
+  [0, 8, 1, 3, 4, [[7, 1]]], [0, 5, 2, 4, 4, [[5, 1]]], [0, 7, 10, 4, 4, []],
+  [1, 8, 7, 4, 5, [[7, 7]]], [1, 3, 10, 4, 6, [[3, 9]]], [1, 4, 7, 4, 6, []],
+  [0, 9, 0, 4, 6, []], [1, 9, 2, 4, 8, [[9, 1], [9, 3]]],
+  [1, 6, 9, 4, 9, [[7, 9]]], [1, 4, 3, 4, 10, [[3, 3]]],
+  [1, 5, 4, 4, 11, [[5, 3]]], [1, 5, 8, 4, 13, [[5, 7], [5, 9]]],
+] as const satisfies readonly PencilReplayMove[]
+
+function pencilProductionReplay143624() {
+  const events: Record<string, unknown>[] = [
+    { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+  ]
+  let decision = 0
+  let previousScores: [number, number] = [0, 0]
+  PENCIL_REPLAY_143624_MOVES.forEach(([player, x, y, score0, score1, closedBoxes], moveIndex) => {
+    decision += 1
+    events.push(
+      { type: 'turn', player, pass_: 0, scores: [...previousScores] },
+      { type: 'time_used', seat: player, used: decision / 10, remaining: 900 - decision / 10, budget: 900 },
+      {
+        type: 'move', player, x, y, scored: closedBoxes.length > 0,
+        scores: [score0, score1], move_index: moveIndex + 1,
+        closed_boxes: closedBoxes.map(([boxX, boxY]) => ({ x: boxX, y: boxY, owner: player })),
+      },
+    )
+    previousScores = [score0, score1]
+    if (closedBoxes.length > 0 && score0 < 13 && score1 < 13) {
+      const passer = player === 0 ? 1 : 0
+      decision += 1
+      events.push(
+        { type: 'turn', player: passer, pass_: 1, last: { x, y }, scores: [score0, score1] },
+        { type: 'time_used', seat: passer, used: decision / 10, remaining: 900 - decision / 10, budget: 900 },
+        { type: 'pass', player: passer, scores: [score0, score1] },
+      )
+    }
+  })
+  events.push({ type: 'match_end', winner: 1, reason: 'majority', deltas: [-9, 9] })
+  return events
+}
+
 async function installControlledEventSource(page: Page) {
   await page.addInitScript(() => {
     type WireEvent = Record<string, unknown>
@@ -1821,12 +1889,21 @@ test('Pencil human canvas rejects the production box-center click and stays squa
   await expect(page.getByText('轮到你连边', { exact: true })).toBeVisible()
   const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
   const eventLog = page.getByTestId('human-event-log')
+  const overview = page.getByTestId('pencil-position-overview')
   await expect(canvas).toBeVisible()
+  await expect(overview).toBeVisible()
 
   for (const viewport of [
+    { width: 2560, height: 1080 },
+    { width: 1920, height: 1080 },
     { width: 2048, height: 1024 },
     { width: 2048, height: 1152 },
+    { width: 1600, height: 900 },
+    { width: 1536, height: 1080 },
+    { width: 1366, height: 768 },
     { width: 1312, height: 700 },
+    { width: 1024, height: 768 },
+    { width: 844, height: 390 },
     { width: 390, height: 700 },
     { width: 320, height: 568 },
   ]) {
@@ -1834,14 +1911,32 @@ test('Pencil human canvas rejects the production box-center click and stays squa
     const bounds = await canvas.boundingBox()
     expect(bounds).not.toBeNull()
     expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
-    if (viewport.width === 2048) {
-      expect(bounds?.width ?? 9999).toBeLessThanOrEqual(641)
-      expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(600)
+    if (viewport.width >= 1536) {
+      const expectedMax = Math.min(832, viewport.height - 256, viewport.width - 896)
+      expect(bounds?.width ?? 9999).toBeLessThanOrEqual(expectedMax + 1)
+      expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(expectedMax - 2)
       expect((bounds?.y ?? 0) + (bounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
       const logBounds = await eventLog.boundingBox()
+      const overviewBounds = await overview.boundingBox()
       expect(logBounds).not.toBeNull()
+      expect(overviewBounds).not.toBeNull()
+      expect((overviewBounds?.x ?? 9999) + (overviewBounds?.width ?? 0)).toBeLessThan(bounds?.x ?? 0)
+      expect(overviewBounds?.height ?? 9999).toBeLessThanOrEqual((bounds?.height ?? 0) + 1)
+      const containment = await overview.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+      }))
+      expect(containment.scrollHeight).toBeLessThanOrEqual(containment.clientHeight + 1)
       expect(logBounds?.x ?? 0).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0))
       expect((logBounds?.y ?? 0) + (logBounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    } else if (viewport.width >= 1280) {
+      const logBounds = await eventLog.boundingBox()
+      const overviewBounds = await overview.boundingBox()
+      expect(logBounds).not.toBeNull()
+      expect(overviewBounds).not.toBeNull()
+      expect(Math.abs((overviewBounds?.x ?? 0) - (bounds?.x ?? 0))).toBeLessThanOrEqual(1)
+      expect((overviewBounds?.y ?? 0) + (overviewBounds?.height ?? 0)).toBeLessThanOrEqual(bounds?.y ?? 0)
+      expect(logBounds?.x ?? 0).toBeGreaterThan((bounds?.x ?? 0) + (bounds?.width ?? 0))
     }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow, `${viewport.width}px human view overflow`).toBeLessThanOrEqual(1)
@@ -2063,17 +2158,41 @@ test('Pencil human canvas replaces an equal-length snapshot and finishes animati
 
 test('Pencil replay gives the square board priority while the timeline remains usable during page scroll', async ({ page }) => {
   const monitor = monitorBrowser(page)
-  // 线上 Safari 事故 20260810143624-4149d6a3：宽屏方形棋盘按剩余横向空间
-  // 放大到 1200px+，首屏只能看到上半局面；完整时序又把右栏撑出视口。
-  const matchId = 'mock-pencil-production-replay-layout-20260810143624-4149d6a3'
-  const events = [
-    ...pencilHumanIncidentPrefix(),
-    ...Array.from({ length: 190 }, (_, index) => ({
-      type: 'time_used', seat: index % 2, used: index / 10, remaining: 900 - index / 10,
-    })),
-    { type: 'illegal', player: 1, move: { x: 5, y: 5 }, why: 'illegal_move' },
-    { type: 'match_end', winner: 0, reason: 'illegal', deltas: [2, -2] },
-  ]
+  // 线上 Safari 对局 20260810143624-4149d6a3：此前宽屏方形棋盘按剩余横向
+  // 空间放大到 1200px+，首屏只能看到上半局面；完整时序又把右栏撑出视口。
+  // fixture 使用上方从该对局提取的完整54步轨迹，并确定性重建原206个公开事件。
+  const matchId = '20260810143624-4149d6a3'
+  const events = pencilProductionReplay143624()
+  expect(events).toHaveLength(206)
+  const replayMoves = events.filter((event) => event.type === 'move')
+  const replayPasses = events.filter((event) => event.type === 'pass')
+  expect(replayMoves).toHaveLength(54)
+  expect(replayPasses).toHaveLength(14)
+  const seenEdges = new Set<string>()
+  let verifiedScores: [number, number] = [0, 0]
+  let verifiedBoxes = 0
+  replayMoves.forEach((event, index) => {
+    const player = Number(event.player)
+    const x = Number(event.x)
+    const y = Number(event.y)
+    const scores = event.scores as [number, number]
+    const closedBoxes = event.closed_boxes as Array<{ x: number; y: number; owner: number }>
+    expect((x + y) % 2, `move ${index + 1} must target an edge`).toBe(1)
+    expect(seenEdges.has(`${x},${y}`), `move ${index + 1} must be unique`).toBe(false)
+    seenEdges.add(`${x},${y}`)
+    const gained = scores[player] - verifiedScores[player]
+    expect(gained, `move ${index + 1} score delta`).toBe(closedBoxes.length)
+    expect(scores[1 - player], `move ${index + 1} opponent score`).toBe(verifiedScores[1 - player])
+    expect(closedBoxes.every((box) => box.owner === player), `move ${index + 1} box owner`).toBe(true)
+    verifiedBoxes += closedBoxes.length
+    verifiedScores = [...scores]
+  })
+  expect(verifiedScores).toEqual([4, 13])
+  expect(verifiedBoxes).toBe(17)
+  const firstScoringMoveIndex = events.findIndex((event) => event.type === 'move' && event.move_index === 24)
+  expect(firstScoringMoveIndex).toBeGreaterThan(1)
+  expect(events[firstScoringMoveIndex - 2]).toMatchObject({ type: 'turn', scores: [0, 0] })
+  expect(events[firstScoringMoveIndex]).toMatchObject({ type: 'move', scores: [0, 1] })
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
   })
@@ -2086,13 +2205,12 @@ test('Pencil replay gives the square board priority while the timeline remains u
           id: matchId,
           game_id: 'pencil',
           status: 'completed',
-          match_type: 'human',
-          human_seat: 1,
-          winner: 0,
-          reason: 'illegal',
-          bot_a: { name: 'pencil_reference', owner_name: 'tester1' },
-          bot_b: { owner_name: 'tester2', is_human: true },
-          result: { rounds_played: 11, deltas: [2, -2] },
+          match_type: 'challenge',
+          winner: 1,
+          reason: 'majority',
+          bot_a: { name: 'admin_pencil', owner_name: 'admin' },
+          bot_b: { name: 'tester11_pencil', owner_name: 'tester11' },
+          result: { rounds_played: 54, deltas: [-9, 9], normalized_delta: -9 },
         },
         replay: { events_json: JSON.stringify(events) },
       }),
@@ -2112,23 +2230,57 @@ test('Pencil replay gives the square board priority while the timeline remains u
   await page.goto(`/#/match/${matchId}`)
   const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
   const timeline = page.getByTestId('match-timeline')
+  const overview = page.getByTestId('pencil-position-overview')
   await expect(canvas).toBeVisible()
   await expect(timeline).toBeVisible()
+  await expect(overview).toBeVisible()
   await page.getByRole('button', { name: /跳到结局/ }).click()
 
+  await expect(overview).toContainText('54/60')
+  await expect(overview).toContainText('6')
+  await expect(overview).toContainText('17/25')
+  await expect(overview).toContainText('8')
+  await expect(page.getByTestId('pencil-last-edge')).toHaveText('(5, 8)')
+  await expect(page.getByTestId('pencil-box-map')).toBeVisible()
+  await expect(page.getByTestId('pencil-box-map').locator('[data-owner]')).toHaveCount(25)
+  await expect(page.getByTestId('pencil-box-map').locator('[data-owner="0"]')).toHaveCount(4)
+  await expect(page.getByTestId('pencil-box-map').locator('[data-owner="1"]')).toHaveCount(13)
+  await expect(page.getByTestId('pencil-edge-composition')).toHaveAttribute(
+    'aria-label',
+    '连边构成：红方 24 条，蓝方 30 条，未连 6 条',
+  )
+
   for (const viewport of [
+    { width: 2560, height: 1080 },
+    { width: 1920, height: 1080 },
     { width: 2048, height: 1024 },
     { width: 2048, height: 1152 },
+    { width: 1600, height: 900 },
+    { width: 1536, height: 1080 },
   ]) {
     await page.setViewportSize(viewport)
     const desktopCanvas = await canvas.boundingBox()
     const desktopTimeline = await timeline.boundingBox()
+    const overviewBounds = await overview.boundingBox()
     expect(desktopCanvas).not.toBeNull()
     expect(desktopTimeline).not.toBeNull()
+    expect(overviewBounds).not.toBeNull()
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
-    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(641)
-    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(600)
+    // 三栏宽屏同时受视口高度和主区剩余宽度约束。1536×1080 是宽度瓶颈，
+    // 不能再按高度公式强行要求 824px 棋盘，否则会重新挤压信息轨或时序栏。
+    const expectedMax = Math.min(832, viewport.height - 256, viewport.width - 888)
+    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(expectedMax + 1)
+    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(expectedMax - 2)
     expect((desktopCanvas?.y ?? 0) + (desktopCanvas?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    expect((overviewBounds?.x ?? 9999) + (overviewBounds?.width ?? 0)).toBeLessThan(desktopCanvas?.x ?? 0)
+    expect(overviewBounds?.height ?? 9999).toBeLessThanOrEqual((desktopCanvas?.height ?? 0) + 1)
+    const overviewContainment = await overview.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    }))
+    expect(overviewContainment.scrollHeight).toBeLessThanOrEqual(overviewContainment.clientHeight + 1)
+    expect(overviewContainment.overflowY).not.toBe('visible')
     expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
     expect((desktopTimeline?.y ?? 0) + (desktopTimeline?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
     const timelineScroll = await timeline.locator('div.overflow-y-auto').evaluate((element) => ({
@@ -2138,20 +2290,72 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(timelineScroll.scrollHeight).toBeGreaterThan(timelineScroll.clientHeight)
   }
 
-  await page.setViewportSize({ width: 1312, height: 700 })
-  const desktopCanvas = await canvas.boundingBox()
-  const desktopTimeline = await timeline.boundingBox()
-  expect(desktopCanvas).not.toBeNull()
-  expect(desktopTimeline).not.toBeNull()
-  expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
-  expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(641)
-  expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
+  // 用户主动折叠宽屏时序后不得继续保留一条空右轨；概览与棋盘应并排占用主区，
+  // 折叠标题移到下一行，展开后恢复三栏。
+  await page.setViewportSize({ width: 1600, height: 900 })
+  await timeline.getByRole('button', { name: '折叠', exact: true }).click()
+  const collapsedCanvas = await canvas.boundingBox()
+  const collapsedOverview = await overview.boundingBox()
+  const collapsedTimeline = await timeline.boundingBox()
+  expect(collapsedCanvas).not.toBeNull()
+  expect(collapsedOverview).not.toBeNull()
+  expect(collapsedTimeline).not.toBeNull()
+  expect((collapsedOverview?.x ?? 9999) + (collapsedOverview?.width ?? 0)).toBeLessThan(collapsedCanvas?.x ?? 0)
+  expect(collapsedTimeline?.y ?? 0).toBeGreaterThan(Math.max(
+    (collapsedOverview?.y ?? 0) + (collapsedOverview?.height ?? 0),
+    (collapsedCanvas?.y ?? 0) + (collapsedCanvas?.height ?? 0),
+  ))
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  await timeline.getByRole('button', { name: '展开', exact: true }).click()
 
+  for (const viewport of [
+    { width: 1366, height: 768 },
+    { width: 1312, height: 700 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const desktopCanvas = await canvas.boundingBox()
+    const desktopTimeline = await timeline.boundingBox()
+    const desktopOverview = await overview.boundingBox()
+    expect(desktopCanvas).not.toBeNull()
+    expect(desktopTimeline).not.toBeNull()
+    expect(desktopOverview).not.toBeNull()
+    expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
+    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(400)
+    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(520)
+    expect(Math.abs((desktopOverview?.x ?? 0) - (desktopCanvas?.x ?? 0))).toBeLessThanOrEqual(1)
+    expect((desktopOverview?.y ?? 0) + (desktopOverview?.height ?? 0)).toBeLessThanOrEqual(desktopCanvas?.y ?? 0)
+    expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
+  }
+
+  await page.setViewportSize({ width: 1312, height: 700 })
   await page.evaluate(() => window.scrollTo(0, 360))
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100)
   const stickyTimeline = await timeline.boundingBox()
   expect(stickyTimeline?.y ?? 999).toBeLessThanOrEqual(40)
   await page.evaluate(() => window.scrollTo(0, 0))
+
+  for (const viewport of [
+    { width: 1024, height: 768 },
+    { width: 844, height: 390 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const boardBounds = await canvas.boundingBox()
+    const overviewBounds = await overview.boundingBox()
+    const timelineBounds = await timeline.boundingBox()
+    expect(boardBounds).not.toBeNull()
+    expect(overviewBounds).not.toBeNull()
+    expect(timelineBounds).not.toBeNull()
+    expect(Math.abs((boardBounds?.width ?? 0) - (boardBounds?.height ?? 0))).toBeLessThanOrEqual(1)
+    expect(boardBounds?.width ?? 9999).toBeLessThanOrEqual(viewport.height - 96 + 1)
+    expect(boardBounds?.width ?? 0).toBeGreaterThanOrEqual(280)
+    expect((overviewBounds?.x ?? 9999) + (overviewBounds?.width ?? 0)).toBeLessThan(boardBounds?.x ?? 0)
+    expect(timelineBounds?.y ?? 0).toBeGreaterThan(Math.max(
+      (overviewBounds?.y ?? 0) + (overviewBounds?.height ?? 0),
+      (boardBounds?.y ?? 0) + (boardBounds?.height ?? 0),
+    ))
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow, `${viewport.width}x${viewport.height} replay overflow`).toBeLessThanOrEqual(1)
+  }
 
   for (const viewport of [
     { width: 390, height: 700 },
@@ -2160,7 +2364,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
     await page.setViewportSize(viewport)
     const seatOneScore = page.getByTestId('pencil-seat-score-1')
     await expect(seatOneScore).toContainText('座位 1 · 红')
-    await expect(seatOneScore).toContainText('2')
+    await expect(seatOneScore).toContainText('4')
     await expect(seatOneScore).not.toContainText('pencil_reference')
     await expect(timeline.getByRole('button', { name: '展开', exact: true })).toBeVisible()
     const bounds = await canvas.boundingBox()
@@ -2292,17 +2496,91 @@ test('Holdem replay state includes blinds and treats all-in amount as raise-to',
 
 test('Pencil replay reconstructs the judge score for an illegal terminal', async ({ page }) => {
   await page.goto('/')
-  const state = await page.evaluate(async () => {
+  const turnStates = await page.evaluate(async () => {
     const module = await import('/src/games/pencil/reducer.ts')
-    return module.reducePencilEvents([
-      { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
-      { type: 'illegal', player: 0, move: { x: -1, y: -1 }, why: 'illegal_move' },
-      { type: 'match_end', winner: 1, reason: 'illegal', deltas: [-2, 2] },
-    ])
+    const start = { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] }
+    const turn = { type: 'turn', player: 0, pass_: 0, scores: [0, 0] }
+    const scoredMove = {
+      type: 'move', player: 0, x: 1, y: 0, scored: true, scores: [1, 0],
+      move_index: 1, closed_boxes: [{ x: 1, y: 1, owner: 0 }],
+    }
+    const forcedPass = { type: 'turn', player: 1, pass_: 1, scores: [1, 0] }
+    const pass = { type: 'pass', player: 1, scores: [1, 0] }
+    const nextTurn = { type: 'turn', player: 0, pass_: 0, scores: [1, 0] }
+    const timeUsed = { type: 'time_used', seat: 0, used: 0.2, remaining: 899.8, budget: 900 }
+    const timeOut = { type: 'time_out', seat: 0, used: 900, budget: 900 }
+    const illegal = { type: 'illegal', player: 0, move: { x: -1, y: -1 }, why: 'illegal_move' }
+    const incident = { type: 'technical_incident', seat: 0, code: 'missing_response', error: '响应异常' }
+    return [
+      module.reducePencilEvents([start, turn]),
+      module.reducePencilEvents([start, turn, scoredMove]),
+      module.reducePencilEvents([start, turn, scoredMove, forcedPass]),
+      module.reducePencilEvents([start, turn, scoredMove, forcedPass, pass]),
+      module.reducePencilEvents([start, turn, scoredMove, forcedPass, pass, nextTurn]),
+      module.reducePencilEvents([start, turn, timeUsed]),
+      module.reducePencilEvents([start, turn, scoredMove, forcedPass, timeOut]),
+      module.reducePencilEvents([start, turn, scoredMove, forcedPass, illegal]),
+      module.reducePencilEvents([start, turn, scoredMove, forcedPass, incident]),
+    ].map(({ toAct, extraTurn, mustPass }) => ({ toAct, extraTurn, mustPass }))
   })
+  expect(turnStates).toEqual([
+    { toAct: 0, extraTurn: false, mustPass: false },
+    { toAct: null, extraTurn: true, mustPass: false },
+    { toAct: 1, extraTurn: true, mustPass: true },
+    { toAct: null, extraTurn: false, mustPass: false },
+    { toAct: 0, extraTurn: false, mustPass: false },
+    { toAct: null, extraTurn: false, mustPass: false },
+    { toAct: null, extraTurn: false, mustPass: false },
+    { toAct: null, extraTurn: false, mustPass: false },
+    { toAct: null, extraTurn: false, mustPass: false },
+  ])
+
+  const events = [
+    { type: 'match_start', game_id: 'pencil', n_dots: 6, size: 11, scores: [0, 0] },
+    { type: 'illegal', player: 0, move: { x: -1, y: -1 }, why: 'illegal_move' },
+    { type: 'match_end', winner: 1, reason: 'illegal', deltas: [-2, 2] },
+  ]
+  const state = await page.evaluate(async (fixture) => {
+    const module = await import('/src/games/pencil/reducer.ts')
+    return module.reducePencilEvents(fixture)
+  }, events)
   expect(state.scores).toEqual([0, 2])
   expect(state.winner).toBe(1)
   expect(state.reason).toBe('illegal')
+
+  const matchId = 'mock-pencil-illegal-position-summary'
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+  })
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId, game_id: 'pencil', status: 'completed', match_type: 'challenge',
+          winner: 1, reason: 'illegal',
+          bot_a: { name: 'illegal_a', owner_name: 'alpha' },
+          bot_b: { name: 'legal_b', owner_name: 'beta' },
+          result: { rounds_played: 0, deltas: [-2, 2], normalized_delta: -2 },
+        },
+        replay: { events_json: JSON.stringify(events) },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}' })
+  })
+  await page.setViewportSize({ width: 1600, height: 900 })
+  await page.goto(`/#/match/${matchId}`)
+  await page.getByRole('button', { name: /跳到结局/ }).click()
+  const overview = page.getByTestId('pencil-position-overview')
+  await expect(overview).toContainText('0/25')
+  await expect(overview).toContainText('25')
+  await expect(overview).not.toContainText('2/25')
+  await expect(overview).toContainText('蓝方经裁判判定获胜')
+  await expect(overview).toContainText('终止前红 0 格 · 蓝 0 格 · 25 格未决')
+  await expect(page.getByTestId('pencil-box-map').locator('[data-owner="0"], [data-owner="1"]')).toHaveCount(0)
 })
 
 test('MatchViewer presents a zero-hand protocol loss as a terminal incident', async ({ page }) => {
