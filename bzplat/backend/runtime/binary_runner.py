@@ -578,8 +578,8 @@ class BinaryRunner:
             session.binary_path.chmod(session.binary_path.stat().st_mode | 0o111)
         except (OSError, PermissionError):
             pass  # 只读挂载/权限不足时忽略（本机路径通常可改）
-        cmd = [
-            self._docker_bin, "run", "-i", "--rm",
+        options = [
+            "-i", "--rm",
             "--pull=never",
             "--name", name,
             "--network=none",
@@ -600,11 +600,76 @@ class BinaryRunner:
             "--entrypoint", "/app/bot",
             self._linux_image,
         ]
-        if session.execution_scope is not None:
-            cmd[8:8] = [
+        scope = session.execution_scope
+        if scope is not None:
+            options[5:5] = [
                 "--label",
-                f"{_AUTO_EXECUTION_LABEL}={session.execution_scope.token}",
+                f"{_AUTO_EXECUTION_LABEL}={scope.token}",
             ]
+            create_cmd = [self._docker_bin, "create", *options]
+            try:
+                created = await asyncio.to_thread(
+                    _docker_control_command,
+                    create_cmd,
+                    timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+                    timeout_message="Docker 自动对局容器创建超时",
+                )
+            except PlatformRunnerError as exc:
+                # The CLI was killed by the bounded control helper, but the
+                # daemon may still finish an already accepted create request.
+                # Mark the durable barrier and retain the flock until that exact
+                # labelled container appears and can be removed.  Cancellation
+                # (service shutdown) releases flock, while recovery_pending keeps
+                # the dispatched DB slot occupied for the next leader.
+                scope.mark_recovery_pending(str(exc))
+                while True:
+                    try:
+                        visible = await self._docker_container_execution_label(name)
+                    except PlatformRunnerError:
+                        visible = None
+                    if visible == scope.token:
+                        await self._cleanup_created_scope_unlocked(session, str(exc))
+                        raise
+                    await asyncio.sleep(_AUTO_EXECUTION_VISIBILITY_POLL_SEC)
+            if created.returncode != 0:
+                reason = f"Docker 自动对局容器创建失败（exit {created.returncode}）"
+                await self._cleanup_created_scope_unlocked(session, reason)
+                raise PlatformRunnerError(reason)
+            # ``docker create`` is synchronous: success means the daemon has
+            # durably created the stopped, labelled container.  Keep the flock
+            # until inspect proves the exact immutable scope, then start/attach.
+            while True:
+                try:
+                    visible = await self._docker_container_execution_label(name)
+                except PlatformRunnerError:
+                    visible = None
+                if visible == scope.token:
+                    break
+                await asyncio.sleep(_AUTO_EXECUTION_VISIBILITY_POLL_SEC)
+            try:
+                scope.assert_current()
+            except BaseException:
+                await self._cleanup_created_scope_unlocked(
+                    session, "auto-match epoch changed before docker start"
+                )
+                raise
+            start_cmd = [self._docker_bin, "start", "-a", "-i", name]
+            try:
+                session.proc = await asyncio.create_subprocess_exec(
+                    *start_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    limit=1024 * 1024,
+                )
+            except BaseException:
+                await self._cleanup_created_scope_unlocked(
+                    session, "Docker 自动对局容器启动失败"
+                )
+                raise
+            return
+
+        cmd = [self._docker_bin, "run", *options]
         session.proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -612,8 +677,6 @@ class BinaryRunner:
             stderr=asyncio.subprocess.PIPE,
             limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
         )
-        if session.execution_scope is not None:
-            await self._wait_for_execution_container_visible(session)
 
     async def _docker_container_execution_label(
         self, container_name: str
@@ -634,60 +697,32 @@ class BinaryRunner:
             return None
         return result.stdout.strip() or None
 
-    async def _wait_for_execution_container_visible(
-        self, session: BotSession
+    async def _cleanup_created_scope_unlocked(
+        self, session: BotSession, reason: str
     ) -> None:
-        """Keep the launch flock until Docker proves the scope label exists.
-
-        ``create_subprocess_exec('docker run', ...)`` only proves that the CLI
-        process was forked; the daemon may not have created the container yet.
-        Releasing the flock at that point lets takeover observe zero containers
-        and finalize before the delayed CLI creates one.  There is intentionally
-        no timeout that releases the lock on uncertainty: a stuck daemon fails
-        closed until the service process is restarted (flock then auto-releases).
-        """
+        """Remove an exact created container and prove its scope is empty."""
         scope = session.execution_scope
-        if scope is None or not session.container_name or session.proc is None:
+        if scope is None or not session.container_name:
             return
-        while True:
-            if session.proc.returncode is not None:
-                # CLI exit alone is not proof: the daemon may already have
-                # accepted the create request.  Still under the launch flock,
-                # clean by the exact scope and require a zero-container proof.
-                # Remove by the exact deterministic name first (covers a
-                # container whose label query has not become observable yet),
-                # then also sweep by immutable scope label.
-                try:
-                    await asyncio.to_thread(
-                        _docker_control_command,
-                        [self._docker_bin, "rm", "-f", session.container_name],
-                        timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
-                        timeout_message="Docker 延迟启动容器清理超时",
-                    )
-                except PlatformRunnerError:
-                    pass
-                cleanup = await self._force_stop_execution_unlocked(
-                    scope.token,
-                    execution_backend="docker",
-                    allow_local_ack=True,
-                )
-                if cleanup.get("confirmed"):
-                    return
-                reason = str(
-                    cleanup.get("reason")
-                    or "Docker CLI 退出后无法确认执行范围已清理"
-                )
-                scope.mark_recovery_pending(reason)
-                raise PlatformRunnerError(reason)
-            try:
-                visible_scope = await self._docker_container_execution_label(
-                    session.container_name
-                )
-            except PlatformRunnerError:
-                visible_scope = None
-            if visible_scope == scope.token:
-                return
-            await asyncio.sleep(_AUTO_EXECUTION_VISIBILITY_POLL_SEC)
+        try:
+            await asyncio.to_thread(
+                _docker_control_command,
+                [self._docker_bin, "rm", "-f", session.container_name],
+                timeout=_DOCKER_INSPECT_TIMEOUT_SEC,
+                timeout_message="Docker 自动对局容器清理超时",
+            )
+        except PlatformRunnerError:
+            pass
+        cleanup = await self._force_stop_execution_unlocked(
+            scope.token,
+            execution_backend="docker",
+            allow_local_ack=True,
+        )
+        if cleanup.get("confirmed"):
+            return
+        message = str(cleanup.get("reason") or reason)
+        scope.mark_recovery_pending(message)
+        raise PlatformRunnerError(message)
 
     async def send(self, session_id: str, line: str, *,
                    timeout: float = DEFAULT_ACTION_TIMEOUT) -> str:

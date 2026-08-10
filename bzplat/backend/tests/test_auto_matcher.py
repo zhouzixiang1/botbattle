@@ -656,7 +656,7 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
 ):
     active_containers: list[str] = []
     fence_current = True
-    cli_spawned = asyncio.Event()
+    create_returned = Event()
     label_visible = asyncio.Event()
     lock_path = str(tmp_path / "auto-launch.lock")
     recovery_reasons: list[str] = []
@@ -685,8 +685,8 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
     class FakeProc:
         returncode = None
 
-    async def spawn_cli(*_args, **_kwargs):
-        cli_spawned.set()
+    async def spawn_cli(*args, **_kwargs):
+        assert args[1:4] == ("start", "-a", "-i")
         return FakeProc()
 
     async def visible_scope(_container_name: str) -> str | None:
@@ -697,11 +697,17 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
         return list(active_containers)
 
     def docker_control(args, **_kwargs):
-        assert args[1:3] == ["rm", "-f"]
-        active_containers.clear()
-
         class Result:
             returncode = 0
+            stdout = "container-a\n"
+
+        if args[1] == "create":
+            label_pos = args.index("--label")
+            assert args[label_pos + 1] == "bzplat.auto_execution=scope-a"
+            create_returned.set()
+            return Result()
+        assert args[1:3] == ["rm", "-f"]
+        active_containers.clear()
 
         return Result()
 
@@ -716,9 +722,9 @@ def test_launch_flock_serializes_stale_spawn_before_label_cleanup(
                 await runner._start_docker(session)
 
         spawn_task = asyncio.create_task(stale_spawn())
-        # The docker CLI process exists, but the daemon has not made the scope
-        # label visible yet.  The launch flock must still be held here.
-        await cli_spawned.wait()
+        # ``docker create`` returned, but exact-label inspect is deliberately
+        # delayed.  The launch flock must still be held until it is visible.
+        await asyncio.to_thread(create_returned.wait)
         cleanup_task = asyncio.create_task(
             runner.force_stop_execution(
                 "scope-a",
