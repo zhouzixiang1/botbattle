@@ -12,8 +12,11 @@ from fastapi.testclient import TestClient
 from bzplat.backend.contests import showcase_seed as showcase_seed_module
 from bzplat.backend.contests.scheduler import ContestScheduler
 from bzplat.backend.contests.showcase_seed import (
+    SHOWCASE_PLAYER_PROFILES,
+    SHOWCASE_PROFILE_SPECS,
     ShowcaseSeedError,
     _recover_incomplete_showcases,
+    _verify_group_stage_distribution,
     _verify_match_replay_quality,
     _verify_pairing_identity_graph,
     rollback_showcases,
@@ -22,6 +25,8 @@ from bzplat.backend.contests.showcase_seed import (
 )
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
+from bzplat.backend.matches.runner import MatchRunner
+from bzplat.backend.runtime.binary_runner import BinaryRunner
 
 
 PASSWORD = "pw123456"
@@ -475,8 +480,8 @@ def test_seed_deactivates_earlier_tracked_bot_when_later_identity_conflicts(
     db_path = tmp_path / "tracked-cleanup.db"
     upload_root = tmp_path / "bot_uploads_showcase"
     upload_root.mkdir()
-    sample = Path(__file__).parents[3] / "samples" / "gomokubot_linux_amd64"
-    raw = sample.read_bytes()
+    profile_dir = Path(__file__).parents[3] / "samples" / "gomoku_showcase"
+    raw = (profile_dir / SHOWCASE_PROFILE_SPECS["tactical"]["filename"]).read_bytes()
     store = create_app(db_path=str(db_path), max_concurrent=1).state.store
     players = []
     for index in (1, 2):
@@ -523,12 +528,150 @@ def test_seed_deactivates_earlier_tracked_bot_when_later_identity_conflicts(
     with pytest.raises(ShowcaseSeedError, match="专用演示 Bot 冲突"):
         asyncio.run(
             showcase_seed_module.seed_showcases(
-                db_path, upload_root, sample, emit=lambda _message: None,
+                db_path, upload_root, profile_dir, emit=lambda _message: None,
             )
         )
     reopened = create_app(db_path=str(db_path), max_concurrent=1).state.store
     assert reopened.get_bot(first["id"])["is_active"] == 0
     reopened.close()
+
+
+def test_showcase_profiles_are_checksum_pinned_and_deterministically_ranked():
+    profile_dir = Path(__file__).parents[3] / "samples" / "gomoku_showcase"
+    paths: dict[str, str] = {}
+    for name, profile in SHOWCASE_PROFILE_SPECS.items():
+        path = profile_dir / profile["filename"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == profile["checksum"]
+        paths[name] = str(path)
+    assert SHOWCASE_PLAYER_PROFILES == (
+        "tactical", "tactical", "tactical", "tactical",
+        "steady", "steady", "steady", "steady",
+        "foundation", "foundation", "foundation", "foundation",
+    )
+
+    async def play(
+        runner: MatchRunner, a: str, b: str,
+    ) -> tuple[int | None, str, tuple[tuple[int, int, int], ...]]:
+        result = await runner.run_binaries(
+            paths[a], paths[b], game_id="gomoku",
+            runtime_modes=("longrunning", "longrunning"), seed=20260810,
+        )
+        assert result.reason in {"five", "draw"}
+        assert not [
+            event for event in result.events
+            if event.get("type") in {"illegal", "technical_incident"}
+            or event.get("reason") in {"crash", "timeout", "protocol_error"}
+        ]
+        assert result.events[-1]["type"] == "match_end"
+        trajectory = tuple(
+            (event["player"], event["x"], event["y"])
+            for event in result.events if event.get("type") == "move"
+        )
+        return result.winner, result.reason, trajectory
+
+    async def exercise(
+        concurrency: int,
+    ) -> tuple[
+        list[tuple[int | None, str, tuple[tuple[int, int, int], ...]]],
+        dict[str, int],
+    ]:
+        fixtures = [
+            ("tactical", "steady", 0),
+            ("steady", "tactical", 1),
+            ("tactical", "foundation", 0),
+            ("foundation", "tactical", 1),
+            ("steady", "foundation", 0),
+            ("foundation", "steady", 1),
+        ]
+        runner = MatchRunner(BinaryRunner(prefer_local=True))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def bounded(a: str, b: str):
+            async with semaphore:
+                return await play(runner, a, b)
+
+        work = [(a, b) for a, b, _winner in fixtures]
+        work.extend((profile, profile) for profile in paths)
+        outcomes = list(await asyncio.gather(*(bounded(a, b) for a, b in work)))
+        points = {name: 0 for name in paths}
+        for (a, b, expected_winner), outcome in zip(fixtures, outcomes):
+            assert outcome[0] == expected_winner
+            points[(a, b)[expected_winner]] += 2
+        return outcomes, points
+
+    first = asyncio.run(exercise(1))
+    second = asyncio.run(exercise(2))
+    assert first == second
+    assert first[1] == {"tactical": 8, "steady": 4, "foundation": 0}
+
+
+def test_showcase_group_quality_rejects_flat_points():
+    class StageStore:
+        @staticmethod
+        def list_stage_results(_contest_id, *, stage_idx):
+            assert stage_idx == 0
+            return [
+                {"group_id": group, "points": 4.0, "rank_in_group": rank}
+                for group in ("G1", "G2", "G3", "G4")
+                for rank in (1, 2, 3)
+            ]
+
+    with pytest.raises(ShowcaseSeedError, match="8/4/0"):
+        _verify_group_stage_distribution(StageStore(), 1, label="finished")
+
+
+def test_partial_rollback_allows_active_bot_and_missing_expected_file_but_not_unknown(
+    tmp_path, monkeypatch,
+):
+    app = create_app(db_path=str(tmp_path / "rollback-scope.db"), max_concurrent=1)
+    store = app.state.store
+    upload_root = tmp_path / "bot_uploads_showcase"
+    validate_showcase_upload_namespace(store, upload_root, create=True)
+    organizer = store.create_user(
+        "showcase_organizer", "showcase-organizer@invalid.example",
+        hash_password(PASSWORD), role="organizer",
+    )
+    player = store.create_user(
+        "showcase_player_01", "showcase-player-01@invalid.example",
+        hash_password(PASSWORD), role="user",
+    )
+    binary = upload_root / "1" / "v1" / "bot.bin"
+    bot = store.create_bot(
+        player["id"], "showcase_gomoku_01",
+        description="合成演示 LongRunning 五子棋 Bot",
+        binary_path=str(binary), format="elf", os="linux", arch="amd64",
+        game_id="gomoku", runtime_mode="longrunning", is_active=1,
+    )
+    binary = upload_root / str(bot["id"]) / "v1" / "bot.bin"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"expected file may be missing during recovery")
+    store.add_bot_version(
+        bot["id"], version=1, binary_path=str(binary),
+        checksum=hashlib.sha256(binary.read_bytes()).hexdigest(),
+        size_bytes=binary.stat().st_size, runtime_mode="longrunning",
+    )
+    store.update_bot(bot["id"], binary_path=str(binary), current_version=1)
+
+    unknown = upload_root / "unknown.bin"
+    unknown.write_bytes(b"must fail closed")
+    with pytest.raises(ShowcaseSeedError, match="非白名单对象"):
+        rollback_showcases(store, upload_root)
+    unknown.unlink()
+    binary.unlink()
+
+    # Presentation quality is intentionally unusable here.  Rollback still
+    # succeeds because its frozen scope has no active match or foreign object.
+    monkeypatch.setattr(
+        showcase_seed_module,
+        "_verify_showcase_presentation_quality",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("rollback must not run presentation quality")
+        ),
+    )
+    result = rollback_showcases(store, upload_root)
+    assert result == {"contests": 0, "matches": 0, "bots": 1, "users": 2}
+    assert store.get_user(int(organizer["id"])) is None
+    assert not upload_root.exists()
 
 
 def test_showcase_pairing_rejects_cross_bound_dedicated_bot(tmp_path):

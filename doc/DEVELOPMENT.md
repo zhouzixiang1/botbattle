@@ -72,7 +72,12 @@ Linux x86_64 ELF，并检查产物类型：
 ```bash
 bash samples/build_sample.sh
 file samples/{callbot,gomokubot,pencilbot}_linux_amd64
+sha256sum samples/gomoku_showcase/*_linux_amd64
 ```
+
+脚本还会从 `samples/gomoku_showcase/gomoku_showcase_bot.c` 构建赛事演示专用的
+`tactical/steady/foundation` 三档 LongRunning ELF。三档不读时钟、不用随机数，checksum
+由演示 seed manifest 锁定；它们是合成的强/中/弱矩阵，不是自然形成的 12 种独立棋力。
 
 玩家侧跨系统构建说明不依赖仓库脚本，见 `wiki/BOT_DEV.md`。
 
@@ -210,12 +215,19 @@ python scripts/seed_contest_showcase.py verify \
   --db "/abs/worktree/botzone.db"
 ```
 
+seed 默认从仓库 `samples/gomoku_showcase/` 读取 checksum 锁定的三档 ELF；如部署包将其放在
+其他位置，只能用绝对 `--profile-dir` 指向同一组已审核产物。01–04 固定为 tactical、05–08
+为 steady、09–12 为 foundation，蛇形分组使每组各一档。策略 manifest 版本变化时，已有 partial
+图不会原地换版本；命令会 fail-closed 并要求先 rollback 后重新 seed，避免冻结 pairing 混用策略。
+
 预期清单固定为：draft 4 人；open 6 人；published-manual 12 人、24 个 pending pairing、
 `starts_at=NULL`、0 Match；running 12 人、真实 completed 与未绑定 pending 并存、0 active；
 rest 24 场真实小组赛；finished 24 场分组双循环 + 7 场 Top 8 淘汰。完整集合共 59 个互不复用的
 真实 Match，所有回放经 canonical LongRunning Linux ELF、正式 Manager/Orchestrator/GameSpec 裁判生成。
 验收逐场要求 `technical_loss=0`、原因仅 `five/draw`、无故障事件，且回放只有一个与数据库胜者/原因
-及结果分差一致的末尾 canonical `match_end`。六个 key 已完整时二次 seed 先严格验收并跳过 provisioning；12 个
+及结果分差一致的末尾 canonical `match_end`。rest 与 finished 的四组各自固定形成 8/4/0 分；
+running/rest/finished 中同一有序 Bot 对的归一落子轨迹必须完全一致，finished 的 7 场淘汰赛必须
+全部产生胜者。六个 key 已完整时二次 seed 先严格验收并跳过 provisioning；12 个
 专用 Bot 最终全部 inactive（历史详情仍可按 ID 查看），不会进入五子棋榜单或自动匹配。
 
 部署到主库属于显式运维写操作，只能在代码已评审、主库已备份且 50380 已停服后执行；独立 seed
@@ -238,7 +250,10 @@ seed 中断后只恢复专用 marker 赛事，不调用全平台 orphan/reconcil
 会先精确解绑并删除 match/index/replay，随后只经正常排期闸门重派，未来 `scheduled_at` 不会提前启动；
 非演示活动赛事不会被接管。管理员统计和最近趋势会排除快照关联的 6 赛事、59 对局、13 用户与 12 Bot。
 回滚必须同样停服、先备份，再执行下列白名单命令。它会在删除前整体核对 6 个 key/marker、专用
-账号邮箱与角色、每个 Bot 的版本路径、全游戏对局归属及目录精确白名单；任一漂移都拒绝，避免部分清理：
+账号邮箱与角色、每个 Bot 的版本路径、全游戏对局归属及目录白名单，并先冻结精确删除计划再开始
+写操作。rollback scope 故意不调用展示质量门禁：坏积分、缺回放、缺少预期二进制、partial key 或
+Bot 的 active 标志不会阻塞恢复；但任何 active Match、额外文件/目录、符号链接、外部赛事/对局引用
+或非 canonical 路径仍会拒绝，避免误删真实数据：
 
 ```bash
 python scripts/seed_contest_showcase.py rollback \

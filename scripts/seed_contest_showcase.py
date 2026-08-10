@@ -48,6 +48,18 @@ def _absolute_existing(path_raw: str, *, label: str) -> Path:
     return path
 
 
+def _absolute_directory(path_raw: str, *, label: str) -> Path:
+    candidate = Path(path_raw).expanduser()
+    if not candidate.is_absolute():
+        raise ShowcaseSeedError(f"{label} 必须使用绝对路径")
+    if candidate.is_symlink():
+        raise ShowcaseSeedError(f"{label} 不得为符号链接")
+    path = candidate.resolve()
+    if not path.is_dir():
+        raise ShowcaseSeedError(f"{label} 不存在: {path}")
+    return path
+
+
 def _is_primary_db(db_path: Path) -> bool:
     primary = primary_checkout_root(ROOT)
     if primary is None:
@@ -87,9 +99,9 @@ def main() -> int:
         help="演示 Bot 上传目录绝对路径（默认 <db.parent>/bot_uploads_showcase）",
     )
     parser.add_argument(
-        "--sample-binary",
-        default=str(ROOT / "samples/gomokubot_linux_amd64"),
-        help="canonical LongRunning 五子棋 ELF",
+        "--profile-dir",
+        default=str(ROOT / "samples/gomoku_showcase"),
+        help="checksum 锁定的三档 canonical LongRunning 五子棋 ELF 目录",
     )
     parser.add_argument(
         "--max-concurrent",
@@ -156,12 +168,12 @@ def main() -> int:
         print(f"主运行时目标：{'是（已显式授权）' if primary_target else '否'}")
 
         if args.action == "seed":
-            sample = _absolute_existing(args.sample_binary, label="--sample-binary")
+            profile_dir = _absolute_directory(args.profile_dir, label="--profile-dir")
             result = asyncio.run(
                 seed_showcases(
                     db_path,
                     upload_root,
-                    sample,
+                    profile_dir,
                     max_concurrent=args.max_concurrent,
                     timeout_per_contest=args.timeout_per_contest,
                     emit=print,

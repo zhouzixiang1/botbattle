@@ -15,6 +15,7 @@ import os
 import secrets
 import stat
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,6 +46,7 @@ from bzplat.backend.store.schema import (
 logger = logging.getLogger(__name__)
 
 SEED_VERSION = "contest-showcase-v1"
+SHOWCASE_STRATEGY_VERSION = "gomoku-showcase-matrix-v2"
 SHOWCASE_UPLOAD_BASENAME = "bot_uploads_showcase"
 SHOWCASE_UPLOAD_MARKER = ".botbattle-contest-showcase"
 SHOWCASE_UPLOAD_MARKER_CONTENT = f"{SEED_VERSION}\n"
@@ -77,14 +79,80 @@ TITLE = {
     "contest_lifecycle_rest": "【合成演示】05 小组赛结束·晋级确认",
     "contest_lifecycle_finished": "【合成演示】06 完整赛事·正式名次",
 }
+SHOWCASE_PROFILE_SPECS: dict[str, dict[str, str]] = {
+    "tactical": {
+        "label": "战术型",
+        "filename": "gomoku_showcase_tactical_linux_amd64",
+        "checksum": "ade0b2135d997925a66eead6312a9445f5fa22bc154770a2a5f62f250f284963",
+    },
+    "steady": {
+        "label": "稳健型",
+        "filename": "gomoku_showcase_steady_linux_amd64",
+        "checksum": "39c3b1ecc86c77f6f600d5a6a9862e47e003ceb12efc997560b97b97258d0106",
+    },
+    "foundation": {
+        "label": "基础型",
+        "filename": "gomoku_showcase_foundation_linux_amd64",
+        "checksum": "7ea63c34bdd092a0bed86a4165829b18a3a0b7d6d846cffef2f216d6214c3f5f",
+    },
+}
+SHOWCASE_PLAYER_PROFILES = (
+    *("tactical" for _ in range(4)),
+    *("steady" for _ in range(4)),
+    *("foundation" for _ in range(4)),
+)
 
 
 class ShowcaseSeedError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class _RollbackPlan:
+    """Fully validated deletion whitelist, frozen before the first mutation."""
+
+    organizer_id: int
+    contest_matches: tuple[tuple[int, tuple[str, ...]], ...]
+    player_bots: tuple[tuple[int, int | None], ...]
+    upload_root: Path
+
+
 def _log_emit(message: str) -> None:
     logger.info("%s", message)
+
+
+def _profile_for_player(index: int) -> tuple[str, dict[str, str]]:
+    try:
+        name = SHOWCASE_PLAYER_PROFILES[index - 1]
+        return name, SHOWCASE_PROFILE_SPECS[name]
+    except (IndexError, KeyError) as exc:
+        raise ShowcaseSeedError(f"演示 Bot 编号超出 profile 清单: {index}") from exc
+
+
+def _load_showcase_profile_binaries(profile_dir: Path) -> dict[str, bytes]:
+    """Load only the three reviewed, checksum-pinned showcase ELF profiles."""
+    candidate = profile_dir.expanduser()
+    if not candidate.is_absolute():
+        raise ShowcaseSeedError("演示 Bot profile 目录必须使用绝对路径")
+    if candidate.is_symlink():
+        raise ShowcaseSeedError("演示 Bot profile 目录不得为符号链接")
+    root = candidate.resolve()
+    if not root.is_dir():
+        raise ShowcaseSeedError(f"演示 Bot profile 目录不存在: {root}")
+    binaries: dict[str, bytes] = {}
+    for name, spec in SHOWCASE_PROFILE_SPECS.items():
+        path = root / spec["filename"]
+        if path.is_symlink() or not path.is_file() or path.resolve().parent != root:
+            raise ShowcaseSeedError(f"演示 Bot profile 文件非法: {path}")
+        raw = path.read_bytes()
+        checksum = hashlib.sha256(raw).hexdigest()
+        if checksum != spec["checksum"]:
+            raise ShowcaseSeedError(
+                f"演示 Bot profile checksum 不匹配: {name} "
+                f"(expected={spec['checksum']}, actual={checksum})"
+            )
+        binaries[name] = raw
+    return binaries
 
 
 def validate_showcase_upload_target(
@@ -269,6 +337,100 @@ def validate_showcase_upload_namespace(
             f"（unexpected={unexpected}, missing={missing}）"
         )
     return {"bots": len(bots), "files": len(actual_files) - 1}
+
+
+def _validate_showcase_upload_rollback_scope(
+    store: Store,
+    upload_root: Path,
+) -> dict[str, int]:
+    """Prove every existing namespace object is seed-owned; allow missing files.
+
+    Rollback is a recovery operation, so a partially written or manually lost
+    expected binary must not make cleanup impossible.  Unknown files,
+    symlinks, non-canonical DB paths and an invalid marker remain fatal.
+    """
+    root = upload_root.expanduser()
+    if not root.is_absolute() or root.name != SHOWCASE_UPLOAD_BASENAME:
+        raise ShowcaseSeedError(
+            f"演示 Bot 目录必须是绝对的 {SHOWCASE_UPLOAD_BASENAME}"
+        )
+    if root.is_symlink():
+        raise ShowcaseSeedError("演示 Bot 目录不得为符号链接")
+    root = root.resolve()
+    if not root.is_dir():
+        raise ShowcaseSeedError("演示 Bot 目录不存在或缺少 namespace marker")
+
+    marker = root / SHOWCASE_UPLOAD_MARKER
+    if not marker.exists():
+        raise ShowcaseSeedError("演示 Bot 目录缺少 namespace marker")
+    marker_mode = marker.lstat().st_mode
+    if (
+        stat.S_ISLNK(marker_mode)
+        or not stat.S_ISREG(marker_mode)
+        or marker.read_text(encoding="utf-8") != SHOWCASE_UPLOAD_MARKER_CONTENT
+    ):
+        raise ShowcaseSeedError("演示 Bot namespace marker 非法")
+
+    _organizer, _players, bots = _reserved_identity_graph(
+        store, require_complete=False
+    )
+    allowed_dirs = {root}
+    allowed_files = {marker}
+    for bot in bots:
+        bot_id = int(bot["id"])
+        bot_dir = root / str(bot_id)
+        allowed_dirs.add(bot_dir)
+        version_paths: set[Path] = set()
+        for version in store.list_bot_versions(bot_id):
+            version_dir = bot_dir / f"v{int(version['version'])}"
+            expected_binary = version_dir / "bot.bin"
+            configured = Path(str(version.get("binary_path") or "")).expanduser()
+            if (
+                not configured.is_absolute()
+                or Path(os.path.abspath(configured)) != expected_binary
+            ):
+                raise ShowcaseSeedError(
+                    f"专用演示 Bot #{bot_id} 版本路径不属于 canonical namespace"
+                )
+            allowed_dirs.add(version_dir)
+            allowed_files.add(expected_binary)
+            version_paths.add(expected_binary)
+        configured_bot = str(bot.get("binary_path") or "")
+        if configured_bot:
+            bot_path = Path(os.path.abspath(Path(configured_bot).expanduser()))
+            if bot_path not in version_paths:
+                raise ShowcaseSeedError(
+                    f"专用演示 Bot #{bot_id} 当前路径不属于版本白名单"
+                )
+
+    actual_dirs = {root}
+    actual_files: set[Path] = set()
+
+    def visit(directory: Path) -> None:
+        for child in directory.iterdir():
+            mode = child.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                raise ShowcaseSeedError(f"演示 Bot 目录含符号链接: {child}")
+            if stat.S_ISDIR(mode):
+                actual_dirs.add(child)
+                visit(child)
+            elif stat.S_ISREG(mode):
+                actual_files.add(child)
+            else:
+                raise ShowcaseSeedError(f"演示 Bot 目录含非法文件类型: {child}")
+
+    visit(root)
+    unexpected = (actual_dirs - allowed_dirs) | (actual_files - allowed_files)
+    if unexpected:
+        raise ShowcaseSeedError(
+            "演示 Bot rollback namespace 含非白名单对象: "
+            f"{sorted(str(path) for path in unexpected)}"
+        )
+    return {
+        "bots": len(bots),
+        "existing_files": len(actual_files) - 1,
+        "missing_files": len(allowed_files - actual_files),
+    }
 
 
 def _deactivate_showcase_bots(store: Store, *, strict: bool) -> None:
@@ -466,6 +628,7 @@ def _canonical_version(
         return bool(
             path == canonical
             and path.is_file()
+            and hashlib.sha256(path.read_bytes()).hexdigest() == checksum
             and current.get("checksum") == checksum
             and current.get("runtime_mode") == "longrunning"
             and bot.get("runtime_mode") == "longrunning"
@@ -478,15 +641,12 @@ def _canonical_version(
 def provision_showcase_identities(
     store: Store,
     upload_root: Path,
-    sample_binary: Path,
+    profile_dir: Path,
     *,
     emit: Callable[[str], None] = _log_emit,
     activated_bot_ids: set[int] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    if not sample_binary.is_file():
-        raise ShowcaseSeedError(f"五子棋样例 ELF 不存在: {sample_binary}")
-    raw = sample_binary.read_bytes()
-    checksum = hashlib.sha256(raw).hexdigest()
+    profile_binaries = _load_showcase_profile_binaries(profile_dir)
     organizer = _ensure_user(
         store,
         username=ORGANIZER_USERNAME,
@@ -511,7 +671,14 @@ def provision_showcase_identities(
     preflight = BinaryRunner(prefer_local=True)
     bots: list[dict[str, Any]] = []
     for index, player in enumerate(players, 1):
+        profile_name, profile = _profile_for_player(index)
+        raw = profile_binaries[profile_name]
+        checksum = profile["checksum"]
         name = f"{BOT_PREFIX}{index:02d}"
+        profile_marker = (
+            f"策略档位：{profile['label']} ({profile_name})；"
+            f"策略版本：{SHOWCASE_STRATEGY_VERSION}"
+        )
         bot = store.get_bot_by_owner_name(int(player["id"]), name)
         if bot is None:
             bot = manager.create_from_upload(
@@ -519,8 +686,8 @@ def provision_showcase_identities(
                 name,
                 raw,
                 display_name=f"演示棋手 {index:02d}",
-                description="合成演示 LongRunning 五子棋 Bot",
-                upload_note=f"{SEED_VERSION} canonical sample",
+                description=f"合成演示 LongRunning 五子棋 Bot；{profile_marker}",
+                upload_note=f"{SEED_VERSION} canonical profile={profile_name}",
                 game_id=SHOWCASE_GAME_ID,
                 runtime_mode="longrunning",
                 binary_runner=preflight,
@@ -536,11 +703,21 @@ def provision_showcase_identities(
                     int(bot["id"]),
                     int(player["id"]),
                     raw,
-                    upload_note=f"{SEED_VERSION} canonical refresh",
+                    upload_note=(
+                        f"{SEED_VERSION} canonical refresh profile={profile_name}"
+                    ),
                     runtime_mode="longrunning",
                     binary_runner=preflight,
                 )
                 emit(f"Bot {index:02d}/12：已刷新 canonical LongRunning 版本")
+            if profile_marker not in str(bot.get("description") or ""):
+                bot = store.update_bot(
+                    int(bot["id"]),
+                    description=(
+                        "合成演示 LongRunning 五子棋 Bot；"
+                        f"{profile_marker}"
+                    ),
+                )
             if not bot.get("is_active"):
                 bot = manager.set_active(int(bot["id"]), int(player["id"]), True)
                 if activated_bot_ids is not None:
@@ -561,6 +738,17 @@ def _find_seed_contest(store: Store, organizer_id: int, key: str) -> dict[str, A
     if len(candidates) > 1:
         raise ShowcaseSeedError(f"发现多个未完成演示生成记录: {key}")
     return candidates[0] if candidates else None
+
+
+def _has_showcase_seed_records(store: Store) -> bool:
+    return any(
+        contest.get("showcase_key") in SHOWCASE_KEYS
+        or any(
+            _marker(key) in str(contest.get("description") or "")
+            for key in SHOWCASE_KEYS
+        )
+        for contest in store.list_contests()
+    )
 
 
 def _running_stages() -> list[dict[str, Any]]:
@@ -873,7 +1061,7 @@ async def _drive_contest(
 async def seed_showcases(
     db_path: Path,
     upload_root: Path,
-    sample_binary: Path,
+    profile_dir: Path,
     *,
     max_concurrent: int = 2,
     timeout_per_contest: float = 1800,
@@ -894,10 +1082,21 @@ async def seed_showcases(
             )
             emit("六个演示快照已完整：跳过 Bot provisioning，仅执行严格验收")
             return verify_showcases(store, upload_root)
+        if _has_showcase_seed_records(store):
+            # Frozen pairings retain exact Bot versions.  Updating binaries in
+            # place would mix the old strategy with this manifest, so a
+            # strategy-version change must be rolled back and reseeded fresh.
+            try:
+                _verify_showcase_profile_quality(store, upload_root)
+            except ShowcaseSeedError as exc:
+                raise ShowcaseSeedError(
+                    "检测到使用旧策略 manifest 的未完成演示图；"
+                    "请先执行 rollback，再用当前 profile 重新 seed"
+                ) from exc
         organizer, players, bots = provision_showcase_identities(
             store,
             upload_root,
-            sample_binary,
+            profile_dir,
             emit=emit,
             activated_bot_ids=activated_bot_ids,
         )
@@ -949,7 +1148,8 @@ async def seed_showcases(
         store.close()
 
 
-def verify_showcases(store: Store, upload_root: Path) -> dict[str, Any]:
+def _verify_showcase_integrity(store: Store, upload_root: Path) -> dict[str, Any]:
+    """Strictly verify the complete identity, filesystem and frozen DB graph."""
     organizer, players, bots = _reserved_identity_graph(
         store, require_complete=True
     )
@@ -1035,8 +1235,6 @@ def verify_showcases(store: Store, upload_root: Path) -> dict[str, Any]:
         }
         if bound_ids != match_ids:
             raise ShowcaseSeedError(f"{key} pairing/match 绑定集合不一致")
-        for match in matches:
-            _verify_match_replay_quality(store, match)
         if all_match_ids.intersection(match_ids):
             raise ShowcaseSeedError("演示赛事之间复用了 match_id")
         all_match_ids.update(match_ids)
@@ -1094,16 +1292,160 @@ def verify_showcases(store: Store, upload_root: Path) -> dict[str, Any]:
         raise ShowcaseSeedError("finished 缺少小组阶段结果")
     if len(store.list_stage_results(finished_id, stage_idx=1)) < 8:
         raise ShowcaseSeedError("finished 缺少淘汰阶段结果")
-    group_points = {
-        float(row.get("points") or 0)
-        for row in store.list_stage_results(finished_id, stage_idx=0)
-    }
-    if len(group_points) < 2:
-        raise ShowcaseSeedError("finished 小组排名积分全平，不适合作为展示数据")
     return {
         "seed_version": SEED_VERSION,
         "showcases": contests,
         "total_showcase_matches": len(all_match_ids),
+        "integrity_verified": True,
+    }
+
+
+def _verify_showcase_profile_quality(
+    store: Store,
+    upload_root: Path,
+) -> None:
+    """Require the exact reviewed profile assignment used by the current seed."""
+    _organizer, players, bots = _reserved_identity_graph(
+        store, require_complete=True
+    )
+    for index, (player, bot) in enumerate(zip(players, bots), 1):
+        profile_name, profile = _profile_for_player(index)
+        profile_marker = (
+            f"策略档位：{profile['label']} ({profile_name})；"
+            f"策略版本：{SHOWCASE_STRATEGY_VERSION}"
+        )
+        if (
+            int(bot.get("owner_id") or 0) != int(player["id"])
+            or profile_marker not in str(bot.get("description") or "")
+            or not _canonical_version(
+                store, bot, upload_root, profile["checksum"]
+            )
+        ):
+            raise ShowcaseSeedError(
+                f"演示 Bot {index:02d} 未使用审核锁定的 {profile_name} profile；"
+                "旧策略数据请先 rollback 后重新 seed"
+            )
+
+
+def _verify_group_stage_distribution(
+    store: Store,
+    contest_id: int,
+    *,
+    label: str,
+) -> None:
+    rows = store.list_stage_results(contest_id, stage_idx=0)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("group_id") or ""), []).append(row)
+    if set(grouped) != {"G1", "G2", "G3", "G4"}:
+        raise ShowcaseSeedError(f"{label} 小组结果必须完整覆盖 G1..G4")
+    for group_id, group_rows in grouped.items():
+        points = sorted(float(row.get("points") or 0) for row in group_rows)
+        ranks = sorted(int(row.get("rank_in_group") or 0) for row in group_rows)
+        if points != [0.0, 4.0, 8.0] or ranks != [1, 2, 3]:
+            raise ShowcaseSeedError(
+                f"{label} {group_id} 应稳定形成 8/4/0 分与连续组内名次，"
+                f"实际积分={points}"
+            )
+
+
+def _normalized_replay_trajectory(
+    store: Store,
+    match_id: str,
+) -> tuple[tuple[tuple[int, int, int], ...], int | None, str | None]:
+    replay = store.get_replay(match_id)
+    events = json.loads((replay or {}).get("events_json") or "[]")
+    moves = tuple(
+        (int(event["player"]), int(event["x"]), int(event["y"]))
+        for event in events
+        if event.get("type") == "move"
+    )
+    terminal = events[-1]
+    return moves, terminal.get("winner"), terminal.get("reason")
+
+
+def _verify_cross_snapshot_trajectories(
+    store: Store,
+    integrity: dict[str, Any],
+) -> None:
+    """The same ordered group pairing must replay identically in every snapshot."""
+
+    def trajectories(key: str) -> dict[tuple[int, int], tuple[Any, ...]]:
+        contest_id = int(integrity["showcases"][key]["contest_id"])
+        output: dict[tuple[int, int], tuple[Any, ...]] = {}
+        for pairing in store.list_contest_pairings(contest_id, stage_idx=0):
+            match_id = pairing.get("match_id")
+            if not match_id:
+                continue
+            ordered_pair = (
+                int(pairing.get("bot_a_id") or 0),
+                int(pairing.get("bot_b_id") or 0),
+            )
+            if ordered_pair in output:
+                raise ShowcaseSeedError(
+                    f"{key} 小组赛重复有序 Bot 对: {ordered_pair}"
+                )
+            output[ordered_pair] = _normalized_replay_trajectory(
+                store, str(match_id)
+            )
+        return output
+
+    baseline = trajectories("contest_lifecycle_finished")
+    if len(baseline) != 24:
+        raise ShowcaseSeedError("finished 小组赛缺少 24 条唯一有序对轨迹")
+    for key, expected_count in (
+        ("contest_lifecycle_running", 4),
+        ("contest_lifecycle_rest", 24),
+    ):
+        current = trajectories(key)
+        if len(current) != expected_count:
+            raise ShowcaseSeedError(f"{key} 真实轨迹数量异常")
+        for ordered_pair, trajectory in current.items():
+            if baseline.get(ordered_pair) != trajectory:
+                raise ShowcaseSeedError(
+                    f"{key} 有序 Bot 对 {ordered_pair} 的真实轨迹不可复现"
+                )
+
+    finished_id = int(
+        integrity["showcases"]["contest_lifecycle_finished"]["contest_id"]
+    )
+    knockout = store.list_contest_pairings(finished_id, stage_idx=1)
+    if len(knockout) != 7:
+        raise ShowcaseSeedError("finished 淘汰赛必须包含 7 场真实决胜")
+    for pairing in knockout:
+        match = store.get_match(str(pairing.get("match_id") or ""))
+        if not match or match.get("reason") != "five" or match.get("winner") not in (0, 1):
+            raise ShowcaseSeedError("finished 淘汰赛不得以平局或无胜者结束")
+
+
+def _verify_showcase_presentation_quality(
+    store: Store,
+    upload_root: Path,
+    integrity: dict[str, Any],
+) -> None:
+    """Apply strict, non-destructive customer-demo quality gates."""
+    _verify_showcase_profile_quality(store, upload_root)
+    for item in integrity["showcases"].values():
+        for match in store.list_matches(
+            limit=1000, contest_id=int(item["contest_id"])
+        ):
+            _verify_match_replay_quality(store, match)
+    for key in ("contest_lifecycle_rest", "contest_lifecycle_finished"):
+        _verify_group_stage_distribution(
+            store,
+            int(integrity["showcases"][key]["contest_id"]),
+            label=key,
+        )
+    _verify_cross_snapshot_trajectories(store, integrity)
+
+
+def verify_showcases(store: Store, upload_root: Path) -> dict[str, Any]:
+    """Strict operator verification: graph integrity plus presentation quality."""
+    result = _verify_showcase_integrity(store, upload_root)
+    _verify_showcase_presentation_quality(store, upload_root, result)
+    return {
+        **result,
+        "presentation_quality_verified": True,
         "verified": True,
     }
 
@@ -1125,23 +1467,33 @@ def rollback_showcases(
     _validated_organizer, validated_players, validated_bots = _reserved_identity_graph(
         store, require_complete=False
     )
-    validate_showcase_upload_namespace(store, upload_root)
+    _validate_showcase_upload_rollback_scope(store, upload_root)
     frozen = {
         key: store.get_contest_by_showcase_key(key) for key in SHOWCASE_KEYS
     }
     for key, contest in frozen.items():
         if contest and int(contest.get("organizer_id") or 0) != int(organizer["id"]):
             raise ShowcaseSeedError(f"{key} 不属于专用演示组织者，拒绝回滚")
-    if all(frozen.values()):
-        # A complete deployment must satisfy the same exact graph/replay/
-        # inactive-Bot contract as verify before any destructive step begins.
-        verify_showcases(store, upload_root)
     validated_user_ids = {int(player["id"]) for player in validated_players}
     validated_bot_ids = {int(bot["id"]) for bot in validated_bots}
     expected_user_bot = {
         int(bot["owner_id"]): int(bot["id"]) for bot in validated_bots
     }
     allowed_keys = set(SHOWCASE_KEYS)
+    all_marked_contests = [
+        contest
+        for contest in store.list_contests()
+        if contest.get("showcase_key") in allowed_keys
+        or any(
+            _marker(key) in str(contest.get("description") or "")
+            for key in allowed_keys
+        )
+    ]
+    if any(
+        int(contest.get("organizer_id") or 0) != int(organizer["id"])
+        for contest in all_marked_contests
+    ):
+        raise ShowcaseSeedError("演示 key/marker 被非专用组织者占用，拒绝回滚")
     candidates = [
         contest
         for contest in store.list_contests(organizer_id=int(organizer["id"]))
@@ -1149,6 +1501,7 @@ def rollback_showcases(
         or any(_marker(key) in str(contest.get("description") or "") for key in allowed_keys)
     ]
     seen_marker_keys: set[str] = set()
+    candidate_match_ids: dict[int, tuple[str, ...]] = {}
     for contest in candidates:
         key = contest.get("showcase_key")
         if key is not None and key not in allowed_keys:
@@ -1188,9 +1541,12 @@ def rollback_showcases(
             match.get("game_id") != SHOWCASE_GAME_ID
             or match.get("match_type") != TYPE_CONTEST
             or int(match.get("contest_id") or 0) != int(contest["id"])
+            or int(match.get("owner_id") or 0) != int(organizer["id"])
+            or int(match.get("bot_a_id") or 0) not in validated_bot_ids
+            or int(match.get("bot_b_id") or 0) not in validated_bot_ids
             for match in matches
         ):
-            raise ShowcaseSeedError(f"赛事 #{contest['id']} 含非预期游戏/类型对局")
+            raise ShowcaseSeedError(f"赛事 #{contest['id']} 含非预期身份/游戏/类型对局")
         _verify_pairing_identity_graph(
             store,
             int(contest["id"]),
@@ -1201,6 +1557,9 @@ def rollback_showcases(
         )
         if any(match.get("status") in (STATUS_PENDING, STATUS_RUNNING) for match in matches):
             raise ShowcaseSeedError(f"赛事 #{contest['id']} 仍有活跃对局，拒绝回滚")
+        candidate_match_ids[int(contest["id"])] = tuple(
+            str(match["id"]) for match in matches
+        )
 
     candidate_ids = {int(contest["id"]) for contest in candidates}
     organized_ids = {
@@ -1268,29 +1627,46 @@ def rollback_showcases(
         ):
             raise ShowcaseSeedError("专用演示账号存在非白名单赛事报名，拒绝回滚")
 
+    # Freeze the exact deletion whitelist only after every DB/filesystem scope
+    # assertion has passed.  No mutation is permitted above this point.
+    plan = _RollbackPlan(
+        organizer_id=int(organizer["id"]),
+        contest_matches=tuple(
+            (int(contest["id"]), candidate_match_ids[int(contest["id"])])
+            for contest in candidates
+        ),
+        player_bots=tuple(
+            (
+                int(player["id"]),
+                int(bot["id"]) if bot is not None else None,
+            )
+            for player, bot in player_bots
+        ),
+        upload_root=resolved_upload_root,
+    )
+
     deleted_matches = 0
-    for contest in candidates:
-        cid = int(contest["id"])
-        for match in store.list_matches(limit=1000, contest_id=cid):
-            deleted_matches += int(store.delete_match(str(match["id"])))
+    for cid, match_ids in plan.contest_matches:
+        for match_id in match_ids:
+            deleted_matches += int(store.delete_match(match_id))
         store.delete_contest(cid)
         emit(f"已删除演示赛事 #{cid}")
 
-    bot_manager = BotManager(store, upload_root=upload_root)
+    bot_manager = BotManager(store, upload_root=plan.upload_root)
     deleted_bots = 0
     deleted_users = 0
-    for player, bot in player_bots:
-        if bot is not None:
-            bot_manager.purge_bot_files(int(bot["id"]))
-            deleted_bots += int(store.delete_bot(int(bot["id"])))
-        deleted_users += int(store.delete_user(int(player["id"])))
-    deleted_users += int(store.delete_user(int(organizer["id"])))
-    marker = resolved_upload_root / SHOWCASE_UPLOAD_MARKER
-    if resolved_upload_root.exists() and set(resolved_upload_root.iterdir()) == {marker}:
+    for player_id, bot_id in plan.player_bots:
+        if bot_id is not None:
+            bot_manager.purge_bot_files(bot_id)
+            deleted_bots += int(store.delete_bot(bot_id))
+        deleted_users += int(store.delete_user(player_id))
+    deleted_users += int(store.delete_user(plan.organizer_id))
+    marker = plan.upload_root / SHOWCASE_UPLOAD_MARKER
+    if plan.upload_root.exists() and set(plan.upload_root.iterdir()) == {marker}:
         marker.unlink()
-        resolved_upload_root.rmdir()
+        plan.upload_root.rmdir()
     return {
-        "contests": len(candidates),
+        "contests": len(plan.contest_matches),
         "matches": deleted_matches,
         "bots": deleted_bots,
         "users": deleted_users,
