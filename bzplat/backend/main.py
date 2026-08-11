@@ -28,7 +28,7 @@ from bzplat.backend.qa_safety import (
     assert_qa_upload_root_isolated,
     qa_instance_enabled,
 )
-from bzplat.backend.runtime import BinaryRunner
+from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
 )
