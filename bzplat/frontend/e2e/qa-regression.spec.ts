@@ -4136,6 +4136,10 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
     adminPage,
     '/api/admin/settings/runtime',
   )
+  const expectedStatsCancellations = captureExactGetCancellations(
+    adminPage,
+    '/api/admin/stats',
+  )
   const adminMonitor = monitorBrowser(adminPage)
   await loginThroughUi(adminPage, ADMIN)
   await adminPage.goto('/#/admin')
@@ -4187,7 +4191,10 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
   expect((await finalResponse.json() as { match: { status: string } }).match.status).toBe('aborted')
 
   await humanMonitor.expectClean()
-  await adminMonitor.expectClean(expectedRuntimeCancellations())
+  await adminMonitor.expectClean([
+    ...expectedRuntimeCancellations(),
+    ...expectedStatsCancellations(),
+  ])
   await adminContext.close()
   adminContext = null
   }, async () => {
