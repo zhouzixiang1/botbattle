@@ -836,6 +836,17 @@ test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
 
 test('contest game switching cannot submit a stale or mismatched template', async ({ page }) => {
   const monitor = monitorBrowser(page)
+  const cancelledGomokuTemplateFailures: string[] = []
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url())
+    if (
+      request.method() === 'GET' &&
+      url.pathname === '/api/contests/templates' &&
+      url.search === '?game=gomoku'
+    ) {
+      cancelledGomokuTemplateFailures.push(request.failure()?.errorText || '')
+    }
+  })
   await loginThroughUi(page, ORGANIZER)
 
   let markGomokuRequested!: () => void
@@ -922,13 +933,17 @@ test('contest game switching cannot submit a stale or mismatched template', asyn
   })
   await expect(page.getByText('赛事创建成功', { exact: true })).toBeVisible()
 
-  await monitor.expectClean([{
+  await expect.poll(() => cancelledGomokuTemplateFailures.length).toBe(1)
+  expect(cancelledGomokuTemplateFailures[0]).toMatch(
+    /^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i,
+  )
+  await monitor.expectClean(cancelledGomokuTemplateFailures.map((errorText) => ({
     kind: 'requestfailed',
     method: 'GET',
     pathname: '/api/contests/templates',
     search: '?game=gomoku',
-    errorText: 'net::ERR_ABORTED',
-  }])
+    errorText,
+  })))
 })
 
 test('contest recovery finish trusts terminal matches when pairing status is stale', async ({ page }) => {

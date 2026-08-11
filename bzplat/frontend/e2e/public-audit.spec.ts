@@ -312,6 +312,17 @@ test('invalid login is single-submit and displays the server error', async ({ pa
 test('history distinguishes a recoverable network error from a genuine empty state', async ({ page }) => {
   const monitor = monitorBrowser(page)
   let abortedMatchRequests = 0
+  const abortedFailureTexts: string[] = []
+  page.on('requestfailed', (request) => {
+    const url = new URL(request.url())
+    if (
+      request.method() === 'GET' &&
+      url.pathname === '/api/matches' &&
+      url.search === '?limit=20&offset=0'
+    ) {
+      abortedFailureTexts.push(request.failure()?.errorText || '')
+    }
+  })
   await page.route('**/api/matches?*', (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -322,22 +333,28 @@ test('history distinguishes a recoverable network error from a genuine empty sta
     return route.abort('failed')
   })
   await page.goto('/#/history')
-  await expect(page.getByText(/Failed to fetch|网络|请求失败/)).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText(
+    /Failed to fetch|NetworkError when attempting to fetch resource\.|Load failed|网络|请求失败/,
+  )
   await expect(page.getByText('当前条件下暂无对局', { exact: true })).toHaveCount(0)
   // React StrictMode may abort the probe effect and issue it once more. Keep the
   // allowance bounded to that exact behavior; zero or more than two is a failure.
   expect(abortedMatchRequests).toBeGreaterThanOrEqual(1)
   expect(abortedMatchRequests).toBeLessThanOrEqual(2)
+  await expect.poll(() => abortedFailureTexts.length).toBe(abortedMatchRequests)
+  for (const errorText of abortedFailureTexts) {
+    expect(errorText).toMatch(/^(?:net::ERR_FAILED|NS_ERROR_FAILURE|Blocked by Web Inspector)$/)
+  }
 
   await page.unroute('**/api/matches?*')
   await page.reload()
   await expect(page.locator('a[href^="#/match/"]').first()).toBeVisible()
-  const expectedFailures = Array.from({ length: abortedMatchRequests }, () => ({
+  const expectedFailures = abortedFailureTexts.map((errorText) => ({
     kind: 'requestfailed',
     method: 'GET',
     pathname: '/api/matches',
     search: '?limit=20&offset=0',
-    errorText: 'net::ERR_FAILED',
+    errorText,
   } as const))
   await monitor.expectClean(expectedFailures)
 })
