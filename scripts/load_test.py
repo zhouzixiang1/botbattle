@@ -77,7 +77,7 @@ PASSWORD = "LoadTest1234"          # 所有 load 账号统一密码
 EMAIL_DOMAIN = "loadtest.local"
 N_USERS = 60                       # 普通用户数（可被 --users 覆盖）
 N_ORGS = 2                         # 组织者数
-TARGET_MATCHES = 12                # 阶段 2 目标对局总数（三游戏×4，配合关限流可在 ~60s 完成）
+TARGET_MATCHES = 12                # 阶段 2 目标对局总数（三游戏×4）
 SAMPLE_BINARIES = {
     "holdem": "samples/callbot_linux_amd64",
     "gomoku": "samples/gomokubot_linux_amd64",
@@ -86,7 +86,17 @@ SAMPLE_BINARIES = {
 GAMES = ("holdem", "gomoku", "pencil")
 LOAD_ACCOUNT_NAMESPACE = "load-test-v1"
 LOAD_ADMIN_NAME = "load_admin"
-MATCH_WAIT_TIMEOUT_SEC = 300.0
+# 生产式 Traditional 70 手单局约 285 秒；顺序链路留约 25% 余量。
+SEQUENTIAL_MATCH_TIMEOUT_SEC = 360.0
+# 两个 match slot 仍共享 Docker launch fence，claim 后的单局不能按理想并行估算。
+CONTENDED_MATCH_TIMEOUT_SEC = SEQUENTIAL_MATCH_TIMEOUT_SEC * 2
+# 固定 load mix 的共享批次预算：4×Holdem 360s + 8×棋类 180s = 48min。
+LOAD_GAME_BUDGET_SEC = {"holdem": 360.0, "gomoku": 180.0, "pencil": 180.0}
+
+
+def load_batch_timeout_seconds(games: list[str]) -> float:
+    """Return one absolute claim+completion budget for the fixed Docker batch."""
+    return sum(LOAD_GAME_BUDGET_SEC[game] for game in games)
 
 
 def load_account_spec(username: str, email: str, role: str) -> QaAccountSpec:
@@ -161,7 +171,7 @@ class Api:
         self,
         token: str,
         mid: str,
-        timeout: float = MATCH_WAIT_TIMEOUT_SEC,
+        timeout: float = SEQUENTIAL_MATCH_TIMEOUT_SEC,
     ) -> dict:
         deadline = time.monotonic() + timeout
         last_payload: dict[str, Any] | None = None
@@ -631,6 +641,9 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
                 b = user_names[(i + 13) % len(user_names)]
             pairs.append((ctx["bots"][a][game], ctx["bots"][b][game], game))
 
+    batch_timeout = load_batch_timeout_seconds([game for _, _, game in pairs])
+    batch_deadline = time.monotonic() + batch_timeout
+
     results: list[dict] = []
     errors: list[str] = []
     done = [0]
@@ -640,14 +653,25 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
         execution: dict[str, Any], game: str, owner_tok: str
     ) -> None:
         try:
+            claim_remaining = batch_deadline - time.monotonic()
+            if claim_remaining <= 0:
+                raise TimeoutError(f"阶段2批次超过 {batch_timeout:.0f}s 绝对上限")
             mid = api.wait_execution_match(
                 owner_tok,
                 execution,
                 label=f"阶段2 {game} 挑战",
-                timeout=MATCH_WAIT_TIMEOUT_SEC,
+                timeout=claim_remaining,
             )
-            # Hold'em 规则固定为 70 手，不能靠请求参数缩短；给真实整场留足时间。
-            m = api.wait_match(owner_tok, mid)
+            match_remaining = batch_deadline - time.monotonic()
+            if match_remaining <= 0:
+                raise TimeoutError(f"阶段2批次超过 {batch_timeout:.0f}s 绝对上限")
+            # claim 后仍可能与另一场共享 Docker launch fence；每局最多 12 分钟，
+            # 同时受整个固定 12 场批次的绝对截止约束。
+            m = api.wait_match(
+                owner_tok,
+                mid,
+                timeout=min(CONTENDED_MATCH_TIMEOUT_SEC, match_remaining),
+            )
             with lock:
                 results.append({"match": m, "game": game})
                 done[0] += 1
@@ -659,6 +683,7 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
 
     # 单一线程顺序发起挑战；每个成功请求立即起 waiter 线程并行等待终态。
     # 这里不控制或断言服务端同时运行的对局数，也不声称持续打满并发 ceiling。
+    print(f"    阶段 2 claim+完成共享绝对上限 {batch_timeout / 60:.0f} 分钟")
     t0 = time.time()
     waiters: list[threading.Thread] = []
     for idx, (my_bid, opp_bid, game) in enumerate(pairs):

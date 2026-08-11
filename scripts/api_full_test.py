@@ -57,7 +57,10 @@ from scripts._qa_target import (  # noqa: E402
 PASS = 0
 FAIL = 0
 FAILS: list[str] = []
-MATCH_WAIT_TIMEOUT_SEC = 300.0
+# 生产式 Traditional 70 手单局约 285 秒；顺序链路留约 25% 余量。
+SEQUENTIAL_MATCH_TIMEOUT_SEC = 360.0
+# 两个 match slot 仍共享 Docker launch fence，claim 后的单局不能按理想并行估算。
+CONTENDED_MATCH_TIMEOUT_SEC = SEQUENTIAL_MATCH_TIMEOUT_SEC * 2
 PASSWORD = "ApiQa1234"
 QA_ACCOUNTS = {
     "admin": ("apiqa_admin", "apiqa_admin@test.invalid", ROLE_ADMIN, True),
@@ -386,7 +389,7 @@ def wait_match(
     api: Api,
     token: str,
     mid: str,
-    timeout: float = MATCH_WAIT_TIMEOUT_SEC,
+    timeout: float = SEQUENTIAL_MATCH_TIMEOUT_SEC,
 ) -> dict:
     deadline = time.monotonic() + timeout
     last_payload: dict[str, Any] | None = None
@@ -642,6 +645,10 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
         threading.Thread(target=submit, args=(i, a, b, t))
         for i, (a, b, t) in enumerate(pairs)
     ]
+    # 四场均为固定 70 手 Holdem。所有 waiter 共用绝对截止，claim 与完成
+    # 消耗同一批预算，避免给每个阶段重复追加超时。
+    batch_timeout = SEQUENTIAL_MATCH_TIMEOUT_SEC * n
+    batch_deadline = time.monotonic() + batch_timeout
     t0 = time.time()
     for th in threads:
         th.start()
@@ -662,14 +669,25 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
     # 超过并发容量的请求由持久队列保留，不再依赖旧的 429 + 客户端重提。
     def wait_one(i: int, tok: str, snapshot: dict[str, Any]) -> None:
         try:
+            claim_remaining = batch_deadline - time.monotonic()
+            if claim_remaining <= 0:
+                raise TimeoutError(f"并发挑战批次超过 {batch_timeout:.0f}s 绝对上限")
             mid = wait_execution_snapshot(
                 api,
                 tok,
                 snapshot,
                 label=f"并发挑战 #{i}",
-                timeout=MATCH_WAIT_TIMEOUT_SEC,
+                timeout=claim_remaining,
             )
-            match = wait_match(api, tok, mid)
+            match_remaining = batch_deadline - time.monotonic()
+            if match_remaining <= 0:
+                raise TimeoutError(f"并发挑战批次超过 {batch_timeout:.0f}s 绝对上限")
+            match = wait_match(
+                api,
+                tok,
+                mid,
+                timeout=min(CONTENDED_MATCH_TIMEOUT_SEC, match_remaining),
+            )
             with lock:
                 results[i] = match
         except Exception as exc:
@@ -751,8 +769,11 @@ def test_leaderboard_and_contest(
     # 等所有对阵的 match 完成。
     # 注：后端 maybe_finish 目前无路由触发，比赛 status 不会自动转 finished，
     # 因此用「所有 pairing 的 match 均 completed」作为完成判据。
-    # 三个对阵在默认两槽下最多分两波；每波仍沿用单局 300 秒硬上限。
-    deadline = time.monotonic() + MATCH_WAIT_TIMEOUT_SEC * 2
+    # 三个固定 70 手对阵共享 Docker launch fence；总预算按三局顺序上限计，
+    # 而不是按理想的两槽并行波次计。
+    expected_pairings = 3
+    contest_timeout = SEQUENTIAL_MATCH_TIMEOUT_SEC * expected_pairings
+    deadline = time.monotonic() + contest_timeout
     all_done = False
     while time.monotonic() < deadline:
         detail = api.poll_json(
@@ -794,7 +815,6 @@ def test_leaderboard_and_contest(
     pairings = detail.get("pairings", [])
     standings = detail.get("standings", [])
     # 循环赛对阵数 = C(3,2) = 3
-    expected_pairings = 3
     check(f"循环赛 {expected_pairings} 个对阵", len(pairings) == expected_pairings,
           f"got {len(pairings)}")
     check("standings 非空", len(standings) > 0, "空")

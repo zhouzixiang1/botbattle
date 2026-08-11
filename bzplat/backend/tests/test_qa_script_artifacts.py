@@ -161,6 +161,14 @@ def test_api_replay_count_uses_nested_result_contract():
     assert module.match_rounds_played({"result": {"rounds_played": 70}}) == 70
     assert module.match_rounds_played({"rounds_played": 70}) == 0
     assert module.qa_contest_payload("run1")["template_id"] == "holdem_rr"
+    assert module.SEQUENTIAL_MATCH_TIMEOUT_SEC == 360.0
+    assert module.CONTENDED_MATCH_TIMEOUT_SEC == 720.0
+
+    load_module = load_script("load_test")
+    games = ["holdem", "gomoku", "pencil"] * 4
+    assert load_module.SEQUENTIAL_MATCH_TIMEOUT_SEC == 360.0
+    assert load_module.CONTENDED_MATCH_TIMEOUT_SEC == 720.0
+    assert load_module.load_batch_timeout_seconds(games) == 2880.0
 
 
 class _FakePollClock:
@@ -262,10 +270,16 @@ def test_qa_match_polling_artifacts_are_rate_aware_and_bounded():
     for source in (api_source, load_source):
         assert "RateAwareJsonPoller(min_interval=1.0)" in source
         assert "execution_request_path(public_id)" in source
-        assert "MATCH_WAIT_TIMEOUT_SEC = 300.0" in source
+        assert "SEQUENTIAL_MATCH_TIMEOUT_SEC = 360.0" in source
+        assert "CONTENDED_MATCH_TIMEOUT_SEC = SEQUENTIAL_MATCH_TIMEOUT_SEC * 2" in source
         assert "time.sleep(0.4)" not in source
         assert "time.sleep(0.5)" not in source
+    assert "batch_timeout = SEQUENTIAL_MATCH_TIMEOUT_SEC * n" in api_source
+    assert "timeout=min(CONTENDED_MATCH_TIMEOUT_SEC, match_remaining)" in api_source
+    assert "load_batch_timeout_seconds([game for _, _, game in pairs])" in load_source
+    assert "timeout=min(CONTENDED_MATCH_TIMEOUT_SEC, match_remaining)" in load_source
     assert "Retry-After" in load_doc
+    assert "2880 秒绝对截止" in load_doc
     assert "不会靠关闭服务端限流绕过边界" in load_doc
 
 
