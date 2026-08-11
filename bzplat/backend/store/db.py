@@ -4129,6 +4129,7 @@ class Store:
                 "u.display_name AS owner_display, "
                 "r.rating, r.rd, COALESCE(r.wins,0) AS wins, "
                 "COALESCE(r.losses,0) AS losses, COALESCE(r.draws,0) AS draws, "
+                "COALESCE(r.matches_played,0) AS matches_played, "
                 "COALESCE(r.matches_played,0) AS rated_matches "
                 "FROM bots b "
                 "LEFT JOIN users u ON b.owner_id=u.id "

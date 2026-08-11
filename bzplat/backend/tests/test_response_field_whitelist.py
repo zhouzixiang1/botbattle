@@ -80,7 +80,10 @@ def test_bot_profile_drops_dead_fields(tmp_path):
         ):
             assert dead not in p, f"bot_profile 仍含死字段 {dead}"
         # 守护：测试依赖字段保留
-        for keep in ("rated_matches", "rank_total", "ranking_progress", "owner_id"):
+        for keep in (
+            "wins", "losses", "draws", "matches_played", "rated_matches",
+            "rank_total", "ranking_progress", "owner_id",
+        ):
             assert keep in p, f"bot_profile 误删了保留字段 {keep}"
 
 

@@ -40,7 +40,30 @@ def test_bot_profile_returns_owner_and_rating(tmp_path):
     assert p["game_id"] == "holdem"
     assert p["rating"] == 1650.0
     assert p["wins"] == 3
+    assert p["losses"] == 1
+    assert p["draws"] == 0
     assert p["matches_played"] == 4
+    assert p["rated_matches"] == 4
+    s.close()
+
+
+def test_bot_profile_zero_sample_stats_keep_public_compatibility_fields(tmp_path):
+    s = _store(tmp_path)
+    _, b1, _ = _seed_two_bots(s)
+
+    p = s.bot_profile(b1["id"])
+
+    assert p is not None
+    assert {
+        field: p[field]
+        for field in ("wins", "losses", "draws", "matches_played", "rated_matches")
+    } == {
+        "wins": 0,
+        "losses": 0,
+        "draws": 0,
+        "matches_played": 0,
+        "rated_matches": 0,
+    }
     s.close()
 
 
@@ -227,6 +250,11 @@ def test_bot_profile_endpoint(tmp_path):
     assert p["name"] == "botA"
     assert p["rating"] == 1700
     assert p["owner_name"] == "admin"
+    assert p["wins"] == 2
+    assert p["losses"] == 0
+    assert p["draws"] == 0
+    assert p["matches_played"] == 2
+    assert p["rated_matches"] == 2
 
 
 def test_bot_profile_404(tmp_path):

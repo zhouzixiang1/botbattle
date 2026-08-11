@@ -178,7 +178,7 @@ def test_profile_exposes_deltas_rank_and_technical_failure_denominator(tmp_path)
     assert profile["unique_opponents"] == 1
     assert profile["technical_failures"] == 1
     assert profile["normal_completion_rate"] == 0.9
-    assert "matches_played" not in profile
+    assert profile["matches_played"] == profile["rated_matches"] == 10
 
 
 def test_recent_delta_is_null_without_window_baseline(tmp_path):
