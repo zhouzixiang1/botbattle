@@ -4050,8 +4050,11 @@ test('organizer has no dead admin navigation while admin owner links use usernam
   const organizerPage = await organizerContext.newPage()
   const organizerMonitor = monitorBrowser(organizerPage)
   await loginThroughUi(organizerPage, ORGANIZER)
-  await organizerPage.goto('/#/')
   await expect(organizerPage.getByRole('link', { name: '管理端', exact: true })).toHaveCount(0)
+  // WebKit turns fetches interrupted by an immediate post-login navigation into
+  // page errors. Let the authenticated home requests finish before probing the
+  // access-control route; the extra goto('/#/') was a redundant second mount.
+  await organizerMonitor.settle()
   await organizerPage.goto('/#/admin')
   await expect(organizerPage.getByText('当前账号没有管理权限', { exact: true })).toBeVisible()
   await organizerMonitor.expectClean()
@@ -4063,8 +4066,13 @@ test('organizer has no dead admin navigation while admin owner links use usernam
     adminPage,
     '/api/admin/settings/runtime',
   )
+  const expectedStatsCancellations = captureExactGetCancellations(
+    adminPage,
+    '/api/admin/stats',
+  )
   const adminMonitor = monitorBrowser(adminPage)
   await loginThroughUi(adminPage, ADMIN)
+  await adminMonitor.settle()
   await adminPage.goto('/#/admin')
   const adminNav = adminPage.getByRole('navigation', { name: '管理控制台模块', exact: true })
   await adminNav.getByRole('button', { name: /^Bot / }).click()
@@ -4088,7 +4096,10 @@ test('organizer has no dead admin navigation while admin owner links use usernam
   const owner = adminPage.locator(`a[href="#/user/${USER}"]`).first()
   await expect(owner).toHaveAttribute('href', `#/user/${USER}`)
   await expect(adminPage.getByRole('table').locator('tbody tr')).toHaveCount(filteredBots.bots.length)
-  await adminMonitor.expectClean(expectedRuntimeCancellations())
+  await adminMonitor.expectClean([
+    ...expectedRuntimeCancellations(),
+    ...expectedStatsCancellations(),
+  ])
   await adminContext.close()
 })
 

@@ -19,6 +19,33 @@ test.beforeAll(async ({ request }) => {
   expect((await response.json() as { qa_instance?: boolean }).qa_instance).toBe(true)
 })
 
+function captureExactGetCancellations(page: Page, pathname: string, maxCount = 3) {
+  const errors: string[] = []
+  page.on('requestfailed', (request) => {
+    if (
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname === pathname
+    ) {
+      errors.push(request.failure()?.errorText || '')
+    }
+  })
+  return () => {
+    expect(errors.length, `${pathname} cancellation count`).toBeLessThanOrEqual(maxCount)
+    for (const errorText of errors) {
+      expect(
+        errorText,
+        `${pathname} failed for a reason other than a browser navigation/effect cancellation`,
+      ).toMatch(/^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i)
+    }
+    return errors.map((errorText) => ({
+      kind: 'requestfailed' as const,
+      method: 'GET',
+      pathname,
+      errorText,
+    }))
+  }
+}
+
 async function loggedInPage(
   browser: Browser,
   baseURL: string,
@@ -260,6 +287,14 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
 
   const admin = await loggedInPage(browser, baseURL!, ADMIN)
   childContexts.add(admin.context)
+  const expectedRuntimeCancellations = captureExactGetCancellations(
+    admin.page,
+    '/api/admin/settings/runtime',
+  )
+  const expectedStatsCancellations = captureExactGetCancellations(
+    admin.page,
+    '/api/admin/stats',
+  )
   await admin.page.goto('/#/admin')
   const adminNavigation = admin.page.getByRole('navigation', { name: '管理控制台模块' })
   await expect(adminNavigation).toBeVisible()
@@ -270,7 +305,10 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
   await expect(row.getByRole('button', { name: /删除/ })).toHaveCount(0)
   const forbiddenDelete = await admin.page.request.delete(`/api/admin/contests/${contestId}`)
   expect(forbiddenDelete.status(), await forbiddenDelete.text()).toBe(409)
-  await admin.monitor.expectClean()
+  await admin.monitor.expectClean([
+    ...expectedRuntimeCancellations(),
+    ...expectedStatsCancellations(),
+  ])
   await admin.context.close()
   childContexts.delete(admin.context)
   }, async () => {
