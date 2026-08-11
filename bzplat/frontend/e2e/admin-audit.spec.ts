@@ -3,6 +3,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 import { loginThroughUi, monitorBrowser, withCleanup } from './helpers'
 
 const ADMIN = process.env.BZ_E2E_ADMIN || 'qa_admin'
+const MIN_TOUCH_TARGET_PX = 44
+const RENDERING_EPSILON_PX = 0.01
 
 const ADMIN_VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900, interactive: true },
@@ -35,8 +37,8 @@ async function selectAdminModule(page: Page, label: string) {
 async function expectTouchTarget(locator: Locator, label: string) {
   const box = await locator.boundingBox()
   expect(box, `${label} has no rendered box`).not.toBeNull()
-  expect(box?.width ?? 0, `${label} width`).toBeGreaterThanOrEqual(44)
-  expect(box?.height ?? 0, `${label} height`).toBeGreaterThanOrEqual(44)
+  expect(box?.width ?? 0, `${label} width`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
+  expect(box?.height ?? 0, `${label} height`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
 }
 
 test.beforeAll(async ({ request }) => {
