@@ -174,9 +174,9 @@ function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
 
   if (!user) {
     return (
-      <PageFrame width="narrow" layout="messages-guest">
+      <PageFrame layout="messages-guest">
         <PageHeader title="站内信" description="登录后查看平台消息并在原线程回复。" />
-        <EmptyState text="请先登录" className="rounded-xl border py-12" />
+        <EmptyState text="请先登录" className="mx-auto w-full max-w-5xl rounded-xl border py-12" />
       </PageFrame>
     )
   }

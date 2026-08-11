@@ -101,9 +101,9 @@ export default function Notifications() {
 
   if (!user) {
     return (
-      <PageFrame width="narrow" layout="account-notifications-guest">
+      <PageFrame layout="account-notifications-guest">
         <PageHeader title="通知" description="登录后查看对局结果、赛事与系统消息。" />
-        <DataRegion title="通知中心"><EmptyState text="请先登录" icon={<Bell className="size-5 opacity-50" />} className="py-8" /></DataRegion>
+        <DataRegion title="通知中心" className="mx-auto w-full max-w-5xl"><EmptyState text="请先登录" icon={<Bell className="size-5 opacity-50" />} className="py-8" /></DataRegion>
       </PageFrame>
     )
   }

@@ -60,6 +60,15 @@ test('public deep links, refresh, back/forward, search, and fallback routes work
   const matchHref = await matchLink.getAttribute('href')
   const matchId = matchHref?.match(/^#\/match\/(.+)$/)?.[1]
   expect(matchId, `unexpected public match href: ${matchHref}`).toBeTruthy()
+  const abortedDetailRequests: string[] = []
+  page.on('requestfailed', (request) => {
+    if (
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname === `/api/matches/${matchId}`
+    ) {
+      abortedDetailRequests.push(request.failure()?.errorText || '')
+    }
+  })
   const waitForMatchDetail = () => page.waitForResponse((response) => {
     const request = response.request()
     const url = new URL(response.url())
@@ -102,9 +111,15 @@ test('public deep links, refresh, back/forward, search, and fallback routes work
 
   await page.goto('/#/this-route-does-not-exist')
   await expect(page).toHaveURL(/\/#\/$/)
-  await expect(page.getByRole('heading', { name: '首页', exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '多游戏 Bot 竞赛平台', exact: true })).toBeVisible()
-  await monitor.expectClean()
+  await expect(page.getByRole('heading', { name: 'Bot 对战中心', exact: true })).toBeVisible()
+  await expect(page.locator('main')).toContainText('上传 Linux x86_64 ELF Bot')
+  expect(abortedDetailRequests.length).toBeLessThanOrEqual(3)
+  await monitor.expectClean(abortedDetailRequests.map((errorText) => ({
+    kind: 'requestfailed' as const,
+    method: 'GET',
+    pathname: `/api/matches/${matchId}`,
+    errorText,
+  })))
 })
 
 test('collapsed desktop sidebar keeps the Botbattle wordmark inside the navigation rail', async ({ page }) => {
@@ -294,7 +309,7 @@ test('invalid login is single-submit and displays the server error', async ({ pa
   }])
 })
 
-test('history exposes a recoverable error and empty state after a network failure', async ({ page }) => {
+test('history distinguishes a recoverable network error from a genuine empty state', async ({ page }) => {
   const monitor = monitorBrowser(page)
   let abortedMatchRequests = 0
   await page.route('**/api/matches?*', (route) => {
@@ -308,7 +323,7 @@ test('history exposes a recoverable error and empty state after a network failur
   })
   await page.goto('/#/history')
   await expect(page.getByText(/Failed to fetch|网络|请求失败/)).toBeVisible()
-  await expect(page.getByText('暂无对局', { exact: true })).toBeVisible()
+  await expect(page.getByText('当前条件下暂无对局', { exact: true })).toHaveCount(0)
   // React StrictMode may abort the probe effect and issue it once more. Keep the
   // allowance bounded to that exact behavior; zero or more than two is a failure.
   expect(abortedMatchRequests).toBeGreaterThanOrEqual(1)

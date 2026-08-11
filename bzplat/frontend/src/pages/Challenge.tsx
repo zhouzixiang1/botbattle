@@ -535,7 +535,10 @@ export default function Challenge() {
           {executionPolling && <Loading text="正在读取请求状态…" className="py-4" />}
           {(error || executionOffline) && (
             <div ref={errorAlertRef} className="space-y-2" role="alert" tabIndex={-1}>
-              <ErrorMsg msg={executionOffline ? '当前离线；请求仍保留，联网后会自动恢复。' : error} />
+              <ErrorMsg
+                msg={executionOffline ? '当前离线；请求仍保留，联网后会自动恢复。' : error}
+                announce={false}
+              />
               <div className="flex flex-wrap gap-2">
                 <Button type="button" variant="outline" className="min-h-11" onClick={refreshExecution}>
                   立即重试
@@ -557,7 +560,10 @@ export default function Challenge() {
               tabIndex={-1}
             >
               <div>
-                <ErrorMsg msg={executionOffline ? '当前离线；以下保留上次状态，联网后会自动续查。' : error} />
+                <ErrorMsg
+                  msg={executionOffline ? '当前离线；以下保留上次状态，联网后会自动续查。' : error}
+                  announce={false}
+                />
                 {executionStale && <p className="mt-1 text-xs text-muted-foreground">队列位置可能已变化。</p>}
               </div>
               <Button type="button" variant="outline" className="min-h-11" onClick={refreshExecution}>

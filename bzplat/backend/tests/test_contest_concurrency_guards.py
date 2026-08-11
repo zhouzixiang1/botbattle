@@ -13,7 +13,11 @@ from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
-from bzplat.backend.store.schema import XP_CONTEST_PARTICIPATE
+from bzplat.backend.store.schema import (
+    EXECUTION_SOURCE_CONTEST,
+    TYPE_CONTEST,
+    XP_CONTEST_PARTICIPATE,
+)
 from bzplat.backend.tests.execution_helpers import (
     claim_next_queued,
     enable_execution_queue,
@@ -392,6 +396,39 @@ def test_delete_published_without_matches_cancels_schedule_then_deletes(tmp_path
         assert store.get_contest(contest_id)["status"] == "published"
         assert await manager.delete(contest_id) is True
         assert store.get_contest(contest_id) is None
+
+    asyncio.run(exercise())
+
+
+def test_delete_published_rejects_queued_execution_request(tmp_path):
+    async def exercise():
+        store, contest_id, users, bots = _manager_fixture(
+            tmp_path, status="open"
+        )
+        manager = ContestManager(store, _CountingOrch())
+        await manager.publish(contest_id)
+        pairings = store.list_contest_pairings(contest_id)
+        pairing = pairings[0]
+        store.executions.resume()
+        request = store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=users[0]["id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[0]["id"],
+            bot_b_id=bots[1]["id"],
+            bot_a_version_id=pairing.get("bot_a_version_id"),
+            bot_b_version_id=pairing.get("bot_b_version_id"),
+            contest_id=contest_id,
+            contest_pairing_id=pairing["id"],
+        )
+
+        with pytest.raises(ValueError, match="排队或执行中的请求"):
+            await manager.delete(contest_id)
+
+        assert store.get_contest(contest_id)["status"] == "published"
+        assert store.executions.get(request["public_id"])["status"] == "queued"
+        assert len(store.list_contest_pairings(contest_id)) == len(pairings)
 
     asyncio.run(exercise())
 

@@ -49,11 +49,19 @@ export function Loading({ text = '加载中…', className }: { text?: string; c
 }
 
 /** 错误提示行 */
-export function ErrorMsg({ msg, className }: { msg?: string; className?: string }) {
+export function ErrorMsg({
+  msg,
+  className,
+  announce = true,
+}: {
+  msg?: string
+  className?: string
+  announce?: boolean
+}) {
   return msg ? (
     <p
       data-slot="error-message"
-      role="alert"
+      role={announce ? 'alert' : undefined}
       className={cn(
         'flex items-center gap-1.5 text-sm text-destructive',
         className

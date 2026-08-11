@@ -2869,6 +2869,46 @@ def test_preflight_launch_and_instance_cleanup_share_the_same_flock(
     asyncio.run(exercise())
 
 
+def test_dispatcher_waits_for_live_launch_before_checking_journal(
+    queue_store, tmp_path
+):
+    supervisor = _journal_supervisor(queue_store, tmp_path)
+    runtime = SimpleNamespace(supervisor=supervisor)
+    orch = SimpleNamespace(runner=SimpleNamespace(runner=runtime))
+    dispatcher = ExecutionDispatcher(
+        orch,
+        queue_store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=False,
+    )
+
+    async def exercise() -> dict:
+        async with supervisor.launch_guard():
+            _begin_test_launch(
+                queue_store,
+                token="live-launch-token",
+                boot_id="boot-a",
+                job_public_id="live-launch",
+            )
+            iteration = asyncio.create_task(dispatcher.run_once())
+            await asyncio.sleep(0.02)
+            assert iteration.done() is False
+            assert queue_store.executions.control()["dispatcher_state"] == "running"
+            queue_store.executions.mark_docker_launch_created(
+                "live-launch-token"
+            )
+            queue_store.executions.clear_docker_launch_created(
+                "live-launch-token"
+            )
+        return await asyncio.wait_for(iteration, timeout=1)
+
+    result = asyncio.run(exercise())
+    assert result["outcome"] == "ok"
+    assert queue_store.executions.control()["dispatcher_state"] == "running"
+    assert queue_store.executions.docker_launch()["state"] == "idle"
+
+
 def test_app_main_and_preflight_runners_share_one_supervisor(
     tmp_path, monkeypatch
 ):

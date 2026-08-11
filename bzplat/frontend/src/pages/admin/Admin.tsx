@@ -65,9 +65,9 @@ export default function Admin() {
 
   if (!isLoggedIn) {
     return (
-      <PageFrame width="narrow" layout="admin-auth-required">
+      <PageFrame layout="admin-auth-required">
         <PageHeader title="管理控制台" description="请先使用管理员账号登录。" />
-        <section className="rounded-xl border bg-card">
+        <section className="mx-auto w-full max-w-5xl rounded-xl border bg-card">
           <EmptyState text="当前未登录" className="py-12" />
           <div className="border-t p-3 text-center">
             <Button asChild size="sm"><Link to="/login">前往登录</Link></Button>
@@ -79,9 +79,9 @@ export default function Admin() {
 
   if (user?.role !== 'admin') {
     return (
-      <PageFrame width="narrow" layout="admin-forbidden">
+      <PageFrame layout="admin-forbidden">
         <PageHeader title="管理控制台" description="该区域只向平台管理员开放。" />
-        <section className="rounded-xl border bg-card">
+        <section className="mx-auto w-full max-w-5xl rounded-xl border bg-card">
           <EmptyState text="当前账号没有管理权限" icon={<ShieldCheck className="size-7 opacity-40" />} className="py-12" />
         </section>
       </PageFrame>

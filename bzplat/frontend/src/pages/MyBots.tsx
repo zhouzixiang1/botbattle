@@ -180,9 +180,9 @@ export default function MyBots() {
 
   if (!isLoggedIn) {
     return (
-      <PageFrame width="narrow" layout="account-my-bots-guest">
+      <PageFrame layout="account-my-bots-guest">
         <PageHeader title="我的 Bot" description="登录后上传、维护与切换 Bot 版本。" />
-        <DataRegion title="Bot 管理" contentClassName="space-y-3 px-4 py-6">
+        <DataRegion title="Bot 管理" className="mx-auto w-full max-w-5xl" contentClassName="space-y-3 px-4 py-6">
           <EmptyState text="请先登录后管理 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-3" />
           <div className="flex min-w-0 justify-center"><Button asChild size="sm"><Link to="/login">前往登录</Link></Button></div>
         </DataRegion>

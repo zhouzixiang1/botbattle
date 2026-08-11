@@ -348,7 +348,8 @@ test('lost POST response recovers the committed request by its pre-persisted id'
   await page.getByRole('button', { name: '开始对局', exact: true }).click()
 
   const recovery = page.getByTestId('execution-request-recovery')
-  const alert = recovery.getByRole('alert')
+  const alert = recovery.locator('[role="alert"][tabindex="-1"]')
+  await expect(recovery.getByRole('alert')).toHaveCount(1)
   await expect(alert).toContainText('正在确认受理状态')
   await expect(alert).toBeFocused()
   await expect(page.getByTestId('execution-request-card')).toContainText('排队中', { timeout: 12_000 })

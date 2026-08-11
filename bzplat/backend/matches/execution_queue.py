@@ -376,8 +376,23 @@ class ExecutionDispatcher:
         if control["dispatcher_state"] != "running":
             return {"outcome": str(control["dispatcher_state"])}
 
+        supervisor = getattr(
+            getattr(getattr(self.orch, "runner", None), "runner", None),
+            "supervisor",
+            None,
+        )
         try:
-            self.repo.assert_docker_launch_idle()
+            if supervisor is None:
+                self.repo.assert_docker_launch_idle()
+            else:
+                # A normal create -> start transition deliberately leaves the
+                # durable journal in creating/created for a short window.  The
+                # same cross-process flock that owns that transition must also
+                # serialize this orphan check; otherwise the one-second poller
+                # can mistake a live launch for abandoned state and pause the
+                # whole queue while the owner is still clearing the journal.
+                async with supervisor.launch_guard():
+                    self.repo.assert_docker_launch_idle()
         except DockerLaunchInvariantError as exc:
             self._pause_control_uncertainty(str(exc))
             return {"outcome": "paused"}

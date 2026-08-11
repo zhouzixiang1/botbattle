@@ -780,22 +780,11 @@ class BinaryRunner:
             returncode,
             tail[:500],
         )
-        platform_reason = _classify_container_platform_exit(
-            mode=session.mode,
-            returncode=returncode,
-        )
-        if platform_reason is not None:
-            # ``--pull=never`` makes a concurrently removed image fail fast as
-            # docker exit 125.  Invalidate the readiness cache so the next
-            # attempt can inspect/pull again outside the Bot decision clock.
-            await asyncio.to_thread(
-                _invalidate_linux_image_ready_sync,
-                self._docker_bin,
-                self._linux_image,
-            )
-            return PlatformRunnerError(
-                f"sandbox 启动失败（{platform_reason}）"
-            )
+        # Docker control failures are rejected by ``start_attached`` before it
+        # returns a process. Once a non-zero daemon StartedAt has been proved,
+        # ``docker start -a`` forwards the container's exit status; even 125 is
+        # therefore Bot-attributable and must not pause the platform or evade a
+        # rated result.
         return BotCrashedError(
             f"bot {session.session_id} {context}（进程退出码={returncode}）"
         )
@@ -931,14 +920,3 @@ class BinaryRunner:
             await self.supervisor.cleanup_instance()
         except DockerControlUncertain as exc:
             raise SandboxControlUncertain(str(exc)) from exc
-
-
-def _classify_container_platform_exit(
-    *,
-    mode: str,
-    returncode: int | None,
-) -> str | None:
-    """Docker exit 125 is infrastructure; all other exits belong to the Bot."""
-    if mode == "docker" and returncode == 125:
-        return "docker exit 125"
-    return None

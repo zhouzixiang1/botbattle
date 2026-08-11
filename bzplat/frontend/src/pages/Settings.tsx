@@ -158,9 +158,9 @@ export default function Settings() {
 
   if (!user) {
     return (
-      <PageFrame width="narrow" layout="account-settings-guest">
+      <PageFrame layout="account-settings-guest">
         <PageHeader title="个人设置" description="登录后管理资料、密码、通知偏好与收藏。" />
-        <DataRegion title="账号设置"><EmptyState text="请先登录" icon={<Settings2 className="size-5 opacity-50" />} className="py-8" /></DataRegion>
+        <DataRegion title="账号设置" className="mx-auto w-full max-w-5xl"><EmptyState text="请先登录" icon={<Settings2 className="size-5 opacity-50" />} className="py-8" /></DataRegion>
       </PageFrame>
     )
   }

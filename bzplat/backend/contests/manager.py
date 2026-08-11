@@ -1616,6 +1616,8 @@ class ContestManager:
                 raise ValueError("已完成或已有正式赛果的赛事不能删除")
             if contest["status"] in (CONTEST_RUNNING, CONTEST_REST):
                 raise ValueError("运行中或休息期赛事不能删除，请先完成或中止在途对局")
+            if self.store.executions.contest_has_active_jobs(contest_id):
+                raise ValueError("赛事仍有排队或执行中的请求，不能删除")
             if self.store.contest_has_active_matches(contest_id):
                 raise ValueError("赛事仍有 pending/running 对局，不能删除")
             if contest["status"] == CONTEST_PUBLISHED:

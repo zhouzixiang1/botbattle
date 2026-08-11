@@ -11,6 +11,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Iterable
 
+
+logger = logging.getLogger(__name__)
 
 CANONICAL_DOCKER_HOST = "unix:///var/run/docker.sock"
 INSTANCE_LABEL = "io.botbattle.instance"
@@ -372,6 +375,13 @@ class DockerSupervisor:
                 host_boot_id=boot_id,
             )
         except Exception as exc:
+            logger.exception(
+                "Docker launch intent persistence failed owner=%s job=%s attempt=%s slot=%s",
+                owner_kind,
+                identity.job_public_id,
+                identity.attempt_no,
+                slot,
+            )
             raise DockerControlUncertain(
                 "Docker create intent 无法持久化"
             ) from exc

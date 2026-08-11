@@ -897,6 +897,19 @@ class ExecutionRepository:
                 "ahead_sandbox_units": ahead_units,
             }
 
+    def contest_has_active_jobs(self, contest_id: int) -> bool:
+        """Return whether a contest still owns a non-terminal durable request."""
+        with self.store._tx() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM execution_jobs WHERE contest_id=? "
+                    "AND status IN ('queued','starting','running','settling') "
+                    "LIMIT 1",
+                    (int(contest_id),),
+                ).fetchone()
+                is not None
+            )
+
     # ------------------------------------------------------------------
     # Atomic claim
     # ------------------------------------------------------------------

@@ -463,17 +463,17 @@ for (const viewport of VIEWPORTS) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height })
     const monitor = monitorBrowser(page)
     const routes = [
-      { path: '/', heading: '首页', evidence: '多游戏 Bot 竞赛平台' },
+      { path: '/', heading: 'Bot 对战中心', evidence: '上传 Linux x86_64 ELF Bot' },
       { path: '/leaderboard', heading: '排行榜', evidence: '每款游戏独立使用 Glicko-2 数值评分' },
-      { path: '/history', heading: '对局历史', evidence: '全部对局记录，可按状态与游戏筛选' },
-      { path: '/contests', heading: '锦标赛', evidence: '组织者发布锦标赛' },
+      { path: '/history', heading: '对局历史', evidence: '查看双方用户、Bot 或真人身份以及对局性质' },
+      { path: '/contests', heading: '锦标赛', evidence: '查看公开赛事与排期' },
       { path: '/wiki', heading: 'Wiki', evidence: '协议规范、Bot 开发指南' },
-      { path: '/judges', heading: '裁判', evidence: '公开可审计' },
+      { path: '/judges', heading: '裁判源码', evidence: '每款游戏的权威裁判以明文公开' },
       { path: '/challenge', heading: '发起挑战', evidence: '请先' },
       { path: '/my-bots', heading: '我的 Bot', evidence: '请先' },
       { path: '/notifications', heading: '通知', evidence: '请先登录' },
-      { path: '/settings', heading: '设置', evidence: '请先登录' },
-      { path: '/admin', heading: '管理端', evidence: '请先' },
+      { path: '/settings', heading: '个人设置', evidence: '请先登录' },
+      { path: '/admin', heading: '管理控制台', evidence: '请先' },
     ]
 
     for (const route of routes) {

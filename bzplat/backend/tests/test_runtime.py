@@ -128,9 +128,8 @@ def test_missing_docker_fails_closed_unless_local_mode_is_explicit():
     assert explicit_test_mode._select_mode(info) == "local"
 
 
-def test_docker_exit_125_is_platform_fault_not_bot_crash(tmp_path, monkeypatch):
-    """docker run exit 125 is an infrastructure failure and must not rate a Bot."""
-    import bzplat.backend.runtime.binary_runner as runtime_mod
+def test_started_container_exit_125_is_bot_crash(tmp_path, monkeypatch):
+    """After StartedAt, exit 125 belongs to the Bot, not Docker control."""
 
     class FakeStdin:
         def write(self, _data):
@@ -157,21 +156,16 @@ def test_docker_exit_125_is_platform_fault_not_bot_crash(tmp_path, monkeypatch):
     info = BinaryInfo("elf", "linux", "amd64", True)
 
     _allow_fake_docker_binary(monkeypatch)
-    infra = BinaryRunner(
+    bot_125 = BinaryRunner(
         docker_bin="docker-exit-125-cache-test",
         prefer_local=False,
         linux_image="test.invalid/exit-125:latest",
     )
-    cache_key = (infra._docker_bin, infra._linux_image)
-    with runtime_mod._IMAGE_READY_LOCK:
-        runtime_mod._IMAGE_READY_KEYS.add(cache_key)
-    infra._sessions["infra"] = BotSession(
+    bot_125._sessions["infra"] = BotSession(
         "infra", info, path, proc=FakeProc(125), mode="docker",
     )
-    with pytest.raises(PlatformRunnerError, match="docker exit 125"):
-        asyncio.run(infra.send("infra", "{}"))
-    with runtime_mod._IMAGE_READY_LOCK:
-        assert cache_key not in runtime_mod._IMAGE_READY_KEYS
+    with pytest.raises(BotCrashedError, match="125"):
+        asyncio.run(bot_125.send("infra", "{}"))
 
     bot_fault = BinaryRunner(prefer_local=False)
     bot_fault._sessions["bot"] = BotSession(
@@ -802,12 +796,12 @@ def test_broken_stdin_uses_same_docker_exit_classification(tmp_path):
     path.write_bytes(b"unused")
     info = BinaryInfo("elf", "linux", "amd64", True)
 
-    infra = BinaryRunner(prefer_local=False)
-    infra._sessions["infra-pipe"] = BotSession(
+    bot_125 = BinaryRunner(prefer_local=False)
+    bot_125._sessions["infra-pipe"] = BotSession(
         "infra-pipe", info, path, proc=FakeProc(125), mode="docker"
     )
-    with pytest.raises(PlatformRunnerError, match="docker exit 125"):
-        asyncio.run(infra.send("infra-pipe", "{}"))
+    with pytest.raises(BotCrashedError, match="125"):
+        asyncio.run(bot_125.send("infra-pipe", "{}"))
 
     bot_fault = BinaryRunner(prefer_local=False)
     bot_fault._sessions["bot-pipe"] = BotSession(
