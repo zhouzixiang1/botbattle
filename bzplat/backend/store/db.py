@@ -3059,6 +3059,47 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _install_rating_projection_mutation_triggers(conn)
 
 
+def _certify_fresh_rating_projection(conn: sqlite3.Connection) -> None:
+    """Trust the canonical empty projection on a genuinely new schema.
+
+    Existing databases deliberately enter the offline rebuild workflow as
+    ``legacy-unverified``.  A connection that had no application tables before
+    ``SCHEMA`` ran cannot contain legacy rating business data, however, so
+    forcing an operator-only cold-backup rebuild would leave every fresh
+    installation unable to claim its first rated match.  Certify only that
+    brand-new empty state; reopening or upgrading an existing schema never
+    calls this helper.
+    """
+    live = rating_projection_digests(conn)
+    if (
+        live["issues"]
+        or int(live["source_settlement_count"]) != 0
+        or conn.execute("SELECT 1 FROM bots LIMIT 1").fetchone() is not None
+        or conn.execute("SELECT 1 FROM ratings LIMIT 1").fetchone() is not None
+        or conn.execute("SELECT 1 FROM rating_history LIMIT 1").fetchone() is not None
+        or (
+            conn.execute("SELECT 1 FROM pair_stats LIMIT 1").fetchone()
+            is not None
+        )
+    ):
+        raise RuntimeError("fresh rating projection is not canonically empty")
+    conn.execute(
+        "UPDATE rating_projection_state SET policy_version=?,rebuilt_at=?,"
+        "source_settlement_count=?,source_last_settled_order=?,source_digest=?,"
+        "projection_digest=?,plan_digest=?,trusted_mutation_revision=mutation_revision "
+        "WHERE singleton=1",
+        (
+            _RATING_PROJECTION_POLICY_VERSION,
+            _now(),
+            int(live["source_settlement_count"]),
+            int(live["source_last_settled_order"]),
+            live["source_digest"],
+            live["projection_digest"],
+            live["plan_digest"],
+        ),
+    )
+
+
 class Store:
     """SQLite 存储。线程安全；持久连接 check_same_thread=False。"""
 
@@ -3072,9 +3113,15 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")  # 锁等待 5s，防并发写直接报错
         self._conn.row_factory = sqlite3.Row
+        fresh_schema = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+        ).fetchone() is None
         with self._tx() as conn:
             conn.executescript(SCHEMA)
             _migrate(conn)
+            if fresh_schema:
+                _certify_fresh_rating_projection(conn)
             seed_email_templates(conn, _now())
             # 启动一致性断言：每个已注册游戏必须有对应的物理表 matches_<game>。
             # schema.py 的字面 DDL 只覆盖 holdem/gomoku/pencil；第 4 游戏须经

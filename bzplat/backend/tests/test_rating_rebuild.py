@@ -61,6 +61,39 @@ def _mark_projection_verified(store: Store) -> None:
         )
 
 
+def test_fresh_store_certifies_empty_projection_and_keeps_it_current(tmp_path):
+    store = Store(str(tmp_path / "fresh-projection.db"))
+    initial = store.rating_projection_status()
+    assert initial["ready"] is True
+    assert initial["state"]["policy_version"] == "owner-neutral-v3"
+
+    _bot(store, "fresh-projection")
+    after_bot = store.rating_projection_status()
+    assert after_bot["ready"] is True
+    assert after_bot["state"]["mutation_revision"] == (
+        after_bot["state"]["trusted_mutation_revision"]
+    )
+    store.close()
+
+
+def test_existing_empty_store_is_never_silently_recertified(tmp_path):
+    db = tmp_path / "existing-empty-projection.db"
+    store = Store(str(db))
+    assert store.rating_projection_status()["ready"] is True
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE rating_projection_state SET policy_version='legacy-unverified',"
+            "source_digest='',projection_digest='',plan_digest='' WHERE singleton=1"
+        )
+    store.close()
+
+    reopened = Store(str(db))
+    status = reopened.rating_projection_status()
+    assert status["ready"] is False
+    assert status["state"]["policy_version"] == "legacy-unverified"
+    reopened.close()
+
+
 def _bot(
     store: Store,
     username: str,
@@ -166,6 +199,15 @@ def test_rebuild_dry_run_apply_verify_is_source_preserving_and_idempotent(tmp_pa
     bot_a = _bot(store, "same-a", owner_id=owner["id"])
     bot_b = _bot(store, "same-b", owner_id=owner["id"])
     bot_c = _bot(store, "other")
+    # This fixture models an upgraded v2 database whose old settlement path
+    # rated same-owner matches.  A genuinely fresh database is certified now,
+    # so explicitly restore the legacy trust boundary before injecting that
+    # historical corruption.
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE rating_projection_state SET policy_version='legacy-unverified',"
+            "source_digest='',projection_digest='',plan_digest='' WHERE singleton=1"
+        )
     orch = MatchOrchestrator(store)
     _complete(
         store, orch, "eligible-1", bot_a["id"], bot_c["id"],
@@ -559,7 +601,7 @@ def test_rating_rebuild_cli_defaults_readonly_and_gates_apply(tmp_path):
     assert dry.exit_code == 0
     report = json.loads(dry.stdout)
     assert report["mode"] == "dry-run"
-    assert report["projection_state_current"] is False
+    assert report["projection_state_current"] is True
     assert len(report["source_digest"]) == 64
     assert len(report["plan_digest"]) == 64
     assert len(report["rebuilt_projection_digest"]) == 64
@@ -588,6 +630,7 @@ def test_rating_rebuild_cli_defaults_readonly_and_gates_apply(tmp_path):
         ],
     )
     assert applied.exit_code == 0, applied.stdout
+    assert json.loads(applied.stdout)["no_op"] is True
     verified = runner.invoke(
         cli_app, ["rating-rebuild", "--db", str(db), "--verify"]
     )

@@ -241,8 +241,10 @@ identifier 与 `sqlite_master.type`，再以规范化 SQL 比较定义；同定�
 这里保证的是 trigger 定义与业务数据的**逻辑幂等**；Store 打开仍有其他迁移 DML，不能承诺整个 DB
 文件的 SHA-256、mtime 或字节完全不变，也不能把“39 个 trigger 零 DDL”等同于整次打开 zero-write。
 
-迁移按终局时间与 match ID 为旧 settlement 固化连续序号，分类每局评分资格但绝不自动重放；投影初始
-保持 `legacy-unverified`。长期 `rating-rebuild` 按 immutable policy + settled_order 离线 dry-run/apply/verify；
+迁移按终局时间与 match ID 为旧 settlement 固化连续序号，分类每局评分资格但绝不自动重放；任何已存在的 schema
+升级后都保持 `legacy-unverified`。只有连接前完全没有业务表的真正新建库，才会在同一初始化事务内
+认证空 source / 空 Bot universe / 空投影，使新部署可以直接 claim 第一场 rated 对局；既有空库重开也不会被重新认证。
+长期 `rating-rebuild` 按 immutable policy + settled_order 离线 dry-run/apply/verify；
 `store.rating_projection_digests` 与 `rating_source_input_issues` 是线上门禁/离线重建共享的 canonical 语义。
 单一只读快照生成 source、Bot universe plan、rebuilt projection 三摘要。apply 在独占事务内复核三者，
 要求 dispatcher 已停止且无 `starting/running/settling` execution attempt，并要求冷备/目标完整性、外键、

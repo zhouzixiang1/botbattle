@@ -105,7 +105,9 @@ effective  = min(configured, ceiling)
 - 人工/人机按用户同时活跃最多 1 条、排队最多 4 条；当非赛事请求等待时赛事最多占 1 个活跃 slot。
   基础优先级为人工/人机 > 赛事 > 自动，但每 60 秒增加一次无上限 aging，自动请求最终一定能越过
   后续到达的高优先级请求，不会永久饥饿。
-- rated job claim 前还须通过评分投影 readiness 与双方 Bot 的 rated-overlap 门禁。容量可在容器清零后释放，
+- rated job claim 前还须通过评分投影 readiness 与双方 Bot 的 rated-overlap 门禁。真正新建且没有任何旧业务表的库
+  会在初始化事务内认证其规范空投影；任何已存在的 schema 仍必须走离线 rebuild，即使当时没有对局也不会被启动自动信任。
+  容量可在容器清零后释放，
   但同一 Bot 的 completed 未结算局仍阻止下一条 rated job，避免 Glicko 顺序重叠。
 
 ## 运行模式边界
