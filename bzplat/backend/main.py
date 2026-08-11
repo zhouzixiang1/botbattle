@@ -48,6 +48,7 @@ from bzplat.backend.runtime.limits import (
 )
 from bzplat.backend.security import (
     AccessLogMiddleware,
+    BotUploadBodyLimitMiddleware,
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
 )
@@ -310,6 +311,9 @@ def create_app(
     app.state.avatar_dir = avatars_dir
     app.state.runtime_ceiling = concurrent_ceiling()
 
+    # Added first = innermost user middleware: still before FastAPI form parsing,
+    # while the existing security/access layers can decorate and log its 413.
+    app.add_middleware(BotUploadBodyLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RateLimitMiddleware)
     # AccessLog 最后 add = 最外层，记录所有请求（含被限流的 429）

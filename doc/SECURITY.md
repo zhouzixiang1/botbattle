@@ -82,11 +82,20 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 
 ### Bot 上传容量边界
 
-新建 Bot 与上传版本共用一个进程级上传槽。端点取得槽后只读取 `50 MiB + 1` 个字节，超出即返回
-`400 invalid_size`；槽从读取开始一直持有到隐藏版本落盘、沙箱预检、发布或回滚全部结束。因此不同
-Bot ID 不能绕过单槽预检，同时在内存保留多份二进制或写入多个待检临时目录。等待槽超过 1 秒返回
-`503 upload_busy` 与 `Retry-After`，不继续读取文件到应用内存。客户端中断只取消 HTTP 等待；已开始的
-文件读取/worker 会先收敛，随后才释放槽，避免取消造成容量提前释放。
+纯 ASGI body limiter 只精确匹配 `POST /api/bots` 与单路径段的
+`POST /api/bots/{id}/versions`，在 FastAPI/Starlette 解析 multipart、创建 spool 文件之前生效。总请求体
+上限为 **51 MiB**（50 MiB Bot + 1 MiB 有界 multipart 字段/边界开销）：ASGI scope 中的
+`Content-Length` 只用于超限早拒绝，超限会立即返回结构化 `413 upload_body_too_large`，不调用 `receive`
+或下游；缺失、错误或伪小长度不会被信任，每个 `http.request` chunk 在交给解析器前仍累计计数，
+越界 chunk 不下传，后续
+读取只见断开。真实 `http.disconnect` 原样透传，不伪报 413；X-Forwarded-For/X-Real-IP 等代理身份头
+不参与容量判断。
+
+通过 body limiter 后，新建 Bot 与上传版本再共用一个进程级上传槽。端点取得槽后只读取
+`50 MiB + 1` 个字节，文件本身超出即返回 `400 invalid_size`；槽从读取开始一直持有到隐藏版本落盘、
+沙箱预检、发布或回滚全部结束。因此不同 Bot ID 不能绕过单槽预检，同时在内存保留多份二进制或写入
+多个待检临时目录。等待槽超过 1 秒返回 `503 upload_busy` 与 `Retry-After`。客户端中断只取消 HTTP
+等待；已开始的文件读取/worker 会先收敛，随后才释放槽，避免取消造成容量提前释放。
 
 ## 安全响应头
 

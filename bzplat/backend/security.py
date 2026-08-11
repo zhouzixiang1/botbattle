@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -14,8 +15,9 @@ from typing import Any
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from bzplat.backend.bots.manager import MAX_BYTES as MAX_BOT_BINARY_BYTES
 from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,15 @@ _UPLOAD_STRICT = (6, 60)
 _CHALLENGE_STRICT = (8, 60)
 _FEEDBACK_STRICT = (5, 60)
 _API_DEFAULT = (120, 60)
+BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+BOT_UPLOAD_BODY_MAX_BYTES = (
+    MAX_BOT_BINARY_BYTES + BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES
+)
+_BOT_VERSION_UPLOAD_PATH = re.compile(r"/api/bots/[^/]+/versions")
+_BOT_UPLOAD_TOO_LARGE = {
+    "code": "upload_body_too_large",
+    "message": "Bot 二进制最大 50 MiB，上传请求体超过允许的 multipart 上限",
+}
 _STATIC_SKIP_EXT = (
     ".js",
     ".css",
@@ -41,6 +52,110 @@ _STATIC_SKIP_EXT = (
     ".map",
     ".webp",
 )
+
+
+class _BotUploadBodyTooLarge(Exception):
+    pass
+
+
+class BotUploadBodyLimitMiddleware:
+    """Bound Bot multipart bodies before Starlette creates spooled files.
+
+    ``Content-Length`` is only an early-reject hint.  Every delivered ASGI body
+    chunk is still counted, so a missing or forged-small header cannot bypass the
+    limit.  Proxy identity headers are deliberately irrelevant to this boundary.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_body_bytes: int = BOT_UPLOAD_BODY_MAX_BYTES,
+    ) -> None:
+        if max_body_bytes < 1:
+            raise ValueError("max_body_bytes must be positive")
+        self.app = app
+        self.max_body_bytes = int(max_body_bytes)
+
+    @staticmethod
+    def _is_bot_upload(scope: Scope) -> bool:
+        if scope.get("type") != "http" or scope.get("method") != "POST":
+            return False
+        path = str(scope.get("path") or "")
+        return path == "/api/bots" or bool(
+            _BOT_VERSION_UPLOAD_PATH.fullmatch(path)
+        )
+
+    def _declared_too_large(self, scope: Scope) -> bool:
+        for name, raw_value in scope.get("headers") or []:
+            if name.lower() != b"content-length":
+                continue
+            # Treat each duplicate/comma-separated numeric value as an early
+            # rejection signal.  Malformed or forged-small values never grant
+            # admission; the receive counter below remains authoritative.
+            for value in raw_value.split(b","):
+                try:
+                    declared = int(value.strip())
+                except ValueError:
+                    continue
+                if declared > self.max_body_bytes:
+                    return True
+        return False
+
+    @staticmethod
+    async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": dict(_BOT_UPLOAD_TOO_LARGE)},
+        )
+        await response(scope, receive, send)
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if not self._is_bot_upload(scope):
+            await self.app(scope, receive, send)
+            return
+        if self._declared_too_large(scope):
+            # Do not call receive or downstream: an honest oversized request is
+            # rejected before multipart parsing can create a spool file.
+            await self._reject(scope, receive, send)
+            return
+
+        received = 0
+        rejected = False
+
+        async def limited_receive() -> Message:
+            nonlocal received, rejected
+            if rejected:
+                # If a defensive downstream catches the size exception and asks
+                # again, never expose further client bytes or block on receive.
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message.get("type") != "http.request":
+                # In particular, propagate a real disconnect without turning it
+                # into a misleading 413 response.
+                return message
+            received += len(message.get("body", b""))
+            if received > self.max_body_bytes:
+                rejected = True
+                # The crossing chunk is never returned to Starlette, so its
+                # multipart spool cannot grow past the configured body limit.
+                raise _BotUploadBodyTooLarge
+            return message
+
+        async def limited_send(message: Message) -> None:
+            # A downstream which catches our private receive exception must not
+            # race its own response against the authoritative 413 below.
+            if not rejected:
+                await send(message)
+
+        try:
+            await self.app(scope, limited_receive, limited_send)
+        except _BotUploadBodyTooLarge:
+            pass
+        if rejected:
+            await self._reject(scope, limited_receive, send)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

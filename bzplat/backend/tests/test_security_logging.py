@@ -10,15 +10,23 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI, File, UploadFile
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER, setup_logging
-from bzplat.backend.security import RateLimitMiddleware, audit_log, client_ip
+from bzplat.backend.security import (
+    BotUploadBodyLimitMiddleware,
+    RateLimitMiddleware,
+    audit_log,
+    client_ip,
+)
 
 
 @pytest.fixture
@@ -117,8 +125,6 @@ def test_client_ip_xff_spoofed_leftmost_ignored():
 
 def test_rate_limit_separates_reads_from_upload_writes():
     """刷新版本历史不能提前耗尽同一路径 POST 的 6 次上传额度。"""
-    from fastapi import FastAPI
-
     app = FastAPI()
     app.add_middleware(RateLimitMiddleware, enabled=True)
 
@@ -139,6 +145,232 @@ def test_rate_limit_separates_reads_from_upload_writes():
 
     assert limited.status_code == 429
     assert limited.json()["code"] == "rate_limit_exceeded"
+
+
+def _asgi_scope(
+    path: str = "/api/bots",
+    *,
+    method: str = "POST",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers or [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+    }
+
+
+def test_upload_body_limit_rejects_declared_size_without_receive_or_downstream():
+    called = False
+    receive_calls = 0
+    sent: list[dict] = []
+
+    async def downstream(_scope, _receive, _send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        return {"type": "http.request", "body": b"never", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(
+            _asgi_scope(
+                headers=[
+                    (b"content-length", b"9"),
+                    (b"x-forwarded-for", b"203.0.113.77"),
+                ]
+            ),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert called is False
+    assert receive_calls == 0
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert sent[0]["status"] == 413
+    body = json.loads(sent[1]["body"])
+    assert body["detail"]["code"] == "upload_body_too_large"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"transfer-encoding", b"chunked")],
+        [(b"content-length", b"1")],
+    ],
+    ids=["chunked-no-length", "forged-small-length"],
+)
+def test_upload_body_limit_counts_chunks_and_disconnects_caught_downstream(
+    headers,
+):
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"1234", "more_body": True},
+            {"type": "http.request", "body": b"5678", "more_body": True},
+            {"type": "http.request", "body": b"9", "more_body": True},
+            {"type": "http.request", "body": b"not-read", "more_body": False},
+        ]
+    )
+    receive_calls = 0
+    delivered: list[dict] = []
+    after_reject: list[dict] = []
+    sent: list[dict] = []
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        return next(messages)
+
+    async def downstream(_scope, limited_receive, _send):
+        try:
+            while True:
+                message = await limited_receive()
+                delivered.append(message)
+                if not message.get("more_body"):
+                    return
+        except Exception:
+            # Defensive downstream code cannot resume reading client bytes after
+            # the crossing chunk; it sees a synthetic disconnect instead.
+            after_reject.append(await limited_receive())
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(
+            _asgi_scope(headers=headers),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert [message["body"] for message in delivered] == [b"1234", b"5678"]
+    assert sum(len(message["body"]) for message in delivered) == 8
+    assert after_reject == [{"type": "http.disconnect"}]
+    assert receive_calls == 3
+    assert sent[0]["status"] == 413
+    assert json.loads(sent[1]["body"])["detail"]["code"] == "upload_body_too_large"
+
+
+def test_upload_body_limit_preserves_real_disconnect_without_413():
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"123", "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+    delivered: list[dict] = []
+    sent: list[dict] = []
+
+    async def receive():
+        return next(messages)
+
+    async def downstream(_scope, limited_receive, _send):
+        delivered.append(await limited_receive())
+        delivered.append(await limited_receive())
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(_asgi_scope(), receive, send)
+
+    asyncio.run(exercise())
+    assert [message["type"] for message in delivered] == [
+        "http.request",
+        "http.disconnect",
+    ]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "limited"),
+    [
+        ("POST", "/api/bots/7/versions", True),
+        ("POST", "/api/bots/not-an-int/versions", True),
+        ("GET", "/api/bots", False),
+        ("POST", "/api/bots/7/versions/", False),
+        ("POST", "/api/bots/7/versions/extra", False),
+        ("POST", "/api/bots-extra", False),
+    ],
+)
+def test_upload_body_limit_matches_only_exact_upload_routes(method, path, limited):
+    called = False
+    sent: list[dict] = []
+
+    async def downstream(_scope, _receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(
+            _asgi_scope(
+                path,
+                method=method,
+                headers=[(b"content-length", b"9")],
+            ),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert called is (not limited)
+    assert sent[0]["status"] == (413 if limited else 204)
+
+
+def test_upload_body_limit_http_response_is_structured_413():
+    app = FastAPI()
+    app.add_middleware(BotUploadBodyLimitMiddleware, max_body_bytes=256)
+    endpoint_called = False
+
+    @app.post("/api/bots")
+    async def upload(file: UploadFile = File(...)):
+        nonlocal endpoint_called
+        endpoint_called = True
+        return {"size": len(await file.read())}
+
+    response = TestClient(app).post(
+        "/api/bots",
+        files={"file": ("bot.bin", b"x" * 512, "application/octet-stream")},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {
+        "detail": {
+            "code": "upload_body_too_large",
+            "message": "Bot 二进制最大 50 MiB，上传请求体超过允许的 multipart 上限",
+        }
+    }
+    assert endpoint_called is False
 
 
 # ── audit_log：格式 + result=fail 升级为 WARNING ─────────────────────────────
