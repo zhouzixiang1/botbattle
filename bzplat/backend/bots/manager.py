@@ -363,7 +363,11 @@ class BotManager:
         page: int | None = None, per_page: int = 50,
     ) -> list[dict] | dict:
         return self.store.list_bots(
-            owner_id=owner_id, game_id=game_id, page=page, per_page=per_page,
+            owner_id=owner_id,
+            active_only=False,
+            game_id=game_id,
+            page=page,
+            per_page=per_page,
         )
 
     def list_public(
