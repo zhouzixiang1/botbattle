@@ -653,8 +653,8 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
         assert observations[0]["api"]["result"]["deltas"] == expected_deltas
     else:
         # Durable attempts do not manufacture a public platform_error. They keep
-        # the match/job recoverable until exact namespace cleanup, then requeue
-        # the request without retaining a garbage match.
+        # the match/job recoverable until exact namespace cleanup, then expose a
+        # truthful interrupted manual request without retaining a garbage match.
         assert terminal == []
         assert observations == []
         active = store.executions.snapshot(
@@ -663,22 +663,26 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
             aging_seconds=60,
         )["active"]
         assert len(active) == 1
+        request_public_id = active[0]["public_id"]
         match_id = active[0]["current_match_id"]
         assert store.get_match(match_id)["status"] == "running"
         assert store.executions.control()["dispatcher_state"] == "paused"
         public_detail = match_detail(match_id, _api_request(store, match_id))
         assert "/private" not in json.dumps(public_detail, ensure_ascii=False)
         assert store.executions.recover_after_namespace_cleanup() == {
-            "requeued": 1,
-            "interrupted": 0,
+            "requeued": 0,
+            "interrupted": 1,
             "settling": 0,
         }
         assert store.get_match(match_id) is None
-        assert len(store.executions.snapshot(
+        interrupted = store.executions.get(request_public_id)
+        assert interrupted["status"] == "interrupted"
+        assert interrupted["retryable"] == 1
+        assert store.executions.snapshot(
             max_match_slots=1,
             max_sandbox_units=2,
             aging_seconds=60,
-        )["queued"]) == 1
+        )["queued"] == []
     store.close()
 
 
