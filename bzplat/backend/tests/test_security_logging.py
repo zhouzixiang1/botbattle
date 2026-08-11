@@ -373,6 +373,85 @@ def test_upload_body_limit_http_response_is_structured_413():
     assert endpoint_called is False
 
 
+def test_chunked_multipart_limit_closes_rolled_spool(monkeypatch):
+    """A receive-time 413 must enter Starlette's open-file cleanup branch."""
+    import tempfile
+    import starlette.formparsers as formparsers
+
+    created = []
+    real_spooled_file = tempfile.SpooledTemporaryFile
+
+    def tracking_spooled_file(*args, **kwargs):
+        kwargs["max_size"] = 8
+        spool = real_spooled_file(*args, **kwargs)
+        created.append(spool)
+        return spool
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracking_spooled_file)
+
+    app = FastAPI()
+    app.add_middleware(BotUploadBodyLimitMiddleware, max_body_bytes=256)
+    endpoint_called = False
+
+    @app.post("/api/bots")
+    async def upload(file: UploadFile = File(...)):
+        nonlocal endpoint_called
+        endpoint_called = True
+        return {"size": len(await file.read())}
+
+    boundary = b"botbattle-boundary"
+    body = (
+        b"--" + boundary
+        + b'\r\nContent-Disposition: form-data; name="file"; filename="bot.bin"'
+        + b"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        + (b"x" * 512)
+        + b"\r\n--" + boundary + b"--\r\n"
+    )
+    chunks = [body[offset : offset + 64] for offset in range(0, len(body), 64)]
+    sent: list[dict] = []
+    index = 0
+
+    async def receive():
+        nonlocal index
+        chunk = chunks[index]
+        index += 1
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": index < len(chunks),
+        }
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        await app(
+            _asgi_scope(
+                headers=[
+                    (
+                        b"content-type",
+                        b"multipart/form-data; boundary=" + boundary,
+                    ),
+                    (b"transfer-encoding", b"chunked"),
+                ]
+            ),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert endpoint_called is False
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert sent[0]["status"] == 413
+    assert json.loads(sent[1]["body"])["detail"]["code"] == "upload_body_too_large"
+    assert len(created) == 1
+    assert created[0]._rolled is True
+    assert created[0].closed is True
+
+
 # ── audit_log：格式 + result=fail 升级为 WARNING ─────────────────────────────
 
 

@@ -87,8 +87,8 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 上限为 **51 MiB**（50 MiB Bot + 1 MiB 有界 multipart 字段/边界开销）：ASGI scope 中的
 `Content-Length` 只用于超限早拒绝，超限会立即返回结构化 `413 upload_body_too_large`，不调用 `receive`
 或下游；缺失、错误或伪小长度不会被信任，每个 `http.request` chunk 在交给解析器前仍累计计数，
-越界 chunk 不下传，后续
-读取只见断开。真实 `http.disconnect` 原样透传，不伪报 413；X-Forwarded-For/X-Real-IP 等代理身份头
+越界 chunk 不下传，后续读取只见断开；超限异常进入 Starlette 的 multipart 错误清理分支，已 rollover
+到磁盘的 spool 文件也会关闭。真实 `http.disconnect` 原样透传，不伪报 413；X-Forwarded-For/X-Real-IP 等代理身份头
 不参与容量判断。
 
 通过 body limiter 后，新建 Bot 与上传版本再共用一个进程级上传槽。端点取得槽后只读取

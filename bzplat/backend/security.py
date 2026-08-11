@@ -54,8 +54,8 @@ _STATIC_SKIP_EXT = (
 )
 
 
-class _BotUploadBodyTooLarge(Exception):
-    pass
+class _BotUploadBodyTooLarge(OSError):
+    """Enter Starlette's multipart error cleanup path for open spool files."""
 
 
 class BotUploadBodyLimitMiddleware:
