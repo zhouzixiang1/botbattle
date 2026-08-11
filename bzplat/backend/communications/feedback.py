@@ -219,7 +219,12 @@ class FeedbackService:
             }
 
     def get_detail(
-        self, bug_public_id: str, *, user_id: int | None, admin: bool
+        self,
+        bug_public_id: str,
+        *,
+        user_id: int | None,
+        admin: bool,
+        tracking_token: str = "",
     ) -> dict[str, Any]:
         with self.store._tx() as conn:
             row = conn.execute(
@@ -228,7 +233,18 @@ class FeedbackService:
                 "LEFT JOIN users u ON u.id=b.reporter_user_id WHERE b.public_id=?",
                 (bug_public_id,),
             ).fetchone()
-            if row is None or (not admin and row["reporter_user_id"] != user_id):
+            allowed = bool(row) and (
+                admin
+                or (user_id is not None and row["reporter_user_id"] == user_id)
+                or (
+                    row["reporter_user_id"] is None
+                    and bool(tracking_token)
+                    and secrets.compare_digest(
+                        str(row["tracking_token_hash"]), token_hash(tracking_token)
+                    )
+                )
+            )
+            if not allowed:
                 raise CommunicationNotFound("Bug 反馈不存在")
             events = [
                 {
@@ -290,6 +306,97 @@ class FeedbackService:
                     if diagnostic else None
                 ),
             }
+
+    def authorize_report(
+        self,
+        bug_public_id: str,
+        *,
+        user_id: int | None,
+        admin: bool,
+        tracking_token: str = "",
+    ) -> dict[str, Any]:
+        """Resolve a report after owner/admin/token authorization.
+
+        Unauthorized callers receive the same not-found result as unknown public IDs,
+        so the endpoint does not become a report-existence oracle.
+        """
+        with self.store._tx() as conn:
+            row = conn.execute(
+                "SELECT b.id,b.public_id,b.conversation_id,b.reporter_user_id,"
+                "b.tracking_token_hash,b.status,c.public_id AS conversation_public_id "
+                "FROM bug_reports b JOIN conversations c ON c.id=b.conversation_id "
+                "WHERE b.public_id=?",
+                (bug_public_id,),
+            ).fetchone()
+            allowed = bool(row) and (
+                admin
+                or (user_id is not None and row["reporter_user_id"] == user_id)
+                or (
+                    row["reporter_user_id"] is None
+                    and bool(tracking_token)
+                    and secrets.compare_digest(
+                        str(row["tracking_token_hash"]), token_hash(tracking_token)
+                    )
+                )
+            )
+            if not allowed:
+                raise CommunicationNotFound("Bug 反馈不存在")
+            return dict(row)
+
+    def read_attachment(
+        self,
+        bug_public_id: str,
+        attachment_public_id: str,
+        *,
+        user_id: int | None,
+        admin: bool,
+        tracking_token: str = "",
+    ) -> dict[str, Any]:
+        bug = self.authorize_report(
+            bug_public_id,
+            user_id=user_id,
+            admin=admin,
+            tracking_token=tracking_token,
+        )
+        with self.store._tx() as conn:
+            attachment = conn.execute(
+                "SELECT public_id,original_name,media_type,size_bytes,sha256,storage_path "
+                "FROM bug_attachments WHERE public_id=? AND bug_report_id=?",
+                (attachment_public_id, bug["id"]),
+            ).fetchone()
+        if attachment is None:
+            raise CommunicationNotFound("附件不存在")
+        try:
+            root = self.attachment_root.resolve(strict=True)
+        except OSError as exc:
+            raise CommunicationNotFound("附件不存在") from exc
+        path = Path(str(attachment["storage_path"]))
+        if path.is_symlink():
+            raise CommunicationNotFound("附件不存在")
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise CommunicationNotFound("附件不存在") from exc
+        if root not in resolved.parents or not resolved.is_file():
+            raise CommunicationNotFound("附件不存在")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(resolved, flags)
+            with os.fdopen(fd, "rb") as handle:
+                raw = handle.read(MAX_ATTACHMENT_BYTES + 1)
+        except OSError as exc:
+            raise CommunicationNotFound("附件不存在") from exc
+        if (
+            len(raw) != int(attachment["size_bytes"])
+            or len(raw) > MAX_ATTACHMENT_BYTES
+            or hashlib.sha256(raw).hexdigest() != str(attachment["sha256"])
+        ):
+            raise CommunicationNotFound("附件不存在")
+        return {
+            "content": raw,
+            "original_name": str(attachment["original_name"]),
+            "media_type": str(attachment["media_type"]),
+        }
 
     def update_status(
         self,
@@ -365,17 +472,21 @@ class FeedbackService:
             ).fetchone()
             if row is None:
                 raise CommunicationNotFound("Bug 反馈不存在")
-            allowed = admin or (
-                user_id is not None and row["reporter_user_id"] == user_id
-            ) or (
+            guest_token_allowed = (
                 row["reporter_user_id"] is None
+                and user_id is None
                 and bool(tracking_token)
                 and secrets.compare_digest(
                     str(row["tracking_token_hash"]), token_hash(tracking_token)
                 )
             )
+            allowed = admin or (
+                user_id is not None and row["reporter_user_id"] == user_id
+            ) or guest_token_allowed
             if not allowed:
-                raise CommunicationForbidden("无权为该反馈上传附件")
+                # Match unknown reports and bad/missing guest tokens exactly so this
+                # upload endpoint cannot be used as an existence oracle.
+                raise CommunicationNotFound("Bug 反馈不存在")
             count = int(conn.execute(
                 "SELECT COUNT(*) FROM bug_attachments WHERE bug_report_id=?",
                 (row["id"],),

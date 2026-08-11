@@ -1,6 +1,6 @@
 import { useState, lazy, Suspense } from 'react'
 import { useLocation, Routes, Route, NavLink, Link, useNavigate, Navigate } from 'react-router-dom'
-import { CircleUserRound, Menu, LogOut, User as UserIcon, Loader2, PanelLeftClose, PanelLeft, Settings2 } from 'lucide-react'
+import { CircleUserRound, Menu, LogOut, User as UserIcon, Loader2, Mail, PanelLeftClose, PanelLeft, Settings2 } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
 import NotificationBell from '@/components/NotificationBell'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -36,6 +36,8 @@ const HumanPlay = lazy(() => import('@/pages/HumanPlay'))
 const UserProfile = lazy(() => import('@/pages/UserProfile'))
 const SearchPage = lazy(() => import('@/pages/Search'))
 const Notifications = lazy(() => import('@/pages/Notifications'))
+const Messages = lazy(() => import('@/pages/Messages'))
+const Feedback = lazy(() => import('@/pages/Feedback'))
 const Settings = lazy(() => import('@/pages/Settings'))
 const Login = lazy(() => import('@/pages/Login'))
 const Register = lazy(() => import('@/pages/Register'))
@@ -209,6 +211,11 @@ export function AppShell() {
             {!sidebarCollapsed && (
               <div className="flex items-center justify-end gap-1">
                 <ThemeToggle />
+                {isLoggedIn && (
+                  <Button asChild variant="ghost" size="icon" aria-label="站内信">
+                    <Link to="/messages"><Mail aria-hidden="true" className="size-4" /></Link>
+                  </Button>
+                )}
                 {isLoggedIn && <NotificationBell />}
               </div>
             )}
@@ -317,7 +324,7 @@ export function AppShell() {
                   <div className="mt-4 px-1">
                     <GlobalSearch compact />
                     <div className="mt-2 flex items-center justify-between gap-2">
-                      {isLoggedIn && <NotificationBell />}
+                      {isLoggedIn && <div className="flex items-center gap-1"><Button asChild variant="ghost" size="icon" aria-label="站内信"><Link to="/messages" onClick={() => setMobileOpen(false)}><Mail className="size-4" /></Link></Button><NotificationBell /></div>}
                       <ThemeToggle />
                     </div>
                   </div>
@@ -428,6 +435,9 @@ export function AppShell() {
               <Route path="/user/:name" element={<UserProfile />} />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/notifications" element={<Notifications />} />
+              <Route path="/messages" element={<Messages />} />
+              <Route path="/messages/:conversationId" element={<Messages />} />
+              <Route path="/feedback" element={<Feedback />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />

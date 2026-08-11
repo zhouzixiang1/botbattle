@@ -3,7 +3,17 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from pydantic import BaseModel, Field, StrictBool
 
 from bzplat.backend.auth.dependencies import optional_user, require_admin, require_user
@@ -80,8 +90,10 @@ def user_sent(
 def user_thread(
     conversation_public_id: str,
     request: Request,
+    response: Response,
     user=Depends(require_user),
 ):
+    _no_store(response)
     try:
         return _service(request).repository.get_thread(
             conversation_public_id, user_id=user["id"]
@@ -180,8 +192,10 @@ def admin_failed(
 def admin_thread(
     conversation_public_id: str,
     request: Request,
+    response: Response,
     _admin=Depends(require_admin),
 ):
+    _no_store(response)
     try:
         return _service(request).repository.get_thread(
             conversation_public_id, admin=True
@@ -283,6 +297,11 @@ class BroadcastCreateBody(StrictModel):
     approval_token: str = Field(..., min_length=20, max_length=200)
     confirm: StrictBool
     scheduled_at: str | None = Field(None, max_length=40)
+
+
+class BroadcastRetryBody(StrictModel):
+    recipient_public_ids: list[str] = Field(default_factory=list, max_length=100)
+    delivery_public_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 @router.post("/api/admin/communications/broadcasts/preview")
@@ -394,6 +413,81 @@ def broadcast_cancel(
     return {"broadcast": result}
 
 
+@router.get("/api/admin/communications/broadcasts")
+def broadcast_list(
+    request: Request,
+    state: str | None = None,
+    page: int = 1,
+    per_page: int = 30,
+    _admin=Depends(require_admin),
+):
+    try:
+        return _service(request).repository.list_broadcasts(
+            state=state, page=page, per_page=per_page
+        )
+    except Exception as exc:
+        raise _domain_error(exc) from exc
+
+
+@router.get("/api/admin/communications/broadcasts/{broadcast_public_id}")
+def broadcast_detail(
+    broadcast_public_id: str,
+    request: Request,
+    _admin=Depends(require_admin),
+):
+    try:
+        return {
+            "broadcast": _service(request).repository.get_broadcast_detail(
+                broadcast_public_id
+            )
+        }
+    except Exception as exc:
+        raise _domain_error(exc) from exc
+
+
+@router.post("/api/admin/communications/broadcasts/{broadcast_public_id}/retry-failed")
+def broadcast_retry_failed(
+    broadcast_public_id: str,
+    body: BroadcastRetryBody,
+    request: Request,
+    admin=Depends(require_admin),
+):
+    selected_count = len(set(body.recipient_public_ids)) + len(
+        set(body.delivery_public_ids)
+    )
+    if selected_count < 1 or selected_count > 100:
+        raise HTTPException(400, "每次必须选择 1-100 个失败项")
+    try:
+        result = _service(request).repository.retry_failed_broadcast_work(
+            broadcast_public_id,
+            recipient_public_ids=body.recipient_public_ids,
+            delivery_public_ids=body.delivery_public_ids,
+        )
+    except Exception as exc:
+        audit_log(
+            request,
+            "broadcast_retry_failed",
+            result="fail",
+            user=admin.get("username"),
+            target=broadcast_public_id,
+            detail=type(exc).__name__,
+        )
+        raise _domain_error(exc) from exc
+    audit_log(
+        request,
+        "broadcast_retry_failed",
+        result="ok",
+        user=admin.get("username"),
+        target=broadcast_public_id,
+        detail=(
+            f"selected={selected_count} "
+            f"retried={len(result['retried_recipients']) + len(result['retried_deliveries'])} "
+            f"ignored={len(result['ignored'])} exhausted={len(result['exhausted'])}"
+        ),
+    )
+    return {"retry": result}
+
+
 @router.get("/api/admin/communications/broadcasts/{broadcast_public_id}/deliveries")
 def broadcast_deliveries(
     broadcast_public_id: str,
@@ -415,6 +509,7 @@ class DiagnosticInput(StrictModel):
     viewport_height: int | None = Field(None, ge=240, le=16_384)
     locale: str = Field("", max_length=20)
     timezone: str = Field("", max_length=64)
+    theme: Literal["light", "dark", "system", "unknown"] = "unknown"
     failed_api_template: Literal[
         "/api/auth/*",
         "/api/bots/*",
@@ -453,9 +548,13 @@ class BugStatusBody(StrictModel):
 def create_bug_report(
     body: BugCreateBody,
     request: Request,
+    response: Response,
     user=Depends(optional_user),
 ):
     if user is None:
+        # Anonymous creation returns a bearer-like tracking token.  Prevent browser,
+        # proxy and referrer persistence of that response.
+        _no_store(response)
         if not _env_bool("BZ_SKIP_CAPTCHA", False):
             captcha = request.app.state.captcha
             if not captcha.verify(body.captcha_id or "", body.captcha_answer or ""):
@@ -473,6 +572,7 @@ def create_bug_report(
             viewport_height=diag.viewport_height,
             locale=diag.locale,
             timezone=diag.timezone,
+            theme=diag.theme,
             failed_api_template=diag.failed_api_template,
             failed_api_status=diag.failed_api_status,
             trace_id=diag.trace_id,
@@ -511,10 +611,12 @@ def create_bug_report(
 @router.get("/api/feedback/bugs")
 def list_my_bug_reports(
     request: Request,
+    response: Response,
     page: int = 1,
     per_page: int = 30,
     user=Depends(require_user),
 ):
+    _no_store(response)
     return _feedback(request).list_owned(user["id"], page=page, per_page=per_page)
 
 
@@ -522,14 +624,86 @@ def list_my_bug_reports(
 def get_my_bug_report(
     bug_public_id: str,
     request: Request,
+    response: Response,
     user=Depends(require_user),
 ):
+    _no_store(response)
     try:
         return {"bug_report": _feedback(request).get_detail(
             bug_public_id, user_id=user["id"], admin=False
         )}
     except Exception as exc:
         raise _domain_error(exc) from exc
+
+
+def _no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+
+
+@router.get("/api/feedback/bugs/{bug_public_id}/track")
+def track_guest_bug_report(
+    bug_public_id: str,
+    request: Request,
+    response: Response,
+    tracking_token: str = Header("", alias="X-Feedback-Token", max_length=200),
+):
+    _no_store(response)
+    try:
+        bug = _feedback(request).get_detail(
+            bug_public_id,
+            user_id=None,
+            admin=False,
+            tracking_token=tracking_token,
+        )
+        thread = _service(request).repository.get_thread(
+            bug["conversation_public_id"], admin=True
+        )
+        return {"bug_report": bug, "thread": thread}
+    except Exception as exc:
+        raise _domain_error(exc) from exc
+
+
+@router.post("/api/feedback/bugs/{bug_public_id}/track/reply")
+def reply_guest_bug_report(
+    bug_public_id: str,
+    body: ReplyBody,
+    request: Request,
+    response: Response,
+    tracking_token: str = Header("", alias="X-Feedback-Token", max_length=200),
+):
+    _no_store(response)
+    if body.email:
+        raise HTTPException(400, "访客回复不能指定邮件投递")
+    try:
+        bug = _feedback(request).authorize_report(
+            bug_public_id,
+            user_id=None,
+            admin=False,
+            tracking_token=tracking_token,
+        )
+        message = _service(request).reply_guest_report(
+            bug["conversation_public_id"],
+            body_text=body.body,
+            reply_to=body.reply_to,
+        )
+    except Exception as exc:
+        audit_log(
+            request,
+            "bug_report_guest_reply",
+            result="fail",
+            target=bug_public_id,
+            detail=type(exc).__name__,
+        )
+        raise _domain_error(exc) from exc
+    audit_log(
+        request,
+        "bug_report_guest_reply",
+        result="ok",
+        target=bug_public_id,
+    )
+    return {"message": message}
 
 
 @router.post("/api/feedback/bugs/{bug_public_id}/attachments")
@@ -549,9 +723,14 @@ async def upload_bug_attachment(
             tracking_token=tracking_token,
         )
         raw = await file.read(MAX_ATTACHMENT_BYTES + 1)
+        uploader_user_id = (
+            int(user["id"])
+            if user and (is_admin or bug["reporter_user_id"] == int(user["id"]))
+            else None
+        )
         attachment = _feedback(request).save_attachment(
             bug,
-            uploaded_by_user_id=(int(user["id"]) if user else None),
+            uploaded_by_user_id=uploader_user_id,
             original_name=file.filename or "image",
             claimed_media_type=file.content_type or "",
             raw=raw,
@@ -575,6 +754,39 @@ async def upload_bug_attachment(
         detail=f"attachment={attachment['public_id']} size={attachment['size_bytes']}",
     )
     return {"attachment": attachment}
+
+
+@router.get("/api/feedback/bugs/{bug_public_id}/attachments/{attachment_public_id}")
+def download_bug_attachment(
+    bug_public_id: str,
+    attachment_public_id: str,
+    request: Request,
+    user=Depends(optional_user),
+    tracking_token: str = Header("", alias="X-Feedback-Token", max_length=200),
+):
+    is_admin = bool(user and user.get("role") == ROLE_ADMIN)
+    try:
+        attachment = _feedback(request).read_attachment(
+            bug_public_id,
+            attachment_public_id,
+            user_id=(int(user["id"]) if user else None),
+            admin=is_admin,
+            tracking_token=tracking_token,
+        )
+    except Exception as exc:
+        raise _domain_error(exc) from exc
+    headers = {
+        "Cache-Control": "private, no-store, max-age=0",
+        "Pragma": "no-cache",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'inline; filename="{attachment["original_name"]}"',
+    }
+    return Response(
+        content=attachment["content"],
+        media_type=attachment["media_type"],
+        headers=headers,
+    )
 
 
 @router.get("/api/admin/bug-reports")

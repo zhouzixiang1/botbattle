@@ -303,7 +303,7 @@ export default function ContestsTab() {
         <Table className="min-w-[64rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">ID</TableHead>
+              <TableHead className="px-3 py-2.5">序号</TableHead>
               <TableHead className="px-3 py-2.5">标题</TableHead>
               <TableHead className="px-3 py-2.5">游戏 / 模板</TableHead>
               <TableHead className="px-3 py-2.5">状态</TableHead>
@@ -313,7 +313,7 @@ export default function ContestsTab() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {contests.map((contest) => {
+            {contests.map((contest, index) => {
               const isShowcase = Boolean(contest.showcase_key)
               const primary = isShowcase ? undefined : PRIMARY_ACTION[contest.status]
               const mutableRoster = !isShowcase && ROSTER_MUTABLE.has(contest.status)
@@ -321,7 +321,7 @@ export default function ContestsTab() {
               return (
                 <Fragment key={contest.id}>
                   <TableRow className={timeIssue ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
-                    <TableCell className="px-3 py-2 font-mono text-muted-foreground">{contest.id}</TableCell>
+                    <TableCell className="px-3 py-2 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
                     <TableCell className="max-w-64 px-3 py-2 font-medium text-foreground">
                       <Link to={`/contests/${contest.id}`} className="block break-words text-primary hover:underline">{contest.title}</Link>
                     </TableCell>

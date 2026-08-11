@@ -77,7 +77,9 @@ graph TB
 
 邮件层以 `Botbattle` 为默认发件人名称。邮箱验证、密码重置和欢迎信是代码拥有、显式版本化的安全模板；旧 `email_templates` 行仅保留作历史审计，启动仍只 `INSERT OR IGNORE`，不覆盖旧自定义，但运行时不再读取这些正文。注册、重置与邮箱验证事务只写高优先级 delivery 并返回 `queued`，SMTP 成败不回滚用户、验证码或密码变更。验证/重置码只存于短期 `email_codes` 行，delivery 仅保存模板版本与该行引用；worker 发送时才在内存渲染，过期、已使用或已被更新的码直接 `cancelled`。
 
-通信状态机只有以下权威转移：conversation 为 `open→closed/archived`；delivery 为 `queued→sending→sent`，可重试失败指数退避回 `queued`，达上限后 `failed`，过期/取消为 `cancelled`；broadcast 为 `draft→scheduled→running→completed`，完成前可转 `cancelled`。取消立即停止未 claim 的受众与 queued 邮件；已进入当前固定批或 SMTP 的工作可能在竞态窗口内完成，不声称可撤回。SMTP 存在“供应商已接收、DB 尚未写 sent”的崩溃窗口，因此语义是有界的 **at-least-once**，不声称 exactly-once；唯一 idempotency key 与确定性 `Message-ID` 用于支持合作供应商去重。
+通信状态机只有以下权威转移：conversation 为 `open→closed/archived`；delivery 为 `queued→sending→sent`，可重试失败指数退避回 `queued`，达上限后 `failed`，过期/取消为 `cancelled`；broadcast 为 `draft→scheduled→running→completed`，完成前可转 `cancelled`。worker 投影单个受众时在同一 `BEGIN IMMEDIATE` 内完成 `running` CAS、创建 conversation/message、写站内投递/queued 邮件并结算 recipient，故取消不能插入“状态校验→生成消息”之间；取消先提交则投影不发生，投影先提交则已生成站内信不声称可撤回。broadcast 仅在所有 recipient 不再是 `pending/processing` 且所有 delivery 不再是 `queued/sending` 后完成；人工重试任一 recipient 或 delivery 都清除 `completed_at`，已完成广播回到 `scheduled`。
+
+邮件的 `sending` 只表示已 claim，不等于已进入供应商。`resolve_delivery_content` 是明确的最终 SMTP 准入边界：它以 `BEGIN IMMEDIATE` 复核当前 attempt/claim，并对父 broadcast 的 `scheduled/running` 状态做 CAS；取消先提交时返回空且 worker 把 delivery 收敛为 `cancelled`，准入先提交后取消才允许本次供应商调用完成。`claim_delivery` 不领取非活动父广播的邮件；启动恢复把 cancelled/completed 等非活动父广播遗留的 `sending` 直接收敛为 `cancelled`，绝不重新排入 queued。真正调用供应商后仍存在“供应商已接收、DB 尚未写 sent”的崩溃窗口，因此语义是有界的 **at-least-once**，不声称 exactly-once；唯一 idempotency key 与确定性 `Message-ID` 用于支持合作供应商去重。
 
 ### 2.2 核心解耦契约
 
@@ -274,7 +276,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 搜索：`GET /api/search`
 - 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
 - Wiki：`GET /api/wiki`
-- Bug 反馈：`POST /api/feedback/bugs`；访客必须通过图形验证码与独立 IP 限流。请求是严格 JSON，附件不得 base64 混入，只能在创建后用独立 multipart 端点上传
+- Bug 反馈：`POST /api/feedback/bugs`；访客必须通过图形验证码与独立 IP 限流，成功响应含追踪令牌并固定 `no-store/no-referrer`。请求是严格 JSON，附件不得 base64 混入，只能在创建后用独立 multipart 端点上传
 - **裁判公开**：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（裁判源码全文）——裁判是公开可审计的规则定义（区别于 Bot 私有黑盒），源码对全体玩家透明
 
 ### 4.2 鉴权端点（require_user，登录玩家）
@@ -284,8 +286,8 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 私有调试：`GET /api/matches/{id}/debug`；必须登录且通过 Store 终态/owner/赛事角色授权，成功与拒绝均 `Cache-Control: private, no-store`，读取记审计但不记录内容
 - 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；API 预检用于友好提示，Store 的关注、收藏、评论、点赞与取消点赞仍在 `BEGIN IMMEDIATE` 写事务内复核 actor/target，竞态删除或不存在统一 404；删除实体使用同级写锁清理多态关系与缓存，避免检查后删除造成孤儿或 500
 - 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`；评论/点赞请求使用严格 target 枚举且必须引用当前存在的实体，通知排除行为发起者本人
-- 通信：`GET /api/communications/{inbox,sent}`、`GET /api/communications/threads/{public_id}`、`POST .../{read,reply}`；只允许已登录用户读取/回复自己的 participant thread，无用户任意私信创建 API。旧 `GET /api/notifications`、`POST /read`、`/read-all` 继续读兼容投影；`GET/PUT /api/notification-prefs` 四字段唯一类型为 boolean
-- Bug 追踪：`GET /api/feedback/bugs`、`GET /api/feedback/bugs/{public_id}`；登录用户只能读自己提交的反馈。`POST /api/feedback/bugs/{public_id}/attachments` 是独立 multipart 路由，登录 owner/admin 或持创建时一次性返回追踪令牌的访客才可上传
+- 通信：`GET /api/communications/{inbox,sent}`、`GET /api/communications/threads/{public_id}`、`POST .../{read,reply}`；只允许已登录用户读取/回复自己的 participant thread，无用户任意私信创建 API。用户与管理员的私有 thread 详情响应统一固定 `no-store/no-referrer`。旧 `GET /api/notifications`、`POST /read`、`/read-all` 继续读兼容投影；`GET/PUT /api/notification-prefs` 四字段唯一类型为 boolean
+- Bug 追踪：`GET /api/feedback/bugs`、`GET /api/feedback/bugs/{public_id}`；登录用户只能读自己提交的反馈，认证列表与详情同样固定 `no-store/no-referrer`。访客以创建时一次性返回的追踪令牌访问 `GET /api/feedback/bugs/{public_id}/track` 并在同一线程 `POST .../track/reply`；创建/追踪/回复响应均 `no-store/no-referrer`，未授权、错误/缺失 token 与不存在统一 404。附件上传为独立 multipart 路由，下载为 `GET .../attachments/{attachment_public_id}`；登录 owner/admin 或持令牌访客才可读写，服务端二次校验路径、大小与 SHA-256。访客 token 授权只在请求没有认证用户时成立；即使同一请求误带另一账号的 Authorization 也统一 404，绝不把访客附件归到该账号。当前附件契约保留原始图片字节以便完整性复查，本轮不做 EXIF 重编码/剥离；界面继续提示不要上传含隐私的截图，EXIF 清理留作独立安全增强
 - 赛事：`POST /api/contests/{id}/register`
 - 认证：`GET /api/auth/me`、`POST /logout`、`/change-password`、`PUT /profile`、`POST /avatar`
 
@@ -301,7 +303,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 配置：`GET /api/admin/settings/runtime` 仅返回 `source=code, mutable=false` 的只读诊断；`PUT /api/admin/auto-match` 只改 `execution_control.auto_enabled`，从而控制 auto job 的生成与 claim eligibility，不能影响 manual/human/contest 或在途局；`POST /api/admin/execution-queue/resume` 触发实际 namespace 清场与恢复，不能凭标志跳过。两者均写审计，QA 开启 auto 返回 409；站点文案仍由 `PATCH /api/admin/settings/site` 管理。不存在 runtime PATCH。
 - 模板：只保留公开 `GET /api/contests/templates`，响应来自游戏注册表并标记 `source=code, mutable=false`；不存在 `/api/admin/templates*` CRUD/预览路由。
 - 平台通信：`GET /api/admin/communications/{inbox,sent,drafts,failed}`、`GET /api/admin/communications/threads/{public_id}`、`POST .../reply`。失败投递读模型只返回 public ID、公开用户名和脱敏错误码，不返回收件地址或内部主键
-- 广播：`POST /api/admin/communications/broadcasts/preview`、`POST /create`、`POST /{public_id}/cancel`、`GET /{public_id}/deliveries`。preview 先去重解析 active users / role / game Bot owners / contest entrants / selected public usernames，并把用户快照、subject/body/channels 绑定到短期 token/hash；approve 重新执行 admin 权限校验，但不重算或暗改受众
+- 广播：`POST /api/admin/communications/broadcasts/preview`、`POST /create`、`POST /{public_id}/cancel`、`GET /api/admin/communications/broadcasts[/{public_id}]`、`GET /{public_id}/deliveries`与 `POST /{public_id}/retry-failed`。preview 先去重解析 active users / role / game Bot owners / contest entrants / selected public usernames，并把用户快照、subject/body/channels 绑定到短期 token/hash；approve 重新执行 admin 权限校验，但不重算或暗改受众。手动重试只对显式选中的 failed recipient/delivery 追加一次有界机会，已发送、已取消或已达管理上限的项不会被重置
 - Bug 处理：`GET /api/admin/bug-reports[/{public_id}]`、`PATCH /api/admin/bug-reports/{public_id}/status`；管理员回复使用同一 communication thread。状态机为 `new→acknowledged/needs_info/in_progress→resolved/duplicate/wont_fix`，终态不可回退
 - 邮件：`GET /api/admin/email/{templates,outbox}`；官方模板返回 `source=code, mutable=false, version`。旧 `PUT /templates/{key}` 为明确的兼容拒绝入口（409 + audit），不再改变运行时模板
 - 日志：`GET /api/admin/logs`
@@ -414,6 +416,8 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - **长文本**：实体名、Bot 名使用 `EntityName`，UUID/checksum/版本号使用 `Identifier`，一般截断文本使用 `OverflowText`。截断时才出现可键盘访问的 Radix Tooltip；嵌入 Link/Button 时由外层交互控件担任 TooltipTrigger，禁止回退原生 `title=`。
 - **公共/账户页落地**：Home、History、MyBots、BotDetail、UserProfile、Contests 列表、Wiki、Judges、Search、Notifications、Settings 与认证页均提供独立 `data-page-layout`。自然名称最多两行；内部数据库 ID 不充当列表序号，只在 owner/诊断位以可复制 `Identifier` 展示；列表序号按当前视图从 1 起。页面纵向只由全局 main 滚动，源码、弹窗、Tabs 与宽表等必要局部 overflow 必须同时标记 `data-scroll-region/data-overflow-allowed`。
 - **Shell 与导航**：`xl` 起显示 224px（可折叠为 56px）桌面侧栏，较窄视口使用顶栏 + Sheet；登录用户在移动顶栏和抽屉内均有明确账号入口。全局 main 是页面纵向滚动 owner；HashRouter 跨 pathname 的 PUSH/REPLACE 回顶并聚焦 main，同页筛选/search 更新保留滚动与焦点，POP 恢复对应 history entry 的 window scroll，懒加载恢复期间用户输入可立即中断。
+- **Admin 信息架构**：管理控制台与前台共用 `PageFrame/PageHeader`、Button/Select/Badge 和语义 token；桌面以窄侧栏切换业务模块，移动端使用 Radix Select，不再保留另一套横向 Tab 外观。“通信中心”是紧凑三栏邮箱工作台：收/发会话、群发历史、失败投递、Bug 诊断/状态/回复使用同一主从阅读模式；小屏选中详情后隐藏列表并提供明确返回。详情读取以 AbortController、请求序号和 public ID 防止迟到响应覆盖当前项。群发编辑始终经“受众快照预览 → 二次确认”；预览请求同时绑定请求序号与规范化表单 payload fingerprint，任一字段变化都会中止/作废旧响应，批准时再次核对当前 preview public ID、token 与 fingerprint，不再向管理员暴露无效的运行时邮件模板编辑器。Admin 列表的面向人序号按 `(page-1)*per_page+index+1` 生成，真实数据库 ID 只作路由/运维标识并明确降级标注。
+- **反馈身份边界**：`Feedback.tsx` 以稳定 user ID 的 identity epoch 管理列表、详情、提交、回复和多文件上传；登录/退出/切换账号在 render 边界先使旧 epoch 失效，effect 再统一 abort 请求并清空旧选择。每个写操作冻结发起时的 user ID 与 Bearer，所有 await 后复核 epoch；访客请求强制 `suppressAuth + credentials=omit`，身份变化会停止余下文件且迟到请求不能再选择详情、写入旧列表或复位新操作的 loading。冻结身份的 401 只返回给调用者，不清理更新后的全局会话。
 - **sticky/layer 变量**：Shell、页面工具栏与表头只使用 `--sticky-shell-offset` / `--sticky-page-offset` / `--sticky-toolbar-height` / `--sticky-table-offset`；导航、modal、portal 浮层、toast 只使用 `--z-navigation` / `--z-modal` / `--z-popover` / `--z-toast`，其中 portal 浮层必须高于会触发它的 modal，禁止页面继续写任意大 z-index。
 
 ## 6. 安全设计

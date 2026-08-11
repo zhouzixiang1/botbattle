@@ -11,6 +11,7 @@ import { Switch } from '@/components/ui/switch'
 import { useConfirm } from '@/hooks/use-confirm'
 import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
 import { fmtTime } from '@/lib/format'
+import { OverflowText } from '@/components/ui/overflow-text'
 
 interface Stats {
   users: number
@@ -223,7 +224,7 @@ export default function Dashboard() {
                     to={`/user/${encodeURIComponent(u.username)}`}
                     className="min-w-0 max-w-[10rem] truncate font-medium text-primary hover:underline"
                   >
-                    {u.username}
+                    <OverflowText tooltipFocusable={false}>{u.username}</OverflowText>
                   </Link>
                   <span className="text-xs text-muted-foreground">
                     <span className="mr-2">{ROLE_LABEL[u.role] || u.role}</span>

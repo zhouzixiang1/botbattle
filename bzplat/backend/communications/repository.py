@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import secrets
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from bzplat.backend.store import Store
+from bzplat.backend.store.schema import BROADCAST_STATES
 
 from .templates import get_template
 from .utils import (
@@ -47,6 +49,8 @@ def _json(raw: str | None, default: Any) -> Any:
 
 
 class CommunicationRepository:
+    _ADMIN_RETRY_ATTEMPT_LIMIT = 8
+
     def __init__(self, store: Store) -> None:
         self.store = store
 
@@ -67,13 +71,22 @@ class CommunicationRepository:
         legacy_notification: dict[str, str] | None = None,
         broadcast_id: int | None = None,
         idempotency_prefix: str | None = None,
+        _connection: Any | None = None,
     ) -> dict[str, Any] | None:
-        """Atomically create a one-user thread, message and channel deliveries."""
+        """Atomically create a one-user thread, message and channel deliveries.
+
+        ``_connection`` is repository-internal: the broadcast worker supplies its
+        existing ``BEGIN IMMEDIATE`` connection so the running-state CAS, message
+        projection and queued email are one indivisible transaction.
+        """
         created = now_iso()
         conversation_pid = public_id("cnv")
         message_pid = public_id("msg")
         metadata_json = canonical_json(metadata or {})
-        with self.store._tx() as conn:  # domain transaction boundary
+        transaction = (
+            self.store._tx() if _connection is None else nullcontext(_connection)
+        )
+        with transaction as conn:  # domain transaction boundary
             user = conn.execute(
                 "SELECT id, username, email, is_active FROM users WHERE id=?",
                 (user_id,),
@@ -206,6 +219,7 @@ class CommunicationRepository:
         reply_to_public_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         queue_email: bool = False,
+        allow_anonymous_user: bool = False,
     ) -> dict[str, Any]:
         created = now_iso()
         message_pid = public_id("msg")
@@ -221,11 +235,20 @@ class CommunicationRepository:
             if conversation["kind"] == "auth":
                 raise CommunicationForbidden("事务认证邮件不可回复")
             if actor_kind == "user":
-                allowed = conn.execute(
-                    "SELECT 1 FROM conversation_participants "
-                    "WHERE conversation_id=? AND user_id=? AND participant_kind='user'",
-                    (conversation["id"], actor_user_id),
-                ).fetchone()
+                allowed = None
+                if actor_user_id is not None:
+                    allowed = conn.execute(
+                        "SELECT 1 FROM conversation_participants "
+                        "WHERE conversation_id=? AND user_id=? AND participant_kind='user'",
+                        (conversation["id"], actor_user_id),
+                    ).fetchone()
+                elif allow_anonymous_user:
+                    allowed = conn.execute(
+                        "SELECT 1 FROM conversation_participants "
+                        "WHERE conversation_id=? AND user_id IS NULL "
+                        "AND participant_kind='user'",
+                        (conversation["id"],),
+                    ).fetchone()
                 if allowed is None:
                     raise CommunicationForbidden("无权访问该会话")
             reply_to_id = None
@@ -915,6 +938,224 @@ class CommunicationRepository:
     def list_broadcast_drafts(self, *, page: int, per_page: int) -> dict[str, Any]:
         return self._list_broadcasts_by_state("draft", page=page, per_page=per_page)
 
+    def list_broadcasts(
+        self, *, state: str | None, page: int, per_page: int
+    ) -> dict[str, Any]:
+        """Admin batch history without recipient addresses or internal identifiers."""
+        if state is not None and state not in BROADCAST_STATES:
+            raise ValueError("未知广播状态")
+        page = max(1, int(page))
+        per_page = max(1, min(100, int(per_page)))
+        where = "WHERE b.state=?" if state else ""
+        params: list[Any] = [state] if state else []
+        with self.store._tx() as conn:
+            total = int(conn.execute(
+                f"SELECT COUNT(*) FROM broadcasts b {where}", tuple(params)
+            ).fetchone()[0])
+            rows = conn.execute(
+                "SELECT b.public_id,b.state,b.audience_kind,b.audience_count,b.subject,"
+                "b.channels_json,b.audience_snapshot_hash,b.preview_expires_at,"
+                "b.scheduled_at,b.approved_at,b.started_at,b.completed_at,b.cancelled_at,"
+                "b.created_at,b.updated_at,"
+                "(SELECT COUNT(*) FROM broadcast_recipients br WHERE br.broadcast_id=b.id "
+                "AND br.state='delivered') AS delivered_count,"
+                "(SELECT COUNT(*) FROM broadcast_recipients br WHERE br.broadcast_id=b.id "
+                "AND br.state='failed') AS failed_recipient_count,"
+                "(SELECT COUNT(*) FROM deliveries d WHERE d.broadcast_id=b.id "
+                "AND d.status='failed') AS failed_delivery_count "
+                f"FROM broadcasts b {where} ORDER BY b.id DESC LIMIT ? OFFSET ?",
+                tuple(params + [per_page, (page - 1) * per_page]),
+            ).fetchall()
+            return {
+                "broadcasts": [
+                    {
+                        "public_id": row["public_id"],
+                        "state": row["state"],
+                        "audience_kind": row["audience_kind"],
+                        "audience_count": int(row["audience_count"]),
+                        "subject": row["subject"],
+                        "channels": _json(row["channels_json"], []),
+                        "audience_snapshot_hash": row["audience_snapshot_hash"],
+                        "preview_expires_at": row["preview_expires_at"],
+                        "scheduled_at": row["scheduled_at"],
+                        "approved_at": row["approved_at"],
+                        "started_at": row["started_at"],
+                        "completed_at": row["completed_at"],
+                        "cancelled_at": row["cancelled_at"],
+                        "created_at": row["created_at"],
+                        "updated_at": row["updated_at"],
+                        "delivered_count": int(row["delivered_count"]),
+                        "failed_recipient_count": int(row["failed_recipient_count"]),
+                        "failed_delivery_count": int(row["failed_delivery_count"]),
+                    }
+                    for row in rows
+                ],
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+            }
+
+    def get_broadcast_detail(self, public_id_value: str) -> dict[str, Any]:
+        """Return one admin-safe batch read model and retryable failed work."""
+        with self.store._tx() as conn:
+            row = conn.execute(
+                "SELECT b.*,u.username AS created_by_username FROM broadcasts b "
+                "LEFT JOIN users u ON u.id=b.created_by_user_id WHERE b.public_id=?",
+                (public_id_value,),
+            ).fetchone()
+            if row is None:
+                raise CommunicationNotFound("广播不存在")
+            recipient_counts = {
+                item["state"]: int(item["n"])
+                for item in conn.execute(
+                    "SELECT state,COUNT(*) n FROM broadcast_recipients "
+                    "WHERE broadcast_id=? GROUP BY state",
+                    (row["id"],),
+                )
+            }
+            delivery_counts = {
+                f"{item['channel']}:{item['status']}": int(item["n"])
+                for item in conn.execute(
+                    "SELECT channel,status,COUNT(*) n FROM deliveries "
+                    "WHERE broadcast_id=? GROUP BY channel,status",
+                    (row["id"],),
+                )
+            }
+            failed_recipients = [
+                _dict(item)
+                for item in conn.execute(
+                    "SELECT br.public_id,br.state,br.attempt_count,br.max_attempts,"
+                    "br.last_error,br.processed_at,u.username FROM broadcast_recipients br "
+                    "LEFT JOIN users u ON u.id=br.user_id "
+                    "WHERE br.broadcast_id=? AND br.state='failed' ORDER BY br.id",
+                    (row["id"],),
+                )
+            ]
+            failed_deliveries = [
+                _dict(item)
+                for item in conn.execute(
+                    "SELECT d.public_id,d.channel,d.status,d.attempt_count,d.max_attempts,"
+                    "d.last_error,d.updated_at,u.username FROM deliveries d "
+                    "LEFT JOIN users u ON u.id=d.recipient_user_id "
+                    "WHERE d.broadcast_id=? AND d.status='failed' ORDER BY d.id",
+                    (row["id"],),
+                )
+            ]
+            return {
+                "public_id": row["public_id"],
+                "state": row["state"],
+                "audience_kind": row["audience_kind"],
+                "audience_filter": _json(row["audience_filter_json"], {}),
+                "audience_count": int(row["audience_count"]),
+                "audience_snapshot_hash": row["audience_snapshot_hash"],
+                "subject": row["subject"],
+                "body_text": row["body_text"],
+                "channels": _json(row["channels_json"], []),
+                "preview_expires_at": row["preview_expires_at"],
+                "scheduled_at": row["scheduled_at"],
+                "approved_at": row["approved_at"],
+                "started_at": row["started_at"],
+                "completed_at": row["completed_at"],
+                "cancelled_at": row["cancelled_at"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "created_by_username": row["created_by_username"],
+                "recipients": recipient_counts,
+                "deliveries": delivery_counts,
+                "failed_recipients": failed_recipients,
+                "failed_deliveries": failed_deliveries,
+            }
+
+    def retry_failed_broadcast_work(
+        self,
+        public_id_value: str,
+        *,
+        recipient_public_ids: Iterable[str],
+        delivery_public_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        """Grant one bounded manual attempt to explicitly selected failed work.
+
+        The transition is idempotent: once a failed item is pending/queued, repeating
+        the same request reports it as ignored.  Sent work is never selected or reset.
+        """
+        recipients = sorted(set(recipient_public_ids))
+        deliveries = sorted(set(delivery_public_ids))
+        now = now_iso()
+        result: dict[str, Any] = {
+            "retried_recipients": [],
+            "retried_deliveries": [],
+            "ignored": [],
+            "exhausted": [],
+        }
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            broadcast = conn.execute(
+                "SELECT id,state FROM broadcasts WHERE public_id=?",
+                (public_id_value,),
+            ).fetchone()
+            if broadcast is None:
+                raise CommunicationNotFound("广播不存在")
+            if broadcast["state"] == "cancelled":
+                raise CommunicationConflict("已取消广播不能重试")
+
+            for public_id_value_item in recipients:
+                row = conn.execute(
+                    "SELECT id,state,attempt_count,max_attempts FROM broadcast_recipients "
+                    "WHERE public_id=? AND broadcast_id=?",
+                    (public_id_value_item, broadcast["id"]),
+                ).fetchone()
+                if row is None or row["state"] != "failed":
+                    result["ignored"].append(public_id_value_item)
+                    continue
+                attempt_count = int(row["attempt_count"])
+                if attempt_count >= self._ADMIN_RETRY_ATTEMPT_LIMIT:
+                    result["exhausted"].append(public_id_value_item)
+                    continue
+                conn.execute(
+                    "UPDATE broadcast_recipients SET state='pending',max_attempts=?,"
+                    "next_attempt_at=?,last_error='',processed_at=NULL WHERE id=? "
+                    "AND state='failed'",
+                    (attempt_count + 1, now, row["id"]),
+                )
+                result["retried_recipients"].append(public_id_value_item)
+
+            for public_id_value_item in deliveries:
+                row = conn.execute(
+                    "SELECT id,status,attempt_count,max_attempts FROM deliveries "
+                    "WHERE public_id=? AND broadcast_id=?",
+                    (public_id_value_item, broadcast["id"]),
+                ).fetchone()
+                if row is None or row["status"] != "failed":
+                    result["ignored"].append(public_id_value_item)
+                    continue
+                attempt_count = int(row["attempt_count"])
+                if attempt_count >= self._ADMIN_RETRY_ATTEMPT_LIMIT:
+                    result["exhausted"].append(public_id_value_item)
+                    continue
+                conn.execute(
+                    "UPDATE deliveries SET status='queued',max_attempts=?,next_attempt_at=?,"
+                    "last_error='',claimed_at=NULL,updated_at=? WHERE id=? AND status='failed'",
+                    (
+                        attempt_count + 1,
+                        now,
+                        now,
+                        row["id"],
+                    ),
+                )
+                result["retried_deliveries"].append(public_id_value_item)
+
+            if result["retried_recipients"] or result["retried_deliveries"]:
+                conn.execute(
+                    "UPDATE broadcasts SET "
+                    "state=CASE WHEN state='completed' THEN 'scheduled' ELSE state END,"
+                    "scheduled_at=CASE WHEN state='completed' THEN ? ELSE scheduled_at END,"
+                    "completed_at=NULL,updated_at=? "
+                    "WHERE id=? AND state IN ('scheduled','running','completed')",
+                    (now, now, broadcast["id"]),
+                )
+        result["public_id"] = public_id_value
+        return result
+
     def _list_broadcasts_by_state(
         self, state: str, *, page: int, per_page: int
     ) -> dict[str, Any]:
@@ -973,31 +1214,62 @@ class CommunicationRepository:
     def recover_inflight(self) -> dict[str, int]:
         now = now_iso()
         with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            delivery_cancelled = conn.execute(
+                "UPDATE deliveries SET status='cancelled',claimed_at=NULL,"
+                "cancelled_at=?,last_error='broadcast_not_active',updated_at=? "
+                "WHERE status='sending' AND broadcast_id IS NOT NULL AND NOT EXISTS("
+                "SELECT 1 FROM broadcasts b WHERE b.id=deliveries.broadcast_id "
+                "AND b.state IN ('scheduled','running'))",
+                (now, now),
+            ).rowcount
             delivery_failed = conn.execute(
                 "UPDATE deliveries SET status='failed',claimed_at=NULL,"
                 "last_error='recovery_attempt_limit',updated_at=? "
-                "WHERE status='sending' AND attempt_count>=max_attempts",
+                "WHERE status='sending' AND attempt_count>=max_attempts AND ("
+                "broadcast_id IS NULL OR EXISTS(SELECT 1 FROM broadcasts b "
+                "WHERE b.id=deliveries.broadcast_id "
+                "AND b.state IN ('scheduled','running')))",
                 (now,),
             ).rowcount
             delivery_queued = conn.execute(
                 "UPDATE deliveries SET status='queued',claimed_at=NULL,next_attempt_at=?,"
-                "updated_at=? WHERE status='sending' AND attempt_count<max_attempts",
+                "updated_at=? WHERE status='sending' AND attempt_count<max_attempts AND ("
+                "broadcast_id IS NULL OR EXISTS(SELECT 1 FROM broadcasts b "
+                "WHERE b.id=deliveries.broadcast_id "
+                "AND b.state IN ('scheduled','running')))",
                 (now, now),
+            ).rowcount
+            recipient_cancelled = conn.execute(
+                "UPDATE broadcast_recipients SET state='cancelled',processed_at=?,"
+                "last_error='broadcast_not_active' WHERE state='processing' "
+                "AND NOT EXISTS(SELECT 1 FROM broadcasts b "
+                "WHERE b.id=broadcast_recipients.broadcast_id "
+                "AND b.state IN ('scheduled','running'))",
+                (now,),
             ).rowcount
             recipient_failed = conn.execute(
                 "UPDATE broadcast_recipients SET state='failed',"
                 "last_error='recovery_attempt_limit',processed_at=? "
-                "WHERE state='processing' AND attempt_count>=max_attempts",
+                "WHERE state='processing' AND attempt_count>=max_attempts "
+                "AND EXISTS(SELECT 1 FROM broadcasts b "
+                "WHERE b.id=broadcast_recipients.broadcast_id "
+                "AND b.state IN ('scheduled','running'))",
                 (now,),
             ).rowcount
             recipient_pending = conn.execute(
                 "UPDATE broadcast_recipients SET state='pending',next_attempt_at=? "
-                "WHERE state='processing' AND attempt_count<max_attempts",
+                "WHERE state='processing' AND attempt_count<max_attempts "
+                "AND EXISTS(SELECT 1 FROM broadcasts b "
+                "WHERE b.id=broadcast_recipients.broadcast_id "
+                "AND b.state IN ('scheduled','running'))",
                 (now,),
             ).rowcount
             return {
-                "deliveries": delivery_failed + delivery_queued,
-                "broadcast_recipients": recipient_failed + recipient_pending,
+                "deliveries": delivery_cancelled + delivery_failed + delivery_queued,
+                "broadcast_recipients": (
+                    recipient_cancelled + recipient_failed + recipient_pending
+                ),
             }
 
     def claim_delivery(self) -> dict[str, Any] | None:
@@ -1005,14 +1277,29 @@ class CommunicationRepository:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
+                "UPDATE deliveries SET status='cancelled',cancelled_at=?,"
+                "last_error='broadcast_not_active',updated_at=? "
+                "WHERE channel='email' AND status='queued' "
+                "AND broadcast_id IS NOT NULL AND NOT EXISTS("
+                "SELECT 1 FROM broadcasts b WHERE b.id=deliveries.broadcast_id "
+                "AND b.state IN ('scheduled','running'))",
+                (now, now),
+            )
+            conn.execute(
                 "UPDATE deliveries SET status='failed',last_error='attempt_limit',"
-                "updated_at=? WHERE status='queued' AND attempt_count>=max_attempts",
+                "updated_at=? WHERE status='queued' AND attempt_count>=max_attempts "
+                "AND (broadcast_id IS NULL OR EXISTS(SELECT 1 FROM broadcasts b "
+                "WHERE b.id=deliveries.broadcast_id "
+                "AND b.state IN ('scheduled','running')))",
                 (now,),
             )
             row = conn.execute(
-                "SELECT * FROM deliveries WHERE channel='email' AND status='queued' "
-                "AND attempt_count<max_attempts AND next_attempt_at<=? "
-                "ORDER BY priority DESC,next_attempt_at,id LIMIT 1",
+                "SELECT d.* FROM deliveries d LEFT JOIN broadcasts b "
+                "ON b.id=d.broadcast_id WHERE d.channel='email' "
+                "AND d.status='queued' AND d.attempt_count<d.max_attempts "
+                "AND d.next_attempt_at<=? AND (d.broadcast_id IS NULL "
+                "OR b.state IN ('scheduled','running')) "
+                "ORDER BY d.priority DESC,d.next_attempt_at,d.id LIMIT 1",
                 (now,),
             ).fetchone()
             if row is None:
@@ -1030,20 +1317,49 @@ class CommunicationRepository:
     def resolve_delivery_content(
         self, delivery: dict[str, Any]
     ) -> tuple[str, str, str] | None:
-        """Return subject/text/html, or None when a secret delivery is stale."""
+        """Perform final SMTP admission and return renderable content.
+
+        The write transaction serializes this check with broadcast cancellation.
+        Once it commits successfully, provider I/O may finish even if cancellation
+        commits immediately afterwards; before it commits, an inactive parent makes
+        the claim stale and returns ``None`` without contacting SMTP.
+        """
         with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            live = conn.execute(
+                "SELECT d.*,b.state AS broadcast_state FROM deliveries d "
+                "LEFT JOIN broadcasts b ON b.id=d.broadcast_id WHERE d.public_id=?",
+                (delivery.get("public_id"),),
+            ).fetchone()
+            if (
+                live is None
+                or live["status"] != "sending"
+                or int(live["attempt_count"]) != int(delivery.get("attempt_count", -1))
+                or str(live["claimed_at"] or "") != str(delivery.get("claimed_at") or "")
+            ):
+                return None
+            if live["broadcast_id"] is not None:
+                admitted = conn.execute(
+                    "UPDATE deliveries SET status='sending' WHERE id=? "
+                    "AND status='sending' AND EXISTS(SELECT 1 FROM broadcasts b "
+                    "WHERE b.id=deliveries.broadcast_id "
+                    "AND b.state IN ('scheduled','running'))",
+                    (live["id"],),
+                )
+                if admitted.rowcount != 1:
+                    return None
             user = conn.execute(
                 "SELECT id,username,display_name,email,is_active,email_verified "
                 "FROM users WHERE id=?",
-                (delivery.get("recipient_user_id"),),
+                (live["recipient_user_id"],),
             ).fetchone()
             if user is None or not user["is_active"]:
                 return None
-            if delivery.get("template_key"):
+            if live["template_key"]:
                 template = get_template(
-                    str(delivery["template_key"]), int(delivery["template_version"])
+                    str(live["template_key"]), int(live["template_version"])
                 )
-                payload = _json(delivery.get("payload_json"), {})
+                payload = _json(live["payload_json"], {})
                 context = dict(payload.get("context") or {})
                 if payload.get("kind") == "email_code":
                     code_row = conn.execute(
@@ -1083,7 +1399,7 @@ class CommunicationRepository:
             message = conn.execute(
                 "SELECT m.body_text,m.sanitized_html,c.subject FROM messages m "
                 "JOIN conversations c ON c.id=m.conversation_id WHERE m.id=?",
-                (delivery.get("message_id"),),
+                (live["message_id"],),
             ).fetchone()
             if message is None:
                 return None
@@ -1137,10 +1453,27 @@ class CommunicationRepository:
         now = datetime.now()
         with self.store._tx() as conn:
             row = conn.execute(
-                "SELECT * FROM deliveries WHERE public_id=?", (delivery_public_id,)
+                "SELECT d.*,b.state AS broadcast_state FROM deliveries d "
+                "LEFT JOIN broadcasts b ON b.id=d.broadcast_id WHERE d.public_id=?",
+                (delivery_public_id,),
             ).fetchone()
             if row is None or row["status"] != "sending":
                 return "ignored"
+            if (
+                row["broadcast_id"] is not None
+                and row["broadcast_state"] not in {"scheduled", "running"}
+            ):
+                conn.execute(
+                    "UPDATE deliveries SET status='cancelled',cancelled_at=?,"
+                    "claimed_at=NULL,last_error='broadcast_not_active',updated_at=? "
+                    "WHERE id=? AND status='sending'",
+                    (
+                        now.isoformat(timespec="seconds"),
+                        now.isoformat(timespec="seconds"),
+                        row["id"],
+                    ),
+                )
+                return "cancelled"
             attempt = int(row["attempt_count"])
             max_attempts = int(row["max_attempts"])
             if attempt >= max_attempts:
@@ -1188,9 +1521,11 @@ class CommunicationRepository:
             rows = conn.execute(
                 "SELECT d.public_id,d.channel,d.status,d.attempt_count,d.max_attempts,"
                 "d.last_error,d.provider,d.provider_message_id,d.template_key,d.created_at,"
-                "d.updated_at,c.public_id AS conversation_public_id,u.username "
+                "d.updated_at,c.public_id AS conversation_public_id,u.username,"
+                "b.public_id AS broadcast_public_id "
                 "FROM deliveries d LEFT JOIN messages m ON m.id=d.message_id "
                 "LEFT JOIN conversations c ON c.id=m.conversation_id "
+                "LEFT JOIN broadcasts b ON b.id=d.broadcast_id "
                 "LEFT JOIN users u ON u.id=d.recipient_user_id "
                 "WHERE d.status='failed' ORDER BY d.id DESC LIMIT ? OFFSET ?",
                 (per_page, (page - 1) * per_page),
@@ -1217,9 +1552,11 @@ class CommunicationRepository:
                 "AND (b.scheduled_at IS NULL OR b.scheduled_at<=?) AND ("
                 "EXISTS(SELECT 1 FROM broadcast_recipients due "
                 "WHERE due.broadcast_id=b.id AND due.state='pending' "
-                "AND due.next_attempt_at<=?) OR NOT EXISTS(SELECT 1 "
+                "AND due.next_attempt_at<=?) OR (NOT EXISTS(SELECT 1 "
                 "FROM broadcast_recipients unfinished WHERE unfinished.broadcast_id=b.id "
-                "AND unfinished.state IN ('pending','processing'))) "
+                "AND unfinished.state IN ('pending','processing')) AND NOT EXISTS(SELECT 1 "
+                "FROM deliveries active_delivery WHERE active_delivery.broadcast_id=b.id "
+                "AND active_delivery.status IN ('queued','sending')))) "
                 "ORDER BY b.id LIMIT 1",
                 (now, now),
             ).fetchone()
@@ -1242,7 +1579,12 @@ class CommunicationRepository:
                     "AND state IN ('pending','processing')",
                     (broadcast["id"],),
                 ).fetchone()[0])
-                if unfinished == 0:
+                active_deliveries = int(conn.execute(
+                    "SELECT COUNT(*) FROM deliveries WHERE broadcast_id=? "
+                    "AND status IN ('queued','sending')",
+                    (broadcast["id"],),
+                ).fetchone()[0])
+                if unfinished == 0 and active_deliveries == 0:
                     conn.execute(
                         "UPDATE broadcasts SET state='completed',completed_at=?,updated_at=? "
                         "WHERE id=? AND state='running'",
@@ -1264,56 +1606,82 @@ class CommunicationRepository:
     def process_broadcast_recipient(
         self, broadcast: dict[str, Any], recipient: dict[str, Any]
     ) -> None:
+        """Project one claimed recipient while cancellation is transactionally excluded."""
         with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT br.state,b.state AS broadcast_state FROM broadcast_recipients br "
-                "JOIN broadcasts b ON b.id=br.broadcast_id WHERE br.public_id=?",
-                (recipient["public_id"],),
+                "SELECT br.state AS recipient_state,br.user_id AS recipient_user_id,"
+                "b.id AS broadcast_id,b.public_id AS broadcast_public_id,b.subject,"
+                "b.body_text,b.channels_json FROM broadcast_recipients br "
+                "JOIN broadcasts b ON b.id=br.broadcast_id "
+                "WHERE br.public_id=? AND b.public_id=?",
+                (recipient["public_id"], broadcast["public_id"]),
             ).fetchone()
             if (
                 current is None
-                or current["state"] != "processing"
-                or current["broadcast_state"] != "running"
+                or current["recipient_state"] != "processing"
             ):
                 return
-        uid = recipient.get("user_id")
-        if uid is None:
-            self.finish_broadcast_recipient(recipient["public_id"], state="cancelled")
-            return
-        channels = set(_json(broadcast.get("channels_json"), []))
-        result = self.create_message_to_user(
-            int(uid),
-            kind="broadcast",
-            subject=str(broadcast["subject"]),
-            body_text=str(broadcast["body_text"]),
-            author_kind="platform",
-            metadata={"broadcast_public_id": broadcast["public_id"]},
-            queue_email="email" in channels,
-            email_priority=10,
-            legacy_notification={
-                "type": "broadcast",
-                "title": str(broadcast["subject"]),
-                "body": str(broadcast["body_text"]),
-                "link": "/messages",
-            },
-            broadcast_id=int(broadcast["id"]),
-            idempotency_prefix=f"broadcast:{broadcast['public_id']}:user:{uid}",
-        )
-        if result is None:
-            self.finish_broadcast_recipient(recipient["public_id"], state="cancelled")
-            return
-        with self.store._tx() as conn:
+            # Compare-and-set while holding SQLite's writer lock.  A concurrent
+            # cancellation either commits before this check (and projection stops)
+            # or waits until the message/email projection has committed.
+            running = conn.execute(
+                "UPDATE broadcasts SET state='running' "
+                "WHERE id=? AND public_id=? AND state='running'",
+                (current["broadcast_id"], current["broadcast_public_id"]),
+            )
+            if running.rowcount != 1:
+                return
+            uid = current["recipient_user_id"]
+            if uid is None:
+                conn.execute(
+                    "UPDATE broadcast_recipients SET state='cancelled',processed_at=? "
+                    "WHERE public_id=? AND state='processing'",
+                    (now_iso(), recipient["public_id"]),
+                )
+                return
+            channels = set(_json(current["channels_json"], []))
+            result = self.create_message_to_user(
+                int(uid),
+                kind="broadcast",
+                subject=str(current["subject"]),
+                body_text=str(current["body_text"]),
+                author_kind="platform",
+                metadata={"broadcast_public_id": current["broadcast_public_id"]},
+                queue_email="email" in channels,
+                email_priority=10,
+                legacy_notification={
+                    "type": "broadcast",
+                    "title": str(current["subject"]),
+                    "body": str(current["body_text"]),
+                    "link": "/messages",
+                },
+                broadcast_id=int(current["broadcast_id"]),
+                idempotency_prefix=(
+                    f"broadcast:{current['broadcast_public_id']}:user:{uid}"
+                ),
+                _connection=conn,
+            )
+            if result is None:
+                conn.execute(
+                    "UPDATE broadcast_recipients SET state='cancelled',processed_at=? "
+                    "WHERE public_id=? AND state='processing'",
+                    (now_iso(), recipient["public_id"]),
+                )
+                return
             conversation = conn.execute(
                 "SELECT id FROM conversations WHERE public_id=?",
                 (result["conversation_public_id"],),
             ).fetchone()
             conn.execute(
                 "UPDATE broadcast_recipients SET state='delivered',conversation_id=?,"
-                "processed_at=? WHERE public_id=? AND state='processing'",
+                "processed_at=? WHERE public_id=? AND broadcast_id=? "
+                "AND state='processing'",
                 (
                     conversation["id"] if conversation else None,
                     now_iso(),
                     recipient["public_id"],
+                    current["broadcast_id"],
                 ),
             )
 

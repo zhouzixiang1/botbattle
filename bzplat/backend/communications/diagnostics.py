@@ -13,6 +13,7 @@ from .utils import safe_route
 DIAGNOSTIC_SCHEMA_VERSION = 1
 BROWSER_FAMILIES = frozenset({"chrome", "firefox", "safari", "edge", "other", "unknown"})
 OS_FAMILIES = frozenset({"windows", "macos", "linux", "android", "ios", "other", "unknown"})
+THEMES = frozenset({"light", "dark", "system", "unknown"})
 FAILED_API_TEMPLATES = frozenset({
     "/api/auth/*",
     "/api/bots/*",
@@ -44,6 +45,7 @@ def build_diagnostic_bundle(
     viewport_height: int | None,
     locale: str,
     timezone: str,
+    theme: str,
     failed_api_template: str | None,
     failed_api_status: int | None,
     trace_id: str,
@@ -54,6 +56,8 @@ def build_diagnostic_bundle(
         raise ValueError("browser_family 只能使用粗粒度枚举")
     if os_family not in OS_FAMILIES:
         raise ValueError("os_family 只能使用粗粒度枚举")
+    if theme not in THEMES:
+        raise ValueError("theme 只能使用 light/dark/system/unknown")
     route = safe_route(current_route)
     if viewport_width is not None and not 240 <= viewport_width <= 16_384:
         raise ValueError("viewport_width 超出安全范围")
@@ -89,6 +93,7 @@ def build_diagnostic_bundle(
             ),
             "locale": locale or "unknown",
             "timezone": timezone or "unknown",
+            "theme": theme,
         },
         "failed_api": (
             {

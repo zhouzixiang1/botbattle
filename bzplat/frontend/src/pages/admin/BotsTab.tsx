@@ -1,9 +1,11 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { Badge,  Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, Tooltip, TooltipContent, TooltipTrigger } from './ui'
+import { Badge, Button, Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, Tooltip, TooltipContent, TooltipTrigger } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
+import { OverflowText } from '@/components/ui/overflow-text'
+import { Input } from '@/components/ui/input'
 
 interface Bot {
   id: number
@@ -123,14 +125,14 @@ export default function BotsTab() {
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <input
+        <Input
           value={q}
           onChange={(e) => {
             setQ(e.target.value)
             setPage(1)
           }}
           placeholder="搜索 Bot 名称"
-          className="h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring outline-none"
+          className="h-9 w-auto min-w-48"
         />
         <span className="text-xs text-muted-foreground">共 {total || filtered.length} 个</span>
         <div className="ml-auto">
@@ -143,7 +145,7 @@ export default function BotsTab() {
         <Table className="min-w-[42rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">ID</TableHead>
+              <TableHead className="px-3 py-2.5">序号</TableHead>
               <TableHead className="px-3 py-2.5">名称</TableHead>
               <TableHead className="px-3 py-2.5">所有者</TableHead>
               <TableHead className="px-3 py-2.5">版本</TableHead>
@@ -152,14 +154,14 @@ export default function BotsTab() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.map((b) => (
+            {filtered.map((b, index) => (
               <Fragment key={b.id}>
                 <TableRow className="hover:bg-accent">
-                  <TableCell className="px-3 py-2 font-mono text-muted-foreground">{b.id}</TableCell>
+                  <TableCell className="px-3 py-2 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
                   <TableCell className="max-w-[16rem] px-3 py-2 font-medium text-foreground">
-                    <span className="block truncate" title={b.display_name || b.name}>
+                    <OverflowText>
                       {b.display_name || b.name}
-                    </span>
+                    </OverflowText>
                     {b.is_builtin && <span className="ml-1 text-[10px] text-primary">内置</span>}
                     {b.runnable === false && (
                       <span className="mt-0.5 block break-all font-mono text-[10px] font-normal text-destructive">
@@ -172,7 +174,7 @@ export default function BotsTab() {
                       <Link to={`/user/${encodeURIComponent(b.owner_name)}`} className="text-primary hover:underline">
                         {b.owner_display || b.owner_name}
                       </Link>
-                    ) : <span className="text-muted-foreground">#{b.owner_id}</span>}
+                    ) : <span className="text-muted-foreground">内部用户 ID {b.owner_id}</span>}
                   </TableCell>
                   <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">v{b.current_version}</TableCell>
                   <TableCell className="px-3 py-2">
@@ -183,29 +185,32 @@ export default function BotsTab() {
                   </TableCell>
                   <TableCell className="px-3 py-2">
                     <div className="flex flex-wrap gap-1">
-                      <button
+                      <Button
                         type="button"
+                        variant="outline"
+                        size="sm"
                         disabled={busyId === b.id || (!b.is_active && b.runnable === false)}
                         onClick={() => void patch(b.id, { is_active: !b.is_active })}
-                        className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         {b.is_active ? '下架' : b.runnable === false ? '不可上架' : '上架'}
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
+                        variant="outline"
+                        size="sm"
                         onClick={() => void showVersions(b)}
-                        className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         版本
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
+                        variant="destructive"
+                        size="sm"
                         disabled={busyId === b.id}
                         onClick={() => void del(b.id)}
-                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         删除
-                      </button>
+                      </Button>
                     </div>
                   </TableCell>
                 </TableRow>

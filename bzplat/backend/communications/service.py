@@ -153,6 +153,23 @@ class CommunicationService:
             queue_email=queue_email,
         )
 
+    def reply_guest_report(
+        self,
+        conversation_public_id: str,
+        *,
+        body_text: str,
+        reply_to: str | None,
+    ) -> dict[str, Any]:
+        body = clean_text(body_text, max_length=10_000, field="body")
+        return self.repository.append_message(
+            conversation_public_id,
+            actor_user_id=None,
+            actor_kind="user",
+            body_text=body,
+            reply_to_public_id=reply_to,
+            allow_anonymous_user=True,
+        )
+
     def preview_broadcast(
         self,
         *,

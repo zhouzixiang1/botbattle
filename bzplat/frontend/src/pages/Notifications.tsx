@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Bell, Check, CheckCheck, MailOpen } from 'lucide-react'
+import { Bell, Bug, Check, CheckCheck, Mail, MailOpen } from 'lucide-react'
 
 import { apiGet, apiPost, errMsg } from '@/api'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
@@ -113,11 +113,7 @@ export default function Notifications() {
       <PageHeader
         title="通知"
         description="对局结果、赛事进度、评论与系统消息集中在这里。"
-        actions={unread > 0 ? (
-          <Button type="button" variant="outline" size="sm" onClick={readAll} disabled={markingAll} aria-busy={markingAll}>
-            <CheckCheck className="size-4" />{markingAll ? '处理中…' : '全部标记已读'}
-          </Button>
-        ) : undefined}
+        actions={<><Button asChild variant="outline" size="sm"><Link to="/messages"><Mail className="size-4" />站内信</Link></Button><Button asChild variant="outline" size="sm"><Link to="/feedback"><Bug className="size-4" />反馈问题</Link></Button>{unread > 0 && <Button type="button" variant="outline" size="sm" onClick={readAll} disabled={markingAll} aria-busy={markingAll}><CheckCheck className="size-4" />{markingAll ? '处理中…' : '全部标记已读'}</Button>}</>}
       />
 
       <SummaryStrip columns={3}>

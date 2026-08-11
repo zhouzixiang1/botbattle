@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
-import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Badge, EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
+import { Button, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Badge, EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
@@ -226,21 +226,17 @@ export default function MatchesTab() {
                 <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(m.created_at)}</TableCell>
                 <TableCell className="px-3 py-2">
                   <div className="flex gap-1">
-                    <Link
-                      to={`/match/${m.id}`}
-                      className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-primary hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      查看
-                    </Link>
+                    <Button asChild variant="outline" size="sm"><Link to={`/match/${m.id}`}>查看</Link></Button>
                     {(m.status === 'running' || m.status === 'pending') && (
-                      <button
+                      <Button
                         type="button"
+                        variant="destructive"
+                        size="sm"
                         disabled={busyId === m.id}
                         onClick={() => void abort(m.id)}
-                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         中止
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </TableCell>
