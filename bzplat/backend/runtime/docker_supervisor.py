@@ -716,6 +716,85 @@ class DockerSupervisor:
                 max_polls=6,
             )
 
+    def _exact_session_ids(
+        self,
+        identity: DockerExecutionIdentity,
+        *,
+        slot: int,
+        name: str,
+        launch_token: str,
+    ) -> list[str]:
+        """Resolve one session only when name, token and all labels agree."""
+        if not launch_token or name != identity.container_name(slot):
+            raise DockerControlUncertain("Docker 会话清理身份不完整")
+        token_ids = set(
+            self.list_ids(
+                job_public_id=identity.job_public_id,
+                attempt_no=identity.attempt_no,
+                launch_token=launch_token,
+            )
+        )
+        name_ids = set(self.list_name_ids(name))
+        # Docker names are unique and launch tokens are UUIDs. Any disagreement
+        # means an external rename/collision or an incomplete control response;
+        # never widen removal to the whole job from this per-turn path.
+        if token_ids != name_ids or len(token_ids) > 1:
+            raise DockerControlUncertain(
+                "Docker 会话 name/token 查询结果不一致"
+            )
+        expected = dict(identity.labels(slot, launch_token=launch_token))
+        for container_id in token_ids:
+            labels = self.inspect_existing_labels(container_id)
+            if any(labels.get(key) != value for key, value in expected.items()):
+                raise DockerControlUncertain(
+                    "Docker 会话 label 与执行任务不匹配"
+                )
+        return sorted(token_ids)
+
+    async def cleanup_session(
+        self,
+        identity: DockerExecutionIdentity,
+        *,
+        slot: int,
+        name: str,
+        launch_token: str,
+        zero_polls: int = 2,
+    ) -> None:
+        """Remove one physical Bot session without touching sibling seats.
+
+        Successful ``start_attached`` has already closed its durable create
+        journal entry. Holding the shared launch flock prevents another create
+        from racing the exact token/name proof below. Two consecutive zero
+        observations make a Traditional turn release its container immediately
+        while the job-level cleanup remains the final attempt-wide barrier.
+        """
+        async with self.launch_guard():
+            launch = self._journal_snapshot()
+            if launch.get("state") != "idle":
+                raise DockerControlUncertain(
+                    "Docker launch journal 未闭合，拒绝单会话清理"
+                )
+            consecutive_zero = 0
+            for _ in range(6):
+                ids = await asyncio.to_thread(
+                    self._exact_session_ids,
+                    identity,
+                    slot=slot,
+                    name=name,
+                    launch_token=launch_token,
+                )
+                if not ids:
+                    consecutive_zero += 1
+                    if consecutive_zero >= max(1, int(zero_polls)):
+                        return
+                else:
+                    consecutive_zero = 0
+                    await asyncio.to_thread(self.remove_names, ids)
+                await asyncio.sleep(0.05)
+        raise DockerControlUncertain(
+            "Docker 会话 rm 后 name/token 未确认为 0"
+        )
+
     async def cleanup_instance(self) -> None:
         """Startup-only exact namespace cleanup and double-zero proof."""
         async with self.launch_guard():

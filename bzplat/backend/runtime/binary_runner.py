@@ -93,6 +93,7 @@ class BotSession:
     proc: asyncio.subprocess.Process | None = None
     mode: str = "docker"  # docker | local（local 仅 BZ_BOT_LOCAL 测试开关）
     container_name: str = ""
+    container_slot: int | None = None
     launch_token: str = ""
     _buf: bytes = field(default_factory=bytes)
     _stderr_tail: bytearray = field(default_factory=bytearray)  # bot stderr 末尾（排查崩溃用）
@@ -636,6 +637,7 @@ class BinaryRunner:
                 supervisor.instance, f"preflight-{session.session_id}", 1
             )
             slot = 0
+        session.container_slot = slot
         owner_kind = "execution" if scope is not None else "preflight"
         session.launch_token = uuid.uuid4().hex
         try:
@@ -823,7 +825,7 @@ class BinaryRunner:
         return raw.decode("utf-8", errors="replace").rstrip("\r\n") or None
 
     async def stop_session(self, session_id: str) -> None:
-        """Stop one attach process; scoped container removal happens per job."""
+        """Stop one transport and remove its exact physical container."""
         session = self._sessions.get(session_id)
         if session is None:
             return
@@ -843,24 +845,50 @@ class BinaryRunner:
                         await proc.wait()
                 except ProcessLookupError:
                     pass
-            # A job-level cleanup proves all seat/Traditional containers are
-            # zero together. Unscoped preflight owns its exact name here.
-            if (
-                session.execution_scope is None
-                and session.container_name
-                and self.supervisor is not None
-            ):
+            if session.container_name:
+                scope = session.execution_scope
+                supervisor = self.supervisor
+                if supervisor is None:
+                    reason = "Docker supervisor 未配置，无法确认单会话清理"
+                    if scope is not None:
+                        scope.mark_recovery_pending(reason)
+                    else:
+                        self._mark_unscoped_docker_uncertain(reason)
+                    raise SandboxControlUncertain(reason)
                 try:
-                    await self.supervisor.cleanup_job(
-                        DockerExecutionIdentity(
-                            self.supervisor.instance,
-                            f"preflight-{session.session_id}",
-                            1,
+                    if scope is not None:
+                        if session.container_slot is None or not session.launch_token:
+                            raise DockerControlUncertain(
+                                "Docker 会话缺少精确清理身份"
+                            )
+                        # Traditional 每回合都是一个物理会话；只停
+                        # ``docker start -a`` 会留下 running/stopped 容器。
+                        # 用该 session 的 slot/name/launch token 立即定向删除，
+                        # 不能调用 cleanup_job 误删同局 LongRunning 座位。
+                        await supervisor.cleanup_session(
+                            scope.identity,
+                            slot=session.container_slot,
+                            name=session.container_name,
+                            launch_token=session.launch_token,
                         )
-                    )
+                    else:
+                        # Unscoped preflight owns its one-job namespace here.
+                        # Its launch journal may still need the broader cleanup
+                        # path when create/start acknowledgement was uncertain.
+                        await supervisor.cleanup_job(
+                            DockerExecutionIdentity(
+                                supervisor.instance,
+                                f"preflight-{session.session_id}",
+                                1,
+                            )
+                        )
                 except DockerControlUncertain as exc:
-                    self._mark_unscoped_docker_uncertain(str(exc))
-                    raise SandboxControlUncertain(str(exc)) from exc
+                    reason = str(exc)
+                    if scope is not None:
+                        scope.mark_recovery_pending(reason)
+                    else:
+                        self._mark_unscoped_docker_uncertain(reason)
+                    raise SandboxControlUncertain(reason) from exc
         finally:
             # An uncertain cleanup has already paused the dispatcher/journal,
             # which gates every later create.  Release the in-process lane so a

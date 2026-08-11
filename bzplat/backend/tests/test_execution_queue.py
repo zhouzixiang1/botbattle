@@ -2169,6 +2169,191 @@ def test_docker_commands_are_local_deterministic_and_hardened(monkeypatch, tmp_p
     ]
 
 
+def test_exact_session_cleanup_removes_only_its_launch_token(
+    queue_store, tmp_path, monkeypatch
+):
+    supervisor = _journal_supervisor(queue_store, tmp_path)
+    identity = DockerExecutionIdentity(
+        "journal-test-instance", "traditional-turn", 2
+    )
+    slot = 7
+    token = "traditional-turn-token"
+    name = identity.container_name(slot)
+    target_id = "target-container-id"
+    sibling_id = "longrunning-sibling-id"
+    present = True
+    removed: list[list[str]] = []
+
+    def list_ids(**filters):
+        assert filters == {
+            "job_public_id": identity.job_public_id,
+            "attempt_no": identity.attempt_no,
+            "launch_token": token,
+        }
+        return [target_id] if present else []
+
+    monkeypatch.setattr(supervisor, "list_ids", list_ids)
+    monkeypatch.setattr(
+        supervisor,
+        "list_name_ids",
+        lambda exact_name: [target_id] if present and exact_name == name else [],
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "inspect_existing_labels",
+        lambda container_id: (
+            dict(identity.labels(slot, launch_token=token))
+            if container_id == target_id
+            else pytest.fail("sibling container must not be inspected")
+        ),
+    )
+
+    def remove_exact(ids):
+        nonlocal present
+        removed.append(list(ids))
+        assert list(ids) == [target_id]
+        assert sibling_id not in ids
+        present = False
+
+    monkeypatch.setattr(supervisor, "remove_names", remove_exact)
+
+    asyncio.run(
+        supervisor.cleanup_session(
+            identity,
+            slot=slot,
+            name=name,
+            launch_token=token,
+        )
+    )
+
+    assert removed == [[target_id]]
+
+
+def test_exact_session_cleanup_fails_closed_on_label_mismatch(
+    queue_store, tmp_path, monkeypatch
+):
+    supervisor = _journal_supervisor(queue_store, tmp_path)
+    identity = DockerExecutionIdentity(
+        "journal-test-instance", "traditional-mismatch", 1
+    )
+    slot = 3
+    token = "expected-launch-token"
+    name = identity.container_name(slot)
+    monkeypatch.setattr(
+        supervisor,
+        "list_ids",
+        lambda **_filters: ["mismatched-container"],
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "list_name_ids",
+        lambda _name: ["mismatched-container"],
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "inspect_existing_labels",
+        lambda _container_id: dict(
+            identity.labels(slot, launch_token="different-token")
+        ),
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "remove_names",
+        lambda _ids: pytest.fail("mismatched labels must never be removed"),
+    )
+
+    with pytest.raises(DockerControlUncertain, match="label"):
+        asyncio.run(
+            supervisor.cleanup_session(
+                identity,
+                slot=slot,
+                name=name,
+                launch_token=token,
+            )
+        )
+
+
+def test_scoped_stop_immediately_cleans_traditional_turn_container(tmp_path):
+    cleanup_calls: list[tuple] = []
+    recovery_reasons: list[str] = []
+
+    class ExactSupervisor:
+        async def cleanup_session(
+            self, identity, *, slot, name, launch_token
+        ) -> None:
+            cleanup_calls.append((identity, slot, name, launch_token))
+
+    supervisor = ExactSupervisor()
+    scope = SimpleNamespace(
+        identity=DockerExecutionIdentity("instance-a", "request-a", 4),
+        mark_recovery_pending=recovery_reasons.append,
+    )
+    session = BotSession(
+        session_id="traditional-turn-session",
+        info=SimpleNamespace(),
+        binary_path=tmp_path / "bot.elf",
+        proc=SimpleNamespace(returncode=0),
+        mode="docker",
+        container_name=scope.identity.container_name(9),
+        container_slot=9,
+        launch_token="turn-launch-token",
+        execution_scope=scope,
+    )
+    runner = object.__new__(BinaryRunner)
+    runner._sessions = {session.session_id: session}
+    runner.supervisor = supervisor
+    runner._preflight_gate = None
+
+    asyncio.run(runner.stop_session(session.session_id))
+
+    assert cleanup_calls == [
+        (
+            scope.identity,
+            9,
+            scope.identity.container_name(9),
+            "turn-launch-token",
+        )
+    ]
+    assert recovery_reasons == []
+    assert runner._sessions == {}
+
+
+def test_scoped_stop_marks_recovery_pending_when_exact_cleanup_is_uncertain(
+    tmp_path,
+):
+    recovery_reasons: list[str] = []
+
+    class UncertainSupervisor:
+        async def cleanup_session(self, *_args, **_kwargs) -> None:
+            raise DockerControlUncertain("mock exact cleanup uncertainty")
+
+    scope = SimpleNamespace(
+        identity=DockerExecutionIdentity("instance-a", "request-b", 1),
+        mark_recovery_pending=recovery_reasons.append,
+    )
+    session = BotSession(
+        session_id="uncertain-traditional-turn",
+        info=SimpleNamespace(),
+        binary_path=tmp_path / "bot.elf",
+        proc=SimpleNamespace(returncode=0),
+        mode="docker",
+        container_name=scope.identity.container_name(2),
+        container_slot=2,
+        launch_token="uncertain-turn-token",
+        execution_scope=scope,
+    )
+    runner = object.__new__(BinaryRunner)
+    runner._sessions = {session.session_id: session}
+    runner.supervisor = UncertainSupervisor()
+    runner._preflight_gate = None
+
+    with pytest.raises(SandboxControlUncertain, match="uncertainty"):
+        asyncio.run(runner.stop_session(session.session_id))
+
+    assert recovery_reasons == ["mock exact cleanup uncertainty"]
+    assert session.session_id in runner._sessions
+
+
 def test_docker_start_requires_daemon_started_at(monkeypatch):
     supervisor = object.__new__(DockerSupervisor)
     supervisor.docker_bin = "docker"
