@@ -17,6 +17,20 @@ async function expectNoRootOverflow(page: Page, label: string) {
   expect(overflow, `${label} overflows viewport by ${overflow}px`).toBeLessThanOrEqual(1)
 }
 
+async function selectAdminModule(page: Page, label: string) {
+  const mobileTrigger = page.getByRole('button', { name: '选择管理模块' })
+  if (await mobileTrigger.isVisible()) {
+    await mobileTrigger.click()
+    await page.getByRole('option', { name: label, exact: true }).click()
+  } else {
+    await page
+      .getByRole('navigation', { name: '管理控制台模块' })
+      .getByRole('button', { name: new RegExp(`^${label}`) })
+      .click()
+  }
+  await expect(page.getByRole('main', { name: label, exact: true })).toBeVisible()
+}
+
 test.beforeAll(async ({ request }) => {
   const response = await request.get('/api/health')
   expect(response.status(), await response.text()).toBe(200)
@@ -35,7 +49,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
     await expectNoRootOverflow(page, 'dashboard')
 
-    await page.getByRole('button', { name: '用户', exact: true }).click()
+    await selectAdminModule(page, '用户')
     const userSearch = page.getByPlaceholder('搜索用户名/邮箱')
     await expect(userSearch).toBeVisible()
     if (viewport.interactive) {
@@ -96,7 +110,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'users')
 
-    await page.getByRole('button', { name: 'Bot', exact: true }).click()
+    await selectAdminModule(page, 'Bot')
     const botSearch = page.getByPlaceholder('搜索 Bot 名称')
     await expect(botSearch).toBeVisible()
     if (viewport.interactive) {
@@ -122,7 +136,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'bots')
 
-    await page.getByRole('button', { name: '对局记录', exact: true }).click()
+    await selectAdminModule(page, '对局')
     await expect(page.getByText(/共 \d+ 局/)).toBeVisible()
     if (viewport.interactive) {
       const completedMatchesPromise = page.waitForResponse((response) => {
@@ -166,7 +180,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'matches')
 
-    await page.getByRole('button', { name: '锦标赛', exact: true }).click()
+    await selectAdminModule(page, '锦标赛')
     await expect(page.getByText(/共 \d+ 个锦标赛/)).toBeVisible()
     await expectNoRootOverflow(page, 'contests')
 
@@ -192,7 +206,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
       })
     }
 
-    await page.getByRole('button', { name: '日志', exact: true }).click()
+    await selectAdminModule(page, '日志')
     const logSearch = page.getByPlaceholder('对局 ID / Bot ID / 模块 / IP / 操作')
     await expect(logSearch).toBeVisible()
     if (viewport.interactive) {
@@ -224,14 +238,18 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'logs')
 
-    await page.getByRole('button', { name: '邮件', exact: true }).click()
-    await expect(page.getByRole('button', { name: '邮件模板', exact: true })).toBeVisible()
+    await selectAdminModule(page, '通信中心')
+    const communications = page.getByRole('main', { name: '通信中心', exact: true })
+    await expect(communications.getByRole('button', { name: '新建群发', exact: true })).toBeVisible()
     if (viewport.interactive) {
-      await page.getByRole('button', { name: /发件箱/ }).click()
-      await expect(page.getByText(/无发信记录|收件人/)).toBeVisible()
-      await page.getByRole('button', { name: '邮件模板', exact: true }).click()
+      await communications.getByRole('button', { name: '已发送', exact: true }).click()
+      await expect(communications.getByRole('heading', { name: '已发送', exact: true })).toBeVisible()
+      await communications.getByRole('button', { name: '群发记录', exact: true }).click()
+      await expect(communications.getByRole('heading', { name: '群发记录', exact: true })).toBeVisible()
+      await communications.getByRole('button', { name: '问题反馈', exact: true }).click()
+      await expect(communications.getByRole('heading', { name: '问题反馈', exact: true })).toBeVisible()
     }
-    await expectNoRootOverflow(page, 'email')
+    await expectNoRootOverflow(page, 'communications')
 
       await monitor.expectClean()
     }, async () => {})
