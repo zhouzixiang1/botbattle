@@ -583,20 +583,46 @@ def test_guest_bug_feedback_allowlist_tracking_and_image_magic(tmp_path, monkeyp
 def test_feedback_frontend_guards_writes_across_identity_changes():
     frontend_root = Path(__file__).resolve().parents[2] / "frontend" / "src"
     source = (frontend_root / "pages" / "Feedback.tsx").read_text(encoding="utf-8")
+    messages_source = (frontend_root / "pages" / "Messages.tsx").read_text(
+        encoding="utf-8"
+    )
+    admin_source = (frontend_root / "pages" / "admin" / "EmailTab.tsx").read_text(
+        encoding="utf-8"
+    )
     api_source = (frontend_root / "api.ts").read_text(encoding="utf-8")
 
+    assert "<FeedbackForIdentity key={user?.id ?? 'guest'} user={user} />" in source
     assert "identityEpochRef" in source
     assert "operationControllersRef" in source
     assert "abortIdentityOperations()" in source
     assert source.count("operationIsCurrent(operation)") >= 12
     assert "selectReport(created.public_id, operation.epoch)" in source
     assert "selectReport(reportPublicId, operation.epoch)" in source
+    download_source = source.split("const downloadAttachment = async", 1)[1].split(
+        "const addAttachments = async", 1
+    )[0]
+    assert "const operation = beginIdentityOperation()" in download_source
+    assert "signal: operation.controller.signal" in download_source
+    assert download_source.count("operationIsCurrent(operation)") >= 3
+    assert "operation.authToken" in download_source
+    assert "finishIdentityOperation(operation)" in download_source
     assert "suppressAuth: true" in source
     assert "credentials: 'omit'" in source
     assert "cache: 'no-store'" in source
     assert "referrerPolicy: 'no-referrer'" in source
     assert "suppressAuth?: boolean" in api_source
     assert "const soft = suppressAuth ||" in api_source
+
+    assert "<MessagesForIdentity key={user?.id ?? 'guest'} user={user} />" in messages_source
+    assert "listRequestRef.current.controller?.abort()" in messages_source
+    assert "sendRequestRef.current.controller?.abort()" in messages_source
+    assert "suppressAuth: true" in messages_source
+    assert "requestOptions(controller.signal)" in messages_source
+
+    assert "attachmentControllersRef" in admin_source
+    assert "cancelAttachmentRequests()" in admin_source
+    assert "signal: controller.signal" in admin_source
+    assert "!selectionMatches('bug', bugPublicId)" in admin_source
 
 
 def test_admin_broadcast_history_detail_and_bounded_failed_retry(tmp_path):

@@ -4,7 +4,7 @@ import { Bug, CheckCircle2, Inbox, Paperclip, Send } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { toast } from 'sonner'
 
-import { apiFetch, apiGet, apiJson, apiUpload, errMsg, lastSafeApiFailure, userToken, type ApiRequestInit } from '@/api'
+import { apiFetch, apiGet, apiJson, apiUpload, errMsg, lastSafeApiFailure, userToken, type ApiRequestInit, type CurrentUser } from '@/api'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
 import type { BugDetail, BugSummary, ThreadDetail } from '@/components/communications/types'
 import { BUG_CATEGORY_LABELS, BUG_IMPACT_LABELS, BUG_STATUS_LABELS } from '@/components/communications/types'
@@ -77,6 +77,10 @@ async function guestFetch<T>(path: string, token: string, method: 'GET' | 'POST'
 
 export default function Feedback() {
   const { user } = useAuth()
+  return <FeedbackForIdentity key={user?.id ?? 'guest'} user={user} />
+}
+
+function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
   const userId = user?.id ?? null
   const { theme = 'system' } = useTheme()
   const [category, setCategory] = useState('page')
@@ -395,19 +399,37 @@ export default function Feedback() {
       selected !== loaded.bug_report.public_id ||
       loadedIdentityEpochRef.current !== identityEpochRef.current.epoch
     ) return
+    const operation = beginIdentityOperation()
+    const reportPublicId = loaded.bug_report.public_id
+    const track = selectedTrack
+    if (operation.userId === null && !track) {
+      finishIdentityOperation(operation)
+      return
+    }
     try {
       const headers = new Headers()
-      const guest = identityEpochRef.current.userId === null
-      const auth = guest ? null : userToken.get()
-      if (auth) headers.set('Authorization', `Bearer ${auth}`)
-      if (guest && selectedTrack) headers.set('X-Feedback-Token', selectedTrack.tracking_token)
-      const response = await fetch(`/api/feedback/bugs/${encodeURIComponent(loaded.bug_report.public_id)}/attachments/${encodeURIComponent(attachmentId)}`, { headers, credentials: guest || auth ? 'omit' : 'include', cache: 'no-store', referrerPolicy: 'no-referrer' })
+      if (operation.authToken) headers.set('Authorization', `Bearer ${operation.authToken}`)
+      if (operation.userId === null && track) headers.set('X-Feedback-Token', track.tracking_token)
+      const response = await fetch(`/api/feedback/bugs/${encodeURIComponent(reportPublicId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+        headers,
+        credentials: operation.userId === null || operation.authToken ? 'omit' : 'include',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer',
+        signal: operation.controller.signal,
+      })
+      if (!operationIsCurrent(operation)) return
       if (!response.ok) throw new Error('附件读取失败')
-      const url = URL.createObjectURL(await response.blob())
+      const blob = await response.blob()
+      if (!operationIsCurrent(operation)) return
+      const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url; anchor.download = name; anchor.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
-    } catch (cause) { setError(errMsg(cause, '附件读取失败')) }
+    } catch (cause) {
+      if (operationIsCurrent(operation)) setError(errMsg(cause, '附件读取失败'))
+    } finally {
+      finishIdentityOperation(operation)
+    }
   }
 
   const addAttachments = async (nextFiles: File[]) => {

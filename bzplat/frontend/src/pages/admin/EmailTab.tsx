@@ -422,9 +422,19 @@ export default function CommunicationsTab() {
   const [error, setError] = useState('')
   const selectionRef = useRef<Selection | null>(null)
   const detailRequestRef = useRef<{ seq: number; controller: AbortController | null }>({ seq: 0, controller: null })
+  const attachmentControllersRef = useRef<Set<AbortController>>(new Set())
   const perPage = 30
 
+  const cancelAttachmentRequests = () => {
+    for (const controller of attachmentControllersRef.current) controller.abort()
+    attachmentControllersRef.current.clear()
+  }
+
   const setActiveSelection = (next: Selection | null) => {
+    const current = selectionRef.current
+    if (current?.kind !== next?.kind || current?.publicId !== next?.publicId) {
+      cancelAttachmentRequests()
+    }
     selectionRef.current = next
     setSelection(next)
   }
@@ -459,7 +469,10 @@ export default function CommunicationsTab() {
     cancelDetailRequest(); setActiveSelection(null); setDetailLoading(false); setThread(null); setBroadcast(null); setBug(null); setFailure(null); setReply(''); setReplyEmail(false)
   }
 
-  useEffect(() => () => detailRequestRef.current.controller?.abort(), [])
+  useEffect(() => () => {
+    detailRequestRef.current.controller?.abort()
+    cancelAttachmentRequests()
+  }, [])
 
   const loadList = useCallback(async () => {
     setListLoading(true); setError('')
@@ -620,16 +633,34 @@ export default function CommunicationsTab() {
 
   const downloadAttachment = async (attachmentId: string, name: string) => {
     if (!bug || !selectionMatches('bug', bug.public_id)) { setError('当前选择已变化，请重新打开反馈后再操作'); return }
+    const bugPublicId = bug.public_id
+    const controller = new AbortController()
+    attachmentControllersRef.current.add(controller)
     try {
       const headers = new Headers()
       const token = userToken.get()
       if (token) headers.set('Authorization', `Bearer ${token}`)
-      const response = await fetch(`/api/feedback/bugs/${encodeURIComponent(bug.public_id)}/attachments/${encodeURIComponent(attachmentId)}`, { headers, credentials: 'include', cache: 'no-store' })
+      const response = await fetch(`/api/feedback/bugs/${encodeURIComponent(bugPublicId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+        headers,
+        credentials: token ? 'omit' : 'include',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer',
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || !selectionMatches('bug', bugPublicId)) return
       if (!response.ok) throw new Error('附件读取失败')
-      const url = URL.createObjectURL(await response.blob())
+      const blob = await response.blob()
+      if (controller.signal.aborted || !selectionMatches('bug', bugPublicId)) return
+      const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
-    } catch (cause) { setError(errMsg(cause, '附件读取失败')) }
+    } catch (cause) {
+      if (!controller.signal.aborted && selectionMatches('bug', bugPublicId)) {
+        setError(errMsg(cause, '附件读取失败'))
+      }
+    } finally {
+      attachmentControllersRef.current.delete(controller)
+    }
   }
 
   const selectedId = selection?.publicId || ''

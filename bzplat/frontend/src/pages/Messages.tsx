@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, Bug, Inbox, Mail, RefreshCw, Send } from 'lucide-react'
 import { toast } from 'sonner'
 
-import { apiGet, apiJson, errMsg } from '@/api'
+import { apiGet, apiJson, errMsg, userToken, type ApiRequestInit, type CurrentUser } from '@/api'
 import type { ThreadDetail, ThreadSummary } from '@/components/communications/types'
 import { THREAD_KIND_LABELS } from '@/components/communications/types'
 import { ThreadView } from '@/components/communications/thread-view'
@@ -19,6 +19,10 @@ type Box = 'inbox' | 'sent'
 
 export default function Messages() {
   const { user } = useAuth()
+  return <MessagesForIdentity key={user?.id ?? 'guest'} user={user} />
+}
+
+function MessagesForIdentity({ user }: { user: CurrentUser | null }) {
   const navigate = useNavigate()
   const { conversationId = '' } = useParams()
   const [box, setBox] = useState<Box>('inbox')
@@ -30,23 +34,48 @@ export default function Messages() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
+  const authToken = useRef(userToken.get()).current
+  const listRequestRef = useRef<{ seq: number; controller: AbortController | null }>({ seq: 0, controller: null })
   const detailRequestRef = useRef<{ seq: number; controller: AbortController | null }>({ seq: 0, controller: null })
+  const sendRequestRef = useRef<{ seq: number; controller: AbortController | null }>({ seq: 0, controller: null })
+
+  const requestOptions = useCallback((signal?: AbortSignal): Omit<ApiRequestInit, 'method' | 'body'> => ({
+    signal,
+    suppressAuth: true,
+    credentials: authToken ? 'omit' : 'include',
+    headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+    cache: 'no-store',
+    referrerPolicy: 'no-referrer',
+  }), [authToken])
 
   const loadThreads = useCallback(async () => {
     if (!user) return
+    listRequestRef.current.controller?.abort()
+    const controller = new AbortController()
+    const seq = listRequestRef.current.seq + 1
+    listRequestRef.current = { seq, controller }
+    const isCurrent = () => (
+      listRequestRef.current.seq === seq &&
+      listRequestRef.current.controller === controller &&
+      !controller.signal.aborted
+    )
     setLoading(true)
     setError('')
     try {
-      const result = await apiGet<{ threads: ThreadSummary[] }>(`/api/communications/${box}?per_page=100`)
+      const result = await apiGet<{ threads: ThreadSummary[] }>(
+        `/api/communications/${box}?per_page=100`,
+        requestOptions(controller.signal),
+      )
+      if (!isCurrent()) return
       setThreads(result.threads || [])
       setSelected((current) => conversationId || (current && result.threads.some((item) => item.public_id === current) ? current : ''))
       if (!result.threads.length && !conversationId) setThread(null)
     } catch (cause) {
-      setError(errMsg(cause, '消息列表加载失败'))
+      if (isCurrent()) setError(errMsg(cause, '消息列表加载失败'))
     } finally {
-      setLoading(false)
+      if (isCurrent()) setLoading(false)
     }
-  }, [box, conversationId, user])
+  }, [box, conversationId, requestOptions, user])
 
   useEffect(() => { void loadThreads() }, [loadThreads])
 
@@ -64,11 +93,19 @@ export default function Messages() {
     setDetailLoading(true)
     setError('')
     try {
-      const result = await apiGet<ThreadDetail>(`/api/communications/threads/${encodeURIComponent(publicId)}`, { signal: controller.signal })
+      const result = await apiGet<ThreadDetail>(
+        `/api/communications/threads/${encodeURIComponent(publicId)}`,
+        requestOptions(controller.signal),
+      )
       if (!isCurrent()) return
       if (result.conversation.public_id !== publicId) throw new Error('会话详情标识不一致')
       if (box === 'inbox') {
-        await apiJson(`/api/communications/threads/${encodeURIComponent(publicId)}/read`, 'POST', {})
+        await apiJson(
+          `/api/communications/threads/${encodeURIComponent(publicId)}/read`,
+          'POST',
+          {},
+          requestOptions(controller.signal),
+        )
         if (!isCurrent()) return
         setThreads((items) => items.map((item) => item.public_id === publicId ? { ...item, unread_count: 0 } : item))
       }
@@ -93,22 +130,45 @@ export default function Messages() {
     }
   }, [conversationId, user])
 
-  useEffect(() => () => detailRequestRef.current.controller?.abort(), [])
+  useEffect(() => () => {
+    listRequestRef.current.controller?.abort()
+    detailRequestRef.current.controller?.abort()
+    sendRequestRef.current.controller?.abort()
+  }, [])
 
   const sendReply = async () => {
     if (!thread || selected !== thread.conversation.public_id || !reply.trim()) return
+    sendRequestRef.current.controller?.abort()
+    const controller = new AbortController()
+    const seq = sendRequestRef.current.seq + 1
+    sendRequestRef.current = { seq, controller }
+    const publicId = thread.conversation.public_id
+    const body = reply.trim()
+    const isCurrent = () => (
+      sendRequestRef.current.seq === seq &&
+      sendRequestRef.current.controller === controller &&
+      !controller.signal.aborted
+    )
     setSending(true)
     setError('')
     try {
-      await apiJson(`/api/communications/threads/${encodeURIComponent(thread.conversation.public_id)}/reply`, 'POST', { body: reply.trim() })
+      await apiJson(
+        `/api/communications/threads/${encodeURIComponent(publicId)}/reply`,
+        'POST',
+        { body },
+        requestOptions(controller.signal),
+      )
+      if (!isCurrent()) return
       setReply('')
-      await openThread(thread.conversation.public_id)
+      await openThread(publicId)
+      if (!isCurrent()) return
       await loadThreads()
+      if (!isCurrent()) return
       toast.success('回复已发送')
     } catch (cause) {
-      setError(errMsg(cause, '回复发送失败'))
+      if (isCurrent()) setError(errMsg(cause, '回复发送失败'))
     } finally {
-      setSending(false)
+      if (isCurrent()) setSending(false)
     }
   }
 
