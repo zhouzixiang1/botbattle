@@ -119,7 +119,7 @@ def test_player_wiki_has_no_repository_or_internal_instructions() -> None:
         assert internal not in text, f"玩家 Wiki 泄漏工程或内部接口内容: {internal}"
 
 
-def test_player_wiki_is_quickstart_first_and_has_no_comparison_prose() -> None:
+def test_player_wiki_is_quickstart_first_and_scopes_compatibility_guidance() -> None:
     index = (ROOT / "wiki/INDEX.md").read_text(encoding="utf-8")
     protocol = (ROOT / "wiki/PROTOCOL.md").read_text(encoding="utf-8")
     bot_dev = (ROOT / "wiki/BOT_DEV.md").read_text(encoding="utf-8")
@@ -152,7 +152,20 @@ def test_player_wiki_is_quickstart_first_and_has_no_comparison_prose() -> None:
     prose_without_required_signal = wiki_text.replace(
         ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<", ""
     )
-    assert "botzone" not in prose_without_required_signal.casefold()
+    # Botzone/SAU 只作为 Pencil 预检故障的精确诊断信号出现，不重新提供
+    # 第二套协议或泛化成平台对比说明。保留这两处用户可操作的兼容性提示，
+    # 同时继续阻止 Wiki 漂回宽泛的 Botzone 比较文案。
+    assert "Botzone JSON 首回合协议" in bot_dev
+    assert "Botzone JSON 首回合通信" in bot_dev
+    assert "旧 SAU 裁判使用的" in bot_dev
+    assert "`name?`、`new`、`move`、`take` 等文本命令不是本平台协议" in bot_dev
+    assert "Traditional/LongRunning 都不能转换协议" in bot_dev
+    prose_without_scoped_diagnostics = prose_without_required_signal
+    for allowed in ("Botzone JSON 首回合协议", "Botzone JSON 首回合通信"):
+        prose_without_scoped_diagnostics = prose_without_scoped_diagnostics.replace(
+            allowed, ""
+        )
+    assert "botzone" not in prose_without_scoped_diagnostics.casefold()
     assert "对比表" not in wiki_text
 
 

@@ -161,9 +161,9 @@ def test_api_replay_count_uses_nested_result_contract():
     assert module.qa_contest_payload("run1")["template_id"] == "holdem_rr"
 
 
-def test_api_no_smtp_registration_rolls_user_back_on_every_retry():
+def test_api_no_smtp_registration_persists_user_and_queues_delivery():
     module = load_script("api_full_test")
-    ok, detail = module.verify_no_smtp_registration_rollback()
+    ok, detail = module.verify_no_smtp_registration_persistence()
     assert ok, detail
 
 
