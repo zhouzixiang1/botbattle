@@ -592,6 +592,8 @@ def test_feedback_frontend_guards_writes_across_identity_changes():
     api_source = (frontend_root / "api.ts").read_text(encoding="utf-8")
 
     assert "<FeedbackForIdentity key={user?.id ?? 'guest'} user={user} />" in source
+    assert source.count("frozenAuthRequestOptions(controller.signal)") >= 2
+    assert "credentials: authToken ? 'omit' : 'include'" in source
     assert "identityEpochRef" in source
     assert "operationControllersRef" in source
     assert "abortIdentityOperations()" in source

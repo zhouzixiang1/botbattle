@@ -75,6 +75,20 @@ async function guestFetch<T>(path: string, token: string, method: 'GET' | 'POST'
   })
 }
 
+function frozenAuthRequestOptions(
+  signal: AbortSignal,
+): Omit<ApiRequestInit, 'method' | 'body'> {
+  const authToken = userToken.get()
+  return {
+    signal,
+    suppressAuth: true,
+    credentials: authToken ? 'omit' : 'include',
+    headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+    cache: 'no-store',
+    referrerPolicy: 'no-referrer',
+  }
+}
+
 export default function Feedback() {
   const { user } = useAuth()
   return <FeedbackForIdentity key={user?.id ?? 'guest'} user={user} />
@@ -155,7 +169,11 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
         headers: { Authorization: `Bearer ${operation.authToken}` },
       }
     }
-    return { signal: operation.controller.signal }
+    return {
+      signal: operation.controller.signal,
+      suppressAuth: true,
+      credentials: 'include',
+    }
   }
 
   const selectedTrack = useMemo(() => tracks.find((item) => item.public_id === selected), [selected, tracks])
@@ -166,6 +184,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
     const controller = new AbortController()
     const seq = listRequestRef.current.seq + 1
     const identity = { ...identityEpochRef.current }
+    const requestOptions = frozenAuthRequestOptions(controller.signal)
     listRequestRef.current = { seq, controller }
     const isCurrent = () => (
       listRequestRef.current.seq === seq &&
@@ -184,7 +203,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
       }
       const result = await apiGet<{ bug_reports: BugSummary[] }>(
         '/api/feedback/bugs?per_page=100',
-        { signal: controller.signal, cache: 'no-store', referrerPolicy: 'no-referrer' },
+        requestOptions,
       )
       if (!isCurrent()) return
       setReports(result.bug_reports || [])
@@ -231,6 +250,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
     const controller = new AbortController()
     const seq = detailRequestRef.current.seq + 1
     const identity = { ...identityEpochRef.current }
+    const requestOptions = frozenAuthRequestOptions(controller.signal)
     detailRequestRef.current = { seq, controller }
     const isCurrent = () => (
       detailRequestRef.current.seq === seq &&
@@ -244,10 +264,16 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
     setError('')
     try {
       if (identity.userId !== null) {
-        const result = await apiGet<{ bug_report: BugDetail }>(`/api/feedback/bugs/${encodeURIComponent(publicId)}`, { signal: controller.signal, cache: 'no-store', referrerPolicy: 'no-referrer' })
+        const result = await apiGet<{ bug_report: BugDetail }>(
+          `/api/feedback/bugs/${encodeURIComponent(publicId)}`,
+          requestOptions,
+        )
         if (!isCurrent()) return
         if (result.bug_report.public_id !== publicId) throw new Error('反馈详情标识不一致')
-        const thread = await apiGet<ThreadDetail>(`/api/communications/threads/${encodeURIComponent(result.bug_report.conversation_public_id)}`, { signal: controller.signal, cache: 'no-store', referrerPolicy: 'no-referrer' })
+        const thread = await apiGet<ThreadDetail>(
+          `/api/communications/threads/${encodeURIComponent(result.bug_report.conversation_public_id)}`,
+          requestOptions,
+        )
         if (!isCurrent()) return
         if (thread.conversation.public_id !== result.bug_report.conversation_public_id) throw new Error('反馈会话标识不一致')
         loadedIdentityEpochRef.current = identity.epoch
