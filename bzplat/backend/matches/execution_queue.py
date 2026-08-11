@@ -305,7 +305,11 @@ class ExecutionDispatcher:
             ):
                 return False
             retry_at = str(control.get("retry_at") or "")
-            if retry_at and retry_at > datetime.now().isoformat(timespec="seconds"):
+            if (
+                not administrator
+                and retry_at
+                and retry_at > datetime.now().isoformat(timespec="seconds")
+            ):
                 return False
             try:
                 # Runtime recovery is deliberately not a live takeover.  Stop
@@ -344,7 +348,6 @@ class ExecutionDispatcher:
         control = self.repo.control()
         if control["dispatcher_state"] != "paused":
             return control["dispatcher_state"] == "running"
-        control["retry_at"] = None
         return await self._resume_paused_if_due(control, administrator=True)
 
     async def _process_cancellations(self) -> None:

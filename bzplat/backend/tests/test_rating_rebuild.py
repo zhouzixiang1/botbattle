@@ -61,17 +61,34 @@ def _mark_projection_verified(store: Store) -> None:
         )
 
 
-def _bot(store: Store, username: str, *, owner_id: int | None = None) -> dict:
+def _bot(
+    store: Store,
+    username: str,
+    *,
+    owner_id: int | None = None,
+    binary_dir: Path | None = None,
+) -> dict:
     if owner_id is None:
         owner = store.create_user(
             username, f"{username}@example.com", hash_password("password1")
         )
         owner_id = int(owner["id"])
-    path = f"/tmp/{username}.elf"
-    bot = store.create_bot(
-        owner_id, f"bot-{username}", binary_path=path, format="elf", game_id="gomoku"
+    path = (
+        binary_dir / f"{username}.elf"
+        if binary_dir is not None
+        else Path(f"/tmp/{username}.elf")
     )
-    store.add_bot_version(bot["id"], binary_path=path)
+    if binary_dir is not None:
+        path.write_bytes(f"fixture-{username}".encode())
+    binary_path = str(path)
+    bot = store.create_bot(
+        owner_id,
+        f"bot-{username}",
+        binary_path=binary_path,
+        format="elf",
+        game_id="gomoku",
+    )
+    store.add_bot_version(bot["id"], binary_path=binary_path)
     store.ensure_rating(bot["id"], game_id="gomoku")
     return bot
 
@@ -875,8 +892,8 @@ def test_apply_rejects_leaderboard_visibility_change_in_plan_digest(
 def test_rebuild_is_no_go_while_execution_attempt_is_active(tmp_path):
     db = (tmp_path / "queued-generation.db").resolve()
     store = Store(str(db))
-    first = _bot(store, "queued-generation-a")
-    second = _bot(store, "queued-generation-b")
+    first = _bot(store, "queued-generation-a", binary_dir=tmp_path)
+    second = _bot(store, "queued-generation-b", binary_dir=tmp_path)
     _mark_projection_verified(store)
     store.executions.resume()
     first_version = store.get_current_bot_version(first["id"])

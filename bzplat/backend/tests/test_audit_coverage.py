@@ -961,14 +961,16 @@ def test_platform_sandbox_fault_aborts_without_technical_loss_or_rating(store: S
     assert store.executions.control()["dispatcher_state"] == "paused"
 
     # Simulate the dispatcher's verified zero-label recovery boundary.  An
-    # event-free manual attempt is deleted and its durable request requeued;
-    # no synthetic public platform_error match survives.
+    # event-free manual runtime failure is deleted, but remains an explicit
+    # owner-retryable interruption; no synthetic public platform_error match
+    # survives and no hidden automatic retry is started on the user's behalf.
     recovered = store.executions.recover_after_namespace_cleanup()
-    assert recovered["requeued"] == 1
+    assert recovered == {"requeued": 0, "interrupted": 1, "settling": 0}
     assert store.get_match(mid) is None
-    retried = store.executions.get(job["public_id"])
-    assert retried and retried["status"] == "queued"
-    assert retried["current_match_id"] is None
+    interrupted = store.executions.get(job["public_id"])
+    assert interrupted and interrupted["status"] == "interrupted"
+    assert interrupted["retryable"] == 1
+    assert interrupted["current_match_id"] is None
 
 
 def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
