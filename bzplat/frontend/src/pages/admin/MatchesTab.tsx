@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { Button, Table, TableHeader, TableBody, TableHead, TableRow, TableCell, Badge, EmptyState, Loading, ErrorMsg, RefreshBtn, StatusBadge, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui'
 import { useConfirm } from '@/hooks/use-confirm'
 import Pagination from '@/components/Pagination'
 import { fmtTime } from '@/lib/format'
 import { findGame, gameLabel, resolveTerminalReason } from '@/games'
+import type { MatchParticipantSource } from '@/lib/match-participants'
 
-interface Match {
+interface Match extends MatchParticipantSource {
   id: string
   bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name?: string
-  bot_b_name?: string
   game_id?: string
   status: string
   match_type: string
@@ -41,14 +41,6 @@ const QUALITY_FILTERS = [
   { value: 'true', label: '含 Bot 技术故障' },
   { value: 'false', label: '不含 Bot 技术故障' },
 ]
-
-const MATCH_TYPE_LABEL: Record<string, string> = {
-  challenge: '挑战',
-  ladder: '天梯',
-  contest: '锦标赛',
-  human: '人机',
-  table: '房间',
-}
 
 function technicalIncidentCount(match: Match): number {
   return Object.values(match.result?.technical_incidents_by_seat || {})
@@ -161,7 +153,7 @@ export default function MatchesTab() {
       <ErrorMsg msg={error} />
 
       <div className="overflow-x-auto rounded-xl border border-border bg-card">
-        <Table className="min-w-[48rem]">
+        <Table className="min-w-[56rem]">
           <TableHeader>
             <TableRow>
               <TableHead className="px-3 py-2.5">对局 ID</TableHead>
@@ -186,16 +178,12 @@ export default function MatchesTab() {
               return (
               <TableRow key={m.id} className={incidentCount > 0 ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
                 <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">{m.id.slice(0, 16)}…</TableCell>
-                <TableCell className="max-w-[16rem] px-3 py-2 text-foreground">
-                  <div className="flex min-w-0 items-center gap-1 truncate">
-                    {m.bot_a_id != null ? <Link to={`/bot/${m.bot_a_id}`} className="min-w-0 truncate text-primary hover:underline">{m.bot_a_name || `#${m.bot_a_id}`}</Link> : <span>已删除 Bot</span>}
-                    <span className="shrink-0 text-muted-foreground">vs</span>
-                    {m.bot_b_id != null ? <Link to={`/bot/${m.bot_b_id}`} className="min-w-0 truncate text-primary hover:underline">{m.bot_b_name || `#${m.bot_b_id}`}</Link> : <span>已删除 Bot</span>}
-                  </div>
+                <TableCell className="max-w-[22rem] px-3 py-2 text-foreground">
+                  <MatchParticipants source={m} />
                 </TableCell>
                 <TableCell className="px-3 py-2 text-xs text-muted-foreground">
                   <div>{gameLabel(m.game_id)}</div>
-                  <div>{MATCH_TYPE_LABEL[m.match_type] || m.match_type}</div>
+                  <MatchNatureBadge matchType={m.match_type} source={m} className="mt-1" />
                 </TableCell>
                 <TableCell className="px-3 py-2">
                   <StatusBadge status={m.status} />

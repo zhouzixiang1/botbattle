@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { PlayCircle, ArrowRight, Clock, Swords, UserRound, Activity } from 'lucide-react'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
 import MatchBoard from '@/components/MatchBoard'
+import { MatchNatureBadge } from '@/components/MatchParticipants'
 import { Button } from '@/components/ui/button'
 import { OverflowText } from '@/components/ui/overflow-text'
 import { ErrorMsg, Loading } from '@/components/ui/status'
@@ -351,6 +352,7 @@ export default function HumanPlay() {
 
       <StickyToolbar label="人类对战状态" className="justify-between">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+          {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
           {over ? (
             <span className="min-w-0 break-words font-medium text-foreground">
               对局结束 · 胜者：{winnerLabel}

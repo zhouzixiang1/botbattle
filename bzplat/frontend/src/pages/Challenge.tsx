@@ -468,8 +468,8 @@ export default function Challenge() {
               <BotIcon className="size-4 shrink-0 text-primary" />
               <strong className="max-w-full break-words [overflow-wrap:anywhere]">{seat.bot.display_name || seat.bot.name}</strong>
               <span className="max-w-full break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                {seat.bot.owner_display || seat.bot.owner_name || `#${seat.bot.owner_id}`}
-                {seat.bot.owner_id === user?.id ? '（我的）' : ''}
+                {seat.bot.owner_display || seat.bot.owner_name || '所属用户不可用'}
+                {seat.bot.owner_id != null && seat.bot.owner_id === user?.id ? '（我的）' : ''}
               </span>
             </span>
           ) : (
@@ -667,8 +667,8 @@ export default function Challenge() {
                             <BotIcon className="size-4 shrink-0 text-primary" />
                             <strong className="max-w-full break-words [overflow-wrap:anywhere]">{seats[1].bot.display_name || seats[1].bot.name}</strong>
                             <span className="max-w-full break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                              {seats[1].bot.owner_display || seats[1].bot.owner_name || `#${seats[1].bot.owner_id}`}
-                              {seats[1].bot.owner_id === user?.id ? '（我的）' : ''}
+                              {seats[1].bot.owner_display || seats[1].bot.owner_name || '所属用户不可用'}
+                              {seats[1].bot.owner_id != null && seats[1].bot.owner_id === user?.id ? '（我的）' : ''}
                             </span>
                           </span>
                         ) : (

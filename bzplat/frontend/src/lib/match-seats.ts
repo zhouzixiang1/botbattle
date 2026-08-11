@@ -1,7 +1,12 @@
 /** 对局座位身份：REST/SSE/WS snapshot → SeatInfo[]，供 MatchViewer / HumanPlay / canvas 共用。 */
 import type { SeatInfo } from '@/games/canvas-types'
+import {
+  participantHeaderLabel,
+  resolveMatchParticipant,
+  type MatchParticipantSource,
+} from '@/lib/match-participants'
 
-export interface MatchSeatRow {
+export interface MatchSeatRow extends MatchParticipantSource {
   id?: string
   match_type?: string
   human_seat?: number | null
@@ -16,8 +21,6 @@ export interface MatchSeatRow {
   rating_settled?: boolean
   /** 1 表示 Bot 故障被判负；平台故障的 aborted 对局不设置。 */
   technical_loss?: number
-  bot_a_id?: number
-  bot_b_id?: number
   /** 对局结果唯一公共契约。 */
   result?: {
     rounds_played?: number
@@ -35,77 +38,25 @@ export interface MatchSeatRow {
       leg?: number | null
     }>
   }
-  bot_a?: {
-    id?: number | null
-    name?: string
-    display_name?: string
-    owner_name?: string
-    owner_display?: string
-    is_human?: boolean
-  }
-  bot_b?: {
-    id?: number | null
-    name?: string
-    display_name?: string
-    owner_name?: string
-    owner_display?: string
-    is_human?: boolean
-  }
-  bot_a_name?: string
-  bot_a_display?: string
-  bot_b_name?: string
-  bot_b_display?: string
-  bot_a_owner_name?: string
-  bot_a_owner_display?: string
-  bot_b_owner_name?: string
-  bot_b_owner_display?: string
-}
-
-export function botLabel(
-  nested?: { name?: string; display_name?: string },
-  flatDisplay?: string,
-  flatName?: string,
-): string {
-  return (nested?.display_name || nested?.name || flatDisplay || flatName || '').trim()
 }
 
 export function seatInfos(m: MatchSeatRow | null | undefined): SeatInfo[] | undefined {
   if (!m) return undefined
-  const a = m.bot_a
-  const b = m.bot_b
-  return [
-    {
-      botName: botLabel(a, m.bot_a_display, m.bot_a_name) || undefined,
-      ownerName: a?.owner_name ?? m.bot_a_owner_name,
-      isHuman: a?.is_human ?? (m.match_type === 'human' && m.human_seat === 0),
-    },
-    {
-      botName: botLabel(b, m.bot_b_display, m.bot_b_name) || undefined,
-      ownerName: b?.owner_name ?? m.bot_b_owner_name,
-      isHuman: b?.is_human ?? (m.match_type === 'human' && m.human_seat === 1),
-    },
-  ]
+  return ([0, 1] as const).map((side) => {
+    const participant = resolveMatchParticipant(m, side)
+    const hasPublicBotLabel = participant.botLabel !== 'Bot 名称不可用'
+      && participant.botLabel !== 'Bot 已删除'
+    return {
+      botName: !participant.isHuman && hasPublicBotLabel ? participant.botLabel : undefined,
+      ownerName: participant.ownerName || undefined,
+      isHuman: participant.isHuman,
+    }
+  })
 }
 
 /** 顶栏对阵文案：BOT 名（@用户）或人类 */
 export function seatHeaderLabel(m: MatchSeatRow, side: 0 | 1): string {
-  const nested = side === 0 ? m.bot_a : m.bot_b
-  const bot = botLabel(
-    nested,
-    side === 0 ? m.bot_a_display : m.bot_b_display,
-    side === 0 ? m.bot_a_name : m.bot_b_name,
-  )
-  const owner =
-    nested?.owner_name ?? (side === 0 ? m.bot_a_owner_name : m.bot_b_owner_name)
-  const isHuman =
-    nested?.is_human ?? (m.match_type === 'human' && m.human_seat === side)
-  if (isHuman) return owner ? `${owner}（人类）` : '人类'
-  if (bot && owner) return `${bot} @${owner}`
-  if (bot) return bot
-  if (owner) return `@${owner}`
-  const id = side === 0 ? m.bot_a_id : m.bot_b_id
-  // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
-  return id != null ? `Bot #${id}` : `座位 ${side + 1}`
+  return participantHeaderLabel(resolveMatchParticipant(m, side))
 }
 
 /** 胜者文案：优先名字，回退座位号 / 平局 / 进行中 */

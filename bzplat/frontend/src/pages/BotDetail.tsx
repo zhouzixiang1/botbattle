@@ -3,6 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -24,7 +25,8 @@ import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { toast } from 'sonner'
 import { useAuth } from '@/components/useAuth'
-import { gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
+import { gameLabel, gameIcon } from '@/lib/games'
+import { isBotSelfPlay, resolveMatchParticipant, type MatchParticipantSource } from '@/lib/match-participants'
 import { fmtTime, fmtRating, fmtDate } from '@/lib/format'
 import { CopyIdentifier, SummaryMetric } from '@/pages/public-page-ui'
 
@@ -63,7 +65,7 @@ interface BotProfile {
   technical_failures: number
 }
 
-interface MatchRow {
+interface MatchRow extends MatchParticipantSource {
   id: string
   game_id: string
   status: string
@@ -71,10 +73,6 @@ interface MatchRow {
   match_type: string
   bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name: string
-  bot_b_name: string
-  bot_a_display?: string
-  bot_b_display?: string
   result?: { rounds_played?: number; deltas?: number[]; normalized_delta?: number }
   created_at?: string
 }
@@ -112,11 +110,20 @@ function fmtSigned(value: number | null | undefined): string {
   return `${value > 0 ? '+' : ''}${value.toFixed(1)}`
 }
 
-function matchOutcome(m: MatchRow, botId: number): 'win' | 'loss' | 'draw' | '' {
+function matchOutcome(m: MatchRow, botId: number): 'win' | 'loss' | 'draw' | 'selfplay' | '' {
   if (m.status !== 'completed') return ''
+  if (isBotSelfPlay(m)) return 'selfplay'
   if (m.winner === null) return 'draw'
-  const isA = m.bot_a_id === botId
-  const won = (isA && m.winner === 0) || (!isA && m.winner === 1)
+  const seatA = resolveMatchParticipant(m, 0)
+  const seatB = resolveMatchParticipant(m, 1)
+  // human 对局物理上会在两侧保存同一 Bot id；实际 Bot 座由 is_human 决定。
+  const botSeat = !seatA.isHuman && seatA.botId === botId
+    ? 0
+    : !seatB.isHuman && seatB.botId === botId
+      ? 1
+      : null
+  if (botSeat == null) return ''
+  const won = m.winner === botSeat
   return won ? 'win' : 'loss'
 }
 
@@ -361,13 +368,13 @@ export default function BotDetail() {
               <Loading text="正在加载对局…" />
             ) : (
               <DataTable className="rounded-none border-0" scrollLabel="Bot 对局历史">
-                <Table aria-label="Bot 对局历史" className="min-w-[38rem]">
+                <Table aria-label="Bot 对局历史" className="min-w-[46rem]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
-                  <TableHead className="min-w-[6rem]">对手</TableHead>
+                  <TableHead className="min-w-[18rem]">对阵与所属用户</TableHead>
                   <TableHead>结果</TableHead>
-                  <TableHead className="hidden sm:table-cell">类型</TableHead>
+                  <TableHead>性质</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -376,42 +383,31 @@ export default function BotDetail() {
                   <TableRow><TableCell colSpan={5}><EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" /></TableCell></TableRow>
                 ) : (
                   matches.map((m) => {
-                    const isA = m.bot_a_id === botId
-                    const oppName = isA ? m.bot_b_display || m.bot_b_name : m.bot_a_display || m.bot_a_name
-                    const oppId = isA ? m.bot_b_id : m.bot_a_id
                     const outcome = matchOutcome(m, botId)
+                    const participantStates = m.status === 'completed' && m.winner === 0
+                      ? (['winner', 'loser'] as const)
+                      : m.status === 'completed' && m.winner === 1
+                        ? (['loser', 'winner'] as const)
+                        : (['neutral', 'neutral'] as const)
                     return (
                       <TableRow key={m.id}>
                         <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                           {fmtTime(m.created_at)}
                         </TableCell>
-                        <TableCell className="max-w-[12rem] whitespace-normal">
-                          {oppId != null ? (
-                            <Link to={`/bot/${oppId}`} className="block min-w-0 hover:text-primary">
-                              <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{oppName || '未命名 Bot'}</EntityName>
-                            </Link>
-                          ) : (
-                            <span className="text-muted-foreground">已删除 Bot</span>
-                          )}
+                        <TableCell className="max-w-[22rem] whitespace-normal">
+                          <MatchParticipants source={m} states={participantStates} />
                         </TableCell>
                         <TableCell>
                           {m.status === 'completed' ? (
                             <Badge variant={outcome === 'win' ? 'default' : outcome === 'loss' ? 'destructive' : 'secondary'}>
-                              {outcome === 'win' ? '胜' : outcome === 'loss' ? '负' : '平'}
+                              {outcome === 'win' ? '胜' : outcome === 'loss' ? '负' : outcome === 'selfplay' ? '自博弈' : '平'}
                             </Badge>
                           ) : (
                             <StatusBadge status={m.status} />
                           )}
                         </TableCell>
-                        <TableCell className="hidden text-xs text-muted-foreground sm:table-cell">
-                          {(() => {
-                            const tb = matchTypeBadge(m.match_type)
-                            return tb ? (
-                              <Badge variant="outline" className={`text-[10px] ${tb.cls}`}>{tb.label}</Badge>
-                            ) : (
-                              m.match_type || '—'
-                            )
-                          })()}
+                        <TableCell className="text-xs text-muted-foreground">
+                          <MatchNatureBadge matchType={m.match_type} source={m} />
                         </TableCell>
                         <TableCell className="text-right">
                           <Link to={`/match/${encodeURIComponent(m.id)}`} className="text-xs font-medium text-primary hover:underline">回放</Link>

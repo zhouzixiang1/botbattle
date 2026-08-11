@@ -9,11 +9,12 @@
  * - 合并旧 MatchDetail（回放）逻辑；ArenaWatch 已删除，/watch 旧路径不再重定向。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
+import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
 import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -22,7 +23,7 @@ import { Slider } from '@/components/ui/slider'
 import { ErrorMsg, Loading, EmptyState } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiGet, apiPost, errMsg } from '@/api'
-import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/games'
+import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { findGame, resolveTerminalReason, unsupportedGameLabel } from '@/games'
@@ -438,7 +439,6 @@ export default function MatchViewer() {
   const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
   const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
   const compactViewportDashboard = viewportDashboard && timelineCollapsed
-  const typeBadge = matchTypeBadge(match?.match_type)
   const ratingStateBadge = match ? ratingBadge(match) : null
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(match?.reason, match?.status)
@@ -566,28 +566,16 @@ export default function MatchViewer() {
       : null
   const renderSeat = (seat: 0 | 1) => {
     if (!match) return null
-    const info = seats?.[seat]
-    const botId = seat === 0 ? match.bot_a_id : match.bot_b_id
-    const name = info?.botName || seatHeaderLabel(match, seat)
     const isWinner = winnerSeat === seat
     return (
-      <div className={`min-w-0 rounded-lg border px-3 py-2 ${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}>
-        <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-          <span>座位 {seat + 1}</span>
-          {gameSpec?.seatColors?.[seat] && <span>· {gameSpec.seatColors[seat]}</span>}
-          {isWinner && <Badge className="ml-auto">胜</Badge>}
-        </div>
-        {botId != null && !info?.isHuman ? (
-          <Link to={`/bot/${botId}`} className="block break-words font-semibold text-foreground [overflow-wrap:anywhere] hover:text-primary">
-            {name}
-          </Link>
-        ) : (
-          <div className="break-words font-semibold text-foreground [overflow-wrap:anywhere]">{name}</div>
-        )}
-        {info?.ownerName && !info.isHuman && (
-          <div className="mt-0.5 break-all text-xs text-muted-foreground">@{info.ownerName}</div>
-        )}
-      </div>
+      <MatchParticipantIdentity
+        source={match}
+        side={seat}
+        variant="panel"
+        state={isWinner ? 'winner' : winnerSeat != null ? 'loser' : 'neutral'}
+        seatDetail={gameSpec?.seatColors?.[seat]}
+        className={`${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} border ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}
+      />
     )
   }
 
@@ -598,9 +586,7 @@ export default function MatchViewer() {
         {match && (
           <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
         )}
-        {typeBadge && (
-          <Badge variant="outline" className={`text-[10px] ${typeBadge.cls}`}>{typeBadge.label}</Badge>
-        )}
+        {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
         {ratingStateBadge && (
           <Badge
             data-testid="rating-state"

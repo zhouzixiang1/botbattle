@@ -514,8 +514,8 @@ def test_store_permissions_contest_delay_human_and_deletion(tmp_path):
         "human", user_id=admin["id"], is_admin=True,
     )["allowed"]
 
-    # 用户删除经 users→bots 级联后，对局和私有 session 保留，
-    # 但快照 bot_id 必须 SET NULL，不得留孤儿。
+    # 管理端安全删除必须保留历史身份；底层 delete_user 仍单独验证 FK 清理，
+    # 但不属于公开/管理端允许调用的业务路径。
     owner_c = _make_user(store, "debug_c")
     bot_c = _make_bot(store, owner_c["id"], "c")
     _terminal_match(store, "user-delete", bot_c["id"], bot_c["id"])
@@ -523,7 +523,10 @@ def test_store_permissions_contest_delay_human_and_deletion(tmp_path):
         "user-delete", [_entry({"owner": "deleted"}, seat=0)]
     )
     deletion = store.delete_user_if_safe(owner_c["id"])
-    assert deletion["deleted"] is True
+    assert deletion["deleted"] is False
+    assert deletion["blockers"]["matches"] == 1
+    assert store.get_user(owner_c["id"]) is not None
+    assert store.delete_user(owner_c["id"])
     assert store._conn.execute(
         "SELECT bot_id FROM match_debug_entries "
         "WHERE match_id='user-delete' AND seat=0"

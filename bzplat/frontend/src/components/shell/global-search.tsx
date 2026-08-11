@@ -9,8 +9,10 @@ import {
   CommandItem,
   CommandList,
 } from '@/components/ui/command'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { apiGet } from '@/api'
 import { gameLabel } from '@/games'
+import { matchParticipantSearchText, type MatchParticipantSource } from '@/lib/match-participants'
 
 interface SearchUser {
   id: number
@@ -23,14 +25,11 @@ interface SearchBot {
   game_id: string
   owner_name?: string
 }
-interface SearchMatch {
+interface SearchMatch extends MatchParticipantSource {
   id: string
   game_id: string
+  match_type?: string
   winner_bot_id?: number
-  bot_a_name?: string
-  bot_b_name?: string
-  bot_a_display?: string
-  bot_b_display?: string
 }
 
 /**
@@ -187,12 +186,18 @@ export function GlobalSearch({
               {matches.slice(0, 6).map((m) => (
                 <CommandItem
                   key={`m${m.id}`}
-                  value={`match ${m.id} ${m.bot_a_name ?? ''} ${m.bot_b_name ?? ''} ${m.bot_a_display ?? ''} ${m.bot_b_display ?? ''}`}
+                  value={`match ${m.id} ${matchParticipantSearchText(m)}`}
                   onSelect={() => go(`/match/${m.id}`)}
+                  className="items-start"
                 >
-                  <Swords aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate font-mono text-xs">{m.id.slice(0, 8)}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">{gameLabel(m.game_id)}</span>
+                  <Swords aria-hidden="true" className="mt-1 size-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <MatchParticipants source={m} links={false} className="gap-1" />
+                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                      <span>{gameLabel(m.game_id)}</span>
+                      <MatchNatureBadge matchType={m.match_type} source={m} />
+                    </div>
+                  </div>
                 </CommandItem>
               ))}
             </CommandGroup>

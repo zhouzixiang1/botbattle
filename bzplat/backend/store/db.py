@@ -141,6 +141,22 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return dict(row) if row is not None else None
 
 
+# 旧 contest pairing / stage snapshot 可能先于 entry 身份列存在。只在同一赛事中
+# 一个 bot_id 唯一对应一个报名项时，读边界才可恢复 entry_id；0/多条保持未知。
+_UNIQUE_CONTEST_ENTRY_SQL = (
+    "(SELECT contest_id,bot_id,MIN(id) AS entry_id FROM contest_entries "
+    "WHERE bot_id IS NOT NULL GROUP BY contest_id,bot_id HAVING COUNT(*)=1)"
+)
+
+
+def _apply_effective_entry_ids(row: dict, *fields: tuple[str, str]) -> dict:
+    for public_field, projection_field in fields:
+        if row.get(public_field) is None:
+            row[public_field] = row.get(projection_field)
+        row.pop(projection_field, None)
+    return row
+
+
 def _delete_comment_likes_for(
     conn: sqlite3.Connection,
     where_sql: str,
@@ -3215,25 +3231,38 @@ class Store:
         limit: int = 20,
         game_id: str | None = None,
     ) -> list[dict]:
-        """按对局 ID 或 bot 名模糊搜索已完成对局。"""
+        """按对局、Bot 或公开参与者姓名搜索已完成对局。"""
         ql = f"%{q.lower()}%" if q else "%"
         with self._tx() as c:
             sel = (
                 "m.id, m.game_id, m.status, m.winner, m.reason, "
-                "m.match_type, m.created_at, "
+                "m.match_type, m.contest_id, m.created_at, "
+                "m.bot_a_id, m.bot_b_id, m.human_user_id, m.human_seat, "
                 "ba.name AS bot_a_name, bb.name AS bot_b_name, "
-                "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display"
+                "ba.display_name AS bot_a_display, bb.display_name AS bot_b_display, "
+                "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
+                "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
+                "hu.username AS human_user_name, hu.display_name AS human_user_display"
             )
             join_bots = (
                 "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
-                "LEFT JOIN bots bb ON m.bot_b_id=bb.id"
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id "
+                "LEFT JOIN users ua ON ba.owner_id=ua.id "
+                "LEFT JOIN users ub ON bb.owner_id=ub.id "
+                "LEFT JOIN users hu ON m.human_user_id=hu.id"
             )
-            where_sql = (
-                " WHERE m.status='completed' "
-                "AND (LOWER(m.id) LIKE ? OR LOWER(ba.name) LIKE ? OR LOWER(bb.name) LIKE ? "
-                "OR LOWER(ba.display_name) LIKE ? OR LOWER(bb.display_name) LIKE ?)"
+            searchable = (
+                "m.id",
+                "ba.name", "bb.name",
+                "ba.display_name", "bb.display_name",
+                "ua.username", "ub.username",
+                "ua.display_name", "ub.display_name",
+                "hu.username", "hu.display_name",
             )
-            params: list[Any] = [ql, ql, ql, ql, ql]
+            where_sql = " WHERE m.status='completed' AND (" + " OR ".join(
+                f"LOWER({column}) LIKE ?" for column in searchable
+            ) + ")"
+            params: list[Any] = [ql] * len(searchable)
             if game_id:
                 where_sql += " AND m.game_id=?"
                 params.append(game_id)
@@ -3733,12 +3762,7 @@ class Store:
             return deleted
 
     def delete_bot_if_safe(self, bot_id: int) -> dict:
-        """在一个写事务内检查活跃引用并硬删 Bot，消除 check→delete 竞态。"""
-        active_contest_statuses = (
-            CONTEST_PUBLISHED,
-            CONTEST_RUNNING,
-            CONTEST_REST,
-        )
+        """仅硬删从未参赛的 Bot，避免永久破坏历史参与者身份。"""
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             if not c.execute("SELECT id FROM bots WHERE id=?", (bot_id,)).fetchone():
@@ -3747,21 +3771,10 @@ class Store:
             match_count = 0
             for gid in _all_game_ids():
                 table = _matches_table(gid)
-                rated = _rating_eligible_sql("m")
                 row = c.execute(
-                    f"SELECT COUNT(*) AS n FROM {table} m "
-                    "WHERE (m.bot_a_id=? OR m.bot_b_id=?) AND ("
-                    "m.status IN (?,?) OR (m.status=? AND "
-                    f"({rated}) AND NOT EXISTS ("
-                    "SELECT 1 FROM match_rating_settlements settled "
-                    "WHERE settled.match_id=m.id)))",
-                    (
-                        bot_id,
-                        bot_id,
-                        STATUS_PENDING,
-                        STATUS_RUNNING,
-                        STATUS_COMPLETED,
-                    ),
+                    f"SELECT COUNT(*) AS n FROM {table} "
+                    "WHERE bot_a_id=? OR bot_b_id=?",
+                    (bot_id, bot_id),
                 ).fetchone()
                 match_count += int(row["n"] if row else 0)
             queued_row = c.execute(
@@ -3772,20 +3785,14 @@ class Store:
             ).fetchone()
             match_count += int(queued_row["n"] if queued_row else 0)
 
-            status_marks = ",".join("?" for _ in active_contest_statuses)
             pairing_row = c.execute(
                 "SELECT COUNT(*) AS n FROM contest_pairings pairing "
-                "JOIN contests contest ON contest.id=pairing.contest_id "
-                "WHERE (pairing.bot_a_id=? OR pairing.bot_b_id=?) "
-                f"AND contest.status IN ({status_marks})",
-                (bot_id, bot_id, *active_contest_statuses),
+                "WHERE pairing.bot_a_id=? OR pairing.bot_b_id=?",
+                (bot_id, bot_id),
             ).fetchone()
             entry_row = c.execute(
-                "SELECT COUNT(*) AS n FROM contest_entries entry "
-                "JOIN contests contest ON contest.id=entry.contest_id "
-                "WHERE entry.bot_id=? "
-                f"AND contest.status IN ({status_marks})",
-                (bot_id, *active_contest_statuses),
+                "SELECT COUNT(*) AS n FROM contest_entries WHERE bot_id=?",
+                (bot_id,),
             ).fetchone()
             refs = {
                 "matches": match_count,
@@ -5184,12 +5191,21 @@ class Store:
         with self._tx() as c:
             join_bots = (
                 "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
-                "LEFT JOIN bots bb ON m.bot_b_id=bb.id"
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id "
+                "LEFT JOIN users ua ON ba.owner_id=ua.id "
+                "LEFT JOIN users ub ON bb.owner_id=ub.id "
+                "LEFT JOIN users hu ON m.human_user_id=hu.id"
             )
             sel = (
                 "m.*, ba.name AS bot_a_name, bb.name AS bot_b_name, "
                 "ba.display_name AS bot_a_display, "
                 "bb.display_name AS bot_b_display, "
+                "ua.username AS bot_a_owner_name, "
+                "ua.display_name AS bot_a_owner_display, "
+                "ub.username AS bot_b_owner_name, "
+                "ub.display_name AS bot_b_owner_display, "
+                "hu.username AS human_user_name, "
+                "hu.display_name AS human_user_display, "
                 "(SELECT mr.events_json FROM match_replays mr "
                 "WHERE mr.match_id=m.id) AS _replay_events_json"
             )
@@ -5260,13 +5276,20 @@ class Store:
         with self._tx() as c:
             sel = (
                 "m.id, m.game_id, m.status, m.winner, m.likes_count, "
-                "m.views_count, m.created_at, "
+                "m.views_count, m.created_at, m.match_type, m.contest_id, "
+                "m.bot_a_id, m.bot_b_id, m.human_user_id, m.human_seat, "
                 "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
-                "bb.name AS bot_b_name, bb.display_name AS bot_b_display"
+                "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
+                "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
+                "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
+                "hu.username AS human_user_name, hu.display_name AS human_user_display"
             )
             join = (
                 "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
-                "LEFT JOIN bots bb ON m.bot_b_id=bb.id"
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id "
+                "LEFT JOIN users ua ON ba.owner_id=ua.id "
+                "LEFT JOIN users ub ON bb.owner_id=ub.id "
+                "LEFT JOIN users hu ON m.human_user_id=hu.id"
             )
             where = "WHERE m.status='completed' AND m.likes_count > 0"
             subs = []
@@ -7842,13 +7865,31 @@ class Store:
         self, contest_id: int, *, stage_idx: int | None = None
     ) -> list[dict]:
         with self._tx() as c:
-            sql = "SELECT * FROM contest_pairings WHERE contest_id=?"
+            sql = (
+                "SELECT p.*, legacy_a.entry_id AS _effective_entry_a_id, "
+                "legacy_b.entry_id AS _effective_entry_b_id "
+                "FROM contest_pairings p "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
+                "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
+                "AND p.contest_id=legacy_a.contest_id "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
+                "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
+                "AND p.contest_id=legacy_b.contest_id "
+                "WHERE p.contest_id=?"
+            )
             params: list[Any] = [contest_id]
             if stage_idx is not None:
-                sql += " AND stage_idx=?"
+                sql += " AND p.stage_idx=?"
                 params.append(stage_idx)
-            sql += " ORDER BY stage_idx, round_num, id"
-            return [_row(r) for r in c.execute(sql, params)]
+            sql += " ORDER BY p.stage_idx, p.round_num, p.id"
+            return [
+                _apply_effective_entry_ids(
+                    _row(r),
+                    ("entry_a_id", "_effective_entry_a_id"),
+                    ("entry_b_id", "_effective_entry_b_id"),
+                )
+                for r in c.execute(sql, params)
+            ]
 
     list_contest_pairings = list_pairings
 
@@ -8007,21 +8048,47 @@ class Store:
             gid = _registered_game_id(ct["game_id"] if ct else None)
             tbl = _matches_table(gid)
             rows = c.execute(
-                "SELECT p.*, ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+                "SELECT p.*, "
+                "COALESCE(p.entry_a_id, legacy_a.entry_id) AS _effective_entry_a_id, "
+                "COALESCE(p.entry_b_id, legacy_b.entry_id) AS _effective_entry_b_id, "
+                "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
                 "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
-                "ua.username AS owner_a_name, ub.username AS owner_b_name, "
+                "COALESCE(ua.username,eua.username) AS owner_a_name, "
+                "COALESCE(ua.display_name,eua.display_name) AS owner_a_display, "
+                "COALESCE(ub.username,eub.username) AS owner_b_name, "
+                "COALESCE(ub.display_name,eub.display_name) AS owner_b_display, "
                 "m.winner AS match_winner "
                 "FROM contest_pairings p "
                 "LEFT JOIN bots ba ON p.bot_a_id=ba.id "
                 "LEFT JOIN bots bb ON p.bot_b_id=bb.id "
                 "LEFT JOIN users ua ON ba.owner_id=ua.id "
                 "LEFT JOIN users ub ON bb.owner_id=ub.id "
+                "LEFT JOIN contest_entries ea ON p.entry_a_id=ea.id "
+                "AND ea.contest_id=p.contest_id "
+                "LEFT JOIN contest_entries eb ON p.entry_b_id=eb.id "
+                "AND eb.contest_id=p.contest_id "
+                "LEFT JOIN users eua ON ea.user_id=eua.id "
+                "LEFT JOIN users eub ON eb.user_id=eub.id "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_a "
+                "ON p.entry_a_id IS NULL AND p.bot_a_id=legacy_a.bot_id "
+                "AND p.contest_id=legacy_a.contest_id "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy_b "
+                "ON p.entry_b_id IS NULL AND p.bot_b_id=legacy_b.bot_id "
+                "AND p.contest_id=legacy_b.contest_id "
                 f"LEFT JOIN {tbl} m ON p.match_id=m.id "
                 "WHERE p.contest_id=? "
                 "ORDER BY p.stage_idx, p.round_num, p.id",
                 (contest_id,),
             ).fetchall()
-            return [_row(r) for r in rows]
+            result: list[dict] = []
+            for raw in rows:
+                row = _apply_effective_entry_ids(
+                    _row(raw),
+                    ("entry_a_id", "_effective_entry_a_id"),
+                    ("entry_b_id", "_effective_entry_b_id"),
+                )
+                result.append(row)
+            return result
 
     def contest_entries_named(
         self, contest_id: int, *, page: int | None = None, per_page: int = 50,
@@ -8413,13 +8480,25 @@ class Store:
         self, contest_id: int, *, stage_idx: int | None = None
     ) -> list[dict]:
         with self._tx() as c:
-            sql = "SELECT * FROM contest_stage_results WHERE contest_id=?"
+            sql = (
+                "SELECT result.*, legacy.entry_id AS _effective_entry_id "
+                "FROM contest_stage_results result "
+                f"LEFT JOIN {_UNIQUE_CONTEST_ENTRY_SQL} legacy "
+                "ON result.entry_id IS NULL AND result.bot_id=legacy.bot_id "
+                "AND result.contest_id=legacy.contest_id "
+                "WHERE result.contest_id=?"
+            )
             params: list[Any] = [contest_id]
             if stage_idx is not None:
-                sql += " AND stage_idx=?"
+                sql += " AND result.stage_idx=?"
                 params.append(stage_idx)
-            sql += " ORDER BY stage_idx, points DESC, delta_total DESC"
-            return [_row(r) for r in c.execute(sql, params)]
+            sql += " ORDER BY result.stage_idx, result.points DESC, result.delta_total DESC"
+            return [
+                _apply_effective_entry_ids(
+                    _row(r), ("entry_id", "_effective_entry_id")
+                )
+                for r in c.execute(sql, params)
+            ]
 
     # ── contest_official_results（P2 全员正式名次）─────────────
 
@@ -8815,21 +8894,17 @@ class Store:
     # ── 删除（管理端，schema 均 ON DELETE CASCADE） ─────────
 
     def delete_user_if_safe(self, user_id: int) -> dict:
-        """原子拒绝会破坏活跃对局/赛事的管理员用户硬删。
+        """原子拒绝会破坏历史或活跃参与者身份的管理员用户硬删。
 
         删除用户会经 ``users → bots`` 级联，不能只依赖 Bot 删除端点的保护。
         本方法在 ``BEGIN IMMEDIATE`` 事务内先汇总该用户全部 Bot 的活跃引用及
         其组织的赛事，再决定是否删除；这样另一个连接也不能在检查和 DELETE
-        之间插入新的引用。完成态历史仍按 schema 的 SET NULL/CASCADE 契约保留。
+        之间插入新的引用。已参赛用户应改为停用，不能依赖 SET NULL/CASCADE
+        把历史身份改成不可恢复的“已删除”。
 
         返回 ``found/deleted/bot_ids/blockers``；成功时调用方可用删除前保存的
         ``bot_ids`` 清理对应上传目录。
         """
-        active_contest_statuses = (
-            CONTEST_PUBLISHED,
-            CONTEST_RUNNING,
-            CONTEST_REST,
-        )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             user = c.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
@@ -8852,45 +8927,44 @@ class Store:
                 table = _matches_table(gid)
                 row = c.execute(
                     f"SELECT COUNT(*) AS n FROM {table} "
-                    "WHERE status IN (?,?) AND ("
+                    "WHERE ("
                     "bot_a_id IN (SELECT id FROM bots WHERE owner_id=?) OR "
                     "bot_b_id IN (SELECT id FROM bots WHERE owner_id=?) OR "
                     "owner_id=? OR human_user_id=?)",
-                    (
-                        STATUS_PENDING,
-                        STATUS_RUNNING,
-                        user_id,
-                        user_id,
-                        user_id,
-                        user_id,
-                    ),
+                    (user_id, user_id, user_id, user_id),
                 ).fetchone()
                 match_count += int(row["n"] if row else 0)
 
-            status_marks = ",".join("?" for _ in active_contest_statuses)
             pairing_row = c.execute(
                 "SELECT COUNT(*) AS n FROM contest_pairings cp "
-                "JOIN contests contest ON contest.id=cp.contest_id "
-                f"WHERE contest.status IN ({status_marks}) AND ("
+                "WHERE ("
                 "cp.bot_a_id IN (SELECT id FROM bots WHERE owner_id=?) OR "
                 "cp.bot_b_id IN (SELECT id FROM bots WHERE owner_id=?))",
-                (*active_contest_statuses, user_id, user_id),
+                (user_id, user_id),
             ).fetchone()
             entry_row = c.execute(
                 "SELECT COUNT(*) AS n FROM contest_entries entry "
-                "JOIN contests contest ON contest.id=entry.contest_id "
-                f"WHERE contest.status IN ({status_marks}) AND (entry.user_id=? OR "
-                "entry.bot_id IN (SELECT id FROM bots WHERE owner_id=?))",
-                (*active_contest_statuses, user_id, user_id),
+                "WHERE entry.user_id=? OR "
+                "entry.bot_id IN (SELECT id FROM bots WHERE owner_id=?)",
+                (user_id, user_id),
             ).fetchone()
             organized_row = c.execute(
                 "SELECT COUNT(*) AS n FROM contests WHERE organizer_id=?", (user_id,)
+            ).fetchone()
+            execution_row = c.execute(
+                "SELECT COUNT(*) AS n FROM execution_jobs job "
+                "WHERE job.status IN ('queued','starting','running','settling') "
+                "AND (job.owner_user_id=? OR job.human_user_id=? OR "
+                "job.bot_a_id IN (SELECT id FROM bots WHERE owner_id=?) OR "
+                "job.bot_b_id IN (SELECT id FROM bots WHERE owner_id=?))",
+                (user_id, user_id, user_id, user_id),
             ).fetchone()
             blockers = {
                 "matches": match_count,
                 "contest_pairings": int(pairing_row["n"] if pairing_row else 0),
                 "contest_entries": int(entry_row["n"] if entry_row else 0),
                 "organized_contests": int(organized_row["n"] if organized_row else 0),
+                "active_execution_jobs": int(execution_row["n"] if execution_row else 0),
             }
             if any(blockers.values()):
                 return {

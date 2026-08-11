@@ -54,7 +54,7 @@ interface Entry {
   id: number
   contest_id: number
   user_id: number
-  bot_id: number
+  bot_id: number | null
   username?: string
   bot_name?: string
   registered_at: string
@@ -430,10 +430,14 @@ export default function ContestsTab() {
                                   <TableCell className="px-2 py-1">
                                     {entry.username
                                       ? <Link to={`/user/${encodeURIComponent(entry.username)}`} className="text-primary hover:underline">{entry.username}</Link>
-                                      : `用户 #${entry.user_id}`}
+                                      : '用户信息不可用'}
                                   </TableCell>
                                   <TableCell className="px-2 py-1">
-                                    <Link to={`/bot/${entry.bot_id}`} className="text-primary hover:underline">{entry.bot_name || `Bot #${entry.bot_id}`}</Link>
+                                    {entry.bot_id != null ? (
+                                      <Link to={`/bot/${entry.bot_id}`} className="text-primary hover:underline">{entry.bot_name || 'Bot 名称不可用'}</Link>
+                                    ) : (
+                                      <span>已删除 Bot</span>
+                                    )}
                                   </TableCell>
                                   <TableCell className="px-2 py-1">{fmtTime(entry.registered_at)}</TableCell>
                                   {mutableRoster && (

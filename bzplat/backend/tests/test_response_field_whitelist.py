@@ -98,10 +98,15 @@ def test_matches_list_drops_dead_keeps_critical(tmp_path):
         if not ms:
             return
         m = ms[0]
-        # 裁剪的死字段
-        for dead in ("started_at", "ended_at", "human_user_id", "human_seat",
-                     "likes_count", "views_count", "owner_id"):
-            assert dead not in m, f"matches 列表仍含死字段 {dead}"
+        # 正向白名单：内部 replay 诊断原文与任何新增物理列都不得
+        # 因遗漏黑名单而进入公开列表。
+        allowed = {
+            "id", "game_id", "status", "winner", "reason", "match_type",
+            "contest_id", "created_at", "bot_a_id", "bot_b_id",
+            "technical_loss", "result", "bot_a", "bot_b",
+        }
+        assert set(m) <= allowed, f"matches 列表泄漏非公开字段: {set(m) - allowed}"
         # 守护：4 个会致回归的字段必须在（有消费者）
         for keep in ("winner", "reason", "match_type", "contest_id"):
             assert keep in m, f"matches 列表误删了关键字段 {keep}（会致回归）"
+        assert "bot_a" in m and "bot_b" in m

@@ -885,6 +885,12 @@ test('contest recovery finish trusts terminal matches when pairing status is sta
           id: 1,
           bot_a_id: 1,
           bot_b_id: 2,
+          bot_a_name: 'force_finish_a',
+          bot_b_name: 'force_finish_b',
+          owner_a_name: 'force_owner_a',
+          owner_a_display: '强制结束甲方',
+          owner_b_name: 'force_owner_b',
+          owner_b_display: '强制结束乙方',
           // The pairing projection is stale, while its associated match is
           // already terminal. The finish endpoint is authoritative here.
           status: 'running',
@@ -2349,21 +2355,27 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
         {
           id: 'admin-normal-majority', game_id: 'pencil', status: 'completed',
           reason: 'majority', match_type: 'contest', winner: 0,
-          bot_a_id: 1, bot_b_id: 2, bot_a_name: 'normal_a', bot_b_name: 'normal_b',
+          bot_a_id: 1, bot_b_id: 2,
+          bot_a: { id: 1, name: 'normal_a', owner_name: 'normal_owner_a', owner_display: 'Normal Owner A', is_human: false },
+          bot_b: { id: 2, name: 'normal_b', owner_name: 'normal_owner_b', owner_display: 'Normal Owner B', is_human: false },
           result: { rounds_played: 12, deltas: [1, -1] }, created_at: '2026-08-09T12:00:00Z',
           contest_id: 1,
         },
         {
           id: 'admin-danger-platform', game_id: 'holdem', status: 'aborted',
           reason: 'platform_error', match_type: 'challenge', winner: null,
-          bot_a_id: 3, bot_b_id: 4, bot_a_name: 'fault_a', bot_b_name: 'fault_b',
+          bot_a_id: 3, bot_b_id: 4,
+          bot_a: { id: 3, name: 'fault_a', owner_name: 'fault_owner_a', owner_display: 'Fault Owner A', is_human: false },
+          bot_b: { id: 4, name: 'fault_b', owner_name: 'fault_owner_b', owner_display: 'Fault Owner B', is_human: false },
           result: { rounds_played: 0, deltas: [0, 0] }, created_at: '2026-08-09T12:01:00Z',
           contest_id: null,
         },
         {
           id: 'admin-running-default', game_id: 'gomoku', status: 'running',
           reason: 'completed', match_type: 'challenge', winner: null,
-          bot_a_id: 5, bot_b_id: 6, bot_a_name: 'running_default_a', bot_b_name: 'running_default_b',
+          bot_a_id: 5, bot_b_id: 6,
+          bot_a: { id: 5, name: 'running_default_a', owner_name: 'running_owner_a', owner_display: 'Running Owner A', is_human: false },
+          bot_b: { id: 6, name: 'running_default_b', owner_name: 'running_owner_b', owner_display: 'Running Owner B', is_human: false },
           result: { rounds_played: 4, deltas: [0, 0] }, created_at: '2026-08-09T12:02:00Z',
           contest_id: null,
         },
@@ -2377,6 +2389,9 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
   await expect(page.getByTestId('terminal-reason').filter({ hasText: '平台运行异常' }))
     .toHaveAttribute('data-tone', 'danger')
   const runningRow = page.getByRole('row').filter({ hasText: 'running_default_a' })
+  await expect(runningRow).toContainText('Running Owner A · @running_owner_a')
+  await expect(runningRow).toContainText('Running Owner B · @running_owner_b')
+  await expect(runningRow.locator('[data-match-nature="challenge"]')).toHaveText('用户挑战')
   await expect(runningRow.getByTestId('terminal-reason')).toHaveCount(0)
   await expect(runningRow).not.toContainText('正常结束')
   await monitor.expectClean()
@@ -2418,8 +2433,10 @@ test('Pencil clock initializes the untouched seat and renders a first-event time
             game_id: 'pencil',
             status: 'running',
             match_type: 'challenge',
-            bot_a_name: 'Clock Red',
-            bot_b_name: 'Clock Blue',
+            bot_a_id: 41,
+            bot_b_id: 42,
+            bot_a: { id: 41, name: 'clock_red', display_name: 'Clock Red', owner_name: 'clock_owner_red', owner_display: 'Clock Owner Red', is_human: false },
+            bot_b: { id: 42, name: 'clock_blue', display_name: 'Clock Blue', owner_name: 'clock_owner_blue', owner_display: 'Clock Owner Blue', is_human: false },
           },
           replay: { events_json: '[]' },
         }),

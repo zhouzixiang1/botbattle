@@ -8,6 +8,7 @@
  */
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
 import {
   DataTable,
   Table,
@@ -18,21 +19,18 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
-import { EntityName } from '@/components/ui/overflow-text'
 import { StatusBadge } from '@/components/ui/status'
 import { fmtTime } from '@/lib/format'
+import type { MatchParticipantSource } from '@/lib/match-participants'
 import Pagination from '@/components/Pagination'
 
-export interface SchedulePairing {
+export interface SchedulePairing extends MatchParticipantSource {
   id: number
   round_num?: number
   bracket_slot?: number | null
-  bot_a_id: number
+  bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name?: string
-  bot_a_display?: string
-  bot_b_name?: string
-  bot_b_display?: string
+  is_bye?: boolean
   match_id?: string | null
   status?: string
   match_winner?: number | null
@@ -94,14 +92,14 @@ export default function ScheduleTable({ pairings }: Props) {
             <TableHead className="min-w-[8rem]">座位 1</TableHead>
             <TableHead className="min-w-[8rem]">座位 2</TableHead>
             <TableHead className="w-36">排期时间</TableHead>
-            <TableHead className="w-24">状态</TableHead>
+            <TableHead className="w-28">状态 / 性质</TableHead>
             <TableHead className="w-16 text-right">查看</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {pageRows.map(({ pairing: p, round, isRoundStart }) => {
             const w = p.match_winner
-            const isBye = p.bot_b_id == null
+            const isBye = p.is_bye === true
             // 胜者着色：a 胜 → 座位1 高亮；b 胜 → 座位2 高亮（bye 时 a 自动晋级）
             const aWin = (isBye && p.status === 'completed') || w === 0
             const bWin = !isBye && w === 1
@@ -112,46 +110,28 @@ export default function ScheduleTable({ pairings }: Props) {
                   {isRoundStart ? `R${round}` : ''}
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
-                  <Link
-                    to={`/bot/${p.bot_a_id}`}
-                    className={`block min-w-0 hover:text-primary ${
-                      aWin ? 'font-semibold text-success' : w === 1 ? 'text-muted-foreground' : 'text-foreground'
-                    }`}
-                  >
-                    <EntityName
-                      tooltip={p.bot_a_display || p.bot_a_name || '未命名 Bot'}
-                      tooltipFocusable={false}
-                      className="text-sm"
-                    >
-                      {p.bot_a_display || p.bot_a_name || '未命名 Bot'}
-                    </EntityName>
-                  </Link>
+                  <MatchParticipantIdentity
+                    source={p}
+                    side={0}
+                    state={aWin ? 'winner' : bWin ? 'loser' : 'neutral'}
+                  />
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
-                  {isBye ? (
-                    <span className="block truncate italic text-muted-foreground">轮空 (bye)</span>
-                  ) : (
-                    <Link
-                      to={`/bot/${p.bot_b_id}`}
-                      className={`block min-w-0 hover:text-primary ${
-                        bWin ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'
-                      }`}
-                    >
-                      <EntityName
-                        tooltip={p.bot_b_display || p.bot_b_name || '未命名 Bot'}
-                        tooltipFocusable={false}
-                        className="text-sm"
-                      >
-                        {p.bot_b_display || p.bot_b_name || '未命名 Bot'}
-                      </EntityName>
-                    </Link>
-                  )}
+                  <MatchParticipantIdentity
+                    source={p}
+                    side={1}
+                    state={bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral'}
+                    emptyLabel={isBye ? '轮空 (bye)' : undefined}
+                  />
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                   {p.scheduled_at ? fmtTime(p.scheduled_at) : '—'}
                 </TableCell>
                 <TableCell>
-                  <StatusBadge status={p.status || 'pending'} />
+                  <div className="flex flex-col items-start gap-1">
+                    <StatusBadge status={p.status || 'pending'} />
+                    <MatchNatureBadge matchType="contest" />
+                  </div>
                 </TableCell>
                 <TableCell className="text-right">
                   {p.match_id ? (

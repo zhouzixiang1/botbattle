@@ -83,9 +83,9 @@ export interface ExecutionRequestSnapshot {
 }
 
 const SOURCE_LABEL: Record<ExecutionSource, string> = {
-  manual: '人工挑战',
-  human: '人机对战',
-  contest: '赛事',
+  manual: '用户挑战',
+  human: '真人对战',
+  contest: '锦标赛',
   auto: '自动排位',
 }
 

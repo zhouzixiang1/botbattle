@@ -461,6 +461,10 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
             snap = ws.receive_json()
         assert snap["type"] == "snapshot"
         assert snap["match"]["human_seat"] == 1
+        for internal in (
+            "owner_id", "human_user_id", "match_seed", "_replay_events_json",
+        ):
+            assert internal not in snap["match"]
 
         # 该局刻意只读取快照、不落子；退出 client 前它应仍是编排器拥有的
         # 后台任务，精确覆盖曾导致 pytest 退出挂起的场景。

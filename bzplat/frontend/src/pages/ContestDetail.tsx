@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock } from 'lucide-react'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +29,7 @@ import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { findGame, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
+import type { MatchParticipantSource } from '@/lib/match-participants'
 import { toast } from 'sonner'
 import { SummaryMetric } from '@/pages/public-page-ui'
 
@@ -82,7 +84,7 @@ interface Stage {
 interface Entry {
   id: number
   user_id: number
-  bot_id: number
+  bot_id: number | null
   registered_at?: string
   group_id?: string
   seed?: number
@@ -97,28 +99,23 @@ interface Entry {
   school?: string
   student_id?: string
 }
-interface Pairing {
+interface Pairing extends MatchParticipantSource {
   id: number
   round_num?: number
   bracket_slot?: number | null
-  bot_a_id: number
+  bot_a_id: number | null
   bot_b_id: number | null
+  is_bye?: boolean
   match_id?: string | null
   status?: string
   stage_idx?: number
   stage_key?: string
   group_id?: string
-  bot_a_name?: string
-  bot_a_display?: string
-  bot_b_name?: string
-  bot_b_display?: string
-  owner_a_name?: string
-  owner_b_name?: string
   match_winner?: number | null
   scheduled_at?: string | null
 }
 interface Standing {
-  bot_id: number
+  bot_id: number | null
   points: number
   wins: number
   draws: number
@@ -897,16 +894,20 @@ export default function ContestDetail() {
                     {entries.map((e) => (
                       <li key={e.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2.5">
                         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                          <Link to={`/bot/${e.bot_id}`} className="min-w-0 max-w-full hover:text-primary sm:max-w-xs">
-                            <EntityName
-                              lines={2}
-                              tooltip={e.bot_display || e.bot_name || '未命名 Bot'}
-                              tooltipFocusable={false}
-                              className="text-sm [overflow-wrap:anywhere]"
-                            >
-                              {e.bot_display || e.bot_name || '未命名 Bot'}
-                            </EntityName>
-                          </Link>
+                          {e.bot_id != null ? (
+                            <Link to={`/bot/${e.bot_id}`} className="min-w-0 max-w-full hover:text-primary sm:max-w-xs">
+                              <EntityName
+                                lines={2}
+                                tooltip={e.bot_display || e.bot_name || 'Bot 名称不可用'}
+                                tooltipFocusable={false}
+                                className="text-sm [overflow-wrap:anywhere]"
+                              >
+                                {e.bot_display || e.bot_name || 'Bot 名称不可用'}
+                              </EntityName>
+                            </Link>
+                          ) : (
+                            <span className="text-sm text-muted-foreground">已删除 Bot</span>
+                          )}
                           {e.owner_name && (
                             <Link to={`/user/${encodeURIComponent(e.owner_name)}`} className="min-w-0 max-w-full text-xs text-muted-foreground hover:text-primary sm:max-w-56">
                               <OverflowText lines={2} tooltip={`@${e.owner_display || e.owner_name}`} tooltipFocusable={false} className="[overflow-wrap:anywhere]">
@@ -979,14 +980,18 @@ export default function ContestDetail() {
                       <TableRow><TableCell colSpan={5}><EmptyState text="暂无积分数据" icon={<Trophy className="size-7 opacity-40" />} /></TableCell></TableRow>
                     ) : (
                       standingsPageItems.map((s, i) => (
-                        <TableRow key={s.bot_id}>
+                        <TableRow key={`${s.bot_id ?? 'deleted'}-${standingsPageBase + i}`}>
                           <TableCell className="font-mono text-xs text-muted-foreground">{standingsPageBase + i + 1}</TableCell>
                           <TableCell className="max-w-[10rem]">
-                            <Link to={`/bot/${s.bot_id}`} className="block min-w-0 hover:text-primary">
-                              <EntityName tooltip={s.bot_name || '未命名 Bot'} tooltipFocusable={false}>
-                                {s.bot_name || '未命名 Bot'}
-                              </EntityName>
-                            </Link>
+                            {s.bot_id != null ? (
+                              <Link to={`/bot/${s.bot_id}`} className="block min-w-0 hover:text-primary">
+                                <EntityName tooltip={s.bot_name || 'Bot 名称不可用'} tooltipFocusable={false}>
+                                  {s.bot_name || 'Bot 名称不可用'}
+                                </EntityName>
+                              </Link>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">已删除 Bot</span>
+                            )}
                           </TableCell>
                           <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
                           <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
@@ -1231,31 +1236,27 @@ function PairingFoldedList({ pairings }: { pairings: Pairing[] }) {
               {ps.map((p) => {
                 const w = p.match_winner
                 return (
-                  <div key={p.id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-sm">
-                    <Link to={`/bot/${p.bot_a_id}`} className={`min-w-0 max-w-[min(100%,15rem)] hover:text-primary ${w === 0 ? 'font-semibold text-success' : w === 1 ? 'text-muted-foreground' : 'text-foreground'}`}>
-                      <OverflowText lines={2} tooltip={p.bot_a_display || p.bot_a_name || '未命名 Bot'} tooltipFocusable={false} className="[overflow-wrap:anywhere]">
-                        {p.bot_a_display || p.bot_a_name || '未命名 Bot'}
-                      </OverflowText>
-                    </Link>
-                    <span className="shrink-0 text-muted-foreground">vs</span>
-                    {p.bot_b_id == null ? (
-                      <span className="italic text-muted-foreground">轮空 (bye)</span>
-                    ) : (
-                      <Link to={`/bot/${p.bot_b_id}`} className={`min-w-0 max-w-[min(100%,15rem)] hover:text-primary ${w === 1 ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'}`}>
-                        <OverflowText lines={2} tooltip={p.bot_b_display || p.bot_b_name || '未命名 Bot'} tooltipFocusable={false} className="[overflow-wrap:anywhere]">
-                          {p.bot_b_display || p.bot_b_name || '未命名 Bot'}
-                        </OverflowText>
-                      </Link>
-                    )}
-                    <StatusBadge status={p.status || 'pending'} />
-                    {p.scheduled_at && (
-                      <span className="text-xs text-muted-foreground">{fmtTime(p.scheduled_at)}</span>
-                    )}
-                    {p.match_id && (
-                      <Button asChild variant="ghost" size="xs" className="ml-auto text-primary">
-                        <Link to={`/match/${p.match_id}`}>查看</Link>
-                      </Button>
-                    )}
+                  <div key={p.id} className="grid min-w-0 gap-2 px-3 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                    <MatchParticipants
+                      source={p}
+                      states={[
+                        w === 0 ? 'winner' : w === 1 ? 'loser' : 'neutral',
+                        w === 1 ? 'winner' : w === 0 && p.is_bye !== true ? 'loser' : 'neutral',
+                      ]}
+                      secondEmptyLabel={p.is_bye === true ? '轮空 (bye)' : undefined}
+                    />
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
+                      <MatchNatureBadge matchType="contest" />
+                      <StatusBadge status={p.status || 'pending'} />
+                      {p.scheduled_at && (
+                        <span className="text-xs text-muted-foreground">{fmtTime(p.scheduled_at)}</span>
+                      )}
+                      {p.match_id && (
+                        <Button asChild variant="ghost" size="xs" className="text-primary">
+                          <Link to={`/match/${p.match_id}`}>查看</Link>
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )
               })}

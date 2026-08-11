@@ -15,8 +15,8 @@ import {
 
 import { apiGet, errMsg } from '@/api'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { useAuth } from '@/components/useAuth'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { EntityName } from '@/components/ui/overflow-text'
@@ -32,51 +32,28 @@ import {
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { fmtTime } from '@/lib/format'
-import { GAMES, gameIcon, gameLabel, matchTypeBadge } from '@/lib/games'
+import { GAMES, gameIcon, gameLabel } from '@/lib/games'
+import type { MatchParticipantSource } from '@/lib/match-participants'
 import { SummaryMetric } from '@/pages/public-page-ui'
 
-interface Match {
+interface Match extends MatchParticipantSource {
   id: string
   status: string
   bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name?: string
-  bot_b_name?: string
-  bot_a_display?: string
-  bot_b_display?: string
   created_at?: string
   game_id?: string
   match_type?: string
   contest_id?: string | number | null
 }
 
-interface LikedMatch {
+interface LikedMatch extends MatchParticipantSource {
   id: string
   game_id: string
   likes_count: number
   views_count: number
-  bot_a_name?: string
-  bot_a_display?: string
-  bot_b_name?: string
-  bot_b_display?: string
+  match_type?: string
   created_at?: string
-}
-
-function displayBot(display?: string, name?: string): string {
-  return display || name || '已删除 Bot'
-}
-
-function BotLink({ id, label }: { id: number | null; label: string }) {
-  if (id == null) {
-    return <EntityName lines={2} className="text-sm text-muted-foreground">{label}</EntityName>
-  }
-  return (
-    <Link to={`/bot/${id}`} className="min-w-0 hover:text-primary">
-      <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">
-        {label}
-      </EntityName>
-    </Link>
-  )
 }
 
 const QUICK_LINKS = [
@@ -202,7 +179,6 @@ export default function Home() {
                   </TableHeader>
                   <TableBody>
                     {matches.map((match) => {
-                      const typeBadge = matchTypeBadge(match.match_type)
                       const GameIcon = gameIcon(match.game_id)
                       return (
                         <TableRow key={match.id}>
@@ -211,15 +187,11 @@ export default function Home() {
                             <span className="flex min-w-0 items-center gap-1.5">
                               <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
                               <span>{gameLabel(match.game_id)}</span>
-                              {typeBadge && <Badge variant="outline" className={typeBadge.cls}>{typeBadge.label}</Badge>}
+                              <MatchNatureBadge matchType={match.match_type} source={match} />
                             </span>
                           </TableCell>
                           <TableCell className="whitespace-normal">
-                            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-2">
-                              <BotLink id={match.bot_a_id} label={displayBot(match.bot_a_display, match.bot_a_name)} />
-                              <span className="text-xs text-muted-foreground">vs</span>
-                              <BotLink id={match.bot_b_id} label={displayBot(match.bot_b_display, match.bot_b_name)} />
-                            </div>
+                            <MatchParticipants source={match} />
                           </TableCell>
                           <TableCell><StatusBadge status={match.status} /></TableCell>
                           <TableCell className="text-right">
@@ -238,21 +210,16 @@ export default function Home() {
             </div>
             <ul className="divide-y divide-border md:hidden">
               {matches.map((match) => {
-                const typeBadge = matchTypeBadge(match.match_type)
                 const GameIcon = gameIcon(match.game_id)
                 return (
                   <li key={match.id} className="min-w-0 px-3 py-2.5">
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
                       <span className="text-xs font-medium">{gameLabel(match.game_id)}</span>
-                      {typeBadge && <Badge variant="outline" className={typeBadge.cls}>{typeBadge.label}</Badge>}
+                      <MatchNatureBadge matchType={match.match_type} source={match} />
                       <span className="ml-auto"><StatusBadge status={match.status} /></span>
                     </div>
-                    <div className="mt-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-2">
-                      <BotLink id={match.bot_a_id} label={displayBot(match.bot_a_display, match.bot_a_name)} />
-                      <span className="text-xs text-muted-foreground">vs</span>
-                      <BotLink id={match.bot_b_id} label={displayBot(match.bot_b_display, match.bot_b_name)} />
-                    </div>
+                    <MatchParticipants source={match} className="mt-2" />
                     <div className="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
                       <time className="min-w-0 font-mono tabular-nums">{fmtTime(match.created_at)}</time>
                       <Link className="shrink-0 whitespace-nowrap font-medium text-primary" to={`/match/${encodeURIComponent(match.id)}`}>
@@ -297,16 +264,23 @@ function LikedTopMatches() {
           {matches.map((match, index) => (
             <li key={match.id} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
               <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{index + 1}</span>
-              <Link to={`/match/${encodeURIComponent(match.id)}`} className="min-w-0 hover:text-primary">
-                <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">
-                  {displayBot(match.bot_a_display, match.bot_a_name)} vs {displayBot(match.bot_b_display, match.bot_b_name)}
-                </EntityName>
-                <span className="mt-0.5 block text-xs text-muted-foreground">{gameLabel(match.game_id)} · {fmtTime(match.created_at)}</span>
-              </Link>
-              <span className="flex min-w-0 shrink-0 items-center gap-3 text-xs tabular-nums text-muted-foreground">
-                <span className="inline-flex min-w-0 items-center gap-1"><Heart className="size-3 text-destructive" />{match.likes_count}</span>
-                <span className="inline-flex min-w-0 items-center gap-1"><Eye className="size-3" />{match.views_count}</span>
-              </span>
+              <div className="min-w-0">
+                <MatchParticipants source={match} />
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                  <span>{gameLabel(match.game_id)}</span>
+                  <MatchNatureBadge matchType={match.match_type} source={match} />
+                  <time className="font-mono tabular-nums">{fmtTime(match.created_at)}</time>
+                </div>
+              </div>
+              <div className="flex min-w-0 shrink-0 items-center gap-2">
+                <span className="flex min-w-0 items-center gap-3 text-xs tabular-nums text-muted-foreground">
+                  <span className="inline-flex min-w-0 items-center gap-1"><Heart className="size-3 text-destructive" />{match.likes_count}</span>
+                  <span className="inline-flex min-w-0 items-center gap-1"><Eye className="size-3" />{match.views_count}</span>
+                </span>
+                <Button asChild variant="ghost" size="xs">
+                  <Link to={`/match/${encodeURIComponent(match.id)}`}>回放</Link>
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

@@ -180,8 +180,52 @@ def _with_seat_info(m: dict, store=None) -> dict:
     return result
 
 
-def _public_match_rows(rows: list[dict]) -> list[dict]:
-    return [sanitize_public_match(row) or row for row in rows]
+_PUBLIC_MATCH_LIST_FIELDS = frozenset(
+    {
+        "id",
+        "game_id",
+        "status",
+        "winner",
+        "reason",
+        "match_type",
+        "contest_id",
+        "created_at",
+        "bot_a_id",
+        "bot_b_id",
+        "technical_loss",
+        "result",
+        "bot_a",
+        "bot_b",
+    }
+)
+_PUBLIC_MATCH_ENGAGEMENT_FIELDS = frozenset({"likes_count", "views_count"})
+
+
+def _public_match_list_rows(
+    rows: list[dict], *, keep_engagement: bool = False
+) -> list[dict]:
+    """Project public list rows through the same participant identity contract.
+
+    ``Store.list_matches`` joins the two Bot owners and the optional human
+    player in one bounded query.  This avoids per-row user lookups while making
+    History unambiguous: every seat is either one public user-owned Bot or one
+    public human identity.
+    """
+    from bzplat.backend.matches.seat_info import with_seat_info
+
+    projected: list[dict] = []
+    for row in rows:
+        public = with_seat_info(sanitize_public_match(row) or row) or row
+        # 用正向白名单锁定公开列表契约：Store 为技术故障归一携带的
+        # _replay_events_json，以及未来新增的执行/关联列，都不能因忘记更新黑名单
+        # 而静默泄漏。Bot id 仍是公开详情路由键，但 UI 不得用它当名称兜底。
+        allowed = _PUBLIC_MATCH_LIST_FIELDS
+        if keep_engagement:
+            allowed = allowed | _PUBLIC_MATCH_ENGAGEMENT_FIELDS
+        projected.append(
+            {key: value for key, value in public.items() if key in allowed}
+        )
+    return projected
 
 
 # ── bots ──────────────────────────────────────────────────────
@@ -430,7 +474,7 @@ def global_search(
         }
     if t == "matches":
         return {
-            "matches": _public_match_rows(
+            "matches": _public_match_list_rows(
                 store.search_matches(ql, limit=lim, game_id=game_id)
             )
         }
@@ -513,12 +557,12 @@ def bot_matches(
     if page is not None:
         pp = max(1, min(200, per_page))
         off = (max(1, page) - 1) * pp
-        rows = _public_match_rows(
+        rows = _public_match_list_rows(
             store.list_matches(limit=pp, offset=off, bot_id=bot_id)
         )
         total = store.count_bot_matches(bot_id)
         return {"matches": rows, "page": max(1, page), "per_page": pp, "total": total}
-    rows = _public_match_rows(
+    rows = _public_match_list_rows(
         store.list_matches(
             bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
         )
@@ -1113,7 +1157,7 @@ def list_matches(
     store = _store(request)
     lim = max(1, min(limit, 100))
     off = max(0, offset)
-    rows = _public_match_rows(
+    rows = _public_match_list_rows(
         store.list_matches(
             status=status,
             game_id=game_id,
@@ -1122,14 +1166,8 @@ def list_matches(
             offset=off,
         )
     )
-    # 裁列表响应死字段（对抗审计：started_at/ended_at/human_user_id/human_seat/
-    # likes_count/views_count/owner_id 列表不消费；
-    # 不动 winner/reason/match_type/contest_id——BotDetail/Home/admin 有消费者，删了致回归）。
-    _MATCH_LIST_DEAD = ("started_at", "ended_at", "human_user_id", "human_seat",
-                        "likes_count", "views_count", "owner_id")
-    for m in rows:
-        for k in _MATCH_LIST_DEAD:
-            m.pop(k, None)
+    # 参与者公开身份与列表裁剪均由 _public_match_list_rows 单点负责。
+    # winner/reason/match_type/contest_id 仍是 BotDetail/Home/admin 的现行消费者字段。
     total = store.count_matches(
         status=status,
         game_id=game_id,
@@ -1142,7 +1180,11 @@ def list_matches(
 def liked_top_matches(request: Request, limit: int = 10):
     """对局点赞排行榜（对标 Botzone，首页用）。必须在 {match_id} 路由前注册。"""
     store = _store(request)
-    return {"matches": _public_match_rows(store.list_liked_top_matches(limit))}
+    return {
+        "matches": _public_match_list_rows(
+            store.list_liked_top_matches(limit), keep_engagement=True
+        )
+    }
 
 
 @router.get("/api/matches/{match_id}")
@@ -1694,6 +1736,64 @@ def contest_templates(request: Request, game: str | None = None):
 # API 层另造一套状态字面量；显式 ``?status=draft`` 也不得绕过可见性。
 _CONTEST_HIDDEN_STATUSES = (CONTEST_DRAFT, CONTEST_CANCELLED)
 
+_PUBLIC_PAIRING_INTERNAL_FIELDS = (
+    "contest_id",
+    "entry_a_id",
+    "entry_b_id",
+    "bot_a_version_id",
+    "bot_b_version_id",
+    "pairing_seed",
+    "published_at",
+    "color_first",
+)
+
+_PUBLIC_PAIRING_FIELDS = frozenset(
+    {
+        "id",
+        "round_num",
+        "bot_a_id",
+        "bot_b_id",
+        "scheduled_at",
+        "match_id",
+        "status",
+        "stage_idx",
+        "stage_key",
+        "group_id",
+        "bracket_slot",
+        "bot_a_name",
+        "bot_a_display",
+        "bot_b_name",
+        "bot_b_display",
+        "owner_a_name",
+        "owner_a_display",
+        "owner_b_name",
+        "owner_b_display",
+        "match_winner",
+        "is_bye",
+    }
+)
+
+
+def _public_contest_pairings(rows: list[dict]) -> list[dict]:
+    """Return schedule rows with public Bot/user identity and no execution keys."""
+    projected: list[dict] = []
+    for row in rows:
+        public = dict(row)
+        # bot_b_id 可能因历史硬删除被 SET NULL，legacy pairing 也可能没有 entry id。
+        # 仅四项权威条件同时满足才认作真实轮空；歧义一律 fail closed。
+        public["is_bye"] = bool(
+            row.get("entry_b_id") is None
+            and row.get("bot_b_id") is None
+            and row.get("match_id") is None
+            and row.get("status") == STATUS_COMPLETED
+        )
+        for field in _PUBLIC_PAIRING_INTERNAL_FIELDS:
+            public.pop(field, None)
+        projected.append(
+            {key: value for key, value in public.items() if key in _PUBLIC_PAIRING_FIELDS}
+        )
+    return projected
+
 
 def _can_view_hidden_contest(contest: dict, user: dict | None) -> bool:
     return bool(
@@ -1804,14 +1904,17 @@ def contest_detail(
     else:
         entries = entries_result
         entries_meta = {}
-    pairings = store.contest_bracket(contest_id)
+    # 阶段投影依赖 entry_a_id / entry_b_id 求实际参赛者；响应才裁掉这些
+    # 内部关联键。不能拿 public pairings 反哺内部 presentation，否则阶段榜会变空。
+    raw_pairings = store.contest_bracket(contest_id)
+    pairings = _public_contest_pairings(raw_pairings)
     stage_entries = (
         entries
         if not isinstance(entries_result, dict)
         else store.contest_entries_named(contest_id)
     )
     stage_summaries = build_stage_summaries(
-        _contests(request), c, stage_entries, pairings
+        _contests(request), c, stage_entries, raw_pairings
     )
     standings = _contests(request).standings(contest_id)
     # 给 standings 补 bot 名（standings 只有 bot_id）
@@ -1850,14 +1953,6 @@ def contest_detail(
     for s in standings:
         for k in _STANDINGS_DEAD:
             s.pop(k, None)
-    _PAIRING_DEAD = (
-        "contest_id", "entry_a_id", "entry_b_id", "bot_a_version_id",
-        "bot_b_version_id", "pairing_seed", "published_at", "color_first",
-        "owner_a_name", "owner_b_name",
-    )
-    for p in pairings:
-        for k in _PAIRING_DEAD:
-            p.pop(k, None)
     # 旧库列仅作历史存储；现行 API 不再暴露可覆盖的规则配置。
     c = _contest_for_api(c)
     resp = {
@@ -1887,7 +1982,11 @@ def contest_bracket(
         and not _can_view_hidden_contest(contest, user)
     ):
         raise HTTPException(404, "比赛不存在")
-    return {"pairings": _store(request).contest_bracket(contest_id)}
+    return {
+        "pairings": _public_contest_pairings(
+            _store(request).contest_bracket(contest_id)
+        )
+    }
 
 
 def _require_contest_organizer(c: dict, user: dict) -> None:
@@ -2299,8 +2398,8 @@ def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admi
     if not result["deleted"]:
         raise HTTPException(
             409,
-            "用户存在活跃对局/赛事引用或仍是赛事组织者，不能硬删："
-            f"{result['blockers']}（请先中止对局并删除或转移其赛事）",
+            "用户存在历史或活跃对局/赛事引用，或仍是赛事组织者，不能硬删："
+            f"{result['blockers']}（请改为停用账号；历史参赛身份必须保留）",
         )
     for bot_id in result["bot_ids"]:
         _bots(request).purge_bot_files(bot_id)
@@ -2462,11 +2561,8 @@ def admin_patch_bot(
 @router.delete("/api/admin/bots/{bot_id}")
 def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)):
     store = _store(request)
-    # 业务规则：硬删前检查活跃/待结算引用。bots 表 FK 是 ON DELETE SET NULL（matches 与
-    # contest_pairings/entries 均为 SET NULL，保历史）。硬删正在打(pending/running)对局或
-    # 进行中赛事(published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→
-    # _apply_ratings(None) 崩；②进行中赛事对阵/报名的 bot_id 变 NULL→对阵表残缺。
-    # 此时应改用停用（is_active=0，用户路径）。
+    # 业务规则：仅从未参赛的 Bot 可硬删。SET NULL 虽能保住比赛行，却会永久丢失
+    # “哪个用户的哪个 Bot”这一公开历史身份；已有任何对局或赛事记录时必须改用停用。
     result = store.delete_bot_if_safe(bot_id)
     if not result["found"]:
         raise HTTPException(404, "bot 不存在")
@@ -2474,7 +2570,8 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
     if not result["deleted"]:
         raise HTTPException(
             409,
-            f"bot 存在活跃或待结算引用，不能硬删：{refs}（对局/赛事；请改用停用 is_active=0）",
+            f"bot 存在历史或活跃引用，不能硬删：{refs}"
+            "（对局/赛事；请改用停用 is_active=0，保留公开参赛身份）",
         )
     # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
     _bots(request).purge_bot_files(bot_id)

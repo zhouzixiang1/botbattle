@@ -4,6 +4,7 @@ import { Bot as BotIcon, Search as SearchIcon, Swords, User as UserIcon } from '
 
 import { apiGet, errMsg } from '@/api'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,6 +23,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { fmtRating, fmtTime } from '@/lib/format'
 import { GAMES, gameIcon, gameLabel } from '@/lib/games'
+import type { MatchParticipantSource } from '@/lib/match-participants'
 import { SummaryMetric } from '@/pages/public-page-ui'
 
 type SearchType = 'users' | 'bots' | 'matches'
@@ -42,16 +44,13 @@ interface BotRow {
   rating?: number
 }
 
-interface MatchRow {
+interface MatchRow extends MatchParticipantSource {
   id: string
   game_id: string
   winner: number | null
   bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name: string
-  bot_b_name: string
-  bot_a_display?: string
-  bot_b_display?: string
+  match_type?: string
   created_at?: string
 }
 
@@ -262,7 +261,6 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
     return <EmptyState text="无匹配对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
   }
 
-  const botName = (display?: string, name?: string) => display || name || '已删除 Bot'
   return (
     <>
       <div className="hidden md:block">
@@ -273,7 +271,7 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
                 <TableHead>序号</TableHead>
                 <TableHead>时间</TableHead>
                 <TableHead className="w-full min-w-[16rem]">对阵</TableHead>
-                <TableHead>游戏</TableHead>
+                <TableHead>游戏 / 性质</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -283,13 +281,14 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
                   <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</TableCell>
                   <TableCell className="whitespace-normal">
-                    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-2">
-                      <MatchBotLink id={match.bot_a_id} label={botName(match.bot_a_display, match.bot_a_name)} />
-                      <span className="text-xs text-muted-foreground">vs</span>
-                      <MatchBotLink id={match.bot_b_id} label={botName(match.bot_b_display, match.bot_b_name)} />
+                    <MatchParticipants source={match} />
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex min-w-0 flex-col items-start gap-1">
+                      <span>{gameLabel(match.game_id)}</span>
+                      <MatchNatureBadge matchType={match.match_type} source={match} />
                     </div>
                   </TableCell>
-                  <TableCell>{gameLabel(match.game_id)}</TableCell>
                   <TableCell className="text-right"><Button asChild variant="ghost" size="xs"><Link to={`/match/${encodeURIComponent(match.id)}`}>回放</Link></Button></TableCell>
                 </TableRow>
               ))}
@@ -300,28 +299,16 @@ function MatchResults({ matches }: { matches: MatchRow[] }) {
       <ul className="divide-y divide-border md:hidden">
         {matches.map((match, index) => (
           <li key={match.id} className="min-w-0 px-3 py-2.5">
-            <div className="flex min-w-0 items-center justify-between gap-2 text-xs text-muted-foreground">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span className="font-mono">{index + 1} · {fmtTime(match.created_at)}</span>
-              <Badge variant="secondary">{gameLabel(match.game_id)}</Badge>
+              <Badge variant="secondary" className="ml-auto">{gameLabel(match.game_id)}</Badge>
+              <MatchNatureBadge matchType={match.match_type} source={match} />
             </div>
-            <div className="mt-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-2">
-              <MatchBotLink id={match.bot_a_id} label={botName(match.bot_a_display, match.bot_a_name)} />
-              <span className="text-xs text-muted-foreground">vs</span>
-              <MatchBotLink id={match.bot_b_id} label={botName(match.bot_b_display, match.bot_b_name)} />
-            </div>
+            <MatchParticipants source={match} className="mt-2" />
             <Button asChild variant="link" size="xs" className="mt-1 px-0"><Link to={`/match/${encodeURIComponent(match.id)}`}>打开回放</Link></Button>
           </li>
         ))}
       </ul>
     </>
-  )
-}
-
-function MatchBotLink({ id, label }: { id: number | null; label: string }) {
-  if (id == null) return <EntityName lines={2} className="text-sm text-muted-foreground">{label}</EntityName>
-  return (
-    <Link to={`/bot/${id}`} className="min-w-0 hover:text-primary">
-      <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{label}</EntityName>
-    </Link>
   )
 }

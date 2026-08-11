@@ -13,21 +13,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, ChevronDown } from 'lucide-react'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { OverflowText } from '@/components/ui/overflow-text'
 import { StatusBadge } from '@/components/ui/status'
+import type { MatchParticipantSource } from '@/lib/match-participants'
 
-export interface BracketPairing {
+export interface BracketPairing extends MatchParticipantSource {
   id: number
   round_num?: number
   bracket_slot?: number | null
-  bot_a_id: number
+  bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name?: string
-  bot_a_display?: string
-  bot_b_name?: string
-  bot_b_display?: string
+  is_bye?: boolean
   match_winner?: number | null
   match_id?: string | null
   status?: string
@@ -38,17 +36,6 @@ interface Props {
   pairings: BracketPairing[]
   /** 已完成轮数（用于默认展开到哪轮）；不传则展开全部 */
   completedRounds?: number
-}
-
-function botLabel(p: BracketPairing, side: 0 | 1): string {
-  if (side === 0) return p.bot_a_display || p.bot_a_name || '未命名 Bot'
-  // 轮空（bye placeholder）：bot_b_id 为 null，展示为「轮空」而非 #null
-  if (p.bot_b_id == null) return '轮空'
-  return p.bot_b_display || p.bot_b_name || '未命名 Bot'
-}
-
-function botId(p: BracketPairing, side: 0 | 1): number | null {
-  return side === 0 ? p.bot_a_id : p.bot_b_id
 }
 
 /** 排期时间格式化为紧凑的 MM-DD HH:mm（仅在展示空间有限的对阵卡里用）。 */
@@ -207,7 +194,7 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
             const isCollapsed = collapsed.has(r.round)
             const roundPanelId = `bracket-round-${r.round}`
             return (
-              <div key={r.round} className="relative flex min-w-[180px] flex-col">
+              <div key={r.round} className="relative flex min-w-[220px] flex-col">
                 <Button
                   type="button"
                   variant="ghost"
@@ -225,8 +212,9 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                   <div id={roundPanelId} className="space-y-2">
                     {r.pairings.map((p) => {
                       const w = p.match_winner
-                      // 轮空（bye）：bot_b_id 为 null 且 status=completed，bot_a 自动晋级为胜者
-                      const isBye = p.bot_b_id == null && p.status === 'completed'
+                      // 轮空由后端在裁掉 entry id 前显式派生；bot 被删也会令
+                      // bot_b_id=NULL，不能据此猜成 bye。
+                      const isBye = p.is_bye === true && p.status === 'completed'
                       const aWin = isBye || w === 0
                       const bWin = !isBye && w === 1
                       const scheduled = fmtScheduled(p.scheduled_at)
@@ -241,31 +229,25 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                             w != null ? 'border-primary/30' : 'border-border'
                           }`}
                         >
-                          <SlotRow
-                            label={botLabel(p, 0)}
-                            botId={botId(p, 0)}
-                            win={aWin}
-                            lose={bWin && !isBye ? true : false}
-                          />
-                          <div className="my-0.5 text-center text-[10px] text-muted-foreground">vs</div>
-                          <SlotRow
-                            label={botLabel(p, 1)}
-                            botId={botId(p, 1)}
-                            win={bWin}
-                            lose={aWin && !isBye ? true : false}
-                            bye={p.bot_b_id == null}
+                          <MatchParticipants
+                            source={p}
+                            states={[
+                              aWin ? 'winner' : bWin && !isBye ? 'loser' : 'neutral',
+                              bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral',
+                            ]}
+                            secondEmptyLabel={p.is_bye === true ? '轮空 (bye)' : undefined}
+                            className="gap-1"
                           />
                           {/* 排期时间 + 状态徽章（紧凑展示） */}
-                          {(scheduled || p.status) && (
-                            <div className="mt-1 flex items-center justify-center gap-1.5">
-                              {scheduled && (
-                                <span className="text-[10px] text-muted-foreground">{scheduled}</span>
-                              )}
-                              {p.status && p.status !== 'completed' && (
-                                <StatusBadge status={p.status} />
-                              )}
-                            </div>
-                          )}
+                          <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
+                            <MatchNatureBadge matchType="contest" />
+                            {scheduled && (
+                              <span className="text-[10px] text-muted-foreground">{scheduled}</span>
+                            )}
+                            {p.status && p.status !== 'completed' && (
+                              <StatusBadge status={p.status} />
+                            )}
+                          </div>
                           {p.match_id && p.status === 'completed' && (
                             <Link
                               to={`/match/${p.match_id}`}
@@ -284,40 +266,6 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
           })}
         </div>
       </div>
-    </div>
-  )
-}
-
-function SlotRow({
-  label,
-  botId,
-  win,
-  lose,
-  bye = false,
-}: {
-  label: string
-  botId: number | null
-  win: boolean
-  lose: boolean
-  /** 轮空占位：无对手，渲染为非链接的 muted 文本而非 /bot/null */
-  bye?: boolean
-}) {
-  return (
-    <div
-      className={`flex items-center gap-1 rounded px-1.5 py-0.5 ${
-        win ? 'bg-success/10 font-semibold text-success' : lose ? 'text-muted-foreground line-through' : 'text-foreground'
-      }`}
-    >
-      {bye || botId == null ? (
-        <OverflowText tooltip={label} tooltipFocusable={false} className="min-w-0 flex-1 italic text-muted-foreground">{label}</OverflowText>
-      ) : (
-        <Link to={`/bot/${botId}`} className="min-w-0 flex-1 hover:text-primary">
-          <OverflowText tooltip={label || '未命名 Bot'} tooltipFocusable={false}>
-            {label || '未命名 Bot'}
-          </OverflowText>
-        </Link>
-      )}
-      {win && <span className="text-[10px]">✓</span>}
     </div>
   )
 }
