@@ -194,6 +194,68 @@ def _poll_response(status: int, payload, *, retry_after: str | None = None):
     )
 
 
+def test_api_leaderboard_check_uses_public_numeric_ranking_contract():
+    module = load_script("api_full_test")
+    payload = {
+        "leaderboard": [
+            {
+                "rating": 1510.0,
+                "rated_matches": 10,
+                "ranking_eligible": True,
+                "rank": 1,
+            },
+            {
+                "rating": 1500.0,
+                "rated_matches": 2,
+                "ranking_eligible": False,
+                "rank": None,
+            },
+        ],
+        "ranking_min_matches": 10,
+    }
+    body, rows = module.require_leaderboard_payload(_poll_response(200, payload))
+    assert body is payload
+    assert rows == payload["leaderboard"]
+    assert module.validate_leaderboard_numeric_contract(body, rows)[0] is True
+
+    old_field = {
+        "leaderboard": [
+            {
+                "rating": 1510.0,
+                "matches_played": 10,
+                "ranking_eligible": True,
+                "rank": 1,
+            }
+        ],
+        "ranking_min_matches": 10,
+    }
+    assert module.validate_leaderboard_numeric_contract(
+        old_field, old_field["leaderboard"]
+    )[0] is False
+
+    mismatch = {**payload, "leaderboard": [{**payload["leaderboard"][1], "rank": 2}]}
+    assert module.validate_leaderboard_numeric_contract(
+        mismatch, mismatch["leaderboard"]
+    )[0] is False
+
+    with pytest.raises(QaPollingError, match=r"HTTP 503"):
+        module.require_leaderboard_payload(
+            _poll_response(503, {"detail": "unavailable"})
+        )
+    malformed = SimpleNamespace(
+        status_code=200,
+        headers={},
+        text="not-json",
+        json=lambda: (_ for _ in ()).throw(ValueError("invalid JSON")),
+    )
+    with pytest.raises(QaPollingError, match="不可解析为 JSON"):
+        module.require_leaderboard_payload(malformed)
+    with pytest.raises(QaPollingError, match="leaderboard 必须是对象列表"):
+        module.require_leaderboard_payload(
+            _poll_response(200, {"leaderboard": ["not-an-object"]})
+        )
+
+
 def test_rate_aware_qa_poller_coordinates_and_honors_retry_after():
     clock = _FakePollClock()
     poller = RateAwareJsonPoller(

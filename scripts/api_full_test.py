@@ -304,6 +304,61 @@ def qa_contest_payload(run_id: str) -> dict[str, Any]:
     }
 
 
+def require_leaderboard_payload(
+    response: httpx.Response,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Require the public leaderboard's HTTP/JSON container contract."""
+    status = int(response.status_code)
+    body = response.text[:240]
+    if status != 200:
+        raise QaPollingError(f"排行榜请求失败：HTTP {status} body={body!r}")
+    try:
+        payload: Any = response.json()
+    except (TypeError, ValueError) as exc:
+        raise QaPollingError(
+            f"排行榜响应不可解析为 JSON：HTTP 200 body={body!r}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise QaPollingError(
+            f"排行榜响应必须是 JSON 对象：HTTP 200 body={body!r}"
+        )
+    rows = payload.get("leaderboard")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise QaPollingError(
+            f"排行榜 leaderboard 必须是对象列表：HTTP 200 body={body!r}"
+        )
+    return payload, rows
+
+
+def validate_leaderboard_numeric_contract(
+    payload: dict[str, Any], rows: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """Validate rated sample counts separately from public rank eligibility."""
+    minimum = payload.get("ranking_min_matches")
+    if type(minimum) is not int or minimum < 1:
+        return False, f"ranking_min_matches={minimum!r}"
+    for index, row in enumerate(rows, start=1):
+        rated_matches = row.get("rated_matches")
+        eligible = row.get("ranking_eligible")
+        rank = row.get("rank")
+        expected_eligible = (
+            type(rated_matches) is int
+            and rated_matches >= minimum
+        )
+        if type(rated_matches) is not int or rated_matches < 0:
+            return False, f"row#{index} rated_matches={rated_matches!r}"
+        if type(eligible) is not bool or eligible != expected_eligible:
+            return False, (
+                f"row#{index} rated_matches={rated_matches} "
+                f"ranking_eligible={eligible!r} expected={expected_eligible}"
+            )
+        if eligible and (type(rank) is not int or rank < 1):
+            return False, f"row#{index} eligible rank={rank!r}"
+        if not eligible and rank is not None:
+            return False, f"row#{index} ineligible rank={rank!r}"
+    return True, f"ranking_min_matches={minimum} rows={len(rows)}"
+
+
 # ─────────────────────────────────────────────────────────────
 def test_auth_flow(api: Api) -> dict[str, str]:
     print("\n[1/6] 鉴权流程：无 SMTP queued 持久化 → 隔离播种 → 验证码登录")
@@ -737,15 +792,27 @@ def test_leaderboard_and_contest(
     print("\n[6/6] 排行榜 Glicko + 组织者比赛")
     # 排行榜
     r = api.client.get("/api/leaderboard?game_id=holdem&limit=20")
-    lb = r.json().get("leaderboard", [])
+    try:
+        leaderboard_payload, lb = require_leaderboard_payload(r)
+        check("排行榜返回 HTTP 200 JSON 对象列表", True)
+    except QaPollingError as exc:
+        leaderboard_payload, lb = {}, []
+        check("排行榜返回 HTTP 200 JSON 对象列表", False, str(exc))
     check("排行榜非空", len(lb) > 0, "空")
     if lb:
         row0 = lb[0]
         check("排行榜含 rating 字段", "rating" in row0, str(row0)[:80])
-        check("排行榜含 matches_played", "matches_played" in row0, str(row0)[:80])
-        # 已跑多局，应有 matches_played > 0
-        played = [x for x in lb if x.get("matches_played", 0) > 0]
-        check("存在已参赛 bot", len(played) > 0, "全部 matches_played=0")
+        check("排行榜含 rated_matches 字段", "rated_matches" in row0, str(row0)[:80])
+        numeric_ok, numeric_detail = validate_leaderboard_numeric_contract(
+            leaderboard_payload, lb,
+        )
+        check("计分样本与公开排名资格一致", numeric_ok, numeric_detail)
+        # 已跑多局，应至少有一个完成评分结算的样本；这不等同于达到公开排名门槛。
+        rated = [
+            row for row in lb
+            if type(row.get("rated_matches")) is int and row["rated_matches"] > 0
+        ]
+        check("存在已有计分样本 bot", len(rated) > 0, "全部 rated_matches=0")
 
     # 比赛循环赛
     r = api.authed(
