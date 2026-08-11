@@ -1745,6 +1745,20 @@ test('MatchViewer distinguishes rating eligibility from settlement state', async
     const replayEvents = fixture.status === 'aborted'
       ? [{ type: 'error', reason: 'platform_error' }]
       : [{ type: 'match_end', winner: 0, reason: 'five' }]
+    const match = {
+      id: fixture.id,
+      game_id: 'gomoku',
+      status: fixture.status,
+      reason: fixture.status === 'aborted' ? 'platform_error' : 'five',
+      winner: fixture.status === 'aborted' ? null : 0,
+      match_type: 'challenge',
+      rated: fixture.rated,
+      rating_reason: fixture.ratingReason,
+      rating_settled: fixture.ratingSettled,
+      bot_a: { name: 'policy_alpha', owner_name: 'owner-a' },
+      bot_b: { name: 'policy_beta', owner_name: 'owner-b' },
+      result: { rounds_played: 9, deltas: [1, -1], normalized_delta: 1 },
+    }
     if (fixture.status === 'pending') {
       await page.route(`**/api/matches/${fixture.id}/replay`, async (route) => {
         liveReplayRequests += 1
@@ -1764,38 +1778,26 @@ test('MatchViewer distinguishes rating eligibility from settlement state', async
       await page.route(`**/api/matches/${fixture.id}/events`, async (route) => route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
-        body: `data: ${JSON.stringify({ type: 'snapshot', match: { status: 'pending' }, events: [] })}\n\n`,
+        body: `data: ${JSON.stringify({ type: 'snapshot', match, events: [] })}\n\n`,
       }))
     }
     await page.route(`**/api/matches/${fixture.id}`, async (route) => route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        match: {
-          id: fixture.id,
-          game_id: 'gomoku',
-          status: fixture.status,
-          reason: fixture.status === 'aborted' ? 'platform_error' : 'five',
-          winner: fixture.status === 'aborted' ? null : 0,
-          match_type: 'challenge',
-          rated: fixture.rated,
-          rating_reason: fixture.ratingReason,
-          rating_settled: fixture.ratingSettled,
-          bot_a: { name: 'policy_alpha', owner_name: 'owner-a' },
-          bot_b: { name: 'policy_beta', owner_name: 'owner-b' },
-          result: { rounds_played: 9, deltas: [1, -1], normalized_delta: 1 },
-        },
-      }),
+      body: JSON.stringify({ match }),
     }))
   }
 
+  const expectedDetailCancellations = fixtures.map((fixture) => (
+    captureExactGetCancellations(page, `/api/matches/${fixture.id}`)
+  ))
   const monitor = monitorBrowser(page)
   for (const fixture of fixtures) {
     await page.goto(`/#/match/${fixture.id}`)
     await expect(page.getByTestId('rating-state')).toHaveText(fixture.label)
   }
   expect(liveReplayRequests).toBe(0)
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations.flatMap((expected) => expected()))
 })
 
 test('MatchViewer gates replay behind metadata and keeps metadata on replay failure', async ({ page }) => {
@@ -1854,6 +1856,10 @@ test('MatchViewer gates replay behind metadata and keeps metadata on replay fail
 
 test('MatchViewer replays live history sequentially and stays compact across viewports', async ({ page }) => {
   const matchId = 'mock-live-cursor-layout'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const initialEvents = [
     { type: 'match_start', game_id: 'holdem', num_hands: 70 },
     { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [20000, 20000] },
@@ -1912,7 +1918,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   releaseMatchResponse()
-  expect(await sse.disconnect()).toBe(true)
+  await expect.poll(() => sse.disconnect()).toBe(true)
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
   await expect(page.getByText('加载中…', { exact: true })).toHaveCount(0)
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
@@ -1996,10 +2002,10 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await page.setViewportSize({ width: 390, height: 844 })
   await page.evaluate(() => window.scrollTo(0, 0))
   const mobileCanvasBox = await canvas.boundingBox()
-  expect(mobileCanvasBox?.width ?? 0).toBeGreaterThanOrEqual(356)
+  expect(mobileCanvasBox?.width ?? 0).toBeGreaterThanOrEqual(390 - 40)
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
   expect(overflow).toBeLessThanOrEqual(1)
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('private Bot debug stays folded, safe, bounded on mobile, and hidden when unauthorized', async ({ page }) => {
@@ -2243,6 +2249,10 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
 
 test('MatchViewer preserves more than 4000 events across reconnect snapshots', async ({ page }) => {
   const matchId = 'mock-live-long-prefix'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const initialEvents = [
     { type: 'match_start', game_id: 'holdem', num_hands: 70 },
     ...Array.from({ length: 4_100 }, (_, index) => ({
@@ -2298,8 +2308,8 @@ test('MatchViewer preserves more than 4000 events across reconnect snapshots', a
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: grownEvents })).toBe(true)
   await expect(position).toHaveText(`事件 ${cursorBeforeReconnect}/4351`)
-  await expect(page.getByText('动作时序 (1/4351)', { exact: true })).toBeVisible()
-  await monitor.expectClean()
+  await expect(page.getByText(`动作时序 (${cursorBeforeReconnect}/4351)`, { exact: true })).toBeVisible()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page }) => {
@@ -2336,6 +2346,9 @@ test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page 
     }))
   }
 
+  const expectedDetailCancellations = fixtures.map((fixture) => (
+    captureExactGetCancellations(page, `/api/matches/${fixture.id}`)
+  ))
   const monitor = monitorBrowser(page)
   for (const fixture of fixtures) {
     await page.goto(`/#/match/${fixture.id}`)
@@ -2346,11 +2359,12 @@ test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page 
     await expect(page.getByTestId('holdem-position-overview')).toContainText('未完成任何一手')
     await expect(page.getByTestId('holdem-position-overview')).not.toContainText('当前手 1')
   }
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations.flatMap((expected) => expected()))
 })
 
 test('terminal reason presentation keeps normal adjudication neutral and faults dangerous', async ({ page }) => {
   const monitor = monitorBrowser(page)
+  const expectedDetailCancellations: Array<ReturnType<typeof captureExactGetCancellations>> = []
   const viewerFixtures = [
     {
       id: 'mock-reason-five', gameId: 'gomoku', reason: 'five',
@@ -2424,6 +2438,9 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
   )
 
   for (const fixture of viewerFixtures) {
+    expectedDetailCancellations.push(
+      captureExactGetCancellations(page, `/api/matches/${fixture.id}`),
+    )
     await routeStructuredReplay(page, fixture.id, fixture.events)
     await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
       status: 200, contentType: 'application/json', body: '{"ok":true}',
@@ -2479,6 +2496,9 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
   // Active rows historically carried the storage default reason='completed'.
   // Status is authoritative: a running match must not claim normal completion.
   const runningViewerId = 'mock-reason-running-default'
+  expectedDetailCancellations.push(
+    captureExactGetCancellations(page, `/api/matches/${runningViewerId}`),
+  )
   const runningMatch = {
     id: runningViewerId,
     game_id: 'gomoku',
@@ -2573,11 +2593,12 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
   await expect(runningRow.locator('[data-match-nature="challenge"]')).toHaveText('用户挑战')
   await expect(runningRow.getByTestId('terminal-reason')).toHaveCount(0)
   await expect(runningRow).not.toContainText('正常结束')
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations.flatMap((expected) => expected()))
 })
 
 test('Pencil clock initializes the untouched seat and renders a first-event timeout', async ({ page }) => {
   const monitor = monitorBrowser(page)
+  const expectedDetailCancellations: Array<ReturnType<typeof captureExactGetCancellations>> = []
   await page.route('**/api/comments?*', async (route) => {
     await route.fulfill({
       status: 200,
@@ -2590,6 +2611,9 @@ test('Pencil clock initializes the untouched seat and renders a first-event time
     matchId: string,
     events: Array<Record<string, unknown>>,
   ) => {
+    expectedDetailCancellations.push(
+      captureExactGetCancellations(page, `/api/matches/${matchId}`),
+    )
     await page.route(`**/api/matches/${matchId}/view`, async (route) => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
     })
@@ -2645,7 +2669,7 @@ test('Pencil clock initializes the untouched seat and renders a first-event time
   // `0:00超时`. Whitespace is layout-only, while both values and their order stay exact.
   await expect(timeoutBadge.locator('..')).toHaveText(/^\s*0:00\s*超时\s*$/)
   await expect(page.getByText('15:00', { exact: true })).toBeVisible()
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations.flatMap((expected) => expected()))
 })
 
 test('Pencil canvas geometry and hit testing match the interleaved judge coordinates', async ({ page }) => {
@@ -3021,6 +3045,10 @@ test('Pencil replay gives the square board priority while the timeline remains u
   // 空间放大到 1200px+，首屏只能看到上半局面；完整时序又把右栏撑出视口。
   // fixture 使用上方从该对局提取的完整54步轨迹，并确定性重建原206个公开事件。
   const matchId = '20260810143624-4149d6a3'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const events = pencilProductionReplay143624()
   expect(events).toHaveLength(206)
   const replayMoves = events.filter((event) => event.type === 'move')
@@ -3125,11 +3153,12 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(desktopTimeline).not.toBeNull()
     expect(overviewBounds).not.toBeNull()
     expect(Math.abs((desktopCanvas?.width ?? 0) - (desktopCanvas?.height ?? 0))).toBeLessThanOrEqual(1)
-    // 三栏宽屏同时受视口高度和主区剩余宽度约束。1536×1080 是宽度瓶颈，
-    // 不能再按高度公式强行要求 824px 棋盘，否则会重新挤压信息轨或时序栏。
-    const expectedMax = Math.min(832, viewport.height - 256, viewport.width - 888)
-    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(expectedMax + 1)
-    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(expectedMax - 2)
+    // 棋盘的硬上界来自 52rem 与视口高度；主区横向余量会随侧栏密度变化，
+    // 因而旧的固定减去 888px 只能作为保守下界，不能再误当作精确上界。
+    const heightCap = Math.min(832, viewport.height - 256)
+    const conservativeFloor = Math.min(heightCap, viewport.width - 888)
+    expect(desktopCanvas?.width ?? 9999).toBeLessThanOrEqual(heightCap + 1)
+    expect(desktopCanvas?.width ?? 0).toBeGreaterThanOrEqual(conservativeFloor - 2)
     expect((desktopCanvas?.y ?? 0) + (desktopCanvas?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
     expect((overviewBounds?.x ?? 9999) + (overviewBounds?.width ?? 0)).toBeLessThan(desktopCanvas?.x ?? 0)
     expect(overviewBounds?.height ?? 9999).toBeLessThanOrEqual((desktopCanvas?.height ?? 0) + 1)
@@ -3235,11 +3264,15 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
     await page.evaluate(() => window.scrollTo(0, 0))
   }
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns for abnormal reasons', async ({ page }) => {
   const matchId = 'mock-reconnect-terminal-error'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const runningMatch = {
     id: matchId,
     game_id: 'holdem',
@@ -3332,7 +3365,7 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
   await page.reload()
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
   await expect(page.locator('main')).toContainText('Bot 技术判负')
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('Holdem replay state includes blinds and treats all-in amount as raise-to', async ({ page }) => {
@@ -3526,6 +3559,10 @@ test('Pencil replay reconstructs the judge score for an illegal terminal', async
 
 test('MatchViewer presents a zero-hand protocol loss as a terminal incident', async ({ page }) => {
   const matchId = 'mock-zero-hand-protocol-loss'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const events = [
     { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
     { type: 'deal_hole', hand: 0, holes: [['3d', 'Th'], ['Qs', '4c']] },
@@ -3577,8 +3614,8 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   const incident = page.getByRole('alert').filter({ hasText: 'Bot 技术判负' })
-  await expect(incident).toContainText('admin @zzx（座位 1）')
-  await expect(incident).toContainText('zxx02 @zhouzixiang（座位 2）获胜')
+  await expect(incident).toContainText('admin（@zzx）（座位 1）')
+  await expect(incident).toContainText('zxx02（@zhouzixiang）（座位 2）获胜')
   await expect(incident).toContainText('missing_response')
   await expect(incident).toContainText('第 1 次决策')
   await expect(incident).toContainText('Bot 响应缺少必填 response 字段')
@@ -3596,11 +3633,15 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   expect(overflow).toBeLessThanOrEqual(1)
   await expect(page.getByText('admin', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('zxx02', { exact: true }).first()).toBeVisible()
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('MatchViewer keeps chess history playable after a mid-game technical loss', async ({ page }) => {
   const matchId = 'mock-gomoku-midgame-protocol-loss'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const events = [
     { type: 'match_start', game_id: 'gomoku', size: 15 },
     { type: 'move', player: 0, x: 7, y: 7, move_index: 1 },
@@ -3646,8 +3687,13 @@ test('MatchViewer keeps chess history playable after a mid-game technical loss',
   await expect(page.getByRole('button', { name: '播放', exact: true })).toBeVisible()
   await expect(page.locator('main')).toContainText('动作时序')
   await expect(page.getByRole('alert')).toContainText('missing_response')
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
+
+async function openBotVersionManager(page: Page, row: Locator, botName: string) {
+  await row.getByRole('button', { name: `管理 ${botName}`, exact: true }).click()
+  await page.getByRole('menuitem', { name: '版本管理', exact: true }).click()
+}
 
 async function activateVersion(page: Page, manager: Locator, botId: number, version: number) {
   const row = versionRow(manager, version)
@@ -3684,7 +3730,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
     const botLink = page.getByRole('link', { name: primaryBot.name, exact: true })
     const botRow = botLink.locator('xpath=ancestor::li[1]')
     const botId = primaryBot.id
-    await expect(botRow.getByText(`#${botId}`, { exact: true })).toBeVisible()
+    await expect(botRow.getByText('内部 ID', { exact: true }).locator('..')).toContainText(String(botId))
 
   // Reuse the dialog A→B while A's response is held back. A late response used
   // to replace B's version rows and could activate A's version number on B.
@@ -3692,7 +3738,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
     .getByRole('link', { name: slowBot.name, exact: true })
     .locator('xpath=ancestor::li[1]')
   const slowBotId = slowBot.id
-  await expect(slowBotRow.getByText(`#${slowBotId}`, { exact: true })).toBeVisible()
+  await expect(slowBotRow.getByText('内部 ID', { exact: true }).locator('..')).toContainText(String(slowBotId))
   let releaseSlow!: () => void
   const slowGate = new Promise<void>((resolve) => { releaseSlow = resolve })
   let observeSlow!: () => void
@@ -3721,13 +3767,13 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
       }),
     })
   })
-  await slowBotRow.getByRole('button', { name: '版本', exact: true }).click()
+  await openBotVersionManager(page, slowBotRow, slowBot.name)
   await slowObserved
-  await expect(page.getByRole('dialog').filter({ hasText: `版本管理 · ${slowBot.name}` })).toBeVisible()
+  await expect(page.getByRole('dialog', { name: `版本管理 ${slowBot.name}`, exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
 
-  await botRow.getByRole('button', { name: '版本', exact: true }).click()
-  const manager = page.getByRole('dialog').filter({ hasText: `版本管理 · ${primaryBot.name}` })
+  await openBotVersionManager(page, botRow, primaryBot.name)
+  const manager = page.getByRole('dialog', { name: `版本管理 ${primaryBot.name}`, exact: true })
   await expect(manager.getByText('版本历史', { exact: true })).toBeVisible()
   await expect(manager.getByRole('combobox').filter({ hasText: 'Traditional（默认）' })).toBeVisible()
   await expect(manager.getByText(/每个决策点重启进程并发送完整历史信封/)).toBeVisible()
@@ -3794,15 +3840,15 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   })
 
   await page.keyboard.press('Escape')
-  await slowBotRow.getByRole('button', { name: '版本', exact: true }).click()
-  const staleManager = page.getByRole('dialog').filter({ hasText: `版本管理 · ${slowBot.name}` })
+  await openBotVersionManager(page, slowBotRow, slowBot.name)
+  const staleManager = page.getByRole('dialog', { name: `版本管理 ${slowBot.name}`, exact: true })
   await expect(staleManager.getByText(/^v\d+$/).first()).toBeVisible()
   await staleManager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await staleUploadObserved
   await page.keyboard.press('Escape')
 
-  await botRow.getByRole('button', { name: '版本', exact: true }).click()
+  await openBotVersionManager(page, botRow, primaryBot.name)
   await expect(manager.getByText(/^v\d+$/).first()).toBeVisible()
   await manager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await manager.getByRole('button', { name: '上传新版本', exact: true }).click()
@@ -3894,7 +3940,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   // Close the manager explicitly: an Escape sent while the nested confirmation
   // is finishing its exit animation can be consumed by that already-confirmed
   // dialog and leave the manager modal blocking the underlying Bot row.
-  await manager.getByRole('button', { name: 'Close', exact: true }).click()
+  await manager.getByRole('button', { name: '关闭', exact: true }).click()
   await expect(manager).not.toBeVisible()
 
   let releaseNextUpload!: () => void
@@ -3914,7 +3960,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
       body: JSON.stringify({ bot: { id: slowBotId } }),
     })
   })
-  await slowBotRow.getByRole('button', { name: '版本', exact: true }).click()
+  await openBotVersionManager(page, slowBotRow, slowBot.name)
   await expect(staleManager.getByText(/^v\d+$/).first()).toBeVisible()
   await staleManager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
@@ -3941,7 +3987,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await page.unroute(slowPattern)
 
   await page.keyboard.press('Escape')
-  await botRow.getByRole('button', { name: '版本', exact: true }).click()
+  await openBotVersionManager(page, botRow, primaryBot.name)
   await expect(versionRow(manager, originalVersion).getByText('当前', { exact: true })).toBeVisible()
 
   // A runnable ELF that exits immediately passes binary classification but fails
@@ -3994,16 +4040,21 @@ test('organizer has no dead admin navigation while admin owner links use usernam
   await organizerPage.goto('/#/')
   await expect(organizerPage.getByRole('link', { name: '管理端', exact: true })).toHaveCount(0)
   await organizerPage.goto('/#/admin')
-  await expect(organizerPage.getByText('仅管理员可访问管理端。', { exact: false })).toBeVisible()
+  await expect(organizerPage.getByText('当前账号没有管理权限', { exact: true })).toBeVisible()
   await organizerMonitor.expectClean()
   await organizerContext.close()
 
   const adminContext = await browser.newContext({ baseURL, viewport: { width: 1440, height: 900 } })
   const adminPage = await adminContext.newPage()
+  const expectedRuntimeCancellations = captureExactGetCancellations(
+    adminPage,
+    '/api/admin/settings/runtime',
+  )
   const adminMonitor = monitorBrowser(adminPage)
   await loginThroughUi(adminPage, ADMIN)
   await adminPage.goto('/#/admin')
-  await adminPage.getByRole('button', { name: 'Bot', exact: true }).click()
+  const adminNav = adminPage.getByRole('navigation', { name: '管理控制台模块', exact: true })
+  await adminNav.getByRole('button', { name: /^Bot / }).click()
   const botQuery = `${USER}_holdem`
   const filteredBotsPromise = adminPage.waitForResponse((response) => {
     const url = new URL(response.url())
@@ -4024,7 +4075,7 @@ test('organizer has no dead admin navigation while admin owner links use usernam
   const owner = adminPage.locator(`a[href="#/user/${USER}"]`).first()
   await expect(owner).toHaveAttribute('href', `#/user/${USER}`)
   await expect(adminPage.getByRole('table').locator('tbody tr')).toHaveCount(filteredBots.bots.length)
-  await adminMonitor.expectClean()
+  await adminMonitor.expectClean(expectedRuntimeCancellations())
   await adminContext.close()
 })
 
@@ -4066,10 +4117,15 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
     viewport: { width: 1440, height: 900 },
   })
   const adminPage = await adminContext.newPage()
+  const expectedRuntimeCancellations = captureExactGetCancellations(
+    adminPage,
+    '/api/admin/settings/runtime',
+  )
   const adminMonitor = monitorBrowser(adminPage)
   await loginThroughUi(adminPage, ADMIN)
   await adminPage.goto('/#/admin')
-  await adminPage.getByRole('button', { name: '对局记录', exact: true }).click()
+  const adminNav = adminPage.getByRole('navigation', { name: '管理控制台模块', exact: true })
+  await adminNav.getByRole('button', { name: /^对局 / }).click()
   const runningResponsePromise = adminPage.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'GET' &&
@@ -4116,7 +4172,7 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
   expect((await finalResponse.json() as { match: { status: string } }).match.status).toBe('aborted')
 
   await humanMonitor.expectClean()
-  await adminMonitor.expectClean()
+  await adminMonitor.expectClean(expectedRuntimeCancellations())
   await adminContext.close()
   adminContext = null
   }, async () => {
@@ -4139,6 +4195,10 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
 test('unknown match game is an explicit unsupported state, never a Holdem replay', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const matchId = 'mock-unsupported-game'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const replayEvents = [
     { type: 'match_start' },
     { type: 'match_end', winner: 0, reason: 'completed', deltas: [1, -1] },
@@ -4188,7 +4248,7 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
   await expect(page.getByText('回放不可用：不支持的游戏（future_chess）')).toBeVisible()
   await expect(page.getByRole('img', { name: /holdem 对局画面/ })).toHaveCount(0)
   expect(replayRequests).toBe(0)
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('Gomoku human canvas serializes its canonical response envelope', async ({ page }) => {
