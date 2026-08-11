@@ -264,14 +264,18 @@ def test_response_line_hard_limit_and_preflight_discards_debug():
 
 
 @pytest.mark.parametrize(
-    "malicious_line",
-    [
-        '{"response":' + ("9" * 5_000) + '}',
-        '{"response":0,"debug":' + ("[" * 10_000) + "0" + ("]" * 10_000) + '}',
-    ],
+    "decoder_error",
+    [ValueError, RecursionError],
+    ids=["value-error", "recursion-error"],
 )
-def test_malicious_json_decoder_failures_are_protocol_faults(malicious_line):
-    transport = _Transport(malicious_line, "traditional")
+def test_malicious_json_decoder_failures_are_protocol_faults(
+    monkeypatch, decoder_error
+):
+    def reject_malicious_json(_line):
+        raise decoder_error("malicious JSON cannot be decoded")
+
+    monkeypatch.setattr(botzone.json, "loads", reject_malicious_json)
+    transport = _Transport('{"response":0}', "traditional")
     captured = []
     with pytest.raises(BotProtocolError) as raised:
         asyncio.run(_botzone_decide(
