@@ -128,6 +128,25 @@ function holdemDuplicateReplayFixture(): Array<Record<string, unknown>> {
   return events
 }
 
+async function routeStructuredReplay(
+  page: Page,
+  matchId: string,
+  events: Array<Record<string, unknown>>,
+) {
+  await page.route(`**/api/matches/${matchId}/replay`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match_id: matchId,
+        events,
+        event_count: events.length,
+        updated_at: '2026-08-11T00:00:00',
+      }),
+    })
+  })
+}
+
 async function createDisposableBot(
   page: Page,
   name: string,
@@ -1289,7 +1308,6 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
           bot_b: { name: 'canonical_b', owner_name: 'beta' },
           result: { rounds_played: 0, deltas: [0, 0] },
         },
-        replay: { events_json: '[]' },
       }),
     })
   })
@@ -1324,6 +1342,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
   expect(events.filter((event) => event.type === 'settle')).toHaveLength(70)
   expect(events.at(-1)).toEqual({ type: 'match_end', winner: 1, reason: 'completed', deltas: [-2850, 2850] })
 
+  await routeStructuredReplay(page, matchId, events)
   await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
     status: 200, contentType: 'application/json', body: '{"ok":true}',
   }))
@@ -1344,7 +1363,6 @@ test('Holdem production replay uses empty space for a responsive current-positio
         bot_b: { id: 4, name: 'mybot01', display_name: '测试Bot01', owner_name: 'tester01' },
         result: { rounds_played: 70, deltas: [-2850, 2850], normalized_delta: -28.5 },
       },
-      replay: { events_json: JSON.stringify(events) },
     }),
   }))
   await page.route('**/api/comments?*', async (route) => route.fulfill({
@@ -1461,6 +1479,7 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   expect(events.filter((event) => event.type === 'hand_start')).toHaveLength(140)
   expect(events.filter((event) => event.type === 'settle')).toHaveLength(140)
 
+  await routeStructuredReplay(page, matchId, events)
   await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
     status: 200, contentType: 'application/json', body: '{"ok":true}',
   }))
@@ -1487,7 +1506,6 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
           ],
         },
       },
-      replay: { events_json: JSON.stringify(events) },
     }),
   }))
   await page.route('**/api/comments?*', async (route) => route.fulfill({
@@ -1648,7 +1666,23 @@ test('MatchViewer distinguishes rating eligibility from settlement state', async
   await page.route('**/api/comments?*', async (route) => route.fulfill({
     status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
   }))
+  let liveReplayRequests = 0
   for (const fixture of fixtures) {
+    const replayEvents = fixture.status === 'aborted'
+      ? [{ type: 'error', reason: 'platform_error' }]
+      : [{ type: 'match_end', winner: 0, reason: 'five' }]
+    if (fixture.status === 'pending') {
+      await page.route(`**/api/matches/${fixture.id}/replay`, async (route) => {
+        liveReplayRequests += 1
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: '{"detail":"live match must not fetch replay"}',
+        })
+      })
+    } else {
+      await routeStructuredReplay(page, fixture.id, replayEvents)
+    }
     await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
       status: 200, contentType: 'application/json', body: '{"ok":true}',
     }))
@@ -1677,11 +1711,6 @@ test('MatchViewer distinguishes rating eligibility from settlement state', async
           bot_b: { name: 'policy_beta', owner_name: 'owner-b' },
           result: { rounds_played: 9, deltas: [1, -1], normalized_delta: 1 },
         },
-        replay: { events_json: JSON.stringify(fixture.status === 'pending'
-          ? []
-          : fixture.status === 'aborted'
-            ? [{ type: 'error', reason: 'platform_error' }]
-            : [{ type: 'match_end', winner: 0, reason: 'five' }]) },
       }),
     }))
   }
@@ -1691,7 +1720,62 @@ test('MatchViewer distinguishes rating eligibility from settlement state', async
     await page.goto(`/#/match/${fixture.id}`)
     await expect(page.getByTestId('rating-state')).toHaveText(fixture.label)
   }
+  expect(liveReplayRequests).toBe(0)
   await monitor.expectClean()
+})
+
+test('MatchViewer gates replay behind metadata and keeps metadata on replay failure', async ({ page }) => {
+  const matchId = 'mock-replay-metadata-gate-failure'
+  let replayRequests = 0
+  let releaseMetadata!: () => void
+  let observeMetadata!: () => void
+  const metadataGate = new Promise<void>((resolve) => { releaseMetadata = resolve })
+  const metadataObserved = new Promise<void>((resolve) => { observeMetadata = resolve })
+
+  await page.route(`**/api/matches/${matchId}/replay`, async (route) => {
+    replayRequests += 1
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: '回放暂时不可用' }),
+    })
+  })
+  await page.route(`**/api/matches/${matchId}/view`, async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"ok":true}',
+  }))
+  await page.route(`**/api/matches/${matchId}`, async (route) => {
+    observeMetadata()
+    await metadataGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match: {
+          id: matchId,
+          game_id: 'holdem',
+          status: 'completed',
+          winner: 0,
+          reason: 'completed',
+          match_type: 'challenge',
+          bot_a: { name: 'metadata_alpha', owner_name: 'alpha' },
+          bot_b: { name: 'metadata_beta', owner_name: 'beta' },
+          result: { rounds_played: 1, deltas: [10, -10] },
+        },
+      }),
+    })
+  })
+  await page.route('**/api/comments?*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
+  }))
+
+  await page.goto(`/#/match/${matchId}`)
+  await metadataObserved
+  expect(replayRequests).toBe(0)
+  releaseMetadata()
+  await expect(page.getByText('metadata_alpha', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('metadata_beta', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('回放暂时不可用', { exact: true })).toBeVisible()
+  expect(replayRequests).toBe(1)
 })
 
 test('MatchViewer replays live history sequentially and stays compact across viewports', async ({ page }) => {
@@ -1709,8 +1793,23 @@ test('MatchViewer replays live history sequentially and stays compact across vie
     { type: 'deal_hole', hand: 1, holes: [['9h', '9d'], ['8s', '8c']] },
     { type: 'action', player: 1, action: 'raise', amount: 200 },
   ]
+  const runningMatch = {
+    id: matchId,
+    game_id: 'holdem',
+    status: 'running',
+    match_type: 'challenge',
+    bot_a: { name: 'live_alpha', owner_name: 'alpha' },
+    bot_b: { name: 'live_beta', owner_name: 'beta' },
+    result: { rounds_played: 0, deltas: [0, 0] },
+  }
+  let replayRequests = 0
 
   const sse = await installControlledEventSource(page)
+
+  await page.route(`**/api/matches/${matchId}/replay`, async (route) => {
+    replayRequests += 1
+    await route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"live must not fetch replay"}' })
+  })
 
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
@@ -1727,16 +1826,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        match: {
-          id: matchId,
-          game_id: 'holdem',
-          status: 'running',
-          match_type: 'challenge',
-          bot_a: { name: 'live_alpha', owner_name: 'alpha' },
-          bot_b: { name: 'live_beta', owner_name: 'beta' },
-          result: { rounds_played: 0, deltas: [0, 0] },
-        },
-        replay: { events_json: JSON.stringify(initialEvents) },
+        match: runningMatch,
       }),
     })
   })
@@ -1748,7 +1838,12 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   releaseMatchResponse()
+  expect(await sse.disconnect()).toBe(true)
+  await expect(page.getByText('连接中', { exact: true })).toBeVisible()
+  await expect(page.getByText('加载中…', { exact: true })).toHaveCount(0)
+  expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
   await expect(page.getByText('事件 1/4', { exact: true })).toBeVisible()
+  expect(replayRequests).toBe(0)
   await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
 
   // 即使自动播放已经追到当前尾部，后续事件也必须先增加分母，再按速度推进。
@@ -1859,10 +1954,10 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
       bot_b: { name: 'debug_beta', owner_name: 'beta' },
       result: { rounds_played: 1, deltas: [100, -100], normalized_delta: 1 },
     },
-    replay: { events_json: JSON.stringify(replay) },
   })
 
   for (const id of [allowedId, deniedId, staleId]) {
+    await routeStructuredReplay(page, id, replay)
     await page.route(`**/api/matches/${id}/view`, async (route) => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
     })
@@ -2007,6 +2102,15 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
     action: 'check',
     amount: 0,
   }))
+  const runningMatch = {
+    id: matchId,
+    game_id: 'holdem',
+    status: 'running',
+    match_type: 'challenge',
+    bot_a: { name: 'clock_alpha', owner_name: 'alpha' },
+    bot_b: { name: 'clock_beta', owner_name: 'beta' },
+    result: { rounds_played: 0, deltas: [0, 0] },
+  }
   const sse = await installControlledEventSource(page)
   let releaseMatchResponse!: () => void
   const matchResponseGate = new Promise<void>((resolve) => {
@@ -2022,16 +2126,7 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
-        match: {
-          id: matchId,
-          game_id: 'holdem',
-          status: 'running',
-          match_type: 'challenge',
-          bot_a: { name: 'clock_alpha', owner_name: 'alpha' },
-          bot_b: { name: 'clock_beta', owner_name: 'beta' },
-          result: { rounds_played: 0, deltas: [0, 0] },
-        },
-        replay: { events_json: JSON.stringify(initialEvents) },
+        match: runningMatch,
       }),
     })
   })
@@ -2042,6 +2137,7 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   releaseMatchResponse()
+  expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
   const position = page.getByTestId('playback-position')
   await expect(position).toHaveText('事件 1/2')
   expect(await sse.stream(streamEvents, 50)).toBe(true)
@@ -2092,10 +2188,7 @@ test('MatchViewer preserves more than 4000 events across reconnect snapshots', a
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        match: runningMatch,
-        replay: { events_json: '[]' },
-      }),
+      body: JSON.stringify({ match: runningMatch }),
     })
   })
   await page.route('**/api/comments?*', async (route) => route.fulfill({
@@ -2128,6 +2221,10 @@ test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page 
     status: 200, contentType: 'application/json', body: '{"comments":[],"count":0,"total":0}',
   }))
   for (const fixture of fixtures) {
+    await routeStructuredReplay(page, fixture.id, [
+      { type: 'match_start', game_id: 'holdem', num_hands: 70 },
+      { type: 'error', reason: fixture.reason },
+    ])
     await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
       status: 200, contentType: 'application/json', body: '{"ok":true}',
     }))
@@ -2144,12 +2241,6 @@ test('Holdem aborts before hand start do not claim hand 1 of 70', async ({ page 
           bot_a: { name: 'abort_alpha', owner_name: 'alpha' },
           bot_b: { name: 'abort_beta', owner_name: 'beta' },
           result: { rounds_played: 0, deltas: [0, 0] },
-        },
-        replay: {
-          events_json: JSON.stringify([
-            { type: 'match_start', game_id: 'holdem', num_hands: 70 },
-            { type: 'error', reason: fixture.reason },
-          ]),
         },
       }),
     }))
@@ -2243,6 +2334,7 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
   )
 
   for (const fixture of viewerFixtures) {
+    await routeStructuredReplay(page, fixture.id, fixture.events)
     await page.route(`**/api/matches/${fixture.id}/view`, async (route) => route.fulfill({
       status: 200, contentType: 'application/json', body: '{"ok":true}',
     }))
@@ -2263,9 +2355,6 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
             rounds_played: 1,
             deltas: fixture.winner === 0 ? [1, -1] : [-1, 1],
           },
-        },
-        replay: {
-          events_json: JSON.stringify(fixture.events),
         },
       }),
     }))
@@ -2323,7 +2412,7 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
   await page.route(`**/api/matches/${runningViewerId}`, async (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ match: runningMatch, replay: { events_json: '[]' } }),
+    body: JSON.stringify({ match: runningMatch }),
   }))
   await page.goto(`/#/match/${runningViewerId}`)
   await expect(page.getByText('对局进行中', { exact: true })).toBeVisible()
@@ -2438,7 +2527,6 @@ test('Pencil clock initializes the untouched seat and renders a first-event time
             bot_a: { id: 41, name: 'clock_red', display_name: 'Clock Red', owner_name: 'clock_owner_red', owner_display: 'Clock Owner Red', is_human: false },
             bot_b: { id: 42, name: 'clock_blue', display_name: 'Clock Blue', owner_name: 'clock_owner_blue', owner_display: 'Clock Owner Blue', is_human: false },
           },
-          replay: { events_json: '[]' },
         }),
       })
     })
@@ -2866,6 +2954,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
   expect(firstScoringMoveIndex).toBeGreaterThan(1)
   expect(events[firstScoringMoveIndex - 2]).toMatchObject({ type: 'turn', scores: [0, 0] })
   expect(events[firstScoringMoveIndex]).toMatchObject({ type: 'move', scores: [0, 1] })
+  await routeStructuredReplay(page, matchId, events)
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
   })
@@ -2885,7 +2974,6 @@ test('Pencil replay gives the square board priority while the timeline remains u
           bot_b: { name: 'tester11_pencil', owner_name: 'tester11' },
           result: { rounds_played: 54, deltas: [-9, 9], normalized_delta: -9 },
         },
-        replay: { events_json: JSON.stringify(events) },
       }),
     })
   })
@@ -3079,7 +3167,7 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ match: runningMatch, replay: { events_json: '[]' } }),
+      body: JSON.stringify({ match: runningMatch }),
     })
   })
   let eventRequests = 0
@@ -3124,6 +3212,9 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
   // user-visible warning after a direct refresh (not only during live SSE).
   await page.unroute(`**/api/matches/${matchId}`)
   await page.unroute(`**/api/matches/${matchId}/events`)
+  await routeStructuredReplay(page, matchId, [
+    { type: 'match_end', winner: 1, reason: 'technical_loss', deltas: [-1, 1] },
+  ])
   await page.route(`**/api/matches/${matchId}`, async (route) => {
     await route.fulfill({
       status: 200,
@@ -3136,11 +3227,6 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
           winner: 1,
           technical_loss: 1,
           result: { rounds_played: 0, deltas: [-1, 1] },
-        },
-        replay: {
-          events_json: JSON.stringify([
-            { type: 'match_end', winner: 1, reason: 'technical_loss', deltas: [-1, 1] },
-          ]),
         },
       }),
     })
@@ -3306,6 +3392,7 @@ test('Pencil replay reconstructs the judge score for an illegal terminal', async
   expect(state.reason).toBe('illegal')
 
   const matchId = 'mock-pencil-illegal-position-summary'
+  await routeStructuredReplay(page, matchId, events)
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
   })
@@ -3321,7 +3408,6 @@ test('Pencil replay reconstructs the judge score for an illegal terminal', async
           bot_b: { name: 'legal_b', owner_name: 'beta' },
           result: { rounds_played: 0, deltas: [-2, 2], normalized_delta: -2 },
         },
-        replay: { events_json: JSON.stringify(events) },
       }),
     })
   })
@@ -3351,6 +3437,7 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
     },
     { type: 'match_end', winner: 1, reason: 'protocol_error', deltas: [-1, 1] },
   ]
+  await routeStructuredReplay(page, matchId, events)
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
   })
@@ -3381,7 +3468,6 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
             }],
           },
         },
-        replay: { events_json: JSON.stringify(events) },
       }),
     })
   })
@@ -3427,6 +3513,7 @@ test('MatchViewer keeps chess history playable after a mid-game technical loss',
     },
     { type: 'match_end', winner: 1, reason: 'protocol_error', deltas: [-1, 1] },
   ]
+  await routeStructuredReplay(page, matchId, events)
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
   })
@@ -3448,7 +3535,6 @@ test('MatchViewer keeps chess history playable after a mid-game technical loss',
           // 历史通用字段对棋类为 0；已走步数必须从 replay reducer 取。
           result: { rounds_played: 0, deltas: [-1, 1] },
         },
-        replay: { events_json: JSON.stringify(events) },
       }),
     })
   })
@@ -3955,6 +4041,24 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
 test('unknown match game is an explicit unsupported state, never a Holdem replay', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const matchId = 'mock-unsupported-game'
+  const replayEvents = [
+    { type: 'match_start' },
+    { type: 'match_end', winner: 0, reason: 'completed', deltas: [1, -1] },
+  ]
+  let replayRequests = 0
+  await page.route(`**/api/matches/${matchId}/replay`, async (route) => {
+    replayRequests += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match_id: matchId,
+        events: replayEvents,
+        event_count: replayEvents.length,
+        updated_at: null,
+      }),
+    })
+  })
   await page.route(`**/api/matches/${matchId}/view`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
   })
@@ -3969,12 +4073,6 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
           status: 'completed',
           winner: 0,
           result: { rounds_played: 1, deltas: [1, -1] },
-        },
-        replay: {
-          events_json: JSON.stringify([
-            { type: 'match_start' },
-            { type: 'match_end', winner: 0, reason: 'completed', deltas: [1, -1] },
-          ]),
         },
       }),
     })
@@ -3991,6 +4089,7 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
   await expect(page.getByText('不支持的游戏（future_chess）').first()).toBeVisible()
   await expect(page.getByText('回放不可用：不支持的游戏（future_chess）')).toBeVisible()
   await expect(page.getByRole('img', { name: /holdem 对局画面/ })).toHaveCount(0)
+  expect(replayRequests).toBe(0)
   await monitor.expectClean()
 })
 

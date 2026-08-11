@@ -1194,6 +1194,7 @@ def match_detail(
     response: Response = None,
     user: dict | None = Depends(optional_user),
 ):
+    """Return lightweight match metadata; replay events have a separate route."""
     # 当前身份决定 can_view_debug；共享缓存必须按认证上下文分离。
     if response is not None:
         response.headers["Vary"] = "Authorization, Cookie"
@@ -1201,7 +1202,6 @@ def match_detail(
     m = store.get_match_detailed(match_id)
     if not m:
         raise HTTPException(404, "对局不存在")
-    replay = store.get_public_replay(match_id) or {}
     public_match = _with_seat_info(m, store=store)
     # 只暴露“当前身份是否具备读取权限”，不暴露调试记录是否存在、数量或内容。
     # MatchViewer 据此避免让无关登录用户产生预期内的 403 请求噪声。
@@ -1215,7 +1215,7 @@ def match_detail(
             is_admin=user.get("role") == ROLE_ADMIN,
         )
         public_match["can_view_debug"] = bool(access.get("allowed"))
-    return {"match": public_match, "replay": replay}
+    return {"match": public_match}
 
 
 @router.get("/api/matches/{match_id}/debug")
@@ -1289,6 +1289,15 @@ def match_debug(
         "dropped_count": int(result.get("dropped_count") or 0),
         "updated_at": result.get("updated_at"),
     }
+
+
+@router.get("/api/matches/{match_id}/replay")
+def match_replay(match_id: str, request: Request):
+    """Return the structured, public replay only when a viewer needs it."""
+    payload = _store(request).get_public_replay_payload(match_id)
+    if payload is None:
+        raise HTTPException(404, "对局不存在")
+    return payload
 
 
 @router.get("/api/matches/{match_id}/events")

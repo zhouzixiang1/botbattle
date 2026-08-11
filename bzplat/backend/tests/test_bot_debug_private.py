@@ -715,12 +715,18 @@ def test_private_api_no_store_audit_and_public_boundaries(tmp_path, monkeypatch)
     assert guest.status_code == 200
     assert guest.json()["match"]["can_view_debug"] is False
     assert "river-safe" not in guest.text
+    public_replay = client.get("/api/matches/api-match/replay")
+    assert public_replay.status_code == 200
+    assert set(public_replay.json()) == {
+        "match_id", "events", "event_count", "updated_at",
+    }
+    assert "river-safe" not in public_replay.text
     public_list = client.get("/api/matches")
     public_search = client.get(
         "/api/search", params={"type": "matches", "q": "api-match"}
     )
     assert public_list.status_code == public_search.status_code == 200
-    for public_response in (public_list, public_search):
+    for public_response in (public_list, public_search, public_replay):
         assert "river-safe" not in public_response.text
         assert "can_view_debug" not in public_response.text
 

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
 
-from bzplat.backend.api_routes import match_detail
+from bzplat.backend.api_routes import match_detail, match_replay
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
@@ -555,7 +555,9 @@ def test_unknown_completed_reason_is_normalized_before_live_and_storage(tmp_path
     ]
     detail = match_detail(match_id, _api_request(store, match_id))
     assert detail["match"]["reason"] == "completed"
-    assert json.loads(detail["replay"]["events_json"])[-1] == terminal[0]
+    replay = match_replay(match_id, _api_request(store, match_id))
+    assert replay["events"][-1] == terminal[0]
+    assert "replay" not in detail
     assert "privateadapterfailure" not in json.dumps(detail, ensure_ascii=False)
     assert "内部异常路径" not in json.dumps(detail, ensure_ascii=False)
     store.close()
@@ -763,7 +765,8 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
             assert closed.value.code == 1000
 
         final_detail = client.get(f"/api/matches/{match_id}").json()
-        replay = json.loads(final_detail["replay"]["events_json"])
+        assert "replay" not in final_detail
+        replay = client.get(f"/api/matches/{match_id}/replay").json()["events"]
         assert [
             event for event in replay if event.get("type") == "match_end"
         ] == [terminal]

@@ -5,7 +5,7 @@
   1. 无 SMTP 注册持久化 + queued 投递契约 + 隔离 DB 专用账号播种 → 验证码登录 → /me
   2. Bot 上传 / 版本 / 上架 / 公开列表
   3. 挑战对局 + 结果完整性（零和、winner、净筹码）
-  4. 已完成对局的 SSE 终态 snapshot vs 落盘回放 events_json 一致性
+  4. 已完成对局的 SSE 终态 snapshot vs 结构化 replay events 一致性
   5. 全局执行队列（并发 202 接单、opaque public_id、自动补槽到终态）
   6. 排行榜 Glicko-2 更新、组织者比赛循环赛
 
@@ -489,8 +489,8 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
     check("SSE 测试对局完成", m["status"] == "completed", f"status={m['status']}")
 
     # 落盘 replay 完整性校验（权威数据）
-    r = api.authed(users["alice"], "GET", f"/api/matches/{mid}")
-    replay = json.loads(r.json()["replay"].get("events_json") or "[]")
+    r = api.authed(users["alice"], "GET", f"/api/matches/{mid}/replay")
+    replay = r.json().get("events") or []
     rep_types = [e.get("type") for e in replay]
     check("replay 非空", len(replay) > 0, "空")
     check("replay 以 hand_start 开头", rep_types[:1] == ["hand_start"], str(rep_types[:3]))

@@ -286,19 +286,20 @@ def _canonical_public_match_end(
     }
 
 
-def _sanitize_public_replay(
+def _sanitize_public_replay_events(
     replay: dict | None,
     match: dict | None,
     *,
     human_viewer_seat: int | None = None,
-) -> dict | None:
-    """Return a replay whose terminal is derived from the authoritative row."""
-    if replay is None and match is None:
-        return None
-    public = dict(replay or {})
-    if match is not None:
-        public.setdefault("match_id", match.get("id"))
-    raw_events = public.get("events_json")
+) -> list[dict[str, Any]]:
+    """Return one public event list with an authoritative terminal.
+
+    This is the canonical projection used by both the legacy internal
+    ``events_json`` wrapper and the public structured replay endpoint.  Keeping
+    the event list structured avoids the old REST path's JSON-string-inside-JSON
+    double encoding and the matching second parse in the browser.
+    """
+    raw_events = (replay or {}).get("events_json")
     try:
         events = json.loads(raw_events) if isinstance(raw_events, str) else []
     except (TypeError, ValueError):
@@ -327,6 +328,26 @@ def _sanitize_public_replay(
                     {"type": "error", "reason": authoritative.get("reason")}
                 )
             )
+    return sanitized
+
+
+def _sanitize_public_replay(
+    replay: dict | None,
+    match: dict | None,
+    *,
+    human_viewer_seat: int | None = None,
+) -> dict | None:
+    """Return the internal/compat replay wrapper with authoritative terminal."""
+    if replay is None and match is None:
+        return None
+    public = dict(replay or {})
+    if match is not None:
+        public.setdefault("match_id", match.get("id"))
+    sanitized = _sanitize_public_replay_events(
+        replay,
+        match,
+        human_viewer_seat=human_viewer_seat,
+    )
     public["events_json"] = json.dumps(sanitized, ensure_ascii=False)
     return public
 
@@ -343,7 +364,9 @@ def _with_technical_incident_diagnostics(m: dict | None) -> dict | None:
     """
     if m is None:
         return None
-    replay_events = _load_replay_bot_incident_events(m.pop("_replay_events_json", None))
+    replay_events = _load_replay_bot_incident_events(
+        m.pop("_replay_incident_events_json", None)
+    )
     result = m.get("result")
     if not isinstance(result, dict):
         result = {}
@@ -473,6 +496,32 @@ def _technical_incident_filter_sql(alias: str = "m") -> str:
         "CASE WHEN je.type='object' THEN json_extract(je.value, '$.type') END "
         f"IN ('{TECHNICAL_INCIDENT_EVENT}',"
         "'bot_decide_error','bot_technical_error')))"
+    )
+
+
+def _technical_incident_projection_sql(alias: str = "m") -> str:
+    """Project only legacy/current incident objects from a replay JSON array.
+
+    Match list/detail responses still need historical incident diagnostics, but
+    selecting the whole replay made their cost proportional to every move in a
+    match.  SQLite JSON1 filters the stored array before it crosses the DB/Python
+    boundary.  Invalid JSON and non-array JSON fail closed to an empty list.
+    """
+    safe_events = (
+        "CASE WHEN json_valid(mr.events_json) "
+        "AND json_type(mr.events_json)='array' "
+        "THEN mr.events_json ELSE '[]' END"
+    )
+    event_types = ",".join(
+        f"'{event_type}'" for event_type in sorted(READ_TECHNICAL_INCIDENT_EVENTS)
+    )
+    return (
+        "COALESCE((SELECT json_group_array(json(je.value)) "
+        "FROM match_replays mr, "
+        f"json_each({safe_events}) je "
+        f"WHERE mr.match_id={alias}.id AND je.type='object' "
+        "AND json_extract(je.value, '$.type') "
+        f"IN ({event_types})), '[]')"
     )
 
 
@@ -4997,8 +5046,8 @@ class Store:
                 "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
                 "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
                 "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
-                "(SELECT mr.events_json FROM match_replays mr "
-                "WHERE mr.match_id=m.id) AS _replay_events_json"
+                f"{_technical_incident_projection_sql('m')} "
+                "AS _replay_incident_events_json"
             )
             sql = (
                 f"SELECT {sel} FROM {tbl} m "
@@ -5206,8 +5255,8 @@ class Store:
                 "ub.display_name AS bot_b_owner_display, "
                 "hu.username AS human_user_name, "
                 "hu.display_name AS human_user_display, "
-                "(SELECT mr.events_json FROM match_replays mr "
-                "WHERE mr.match_id=m.id) AS _replay_events_json"
+                f"{_technical_incident_projection_sql('m')} "
+                "AS _replay_incident_events_json"
             )
             where_parts: list[str] = []
             params: list[Any] = []
@@ -5345,9 +5394,14 @@ class Store:
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return None
-            match = _parse_match_json_cols(
-                _row(c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone())
+            match_row = _row(
+                c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
             )
+            if match_row is None:
+                # matches_index is a locator, not proof that the physical match
+                # still exists.  Fail closed on a drifted/orphan index row.
+                return None
+            match = _parse_match_json_cols(match_row)
             replay = _row(
                 c.execute(
                     "SELECT * FROM match_replays WHERE match_id=?", (match_id,)
@@ -5599,6 +5653,50 @@ class Store:
                 "total_bytes": int(session["total_bytes"]) if session else 0,
                 "dropped_count": int(session["dropped_count"]) if session else 0,
                 "updated_at": session["updated_at"] if session else None,
+            }
+
+    def get_public_replay_payload(
+        self,
+        match_id: str,
+        *,
+        human_viewer_seat: int | None = None,
+    ) -> dict | None:
+        """Return structured public replay data without double JSON encoding.
+
+        The match row and replay are read in one SQLite snapshot so the
+        canonical terminal always agrees with the authoritative status.  This
+        method deliberately returns only replay transport fields; match
+        metadata remains on ``GET /api/matches/{id}``.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN")
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return None
+            match_row = _row(
+                c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
+            )
+            if match_row is None:
+                # A stale locator must not turn into a synthetic empty replay.
+                return None
+            match = _parse_match_json_cols(match_row)
+            replay = _row(
+                c.execute(
+                    "SELECT match_id, events_json, updated_at "
+                    "FROM match_replays WHERE match_id=?",
+                    (match_id,),
+                ).fetchone()
+            )
+            events = _sanitize_public_replay_events(
+                replay,
+                match,
+                human_viewer_seat=human_viewer_seat,
+            )
+            return {
+                "match_id": match_id,
+                "events": events,
+                "event_count": len(events),
+                "updated_at": (replay or {}).get("updated_at"),
             }
 
     # ── ratings（per-game：PK = bot_id + game_id，全面解耦 PR3）─────────

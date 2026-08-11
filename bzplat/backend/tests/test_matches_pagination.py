@@ -40,6 +40,14 @@ def _app(tmp_path):
     return c, store
 
 
+def _replay_events(client: TestClient, match_id: str) -> list[dict]:
+    response = client.get(f"/api/matches/{match_id}/replay")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["event_count"] == len(payload["events"])
+    return payload["events"]
+
+
 def test_matches_list_returns_total(tmp_path):
     c, store = _app(tmp_path)
     r = c.get("/api/matches?limit=100")
@@ -90,6 +98,177 @@ def test_matches_total_filtered_by_status(tmp_path):
     assert both["total"] == 7
 
 
+def test_match_metadata_is_small_and_replay_events_load_separately(tmp_path):
+    c, store = _app(tmp_path)
+    events = [
+        {
+            "type": "move",
+            "player": index % 2,
+            "x": index % 15,
+            "y": (index // 15) % 15,
+            "move_index": index,
+            "scores": [0, 0],
+        }
+        for index in range(2_500)
+    ]
+    store.update_match(
+        "mg1",
+        status="completed",
+        winner=0,
+        reason="five",
+        result={"rounds_played": 2_500, "deltas": [1, -1], "normalized_delta": 1},
+    )
+    store.upsert_replay("mg1", json.dumps(events))
+
+    detail = c.get("/api/matches/mg1")
+    assert detail.status_code == 200
+    assert set(detail.json()) == {"match"}
+    assert "replay" not in detail.json()
+    # Metadata size is independent of replay length; the old endpoint embedded
+    # the escaped event string and grew to hundreds of kilobytes here.
+    assert len(detail.content) < 8_000
+
+    replay = c.get("/api/matches/mg1/replay")
+    assert replay.status_code == 200
+    payload = replay.json()
+    assert set(payload) == {"match_id", "events", "event_count", "updated_at"}
+    assert payload["match_id"] == "mg1"
+    assert payload["event_count"] == 2_501
+    assert payload["events"][0]["type"] == "move"
+    assert payload["events"][-1] == {
+        "type": "match_end",
+        "winner": 0,
+        "reason": "five",
+        "deltas": [1, -1],
+    }
+
+
+def test_replay_contract_handles_missing_malformed_and_drifted_matches(tmp_path):
+    c, store = _app(tmp_path)
+    source = store.get_match("mh0")
+    store.create_match(
+        "active-without-replay",
+        bot_a_id=source["bot_a_id"],
+        bot_b_id=source["bot_b_id"],
+        owner_id=source["owner_id"],
+        game_id="holdem",
+    )
+
+    empty = c.get("/api/matches/active-without-replay/replay")
+    assert empty.status_code == 200
+    assert empty.json() == {
+        "match_id": "active-without-replay",
+        "events": [],
+        "event_count": 0,
+        "updated_at": None,
+    }
+
+    store.update_match(
+        "mh4",
+        status="completed",
+        winner=1,
+        reason="completed",
+        result={"rounds_played": 0, "deltas": [-7, 7], "normalized_delta": -0.07},
+    )
+    store.upsert_replay("mh4", "not-json")
+    malformed = c.get("/api/matches/mh4/replay")
+    assert malformed.status_code == 200
+    assert malformed.json()["events"] == [
+        {
+            "type": "match_end",
+            "winner": 1,
+            "reason": "completed",
+            "deltas": [-7, 7],
+        }
+    ]
+
+    # matches_index only locates a physical row. A deliberately drifted index
+    # must not make either endpoint synthesize a match/replay response.
+    with store._tx() as conn:
+        conn.execute("DELETE FROM matches_holdem WHERE id=?", ("mh5",))
+    assert c.get("/api/matches/mh5").status_code == 404
+    assert c.get("/api/matches/mh5/replay").status_code == 404
+
+
+def test_active_human_replay_route_is_spectator_safe(tmp_path):
+    c, store = _app(tmp_path)
+    source = store.get_match("mh0")
+    store.create_match(
+        "active-human-replay",
+        bot_a_id=source["bot_a_id"],
+        bot_b_id=source["bot_b_id"],
+        owner_id=source["owner_id"],
+        match_type="human",
+        game_id="holdem",
+        human_user_id=source["owner_id"],
+        human_seat=1,
+    )
+    store.update_match("active-human-replay", status="running")
+    store.upsert_replay(
+        "active-human-replay",
+        json.dumps(
+            [
+                {
+                    "type": "deal_hole",
+                    "hand": 0,
+                    "holes": [["As", "Ah"], ["Ks", "Kh"]],
+                },
+                {
+                    "type": "your_turn",
+                    "player": 1,
+                    "request": {"my_id": 1, "my_cards": [44, 45]},
+                },
+            ]
+        ),
+    )
+
+    payload = c.get("/api/matches/active-human-replay/replay").json()
+    assert payload["events"] == [
+        {"type": "deal_hole", "hand": 0, "holes": [[], []]},
+    ]
+    assert "my_cards" not in json.dumps(payload)
+
+
+def test_list_and_detail_project_only_replay_incidents(tmp_path):
+    c, store = _app(tmp_path)
+    events = [
+        {"type": "move", "player": index % 2, "x": index % 15, "y": 0}
+        for index in range(2_000)
+    ]
+    events.append(
+        {
+            "type": "bot_technical_error",
+            "reason": "protocol_error",
+            "code": "missing_response",
+            "seat": 1,
+            "turn": 2,
+            "error": "/private/raw-output",
+        }
+    )
+    store.upsert_replay("mh1", json.dumps(events))
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        listed = store.list_matches(game_id="holdem", limit=100)
+        detailed = store.get_match_detailed("mh1")
+    finally:
+        store._conn.set_trace_callback(None)
+
+    listed_match = next(row for row in listed if row["id"] == "mh1")
+    for match in (listed_match, detailed):
+        assert match["result"]["technical_incidents_by_seat"] == {0: 0, 1: 1}
+        assert match["result"]["technical_incident_samples"][0]["code"] == "missing_response"
+        assert "/private" not in json.dumps(match, ensure_ascii=False)
+
+    match_selects = [
+        sql for sql in statements
+        if sql.lstrip().upper().startswith("SELECT") and "match_replays mr" in sql
+    ]
+    assert len(match_selects) >= 2
+    assert all("json_group_array(json(je.value))" in sql for sql in match_selects)
+    assert all("SELECT mr.events_json" not in sql for sql in match_selects)
+
+
 def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     c, store = _app(tmp_path)
     private = "error:/private/bot_uploads/secret traceback"
@@ -115,7 +294,8 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     assert next(row for row in listed if row["id"] == "mg0")["reason"] == "platform_error"
     detail = c.get("/api/matches/mg0").json()
     assert detail["match"]["reason"] == "platform_error"
-    public_events = json.loads(detail["replay"]["events_json"])
+    assert "replay" not in detail
+    public_events = _replay_events(c, "mg0")
     assert public_events == [
         {"type": "match_start", "game_id": "gomoku"},
         {"type": "error", "reason": "platform_error"},
@@ -152,7 +332,8 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
         ),
     )
     completed = c.get("/api/matches/mh0").json()
-    assert json.loads(completed["replay"]["events_json"]) == [
+    assert "replay" not in completed
+    assert _replay_events(c, "mh0") == [
         {"type": "match_start", "game_id": "holdem"},
         {
             "type": "match_end",
@@ -181,7 +362,7 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     )
     active = c.get("/api/matches/active-private").json()
     assert active["match"]["reason"] == ""
-    assert json.loads(active["replay"]["events_json"]) == []
+    assert _replay_events(c, "active-private") == []
     assert "/private" not in json.dumps(active, ensure_ascii=False)
 
     # Global match search is a minimal public projection. It must not return the
@@ -221,7 +402,7 @@ def test_public_match_and_replay_hide_free_form_terminal_errors(tmp_path):
     store.update_match("mh2", status="completed", reason="内部异常路径")
     chinese_private = c.get("/api/matches/mh2").json()
     assert chinese_private["match"]["reason"] == "completed"
-    assert json.loads(chinese_private["replay"]["events_json"])[-1]["reason"] == "completed"
+    assert _replay_events(c, "mh2")[-1]["reason"] == "completed"
     assert "内部异常路径" not in json.dumps(chinese_private, ensure_ascii=False)
 
 
@@ -362,14 +543,14 @@ def test_matches_normalize_legacy_incidents_to_one_current_contract(tmp_path):
     assert detail["result"]["technical_incident_samples"][0]["code"] == "missing_response"
 
     legacy_detail = c.get("/api/matches/mh0").json()
-    public_events = json.loads(legacy_detail["replay"]["events_json"])
+    public_events = _replay_events(c, "mh0")
     assert len([e for e in public_events if e["type"] == "technical_incident"]) == 3
     assert not [
         e
         for e in public_events
         if e["type"] in {"bot_decide_error", "bot_technical_error"}
     ]
-    assert "/private" not in legacy_detail["replay"]["events_json"]
+    assert "/private" not in json.dumps(public_events, ensure_ascii=False)
 
     # A terminal SSE subscription must use the same public read boundary. This
     # exercises the actual route generator, not only Store.get_public_replay().

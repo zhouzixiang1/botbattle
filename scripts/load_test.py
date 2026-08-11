@@ -684,8 +684,8 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
     if completed:
         mid = completed[0]["match"]["id"]
         owner_tok = ctx["tokens"][user_names[0]]
-        r = api.authed(owner_tok, "GET", f"/api/matches/{mid}")
-        events = json.loads(r.json()["replay"].get("events_json") or "[]")
+        r = api.authed(owner_tok, "GET", f"/api/matches/{mid}/replay")
+        events = r.json().get("events") or []
         check("replay events 非空", len(events) > 0, "空")
 
     # 排行榜 Glicko 已更新（challenge 类型会更新）

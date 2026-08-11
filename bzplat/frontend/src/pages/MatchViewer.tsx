@@ -4,7 +4,7 @@
  * - running/pending → 直播模式：开 SSE，从事件 1 按回放速度推进（DVR 模型），
  *   新事件先进入缓冲、显示「落后 N 个事件」、可「跳到最新」；match_end 到达后
  *   游标继续顺序补完（不强制跳结局）；已结束对局重开页同样自动从头播放。
- * - completed/aborted → 回放模式：一次性加载 events_json，从头自动播放。
+ * - completed/aborted → 元数据先渲染，再按需加载结构化 replay events。
  * - 座位身份：从 match.bot_a/bot_b（后端 JOIN）构造 SeatInfo 传 canvas。
  * - 合并旧 MatchDetail（回放）逻辑；ArenaWatch 已删除，/watch 旧路径不再重定向。
  */
@@ -22,7 +22,7 @@ import { Badge } from '@/components/ui/badge'
 import { Slider } from '@/components/ui/slider'
 import { ErrorMsg, Loading, EmptyState } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { apiGet, apiPost, errMsg } from '@/api'
+import { apiFetch, apiGet, apiPost, errMsg } from '@/api'
 import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
@@ -42,6 +42,13 @@ type MatchRow = MatchSeatRow & {
   status?: string
   reason?: string
   can_view_debug?: boolean
+}
+
+type ReplayPayload = {
+  match_id: string
+  events: RawEvent[]
+  event_count: number
+  updated_at?: string | null
 }
 
 function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
@@ -140,8 +147,11 @@ export default function MatchViewer() {
   const isLiveMatch = match?.status === 'running' || match?.status === 'pending'
   useEffect(() => {
     if (!id) return
+    const controller = new AbortController()
     setLoading(true)
     setError('')
+    setMatch(null)
+    setStatus('connecting')
     eventsLenRef.current = 0
     pendingEventsRef.current = []
     setEvents([])
@@ -190,19 +200,28 @@ export default function MatchViewer() {
     // 浏览计数（公开，失败忽略）
     void apiPost(`/api/matches/${encodeURIComponent(id)}/view`, 'POST', {}).catch(() => undefined)
 
-    void apiGet<{ match: MatchRow; replay: { events_json?: string } }>(`/api/matches/${encodeURIComponent(id)}`)
-      .then((d) => {
+    void apiFetch<{ match: MatchRow }>(`/api/matches/${encodeURIComponent(id)}`, {
+      method: 'GET',
+      signal: controller.signal,
+    })
+      .then(async (d) => {
         if (cancelled) return
         setMatch(d.match)
         const m = d.match
-        const evs: RawEvent[] = (() => { try { return JSON.parse(d.replay?.events_json || '[]') as RawEvent[] } catch { return [] } })()
-        eventsLenRef.current = evs.length
-        setEvents(evs)
+        if (!findGame(normalizeGameId(m.game_id))) {
+          // Unknown/future games have no reducer contract. Metadata is enough
+          // to render the explicit unsupported state; never download a replay
+          // that this client cannot safely interpret.
+          setStatus('error')
+          setLoading(false)
+          return
+        }
         const live = m.status === 'running' || m.status === 'pending'
         if (live) {
           setStatus('live'); setCursor(0); setPlaying(true)
           es = new EventSource(`/api/matches/${encodeURIComponent(id)}/events`)
           es.onmessage = (msg) => {
+            if (cancelled) return
             try {
               const ev = JSON.parse(msg.data) as RawEvent
               if (ev.type === 'snapshot') {
@@ -219,6 +238,7 @@ export default function MatchViewer() {
                   const local = queued.length ? [...prev, ...queued] : prev
                   return hist.length >= local.length ? hist : local
                 })
+                setLoading(false)
                 const terminal = snapshotMatch?.status === 'completed' || snapshotMatch?.status === 'aborted'
                 if (terminal) {
                   // 初始详情仍是 live、订阅瞬间已结束：snapshot 是唯一终态信号。
@@ -262,6 +282,7 @@ export default function MatchViewer() {
                   return patch
                 })
                 setStatus(String(ev.type))
+                setLoading(false)
                 terminalClosed = true
                 es?.close()
                 refreshTerminalMatch()
@@ -277,20 +298,39 @@ export default function MatchViewer() {
             // transport failure. Keep it alive and expose a connecting state;
             // the next authoritative snapshot restores `live` above.
             setStatus('connecting')
+            // A first-frame failure must not leave the whole page in a
+            // permanent spinner. Metadata stays visible while EventSource
+            // retries and a later snapshot can still populate the replay.
+            setLoading(false)
           }
         } else {
+          const replay = await apiFetch<ReplayPayload>(
+            `/api/matches/${encodeURIComponent(id)}/replay`,
+            { method: 'GET', signal: controller.signal },
+          )
+          if (cancelled) return
+          const evs = Array.isArray(replay.events) ? replay.events : []
+          eventsLenRef.current = evs.length
+          setEvents(evs)
           const pinTechnicalTerminal =
             matchHasTechnicalLoss(m) && Number(m.result?.rounds_played ?? 0) <= 0
           setStatus('replay')
           setCursor(evs.length > 0 ? (pinTechnicalTerminal ? evs.length - 1 : 0) : 0)
           setPlaying(evs.length > 0 && !pinTechnicalTerminal)
+          setLoading(false)
         }
       })
-      .catch((e) => { if (!cancelled) { setError(errMsg(e)); setStatus('error') } })
-      .finally(() => { if (!cancelled) setLoading(false) })
+      .catch((e) => {
+        if (!cancelled && !(e instanceof DOMException && e.name === 'AbortError')) {
+          setError(errMsg(e))
+          setStatus('error')
+          setLoading(false)
+        }
+      })
 
     return () => {
       cancelled = true
+      controller.abort()
       cancelFlush()
       pendingEventsRef.current = []
       es?.close()
