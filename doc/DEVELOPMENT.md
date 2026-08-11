@@ -166,7 +166,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
 | **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，半负载并发 ceiling=`max(1,cpu//4)`，全员循环 `FULL_RR_MAX_N=12`；admin 不可抬高（`runtime/limits.py`） |
-| **运行参数** | `runtime/config.py` 是 action timeout、全局双资源容量/aging/用户上限、自动排位定级阈值、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。自动排位只是 producer，唯一可变项为 `execution_control.auto_enabled`；`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
+| **运行参数** | `runtime/config.py` 是 action timeout、全局双资源容量/aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。自动排位只是 producer，唯一可变项为 `execution_control.auto_enabled`；`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |
 | **前端组件** | 用 `@/components/ui/*` 共享原语，禁内联重复样式 |
@@ -193,7 +193,6 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
    - `engine.py`（裁判↔平台协议适配，提供 Session 并驱动纯裁判，`run_async(decide) → MatchResult`）
    - `protocol.py`（`dumps_request` / `loads_response` / `validate_response_payload` / `fail_response`；只导出本游戏 API；复用 `games/_board_protocol.py` 时在 spec 的 `shared_source_files` 声明公开源码）
    - `result.py`（**独立**定义，满足鸭子契约：`winners` + `deltas`，**不**共享基类）
-   - `tiers.py`（段位曲线，查表用 `base.tier_for_in`）
    - `templates.py`（本游戏内置赛事模板）
    - `spec.py`（装配 `GameSpec`，声明 `normalize_delta` 与 `progress_from_events`）
 2. `store/schema.py` 的 `REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项；`Store._migrate()` 根据注册 ID 用同构模板创建 `matches_<game>` 表及索引，不复制静态 DDL。
@@ -203,6 +202,8 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 6. 跑测试：`pytest`（含 `test_result_contract` / `test_import_cycles` / `test_game_registry` / `test_tongyong_layer_no_game_branches`）+ `npm run build`。
 
 > 新代码直接面向 `games` 注册表，不要在 `matches/runner.py` 加游戏分支。`run_session` 的 kwargs 仅供内部复现控制，新增或拼错规则键必须显式失败。
+
+公开排名资格只修改 `runtime/config.py` 的 `RANKING_MIN_RATED_MATCHES`；auto-match 内部冷启动目标是独立的 `AutoMatchConfig.bootstrap_target_matches`。两者目前默认都是 10，但消费边界不同，不得用调度配置驱动公开 API。
 
 ### 5.2 新增 API 端点
 - 在 `api_routes.py`（或 `auth/routes.py`）加路由，按需用 `require_user`/`require_admin`/`require_organizer` 依赖。

@@ -12,10 +12,11 @@ import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
+from bzplat.backend.runtime.config import RANKING_MIN_RATED_MATCHES
 
 from .public_contract import (
     READ_TECHNICAL_INCIDENT_EVENTS,
@@ -85,6 +86,55 @@ class _RatingProjectionMutationGuard:
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+_GLICKO_95_Z = 1.96
+
+
+def _attach_numeric_ranking(
+    row: dict,
+    *,
+    eligible: bool,
+    rank: int | None,
+    rank_total: int,
+) -> dict:
+    """Attach the public numeric ranking contract to one rating row.
+
+    Percentile is an ordinal interpolation over eligible public Bots: a sole
+    Bot is at 100; with N>1, ``100 * (N-rank) / (N-1)`` maps first to 100 and
+    last to 0. Bots below the public sample threshold have no rank/percentile.
+    """
+    rated_matches = max(0, int(row.get("rated_matches") or 0))
+    minimum = max(1, int(RANKING_MIN_RATED_MATCHES))
+    rating = row.get("rating")
+    rd = row.get("rd")
+
+    row["rated_matches"] = rated_matches
+    row["ranking_min_matches"] = minimum
+    row["ranking_progress"] = round(min(1.0, rated_matches / minimum), 4)
+    row["ranking_eligible"] = bool(eligible)
+    row["rank_total"] = max(0, int(rank_total))
+    row["rank"] = int(rank) if eligible and rank is not None else None
+
+    if rating is None or rd is None:
+        row["confidence_low"] = None
+        row["confidence_high"] = None
+    else:
+        center = float(rating)
+        spread = _GLICKO_95_Z * max(0.0, float(rd))
+        row["confidence_low"] = round(center - spread, 2)
+        row["confidence_high"] = round(center + spread, 2)
+
+    if not eligible or row["rank"] is None or row["rank_total"] <= 0:
+        row["percentile"] = None
+    elif row["rank_total"] == 1:
+        row["percentile"] = 100.0
+    else:
+        row["percentile"] = round(
+            100.0 * (row["rank_total"] - row["rank"]) / (row["rank_total"] - 1),
+            2,
+        )
+    return row
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -3986,7 +4036,7 @@ class Store:
             )
 
     def bot_profile(self, bot_id: int) -> dict | None:
-        """聚合 Bot 详情：bot 信息 + owner + rating + 胜率 + 段位。
+        """聚合 Bot 详情：身份、Glicko 数值、公开名次与可靠性样本。
 
         不含对局历史与对手战绩（单独端点，避免单次返回过大）。
         """
@@ -3994,8 +4044,9 @@ class Store:
             row = c.execute(
                 "SELECT b.*, u.username AS owner_name, "
                 "u.display_name AS owner_display, "
-                "r.rating, r.rd, r.vol, r.wins, r.losses, r.draws, "
-                "r.matches_played, r.last_played_at AS rated_at "
+                "r.rating, r.rd, COALESCE(r.wins,0) AS wins, "
+                "COALESCE(r.losses,0) AS losses, COALESCE(r.draws,0) AS draws, "
+                "COALESCE(r.matches_played,0) AS rated_matches "
                 "FROM bots b "
                 "LEFT JOIN users u ON b.owner_id=u.id "
                 "LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
@@ -4003,14 +4054,106 @@ class Store:
                 (bot_id,),
             ).fetchone()
             d = _row(row)
-            if d is not None:
-                from bzplat.backend.games import registry as _game_registry
-                t = _game_registry.tier_for(
-                    _registered_game_id(d.get("game_id")), d.get("rating")
+            if d is None:
+                return None
+
+            gid = _registered_game_id(d.get("game_id"))
+            match_table = _matches_table(gid)
+            rated_matches = max(0, int(d.get("rated_matches") or 0))
+            rating = d.get("rating")
+            public_candidate = (
+                bool(d.get("is_active"))
+                and d.get("format") == SUPPORTED_BINARY_FORMAT
+                and d.get("os") == SUPPORTED_BINARY_OS
+                and d.get("arch") == SUPPORTED_BINARY_ARCH
+                and rating is not None
+            )
+            ranking_eligible = (
+                public_candidate and rated_matches >= RANKING_MIN_RATED_MATCHES
+            )
+            cutoff_30d = (datetime.now() - timedelta(days=30)).isoformat(
+                timespec="seconds"
+            )
+            metrics = c.execute(
+                f"""
+                SELECT
+                  COUNT(*) AS rank_total,
+                  COALESCE(SUM(CASE WHEN (
+                    r.rating > :target_rating OR
+                    (r.rating = :target_rating AND r.matches_played > :target_matches) OR
+                    (r.rating = :target_rating AND r.matches_played = :target_matches
+                     AND r.bot_id < :target_bot_id)
+                  ) THEN 1 ELSE 0 END), 0) AS better_count,
+                  (SELECT COUNT(DISTINCT opponent_id) FROM (
+                    SELECT bot_b_id AS opponent_id FROM pair_stats WHERE bot_a_id=:target_bot_id
+                    UNION ALL
+                    SELECT bot_a_id AS opponent_id FROM pair_stats WHERE bot_b_id=:target_bot_id
+                  )) AS unique_opponents,
+                  (SELECT rh.rating FROM rating_history rh
+                   WHERE rh.bot_id=:target_bot_id AND rh.game_id=:game_id
+                   ORDER BY rh.id DESC LIMIT 1 OFFSET 1) AS prev_rating,
+                  (SELECT rh.rating FROM rating_history rh
+                   WHERE rh.bot_id=:target_bot_id AND rh.game_id=:game_id
+                     AND rh.created_at <= :cutoff_30d
+                   ORDER BY rh.created_at DESC, rh.id DESC LIMIT 1) AS baseline_30d,
+                  (SELECT COUNT(*) FROM {match_table} tm
+                   JOIN match_rating_settlements settled ON settled.match_id=tm.id
+                   WHERE tm.status=:completed
+                     AND tm.match_type NOT IN (:contest_type,:human_type)
+                     AND tm.bot_a_id <> tm.bot_b_id AND tm.technical_loss=1
+                     AND ((tm.bot_a_id=:target_bot_id AND tm.winner=1)
+                          OR (tm.bot_b_id=:target_bot_id AND tm.winner=0)))
+                    AS technical_failures
+                FROM ratings r
+                JOIN bots b ON b.id=r.bot_id AND b.game_id=r.game_id
+                WHERE b.is_active=1 AND b.format=:binary_format
+                  AND b.os=:binary_os AND b.arch=:binary_arch
+                  AND b.game_id=:game_id
+                  AND r.matches_played >= :ranking_min_matches
+                """,
+                {
+                    "target_rating": rating,
+                    "target_matches": rated_matches,
+                    "target_bot_id": bot_id,
+                    "game_id": gid,
+                    "cutoff_30d": cutoff_30d,
+                    "completed": STATUS_COMPLETED,
+                    "contest_type": TYPE_CONTEST,
+                    "human_type": TYPE_HUMAN,
+                    "binary_format": SUPPORTED_BINARY_FORMAT,
+                    "binary_os": SUPPORTED_BINARY_OS,
+                    "binary_arch": SUPPORTED_BINARY_ARCH,
+                    "ranking_min_matches": RANKING_MIN_RATED_MATCHES,
+                },
+            ).fetchone()
+            metric = _row(metrics) or {}
+            rank_total = int(metric.get("rank_total") or 0)
+            rank = int(metric.get("better_count") or 0) + 1 if ranking_eligible else None
+            prev_rating = metric.get("prev_rating")
+            baseline_30d = metric.get("baseline_30d")
+            d["rating_delta"] = (
+                round(float(rating) - float(prev_rating), 2)
+                if rating is not None and prev_rating is not None else None
+            )
+            d["recent_delta_30d"] = (
+                round(float(rating) - float(baseline_30d), 2)
+                if rating is not None and baseline_30d is not None else None
+            )
+            d["unique_opponents"] = int(metric.get("unique_opponents") or 0)
+            d["technical_failures"] = int(metric.get("technical_failures") or 0)
+            if rated_matches > 0:
+                d["normal_completion_rate"] = round(
+                    max(0.0, min(1.0, (rated_matches - d["technical_failures"]) / rated_matches)),
+                    4,
                 )
-                d["tier_level"] = t.level
-                d["tier_key"] = t.key
-                d["tier_name"] = t.name
+            else:
+                d["normal_completion_rate"] = None
+            _attach_numeric_ranking(
+                d,
+                eligible=ranking_eligible,
+                rank=rank,
+                rank_total=rank_total,
+            )
             return d
 
     def bot_opponents_stats(
@@ -5713,9 +5856,8 @@ class Store:
     def list_leaderboard(
         self, *, game_id: str, limit: int = 50,
         page: int | None = None, per_page: int = 50,
-        placement_games: int | None = None,
     ) -> dict:
-        """返回单一游戏的正式榜、定级区和紧凑概览。
+        """返回单一游戏的公开排名、计分样本和紧凑概览。
 
         Glicko-2 评分池按游戏隔离，因此 ``game_id`` 是不可省略的维度；Store
         也必须 fail closed，不能只依赖 API 层阻止跨游戏混排。最近对局只接受
@@ -5743,33 +5885,40 @@ class Store:
                 SUPPORTED_BINARY_ARCH,
                 gid,
             )
-            placement_required = (
-                max(0, int(placement_games)) if placement_games is not None else 0
-            )
-            formal_condition = (
-                f"r.matches_played >= {placement_required}"
-                if placement_required > 0 else "1=1"
-            )
+            ranking_min_matches = max(1, int(RANKING_MIN_RATED_MATCHES))
+            eligible_condition = f"r.matches_played >= {ranking_min_matches}"
 
             summary_row = c.execute(
                 "SELECT COUNT(*) AS total, "
-                f"SUM(CASE WHEN {formal_condition} THEN 1 ELSE 0 END) AS ranked, "
-                f"SUM(CASE WHEN {formal_condition} THEN 0 ELSE 1 END) AS placement, "
+                f"SUM(CASE WHEN {eligible_condition} THEN 1 ELSE 0 END) AS eligible, "
+                f"SUM(CASE WHEN {eligible_condition} THEN 0 ELSE 1 END) AS sample, "
                 f"MAX(r.last_played_at) AS last_rated_at {eligibility_from}",
                 eligibility_params,
             ).fetchone()
             summary = {
                 "total": int(summary_row["total"] or 0),
-                "ranked": int(summary_row["ranked"] or 0),
-                "placement": int(summary_row["placement"] or 0),
+                "eligible": int(summary_row["eligible"] or 0),
+                "sample": int(summary_row["sample"] or 0),
                 "last_rated_at": summary_row["last_rated_at"],
             }
+            cutoff_30d = (datetime.now() - timedelta(days=30)).isoformat(
+                timespec="seconds"
+            )
 
             # last_rh 只接纳三处一致的 completed 对局。rating_history.reason 中
             # 的非 match 原因、错误 game_id 索引和缺失物理行都会被自然跳过。
+            opponent_cte = (
+                "WITH opponent_counts AS ("
+                " SELECT bot_id, COUNT(DISTINCT opponent_id) AS unique_opponents FROM ("
+                "  SELECT bot_a_id AS bot_id, bot_b_id AS opponent_id FROM pair_stats "
+                "  UNION ALL SELECT bot_b_id AS bot_id, bot_a_id AS opponent_id FROM pair_stats"
+                " ) GROUP BY bot_id"
+                ") "
+            )
             item_from = (
                 f"FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
+                "LEFT JOIN opponent_counts oc ON oc.bot_id=r.bot_id "
                 "LEFT JOIN rating_history last_rh ON last_rh.id=("
                 " SELECT rh.id FROM rating_history rh "
                 " JOIN matches_index mi ON mi.id=rh.reason AND mi.game_id=rh.game_id "
@@ -5782,66 +5931,67 @@ class Store:
                 "AND b.game_id=?"
             )
             item_params: tuple[Any, ...] = (
+                cutoff_30d,
                 STATUS_COMPLETED,
                 *eligibility_params,
             )
             sel = (
                 "SELECT r.bot_id, r.rating, r.rd, r.wins, r.losses, "
-                "r.draws, r.matches_played, "
+                "r.draws, r.matches_played AS rated_matches, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
                 "u.username AS owner_name, "
+                "COALESCE(oc.unique_opponents,0) AS unique_opponents, "
                 "(SELECT rh.rating FROM rating_history rh "
                 " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id "
                 " ORDER BY rh.id DESC LIMIT 1 OFFSET 1) AS prev_rating, "
+                "(SELECT rh.rating FROM rating_history rh "
+                " WHERE rh.bot_id=r.bot_id AND rh.game_id=r.game_id "
+                " AND rh.created_at <= ? "
+                " ORDER BY rh.created_at DESC, rh.id DESC LIMIT 1) AS baseline_30d, "
                 "last_rh.reason AS last_match_id, "
                 "last_rh.created_at AS last_match_at, "
-                f"ROW_NUMBER() OVER (PARTITION BY CASE WHEN {formal_condition} "
+                f"ROW_NUMBER() OVER (PARTITION BY CASE WHEN {eligible_condition} "
                 "THEN 1 ELSE 0 END ORDER BY r.rating DESC, r.matches_played DESC, "
                 "r.bot_id ASC) AS group_rank "
             )
-            # 正式榜排在定级中 Bot 之前；组内按 rating、场次、bot_id 稳定排序。
-            # placement_required 来自代码配置并先转 int，不接受 SQL 输入。
+            # 公开排名排在计分样本之前；组内按 rating、场次、bot_id 稳定排序。
             order = (
-                f" ORDER BY ({formal_condition}) DESC, r.rating DESC, "
+                f" ORDER BY ({eligible_condition}) DESC, r.rating DESC, "
                 "r.matches_played DESC, r.bot_id ASC"
             )
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
                 off = (max(1, int(page)) - 1) * pp
-                sql = f"{sel}{item_from}{order} LIMIT ? OFFSET ?"
+                sql = f"{opponent_cte}{sel}{item_from}{order} LIMIT ? OFFSET ?"
                 rows = [_row(r) for r in c.execute(
                     sql, item_params + (pp, off)
                 ).fetchall()]
             else:
                 pp = max(1, min(limit, 200))
-                sql = f"{sel}{item_from}{order} LIMIT ?"
+                sql = f"{opponent_cte}{sel}{item_from}{order} LIMIT ?"
                 rows = [_row(r) for r in c.execute(
                     sql, item_params + (pp,)
                 )]
-            # 计算并补 tier + delta（应用层，避免 SQL 嵌套过深）
-            # 段位 per-game：整个结果集已经钉死 gid，不从行数据猜游戏。
-            from bzplat.backend.games import registry as _game_registry
+            # 计算数值投影（应用层，避免 SQL 嵌套过深）。
             for row in rows:
                 prev = row.pop("prev_rating", None)
+                baseline_30d = row.pop("baseline_30d", None)
                 if prev is not None:
                     row["rating_delta"] = round(row["rating"] - prev, 2)
                 else:
                     row["rating_delta"] = None
-                t = _game_registry.tier_for(gid, row["rating"])
-                row["tier_level"] = t.level
-                row["tier_key"] = t.key
-                row["tier_name"] = t.name
-                played = max(0, int(row.get("matches_played") or 0))
-                row["placement_required"] = placement_required
-                row["placement_remaining"] = max(
-                    0, placement_required - played
+                row["recent_delta_30d"] = (
+                    round(row["rating"] - baseline_30d, 2)
+                    if baseline_30d is not None else None
                 )
-                row["is_placement"] = (
-                    placement_required > 0 and played < placement_required
-                )
+                played = max(0, int(row.get("rated_matches") or 0))
+                eligible = played >= ranking_min_matches
                 group_rank = row.pop("group_rank", None)
-                row["rank"] = (
-                    None if row["is_placement"] else int(group_rank or 0)
+                _attach_numeric_ranking(
+                    row,
+                    eligible=eligible,
+                    rank=int(group_rank or 0) if eligible else None,
+                    rank_total=summary["eligible"],
                 )
 
             result: dict[str, Any] = {
@@ -5849,7 +5999,7 @@ class Store:
                 "total": summary["total"],
                 "summary": summary,
                 "game_id": gid,
-                "placement_required": placement_required,
+                "ranking_min_matches": ranking_min_matches,
             }
             if page is not None:
                 result.update({
@@ -5866,13 +6016,13 @@ class Store:
         *,
         limit: int = 100,
         stale_since: int | None = None,
-        placement_games: int | None = None,
+        bootstrap_target_matches: int | None = None,
     ) -> list[dict]:
         """按陈旧度返回可对战 bot，供闲时自动对局挑选。
 
         - stale_since（秒，>0）：只返回 last_played_at 早于 now-stale_since 或从未赛（NULL）的 bot；
           None/0 = 不限。
-        - placement_games（>0）：matches_played < 该值的「定级期」bot 排最前（新 bot 优先定级），
+        - bootstrap_target_matches（>0）：样本数低于内部目标的 bot 排最前，
           其后按陈旧度（NULL 最前，再按时间升序）。
         仅返回 active+public+非内置且有二进制的 bot。
         """
@@ -5900,10 +6050,12 @@ class Store:
                 cutoff = (datetime.now() - timedelta(seconds=int(stale_since))).isoformat(timespec="seconds")
                 sql += " AND (r.last_played_at IS NULL OR r.last_played_at < ?)"
                 params.append(cutoff)
-            # 排序：定级期 bot 最前（若有），其后 NULL 最前、再按时间升序
+            # 排序：bootstrap 样本不足的 bot 最前，其后 NULL 最前、再按时间升序
             order = " ORDER BY "
-            if placement_games and placement_games > 0:
-                order += f"(r.matches_played < {int(placement_games)}) DESC, "
+            if bootstrap_target_matches and bootstrap_target_matches > 0:
+                order += (
+                    f"(r.matches_played < {int(bootstrap_target_matches)}) DESC, "
+                )
             order += "r.last_played_at IS NULL DESC, r.last_played_at ASC LIMIT ?"
             sql += order
             params.append(limit)

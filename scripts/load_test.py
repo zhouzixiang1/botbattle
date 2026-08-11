@@ -316,9 +316,6 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     r = api.client.get("/api/leaderboard?game_id=holdem&limit=20")
     check("GET /api/leaderboard", r.status_code == 200 and "leaderboard" in r.json(), r.text[:80])
 
-    # 段位定义（PR-5）
-    r = api.client.get("/api/tiers?game_id=holdem")
-    check("GET /api/tiers", r.status_code == 200 and len(r.json().get("tiers", [])) >= 6, r.text[:80])
     # 经验/等级体系（PR-9）
     r = api.client.get("/api/levels/info")
     check("GET /api/levels/info", r.status_code == 200 and "thresholds" in r.json(), r.text[:80])
@@ -694,7 +691,7 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
     # 排行榜 Glicko 已更新（challenge 类型会更新）
     r = api.client.get("/api/leaderboard?game_id=holdem&limit=50")
     lb = r.json().get("leaderboard", [])
-    played = [x for x in lb if x.get("matches_played", 0) > 0]
+    played = [x for x in lb if x.get("rated_matches", 0) > 0]
     check("排行榜存在已参赛 bot（Glicko 更新）", len(played) > 0, f"played={len(played)}")
 
     print(f"    阶段 2 总耗时 {dt:.1f}s，completed={len(completed)} aborted={len(aborted)}")

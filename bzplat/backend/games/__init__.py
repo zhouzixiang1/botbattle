@@ -14,7 +14,6 @@ from bzplat.backend.games.base import (
     GameSpec,
     ProtocolSpec,
     SessionFactory,
-    TierDef,
 )
 from bzplat.backend.games.gomoku.spec import SPEC as _GOMOKU_SPEC
 from bzplat.backend.games.holdem.spec import SPEC as _HOLDEM_SPEC
@@ -156,7 +155,6 @@ __all__ = [
     "registry",
     "GameRegistry",
     "GameSpec",
-    "TierDef",
     "ProtocolSpec",
     "SessionFactory",
     "normalize_game_id",

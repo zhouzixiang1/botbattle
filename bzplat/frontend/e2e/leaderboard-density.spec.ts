@@ -40,10 +40,13 @@ test.beforeAll(async ({ browser, baseURL }) => {
 
 function mockedLeaderboard(gameId: string) {
   const rows = Array.from({ length: 12 }, (_, index) => {
-    const placement = index >= 10
-    const played = placement ? 8 + (index - 10) : 24 + index
+    const eligible = index < 10
+    const played = eligible ? 24 + index : 8 + (index - 10)
+    const rank = eligible ? index + 1 : null
     return {
-      rank: placement ? null : index + 1,
+      rank,
+      rank_total: 10,
+      percentile: rank == null ? null : Number((100 * (10 - rank) / 9).toFixed(2)),
       bot_id: 80_000 + index,
       bot_name: `${gameId}_bot_${index + 1}`,
       bot_display: index === 0
@@ -54,16 +57,18 @@ function mockedLeaderboard(gameId: string) {
         : `owner_${index + 1}`,
       rating: 2100 - index * 37,
       rd: 62 + index,
+      confidence_low: 2100 - index * 37 - 1.96 * (62 + index),
+      confidence_high: 2100 - index * 37 + 1.96 * (62 + index),
       wins: Math.max(0, played - 7),
       draws: index % 3,
       losses: Math.max(0, 7 - (index % 3)),
-      matches_played: played,
+      rated_matches: played,
+      unique_opponents: Math.min(played, 7 + index),
       rating_delta: index % 3 === 0 ? 12.4 : index % 3 === 1 ? -7.6 : 0,
-      tier_name: index < 3 ? '专家' : '熟练',
-      tier_key: index < 3 ? 'expert' : 'silver',
-      is_placement: placement,
-      placement_required: 10,
-      placement_remaining: placement ? 10 - played : 0,
+      recent_delta_30d: index % 4 === 0 ? null : 18.6 - index,
+      ranking_min_matches: 10,
+      ranking_progress: Math.min(1, played / 10),
+      ranking_eligible: eligible,
       last_match_id: index % 4 === 0 ? null : `${gameId}-validated-match-${index}`,
       last_match_at: index % 4 === 0 ? null : `2026-08-10T12:${String(index).padStart(2, '0')}:00`,
     }
@@ -71,11 +76,11 @@ function mockedLeaderboard(gameId: string) {
   return {
     leaderboard: rows,
     game_id: gameId,
-    placement_required: 10,
+    ranking_min_matches: 10,
     summary: {
       total: 12,
-      ranked: 10,
-      placement: 2,
+      eligible: 10,
+      sample: 2,
       last_rated_at: '2026-08-10T12:30:00',
     },
     page: 1,
@@ -155,7 +160,6 @@ for (const viewport of VIEWPORTS) {
       const monitor = monitorBrowser(page)
       const leaderboardRequests = new Map<string, number>()
       let queueRequests = 0
-      const tierRequests = new Map<string, number>()
 
       await page.route('**/api/leaderboard?**', async (route) => {
         const url = new URL(route.request().url())
@@ -172,11 +176,6 @@ for (const viewport of VIEWPORTS) {
           body: JSON.stringify(mockedLeaderboard(gameId)),
         })
       })
-      await page.route('**/api/tiers?**', async (route) => {
-        const gameId = new URL(route.request().url()).searchParams.get('game_id') || ''
-        tierRequests.set(gameId, (tierRequests.get(gameId) ?? 0) + 1)
-        await route.continue()
-      })
       await page.route('**/api/execution-queue', async (route) => {
         queueRequests += 1
         await route.fulfill({
@@ -185,7 +184,6 @@ for (const viewport of VIEWPORTS) {
           body: JSON.stringify(mockedExecutionQueue()),
         })
       })
-
       const authProbe = page.waitForResponse((response) => {
         const url = new URL(response.url())
         return response.request().method() === 'GET' && url.pathname === '/api/auth/me'
@@ -208,10 +206,10 @@ for (const viewport of VIEWPORTS) {
       }
       const main = page.locator('main')
       await expect(main.getByRole('heading', { name: '排行榜', exact: true })).toBeVisible()
-      await expect(main).toContainText('每款游戏独立使用 Glicko-2 评级')
+      await expect(main).toContainText('每款游戏独立使用 Glicko-2 数值评分')
       await expect(main).toContainText('Bot 总数')
-      await expect(main).toContainText('正式榜')
-      await expect(main).toContainText('定级中')
+      await expect(main).toContainText('公开排名')
+      await expect(main).toContainText('计分样本')
       await expect(main).toContainText('最近更新')
       const queuePanel = page.getByTestId('execution-queue-panel')
       await expect(queuePanel).toBeVisible()
@@ -225,8 +223,8 @@ for (const viewport of VIEWPORTS) {
         '#/match/holdem-human-active-match',
       )
       await expect(queuePanel).toContainText('人机对战不计评分')
-      const totalValue = main.getByText('Bot 总数', { exact: true }).locator('..').locator('dd')
-      await expect(totalValue).toHaveText('12')
+      const totalMetric = main.getByText('Bot 总数', { exact: true }).locator('..')
+      await expect(totalMetric).toContainText('12')
       const holdemTab = page.getByRole('tab', { name: '德州扑克', exact: true })
       const gomokuTab = page.getByRole('tab', { name: '五子棋', exact: true })
       await expect(holdemTab).toHaveAttribute('aria-selected', 'true')
@@ -234,7 +232,7 @@ for (const viewport of VIEWPORTS) {
       const activeLayout = viewport.name === 'mobile'
         ? page.getByTestId('leaderboard-mobile')
         : page.getByTestId('leaderboard-desktop')
-      await expect(activeLayout.getByText('定级中（暂无正式名次）', { exact: false })).toBeVisible()
+      await expect(activeLayout.getByText('计分样本（无公开名次）', { exact: false })).toBeVisible()
       await expect(main).not.toContainText('elf/linux-amd64')
       await expect(main.getByRole('columnheader', { name: '平台', exact: true })).toHaveCount(0)
       await expect(main.getByRole('columnheader', { name: '游戏', exact: true })).toHaveCount(0)
@@ -277,12 +275,12 @@ for (const viewport of VIEWPORTS) {
       })
       // Click while the list is scrolled: the sticky tabs must remain operable.
       await gomokuTab.click()
-      await expect(totalValue).toHaveText('0')
+      await expect(totalMetric).toContainText('0')
       await expect(activeLayout).toBeHidden()
       await gomokuResponse
       await expect(gomokuTab).toHaveAttribute('aria-selected', 'true')
       await expect(holdemTab).toHaveAttribute('aria-selected', 'false')
-      await expect(totalValue).toHaveText('12')
+      await expect(totalMetric).toContainText('12')
       await expect(activeLayout.getByText('GOMOKU Bot 2', { exact: true })).toBeVisible()
       await expect(queuePanel).toContainText('德州扑克')
       await expect(queuePanel).toContainText('五子棋')
@@ -292,8 +290,6 @@ for (const viewport of VIEWPORTS) {
       expect(leaderboardRequests.get('holdem')).toBeGreaterThanOrEqual(1)
       expect(leaderboardRequests.get('gomoku')).toBeGreaterThanOrEqual(1)
       expect(queueRequests).toBeGreaterThanOrEqual(1)
-      expect(tierRequests.get('holdem'), `${role} holdem tiers should be singleflight`).toBe(1)
-      expect(tierRequests.get('gomoku'), `${role} gomoku tiers should be singleflight`).toBe(1)
       await monitor.expectClean()
       await context.close()
     }

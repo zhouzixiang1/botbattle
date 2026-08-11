@@ -214,7 +214,7 @@ export default function UserProfile() {
       <SummaryStrip columns={4}>
         <SummaryMetric label="总胜率" value={`${winRate.toFixed(1)}%`} detail={`${totalGames} 场计分对局`} />
         <SummaryMetric label="胜" value={wins} detail={`负 ${profile.stats.losses || 0} · 平 ${profile.stats.draws || 0}`} />
-        <SummaryMetric label="公开 Bot" value={profile.bot_count} detail={`${profile.stats.rated_bots || 0} 个已定级`} icon={<BotIcon className="size-4" />} />
+        <SummaryMetric label="公开 Bot" value={profile.bot_count} detail={`${profile.stats.rated_bots || 0} 个有评分记录`} icon={<BotIcon className="size-4" />} />
         <SummaryMetric label="社交" value={user && !isSelf ? followerCount : '—'} detail={user && !isSelf ? '粉丝数' : '登录后可关注'} icon={<Users className="size-4" />} />
       </SummaryStrip>
 

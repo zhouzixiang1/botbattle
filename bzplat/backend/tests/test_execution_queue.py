@@ -712,6 +712,42 @@ def test_auto_refill_quarantines_corrupt_current_artifact(queue_store):
     ).fetchone()[0] == 0
 
 
+def test_auto_refill_bootstrap_lane_prioritizes_low_sample_bots(queue_store):
+    """冷启动资格由 execution queue 的已计分场次通道实现。"""
+    store = queue_store
+    bootstrap = (_bot(store, "bootstrap-a"), _bot(store, "bootstrap-b"))
+    established = (_bot(store, "established-a"), _bot(store, "established-b"))
+    for bot in bootstrap:
+        store.update_rating_row(
+            bot["bot_id"], game_id="holdem", matches_played=1
+        )
+    for bot in established:
+        store.update_rating_row(
+            bot["bot_id"], game_id="holdem", matches_played=20
+        )
+    _verify_projection(store)
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE auto_match_fair_state SET next_game_idx=0,next_lane=0 "
+            "WHERE singleton=1"
+        )
+
+    result = store.executions.refill_auto(
+        target_queued=1,
+        bootstrap_target_matches=10,
+    )
+
+    assert result["inserted"] == 1
+    decision = store._conn.execute(
+        "SELECT actual_lane,bot_a_id,bot_b_id FROM auto_match_decisions"
+    ).fetchone()
+    assert decision["actual_lane"] == "bootstrap"
+    assert {decision["bot_a_id"], decision["bot_b_id"]} == {
+        bootstrap[0]["bot_id"],
+        bootstrap[1]["bot_id"],
+    }
+
+
 def test_finalize_never_releases_capacity_for_non_terminal_match(queue_store):
     pair = (_bot(queue_store, "finalize-a"), _bot(queue_store, "finalize-b"))
     queued = _enqueue_pair(queue_store, pair)

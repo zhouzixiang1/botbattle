@@ -39,7 +39,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 上传 Bot | 唯一接受 Linux x86_64 ELF；PE/`.exe`、Mach-O、ARM64 ELF、原始 `.py` 与脚本全部拒绝；预检按所选 runtime_mode 使用正式首回合同一信封，LongRunning 必须握手 |
 | 历史二进制 | 旧库中非 Linux x86_64 ELF 记录只可供 owner/admin 审计，必须标记为不可运行；不得出现在公开选择器、搜索、排行榜、自动排位或报名候选中，也不得由 owner/admin 重新激活；即使旧版本没有 checksum/size，缺失文件也须在 job 创建/claim 的完整性门禁拒绝 |
 | 版本管理 | 同一 Bot 可上传多版本，可切换激活版本，可删/改名/改简介 |
-| Bot 详情页 | 信息卡（评级/胜率/战绩/段位）+ 对局历史 + 对手战绩 + 评分曲线（recharts）|
+| Bot 详情页 | 数值评分卡（Rating/RD/95% 区间/公开名次/样本/可靠性）+ 对局历史 + 对手战绩 + 评分曲线（recharts）|
 
 ### 3.3 对局与观赛
 | 需求 | 验收标准 |
@@ -58,8 +58,8 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 需求 | 验收标准 |
 |------|---------|
 | Glicko-2 评分 | 自实现，按游戏分别排名；对局完成自动更新（contest/human 除外） |
-| 段位称号 | 6 档：新手(<1600)/进阶/熟练/高手/专家/大师(≥2200)，彩色徽章 |
-| 排名趋势 | rating_history 记录评分变化，排行榜显示升降箭头 |
+| 数值排名 | 至少 `RANKING_MIN_RATED_MATCHES` 场才有公开名次；展示 1-based 名次/总数、百分位、Rating/RD、95% 区间和样本进度，不输出定性标签 |
+| 排名趋势 | `rating_history` 记录评分变化；排行榜显示相邻变化和 30 日基线变化 |
 
 ### 3.5 赛事系统
 | 需求 | 验收标准 |
@@ -112,7 +112,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | **可靠** | 本地 supervisor | 同 DB 由邻接 flock 保证单 dispatcher；Docker 固定 canonical 本机 socket，以稳定 `BZ_INSTANCE_KEY` 和 job/attempt/slot label 精确清理；旧 active 状态与控制结果不确定均 fail closed |
 | **可靠** | 隔离 QA | `BZ_QA_INSTANCE=1` 时拒绝 50380、主库同路径/同 inode 与主 checkout 运行时写目标；Vite 同样拒绝代理到 50380 |
 | **可靠** | 日志可查 | 统一日志 `logs/app.log`（5MB×5 轮转），Bot stderr 尾部 4KB 捕获，admin 网页查看 |
-| **可维护** | 新增游戏低成本 | 实现 `games/<game>/`（engine/protocol/result/tiers/templates/spec）+ 常量/注册 + 前端 GameViewSpec；同构对局表由迁移模板创建，赛制/编排主流程禁止增加 `if game_id` 分支 |
+| **可维护** | 新增游戏低成本 | 实现 `games/<game>/`（engine/protocol/result/templates/spec）+ 常量/注册 + 前端 GameViewSpec；同构对局表由迁移模板创建，赛制/编排主流程禁止增加 `if game_id` 分支 |
 | **可维护** | 常量集中 | 所有状态码/类型/`REGISTERED_ENGINES`/平台 settings 键名集中在 `schema.py` |
 | **可用性** | 响应式 | 桌面/平板/手机三档适配，移动端汉堡菜单 + 表格列隐藏 |
 | **可用性** | 暗色模式 | OKLCH 双主题，浅色默认 + 暗色对等，顶栏一键切换 |
@@ -126,7 +126,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | Bot 管理 | `bots/` + api_routes | test_settings_mybots | wiki/BOT_DEV、BOT_DETAIL |
 | 对局编排 | `matches/execution_queue+orchestrator+runner`、`store/execution` | test_execution_queue、test_engine、test_protocol | wiki/GUIDE、doc/RUNTIME |
 | 人类对战 / 棋钟 | orchestrator + runner + WS /play | test_human_match、test_chess_clock | wiki/GUIDE、PENCIL |
-| 评分排行 | `rating/glicko2` + `games/*/tiers.py` | test_tiers、test_engine | wiki/GUIDE |
+| 评分排行 | `rating/glicko2` + `store/db.py` 数值投影 | test_numeric_ranking、test_leaderboard_density、test_rating_rebuild | wiki/GUIDE |
 | 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/GUIDE、CONTEST_BRACKET |
 | 社交 | api_routes + store | test_social、test_comments_likes | wiki/GUIDE |
 | 通知 | `notifications/` | test_notifications | wiki/GUIDE |

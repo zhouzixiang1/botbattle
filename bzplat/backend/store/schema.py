@@ -611,8 +611,8 @@ CREATE TABLE IF NOT EXISTS pair_stats (
     PRIMARY KEY (bot_a_id, bot_b_id)
 );
 
--- 评分历史快照：每次 _apply_ratings 落一条，用于段位趋势/曲线（PR-1 建表 + 落盘，
--- PR-5 段位趋势读取）。每 bot 限保留最近 N 条（见 store 截断）。
+-- 评分历史快照：每次 _apply_ratings 落一条，用于数值变化与曲线。
+-- 每 bot 限保留最近 N 条（见 store 截断）。
 CREATE TABLE IF NOT EXISTS rating_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,

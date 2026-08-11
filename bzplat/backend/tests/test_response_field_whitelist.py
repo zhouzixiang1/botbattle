@@ -4,7 +4,7 @@
 不再出现在 API 响应里——若未来有人加回死字段，测试会报。同时验证 4 个会致回归的字段
 （winner/reason/match_type/contest_id）和共享 SELECT 字段仍在（守护不误删）。
 
-注意：store 层断言（test_tiers/test_bot_profile）保留——本测试只覆盖 API 路由响应层。
+注意：Store 数值投影另有专门测试；本文件只覆盖 API 路由响应层。
 """
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ def test_leaderboard_drops_dead_fields(tmp_path):
             "format", "os", "arch", "game_id", "delta_total", "net_chips",
         ):
             assert dead not in row, f"leaderboard 仍含死字段 {dead}"
-        # 守护：tier_level 保留（test_tiers + 段位渲染依赖）
-        assert "tier_level" in row
-        assert "rating" in row and "bot_name" in row
+        # 守护：公开数值字段与身份字段保留。
+        for keep in ("rating", "bot_name", "rated_matches", "rank_total", "ranking_eligible"):
+            assert keep in row
 
 
 def test_bot_profile_drops_dead_fields(tmp_path):
@@ -80,7 +80,7 @@ def test_bot_profile_drops_dead_fields(tmp_path):
         ):
             assert dead not in p, f"bot_profile 仍含死字段 {dead}"
         # 守护：测试依赖字段保留
-        for keep in ("matches_played", "tier_level", "owner_id"):
+        for keep in ("rated_matches", "rank_total", "ranking_progress", "owner_id"):
             assert keep in p, f"bot_profile 误删了保留字段 {keep}"
 
 

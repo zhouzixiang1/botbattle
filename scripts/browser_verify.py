@@ -97,7 +97,7 @@ def main():
         pg = b.new_page(viewport={"width": 1280, "height": 800})
         pg.goto(f"{BASE}/#/leaderboard", wait_until="networkidle", timeout=15000)
         pg.wait_for_timeout(1200)
-        check("排行榜段位徽章", has_text(pg, "新手") or has_text(pg, "进阶") or has_text(pg, "熟练") or has_text(pg, "高手"))
+        check("排行榜数值字段", has_text(pg, "Rating / 95% 区间") and has_text(pg, "名次 / 百分位"))
         check("排行榜表格列", pg.eval_on_selector_all("table thead th", "els => els.length") >= 4)
 
         pg.goto(f"{BASE}/#/login", wait_until="networkidle", timeout=15000)

@@ -48,7 +48,7 @@ def test_store_leaderboard_requires_one_registered_game(tmp_path):
     store.close()
 
 
-def test_leaderboard_summary_rank_and_placement_are_server_authoritative(tmp_path):
+def test_leaderboard_summary_rank_and_sample_are_server_authoritative(tmp_path):
     app = create_app(db_path=str(tmp_path / "ranked.db"))
     store = app.state.store
     formal_high = _rated_bot(
@@ -59,8 +59,8 @@ def test_leaderboard_summary_rank_and_placement_are_server_authoritative(tmp_pat
         store, username="formal_low", name="formal_low_bot",
         rating=1500, matches=10, wins=4, draws=1,
     )
-    provisional = _rated_bot(
-        store, username="provisional", name="provisional_bot",
+    sample = _rated_bot(
+        store, username="sample", name="sample_bot",
         rating=2300, matches=9, wins=9,
     )
 
@@ -77,21 +77,21 @@ def test_leaderboard_summary_rank_and_placement_are_server_authoritative(tmp_pat
         body = response.json()
 
     assert body["game_id"] == "holdem"
-    assert body["placement_required"] == 10
+    assert body["ranking_min_matches"] == 10
     assert body["summary"] == {
         "total": 3,
-        "ranked": 2,
-        "placement": 1,
-        "last_rated_at": f"2026-08-10T12:{provisional['id']:02d}:00",
+        "eligible": 2,
+        "sample": 1,
+        "last_rated_at": f"2026-08-10T12:{sample['id']:02d}:00",
     }
     rows = body["leaderboard"]
     assert [row["bot_id"] for row in rows] == [
-        formal_high["id"], formal_low["id"], provisional["id"],
+        formal_high["id"], formal_low["id"], sample["id"],
     ]
     assert [row["rank"] for row in rows] == [1, 2, None]
-    assert rows[-1]["is_placement"] is True
-    assert rows[-1]["placement_remaining"] == 1
-    assert rows[-1]["matches_played"] == 9
+    assert rows[-1]["ranking_eligible"] is False
+    assert rows[-1]["ranking_progress"] == 0.9
+    assert rows[-1]["rated_matches"] == 9
 
     # game_id 只在响应顶层出现；内部累计分差和平台 canonical tuple 不进榜单。
     forbidden = {"game_id", "delta_total", "net_chips", "format", "os", "arch", "vol"}
@@ -169,9 +169,7 @@ def test_rating_delta_and_recent_match_stay_in_same_validated_game(tmp_path):
         game_id="holdem",
     )
 
-    result = store.list_leaderboard(
-        game_id="holdem", page=1, per_page=20, placement_games=10,
-    )
+    result = store.list_leaderboard(game_id="holdem", page=1, per_page=20)
     row = next(item for item in result["items"] if item["bot_id"] == bot["id"])
     assert row["rating_delta"] == 100.0
     assert row["last_match_id"] == "valid-holdem-match"

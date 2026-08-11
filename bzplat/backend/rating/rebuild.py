@@ -16,7 +16,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bzplat.backend.games import registry as game_registry
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
 from bzplat.backend.runtime.config import RANKING_MIN_RATED_MATCHES
 from bzplat.backend.store import (
@@ -539,13 +538,13 @@ def _leaderboard_projection(
     """Project ratings with the production leaderboard's exact public scope.
 
     ``Store.list_leaderboard`` admits only active Linux/amd64 ELF Bots whose
-    rating game matches the Bot game.  Formal rows require the code-owned match
-    threshold and are ordered by rating, matches played, then Bot ID.  Placement
-    rows remain eligible but deliberately have no formal rank.
+    rating game matches the Bot game.  Ranked rows require the code-owned match
+    threshold and are ordered by rating, matches played, then Bot ID.  Public
+    candidates below the threshold remain visible but have no public rank.
     """
     bots = {int(row["id"]): row for row in bot_universe}
     projected: dict[tuple[int, str], dict[str, Any]] = {}
-    formal_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    ranked_by_game: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for rating in ratings:
         bot_id = int(rating["bot_id"])
         game_id = str(rating["game_id"])
@@ -562,28 +561,21 @@ def _leaderboard_projection(
         ):
             continue
         matches_played = max(0, int(rating.get("matches_played") or 0))
-        is_placement = (
-            RANKING_MIN_RATED_MATCHES > 0
-            and matches_played < RANKING_MIN_RATED_MATCHES
+        ranking_eligible = matches_played >= max(
+            1, int(RANKING_MIN_RATED_MATCHES)
         )
-        tier = game_registry.tier_for(game_id, rating.get("rating"))
         item = {
             "rank": None,
-            "is_placement": is_placement,
-            "tier": {
-                "level": tier.level,
-                "key": tier.key,
-                "name": tier.name,
-            },
+            "ranking_eligible": ranking_eligible,
             "rating": float(rating["rating"]),
             "matches_played": matches_played,
             "bot_id": bot_id,
         }
         projected[(bot_id, game_id)] = item
-        if not is_placement:
-            formal_by_game[game_id].append(item)
+        if ranking_eligible:
+            ranked_by_game[game_id].append(item)
 
-    for rows in formal_by_game.values():
+    for rows in ranked_by_game.values():
         rows.sort(
             key=lambda row: (
                 -float(row["rating"]),
@@ -626,18 +618,16 @@ def _rating_diff(
                 "rating_before": float(old["rating"]),
                 "rating_after": float(new["rating"]),
                 "rating_delta": float(new["rating"]) - float(old["rating"]),
-                "leaderboard_eligible_before": old_board is not None,
-                "leaderboard_eligible_after": new_board is not None,
-                "is_placement_before": (
-                    old_board["is_placement"] if old_board is not None else None
+                "public_candidate_before": old_board is not None,
+                "public_candidate_after": new_board is not None,
+                "ranking_eligible_before": (
+                    old_board["ranking_eligible"] if old_board is not None else None
                 ),
-                "is_placement_after": (
-                    new_board["is_placement"] if new_board is not None else None
+                "ranking_eligible_after": (
+                    new_board["ranking_eligible"] if new_board is not None else None
                 ),
                 "rank_before": old_board["rank"] if old_board is not None else None,
                 "rank_after": new_board["rank"] if new_board is not None else None,
-                "tier_before": old_board["tier"] if old_board is not None else None,
-                "tier_after": new_board["tier"] if new_board is not None else None,
                 "matches_before": int(old["matches_played"]),
                 "matches_after": int(new["matches_played"]),
                 "wld_before": [int(old["wins"]), int(old["losses"]), int(old["draws"])],
@@ -747,7 +737,12 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
                 ),
                 "bot_universe_count": len(bot_universe),
                 "bot_universe_digest": str(live["bot_universe_digest"]),
-                "leaderboard_eligible_bot_count": len(eligible_rebuilt),
+                "public_candidate_bot_count": len(eligible_rebuilt),
+                "ranking_eligible_bot_count": sum(
+                    1
+                    for row in eligible_rebuilt.values()
+                    if row["ranking_eligible"]
+                ),
                 "source_digest": source_digest,
                 "plan_digest": plan_digest,
                 "current_projection_digest": current_projection_digest,
@@ -774,11 +769,6 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
                     1
                     for row in changes
                     if row["rank_before"] != row["rank_after"]
-                ),
-                "tier_changed_bot_count": sum(
-                    1
-                    for row in changes
-                    if row["tier_before"] != row["tier_after"]
                 ),
                 "changed_bots": changes,
                 "issues": sorted(set(issues)),

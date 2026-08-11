@@ -770,7 +770,8 @@ def test_bot_profile_joins_rating_with_game_id(store_with_matches):
     s.update_rating_row(bg, rating=2100)
     p = s.bot_profile(bg)
     assert p["rating"] == 2100
-    assert p["tier_name"] == "专家"
+    assert p["confidence_low"] is not None
+    assert p["confidence_high"] is not None
 
 
 # ── 旧库迁移（对局丢弃，用户/bot/赛事保留）──────────────────────

@@ -19,7 +19,6 @@ import {
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { EntityName, OverflowText } from '@/components/ui/overflow-text'
-import { TierBadge } from '@/components/tier-badge'
 import Comments from '@/components/Comments'
 import Pagination from '@/components/Pagination'
 import { apiGet, apiJson, errMsg } from '@/api'
@@ -48,14 +47,20 @@ interface BotProfile {
   wins?: number
   losses?: number
   draws?: number
-  matches_played?: number
-  rated_at?: string
-  tier_level?: number
-  tier_key?: string
-  tier_name?: string
-  is_placement?: boolean
-  placement_required?: number
-  placement_remaining?: number
+  rated_matches: number
+  unique_opponents: number
+  confidence_low: number | null
+  confidence_high: number | null
+  rank: number | null
+  rank_total: number
+  percentile: number | null
+  ranking_min_matches: number
+  ranking_progress: number
+  ranking_eligible: boolean
+  rating_delta: number | null
+  recent_delta_30d: number | null
+  normal_completion_rate: number | null
+  technical_failures: number
 }
 
 interface MatchRow {
@@ -97,17 +102,14 @@ interface RatingPoint {
 }
 
 /* ── 辅助 ─────────────────────────────────────────────── */
-function winRate(p?: BotProfile): number {
-  const w = p?.wins ?? 0
-  const l = p?.losses ?? 0
-  const d = p?.draws ?? 0
-  const total = w + l + d
-  if (total === 0) return 0
-  return (w + d * 0.5) / total
-}
-
 function fmtPct(r: number): string {
   return `${(r * 100).toFixed(1)}%`
+}
+
+function fmtSigned(value: number | null | undefined): string {
+  if (value == null) return '—'
+  if (value === 0) return '0'
+  return `${value > 0 ? '+' : ''}${value.toFixed(1)}`
 }
 
 function matchOutcome(m: MatchRow, botId: number): 'win' | 'loss' | 'draw' | '' {
@@ -265,9 +267,7 @@ export default function BotDetail() {
     )
   }
 
-  const wr = winRate(profile)
-  // 定级只计算会进入 Glicko 的对局；优先使用后端权威 matches_played。
-  const total = profile.matches_played ?? ((profile.wins ?? 0) + (profile.losses ?? 0) + (profile.draws ?? 0))
+  const ratedMatches = profile.rated_matches ?? ((profile.wins ?? 0) + (profile.losses ?? 0) + (profile.draws ?? 0))
   const GameIcon = gameIcon(profile.game_id)
 
   return (
@@ -290,11 +290,11 @@ export default function BotDetail() {
           <div className="min-w-0 space-y-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <Badge variant="outline"><GameIcon className="size-3.5" />{gameLabel(profile.game_id)}</Badge>
-              {profile.is_placement ? (
-                <Badge variant="secondary">定级中 {total}/{profile.placement_required ?? 0}</Badge>
-              ) : profile.tier_name ? (
-                <TierBadge rating={profile.rating} label={profile.tier_name} gameId={profile.game_id} tierKey={profile.tier_key} />
-              ) : null}
+              {profile.ranking_eligible && profile.rank != null ? (
+                <Badge variant="outline" className="font-mono">公开排名 #{profile.rank} / {profile.rank_total}</Badge>
+              ) : (
+                <Badge variant="secondary" className="font-mono">排名资格 {ratedMatches}/{profile.ranking_min_matches}</Badge>
+              )}
               {!profile.is_active && <Badge variant="secondary">已停用</Badge>}
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -314,10 +314,34 @@ export default function BotDetail() {
       </DataRegion>
 
       <SummaryStrip columns={4}>
-        <SummaryMetric label="Rating" value={fmtRating(profile.rating)} detail={profile.is_placement ? `再完成 ${profile.placement_remaining ?? 0} 场完成定级` : profile.rd != null ? `RD ${Number(profile.rd).toFixed(0)}` : '暂无 RD'} />
-        <SummaryMetric label="胜率" value={fmtPct(wr)} detail={`共 ${total} 场`} />
-        <SummaryMetric label="胜" value={profile.wins ?? 0} detail={`负 ${profile.losses ?? 0}`} />
-        <SummaryMetric label="平" value={profile.draws ?? 0} detail={`${opponents.length} 个近期对手`} />
+        <SummaryMetric
+          label="Rating"
+          value={fmtRating(profile.rating)}
+          detail={profile.rd != null && profile.confidence_low != null && profile.confidence_high != null
+            ? `RD ${Number(profile.rd).toFixed(0)} · 95% ${profile.confidence_low.toFixed(0)}–${profile.confidence_high.toFixed(0)}`
+            : 'RD / 95% 区间暂无数据'}
+        />
+        <SummaryMetric
+          label="公开名次"
+          value={profile.rank == null ? '—' : `#${profile.rank} / ${profile.rank_total}`}
+          detail={profile.rank == null
+            ? `资格进度 ${(profile.ranking_progress * 100).toFixed(0)}%（${ratedMatches}/${profile.ranking_min_matches}）`
+            : `百分位 ${profile.percentile == null ? '—' : `${profile.percentile.toFixed(1)}%`}`}
+        />
+        <SummaryMetric label="计分样本" value={ratedMatches} detail={`${profile.unique_opponents ?? 0} 个不同对手`} />
+        <SummaryMetric
+          label="正常完成率"
+          value={profile.normal_completion_rate == null ? '—' : fmtPct(profile.normal_completion_rate)}
+          detail={`${profile.technical_failures ?? 0} 次本 Bot 技术负 / ${ratedMatches} 场计分对局`}
+        />
+      </SummaryStrip>
+
+      <SummaryStrip columns={5} label="评分变化与赛果">
+        <SummaryMetric label="上次变化" value={fmtSigned(profile.rating_delta)} detail="相邻评分快照" />
+        <SummaryMetric label="30 日变化" value={fmtSigned(profile.recent_delta_30d)} detail="缺窗口起点时为 —" />
+        <SummaryMetric label="胜" value={profile.wins ?? 0} detail="计分对局" />
+        <SummaryMetric label="平" value={profile.draws ?? 0} detail="计分对局" />
+        <SummaryMetric label="负" value={profile.losses ?? 0} detail="计分对局" />
       </SummaryStrip>
 
       <Tabs defaultValue="history" className="w-full">

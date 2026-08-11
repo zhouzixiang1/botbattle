@@ -693,7 +693,7 @@ def test_dry_run_uses_one_read_snapshot_for_source_plan_and_projection(
         ).fetchone()[0] == 0
 
 
-def test_rank_and_tier_diff_matches_public_leaderboard_scope_and_order():
+def test_numeric_rank_diff_matches_public_leaderboard_scope_and_order():
     def rating(bot_id, value, matches):
         return {
             "bot_id": bot_id,
@@ -750,16 +750,18 @@ def test_rank_and_tier_diff_matches_public_leaderboard_scope_and_order():
 
     # Same rating: production order next compares matches, then Bot ID. Bot 1
     # is included even though its own projection did not change, because its
-    # formal rank changed as a consequence of Bot 2's rebuild.
+    # public rank changed as a consequence of Bot 2's rebuild.
     assert changes[1]["projection_changed"] is False
     assert (changes[1]["rank_before"], changes[1]["rank_after"]) == (2, 1)
     assert (changes[2]["rank_before"], changes[2]["rank_after"]) == (1, 2)
-    # A high-rated placement Bot has no formal rank, but its online tier diff is
-    # still visible. Inactive and wrong-architecture Bots never affect ranks.
-    assert changes[3]["is_placement_before"] is True
+    # A high-rated sample below the public threshold has no rank. Its numeric
+    # rating change remains auditable; inactive and wrong-architecture Bots
+    # never affect public ranks.
+    assert changes[3]["ranking_eligible_before"] is False
+    assert changes[3]["ranking_eligible_after"] is False
     assert changes[3]["rank_before"] is None
-    assert changes[3]["tier_before"]["key"] == "expert"
-    assert changes[3]["tier_after"]["key"] == "master"
+    assert changes[3]["rating_before"] == 2100
+    assert changes[3]["rating_after"] == 2200
     assert 5 not in changes
     assert 6 not in changes
 

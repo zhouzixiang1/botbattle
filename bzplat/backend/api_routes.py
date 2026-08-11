@@ -43,10 +43,10 @@ from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
-    RANKING_MIN_RATED_MATCHES,
     CONFIGURATION_SOURCE,
     CONTEST_SCHEDULER_CONFIG,
     FULL_RR_MAX_N,
+    RANKING_MIN_RATED_MATCHES,
 )
 from bzplat.backend.runtime.limits import (
     BOT_CPUS,
@@ -101,17 +101,6 @@ def _with_bot_runnable(bot: dict) -> dict:
     )
     public["runnable"] = runnable
     public["unsupported_reason"] = None if runnable else SUPPORTED_BINARY_ERROR
-    return public
-
-
-def _with_placement_status(row: dict) -> dict:
-    """Attach the code-owned placement contract to one rating-bearing row."""
-    public = dict(row)
-    required = max(0, int(RANKING_MIN_RATED_MATCHES))
-    played = max(0, int(public.get("matches_played") or 0))
-    public["placement_required"] = required
-    public["placement_remaining"] = max(0, required - played)
-    public["is_placement"] = required > 0 and played < required
     return public
 
 
@@ -502,11 +491,10 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
         p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
     p = _with_bot_runnable(p)
     p = _public_bot_identity(p)
-    # 裁响应死字段（对抗审计验证：vol/rated_at/is_builtin/updated_at 前端不消费；
-    # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
+    # 裁响应死字段；公开数值评分字段由 Store 的单一投影返回。
     for k in ("vol", "rated_at", "is_builtin", "updated_at"):
         p.pop(k, None)
-    return {"profile": _with_placement_status(p)}
+    return {"profile": p}
 
 
 @router.get("/api/bots/{bot_id}/matches")
@@ -1300,23 +1288,24 @@ def leaderboard(
         raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
     result = _store(request).list_leaderboard(
         game_id=normalized_game_id, limit=max(1, min(limit, 200)), page=page,
-        per_page=per_page, placement_games=RANKING_MIN_RATED_MATCHES,
+        per_page=per_page,
     )
     # 响应白名单投影：平台三元组、game_id 重复列、内部累计分差和波动率都不属于
     # 排行阅读信息；游戏维度只在响应顶层返回一次。
     items = result["items"]
     keep = {
-        "rank", "bot_id", "rating", "rd", "wins", "losses", "draws",
-        "matches_played", "bot_name", "bot_display", "owner_name",
-        "rating_delta", "tier_level", "tier_key", "tier_name",
-        "placement_required", "placement_remaining", "is_placement",
+        "rank", "rank_total", "percentile", "bot_id", "rating", "rd",
+        "confidence_low", "confidence_high", "wins", "losses", "draws",
+        "rated_matches", "unique_opponents", "bot_name", "bot_display", "owner_name",
+        "rating_delta", "recent_delta_30d", "ranking_min_matches",
+        "ranking_progress", "ranking_eligible",
         "last_match_id", "last_match_at",
     }
     proj = [{k: row[k] for k in keep if k in row} for row in items]
     response = {
         "leaderboard": proj,
         "game_id": result["game_id"],
-        "placement_required": result["placement_required"],
+        "ranking_min_matches": result["ranking_min_matches"],
         "summary": result["summary"],
         "total": result["total"],
     }
@@ -1329,24 +1318,6 @@ def leaderboard(
 def execution_queue(request: Request):
     """Public global capacity/queue projection with no internal identifiers."""
     return _execution_dispatcher(request).public_snapshot()
-
-
-@router.get("/api/tiers")
-def tiers(game_id: str):
-    """段位定义（公开，前端镜像校验用）。
-
-    game_id 是必填维度；缺失或未知都明确拒绝，不得伪装成另一款游戏的段位。
-    """
-    from bzplat.backend.games import registry as _game_registry
-    gid = game_id.strip().lower()
-    try:
-        return {
-            "tiers": _game_registry.all_tiers(gid),
-            "game_id": gid,
-            "placement_required": RANKING_MIN_RATED_MATCHES,
-        }
-    except KeyError as exc:
-        raise HTTPException(400, f"未知游戏: {gid!r}") from exc
 
 
 @router.get("/api/levels/info")
@@ -2877,6 +2848,7 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
         "bot_cpus": BOT_CPUS,
         "bot_memory_mb": BOT_MEMORY_MB,
         "full_rr_max_n": FULL_RR_MAX_N,
+        "ranking_min_rated_matches": RANKING_MIN_RATED_MATCHES,
         "contest_scheduler": CONTEST_SCHEDULER_CONFIG.as_dict(),
         "queue": queue_snapshot,
         "auto_match": {
@@ -3147,7 +3119,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
     {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议与 C/Python 示例"},
     {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},
-    {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/段位/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
+    {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/数值评分/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
 ]
 
 

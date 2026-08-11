@@ -5,7 +5,7 @@
 
 ## 架构总览
 
-**实现真相在 `bzplat/backend/games/<game>/`**。每游戏严格分层：`<game>_judge.py` 是纯游戏规则（零平台依赖），`engine.py` 是裁判与平台协议之间的适配层（调用 `decide`、驱动纯裁判并发出事件）；同包还包含 `protocol.py`（行协议）、`result.py`（独立结果）、`tiers.py`、`templates.py` 与装配 `GameSpec` 的 `spec.py`。
+**实现真相在 `bzplat/backend/games/<game>/`**。每游戏严格分层：`<game>_judge.py` 是纯游戏规则（零平台依赖），`engine.py` 是裁判与平台协议之间的适配层（调用 `decide`、驱动纯裁判并发出事件）；同包还包含 `protocol.py`（行协议）、`result.py`（独立结果）、`templates.py` 与装配 `GameSpec` 的 `spec.py`。
 
 | 游戏 | 纯裁判规则 | 平台适配 / Session |
 |------|------------|--------------------|

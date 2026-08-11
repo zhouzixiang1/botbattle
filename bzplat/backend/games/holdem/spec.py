@@ -1,6 +1,6 @@
-"""德州扑克 GameSpec——把引擎/协议/配置/段位/模板统一声明成一个对象。
+"""德州扑克 GameSpec——把引擎/协议/配置/模板统一声明成一个对象。
 
-PR4：引擎/协议/结果/段位已物理迁入本包（games/holdem/），不再共享基类。
+引擎/协议/结果已物理迁入本包（games/holdem/），不再共享基类。
 """
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from bzplat.backend.games.holdem.engine import (
     STARTING_STACK,
 )
 from bzplat.backend.games.holdem import protocol as proto
-from bzplat.backend.games.holdem import tiers as _tiers_mod
 from bzplat.backend.games.holdem import templates as _templates_mod
 
 GAME_ID = "holdem"
@@ -151,7 +150,6 @@ SPEC = GameSpec(
     normalize_delta=_normalize_delta,
     progress_from_events=_progress_from_events,
     eta_for_match=_eta_for_match,
-    tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,
     default_scoring="poker_3_1_0",
     code_path="bzplat/backend/games/holdem/engine.py",

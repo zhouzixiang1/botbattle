@@ -173,8 +173,9 @@ def test_leaderboard_pagination(tmp_path):
     assert len(p1["leaderboard"]) == 5
     assert p1["page"] == 1 and p1["per_page"] == 5
     assert [row["rank"] for row in p1["leaderboard"]] == [1, 2, 3, 4, 5]
-    # tier/delta 后处理仍作用于分页行
-    assert "tier_name" in p1["leaderboard"][0]
+    # 数值评分投影仍作用于分页行
+    assert "confidence_low" in p1["leaderboard"][0]
+    assert "rank_total" in p1["leaderboard"][0]
     assert "rating_delta" in p1["leaderboard"][0]
 
     p2 = c.get("/api/leaderboard?game_id=holdem&page=2&per_page=5").json()

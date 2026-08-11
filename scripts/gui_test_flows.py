@@ -138,10 +138,6 @@ def main() -> int:
     check("赛事列表", st == 200 and "contests" in d)
     # 站点信息
     check("站点信息", api("GET", "/api/site/info")[0] == 200)
-    # 三游戏段位曲线
-    for g in ("holdem", "gomoku", "pencil"):
-        check(f"段位曲线 {g}", api("GET", f"/api/tiers?game_id={g}")[0] == 200)
-
     # ── contest 27 详情（115 报名分页）──
     print("\n--- Contest 27 详情（115 报名分页）---")
     st, d = api("GET", "/api/contests/27?entries_page=1&entries_per_page=20")

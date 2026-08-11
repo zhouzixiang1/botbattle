@@ -1,12 +1,12 @@
 """游戏注册表框架——平台与具体游戏之间的唯一契约。
 
-设计目标（契约解耦）：每款游戏集中拥有自己的裁判/适配器/协议入口/结果/段位/
+设计目标（契约解耦）：每款游戏集中拥有自己的裁判/适配器/协议入口/结果/
 模板；其中纯裁判零平台依赖，适配器则有意复用平台运行时故障类型。平台通用层
 （编排 / 赛制 / 评分 / DB）只依赖本模块定义的 ``GameSpec`` 接口，通过
 ``GameRegistry`` 单例按 ``game_id`` 取到 spec，再调用 spec 上的能力。
 **禁止通用层出现 ``if game_id == ...`` 分支**——游戏差异封装在各自的 spec 里。
 
-新增一款游戏 = 新建 ``games/<game>/`` 包（填 engine/protocol/result/tiers/
+新增一款游戏 = 新建 ``games/<game>/`` 包（填 engine/protocol/result/
 config/templates/spec），在 ``games/__init__.py`` 注册一行——通用层零改动。
 """
 from __future__ import annotations
@@ -88,33 +88,6 @@ class ProtocolSpec:
 
 
 @dataclass(frozen=True)
-class TierDef:
-    """一款游戏的单个段位定义（per-game 段位曲线的一档）。"""
-
-    level: int          # 0-based 序号（用于 gating 推导）
-    key: str            # 英文 key
-    name: str           # 中文段位名
-    color: str          # tailwind 文字色类
-    bg: str             # tailwind 背景色类（浅）
-    min_rating: float   # 该段位最低 rating（含）
-
-
-def tier_for_in(rating: float | int | None, tiers: list[TierDef]) -> TierDef:
-    """在指定段位曲线里按 rating 查段位（共享查表算法，全面解耦 PR-D）。
-
-    旧的 per-game tier_for 包装已删除。本函数集中唯一查表算法；各 tiers.py 只声明
-    TIERS 数据列表（曲线数据独立，可分游戏调），注册表统一调用本函数。
-    """
-    if rating is None:
-        return tiers[-1]
-    r = float(rating)
-    for t in tiers:
-        if r >= t.min_rating:
-            return t
-    return tiers[-1]
-
-
-@dataclass(frozen=True)
 class GameSpec:
     """一款游戏的全部固有属性声明——"游戏类"模型的核心。
 
@@ -137,9 +110,6 @@ class GameSpec:
     normalize_delta: Callable[[int], float]                # 将座位 0 原始分差换算为本游戏展示单位
     progress_from_events: Callable[[list[dict[str, Any]]], int]  # 技术终局已完成轮数
     eta_for_match: Callable[[dict[str, Any]], int]         # 按 match_config 算每场秒数（取代 if game_id 缩放分支）
-
-    # 段位曲线（完全 per-game，替代全局 engine/tiers.py）。查表算法共享 base.tier_for_in。
-    tiers: list[TierDef]
 
     # 赛事模板（本游戏的 DEFAULT_TEMPLATES 条目）
     templates: list[dict[str, Any]]
@@ -259,29 +229,6 @@ class GameRegistry:
         产品创建入口如需默认游戏，应在其请求模型或创建函数中明确赋值。
         """
         return (game_id or "").strip().lower()
-
-    # ── 便捷函数（通用层经 registry 调用，而非直接 import 具体游戏）──
-    def tier_for(self, game_id: str, rating: float | int | None) -> TierDef:
-        spec = self.get(game_id)
-        if not spec.tiers:
-            raise ValueError(f"游戏 {spec.game_id!r} 未声明段位曲线")
-        # 查表算法共享 base.tier_for_in（各游戏的 tier_for 包装已删除，统一走此）
-        return tier_for_in(rating, spec.tiers)
-
-    def tier_dict(self, game_id: str, rating: float | int | None) -> dict:
-        t = self.tier_for(game_id, rating)
-        return {
-            "level": t.level, "key": t.key, "name": t.name,
-            "color": t.color, "bg": t.bg, "min_rating": t.min_rating,
-        }
-
-    def all_tiers(self, game_id: str) -> list[dict]:
-        spec = self.get(game_id)
-        return [
-            {"level": t.level, "key": t.key, "name": t.name,
-             "color": t.color, "bg": t.bg, "min_rating": t.min_rating}
-            for t in spec.tiers
-        ]
 
     def judge_games(self) -> list[dict[str, Any]]:
         """聚合所有游戏的公开裁判元信息。"""

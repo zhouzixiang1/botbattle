@@ -392,8 +392,8 @@ test('public queue keeps stale data private and recovers from slow/error/offline
       body: JSON.stringify({
         leaderboard: [],
         game_id: gameId,
-        placement_required: 10,
-        summary: { total: 0, ranked: 0, placement: 0, last_rated_at: null },
+        ranking_min_matches: 10,
+        summary: { total: 0, eligible: 0, sample: 0, last_rated_at: null },
         page: 1,
         per_page: 50,
         total: 0,
