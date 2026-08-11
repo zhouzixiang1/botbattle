@@ -46,6 +46,7 @@ from scripts._execution_request import (  # noqa: E402
     require_execution_request,
     wait_for_execution_match,
 )
+from scripts._qa_polling import QaPollingError, RateAwareJsonPoller  # noqa: E402
 from scripts._qa_target import (  # noqa: E402
     assert_qa_instance,
     ensure_qa_base,
@@ -56,6 +57,7 @@ from scripts._qa_target import (  # noqa: E402
 PASS = 0
 FAIL = 0
 FAILS: list[str] = []
+MATCH_WAIT_TIMEOUT_SEC = 300.0
 PASSWORD = "ApiQa1234"
 QA_ACCOUNTS = {
     "admin": ("apiqa_admin", "apiqa_admin@test.invalid", ROLE_ADMIN, True),
@@ -88,6 +90,7 @@ class Api:
         self.base = base.rstrip("/")
         self.db_path = db_path
         self.client = httpx.Client(base_url=self.base, timeout=120)
+        self.poller = RateAwareJsonPoller(min_interval=1.0)
 
     # ── 鉴权 ───────────────────────────────────────────────
     def captcha(self) -> dict:
@@ -109,6 +112,21 @@ class Api:
         headers = dict(kw.pop("headers", {}) or {})
         headers.setdefault("Authorization", f"Bearer {token}")
         return self.client.request(method, path, headers=headers, **kw)
+
+    def poll_json(
+        self,
+        path: str,
+        *,
+        label: str,
+        deadline: float,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        request = (
+            (lambda: self.authed(token, "GET", path))
+            if token
+            else (lambda: self.client.get(path))
+        )
+        return self.poller.get_json(request, label=label, deadline=deadline)
 
 
 def read_sample(path: str) -> bytes:
@@ -364,15 +382,40 @@ def test_bots(api: Api, users: dict[str, str], run_id: str) -> dict[str, int]:
     return bot_ids
 
 
-def wait_match(api: Api, token: str, mid: str, timeout: float = 90) -> dict:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        r = api.authed(token, "GET", f"/api/matches/{mid}")
-        m = r.json()["match"]
-        if m["status"] in ("completed", "aborted"):
-            return m
-        time.sleep(0.4)
-    raise TimeoutError(f"对局 {mid} 超时")
+def wait_match(
+    api: Api,
+    token: str,
+    mid: str,
+    timeout: float = MATCH_WAIT_TIMEOUT_SEC,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    last_payload: dict[str, Any] | None = None
+    while True:
+        try:
+            payload = api.poll_json(
+                f"/api/matches/{mid}",
+                token=token,
+                label=f"对局 {mid} 详情",
+                deadline=deadline,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"对局 {mid} 在 {timeout:.1f}s 内未完成；{exc}；"
+                f"最后成功响应 HTTP 200 body={last_payload!r}"
+            ) from exc
+        last_payload = payload
+        match = payload.get("match")
+        if not isinstance(match, dict):
+            raise QaPollingError(
+                f"对局 {mid} 详情缺少 match 对象：HTTP 200 body={payload!r}"
+            )
+        status = match.get("status")
+        if not isinstance(status, str) or not status:
+            raise QaPollingError(
+                f"对局 {mid} 详情缺少 status：HTTP 200 body={payload!r}"
+            )
+        if status in ("completed", "aborted"):
+            return match
 
 
 def wait_accepted_match(
@@ -413,21 +456,23 @@ def wait_execution_snapshot(
 ) -> str:
     """Wait for match admission from an already validated queue snapshot."""
 
+    deadline = time.monotonic() + timeout
+
     def fetch(public_id: str) -> tuple[int, Any, str]:
-        polled = api.authed(
-            token, "GET", execution_request_path(public_id)
+        body = api.poll_json(
+            execution_request_path(public_id),
+            token=token,
+            label=f"{label} 执行请求 {public_id}",
+            deadline=deadline,
         )
-        try:
-            body: Any = polled.json()
-        except ValueError:
-            body = None
-        return polled.status_code, body, polled.text[:240]
+        return 200, body, ""
 
     return wait_for_execution_match(
         initial,
         fetch,
         label=label,
         timeout=timeout,
+        interval=0,
     )
 
 
@@ -485,7 +530,7 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
     )
 
     # 等对局完成（replay 是权威完整数据）
-    m = wait_match(api, users["alice"], mid, timeout=90)
+    m = wait_match(api, users["alice"], mid)
     check("SSE 测试对局完成", m["status"] == "completed", f"status={m['status']}")
 
     # 落盘 replay 完整性校验（权威数据）
@@ -622,9 +667,9 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
                 tok,
                 snapshot,
                 label=f"并发挑战 #{i}",
-                timeout=240,
+                timeout=MATCH_WAIT_TIMEOUT_SEC,
             )
-            match = wait_match(api, tok, mid, timeout=240)
+            match = wait_match(api, tok, mid)
             with lock:
                 results[i] = match
         except Exception as exc:
@@ -706,11 +751,16 @@ def test_leaderboard_and_contest(
     # 等所有对阵的 match 完成。
     # 注：后端 maybe_finish 目前无路由触发，比赛 status 不会自动转 finished，
     # 因此用「所有 pairing 的 match 均 completed」作为完成判据。
-    deadline = time.time() + 180
+    # 三个对阵在默认两槽下最多分两波；每波仍沿用单局 300 秒硬上限。
+    deadline = time.monotonic() + MATCH_WAIT_TIMEOUT_SEC * 2
     all_done = False
-    while time.time() < deadline:
-        r = api.client.get(f"/api/contests/{cid}")
-        pairings = r.json().get("pairings", [])
+    while time.monotonic() < deadline:
+        detail = api.poll_json(
+            f"/api/contests/{cid}",
+            label=f"赛事 {cid} 详情",
+            deadline=deadline,
+        )
+        pairings = detail.get("pairings", [])
         if pairings:
             statuses = []
             for p in pairings:
@@ -718,12 +768,21 @@ def test_leaderboard_and_contest(
                 if not mid_p:
                     statuses.append("pending")
                     continue
-                pm = api.client.get(f"/api/matches/{mid_p}").json()["match"]
+                match_payload = api.poll_json(
+                    f"/api/matches/{mid_p}",
+                    label=f"赛事 {cid} 对局 {mid_p} 详情",
+                    deadline=deadline,
+                )
+                pm = match_payload.get("match")
+                if not isinstance(pm, dict) or not isinstance(pm.get("status"), str):
+                    raise QaPollingError(
+                        f"赛事 {cid} 对局 {mid_p} 缺少 match/status："
+                        f"HTTP 200 body={match_payload!r}"
+                    )
                 statuses.append(pm["status"])
             if all(s in ("completed", "aborted") for s in statuses):
                 all_done = True
                 break
-        time.sleep(1)
 
     check("循环赛所有对阵完成", all_done, "超时未完成")
 

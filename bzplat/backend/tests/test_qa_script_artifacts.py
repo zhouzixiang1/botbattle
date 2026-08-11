@@ -8,11 +8,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.store import Store
+from scripts._qa_polling import QaPollingError, RateAwareJsonPoller
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -159,6 +161,112 @@ def test_api_replay_count_uses_nested_result_contract():
     assert module.match_rounds_played({"result": {"rounds_played": 70}}) == 70
     assert module.match_rounds_played({"rounds_played": 70}) == 0
     assert module.qa_contest_payload("run1")["template_id"] == "holdem_rr"
+
+
+class _FakePollClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+
+
+def _poll_response(status: int, payload, *, retry_after: str | None = None):
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    return SimpleNamespace(
+        status_code=status,
+        headers=headers,
+        text=json.dumps(payload),
+        json=lambda: payload,
+    )
+
+
+def test_rate_aware_qa_poller_coordinates_and_honors_retry_after():
+    clock = _FakePollClock()
+    poller = RateAwareJsonPoller(
+        min_interval=1.0,
+        retry_padding=0.05,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    responses = iter(
+        [
+            _poll_response(
+                429,
+                {"code": "rate_limit_exceeded"},
+                retry_after="2",
+            ),
+            _poll_response(200, {"match": {"status": "running"}}),
+            _poll_response(200, {"match": {"status": "completed"}}),
+        ]
+    )
+
+    first = poller.get_json(
+        lambda: next(responses),
+        label="match m1",
+        deadline=10,
+    )
+    second = poller.get_json(
+        lambda: next(responses),
+        label="match m2",
+        deadline=10,
+    )
+
+    assert first["match"]["status"] == "running"
+    assert second["match"]["status"] == "completed"
+    assert clock.sleeps == pytest.approx([2.05, 1.0])
+
+
+def test_rate_aware_qa_poller_reports_http_status_and_body():
+    clock = _FakePollClock()
+    poller = RateAwareJsonPoller(
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    with pytest.raises(QaPollingError, match=r"HTTP 503 body=.*unavailable"):
+        poller.get_json(
+            lambda: _poll_response(503, {"detail": "unavailable"}),
+            label="match m1",
+            deadline=10,
+        )
+
+    malformed = SimpleNamespace(
+        status_code=200,
+        headers={},
+        text="not-json",
+        json=lambda: (_ for _ in ()).throw(ValueError("invalid JSON")),
+    )
+    with pytest.raises(QaPollingError, match=r"HTTP 200 body='not-json'"):
+        poller.get_json(
+            lambda: malformed,
+            label="match m2",
+            deadline=10,
+        )
+
+
+def test_qa_match_polling_artifacts_are_rate_aware_and_bounded():
+    api_source = (ROOT / "scripts" / "api_full_test.py").read_text(
+        encoding="utf-8"
+    )
+    load_source = (ROOT / "scripts" / "load_test.py").read_text(
+        encoding="utf-8"
+    )
+    load_doc = (ROOT / "doc" / "LOADTEST.md").read_text(encoding="utf-8")
+
+    for source in (api_source, load_source):
+        assert "RateAwareJsonPoller(min_interval=1.0)" in source
+        assert "execution_request_path(public_id)" in source
+        assert "MATCH_WAIT_TIMEOUT_SEC = 300.0" in source
+        assert "time.sleep(0.4)" not in source
+        assert "time.sleep(0.5)" not in source
+    assert "Retry-After" in load_doc
+    assert "不会靠关闭服务端限流绕过边界" in load_doc
 
 
 def test_api_no_smtp_registration_persists_user_and_queues_delivery():
