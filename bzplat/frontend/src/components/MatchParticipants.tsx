@@ -24,19 +24,23 @@ interface MatchParticipantIdentityProps {
   emptyLabel?: string
   links?: boolean
   seatDetail?: string
+  /** 名称与 owner 的最大展示行数；移动数据卡可放宽，表格默认仍保持单行。 */
+  textLines?: 1 | 2 | 3
 }
 
 function OwnerIdentity({
   participant,
   links,
+  lines,
 }: {
   participant: ResolvedMatchParticipant
   links: boolean
+  lines: 1 | 2 | 3
 }) {
   const label = participantOwnerText(participant)
   if (!participant.ownerName || !links) {
     return (
-      <OverflowText tooltip={label} tooltipFocusable={false} className="text-xs text-muted-foreground">
+      <OverflowText lines={lines} tooltip={label} tooltipFocusable={false} className="text-xs text-muted-foreground">
         {label}
       </OverflowText>
     )
@@ -46,7 +50,7 @@ function OwnerIdentity({
       to={`/user/${encodeURIComponent(participant.ownerName)}`}
       className="min-w-0 text-xs text-muted-foreground hover:text-primary"
     >
-      <OverflowText tooltip={label} tooltipFocusable={false}>{label}</OverflowText>
+      <OverflowText lines={lines} tooltip={label} tooltipFocusable={false}>{label}</OverflowText>
     </Link>
   )
 }
@@ -60,6 +64,7 @@ export function MatchParticipantIdentity({
   emptyLabel,
   links = true,
   seatDetail,
+  textLines = 1,
 }: MatchParticipantIdentityProps) {
   const participant = resolveMatchParticipant(source, side)
   const explicitEmpty = Boolean(emptyLabel && !participant.isHuman && participant.botId == null)
@@ -82,7 +87,7 @@ export function MatchParticipantIdentity({
         )}
       >
         <div className="text-[10px] font-medium text-muted-foreground">{participant.seatLabel}</div>
-        <EntityName lines={1} tooltip={emptyLabel} tooltipFocusable={false} className="text-sm italic text-muted-foreground">
+        <EntityName lines={textLines} tooltip={emptyLabel} tooltipFocusable={false} className="text-sm italic text-muted-foreground">
           {emptyLabel}
         </EntityName>
       </div>
@@ -109,13 +114,13 @@ export function MatchParticipantIdentity({
         {state === 'winner' && <Badge className="ml-auto h-4 px-1 text-[9px]">胜</Badge>}
       </div>
       {participant.isHuman ? (
-        <EntityName lines={1} tooltip="真人" tooltipFocusable={false} className={cn('text-sm font-semibold', stateClass)}>
+        <EntityName lines={textLines} tooltip="真人" tooltipFocusable={false} className={cn('text-sm font-semibold', stateClass)}>
           真人
         </EntityName>
       ) : participant.botId != null && links ? (
         <Link to={`/bot/${participant.botId}`} className="block min-w-0 hover:text-primary">
           <EntityName
-            lines={1}
+            lines={textLines}
             tooltip={participant.botLabel}
             tooltipFocusable={false}
             className={cn('text-sm font-semibold hover:text-primary', stateClass)}
@@ -125,7 +130,7 @@ export function MatchParticipantIdentity({
         </Link>
       ) : (
         <EntityName
-          lines={1}
+          lines={textLines}
           tooltip={participant.botLabel}
           tooltipFocusable={false}
           className={cn(
@@ -140,7 +145,7 @@ export function MatchParticipantIdentity({
         <span className="shrink-0 text-[10px] text-muted-foreground">
           {participant.isHuman ? '用户' : '所属'}
         </span>
-        <OwnerIdentity participant={participant} links={links} />
+        <OwnerIdentity participant={participant} links={links} lines={textLines} />
       </div>
     </div>
   )

@@ -3,7 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
 import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
-import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
+import { MatchNatureBadge, MatchParticipantIdentity, MatchParticipants } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -125,6 +125,48 @@ function matchOutcome(m: MatchRow, botId: number): 'win' | 'loss' | 'draw' | 'se
   if (botSeat == null) return ''
   const won = m.winner === botSeat
   return won ? 'win' : 'loss'
+}
+
+function participantStates(m: MatchRow) {
+  return m.status === 'completed' && m.winner === 0
+    ? (['winner', 'loser'] as const)
+    : m.status === 'completed' && m.winner === 1
+      ? (['loser', 'winner'] as const)
+      : (['neutral', 'neutral'] as const)
+}
+
+function MatchOutcome({ match, botId }: { match: MatchRow; botId: number }) {
+  const outcome = matchOutcome(match, botId)
+  if (match.status !== 'completed') return <StatusBadge status={match.status} />
+  return (
+    <Badge variant={outcome === 'win' ? 'default' : outcome === 'loss' ? 'destructive' : 'secondary'}>
+      {outcome === 'win' ? '胜' : outcome === 'loss' ? '负' : outcome === 'selfplay' ? '自博弈' : '平'}
+    </Badge>
+  )
+}
+
+function MobileMatchCard({ match, botId }: { match: MatchRow; botId: number }) {
+  const states = participantStates(match)
+  return (
+    <article
+      data-testid="bot-match-mobile-card"
+      data-match-type={match.match_type}
+      className="space-y-2.5 px-3 py-3"
+    >
+      <header className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="mr-auto font-mono text-xs text-muted-foreground">{fmtTime(match.created_at)}</span>
+        <MatchOutcome match={match} botId={botId} />
+        <MatchNatureBadge matchType={match.match_type} source={match} />
+      </header>
+      <div data-match-participants="true" className="grid min-w-0 gap-2">
+        <MatchParticipantIdentity source={match} side={0} variant="panel" state={states[0]} textLines={2} />
+        <MatchParticipantIdentity source={match} side={1} variant="panel" state={states[1]} textLines={2} />
+      </div>
+      <Button asChild variant="outline" size="sm" className="min-h-11 w-full text-primary">
+        <Link to={`/match/${encodeURIComponent(match.id)}`}>查看对局回放</Link>
+      </Button>
+    </article>
+  )
 }
 
 const chartConfig = {
@@ -367,8 +409,15 @@ export default function BotDetail() {
             ) : matchesLoading ? (
               <Loading text="正在加载对局…" />
             ) : (
-              <DataTable className="rounded-none border-0" scrollLabel="Bot 对局历史">
-                <Table aria-label="Bot 对局历史" className="min-w-[46rem]">
+              <>
+                <div className="divide-y md:hidden" aria-label="Bot 对局历史移动视图">
+                  {matches.length === 0 ? (
+                    <EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
+                  ) : matches.map((match) => <MobileMatchCard key={match.id} match={match} botId={botId} />)}
+                </div>
+                <div className="hidden md:block">
+                  <DataTable className="rounded-none border-0" scrollLabel="Bot 对局历史">
+                    <Table aria-label="Bot 对局历史" className="min-w-[46rem]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
@@ -383,28 +432,17 @@ export default function BotDetail() {
                   <TableRow><TableCell colSpan={5}><EmptyState text="暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" /></TableCell></TableRow>
                 ) : (
                   matches.map((m) => {
-                    const outcome = matchOutcome(m, botId)
-                    const participantStates = m.status === 'completed' && m.winner === 0
-                      ? (['winner', 'loser'] as const)
-                      : m.status === 'completed' && m.winner === 1
-                        ? (['loser', 'winner'] as const)
-                        : (['neutral', 'neutral'] as const)
+                    const states = participantStates(m)
                     return (
                       <TableRow key={m.id}>
                         <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                           {fmtTime(m.created_at)}
                         </TableCell>
                         <TableCell className="max-w-[22rem] whitespace-normal">
-                          <MatchParticipants source={m} states={participantStates} />
+                          <MatchParticipants source={m} states={states} />
                         </TableCell>
                         <TableCell>
-                          {m.status === 'completed' ? (
-                            <Badge variant={outcome === 'win' ? 'default' : outcome === 'loss' ? 'destructive' : 'secondary'}>
-                              {outcome === 'win' ? '胜' : outcome === 'loss' ? '负' : outcome === 'selfplay' ? '自博弈' : '平'}
-                            </Badge>
-                          ) : (
-                            <StatusBadge status={m.status} />
-                          )}
+                          <MatchOutcome match={m} botId={botId} />
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           <MatchNatureBadge matchType={m.match_type} source={m} />
@@ -417,8 +455,10 @@ export default function BotDetail() {
                   })
                 )}
               </TableBody>
-                </Table>
-              </DataTable>
+                    </Table>
+                  </DataTable>
+                </div>
+              </>
             )}
             <Pagination
               page={matchesPage}

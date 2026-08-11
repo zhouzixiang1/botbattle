@@ -35,6 +35,7 @@ export interface SchedulePairing extends MatchParticipantSource {
   status?: string
   match_winner?: number | null
   scheduled_at?: string | null
+  group_id?: string | null
 }
 
 interface Props {
@@ -42,6 +43,14 @@ interface Props {
 }
 
 const PER_PAGE = 30
+
+function pairingResultLabel(pairing: SchedulePairing): string {
+  if (pairing.is_bye === true && pairing.status === 'completed') return '座位 1 轮空晋级'
+  if (pairing.status !== 'completed') return '赛果待定'
+  if (pairing.match_winner === 0) return '座位 1 胜'
+  if (pairing.match_winner === 1) return '座位 2 胜'
+  return '平局'
+}
 
 export default function ScheduleTable({ pairings }: Props) {
   const [page, setPage] = useState(1)
@@ -84,8 +93,42 @@ export default function ScheduleTable({ pairings }: Props) {
 
   return (
     <div className="min-w-0 space-y-2">
-      <DataTable scrollLabel="赛事对阵一览表">
-      <Table className="min-w-[40rem]" aria-label="赛事对阵一览表">
+      <div className="divide-y overflow-hidden rounded-lg border md:hidden" aria-label="赛事对阵一览表移动视图">
+        {pageRows.map(({ pairing: p, round }) => {
+          const isBye = p.is_bye === true
+          const aWin = (isBye && p.status === 'completed') || p.match_winner === 0
+          const bWin = !isBye && p.match_winner === 1
+          return (
+            <article key={p.id} data-testid="contest-schedule-mobile-card" className="space-y-2.5 p-3">
+              <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                <span className="font-mono font-semibold text-foreground">
+                  {p.group_id ? `${p.group_id} · ` : ''}R{round}
+                </span>
+                <span className="ml-auto text-muted-foreground">{p.scheduled_at ? fmtTime(p.scheduled_at) : '未定排期'}</span>
+              </header>
+              <div data-match-participants="true" className="grid min-w-0 gap-2">
+                <MatchParticipantIdentity source={p} side={0} variant="panel" state={aWin ? 'winner' : bWin ? 'loser' : 'neutral'} textLines={2} />
+                <MatchParticipantIdentity source={p} side={1} variant="panel" state={bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral'} emptyLabel={isBye ? '轮空 (bye)' : undefined} textLines={2} />
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <StatusBadge status={p.status || 'pending'} />
+                <MatchNatureBadge matchType="contest" />
+                <span className="text-xs font-medium text-foreground">{pairingResultLabel(p)}</span>
+              </div>
+              {p.match_id ? (
+                <Button asChild variant="outline" size="sm" className="min-h-11 w-full text-primary">
+                  <Link to={`/match/${p.match_id}`}>查看对局</Link>
+                </Button>
+              ) : (
+                <div className="flex min-h-11 items-center justify-center rounded-md bg-muted/40 text-xs text-muted-foreground">尚未生成对局</div>
+              )}
+            </article>
+          )
+        })}
+      </div>
+      <div className="hidden md:block">
+        <DataTable scrollLabel="赛事对阵一览表">
+          <Table className="min-w-[40rem]" aria-label="赛事对阵一览表">
         <TableHeader>
           <TableRow>
             <TableHead className="w-16">轮次</TableHead>
@@ -146,8 +189,9 @@ export default function ScheduleTable({ pairings }: Props) {
             )
           })}
         </TableBody>
-      </Table>
-      </DataTable>
+          </Table>
+        </DataTable>
+      </div>
       <Pagination page={safePage} perPage={PER_PAGE} total={rows.length} onPageChange={setPage} />
     </div>
   )

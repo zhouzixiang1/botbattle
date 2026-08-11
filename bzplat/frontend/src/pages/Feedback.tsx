@@ -12,7 +12,7 @@ import { ThreadView } from '@/components/communications/thread-view'
 import { DataRegion, PageFrame, PageHeader } from '@/components/layout'
 import { useAuth } from '@/components/useAuth'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -41,6 +41,12 @@ function readTracks(): GuestTrack[] {
 function saveTrack(track: GuestTrack) {
   const next = [track, ...readTracks().filter((item) => item.public_id !== track.public_id)].slice(0, 10)
   localStorage.setItem(TRACKS_KEY, JSON.stringify(next))
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 function coarseBrowser(): 'chrome' | 'firefox' | 'safari' | 'edge' | 'other' | 'unknown' {
@@ -532,8 +538,25 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
           <div className="space-y-1.5"><Label htmlFor="feedback-body">补充说明（可选）</Label><Textarea id="feedback-body" value={body} onChange={(event) => setBody(event.target.value)} maxLength={20_000} rows={4} placeholder="如果方便，补充点了什么、期望看到什么；不需要写技术原因" /></div>
           <div className="space-y-1.5">
             <Label htmlFor="feedback-files">截图（可选）</Label>
-            <Input id="feedback-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => setFiles(Array.from(event.target.files || []).slice(0, 5))} />
-            <p className="text-xs text-muted-foreground">{files.length ? `已选择 ${files.length} 张；提交时自动上传` : '不用整理日志；平台只打包安全诊断摘要'}</p>
+            <input id="feedback-files" className="peer sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={(event) => setFiles(Array.from(event.target.files || []).slice(0, 5))} />
+            <Label
+              htmlFor="feedback-files"
+              className={buttonVariants({ variant: 'outline', size: 'sm', className: 'min-h-11 w-full cursor-pointer peer-focus-visible:ring-[3px] peer-focus-visible:ring-ring/50' })}
+            >
+              <Paperclip className="size-4" />选择截图（最多 5 张）
+            </Label>
+            {files.length ? (
+              <ul data-testid="feedback-file-summary" className="space-y-1 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                {files.map((file, index) => (
+                  <li key={`${file.name}-${file.size}-${index}`} className="flex min-w-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-foreground">{file.name}</span>
+                    <span className="shrink-0 font-mono">{formatFileSize(file.size)}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-xs text-muted-foreground">不用整理日志；平台只打包安全诊断摘要</p>
+            )}
           </div>
           {!user && <CaptchaField onChange={setCaptcha} />}
           <Button className="w-full" disabled={submitting || !title.trim()} aria-busy={submitting} onClick={() => void submit()}><Send className="size-4" />{submitting ? '正在提交…' : '提交并开始追踪'}</Button>
@@ -551,7 +574,7 @@ function FeedbackForIdentity({ user }: { user: CurrentUser | null }) {
                 <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground"><span>{BUG_CATEGORY_LABELS[loaded.bug_report.category]}</span><span>{BUG_IMPACT_LABELS[loaded.bug_report.impact]}</span><span className="font-mono">{loaded.bug_report.public_id}</span></div>
                 <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
                   {loaded.bug_report.attachments.map((attachment) => <Button key={attachment.public_id} type="button" variant="outline" size="sm" onClick={() => void downloadAttachment(attachment.public_id, attachment.original_name)}><Paperclip className="size-3.5" /><span className="max-w-44 truncate">{attachment.original_name}</span></Button>)}
-                  {loaded.bug_report.attachments.length < 5 && <div className="min-w-48 flex-1"><Label htmlFor="feedback-more-files" className="sr-only">补充截图</Label><Input id="feedback-more-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={uploading} aria-label="补充截图" onChange={(event) => { const selectedFiles = Array.from(event.target.files || []); event.target.value = ''; void addAttachments(selectedFiles) }} /></div>}
+                  {loaded.bug_report.attachments.length < 5 && <div className="min-w-48 flex-1"><input id="feedback-more-files" className="peer sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple disabled={uploading} aria-label="补充截图" onChange={(event) => { const selectedFiles = Array.from(event.target.files || []); event.target.value = ''; void addAttachments(selectedFiles) }} /><Label htmlFor="feedback-more-files" aria-disabled={uploading} className={buttonVariants({ variant: 'outline', size: 'sm', className: 'min-h-11 w-full cursor-pointer peer-disabled:pointer-events-none peer-disabled:opacity-50 peer-focus-visible:ring-[3px] peer-focus-visible:ring-ring/50' })}><Paperclip className="size-4" />{uploading ? '正在上传…' : '选择补充截图'}</Label></div>}
                   {uploading && <span className="text-xs text-muted-foreground">正在上传…</span>}
                 </div>
                 <div className="mt-2 flex flex-wrap gap-2">{loaded.bug_report.events.filter((event) => event.event_type === 'status_changed').map((event) => <span key={event.public_id} className="inline-flex items-center gap-1 text-xs text-muted-foreground"><CheckCircle2 className="size-3.5" />{BUG_STATUS_LABELS[event.to_status] || event.to_status}{event.note ? `：${event.note}` : ''}</span>)}</div>
