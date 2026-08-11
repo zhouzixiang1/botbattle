@@ -2027,6 +2027,10 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
   await loginThroughUi(page, USER)
   const monitor = monitorBrowser(page)
   const allowedId = 'mock-private-debug-allowed'
+  const expectedAllowedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${allowedId}`,
+  )
   const deniedId = 'mock-private-debug-denied'
   const staleId = 'mock-private-debug-stale'
   const longToken = `LONG_${'A'.repeat(3_950)}`
@@ -2182,16 +2186,15 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
   await expect(page.getByText('STALE_PRIVATE_CONTENT', { exact: true })).toHaveCount(0)
   await page.waitForTimeout(150)
   expect(deniedDebugRequests).toBe(0)
-  await monitor.expectClean([{
-    kind: 'requestfailed',
-    method: 'GET',
-    pathname: `/api/matches/${allowedId}`,
-    errorText: 'net::ERR_ABORTED',
-  }])
+  await monitor.expectClean(expectedAllowedDetailCancellations())
 })
 
 test('MatchViewer playback clock cannot be starved by continuous SSE traffic', async ({ page }) => {
   const matchId = 'mock-live-continuous-clock'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const initialEvents = [
     { type: 'match_start', game_id: 'holdem', num_hands: 70 },
     { type: 'hand_start', hand: 0, sb: 0, bb: 1, chips: [19950, 19900] },
@@ -2254,12 +2257,7 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
   expect(duringStream, 'playback cursor must advance while SSE still changes total').toBeGreaterThan(1)
   await expect.poll(async () => Number(await sse.sent()), { timeout: 3_000 })
     .toBe(40)
-  await monitor.expectClean([{
-    kind: 'requestfailed',
-    method: 'GET',
-    pathname: `/api/matches/${matchId}`,
-    errorText: 'net::ERR_ABORTED',
-  }])
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('MatchViewer preserves more than 4000 events across reconnect snapshots', async ({ page }) => {
