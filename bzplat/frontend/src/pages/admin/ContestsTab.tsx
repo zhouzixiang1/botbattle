@@ -540,7 +540,7 @@ function ScheduleDialog({
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose() }}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto break-words">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto break-words max-lg:[&_[data-slot=button]]:min-h-11 max-lg:[&_[data-slot=input]]:min-h-11">
         <DialogHeader>
           <DialogTitle>编辑赛事时间</DialogTitle>
           <DialogDescription>

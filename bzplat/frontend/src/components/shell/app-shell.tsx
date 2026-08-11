@@ -75,14 +75,22 @@ function navItemsFor(user?: { role?: string } | null): NavItem[] {
 function NavLinks({
   onNavigate,
   user,
+  touchTargets = false,
 }: {
   onNavigate?: () => void
   user?: { role?: string } | null
+  touchTargets?: boolean
 }) {
   return (
     <nav aria-label="主导航" className="flex min-w-0 flex-col gap-0.5">
       {navItemsFor(user).map((item) => (
-        <NavLink key={item.to} to={item.to} end={item.end} className={navCls} onClick={onNavigate}>
+        <NavLink
+          key={item.to}
+          to={item.to}
+          end={item.end}
+          className={({ isActive }) => cn(navCls({ isActive }), touchTargets && 'min-h-11')}
+          onClick={onNavigate}
+        >
           <item.icon aria-hidden="true" className="size-4 shrink-0" />
           <span className="truncate">{item.label}</span>
         </NavLink>
@@ -302,7 +310,7 @@ export function AppShell() {
             {showSidebar ? (
               <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
                 <SheetTrigger asChild>
-                  <Button variant="ghost" size="icon" aria-label="菜单">
+                  <Button variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="菜单">
                     <Menu aria-hidden="true" className="size-5" />
                   </Button>
                 </SheetTrigger>
@@ -310,7 +318,7 @@ export function AppShell() {
                   side="left"
                   data-scroll-region="mobile-navigation"
                   data-overflow-allowed="y"
-                  className="w-[min(20rem,90vw)] overflow-y-auto p-4"
+                  className="w-[min(20rem,90vw)] overflow-y-auto p-4 [&_[data-slot=sheet-close]]:size-11"
                 >
                   <SheetHeader className="p-0">
                     <SheetTitle className="text-left">
@@ -318,14 +326,14 @@ export function AppShell() {
                     </SheetTitle>
                   </SheetHeader>
                   <div className="mt-4 px-1">
-                    <NavLinks onNavigate={() => setMobileOpen(false)} user={user} />
+                    <NavLinks onNavigate={() => setMobileOpen(false)} user={user} touchTargets />
                   </div>
                   {/* 移动端补齐桌面侧栏的功能入口：搜索 + 通知 + 主题（<xl 时桌面侧栏隐藏，抽屉需对等） */}
                   <div className="mt-4 px-1">
-                    <GlobalSearch compact />
+                    <GlobalSearch compact touchTarget />
                     <div className="mt-2 flex items-center justify-between gap-2">
-                      {isLoggedIn && <div className="flex items-center gap-1"><Button asChild variant="ghost" size="icon" aria-label="站内信"><Link to="/messages" onClick={() => setMobileOpen(false)}><Mail className="size-4" /></Link></Button><NotificationBell /></div>}
-                      <ThemeToggle />
+                      {isLoggedIn && <div className="flex items-center gap-2"><Button asChild variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="站内信"><Link to="/messages" onClick={() => setMobileOpen(false)}><Mail className="size-4" /></Link></Button><NotificationBell className="size-11" /></div>}
+                      <ThemeToggle className="size-11" />
                     </div>
                   </div>
                   {isLoggedIn && (
@@ -342,7 +350,7 @@ export function AppShell() {
                         </div>
                       </div>
                       <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
-                        <Button asChild variant="outline" size="sm" className="w-full">
+                        <Button asChild variant="outline" size="sm" className="min-h-11 w-full">
                           <Link
                             to={`/user/${encodeURIComponent(user?.username ?? '')}`}
                             onClick={() => setMobileOpen(false)}
@@ -351,7 +359,7 @@ export function AppShell() {
                             个人主页
                           </Link>
                         </Button>
-                        <Button asChild variant="outline" size="sm" className="w-full">
+                        <Button asChild variant="outline" size="sm" className="min-h-11 w-full">
                           <Link to="/settings" onClick={() => setMobileOpen(false)}>
                             <Settings2 aria-hidden="true" className="size-4" />
                             账号设置
@@ -362,7 +370,7 @@ export function AppShell() {
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="mt-2 w-full justify-start text-muted-foreground"
+                        className="mt-2 min-h-11 w-full justify-start text-muted-foreground"
                         onClick={() => void onLogout()}
                       >
                         <LogOut aria-hidden="true" className="size-4" />
@@ -372,12 +380,12 @@ export function AppShell() {
                   )}
                   {!isLoggedIn && (
                     <div className="mt-6 flex flex-col gap-2 px-1">
-                      <Button asChild variant="outline" className="w-full">
+                      <Button asChild variant="outline" className="min-h-11 w-full">
                         <Link to="/login" onClick={() => setMobileOpen(false)}>
                           登录
                         </Link>
                       </Button>
-                      <Button asChild className="w-full shadow-soft">
+                      <Button asChild className="min-h-11 w-full shadow-soft">
                         <Link to="/register" onClick={() => setMobileOpen(false)}>
                           注册
                         </Link>
@@ -387,21 +395,21 @@ export function AppShell() {
                 </SheetContent>
               </Sheet>
             ) : null}
-            <Link to="/" className="flex items-center">
+            <Link to="/" className="flex min-h-11 items-center">
               <BrandMark />
             </Link>
 
             {/* 右侧操作 */}
             <div className="ml-auto flex min-w-0 items-center gap-1">
-              {!isAuthPage && <GlobalSearch hotkey />}
+              {!isAuthPage && <GlobalSearch hotkey touchTarget />}
               {!isAuthPage && isLoggedIn && (
-                <Button asChild variant="ghost" size="icon" aria-label="账户">
+                <Button asChild variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="账户">
                   <Link to="/settings">
                     <CircleUserRound aria-hidden="true" className="size-[1.15rem]" />
                   </Link>
                 </Button>
               )}
-              <ThemeToggle />
+              <ThemeToggle className="max-xl:size-11" />
               {isAuthPage && !isLoggedIn && (
                 <Button asChild variant="ghost" size="sm" className="text-muted-foreground">
                   <Link to="/login">登录</Link>

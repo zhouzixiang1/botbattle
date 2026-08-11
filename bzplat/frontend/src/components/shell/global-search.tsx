@@ -13,6 +13,7 @@ import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipa
 import { apiGet } from '@/api'
 import { gameLabel } from '@/games'
 import { matchParticipantSearchText, type MatchParticipantSource } from '@/lib/match-participants'
+import { cn } from '@/lib/utils'
 
 interface SearchUser {
   id: number
@@ -43,10 +44,13 @@ interface SearchMatch extends MatchParticipantSource {
 export function GlobalSearch({
   compact = false,
   hotkey = false,
+  touchTarget = false,
 }: {
   compact?: boolean
   /** AppShell 只给一个常驻实例注册快捷键，避免多个响应式入口同时打开重叠弹窗。 */
   hotkey?: boolean
+  /** 移动 Shell 中保证触控区不小于 44px，不改变桌面侧栏密度。 */
+  touchTarget?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
@@ -117,7 +121,10 @@ export function GlobalSearch({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="inline-flex h-[var(--control-height)] w-full min-w-0 touch-manipulation items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+          className={cn(
+            'inline-flex h-[var(--control-height)] w-full min-w-0 touch-manipulation items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none',
+            touchTarget && 'min-h-11',
+          )}
           aria-label="搜索"
           aria-haspopup="dialog"
           aria-expanded={open}
@@ -131,7 +138,10 @@ export function GlobalSearch({
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="inline-flex size-[var(--control-height)] shrink-0 touch-manipulation items-center justify-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none md:hidden"
+            className={cn(
+              'inline-flex size-[var(--control-height)] shrink-0 touch-manipulation items-center justify-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none md:hidden',
+              touchTarget && 'min-h-11 min-w-11',
+            )}
             aria-label="搜索"
             aria-haspopup="dialog"
             aria-expanded={open}
@@ -142,7 +152,10 @@ export function GlobalSearch({
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="hidden h-[var(--control-height)] max-w-full min-w-0 touch-manipulation items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none md:inline-flex"
+            className={cn(
+              'hidden h-[var(--control-height)] max-w-full min-w-0 touch-manipulation items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none md:inline-flex',
+              touchTarget && 'min-h-11',
+            )}
             aria-haspopup="dialog"
             aria-expanded={open}
             aria-keyshortcuts="Control+K Meta+K"

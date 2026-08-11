@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { loginThroughUi, monitorBrowser, withCleanup } from './helpers'
 
@@ -18,17 +18,25 @@ async function expectNoRootOverflow(page: Page, label: string) {
 }
 
 async function selectAdminModule(page: Page, label: string) {
-  const mobileTrigger = page.getByRole('button', { name: '选择管理模块' })
-  if (await mobileTrigger.isVisible()) {
+  const mobileTrigger = page.getByRole('combobox', { name: '选择管理模块' })
+  const viewportWidth = page.viewportSize()?.width ?? 1440
+  if (viewportWidth < 1024) {
+    await expect(mobileTrigger).toBeVisible()
     await mobileTrigger.click()
     await page.getByRole('option', { name: label, exact: true }).click()
   } else {
-    await page
-      .getByRole('navigation', { name: '管理控制台模块' })
-      .getByRole('button', { name: new RegExp(`^${label}`) })
-      .click()
+    const desktopNavigation = page.getByRole('navigation', { name: '管理控制台模块' })
+    await expect(desktopNavigation).toBeVisible()
+    await desktopNavigation.getByRole('button', { name: new RegExp(`^${label}`) }).click()
   }
   await expect(page.getByRole('main', { name: label, exact: true })).toBeVisible()
+}
+
+async function expectTouchTarget(locator: Locator, label: string) {
+  const box = await locator.boundingBox()
+  expect(box, `${label} has no rendered box`).not.toBeNull()
+  expect(box?.width ?? 0, `${label} width`).toBeGreaterThanOrEqual(44)
+  expect(box?.height ?? 0, `${label} height`).toBeGreaterThanOrEqual(44)
 }
 
 test.beforeAll(async ({ request }) => {
@@ -46,12 +54,37 @@ for (const viewport of ADMIN_VIEWPORTS) {
       await loginThroughUi(page, ADMIN)
       await page.goto('/#/admin')
 
+      if (viewport.name === 'mobile') {
+        const menu = page.getByRole('button', { name: '菜单', exact: true })
+        await expectTouchTarget(menu, 'mobile shell menu')
+        await expectTouchTarget(page.getByRole('button', { name: '搜索', exact: true }), 'mobile shell search')
+        await expectTouchTarget(page.getByRole('link', { name: '账户', exact: true }), 'mobile shell account')
+        await expectTouchTarget(page.getByRole('button', { name: /^当前：/ }), 'mobile shell theme')
+
+        await menu.click()
+        const mobileNavigation = page.getByRole('dialog')
+        await expect(mobileNavigation).toBeVisible()
+        await expectTouchTarget(mobileNavigation.getByRole('link', { name: '首页', exact: true }), 'mobile navigation item')
+        await expectTouchTarget(mobileNavigation.getByRole('button', { name: '搜索', exact: true }), 'mobile drawer search')
+        await expectTouchTarget(mobileNavigation.getByRole('link', { name: '站内信', exact: true }), 'mobile drawer messages')
+        await expectTouchTarget(mobileNavigation.getByRole('button', { name: '通知', exact: true }), 'mobile drawer notifications')
+        await expectTouchTarget(mobileNavigation.getByRole('button', { name: /^当前：/ }), 'mobile drawer theme')
+        await mobileNavigation.getByRole('button', { name: '关闭', exact: true }).click()
+        await expect(mobileNavigation).toHaveCount(0)
+
+        await expectTouchTarget(page.getByRole('combobox', { name: '选择管理模块' }), 'mobile admin module selector')
+      }
+
     await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
     await expectNoRootOverflow(page, 'dashboard')
 
     await selectAdminModule(page, '用户')
     const userSearch = page.getByPlaceholder('搜索用户名/邮箱')
     await expect(userSearch).toBeVisible()
+    if (viewport.name === 'mobile') {
+      await expectTouchTarget(userSearch, 'mobile admin user search')
+      await expectTouchTarget(page.getByRole('button', { name: '删除', exact: true }).first(), 'mobile admin destructive action')
+    }
     if (viewport.interactive) {
       const filteredUsersPromise = page.waitForResponse((response) => {
         const url = new URL(response.url())

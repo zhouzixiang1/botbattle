@@ -94,18 +94,18 @@ export default function Admin() {
         eyebrow="平台运维"
         title="管理控制台"
         description={`${active.label}：${active.description}`}
-        actions={<Button asChild variant="outline" size="sm"><Link to="/feedback">查看用户视角</Link></Button>}
+        actions={<Button asChild variant="outline" size="sm" className="max-lg:min-h-11"><Link to="/feedback">查看用户视角</Link></Button>}
       />
 
       <div className="grid min-w-0 gap-3 lg:grid-cols-[12.5rem_minmax(0,1fr)]">
         <div className="lg:hidden">
           <Select value={tab} onValueChange={(value) => selectTab(value as TabKey)}>
-            <SelectTrigger aria-label="选择管理模块" className="w-full bg-card">
+            <SelectTrigger aria-label="选择管理模块" className="min-h-11 w-full bg-card">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {TABS.map((item) => (
-                <SelectItem key={item.key} value={item.key}>{item.label}</SelectItem>
+                <SelectItem key={item.key} value={item.key} className="min-h-11">{item.label}</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -138,7 +138,11 @@ export default function Admin() {
           </nav>
         </aside>
 
-        <main id="admin-content" className="min-w-0" aria-label={active.label}>
+        <main
+          id="admin-content"
+          className="min-w-0 max-lg:[&_[data-slot=button]]:min-h-11 max-lg:[&_[data-slot=button]]:min-w-11 max-lg:[&_[data-slot=input]]:min-h-11 max-lg:[&_[data-slot=select-trigger]]:min-h-11 max-lg:[&_textarea]:min-h-11"
+          aria-label={active.label}
+        >
           {tab === 'dashboard' && <Dashboard />}
           {tab === 'users' && <UsersTab />}
           {tab === 'bots' && <BotsTab />}

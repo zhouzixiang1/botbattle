@@ -18,7 +18,7 @@ interface Notification {
   created_at: string
 }
 
-export default function NotificationBell() {
+export default function NotificationBell({ className }: { className?: string }) {
   const [unread, setUnread] = useState(0)
   const [recent, setRecent] = useState<Notification[]>([])
   const [open, setOpen] = useState(false)
@@ -62,7 +62,10 @@ export default function NotificationBell() {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          className={cn(
+            'relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
+            className,
+          )}
           aria-label="通知"
         >
           <Bell className="size-[1.15rem]" />
