@@ -3704,8 +3704,13 @@ test('MatchViewer keeps chess history playable after a mid-game technical loss',
 })
 
 async function openBotVersionManager(page: Page, row: Locator, botName: string) {
-  await row.getByRole('button', { name: `管理 ${botName}`, exact: true }).click()
-  await page.getByRole('menuitem', { name: '版本管理', exact: true }).click()
+  const trigger = row.getByRole('button', { name: `管理 ${botName}`, exact: true })
+  await trigger.focus()
+  await trigger.press('Enter')
+  const versionItem = page.getByRole('menuitem', { name: '版本管理', exact: true })
+  await expect(versionItem).toBeVisible()
+  await expect(versionItem).toBeFocused()
+  await page.keyboard.press('Enter')
 }
 
 async function activateVersion(page: Page, manager: Locator, botId: number, version: number) {
