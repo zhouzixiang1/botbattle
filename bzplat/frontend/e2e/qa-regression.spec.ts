@@ -147,6 +147,33 @@ async function routeStructuredReplay(
   })
 }
 
+function captureExactGetCancellations(page: Page, pathname: string, maxCount = 3) {
+  const errors: string[] = []
+  page.on('requestfailed', (request) => {
+    if (
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname === pathname
+    ) {
+      errors.push(request.failure()?.errorText || '')
+    }
+  })
+  return () => {
+    expect(errors.length, `${pathname} cancellation count`).toBeLessThanOrEqual(maxCount)
+    for (const errorText of errors) {
+      expect(
+        errorText,
+        `${pathname} failed for a reason other than a browser navigation/effect cancellation`,
+      ).toMatch(/(?:ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)/i)
+    }
+    return errors.map((errorText) => ({
+      kind: 'requestfailed' as const,
+      method: 'GET',
+      pathname,
+      errorText,
+    }))
+  }
+}
+
 async function createDisposableBot(
   page: Page,
   name: string,
@@ -156,7 +183,7 @@ async function createDisposableBot(
     multipart: {
       name,
       display_name: name,
-      description: 'Disposable Playwright entity; hard-deleted in test cleanup',
+      description: 'Playwright QA entity; cleanup follows immutable-audit constraints',
       upload_note: 'initial disposable version',
       game_id: 'holdem',
       runtime_mode: runtimeMode,
@@ -176,6 +203,33 @@ async function createDisposableBot(
   expect(data.bot?.name).toBe(name)
   expect(data.bot?.runtime_mode).toBe(runtimeMode)
   return data.bot as { id: number; name: string }
+}
+
+async function getOrCreateChallengeFixtureBot(page: Page) {
+  // Completed matches are immutable audit records and correctly prevent hard-delete.
+  // Reuse one active QA-only Bot instead of leaking a new referenced Bot per browser run.
+  const name = 'pw_e2e_challenge_longrun'
+  const mine = await page.request.get('/api/bots/mine?game_id=holdem&page=1&per_page=100')
+  const mineText = await mine.text()
+  expect(mine.status(), mineText).toBe(200)
+  const existing = (JSON.parse(mineText) as {
+    bots?: Array<{
+      id: number
+      name: string
+      runtime_mode?: string
+      is_active?: number
+      runnable?: boolean
+    }>
+  }).bots?.find((bot) => bot.name === name)
+  if (!existing) return createDisposableBot(page, name, 'longrunning')
+
+  expect(existing.runtime_mode, `${name} must retain its LongRunning fixture contract`).toBe('longrunning')
+  expect(existing.runnable, `${name} must remain runnable`).not.toBe(false)
+  if (!existing.is_active) {
+    const activated = await page.request.post(`/api/bots/${existing.id}/active?active=true`)
+    expect(activated.status(), await activated.text()).toBe(200)
+  }
+  return { id: existing.id, name: existing.name }
 }
 
 async function hardDeleteBots(
@@ -762,11 +816,14 @@ test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
     .locator('xpath=ancestor::li[1]')
   await expect(longRow).toBeVisible()
   await page.setViewportSize({ width: 320, height: 844 })
-  await longRow.getByRole('button', { name: '编辑', exact: true }).click()
+  await longRow.getByRole('button', { name: `管理 ${longBotLabel}`, exact: true }).click()
+  await page.getByRole('menuitem', { name: '编辑资料', exact: true }).click()
   await expect(longRow.getByLabel('显示名', { exact: true })).toBeVisible()
   await expect(longRow.getByLabel('简介', { exact: true })).toBeVisible()
   const editDescriptionBox = await longRow.getByLabel('简介', { exact: true }).boundingBox()
-  expect(editDescriptionBox?.width ?? 999).toBeLessThanOrEqual(230)
+  expect(editDescriptionBox).not.toBeNull()
+  expect(editDescriptionBox?.x ?? -1).toBeGreaterThanOrEqual(0)
+  expect((editDescriptionBox?.x ?? 999) + (editDescriptionBox?.width ?? 999)).toBeLessThanOrEqual(320)
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
   expect(overflow).toBeLessThanOrEqual(1)
   await monitor.expectClean([{
@@ -1129,30 +1186,27 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
   request,
 }) => {
   expect(baseURL).toBeTruthy()
-  const createdBotIds: number[] = []
   let matchId: string | null = null
   await withCleanup(async () => {
     const monitor = monitorBrowser(page)
     await loginThroughUi(page, USER)
-    const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
     // This case verifies the challenge/UI lifecycle rather than Traditional's
     // per-decision container startup. The sample implements the canonical
     // KEEP_RUNNING handshake, so LongRunning keeps the real 70-hand match
     // comfortably inside the browser-test budget without weakening assertions.
-    const disposable = await createDisposableBot(page, `pwch_${suffix}`, 'longrunning')
-    createdBotIds.push(disposable.id)
+    const fixtureBot = await getOrCreateChallengeFixtureBot(page)
     await page.goto('/#/challenge')
 
     await chooseBot(
       page,
       page.getByRole('button', { name: '选择我的 Bot', exact: true }),
-      disposable.name,
+      fixtureBot.name,
       true,
     )
     await chooseBot(
       page,
       page.getByRole('button', { name: '选择 Bot（搜索 / 我的 / 按用户）', exact: true }),
-      disposable.name,
+      fixtureBot.name,
       false,
     )
 
@@ -1172,6 +1226,10 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     const response = await responsePromise
     matchId = await waitForAcceptedExecutionMatch(page, response, 'manual')
     expect(matchId).toBeTruthy()
+    const expectedDetailCancellations = captureExactGetCancellations(
+      page,
+      `/api/matches/${matchId}`,
+    )
     await expect(page).toHaveURL(/\/#\/match\//)
     expect(challengePosts).toBe(1)
 
@@ -1193,10 +1251,11 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     const searchDialogs = page.getByRole('dialog')
     await expect(searchDialogs).toHaveCount(1)
     const search = searchDialogs.getByPlaceholder('搜索 Bot、用户、对局…')
-    await search.fill(disposable.name)
-    await expect(searchDialogs.getByText('Bot', { exact: true })).toBeVisible()
-    await expect(searchDialogs.getByText('对局', { exact: true })).toBeVisible()
-    await monitor.expectClean()
+    await search.fill(fixtureBot.name)
+    const groupHeadings = searchDialogs.locator('[cmdk-group-heading]')
+    await expect(groupHeadings.filter({ hasText: /^Bot$/ })).toHaveCount(1)
+    await expect(groupHeadings.filter({ hasText: /^对局$/ })).toHaveCount(1)
+    await monitor.expectClean(expectedDetailCancellations())
   }, async () => {
     const tasks: Array<{ label: string; run: () => Promise<void> }> = []
     if (matchId) {
@@ -1206,10 +1265,6 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
         run: () => ensureMatchTerminal(browser, baseURL!, request, createdMatchId),
       })
     }
-    tasks.push({
-      label: 'delete disposable challenge Bots',
-      run: () => hardDeleteBots(browser, baseURL!, createdBotIds),
-    })
     await runCleanupTasks(tasks)
   })
 })
@@ -1236,6 +1291,10 @@ test('terminal SSE snapshot switches a raced live page to replay without reconne
       eventRequests += 1
     }
   })
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
@@ -1243,13 +1302,17 @@ test('terminal SSE snapshot switches a raced live page to replay without reconne
   // that window so a server-side terminal snapshot regression cannot false-pass.
   await page.waitForTimeout(4_000)
   expect(eventRequests).toBe(1)
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page }) => {
-  const monitor = monitorBrowser(page)
   const viewerId = 'mock-canonical-terminal-viewer'
   const humanId = 'mock-canonical-terminal-human'
+  const expectedViewerDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${viewerId}`,
+  )
+  const monitor = monitorBrowser(page)
 
   // Register WebSocket interception before the first navigation. Vite creates
   // its HMR socket on that navigation; Playwright must install page-level WS
@@ -1321,7 +1384,9 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
 
   await page.goto(`/#/match/${viewerId}`)
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
-  await expect(page.getByText('canonical_a @alpha', { exact: true }).first()).toBeVisible()
+  const viewerSeatOne = page.locator('[data-match-participant][data-seat="1"]')
+  await expect(viewerSeatOne.getByText('canonical_a', { exact: true })).toBeVisible()
+  await expect(viewerSeatOne.getByRole('link', { name: '@alpha', exact: true })).toBeVisible()
   // The viewer intentionally parks on the event before terminal. Step once to
   // prove the game reducer consumes canonical `deltas`, not retired aliases.
   await page.getByRole('button', { name: '下一个事件', exact: true }).click()
@@ -1329,14 +1394,19 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await expect(page.getByTestId('holdem-seat-state-2')).toContainText('-37')
 
   await page.goto(`/#/play/${humanId}`)
-  await expect(page.getByText(/对局结束 · 胜者：canonical_bot @alpha/)).toBeVisible()
+  const humanStatus = page.getByRole('region', { name: '人类对战状态' })
+  await expect(humanStatus).toContainText('对局结束 · 胜者：canonical_bot（@alpha）')
   await expect(page.getByText('累计 +23 / -23', { exact: true })).toBeVisible()
-  await monitor.expectClean()
+  await monitor.expectClean(expectedViewerDetailCancellations())
 })
 
 test('Holdem production replay uses empty space for a responsive current-position dashboard', async ({ page }) => {
-  const monitor = monitorBrowser(page)
   const matchId = '20260809205002-ede64ea8'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
+  const monitor = monitorBrowser(page)
   const events = holdemProductionReplay0809()
   expect(events.filter((event) => event.type === 'hand_start')).toHaveLength(70)
   expect(events.filter((event) => event.type === 'settle')).toHaveLength(70)
@@ -1469,12 +1539,16 @@ test('Holdem production replay uses empty space for a responsive current-positio
   expect(collapsedHud?.x ?? 9999).toBeLessThan(collapsedCanvas?.x ?? 0)
   expect(collapsedTimeline?.y ?? 0).toBeGreaterThan((collapsedCanvas?.y ?? 0) + (collapsedCanvas?.height ?? 0))
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats truthful', async ({ page }) => {
-  const monitor = monitorBrowser(page)
   const matchId = 'mock-holdem-duplicate-position-dashboard'
+  const expectedDetailCancellations = captureExactGetCancellations(
+    page,
+    `/api/matches/${matchId}`,
+  )
+  const monitor = monitorBrowser(page)
   const events = holdemDuplicateReplayFixture()
   expect(events.filter((event) => event.type === 'hand_start')).toHaveLength(140)
   expect(events.filter((event) => event.type === 'settle')).toHaveLength(140)
@@ -1546,7 +1620,7 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await expect(overview).not.toContainText('等待行动')
   await expect(overview).not.toContainText('当前手 70')
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
-  await monitor.expectClean()
+  await monitor.expectClean(expectedDetailCancellations())
 })
 
 test('human Holdem reuses the public-position HUD without exposing hole-card text', async ({ page }) => {
