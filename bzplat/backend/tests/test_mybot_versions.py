@@ -147,6 +147,54 @@ def test_api_upload_bot_with_runtime_mode(tmp_path):
     assert bot["runtime_mode"] == "traditional"
 
 
+def test_manual_multipart_routes_preserve_openapi_contract(tmp_path):
+    """Pre-parse admission must not erase Swagger/generated-client bodies."""
+    app = _app(tmp_path)
+    paths = app.openapi()["paths"]
+    cases = {
+        "/api/bots": (
+            {"name", "file"},
+            {
+                "name",
+                "display_name",
+                "description",
+                "upload_note",
+                "game_id",
+                "runtime_mode",
+                "file",
+            },
+            {"400", "401", "413", "503"},
+        ),
+        "/api/bots/{bot_id}/versions": (
+            {"file"},
+            {"upload_note", "runtime_mode", "file"},
+            {"400", "401", "413", "503"},
+        ),
+        "/api/auth/avatar": (
+            {"file"},
+            {"file"},
+            {"400", "401", "413", "422"},
+        ),
+        "/api/feedback/bugs/{bug_public_id}/attachments": (
+            {"file"},
+            {"tracking_token", "file"},
+            {"400", "404", "413", "422"},
+        ),
+    }
+    for path, (required, properties, responses) in cases.items():
+        operation = paths[path]["post"]
+        request_body = operation["requestBody"]
+        assert request_body["required"] is True
+        schema = request_body["content"]["multipart/form-data"]["schema"]
+        assert set(schema["required"]) == required
+        assert set(schema["properties"]) == properties
+        assert schema["properties"]["file"] == {
+            "type": "string",
+            "format": "binary",
+        }
+        assert responses <= set(operation["responses"])
+
+
 def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkeypatch):
     """A slow/unresponsive Bot upload must not freeze health, SSE or WebSocket tasks."""
     from httpx import ASGITransport, AsyncClient

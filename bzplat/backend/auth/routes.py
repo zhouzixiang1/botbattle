@@ -321,9 +321,31 @@ async def update_profile(
 
 _AVATAR_MAX = 2 * 1024 * 1024  # 2MB
 _AVATAR_ALLOWED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_AVATAR_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "file": {"type": "string", "format": "binary"}
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "400": {"description": "头像文件大小或媒体类型无效"},
+        "401": {"description": "未登录或会话过期"},
+        "413": {"description": "multipart 请求体超过 3 MiB"},
+        "422": {"description": "缺少 multipart 文件字段"},
+    },
+}
 
 
-@router.post("/avatar")
+@router.post("/avatar", openapi_extra=_AVATAR_UPLOAD_OPENAPI)
 async def upload_avatar(
     request: Request,
     user: dict = Depends(require_user),

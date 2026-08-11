@@ -704,7 +704,35 @@ def reply_guest_bug_report(
     return {"message": message}
 
 
-@router.post("/api/feedback/bugs/{bug_public_id}/attachments")
+_BUG_ATTACHMENT_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "tracking_token": {"type": "string", "default": ""},
+                        "file": {"type": "string", "format": "binary"},
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "400": {"description": "附件大小、图片内容或媒体类型无效"},
+        "404": {"description": "反馈不存在或无附件权限"},
+        "413": {"description": "multipart 请求体超过 6 MiB"},
+        "422": {"description": "缺少 multipart 文件字段"},
+    },
+}
+
+
+@router.post(
+    "/api/feedback/bugs/{bug_public_id}/attachments",
+    openapi_extra=_BUG_ATTACHMENT_UPLOAD_OPENAPI,
+)
 async def upload_bug_attachment(
     bug_public_id: str,
     request: Request,

@@ -97,6 +97,62 @@ from bzplat.backend.store.schema import (
 from bzplat.backend.store.public_contract import sanitize_public_match
 router = APIRouter()
 _T = TypeVar("_T")
+_BINARY_FILE_SCHEMA = {"type": "string", "format": "binary"}
+_BOT_CREATE_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["name", "file"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "display_name": {"type": "string", "default": ""},
+                        "description": {"type": "string", "default": ""},
+                        "upload_note": {"type": "string", "default": ""},
+                        "game_id": {"type": "string", "default": "holdem"},
+                        "runtime_mode": {
+                            "type": "string",
+                            "default": DEFAULT_RUNTIME_MODE,
+                        },
+                        "file": _BINARY_FILE_SCHEMA,
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "400": {"description": "Bot 文件或参数无效，或预检失败"},
+        "401": {"description": "未登录或会话过期"},
+        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "503": {"description": "上传槽繁忙或沙箱暂不可用"},
+    },
+}
+_BOT_VERSION_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "upload_note": {"type": "string", "default": ""},
+                        "runtime_mode": {"type": "string", "default": ""},
+                        "file": _BINARY_FILE_SCHEMA,
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "400": {"description": "Bot 文件或参数无效，或预检失败"},
+        "401": {"description": "未登录或会话过期"},
+        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "503": {"description": "上传槽繁忙或沙箱暂不可用"},
+    },
+}
 
 
 class _BotUploadBusy(Exception):
@@ -714,7 +770,7 @@ def bot_rating_history(
     return {"history": _store(request).list_rating_history(bot_id, limit=max(1, min(limit, 500)))}
 
 
-@router.post("/api/bots")
+@router.post("/api/bots", openapi_extra=_BOT_CREATE_UPLOAD_OPENAPI)
 async def upload_bot(
     request: Request,
     user=Depends(require_user),
@@ -770,7 +826,10 @@ async def upload_bot(
     return {"bot": bot}
 
 
-@router.post("/api/bots/{bot_id}/versions")
+@router.post(
+    "/api/bots/{bot_id}/versions",
+    openapi_extra=_BOT_VERSION_UPLOAD_OPENAPI,
+)
 async def upload_bot_version(
     bot_id: int,
     request: Request,
