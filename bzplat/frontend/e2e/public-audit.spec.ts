@@ -107,6 +107,25 @@ test('public deep links, refresh, back/forward, search, and fallback routes work
   await monitor.expectClean()
 })
 
+test('collapsed desktop sidebar keeps the Botbattle wordmark inside the navigation rail', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/#/')
+
+  const sidebar = page.locator('aside[aria-label="站点导航"]')
+  await expect(sidebar).toBeVisible()
+  await expect(sidebar.getByText('Botbattle', { exact: true })).toBeVisible()
+
+  await sidebar.getByRole('button', { name: '收起侧边栏' }).click()
+  await expect(sidebar).toHaveAttribute('data-sidebar-collapsed', 'true')
+  await expect(sidebar.getByText('Botbattle', { exact: true })).toHaveCount(0)
+  const collapsedOverflow = await sidebar.evaluate((node) => node.scrollWidth - node.clientWidth)
+  expect(collapsedOverflow).toBeLessThanOrEqual(1)
+
+  await sidebar.getByRole('button', { name: '展开侧边栏' }).click()
+  await expect(sidebar).toHaveAttribute('data-sidebar-collapsed', 'false')
+  await expect(sidebar.getByText('Botbattle', { exact: true })).toBeVisible()
+})
+
 test('invalid login is single-submit and displays the server error', async ({ page }) => {
   const monitor = monitorBrowser(page)
   let loginPosts = 0

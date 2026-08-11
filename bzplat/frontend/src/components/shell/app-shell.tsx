@@ -128,8 +128,9 @@ export function AppShell() {
       {showSidebar && (
         <aside
           aria-label="站点导航"
+          data-sidebar-collapsed={sidebarCollapsed ? 'true' : 'false'}
           className={cn(
-            'sticky top-0 hidden h-dvh shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200 motion-reduce:transition-none xl:flex',
+            'sticky top-0 hidden h-dvh shrink-0 flex-col overflow-x-clip border-r border-border bg-card xl:flex',
             sidebarCollapsed
               ? 'w-[var(--shell-sidebar-collapsed-width)]'
               : 'w-[var(--shell-sidebar-width)]',
@@ -146,9 +147,13 @@ export function AppShell() {
               <Link
                 to="/"
                 aria-label={sidebarCollapsed ? 'Botbattle 首页' : undefined}
-                className="flex items-center"
+                className="flex min-w-0 max-w-full items-center overflow-hidden"
               >
-                <BrandMark size={sidebarCollapsed ? 'sm' : 'md'} withText={!sidebarCollapsed} />
+                <BrandMark
+                  className="min-w-0 max-w-full overflow-hidden"
+                  size={sidebarCollapsed ? 'sm' : 'md'}
+                  withText={!sidebarCollapsed}
+                />
               </Link>
               <Button
                 variant="ghost"

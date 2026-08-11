@@ -15,6 +15,7 @@ import { Link } from 'react-router-dom'
 import { ChevronRight, ChevronDown } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { OverflowText } from '@/components/ui/overflow-text'
 import { StatusBadge } from '@/components/ui/status'
 
 export interface BracketPairing {
@@ -40,10 +41,10 @@ interface Props {
 }
 
 function botLabel(p: BracketPairing, side: 0 | 1): string {
-  if (side === 0) return p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`
+  if (side === 0) return p.bot_a_display || p.bot_a_name || '未命名 Bot'
   // 轮空（bye placeholder）：bot_b_id 为 null，展示为「轮空」而非 #null
   if (p.bot_b_id == null) return '轮空'
-  return p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`
+  return p.bot_b_display || p.bot_b_name || '未命名 Bot'
 }
 
 function botId(p: BracketPairing, side: 0 | 1): number | null {
@@ -168,24 +169,31 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
             <Button
               key={r.round}
               variant={r.round <= expandTo ? 'default' : 'outline'}
-              size="sm"
-              className="h-6 px-2 text-[11px]"
+              size="xs"
               onClick={() => setExpandTo(r.round)}
             >
               R{r.round}
             </Button>
           ))}
-          <Button variant="ghost" size="sm" className="h-6 text-[11px]" onClick={() => setExpandTo(maxRound)}>
+          <Button variant="ghost" size="xs" onClick={() => setExpandTo(maxRound)}>
             全部
           </Button>
         </div>
       )}
 
       {/* 树状图：每轮一列，横向滚动；外层 relative 供 SVG overlay 定位 */}
-      <div className="overflow-x-auto pb-2">
+      <div
+        data-scroll-region="contest-bracket"
+        data-overflow-allowed="x"
+        role="region"
+        aria-label="淘汰赛对阵树"
+        tabIndex={0}
+        className="min-w-0 overflow-x-auto overscroll-x-contain pb-2 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
         <div ref={containerRef} className="relative flex min-w-max gap-6">
           {/* 连接线层：覆盖整片对阵区，不拦截鼠标事件（点击穿透到卡片） */}
           <svg
+            aria-hidden="true"
             className="text-muted-foreground/40 pointer-events-none absolute inset-0 h-full w-full"
             fill="none"
             stroke="currentColor"
@@ -197,19 +205,24 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
           </svg>
           {visibleRounds.map((r) => {
             const isCollapsed = collapsed.has(r.round)
+            const roundPanelId = `bracket-round-${r.round}`
             return (
               <div key={r.round} className="relative flex min-w-[180px] flex-col">
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="xs"
                   onClick={() => toggleCollapse(r.round)}
-                  className="mb-2 flex items-center gap-1 text-xs font-semibold text-foreground hover:text-primary"
+                  aria-expanded={!isCollapsed}
+                  aria-controls={roundPanelId}
+                  className="mb-2 w-full justify-start text-foreground hover:text-primary"
                 >
-                  {isCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                  {isCollapsed ? <ChevronRight aria-hidden="true" className="size-3.5" /> : <ChevronDown aria-hidden="true" className="size-3.5" />}
                   第 {r.round} 轮
                   <Badge variant="secondary" className="text-[10px]">{r.pairings.length}</Badge>
-                </button>
+                </Button>
                 {!isCollapsed && (
-                  <div className="space-y-2">
+                  <div id={roundPanelId} className="space-y-2">
                     {r.pairings.map((p) => {
                       const w = p.match_winner
                       // 轮空（bye）：bot_b_id 为 null 且 status=completed，bot_a 自动晋级为胜者
@@ -296,10 +309,12 @@ function SlotRow({
       }`}
     >
       {bye || botId == null ? (
-        <span className="min-w-0 flex-1 truncate italic text-muted-foreground">{label}</span>
+        <OverflowText tooltip={label} tooltipFocusable={false} className="min-w-0 flex-1 italic text-muted-foreground">{label}</OverflowText>
       ) : (
-        <Link to={`/bot/${botId}`} className="min-w-0 flex-1 truncate hover:text-primary">
-          {label || '—'}
+        <Link to={`/bot/${botId}`} className="min-w-0 flex-1 hover:text-primary">
+          <OverflowText tooltip={label || '未命名 Bot'} tooltipFocusable={false}>
+            {label || '未命名 Bot'}
+          </OverflowText>
         </Link>
       )}
       {win && <span className="text-[10px]">✓</span>}

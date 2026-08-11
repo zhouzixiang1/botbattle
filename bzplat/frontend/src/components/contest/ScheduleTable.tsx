@@ -9,6 +9,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
+  DataTable,
   Table,
   TableBody,
   TableCell,
@@ -17,6 +18,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
+import { EntityName } from '@/components/ui/overflow-text'
 import { StatusBadge } from '@/components/ui/status'
 import { fmtTime } from '@/lib/format'
 import Pagination from '@/components/Pagination'
@@ -83,8 +85,9 @@ export default function ScheduleTable({ pairings }: Props) {
   }
 
   return (
-    <div className="overflow-x-auto">
-      <Table className="min-w-[40rem]">
+    <div className="min-w-0 space-y-2">
+      <DataTable scrollLabel="赛事对阵一览表">
+      <Table className="min-w-[40rem]" aria-label="赛事对阵一览表">
         <TableHeader>
           <TableRow>
             <TableHead className="w-16">轮次</TableHead>
@@ -111,12 +114,17 @@ export default function ScheduleTable({ pairings }: Props) {
                 <TableCell className="max-w-[12rem]">
                   <Link
                     to={`/bot/${p.bot_a_id}`}
-                    title={p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`}
-                    className={`block truncate hover:text-primary ${
+                    className={`block min-w-0 hover:text-primary ${
                       aWin ? 'font-semibold text-success' : w === 1 ? 'text-muted-foreground' : 'text-foreground'
                     }`}
                   >
-                    {p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`}
+                    <EntityName
+                      tooltip={p.bot_a_display || p.bot_a_name || '未命名 Bot'}
+                      tooltipFocusable={false}
+                      className="text-sm"
+                    >
+                      {p.bot_a_display || p.bot_a_name || '未命名 Bot'}
+                    </EntityName>
                   </Link>
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
@@ -125,12 +133,17 @@ export default function ScheduleTable({ pairings }: Props) {
                   ) : (
                     <Link
                       to={`/bot/${p.bot_b_id}`}
-                      title={p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
-                      className={`block truncate hover:text-primary ${
+                      className={`block min-w-0 hover:text-primary ${
                         bWin ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'
                       }`}
                     >
-                      {p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
+                      <EntityName
+                        tooltip={p.bot_b_display || p.bot_b_name || '未命名 Bot'}
+                        tooltipFocusable={false}
+                        className="text-sm"
+                      >
+                        {p.bot_b_display || p.bot_b_name || '未命名 Bot'}
+                      </EntityName>
                     </Link>
                   )}
                 </TableCell>
@@ -142,7 +155,7 @@ export default function ScheduleTable({ pairings }: Props) {
                 </TableCell>
                 <TableCell className="text-right">
                   {p.match_id ? (
-                    <Button asChild variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-primary">
+                    <Button asChild variant="ghost" size="xs" className="text-primary">
                       <Link to={`/match/${p.match_id}`}>查看</Link>
                     </Button>
                   ) : (
@@ -154,6 +167,7 @@ export default function ScheduleTable({ pairings }: Props) {
           })}
         </TableBody>
       </Table>
+      </DataTable>
       <Pagination page={safePage} perPage={PER_PAGE} total={rows.length} onPageChange={setPage} />
     </div>
   )
