@@ -101,6 +101,12 @@ function StickyToolbar({
     const updateHeight = () => {
       page.style.setProperty("--sticky-toolbar-height", `${toolbar.offsetHeight}px`)
       page.style.setProperty("--sticky-toolbar-gap", "0.5rem")
+      // --sticky-table-offset 在 :root 计算时只看得到初始的 0px 高度；
+      // 必须在同一 PageFrame 重新声明派生值，表头才能继承本工具栏的真实高度。
+      page.style.setProperty(
+        "--sticky-table-offset",
+        "calc(var(--sticky-page-offset) + var(--sticky-toolbar-height) + var(--sticky-toolbar-gap))",
+      )
     }
 
     updateHeight()
@@ -111,6 +117,7 @@ function StickyToolbar({
       observer?.disconnect()
       page.style.removeProperty("--sticky-toolbar-height")
       page.style.removeProperty("--sticky-toolbar-gap")
+      page.style.removeProperty("--sticky-table-offset")
     }
   }, [])
 
@@ -122,7 +129,7 @@ function StickyToolbar({
       role="region"
       aria-label={label}
       className={cn(
-        "sticky top-[var(--sticky-page-offset)] z-[var(--z-sticky)] flex min-w-0 flex-wrap items-center gap-2 rounded-lg border bg-background/95 px-2 py-2 shadow-sm backdrop-blur-sm supports-[backdrop-filter]:bg-background/85",
+        "sticky top-[var(--sticky-page-offset)] z-[var(--z-sticky-toolbar)] flex min-w-0 flex-wrap items-center gap-2 rounded-lg border bg-background/95 px-2 py-2 shadow-sm backdrop-blur-sm before:pointer-events-none before:absolute before:inset-x-0 before:bottom-full before:h-[var(--sticky-page-gap)] before:bg-background before:content-[''] after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-[var(--sticky-toolbar-gap)] after:bg-background after:content-[''] supports-[backdrop-filter]:bg-background/85",
         className
       )}
       {...props}

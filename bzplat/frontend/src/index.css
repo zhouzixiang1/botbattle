@@ -35,7 +35,8 @@
   --sticky-toolbar-gap: 0px;
   --sticky-table-offset: calc(var(--sticky-page-offset) + var(--sticky-toolbar-height) + var(--sticky-toolbar-gap));
   --z-base: 0;
-  --z-sticky: 30;
+  --z-sticky-table: 20;
+  --z-sticky-toolbar: 30;
   --z-navigation: 40;
   --z-modal: 60;
   /* Radix 浮层 portal 到 body，须高于可能触发它的 Dialog/Sheet。 */

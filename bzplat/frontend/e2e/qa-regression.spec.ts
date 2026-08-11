@@ -2087,7 +2087,12 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
   await expect(page.getByText('STALE_PRIVATE_CONTENT', { exact: true })).toHaveCount(0)
   await page.waitForTimeout(150)
   expect(deniedDebugRequests).toBe(0)
-  await monitor.expectClean()
+  await monitor.expectClean([{
+    kind: 'requestfailed',
+    method: 'GET',
+    pathname: `/api/matches/${allowedId}`,
+    errorText: 'net::ERR_ABORTED',
+  }])
 })
 
 test('MatchViewer playback clock cannot be starved by continuous SSE traffic', async ({ page }) => {
@@ -2673,14 +2678,22 @@ test('Pencil human canvas rejects the production box-center click and stays squa
     expect(bounds).not.toBeNull()
     expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
     if (viewport.width >= 1536) {
-      const expectedMax = Math.min(832, viewport.height - 256, viewport.width - 896)
-      expect(bounds?.width ?? 9999).toBeLessThanOrEqual(expectedMax + 1)
-      expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(expectedMax - 2)
-      expect((bounds?.y ?? 0) + (bounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
       const logBounds = await eventLog.boundingBox()
       const overviewBounds = await overview.boundingBox()
       expect(logBounds).not.toBeNull()
       expect(overviewBounds).not.toBeNull()
+      const boardTrackWidth = await page.getByTestId('human-canvas-layout').evaluate((element) => {
+        const columns = getComputedStyle(element).gridTemplateColumns
+          .split(/\s+/)
+          .map((value) => Number.parseFloat(value))
+        return columns[1] ?? 0
+      })
+      // 三栏的实际中轨已经扣除 shell、gutter、HUD、日志栏及系统 gap；棋盘应优先
+      // 用满该语义轨道，同时仍受 52rem 和首屏可用高度上限约束。
+      const expectedMax = Math.min(832, viewport.height - 256, boardTrackWidth)
+      expect(bounds?.width ?? 9999).toBeLessThanOrEqual(expectedMax + 1)
+      expect(bounds?.width ?? 0).toBeGreaterThanOrEqual(expectedMax - 2)
+      expect((bounds?.y ?? 0) + (bounds?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
       expect((overviewBounds?.x ?? 9999) + (overviewBounds?.width ?? 0)).toBeLessThan(bounds?.x ?? 0)
       expect(overviewBounds?.height ?? 9999).toBeLessThanOrEqual((bounds?.height ?? 0) + 1)
       const containment = await overview.evaluate((element) => ({

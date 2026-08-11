@@ -106,7 +106,7 @@ function TableHeader({
       className={cn(
         "bg-muted/40 [&_tr]:border-b [&_tr:hover]:bg-transparent",
         stickyMode &&
-          "sticky z-[var(--z-sticky)] bg-card/95 shadow-[0_1px_0_var(--border)] backdrop-blur-sm",
+          "sticky z-[var(--z-sticky-table)] bg-card/95 shadow-[0_1px_0_var(--border)] backdrop-blur-sm",
         stickyMode === "page" && "top-[var(--sticky-table-offset)]",
         stickyMode === "region" && "top-0",
         className

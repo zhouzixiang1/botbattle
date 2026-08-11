@@ -332,7 +332,13 @@ export default function HumanPlay() {
   }
 
   return (
-    <PageFrame width="wide" layout="game-human-play">
+    <PageFrame
+      width="wide"
+      layout="game-human-play"
+      // 棋盘是人机页的主任务；沿用页面 sticky 间距 token 压缩首屏区块节奏，
+      // 不通过缩小方形棋盘来换取视口适配。
+      className="gap-[var(--sticky-page-gap)]"
+    >
       <PageHeader
         title="人类对战"
         description="权威局面、行动控件与裁判事件保持同步；断线时页面会自动重连。"
@@ -408,11 +414,14 @@ export default function HumanPlay() {
 
       {/* 排布、动作控件和 WS 序列化均由当前游戏规格提供。 */}
       {gameSpec?.humanPlay.layout === 'canvas-with-log' && (
-        <div className={viewportDashboard
-          ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
-          : viewportFitCanvas
-            ? 'grid min-w-0 items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_22rem]'
-          : 'grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}>
+        <div
+          data-testid="human-canvas-layout"
+          className={viewportDashboard
+            ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
+            : viewportFitCanvas
+              ? 'grid min-w-0 items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_22rem]'
+            : 'grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}
+        >
           {viewportDashboard && ReplayHud && currentVm !== null && (
             <div className="min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1">
               <ReplayHud vm={currentVm} seats={seats} />
