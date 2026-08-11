@@ -6,6 +6,8 @@
 > opaque `public_id` 轮询到 claim 产生 `match_id`；容量等待由服务端队列承接，不再把 admission
 > 429 当补槽协议。execution-request、match detail 与赛事状态轮询共享线程安全的 1 秒最小节拍，
 > 每次都校验 HTTP/JSON，并在真实 429 时按 `Retry-After` 统一退避；不会靠关闭服务端限流绕过边界。
+> 阶段 2 的 challenge POST 同样复用限流助手：只对明确的 429 用原 payload 最多尝试 3 次，
+> 首个非 429（包括已接受的 202）立即返回，绝不重复提交已接受 request；重试耗尽则把该场记为失败。
 > 顺序单局等待上限为 360 秒；claim 后若与另一场共享 Docker launch fence，则单局上限为
 > 720 秒。阶段 2 固定 12 场（4 场 Holdem + 8 场棋类）使用一个 2880 秒绝对截止，计算为
 > `4×360 + 8×180`，claim 与完成共同消耗该预算，不会为每个阶段重复叠加等待。该脚本尚未在
@@ -92,15 +94,19 @@ python scripts/load_test.py \
 - `_rebuild_ctx`（`--skip-seed`）能从已种 DB 重建一致上下文
 - 同名但邮箱/角色/密码不匹配时不改状态、不签发 session；任意既有 admin 不会被复用
 
+`bzplat/backend/tests/test_qa_script_artifacts.py` 还用假响应和零真实等待验证阶段 2 challenge：
+429 严格按 `Retry-After` 退避、重试次数有硬上限、复用同一 payload，且 202 后不再 POST。
+
 ```bash
-pytest bzplat/backend/tests/test_load_test_seed.py -v
+pytest bzplat/backend/tests/test_load_test_seed.py \
+  bzplat/backend/tests/test_qa_script_artifacts.py -v
 ```
 
 ## 注意
 
 - **固定规则**：holdem 始终跑 70 手且每手固定 20000 筹码、50/100 盲注，gomoku 固定 15×15，pencil 固定 N=6；请求中传规则字段不能改变规则。阶段 2 目标 `TARGET_MATCHES=12`（三游戏×4），需为真实 70 手对局预留足够时间。
 - **双资源硬顶**：`max_match_slots=min(代码默认 2,max(1,cpu//4))`，`max_sandbox_units=slots×2`；Bot-vs-Bot 占 `1+2`，人机占 `1+1`，`starting/running/settling` 都占容量。管理端、旧 settings 与环境变量均不可覆盖。
-- **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。这里的 429 只表示 HTTP 限流；执行容量不足应返回/保持 202 queued。脚本迁移后仍按 `Retry-After` 处理精确限流 429。
+- **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。这里的 429 只表示 HTTP 限流；执行容量不足应返回/保持 202 queued。阶段 0 与阶段 2 统一只对精确 429 按 `Retry-After` 有界重试；首个 202 即停止，避免重复已接受请求。
 - **验收失败策略**：缺少 Python `websockets` 依赖会让阶段 4 失败；阶段 6 验证配置来源和写入口封闭，不通过临时改配置催化后台任务。自动 producer/唯一开关/混合来源容量由 `test_execution_queue.py` 与 `test_runtime_settings.py` 覆盖。
 - **资源不调高**：不改 `bot_cpus/bot_memory`（只读硬顶）。
 - **Bot 运行失败不豁免**：可由隔离服务选择 Docker 或 `BZ_BOT_LOCAL=1`；阶段 2 要求三游戏各有 completed，且 completed 多于 aborted，不会把大量 EOF/aborted 只记 warning 后冒充通过。

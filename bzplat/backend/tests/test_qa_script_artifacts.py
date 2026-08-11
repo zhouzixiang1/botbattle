@@ -194,6 +194,74 @@ def _poll_response(status: int, payload, *, retry_after: str | None = None):
     )
 
 
+def test_load_challenge_retry_is_bounded_and_never_reposts_accepted_request(
+    monkeypatch,
+):
+    module = load_script("load_test")
+    payload = {"my_bot_id": 1, "opponent_bot_id": 2, "game_id": "gomoku"}
+    sleeps: list[float] = []
+
+    class FakeApi:
+        def __init__(self, responses):
+            self.responses = iter(responses)
+            self.calls: list[tuple[str, str, object]] = []
+
+        def authed(self, token, method, path, **kwargs):
+            self.calls.append((method, path, kwargs.get("json")))
+            return next(self.responses)
+
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+    accepted_api = FakeApi(
+        [
+            _poll_response(429, {"code": "rate_limit_exceeded"}, retry_after="2"),
+            _poll_response(202, {"request": {"public_id": "request-1"}}),
+            pytest.fail,
+        ]
+    )
+
+    response = module._paced_challenge(
+        accepted_api, "token", payload, max_attempts=3
+    )
+
+    assert response.status_code == 202
+    assert accepted_api.calls == [
+        ("POST", "/api/matches/challenge", payload),
+        ("POST", "/api/matches/challenge", payload),
+    ]
+    assert all(call[2] is payload for call in accepted_api.calls)
+    assert sleeps == [3.0]
+
+    sleeps.clear()
+    limited_api = FakeApi(
+        [
+            _poll_response(429, {}, retry_after="1"),
+            _poll_response(429, {}, retry_after="1"),
+            _poll_response(429, {}, retry_after="1"),
+        ]
+    )
+
+    response = module._paced_challenge(
+        limited_api, "token", payload, max_attempts=3
+    )
+
+    assert response.status_code == 429
+    assert len(limited_api.calls) == 3
+    assert sleeps == [2.0, 2.0]
+
+
+def test_load_phase2_uses_the_bounded_challenge_retry_helper():
+    source = (ROOT / "scripts" / "load_test.py").read_text(encoding="utf-8")
+    phase2_source = source.split("def phase2_matches", 1)[1].split(
+        "def _rate_limited_post", 1
+    )[0]
+
+    assert "r = _paced_challenge(api, owner_tok, payload)" in phase2_source
+    assert (
+        'api.authed(owner_tok, "POST", "/api/matches/challenge"'
+        not in phase2_source
+    )
+
+
 def test_api_leaderboard_check_uses_public_numeric_ranking_contract():
     module = load_script("api_full_test")
     payload = {

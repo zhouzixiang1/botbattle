@@ -59,7 +59,11 @@ from scripts._qa_accounts import (  # noqa: E402
     preflight_dedicated_accounts,
 )
 from scripts._qa_bots import ensure_qa_sample_bot  # noqa: E402
-from scripts._qa_polling import QaPollingError, RateAwareJsonPoller  # noqa: E402
+from scripts._qa_polling import (  # noqa: E402
+    QaPollingError,
+    RateAwareJsonPoller,
+    retry_after_seconds,
+)
 from scripts._qa_target import (  # noqa: E402
     assert_qa_instance,
     ensure_qa_base,
@@ -598,8 +602,8 @@ def _user_id(db_path: str, username: str) -> int:
 
 # ── 阶段 2：对局（三游戏多局 + 自博弈）────────────────────────
 # dev 服务按 IP 限流：/api/matches/challenge = 8 req/60s（同一 IP 共享）。
-# 压测时建议重启服务设 BZ_RATE_LIMIT=0 关闭限流，则挑战无需节流、可快速并发。
-# 若限流开启，所有请求来自 127.0.0.1，挑战需节流：每窗口最多 8 个，间隔 ~7.6s。
+# 发布 QA 保持服务端限流；所有请求来自 127.0.0.1，因此客户端节流并对真实 429 有界重试。
+# --no-throttle 仅供已明确关闭限流的专项本地运行，不能用于发布验收。
 CHALLENGE_RATE = 8           # 每 RATE_WINDOW 秒最多发起的挑战数（限流开启时）
 RATE_WINDOW = 60.0
 CHALLENGE_INTERVAL = RATE_WINDOW / CHALLENGE_RATE  # ~7.5s（限流开启时）
@@ -696,7 +700,7 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
             expected = idx * CHALLENGE_INTERVAL
             if elapsed < expected:
                 time.sleep(expected - elapsed)
-        r = api.authed(owner_tok, "POST", "/api/matches/challenge", json=payload)
+        r = _paced_challenge(api, owner_tok, payload)
         try:
             execution = api.accepted_execution(
                 r, label=f"阶段2 {game} 挑战"
@@ -704,9 +708,6 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
         except Exception as exc:
             with lock:
                 errors.append(f"challenge {game}: {exc}")
-            # 被限流时多等一个窗口再继续
-            if r.status_code == 429:
-                time.sleep(RATE_WINDOW / CHALLENGE_RATE)
             continue
         th = threading.Thread(
             target=wait_one,
@@ -771,26 +772,64 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
         time.sleep(RATE_WINDOW + 2)
 
 
-def _paced_challenge(api: Api, token: str, payload: dict, *, retries: int = 3) -> httpx.Response:
-    """发起挑战，遇 429 限流则按 Retry-After 等待重试。"""
-    for _ in range(retries):
-        r = api.authed(token, "POST", "/api/matches/challenge", json=payload)
-        if r.status_code != 429:
-            return r
-        wait = float(r.headers.get("Retry-After", "8")) or 8.0
-        time.sleep(wait + 1)
-    return r  # 最后一次的响应（仍 429 则交由调用方处理）
+def _rate_limited_post(
+    api: Api,
+    token: str,
+    path: str,
+    payload: dict,
+    *,
+    max_attempts: int,
+    default_retry_after: float,
+) -> httpx.Response:
+    """POST once accepted; retry only explicit 429 responses, with a hard cap."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    for attempt in range(max_attempts):
+        response = api.authed(token, "POST", path, json=payload)
+        if response.status_code != 429 or attempt + 1 == max_attempts:
+            return response
+        wait = retry_after_seconds(
+            response.headers.get("Retry-After"),
+            default=default_retry_after,
+        )
+        time.sleep(wait + 1.0)
+    raise AssertionError("unreachable")
 
 
-def _paced_human(api: Api, token: str, payload: dict, *, retries: int = 2) -> httpx.Response:
-    """发起人类对局，遇 429 限流则等待重试（/api/matches/human 走 _API_DEFAULT 120/60s）。"""
-    for _ in range(retries):
-        r = api.authed(token, "POST", "/api/matches/human", json=payload)
-        if r.status_code != 429:
-            return r
-        wait = float(r.headers.get("Retry-After", "5")) or 5.0
-        time.sleep(wait + 1)
-    return r
+def _paced_challenge(
+    api: Api,
+    token: str,
+    payload: dict,
+    *,
+    max_attempts: int = 3,
+) -> httpx.Response:
+    """发起挑战；仅对 429 按 Retry-After 有界重试，202 不会重复提交。"""
+    return _rate_limited_post(
+        api,
+        token,
+        "/api/matches/challenge",
+        payload,
+        max_attempts=max_attempts,
+        default_retry_after=8.0,
+    )
+
+
+def _paced_human(
+    api: Api,
+    token: str,
+    payload: dict,
+    *,
+    max_attempts: int = 2,
+) -> httpx.Response:
+    """发起人类对局；仅对 429 有界重试（该端点走 _API_DEFAULT 120/60s）。"""
+    return _rate_limited_post(
+        api,
+        token,
+        "/api/matches/human",
+        payload,
+        max_attempts=max_attempts,
+        default_retry_after=5.0,
+    )
 
 
 def _all_bot_names(db_path: str, owner_username: str) -> list[str]:
