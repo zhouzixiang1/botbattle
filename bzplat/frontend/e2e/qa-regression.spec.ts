@@ -2142,7 +2142,13 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   releaseMatchResponse()
-  expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
+  // Metadata resolution schedules the live EventSource from a React effect;
+  // wait for that concrete subscription instead of racing the same task that
+  // released the mocked response.  The first successful poll emits exactly
+  // one authoritative snapshot.
+  await expect.poll(
+    () => sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents }),
+  ).toBe(true)
   const position = page.getByTestId('playback-position')
   await expect(position).toHaveText('事件 1/2')
   expect(await sse.stream(streamEvents, 50)).toBe(true)
@@ -2153,7 +2159,12 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
   expect(duringStream, 'playback cursor must advance while SSE still changes total').toBeGreaterThan(1)
   await expect.poll(async () => Number(await sse.sent()), { timeout: 3_000 })
     .toBe(40)
-  await monitor.expectClean()
+  await monitor.expectClean([{
+    kind: 'requestfailed',
+    method: 'GET',
+    pathname: `/api/matches/${matchId}`,
+    errorText: 'net::ERR_ABORTED',
+  }])
 })
 
 test('MatchViewer preserves more than 4000 events across reconnect snapshots', async ({ page }) => {
