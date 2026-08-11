@@ -260,6 +260,35 @@ def test_load_phase2_uses_the_bounded_challenge_retry_helper():
         'api.authed(owner_tok, "POST", "/api/matches/challenge"'
         not in phase2_source
     )
+    assert "_check_phase2_transport_outcomes(" in phase2_source
+
+
+@pytest.mark.parametrize(
+    ("accepted_count", "terminal_count", "errors"),
+    [
+        (11, 11, ["challenge gomoku: HTTP 429 rate_limit_exceeded"]),
+        (12, 11, ["wait pencil: 阶段2批次超时"]),
+    ],
+)
+def test_load_phase2_transport_errors_make_the_final_exit_nonzero(
+    monkeypatch,
+    accepted_count,
+    terminal_count,
+    errors,
+):
+    module = load_script("load_test")
+    monkeypatch.setattr(module, "PASS", 0)
+    monkeypatch.setattr(module, "FAIL", 0)
+    monkeypatch.setattr(module, "FAILS", [])
+
+    module._check_phase2_transport_outcomes(
+        accepted_count=accepted_count,
+        terminal_count=terminal_count,
+        errors=errors,
+    )
+
+    assert module.FAIL > 0
+    assert (0 if module.FAIL == 0 else 1) == 1
 
 
 def test_api_leaderboard_check_uses_public_numeric_ranking_contract():

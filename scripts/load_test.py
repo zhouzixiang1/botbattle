@@ -610,6 +610,29 @@ CHALLENGE_INTERVAL = RATE_WINDOW / CHALLENGE_RATE  # ~7.5s（限流开启时）
 NO_THROTTLE = False          # --no-throttle 标志（服务端关限流时跳过挑战节流）
 
 
+def _check_phase2_transport_outcomes(
+    *,
+    accepted_count: int,
+    terminal_count: int,
+    errors: list[str],
+    target: int = TARGET_MATCHES,
+) -> tuple[list[str], list[str]]:
+    """Make every missing acceptance or terminal result a hard QA failure."""
+    challenge_errors = [e for e in errors if e.startswith("challenge ")]
+    wait_errors = [e for e in errors if e.startswith("wait ")]
+    check(
+        f"挑战请求全部接受（{accepted_count}/{target} 场）",
+        accepted_count == target and not challenge_errors,
+        f"challenge_errors={challenge_errors}",
+    )
+    check(
+        f"已接受挑战全部取得终态（{terminal_count}/{accepted_count} 场）",
+        terminal_count == accepted_count and not wait_errors,
+        f"wait_errors={wait_errors}",
+    )
+    return challenge_errors, wait_errors
+
+
 def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
     print(f"\n=== 阶段 2：对局（三游戏混跑，目标 {TARGET_MATCHES} 场；"
           f"顺序提交、并行等待，挑战节流 {CHALLENGE_RATE}/{int(RATE_WINDOW)}s）===")
@@ -700,8 +723,8 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
             expected = idx * CHALLENGE_INTERVAL
             if elapsed < expected:
                 time.sleep(expected - elapsed)
-        r = _paced_challenge(api, owner_tok, payload)
         try:
+            r = _paced_challenge(api, owner_tok, payload)
             execution = api.accepted_execution(
                 r, label=f"阶段2 {game} 挑战"
             )
@@ -722,14 +745,17 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
 
     completed = [r for r in results if r["match"]["status"] == "completed"]
     aborted = [r for r in results if r["match"]["status"] == "aborted"]
-    launched = len(results) + len([e for e in errors if e.startswith("wait ")])
-    check(f"发起挑战（成功+等待）{launched} 场", launched >= TARGET_MATCHES * 0.8,
-          f"results={len(results)} challenge_errors={sum(1 for e in errors if e.startswith('challenge'))}")
+    accepted_count = len(waiters)
+    challenge_errors, wait_errors = _check_phase2_transport_outcomes(
+        accepted_count=accepted_count,
+        terminal_count=len(results),
+        errors=errors,
+    )
     check("挑战对局多数完成（completed > aborted）", len(completed) > len(aborted),
-          f"completed={len(completed)} aborted={len(aborted)} wait_errors={sum(1 for e in errors if e.startswith('wait'))}")
-    challenge_429 = sum(1 for e in errors if "429" in e)
+          f"completed={len(completed)} aborted={len(aborted)} wait_errors={len(wait_errors)}")
+    challenge_429 = sum(1 for e in challenge_errors if "429" in e)
     if challenge_429:
-        warn(f"阶段 2 挑战被限流 429 共 {challenge_429} 例（节流仍被触发，可减小 TARGET_MATCHES）")
+        warn(f"阶段 2 挑战限流 429 有界重试耗尽 {challenge_429} 例")
 
     # 各游戏至少有 1 场 completed
     for g in GAMES:

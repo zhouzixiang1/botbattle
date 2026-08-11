@@ -14,7 +14,7 @@
 | **隔离端到端冒烟** | `scripts/e2e_smoke.sh` | 临时 DB/uploads/avatars/logs 下的上传→挑战→赛事；挑战必须 `completed`，且 `result` 具有 `rounds_played`、双数值零和 `deltas` 与有限 `normalized_delta` | 验证核心链路且不写 checkout/主库，`aborted` 不得假通过 |
 | **API 关键链路脚本** | `scripts/api_full_test.py` | 挑战精确接收 202 request，校验 opaque `public_id`，轮询到 claim 后再读取 Match；轮询共享 1 秒节拍、校验 HTTP/JSON 并按 `Retry-After` 退避；排行榜同样严格校验 HTTP 200、JSON 对象/对象列表，以 `rated_matches` 验证已有计分样本，并按 `ranking_min_matches` 核对 `ranking_eligible` 与 1-based `rank`，不要求已下架的榜单 `matches_played`；顺序单局 360 秒、双槽争用单局 720 秒，四局并发共享 1440 秒 claim+完成绝对截止，三场循环赛共享 1080 秒截止；并发请求由持久队列自动补槽，不再按 admission 429 客户端重提 | 尚未在目标 HEAD 实跑；取消/重试由 `test_execution_queue` 覆盖，实时 SSE 增量与全部端点仍需其他层覆盖，不得把历史结果计入本轮发布证据 |
 | **真浏览器回归** | Playwright + Chromium | 访客/玩家/组织者/admin 的导航、表单、CRUD、赛事、实时通信 | 用真实 DOM、Console、Network 验证用户行为 |
-| **多局/赛事容量脚本** | `scripts/load_test.py` / `contest_stress.py` | 多用户、多游戏、多局终态；draft 名册容量与赛制估算 | 验证所列链路与容量；默认不证明持续打满并发或真实大赛排期 |
+| **多局/赛事容量脚本** | `scripts/load_test.py` / `contest_stress.py` | 多用户、多游戏、多局终态；load 固定 12 场必须全部接受且全部取得终态，429 耗尽、POST 异常或 waiter 超时均硬失败；draft 名册容量与赛制估算 | 验证所列链路与容量；默认不证明持续打满并发或真实大赛排期 |
 
 ## 2. 后端测试范围
 

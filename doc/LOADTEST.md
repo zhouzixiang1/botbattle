@@ -7,7 +7,8 @@
 > 429 当补槽协议。execution-request、match detail 与赛事状态轮询共享线程安全的 1 秒最小节拍，
 > 每次都校验 HTTP/JSON，并在真实 429 时按 `Retry-After` 统一退避；不会靠关闭服务端限流绕过边界。
 > 阶段 2 的 challenge POST 同样复用限流助手：只对明确的 429 用原 payload 最多尝试 3 次，
-> 首个非 429（包括已接受的 202）立即返回，绝不重复提交已接受 request；重试耗尽则把该场记为失败。
+> 首个非 429（包括已接受的 202）立即返回，绝不重复提交已接受 request；重试耗尽、POST
+> 异常或任一已接受 request 未在时限内取得终态，都是硬失败，不会被“大多数完成”掩盖。
 > 顺序单局等待上限为 360 秒；claim 后若与另一场共享 Docker launch fence，则单局上限为
 > 720 秒。阶段 2 固定 12 场（4 场 Holdem + 8 场棋类）使用一个 2880 秒绝对截止，计算为
 > `4×360 + 8×180`，claim 与完成共同消耗该预算，不会为每个阶段重复叠加等待。该脚本尚未在
@@ -95,7 +96,8 @@ python scripts/load_test.py \
 - 同名但邮箱/角色/密码不匹配时不改状态、不签发 session；任意既有 admin 不会被复用
 
 `bzplat/backend/tests/test_qa_script_artifacts.py` 还用假响应和零真实等待验证阶段 2 challenge：
-429 严格按 `Retry-After` 退避、重试次数有硬上限、复用同一 payload，且 202 后不再 POST。
+429 严格按 `Retry-After` 退避、重试次数有硬上限、复用同一 payload，且 202 后不再 POST；
+另外守护 429 耗尽和 waiter 超时均使整轮退出非零。
 
 ```bash
 pytest bzplat/backend/tests/test_load_test_seed.py \
