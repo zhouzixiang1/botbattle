@@ -5,10 +5,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
+from collections.abc import AsyncIterator, Awaitable
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -23,6 +26,7 @@ from bzplat.backend.auth.dependencies import (
 )
 from bzplat.backend.security import audit_log
 from bzplat.backend.bots import BotError, BotManager
+from bzplat.backend.bots.manager import MAX_BYTES
 
 logger = logging.getLogger(__name__)
 _DEBUG_NO_STORE_HEADERS = {
@@ -43,6 +47,7 @@ from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
+    BOT_UPLOAD_ADMISSION_WAIT_SEC,
     CONFIGURATION_SOURCE,
     CONTEST_SCHEDULER_CONFIG,
     FULL_RR_MAX_N,
@@ -81,6 +86,98 @@ from bzplat.backend.store.schema import (
 )
 from bzplat.backend.store.public_contract import sanitize_public_match
 router = APIRouter()
+_T = TypeVar("_T")
+
+
+class _BotUploadBusy(Exception):
+    """The one global upload/preflight lane did not open in time."""
+
+
+async def _finish_upload_step_before_cancel(awaitable: Awaitable[_T]) -> _T:
+    """Keep admission held until a started file/thread operation really ends.
+
+    Cancelling ``asyncio.to_thread`` only cancels its asyncio wrapper; the worker
+    keeps running.  Releasing the global upload permit at that point would allow
+    another request to retain/write a second payload while the first preflight is
+    still active.  Shield and drain the task, then propagate cancellation.
+    """
+
+    task = asyncio.ensure_future(awaitable)
+    cancellation_pending = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancellation_pending = True
+        except BaseException:
+            break
+    if cancellation_pending:
+        try:
+            task.result()
+        except BaseException:
+            pass
+        raise asyncio.CancelledError
+    return task.result()
+
+
+@asynccontextmanager
+async def _bot_upload_admission(request: Request) -> AsyncIterator[None]:
+    """Acquire the process-wide upload lane with bounded, cancel-safe waiting."""
+
+    gate = getattr(request.app.state, "bot_upload_gate", None)
+    if gate is None:
+        raise _BotUploadBusy
+    acquire = asyncio.create_task(
+        asyncio.to_thread(
+            lambda: gate.acquire(timeout=BOT_UPLOAD_ADMISSION_WAIT_SEC)
+        ),
+        name="bot-upload-admission",
+    )
+    cancellation_pending = False
+    while not acquire.done():
+        try:
+            await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            if acquire.cancelled():
+                raise
+            cancellation_pending = True
+        except BaseException:
+            break
+    acquired = acquire.result()
+    if cancellation_pending:
+        if acquired:
+            gate.release()
+        raise asyncio.CancelledError
+    if not acquired:
+        raise _BotUploadBusy
+    try:
+        yield
+    finally:
+        gate.release()
+
+
+async def _read_bot_upload(file: UploadFile) -> bytes:
+    """Read at most the supported limit plus one sentinel byte."""
+
+    raw = await _finish_upload_step_before_cancel(file.read(MAX_BYTES + 1))
+    if not raw or len(raw) > MAX_BYTES:
+        raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
+    return raw
+
+
+def _upload_busy_error() -> HTTPException:
+    return HTTPException(
+        503,
+        detail={
+            "code": "upload_busy",
+            "message": "Bot 上传预检繁忙，请稍后重试",
+        },
+        headers={
+            "Retry-After": str(max(1, math.ceil(BOT_UPLOAD_ADMISSION_WAIT_SEC)))
+        },
+    )
 
 
 def _orch(request: Request) -> MatchOrchestrator:
@@ -602,19 +699,33 @@ async def upload_bot(
     file: UploadFile = File(...),
     user=Depends(require_user),
 ):
-    raw = await file.read()
     try:
-        bot = await asyncio.to_thread(
-            _bots(request).create_from_upload,
-            user["id"],
-            name,
-            raw,
-            display_name=display_name, description=description,
-            upload_note=upload_note,
-            game_id=game_id,
-            runtime_mode=runtime_mode,
-            binary_runner=_new_preflight_runner(request),
+        async with _bot_upload_admission(request):
+            raw = await _read_bot_upload(file)
+            bot = await _finish_upload_step_before_cancel(
+                asyncio.to_thread(
+                    _bots(request).create_from_upload,
+                    user["id"],
+                    name,
+                    raw,
+                    display_name=display_name,
+                    description=description,
+                    upload_note=upload_note,
+                    game_id=game_id,
+                    runtime_mode=runtime_mode,
+                    binary_runner=_new_preflight_runner(request),
+                )
+            )
+    except _BotUploadBusy:
+        audit_log(
+            request,
+            "bot_upload",
+            result="fail",
+            user=user.get("username"),
+            target=name,
+            detail="upload_busy",
         )
+        raise _upload_busy_error()
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
@@ -634,17 +745,30 @@ async def upload_bot_version(
     file: UploadFile = File(...),
     user=Depends(require_user),
 ):
-    raw = await file.read()
     try:
-        bot = await asyncio.to_thread(
-            _bots(request).upload_version,
-            bot_id,
-            user["id"],
-            raw,
-            upload_note=upload_note,
-            runtime_mode=runtime_mode or None,
-            binary_runner=_new_preflight_runner(request),
+        async with _bot_upload_admission(request):
+            raw = await _read_bot_upload(file)
+            bot = await _finish_upload_step_before_cancel(
+                asyncio.to_thread(
+                    _bots(request).upload_version,
+                    bot_id,
+                    user["id"],
+                    raw,
+                    upload_note=upload_note,
+                    runtime_mode=runtime_mode or None,
+                    binary_runner=_new_preflight_runner(request),
+                )
+            )
+    except _BotUploadBusy:
+        audit_log(
+            request,
+            "bot_version_upload",
+            result="fail",
+            user=user.get("username"),
+            target=bot_id,
+            detail="upload_busy",
         )
+        raise _upload_busy_error()
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})

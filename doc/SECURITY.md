@@ -80,6 +80,14 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 
 > 已知局限：WebSocket（`/api/matches/{id}/play`）与 SSE（`/api/matches/{id}/events`）不经 BaseHTTPMiddleware，当前无限流。
 
+### Bot 上传容量边界
+
+新建 Bot 与上传版本共用一个进程级上传槽。端点取得槽后只读取 `50 MiB + 1` 个字节，超出即返回
+`400 invalid_size`；槽从读取开始一直持有到隐藏版本落盘、沙箱预检、发布或回滚全部结束。因此不同
+Bot ID 不能绕过单槽预检，同时在内存保留多份二进制或写入多个待检临时目录。等待槽超过 1 秒返回
+`503 upload_busy` 与 `Retry-After`，不继续读取文件到应用内存。客户端中断只取消 HTTP 等待；已开始的
+文件读取/worker 会先收敛，随后才释放槽，避免取消造成容量提前释放。
+
 ## 安全响应头
 
 `SecurityHeadersMiddleware`（`security.py`）：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy`、`Permissions-Policy`。HSTS 仅 `BZ_HSTS=1` 时加。

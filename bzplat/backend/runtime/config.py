@@ -17,6 +17,12 @@ ACTION_TIMEOUT_SEC = 60.0
 MAX_CONCURRENT_MATCHES = 2
 FULL_RR_MAX_N = 12
 
+# Bot 上传从读取请求文件到隐藏版本预检完成共用一个全局槽。等待超过
+# 一秒即明确返回繁忙，避免不同 Bot 的并发版本上传同时保留大块 raw
+# 并写入多个待预检临时目录。
+BOT_UPLOAD_ADMISSION_SLOTS = 1
+BOT_UPLOAD_ADMISSION_WAIT_SEC = 1.0
+
 # 人类对战回合参数；并发统一由全局 execution queue 控制。
 HUMAN_ACTION_TIMEOUT_SEC = 120.0
 HUMAN_MAX_CONSECUTIVE_TIMEOUTS = 5
@@ -61,6 +67,8 @@ CONTEST_SCHEDULER_CONFIG = ContestSchedulerConfig()
 __all__ = [
     "ACTION_TIMEOUT_SEC",
     "AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES",
+    "BOT_UPLOAD_ADMISSION_SLOTS",
+    "BOT_UPLOAD_ADMISSION_WAIT_SEC",
     "CONFIGURATION_SOURCE",
     "CONTEST_SCHEDULER_CONFIG",
     "ContestSchedulerConfig",

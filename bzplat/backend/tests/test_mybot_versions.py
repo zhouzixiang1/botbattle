@@ -195,6 +195,166 @@ def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkey
     asyncio.run(exercise())
 
 
+def test_upload_endpoint_reads_only_limit_plus_one_before_manager(
+    tmp_path, monkeypatch
+):
+    """The API must reject an oversized body without retaining the whole file."""
+    import bzplat.backend.api_routes as api_routes
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+
+    app = _app(tmp_path)
+    _setup(app)
+    read_sizes: list[int] = []
+    manager_called = False
+    original_read = StarletteUploadFile.read
+
+    async def tracked_read(upload, size=-1):
+        read_sizes.append(size)
+        return await original_read(upload, size)
+
+    def unexpected_manager(*_args, **_kwargs):
+        nonlocal manager_called
+        manager_called = True
+        raise AssertionError("oversized payload reached BotManager")
+
+    monkeypatch.setattr(api_routes, "MAX_BYTES", 4)
+    monkeypatch.setattr(StarletteUploadFile, "read", tracked_read)
+    monkeypatch.setattr(
+        app.state.bot_manager, "create_from_upload", unexpected_manager
+    )
+
+    response = TestClient(app).post(
+        "/api/bots",
+        headers=_login(app),
+        data={"name": "bounded_read", "game_id": "holdem"},
+        files={"file": ("bot.bin", b"12345", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_size"
+    assert read_sizes == [5]
+    assert manager_called is False
+
+
+def test_upload_admission_is_shared_busy_and_worker_cancel_safe(
+    tmp_path, monkeypatch
+):
+    """New-Bot and version routes share one lane; cancel cannot release it early."""
+    from httpx import ASGITransport, AsyncClient
+    import bzplat.backend.api_routes as api_routes
+
+    app = _app(tmp_path)
+    _, owner = _setup(app)
+    entered = Event()
+    release = Event()
+    create_calls = 0
+    version_called = False
+
+    def blocking_first_create(*_args, **_kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        if create_calls == 1:
+            entered.set()
+            assert release.wait(timeout=3)
+        return {
+            "id": 900 + create_calls,
+            "owner_id": owner["id"],
+            "name": f"upload-{create_calls}",
+            "current_version": 1,
+        }
+
+    def unexpected_version(*_args, **_kwargs):
+        nonlocal version_called
+        version_called = True
+        raise AssertionError("busy version upload reached BotManager")
+
+    monkeypatch.setattr(api_routes, "BOT_UPLOAD_ADMISSION_WAIT_SEC", 0.05)
+    monkeypatch.setattr(
+        app.state.bot_manager, "create_from_upload", blocking_first_create
+    )
+    monkeypatch.setattr(
+        app.state.bot_manager, "upload_version", unexpected_version
+    )
+
+    async def exercise():
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            first = asyncio.create_task(
+                client.post(
+                    "/api/bots",
+                    headers=_login(app),
+                    data={"name": "cancelled_upload", "game_id": "holdem"},
+                    files={"file": ("bot.bin", b"first", "application/octet-stream")},
+                )
+            )
+            assert await asyncio.wait_for(
+                asyncio.to_thread(entered.wait, 2), timeout=2.5
+            )
+            first.cancel()
+            await asyncio.sleep(0.01)
+            assert not first.done(), "cancel released admission before worker ended"
+
+            busy = await client.post(
+                "/api/bots/123/versions",
+                headers=_login(app),
+                files={"file": ("bot.bin", b"second", "application/octet-stream")},
+            )
+            assert busy.status_code == 503
+            assert busy.json()["detail"]["code"] == "upload_busy"
+            assert busy.headers["retry-after"] == "1"
+            assert version_called is False
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            after = await client.post(
+                "/api/bots",
+                headers=_login(app),
+                data={"name": "after_cancel", "game_id": "holdem"},
+                files={"file": ("bot.bin", b"third", "application/octet-stream")},
+            )
+            assert after.status_code == 200, after.text
+
+    asyncio.run(exercise())
+    assert create_calls == 2
+
+
+def test_cancelled_upload_waiter_releases_late_acquired_permit(
+    tmp_path, monkeypatch
+):
+    """Cancellation while waiting cannot leak a permit acquired by its worker."""
+    from httpx import ASGITransport, AsyncClient
+    import bzplat.backend.api_routes as api_routes
+
+    app = _app(tmp_path)
+    _setup(app)
+    gate = app.state.bot_upload_gate
+    assert gate.acquire(blocking=False)
+    monkeypatch.setattr(api_routes, "BOT_UPLOAD_ADMISSION_WAIT_SEC", 0.5)
+
+    async def exercise():
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            waiting = asyncio.create_task(
+                client.post(
+                    "/api/bots",
+                    headers=_login(app),
+                    data={"name": "cancelled_waiter", "game_id": "holdem"},
+                    files={"file": ("bot.bin", b"waiting", "application/octet-stream")},
+                )
+            )
+            await asyncio.sleep(0.02)
+            waiting.cancel()
+            gate.release()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+
+    asyncio.run(exercise())
+    assert gate.acquire(blocking=False), "cancelled waiter leaked upload permit"
+    gate.release()
+
+
 def test_upload_preflight_uses_pending_version_runtime_mode(tmp_path, monkeypatch):
     """预检必须验证待发布版本的选择，不能沿用当前版本或隐式默认。"""
     app = _app(tmp_path)

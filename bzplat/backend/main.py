@@ -35,6 +35,7 @@ from bzplat.backend.qa_safety import (
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
+    BOT_UPLOAD_ADMISSION_SLOTS,
 )
 from bzplat.backend.runtime.docker_supervisor import (
     DockerSupervisor,
@@ -160,6 +161,10 @@ def create_app(
     # match queue. It is shared by every worker-thread runner factory, so the
     # physical upper bound is execution sandbox units + one preflight sandbox.
     preflight_gate = threading.BoundedSemaphore(1)
+    # Admission starts before reading UploadFile into bytes and stays held until
+    # staging/preflight/commit (or rollback) finishes.  This gate must remain
+    # separate from preflight_gate because BinaryRunner acquires that inner gate.
+    bot_upload_gate = threading.BoundedSemaphore(BOT_UPLOAD_ADMISSION_SLOTS)
 
     def _pause_for_unscoped_docker(reason: str) -> None:
         launch = store.executions.docker_launch()
@@ -291,6 +296,7 @@ def create_app(
         preflight_gate=preflight_gate,
     )
     app.state.preflight_gate = preflight_gate
+    app.state.bot_upload_gate = bot_upload_gate
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer
