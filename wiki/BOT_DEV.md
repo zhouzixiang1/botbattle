@@ -304,6 +304,14 @@ docker run --rm -i --platform linux/amd64 \
 平台会先准备 Linux x86_64 沙箱镜像，再开始这 8 秒计时。若镜像仓库或平台沙箱故障，
 上传会明确提示平台暂不可用，不会把镜像下载时间误判成 Bot 响应慢。
 
+如果 Pencil 提示“ELF 已在沙箱中启动，但没有按 Botzone JSON 首回合协议响应”，说明文件
+格式和沙箱启动已经通过，问题位于 stdin/stdout 通信：程序必须读取
+`{"requests":[...],"responses":[]}`，再输出一整行
+`{"response":{"x":x,"y":y}}`，末尾写入换行并立即 flush。旧 SAU 裁判使用的
+`name?`、`new`、`move`、`take` 等文本命令不是本平台协议；仅重命名该二进制或切换
+Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例保留 JSON 输入输出层，
+再接入原有决策函数并重新编译。
+
 ## 10. 常见故障
 
 | 故障 | 结果 | 修复 |
@@ -313,6 +321,7 @@ docker run --rm -i --platform linux/amd64 \
 | 忘记换行或 flush | 决策超时并技术判负 | 每次输出完整行后立即 flush |
 | 顶层输出 `0` | `protocol_error` | 输出 `{"response":0}` |
 | 棋类输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
+| Pencil ELF 启动后 8 秒无响应 | 未按 Botzone JSON 首回合通信 | 移除旧 SAU `name?/new/move/take` 文本入口；按上节读取完整信封，输出换行并 flush |
 | 附加顶层 `debug` | 正式 Bot 对战终局后按权限私有展示；预检丢弃 | 保持小而结构化，绝不放密码或 token；动作仍只由 `response` 决定 |
 | 附加 `data/globaldata` | 平台忽略 | 只有 `response` 与可选私有 `debug` 有定义 |
 | 单行响应超过 64 KiB | `protocol_error` | 压缩或删减 `debug`，每次只输出一行 JSON |

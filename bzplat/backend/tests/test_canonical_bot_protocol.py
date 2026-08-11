@@ -57,6 +57,13 @@ class _PreflightTransport:
         self.stopped.append(sid)
 
 
+class _TimeoutPreflightTransport(_PreflightTransport):
+    async def send(self, _sid, line, *, timeout):
+        self.sent.append(json.loads(line))
+        self.send_timeouts.append(timeout)
+        raise asyncio.TimeoutError
+
+
 @pytest.mark.parametrize("game_id", ["holdem", "gomoku", "pencil"])
 @pytest.mark.parametrize("runtime_mode", ["traditional", "longrunning"])
 def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
@@ -96,6 +103,33 @@ def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
         }
     assert transport.extra_reads == (1 if runtime_mode == "longrunning" else 0)
     assert transport.extra_timeouts == ([1.0] if runtime_mode == "longrunning" else [])
+    assert transport.stopped == ["s0"]
+
+
+def test_pencil_preflight_timeout_explains_json_and_legacy_sau_incompatibility():
+    transport = _TimeoutPreflightTransport("")
+
+    ok, detail = asyncio.run(
+        preflight_bot(
+            "pencil",
+            "/staged/bot.bin",
+            transport,
+            runtime_mode="traditional",
+        )
+    )
+
+    assert not ok
+    assert "ELF 已在沙箱中启动" in detail
+    assert "8.0s" in detail
+    assert "Botzone JSON 首回合协议" in detail
+    assert "requests/responses" in detail
+    assert '{"response":{"x":x,"y":y}}' in detail
+    assert "换行" in detail
+    assert "flush" in detail
+    assert "name?/new/move/take" in detail
+    assert "不兼容" in detail
+    assert "/wiki?slug=bot-dev" in detail
+    assert transport.send_timeouts == [8.0]
     assert transport.stopped == ["s0"]
 
 

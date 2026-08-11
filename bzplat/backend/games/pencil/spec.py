@@ -91,7 +91,13 @@ async def _preflight_check(
     except BotCrashedError as exc:
         return False, f"Bot 进程异常退出: {exc}"
     except asyncio.TimeoutError:
-        return False, f"Bot {timeout}s 内未响应"
+        return False, (
+            f"ELF 已在沙箱中启动，但 {timeout}s 内没有按 Botzone JSON 首回合协议响应。"
+            "请让程序读取 requests/responses JSON 信封，输出 "
+            '{"response":{"x":x,"y":y}}，末尾换行并立即 flush。'
+            "旧 SAU 的 name?/new/move/take 文本协议与本平台不兼容。"
+            "修复步骤：Bot 开发指南 → 上传预检（/wiki?slug=bot-dev）。"
+        )
     except Exception as e:
         return False, f"响应不合法: {e}"
 
