@@ -162,10 +162,11 @@ def create_app(
     # match queue. It is shared by every worker-thread runner factory, so the
     # physical upper bound is execution sandbox units + one preflight sandbox.
     preflight_gate = threading.BoundedSemaphore(1)
-    # Admission starts before reading UploadFile into bytes and stays held until
-    # staging/preflight/commit (or rollback) finishes.  This gate must remain
-    # separate from preflight_gate because BinaryRunner acquires that inner gate.
-    bot_upload_gate = threading.BoundedSemaphore(BOT_UPLOAD_ADMISSION_SLOTS)
+    # Admission starts before multipart parsing and stays held through
+    # staging/preflight/commit (or rollback). It belongs to the app's one ASGI
+    # loop, so an asyncio semaphore avoids consuming the default thread pool
+    # while uploads wait. Keep it separate from the cross-thread preflight gate.
+    bot_upload_gate = asyncio.Semaphore(BOT_UPLOAD_ADMISSION_SLOTS)
 
     def _pause_for_unscoped_docker(reason: str) -> None:
         launch = store.executions.docker_launch()

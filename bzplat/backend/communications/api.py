@@ -6,15 +6,13 @@ from typing import Annotated, Literal, Union
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     Header,
     HTTPException,
     Request,
     Response,
-    UploadFile,
 )
 from pydantic import BaseModel, Field, StrictBool
+from starlette.datastructures import UploadFile
 
 from bzplat.backend.auth.dependencies import optional_user, require_admin, require_user
 from bzplat.backend.security import _env_bool, audit_log
@@ -710,19 +708,29 @@ def reply_guest_bug_report(
 async def upload_bug_attachment(
     bug_public_id: str,
     request: Request,
-    tracking_token: str = Form(""),
-    file: UploadFile = File(...),
     user=Depends(optional_user),
 ):
     is_admin = bool(user and user.get("role") == ROLE_ADMIN)
     try:
-        bug = _feedback(request).authorize_attachment(
-            bug_public_id,
-            user_id=(int(user["id"]) if user else None),
-            admin=is_admin,
-            tracking_token=tracking_token,
-        )
-        raw = await file.read(MAX_ATTACHMENT_BYTES + 1)
+        async with request.form(max_files=1, max_fields=2) as form:
+            token_value = form.get("tracking_token")
+            tracking_token = (
+                token_value if isinstance(token_value, str) else ""
+            )
+            file = form.get("file")
+            if not isinstance(file, UploadFile):
+                raise HTTPException(
+                    422, "multipart 文件字段 file 缺失或类型错误"
+                )
+            bug = _feedback(request).authorize_attachment(
+                bug_public_id,
+                user_id=(int(user["id"]) if user else None),
+                admin=is_admin,
+                tracking_token=tracking_token,
+            )
+            raw = await file.read(MAX_ATTACHMENT_BYTES + 1)
+            original_name = file.filename or "image"
+            claimed_media_type = file.content_type or ""
         uploader_user_id = (
             int(user["id"])
             if user and (is_admin or bug["reporter_user_id"] == int(user["id"]))
@@ -731,10 +739,12 @@ async def upload_bug_attachment(
         attachment = _feedback(request).save_attachment(
             bug,
             uploaded_by_user_id=uploader_user_id,
-            original_name=file.filename or "image",
-            claimed_media_type=file.content_type or "",
+            original_name=original_name,
+            claimed_media_type=claimed_media_type,
             raw=raw,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         audit_log(
             request,

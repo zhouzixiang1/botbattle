@@ -320,20 +320,135 @@ def test_upload_admission_is_shared_busy_and_worker_cancel_safe(
     assert create_calls == 2
 
 
-def test_cancelled_upload_waiter_releases_late_acquired_permit(
+def test_upload_admission_precedes_multipart_receive(tmp_path, monkeypatch):
+    """A busy lane rejects another authenticated body before its first byte."""
+    from httpx import ASGITransport, AsyncClient
+    import bzplat.backend.api_routes as api_routes
+
+    app = _app(tmp_path)
+    _, owner = _setup(app)
+    monkeypatch.setattr(api_routes, "BOT_UPLOAD_ADMISSION_WAIT_SEC", 0.05)
+    monkeypatch.setattr(
+        app.state.bot_manager,
+        "create_from_upload",
+        lambda *_args, **_kwargs: {
+            "id": 990,
+            "owner_id": owner["id"],
+            "name": "parsed-after-admission",
+            "current_version": 1,
+        },
+    )
+
+    boundary = b"admission-before-form"
+    body = (
+        b"--" + boundary
+        + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\nfirst'
+        + b"\r\n--" + boundary
+        + b'\r\nContent-Disposition: form-data; name="file"; filename="bot.bin"'
+        + b"\r\nContent-Type: application/octet-stream\r\n\r\nelf"
+        + b"\r\n--" + boundary + b"--\r\n"
+    )
+
+    async def exercise():
+        first_receive_entered = asyncio.Event()
+        release_first_receive = asyncio.Event()
+        first_body_reads = 0
+        second_body_reads = 0
+
+        async def first_body():
+            nonlocal first_body_reads
+            first_body_reads += 1
+            first_receive_entered.set()
+            await release_first_receive.wait()
+            yield body
+
+        async def second_body():
+            nonlocal second_body_reads
+            second_body_reads += 1
+            yield body
+
+        transport = ASGITransport(app=app)
+        headers = {
+            **_login(app),
+            "Content-Type": (
+                "multipart/form-data; boundary=" + boundary.decode()
+            ),
+        }
+        async with AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            first = asyncio.create_task(
+                client.post("/api/bots", headers=headers, content=first_body())
+            )
+            await asyncio.wait_for(first_receive_entered.wait(), timeout=1)
+
+            busy = await client.post(
+                "/api/bots/123/versions",
+                headers=headers,
+                content=second_body(),
+            )
+            assert busy.status_code == 503
+            assert busy.json()["detail"]["code"] == "upload_busy"
+            assert second_body_reads == 0
+
+            release_first_receive.set()
+            response = await asyncio.wait_for(first, timeout=1)
+            assert response.status_code == 200, response.text
+            assert first_body_reads == 1
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("path", ["/api/bots", "/api/auth/avatar"])
+def test_authenticated_upload_routes_reject_before_reading_guest_body(
+    tmp_path, path
+):
+    """Removing FastAPI File params makes auth run before multipart receive."""
+    from httpx import ASGITransport, AsyncClient
+
+    app = _app(tmp_path)
+    _setup(app)
+    boundary = "guest-body-not-read"
+
+    async def exercise():
+        body_reads = 0
+
+        async def guest_body():
+            nonlocal body_reads
+            body_reads += 1
+            yield b"untrusted multipart bytes"
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            response = await client.post(
+                path,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}"
+                },
+                content=guest_body(),
+            )
+        assert response.status_code == 401
+        assert body_reads == 0
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_upload_waiter_does_not_leak_permit(
     tmp_path, monkeypatch
 ):
-    """Cancellation while waiting cannot leak a permit acquired by its worker."""
+    """Cancellation removes an asyncio waiter without leaking a permit."""
     from httpx import ASGITransport, AsyncClient
     import bzplat.backend.api_routes as api_routes
 
     app = _app(tmp_path)
     _setup(app)
     gate = app.state.bot_upload_gate
-    assert gate.acquire(blocking=False)
     monkeypatch.setattr(api_routes, "BOT_UPLOAD_ADMISSION_WAIT_SEC", 0.5)
 
     async def exercise():
+        await gate.acquire()
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             waiting = asyncio.create_task(
@@ -346,13 +461,13 @@ def test_cancelled_upload_waiter_releases_late_acquired_permit(
             )
             await asyncio.sleep(0.02)
             waiting.cancel()
-            gate.release()
             with pytest.raises(asyncio.CancelledError):
                 await waiting
+            gate.release()
+            await asyncio.wait_for(gate.acquire(), timeout=0.1)
+            gate.release()
 
     asyncio.run(exercise())
-    assert gate.acquire(blocking=False), "cancelled waiter leaked upload permit"
-    gate.release()
 
 
 def test_upload_preflight_uses_pending_version_runtime_mode(tmp_path, monkeypatch):

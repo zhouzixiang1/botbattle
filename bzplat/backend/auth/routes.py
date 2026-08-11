@@ -7,14 +7,12 @@ from pathlib import Path
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     HTTPException,
     Request,
     Response,
-    UploadFile,
 )
 from pydantic import BaseModel, Field, field_validator
+from starlette.datastructures import UploadFile
 
 from .auth_manager import COOKIE_NAME, AuthError, AuthManager, validate_phone
 from .captcha import CAPTCHA_TTL_SEC, CaptchaStore, png_to_data_url
@@ -328,14 +326,17 @@ _AVATAR_ALLOWED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 @router.post("/avatar")
 async def upload_avatar(
     request: Request,
-    file: UploadFile = File(...),
     user: dict = Depends(require_user),
 ) -> dict:
     """上传/更新当前用户头像。存本地 avatars/<uid>.<ext>，StaticFiles 托管。"""
-    raw = await file.read()
+    async with request.form(max_files=1, max_fields=1) as form:
+        file = form.get("file")
+        if not isinstance(file, UploadFile):
+            raise HTTPException(422, "multipart 文件字段 file 缺失或类型错误")
+        raw = await file.read(_AVATAR_MAX + 1)
+        ctype = (file.content_type or "").lower()
     if not raw or len(raw) > _AVATAR_MAX:
         raise HTTPException(400, "头像文件须 1..2MB")
-    ctype = (file.content_type or "").lower()
     ext_map = {
         "image/png": "png", "image/jpeg": "jpg",
         "image/webp": "webp", "image/gif": "gif",

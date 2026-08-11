@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
+from starlette.formparsers import MultiPartException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -30,14 +31,28 @@ _UPLOAD_STRICT = (6, 60)
 _CHALLENGE_STRICT = (8, 60)
 _FEEDBACK_STRICT = (5, 60)
 _API_DEFAULT = (120, 60)
-BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES = MULTIPART_OVERHEAD_BYTES
 BOT_UPLOAD_BODY_MAX_BYTES = (
     MAX_BOT_BINARY_BYTES + BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES
 )
+BUG_ATTACHMENT_BODY_MAX_BYTES = 5 * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES
+AVATAR_BODY_MAX_BYTES = 2 * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES
 _BOT_VERSION_UPLOAD_PATH = re.compile(r"/api/bots/[^/]+/versions")
+_BUG_ATTACHMENT_UPLOAD_PATH = re.compile(
+    r"/api/feedback/bugs/[^/]+/attachments"
+)
 _BOT_UPLOAD_TOO_LARGE = {
     "code": "upload_body_too_large",
     "message": "Bot 二进制最大 50 MiB，上传请求体超过允许的 multipart 上限",
+}
+_BUG_ATTACHMENT_TOO_LARGE = {
+    "code": "attachment_body_too_large",
+    "message": "Bug 附件最大 5 MiB，上传请求体超过允许的 multipart 上限",
+}
+_AVATAR_TOO_LARGE = {
+    "code": "avatar_body_too_large",
+    "message": "头像最大 2 MiB，上传请求体超过允许的 multipart 上限",
 }
 _STATIC_SKIP_EXT = (
     ".js",
@@ -54,12 +69,15 @@ _STATIC_SKIP_EXT = (
 )
 
 
-class _BotUploadBodyTooLarge(OSError):
+class _UploadBodyTooLarge(MultiPartException):
     """Enter Starlette's multipart error cleanup path for open spool files."""
+
+    def __init__(self) -> None:
+        super().__init__("Upload request body exceeded its route limit.")
 
 
 class BotUploadBodyLimitMiddleware:
-    """Bound Bot multipart bodies before Starlette creates spooled files.
+    """Bound protected multipart bodies before Starlette creates spooled files.
 
     ``Content-Length`` is only an early-reject hint.  Every delivered ASGI body
     chunk is still counted, so a missing or forged-small header cannot bypass the
@@ -70,12 +88,16 @@ class BotUploadBodyLimitMiddleware:
         self,
         app: ASGIApp,
         *,
-        max_body_bytes: int = BOT_UPLOAD_BODY_MAX_BYTES,
+        max_body_bytes: int | None = None,
     ) -> None:
-        if max_body_bytes < 1:
+        if max_body_bytes is not None and max_body_bytes < 1:
             raise ValueError("max_body_bytes must be positive")
         self.app = app
-        self.max_body_bytes = int(max_body_bytes)
+        # Test-only override retained for the existing direct ASGI harness. In
+        # production each exact route uses its own fixed request envelope.
+        self.max_body_bytes = (
+            int(max_body_bytes) if max_body_bytes is not None else None
+        )
 
     @staticmethod
     def _is_bot_upload(scope: Scope) -> bool:
@@ -86,7 +108,27 @@ class BotUploadBodyLimitMiddleware:
             _BOT_VERSION_UPLOAD_PATH.fullmatch(path)
         )
 
-    def _declared_too_large(self, scope: Scope) -> bool:
+    def _policy_for_scope(
+        self, scope: Scope
+    ) -> tuple[int, dict[str, str]] | None:
+        if scope.get("type") != "http" or scope.get("method") != "POST":
+            return None
+        path = str(scope.get("path") or "")
+        if self._is_bot_upload(scope):
+            limit = BOT_UPLOAD_BODY_MAX_BYTES
+            detail = _BOT_UPLOAD_TOO_LARGE
+        elif _BUG_ATTACHMENT_UPLOAD_PATH.fullmatch(path):
+            limit = BUG_ATTACHMENT_BODY_MAX_BYTES
+            detail = _BUG_ATTACHMENT_TOO_LARGE
+        elif path == "/api/auth/avatar":
+            limit = AVATAR_BODY_MAX_BYTES
+            detail = _AVATAR_TOO_LARGE
+        else:
+            return None
+        return self.max_body_bytes or limit, detail
+
+    @staticmethod
+    def _declared_too_large(scope: Scope, max_body_bytes: int) -> bool:
         for name, raw_value in scope.get("headers") or []:
             if name.lower() != b"content-length":
                 continue
@@ -98,28 +140,35 @@ class BotUploadBodyLimitMiddleware:
                     declared = int(value.strip())
                 except ValueError:
                     continue
-                if declared > self.max_body_bytes:
+                if declared > max_body_bytes:
                     return True
         return False
 
     @staticmethod
-    async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
+    async def _reject(
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        detail: dict[str, str],
+    ) -> None:
         response = JSONResponse(
             status_code=413,
-            content={"detail": dict(_BOT_UPLOAD_TOO_LARGE)},
+            content={"detail": dict(detail)},
         )
         await response(scope, receive, send)
 
     async def __call__(
         self, scope: Scope, receive: Receive, send: Send
     ) -> None:
-        if not self._is_bot_upload(scope):
+        policy = self._policy_for_scope(scope)
+        if policy is None:
             await self.app(scope, receive, send)
             return
-        if self._declared_too_large(scope):
+        max_body_bytes, detail = policy
+        if self._declared_too_large(scope, max_body_bytes):
             # Do not call receive or downstream: an honest oversized request is
             # rejected before multipart parsing can create a spool file.
-            await self._reject(scope, receive, send)
+            await self._reject(scope, receive, send, detail)
             return
 
         received = 0
@@ -137,11 +186,11 @@ class BotUploadBodyLimitMiddleware:
                 # into a misleading 413 response.
                 return message
             received += len(message.get("body", b""))
-            if received > self.max_body_bytes:
+            if received > max_body_bytes:
                 rejected = True
                 # The crossing chunk is never returned to Starlette, so its
                 # multipart spool cannot grow past the configured body limit.
-                raise _BotUploadBodyTooLarge
+                raise _UploadBodyTooLarge
             return message
 
         async def limited_send(message: Message) -> None:
@@ -152,10 +201,10 @@ class BotUploadBodyLimitMiddleware:
 
         try:
             await self.app(scope, limited_receive, limited_send)
-        except _BotUploadBodyTooLarge:
+        except _UploadBodyTooLarge:
             pass
         if rejected:
-            await self._reject(scope, limited_receive, send)
+            await self._reject(scope, limited_receive, send, detail)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

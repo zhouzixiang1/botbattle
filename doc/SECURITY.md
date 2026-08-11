@@ -80,22 +80,17 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 
 > 已知局限：WebSocket（`/api/matches/{id}/play`）与 SSE（`/api/matches/{id}/events`）不经 BaseHTTPMiddleware，当前无限流。
 
-### Bot 上传容量边界
+### multipart 上传容量边界
 
-纯 ASGI body limiter 只精确匹配 `POST /api/bots` 与单路径段的
-`POST /api/bots/{id}/versions`，在 FastAPI/Starlette 解析 multipart、创建 spool 文件之前生效。总请求体
-上限为 **51 MiB**（50 MiB Bot + 1 MiB 有界 multipart 字段/边界开销）：ASGI scope 中的
-`Content-Length` 只用于超限早拒绝，超限会立即返回结构化 `413 upload_body_too_large`，不调用 `receive`
-或下游；缺失、错误或伪小长度不会被信任，每个 `http.request` chunk 在交给解析器前仍累计计数，
-越界 chunk 不下传，后续读取只见断开；超限异常进入 Starlette 的 multipart 错误清理分支，已 rollover
-到磁盘的 spool 文件也会关闭。真实 `http.disconnect` 原样透传，不伪报 413；X-Forwarded-For/X-Real-IP 等代理身份头
-不参与容量判断。
+纯 ASGI body limiter 在 FastAPI/Starlette 解析 multipart、创建 spool 文件之前按精确 POST 路径执行三档硬顶：
 
-通过 body limiter 后，新建 Bot 与上传版本再共用一个进程级上传槽。端点取得槽后只读取
-`50 MiB + 1` 个字节，文件本身超出即返回 `400 invalid_size`；槽从读取开始一直持有到隐藏版本落盘、
-沙箱预检、发布或回滚全部结束。因此不同 Bot ID 不能绕过单槽预检，同时在内存保留多份二进制或写入
-多个待检临时目录。等待槽超过 1 秒返回 `503 upload_busy` 与 `Retry-After`。客户端中断只取消 HTTP
-等待；已开始的文件读取/worker 会先收敛，随后才释放槽，避免取消造成容量提前释放。
+- `POST /api/bots`、`POST /api/bots/{id}/versions`：**51 MiB** 请求体（50 MiB Bot + 1 MiB multipart 开销），超限为 `413 upload_body_too_large`；
+- `POST /api/feedback/bugs/{public_id}/attachments`：**6 MiB** 请求体（5 MiB 图片 + 1 MiB multipart 开销），超限为 `413 attachment_body_too_large`；
+- `POST /api/auth/avatar`：**3 MiB** 请求体（2 MiB 图片 + 1 MiB multipart 开销），超限为 `413 avatar_body_too_large`。
+
+`Content-Length` 只用于超限早拒绝，超限时不调用 `receive` 或下游；缺失、重复、非法或伪小长度不会被信任，每个实际 `http.request` chunk 在交给解析器前仍累计计数。越界 chunk 不下传，后续读取只见断开；容量异常使用 Starlette 的 `MultiPartException` 清理路径，已 rollover 到磁盘的 spool 文件同步关闭。真实 `http.disconnect` 原样透传，不伪报 413；代理身份头不参与容量判断。三档请求体硬顶之外，业务层仍分别执行 50/5/2 MiB 的实际文件大小与内容校验。
+
+通过 body limiter 后，新建 Bot 与上传版本再共用一个进程级异步上传槽。端点签名不声明 `Form/File`，因此 FastAPI 先完成登录认证；取得槽后才手工解析 multipart，并在退出表单上下文时关闭 `UploadFile`。随后只读取 `50 MiB + 1` 个字节，文件本身超出即返回 `400 invalid_size`；槽从解析开始一直持有到隐藏版本落盘、沙箱预检、发布或回滚全部结束。因此不同 Bot ID 不能绕过单槽预检，同时在内存保留多份二进制或写入多个待检临时目录。等待槽使用主 ASGI 事件循环的 `asyncio.Semaphore`，不会让等待者占用默认线程池；超过 1 秒返回 `503 upload_busy` 与 `Retry-After`，且忙请求尚未读取任何 multipart 字节。客户端中断只取消 HTTP 等待；已开始的文件读取/worker 会先收敛，随后才释放槽，避免取消造成容量提前释放。
 
 ## 安全响应头
 

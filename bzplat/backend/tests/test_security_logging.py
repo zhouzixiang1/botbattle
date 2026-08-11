@@ -22,6 +22,9 @@ from fastapi.testclient import TestClient
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER, setup_logging
 from bzplat.backend.security import (
+    AVATAR_BODY_MAX_BYTES,
+    BOT_UPLOAD_BODY_MAX_BYTES,
+    BUG_ATTACHMENT_BODY_MAX_BYTES,
     BotUploadBodyLimitMiddleware,
     RateLimitMiddleware,
     audit_log,
@@ -211,6 +214,66 @@ def test_upload_body_limit_rejects_declared_size_without_receive_or_downstream()
 
 
 @pytest.mark.parametrize(
+    ("path", "limit", "code"),
+    [
+        ("/api/bots", BOT_UPLOAD_BODY_MAX_BYTES, "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            BUG_ATTACHMENT_BODY_MAX_BYTES,
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", AVATAR_BODY_MAX_BYTES, "avatar_body_too_large"),
+    ],
+)
+def test_upload_body_limit_uses_exact_route_envelopes(path, limit, code):
+    downstream_calls = 0
+
+    async def downstream(_scope, _receive, send):
+        nonlocal downstream_calls
+        downstream_calls += 1
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        raise AssertionError("declared-size decision must not read request body")
+
+    async def invoke(declared):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        limiter = BotUploadBodyLimitMiddleware(downstream)
+        await limiter(
+            _asgi_scope(
+                path,
+                headers=[(b"content-length", str(declared).encode())],
+            ),
+            receive,
+            send,
+        )
+        return sent
+
+    accepted = asyncio.run(invoke(limit))
+    rejected = asyncio.run(invoke(limit + 1))
+    assert downstream_calls == 1
+    assert accepted[0]["status"] == 204
+    assert rejected[0]["status"] == 413
+    assert json.loads(rejected[1]["body"])["detail"]["code"] == code
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_code"),
+    [
+        ("/api/bots", "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", "avatar_body_too_large"),
+    ],
+)
+@pytest.mark.parametrize(
     "headers",
     [
         [(b"transfer-encoding", b"chunked")],
@@ -219,7 +282,7 @@ def test_upload_body_limit_rejects_declared_size_without_receive_or_downstream()
     ids=["chunked-no-length", "forged-small-length"],
 )
 def test_upload_body_limit_counts_chunks_and_disconnects_caught_downstream(
-    headers,
+    path, expected_code, headers,
 ):
     messages = iter(
         [
@@ -257,7 +320,7 @@ def test_upload_body_limit_counts_chunks_and_disconnects_caught_downstream(
     async def exercise():
         limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
         await limiter(
-            _asgi_scope(headers=headers),
+            _asgi_scope(path, headers=headers),
             receive,
             send,
         )
@@ -268,7 +331,7 @@ def test_upload_body_limit_counts_chunks_and_disconnects_caught_downstream(
     assert after_reject == [{"type": "http.disconnect"}]
     assert receive_calls == 3
     assert sent[0]["status"] == 413
-    assert json.loads(sent[1]["body"])["detail"]["code"] == "upload_body_too_large"
+    assert json.loads(sent[1]["body"])["detail"]["code"] == expected_code
 
 
 def test_upload_body_limit_preserves_real_disconnect_without_413():
@@ -308,7 +371,11 @@ def test_upload_body_limit_preserves_real_disconnect_without_413():
     [
         ("POST", "/api/bots/7/versions", True),
         ("POST", "/api/bots/not-an-int/versions", True),
+        ("POST", "/api/feedback/bugs/bug_test/attachments", True),
+        ("POST", "/api/auth/avatar", True),
         ("GET", "/api/bots", False),
+        ("GET", "/api/auth/avatar", False),
+        ("POST", "/api/feedback/bugs/bug_test/attachments/", False),
         ("POST", "/api/bots/7/versions/", False),
         ("POST", "/api/bots/7/versions/extra", False),
         ("POST", "/api/bots-extra", False),
@@ -347,33 +414,53 @@ def test_upload_body_limit_matches_only_exact_upload_routes(method, path, limite
     assert sent[0]["status"] == (413 if limited else 204)
 
 
-def test_upload_body_limit_http_response_is_structured_413():
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("/api/bots", "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", "avatar_body_too_large"),
+    ],
+)
+def test_upload_body_limit_http_response_is_structured_413(path, code):
     app = FastAPI()
     app.add_middleware(BotUploadBodyLimitMiddleware, max_body_bytes=256)
     endpoint_called = False
 
-    @app.post("/api/bots")
     async def upload(file: UploadFile = File(...)):
         nonlocal endpoint_called
         endpoint_called = True
         return {"size": len(await file.read())}
 
+    app.add_api_route(path, upload, methods=["POST"])
+
     response = TestClient(app).post(
-        "/api/bots",
+        path,
         files={"file": ("bot.bin", b"x" * 512, "application/octet-stream")},
     )
 
     assert response.status_code == 413
-    assert response.json() == {
-        "detail": {
-            "code": "upload_body_too_large",
-            "message": "Bot 二进制最大 50 MiB，上传请求体超过允许的 multipart 上限",
-        }
-    }
+    assert response.json()["detail"]["code"] == code
     assert endpoint_called is False
 
 
-def test_chunked_multipart_limit_closes_rolled_spool(monkeypatch):
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("/api/bots", "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", "avatar_body_too_large"),
+    ],
+)
+def test_chunked_multipart_limit_closes_rolled_spool(
+    monkeypatch, path, code
+):
     """A receive-time 413 must enter Starlette's open-file cleanup branch."""
     import tempfile
     import starlette.formparsers as formparsers
@@ -393,11 +480,12 @@ def test_chunked_multipart_limit_closes_rolled_spool(monkeypatch):
     app.add_middleware(BotUploadBodyLimitMiddleware, max_body_bytes=256)
     endpoint_called = False
 
-    @app.post("/api/bots")
     async def upload(file: UploadFile = File(...)):
         nonlocal endpoint_called
         endpoint_called = True
         return {"size": len(await file.read())}
+
+    app.add_api_route(path, upload, methods=["POST"])
 
     boundary = b"botbattle-boundary"
     body = (
@@ -427,6 +515,7 @@ def test_chunked_multipart_limit_closes_rolled_spool(monkeypatch):
     async def exercise():
         await app(
             _asgi_scope(
+                path,
                 headers=[
                     (
                         b"content-type",
@@ -446,7 +535,7 @@ def test_chunked_multipart_limit_closes_rolled_spool(monkeypatch):
         "http.response.body",
     ]
     assert sent[0]["status"] == 413
-    assert json.loads(sent[1]["body"])["detail"]["code"] == "upload_body_too_large"
+    assert json.loads(sent[1]["body"])["detail"]["code"] == code
     assert len(created) == 1
     assert created[0]._rolled is True
     assert created[0].closed is True

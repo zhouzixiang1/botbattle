@@ -13,9 +13,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+import anyio
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
+from starlette.datastructures import FormData, UploadFile
 
 from bzplat.backend.auth.dependencies import (
     _extract_token,
@@ -103,23 +113,32 @@ async def _finish_upload_step_before_cancel(awaitable: Awaitable[_T]) -> _T:
     """
 
     task = asyncio.ensure_future(awaitable)
-    cancellation_pending = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.cancelled():
-                raise
-            cancellation_pending = True
-        except BaseException:
-            break
-    if cancellation_pending:
-        try:
-            task.result()
-        except BaseException:
-            pass
-        raise asyncio.CancelledError
-    return task.result()
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if task.cancelled():
+            raise
+        # Starlette/AnyIO cancellation scopes are level-triggered: merely
+        # catching CancelledError and awaiting again can spin until the worker
+        # ends, starving the event loop and defeating bounded admission waits.
+        # Shield this short drain so other requests keep making progress while
+        # the already-started file/thread operation converges.
+        with anyio.CancelScope(shield=True):
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        raise
+                except BaseException:
+                    break
+            try:
+                task.result()
+            except BaseException:
+                pass
+        raise
+    except BaseException:
+        return task.result()
 
 
 @asynccontextmanager
@@ -129,33 +148,41 @@ async def _bot_upload_admission(request: Request) -> AsyncIterator[None]:
     gate = getattr(request.app.state, "bot_upload_gate", None)
     if gate is None:
         raise _BotUploadBusy
-    acquire = asyncio.create_task(
-        asyncio.to_thread(
-            lambda: gate.acquire(timeout=BOT_UPLOAD_ADMISSION_WAIT_SEC)
-        ),
-        name="bot-upload-admission",
-    )
-    cancellation_pending = False
-    while not acquire.done():
-        try:
-            await asyncio.shield(acquire)
-        except asyncio.CancelledError:
-            if acquire.cancelled():
-                raise
-            cancellation_pending = True
-        except BaseException:
-            break
-    acquired = acquire.result()
-    if cancellation_pending:
-        if acquired:
-            gate.release()
-        raise asyncio.CancelledError
-    if not acquired:
+    acquired = False
+    try:
+        await asyncio.wait_for(
+            gate.acquire(), timeout=BOT_UPLOAD_ADMISSION_WAIT_SEC
+        )
+        acquired = True
+    except TimeoutError:
         raise _BotUploadBusy
     try:
         yield
     finally:
-        gate.release()
+        if acquired:
+            gate.release()
+
+
+def _multipart_text(
+    form: FormData,
+    key: str,
+    *,
+    default: str = "",
+    required: bool = False,
+) -> str:
+    value = form.get(key)
+    if isinstance(value, str):
+        return value
+    if not required and value is None:
+        return default
+    raise HTTPException(422, detail=f"multipart 字段 {key} 缺失或类型错误")
+
+
+def _multipart_file(form: FormData) -> UploadFile:
+    value = form.get("file")
+    if isinstance(value, UploadFile):
+        return value
+    raise HTTPException(422, detail="multipart 文件字段 file 缺失或类型错误")
 
 
 async def _read_bot_upload(file: UploadFile) -> bytes:
@@ -690,18 +717,25 @@ def bot_rating_history(
 @router.post("/api/bots")
 async def upload_bot(
     request: Request,
-    name: str = Form(...),
-    display_name: str = Form(""),
-    description: str = Form(""),
-    upload_note: str = Form(""),
-    game_id: str = Form("holdem"),
-    runtime_mode: str = Form(DEFAULT_RUNTIME_MODE),
-    file: UploadFile = File(...),
     user=Depends(require_user),
 ):
+    name = ""
+    game_id = "holdem"
+    runtime_mode = DEFAULT_RUNTIME_MODE
     try:
         async with _bot_upload_admission(request):
-            raw = await _read_bot_upload(file)
+            async with request.form(max_files=1, max_fields=10) as form:
+                name = _multipart_text(form, "name", required=True)
+                display_name = _multipart_text(form, "display_name")
+                description = _multipart_text(form, "description")
+                upload_note = _multipart_text(form, "upload_note")
+                game_id = _multipart_text(
+                    form, "game_id", default="holdem"
+                )
+                runtime_mode = _multipart_text(
+                    form, "runtime_mode", default=DEFAULT_RUNTIME_MODE
+                )
+                raw = await _read_bot_upload(_multipart_file(form))
             bot = await _finish_upload_step_before_cancel(
                 asyncio.to_thread(
                     _bots(request).create_from_upload,
@@ -740,14 +774,14 @@ async def upload_bot(
 async def upload_bot_version(
     bot_id: int,
     request: Request,
-    upload_note: str = Form(""),
-    runtime_mode: str = Form(""),
-    file: UploadFile = File(...),
     user=Depends(require_user),
 ):
     try:
         async with _bot_upload_admission(request):
-            raw = await _read_bot_upload(file)
+            async with request.form(max_files=1, max_fields=4) as form:
+                upload_note = _multipart_text(form, "upload_note")
+                runtime_mode = _multipart_text(form, "runtime_mode")
+                raw = await _read_bot_upload(_multipart_file(form))
             bot = await _finish_upload_step_before_cancel(
                 asyncio.to_thread(
                     _bots(request).upload_version,
