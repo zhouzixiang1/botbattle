@@ -230,8 +230,8 @@ def rating_rebuild(
             raise typer.BadParameter(
                 f"评分重建 No-Go: issues={report['issues']} "
                 f"running={report['running_match_count']} "
-                f"auto_match_queue={report['auto_match_queue_count']} "
-                f"dispatcher_lease={report['dispatcher_lease_live']}"
+                f"execution_active={report['execution_active_count']} "
+                f"dispatcher_state={report['dispatcher_state']}"
             )
         report = apply_rebuild_plan(
             database,

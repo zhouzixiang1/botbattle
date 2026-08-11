@@ -11,6 +11,11 @@ import pytest
 from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.store import Store
+from bzplat.backend.tests.execution_helpers import (
+    claim_request,
+    enable_execution_queue,
+    queued_execution_jobs,
+)
 
 
 class _SuccessOrch:
@@ -169,22 +174,31 @@ def test_concurrent_publish_rechecks_status_under_single_contest_lock(tmp_path):
 def test_pairing_bind_failure_discards_prepared_match_without_orphan(
     tmp_path, monkeypatch
 ):
-    """challenge prepare 成功但 pairing 事务失败时，runner 不启动且 match 精确删除。"""
+    """Atomic claim 的 pairing 写入失败时不留下 match/replay/index 孤儿。"""
     async def exercise():
         store, contest_id = _setup(tmp_path)
         orch = MatchOrchestrator(store)
         manager = ContestManager(store, orch)
+        enable_execution_queue(store)
+        assert (await manager.start(contest_id))["status"] == "published"
+        queued = queued_execution_jobs(orch)
+        assert len(queued) == 1
+        with store._tx() as conn:
+            conn.execute(
+                "CREATE TRIGGER fail_pairing_claim BEFORE UPDATE OF match_id "
+                "ON contest_pairings WHEN NEW.match_id IS NOT NULL BEGIN "
+                "SELECT RAISE(ABORT, 'pairing commit exploded'); END"
+            )
 
-        def fail_bind(*args, **kwargs):
-            raise RuntimeError("pairing commit exploded")
+        with pytest.raises(sqlite3.IntegrityError, match="pairing commit exploded"):
+            claim_request(orch, queued[0]["public_id"], start=False)
 
-        monkeypatch.setattr(store, "bind_contest_pairing_match", fail_bind)
-        with pytest.raises(RuntimeError, match="pairing commit exploded"):
-            await manager.start(contest_id)
-
-        assert store.get_contest(contest_id)["status"] == "open"
-        assert store.list_contest_pairings(contest_id) == []
+        pairing = store.list_contest_pairings(contest_id)
+        assert len(pairing) == 1
+        assert pairing[0]["status"] == "pending"
+        assert pairing[0]["match_id"] is None
         assert store.list_matches(contest_id=contest_id) == []
+        assert store.executions.get(queued[0]["public_id"])["status"] == "queued"
         assert orch._tasks == {}
 
     asyncio.run(exercise())
@@ -193,7 +207,7 @@ def test_pairing_bind_failure_discards_prepared_match_without_orphan(
 def test_nth_dispatch_failure_keeps_started_progress_and_failed_pairing_retryable(
     tmp_path, monkeypatch
 ):
-    """第 N 场失败不谎报全失败：已绑定场保留，失败场 pending 且无孤儿 match。"""
+    """第 N 次 claim 失败保留既有进度，其余请求仍 queued 且无孤儿 match。"""
     async def exercise():
         store, contest_id = _setup(tmp_path)
         u3 = store.create_user("atomic3", "atomic3@example.com", "hash")
@@ -205,31 +219,39 @@ def test_nth_dispatch_failure_keeps_started_progress_and_failed_pairing_retryabl
         store.add_contest_entry(contest_id, u3["id"], b3["id"])
         orch = MatchOrchestrator(store)
         manager = ContestManager(store, orch)
-        original_bind = store.bind_contest_pairing_match
-        calls = 0
-
-        def fail_second_bind(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise RuntimeError("second pairing commit exploded")
-            return original_bind(*args, **kwargs)
-
-        monkeypatch.setattr(store, "bind_contest_pairing_match", fail_second_bind)
+        enable_execution_queue(store)
         result = await manager.start(contest_id)
-        assert result["status"] == "running"
+        assert result["status"] == "published"
+
+        queued = queued_execution_jobs(orch)
+        assert len(queued) == 3
+        first = claim_request(orch, queued[0]["public_id"], start=False)
+        assert store.get_contest(contest_id)["status"] == "running"
+        failed_pairing_id = int(queued[1]["contest_pairing_id"])
+        with store._tx() as conn:
+            conn.execute(
+                "CREATE TRIGGER fail_second_pairing_claim "
+                "BEFORE UPDATE OF match_id ON contest_pairings "
+                f"WHEN NEW.id={failed_pairing_id} AND NEW.match_id IS NOT NULL BEGIN "
+                "SELECT RAISE(ABORT, 'second pairing commit exploded'); END"
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError, match="second pairing commit exploded"
+        ):
+            claim_request(orch, queued[1]["public_id"], start=False)
 
         pairings = store.list_contest_pairings(contest_id)
         assert len(pairings) == 3
         bound = [pairing for pairing in pairings if pairing.get("match_id")]
         retryable = [pairing for pairing in pairings if not pairing.get("match_id")]
-        assert len(bound) == 2
-        assert len(retryable) == 1
-        assert retryable[0]["status"] == "pending"
+        assert len(bound) == 1
+        assert bound[0]["match_id"] == first["current_match_id"]
+        assert len(retryable) == 2
+        assert all(pairing["status"] == "pending" for pairing in retryable)
         matches = store.list_matches(contest_id=contest_id)
-        assert {match["id"] for match in matches} == {
-            pairing["match_id"] for pairing in bound
-        }
+        assert {match["id"] for match in matches} == {first["current_match_id"]}
+        assert store.executions.get(queued[1]["public_id"])["status"] == "queued"
+        assert store.executions.get(queued[2]["public_id"])["status"] == "queued"
         await orch.shutdown()
 
     asyncio.run(exercise())

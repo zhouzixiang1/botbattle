@@ -1,11 +1,15 @@
 """SQLite 存储层导出。"""
 from .db import (
-    AutoMatchFenceLost,
     Store,
     rating_plan_digest,
     rating_projection_digest,
     rating_projection_digests,
     rating_source_input_issues,
+)
+from .execution import (
+    ExecutionInvariantError,
+    ExecutionQueueClosed,
+    ExecutionRepository,
 )
 from .schema import (
     CODE_RESET,
@@ -33,7 +37,9 @@ from .schema import (
 
 __all__ = [
     "Store",
-    "AutoMatchFenceLost",
+    "ExecutionInvariantError",
+    "ExecutionQueueClosed",
+    "ExecutionRepository",
     "rating_plan_digest",
     "rating_projection_digest",
     "rating_projection_digests",

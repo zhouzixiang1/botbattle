@@ -1,6 +1,6 @@
 """赛事时间调度器——后台周期扫描赛事的 *_at 字段，到点自动推进阶段。
 
-仿 ``matches/auto_matcher.AutoMatchScheduler`` 的 ``while True + asyncio.sleep`` 后台任务，
+采用单进程 ``while True + asyncio.sleep`` 后台任务，
 挂到 ``main.py`` lifespan。每 interval（默认 15s，platform_settings 可配）扫描所有赛事：
 
 1. **draft 且 registration_opens_at<=now** → ``open_registration()``（到点开放报名）

@@ -317,8 +317,10 @@ def test_qa_script_claims_match_the_observed_coverage():
     assert "snapshot 之后的实时增量事件" in load_source
     assert "SSE 实时事件流" not in api_source
     assert "终态 snapshot" in api_source
-    assert "首波精确接纳" in api_source
-    assert "超额请求明确 429" in api_source
+    assert "并发提交的 {n} 个挑战全部返回 202 + opaque public_id" in api_source
+    assert "超过并发容量的请求由持久队列保留" in api_source
+    assert "首波精确接纳" not in api_source
+    assert "超额请求明确 429" not in api_source
     assert "全部 {n} 局成功发起" not in api_source
     assert "持续打满并发对局（8 场）" not in load_doc
     assert "全端点覆盖" not in doc_index

@@ -110,7 +110,15 @@ def test_swap_bot_keeps_history_points(tmp_path):
     # 建对应 match（completed, botA 赢）
     for i, p in enumerate(s.list_contest_pairings(c, stage_idx=0)):
         mid = f"p0swap-{i}"
-        s.create_match(mid, ba, bb, game_id="holdem", contest_id=c, match_config={})
+        s.create_match(
+            mid,
+            ba,
+            bb,
+            game_id="holdem",
+            contest_id=c,
+            match_type="contest",
+            match_config={},
+        )
         s.update_match(mid, status="completed", winner=0,
                        result={"rounds_played": 2, "deltas": [100, -100]},
                        reason="completed")

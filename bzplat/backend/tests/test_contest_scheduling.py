@@ -19,7 +19,7 @@ import pytest
 
 from bzplat.backend.contests.manager import ContestManager, _now, _validate_contest_times
 from bzplat.backend.contests.scheduler import ContestScheduler
-from bzplat.backend.matches.orchestrator import BotCapacityError, MatchOrchestrator
+from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.store import Store
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
@@ -487,73 +487,6 @@ def test_contest_dispatch_admits_only_free_slots_and_refills_on_completion(
     assert len(active) == 2
     assert len(store.list_matches(contest_id=contest["id"], limit=1000)) == 3
     assert sum(pairing["status"] == "running" for pairing in refreshed) == 2
-
-
-def test_orchestrator_capacity_counts_waiting_bot_tasks_but_not_human(setup):
-    """admission 看已建 task（含等 semaphore），人类局走独立槽。"""
-    store, _mgr, _, users = setup
-    store.create_match(
-        "capacity-bot-task", users["b1"], users["b2"],
-        match_type="challenge", game_id="holdem",
-    )
-    store.create_match(
-        "capacity-human-task", users["b1"], None,
-        match_type="human", game_id="holdem", human_user_id=users["u2"],
-        human_seat=1,
-    )
-    orch = MatchOrchestrator(store, max_concurrent=2)
-
-    async def exercise():
-        gate = asyncio.Event()
-
-        async def wait_forever():
-            await gate.wait()
-
-        bot_task = asyncio.create_task(wait_forever())
-        human_task = asyncio.create_task(wait_forever())
-        orch._tasks["capacity-bot-task"] = bot_task
-        orch._tasks["capacity-human-task"] = human_task
-        orch._reserve_bot_slot("capacity-bot-task")
-        try:
-            assert orch.available_bot_slots() == 1
-        finally:
-            bot_task.cancel()
-            human_task.cancel()
-            await asyncio.gather(bot_task, human_task, return_exceptions=True)
-            orch._tasks.clear()
-            orch._bot_admitted.clear()
-
-    asyncio.run(exercise())
-
-
-def test_orchestrator_global_admission_rejects_before_creating_extra_match(setup):
-    """挑战入口也必须使用统一令牌，不能在 semaphore 后堆 pending 行。"""
-    store, _mgr, _, users = setup
-    orch = MatchOrchestrator(store, max_concurrent=1)
-
-    async def exercise():
-        first = await orch.challenge(
-            users["b1"], users["b2"], users["u1"],
-            game_id="holdem", defer_start=True,
-        )
-        assert orch.available_bot_slots() == 0
-        with pytest.raises(BotCapacityError):
-            await orch.challenge(
-                users["b1"], users["b2"], users["u1"],
-                game_id="holdem", defer_start=True,
-            )
-        assert [match["id"] for match in store.list_matches(limit=100)] == [first]
-
-        assert orch.discard_prepared_match(first) is True
-        assert orch.available_bot_slots() == 1
-        replacement = await orch.challenge(
-            users["b1"], users["b2"], users["u1"],
-            game_id="holdem", defer_start=True,
-        )
-        assert replacement != first
-        assert orch.discard_prepared_match(replacement) is True
-
-    asyncio.run(exercise())
 
 
 def test_reconcile_repairs_legacy_start_time_and_completed_pairing(setup):

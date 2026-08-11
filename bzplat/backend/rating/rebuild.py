@@ -18,7 +18,7 @@ from typing import Any
 
 from bzplat.backend.games import registry as game_registry
 from bzplat.backend.rating.glicko2 import Rating, match_scores, update_rating
-from bzplat.backend.runtime.config import AUTO_MATCH_PLACEMENT_REQUIRED
+from bzplat.backend.runtime.config import RANKING_MIN_RATED_MATCHES
 from bzplat.backend.store import (
     rating_projection_digest,
     rating_projection_digests,
@@ -185,14 +185,19 @@ def _load_bot_universe(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return bots
 
 
-def _auto_match_queue_issues(
+def _execution_queue_issues(
     conn: sqlite3.Connection,
 ) -> tuple[int, list[str]]:
-    count = int(conn.execute("SELECT COUNT(*) FROM auto_match_queue").fetchone()[0])
+    count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM execution_jobs "
+            "WHERE status IN ('starting','running','settling')"
+        ).fetchone()[0]
+    )
     if count == 0:
         return 0, []
     return count, [
-        f"auto_match_queue 非空（{count} 行）；必须先排空旧评分代际队列"
+        f"execution_jobs 有 {count} 个活跃 attempt；必须先停止服务并完成清场"
     ]
 
 
@@ -215,8 +220,9 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
         "match_rating_settlements",
         "rating_projection_state",
         "rating_settlement_sequence",
-        "auto_match_queue",
-        "auto_match_dispatcher",
+        "execution_jobs",
+        "execution_job_attempts",
+        "execution_control",
     }
     missing = sorted(required - _tables(conn))
     if missing:
@@ -557,8 +563,8 @@ def _leaderboard_projection(
             continue
         matches_played = max(0, int(rating.get("matches_played") or 0))
         is_placement = (
-            AUTO_MATCH_PLACEMENT_REQUIRED > 0
-            and matches_played < AUTO_MATCH_PLACEMENT_REQUIRED
+            RANKING_MIN_RATED_MATCHES > 0
+            and matches_played < RANKING_MIN_RATED_MATCHES
         )
         tier = game_registry.tier_for(game_id, rating.get("rating"))
         item = {
@@ -658,7 +664,7 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
             _validate_database_health(conn, label="target")
             live = rating_projection_digests(conn)
             source, replay_issues = _load_source(conn)
-            auto_match_queue_count, queue_issues = _auto_match_queue_issues(conn)
+            execution_active_count, queue_issues = _execution_queue_issues(conn)
             issues = sorted(
                 set([*live["issues"], *replay_issues, *queue_issues])
             )
@@ -697,14 +703,17 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
                 projection_state, live
             )
             dispatcher = conn.execute(
-                "SELECT owner_token,lease_until FROM auto_match_dispatcher "
+                "SELECT dispatcher_state,accepting FROM execution_control "
                 "WHERE singleton=1"
             ).fetchone()
-            dispatcher_lease_live = bool(
-                dispatcher
-                and dispatcher["owner_token"]
-                and str(dispatcher["lease_until"] or "")
-                > datetime.now().isoformat(timespec="seconds")
+            dispatcher_state = (
+                str(dispatcher["dispatcher_state"] or "stopped")
+                if dispatcher
+                else "missing"
+            )
+            dispatcher_active = bool(
+                dispatcher_state != "stopped"
+                or (dispatcher and int(dispatcher["accepting"] or 0) != 0)
             )
             source_digest = str(live["source_digest"])
             plan_digest = str(live["plan_digest"])
@@ -774,10 +783,11 @@ def build_rebuild_plan(db_path: str | Path) -> RebuildPlan:
                 "changed_bots": changes,
                 "issues": sorted(set(issues)),
                 "running_match_count": running,
-                "auto_match_queue_count": auto_match_queue_count,
-                "dispatcher_lease_live": dispatcher_lease_live,
+                "execution_active_count": execution_active_count,
+                "dispatcher_state": dispatcher_state,
+                "dispatcher_active": dispatcher_active,
                 "ready_to_apply": (
-                    not issues and running == 0 and not dispatcher_lease_live
+                    not issues and running == 0 and not dispatcher_active
                 ),
             }
             return RebuildPlan(
@@ -899,8 +909,8 @@ def apply_rebuild_plan(
         _validate_database_health(conn, label="target")
         live = rating_projection_digests(conn)
         source, replay_issues = _load_source(conn)
-        auto_match_queue_count, queue_issues = _auto_match_queue_issues(conn)
-        if auto_match_queue_count:
+        execution_active_count, queue_issues = _execution_queue_issues(conn)
+        if execution_active_count:
             raise RuntimeError(f"评分重建 No-Go: {queue_issues[0]}")
         issues = sorted(set([*live["issues"], *replay_issues]))
         if issues:
@@ -916,17 +926,21 @@ def apply_rebuild_plan(
             for game_id in sorted(VALID_GAME_IDS)
         )
         dispatcher = conn.execute(
-            "SELECT owner_token,lease_until FROM auto_match_dispatcher WHERE singleton=1"
+            "SELECT dispatcher_state,accepting FROM execution_control WHERE singleton=1"
         ).fetchone()
-        lease_live = bool(
-            dispatcher
-            and dispatcher["owner_token"]
-            and str(dispatcher["lease_until"] or "")
-            > datetime.now().isoformat(timespec="seconds")
+        dispatcher_state = (
+            str(dispatcher["dispatcher_state"] or "stopped")
+            if dispatcher
+            else "missing"
         )
-        if running or lease_live:
+        dispatcher_active = bool(
+            dispatcher_state != "stopped"
+            or (dispatcher and int(dispatcher["accepting"] or 0) != 0)
+        )
+        if running or dispatcher_active:
             raise RuntimeError(
-                f"服务未完全停止: running_matches={running} dispatcher_lease={lease_live}"
+                "服务未完全停止: "
+                f"running_matches={running} dispatcher_state={dispatcher_state}"
             )
         ratings, history, pairs = _replay(source, bot_universe)
         rebuilt_projection_digest = rating_projection_digest(

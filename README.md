@@ -10,13 +10,14 @@
 - 各游戏独立裁判引擎 + 统一 GameSpec/结果契约；赛制与编排主流程无需游戏名分支
 - SSE 实时观赛 + 完整对局回放（播放/暂停/步进/倍速/逐手跳转）
 - 终局私有 Bot debug sidecar：双方作者对称调试，赛事延迟授权，公开回放零泄漏
-- 人类 vs Bot（WebSocket 实时交互，独立并发，不计评分）
+- 人类 vs Bot（WebSocket 实时交互；与其他来源共享全局容量，占 1 个对局槽 + 1 个沙箱单元，不计评分）
+- 人工、人机、赛事与自动排位统一进入持久执行队列；挑战/人机返回 HTTP 202 请求，可刷新恢复、取消，基础设施中断后可安全重试
 
 **赛事与排行**
 - Glicko-2 排行榜（按游戏分别排名）+ 6 档段位称号 + 相邻评分变化/RD/胜率与最近对局
 - 组织者赛事：6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰）+ 内置预赛/决赛等模板、积分榜、对阵图、休息期换 Bot
 - 客户演示：六个明确标注“合成演示”的只读生命周期快照，保留真实裁判回放、逐阶段排名/晋级与独立正式总榜
-- 持久公平自动排位：全局串行持续运行、游戏/定级通道与所有者轮转、公开正在/即将对局
+- 持久公平自动排位：只作为全局执行队列的自动 producer，按游戏/定级通道/所有者轮转，公开正在/即将请求；唯一运维开关不影响人工、人机和赛事
 
 **平台功能**
 - 账号体系：注册/登录/邮箱验证/重置密码、个人主页、资料/头像编辑
@@ -82,7 +83,7 @@ botzone create-admin alice alice@example.com 'password123'
 - **后端**：Python ≥ 3.12、FastAPI、uvicorn、SQLite、SMTP（captcha + Pillow）
 - **前端**：React 19 + Vite 8 + Tailwind CSS v4（CSS-first）+ shadcn/ui + Radix UI + lucide-react + recharts
 - **暗色模式**：next-themes + OKLCH 双主题 token（浅色默认 + 暗色对等）
-- **运行时**：Docker（必需；Linux x86_64 ELF 使用 debian:bookworm-slim）
+- **运行时**：Docker（必需；Linux x86_64 ELF 使用 debian:bookworm-slim）；本机 canonical socket + 实例/请求/attempt/座位标签构成精确清理边界
 - **评分**：Glicko-2（自实现，无外部依赖）
 
 ## 目录结构

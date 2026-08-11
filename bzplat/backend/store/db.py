@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
@@ -70,60 +70,6 @@ _AUTO_MATCH_FAIR_BOOTSTRAP_VERSION = 1
 _AUTO_MATCH_POLICY_VERSION = "owner-game-lane-v2"
 _RATING_PROJECTION_POLICY_VERSION = "owner-neutral-v3"
 _RATING_PROJECTION_LEGACY_VERSION = "legacy-unverified"
-_AUTO_MATCH_PLATFORM_ABORT_REASONS = frozenset(
-    {
-        "platform_error",
-        "version_unavailable",
-        "orphan_after_restart",
-        "orphan_pending_after_restart",
-    }
-)
-
-
-def _daemon_incarnation_changed(previous: str, current: str) -> bool:
-    """Return true only for a comparable Docker/host restart proof."""
-
-    def parse(value: str) -> dict[str, str]:
-        return {
-            key: item
-            for part in str(value or "").split(";")
-            if ":" in part
-            for key, item in [part.split(":", 1)]
-        }
-
-    before = parse(previous)
-    after = parse(current)
-    if (
-        before.get("transport") != "unix"
-        or after.get("transport") != "unix"
-        or before.get("locality") != "local"
-        or after.get("locality") != "local"
-    ):
-        # A client-host reboot says nothing about an in-flight request owned by
-        # a remote daemon or an unaudited Unix-socket proxy.
-        return False
-    before_boot = before.get("boot", "unknown")
-    after_boot = after.get("boot", "unknown")
-    if (
-        before_boot != "unknown"
-        and after_boot != "unknown"
-        and before_boot != after_boot
-    ):
-        return True
-    before_daemon = before.get("daemon", "unknown")
-    after_daemon = after.get("daemon", "unknown")
-    return (
-        before_boot == after_boot
-        and before_daemon != "unknown"
-        and after_daemon != "unknown"
-        and before_daemon != after_daemon
-    )
-
-
-class AutoMatchFenceLost(RuntimeError):
-    """The automatic-match worker no longer owns its durable dispatch epoch."""
-
-
 @dataclass(frozen=True)
 class _RatingProjectionMutationGuard:
     """Proof that the marker-settled projection was trusted before one write.
@@ -139,12 +85,6 @@ class _RatingProjectionMutationGuard:
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
-
-
-def _after_seconds(seconds: int | float) -> str:
-    return (datetime.now() + timedelta(seconds=float(seconds))).isoformat(
-        timespec="seconds"
-    )
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -920,6 +860,64 @@ def _rating_eligible_sql(alias: str) -> str:
     )
 
 
+def _normalize_schema_sql(sql: str) -> str:
+    """Collapse insignificant formatting for sqlite_master comparisons."""
+    return " ".join(sql.strip().rstrip(";").split())
+
+
+def _ensure_trigger(
+    conn: sqlite3.Connection,
+    name: str,
+    create_sql: str,
+) -> None:
+    """Install one canonical trigger without rewriting an identical schema.
+
+    A missing trigger is created, while a stale definition is replaced inside
+    the caller's migration transaction.  Any collision or post-create mismatch
+    raises so that ``Store`` rolls the whole migration back instead of accepting
+    a partially guarded database.
+    """
+    valid_name = bool(name) and name.isascii()
+    valid_name = valid_name and (name[0].isalpha() or name[0] == "_")
+    valid_name = valid_name and all(ch.isalnum() or ch == "_" for ch in name)
+    if not valid_name:
+        raise ValueError(f"invalid trigger identifier: {name!r}")
+
+    desired = _normalize_schema_sql(create_sql)
+    if not desired.startswith(f"CREATE TRIGGER {name} "):
+        raise ValueError(f"trigger SQL/name mismatch: {name!r}")
+
+    objects = conn.execute(
+        "SELECT type,sql FROM sqlite_master WHERE name=? ORDER BY type",
+        (name,),
+    ).fetchall()
+    conflicts = sorted(str(row[0]) for row in objects if str(row[0]) != "trigger")
+    if conflicts:
+        raise RuntimeError(
+            f"schema object name collision for trigger {name}: {conflicts}"
+        )
+    trigger_rows = [row for row in objects if str(row[0]) == "trigger"]
+    if len(trigger_rows) > 1:
+        raise RuntimeError(f"duplicate trigger definition in sqlite_master: {name}")
+    if trigger_rows:
+        current = _normalize_schema_sql(str(trigger_rows[0][1] or ""))
+        if current == desired:
+            return
+        conn.execute(f"DROP TRIGGER {name}")
+
+    conn.execute(create_sql)
+    installed = conn.execute(
+        "SELECT type,sql FROM sqlite_master WHERE name=?",
+        (name,),
+    ).fetchall()
+    if (
+        len(installed) != 1
+        or str(installed[0][0]) != "trigger"
+        or _normalize_schema_sql(str(installed[0][1] or "")) != desired
+    ):
+        raise RuntimeError(f"trigger verification failed after install: {name}")
+
+
 def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
     """Enforce one rating-bearing lifecycle per Bot at the SQLite boundary."""
     for gid in sorted(_all_game_ids()):
@@ -936,28 +934,33 @@ def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
             "SELECT 1 FROM match_rating_settlements settled "
             "WHERE settled.match_id=m.id))) LIMIT 1"
         )
-        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rated_overlap_insert")
-        conn.execute(
-            f"CREATE TRIGGER trg_{table}_rated_overlap_insert "
+        insert_name = f"trg_{table}_rated_overlap_insert"
+        _ensure_trigger(
+            conn,
+            insert_name,
+            f"CREATE TRIGGER {insert_name} "
             f"BEFORE INSERT ON {table} "
             "WHEN NEW.status IN ('pending','running') "
             f"AND ({new_rated}) AND EXISTS ({overlap}) "
-            "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END"
+            "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END",
         )
-        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rated_overlap_update")
-        conn.execute(
-            f"CREATE TRIGGER trg_{table}_rated_overlap_update "
+        update_name = f"trg_{table}_rated_overlap_update"
+        _ensure_trigger(
+            conn,
+            update_name,
+            f"CREATE TRIGGER {update_name} "
             f"BEFORE UPDATE OF bot_a_id,bot_b_id,match_type,status ON {table} "
             "WHEN NEW.status IN ('pending','running') "
             f"AND ({new_rated}) AND EXISTS ({overlap}) "
-            "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END"
+            "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END",
         )
 
 
 def _install_rating_source_guards(conn: sqlite3.Connection) -> None:
     """Make every settled replay input immutable at the SQLite boundary."""
-    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_policy_source_immutable")
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_policy_source_immutable",
         "CREATE TRIGGER trg_match_rating_policy_source_immutable "
         "BEFORE UPDATE OF match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
         "classified_at ON match_rating_policies WHEN "
@@ -966,32 +969,38 @@ def _install_rating_source_guards(conn: sqlite3.Connection) -> None:
         "OLD.bot_b_id IS NOT NEW.bot_b_id OR OLD.rated IS NOT NEW.rated OR "
         "OLD.rating_reason IS NOT NEW.rating_reason OR OLD.source IS NOT NEW.source OR "
         "OLD.classified_at IS NOT NEW.classified_at BEGIN "
-        "SELECT RAISE(ABORT,'rating policy source immutable'); END"
+        "SELECT RAISE(ABORT,'rating policy source immutable'); END",
     )
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_settled_delete "
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_policy_settled_delete",
+        "CREATE TRIGGER trg_match_rating_policy_settled_delete "
         "BEFORE DELETE ON match_rating_policies WHEN OLD.settled_order IS NOT NULL OR "
         "EXISTS(SELECT 1 FROM match_rating_settlements s WHERE s.match_id=OLD.match_id) "
-        "BEGIN SELECT RAISE(ABORT,'settled rating policy immutable'); END"
+        "BEGIN SELECT RAISE(ABORT,'settled rating policy immutable'); END",
     )
     for gid in sorted(_all_game_ids()):
         table = _matches_table(gid)
-        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rating_source_update")
-        conn.execute(
-            f"CREATE TRIGGER trg_{table}_rating_source_update "
+        update_name = f"trg_{table}_rating_source_update"
+        _ensure_trigger(
+            conn,
+            update_name,
+            f"CREATE TRIGGER {update_name} "
             f"BEFORE UPDATE OF id,winner,result,ended_at,status ON {table} WHEN "
             "EXISTS(SELECT 1 FROM match_rating_settlements s WHERE s.match_id=OLD.id) "
             "AND (OLD.id IS NOT NEW.id OR OLD.winner IS NOT NEW.winner OR "
             "OLD.result IS NOT NEW.result OR "
             "OLD.ended_at IS NOT NEW.ended_at OR OLD.status IS NOT NEW.status) "
-            "BEGIN SELECT RAISE(ABORT,'settled match rating source immutable'); END"
+            "BEGIN SELECT RAISE(ABORT,'settled match rating source immutable'); END",
         )
-        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_rating_source_delete")
-        conn.execute(
-            f"CREATE TRIGGER trg_{table}_rating_source_delete BEFORE DELETE ON {table} "
+        delete_name = f"trg_{table}_rating_source_delete"
+        _ensure_trigger(
+            conn,
+            delete_name,
+            f"CREATE TRIGGER {delete_name} BEFORE DELETE ON {table} "
             "WHEN EXISTS(SELECT 1 FROM match_rating_settlements s "
             "WHERE s.match_id=OLD.id) BEGIN "
-            "SELECT RAISE(ABORT,'settled match rating source immutable'); END"
+            "SELECT RAISE(ABORT,'settled match rating source immutable'); END",
         )
 
 
@@ -1007,68 +1016,70 @@ def _install_rating_projection_mutation_triggers(
     for table in simple_tables:
         for operation in ("INSERT", "UPDATE", "DELETE"):
             name = f"trg_{table}_projection_mutation_{operation.lower()}"
-            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
-            conn.execute(
+            _ensure_trigger(
+                conn,
+                name,
                 f"CREATE TRIGGER {name} AFTER {operation} ON {table} "
-                f"BEGIN {bump} END"
+                f"BEGIN {bump} END",
             )
 
-    conn.execute("DROP TRIGGER IF EXISTS trg_bots_projection_mutation_insert")
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_bots_projection_mutation_insert",
         "CREATE TRIGGER trg_bots_projection_mutation_insert AFTER INSERT ON bots "
-        f"BEGIN {bump} END"
+        f"BEGIN {bump} END",
     )
-    conn.execute("DROP TRIGGER IF EXISTS trg_bots_projection_mutation_delete")
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_bots_projection_mutation_delete",
         "CREATE TRIGGER trg_bots_projection_mutation_delete AFTER DELETE ON bots "
-        f"BEGIN {bump} END"
+        f"BEGIN {bump} END",
     )
-    conn.execute("DROP TRIGGER IF EXISTS trg_bots_projection_mutation_update")
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_bots_projection_mutation_update",
         "CREATE TRIGGER trg_bots_projection_mutation_update "
         "AFTER UPDATE OF game_id,is_active,format,os,arch ON bots WHEN "
         "OLD.game_id IS NOT NEW.game_id OR OLD.is_active IS NOT NEW.is_active OR "
         "OLD.format IS NOT NEW.format OR OLD.os IS NOT NEW.os OR "
-        f"OLD.arch IS NOT NEW.arch BEGIN {bump} END"
+        f"OLD.arch IS NOT NEW.arch BEGIN {bump} END",
     )
 
-    conn.execute(
-        "DROP TRIGGER IF EXISTS trg_match_rating_policy_projection_mutation_order"
-    )
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_policy_projection_mutation_order",
         "CREATE TRIGGER trg_match_rating_policy_projection_mutation_order "
         "AFTER UPDATE OF settled_order ON match_rating_policies WHEN "
         "OLD.settled_order IS NOT NEW.settled_order "
-        f"BEGIN {bump} END"
+        f"BEGIN {bump} END",
     )
-    conn.execute(
-        "DROP TRIGGER IF EXISTS trg_rating_settlement_sequence_projection_mutation"
-    )
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_rating_settlement_sequence_projection_mutation",
         "CREATE TRIGGER trg_rating_settlement_sequence_projection_mutation "
         "AFTER UPDATE OF next_order ON rating_settlement_sequence WHEN "
         "OLD.next_order IS NOT NEW.next_order "
-        f"BEGIN {bump} END"
+        f"BEGIN {bump} END",
     )
-    conn.execute(
-        "DROP TRIGGER IF EXISTS trg_match_rating_settlement_projection_mutation_insert"
-    )
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_settlement_projection_mutation_insert",
         "CREATE TRIGGER trg_match_rating_settlement_projection_mutation_insert "
         "AFTER INSERT ON match_rating_settlements WHEN NEW.settled_order>0 "
-        f"BEGIN {bump} END"
+        f"BEGIN {bump} END",
     )
     for game_id in sorted(_all_game_ids()):
         table = _matches_table(game_id)
         name = f"trg_{table}_projection_mutation_source"
-        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
-        conn.execute(
+        _ensure_trigger(
+            conn,
+            name,
             f"CREATE TRIGGER {name} AFTER UPDATE OF id,winner,result,ended_at,status "
             f"ON {table} WHEN EXISTS(SELECT 1 FROM match_rating_policies policy "
             "WHERE policy.match_id=OLD.id AND policy.settled_order IS NOT NULL) "
             "AND (OLD.id IS NOT NEW.id OR OLD.winner IS NOT NEW.winner OR "
             "OLD.result IS NOT NEW.result OR OLD.ended_at IS NOT NEW.ended_at OR "
-            f"OLD.status IS NOT NEW.status) BEGIN {bump} END"
+            f"OLD.status IS NOT NEW.status) BEGIN {bump} END",
         )
 
 
@@ -1090,8 +1101,20 @@ def _bootstrap_auto_match_fairness(conn: sqlite3.Connection) -> None:
 
     history: list[dict[str, Any]] = []
     game_ids = sorted(_all_game_ids())
+    existing_tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
     for gid in game_ids:
         table = _matches_table(gid)
+        # Keep the post-migration registry/table assertion authoritative.  A
+        # partially registered game must fail with that explicit diagnostic,
+        # rather than an incidental ``no such table`` while bootstrapping the
+        # unrelated automatic-fairness projection.
+        if table not in existing_tables:
+            continue
         rows = conn.execute(
             f"SELECT m.id,m.game_id,m.bot_a_id,m.bot_b_id,m.created_at,m.ended_at,"
             "a.owner_id AS owner_a_id,b.owner_id AS owner_b_id "
@@ -1193,12 +1216,15 @@ def _ensure_match_rating_policy_identity(conn: sqlite3.Connection) -> None:
     valid_games = ",".join(f"'{gid}'" for gid in sorted(_all_game_ids()))
     for action in ("INSERT", "UPDATE OF game_id,bot_a_id,bot_b_id,rated"):
         suffix = "insert" if action == "INSERT" else "update"
-        conn.execute(
-            f"CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_identity_{suffix} "
+        name = f"trg_match_rating_policy_identity_{suffix}"
+        _ensure_trigger(
+            conn,
+            name,
+            f"CREATE TRIGGER {name} "
             f"BEFORE {action} ON match_rating_policies WHEN "
             f"NEW.game_id IS NULL OR NEW.game_id NOT IN ({valid_games}) OR "
             "(NEW.rated=1 AND (NEW.bot_a_id IS NULL OR NEW.bot_b_id IS NULL)) "
-            "BEGIN SELECT RAISE(ABORT,'rating policy identity invalid'); END"
+            "BEGIN SELECT RAISE(ABORT,'rating policy identity invalid'); END",
         )
 
 
@@ -1371,11 +1397,13 @@ def _ensure_rating_settlement_sequence(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_match_rating_policy_settled_order "
         "ON match_rating_policies(settled_order) WHERE settled_order IS NOT NULL"
     )
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_policy_order_immutable "
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_policy_order_immutable",
+        "CREATE TRIGGER trg_match_rating_policy_order_immutable "
         "BEFORE UPDATE OF settled_order ON match_rating_policies "
         "WHEN OLD.settled_order IS NOT NULL AND OLD.settled_order IS NOT NEW.settled_order "
-        "BEGIN SELECT RAISE(ABORT,'rating policy settled_order immutable'); END"
+        "BEGIN SELECT RAISE(ABORT,'rating policy settled_order immutable'); END",
     )
 
     conn.execute(
@@ -1384,42 +1412,47 @@ def _ensure_rating_settlement_sequence(conn: sqlite3.Connection) -> None:
         "WHERE settled_order IS NOT NULL AND settled_order>0"
     )
     sentinel = MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL.replace("'", "''")
-    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_settlement_order_insert")
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_settlement_order_insert",
         "CREATE TRIGGER trg_match_rating_settlement_order_insert "
         "BEFORE INSERT ON match_rating_settlements "
         f"WHEN NEW.match_id<>'{sentinel}' AND ("
         "NEW.settled_order IS NULL OR NEW.settled_order<=0 OR "
         "NEW.settled_order<>(SELECT COALESCE(MAX(settled_order),0)+1 "
         "FROM match_rating_settlements WHERE settled_order>0)) BEGIN "
-        "SELECT RAISE(ABORT,'rating settlement order must be next'); END"
+        "SELECT RAISE(ABORT,'rating settlement order must be next'); END",
     )
-    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_settlement_order_immutable")
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_settlement_order_immutable",
         "CREATE TRIGGER trg_match_rating_settlement_order_immutable "
         "BEFORE UPDATE OF match_id,settled_at,settled_order "
         "ON match_rating_settlements WHEN OLD.match_id IS NOT NEW.match_id OR "
         "OLD.settled_at IS NOT NEW.settled_at OR "
         "OLD.settled_order IS NOT NEW.settled_order BEGIN "
-        "SELECT RAISE(ABORT,'rating settlement source immutable'); END"
+        "SELECT RAISE(ABORT,'rating settlement source immutable'); END",
     )
-    conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_settlement_delete_immutable")
-    conn.execute(
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_settlement_delete_immutable",
         "CREATE TRIGGER trg_match_rating_settlement_delete_immutable "
         "BEFORE DELETE ON match_rating_settlements "
         "WHEN OLD.settled_order IS NOT NULL BEGIN "
-        "SELECT RAISE(ABORT,'rating settlement source immutable'); END"
+        "SELECT RAISE(ABORT,'rating settlement source immutable'); END",
     )
     # Older releases advanced count/last from policy_version alone.  That
     # partially blessed an already-stale state before the application had
     # verified the projection/source/plan baseline.  The Store now advances all
     # five summary fields together behind an explicit pre-mutation guard.
     conn.execute("DROP TRIGGER IF EXISTS trg_match_rating_projection_advance")
-    conn.execute(
-        "CREATE TRIGGER IF NOT EXISTS trg_match_rating_projection_dirty_on_delete "
+    _ensure_trigger(
+        conn,
+        "trg_match_rating_projection_dirty_on_delete",
+        "CREATE TRIGGER trg_match_rating_projection_dirty_on_delete "
         "AFTER DELETE ON match_rating_settlements WHEN OLD.settled_order>0 BEGIN "
         "UPDATE rating_projection_state SET policy_version='projection-dirty',"
-        "rebuilt_at=NULL WHERE singleton=1; END"
+        "rebuilt_at=NULL WHERE singleton=1; END",
     )
     _install_rating_source_guards(conn)
 
@@ -2269,6 +2302,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
+    _missing_registered_tables = sorted(
+        _matches_table(gid)
+        for gid in _all_game_ids()
+        if _matches_table(gid) not in _tables_after
+    )
+    assert not _missing_registered_tables, (
+        "注册表里的游戏缺物理表（_migrate 自动建表应覆盖此场景）："
+        f"{_missing_registered_tables}。检查 games/__init__.py 注册 vs schema.py DDL。"
+    )
     for _gid in _all_game_ids():
         _tbl = _matches_table(_gid)
         if _tbl not in _tables_after:
@@ -2572,101 +2614,242 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ON contest_pairings(match_id) WHERE match_id IS NOT NULL"
         )
 
-    # ── 自动排位 v2：每日配额下线，单一持久公平队列接管 ────────────────
-    _add_col(conn, "auto_match_dispatcher", "lease_epoch", "INTEGER NOT NULL DEFAULT 0")
-    _add_col(conn, "auto_match_queue", "dispatcher_epoch", "INTEGER")
-    _add_col(conn, "auto_match_decisions", "claim_dispatcher_token", "TEXT")
-    _add_col(conn, "auto_match_decisions", "claim_dispatcher_epoch", "INTEGER")
-    for table in ("auto_match_queue", "auto_match_decisions"):
-        _add_col(conn, table, "execution_scope", "TEXT")
-        _add_col(conn, table, "execution_backend", "TEXT")
-        _add_col(conn, table, "execution_state", "TEXT")
-        _add_col(conn, table, "execution_launch_state", "TEXT")
-        _add_col(conn, table, "execution_launch_token", "TEXT")
-        _add_col(conn, table, "execution_daemon_incarnation", "TEXT")
-        _add_col(conn, table, "cleanup_requested_at", "TEXT")
-        _add_col(conn, table, "cleanup_ack_at", "TEXT")
-        _add_col(conn, table, "cleanup_error", "TEXT NOT NULL DEFAULT ''")
-    # A pre-upgrade active claim has no provable container label.  Preserve its
-    # one-dispatched barrier as local/unconfirmable instead of releasing it.
-    conn.execute(
-        "UPDATE auto_match_queue SET execution_scope='legacy-' || id,"
-        "execution_backend='local',execution_state='recovery_pending',"
-        "execution_launch_state='creating',"
-        "execution_launch_token='legacy-' || id,"
-        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
-        "boot:unknown;daemon:unknown',"
-        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
-        "cleanup_error='legacy active claim requires operator recovery' "
-        "WHERE status='dispatched' AND execution_scope IS NULL",
-        (_now(),),
-    )
-    conn.execute(
-        "UPDATE auto_match_decisions SET execution_scope=(SELECT q.execution_scope "
-        "FROM auto_match_queue q WHERE q.decision_id=auto_match_decisions.id),"
-        "execution_backend='local',execution_state='recovery_pending',"
-        "execution_launch_state='creating',"
-        "execution_launch_token='legacy-' || id,"
-        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
-        "boot:unknown;daemon:unknown',"
-        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
-        "cleanup_error='legacy active claim requires operator recovery' "
-        "WHERE lifecycle='dispatched' AND execution_scope IS NULL "
-        "AND EXISTS(SELECT 1 FROM auto_match_queue q "
-        "WHERE q.decision_id=auto_match_decisions.id AND q.status='dispatched')",
-        (_now(),),
-    )
-    # Also fail closed if an operator briefly ran an earlier physical-fence
-    # build which already persisted a scope but did not yet have launch tokens.
-    conn.execute(
-        "UPDATE auto_match_queue SET execution_launch_state='creating',"
-        "execution_launch_token='legacy-launch-' || id,"
-        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
-        "boot:unknown;daemon:unknown',"
-        "execution_state='recovery_pending',"
-        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
-        "cleanup_error='legacy launch acknowledgement is unprovable' "
-        "WHERE status='dispatched' AND execution_launch_state IS NULL",
-        (_now(),),
-    )
-    conn.execute(
-        "UPDATE auto_match_decisions SET "
-        "execution_launch_state=(SELECT q.execution_launch_state FROM auto_match_queue q "
-        "WHERE q.decision_id=auto_match_decisions.id),"
-        "execution_launch_token=(SELECT q.execution_launch_token FROM auto_match_queue q "
-        "WHERE q.decision_id=auto_match_decisions.id),"
-        "execution_daemon_incarnation=(SELECT q.execution_daemon_incarnation "
-        "FROM auto_match_queue q WHERE q.decision_id=auto_match_decisions.id),"
-        "execution_state='recovery_pending',"
-        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
-        "cleanup_error='legacy launch acknowledgement is unprovable' "
-        "WHERE lifecycle='dispatched' AND execution_launch_state IS NULL "
-        "AND EXISTS(SELECT 1 FROM auto_match_queue q "
-        "WHERE q.decision_id=auto_match_decisions.id AND q.status='dispatched')",
-        (_now(),),
-    )
-    conn.execute(
-        "UPDATE auto_match_queue SET "
-        "execution_daemon_incarnation='transport:unknown;locality:unknown;"
-        "boot:unknown;daemon:unknown',"
-        "execution_state='recovery_pending',"
-        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
-        "cleanup_error='legacy daemon incarnation is unprovable' "
-        "WHERE status='dispatched' AND execution_launch_state<>'unstarted' "
-        "AND execution_daemon_incarnation IS NULL",
-        (_now(),),
-    )
-    conn.execute(
-        "UPDATE auto_match_decisions SET "
-        "execution_daemon_incarnation=(SELECT q.execution_daemon_incarnation "
-        "FROM auto_match_queue q WHERE q.decision_id=auto_match_decisions.id),"
-        "execution_state='recovery_pending',"
-        "cleanup_requested_at=COALESCE(cleanup_requested_at,?),"
-        "cleanup_error='legacy daemon incarnation is unprovable' "
-        "WHERE lifecycle='dispatched' AND execution_launch_state<>'unstarted' "
-        "AND execution_daemon_incarnation IS NULL",
-        (_now(),),
-    )
+    # ── 全来源持久执行队列 v3 ─────────────────────────────────────────
+    # Fresh schema 已创建 execution_*；升级库在这里一次性吸收旧 auto-only
+    # lookahead。queued 可无损转换；旧 dispatched 的物理容器没有 instance
+    # namespace，不能把“没看见新 label”伪装成清理证明，因此保留为仍占容量的
+    # settling attempt 并把 dispatcher 置 manual pause，等待维护者确认旧平台已停后
+    # 显式恢复；普通进程启动绝不跨过这一人工确认边界。
+    tables_now = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "execution_jobs" in tables_now:
+        _add_col(
+            conn,
+            "execution_jobs",
+            "failure_count",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (failure_count>=0)",
+        )
+        _add_col(conn, "execution_jobs", "next_attempt_at", "TEXT")
+    if "auto_match_control" in tables_now:
+        old_switch = conn.execute(
+            "SELECT enabled FROM auto_match_control WHERE singleton=1"
+        ).fetchone()
+        if old_switch is not None:
+            conn.execute(
+                "UPDATE execution_control SET auto_enabled=?,updated_at=? "
+                "WHERE singleton=1",
+                (1 if int(old_switch["enabled"] or 0) else 0, _now()),
+            )
+    if "auto_match_decisions" in tables_now:
+        _add_col(conn, "auto_match_decisions", "job_public_id", "TEXT")
+
+    legacy_active = 0
+    if "auto_match_queue" in tables_now:
+        legacy_count = int(
+            conn.execute("SELECT COUNT(*) FROM auto_match_queue").fetchone()[0]
+        )
+        legacy_rows = conn.execute(
+            "SELECT q.*,d.created_at AS decision_created_at,"
+            "d.lifecycle AS decision_lifecycle,d.match_id AS decision_match_id "
+            "FROM auto_match_queue q JOIN auto_match_decisions d "
+            "ON d.id=q.decision_id ORDER BY q.id"
+        ).fetchall()
+        if len(legacy_rows) != legacy_count:
+            raise RuntimeError(
+                "旧 auto_match_queue 存在缺失 decision 的孤儿行；"
+                "为避免丢失执行请求，迁移已中止且不会删除旧队列表"
+            )
+        for legacy in legacy_rows:
+            legacy_status = str(legacy["status"] or "")
+            if legacy_status not in {"queued", "dispatched"}:
+                raise RuntimeError(
+                    f"旧执行队列状态不可迁移: {legacy_status!r}"
+                )
+            decision_id = int(legacy["decision_id"])
+            digest = hashlib.sha256(
+                f"legacy-auto:{decision_id}:{legacy['decision_created_at']}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:24]
+            public_id = f"req_{digest}"
+            is_active = legacy_status == "dispatched"
+            match_id = str(legacy["match_id"] or "") or None
+            decision_match_id = (
+                str(legacy["decision_match_id"] or "") or None
+            )
+            expected_lifecycle = "dispatched" if is_active else "queued"
+            if (
+                str(legacy["decision_lifecycle"] or "") != expected_lifecycle
+                or decision_match_id != match_id
+            ):
+                raise RuntimeError(
+                    "旧自动排位 queue/decision 生命周期不一致；"
+                    "为保留审计链，迁移已中止"
+                )
+            if is_active:
+                game_id = str(legacy["game_id"] or "")
+                if game_id not in _all_game_ids() or not match_id:
+                    raise RuntimeError(
+                        "旧 dispatched 执行缺少可识别的 game/match；迁移已中止"
+                    )
+                indexed = conn.execute(
+                    "SELECT game_id FROM matches_index WHERE id=?", (match_id,)
+                ).fetchone()
+                physical = conn.execute(
+                    f"SELECT 1 FROM {_matches_table(game_id)} WHERE id=?",
+                    (match_id,),
+                ).fetchone()
+                if (
+                    indexed is None
+                    or str(indexed["game_id"] or "") != game_id
+                    or physical is None
+                ):
+                    raise RuntimeError(
+                        "旧 dispatched 执行引用的 match 索引或实体缺失；"
+                        "迁移已中止且不会删除旧队列表"
+                    )
+            status = "settling" if is_active else "queued"
+            retryable = 0
+            terminal_reason = ""
+            migration_error = "legacy_execution_unscoped" if is_active else ""
+            conn.execute(
+                "INSERT OR IGNORE INTO execution_jobs("
+                "public_id,source,status,priority,owner_user_id,game_id,match_type,"
+                "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,match_config,"
+                "rated,rating_reason,match_slots,sandbox_units,current_match_id,"
+                "auto_decision_id,cancel_requested,attempt_count,cleanup_state,"
+                "retryable,terminal_reason,last_error,created_at,claimed_at,"
+                "settling_at,terminal_at) "
+                "VALUES(?, 'auto', ?, 10, NULL, ?, 'ladder', ?, ?, ?, ?, '{}',"
+                "1,'eligible',1,2,?,?,0,?,? ,?,?,?, ?,?,?,?)",
+                (
+                    public_id,
+                    status,
+                    legacy["game_id"],
+                    legacy["bot_a_id"],
+                    legacy["bot_b_id"],
+                    legacy["bot_a_version_id"],
+                    legacy["bot_b_version_id"],
+                    match_id if is_active else None,
+                    decision_id,
+                    1 if is_active else 0,
+                    "pending" if is_active else "none",
+                    retryable,
+                    terminal_reason,
+                    migration_error,
+                    legacy["created_at"] or legacy["decision_created_at"] or _now(),
+                    (
+                        legacy["dispatched_at"]
+                        or legacy["created_at"]
+                        or legacy["decision_created_at"]
+                        or _now()
+                    )
+                    if is_active
+                    else None,
+                    _now() if is_active else None,
+                    None,
+                ),
+            )
+            job = conn.execute(
+                "SELECT id FROM execution_jobs WHERE public_id=?", (public_id,)
+            ).fetchone()
+            if is_active and job is not None and match_id:
+                conn.execute(
+                    "INSERT OR IGNORE INTO execution_job_attempts("
+                    "job_id,attempt_no,match_id,status,events_observed,created_at,"
+                    "terminal_at,terminal_reason) VALUES(?,1,?,'settling',0,?,NULL,?)",
+                    (
+                        int(job["id"]),
+                        match_id,
+                        legacy["dispatched_at"] or legacy["created_at"] or _now(),
+                        migration_error,
+                    ),
+                )
+                legacy_active += 1
+            conn.execute(
+                "UPDATE auto_match_decisions SET job_public_id=? WHERE id=?",
+                (public_id, decision_id),
+            )
+
+    if legacy_active:
+        conn.execute(
+            "UPDATE execution_control SET dispatcher_state='paused',accepting=1,"
+            "pause_reason=?,retry_count=0,retry_at=NULL,updated_at=? WHERE singleton=1",
+            (
+                "manual:升级前存在未完成的无命名空间执行；"
+                "确认旧平台已停服且旧容器已清理后由管理员恢复",
+                _now(),
+            ),
+        )
+
+    # 先移除旧活跃队列，再重建永久决策审计。execution_jobs 只保存 decision id
+    # 数值映射，不声明反向 FK，所以表替换不会影响 job 或历史 match。
+    conn.execute("DROP TABLE IF EXISTS auto_match_queue")
+    if "auto_match_decisions" in tables_now and {
+        "claim_dispatcher_token",
+        "execution_scope",
+        "execution_daemon_incarnation",
+    }.intersection(_table_cols(conn, "auto_match_decisions")):
+        conn.execute("DROP TABLE IF EXISTS auto_match_decisions_v3")
+        conn.execute(
+            "CREATE TABLE auto_match_decisions_v3("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,policy_version TEXT NOT NULL,"
+            "state_revision INTEGER NOT NULL,cursor_game_idx INTEGER NOT NULL,"
+            "requested_lane TEXT NOT NULL,actual_lane TEXT NOT NULL,"
+            "fallback_reason TEXT NOT NULL DEFAULT '',game_id TEXT NOT NULL,"
+            "bot_a_id INTEGER NOT NULL,bot_b_id INTEGER NOT NULL,"
+            "owner_a_id INTEGER NOT NULL,owner_b_id INTEGER NOT NULL,"
+            "bot_a_version_id INTEGER NOT NULL,bot_b_version_id INTEGER NOT NULL,"
+            "owner_a_service_before INTEGER NOT NULL,owner_b_service_before INTEGER NOT NULL,"
+            "bot_a_service_before INTEGER NOT NULL,bot_b_service_before INTEGER NOT NULL,"
+            "bot_pair_count_before INTEGER NOT NULL,owner_pair_count_before INTEGER NOT NULL,"
+            "rating_gap REAL NOT NULL,bot_a_seat_debt_before INTEGER NOT NULL,"
+            "bot_b_seat_debt_before INTEGER NOT NULL,selection_reason TEXT NOT NULL,"
+            "lifecycle TEXT NOT NULL DEFAULT 'queued',match_id TEXT,"
+            "attempt_count INTEGER NOT NULL DEFAULT 0,last_attempt_error TEXT NOT NULL DEFAULT '',"
+            "created_at TEXT NOT NULL,dispatched_at TEXT,terminal_at TEXT,"
+            "terminal_reason TEXT NOT NULL DEFAULT '',settlement_order INTEGER,job_public_id TEXT,"
+            "CHECK(bot_a_id<>bot_b_id),CHECK(owner_a_id<>owner_b_id),"
+            "CHECK(requested_lane IN ('bootstrap','established')),"
+            "CHECK(actual_lane IN ('bootstrap','established')),"
+            "CHECK(lifecycle IN ('queued','dispatched','completed','aborted','cancelled')))"
+        )
+        keep = (
+            "id,policy_version,state_revision,cursor_game_idx,requested_lane,actual_lane,"
+            "fallback_reason,game_id,bot_a_id,bot_b_id,owner_a_id,owner_b_id,"
+            "bot_a_version_id,bot_b_version_id,owner_a_service_before,"
+            "owner_b_service_before,bot_a_service_before,bot_b_service_before,"
+            "bot_pair_count_before,owner_pair_count_before,rating_gap,"
+            "bot_a_seat_debt_before,bot_b_seat_debt_before,selection_reason,"
+            "lifecycle,match_id,attempt_count,last_attempt_error,created_at,dispatched_at,"
+            "terminal_at,terminal_reason,settlement_order,job_public_id"
+        )
+        select_keep = keep.replace(
+            "requested_lane,actual_lane,",
+            "CASE requested_lane WHEN 'placement' THEN 'bootstrap' "
+            "WHEN 'formal' THEN 'established' ELSE requested_lane END,"
+            "CASE actual_lane WHEN 'placement' THEN 'bootstrap' "
+            "WHEN 'formal' THEN 'established' ELSE actual_lane END,",
+        )
+        conn.execute(
+            f"INSERT INTO auto_match_decisions_v3({keep}) "
+            f"SELECT {select_keep} FROM auto_match_decisions"
+        )
+        conn.execute("DROP TABLE auto_match_decisions")
+        conn.execute("ALTER TABLE auto_match_decisions_v3 RENAME TO auto_match_decisions")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_decisions_match "
+            "ON auto_match_decisions(match_id) WHERE match_id IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_auto_match_decisions_created "
+            "ON auto_match_decisions(id DESC)"
+        )
+
+    conn.execute("DROP TABLE IF EXISTS auto_match_dispatcher")
+    conn.execute("DROP TABLE IF EXISTS auto_match_control")
     _add_col(conn, "rating_projection_state", "source_digest", "TEXT NOT NULL DEFAULT ''")
     _add_col(conn, "rating_projection_state", "projection_digest", "TEXT NOT NULL DEFAULT ''")
     _add_col(conn, "rating_projection_state", "plan_digest", "TEXT NOT NULL DEFAULT ''")
@@ -2678,61 +2861,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn, "rating_projection_state", "trusted_mutation_revision",
         "INTEGER NOT NULL DEFAULT 0",
     )
-    conn.execute("DROP TRIGGER IF EXISTS trg_auto_match_queue_fence_insert")
-    conn.execute(
-        "CREATE TRIGGER trg_auto_match_queue_fence_insert "
-        "BEFORE INSERT ON auto_match_queue WHEN "
-        "(NEW.status='queued' AND (NEW.match_id IS NOT NULL OR "
-        "NEW.dispatcher_token IS NOT NULL OR NEW.dispatcher_epoch IS NOT NULL OR "
-        "NEW.dispatched_at IS NOT NULL OR NEW.execution_scope IS NOT NULL OR "
-        "NEW.execution_backend IS NOT NULL OR NEW.execution_state IS NOT NULL OR "
-        "NEW.execution_launch_state IS NOT NULL OR "
-        "NEW.execution_launch_token IS NOT NULL OR "
-        "NEW.execution_daemon_incarnation IS NOT NULL OR "
-        "NEW.cleanup_requested_at IS NOT NULL OR NEW.cleanup_ack_at IS NOT NULL OR "
-        "NEW.cleanup_error<>'')) OR "
-        "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
-        "NEW.dispatcher_token IS NULL OR NEW.dispatcher_epoch IS NULL OR "
-        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL OR "
-        "NEW.execution_scope IS NULL OR NEW.execution_backend IS NULL OR "
-        "NEW.execution_state IS NULL OR NEW.execution_launch_state IS NULL OR "
-        "(NEW.execution_launch_state='unstarted' AND (NEW.execution_launch_token IS NOT NULL OR "
-        "NEW.execution_daemon_incarnation IS NOT NULL)) OR "
-        "(NEW.execution_launch_state<>'unstarted' AND (NEW.execution_launch_token IS NULL OR "
-        "NEW.execution_daemon_incarnation IS NULL)))) BEGIN "
-        "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
-    )
-    conn.execute("DROP TRIGGER IF EXISTS trg_auto_match_queue_fence_update")
-    conn.execute(
-        "CREATE TRIGGER trg_auto_match_queue_fence_update "
-        "BEFORE UPDATE OF status,match_id,dispatcher_token,dispatcher_epoch,dispatched_at,"
-        "execution_scope,execution_backend,execution_state,cleanup_requested_at,"
-        "execution_launch_state,execution_launch_token,execution_daemon_incarnation,"
-        "cleanup_ack_at,cleanup_error "
-        "ON auto_match_queue WHEN "
-        "(NEW.status='queued' AND (NEW.match_id IS NOT NULL OR "
-        "NEW.dispatcher_token IS NOT NULL OR NEW.dispatcher_epoch IS NOT NULL OR "
-        "NEW.dispatched_at IS NOT NULL OR NEW.execution_scope IS NOT NULL OR "
-        "NEW.execution_backend IS NOT NULL OR NEW.execution_state IS NOT NULL OR "
-        "NEW.execution_launch_state IS NOT NULL OR "
-        "NEW.execution_launch_token IS NOT NULL OR "
-        "NEW.execution_daemon_incarnation IS NOT NULL OR "
-        "NEW.cleanup_requested_at IS NOT NULL OR NEW.cleanup_ack_at IS NOT NULL OR "
-        "NEW.cleanup_error<>'')) OR "
-        "(NEW.status='dispatched' AND (NEW.match_id IS NULL OR "
-        "NEW.dispatcher_token IS NULL OR NEW.dispatcher_epoch IS NULL OR "
-        "NEW.dispatcher_epoch<=0 OR NEW.dispatched_at IS NULL OR "
-        "NEW.execution_scope IS NULL OR NEW.execution_backend IS NULL OR "
-        "NEW.execution_state IS NULL OR NEW.execution_launch_state IS NULL OR "
-        "(NEW.execution_launch_state='unstarted' AND (NEW.execution_launch_token IS NOT NULL OR "
-        "NEW.execution_daemon_incarnation IS NOT NULL)) OR "
-        "(NEW.execution_launch_state<>'unstarted' AND (NEW.execution_launch_token IS NULL OR "
-        "NEW.execution_daemon_incarnation IS NULL)))) BEGIN "
-        "SELECT RAISE(ABORT,'invalid auto-match queue fence'); END"
-    )
     # 公平计数只从历史 completed system ladder 一次性引导；此后仅由 queue
     # terminal transaction 更新，绝不读取可被前台挑战影响的 ratings/pair_stats。
     _bootstrap_auto_match_fairness(conn)
+    # The global dispatcher now owns all Docker uncertainty retry state.  The
+    # auto-only circuit-breaker columns have no writer and must not survive as a
+    # misleading second control plane.
+    for _dead_auto_fair_column in ("platform_failures", "not_before"):
+        if _dead_auto_fair_column in _table_cols(conn, "auto_match_fair_state"):
+            conn.execute(
+                f"ALTER TABLE auto_match_fair_state DROP COLUMN "
+                f"{_dead_auto_fair_column}"
+            )
     _ensure_match_rating_policy_identity(conn)
     _classify_legacy_match_rating_policies(conn)
     conn.execute("DROP TABLE IF EXISTS auto_match_daily_claims")
@@ -2812,6 +2952,12 @@ class Store:
                 f"注册表里的游戏缺物理表（_migrate 自动建表应覆盖此场景）："
                 f"{_missing}。检查 games/__init__.py 注册 vs schema.py DDL。"
             )
+        # Delayed import keeps db.py's schema helpers available while the
+        # source-neutral repository imports them.  Callers use this one facade;
+        # no execution path is allowed to mutate execution_jobs ad hoc.
+        from .execution import ExecutionRepository
+
+        self.executions = ExecutionRepository(self)
 
     @contextlib.contextmanager
     def _tx(self):
@@ -3487,8 +3633,9 @@ class Store:
                     return False
             if (
                 c.execute(
-                    "SELECT 1 FROM auto_match_queue "
-                    "WHERE bot_a_id=? OR bot_b_id=? LIMIT 1",
+                    "SELECT 1 FROM execution_jobs "
+                    "WHERE status IN ('queued','starting','running','settling') "
+                    "AND (bot_a_id=? OR bot_b_id=?) LIMIT 1",
                     (bot_id, bot_id),
                 ).fetchone()
                 or c.execute(
@@ -3541,8 +3688,9 @@ class Store:
                 ).fetchone()
                 match_count += int(row["n"] if row else 0)
             queued_row = c.execute(
-                "SELECT COUNT(*) AS n FROM auto_match_queue "
-                "WHERE bot_a_id=? OR bot_b_id=?",
+                "SELECT COUNT(*) AS n FROM execution_jobs "
+                "WHERE status IN ('queued','starting','running','settling') "
+                "AND (bot_a_id=? OR bot_b_id=?)",
                 (bot_id, bot_id),
             ).fetchone()
             match_count += int(queued_row["n"] if queued_row else 0)
@@ -3594,8 +3742,9 @@ class Store:
                 if row and row["n"]:
                     out["matches"] += int(row["n"])
             queued = c.execute(
-                "SELECT COUNT(*) AS n FROM auto_match_queue "
-                "WHERE bot_a_id=? OR bot_b_id=?",
+                "SELECT COUNT(*) AS n FROM execution_jobs "
+                "WHERE status IN ('queued','starting','running','settling') "
+                "AND (bot_a_id=? OR bot_b_id=?)",
                 (bot_id, bot_id),
             ).fetchone()
             if queued and queued["n"]:
@@ -3736,11 +3885,12 @@ class Store:
                 (bot_id, version),
             ).fetchone()
             if version_row and c.execute(
-                "SELECT 1 FROM auto_match_queue WHERE bot_a_version_id=? "
-                "OR bot_b_version_id=? LIMIT 1",
+                "SELECT 1 FROM execution_jobs "
+                "WHERE status IN ('queued','starting','running','settling') "
+                "AND (bot_a_version_id=? OR bot_b_version_id=?) LIMIT 1",
                 (version_row["id"], version_row["id"]),
             ).fetchone():
-                raise ValueError("该版本已被冻结到自动排位队列，暂不可删除")
+                raise ValueError("该版本已被冻结到执行队列，暂不可删除")
 
             cur = c.execute(
                 "DELETE FROM bot_versions WHERE bot_id=? AND version=?",
@@ -3949,607 +4099,6 @@ class Store:
         return False
 
     @staticmethod
-    def _auto_queue_identity_tx(
-        c: sqlite3.Connection,
-        row: sqlite3.Row | dict,
-    ) -> dict | None:
-        """Validate one frozen queue identity against current executable state."""
-        q = dict(row)
-        identity = c.execute(
-            "SELECT a.id AS a_id, a.owner_id AS a_owner_id, a.game_id AS a_game_id, "
-            "a.is_active AS a_active, a.is_builtin AS a_builtin, "
-            "a.format AS a_format, a.os AS a_os, a.arch AS a_arch, "
-            "ua.is_active AS a_owner_active, "
-            "b.id AS b_id, b.owner_id AS b_owner_id, b.game_id AS b_game_id, "
-            "b.is_active AS b_active, b.is_builtin AS b_builtin, "
-            "b.format AS b_format, b.os AS b_os, b.arch AS b_arch, "
-            "ub.is_active AS b_owner_active, "
-            "va.id AS a_version_id, va.binary_path AS a_version_path, "
-            "va.format AS a_version_format, va.os AS a_version_os, "
-            "va.arch AS a_version_arch, va.runtime_mode AS a_version_runtime, "
-            "vb.id AS b_version_id, vb.binary_path AS b_version_path, "
-            "vb.format AS b_version_format, vb.os AS b_version_os, "
-            "vb.arch AS b_version_arch, vb.runtime_mode AS b_version_runtime, "
-            "d.lifecycle AS decision_lifecycle,d.game_id AS decision_game_id,"
-            "d.bot_a_id AS decision_bot_a_id,d.bot_b_id AS decision_bot_b_id,"
-            "d.bot_a_version_id AS decision_version_a_id,"
-            "d.bot_b_version_id AS decision_version_b_id,"
-            "ra.game_id AS a_rating_game, rb.game_id AS b_rating_game "
-            "FROM bots a JOIN users ua ON ua.id=a.owner_id "
-            "JOIN bots b ON b.id=? JOIN users ub ON ub.id=b.owner_id "
-            "JOIN bot_versions va ON va.id=? AND va.bot_id=a.id "
-            "JOIN bot_versions vb ON vb.id=? AND vb.bot_id=b.id "
-            "JOIN auto_match_decisions d ON d.id=? "
-            "JOIN ratings ra ON ra.bot_id=a.id AND ra.game_id=a.game_id "
-            "JOIN ratings rb ON rb.bot_id=b.id AND rb.game_id=b.game_id "
-            "WHERE a.id=?",
-            (
-                int(q["bot_b_id"]),
-                int(q["bot_a_version_id"]),
-                int(q["bot_b_version_id"]),
-                int(q["decision_id"]),
-                int(q["bot_a_id"]),
-            ),
-        ).fetchone()
-        if identity is None:
-            return None
-        data = dict(identity)
-        gid = str(q.get("game_id") or "")
-        if (
-            int(data["a_id"]) == int(data["b_id"])
-            or int(data["a_owner_id"]) == int(data["b_owner_id"])
-            or data["a_game_id"] != gid
-            or data["b_game_id"] != gid
-            or data["a_rating_game"] != gid
-            or data["b_rating_game"] != gid
-            or not int(data["a_active"])
-            or not int(data["b_active"])
-            or not int(data["a_owner_active"])
-            or not int(data["b_owner_active"])
-            or int(data["a_builtin"])
-            or int(data["b_builtin"])
-            or data["decision_game_id"] != gid
-            or int(data["decision_bot_a_id"]) != int(q["bot_a_id"])
-            or int(data["decision_bot_b_id"]) != int(q["bot_b_id"])
-            or int(data["decision_version_a_id"]) != int(q["bot_a_version_id"])
-            or int(data["decision_version_b_id"]) != int(q["bot_b_version_id"])
-            or data["decision_lifecycle"] != (
-                "queued" if q.get("status") == "queued" else "dispatched"
-            )
-        ):
-            return None
-        for prefix in ("a", "b"):
-            if (
-                data[f"{prefix}_format"] != SUPPORTED_BINARY_FORMAT
-                or data[f"{prefix}_os"] != SUPPORTED_BINARY_OS
-                or data[f"{prefix}_arch"] != SUPPORTED_BINARY_ARCH
-                or data[f"{prefix}_version_format"] != SUPPORTED_BINARY_FORMAT
-                or data[f"{prefix}_version_os"] != SUPPORTED_BINARY_OS
-                or data[f"{prefix}_version_arch"] != SUPPORTED_BINARY_ARCH
-                or data[f"{prefix}_version_runtime"] not in VALID_RUNTIME_MODES
-                or not str(data[f"{prefix}_version_path"] or "")
-            ):
-                return None
-        return data
-
-    @staticmethod
-    def _auto_dispatcher_owned_tx(
-        c: sqlite3.Connection,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-    ) -> bool:
-        now = _now()
-        row = c.execute(
-            "SELECT owner_token,lease_epoch,lease_until FROM auto_match_dispatcher "
-            "WHERE singleton=1"
-        ).fetchone()
-        return bool(
-            row
-            and str(row["owner_token"] or "") == dispatcher_token
-            and int(row["lease_epoch"] or 0) == int(dispatcher_epoch)
-            and str(row["lease_until"] or "") > now
-        )
-
-    @classmethod
-    def _auto_match_fence_owned_tx(
-        cls,
-        c: sqlite3.Connection,
-        match_id: str,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        *,
-        require_claim_fence: bool,
-    ) -> sqlite3.Row | None:
-        """Return the dispatched queue row only for the live fenced owner."""
-        if not cls._auto_dispatcher_owned_tx(
-            c, dispatcher_token, dispatcher_epoch
-        ):
-            return None
-        row = c.execute(
-            "SELECT q.*,d.claim_dispatcher_token,d.claim_dispatcher_epoch "
-            "FROM auto_match_queue q JOIN auto_match_decisions d ON d.id=q.decision_id "
-            "WHERE q.status='dispatched' AND q.match_id=? "
-            "AND q.dispatcher_token=? AND q.dispatcher_epoch=?",
-            (match_id, dispatcher_token, int(dispatcher_epoch)),
-        ).fetchone()
-        if row is None:
-            return None
-        if require_claim_fence and (
-            str(row["claim_dispatcher_token"] or "") != dispatcher_token
-            or int(row["claim_dispatcher_epoch"] or 0) != int(dispatcher_epoch)
-        ):
-            return None
-        return row
-
-    @classmethod
-    def _require_auto_match_fence_tx(
-        cls,
-        c: sqlite3.Connection,
-        match_id: str,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        *,
-        require_claim_fence: bool,
-    ) -> sqlite3.Row:
-        row = cls._auto_match_fence_owned_tx(
-            c,
-            match_id,
-            dispatcher_token,
-            dispatcher_epoch,
-            require_claim_fence=require_claim_fence,
-        )
-        if row is None:
-            raise AutoMatchFenceLost(
-                f"auto-match dispatch fence lost for match {match_id}"
-            )
-        if require_claim_fence:
-            indexed = c.execute(
-                "SELECT game_id FROM matches_index WHERE id=?", (match_id,)
-            ).fetchone()
-            if indexed is None:
-                raise AutoMatchFenceLost(
-                    f"auto-match match disappeared for fence {match_id}"
-                )
-            table = _matches_table(indexed["game_id"])
-            match = c.execute(
-                f"SELECT match_config FROM {table} WHERE id=?", (match_id,)
-            ).fetchone()
-            if match is None:
-                raise AutoMatchFenceLost(
-                    f"auto-match match disappeared for fence {match_id}"
-                )
-            try:
-                config = json.loads(match["match_config"] or "{}")
-            except (TypeError, ValueError):
-                config = {}
-            if (
-                str(config.get("_auto_match_claim_token") or "")
-                != dispatcher_token
-                or int(config.get("_auto_match_claim_epoch") or 0)
-                != int(dispatcher_epoch)
-            ):
-                raise AutoMatchFenceLost(
-                    f"auto-match frozen claim fence mismatch for match {match_id}"
-                )
-        return row
-
-    def assert_auto_match_claim_fence(
-        self, match_id: str, dispatcher_token: str, dispatcher_epoch: int
-    ) -> None:
-        """Fail closed unless ``match_id`` is owned by the live claimed epoch."""
-        with self._tx() as c:
-            c.execute("BEGIN")
-            self._require_auto_match_fence_tx(
-                c,
-                match_id,
-                dispatcher_token,
-                dispatcher_epoch,
-                require_claim_fence=True,
-            )
-
-    @property
-    def auto_match_execution_launch_lock_path(self) -> str:
-        """Stable cross-process lock shared by every auto execution for this DB."""
-        digest = hashlib.sha256(os.path.abspath(self.path).encode("utf-8")).hexdigest()
-        return f"/tmp/botbattle-auto-launch-{digest[:24]}.lock"
-
-    def assert_auto_match_execution_fence(
-        self,
-        match_id: str,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_scope: str,
-    ) -> None:
-        """Fence every physical spawn/decision against takeover recovery."""
-        with self._tx() as c:
-            c.execute("BEGIN")
-            row = self._require_auto_match_fence_tx(
-                c,
-                match_id,
-                dispatcher_token,
-                dispatcher_epoch,
-                require_claim_fence=True,
-            )
-            if (
-                str(row["execution_scope"] or "") != execution_scope
-                or row["execution_state"] not in ("claimed", "running")
-            ):
-                raise AutoMatchFenceLost(
-                    f"auto-match execution scope lost for match {match_id}"
-                )
-
-    def mark_auto_match_execution_recovery_pending(
-        self,
-        match_id: str,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_scope: str,
-        reason: str,
-    ) -> None:
-        """Fail closed when the original worker cannot prove sandbox cleanup."""
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            row = self._require_auto_match_fence_tx(
-                c,
-                match_id,
-                dispatcher_token,
-                dispatcher_epoch,
-                require_claim_fence=True,
-            )
-            if str(row["execution_scope"] or "") != execution_scope:
-                raise AutoMatchFenceLost(
-                    f"auto-match execution scope lost for match {match_id}"
-                )
-            message = str(reason or "execution cleanup not confirmed")[:500]
-            requested_at = _now()
-            if str(row["execution_state"] or "") == "recovery_pending":
-                c.execute(
-                    "UPDATE auto_match_queue SET cleanup_error=? WHERE id=?",
-                    (message, int(row["id"])),
-                )
-                c.execute(
-                    "UPDATE auto_match_decisions SET cleanup_error=? WHERE id=? "
-                    "AND lifecycle='dispatched'",
-                    (message, int(row["decision_id"])),
-                )
-                return
-            changed = c.execute(
-                "UPDATE auto_match_queue SET execution_state='recovery_pending',"
-                "cleanup_requested_at=?,cleanup_ack_at=NULL,cleanup_error=? "
-                "WHERE id=? AND execution_state IN ('claimed','running')",
-                (requested_at, message, int(row["id"])),
-            )
-            if changed.rowcount != 1:
-                raise AutoMatchFenceLost(
-                    f"auto-match execution recovery CAS lost for match {match_id}"
-                )
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_state='recovery_pending',"
-                "cleanup_requested_at=?,cleanup_ack_at=NULL,cleanup_error=? "
-                "WHERE id=? AND lifecycle='dispatched'",
-                (requested_at, message, int(row["decision_id"])),
-            )
-
-    def mark_auto_match_execution_launch_state(
-        self,
-        match_id: str,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_scope: str,
-        launch_state: str,
-        launch_token: str | None,
-        daemon_incarnation: str | None = None,
-    ) -> None:
-        """Persist daemon-ack launch progress under the current execution fence."""
-        transitions = {
-            "creating": {"unstarted", "started"},
-            "created": {"creating"},
-            "started": {"creating", "created"},  # local skips Docker-created
-        }
-        if launch_state not in transitions:
-            raise ValueError("invalid auto execution launch state")
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            row = self._require_auto_match_fence_tx(
-                c,
-                match_id,
-                dispatcher_token,
-                dispatcher_epoch,
-                require_claim_fence=True,
-            )
-            if str(row["execution_scope"] or "") != execution_scope:
-                raise AutoMatchFenceLost(
-                    f"auto-match execution scope lost for match {match_id}"
-                )
-            current = str(row["execution_launch_state"] or "")
-            current_token = str(row["execution_launch_token"] or "")
-            token = str(launch_token or "")
-            incarnation = str(daemon_incarnation or "")
-            if not token:
-                raise ValueError("auto execution launch token required")
-            if launch_state == "creating" and not incarnation:
-                raise ValueError("auto execution daemon incarnation required")
-            if current == launch_state and current_token == token:
-                if launch_state == "creating" and str(
-                    row["execution_daemon_incarnation"] or ""
-                ) != incarnation:
-                    # After an ambiguous CLI terminal result, advancing this
-                    # marker to the then-current daemon is conservative: it can
-                    # only require an additional restart before negative proof.
-                    c.execute(
-                        "UPDATE auto_match_queue SET execution_daemon_incarnation=? "
-                        "WHERE id=?",
-                        (incarnation, int(row["id"])),
-                    )
-                    c.execute(
-                        "UPDATE auto_match_decisions SET execution_daemon_incarnation=? "
-                        "WHERE id=?",
-                        (incarnation, int(row["decision_id"])),
-                    )
-                return
-            if current not in transitions[launch_state]:
-                raise AutoMatchFenceLost(
-                    f"invalid auto launch transition {current}->{launch_state}"
-                )
-            c.execute(
-                "UPDATE auto_match_queue SET execution_launch_state=?,"
-                "execution_launch_token=?,execution_daemon_incarnation="
-                "CASE WHEN ?='creating' THEN ? ELSE execution_daemon_incarnation END "
-                "WHERE id=?",
-                (launch_state, token, launch_state, incarnation, int(row["id"])),
-            )
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_launch_state=?,"
-                "execution_launch_token=?,execution_daemon_incarnation="
-                "CASE WHEN ?='creating' THEN ? ELSE execution_daemon_incarnation END "
-                "WHERE id=?",
-                (
-                    launch_state,
-                    token,
-                    launch_state,
-                    incarnation,
-                    int(row["decision_id"]),
-                ),
-            )
-
-    def mark_auto_match_execution_cleanup_confirmed(
-        self,
-        match_id: str,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_scope: str,
-    ) -> None:
-        """Persist same-owner physical zero proof before terminal release."""
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            row = self._require_auto_match_fence_tx(
-                c,
-                match_id,
-                dispatcher_token,
-                dispatcher_epoch,
-                require_claim_fence=True,
-            )
-            if str(row["execution_scope"] or "") != execution_scope:
-                raise AutoMatchFenceLost(
-                    f"auto-match execution scope lost for match {match_id}"
-                )
-            if str(row["execution_launch_state"] or "") == "creating":
-                raise AutoMatchFenceLost(
-                    f"auto-match create evidence missing for match {match_id}"
-                )
-            if str(row["execution_state"] or "") == "cleanup_confirmed":
-                return
-            ack_at = _now()
-            changed = c.execute(
-                "UPDATE auto_match_queue SET execution_state='cleanup_confirmed',"
-                "cleanup_ack_at=?,cleanup_error='' WHERE id=? "
-                "AND execution_state IN ('claimed','running','recovery_pending')",
-                (ack_at, int(row["id"])),
-            )
-            if changed.rowcount != 1:
-                raise AutoMatchFenceLost(
-                    f"auto-match cleanup confirmation CAS lost for {match_id}"
-                )
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_state='cleanup_confirmed',"
-                "cleanup_ack_at=?,cleanup_error='' WHERE id=? "
-                "AND lifecycle='dispatched'",
-                (ack_at, int(row["decision_id"])),
-            )
-
-    def record_auto_match_execution_launch_observed(
-        self,
-        match_id: str,
-        *,
-        execution_scope: str,
-        launch_token: str,
-    ) -> bool:
-        """Durably record exact Docker evidence, even across an epoch switch.
-
-        This is a monotonic evidence-only CAS: it cannot launch, finalize, or
-        release a queue slot.  Allowing the old worker to persist the exact
-        scope+launch label prevents it from deleting the only evidence after a
-        takeover changed the epoch between inspect and this write.
-        """
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE match_id=? "
-                "AND status='dispatched' AND execution_scope=?",
-                (match_id, execution_scope),
-            ).fetchone()
-            if row is None:
-                return False
-            if str(row["execution_launch_token"] or "") != str(launch_token):
-                return False
-            state = str(row["execution_launch_state"] or "")
-            if state != "creating":
-                return state in {"created", "started"}
-            c.execute(
-                "UPDATE auto_match_queue SET execution_launch_state='created' WHERE id=?",
-                (int(row["id"]),),
-            )
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_launch_state='created' WHERE id=?",
-                (int(row["decision_id"]),),
-            )
-            return True
-
-    def record_auto_match_execution_ambiguous_incarnation(
-        self,
-        match_id: str,
-        *,
-        execution_scope: str,
-        launch_token: str,
-        daemon_incarnation: str,
-    ) -> bool:
-        """Conservatively advance an ambiguous RPC marker across takeover."""
-        if not str(daemon_incarnation or ""):
-            return False
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE match_id=? "
-                "AND status='dispatched' AND execution_scope=?",
-                (match_id, execution_scope),
-            ).fetchone()
-            if (
-                row is None
-                or str(row["execution_launch_state"] or "") != "creating"
-                or str(row["execution_launch_token"] or "") != str(launch_token)
-            ):
-                return False
-            c.execute(
-                "UPDATE auto_match_queue SET execution_daemon_incarnation=? WHERE id=?",
-                (daemon_incarnation, int(row["id"])),
-            )
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_daemon_incarnation=? WHERE id=?",
-                (daemon_incarnation, int(row["decision_id"])),
-            )
-            return True
-
-    def record_auto_match_execution_daemon_restart(
-        self,
-        match_id: str,
-        *,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_scope: str,
-        previous_incarnation: str,
-        current_incarnation: str,
-    ) -> bool:
-        """Resolve an ambiguous create only after a comparable daemon restart."""
-        if not _daemon_incarnation_changed(
-            previous_incarnation, current_incarnation
-        ):
-            return False
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return False
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE match_id=? "
-                "AND status='dispatched' AND dispatcher_token=? AND dispatcher_epoch=? "
-                "AND execution_scope=? AND execution_state='recovery_pending'",
-                (
-                    match_id,
-                    dispatcher_token,
-                    int(dispatcher_epoch),
-                    execution_scope,
-                ),
-            ).fetchone()
-            if row is None:
-                return False
-            if str(row["execution_launch_state"] or "") != "creating":
-                return str(row["execution_launch_state"] or "") in {
-                    "created",
-                    "started",
-                }
-            if str(row["execution_daemon_incarnation"] or "") != str(
-                previous_incarnation
-            ):
-                return False
-            c.execute(
-                "UPDATE auto_match_queue SET execution_launch_state='created',"
-                "execution_daemon_incarnation=? WHERE id=?",
-                (current_incarnation, int(row["id"])),
-            )
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_launch_state='created',"
-                "execution_daemon_incarnation=? WHERE id=?",
-                (current_incarnation, int(row["decision_id"])),
-            )
-            return True
-
-    def acquire_auto_match_dispatcher(
-        self, dispatcher_token: str, *, lease_seconds: int = 30
-    ) -> dict:
-        """Acquire/renew the single dispatcher lease with a write-linearized CAS."""
-        if not dispatcher_token:
-            raise ValueError("dispatcher token required")
-        now = _now()
-        lease_until = _after_seconds(max(5, int(lease_seconds)))
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            row = c.execute(
-                "SELECT owner_token,lease_epoch,lease_until FROM auto_match_dispatcher "
-                "WHERE singleton=1"
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("auto_match_dispatcher singleton missing")
-            previous = str(row["owner_token"] or "")
-            expired = not row["lease_until"] or str(row["lease_until"]) <= now
-            if previous == dispatcher_token or not previous or expired:
-                # Expiry is a fencing boundary even when the same process token
-                # later reacquires.  Its pre-expiry worker must not inherit the
-                # renewed epoch after an event-loop stall.
-                changed_owner = previous != dispatcher_token or expired
-                epoch = int(row["lease_epoch"] or 0) + (1 if changed_owner else 0)
-                c.execute(
-                    "UPDATE auto_match_dispatcher SET owner_token=?,lease_epoch=?,lease_until=?,"
-                    "heartbeat_at=? WHERE singleton=1",
-                    (dispatcher_token, epoch, lease_until, now),
-                )
-                return {
-                    "owned": True,
-                    "changed_owner": changed_owner,
-                    "previous_owner": previous,
-                    "lease_epoch": epoch,
-                    "lease_until": lease_until,
-                }
-            return {
-                "owned": False,
-                "changed_owner": False,
-                "previous_owner": previous,
-                "lease_epoch": int(row["lease_epoch"] or 0),
-                "lease_until": row["lease_until"],
-            }
-
-    def release_auto_match_dispatcher(
-        self, dispatcher_token: str, dispatcher_epoch: int
-    ) -> bool:
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            cur = c.execute(
-                "UPDATE auto_match_dispatcher SET owner_token=NULL,lease_until=NULL,"
-                "heartbeat_at=? WHERE singleton=1 AND owner_token=? AND lease_epoch=?",
-                (_now(), dispatcher_token, int(dispatcher_epoch)),
-            )
-            return cur.rowcount == 1
-
-    def auto_match_dispatcher_state(self) -> dict:
-        with self._tx() as c:
-            row = c.execute(
-                "SELECT owner_token,lease_epoch,lease_until,heartbeat_at "
-                "FROM auto_match_dispatcher "
-                "WHERE singleton=1"
-            ).fetchone()
-            return dict(row) if row else {}
-
-    @staticmethod
     def _rating_projection_status_tx(c: sqlite3.Connection) -> dict:
         state = c.execute(
             "SELECT * FROM rating_projection_state WHERE singleton=1"
@@ -4710,47 +4259,13 @@ class Store:
         with self._tx() as c:
             return self._rating_projection_status_tx(c)
 
-    @staticmethod
-    def _auto_backoff_tx(c: sqlite3.Connection, reason: str) -> dict:
-        state = c.execute(
-            "SELECT platform_failures FROM auto_match_fair_state WHERE singleton=1"
-        ).fetchone()
-        failures = int(state["platform_failures"] or 0) + 1 if state else 1
-        delay = min(300, 2 ** min(failures - 1, 8))
-        not_before = _after_seconds(delay)
-        c.execute(
-            "UPDATE auto_match_fair_state SET platform_failures=?,not_before=?,"
-            "updated_at=? WHERE singleton=1",
-            (failures, not_before, _now()),
-        )
-        return {"failures": failures, "not_before": not_before, "reason": reason}
-
-    @staticmethod
-    def _auto_reset_backoff_tx(c: sqlite3.Connection) -> None:
-        c.execute(
-            "UPDATE auto_match_fair_state SET platform_failures=0,not_before=NULL,"
-            "updated_at=? WHERE singleton=1",
-            (_now(),),
-        )
-
-    @staticmethod
-    def _auto_cancel_queue_row_tx(
-        c: sqlite3.Connection, row: sqlite3.Row | dict, reason: str
-    ) -> None:
-        q = dict(row)
-        now = _now()
-        c.execute(
-            "UPDATE auto_match_decisions SET lifecycle='cancelled',terminal_at=?,"
-            "terminal_reason=? WHERE id=? AND lifecycle IN ('queued','dispatched')",
-            (now, reason, int(q["decision_id"])),
-        )
-        c.execute("DELETE FROM auto_match_queue WHERE id=?", (int(q["id"]),))
-
     def _auto_queue_candidates_tx(self, c: sqlite3.Connection) -> list[dict]:
         rows = c.execute(
             "SELECT b.id AS bot_id,b.owner_id,b.game_id,b.name AS bot_name,"
             "b.display_name AS bot_display,u.username AS owner_name,"
             "u.display_name AS owner_display,v.id AS version_id,r.rating,r.rd,"
+            "v.version AS version_number,v.binary_path AS version_binary_path,"
+            "v.checksum AS version_checksum,v.size_bytes AS version_size_bytes,"
             "r.matches_played,COALESCE(os.served_count,0) AS owner_service,"
             "COALESCE(os.last_served_revision,0) AS owner_last_revision,"
             "COALESCE(bs.served_count,0) AS bot_service,"
@@ -4769,11 +4284,15 @@ class Store:
             "AND b.binary_path=v.binary_path AND b.runtime_mode=v.runtime_mode "
             "AND b.format=? AND b.os=? AND b.arch=? "
             "AND v.format=? AND v.os=? AND v.arch=? "
-            "AND NOT EXISTS (SELECT 1 FROM auto_match_queue q "
-            "WHERE b.id IN (q.bot_a_id,q.bot_b_id)) "
-            "AND NOT EXISTS (SELECT 1 FROM auto_match_queue q "
+            "AND NOT EXISTS (SELECT 1 FROM execution_jobs q "
+            "WHERE q.source='auto' AND q.status IN "
+            "('queued','starting','running','settling') "
+            "AND b.id IN (q.bot_a_id,q.bot_b_id)) "
+            "AND NOT EXISTS (SELECT 1 FROM execution_jobs q "
             "JOIN bots qa ON qa.id=q.bot_a_id JOIN bots qb ON qb.id=q.bot_b_id "
-            "WHERE b.owner_id IN (qa.owner_id,qb.owner_id))",
+            "WHERE q.source='auto' AND q.status IN "
+            "('queued','starting','running','settling') "
+            "AND b.owner_id IN (qa.owner_id,qb.owner_id))",
             (
                 SUPPORTED_BINARY_FORMAT,
                 SUPPORTED_BINARY_OS,
@@ -4838,7 +4357,9 @@ class Store:
         queued = c.execute(
             "SELECT SUM(CASE WHEN bot_a_id=? THEN 1 ELSE 0 END) AS seat_a,"
             "SUM(CASE WHEN bot_b_id=? THEN 1 ELSE 0 END) AS seat_b "
-            "FROM auto_match_queue WHERE bot_a_id=? OR bot_b_id=?",
+            "FROM execution_jobs WHERE source='auto' AND status IN "
+            "('queued','starting','running','settling') "
+            "AND (bot_a_id=? OR bot_b_id=?)",
             (bot["bot_id"], bot["bot_id"], bot["bot_id"], bot["bot_id"]),
         ).fetchone()
         return (
@@ -4855,16 +4376,17 @@ class Store:
         *,
         game_id: str,
         lane: str,
-        placement_required: int,
+        bootstrap_target_matches: int,
     ) -> tuple[dict, dict, str, int, int, float] | None:
         game = [bot for bot in candidates if bot["game_id"] == game_id]
         if len({int(bot["owner_id"]) for bot in game}) < 2:
             return None
         for bot in game:
             bot["_lane"] = (
-                "placement"
-                if int(bot.get("matches_played") or 0) < placement_required
-                else "formal"
+                "bootstrap"
+                if int(bot.get("matches_played") or 0)
+                < bootstrap_target_matches
+                else "established"
             )
         lane_bots = [bot for bot in game if bot["_lane"] == lane]
         if not lane_bots:
@@ -4890,28 +4412,28 @@ class Store:
             ]
             widened_reason = ""
             partners = exact
-            if not partners and lane == "placement":
-                # The sole placement owner still receives calibration service,
-                # but never against itself; a formal owner is the auditable fallback.
+            if not partners and lane == "bootstrap":
+                # A sole bootstrap owner still receives cold-start service,
+                # but never against itself; an established owner is the auditable fallback.
                 partners = [
                     bot for bot in game
                     if int(bot["owner_id"]) != int(anchor["owner_id"])
-                    and bot["_lane"] == "formal"
+                    and bot["_lane"] == "established"
                 ]
                 if partners:
-                    widened_reason = "single_placement_owner"
-            elif not partners and lane == "formal":
-                placement_partners = [
+                    widened_reason = "single_bootstrap_owner"
+            elif not partners and lane == "established":
+                bootstrap_partners = [
                     bot for bot in game
                     if int(bot["owner_id"]) != int(anchor["owner_id"])
-                    and bot["_lane"] == "placement"
+                    and bot["_lane"] == "bootstrap"
                 ]
-                # A lone formal owner must still receive formal-lane service.
-                # Require at least two placement owners so the fallback does not
+                # A lone established owner must still receive established-lane service.
+                # Require at least two bootstrap owners so the fallback does not
                 # degenerate into one permanently repeated cross-lane pair.
-                if len({int(bot["owner_id"]) for bot in placement_partners}) >= 2:
-                    partners = placement_partners
-                    widened_reason = "single_formal_owner"
+                if len({int(bot["owner_id"]) for bot in bootstrap_partners}) >= 2:
+                    partners = bootstrap_partners
+                    widened_reason = "single_established_owner"
             if not partners:
                 continue
 
@@ -4969,711 +4491,6 @@ class Store:
             )
         return None
 
-    def refill_auto_match_queue(
-        self,
-        *,
-        target_queued: int,
-        placement_required: int,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-    ) -> dict:
-        """Fill fixed lookahead under the persistent game/lane/owner policy."""
-        target = max(0, int(target_queued))
-        placement = max(0, int(placement_required))
-        inserted = 0
-        removed_invalid = 0
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return {"outcome": "not_leader", "inserted": 0}
-            switch = c.execute(
-                "SELECT enabled FROM auto_match_control WHERE singleton=1"
-            ).fetchone()
-            if not switch or int(switch["enabled"]) != 1:
-                return {"outcome": "disabled", "inserted": 0}
-            projection = self._rating_projection_status_tx(c)
-            if not projection["ready"]:
-                return {
-                    "outcome": "rating_unverified",
-                    "inserted": 0,
-                    "rating_projection": projection,
-                }
-            fair = c.execute(
-                "SELECT * FROM auto_match_fair_state WHERE singleton=1"
-            ).fetchone()
-            if fair is None:
-                raise RuntimeError("auto_match_fair_state singleton missing")
-            if fair["not_before"] and str(fair["not_before"]) > _now():
-                return {
-                    "outcome": "backoff",
-                    "inserted": 0,
-                    "not_before": fair["not_before"],
-                    "platform_failures": int(fair["platform_failures"] or 0),
-                }
-
-            for row in c.execute(
-                "SELECT * FROM auto_match_queue WHERE status='queued' ORDER BY id"
-            ).fetchall():
-                if self._auto_queue_identity_tx(c, row) is None:
-                    self._auto_cancel_queue_row_tx(c, row, "identity_invalid")
-                    removed_invalid += 1
-
-            queued_row = c.execute(
-                "SELECT COUNT(*) AS n FROM auto_match_queue WHERE status='queued'"
-            ).fetchone()
-            queued_count = int(queued_row["n"] if queued_row else 0)
-            game_ids = sorted(_all_game_ids())
-            while queued_count < target:
-                candidates = self._auto_queue_candidates_tx(c)
-                state = c.execute(
-                    "SELECT * FROM auto_match_fair_state WHERE singleton=1"
-                ).fetchone()
-                cursor = int(state["next_game_idx"] or 0) % max(1, len(game_ids))
-                requested_lane = (
-                    "placement" if int(state["next_lane"] or 0) == 0 else "formal"
-                )
-                rotated = game_ids[cursor:] + game_ids[:cursor]
-                selected = None
-                selected_game_idx = cursor
-                actual_lane = requested_lane
-                lane_fallback = ""
-                for candidate_lane in (requested_lane, (
-                    "formal" if requested_lane == "placement" else "placement"
-                )):
-                    for gid in rotated:
-                        choice = self._auto_choose_pair_tx(
-                            c,
-                            candidates,
-                            game_id=gid,
-                            lane=candidate_lane,
-                            placement_required=placement,
-                        )
-                        if choice is not None:
-                            selected = choice
-                            selected_game_idx = game_ids.index(gid)
-                            actual_lane = candidate_lane
-                            if candidate_lane != requested_lane:
-                                lane_fallback = "requested_lane_empty"
-                            break
-                    if selected is not None:
-                        break
-                if selected is None:
-                    break
-
-                anchor, partner, partner_fallback, bot_pair, owner_pair, rating_gap = selected
-                anchor_debt = self._auto_queue_seat_debt_tx(c, anchor)
-                partner_debt = self._auto_queue_seat_debt_tx(c, partner)
-                normal_cost = abs(anchor_debt + 1) + abs(partner_debt - 1)
-                reverse_cost = abs(anchor_debt - 1) + abs(partner_debt + 1)
-                if reverse_cost < normal_cost:
-                    bot_a, bot_b = partner, anchor
-                    debt_a, debt_b = partner_debt, anchor_debt
-                elif normal_cost < reverse_cost:
-                    bot_a, bot_b = anchor, partner
-                    debt_a, debt_b = anchor_debt, partner_debt
-                elif int(anchor["bot_id"]) <= int(partner["bot_id"]):
-                    bot_a, bot_b = anchor, partner
-                    debt_a, debt_b = anchor_debt, partner_debt
-                else:
-                    bot_a, bot_b = partner, anchor
-                    debt_a, debt_b = partner_debt, anchor_debt
-
-                fallback = ",".join(
-                    part for part in (lane_fallback, partner_fallback) if part
-                )
-                reason = (
-                    ("定级通道" if actual_lane == "placement" else "正式通道")
-                    + f" · owner/Bot 轮转 · Bot交手 {bot_pair} · "
-                    + f"owner交手 {owner_pair} · Rating差 {rating_gap:.0f} · 先后手平衡"
-                )
-                now = _now()
-                decision = c.execute(
-                    "INSERT INTO auto_match_decisions("
-                    "policy_version,state_revision,cursor_game_idx,requested_lane,"
-                    "actual_lane,fallback_reason,game_id,bot_a_id,bot_b_id,"
-                    "owner_a_id,owner_b_id,bot_a_version_id,bot_b_version_id,"
-                    "owner_a_service_before,owner_b_service_before,"
-                    "bot_a_service_before,bot_b_service_before,bot_pair_count_before,"
-                    "owner_pair_count_before,rating_gap,bot_a_seat_debt_before,"
-                    "bot_b_seat_debt_before,selection_reason,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        _AUTO_MATCH_POLICY_VERSION,
-                        int(state["revision"] or 0),
-                        cursor,
-                        requested_lane,
-                        actual_lane,
-                        fallback,
-                        bot_a["game_id"],
-                        int(bot_a["bot_id"]),
-                        int(bot_b["bot_id"]),
-                        int(bot_a["owner_id"]),
-                        int(bot_b["owner_id"]),
-                        int(bot_a["version_id"]),
-                        int(bot_b["version_id"]),
-                        int(bot_a.get("owner_service") or 0),
-                        int(bot_b.get("owner_service") or 0),
-                        int(bot_a.get("bot_service") or 0),
-                        int(bot_b.get("bot_service") or 0),
-                        bot_pair,
-                        owner_pair,
-                        rating_gap,
-                        debt_a,
-                        debt_b,
-                        reason,
-                        now,
-                    ),
-                )
-                c.execute(
-                    "INSERT INTO auto_match_queue("
-                    "decision_id,game_id,bot_a_id,bot_b_id,bot_a_version_id,"
-                    "bot_b_version_id,status,selection_reason,created_at) "
-                    "VALUES(?,?,?,?,?,?,'queued',?,?)",
-                    (
-                        int(decision.lastrowid),
-                        bot_a["game_id"],
-                        int(bot_a["bot_id"]),
-                        int(bot_b["bot_id"]),
-                        int(bot_a["version_id"]),
-                        int(bot_b["version_id"]),
-                        reason,
-                        now,
-                    ),
-                )
-                c.execute(
-                    "UPDATE auto_match_fair_state SET next_game_idx=?,next_lane=?,"
-                    "revision=revision+1,updated_at=? WHERE singleton=1",
-                    (
-                        (selected_game_idx + 1) % max(1, len(game_ids)),
-                        1 - int(state["next_lane"] or 0),
-                        now,
-                    ),
-                )
-                queued_count += 1
-                inserted += 1
-
-            return {
-                "outcome": "ok",
-                "inserted": inserted,
-                "removed_invalid": removed_invalid,
-                "queued": queued_count,
-                "remaining_eligible": len(self._auto_queue_candidates_tx(c)),
-            }
-
-    def list_auto_match_queue(self, *, game_id: str | None = None) -> list[dict]:
-        """Return active/upcoming rows with public Bot identity and global position."""
-        gid = _registered_game_id(game_id) if game_id is not None else None
-        with self._tx() as c:
-            rows = c.execute(
-                "SELECT q.*,d.requested_lane,d.actual_lane,d.fallback_reason, "
-                "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
-                "ua.username AS bot_a_owner, ua.display_name AS bot_a_owner_display, "
-                "ra.rating AS bot_a_rating, ra.matches_played AS bot_a_matches_played, "
-                "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
-                "ub.username AS bot_b_owner, ub.display_name AS bot_b_owner_display, "
-                "rb.rating AS bot_b_rating, rb.matches_played AS bot_b_matches_played "
-                "FROM auto_match_queue q JOIN auto_match_decisions d ON d.id=q.decision_id "
-                "JOIN bots ba ON ba.id=q.bot_a_id JOIN users ua ON ua.id=ba.owner_id "
-                "JOIN ratings ra ON ra.bot_id=ba.id AND ra.game_id=q.game_id "
-                "JOIN bots bb ON bb.id=q.bot_b_id JOIN users ub ON ub.id=bb.owner_id "
-                "JOIN ratings rb ON rb.bot_id=bb.id AND rb.game_id=q.game_id "
-                "ORDER BY CASE q.status WHEN 'dispatched' THEN 0 ELSE 1 END, q.id"
-            ).fetchall()
-            projected: list[dict] = []
-            queued_position = 0
-            for raw in rows:
-                item = dict(raw)
-                if item["status"] == "queued":
-                    queued_position += 1
-                    item["position"] = queued_position
-                else:
-                    item["position"] = 0
-                    tbl = self._match_table_of(c, str(item.get("match_id") or ""))
-                    match = (
-                        c.execute(
-                            f"SELECT status,reason,started_at,created_at FROM {tbl} "
-                            "WHERE id=?",
-                            (item["match_id"],),
-                        ).fetchone()
-                        if tbl
-                        else None
-                    )
-                    item["match_status"] = match["status"] if match else None
-                    item["match_reason"] = match["reason"] if match else None
-                    item["match_started_at"] = match["started_at"] if match else None
-                if gid is None or item["game_id"] == gid:
-                    projected.append(item)
-            return projected
-
-    def claim_next_auto_match(
-        self,
-        match_id: str,
-        *,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_backend: str = "docker",
-    ) -> dict:
-        """Atomically claim the global head and create its match/index/replay.
-
-        The partial unique index permits at most one dispatched row across all
-        processes.  Switch, lease, frozen versions and rating lifecycle are all
-        re-read after BEGIN IMMEDIATE, so an acknowledged ``off`` cannot race a
-        later dispatch.
-        """
-        if execution_backend not in {"docker", "local"}:
-            raise ValueError("unknown auto-match execution backend")
-        execution_scope = secrets.token_hex(24)
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return {"outcome": "not_leader", "reason": "调度租约不属于当前进程"}
-            switch = c.execute(
-                "SELECT enabled FROM auto_match_control WHERE singleton=1"
-            ).fetchone()
-            if not switch or int(switch["enabled"]) != 1:
-                return {"outcome": "disabled", "reason": "管理员已关闭自动排位"}
-            projection = self._rating_projection_status_tx(c)
-            if not projection["ready"]:
-                return {
-                    "outcome": "rating_unverified",
-                    "reason": "排行榜投影尚未按当前评分策略验证",
-                    "rating_projection": projection,
-                }
-            fair = c.execute(
-                "SELECT not_before,platform_failures FROM auto_match_fair_state "
-                "WHERE singleton=1"
-            ).fetchone()
-            if fair and fair["not_before"] and str(fair["not_before"]) > _now():
-                return {
-                    "outcome": "backoff",
-                    "reason": "平台故障退避中",
-                    "not_before": fair["not_before"],
-                    "platform_failures": int(fair["platform_failures"] or 0),
-                }
-            if c.execute(
-                "SELECT 1 FROM auto_match_queue WHERE status='dispatched' LIMIT 1"
-            ).fetchone():
-                return {"outcome": "busy", "reason": "已有自动排位正在进行"}
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE status='queued' ORDER BY id LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return {"outcome": "empty", "reason": "暂无可配对 Bot"}
-            identity = self._auto_queue_identity_tx(c, row)
-            if identity is None:
-                self._auto_cancel_queue_row_tx(c, row, "identity_invalid_at_claim")
-                return {"outcome": "invalid", "reason": "队首 Bot 或冻结版本已失效"}
-            gid = _registered_game_id(row["game_id"])
-            for bot_id in (int(row["bot_a_id"]), int(row["bot_b_id"])):
-                if self._bot_has_active_rated_match_tx(c, bot_id, game_id=gid):
-                    return {
-                        "outcome": "blocked",
-                        "reason": "队首 Bot 正在其他计分对局中",
-                    }
-
-            tbl = _matches_table(gid)
-            created_at = _now()
-            match_config = json.dumps(
-                {
-                    "_bot_a_version_id": int(row["bot_a_version_id"]),
-                    "_bot_b_version_id": int(row["bot_b_version_id"]),
-                    "_auto_match_queue_id": int(row["id"]),
-                    "_auto_match_decision_id": int(row["decision_id"]),
-                    "_auto_match_claim_token": dispatcher_token,
-                    "_auto_match_claim_epoch": int(dispatcher_epoch),
-                    "_auto_match_execution_scope": execution_scope,
-                    "_rating_eligible": True,
-                    "_rating_reason": "eligible",
-                },
-                ensure_ascii=False,
-            )
-            c.execute(
-                f"INSERT INTO {tbl}(id,bot_a_id,bot_b_id,owner_id,contest_id,reason,"
-                "match_type,status,game_id,match_config,human_user_id,human_seat,created_at) "
-                "VALUES(?,?,?,NULL,NULL,'',?,'pending',?,?,NULL,NULL,?)",
-                (
-                    match_id,
-                    int(row["bot_a_id"]),
-                    int(row["bot_b_id"]),
-                    TYPE_LADDER,
-                    gid,
-                    match_config,
-                    created_at,
-                ),
-            )
-            c.execute(
-                "INSERT INTO match_rating_policies("
-                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
-                "classified_at) VALUES(?,?,?,?,1,'eligible','auto_v2',?)",
-                (
-                    match_id,
-                    gid,
-                    int(row["bot_a_id"]),
-                    int(row["bot_b_id"]),
-                    created_at,
-                ),
-            )
-            c.execute(
-                "INSERT INTO matches_index(id,game_id) VALUES(?,?)",
-                (match_id, gid),
-            )
-            c.execute(
-                "INSERT INTO match_replays(match_id,events_json,updated_at) VALUES(?, '[]', ?)",
-                (match_id, created_at),
-            )
-            c.execute(
-                "UPDATE auto_match_queue SET status='dispatched', match_id=?, "
-                "dispatcher_token=?,dispatcher_epoch=?,dispatched_at=?,"
-                "execution_scope=?,execution_backend=?,execution_state='claimed',"
-                "execution_launch_state='unstarted',execution_launch_token=NULL,"
-                "execution_daemon_incarnation=NULL,"
-                "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
-                "WHERE id=? AND status='queued'",
-                (
-                    match_id,
-                    dispatcher_token,
-                    int(dispatcher_epoch),
-                    created_at,
-                    execution_scope,
-                    execution_backend,
-                    row["id"],
-                ),
-            )
-            if c.execute("SELECT changes()").fetchone()[0] != 1:
-                raise RuntimeError("auto-match queue claim CAS lost")
-            updated = c.execute(
-                "UPDATE auto_match_decisions SET lifecycle='dispatched',match_id=?,"
-                "attempt_count=attempt_count+1,last_attempt_error='',dispatched_at=?,"
-                "claim_dispatcher_token=?,claim_dispatcher_epoch=?,"
-                "execution_scope=?,execution_backend=?,execution_state='claimed',"
-                "execution_launch_state='unstarted',execution_launch_token=NULL,"
-                "execution_daemon_incarnation=NULL,"
-                "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
-                "WHERE id=? AND lifecycle='queued'",
-                (
-                    match_id,
-                    created_at,
-                    dispatcher_token,
-                    int(dispatcher_epoch),
-                    execution_scope,
-                    execution_backend,
-                    int(row["decision_id"]),
-                ),
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError("auto-match decision claim CAS lost")
-            return {
-                "outcome": "claimed",
-                "match_id": match_id,
-                "queue_id": int(row["id"]),
-                "game_id": gid,
-                "dispatcher_token": dispatcher_token,
-                "dispatcher_epoch": int(dispatcher_epoch),
-                "execution_scope": execution_scope,
-                "execution_backend": execution_backend,
-                "launch_lock_path": self.auto_match_execution_launch_lock_path,
-            }
-
-    def rollback_auto_match_claim(
-        self,
-        match_id: str,
-        *,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        reason: str = "start_failure",
-    ) -> bool:
-        """Delete an unstarted claim and restore the exact queue row atomically."""
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return False
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE status='dispatched' "
-                "AND match_id=? AND dispatcher_token=? AND dispatcher_epoch=?",
-                (match_id, dispatcher_token, int(dispatcher_epoch)),
-            ).fetchone()
-            if row is None:
-                return False
-            if str(row["execution_launch_state"] or "") != "unstarted":
-                # Once any physical launch began, only a zero-proof cleanup
-                # transition may release this dispatched barrier.
-                return False
-            table = self._match_table_of(c, match_id)
-            match = (
-                c.execute(f"SELECT status FROM {table} WHERE id=?", (match_id,)).fetchone()
-                if table else None
-            )
-            if match is None or match["status"] != STATUS_PENDING:
-                return False
-            c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
-            c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
-            c.execute("DELETE FROM match_rating_policies WHERE match_id=?", (match_id,))
-            c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
-            c.execute(
-                "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
-                "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
-                "execution_launch_state=NULL,execution_launch_token=NULL,"
-                "execution_daemon_incarnation=NULL,"
-                "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
-                (int(row["id"]),),
-            )
-            c.execute(
-                "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                "dispatched_at=NULL,last_attempt_error=?,claim_dispatcher_token=NULL,"
-                "claim_dispatcher_epoch=NULL,execution_scope=NULL,"
-                "execution_backend=NULL,execution_state=NULL,cleanup_requested_at=NULL,"
-                "execution_launch_state=NULL,execution_launch_token=NULL,"
-                "execution_daemon_incarnation=NULL,"
-                "cleanup_ack_at=NULL,cleanup_error='' WHERE id=? "
-                "AND lifecycle='dispatched'",
-                (reason, int(row["decision_id"])),
-            )
-            self._auto_backoff_tx(c, reason)
-            return True
-
-    def recover_auto_match_dispatcher_takeover(
-        self, *, dispatcher_token: str, dispatcher_epoch: int
-    ) -> dict:
-        """Adopt a stale claim but retain the global slot until physical cleanup.
-
-        Epoch takeover fences all old Store writes first.  This transaction only
-        advances the durable claim to ``recovery_pending``; it deliberately does
-        not abort/delete/requeue anything.  The scheduler must acquire the shared
-        launch flock, force-stop the persisted scope, prove zero containers, and
-        call :meth:`finalize_auto_match_execution_cleanup` separately.
-        """
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return {"outcome": "not_leader"}
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE status='dispatched' LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return {"outcome": "clean"}
-            if (
-                row["dispatcher_token"] == dispatcher_token
-                and int(row["dispatcher_epoch"] or 0) == int(dispatcher_epoch)
-            ):
-                if row["execution_state"] == "recovery_pending":
-                    return {
-                        "outcome": "recovery_pending",
-                        "match_id": str(row["match_id"]),
-                        "execution_scope": str(row["execution_scope"]),
-                        "execution_backend": str(row["execution_backend"]),
-                        "execution_launch_state": str(row["execution_launch_state"]),
-                        "execution_launch_token": str(row["execution_launch_token"] or ""),
-                        "execution_daemon_incarnation": str(
-                            row["execution_daemon_incarnation"] or ""
-                        ),
-                        "launch_lock_path": self.auto_match_execution_launch_lock_path,
-                        "cleanup_error": str(row["cleanup_error"] or ""),
-                    }
-                return {"outcome": "clean"}
-            match_id = str(row["match_id"] or "")
-            scope = str(row["execution_scope"] or "")
-            backend = str(row["execution_backend"] or "")
-            if not scope or backend not in {"docker", "local"}:
-                raise RuntimeError("stale auto-match claim lacks execution identity")
-            requested_at = _now()
-            changed = c.execute(
-                "UPDATE auto_match_queue SET dispatcher_token=?,dispatcher_epoch=?,"
-                "execution_state='recovery_pending',cleanup_requested_at=?,"
-                "cleanup_ack_at=NULL,cleanup_error='' "
-                "WHERE id=? AND status='dispatched'",
-                (
-                    dispatcher_token,
-                    int(dispatcher_epoch),
-                    requested_at,
-                    int(row["id"]),
-                ),
-            )
-            if changed.rowcount != 1:
-                raise RuntimeError("auto-match takeover CAS lost")
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_state='recovery_pending',"
-                "cleanup_requested_at=?,cleanup_ack_at=NULL,cleanup_error='' "
-                "WHERE id=? AND lifecycle='dispatched'",
-                (requested_at, int(row["decision_id"])),
-            )
-            return {
-                "outcome": "recovery_pending",
-                "match_id": match_id,
-                "execution_scope": scope,
-                "execution_backend": backend,
-                "execution_launch_state": str(row["execution_launch_state"]),
-                "execution_launch_token": str(row["execution_launch_token"] or ""),
-                "execution_daemon_incarnation": str(
-                    row["execution_daemon_incarnation"] or ""
-                ),
-                "launch_lock_path": self.auto_match_execution_launch_lock_path,
-                "cleanup_error": "",
-            }
-
-    def get_auto_match_execution_recovery(
-        self, *, dispatcher_token: str, dispatcher_epoch: int
-    ) -> dict | None:
-        """Return the current owner's durable recovery scope, if any."""
-        with self._tx() as c:
-            c.execute("BEGIN")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return None
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE status='dispatched' "
-                "AND dispatcher_token=? AND dispatcher_epoch=? "
-                "AND execution_state='recovery_pending' LIMIT 1",
-                (dispatcher_token, int(dispatcher_epoch)),
-            ).fetchone()
-            if row is None:
-                return None
-            return {
-                "match_id": str(row["match_id"]),
-                "execution_scope": str(row["execution_scope"]),
-                "execution_backend": str(row["execution_backend"]),
-                "execution_launch_state": str(row["execution_launch_state"]),
-                "execution_launch_token": str(row["execution_launch_token"] or ""),
-                "execution_daemon_incarnation": str(
-                    row["execution_daemon_incarnation"] or ""
-                ),
-                "launch_lock_path": self.auto_match_execution_launch_lock_path,
-                "cleanup_error": str(row["cleanup_error"] or ""),
-            }
-
-    def record_auto_match_execution_cleanup_failure(
-        self,
-        match_id: str,
-        *,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_scope: str,
-        reason: str,
-    ) -> bool:
-        """Persist a failed proof while retaining the one-dispatched slot."""
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return False
-            message = str(reason or "execution cleanup not confirmed")[:500]
-            changed = c.execute(
-                "UPDATE auto_match_queue SET cleanup_error=? WHERE match_id=? "
-                "AND status='dispatched' AND dispatcher_token=? AND dispatcher_epoch=? "
-                "AND execution_scope=? AND execution_state='recovery_pending'",
-                (
-                    message,
-                    match_id,
-                    dispatcher_token,
-                    int(dispatcher_epoch),
-                    execution_scope,
-                ),
-            )
-            if changed.rowcount != 1:
-                return False
-            c.execute(
-                "UPDATE auto_match_decisions SET cleanup_error=? WHERE match_id=? "
-                "AND execution_scope=? AND execution_state='recovery_pending'",
-                (message, match_id, execution_scope),
-            )
-            return True
-
-    def finalize_auto_match_execution_cleanup(
-        self,
-        match_id: str,
-        *,
-        dispatcher_token: str,
-        dispatcher_epoch: int,
-        execution_scope: str,
-    ) -> dict:
-        """Acknowledge zero physical workers, then converge the recovered claim."""
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return {"outcome": "not_leader"}
-            row = c.execute(
-                "SELECT * FROM auto_match_queue WHERE match_id=? "
-                "AND status='dispatched' AND dispatcher_token=? AND dispatcher_epoch=? "
-                "AND execution_scope=? AND execution_state='recovery_pending'",
-                (
-                    match_id,
-                    dispatcher_token,
-                    int(dispatcher_epoch),
-                    execution_scope,
-                ),
-            ).fetchone()
-            if row is None:
-                return {"outcome": "stale"}
-            if str(row["execution_launch_state"] or "") == "creating":
-                return {
-                    "outcome": "awaiting_scope_observation",
-                    "match_id": match_id,
-                }
-            table = self._match_table_of(c, match_id)
-            match = (
-                c.execute(f"SELECT status FROM {table} WHERE id=?", (match_id,)).fetchone()
-                if table else None
-            )
-            ack_at = _now()
-            if match is None or match["status"] == STATUS_PENDING:
-                c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
-                c.execute("DELETE FROM matches_index WHERE id=?", (match_id,))
-                c.execute("DELETE FROM match_rating_policies WHERE match_id=?", (match_id,))
-                if match is not None and table is not None:
-                    c.execute(f"DELETE FROM {table} WHERE id=?", (match_id,))
-                c.execute(
-                    "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                    "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
-                    "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
-                    "execution_launch_state=NULL,execution_launch_token=NULL,"
-                    "execution_daemon_incarnation=NULL,"
-                    "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
-                    "WHERE id=?",
-                    (int(row["id"]),),
-                )
-                c.execute(
-                    "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                    "dispatched_at=NULL,last_attempt_error='dispatcher_lost_before_start',"
-                    "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
-                    "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
-                    "execution_launch_state=NULL,execution_launch_token=NULL,"
-                    "execution_daemon_incarnation=NULL,"
-                    "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' "
-                    "WHERE id=? AND lifecycle='dispatched'",
-                    (int(row["decision_id"]),),
-                )
-                backoff = self._auto_backoff_tx(c, "dispatcher_lost_before_start")
-                return {"outcome": "requeued_pending", "backoff": backoff}
-            if match["status"] == STATUS_RUNNING:
-                c.execute(
-                    f"UPDATE {table} SET status=?,reason='orphan_after_restart',"
-                    "ended_at=? WHERE id=? AND status=?",
-                    (STATUS_ABORTED, ack_at, match_id, STATUS_RUNNING),
-                )
-            c.execute(
-                "UPDATE auto_match_queue SET execution_state='cleanup_confirmed',"
-                "cleanup_ack_at=?,cleanup_error='' WHERE id=?",
-                (ack_at, int(row["id"])),
-            )
-            c.execute(
-                "UPDATE auto_match_decisions SET execution_state='cleanup_confirmed',"
-                "cleanup_ack_at=?,cleanup_error='' WHERE id=?",
-                (ack_at, int(row["decision_id"])),
-            )
-            return {"outcome": "cleanup_confirmed", "match_id": match_id}
-
     @staticmethod
     def _auto_complete_service_tx(
         c: sqlite3.Connection, decision: sqlite3.Row | dict, terminal_at: str
@@ -5725,179 +4542,6 @@ class Store:
             "last_served_at=excluded.last_served_at",
             (gid, owner_lo, owner_hi, terminal_at),
         )
-
-    def reconcile_auto_match_queue(
-        self, *, dispatcher_token: str, dispatcher_epoch: int
-    ) -> dict:
-        """Converge terminal rows; service counters change exactly once."""
-        removed_terminal = 0
-        reset_missing = 0
-        removed_invalid = 0
-        waiting_settlement = 0
-        recovery_pending = 0
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if not self._auto_dispatcher_owned_tx(
-                c, dispatcher_token, dispatcher_epoch
-            ):
-                return {"outcome": "not_leader"}
-            def physical_cleanup_ready(row: sqlite3.Row) -> bool:
-                nonlocal recovery_pending
-                state = str(row["execution_state"] or "")
-                if state == "cleanup_confirmed":
-                    return True
-                if str(row["execution_launch_state"] or "") == "unstarted":
-                    ack_at = _now()
-                    c.execute(
-                        "UPDATE auto_match_queue SET execution_state='cleanup_confirmed',"
-                        "cleanup_ack_at=?,cleanup_error='' WHERE id=?",
-                        (ack_at, int(row["id"])),
-                    )
-                    c.execute(
-                        "UPDATE auto_match_decisions SET execution_state='cleanup_confirmed',"
-                        "cleanup_ack_at=?,cleanup_error='' WHERE id=?",
-                        (ack_at, int(row["decision_id"])),
-                    )
-                    return True
-                if state != "recovery_pending":
-                    requested_at = _now()
-                    c.execute(
-                        "UPDATE auto_match_queue SET execution_state='recovery_pending',"
-                        "cleanup_requested_at=?,cleanup_ack_at=NULL,"
-                        "cleanup_error='terminal row awaits physical cleanup' WHERE id=?",
-                        (requested_at, int(row["id"])),
-                    )
-                    c.execute(
-                        "UPDATE auto_match_decisions SET execution_state='recovery_pending',"
-                        "cleanup_requested_at=?,cleanup_ack_at=NULL,"
-                        "cleanup_error='terminal row awaits physical cleanup' WHERE id=?",
-                        (requested_at, int(row["decision_id"])),
-                    )
-                recovery_pending += 1
-                return False
-
-            for row in c.execute(
-                "SELECT * FROM auto_match_queue ORDER BY id"
-            ).fetchall():
-                if row["status"] == "queued":
-                    if self._auto_queue_identity_tx(c, row) is None:
-                        self._auto_cancel_queue_row_tx(c, row, "identity_invalid")
-                        removed_invalid += 1
-                    continue
-                if row["execution_state"] == "recovery_pending":
-                    # A terminal/missing match row is not proof that an old
-                    # Docker container has stopped.  Only explicit cleanup ack
-                    # may advance this durable global-serial barrier.
-                    recovery_pending += 1
-                    continue
-                match_id = str(row["match_id"] or "")
-                tbl = self._match_table_of(c, match_id)
-                if not tbl:
-                    if not physical_cleanup_ready(row):
-                        continue
-                    c.execute(
-                        "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
-                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
-                        "execution_launch_state=NULL,execution_launch_token=NULL,"
-                        "execution_daemon_incarnation=NULL,"
-                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
-                        (row["id"],),
-                    )
-                    c.execute(
-                        "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                        "dispatched_at=NULL,last_attempt_error='missing_match',"
-                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
-                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
-                        "execution_launch_state=NULL,execution_launch_token=NULL,"
-                        "execution_daemon_incarnation=NULL,"
-                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
-                        (row["decision_id"],),
-                    )
-                    self._auto_backoff_tx(c, "missing_match")
-                    reset_missing += 1
-                    continue
-                match = c.execute(
-                    f"SELECT status,reason,ended_at FROM {tbl} WHERE id=?", (match_id,)
-                ).fetchone()
-                if not match:
-                    if not physical_cleanup_ready(row):
-                        continue
-                    c.execute(
-                        "UPDATE auto_match_queue SET status='queued',match_id=NULL,"
-                        "dispatcher_token=NULL,dispatcher_epoch=NULL,dispatched_at=NULL,"
-                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
-                        "execution_launch_state=NULL,execution_launch_token=NULL,"
-                        "execution_daemon_incarnation=NULL,"
-                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
-                        (row["id"],),
-                    )
-                    c.execute(
-                        "UPDATE auto_match_decisions SET lifecycle='queued',match_id=NULL,"
-                        "dispatched_at=NULL,last_attempt_error='missing_match',"
-                        "claim_dispatcher_token=NULL,claim_dispatcher_epoch=NULL,"
-                        "execution_scope=NULL,execution_backend=NULL,execution_state=NULL,"
-                        "execution_launch_state=NULL,execution_launch_token=NULL,"
-                        "execution_daemon_incarnation=NULL,"
-                        "cleanup_requested_at=NULL,cleanup_ack_at=NULL,cleanup_error='' WHERE id=?",
-                        (row["decision_id"],),
-                    )
-                    self._auto_backoff_tx(c, "missing_match")
-                    reset_missing += 1
-                elif match["status"] in (STATUS_ABORTED, STATUS_COMPLETED) and not physical_cleanup_ready(row):
-                    continue
-                elif match["status"] == STATUS_ABORTED:
-                    terminal_at = str(match["ended_at"] or _now())
-                    reason = str(match["reason"] or "aborted")
-                    c.execute(
-                        "UPDATE auto_match_decisions SET lifecycle='aborted',"
-                        "terminal_at=?,terminal_reason=? WHERE id=? "
-                        "AND lifecycle='dispatched'",
-                        (terminal_at, reason, row["decision_id"]),
-                    )
-                    c.execute("DELETE FROM auto_match_queue WHERE id=?", (row["id"],))
-                    if reason in _AUTO_MATCH_PLATFORM_ABORT_REASONS:
-                        self._auto_backoff_tx(c, reason)
-                    removed_terminal += 1
-                elif match["status"] == STATUS_COMPLETED:
-                    settled = c.execute(
-                        "SELECT settled_order FROM match_rating_settlements "
-                        "WHERE match_id=?",
-                        (match_id,),
-                    ).fetchone()
-                    if settled:
-                        terminal_at = str(match["ended_at"] or _now())
-                        decision = c.execute(
-                            "SELECT * FROM auto_match_decisions WHERE id=?",
-                            (row["decision_id"],),
-                        ).fetchone()
-                        changed = c.execute(
-                            "UPDATE auto_match_decisions SET lifecycle='completed',"
-                            "terminal_at=?,terminal_reason=?,settlement_order=? "
-                            "WHERE id=? "
-                            "AND lifecycle='dispatched'",
-                            (
-                                terminal_at,
-                                str(match["reason"] or "completed"),
-                                int(settled["settled_order"]),
-                                row["decision_id"],
-                            ),
-                        )
-                        if changed.rowcount == 1 and decision is not None:
-                            self._auto_complete_service_tx(c, decision, terminal_at)
-                            self._auto_reset_backoff_tx(c)
-                        c.execute("DELETE FROM auto_match_queue WHERE id=?", (row["id"],))
-                        removed_terminal += 1
-                    else:
-                        waiting_settlement += 1
-            return {
-                "outcome": "ok",
-                "removed_terminal": removed_terminal,
-                "reset_missing": reset_missing,
-                "removed_invalid": removed_invalid,
-                "waiting_settlement": waiting_settlement,
-                "recovery_pending": recovery_pending,
-            }
 
     @staticmethod
     def _match_rating_policy_tx(
@@ -5988,33 +4632,10 @@ class Store:
             config["_rating_reason"] = rating_reason
             mc_json = json.dumps(config, ensure_ascii=False)
             if rated_pair:
-                # A dispatched row remains authoritative until an aborted terminal
-                # or completed+settled terminal converges.  Starting another rated
-                # match in that window could reorder Glicko snapshots.
-                reserved = c.execute(
-                    "SELECT 1 FROM auto_match_queue WHERE status='dispatched' "
-                    "AND (? IN (bot_a_id,bot_b_id) OR ? IN (bot_a_id,bot_b_id)) "
-                    "LIMIT 1",
-                    (bot_a_id, bot_b_id),
-                ).fetchone()
-                if reserved:
-                    raise ValueError("Bot 正在自动排位结算中，请稍后重试")
                 if self._bot_has_active_rated_match_tx(c, bot_a_id, game_id=gid):
                     raise ValueError("座位 1 Bot 正在其他计分对局中")
                 if self._bot_has_active_rated_match_tx(c, bot_b_id, game_id=gid):
                     raise ValueError("座位 2 Bot 正在其他计分对局中")
-                # Foreground rated work has priority.  Remove any not-yet-dispatched
-                # lookahead pairs that froze either Bot; the scheduler refills from
-                # the new rating/last-service truth after this match completes.
-                queued = c.execute(
-                    "SELECT * FROM auto_match_queue WHERE status='queued' "
-                    "AND (? IN (bot_a_id,bot_b_id) OR ? IN (bot_a_id,bot_b_id))",
-                    (bot_a_id, bot_b_id),
-                ).fetchall()
-                for queue_row in queued:
-                    self._auto_cancel_queue_row_tx(
-                        c, queue_row, "foreground_rated_priority"
-                    )
             created_at = _now()
             c.execute(
                 f"INSERT INTO {tbl}(id, bot_a_id, bot_b_id, owner_id, "
@@ -6220,9 +4841,6 @@ class Store:
     def update_match(
         self,
         match_id: str,
-        *,
-        auto_dispatcher_token: str | None = None,
-        auto_dispatcher_epoch: int | None = None,
         **fields: Any,
     ) -> dict | None:
         allowed = {
@@ -6244,11 +4862,6 @@ class Store:
             for k, v in fields.items()
             if k in allowed
         ]
-        fenced = auto_dispatcher_token is not None or auto_dispatcher_epoch is not None
-        if fenced and (
-            not auto_dispatcher_token or auto_dispatcher_epoch is None
-        ):
-            raise ValueError("auto-match write fence requires token and epoch")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             projection_guard = (
@@ -6258,56 +4871,39 @@ class Store:
             )
             tbl = self._match_table_of(c, match_id)
             if not tbl:
-                if fenced:
-                    raise AutoMatchFenceLost(
-                        f"auto-match match disappeared for write {match_id}"
-                    )
                 return None
-            match_config_row = c.execute(
-                f"SELECT match_config FROM {tbl} WHERE id=?", (match_id,)
-            ).fetchone()
-            try:
-                persisted_config = json.loads(
-                    (match_config_row["match_config"] if match_config_row else "") or "{}"
-                )
-            except (TypeError, ValueError):
-                persisted_config = {}
-            if persisted_config.get("_auto_match_claim_epoch") and not fenced:
-                raise AutoMatchFenceLost(
-                    f"auto-match write requires frozen fence for match {match_id}"
-                )
-            if fenced:
-                self._require_auto_match_fence_tx(
-                    c,
-                    match_id,
-                    str(auto_dispatcher_token),
-                    int(auto_dispatcher_epoch),
-                    require_claim_fence=True,
-                )
             if sets:
                 vals.append(match_id)
                 status = fields.get("status")
-                status_guard = ""
-                if fenced and status == STATUS_RUNNING:
-                    status_guard = " AND status='pending'"
-                elif fenced and status in (STATUS_COMPLETED, STATUS_ABORTED):
-                    status_guard = " AND status IN ('pending','running')"
                 changed = c.execute(
-                    f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?{status_guard}", vals
+                    f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?", vals
                 )
-                if fenced and changed.rowcount != 1:
-                    raise AutoMatchFenceLost(
-                        f"auto-match terminal/state CAS lost for match {match_id}"
-                    )
-                if fenced and status == STATUS_RUNNING:
+                if changed.rowcount != 1:
+                    return None
+                if status == STATUS_RUNNING:
+                    started = fields.get("started_at") or _now()
                     c.execute(
-                        "UPDATE auto_match_queue SET execution_state='running' "
-                        "WHERE match_id=? AND execution_state='claimed'",
-                        (match_id,),
+                        "UPDATE execution_jobs SET status='running',started_at=? "
+                        "WHERE current_match_id=? AND status='starting'",
+                        (started, match_id),
                     )
                     c.execute(
-                        "UPDATE auto_match_decisions SET execution_state='running' "
-                        "WHERE match_id=? AND execution_state='claimed'",
+                        "UPDATE execution_job_attempts SET status='running',started_at=? "
+                        "WHERE match_id=? AND status='starting'",
+                        (started, match_id),
+                    )
+                elif status in (STATUS_COMPLETED, STATUS_ABORTED):
+                    settling = _now()
+                    c.execute(
+                        "UPDATE execution_jobs SET status='settling',settling_at=?,"
+                        "cleanup_state=CASE WHEN cleanup_state='confirmed' "
+                        "THEN 'confirmed' ELSE 'pending' END "
+                        "WHERE current_match_id=? AND status IN ('starting','running')",
+                        (settling, match_id),
+                    )
+                    c.execute(
+                        "UPDATE execution_job_attempts SET status='settling' "
+                        "WHERE match_id=? AND status IN ('starting','running')",
                         (match_id,),
                     )
             if fields.get("status") == STATUS_COMPLETED:
@@ -6332,6 +4928,7 @@ class Store:
     def abort_match_if_active(self, match_id: str, *, reason: str) -> dict | None:
         """仅把 pending/running 对局原子推进为 aborted；终态绝不倒退。"""
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return None
@@ -6342,6 +4939,19 @@ class Store:
                     STATUS_ABORTED, reason, _now(), match_id,
                     STATUS_PENDING, STATUS_RUNNING,
                 ),
+            )
+            settling = _now()
+            c.execute(
+                "UPDATE execution_jobs SET status='settling',settling_at=?,"
+                "cancel_requested=1,cleanup_state=CASE WHEN cleanup_state='confirmed' "
+                "THEN 'confirmed' ELSE 'pending' END "
+                "WHERE current_match_id=? AND status IN ('starting','running')",
+                (settling, match_id),
+            )
+            c.execute(
+                "UPDATE execution_job_attempts SET status='settling' "
+                "WHERE match_id=? AND status IN ('starting','running')",
+                (match_id,),
             )
             return _parse_match_json_cols(_row(
                 c.execute(f"SELECT * FROM {tbl} WHERE id=?", (match_id,)).fetchone()
@@ -6367,6 +4977,12 @@ class Store:
                 (match_id, match_id),
             ).fetchone():
                 raise ValueError("已结算对局是评分审计证据，禁止删除")
+            if c.execute(
+                "SELECT 1 FROM execution_jobs WHERE current_match_id=? "
+                "AND status IN ('starting','running','settling')",
+                (match_id,),
+            ).fetchone():
+                raise ValueError("执行任务当前 attempt 禁止从通用删除入口移除")
             _delete_social_target(c, "match", match_id)
             cur = c.execute(f"DELETE FROM {tbl} WHERE id=?", (match_id,))
             deleted = cur.rowcount > 0
@@ -6376,11 +4992,6 @@ class Store:
                 c.execute(
                     "DELETE FROM match_rating_policies WHERE match_id=?", (match_id,)
                 )
-                auto_row = c.execute(
-                    "SELECT * FROM auto_match_queue WHERE match_id=?", (match_id,)
-                ).fetchone()
-                if auto_row is not None:
-                    self._auto_cancel_queue_row_tx(c, auto_row, "match_deleted")
                 c.execute(
                     "DELETE FROM match_rating_settlements WHERE match_id=?",
                     (match_id,),
@@ -6502,41 +5113,9 @@ class Store:
         self,
         match_id: str,
         events_json: str = "[]",
-        *,
-        auto_dispatcher_token: str | None = None,
-        auto_dispatcher_epoch: int | None = None,
     ) -> None:
-        fenced = auto_dispatcher_token is not None or auto_dispatcher_epoch is not None
-        if fenced and (
-            not auto_dispatcher_token or auto_dispatcher_epoch is None
-        ):
-            raise ValueError("auto-match replay fence requires token and epoch")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            table = self._match_table_of(c, match_id)
-            if table is not None:
-                match_config_row = c.execute(
-                    f"SELECT match_config FROM {table} WHERE id=?", (match_id,)
-                ).fetchone()
-                try:
-                    persisted_config = json.loads(
-                        (match_config_row["match_config"] if match_config_row else "")
-                        or "{}"
-                    )
-                except (TypeError, ValueError):
-                    persisted_config = {}
-                if persisted_config.get("_auto_match_claim_epoch") and not fenced:
-                    raise AutoMatchFenceLost(
-                        f"auto-match replay requires frozen fence for match {match_id}"
-                    )
-            if fenced:
-                self._require_auto_match_fence_tx(
-                    c,
-                    match_id,
-                    str(auto_dispatcher_token),
-                    int(auto_dispatcher_epoch),
-                    require_claim_fence=True,
-                )
             c.execute(
                 "INSERT INTO match_replays(match_id, events_json, updated_at) "
                 "VALUES(?,?,?) "
@@ -6676,8 +5255,6 @@ class Store:
         entries: list[dict[str, Any]],
         *,
         dropped_count: int = 0,
-        auto_dispatcher_token: str | None = None,
-        auto_dispatcher_epoch: int | None = None,
     ) -> bool:
         """在 Bot-vs-Bot 对局终态后原子替换整场调试批次。
 
@@ -6685,22 +5262,9 @@ class Store:
         不得回滚已经提交的对局结果。单条/整场硬上限由 collector 与表 CHECK
         双重约束。
         """
-        fenced = auto_dispatcher_token is not None or auto_dispatcher_epoch is not None
-        if fenced and (
-            not auto_dispatcher_token or auto_dispatcher_epoch is None
-        ):
-            raise ValueError("auto-match debug fence requires token and epoch")
         now = _now()
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
-            if fenced:
-                self._require_auto_match_fence_tx(
-                    c,
-                    match_id,
-                    str(auto_dispatcher_token),
-                    int(auto_dispatcher_epoch),
-                    require_claim_fence=True,
-                )
             tbl = self._match_table_of(c, match_id)
             if not tbl:
                 return False
@@ -6957,45 +5521,6 @@ class Store:
                 ).fetchone()
             )
 
-    def _require_auto_settlement_fence_tx(
-        self,
-        c: sqlite3.Connection,
-        match_id: str,
-        dispatcher_token: str | None,
-        dispatcher_epoch: int | None,
-    ) -> None:
-        """Require the current leader for a frozen auto-match settlement.
-
-        A takeover may adopt a completed match, so settlement validates the
-        queue's current owner/epoch but deliberately does not require the
-        original claim token recorded in the immutable decision/config.
-        """
-        table = self._match_table_of(c, match_id)
-        if table is None:
-            return
-        match = c.execute(
-            f"SELECT match_config FROM {table} WHERE id=?", (match_id,)
-        ).fetchone()
-        if match is None:
-            return
-        try:
-            config = json.loads(match["match_config"] or "{}")
-        except (TypeError, ValueError):
-            config = {}
-        if not config.get("_auto_match_claim_epoch"):
-            return
-        if not dispatcher_token or dispatcher_epoch is None:
-            raise AutoMatchFenceLost(
-                f"auto-match settlement lacks current fence for match {match_id}"
-            )
-        self._require_auto_match_fence_tx(
-            c,
-            match_id,
-            dispatcher_token,
-            int(dispatcher_epoch),
-            require_claim_fence=False,
-        )
-
     def apply_match_ratings_atomic(
         self,
         bot_a_id: int,
@@ -7009,8 +5534,6 @@ class Store:
         delta_b: int,
         reason: str = "",
         settlement_id: str | None = None,
-        auto_dispatcher_token: str | None = None,
-        auto_dispatcher_epoch: int | None = None,
     ) -> bool:
         """恰好一次地落双边 rating/history、pair_stats 与结算凭据。
 
@@ -7040,12 +5563,6 @@ class Store:
                     (settlement_id,),
                 ).fetchone():
                     return False
-                self._require_auto_settlement_fence_tx(
-                    c,
-                    settlement_id,
-                    auto_dispatcher_token,
-                    auto_dispatcher_epoch,
-                )
                 projection_guard = self._rating_projection_mutation_guard_tx(c)
                 settlement_order = self._rating_settlement_order_for_insert_tx(
                     c, settlement_id
@@ -7126,9 +5643,6 @@ class Store:
     def mark_match_rating_settled(
         self,
         match_id: str,
-        *,
-        auto_dispatcher_token: str | None = None,
-        auto_dispatcher_epoch: int | None = None,
     ) -> bool:
         """原子写入无评分副作用的结算 marker；已存在返回 False。
 
@@ -7142,12 +5656,6 @@ class Store:
                 (match_id,),
             ).fetchone():
                 return False
-            self._require_auto_settlement_fence_tx(
-                c,
-                match_id,
-                auto_dispatcher_token,
-                auto_dispatcher_epoch,
-            )
             policy = c.execute(
                 "SELECT rated FROM match_rating_policies WHERE match_id=?",
                 (match_id,),
@@ -7460,7 +5968,7 @@ class Store:
           已无对应内存 Task/Future，统一标 ``orphan_pending_after_restart`` aborted；
         - contest_id=NULL AND match_type='contest' AND status='pending'（e2e 残留等无主）；
         - contest 已终态（finished/cancelled）但仍 pending 的赛事对局（排期积压后赛事已结束，
-          这些 pending 永不会被打，堵 orchestrator._tasks → auto_matcher 误判不空闲）。
+          这些 pending 永不会被打，也会污染公开运行状态）。
 
         活跃赛事的 pending contest match 不在本方法粗暴标 aborted：已绑定/
         未绑定的两阶段派发中断由 ``reset_dead_contest_pairings`` 精确删除并重派。
@@ -7475,8 +5983,9 @@ class Store:
                     f"SELECT COUNT(*) FROM {tbl} WHERE status=? "
                     "AND (contest_id IS NULL OR contest_id NOT IN ("
                     "SELECT id FROM contests WHERE showcase_key IS NOT NULL)) "
-                    "AND id NOT IN (SELECT match_id FROM auto_match_queue "
-                    "WHERE match_id IS NOT NULL)",
+                    "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
+                    "WHERE current_match_id IS NOT NULL AND status IN "
+                    "('starting','running','settling'))",
                     (STATUS_RUNNING,),
                 ).fetchone()
                 cnt = int(row[0]) if row else 0
@@ -7486,8 +5995,9 @@ class Store:
                         "ended_at=datetime('now') WHERE status=? "
                         "AND (contest_id IS NULL OR contest_id NOT IN ("
                         "SELECT id FROM contests WHERE showcase_key IS NOT NULL)) "
-                        "AND id NOT IN (SELECT match_id FROM auto_match_queue "
-                        "WHERE match_id IS NOT NULL)",
+                        "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
+                        "WHERE current_match_id IS NOT NULL AND status IN "
+                        "('starting','running','settling'))",
                         (STATUS_ABORTED, STATUS_RUNNING),
                     )
                     n += cnt
@@ -7496,8 +6006,9 @@ class Store:
                 non_contest_pending = c.execute(
                     f"SELECT COUNT(*) FROM {tbl} "
                     "WHERE status=? AND match_type<>? "
-                    "AND id NOT IN (SELECT match_id FROM auto_match_queue "
-                    "WHERE match_id IS NOT NULL)",
+                    "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
+                    "WHERE current_match_id IS NOT NULL AND status IN "
+                    "('starting','running','settling'))",
                     (STATUS_PENDING, TYPE_CONTEST),
                 ).fetchone()
                 pending_count = int(non_contest_pending[0]) if non_contest_pending else 0
@@ -7506,8 +6017,9 @@ class Store:
                         f"UPDATE {tbl} SET status=?, "
                         "reason='orphan_pending_after_restart', ended_at=? "
                         "WHERE status=? AND match_type<>? "
-                        "AND id NOT IN (SELECT match_id FROM auto_match_queue "
-                        "WHERE match_id IS NOT NULL)",
+                        "AND id NOT IN (SELECT current_match_id FROM execution_jobs "
+                        "WHERE current_match_id IS NOT NULL AND status IN "
+                        "('starting','running','settling'))",
                         (
                             STATUS_ABORTED,
                             _now(),
@@ -7614,10 +6126,6 @@ class Store:
                         "DELETE FROM match_rating_policies WHERE match_id=?",
                         (match_id,),
                     )
-                    c.execute(
-                        "DELETE FROM auto_match_queue WHERE match_id=?",
-                        (match_id,),
-                    )
                     recovered += 1
 
             pairings = c.execute(
@@ -7658,10 +6166,6 @@ class Store:
                     c.execute("DELETE FROM match_replays WHERE match_id=?", (match_id,))
                     c.execute(
                         "DELETE FROM match_rating_policies WHERE match_id=?",
-                        (match_id,),
-                    )
-                    c.execute(
-                        "DELETE FROM auto_match_queue WHERE match_id=?",
                         (match_id,),
                     )
                 elif match["status"] == STATUS_RUNNING:
@@ -9832,13 +8336,13 @@ class Store:
     # ── platform_settings ─────────────────────────────────────
 
     def get_auto_match_enabled(self) -> bool:
-        """Return the v2 singleton switch (independent from legacy settings)."""
+        """Return the producer-only switch from the global queue singleton."""
         with self._tx() as c:
             row = c.execute(
-                "SELECT enabled FROM auto_match_control WHERE singleton=1"
+                "SELECT auto_enabled FROM execution_control WHERE singleton=1"
             ).fetchone()
             # SCHEMA always seeds the singleton.  Missing/corrupt state fails closed.
-            return bool(row and int(row["enabled"]) == 1)
+            return bool(row and int(row["auto_enabled"]) == 1)
 
     def set_auto_match_enabled(self, enabled: bool) -> bool:
         if type(enabled) is not bool:  # bool is deliberately strict at Store boundary.
@@ -9846,20 +8350,12 @@ class Store:
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             changed = c.execute(
-                "UPDATE auto_match_control SET enabled=?,updated_at=? WHERE singleton=1",
+                "UPDATE execution_control SET auto_enabled=?,updated_at=? WHERE singleton=1",
                 (1 if enabled else 0, _now()),
             )
             if changed.rowcount != 1:
                 raise RuntimeError("自动排位控制单例缺失")
         return enabled
-
-    def get_auto_match_fair_state(self) -> dict:
-        with self._tx() as c:
-            row = c.execute(
-                "SELECT next_game_idx,next_lane,revision,platform_failures,"
-                "not_before,updated_at FROM auto_match_fair_state WHERE singleton=1"
-            ).fetchone()
-            return dict(row) if row else {}
 
     def rating_integrity_diagnostics(self) -> dict:
         """Read-only No-Go audit for legacy eligibility and projection state.

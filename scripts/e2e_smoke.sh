@@ -150,8 +150,13 @@ print("seeded users")
 PY
 
 "$PY" - <<'PY'
-import json, urllib.request, http.cookiejar, os
+import json, urllib.error, urllib.request, http.cookiejar, os
 from pathlib import Path
+from scripts._execution_request import (
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
 
 BASE = os.environ["BZ_E2E_BASE_URL"]
 ELF = Path("samples/callbot_linux_amd64").read_bytes()
@@ -224,8 +229,20 @@ def api_auth(token, method, path, data=None, multipart=None):
         body = json.dumps(data).encode()
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode()
+            payload = json.loads(raw) if raw else {}
+            payload["_status"] = resp.status
+            return payload
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode()
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {"_body": raw[:240]}
+        payload["_status"] = exc.code
+        return payload
 
 ta, tb, to = bearer_for("alice"), bearer_for("bob"), bearer_for("org1")
 ba = api_auth(ta, "POST", "/api/bots", multipart={
@@ -243,7 +260,30 @@ ch = api_auth(ta, "POST", "/api/matches/challenge", data={
 })
 print("challenge", ch)
 import time
-mid = ch["match_id"]
+execution = require_execution_request(
+    int(ch.get("_status") or 0),
+    ch,
+    label="隔离 E2E 挑战",
+    detail=str(ch.get("detail") or ch.get("_body") or ""),
+)
+
+def fetch_execution(public_id):
+    payload = api_auth(
+        ta, "GET", execution_request_path(public_id)
+    )
+    return (
+        int(payload.get("_status") or 0),
+        payload,
+        str(payload.get("detail") or payload.get("_body") or payload)[:240],
+    )
+
+mid = wait_for_execution_match(
+    execution,
+    fetch_execution,
+    label="隔离 E2E 挑战",
+    timeout=120,
+)
+print("challenge admitted", execution["public_id"], mid)
 for _ in range(60):
     d = api_auth(ta, "GET", f"/api/matches/{mid}")
     status = d["match"]["status"]

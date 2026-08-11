@@ -31,6 +31,7 @@ from bzplat.backend.runtime.binary_runner import (
     BotResponseLineTooLargeError,
 )
 from bzplat.backend.store import Store
+from bzplat.backend.tests.execution_helpers import challenge_and_start
 
 
 def _entry(debug, *, seat=0, turn=1, leg=None):
@@ -342,7 +343,10 @@ def test_binary_runner_stream_reader_enforces_the_exact_transport_boundary():
         stdout.feed_eof()
         proc = SimpleNamespace(stdin=_Stdin(), stdout=stdout, stderr=None)
         runner = BinaryRunner(prefer_local=True)
-        runner._sessions["bounded"] = SimpleNamespace(proc=proc)
+        runner._sessions["bounded"] = SimpleNamespace(
+            proc=proc,
+            execution_scope=None,
+        )
         if extra:
             return await runner.read_extra_line("bounded", timeout=1)
         return await runner.send("bounded", "{}", timeout=1)
@@ -492,7 +496,7 @@ def test_store_permissions_contest_delay_human_and_deletion(tmp_path):
     )["allowed"]
 
     store.create_match(
-        "active", bot_a["id"], bot_b["id"], game_id="holdem"
+        "active", bot_a["id"], bot_a["id"], game_id="holdem"
     )
     assert not store.replace_match_debug("active", entries)
     assert not store.get_match_debug_for_user(
@@ -514,7 +518,7 @@ def test_store_permissions_contest_delay_human_and_deletion(tmp_path):
     # 但快照 bot_id 必须 SET NULL，不得留孤儿。
     owner_c = _make_user(store, "debug_c")
     bot_c = _make_bot(store, owner_c["id"], "c")
-    _terminal_match(store, "user-delete", bot_c["id"], bot_b["id"])
+    _terminal_match(store, "user-delete", bot_c["id"], bot_c["id"])
     assert store.replace_match_debug(
         "user-delete", [_entry({"owner": "deleted"}, seat=0)]
     )
@@ -532,12 +536,20 @@ def test_store_permissions_contest_delay_human_and_deletion(tmp_path):
         "SELECT bot_id FROM match_debug_entries "
         "WHERE match_id='ordinary' AND seat=0"
     ).fetchone()[0] is None
-    assert store.delete_match("ordinary")
+    with pytest.raises(ValueError, match="评分审计证据"):
+        store.delete_match("ordinary")
+
+    # Rating-bearing rows retain their durable audit source.  Exercise debug
+    # cascade deletion on a neutral self-play row, which remains deletable.
+    store.create_match("deletable", bot_b["id"], bot_b["id"], game_id="holdem")
+    store.update_match("deletable", status="aborted", reason="test_fixture")
+    assert store.replace_match_debug("deletable", entries)
+    assert store.delete_match("deletable")
     assert store._conn.execute(
-        "SELECT COUNT(*) FROM match_debug_sessions WHERE match_id='ordinary'"
+        "SELECT COUNT(*) FROM match_debug_sessions WHERE match_id='deletable'"
     ).fetchone()[0] == 0
     assert store._conn.execute(
-        "SELECT COUNT(*) FROM match_debug_entries WHERE match_id='ordinary'"
+        "SELECT COUNT(*) FROM match_debug_entries WHERE match_id='deletable'"
     ).fetchone()[0] == 0
     store.close()
 
@@ -634,7 +646,8 @@ def test_orchestrator_batches_debug_and_persistence_failure_never_changes_result
     monkeypatch.setattr(orch, "_broadcast", observing_broadcast)
 
     async def run_one():
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bot_a["id"], bot_b["id"], owner["id"], game_id="holdem"
         )
         await orch._tasks[match_id]

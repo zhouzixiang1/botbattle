@@ -423,27 +423,6 @@ class MatchRunner:
         self.runner = runner or BinaryRunner()
         self.action_timeout = action_timeout
 
-    @property
-    def execution_backend(self) -> str:
-        return str(getattr(self.runner, "execution_backend", "docker"))
-
-    async def force_stop_execution(
-        self,
-        token: str,
-        *,
-        launch_lock_path: str,
-        execution_backend: str,
-        allow_local_ack: bool,
-        execution_launch_token: str | None = None,
-    ) -> dict[str, object]:
-        return await self.runner.force_stop_execution(
-            token,
-            launch_lock_path=launch_lock_path,
-            execution_backend=execution_backend,
-            allow_local_ack=allow_local_ack,
-            execution_launch_token=execution_launch_token,
-        )
-
     async def _close_execution_sessions(
         self,
         session_ids: tuple[str, ...],
@@ -458,19 +437,11 @@ class MatchRunner:
                 if first_error is None:
                     first_error = exc
         if execution_scope is not None:
-            result = await self.force_stop_execution(
-                execution_scope.token,
-                launch_lock_path=execution_scope.launch_lock_path,
-                execution_backend=self.execution_backend,
-                allow_local_ack=True,
-            )
-            if not result.get("confirmed"):
-                reason = str(
-                    result.get("reason") or "无法确认自动对局执行单元已停止"
-                )
-                execution_scope.mark_recovery_pending(reason)
-                raise PlatformRunnerError(reason)
-            execution_scope.mark_cleanup_confirmed()
+            # Cleanup is one job-level operation: both seats, every Traditional
+            # one-shot container and any uncertain create are removed by the
+            # same exact instance/job/attempt labels before capacity is released.
+            await self.runner.cleanup_execution(execution_scope)
+            first_error = None
         if first_error is not None:
             raise first_error
 
@@ -604,6 +575,7 @@ class MatchRunner:
         seed: int | None = None,
         runtime_mode: str | None = None,
         time_budget_per_side: float | None = None,
+        execution_scope: ExecutionScope | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """Bot vs 人类：bot 侧走 BinaryRunner，人类侧走 human_decide 协程。
@@ -624,6 +596,7 @@ class MatchRunner:
             bot_path,
             rm,
             failed_seat=bot_seat,
+            execution_scope=execution_scope,
         )
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
@@ -734,7 +707,7 @@ class MatchRunner:
                 gid, decide, on_event=on_event, rng=rng, **match_params,
             )
         finally:
-            await self.runner.stop_session(sid_bot)
+            await self._close_execution_sessions((sid_bot,), execution_scope)
 
     async def run_callables(
         self,

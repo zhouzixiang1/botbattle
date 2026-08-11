@@ -9,6 +9,7 @@ import {
   type BrowserContext,
   type Locator,
   type Page,
+  type Response,
 } from '@playwright/test'
 
 import {
@@ -1069,6 +1070,48 @@ async function chooseBot(page: Page, trigger: Locator, query: string, mineOnly: 
   await dialog.locator('li').filter({ hasText: query }).getByRole('button').click()
 }
 
+/**
+ * Challenge/human creation is a durable 202 request, not a synchronous match.
+ * Poll the owner-scoped opaque id until capacity admission binds a public match.
+ */
+async function waitForAcceptedExecutionMatch(
+  page: Page,
+  acceptedResponse: Response,
+  expectedSource: 'manual' | 'human',
+  timeout = 45_000,
+): Promise<string> {
+  const acceptedText = await acceptedResponse.text()
+  expect(acceptedResponse.status(), acceptedText).toBe(202)
+  const accepted = JSON.parse(acceptedText) as {
+    public_id?: string
+    request?: { source?: string }
+  }
+  expect(accepted.public_id).toMatch(/^req_[A-Za-z0-9_-]{24}$/)
+  expect(accepted.request?.source).toBe(expectedSource)
+
+  let matchId = ''
+  await expect.poll(async () => {
+    const detail = await page.request.get(
+      `/api/execution-requests/${encodeURIComponent(accepted.public_id!)}`,
+    )
+    const text = await detail.text()
+    if (detail.status() !== 200) return `http:${detail.status()}:${text}`
+    const snapshot = JSON.parse(text) as {
+      public_id?: string
+      request?: { match_id?: string | null; source?: string; status?: string }
+    }
+    if (snapshot.public_id !== accepted.public_id) return 'public-id-mismatch'
+    if (snapshot.request?.source !== expectedSource) return 'source-mismatch'
+    matchId = snapshot.request?.match_id || ''
+    return matchId ? `match:${matchId}` : `status:${snapshot.request?.status || 'unknown'}`
+  }, {
+    timeout,
+    intervals: [100, 250, 500, 1_000],
+    message: `execution request ${accepted.public_id} did not receive a match`,
+  }).toMatch(/^match:/)
+  return matchId
+}
+
 /** 把 Pencil 交错坐标转换成当前响应式 canvas 内的 CSS 点击位置。 */
 async function pencilCanvasPoint(canvas: Locator, x: number, y: number) {
   return canvas.evaluate(async (element, coordinate) => {
@@ -1127,10 +1170,7 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     )
     await page.getByRole('button', { name: '开始对局', exact: true }).dblclick()
     const response = await responsePromise
-    const responseText = await response.text()
-    const started = JSON.parse(responseText) as { match_id?: string }
-    if (started.match_id) matchId = started.match_id
-    expect(response.status(), responseText).toBe(200)
+    matchId = await waitForAcceptedExecutionMatch(page, response, 'manual')
     expect(matchId).toBeTruthy()
     await expect(page).toHaveURL(/\/#\/match\//)
     expect(challengePosts).toBe(1)
@@ -3839,12 +3879,8 @@ test('admin abort cancels a live human match and cannot be overwritten by the ru
   )
   await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
   const startResponse = await startResponsePromise
-  const startResponseText = await startResponse.text()
-  const started = JSON.parse(startResponseText) as { match_id: string; status: string }
-  const createdMatchId = started.match_id
+  const createdMatchId = await waitForAcceptedExecutionMatch(page, startResponse, 'human')
   matchId = createdMatchId
-  expect(startResponse.status(), startResponseText).toBe(200)
-  expect(started.status).toBe('pending')
   await expect(page.getByRole('button', { name: '弃牌', exact: true })).toBeEnabled({
     timeout: 20_000,
   })
@@ -4060,10 +4096,7 @@ test('real Pencil human play accepts several canvas-picked edges without illegal
     )
     await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
     const startResponse = await startResponsePromise
-    const startBody = await startResponse.text()
-    expect(startResponse.status(), startBody).toBe(200)
-    const started = JSON.parse(startBody) as { match_id: string }
-    matchId = started.match_id
+    matchId = await waitForAcceptedExecutionMatch(page, startResponse, 'human')
 
     const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
     await expect(canvas).toBeVisible({ timeout: 20_000 })
@@ -4187,12 +4220,8 @@ test('human Holdem uses one WebSocket per load, sends legal protocol, and finish
   )
   await page.getByRole('button', { name: '开始人类对战', exact: true }).click()
   const startedResponse = await startResponse
-  const startedResponseText = await startedResponse.text()
-  const started = JSON.parse(startedResponseText) as { match_id: string; status: string }
-  const createdMatchId = started.match_id
+  const createdMatchId = await waitForAcceptedExecutionMatch(page, startedResponse, 'human')
   matchId = createdMatchId
-  expect(startedResponse.status(), startedResponseText).toBe(200)
-  expect(started.status).toBe('pending')
   await expect(page).toHaveURL(/\/#\/play\//)
 
   const fold = page.getByRole('button', { name: '弃牌', exact: true })

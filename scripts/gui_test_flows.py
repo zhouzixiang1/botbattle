@@ -19,6 +19,11 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from _execution_request import (
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
 from _qa_target import assert_qa_instance, qa_base
 
 BASE = qa_base("http://127.0.0.1:50381")
@@ -70,6 +75,31 @@ def login(name: str, pw: str) -> str | None:
         "captcha_id": cap["captcha_id"], "captcha_answer": ans,
     })
     return d.get("token") if st == 200 else None
+
+
+def execution_match_id(
+    token: str,
+    status: int,
+    payload: dict,
+    *,
+    label: str,
+    timeout: float = 120,
+) -> tuple[str, str]:
+    initial = require_execution_request(status, payload, label=label)
+
+    def fetch(public_id: str):
+        poll_status, poll_payload = api(
+            "GET", execution_request_path(public_id), token=token
+        )
+        return poll_status, poll_payload, str(poll_payload)[:240]
+
+    match_id = wait_for_execution_match(
+        initial,
+        fetch,
+        label=label,
+        timeout=timeout,
+    )
+    return str(initial["public_id"]), match_id
 
 
 def assert_pagination(name: str, path: str, key: str, per_page: int = 5):
@@ -157,7 +187,21 @@ def main() -> int:
         st, d = api("POST", "/api/matches/challenge", token=tok_tester1, body={
             "my_bot_id": 2, "opponent_bot_id": 3,
         })
-        check("发起对战", st == 200, f"status={st} {str(d)[:100]}")
+        try:
+            public_id, mid = execution_match_id(
+                tok_tester1,
+                st,
+                d,
+                label="GUI 流程挑战",
+            )
+        except Exception as exc:
+            check("发起对战(202 + match_id)", False, str(exc))
+        else:
+            check(
+                "发起对战(202 + match_id)",
+                True,
+                f"public_id={public_id} match_id={mid}",
+            )
         # 评论
         st, d = api("GET", "/api/comments?target_type=match&target_id=20260804213844-3ecdfb1c&page=1&per_page=5")
         check("评论分页", st == 200 and "total" in d, f"keys={list(d.keys())}")
@@ -202,9 +246,23 @@ def main() -> int:
         st, d = api("POST", "/api/matches/challenge", token=tok_tester1, body={
             "my_bot_id": 2, "opponent_bot_id": 786,
         })
-        # bot 2 现在有 pending 对局 → 强删应 409
-        st, d = api("DELETE", "/api/admin/bots/2", token=tok_admin)
-        check("B3 强删活跃bot→409", st == 409, f"status={st} {str(d)[:80]}")
+        try:
+            public_id, active_mid = execution_match_id(
+                tok_tester1,
+                st,
+                d,
+                label="B3 活跃 Bot 挑战",
+            )
+        except Exception as exc:
+            check("B3 前置挑战进入队列", False, str(exc))
+        else:
+            # dispatcher 已建立 match；running/pending 引用均应阻止强删。
+            st, d = api("DELETE", "/api/admin/bots/2", token=tok_admin)
+            check(
+                "B3 强删活跃bot→409",
+                st == 409,
+                f"status={st} public_id={public_id} match_id={active_mid} {str(d)[:80]}",
+            )
         # 强删无引用的 bot → 允许（用测试上传的 bot 1906，它无对局）
         st, d = api("DELETE", "/api/admin/bots/1906", token=tok_admin)
         check("强删无引用bot→200", st == 200, f"status={st} {str(d)[:80]}")

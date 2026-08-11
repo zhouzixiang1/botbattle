@@ -6,7 +6,7 @@
 
 | 文件 | 内容 | 来源 |
 |------|------|------|
-| `logs/app.log` | 业务/系统日志（对局、bot、auto-match、异常） | 各模块 `logging.getLogger(__name__)` |
+| `logs/app.log` | 业务/系统日志（全来源执行队列/自动 producer、Docker cleanup/恢复、对局、Bot、异常） | 各模块 `logging.getLogger(__name__)` |
 | `logs/access.log` | HTTP 访问日志（每请求一行，**含真实客户端 IP**） | `AccessLogMiddleware` |
 | `logs/audit.log` | 安全审计日志（敏感操作：登录/上传/admin 写，含 actor+IP+结果） | `audit_log()` 辅助函数 |
 

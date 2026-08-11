@@ -1,6 +1,11 @@
 # 压测 / 大规模系统测试
 
-`scripts/load_test.py` 是一个独立可跑的大规模系统压测脚本：批量创建用户、模拟真实行为，覆盖 user / organizer / admin 的主要业务端点。
+`scripts/load_test.py` 是大规模系统压测入口：批量创建用户、模拟真实行为，目标覆盖 user / organizer / admin 的主要业务端点。
+
+> **当前证据边界**：脚本的挑战、人机和依赖建局阶段已改为校验 HTTP 202 持久 request，并按
+> opaque `public_id` 轮询到 claim 产生 `match_id`；容量等待由服务端队列承接，不再把 admission
+> 429 当补槽协议。该脚本尚未在目标 HEAD 实跑，也不单独覆盖 request 取消/重试或证明双资源
+> 峰值，因此历史退出码/通过数不能作为当前发布证据。
 
 ## 用途
 
@@ -21,7 +26,7 @@
 ```bash
 # 在 worktree 根启动隔离服务
 export BZ_DB_PATH="$PWD/botzone.db"
-BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 \
+BZ_INSTANCE_KEY=qa-loadtest BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 \
   python -m bzplat.backend.cli serve --port 50381
 
 # 另一终端：默认/相对 upload_root 均落到 <db.parent>/bot_uploads
@@ -64,9 +69,9 @@ python scripts/load_test.py \
 |------|----------|------|
 | **0 基础** | `GET /api/{health,wiki,leaderboard,contests,contests/templates,matches,users,auth/captcha}`；`GET /api/auth/me`；`POST /api/auth/change-password`（验旧 session 失效） | 公开 + user |
 | **1 Bot** | `GET /api/bots/{mine,public,{id}}`；`POST /api/bots`（HTTP 上传）；`POST /api/bots/{id}/versions`；`POST /api/bots/{id}/active` | user |
-| **2 对局** | `POST /api/matches/challenge`（三游戏混跑 + 自博弈，目标 `TARGET_MATCHES=12` 场；客户端顺序提交、线程并行等待终态）；`GET /api/matches`；`GET /api/matches/{id}`；`GET /api/leaderboard?game_id=<id>`（验对应游戏 Glicko 更新） | user |
+| **2 对局** | `POST /api/matches/challenge` 精确接收 202 request；按 `public_id` 查询直到 claim 出现 `match_id`，三游戏混跑 + 自博弈，目标 `TARGET_MATCHES=12`；并行等待终态后 GET Match/排行榜核对 Glicko。不再期待 admission 429，也不据此声称测得服务端峰值并发 | user |
 | **3 SSE snapshot** | `GET /api/matches/{id}/events`（只验首个非 ping 帧为 snapshot，且含 match + 历史列表；不覆盖后续实时增量） | 公开 |
-| **4 人类 vs Bot** | `POST /api/matches/human`（固定座位 2）；WS `/api/matches/{id}/play`（holdem/gomoku/pencil，按 snapshot/move 维护已占位置，收 `your_turn` 只回合法未占动作直至 `match_end`，收到 `error` 即失败）；结束后再 GET 断言持久化 `status=completed`，并验 per-user ≤1、match_type=human、**Glicko 不变** | user |
+| **4 人类 vs Bot** | `POST /api/matches/human` 接收 202 request（固定展示座位 2），轮询取得 `match_id` 后才连接 WS `/api/matches/{id}/play`；结束后断言 completed、per-user 活跃 ≤1、match_type=human、**Glicko 不变**。共享 match slot + 1 sandbox unit 由 execution queue 单测与浏览器队列验收另行证明 | user |
 | **5 赛事** | `POST /api/contests`（template）；`/{id}/{open,register,dispatch,start,resume}`；轮询到 finished；验 standings/pairings/stage_results、contest 对局不更新 Glicko | organizer + user |
 | **6 代码配置边界** | `GET /api/admin/settings/runtime` 验 `source=code/mutable=false`；确认 runtime PATCH 与 admin template CRUD 均 404；公开模板列表标记代码只读 | admin + 公开 |
 | **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches,email/templates,contests}`；`POST /api/admin/users/{id}/role`；`DELETE /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/{users,contests}/{id}/{sessions,entries}`；`POST /api/auth/admin/create-reset-token` | admin |
@@ -89,9 +94,9 @@ pytest bzplat/backend/tests/test_load_test_seed.py -v
 ## 注意
 
 - **固定规则**：holdem 始终跑 70 手且每手固定 20000 筹码、50/100 盲注，gomoku 固定 15×15，pencil 固定 N=6；请求中传规则字段不能改变规则。阶段 2 目标 `TARGET_MATCHES=12`（三游戏×4），需为真实 70 手对局预留足够时间。
-- **并发硬顶** = `cpu//4`；代码默认并发为 2，实际取二者较小值。管理端、旧 settings 与环境变量均不可覆盖。
-- **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。阶段 2 按此节流；`_paced_challenge` / `_paced_human` 遇 429 自动按 `Retry-After` 重试。
-- **验收失败策略**：缺少 Python `websockets` 依赖会让阶段 4 失败；阶段 6 验证配置来源和写入口封闭，不通过临时改配置催化后台任务。auto-match 行为由 pytest 的注入配置测试覆盖。
+- **双资源硬顶**：`max_match_slots=min(代码默认 2,max(1,cpu//4))`，`max_sandbox_units=slots×2`；Bot-vs-Bot 占 `1+2`，人机占 `1+1`，`starting/running/settling` 都占容量。管理端、旧 settings 与环境变量均不可覆盖。
+- **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。这里的 429 只表示 HTTP 限流；执行容量不足应返回/保持 202 queued。脚本迁移后仍按 `Retry-After` 处理精确限流 429。
+- **验收失败策略**：缺少 Python `websockets` 依赖会让阶段 4 失败；阶段 6 验证配置来源和写入口封闭，不通过临时改配置催化后台任务。自动 producer/唯一开关/混合来源容量由 `test_execution_queue.py` 与 `test_runtime_settings.py` 覆盖。
 - **资源不调高**：不改 `bot_cpus/bot_memory`（只读硬顶）。
 - **Bot 运行失败不豁免**：可由隔离服务选择 Docker 或 `BZ_BOT_LOCAL=1`；阶段 2 要求三游戏各有 completed，且 completed 多于 aborted，不会把大量 EOF/aborted 只记 warning 后冒充通过。
 

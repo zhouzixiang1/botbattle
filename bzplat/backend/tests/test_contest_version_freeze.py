@@ -13,6 +13,10 @@ from pathlib import Path
 import pytest
 
 from bzplat.backend.store import Store
+from bzplat.backend.tests.execution_helpers import (
+    claim_next_queued,
+    enable_execution_queue,
+)
 
 
 def _store(tmp_path):
@@ -274,12 +278,14 @@ def test_dispatch_persists_and_runs_frozen_versions_after_current_changes(tmp_pa
         runner = CapturingRunner()
         orch = MatchOrchestrator(s, runner=runner, max_concurrent=1)
         manager = ContestManager(s, orch)
+        enable_execution_queue(s)
         await manager.publish(contest_id)
         pairing = s.list_contest_pairings(contest_id)[0]
         for bot_id in bots:
             s.set_current_version(bot_id, 2)
 
         await manager.start(contest_id)
+        claim_next_queued(orch)
         match_id = s.list_contest_pairings(contest_id)[0]["match_id"]
         for _ in range(100):
             if s.get_match(match_id)["status"] in ("completed", "aborted"):

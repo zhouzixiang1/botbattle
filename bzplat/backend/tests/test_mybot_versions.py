@@ -609,6 +609,11 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
     captured: dict = {}
 
     class _FakeRunner:
+        runner = None
+
+        def __init__(self):
+            self.runner = self
+
         async def run_binaries(self, path_a, path_b, *, runtime_modes=None, **kw):
             captured["modes"] = runtime_modes
             captured["paths"] = (path_a, path_b)
@@ -622,11 +627,28 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
                 events = []
             return _R()
 
+        async def cleanup_execution(self, scope):
+            scope.mark_cleanup_confirmed()
+
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
     orch = MatchOrchestrator(store, runner=_FakeRunner(), max_concurrent=1)
     async def run():
-        mid = await orch.challenge(ba["id"], bb["id"], u["id"], game_id="holdem")
+        store.executions.resume()
+        request_id = await orch.challenge(
+            ba["id"], bb["id"], u["id"], game_id="holdem"
+        )
+        job = store.executions.claim_next(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=1,
+        )
+        assert job is not None and job["public_id"] == request_id
+        mid = str(job["current_match_id"])
+        orch.start_execution_job(job)
         await orch._tasks[mid]
+        assert store.executions.finalize_ready() == 1
 
     asyncio.run(run())
     assert captured.get("modes") == ("traditional", "longrunning"), captured

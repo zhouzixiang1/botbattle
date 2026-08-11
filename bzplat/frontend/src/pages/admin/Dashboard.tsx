@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
-import { apiGet, apiJson, errMsg } from '@/api'
-import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn } from './ui'
+import { apiFetch, apiJson, errMsg } from '@/api'
+import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn, Button } from './ui'
 import {
-  AutoMatchQueuePanel,
-  type AutoMatchQueueSnapshot,
-} from '@/components/auto-match-queue'
+  ExecutionQueuePanel,
+  type ExecutionQueueSnapshot,
+} from '@/components/execution-queue'
 import { Switch } from '@/components/ui/switch'
+import { useConfirm } from '@/hooks/use-confirm'
+import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
 import { fmtTime } from '@/lib/format'
 
 interface Stats {
@@ -27,6 +29,10 @@ interface Stats {
   recent_users: { id: number; username: string; email: string; role: string; created_at: string }[]
 }
 
+interface RuntimeDiagnostics {
+  queue: ExecutionQueueSnapshot
+}
+
 const ROLE_LABEL: Record<string, string> = {
   user: '普通用户',
   organizer: '组织者',
@@ -37,52 +43,61 @@ export default function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
-  const [queue, setQueue] = useState<AutoMatchQueueSnapshot | null>(null)
+  const [queue, setQueue] = useState<ExecutionQueueSnapshot | null>(null)
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [savingAutoMatch, setSavingAutoMatch] = useState(false)
   const requestRevision = useRef(0)
   const toggleInFlight = useRef(false)
+  const [confirm, confirmDialog] = useConfirm()
 
-  const load = useCallback(async (showLoading = true) => {
-    if (toggleInFlight.current) return
-    const revision = ++requestRevision.current
-    if (showLoading) setLoading(true)
-    try {
-      const [d, q] = await Promise.all([
-        apiGet<Stats>('/api/admin/stats'),
-        apiGet<AutoMatchQueueSnapshot>('/api/auto-match/queue'),
-      ])
-      if (revision === requestRevision.current) {
-        setStats(d)
-        setQueue(q)
-        setError('')
-      }
-    } catch (e) {
-      if (revision === requestRevision.current) setError(errMsg(e, '加载失败'))
-    } finally {
-      if (showLoading && revision === requestRevision.current) setLoading(false)
-    }
+  const pollDashboard = useCallback(async (signal: AbortSignal) => {
+    const revision = requestRevision.current
+    const [statsResult, runtimeResult] = await Promise.allSettled([
+      apiFetch<Stats>('/api/admin/stats', { method: 'GET', signal }),
+      apiFetch<RuntimeDiagnostics>('/api/admin/settings/runtime', { method: 'GET', signal }),
+    ])
+    if (statsResult.status === 'rejected') throw statsResult.reason
+    if (runtimeResult.status === 'rejected') throw runtimeResult.reason
+    if (signal.aborted || revision !== requestRevision.current) return
+    setStats(statsResult.value)
+    setQueue(runtimeResult.value.queue)
+    setLastUpdatedAt(Date.now())
   }, [])
 
-  useEffect(() => {
-    void load(true)
-    const timer = window.setInterval(() => { void load(false) }, 5_000)
-    return () => window.clearInterval(timer)
-  }, [load])
+  const {
+    refresh,
+    polling,
+    offline,
+  } = useSingleFlightPolling({
+    task: pollDashboard,
+    enabled: !savingAutoMatch,
+    intervalMs: 5_000,
+    maxIntervalMs: 40_000,
+    onSuccess: () => {
+      setError('')
+      setLoading(false)
+    },
+    onError: (e) => {
+      setError(errMsg(e, '加载失败'))
+      setLoading(false)
+    },
+  })
 
   const toggleAutoMatch = async (enabled: boolean) => {
-    if (toggleInFlight.current || (!queue?.capability_enabled && enabled)) return
+    if (toggleInFlight.current) return
     const revision = ++requestRevision.current
     toggleInFlight.current = true
     setSavingAutoMatch(true)
     try {
-      const updated = await apiJson<AutoMatchQueueSnapshot>(
+      const updated = await apiJson<ExecutionQueueSnapshot>(
         '/api/admin/auto-match',
         'PUT',
         { enabled },
       )
       if (revision !== requestRevision.current) return
       setQueue(updated)
-      toast.success(enabled ? '自动排位已开启，队列将继续运行' : '自动排位已暂停，当前对局会正常结束')
+      setLastUpdatedAt(Date.now())
+      toast.success(enabled ? '自动排位生产已开启' : '自动排位生产已关闭，人工与赛事任务不受影响')
     } catch (e) {
       if (revision === requestRevision.current) {
         toast.error(errMsg(e, '更新自动排位总开关失败'))
@@ -93,8 +108,49 @@ export default function Dashboard() {
     }
   }
 
-  if (loading && !stats) return <Loading />
-  if (error && !stats) return <ErrorMsg msg={error} />
+  const resumeQueue = async () => {
+    if (toggleInFlight.current) return
+    if (!await confirm({
+      title: '清场并恢复执行队列',
+      desc: '将删除当前平台实例标签下的所有容器，确认清零后补偿中断任务并恢复派发。',
+      confirmText: '清场并恢复',
+      danger: true,
+    })) return
+    const revision = ++requestRevision.current
+    toggleInFlight.current = true
+    setSavingAutoMatch(true)
+    try {
+      const updated = await apiJson<ExecutionQueueSnapshot>(
+        '/api/admin/execution-queue/resume',
+        'POST',
+      )
+      if (revision !== requestRevision.current) return
+      setQueue(updated)
+      setLastUpdatedAt(Date.now())
+      if (updated.dispatcher.state === 'paused') {
+        toast.error(updated.dispatcher.pause_reason || '清理尚未确认，队列仍保持暂停')
+      } else {
+        toast.success('全局执行队列已恢复')
+      }
+    } catch (e) {
+      toast.error(errMsg(e, '恢复全局执行队列失败'))
+    } finally {
+      toggleInFlight.current = false
+      setSavingAutoMatch(false)
+    }
+  }
+
+  if (loading && !stats) return <div role="status" aria-live="polite"><Loading /></div>
+  if ((error || offline) && !stats) {
+    return (
+      <div className="space-y-3" role="alert">
+        <ErrorMsg msg={offline ? '当前离线；联网后会自动恢复管理总览。' : error} />
+        <Button type="button" variant="outline" className="min-h-11" onClick={refresh}>
+          立即重试
+        </Button>
+      </div>
+    )
+  }
   if (!stats) return <EmptyState text="无数据" />
 
   // running 是健康的活跃状态，不能计入异常；历史 Bot 响应异常在对局记录中单独展示。
@@ -104,9 +160,11 @@ export default function Dashboard() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">平台总览统计</p>
-        <RefreshBtn onClick={() => { void load(true) }} />
+        <RefreshBtn onClick={refresh} className="min-h-11" />
       </div>
-      <ErrorMsg msg={error} />
+      {(error || offline) && (
+        <div role="alert"><ErrorMsg msg={offline ? '当前离线；以下保留上次成功数据。' : error} /></div>
+      )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <MetricCard label="用户" value={stats.users} hint={`活跃 ${stats.users_active}`} />
@@ -118,24 +176,36 @@ export default function Dashboard() {
         <MetricCard label="在线会话" value={stats.active_sessions} />
       </div>
 
-      <AutoMatchQueuePanel
+      <ExecutionQueuePanel
         snapshot={queue}
-        maxUpcoming={6}
+        loading={!queue && polling}
+        error={offline ? '当前离线；联网后会自动刷新内部队列诊断。' : error}
+        stale={!!queue && (offline || !!error)}
+        lastUpdatedAt={lastUpdatedAt}
+        onRetry={refresh}
+        maxQueued={6}
+        compactOnMobile
         className="mt-5"
         action={queue ? (
-          <div className="flex shrink-0 items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5">
-            <div className="text-right">
-              <div className="text-xs font-medium">总开关</div>
-              <div className="text-[10px] text-muted-foreground">
-                {queue.capability_enabled ? '生产调度能力可用' : 'QA 安全门已锁定'}
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            {queue.dispatcher.state === 'paused' && (
+              <Button size="sm" className="min-h-11" variant="outline" disabled={savingAutoMatch} onClick={() => { void resumeQueue() }}>
+                清场并恢复
+              </Button>
+            )}
+            <div className="flex min-h-11 items-center gap-3 rounded-lg border border-border bg-background px-2.5 py-1.5">
+              <div className="text-right">
+                <div className="text-xs font-medium">自动排位</div>
+                <div className="text-xs text-muted-foreground">仅控制自动任务生产</div>
               </div>
+              <Switch
+                checked={queue.dispatcher.auto_enabled}
+                disabled={savingAutoMatch}
+                onCheckedChange={(checked) => { void toggleAutoMatch(checked) }}
+                aria-label="自动排位生产开关"
+                className="relative before:absolute before:-inset-3 before:content-['']"
+              />
             </div>
-            <Switch
-              checked={queue.enabled}
-              disabled={savingAutoMatch || (!queue.capability_enabled && !queue.enabled)}
-              onCheckedChange={(checked) => { void toggleAutoMatch(checked) }}
-              aria-label="自动排位总开关"
-            />
           </div>
         ) : null}
       />
@@ -176,6 +246,7 @@ export default function Dashboard() {
           {stats.matches === 0 && <EmptyState text="暂无对局" />}
         </Card>
       </div>
+      {confirmDialog}
     </div>
   )
 }

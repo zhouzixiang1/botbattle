@@ -17,16 +17,31 @@ ACTION_TIMEOUT_SEC = 60.0
 MAX_CONCURRENT_MATCHES = 2
 FULL_RR_MAX_N = 12
 
-# 人类对战运行参数；由 orchestrator 消费，统一放在这里防止散落字面量。
-HUMAN_MAX_CONCURRENT_MATCHES = 4
+# 人类对战回合参数；并发统一由全局 execution queue 控制。
 HUMAN_ACTION_TIMEOUT_SEC = 120.0
 HUMAN_MAX_CONSECUTIVE_TIMEOUTS = 5
 
 
-# 自动排位只有一个管理员可变总开关；定级阈值是产品契约，不是调度参数。
-# 队列长度、串行执行和公平选择策略属于 auto_matcher 的内部算法常量，不能从
+# 全来源执行队列：每个 job 固定占一个 match slot，Bot-vs-Bot
+# 占 2 个 sandbox unit，人机占 1 个。应用启动时 match slot 会经
+# machine ceiling 钳制，sandbox 容量按钳制后的 slot * 2 派生。
+EXECUTION_AGING_SECONDS = 60
+EXECUTION_USER_ACTIVE_LIMIT = 1
+EXECUTION_USER_QUEUED_LIMIT = 4
+EXECUTION_CONTEST_SHARE_SLOTS = 1
+EXECUTION_AUTO_LOOKAHEAD = 6
+EXECUTION_POLL_SECONDS = 1.0
+
+
+# 自动排位只有一个管理员可变总开关；bootstrap 目标仅用于公平队列让
+# 新 Bot 获得冷启动服务，与公开排名资格阈值完全无关。
+# 自动候选前瞻与公平选择策略属于 execution queue 的代码常量，不能从
 # platform_settings、环境变量或管理端请求形成第二套运行时配置。
-AUTO_MATCH_PLACEMENT_REQUIRED = 10
+AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES = 10
+
+# 公开排名资格由独立的已计分场次契约控制；与 auto bootstrap 公平通道
+# 数值恰好相同也不构成配置耦合。
+RANKING_MIN_RATED_MATCHES = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,13 +60,19 @@ CONTEST_SCHEDULER_CONFIG = ContestSchedulerConfig()
 
 __all__ = [
     "ACTION_TIMEOUT_SEC",
-    "AUTO_MATCH_PLACEMENT_REQUIRED",
+    "AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES",
     "CONFIGURATION_SOURCE",
     "CONTEST_SCHEDULER_CONFIG",
     "ContestSchedulerConfig",
     "FULL_RR_MAX_N",
+    "EXECUTION_AGING_SECONDS",
+    "EXECUTION_AUTO_LOOKAHEAD",
+    "EXECUTION_CONTEST_SHARE_SLOTS",
+    "EXECUTION_POLL_SECONDS",
+    "EXECUTION_USER_ACTIVE_LIMIT",
+    "EXECUTION_USER_QUEUED_LIMIT",
     "HUMAN_ACTION_TIMEOUT_SEC",
-    "HUMAN_MAX_CONCURRENT_MATCHES",
     "HUMAN_MAX_CONSECUTIVE_TIMEOUTS",
     "MAX_CONCURRENT_MATCHES",
+    "RANKING_MIN_RATED_MATCHES",
 ]

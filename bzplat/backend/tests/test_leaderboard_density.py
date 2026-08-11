@@ -125,6 +125,7 @@ def test_rating_delta_and_recent_match_stay_in_same_validated_game(tmp_path):
         bot["id"], 1500, 90, 0.06, 11, "valid-holdem-match",
         game_id="holdem",
     )
+    assert store.mark_match_rating_settled("valid-holdem-match")
 
     # 物理行仍在 holdem，但故意把索引漂移成 gomoku；最新链接必须跳过它。
     store.create_match(
@@ -134,6 +135,7 @@ def test_rating_delta_and_recent_match_stay_in_same_validated_game(tmp_path):
         "drifted-index-match", status="completed", winner=0,
         reason="completed", result={"rounds_played": 70, "deltas": [1, -1], "normalized_delta": 0.01},
     )
+    assert store.mark_match_rating_settled("drifted-index-match")
     store._conn.execute(
         "UPDATE matches_index SET game_id='gomoku' WHERE id='drifted-index-match'"
     )

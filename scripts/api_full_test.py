@@ -6,7 +6,7 @@
   2. Bot 上传 / 版本 / 上架 / 公开列表
   3. 挑战对局 + 结果完整性（零和、winner、净筹码）
   4. 已完成对局的 SSE 终态 snapshot vs 落盘回放 events_json 一致性
-  5. 全局 admission 与补槽（首波只接纳代码并发上限，超额 429，释放后补齐）
+  5. 全局执行队列（并发 202 接单、opaque public_id、自动补槽到终态）
   6. 排行榜 Glicko-2 更新、组织者比赛循环赛
 
 前置：
@@ -41,6 +41,11 @@ sys.path.insert(0, str(ROOT))
 from bzplat.backend.crypto import hash_password, verify_password  # noqa: E402
 from bzplat.backend.store import Store  # noqa: E402
 from bzplat.backend.store.schema import ROLE_ADMIN, ROLE_ORGANIZER, ROLE_USER  # noqa: E402
+from scripts._execution_request import (  # noqa: E402
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
 from scripts._qa_target import (  # noqa: E402
     assert_qa_instance,
     ensure_qa_base,
@@ -349,13 +354,75 @@ def wait_match(api: Api, token: str, mid: str, timeout: float = 90) -> dict:
     raise TimeoutError(f"对局 {mid} 超时")
 
 
+def wait_accepted_match(
+    api: Api,
+    token: str,
+    response: httpx.Response,
+    *,
+    label: str,
+    timeout: float = 120,
+) -> tuple[str, str]:
+    """Validate a 202 ticket and wait until the dispatcher creates its match."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    initial = require_execution_request(
+        response.status_code,
+        payload,
+        label=label,
+        detail=response.text[:240],
+    )
+    return str(initial["public_id"]), wait_execution_snapshot(
+        api,
+        token,
+        initial,
+        label=label,
+        timeout=timeout,
+    )
+
+
+def wait_execution_snapshot(
+    api: Api,
+    token: str,
+    initial: dict[str, Any],
+    *,
+    label: str,
+    timeout: float = 120,
+) -> str:
+    """Wait for match admission from an already validated queue snapshot."""
+
+    def fetch(public_id: str) -> tuple[int, Any, str]:
+        polled = api.authed(
+            token, "GET", execution_request_path(public_id)
+        )
+        try:
+            body: Any = polled.json()
+        except ValueError:
+            body = None
+        return polled.status_code, body, polled.text[:240]
+
+    return wait_for_execution_match(
+        initial,
+        fetch,
+        label=label,
+        timeout=timeout,
+    )
+
+
 def test_single_match(api: Api, users: dict[str, str], bot_ids: dict[str, int]) -> str:
     print("\n[3/6] 单局对局 + 结果完整性")
     r = api.authed(users["alice"], "POST", "/api/matches/challenge", json={
         "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["BobBot"],
     })
-    check("发起挑战", r.status_code == 200 and "match_id" in r.json(), f"{r.status_code} {r.text[:80]}")
-    mid = r.json()["match_id"]
+    try:
+        public_id, mid = wait_accepted_match(
+            api, users["alice"], r, label="单局挑战"
+        )
+        check("挑战进入全局执行队列(202)", True, f"public_id={public_id}")
+    except Exception as exc:
+        check("挑战进入全局执行队列(202)", False, str(exc))
+        raise
     m = wait_match(api, users["alice"], mid)
     check("对局完成(非 aborted)", m["status"] == "completed", f"status={m['status']} reason={m.get('reason')}")
 
@@ -392,7 +459,9 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
     r = api.authed(users["alice"], "POST", "/api/matches/challenge", json={
         "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["CarolBot"],
     })
-    mid = r.json()["match_id"]
+    _, mid = wait_accepted_match(
+        api, users["alice"], r, label="SSE 挑战"
+    )
 
     # 等对局完成（replay 是权威完整数据）
     m = wait_match(api, users["alice"], mid, timeout=90)
@@ -469,7 +538,7 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
 
 
 def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, int], n: int = 4) -> None:
-    print(f"\n[5/6] 并发 admission + 补槽（总计 {n} 局）")
+    print(f"\n[5/6] 全局排队 + 自动补槽（总计 {n} 局）")
     # 不同 bot 对，避免冲突：Alice vs Bob, Alice vs Carol, Carol vs Bob, Bob vs Carol
     pairs = [
         (bot_ids["AliceBot"], bot_ids["BobBot"], users["alice"]),
@@ -479,33 +548,32 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
     ]
     pairs = (pairs * ((n + 3) // 4))[:n]
 
-    health = api.client.get("/api/health").json()
-    capacity = max(1, int(health.get("max_concurrent") or 1))
-    expected_first_wave = min(n, capacity)
     results: dict[int, dict] = {}
-    first_match_ids: dict[int, str] = {}
-    rejected: dict[int, tuple[int, int, str]] = {}
+    accepted: dict[int, tuple[str, dict[str, Any]]] = {}
     errors: dict[int, str] = {}
     barrier = threading.Barrier(n)
+    lock = threading.Lock()
 
-    def submit_first_wave(i: int, a: int, b: int, tok: str):
+    def submit(i: int, a: int, b: int, tok: str) -> None:
         try:
             barrier.wait()  # 尽量同时发起
             r = api.authed(tok, "POST", "/api/matches/challenge", json={
                 "my_bot_id": a, "opponent_bot_id": b,
             })
-            if r.status_code == 200:
-                first_match_ids[i] = r.json()["match_id"]
-                return
-            if r.status_code == 429 and "并发已满" in r.text:
-                rejected[i] = (a, b, tok)
-                return
-            errors[i] = f"challenge {r.status_code} {r.text[:80]}"
-        except Exception as e:
-            errors[i] = str(e)
+            payload = require_execution_request(
+                r.status_code,
+                r.json() if r.content else None,
+                label=f"并发挑战 #{i}",
+                detail=r.text[:240],
+            )
+            with lock:
+                accepted[i] = (tok, payload)
+        except Exception as exc:
+            with lock:
+                errors[i] = str(exc)
 
     threads = [
-        threading.Thread(target=submit_first_wave, args=(i, a, b, t))
+        threading.Thread(target=submit, args=(i, a, b, t))
         for i, (a, b, t) in enumerate(pairs)
     ]
     t0 = time.time()
@@ -514,60 +582,47 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
     for th in threads:
         th.join()
 
-    first_wave_ok = (
-        not errors
-        and len(first_match_ids) == expected_first_wave
-        and len(rejected) == n - expected_first_wave
-    )
+    public_ids = [snapshot["public_id"] for _, snapshot in accepted.values()]
     check(
-        f"首波精确接纳 {expected_first_wave} 局，超额请求明确 429",
-        first_wave_ok,
+        f"并发提交的 {n} 个挑战全部返回 202 + opaque public_id",
+        not errors and len(accepted) == n and len(set(public_ids)) == n,
         (
-            f"accepted={len(first_match_ids)} rejected={len(rejected)} "
+            f"accepted={len(accepted)} unique_ids={len(set(public_ids))} "
             + "; ".join(f"#{k}:{v}" for k, v in errors.items())
         ),
     )
 
-    # 先等首波释放全局槽位，再把明确因 admission 拒绝的请求
-    # 按同一 capacity 分批补进。这才是代码配置为 2 时的真实契约，
-    # 不应把任意数量的 pending task 塞进 semaphore 后再声称“并发成功”。
-    for i, mid in sorted(first_match_ids.items()):
+    # 每个 waiter 先等待全局 dispatcher 分配 match_id，再等待该局终态；
+    # 超过并发容量的请求由持久队列保留，不再依赖旧的 429 + 客户端重提。
+    def wait_one(i: int, tok: str, snapshot: dict[str, Any]) -> None:
         try:
-            results[i] = wait_match(api, pairs[i][2], mid, timeout=120)
+            mid = wait_execution_snapshot(
+                api,
+                tok,
+                snapshot,
+                label=f"并发挑战 #{i}",
+                timeout=240,
+            )
+            match = wait_match(api, tok, mid, timeout=240)
+            with lock:
+                results[i] = match
         except Exception as exc:
-            errors[i] = str(exc)
-
-    retry_items = sorted(rejected.items())
-    for start in range(0, len(retry_items), capacity):
-        batch = retry_items[start : start + capacity]
-        retry_barrier = threading.Barrier(len(batch))
-
-        def retry(i: int, a: int, b: int, tok: str) -> None:
-            try:
-                retry_barrier.wait()
-                r = api.authed(tok, "POST", "/api/matches/challenge", json={
-                    "my_bot_id": a, "opponent_bot_id": b,
-                })
-                if r.status_code != 200:
-                    errors[i] = f"retry challenge {r.status_code} {r.text[:80]}"
-                    return
-                results[i] = wait_match(api, tok, r.json()["match_id"], timeout=120)
-            except Exception as exc:
+            with lock:
                 errors[i] = str(exc)
 
-        retry_threads = [
-            threading.Thread(target=retry, args=(i, a, b, tok))
-            for i, (a, b, tok) in batch
-        ]
-        for th in retry_threads:
-            th.start()
-        for th in retry_threads:
-            th.join()
+    waiters = [
+        threading.Thread(target=wait_one, args=(i, tok, snapshot))
+        for i, (tok, snapshot) in sorted(accepted.items())
+    ]
+    for th in waiters:
+        th.start()
+    for th in waiters:
+        th.join()
 
     dt = time.time() - t0
     completed = [m for m in results.values() if m["status"] == "completed"]
     check(
-        f"补槽后全部 {n} 局 completed",
+        f"队列自动补槽后全部 {n} 局 completed",
         len(completed) == n and not errors,
         (
             f"completed={len(completed)} "
@@ -584,9 +639,9 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
         for m in results.values()
     )
     check("每局 result.deltas 零和", zero_sum, "存在缺失或非零和对局")
-    # 无重复 match_id
-    check("无超时(<120s 总)", dt < 125, f"耗时 {dt:.1f}s")
-    print(f"    {n} 局并发总耗时 {dt:.1f}s")
+    match_ids = [str(m.get("id")) for m in results.values()]
+    check("执行请求映射到不重复 match_id", len(set(match_ids)) == len(match_ids), str(match_ids))
+    print(f"    {n} 个排队请求总耗时 {dt:.1f}s")
 
 
 def test_leaderboard_and_contest(

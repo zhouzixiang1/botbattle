@@ -870,35 +870,44 @@ def test_apply_rejects_leaderboard_visibility_change_in_plan_digest(
         _apply_reviewed(db, reviewed, backup)
 
 
-def test_rebuild_is_no_go_while_auto_match_queue_is_nonempty(tmp_path):
+def test_rebuild_is_no_go_while_execution_attempt_is_active(tmp_path):
     db = (tmp_path / "queued-generation.db").resolve()
     store = Store(str(db))
-    _bot(store, "queued-generation-a")
-    _bot(store, "queued-generation-b")
+    first = _bot(store, "queued-generation-a")
+    second = _bot(store, "queued-generation-b")
     _mark_projection_verified(store)
-    token = "queued-generation-leader"
-    lease = store.acquire_auto_match_dispatcher(token, lease_seconds=30)
-    assert lease["owned"] is True
-    refill = store.refill_auto_match_queue(
-        target_queued=1,
-        placement_required=10,
-        dispatcher_token=token,
-        dispatcher_epoch=int(lease["lease_epoch"]),
+    store.executions.resume()
+    first_version = store.get_current_bot_version(first["id"])
+    second_version = store.get_current_bot_version(second["id"])
+    assert first_version is not None and second_version is not None
+    queued = store.executions.enqueue(
+        source="auto",
+        owner_user_id=None,
+        game_id="gomoku",
+        match_type="ladder",
+        bot_a_id=first["id"],
+        bot_b_id=second["id"],
+        bot_a_version_id=first_version["id"],
+        bot_b_version_id=second_version["id"],
     )
-    assert refill["inserted"] == 1
-    assert store.release_auto_match_dispatcher(
-        token, int(lease["lease_epoch"])
+    claimed = store.executions.claim_next(
+        max_match_slots=1,
+        max_sandbox_units=2,
+        aging_seconds=60,
+        user_active_limit=1,
+        contest_share_slots=1,
     )
+    assert claimed is not None and claimed["public_id"] == queued["public_id"]
     store.close()
 
     plan = build_rebuild_plan(db)
-    assert plan.report["auto_match_queue_count"] == 1
+    assert plan.report["execution_active_count"] == 1
     assert plan.report["ready_to_apply"] is False
-    assert any("auto_match_queue 非空" in issue for issue in plan.report["issues"])
+    assert any("execution_jobs 有 1 个活跃 attempt" in issue for issue in plan.report["issues"])
 
     backup = (tmp_path / "queued-generation.cold.db").resolve()
     shutil.copy2(db, backup)
-    with pytest.raises(RuntimeError, match="No-Go: auto_match_queue 非空"):
+    with pytest.raises(RuntimeError, match="No-Go: execution_jobs 有 1 个活跃 attempt"):
         _apply_reviewed(db, plan, backup)
 
 

@@ -25,6 +25,8 @@ def _app(tmp_path):
     store.update_user(u["id"], email_verified=1)
     b1 = store.create_bot(u["id"], "botA", binary_path="/tmp", format="elf", game_id="holdem")
     b2 = store.create_bot(u["id"], "botB", binary_path="/tmp", format="elf", game_id="holdem")
+    g1 = store.create_bot(u["id"], "gomokuA", binary_path="/tmp", format="elf", game_id="gomoku")
+    g2 = store.create_bot(u["id"], "gomokuB", binary_path="/tmp", format="elf", game_id="gomoku")
     # 建若干 holdem + gomoku 对局（completed / aborted 混合）
     for i in range(7):
         mid = f"mh{i}"
@@ -32,7 +34,7 @@ def _app(tmp_path):
         store.update_match(mid, status="completed", winner=0)
     for i in range(3):
         mid = f"mg{i}"
-        store.create_match(mid, bot_a_id=b1["id"], bot_b_id=b2["id"], owner_id=u["id"], game_id="gomoku")
+        store.create_match(mid, bot_a_id=g1["id"], bot_b_id=g2["id"], owner_id=u["id"], game_id="gomoku")
         store.update_match(mid, status="aborted")
     c = TestClient(app)
     return c, store

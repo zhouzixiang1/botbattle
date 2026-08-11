@@ -20,6 +20,43 @@ MATCH_DEBUG_MAX_BYTES_PER_SEAT = 128 * 1024
 MATCH_DEBUG_MAX_ENTRIES_PER_MATCH = 1024
 MATCH_DEBUG_MAX_BYTES_PER_MATCH = 256 * 1024
 
+# 全局执行请求状态机。queued 之外的 starting/running/settling 都占用一场
+# match slot；直到业务终态已落盘且 sandbox label 清零，才允许从 settling
+# 进入终态并释放容量。评分未结算由 per-Bot rated-overlap 门禁隔离，不占用
+# 无关任务的全局容量。
+EXECUTION_SOURCE_MANUAL = "manual"
+EXECUTION_SOURCE_HUMAN = "human"
+EXECUTION_SOURCE_CONTEST = "contest"
+EXECUTION_SOURCE_AUTO = "auto"
+EXECUTION_SOURCES = frozenset(
+    {
+        EXECUTION_SOURCE_MANUAL,
+        EXECUTION_SOURCE_HUMAN,
+        EXECUTION_SOURCE_CONTEST,
+        EXECUTION_SOURCE_AUTO,
+    }
+)
+
+EXECUTION_QUEUED = "queued"
+EXECUTION_STARTING = "starting"
+EXECUTION_RUNNING = "running"
+EXECUTION_SETTLING = "settling"
+EXECUTION_COMPLETED = "completed"
+EXECUTION_CANCELLED = "cancelled"
+EXECUTION_INTERRUPTED = "interrupted"
+EXECUTION_ACTIVE_STATES = frozenset(
+    {EXECUTION_STARTING, EXECUTION_RUNNING, EXECUTION_SETTLING}
+)
+EXECUTION_TERMINAL_STATES = frozenset(
+    {EXECUTION_COMPLETED, EXECUTION_CANCELLED, EXECUTION_INTERRUPTED}
+)
+
+DISPATCHER_STOPPED = "stopped"
+DISPATCHER_STARTING = "starting"
+DISPATCHER_RUNNING = "running"
+DISPATCHER_PAUSED = "paused"
+DISPATCHER_STOPPING = "stopping"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -282,6 +319,171 @@ CREATE TABLE IF NOT EXISTS rating_settlement_sequence (
 );
 INSERT OR IGNORE INTO rating_settlement_sequence(singleton,next_order) VALUES(1,1);
 
+-- 全来源执行请求。public_id 是唯一对外标识；版本 ID、内部主键、match_config
+-- 与故障详情只供调度器使用，所有 API 必须显式白名单投影。
+CREATE TABLE IF NOT EXISTS execution_jobs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    source              TEXT    NOT NULL CHECK (
+        source IN ('manual','human','contest','auto')
+    ),
+    status              TEXT    NOT NULL DEFAULT 'queued' CHECK (
+        status IN ('queued','starting','running','settling',
+                   'completed','cancelled','interrupted')
+    ),
+    priority            INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 100),
+    owner_user_id       INTEGER,
+    game_id             TEXT    NOT NULL,
+    match_type          TEXT    NOT NULL CHECK (
+        match_type IN ('challenge','table','contest','ladder','human')
+    ),
+    -- These are immutable audit snapshots, not ownership FKs.  Active-request
+    -- deletion guards below protect runnable identities while still allowing
+    -- ordinary account/Bot retention policy after the request is terminal.
+    bot_a_id            INTEGER NOT NULL,
+    bot_b_id            INTEGER NOT NULL,
+    bot_a_version_id    INTEGER,
+    bot_b_version_id    INTEGER,
+    human_user_id       INTEGER,
+    human_seat          INTEGER CHECK (human_seat IN (0,1)),
+    contest_id          INTEGER,
+    contest_pairing_id  INTEGER,
+    match_config        TEXT    NOT NULL DEFAULT '{}' CHECK (json_valid(match_config)),
+    rated               INTEGER NOT NULL CHECK (rated IN (0,1)),
+    rating_reason       TEXT    NOT NULL,
+    match_slots         INTEGER NOT NULL DEFAULT 1 CHECK (match_slots=1),
+    sandbox_units       INTEGER NOT NULL CHECK (sandbox_units IN (1,2)),
+    current_match_id    TEXT,
+    auto_decision_id    INTEGER,
+    cancel_requested    INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+    attempt_count       INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
+    cleanup_state       TEXT    NOT NULL DEFAULT 'none' CHECK (
+        cleanup_state IN ('none','pending','confirmed')
+    ),
+    failure_count       INTEGER NOT NULL DEFAULT 0 CHECK (failure_count>=0),
+    next_attempt_at     TEXT,
+    retryable           INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0,1)),
+    terminal_reason     TEXT    NOT NULL DEFAULT '',
+    last_error          TEXT    NOT NULL DEFAULT '',
+    created_at          TEXT    NOT NULL,
+    claimed_at          TEXT,
+    started_at          TEXT,
+    settling_at         TEXT,
+    terminal_at         TEXT,
+    CONSTRAINT chk_execution_job_human_resources CHECK (
+        (source='human' AND match_type='human' AND sandbox_units=1
+         AND human_user_id IS NOT NULL AND human_seat IS NOT NULL) OR
+        (source<>'human' AND match_type<>'human' AND sandbox_units=2
+         AND human_user_id IS NULL AND human_seat IS NULL)
+    ),
+    CONSTRAINT chk_execution_job_contest_ref CHECK (
+        (source='contest' AND contest_id IS NOT NULL
+         AND contest_pairing_id IS NOT NULL) OR
+        (source<>'contest' AND contest_pairing_id IS NULL)
+    ),
+    CONSTRAINT chk_execution_job_lifecycle CHECK (
+        (status='queued' AND current_match_id IS NULL
+         AND claimed_at IS NULL AND started_at IS NULL AND settling_at IS NULL
+         AND terminal_at IS NULL AND cleanup_state='none') OR
+        (status='starting' AND current_match_id IS NOT NULL
+         AND claimed_at IS NOT NULL AND terminal_at IS NULL
+         AND cleanup_state IN ('none','pending','confirmed')) OR
+        (status='running' AND current_match_id IS NOT NULL
+         AND claimed_at IS NOT NULL AND started_at IS NOT NULL
+         AND terminal_at IS NULL
+         AND cleanup_state IN ('none','pending','confirmed')) OR
+        (status='settling' AND current_match_id IS NOT NULL
+         AND claimed_at IS NOT NULL AND settling_at IS NOT NULL
+         AND terminal_at IS NULL AND cleanup_state IN ('pending','confirmed')) OR
+        (status IN ('completed','cancelled','interrupted')
+         AND terminal_at IS NOT NULL)
+    )
+);
+
+-- 每次 claim 对应一个不可复活的 match attempt。running crash 若已有公开事件，
+-- 旧 attempt 保留 interrupted 审计；自动/赛事请求可以在同一 public_id 下重排新 attempt。
+CREATE TABLE IF NOT EXISTS execution_job_attempts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id          INTEGER NOT NULL REFERENCES execution_jobs(id) ON DELETE RESTRICT,
+    attempt_no      INTEGER NOT NULL CHECK (attempt_no>=1),
+    match_id        TEXT    NOT NULL UNIQUE,
+    status          TEXT    NOT NULL CHECK (
+        status IN ('starting','running','settling','completed',
+                   'cancelled','interrupted')
+    ),
+    events_observed INTEGER NOT NULL DEFAULT 0 CHECK (events_observed IN (0,1)),
+    created_at      TEXT    NOT NULL,
+    started_at      TEXT,
+    terminal_at     TEXT,
+    terminal_reason TEXT    NOT NULL DEFAULT '',
+    UNIQUE(job_id,attempt_no)
+);
+
+-- 单 dispatcher 控制面。跨进程唯一性由 DB 邻接 OS flock 提供；本表只保存
+-- 可诊断/可恢复的状态，不保存 lease、PID、boot id 或 daemon incarnation。
+CREATE TABLE IF NOT EXISTS execution_control (
+    singleton           INTEGER PRIMARY KEY CHECK (singleton=1),
+    dispatcher_state    TEXT    NOT NULL DEFAULT 'stopped' CHECK (
+        dispatcher_state IN ('stopped','starting','running','paused','stopping')
+    ),
+    accepting           INTEGER NOT NULL DEFAULT 0 CHECK (accepting IN (0,1)),
+    auto_enabled        INTEGER NOT NULL DEFAULT 1 CHECK (auto_enabled IN (0,1)),
+    pause_reason        TEXT    NOT NULL DEFAULT '',
+    retry_count         INTEGER NOT NULL DEFAULT 0 CHECK (retry_count>=0),
+    retry_at            TEXT,
+    updated_at          TEXT    NOT NULL
+);
+INSERT OR IGNORE INTO execution_control(
+    singleton,dispatcher_state,accepting,auto_enabled,pause_reason,retry_count,updated_at
+) VALUES(1,'stopped',0,1,'',0,CURRENT_TIMESTAMP);
+
+-- Docker create 的物理事实先于 execution attempt 容器存在。这个单例 journal
+-- 与 DB 邻接的实例级 flock 共同封住跨线程/跨进程的 create/cleanup 窗口；
+-- creating 不能仅凭同一 host boot 下的 label 双零自动清除。
+CREATE TABLE IF NOT EXISTS docker_launch_journal (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
+    state           TEXT    NOT NULL DEFAULT 'idle' CHECK (
+        state IN ('idle','creating','created')
+    ),
+    launch_token    TEXT,
+    instance_key    TEXT,
+    owner_kind      TEXT CHECK (
+        owner_kind IS NULL OR owner_kind IN ('execution','preflight')
+    ),
+    job_public_id   TEXT,
+    attempt_no      INTEGER CHECK (attempt_no IS NULL OR attempt_no>=1),
+    slot            INTEGER CHECK (slot IS NULL OR slot>=0),
+    container_name  TEXT,
+    host_boot_id    TEXT,
+    updated_at      TEXT    NOT NULL,
+    CONSTRAINT chk_docker_launch_journal_shape CHECK (
+        (state='idle' AND launch_token IS NULL AND instance_key IS NULL
+         AND owner_kind IS NULL AND job_public_id IS NULL
+         AND attempt_no IS NULL AND slot IS NULL AND container_name IS NULL
+         AND host_boot_id IS NULL) OR
+        (state IN ('creating','created') AND launch_token IS NOT NULL
+         AND instance_key IS NOT NULL AND owner_kind IS NOT NULL
+         AND job_public_id IS NOT NULL AND attempt_no IS NOT NULL
+         AND slot IS NOT NULL AND container_name IS NOT NULL
+         AND host_boot_id IS NOT NULL)
+    )
+);
+INSERT OR IGNORE INTO docker_launch_journal(singleton,state,updated_at)
+VALUES(1,'idle',CURRENT_TIMESTAMP);
+
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_dispatch
+    ON execution_jobs(status,priority,created_at,id);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_owner
+    ON execution_jobs(owner_user_id,status,created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_source
+    ON execution_jobs(source,status,created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_current_match
+    ON execution_jobs(current_match_id) WHERE current_match_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_active_contest_pairing
+    ON execution_jobs(contest_pairing_id)
+    WHERE contest_pairing_id IS NOT NULL
+      AND status IN ('queued','starting','running','settling');
+
 -- 系统自动排位的永久选择审计。活跃队列终态后会删除，但选择时的游标、lane、
 -- owner/Bot/配对服务计数、Rating 差、先后手债务和冻结版本必须长期保留，才能
 -- 复核公平策略。Bot/用户/版本 ID 故意是审计快照而非 FK，实体硬删后证据仍在。
@@ -319,156 +521,30 @@ CREATE TABLE IF NOT EXISTS auto_match_decisions (
     terminal_at                 TEXT,
     terminal_reason             TEXT    NOT NULL DEFAULT '',
     settlement_order            INTEGER,
-    claim_dispatcher_token      TEXT,
-    claim_dispatcher_epoch      INTEGER CHECK (
-        claim_dispatcher_epoch IS NULL OR claim_dispatcher_epoch>0
-    ),
-    execution_scope             TEXT,
-    execution_backend           TEXT CHECK (
-        execution_backend IS NULL OR execution_backend IN ('docker','local')
-    ),
-    execution_state             TEXT CHECK (
-        execution_state IS NULL OR execution_state IN (
-            'claimed','running','recovery_pending','cleanup_confirmed'
-        )
-    ),
-    execution_launch_state      TEXT CHECK (
-        execution_launch_state IS NULL OR execution_launch_state IN (
-            'unstarted','creating','created','started'
-        )
-    ),
-    execution_launch_token      TEXT,
-    execution_daemon_incarnation TEXT,
-    cleanup_requested_at        TEXT,
-    cleanup_ack_at              TEXT,
-    cleanup_error               TEXT NOT NULL DEFAULT '',
+    job_public_id               TEXT,
     CONSTRAINT chk_auto_decision_bots CHECK (bot_a_id <> bot_b_id),
     CONSTRAINT chk_auto_decision_owners CHECK (owner_a_id <> owner_b_id),
     CONSTRAINT chk_auto_decision_lane CHECK (
-        requested_lane IN ('placement','formal') AND
-        actual_lane IN ('placement','formal')
+        requested_lane IN ('bootstrap','established') AND
+        actual_lane IN ('bootstrap','established')
     ),
     CONSTRAINT chk_auto_decision_lifecycle CHECK (
         lifecycle IN ('queued','dispatched','completed','aborted','cancelled')
-    ),
-    CONSTRAINT chk_auto_decision_fence_pair CHECK (
-        (claim_dispatcher_token IS NULL) = (claim_dispatcher_epoch IS NULL)
-    ),
-    CONSTRAINT chk_auto_decision_execution_pair CHECK (
-        (execution_scope IS NULL) = (execution_backend IS NULL) AND
-        (execution_scope IS NULL) = (execution_state IS NULL) AND
-        (execution_scope IS NULL) = (execution_launch_state IS NULL) AND
-        ((execution_launch_state IS NULL AND execution_launch_token IS NULL
-          AND execution_daemon_incarnation IS NULL) OR
-         (execution_launch_state='unstarted' AND execution_launch_token IS NULL
-          AND execution_daemon_incarnation IS NULL) OR
-         (execution_launch_state IN ('creating','created','started')
-          AND execution_launch_token IS NOT NULL
-          AND execution_daemon_incarnation IS NOT NULL))
     )
 );
 
--- 活跃公平队列只保留 queued/dispatched 两个生命周期；completed 且评分结算
--- 落稳，或 aborted 终态落稳后即删除。match_id 因 matches 按游戏分表而不声明
--- 物理 FK，由 Store 在同一 BEGIN IMMEDIATE 事务维护。
-CREATE TABLE IF NOT EXISTS auto_match_queue (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    decision_id         INTEGER NOT NULL UNIQUE
-                            REFERENCES auto_match_decisions(id) ON DELETE RESTRICT,
-    game_id             TEXT    NOT NULL,
-    bot_a_id            INTEGER NOT NULL REFERENCES bots(id) ON DELETE RESTRICT,
-    bot_b_id            INTEGER NOT NULL REFERENCES bots(id) ON DELETE RESTRICT,
-    bot_a_version_id    INTEGER NOT NULL REFERENCES bot_versions(id) ON DELETE RESTRICT,
-    bot_b_version_id    INTEGER NOT NULL REFERENCES bot_versions(id) ON DELETE RESTRICT,
-    status              TEXT    NOT NULL DEFAULT 'queued',
-    match_id            TEXT,
-    dispatcher_token    TEXT,
-    dispatcher_epoch    INTEGER CHECK (
-        dispatcher_epoch IS NULL OR dispatcher_epoch>0
-    ),
-    execution_scope     TEXT,
-    execution_backend   TEXT CHECK (
-        execution_backend IS NULL OR execution_backend IN ('docker','local')
-    ),
-    execution_state     TEXT CHECK (
-        execution_state IS NULL OR execution_state IN (
-            'claimed','running','recovery_pending','cleanup_confirmed'
-        )
-    ),
-    execution_launch_state TEXT CHECK (
-        execution_launch_state IS NULL OR execution_launch_state IN (
-            'unstarted','creating','created','started'
-        )
-    ),
-    execution_launch_token TEXT,
-    execution_daemon_incarnation TEXT,
-    cleanup_requested_at TEXT,
-    cleanup_ack_at      TEXT,
-    cleanup_error       TEXT NOT NULL DEFAULT '',
-    selection_reason    TEXT    NOT NULL DEFAULT '',
-    created_at          TEXT    NOT NULL,
-    dispatched_at       TEXT,
-    CONSTRAINT chk_auto_queue_bots CHECK (bot_a_id <> bot_b_id),
-    CONSTRAINT chk_auto_queue_status CHECK (status IN ('queued','dispatched')),
-    CONSTRAINT chk_auto_queue_lifecycle CHECK (
-        (status='queued' AND match_id IS NULL AND dispatcher_token IS NULL
-                         AND dispatcher_epoch IS NULL AND dispatched_at IS NULL
-                         AND execution_scope IS NULL AND execution_backend IS NULL
-                         AND execution_state IS NULL AND execution_launch_state IS NULL
-                         AND execution_launch_token IS NULL
-                         AND execution_daemon_incarnation IS NULL
-                         AND cleanup_requested_at IS NULL AND cleanup_ack_at IS NULL) OR
-        (status='dispatched' AND match_id IS NOT NULL AND dispatcher_token IS NOT NULL
-                             AND dispatcher_epoch IS NOT NULL AND dispatched_at IS NOT NULL
-                             AND execution_scope IS NOT NULL
-                             AND execution_backend IS NOT NULL
-                             AND execution_state IS NOT NULL
-                             AND execution_launch_state IS NOT NULL
-                             AND ((execution_launch_state='unstarted'
-                                   AND execution_launch_token IS NULL
-                                   AND execution_daemon_incarnation IS NULL)
-                                  OR (execution_launch_state<>'unstarted'
-                                      AND execution_launch_token IS NOT NULL
-                                      AND execution_daemon_incarnation IS NOT NULL)))
-    )
-);
-
--- v2 独立单例控制面。它与历史 platform_settings 的同名键无关，首次升级始终
--- 默认开启，之后只有管理员严格布尔 API 可改 enabled。
-CREATE TABLE IF NOT EXISTS auto_match_control (
-    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
-    enabled         INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
-    updated_at      TEXT    NOT NULL
-);
-INSERT OR IGNORE INTO auto_match_control(singleton,enabled,updated_at)
-VALUES(1,1,CURRENT_TIMESTAMP);
-
--- 调度 owner lease 防多个服务进程互相派发/恢复。lease 只是内部协调状态，不是
--- 管理员参数；过期后新进程可接管，未过期时其他进程只读队列。
-CREATE TABLE IF NOT EXISTS auto_match_dispatcher (
-    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
-    owner_token     TEXT,
-    lease_epoch     INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch>=0),
-    lease_until     TEXT,
-    heartbeat_at    TEXT
-);
-INSERT OR IGNORE INTO auto_match_dispatcher(singleton,lease_epoch) VALUES(1,0);
-
--- 持久公平游标与平台故障 circuit breaker。next_lane: 0=placement, 1=formal。
+-- 持久公平游标。next_lane: 0=bootstrap, 1=established。
 CREATE TABLE IF NOT EXISTS auto_match_fair_state (
     singleton           INTEGER PRIMARY KEY CHECK (singleton=1),
     next_game_idx       INTEGER NOT NULL DEFAULT 0 CHECK (next_game_idx>=0),
     next_lane           INTEGER NOT NULL DEFAULT 0 CHECK (next_lane IN (0,1)),
     revision            INTEGER NOT NULL DEFAULT 0 CHECK (revision>=0),
     bootstrap_version   INTEGER NOT NULL DEFAULT 0 CHECK (bootstrap_version>=0),
-    platform_failures   INTEGER NOT NULL DEFAULT 0 CHECK (platform_failures>=0),
-    not_before          TEXT,
     updated_at          TEXT    NOT NULL
 );
 INSERT OR IGNORE INTO auto_match_fair_state(
-    singleton,next_game_idx,next_lane,revision,bootstrap_version,
-    platform_failures,not_before,updated_at
-) VALUES(1,0,0,0,0,0,NULL,CURRENT_TIMESTAMP);
+    singleton,next_game_idx,next_lane,revision,bootstrap_version,updated_at
+) VALUES(1,0,0,0,0,CURRENT_TIMESTAMP);
 
 -- 公平选择只读这些 auto 专属计数，绝不借用可被前台挑战影响的 ratings/
 -- pair_stats。所有计数按游戏隔离；owner 全局活跃唯一由 queue trigger 保证。
@@ -746,140 +822,10 @@ CREATE TABLE IF NOT EXISTS contest_templates (
 
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bot_versions_bot ON bot_versions(bot_id);
-CREATE INDEX IF NOT EXISTS idx_auto_match_queue_order
-    ON auto_match_queue(status, id);
-CREATE INDEX IF NOT EXISTS idx_auto_match_queue_game
-    ON auto_match_queue(game_id, status, id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_queue_match
-    ON auto_match_queue(match_id) WHERE match_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_decisions_match
     ON auto_match_decisions(match_id) WHERE match_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_auto_match_decisions_created
     ON auto_match_decisions(id DESC);
--- 整个平台最多一场系统自动排位处于 dispatched；多进程共同受 SQLite 唯一索引约束。
-CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_queue_one_dispatched
-    ON auto_match_queue(status) WHERE status='dispatched';
-
--- 一个 Bot 在 queued/dispatched 活跃队列中只能出现一次。跨列唯一性无法用普通
--- UNIQUE 表达，写事务内的触发器在 SQLite 串行写锁下提供数据库级硬约束。
-CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_bot_insert
-BEFORE INSERT ON auto_match_queue
-WHEN EXISTS (
-    SELECT 1 FROM auto_match_queue q
-    WHERE NEW.bot_a_id IN (q.bot_a_id, q.bot_b_id)
-       OR NEW.bot_b_id IN (q.bot_a_id, q.bot_b_id)
-)
-BEGIN
-    SELECT RAISE(ABORT, 'auto-match bot already queued');
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_bot_update
-BEFORE UPDATE OF bot_a_id,bot_b_id ON auto_match_queue
-WHEN EXISTS (
-    SELECT 1 FROM auto_match_queue q
-    WHERE q.id<>OLD.id AND (
-        NEW.bot_a_id IN (q.bot_a_id, q.bot_b_id)
-        OR NEW.bot_b_id IN (q.bot_a_id, q.bot_b_id)
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'auto-match bot already queued');
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_owner_insert
-BEFORE INSERT ON auto_match_queue
-WHEN EXISTS (
-    SELECT 1 FROM auto_match_queue q
-    JOIN bots qa ON qa.id=q.bot_a_id
-    JOIN bots qb ON qb.id=q.bot_b_id
-    JOIN bots na ON na.id=NEW.bot_a_id
-    JOIN bots nb ON nb.id=NEW.bot_b_id
-    WHERE na.owner_id IN (qa.owner_id,qb.owner_id)
-       OR nb.owner_id IN (qa.owner_id,qb.owner_id)
-)
-BEGIN
-    SELECT RAISE(ABORT, 'auto-match owner already queued');
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_unique_owner_update
-BEFORE UPDATE OF bot_a_id,bot_b_id ON auto_match_queue
-WHEN EXISTS (
-    SELECT 1 FROM auto_match_queue q
-    JOIN bots qa ON qa.id=q.bot_a_id
-    JOIN bots qb ON qb.id=q.bot_b_id
-    JOIN bots na ON na.id=NEW.bot_a_id
-    JOIN bots nb ON nb.id=NEW.bot_b_id
-    WHERE q.id<>OLD.id AND (
-        na.owner_id IN (qa.owner_id,qb.owner_id)
-        OR nb.owner_id IN (qa.owner_id,qb.owner_id)
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'auto-match owner already queued');
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_identity_insert
-BEFORE INSERT ON auto_match_queue
-WHEN NOT EXISTS (
-    SELECT 1 FROM bots a JOIN users ua ON ua.id=a.owner_id JOIN bots b
-      ON a.id=NEW.bot_a_id AND b.id=NEW.bot_b_id
-    JOIN users ub ON ub.id=b.owner_id
-    JOIN bot_versions va ON va.id=NEW.bot_a_version_id AND va.bot_id=a.id
-    JOIN bot_versions vb ON vb.id=NEW.bot_b_version_id AND vb.bot_id=b.id
-    JOIN auto_match_decisions d ON d.id=NEW.decision_id
-    WHERE a.game_id=NEW.game_id AND b.game_id=NEW.game_id
-      AND a.owner_id<>b.owner_id
-      AND a.is_active=1 AND b.is_active=1
-      AND ua.is_active=1 AND ub.is_active=1
-      AND a.is_builtin=0 AND b.is_builtin=0
-      AND a.format='elf' AND b.format='elf'
-      AND a.os='linux' AND b.os='linux'
-      AND a.arch='amd64' AND b.arch='amd64'
-      AND va.format='elf' AND vb.format='elf'
-      AND va.os='linux' AND vb.os='linux'
-      AND va.arch='amd64' AND vb.arch='amd64'
-      AND va.binary_path<>'' AND vb.binary_path<>''
-      AND d.game_id=NEW.game_id
-      AND d.bot_a_id=NEW.bot_a_id AND d.bot_b_id=NEW.bot_b_id
-      AND d.bot_a_version_id=NEW.bot_a_version_id
-      AND d.bot_b_version_id=NEW.bot_b_version_id
-      AND d.lifecycle='queued'
-)
-BEGIN
-    SELECT RAISE(ABORT, 'invalid auto-match queue identity');
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_auto_match_queue_identity_update
-BEFORE UPDATE OF decision_id,game_id,bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id
-ON auto_match_queue
-WHEN NOT EXISTS (
-    SELECT 1 FROM bots a JOIN users ua ON ua.id=a.owner_id JOIN bots b
-      ON a.id=NEW.bot_a_id AND b.id=NEW.bot_b_id
-    JOIN users ub ON ub.id=b.owner_id
-    JOIN bot_versions va ON va.id=NEW.bot_a_version_id AND va.bot_id=a.id
-    JOIN bot_versions vb ON vb.id=NEW.bot_b_version_id AND vb.bot_id=b.id
-    JOIN auto_match_decisions d ON d.id=NEW.decision_id
-    WHERE a.game_id=NEW.game_id AND b.game_id=NEW.game_id
-      AND a.owner_id<>b.owner_id
-      AND a.is_active=1 AND b.is_active=1
-      AND ua.is_active=1 AND ub.is_active=1
-      AND a.is_builtin=0 AND b.is_builtin=0
-      AND a.format='elf' AND b.format='elf'
-      AND a.os='linux' AND b.os='linux'
-      AND a.arch='amd64' AND b.arch='amd64'
-      AND va.format='elf' AND vb.format='elf'
-      AND va.os='linux' AND vb.os='linux'
-      AND va.arch='amd64' AND vb.arch='amd64'
-      AND va.binary_path<>'' AND vb.binary_path<>''
-      AND d.game_id=NEW.game_id
-      AND d.bot_a_id=NEW.bot_a_id AND d.bot_b_id=NEW.bot_b_id
-      AND d.bot_a_version_id=NEW.bot_a_version_id
-      AND d.bot_b_version_id=NEW.bot_b_version_id
-      AND d.lifecycle='queued'
-)
-BEGIN
-    SELECT RAISE(ABORT, 'invalid auto-match queue identity');
-END;
 -- 每游戏对局表的索引由 db.py _migrate 的 _PER_GAME_INDEX_COLS 循环建（注册表派生，
 -- 覆盖第 4 游戏），不在此字面硬编码（避免重复索引 + 加游戏漏建）。
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -918,7 +864,6 @@ STATUS_ABORTED = "aborted"
 
 # 对外对局技术故障事件（新写 replay / 实时 SSE / 公开读取唯一命名）
 TECHNICAL_INCIDENT_EVENT = "technical_incident"
-BOT_CAPACITY_EXHAUSTED_REASON = "bot_capacity_exhausted"
 TECHNICAL_INCIDENT_MESSAGES = {
     "invalid_json": "Bot 输出不是合法 JSON",
     "invalid_envelope": "Bot 响应信封必须是 JSON 对象",

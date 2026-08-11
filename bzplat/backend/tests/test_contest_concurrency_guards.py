@@ -14,6 +14,10 @@ from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import XP_CONTEST_PARTICIPATE
+from bzplat.backend.tests.execution_helpers import (
+    claim_next_queued,
+    enable_execution_queue,
+)
 
 
 class _CountingOrch:
@@ -417,8 +421,10 @@ def test_force_finish_rejects_while_real_runner_is_blocked(tmp_path):
         runner = BlockingRunner()
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
         manager = ContestManager(store, orch)
+        enable_execution_queue(store)
         await manager.publish(contest_id)
         await manager.start(contest_id)
+        claim_next_queued(orch)
         await asyncio.wait_for(runner.entered.wait(), timeout=1)
 
         with pytest.raises(ValueError, match="未完成对阵"):

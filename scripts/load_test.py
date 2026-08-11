@@ -47,6 +47,11 @@ from bzplat.backend.crypto import hash_password, new_session_token, session_expi
 from bzplat.backend.store import Store  # noqa: E402
 from bzplat.backend.store.schema import ROLE_ADMIN, ROLE_ORGANIZER, ROLE_USER  # noqa: E402
 from bzplat.backend.bots.manager import BotManager  # noqa: E402
+from scripts._execution_request import (  # noqa: E402
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
 from scripts._qa_accounts import (  # noqa: E402
     QaAccountSpec,
     get_or_create_dedicated_account,
@@ -144,6 +149,46 @@ class Api:
                     return m
             time.sleep(0.5)
         raise TimeoutError(f"对局 {mid} {timeout}s 未完成")
+
+    @staticmethod
+    def accepted_execution(
+        response: httpx.Response, *, label: str
+    ) -> dict[str, Any]:
+        try:
+            payload: Any = response.json()
+        except ValueError:
+            payload = None
+        return require_execution_request(
+            response.status_code,
+            payload,
+            label=label,
+            detail=response.text[:240],
+        )
+
+    def wait_execution_match(
+        self,
+        token: str,
+        initial: dict[str, Any],
+        *,
+        label: str,
+        timeout: float = 180,
+    ) -> str:
+        def fetch(public_id: str) -> tuple[int, Any, str]:
+            response = self.authed(
+                token, "GET", execution_request_path(public_id)
+            )
+            try:
+                payload: Any = response.json()
+            except ValueError:
+                payload = None
+            return response.status_code, payload, response.text[:240]
+
+        return wait_for_execution_match(
+            initial,
+            fetch,
+            label=label,
+            timeout=timeout,
+        )
 
 
 def multipart(fields: dict[str, Any], file_field: str, filename: str, data: bytes) -> tuple[dict, bytes]:
@@ -340,8 +385,19 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     if rc:
         rr = rc(api, tok, {"my_bot_id": ctx["bots"][ctx["user_names"][0]]["holdem"],
                            "opponent_bot_id": ctx["bots"][u2]["holdem"], "game_id": "holdem"})
-        if rr.status_code == 200:
-            tmid = rr.json()["match_id"]
+        try:
+            execution = api.accepted_execution(rr, label="阶段0互动挑战")
+            tmid = api.wait_execution_match(
+                tok, execution, label="阶段0互动挑战", timeout=180
+            )
+        except Exception as exc:
+            check("阶段0互动挑战进入执行队列", False, str(exc))
+        else:
+            check(
+                "阶段0互动挑战进入执行队列(202)",
+                True,
+                f"public_id={execution['public_id']}",
+            )
             # 评论
             r = api.authed(tok, "POST", "/api/comments",
                            json={"target_type": "match", "target_id": tmid, "body": "loadtest comment"})
@@ -539,8 +595,16 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
     done = [0]
     lock = threading.Lock()
 
-    def wait_one(mid: str, game: str, owner_tok: str) -> None:
+    def wait_one(
+        execution: dict[str, Any], game: str, owner_tok: str
+    ) -> None:
         try:
+            mid = api.wait_execution_match(
+                owner_tok,
+                execution,
+                label=f"阶段2 {game} 挑战",
+                timeout=300,
+            )
             # Hold'em 规则固定为 70 手，不能靠请求参数缩短；给真实整场留足时间。
             m = api.wait_match(owner_tok, mid, timeout=240)
             with lock:
@@ -567,15 +631,22 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
             if elapsed < expected:
                 time.sleep(expected - elapsed)
         r = api.authed(owner_tok, "POST", "/api/matches/challenge", json=payload)
-        if r.status_code != 200:
+        try:
+            execution = api.accepted_execution(
+                r, label=f"阶段2 {game} 挑战"
+            )
+        except Exception as exc:
             with lock:
-                errors.append(f"challenge {game} {r.status_code} {r.text[:60]}")
+                errors.append(f"challenge {game}: {exc}")
             # 被限流时多等一个窗口再继续
             if r.status_code == 429:
                 time.sleep(RATE_WINDOW / CHALLENGE_RATE)
             continue
-        mid = r.json()["match_id"]
-        th = threading.Thread(target=wait_one, args=(mid, game, owner_tok), daemon=True)
+        th = threading.Thread(
+            target=wait_one,
+            args=(execution, game, owner_tok),
+            daemon=True,
+        )
         th.start()
         waiters.append(th)
     for th in waiters:
@@ -686,8 +757,19 @@ def phase3_sse(api: Api, ctx: dict[str, Any]) -> None:
         "my_bot_id": ctx["bots"][u1]["holdem"], "opponent_bot_id": ctx["bots"][u2]["holdem"],
         "game_id": "holdem",
     })
-    check("发起 SSE 观赛对局", r.status_code == 200, r.text[:80])
-    mid = r.json()["match_id"]
+    try:
+        execution = api.accepted_execution(r, label="SSE 观赛挑战")
+        mid = api.wait_execution_match(
+            tok, execution, label="SSE 观赛挑战", timeout=240
+        )
+    except Exception as exc:
+        check("发起 SSE 观赛对局(202 + match_id)", False, str(exc))
+        return
+    check(
+        "发起 SSE 观赛对局(202 + match_id)",
+        True,
+        f"public_id={execution['public_id']}",
+    )
 
     # 订阅并收集非 ping 事件；正常契约下首帧 snapshot 会令线程立即退出。
     # 此阶段只证明连接可建立、首帧 snapshot 结构可用；不等待也不声称验证
@@ -784,11 +866,24 @@ def phase4_human(api: Api, ctx: dict[str, Any]) -> None:
         bot_id = ctx["bots"][opp][game]
         hu_tok = ctx["tokens"][hu]
         r = _paced_human(api, hu_tok, {"bot_id": bot_id, "game_id": game, **cfg})
-        if r.status_code != 200:
-            check(f"人类对战 {game} 建局", False, f"{r.status_code} {r.text[:80]}")
+        try:
+            execution = api.accepted_execution(
+                r, label=f"人类对战 {game}"
+            )
+            mid = api.wait_execution_match(
+                hu_tok,
+                execution,
+                label=f"人类对战 {game}",
+                timeout=240,
+            )
+        except Exception as exc:
+            check(f"人类对战 {game} 建局", False, str(exc))
             continue
-        mid = r.json()["match_id"]
-        check(f"人类对战 {game} 建局", True)
+        check(
+            f"人类对战 {game} 建局(202)",
+            True,
+            f"public_id={execution['public_id']}",
+        )
 
         # 并发提第二局（同一用户）应被拒（per-user ≤1）—— 仅 holdem 场景测一次
         if idx == 0:
@@ -1112,12 +1207,19 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
         "my_bot_id": ctx["bots"][u1]["holdem"], "opponent_bot_id": ctx["bots"][ctx["user_names"][1]]["holdem"],
         "game_id": "holdem",
     })
-    if r.status_code == 200:
-        amid = r.json()["match_id"]
+    try:
+        execution = api.accepted_execution(r, label="阶段7 强制 abort 挑战")
+        amid = api.wait_execution_match(
+            ctx["tokens"][u1],
+            execution,
+            label="阶段7 强制 abort 挑战",
+            timeout=180,
+        )
+    except Exception as exc:
+        warn(f"阶段7 强制 abort 对局发起失败：{exc}")
+    else:
         r = api.authed(tok, "PATCH", f"/api/admin/matches/{amid}", json={"status": "aborted"})
         check("PATCH /api/admin/matches/{id}（强制 aborted）", r.status_code == 200 and r.json()["match"]["status"] == "aborted", r.text[:80])
-    else:
-        warn(f"阶段7 强制 abort 对局发起失败 {r.status_code}")
 
     # 站点配置（PR-10）
     r = api.authed(tok, "PATCH", "/api/admin/settings/site", json={"announcement": "loadtest 公告"})

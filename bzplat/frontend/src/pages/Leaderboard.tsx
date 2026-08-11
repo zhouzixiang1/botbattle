@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Activity,
@@ -13,9 +13,9 @@ import {
 } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import {
-  AutoMatchQueuePanel,
-  type AutoMatchQueueSnapshot,
-} from '@/components/auto-match-queue'
+  ExecutionQueuePanel,
+  type ExecutionQueueSnapshot,
+} from '@/components/execution-queue'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -30,7 +30,8 @@ import {
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { TierBadge } from '@/components/tier-badge'
 import Pagination from '@/components/Pagination'
-import { apiGet, errMsg } from '@/api'
+import { apiFetch, apiGet, errMsg } from '@/api'
+import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
 import { GAMES, type GameId } from '@/lib/games'
 import { fmtRating, fmtTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -296,10 +297,10 @@ export default function Leaderboard() {
   const [gameId, setGameId] = useState<GameId>('holdem')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
-  const [queue, setQueue] = useState<AutoMatchQueueSnapshot | null>(null)
+  const [queue, setQueue] = useState<ExecutionQueueSnapshot | null>(null)
   const [queueLoading, setQueueLoading] = useState(true)
   const [queueError, setQueueError] = useState('')
-  const queueRequest = useRef(0)
+  const [queueLastUpdatedAt, setQueueLastUpdatedAt] = useState<number | null>(null)
   const perPage = 50
 
   useEffect(() => {
@@ -335,34 +336,33 @@ export default function Leaderboard() {
     }
   }, [gameId, page])
 
-  useEffect(() => {
-    let disposed = false
-    const loadQueue = async (initial = false) => {
-      const requestId = ++queueRequest.current
-      if (initial) setQueueLoading(true)
-      try {
-        const data = await apiGet<AutoMatchQueueSnapshot>(
-          `/api/auto-match/queue?game_id=${encodeURIComponent(gameId)}`,
-        )
-        if (disposed || requestId !== queueRequest.current) return
-        if (data.game_id !== gameId) throw new Error('自动排位队列游戏维度不一致')
-        setQueue(data)
-        setQueueError('')
-      } catch (reason) {
-        if (disposed || requestId !== queueRequest.current) return
-        setQueueError(errMsg(reason, '自动排位队列加载失败'))
-      } finally {
-        if (!disposed && requestId === queueRequest.current) setQueueLoading(false)
-      }
-    }
-    void loadQueue(true)
-    const timer = window.setInterval(() => { void loadQueue(false) }, 3_000)
-    return () => {
-      disposed = true
-      queueRequest.current += 1
-      window.clearInterval(timer)
-    }
-  }, [gameId])
+  const pollQueue = useCallback(async (signal: AbortSignal) => {
+    const data = await apiFetch<ExecutionQueueSnapshot>('/api/execution-queue', {
+      method: 'GET',
+      signal,
+    })
+    if (signal.aborted) return
+    setQueue(data)
+    setQueueLastUpdatedAt(Date.now())
+  }, [])
+
+  const {
+    refresh: refreshQueue,
+    polling: queuePolling,
+    offline: queueOffline,
+  } = useSingleFlightPolling({
+    task: pollQueue,
+    intervalMs: 3_000,
+    maxIntervalMs: 24_000,
+    onSuccess: () => {
+      setQueueError('')
+      setQueueLoading(false)
+    },
+    onError: (reason) => {
+      setQueueError(errMsg(reason, '全局执行队列加载失败'))
+      setQueueLoading(false)
+    },
+  })
 
   const changeGame = (next: GameId) => {
     if (next === gameId) return
@@ -372,10 +372,6 @@ export default function Leaderboard() {
     setSummary(EMPTY_SUMMARY)
     setPlacementRequired(0)
     setTotal(0)
-    setQueue(null)
-    setQueueError('')
-    setQueueLoading(true)
-    queueRequest.current += 1
     setError('')
     setLoading(true)
     setGameId(next)
@@ -433,11 +429,15 @@ export default function Leaderboard() {
         </dl>
       </Card>
 
-      <AutoMatchQueuePanel
+      <ExecutionQueuePanel
         snapshot={queue}
-        loading={queueLoading}
-        error={queueError}
-        maxUpcoming={4}
+        loading={queueLoading || (!queue && queuePolling)}
+        error={queueOffline ? '当前离线；联网后会自动刷新全局队列。' : queueError}
+        stale={!!queue && (queueOffline || !!queueError)}
+        lastUpdatedAt={queueLastUpdatedAt}
+        onRetry={refreshQueue}
+        maxQueued={4}
+        compactOnMobile
         className="mb-3"
       />
 

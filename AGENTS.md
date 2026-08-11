@@ -10,7 +10,7 @@
   1. 主目录保持 `main` 干净（只 `git pull` 同步）；50380 服务始终是 main 最新代码、线上 db 不被测试写入。
   2. `git worktree add .worktrees/<分支名> -b feat/...`（或 `fix/...`）——共享主仓库 `.git`，秒建零拷贝。`.worktrees/` 已在 `.gitignore`（不跟踪 node_modules/dist/db 等产物）。
   3. **worktree 跑完全独立的运行时栈**（CWD=worktree 是隔离关键）：
-     - **后端**：`cd .worktrees/<分支名> && python -m bzplat.backend.cli serve --host 127.0.0.1 --port <非50380>`
+    - **后端**：`cd .worktrees/<分支名> && BZ_DB_PATH=$PWD/botzone.db BZ_INSTANCE_KEY=qa-mybranch BZ_QA_INSTANCE=1 python -m bzplat.backend.cli serve --host 127.0.0.1 --port <非50380>`（每个 worktree 替换为自己的稳定唯一 instance key）
        （CWD=worktree → 加载 worktree 源码 + worktree/botzone.db + 独立 bot_uploads/avatars/logs；与主目录源码/db 完全隔离）
      - **前端**：`cd .worktrees/<分支名>/bzplat/frontend && npm install && BZ_API_TARGET=http://127.0.0.1:<worktree端口> npm run dev`
        （vite.config.ts 的 proxy 目标读 `BZ_API_TARGET` 环境变量）
@@ -22,7 +22,7 @@
        # 副本与主库完全独立——往 worktree 库写不会影响主库（关键：是 cp 不是软链接）
        ```
      - **先评估影响再动**：复制前必须想清「这个 worktree 的改动会怎么读写数据库？」——新增表/列（需迁移测试）、写业务数据（造测试数据）、只读查询（副本即可）、清空/迁移（高风险，确认在 worktree 库操作）。评估结论写进 PR 描述的「数据库影响」一栏。
-     - **起服务必须钉死 worktree 库**：`cd .worktrees/<分支名> && BZ_DB_PATH=$PWD/botzone.db python -m bzplat.backend.cli serve --port <非50380>`——显式 `BZ_DB_PATH=$PWD/botzone.db`（绝对路径）锁死到 worktree 库，杜绝 CWD 漂移或误连主库。关联产物（`bot_uploads/`/`avatars/`/`logs/`）也跑在 worktree 下（CWD 隔离）。
+    - **起服务必须钉死 worktree 库与 Docker namespace**：`cd .worktrees/<分支名> && BZ_DB_PATH=$PWD/botzone.db BZ_INSTANCE_KEY=qa-mybranch BZ_DOCKER_HOST=unix:///var/run/docker.sock BZ_QA_INSTANCE=1 python -m bzplat.backend.cli serve --port <非50380>`——显式 `BZ_DB_PATH=$PWD/botzone.db`（绝对路径）锁死到 worktree 库，`BZ_INSTANCE_KEY` 每个并行 worktree 替换为稳定唯一小写值，杜绝 CWD 漂移、误连主库或跨实例清理容器。关联产物（`bot_uploads/`/`avatars/`/`logs/`）也跑在 worktree 下（CWD 隔离）。
      - **铁律：测试只能动 worktree 库，绝不动主分支库**——`/home/zzx/project/botbattle/botzone.db`（50380 服务）是**只读真相源**，任何写操作（造数据/迁移/清空/修复）都必须在 worktree 副本上进行。误写主库 = 污染线上，不可逆。验证某操作安全时，先在 worktree 库跑通再考虑是否适用于主库（且主库操作必须用户明确授权）。
   4. **合并必须走 GitHub Pull Request**（`gh pr create` → 评审 → 合并到 main），**禁止本地 `git merge` 直推 main**。
   5. PR 合并后**清理**：停 worktree 服务 → 主目录 `git worktree remove .worktrees/<分支名>` → 删分支（本地 + 远端）→ 主目录 `git pull` + `bash scripts/rebuild.sh`（rebuild + restart，让 50380 生效新代码）。
@@ -87,23 +87,25 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 - **测试种子账号**：`python scripts/seed_test_accounts.py`（建 tester1/tester2，各上传 holdem/gomoku/pencil 样例 Bot；幂等，便于对战/人类对战测试）。
 - **改完代码必须 rebuild + restart**：`bash scripts/rebuild.sh`（`npm run build` → `platform-ctl.sh restart`）。前端产物（`bzplat/frontend/dist`）由后端 StaticFiles 托管、后端代码由运行进程加载——不 rebuild+restart 代码不会生效（常见症状：新路由 405 Method Not Allowed）。
 - **worktree 前端独立预览**（开发期，不碰主服务 50380）：先在 worktree 起独立后端 `cd .worktrees/<分支> && python -m bzplat.backend.cli serve --port 50381`，再 `BZ_API_TARGET=http://127.0.0.1:50381 npm run dev`（vite dev server，proxy 到 worktree 后端）。详见上方「worktree 隔离工作流」。
-- **日志**：`logs/app.log`（`logging_config.setup_logging`，统一格式 `时间 级别 [模块] 消息`）。排查对局/bot 崩溃/auto-match/WS 问题在此；admin「日志」Tab 可网页查看与过滤。bot EOF 会附带 stderr 末尾。
+- **日志**：`logs/app.log`（`logging_config.setup_logging`，统一格式 `时间 级别 [模块] 消息`）。排查执行队列/自动排位生产、对局、Bot 崩溃和 WS 问题在此；admin「日志」Tab 可网页查看与过滤。bot EOF 会附带 stderr 末尾。
 
 ## 关键约束（容易踩坑）
 
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
 - **常量按职责集中**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）及历史 `platform_settings` 键名集中在 `bzplat/backend/store/schema.py`；生产运行参数集中在 `bzplat/backend/runtime/config.py`，资源硬顶及机器 ceiling 计算集中在 `runtime/limits.py`。禁止在消费者中散落同义字面量。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
-- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定默认对局并发 2（再由 `runtime/limits.py` 按 `max(1, cpu//4)` ceiling 钳制）、action timeout、自动排位定级阈值、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；自动排位仅 `auto_match_control` 管理员总开关可变，公平策略/队列长度/退避不是运行时参数；`runtime/limits.py` 固定每 Bot `--cpus=1` / `--memory=512m`。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
+- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定默认对局并发 2（再由 `runtime/limits.py` 按 `max(1, cpu//4)` ceiling 钳制）、action timeout、全局执行容量/aging/用户上限、自动排位定级阈值、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；自动排位只是 `source=auto` producer，仅 `execution_control.auto_enabled` 管理员总开关可变，公平策略/队列长度/退避不是运行时参数；`runtime/limits.py` 固定每 Bot `--cpus=1` / `--memory=512m`。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
 
 ## 架构分层（编辑时切勿越界）
 
 ```
 contests/   赛制：templates(阶段模板+计分) → stages(对阵生成) → manager(阶段状态机) → ranking(正式名次/破同分) + scheduler(时间调度器，到点自动推进阶段)；presentation(逐阶段排名/晋级读模型)；showcase/showcase_seed(长期只读演示快照及真实裁判数据生成)
-matches/    编排：orchestrator(入队/SSE/评分/判胜/人类对战) + runner(起Bot进程,按game_id路由)
+matches/    编排：execution_queue(全来源持久 job/attempt、双资源 claim、唯一 dispatcher、恢复/公开投影)
+            + orchestrator(只启动已 claim attempt、SSE/评分/判胜/人类对战) + runner(起Bot进程,按game_id路由)
             + result_contract(持久化结果唯一 builder：rounds_played/deltas/normalized_delta)
             人类对战：orchestrator.challenge_human/_run_human_match + runner.run_bot_vs_human
-            （人类侧经 _human_turns Future + WebSocket /api/matches/{id}/play 回传落子，独立 _human_sem，不计 Glicko）
+            （人类侧经 _human_turns Future + WebSocket /api/matches/{id}/play 回传落子；与其他来源共享
+            全局 match slots，固定占 1 slot + 1 sandbox unit，不计 Glicko）
             评分副作用：_apply_ratings 通过 match_rating_settlements 对每场 match 恰好一次结算，
             在同一事务更新双方 ratings + rating_history（段位趋势）+ pair_stats；启动时补算 completed 未结算场次
             通知副作用：对局完成（非 contest）经 orch.notifier.notify_both_owners 通知双方 owner
@@ -123,12 +125,12 @@ games/      游戏注册表（赛制/编排契约解耦的单一入口）：base
             通用层经 registry.get(game_id) 取 spec 调用其能力，**禁止 if game_id== 分支**
             新增游戏 = 建 games/<game>/ 包 + 注册一行 + schema 加一项
             站点配置：GET /api/site/info
-runtime/    沙箱与代码配置：config.py(生产运行参数唯一真相源)+ Linux x86_64 ELF BinaryRunner(docker/local) + limits(资源硬顶/机器 ceiling)；PE/Mach-O/ARM64/脚本在上传时拒绝；Docker 镜像在 Bot 计时前完成 linux/amd64 检查/拉取，实际运行固定 `--pull=never --entrypoint /app/bot`
-store/      SQLite + schema.py(常量唯一来源；fresh 实体 game_id 必填且无 DB 默认值)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game（原始分差累计列 delta_total）
+runtime/    沙箱与代码配置：config.py(生产运行参数唯一真相源)+ Linux x86_64 ELF BinaryRunner(docker/local) + limits(资源硬顶/机器 ceiling)；生产只连接本机 canonical Docker socket，execution/preflight 共享 supervisor 与跨进程 launch flock，create 先持久化 token/host-boot journal，再按 instance/job/attempt/slot/launch label 精确清理；PE/Mach-O/ARM64/脚本在上传时拒绝；Docker 镜像在 Bot 计时前完成 linux/amd64 检查/拉取，实际运行固定 `--pull=never --entrypoint /app/bot`
+store/      SQLite + schema.py(常量唯一来源；fresh 实体 game_id 必填且无 DB 默认值) + execution.py(通用 execution_jobs/attempts/control、公平 producer、原子 claim/恢复)；matches 拆每游戏表（match_config+result 双 JSON 列，游戏无关）+ matches_index + ratings per-game（原始分差累计列 delta_total）
 api_routes  接口：REST + SSE(观赛 /events) + WebSocket(人类对战 /play)；用户搜索 /api/users；用户主页 /api/users/{name}/{profile,bots}；全局搜索 /api/search；admin 日志 /api/admin/logs
 auth/       认证 + 资料编辑：PUT /api/auth/profile（display_name/bio）+ POST /api/auth/avatar（本地 avatars/ 托管）
 logging     统一日志：logging_config.setup_logging（logs/app.log，含 bot stderr 捕获），cli serve 接入
-matches/    后台对局：auto_matcher（持久公平队列、全局串行 ladder、游戏/通道/owner/Bot 轮转、单一管理员总开关）
+store/      自动排位：仅作为 `source=auto` producer 写入全局执行队列；游戏/lane/owner/Bot 轮转与永久 decision 审计不形成第二套 admission、dispatcher 或物理 fence，唯一开关是 `execution_control.auto_enabled`
 ```
 
 **前端架构（bzplat/frontend，React 19 + Vite 8 + Tailwind v4 + shadcn/ui）**：
@@ -173,13 +175,13 @@ src/pages/                 顶层路由全部用 React.lazy 代码分割（每�
 
 **引擎路由入口**：`games.registry.get(game_id)` 取 `GameSpec` → `spec.run_session(decide, **params)` 构造并运行该游戏 Session；`spec.protocol.dumps_request/loads_response/validate_response_payload/fail_response` 处理行协议。`matches/runner.py` 经 games 注册表路由，不再有 if-chain。
 
-**人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局走独立 `_human_sem`（默认 4，不占 bot 对局槽）、`human_action_timeout`（默认 120s 逐回合防挂机）、**不计 Glicko**、per-user 同时 ≤ 1。若 spec 定义累计棋钟，Bot 与真人两侧都计入各自总预算；Pencil 为每方 900s，runner 发出 `time_used/time_out`，与 120s 逐回合保护叠加，较早触发的限制生效。
+**人类 vs Bot**（`match_type=human`）：引擎 `decide(player_idx, request)` 每回合阻塞；`run_bot_vs_human` 把 bot 侧接 BinaryRunner、人类侧接一个等待 `asyncio.Future` 的协程。orchestrator 的 `_human_turns` 注册 pending 回合并广播 `your_turn`，WebSocket `/play` 收到落子即 `resolve_human_turn`。人类对局与 manual/contest/auto 共用全局执行队列和 match slots，claim 后固定占 `1 match slot + 1 sandbox unit`；`human_action_timeout` 默认 120s 逐回合防挂机，**不计 Glicko**，人工/人机请求 per-user 同时活跃 ≤ 1。若 spec 定义累计棋钟，Bot 与真人两侧都计入各自总预算；Pencil 为每方 900s，runner 发出 `time_used/time_out`，与 120s 逐回合保护叠加，较早触发的限制生效。
 
-**挑战对战**（统一入口）：挑战页一个入口，两个座位——座位 1（先手/黑）只能选 Bot；座位 2（后手/白）可选 Bot **或「我亲自上场」（人类，固定座位 2=后手，`human_seat=1`）**。座位 1 vs 座位 2 都选 Bot → `POST /api/matches/challenge`（`my_bot_id`/`opponent_bot_id` + 可选版本 `my_bot_version_id`/`opponent_bot_version_id`，**自博弈允许**——同 bot 同/不同版本均可）；座位 2 = 人类 → `POST /api/matches/human`（`bot_id`=座位1 bot，`human_seat=1` 固定）。版本路径解析：非 contest（含 human/ladder）在创建时把显式版本或当时 current 版本冻结进 `match_config._bot_a/b_version_id`，contest 从 `contest_pairings.bot_a/b_version_id` 读；排队期间上传/回滚不改变执行路径，无 `bot_versions` 行的 legacy Bot 才回退 `bots.binary_path`。`GET /api/bots/{id}/versions` 对非 owner 返回脱敏版本列表。
+**挑战对战**（统一入口）：挑战页一个入口，两个座位——座位 1（先手/黑）只能选 Bot；座位 2（后手/白）可选 Bot **或「我亲自上场」（人类，固定座位 2=后手，`human_seat=1`）**。座位 1 vs 座位 2 都选 Bot → `POST /api/matches/challenge`（`my_bot_id`/`opponent_bot_id` + 可选版本 `my_bot_version_id`/`opponent_bot_version_id`，**自博弈允许**——同 bot 同/不同版本均可）；座位 2 = 人类 → `POST /api/matches/human`（`bot_id`=座位1 bot，`human_seat=1` 固定）。两个 POST 都返回 **HTTP 202 的持久 execution request**（`public_id`、排队位置/双容量/动态 ETA），不是立即返回 Match；前端持久化 `public_id` 并轮询 `GET /api/execution-requests/{public_id}`，只有 claim 后出现 `match_id` 才跳转对局。本人可 `DELETE` 取消 manual/human；可重试的 `interrupted` 通过 `POST .../retry`（202）把同一 job 重新排队，下次 claim 才创建新的不可复活 attempt，旧 Match 保留为不可变审计。显式版本或当前激活版本在 job 创建时冻结，claim 时复制到 `match_config._bot_a/b_version_id`；赛事版本来自 pairing 快照。排队期间上传/回滚不改变 runner 路径，无 `bot_versions` 行的 legacy Bot 才回退 `bots.binary_path`。`GET /api/bots/{id}/versions` 对非 owner 返回脱敏版本列表。
 
 **座位编号约定**：**展示层从 1 开始**（座位 1/2），**内部 0-indexed**（后端 `winner`/`human_seat` 为 0/1，DB CHECK `winner IN (0,1)`）。前端显示 `+1`（Challenge/HumanPlay/MatchViewer/match-seats/canvas 共 7 处）。
 
-**赛制阶段状态机**：`draft→open→published→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。`published` 是「排期已发布、等待开赛」中间态（报名截止→出排期→到点开打的两阶段）；`starts_at=NULL` 明确表示等待组织者手动开始，任何 scheduler/reconcile 路径都不得偷换为立即开赛。`ContestScheduler`（`contests/scheduler.py`，挂 main.py lifespan）后台周期扫描赛事 `*_at` 字段，到点自动推进阶段（开放报名/截止报名出排期/到点 dispatch pairing/rest 恢复）；组织者手动按钮始终可提前触发。逐场排期：运行态 `contest_pairings.scheduled_at=NULL` 才表示立即可打，published 还必须先通过赛事级 `starts_at` 闸门。Bot 对局统一先占 orchestrator 全局 admission；赛事只为剩余槽创建/绑定 match，其余 pairing 保持 `pending + match_id=NULL`，单场完成立即回写 pairing 并补一个空槽。新阶段首批 pairing（版本快照/bye/排期）与 `current_stage_idx/status` 必须经 Store 单事务批量提交；正式榜清旧/全量写入/`official_results_ready=1` 也必须同事务，启动对账负责补算 `finished+ready=0`。
+**赛制阶段状态机**：`draft→open→published→running→(rest)→finished`。`ContestManager.maybe_finish` 是对局完成回调入口，负责瑞士补轮 / 淘汰晋级 / 休息期换 Bot / 进入下一阶段。`published` 是「排期已发布、等待开赛」中间态（报名截止→出排期→到点开打的两阶段）；`starts_at=NULL` 明确表示等待组织者手动开始，任何 scheduler/reconcile 路径都不得偷换为立即开赛。`ContestScheduler`（`contests/scheduler.py`，挂 main.py lifespan）后台周期扫描赛事 `*_at` 字段，到点自动推进阶段（开放报名/截止报名出排期/到点 enqueue pairing/rest 恢复）；组织者手动按钮始终可提前触发。逐场排期：运行态 `contest_pairings.scheduled_at=NULL` 才表示立即可排队，published 还必须先通过赛事级 `starts_at` 闸门。赛事只把 pairing 作为 `source=contest` job 写入全局执行队列；Match 及 replay/policy 只在 claim 时创建并原子绑定 pairing，其余 pairing 保持 `pending + match_id=NULL`。单场完成立即回写 pairing 并补下一条可排 job。新阶段首批 pairing（版本快照/bye/排期）与 `current_stage_idx/status` 必须经 Store 单事务批量提交；正式榜清旧/全量写入/`official_results_ready=1` 也必须同事务，启动对账负责补算 `finished+ready=0`。
 
 **组织者实名 + 导出**：`require_real_name` 赛事报名时校验用户实名（`users.real_name/phone/school/student_id`）。`contest_entries_named` JOIN 实名字段，但 `contest_detail` 对**非组织者脱敏**（剔除 real_name/phone/school/student_id）+ 返回 `is_organizer` 标志。`GET /api/contests/{id}/export?format=csv`（**组织者 gated**）：合并导出报名名单（含实名）+ 结果排名 + 战绩一行 CSV（UTF-8 BOM 供 Excel）；任何状态可导出（未完赛 rank 列空）。前端赛程：BracketTree（SVG 连接线，`bracket_slot//2` 拓扑）+ ScheduleTable（一览表）+ 阶段 Tab 显示中文标签 + 进度。
 

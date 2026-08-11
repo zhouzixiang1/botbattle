@@ -11,8 +11,9 @@ from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
-    AUTO_MATCH_PLACEMENT_REQUIRED,
+    AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES,
     CONFIGURATION_SOURCE,
+    RANKING_MIN_RATED_MATCHES,
 )
 from bzplat.backend.runtime.limits import (
     clamp_concurrent,
@@ -66,8 +67,9 @@ def test_runtime_diagnostics_are_explicitly_code_owned(tmp_path):
     assert data["bot_cpus"] == 1
     assert data["bot_memory_mb"] == 512
     assert data["auto_match"]["enabled"] is True
-    assert data["auto_match"]["effective_enabled"] is True
-    assert data["auto_match"]["policy"]["serial"] is True
+    assert data["auto_match"]["mutable"] is True
+    assert data["queue"]["capacity"]["match_slots"]["capacity"] == 1
+    assert data["queue"]["capacity"]["sandbox_units"]["capacity"] == 2
     assert "interval_sec" not in data["auto_match"]
     assert data["contest_scheduler"] == {"enabled": True, "interval": 15}
     assert "auto_match" not in data["readonly"]
@@ -77,7 +79,7 @@ def test_qa_instance_uses_code_disabled_auto_match_profile(monkeypatch, tmp_path
     monkeypatch.setenv("BZ_QA_INSTANCE", "1")
     client, app = _admin_client(tmp_path)
 
-    assert app.state.auto_matcher.capability_enabled is False
+    assert app.state.execution_dispatcher.auto_capability_enabled is False
 
     response = client.get("/api/admin/settings/runtime")
     assert response.status_code == 200
@@ -85,8 +87,7 @@ def test_qa_instance_uses_code_disabled_auto_match_profile(monkeypatch, tmp_path
     assert data["source"] == CONFIGURATION_SOURCE
     assert data["mutable"] is False
     assert data["auto_match"]["enabled"] is True
-    assert data["auto_match"]["effective_enabled"] is False
-    assert data["auto_match"]["capability_enabled"] is False
+    assert app.state.execution_dispatcher.auto_capability_enabled is False
     assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == 1
 
 
@@ -128,7 +129,7 @@ def test_startup_ignores_legacy_runtime_rows_and_does_not_rewrite_them(tmp_path)
 
     assert app.state.orch.max_concurrent == default_max_concurrent()
     assert app.state.orch.runner.action_timeout == ACTION_TIMEOUT_SEC
-    assert app.state.auto_matcher.configured_enabled is True
+    assert app.state.execution_dispatcher.auto_capability_enabled is True
     assert app.state.store.get_settings(
         [SETTING_ACTION_TIMEOUT, SETTING_MAX_CONCURRENT, SETTING_CONTEST_REST]
     ) == {
@@ -156,7 +157,8 @@ def test_fresh_app_does_not_seed_legacy_runtime_settings(tmp_path):
 def test_code_configuration_is_immutable():
     import bzplat.backend.runtime.config as config
 
-    assert AUTO_MATCH_PLACEMENT_REQUIRED == 10
+    assert AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES == 10
+    assert RANKING_MIN_RATED_MATCHES == 10
     assert not hasattr(config, "AUTO_MATCH_CONFIG")
     assert not hasattr(config, "QA_AUTO_MATCH_CONFIG")
 

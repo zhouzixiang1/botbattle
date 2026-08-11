@@ -23,7 +23,8 @@
 | **实时观赛** | SSE 推送对局事件流，前端棋盘/牌桌逐步可视化 |
 | **对局回放** | 完整事件录制，支持播放/暂停/步进/倍速/逐手跳转 |
 | **私有 Bot 调试** | 可选响应 `debug` 经限额、清洗、脱敏后独立保存；终局按 Bot owner/赛事组织者/admin 授权查看，不进入公共回放 |
-| **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场（独立并发，不计评分） |
+| **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场；与其他来源共享全局 match slots，只占 1 个沙箱单元，不计评分 |
+| **全来源执行队列** | 人工、人机、赛事与自动排位统一写持久 job；挑战/人机返回 HTTP 202 请求，支持刷新恢复、查询、取消与中断后重试，Match 仅在原子 claim 时创建 |
 | **Glicko-2 排行榜** | 自实现评分系统，按游戏分别排名；含 6 档段位、相邻评分变化、RD、胜率、最近对局与定级分段 |
 | **赛事系统** | 6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰）+ 10 个内置模板（含预赛/决赛），完整生命周期（草稿→报名→发布当前阶段排期→进行→休息→结束），积分榜 + 对阵图 + 正式名次；可部署六个明确标注、不可写的客户演示快照，回放仍由真实裁判链生成 |
 | **社交与互动** | 关注用户、收藏 Bot、对局/Bot 评论、点赞、浏览计数、点赞榜 |
@@ -31,7 +32,7 @@
 | **用户体系** | 注册/登录/邮箱验证、个人主页、资料编辑、头像、经验与等级 |
 | **全局搜索** | Cmd+K 命令面板，聚合搜索 Bot / 用户 / 对局 |
 | **管理后台** | 7 个 Tab：仪表盘、用户/Bot/对局/赛事管理、日志、邮件；运行参数与赛制模板均由代码唯一配置，不提供网页编辑器 |
-| **持续公平自动排位** | 全局串行持久队列持续维护天梯；游戏/定级通道/所有者/Bot 轮转，平衡配对与先后手，并公开正在/即将对局 |
+| **持续公平自动排位** | 仅作为全局执行队列的 `source=auto` producer；游戏/定级通道/所有者/Bot 轮转，平衡配对与先后手并公开正在/即将请求；唯一开关不影响人工、人机和赛事 |
 | **站点可配置** | 站名 / Logo / 公告 / 关于（admin 可配） |
 
 ## 3. 技术栈
@@ -59,9 +60,9 @@ botbattle/
 │   │   ├── api_routes.py      # 主 REST + SSE + WebSocket
 │   │   ├── auth/              # 认证（13 路由 + 验证码 + 依赖）
 │   │   ├── games/             # 【游戏单一真相】GameSpec + registry + holdem/gomoku/pencil 自包含子包
-│   │   ├── store/             # SQLite（Store + schema.py 常量唯一来源；matches 按游戏分表）
-│   │   ├── runtime/           # Linux ELF 沙箱 + config 不可变运行配置 + limits 资源硬顶
-│   │   ├── matches/           # 编排 orchestrator + runner + auto_matcher
+│   │   ├── store/             # SQLite（Store + schema.py + execution job/attempt/control；matches 按游戏分表）
+│   │   ├── runtime/           # Linux ELF 沙箱 + 本地 Docker namespace supervisor + config/limits
+│   │   ├── matches/           # execution_queue dispatcher + orchestrator + runner
 │   │   ├── contests/          # 赛制 templates/stages/manager/ranking（模板由 games 聚合）
 │   │   ├── notifications/     # 站内通知 + 邮件偏好
 │   │   ├── bots/ rating/ mail/

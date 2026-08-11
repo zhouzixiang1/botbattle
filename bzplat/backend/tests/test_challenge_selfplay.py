@@ -18,6 +18,10 @@ from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
+from bzplat.backend.tests.execution_helpers import (
+    challenge_and_start,
+    start_claimed_match,
+)
 
 
 def _store(tmp_path) -> Store:
@@ -52,7 +56,8 @@ def test_selfplay_same_bot_allowed(tmp_path):
     orch = MatchOrchestrator(s, runner=_NoopRunner(), max_concurrent=1)
     # 旧逻辑会 raise "不能与自己对战"；现允许
     mid = asyncio.run(
-        orch.challenge(
+        challenge_and_start(
+            orch,
             b["id"], b["id"], u, game_id="holdem", defer_start=True
         )
     )
@@ -77,7 +82,8 @@ def test_challenge_version_pinning(tmp_path):
     va2 = s.add_bot_version(ba["id"], binary_path=a_v2, format="elf")
     vb2 = s.add_bot_version(bb["id"], binary_path=b_v2, format="elf")
     orch = MatchOrchestrator(s, runner=_NoopRunner(), max_concurrent=1)
-    mid = asyncio.run(orch.challenge(
+    mid = asyncio.run(challenge_and_start(
+        orch,
         ba["id"], bb["id"], u,
         game_id="holdem",
         bot_a_version_id=va2["id"], bot_b_version_id=vb2["id"],
@@ -168,7 +174,8 @@ def test_default_versions_are_frozen_before_deferred_runner_start(tmp_path):
 
         runner = CapturingRunner()
         orch = MatchOrchestrator(s, runner=runner, max_concurrent=1)
-        mid = await orch.challenge(
+        mid = await challenge_and_start(
+            orch,
             ba["id"], bb["id"], uid, game_id="holdem", defer_start=True,
         )
         match = s.get_match(mid)
@@ -178,7 +185,7 @@ def test_default_versions_are_frozen_before_deferred_runner_start(tmp_path):
         # 模拟 match 已排队但尚未获得 runner：此时 owner 上传/回滚到 v2。
         s.set_current_version(ba["id"], 2)
         s.set_current_version(bb["id"], 2)
-        orch.start_prepared_match(mid)
+        start_claimed_match(orch, mid)
         task = orch._tasks[mid]
         await task
 
@@ -224,14 +231,15 @@ def test_legacy_bots_without_version_rows_fall_back_to_binary_path(tmp_path):
         runner = CapturingRunner()
         orch = MatchOrchestrator(s, runner=runner, max_concurrent=1)
 
-        mid = await orch.challenge(
+        mid = await challenge_and_start(
+            orch,
             ba["id"], bb["id"], uid, game_id="holdem", defer_start=True,
         )
-        assert s.get_match(mid)["match_config"] == {
-            "_rating_eligible": False,
-            "_rating_reason": "same_owner",
-        }
-        orch.start_prepared_match(mid)
+        match_config = s.get_match(mid)["match_config"]
+        assert match_config["_rating_eligible"] is False
+        assert match_config["_rating_reason"] == "same_owner"
+        assert match_config["_execution_request_id"].startswith("req_")
+        start_claimed_match(orch, mid)
         task = orch._tasks[mid]
         await task
 
@@ -286,12 +294,13 @@ def test_different_owner_challenge_remains_rated(tmp_path):
         s.ensure_rating(bot_a["id"])
         s.ensure_rating(bot_b["id"])
         orch = MatchOrchestrator(s, runner=_NoopRunner(), max_concurrent=1)
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bot_a["id"], bot_b["id"], owner_a,
             game_id="holdem", defer_start=True,
         )
         assert s.get_match(match_id)["match_config"]["_rating_eligible"] is True
-        orch.start_prepared_match(match_id)
+        start_claimed_match(orch, match_id)
         await orch._tasks[match_id]
 
         assert s.is_match_rating_settled(match_id) is True

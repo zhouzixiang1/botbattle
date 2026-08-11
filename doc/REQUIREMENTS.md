@@ -37,18 +37,18 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 需求 | 验收标准 |
 |------|---------|
 | 上传 Bot | 唯一接受 Linux x86_64 ELF；PE/`.exe`、Mach-O、ARM64 ELF、原始 `.py` 与脚本全部拒绝；预检按所选 runtime_mode 使用正式首回合同一信封，LongRunning 必须握手 |
-| 历史二进制 | 旧库中非 Linux x86_64 ELF 记录只可供 owner/admin 审计，必须标记为不可运行；不得出现在公开选择器、搜索、排行榜、自动匹配或报名候选中，也不得由 owner/admin 重新激活；即使旧版本没有 checksum/size，缺失文件也须在建局前拒绝 |
+| 历史二进制 | 旧库中非 Linux x86_64 ELF 记录只可供 owner/admin 审计，必须标记为不可运行；不得出现在公开选择器、搜索、排行榜、自动排位或报名候选中，也不得由 owner/admin 重新激活；即使旧版本没有 checksum/size，缺失文件也须在 job 创建/claim 的完整性门禁拒绝 |
 | 版本管理 | 同一 Bot 可上传多版本，可切换激活版本，可删/改名/改简介 |
 | Bot 详情页 | 信息卡（评级/胜率/战绩/段位）+ 对局历史 + 对手战绩 + 评分曲线（recharts）|
 
 ### 3.3 对局与观赛
 | 需求 | 验收标准 |
 |------|---------|
-| Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值），沙箱运行，完成后计 Glicko |
+| Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值）；POST 返回 HTTP 202 持久 request，不在排队阶段创建 Match；支持查询、刷新恢复、取消及 interrupted 重试，取得容量后才沙箱运行，符合资格的完成局计 Glicko |
 | 实时观赛 | SSE 推送事件流，前端棋盘/牌桌逐步渲染 |
 | 对局回放 | 完整事件录制，播放/暂停/步进/倍速（0.5x-4x）/逐手跳转/进度拖动 |
 | Pencil 累计棋钟 | 每方固定 900 秒；Bot-vs-Bot 与人类对战均累计实际决策时间，成功/耗尽分别落 `time_used`/`time_out` 事件，并在点格棋观赛/回放显示剩余时间与超时状态 |
-| 人类 vs Bot | WebSocket 落子回传，独立并发槽（默认 4），per-user ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
+| 人类 vs Bot | WebSocket 落子回传；与 manual/contest/auto 共用全局队列和 match slots，claim 后占 `1 slot + 1 sandbox unit`，人工/人机 per-user 活跃 ≤1，不计 Glicko；通用人类回合等待默认 120 秒，Pencil 同时受每方 900 秒累计棋钟约束 |
 | 自博弈 | 同一 owner 的两个不同 Bot 可对战，走普通挑战 |
 | 崩溃收敛 | 对局中途 Bot 崩溃（含人类局）按游戏结果结算为 `completed` + `reason=crash`；Bot-vs-Bot 启动失败为 `completed` + `technical_loss`，人类局启动失败为 `aborted` |
 | 协议故障收敛 | 唯一响应对象必须包含 `response`，平台忽略其他顶层字段；顶层整数/裸坐标/缺少 `response` 的旧 `{a}` 仍拒绝，LongRunning 缺失精确握手不回退。首次协议故障即 `completed + protocol_error + technical_loss`；超时为 `completed + timeout + technical_loss`。Bot-vs-Bot 计分、人机局不计 Glicko；平台 sandbox 故障始终 aborted 且不评分；格式正确的非法游戏动作仍交裁判。新写回放和 SSE 只使用 `technical_incident`；结果只公开 `technical_incident_count` / `technical_incidents_by_seat` / `technical_incident_samples`，列表查询唯一使用 `has_technical_incidents`；历史旧事件仅在服务端读取边界归一化，不形成新写或第二套对外合约 |
@@ -89,14 +89,15 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 需求 | 验收标准 |
 |------|---------|
 | 7 Tab 后台 | 仪表盘、用户/Bot/对局/赛事管理、日志、邮件模板与发件箱；不展示运行时/赛制模板编辑器 |
-| 代码唯一配置 | 并发/超时/auto-match/scheduler/循环赛护栏与内置赛制模板只随代码评审发布；旧数据库值和前端请求不能覆盖 |
+| 代码唯一配置 | 双资源容量/aging/用户上限/超时/自动公平策略/scheduler/循环赛护栏与内置赛制模板只随代码评审发布；旧数据库值和前端请求不能覆盖；唯一可变自动开关为 `execution_control.auto_enabled` |
 | 安全中止与删除 | 活跃对局只允许经 orchestrator 取消并收敛为 `aborted`，不得手工伪造 running/completed；用户/Bot/赛事存在活跃引用时拒绝硬删 |
 
 ### 3.9 站点与后台调度
 | 需求 | 验收标准 |
 |------|---------|
 | 站点配置 | 站名/Logo/公告/About 可配（admin） |
-| 持续公平自动排位 | 默认开启、全局串行且无每日上限；持久公平队列按游戏/通道/所有者/Bot 轮转，排除同所有者并平衡对手与座位；管理员只有一个总开关，公开正在/即将对局 |
+| 全来源执行队列 | manual/human/contest/auto 全部先写持久 job；Bot-vs-Bot 占 `1 match slot + 2 sandbox units`，人机占 `1+1`，`starting/running/settling` 均占容量；优先级带无上限 aging，Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
+| 持续公平自动排位 | 默认开启且无每日上限，只作为全局队列的 `source=auto` producer；按游戏/lane/所有者/Bot 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；唯一开关只影响 auto 生成/claim，不影响人工、人机、赛事或在途局 |
 
 ## 4. 非功能需求
 
@@ -108,6 +109,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | **安全** | 接口限流 | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s 等），可 `BZ_RATE_LIMIT` 开关 |
 | **安全** | 认证 | 密码 hash 存储，session token，cookie `bz_session`，验证码防爆破 |
 | **可靠** | 数据持久 | SQLite 单文件，自带 `_migrate` 自愈（补列/重建表），向后兼容旧库 |
+| **可靠** | 本地 supervisor | 同 DB 由邻接 flock 保证单 dispatcher；Docker 固定 canonical 本机 socket，以稳定 `BZ_INSTANCE_KEY` 和 job/attempt/slot label 精确清理；旧 active 状态与控制结果不确定均 fail closed |
 | **可靠** | 隔离 QA | `BZ_QA_INSTANCE=1` 时拒绝 50380、主库同路径/同 inode 与主 checkout 运行时写目标；Vite 同样拒绝代理到 50380 |
 | **可靠** | 日志可查 | 统一日志 `logs/app.log`（5MB×5 轮转），Bot stderr 尾部 4KB 捕获，admin 网页查看 |
 | **可维护** | 新增游戏低成本 | 实现 `games/<game>/`（engine/protocol/result/tiers/templates/spec）+ 常量/注册 + 前端 GameViewSpec；同构对局表由迁移模板创建，赛制/编排主流程禁止增加 `if game_id` 分支 |
@@ -122,7 +124,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 |----------|---------|---------|------|
 | 账号认证 | `auth/` | test_auth | wiki（功能说明散见） |
 | Bot 管理 | `bots/` + api_routes | test_settings_mybots | wiki/BOT_DEV、BOT_DETAIL |
-| 对局编排 | `matches/orchestrator+runner` | test_engine、test_protocol | wiki/GUIDE |
+| 对局编排 | `matches/execution_queue+orchestrator+runner`、`store/execution` | test_execution_queue、test_engine、test_protocol | wiki/GUIDE、doc/RUNTIME |
 | 人类对战 / 棋钟 | orchestrator + runner + WS /play | test_human_match、test_chess_clock | wiki/GUIDE、PENCIL |
 | 评分排行 | `rating/glicko2` + `games/*/tiers.py` | test_tiers、test_engine | wiki/GUIDE |
 | 赛事 | `contests/`（模板聚合自 games） | test_contest_*、test_game_templates | wiki/GUIDE、CONTEST_BRACKET |

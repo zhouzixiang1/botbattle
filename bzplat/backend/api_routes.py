@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -39,10 +40,10 @@ from bzplat.backend.contests.showcase import (
 )
 from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.games import registry as game_registry
-from bzplat.backend.matches import BotCapacityError, MatchOrchestrator
+from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
-    AUTO_MATCH_PLACEMENT_REQUIRED,
+    RANKING_MIN_RATED_MATCHES,
     CONFIGURATION_SOURCE,
     CONTEST_SCHEDULER_CONFIG,
     FULL_RR_MAX_N,
@@ -54,6 +55,10 @@ from bzplat.backend.runtime.limits import (
     cpu_count,
 )
 from bzplat.backend.runtime.binary_runner import PlatformRunnerError
+from bzplat.backend.store.execution import (
+    ExecutionIdempotencyConflict,
+    ExecutionQueueClosed,
+)
 from bzplat.backend.store.schema import (
     COMMENT_TARGET_TYPES,
     CONTEST_CANCELLED,
@@ -64,6 +69,8 @@ from bzplat.backend.store.schema import (
     CONTEST_REST,
     CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
+    EXECUTION_SOURCE_HUMAN,
+    EXECUTION_SOURCE_MANUAL,
     LIKE_TARGET_TYPES,
     ROLE_ADMIN,
     ROLE_ORGANIZER,
@@ -100,7 +107,7 @@ def _with_bot_runnable(bot: dict) -> dict:
 def _with_placement_status(row: dict) -> dict:
     """Attach the code-owned placement contract to one rating-bearing row."""
     public = dict(row)
-    required = max(0, int(AUTO_MATCH_PLACEMENT_REQUIRED))
+    required = max(0, int(RANKING_MIN_RATED_MATCHES))
     played = max(0, int(public.get("matches_played") or 0))
     public["placement_required"] = required
     public["placement_remaining"] = max(0, required - played)
@@ -124,6 +131,13 @@ def _contests(request: Request) -> ContestManager:
 
 def _store(request: Request):
     return request.app.state.store
+
+
+def _execution_dispatcher(request: Request):
+    dispatcher = getattr(request.app.state, "execution_dispatcher", None)
+    if dispatcher is None:
+        raise HTTPException(503, "执行队列未就绪")
+    return dispatcher
 
 
 def _require_social_target(
@@ -800,9 +814,44 @@ class ChallengeBody(BaseModel):
     my_bot_version_id: int | None = None
     opponent_bot_version_id: int | None = None
     game_id: str | None = None
+    request_id: str | None = Field(
+        default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
+    )
 
 
-@router.post("/api/matches/challenge")
+def _execution_idempotency_fingerprint(kind: str, body: BaseModel) -> str:
+    payload = {
+        "kind": kind,
+        "body": body.model_dump(mode="json", exclude={"request_id"}),
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _existing_idempotent_request(
+    request: Request,
+    *,
+    request_id: str | None,
+    owner_user_id: int,
+    source: str,
+    fingerprint: str,
+) -> dict | None:
+    if request_id is None:
+        return None
+    existing = _store(request).executions.get_idempotent(
+        request_id,
+        owner_user_id=owner_user_id,
+        source=source,
+        fingerprint=fingerprint,
+    )
+    if existing is None:
+        return None
+    return _execution_dispatcher(request).public_request(request_id)
+
+
+@router.post("/api/matches/challenge", status_code=202)
 async def challenge(body: ChallengeBody, request: Request, user=Depends(require_user)):
     # P1-3 安全修复：my_bot_id 必须属于当前用户（防用别人的 bot 开赛，污染其评分/战绩）。
     # opponent_bot_id 允许任意（挑战他人 bot 是正常功能）。
@@ -813,29 +862,41 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
         audit_log(request, "match_challenge", result="deny", user=user.get("username"),
                   detail=f"my_bot_id={body.my_bot_id} 非本人 bot")
         raise HTTPException(403, "只能用自己的 Bot 发起挑战")
+    # Resolve the process owner before accepting a durable request.  A broken
+    # app fixture/startup must fail without leaving a job that nobody can wake.
+    dispatcher = _execution_dispatcher(request)
+    fingerprint = _execution_idempotency_fingerprint("challenge", body)
     try:
-        mid = await _orch(request).challenge(
+        existing = _existing_idempotent_request(
+            request,
+            request_id=body.request_id,
+            owner_user_id=int(user["id"]),
+            source=EXECUTION_SOURCE_MANUAL,
+            fingerprint=fingerprint,
+        )
+        if existing is not None:
+            return existing
+        request_id = await _orch(request).challenge(
             body.my_bot_id,
             body.opponent_bot_id,
             user["id"],
             game_id=body.game_id,
             bot_a_version_id=body.my_bot_version_id,
             bot_b_version_id=body.opponent_bot_version_id,
+            request_id=body.request_id,
+            idempotency_fingerprint=fingerprint,
         )
-    except BotCapacityError as e:
+    except ExecutionIdempotencyConflict as e:
+        raise HTTPException(409, str(e))
+    except ExecutionQueueClosed as e:
         audit_log(request, "match_challenge", result="busy", user=user.get("username"), detail=str(e))
-        raise HTTPException(429, str(e))
+        raise HTTPException(503, str(e))
     except ValueError as e:
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
-    audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=mid, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
-    policy = _store(request).match_rating_policy(_store(request).get_match(mid) or {})
-    return {
-        "match_id": mid,
-        "status": "pending",
-        **policy,
-        "rating_settled": False,
-    }
+    audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=request_id, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
 
 
 class HumanChallengeBody(BaseModel):
@@ -844,31 +905,113 @@ class HumanChallengeBody(BaseModel):
     bot_id: int
     human_seat: Literal[1] = 1  # 产品契约：人类固定座位 2（内部索引 1）
     game_id: str | None = None
+    request_id: str | None = Field(
+        default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
+    )
 
 
-@router.post("/api/matches/human")
+@router.post("/api/matches/human", status_code=202)
 async def challenge_human(body: HumanChallengeBody, request: Request, user=Depends(require_user)):
     """人类 vs bot：当前登录用户作为人类玩家对战指定 bot。"""
+    dispatcher = _execution_dispatcher(request)
+    fingerprint = _execution_idempotency_fingerprint("human", body)
     try:
-        mid = await _orch(request).challenge_human(
+        existing = _existing_idempotent_request(
+            request,
+            request_id=body.request_id,
+            owner_user_id=int(user["id"]),
+            source=EXECUTION_SOURCE_HUMAN,
+            fingerprint=fingerprint,
+        )
+        if existing is not None:
+            return existing
+        request_id = await _orch(request).challenge_human(
             body.bot_id,
             user["id"],
             human_seat=body.human_seat,
             game_id=body.game_id,
+            request_id=body.request_id,
+            idempotency_fingerprint=fingerprint,
         )
+    except ExecutionIdempotencyConflict as e:
+        raise HTTPException(409, str(e))
+    except ExecutionQueueClosed as e:
+        audit_log(request, "match_human", result="busy", user=user.get("username"), detail=str(e))
+        raise HTTPException(503, str(e))
     except ValueError as e:
         audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
-    audit_log(request, "match_human", result="ok", user=user.get("username"), target=mid, detail=f"bot={body.bot_id} seat={body.human_seat}")
-    policy = _store(request).match_rating_policy(
-        _store(request).get_match(mid) or {}
-    )
-    return {
-        "match_id": mid,
-        "status": "pending",
-        **policy,
-        "rating_settled": False,
-    }
+    audit_log(request, "match_human", result="ok", user=user.get("username"), target=request_id, detail=f"bot={body.bot_id} seat={body.human_seat}")
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
+
+
+def _owned_execution_request(request: Request, request_id: str, user: dict) -> dict:
+    job = _store(request).executions.get(request_id)
+    if job is None:
+        raise HTTPException(404, "执行请求不存在")
+    if job.get("owner_user_id") != user.get("id") and user.get("role") != ROLE_ADMIN:
+        raise HTTPException(403, "无权访问该执行请求")
+    return job
+
+
+@router.get("/api/execution-requests/{request_id}")
+def execution_request_detail(
+    request_id: str,
+    request: Request,
+    user=Depends(require_user),
+):
+    _owned_execution_request(request, request_id, user)
+    payload = _execution_dispatcher(request).public_request(request_id)
+    if payload is None:
+        raise HTTPException(404, "执行请求不存在")
+    return payload
+
+
+@router.delete("/api/execution-requests/{request_id}")
+def cancel_execution_request(
+    request_id: str,
+    request: Request,
+    user=Depends(require_user),
+):
+    job = _owned_execution_request(request, request_id, user)
+    if user.get("role") != ROLE_ADMIN and job.get("source") not in {
+        EXECUTION_SOURCE_MANUAL,
+        EXECUTION_SOURCE_HUMAN,
+    }:
+        raise HTTPException(403, "仅可取消自己发起的挑战或人机请求")
+    owner = None if user.get("role") == ROLE_ADMIN else int(user["id"])
+    try:
+        _store(request).executions.request_cancel(
+            request_id, owner_user_id=owner
+        )
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    dispatcher = _execution_dispatcher(request)
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
+
+
+@router.post("/api/execution-requests/{request_id}/retry", status_code=202)
+def retry_execution_request(
+    request_id: str,
+    request: Request,
+    user=Depends(require_user),
+):
+    job = _owned_execution_request(request, request_id, user)
+    if user.get("role") != ROLE_ADMIN and job.get("source") not in {
+        EXECUTION_SOURCE_MANUAL,
+        EXECUTION_SOURCE_HUMAN,
+    }:
+        raise HTTPException(403, "仅可重试自己发起的挑战或人机请求")
+    owner = None if user.get("role") == ROLE_ADMIN else int(user["id"])
+    try:
+        _store(request).executions.retry(request_id, owner_user_id=owner)
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    dispatcher = _execution_dispatcher(request)
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
 
 
 @router.websocket("/api/matches/{match_id}/play")
@@ -1157,7 +1300,7 @@ def leaderboard(
         raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
     result = _store(request).list_leaderboard(
         game_id=normalized_game_id, limit=max(1, min(limit, 200)), page=page,
-        per_page=per_page, placement_games=AUTO_MATCH_PLACEMENT_REQUIRED,
+        per_page=per_page, placement_games=RANKING_MIN_RATED_MATCHES,
     )
     # 响应白名单投影：平台三元组、game_id 重复列、内部累计分差和波动率都不属于
     # 排行阅读信息；游戏维度只在响应顶层返回一次。
@@ -1182,22 +1325,10 @@ def leaderboard(
     return response
 
 
-@router.get("/api/auto-match/queue")
-def auto_match_queue(request: Request, game_id: str | None = None):
-    """Public, sanitized active/upcoming automatic-ranking queue."""
-    normalized: str | None = None
-    if game_id is not None:
-        normalized = game_id.strip().lower()
-        if not normalized:
-            raise HTTPException(400, "game_id 不可为空")
-        try:
-            game_registry.get(normalized)
-        except (KeyError, AttributeError) as exc:
-            raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
-    auto_matcher = getattr(request.app.state, "auto_matcher", None)
-    if auto_matcher is None:
-        raise HTTPException(503, "自动排位调度器未就绪")
-    return auto_matcher.public_snapshot(game_id=normalized)
+@router.get("/api/execution-queue")
+def execution_queue(request: Request):
+    """Public global capacity/queue projection with no internal identifiers."""
+    return _execution_dispatcher(request).public_snapshot()
 
 
 @router.get("/api/tiers")
@@ -1212,7 +1343,7 @@ def tiers(game_id: str):
         return {
             "tiers": _game_registry.all_tiers(gid),
             "game_id": gid,
-            "placement_required": AUTO_MATCH_PLACEMENT_REQUIRED,
+            "placement_required": RANKING_MIN_RATED_MATCHES,
         }
     except KeyError as exc:
         raise HTTPException(400, f"未知游戏: {gid!r}") from exc
@@ -2727,17 +2858,14 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
     store = _store(request)
     orch = _orch(request)
     stats = store.count_stats()
-    auto_matcher = getattr(request.app.state, "auto_matcher", None)
-    am = auto_matcher.public_snapshot() if auto_matcher is not None else {
-        "enabled": False,
-        "effective_enabled": False,
-        "capability_enabled": False,
-        "paused": True,
-        "pause_reason": "调度器未就绪",
-        "active": None,
-        "upcoming": [],
+    dispatcher = getattr(request.app.state, "execution_dispatcher", None)
+    queue_snapshot = dispatcher.public_snapshot(include_internal=True) if dispatcher is not None else {
+        "dispatcher": {
+            "state": "stopped", "accepting": False, "auto_enabled": False,
+            "pause_reason": "调度器未就绪", "retry_at": None,
+        },
+        "capacity": {}, "active": [], "queued": [], "queued_count": 0,
     }
-    am["mutable"] = True
     return {
         "source": CONFIGURATION_SOURCE,
         "mutable": False,
@@ -2750,11 +2878,11 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
         "bot_memory_mb": BOT_MEMORY_MB,
         "full_rr_max_n": FULL_RR_MAX_N,
         "contest_scheduler": CONTEST_SCHEDULER_CONFIG.as_dict(),
-        "queue": {
-            "pending": stats.get("matches_pending", 0),
-            "running": stats.get("matches_running", 0),
+        "queue": queue_snapshot,
+        "auto_match": {
+            "enabled": queue_snapshot["dispatcher"]["auto_enabled"],
+            "mutable": True,
         },
-        "auto_match": am,
         "rating_integrity": store.rating_integrity_diagnostics(),
         "readonly": [
             "action_timeout_sec",
@@ -2779,7 +2907,7 @@ async def admin_toggle_auto_match(
     request: Request,
     admin=Depends(require_admin),
 ):
-    scheduler = getattr(request.app.state, "auto_matcher", None)
+    scheduler = getattr(request.app.state, "execution_dispatcher", None)
     if scheduler is None:
         audit_log(
             request,
@@ -2789,7 +2917,7 @@ async def admin_toggle_auto_match(
             detail="scheduler_unavailable",
         )
         raise HTTPException(503, "自动排位调度器未就绪")
-    if body.enabled and not scheduler.capability_enabled:
+    if body.enabled and not scheduler.auto_capability_enabled:
         audit_log(
             request,
             "admin_auto_match_toggle",
@@ -2808,7 +2936,23 @@ async def admin_toggle_auto_match(
         user=admin.get("username"),
         detail=f"enabled={int(bool(body.enabled))} previous={int(previous)}",
     )
-    return scheduler.public_snapshot()
+    return scheduler.public_snapshot(include_internal=True)
+
+
+@router.post("/api/admin/execution-queue/resume")
+async def admin_resume_execution_queue(
+    request: Request,
+    admin=Depends(require_admin),
+):
+    dispatcher = _execution_dispatcher(request)
+    resumed = await dispatcher.admin_resume()
+    audit_log(
+        request,
+        "admin_execution_queue_resume",
+        result="ok" if resumed else "paused",
+        user=admin.get("username"),
+    )
+    return dispatcher.public_snapshot(include_internal=True)
 
 
 class SiteSettingsPatch(BaseModel):

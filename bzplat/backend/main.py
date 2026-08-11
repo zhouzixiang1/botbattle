@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from bzplat.backend.bots import BotManager
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.mail import Mailer
 from bzplat.backend.matches import MatchOrchestrator, MatchRunner
-from bzplat.backend.matches.auto_matcher import AutoMatchScheduler
+from bzplat.backend.matches.execution_queue import ExecutionDispatcher
 from bzplat.backend.notifications import NotificationManager
 from bzplat.backend.qa_safety import (
     assert_qa_database_isolated,
@@ -30,6 +31,10 @@ from bzplat.backend.qa_safety import (
 from bzplat.backend.runtime import BinaryRunner
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
+)
+from bzplat.backend.runtime.docker_supervisor import (
+    DockerSupervisor,
+    validate_local_docker_configuration,
 )
 from bzplat.backend.runtime.limits import (
     clamp_concurrent,
@@ -115,6 +120,10 @@ def create_app(
             purpose="BZ_QA_INSTANCE 头像目录",
         )
     prefer_local = os.environ.get("BZ_BOT_LOCAL", "").lower() in ("1", "true", "yes")
+    if not prefer_local:
+        # Reject remote/custom production configuration before Store can create
+        # or migrate the selected DB. Commands independently pin the same socket.
+        validate_local_docker_configuration()
     store = Store(db_path)
     _seed_site_settings(store)
     effective_conc = _effective_max_concurrent(max_concurrent)
@@ -128,7 +137,37 @@ def create_app(
         auth = AuthManager(store, mailer=None)
     captcha = CaptchaStore()
     bot_manager = BotManager(store, upload_root=upload_root)
-    binary_runner = BinaryRunner(prefer_local=prefer_local)
+    execution_dispatcher: ExecutionDispatcher | None = None
+    shared_supervisor = (
+        None
+        if prefer_local
+        else DockerSupervisor(
+            db_path=db_path,
+            launch_journal=store.executions,
+        )
+    )
+    # Upload preflight is intentionally a single, bounded lane outside the
+    # match queue. It is shared by every worker-thread runner factory, so the
+    # physical upper bound is execution sandbox units + one preflight sandbox.
+    preflight_gate = threading.BoundedSemaphore(1)
+
+    def _pause_for_unscoped_docker(reason: str) -> None:
+        launch = store.executions.docker_launch()
+        store.executions.pause_for_docker_uncertainty(
+            f"Docker 控制不确定：{reason}",
+            # A live callback runs on the same boot that wrote its create
+            # intent.  It therefore cannot use two zero samples as recovery.
+            manual=launch["state"] == "creating",
+        )
+        if execution_dispatcher is not None:
+            execution_dispatcher.wake()
+
+    binary_runner = BinaryRunner(
+        prefer_local=prefer_local,
+        db_path=db_path,
+        docker_uncertain_callback=_pause_for_unscoped_docker,
+        supervisor=shared_supervisor,
+    )
 
     match_runner = MatchRunner(binary_runner, action_timeout=ACTION_TIMEOUT_SEC)
     orch = MatchOrchestrator(store, runner=match_runner, max_concurrent=effective_conc)
@@ -136,10 +175,13 @@ def create_app(
     # QA capability guard is independent from the persisted administrator switch:
     # a copied production DB may say enabled, but an isolated QA process must never
     # write background ladder matches.
-    auto_matcher = AutoMatchScheduler(
+    execution_dispatcher = ExecutionDispatcher(
         orch,
         store,
-        capability_enabled=not qa_instance,
+        max_match_slots=effective_conc,
+        max_sandbox_units=effective_conc * 2,
+        auto_capability_enabled=not qa_instance,
+        contest_reconciler=contest_manager.reconcile_running_contests,
     )
 
     async def _on_match_done(match_id: str, contest_id: int | None) -> None:
@@ -153,11 +195,9 @@ def create_app(
                     retry_aborted=orch.is_admin_abort_handoff(match_id),
                 )
         finally:
-            # Every Bot completion releases admission.  Auto rows are removed only
-            # after terminal/settlement convergence; foreground completions merely
-            # wake the next queued automatic match immediately.  A contest callback
-            # failure must not suppress this independent capacity signal.
-            await auto_matcher.on_match_done(match_id)
+            # Match completion wakes the shared dispatcher.  Capacity remains
+            # occupied until the attempt's exact label cleanup is confirmed.
+            execution_dispatcher.wake()
 
     orch.on_match_done = _on_match_done
 
@@ -170,30 +210,21 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # 启动时清理孤儿对局：上次进程非正常退出时，DB 里残留的 status=running
-        # 记录（含人类对局）已无对应内存协程/Future，永久卡死。统一标 aborted。
-        recovered = store.recover_orphan_matches()
-        if recovered:
-            logger.warning(
-                "启动清理孤儿对局 %d 场（标记为 aborted）", recovered
-            )
-        # completed 业务结果与全局评分是两个事务：若上次进程在二者之间退出，
-        # 用持久化 result/winner 补算。settlement claim 与评分同事务，重复启动
-        # 无副作用；这里只补评分，不重发通知或重复奖励 XP。必须先于 auto-match。
-        rating_recovered = await orch.recover_unsettled_match_ratings()
-        if rating_recovered:
-            logger.warning("启动补算未结算评分 %d 场", rating_recovered)
-        # 启动对账：让 published/running/rest 赛事收敛，并补算 finished+ready=0 正式榜。
-        # 修复「赛事卡 running」——match 全完成但 maybe_finish 回调丢失/被吞、或 match 被
-        # orphan 清成 aborted 但赛事状态未同步。详见 ContestManager.reconcile_running_contests。
-        reconciled = await contest_manager.reconcile_running_contests()
-        if reconciled:
-            logger.info("启动对账 %d 场赛事状态收敛", reconciled)
-        task = asyncio.create_task(auto_matcher.loop(), name="auto-match")
-        _app.state.auto_matcher = auto_matcher
-        _app.state._auto_match_task = task
+        # Exact instance-label cleanup is the only recovery gate.  Only after it
+        # proves zero may active attempts be requeued/interrupted and legacy
+        # untracked running rows be marked orphaned.
+        dispatcher_start = await execution_dispatcher.start()
+        logger.info("execution dispatcher startup: %s", dispatcher_start["outcome"])
+        # Legacy orphan recovery, rating repair and contest reconciliation are
+        # owned by ExecutionDispatcher so startup and delayed pause -> resume
+        # cannot drift into different recovery pipelines.
+        task = asyncio.create_task(
+            execution_dispatcher.loop(), name="execution-dispatcher"
+        )
+        _app.state.execution_dispatcher = execution_dispatcher
+        _app.state._execution_dispatcher_task = task
         # 赛事时间调度器：后台周期扫描赛事 *_at 字段，到点自动推进阶段
-        # （开放报名/截止报名出排期/到点开打/rest 恢复）。仿 auto_matcher.loop()。
+        # （开放报名/截止报名出排期/到点开打/rest 恢复）。
         from bzplat.backend.contests.scheduler import ContestScheduler
         contest_scheduler = ContestScheduler(contest_manager, store)
         sched_task = asyncio.create_task(contest_scheduler.loop(), name="contest-scheduler")
@@ -202,13 +233,13 @@ def create_app(
         try:
             yield
         finally:
+            await execution_dispatcher.stop()
             task.cancel()
             sched_task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
-            auto_matcher.close()
             try:
                 await sched_task
             except asyncio.CancelledError:
@@ -217,6 +248,7 @@ def create_app(
             # them explicitly before the server closes the event loop; relying
             # on loop-wide cancellation can otherwise hang shutdown forever.
             await orch.shutdown()
+            await execution_dispatcher.close()
 
     app = FastAPI(title="botzone-platform", version="0.1.0", lifespan=lifespan)
     app.state.store = store
@@ -230,13 +262,18 @@ def create_app(
     # Sharing the orchestrator runner across event loops/threads would race its
     # session map and subprocess transports.
     app.state.preflight_runner_factory = lambda: BinaryRunner(
-        prefer_local=prefer_local
+        prefer_local=prefer_local,
+        db_path=db_path,
+        docker_uncertain_callback=_pause_for_unscoped_docker,
+        supervisor=shared_supervisor,
+        preflight_gate=preflight_gate,
     )
+    app.state.preflight_gate = preflight_gate
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer
     app.state.notifier = notifier
-    app.state.auto_matcher = auto_matcher
+    app.state.execution_dispatcher = execution_dispatcher
     # Avatar writes and StaticFiles must share the exact preflight-validated path.
     # Routes must not resolve BZ_AVATAR_DIR independently after app creation.
     app.state.avatar_dir = avatars_dir
