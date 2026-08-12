@@ -1,6 +1,6 @@
-"""五子棋 GameSpec——引擎/协议/配置/段位/模板统一声明。
+"""五子棋 GameSpec——引擎/协议/配置/模板统一声明。
 
-引擎/协议/结果/段位已物理迁入本包（games/gomoku/）。protocol.py 只公开
+引擎/协议/结果已物理迁入本包（games/gomoku/）。protocol.py 只公开
 五子棋 API，棋类同构 JSON 原语由公开的 _board_protocol.py 唯一实现。
 """
 from __future__ import annotations
@@ -11,7 +11,6 @@ from bzplat.backend.games.base import GameSpec, ProtocolSpec
 from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.gomoku.engine import BOARD_SIZE, GomokuSession
 from bzplat.backend.games.gomoku import protocol as proto
-from bzplat.backend.games.gomoku import tiers as _tiers_mod
 from bzplat.backend.games.gomoku import templates as _templates_mod
 
 GAME_ID = "gomoku"
@@ -109,7 +108,6 @@ SPEC = GameSpec(
     normalize_delta=_normalize_delta,
     progress_from_events=_progress_from_events,
     eta_for_match=_eta_for_match,
-    tiers=_tiers_mod.TIERS,
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/gomoku/engine.py",

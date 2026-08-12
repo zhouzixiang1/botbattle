@@ -4,7 +4,7 @@
 不再出现在 API 响应里——若未来有人加回死字段，测试会报。同时验证 4 个会致回归的字段
 （winner/reason/match_type/contest_id）和共享 SELECT 字段仍在（守护不误删）。
 
-注意：store 层断言（test_tiers/test_bot_profile）保留——本测试只覆盖 API 路由响应层。
+注意：Store 数值投影另有专门测试；本文件只覆盖 API 路由响应层。
 """
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ def test_leaderboard_drops_dead_fields(tmp_path):
             "format", "os", "arch", "game_id", "delta_total", "net_chips",
         ):
             assert dead not in row, f"leaderboard 仍含死字段 {dead}"
-        # 守护：tier_level 保留（test_tiers + 段位渲染依赖）
-        assert "tier_level" in row
-        assert "rating" in row and "bot_name" in row
+        # 守护：公开数值字段与身份字段保留。
+        for keep in ("rating", "bot_name", "rated_matches", "rank_total", "ranking_eligible"):
+            assert keep in row
 
 
 def test_bot_profile_drops_dead_fields(tmp_path):
@@ -80,7 +80,10 @@ def test_bot_profile_drops_dead_fields(tmp_path):
         ):
             assert dead not in p, f"bot_profile 仍含死字段 {dead}"
         # 守护：测试依赖字段保留
-        for keep in ("matches_played", "tier_level", "owner_id"):
+        for keep in (
+            "wins", "losses", "draws", "matches_played", "rated_matches",
+            "rank_total", "ranking_progress", "owner_id",
+        ):
             assert keep in p, f"bot_profile 误删了保留字段 {keep}"
 
 
@@ -98,10 +101,15 @@ def test_matches_list_drops_dead_keeps_critical(tmp_path):
         if not ms:
             return
         m = ms[0]
-        # 裁剪的死字段
-        for dead in ("started_at", "ended_at", "human_user_id", "human_seat",
-                     "likes_count", "views_count", "owner_id"):
-            assert dead not in m, f"matches 列表仍含死字段 {dead}"
+        # 正向白名单：内部 replay 诊断原文与任何新增物理列都不得
+        # 因遗漏黑名单而进入公开列表。
+        allowed = {
+            "id", "game_id", "status", "winner", "reason", "match_type",
+            "contest_id", "created_at", "bot_a_id", "bot_b_id",
+            "technical_loss", "result", "bot_a", "bot_b",
+        }
+        assert set(m) <= allowed, f"matches 列表泄漏非公开字段: {set(m) - allowed}"
         # 守护：4 个会致回归的字段必须在（有消费者）
         for keep in ("winner", "reason", "match_type", "contest_id"):
             assert keep in m, f"matches 列表误删了关键字段 {keep}（会致回归）"
+        assert "bot_a" in m and "bot_b" in m

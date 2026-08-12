@@ -7,15 +7,19 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
+from starlette.formparsers import MultiPartException
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from bzplat.backend.bots.manager import MAX_BYTES as MAX_BOT_BINARY_BYTES
 from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER
 
 logger = logging.getLogger(__name__)
@@ -26,7 +30,31 @@ _AUTH_STRICT = (20, 60)
 _CAPTCHA_LIMIT = (60, 60)
 _UPLOAD_STRICT = (6, 60)
 _CHALLENGE_STRICT = (8, 60)
+_FEEDBACK_STRICT = (5, 60)
 _API_DEFAULT = (120, 60)
+MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES = MULTIPART_OVERHEAD_BYTES
+BOT_UPLOAD_BODY_MAX_BYTES = (
+    MAX_BOT_BINARY_BYTES + BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES
+)
+BUG_ATTACHMENT_BODY_MAX_BYTES = 5 * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES
+AVATAR_BODY_MAX_BYTES = 2 * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES
+_BOT_VERSION_UPLOAD_PATH = re.compile(r"/api/bots/[^/]+/versions")
+_BUG_ATTACHMENT_UPLOAD_PATH = re.compile(
+    r"/api/feedback/bugs/[^/]+/attachments"
+)
+_BOT_UPLOAD_TOO_LARGE = {
+    "code": "upload_body_too_large",
+    "message": "Bot 二进制最大 50 MiB，上传请求体超过允许的 multipart 上限",
+}
+_BUG_ATTACHMENT_TOO_LARGE = {
+    "code": "attachment_body_too_large",
+    "message": "Bug 附件最大 5 MiB，上传请求体超过允许的 multipart 上限",
+}
+_AVATAR_TOO_LARGE = {
+    "code": "avatar_body_too_large",
+    "message": "头像最大 2 MiB，上传请求体超过允许的 multipart 上限",
+}
 _STATIC_SKIP_EXT = (
     ".js",
     ".css",
@@ -40,6 +68,197 @@ _STATIC_SKIP_EXT = (
     ".map",
     ".webp",
 )
+
+
+def normalize_public_origin(value: str) -> str:
+    """Return one canonical HTTP(S) origin without path/query/credentials."""
+    raw = (value or "").strip()
+    if not raw or "\\" in raw or any(ord(char) < 0x20 or char.isspace() for char in raw):
+        raise ValueError("origin 格式无效")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("origin 格式无效") from exc
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("origin 必须是不含路径、查询或凭据的 HTTP(S) origin")
+    host = parsed.hostname
+    try:
+        if ":" in host:
+            host = f"[{host.lower()}]"
+        else:
+            host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("origin 主机名无效") from exc
+    if port == (443 if scheme == "https" else 80):
+        port = None
+    return f"{scheme}://{host}{f':{port}' if port is not None else ''}"
+
+
+def websocket_origin_allowed(
+    origin: str | None,
+    *,
+    public_origin: str | None = None,
+) -> bool:
+    """Fail closed unless a browser Origin matches ``BZ_PUBLIC_ORIGIN`` exactly."""
+    expected = (
+        os.environ.get("BZ_PUBLIC_ORIGIN", "")
+        if public_origin is None
+        else public_origin
+    )
+    if not origin or not expected:
+        return False
+    try:
+        return normalize_public_origin(origin) == normalize_public_origin(expected)
+    except ValueError:
+        return False
+
+
+class _UploadBodyTooLarge(MultiPartException):
+    """Enter Starlette's multipart error cleanup path for open spool files."""
+
+    def __init__(self) -> None:
+        super().__init__("Upload request body exceeded its route limit.")
+
+
+class BotUploadBodyLimitMiddleware:
+    """Bound protected multipart bodies before Starlette creates spooled files.
+
+    ``Content-Length`` is only an early-reject hint.  Every delivered ASGI body
+    chunk is still counted, so a missing or forged-small header cannot bypass the
+    limit.  Proxy identity headers are deliberately irrelevant to this boundary.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_body_bytes: int | None = None,
+    ) -> None:
+        if max_body_bytes is not None and max_body_bytes < 1:
+            raise ValueError("max_body_bytes must be positive")
+        self.app = app
+        # Test-only override retained for the existing direct ASGI harness. In
+        # production each exact route uses its own fixed request envelope.
+        self.max_body_bytes = (
+            int(max_body_bytes) if max_body_bytes is not None else None
+        )
+
+    @staticmethod
+    def _is_bot_upload(scope: Scope) -> bool:
+        if scope.get("type") != "http" or scope.get("method") != "POST":
+            return False
+        path = str(scope.get("path") or "")
+        return path == "/api/bots" or bool(
+            _BOT_VERSION_UPLOAD_PATH.fullmatch(path)
+        )
+
+    def _policy_for_scope(
+        self, scope: Scope
+    ) -> tuple[int, dict[str, str]] | None:
+        if scope.get("type") != "http" or scope.get("method") != "POST":
+            return None
+        path = str(scope.get("path") or "")
+        if self._is_bot_upload(scope):
+            limit = BOT_UPLOAD_BODY_MAX_BYTES
+            detail = _BOT_UPLOAD_TOO_LARGE
+        elif _BUG_ATTACHMENT_UPLOAD_PATH.fullmatch(path):
+            limit = BUG_ATTACHMENT_BODY_MAX_BYTES
+            detail = _BUG_ATTACHMENT_TOO_LARGE
+        elif path == "/api/auth/avatar":
+            limit = AVATAR_BODY_MAX_BYTES
+            detail = _AVATAR_TOO_LARGE
+        else:
+            return None
+        return self.max_body_bytes or limit, detail
+
+    @staticmethod
+    def _declared_too_large(scope: Scope, max_body_bytes: int) -> bool:
+        for name, raw_value in scope.get("headers") or []:
+            if name.lower() != b"content-length":
+                continue
+            # Treat each duplicate/comma-separated numeric value as an early
+            # rejection signal.  Malformed or forged-small values never grant
+            # admission; the receive counter below remains authoritative.
+            for value in raw_value.split(b","):
+                try:
+                    declared = int(value.strip())
+                except ValueError:
+                    continue
+                if declared > max_body_bytes:
+                    return True
+        return False
+
+    @staticmethod
+    async def _reject(
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        detail: dict[str, str],
+    ) -> None:
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": dict(detail)},
+        )
+        await response(scope, receive, send)
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        policy = self._policy_for_scope(scope)
+        if policy is None:
+            await self.app(scope, receive, send)
+            return
+        max_body_bytes, detail = policy
+        if self._declared_too_large(scope, max_body_bytes):
+            # Do not call receive or downstream: an honest oversized request is
+            # rejected before multipart parsing can create a spool file.
+            await self._reject(scope, receive, send, detail)
+            return
+
+        received = 0
+        rejected = False
+
+        async def limited_receive() -> Message:
+            nonlocal received, rejected
+            if rejected:
+                # If a defensive downstream catches the size exception and asks
+                # again, never expose further client bytes or block on receive.
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message.get("type") != "http.request":
+                # In particular, propagate a real disconnect without turning it
+                # into a misleading 413 response.
+                return message
+            received += len(message.get("body", b""))
+            if received > max_body_bytes:
+                rejected = True
+                # The crossing chunk is never returned to Starlette, so its
+                # multipart spool cannot grow past the configured body limit.
+                raise _UploadBodyTooLarge
+            return message
+
+        async def limited_send(message: Message) -> None:
+            # A downstream which catches our private receive exception must not
+            # race its own response against the authoritative 413 below.
+            if not rejected:
+                await send(message)
+
+        try:
+            await self.app(scope, limited_receive, limited_send)
+        except _UploadBodyTooLarge:
+            pass
+        if rejected:
+            await self._reject(scope, limited_receive, send, detail)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -181,6 +400,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return _UPLOAD_STRICT
         if path == "/api/matches/challenge":
             return _CHALLENGE_STRICT
+        if method == "POST" and (
+            path == "/api/feedback/bugs"
+            or (path.startswith("/api/feedback/bugs/") and path.endswith("/attachments"))
+        ):
+            return _FEEDBACK_STRICT
         if path.startswith("/api/"):
             return _API_DEFAULT
         return None

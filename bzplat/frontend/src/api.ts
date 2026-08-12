@@ -7,6 +7,50 @@
 
 const TOKEN_KEY = 'bzplat_token'
 const USER_KEY = 'bzplat_user'
+const SAFE_FAILURE_KEY = 'bzplat_last_safe_api_failure'
+
+export interface SafeApiFailure {
+  template: string
+  status: number
+  trace_id: string
+}
+
+export interface ApiRequestInit extends RequestInit {
+  /** Do not inject the mutable global Bearer token into this request. */
+  suppressAuth?: boolean
+}
+
+const SAFE_API_TEMPLATES = [
+  '/api/auth/*',
+  '/api/bots/*',
+  '/api/matches/*',
+  '/api/contests/*',
+  '/api/communications/*',
+  '/api/feedback/bugs',
+  '/api/notifications',
+] as const
+
+function safeApiTemplate(path: string): string | null {
+  const pathname = path.split(/[?#]/, 1)[0]
+  if (pathname.startsWith('/api/auth/')) return '/api/auth/*'
+  if (pathname.startsWith('/api/bots/')) return '/api/bots/*'
+  if (pathname.startsWith('/api/matches/')) return '/api/matches/*'
+  if (pathname.startsWith('/api/contests/')) return '/api/contests/*'
+  if (pathname.startsWith('/api/communications/')) return '/api/communications/*'
+  if (pathname === '/api/feedback/bugs') return '/api/feedback/bugs'
+  if (pathname === '/api/notifications') return '/api/notifications'
+  return null
+}
+
+export function lastSafeApiFailure(): SafeApiFailure | null {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(SAFE_FAILURE_KEY) || 'null') as SafeApiFailure | null
+    if (!parsed || !SAFE_API_TEMPLATES.includes(parsed.template as never)) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
 
 export interface CurrentUser {
   id: number
@@ -84,10 +128,11 @@ async function readErrorDetail(r: Response): Promise<string> {
 
 export async function apiFetch<T = unknown>(
   path: string,
-  options: RequestInit = {},
+  options: ApiRequestInit = {},
 ): Promise<T> {
-  const headers = new Headers(options.headers || {})
-  const token = userToken.get()
+  const { suppressAuth = false, ...requestOptions } = options
+  const headers = new Headers(requestOptions.headers || {})
+  const token = suppressAuth ? null : userToken.get()
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`)
   }
@@ -106,16 +151,18 @@ export async function apiFetch<T = unknown>(
   }
 
   const r = await fetch(path, {
-    ...options,
+    ...requestOptions,
     headers,
     body,
-    credentials: 'include',
+    credentials: requestOptions.credentials ?? 'include',
   })
 
   if (r.status === 401) {
     const detail = await readErrorDetail(r)
     // /me 探测与凭据接口：不跳登录页（避免未登录打开页面就刷错）
-    const soft = path.includes('/api/auth/me') || isCredentialAuthPath(path)
+    // Caller-isolated requests may carry a deliberately frozen identity.  A
+    // late 401 from that identity must not clear or redirect a newer session.
+    const soft = suppressAuth || path.includes('/api/auth/me') || isCredentialAuthPath(path)
     if (!soft) {
       userToken.clear()
       currentUserStore.clear()
@@ -131,6 +178,14 @@ export async function apiFetch<T = unknown>(
   }
 
   if (!r.ok) {
+    const template = safeApiTemplate(path)
+    if (template) {
+      sessionStorage.setItem(SAFE_FAILURE_KEY, JSON.stringify({
+        template,
+        status: r.status,
+        trace_id: (r.headers.get('x-trace-id') || '').slice(0, 64),
+      }))
+    }
     throw new ApiError(path, r.status, await readErrorDetail(r))
   }
 
@@ -157,16 +212,21 @@ export class UnauthorizedError extends ApiError {
   }
 }
 
-export function apiGet<T = unknown>(path: string): Promise<T> {
-  return apiFetch<T>(path, { method: 'GET' })
+export function apiGet<T = unknown>(
+  path: string,
+  options: Omit<ApiRequestInit, 'method'> = {},
+): Promise<T> {
+  return apiFetch<T>(path, { ...options, method: 'GET' })
 }
 
 export function apiJson<T = unknown>(
   path: string,
   method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   body?: unknown,
+  options: Omit<ApiRequestInit, 'method' | 'body'> = {},
 ): Promise<T> {
   return apiFetch<T>(path, {
+    ...options,
     method,
     body: body === undefined ? undefined : (body as BodyInit),
   })
@@ -179,6 +239,7 @@ export function apiForm<T = unknown>(
   path: string,
   method: 'POST' | 'PUT' | 'PATCH' = 'POST',
   fields: Record<string, string | Blob | File | boolean | number | undefined | null> = {},
+  options: Omit<ApiRequestInit, 'method' | 'body'> = {},
 ): Promise<T> {
   const fd = new FormData()
   for (const [k, v] of Object.entries(fields)) {
@@ -189,7 +250,7 @@ export function apiForm<T = unknown>(
       fd.append(k, v)
     }
   }
-  return apiFetch<T>(path, { method, body: fd })
+  return apiFetch<T>(path, { ...options, method, body: fd })
 }
 
 export function apiUpload<T = unknown>(
@@ -197,8 +258,9 @@ export function apiUpload<T = unknown>(
   file: File,
   fields: Record<string, string> = {},
   method: 'POST' | 'PUT' = 'POST',
+  options: Omit<ApiRequestInit, 'method' | 'body'> = {},
 ): Promise<T> {
-  return apiForm<T>(path, method, { ...fields, file })
+  return apiForm<T>(path, method, { ...fields, file }, options)
 }
 
 export function errMsg(e: unknown, fallback = '操作失败'): string {
@@ -211,10 +273,10 @@ export function isUnauthorized(e: unknown): boolean {
   return e instanceof UnauthorizedError || (e instanceof ApiError && e.status === 401)
 }
 
-/** 构造人类对战 WebSocket URL（带 token query 鉴权）。
- * 同源：根据当前 location 推断 ws/wss + host。 */
+/** 构造人类对战 WebSocket URL。
+ * 同源 HttpOnly ``bz_session`` cookie 由浏览器在握手时自动携带；
+ * 会话 token 不得进入 URL，避免泄漏到访问日志和诊断记录。 */
 export function playWsUrl(matchId: string): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const token = userToken.get() || ''
-  return `${proto}//${location.host}/api/matches/${matchId}/play?token=${encodeURIComponent(token)}`
+  return `${proto}//${location.host}/api/matches/${matchId}/play`
 }

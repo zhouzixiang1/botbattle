@@ -15,6 +15,11 @@ from bzplat.backend.matches.orchestrator import (
     MatchOrchestrator,
 )
 from bzplat.backend.store import Store
+from bzplat.backend.tests.execution_helpers import (
+    challenge_and_start,
+    human_and_start,
+    start_claimed_match,
+)
 
 
 class NeverRunner:
@@ -116,7 +121,8 @@ def test_bot_match_never_falls_back_from_invalid_frozen_version(
         runner = NeverRunner()
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
         before = _ratings(store, bots, "holdem")
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bots[0]["id"],
             bots[1]["id"],
             users[0]["id"],
@@ -153,7 +159,7 @@ def test_bot_match_never_falls_back_from_invalid_frozen_version(
             )
 
         queue = orch.subscribe(match_id)
-        orch.start_prepared_match(match_id)
+        start_claimed_match(orch, match_id)
         task = orch._tasks[match_id]
         await task
 
@@ -166,7 +172,6 @@ def test_bot_match_never_falls_back_from_invalid_frozen_version(
         assert _ratings(store, bots, "holdem") == before
         assert not store.is_match_rating_settled(match_id)
         assert match_id not in orch._tasks
-        assert orch._bot_running == 0
         assert match_id not in orch._sse
 
         errors = [event for event in _drain(queue) if event.get("type") == "error"]
@@ -195,11 +200,13 @@ def test_human_match_cross_bot_version_aborts_and_releases_user(tmp_path):
         runner = NeverRunner()
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
         before = _ratings(store, bots, "gomoku")
-        match_id = await orch.challenge_human(
+        match_id = await human_and_start(
+            orch,
             bots[0]["id"],
             users[0]["id"],
             human_seat=1,
             game_id="gomoku",
+            defer_start=True,
         )
         _set_match_version(
             store,
@@ -209,6 +216,7 @@ def test_human_match_cross_bot_version_aborts_and_releases_user(tmp_path):
             version_id=versions[1]["id"],
         )
         queue = orch.subscribe(match_id)
+        start_claimed_match(orch, match_id)
         task = orch._tasks[match_id]
         await task
 
@@ -366,7 +374,8 @@ def test_checksum_or_size_tamper_invalidates_cache_before_runner(tmp_path, tampe
         assert orch._runtime_for_bot_version(
             store.get_bot(bots[0]["id"]), versions[0]["id"], seat=0
         )[0] == str(binary_a)
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bots[0]["id"],
             bots[1]["id"],
             user["id"],
@@ -390,7 +399,7 @@ def test_checksum_or_size_tamper_invalidates_cache_before_runner(tmp_path, tampe
         assert changed_stat.st_ctime_ns != previous.st_ctime_ns
 
         queue = orch.subscribe(match_id)
-        orch.start_prepared_match(match_id)
+        start_claimed_match(orch, match_id)
         task = orch._tasks[match_id]
         await task
 
@@ -456,25 +465,26 @@ def test_contest_empty_frozen_path_aborts_and_resets_pairing_safely(tmp_path):
 
         orch.on_match_done = on_match_done
         before = _ratings(store, bots, "holdem")
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bots[0]["id"],
             bots[1]["id"],
             organizer["id"],
             match_type="contest",
             contest_id=contest["id"],
+            contest_pairing_id=pairing["id"],
             game_id="holdem",
             bot_a_version_id=versions[0]["id"],
             bot_b_version_id=versions[1]["id"],
             defer_start=True,
         )
-        store.bind_contest_pairing_match(contest["id"], pairing["id"], match_id)
         with store._tx() as conn:
             conn.execute(
                 "UPDATE bot_versions SET binary_path='' WHERE id=?",
                 (versions[0]["id"],),
             )
 
-        orch.start_prepared_match(match_id)
+        start_claimed_match(orch, match_id)
         task = orch._tasks[match_id]
         await task
 

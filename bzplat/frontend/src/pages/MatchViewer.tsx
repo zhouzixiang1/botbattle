@@ -4,23 +4,26 @@
  * - running/pending → 直播模式：开 SSE，从事件 1 按回放速度推进（DVR 模型），
  *   新事件先进入缓冲、显示「落后 N 个事件」、可「跳到最新」；match_end 到达后
  *   游标继续顺序补完（不强制跳结局）；已结束对局重开页同样自动从头播放。
- * - completed/aborted → 回放模式：一次性加载 events_json，从头自动播放。
+ * - completed/aborted → 元数据先渲染，再按需加载结构化 replay events。
  * - 座位身份：从 match.bot_a/bot_b（后端 JOIN）构造 SeatInfo 传 canvas。
  * - 合并旧 MatchDetail（回放）逻辑；ArenaWatch 已删除，/watch 旧路径不再重定向。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
 import PageStub from '@/components/PageStub'
+import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
+import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
+import { useAuth } from '@/components/useAuth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Slider } from '@/components/ui/slider'
 import { ErrorMsg, Loading, EmptyState } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { apiGet, apiPost, errMsg } from '@/api'
-import { gameLabel, gameIcon, normalizeGameId, matchTypeBadge } from '@/lib/games'
+import { apiFetch, apiGet, apiPost, errMsg } from '@/api'
+import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { findGame, resolveTerminalReason, unsupportedGameLabel } from '@/games'
@@ -33,7 +36,20 @@ import {
   resolveWinnerLabel,
 } from '@/lib/match-seats'
 
-type MatchRow = MatchSeatRow & { game_id?: string; status?: string; reason?: string }
+type MatchRow = MatchSeatRow & {
+  id?: string
+  game_id?: string
+  status?: string
+  reason?: string
+  can_view_debug?: boolean
+}
+
+type ReplayPayload = {
+  match_id: string
+  events: RawEvent[]
+  event_count: number
+  updated_at?: string | null
+}
 
 function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
   if (!match) return false
@@ -64,10 +80,45 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
   completed: 'default', aborted: 'destructive', running: 'default', pending: 'secondary',
 }
 
+const RATING_REASON_LABEL: Record<string, string> = {
+  eligible: '计入天梯',
+  same_owner: '同所有者调试 · 不计天梯',
+  self_play: '自博弈调试 · 不计天梯',
+  human: '人机对局 · 不计天梯',
+  contest: '赛事积分 · 不计天梯',
+  bot_missing: '历史 Bot 缺失 · 不计天梯',
+  owner_missing: '历史所有者缺失 · 不计天梯',
+}
+
+function ratingBadge(match: MatchRow): {
+  label: string
+  variant: 'default' | 'secondary' | 'destructive' | 'outline'
+} | null {
+  if (match.status === 'aborted') {
+    return { label: '已中止未计分', variant: 'destructive' }
+  }
+  if (match.rated !== true) {
+    if (match.rated !== false) return null
+    return {
+      label: RATING_REASON_LABEL[match.rating_reason || ''] || '不计天梯',
+      variant: 'secondary',
+    }
+  }
+  if (match.status === 'completed') {
+    return match.rating_settled === true
+      ? { label: '已计分', variant: 'default' }
+      : { label: '待结算', variant: 'secondary' }
+  }
+  return { label: '预计计分', variant: 'outline' }
+}
+
 export default function MatchViewer() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { user } = useAuth()
   const [match, setMatch] = useState<MatchRow | null>(null)
+  const [botDebug, setBotDebug] = useState<BotDebugPayload | null>(null)
+  const [debugPermissionScope, setDebugPermissionScope] = useState<string | null>(null)
   const [events, setEvents] = useState<RawEvent[]>([])
   const [status, setStatus] = useState<string>('connecting')  // connecting|live|match_end|error|replay
   const [error, setError] = useState('')
@@ -88,13 +139,19 @@ export default function MatchViewer() {
   // React 的 nested-update 保护；先入队、每帧合并一次，match_end 到达时同步冲刷。
   const pendingEventsRef = useRef<RawEvent[]>([])
   const flushFrameRef = useRef<number | null>(null)
+  const debugPermissionRefreshRef = useRef<string | null>(null)
+  const debugFetchedRef = useRef<string | null>(null)
+  const debugLoadGenerationRef = useRef(0)
 
   // 直播 SSE / 回放加载（一次性探测状态，决定模式）
   const isLiveMatch = match?.status === 'running' || match?.status === 'pending'
   useEffect(() => {
     if (!id) return
+    const controller = new AbortController()
     setLoading(true)
     setError('')
+    setMatch(null)
+    setStatus('connecting')
     eventsLenRef.current = 0
     pendingEventsRef.current = []
     setEvents([])
@@ -129,23 +186,42 @@ export default function MatchViewer() {
         flushFrameRef.current = requestAnimationFrame(flushPending)
       }
     }
+    const refreshTerminalMatch = () => {
+      void apiGet<{ match: MatchRow }>(`/api/matches/${encodeURIComponent(id)}`)
+        .then((detail) => {
+          if (cancelled) return
+          if (detail.match.status === 'completed' || detail.match.status === 'aborted') {
+            setMatch(detail.match)
+          }
+        })
+        .catch(() => undefined)
+    }
 
     // 浏览计数（公开，失败忽略）
     void apiPost(`/api/matches/${encodeURIComponent(id)}/view`, 'POST', {}).catch(() => undefined)
 
-    void apiGet<{ match: MatchRow; replay: { events_json?: string } }>(`/api/matches/${encodeURIComponent(id)}`)
-      .then((d) => {
+    void apiFetch<{ match: MatchRow }>(`/api/matches/${encodeURIComponent(id)}`, {
+      method: 'GET',
+      signal: controller.signal,
+    })
+      .then(async (d) => {
         if (cancelled) return
         setMatch(d.match)
         const m = d.match
-        const evs: RawEvent[] = (() => { try { return JSON.parse(d.replay?.events_json || '[]') as RawEvent[] } catch { return [] } })()
-        eventsLenRef.current = evs.length
-        setEvents(evs)
+        if (!findGame(normalizeGameId(m.game_id))) {
+          // Unknown/future games have no reducer contract. Metadata is enough
+          // to render the explicit unsupported state; never download a replay
+          // that this client cannot safely interpret.
+          setStatus('error')
+          setLoading(false)
+          return
+        }
         const live = m.status === 'running' || m.status === 'pending'
         if (live) {
           setStatus('live'); setCursor(0); setPlaying(true)
           es = new EventSource(`/api/matches/${encodeURIComponent(id)}/events`)
           es.onmessage = (msg) => {
+            if (cancelled) return
             try {
               const ev = JSON.parse(msg.data) as RawEvent
               if (ev.type === 'snapshot') {
@@ -162,6 +238,7 @@ export default function MatchViewer() {
                   const local = queued.length ? [...prev, ...queued] : prev
                   return hist.length >= local.length ? hist : local
                 })
+                setLoading(false)
                 const terminal = snapshotMatch?.status === 'completed' || snapshotMatch?.status === 'aborted'
                 if (terminal) {
                   // 初始详情仍是 live、订阅瞬间已结束：snapshot 是唯一终态信号。
@@ -170,6 +247,7 @@ export default function MatchViewer() {
                   setStatus('replay')
                   terminalClosed = true
                   es?.close()
+                  refreshTerminalMatch()
                 } else {
                   setStatus('live')
                 }
@@ -204,8 +282,10 @@ export default function MatchViewer() {
                   return patch
                 })
                 setStatus(String(ev.type))
+                setLoading(false)
                 terminalClosed = true
                 es?.close()
+                refreshTerminalMatch()
               } else {
                 // 常规事件（落子/判决等）：逐帧批量追加，避免瞬时对局触发深度更新告警。
                 queueEvent(ev)
@@ -218,25 +298,109 @@ export default function MatchViewer() {
             // transport failure. Keep it alive and expose a connecting state;
             // the next authoritative snapshot restores `live` above.
             setStatus('connecting')
+            // A first-frame failure must not leave the whole page in a
+            // permanent spinner. Metadata stays visible while EventSource
+            // retries and a later snapshot can still populate the replay.
+            setLoading(false)
           }
         } else {
+          const replay = await apiFetch<ReplayPayload>(
+            `/api/matches/${encodeURIComponent(id)}/replay`,
+            { method: 'GET', signal: controller.signal },
+          )
+          if (cancelled) return
+          const evs = Array.isArray(replay.events) ? replay.events : []
+          eventsLenRef.current = evs.length
+          setEvents(evs)
           const pinTechnicalTerminal =
             matchHasTechnicalLoss(m) && Number(m.result?.rounds_played ?? 0) <= 0
           setStatus('replay')
           setCursor(evs.length > 0 ? (pinTechnicalTerminal ? evs.length - 1 : 0) : 0)
           setPlaying(evs.length > 0 && !pinTechnicalTerminal)
+          setLoading(false)
         }
       })
-      .catch((e) => { if (!cancelled) { setError(errMsg(e)); setStatus('error') } })
-      .finally(() => { if (!cancelled) setLoading(false) })
+      .catch((e) => {
+        if (!cancelled && !(e instanceof DOMException && e.name === 'AbortError')) {
+          setError(errMsg(e))
+          setStatus('error')
+          setLoading(false)
+        }
+      })
 
     return () => {
       cancelled = true
+      controller.abort()
       cancelFlush()
       pendingEventsRef.current = []
       es?.close()
     }
   }, [id])
+
+  // 私有 debug 只在终态且详情明确授予当前身份时读取。
+  // 每个 match+user 权限域必须独立刷新详情；路由或账号切换会通过
+  // generation 废弃旧响应，防止上一局/上一身份的私有内容短暂渲染。
+  useEffect(() => {
+    const generation = ++debugLoadGenerationRef.current
+    const current = () => debugLoadGenerationRef.current === generation
+    if (!id || !user) {
+      setBotDebug(null)
+      setDebugPermissionScope(null)
+      debugPermissionRefreshRef.current = null
+      debugFetchedRef.current = null
+      return
+    }
+    if (match?.id !== id) {
+      setBotDebug(null)
+      setDebugPermissionScope(null)
+      debugPermissionRefreshRef.current = null
+      debugFetchedRef.current = null
+      return
+    }
+    const terminal = match?.status === 'completed' || match?.status === 'aborted'
+    if (!terminal) {
+      setBotDebug(null)
+      setDebugPermissionScope(null)
+      debugPermissionRefreshRef.current = null
+      debugFetchedRef.current = null
+      return
+    }
+
+    const permissionKey = `${id}:${user.id}`
+    if (debugPermissionScope !== permissionKey) {
+      if (debugPermissionRefreshRef.current !== permissionKey) {
+        debugPermissionRefreshRef.current = permissionKey
+        debugFetchedRef.current = null
+        setBotDebug(null)
+        void apiGet<{ match: MatchRow }>(`/api/matches/${encodeURIComponent(id)}`)
+          .then((detail) => {
+            if (current() && detail.match.id === id) {
+              setMatch(detail.match)
+              setDebugPermissionScope(permissionKey)
+            }
+          })
+          .catch(() => {
+            if (current()) debugPermissionRefreshRef.current = null
+          })
+      }
+      return
+    }
+
+    if (!match?.can_view_debug) {
+      setBotDebug(null)
+      return
+    }
+    const fetchKey = permissionKey
+    if (debugFetchedRef.current === fetchKey) return
+    debugFetchedRef.current = fetchKey
+    void apiGet<BotDebugPayload>(`/api/matches/${encodeURIComponent(id)}/debug`)
+      .then((payload) => {
+        if (current() && payload.match_id === id) setBotDebug(payload)
+      })
+      .catch(() => {
+        if (current()) setBotDebug(null)
+      })
+  }, [id, user?.id, match?.id, match?.status, match?.can_view_debug, debugPermissionScope])
 
   // 窄屏默认折叠时序面板，并在旋转/调整窗口跨过 xl 断点时同步。
   // 同一布局内的手动折叠选择不会被 resize 覆盖。
@@ -315,7 +479,7 @@ export default function MatchViewer() {
   const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
   const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
   const compactViewportDashboard = viewportDashboard && timelineCollapsed
-  const typeBadge = matchTypeBadge(match?.match_type)
+  const ratingStateBadge = match ? ratingBadge(match) : null
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(match?.reason, match?.status)
     : resolveTerminalReason(match?.reason, match?.status)
@@ -442,28 +606,16 @@ export default function MatchViewer() {
       : null
   const renderSeat = (seat: 0 | 1) => {
     if (!match) return null
-    const info = seats?.[seat]
-    const botId = seat === 0 ? match.bot_a_id : match.bot_b_id
-    const name = info?.botName || seatHeaderLabel(match, seat)
     const isWinner = winnerSeat === seat
     return (
-      <div className={`min-w-0 rounded-lg border px-3 py-2 ${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}>
-        <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-          <span>座位 {seat + 1}</span>
-          {gameSpec?.seatColors?.[seat] && <span>· {gameSpec.seatColors[seat]}</span>}
-          {isWinner && <Badge className="ml-auto">胜</Badge>}
-        </div>
-        {botId != null && !info?.isHuman ? (
-          <Link to={`/bot/${botId}`} className="block break-words font-semibold text-foreground [overflow-wrap:anywhere] hover:text-primary">
-            {name}
-          </Link>
-        ) : (
-          <div className="break-words font-semibold text-foreground [overflow-wrap:anywhere]">{name}</div>
-        )}
-        {info?.ownerName && !info.isHuman && (
-          <div className="mt-0.5 break-all text-xs text-muted-foreground">@{info.ownerName}</div>
-        )}
-      </div>
+      <MatchParticipantIdentity
+        source={match}
+        side={seat}
+        variant="panel"
+        state={isWinner ? 'winner' : winnerSeat != null ? 'loser' : 'neutral'}
+        seatDetail={gameSpec?.seatColors?.[seat]}
+        className={`${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} border ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}
+      />
     )
   }
 
@@ -474,8 +626,15 @@ export default function MatchViewer() {
         {match && (
           <Badge variant="secondary" className="gap-1"><GameIcon className="size-3" />{gameLabel(gameId)}</Badge>
         )}
-        {typeBadge && (
-          <Badge variant="outline" className={`text-[10px] ${typeBadge.cls}`}>{typeBadge.label}</Badge>
+        {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
+        {ratingStateBadge && (
+          <Badge
+            data-testid="rating-state"
+            variant={ratingStateBadge.variant}
+            className="max-w-full whitespace-normal text-[10px]"
+          >
+            {ratingStateBadge.label}
+          </Badge>
         )}
         {/* 状态徽标：优先用 DB 权威字段 match.status（completed/aborted/running/pending），
             回退到本地连接态（connecting/live/match_end/error/replay）。
@@ -583,6 +742,19 @@ export default function MatchViewer() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {user
+        && match
+        && match.id === id
+        && debugPermissionScope === `${id}:${user.id}`
+        && match.can_view_debug
+        && botDebug
+        && botDebug.match_id === match.id && (
+        <BotDebugPanel
+          payload={botDebug}
+          seatNames={[seatHeaderLabel(match, 0), seatHeaderLabel(match, 1)]}
+        />
       )}
 
       {error && <ErrorMsg msg={error} className="mb-4" />}

@@ -6,24 +6,27 @@
 
 **对战核心**
 - 唯一上传格式为 **Linux x86_64 ELF**；拒绝 PE/`.exe`、Mach-O、ARM64 ELF 和原始 `.py`，Docker 硬隔离执行
-- 唯一 JSON 信封：Traditional / LongRunning 只区分进程生命周期；响应必须包含 `response`，其他顶层字段忽略；LongRunning 必须握手且不回退
+- 唯一 JSON 信封：Traditional / LongRunning 只区分进程生命周期；响应必须包含 `response`，可选 `debug` 走独立私有 sidecar，其余顶层字段忽略；LongRunning 必须握手且不回退
 - 各游戏独立裁判引擎 + 统一 GameSpec/结果契约；赛制与编排主流程无需游戏名分支
 - SSE 实时观赛 + 完整对局回放（播放/暂停/步进/倍速/逐手跳转）
-- 人类 vs Bot（WebSocket 实时交互，独立并发，不计评分）
+- 全站对局身份统一：逐座位显示 Bot 与所属用户或实际真人，并明确标注自动排位、用户挑战、自博弈、真人对战、锦标赛等性质；已参赛实体只停用、不硬删历史身份
+- 终局私有 Bot debug sidecar：双方作者对称调试，赛事延迟授权，公开回放零泄漏
+- 人类 vs Bot（WebSocket 实时交互；与其他来源共享全局容量，占 1 个对局槽 + 1 个沙箱单元，不计评分）
+- 人工、人机、赛事与自动排位统一进入持久执行队列；挑战/人机返回 HTTP 202 请求，可刷新恢复、取消，基础设施中断后可安全重试
 
 **赛事与排行**
-- Glicko-2 排行榜（按游戏分别排名）+ 6 档段位称号 + 相邻评分变化/RD/胜率与最近对局
+- Glicko-2 数值排行榜（按游戏分别排名）+ 1-based 名次/百分位 + 95% 置信区间 + 评分变化/RD/样本与最近对局
 - 组织者赛事：6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰）+ 内置预赛/决赛等模板、积分榜、对阵图、休息期换 Bot
 - 客户演示：六个明确标注“合成演示”的只读生命周期快照，保留真实裁判回放、逐阶段排名/晋级与独立正式总榜
-- 闲时自动对局维护天梯（陈旧度 + 定级赛优先）
+- 持久公平自动排位：只作为全局执行队列的自动 producer，按游戏/bootstrap 通道/所有者轮转，公开正在/即将请求；唯一运维开关不影响人工、人机和赛事
 
 **平台功能**
 - 账号体系：注册/登录/邮箱验证/重置密码、个人主页、资料/头像编辑
 - 社交：关注用户、收藏 Bot、评论、点赞、浏览计数、点赞榜
-- 通知：站内通知 + 可选邮件提醒（对局完成/被关注/赛事/评论）
+- 通信：站内消息为真相、邮件异步投递；保留旧通知铃铛，并支持用户/admin 线程、固定受众广播与可追踪 Bug 反馈
 - 经验与等级系统（等级 gating 部分功能）、全局搜索（Cmd+K 命令面板）
 - 站点可配置（站名/Logo/公告）
-- 管理后台（7 Tab：仪表盘/用户/Bot/对局记录/锦标赛/日志/邮件）；运行参数与赛制模板随代码评审发布，不提供网页写入口
+- 管理后台提供紧凑通信中心：收发信、广播快照预览/二次批准、失败重试与 Bug 诊断/回复；事务邮件模板随代码版本发布，历史数据库自定义只读保留
 
 **前端**
 - React 19 + shadcn/ui 设计系统，**浅/暗双主题**（OKLCH token，一键切换）
@@ -49,7 +52,7 @@ pip install -e '.[dev]'
 # 前端
 (cd bzplat/frontend && npm install && npm run build)
 
-# 配置环境（SMTP_* 未配时现有账号仍可使用，但注册/重置会返回 503）
+# 配置环境（SMTP_* 未配时邮件仍会排队并重试；注册/重置业务请求不阻塞）
 cp .env.example .env
 
 # 本地无 Docker 时用本机跑 ELF（仅测试；必须在启动服务前设置）
@@ -78,10 +81,10 @@ botzone create-admin alice alice@example.com 'password123'
 
 ## 技术栈
 
-- **后端**：Python ≥ 3.12、FastAPI、uvicorn、SQLite、SMTP（captcha + Pillow）
+- **后端**：Python ≥ 3.12、FastAPI、uvicorn、SQLite、异步 SMTP delivery worker（captcha + Pillow）
 - **前端**：React 19 + Vite 8 + Tailwind CSS v4（CSS-first）+ shadcn/ui + Radix UI + lucide-react + recharts
 - **暗色模式**：next-themes + OKLCH 双主题 token（浅色默认 + 暗色对等）
-- **运行时**：Docker（必需；Linux x86_64 ELF 使用 debian:bookworm-slim）
+- **运行时**：Docker（必需；Linux x86_64 ELF 使用 debian:bookworm-slim）；本机 canonical socket + 实例/请求/attempt/座位标签构成精确清理边界
 - **评分**：Glicko-2（自实现，无外部依赖）
 
 ## 目录结构
@@ -89,7 +92,7 @@ botzone create-admin alice alice@example.com 'password123'
 ```
 ├── bzplat/
 │   ├── backend/          # FastAPI：games(注册表) / matches / contests / store / runtime /
-│   │                     # auth / bots / notifications / rating / mail
+│   │                     # auth / bots / communications / notifications(兼容投影) / rating / mail
 │   └── frontend/         # React 19 + Vite 8 + Tailwind v4 + shadcn/ui（src/games 注册表 + canvas）
 ├── doc/                  # 工程交付文档（6 份核心文档 + 现行专项文档 + INDEX）
 ├── wiki/                 # Bot 玩家文档（规则/协议/Bot 开发指南）

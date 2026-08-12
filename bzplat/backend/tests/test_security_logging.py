@@ -10,15 +10,33 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI, File, UploadFile
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
-from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER, setup_logging
-from bzplat.backend.security import RateLimitMiddleware, audit_log, client_ip
+from bzplat.backend.logging_config import (
+    ACCESS_LOGGER,
+    AUDIT_LOGGER,
+    UvicornRequestTargetFilter,
+    setup_logging,
+)
+from bzplat.backend.security import (
+    AVATAR_BODY_MAX_BYTES,
+    BOT_UPLOAD_BODY_MAX_BYTES,
+    BUG_ATTACHMENT_BODY_MAX_BYTES,
+    BotUploadBodyLimitMiddleware,
+    RateLimitMiddleware,
+    audit_log,
+    client_ip,
+    normalize_public_origin,
+    websocket_origin_allowed,
+)
 
 
 @pytest.fixture
@@ -31,6 +49,105 @@ def log_dir(tmp_path):
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def test_public_origin_normalization_and_exact_websocket_match():
+    assert normalize_public_origin("HTTPS://Example.COM:443/") == "https://example.com"
+    assert normalize_public_origin("http://127.0.0.1:50381") == "http://127.0.0.1:50381"
+    assert websocket_origin_allowed(
+        "HTTPS://Example.COM:443/", public_origin="https://example.com"
+    )
+    assert not websocket_origin_allowed(
+        "https://other.example", public_origin="https://example.com"
+    )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "",
+        "null",
+        "ws://example.com",
+        "https://user:pass@example.com",
+        "https://example.com/path",
+        "https://example.com?query=1",
+        "https://example.com#fragment",
+        "https://example.com\\@evil.test",
+    ],
+)
+def test_public_origin_rejects_missing_or_non_origin_values(origin):
+    assert not websocket_origin_allowed(origin, public_origin="https://example.com")
+
+
+def test_websocket_origin_fails_closed_without_public_origin(monkeypatch):
+    monkeypatch.delenv("BZ_PUBLIC_ORIGIN", raising=False)
+    assert not websocket_origin_allowed("https://example.com")
+    assert not websocket_origin_allowed(
+        "https://example.com", public_origin="https://example.com/path"
+    )
+
+
+def test_uvicorn_filter_projects_http_and_websocket_targets_to_path_only():
+    secret = "session-secret-must-not-survive"
+    request_filter = UvicornRequestTargetFilter()
+    http_record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        (("127.0.0.1", 1234), "GET", f"/api/items?token={secret}", "1.1", 200),
+        None,
+    )
+    ws_record = logging.LogRecord(
+        "uvicorn.error",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "WebSocket %s" [accepted]',
+        (("127.0.0.1", 1234), f"/api/matches/m1/play?token={secret}"),
+        None,
+    )
+
+    assert request_filter.filter(http_record)
+    assert request_filter.filter(ws_record)
+    assert http_record.args[1:] == ("GET", "/api/items", "1.1", 200)
+    assert ws_record.args[1] == "/api/matches/m1/play"
+    assert secret not in http_record.getMessage()
+    assert secret not in ws_record.getMessage()
+
+
+def test_uvicorn_http_and_websocket_queries_never_reach_serialized_logs(
+    log_dir, capsys
+):
+    http_secret = "http-query-secret"
+    ws_secret = "websocket-query-secret"
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1", 1234),
+        "GET",
+        f"/api/history?token={http_secret}&page=2",
+        "1.1",
+        200,
+    )
+    logging.getLogger("uvicorn.error").info(
+        '%s - "WebSocket %s" 403',
+        ("127.0.0.1", 1234),
+        f"/api/matches/m1/play?token={ws_secret}",
+    )
+    for logger_name in ("uvicorn.access", "uvicorn.error"):
+        for handler in logging.getLogger(logger_name).handlers:
+            handler.flush()
+
+    content = _read(log_dir / "app.log")
+    captured = capsys.readouterr()
+    console = captured.out + captured.err
+    assert http_secret not in content
+    assert ws_secret not in content
+    assert http_secret not in console
+    assert ws_secret not in console
+    assert 'GET /api/history HTTP/1.1" 200' in content
+    assert 'WebSocket /api/matches/m1/play" 403' in content
 
 
 # ── logging_config：三 handler 独立文件 + propagate 隔离 ────────────────────
@@ -117,8 +234,6 @@ def test_client_ip_xff_spoofed_leftmost_ignored():
 
 def test_rate_limit_separates_reads_from_upload_writes():
     """刷新版本历史不能提前耗尽同一路径 POST 的 6 次上传额度。"""
-    from fastapi import FastAPI
-
     app = FastAPI()
     app.add_middleware(RateLimitMiddleware, enabled=True)
 
@@ -139,6 +254,397 @@ def test_rate_limit_separates_reads_from_upload_writes():
 
     assert limited.status_code == 429
     assert limited.json()["code"] == "rate_limit_exceeded"
+
+
+def _asgi_scope(
+    path: str = "/api/bots",
+    *,
+    method: str = "POST",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers or [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+    }
+
+
+def test_upload_body_limit_rejects_declared_size_without_receive_or_downstream():
+    called = False
+    receive_calls = 0
+    sent: list[dict] = []
+
+    async def downstream(_scope, _receive, _send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        return {"type": "http.request", "body": b"never", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(
+            _asgi_scope(
+                headers=[
+                    (b"content-length", b"9"),
+                    (b"x-forwarded-for", b"203.0.113.77"),
+                ]
+            ),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert called is False
+    assert receive_calls == 0
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert sent[0]["status"] == 413
+    body = json.loads(sent[1]["body"])
+    assert body["detail"]["code"] == "upload_body_too_large"
+
+
+@pytest.mark.parametrize(
+    ("path", "limit", "code"),
+    [
+        ("/api/bots", BOT_UPLOAD_BODY_MAX_BYTES, "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            BUG_ATTACHMENT_BODY_MAX_BYTES,
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", AVATAR_BODY_MAX_BYTES, "avatar_body_too_large"),
+    ],
+)
+def test_upload_body_limit_uses_exact_route_envelopes(path, limit, code):
+    downstream_calls = 0
+
+    async def downstream(_scope, _receive, send):
+        nonlocal downstream_calls
+        downstream_calls += 1
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        raise AssertionError("declared-size decision must not read request body")
+
+    async def invoke(declared):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        limiter = BotUploadBodyLimitMiddleware(downstream)
+        await limiter(
+            _asgi_scope(
+                path,
+                headers=[(b"content-length", str(declared).encode())],
+            ),
+            receive,
+            send,
+        )
+        return sent
+
+    accepted = asyncio.run(invoke(limit))
+    rejected = asyncio.run(invoke(limit + 1))
+    assert downstream_calls == 1
+    assert accepted[0]["status"] == 204
+    assert rejected[0]["status"] == 413
+    assert json.loads(rejected[1]["body"])["detail"]["code"] == code
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_code"),
+    [
+        ("/api/bots", "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", "avatar_body_too_large"),
+    ],
+)
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"transfer-encoding", b"chunked")],
+        [(b"content-length", b"1")],
+    ],
+    ids=["chunked-no-length", "forged-small-length"],
+)
+def test_upload_body_limit_counts_chunks_and_disconnects_caught_downstream(
+    path, expected_code, headers,
+):
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"1234", "more_body": True},
+            {"type": "http.request", "body": b"5678", "more_body": True},
+            {"type": "http.request", "body": b"9", "more_body": True},
+            {"type": "http.request", "body": b"not-read", "more_body": False},
+        ]
+    )
+    receive_calls = 0
+    delivered: list[dict] = []
+    after_reject: list[dict] = []
+    sent: list[dict] = []
+
+    async def receive():
+        nonlocal receive_calls
+        receive_calls += 1
+        return next(messages)
+
+    async def downstream(_scope, limited_receive, _send):
+        try:
+            while True:
+                message = await limited_receive()
+                delivered.append(message)
+                if not message.get("more_body"):
+                    return
+        except Exception:
+            # Defensive downstream code cannot resume reading client bytes after
+            # the crossing chunk; it sees a synthetic disconnect instead.
+            after_reject.append(await limited_receive())
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(
+            _asgi_scope(path, headers=headers),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert [message["body"] for message in delivered] == [b"1234", b"5678"]
+    assert sum(len(message["body"]) for message in delivered) == 8
+    assert after_reject == [{"type": "http.disconnect"}]
+    assert receive_calls == 3
+    assert sent[0]["status"] == 413
+    assert json.loads(sent[1]["body"])["detail"]["code"] == expected_code
+
+
+def test_upload_body_limit_preserves_real_disconnect_without_413():
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"123", "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+    delivered: list[dict] = []
+    sent: list[dict] = []
+
+    async def receive():
+        return next(messages)
+
+    async def downstream(_scope, limited_receive, _send):
+        delivered.append(await limited_receive())
+        delivered.append(await limited_receive())
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(_asgi_scope(), receive, send)
+
+    asyncio.run(exercise())
+    assert [message["type"] for message in delivered] == [
+        "http.request",
+        "http.disconnect",
+    ]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "limited"),
+    [
+        ("POST", "/api/bots/7/versions", True),
+        ("POST", "/api/bots/not-an-int/versions", True),
+        ("POST", "/api/feedback/bugs/bug_test/attachments", True),
+        ("POST", "/api/auth/avatar", True),
+        ("GET", "/api/bots", False),
+        ("GET", "/api/auth/avatar", False),
+        ("POST", "/api/feedback/bugs/bug_test/attachments/", False),
+        ("POST", "/api/bots/7/versions/", False),
+        ("POST", "/api/bots/7/versions/extra", False),
+        ("POST", "/api/bots-extra", False),
+    ],
+)
+def test_upload_body_limit_matches_only_exact_upload_routes(method, path, limited):
+    called = False
+    sent: list[dict] = []
+
+    async def downstream(_scope, _receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        limiter = BotUploadBodyLimitMiddleware(downstream, max_body_bytes=8)
+        await limiter(
+            _asgi_scope(
+                path,
+                method=method,
+                headers=[(b"content-length", b"9")],
+            ),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert called is (not limited)
+    assert sent[0]["status"] == (413 if limited else 204)
+
+
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("/api/bots", "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", "avatar_body_too_large"),
+    ],
+)
+def test_upload_body_limit_http_response_is_structured_413(path, code):
+    app = FastAPI()
+    app.add_middleware(BotUploadBodyLimitMiddleware, max_body_bytes=256)
+    endpoint_called = False
+
+    async def upload(file: UploadFile = File(...)):
+        nonlocal endpoint_called
+        endpoint_called = True
+        return {"size": len(await file.read())}
+
+    app.add_api_route(path, upload, methods=["POST"])
+
+    response = TestClient(app).post(
+        path,
+        files={"file": ("bot.bin", b"x" * 512, "application/octet-stream")},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == code
+    assert endpoint_called is False
+
+
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("/api/bots", "upload_body_too_large"),
+        (
+            "/api/feedback/bugs/bug_test/attachments",
+            "attachment_body_too_large",
+        ),
+        ("/api/auth/avatar", "avatar_body_too_large"),
+    ],
+)
+def test_chunked_multipart_limit_closes_rolled_spool(
+    monkeypatch, path, code
+):
+    """A receive-time 413 must enter Starlette's open-file cleanup branch."""
+    import tempfile
+    import starlette.formparsers as formparsers
+
+    created = []
+    real_spooled_file = tempfile.SpooledTemporaryFile
+
+    def tracking_spooled_file(*args, **kwargs):
+        kwargs["max_size"] = 8
+        spool = real_spooled_file(*args, **kwargs)
+        created.append(spool)
+        return spool
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracking_spooled_file)
+
+    app = FastAPI()
+    app.add_middleware(BotUploadBodyLimitMiddleware, max_body_bytes=256)
+    endpoint_called = False
+
+    async def upload(file: UploadFile = File(...)):
+        nonlocal endpoint_called
+        endpoint_called = True
+        return {"size": len(await file.read())}
+
+    app.add_api_route(path, upload, methods=["POST"])
+
+    boundary = b"botbattle-boundary"
+    body = (
+        b"--" + boundary
+        + b'\r\nContent-Disposition: form-data; name="file"; filename="bot.bin"'
+        + b"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        + (b"x" * 512)
+        + b"\r\n--" + boundary + b"--\r\n"
+    )
+    chunks = [body[offset : offset + 64] for offset in range(0, len(body), 64)]
+    sent: list[dict] = []
+    index = 0
+
+    async def receive():
+        nonlocal index
+        chunk = chunks[index]
+        index += 1
+        return {
+            "type": "http.request",
+            "body": chunk,
+            "more_body": index < len(chunks),
+        }
+
+    async def send(message):
+        sent.append(message)
+
+    async def exercise():
+        await app(
+            _asgi_scope(
+                path,
+                headers=[
+                    (
+                        b"content-type",
+                        b"multipart/form-data; boundary=" + boundary,
+                    ),
+                    (b"transfer-encoding", b"chunked"),
+                ]
+            ),
+            receive,
+            send,
+        )
+
+    asyncio.run(exercise())
+    assert endpoint_called is False
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert sent[0]["status"] == 413
+    assert json.loads(sent[1]["body"])["detail"]["code"] == code
+    assert len(created) == 1
+    assert created[0]._rolled is True
+    assert created[0].closed is True
 
 
 # ── audit_log：格式 + result=fail 升级为 WARNING ─────────────────────────────
@@ -280,7 +786,7 @@ def test_admin_logs_rejects_unknown_file(admin_client):
 
 
 def test_captcha_not_logged_in_plaintext(tmp_path, caplog):
-    """SMTP 未配置时，验证码日志应脱敏（不含完整 code）。"""
+    """排队路径不记录验证码明文（SMTP 未配置也不在请求线程报错）。"""
     from bzplat.backend.auth.auth_manager import AuthManager
     from bzplat.backend.store import Store
 
@@ -290,8 +796,7 @@ def test_captcha_not_logged_in_plaintext(tmp_path, caplog):
     # mailer=None 模拟 SMTP 未配置
     am = AuthManager(store, mailer=None)
     with caplog.at_level(logging.WARNING):
-        with pytest.raises(Exception):
-            am.send_verify_code(store.get_user(user["id"]))
+        am.send_verify_code(store.get_user(user["id"]))
     # 收集所有日志消息，不应含完整 6 位验证码
     full_text = " ".join(r.getMessage() for r in caplog.records)
     # 脱敏后只出现 code=XX*** 形式，不应出现连续 6 位数字的明文 code
@@ -301,3 +806,5 @@ def test_captcha_not_logged_in_plaintext(tmp_path, caplog):
     if m:
         val = m.group(1)
         assert not re.fullmatch(r"\d{6}", val), f"验证码明文泄漏到日志: code={val}"
+    code = store.get_latest_email_code(user["id"], "verify")["code"]
+    assert code not in full_text

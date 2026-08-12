@@ -65,6 +65,18 @@ def test_match_detail_route_returns_nested_seat_info(tmp_path):
     # 扁平 JOIN 列应被清理（已挪进 bot_a/bot_b）
     assert "bot_a_name" not in m
     assert "bot_b_owner_name" not in m
+    for internal in (
+        "owner_id", "human_user_id", "match_seed", "_replay_events_json",
+    ):
+        assert internal not in m
+    allowed = {
+        "id", "bot_a_id", "bot_b_id", "contest_id", "winner", "reason",
+        "match_type", "status", "game_id", "result", "human_seat",
+        "technical_loss", "started_at", "ended_at", "created_at",
+        "likes_count", "views_count", "rated", "rating_reason",
+        "rating_settled", "bot_a", "bot_b", "can_view_debug",
+    }
+    assert set(m) <= allowed
 
 
 def test_match_detail_exposes_winner_and_earnings_for_viewer(tmp_path):
@@ -124,3 +136,157 @@ def test_match_detail_human_match_marks_is_human(tmp_path):
     assert m["bot_b"]["is_human"] is True    # seat 1 = human
     assert m["bot_b"]["owner_name"] == "human_player"
     assert m["bot_b"]["name"] in ("human_player", "人类") or m["bot_b"]["display_name"]
+    assert m["human_seat"] == 1
+    for internal in (
+        "owner_id", "human_user_id", "match_seed", "_replay_events_json",
+    ):
+        assert internal not in m
+
+
+def test_match_list_exposes_bot_owners_and_real_human_without_private_ids(tmp_path):
+    """History 列表与详情共用座位身份，不把 Bot 主人冒充真人。"""
+    app = create_app(db_path=str(tmp_path / "history-identities.db"))
+    st = app.state.store
+    alice = st.create_user(
+        "alice", "alice@example.com", hash_password("pw"), display_name="Alice"
+    )
+    bob = st.create_user(
+        "bob", "bob@example.com", hash_password("pw"), display_name="Bob"
+    )
+    bot_owner = st.create_user(
+        "bot_owner", "owner@example.com", hash_password("pw"),
+        display_name="Bot 主人",
+    )
+    alpha = st.create_bot(
+        alice["id"], "alpha", display_name="Alpha Bot", binary_path="/tmp",
+        format="elf", game_id="gomoku",
+    )
+    beta = st.create_bot(
+        bot_owner["id"], "beta", display_name="Beta Bot", binary_path="/tmp",
+        format="elf", game_id="gomoku",
+    )
+    st.create_match(
+        "history-challenge", bot_a_id=alpha["id"], bot_b_id=beta["id"],
+        owner_id=alice["id"], game_id="gomoku", match_type="challenge",
+    )
+    st.create_match(
+        "history-human", bot_a_id=beta["id"], bot_b_id=beta["id"],
+        owner_id=bob["id"], game_id="gomoku", match_type="human",
+        human_user_id=bob["id"], human_seat=1,
+    )
+    st.create_match(
+        "history-selfplay", bot_a_id=alpha["id"], bot_b_id=alpha["id"],
+        owner_id=alice["id"], game_id="gomoku", match_type="challenge",
+    )
+    st.update_match(
+        "history-challenge", status="completed", reason="five", winner=0,
+        match_seed=101,
+        result={"rounds_played": 9, "deltas": [1, -1], "normalized_delta": 1},
+    )
+    st.update_match(
+        "history-human", status="completed", reason="five", winner=1,
+        match_seed=202,
+        result={"rounds_played": 11, "deltas": [-1, 1], "normalized_delta": -1},
+    )
+    st.update_match(
+        "history-selfplay", status="completed", reason="five", winner=1,
+        result={"rounds_played": 7, "deltas": [-1, 1], "normalized_delta": -1},
+    )
+    st.like(alice["id"], "match", "history-human")
+    st.like(alice["id"], "match", "history-selfplay")
+
+    client = TestClient(app)
+    response = client.get("/api/matches?limit=20")
+    assert response.status_code == 200
+    rows = {row["id"]: row for row in response.json()["matches"]}
+
+    challenge = rows["history-challenge"]
+    assert challenge["bot_a"] == {
+        "id": alpha["id"],
+        "name": "alpha",
+        "display_name": "Alpha Bot",
+        "owner_name": "alice",
+        "owner_display": "Alice",
+        "is_human": False,
+    }
+    assert challenge["bot_b"]["owner_name"] == "bot_owner"
+    assert challenge["bot_b"]["is_human"] is False
+
+    human = rows["history-human"]
+    assert human["bot_a"]["name"] == "beta"
+    assert human["bot_a"]["owner_name"] == "bot_owner"
+    assert human["bot_b"]["id"] is None
+    assert human["bot_b"]["name"] == "Bob"
+    assert human["bot_b"]["owner_name"] == "bob"
+    assert human["bot_b"]["is_human"] is True
+    for private_or_flat in (
+        "human_user_id",
+        "human_seat",
+        "human_user_name",
+        "human_user_display",
+        "bot_a_owner_name",
+        "bot_b_owner_name",
+        "owner_id",
+        "match_seed",
+    ):
+        assert private_or_flat not in human
+
+    selfplay = rows["history-selfplay"]
+    assert selfplay["bot_a"]["id"] == alpha["id"]
+    assert selfplay["bot_b"]["id"] == alpha["id"]
+    assert selfplay["bot_a"]["owner_name"] == "alice"
+    assert selfplay["bot_b"]["owner_name"] == "alice"
+    assert selfplay["bot_a"]["is_human"] is False
+    assert selfplay["bot_b"]["is_human"] is False
+    assert "likes_count" not in selfplay and "views_count" not in selfplay
+
+    # Home、Bot 详情、搜索和热门对局都必须收到同一个嵌套身份契约。
+    bot_rows = client.get(
+        f"/api/bots/{beta['id']}/matches?page=1&per_page=20"
+    ).json()["matches"]
+    search_rows = client.get(
+        "/api/search?q=bob&type=matches&limit=20"
+    ).json()["matches"]
+    liked_rows = client.get("/api/matches/liked-top?limit=20").json()["matches"]
+    endpoint_rows = [bot_rows, search_rows, liked_rows]
+    for public_rows in endpoint_rows:
+        projected = next(row for row in public_rows if row["id"] == "history-human")
+        assert projected["match_type"] == "human"
+        assert projected["bot_a"]["owner_name"] == "bot_owner"
+        assert projected["bot_b"]["owner_name"] == "bob"
+        assert projected["bot_b"]["is_human"] is True
+        for internal in (
+            "owner_id", "human_user_id", "human_seat", "match_seed",
+            "bot_a_owner_name", "bot_b_owner_name", "human_user_name",
+        ):
+            assert internal not in projected
+    assert all(
+        "likes_count" not in row and "views_count" not in row
+        for rows_without_engagement in (bot_rows, search_rows)
+        for row in rows_without_engagement
+    )
+    liked_human = next(row for row in liked_rows if row["id"] == "history-human")
+    assert liked_human["likes_count"] == 1
+    assert "views_count" in liked_human
+
+    # 自博弈在每个公开列表入口都必须保留两个独立座位，
+    # 前端才能以相同 Bot id 识别其性质，同时仍按座位展示胜负。
+    selfplay_endpoint_rows = [
+        client.get(
+            f"/api/bots/{alpha['id']}/matches?page=1&per_page=20"
+        ).json()["matches"],
+        client.get(
+            "/api/search?q=alpha&type=matches&limit=20"
+        ).json()["matches"],
+        liked_rows,
+    ]
+    for public_rows in selfplay_endpoint_rows:
+        projected = next(
+            row for row in public_rows if row["id"] == "history-selfplay"
+        )
+        assert projected["bot_a"]["id"] == alpha["id"]
+        assert projected["bot_b"]["id"] == alpha["id"]
+        assert projected["bot_a"]["owner_name"] == "alice"
+        assert projected["bot_b"]["owner_name"] == "alice"
+        assert projected["bot_a"]["is_human"] is False
+        assert projected["bot_b"]["is_human"] is False

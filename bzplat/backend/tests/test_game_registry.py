@@ -6,7 +6,6 @@
 - run_session 经注册表分发到正确引擎
 - 协议 dumps/loads/fail_response 按游戏路由
 - validate_match_config / default_match_config 按游戏
-- 段位曲线 per-game
 - schema 的 REGISTERED_ENGINES/VALID_GAME_IDS 与注册表一致
 - 公开裁判源码元信息从注册表派生
 """
@@ -188,36 +187,6 @@ def test_default_match_config_per_game():
     assert default_match_config("pencil") == {}
 
 
-# ── 段位 per-game ─────────────────────────────────────────────
-def test_tiers_per_game():
-    for gid in ("holdem", "gomoku", "pencil"):
-        tiers = registry.get(gid).tiers
-        assert len(tiers) == 6  # 6 档
-        assert tiers[0].level == 5 and tiers[0].key == "master"
-        assert tiers[-1].level == 0 and tiers[-1].key == "novice"
-
-
-def test_tier_for_per_game():
-    assert registry.tier_for("holdem", 2300).key == "master"
-    assert registry.tier_for("holdem", 1900).key == "gold"
-    assert registry.tier_for("gomoku", 1500).key == "novice"
-    assert registry.tier_for("pencil", None).key == "novice"
-
-
-def test_tier_dict_structure():
-    d = registry.tier_dict("holdem", 1900)
-    assert d["key"] == "gold"
-    assert d["level"] == 3
-    assert "color" in d and "bg" in d and "min_rating" in d
-
-
-def test_all_tiers_per_game():
-    for gid in ("holdem", "gomoku", "pencil"):
-        all_t = registry.all_tiers(gid)
-        assert len(all_t) == 6
-        assert all_t[0]["key"] == "master"
-
-
 # ── 编排特化函数（spec 上的能力）──────────────────────────────
 def test_normalize_delta_per_game():
     # Holdem 筹码差除以大盲 100，得到整场大盲分差；棋类透传。
@@ -311,7 +280,6 @@ def test_dead_fields_removed():
     field_names = {f.name for f in dataclasses.fields(GameSpec)}
     assert "eta_per_match_sec" not in field_names, "eta_per_match_sec 是死字段（通用层读 eta_for_match），已删"
     assert "frontend_module" not in field_names, "frontend_module 后端从不读，已删"
-    assert "tier_for" not in field_names, "tier_for 字段冗余（registry.tier_for 统一走 tier_for_in），已删"
     assert "rounds_per_match" not in field_names
     assert "num_seats" not in field_names
     assert "judge_params" not in field_names

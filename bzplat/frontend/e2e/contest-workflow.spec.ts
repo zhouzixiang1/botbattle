@@ -19,6 +19,33 @@ test.beforeAll(async ({ request }) => {
   expect((await response.json() as { qa_instance?: boolean }).qa_instance).toBe(true)
 })
 
+function captureExactGetCancellations(page: Page, pathname: string, maxCount = 3) {
+  const errors: string[] = []
+  page.on('requestfailed', (request) => {
+    if (
+      request.method() === 'GET' &&
+      new URL(request.url()).pathname === pathname
+    ) {
+      errors.push(request.failure()?.errorText || '')
+    }
+  })
+  return () => {
+    expect(errors.length, `${pathname} cancellation count`).toBeLessThanOrEqual(maxCount)
+    for (const errorText of errors) {
+      expect(
+        errorText,
+        `${pathname} failed for a reason other than a browser navigation/effect cancellation`,
+      ).toMatch(/^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i)
+    }
+    return errors.map((errorText) => ({
+      kind: 'requestfailed' as const,
+      method: 'GET',
+      pathname,
+      errorText,
+    }))
+  }
+}
+
 async function loggedInPage(
   browser: Browser,
   baseURL: string,
@@ -35,67 +62,51 @@ async function ensureCreatedContestSettled(
   browser: Browser,
   baseURL: string,
   contestId: number,
-  alreadyDeleted: boolean,
 ) {
+  if (!browser.isConnected()) return
   const admin = await loggedInPage(browser, baseURL, ADMIN)
   try {
     const initial = await admin.page.request.get(`/api/contests/${contestId}`)
-    if (alreadyDeleted) {
-      expect(initial.status(), await initial.text()).toBe(404)
-      return
-    }
     expect(initial.status(), await initial.text()).toBe(200)
-    let detail = await initial.json() as {
+    const detail = await initial.json() as {
       contest: { status: string }
-      pairings?: Array<{ match_id?: string | null }>
+      pairings?: Array<{ id?: number; status?: string; match_id?: string | null }>
     }
 
-    for (const matchId of new Set(
-      (detail.pairings || []).map((pairing) => pairing.match_id).filter(Boolean) as string[],
-    )) {
-      const matchResponse = await admin.page.request.get(`/api/matches/${matchId}`)
-      expect(matchResponse.status(), await matchResponse.text()).toBe(200)
-      const match = await matchResponse.json() as { match: { status: string } }
-      if (match.match.status === 'pending' || match.match.status === 'running') {
-        const abort = await admin.page.request.patch(`/api/admin/matches/${matchId}`, {
-          data: { status: 'aborted' },
-        })
-        expect(abort.status(), await abort.text()).toBe(200)
-      } else {
-        expect(['completed', 'aborted']).toContain(match.match.status)
-      }
-    }
-
-    const refreshed = await admin.page.request.get(`/api/contests/${contestId}`)
-    expect(refreshed.status(), await refreshed.text()).toBe(200)
-    detail = await refreshed.json() as typeof detail
-    if (detail.contest.status === 'running' || detail.contest.status === 'rest') {
-      const finish = await admin.page.request.patch(`/api/admin/contests/${contestId}`, {
-        data: { status: 'finished' },
-      })
-      expect(finish.status(), await finish.text()).toBe(200)
-    } else {
-      expect(['draft', 'open', 'published', 'finished', 'cancelled']).toContain(
-        detail.contest.status,
-      )
-    }
-
-    const finalDetail = await admin.page.request.get(`/api/contests/${contestId}`)
-    expect(finalDetail.status(), await finalDetail.text()).toBe(200)
-    const finalStatus = ((await finalDetail.json()) as { contest: { status: string } }).contest.status
     const remove = await admin.page.request.delete(`/api/admin/contests/${contestId}`)
-    if (finalStatus === 'finished') {
+    if (detail.contest.status === 'finished') {
       // Finished contests are immutable audit records by product contract. A QA
       // instance is disposable as a whole, so cleanup verifies protection rather
       // than bypassing it or corrupting the terminal history.
       expect(remove.status(), await remove.text()).toBe(409)
       const verify = await admin.page.request.get(`/api/contests/${contestId}`)
       expect(verify.status(), await verify.text()).toBe(200)
-    } else {
+      return
+    }
+    if (remove.status() === 200) {
+      expect(['draft', 'open', 'published', 'cancelled']).toContain(
+        detail.contest.status,
+      )
       expect(remove.status(), await remove.text()).toBe(200)
       const verify = await admin.page.request.get(`/api/contests/${contestId}`)
       expect(verify.status(), await verify.text()).toBe(404)
+      return
     }
+
+    // Never manufacture a terminal contest by aborting matches: an abort
+    // intentionally requeues its pairing, so force-finishing immediately would
+    // race the durable queue and destroy the very evidence needed to diagnose a
+    // failed workflow. Preserve the isolated QA state and surface a bounded
+    // snapshot; the whole disposable DB is reset between release runs.
+    const runtime = await admin.page.request.get('/api/admin/settings/runtime')
+    const runtimeBody = runtime.status() === 200 ? await runtime.json() : null
+    throw new Error(JSON.stringify({
+      contest: detail.contest,
+      pairings: detail.pairings || [],
+      delete_status: remove.status(),
+      delete_body: await remove.text(),
+      queue: runtimeBody?.queue || null,
+    }))
   } finally {
     await admin.context.close()
   }
@@ -131,9 +142,13 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
   browser,
   baseURL,
 }) => {
+  // Two real double-round-robin Gomoku matches run concurrently, while every
+  // Traditional turn must serialize Docker create/start through the global
+  // physical launch fence.  This is intentionally a real runtime proof rather
+  // than a mocked fast path, so allow the measured ~90s healthy completion.
+  test.setTimeout(240_000)
   expect(baseURL).toBeTruthy()
   let contestId: number | null = null
-  let contestDeleted = false
   const childContexts = new Set<BrowserContext>()
   await withCleanup(async () => {
     const title = `PW QA Gomoku ${Date.now()}`
@@ -226,25 +241,41 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
       const data = await response.json() as { contest?: { status?: string } }
       return data.contest?.status
     }, contestId)
-  }, { timeout: 60_000, intervals: [500, 1000, 2000] }).toBe('finished')
+  }, { timeout: 150_000, intervals: [500, 1000, 2000] }).toBe('finished')
 
   const matchStatuses = await page.evaluate(async (currentContestId) => {
     const contestResponse = await fetch(`/api/contests/${currentContestId}`)
     const data = await contestResponse.json() as {
+      contest?: { official_results_ready?: number }
       pairings?: Array<{ status?: string; match_id?: string | null }>
     }
-    return await Promise.all((data.pairings || []).map(async (pairing) => {
-      if (!pairing.match_id) return { pairing: pairing.status, match: null }
+    const pairings = await Promise.all((data.pairings || []).map(async (pairing) => {
+      if (!pairing.match_id) return { pairing: pairing.status, match: null, reason: null }
       const matchResponse = await fetch(`/api/matches/${pairing.match_id}`)
-      const matchData = await matchResponse.json() as { match?: { status?: string } }
-      return { pairing: pairing.status, match: matchData.match?.status }
+      const matchData = await matchResponse.json() as {
+        match?: { status?: string; reason?: string }
+      }
+      return {
+        pairing: pairing.status,
+        match: matchData.match?.status,
+        reason: matchData.match?.reason,
+      }
     }))
+    return { officialResultsReady: data.contest?.official_results_ready, pairings }
   }, contestId)
-  expect(matchStatuses).toHaveLength(2)
-  expect(matchStatuses).toEqual([
-    { pairing: 'completed', match: 'completed' },
-    { pairing: 'completed', match: 'completed' },
+  expect(matchStatuses.officialResultsReady).toBe(1)
+  expect(matchStatuses.pairings).toHaveLength(2)
+  expect(matchStatuses.pairings).toEqual([
+    { pairing: 'completed', match: 'completed', reason: 'five' },
+    { pairing: 'completed', match: 'completed', reason: 'five' },
   ])
+
+  const runtime = await page.request.get('/api/execution-queue')
+  expect(runtime.status(), await runtime.text()).toBe(200)
+  const queue = (await runtime.json()) as {
+    dispatcher: { state: string; accepting: boolean }
+  }
+  expect(queue.dispatcher).toMatchObject({ state: 'running', accepting: true })
 
   await page.reload()
   await expect(page.getByRole('main').getByText('已结束', { exact: true })).toBeVisible()
@@ -256,19 +287,40 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
 
   const admin = await loggedInPage(browser, baseURL!, ADMIN)
   childContexts.add(admin.context)
+  const expectedRuntimeCancellations = captureExactGetCancellations(
+    admin.page,
+    '/api/admin/settings/runtime',
+  )
+  const expectedStatsCancellations = captureExactGetCancellations(
+    admin.page,
+    '/api/admin/stats',
+  )
   await admin.page.goto('/#/admin')
-  await admin.page.getByRole('button', { name: '锦标赛', exact: true }).click()
+  const adminNavigation = admin.page.getByRole('navigation', { name: '管理控制台模块' })
+  await expect(adminNavigation).toBeVisible()
+  await adminNavigation.getByRole('button', { name: /^锦标赛/ }).click()
   const row = admin.page.getByText(title, { exact: true }).locator('xpath=ancestor::tr[1]')
   await expect(row).toBeVisible()
   await expect(row.getByText('成绩已归档 · 只读', { exact: true })).toBeVisible()
   await expect(row.getByRole('button', { name: /删除/ })).toHaveCount(0)
   const forbiddenDelete = await admin.page.request.delete(`/api/admin/contests/${contestId}`)
   expect(forbiddenDelete.status(), await forbiddenDelete.text()).toBe(409)
-  await admin.monitor.expectClean()
+  await admin.monitor.expectClean([
+    ...expectedRuntimeCancellations(),
+    ...expectedStatsCancellations(),
+  ])
   await admin.context.close()
   childContexts.delete(admin.context)
   }, async () => {
     const tasks: Array<{ label: string; run: () => Promise<void> }> = []
+    for (const context of childContexts) {
+      tasks.push({
+        label: 'close child browser context',
+        run: async () => {
+          if (context.browser()?.isConnected()) await context.close()
+        },
+      })
+    }
     if (contestId !== null) {
       const createdContestId = contestId
       tasks.push({
@@ -277,12 +329,8 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
           browser,
           baseURL!,
           createdContestId,
-          contestDeleted,
         ),
       })
-    }
-    for (const context of childContexts) {
-      tasks.push({ label: 'close child browser context', run: () => context.close() })
     }
     await runCleanupTasks(tasks)
   })

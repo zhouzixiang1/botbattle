@@ -19,6 +19,11 @@ import sys
 import urllib.request
 import urllib.error
 
+from _execution_request import (
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
 from _qa_target import assert_qa_instance, ensure_qa_base
 
 PASS = "\033[32m✓\033[0m"
@@ -35,7 +40,10 @@ def req(base: str, method: str, path: str, token: str = "", body: dict | None = 
     r = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(r, timeout=30) as resp:
-            return json.loads(resp.read())
+            raw = resp.read()
+            payload = json.loads(raw) if raw else {}
+            payload["_status"] = resp.status
+            return payload
     except urllib.error.HTTPError as e:
         return {"_status": e.code, "_body": e.read().decode()[:200]}
     except Exception as e:  # noqa: BLE001
@@ -50,6 +58,42 @@ def login(base: str, username: str, password: str) -> str:
     })
     assert d.get("token"), f"登录失败 {username}: {d}"
     return d["token"]
+
+
+def execution_match_id(
+    base: str,
+    token: str,
+    payload: dict,
+    *,
+    label: str,
+) -> tuple[str, str]:
+    initial = require_execution_request(
+        int(payload.get("_status") or 0),
+        payload,
+        label=label,
+        detail=str(payload.get("_body") or payload.get("_error") or ""),
+    )
+
+    def fetch(public_id: str):
+        polled = req(
+            base,
+            "GET",
+            execution_request_path(public_id),
+            token=token,
+        )
+        return (
+            int(polled.get("_status") or 0),
+            polled,
+            str(polled.get("_body") or polled.get("_error") or polled)[:240],
+        )
+
+    match_id = wait_for_execution_match(
+        initial,
+        fetch,
+        label=label,
+        timeout=120,
+    )
+    return str(initial["public_id"]), match_id
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -89,8 +133,18 @@ def main() -> int:
                 "game_id": "holdem", "my_bot_id": holdem["id"],
                 "opponent_bot_id": opp["id"],
             })
-            mid = d2.get("match_id") or d2.get("id")
-            check("发起挑战", bool(mid), str(mid or d2.get("_body", ""))[:60])
+            try:
+                public_id, mid = execution_match_id(
+                    base, t, d2, label="GUI API 冒烟挑战"
+                )
+            except Exception as exc:
+                check("发起挑战(202 + match_id)", False, str(exc))
+            else:
+                check(
+                    "发起挑战(202 + match_id)",
+                    True,
+                    f"public_id={public_id} match_id={mid}",
+                )
         else:
             check("发起挑战", False, "找不到对手 bot")
 

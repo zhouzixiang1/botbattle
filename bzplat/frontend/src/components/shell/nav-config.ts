@@ -7,6 +7,7 @@ import {
   BookOpen,
   Shield,
   History as HistoryIcon,
+  LifeBuoy,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -20,7 +21,7 @@ export interface NavItem {
   end?: boolean
 }
 
-/** 主导航：桌面端水平展示，移动端进抽屉 */
+/** 主导航：xl+ 侧栏纵向展示，较窄视口进入 Sheet 抽屉。 */
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: '首页', icon: Home, end: true },
   { to: '/challenge', label: '挑战', icon: Swords },
@@ -29,6 +30,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/contests', label: '锦标赛', icon: Medal },
   { to: '/my-bots', label: '我的 Bot', icon: Bot },
   { to: '/wiki', label: 'Wiki', icon: BookOpen },
+  { to: '/feedback', label: '问题反馈', icon: LifeBuoy },
 ]
 
 /** 管理入口（仅 admin/organizer 可见，单独放） */

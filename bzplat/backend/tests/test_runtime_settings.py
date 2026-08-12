@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import FrozenInstanceError
 from unittest import mock
 
 import pytest
@@ -12,9 +11,9 @@ from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
-    AUTO_MATCH_CONFIG,
+    AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES,
     CONFIGURATION_SOURCE,
-    QA_AUTO_MATCH_CONFIG,
+    RANKING_MIN_RATED_MATCHES,
 )
 from bzplat.backend.runtime.limits import (
     clamp_concurrent,
@@ -24,8 +23,6 @@ from bzplat.backend.runtime.limits import (
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import (
     SETTING_ACTION_TIMEOUT,
-    SETTING_AUTO_MATCH_ENABLED,
-    SETTING_AUTO_MATCH_INTERVAL_SEC,
     SETTING_CONTEST_REST,
     SETTING_MAX_CONCURRENT,
 )
@@ -69,27 +66,28 @@ def test_runtime_diagnostics_are_explicitly_code_owned(tmp_path):
     assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == 1
     assert data["bot_cpus"] == 1
     assert data["bot_memory_mb"] == 512
-    assert data["auto_match"]["enabled"] is AUTO_MATCH_CONFIG.enabled
-    assert data["auto_match"]["interval_sec"] == AUTO_MATCH_CONFIG.interval
+    assert data["auto_match"]["enabled"] is True
+    assert data["auto_match"]["mutable"] is True
+    assert data["queue"]["capacity"]["match_slots"]["capacity"] == 1
+    assert data["queue"]["capacity"]["sandbox_units"]["capacity"] == 2
+    assert "interval_sec" not in data["auto_match"]
     assert data["contest_scheduler"] == {"enabled": True, "interval": 15}
-    assert "auto_match" in data["readonly"]
+    assert "auto_match" not in data["readonly"]
 
 
 def test_qa_instance_uses_code_disabled_auto_match_profile(monkeypatch, tmp_path):
     monkeypatch.setenv("BZ_QA_INSTANCE", "1")
     client, app = _admin_client(tmp_path)
 
-    assert AUTO_MATCH_CONFIG.enabled is True
-    assert QA_AUTO_MATCH_CONFIG.enabled is False
-    assert app.state.auto_matcher.config is QA_AUTO_MATCH_CONFIG
-    assert app.state.auto_matcher._cfg() == QA_AUTO_MATCH_CONFIG.as_dict()
+    assert app.state.execution_dispatcher.auto_capability_enabled is False
 
     response = client.get("/api/admin/settings/runtime")
     assert response.status_code == 200
     data = response.json()
     assert data["source"] == CONFIGURATION_SOURCE
     assert data["mutable"] is False
-    assert data["auto_match"]["enabled"] is False
+    assert data["auto_match"]["enabled"] is True
+    assert app.state.execution_dispatcher.auto_capability_enabled is False
     assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == 1
 
 
@@ -120,8 +118,8 @@ def test_startup_ignores_legacy_runtime_rows_and_does_not_rewrite_them(tmp_path)
         SETTING_ACTION_TIMEOUT: "1",
         SETTING_MAX_CONCURRENT: "999",
         SETTING_CONTEST_REST: "99",
-        SETTING_AUTO_MATCH_ENABLED: "0",
-        SETTING_AUTO_MATCH_INTERVAL_SEC: "1",
+        "auto_match_enabled": "0",
+        "auto_match_interval_sec": "1",
     }
     store = Store(db)
     store.set_settings(legacy)
@@ -131,8 +129,17 @@ def test_startup_ignores_legacy_runtime_rows_and_does_not_rewrite_them(tmp_path)
 
     assert app.state.orch.max_concurrent == default_max_concurrent()
     assert app.state.orch.runner.action_timeout == ACTION_TIMEOUT_SEC
-    assert app.state.auto_matcher._cfg() == AUTO_MATCH_CONFIG.as_dict()
-    assert app.state.store.get_settings(list(legacy)) == legacy
+    assert app.state.execution_dispatcher.auto_capability_enabled is True
+    assert app.state.store.get_settings(
+        [SETTING_ACTION_TIMEOUT, SETTING_MAX_CONCURRENT, SETTING_CONTEST_REST]
+    ) == {
+        SETTING_ACTION_TIMEOUT: "1",
+        SETTING_MAX_CONCURRENT: "999",
+        SETTING_CONTEST_REST: "99",
+    }
+    assert app.state.store.get_settings(
+        ["auto_match_enabled", "auto_match_interval_sec"]
+    ) == {}
 
 
 def test_fresh_app_does_not_seed_legacy_runtime_settings(tmp_path):
@@ -141,15 +148,19 @@ def test_fresh_app_does_not_seed_legacy_runtime_settings(tmp_path):
         SETTING_ACTION_TIMEOUT,
         SETTING_MAX_CONCURRENT,
         SETTING_CONTEST_REST,
-        SETTING_AUTO_MATCH_ENABLED,
-        SETTING_AUTO_MATCH_INTERVAL_SEC,
+        "auto_match_enabled",
+        "auto_match_interval_sec",
     ]
     assert app.state.store.get_settings(keys) == {}
 
 
 def test_code_configuration_is_immutable():
-    with pytest.raises(FrozenInstanceError):
-        AUTO_MATCH_CONFIG.interval = 1  # type: ignore[misc]
+    import bzplat.backend.runtime.config as config
+
+    assert AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES == 10
+    assert RANKING_MIN_RATED_MATCHES == 10
+    assert not hasattr(config, "AUTO_MATCH_CONFIG")
+    assert not hasattr(config, "QA_AUTO_MATCH_CONFIG")
 
 
 def test_store_set_settings_rolls_back_whole_batch_on_statement_failure(tmp_path):

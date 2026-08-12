@@ -23,6 +23,12 @@ from bzplat.backend.runtime.binary_runner import (
     BotSession,
     PlatformRunnerError,
 )
+from bzplat.backend.runtime.docker_supervisor import (
+    CANONICAL_DOCKER_HOST,
+    DockerExecutionIdentity,
+    DockerSupervisor,
+    DockerSupervisorError,
+)
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 ELF = SAMPLES / "callbot_linux_amd64"
@@ -95,14 +101,26 @@ def test_pe_is_diagnostic_only_even_when_machine_is_amd64():
     assert "Windows PE 不受支持" in info.reject_reason
 
 
+def _docker_payload(args) -> tuple[str, ...]:
+    """Return the command after the mandatory local-socket prefix."""
+    argv = tuple(args)
+    assert argv[1:3] == ("--host", CANONICAL_DOCKER_HOST)
+    return argv[3:]
+
+
+def _allow_fake_docker_binary(monkeypatch) -> None:
+    """Let command-boundary tests use a synthetic Docker executable name."""
+    import bzplat.backend.runtime.docker_supervisor as supervisor_mod
+
+    monkeypatch.setattr(supervisor_mod.shutil, "which", lambda _name: "/fake/docker")
+
+
 def test_missing_docker_fails_closed_unless_local_mode_is_explicit():
     """Production may never execute an uploaded ELF directly on the host."""
     info = BinaryInfo("elf", "linux", "amd64", True)
 
-    production = BinaryRunner(docker_bin="definitely-no-such-docker", prefer_local=False)
-    assert production._docker_ok is False
-    with pytest.raises(PlatformRunnerError, match="Docker 沙箱"):
-        production._select_mode(info)
+    with pytest.raises(DockerSupervisorError, match="Docker CLI 不可用"):
+        BinaryRunner(docker_bin="definitely-no-such-docker", prefer_local=False)
 
     explicit_test_mode = BinaryRunner(
         docker_bin="definitely-no-such-docker", prefer_local=True
@@ -110,9 +128,8 @@ def test_missing_docker_fails_closed_unless_local_mode_is_explicit():
     assert explicit_test_mode._select_mode(info) == "local"
 
 
-def test_docker_exit_125_is_platform_fault_not_bot_crash(tmp_path):
-    """docker run exit 125 is an infrastructure failure and must not rate a Bot."""
-    import bzplat.backend.runtime.binary_runner as runtime_mod
+def test_started_container_exit_125_is_bot_crash(tmp_path, monkeypatch):
+    """After StartedAt, exit 125 belongs to the Bot, not Docker control."""
 
     class FakeStdin:
         def write(self, _data):
@@ -138,21 +155,17 @@ def test_docker_exit_125_is_platform_fault_not_bot_crash(tmp_path):
     path.write_bytes(b"unused")
     info = BinaryInfo("elf", "linux", "amd64", True)
 
-    infra = BinaryRunner(
+    _allow_fake_docker_binary(monkeypatch)
+    bot_125 = BinaryRunner(
         docker_bin="docker-exit-125-cache-test",
         prefer_local=False,
         linux_image="test.invalid/exit-125:latest",
     )
-    cache_key = (infra._docker_bin, infra._linux_image)
-    with runtime_mod._IMAGE_READY_LOCK:
-        runtime_mod._IMAGE_READY_KEYS.add(cache_key)
-    infra._sessions["infra"] = BotSession(
+    bot_125._sessions["infra"] = BotSession(
         "infra", info, path, proc=FakeProc(125), mode="docker",
     )
-    with pytest.raises(PlatformRunnerError, match="docker exit 125"):
-        asyncio.run(infra.send("infra", "{}"))
-    with runtime_mod._IMAGE_READY_LOCK:
-        assert cache_key not in runtime_mod._IMAGE_READY_KEYS
+    with pytest.raises(BotCrashedError, match="125"):
+        asyncio.run(bot_125.send("infra", "{}"))
 
     bot_fault = BinaryRunner(prefer_local=False)
     bot_fault._sessions["bot"] = BotSession(
@@ -195,30 +208,22 @@ def test_decision_timeout_log_does_not_expose_bot_stderr_paths(tmp_path, caplog)
     assert "secret-version" not in caplog.text
 
 
-def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path, monkeypatch):
+def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path):
     """唯一生产容器路径固定 linux/amd64，并在 argv 层强制硬隔离。"""
-    captured: list[tuple[str, ...]] = []
-
-    class FakeProc:
-        returncode = None
-
-    async def capture_spawn(*args, **_kwargs):
-        captured.append(args)
-        return FakeProc()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
-    runner = BinaryRunner(prefer_local=False)
-
     elf_path = tmp_path / "bot"
     elf_path.write_bytes(b"unused")
-    elf_session = BotSession(
-        "elf-argv", BinaryInfo("elf", "linux", "amd64", True), elf_path,
-        mode="docker",
+    identity = DockerExecutionIdentity("runtime-test", "req_runtime", 3)
+    args = tuple(
+        DockerSupervisor.sandbox_options(
+            identity=identity,
+            slot=1,
+            name=identity.container_name(1),
+            binary_path=elf_path,
+            image="debian:bookworm-slim",
+            memory="512m",
+            cpus="1",
+        )
     )
-
-    asyncio.run(runner._start_docker(elf_session))
-    assert len(captured) == 1
-    args = captured[0]
     assert "--pull=never" in args
     assert "--network=none" in args
     assert "--read-only" in args
@@ -230,15 +235,22 @@ def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path, monk
     assert ("--user", "65534:65534") == (
         args[args.index("--user")], args[args.index("--user") + 1]
     )
+    assert "--memory=512m" in args
+    assert "--memory-swap=512m" in args
+    assert "--cpus=1" in args
+    assert "--pids-limit=64" in args
+    assert "--log-driver=none" in args
+    tmpfs = args[args.index("--tmpfs") + 1]
+    assert tmpfs == "/tmp:rw,exec,nosuid,nodev,size=64m"
     assert ("--platform", "linux/amd64") == (
         args[args.index("--platform")], args[args.index("--platform") + 1]
     )
-    mounts = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "-v"]
+    mounts = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == "--volume"]
     assert mounts and all(mount.endswith(":ro") for mount in mounts)
     assert ("--entrypoint", "/app/bot") == (
         args[args.index("--entrypoint")], args[args.index("--entrypoint") + 1]
     )
-    assert args[-1] == runner._linux_image
+    assert args[-1] == "debian:bookworm-slim"
 
 
 def test_linux_image_gate_pulls_once_across_worker_event_loops(monkeypatch):
@@ -252,16 +264,18 @@ def test_linux_image_gate_pulls_once_across_worker_event_loops(monkeypatch):
         nonlocal inspect_count
         argv = tuple(args)
         calls.append(argv)
-        if argv[1:3] == ("image", "inspect"):
+        payload = _docker_payload(argv)
+        if payload[:2] == ("image", "inspect"):
             inspect_count += 1
             if inspect_count == 1:
                 return subprocess.CompletedProcess(args, 1, "", "missing")
             return subprocess.CompletedProcess(args, 0, "linux/amd64\n", "")
-        assert argv[1:4] == ("pull", "--platform", "linux/amd64")
+        assert payload[:3] == ("pull", "--platform", "linux/amd64")
         time.sleep(0.02)
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    _allow_fake_docker_binary(monkeypatch)
     image = "test-registry.invalid/bot-image:pull-once"
     first = BinaryRunner(
         docker_bin="docker-image-gate-test",
@@ -282,8 +296,10 @@ def test_linux_image_gate_pulls_once_across_worker_event_loops(monkeypatch):
         for future in futures:
             future.result(timeout=2)
     asyncio.run(first._ensure_linux_image_ready())
-    assert sum(argv[1] == "pull" for argv in calls) == 1
-    assert sum(argv[1:3] == ("image", "inspect") for argv in calls) == 2
+    assert sum(_docker_payload(argv)[0] == "pull" for argv in calls) == 1
+    assert sum(
+        _docker_payload(argv)[:2] == ("image", "inspect") for argv in calls
+    ) == 2
 
 
 def test_cached_linux_amd64_image_never_pulls(monkeypatch):
@@ -294,10 +310,11 @@ def test_cached_linux_amd64_image_never_pulls(monkeypatch):
     def fake_run(args, **_kwargs):
         argv = tuple(args)
         calls.append(argv)
-        assert argv[1:3] == ("image", "inspect")
+        assert _docker_payload(argv)[:2] == ("image", "inspect")
         return subprocess.CompletedProcess(args, 0, "linux/amd64\n", "")
 
     monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    _allow_fake_docker_binary(monkeypatch)
     runner = BinaryRunner(
         docker_bin="docker-cached-image-test",
         prefer_local=False,
@@ -324,7 +341,7 @@ def test_linux_image_prepare_failure_is_platform_fault_before_container_start(
     docker_starts = 0
 
     def fake_run(args, **_kwargs):
-        if args[1:3] == ["image", "inspect"]:
+        if _docker_payload(args)[:2] == ("image", "inspect"):
             return subprocess.CompletedProcess(args, 1, "", "missing")
         if isinstance(pull_effect, BaseException):
             raise pull_effect
@@ -336,6 +353,7 @@ def test_linux_image_prepare_failure_is_platform_fault_before_container_start(
         )
 
     monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    _allow_fake_docker_binary(monkeypatch)
     runner = BinaryRunner(
         docker_bin=f"docker-image-failure-{message}",
         prefer_local=False,
@@ -382,6 +400,7 @@ def test_linux_image_initial_inspect_failure_never_starts_container(
         raise inspect_effect
 
     monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    _allow_fake_docker_binary(monkeypatch)
     runner = BinaryRunner(
         docker_bin=f"docker-initial-inspect-{message}",
         prefer_local=False,
@@ -398,7 +417,9 @@ def test_linux_image_initial_inspect_failure_never_starts_container(
     monkeypatch.setattr(runner, "_start_docker", should_not_start)
     with pytest.raises(PlatformRunnerError, match=message):
         asyncio.run(runner.start_session(ELF, runtime_mode="traditional"))
-    assert calls and all(argv[1:3] == ("image", "inspect") for argv in calls)
+    assert calls and all(
+        _docker_payload(argv)[:2] == ("image", "inspect") for argv in calls
+    )
     assert docker_starts == 0
     assert runner._sessions == {}
 
@@ -414,7 +435,7 @@ def test_linux_image_final_inspect_failure_never_starts_container(
 
     def fake_run(args, **_kwargs):
         nonlocal inspect_count
-        if args[1:3] == ["image", "inspect"]:
+        if _docker_payload(args)[:2] == ("image", "inspect"):
             inspect_count += 1
             return subprocess.CompletedProcess(
                 args,
@@ -425,6 +446,7 @@ def test_linux_image_final_inspect_failure_never_starts_container(
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    _allow_fake_docker_binary(monkeypatch)
     runner = BinaryRunner(
         docker_bin="docker-final-inspect-failure",
         prefer_local=False,
@@ -451,11 +473,12 @@ def test_linux_image_wrong_arch_after_pull_is_platform_fault(monkeypatch, caplog
     import bzplat.backend.runtime.binary_runner as runtime_mod
 
     def fake_run(args, **_kwargs):
-        if args[1:3] == ["image", "inspect"]:
+        if _docker_payload(args)[:2] == ("image", "inspect"):
             return subprocess.CompletedProcess(args, 0, "linux/arm64\n", "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(runtime_mod.subprocess, "run", fake_run)
+    _allow_fake_docker_binary(monkeypatch)
     runner = BinaryRunner(
         docker_bin="docker-wrong-arch-test",
         prefer_local=False,
@@ -539,11 +562,13 @@ def test_local_test_mode_never_checks_or_pulls_docker_image(monkeypatch):
     asyncio.run(runner.stop_session(sid))
 
 
-def test_linux_image_env_is_read_when_runner_is_created(monkeypatch):
-    """create_app 加载环境后创建 runner，镜像配置不得冻结在 import 时。"""
+def test_linux_image_is_code_owned_and_ignores_environment(monkeypatch):
+    """生产镜像不是环境可切换的执行边界；显式测试参数仍可覆盖。"""
     monkeypatch.setenv("BZ_LINUX_BOT_IMAGE", "registry.example/bots/linux:v2")
     runner = BinaryRunner(prefer_local=True)
-    assert runner._linux_image == "registry.example/bots/linux:v2"
+    assert runner._linux_image == "debian:bookworm-slim"
+    explicit = BinaryRunner(prefer_local=True, linux_image="test.invalid/fixture:v1")
+    assert explicit._linux_image == "test.invalid/fixture:v1"
 
 
 @pytest.mark.parametrize(
@@ -771,12 +796,12 @@ def test_broken_stdin_uses_same_docker_exit_classification(tmp_path):
     path.write_bytes(b"unused")
     info = BinaryInfo("elf", "linux", "amd64", True)
 
-    infra = BinaryRunner(prefer_local=False)
-    infra._sessions["infra-pipe"] = BotSession(
+    bot_125 = BinaryRunner(prefer_local=False)
+    bot_125._sessions["infra-pipe"] = BotSession(
         "infra-pipe", info, path, proc=FakeProc(125), mode="docker"
     )
-    with pytest.raises(PlatformRunnerError, match="docker exit 125"):
-        asyncio.run(infra.send("infra-pipe", "{}"))
+    with pytest.raises(BotCrashedError, match="125"):
+        asyncio.run(bot_125.send("infra-pipe", "{}"))
 
     bot_fault = BinaryRunner(prefer_local=False)
     bot_fault._sessions["bot-pipe"] = BotSession(
@@ -911,10 +936,24 @@ def test_orchestrator_resolves_holdem_winner_non_null():
         import asyncio
 
         async def _run():
-            mid = await orch.challenge(ba["id"], bb["id"], u["id"], game_id="holdem")
+            store.executions.resume()
+            request_id = await orch.challenge(
+                ba["id"], bb["id"], u["id"], game_id="holdem"
+            )
+            job = store.executions.claim_next(
+                max_match_slots=1,
+                max_sandbox_units=2,
+                aging_seconds=60,
+                user_active_limit=1,
+                contest_share_slots=1,
+            )
+            assert job is not None and job["public_id"] == request_id
+            mid = str(job["current_match_id"])
+            orch.start_execution_job(job)
             task = orch._tasks.get(mid)
             if task:
                 await asyncio.wait_for(task, timeout=60)
+            store.executions.finalize_ready()
             return mid
 
         mid = asyncio.run(_run())

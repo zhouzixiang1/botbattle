@@ -20,7 +20,7 @@ export default function BrandMark({
     <span className={cn('flex items-center gap-2 font-semibold tracking-tight text-foreground', className)}>
       <span
         className={cn(
-          'flex items-center justify-center rounded-lg bg-primary font-bold text-primary-foreground shadow-soft',
+          'flex shrink-0 items-center justify-center rounded-lg bg-primary font-bold text-primary-foreground shadow-soft',
           box,
         )}
       >

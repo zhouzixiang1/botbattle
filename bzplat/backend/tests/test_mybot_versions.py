@@ -147,6 +147,54 @@ def test_api_upload_bot_with_runtime_mode(tmp_path):
     assert bot["runtime_mode"] == "traditional"
 
 
+def test_manual_multipart_routes_preserve_openapi_contract(tmp_path):
+    """Pre-parse admission must not erase Swagger/generated-client bodies."""
+    app = _app(tmp_path)
+    paths = app.openapi()["paths"]
+    cases = {
+        "/api/bots": (
+            {"name", "file"},
+            {
+                "name",
+                "display_name",
+                "description",
+                "upload_note",
+                "game_id",
+                "runtime_mode",
+                "file",
+            },
+            {"400", "401", "413", "503"},
+        ),
+        "/api/bots/{bot_id}/versions": (
+            {"file"},
+            {"upload_note", "runtime_mode", "file"},
+            {"400", "401", "413", "503"},
+        ),
+        "/api/auth/avatar": (
+            {"file"},
+            {"file"},
+            {"400", "401", "413", "422"},
+        ),
+        "/api/feedback/bugs/{bug_public_id}/attachments": (
+            {"file"},
+            {"tracking_token", "file"},
+            {"400", "404", "413", "422"},
+        ),
+    }
+    for path, (required, properties, responses) in cases.items():
+        operation = paths[path]["post"]
+        request_body = operation["requestBody"]
+        assert request_body["required"] is True
+        schema = request_body["content"]["multipart/form-data"]["schema"]
+        assert set(schema["required"]) == required
+        assert set(schema["properties"]) == properties
+        assert schema["properties"]["file"] == {
+            "type": "string",
+            "format": "binary",
+        }
+        assert responses <= set(operation["responses"])
+
+
 def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkeypatch):
     """A slow/unresponsive Bot upload must not freeze health, SSE or WebSocket tasks."""
     from httpx import ASGITransport, AsyncClient
@@ -191,6 +239,281 @@ def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkey
                 release.set()
             response = await asyncio.wait_for(upload, timeout=2)
             assert response.status_code == 200, response.text
+
+    asyncio.run(exercise())
+
+
+def test_upload_endpoint_reads_only_limit_plus_one_before_manager(
+    tmp_path, monkeypatch
+):
+    """The API must reject an oversized body without retaining the whole file."""
+    import bzplat.backend.api_routes as api_routes
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+
+    app = _app(tmp_path)
+    _setup(app)
+    read_sizes: list[int] = []
+    manager_called = False
+    original_read = StarletteUploadFile.read
+
+    async def tracked_read(upload, size=-1):
+        read_sizes.append(size)
+        return await original_read(upload, size)
+
+    def unexpected_manager(*_args, **_kwargs):
+        nonlocal manager_called
+        manager_called = True
+        raise AssertionError("oversized payload reached BotManager")
+
+    monkeypatch.setattr(api_routes, "MAX_BYTES", 4)
+    monkeypatch.setattr(StarletteUploadFile, "read", tracked_read)
+    monkeypatch.setattr(
+        app.state.bot_manager, "create_from_upload", unexpected_manager
+    )
+
+    response = TestClient(app).post(
+        "/api/bots",
+        headers=_login(app),
+        data={"name": "bounded_read", "game_id": "holdem"},
+        files={"file": ("bot.bin", b"12345", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid_size"
+    assert read_sizes == [5]
+    assert manager_called is False
+
+
+def test_upload_admission_is_shared_busy_and_worker_cancel_safe(
+    tmp_path, monkeypatch
+):
+    """New-Bot and version routes share one lane; cancel cannot release it early."""
+    from httpx import ASGITransport, AsyncClient
+    import bzplat.backend.api_routes as api_routes
+
+    app = _app(tmp_path)
+    _, owner = _setup(app)
+    entered = Event()
+    release = Event()
+    create_calls = 0
+    version_called = False
+
+    def blocking_first_create(*_args, **_kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        if create_calls == 1:
+            entered.set()
+            assert release.wait(timeout=3)
+        return {
+            "id": 900 + create_calls,
+            "owner_id": owner["id"],
+            "name": f"upload-{create_calls}",
+            "current_version": 1,
+        }
+
+    def unexpected_version(*_args, **_kwargs):
+        nonlocal version_called
+        version_called = True
+        raise AssertionError("busy version upload reached BotManager")
+
+    monkeypatch.setattr(api_routes, "BOT_UPLOAD_ADMISSION_WAIT_SEC", 0.05)
+    monkeypatch.setattr(
+        app.state.bot_manager, "create_from_upload", blocking_first_create
+    )
+    monkeypatch.setattr(
+        app.state.bot_manager, "upload_version", unexpected_version
+    )
+
+    async def exercise():
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            first = asyncio.create_task(
+                client.post(
+                    "/api/bots",
+                    headers=_login(app),
+                    data={"name": "cancelled_upload", "game_id": "holdem"},
+                    files={"file": ("bot.bin", b"first", "application/octet-stream")},
+                )
+            )
+            assert await asyncio.wait_for(
+                asyncio.to_thread(entered.wait, 2), timeout=2.5
+            )
+            first.cancel()
+            await asyncio.sleep(0.01)
+            assert not first.done(), "cancel released admission before worker ended"
+
+            busy = await client.post(
+                "/api/bots/123/versions",
+                headers=_login(app),
+                files={"file": ("bot.bin", b"second", "application/octet-stream")},
+            )
+            assert busy.status_code == 503
+            assert busy.json()["detail"]["code"] == "upload_busy"
+            assert busy.headers["retry-after"] == "1"
+            assert version_called is False
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            after = await client.post(
+                "/api/bots",
+                headers=_login(app),
+                data={"name": "after_cancel", "game_id": "holdem"},
+                files={"file": ("bot.bin", b"third", "application/octet-stream")},
+            )
+            assert after.status_code == 200, after.text
+
+    asyncio.run(exercise())
+    assert create_calls == 2
+
+
+def test_upload_admission_precedes_multipart_receive(tmp_path, monkeypatch):
+    """A busy lane rejects another authenticated body before its first byte."""
+    from httpx import ASGITransport, AsyncClient
+    import bzplat.backend.api_routes as api_routes
+
+    app = _app(tmp_path)
+    _, owner = _setup(app)
+    monkeypatch.setattr(api_routes, "BOT_UPLOAD_ADMISSION_WAIT_SEC", 0.05)
+    monkeypatch.setattr(
+        app.state.bot_manager,
+        "create_from_upload",
+        lambda *_args, **_kwargs: {
+            "id": 990,
+            "owner_id": owner["id"],
+            "name": "parsed-after-admission",
+            "current_version": 1,
+        },
+    )
+
+    boundary = b"admission-before-form"
+    body = (
+        b"--" + boundary
+        + b'\r\nContent-Disposition: form-data; name="name"\r\n\r\nfirst'
+        + b"\r\n--" + boundary
+        + b'\r\nContent-Disposition: form-data; name="file"; filename="bot.bin"'
+        + b"\r\nContent-Type: application/octet-stream\r\n\r\nelf"
+        + b"\r\n--" + boundary + b"--\r\n"
+    )
+
+    async def exercise():
+        first_receive_entered = asyncio.Event()
+        release_first_receive = asyncio.Event()
+        first_body_reads = 0
+        second_body_reads = 0
+
+        async def first_body():
+            nonlocal first_body_reads
+            first_body_reads += 1
+            first_receive_entered.set()
+            await release_first_receive.wait()
+            yield body
+
+        async def second_body():
+            nonlocal second_body_reads
+            second_body_reads += 1
+            yield body
+
+        transport = ASGITransport(app=app)
+        headers = {
+            **_login(app),
+            "Content-Type": (
+                "multipart/form-data; boundary=" + boundary.decode()
+            ),
+        }
+        async with AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            first = asyncio.create_task(
+                client.post("/api/bots", headers=headers, content=first_body())
+            )
+            await asyncio.wait_for(first_receive_entered.wait(), timeout=1)
+
+            busy = await client.post(
+                "/api/bots/123/versions",
+                headers=headers,
+                content=second_body(),
+            )
+            assert busy.status_code == 503
+            assert busy.json()["detail"]["code"] == "upload_busy"
+            assert second_body_reads == 0
+
+            release_first_receive.set()
+            response = await asyncio.wait_for(first, timeout=1)
+            assert response.status_code == 200, response.text
+            assert first_body_reads == 1
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("path", ["/api/bots", "/api/auth/avatar"])
+def test_authenticated_upload_routes_reject_before_reading_guest_body(
+    tmp_path, path
+):
+    """Removing FastAPI File params makes auth run before multipart receive."""
+    from httpx import ASGITransport, AsyncClient
+
+    app = _app(tmp_path)
+    _setup(app)
+    boundary = "guest-body-not-read"
+
+    async def exercise():
+        body_reads = 0
+
+        async def guest_body():
+            nonlocal body_reads
+            body_reads += 1
+            yield b"untrusted multipart bytes"
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            response = await client.post(
+                path,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}"
+                },
+                content=guest_body(),
+            )
+        assert response.status_code == 401
+        assert body_reads == 0
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_upload_waiter_does_not_leak_permit(
+    tmp_path, monkeypatch
+):
+    """Cancellation removes an asyncio waiter without leaking a permit."""
+    from httpx import ASGITransport, AsyncClient
+    import bzplat.backend.api_routes as api_routes
+
+    app = _app(tmp_path)
+    _setup(app)
+    gate = app.state.bot_upload_gate
+    monkeypatch.setattr(api_routes, "BOT_UPLOAD_ADMISSION_WAIT_SEC", 0.5)
+
+    async def exercise():
+        await gate.acquire()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            waiting = asyncio.create_task(
+                client.post(
+                    "/api/bots",
+                    headers=_login(app),
+                    data={"name": "cancelled_waiter", "game_id": "holdem"},
+                    files={"file": ("bot.bin", b"waiting", "application/octet-stream")},
+                )
+            )
+            await asyncio.sleep(0.02)
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            gate.release()
+            await asyncio.wait_for(gate.acquire(), timeout=0.1)
+            gate.release()
 
     asyncio.run(exercise())
 
@@ -609,6 +932,11 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
     captured: dict = {}
 
     class _FakeRunner:
+        runner = None
+
+        def __init__(self):
+            self.runner = self
+
         async def run_binaries(self, path_a, path_b, *, runtime_modes=None, **kw):
             captured["modes"] = runtime_modes
             captured["paths"] = (path_a, path_b)
@@ -622,11 +950,28 @@ def test_orchestrator_passes_runtime_modes_to_runner(tmp_path):
                 events = []
             return _R()
 
+        async def cleanup_execution(self, scope):
+            scope.mark_cleanup_confirmed()
+
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
     orch = MatchOrchestrator(store, runner=_FakeRunner(), max_concurrent=1)
     async def run():
-        mid = await orch.challenge(ba["id"], bb["id"], u["id"], game_id="holdem")
+        store.executions.resume()
+        request_id = await orch.challenge(
+            ba["id"], bb["id"], u["id"], game_id="holdem"
+        )
+        job = store.executions.claim_next(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=1,
+        )
+        assert job is not None and job["public_id"] == request_id
+        mid = str(job["current_match_id"])
+        orch.start_execution_job(job)
         await orch._tasks[mid]
+        assert store.executions.finalize_ready() == 1
 
     asyncio.run(run())
     assert captured.get("modes") == ("traditional", "longrunning"), captured

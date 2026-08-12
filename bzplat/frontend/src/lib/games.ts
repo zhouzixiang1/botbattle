@@ -24,15 +24,15 @@ import { GAMES as _GAMES } from '@/games'
 export function matchTypeBadge(t: string | undefined): { label: string; cls: string } | null {
   switch (t) {
     case 'ladder':
-      return { label: '后台', cls: 'bg-secondary text-secondary-foreground' }
+      return { label: '自动排位', cls: 'bg-secondary text-secondary-foreground' }
     case 'human':
-      return { label: '人类', cls: 'bg-warning/15 text-warning' }
+      return { label: '真人对战', cls: 'bg-warning/15 text-warning' }
     case 'contest':
-      return { label: '比赛', cls: 'bg-primary/15 text-primary' }
+      return { label: '锦标赛', cls: 'bg-primary/15 text-primary' }
     case 'table':
-      return { label: '桌台', cls: 'bg-muted text-muted-foreground' }
+      return { label: '平台桌台', cls: 'bg-muted text-muted-foreground' }
     case 'challenge':
-      return { label: '挑战', cls: 'bg-success/15 text-success' }
+      return { label: '用户挑战', cls: 'bg-success/15 text-success' }
     default:
       return null
   }

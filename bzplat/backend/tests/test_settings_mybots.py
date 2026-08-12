@@ -34,6 +34,18 @@ def test_owner_patch_bot(tmp_path):
     # is_public 字段已下线，响应不应再包含该键
     assert "is_public" not in b
 
+    # Owner inventory must retain inactive Bots so the My Bots page can offer
+    # reactivation.  Public discovery remains active-only.
+    mine = c.get("/api/bots/mine?page=1&per_page=20", headers=h1)
+    assert mine.status_code == 200
+    listed = next(bot for bot in mine.json()["bots"] if bot["id"] == bid)
+    assert listed["is_active"] in (0, False)
+    assert mine.json()["total"] == 1
+
+    public = c.get("/api/bots/public?game_id=holdem")
+    assert public.status_code == 200
+    assert bid not in {bot["id"] for bot in public.json()["bots"]}
+
 
 def test_other_user_cannot_patch(tmp_path):
     c, bid, t1, t2 = _app(tmp_path)

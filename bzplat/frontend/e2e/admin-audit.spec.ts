@@ -1,8 +1,10 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { loginThroughUi, monitorBrowser, withCleanup } from './helpers'
 
 const ADMIN = process.env.BZ_E2E_ADMIN || 'qa_admin'
+const MIN_TOUCH_TARGET_PX = 44
+const RENDERING_EPSILON_PX = 0.01
 
 const ADMIN_VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900, interactive: true },
@@ -15,6 +17,28 @@ async function expectNoRootOverflow(page: Page, label: string) {
     () => document.documentElement.scrollWidth - window.innerWidth,
   )
   expect(overflow, `${label} overflows viewport by ${overflow}px`).toBeLessThanOrEqual(1)
+}
+
+async function selectAdminModule(page: Page, label: string) {
+  const mobileTrigger = page.getByRole('combobox', { name: '选择管理模块' })
+  const viewportWidth = page.viewportSize()?.width ?? 1440
+  if (viewportWidth < 1024) {
+    await expect(mobileTrigger).toBeVisible()
+    await mobileTrigger.click()
+    await page.getByRole('option', { name: label, exact: true }).click()
+  } else {
+    const desktopNavigation = page.getByRole('navigation', { name: '管理控制台模块' })
+    await expect(desktopNavigation).toBeVisible()
+    await desktopNavigation.getByRole('button', { name: new RegExp(`^${label}`) }).click()
+  }
+  await expect(page.getByRole('main', { name: label, exact: true })).toBeVisible()
+}
+
+async function expectTouchTarget(locator: Locator, label: string) {
+  const box = await locator.boundingBox()
+  expect(box, `${label} has no rendered box`).not.toBeNull()
+  expect(box?.width ?? 0, `${label} width`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
+  expect(box?.height ?? 0, `${label} height`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
 }
 
 test.beforeAll(async ({ request }) => {
@@ -32,12 +56,37 @@ for (const viewport of ADMIN_VIEWPORTS) {
       await loginThroughUi(page, ADMIN)
       await page.goto('/#/admin')
 
+      if (viewport.name === 'mobile') {
+        const menu = page.getByRole('button', { name: '菜单', exact: true })
+        await expectTouchTarget(menu, 'mobile shell menu')
+        await expectTouchTarget(page.getByRole('button', { name: '搜索', exact: true }), 'mobile shell search')
+        await expectTouchTarget(page.getByRole('link', { name: '账户', exact: true }), 'mobile shell account')
+        await expectTouchTarget(page.getByRole('button', { name: /^当前：/ }), 'mobile shell theme')
+
+        await menu.click()
+        const mobileNavigation = page.getByRole('dialog')
+        await expect(mobileNavigation).toBeVisible()
+        await expectTouchTarget(mobileNavigation.getByRole('link', { name: '首页', exact: true }), 'mobile navigation item')
+        await expectTouchTarget(mobileNavigation.getByRole('button', { name: '搜索', exact: true }), 'mobile drawer search')
+        await expectTouchTarget(mobileNavigation.getByRole('link', { name: '站内信', exact: true }), 'mobile drawer messages')
+        await expectTouchTarget(mobileNavigation.getByRole('button', { name: '通知', exact: true }), 'mobile drawer notifications')
+        await expectTouchTarget(mobileNavigation.getByRole('button', { name: /^当前：/ }), 'mobile drawer theme')
+        await mobileNavigation.getByRole('button', { name: '关闭', exact: true }).click()
+        await expect(mobileNavigation).toHaveCount(0)
+
+        await expectTouchTarget(page.getByRole('combobox', { name: '选择管理模块' }), 'mobile admin module selector')
+      }
+
     await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
     await expectNoRootOverflow(page, 'dashboard')
 
-    await page.getByRole('button', { name: '用户', exact: true }).click()
+    await selectAdminModule(page, '用户')
     const userSearch = page.getByPlaceholder('搜索用户名/邮箱')
     await expect(userSearch).toBeVisible()
+    if (viewport.name === 'mobile') {
+      await expectTouchTarget(userSearch, 'mobile admin user search')
+      await expectTouchTarget(page.getByRole('button', { name: '删除', exact: true }).first(), 'mobile admin destructive action')
+    }
     if (viewport.interactive) {
       const filteredUsersPromise = page.waitForResponse((response) => {
         const url = new URL(response.url())
@@ -96,7 +145,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'users')
 
-    await page.getByRole('button', { name: 'Bot', exact: true }).click()
+    await selectAdminModule(page, 'Bot')
     const botSearch = page.getByPlaceholder('搜索 Bot 名称')
     await expect(botSearch).toBeVisible()
     if (viewport.interactive) {
@@ -122,7 +171,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'bots')
 
-    await page.getByRole('button', { name: '对局记录', exact: true }).click()
+    await selectAdminModule(page, '对局')
     await expect(page.getByText(/共 \d+ 局/)).toBeVisible()
     if (viewport.interactive) {
       const completedMatchesPromise = page.waitForResponse((response) => {
@@ -166,7 +215,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'matches')
 
-    await page.getByRole('button', { name: '锦标赛', exact: true }).click()
+    await selectAdminModule(page, '锦标赛')
     await expect(page.getByText(/共 \d+ 个锦标赛/)).toBeVisible()
     await expectNoRootOverflow(page, 'contests')
 
@@ -192,7 +241,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
       })
     }
 
-    await page.getByRole('button', { name: '日志', exact: true }).click()
+    await selectAdminModule(page, '日志')
     const logSearch = page.getByPlaceholder('对局 ID / Bot ID / 模块 / IP / 操作')
     await expect(logSearch).toBeVisible()
     if (viewport.interactive) {
@@ -224,19 +273,103 @@ for (const viewport of ADMIN_VIEWPORTS) {
     }
     await expectNoRootOverflow(page, 'logs')
 
-    await page.getByRole('button', { name: '邮件', exact: true }).click()
-    await expect(page.getByRole('button', { name: '邮件模板', exact: true })).toBeVisible()
+    await selectAdminModule(page, '通信中心')
+    const communications = page.getByRole('main', { name: '通信中心', exact: true })
+    await expect(communications.getByRole('button', { name: '新建群发', exact: true })).toBeVisible()
     if (viewport.interactive) {
-      await page.getByRole('button', { name: /发件箱/ }).click()
-      await expect(page.getByText(/无发信记录|收件人/)).toBeVisible()
-      await page.getByRole('button', { name: '邮件模板', exact: true }).click()
+      await communications.getByRole('button', { name: '已发送', exact: true }).click()
+      await expect(communications.getByRole('heading', { name: '已发送', exact: true })).toBeVisible()
+      await communications.getByRole('button', { name: '群发记录', exact: true }).click()
+      await expect(communications.getByRole('heading', { name: '群发记录', exact: true })).toBeVisible()
+      await communications.getByRole('button', { name: '问题反馈', exact: true }).click()
+      await expect(communications.getByRole('heading', { name: '问题反馈', exact: true })).toBeVisible()
     }
-    await expectNoRootOverflow(page, 'email')
+    await expectNoRootOverflow(page, 'communications')
 
       await monitor.expectClean()
     }, async () => {})
   })
 }
+
+test('admin queue switch is a single boolean control and survives polling', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, ADMIN)
+  let enabled = true
+  let publicQueueRequests = 0
+  const payloads: boolean[] = []
+  const snapshot = () => ({
+    dispatcher: {
+      state: 'running',
+      accepting: true,
+      auto_enabled: enabled,
+      pause_reason: '',
+      retry_at: null,
+    },
+    capacity: {
+      match_slots: { used: 0, capacity: 4 },
+      sandbox_units: { used: 0, capacity: 8 },
+      running_matches: 0,
+    },
+    active: [],
+    queued: [{
+      public_id: 'admin-public-7001',
+      source: 'auto',
+      status: 'queued',
+      game_id: 'holdem',
+      match_type: 'ladder',
+      match_id: null,
+      sandbox_units: 2,
+      rated: true,
+      rating_reason: 'eligible',
+      retryable: false,
+      cancel_requested: false,
+      reason: '',
+    }],
+    queued_count: 1,
+  })
+  await page.route('**/api/admin/settings/runtime', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ source: 'code', mutable: false, queue: snapshot() }),
+    })
+  })
+  await page.route('**/api/execution-queue', async (route) => {
+    publicQueueRequests += 1
+    await route.fulfill({ status: 500, body: 'dashboard must use internal admin snapshot' })
+  })
+  await page.route('**/api/admin/auto-match', async (route) => {
+    expect(route.request().method()).toBe('PUT')
+    const body = route.request().postDataJSON() as { enabled?: unknown }
+    expect(typeof body.enabled).toBe('boolean')
+    expect(Object.keys(body)).toEqual(['enabled'])
+    enabled = body.enabled as boolean
+    payloads.push(enabled)
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(snapshot()),
+    })
+  })
+
+  await page.goto('/#/admin')
+  const panel = page.getByTestId('execution-queue-panel')
+  const toggle = page.getByRole('switch', { name: '自动排位生产开关' })
+  await expect(panel).toContainText('等待执行')
+  await expect(toggle).toBeChecked()
+  await expectNoRootOverflow(page, 'admin auto queue enabled')
+
+  await toggle.click()
+  await expect(toggle).not.toBeChecked()
+  await expect(page.getByText('自动排位生产已关闭，人工与赛事任务不受影响', { exact: true })).toBeVisible()
+  await toggle.click()
+  await expect(toggle).toBeChecked()
+  await expect(page.getByText('自动排位生产已开启', { exact: true })).toBeVisible()
+  expect(payloads).toEqual([false, true])
+  expect(publicQueueRequests).toBe(0)
+  await expectNoRootOverflow(page, 'admin auto queue re-enabled')
+  await monitor.expectClean()
+})
 
 for (const viewport of ADMIN_VIEWPORTS) {
   test(`manual contest schedule stays explicit and scrollable with long text (${viewport.name})`, async ({ page }) => {
@@ -589,6 +722,10 @@ test('contest detail changes its primary content and actions with lifecycle stag
           bot_b_id: 12,
           bot_a_name: 'winner_bot',
           bot_b_name: 'runner_bot',
+          owner_a_name: 'winner_user',
+          owner_a_display: 'Winner User',
+          owner_b_name: 'runner_user',
+          owner_b_display: 'Runner User',
           stage_idx: 0,
           status: 'completed',
           match_winner: 0,

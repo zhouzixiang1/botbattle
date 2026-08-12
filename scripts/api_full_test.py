@@ -2,17 +2,17 @@
 """通过 HTTP API 做关键业务链路集成测试。
 
 覆盖：
-  1. 无 SMTP 注册回滚契约 + 隔离 DB 专用账号播种 → 验证码登录 → /me
+  1. 无 SMTP 注册持久化 + queued 投递契约 + 隔离 DB 专用账号播种 → 验证码登录 → /me
   2. Bot 上传 / 版本 / 上架 / 公开列表
   3. 挑战对局 + 结果完整性（零和、winner、净筹码）
-  4. 已完成对局的 SSE 终态 snapshot vs 落盘回放 events_json 一致性
-  5. 全局 admission 与补槽（首波只接纳代码并发上限，超额 429，释放后补齐）
+  4. 已完成对局的 SSE 终态 snapshot vs 结构化 replay events 一致性
+  5. 全局执行队列（并发 202 接单、opaque public_id、自动补槽到终态）
   6. 排行榜 Glicko-2 更新、组织者比赛循环赛
 
 前置：
   - 后端以 BZ_TEST_CAPTCHA=1 启动（captcha 接口返回 answer）
   - 后端以 BZ_QA_INSTANCE=1 标记为隔离 QA 实例
-  - 不发送测试邮件：账号在隔离 DB 幂等播种；无 SMTP 注册原子性在独立临时 app 验证
+  - 不发送测试邮件：账号在隔离 DB 幂等播种；无 SMTP queued 契约在独立临时 app 验证
   - BZ_BOT_LOCAL=1（本地跑 ELF，无需 Docker）
 
 用法：
@@ -41,6 +41,12 @@ sys.path.insert(0, str(ROOT))
 from bzplat.backend.crypto import hash_password, verify_password  # noqa: E402
 from bzplat.backend.store import Store  # noqa: E402
 from bzplat.backend.store.schema import ROLE_ADMIN, ROLE_ORGANIZER, ROLE_USER  # noqa: E402
+from scripts._execution_request import (  # noqa: E402
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
+from scripts._qa_polling import QaPollingError, RateAwareJsonPoller  # noqa: E402
 from scripts._qa_target import (  # noqa: E402
     assert_qa_instance,
     ensure_qa_base,
@@ -51,6 +57,10 @@ from scripts._qa_target import (  # noqa: E402
 PASS = 0
 FAIL = 0
 FAILS: list[str] = []
+# 生产式 Traditional 70 手单局约 285 秒；顺序链路留约 25% 余量。
+SEQUENTIAL_MATCH_TIMEOUT_SEC = 360.0
+# 两个 match slot 仍共享 Docker launch fence，claim 后的单局不能按理想并行估算。
+CONTENDED_MATCH_TIMEOUT_SEC = SEQUENTIAL_MATCH_TIMEOUT_SEC * 2
 PASSWORD = "ApiQa1234"
 QA_ACCOUNTS = {
     "admin": ("apiqa_admin", "apiqa_admin@test.invalid", ROLE_ADMIN, True),
@@ -83,6 +93,7 @@ class Api:
         self.base = base.rstrip("/")
         self.db_path = db_path
         self.client = httpx.Client(base_url=self.base, timeout=120)
+        self.poller = RateAwareJsonPoller(min_interval=1.0)
 
     # ── 鉴权 ───────────────────────────────────────────────
     def captcha(self) -> dict:
@@ -105,6 +116,21 @@ class Api:
         headers.setdefault("Authorization", f"Bearer {token}")
         return self.client.request(method, path, headers=headers, **kw)
 
+    def poll_json(
+        self,
+        path: str,
+        *,
+        label: str,
+        deadline: float,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        request = (
+            (lambda: self.authed(token, "GET", path))
+            if token
+            else (lambda: self.client.get(path))
+        )
+        return self.poller.get_json(request, label=label, deadline=deadline)
+
 
 def read_sample(path: str) -> bytes:
     p = Path(__file__).resolve().parent.parent / path
@@ -125,11 +151,12 @@ def multipart(fields: dict[str, Any], file_field: str, filename: str, data: byte
     return {"Content-Type": f"multipart/form-data; boundary={boundary}"}, b"".join(parts)
 
 
-def verify_no_smtp_registration_rollback() -> tuple[bool, str]:
-    """Exercise the HTTP registration compensation contract without real SMTP.
+def verify_no_smtp_registration_persistence() -> tuple[bool, str]:
+    """Exercise queued registration persistence without real SMTP.
 
-    This uses a disposable app/runtime, explicitly forces ``mailer=None`` and runs
-    the same request twice.  It cannot send mail or mutate the target QA database.
+    This uses a disposable app/runtime and runs the same request twice.  It cannot
+    send mail or mutate the target QA database.  The first call must persist the
+    user, short-lived code and opaque delivery; the duplicate call remains a 409.
     """
     from fastapi.testclient import TestClient
     from bzplat.backend.main import create_app
@@ -162,20 +189,40 @@ def verify_no_smtp_registration_rollback() -> tuple[bool, str]:
                 "captcha_id": "skip",
                 "captcha_answer": "skip",
             }
-            statuses: list[int] = []
+            responses: list[httpx.Response] = []
             remains: list[bool] = []
             try:
                 for _ in range(2):
                     response = client.post("/api/auth/register", json=payload)
-                    statuses.append(response.status_code)
+                    responses.append(response)
                     remains.append(
                         app.state.store.get_user_by_username("apirollback") is not None
                     )
+                code_row = app.state.store._conn.execute(
+                    "SELECT code FROM email_codes ORDER BY id LIMIT 1"
+                ).fetchone()
+                delivery = app.state.store._conn.execute(
+                    "SELECT status,payload_json FROM deliveries ORDER BY id LIMIT 1"
+                ).fetchone()
             finally:
                 client.close()
                 app.state.store.close()
-    ok = statuses == [503, 503] and remains == [False, False]
-    return ok, f"statuses={statuses} user_remains={remains}"
+    statuses = [response.status_code for response in responses]
+    first_body = responses[0].json() if responses and responses[0].status_code == 200 else {}
+    payload_text = str(delivery["payload_json"] if delivery else "")
+    ok = (
+        statuses == [200, 409]
+        and remains == [True, True]
+        and first_body.get("delivery_status") == "queued"
+        and code_row is not None
+        and delivery is not None
+        and delivery["status"] in {"queued", "sending"}
+        and str(code_row["code"]) not in payload_text
+    )
+    return ok, (
+        f"statuses={statuses} user_remains={remains} "
+        f"delivery_status={delivery['status'] if delivery else None}"
+    )
 
 
 def seed_qa_accounts(db_path: str) -> dict[str, str]:
@@ -257,12 +304,67 @@ def qa_contest_payload(run_id: str) -> dict[str, Any]:
     }
 
 
+def require_leaderboard_payload(
+    response: httpx.Response,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Require the public leaderboard's HTTP/JSON container contract."""
+    status = int(response.status_code)
+    body = response.text[:240]
+    if status != 200:
+        raise QaPollingError(f"排行榜请求失败：HTTP {status} body={body!r}")
+    try:
+        payload: Any = response.json()
+    except (TypeError, ValueError) as exc:
+        raise QaPollingError(
+            f"排行榜响应不可解析为 JSON：HTTP 200 body={body!r}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise QaPollingError(
+            f"排行榜响应必须是 JSON 对象：HTTP 200 body={body!r}"
+        )
+    rows = payload.get("leaderboard")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise QaPollingError(
+            f"排行榜 leaderboard 必须是对象列表：HTTP 200 body={body!r}"
+        )
+    return payload, rows
+
+
+def validate_leaderboard_numeric_contract(
+    payload: dict[str, Any], rows: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """Validate rated sample counts separately from public rank eligibility."""
+    minimum = payload.get("ranking_min_matches")
+    if type(minimum) is not int or minimum < 1:
+        return False, f"ranking_min_matches={minimum!r}"
+    for index, row in enumerate(rows, start=1):
+        rated_matches = row.get("rated_matches")
+        eligible = row.get("ranking_eligible")
+        rank = row.get("rank")
+        expected_eligible = (
+            type(rated_matches) is int
+            and rated_matches >= minimum
+        )
+        if type(rated_matches) is not int or rated_matches < 0:
+            return False, f"row#{index} rated_matches={rated_matches!r}"
+        if type(eligible) is not bool or eligible != expected_eligible:
+            return False, (
+                f"row#{index} rated_matches={rated_matches} "
+                f"ranking_eligible={eligible!r} expected={expected_eligible}"
+            )
+        if eligible and (type(rank) is not int or rank < 1):
+            return False, f"row#{index} eligible rank={rank!r}"
+        if not eligible and rank is not None:
+            return False, f"row#{index} ineligible rank={rank!r}"
+    return True, f"ranking_min_matches={minimum} rows={len(rows)}"
+
+
 # ─────────────────────────────────────────────────────────────
 def test_auth_flow(api: Api) -> dict[str, str]:
-    print("\n[1/6] 鉴权流程：无 SMTP 回滚 → 隔离播种 → 验证码登录")
+    print("\n[1/6] 鉴权流程：无 SMTP queued 持久化 → 隔离播种 → 验证码登录")
     users: dict[str, str] = {}
-    rollback_ok, rollback_detail = verify_no_smtp_registration_rollback()
-    check("无 SMTP 注册失败会删除用户且可安全重试", rollback_ok, rollback_detail)
+    queued_ok, queued_detail = verify_no_smtp_registration_persistence()
+    check("无 SMTP 注册保留账号/验证码并排队投递", queued_ok, queued_detail)
 
     usernames = seed_qa_accounts(api.db_path)
     for logical in ("admin", "alice", "bob", "carol", "org1"):
@@ -338,15 +440,98 @@ def test_bots(api: Api, users: dict[str, str], run_id: str) -> dict[str, int]:
     return bot_ids
 
 
-def wait_match(api: Api, token: str, mid: str, timeout: float = 90) -> dict:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        r = api.authed(token, "GET", f"/api/matches/{mid}")
-        m = r.json()["match"]
-        if m["status"] in ("completed", "aborted"):
-            return m
-        time.sleep(0.4)
-    raise TimeoutError(f"对局 {mid} 超时")
+def wait_match(
+    api: Api,
+    token: str,
+    mid: str,
+    timeout: float = SEQUENTIAL_MATCH_TIMEOUT_SEC,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    last_payload: dict[str, Any] | None = None
+    while True:
+        try:
+            payload = api.poll_json(
+                f"/api/matches/{mid}",
+                token=token,
+                label=f"对局 {mid} 详情",
+                deadline=deadline,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"对局 {mid} 在 {timeout:.1f}s 内未完成；{exc}；"
+                f"最后成功响应 HTTP 200 body={last_payload!r}"
+            ) from exc
+        last_payload = payload
+        match = payload.get("match")
+        if not isinstance(match, dict):
+            raise QaPollingError(
+                f"对局 {mid} 详情缺少 match 对象：HTTP 200 body={payload!r}"
+            )
+        status = match.get("status")
+        if not isinstance(status, str) or not status:
+            raise QaPollingError(
+                f"对局 {mid} 详情缺少 status：HTTP 200 body={payload!r}"
+            )
+        if status in ("completed", "aborted"):
+            return match
+
+
+def wait_accepted_match(
+    api: Api,
+    token: str,
+    response: httpx.Response,
+    *,
+    label: str,
+    timeout: float = 120,
+) -> tuple[str, str]:
+    """Validate a 202 ticket and wait until the dispatcher creates its match."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    initial = require_execution_request(
+        response.status_code,
+        payload,
+        label=label,
+        detail=response.text[:240],
+    )
+    return str(initial["public_id"]), wait_execution_snapshot(
+        api,
+        token,
+        initial,
+        label=label,
+        timeout=timeout,
+    )
+
+
+def wait_execution_snapshot(
+    api: Api,
+    token: str,
+    initial: dict[str, Any],
+    *,
+    label: str,
+    timeout: float = 120,
+) -> str:
+    """Wait for match admission from an already validated queue snapshot."""
+
+    deadline = time.monotonic() + timeout
+
+    def fetch(public_id: str) -> tuple[int, Any, str]:
+        body = api.poll_json(
+            execution_request_path(public_id),
+            token=token,
+            label=f"{label} 执行请求 {public_id}",
+            deadline=deadline,
+        )
+        return 200, body, ""
+
+    return wait_for_execution_match(
+        initial,
+        fetch,
+        label=label,
+        timeout=timeout,
+        interval=0,
+    )
 
 
 def test_single_match(api: Api, users: dict[str, str], bot_ids: dict[str, int]) -> str:
@@ -354,8 +539,14 @@ def test_single_match(api: Api, users: dict[str, str], bot_ids: dict[str, int]) 
     r = api.authed(users["alice"], "POST", "/api/matches/challenge", json={
         "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["BobBot"],
     })
-    check("发起挑战", r.status_code == 200 and "match_id" in r.json(), f"{r.status_code} {r.text[:80]}")
-    mid = r.json()["match_id"]
+    try:
+        public_id, mid = wait_accepted_match(
+            api, users["alice"], r, label="单局挑战"
+        )
+        check("挑战进入全局执行队列(202)", True, f"public_id={public_id}")
+    except Exception as exc:
+        check("挑战进入全局执行队列(202)", False, str(exc))
+        raise
     m = wait_match(api, users["alice"], mid)
     check("对局完成(非 aborted)", m["status"] == "completed", f"status={m['status']} reason={m.get('reason')}")
 
@@ -392,15 +583,17 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
     r = api.authed(users["alice"], "POST", "/api/matches/challenge", json={
         "my_bot_id": bot_ids["AliceBot"], "opponent_bot_id": bot_ids["CarolBot"],
     })
-    mid = r.json()["match_id"]
+    _, mid = wait_accepted_match(
+        api, users["alice"], r, label="SSE 挑战"
+    )
 
     # 等对局完成（replay 是权威完整数据）
-    m = wait_match(api, users["alice"], mid, timeout=90)
+    m = wait_match(api, users["alice"], mid)
     check("SSE 测试对局完成", m["status"] == "completed", f"status={m['status']}")
 
     # 落盘 replay 完整性校验（权威数据）
-    r = api.authed(users["alice"], "GET", f"/api/matches/{mid}")
-    replay = json.loads(r.json()["replay"].get("events_json") or "[]")
+    r = api.authed(users["alice"], "GET", f"/api/matches/{mid}/replay")
+    replay = r.json().get("events") or []
     rep_types = [e.get("type") for e in replay]
     check("replay 非空", len(replay) > 0, "空")
     check("replay 以 hand_start 开头", rep_types[:1] == ["hand_start"], str(rep_types[:3]))
@@ -469,7 +662,7 @@ def test_sse_vs_replay(api: Api, users: dict[str, str], bot_ids: dict[str, int])
 
 
 def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, int], n: int = 4) -> None:
-    print(f"\n[5/6] 并发 admission + 补槽（总计 {n} 局）")
+    print(f"\n[5/6] 全局排队 + 自动补槽（总计 {n} 局）")
     # 不同 bot 对，避免冲突：Alice vs Bob, Alice vs Carol, Carol vs Bob, Bob vs Carol
     pairs = [
         (bot_ids["AliceBot"], bot_ids["BobBot"], users["alice"]),
@@ -479,95 +672,96 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
     ]
     pairs = (pairs * ((n + 3) // 4))[:n]
 
-    health = api.client.get("/api/health").json()
-    capacity = max(1, int(health.get("max_concurrent") or 1))
-    expected_first_wave = min(n, capacity)
     results: dict[int, dict] = {}
-    first_match_ids: dict[int, str] = {}
-    rejected: dict[int, tuple[int, int, str]] = {}
+    accepted: dict[int, tuple[str, dict[str, Any]]] = {}
     errors: dict[int, str] = {}
     barrier = threading.Barrier(n)
+    lock = threading.Lock()
 
-    def submit_first_wave(i: int, a: int, b: int, tok: str):
+    def submit(i: int, a: int, b: int, tok: str) -> None:
         try:
             barrier.wait()  # 尽量同时发起
             r = api.authed(tok, "POST", "/api/matches/challenge", json={
                 "my_bot_id": a, "opponent_bot_id": b,
             })
-            if r.status_code == 200:
-                first_match_ids[i] = r.json()["match_id"]
-                return
-            if r.status_code == 429 and "并发已满" in r.text:
-                rejected[i] = (a, b, tok)
-                return
-            errors[i] = f"challenge {r.status_code} {r.text[:80]}"
-        except Exception as e:
-            errors[i] = str(e)
+            payload = require_execution_request(
+                r.status_code,
+                r.json() if r.content else None,
+                label=f"并发挑战 #{i}",
+                detail=r.text[:240],
+            )
+            with lock:
+                accepted[i] = (tok, payload)
+        except Exception as exc:
+            with lock:
+                errors[i] = str(exc)
 
     threads = [
-        threading.Thread(target=submit_first_wave, args=(i, a, b, t))
+        threading.Thread(target=submit, args=(i, a, b, t))
         for i, (a, b, t) in enumerate(pairs)
     ]
+    # 四场均为固定 70 手 Holdem。所有 waiter 共用绝对截止，claim 与完成
+    # 消耗同一批预算，避免给每个阶段重复追加超时。
+    batch_timeout = SEQUENTIAL_MATCH_TIMEOUT_SEC * n
+    batch_deadline = time.monotonic() + batch_timeout
     t0 = time.time()
     for th in threads:
         th.start()
     for th in threads:
         th.join()
 
-    first_wave_ok = (
-        not errors
-        and len(first_match_ids) == expected_first_wave
-        and len(rejected) == n - expected_first_wave
-    )
+    public_ids = [snapshot["public_id"] for _, snapshot in accepted.values()]
     check(
-        f"首波精确接纳 {expected_first_wave} 局，超额请求明确 429",
-        first_wave_ok,
+        f"并发提交的 {n} 个挑战全部返回 202 + opaque public_id",
+        not errors and len(accepted) == n and len(set(public_ids)) == n,
         (
-            f"accepted={len(first_match_ids)} rejected={len(rejected)} "
+            f"accepted={len(accepted)} unique_ids={len(set(public_ids))} "
             + "; ".join(f"#{k}:{v}" for k, v in errors.items())
         ),
     )
 
-    # 先等首波释放全局槽位，再把明确因 admission 拒绝的请求
-    # 按同一 capacity 分批补进。这才是代码配置为 2 时的真实契约，
-    # 不应把任意数量的 pending task 塞进 semaphore 后再声称“并发成功”。
-    for i, mid in sorted(first_match_ids.items()):
+    # 每个 waiter 先等待全局 dispatcher 分配 match_id，再等待该局终态；
+    # 超过并发容量的请求由持久队列保留，不再依赖旧的 429 + 客户端重提。
+    def wait_one(i: int, tok: str, snapshot: dict[str, Any]) -> None:
         try:
-            results[i] = wait_match(api, pairs[i][2], mid, timeout=120)
+            claim_remaining = batch_deadline - time.monotonic()
+            if claim_remaining <= 0:
+                raise TimeoutError(f"并发挑战批次超过 {batch_timeout:.0f}s 绝对上限")
+            mid = wait_execution_snapshot(
+                api,
+                tok,
+                snapshot,
+                label=f"并发挑战 #{i}",
+                timeout=claim_remaining,
+            )
+            match_remaining = batch_deadline - time.monotonic()
+            if match_remaining <= 0:
+                raise TimeoutError(f"并发挑战批次超过 {batch_timeout:.0f}s 绝对上限")
+            match = wait_match(
+                api,
+                tok,
+                mid,
+                timeout=min(CONTENDED_MATCH_TIMEOUT_SEC, match_remaining),
+            )
+            with lock:
+                results[i] = match
         except Exception as exc:
-            errors[i] = str(exc)
-
-    retry_items = sorted(rejected.items())
-    for start in range(0, len(retry_items), capacity):
-        batch = retry_items[start : start + capacity]
-        retry_barrier = threading.Barrier(len(batch))
-
-        def retry(i: int, a: int, b: int, tok: str) -> None:
-            try:
-                retry_barrier.wait()
-                r = api.authed(tok, "POST", "/api/matches/challenge", json={
-                    "my_bot_id": a, "opponent_bot_id": b,
-                })
-                if r.status_code != 200:
-                    errors[i] = f"retry challenge {r.status_code} {r.text[:80]}"
-                    return
-                results[i] = wait_match(api, tok, r.json()["match_id"], timeout=120)
-            except Exception as exc:
+            with lock:
                 errors[i] = str(exc)
 
-        retry_threads = [
-            threading.Thread(target=retry, args=(i, a, b, tok))
-            for i, (a, b, tok) in batch
-        ]
-        for th in retry_threads:
-            th.start()
-        for th in retry_threads:
-            th.join()
+    waiters = [
+        threading.Thread(target=wait_one, args=(i, tok, snapshot))
+        for i, (tok, snapshot) in sorted(accepted.items())
+    ]
+    for th in waiters:
+        th.start()
+    for th in waiters:
+        th.join()
 
     dt = time.time() - t0
     completed = [m for m in results.values() if m["status"] == "completed"]
     check(
-        f"补槽后全部 {n} 局 completed",
+        f"队列自动补槽后全部 {n} 局 completed",
         len(completed) == n and not errors,
         (
             f"completed={len(completed)} "
@@ -584,9 +778,9 @@ def test_concurrent_matches(api: Api, users: dict[str, str], bot_ids: dict[str, 
         for m in results.values()
     )
     check("每局 result.deltas 零和", zero_sum, "存在缺失或非零和对局")
-    # 无重复 match_id
-    check("无超时(<120s 总)", dt < 125, f"耗时 {dt:.1f}s")
-    print(f"    {n} 局并发总耗时 {dt:.1f}s")
+    match_ids = [str(m.get("id")) for m in results.values()]
+    check("执行请求映射到不重复 match_id", len(set(match_ids)) == len(match_ids), str(match_ids))
+    print(f"    {n} 个排队请求总耗时 {dt:.1f}s")
 
 
 def test_leaderboard_and_contest(
@@ -598,15 +792,27 @@ def test_leaderboard_and_contest(
     print("\n[6/6] 排行榜 Glicko + 组织者比赛")
     # 排行榜
     r = api.client.get("/api/leaderboard?game_id=holdem&limit=20")
-    lb = r.json().get("leaderboard", [])
+    try:
+        leaderboard_payload, lb = require_leaderboard_payload(r)
+        check("排行榜返回 HTTP 200 JSON 对象列表", True)
+    except QaPollingError as exc:
+        leaderboard_payload, lb = {}, []
+        check("排行榜返回 HTTP 200 JSON 对象列表", False, str(exc))
     check("排行榜非空", len(lb) > 0, "空")
     if lb:
         row0 = lb[0]
         check("排行榜含 rating 字段", "rating" in row0, str(row0)[:80])
-        check("排行榜含 matches_played", "matches_played" in row0, str(row0)[:80])
-        # 已跑多局，应有 matches_played > 0
-        played = [x for x in lb if x.get("matches_played", 0) > 0]
-        check("存在已参赛 bot", len(played) > 0, "全部 matches_played=0")
+        check("排行榜含 rated_matches 字段", "rated_matches" in row0, str(row0)[:80])
+        numeric_ok, numeric_detail = validate_leaderboard_numeric_contract(
+            leaderboard_payload, lb,
+        )
+        check("计分样本与公开排名资格一致", numeric_ok, numeric_detail)
+        # 已跑多局，应至少有一个完成评分结算的样本；这不等同于达到公开排名门槛。
+        rated = [
+            row for row in lb
+            if type(row.get("rated_matches")) is int and row["rated_matches"] > 0
+        ]
+        check("存在已有计分样本 bot", len(rated) > 0, "全部 rated_matches=0")
 
     # 比赛循环赛
     r = api.authed(
@@ -630,11 +836,19 @@ def test_leaderboard_and_contest(
     # 等所有对阵的 match 完成。
     # 注：后端 maybe_finish 目前无路由触发，比赛 status 不会自动转 finished，
     # 因此用「所有 pairing 的 match 均 completed」作为完成判据。
-    deadline = time.time() + 180
+    # 三个固定 70 手对阵共享 Docker launch fence；总预算按三局顺序上限计，
+    # 而不是按理想的两槽并行波次计。
+    expected_pairings = 3
+    contest_timeout = SEQUENTIAL_MATCH_TIMEOUT_SEC * expected_pairings
+    deadline = time.monotonic() + contest_timeout
     all_done = False
-    while time.time() < deadline:
-        r = api.client.get(f"/api/contests/{cid}")
-        pairings = r.json().get("pairings", [])
+    while time.monotonic() < deadline:
+        detail = api.poll_json(
+            f"/api/contests/{cid}",
+            label=f"赛事 {cid} 详情",
+            deadline=deadline,
+        )
+        pairings = detail.get("pairings", [])
         if pairings:
             statuses = []
             for p in pairings:
@@ -642,12 +856,21 @@ def test_leaderboard_and_contest(
                 if not mid_p:
                     statuses.append("pending")
                     continue
-                pm = api.client.get(f"/api/matches/{mid_p}").json()["match"]
+                match_payload = api.poll_json(
+                    f"/api/matches/{mid_p}",
+                    label=f"赛事 {cid} 对局 {mid_p} 详情",
+                    deadline=deadline,
+                )
+                pm = match_payload.get("match")
+                if not isinstance(pm, dict) or not isinstance(pm.get("status"), str):
+                    raise QaPollingError(
+                        f"赛事 {cid} 对局 {mid_p} 缺少 match/status："
+                        f"HTTP 200 body={match_payload!r}"
+                    )
                 statuses.append(pm["status"])
             if all(s in ("completed", "aborted") for s in statuses):
                 all_done = True
                 break
-        time.sleep(1)
 
     check("循环赛所有对阵完成", all_done, "超时未完成")
 
@@ -659,7 +882,6 @@ def test_leaderboard_and_contest(
     pairings = detail.get("pairings", [])
     standings = detail.get("standings", [])
     # 循环赛对阵数 = C(3,2) = 3
-    expected_pairings = 3
     check(f"循环赛 {expected_pairings} 个对阵", len(pairings) == expected_pairings,
           f"got {len(pairings)}")
     check("standings 非空", len(standings) > 0, "空")

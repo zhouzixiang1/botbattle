@@ -1,6 +1,6 @@
 """循环依赖加固 + games/ 契约边界守护测试。
 
-裁判/适配器/协议/结果/段位集中在 games/<game>/ 子包，三层冗余 shim
+裁判/适配器/协议/结果集中在 games/<game>/ 子包，三层冗余 shim
 （engine/ + protocol/ + _compat/）已删除。本测试在**独立子进程**里从多种 import
 顺序断言无 ImportError——若有人在新模块加了反向 import（如通用层 import 具体游戏），
 此测试会捕获。零平台依赖只保证权威 ``*_judge.py``；engine 可复用 runtime 的统一
@@ -10,7 +10,7 @@
 已加载的模块对象/monkeypatch）。子进程完全隔离，测完即弃。
 
 守护的不变量（文档化于 AGENTS.md）：
-- games/<game>/ 子包（engine/protocol/result/tiers/spec/templates）**不得**反向
+- games/<game>/ 子包（engine/protocol/result/spec/templates）**不得**反向
   import bzplat.backend.engine / bzplat.backend._compat / bzplat.backend.protocol（已删的
   shim，保留为"防回退"哨兵）或通用层（matches/contests/store/api_routes）——只能 import
   同包、games 契约/共享协议、runtime 底层错误类型或 store.schema 纯常量。
@@ -77,7 +77,6 @@ def test_import_all_main_modules():
         "bzplat.backend.games.holdem.engine",
         "bzplat.backend.games.holdem.holdem_judge",
         "bzplat.backend.games.holdem.result",
-        "bzplat.backend.games.holdem.tiers",
         "bzplat.backend.games.gomoku.engine",
         "bzplat.backend.games.pencil.engine",
         "bzplat.backend.matches.orchestrator",

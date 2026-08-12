@@ -12,13 +12,20 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password
+from bzplat.backend.matches.execution_queue import ExecutionDispatcher
+from bzplat.backend.runtime.binary_runner import SandboxControlUncertain
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import STATUS_ABORTED, STATUS_COMPLETED
+from bzplat.backend.tests.execution_helpers import (
+    claim_request,
+    enable_execution_queue,
+)
 
 
 @pytest.fixture
@@ -192,8 +199,161 @@ def test_reconcile_redispatches_after_orphan_restart(store: Store):
     asyncio.run(run())
 
 
+def test_delayed_dispatcher_resume_runs_full_contest_recovery(store: Store):
+    """A later successful Docker resume repairs both dead and unready contests."""
+    users, bots = _mk_bots(store, 4)
+
+    dead_contest = store.create_contest(
+        "delayed-resume-dead",
+        users[0]["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )
+    dead_entries = [
+        store.add_contest_entry(dead_contest["id"], users[i]["id"], bots[i]["id"])
+        for i in range(2)
+    ]
+    dead_pairing = store.add_contest_pairing(
+        dead_contest["id"],
+        bots[0]["id"],
+        bots[1]["id"],
+        status="pending",
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=dead_entries[0]["id"],
+        entry_b_id=dead_entries[1]["id"],
+    )
+    dead_match_id = "delayed-resume-dead-match"
+    store.create_match(
+        dead_match_id,
+        bots[0]["id"],
+        bots[1]["id"],
+        owner_id=users[0]["id"],
+        contest_id=dead_contest["id"],
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.bind_contest_pairing_match(
+        dead_contest["id"], dead_pairing["id"], dead_match_id
+    )
+
+    finished_contest = store.create_contest(
+        "delayed-resume-unready",
+        users[2]["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )
+    finished_entries = [
+        store.add_contest_entry(
+            finished_contest["id"], users[i]["id"], bots[i]["id"]
+        )
+        for i in range(2, 4)
+    ]
+    finished_pairing = store.add_contest_pairing(
+        finished_contest["id"],
+        bots[2]["id"],
+        bots[3]["id"],
+        status="pending",
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=finished_entries[0]["id"],
+        entry_b_id=finished_entries[1]["id"],
+    )
+    finished_match_id = "delayed-resume-finished-match"
+    store.create_match(
+        finished_match_id,
+        bots[2]["id"],
+        bots[3]["id"],
+        owner_id=users[2]["id"],
+        contest_id=finished_contest["id"],
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(
+        finished_match_id,
+        status=STATUS_COMPLETED,
+        winner=0,
+        reason="completed",
+        result={
+            "rounds_played": 1,
+            "deltas": [1, -1],
+            "normalized_delta": 1,
+        },
+    )
+    store.bind_contest_pairing_match(
+        finished_contest["id"], finished_pairing["id"], finished_match_id
+    )
+    store.update_contest_pairing(finished_pairing["id"], status="completed")
+    store.update_contest(
+        finished_contest["id"], status="finished", official_results_ready=0
+    )
+    assert store.get_contest(finished_contest["id"])["official_results_ready"] == 0
+
+    class RecoveryRuntime:
+        supervisor = None
+
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        async def cleanup_instance(self) -> None:
+            self.cleanup_calls += 1
+            if self.cleanup_calls == 1:
+                raise SandboxControlUncertain("first cleanup remains uncertain")
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class RecoveryOrchestrator(_FakeOrch):
+        def __init__(self, target_store: Store, runtime: RecoveryRuntime) -> None:
+            super().__init__(target_store)
+            self.runner = SimpleNamespace(runner=runtime)
+
+        async def quiesce_execution_tasks(self) -> None:
+            return None
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            return 0
+
+    runtime = RecoveryRuntime()
+    orch = RecoveryOrchestrator(store, runtime)
+    manager = ContestManager(store, orch)  # type: ignore[arg-type]
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=2,
+        max_sandbox_units=4,
+        auto_capability_enabled=False,
+        contest_reconciler=manager.reconcile_running_contests,
+    )
+    store.executions.pause("forced recovery test", bounded_retry=False)
+
+    async def run() -> None:
+        assert not await dispatcher.admin_resume()
+        assert (
+            store.list_contest_pairings(dead_contest["id"])[0]["match_id"]
+            == dead_match_id
+        )
+        assert (
+            store.get_contest(finished_contest["id"])["official_results_ready"]
+            == 0
+        )
+
+        assert await dispatcher.admin_resume()
+        repaired_pairing = store.list_contest_pairings(dead_contest["id"])[0]
+        assert repaired_pairing["status"] == "running"
+        assert repaired_pairing["match_id"] not in {None, dead_match_id}
+        repaired_finished = store.get_contest(finished_contest["id"])
+        assert repaired_finished["official_results_ready"] == 1
+        assert len(store.list_official_results(finished_contest["id"])) == 2
+
+    asyncio.run(run())
+    assert runtime.cleanup_calls == 2
+
+
 def test_reconcile_deletes_bound_prepared_ghost_before_redispatch(store: Store):
-    """bind 已提交但 start 前崩溃：启动对账须删旧 pending match/replay/index 再重派。"""
+    """claim 已提交但 task 未启动：namespace recovery 原子删旧 attempt 并重派。"""
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
 
     users, bots = _mk_bots(store, 2)
@@ -209,22 +369,23 @@ def test_reconcile_deletes_bound_prepared_ghost_before_redispatch(store: Store):
 
     async def run():
         original_orch = MatchOrchestrator(store)
-        ghost_id = await original_orch.challenge(
-            bots[0]["id"], bots[1]["id"], users[0]["id"],
-            contest_id=cid, match_type="contest", game_id="holdem",
-            defer_start=True,
-        )
         pairing = store.add_contest_pairing(
             cid, bots[0]["id"], bots[1]["id"], status="pending", stage_idx=0,
         )
-        store.bind_contest_pairing_match(cid, pairing["id"], ghost_id)
+        enable_execution_queue(store)
+        request_id = await original_orch.challenge(
+            bots[0]["id"], bots[1]["id"], users[0]["id"],
+            contest_id=cid, match_type="contest", game_id="holdem",
+            contest_pairing_id=pairing["id"],
+        )
+        claimed = claim_request(original_orch, request_id, start=False)
+        ghost_id = claimed["current_match_id"]
         assert store.get_match(ghost_id)["status"] == "pending"
         assert store.get_replay(ghost_id) is not None
+        assert store.list_contest_pairings(cid)[0]["match_id"] == ghost_id
 
-        # 新进程只有新 orchestrator；旧 prepared map/task 均不存在。
-        replacement = _FakeOrch(store)
-        manager = ContestManager(store, replacement)  # type: ignore
-        await manager.reconcile_running_contests()
+        recovered = store.executions.recover_after_namespace_cleanup()
+        assert recovered["requeued"] == 1
 
         assert store.get_match(ghost_id) is None
         assert store.get_replay(ghost_id) is None
@@ -232,21 +393,22 @@ def test_reconcile_deletes_bound_prepared_ghost_before_redispatch(store: Store):
             "SELECT 1 FROM matches_index WHERE id=?", (ghost_id,)
         ).fetchone()
         assert index is None
+        reset = store.list_contest_pairings(cid, stage_idx=0)[0]
+        assert reset["status"] == "pending"
+        assert reset["match_id"] is None
+
+        replacement = claim_request(original_orch, request_id, start=False)
         refreshed = store.list_contest_pairings(cid, stage_idx=0)[0]
+        assert refreshed["match_id"] == replacement["current_match_id"]
         assert refreshed["match_id"] != ghost_id
         live_matches = store.list_matches(contest_id=cid)
         assert {match["id"] for match in live_matches} == {refreshed["match_id"]}
-
-        _complete_all_pairs(store, cid, 0, winner_fn=lambda a, b: 0)
-        await manager.reconcile_running_contests()
-        assert store.get_contest(cid)["status"] == "finished"
-        assert not store.contest_has_active_matches(cid)
 
     asyncio.run(run())
 
 
 def test_reconcile_deletes_unbound_prepared_ghost_before_redispatch(store: Store):
-    """prepare 成功但 bind 前硬崩：删无引用 pending match/index/replay 再重派。"""
+    """enqueue 与 claim 之间不创建 match，消除旧 prepare-before-bind ghost 窗口。"""
     from bzplat.backend.matches.orchestrator import MatchOrchestrator
 
     users, bots = _mk_bots(store, 2)
@@ -274,33 +436,32 @@ def test_reconcile_deletes_unbound_prepared_ghost_before_redispatch(store: Store
 
     async def run():
         old_orchestrator = MatchOrchestrator(store)
-        ghost_id = await old_orchestrator.challenge(
+        enable_execution_queue(store)
+        request_id = await old_orchestrator.challenge(
             bots[0]["id"],
             bots[1]["id"],
             users[0]["id"],
             contest_id=cid,
             match_type="contest",
             game_id="holdem",
-            defer_start=True,
+            contest_pairing_id=pairing["id"],
         )
-        assert store.get_match(ghost_id)["status"] == "pending"
-        assert store.get_replay(ghost_id) is not None
+        request = store.executions.get(request_id)
+        assert request and request["status"] == "queued"
+        assert request["current_match_id"] is None
+        assert store.list_matches(contest_id=cid) == []
         assert store.list_contest_pairings(cid)[0]["match_id"] is None
 
-        replacement = _FakeOrch(store)
-        manager = ContestManager(store, replacement)  # type: ignore[arg-type]
-        await manager.reconcile_running_contests()
-
-        assert store.get_match(ghost_id) is None
-        assert store.get_replay(ghost_id) is None
-        assert store._conn.execute(
-            "SELECT 1 FROM matches_index WHERE id=?", (ghost_id,)
-        ).fetchone() is None
+        claimed = claim_request(old_orchestrator, request_id, start=False)
+        match_id = claimed["current_match_id"]
+        assert store.get_match(match_id)["status"] == "pending"
+        assert store.get_replay(match_id) is not None
         refreshed = store.list_contest_pairings(cid)[0]
         assert refreshed["id"] == pairing["id"]
-        assert refreshed["match_id"] and refreshed["match_id"] != ghost_id
+        assert refreshed["status"] == "running"
+        assert refreshed["match_id"] == match_id
         assert {row["id"] for row in store.list_matches(contest_id=cid)} == {
-            refreshed["match_id"]
+            match_id
         }
 
     asyncio.run(run())

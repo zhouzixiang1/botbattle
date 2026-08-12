@@ -8,7 +8,9 @@
  */
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
 import {
+  DataTable,
   Table,
   TableBody,
   TableCell,
@@ -19,22 +21,21 @@ import {
 import { Button } from '@/components/ui/button'
 import { StatusBadge } from '@/components/ui/status'
 import { fmtTime } from '@/lib/format'
+import type { MatchParticipantSource } from '@/lib/match-participants'
 import Pagination from '@/components/Pagination'
 
-export interface SchedulePairing {
+export interface SchedulePairing extends MatchParticipantSource {
   id: number
   round_num?: number
   bracket_slot?: number | null
-  bot_a_id: number
+  bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name?: string
-  bot_a_display?: string
-  bot_b_name?: string
-  bot_b_display?: string
+  is_bye?: boolean
   match_id?: string | null
   status?: string
   match_winner?: number | null
   scheduled_at?: string | null
+  group_id?: string | null
 }
 
 interface Props {
@@ -42,6 +43,14 @@ interface Props {
 }
 
 const PER_PAGE = 30
+
+function pairingResultLabel(pairing: SchedulePairing): string {
+  if (pairing.is_bye === true && pairing.status === 'completed') return '座位 1 轮空晋级'
+  if (pairing.status !== 'completed') return '赛果待定'
+  if (pairing.match_winner === 0) return '座位 1 胜'
+  if (pairing.match_winner === 1) return '座位 2 胜'
+  return '平局'
+}
 
 export default function ScheduleTable({ pairings }: Props) {
   const [page, setPage] = useState(1)
@@ -83,22 +92,57 @@ export default function ScheduleTable({ pairings }: Props) {
   }
 
   return (
-    <div className="overflow-x-auto">
-      <Table className="min-w-[40rem]">
+    <div className="min-w-0 space-y-2">
+      <div className="divide-y overflow-hidden rounded-lg border md:hidden" aria-label="赛事对阵一览表移动视图">
+        {pageRows.map(({ pairing: p, round }) => {
+          const isBye = p.is_bye === true
+          const aWin = (isBye && p.status === 'completed') || p.match_winner === 0
+          const bWin = !isBye && p.match_winner === 1
+          return (
+            <article key={p.id} data-testid="contest-schedule-mobile-card" className="space-y-2.5 p-3">
+              <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                <span className="font-mono font-semibold text-foreground">
+                  {p.group_id ? `${p.group_id} · ` : ''}R{round}
+                </span>
+                <span className="ml-auto text-muted-foreground">{p.scheduled_at ? fmtTime(p.scheduled_at) : '未定排期'}</span>
+              </header>
+              <div data-match-participants="true" className="grid min-w-0 gap-2">
+                <MatchParticipantIdentity source={p} side={0} variant="panel" state={aWin ? 'winner' : bWin ? 'loser' : 'neutral'} textLines={2} />
+                <MatchParticipantIdentity source={p} side={1} variant="panel" state={bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral'} emptyLabel={isBye ? '轮空 (bye)' : undefined} textLines={2} />
+              </div>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <StatusBadge status={p.status || 'pending'} />
+                <MatchNatureBadge matchType="contest" />
+                <span className="text-xs font-medium text-foreground">{pairingResultLabel(p)}</span>
+              </div>
+              {p.match_id ? (
+                <Button asChild variant="outline" size="sm" className="min-h-11 w-full text-primary">
+                  <Link to={`/match/${p.match_id}`}>查看对局</Link>
+                </Button>
+              ) : (
+                <div className="flex min-h-11 items-center justify-center rounded-md bg-muted/40 text-xs text-muted-foreground">尚未生成对局</div>
+              )}
+            </article>
+          )
+        })}
+      </div>
+      <div className="hidden md:block">
+        <DataTable scrollLabel="赛事对阵一览表">
+          <Table className="min-w-[40rem]" aria-label="赛事对阵一览表">
         <TableHeader>
           <TableRow>
             <TableHead className="w-16">轮次</TableHead>
             <TableHead className="min-w-[8rem]">座位 1</TableHead>
             <TableHead className="min-w-[8rem]">座位 2</TableHead>
             <TableHead className="w-36">排期时间</TableHead>
-            <TableHead className="w-24">状态</TableHead>
+            <TableHead className="w-28">状态 / 性质</TableHead>
             <TableHead className="w-16 text-right">查看</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {pageRows.map(({ pairing: p, round, isRoundStart }) => {
             const w = p.match_winner
-            const isBye = p.bot_b_id == null
+            const isBye = p.is_bye === true
             // 胜者着色：a 胜 → 座位1 高亮；b 胜 → 座位2 高亮（bye 时 a 自动晋级）
             const aWin = (isBye && p.status === 'completed') || w === 0
             const bWin = !isBye && w === 1
@@ -109,40 +153,32 @@ export default function ScheduleTable({ pairings }: Props) {
                   {isRoundStart ? `R${round}` : ''}
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
-                  <Link
-                    to={`/bot/${p.bot_a_id}`}
-                    title={p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`}
-                    className={`block truncate hover:text-primary ${
-                      aWin ? 'font-semibold text-success' : w === 1 ? 'text-muted-foreground' : 'text-foreground'
-                    }`}
-                  >
-                    {p.bot_a_display || p.bot_a_name || `#${p.bot_a_id}`}
-                  </Link>
+                  <MatchParticipantIdentity
+                    source={p}
+                    side={0}
+                    state={aWin ? 'winner' : bWin ? 'loser' : 'neutral'}
+                  />
                 </TableCell>
                 <TableCell className="max-w-[12rem]">
-                  {isBye ? (
-                    <span className="block truncate italic text-muted-foreground">轮空 (bye)</span>
-                  ) : (
-                    <Link
-                      to={`/bot/${p.bot_b_id}`}
-                      title={p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
-                      className={`block truncate hover:text-primary ${
-                        bWin ? 'font-semibold text-success' : w === 0 ? 'text-muted-foreground' : 'text-foreground'
-                      }`}
-                    >
-                      {p.bot_b_display || p.bot_b_name || `#${p.bot_b_id}`}
-                    </Link>
-                  )}
+                  <MatchParticipantIdentity
+                    source={p}
+                    side={1}
+                    state={bWin ? 'winner' : aWin && !isBye ? 'loser' : 'neutral'}
+                    emptyLabel={isBye ? '轮空 (bye)' : undefined}
+                  />
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                   {p.scheduled_at ? fmtTime(p.scheduled_at) : '—'}
                 </TableCell>
                 <TableCell>
-                  <StatusBadge status={p.status || 'pending'} />
+                  <div className="flex flex-col items-start gap-1">
+                    <StatusBadge status={p.status || 'pending'} />
+                    <MatchNatureBadge matchType="contest" />
+                  </div>
                 </TableCell>
                 <TableCell className="text-right">
                   {p.match_id ? (
-                    <Button asChild variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-primary">
+                    <Button asChild variant="ghost" size="xs" className="text-primary">
                       <Link to={`/match/${p.match_id}`}>查看</Link>
                     </Button>
                   ) : (
@@ -153,7 +189,9 @@ export default function ScheduleTable({ pairings }: Props) {
             )
           })}
         </TableBody>
-      </Table>
+          </Table>
+        </DataTable>
+      </div>
       <Pagination page={safePage} perPage={PER_PAGE} total={rows.length} onPageChange={setPage} />
     </div>
   )

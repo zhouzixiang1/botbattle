@@ -203,7 +203,7 @@ export default function OpponentPickerModal({
                             {tab === 'mine' && <Badge variant="outline" className="ml-2 text-[10px]">自博弈</Badge>}
                           </span>
                           <span className="text-xs text-muted-foreground">
-                            {b.owner_display || b.owner_name || `用户 #${b.owner_id}`}
+                            {b.owner_display || b.owner_name || '所属用户不可用'}
                           </span>
                         </button>
                       </li>

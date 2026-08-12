@@ -20,6 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from _execution_request import (
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
 from _qa_target import assert_qa_instance, qa_base
 
 BASE = qa_base()
@@ -104,6 +109,31 @@ def login_api(username: str, password: str) -> str | None:
         print(f"  login_api fail {username}: {code} {data}")
         return None
     return data.get("token")
+
+
+def execution_match_id(
+    token: str,
+    status: int,
+    payload: dict,
+    *,
+    label: str,
+    timeout: float = 120,
+) -> tuple[str, str]:
+    initial = require_execution_request(status, payload, label=label)
+
+    def fetch(public_id: str):
+        poll_status, poll_payload = api(
+            "GET", execution_request_path(public_id), token=token
+        )
+        return poll_status, poll_payload, str(poll_payload)[:240]
+
+    match_id = wait_for_execution_match(
+        initial,
+        fetch,
+        label=label,
+        timeout=timeout,
+    )
+    return str(initial["public_id"]), match_id
 
 
 def attach(page):
@@ -403,8 +433,18 @@ def main() -> int:
     )
     print(f"  challenge create: {code} {str(ch)[:120]}")
     live_match = None
-    if code in (200, 201):
-        live_match = str((ch.get("match") or ch).get("id") or ch.get("match_id") or "")
+    try:
+        public_id, live_match = execution_match_id(
+            utoken,
+            code,
+            ch,
+            label="用户旅程挑战",
+        )
+        print(
+            f"  challenge admitted: public_id={public_id} match_id={live_match}"
+        )
+    except Exception as exc:
+        print(f"  challenge queue failure: {exc}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)

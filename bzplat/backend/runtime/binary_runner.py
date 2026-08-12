@@ -7,12 +7,20 @@ import os
 import shutil
 import subprocess
 import threading
-import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from bzplat.backend.runtime.config import ACTION_TIMEOUT_SEC
+from bzplat.backend.runtime.docker_supervisor import (
+    CANONICAL_DOCKER_HOST,
+    DockerControlUncertain,
+    DockerExecutionIdentity,
+    DockerSupervisor,
+    docker_cli_environment,
+)
+from bzplat.backend.runtime.limits import MAX_BOT_RESPONSE_LINE_BYTES
 
 from ..bots.classify import (
     BinaryInfo,
@@ -40,6 +48,44 @@ _IMAGE_READY_KEYS: set[tuple[str, str]] = set()
 
 
 @dataclass
+class ExecutionScope:
+    """One durable job attempt shared by all of its Bot sessions."""
+
+    instance: str
+    job_public_id: str
+    attempt_no: int
+    supervisor: DockerSupervisor | None
+    attempt_check: Callable[[], None]
+    recovery_mark: Callable[[str], None] | None = None
+    cleanup_mark: Callable[[], None] | None = None
+    _next_slot: int = 0
+    _slot_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    @property
+    def identity(self) -> DockerExecutionIdentity:
+        return DockerExecutionIdentity(
+            self.instance, self.job_public_id, int(self.attempt_no)
+        )
+
+    def allocate_slot(self) -> int:
+        with self._slot_lock:
+            slot = self._next_slot
+            self._next_slot += 1
+            return slot
+
+    def assert_current(self) -> None:
+        self.attempt_check()
+
+    def mark_recovery_pending(self, reason: str) -> None:
+        if self.recovery_mark is not None:
+            self.recovery_mark(reason)
+
+    def mark_cleanup_confirmed(self) -> None:
+        if self.cleanup_mark is not None:
+            self.cleanup_mark()
+
+
+@dataclass
 class BotSession:
     session_id: str
     info: BinaryInfo
@@ -47,6 +93,8 @@ class BotSession:
     proc: asyncio.subprocess.Process | None = None
     mode: str = "docker"  # docker | local（local 仅 BZ_BOT_LOCAL 测试开关）
     container_name: str = ""
+    container_slot: int | None = None
+    launch_token: str = ""
     _buf: bytes = field(default_factory=bytes)
     _stderr_tail: bytearray = field(default_factory=bytearray)  # bot stderr 末尾（排查崩溃用）
     _stderr_task: asyncio.Task | None = None
@@ -56,6 +104,8 @@ class BotSession:
     responses: list = field(default_factory=list)  # 累积 Bot 响应负载（Traditional 信封 responses[]）
     turn: int = 0                                  # 已完成的回合数（0=首回合尚未握手判定）
     long_running: bool = False  # LongRunning Bot 首回合握手后置 True（之后发单 request 信封）
+    execution_scope: ExecutionScope | None = None
+    _preflight_permit_held: bool = False
     def start_stderr_drain(self) -> None:
         """异步读取 bot stderr 到尾部缓冲（保留末尾 4KB，排查崩溃）。"""
         proc = self.proc
@@ -96,12 +146,20 @@ class BotCrashedError(RuntimeError):
         self.crashed_seat = crashed_seat
 
 
+class BotResponseLineTooLargeError(RuntimeError):
+    """Bot stdout 在传输层超过单行硬顶；runner 将其归责为协议故障。"""
+
+
 class PlatformRunnerError(RuntimeError):
     """Sandbox/container infrastructure failed before the Bot could be judged.
 
     This must never be converted into a Bot technical loss: Docker daemon/image/
     invocation failures are platform faults and therefore abort without rating.
     """
+
+
+class SandboxControlUncertain(PlatformRunnerError):
+    """A Docker create/inspect/rm acknowledgement is not trustworthy."""
 
 
 def _docker_control_command(
@@ -115,6 +173,8 @@ def _docker_control_command(
     The caller executes this synchronous helper through ``asyncio.to_thread``.
     Raw registry/daemon stderr is intentionally not returned in public errors.
     """
+    if len(args) >= 2 and args[1] != "--host":
+        args = [args[0], "--host", CANONICAL_DOCKER_HOST, *args[1:]]
     try:
         return subprocess.run(
             args,
@@ -125,6 +185,7 @@ def _docker_control_command(
             errors="replace",
             timeout=timeout,
             check=False,
+            env=docker_cli_environment(),
         )
     except subprocess.TimeoutExpired as exc:
         logger.error(
@@ -318,6 +379,11 @@ class BinaryRunner:
         prefer_local: bool | None = None,
         linux_image: str | None = None,
         image_prepare_timeout: float = DEFAULT_IMAGE_PREPARE_TIMEOUT,
+        db_path: str | Path | None = None,
+        instance_key: str | None = None,
+        docker_uncertain_callback: Callable[[str], None] | None = None,
+        supervisor: DockerSupervisor | None = None,
+        preflight_gate: threading.BoundedSemaphore | None = None,
     ) -> None:
         self._docker_bin = docker_bin
         self._sessions: dict[str, BotSession] = {}
@@ -325,13 +391,35 @@ class BinaryRunner:
         if prefer_local is None:
             prefer_local = os.environ.get("BZ_BOT_LOCAL", "").lower() in ("1", "true", "yes")
         self._prefer_local = prefer_local
+        self._docker_uncertain_callback = docker_uncertain_callback
+        self._preflight_gate = preflight_gate
         self._docker_ok = shutil.which(docker_bin) is not None
+        self.supervisor: DockerSupervisor | None = supervisor
+        if not self._prefer_local:
+            if self.supervisor is None:
+                self.supervisor = DockerSupervisor(
+                    db_path=db_path or os.environ.get("BZ_DB_PATH", "botzone.db"),
+                    docker_bin=docker_bin,
+                    instance_key=instance_key,
+                )
+            self._docker_ok = True
+        elif supervisor is not None:
+            raise ValueError("local runner cannot own a Docker supervisor")
         self._linux_image = (
             linux_image
-            or os.environ.get("BZ_LINUX_BOT_IMAGE", "").strip()
             or DEFAULT_LINUX_IMAGE
         )
         self._image_prepare_timeout = max(0.001, float(image_prepare_timeout))
+
+    def _mark_unscoped_docker_uncertain(self, reason: str) -> None:
+        """Pause the shared dispatcher for preflight/control uncertainty."""
+        callback = getattr(self, "_docker_uncertain_callback", None)
+        if callback is None:
+            return
+        try:
+            callback(reason)
+        except Exception:
+            logger.exception("failed to persist Docker uncertainty pause")
 
     def _new_session(
         self,
@@ -339,8 +427,11 @@ class BinaryRunner:
         *,
         info: BinaryInfo | None,
         runtime_mode: str,
+        execution_scope: ExecutionScope | None = None,
     ) -> BotSession:
         """校验二进制并创建逻辑会话；不启动进程。"""
+        if execution_scope is not None:
+            execution_scope.assert_current()
         if runtime_mode not in VALID_RUNTIME_MODES:
             raise ValueError(f"未知运行模式: {runtime_mode}")
         path = Path(binary_path).resolve()
@@ -362,7 +453,7 @@ class BinaryRunner:
         mode = self._select_mode(info)
         session = BotSession(
             session_id=sid, info=info, binary_path=path, mode=mode,
-            runtime_mode=runtime_mode,
+            runtime_mode=runtime_mode, execution_scope=execution_scope,
         )
         return session
 
@@ -372,6 +463,7 @@ class BinaryRunner:
         *,
         info: BinaryInfo | None = None,
         runtime_mode: str = DEFAULT_RUNTIME_MODE,
+        execution_scope: ExecutionScope | None = None,
     ) -> str:
         """只登记 Traditional 的历史状态，不启动整场闲置 Bot 进程。"""
         if runtime_mode != DEFAULT_RUNTIME_MODE:
@@ -380,6 +472,7 @@ class BinaryRunner:
             binary_path,
             info=info,
             runtime_mode=runtime_mode,
+            execution_scope=execution_scope,
         )
         if session.mode == "docker":
             # Traditional 的逻辑会话在游戏 Session/棋钟启动前建立；此处完成
@@ -396,23 +489,30 @@ class BinaryRunner:
     async def start_session(self, binary_path: str | Path, *,
                             info: BinaryInfo | None = None,
                             action_timeout: float = DEFAULT_ACTION_TIMEOUT,
-                            runtime_mode: str = DEFAULT_RUNTIME_MODE) -> str:
+                            runtime_mode: str = DEFAULT_RUNTIME_MODE,
+                            execution_scope: ExecutionScope | None = None) -> str:
         session = self._new_session(
             binary_path,
             info=info,
             runtime_mode=runtime_mode,
+            execution_scope=execution_scope,
         )
         sid = session.session_id
         mode = session.mode
         try:
-            if mode == "local":
-                await self._start_local(session)
-            else:
+            if mode == "docker":
                 # 镜像 inspect/pull 属于平台准备阶段，必须先于 Bot 响应计时；
                 # ``docker run --pull=never`` 再保证计时窗口内不会隐式拉镜像。
                 await self.ensure_runtime_ready()
+            if execution_scope is not None:
+                execution_scope.assert_current()
+            if mode == "local":
+                await self._start_local(session)
+            else:
+                await self._acquire_preflight_permit(session)
                 await self._start_docker(session)
         except OSError as exc:
+            self._release_preflight_permit(session)
             if mode == "docker":
                 # Host process/resource failures while invoking the sandbox are
                 # platform faults.  Do not expose absolute paths from OSError to
@@ -421,6 +521,9 @@ class BinaryRunner:
                     f"无法启动 {mode} 沙箱（{type(exc).__name__}）"
                 ) from exc
             raise
+        except BaseException:
+            self._release_preflight_permit(session)
+            raise
         session.start_stderr_drain()
         logger.info(
             "bot session started sid=%s mode=%s path=%s fmt=%s/%s-%s",
@@ -428,6 +531,47 @@ class BinaryRunner:
         )
         self._sessions[sid] = session
         return sid
+
+    async def _acquire_preflight_permit(self, session: BotSession) -> None:
+        """Bound unscoped upload preflight across worker event loops.
+
+        The platform owns one process per DB (dispatcher flock), while upload
+        validation may run in several worker threads/event loops.  A
+        ``threading.BoundedSemaphore`` is therefore the correct small boundary:
+        at most one extra untrusted preflight container may coexist with the
+        execution queue.  Job-scoped sessions already consume the durable
+        execution capacity and never acquire this dedicated lane.
+        """
+        gate = self._preflight_gate
+        if (
+            gate is None
+            or session.mode != "docker"
+            or session.execution_scope is not None
+            or session._preflight_permit_held
+        ):
+            return
+        acquire = asyncio.create_task(
+            asyncio.to_thread(gate.acquire),
+            name=f"preflight-admission-{session.session_id}",
+        )
+        cancelled = False
+        while not acquire.done():
+            try:
+                await asyncio.shield(acquire)
+            except asyncio.CancelledError:
+                cancelled = True
+        acquire.result()
+        if cancelled:
+            gate.release()
+            raise asyncio.CancelledError
+        session._preflight_permit_held = True
+
+    def _release_preflight_permit(self, session: BotSession) -> None:
+        gate = self._preflight_gate
+        if gate is None or not session._preflight_permit_held:
+            return
+        session._preflight_permit_held = False
+        gate.release()
 
     async def _ensure_linux_image_ready(self) -> None:
         await asyncio.to_thread(
@@ -448,7 +592,11 @@ class BinaryRunner:
             return
         if not self._docker_ok:
             raise PlatformRunnerError("Linux x86_64 ELF bot 需要 Docker 沙箱")
-        await self._ensure_linux_image_ready()
+        try:
+            await self._ensure_linux_image_ready()
+        except PlatformRunnerError as exc:
+            self._mark_unscoped_docker_uncertain(str(exc))
+            raise
 
     def _select_mode(self, info: BinaryInfo) -> str:
         require_supported_binary(info)
@@ -469,53 +617,114 @@ class BinaryRunner:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
+            # 多留一个字节容纳合法上限后的换行；超限时 readline 会抛
+            # ValueError，由 send/read_extra_line 转成不携带原文的类型错误。
+            limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
         )
 
     async def _start_docker(self, session: BotSession) -> None:
-        name = f"bzbot-{session.session_id}"
-        session.container_name = name
-        # 确保二进制可执行（Docker 只读挂载 -v path:/app/bot:ro 不经 _start_local 的 chmod；
-        # 若文件缺 exec 位 → exit 126 permission denied）。防御性补权限。
+        """Create, label, inspect and start one deterministic local container."""
+        supervisor = self.supervisor
+        if supervisor is None:
+            raise PlatformRunnerError("Docker supervisor 未配置")
+        scope = session.execution_scope
+        if scope is not None:
+            scope.assert_current()
+            identity = scope.identity
+            slot = scope.allocate_slot()
+        else:
+            identity = DockerExecutionIdentity(
+                supervisor.instance, f"preflight-{session.session_id}", 1
+            )
+            slot = 0
+        session.container_slot = slot
+        owner_kind = "execution" if scope is not None else "preflight"
+        session.launch_token = uuid.uuid4().hex
         try:
             session.binary_path.chmod(session.binary_path.stat().st_mode | 0o111)
         except (OSError, PermissionError):
-            pass  # 只读挂载/权限不足时忽略（本机路径通常可改）
-        cmd = [
-            self._docker_bin, "run", "-i", "--rm",
-            "--pull=never",
-            "--name", name,
-            "--network=none",
-            f"--memory={DEFAULT_MEMORY}",
-            f"--cpus={DEFAULT_CPUS}",
-            "--read-only",
-            # /tmp 需可执行：PyInstaller 解压运行、动态链接 ELF 的 ld.so 延迟绑定都依赖 /tmp exec。
-            # noexec 会导致 libz.so.1 等 .so 映射失败（exit 127），Bot 启动即崩。
-            "--tmpfs", "/tmp:rw,exec,nosuid,size=64m",
-            "--cap-drop=ALL",
-            "--security-opt", "no-new-privileges",
-            "--user", "65534:65534",
-            "--platform", "linux/amd64",
-            "-v", f"{session.binary_path}:/app/bot:ro",
-            "--workdir", "/app",
-            # 忽略自定义镜像自带的 Entrypoint/CMD，直接执行经文件头闸门
-            # 校验的挂载 ELF；镜像只提供 Linux 用户态/动态链接环境。
-            "--entrypoint", "/app/bot",
-            self._linux_image,
-        ]
-        session.proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=1024 * 1024,
-        )
+            pass
+        try:
+            async with supervisor.launch_guard():
+                # ``to_thread`` cancellation does not stop the worker. Shield and
+                # drain it before propagating cancellation; the durable intent
+                # remains authoritative even if daemon acknowledgement is lost.
+                create_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        supervisor.create,
+                        identity=identity,
+                        slot=slot,
+                        launch_token=session.launch_token,
+                        owner_kind=owner_kind,
+                        binary_path=session.binary_path,
+                        image=self._linux_image,
+                        memory=DEFAULT_MEMORY,
+                        cpus=DEFAULT_CPUS,
+                    ),
+                    name=f"docker-create-{session.session_id}",
+                )
+                try:
+                    session.container_name = await asyncio.shield(create_task)
+                except asyncio.CancelledError:
+                    try:
+                        session.container_name = await create_task
+                    except DockerControlUncertain as exc:
+                        reason = str(exc)
+                        if scope is not None:
+                            scope.mark_recovery_pending(reason)
+                        else:
+                            self._mark_unscoped_docker_uncertain(reason)
+                    else:
+                        reason = "Docker create 已确认但调用方取消；等待精确清理"
+                        if scope is not None:
+                            scope.mark_recovery_pending(reason)
+                        else:
+                            self._mark_unscoped_docker_uncertain(reason)
+                    raise
+                if scope is not None:
+                    scope.assert_current()
+                start_task = asyncio.create_task(
+                    supervisor.start_attached(
+                        session.container_name,
+                        stream_limit=MAX_BOT_RESPONSE_LINE_BYTES + 1,
+                        launch_token=session.launch_token,
+                    ),
+                    name=f"docker-start-{session.session_id}",
+                )
+                try:
+                    session.proc = await asyncio.shield(start_task)
+                except asyncio.CancelledError:
+                    start_task.cancel()
+                    reason = "Docker start 期间调用方取消；等待精确清理"
+                    try:
+                        attached = await start_task
+                    except asyncio.CancelledError:
+                        attached = None
+                    except DockerControlUncertain as exc:
+                        reason = str(exc)
+                        attached = None
+                    if attached is not None:
+                        await supervisor._terminate_control_process(attached)
+                    if scope is not None:
+                        scope.mark_recovery_pending(reason)
+                    else:
+                        self._mark_unscoped_docker_uncertain(reason)
+                    raise
+        except DockerControlUncertain as exc:
+            reason = str(exc)
+            if scope is not None:
+                scope.mark_recovery_pending(reason)
+            else:
+                self._mark_unscoped_docker_uncertain(reason)
+            raise SandboxControlUncertain(reason) from exc
 
     async def send(self, session_id: str, line: str, *,
                    timeout: float = DEFAULT_ACTION_TIMEOUT) -> str:
         session = self._sessions.get(session_id)
         if not session or not session.proc or not session.proc.stdin or not session.proc.stdout:
             raise RuntimeError(f"session {session_id} 不可用")
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         if not line.endswith("\n"):
             line = line + "\n"
         try:
@@ -531,8 +740,14 @@ class BinaryRunner:
             # match/bot/version/runtime/seat/turn after this typed timeout propagates.
             logger.warning("bot session %s 决策超时 (%ss)", session_id, timeout)
             raise TimeoutError(f"bot {session_id} 决策超时 ({timeout}s)")
+        except ValueError as exc:
+            # StreamReader.readline 将 LimitOverrunError 规范化为 ValueError。
+            # 不记录 Bot 控制的原始 stdout，也不把它误判成平台故障。
+            raise BotResponseLineTooLargeError("Bot stdout 响应行超过硬顶") from exc
         if not raw:
             raise await self._process_exit_error(session, "stdout EOF")
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         return raw.decode("utf-8", errors="replace").rstrip("\r\n")
 
     async def _process_exit_error(
@@ -565,22 +780,11 @@ class BinaryRunner:
             returncode,
             tail[:500],
         )
-        platform_reason = _classify_container_platform_exit(
-            mode=session.mode,
-            returncode=returncode,
-        )
-        if platform_reason is not None:
-            # ``--pull=never`` makes a concurrently removed image fail fast as
-            # docker exit 125.  Invalidate the readiness cache so the next
-            # attempt can inspect/pull again outside the Bot decision clock.
-            await asyncio.to_thread(
-                _invalidate_linux_image_ready_sync,
-                self._docker_bin,
-                self._linux_image,
-            )
-            return PlatformRunnerError(
-                f"sandbox 启动失败（{platform_reason}）"
-            )
+        # Docker control failures are rejected by ``start_attached`` before it
+        # returns a process. Once a non-zero daemon StartedAt has been proved,
+        # ``docker start -a`` forwards the container's exit status; even 125 is
+        # therefore Bot-attributable and must not pause the platform or evade a
+        # rated result.
         return BotCrashedError(
             f"bot {session.session_id} {context}（进程退出码={returncode}）"
         )
@@ -595,54 +799,124 @@ class BinaryRunner:
         session = self._sessions.get(session_id)
         if not session or not session.proc or not session.proc.stdout:
             return None
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         try:
             raw = await asyncio.wait_for(session.proc.stdout.readline(), timeout=timeout)
         except asyncio.TimeoutError:
             return None
+        except ValueError as exc:
+            raise BotResponseLineTooLargeError("Bot stdout 握手行超过硬顶") from exc
         if not raw:
             return None
+        if session.execution_scope is not None:
+            session.execution_scope.assert_current()
         return raw.decode("utf-8", errors="replace").rstrip("\r\n") or None
 
     async def stop_session(self, session_id: str) -> None:
-        session = self._sessions.pop(session_id, None)
-        if not session:
+        """Stop one transport and remove its exact physical container."""
+        session = self._sessions.get(session_id)
+        if session is None:
             return
-        # 取消 stderr drain 任务
-        if session._stderr_task is not None:
-            session._stderr_task.cancel()
-        proc = session.proc
-        if proc and proc.returncode is None:
-            try:
-                if proc.stdin:
-                    proc.stdin.close()
-            except Exception:
-                pass
-            try:
-                proc.terminate()
+        try:
+            if session._stderr_task is not None:
+                session._stderr_task.cancel()
+            proc = session.proc
+            if proc is not None and proc.returncode is None:
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-            except ProcessLookupError:
-                pass
-        if session.container_name and self._docker_ok:
-            try:
-                await asyncio.create_subprocess_exec(
-                    self._docker_bin, "rm", "-f", session.container_name,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-            except Exception:
-                logger.debug("docker rm failed", exc_info=True)
+                    if proc.stdin is not None:
+                        proc.stdin.close()
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=3)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+                except ProcessLookupError:
+                    pass
+            if session.container_name:
+                scope = session.execution_scope
+                supervisor = self.supervisor
+                if supervisor is None:
+                    reason = "Docker supervisor 未配置，无法确认单会话清理"
+                    if scope is not None:
+                        scope.mark_recovery_pending(reason)
+                    else:
+                        self._mark_unscoped_docker_uncertain(reason)
+                    raise SandboxControlUncertain(reason)
+                try:
+                    if scope is not None:
+                        if session.container_slot is None or not session.launch_token:
+                            raise DockerControlUncertain(
+                                "Docker 会话缺少精确清理身份"
+                            )
+                        # Traditional 每回合都是一个物理会话；只停
+                        # ``docker start -a`` 会留下 running/stopped 容器。
+                        # 用该 session 的 slot/name/launch token 立即定向删除，
+                        # 不能调用 cleanup_job 误删同局 LongRunning 座位。
+                        await supervisor.cleanup_session(
+                            scope.identity,
+                            slot=session.container_slot,
+                            name=session.container_name,
+                            launch_token=session.launch_token,
+                        )
+                    else:
+                        # Unscoped preflight owns its one-job namespace here.
+                        # Its launch journal may still need the broader cleanup
+                        # path when create/start acknowledgement was uncertain.
+                        await supervisor.cleanup_job(
+                            DockerExecutionIdentity(
+                                supervisor.instance,
+                                f"preflight-{session.session_id}",
+                                1,
+                            )
+                        )
+                except DockerControlUncertain as exc:
+                    reason = str(exc)
+                    if scope is not None:
+                        scope.mark_recovery_pending(reason)
+                    else:
+                        self._mark_unscoped_docker_uncertain(reason)
+                    raise SandboxControlUncertain(reason) from exc
+        finally:
+            # An uncertain cleanup has already paused the dispatcher/journal,
+            # which gates every later create.  Release the in-process lane so a
+            # successful administrator namespace recovery does not leave a
+            # permanently leaked semaphore token.
+            self._release_preflight_permit(session)
+        self._sessions.pop(session_id, None)
 
+    async def cleanup_execution(self, scope: ExecutionScope) -> None:
+        """Remove one exact job attempt and prove its labels are zero."""
+        matching = [
+            sid
+            for sid, session in list(self._sessions.items())
+            if session.execution_scope is scope
+        ]
+        for sid in matching:
+            await self.stop_session(sid)
+        if self._prefer_local:
+            scope.mark_cleanup_confirmed()
+            return
+        supervisor = scope.supervisor or self.supervisor
+        if supervisor is None:
+            reason = "Docker supervisor 未配置，无法确认清理"
+            scope.mark_recovery_pending(reason)
+            raise SandboxControlUncertain(reason)
+        try:
+            await supervisor.cleanup_job(scope.identity)
+        except DockerControlUncertain as exc:
+            reason = str(exc)
+            scope.mark_recovery_pending(reason)
+            raise SandboxControlUncertain(reason) from exc
+        scope.mark_cleanup_confirmed()
 
-def _classify_container_platform_exit(
-    *,
-    mode: str,
-    returncode: int | None,
-) -> str | None:
-    """Docker exit 125 is infrastructure; all other exits belong to the Bot."""
-    if mode == "docker" and returncode == 125:
-        return "docker exit 125"
-    return None
+    async def cleanup_instance(self) -> None:
+        if self._prefer_local:
+            return
+        if self.supervisor is None:
+            raise SandboxControlUncertain("Docker supervisor 未配置")
+        try:
+            await self.supervisor.cleanup_instance()
+        except DockerControlUncertain as exc:
+            raise SandboxControlUncertain(str(exc)) from exc

@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from bzplat.backend.api_routes import _public_contest_pairings
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
@@ -11,6 +12,30 @@ from bzplat.backend.store import Store
 
 def _store(tmp_path) -> Store:
     return Store(str(tmp_path / "cb.db"))
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({}, True),
+        ({"entry_b_id": 17}, False),
+        ({"bot_b_id": 23}, False),
+        ({"match_id": "historical-match"}, False),
+        ({"status": "pending"}, False),
+    ],
+)
+def test_public_pairing_bye_requires_all_four_authoritative_conditions(
+    override, expected
+):
+    row = {
+        "id": 1,
+        "entry_b_id": None,
+        "bot_b_id": None,
+        "match_id": None,
+        "status": "completed",
+        **override,
+    }
+    assert _public_contest_pairings([row])[0]["is_bye"] is expected
 
 
 def test_contest_bracket_resolves_names(tmp_path):
@@ -132,11 +157,124 @@ def test_bracket_endpoint_and_detail_named(tmp_path):
     c.post(f"/api/contests/{cid}/open", headers=h)
     c.post(f"/api/contests/{cid}/register", json={"bot_id": b1["id"]}, headers=ah)
     c.post(f"/api/contests/{cid}/register", json={"bot_id": b2["id"]}, headers=bh)
-    # bracket 端点（无对阵也应有报名）
+    normal_pairing = store.add_pairing(
+        cid, b1["id"], b2["id"], stage_key="rr",
+        entry_a_id=store.get_entry(cid, u1["id"])["id"],
+        entry_b_id=store.get_entry(cid, u2["id"])["id"],
+        bot_a_version_id=101, bot_b_version_id=102, pairing_seed=777,
+    )
+    bye_pairing = store.add_pairing(
+        cid, b1["id"], None, stage_key="rr", status="completed",
+        entry_a_id=store.get_entry(cid, u1["id"])["id"],
+    )
+    # detail 与 bracket 端点使用同一公开参赛者契约。
     r = c.get(f"/api/contests/{cid}/bracket")
     assert r.status_code == 200 and "pairings" in r.json()
+    bracket_rows = {row["id"]: row for row in r.json()["pairings"]}
+    bracket_pairing = bracket_rows[normal_pairing["id"]]
+    public_pairing_fields = {
+        "id", "round_num", "bot_a_id", "bot_b_id", "scheduled_at",
+        "match_id", "status", "stage_idx", "stage_key", "group_id",
+        "bracket_slot", "bot_a_name", "bot_a_display", "bot_b_name",
+        "bot_b_display", "owner_a_name", "owner_a_display",
+        "owner_b_name", "owner_b_display", "match_winner", "is_bye",
+    }
+    assert set(bracket_pairing) <= public_pairing_fields
+    assert bracket_pairing["owner_a_name"] == "alice"
+    assert bracket_pairing["owner_b_name"] == "bob"
+    for internal in (
+        "contest_id", "entry_a_id", "entry_b_id", "bot_a_version_id",
+        "bot_b_version_id", "pairing_seed", "published_at", "color_first",
+    ):
+        assert internal not in bracket_pairing
+    assert bracket_rows[bye_pairing["id"]]["is_bye"] is True
     # detail 含 named entries
     r = c.get(f"/api/contests/{cid}")
     ents = r.json()["entries"]
     assert len(ents) >= 2, f"entries={len(ents)}"
     assert "bot_name" in ents[0]
+    detail_rows = {row["id"]: row for row in r.json()["pairings"]}
+    detail_pairing = detail_rows[normal_pairing["id"]]
+    assert detail_pairing["owner_a_name"] == "alice"
+    assert detail_pairing["owner_b_name"] == "bob"
+    assert detail_pairing["is_bye"] is False
+    # 公开 pairings 会裁掉 entry ids，但内部阶段读模型仍须用原始关联键，
+    # 否则阶段排名会把真实参赛者全部过滤为空。
+    stage_rows = [
+        row
+        for stage in r.json()["stage_standings"]
+        for row in stage["rows"]
+    ]
+    assert {row["owner_name"] for row in stage_rows} == {"alice", "bob"}
+
+    # 低层历史清理会把 bot_b_id SET NULL，但 entry 身份仍在；公开层不能把
+    # 这种历史误报成轮空，也应尽量从 entry 恢复所属用户。
+    assert store.delete_bot(b2["id"])
+    deleted_rows = {
+        row["id"]: row
+        for row in c.get(f"/api/contests/{cid}/bracket").json()["pairings"]
+    }
+    deleted_bot_pairing = deleted_rows[normal_pairing["id"]]
+    assert deleted_bot_pairing["bot_b_id"] is None
+    assert deleted_bot_pairing["is_bye"] is False
+    assert deleted_bot_pairing["owner_b_name"] == "bob"
+
+
+def test_legacy_pairing_recovers_unique_entries_without_guessing_bye(tmp_path):
+    """旧 pairing 无 entry ids 时只读恢复唯一报名身份，双 Bot 不误报轮空。"""
+    app = create_app(db_path=str(tmp_path / "legacy-pairing.db"))
+    store = app.state.store
+    organizer = store.create_user("legacy-org", "lo@example.com", "hash", role="organizer")
+    alice = store.create_user("legacy-alice", "la@example.com", "hash")
+    bob = store.create_user("legacy-bob", "lb@example.com", "hash")
+    bot_a = store.create_bot(alice["id"], "legacy-a", binary_path="/tmp", format="elf", game_id="holdem")
+    bot_b = store.create_bot(bob["id"], "legacy-b", binary_path="/tmp", format="elf", game_id="holdem")
+    contest = store.create_contest(
+        "Legacy", organizer_id=organizer["id"], game_id="holdem",
+        stages_json='[{"key":"rr","type":"round_robin","scoring":"poker_3_1_0"}]',
+    )
+    store.update_contest(contest["id"], status="open")
+    store.add_entry(contest["id"], alice["id"], bot_a["id"])
+    store.add_entry(contest["id"], bob["id"], bot_b["id"])
+    pairing = store.add_pairing(
+        contest["id"], bot_a["id"], bot_b["id"], stage_key="rr",
+        entry_a_id=None, entry_b_id=None,
+    )
+    match_id = "legacy-completed-pairing"
+    store.create_match(
+        match_id, bot_a["id"], bot_b["id"], game_id="holdem",
+        contest_id=contest["id"], match_type="contest",
+    )
+    store.update_match(
+        match_id, status="completed", winner=1, reason="completed",
+        result={"rounds_played": 1, "deltas": [-5, 5], "normalized_delta": -0.05},
+    )
+    store.update_contest_pairing(pairing["id"], match_id=match_id, status="completed")
+
+    response = TestClient(app).get(f"/api/contests/{contest['id']}")
+    assert response.status_code == 200
+    public = next(row for row in response.json()["pairings"] if row["id"] == pairing["id"])
+    assert public["is_bye"] is False
+    stage_rows = response.json()["stage_standings"][0]["rows"]
+    assert {row["owner_name"] for row in stage_rows} == {"legacy-alice", "legacy-bob"}
+    live_points = {row["owner_name"]: row["points"] for row in stage_rows}
+    assert live_points == {"legacy-alice": 0.0, "legacy-bob": 3.0}
+
+    # 旧阶段快照同样可能只有 bot_id；唯一报名映射须在读边界恢复 entry_id。
+    with store._tx() as conn:
+        conn.executemany(
+            "INSERT INTO contest_stage_results("
+            "contest_id,stage_idx,stage_key,entry_id,bot_id,points,wins,draws,"
+            "losses,delta_total,group_id,payload_json) "
+            "VALUES(?,0,'rr',NULL,?,?,?,?,?,?, '', '{}')",
+            [
+                (contest["id"], bot_a["id"], 7.0, 2, 1, 0, 12),
+                (contest["id"], bot_b["id"], 4.0, 1, 1, 1, -12),
+            ],
+        )
+    persisted = TestClient(app).get(f"/api/contests/{contest['id']}").json()
+    persisted_rows = persisted["stage_standings"][0]["rows"]
+    assert {row["owner_name"]: row["points"] for row in persisted_rows} == {
+        "legacy-alice": 7.0,
+        "legacy-bob": 4.0,
+    }

@@ -2,17 +2,32 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
 import re
+from collections.abc import AsyncIterator, Awaitable
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+import anyio
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
+from starlette.datastructures import FormData, UploadFile
 
+from bzplat.backend.auth.auth_manager import COOKIE_NAME
 from bzplat.backend.auth.dependencies import (
     _extract_token,
     optional_user,
@@ -20,10 +35,22 @@ from bzplat.backend.auth.dependencies import (
     require_organizer,
     require_user,
 )
-from bzplat.backend.security import audit_log
+from bzplat.backend.security import audit_log, websocket_origin_allowed
 from bzplat.backend.bots import BotError, BotManager
+from bzplat.backend.bots.manager import MAX_BYTES
 
 logger = logging.getLogger(__name__)
+_DEBUG_NO_STORE_HEADERS = {
+    "Cache-Control": "private, no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Vary": "Authorization, Cookie",
+}
+_ADMIN_PRIVATE_HEADERS = {
+    "Cache-Control": "private, no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Vary": "Authorization, Cookie",
+    "Referrer-Policy": "no-referrer",
+}
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.presentation import build_stage_summaries
 from bzplat.backend.contests.showcase import (
@@ -34,13 +61,14 @@ from bzplat.backend.contests.showcase import (
 )
 from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.games import registry as game_registry
-from bzplat.backend.matches import BotCapacityError, MatchOrchestrator
+from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
-    AUTO_MATCH_CONFIG,
+    BOT_UPLOAD_ADMISSION_WAIT_SEC,
     CONFIGURATION_SOURCE,
     CONTEST_SCHEDULER_CONFIG,
     FULL_RR_MAX_N,
+    RANKING_MIN_RATED_MATCHES,
 )
 from bzplat.backend.runtime.limits import (
     BOT_CPUS,
@@ -49,6 +77,10 @@ from bzplat.backend.runtime.limits import (
     cpu_count,
 )
 from bzplat.backend.runtime.binary_runner import PlatformRunnerError
+from bzplat.backend.store.execution import (
+    ExecutionIdempotencyConflict,
+    ExecutionQueueClosed,
+)
 from bzplat.backend.store.schema import (
     COMMENT_TARGET_TYPES,
     CONTEST_CANCELLED,
@@ -59,6 +91,8 @@ from bzplat.backend.store.schema import (
     CONTEST_REST,
     CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
+    EXECUTION_SOURCE_HUMAN,
+    EXECUTION_SOURCE_MANUAL,
     LIKE_TARGET_TYPES,
     ROLE_ADMIN,
     ROLE_ORGANIZER,
@@ -69,6 +103,171 @@ from bzplat.backend.store.schema import (
 )
 from bzplat.backend.store.public_contract import sanitize_public_match
 router = APIRouter()
+_T = TypeVar("_T")
+_BINARY_FILE_SCHEMA = {"type": "string", "format": "binary"}
+_BOT_CREATE_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["name", "file"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "display_name": {"type": "string", "default": ""},
+                        "description": {"type": "string", "default": ""},
+                        "upload_note": {"type": "string", "default": ""},
+                        "game_id": {"type": "string", "default": "holdem"},
+                        "runtime_mode": {
+                            "type": "string",
+                            "default": DEFAULT_RUNTIME_MODE,
+                        },
+                        "file": _BINARY_FILE_SCHEMA,
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "400": {"description": "Bot 文件或参数无效，或预检失败"},
+        "401": {"description": "未登录或会话过期"},
+        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "503": {"description": "上传槽繁忙或沙箱暂不可用"},
+    },
+}
+_BOT_VERSION_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "upload_note": {"type": "string", "default": ""},
+                        "runtime_mode": {"type": "string", "default": ""},
+                        "file": _BINARY_FILE_SCHEMA,
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "400": {"description": "Bot 文件或参数无效，或预检失败"},
+        "401": {"description": "未登录或会话过期"},
+        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "503": {"description": "上传槽繁忙或沙箱暂不可用"},
+    },
+}
+
+
+class _BotUploadBusy(Exception):
+    """The one global upload/preflight lane did not open in time."""
+
+
+async def _finish_upload_step_before_cancel(awaitable: Awaitable[_T]) -> _T:
+    """Keep admission held until a started file/thread operation really ends.
+
+    Cancelling ``asyncio.to_thread`` only cancels its asyncio wrapper; the worker
+    keeps running.  Releasing the global upload permit at that point would allow
+    another request to retain/write a second payload while the first preflight is
+    still active.  Shield and drain the task, then propagate cancellation.
+    """
+
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if task.cancelled():
+            raise
+        # Starlette/AnyIO cancellation scopes are level-triggered: merely
+        # catching CancelledError and awaiting again can spin until the worker
+        # ends, starving the event loop and defeating bounded admission waits.
+        # Shield this short drain so other requests keep making progress while
+        # the already-started file/thread operation converges.
+        with anyio.CancelScope(shield=True):
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        raise
+                except BaseException:
+                    break
+            try:
+                task.result()
+            except BaseException:
+                pass
+        raise
+    except BaseException:
+        return task.result()
+
+
+@asynccontextmanager
+async def _bot_upload_admission(request: Request) -> AsyncIterator[None]:
+    """Acquire the process-wide upload lane with bounded, cancel-safe waiting."""
+
+    gate = getattr(request.app.state, "bot_upload_gate", None)
+    if gate is None:
+        raise _BotUploadBusy
+    acquired = False
+    try:
+        await asyncio.wait_for(
+            gate.acquire(), timeout=BOT_UPLOAD_ADMISSION_WAIT_SEC
+        )
+        acquired = True
+    except TimeoutError:
+        raise _BotUploadBusy
+    try:
+        yield
+    finally:
+        if acquired:
+            gate.release()
+
+
+def _multipart_text(
+    form: FormData,
+    key: str,
+    *,
+    default: str = "",
+    required: bool = False,
+) -> str:
+    value = form.get(key)
+    if isinstance(value, str):
+        return value
+    if not required and value is None:
+        return default
+    raise HTTPException(422, detail=f"multipart 字段 {key} 缺失或类型错误")
+
+
+def _multipart_file(form: FormData) -> UploadFile:
+    value = form.get("file")
+    if isinstance(value, UploadFile):
+        return value
+    raise HTTPException(422, detail="multipart 文件字段 file 缺失或类型错误")
+
+
+async def _read_bot_upload(file: UploadFile) -> bytes:
+    """Read at most the supported limit plus one sentinel byte."""
+
+    raw = await _finish_upload_step_before_cancel(file.read(MAX_BYTES + 1))
+    if not raw or len(raw) > MAX_BYTES:
+        raise BotError("invalid_size", f"二进制大小须 1..{MAX_BYTES} 字节")
+    return raw
+
+
+def _upload_busy_error() -> HTTPException:
+    return HTTPException(
+        503,
+        detail={
+            "code": "upload_busy",
+            "message": "Bot 上传预检繁忙，请稍后重试",
+        },
+        headers={
+            "Retry-After": str(max(1, math.ceil(BOT_UPLOAD_ADMISSION_WAIT_SEC)))
+        },
+    )
 
 
 def _orch(request: Request) -> MatchOrchestrator:
@@ -92,17 +291,6 @@ def _with_bot_runnable(bot: dict) -> dict:
     return public
 
 
-def _with_placement_status(row: dict) -> dict:
-    """Attach the code-owned placement contract to one rating-bearing row."""
-    public = dict(row)
-    required = max(0, int(AUTO_MATCH_CONFIG.placement_games))
-    played = max(0, int(public.get("matches_played") or 0))
-    public["placement_required"] = required
-    public["placement_remaining"] = max(0, required - played)
-    public["is_placement"] = required > 0 and played < required
-    return public
-
-
 def _new_preflight_runner(request: Request):
     """Return one upload-owned runner; never share match subprocess state."""
     factory = getattr(request.app.state, "preflight_runner_factory", None)
@@ -119,6 +307,13 @@ def _contests(request: Request) -> ContestManager:
 
 def _store(request: Request):
     return request.app.state.store
+
+
+def _execution_dispatcher(request: Request):
+    dispatcher = getattr(request.app.state, "execution_dispatcher", None)
+    if dispatcher is None:
+        raise HTTPException(503, "执行队列未就绪")
+    return dispatcher
 
 
 def _require_social_target(
@@ -162,11 +357,62 @@ def _with_seat_info(m: dict, store=None) -> dict:
             human_user = store.get_user(int(public_match["human_user_id"]))
         except Exception:
             human_user = None
-    return with_seat_info(public_match, human_user=human_user) or public_match
+    result = with_seat_info(public_match, human_user=human_user) or public_match
+    if store is not None and result.get("id"):
+        # Eligibility is frozen at creation, but it does not prove the derived
+        # rating transaction committed.  Only the exactly-once marker does.
+        result["rating_settled"] = bool(
+            store.is_match_rating_settled(str(result["id"]))
+        )
+    return result
 
 
-def _public_match_rows(rows: list[dict]) -> list[dict]:
-    return [sanitize_public_match(row) or row for row in rows]
+_PUBLIC_MATCH_LIST_FIELDS = frozenset(
+    {
+        "id",
+        "game_id",
+        "status",
+        "winner",
+        "reason",
+        "match_type",
+        "contest_id",
+        "created_at",
+        "bot_a_id",
+        "bot_b_id",
+        "technical_loss",
+        "result",
+        "bot_a",
+        "bot_b",
+    }
+)
+_PUBLIC_MATCH_ENGAGEMENT_FIELDS = frozenset({"likes_count", "views_count"})
+
+
+def _public_match_list_rows(
+    rows: list[dict], *, keep_engagement: bool = False
+) -> list[dict]:
+    """Project public list rows through the same participant identity contract.
+
+    ``Store.list_matches`` joins the two Bot owners and the optional human
+    player in one bounded query.  This avoids per-row user lookups while making
+    History unambiguous: every seat is either one public user-owned Bot or one
+    public human identity.
+    """
+    from bzplat.backend.matches.seat_info import with_seat_info
+
+    projected: list[dict] = []
+    for row in rows:
+        public = with_seat_info(sanitize_public_match(row) or row) or row
+        # 用正向白名单锁定公开列表契约：Store 为技术故障归一携带的
+        # _replay_events_json，以及未来新增的执行/关联列，都不能因忘记更新黑名单
+        # 而静默泄漏。Bot id 仍是公开详情路由键，但 UI 不得用它当名称兜底。
+        allowed = _PUBLIC_MATCH_LIST_FIELDS
+        if keep_engagement:
+            allowed = allowed | _PUBLIC_MATCH_ENGAGEMENT_FIELDS
+        projected.append(
+            {key: value for key, value in public.items() if key in allowed}
+        )
+    return projected
 
 
 # ── bots ──────────────────────────────────────────────────────
@@ -415,7 +661,7 @@ def global_search(
         }
     if t == "matches":
         return {
-            "matches": _public_match_rows(
+            "matches": _public_match_list_rows(
                 store.search_matches(ql, limit=lim, game_id=game_id)
             )
         }
@@ -476,11 +722,10 @@ def bot_profile(bot_id: int, request: Request, user=Depends(optional_user)):
         p = {k: v for k, v in p.items() if k not in _BOT_SENSITIVE_FIELDS}
     p = _with_bot_runnable(p)
     p = _public_bot_identity(p)
-    # 裁响应死字段（对抗审计验证：vol/rated_at/is_builtin/updated_at 前端不消费；
-    # 留 matches_played/tier_level/owner_id——store 测试断言 + 前端补展示）。
+    # 裁响应死字段；公开数值评分字段由 Store 的单一投影返回。
     for k in ("vol", "rated_at", "is_builtin", "updated_at"):
         p.pop(k, None)
-    return {"profile": _with_placement_status(p)}
+    return {"profile": p}
 
 
 @router.get("/api/bots/{bot_id}/matches")
@@ -499,12 +744,12 @@ def bot_matches(
     if page is not None:
         pp = max(1, min(200, per_page))
         off = (max(1, page) - 1) * pp
-        rows = _public_match_rows(
+        rows = _public_match_list_rows(
             store.list_matches(limit=pp, offset=off, bot_id=bot_id)
         )
         total = store.count_bot_matches(bot_id)
         return {"matches": rows, "page": max(1, page), "per_page": pp, "total": total}
-    rows = _public_match_rows(
+    rows = _public_match_list_rows(
         store.list_matches(
             bot_id=bot_id, limit=max(1, min(limit, 100)), offset=max(0, offset)
         )
@@ -532,31 +777,52 @@ def bot_rating_history(
     return {"history": _store(request).list_rating_history(bot_id, limit=max(1, min(limit, 500)))}
 
 
-@router.post("/api/bots")
+@router.post("/api/bots", openapi_extra=_BOT_CREATE_UPLOAD_OPENAPI)
 async def upload_bot(
     request: Request,
-    name: str = Form(...),
-    display_name: str = Form(""),
-    description: str = Form(""),
-    upload_note: str = Form(""),
-    game_id: str = Form("holdem"),
-    runtime_mode: str = Form(DEFAULT_RUNTIME_MODE),
-    file: UploadFile = File(...),
     user=Depends(require_user),
 ):
-    raw = await file.read()
+    name = ""
+    game_id = "holdem"
+    runtime_mode = DEFAULT_RUNTIME_MODE
     try:
-        bot = await asyncio.to_thread(
-            _bots(request).create_from_upload,
-            user["id"],
-            name,
-            raw,
-            display_name=display_name, description=description,
-            upload_note=upload_note,
-            game_id=game_id,
-            runtime_mode=runtime_mode,
-            binary_runner=_new_preflight_runner(request),
+        async with _bot_upload_admission(request):
+            async with request.form(max_files=1, max_fields=10) as form:
+                name = _multipart_text(form, "name", required=True)
+                display_name = _multipart_text(form, "display_name")
+                description = _multipart_text(form, "description")
+                upload_note = _multipart_text(form, "upload_note")
+                game_id = _multipart_text(
+                    form, "game_id", default="holdem"
+                )
+                runtime_mode = _multipart_text(
+                    form, "runtime_mode", default=DEFAULT_RUNTIME_MODE
+                )
+                raw = await _read_bot_upload(_multipart_file(form))
+            bot = await _finish_upload_step_before_cancel(
+                asyncio.to_thread(
+                    _bots(request).create_from_upload,
+                    user["id"],
+                    name,
+                    raw,
+                    display_name=display_name,
+                    description=description,
+                    upload_note=upload_note,
+                    game_id=game_id,
+                    runtime_mode=runtime_mode,
+                    binary_runner=_new_preflight_runner(request),
+                )
+            )
+    except _BotUploadBusy:
+        audit_log(
+            request,
+            "bot_upload",
+            result="fail",
+            user=user.get("username"),
+            target=name,
+            detail="upload_busy",
         )
+        raise _upload_busy_error()
     except BotError as e:
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
@@ -567,26 +833,42 @@ async def upload_bot(
     return {"bot": bot}
 
 
-@router.post("/api/bots/{bot_id}/versions")
+@router.post(
+    "/api/bots/{bot_id}/versions",
+    openapi_extra=_BOT_VERSION_UPLOAD_OPENAPI,
+)
 async def upload_bot_version(
     bot_id: int,
     request: Request,
-    upload_note: str = Form(""),
-    runtime_mode: str = Form(""),
-    file: UploadFile = File(...),
     user=Depends(require_user),
 ):
-    raw = await file.read()
     try:
-        bot = await asyncio.to_thread(
-            _bots(request).upload_version,
-            bot_id,
-            user["id"],
-            raw,
-            upload_note=upload_note,
-            runtime_mode=runtime_mode or None,
-            binary_runner=_new_preflight_runner(request),
+        async with _bot_upload_admission(request):
+            async with request.form(max_files=1, max_fields=4) as form:
+                upload_note = _multipart_text(form, "upload_note")
+                runtime_mode = _multipart_text(form, "runtime_mode")
+                raw = await _read_bot_upload(_multipart_file(form))
+            bot = await _finish_upload_step_before_cancel(
+                asyncio.to_thread(
+                    _bots(request).upload_version,
+                    bot_id,
+                    user["id"],
+                    raw,
+                    upload_note=upload_note,
+                    runtime_mode=runtime_mode or None,
+                    binary_runner=_new_preflight_runner(request),
+                )
+            )
+    except _BotUploadBusy:
+        audit_log(
+            request,
+            "bot_version_upload",
+            result="fail",
+            user=user.get("username"),
+            target=bot_id,
+            detail="upload_busy",
         )
+        raise _upload_busy_error()
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
         raise HTTPException(400, detail={"code": e.code, "message": e.message})
@@ -788,9 +1070,44 @@ class ChallengeBody(BaseModel):
     my_bot_version_id: int | None = None
     opponent_bot_version_id: int | None = None
     game_id: str | None = None
+    request_id: str | None = Field(
+        default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
+    )
 
 
-@router.post("/api/matches/challenge")
+def _execution_idempotency_fingerprint(kind: str, body: BaseModel) -> str:
+    payload = {
+        "kind": kind,
+        "body": body.model_dump(mode="json", exclude={"request_id"}),
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _existing_idempotent_request(
+    request: Request,
+    *,
+    request_id: str | None,
+    owner_user_id: int,
+    source: str,
+    fingerprint: str,
+) -> dict | None:
+    if request_id is None:
+        return None
+    existing = _store(request).executions.get_idempotent(
+        request_id,
+        owner_user_id=owner_user_id,
+        source=source,
+        fingerprint=fingerprint,
+    )
+    if existing is None:
+        return None
+    return _execution_dispatcher(request).public_request(request_id)
+
+
+@router.post("/api/matches/challenge", status_code=202)
 async def challenge(body: ChallengeBody, request: Request, user=Depends(require_user)):
     # P1-3 安全修复：my_bot_id 必须属于当前用户（防用别人的 bot 开赛，污染其评分/战绩）。
     # opponent_bot_id 允许任意（挑战他人 bot 是正常功能）。
@@ -801,23 +1118,41 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
         audit_log(request, "match_challenge", result="deny", user=user.get("username"),
                   detail=f"my_bot_id={body.my_bot_id} 非本人 bot")
         raise HTTPException(403, "只能用自己的 Bot 发起挑战")
+    # Resolve the process owner before accepting a durable request.  A broken
+    # app fixture/startup must fail without leaving a job that nobody can wake.
+    dispatcher = _execution_dispatcher(request)
+    fingerprint = _execution_idempotency_fingerprint("challenge", body)
     try:
-        mid = await _orch(request).challenge(
+        existing = _existing_idempotent_request(
+            request,
+            request_id=body.request_id,
+            owner_user_id=int(user["id"]),
+            source=EXECUTION_SOURCE_MANUAL,
+            fingerprint=fingerprint,
+        )
+        if existing is not None:
+            return existing
+        request_id = await _orch(request).challenge(
             body.my_bot_id,
             body.opponent_bot_id,
             user["id"],
             game_id=body.game_id,
             bot_a_version_id=body.my_bot_version_id,
             bot_b_version_id=body.opponent_bot_version_id,
+            request_id=body.request_id,
+            idempotency_fingerprint=fingerprint,
         )
-    except BotCapacityError as e:
+    except ExecutionIdempotencyConflict as e:
+        raise HTTPException(409, str(e))
+    except ExecutionQueueClosed as e:
         audit_log(request, "match_challenge", result="busy", user=user.get("username"), detail=str(e))
-        raise HTTPException(429, str(e))
+        raise HTTPException(503, str(e))
     except ValueError as e:
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
-    audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=mid, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
-    return {"match_id": mid, "status": "pending"}
+    audit_log(request, "match_challenge", result="ok", user=user.get("username"), target=request_id, detail=f"bots={body.my_bot_id}vs{body.opponent_bot_id}")
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
 
 
 class HumanChallengeBody(BaseModel):
@@ -826,37 +1161,141 @@ class HumanChallengeBody(BaseModel):
     bot_id: int
     human_seat: Literal[1] = 1  # 产品契约：人类固定座位 2（内部索引 1）
     game_id: str | None = None
+    request_id: str | None = Field(
+        default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
+    )
 
 
-@router.post("/api/matches/human")
+@router.post("/api/matches/human", status_code=202)
 async def challenge_human(body: HumanChallengeBody, request: Request, user=Depends(require_user)):
     """人类 vs bot：当前登录用户作为人类玩家对战指定 bot。"""
+    dispatcher = _execution_dispatcher(request)
+    fingerprint = _execution_idempotency_fingerprint("human", body)
     try:
-        mid = await _orch(request).challenge_human(
+        existing = _existing_idempotent_request(
+            request,
+            request_id=body.request_id,
+            owner_user_id=int(user["id"]),
+            source=EXECUTION_SOURCE_HUMAN,
+            fingerprint=fingerprint,
+        )
+        if existing is not None:
+            return existing
+        request_id = await _orch(request).challenge_human(
             body.bot_id,
             user["id"],
             human_seat=body.human_seat,
             game_id=body.game_id,
+            request_id=body.request_id,
+            idempotency_fingerprint=fingerprint,
         )
+    except ExecutionIdempotencyConflict as e:
+        raise HTTPException(409, str(e))
+    except ExecutionQueueClosed as e:
+        audit_log(request, "match_human", result="busy", user=user.get("username"), detail=str(e))
+        raise HTTPException(503, str(e))
     except ValueError as e:
         audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
-    audit_log(request, "match_human", result="ok", user=user.get("username"), target=mid, detail=f"bot={body.bot_id} seat={body.human_seat}")
-    return {"match_id": mid, "status": "pending"}
+    audit_log(request, "match_human", result="ok", user=user.get("username"), target=request_id, detail=f"bot={body.bot_id} seat={body.human_seat}")
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
+
+
+def _owned_execution_request(request: Request, request_id: str, user: dict) -> dict:
+    job = _store(request).executions.get(request_id)
+    if job is None:
+        raise HTTPException(404, "执行请求不存在")
+    if job.get("owner_user_id") != user.get("id") and user.get("role") != ROLE_ADMIN:
+        raise HTTPException(403, "无权访问该执行请求")
+    return job
+
+
+@router.get("/api/execution-requests/{request_id}")
+def execution_request_detail(
+    request_id: str,
+    request: Request,
+    user=Depends(require_user),
+):
+    _owned_execution_request(request, request_id, user)
+    payload = _execution_dispatcher(request).public_request(request_id)
+    if payload is None:
+        raise HTTPException(404, "执行请求不存在")
+    return payload
+
+
+@router.delete("/api/execution-requests/{request_id}")
+def cancel_execution_request(
+    request_id: str,
+    request: Request,
+    user=Depends(require_user),
+):
+    job = _owned_execution_request(request, request_id, user)
+    if user.get("role") != ROLE_ADMIN and job.get("source") not in {
+        EXECUTION_SOURCE_MANUAL,
+        EXECUTION_SOURCE_HUMAN,
+    }:
+        raise HTTPException(403, "仅可取消自己发起的挑战或人机请求")
+    owner = None if user.get("role") == ROLE_ADMIN else int(user["id"])
+    try:
+        _store(request).executions.request_cancel(
+            request_id, owner_user_id=owner
+        )
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    dispatcher = _execution_dispatcher(request)
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
+
+
+@router.post("/api/execution-requests/{request_id}/retry", status_code=202)
+def retry_execution_request(
+    request_id: str,
+    request: Request,
+    user=Depends(require_user),
+):
+    job = _owned_execution_request(request, request_id, user)
+    if user.get("role") != ROLE_ADMIN and job.get("source") not in {
+        EXECUTION_SOURCE_MANUAL,
+        EXECUTION_SOURCE_HUMAN,
+    }:
+        raise HTTPException(403, "仅可重试自己发起的挑战或人机请求")
+    owner = None if user.get("role") == ROLE_ADMIN else int(user["id"])
+    try:
+        _store(request).executions.retry(request_id, owner_user_id=owner)
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    dispatcher = _execution_dispatcher(request)
+    dispatcher.wake()
+    return dispatcher.public_request(request_id)
 
 
 @router.websocket("/api/matches/{match_id}/play")
 async def play_websocket(websocket: WebSocket, match_id: str):
     """人类对战双向通道：推送事件（含 your_turn）+ 接收人类落子。
 
-    鉴权：query 参数 token（Bearer）或 cookie bz_session。
+    鉴权：Origin 必须与 ``BZ_PUBLIC_ORIGIN`` 严格匹配，随后仅从
+    同源握手自动携带的 HttpOnly cookie ``bz_session`` 取会话。
+    不接受 URL query token，避免长期会话进入 Uvicorn/反代访问日志。
     仅 match.human_user_id 本人可连；解析 pending 人类回合 Future。
     """
     store = websocket.app.state.store
     auth = websocket.app.state.auth
     orch = websocket.app.state.orch
+    if (
+        "token" in websocket.query_params
+        or not websocket_origin_allowed(websocket.headers.get("origin"))
+    ):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "reject",
+            "reason": "forbidden",
+            "message": "无权访问该对局",
+        })
+        await websocket.close()
+        return
     # 鉴权
-    token = websocket.query_params.get("token") or websocket.cookies.get("bz_session")
+    token = websocket.cookies.get(COOKIE_NAME)
     user = auth.verify_session(token)
     m = store.get_match(match_id)
     if not user or not m or m.get("human_user_id") != user["id"]:
@@ -956,7 +1395,7 @@ def list_matches(
     store = _store(request)
     lim = max(1, min(limit, 100))
     off = max(0, offset)
-    rows = _public_match_rows(
+    rows = _public_match_list_rows(
         store.list_matches(
             status=status,
             game_id=game_id,
@@ -965,14 +1404,8 @@ def list_matches(
             offset=off,
         )
     )
-    # 裁列表响应死字段（对抗审计：started_at/ended_at/human_user_id/human_seat/
-    # likes_count/views_count/owner_id 列表不消费；
-    # 不动 winner/reason/match_type/contest_id——BotDetail/Home/admin 有消费者，删了致回归）。
-    _MATCH_LIST_DEAD = ("started_at", "ended_at", "human_user_id", "human_seat",
-                        "likes_count", "views_count", "owner_id")
-    for m in rows:
-        for k in _MATCH_LIST_DEAD:
-            m.pop(k, None)
+    # 参与者公开身份与列表裁剪均由 _public_match_list_rows 单点负责。
+    # winner/reason/match_type/contest_id 仍是 BotDetail/Home/admin 的现行消费者字段。
     total = store.count_matches(
         status=status,
         game_id=game_id,
@@ -985,17 +1418,124 @@ def list_matches(
 def liked_top_matches(request: Request, limit: int = 10):
     """对局点赞排行榜（对标 Botzone，首页用）。必须在 {match_id} 路由前注册。"""
     store = _store(request)
-    return {"matches": _public_match_rows(store.list_liked_top_matches(limit))}
+    return {
+        "matches": _public_match_list_rows(
+            store.list_liked_top_matches(limit), keep_engagement=True
+        )
+    }
 
 
 @router.get("/api/matches/{match_id}")
-def match_detail(match_id: str, request: Request):
+def match_detail(
+    match_id: str,
+    request: Request,
+    response: Response = None,
+    user: dict | None = Depends(optional_user),
+):
+    """Return lightweight match metadata; replay events have a separate route."""
+    # 当前身份决定 can_view_debug；共享缓存必须按认证上下文分离。
+    if response is not None:
+        response.headers["Vary"] = "Authorization, Cookie"
     store = _store(request)
     m = store.get_match_detailed(match_id)
     if not m:
         raise HTTPException(404, "对局不存在")
-    replay = store.get_public_replay(match_id) or {}
-    return {"match": _with_seat_info(m, store=store), "replay": replay}
+    public_match = _with_seat_info(m, store=store)
+    # 只暴露“当前身份是否具备读取权限”，不暴露调试记录是否存在、数量或内容。
+    # MatchViewer 据此避免让无关登录用户产生预期内的 403 请求噪声。
+    public_match["can_view_debug"] = False
+    # 权威终局回归会直接调用本函数观察广播时的 API 快照；
+    # 该调用无 FastAPI 依赖注入，因而 Depends 默认值不得被当成已登录用户。
+    if isinstance(user, dict):
+        access = store.can_read_match_debug(
+            match_id,
+            user_id=int(user["id"]),
+            is_admin=user.get("role") == ROLE_ADMIN,
+        )
+        public_match["can_view_debug"] = bool(access.get("allowed"))
+    return {"match": public_match}
+
+
+@router.get("/api/matches/{match_id}/debug")
+def match_debug(
+    match_id: str,
+    request: Request,
+    response: Response,
+    user: dict | None = Depends(optional_user),
+):
+    """终态 Bot debug 私有读取；拒绝响应不泄漏记录是否存在。"""
+    response.headers.update(_DEBUG_NO_STORE_HEADERS)
+    if not isinstance(user, dict):
+        audit_log(
+            request,
+            "match_debug_read",
+            result="fail",
+            target=match_id,
+            detail="unauthenticated",
+        )
+        raise HTTPException(
+            401,
+            "未登录或会话过期",
+            headers=_DEBUG_NO_STORE_HEADERS,
+        )
+    result = _store(request).get_match_debug_for_user(
+        match_id,
+        user_id=int(user["id"]),
+        is_admin=user.get("role") == ROLE_ADMIN,
+    )
+    if not result.get("found"):
+        audit_log(
+            request,
+            "match_debug_read",
+            result="fail",
+            user=user.get("username") or user.get("id"),
+            target=match_id,
+            detail="not_found",
+        )
+        raise HTTPException(
+            404,
+            "对局不存在",
+            headers=_DEBUG_NO_STORE_HEADERS,
+        )
+    if not result.get("allowed"):
+        audit_log(
+            request,
+            "match_debug_read",
+            result="fail",
+            user=user.get("username") or user.get("id"),
+            target=match_id,
+            detail="denied",
+        )
+        raise HTTPException(
+            403,
+            "无权查看该对局的调试信息",
+            headers=_DEBUG_NO_STORE_HEADERS,
+        )
+    entries = result.get("entries") or []
+    audit_log(
+        request,
+        "match_debug_read",
+        user=user.get("username") or user.get("id"),
+        target=match_id,
+        detail=f"entries={len(entries)}",
+    )
+    return {
+        "match_id": match_id,
+        "entries": entries,
+        "entry_count": int(result.get("entry_count") or 0),
+        "total_bytes": int(result.get("total_bytes") or 0),
+        "dropped_count": int(result.get("dropped_count") or 0),
+        "updated_at": result.get("updated_at"),
+    }
+
+
+@router.get("/api/matches/{match_id}/replay")
+def match_replay(match_id: str, request: Request):
+    """Return the structured, public replay only when a viewer needs it."""
+    payload = _store(request).get_public_replay_payload(match_id)
+    if payload is None:
+        raise HTTPException(404, "对局不存在")
+    return payload
 
 
 @router.get("/api/matches/{match_id}/events")
@@ -1037,23 +1577,24 @@ def leaderboard(
         raise HTTPException(400, f"未知游戏: {game_id!r}") from exc
     result = _store(request).list_leaderboard(
         game_id=normalized_game_id, limit=max(1, min(limit, 200)), page=page,
-        per_page=per_page, placement_games=AUTO_MATCH_CONFIG.placement_games,
+        per_page=per_page,
     )
     # 响应白名单投影：平台三元组、game_id 重复列、内部累计分差和波动率都不属于
     # 排行阅读信息；游戏维度只在响应顶层返回一次。
     items = result["items"]
     keep = {
-        "rank", "bot_id", "rating", "rd", "wins", "losses", "draws",
-        "matches_played", "bot_name", "bot_display", "owner_name",
-        "rating_delta", "tier_level", "tier_key", "tier_name",
-        "placement_required", "placement_remaining", "is_placement",
+        "rank", "rank_total", "percentile", "bot_id", "rating", "rd",
+        "confidence_low", "confidence_high", "wins", "losses", "draws",
+        "rated_matches", "unique_opponents", "bot_name", "bot_display", "owner_name",
+        "rating_delta", "recent_delta_30d", "ranking_min_matches",
+        "ranking_progress", "ranking_eligible",
         "last_match_id", "last_match_at",
     }
     proj = [{k: row[k] for k in keep if k in row} for row in items]
     response = {
         "leaderboard": proj,
         "game_id": result["game_id"],
-        "placement_required": result["placement_required"],
+        "ranking_min_matches": result["ranking_min_matches"],
         "summary": result["summary"],
         "total": result["total"],
     }
@@ -1062,22 +1603,10 @@ def leaderboard(
     return response
 
 
-@router.get("/api/tiers")
-def tiers(game_id: str):
-    """段位定义（公开，前端镜像校验用）。
-
-    game_id 是必填维度；缺失或未知都明确拒绝，不得伪装成另一款游戏的段位。
-    """
-    from bzplat.backend.games import registry as _game_registry
-    gid = game_id.strip().lower()
-    try:
-        return {
-            "tiers": _game_registry.all_tiers(gid),
-            "game_id": gid,
-            "placement_required": AUTO_MATCH_CONFIG.placement_games,
-        }
-    except KeyError as exc:
-        raise HTTPException(400, f"未知游戏: {gid!r}") from exc
+@router.get("/api/execution-queue")
+def execution_queue(request: Request):
+    """Public global capacity/queue projection with no internal identifiers."""
+    return _execution_dispatcher(request).public_snapshot()
 
 
 @router.get("/api/levels/info")
@@ -1454,6 +1983,64 @@ def contest_templates(request: Request, game: str | None = None):
 # API 层另造一套状态字面量；显式 ``?status=draft`` 也不得绕过可见性。
 _CONTEST_HIDDEN_STATUSES = (CONTEST_DRAFT, CONTEST_CANCELLED)
 
+_PUBLIC_PAIRING_INTERNAL_FIELDS = (
+    "contest_id",
+    "entry_a_id",
+    "entry_b_id",
+    "bot_a_version_id",
+    "bot_b_version_id",
+    "pairing_seed",
+    "published_at",
+    "color_first",
+)
+
+_PUBLIC_PAIRING_FIELDS = frozenset(
+    {
+        "id",
+        "round_num",
+        "bot_a_id",
+        "bot_b_id",
+        "scheduled_at",
+        "match_id",
+        "status",
+        "stage_idx",
+        "stage_key",
+        "group_id",
+        "bracket_slot",
+        "bot_a_name",
+        "bot_a_display",
+        "bot_b_name",
+        "bot_b_display",
+        "owner_a_name",
+        "owner_a_display",
+        "owner_b_name",
+        "owner_b_display",
+        "match_winner",
+        "is_bye",
+    }
+)
+
+
+def _public_contest_pairings(rows: list[dict]) -> list[dict]:
+    """Return schedule rows with public Bot/user identity and no execution keys."""
+    projected: list[dict] = []
+    for row in rows:
+        public = dict(row)
+        # bot_b_id 可能因历史硬删除被 SET NULL，legacy pairing 也可能没有 entry id。
+        # 仅四项权威条件同时满足才认作真实轮空；歧义一律 fail closed。
+        public["is_bye"] = bool(
+            row.get("entry_b_id") is None
+            and row.get("bot_b_id") is None
+            and row.get("match_id") is None
+            and row.get("status") == STATUS_COMPLETED
+        )
+        for field in _PUBLIC_PAIRING_INTERNAL_FIELDS:
+            public.pop(field, None)
+        projected.append(
+            {key: value for key, value in public.items() if key in _PUBLIC_PAIRING_FIELDS}
+        )
+    return projected
+
 
 def _can_view_hidden_contest(contest: dict, user: dict | None) -> bool:
     return bool(
@@ -1564,14 +2151,17 @@ def contest_detail(
     else:
         entries = entries_result
         entries_meta = {}
-    pairings = store.contest_bracket(contest_id)
+    # 阶段投影依赖 entry_a_id / entry_b_id 求实际参赛者；响应才裁掉这些
+    # 内部关联键。不能拿 public pairings 反哺内部 presentation，否则阶段榜会变空。
+    raw_pairings = store.contest_bracket(contest_id)
+    pairings = _public_contest_pairings(raw_pairings)
     stage_entries = (
         entries
         if not isinstance(entries_result, dict)
         else store.contest_entries_named(contest_id)
     )
     stage_summaries = build_stage_summaries(
-        _contests(request), c, stage_entries, pairings
+        _contests(request), c, stage_entries, raw_pairings
     )
     standings = _contests(request).standings(contest_id)
     # 给 standings 补 bot 名（standings 只有 bot_id）
@@ -1610,14 +2200,6 @@ def contest_detail(
     for s in standings:
         for k in _STANDINGS_DEAD:
             s.pop(k, None)
-    _PAIRING_DEAD = (
-        "contest_id", "entry_a_id", "entry_b_id", "bot_a_version_id",
-        "bot_b_version_id", "pairing_seed", "published_at", "color_first",
-        "owner_a_name", "owner_b_name",
-    )
-    for p in pairings:
-        for k in _PAIRING_DEAD:
-            p.pop(k, None)
     # 旧库列仅作历史存储；现行 API 不再暴露可覆盖的规则配置。
     c = _contest_for_api(c)
     resp = {
@@ -1647,7 +2229,11 @@ def contest_bracket(
         and not _can_view_hidden_contest(contest, user)
     ):
         raise HTTPException(404, "比赛不存在")
-    return {"pairings": _store(request).contest_bracket(contest_id)}
+    return {
+        "pairings": _public_contest_pairings(
+            _store(request).contest_bracket(contest_id)
+        )
+    }
 
 
 def _require_contest_organizer(c: dict, user: dict) -> None:
@@ -1996,30 +2582,56 @@ async def finish_contest(
 
 # ── admin ─────────────────────────────────────────────────────
 
+_ADMIN_USER_RESPONSE_FIELDS = (
+    "id", "username", "email", "role", "display_name", "is_active",
+    "email_verified", "created_at", "last_login_at", "real_name", "phone",
+    "school", "student_id",
+)
+
+
+def _admin_user_for_api(user: dict[str, Any]) -> dict[str, Any]:
+    """Project one user through the admin response allowlist.
+
+    Admin may need PII to verify tournament registrations, but authentication
+    credentials and future Store-only columns must never become API fields.
+    """
+    return {field: user.get(field) for field in _ADMIN_USER_RESPONSE_FIELDS}
+
+
+def _set_admin_private_headers(response: Response) -> None:
+    response.headers.update(_ADMIN_PRIVATE_HEADERS)
+
 @router.get("/api/admin/users")
 def admin_users(
-    request: Request, q: str | None = None, real_name: bool | None = None,
+    request: Request, response: Response,
+    q: str | None = None, real_name: bool | None = None,
     page: int | None = None, per_page: int = 50,
     _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     result = _store(request).list_users(
         q=q, real_name=real_name, page=page, per_page=per_page,
     )
     if isinstance(result, dict):
-        return {"users": result["items"], "page": result["page"],
+        return {"users": [_admin_user_for_api(u) for u in result["items"]],
+                "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"users": result}
+    return {"users": [_admin_user_for_api(u) for u in result]}
 
 
 @router.post("/api/admin/users/{user_id}/role")
 def admin_set_role(
-    user_id: int, role: str, request: Request, admin=Depends(require_admin)
+    user_id: int, role: str, request: Request, response: Response,
+    admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     if role not in ("user", "organizer", "admin"):
-        raise HTTPException(400, "非法角色")
+        raise HTTPException(400, "非法角色", headers=_ADMIN_PRIVATE_HEADERS)
     u = _store(request).update_user(user_id, role=role)
+    if not u:
+        raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
     audit_log(request, "admin_set_role", result="ok", user=admin.get("username"), target=user_id, detail=f"role={role}")
-    return {"user": u}
+    return {"user": _admin_user_for_api(u)}
 
 
 class AdminUserPatch(BaseModel):
@@ -2030,8 +2642,10 @@ class AdminUserPatch(BaseModel):
 
 @router.patch("/api/admin/users/{user_id}")
 def admin_patch_user(
-    user_id: int, body: AdminUserPatch, request: Request, _admin=Depends(require_admin)
+    user_id: int, body: AdminUserPatch, request: Request, response: Response,
+    _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     fields: dict[str, Any] = {}
     if body.is_active is not None:
         fields["is_active"] = 1 if body.is_active else 0
@@ -2039,14 +2653,14 @@ def admin_patch_user(
         fields["email_verified"] = 1 if body.email_verified else 0
     if body.role is not None:
         if body.role not in ("user", "organizer", "admin"):
-            raise HTTPException(400, "非法角色")
+            raise HTTPException(400, "非法角色", headers=_ADMIN_PRIVATE_HEADERS)
         fields["role"] = body.role
     if not fields:
-        raise HTTPException(400, "无更新字段")
+        raise HTTPException(400, "无更新字段", headers=_ADMIN_PRIVATE_HEADERS)
     u = _store(request).update_user(user_id, **fields)
     if not u:
-        raise HTTPException(404, "用户不存在")
-    return {"user": u}
+        raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
+    return {"user": _admin_user_for_api(u)}
 
 
 @router.delete("/api/admin/users/{user_id}")
@@ -2059,8 +2673,8 @@ def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admi
     if not result["deleted"]:
         raise HTTPException(
             409,
-            "用户存在活跃对局/赛事引用或仍是赛事组织者，不能硬删："
-            f"{result['blockers']}（请先中止对局并删除或转移其赛事）",
+            "用户存在历史或活跃对局/赛事引用，或仍是赛事组织者，不能硬删："
+            f"{result['blockers']}（请改为停用账号；历史参赛身份必须保留）",
         )
     for bot_id in result["bot_ids"]:
         _bots(request).purge_bot_files(bot_id)
@@ -2070,15 +2684,19 @@ def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admi
 
 @router.get("/api/admin/users/{user_id}/sessions")
 def admin_user_sessions(
-    user_id: int, request: Request, _admin=Depends(require_admin)
+    user_id: int, request: Request, response: Response,
+    _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     return {"sessions": _store(request).list_sessions(user_id)}
 
 
 @router.delete("/api/admin/users/{user_id}/sessions")
 def admin_revoke_sessions(
-    user_id: int, request: Request, _admin=Depends(require_admin)
+    user_id: int, request: Request, response: Response,
+    _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     n = _store(request).delete_sessions_for_user(user_id)
     return {"ok": True, "revoked": n}
 
@@ -2222,11 +2840,8 @@ def admin_patch_bot(
 @router.delete("/api/admin/bots/{bot_id}")
 def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)):
     store = _store(request)
-    # 业务规则：硬删前检查活跃引用。bots 表 FK 是 ON DELETE SET NULL（matches 与
-    # contest_pairings/entries 均为 SET NULL，保历史）。硬删正在打(pending/running)对局或
-    # 进行中赛事(published/running/rest)报名的 bot 会：①让运行中对局 bot_id 变 NULL→
-    # _apply_ratings(None) 崩；②进行中赛事对阵/报名的 bot_id 变 NULL→对阵表残缺。
-    # 此时应改用停用（is_active=0，用户路径）。
+    # 业务规则：仅从未参赛的 Bot 可硬删。SET NULL 虽能保住比赛行，却会永久丢失
+    # “哪个用户的哪个 Bot”这一公开历史身份；已有任何对局或赛事记录时必须改用停用。
     result = store.delete_bot_if_safe(bot_id)
     if not result["found"]:
         raise HTTPException(404, "bot 不存在")
@@ -2234,7 +2849,8 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
     if not result["deleted"]:
         raise HTTPException(
             409,
-            f"bot 存在活跃引用，不能硬删：{refs}（进行中对局/赛事；请改用停用 is_active=0）",
+            f"bot 存在历史或活跃引用，不能硬删：{refs}"
+            "（对局/赛事；请改用停用 is_active=0，保留公开参赛身份）",
         )
     # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
     _bots(request).purge_bot_files(bot_id)
@@ -2541,6 +3157,8 @@ async def admin_delete_entry(
 # ── admin: email templates & outbox ───────────────────────────
 
 class TemplateUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     subject: str
     body_html: str = ""
     body_text: str = ""
@@ -2548,27 +3166,72 @@ class TemplateUpdate(BaseModel):
 
 @router.get("/api/admin/email/templates")
 def admin_templates(request: Request, _admin=Depends(require_admin)):
-    return {"templates": _store(request).list_templates()}
+    from bzplat.backend.communications.templates import list_templates
+
+    legacy = {row["key"]: row for row in _store(request).list_templates()}
+    templates = []
+    for item in list_templates():
+        old = legacy.get(item.key)
+        customized = bool(old and (
+            old["subject"] != item.subject
+            or old["body_html"] != item.body_html
+            or old["body_text"] != item.body_text
+        ))
+        templates.append({
+            "key": item.key,
+            "version": item.version,
+            "subject": item.subject,
+            "body_html": item.body_html,
+            "body_text": item.body_text,
+            "secret": item.secret,
+            "source": "code",
+            "mutable": False,
+            "legacy_customization_preserved": customized,
+        })
+    return {
+        "source": "code",
+        "mutable": False,
+        "legacy_rows_preserved": True,
+        "templates": templates,
+    }
 
 
 @router.get("/api/admin/email/templates/{key}")
 def admin_template(key: str, request: Request, _admin=Depends(require_admin)):
-    t = _store(request).get_template(key)
-    if not t:
+    from bzplat.backend.communications.templates import get_template
+
+    try:
+        item = get_template(key)
+    except KeyError:
         raise HTTPException(404, "模板不存在")
-    return {"template": t}
+    return {"template": {
+        "key": item.key,
+        "version": item.version,
+        "subject": item.subject,
+        "body_html": item.body_html,
+        "body_text": item.body_text,
+        "secret": item.secret,
+        "source": "code",
+        "mutable": False,
+    }}
 
 
 @router.put("/api/admin/email/templates/{key}")
 def admin_update_template(
-    key: str, body: TemplateUpdate, request: Request, _admin=Depends(require_admin)
+    key: str, body: TemplateUpdate, request: Request, admin=Depends(require_admin)
 ):
-    t = _store(request).update_template(
-        key, subject=body.subject, body_html=body.body_html, body_text=body.body_text
+    audit_log(
+        request,
+        "admin_email_template_update",
+        result="fail",
+        user=admin.get("username"),
+        target=key,
+        detail="code_owned",
     )
-    if not t:
-        raise HTTPException(404, "模板不存在")
-    return {"template": t}
+    raise HTTPException(
+        409,
+        "事务邮件模板由代码版本管理；旧 email_templates 自定义记录已保留但不再执行",
+    )
 
 
 @router.get("/api/admin/email/outbox")
@@ -2583,27 +3246,19 @@ def admin_outbox(
     return {"outbox": rows, "total": len(rows)}
 
 
-# ── admin: runtime diagnostics（代码配置，只读）───────────────
+# ── admin: runtime diagnostics + 唯一自动排位总开关 ─────────
 @router.get("/api/admin/settings/runtime")
 def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
     store = _store(request)
     orch = _orch(request)
     stats = store.count_stats()
-    # 生产使用 AUTO_MATCH_CONFIG；隔离 QA 使用代码持有的 disabled profile。
-    # 诊断必须展示当前进程实际生效值，不能在 QA 中误报生产默认值。
-    auto_matcher = getattr(request.app.state, "auto_matcher", None)
-    cfg = getattr(auto_matcher, "config", AUTO_MATCH_CONFIG)
-    am = {
-        "enabled": cfg.enabled,
-        "interval_sec": cfg.interval,
-        "min_idle_sec": cfg.min_idle,
-        "bot_cooldown": cfg.cooldown,
-        "stale_sec": cfg.stale,
-        "reserve_slots": cfg.reserve,
-        "placement_games": cfg.placement_games,
-        "max_per_round": cfg.max_per_round,
-        "daily_cap": cfg.daily_cap,
-        "daily_count": getattr(auto_matcher, "daily_count", 0),
+    dispatcher = getattr(request.app.state, "execution_dispatcher", None)
+    queue_snapshot = dispatcher.public_snapshot(include_internal=True) if dispatcher is not None else {
+        "dispatcher": {
+            "state": "stopped", "accepting": False, "auto_enabled": False,
+            "pause_reason": "调度器未就绪", "retry_at": None,
+        },
+        "capacity": {}, "active": [], "queued": [], "queued_count": 0,
     }
     return {
         "source": CONFIGURATION_SOURCE,
@@ -2616,12 +3271,14 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
         "bot_cpus": BOT_CPUS,
         "bot_memory_mb": BOT_MEMORY_MB,
         "full_rr_max_n": FULL_RR_MAX_N,
+        "ranking_min_rated_matches": RANKING_MIN_RATED_MATCHES,
         "contest_scheduler": CONTEST_SCHEDULER_CONFIG.as_dict(),
-        "queue": {
-            "pending": stats.get("matches_pending", 0),
-            "running": stats.get("matches_running", 0),
+        "queue": queue_snapshot,
+        "auto_match": {
+            "enabled": queue_snapshot["dispatcher"]["auto_enabled"],
+            "mutable": True,
         },
-        "auto_match": am,
+        "rating_integrity": store.rating_integrity_diagnostics(),
         "readonly": [
             "action_timeout_sec",
             "max_concurrent_matches",
@@ -2629,9 +3286,68 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
             "bot_memory_mb",
             "full_rr_max_n",
             "contest_scheduler",
-            "auto_match",
         ],
     }
+
+
+class AutoMatchToggle(BaseModel):
+    enabled: StrictBool
+
+    model_config = {"extra": "forbid"}
+
+
+@router.put("/api/admin/auto-match")
+async def admin_toggle_auto_match(
+    body: AutoMatchToggle,
+    request: Request,
+    admin=Depends(require_admin),
+):
+    scheduler = getattr(request.app.state, "execution_dispatcher", None)
+    if scheduler is None:
+        audit_log(
+            request,
+            "admin_auto_match_toggle",
+            result="fail",
+            user=admin.get("username"),
+            detail="scheduler_unavailable",
+        )
+        raise HTTPException(503, "自动排位调度器未就绪")
+    if body.enabled and not scheduler.auto_capability_enabled:
+        audit_log(
+            request,
+            "admin_auto_match_toggle",
+            result="deny",
+            user=admin.get("username"),
+            detail="qa_capability_guard",
+        )
+        raise HTTPException(409, "隔离 QA 实例禁止开启自动排位")
+    previous = _store(request).get_auto_match_enabled()
+    _store(request).set_auto_match_enabled(bool(body.enabled))
+    scheduler.wake()
+    audit_log(
+        request,
+        "admin_auto_match_toggle",
+        result="ok",
+        user=admin.get("username"),
+        detail=f"enabled={int(bool(body.enabled))} previous={int(previous)}",
+    )
+    return scheduler.public_snapshot(include_internal=True)
+
+
+@router.post("/api/admin/execution-queue/resume")
+async def admin_resume_execution_queue(
+    request: Request,
+    admin=Depends(require_admin),
+):
+    dispatcher = _execution_dispatcher(request)
+    resumed = await dispatcher.admin_resume()
+    audit_log(
+        request,
+        "admin_execution_queue_resume",
+        result="ok" if resumed else "paused",
+        user=admin.get("username"),
+    )
+    return dispatcher.public_snapshot(include_internal=True)
 
 
 class SiteSettingsPatch(BaseModel):
@@ -2826,7 +3542,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
     {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议与 C/Python 示例"},
     {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},
-    {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/段位/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
+    {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/数值评分/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
 ]
 
 

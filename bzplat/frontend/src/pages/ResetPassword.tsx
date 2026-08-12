@@ -65,9 +65,9 @@ export default function ResetPassword() {
   }
 
   return (
-    <AuthShell title="重置密码" subtitle="通过邮箱验证码重新设置密码">
-      <Card className="w-full max-w-md">
-        <CardContent className="py-6">
+    <AuthShell layout="auth-reset-password" title="重置密码" subtitle={step === 'request' ? '先请求邮件验证码' : '输入邮件验证码并设置新密码'}>
+      <Card density="compact" className="mx-auto w-full max-w-md">
+        <CardContent>
           {step === 'request' ? (
             <form onSubmit={(e) => void onRequest(e)} className="space-y-4">
               <div className="space-y-1.5">
@@ -81,8 +81,8 @@ export default function ResetPassword() {
               </div>
               <CaptchaField onChange={setCaptcha} />
               {error && <ErrorMsg msg={error} />}
-              {msg && <p className="text-sm text-primary">{msg}</p>}
-              <Button type="submit" disabled={busy} className="w-full gap-1.5">
+              {msg && <p role="status" className="text-sm text-primary">{msg}</p>}
+              <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
                 <KeyRound className="size-4" />
                 {busy ? '发送中…' : '发送重置验证码'}
               </Button>
@@ -111,6 +111,7 @@ export default function ResetPassword() {
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
                   required
+                  autoComplete="one-time-code"
                   className="font-mono tracking-widest"
                 />
               </div>
@@ -127,8 +128,8 @@ export default function ResetPassword() {
                 />
               </div>
               {error && <ErrorMsg msg={error} />}
-              {msg && <p className="text-sm text-primary">{msg}</p>}
-              <Button type="submit" disabled={busy} className="w-full gap-1.5">
+              {msg && <p role="status" className="text-sm text-primary">{msg}</p>}
+              <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
                 <MailCheck className="size-4" />
                 {busy ? '提交中…' : '重置密码'}
               </Button>

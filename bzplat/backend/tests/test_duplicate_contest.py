@@ -20,6 +20,11 @@ import pytest
 
 from bzplat.backend.games import registry
 from bzplat.backend.games.holdem.templates import TEMPLATES
+from bzplat.backend.tests.execution_helpers import (
+    claim_next_queued,
+    claim_request,
+    enable_execution_queue,
+)
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 FOLDBOT = SAMPLES / "holdem_bots" / "foldbot"
@@ -52,11 +57,10 @@ def test_challenge_duplicate_flag_persisted_to_match_config(tmp_path):
     orch = MatchOrchestrator(s, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
 
     async def _go():
-        # defer_start 只建 match 行，不创建后台 task；本用例仅校验持久化 config。
-        mid = await orch.challenge_duplicate(
-            ba, bb, u, duplicate_seed=42, defer_start=True
-        )
-        m = s.get_match(mid)
+        enable_execution_queue(s)
+        request_id = await orch.challenge_duplicate(ba, bb, u, duplicate_seed=42)
+        job = claim_request(orch, request_id, start=False)
+        m = s.get_match(job["current_match_id"])
         return m
 
     m = asyncio.run(_go())
@@ -99,7 +103,9 @@ def test_duplicate_contest_two_legs_independent_scoring(tmp_path):
 
     async def _run_to_finish():
         # start() 内部 _begin_stage → _dispatch_pending_locked → challenge_duplicate
+        enable_execution_queue(s)
         await cm.start(c)
+        claim_next_queued(orch)
         # 等所有对局 task 跑完（round_robin 2 人 = 1 场 match）
         tasks = list(orch._tasks.values())
         if tasks:
@@ -179,7 +185,9 @@ def test_duplicate_standings_two_legs_accumulated(tmp_path):
     cm = ContestManager(s, orch)
 
     async def _run():
+        enable_execution_queue(s)
         await cm.start(c)
+        claim_next_queued(orch)
         tasks = list(orch._tasks.values())
         if tasks:
             await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=180)

@@ -149,10 +149,22 @@ def test_allow_large_round_robin_bypasses_guard(tmp_path):
     for uid in users:
         store.add_contest_entry(c, uid, store.get_bot_by_owner_name(uid, f"lrb{users.index(uid)}")["id"])
     orch = MatchOrchestrator(store, runner=MatchRunner(BinaryRunner(prefer_local=True)), max_concurrent=1)
-    # 此用例只验证大 RR 门禁；prepare/bind 保留，runner 不在本测试启动。
-    orch.start_prepared_match = lambda _match_id: None  # type: ignore[method-assign]
+    # 此用例只验证大 RR 门禁；赛事只持久化 execution requests，runner
+    # 不在本测试 claim/启动。
+    store.executions.resume()
     cm = ContestManager(store, orch)
     store.update_contest(c, status="open")
     # start 应不抛 _guard_full_rr 错（allow_large_round_robin 旁路）
     asyncio.run(cm.start(c))
-    assert store.get_contest(c)["status"] == "running"
+    # 新执行契约在 claim 前不创建 Match，也不伪装成 running；手动 start
+    # 只把全部到点 pairing 持久排队，首个原子 claim 才同步推进赛事状态。
+    assert store.get_contest(c)["status"] == "published"
+    pairings = store.list_contest_pairings(c)
+    assert len(pairings) == 13 * 12 // 2
+    assert all(p["status"] == "pending" and p["match_id"] is None for p in pairings)
+    queued = store.executions.snapshot(
+        max_match_slots=1,
+        max_sandbox_units=2,
+        aging_seconds=60,
+    )["queued"]
+    assert len([job for job in queued if job["source"] == "contest"]) == len(pairings)

@@ -47,6 +47,11 @@ def test_removed_judge_setting_rows_are_not_read_by_orchestrator(store):
     captured: dict = {}
 
     class FixedRunner:
+        runner = None
+
+        def __init__(self):
+            self.runner = self
+
         async def run_binaries(self, *args, **kwargs):
             captured.update(kwargs)
 
@@ -57,11 +62,28 @@ def test_removed_judge_setting_rows_are_not_read_by_orchestrator(store):
                 events = []
             return Result()
 
+        async def cleanup_execution(self, scope):
+            scope.mark_cleanup_confirmed()
+
     orchestrator = MatchOrchestrator(store, runner=FixedRunner(), max_concurrent=1)
 
     async def exercise():
-        mid = await orchestrator.challenge(a["id"], b["id"], user["id"], game_id="holdem")
+        store.executions.resume()
+        request_id = await orchestrator.challenge(
+            a["id"], b["id"], user["id"], game_id="holdem"
+        )
+        job = store.executions.claim_next(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=1,
+        )
+        assert job is not None and job["public_id"] == request_id
+        mid = str(job["current_match_id"])
+        orchestrator.start_execution_job(job)
         await orchestrator._tasks[mid]
+        assert store.executions.finalize_ready() == 1
 
     asyncio.run(exercise())
     assert not {"starting_stack", "sb", "bb"}.intersection(captured)

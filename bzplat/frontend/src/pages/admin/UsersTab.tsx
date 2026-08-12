@@ -2,8 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiGet, apiJson, errMsg } from '../../api'
 import { fmtTime } from '../../lib/format'
-import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tooltip, TooltipContent, TooltipTrigger } from './ui'
+import { Button, Table, TableHeader, TableBody, TableHead, TableRow, TableCell,  EmptyState, Loading, ErrorMsg, RefreshBtn, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tooltip, TooltipContent, TooltipTrigger } from './ui'
 import Pagination from '@/components/Pagination'
+import { OverflowText } from '@/components/ui/overflow-text'
+import { Input } from '@/components/ui/input'
+import { useConfirm } from '@/hooks/use-confirm'
 import { toast } from 'sonner'
 
 interface User {
@@ -43,6 +46,7 @@ function realNameDetail(u: User): string {
 }
 
 export default function UsersTab() {
+  const [confirm, confirmDialog] = useConfirm()
   const [users, setUsers] = useState<User[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -50,7 +54,6 @@ export default function UsersTab() {
   // 实名筛选：'all' = 不过滤（哨兵，符合项目 Select 规范——空串被 Radix 当占位）
   const [realNameFilter, setRealNameFilter] = useState<'all' | 'yes' | 'no'>('all')
   const [busyId, setBusyId] = useState<number | null>(null)
-  const [confirmDel, setConfirmDel] = useState<number | null>(null)
   // 分页
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
@@ -107,10 +110,15 @@ export default function UsersTab() {
   }
 
   const delUser = async (uid: number) => {
+    if (!await confirm({
+      title: '删除用户',
+      desc: `确认删除内部用户 ID ${uid}？若存在活跃对局或赛事引用，后端会拒绝。`,
+      confirmText: '删除',
+      danger: true,
+    })) return
     setBusyId(uid)
     try {
       await apiJson(`/api/admin/users/${uid}`, 'DELETE')
-      setConfirmDel(null)
       await load()
     } catch (e) {
       setError(errMsg(e, '删除失败'))
@@ -136,14 +144,14 @@ export default function UsersTab() {
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <input
+        <Input
           value={q}
           onChange={(e) => {
             setQ(e.target.value)
             setPage(1)
           }}
           placeholder="搜索用户名/邮箱"
-          className="h-9 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring outline-none"
+          className="h-9 w-auto min-w-48"
         />
         <Select
           value={realNameFilter}
@@ -172,7 +180,7 @@ export default function UsersTab() {
         <Table className="min-w-[48rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">ID</TableHead>
+              <TableHead className="px-3 py-2.5">序号</TableHead>
               <TableHead className="px-3 py-2.5">用户名</TableHead>
               <TableHead className="px-3 py-2.5">邮箱</TableHead>
               <TableHead className="px-3 py-2.5">实名</TableHead>
@@ -183,16 +191,16 @@ export default function UsersTab() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.map((u) => (
+            {filtered.map((u, index) => (
               <TableRow key={u.id} className="hover:bg-accent">
-                <TableCell className="px-3 py-2 font-mono text-muted-foreground">{u.id}</TableCell>
+                <TableCell className="px-3 py-2 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
                 <TableCell className="px-3 py-2">
                   <Link to={`/user/${encodeURIComponent(u.username)}`} className="font-medium text-primary hover:underline">
                     {u.username}
                   </Link>
                 </TableCell>
-                <TableCell className="max-w-[16rem] truncate px-3 py-2 text-muted-foreground">
-                  <span className="block truncate" title={u.email}>{u.email}</span>
+                <TableCell className="max-w-[16rem] px-3 py-2 text-muted-foreground">
+                  <OverflowText>{u.email}</OverflowText>
                 </TableCell>
                 <TableCell className="px-3 py-2 text-sm">
                   {hasRealName(u) ? (
@@ -241,50 +249,25 @@ export default function UsersTab() {
                 <TableCell className="px-3 py-2 text-xs text-muted-foreground">{fmtTime(u.created_at)}</TableCell>
                 <TableCell className="px-3 py-2">
                   <div className="flex flex-wrap gap-1">
-                    <button
+                    <Button
                       type="button"
+                      variant="outline"
+                      size="sm"
                       disabled={busyId === u.id}
                       onClick={() => void toggleActive(u)}
-                      className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       {u.is_active ? '停用' : '启用'}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
+                      variant="outline"
+                      size="sm"
                       disabled={busyId === u.id}
                       onClick={() => void revokeSessions(u.id)}
-                      className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       下线
-                    </button>
-                    {confirmDel === u.id ? (
-                      <>
-                        <button
-                          type="button"
-                          disabled={busyId === u.id}
-                          onClick={() => void delUser(u.id)}
-                          className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          确认删除
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDel(null)}
-                          className="inline-flex h-8 items-center rounded-md border border-input bg-background px-3 text-xs text-foreground hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          取消
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={busyId === u.id}
-                        onClick={() => setConfirmDel(u.id)}
-                        className="inline-flex h-8 items-center rounded-md border border-destructive/30 bg-destructive/10 px-3 text-xs text-destructive hover:bg-destructive/20 focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        删除
-                      </button>
-                    )}
+                    </Button>
+                    <Button type="button" variant="destructive" size="sm" disabled={busyId === u.id} onClick={() => void delUser(u.id)}>删除</Button>
                   </div>
                 </TableCell>
               </TableRow>
@@ -294,6 +277,7 @@ export default function UsersTab() {
         {filtered.length === 0 && <EmptyState text="无用户" />}
       </div>
       <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+      {confirmDialog}
     </div>
   )
 }

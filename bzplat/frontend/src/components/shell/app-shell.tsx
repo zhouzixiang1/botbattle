@@ -1,6 +1,6 @@
 import { useState, lazy, Suspense } from 'react'
 import { useLocation, Routes, Route, NavLink, Link, useNavigate, Navigate } from 'react-router-dom'
-import { Menu, LogOut, User as UserIcon, Loader2, PanelLeftClose, PanelLeft } from 'lucide-react'
+import { CircleUserRound, Menu, LogOut, User as UserIcon, Loader2, Mail, PanelLeftClose, PanelLeft, Settings2 } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
 import NotificationBell from '@/components/NotificationBell'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -16,6 +16,8 @@ import {
   SheetTrigger,
 } from '@/components/ui/sheet'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { EntityName } from '@/components/ui/overflow-text'
+import { useScrollRestoration } from '@/hooks/use-scroll-restoration'
 import { cn } from '@/lib/utils'
 
 // 页面懒加载（代码分割：每个页面独立 chunk，recharts 等大依赖只在访问时加载）
@@ -34,6 +36,8 @@ const HumanPlay = lazy(() => import('@/pages/HumanPlay'))
 const UserProfile = lazy(() => import('@/pages/UserProfile'))
 const SearchPage = lazy(() => import('@/pages/Search'))
 const Notifications = lazy(() => import('@/pages/Notifications'))
+const Messages = lazy(() => import('@/pages/Messages'))
+const Feedback = lazy(() => import('@/pages/Feedback'))
 const Settings = lazy(() => import('@/pages/Settings'))
 const Login = lazy(() => import('@/pages/Login'))
 const Register = lazy(() => import('@/pages/Register'))
@@ -44,15 +48,15 @@ const Admin = lazy(() => import('@/pages/admin/Admin'))
 /** 懒加载 fallback（旋转加载图标，居中） */
 function PageFallback() {
   return (
-    <div className="flex min-h-[50vh] items-center justify-center">
-      <Loader2 className="size-6 animate-spin text-muted-foreground" />
+    <div className="flex min-h-[50vh] items-center justify-center" role="status" aria-label="页面加载中">
+      <Loader2 aria-hidden="true" className="size-6 animate-spin text-muted-foreground" />
     </div>
   )
 }
 
 const navCls = ({ isActive }: { isActive: boolean }) =>
   cn(
-    'inline-flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+    'inline-flex min-h-[var(--control-height)] min-w-0 items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
     isActive
       ? 'bg-primary/10 text-primary'
       : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
@@ -71,16 +75,24 @@ function navItemsFor(user?: { role?: string } | null): NavItem[] {
 function NavLinks({
   onNavigate,
   user,
+  touchTargets = false,
 }: {
   onNavigate?: () => void
   user?: { role?: string } | null
+  touchTargets?: boolean
 }) {
   return (
-    <nav className="flex flex-col gap-0.5">
+    <nav aria-label="主导航" className="flex min-w-0 flex-col gap-0.5">
       {navItemsFor(user).map((item) => (
-        <NavLink key={item.to} to={item.to} end={item.end} className={navCls} onClick={onNavigate}>
-          <item.icon className="size-4 shrink-0" />
-          {item.label}
+        <NavLink
+          key={item.to}
+          to={item.to}
+          end={item.end}
+          className={({ isActive }) => cn(navCls({ isActive }), touchTargets && 'min-h-11')}
+          onClick={onNavigate}
+        >
+          <item.icon aria-hidden="true" className="size-4 shrink-0" />
+          <span className="truncate">{item.label}</span>
         </NavLink>
       ))}
     </nav>
@@ -93,8 +105,10 @@ export function AppShell() {
   const location = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  useScrollRestoration()
 
   const onLogout = async () => {
+    setMobileOpen(false)
     await logout()
     nav('/')
   }
@@ -104,47 +118,91 @@ export function AppShell() {
   const showSidebar = !isAuthPage
 
   return (
-    <div className="flex min-h-screen bg-background font-sans text-foreground lg:flex-row">
-      {/* 桌面侧边栏（lg+，统一显示——登录/未登录都用侧边栏；auth 页不显示） */}
+    <div
+      data-app-shell
+      data-sidebar-visible={showSidebar ? 'true' : 'false'}
+      className="flex min-h-dvh min-w-0 bg-background font-sans text-foreground"
+    >
+      <button
+        type="button"
+        onClick={() => {
+          const main = document.getElementById('main-content')
+          main?.focus()
+          main?.scrollIntoView({ block: 'start' })
+        }}
+        className="fixed top-2 left-2 z-[var(--z-modal)] -translate-y-16 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground shadow-lg transition-transform focus:translate-y-0"
+      >
+        跳至主内容
+      </button>
+      {/* 桌面侧边栏（xl+，统一显示——登录/未登录都用侧边栏；auth 页不显示） */}
       {showSidebar && (
         <aside
+          aria-label="站点导航"
+          data-sidebar-collapsed={sidebarCollapsed ? 'true' : 'false'}
           className={cn(
-            'sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-card transition-all duration-200 lg:flex',
-            sidebarCollapsed ? 'w-14' : 'w-64',
+            'sticky top-0 hidden h-dvh shrink-0 flex-col overflow-x-clip border-r border-border bg-card xl:flex',
+            sidebarCollapsed
+              ? 'w-[var(--shell-sidebar-collapsed-width)]'
+              : 'w-[var(--shell-sidebar-width)]',
           )}
         >
           {/* Logo + 搜索（折叠时只显示 Logo 图标） */}
-          <div className="flex flex-col gap-3 border-b border-border p-3">
-            <div className="flex items-center justify-between">
-              <Link to="/" className="flex items-center">
-                <BrandMark size={sidebarCollapsed ? 'sm' : 'md'} />
+          <div
+            className={cn(
+              'flex flex-col border-b border-border',
+              sidebarCollapsed ? 'gap-2 p-2' : 'gap-3 p-3',
+            )}
+          >
+            <div className={cn('flex items-center justify-between', sidebarCollapsed && 'flex-col gap-2')}>
+              <Link
+                to="/"
+                aria-label={sidebarCollapsed ? 'Botbattle 首页' : undefined}
+                className="flex min-w-0 max-w-full items-center overflow-hidden"
+              >
+                <BrandMark
+                  className="min-w-0 max-w-full overflow-hidden"
+                  size={sidebarCollapsed ? 'sm' : 'md'}
+                  withText={!sidebarCollapsed}
+                />
               </Link>
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-7 shrink-0 text-muted-foreground"
+                className="shrink-0 text-muted-foreground"
                 onClick={() => setSidebarCollapsed((v) => !v)}
                 aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
               >
-                {sidebarCollapsed ? <PanelLeft className="size-4" /> : <PanelLeftClose className="size-4" />}
+                {sidebarCollapsed ? <PanelLeft aria-hidden="true" className="size-4" /> : <PanelLeftClose aria-hidden="true" className="size-4" />}
               </Button>
             </div>
             {!sidebarCollapsed && <GlobalSearch compact />}
           </div>
 
           {/* 导航（flex-1 占满中部，可滚动） */}
-          <div className="no-scrollbar flex-1 overflow-y-auto p-2">
+          <div
+            data-scroll-region="sidebar-navigation"
+            data-overflow-allowed="y"
+            className="no-scrollbar min-h-0 min-w-0 flex-1 overflow-y-auto p-2"
+          >
             {sidebarCollapsed ? (
-              <nav className="flex flex-col items-center gap-1">
+              <nav aria-label="主导航" className="flex min-w-0 flex-col items-center gap-1">
                 {navItemsFor(user).map((item) => (
                   <Tooltip key={item.to}>
                     <TooltipTrigger asChild>
                       <NavLink
                         to={item.to}
                         end={item.end}
-                        className="inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent [&.active]:bg-primary/10 [&.active]:text-primary"
+                        aria-label={item.label}
+                        className={({ isActive }) =>
+                          cn(
+                            'inline-flex size-[var(--control-height)] items-center justify-center rounded-lg transition-colors',
+                            isActive
+                              ? 'bg-primary/10 text-primary'
+                              : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                          )
+                        }
                       >
-                        <item.icon className="size-4" />
+                        <item.icon aria-hidden="true" className="size-4" />
                       </NavLink>
                     </TooltipTrigger>
                     <TooltipContent side="right">{item.label}</TooltipContent>
@@ -161,6 +219,11 @@ export function AppShell() {
             {!sidebarCollapsed && (
               <div className="flex items-center justify-end gap-1">
                 <ThemeToggle />
+                {isLoggedIn && (
+                  <Button asChild variant="ghost" size="icon" aria-label="站内信">
+                    <Link to="/messages"><Mail aria-hidden="true" className="size-4" /></Link>
+                  </Button>
+                )}
                 {isLoggedIn && <NotificationBell />}
               </div>
             )}
@@ -171,17 +234,22 @@ export function AppShell() {
                   sidebarCollapsed && 'justify-center',
                 )}
               >
-                <UserIcon className="size-4 shrink-0 text-primary" />
+                <UserIcon aria-hidden="true" className="size-4 shrink-0 text-primary" />
                 {!sidebarCollapsed && (
                   <>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Link
                           to={`/user/${encodeURIComponent(user?.username ?? '')}`}
-                          className="min-w-0 max-w-[9rem] flex-1 truncate text-sm font-medium text-foreground hover:text-primary"
-                          title={user?.display_name || user?.username}
+                          className="min-w-0 max-w-[7rem] flex-1 text-sm hover:text-primary"
                         >
-                          {user?.display_name || user?.username}
+                          <EntityName
+                            className="text-sm hover:text-primary"
+                            tooltip={false}
+                            tooltipFocusable={false}
+                          >
+                            {user?.display_name || user?.username}
+                          </EntityName>
                         </Link>
                       </TooltipTrigger>
                       <TooltipContent className="max-w-xs break-all">
@@ -199,10 +267,10 @@ export function AppShell() {
                       variant="ghost"
                       size="icon"
                       onClick={() => void onLogout()}
-                      className="size-8 shrink-0 text-muted-foreground"
+                      className="shrink-0 text-muted-foreground"
                       aria-label="登出"
                     >
-                      <LogOut className="size-4" />
+                      <LogOut aria-hidden="true" className="size-4" />
                     </Button>
                   </>
                 )}
@@ -227,49 +295,97 @@ export function AppShell() {
       <div className="flex min-w-0 flex-1 flex-col">
         {/*
           顶栏策略：
-          - 非 auth 页：仅 <lg 显示（lg+ 用侧栏）
+          - 非 auth 页：仅 <xl 显示（xl+ 用侧栏）
           - auth 页：全断点显示（仅品牌+主题）
         */}
         <header
+          data-shell-header
           className={cn(
-            'sticky top-0 z-50 border-b border-border bg-background/85 backdrop-blur-md',
-            showSidebar && 'lg:hidden'
+            'sticky top-0 z-[var(--z-navigation)] border-b border-border bg-background/85 backdrop-blur-md',
+            showSidebar && 'xl:hidden'
           )}
         >
-          <div className="flex h-14 w-full items-center gap-2 px-4 lg:px-8">
-            {/* 移动端汉堡（<lg）+ 品牌 */}
+          <div className="flex h-[var(--shell-header-height)] w-full min-w-0 items-center gap-2 px-[var(--page-gutter)]">
+            {/* 移动端汉堡（<xl）+ 品牌 */}
             {showSidebar ? (
               <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
                 <SheetTrigger asChild>
-                  <Button variant="ghost" size="icon" aria-label="菜单">
-                    <Menu className="size-5" />
+                  <Button variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="菜单">
+                    <Menu aria-hidden="true" className="size-5" />
                   </Button>
                 </SheetTrigger>
-                <SheetContent side="left" className="w-72 p-4">
-                  <SheetHeader>
+                <SheetContent
+                  side="left"
+                  data-scroll-region="mobile-navigation"
+                  data-overflow-allowed="y"
+                  className="w-[min(20rem,90vw)] overflow-y-auto p-4 [&_[data-slot=sheet-close]]:size-11"
+                >
+                  <SheetHeader className="p-0">
                     <SheetTitle className="text-left">
                       <BrandMark />
                     </SheetTitle>
                   </SheetHeader>
                   <div className="mt-4 px-1">
-                    <NavLinks onNavigate={() => setMobileOpen(false)} user={user} />
+                    <NavLinks onNavigate={() => setMobileOpen(false)} user={user} touchTargets />
                   </div>
-                  {/* 移动端补齐桌面侧栏的功能入口：搜索 + 通知 + 主题（<lg 时桌面侧栏隐藏，抽屉需对等） */}
+                  {/* 移动端补齐桌面侧栏的功能入口：搜索 + 通知 + 主题（<xl 时桌面侧栏隐藏，抽屉需对等） */}
                   <div className="mt-4 px-1">
-                    <GlobalSearch compact />
+                    <GlobalSearch compact touchTarget />
                     <div className="mt-2 flex items-center justify-between gap-2">
-                      {isLoggedIn && <NotificationBell />}
-                      <ThemeToggle />
+                      {isLoggedIn && <div className="flex items-center gap-2"><Button asChild variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="站内信"><Link to="/messages" onClick={() => setMobileOpen(false)}><Mail className="size-4" /></Link></Button><NotificationBell className="size-11" /></div>}
+                      <ThemeToggle className="size-11" />
                     </div>
                   </div>
+                  {isLoggedIn && (
+                    <div className="mt-5 min-w-0 border-t px-1 pt-4">
+                      <div className="flex min-w-0 items-center gap-2 rounded-lg bg-muted/40 p-3">
+                        <CircleUserRound aria-hidden="true" className="size-5 shrink-0 text-primary" />
+                        <div className="min-w-0 flex-1">
+                          <EntityName className="text-sm">
+                            {user?.display_name || user?.username}
+                          </EntityName>
+                          {user?.username && (
+                            <div className="truncate text-xs text-muted-foreground">@{user.username}</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="mt-2 grid min-w-0 grid-cols-2 gap-2">
+                        <Button asChild variant="outline" size="sm" className="min-h-11 w-full">
+                          <Link
+                            to={`/user/${encodeURIComponent(user?.username ?? '')}`}
+                            onClick={() => setMobileOpen(false)}
+                          >
+                            <UserIcon aria-hidden="true" className="size-4" />
+                            个人主页
+                          </Link>
+                        </Button>
+                        <Button asChild variant="outline" size="sm" className="min-h-11 w-full">
+                          <Link to="/settings" onClick={() => setMobileOpen(false)}>
+                            <Settings2 aria-hidden="true" className="size-4" />
+                            账号设置
+                          </Link>
+                        </Button>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="mt-2 min-h-11 w-full justify-start text-muted-foreground"
+                        onClick={() => void onLogout()}
+                      >
+                        <LogOut aria-hidden="true" className="size-4" />
+                        退出登录
+                      </Button>
+                    </div>
+                  )}
                   {!isLoggedIn && (
                     <div className="mt-6 flex flex-col gap-2 px-1">
-                      <Button asChild variant="outline" className="w-full">
+                      <Button asChild variant="outline" className="min-h-11 w-full">
                         <Link to="/login" onClick={() => setMobileOpen(false)}>
                           登录
                         </Link>
                       </Button>
-                      <Button asChild className="w-full shadow-soft">
+                      <Button asChild className="min-h-11 w-full shadow-soft">
                         <Link to="/register" onClick={() => setMobileOpen(false)}>
                           注册
                         </Link>
@@ -279,18 +395,21 @@ export function AppShell() {
                 </SheetContent>
               </Sheet>
             ) : null}
-            <Link to="/" className="flex items-center">
+            <Link to="/" className="flex min-h-11 items-center">
               <BrandMark />
             </Link>
 
             {/* 右侧操作 */}
-            <div className={cn('flex items-center gap-1', isAuthPage ? 'ml-auto' : 'ml-auto')}>
-              {!isAuthPage && (
-                <div className="hidden sm:block">
-                  <GlobalSearch hotkey />
-                </div>
+            <div className="ml-auto flex min-w-0 items-center gap-1">
+              {!isAuthPage && <GlobalSearch hotkey touchTarget />}
+              {!isAuthPage && isLoggedIn && (
+                <Button asChild variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="账户">
+                  <Link to="/settings">
+                    <CircleUserRound aria-hidden="true" className="size-[1.15rem]" />
+                  </Link>
+                </Button>
               )}
-              <ThemeToggle />
+              <ThemeToggle className="max-xl:size-11" />
               {isAuthPage && !isLoggedIn && (
                 <Button asChild variant="ghost" size="sm" className="text-muted-foreground">
                   <Link to="/login">登录</Link>
@@ -301,7 +420,12 @@ export function AppShell() {
         </header>
 
         {/* 主体内容 */}
-        <main className="mx-auto w-full flex-1 px-4 py-6 lg:px-8">
+        <main
+          id="main-content"
+          data-scroll-owner="page"
+          tabIndex={-1}
+          className="mx-auto w-full min-w-0 flex-1 px-[var(--page-gutter)] py-4 outline-none sm:py-5"
+        >
           <Suspense fallback={<PageFallback />}>
             <Routes>
               <Route path="/" element={<Home />} />
@@ -319,6 +443,9 @@ export function AppShell() {
               <Route path="/user/:name" element={<UserProfile />} />
               <Route path="/search" element={<SearchPage />} />
               <Route path="/notifications" element={<Notifications />} />
+              <Route path="/messages" element={<Messages />} />
+              <Route path="/messages/:conversationId" element={<Messages />} />
+              <Route path="/feedback" element={<Feedback />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />
@@ -333,7 +460,7 @@ export function AppShell() {
 
         {/* 页脚（跟随主体宽度，不跨侧栏） */}
         <footer className="border-t border-border">
-          <div className="flex w-full items-center px-4 py-5 text-xs text-muted-foreground lg:px-8">
+          <div className="flex w-full min-w-0 items-center px-[var(--page-gutter)] py-4 text-xs text-muted-foreground">
             <span>Botbattle · 多游戏 Bot 竞赛平台（德州 / 五子棋 / 点格棋）</span>
           </div>
         </footer>

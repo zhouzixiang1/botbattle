@@ -1,9 +1,9 @@
 """全面解耦 PR4：物理重组测试。
 
 验证：
-1. 各游戏的 engine/protocol/result/tiers 是各自入口；同构棋类协议原语只有一份公开实现
+1. 各游戏的 engine/protocol/result 是各自入口；同构棋类协议原语只有一份公开实现
 2. result 类互相独立（无共享父类），但满足鸭子契约
-3. spec 引用本包 engine/protocol/result/tiers，不存在第二套转发入口
+3. spec 引用本包 engine/protocol/result，不存在第二套转发入口
 """
 from __future__ import annotations
 
@@ -91,20 +91,9 @@ def test_protocols_are_independent_modules():
     assert gproto.parse_xy is pproto.parse_xy
 
 
-# ── 各游戏 tiers 独立 ─────────────────────────────────────────
-def test_tiers_are_independent_modules():
-    from bzplat.backend.games.holdem import tiers as ht
-    from bzplat.backend.games.gomoku import tiers as gt
-    from bzplat.backend.games.pencil import tiers as pt
-
-    assert ht is not gt is not pt
-    # 各自的 TIERS 列表独立（当前阈值相同，但可独立调）
-    assert len(ht.TIERS) == len(gt.TIERS) == len(pt.TIERS) == 6
-
-
 # ── spec 引用本包（不经旧 engine./protocol. 路径）──────────────
 def test_specs_reference_local_package():
-    """三 spec 的 session_factory/protocol/tiers 引用本 games/<game>/ 包，不经旧路径。"""
+    """三 spec 的 session_factory/protocol 引用本 games/<game>/ 包，不经旧路径。"""
     import inspect
 
     from bzplat.backend.games import registry

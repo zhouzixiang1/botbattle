@@ -6,9 +6,9 @@
 设计要点（调研结论）：
   - dev 服务 .env 配了真实 SMTP 且未设 BZ_TEST_CAPTCHA=1 → HTTP /register 的验证码无法被脚本
     解开，且批量 HTTP 注册会狂发真邮件。故用户与 Bot 用 DB-direct 播种（沿用 seed_test_accounts.py
-    与 e2e_smoke.sh 的模式），登录态用 **DB 直写 sessions 表** 生成不透明 Bearer token
-    （`store.add_session(new_session_token(), uid, session_expires())`）—— 服务端从同一 botzone.db
-    读 sessions，Bearer 真正打通 require_user/admin/organizer 全链路。
+    与 e2e_smoke.sh 的模式），登录态用 **DB 直写 sessions 表** 生成不透明 session token
+    （`store.add_session(new_session_token(), uid, session_expires())`）—— REST 用 Bearer，
+    人机 WebSocket 用 `bz_session` Cookie，服务端均从同一 botzone.db 验证。
   - Bot 执行方式由被测服务决定：生产式 Docker 沙箱，或 QA 服务显式设置 BZ_BOT_LOCAL=1。
   - 并发硬顶 = cpu//4；三款游戏均使用 GameSpec 固定规则（holdem 固定 70 手）。
   - 所有用户名/邮箱/Bot 名均 load_* 前缀，可一键识别清理；seed 按样例 ELF 内容幂等，
@@ -17,7 +17,7 @@
 8 个阶段覆盖矩阵：
   0 基础(公开读 + 鉴权)   1 Bot 端点   2 对局(三游戏多局+自博弈)
   3 SSE snapshot         4 人类 vs Bot(WS /play)   5 赛事全生命周期
-  6 自动对局(ladder)     7 Admin 关键端点
+  6 代码配置只读边界     7 Admin 关键端点
 
 用法：
   python scripts/load_test.py [--base http://127.0.0.1:50381] [--db botzone.db] [--users 60]
@@ -45,8 +45,23 @@ sys.path.insert(0, str(ROOT))
 
 from bzplat.backend.crypto import hash_password, new_session_token, session_expires  # noqa: E402
 from bzplat.backend.store import Store  # noqa: E402
-from bzplat.backend.store.schema import ROLE_ADMIN, ROLE_ORGANIZER, ROLE_USER  # noqa: E402
+from bzplat.backend.store.schema import (  # noqa: E402
+    CONTEST_OPEN,
+    CONTEST_PUBLISHED,
+    CONTEST_REST,
+    CONTEST_RUNNING,
+    ROLE_ADMIN,
+    ROLE_ORGANIZER,
+    ROLE_USER,
+)
 from bzplat.backend.bots.manager import BotManager  # noqa: E402
+from bzplat.backend.contests.stages import estimate_match_count  # noqa: E402
+from bzplat.backend.contests.templates import SCORING_CCGC  # noqa: E402
+from scripts._execution_request import (  # noqa: E402
+    execution_request_path,
+    require_execution_request,
+    wait_for_execution_match,
+)
 from scripts._qa_accounts import (  # noqa: E402
     QaAccountSpec,
     get_or_create_dedicated_account,
@@ -54,6 +69,11 @@ from scripts._qa_accounts import (  # noqa: E402
     preflight_dedicated_accounts,
 )
 from scripts._qa_bots import ensure_qa_sample_bot  # noqa: E402
+from scripts._qa_polling import (  # noqa: E402
+    QaPollingError,
+    RateAwareJsonPoller,
+    retry_after_seconds,
+)
 from scripts._qa_target import (  # noqa: E402
     assert_qa_instance,
     ensure_qa_base,
@@ -71,7 +91,7 @@ PASSWORD = "LoadTest1234"          # 所有 load 账号统一密码
 EMAIL_DOMAIN = "loadtest.local"
 N_USERS = 60                       # 普通用户数（可被 --users 覆盖）
 N_ORGS = 2                         # 组织者数
-TARGET_MATCHES = 12                # 阶段 2 目标对局总数（三游戏×4，配合关限流可在 ~60s 完成）
+TARGET_MATCHES = 12                # 阶段 2 目标对局总数（三游戏×4）
 SAMPLE_BINARIES = {
     "holdem": "samples/callbot_linux_amd64",
     "gomoku": "samples/gomokubot_linux_amd64",
@@ -80,6 +100,201 @@ SAMPLE_BINARIES = {
 GAMES = ("holdem", "gomoku", "pencil")
 LOAD_ACCOUNT_NAMESPACE = "load-test-v1"
 LOAD_ADMIN_NAME = "load_admin"
+# 生产式 Traditional 70 手单局约 285 秒；顺序链路留约 25% 余量。
+SEQUENTIAL_MATCH_TIMEOUT_SEC = 360.0
+# 两个 match slot 仍共享 Docker launch fence，claim 后的单局不能按理想并行估算。
+CONTENDED_MATCH_TIMEOUT_SEC = SEQUENTIAL_MATCH_TIMEOUT_SEC * 2
+# 固定 load mix 的共享批次预算：4×Holdem 360s + 8×棋类 180s = 48min。
+LOAD_GAME_BUDGET_SEC = {"holdem": 360.0, "gomoku": 180.0, "pencil": 180.0}
+# 阶段 5 只需证明完整赛事状态机，不重复阶段 2 已完成的 12 场吞吐压力。
+# 四人一轮瑞士产生 2 场并行资格赛，Top2 决赛再跑 1 场；覆盖全局排队、
+# 休息/人工恢复、晋级、单败终局与正式榜，且总拓扑严格有界为 3 场。
+CONTEST_GAME_ID = "gomoku"
+CONTEST_ENTRANT_COUNT = 4
+CONTEST_LIFECYCLE_MARGIN_SEC = 60.0
+ACTIVE_LOAD_CONTEST_STATUSES = (
+    CONTEST_OPEN,
+    CONTEST_PUBLISHED,
+    CONTEST_RUNNING,
+    CONTEST_REST,
+)
+
+
+class ContinuationCleanGateError(RuntimeError):
+    """The requested QA suffix would overlap unfinished isolated work."""
+
+
+def load_batch_timeout_seconds(games: list[str]) -> float:
+    """Return one absolute claim+completion budget for the fixed Docker batch."""
+    return sum(LOAD_GAME_BUDGET_SEC[game] for game in games)
+
+
+def bounded_contest_payload(run_tag: str) -> dict[str, Any]:
+    """Build the small, real two-stage tournament used by final load QA."""
+    return {
+        "title": f"LoadTest gomoku bounded {run_tag}",
+        "game_id": CONTEST_GAME_ID,
+        "stages": [
+            {
+                "key": "qualifier",
+                "type": "swiss",
+                "rounds": 1,
+                "advance_count": 2,
+                "scoring": SCORING_CCGC,
+                "rest_after_minutes": 1,
+                "allow_bot_swap_in_rest": True,
+            },
+            {
+                "key": "final",
+                "type": "single_elimination",
+                "scoring": SCORING_CCGC,
+                "rest_after_minutes": 0,
+                "allow_bot_swap_in_rest": False,
+            },
+        ],
+    }
+
+
+def contest_match_count(stages: list[dict[str, Any]]) -> int:
+    """Return the exact topology size after each advancement cut."""
+    participants = CONTEST_ENTRANT_COUNT
+    total = 0
+    for stage in stages:
+        total += estimate_match_count(stage, participants)
+        advance_count = stage.get("advance_count")
+        if isinstance(advance_count, int) and not isinstance(advance_count, bool):
+            participants = min(participants, advance_count)
+    return total
+
+
+def contest_timeout_seconds(stages: list[dict[str, Any]]) -> float:
+    """Return a topology-derived absolute budget for one bounded contest."""
+    return (
+        load_batch_timeout_seconds(
+            [CONTEST_GAME_ID] * max(1, contest_match_count(stages))
+        )
+        + CONTEST_LIFECYCLE_MARGIN_SEC
+    )
+
+
+def selected_phase_numbers(start_phase: int) -> tuple[int, ...]:
+    """Return the deterministic suffix used by a continuation run."""
+    if start_phase not in range(8):
+        raise ValueError("start_phase 必须在 0..7")
+    return tuple(range(start_phase, 8))
+
+
+def needs_continuation_gate(*, skip_seed: bool, start_phase: int) -> bool:
+    """Return whether this run reuses state or skips an earlier QA phase."""
+    return bool(skip_seed or start_phase > 0)
+
+
+def execution_queue_health_errors(payload: Any) -> list[str]:
+    """Validate a public queue snapshot without treating missing fields as zero."""
+    if not isinstance(payload, dict):
+        return ["snapshot 不是对象"]
+    errors: list[str] = []
+    dispatcher = payload.get("dispatcher")
+    if not isinstance(dispatcher, dict):
+        errors.append("dispatcher 缺失")
+    else:
+        if dispatcher.get("state") != "running":
+            errors.append(f"dispatcher.state={dispatcher.get('state')!r}")
+        if dispatcher.get("accepting") is not True:
+            errors.append(f"dispatcher.accepting={dispatcher.get('accepting')!r}")
+
+    for key in ("active", "queued"):
+        value = payload.get(key)
+        if not isinstance(value, list):
+            errors.append(f"{key} 不是列表")
+        elif value:
+            errors.append(f"{key}={len(value)}")
+    queued_count = payload.get("queued_count")
+    if type(queued_count) is not int or queued_count != 0:
+        errors.append(f"queued_count={queued_count!r}")
+
+    capacity = payload.get("capacity")
+    if not isinstance(capacity, dict):
+        errors.append("capacity 缺失")
+        return errors
+    for key in ("match_slots", "sandbox_units"):
+        resource = capacity.get(key)
+        if not isinstance(resource, dict):
+            errors.append(f"capacity.{key} 缺失")
+            continue
+        used = resource.get("used")
+        total = resource.get("capacity")
+        if type(used) is not int or used != 0:
+            errors.append(f"capacity.{key}.used={used!r}")
+        if type(total) is not int or total <= 0:
+            errors.append(f"capacity.{key}.capacity={total!r}")
+    running_matches = capacity.get("running_matches")
+    if type(running_matches) is not int or running_matches != 0:
+        errors.append(f"capacity.running_matches={running_matches!r}")
+    return errors
+
+
+def active_loadtest_contests(db_path: str) -> list[dict[str, Any]]:
+    """Read unfinished load-test contests without opening the migrating Store."""
+    isolated = qa_db_path(db_path, ROOT)
+    uri = isolated.as_uri() + "?mode=ro"
+    placeholders = ",".join("?" for _ in ACTIVE_LOAD_CONTEST_STATUSES)
+    with sqlite3.connect(uri, uri=True, timeout=5) as con:
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA query_only=ON")
+        rows = con.execute(
+            "SELECT id,title,status FROM contests "
+            f"WHERE title LIKE ? AND status IN ({placeholders}) ORDER BY id",
+            ("LoadTest %", *ACTIVE_LOAD_CONTEST_STATUSES),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def require_continuation_clean(
+    api: "Api", *, label: str = "续跑 clean gate"
+) -> dict[str, Any]:
+    """Prove a stable idle queue and no unfinished load-test contest."""
+    snapshots: list[dict[str, Any]] = []
+    for observation in (1, 2):
+        snapshot = api.poll_json(
+            "/api/execution-queue",
+            label=f"{label} 第 {observation} 次队列快照",
+            deadline=time.monotonic() + 10,
+        )
+        errors = execution_queue_health_errors(snapshot)
+        if errors:
+            raise ContinuationCleanGateError("；".join(errors))
+        snapshots.append(snapshot)
+        if observation == 1:
+            contests = active_loadtest_contests(api.db_path)
+            if contests:
+                detail = ", ".join(
+                    f"#{row['id']} {row['title']} ({row['status']})"
+                    for row in contests
+                )
+                raise ContinuationCleanGateError(
+                    f"存在未完成的 LoadTest 赛事：{detail}"
+                )
+    return snapshots[-1]
+
+
+def wait_execution_queue_idle(
+    api: "Api", *, timeout: float = 60.0, label: str = "最终执行队列"
+) -> dict[str, Any]:
+    """Wait for jobs, capacity, dispatcher and exact sandbox cleanup to converge."""
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] = {}
+    errors: list[str] = []
+    while time.monotonic() < deadline:
+        last = api.poll_json(
+            "/api/execution-queue",
+            label=label,
+            deadline=deadline,
+        )
+        errors = execution_queue_health_errors(last)
+        if not errors:
+            return last
+    raise TimeoutError(f"{label}未健康收敛：{errors!r} snapshot={last!r}")
 
 
 def load_account_spec(username: str, email: str, role: str) -> QaAccountSpec:
@@ -128,22 +343,104 @@ class Api:
         self.base = base.rstrip("/")
         self.db_path = db_path
         self.client = httpx.Client(base_url=self.base, timeout=300)
+        self.poller = RateAwareJsonPoller(min_interval=1.0)
 
     def authed(self, token: str, method: str, path: str, **kw) -> httpx.Response:
         headers = dict(kw.pop("headers", {}) or {})
         headers.setdefault("Authorization", f"Bearer {token}")
         return self.client.request(method, path, headers=headers, **kw)
 
-    def wait_match(self, token: str, mid: str, timeout: float = 180) -> dict:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            r = self.authed(token, "GET", f"/api/matches/{mid}")
-            if r.status_code == 200:
-                m = r.json()["match"]
-                if m["status"] in ("completed", "aborted"):
-                    return m
-            time.sleep(0.5)
-        raise TimeoutError(f"对局 {mid} {timeout}s 未完成")
+    def poll_json(
+        self,
+        path: str,
+        *,
+        label: str,
+        deadline: float,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        request = (
+            (lambda: self.authed(token, "GET", path))
+            if token
+            else (lambda: self.client.get(path))
+        )
+        return self.poller.get_json(request, label=label, deadline=deadline)
+
+    def wait_match(
+        self,
+        token: str,
+        mid: str,
+        timeout: float = SEQUENTIAL_MATCH_TIMEOUT_SEC,
+    ) -> dict:
+        deadline = time.monotonic() + timeout
+        last_payload: dict[str, Any] | None = None
+        while True:
+            try:
+                payload = self.poll_json(
+                    f"/api/matches/{mid}",
+                    token=token,
+                    label=f"对局 {mid} 详情",
+                    deadline=deadline,
+                )
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"对局 {mid} 在 {timeout:.1f}s 内未完成；{exc}；"
+                    f"最后成功响应 HTTP 200 body={last_payload!r}"
+                ) from exc
+            last_payload = payload
+            match = payload.get("match")
+            if not isinstance(match, dict):
+                raise QaPollingError(
+                    f"对局 {mid} 详情缺少 match 对象：HTTP 200 body={payload!r}"
+                )
+            status = match.get("status")
+            if not isinstance(status, str) or not status:
+                raise QaPollingError(
+                    f"对局 {mid} 详情缺少 status：HTTP 200 body={payload!r}"
+                )
+            if status in ("completed", "aborted"):
+                return match
+
+    @staticmethod
+    def accepted_execution(
+        response: httpx.Response, *, label: str
+    ) -> dict[str, Any]:
+        try:
+            payload: Any = response.json()
+        except ValueError:
+            payload = None
+        return require_execution_request(
+            response.status_code,
+            payload,
+            label=label,
+            detail=response.text[:240],
+        )
+
+    def wait_execution_match(
+        self,
+        token: str,
+        initial: dict[str, Any],
+        *,
+        label: str,
+        timeout: float = 180,
+    ) -> str:
+        deadline = time.monotonic() + timeout
+
+        def fetch(public_id: str) -> tuple[int, Any, str]:
+            payload = self.poll_json(
+                execution_request_path(public_id),
+                token=token,
+                label=f"{label} 执行请求 {public_id}",
+                deadline=deadline,
+            )
+            return 200, payload, ""
+
+        return wait_for_execution_match(
+            initial,
+            fetch,
+            label=label,
+            timeout=timeout,
+            interval=0,
+        )
 
 
 def multipart(fields: dict[str, Any], file_field: str, filename: str, data: bytes) -> tuple[dict, bytes]:
@@ -271,9 +568,6 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     r = api.client.get("/api/leaderboard?game_id=holdem&limit=20")
     check("GET /api/leaderboard", r.status_code == 200 and "leaderboard" in r.json(), r.text[:80])
 
-    # 段位定义（PR-5）
-    r = api.client.get("/api/tiers?game_id=holdem")
-    check("GET /api/tiers", r.status_code == 200 and len(r.json().get("tiers", [])) >= 6, r.text[:80])
     # 经验/等级体系（PR-9）
     r = api.client.get("/api/levels/info")
     check("GET /api/levels/info", r.status_code == 200 and "thresholds" in r.json(), r.text[:80])
@@ -340,8 +634,19 @@ def phase0_basics(api: Api, ctx: dict[str, Any]) -> None:
     if rc:
         rr = rc(api, tok, {"my_bot_id": ctx["bots"][ctx["user_names"][0]]["holdem"],
                            "opponent_bot_id": ctx["bots"][u2]["holdem"], "game_id": "holdem"})
-        if rr.status_code == 200:
-            tmid = rr.json()["match_id"]
+        try:
+            execution = api.accepted_execution(rr, label="阶段0互动挑战")
+            tmid = api.wait_execution_match(
+                tok, execution, label="阶段0互动挑战", timeout=180
+            )
+        except Exception as exc:
+            check("阶段0互动挑战进入执行队列", False, str(exc))
+        else:
+            check(
+                "阶段0互动挑战进入执行队列(202)",
+                True,
+                f"public_id={execution['public_id']}",
+            )
             # 评论
             r = api.authed(tok, "POST", "/api/comments",
                            json={"target_type": "match", "target_id": tmid, "body": "loadtest comment"})
@@ -491,12 +796,62 @@ def _user_id(db_path: str, username: str) -> int:
 
 # ── 阶段 2：对局（三游戏多局 + 自博弈）────────────────────────
 # dev 服务按 IP 限流：/api/matches/challenge = 8 req/60s（同一 IP 共享）。
-# 压测时建议重启服务设 BZ_RATE_LIMIT=0 关闭限流，则挑战无需节流、可快速并发。
-# 若限流开启，所有请求来自 127.0.0.1，挑战需节流：每窗口最多 8 个，间隔 ~7.6s。
+# 发布 QA 保持服务端限流；所有请求来自 127.0.0.1，因此客户端节流并对真实 429 有界重试。
+# --no-throttle 仅供已明确关闭限流的专项本地运行，不能用于发布验收。
 CHALLENGE_RATE = 8           # 每 RATE_WINDOW 秒最多发起的挑战数（限流开启时）
 RATE_WINDOW = 60.0
 CHALLENGE_INTERVAL = RATE_WINDOW / CHALLENGE_RATE  # ~7.5s（限流开启时）
 NO_THROTTLE = False          # --no-throttle 标志（服务端关限流时跳过挑战节流）
+
+
+def _check_phase2_transport_outcomes(
+    *,
+    accepted_count: int,
+    terminal_count: int,
+    errors: list[str],
+    target: int = TARGET_MATCHES,
+) -> tuple[list[str], list[str]]:
+    """Make every missing acceptance or terminal result a hard QA failure."""
+    challenge_errors = [e for e in errors if e.startswith("challenge ")]
+    wait_errors = [e for e in errors if e.startswith("wait ")]
+    check(
+        f"挑战请求全部接受（{accepted_count}/{target} 场）",
+        accepted_count == target and not challenge_errors,
+        f"challenge_errors={challenge_errors}",
+    )
+    check(
+        f"已接受挑战全部取得终态（{terminal_count}/{accepted_count} 场）",
+        terminal_count == accepted_count and not wait_errors,
+        f"wait_errors={wait_errors}",
+    )
+    return challenge_errors, wait_errors
+
+
+def _phase2_pairs(
+    ctx: dict[str, Any], *, target: int = TARGET_MATCHES
+) -> list[tuple[int, int, str]]:
+    """Build challenges only from the active seed Bot inventory in ``ctx``."""
+    user_names = ctx["user_names"]
+    if not user_names:
+        raise ValueError("阶段2至少需要一个用户")
+
+    pairs: list[tuple[int, int, str]] = []
+    games_cycle = ["holdem", "gomoku", "pencil"] * ((target // 3) + 2)
+    for i in range(target):
+        game = games_cycle[i % len(games_cycle)]
+        owner = user_names[i % len(user_names)]
+        my = ctx["bots"][owner][game]
+        if i % 4 == 0:
+            # 产品允许同 Bot 自博弈。只使用 seed/重建 ctx 已校验为活跃的正式
+            # Bot，不从 DB 拾取 phase1 已软删除的临时 extra Bot。
+            pairs.append((my, my, game))
+            continue
+
+        opponent = user_names[(i + 7) % len(user_names)]
+        if owner == opponent and len(user_names) > 1:
+            opponent = user_names[(i + 1) % len(user_names)]
+        pairs.append((my, ctx["bots"][opponent][game], game))
+    return pairs
 
 
 def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
@@ -504,45 +859,40 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
           f"顺序提交、并行等待，挑战节流 {CHALLENGE_RATE}/{int(RATE_WINDOW)}s）===")
     user_names = ctx["user_names"]
 
-    # 构造对局对：跨用户对战 + 自博弈（同 owner 两不同 bot）
-    pairs: list[tuple[int, int, str]] = []  # (my_bot_id, opp_bot_id, game)
-    games_cycle = ["holdem", "gomoku", "pencil"] * ((TARGET_MATCHES // 3) + 2)
-    extra_bots = {}  # 缓存：username→extra holdem bot id
-    for i in range(TARGET_MATCHES):
-        game = games_cycle[i % len(games_cycle)]
-        if i % 4 == 0 and len(user_names) >= 1:
-            # 自博弈：同一 owner 的该游戏 bot vs 该 owner 的 extra bot（仅 holdem 有 extra）
-            owner = user_names[i % len(user_names)]
-            my = ctx["bots"][owner][game]
-            if game == "holdem":
-                if owner not in extra_bots:
-                    names = _all_bot_names(api.db_path, owner)
-                    extra = next((n for n in names if n == f"{owner}_extra"), None)
-                    extra_bots[owner] = _bot_id_by_name(api.db_path, extra) if extra else None
-                if extra_bots.get(owner):
-                    opp = extra_bots[owner]
-                    pairs.append((my, opp, game))
-                    continue
-            # 无 extra：跨账号同游戏 bot
-            other = user_names[(i + 1) % len(user_names)]
-            pairs.append((my, ctx["bots"][other][game], game))
-        else:
-            # 跨用户对战
-            a = user_names[i % len(user_names)]
-            b = user_names[(i + 7) % len(user_names)]
-            if a == b:
-                b = user_names[(i + 13) % len(user_names)]
-            pairs.append((ctx["bots"][a][game], ctx["bots"][b][game], game))
+    # 构造对局对：跨用户对战 + 同一活跃正式 Bot 自博弈。
+    pairs = _phase2_pairs(ctx)
+
+    batch_timeout = load_batch_timeout_seconds([game for _, _, game in pairs])
+    batch_deadline = time.monotonic() + batch_timeout
 
     results: list[dict] = []
     errors: list[str] = []
     done = [0]
     lock = threading.Lock()
 
-    def wait_one(mid: str, game: str, owner_tok: str) -> None:
+    def wait_one(
+        execution: dict[str, Any], game: str, owner_tok: str
+    ) -> None:
         try:
-            # Hold'em 规则固定为 70 手，不能靠请求参数缩短；给真实整场留足时间。
-            m = api.wait_match(owner_tok, mid, timeout=240)
+            claim_remaining = batch_deadline - time.monotonic()
+            if claim_remaining <= 0:
+                raise TimeoutError(f"阶段2批次超过 {batch_timeout:.0f}s 绝对上限")
+            mid = api.wait_execution_match(
+                owner_tok,
+                execution,
+                label=f"阶段2 {game} 挑战",
+                timeout=claim_remaining,
+            )
+            match_remaining = batch_deadline - time.monotonic()
+            if match_remaining <= 0:
+                raise TimeoutError(f"阶段2批次超过 {batch_timeout:.0f}s 绝对上限")
+            # claim 后仍可能与另一场共享 Docker launch fence；每局最多 12 分钟，
+            # 同时受整个固定 12 场批次的绝对截止约束。
+            m = api.wait_match(
+                owner_tok,
+                mid,
+                timeout=min(CONTENDED_MATCH_TIMEOUT_SEC, match_remaining),
+            )
             with lock:
                 results.append({"match": m, "game": game})
                 done[0] += 1
@@ -554,6 +904,7 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
 
     # 单一线程顺序发起挑战；每个成功请求立即起 waiter 线程并行等待终态。
     # 这里不控制或断言服务端同时运行的对局数，也不声称持续打满并发 ceiling。
+    print(f"    阶段 2 claim+完成共享绝对上限 {batch_timeout / 60:.0f} 分钟")
     t0 = time.time()
     waiters: list[threading.Thread] = []
     for idx, (my_bid, opp_bid, game) in enumerate(pairs):
@@ -566,16 +917,20 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
             expected = idx * CHALLENGE_INTERVAL
             if elapsed < expected:
                 time.sleep(expected - elapsed)
-        r = api.authed(owner_tok, "POST", "/api/matches/challenge", json=payload)
-        if r.status_code != 200:
+        try:
+            r = _paced_challenge(api, owner_tok, payload)
+            execution = api.accepted_execution(
+                r, label=f"阶段2 {game} 挑战"
+            )
+        except Exception as exc:
             with lock:
-                errors.append(f"challenge {game} {r.status_code} {r.text[:60]}")
-            # 被限流时多等一个窗口再继续
-            if r.status_code == 429:
-                time.sleep(RATE_WINDOW / CHALLENGE_RATE)
+                errors.append(f"challenge {game}: {exc}")
             continue
-        mid = r.json()["match_id"]
-        th = threading.Thread(target=wait_one, args=(mid, game, owner_tok), daemon=True)
+        th = threading.Thread(
+            target=wait_one,
+            args=(execution, game, owner_tok),
+            daemon=True,
+        )
         th.start()
         waiters.append(th)
     for th in waiters:
@@ -584,14 +939,17 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
 
     completed = [r for r in results if r["match"]["status"] == "completed"]
     aborted = [r for r in results if r["match"]["status"] == "aborted"]
-    launched = len(results) + len([e for e in errors if e.startswith("wait ")])
-    check(f"发起挑战（成功+等待）{launched} 场", launched >= TARGET_MATCHES * 0.8,
-          f"results={len(results)} challenge_errors={sum(1 for e in errors if e.startswith('challenge'))}")
+    accepted_count = len(waiters)
+    challenge_errors, wait_errors = _check_phase2_transport_outcomes(
+        accepted_count=accepted_count,
+        terminal_count=len(results),
+        errors=errors,
+    )
     check("挑战对局多数完成（completed > aborted）", len(completed) > len(aborted),
-          f"completed={len(completed)} aborted={len(aborted)} wait_errors={sum(1 for e in errors if e.startswith('wait'))}")
-    challenge_429 = sum(1 for e in errors if "429" in e)
+          f"completed={len(completed)} aborted={len(aborted)} wait_errors={len(wait_errors)}")
+    challenge_429 = sum(1 for e in challenge_errors if "429" in e)
     if challenge_429:
-        warn(f"阶段 2 挑战被限流 429 共 {challenge_429} 例（节流仍被触发，可减小 TARGET_MATCHES）")
+        warn(f"阶段 2 挑战限流 429 有界重试耗尽 {challenge_429} 例")
 
     # 各游戏至少有 1 场 completed
     for g in GAMES:
@@ -616,14 +974,14 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
     if completed:
         mid = completed[0]["match"]["id"]
         owner_tok = ctx["tokens"][user_names[0]]
-        r = api.authed(owner_tok, "GET", f"/api/matches/{mid}")
-        events = json.loads(r.json()["replay"].get("events_json") or "[]")
+        r = api.authed(owner_tok, "GET", f"/api/matches/{mid}/replay")
+        events = r.json().get("events") or []
         check("replay events 非空", len(events) > 0, "空")
 
     # 排行榜 Glicko 已更新（challenge 类型会更新）
     r = api.client.get("/api/leaderboard?game_id=holdem&limit=50")
     lb = r.json().get("leaderboard", [])
-    played = [x for x in lb if x.get("matches_played", 0) > 0]
+    played = [x for x in lb if x.get("rated_matches", 0) > 0]
     check("排行榜存在已参赛 bot（Glicko 更新）", len(played) > 0, f"played={len(played)}")
 
     print(f"    阶段 2 总耗时 {dt:.1f}s，completed={len(completed)} aborted={len(aborted)}")
@@ -634,46 +992,64 @@ def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
         time.sleep(RATE_WINDOW + 2)
 
 
-def _paced_challenge(api: Api, token: str, payload: dict, *, retries: int = 3) -> httpx.Response:
-    """发起挑战，遇 429 限流则按 Retry-After 等待重试。"""
-    for _ in range(retries):
-        r = api.authed(token, "POST", "/api/matches/challenge", json=payload)
-        if r.status_code != 429:
-            return r
-        wait = float(r.headers.get("Retry-After", "8")) or 8.0
-        time.sleep(wait + 1)
-    return r  # 最后一次的响应（仍 429 则交由调用方处理）
+def _rate_limited_post(
+    api: Api,
+    token: str,
+    path: str,
+    payload: dict,
+    *,
+    max_attempts: int,
+    default_retry_after: float,
+) -> httpx.Response:
+    """POST once accepted; retry only explicit 429 responses, with a hard cap."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    for attempt in range(max_attempts):
+        response = api.authed(token, "POST", path, json=payload)
+        if response.status_code != 429 or attempt + 1 == max_attempts:
+            return response
+        wait = retry_after_seconds(
+            response.headers.get("Retry-After"),
+            default=default_retry_after,
+        )
+        time.sleep(wait + 1.0)
+    raise AssertionError("unreachable")
 
 
-def _paced_human(api: Api, token: str, payload: dict, *, retries: int = 2) -> httpx.Response:
-    """发起人类对局，遇 429 限流则等待重试（/api/matches/human 走 _API_DEFAULT 120/60s）。"""
-    for _ in range(retries):
-        r = api.authed(token, "POST", "/api/matches/human", json=payload)
-        if r.status_code != 429:
-            return r
-        wait = float(r.headers.get("Retry-After", "5")) or 5.0
-        time.sleep(wait + 1)
-    return r
+def _paced_challenge(
+    api: Api,
+    token: str,
+    payload: dict,
+    *,
+    max_attempts: int = 3,
+) -> httpx.Response:
+    """发起挑战；仅对 429 按 Retry-After 有界重试，202 不会重复提交。"""
+    return _rate_limited_post(
+        api,
+        token,
+        "/api/matches/challenge",
+        payload,
+        max_attempts=max_attempts,
+        default_retry_after=8.0,
+    )
 
 
-def _all_bot_names(db_path: str, owner_username: str) -> list[str]:
-    con = sqlite3.connect(db_path)
-    try:
-        rows = con.execute(
-            "SELECT b.name FROM bots b JOIN users u ON b.owner_id=u.id WHERE u.username=?",
-            (owner_username,),
-        ).fetchall()
-        return [r[0] for r in rows]
-    finally:
-        con.close()
-
-
-def _bot_id_by_name(db_path: str, name: str) -> int:
-    con = sqlite3.connect(db_path)
-    try:
-        return int(con.execute("SELECT id FROM bots WHERE name=?", (name,)).fetchone()[0])
-    finally:
-        con.close()
+def _paced_human(
+    api: Api,
+    token: str,
+    payload: dict,
+    *,
+    max_attempts: int = 2,
+) -> httpx.Response:
+    """发起人类对局；仅对 429 有界重试（该端点走 _API_DEFAULT 120/60s）。"""
+    return _rate_limited_post(
+        api,
+        token,
+        "/api/matches/human",
+        payload,
+        max_attempts=max_attempts,
+        default_retry_after=5.0,
+    )
 
 
 # ── 阶段 3：SSE snapshot ──────────────────────────────────────
@@ -686,8 +1062,19 @@ def phase3_sse(api: Api, ctx: dict[str, Any]) -> None:
         "my_bot_id": ctx["bots"][u1]["holdem"], "opponent_bot_id": ctx["bots"][u2]["holdem"],
         "game_id": "holdem",
     })
-    check("发起 SSE 观赛对局", r.status_code == 200, r.text[:80])
-    mid = r.json()["match_id"]
+    try:
+        execution = api.accepted_execution(r, label="SSE 观赛挑战")
+        mid = api.wait_execution_match(
+            tok, execution, label="SSE 观赛挑战", timeout=240
+        )
+    except Exception as exc:
+        check("发起 SSE 观赛对局(202 + match_id)", False, str(exc))
+        return
+    check(
+        "发起 SSE 观赛对局(202 + match_id)",
+        True,
+        f"public_id={execution['public_id']}",
+    )
 
     # 订阅并收集非 ping 事件；正常契约下首帧 snapshot 会令线程立即退出。
     # 此阶段只证明连接可建立、首帧 snapshot 结构可用；不等待也不声称验证
@@ -784,11 +1171,24 @@ def phase4_human(api: Api, ctx: dict[str, Any]) -> None:
         bot_id = ctx["bots"][opp][game]
         hu_tok = ctx["tokens"][hu]
         r = _paced_human(api, hu_tok, {"bot_id": bot_id, "game_id": game, **cfg})
-        if r.status_code != 200:
-            check(f"人类对战 {game} 建局", False, f"{r.status_code} {r.text[:80]}")
+        try:
+            execution = api.accepted_execution(
+                r, label=f"人类对战 {game}"
+            )
+            mid = api.wait_execution_match(
+                hu_tok,
+                execution,
+                label=f"人类对战 {game}",
+                timeout=240,
+            )
+        except Exception as exc:
+            check(f"人类对战 {game} 建局", False, str(exc))
             continue
-        mid = r.json()["match_id"]
-        check(f"人类对战 {game} 建局", True)
+        check(
+            f"人类对战 {game} 建局(202)",
+            True,
+            f"public_id={execution['public_id']}",
+        )
 
         # 并发提第二局（同一用户）应被拒（per-user ≤1）—— 仅 holdem 场景测一次
         if idx == 0:
@@ -840,12 +1240,18 @@ def _rating_snapshot(db_path: str, bot_ids: list[int]) -> dict[int, tuple]:
 def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game: str) -> bool:
     """连接 WS /play，回应 your_turn 直到 match_end/error。"""
     ws_base = api.base.replace("http://", "ws://").replace("https://", "wss://")
-    url = f"{ws_base}/api/matches/{mid}/play?token={token}"
+    url = f"{ws_base}/api/matches/{mid}/play"
 
     async def play() -> bool:
         occupied: set[tuple[int, int]] = set()
         try:
-            async with websockets.connect(url, max_size=None, open_timeout=20) as ws:
+            async with websockets.connect(
+                url,
+                origin=api.base.rstrip("/"),
+                additional_headers={"Cookie": f"bz_session={token}"},
+                max_size=None,
+                open_timeout=20,
+            ) as ws:
                 while True:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=180)
@@ -918,77 +1324,171 @@ def _human_move(
 # ── 阶段 5：赛事全生命周期 ────────────────────────────────────
 def phase5_contest(api: Api, ctx: dict[str, Any]) -> None:
     print("\n=== 阶段 5：赛事全生命周期 ===")
-    # 模板列表（公开）已阶段 0 覆盖；这里覆盖 create/open/register/dispatch/start/resume/advance/detail
+    # 模板列表（公开）已阶段 0 覆盖；这里覆盖自定义阶段 create/open/register/
+    # dispatch/publish/start/rest/resume/advance/detail/official-results。
     org1_tok = ctx["tokens"][ctx["org_names"][0]]
-    org2_tok = ctx["tokens"][ctx["org_names"][1]]
 
-    # org1 办 holdem Swiss-KO，org2 办 gomoku round-robin
-    contests = []
-    r = api.authed(org1_tok, "POST", "/api/contests", json={
-        "title": "LoadTest Holdem Swiss-KO", "template_id": "holdem_swiss_ko", "game_id": "holdem",
-    })
-    check("org1 创建 holdem Swiss-KO 赛事", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
-    if r.status_code == 200:
-        contests.append(("holdem", r.json()["contest"]["id"], org1_tok, ctx["org_names"][0]))
+    # 阶段 2 已验证三游戏 12 场真实 Docker 吞吐；这里用一届 3 场的有界
+    # 两阶段五子棋赛事专门验证状态机，避免把约 19 场的生产模板误当发布门禁。
+    run_tag = uuid.uuid4().hex[:8]
+    payload = bounded_contest_payload(run_tag)
+    expected_matches = contest_match_count(payload["stages"])
+    check("有界赛事拓扑精确为 3 场", expected_matches == 3, str(expected_matches))
+    r = api.authed(org1_tok, "POST", "/api/contests", json=payload)
+    check("组织者创建有界两阶段赛事", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
+    if r.status_code != 200:
+        return
+    contests = [(
+        CONTEST_GAME_ID, r.json()["contest"]["id"], org1_tok,
+        ctx["org_names"][0], payload["stages"], expected_matches,
+    )]
 
-    r = api.authed(org2_tok, "POST", "/api/contests", json={
-        "title": "LoadTest Gomoku RR", "template_id": "gomoku_swiss_ko", "game_id": "gomoku",
-    })
-    check("org2 创建 gomoku 赛事", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
-    if r.status_code == 200:
-        contests.append(("gomoku", r.json()["contest"]["id"], org2_tok, ctx["org_names"][1]))
-
-    for game, cid, org_tok, org_name in contests:
+    for game, cid, org_tok, org_name, stages, expected_matches in contests:
         # open
         r = api.authed(org_tok, "POST", f"/api/contests/{cid}/open")
         check(f"[{game}] open 报名", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
 
-        # 8 个用户报名（用各自该游戏 bot）
-        entrants = ctx["user_names"][:8]
+        # 四人先并发两场资格赛；Top2 决赛再跑一场。
+        entrants = ctx["user_names"][:CONTEST_ENTRANT_COUNT]
         for uname in entrants:
             utok = ctx["tokens"][uname]
             bot_id = ctx["bots"][uname][game]
             r = api.authed(utok, "POST", f"/api/contests/{cid}/register", json={"bot_id": bot_id})
             check(f"[{game}] {uname} 报名", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
 
-        # dispatch（换 bot）：第一个报名者换一个 bot（用同游戏另一账号的 bot 不行——dispatch 必须是自己的；
-        # 这里用一个报名者重新 dispatch 自己的同一 bot，验证端点可达）
+        rating_bot_ids = [ctx["bots"][uname][game] for uname in entrants]
+        ratings_before = _rating_snapshot(api.db_path, rating_bot_ids)
+
+        # 启动前先用服务端 estimator 复核同一个拓扑，拒绝意外放大场数。
+        r = api.client.get(f"/api/contests/{cid}")
+        detail_before = r.json() if r.status_code == 200 else {}
+        estimate = detail_before.get("estimate") or {}
+        check(
+            f"[{game}] 服务端估算精确为 {expected_matches} 场",
+            estimate.get("estimated_matches") == expected_matches,
+            f"HTTP {r.status_code} estimate={estimate}",
+        )
+        if estimate.get("estimated_matches") != expected_matches:
+            return
+
+        # 开赛前重新派遣自己的同一 Bot，验证入口和冻结版本读模型；这里不冒充换 Bot。
         u0 = entrants[0]
         r = api.authed(ctx["tokens"][u0], "POST", f"/api/contests/{cid}/dispatch",
                        json={"bot_id": ctx["bots"][u0][game]})
-        check(f"[{game}] dispatch（换 bot）端点可达", r.status_code in (200, 400), f"{r.status_code} {r.text[:80]}")
+        check(
+            f"[{game}] 开赛前重新派遣",
+            r.status_code == 200,
+            f"{r.status_code} {r.text[:80]}",
+        )
+        if r.status_code != 200:
+            return
+
+        # 完整证明 open→published→running，不允许 start 直接跳过发布态。
+        r = api.authed(org_tok, "POST", f"/api/contests/{cid}/publish")
+        published = r.json().get("contest", {}) if r.status_code == 200 else {}
+        published_ok = r.status_code == 200 and published.get("status") == "published"
+        check(f"[{game}] publish 进入已发布", published_ok, r.text[:120])
+        if not published_ok:
+            return
 
         # start
         r = api.authed(org_tok, "POST", f"/api/contests/{cid}/start")
-        check(f"[{game}] start 启动", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
+        started = r.json().get("contest", {}) if r.status_code == 200 else {}
+        # Durable queue mode does not invent a Match at enqueue time: start may
+        # remain published until the first atomic claim switches it to running.
+        started_ok = (
+            r.status_code == 200
+            and started.get("status") in ("published", "running")
+        )
+        check(f"[{game}] start 启动", started_ok, f"{r.status_code} {r.text[:120]}")
+        if not started_ok:
+            return
 
         # 轮询直到 finished（maybe_finish 自动推进；遇 rest 期 resume）
-        deadline = time.time() + 400
+        contest_timeout = contest_timeout_seconds(stages)
+        deadline = time.monotonic() + contest_timeout
+        print(
+            f"    [{game}] {CONTEST_ENTRANT_COUNT} 人两阶段赛事，"
+            f"拓扑预算 {contest_timeout / 60:.0f} 分钟"
+        )
         finished = False
+        saw_running = started.get("status") == "running"
+        saw_rest = False
+        resumed = False
         last_status = None
-        while time.time() < deadline:
-            r = api.client.get(f"/api/contests/{cid}")
-            c = r.json()["contest"]
+        while time.monotonic() < deadline:
+            detail = api.poll_json(
+                f"/api/contests/{cid}",
+                label=f"赛事 {cid} 详情",
+                deadline=deadline,
+            )
+            c = detail.get("contest")
+            if not isinstance(c, dict):
+                raise QaPollingError(
+                    f"赛事 {cid} 详情缺少 contest 对象：HTTP 200 body={detail!r}"
+                )
             last_status = c.get("status")
+            if last_status == "running":
+                saw_running = True
             if last_status == "finished":
                 finished = True
                 break
             if last_status == "rest":
-                # 主动 resume（organizer）
-                api.authed(org_tok, "POST", f"/api/contests/{cid}/resume")
-            time.sleep(2)
+                saw_rest = True
+                check(
+                    f"[{game}] 休息期保留阶段 1 与结束时间",
+                    c.get("current_stage_idx") == 0 and bool(c.get("rest_ends_at")),
+                    str(c),
+                )
+                # 休息期再次派遣同一只本人 Bot，验证合法重新派遣窗口。
+                r = api.authed(
+                    ctx["tokens"][u0], "POST", f"/api/contests/{cid}/dispatch",
+                    json={"bot_id": ctx["bots"][u0][game]},
+                )
+                check(f"[{game}] 休息期重新派遣", r.status_code == 200, r.text[:100])
+                if r.status_code != 200:
+                    return
+                r = api.authed(org_tok, "POST", f"/api/contests/{cid}/resume")
+                resumed_contest = r.json().get("contest", {}) if r.status_code == 200 else {}
+                resumed = (
+                    r.status_code == 200
+                    and resumed_contest.get("status") == "running"
+                    and resumed_contest.get("current_stage_idx") == 1
+                    and resumed_contest.get("rest_ends_at") is None
+                )
+                check(f"[{game}] organizer 恢复并进入决赛", resumed, r.text[:120])
+                if not resumed:
+                    return
+                saw_running = True
         check(f"[{game}] 赛事自动/推进到 finished", finished, f"last_status={last_status}")
+        check(
+            f"[{game}] 实际经过 running、休息与人工恢复",
+            saw_running and saw_rest and resumed,
+        )
+        if not finished:
+            return
 
         # detail 校验
         r = api.client.get(f"/api/contests/{cid}")
         d = r.json()
         pairings = d.get("pairings", [])
         standings = d.get("standings", [])
-        stage_results = d.get("stage_results", [])
+        stage_standings = d.get("stage_standings", [])
         entries = d.get("entries", [])
-        check(f"[{game}] detail 含 pairings", isinstance(pairings, list) and len(pairings) > 0, "空")
+        check(
+            f"[{game}] detail 精确含 {expected_matches} 场完成对阵",
+            isinstance(pairings, list)
+            and len(pairings) == expected_matches
+            and all(p.get("status") == "completed" and p.get("match_id") for p in pairings),
+            str(pairings)[:160],
+        )
         check(f"[{game}] detail 含 standings", isinstance(standings, list) and len(standings) > 0, "空")
-        check(f"[{game}] detail 含 stage_results", isinstance(stage_results, list), "缺")
+        check(
+            f"[{game}] detail 含两个阶段读模型",
+            isinstance(stage_standings, list) and len(stage_standings) == 2,
+            str(stage_standings)[:160],
+        )
+        check(f"[{game}] detail 精确含 4 名参赛者", len(entries) == CONTEST_ENTRANT_COUNT, str(entries)[:120])
         # entries/pairings 含 bot 名（PR-6 对阵图显示 Bot 名）
         if entries:
             check(f"[{game}] detail entries 含 bot_name 字段", "bot_name" in entries[0], str(entries[0])[:80])
@@ -997,14 +1497,53 @@ def phase5_contest(api: Api, ctx: dict[str, Any]) -> None:
         # bracket 端点（PR-6）
         r = api.client.get(f"/api/contests/{cid}/bracket")
         check(f"[{game}] GET /api/contests/{{id}}/bracket", r.status_code == 200 and "pairings" in r.json(), r.text[:80])
-        # contest 对局 match_type=contest 且不更新 Glicko：抽 1 场
-        for p in pairings[:1]:
+        # 所有真实赛事对局均须 completed + contest；赛事不更新 Glicko。
+        for p in pairings:
             pmid = p.get("match_id")
             if pmid:
-                pm = api.client.get(f"/api/matches/{pmid}").json()["match"]
-                check(f"[{game}] 赛事对局 match_type=contest", pm.get("match_type") == "contest",
-                      f"mt={pm.get('match_type')}")
-                break
+                match_payload = api.poll_json(
+                    f"/api/matches/{pmid}",
+                    label=f"赛事 {cid} 对局 {pmid} 详情",
+                    deadline=time.monotonic() + 30,
+                )
+                pm = match_payload.get("match")
+                if not isinstance(pm, dict):
+                    raise QaPollingError(
+                        f"赛事 {cid} 对局 {pmid} 缺少 match 对象："
+                        f"HTTP 200 body={match_payload!r}"
+                    )
+                check(
+                    f"[{game}] 赛事对局 {pmid} completed + contest",
+                    pm.get("status") == "completed" and pm.get("match_type") == "contest",
+                    f"status={pm.get('status')} mt={pm.get('match_type')}",
+                )
+
+        r = api.client.get(f"/api/contests/{cid}/official-results")
+        official = r.json() if r.status_code == 200 else {}
+        results = official.get("results") or []
+        check(
+            f"[{game}] 正式榜 1-based 且覆盖全部参赛者",
+            r.status_code == 200
+            and official.get("ready") is True
+            and len(results) == CONTEST_ENTRANT_COUNT
+            and [row.get("rank") for row in results] == list(range(1, CONTEST_ENTRANT_COUNT + 1)),
+            f"HTTP {r.status_code} body={str(official)[:160]}",
+        )
+        ratings_after = _rating_snapshot(api.db_path, rating_bot_ids)
+        check(
+            f"[{game}] 赛事不更新 Glicko",
+            ratings_before == ratings_after,
+            f"before={ratings_before} after={ratings_after}",
+        )
+        try:
+            queue_payload = wait_execution_queue_idle(
+                api, label=f"赛事 {cid} 完成后执行队列"
+            )
+            queue_idle = True
+        except Exception as exc:
+            queue_payload = {"error": str(exc)}
+            queue_idle = False
+        check(f"[{game}] 赛事完成后执行队列收敛", queue_idle, str(queue_payload)[:180])
 
 
 # ── 阶段 6：代码配置只读边界 ──────────────────────────────────
@@ -1108,35 +1647,85 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     check("GET /api/admin/users/{id}/sessions", r.status_code == 200 and "sessions" in r.json(), r.text[:80])
 
     # PATCH /api/admin/matches/{id}（强制一场 pending→aborted）：先发起一场，立即 abort
-    r = _paced_challenge(api, ctx["tokens"][u1], {
-        "my_bot_id": ctx["bots"][u1]["holdem"], "opponent_bot_id": ctx["bots"][ctx["user_names"][1]]["holdem"],
-        "game_id": "holdem",
-    })
-    if r.status_code == 200:
-        amid = r.json()["match_id"]
-        r = api.authed(tok, "PATCH", f"/api/admin/matches/{amid}", json={"status": "aborted"})
-        check("PATCH /api/admin/matches/{id}（强制 aborted）", r.status_code == 200 and r.json()["match"]["status"] == "aborted", r.text[:80])
+    execution: dict[str, Any] | None = None
+    phase7_request_id = f"req_{uuid.uuid4().hex[:24]}"
+    try:
+        r = _paced_challenge(api, ctx["tokens"][u1], {
+            "my_bot_id": ctx["bots"][u1]["holdem"],
+            "opponent_bot_id": ctx["bots"][ctx["user_names"][1]]["holdem"],
+            "game_id": "holdem",
+            "request_id": phase7_request_id,
+        })
+        execution = api.accepted_execution(r, label="阶段7 强制 abort 挑战")
+        amid = api.wait_execution_match(
+            ctx["tokens"][u1],
+            execution,
+            label="阶段7 强制 abort 挑战",
+            timeout=180,
+        )
+    except Exception as exc:
+        check("阶段7 强制 abort 挑战取得 Match", False, str(exc))
+        # request_id 在 POST 前生成；即使服务端已提交但响应丢失，也能精确取消。
+        cancelled = api.authed(
+            ctx["tokens"][u1],
+            "DELETE",
+            execution_request_path(phase7_request_id),
+        )
+        check(
+            "阶段7 失败请求无残留",
+            cancelled.status_code in (200, 404),
+            f"{cancelled.status_code} {cancelled.text[:100]}",
+        )
     else:
-        warn(f"阶段7 强制 abort 对局发起失败 {r.status_code}")
+        r = api.authed(tok, "PATCH", f"/api/admin/matches/{amid}", json={"status": "aborted"})
+        aborted = (
+            r.status_code == 200
+            and r.json().get("match", {}).get("status") == "aborted"
+        )
+        check("PATCH /api/admin/matches/{id}（强制 aborted）", aborted, r.text[:80])
+        if not aborted:
+            cancelled = api.authed(
+                ctx["tokens"][u1],
+                "DELETE",
+                execution_request_path(phase7_request_id),
+            )
+            check(
+                "阶段7 abort 失败后请求已取消",
+                cancelled.status_code == 200,
+                f"{cancelled.status_code} {cancelled.text[:100]}",
+            )
 
     # 站点配置（PR-10）
     r = api.authed(tok, "PATCH", "/api/admin/settings/site", json={"announcement": "loadtest 公告"})
     check("PATCH /api/admin/settings/site", r.status_code == 200 and r.json()["site"]["announcement"] == "loadtest 公告", r.text[:80])
 
-    # GET/PUT /api/admin/email/templates/{key}
+    # 事务邮件模板由代码持有：GET 可审计，旧 PUT 显式拒绝。
     r = api.authed(tok, "GET", "/api/admin/email/templates/welcome")
     if r.status_code == 200:
         tpl = r.json().get("template", {})
         subj = tpl.get("subject", "欢迎")
         r = api.authed(tok, "PUT", "/api/admin/email/templates/welcome",
                        json={"subject": subj, "body_html": "<p>loadtest</p>", "body_text": "loadtest"})
-        check("PUT /api/admin/email/templates/welcome", r.status_code == 200, f"{r.status_code} {r.text[:60]}")
+        check(
+            "PUT /api/admin/email/templates/welcome 代码模板拒绝写入",
+            tpl.get("mutable") is False and r.status_code == 409,
+            f"{r.status_code} {r.text[:60]}",
+        )
     else:
         warn(f"email template welcome 不可读 {r.status_code}（跳过 PUT）")
 
-    # POST /api/auth/admin/create-reset-token
-    r = api.authed(tok, "POST", "/api/auth/admin/create-reset-token", json={"username_or_email": u1})
-    check("POST /api/auth/admin/create-reset-token", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
+    # 旧管理员改密 credential 入口必须保持下架；404 也证明不会触发邮件投递。
+    r = api.authed(
+        tok,
+        "POST",
+        "/api/auth/admin/create-reset-token",
+        json={"username_or_email": u1},
+    )
+    check(
+        "旧 POST /api/auth/admin/create-reset-token 已下架",
+        r.status_code == 404,
+        f"{r.status_code} {r.text[:80]}",
+    )
 
     # admin GET contest entries（用阶段 5 的赛事，若有）
     r = api.authed(tok, "GET", "/api/admin/contests?status=finished")
@@ -1160,6 +1749,14 @@ def main() -> int:
         help="Bot 产物目录（默认 <db.parent>/bot_uploads；相对路径也基于 db.parent）",
     )
     ap.add_argument("--skip-seed", action="store_true", help="跳过种子（假设已种好）")
+    ap.add_argument(
+        "--start-phase",
+        type=int,
+        choices=range(8),
+        default=0,
+        metavar="0..7",
+        help="只执行指定阶段及其后缀；可先 seed 新副本，也可复用已验证种子（默认 0）",
+    )
     ap.add_argument("--no-throttle", action="store_true",
                     help="跳过挑战节流（用于服务端已设 BZ_RATE_LIMIT=0 关限流时，大幅加速阶段 2/3）")
     args = ap.parse_args()
@@ -1168,7 +1765,6 @@ def main() -> int:
     NO_THROTTLE = args.no_throttle
     if NO_THROTTLE:
         print("  ⚡ 已启用 --no-throttle（假设服务端 BZ_RATE_LIMIT=0）；挑战将不节流")
-
     base = ensure_qa_base(args.base)
     db_path = str(qa_db_path(args.db, ROOT))
     assert_qa_instance(base)
@@ -1196,6 +1792,17 @@ def main() -> int:
         return 2
     print(f"  服务在线：{h.json()}")
 
+    if needs_continuation_gate(
+        skip_seed=args.skip_seed, start_phase=args.start_phase
+    ):
+        try:
+            clean_snapshot = require_continuation_clean(api)
+        except (ContinuationCleanGateError, OSError, sqlite3.Error, QaPollingError, TimeoutError) as exc:
+            print(f"✗ 阶段后缀/复用种子 clean gate 拒绝运行：{exc}")
+            print("  请停止隔离 QA 服务并从干净副本重置 DB/运行时后再试；脚本不会自动清理现场。")
+            return 1
+        print(f"  续跑 clean gate 通过：{clean_snapshot['capacity']}")
+
     # 种子
     if args.skip_seed:
         # 仍需重建 ctx：从 DB 读 load_* 用户与 bot，并生成 token
@@ -1206,14 +1813,33 @@ def main() -> int:
 
     t0 = time.time()
     try:
-        phase0_basics(api, ctx)
-        phase1_bots(api, ctx)
-        phase2_matches(api, ctx)
-        phase3_sse(api, ctx)
-        phase4_human(api, ctx)
-        phase5_contest(api, ctx)
-        phase6_code_config(api, ctx)
-        phase7_admin(api, ctx)
+        phases = (
+            phase0_basics,
+            phase1_bots,
+            phase2_matches,
+            phase3_sse,
+            phase4_human,
+            phase5_contest,
+            phase6_code_config,
+            phase7_admin,
+        )
+        for phase_idx in selected_phase_numbers(args.start_phase):
+            phases[phase_idx](api, ctx)
+        try:
+            wait_execution_queue_idle(
+                api, timeout=60.0, label="全部阶段结束后的执行队列"
+            )
+            final_queue = require_continuation_clean(
+                api, label="全部阶段结束后的稳定 clean gate"
+            )
+        except Exception as exc:
+            check("全部阶段结束后队列与调度器健康归零", False, str(exc))
+        else:
+            check(
+                "全部阶段结束后队列与调度器健康归零",
+                True,
+                str(final_queue)[:180],
+            )
     except KeyboardInterrupt:
         print("\n中断")
         return 130
@@ -1275,23 +1901,27 @@ def _rebuild_ctx(db_path: str) -> dict[str, Any]:
                 )
             validated_users.append((spec, user))
 
-        tokens: dict[str, str] = {}
         bots: dict[str, dict[str, int]] = {}
-        for spec, user in validated_users:
-            token = new_session_token()
-            store.add_session(token, user["id"], session_expires())
-            tokens[spec.username] = token
-
         for uname in user_names:
             user = store.get_user_by_username(uname)
             for gid in GAMES:
                 bname = f"{uname}_{gid}"
                 row = store._conn.execute(
-                    "SELECT id FROM bots WHERE owner_id=? AND name=?",
+                    "SELECT id, is_active FROM bots WHERE owner_id=? AND name=?",
                     (user["id"], bname),
                 ).fetchone()
-                if row:
-                    bots.setdefault(uname, {})[gid] = row["id"]
+                if row is None or not row["is_active"]:
+                    raise RuntimeError(
+                        "--skip-seed 需要完整且活跃的正式 load_* Bot；"
+                        f"{bname!r} 缺失或已停用，请重新安全运行 seed"
+                    )
+                bots.setdefault(uname, {})[gid] = row["id"]
+
+        tokens: dict[str, str] = {}
+        for spec, user in validated_users:
+            token = new_session_token()
+            store.add_session(token, user["id"], session_expires())
+            tokens[spec.username] = token
         return {
             "tokens": tokens,
             "bots": bots,

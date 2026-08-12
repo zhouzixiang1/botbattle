@@ -70,3 +70,24 @@ def test_list_bots_filter_by_owner(store: Store):
     # 不过滤 owner：两个都在（私有 bot 功能已下线，全部可见）
     allp = store.list_bots(game_id="holdem")
     assert {b["id"] for b in allp} == {ba["id"], bb["id"]}
+
+
+def test_list_bots_owner_inventory_can_include_inactive(store: Store):
+    owner = store.create_user("inactive_owner", "inactive@ex.com", hash_password("p1"))
+    active = store.create_bot(
+        owner["id"], "active_bot", binary_path="/tmp/active", format="elf",
+        game_id="holdem",
+    )
+    inactive = store.create_bot(
+        owner["id"], "inactive_bot", binary_path="/tmp/inactive", format="elf",
+        game_id="holdem",
+    )
+    store.update_bot(inactive["id"], is_active=0)
+
+    assert {bot["id"] for bot in store.list_bots(owner_id=owner["id"])} == {
+        active["id"]
+    }
+    assert {
+        bot["id"]
+        for bot in store.list_bots(owner_id=owner["id"], active_only=False)
+    } == {active["id"], inactive["id"]}

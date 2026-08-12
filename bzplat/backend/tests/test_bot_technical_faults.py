@@ -22,6 +22,10 @@ from bzplat.backend.runtime.binary_runner import (
 )
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import STATUS_COMPLETED
+from bzplat.backend.tests.execution_helpers import (
+    challenge_and_start,
+    human_and_start,
+)
 
 
 class _TransportSession:
@@ -292,7 +296,9 @@ class _TechnicalRunner:
 
 def _run_challenge(orch: MatchOrchestrator, bot_a: int, bot_b: int, owner: int, **kwargs):
     async def run():
-        match_id = await orch.challenge(bot_a, bot_b, owner, **kwargs)
+        match_id = await challenge_and_start(
+            orch, bot_a, bot_b, owner, **kwargs
+        )
         task = orch._tasks.get(match_id)
         if task is not None:
             await task
@@ -408,7 +414,8 @@ def test_bot_protocol_fault_in_human_match_blames_only_the_bot(store):
     orch = MatchOrchestrator(store, runner=_TechnicalRunner(exc), max_concurrent=1)
 
     async def run():
-        match_id = await orch.challenge_human(
+        match_id = await human_and_start(
+            orch,
             bot["id"], user["id"], human_seat=1, game_id="gomoku"
         )
         task = orch._tasks[match_id]

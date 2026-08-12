@@ -1,7 +1,9 @@
 /** 图形验证码：拉取 /api/auth/captcha，点击刷新。 */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 export interface CaptchaValue {
@@ -15,6 +17,7 @@ interface Props {
 }
 
 export default function CaptchaField({ onChange, className = '' }: Props) {
+  const inputId = useId()
   const [id, setId] = useState('')
   const [img, setImg] = useState('')
   const [answer, setAnswer] = useState('')
@@ -48,28 +51,32 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
   }, [refresh])
 
   return (
-    <div className={`flex flex-col gap-1.5 text-sm text-foreground ${className}`}>
-      <span className="font-medium">验证码</span>
-      <div className="flex items-center gap-2">
+    <div className={`min-w-0 space-y-1.5 text-sm text-foreground ${className}`}>
+      <Label htmlFor={inputId}>验证码</Label>
+      <div className="grid min-w-0 grid-cols-[minmax(7rem,10rem)_minmax(0,1fr)] items-center gap-2">
         <Tooltip>
           <TooltipTrigger asChild>
-            <button
+            <Button
               type="button"
+              variant="outline"
               onClick={() => void refresh()}
-              className="flex h-11 w-40 shrink-0 items-center justify-center gap-1 overflow-hidden rounded-lg border border-input bg-muted text-xs text-muted-foreground transition-colors hover:bg-accent"
+              aria-label="刷新图形验证码"
+              aria-busy={loading}
+              className="h-10 min-w-0 gap-1 overflow-hidden bg-muted p-0 text-xs text-muted-foreground"
             >
               {img ? (
-                <img src={img} alt="验证码" className="h-full w-full object-contain" />
+                <img src={img} alt="图形验证码内容" className="h-full w-full object-contain" />
               ) : loading ? (
                 <><RefreshCw className="size-3.5 animate-spin" />加载中</>
               ) : (
                 <><RefreshCw className="size-3.5" />点击获取</>
               )}
-            </button>
+            </Button>
           </TooltipTrigger>
           <TooltipContent>点击刷新</TooltipContent>
         </Tooltip>
         <Input
+          id={inputId}
           value={answer}
           onChange={(e) => {
             const v = e.target.value
@@ -82,7 +89,7 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
           className="min-w-0 flex-1"
         />
       </div>
-      {err && <span className="text-xs text-destructive">{err}</span>}
+      {err && <span role="alert" className="text-xs text-destructive">{err}</span>}
       <span className="text-xs text-muted-foreground">看不清可点击图片刷新</span>
     </div>
   )

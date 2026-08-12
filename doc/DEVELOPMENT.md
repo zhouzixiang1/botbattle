@@ -29,7 +29,10 @@ cd bzplat/frontend && npm install
 | 变量 | 说明 | 默认 |
 |------|------|------|
 | `BZ_HOST` / `BZ_PORT` | 绑定地址/端口 | 127.0.0.1 / 50380 |
+| `BZ_PUBLIC_ORIGIN` | 浏览器实际访问的唯一 HTTP(S) origin；人机 WS 严格校验，生产必配 | 未设（WS fail closed） |
 | `BZ_DB_PATH` | SQLite 路径 | botzone.db |
+| `BZ_INSTANCE_KEY` | Docker 清理 namespace；输入会归一化为小写，结果须为 1–48 位字母、数字、`.`、`_`、`-`，生产/每个 worktree 必须稳定且唯一 | 未设时由绝对 DB 路径 SHA-256 派生 |
+| `BZ_DOCKER_HOST` | 生产 Docker 控制面显式覆写；只接受 canonical 本机 socket | `unix:///var/run/docker.sock` |
 | `BZ_BOT_LOCAL` | 强制本机跑 ELF（测试） | 未设 |
 | `BZ_QA_INSTANCE` | 标记隔离 QA 实例；启用时启动前拒绝主 checkout/50380 写目标 | 未设 |
 | `BZ_API_TARGET` | Vite REST/SSE/WS 代理目标；50380 被硬拒绝 | 127.0.0.1:50381 |
@@ -43,18 +46,53 @@ cd bzplat/frontend && npm install
 
 > ⚠️ **敏感信息警示**：`.env` 含 SMTP 明文密码，**绝不提交**。`.gitignore` 应排除 `.env`。文档中不回写真实凭据。
 
+生产 Docker 命令始终显式带 `--host unix:///var/run/docker.sock`。父进程中的 `DOCKER_HOST`、
+`DOCKER_CONTEXT` 与 TLS 变量会从子命令环境中清除，不参与 daemon 选择；若显式设置
+`BZ_DOCKER_HOST`，任何非 canonical 值都会在 Store 迁移前 fail closed。平台不支持远端 Docker。
+
 邮件模块只提供一套 Botbattle 多游戏平台默认文案：邮箱验证、密码重置和验证完成欢迎信。
 新库通过 `INSERT OR IGNORE` 播种这三条模板，因此管理后台已经保存的自定义模板不会在重启时
 被覆盖；历史库如需恢复官方文案，必须先备份，再对这三个精确 key 做受控数据更新。
 
 ## 2. 构建与运行
 
-### 2.1 起服务
+### 2.1 安全启停
+
+生产 `.env` 应为该实例固定一个不会与 QA/worktree 复用的 namespace：
+
 ```bash
+# .env 示例；instance key 上线后保持稳定
+BZ_INSTANCE_KEY=prod-main
+BZ_DOCKER_HOST=unix:///var/run/docker.sock
+BZ_PUBLIC_ORIGIN=https://bot.example.com
+
 scripts/platform-ctl.sh start     # 或：botzone serve
 # 默认 127.0.0.1:50380
 botzone create-admin <user> <email> '<pass>'   # 建管理员（跳过邮箱验证）
 ```
+
+启动会先取得数据库邻接 dispatcher flock，并在共享 `<db>.docker-launch.lock` 内对**本 instance
+label namespace** 清理、连续确认容器/name/token 为零，同时闭合 create journal；只有随后完成 attempt
+补偿才进入 `running/accepting`。同一 host boot 的未确认 create 属于人工边界，即使瞬时双零也保持
+`manual:` paused；不要直接改数据库状态，须在管理端按恢复流程重新做精确清场。其他 Docker 控制结果
+不确定时会保持 `paused` 并有界退避，不得以进程/端口已出现代替管理端队列状态与日志检查。
+
+维护前先保存 PID，再停止并核对进程和端口。`platform-ctl.sh stop` 只发送 SIGTERM 并删除 PID 文件，
+打印 `stopped` 不表示 lifespan 清理已经完成：
+
+```bash
+service_pid="$(cat platform-ctl/web.pid)"
+scripts/platform-ctl.sh stop
+ps -p "$service_pid" -o pid=,stat=,cmd=       # 应无输出
+ss -tlnp | grep ':50380'                      # 应无输出
+docker --host unix:///var/run/docker.sock ps -a \
+  --filter label=io.botbattle.instance=prod-main
+```
+
+正常 lifespan 会先置 `accepting=0`、停止 dispatcher、取消并等待本进程 attempt，再尽力清理精确
+label。若进程仍在、端口仍监听或本 namespace 容器仍存在，不得开始 DB 维护，也不得启动第二个
+进程；先查 `logs/web.log`/`logs/app.log`。强制崩溃后的残留由下一次启动精确清场与补偿，不能手工
+跨 namespace 批量删除。评分重建还有更严格的 DB No-Go，见 6.5。
 
 ### 2.2 构建前端
 ```bash
@@ -97,7 +135,9 @@ cp /home/zzx/project/botbattle/botzone.db .worktrees/<分支名>/botzone.db
 
 # 2) 终端 A：后端（CWD=worktree，显式锁定副本并声明 QA）
 cd .worktrees/<分支名>
-BZ_DB_PATH="$PWD/botzone.db" BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 BZ_SKIP_CAPTCHA=1 \
+BZ_DB_PATH="$PWD/botzone.db" BZ_INSTANCE_KEY=qa-refactor-global-queue \
+  BZ_DOCKER_HOST=unix:///var/run/docker.sock BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 BZ_SKIP_CAPTCHA=1 \
+  BZ_PUBLIC_ORIGIN=http://127.0.0.1:5173 \
   python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50381
 
 # 3) 终端 B：播种三类角色的隔离账号，然后启前端
@@ -116,7 +156,8 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 - **严禁**在主目录 CWD 起 worktree 后端（会加载主源码 + 主库）。
 - QA CLI 会在日志 handler、SQLite、上传/头像目录创建前一次性校验端口和全部写目标；拒绝 50380、主 checkout 内任意 DB/运行时路径，以及主 `bot_uploads`/`avatars`/`logs` 的别名或子目录。当前 linked worktree 与 `/tmp` 独立目录仍允许。
 - QA CLI 未显式设置目录时，`bot_uploads`、`avatars`、`logs` 均由 `BZ_DB_PATH` 的父目录派生；显式相对路径按服务 CWD 解析并在写入前钉为绝对路径。`/api/health` 只返回 `qa_instance` 标记，不公开服务器绝对路径。
-- `BZ_QA_INSTANCE=1` 还会选择代码固定的 `QA_AUTO_MATCH_CONFIG(enabled=False)`，使浏览器/API 验收不受后台 ladder 抢占临时 Bot 的竞态影响；它不是可调运行参数，生产 `AUTO_MATCH_CONFIG`、并发与资源限制均不变。管理端只读诊断返回当前实例实际生效的 profile。
+- 每个并行 worktree 要把示例 `BZ_INSTANCE_KEY` 换成自己的稳定唯一值；不要与生产或其他 worktree 共用。即使当前使用 `BZ_BOT_LOCAL=1`，也保留该约束以防切回 Docker 后误清理。
+- `BZ_QA_INSTANCE=1` 通过独立代码能力门强制禁用自动排位；复制库中的 `execution_control.auto_enabled` 即使为真也无效，API 尝试开启返回 409。生产同样只以该字段作为自动 producer 的唯一开关，不存在 QA/生产两套参数 profile。
 - 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
 
 ## 3. 编码规范
@@ -128,7 +169,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
 | **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，半负载并发 ceiling=`max(1,cpu//4)`，全员循环 `FULL_RR_MAX_N=12`；admin 不可抬高（`runtime/limits.py`） |
-| **运行参数** | `runtime/config.py` 是 action timeout、默认并发、auto-match、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
+| **运行参数** | `runtime/config.py` 是 action timeout、全局双资源容量/aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。自动排位只是 producer，唯一可变项为 `execution_control.auto_enabled`；`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |
 | **前端组件** | 用 `@/components/ui/*` 共享原语，禁内联重复样式 |
@@ -155,7 +196,6 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
    - `engine.py`（裁判↔平台协议适配，提供 Session 并驱动纯裁判，`run_async(decide) → MatchResult`）
    - `protocol.py`（`dumps_request` / `loads_response` / `validate_response_payload` / `fail_response`；只导出本游戏 API；复用 `games/_board_protocol.py` 时在 spec 的 `shared_source_files` 声明公开源码）
    - `result.py`（**独立**定义，满足鸭子契约：`winners` + `deltas`，**不**共享基类）
-   - `tiers.py`（段位曲线，查表用 `base.tier_for_in`）
    - `templates.py`（本游戏内置赛事模板）
    - `spec.py`（装配 `GameSpec`，声明 `normalize_delta` 与 `progress_from_events`）
 2. `store/schema.py` 的 `REGISTERED_ENGINES` / `VALID_GAME_IDS` frozenset 各加一项；`Store._migrate()` 根据注册 ID 用同构模板创建 `matches_<game>` 表及索引，不复制静态 DDL。
@@ -166,6 +206,8 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 
 > 新代码直接面向 `games` 注册表，不要在 `matches/runner.py` 加游戏分支。`run_session` 的 kwargs 仅供内部复现控制，新增或拼错规则键必须显式失败。
 
+公开排名资格只修改 `runtime/config.py` 的 `RANKING_MIN_RATED_MATCHES`；auto-match 内部冷启动目标是独立的 `AutoMatchConfig.bootstrap_target_matches`。两者目前默认都是 10，但消费边界不同，不得用调度配置驱动公开 API。
+
 ### 5.2 新增 API 端点
 - 在 `api_routes.py`（或 `auth/routes.py`）加路由，按需用 `require_user`/`require_admin`/`require_organizer` 依赖。
 - 常量（新状态码/类型）加到 `schema.py`。
@@ -175,13 +217,24 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 
 ### 6.1 systemd 部署
 `deploy/botzone-platform.service` 提供 systemd unit 模板。
+systemd 模板使用 `UMask=0077`，`scripts/platform-ctl.sh` 也在创建 PID、日志、数据库关联
+产物前固定 `umask 077`；生产 `.env`、数据库与日志应为 `0600`，私有运行目录为 `0700`。
+头像是公开静态内容，权限可按静态服务器的只读需求单独配置，不能因此放宽其他运行目录。
+服务默认只绑定 `127.0.0.1`；生产不得为方便反代改回 `0.0.0.0`，应让本机 frp/nginx 连接
+回环端口，避免绕过代理头覆盖、限流、TLS 与无查询参数日志边界。`platform-ctl.sh` 会在创建
+PID/日志目录前拒绝非回环 `BZ_HOST`；systemd 模板则把 `127.0.0.1:50380` 直接写入
+`ExecStart`，不依赖 systemd 不支持的 shell `${VAR:-default}` 展开。
 
 ### 6.2 日志（三文件 + 启动日志）
-- `logs/app.log`：业务/系统日志（`logging_config.setup_logging`，格式 `时间 级别 [模块] 消息`）。排查对局/Bot 崩溃/auto-match/WS 在此；Bot EOF 附 stderr 末尾。
-- `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时）。
+- `logs/app.log`：业务/系统日志（`logging_config.setup_logging`，格式 `时间 级别 [模块] 消息`）。排查执行队列/自动 producer、Docker cleanup/恢复、对局/Bot 崩溃和 WS 在此；Bot EOF 附 stderr 末尾。Uvicorn HTTP/WS record 在 handler 序列化前只保留 path，不记录 query。
+- `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时；middleware 使用 `request.url.path`，不含 query）。
 - `logs/audit.log`：安全审计（登录/注册/改密/上传/管理操作等）。
-- `logs/web.log`：uvicorn 启动 stdout。
+- `logs/web.log`：uvicorn 启动 stdout；CLI 禁止 Uvicorn 默认日志配置覆盖平台 handler，因此同样不含请求 query。
 - **admin「日志」Tab**：`GET /api/admin/logs?file={app|access|audit}`（文件参数白名单）。详见 [SECURITY.md](./SECURITY.md)。
+
+上游 nginx 是独立日志边界：其 `access_log` 必须用 `$request_method`、`$uri`、
+`$server_protocol` 组成请求行，禁止记录包含 query 的 `$request`/`$request_uri`。完整示例见
+[SECURITY.md](./SECURITY.md)。
 
 ### 6.3 测试种子账号
 ```bash
@@ -228,10 +281,10 @@ rest 24 场真实小组赛；finished 24 场分组双循环 + 7 场 Top 8 淘汰
 及结果分差一致的末尾 canonical `match_end`。rest 与 finished 的四组各自固定形成 8/4/0 分；
 running/rest/finished 中同一有序 Bot 对的归一落子轨迹必须完全一致，finished 的 7 场淘汰赛必须
 全部产生胜者。六个 key 已完整时二次 seed 先严格验收并跳过 provisioning；12 个
-专用 Bot 最终全部 inactive（历史详情仍可按 ID 查看），不会进入五子棋榜单或自动匹配。
+专用 Bot 最终全部 inactive（历史详情仍可按 ID 查看），不会进入五子棋榜单或自动排位候选。
 
 部署到主库属于显式运维写操作，只能在代码已评审、主库已备份且 50380 已停服后执行；独立 seed
-进程不能与线上 orchestrator 叠加并发：
+进程不能与线上 dispatcher/orchestrator 叠加并发：
 
 ```bash
 bash scripts/platform-ctl.sh stop
@@ -277,5 +330,18 @@ python scripts/seed_contest_showcase.py rollback \
 | `scripts/seed_test_accounts.py` | 种子测试账号（tester1/tester2 + 按内容同步的三游戏样例 Bot） |
 | `scripts/seed_contest_showcase.py` | 生成/验收/白名单回滚六个长期只读赛事快照；绝对 DB 路径必填，主运行时另需停服确认 |
 | `bzplat/frontend/e2e/*.spec.ts` | Chromium 真浏览器回归（当前静态收集 5 spec / 56 条：访客/用户/组织者/admin，Console+Network+SSE+WS、多视口、长文本滚动、排行榜密度及 3 条 Holdem HUD/复式/真人公开信息回归；最终同一代码 HEAD 全量执行真值见 `TESTING.md`） |
+
+### 6.5 评分投影维护命令
+
+`python -m bzplat.backend.cli rating-rebuild --db /absolute/path.db` 默认只读 dry-run；
+`--verify` 只读核对投影 digest 与水位，任何不一致退出 1。`--apply` 是长期维护入口，不是一次性
+修复脚本：必须停服、提供逐字节独立冷备、逐字确认绝对 DB，并回填同一 dry-run 的
+`source_digest`、`plan_digest`、`rebuilt_projection_digest` 三项摘要。冷备与目标都必须通过完整性、
+外键、全业务与文件摘要门禁；实现还会在 `BEGIN EXCLUSIVE` 内复核三摘要、无 running Match、
+`execution_control` 为 `stopped + accepting=0`，且 `execution_jobs` 没有
+`starting/running/settling`，并在提交前复核重建投影。语义已经一致的再次
+apply 为 zero-write no-op。
+完整命令和生产 No-Go 清单见 [RUNTIME.md](./RUNTIME.md#排行榜重建与上线-no-go)。禁止按
+`created_at` 自制重放脚本，也禁止直接清空 policies/settlements 来“通过”验证。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

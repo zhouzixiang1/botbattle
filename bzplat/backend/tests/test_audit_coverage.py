@@ -30,6 +30,10 @@ from bzplat.backend.runtime.binary_runner import (
 )
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import STATUS_ABORTED, STATUS_COMPLETED, STATUS_RUNNING
+from bzplat.backend.tests.execution_helpers import (
+    challenge_and_start,
+    human_and_start,
+)
 
 
 def _new_match_id() -> str:
@@ -77,20 +81,49 @@ def _completed_rating_match(
     winner: int | None,
     deltas: list[int],
 ) -> dict:
-    store.create_match(
-        match_id,
-        bot_a_id,
-        bot_b_id,
-        owner_id=owner_id,
-        game_id="gomoku",
-        match_type="challenge",
-    )
-    store.update_match(
-        match_id,
-        status=STATUS_COMPLETED,
-        winner=winner,
-        result={"deltas": deltas, "rounds_played": 1},
-    )
+    # These ordering tests intentionally model a restart with multiple
+    # completed-but-unsettled rated rows.  Live admission now prevents creating
+    # that overlap, so seed the already-terminal recovery input directly while
+    # preserving the canonical policy/order/projection invariants.
+    now = datetime.now().isoformat(timespec="seconds")
+    result = {"deltas": deltas, "rounds_played": 1}
+    match_config = {
+        "_rating_eligible": True,
+        "_rating_reason": "eligible",
+    }
+    with store._tx() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        projection_guard = store._rating_projection_mutation_guard_tx(conn)
+        conn.execute(
+            "INSERT INTO matches_gomoku("
+            "id,bot_a_id,bot_b_id,owner_id,winner,reason,match_type,status,"
+            "game_id,match_config,result,started_at,ended_at,created_at) "
+            "VALUES(?,?,?,?,?,'completed','challenge','completed','gomoku',?,?,?,?,?)",
+            (
+                match_id,
+                bot_a_id,
+                bot_b_id,
+                owner_id,
+                winner,
+                json.dumps(match_config, ensure_ascii=False),
+                json.dumps(result, ensure_ascii=False),
+                now,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO matches_index(id,game_id) VALUES(?,'gomoku')",
+            (match_id,),
+        )
+        conn.execute(
+            "INSERT INTO match_rating_policies("
+            "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+            "classified_at) VALUES(?,'gomoku',?,?,1,'eligible','creation_v2',?)",
+            (match_id, bot_a_id, bot_b_id, now),
+        )
+        store._reserve_rating_settlement_order_tx(conn, match_id)
+        store._advance_rating_projection_state_tx(conn, projection_guard)
     return store.get_match(match_id)
 
 
@@ -302,7 +335,8 @@ def test_sse_reconnect_snapshot_uses_complete_active_prefix(store: Store):
     )
 
     async def run() -> None:
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
         )
         task = orch._tasks[match_id]
@@ -395,7 +429,9 @@ def test_bot_crashed_is_technical_loss_in_normal_match(store: Store):
     )
 
     async def run():
-        mid = await orch.challenge(ba["id"], bb["id"], ua["id"], game_id="gomoku")
+        mid = await challenge_and_start(
+            orch, ba["id"], bb["id"], ua["id"], game_id="gomoku"
+        )
         task = orch._tasks.get(mid)
         if task:
             try:
@@ -874,7 +910,9 @@ def test_completed_result_survives_postprocess_exception(store: Store, monkeypat
     monkeypatch.setattr(orch, "_postprocess_completed_match", fail_postprocess)
 
     async def run():
-        mid = await orch.challenge(ba["id"], bb["id"], ua["id"], game_id="gomoku")
+        mid = await challenge_and_start(
+            orch, ba["id"], bb["id"], ua["id"], game_id="gomoku"
+        )
         await asyncio.wait_for(orch._tasks[mid], timeout=1)
         return mid
 
@@ -886,7 +924,7 @@ def test_completed_result_survives_postprocess_exception(store: Store, monkeypat
 
 
 def test_platform_sandbox_fault_aborts_without_technical_loss_or_rating(store: Store):
-    """Docker/platform failures are not attributable to either uploaded Bot."""
+    """Docker/platform failures stay private and retry only after exact cleanup."""
 
     class PlatformFailingRunner:
         async def run_binaries(self, *args, **kwargs):
@@ -901,7 +939,8 @@ def test_platform_sandbox_fault_aborts_without_technical_loss_or_rating(store: S
     orch = MatchOrchestrator(store, runner=PlatformFailingRunner(), max_concurrent=1)
 
     async def run():
-        mid = await orch.challenge(
+        mid = await challenge_and_start(
+            orch,
             bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
         )
         task = orch._tasks.get(mid)
@@ -911,13 +950,27 @@ def test_platform_sandbox_fault_aborts_without_technical_loss_or_rating(store: S
 
     mid = asyncio.run(run())
     match = store.get_match(mid)
-    assert match["status"] == STATUS_ABORTED
-    assert match["reason"] == "platform_error"
+    assert match["status"] == STATUS_RUNNING
     assert match["winner"] is None
     assert not match["technical_loss"]
     assert store.get_rating(bot_a["id"])["matches_played"] == 0
     assert store.get_rating(bot_b["id"])["matches_played"] == 0
     assert not store.is_match_rating_settled(mid)
+    job = store.executions.get_by_match(mid)
+    assert job and job["status"] == "running"
+    assert store.executions.control()["dispatcher_state"] == "paused"
+
+    # Simulate the dispatcher's verified zero-label recovery boundary.  An
+    # event-free manual runtime failure is deleted, but remains an explicit
+    # owner-retryable interruption; no synthetic public platform_error match
+    # survives and no hidden automatic retry is started on the user's behalf.
+    recovered = store.executions.recover_after_namespace_cleanup()
+    assert recovered == {"requeued": 0, "interrupted": 1, "settling": 0}
+    assert store.get_match(mid) is None
+    interrupted = store.executions.get(job["public_id"])
+    assert interrupted and interrupted["status"] == "interrupted"
+    assert interrupted["retryable"] == 1
+    assert interrupted["current_match_id"] is None
 
 
 def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
@@ -955,13 +1008,16 @@ def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
     monkeypatch.setattr(store, "upsert_replay", fail_only_after_terminal)
 
     async def exercise():
-        bot_mid = await orch.challenge(
+        bot_mid = await challenge_and_start(
+            orch,
             ba["id"], bb["id"], owner["id"], game_id="gomoku"
         )
         bot_task = orch._tasks.get(bot_mid)
         if bot_task is not None:
             await bot_task
-        human_mid = await orch.challenge_human(
+        store.executions.finalize_ready()
+        human_mid = await human_and_start(
+            orch,
             ba["id"], owner["id"], human_seat=1, game_id="gomoku",
         )
         human_task = orch._tasks.get(human_mid)
@@ -982,6 +1038,7 @@ def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
     # 初始 replay 写入未被吞；只有 completed 后的补强 flush 故障。
     assert store.get_replay(bot_mid) is not None
     assert store.get_replay(human_mid) is not None
+    store.executions.finalize_ready()
 
     class AbortedHumanRunner:
         def __init__(self, exc: Exception):
@@ -996,13 +1053,15 @@ def test_final_replay_failure_preserves_terminal_bot_and_human_matches(
             aborted_orch = MatchOrchestrator(
                 store, runner=AbortedHumanRunner(exc), max_concurrent=1
             )
-            mid = await aborted_orch.challenge_human(
+            mid = await human_and_start(
+                aborted_orch,
                 ba["id"], owner["id"], human_seat=1, game_id="gomoku"
             )
             task = aborted_orch._tasks.get(mid)
             if task is not None:
                 await task
             mids.append(mid)
+            store.executions.finalize_ready()
         return mids
 
     crashed_mid, inactive_mid = asyncio.run(exercise_aborted_humans())
@@ -1047,7 +1106,8 @@ def test_admin_abort_cancels_blocking_runner_and_broadcasts_error(tmp_path):
 
         runner = BlockingRunner()
         app.state.orch.runner = runner
-        match_id = await app.state.orch.challenge(
+        match_id = await challenge_and_start(
+            app.state.orch,
             bot_a["id"], bot_b["id"], owner_a["id"], game_id="gomoku"
         )
         await asyncio.wait_for(runner.entered.wait(), timeout=1)
@@ -1118,7 +1178,8 @@ def test_admin_abort_store_failure_keeps_owned_task_and_subscribers(
     async def exercise():
         runner = BlockingRunner()
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
         )
         await asyncio.wait_for(runner.entered.wait(), timeout=1)
@@ -1180,7 +1241,8 @@ def test_admin_abort_replay_read_failure_still_hands_off_terminal_state(
 
         orch = MatchOrchestrator(store, runner=runner, max_concurrent=1)
         orch.on_match_done = on_match_done
-        match_id = await orch.challenge(
+        match_id = await challenge_and_start(
+            orch,
             bot_a["id"], bot_b["id"], owner["id"], game_id="gomoku"
         )
         await asyncio.wait_for(runner.entered.wait(), timeout=1)
@@ -1251,13 +1313,16 @@ def test_midmatch_crash_reason_is_preserved_for_bot_and_human_matches(store: Sto
     orch = MatchOrchestrator(store, runner=AdjudicatedCrashRunner(), max_concurrent=2)
 
     async def exercise():
-        bot_mid = await orch.challenge(
+        bot_mid = await challenge_and_start(
+            orch,
             bot_a["id"], bot_b["id"], owner_a["id"], game_id="gomoku"
         )
         bot_task = orch._tasks.get(bot_mid)
         if bot_task is not None:
             await bot_task
-        human_mid = await orch.challenge_human(
+        store.executions.finalize_ready()
+        human_mid = await human_and_start(
+            orch,
             bot_a["id"], owner_a["id"], human_seat=1, game_id="gomoku"
         )
         human_task = orch._tasks.get(human_mid)

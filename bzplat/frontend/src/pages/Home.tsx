@@ -1,11 +1,27 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Heart, Eye, Flame, ArrowRight, Swords, LogIn, UserPlus, Upload, Trophy as TrophyIcon } from 'lucide-react'
-import PageStub from '@/components/PageStub'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
 import {
+  ArrowRight,
+  Bot,
+  Eye,
+  Flame,
+  Heart,
+  LogIn,
+  Swords,
+  Trophy,
+  Upload,
+  UserPlus,
+} from 'lucide-react'
+
+import { apiGet, errMsg } from '@/api'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
+import { useAuth } from '@/components/useAuth'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { EntityName } from '@/components/ui/overflow-text'
+import {
+  DataTable,
   Table,
   TableBody,
   TableCell,
@@ -15,44 +31,36 @@ import {
 } from '@/components/ui/table'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useAuth } from '@/components/useAuth'
-import { apiGet, errMsg } from '@/api'
-import { GAMES, gameLabel, gameIcon, matchTypeBadge } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
+import { GAMES, gameIcon, gameLabel } from '@/lib/games'
+import type { MatchParticipantSource } from '@/lib/match-participants'
+import { SummaryMetric } from '@/pages/public-page-ui'
 
-interface Match {
+interface Match extends MatchParticipantSource {
   id: string
   status: string
   bot_a_id: number | null
   bot_b_id: number | null
-  bot_a_name?: string
-  bot_b_name?: string
-  bot_a_display?: string
-  bot_b_display?: string
   created_at?: string
-  result?: { rounds_played?: number; deltas?: number[]; normalized_delta?: number }
   game_id?: string
   match_type?: string
-  owner_id?: number | null
+  contest_id?: string | number | null
 }
 
-function botDisplayName(display: string | undefined, name: string | undefined, id: number | null): string {
-  return display || name || (id != null ? `Bot #${id}` : '已删除 Bot')
+interface LikedMatch extends MatchParticipantSource {
+  id: string
+  game_id: string
+  likes_count: number
+  views_count: number
+  match_type?: string
+  created_at?: string
 }
 
-function MatchBotLink({ id, name, wrap = false }: { id: number | null; name: string; wrap?: boolean }) {
-  const textClass = wrap ? 'break-words' : 'truncate'
-  if (id == null) return <span className={`min-w-0 ${textClass} text-muted-foreground`}>{name}</span>
-  return (
-    <Link
-      to={`/bot/${id}`}
-      className={`min-w-0 ${textClass} font-medium text-foreground hover:text-primary`}
-      aria-label={`Bot ${name}`}
-    >
-      {name}
-    </Link>
-  )
-}
+const QUICK_LINKS = [
+  { to: '/my-bots', label: '上传 Bot', detail: '提交 ELF 并选择游戏', icon: Upload },
+  { to: '/challenge', label: '发起挑战', detail: '指定对手、版本或亲自上场', icon: Swords },
+  { to: '/leaderboard', label: '查看排行', detail: '按游戏查看 Glicko-2 天梯', icon: Trophy },
+]
 
 export default function Home() {
   const { isLoggedIn } = useAuth()
@@ -63,290 +71,220 @@ export default function Home() {
 
   useEffect(() => {
     setLoading(true)
-    const q = gameId ? `?limit=20&game_id=${encodeURIComponent(gameId)}` : '?limit=20'
-    apiGet<{ matches: Match[] }>(`/api/matches${q}`)
-      .then((d) => {
-        // 首页去重：同一场赛事(contest_id)的批量对阵只保留最新 1 条，
-        // 避免首页被一场赛事的内部对阵刷屏（让首页展示更多样化的动态）。
-        const seenContest = new Set<string | number | null>()
-        const deduped = (d.matches || []).filter((m) => {
-          const cid = (m as Match & { contest_id?: string | number | null }).contest_id
-          if (!cid) return true // 非赛事对局保留
-          if (seenContest.has(cid)) return false // 同赛事只留首条
-          seenContest.add(cid)
+    setError('')
+    const query = gameId ? `?limit=20&game_id=${encodeURIComponent(gameId)}` : '?limit=20'
+    apiGet<{ matches: Match[] }>(`/api/matches${query}`)
+      .then((data) => {
+        const seenContests = new Set<string | number>()
+        const deduped = (data.matches || []).filter((match) => {
+          if (!match.contest_id) return true
+          if (seenContests.has(match.contest_id)) return false
+          seenContests.add(match.contest_id)
           return true
         })
         setMatches(deduped.slice(0, 8))
       })
-      .catch((e) => setError(errMsg(e)))
+      .catch((cause) => setError(errMsg(cause)))
       .finally(() => setLoading(false))
   }, [gameId])
 
+  const activeMatches = matches.filter((match) => match.status === 'pending' || match.status === 'running').length
+  const completedMatches = matches.filter((match) => match.status === 'completed').length
+
   return (
-    <PageStub
-      title="首页"
-      subtitle="最新对局 · 进行中与已完成"
-      actions={
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          游戏
-          <Select value={gameId || 'all'} onValueChange={(v) => setGameId(v === 'all' ? '' : v)}>
-            <SelectTrigger className="h-9 w-[8.5rem]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部</SelectItem>
-              {GAMES.map((g) => (
-                <SelectItem key={g.id} value={g.id}>
-                  {g.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      }
-    >
-      {/* Hero 区 */}
-      <Card className="mb-6 overflow-hidden border-primary/20 bg-gradient-to-br from-primary/5 via-card to-card">
-        <CardContent className="grid gap-4 py-6">
-          <div className="min-w-0 space-y-1.5">
-            <h2 className="font-display text-2xl font-bold tracking-tight text-foreground">
-              多游戏 Bot 竞赛平台
-            </h2>
-            <p className="max-w-4xl break-words text-sm text-muted-foreground">
-              上传你的 Bot，在沙箱中对战。支持德州扑克 · 五子棋 · 点格棋，提供观赛、回放与 Glicko-2 排行榜。
-            </p>
-            <div className="flex flex-wrap gap-2 pt-1">
-              {GAMES.map((g) => (
-                <Badge key={g.id} variant="secondary" className="gap-1.5 px-2.5 py-1">
-                  <g.icon className="size-3.5" />
-                  {g.label}
-                </Badge>
-              ))}
-            </div>
-            {!isLoggedIn && (
-              <div className="flex flex-wrap gap-2 pt-1">
-                <Button asChild size="sm" className="gap-1.5 shadow-soft">
-                  <Link to="/register">
-                    <UserPlus className="size-3.5" />
-                    注册账号
-                  </Link>
-                </Button>
-                <Button asChild variant="outline" size="sm" className="gap-1.5">
-                  <Link to="/login">
-                    <LogIn className="size-3.5" />
-                    登录
-                  </Link>
-                </Button>
-              </div>
-            )}
-            {/* 已登录新用户「快速开始」三步指引（loading 完成后才显示，避免闪烁） */}
-            {isLoggedIn && !loading && (
-              <div className="grid gap-2 pt-2 sm:grid-cols-3">
-                <Link
-                  to="/my-bots"
-                  className="group flex min-w-0 items-center gap-2.5 rounded-lg border border-border bg-card/60 px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-accent"
-                >
-                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 font-mono text-xs font-semibold text-primary">1</span>
-                  <Upload className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
-                  <span className="min-w-0 break-words">
-                    <span className="block font-medium text-foreground">上传 Bot</span>
-                    <span className="block text-xs text-muted-foreground">提交二进制，选择游戏</span>
-                  </span>
-                </Link>
-                <Link
-                  to="/challenge"
-                  className="group flex min-w-0 items-center gap-2.5 rounded-lg border border-border bg-card/60 px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-accent"
-                >
-                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 font-mono text-xs font-semibold text-primary">2</span>
-                  <Swords className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
-                  <span className="min-w-0 break-words">
-                    <span className="block font-medium text-foreground">发起挑战</span>
-                    <span className="block text-xs text-muted-foreground">搜索对手或自博弈</span>
-                  </span>
-                </Link>
-                <Link
-                  to="/leaderboard"
-                  className="group flex min-w-0 items-center gap-2.5 rounded-lg border border-border bg-card/60 px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-accent"
-                >
-                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10 font-mono text-xs font-semibold text-primary">3</span>
-                  <TrophyIcon className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
-                  <span className="min-w-0 break-words">
-                    <span className="block font-medium text-foreground">查看排行</span>
-                    <span className="block text-xs text-muted-foreground">Glicko-2 天梯榜</span>
-                  </span>
-                </Link>
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+    <PageFrame layout="public-home">
+      <PageHeader
+        eyebrow="Botbattle"
+        title="Bot 对战中心"
+        description="上传 Linux x86_64 ELF Bot，在隔离沙箱中完成德州扑克、五子棋与点格棋对局。"
+        actions={
+          isLoggedIn ? (
+            <>
+              <Button asChild variant="outline" size="sm"><Link to="/my-bots"><Bot className="size-4" />我的 Bot</Link></Button>
+              <Button asChild size="sm"><Link to="/challenge"><Swords className="size-4" />发起挑战</Link></Button>
+            </>
+          ) : (
+            <>
+              <Button asChild variant="outline" size="sm"><Link to="/login"><LogIn className="size-4" />登录</Link></Button>
+              <Button asChild size="sm"><Link to="/register"><UserPlus className="size-4" />注册账号</Link></Button>
+            </>
+          )
+        }
+      />
 
+      <SummaryStrip columns={3}>
+        <SummaryMetric label="支持游戏" value={GAMES.length} detail={GAMES.map((game) => game.label).join(' · ')} icon={<Bot className="size-4" />} />
+        <SummaryMetric label="最新活跃" value={activeMatches} detail={`当前展示 ${matches.length} 场`} icon={<Swords className="size-4" />} />
+        <SummaryMetric label="本批完成" value={completedMatches} detail={gameId ? gameLabel(gameId) : '全部游戏'} icon={<Trophy className="size-4" />} />
+      </SummaryStrip>
 
+      <div className="grid min-w-0 gap-2 sm:grid-cols-3" aria-label="快速开始">
+        {QUICK_LINKS.map((item, index) => (
+          <Link key={item.to} to={item.to} className="group min-w-0">
+            <Card density="compact" className="h-full transition-colors hover:border-primary/40 hover:bg-accent/30">
+              <CardContent className="flex min-w-0 items-center gap-3">
+                <span className="flex min-w-0 size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 font-mono text-xs font-semibold text-primary">
+                  {index + 1}
+                </span>
+                <item.icon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+                <span className="min-w-0 flex-1">
+                  <EntityName tooltip={false} tooltipFocusable={false} className="text-sm group-hover:text-primary">{item.label}</EntityName>
+                  <span className="block text-xs text-muted-foreground">{item.detail}</span>
+                </span>
+                <ArrowRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+              </CardContent>
+            </Card>
+          </Link>
+        ))}
+      </div>
 
-      {error && <ErrorMsg msg={error} className="mb-3" />}
+      <StickyToolbar label="首页对局筛选">
+        <span className="shrink-0 text-xs font-medium text-muted-foreground">最新对局</span>
+        <Select value={gameId || 'all'} onValueChange={(value) => setGameId(value === 'all' ? '' : value)}>
+          <SelectTrigger className="w-[8.5rem] max-w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部游戏</SelectItem>
+            {GAMES.map((game) => (
+              <SelectItem key={game.id} value={game.id}>{game.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button asChild variant="ghost" size="sm" className="ml-auto">
+          <Link to="/history">查看全部<ArrowRight className="size-3.5" /></Link>
+        </Button>
+      </StickyToolbar>
 
-      <Card className="overflow-hidden">
-        <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-          <span className="text-sm font-semibold text-foreground">最新对局</span>
-          <Link to="/history" className="text-xs text-primary hover:underline">查看全部 →</Link>
-        </div>
-        {loading ? (
-          <Loading />
+      <DataRegion title="最新对局" description="同一赛事批次仅展示最近一场，避免首页动态被单一赛事占满。">
+        {error ? (
+          <ErrorMsg msg={error} className="px-4 py-6" />
+        ) : loading ? (
+          <Loading text="正在加载最新对局…" />
         ) : matches.length === 0 ? (
-          <EmptyState text="暂无对局" icon={<Swords className="size-7 opacity-40" />} />
+          <EmptyState text="当前游戏暂无对局" icon={<Swords className="size-5 opacity-50" />} className="py-8" />
         ) : (
           <>
-          <div className="hidden overflow-x-auto md:block">
-          <Table className="min-w-[34rem]">
-            <TableHeader>
-              <TableRow>
-                <TableHead className="whitespace-nowrap">时间</TableHead>
-                <TableHead className="whitespace-nowrap">游戏</TableHead>
-                <TableHead className="min-w-[10rem]">对阵</TableHead>
-                <TableHead className="whitespace-nowrap">状态</TableHead>
-                <TableHead className="text-right whitespace-nowrap">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {matches.map((m) => {
-                  const tb = matchTypeBadge(m.match_type)
-                  const GameIcon = gameIcon(m.game_id)
-                  const aName = botDisplayName(m.bot_a_display, m.bot_a_name, m.bot_a_id)
-                  const bName = botDisplayName(m.bot_b_display, m.bot_b_name, m.bot_b_id)
-                  return (
-                    <TableRow key={m.id}>
-                      <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                        {fmtTime(m.created_at)}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1.5">
-                          <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                          <span className="text-sm whitespace-nowrap">{gameLabel(m.game_id)}</span>
-                          {tb && (
-                            <Badge variant="outline" className={`text-[10px] ${tb.cls}`}>
-                              {tb.label}
-                            </Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell className="max-w-[14rem]">
-                        <div className="flex min-w-0 items-center gap-1.5 text-sm">
-                          <MatchBotLink id={m.bot_a_id} name={aName} />
-                          <span className="shrink-0 text-muted-foreground">vs</span>
-                          <MatchBotLink id={m.bot_b_id} name={bName} />
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={m.status} />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-2">
-                          <Link
-                            className="inline-flex items-center gap-0.5 text-xs font-medium text-primary hover:underline"
-                            to={`/match/${m.id}`}
-                          >
-                            {(m.status === 'pending' || m.status === 'running') ? '观赛' : '详情'}
-                            <ArrowRight className="size-3" />
-                          </Link>
-                        </div>
-                      </TableCell>
+            <div className="hidden md:block">
+              <DataTable className="rounded-none border-0" scrollLabel="最新对局">
+                <Table aria-label="最新对局" className="min-w-[42rem]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>时间</TableHead>
+                      <TableHead>游戏</TableHead>
+                      <TableHead className="w-full min-w-[16rem]">对阵</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
                     </TableRow>
-                  )
-                })}
-            </TableBody>
-          </Table>
-          </div>
-          <div className="divide-y divide-border md:hidden">
-            {matches.map((m) => {
-              const tb = matchTypeBadge(m.match_type)
-              const GameIcon = gameIcon(m.game_id)
-              const aName = botDisplayName(m.bot_a_display, m.bot_a_name, m.bot_a_id)
-              const bName = botDisplayName(m.bot_b_display, m.bot_b_name, m.bot_b_id)
-              return (
-                <article key={m.id} className="space-y-2.5 px-4 py-3">
-                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                    <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="text-sm font-medium">{gameLabel(m.game_id)}</span>
-                    {tb && <Badge variant="outline" className={`text-[10px] ${tb.cls}`}>{tb.label}</Badge>}
-                    <span className="ml-auto"><StatusBadge status={m.status} /></span>
-                  </div>
-                  <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-start gap-1.5 text-sm">
-                    <MatchBotLink id={m.bot_a_id} name={aName} wrap />
-                    <span className="shrink-0 text-muted-foreground">vs</span>
-                    <MatchBotLink id={m.bot_b_id} name={bName} wrap />
-                  </div>
-                  <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                    <time className="min-w-0 break-words font-mono">{fmtTime(m.created_at)}</time>
-                    <Link className="inline-flex shrink-0 items-center gap-0.5 font-medium text-primary hover:underline" to={`/match/${m.id}`}>
-                      {(m.status === 'pending' || m.status === 'running') ? '观赛' : '详情'}
-                      <ArrowRight className="size-3" />
-                    </Link>
-                  </div>
-                </article>
-              )
-            })}
-          </div>
+                  </TableHeader>
+                  <TableBody>
+                    {matches.map((match) => {
+                      const GameIcon = gameIcon(match.game_id)
+                      return (
+                        <TableRow key={match.id}>
+                          <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">{fmtTime(match.created_at)}</TableCell>
+                          <TableCell>
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                              <span>{gameLabel(match.game_id)}</span>
+                              <MatchNatureBadge matchType={match.match_type} source={match} />
+                            </span>
+                          </TableCell>
+                          <TableCell className="whitespace-normal">
+                            <MatchParticipants source={match} />
+                          </TableCell>
+                          <TableCell><StatusBadge status={match.status} /></TableCell>
+                          <TableCell className="text-right">
+                            <Button asChild variant="ghost" size="xs">
+                              <Link to={`/match/${encodeURIComponent(match.id)}`}>
+                                {match.status === 'pending' || match.status === 'running' ? '观赛' : '详情'}
+                              </Link>
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </DataTable>
+            </div>
+            <ul className="divide-y divide-border md:hidden">
+              {matches.map((match) => {
+                const GameIcon = gameIcon(match.game_id)
+                return (
+                  <li key={match.id} className="min-w-0 px-3 py-2.5">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <GameIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="text-xs font-medium">{gameLabel(match.game_id)}</span>
+                      <MatchNatureBadge matchType={match.match_type} source={match} />
+                      <span className="ml-auto"><StatusBadge status={match.status} /></span>
+                    </div>
+                    <MatchParticipants source={match} className="mt-2" />
+                    <div className="mt-2 flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
+                      <time className="min-w-0 font-mono tabular-nums">{fmtTime(match.created_at)}</time>
+                      <Link className="shrink-0 whitespace-nowrap font-medium text-primary" to={`/match/${encodeURIComponent(match.id)}`}>
+                        {match.status === 'pending' || match.status === 'running' ? '观赛' : '详情'}
+                      </Link>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
           </>
         )}
-      </Card>
+      </DataRegion>
 
       <LikedTopMatches />
-    </PageStub>
+    </PageFrame>
   )
-}
-
-interface LikedMatch {
-  id: string
-  game_id: string
-  likes_count: number
-  views_count: number
-  bot_a_name?: string
-  bot_a_display?: string
-  bot_b_name?: string
-  bot_b_display?: string
-  created_at?: string
 }
 
 function LikedTopMatches() {
   const [matches, setMatches] = useState<LikedMatch[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
   useEffect(() => {
     apiGet<{ matches: LikedMatch[] }>('/api/matches/liked-top?limit=5')
-      .then((d) => setMatches(d.matches || []))
-      .catch(() => {})
+      .then((data) => setMatches(data.matches || []))
+      .catch((cause) => setError(errMsg(cause, '热门对局加载失败')))
+      .finally(() => setLoading(false))
   }, [])
-  if (matches.length === 0) return null
+
   return (
-    <Card className="mt-6">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Flame className="size-4 text-warning" />
-          热门对局（点赞榜）
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        {matches.map((m) => (
-          <Link
-            key={m.id}
-            to={`/match/${encodeURIComponent(m.id)}`}
-            className="grid min-w-0 gap-2 rounded-lg border border-border px-3 py-2 text-sm transition-colors hover:bg-accent sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-          >
-            <span className="min-w-0 break-words font-medium text-foreground">
-              {m.bot_a_display || m.bot_a_name || '已删除 Bot'} vs {m.bot_b_display || m.bot_b_name || '已删除 Bot'}
-            </span>
-            <Badge variant="outline" className="text-[10px]">
-              {gameLabel(m.game_id)}
-            </Badge>
-            <span className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground sm:justify-self-end">
-              <span className="flex items-center gap-1">
-                <Heart className="size-3 text-destructive" /> {m.likes_count}
-              </span>
-              <span className="flex items-center gap-1">
-                <Eye className="size-3" /> {m.views_count}
-              </span>
-            </span>
-          </Link>
-        ))}
-      </CardContent>
-    </Card>
+    <DataRegion title="热门对局" description="按点赞数展示近期公开回放。" actions={<Flame className="size-4 text-warning" />}>
+      {error ? (
+        <ErrorMsg msg={error} className="px-4 py-6" />
+      ) : loading ? (
+        <Loading text="正在加载热门对局…" className="py-7" />
+      ) : matches.length === 0 ? (
+        <EmptyState text="暂无热门对局" icon={<Heart className="size-5 opacity-50" />} className="py-7" />
+      ) : (
+        <ul className="divide-y divide-border">
+          {matches.map((match, index) => (
+            <li key={match.id} className="grid min-w-0 gap-2 px-3 py-2.5 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center">
+              <span className="hidden font-mono text-xs tabular-nums text-muted-foreground sm:block">{index + 1}</span>
+              <div className="min-w-0">
+                <MatchParticipants source={match} />
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                  <span>{gameLabel(match.game_id)}</span>
+                  <MatchNatureBadge matchType={match.match_type} source={match} />
+                  <time className="font-mono tabular-nums">{fmtTime(match.created_at)}</time>
+                </div>
+              </div>
+              <div className="flex min-w-0 shrink-0 items-center gap-2">
+                <span className="flex min-w-0 items-center gap-3 text-xs tabular-nums text-muted-foreground">
+                  <span className="inline-flex min-w-0 items-center gap-1"><Heart className="size-3 text-destructive" />{match.likes_count}</span>
+                  <span className="inline-flex min-w-0 items-center gap-1"><Eye className="size-3" />{match.views_count}</span>
+                </span>
+                <Button asChild variant="ghost" size="xs">
+                  <Link to={`/match/${encodeURIComponent(match.id)}`}>回放</Link>
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </DataRegion>
   )
 }

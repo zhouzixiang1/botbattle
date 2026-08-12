@@ -12,6 +12,70 @@ RUNTIME_LONGRUNNING = "longrunning"
 VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
 DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL
 
+# 私有 Bot debug 持久化硬顶。schema CHECK、Store 防御性校验与上层
+# 内存收集器共用，避免三处同义数字漂移。
+MATCH_DEBUG_MAX_ENTRY_BYTES = 4 * 1024
+MATCH_DEBUG_MAX_ENTRIES_PER_SEAT = 512
+MATCH_DEBUG_MAX_BYTES_PER_SEAT = 128 * 1024
+MATCH_DEBUG_MAX_ENTRIES_PER_MATCH = 1024
+MATCH_DEBUG_MAX_BYTES_PER_MATCH = 256 * 1024
+
+# 全局执行请求状态机。queued 之外的 starting/running/settling 都占用一场
+# match slot；直到业务终态已落盘且 sandbox label 清零，才允许从 settling
+# 进入终态并释放容量。评分未结算由 per-Bot rated-overlap 门禁隔离，不占用
+# 无关任务的全局容量。
+EXECUTION_SOURCE_MANUAL = "manual"
+EXECUTION_SOURCE_HUMAN = "human"
+EXECUTION_SOURCE_CONTEST = "contest"
+EXECUTION_SOURCE_AUTO = "auto"
+EXECUTION_SOURCES = frozenset(
+    {
+        EXECUTION_SOURCE_MANUAL,
+        EXECUTION_SOURCE_HUMAN,
+        EXECUTION_SOURCE_CONTEST,
+        EXECUTION_SOURCE_AUTO,
+    }
+)
+
+EXECUTION_QUEUED = "queued"
+EXECUTION_STARTING = "starting"
+EXECUTION_RUNNING = "running"
+EXECUTION_SETTLING = "settling"
+EXECUTION_COMPLETED = "completed"
+EXECUTION_CANCELLED = "cancelled"
+EXECUTION_INTERRUPTED = "interrupted"
+EXECUTION_ACTIVE_STATES = frozenset(
+    {EXECUTION_STARTING, EXECUTION_RUNNING, EXECUTION_SETTLING}
+)
+EXECUTION_TERMINAL_STATES = frozenset(
+    {EXECUTION_COMPLETED, EXECUTION_CANCELLED, EXECUTION_INTERRUPTED}
+)
+
+DISPATCHER_STOPPED = "stopped"
+DISPATCHER_STARTING = "starting"
+DISPATCHER_RUNNING = "running"
+DISPATCHER_PAUSED = "paused"
+DISPATCHER_STOPPING = "stopping"
+
+# ── 平台通信状态（communications/ 唯一持久化契约）────────────────────
+# 站内 conversation/message 是普通平台通信的真相；邮件只是异步 delivery。
+# 验证码/重置码属于 transactional delivery，出于安全原因不写普通消息正文。
+CONVERSATION_KINDS = frozenset({
+    "notification", "support", "bug_report", "broadcast", "auth", "system",
+})
+CONVERSATION_STATUSES = frozenset({"open", "closed", "archived"})
+DELIVERY_CHANNELS = frozenset({"in_app", "email"})
+DELIVERY_STATUSES = frozenset({
+    "queued", "sending", "sent", "failed", "cancelled",
+})
+BROADCAST_STATES = frozenset({
+    "draft", "scheduled", "running", "completed", "cancelled",
+})
+BUG_REPORT_STATUSES = frozenset({
+    "new", "acknowledged", "needs_info", "in_progress", "resolved",
+    "duplicate", "wont_fix",
+})
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,6 +250,33 @@ CREATE TABLE IF NOT EXISTS matches_index (
     game_id         TEXT    NOT NULL
 );
 
+-- Bot 顶层 debug sidecar 的私有存储。它不属于公开 replay/result/event 契约，
+-- 只在对局终态后由编排器一次性写入。通过 matches_index 的 FK 保证删除任意
+-- 游戏的对局都会级联清理；Bot/用户删除只清空快照 bot_id，不产生悬空引用。
+CREATE TABLE IF NOT EXISTS match_debug_sessions (
+    match_id        TEXT    PRIMARY KEY REFERENCES matches_index(id) ON DELETE CASCADE,
+    entry_count     INTEGER NOT NULL DEFAULT 0 CHECK (entry_count BETWEEN 0 AND __MATCH_DEBUG_MAX_ENTRIES__),
+    total_bytes     INTEGER NOT NULL DEFAULT 0 CHECK (total_bytes BETWEEN 0 AND __MATCH_DEBUG_MAX_BYTES__),
+    dropped_count   INTEGER NOT NULL DEFAULT 0 CHECK (dropped_count >= 0),
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS match_debug_entries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id        TEXT    NOT NULL REFERENCES match_debug_sessions(match_id) ON DELETE CASCADE,
+    bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    seat            INTEGER NOT NULL CHECK (seat IN (0, 1)),
+    turn            INTEGER NOT NULL CHECK (turn >= 1),
+    leg             INTEGER NOT NULL DEFAULT -1 CHECK (leg >= -1),
+    debug_json      TEXT    NOT NULL CHECK (json_valid(debug_json)),
+    size_bytes      INTEGER NOT NULL CHECK (size_bytes BETWEEN 1 AND __MATCH_DEBUG_MAX_ENTRY_BYTES__),
+    created_at      TEXT    NOT NULL,
+    UNIQUE(match_id, seat, turn, leg)
+);
+CREATE INDEX IF NOT EXISTS idx_match_debug_entries_order
+    ON match_debug_entries(match_id, seat, leg, turn);
+
 CREATE TABLE IF NOT EXISTS match_replays (
     match_id        TEXT    PRIMARY KEY,
     events_json     TEXT    NOT NULL DEFAULT '[]',
@@ -197,16 +288,320 @@ CREATE TABLE IF NOT EXISTS match_replays (
 -- matches 已按游戏分表，无法声明单一物理 FK；删除对局时由 Store.delete_match 清理。
 CREATE TABLE IF NOT EXISTS match_rating_settlements (
     match_id        TEXT    PRIMARY KEY,
-    settled_at      TEXT    NOT NULL
+    settled_at      TEXT    NOT NULL,
+    settled_order   INTEGER
 );
 
--- 系统 auto-match 的持久化每日配额凭据。matches 已按游戏分表，无法声明单一
--- 物理 FK；创建/删除对局时由 Store 在同一事务维护。本表只记录 auto_matcher
--- 显式创建的系统 ladder，普通用户对局不会进入。
-CREATE TABLE IF NOT EXISTS auto_match_daily_claims (
+-- 每场对局在创建/首次 v2 迁移时冻结的评分资格。它是后续全量重建排行榜的
+-- 稳定输入，不依赖 Bot 以后软删/硬删；matches 按游戏分表，故 match_id 由 Store
+-- 维护逻辑引用。迁移只分类，不自动重放或改写既有 ratings/history/settlements。
+CREATE TABLE IF NOT EXISTS match_rating_policies (
     match_id        TEXT    PRIMARY KEY,
-    local_day       TEXT    NOT NULL,
-    created_at      TEXT    NOT NULL
+    game_id         TEXT    NOT NULL,
+    bot_a_id        INTEGER,
+    bot_b_id        INTEGER,
+    settled_order   INTEGER,
+    rated           INTEGER NOT NULL CHECK (rated IN (0,1)),
+    rating_reason   TEXT    NOT NULL,
+    source          TEXT    NOT NULL,
+    classified_at   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_match_rating_policies_reason
+    ON match_rating_policies(source,rating_reason,match_id);
+
+-- 排行榜投影是否已经按当前评分资格真值完整重建。升级只负责识别旧污染，
+-- 不会擅自重放历史；维护重建必须在同一事务刷新四类投影后再把此哨兵推进到
+-- owner-neutral-v3，并记录它覆盖到的 settlement 序号和可信 mutation 链。
+-- v2 没有 mutation lineage，升级后必须离线重建，不能沿用其“已验证”标记。
+CREATE TABLE IF NOT EXISTS rating_projection_state (
+    singleton                   INTEGER PRIMARY KEY CHECK (singleton=1),
+    policy_version              TEXT    NOT NULL,
+    rebuilt_at                  TEXT,
+    source_settlement_count     INTEGER NOT NULL DEFAULT 0 CHECK (source_settlement_count>=0),
+    source_last_settled_order   INTEGER NOT NULL DEFAULT 0 CHECK (source_last_settled_order>=0),
+    source_digest               TEXT    NOT NULL DEFAULT '',
+    projection_digest           TEXT    NOT NULL DEFAULT '',
+    plan_digest                 TEXT    NOT NULL DEFAULT '',
+    mutation_revision           INTEGER NOT NULL DEFAULT 0 CHECK (mutation_revision>=0),
+    trusted_mutation_revision   INTEGER NOT NULL DEFAULT 0 CHECK (trusted_mutation_revision>=0)
+);
+INSERT OR IGNORE INTO rating_projection_state(
+    singleton,policy_version,rebuilt_at,source_settlement_count,
+    source_last_settled_order,source_digest,projection_digest,plan_digest
+) VALUES(1,'legacy-unverified',NULL,0,0,'','','');
+
+-- completed 事务先冻结全局结算序号；实际评分事务随后用同一序号写 settlement。
+-- 这样崩溃恢复不必再猜 created_at/ended_at 顺序。
+CREATE TABLE IF NOT EXISTS rating_settlement_sequence (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
+    next_order      INTEGER NOT NULL CHECK (next_order>=1)
+);
+INSERT OR IGNORE INTO rating_settlement_sequence(singleton,next_order) VALUES(1,1);
+
+-- 全来源执行请求。public_id 是唯一对外标识；版本 ID、内部主键、match_config
+-- 与故障详情只供调度器使用，所有 API 必须显式白名单投影。
+CREATE TABLE IF NOT EXISTS execution_jobs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    source              TEXT    NOT NULL CHECK (
+        source IN ('manual','human','contest','auto')
+    ),
+    status              TEXT    NOT NULL DEFAULT 'queued' CHECK (
+        status IN ('queued','starting','running','settling',
+                   'completed','cancelled','interrupted')
+    ),
+    priority            INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 100),
+    owner_user_id       INTEGER,
+    game_id             TEXT    NOT NULL,
+    match_type          TEXT    NOT NULL CHECK (
+        match_type IN ('challenge','table','contest','ladder','human')
+    ),
+    -- These are immutable audit snapshots, not ownership FKs.  Active-request
+    -- deletion guards below protect runnable identities while still allowing
+    -- ordinary account/Bot retention policy after the request is terminal.
+    bot_a_id            INTEGER NOT NULL,
+    bot_b_id            INTEGER NOT NULL,
+    bot_a_version_id    INTEGER,
+    bot_b_version_id    INTEGER,
+    human_user_id       INTEGER,
+    human_seat          INTEGER CHECK (human_seat IN (0,1)),
+    contest_id          INTEGER,
+    contest_pairing_id  INTEGER,
+    match_config        TEXT    NOT NULL DEFAULT '{}' CHECK (json_valid(match_config)),
+    rated               INTEGER NOT NULL CHECK (rated IN (0,1)),
+    rating_reason       TEXT    NOT NULL,
+    match_slots         INTEGER NOT NULL DEFAULT 1 CHECK (match_slots=1),
+    sandbox_units       INTEGER NOT NULL CHECK (sandbox_units IN (1,2)),
+    current_match_id    TEXT,
+    auto_decision_id    INTEGER,
+    cancel_requested    INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+    attempt_count       INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
+    cleanup_state       TEXT    NOT NULL DEFAULT 'none' CHECK (
+        cleanup_state IN ('none','pending','confirmed')
+    ),
+    failure_count       INTEGER NOT NULL DEFAULT 0 CHECK (failure_count>=0),
+    next_attempt_at     TEXT,
+    retryable           INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0,1)),
+    terminal_reason     TEXT    NOT NULL DEFAULT '',
+    last_error          TEXT    NOT NULL DEFAULT '',
+    created_at          TEXT    NOT NULL,
+    claimed_at          TEXT,
+    started_at          TEXT,
+    settling_at         TEXT,
+    terminal_at         TEXT,
+    CONSTRAINT chk_execution_job_human_resources CHECK (
+        (source='human' AND match_type='human' AND sandbox_units=1
+         AND human_user_id IS NOT NULL AND human_seat IS NOT NULL) OR
+        (source<>'human' AND match_type<>'human' AND sandbox_units=2
+         AND human_user_id IS NULL AND human_seat IS NULL)
+    ),
+    CONSTRAINT chk_execution_job_contest_ref CHECK (
+        (source='contest' AND contest_id IS NOT NULL
+         AND contest_pairing_id IS NOT NULL) OR
+        (source<>'contest' AND contest_pairing_id IS NULL)
+    ),
+    CONSTRAINT chk_execution_job_lifecycle CHECK (
+        (status='queued' AND current_match_id IS NULL
+         AND claimed_at IS NULL AND started_at IS NULL AND settling_at IS NULL
+         AND terminal_at IS NULL AND cleanup_state='none') OR
+        (status='starting' AND current_match_id IS NOT NULL
+         AND claimed_at IS NOT NULL AND terminal_at IS NULL
+         AND cleanup_state IN ('none','pending','confirmed')) OR
+        (status='running' AND current_match_id IS NOT NULL
+         AND claimed_at IS NOT NULL AND started_at IS NOT NULL
+         AND terminal_at IS NULL
+         AND cleanup_state IN ('none','pending','confirmed')) OR
+        (status='settling' AND current_match_id IS NOT NULL
+         AND claimed_at IS NOT NULL AND settling_at IS NOT NULL
+         AND terminal_at IS NULL AND cleanup_state IN ('pending','confirmed')) OR
+        (status IN ('completed','cancelled','interrupted')
+         AND terminal_at IS NOT NULL)
+    )
+);
+
+-- 每次 claim 对应一个不可复活的 match attempt。running crash 若已有公开事件，
+-- 旧 attempt 保留 interrupted 审计；自动/赛事请求可以在同一 public_id 下重排新 attempt。
+CREATE TABLE IF NOT EXISTS execution_job_attempts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id          INTEGER NOT NULL REFERENCES execution_jobs(id) ON DELETE RESTRICT,
+    attempt_no      INTEGER NOT NULL CHECK (attempt_no>=1),
+    match_id        TEXT    NOT NULL UNIQUE,
+    status          TEXT    NOT NULL CHECK (
+        status IN ('starting','running','settling','completed',
+                   'cancelled','interrupted')
+    ),
+    events_observed INTEGER NOT NULL DEFAULT 0 CHECK (events_observed IN (0,1)),
+    created_at      TEXT    NOT NULL,
+    started_at      TEXT,
+    terminal_at     TEXT,
+    terminal_reason TEXT    NOT NULL DEFAULT '',
+    UNIQUE(job_id,attempt_no)
+);
+
+-- 单 dispatcher 控制面。跨进程唯一性由 DB 邻接 OS flock 提供；本表只保存
+-- 可诊断/可恢复的状态，不保存 lease、PID、boot id 或 daemon incarnation。
+CREATE TABLE IF NOT EXISTS execution_control (
+    singleton           INTEGER PRIMARY KEY CHECK (singleton=1),
+    dispatcher_state    TEXT    NOT NULL DEFAULT 'stopped' CHECK (
+        dispatcher_state IN ('stopped','starting','running','paused','stopping')
+    ),
+    accepting           INTEGER NOT NULL DEFAULT 0 CHECK (accepting IN (0,1)),
+    auto_enabled        INTEGER NOT NULL DEFAULT 1 CHECK (auto_enabled IN (0,1)),
+    pause_reason        TEXT    NOT NULL DEFAULT '',
+    retry_count         INTEGER NOT NULL DEFAULT 0 CHECK (retry_count>=0),
+    retry_at            TEXT,
+    updated_at          TEXT    NOT NULL
+);
+INSERT OR IGNORE INTO execution_control(
+    singleton,dispatcher_state,accepting,auto_enabled,pause_reason,retry_count,updated_at
+) VALUES(1,'stopped',0,1,'',0,CURRENT_TIMESTAMP);
+
+-- Docker create 的物理事实先于 execution attempt 容器存在。这个单例 journal
+-- 与 DB 邻接的实例级 flock 共同封住跨线程/跨进程的 create/cleanup 窗口；
+-- creating 不能仅凭同一 host boot 下的 label 双零自动清除。
+CREATE TABLE IF NOT EXISTS docker_launch_journal (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton=1),
+    state           TEXT    NOT NULL DEFAULT 'idle' CHECK (
+        state IN ('idle','creating','created')
+    ),
+    launch_token    TEXT,
+    instance_key    TEXT,
+    owner_kind      TEXT CHECK (
+        owner_kind IS NULL OR owner_kind IN ('execution','preflight')
+    ),
+    job_public_id   TEXT,
+    attempt_no      INTEGER CHECK (attempt_no IS NULL OR attempt_no>=1),
+    slot            INTEGER CHECK (slot IS NULL OR slot>=0),
+    container_name  TEXT,
+    host_boot_id    TEXT,
+    updated_at      TEXT    NOT NULL,
+    CONSTRAINT chk_docker_launch_journal_shape CHECK (
+        (state='idle' AND launch_token IS NULL AND instance_key IS NULL
+         AND owner_kind IS NULL AND job_public_id IS NULL
+         AND attempt_no IS NULL AND slot IS NULL AND container_name IS NULL
+         AND host_boot_id IS NULL) OR
+        (state IN ('creating','created') AND launch_token IS NOT NULL
+         AND instance_key IS NOT NULL AND owner_kind IS NOT NULL
+         AND job_public_id IS NOT NULL AND attempt_no IS NOT NULL
+         AND slot IS NOT NULL AND container_name IS NOT NULL
+         AND host_boot_id IS NOT NULL)
+    )
+);
+INSERT OR IGNORE INTO docker_launch_journal(singleton,state,updated_at)
+VALUES(1,'idle',CURRENT_TIMESTAMP);
+
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_dispatch
+    ON execution_jobs(status,priority,created_at,id);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_owner
+    ON execution_jobs(owner_user_id,status,created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_jobs_source
+    ON execution_jobs(source,status,created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_current_match
+    ON execution_jobs(current_match_id) WHERE current_match_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_jobs_active_contest_pairing
+    ON execution_jobs(contest_pairing_id)
+    WHERE contest_pairing_id IS NOT NULL
+      AND status IN ('queued','starting','running','settling');
+
+-- 系统自动排位的永久选择审计。活跃队列终态后会删除，但选择时的游标、lane、
+-- owner/Bot/配对服务计数、Rating 差、先后手债务和冻结版本必须长期保留，才能
+-- 复核公平策略。Bot/用户/版本 ID 故意是审计快照而非 FK，实体硬删后证据仍在。
+CREATE TABLE IF NOT EXISTS auto_match_decisions (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_version              TEXT    NOT NULL,
+    state_revision              INTEGER NOT NULL,
+    cursor_game_idx             INTEGER NOT NULL,
+    requested_lane              TEXT    NOT NULL,
+    actual_lane                 TEXT    NOT NULL,
+    fallback_reason             TEXT    NOT NULL DEFAULT '',
+    game_id                     TEXT    NOT NULL,
+    bot_a_id                    INTEGER NOT NULL,
+    bot_b_id                    INTEGER NOT NULL,
+    owner_a_id                  INTEGER NOT NULL,
+    owner_b_id                  INTEGER NOT NULL,
+    bot_a_version_id            INTEGER NOT NULL,
+    bot_b_version_id            INTEGER NOT NULL,
+    owner_a_service_before      INTEGER NOT NULL,
+    owner_b_service_before      INTEGER NOT NULL,
+    bot_a_service_before        INTEGER NOT NULL,
+    bot_b_service_before        INTEGER NOT NULL,
+    bot_pair_count_before       INTEGER NOT NULL,
+    owner_pair_count_before     INTEGER NOT NULL,
+    rating_gap                  REAL    NOT NULL,
+    bot_a_seat_debt_before      INTEGER NOT NULL,
+    bot_b_seat_debt_before      INTEGER NOT NULL,
+    selection_reason            TEXT    NOT NULL,
+    lifecycle                   TEXT    NOT NULL DEFAULT 'queued',
+    match_id                    TEXT,
+    attempt_count               INTEGER NOT NULL DEFAULT 0,
+    last_attempt_error          TEXT    NOT NULL DEFAULT '',
+    created_at                  TEXT    NOT NULL,
+    dispatched_at               TEXT,
+    terminal_at                 TEXT,
+    terminal_reason             TEXT    NOT NULL DEFAULT '',
+    settlement_order            INTEGER,
+    job_public_id               TEXT,
+    CONSTRAINT chk_auto_decision_bots CHECK (bot_a_id <> bot_b_id),
+    CONSTRAINT chk_auto_decision_owners CHECK (owner_a_id <> owner_b_id),
+    CONSTRAINT chk_auto_decision_lane CHECK (
+        requested_lane IN ('bootstrap','established') AND
+        actual_lane IN ('bootstrap','established')
+    ),
+    CONSTRAINT chk_auto_decision_lifecycle CHECK (
+        lifecycle IN ('queued','dispatched','completed','aborted','cancelled')
+    )
+);
+
+-- 持久公平游标。next_lane: 0=bootstrap, 1=established。
+CREATE TABLE IF NOT EXISTS auto_match_fair_state (
+    singleton           INTEGER PRIMARY KEY CHECK (singleton=1),
+    next_game_idx       INTEGER NOT NULL DEFAULT 0 CHECK (next_game_idx>=0),
+    next_lane           INTEGER NOT NULL DEFAULT 0 CHECK (next_lane IN (0,1)),
+    revision            INTEGER NOT NULL DEFAULT 0 CHECK (revision>=0),
+    bootstrap_version   INTEGER NOT NULL DEFAULT 0 CHECK (bootstrap_version>=0),
+    updated_at          TEXT    NOT NULL
+);
+INSERT OR IGNORE INTO auto_match_fair_state(
+    singleton,next_game_idx,next_lane,revision,bootstrap_version,updated_at
+) VALUES(1,0,0,0,0,CURRENT_TIMESTAMP);
+
+-- 公平选择只读这些 auto 专属计数，绝不借用可被前台挑战影响的 ratings/
+-- pair_stats。所有计数按游戏隔离；owner 全局活跃唯一由 queue trigger 保证。
+CREATE TABLE IF NOT EXISTS auto_match_owner_service (
+    owner_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    game_id                TEXT    NOT NULL,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    last_served_revision   INTEGER NOT NULL DEFAULT 0 CHECK (last_served_revision>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(owner_id,game_id)
+);
+CREATE TABLE IF NOT EXISTS auto_match_bot_service (
+    bot_id                 INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    game_id                TEXT    NOT NULL,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    seat_a_count           INTEGER NOT NULL DEFAULT 0 CHECK (seat_a_count>=0),
+    seat_b_count           INTEGER NOT NULL DEFAULT 0 CHECK (seat_b_count>=0),
+    last_served_revision   INTEGER NOT NULL DEFAULT 0 CHECK (last_served_revision>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(bot_id,game_id)
+);
+CREATE TABLE IF NOT EXISTS auto_match_bot_pair_service (
+    game_id                TEXT    NOT NULL,
+    bot_lo_id              INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    bot_hi_id              INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(game_id,bot_lo_id,bot_hi_id),
+    CONSTRAINT chk_auto_bot_pair_order CHECK (bot_lo_id < bot_hi_id)
+);
+CREATE TABLE IF NOT EXISTS auto_match_owner_pair_service (
+    game_id                TEXT    NOT NULL,
+    owner_lo_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    owner_hi_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    served_count           INTEGER NOT NULL DEFAULT 0 CHECK (served_count>=0),
+    last_served_at         TEXT,
+    PRIMARY KEY(game_id,owner_lo_id,owner_hi_id),
+    CONSTRAINT chk_auto_owner_pair_order CHECK (owner_lo_id < owner_hi_id)
 );
 
 CREATE TABLE IF NOT EXISTS ratings (
@@ -235,8 +630,8 @@ CREATE TABLE IF NOT EXISTS pair_stats (
     PRIMARY KEY (bot_a_id, bot_b_id)
 );
 
--- 评分历史快照：每次 _apply_ratings 落一条，用于段位趋势/曲线（PR-1 建表 + 落盘，
--- PR-5 段位趋势读取）。每 bot 限保留最近 N 条（见 store 截断）。
+-- 评分历史快照：每次 _apply_ratings 落一条，用于数值变化与曲线。
+-- 每 bot 限保留最近 N 条（见 store 截断）。
 CREATE TABLE IF NOT EXISTS rating_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -301,6 +696,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     body            TEXT    NOT NULL DEFAULT '',
     link            TEXT    NOT NULL DEFAULT '',   -- 前端路由（如 /match/:id）
     is_read         INTEGER NOT NULL DEFAULT 0,
+    communication_message_public_id TEXT,         -- 新通信真相的兼容投影；旧行保持 NULL
     created_at      TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, id DESC);
@@ -359,6 +755,221 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     error           TEXT    NOT NULL DEFAULT '',
     created_at      TEXT    NOT NULL
 );
+
+-- ── communications：平台/admin ↔ 单个用户；不开放任意用户私信 ──────────
+CREATE TABLE IF NOT EXISTS broadcasts (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id               TEXT    NOT NULL UNIQUE,
+    state                   TEXT    NOT NULL DEFAULT 'draft',
+    created_by_user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    audience_kind           TEXT    NOT NULL,
+    audience_filter_json    TEXT    NOT NULL DEFAULT '{}',
+    audience_snapshot_hash  TEXT    NOT NULL,
+    audience_count          INTEGER NOT NULL DEFAULT 0,
+    subject                 TEXT    NOT NULL,
+    body_text               TEXT    NOT NULL,
+    sanitized_html          TEXT    NOT NULL,
+    channels_json           TEXT    NOT NULL DEFAULT '["in_app"]',
+    approval_token_hash     TEXT    NOT NULL,
+    preview_expires_at      TEXT    NOT NULL,
+    scheduled_at            TEXT,
+    approved_at             TEXT,
+    started_at              TEXT,
+    completed_at            TEXT,
+    cancelled_at            TEXT,
+    created_at              TEXT    NOT NULL,
+    updated_at              TEXT    NOT NULL,
+    CONSTRAINT chk_broadcast_state CHECK (
+        state IN ('draft','scheduled','running','completed','cancelled')),
+    CONSTRAINT chk_broadcast_count CHECK (audience_count >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_broadcast_state_schedule
+    ON broadcasts(state, scheduled_at, id);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    kind                TEXT    NOT NULL,
+    subject             TEXT    NOT NULL DEFAULT '',
+    status              TEXT    NOT NULL DEFAULT 'open',
+    created_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_by_kind     TEXT    NOT NULL DEFAULT 'platform',
+    broadcast_id        INTEGER REFERENCES broadcasts(id) ON DELETE SET NULL,
+    created_at          TEXT    NOT NULL,
+    updated_at          TEXT    NOT NULL,
+    closed_at           TEXT,
+    CONSTRAINT chk_conversation_kind CHECK (
+        kind IN ('notification','support','bug_report','broadcast','auth','system')),
+    CONSTRAINT chk_conversation_status CHECK (
+        status IN ('open','closed','archived')),
+    CONSTRAINT chk_conversation_creator CHECK (
+        created_by_kind IN ('user','admin','platform'))
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated
+    ON conversations(updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_broadcast
+    ON conversations(broadcast_id);
+
+CREATE TABLE IF NOT EXISTS conversation_participants (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id               TEXT    NOT NULL UNIQUE,
+    conversation_id         INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    user_id                 INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    participant_kind        TEXT    NOT NULL,
+    last_read_message_id    INTEGER,
+    joined_at               TEXT    NOT NULL,
+    CONSTRAINT chk_participant_kind CHECK (
+        participant_kind IN ('user','admin','platform'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_participant_user
+    ON conversation_participants(conversation_id, user_id)
+    WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_participant_platform
+    ON conversation_participants(conversation_id, participant_kind)
+    WHERE user_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_conversation_participant_lookup
+    ON conversation_participants(user_id, conversation_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    conversation_id     INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    reply_to_id         INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    author_user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    author_kind         TEXT    NOT NULL,
+    body_text           TEXT    NOT NULL,
+    sanitized_html      TEXT    NOT NULL,
+    metadata_json       TEXT    NOT NULL DEFAULT '{}',
+    created_at          TEXT    NOT NULL,
+    CONSTRAINT chk_message_author CHECK (
+        author_kind IN ('user','admin','platform'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation
+    ON messages(conversation_id, id);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id               TEXT    NOT NULL UNIQUE,
+    message_id              INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+    broadcast_id            INTEGER REFERENCES broadcasts(id) ON DELETE SET NULL,
+    channel                 TEXT    NOT NULL,
+    recipient_user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    address_snapshot        TEXT    NOT NULL DEFAULT '',
+    status                  TEXT    NOT NULL DEFAULT 'queued',
+    priority                INTEGER NOT NULL DEFAULT 0,
+    attempt_count           INTEGER NOT NULL DEFAULT 0,
+    max_attempts            INTEGER NOT NULL DEFAULT 5,
+    next_attempt_at         TEXT    NOT NULL,
+    last_error              TEXT    NOT NULL DEFAULT '',
+    provider                TEXT    NOT NULL DEFAULT '',
+    provider_message_id     TEXT    NOT NULL DEFAULT '',
+    idempotency_key         TEXT    NOT NULL UNIQUE,
+    template_key            TEXT    NOT NULL DEFAULT '',
+    template_version        INTEGER NOT NULL DEFAULT 0,
+    payload_json            TEXT    NOT NULL DEFAULT '{}',
+    claimed_at              TEXT,
+    sent_at                 TEXT,
+    cancelled_at            TEXT,
+    created_at              TEXT    NOT NULL,
+    updated_at              TEXT    NOT NULL,
+    CONSTRAINT chk_delivery_channel CHECK (channel IN ('in_app','email')),
+    CONSTRAINT chk_delivery_status CHECK (
+        status IN ('queued','sending','sent','failed','cancelled')),
+    CONSTRAINT chk_delivery_attempts CHECK (
+        attempt_count >= 0 AND max_attempts > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_due
+    ON deliveries(status, next_attempt_at, priority DESC, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_recipient
+    ON deliveries(recipient_user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_deliveries_broadcast
+    ON deliveries(broadcast_id, status);
+
+CREATE TABLE IF NOT EXISTS broadcast_recipients (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    broadcast_id        INTEGER NOT NULL REFERENCES broadcasts(id) ON DELETE CASCADE,
+    user_id             INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    state               TEXT    NOT NULL DEFAULT 'pending',
+    attempt_count       INTEGER NOT NULL DEFAULT 0,
+    max_attempts        INTEGER NOT NULL DEFAULT 5,
+    next_attempt_at     TEXT    NOT NULL DEFAULT '',
+    last_error          TEXT    NOT NULL DEFAULT '',
+    conversation_id     INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    created_at          TEXT    NOT NULL,
+    processed_at        TEXT,
+    CONSTRAINT chk_broadcast_recipient_state CHECK (
+        state IN ('pending','processing','delivered','cancelled','failed')),
+    CONSTRAINT chk_broadcast_recipient_attempts CHECK (
+        attempt_count >= 0 AND max_attempts > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_broadcast_recipient_user
+    ON broadcast_recipients(broadcast_id, user_id)
+    WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_broadcast_recipient_work
+    ON broadcast_recipients(broadcast_id, state, id);
+
+-- 小白式 Bug 反馈复用 conversation；状态变化只追加 event，不改历史事件。
+CREATE TABLE IF NOT EXISTS bug_reports (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    conversation_id     INTEGER NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    reporter_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    tracking_token_hash TEXT    NOT NULL DEFAULT '',
+    category            TEXT    NOT NULL,
+    impact              TEXT    NOT NULL,
+    title               TEXT    NOT NULL,
+    current_route       TEXT    NOT NULL DEFAULT '',
+    status              TEXT    NOT NULL DEFAULT 'new',
+    duplicate_of_id     INTEGER REFERENCES bug_reports(id) ON DELETE SET NULL,
+    created_at          TEXT    NOT NULL,
+    updated_at          TEXT    NOT NULL,
+    CONSTRAINT chk_bug_status CHECK (
+        status IN ('new','acknowledged','needs_info','in_progress','resolved','duplicate','wont_fix'))
+);
+CREATE INDEX IF NOT EXISTS idx_bug_reports_status
+    ON bug_reports(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bug_reports_reporter
+    ON bug_reports(reporter_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS bug_report_events (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    bug_report_id       INTEGER NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+    event_type          TEXT    NOT NULL,
+    actor_user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    from_status         TEXT    NOT NULL DEFAULT '',
+    to_status           TEXT    NOT NULL DEFAULT '',
+    note                TEXT    NOT NULL DEFAULT '',
+    created_at          TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bug_report_events
+    ON bug_report_events(bug_report_id, id);
+
+CREATE TABLE IF NOT EXISTS diagnostic_bundles (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    bug_report_id       INTEGER NOT NULL UNIQUE REFERENCES bug_reports(id) ON DELETE CASCADE,
+    schema_version      INTEGER NOT NULL DEFAULT 1,
+    bundle_json         TEXT    NOT NULL,
+    created_at          TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bug_attachments (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id           TEXT    NOT NULL UNIQUE,
+    bug_report_id       INTEGER NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+    uploaded_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    original_name       TEXT    NOT NULL,
+    media_type          TEXT    NOT NULL,
+    size_bytes          INTEGER NOT NULL,
+    sha256              TEXT    NOT NULL,
+    storage_path        TEXT    NOT NULL UNIQUE,
+    created_at          TEXT    NOT NULL,
+    CONSTRAINT chk_bug_attachment_size CHECK (size_bytes > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_bug_attachments_report
+    ON bug_attachments(bug_report_id, id);
 
 CREATE TABLE IF NOT EXISTS contest_entries (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -446,7 +1057,10 @@ CREATE TABLE IF NOT EXISTS contest_templates (
 
 CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 CREATE INDEX IF NOT EXISTS idx_bot_versions_bot ON bot_versions(bot_id);
-CREATE INDEX IF NOT EXISTS idx_auto_match_claims_day ON auto_match_daily_claims(local_day);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_match_decisions_match
+    ON auto_match_decisions(match_id) WHERE match_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_auto_match_decisions_created
+    ON auto_match_decisions(id DESC);
 -- 每游戏对局表的索引由 db.py _migrate 的 _PER_GAME_INDEX_COLS 循环建（注册表派生，
 -- 覆盖第 4 游戏），不在此字面硬编码（避免重复索引 + 加游戏漏建）。
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -462,6 +1076,15 @@ CREATE INDEX IF NOT EXISTS idx_contest_templates_game ON contest_templates(game_
 # this private marker keeps the SQL text readable while preventing a second,
 # drifting runtime-mode default literal.
 SCHEMA = SCHEMA.replace("__DEFAULT_RUNTIME_MODE__", DEFAULT_RUNTIME_MODE)
+SCHEMA = SCHEMA.replace(
+    "__MATCH_DEBUG_MAX_ENTRIES__", str(MATCH_DEBUG_MAX_ENTRIES_PER_MATCH)
+)
+SCHEMA = SCHEMA.replace(
+    "__MATCH_DEBUG_MAX_BYTES__", str(MATCH_DEBUG_MAX_BYTES_PER_MATCH)
+)
+SCHEMA = SCHEMA.replace(
+    "__MATCH_DEBUG_MAX_ENTRY_BYTES__", str(MATCH_DEBUG_MAX_ENTRY_BYTES)
+)
 
 # 角色
 ROLE_USER = "user"
@@ -476,7 +1099,6 @@ STATUS_ABORTED = "aborted"
 
 # 对外对局技术故障事件（新写 replay / 实时 SSE / 公开读取唯一命名）
 TECHNICAL_INCIDENT_EVENT = "technical_incident"
-BOT_CAPACITY_EXHAUSTED_REASON = "bot_capacity_exhausted"
 TECHNICAL_INCIDENT_MESSAGES = {
     "invalid_json": "Bot 输出不是合法 JSON",
     "invalid_envelope": "Bot 响应信封必须是 JSON 对象",
@@ -485,6 +1107,7 @@ TECHNICAL_INCIDENT_MESSAGES = {
     "missing_keep_running": "LongRunning Bot 未输出 KEEP_RUNNING 握手",
     "invalid_keep_running": "LongRunning Bot 的 KEEP_RUNNING 握手不正确",
     "decision_timeout": "Bot 未在决策时限内输出完整响应行",
+    "response_line_too_large": "Bot 响应行超过 64 KiB 上限",
 }
 
 # 公开 completed/match_end 唯一允许的稳定裁决码。游戏裁判与平台技术判负
@@ -532,7 +1155,7 @@ PUBLIC_MATCH_ERROR_FALLBACK = "platform_error"
 TYPE_CHALLENGE = "challenge"
 TYPE_TABLE = "table"
 TYPE_CONTEST = "contest"
-TYPE_LADDER = "ladder"  # 闲时自动对局维护天梯榜（系统发起，无 owner）
+TYPE_LADDER = "ladder"  # 持续自动排位维护天梯榜（系统发起，无 owner）
 TYPE_HUMAN = "human"  # 人类 vs bot 对局（人类侧无 bot/binary，不计 Glicko）
 
 # 社交目标类型。comments / likes 是多态引用，SQLite 无法为 target_id 声明
@@ -545,11 +1168,6 @@ LIKE_TARGET_TYPES = frozenset({"match", "bot", "comment"})
 # 不会与此前缀冲突；哨兵与回填在同一 Store 初始化事务提交。
 MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL = "__migration__:rating_settlements:v1"
 
-# auto_match_daily_claims 首次升级回填哨兵：只在表首次启用时把历史上唯一的
-# ``owner_id IS NULL + match_type='ladder'`` 系统自动对局纳入当日配额；后续仅
-# 显式 auto-match 创建路径写 claim，避免把其他内部/测试 ladder 误计。
-AUTO_MATCH_CLAIMS_MIGRATION_SENTINEL = "__migration__:auto_match_daily_claims:v1"
-
 # 比赛状态
 CONTEST_DRAFT = "draft"
 CONTEST_OPEN = "open"
@@ -559,7 +1177,7 @@ CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
 
-# 以下 runtime/auto-match 键只标识旧库历史记录；现行值来自 runtime/config.py。
+# 以下 runtime 键只标识旧库历史记录；现行值来自 runtime/config.py。
 SETTING_CONTEST_SCHEDULER_ENABLED = "contest_scheduler_enabled"
 SETTING_CONTEST_SCHEDULER_INTERVAL_SEC = "contest_scheduler_interval_sec"
 
@@ -615,16 +1233,6 @@ SETTING_CONTEST_REST = "contest_default_rest_minutes"
 SETTING_CONTEST_TEMPLATES = "contest_templates"
 SETTING_FULL_RR_MAX_N = "full_rr_max_n"
 
-# 闲时自动对局（维护天梯榜）
-SETTING_AUTO_MATCH_ENABLED = "auto_match_enabled"          # "1"|"0"
-SETTING_AUTO_MATCH_INTERVAL_SEC = "auto_match_interval_sec"  # 轮询间隔
-SETTING_AUTO_MATCH_MIN_IDLE_SEC = "auto_match_min_idle_sec"  # 连续空闲 N 秒才触发
-SETTING_AUTO_MATCH_BOT_COOLDOWN = "auto_match_bot_cooldown"  # 同 Bot 两场间隔下限(秒)
-SETTING_AUTO_MATCH_STALE_SEC = "auto_match_stale_sec"      # last_played_at 超此视为陈旧（0=不限）
-SETTING_AUTO_MATCH_RESERVE_SLOTS = "auto_match_reserve_slots"  # 为用户挑战预留并发槽
-SETTING_AUTO_MATCH_PLACEMENT_GAMES = "auto_match_placement_games"  # 新 bot 定级赛场次（前N场优先）
-SETTING_AUTO_MATCH_MAX_PER_ROUND = "auto_match_max_per_round"  # 每轮最多补几场
-SETTING_AUTO_MATCH_DAILY_CAP = "auto_match_daily_cap"      # 每日后台对局总量上限
 
 # 唯一可执行目标。PE/Mach-O/脚本及其他 ELF 架构仅可作为历史元数据读取，
 # 不属于现行 schema 的可写值，也绝不能进入 runner。

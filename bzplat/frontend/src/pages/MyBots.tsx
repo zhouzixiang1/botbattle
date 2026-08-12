@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { Upload, Trash2, Pencil, Save, X, Power, Bot as BotIcon, History } from 'lucide-react'
-import PageStub from '@/components/PageStub'
+import { Upload, Trash2, Pencil, Save, X, Power, Bot as BotIcon, History, MoreHorizontal } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
-import { Card, CardContent } from '@/components/ui/card'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -18,6 +17,16 @@ import { apiForm, apiGet, apiJson, errMsg } from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import BotVersionManager from '@/components/BotVersionManager'
 import Pagination from '@/components/Pagination'
+import { Loading } from '@/components/ui/status'
+import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { CopyIdentifier, SummaryMetric } from '@/pages/public-page-ui'
 
 interface Bot {
   id: number
@@ -41,6 +50,7 @@ export default function MyBots() {
   const [confirm, confirmDialog] = useConfirm()
   const [bots, setBots] = useState<Bot[]>([])
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -57,7 +67,11 @@ export default function MyBots() {
   const perPage = 20
 
   const load = useCallback(async () => {
-    if (!isLoggedIn) return
+    if (!isLoggedIn) {
+      setLoading(false)
+      return
+    }
+    setLoading(true)
     try {
       const params = new URLSearchParams()
       if (filterGame) params.set('game_id', filterGame)
@@ -69,6 +83,8 @@ export default function MyBots() {
       setError('')
     } catch (e) {
       setError(errMsg(e, '加载失败'))
+    } finally {
+      setLoading(false)
     }
   }, [isLoggedIn, filterGame, page])
 
@@ -164,31 +180,38 @@ export default function MyBots() {
 
   if (!isLoggedIn) {
     return (
-      <PageStub title="我的 Bot">
-        <p>
-          请先{' '}
-          <Link to="/login" className="font-medium text-primary hover:underline">
-            登录
-          </Link>{' '}
-          后管理 Bot。
-        </p>
-      </PageStub>
+      <PageFrame layout="account-my-bots-guest">
+        <PageHeader title="我的 Bot" description="登录后上传、维护与切换 Bot 版本。" />
+        <DataRegion title="Bot 管理" className="mx-auto w-full max-w-5xl" contentClassName="space-y-3 px-4 py-6">
+          <EmptyState text="请先登录后管理 Bot" icon={<BotIcon className="size-5 opacity-50" />} className="py-3" />
+          <div className="flex min-w-0 justify-center"><Button asChild size="sm"><Link to="/login">前往登录</Link></Button></div>
+        </DataRegion>
+      </PageFrame>
     )
   }
 
+  const activeCount = bots.filter((bot) => Boolean(bot.is_active)).length
+  const runnableCount = bots.filter((bot) => bot.runnable !== false).length
+
   return (
-    <PageStub title="我的 Bot" subtitle="上传 Linux x86_64 ELF Bot，并选择对应游戏与运行模式">
-      {/* 桌面双栏：左=上传表单（sticky 常驻），右=筛选+列表主区；<lg 单列堆叠 */}
-      <div className="lg:grid lg:grid-cols-[20rem_minmax(0,1fr)] lg:gap-6">
-      <div className="lg:sticky lg:top-20 lg:self-start">
-      <Card>
-        <CardContent>
-          <form onSubmit={(e) => void onUpload(e)} className="space-y-3">
-            <h2 className="text-sm font-medium text-foreground">上传新 Bot</h2>
+    <PageFrame layout="account-my-bots">
+      <PageHeader title="我的 Bot" description="上传 Linux x86_64 ELF，维护公开资料、运行状态与历史版本。" />
+
+      <SummaryStrip columns={3}>
+        <SummaryMetric label="Bot 总数" value={total} detail={filterGame ? gameLabel(filterGame) : '全部游戏'} icon={<BotIcon className="size-4" />} />
+        <SummaryMetric label="本页启用" value={activeCount} detail={`本页共 ${bots.length} 个`} icon={<Power className="size-4" />} />
+        <SummaryMetric label="本页可运行" value={runnableCount} detail="符合当前 ELF 契约" />
+      </SummaryStrip>
+
+      {error && <ErrorMsg msg={error} />}
+
+      <div className="grid min-w-0 gap-[var(--page-section-gap)] xl:grid-cols-[22rem_minmax(0,1fr)]">
+      <DataRegion title="上传新 Bot" description="上传成功且通过预检后才会发布并激活。" className="self-start">
+          <form onSubmit={(e) => void onUpload(e)} className="min-w-0 space-y-3 p-3">
             <div className="space-y-1.5">
               <Label>游戏类型</Label>
               <Select value={gameId} onValueChange={setGameId}>
-                <SelectTrigger className="mt-1.5 h-9 w-full">
+                <SelectTrigger className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -203,7 +226,7 @@ export default function MyBots() {
             <div className="space-y-1.5">
               <Label>Botzone 运行模式</Label>
               <Select value={runtimeMode} onValueChange={setRuntimeMode}>
-                <SelectTrigger className="mt-1.5 h-9 w-full">
+                <SelectTrigger className="w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -251,7 +274,7 @@ export default function MyBots() {
               <Label htmlFor="upload-file">程序文件（Linux x86_64 ELF）</Label>
               <label
                 htmlFor="upload-file"
-                className="flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent"
+                className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
               >
                 <span className="shrink-0 font-medium text-foreground">选择文件</span>
                 <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
@@ -277,22 +300,18 @@ export default function MyBots() {
                 仅接受 Linux x86_64 ELF，最大 50MB；Windows .exe、macOS 程序和原始 .py 文件均不支持。
               </p>
             </div>
-            {error && <ErrorMsg msg={error} />}
-            <Button type="submit" disabled={busy} className="gap-1.5">
+            <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
               <Upload className="size-4" />
               {busy ? '上传中…' : '上传'}
             </Button>
           </form>
-        </CardContent>
-      </Card>
-      </div>{/* /左栏 sticky */}
+      </DataRegion>
 
-      <div className="mt-6 min-w-0 lg:mt-0">
-      <div className="mb-3">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          筛选游戏
+      <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)]">
+      <StickyToolbar label="我的 Bot 筛选">
+          <span className="shrink-0 text-xs font-medium text-muted-foreground">筛选游戏</span>
           <Select value={filterGame || 'all'} onValueChange={(v) => { setFilterGame(v === 'all' ? '' : v); setPage(1) }}>
-            <SelectTrigger className="h-9 w-[8.5rem]">
+            <SelectTrigger className="w-[8.5rem] max-w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -304,40 +323,41 @@ export default function MyBots() {
               ))}
             </SelectContent>
           </Select>
-        </div>
-      </div>
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
+      </StickyToolbar>
 
-      <Card className="gap-0 py-0">
-        {bots.length === 0 ? (
-          <EmptyState text="暂无 Bot，请先上传" icon={<BotIcon className="size-7 opacity-40" />} />
+      <DataRegion title="Bot 列表" description="主操作保持可见，版本、编辑与删除收纳在更多菜单。">
+        {loading ? (
+          <Loading text="正在加载 Bot…" />
+        ) : bots.length === 0 ? (
+          <EmptyState text="暂无 Bot，请先上传" icon={<BotIcon className="size-5 opacity-50" />} className="py-8" />
         ) : (
           <ul className="divide-y divide-border">
-            {bots.map((b) => (
-              <li key={b.id} className="px-4 py-3">
-                <div className="flex flex-wrap items-center gap-3">
+            {bots.map((b, index) => (
+              <li key={b.id} className="min-w-0 px-3 py-2.5">
+                <div className="grid min-w-0 gap-2 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-start">
+                  <span className="hidden pt-1 font-mono text-xs tabular-nums text-muted-foreground sm:block">{(page - 1) * perPage + index + 1}</span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2 font-medium text-foreground">
-                      <Link to={`/bot/${b.id}`} className="min-w-0 break-words [overflow-wrap:anywhere] hover:text-primary">
-                        {b.display_name || b.name}
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <Link to={`/bot/${b.id}`} className="min-w-0 flex-1 hover:text-primary">
+                        <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{b.display_name || b.name}</EntityName>
                       </Link>
-                      <span className="font-mono text-xs text-muted-foreground">#{b.id}</span>
                       <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
                       {b.runnable === false && <Badge variant="destructive">不可运行</Badge>}
+                      <Badge variant={b.is_active ? 'default' : 'outline'}>{b.is_active ? '已启用' : '已停用'}</Badge>
                     </div>
                     {b.description && (
-                      <p className="mt-0.5 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{b.description}</p>
+                      <OverflowText lines={2} tooltip={false} className="mt-1 text-xs text-muted-foreground">{b.description}</OverflowText>
                     )}
-                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                      <CopyIdentifier value={b.id} />
                       {b.runnable === false && (
                         <span className="max-w-full break-all rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
                           诊断：{b.format || 'unknown'} / {b.os || 'unknown'}-{b.arch || 'unknown'}
                         </span>
                       )}
-                      <span className="max-w-full break-all rounded bg-muted px-1.5 py-0.5 font-mono">
-                        {b.runtime_mode || 'traditional'}
-                      </span>
-                      <span>v{b.current_version ?? 0}</span>
-                      <span>{b.is_active ? '启用' : '停用'}</span>
+                      <Identifier>{b.runtime_mode || 'traditional'}</Identifier>
+                      <span>当前版本 v{b.current_version ?? 0}</span>
                     </div>
                     {b.runnable === false && (
                       <p className="mt-1 break-words text-xs text-destructive [overflow-wrap:anywhere]">
@@ -345,7 +365,7 @@ export default function MyBots() {
                       </p>
                     )}
                   </div>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex min-w-0 shrink-0 items-center gap-1.5">
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span>
@@ -368,64 +388,43 @@ export default function MyBots() {
                           : b.is_active ? '停用 Bot' : '启用 Bot'}
                       </TooltipContent>
                     </Tooltip>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() =>
-                            setVerBot({
-                              id: b.id,
-                              name: b.display_name || b.name,
-                              current: b.current_version ?? 0,
-                              mode: b.runtime_mode || 'traditional',
-                            })
-                          }
-                          className="gap-1"
-                        >
-                          <History className="size-3.5" />
-                          版本
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>上传新版本 / 查看历史 / 回滚</TooltipContent>
-                    </Tooltip>
-                    <Button type="button" variant="outline" size="sm" onClick={() => startEdit(b)} className="gap-1">
-                      <Pencil className="size-3.5" />
-                      编辑
-                    </Button>
-                    <Button type="button" variant="destructive" size="sm" onClick={() => void del(b)} className="gap-1">
-                      <Trash2 className="size-3.5" />
-                      删除
-                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button type="button" variant="outline" size="icon-sm" aria-label={`管理 ${b.display_name || b.name}`}><MoreHorizontal className="size-4" /></Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onSelect={() => setVerBot({ id: b.id, name: b.display_name || b.name, current: b.current_version ?? 0, mode: b.runtime_mode || 'traditional' })}>
+                          <History className="size-4" />版本管理
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => startEdit(b)}><Pencil className="size-4" />编辑资料</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem variant="destructive" onSelect={() => void del(b)}><Trash2 className="size-4" />删除 Bot</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 </div>
                 {editing === b.id && (
-                  <div className="mt-2 flex min-w-0 flex-wrap items-end gap-2 rounded-lg bg-muted p-3">
-                    <label className="min-w-0 flex-[1_1_12rem] space-y-1 text-xs text-muted-foreground">
-                      显示名
-                      <Input value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64} className="h-8 w-full max-w-full" />
-                    </label>
-                    <label className="min-w-0 flex-[1_1_12rem] space-y-1 text-xs text-muted-foreground">
-                      简介
-                      <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500} className="h-8 w-full max-w-full" />
-                    </label>
+                  <div className="mt-2 grid min-w-0 gap-2 rounded-lg bg-muted/50 p-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] lg:items-end">
+                    <div className="min-w-0 space-y-1"><Label htmlFor={`edit-display-${b.id}`} className="text-xs">显示名</Label><Input id={`edit-display-${b.id}`} value={editDisplay} onChange={(e) => setEditDisplay(e.target.value)} maxLength={64} className="w-full" /></div>
+                    <div className="min-w-0 space-y-1"><Label htmlFor={`edit-desc-${b.id}`} className="text-xs">简介</Label><Input id={`edit-desc-${b.id}`} value={editDesc} onChange={(e) => setEditDesc(e.target.value)} maxLength={500} className="w-full" /></div>
+                    <div className="flex min-w-0 shrink-0 items-center gap-1.5">
                     <Button type="button" size="sm" onClick={() => void saveEdit(b)} className="gap-1">
                       <Save className="size-3.5" />保存
                     </Button>
                     <Button type="button" variant="outline" size="sm" onClick={() => setEditing(null)} className="gap-1">
                       <X className="size-3.5" />取消
                     </Button>
+                    </div>
                   </div>
                 )}
               </li>
             ))}
           </ul>
         )}
-        <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
-      </Card>
-      </div>{/* /右栏 */}
-      </div>{/* /桌面双栏栅格 */}
+      </DataRegion>
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+      </div>
+      </div>
       {confirmDialog}
       <BotVersionManager
         botId={verBot?.id ?? null}
@@ -435,6 +434,6 @@ export default function MyBots() {
         onClose={() => setVerBot(null)}
         onChanged={load}
       />
-    </PageStub>
+    </PageFrame>
   )
 }

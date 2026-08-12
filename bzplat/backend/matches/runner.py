@@ -17,13 +17,16 @@ from bzplat.backend.games import (
 # ``match_params`` 只承载游戏 spec 明确允许的平台内部复现参数；固定规则键会在
 # session_factory 入口显式拒绝，runner 不持有任何游戏专属默认值。
 from bzplat.backend.games import _botzone_protocol as _bz
+from bzplat.backend.matches.bot_debug import MAX_RESPONSE_LINE_BYTES
 from bzplat.backend.runtime.binary_runner import (
     BinaryRunner,
     BotCrashedError,
     BotDecisionTimeoutError,
     BotProtocolError,
+    BotResponseLineTooLargeError,
     BotTechnicalError,
     PlatformRunnerError,
+    ExecutionScope,
     DEFAULT_ACTION_TIMEOUT,
 )
 from bzplat.backend.store.schema import (
@@ -32,6 +35,7 @@ from bzplat.backend.store.schema import (
 )
 
 EventSink = Callable[[str, dict[str, Any]], None]
+DebugSink = Callable[[int, int, int | None, Any], None]
 
 
 def _fail_response(game_id: str) -> dict[str, Any]:
@@ -46,10 +50,18 @@ def _protocol_payload(
     failed_seat: int,
     turn: int,
     leg: int | None,
-) -> Any:
+) -> tuple[Any, Any | None]:
     """Strictly decode one Botzone response without persisting raw Bot output."""
+    if len(line.encode("utf-8")) > MAX_RESPONSE_LINE_BYTES:
+        raise BotProtocolError(
+            TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+            error_code="response_line_too_large",
+            failed_seat=failed_seat,
+            turn=turn,
+            leg=leg,
+        )
     try:
-        return _bz.decode_response_payload(
+        return _bz.decode_response_with_debug(
             line,
             _game_registry.get(game_id).protocol.validate_response_payload,
         )
@@ -63,24 +75,58 @@ def _protocol_payload(
         ) from exc
 
 
+def _capture_debug(
+    sink: DebugSink | None,
+    *,
+    seat: int,
+    turn: int,
+    leg: int | None,
+    debug: Any,
+) -> None:
+    """调试采集是尽力 sidecar；异常绝不能改变已校验的 Bot 动作。"""
+    if sink is None or debug is None:
+        return
+    try:
+        sink(seat, turn, leg, debug)
+    except Exception:
+        # 不记录 traceback/异常文本：即使未来的 sink 把 Bot 内容
+        # 放进异常消息，日志也只保留结构化上下文。
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "bot debug collector failed seat=%s turn=%s leg=%s",
+            seat,
+            turn,
+            leg,
+        )
+
+
 async def _open_match_session(
     runner: BinaryRunner,
     binary_path: str,
     runtime_mode: str,
     *,
     failed_seat: int,
+    execution_scope: ExecutionScope | None = None,
 ) -> str:
     """建立一方逻辑会话；Traditional 只登记历史，不预启动闲置进程。"""
     try:
+        scope_kwargs = (
+            {"execution_scope": execution_scope}
+            if execution_scope is not None
+            else {}
+        )
         if runtime_mode == _bz.RUNTIME_TRADITIONAL:
             return await runner.prepare_session(
                 binary_path,
                 runtime_mode=runtime_mode,
+                **scope_kwargs,
             )
         if runtime_mode == _bz.RUNTIME_LONGRUNNING:
             return await runner.start_session(
                 binary_path,
                 runtime_mode=runtime_mode,
+                **scope_kwargs,
             )
         raise ValueError(f"未知运行模式: {runtime_mode}")
     except BotCrashedError as exc:
@@ -128,6 +174,7 @@ async def _traditional_decide_one_shot(
     failed_seat: int,
     turn: int,
     leg: int | None,
+    on_debug: DebugSink | None,
 ) -> dict[str, Any]:
     """Traditional 模式单次决策：启动 Bot → 发完整历史信封 → 读响应 → 停 Bot。
 
@@ -144,9 +191,12 @@ async def _traditional_decide_one_shot(
     line = _bz.dumps_traditional(full_requests, session.responses)
     # 启动临时 bot 进程（每回合重启——traditional 语义）
     try:
+        scope = getattr(session, "execution_scope", None)
+        scope_kwargs = {"execution_scope": scope} if scope is not None else {}
         tmp_sid = await runner.start_session(
             session.binary_path,
             runtime_mode=_bz.RUNTIME_TRADITIONAL,
+            **scope_kwargs,
         )
     except BotCrashedError as exc:
         exc.crashed_seat = failed_seat
@@ -159,7 +209,7 @@ async def _traditional_decide_one_shot(
             raise
     finally:
         await runner.stop_session(tmp_sid)
-    payload = _protocol_payload(
+    payload, debug = _protocol_payload(
         game_id,
         resp_line,
         failed_seat=failed_seat,
@@ -170,6 +220,13 @@ async def _traditional_decide_one_shot(
     session.requests.append(request)
     session.responses.append(payload)
     session.turn += 1
+    _capture_debug(
+        on_debug,
+        seat=failed_seat,
+        turn=turn,
+        leg=leg,
+        debug=debug,
+    )
     return {"response": payload}
 
 
@@ -182,6 +239,7 @@ async def _botzone_decide(
     action_timeout: float,
     failed_seat: int = 0,
     leg: int | None = None,
+    on_debug: DebugSink | None = None,
 ) -> dict[str, Any]:
     """Botzone 标准协议决策：按 session.runtime_mode 选传输路径，返回信封 dict。
 
@@ -211,11 +269,20 @@ async def _botzone_decide(
                 failed_seat=failed_seat,
                 turn=attempted_turn,
                 leg=leg,
+                on_debug=on_debug,
             )
         except asyncio.TimeoutError as exc:
             raise BotDecisionTimeoutError(
                 TECHNICAL_INCIDENT_MESSAGES["decision_timeout"],
                 error_code="decision_timeout",
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            ) from exc
+        except BotResponseLineTooLargeError as exc:
+            raise BotProtocolError(
+                TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+                error_code="response_line_too_large",
                 failed_seat=failed_seat,
                 turn=attempted_turn,
                 leg=leg,
@@ -248,8 +315,16 @@ async def _botzone_decide(
             turn=attempted_turn,
             leg=leg,
         ) from exc
+    except BotResponseLineTooLargeError as exc:
+        raise BotProtocolError(
+            TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+            error_code="response_line_too_large",
+            failed_seat=failed_seat,
+            turn=attempted_turn,
+            leg=leg,
+        ) from exc
 
-    payload = _protocol_payload(
+    payload, debug = _protocol_payload(
         game_id,
         resp_line,
         failed_seat=failed_seat,
@@ -259,7 +334,16 @@ async def _botzone_decide(
 
     # LongRunning 首回合响应后必须精确输出 keep_running 握手。
     if session.runtime_mode == _bz.RUNTIME_LONGRUNNING and is_first_turn:
-        extra = await runner.read_extra_line(session_id, timeout=1.0)
+        try:
+            extra = await runner.read_extra_line(session_id, timeout=1.0)
+        except BotResponseLineTooLargeError as exc:
+            raise BotProtocolError(
+                TECHNICAL_INCIDENT_MESSAGES["response_line_too_large"],
+                error_code="response_line_too_large",
+                failed_seat=failed_seat,
+                turn=attempted_turn,
+                leg=leg,
+            ) from exc
         try:
             _bz.require_keep_running_signal(extra)
         except _bz.ResponseProtocolError as exc:
@@ -278,6 +362,13 @@ async def _botzone_decide(
     session.requests.append(request)
     session.responses.append(payload)
     session.turn += 1
+    _capture_debug(
+        on_debug,
+        seat=failed_seat,
+        turn=attempted_turn,
+        leg=leg,
+        debug=debug,
+    )
     # 返回唯一现行 response 信封，满足引擎的 canonical decide 契约。
     return {"response": payload}
 
@@ -332,6 +423,28 @@ class MatchRunner:
         self.runner = runner or BinaryRunner()
         self.action_timeout = action_timeout
 
+    async def _close_execution_sessions(
+        self,
+        session_ids: tuple[str, ...],
+        execution_scope: ExecutionScope | None,
+    ) -> None:
+        """Stop every session and prove a scoped execution has no worker left."""
+        first_error: BaseException | None = None
+        for session_id in session_ids:
+            try:
+                await self.runner.stop_session(session_id)
+            except BaseException as exc:  # cleanup must continue for the other seat
+                if first_error is None:
+                    first_error = exc
+        if execution_scope is not None:
+            # Cleanup is one job-level operation: both seats, every Traditional
+            # one-shot container and any uncertain create are removed by the
+            # same exact instance/job/attempt labels before capacity is released.
+            await self.runner.cleanup_execution(execution_scope)
+            first_error = None
+        if first_error is not None:
+            raise first_error
+
     async def run_binaries(
         self,
         path_a: str,
@@ -339,9 +452,11 @@ class MatchRunner:
         *,
         game_id: str,
         on_event: EventSink | None = None,
+        on_debug: DebugSink | None = None,
         seed: int | None = None,
         runtime_modes: tuple[str, str] | None = None,
         time_budget_per_side: float | None = None,
+        execution_scope: ExecutionScope | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """跑两个二进制 bot。
@@ -364,6 +479,7 @@ class MatchRunner:
             path_a,
             rm_a,
             failed_seat=0,
+            execution_scope=execution_scope,
         )
         try:
             sid_b = await _open_match_session(
@@ -371,9 +487,10 @@ class MatchRunner:
                 path_b,
                 rm_b,
                 failed_seat=1,
+                execution_scope=execution_scope,
             )
         except BaseException:
-            await self.runner.stop_session(sid_a)
+            await self._close_execution_sessions((sid_a,), execution_scope)
             raise
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
@@ -408,6 +525,7 @@ class MatchRunner:
                         self.runner, sid, request,
                         game_id=gid, action_timeout=effective_timeout,
                         failed_seat=player_idx,
+                        on_debug=on_debug,
                     )
                 except BotTechnicalError as exc:
                     # 首个协议错误/超时即结束对局；绝不伪造成游戏默认动作继续跑。
@@ -442,8 +560,9 @@ class MatchRunner:
                 gid, decide, on_event=on_event, rng=rng, **match_params,
             )
         finally:
-            await self.runner.stop_session(sid_a)
-            await self.runner.stop_session(sid_b)
+            await self._close_execution_sessions(
+                (sid_a, sid_b), execution_scope
+            )
 
     async def run_bot_vs_human(
         self,
@@ -456,6 +575,7 @@ class MatchRunner:
         seed: int | None = None,
         runtime_mode: str | None = None,
         time_budget_per_side: float | None = None,
+        execution_scope: ExecutionScope | None = None,
         **match_params: Any,
     ) -> MatchResult:
         """Bot vs 人类：bot 侧走 BinaryRunner，人类侧走 human_decide 协程。
@@ -476,6 +596,7 @@ class MatchRunner:
             bot_path,
             rm,
             failed_seat=bot_seat,
+            execution_scope=execution_scope,
         )
         try:
             rng = random.Random(seed) if seed is not None else random.Random()
@@ -586,7 +707,7 @@ class MatchRunner:
                 gid, decide, on_event=on_event, rng=rng, **match_params,
             )
         finally:
-            await self.runner.stop_session(sid_bot)
+            await self._close_execution_sessions((sid_bot,), execution_scope)
 
     async def run_callables(
         self,
@@ -626,8 +747,10 @@ class MatchRunner:
         game_id: str,
         seed: int | None = None,
         on_event: EventSink | None = None,
+        on_debug: DebugSink | None = None,
         runtime_modes: tuple[str, str] | None = None,
         time_budget_per_side: float | None = None,
+        execution_scope: ExecutionScope | None = None,
         **match_params: Any,
     ) -> Any:
         """P4 duplicate：跑多 leg（经 spec.build_match_plan），**每 leg 独立判胜负**。
@@ -666,6 +789,7 @@ class MatchRunner:
             path_a,
             rm_a,
             failed_seat=0,
+            execution_scope=execution_scope,
         )
         try:
             sid_b = await _open_match_session(
@@ -673,9 +797,10 @@ class MatchRunner:
                 path_b,
                 rm_b,
                 failed_seat=1,
+                execution_scope=execution_scope,
             )
         except BaseException:
-            await self.runner.stop_session(sid_a)
+            await self._close_execution_sessions((sid_a,), execution_scope)
             raise
         gid = normalize_game_id(game_id)
         try:
@@ -697,6 +822,7 @@ class MatchRunner:
                             game_id=gid, action_timeout=self.action_timeout,
                             failed_seat=physical_seat,
                             leg=li,
+                            on_debug=on_debug,
                         )
                     except BotTechnicalError as exc:
                         _emit_technical_incident(leg_on_event, exc)
@@ -739,8 +865,9 @@ class MatchRunner:
                     leg_winner = None  # 平局
                 leg_results.append({"winner": leg_winner, "deltas": list(leg_deltas)})
         finally:
-            await self.runner.stop_session(sid_a)
-            await self.runner.stop_session(sid_b)
+            await self._close_execution_sessions(
+                (sid_a, sid_b), execution_scope
+            )
         # 构造结果：首 leg 结构 + legs 字段（每 leg 独立胜负）+ 累加 deltas（tiebreak 用）
         if final_result is not None:
             try:

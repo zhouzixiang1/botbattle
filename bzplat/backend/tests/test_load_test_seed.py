@@ -256,6 +256,34 @@ def test_seed_rebuild_ctx_consistent(tmp_path):
     assert ctx2["admin_token"] and ctx2["admin_token"] != ctx["admin_token"]
 
 
+def test_rebuild_ctx_rejects_inactive_formal_bot(tmp_path):
+    mod = _load_module()
+    db = str(tmp_path / "load.db")
+    ctx = mod.seed(db, 1, str(tmp_path / "uploads"))
+    inactive_bot_id = ctx["bots"]["load_u01"]["holdem"]
+
+    store = Store(db)
+    try:
+        store.update_bot(inactive_bot_id, is_active=0)
+        sessions_before = store._conn.execute(
+            "SELECT COUNT(*) FROM sessions"
+        ).fetchone()[0]
+    finally:
+        store.close()
+
+    with pytest.raises(RuntimeError, match="缺失或已停用"):
+        mod._rebuild_ctx(db)
+
+    store = Store(db)
+    try:
+        assert (
+            store._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            == sessions_before
+        )
+    finally:
+        store.close()
+
+
 def test_seed_default_upload_root_follows_database(tmp_path):
     """省略 upload_root 时，所有 Bot 文件必须落在隔离 DB 旁。"""
     mod = _load_module()

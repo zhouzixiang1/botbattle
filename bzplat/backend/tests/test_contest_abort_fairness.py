@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +13,13 @@ from fastapi.testclient import TestClient
 from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password, new_session_token, session_expires
 from bzplat.backend.main import create_app
+from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.store import Store
+from bzplat.backend.tests.execution_helpers import (
+    claim_next_queued,
+    enable_execution_queue,
+    start_claimed_match,
+)
 
 
 class _NeverChallenge:
@@ -91,8 +98,9 @@ def test_admin_abort_keeps_history_and_redispatches_without_ko_advance(tmp_path)
     )
     store.bind_contest_pairing_match(contest_id, pairing["id"], old_match_id)
 
-    # 重派只验证 prepare + bind；不在单测里真启动二进制 Bot。
-    app.state.orch.start_prepared_match = lambda _mid: None
+    # Completion callback only enqueues.  The test drives one atomic dispatcher
+    # claim without starting a binary process.
+    enable_execution_queue(store)
     response = TestClient(app).patch(
         f"/api/admin/matches/{old_match_id}",
         json={"status": "aborted"},
@@ -106,12 +114,105 @@ def test_admin_abort_keeps_history_and_redispatches_without_ko_advance(tmp_path)
     refreshed = store.list_contest_pairings(contest_id, stage_idx=0)
     assert len(refreshed) == 1, "中止不得生成下一轮/决赛对阵"
     assert refreshed[0]["id"] == pairing["id"]
+    assert refreshed[0]["status"] == "pending"
+    assert refreshed[0]["match_id"] is None
+
+    job = claim_next_queued(app.state.orch, start=False)
+    refreshed = store.list_contest_pairings(contest_id, stage_idx=0)
     assert refreshed[0]["status"] == "running"
     assert refreshed[0]["match_id"] not in (None, old_match_id)
+    assert refreshed[0]["match_id"] == job["current_match_id"]
     replacement = store.get_match(refreshed[0]["match_id"])
     assert replacement and replacement["status"] == "pending"
     assert store.get_contest(contest_id)["status"] == "running"
     assert store.list_official_results(contest_id) == []
+
+
+def test_queue_managed_contest_abort_finalizes_old_job_before_immediate_redispatch(
+    tmp_path,
+):
+    """A real claimed contest request must not mask its own replacement."""
+    store = Store(str(tmp_path / "queue-admin-abort.db"))
+    organizer, bot_a = _user_and_bot(store, "queueadmin", role="organizer")
+    user_b, bot_b = _user_and_bot(store, "queueplayer")
+    contest_id, pairing = _ko_contest(
+        store, organizer, [(organizer, bot_a), (user_b, bot_b)]
+    )
+    version_a = store.add_bot_version(
+        bot_a["id"], binary_path=str(bot_a["binary_path"])
+    )
+    version_b = store.add_bot_version(
+        bot_b["id"], binary_path=str(bot_b["binary_path"])
+    )
+    pairing = store.update_contest_pairing(
+        pairing["id"],
+        bot_a_version_id=version_a["id"],
+        bot_b_version_id=version_b["id"],
+    )
+
+    class CleanupProbe:
+        supervisor = None
+
+        async def cleanup_execution(self, scope) -> None:
+            scope.mark_cleanup_confirmed()
+
+    orch = MatchOrchestrator(
+        store,
+        runner=SimpleNamespace(runner=CleanupProbe()),
+        max_concurrent=1,
+    )
+    manager = ContestManager(store, orch)
+    enable_execution_queue(store)
+
+    async def on_match_done(match_id: str, done_contest_id: int | None) -> None:
+        assert done_contest_id == contest_id
+        await manager.handle_match_done(
+            match_id,
+            contest_id,
+            retry_aborted=orch.is_admin_abort_handoff(match_id),
+        )
+
+    orch.on_match_done = on_match_done
+
+    async def run() -> None:
+        await manager._dispatch_pending(contest_id, 0)
+        old_job = claim_next_queued(orch, start=False)
+        old_request_id = str(old_job["public_id"])
+        old_match_id = str(old_job["current_match_id"])
+
+        entered = asyncio.Event()
+        blocked = asyncio.Event()
+
+        async def blocked_inner(match_id: str, *, execution_scope=None) -> None:
+            assert match_id == old_match_id
+            assert execution_scope is not None
+            entered.set()
+            await blocked.wait()
+
+        orch._MatchOrchestrator__run_match_inner = blocked_inner
+        start_claimed_match(orch, old_match_id)
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        aborted = await orch.abort_match(old_match_id)
+        assert aborted["status"] == "aborted"
+        assert aborted["winner"] is None
+
+        # No dispatcher or scheduler tick is needed: exact cleanup let the
+        # callback finalize the old settling row before enqueueing a replacement.
+        assert store.executions.get(old_request_id)["status"] == "cancelled"
+        queued = store.executions.snapshot(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+        )["queued"]
+        assert len(queued) == 1
+        assert queued[0]["public_id"] != old_request_id
+        assert queued[0]["contest_pairing_id"] == pairing["id"]
+        refreshed = store.list_contest_pairings(contest_id)[0]
+        assert refreshed["status"] == "pending"
+        assert refreshed["match_id"] is None
+
+    asyncio.run(run())
 
 
 def test_platform_error_aborted_match_is_not_immediately_redispatched(tmp_path):
@@ -216,6 +317,43 @@ def test_mid_contest_single_unavailable_bot_is_completed_technical_loss(tmp_path
     assert match["bot_a_id"] == bot_a["id"]
     assert match["bot_b_id"] == bot_b["id"]
     assert store.get_contest(contest_id)["status"] == "finished"
+
+
+def test_frozen_artifact_loss_is_adjudicated_once_before_queueing(tmp_path):
+    """A published version disappearing must not create jobs every scheduler tick."""
+    store = Store(str(tmp_path / "frozen-unavailable.db"))
+    organizer, bot_a = _user_and_bot(store, "frozena", role="organizer")
+    user_b, bot_b = _user_and_bot(store, "frozenb")
+    version_a = store.add_bot_version(
+        bot_a["id"], binary_path=bot_a["binary_path"], version=1
+    )
+    version_b = store.add_bot_version(
+        bot_b["id"], binary_path=bot_b["binary_path"], version=1
+    )
+    contest_id, pairing = _ko_contest(
+        store, organizer, [(organizer, bot_a), (user_b, bot_b)]
+    )
+    store.update_contest_pairing(
+        pairing["id"],
+        bot_a_version_id=version_a["id"],
+        bot_b_version_id=version_b["id"],
+    )
+    Path(version_a["binary_path"]).unlink()
+    manager = ContestManager(store, _NeverChallenge())  # type: ignore[arg-type]
+
+    asyncio.run(manager._dispatch_pending(contest_id, 0))
+    first = store.list_contest_pairings(contest_id)[0]
+    match = store.get_match(first["match_id"])
+    assert match and match["status"] == "completed"
+    assert match["winner"] == 1
+    assert int(match["technical_loss"]) == 1
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs"
+    ).fetchone()[0] == 0
+
+    before = [row["id"] for row in store.list_matches(contest_id=contest_id)]
+    asyncio.run(manager._dispatch_pending(contest_id, 0))
+    assert [row["id"] for row in store.list_matches(contest_id=contest_id)] == before
 
 
 def test_mid_contest_both_unavailable_bots_block_without_fake_match(

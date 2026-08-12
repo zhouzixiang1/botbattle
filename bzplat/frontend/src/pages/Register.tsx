@@ -43,26 +43,31 @@ export default function Register() {
   }
 
   return (
-    <AuthShell title="注册账号" subtitle="创建账号，加入 Bot 竞技">
-      <Card className="w-full max-w-md">
-        <CardContent className="py-6">
-          <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">
-            <div className="space-y-1.5">
+    <AuthShell layout="auth-register" title="注册账号" subtitle="创建账号并完成邮箱验证后即可加入 Bot 竞技">
+      <Card density="compact" className="mx-auto w-full max-w-2xl">
+        <CardContent>
+          <form onSubmit={(e) => void onSubmit(e)} className="grid min-w-0 gap-3 sm:grid-cols-2">
+            <div className="min-w-0 space-y-1.5">
               <Label htmlFor="reg-username">用户名</Label>
               <Input id="reg-username" value={username} onChange={(e) => setUsername(e.target.value)} required minLength={3} maxLength={32} autoComplete="username" />
             </div>
-            <div className="space-y-1.5">
+            <div className="min-w-0 space-y-1.5">
               <Label htmlFor="reg-email">邮箱</Label>
               <Input id="reg-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
             </div>
-            <div className="space-y-1.5">
+            <div className="min-w-0 space-y-1.5">
               <Label htmlFor="reg-display">显示名（可选）</Label>
               <Input id="reg-display" value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={64} />
             </div>
+            <div className="min-w-0 space-y-1.5">
+              <Label htmlFor="reg-password">密码（至少 8 位）</Label>
+              <Input id="reg-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
+            </div>
             {/* 实名信息（可选，注册后也可在设置页补填） */}
-            <div className="rounded-lg border border-border p-3 space-y-3">
-              <p className="text-sm font-medium text-foreground">实名信息（选填）</p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <fieldset className="min-w-0 space-y-3 rounded-lg border p-3 sm:col-span-2">
+              <legend className="px-1 text-sm font-medium text-foreground">实名信息（选填）</legend>
+              <p className="text-xs text-muted-foreground">可稍后在设置页补填；仅要求实名的赛事会用到。</p>
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="reg-realname">姓名</Label>
                   <Input id="reg-realname" value={realName} onChange={(e) => setRealName(e.target.value)} maxLength={32} />
@@ -88,17 +93,13 @@ export default function Register() {
                   <Input id="reg-studentid" value={studentId} onChange={(e) => setStudentId(e.target.value)} maxLength={32} />
                 </div>
               </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="reg-password">密码（至少 8 位）</Label>
-              <Input id="reg-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete="new-password" />
-            </div>
-            <CaptchaField onChange={setCaptcha} />
-            {error && <ErrorMsg msg={error} />}
-            <Button type="submit" disabled={busy} className="w-full gap-1.5">
+            </fieldset>
+            <CaptchaField onChange={setCaptcha} className="sm:col-span-2" />
+            {error && <ErrorMsg msg={error} className="sm:col-span-2" />}
+            <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5 sm:col-span-2">
               <UserPlus className="size-4" />{busy ? '注册中…' : '注册'}
             </Button>
-            <p className="text-center text-sm text-muted-foreground">
+            <p className="text-center text-sm text-muted-foreground sm:col-span-2">
               已有账号？{' '}
               <Link to="/login" className="font-medium text-primary hover:underline">去登录</Link>
             </p>

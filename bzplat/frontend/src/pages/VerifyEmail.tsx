@@ -62,9 +62,9 @@ export default function VerifyEmail() {
   }
 
   return (
-    <AuthShell title="验证邮箱" subtitle="输入邮件中的 6 位验证码完成邮箱验证">
-      <Card className="w-full max-w-md">
-        <CardContent className="py-6">
+    <AuthShell layout="auth-verify-email" title="验证邮箱" subtitle="输入邮件验证码完成账号验证；未收到时可在下方重发">
+      <Card density="compact" className="mx-auto w-full max-w-md">
+        <CardContent>
           <form onSubmit={(e) => void onVerify(e)} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="verify-account">用户名或邮箱</Label>
@@ -88,14 +88,14 @@ export default function VerifyEmail() {
               />
             </div>
             {error && <ErrorMsg msg={error} />}
-            {msg && <p className="text-sm text-primary">{msg}</p>}
-            <Button type="submit" disabled={busy} className="w-full gap-1.5">
+            {msg && <p role="status" className="text-sm text-primary">{msg}</p>}
+            <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
               <MailCheck className="size-4" />
               {busy ? '提交中…' : '完成验证'}
             </Button>
           </form>
 
-          <Separator className="my-6" />
+          <Separator className="my-4" />
 
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">未收到邮件？填写验证码后重发：</p>
@@ -104,6 +104,7 @@ export default function VerifyEmail() {
               type="button"
               variant="outline"
               disabled={busy || !emailOrUsername}
+              aria-busy={busy}
               onClick={() => void onResend()}
               className="w-full gap-1.5"
             >

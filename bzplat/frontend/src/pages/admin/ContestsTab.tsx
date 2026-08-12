@@ -54,7 +54,7 @@ interface Entry {
   id: number
   contest_id: number
   user_id: number
-  bot_id: number
+  bot_id: number | null
   username?: string
   bot_name?: string
   registered_at: string
@@ -303,7 +303,7 @@ export default function ContestsTab() {
         <Table className="min-w-[64rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="px-3 py-2.5">ID</TableHead>
+              <TableHead className="px-3 py-2.5">序号</TableHead>
               <TableHead className="px-3 py-2.5">标题</TableHead>
               <TableHead className="px-3 py-2.5">游戏 / 模板</TableHead>
               <TableHead className="px-3 py-2.5">状态</TableHead>
@@ -313,7 +313,7 @@ export default function ContestsTab() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {contests.map((contest) => {
+            {contests.map((contest, index) => {
               const isShowcase = Boolean(contest.showcase_key)
               const primary = isShowcase ? undefined : PRIMARY_ACTION[contest.status]
               const mutableRoster = !isShowcase && ROSTER_MUTABLE.has(contest.status)
@@ -321,7 +321,7 @@ export default function ContestsTab() {
               return (
                 <Fragment key={contest.id}>
                   <TableRow className={timeIssue ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-accent'}>
-                    <TableCell className="px-3 py-2 font-mono text-muted-foreground">{contest.id}</TableCell>
+                    <TableCell className="px-3 py-2 font-mono tabular-nums text-muted-foreground">{(page - 1) * perPage + index + 1}</TableCell>
                     <TableCell className="max-w-64 px-3 py-2 font-medium text-foreground">
                       <Link to={`/contests/${contest.id}`} className="block break-words text-primary hover:underline">{contest.title}</Link>
                     </TableCell>
@@ -430,10 +430,14 @@ export default function ContestsTab() {
                                   <TableCell className="px-2 py-1">
                                     {entry.username
                                       ? <Link to={`/user/${encodeURIComponent(entry.username)}`} className="text-primary hover:underline">{entry.username}</Link>
-                                      : `用户 #${entry.user_id}`}
+                                      : '用户信息不可用'}
                                   </TableCell>
                                   <TableCell className="px-2 py-1">
-                                    <Link to={`/bot/${entry.bot_id}`} className="text-primary hover:underline">{entry.bot_name || `Bot #${entry.bot_id}`}</Link>
+                                    {entry.bot_id != null ? (
+                                      <Link to={`/bot/${entry.bot_id}`} className="text-primary hover:underline">{entry.bot_name || 'Bot 名称不可用'}</Link>
+                                    ) : (
+                                      <span>已删除 Bot</span>
+                                    )}
                                   </TableCell>
                                   <TableCell className="px-2 py-1">{fmtTime(entry.registered_at)}</TableCell>
                                   {mutableRoster && (
@@ -536,7 +540,7 @@ function ScheduleDialog({
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose() }}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto break-words">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto break-words max-lg:[&_[data-slot=button]]:min-h-11 max-lg:[&_[data-slot=input]]:min-h-11">
         <DialogHeader>
           <DialogTitle>编辑赛事时间</DialogTitle>
           <DialogDescription>

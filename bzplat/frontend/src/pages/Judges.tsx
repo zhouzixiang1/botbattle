@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { ChevronDown, FileCode2 } from 'lucide-react'
-import PageStub from '@/components/PageStub'
-import { Card } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Loading, ErrorMsg } from '@/components/ui/status'
-import { apiGet } from '@/api'
+import { ChevronDown, FileCode2, Scale } from 'lucide-react'
 
-/** GET /api/judges 返回的裁判元信息列表 */
+import { apiGet, errMsg } from '@/api'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { Button } from '@/components/ui/button'
+import { Identifier } from '@/components/ui/overflow-text'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { CopyIdentifier, SummaryMetric } from '@/pages/public-page-ui'
+
 interface JudgeGameMeta {
   game_id: string
   label: string
@@ -15,11 +16,6 @@ interface JudgeGameMeta {
   source_files: string[]
 }
 
-interface JudgesResp {
-  games: JudgeGameMeta[]
-}
-
-/** GET /api/judges/{id}/source 返回的源码文件 */
 interface SourceFile {
   name: string
   path: string
@@ -34,128 +30,173 @@ interface SourceResp {
 }
 
 export default function Judges() {
-  const [games, setGames] = useState<JudgeGameMeta[] | null>(null)
+  const [games, setGames] = useState<JudgeGameMeta[]>([])
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     let alive = true
-    setLoading(true)
-    apiGet<JudgesResp>('/api/judges')
-      .then((d) => {
-        if (alive) setGames(d.games)
+    apiGet<{ games: JudgeGameMeta[] }>('/api/judges')
+      .then((data) => {
+        if (alive) setGames(data.games || [])
       })
-      .catch((e) => alive && setError(typeof e === 'string' ? e : '加载失败'))
-      .finally(() => alive && setLoading(false))
+      .catch((cause) => {
+        if (alive) setError(errMsg(cause, '加载失败'))
+      })
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
     return () => {
       alive = false
     }
   }, [])
 
+  const sourceCount = games.reduce((sum, game) => sum + game.source_files.length, 0)
+
   return (
-    <PageStub
-      title="裁判"
-      subtitle="平台每款游戏的裁判是公开可审计的明文代码——规则透明，公正可查。点开查看各游戏裁判引擎的完整源码。"
-    >
-      {loading ? (
-        <Loading />
-      ) : error ? (
-        <ErrorMsg msg={error} />
-      ) : (
-        <div className="space-y-4">
-          {games?.map((g) => (
-            <JudgeCard key={g.game_id} game={g} />
+    <PageFrame width="default" layout="public-judges">
+      <PageHeader
+        eyebrow="公开审计"
+        title="裁判源码"
+        description="每款游戏的权威裁判以明文公开；规则定义、协议适配与共享实现均可逐文件核查。"
+      />
+
+      <SummaryStrip columns={3}>
+        <SummaryMetric label="注册游戏" value={games.length} detail="公开裁判入口" icon={<Scale className="size-4" />} />
+        <SummaryMetric label="源码文件" value={sourceCount} detail="按游戏白名单公开" icon={<FileCode2 className="size-4" />} />
+        <SummaryMetric label="加载策略" value="按需" detail="展开游戏后请求源码" mono={false} />
+      </SummaryStrip>
+
+      {games.length > 0 && (
+        <StickyToolbar label="裁判快速索引">
+          <span className="shrink-0 text-xs font-medium text-muted-foreground">快速定位</span>
+          {games.map((game) => (
+            <Button
+              key={game.game_id}
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => document.getElementById(`judge-${game.game_id}`)?.scrollIntoView({ block: 'start' })}
+            >
+              {game.label}
+            </Button>
           ))}
+        </StickyToolbar>
+      )}
+
+      {error ? (
+        <DataRegion title="裁判目录" contentClassName="px-4 py-6">
+          <ErrorMsg msg={error} />
+        </DataRegion>
+      ) : loading ? (
+        <DataRegion title="裁判目录"><Loading text="正在加载裁判目录…" /></DataRegion>
+      ) : games.length === 0 ? (
+        <DataRegion title="裁判目录"><EmptyState text="暂无公开裁判" icon={<Scale className="size-5 opacity-50" />} className="py-8" /></DataRegion>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-[var(--page-section-gap)]">
+          {games.map((game) => <JudgeRegion key={game.game_id} game={game} />)}
         </div>
       )}
-    </PageStub>
+    </PageFrame>
   )
 }
 
-/** 单个游戏裁判卡片：展示 summary + 折叠的源码全文（懒加载源码）。 */
-function JudgeCard({ game }: { game: JudgeGameMeta }) {
+function JudgeRegion({ game }: { game: JudgeGameMeta }) {
   const [open, setOpen] = useState(false)
   const [source, setSource] = useState<SourceResp | null>(null)
-  const [srcError, setSrcError] = useState('')
-  const [srcLoading, setSrcLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
   const [activeFile, setActiveFile] = useState(0)
 
-  // 懒加载：首次展开时才请求源码
   useEffect(() => {
-    if (!open || source || srcLoading) return
-    setSrcLoading(true)
+    if (!open || source || loading || error) return
+    setLoading(true)
+    setError('')
     apiGet<SourceResp>(`/api/judges/${game.game_id}/source`)
-      .then((d) => {
-        setSource(d)
+      .then((data) => {
+        setSource(data)
         setActiveFile(0)
       })
-      .catch((e) => setSrcError(typeof e === 'string' ? e : '源码加载失败'))
-      .finally(() => setSrcLoading(false))
-  }, [open, source, srcLoading, game.game_id])
+      .catch((cause) => setError(errMsg(cause, '源码加载失败')))
+      .finally(() => setLoading(false))
+  }, [error, game.game_id, loading, open, source])
+
+  const file = source?.files[activeFile]
 
   return (
-    <Card className="p-4 sm:p-5">
-      <div className="flex flex-col gap-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-lg font-semibold text-primary">{game.label}</h2>
-          <code className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-            {game.game_id}
-          </code>
+    <DataRegion
+      id={`judge-${game.game_id}`}
+      title={game.label}
+      description={game.summary}
+      className="scroll-mt-[calc(var(--sticky-page-offset)+var(--sticky-toolbar-height)+var(--sticky-toolbar-gap))]"
+      actions={
+        <Button type="button" variant="outline" size="sm" onClick={() => setOpen((value) => !value)}>
+          <ChevronDown aria-hidden="true" className={`size-4 transition-transform motion-reduce:transition-none ${open ? 'rotate-180' : ''}`} />
+          {open ? '收起源码' : '查看源码'}
+        </Button>
+      }
+    >
+      <div className="min-w-0 space-y-2 px-4 py-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+          <CopyIdentifier value={game.game_id} label="游戏 ID" />
+          <span className="inline-flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+            <span className="shrink-0">入口</span>
+            <Identifier lines={2}>{game.code_path}</Identifier>
+          </span>
         </div>
-        <p className="text-sm text-muted-foreground">{game.summary}</p>
-        <p className="text-xs text-muted-foreground">
-          公开源码文件：{game.source_files.join(', ')}
+        <p className="break-words text-xs text-muted-foreground">
+          公开文件：{game.source_files.join(' · ')}
         </p>
-      </div>
 
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mt-3"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <ChevronDown className={`size-4 transition-transform ${open ? 'rotate-180' : ''}`} />
-        {open ? '收起裁判源码' : '查看裁判源码'}
-      </Button>
-
-      {open && (
-        <div className="mt-3">
-          {srcLoading ? (
-            <Loading />
-          ) : srcError ? (
-            <ErrorMsg msg={srcError} />
-          ) : source && source.files.length > 0 ? (
-            <div className="space-y-2">
-              {/* 文件切换 */}
-              <div className="flex flex-wrap gap-1.5">
-                {source.files.map((f, i) => (
-                  <Button
-                    key={f.name}
-                    type="button"
-                    variant={i === activeFile ? 'default' : 'outline'}
-                    size="sm"
-                    className="gap-1.5"
-                    onClick={() => setActiveFile(i)}
-                  >
-                    <FileCode2 className="size-3.5" />
-                    {f.name}
-                  </Button>
-                ))}
+        {open && (
+          <div className="min-w-0 space-y-3 border-t pt-3">
+            {loading ? (
+              <Loading text="正在加载源码…" className="py-7" />
+            ) : error ? (
+              <div className="space-y-2 py-3">
+                <ErrorMsg msg={error} />
+                <Button type="button" variant="outline" size="sm" onClick={() => setError('')}>重试</Button>
               </div>
-              {/* 源码全文（等宽、可横向滚动） */}
-              <pre className="max-h-[32rem] overflow-auto rounded-lg border border-border bg-muted/50 p-3 text-xs leading-relaxed">
-                <code>{source.files[activeFile].source}</code>
-              </pre>
-              <p className="text-xs text-muted-foreground">
-                路径：{source.files[activeFile].path}
-              </p>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">暂无公开源码文件。</p>
-          )}
-        </div>
-      )}
-    </Card>
+            ) : source && source.files.length > 0 && file ? (
+              <>
+                <div className="flex min-w-0 flex-wrap gap-1.5" role="tablist" aria-label={`${game.label}源码文件`}>
+                  {source.files.map((sourceFile, index) => (
+                    <Button
+                      key={sourceFile.name}
+                      type="button"
+                      role="tab"
+                      aria-selected={index === activeFile}
+                      variant={index === activeFile ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setActiveFile(index)}
+                      className="max-w-full"
+                    >
+                      <FileCode2 aria-hidden="true" className="size-3.5" />
+                      <span className="max-w-56 truncate">{sourceFile.name}</span>
+                    </Button>
+                  ))}
+                </div>
+                <pre
+                  data-scroll-region="judge-source"
+                  data-overflow-allowed="both"
+                  role="region"
+                  aria-label={`${file.name} 源码`}
+                  tabIndex={0}
+                  className="max-h-[32rem] min-w-0 overflow-auto overscroll-contain rounded-lg border bg-muted/40 p-3 font-mono text-xs leading-relaxed outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                >
+                  <code>{file.source}</code>
+                </pre>
+                <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+                  <span className="shrink-0">路径</span>
+                  <Identifier lines={2}>{file.path}</Identifier>
+                </div>
+              </>
+            ) : (
+              <EmptyState text="暂无公开源码文件" icon={<FileCode2 className="size-5 opacity-50" />} className="py-7" />
+            )}
+          </div>
+        )}
+      </div>
+    </DataRegion>
   )
 }

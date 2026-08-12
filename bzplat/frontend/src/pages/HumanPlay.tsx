@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { PlayCircle, ArrowRight, Clock } from 'lucide-react'
-import PageStub from '@/components/PageStub'
+import { PlayCircle, ArrowRight, Clock, Swords, UserRound, Activity } from 'lucide-react'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
 import MatchBoard from '@/components/MatchBoard'
-import { Card } from '@/components/ui/card'
+import { MatchNatureBadge } from '@/components/MatchParticipants'
 import { Button } from '@/components/ui/button'
-import { ErrorMsg } from '@/components/ui/status'
+import { OverflowText } from '@/components/ui/overflow-text'
+import { ErrorMsg, Loading } from '@/components/ui/status'
 import { playWsUrl } from '@/api'
 import { findGame, gameLabel, normalizeGameId, resolveTerminalReason, unsupportedGameLabel } from '@/games'
 import { describePlatformEvent } from '@/games/reasons'
@@ -16,6 +17,7 @@ import {
   resolveWinnerLabel,
 } from '@/lib/match-seats'
 import type { HumanActionEnvelope, RawEvent } from '@/games/base'
+import { SummaryMetric } from '@/pages/public-page-ui'
 
 type Ev = Record<string, unknown> & { type?: string }
 
@@ -313,27 +315,52 @@ export default function HumanPlay() {
   const terminalReason = gameSpec
     ? gameSpec.terminalReason(endInfo?.reason, match?.status)
     : resolveTerminalReason(endInfo?.reason, match?.status)
+  const matchupLabel = match
+    ? `${seatHeaderLabel(match, 0)} vs ${seatHeaderLabel(match, 1)}`
+    : '正在建立连接'
 
   // useEffect 在提交后清状态；这一同步 guard 还会挡住路由切换后的首个 render。
   if (match?.id && String(match.id) !== id) {
-    return <PageStub title="人类对战"><div className="text-sm text-muted-foreground">正在切换对局…</div></PageStub>
+    return (
+      <PageFrame width="wide" layout="game-human-play-switching">
+        <PageHeader title="人类对战" description="正在载入新的权威对局状态。" />
+        <DataRegion title="对局连接" contentClassName="px-4 py-6 text-sm text-muted-foreground">
+          正在切换对局…
+        </DataRegion>
+      </PageFrame>
+    )
   }
 
   return (
-    <PageStub title="人类对战">
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <span className="text-sm text-muted-foreground">
-          {match ? gameLabel(gameId) : '正在加载对局'} · 你坐【座位 {humanSeat + 1}】
-        </span>
-        {match && (
-          // min-w-0 + truncate：长 Bot 名换行时压缩自身而非整行增高、挤压 canvas 高度
-          <span className="min-w-0 max-w-full truncate text-sm text-muted-foreground">
-            {seatHeaderLabel(match, 0)} vs {seatHeaderLabel(match, 1)}
-          </span>
-        )}
-        <span className="text-sm">
+    <PageFrame
+      width="wide"
+      layout="game-human-play"
+      // 棋盘是人机页的主任务；沿用页面 sticky 间距 token 压缩首屏区块节奏，
+      // 不通过缩小方形棋盘来换取视口适配。
+      className="gap-[var(--sticky-page-gap)]"
+    >
+      <PageHeader
+        title="人类对战"
+        description="权威局面、行动控件与裁判事件保持同步；断线时页面会自动重连。"
+        actions={
+          <Button asChild variant="outline" size="sm">
+            <Link to={`/match/${id}`}>查看回放<ArrowRight aria-hidden="true" className="size-4" /></Link>
+          </Button>
+        }
+      />
+
+      <SummaryStrip columns={4} label="人类对战概览" className="grid-cols-2 xl:grid-cols-4">
+        <SummaryMetric label="游戏" value={match ? gameLabel(gameId) : '加载中'} mono={false} icon={<Swords className="size-4" />} />
+        <SummaryMetric label="我的座位" value={match ? `座位 ${humanSeat + 1}` : '加载中'} icon={<UserRound className="size-4" />} />
+        <SummaryMetric label="对阵" value={matchupLabel} mono={false} icon={<Swords className="size-4" />} />
+        <SummaryMetric label="权威事件" value={events.length} detail={reconnecting ? '连接恢复中' : over ? '对局已结束' : '实时同步'} icon={<Activity className="size-4" />} />
+      </SummaryStrip>
+
+      <StickyToolbar label="人类对战状态" className="justify-between">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+          {match && <MatchNatureBadge matchType={match.match_type} source={match} />}
           {over ? (
-            <span className="font-medium text-foreground">
+            <span className="min-w-0 break-words font-medium text-foreground">
               对局结束 · 胜者：{winnerLabel}
               {endInfo?.reason && (
                 <span
@@ -346,49 +373,55 @@ export default function HumanPlay() {
               )}
             </span>
           ) : canSubmitAction ? (
-            <span className="flex items-center gap-1 font-medium text-success">
-              <PlayCircle className="size-4" />
+            <span className="flex min-w-0 items-center gap-1 font-medium text-success">
+              <PlayCircle aria-hidden="true" className="size-4 shrink-0" />
               {turnLabel}
               {remainSec != null && (
-                <span className="ml-1 inline-flex items-center gap-0.5 text-xs text-muted-foreground">
-                  <Clock className="size-3" />{remainSec}s
+                <span aria-label={`本回合剩余约 ${remainSec} 秒`} className="ml-1 inline-flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground tabular-nums">
+                  <Clock aria-hidden="true" className="size-3" />{remainSec}s
                 </span>
               )}
             </span>
           ) : actionSubmitted && myTurn ? (
             <span className="text-muted-foreground">动作已提交，等待裁判处理…</span>
           ) : (
-            <span className="text-muted-foreground">等待中…</span>
+              <span className="text-muted-foreground">等待中…</span>
           )}
-        </span>
+        </div>
         {over && endSummary && (
-          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+          <OverflowText tooltip={endSummary} className="max-w-full font-mono text-xs text-muted-foreground sm:max-w-sm">
             {endSummary}
-          </span>
+          </OverflowText>
         )}
-        <Link to={`/match/${id}`} className="ml-auto inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary hover:underline">
-          查看回放
-          <ArrowRight className="size-4" />
-        </Link>
-      </div>
-      {error && <ErrorMsg msg={error} className="mb-3" />}
+      </StickyToolbar>
+
+      {error && <ErrorMsg msg={error} />}
       {reconnecting && (
-        <div className="mb-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning">
+        <div role="status" className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
           连接已断开，正在重连…（请勿关闭页面）
         </div>
       )}
 
+      {!match && !error && (
+        <DataRegion title="对局连接" contentClassName="px-4 py-6">
+          <Loading text="正在读取权威局面…" />
+        </DataRegion>
+      )}
+
       {match && !gameSpec && (
-        <ErrorMsg msg={`无法进入人类对战：${unsupportedGameLabel(match.game_id)}`} className="mb-3" />
+        <ErrorMsg msg={`无法进入人类对战：${unsupportedGameLabel(match.game_id)}`} />
       )}
 
       {/* 排布、动作控件和 WS 序列化均由当前游戏规格提供。 */}
       {gameSpec?.humanPlay.layout === 'canvas-with-log' && (
-        <div className={viewportDashboard
-          ? 'grid items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
-          : viewportFitCanvas
-            ? 'grid items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_22rem]'
-          : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}>
+        <div
+          data-testid="human-canvas-layout"
+          className={viewportDashboard
+            ? 'grid min-w-0 items-start justify-center gap-4 md:grid-cols-[minmax(12rem,15rem)_minmax(0,min(52rem,calc(100dvh-6rem)))] xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)] 2xl:grid-cols-[minmax(13rem,15rem)_minmax(0,min(52rem,calc(100dvh-16rem)))_minmax(17rem,19rem)]'
+            : viewportFitCanvas
+              ? 'grid min-w-0 items-start justify-center gap-4 xl:grid-cols-[minmax(0,min(52rem,calc(100dvh-16rem)))_22rem]'
+            : 'grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'}
+        >
           {viewportDashboard && ReplayHud && currentVm !== null && (
             <div className="min-w-0 md:col-start-1 md:row-start-1 xl:col-start-1 xl:row-start-1 2xl:col-start-1 2xl:row-start-1">
               <ReplayHud vm={currentVm} seats={seats} />
@@ -415,16 +448,16 @@ export default function HumanPlay() {
               />
             )}
           </div>
-          <div className={viewportDashboard ? 'md:col-span-2 md:col-start-1 md:row-start-2 xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1' : ''}>
-            <EventLogCard id={id} events={events} describeEvent={gameSpec.describeEvent} />
+          <div className={viewportDashboard ? 'min-w-0 md:col-span-2 md:col-start-1 md:row-start-2 xl:sticky xl:top-[var(--sticky-table-offset)] xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1' : 'min-w-0'}>
+            <EventLogCard events={events} describeEvent={gameSpec.describeEvent} />
           </div>
         </div>
       )}
 
       {gameSpec?.humanPlay.layout === 'canvas-controls-log' && (
         <div className={ReplayHud
-          ? 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem] 3xl:grid-cols-[15rem_minmax(0,1fr)_18rem]'
-          : 'grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]'}>
+          ? 'grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem] 3xl:grid-cols-[15rem_minmax(0,1fr)_18rem]'
+          : 'grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,1fr)_18rem]'}>
           {ReplayHud && currentVm !== null && (
             <div className="min-w-0 xl:col-start-1 xl:row-start-1 3xl:col-start-1 3xl:row-start-1">
               <ReplayHud vm={currentVm} seats={seats} />
@@ -446,24 +479,22 @@ export default function HumanPlay() {
               />
             )}
           </div>
-          <div className={`min-w-0 xl:sticky xl:top-6 ${ReplayHud
+          <div className={`min-w-0 xl:sticky xl:top-[var(--sticky-table-offset)] ${ReplayHud
             ? 'xl:col-start-2 xl:row-start-1 xl:row-span-2 3xl:col-start-3 3xl:row-start-1 3xl:row-span-1'
             : 'xl:col-start-2 xl:row-start-1'}`}>
-            <EventLogCard id={id} events={events} describeEvent={gameSpec.describeEvent} />
+            <EventLogCard events={events} describeEvent={gameSpec.describeEvent} />
           </div>
         </div>
       )}
-    </PageStub>
+    </PageFrame>
   )
 }
 
 /** 对局进程事件日志卡；事件含义由游戏包负责描述。 */
 function EventLogCard({
-  id,
   events,
   describeEvent,
 }: {
-  id?: string
   events: Ev[]
   describeEvent: (event: RawEvent) => string
 }) {
@@ -480,27 +511,27 @@ function EventLogCard({
     return describeEvent(event)
   }
   return (
-    <Card data-testid="human-event-log" className="flex flex-col">
-      <div className="border-b border-border px-4 py-2 text-sm font-semibold text-foreground">
-        对局进程 <span className="text-xs font-normal text-muted-foreground">({events.length})</span>
-      </div>
-      <div className="max-h-[60vh] flex-1 overflow-y-auto p-2 text-xs">
+    <DataRegion
+      data-testid="human-event-log"
+      title="对局进程"
+      description={`${events.length} 条权威事件 · 最新在前`}
+      className="flex min-w-0 flex-col"
+      contentClassName="max-h-none flex-1 p-2 text-xs xl:max-h-[min(70dvh,36rem)]"
+      overflow="y"
+      regionLabel="人类对战事件日志"
+    >
         {events.length === 0 ? (
           <p className="py-6 text-center text-muted-foreground">等待对局开始…</p>
         ) : (
           events.slice().reverse().map((ev, i) => (
-            <div key={i} className="flex items-center gap-2 rounded px-2 py-1 text-muted-foreground">
-              <span className="w-10 shrink-0 font-mono opacity-60">#{events.length - i}</span>
-              <span className="min-w-0 flex-1 break-words opacity-80">
+            <div key={i} className="flex min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-muted-foreground hover:bg-muted/50">
+              <span className="w-10 shrink-0 font-mono tabular-nums opacity-60">#{events.length - i}</span>
+              <span className="min-w-0 flex-1 break-words leading-relaxed opacity-80 [overflow-wrap:anywhere]">
                 {describe(ev)}
               </span>
             </div>
           ))
         )}
-      </div>
-      <Button asChild variant="ghost" size="sm" className="m-2 gap-1 self-start">
-        <Link to={`/match/${id}`}>查看回放<ArrowRight className="size-3.5" /></Link>
-      </Button>
-    </Card>
+    </DataRegion>
   )
 }

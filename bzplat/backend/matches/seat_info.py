@@ -8,6 +8,34 @@ from __future__ import annotations
 from typing import Any
 
 
+_PUBLIC_VIEWER_MATCH_FIELDS = frozenset(
+    {
+        "id",
+        "bot_a_id",
+        "bot_b_id",
+        "contest_id",
+        "winner",
+        "reason",
+        "match_type",
+        "status",
+        "game_id",
+        "result",
+        "human_seat",
+        "technical_loss",
+        "started_at",
+        "ended_at",
+        "created_at",
+        "likes_count",
+        "views_count",
+        "rated",
+        "rating_reason",
+        "rating_settled",
+        "bot_a",
+        "bot_b",
+    }
+)
+
+
 def with_seat_info(m: dict | None, human_user: dict | None = None) -> dict | None:
     """把 get_match_detailed 的扁平 JOIN 列整理成嵌套 bot_a/bot_b。
 
@@ -30,6 +58,8 @@ def with_seat_info(m: dict | None, human_user: dict | None = None) -> dict | Non
         "bot_a_owner_display",
         "bot_b_owner_name",
         "bot_b_owner_display",
+        "human_user_name",
+        "human_user_display",
     ):
         out.pop(k, None)
 
@@ -43,10 +73,18 @@ def with_seat_info(m: dict | None, human_user: dict | None = None) -> dict | Non
         display = m.get(f"{prefix}_display")
         owner_name = m.get(f"{prefix}_owner_name")
         owner_display = m.get(f"{prefix}_owner_display")
-        if seat_is_human and human_user:
-            # 人类座：显示真人，不复用 bot 主人
-            uname = human_user.get("username") or owner_name
-            udisp = human_user.get("display_name") or uname
+        if seat_is_human:
+            # 人类座：详情路由可传 users 行，列表路由用同一条
+            # SQL JOIN 带出的脱敏公开姓名。两者都不得复用 Bot 主人。
+            uname = (
+                (human_user or {}).get("username")
+                or m.get("human_user_name")
+            )
+            udisp = (
+                (human_user or {}).get("display_name")
+                or m.get("human_user_display")
+                or uname
+            )
             name = udisp or uname or "人类"
             display = udisp
             owner_name = uname
@@ -62,7 +100,13 @@ def with_seat_info(m: dict | None, human_user: dict | None = None) -> dict | Non
 
     out["bot_a"] = _seat(0)
     out["bot_b"] = _seat(1)
-    return out
+    # 详情与 SSE/WS snapshot 共用正向白名单。这不仅隐藏 owner/
+    # human 外键与随机种子，也防止 Store 为技术故障归一携带的
+    # _replay_events_json 或未来新增物理列进入公开响应。human_seat 保留，
+    # 因为真人交互客户端必须用它区分座位。
+    return {
+        key: value for key, value in out.items() if key in _PUBLIC_VIEWER_MATCH_FIELDS
+    }
 
 
 def match_for_viewer(store: Any, match_id: str) -> dict | None:

@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
 
-from bzplat.backend.api_routes import match_detail
+from bzplat.backend.api_routes import match_detail, match_replay
+from bzplat.backend.auth.auth_manager import COOKIE_NAME
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
@@ -24,6 +25,11 @@ from bzplat.backend.runtime.binary_runner import (
 )
 from bzplat.backend.store import Store
 from bzplat.backend.store.public_contract import sanitize_public_event
+from bzplat.backend.tests.execution_helpers import (
+    challenge_and_start,
+    ensure_cleanup_surface,
+    start_claimed_match,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -407,7 +413,8 @@ async def _run_prepared_match(
     *,
     duplicate: bool = False,
 ) -> tuple[str, list[dict], list[dict]]:
-    match_id = await orch.challenge(
+    match_id = await challenge_and_start(
+        orch,
         bot_a,
         bot_b,
         owner,
@@ -434,7 +441,7 @@ async def _run_prepared_match(
         original_broadcast(mid, event)
 
     orch._broadcast = record_broadcast  # type: ignore[method-assign]
-    orch.start_prepared_match(match_id)
+    start_claimed_match(orch, match_id)
     task = orch._tasks[match_id]
     await task
     live_events: list[dict] = []
@@ -549,7 +556,9 @@ def test_unknown_completed_reason_is_normalized_before_live_and_storage(tmp_path
     ]
     detail = match_detail(match_id, _api_request(store, match_id))
     assert detail["match"]["reason"] == "completed"
-    assert json.loads(detail["replay"]["events_json"])[-1] == terminal[0]
+    replay = match_replay(match_id, _api_request(store, match_id))
+    assert replay["events"][-1] == terminal[0]
+    assert "replay" not in detail
     assert "privateadapterfailure" not in json.dumps(detail, ensure_ascii=False)
     assert "内部异常路径" not in json.dumps(detail, ensure_ascii=False)
     store.close()
@@ -621,19 +630,21 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
         for event in live_events
         if event.get("type") in {"match_end", "error"}
     ]
-    assert len(terminal) == 1
-    assert terminal[0]["type"] == expected_type
-    assert len(observations) == 1
-    assert observations[0]["store"]["status"] == expected_status
-    assert observations[0]["api"]["status"] == expected_status
-    assert observations[0]["store"]["reason"] == expected_reason
-    match_id = observations[0]["store"]["id"]
-    replay = json.loads(store.get_public_replay(match_id)["events_json"])
-    replay_terminals = [
-        event for event in replay if event.get("type") in {"match_end", "error"}
-    ]
-    assert replay_terminals == terminal
     if expected_deltas is not None:
+        assert len(terminal) == 1
+        assert terminal[0]["type"] == expected_type
+        assert len(observations) == 1
+        assert observations[0]["store"]["status"] == expected_status
+        assert observations[0]["api"]["status"] == expected_status
+        assert observations[0]["store"]["reason"] == expected_reason
+        match_id = observations[0]["store"]["id"]
+        replay = json.loads(store.get_public_replay(match_id)["events_json"])
+        replay_terminals = [
+            event
+            for event in replay
+            if event.get("type") in {"match_end", "error"}
+        ]
+        assert replay_terminals == terminal
         assert terminal[0] == {
             "type": "match_end",
             "winner": observations[0]["store"]["winner"],
@@ -642,13 +653,44 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
         }
         assert observations[0]["api"]["result"]["deltas"] == expected_deltas
     else:
-        assert terminal == [{"type": "error", "reason": expected_reason}]
+        # Durable attempts do not manufacture a public platform_error. They keep
+        # the match/job recoverable until exact namespace cleanup, then expose a
+        # truthful interrupted manual request without retaining a garbage match.
+        assert terminal == []
+        assert observations == []
+        active = store.executions.snapshot(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+        )["active"]
+        assert len(active) == 1
+        request_public_id = active[0]["public_id"]
+        match_id = active[0]["current_match_id"]
+        assert store.get_match(match_id)["status"] == "running"
+        assert store.executions.control()["dispatcher_state"] == "paused"
         public_detail = match_detail(match_id, _api_request(store, match_id))
         assert "/private" not in json.dumps(public_detail, ensure_ascii=False)
+        assert store.executions.recover_after_namespace_cleanup() == {
+            "requeued": 0,
+            "interrupted": 1,
+            "settling": 0,
+        }
+        assert store.get_match(match_id) is None
+        interrupted = store.executions.get(request_public_id)
+        assert interrupted["status"] == "interrupted"
+        assert interrupted["retryable"] == 1
+        assert store.executions.snapshot(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+        )["queued"] == []
     store.close()
 
 
-def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_path):
+def test_human_websocket_gets_one_canonical_terminal_after_completed_api(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
     result, engine_end = _normal_result(deltas=(23, -23), winner=0)
 
     class ControlledHumanRunner:
@@ -676,6 +718,7 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
     app = create_app(db_path=str(tmp_path / "human-terminal.db"))
     runner = ControlledHumanRunner()
     app.state.orch.runner = runner
+    ensure_cleanup_surface(app.state.orch)
     store = app.state.store
     user, bot = _user_bot(store, "human-terminal")
     store.update_user(user["id"], email_verified=1)
@@ -687,12 +730,17 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
             headers={"Authorization": f"Bearer {token}"},
             json={"bot_id": bot["id"], "human_seat": 1, "game_id": "holdem"},
         )
-        assert created.status_code == 200, created.text
-        match_id = created.json()["match_id"]
+        assert created.status_code == 202, created.text
+        request_id = created.json()["public_id"]
         assert runner.engine_end_emitted.wait(timeout=2)
+        request = store.executions.get(request_id)
+        assert request and request["current_match_id"]
+        match_id = request["current_match_id"]
 
+        client.cookies.set(COOKIE_NAME, token)
         with client.websocket_connect(
-            f"/api/matches/{match_id}/play?token={token}"
+            f"/api/matches/{match_id}/play",
+            headers={"origin": "http://testserver"},
         ) as websocket:
             snapshot = websocket.receive_json()
             assert snapshot["type"] == "snapshot"
@@ -727,7 +775,8 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
             assert closed.value.code == 1000
 
         final_detail = client.get(f"/api/matches/{match_id}").json()
-        replay = json.loads(final_detail["replay"]["events_json"])
+        assert "replay" not in final_detail
+        replay = client.get(f"/api/matches/{match_id}/replay").json()["events"]
         assert [
             event for event in replay if event.get("type") == "match_end"
         ] == [terminal]

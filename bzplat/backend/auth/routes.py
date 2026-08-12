@@ -7,18 +7,16 @@ from pathlib import Path
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     HTTPException,
     Request,
     Response,
-    UploadFile,
 )
 from pydantic import BaseModel, Field, field_validator
+from starlette.datastructures import UploadFile
 
 from .auth_manager import COOKIE_NAME, AuthError, AuthManager, validate_phone
 from .captcha import CAPTCHA_TTL_SEC, CaptchaStore, png_to_data_url
-from .dependencies import require_admin, require_user
+from .dependencies import require_user
 from bzplat.backend.security import audit_log, client_ip
 from bzplat.backend.security import _env_bool
 
@@ -94,10 +92,6 @@ class ResendVerifyReq(BaseModel):
     captcha_answer: str
 
 
-class AdminResetReq(BaseModel):
-    username_or_email: str
-
-
 def _secure_cookie() -> bool:
     return os.environ.get("BZ_SECURE_COOKIE", "").strip().lower() in {
         "1",
@@ -127,12 +121,8 @@ def _err(exc: AuthError) -> HTTPException:
         "inactive": 403,
         "email_unverified": 403,
         "wrong_old_password": 401,
-        "invalid_reset_token": 400,
-        "expired_reset_token": 400,
         "invalid_code": 400,
         "expired_code": 400,
-        "mail_failed": 502,
-        "mail_not_configured": 503,
         "no_user": 404,
         "invalid_captcha": 400,
         "invalid_phone": 400,
@@ -170,7 +160,6 @@ async def get_captcha(request: Request) -> dict:
 async def register(req: RegisterReq, request: Request) -> dict:
     _require_captcha(request, req.captcha_id, req.captcha_answer)
     auth: AuthManager = request.app.state.auth
-    user: dict | None = None
     try:
         user = auth.register(
             req.username,
@@ -184,16 +173,13 @@ async def register(req: RegisterReq, request: Request) -> dict:
         )
         auth.send_verify_code(user)
     except AuthError as exc:
-        # 注册与首封验证邮件对用户应呈现原子语义：发信失败时补偿删除刚创建的
-        # 未验证账号，避免页面提示失败、重试却遇到用户名/邮箱已占用。
-        if user is not None:
-            auth.store.delete_user(user["id"])
         audit_log(request, "register", result="fail", target=req.username, detail=exc.code)
         raise _err(exc) from exc
     audit_log(request, "register", result="ok", user=user.get("username"))
     return {
         "user": user,
-        "message": "注册成功,验证码已发送到邮箱,请完成验证后再登录",
+        "message": "注册成功，验证码邮件已进入发送队列，请完成验证后再登录",
+        "delivery_status": "queued",
         "need_verify": True,
     }
 
@@ -222,7 +208,11 @@ async def resend_verify(req: ResendVerifyReq, request: Request) -> dict:
             auth.send_verify_code(user)
         except AuthError as exc:
             raise _err(exc) from exc
-    return {"ok": True, "message": "若账号存在且未验证,验证码已重新发送"}
+    return {
+        "ok": True,
+        "message": "若账号存在且未验证，验证码邮件已进入发送队列",
+        "delivery_status": "queued",
+    }
 
 
 @router.post("/login")
@@ -325,19 +315,44 @@ async def update_profile(
 
 _AVATAR_MAX = 2 * 1024 * 1024  # 2MB
 _AVATAR_ALLOWED = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_AVATAR_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "file": {"type": "string", "format": "binary"}
+                    },
+                }
+            }
+        },
+    },
+    "responses": {
+        "400": {"description": "头像文件大小或媒体类型无效"},
+        "401": {"description": "未登录或会话过期"},
+        "413": {"description": "multipart 请求体超过 3 MiB"},
+        "422": {"description": "缺少 multipart 文件字段"},
+    },
+}
 
 
-@router.post("/avatar")
+@router.post("/avatar", openapi_extra=_AVATAR_UPLOAD_OPENAPI)
 async def upload_avatar(
     request: Request,
-    file: UploadFile = File(...),
     user: dict = Depends(require_user),
 ) -> dict:
     """上传/更新当前用户头像。存本地 avatars/<uid>.<ext>，StaticFiles 托管。"""
-    raw = await file.read()
+    async with request.form(max_files=1, max_fields=1) as form:
+        file = form.get("file")
+        if not isinstance(file, UploadFile):
+            raise HTTPException(422, "multipart 文件字段 file 缺失或类型错误")
+        raw = await file.read(_AVATAR_MAX + 1)
+        ctype = (file.content_type or "").lower()
     if not raw or len(raw) > _AVATAR_MAX:
         raise HTTPException(400, "头像文件须 1..2MB")
-    ctype = (file.content_type or "").lower()
     ext_map = {
         "image/png": "png", "image/jpeg": "jpg",
         "image/webp": "webp", "image/gif": "gif",
@@ -373,14 +388,11 @@ def _safe_user_out(u: dict | None) -> dict:
 async def request_reset(req: RequestResetReq, request: Request) -> dict:
     _require_captcha(request, req.captcha_id, req.captcha_answer)
     auth: AuthManager = request.app.state.auth
-    try:
-        auth.request_reset(req.email_or_username)
-    except AuthError as exc:
-        if exc.code == "mail_failed":
-            raise _err(exc) from exc
+    auth.request_reset(req.email_or_username)
     return {
         "ok": True,
-        "message": "若账号存在,重置验证码已发送到邮箱",
+        "message": "若账号存在，重置验证码邮件已进入发送队列",
+        "delivery_status": "queued",
         "token": None,
     }
 
@@ -401,19 +413,3 @@ async def reset_password(req: ResetPasswordReq, request: Request) -> dict:
         "message": "密码已重置,请用新密码登录",
         "username": user.get("username"),
     }
-
-
-@router.post("/admin/create-reset-token")
-async def admin_create_reset_token(
-    req: AdminResetReq,
-    request: Request,
-    admin: dict = Depends(require_admin),
-) -> dict:
-    auth: AuthManager = request.app.state.auth
-    try:
-        token, user = auth.admin_create_reset_token(req.username_or_email)
-    except AuthError as exc:
-        audit_log(request, "admin_create_reset_token", result="fail", user=admin.get("username"), target=req.username_or_email, detail=exc.code)
-        raise _err(exc) from exc
-    audit_log(request, "admin_create_reset_token", result="ok", user=admin.get("username"), target=user.get("username"))
-    return {"ok": True, "token": token, "user": user}

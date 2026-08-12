@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Upload, History, RotateCcw } from 'lucide-react'
 import { fmtTime } from '@/lib/format'
+import { DataRegion } from '@/components/layout'
 import {
   Dialog,
   DialogContent,
@@ -25,7 +26,8 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { Loading } from '@/components/ui/status'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
+import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
 import { useConfirm } from '@/hooks/use-confirm'
 import { apiForm, apiGet, apiJson, errMsg } from '@/api'
 import { toast } from 'sonner'
@@ -85,7 +87,8 @@ export default function BotVersionManager({
   const [curVer, setCurVer] = useState<number | undefined>(undefined)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
+  const [mutationError, setMutationError] = useState('')
   // 上传新版本表单
   const [note, setNote] = useState('')
   const [mode, setMode] = useState(currentRuntimeMode || 'traditional')
@@ -109,7 +112,7 @@ export default function BotVersionManager({
     const targetBotId = botId
     const generation = ++requestGenerationRef.current
     setLoading(true)
-    setError('')
+    setLoadError('')
     try {
       const d = await apiGet<{ versions: BotVersion[]; current_version: number }>(
         `/api/bots/${targetBotId}/versions`,
@@ -125,7 +128,7 @@ export default function BotVersionManager({
         activeBotIdRef.current !== targetBotId ||
         requestGenerationRef.current !== generation
       ) return
-      setError(errMsg(e, '加载版本历史失败'))
+      setLoadError(errMsg(e, '加载版本历史失败'))
     } finally {
       if (
         activeBotIdRef.current === targetBotId &&
@@ -146,20 +149,21 @@ export default function BotVersionManager({
     setMode(currentRuntimeMode || 'traditional')
     setNote('')
     setFile(null)
-    setError('')
+    setLoadError('')
+    setMutationError('')
     if (botId !== null) void load()
   }, [botId, currentRuntimeMode, load])
 
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
     if (botId === null || !file) {
-      setError('请选择 Linux x86_64 ELF 程序文件')
+      setMutationError('请选择 Linux x86_64 ELF 程序文件')
       return
     }
     const targetBotId = botId
     const generation = ++mutationGenerationRef.current
     setBusy(true)
-    setError('')
+    setMutationError('')
     try {
       await apiForm(`/api/bots/${targetBotId}/versions`, 'POST', {
         upload_note: note,
@@ -175,7 +179,7 @@ export default function BotVersionManager({
       onChanged?.()
     } catch (err) {
       if (isCurrentMutation(targetBotId, generation)) {
-        setError(errMsg(err, '上传失败'))
+        setMutationError(errMsg(err, '上传失败'))
       }
     } finally {
       if (isCurrentMutation(targetBotId, generation)) setBusy(false)
@@ -185,7 +189,7 @@ export default function BotVersionManager({
   const rollback = async (v: BotVersion) => {
     if (botId === null) return
     if (v.runnable === false) {
-      setError(v.unsupported_reason || '该历史版本不是 Linux x86_64 ELF，不能激活')
+      setMutationError(v.unsupported_reason || '该历史版本不是 Linux x86_64 ELF，不能激活')
       return
     }
     const targetBotId = botId
@@ -201,6 +205,7 @@ export default function BotVersionManager({
     if (!ok || activeBotIdRef.current !== targetBotId) return
     const generation = ++mutationGenerationRef.current
     setBusy(true)
+    setMutationError('')
     try {
       await apiJson(`/api/bots/${targetBotId}/versions/${v.version}/activate`, 'POST')
       if (!isCurrentMutation(targetBotId, generation)) return
@@ -210,7 +215,7 @@ export default function BotVersionManager({
       onChanged?.()
     } catch (e) {
       if (isCurrentMutation(targetBotId, generation)) {
-        setError(errMsg(e, '回滚失败'))
+        setMutationError(errMsg(e, '回滚失败'))
       }
     } finally {
       if (isCurrentMutation(targetBotId, generation)) setBusy(false)
@@ -219,20 +224,24 @@ export default function BotVersionManager({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+      <DialogContent
+        data-scroll-region="bot-version-dialog"
+        data-overflow-allowed="y"
+        className="max-h-[85dvh] overflow-y-auto overscroll-contain sm:max-w-xl"
+      >
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
+          <DialogTitle className="flex min-w-0 items-start gap-2">
             <History className="size-4" />
-            版本管理{botName ? ` · ${botName}` : ''}
+            <span className="shrink-0">版本管理</span>
+            {botName && <EntityName lines={2} tooltip={botName} className="min-w-0 text-sm">{botName}</EntityName>}
           </DialogTitle>
           <DialogDescription>
             上传新版本、查看历史、回滚到任意旧版本。每版本独立标明 Botzone 运行模式，回滚时恢复。
           </DialogDescription>
         </DialogHeader>
 
-        {/* 上传新版本 */}
-        <form onSubmit={(e) => void onUpload(e)} className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
-          <h3 className="text-sm font-medium text-foreground">上传新版本</h3>
+        <DataRegion title="上传新版本" description="通过预检后发布，并自动切换为当前版本。">
+        <form onSubmit={(e) => void onUpload(e)} className="min-w-0 space-y-3 p-3">
           <div className="space-y-1.5">
             <Label>Botzone 运行模式</Label>
             <Select value={mode} onValueChange={setMode}>
@@ -259,7 +268,7 @@ export default function BotVersionManager({
             <Label htmlFor="ver-file">程序文件（Linux x86_64 ELF）</Label>
             <label
               htmlFor="ver-file"
-              className="flex cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent"
+              className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent focus-within:ring-[3px] focus-within:ring-ring/50"
             >
               <span className="shrink-0 font-medium text-foreground">选择文件</span>
               <span className="min-w-0 truncate">{file?.name || '未选择文件'}</span>
@@ -285,41 +294,40 @@ export default function BotVersionManager({
               仅接受 Linux x86_64 ELF，最大 50MB；Windows .exe、macOS 程序和原始 .py 文件均不支持。
             </p>
           </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          <Button type="submit" disabled={busy} className="gap-1.5">
+          {mutationError && <ErrorMsg msg={mutationError} />}
+          <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
             <Upload className="size-4" />
             {busy ? '处理中…' : '上传新版本'}
           </Button>
         </form>
+        </DataRegion>
 
-        {/* 版本历史 */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-medium text-foreground">版本历史</h3>
+        <DataRegion title="版本历史" description="版本号是该 Bot 内部的业务序列，可随时切换。">
           {loading ? (
             <Loading text="加载中…" />
+          ) : loadError ? (
+            <ErrorMsg msg={loadError} className="px-4 py-6" />
           ) : versions.length === 0 ? (
-            <p className="text-sm text-muted-foreground">暂无版本记录</p>
+            <EmptyState text="暂无版本记录" icon={<History className="size-5 opacity-50" />} className="py-7" />
           ) : (
-            <ul className="space-y-1.5">
+            <ul className="divide-y divide-border">
               {versions.map((v) => {
                 const isCurrent = v.version === (curVer ?? currentVersion)
                 return (
                   <li
                     key={v.id}
-                    className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2"
+                    className="flex min-w-0 items-start gap-2 px-3 py-2.5"
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm font-medium text-foreground">
                         <span>v{v.version}</span>
                         {isCurrent && <Badge variant="default">当前</Badge>}
-                        <Badge variant="secondary" className="font-mono text-[10px]">
-                          {v.runtime_mode}
-                        </Badge>
                         {v.runnable === false && <Badge variant="destructive">不可运行</Badge>}
                       </div>
-                      <div className="mt-0.5 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                      <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span>{fmtTime(v.uploaded_at)}</span>
                         <span>{fmtSize(v.size_bytes)}</span>
+                        <Identifier>{v.runtime_mode}</Identifier>
                         {v.runnable === false && (
                           <span className="text-destructive">
                             诊断：{v.format}/{v.os}-{v.arch}
@@ -327,22 +335,24 @@ export default function BotVersionManager({
                         )}
                       </div>
                       {v.upload_note && (
-                        <p className="mt-0.5 truncate text-xs text-muted-foreground">{v.upload_note}</p>
+                        <OverflowText lines={2} tooltip={false} className="mt-0.5 text-xs text-muted-foreground">{v.upload_note}</OverflowText>
                       )}
                     </div>
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={busy || isCurrent || v.runnable === false}
-                          onClick={() => void rollback(v)}
-                          className="gap-1"
-                        >
-                          <RotateCcw className="size-3.5" />
-                          回滚
-                        </Button>
+                        <span className="inline-flex min-w-0 shrink-0">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={busy || isCurrent || v.runnable === false}
+                            onClick={() => void rollback(v)}
+                            className="gap-1"
+                          >
+                            <RotateCcw className="size-3.5" />
+                            回滚
+                          </Button>
+                        </span>
                       </TooltipTrigger>
                       <TooltipContent>
                         {v.runnable === false
@@ -355,7 +365,7 @@ export default function BotVersionManager({
               })}
             </ul>
           )}
-        </div>
+        </DataRegion>
         {confirmDialog}
       </DialogContent>
     </Dialog>

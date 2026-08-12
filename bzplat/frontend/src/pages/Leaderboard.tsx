@@ -1,21 +1,30 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Activity,
   Bot as BotIcon,
   Clock3,
+  Gauge,
+  ListChecks,
   Minus,
-  ShieldCheck,
-  Target,
   TrendingDown,
   TrendingUp,
   Trophy,
 } from 'lucide-react'
-import PageStub from '@/components/PageStub'
-import { Card } from '@/components/ui/card'
+
+import { apiFetch, apiGet, errMsg } from '@/api'
+import Pagination from '@/components/Pagination'
+import {
+  ExecutionQueuePanel,
+  type ExecutionQueueSnapshot,
+} from '@/components/execution-queue'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
+import { EntityName, OverflowText } from '@/components/ui/overflow-text'
+import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
+  DataTable,
   Table,
   TableBody,
   TableCell,
@@ -23,169 +32,158 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
-import { TierBadge } from '@/components/tier-badge'
-import Pagination from '@/components/Pagination'
-import { apiGet, errMsg } from '@/api'
-import { GAMES, type GameId } from '@/lib/games'
 import { fmtRating, fmtTime } from '@/lib/format'
+import { GAMES, type GameId } from '@/lib/games'
 import { cn } from '@/lib/utils'
+import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
+import { SummaryMetric } from '@/pages/public-page-ui'
 
-interface Row {
+interface RankingRow {
   rank: number | null
+  rank_total: number
+  percentile: number | null
   bot_id: number
   bot_name?: string
   bot_display?: string
   owner_name?: string
   rating: number
-  rd?: number
-  wins?: number
-  losses?: number
-  draws?: number
-  matches_played?: number
-  rating_delta?: number | null
-  tier_name?: string
-  tier_key?: string
-  is_placement: boolean
-  placement_required: number
-  placement_remaining: number
+  rd: number
+  confidence_low: number | null
+  confidence_high: number | null
+  wins: number
+  losses: number
+  draws: number
+  rated_matches: number
+  unique_opponents: number
+  rating_delta: number | null
+  recent_delta_30d: number | null
+  ranking_min_matches: number
+  ranking_progress: number
+  ranking_eligible: boolean
   last_match_id?: string | null
   last_match_at?: string | null
 }
 
-interface Summary {
+interface RankingSummary {
   total: number
-  ranked: number
-  placement: number
+  eligible: number
+  sample: number
   last_rated_at?: string | null
 }
 
 interface LeaderboardResponse {
-  leaderboard: Row[]
+  leaderboard: RankingRow[]
   game_id: string
-  placement_required: number
-  summary: Summary
+  ranking_min_matches: number
+  summary: RankingSummary
   page?: number
   per_page?: number
   total: number
 }
 
-const EMPTY_SUMMARY: Summary = { total: 0, ranked: 0, placement: 0, last_rated_at: null }
-
-function recordFor(row: Row) {
-  const wins = row.wins ?? 0
-  const draws = row.draws ?? 0
-  const losses = row.losses ?? 0
-  const played = row.matches_played ?? wins + draws + losses
-  const winRate = played > 0 ? (wins / played) * 100 : 0
-  return { wins, draws, losses, played, winRate }
+const EMPTY_SUMMARY: RankingSummary = {
+  total: 0,
+  eligible: 0,
+  sample: 0,
+  last_rated_at: null,
 }
 
-function SummaryItem({ icon, label, value }: { icon: ReactNode; label: string; value: ReactNode }) {
+function signed(value: number | null | undefined) {
+  if (value == null) return '—'
+  if (value === 0) return '0'
+  return `${value > 0 ? '+' : ''}${value.toFixed(0)}`
+}
+
+function ChangeValue({ value, label }: { value: number | null; label: string }) {
+  if (value == null) return <span className="text-muted-foreground">{label} —</span>
+  if (value === 0) {
+    return <span className="inline-flex items-center gap-1 text-muted-foreground"><Minus className="size-3" />{label} 0</span>
+  }
   return (
-    <div className="flex min-w-0 items-center gap-2.5 px-3 py-2.5 sm:px-4">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-        {icon}
-      </span>
-      <div className="min-w-0">
-        <dt className="text-[11px] font-medium text-muted-foreground">{label}</dt>
-        <dd className="break-words text-sm font-semibold leading-tight tabular-nums text-foreground [overflow-wrap:anywhere]">
-          {value}
-        </dd>
-      </div>
-    </div>
+    <span className={cn('inline-flex items-center gap-1 font-medium', value > 0 ? 'text-success' : 'text-destructive')}>
+      {value > 0 ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
+      {label} {signed(value)}
+    </span>
   )
 }
 
-function BotIdentity({ row }: { row: Row }) {
-  const name = row.bot_display || row.bot_name || `Bot #${row.bot_id}`
+function BotIdentity({ row }: { row: RankingRow }) {
+  const name = row.bot_display || row.bot_name || '未命名 Bot'
   return (
     <div className="min-w-0">
-      <Link
-        to={`/bot/${row.bot_id}`}
-        className="block break-words font-medium leading-snug text-foreground hover:text-primary [overflow-wrap:anywhere]"
-      >
-        {name}
+      <Link to={`/bot/${row.bot_id}`} className="block min-w-0 hover:text-primary">
+        <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">
+          {name}
+        </EntityName>
       </Link>
-      <div className="mt-0.5 min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
+      <OverflowText tooltip={false} className="mt-0.5 text-xs text-muted-foreground">
         {row.owner_name ? (
           <Link to={`/user/${encodeURIComponent(row.owner_name)}`} className="hover:text-primary hover:underline">
             @{row.owner_name}
           </Link>
         ) : '所有者未知'}
+      </OverflowText>
+    </div>
+  )
+}
+
+function RatingFacts({ row }: { row: RankingRow }) {
+  const hasConfidence = row.confidence_low != null && row.confidence_high != null
+  return (
+    <div className="min-w-0 tabular-nums">
+      <div className="font-mono text-sm font-semibold text-foreground">{fmtRating(row.rating)}</div>
+      <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+        RD {Number(row.rd).toFixed(0)}
+        {hasConfidence ? ` · 95% ${row.confidence_low!.toFixed(0)}–${row.confidence_high!.toFixed(0)}` : ' · 95% —'}
       </div>
     </div>
   )
 }
 
-function PlacementOrTier({ row, gameId }: { row: Row; gameId: GameId }) {
-  const record = recordFor(row)
-  if (row.is_placement) {
+function RankingFacts({ row }: { row: RankingRow }) {
+  if (!row.ranking_eligible || row.rank == null) {
     return (
-      <div className="flex flex-col items-start gap-0.5">
-        <Badge variant="secondary" className="whitespace-nowrap text-muted-foreground">
-          定级 {record.played}/{row.placement_required}
-        </Badge>
-        <span className="text-[11px] text-muted-foreground">还差 {row.placement_remaining} 场</span>
+      <div className="tabular-nums">
+        <div className="font-mono text-xs font-semibold text-foreground">
+          {row.rated_matches}/{row.ranking_min_matches} 场
+        </div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground">
+          资格进度 {(row.ranking_progress * 100).toFixed(0)}%
+        </div>
       </div>
     )
   }
   return (
-    <TierBadge
-      rating={row.rating}
-      label={row.tier_name}
-      gameId={gameId}
-      tierKey={row.tier_key}
-    />
-  )
-}
-
-function RatingInfo({ row }: { row: Row }) {
-  const delta = row.rating_delta
-  return (
-    <div className="min-w-0 tabular-nums">
-      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        <span className="font-mono font-semibold text-primary">{fmtRating(row.rating)}</span>
-        {delta == null ? (
-          <span className="text-[11px] text-muted-foreground">上次 —</span>
-        ) : delta === 0 ? (
-          <span className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground">
-            <Minus className="size-3" />上次 0
-          </span>
-        ) : (
-          <span className={cn(
-            'inline-flex items-center gap-0.5 text-[11px] font-medium',
-            delta > 0 ? 'text-success' : 'text-destructive',
-          )}>
-            {delta > 0 ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
-            上次 {delta > 0 ? '+' : ''}{delta.toFixed(0)}
-          </span>
-        )}
-      </div>
+    <div className="tabular-nums">
+      <div className="font-mono text-xs font-semibold text-foreground">#{row.rank} / {row.rank_total}</div>
       <div className="mt-0.5 text-[11px] text-muted-foreground">
-        RD {row.rd == null ? '—' : Number(row.rd).toFixed(0)}
+        百分位 {row.percentile == null ? '—' : `${row.percentile.toFixed(1)}%`}
       </div>
     </div>
   )
 }
 
-function RecordInfo({ row }: { row: Row }) {
-  const record = recordFor(row)
+function SampleFacts({ row }: { row: RankingRow }) {
   return (
     <div className="tabular-nums">
-      <div className="font-mono text-xs">
-        <span className="text-success">{record.wins}</span>
-        <span className="text-muted-foreground">-{record.draws}-</span>
-        <span className="text-destructive">{record.losses}</span>
-      </div>
-      <div className="mt-0.5 text-[11px] text-muted-foreground">
-        胜率 {record.winRate.toFixed(1)}%
+      <div className="font-mono text-xs text-foreground">{row.rated_matches} 场 · {row.unique_opponents} 对手</div>
+      <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+        {row.wins} 胜 · {row.draws} 平 · {row.losses} 负
       </div>
     </div>
   )
 }
 
-function RecentMatch({ row }: { row: Row }) {
+function ChangeFacts({ row }: { row: RankingRow }) {
+  return (
+    <div className="flex flex-col gap-0.5 text-[11px] tabular-nums">
+      <ChangeValue value={row.rating_delta} label="上次" />
+      <ChangeValue value={row.recent_delta_30d} label="30 日" />
+    </div>
+  )
+}
+
+function RecentMatch({ row }: { row: RankingRow }) {
   if (!row.last_match_id || !row.last_match_at) {
     return <span className="text-xs text-muted-foreground">暂无已验证对局</span>
   }
@@ -201,37 +199,34 @@ function RecentMatch({ row }: { row: Row }) {
 
 function DesktopRows({
   rows,
-  label,
-  count,
-  gameId,
+  title,
+  globalCount,
   testId,
 }: {
-  rows: Row[]
-  label: string
-  count: number
-  gameId: GameId
+  rows: RankingRow[]
+  title: string
+  globalCount: number
   testId: string
 }) {
   if (rows.length === 0) return null
   return (
     <>
       <TableRow className="bg-muted/30 hover:bg-muted/30" data-testid={testId}>
-        <TableCell colSpan={6} className="h-8 px-3 py-1.5 text-xs font-semibold text-muted-foreground">
-          {label} · {count}
+        <TableCell colSpan={7} className="h-8 px-3 py-1.5 text-xs font-semibold text-muted-foreground">
+          {title} · 本页 {rows.length} / 共 {globalCount}
         </TableCell>
       </TableRow>
       {rows.map((row) => (
         <TableRow key={row.bot_id}>
-          <TableCell className="w-10 px-2 font-mono text-xs font-semibold text-muted-foreground">
-            {row.rank ?? '—'}
+          <TableCell className="w-14 font-mono text-xs font-semibold text-muted-foreground">
+            {row.rank == null ? '—' : `#${row.rank}`}
           </TableCell>
-          <TableCell className="whitespace-normal">
-            <BotIdentity row={row} />
-          </TableCell>
-          <TableCell><PlacementOrTier row={row} gameId={gameId} /></TableCell>
-          <TableCell><RatingInfo row={row} /></TableCell>
-          <TableCell><RecordInfo row={row} /></TableCell>
-          <TableCell className="w-36 whitespace-normal"><RecentMatch row={row} /></TableCell>
+          <TableCell className="max-w-64 whitespace-normal"><BotIdentity row={row} /></TableCell>
+          <TableCell><RatingFacts row={row} /></TableCell>
+          <TableCell><RankingFacts row={row} /></TableCell>
+          <TableCell><SampleFacts row={row} /></TableCell>
+          <TableCell><ChangeFacts row={row} /></TableCell>
+          <TableCell className="whitespace-normal"><RecentMatch row={row} /></TableCell>
         </TableRow>
       ))}
     </>
@@ -240,58 +235,63 @@ function DesktopRows({
 
 function MobileSection({
   rows,
-  label,
-  count,
-  gameId,
+  title,
+  globalCount,
   testId,
 }: {
-  rows: Row[]
-  label: string
-  count: number
-  gameId: GameId
+  rows: RankingRow[]
+  title: string
+  globalCount: number
   testId: string
 }) {
   if (rows.length === 0) return null
   return (
     <section data-testid={testId}>
       <h2 className="border-b border-border bg-muted/30 px-3 py-2 text-xs font-semibold text-muted-foreground">
-        {label} · {count}
+        {title} · 本页 {rows.length} / 共 {globalCount}
       </h2>
-      <ol className="divide-y divide-border">
+      <ul className="divide-y divide-border">
         {rows.map((row) => (
           <li key={row.bot_id} className="min-w-0 px-3 py-3">
-            <div className="flex min-w-0 items-start gap-3">
-              <span className="w-6 shrink-0 pt-0.5 text-center font-mono text-xs font-semibold text-muted-foreground">
-                {row.rank ?? '—'}
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-start justify-between gap-2">
-                  <BotIdentity row={row} />
-                  <div className="shrink-0"><PlacementOrTier row={row} gameId={gameId} /></div>
-                </div>
-                <div className="mt-2 grid min-w-0 grid-cols-2 gap-2 rounded-md bg-muted/30 px-2.5 py-2">
-                  <RatingInfo row={row} />
-                  <RecordInfo row={row} />
-                </div>
-                <div className="mt-2"><RecentMatch row={row} /></div>
-              </div>
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <BotIdentity row={row} />
+              {row.rank == null ? (
+                <Badge variant="secondary" className="shrink-0 font-mono">{row.rated_matches}/{row.ranking_min_matches}</Badge>
+              ) : (
+                <Badge variant="outline" className="shrink-0 font-mono">#{row.rank}</Badge>
+              )}
             </div>
+            <div className="mt-2 grid min-w-0 grid-cols-2 gap-x-3 gap-y-2 rounded-lg bg-muted/30 p-2.5">
+              <RatingFacts row={row} />
+              <RankingFacts row={row} />
+              <SampleFacts row={row} />
+              <ChangeFacts row={row} />
+            </div>
+            <div className="mt-2"><RecentMatch row={row} /></div>
           </li>
         ))}
-      </ol>
+      </ul>
     </section>
   )
 }
 
+function SummaryItem({ children }: { children: ReactNode }) {
+  return <>{children}</>
+}
+
 export default function Leaderboard() {
-  const [rows, setRows] = useState<Row[]>([])
-  const [summary, setSummary] = useState<Summary>(EMPTY_SUMMARY)
-  const [placementRequired, setPlacementRequired] = useState(0)
+  const [rows, setRows] = useState<RankingRow[]>([])
+  const [summary, setSummary] = useState<RankingSummary>(EMPTY_SUMMARY)
+  const [rankingMinMatches, setRankingMinMatches] = useState(0)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [gameId, setGameId] = useState<GameId>('holdem')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
+  const [queue, setQueue] = useState<ExecutionQueueSnapshot | null>(null)
+  const [queueLoading, setQueueLoading] = useState(true)
+  const [queueError, setQueueError] = useState('')
+  const [queueLastUpdatedAt, setQueueLastUpdatedAt] = useState<number | null>(null)
   const perPage = 50
 
   useEffect(() => {
@@ -309,13 +309,14 @@ export default function Leaderboard() {
         if (data.game_id !== gameId) throw new Error('排行榜游戏维度不一致')
         setRows(data.leaderboard || [])
         setSummary(data.summary || EMPTY_SUMMARY)
-        setPlacementRequired(data.placement_required ?? 0)
+        setRankingMinMatches(data.ranking_min_matches ?? 0)
         setTotal(data.total ?? 0)
       })
       .catch((reason) => {
         if (cancelled) return
         setRows([])
         setSummary(EMPTY_SUMMARY)
+        setRankingMinMatches(0)
         setTotal(0)
         setError(errMsg(reason, '排行榜加载失败'))
       })
@@ -327,138 +328,139 @@ export default function Leaderboard() {
     }
   }, [gameId, page])
 
+  const pollQueue = useCallback(async (signal: AbortSignal) => {
+    const data = await apiFetch<ExecutionQueueSnapshot>('/api/execution-queue', {
+      method: 'GET',
+      signal,
+    })
+    if (signal.aborted) return
+    setQueue(data)
+    setQueueLastUpdatedAt(Date.now())
+  }, [])
+
+  const {
+    refresh: refreshQueue,
+    polling: queuePolling,
+    offline: queueOffline,
+  } = useSingleFlightPolling({
+    task: pollQueue,
+    intervalMs: 3_000,
+    maxIntervalMs: 24_000,
+    onSuccess: () => {
+      setQueueError('')
+      setQueueLoading(false)
+    },
+    onError: (reason) => {
+      setQueueError(errMsg(reason, '全局执行队列加载失败'))
+      setQueueLoading(false)
+    },
+  })
+
   const changeGame = (next: GameId) => {
     if (next === gameId) return
-    // 游戏维度切换时旧概览不再具有任何语义。先同步清空再发新请求，避免
-    // 慢网下新 tab 短暂展示上一游戏的总数、定级数和列表。
     setRows([])
     setSummary(EMPTY_SUMMARY)
-    setPlacementRequired(0)
+    setRankingMinMatches(0)
     setTotal(0)
     setError('')
     setLoading(true)
     setGameId(next)
     setPage(1)
   }
-  const formalRows = rows.filter((row) => !row.is_placement)
-  const placementRows = rows.filter((row) => row.is_placement)
+
+  const rankedRows = rows.filter((row) => row.ranking_eligible)
+  const sampleRows = rows.filter((row) => !row.ranking_eligible)
 
   return (
-    <PageStub
-      title="排行榜"
-      subtitle={`每款游戏独立使用 Glicko-2 评级；完成 ${placementRequired || 10} 场后进入正式榜。`}
-    >
-      <Tabs value={gameId} onValueChange={(value) => changeGame(value as GameId)} className="contents">
-        <TabsList
-          aria-label="游戏排行榜"
-          data-testid="leaderboard-game-tabs"
-          className={cn(
-            'sticky z-30 mb-3 grid h-auto w-full grid-cols-3 gap-1 rounded-lg border border-border bg-background/95 p-1 shadow-sm backdrop-blur',
-            'top-14 lg:top-0',
-          )}
-        >
-          {GAMES.map((game) => {
-            const GameIcon = game.icon
-            return (
-              <TabsTrigger
-                key={game.id}
-                value={game.id}
-                className={cn(
-                  'h-auto min-w-0 rounded-md px-2 py-2 text-sm transition-colors',
-                  'data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm',
-                  'data-[state=inactive]:text-muted-foreground data-[state=inactive]:hover:bg-muted data-[state=inactive]:hover:text-foreground',
-                )}
-              >
-                <GameIcon className="size-3.5 shrink-0" />
-                <span className="truncate">{game.label}</span>
-              </TabsTrigger>
-            )
-          })}
-        </TabsList>
-      </Tabs>
+    <PageFrame layout="public-leaderboard">
+      <PageHeader
+        title="排行榜"
+        description="每款游戏独立使用 Glicko-2 数值评分；公开名次与计分样本分区展示。"
+      />
 
-      {error && <ErrorMsg msg={error} className="mb-3" />}
+      <StickyToolbar label="排行榜游戏选择">
+        <Tabs value={gameId} onValueChange={(value) => changeGame(value as GameId)} className="w-full">
+          <TabsList aria-label="游戏排行榜" data-testid="leaderboard-game-tabs" className="grid h-auto w-full grid-cols-3 gap-1">
+            {GAMES.map((game) => {
+              const GameIcon = game.icon
+              return (
+                <TabsTrigger key={game.id} value={game.id} className="h-auto min-w-0 px-2 py-2">
+                  <GameIcon className="size-3.5 shrink-0" />
+                  <span className="truncate">{game.label}</span>
+                </TabsTrigger>
+              )
+            })}
+          </TabsList>
+        </Tabs>
+      </StickyToolbar>
 
-      <Card className="mb-3 gap-0 overflow-hidden py-0">
-        <dl className="grid grid-cols-2 divide-x divide-y divide-border sm:grid-cols-4 sm:divide-y-0">
-          <SummaryItem icon={<BotIcon className="size-4" />} label="Bot 总数" value={summary.total} />
-          <SummaryItem icon={<ShieldCheck className="size-4" />} label="正式榜" value={summary.ranked} />
-          <SummaryItem icon={<Target className="size-4" />} label="定级中" value={summary.placement} />
-          <SummaryItem
-            icon={<Clock3 className="size-4" />}
-            label="最近更新"
-            value={summary.last_rated_at ? fmtTime(summary.last_rated_at) : '暂无'}
-          />
-        </dl>
-      </Card>
+      {error && <ErrorMsg msg={error} />}
 
-      {loading ? (
-        <Card className="py-4"><Loading /></Card>
-      ) : rows.length === 0 ? (
-        <Card className="py-2">
-          <EmptyState text="该游戏暂无可排名 Bot" icon={<Trophy className="size-7 opacity-40" />} />
-        </Card>
-      ) : (
-        <Card className="gap-0 py-0">
-          <div className="hidden md:block" data-testid="leaderboard-desktop">
-            <Table className="table-fixed" containerClassName="overflow-visible">
-              <TableHeader className="sticky top-[6.75rem] z-20 bg-background/95 backdrop-blur lg:top-[3.25rem]">
-                <TableRow>
-                  <TableHead className="w-10 px-2">名次</TableHead>
-                  <TableHead className="w-[30%]">Bot / 所有者</TableHead>
-                  <TableHead className="w-[14%]">段位</TableHead>
-                  <TableHead className="w-[20%] whitespace-normal">
-                    <span className="block">Rating / 上次变化</span>
-                    <span className="normal-case font-normal">RD 越低越稳定</span>
-                  </TableHead>
-                  <TableHead className="w-[18%] whitespace-normal">胜-平-负 / 胜率</TableHead>
-                  <TableHead className="w-[16%] whitespace-normal">最近对局</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <DesktopRows
-                  rows={formalRows}
-                  label="正式排名"
-                  count={summary.ranked}
-                  gameId={gameId}
-                  testId="leaderboard-section-formal"
-                />
-                <DesktopRows
-                  rows={placementRows}
-                  label="定级中（暂无正式名次）"
-                  count={summary.placement}
-                  gameId={gameId}
-                  testId="leaderboard-section-placement"
-                />
-              </TableBody>
-            </Table>
-          </div>
+      <SummaryStrip columns={4}>
+        <SummaryItem><SummaryMetric label="Bot 总数" value={summary.total} detail="当前游戏公开候选" icon={<BotIcon className="size-4" />} /></SummaryItem>
+        <SummaryItem><SummaryMetric label="公开排名" value={summary.eligible} detail={rankingMinMatches ? `至少 ${rankingMinMatches} 场计分对局` : '按后端场次门槛'} icon={<Trophy className="size-4" />} /></SummaryItem>
+        <SummaryItem><SummaryMetric label="计分样本" value={summary.sample} detail="场次尚未达到排名门槛" icon={<ListChecks className="size-4" />} /></SummaryItem>
+        <SummaryItem><SummaryMetric label="最近更新" value={summary.last_rated_at ? fmtTime(summary.last_rated_at) : '暂无'} detail="当前游戏评分池" mono={false} icon={<Clock3 className="size-4" />} /></SummaryItem>
+      </SummaryStrip>
 
-          <div className="md:hidden" data-testid="leaderboard-mobile">
-            <MobileSection
-              rows={formalRows}
-              label="正式排名"
-              count={summary.ranked}
-              gameId={gameId}
-              testId="leaderboard-section-formal"
-            />
-            <MobileSection
-              rows={placementRows}
-              label="定级中（暂无正式名次）"
-              count={summary.placement}
-              gameId={gameId}
-              testId="leaderboard-section-placement"
-            />
-          </div>
+      <ExecutionQueuePanel
+        snapshot={queue}
+        loading={queueLoading || (!queue && queuePolling)}
+        error={queueOffline ? '当前离线；联网后会自动刷新全局队列。' : queueError}
+        stale={!!queue && (queueOffline || !!queueError)}
+        lastUpdatedAt={queueLastUpdatedAt}
+        onRetry={refreshQueue}
+        maxQueued={4}
+        compactOnMobile
+      />
 
-          <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
-        </Card>
-      )}
+      <DataRegion
+        title="数值评分明细"
+        description={rankingMinMatches ? `公开名次要求至少 ${rankingMinMatches} 场计分对局；95% 区间按 Rating ± 1.96 × RD。` : '正在读取排名门槛。'}
+        actions={<Gauge className="size-4 text-primary" />}
+      >
+        {loading ? (
+          <Loading text="正在加载排行榜…" />
+        ) : rows.length === 0 ? (
+          <EmptyState text="该游戏暂无可排名 Bot" icon={<Trophy className="size-6 opacity-40" />} className="py-10" />
+        ) : (
+          <>
+            <div className="hidden md:block" data-testid="leaderboard-desktop">
+              <DataTable className="rounded-none border-0" scrollLabel="排行榜数值明细">
+                <Table aria-label="排行榜数值明细" className="min-w-[72rem]">
+                  <TableHeader sticky="page">
+                    <TableRow>
+                      <TableHead>名次</TableHead>
+                      <TableHead className="min-w-48">Bot / 所有者</TableHead>
+                      <TableHead>Rating / 95% 区间</TableHead>
+                      <TableHead>名次 / 百分位</TableHead>
+                      <TableHead>场次 / 对手 / 战绩</TableHead>
+                      <TableHead>评分变化</TableHead>
+                      <TableHead>最近对局</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <DesktopRows rows={rankedRows} title="公开排名" globalCount={summary.eligible} testId="leaderboard-section-ranked" />
+                    <DesktopRows rows={sampleRows} title="计分样本（无公开名次）" globalCount={summary.sample} testId="leaderboard-section-sample" />
+                  </TableBody>
+                </Table>
+              </DataTable>
+            </div>
 
-      <p className="mt-3 flex items-start gap-1.5 text-xs leading-relaxed text-muted-foreground">
+            <div className="md:hidden" data-testid="leaderboard-mobile">
+              <MobileSection rows={rankedRows} title="公开排名" globalCount={summary.eligible} testId="leaderboard-section-ranked" />
+              <MobileSection rows={sampleRows} title="计分样本（无公开名次）" globalCount={summary.sample} testId="leaderboard-section-sample" />
+            </div>
+
+            <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+          </>
+        )}
+      </DataRegion>
+
+      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-muted-foreground">
         <Activity className="mt-0.5 size-3.5 shrink-0" />
-        Rating 变化只对比该 Bot 在当前游戏的上一条评分记录；胜率按胜场 ÷ 总场次计算。
+        百分位按公开名次线性映射：仅一名时为 100%；多人时首位为 100%、末位为 0%。30 日变化缺少窗口起点快照时显示“—”。
       </p>
-    </PageStub>
+    </PageFrame>
   )
 }

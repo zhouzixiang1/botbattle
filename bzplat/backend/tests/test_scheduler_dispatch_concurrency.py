@@ -25,7 +25,7 @@ def _app(tmp_path):
     return create_app(db_path=str(tmp_path / "dc.db"))
 
 
-def _setup_contest(app, *, status="running"):
+def _setup_contest(app, tmp_path: Path, *, status="running"):
     """建一个 running 赛事 + 1 个 pending pairing（2 bot）。"""
     from bzplat.backend.crypto import hash_password
     store = app.state.store
@@ -33,8 +33,16 @@ def _setup_contest(app, *, status="running"):
     store.update_user(org["id"], role="organizer", email_verified=1)
     player = store.create_user("player", "player@e.com", hash_password("pw123456"))
     store.update_user(player["id"], email_verified=1)
-    b1 = store.create_bot(org["id"], "botA", binary_path="/tmp/a", format="elf", game_id="holdem")
-    b2 = store.create_bot(player["id"], "botB", binary_path="/tmp/b", format="elf", game_id="holdem")
+    path_a = tmp_path / "contest-bot-a.elf"
+    path_b = tmp_path / "contest-bot-b.elf"
+    path_a.write_bytes(b"contest bot A fixture")
+    path_b.write_bytes(b"contest bot B fixture")
+    b1 = store.create_bot(
+        org["id"], "botA", binary_path=str(path_a), format="elf", game_id="holdem"
+    )
+    b2 = store.create_bot(
+        player["id"], "botB", binary_path=str(path_b), format="elf", game_id="holdem"
+    )
     cid = store.create_contest(
         "DupTest", organizer_id=org["id"], game_id="holdem", status=status,
         starts_at="2000-01-01T00:00:00" if status == "published" else None,
@@ -53,7 +61,7 @@ def test_dispatch_no_double_under_concurrent_overlap(tmp_path):
     """并发 _dispatch_pending 调用不应双发——锁串行化，每 pairing 只 1 个 match。"""
     async def exercise():
         app = _app(tmp_path)
-        store, org, cid, b1, b2 = _setup_contest(app)
+        store, org, cid, b1, b2 = _setup_contest(app, tmp_path)
         mgr = app.state.contest_manager
         # mock slow challenge 制造让出窗口
         dispatched: list[str] = []
@@ -86,7 +94,9 @@ def test_cancel_waits_for_dispatch_and_rechecks_running_state(tmp_path):
     """dispatch 已开始时取消必须等同一把锁；首场成功后取消应被锁内复核拒绝。"""
     async def exercise():
         app = _app(tmp_path)
-        store, _org, cid, _b1, _b2 = _setup_contest(app, status="published")
+        store, _org, cid, _b1, _b2 = _setup_contest(
+            app, tmp_path, status="published"
+        )
         mgr = app.state.contest_manager
         entered = asyncio.Event()
         release = asyncio.Event()
@@ -124,7 +134,9 @@ def test_cancel_queued_before_dispatch_prevents_dispatch(tmp_path):
     """取消先取得锁时，后续 dispatch 必须在锁内看到 cancelled 并零派发。"""
     async def exercise():
         app = _app(tmp_path)
-        store, _org, cid, _b1, _b2 = _setup_contest(app, status="published")
+        store, _org, cid, _b1, _b2 = _setup_contest(
+            app, tmp_path, status="published"
+        )
         mgr = app.state.contest_manager
         dispatched: list[str] = []
 

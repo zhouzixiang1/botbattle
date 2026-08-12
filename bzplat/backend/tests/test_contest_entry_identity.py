@@ -110,7 +110,15 @@ def test_swap_bot_keeps_history_points(tmp_path):
     # 建对应 match（completed, botA 赢）
     for i, p in enumerate(s.list_contest_pairings(c, stage_idx=0)):
         mid = f"p0swap-{i}"
-        s.create_match(mid, ba, bb, game_id="holdem", contest_id=c, match_config={})
+        s.create_match(
+            mid,
+            ba,
+            bb,
+            game_id="holdem",
+            contest_id=c,
+            match_type="contest",
+            match_config={},
+        )
         s.update_match(mid, status="completed", winner=0,
                        result={"rounds_played": 2, "deltas": [100, -100]},
                        reason="completed")
@@ -194,8 +202,8 @@ def test_bot_active_references_detects_running_contest(tmp_path):
     s.close()
 
 
-def test_admin_delete_bot_blocked_by_api_when_active(tmp_path):
-    """API 层：admin DELETE /api/admin/bots/{id} 对活跃引用的 bot 返回 409。"""
+def test_admin_delete_bot_preserves_active_and_historical_identity(tmp_path):
+    """管理员只能停用已参赛 Bot，终局后也不能抹掉公开身份。"""
     from bzplat.backend.crypto import hash_password
     from bzplat.backend.main import create_app
     from fastapi.testclient import TestClient
@@ -225,8 +233,9 @@ def test_admin_delete_bot_blocked_by_api_when_active(tmp_path):
         reason="completed",
     )
     r_done = client.delete(f"/api/admin/bots/{b}", headers=h)
-    assert r_done.status_code == 200, r_done.text
-    assert store.get_bot(b) is None
+    assert r_done.status_code == 409, r_done.text
+    assert "历史" in r_done.json()["detail"]
+    assert store.get_bot(b) is not None
 
 
 def test_admin_delete_user_rejects_active_bot_references(tmp_path):
@@ -271,6 +280,56 @@ def test_admin_delete_user_rejects_active_bot_references(tmp_path):
     match = store.get_match("delete-user-active-match")
     assert match is not None and match["status"] == "pending"
     assert match["bot_a_id"] == bot["id"] and match["bot_b_id"] == bot["id"]
+    store.update_match(
+        "delete-user-active-match", status="completed", reason="five", winner=0,
+        result={"rounds_played": 1, "deltas": [1, -1], "normalized_delta": 1},
+    )
+    historical = TestClient(app).delete(
+        f"/api/admin/users/{victim['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert historical.status_code == 409, historical.text
+    assert "历史" in historical.json()["detail"]
+    assert store.get_user(victim["id"]) is not None
+
+
+@pytest.mark.parametrize("source", ["manual", "human"])
+def test_delete_user_if_safe_rejects_queued_execution_identity(tmp_path, source):
+    """claim 前尚无 Match，也不能删掉持久队列中的 Bot owner 或真人。"""
+    s = _store(tmp_path)
+    victim = s.create_user(
+        f"queued-{source}", f"queued-{source}@example.com", "hash"
+    )
+    bot = s.create_bot(
+        victim["id"], f"queued-{source}-bot", binary_path="/tmp/queued",
+        format="elf", game_id="pencil",
+    )
+    if source == "human":
+        values = (
+            f"req-{source}", source, victim["id"], "human", bot["id"],
+            bot["id"], victim["id"], 1, 1,
+        )
+    else:
+        values = (
+            f"req-{source}", source, victim["id"], "challenge", bot["id"],
+            bot["id"], None, None, 2,
+        )
+    with s._tx() as c:
+        c.execute(
+            "INSERT INTO execution_jobs("
+            "public_id,source,status,priority,owner_user_id,game_id,match_type,"
+            "bot_a_id,bot_b_id,human_user_id,human_seat,match_config,rated,"
+            "rating_reason,sandbox_units,created_at) "
+            "VALUES(?,?,'queued',50,?,'pencil',?,?,?,?,?,'{}',0,'test',?,?)",
+            (*values, "2026-08-11T00:00:00+00:00"),
+        )
+
+    result = s.delete_user_if_safe(victim["id"])
+    assert result["deleted"] is False
+    assert result["blockers"]["active_execution_jobs"] == 1
+    assert s.get_user(victim["id"]) is not None
+    assert s.get_bot(bot["id"]) is not None
+    s.close()
 
 
 def test_admin_delete_human_player_rejects_foreign_bot_match(tmp_path):

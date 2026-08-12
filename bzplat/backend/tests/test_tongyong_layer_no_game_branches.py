@@ -6,7 +6,7 @@ notifications/）禁止：
   - `== "holdem"` / `!= "holdem"` / `in ("holdem",...)` / `startswith("holdem")` 等按游戏名分支
   - `("holdem", "gomoku", "pencil")` / `["holdem","gomoku","pencil"]` / `{"holdem",...}`
     硬编码 3-game 列表（任意顺序、含 2-game 子集）
-  - `registry.get("holdem")` / `all_tiers("holdem")` 等硬指某游戏的调用（应经变量）
+  - `registry.get("holdem")` 等硬指某游戏的调用（应经变量）
   - `from bzplat.backend.games.holdem import` 直接 import 具体游戏模块（应经 registry）
 
 产品创建入口可以通过请求模型默认值或显式 ``if game_id is None`` 选择默认游戏；
@@ -35,15 +35,15 @@ from bzplat.backend.store.schema import VALID_GAME_IDS  # noqa: E402
 _GAMES = "(?:" + "|".join(sorted(VALID_GAME_IDS)) + ")"
 
 # 禁止的模式：按游戏名分支
-# == "holdem" / != "holdem" / in ("holdem",...) / startswith("holdem") / .get("holdem") / all_tiers("holdem")
+# == "holdem" / != "holdem" / in ("holdem",...) / startswith("holdem") / .get("holdem")
 _BRANCH_RE = re.compile(
     r'==\s*["\']' + _GAMES + r'["\']'                                  # == / != "holdem"
     r'|!=\s*["\']' + _GAMES + r'["\']'
     r'|\bin\s*[\(\[]\s*[^)\]]*["\']' + _GAMES + r'["\']'               # in (... "holdem" ...)
     r'|\.(?:startswith|endswith)\s*\(\s*["\']' + _GAMES + r'["\']'    # .startswith("holdem")
-    # 硬指某游戏的调用：registry.get("holdem") / all_tiers("holdem") / default_match_config("holdem")
+    # 硬指某游戏的调用：registry.get("holdem") / default_match_config("holdem")
     # 排除 = "holdem" 赋值/默认值与 , "holdem" 参数列表里的合法默认（这些由 _FALLBACK_RE 兜底豁免）
-    r'|\.(?:get|all_tiers|default_match_config|game_label|is_registered)\s*\(\s*["\']' + _GAMES + r'["\']'
+    r'|\.(?:get|default_match_config|game_label|is_registered)\s*\(\s*["\']' + _GAMES + r'["\']'
 )
 # 禁止的模式：硬编码 3-game 列表字面量（任意括号 ()/[]/{}，任意顺序，含 2-game 子集）
 # 匹配形如 ("holdem","gomoku","pencil") 或 {"gomoku","holdem"} 或 ["holdem","pencil"] 等
@@ -152,7 +152,6 @@ def test_guard_regex_catches_branch_variants():
         'if x in ("holdem", "gomoku"):',
         'if gid.startswith("pencil"):',
         'return _reg.get("holdem")',
-        '_game_registry.all_tiers("holdem")',
         'registry.default_match_config("gomoku")',
         '("holdem","gomoku","pencil")',
         '["gomoku","holdem"]',            # 乱序 2-game 子集

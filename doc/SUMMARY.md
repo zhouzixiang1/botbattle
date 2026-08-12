@@ -23,7 +23,7 @@
 | #7 | 用户主页完善 + 全局搜索 |
 | #8 | 站内通知 + 邮件提醒 |
 | #9 | 关注用户 + 收藏 Bot |
-| #10 | 段位称号 + 排名变化趋势 |
+| #10 | Bot 评分变化趋势 |
 | #11 | 赛事对阵图 + 显示 Bot 名 |
 | #12 | 对局评论 + 点赞 + 浏览 + 点赞榜 |
 | #13 | 个人设置中心 + MyBots 管理增强 |
@@ -37,7 +37,7 @@
 | #16 (F1) | 地基：shadcn/ui + OKLCH 双主题 token + 暗色骨架 + lucide + `@/`别名 |
 | #17 (F2) | 共享 UI 原语库（26 shadcn 组件） |
 | #18 (F3) | 全局 Shell + 导航 + 移动端抽屉 + Cmd+K 搜索 |
-| #19 (F4) | 核心页（首页/排行榜/Bot详情/用户主页/搜索）+ tiers 清理紫色 |
+| #19 (F4) | 核心页（首页/排行榜/Bot详情/用户主页/搜索）视觉统一 |
 | #20 (F5) | 对局回放 + 赛事 + 实时观赛（emoji→lucide） |
 | #21 (F6) | 账号/管理页 + emoji 全清零 |
 | #22 (F7) | 代码分割(主包-62%) + 暗色全覆盖 + 响应式 + a11y |
@@ -69,15 +69,15 @@
 
 | 指标 | 数值 |
 |------|------|
-| 后端代码 | `bzplat/backend` 当前 70 个非测试 `.py`（含 `games/`，以 `rg --files` 为准） |
+| 后端代码 | `bzplat/backend` 的非测试 `.py` 持续演进；精确数量以目标提交 `rg --files` 重新盘点为准 |
 | API 路由 | REST + SSE + WebSocket；精确数量以目标提交的自动化盘点为准 |
-| 数据库表 | **31** 张 + **38** 个具名索引（全新初始化结果；含系统 auto-match 每日 claim；per-game 表/索引由 `_migrate` 模板补齐） |
+| 数据库表 | SQLite 业务表 + per-game 对局表 + 通用 `execution_jobs/execution_job_attempts/execution_control`；自动排位只保留 decision/fair-state/auto 专属服务计数并映射通用 job，不再有独立 queue/control/lease；评分使用 immutable policy/settlement/sequence/projection state；具体数量由当前 schema 回归断言 |
 | 游戏架构 | `games/` 注册表 + 3 自包含子包（shim 已删，真实现全在 games/） |
 | 前端组件 | 26 个 shadcn 共享原语 |
 | 前端页面 | 顶层业务页面均 lazy 分包；精确数量以目标提交的路由盘点为准 |
 | 自动化测试 | 后端 pytest + Playwright；最终数量以目标提交重新收集为准 |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
-| 浏览器验收 | Playwright **4 个 spec / 50 条**；当前目标提交的完整执行结果以 `TESTING.md` 为准；隔离 QA 由代码禁用 auto-match，生产 profile/并发契约不变；另有 browser/screenshot 辅助脚本 |
+| 浏览器验收 | 当前目标提交的完整执行结果以 `TESTING.md` 为准；隔离 QA 能力门强制禁用自动 producer，生产唯一开关为 `execution_control.auto_enabled`；全来源队列另有专门 Playwright spec，但目标 HEAD 尚须完整执行 |
 | 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
@@ -91,9 +91,9 @@
 | 协议 JSON Schema | ✅ | `contracts/` |
 | 三游戏样例 Bot | ✅ C / Python 均与唯一现行协议绑定 | `samples/` |
 | 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
-| 隔离 API / 冒烟 | ✅ 当前目标提交 API 50 passed / 0 failed、`e2e_smoke.sh` ALL PASSED | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
+| 隔离 API / 冒烟 | ⚠️ `api_full_test.py` 与 `e2e_smoke.sh` 已适配 202 request + `public_id` polling；取消/重试由 API/队列测试覆盖。两者仍须在目标 HEAD 的隔离运行栈重新取证，历史基线不算最终结果 | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
-| 浏览器验收 | ✅ 中性结果、Pencil 响应式仪表盘与排行榜重构整合后的同一最终代码 HEAD 静态收集 5 spec / 53 条并完整通过 53/53；隔离 worktree 运行产物下无非预期日志 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
+| 浏览器验收 | ⚠️ 历史 UI 基线通过；全局执行队列已新增 spec，但目标 HEAD 的静态收集、完整矩阵、Console/Network/日志尚待执行，不沿用 5 spec / 53 条旧数字 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |
 
 ## 5. 经验教训
@@ -112,7 +112,7 @@
 ### 6.1 已知遗留
 | 项 | 影响 | 建议 |
 |----|------|------|
-| auto-match scheduler 时序 | 压测环境后台触发受 idle 窗口影响 | 验收模式未触发时硬失败；仅显式诊断参数可降级为 warning，且不得作为验收证据 |
+| 全局执行队列升级门禁 | 新旧 active 状态、Docker namespace 与评分投影若未收敛会阻止安全派发 | 隔离 QA 禁用自动 producer；升级时确认旧 worker/容器已停，处理 `manual:` pause，并对 `legacy-unverified` 执行离线 rating rebuild；完整 pytest/build/Playwright 后才能上线 |
 | 多 worker 限流 | 内存限流单进程有效 | 多 worker 部署需换 Redis 共享限流状态 |
 | `.env` 敏感信息 | SMTP 明文密码已提交历史 | 建议轮换凭据 + `git filter-branch` 清理历史 + 确认 `.gitignore` |
 

@@ -9,8 +9,11 @@ import {
   CommandItem,
   CommandList,
 } from '@/components/ui/command'
+import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { apiGet } from '@/api'
 import { gameLabel } from '@/games'
+import { matchParticipantSearchText, type MatchParticipantSource } from '@/lib/match-participants'
+import { cn } from '@/lib/utils'
 
 interface SearchUser {
   id: number
@@ -23,14 +26,11 @@ interface SearchBot {
   game_id: string
   owner_name?: string
 }
-interface SearchMatch {
+interface SearchMatch extends MatchParticipantSource {
   id: string
   game_id: string
+  match_type?: string
   winner_bot_id?: number
-  bot_a_name?: string
-  bot_b_name?: string
-  bot_a_display?: string
-  bot_b_display?: string
 }
 
 /**
@@ -44,10 +44,13 @@ interface SearchMatch {
 export function GlobalSearch({
   compact = false,
   hotkey = false,
+  touchTarget = false,
 }: {
   compact?: boolean
   /** AppShell 只给一个常驻实例注册快捷键，避免多个响应式入口同时打开重叠弹窗。 */
   hotkey?: boolean
+  /** 移动 Shell 中保证触控区不小于 44px，不改变桌面侧栏密度。 */
+  touchTarget?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [q, setQ] = useState('')
@@ -118,10 +121,16 @@ export function GlobalSearch({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="inline-flex h-9 w-full items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-accent"
+          className={cn(
+            'inline-flex h-[var(--control-height)] w-full min-w-0 touch-manipulation items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none',
+            touchTarget && 'min-h-11',
+          )}
           aria-label="搜索"
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-keyshortcuts="Control+K Meta+K"
         >
-          <Search className="size-4 shrink-0" />
+          <Search aria-hidden="true" className="size-4 shrink-0" />
           <span className="truncate">搜索 Bot、用户、对局…</span>
         </button>
       ) : (
@@ -129,19 +138,31 @@ export function GlobalSearch({
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground md:hidden"
+            className={cn(
+              'inline-flex size-[var(--control-height)] shrink-0 touch-manipulation items-center justify-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none md:hidden',
+              touchTarget && 'min-h-11 min-w-11',
+            )}
             aria-label="搜索"
+            aria-haspopup="dialog"
+            aria-expanded={open}
+            aria-keyshortcuts="Control+K Meta+K"
           >
-            <Search className="size-[1.15rem]" />
+            <Search aria-hidden="true" className="size-[1.15rem]" />
           </button>
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="hidden h-9 items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-accent md:inline-flex"
+            className={cn(
+              'hidden h-[var(--control-height)] max-w-full min-w-0 touch-manipulation items-center gap-2 rounded-lg border border-input bg-background px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none md:inline-flex',
+              touchTarget && 'min-h-11',
+            )}
+            aria-haspopup="dialog"
+            aria-expanded={open}
+            aria-keyshortcuts="Control+K Meta+K"
           >
-            <Search className="size-4" />
-            <span>搜索 Bot、用户、对局…</span>
-            <kbd className="ml-4 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+            <Search aria-hidden="true" className="size-4 shrink-0" />
+            <span className="truncate">搜索 Bot、用户、对局…</span>
+            <kbd aria-hidden="true" className="ml-2 shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium">
               ⌘K
             </kbd>
           </button>
@@ -155,9 +176,9 @@ export function GlobalSearch({
             <CommandGroup heading="用户">
               {users.slice(0, 6).map((u) => (
                 <CommandItem key={`u${u.id}`} value={`user ${u.username} ${u.display_name ?? ''}`} onSelect={() => go(`/user/${encodeURIComponent(u.username)}`)}>
-                  <User className="size-4 text-muted-foreground" />
-                  <span>{u.display_name || u.username}</span>
-                  {u.display_name && <span className="text-xs text-muted-foreground">@{u.username}</span>}
+                  <User aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{u.display_name || u.username}</span>
+                  {u.display_name && <span className="truncate text-xs text-muted-foreground">@{u.username}</span>}
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -166,9 +187,9 @@ export function GlobalSearch({
             <CommandGroup heading="Bot">
               {bots.slice(0, 6).map((b) => (
                 <CommandItem key={`b${b.id}`} value={`bot ${b.name} ${b.owner_name ?? ''}`} onSelect={() => go(`/bot/${b.id}`)}>
-                  <Bot className="size-4 text-muted-foreground" />
-                  <span>{b.name}</span>
-                  <span className="text-xs text-muted-foreground">{gameLabel(b.game_id)}</span>
+                  <Bot aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{b.name}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{gameLabel(b.game_id)}</span>
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -178,12 +199,18 @@ export function GlobalSearch({
               {matches.slice(0, 6).map((m) => (
                 <CommandItem
                   key={`m${m.id}`}
-                  value={`match ${m.id} ${m.bot_a_name ?? ''} ${m.bot_b_name ?? ''} ${m.bot_a_display ?? ''} ${m.bot_b_display ?? ''}`}
+                  value={`match ${m.id} ${matchParticipantSearchText(m)}`}
                   onSelect={() => go(`/match/${m.id}`)}
+                  className="items-start"
                 >
-                  <Swords className="size-4 text-muted-foreground" />
-                  <span className="font-mono text-xs">{m.id.slice(0, 8)}</span>
-                  <span className="text-xs text-muted-foreground">{gameLabel(m.game_id)}</span>
+                  <Swords aria-hidden="true" className="mt-1 size-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <MatchParticipants source={m} links={false} className="gap-1" />
+                    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                      <span>{gameLabel(m.game_id)}</span>
+                      <MatchNatureBadge matchType={m.match_type} source={m} />
+                    </div>
+                  </div>
                 </CommandItem>
               ))}
             </CommandGroup>

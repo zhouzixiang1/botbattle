@@ -20,10 +20,8 @@ from bzplat.backend.contests.templates import (
     resolve_template,
 )
 from bzplat.backend.contests.showcase import is_showcase, require_mutable
-from bzplat.backend.matches.orchestrator import (
-    MatchOrchestrator,
-    require_binary_file_integrity,
-)
+from bzplat.backend.matches.orchestrator import MatchOrchestrator
+from bzplat.backend.runtime.binary_integrity import require_binary_file_integrity
 from bzplat.backend.matches.result_contract import build_result_payload
 from bzplat.backend.games import normalize_game_id, registry as game_registry
 from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
@@ -586,7 +584,11 @@ class ContestManager:
             )
 
     def _bot_unavailable_reason(
-        self, bot_id: int | None, *, expected_game: str
+        self,
+        bot_id: int | None,
+        *,
+        expected_game: str,
+        version_id: int | None = None,
     ) -> str | None:
         """返回赛事 Bot 不可用原因；可用时返回 None。
 
@@ -608,6 +610,28 @@ class ContestManager:
             return str(exc)
         if bot_game != expected_game:
             return f"Bot #{bot_id} 游戏为 {bot_game}，赛事游戏为 {expected_game}"
+        version = (
+            self.store.get_bot_version(int(version_id))
+            if version_id is not None
+            else self.store.get_current_bot_version(bot_id)
+        )
+        if version_id is not None and (
+            version is None or int(version.get("bot_id") or 0) != int(bot_id)
+        ):
+            return f"Bot #{bot_id} 冻结版本不可用"
+        runtime = version or bot
+        try:
+            require_supported_binary_metadata(
+                str(runtime.get("format") or ""),
+                str(runtime.get("os") or ""),
+                str(runtime.get("arch") or ""),
+            )
+            path = str(runtime.get("binary_path") or "").strip()
+            if not path:
+                raise ValueError("version_unavailable")
+            require_binary_file_integrity(runtime, path)
+        except (OSError, TypeError, ValueError):
+            return f"Bot #{bot_id} 冻结版本文件不可用"
         return None
 
     def _validate_initial_roster(self, contest: dict, entries: list[dict]) -> None:
@@ -1290,10 +1314,14 @@ class ContestManager:
         任何可用于积分/晋级的裁决信息。
         """
         reason_a = self._bot_unavailable_reason(
-            pairing.get("bot_a_id"), expected_game=gid
+            pairing.get("bot_a_id"),
+            expected_game=gid,
+            version_id=pairing.get("bot_a_version_id"),
         )
         reason_b = self._bot_unavailable_reason(
-            pairing.get("bot_b_id"), expected_game=gid
+            pairing.get("bot_b_id"),
+            expected_game=gid,
+            version_id=pairing.get("bot_b_version_id"),
         )
         if reason_a is None and reason_b is None:
             return "ready"
@@ -1365,6 +1393,10 @@ class ContestManager:
         Legacy test doubles predate admission control; ``None`` preserves their
         synchronous contract without weakening the production orchestrator.
         """
+        # Queue-aware orchestrators persist every due pairing without creating
+        # a match.  Global capacity/contest share is enforced later by claim.
+        if callable(getattr(self.orch, "start_execution_job", None)):
+            return None
         capacity_fn = getattr(self.orch, "available_bot_slots", None)
         if not callable(capacity_fn):
             return None
@@ -1476,6 +1508,27 @@ class ContestManager:
         MatchOrchestrator 的真实实现支持 defer/start/discard。少量只用于单元测试的
         legacy fake 没有显式 start/discard 方法时，仍沿用其 challenge 即启动契约。
         """
+        if callable(getattr(self.orch, "start_execution_job", None)):
+            common = {
+                "owner_user_id": contest["organizer_id"],
+                "match_type": TYPE_CONTEST,
+                "contest_id": contest["id"],
+                "contest_pairing_id": pairing["id"],
+                "game_id": gid,
+                "bot_a_version_id": pairing.get("bot_a_version_id"),
+                "bot_b_version_id": pairing.get("bot_b_version_id"),
+            }
+            if want_duplicate:
+                return await self.orch.challenge_duplicate(
+                    pairing["bot_a_id"],
+                    pairing["bot_b_id"],
+                    duplicate_seed=int(pairing["id"]) * 7919 + 1,
+                    **common,
+                )
+            return await self.orch.challenge(
+                pairing["bot_a_id"], pairing["bot_b_id"], **common
+            )
+
         common = {
             "owner_user_id": contest["organizer_id"],
             "match_type": TYPE_CONTEST,
@@ -1563,6 +1616,8 @@ class ContestManager:
                 raise ValueError("已完成或已有正式赛果的赛事不能删除")
             if contest["status"] in (CONTEST_RUNNING, CONTEST_REST):
                 raise ValueError("运行中或休息期赛事不能删除，请先完成或中止在途对局")
+            if self.store.executions.contest_has_active_jobs(contest_id):
+                raise ValueError("赛事仍有排队或执行中的请求，不能删除")
             if self.store.contest_has_active_matches(contest_id):
                 raise ValueError("赛事仍有 pending/running 对局，不能删除")
             if contest["status"] == CONTEST_PUBLISHED:
@@ -1857,6 +1912,30 @@ class ContestManager:
                         retry_aborted
                         and contest.get("status") == CONTEST_RUNNING
                     ):
+                        # The queue keeps a terminal match's job in ``settling``
+                        # until exact sandbox cleanup is confirmed.  Enqueue is
+                        # idempotent for an active contest_pairing_id, so trying
+                        # to redispatch before finalization merely returns the old
+                        # job and makes "immediate" admin redispatch a no-op.
+                        # Finalize after the orchestrator's cleanup barrier, then
+                        # verify this specific job no longer occupies the pairing.
+                        old_execution = self.store.executions.get_by_match(match_id)
+                        self.store.executions.finalize_ready()
+                        if old_execution is not None:
+                            latest_execution = self.store.executions.get(
+                                str(old_execution["public_id"])
+                            )
+                            if latest_execution and latest_execution.get("status") in {
+                                "queued", "starting", "running", "settling"
+                            }:
+                                logger.warning(
+                                    "contest admin abort awaits execution cleanup: "
+                                    "contest=%s pairing=%s request=%s",
+                                    contest_id,
+                                    pairing["id"],
+                                    old_execution["public_id"],
+                                )
+                                return self.store.get_contest(contest_id)
                         await self._dispatch_pending_locked(
                             contest_id, int(pairing.get("stage_idx") or 0)
                         )
