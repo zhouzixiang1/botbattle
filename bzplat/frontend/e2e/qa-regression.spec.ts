@@ -1473,7 +1473,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
   const overview = page.getByTestId('holdem-position-overview')
   const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
   const timeline = page.getByTestId('match-timeline')
-  await page.getByRole('button', { name: /跳到结局/ }).click()
+  await page.getByRole('button', { name: /直接查看最终结果/ }).click()
   // 回退到终局前的 settle：座位状态必须是本手结果，
   // 不能在赢家卡上写“等待行动”。fold 瞬时帧则必须等待结算。
   await page.getByRole('button', { name: '上一个事件', exact: true }).click()
@@ -1623,7 +1623,7 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
 
   await page.setViewportSize({ width: 1920, height: 1080 })
   await page.goto(`/#/match/${matchId}`)
-  await page.getByRole('button', { name: /跳到结局/ }).click()
+  await page.getByRole('button', { name: /直接查看最终结果/ }).click()
   const overview = page.getByTestId('holdem-position-overview')
   await expect(page.getByText('复式赛按分局计分', { exact: true })).toBeVisible()
   await expect(page.getByText('第 140/140 手', { exact: true })).toBeVisible()
@@ -2005,7 +2005,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   })).toBe(true)
   await expect(page.getByText('已完成', { exact: true })).toBeVisible()
   await expect(page.getByText('事件 5/9', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: /已结束 · 剩余 4 个事件 · 跳到结局/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /直接查看最终结果，跳过剩余 4 个回放事件/ })).toBeVisible()
   await page.waitForTimeout(850)
   await expect(page.getByText('事件 5/9', { exact: true })).toBeVisible()
 
@@ -2016,15 +2016,15 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible({ timeout: 2_500 })
   await expect(page.getByText('第 2/70 手', { exact: true })).toBeVisible()
 
-  // 终态到尾后可从事件 1 重播，也可显式跳到结局；两者都不隐式跳转。
+  // 终态到尾后可从事件 1 重播，也可直接查看最终结果；两者都不隐式跳转。
   await page.getByRole('button', { name: '从头重播', exact: true }).click()
   await expect(page.getByText('事件 1/9', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '暂停回放', exact: true }).click()
-  await page.getByRole('button', { name: /已结束 · 剩余 8 个事件 · 跳到结局/ }).click()
+  await page.getByRole('button', { name: /直接查看最终结果，跳过剩余 8 个回放事件/ }).click()
   await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '上一个事件', exact: true }).click()
   await expect(page.getByText('事件 8/9', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: /已结束 · 剩余 1 个事件 · 跳到结局/ }).click()
+  await page.getByRole('button', { name: /直接查看最终结果，跳过剩余 1 个回放事件/ }).click()
   await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible()
 
   const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
@@ -3206,7 +3206,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
   await expect(canvas).toBeVisible()
   await expect(timeline).toBeVisible()
   await expect(overview).toBeVisible()
-  await page.getByRole('button', { name: /跳到结局/ }).click()
+  await page.getByRole('button', { name: /直接查看最终结果/ }).click()
 
   await expect(overview).toContainText('54/60')
   await expect(overview).toContainText('6')
@@ -3631,7 +3631,7 @@ test('Pencil replay reconstructs the judge score for an illegal terminal', async
   })
   await page.setViewportSize({ width: 1600, height: 900 })
   await page.goto(`/#/match/${matchId}`)
-  await page.getByRole('button', { name: /跳到结局/ }).click()
+  await page.getByRole('button', { name: /直接查看最终结果/ }).click()
   const overview = page.getByTestId('pencil-position-overview')
   await expect(overview).toContainText('0/25')
   await expect(overview).toContainText('25')

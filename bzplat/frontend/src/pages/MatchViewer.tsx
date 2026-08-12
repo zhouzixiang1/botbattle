@@ -2,7 +2,7 @@
  * 统一对局页（实时观赛 + 历史回放合一）。路由 /match/:id 唯一页。
  *
  * - running/pending → 直播模式：开 SSE，从事件 1 按回放速度推进（DVR 模型），
- *   新事件先进入缓冲、显示「落后 N 个事件」、可「跳到最新」；match_end 到达后
+ *   新事件先进入缓冲；用户可返回实时画面或直接查看最终结果。match_end 到达后
  *   游标继续顺序补完（不强制跳结局）；已结束对局重开页同样自动从头播放。
  * - completed/aborted → 元数据先渲染，再按需加载结构化 replay events。
  * - 座位身份：从 match.bot_a/bot_b（后端 JOIN）构造 SeatInfo 传 canvas。
@@ -666,8 +666,14 @@ export default function MatchViewer() {
         })()}
         {progressText && <Badge variant="outline">{progressText}</Badge>}
         {lag > 0 && (
-          <Button variant="outline" size="sm" onClick={jumpToLive} className="gap-1">
-            <Radio className="size-3" />落后 {lag} 个事件 · 跳到最新
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={jumpToLive}
+            className="gap-1"
+            aria-label={`返回实时画面，当前落后 ${lag} 个回放事件`}
+          >
+            <Radio className="size-3" />返回实时画面
           </Button>
         )}
         {terminalBacklog > 0 && (
@@ -676,9 +682,10 @@ export default function MatchViewer() {
             size="sm"
             onClick={jumpToTerminal}
             className="h-auto max-w-full gap-1 whitespace-normal py-1.5 text-left"
+            aria-label={`直接查看最终结果，跳过剩余 ${terminalBacklog} 个回放事件`}
           >
             <SkipForward className="size-3 shrink-0" />
-            已结束 · 剩余 {terminalBacklog} 个事件 · 跳到结局
+            直接查看最终结果
           </Button>
         )}
       </div>
