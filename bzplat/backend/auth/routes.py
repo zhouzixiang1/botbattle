@@ -224,7 +224,7 @@ async def login(req: LoginReq, request: Request, response: Response) -> dict:
         audit_log(request, "login", result="fail", target=req.username, detail="captcha_failed")
         raise
     auth: AuthManager = request.app.state.auth
-    # 经 nginx/frp 代理后用 X-Forwarded-For 取真实 IP（trust_proxy 已在 RateLimitMiddleware 读取）
+    # 只有命中 trusted-proxy CIDR 的原始 socket peer 才可提交代理身份头。
     from bzplat.backend.security import _env_int
     ip = client_ip(
         request,

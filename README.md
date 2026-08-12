@@ -68,7 +68,8 @@ botzone create-admin alice alice@example.com 'password123'
 
 浏览器打开 <http://127.0.0.1:50380/>。样例构建、隔离冒烟和真浏览器回归命令统一见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md)。
 
-> 改完代码必须 `bash scripts/rebuild.sh`（build + restart）才生效。
+> `platform-ctl.sh` 会优先管理工作目录匹配的已安装 user-systemd unit，否则使用 PID 文件模式；两种模式都检查健康状态并拒绝在已有监听端口上启动第二个进程。改完代码必须 `bash scripts/rebuild.sh`（build + 安全 restart）才生效。
+> 需要 `192.168.1.0/24` 直连时，先按[安全文档](doc/SECURITY.md#受控-lan-直连)限制主机防火墙，再显式开启 LAN bind；直连客户端网段不能加入 trusted-proxy CIDR。
 
 ## 文档
 

@@ -2,7 +2,7 @@
 
 覆盖公网暴露加固（PR feat/security-logging）：
 - logging_config 三 handler（app/access/audit 独立文件 + propagate 隔离）。
-- AccessLogMiddleware 记真实 IP（trust_proxy 开启时读 X-Forwarded-For）。
+- AccessLogMiddleware 只接受受信 socket peer 提供的代理身份头。
 - audit_log 辅助函数格式（ip/action/result/user/target/detail）+ result=fail 升 WARNING。
 - admin_logs file 参数（app/access/audit 三文件白名单、响应不泄漏绝对路径）。
 - admin_logs 按结构化记录过滤，多行 ERROR 保留 traceback 与对局上下文。
@@ -19,6 +19,7 @@ import pytest
 from fastapi import FastAPI, File, UploadFile
 from fastapi.testclient import TestClient
 
+from bzplat.backend import security as security_module
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.logging_config import (
     ACCESS_LOGGER,
@@ -35,6 +36,8 @@ from bzplat.backend.security import (
     audit_log,
     client_ip,
     normalize_public_origin,
+    trusted_proxy_networks,
+    validate_server_bind,
     websocket_origin_allowed,
 )
 
@@ -59,6 +62,17 @@ def test_public_origin_normalization_and_exact_websocket_match():
     )
     assert not websocket_origin_allowed(
         "https://other.example", public_origin="https://example.com"
+    )
+
+
+def test_lan_http_origin_cannot_replace_public_https_websocket_origin():
+    """LAN HTTP may serve pages/REST, but cookie-only human WS stays HTTPS-only."""
+    public_origin = "https://bot.tydfxt.top"
+
+    assert websocket_origin_allowed(public_origin, public_origin=public_origin)
+    assert not websocket_origin_allowed(
+        "http://192.168.1.13:50380",
+        public_origin=public_origin,
     )
 
 
@@ -219,6 +233,96 @@ def test_client_ip_trust_proxy_prefers_real_ip():
 def test_client_ip_no_trust_proxy_uses_socket_peer():
     req = _FakeReq({"x-forwarded-for": "203.0.113.5"}, host="127.0.0.1")
     assert client_ip(req, trust_proxy=False) == "127.0.0.1"
+
+
+def test_client_ip_direct_lan_peer_cannot_spoof_proxy_headers():
+    """A direct LAN caller is not a proxy, even when global proxy mode is on."""
+    req = _FakeReq(
+        {
+            "x-real-ip": "198.51.100.7",
+            "x-forwarded-for": "203.0.113.5",
+        },
+        host="192.168.1.42",
+    )
+
+    assert client_ip(req, trust_proxy=True) == "192.168.1.42"
+
+
+def test_rate_limit_direct_lan_cannot_rotate_spoofed_proxy_headers(
+    monkeypatch,
+):
+    monkeypatch.setenv("BZ_TRUST_PROXY", "1")
+    monkeypatch.delenv("BZ_TRUSTED_PROXY_CIDRS", raising=False)
+    monkeypatch.setattr(security_module, "_API_DEFAULT", (1, 60))
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, enabled=True)
+
+    @app.get("/api/direct-lan-probe")
+    def direct_lan_probe():
+        return {"ok": True}
+
+    with TestClient(app, client=("192.168.1.42", 50000)) as client:
+        first = client.get(
+            "/api/direct-lan-probe",
+            headers={"X-Real-IP": "198.51.100.1"},
+        )
+        second = client.get(
+            "/api/direct-lan-probe",
+            headers={"X-Real-IP": "198.51.100.2"},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_client_ip_only_trusts_explicit_proxy_peer_cidrs():
+    req = _FakeReq({"x-real-ip": "198.51.100.7"}, host="10.20.30.40")
+
+    assert client_ip(
+        req,
+        trust_proxy=True,
+        trusted_proxy_cidrs=trusted_proxy_networks("10.20.30.40/32"),
+    ) == "198.51.100.7"
+    assert client_ip(
+        req,
+        trust_proxy=True,
+        trusted_proxy_cidrs=trusted_proxy_networks("10.20.30.41/32"),
+    ) == "10.20.30.40"
+
+
+def test_trusted_proxy_cidrs_default_loopback_and_invalid_config_fails(monkeypatch):
+    monkeypatch.delenv("BZ_TRUSTED_PROXY_CIDRS", raising=False)
+    assert {str(network) for network in trusted_proxy_networks()} == {
+        "127.0.0.1/32",
+        "::1/128",
+    }
+    with pytest.raises(ValueError, match="无效 CIDR"):
+        trusted_proxy_networks("127.0.0.1/32,not-a-network")
+    with pytest.raises(ValueError, match="无效 CIDR"):
+        trusted_proxy_networks("192.168.1.5/24")
+
+
+def test_client_ip_malformed_or_short_proxy_chain_falls_back_to_peer():
+    malformed = _FakeReq(
+        {"x-real-ip": "not-an-ip", "x-forwarded-for": "also-bad"}
+    )
+    malformed_authoritative = _FakeReq(
+        {"x-real-ip": "not-an-ip", "x-forwarded-for": "198.51.100.7"}
+    )
+    short_chain = _FakeReq({"x-forwarded-for": "203.0.113.5"})
+
+    assert client_ip(malformed, trust_proxy=True) == "127.0.0.1"
+    assert client_ip(malformed_authoritative, trust_proxy=True) == "127.0.0.1"
+    assert client_ip(short_chain, trust_proxy=True, hops=2) == "127.0.0.1"
+
+
+def test_server_bind_requires_explicit_gate_for_ipv4_wildcard():
+    assert validate_server_bind("127.0.0.1", allow_lan_bind=False) == "127.0.0.1"
+    assert validate_server_bind("0.0.0.0", allow_lan_bind=True) == "0.0.0.0"
+    with pytest.raises(ValueError, match="BZ_ALLOW_LAN_BIND=1"):
+        validate_server_bind("0.0.0.0", allow_lan_bind=False)
+    with pytest.raises(ValueError, match="不支持"):
+        validate_server_bind("192.168.1.10", allow_lan_bind=True)
 
 
 def test_client_ip_xff_spoofed_leftmost_ignored():

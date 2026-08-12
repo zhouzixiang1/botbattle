@@ -29,6 +29,7 @@ cd bzplat/frontend && npm install
 | 变量 | 说明 | 默认 |
 |------|------|------|
 | `BZ_HOST` / `BZ_PORT` | 绑定地址/端口 | 127.0.0.1 / 50380 |
+| `BZ_ALLOW_LAN_BIND` | 只有设为 `1` 才允许 `BZ_HOST=0.0.0.0`；此前必须把主机防火墙限制到受信 LAN | 0 |
 | `BZ_PUBLIC_ORIGIN` | 浏览器实际访问的唯一 HTTP(S) origin；人机 WS 严格校验，生产必配 | 未设（WS fail closed） |
 | `BZ_DB_PATH` | SQLite 路径 | botzone.db |
 | `BZ_INSTANCE_KEY` | Docker 清理 namespace；输入会归一化为小写，结果须为 1–48 位字母、数字、`.`、`_`、`-`，生产/每个 worktree 必须稳定且唯一 | 未设时由绝对 DB 路径 SHA-256 派生 |
@@ -38,7 +39,9 @@ cd bzplat/frontend && npm install
 | `BZ_API_TARGET` | Vite REST/SSE/WS 代理目标；50380 被硬拒绝 | 127.0.0.1:50381 |
 | `BZ_AVATAR_DIR` | 头像目录 | avatars |
 | `BZ_RATE_LIMIT` | 启用限流 | 1 |
-| `BZ_TRUST_PROXY` | 信任 X-Forwarded-For（反向代理部署时需开启，否则限流按代理 IP 失效） | 未设 |
+| `BZ_TRUST_PROXY` | 允许受信 socket peer 提供代理身份头（反向代理部署时开启） | 未设 |
+| `BZ_TRUSTED_PROXY_CIDRS` | 可提供 `X-Real-IP/XFF` 的 ASGI socket peer CIDR；生产显式设精确 loopback，不能填客户端 LAN | `127.0.0.1/32,::1/128` |
+| `BZ_TRUSTED_PROXY_HOPS` | XFF 中由受信 HTTP 代理写入的层数；frp TCP 透传不计一层 | 1 |
 | `BZ_LOG_LEVEL` / `BZ_LOG_DIR` | 日志级别 / 目录 | INFO / logs |
 | `SMTP_HOST/PORT/USER/PASSWORD/FROM` | SMTP（邮箱验证/重置/通知） | 未配则注册/重置返回 503 |
 | `SMTP_FROM_NAME` | 邮件显示的发件人名称 | Botbattle |
@@ -71,17 +74,30 @@ scripts/platform-ctl.sh start     # 或：botzone serve
 botzone create-admin <user> <email> '<pass>'   # 建管理员（跳过邮箱验证）
 ```
 
+`platform-ctl.sh` 只有一个控制入口，但支持两种互斥的托管方式：若 user systemd 已加载
+`botzone-platform.service`，且 unit 的 `WorkingDirectory` 解析后恰好等于当前 checkout，脚本把
+`start/stop/restart/status/logs` 全部委托给该 unit；否则才使用 `platform-ctl/web.pid`。不得同时手工
+启用两种方式。PID fallback 在启动前会确认目标端口无监听；没有自己的活动 PID 却发现监听、无法
+查询端口或停止后 PID/端口未释放时均 fail closed，不会再创建进程。两种方式的 start/restart 都在
+返回成功前等待 `/api/health`，默认就绪上限 60 秒；`0.0.0.0` 绑定仍从 `127.0.0.1` 探活。
+stop 最多等待 90 秒完成 lifespan 并释放端口。
+因此 `scripts/rebuild.sh` 可以复用同一入口，不会绕过 systemd 另起 `nohup` 进程。
+
 启动会先取得数据库邻接 dispatcher flock，并在共享 `<db>.docker-launch.lock` 内对**本 instance
 label namespace** 清理、连续确认容器/name/token 为零，同时闭合 create journal；只有随后完成 attempt
 补偿才进入 `running/accepting`。同一 host boot 的未确认 create 属于人工边界，即使瞬时双零也保持
 `manual:` paused；不要直接改数据库状态，须在管理端按恢复流程重新做精确清场。其他 Docker 控制结果
 不确定时会保持 `paused` 并有界退避，不得以进程/端口已出现代替管理端队列状态与日志检查。
 
-维护前先保存 PID，再停止并核对进程和端口。`platform-ctl.sh stop` 只发送 SIGTERM 并删除 PID 文件，
-打印 `stopped` 不表示 lifespan 清理已经完成：
+维护前先记录实际 PID，再通过统一脚本停止并核对进程和端口。systemd 模式从 unit 读取 MainPID；
+只有 PID fallback 才读取 `platform-ctl/web.pid`。脚本打印 `stopped` 时已确认 lifespan 进程退出且端口
+释放，但数据库/Docker 的业务状态仍须按下面清单复核：
 
 ```bash
-service_pid="$(cat platform-ctl/web.pid)"
+scripts/platform-ctl.sh status
+service_pid="$(systemctl --user show botzone-platform.service \
+  --property=MainPID --value 2>/dev/null || true)"
+[[ "$service_pid" =~ ^[1-9][0-9]*$ ]] || service_pid="$(cat platform-ctl/web.pid)"
 scripts/platform-ctl.sh stop
 ps -p "$service_pid" -o pid=,stat=,cmd=       # 应无输出
 ss -tlnp | grep ':50380'                      # 应无输出
@@ -93,6 +109,11 @@ docker --host unix:///var/run/docker.sock ps -a \
 label。若进程仍在、端口仍监听或本 namespace 容器仍存在，不得开始 DB 维护，也不得启动第二个
 进程；先查 `logs/web.log`/`logs/app.log`。强制崩溃后的残留由下一次启动精确清场与补偿，不能手工
 跨 namespace 批量删除。评分重建还有更严格的 DB No-Go，见 6.5。
+
+默认主库旁的 `botzone.db.execution-dispatcher.lock` 与 `botzone.db.docker-launch.lock` 是 flock
+协调 inode，不是可清理缓存：前者可能被运行中 dispatcher 长期持有，后者在 Docker create/cleanup
+窗口持有。运行中删除会让旧进程继续锁住已 unlink 的 inode，而新进程锁住同名新 inode，从而破坏
+互斥。仓库只精确忽略这两个默认文件名，不使用 `*.lock`；停服后它们也应保留，不能纳入缓存清理。
 
 ### 2.2 构建前端
 ```bash
@@ -217,19 +238,40 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 
 ### 6.1 systemd 部署
 `deploy/botzone-platform.service` 提供 systemd unit 模板。
+建议生产安装为当前服务用户的 user unit，并保持 linger，使登出后仍由 systemd 托管：
+
+```bash
+install -d -m 700 "$HOME/.config/systemd/user"
+install -m 600 deploy/botzone-platform.service \
+  "$HOME/.config/systemd/user/botzone-platform.service"
+systemctl --user daemon-reload
+systemctl --user enable --now botzone-platform.service
+sudo loginctl enable-linger "$USER"              # 管理员首次安装时执行一次
+loginctl show-user "$USER" -p Linger          # 应为 Linger=yes
+scripts/platform-ctl.sh status                # 应显示 running (user systemd)
+```
+
+首次切换前必须先用旧控制方式完整停服并确认 50380 已释放；不能让 systemd 与 PID fallback 同时启动。
+更新 unit 后先 `systemd-analyze --user verify`，再 `daemon-reload`。脚本只接管 `WorkingDirectory` 与
+当前 checkout 完全一致的 user unit，避免从 linked worktree 误重启 main；其他 unit 即使同名也不会
+被操作，其监听端口仍会触发 fallback 的 fail-closed 检查。
 systemd 模板使用 `UMask=0077`，`scripts/platform-ctl.sh` 也在创建 PID、日志、数据库关联
 产物前固定 `umask 077`；生产 `.env`、数据库与日志应为 `0600`，私有运行目录为 `0700`。
 头像是公开静态内容，权限可按静态服务器的只读需求单独配置，不能因此放宽其他运行目录。
-服务默认只绑定 `127.0.0.1`；生产不得为方便反代改回 `0.0.0.0`，应让本机 frp/nginx 连接
-回环端口，避免绕过代理头覆盖、限流、TLS 与无查询参数日志边界。`platform-ctl.sh` 会在创建
-PID/日志目录前拒绝非回环 `BZ_HOST`；systemd 模板则把 `127.0.0.1:50380` 直接写入
-`ExecStart`，不依赖 systemd 不支持的 shell `${VAR:-default}` 展开。
+服务默认只绑定 `127.0.0.1`，本机 frp/nginx 继续连接回环端口。确需让
+`192.168.1.0/24` 直连时，必须先按 [SECURITY.md](./SECURITY.md#受控-lan-直连)
+把主机防火墙的 50380 入站限制到该网段，再同时设置
+`BZ_HOST=0.0.0.0` 与 `BZ_ALLOW_LAN_BIND=1`。缺 gate、其他非回环地址或无效端口都会在创建
+PID/日志/数据库前拒绝；CLI 同样执行该门，不能通过直接 systemctl 绕过。systemd 模板不再硬编码
+host/port，而由 CLI 从 `EnvironmentFile` 读取并安全默认到 `127.0.0.1:50380`。更新模板后必须
+重新 `install`、`daemon-reload`，再由 `scripts/platform-ctl.sh restart` 做有界健康验证。
 
 ### 6.2 日志（三文件 + 启动日志）
 - `logs/app.log`：业务/系统日志（`logging_config.setup_logging`，格式 `时间 级别 [模块] 消息`）。排查执行队列/自动 producer、Docker cleanup/恢复、对局/Bot 崩溃和 WS 在此；Bot EOF 附 stderr 末尾。Uvicorn HTTP/WS record 在 handler 序列化前只保留 path，不记录 query。
 - `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时；middleware 使用 `request.url.path`，不含 query）。
 - `logs/audit.log`：安全审计（登录/注册/改密/上传/管理操作等）。
-- `logs/web.log`：uvicorn 启动 stdout；CLI 禁止 Uvicorn 默认日志配置覆盖平台 handler，因此同样不含请求 query。
+- `logs/web.log`：PID fallback 的 uvicorn 启动 stdout；systemd 模式通过 `scripts/platform-ctl.sh logs`
+  读取该 unit 的 journal。CLI 禁止 Uvicorn 默认日志配置覆盖平台 handler，因此两者同样不含请求 query。
 - **admin「日志」Tab**：`GET /api/admin/logs?file={app|access|audit}`（文件参数白名单）。详见 [SECURITY.md](./SECURITY.md)。
 
 上游 nginx 是独立日志边界：其 `access_log` 必须用 `$request_method`、`$uri`、

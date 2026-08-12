@@ -52,6 +52,10 @@ data/
 *.db
 *.db-journal
 *.pid
+# Default production DB-adjacent flock inodes.  These names are intentionally
+# exact: a running process may hold either inode, so never delete them as cache.
+/botzone.db.docker-launch.lock
+/botzone.db.execution-dispatcher.lock
 bot_uploads/
 bot_uploads_showcase/
 avatars/

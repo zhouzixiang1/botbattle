@@ -39,6 +39,12 @@ def serve(
 
     host = host or os.environ.get("BZ_HOST", "127.0.0.1")
     port = port or int(os.environ.get("BZ_PORT", "50380"))
+    from bzplat.backend.security import validate_server_bind
+
+    try:
+        host = validate_server_bind(host)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     # QA 模式必须在任何日志 handler、数据库连接或运行时目录创建之前
     # 一次性验证全部写目标。普通 main 服务仍可按约定绑定 50380。
@@ -83,6 +89,9 @@ def serve(
         host=host,
         port=port,
         reload=reload,
+        # The application validates proxy headers against the original ASGI
+        # socket peer. Never let Uvicorn rewrite scope['client'] first.
+        proxy_headers=False,
         log_level="info",
         # setup_logging() owns Uvicorn's handlers and request-target filter.
         # Reapplying Uvicorn's default config here would bypass both and write

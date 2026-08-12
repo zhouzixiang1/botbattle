@@ -313,6 +313,62 @@ def test_skip_captcha_allows_login_with_any_answer(tmp_path, monkeypatch):
     assert "SameSite=lax" in session_cookie
 
 
+def test_lan_http_client_can_use_bearer_rest_while_cookie_stays_secure(
+    tmp_path,
+    monkeypatch,
+):
+    """LAN HTTP REST uses the explicit bearer; it must not weaken the session cookie."""
+    from fastapi.testclient import TestClient
+
+    from bzplat.backend.crypto import hash_password
+    from bzplat.backend.main import create_app
+
+    db_path = str(tmp_path / "lan-bearer.db")
+    monkeypatch.setenv("BZ_DB_PATH", db_path)
+    monkeypatch.setenv("BZ_SKIP_CAPTCHA", "1")
+    monkeypatch.setenv("BZ_SECURE_COOKIE", "1")
+    monkeypatch.setenv("BZ_TRUST_PROXY", "1")
+
+    store = Store(db_path)
+    user = store.create_user(
+        "lanuser",
+        "lan@example.com",
+        hash_password("pw123456"),
+    )
+    store.update_user(user["id"], email_verified=1)
+    store.close()
+
+    app = create_app()
+    with TestClient(
+        app,
+        base_url="http://192.168.1.13:50380",
+        client=("192.168.1.42", 50000),
+    ) as client:
+        login = client.post(
+            "/api/auth/login",
+            json={
+                "username": "lanuser",
+                "password": "pw123456",
+                "captcha_id": "skipped",
+                "captcha_answer": "skipped",
+            },
+        )
+        assert login.status_code == 200, login.text
+        assert "Secure" in login.headers["set-cookie"]
+        token = login.json()["token"]
+
+        client.cookies.clear()
+        anonymous = client.get("/api/auth/me")
+        bearer = client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert anonymous.status_code == 401
+    assert bearer.status_code == 200
+    assert bearer.json()["user"]["username"] == "lanuser"
+
+
 def test_skip_captcha_off_still_validates(tmp_path, monkeypatch):
     """默认（BZ_SKIP_CAPTCHA 未开）时，错误验证码仍被拒——守护开关不误开。"""
     client, username, password = _make_test_app(tmp_path, monkeypatch, skip_captcha=False)
