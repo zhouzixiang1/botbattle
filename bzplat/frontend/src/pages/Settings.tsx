@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { CheckCircle2, MailCheck, Settings2, Star, UserRound } from 'lucide-react'
+import { CheckCircle2, Settings2, Star } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,11 +13,10 @@ import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Switch } from '@/components/ui/switch'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
-import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
+import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { apiGet, apiJson, errMsg } from '@/api'
 import { gameLabel } from '@/lib/games'
 import { fmtRating } from '@/lib/format'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface Prefs {
   email_match_done: boolean
@@ -285,6 +284,7 @@ export default function Settings() {
 
   // 后端覆盖头像时文件名不变（<uid>.<ext>），加 cache-buster 防浏览器显示旧图。
   const avatarUrl = user.avatar ? `/avatars/${user.avatar}?v=${avatarVer}` : ''
+  const roleLabel = user.role === 'admin' ? '管理员' : user.role === 'organizer' ? '组织者' : '玩家'
 
   return (
     <PageFrame width="default" layout="account-settings">
@@ -294,13 +294,6 @@ export default function Settings() {
         description="管理公开资料、实名信息、密码、邮件提醒与收藏。"
         actions={<Button asChild variant="outline" size="sm"><Link to={`/user/${encodeURIComponent(user.username)}`}>查看个人主页</Link></Button>}
       />
-
-      <SummaryStrip columns={4}>
-        <SummaryMetric label="账号" value={user.username} detail={user.display_name || '未设置显示名'} mono={false} icon={<UserRound className="size-4" />} />
-        <SummaryMetric label="邮箱" value={<Identifier className="text-sm text-foreground">{user.email}</Identifier>} detail={user.email_verified ? '已验证' : '待验证'} mono={false} icon={<MailCheck className="size-4" />} />
-        <SummaryMetric label="角色" value={user.role === 'admin' ? '管理员' : user.role === 'organizer' ? '组织者' : '玩家'} detail="当前账号权限" mono={false} />
-        <SummaryMetric label="等级" value={`Lv.${user.level ?? 0}`} detail={`经验 ${user.xp ?? 0}`} />
-      </SummaryStrip>
 
       <Tabs
         value={tab}
@@ -346,6 +339,24 @@ export default function Settings() {
                   </label>
                 </div>
                 <p className="text-xs text-muted-foreground">png/jpeg/webp/gif，≤2MB</p>
+                <dl className="space-y-2 border-t pt-3 text-xs">
+                  <div className="min-w-0">
+                    <dt className="text-muted-foreground">账号</dt>
+                    <dd className="mt-0.5 min-w-0 font-medium text-foreground"><OverflowText tooltip={user.username}>@{user.username}</OverflowText></dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-muted-foreground">邮箱</dt>
+                    <dd className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5 font-medium text-foreground">
+                      <OverflowText tooltip={user.email} className="min-w-0">{user.email}</OverflowText>
+                      <Badge variant={user.email_verified ? 'secondary' : 'outline'}>{user.email_verified ? '已验证' : '待验证'}</Badge>
+                    </dd>
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2 text-muted-foreground">
+                    <span>{roleLabel}</span>
+                    <span>Lv.{user.level ?? 0}</span>
+                    <span>{user.xp ?? 0} 经验</span>
+                  </div>
+                </dl>
               </div>
               <div className="min-w-0 space-y-4">
                 <div className="grid min-w-0 gap-3 sm:grid-cols-2">

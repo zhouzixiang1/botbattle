@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Laptop, Moon, Sun } from 'lucide-react'
 import { useTheme } from 'next-themes'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 const ORDER = ['light', 'dark', 'system'] as const
@@ -28,22 +29,26 @@ export function ThemeToggle({ className }: { className?: string }) {
   const Icon = current === 'light' ? Sun : current === 'dark' ? Moon : Laptop
 
   return (
-    <button
-      type="button"
-      aria-label={`当前：${LABELS[current]}（点击切换到${LABELS[next]}）`}
-      title={`${LABELS[current]}（点击切换）`}
-      onClick={() => setTheme(next)}
-      className={cn(
-        'relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-        className
-      )}
-    >
-      {/* mount 前用占位，避免服务端/客户端图标不一致；mount 后按当前主题渲染 */}
-      {mounted ? (
-        <Icon className="size-[1.15rem]" />
-      ) : (
-        <span className="size-[1.15rem]" />
-      )}
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={`当前：${LABELS[current]}（点击切换到${LABELS[next]}）`}
+          onClick={() => setTheme(next)}
+          className={cn(
+            'relative inline-flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+            className
+          )}
+        >
+          {/* mount 前用占位，避免服务端/客户端图标不一致；mount 后按当前主题渲染 */}
+          {mounted ? (
+            <Icon className="size-[1.15rem]" />
+          ) : (
+            <span className="size-[1.15rem]" />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{LABELS[current]}，点击切换到{LABELS[next]}</TooltipContent>
+    </Tooltip>
   )
 }

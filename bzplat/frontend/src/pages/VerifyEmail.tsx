@@ -62,7 +62,7 @@ export default function VerifyEmail() {
   }
 
   return (
-    <AuthShell layout="auth-verify-email" title="验证邮箱" subtitle="输入邮件验证码完成账号验证；未收到时可在下方重发">
+    <AuthShell layout="auth-verify-email" title="验证邮箱" subtitle="输入邮件验证码完成验证；没有收到时可以重新发送。">
       <Card density="compact" className="mx-auto w-full max-w-md">
         <CardContent>
           <form onSubmit={(e) => void onVerify(e)} className="space-y-4">

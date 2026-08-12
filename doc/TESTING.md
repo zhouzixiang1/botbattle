@@ -54,10 +54,11 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前静态有 7 个 spec（每个浏览器 70 条，三浏览器共 210 条）；旧主线 56 条基线不能外推，最终通过数必须以目标代码序列的实际运行证据回填：
+`bzplat/frontend/e2e/` 当前静态有 8 个 spec；每个浏览器及三浏览器总数必须以目标代码序列的 `playwright --list` 与实际运行证据回填，旧主线基线不能外推：
 
 | Spec | 重点 |
 |------|------|
+| `auth-visual.spec.ts` | 登录、注册、重置密码、邮箱验证在 Desktop/Mobile 共用单一品牌与居中标题/表单轴；登录页不重复品牌，顶栏显示与当前页面互补的登录/注册入口；移动操作尺寸、验证码等高、暗色表面和根级零横溢出均有真实 DOM 断言 |
 | `public-audit.spec.ts` | 公开深链、刷新/前进/后退、404 fallback、登录错误、Network 失败后的错误/空状态 |
 | `qa-regression.spec.ts` | 三 viewport 导航与单层页面 gutter、受保护页面访客门禁（不得先发无意义 401）、表单与超长文本/横向溢出边界（含 MyBots 320px 编辑态）、Windows PE 真实上传拒绝与历史不可运行 UI、赛事模板切换竞态与跨游戏提交闸门、挑战防重复提交、搜索、版本上传/回滚、MatchViewer metadata→replay 门控/单请求/失败保留元数据、活动对局零 replay 请求、SSE 首帧失败退出 loading、未知游戏零 replay 请求、冻结 `rated/rating_reason` 与 marker `rating_settled` 分离，覆盖“预计计分/待结算/已计分/已中止未计分”四态及同 owner 中性说明、私有 Bot debug 默认折叠/纯文本安全/4 KiB 长文本移动端不溢出/无权限不请求/跨路由迟到响应隔离/新路由权限详情未返回时旧面板同步消失，以及受控 SSE 直播从事件 1 顺播/持续高频推流不饿死游标/超过 4000 条无损重连/暂停与终局不跳/显式跳转、德州有首手才显示 X/70、canonical `match_end.deltas` 驱动 MatchViewer 与 HumanPlay、Holdem 盲注/底池/all-in raise-to reducer 契约、生产回放 `20260809205002-ede64ea8` 的 70 手真实结算与末手完整事件 HUD、多比例三列/横排/堆叠/折叠/sticky/零横溢出、复式 140 手/换座/leg 边界与真人 HUD 无底牌文本，Pencil 非法终局 2:0 归一、点格棋首次计时/首回合超时 UI 契约、Pencil 横纵边端点与 `2×cell` 格几何、线上 `(5,5)` 格心事故 fixture 零发送、`pass=1` 禁棋盘并只发 `(-1,-1)`、`move/pass/turn` 逐事件行动方与强制让行真值、方向键选择/坐标播报/Enter canonical 提交、同长度 snapshot scene 替换与倒计时重渲染不中断动画、320/390/844/1024/1312/1600/1920/2048/2560 多比例方形棋盘与滚动/时序协作、局面概览数值、Safari 截图同尺寸的 2048×1024/1152 Chromium 布局回归（观赛与真人完整棋盘、长时序独立滚动）、真实 Pencil 人机连续三条合法边（自动处理 Bot 成格让行）、未知游戏 fail-closed、棋类人类动作 canonical `response` 信封、人类 Holdem WebSocket、admin abort 回归 |
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |

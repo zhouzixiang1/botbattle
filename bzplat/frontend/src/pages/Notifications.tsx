@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Bell, Bug, Check, CheckCheck, Mail, MailOpen } from 'lucide-react'
+import { Bell, Bug, Check, CheckCheck, Mail } from 'lucide-react'
 
 import { apiGet, apiPost, errMsg } from '@/api'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import Pagination from '@/components/Pagination'
 import { useAuth } from '@/components/useAuth'
 import { Badge } from '@/components/ui/badge'
@@ -12,7 +12,6 @@ import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { fmtTime } from '@/lib/format'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface Notification {
   id: number
@@ -116,12 +115,6 @@ export default function Notifications() {
         actions={<><Button asChild variant="outline" size="sm"><Link to="/messages"><Mail className="size-4" />站内信</Link></Button><Button asChild variant="outline" size="sm"><Link to="/feedback"><Bug className="size-4" />反馈问题</Link></Button>{unread > 0 && <Button type="button" variant="outline" size="sm" onClick={readAll} disabled={markingAll} aria-busy={markingAll}><CheckCheck className="size-4" />{markingAll ? '处理中…' : '全部标记已读'}</Button>}</>}
       />
 
-      <SummaryStrip columns={3}>
-        <SummaryMetric label="未读" value={unread} detail="全部通知类型" icon={<Bell className="size-4" />} />
-        <SummaryMetric label="当前结果" value={total} detail={filter === 'unread' ? '仅未读通知' : '全部通知'} icon={<MailOpen className="size-4" />} />
-        <SummaryMetric label="本页" value={items.length} detail={`第 ${page} 页 · 每页 ${PER_PAGE} 条`} />
-      </SummaryStrip>
-
       <StickyToolbar label="通知筛选">
         <Tabs value={filter} onValueChange={(value) => changeFilter(value as 'all' | 'unread')} className="min-w-0">
           <TabsList>
@@ -134,7 +127,7 @@ export default function Notifications() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
-      <DataRegion title="消息列表" description={filter === 'unread' ? '仅显示仍需处理的通知' : '按时间倒序显示'}>
+      <DataRegion title={`消息列表 · 共 ${total} 条`} description={filter === 'unread' ? '仅显示仍需处理的通知' : '按时间倒序显示'}>
         {loadError ? (
           <ErrorMsg msg={loadError} className="px-4 py-5" />
         ) : loading ? (

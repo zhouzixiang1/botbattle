@@ -111,8 +111,8 @@ test('public deep links, refresh, back/forward, search, and fallback routes work
 
   await page.goto('/#/this-route-does-not-exist')
   await expect(page).toHaveURL(/\/#\/$/)
-  await expect(page.getByRole('heading', { name: 'Bot 对战中心', exact: true })).toBeVisible()
-  await expect(page.locator('main')).toContainText('上传 Linux x86_64 ELF Bot')
+  await expect(page.getByRole('heading', { name: 'Bot 对战', exact: true })).toBeVisible()
+  await expect(page.locator('main')).toContainText('上传 Bot，选择游戏和对手，开一场')
   expect(abortedDetailRequests.length).toBeLessThanOrEqual(3)
   await monitor.expectClean(abortedDetailRequests.map((errorText) => ({
     kind: 'requestfailed' as const,

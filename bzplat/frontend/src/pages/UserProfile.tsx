@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, Bot as BotIcon, Pencil, UserCheck, UserPlus, Users } from 'lucide-react'
+import { ArrowLeft, Bot as BotIcon, Pencil, UserCheck, UserPlus } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { apiGet, apiJson, errMsg } from '@/api'
-import { DataRegion, PageFrame, PageHeader, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader } from '@/components/layout'
 import Pagination from '@/components/Pagination'
 import { useAuth } from '@/components/useAuth'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -16,7 +16,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { fmtDate } from '@/lib/format'
 import { gameIcon, gameLabel } from '@/lib/games'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface UserProfileData {
   id: number
@@ -130,13 +129,12 @@ export default function UserProfile() {
     return (
       <PageFrame width="default" layout="public-user-profile-loading">
         <PageHeader title="用户资料" description="正在读取用户资料与公开 Bot。" />
-        <DataRegion title="用户概览" contentClassName="p-4">
+        <DataRegion title="用户资料" contentClassName="p-4">
           <div className="flex min-w-0 items-center gap-4">
             <Skeleton className="size-16 shrink-0 rounded-full" />
             <div className="min-w-0 flex-1 space-y-2"><Skeleton className="h-5 w-40 max-w-full" /><Skeleton className="h-4 w-28 max-w-full" /><Skeleton className="h-4 w-64 max-w-full" /></div>
           </div>
         </DataRegion>
-        <SummaryStrip columns={4}>{[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-14" />)}</SummaryStrip>
       </PageFrame>
     )
   }
@@ -187,7 +185,7 @@ export default function UserProfile() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
-      <DataRegion title="用户概览" description={`注册于 ${fmtDate(profile.created_at)}`} contentClassName="p-4">
+      <DataRegion title="用户资料" description={`注册于 ${fmtDate(profile.created_at)}`} contentClassName="p-4">
         <div className="grid min-w-0 gap-4 sm:grid-cols-[4rem_minmax(0,1fr)] sm:items-start">
           <Avatar className="size-16 border">
             {avatarUrl && <AvatarImage src={avatarUrl} alt={`${displayName} 的头像`} />}
@@ -207,16 +205,15 @@ export default function UserProfile() {
                 </div>
               </div>
             )}
+            <dl className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-2 border-t pt-3 text-sm sm:grid-cols-4">
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">计分对局</dt><dd className="mt-0.5 font-mono font-semibold tabular-nums">{totalGames}</dd></div>
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">胜率</dt><dd className="mt-0.5 font-mono font-semibold tabular-nums">{winRate.toFixed(1)}%</dd></div>
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">战绩</dt><dd className="mt-0.5 font-mono font-semibold tabular-nums">{wins} 胜 · {profile.stats.draws || 0} 平 · {profile.stats.losses || 0} 负</dd></div>
+              <div className="min-w-0"><dt className="text-xs text-muted-foreground">公开 Bot</dt><dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.bot_count} 个 · {profile.stats.rated_bots || 0} 个有评分</dd></div>
+            </dl>
           </div>
         </div>
       </DataRegion>
-
-      <SummaryStrip columns={4}>
-        <SummaryMetric label="总胜率" value={`${winRate.toFixed(1)}%`} detail={`${totalGames} 场计分对局`} />
-        <SummaryMetric label="胜" value={wins} detail={`负 ${profile.stats.losses || 0} · 平 ${profile.stats.draws || 0}`} />
-        <SummaryMetric label="公开 Bot" value={profile.bot_count} detail={`${profile.stats.rated_bots || 0} 个有评分记录`} icon={<BotIcon className="size-4" />} />
-        <SummaryMetric label="社交" value={user && !isSelf ? followerCount : '—'} detail={user && !isSelf ? '粉丝数' : '登录后可关注'} icon={<Users className="size-4" />} />
-      </SummaryStrip>
 
       <DataRegion title="公开 Bot" description={`共 ${total || profile.bot_count} 个；当前第 ${page} 页`}>
         {botsError ? (

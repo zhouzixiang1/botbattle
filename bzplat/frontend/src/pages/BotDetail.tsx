@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchNatureBadge, MatchParticipantIdentity, MatchParticipants } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -28,7 +28,7 @@ import { useAuth } from '@/components/useAuth'
 import { gameLabel, gameIcon } from '@/lib/games'
 import { isBotSelfPlay, resolveMatchParticipant, type MatchParticipantSource } from '@/lib/match-participants'
 import { fmtTime, fmtRating, fmtDate } from '@/lib/format'
-import { CopyIdentifier, SummaryMetric } from '@/pages/public-page-ui'
+import { CopyIdentifier } from '@/pages/public-page-ui'
 
 /* ── 类型 ─────────────────────────────────────────────── */
 interface BotProfile {
@@ -298,7 +298,6 @@ export default function BotDetail() {
           <Skeleton className="h-4 w-32 max-w-full" />
           <Skeleton className="h-4 w-72 max-w-full" />
         </DataRegion>
-        <SummaryStrip columns={4}>{[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-14" />)}</SummaryStrip>
       </PageFrame>
     )
   }
@@ -334,7 +333,7 @@ export default function BotDetail() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
-      <DataRegion title="Bot 概览" description="公开身份、游戏维度与版本信息" contentClassName="p-4">
+      <DataRegion title="Bot 资料" description="身份、版本与当前评分" contentClassName="p-4">
         <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
           <div className="min-w-0 space-y-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -360,38 +359,47 @@ export default function BotDetail() {
           </div>
           <CopyIdentifier value={profile.id} />
         </div>
+        <dl className="mt-3 grid min-w-0 grid-cols-2 gap-x-5 gap-y-3 border-t pt-3 text-sm md:grid-cols-4 xl:grid-cols-6">
+          <div className="min-w-0">
+            <dt className="text-xs text-muted-foreground">Rating / 95% 区间</dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+              {fmtRating(profile.rating)}
+              <span className="ml-1.5 font-normal text-muted-foreground">
+                {profile.rd != null && profile.confidence_low != null && profile.confidence_high != null
+                  ? `RD ${Number(profile.rd).toFixed(0)} · ${profile.confidence_low.toFixed(0)}–${profile.confidence_high.toFixed(0)}`
+                  : '暂无区间'}
+              </span>
+            </dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-xs text-muted-foreground">公开名次</dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+              {profile.rank == null ? '暂未入榜' : `第 ${profile.rank} / ${profile.rank_total} 名`}
+              <span className="ml-1.5 font-normal text-muted-foreground">
+                {profile.rank == null
+                  ? `${ratedMatches}/${profile.ranking_min_matches} 场`
+                  : profile.percentile == null ? '' : `前 ${profile.percentile.toFixed(1)}%`}
+              </span>
+            </dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-xs text-muted-foreground">计分样本</dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">{ratedMatches} 场 <span className="font-normal text-muted-foreground">· {profile.unique_opponents ?? 0} 个对手</span></dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-xs text-muted-foreground">战绩</dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.wins ?? 0} 胜 · {profile.draws ?? 0} 平 · {profile.losses ?? 0} 负</dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-xs text-muted-foreground">评分变化</dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">上次 {fmtSigned(profile.rating_delta)} <span className="font-normal text-muted-foreground">· 30 日 {fmtSigned(profile.recent_delta_30d)}</span></dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-xs text-muted-foreground">正常完成率</dt>
+            <dd className="mt-0.5 font-mono font-semibold tabular-nums">{profile.normal_completion_rate == null ? '—' : fmtPct(profile.normal_completion_rate)} <span className="font-normal text-muted-foreground">· 技术负 {profile.technical_failures ?? 0}</span></dd>
+          </div>
+        </dl>
       </DataRegion>
-
-      <SummaryStrip columns={4}>
-        <SummaryMetric
-          label="Rating"
-          value={fmtRating(profile.rating)}
-          detail={profile.rd != null && profile.confidence_low != null && profile.confidence_high != null
-            ? `RD ${Number(profile.rd).toFixed(0)} · 95% ${profile.confidence_low.toFixed(0)}–${profile.confidence_high.toFixed(0)}`
-            : 'RD / 95% 区间暂无数据'}
-        />
-        <SummaryMetric
-          label="公开名次"
-          value={profile.rank == null ? '—' : `#${profile.rank} / ${profile.rank_total}`}
-          detail={profile.rank == null
-            ? `资格进度 ${(profile.ranking_progress * 100).toFixed(0)}%（${ratedMatches}/${profile.ranking_min_matches}）`
-            : `百分位 ${profile.percentile == null ? '—' : `${profile.percentile.toFixed(1)}%`}`}
-        />
-        <SummaryMetric label="计分样本" value={ratedMatches} detail={`${profile.unique_opponents ?? 0} 个不同对手`} />
-        <SummaryMetric
-          label="正常完成率"
-          value={profile.normal_completion_rate == null ? '—' : fmtPct(profile.normal_completion_rate)}
-          detail={`${profile.technical_failures ?? 0} 次本 Bot 技术负 / ${ratedMatches} 场计分对局`}
-        />
-      </SummaryStrip>
-
-      <SummaryStrip columns={5} label="评分变化与赛果">
-        <SummaryMetric label="上次变化" value={fmtSigned(profile.rating_delta)} detail="相邻评分快照" />
-        <SummaryMetric label="30 日变化" value={fmtSigned(profile.recent_delta_30d)} detail="缺窗口起点时为 —" />
-        <SummaryMetric label="胜" value={profile.wins ?? 0} detail="计分对局" />
-        <SummaryMetric label="平" value={profile.draws ?? 0} detail="计分对局" />
-        <SummaryMetric label="负" value={profile.losses ?? 0} detail="计分对局" />
-      </SummaryStrip>
 
       <Tabs defaultValue="history" className="w-full">
         <StickyToolbar label="Bot 详情分区">

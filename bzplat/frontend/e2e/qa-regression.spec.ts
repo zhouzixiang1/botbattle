@@ -517,7 +517,7 @@ for (const viewport of VIEWPORTS) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height })
     const monitor = monitorBrowser(page)
     const routes = [
-      { path: '/', heading: 'Bot 对战中心', evidence: '上传 Linux x86_64 ELF Bot' },
+      { path: '/', heading: 'Bot 对战', evidence: '上传 Bot，选择游戏和对手，开一场' },
       { path: '/leaderboard', heading: '排行榜', evidence: '每款游戏独立使用 Glicko-2 数值评分' },
       { path: '/history', heading: '对局历史', evidence: '查看双方用户、Bot 或真人身份以及对局性质' },
       { path: '/contests', heading: '锦标赛', evidence: '查看公开赛事与排期' },
