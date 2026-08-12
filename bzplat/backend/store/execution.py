@@ -98,7 +98,7 @@ class ExecutionRepository:
     def __init__(self, store: Store) -> None:
         self.store = store
         # Claim/refill run inside one SQLite write transaction.  Re-hashing up
-        # to 50 MiB per candidate on every dispatcher tick would extend that
+        # to 100 MiB per candidate on every dispatcher tick would extend that
         # lock by seconds or gigabytes of I/O.  The helper's cache identity
         # includes device/inode/size/mtime/ctime, so replacement and in-place
         # tampering still force a fresh digest while stable immutable versions

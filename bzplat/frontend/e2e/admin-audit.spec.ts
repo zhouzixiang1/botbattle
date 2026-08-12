@@ -78,6 +78,9 @@ for (const viewport of ADMIN_VIEWPORTS) {
       }
 
     await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
+    await expect(page.getByText('最近注册用户', { exact: true })).toBeVisible()
+    await expect(page.getByText('对局状态分布', { exact: true })).toBeVisible()
+    await expect(page.getByTestId('execution-queue-panel')).toContainText('全站同一时刻只执行一场')
     await expectNoRootOverflow(page, 'dashboard')
 
     await selectAdminModule(page, '用户')
@@ -292,6 +295,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
 }
 
 test('admin queue switch is a single boolean control and survives polling', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, ADMIN)
   let enabled = true
@@ -306,8 +310,8 @@ test('admin queue switch is a single boolean control and survives polling', asyn
       retry_at: null,
     },
     capacity: {
-      match_slots: { used: 0, capacity: 4 },
-      sandbox_units: { used: 0, capacity: 8 },
+      match_slots: { used: 0, capacity: 1 },
+      sandbox_units: { used: 0, capacity: 2 },
       running_matches: 0,
     },
     active: [],
@@ -334,6 +338,34 @@ test('admin queue switch is a single boolean control and survives polling', asyn
       body: JSON.stringify({ source: 'code', mutable: false, queue: snapshot() }),
     })
   })
+  await page.route('**/api/admin/stats', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        users: 123456789,
+        users_active: 98765432,
+        users_verified: 87654321,
+        bots: 123456789,
+        bots_active: 98765432,
+        matches: 999999999,
+        matches_completed: 888888888,
+        matches_aborted: 111111111,
+        matches_running: 12345678,
+        matches_pending: 9876543,
+        contests: 123456,
+        contests_running: 98765,
+        active_sessions: 123456,
+        recent_users: [{
+          id: 7001,
+          username: `very_long_unbroken_admin_dashboard_username_${'x'.repeat(96)}`,
+          email: 'long-user@example.test',
+          role: 'administrator_role_with_long_fallback_label',
+          created_at: '2026-08-12T23:59:59.123456+08:00',
+        }],
+      }),
+    })
+  })
   await page.route('**/api/execution-queue', async (route) => {
     publicQueueRequests += 1
     await route.fulfill({ status: 500, body: 'dashboard must use internal admin snapshot' })
@@ -357,6 +389,8 @@ test('admin queue switch is a single boolean control and survives polling', asyn
   const toggle = page.getByRole('switch', { name: '自动排位生产开关' })
   await expect(panel).toContainText('等待执行')
   await expect(toggle).toBeChecked()
+  await expect(page.getByText('最近注册用户', { exact: true })).toBeVisible()
+  await expect(page.getByText('对局状态分布', { exact: true })).toBeVisible()
   await expectNoRootOverflow(page, 'admin auto queue enabled')
 
   await toggle.click()

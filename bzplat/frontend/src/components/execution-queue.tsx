@@ -227,41 +227,48 @@ export function ExecutionQueuePanel({
         </div>
       )}
 
-      {snapshot.active.length > 0 && (
-        <section>
+      <div className="grid min-w-0 gap-3 lg:grid-cols-2">
+        <section className="min-w-0 rounded-lg border border-border bg-background p-2.5">
           <div className="mb-2 flex items-center justify-between gap-2 text-xs">
             <span className="inline-flex items-center gap-1.5 font-medium">
-              <PlayCircle className="size-3.5 text-primary" aria-hidden="true" /> 占用容量
+              <PlayCircle className="size-3.5 text-primary" aria-hidden="true" /> 正在执行
             </span>
-            <span className="text-muted-foreground">{snapshot.active.length} 场</span>
+            <span className="shrink-0 text-muted-foreground">{snapshot.active.length} 场</span>
           </div>
-          <ul className="grid min-w-0 gap-2 xl:grid-cols-2">
-            {snapshot.active.map((job) => <JobRow key={job.public_id} job={job} />)}
-          </ul>
+          {snapshot.active.length > 0 ? (
+            <ul className="grid min-w-0 gap-2">
+              {snapshot.active.map((job) => <JobRow key={job.public_id} job={job} />)}
+            </ul>
+          ) : (
+            <p className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+              当前没有运行中的对局
+            </p>
+          )}
         </section>
-      )}
 
-      {queued.length > 0 ? (
-        <section>
+        <section className="min-w-0 rounded-lg border border-border bg-background p-2.5">
           <div className="mb-2 flex items-center justify-between gap-2 text-xs">
             <span className="inline-flex items-center gap-1.5 font-medium">
               <Clock3 className="size-3.5 text-muted-foreground" aria-hidden="true" /> 等待执行
             </span>
-            <span className="text-muted-foreground">共 {snapshot.queued_count} 项</span>
+            <span className="shrink-0 text-muted-foreground">共 {snapshot.queued_count} 项</span>
           </div>
-          <ol className="grid min-w-0 gap-2 xl:grid-cols-2">
-            {queued.map((job, index) => <JobRow key={job.public_id} job={job} position={index + 1} />)}
-          </ol>
-          {hidden > 0 && (
-            <p className="mt-2 text-right text-xs text-muted-foreground">另有 {hidden} 项在后续队列</p>
+          {queued.length > 0 ? (
+            <>
+              <ol className="grid min-w-0 gap-2">
+                {queued.map((job, index) => <JobRow key={job.public_id} job={job} position={index + 1} />)}
+              </ol>
+              {hidden > 0 && (
+                <p className="mt-2 text-right text-xs text-muted-foreground">另有 {hidden} 项在后续队列</p>
+              )}
+            </>
+          ) : (
+            <p className="rounded-md border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+              当前没有等待任务
+            </p>
           )}
         </section>
-      ) : snapshot.active.length === 0 && !paused ? (
-        <div className="flex items-start gap-2 rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-          <PlayCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-          <span>当前没有等待或执行中的任务</span>
-        </div>
-      ) : null}
+      </div>
     </div>
   ) : null
 
@@ -287,7 +294,7 @@ export function ExecutionQueuePanel({
             {stale && <Badge variant="outline">数据可能已过期</Badge>}
           </div>
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-            人工、人机、赛事与自动排位共享对局槽和沙箱容量；优先级会随等待时间动态变化。
+            全站同一时刻只执行一场；人工、人机、赛事与自动排位按同一队列等待。
           </p>
           {(lastUpdatedAt || (loading && snapshot)) && (
             <p className="mt-0.5 text-xs text-muted-foreground">
@@ -297,7 +304,7 @@ export function ExecutionQueuePanel({
             </p>
           )}
         </div>
-        {action}
+        {action && <div className="min-w-0 max-w-full">{action}</div>}
       </div>
 
       {error && (

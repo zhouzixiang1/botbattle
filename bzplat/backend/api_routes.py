@@ -35,7 +35,11 @@ from bzplat.backend.auth.dependencies import (
     require_organizer,
     require_user,
 )
-from bzplat.backend.security import audit_log, websocket_origin_allowed
+from bzplat.backend.security import (
+    BOT_UPLOAD_BODY_MAX_BYTES,
+    audit_log,
+    websocket_origin_allowed,
+)
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.bots.manager import MAX_BYTES
 
@@ -105,6 +109,7 @@ from bzplat.backend.store.public_contract import sanitize_public_match
 router = APIRouter()
 _T = TypeVar("_T")
 _BINARY_FILE_SCHEMA = {"type": "string", "format": "binary"}
+_BOT_UPLOAD_BODY_MAX_MIB = BOT_UPLOAD_BODY_MAX_BYTES // (1024 * 1024)
 _BOT_CREATE_UPLOAD_OPENAPI = {
     "requestBody": {
         "required": True,
@@ -132,7 +137,9 @@ _BOT_CREATE_UPLOAD_OPENAPI = {
     "responses": {
         "400": {"description": "Bot 文件或参数无效，或预检失败"},
         "401": {"description": "未登录或会话过期"},
-        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "413": {
+            "description": f"multipart 请求体超过 {_BOT_UPLOAD_BODY_MAX_MIB} MiB"
+        },
         "503": {"description": "上传槽繁忙或沙箱暂不可用"},
     },
 }
@@ -156,7 +163,9 @@ _BOT_VERSION_UPLOAD_OPENAPI = {
     "responses": {
         "400": {"description": "Bot 文件或参数无效，或预检失败"},
         "401": {"description": "未登录或会话过期"},
-        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "413": {
+            "description": f"multipart 请求体超过 {_BOT_UPLOAD_BODY_MAX_MIB} MiB"
+        },
         "503": {"description": "上传槽繁忙或沙箱暂不可用"},
     },
 }
@@ -1109,12 +1118,13 @@ def _existing_idempotent_request(
 
 @router.post("/api/matches/challenge", status_code=202)
 async def challenge(body: ChallengeBody, request: Request, user=Depends(require_user)):
-    # P1-3 安全修复：my_bot_id 必须属于当前用户（防用别人的 bot 开赛，污染其评分/战绩）。
-    # opponent_bot_id 允许任意（挑战他人 bot 是正常功能）。
+    # 普通用户只能用自己的 Bot 占座位 1，防止冒用他人身份污染评分/战绩；
+    # 管理员的显式全站调度能力沿用同一版本归属、可运行性和游戏一致性校验。
+    # opponent_bot_id 仍允许任意可用 Bot（挑战他人 Bot 是正常功能）。
     my_bot = _store(request).get_bot(body.my_bot_id)
     if not my_bot:
         raise HTTPException(404, "Bot 不存在")
-    if my_bot["owner_id"] != user["id"]:
+    if my_bot["owner_id"] != user["id"] and user.get("role") != ROLE_ADMIN:
         audit_log(request, "match_challenge", result="deny", user=user.get("username"),
                   detail=f"my_bot_id={body.my_bot_id} 非本人 bot")
         raise HTTPException(403, "只能用自己的 Bot 发起挑战")

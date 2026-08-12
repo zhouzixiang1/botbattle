@@ -1,11 +1,8 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Activity,
-  Bot as BotIcon,
-  Clock3,
   Gauge,
-  ListChecks,
   Minus,
   TrendingDown,
   TrendingUp,
@@ -18,7 +15,7 @@ import {
   ExecutionQueuePanel,
   type ExecutionQueueSnapshot,
 } from '@/components/execution-queue'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { Badge } from '@/components/ui/badge'
 import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
@@ -36,7 +33,6 @@ import { fmtRating, fmtTime } from '@/lib/format'
 import { GAMES, type GameId } from '@/lib/games'
 import { cn } from '@/lib/utils'
 import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface RankingRow {
   rank: number | null
@@ -275,10 +271,6 @@ function MobileSection({
   )
 }
 
-function SummaryItem({ children }: { children: ReactNode }) {
-  return <>{children}</>
-}
-
 export default function Leaderboard() {
   const [rows, setRows] = useState<RankingRow[]>([])
   const [summary, setSummary] = useState<RankingSummary>(EMPTY_SUMMARY)
@@ -395,13 +387,6 @@ export default function Leaderboard() {
       </StickyToolbar>
 
       {error && <ErrorMsg msg={error} />}
-
-      <SummaryStrip columns={4}>
-        <SummaryItem><SummaryMetric label="Bot 总数" value={summary.total} detail="当前游戏公开候选" icon={<BotIcon className="size-4" />} /></SummaryItem>
-        <SummaryItem><SummaryMetric label="公开排名" value={summary.eligible} detail={rankingMinMatches ? `至少 ${rankingMinMatches} 场计分对局` : '按后端场次门槛'} icon={<Trophy className="size-4" />} /></SummaryItem>
-        <SummaryItem><SummaryMetric label="计分样本" value={summary.sample} detail="场次尚未达到排名门槛" icon={<ListChecks className="size-4" />} /></SummaryItem>
-        <SummaryItem><SummaryMetric label="最近更新" value={summary.last_rated_at ? fmtTime(summary.last_rated_at) : '暂无'} detail="当前游戏评分池" mono={false} icon={<Clock3 className="size-4" />} /></SummaryItem>
-      </SummaryStrip>
 
       <ExecutionQueuePanel
         snapshot={queue}

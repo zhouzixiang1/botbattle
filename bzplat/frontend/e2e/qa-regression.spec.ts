@@ -581,6 +581,8 @@ test('browser-native validation matches backend phone and Bot-name contracts', a
 
   await loginThroughUi(page, USER)
   await page.goto('/#/my-bots')
+  await expect(page.locator('main [data-slot="summary-strip"]')).toHaveCount(0)
+  await expect(page.locator('main')).toContainText('最大 100 MiB')
   const name = page.locator('#upload-name')
   for (const invalid of ['a', '1bot', 'a-b']) {
     await name.fill(invalid)
@@ -3879,7 +3881,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await versionFile.evaluate((element) => {
     const input = element as HTMLInputElement
     const file = new File(['oversized'], 'too-large.bin', { type: 'application/octet-stream' })
-    Object.defineProperty(file, 'size', { value: 50 * 1024 * 1024 + 1 })
+    Object.defineProperty(file, 'size', { value: 100 * 1024 * 1024 + 1 })
     const transfer = new DataTransfer()
     transfer.items.add(file)
     input.files = transfer.files
@@ -3940,7 +3942,8 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await manager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await manager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await currentUploadObserved
-  await expect(manager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+  await expect(manager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
+  await expect(manager.locator('[data-upload-stage="preflight"]')).toContainText('文件已上传，正在服务端预检')
 
   const staleFailureResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -3949,7 +3952,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   releaseStaleUpload()
   expect((await staleFailureResponse).status()).toBe(400)
   await expect(manager).not.toContainText('stale A upload failure')
-  await expect(manager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+  await expect(manager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
 
   const currentSuccessResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -4052,7 +4055,8 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await staleManager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await nextUploadObserved
-  await expect(staleManager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+  await expect(staleManager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
+  await expect(staleManager.locator('[data-upload-stage="preflight"]')).toContainText('文件已上传，正在服务端预检')
 
   const staleRollbackResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -4061,7 +4065,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   releaseStaleRollback()
   expect((await staleRollbackResponse).status()).toBe(500)
   await expect(staleManager).not.toContainText('stale B rollback failure')
-  await expect(staleManager.getByRole('button', { name: '处理中…', exact: true })).toBeDisabled()
+  await expect(staleManager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
 
   const nextUploadResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&

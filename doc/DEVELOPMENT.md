@@ -193,7 +193,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 | **常量集中** | 所有状态码/对局类型/`REGISTERED_ENGINES`/`VALID_GAME_IDS`/平台 settings 键名集中在 `store/schema.py`，别散落 |
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
-| **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，半负载并发 ceiling=`max(1,cpu//4)`，全员循环 `FULL_RR_MAX_N=12`；admin 不可抬高（`runtime/limits.py`） |
+| **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，全站 match slot 固定为 1、sandbox units 固定为 2，CPU ceiling/显式启动值/admin 均不可抬高；Bot 文件上限 100 MiB，全员循环 `FULL_RR_MAX_N=12`（`runtime/limits.py`） |
 | **运行参数** | `runtime/config.py` 是 action timeout、全局双资源容量/aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。自动排位只是 producer，唯一可变项为 `execution_control.auto_enabled`；`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |

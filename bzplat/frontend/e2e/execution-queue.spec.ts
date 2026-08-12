@@ -40,8 +40,8 @@ function queueSnapshot() {
       retry_at: null,
     },
     capacity: {
-      match_slots: { used: 1, capacity: 4 },
-      sandbox_units: { used: 1, capacity: 8 },
+      match_slots: { used: 1, capacity: 1 },
+      sandbox_units: { used: 1, capacity: 2 },
       running_matches: 1,
     },
     active: [{
@@ -87,8 +87,8 @@ function requestSnapshot(
     ahead_jobs: status === 'queued' ? 2 : 0,
     ahead_sandbox_units: status === 'queued' ? 4 : 0,
     capacity: {
-      match_slots: { used: 1, capacity: 4 },
-      sandbox_units: { used: 2, capacity: 8 },
+      match_slots: { used: 1, capacity: 1 },
+      sandbox_units: { used: 2, capacity: 2 },
       running_matches: 1,
     },
     eta: {
@@ -100,7 +100,11 @@ function requestSnapshot(
   }
 }
 
-async function mockBase(page: Page, loggedIn: boolean) {
+async function mockBase(
+  page: Page,
+  loggedIn: boolean,
+  activeUser: Record<string, unknown> = USER,
+) {
   const unexpectedBackendRequests: string[] = []
   const forbiddenMainRequests: string[] = []
   page.on('request', (request) => {
@@ -131,7 +135,7 @@ async function mockBase(page: Page, loggedIn: boolean) {
     await route.fulfill(loggedIn ? {
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ user: USER }),
+      body: JSON.stringify({ user: activeUser }),
     } : {
       status: 401,
       contentType: 'application/json',
@@ -142,10 +146,69 @@ async function mockBase(page: Page, loggedIn: boolean) {
     await page.addInitScript((user) => {
       localStorage.setItem('bzplat_token', 'queue-test-token')
       localStorage.setItem('bzplat_user', JSON.stringify(user))
-    }, USER)
+    }, activeUser)
   }
   return { unexpectedBackendRequests, forbiddenMainRequests }
 }
+
+test('admin seat one picker exposes all public runnable Bots without an owner filter', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  const admin = {
+    ...USER,
+    id: 99,
+    username: 'queue_admin',
+    email: 'queue_admin@example.test',
+    role: 'admin',
+  }
+  const network = await mockBase(page, true, admin)
+  const requests: URL[] = []
+  const foreign = {
+    id: 501,
+    name: 'foreign-seat-one',
+    display_name: 'Foreign Seat One',
+    owner_id: 77,
+    owner_name: 'foreign_owner',
+    game_id: 'holdem',
+    is_active: 1,
+    runnable: true,
+  }
+  await page.route('**/api/bots/public?**', async (route) => {
+    requests.push(new URL(route.request().url()))
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ bots: [foreign], total: 1 }),
+    })
+  })
+  await page.route('**/api/bots/*/versions', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        current_version: 1,
+        versions: [{ id: 9001, version: 1, runnable: true }],
+      }),
+    })
+  })
+
+  await page.goto('/#/challenge')
+  const seatOneTrigger = page.getByRole('button', {
+    name: '选择全站可用 Bot（管理员）',
+    exact: true,
+  })
+  await expect(seatOneTrigger).toBeVisible()
+  await seatOneTrigger.click()
+  const picker = page.getByRole('dialog', { name: /选择对手/ })
+  await expect(picker.getByRole('button', { name: /Foreign Seat One/ })).toBeVisible()
+  expect(requests.some((url) => !url.searchParams.has('owner_id'))).toBe(true)
+  await picker.getByRole('button', { name: /Foreign Seat One/ }).click()
+  await expect(page.locator('main')).toContainText('Foreign Seat One')
+  await expect(page.locator('main')).not.toContainText('座位 1 只能使用自己的 Bot')
+
+  expect(network.unexpectedBackendRequests).toEqual([])
+  expect(network.forbiddenMainRequests).toEqual([])
+  await monitor.expectClean()
+})
 
 test('202 challenge request survives refresh, retries, and cancels exactly once', async ({ page }) => {
   test.setTimeout(60_000)

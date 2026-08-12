@@ -119,19 +119,19 @@ function mockedExecutionQueue() {
       retry_at: null,
     },
     capacity: {
-      match_slots: { used: 2, capacity: 4 },
-      sandbox_units: { used: 3, capacity: 8 },
-      running_matches: 2,
+      match_slots: { used: 1, capacity: 1 },
+      sandbox_units: { used: 1, capacity: 2 },
+      running_matches: 1,
     },
     active: [
       job(1, 'human', 'running', 'holdem'),
-      job(2, 'auto', 'running', 'gomoku'),
     ],
     queued: [
+      job(2, 'auto', 'queued', 'gomoku'),
       job(3, 'contest', 'queued', 'pencil'),
       job(4, 'manual', 'queued', 'holdem'),
     ],
-    queued_count: 2,
+    queued_count: 3,
   }
 }
 
@@ -168,7 +168,7 @@ for (const viewport of VIEWPORTS) {
         expect(url.searchParams.has('game_id')).toBe(true)
         leaderboardRequests.set(gameId, (leaderboardRequests.get(gameId) ?? 0) + 1)
         // Keep the second game's response in flight long enough to prove that
-        // switching tabs clears the first game's summary instead of relabeling it.
+        // switching tabs clears the first game's rows instead of relabeling them.
         if (gameId === 'gomoku') await page.waitForTimeout(200)
         await route.fulfill({
           status: 200,
@@ -207,24 +207,22 @@ for (const viewport of VIEWPORTS) {
       const main = page.locator('main')
       await expect(main.getByRole('heading', { name: '排行榜', exact: true })).toBeVisible()
       await expect(main).toContainText('每款游戏独立使用 Glicko-2 数值评分')
-      await expect(main).toContainText('Bot 总数')
-      await expect(main).toContainText('公开排名')
-      await expect(main).toContainText('计分样本')
-      await expect(main).toContainText('最近更新')
+      await expect(main.locator('[data-slot="summary-strip"]')).toHaveCount(0)
+      await expect(main.getByText('Bot 总数', { exact: true })).toHaveCount(0)
+      await expect(main.getByText('最近更新', { exact: true })).toHaveCount(0)
       const queuePanel = page.getByTestId('execution-queue-panel')
       await expect(queuePanel).toBeVisible()
       if (viewport.name === 'mobile') {
         await queuePanel.locator('summary').click()
       }
-      await expect(queuePanel).toContainText('占用容量')
+      await expect(queuePanel).toContainText('正在执行')
       await expect(queuePanel).toContainText('等待执行')
+      await expect(queuePanel).toContainText('全站同一时刻只执行一场')
       await expect(queuePanel.getByRole('link', { name: '进入观赛' }).first()).toHaveAttribute(
         'href',
         '#/match/holdem-human-active-match',
       )
       await expect(queuePanel).toContainText('人机对战不计评分')
-      const totalMetric = main.getByText('Bot 总数', { exact: true }).locator('..')
-      await expect(totalMetric).toContainText('12')
       const holdemTab = page.getByRole('tab', { name: '德州扑克', exact: true })
       const gomokuTab = page.getByRole('tab', { name: '五子棋', exact: true })
       await expect(holdemTab).toHaveAttribute('aria-selected', 'true')
@@ -275,12 +273,10 @@ for (const viewport of VIEWPORTS) {
       })
       // Click while the list is scrolled: the sticky tabs must remain operable.
       await gomokuTab.click()
-      await expect(totalMetric).toContainText('0')
       await expect(activeLayout).toBeHidden()
       await gomokuResponse
       await expect(gomokuTab).toHaveAttribute('aria-selected', 'true')
       await expect(holdemTab).toHaveAttribute('aria-selected', 'false')
-      await expect(totalMetric).toContainText('12')
       await expect(activeLayout.getByText('GOMOKU Bot 2', { exact: true })).toBeVisible()
       await expect(queuePanel).toContainText('德州扑克')
       await expect(queuePanel).toContainText('五子棋')

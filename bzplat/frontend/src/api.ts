@@ -20,6 +20,20 @@ export interface ApiRequestInit extends RequestInit {
   suppressAuth?: boolean
 }
 
+export interface ApiUploadProgress {
+  loaded: number
+  total: number | null
+  percent: number | null
+}
+
+export interface ApiFormUploadOptions {
+  onProgress?: (progress: ApiUploadProgress) => void
+  onTransferComplete?: () => void
+  signal?: AbortSignal
+  /** Do not inject the mutable global Bearer token into this request. */
+  suppressAuth?: boolean
+}
+
 const SAFE_API_TEMPLATES = [
   '/api/auth/*',
   '/api/bots/*',
@@ -251,6 +265,121 @@ export function apiForm<T = unknown>(
     }
   }
   return apiFetch<T>(path, { ...options, method, body: fd })
+}
+
+/**
+ * multipart upload with browser-reported transfer progress.
+ *
+ * fetch does not expose upload progress, so Bot binaries use XHR for this one
+ * transport concern. Authentication, credentials, 401 handling and safe failure
+ * diagnostics intentionally mirror apiFetch. ``onTransferComplete`` marks only
+ * that the request body reached the server; the response can still be waiting on
+ * binary classification and canonical first-turn preflight.
+ */
+export function apiFormWithProgress<T = unknown>(
+  path: string,
+  fields: Record<string, string | Blob | File | boolean | number | undefined | null> = {},
+  options: ApiFormUploadOptions = {},
+): Promise<T> {
+  const fd = new FormData()
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined || value === null) continue
+    fd.append(key, typeof value === 'boolean' || typeof value === 'number' ? String(value) : value)
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const { signal, suppressAuth = false } = options
+    let settled = false
+
+    const cleanup = () => signal?.removeEventListener('abort', abort)
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      callback()
+    }
+    const abort = () => xhr.abort()
+
+    xhr.open('POST', path)
+    xhr.withCredentials = true
+    const token = suppressAuth ? null : userToken.get()
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+
+    xhr.upload.addEventListener('progress', (event) => {
+      const total = event.lengthComputable && event.total > 0 ? event.total : null
+      options.onProgress?.({
+        loaded: event.loaded,
+        total,
+        percent: total === null ? null : Math.min(100, Math.round((event.loaded / total) * 100)),
+      })
+    })
+    xhr.upload.addEventListener('load', () => options.onTransferComplete?.())
+
+    xhr.addEventListener('load', () => {
+      const status = xhr.status
+      const statusText = xhr.statusText || '请求失败'
+      let parsed: unknown = xhr.responseText
+      const contentType = xhr.getResponseHeader('content-type') || ''
+      if (contentType.includes('application/json') && xhr.responseText) {
+        try {
+          parsed = JSON.parse(xhr.responseText)
+        } catch {
+          parsed = xhr.responseText
+        }
+      }
+
+      let detail = `${status} ${statusText}`
+      if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
+        const rawDetail = (parsed as { detail?: unknown }).detail
+        if (rawDetail) detail = typeof rawDetail === 'string' ? rawDetail : JSON.stringify(rawDetail)
+      }
+
+      if (status === 401) {
+        const soft = suppressAuth || path.includes('/api/auth/me') || isCredentialAuthPath(path)
+        if (!soft) {
+          userToken.clear()
+          currentUserStore.clear()
+          if (!isAuthPublicHash()) {
+            const back = encodeURIComponent(location.hash.replace(/^#/, '') || '/')
+            location.hash = `#/login?from=${back}&reason=expired`
+          }
+        } else if (path.includes('/api/auth/me')) {
+          userToken.clear()
+          currentUserStore.clear()
+        }
+        finish(() => reject(new UnauthorizedError(path, detail)))
+        return
+      }
+
+      if (status < 200 || status >= 300) {
+        const template = safeApiTemplate(path)
+        if (template) {
+          sessionStorage.setItem(SAFE_FAILURE_KEY, JSON.stringify({
+            template,
+            status,
+            trace_id: (xhr.getResponseHeader('x-trace-id') || '').slice(0, 64),
+          }))
+        }
+        finish(() => reject(new ApiError(path, status, detail)))
+        return
+      }
+
+      finish(() => {
+        if (status === 204) resolve(undefined as T)
+        else resolve(parsed as T)
+      })
+    })
+    xhr.addEventListener('error', () => finish(() => reject(new TypeError('网络请求失败'))))
+    xhr.addEventListener('abort', () => finish(() => reject(new DOMException('上传已取消', 'AbortError'))))
+
+    if (signal?.aborted) {
+      finish(() => reject(new DOMException('上传已取消', 'AbortError')))
+      return
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    xhr.send(fd)
+  })
 }
 
 export function apiUpload<T = unknown>(

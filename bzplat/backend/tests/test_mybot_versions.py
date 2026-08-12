@@ -193,6 +193,8 @@ def test_manual_multipart_routes_preserve_openapi_contract(tmp_path):
             "format": "binary",
         }
         assert responses <= set(operation["responses"])
+    for path in ("/api/bots", "/api/bots/{bot_id}/versions"):
+        assert "101 MiB" in paths[path]["post"]["responses"]["413"]["description"]
 
 
 def test_upload_preflight_does_not_block_application_event_loop(tmp_path, monkeypatch):

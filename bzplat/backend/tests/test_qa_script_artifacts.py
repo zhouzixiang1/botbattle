@@ -215,8 +215,8 @@ def _clean_execution_queue_snapshot():
             "retry_at": None,
         },
         "capacity": {
-            "match_slots": {"used": 0, "capacity": 2},
-            "sandbox_units": {"used": 0, "capacity": 4},
+            "match_slots": {"used": 0, "capacity": 1},
+            "sandbox_units": {"used": 0, "capacity": 2},
             "running_matches": 0,
         },
         "active": [],

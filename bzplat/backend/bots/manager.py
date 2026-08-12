@@ -17,11 +17,13 @@ from ..bots.classify import (
     require_supported_binary,
 )
 from ..store import Store
+from ..runtime.limits import MAX_BOT_UPLOAD_BYTES
 
 logger = logging.getLogger(__name__)
 
 UPLOAD_ROOT = Path("bot_uploads")
-MAX_BYTES = 50 * 1024 * 1024
+# 兼容既有调用方名称；容量真相集中在 runtime/limits.py。
+MAX_BYTES = MAX_BOT_UPLOAD_BYTES
 _NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{1,31}$")
 
 

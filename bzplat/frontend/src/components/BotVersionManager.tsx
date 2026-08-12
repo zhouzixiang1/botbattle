@@ -28,8 +28,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
+import {
+  BOT_UPLOAD_MAX_LABEL,
+  BotUploadProgress,
+  botUploadSizeError,
+  type BotUploadStage,
+} from '@/components/bot-upload-progress'
 import { useConfirm } from '@/hooks/use-confirm'
-import { apiForm, apiGet, apiJson, errMsg } from '@/api'
+import { apiFormWithProgress, apiGet, apiJson, errMsg } from '@/api'
 import { toast } from 'sonner'
 
 export interface BotVersion {
@@ -93,6 +99,8 @@ export default function BotVersionManager({
   const [note, setNote] = useState('')
   const [mode, setMode] = useState(currentRuntimeMode || 'traditional')
   const [file, setFile] = useState<File | null>(null)
+  const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
+  const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   // Dialog 在 A→关闭→B 时会复用同一组件；A 的慢响应不得回灌 B。
   const activeBotIdRef = useRef<number | null>(botId)
   const requestGenerationRef = useRef(0)
@@ -149,6 +157,8 @@ export default function BotVersionManager({
     setMode(currentRuntimeMode || 'traditional')
     setNote('')
     setFile(null)
+    setUploadStage('idle')
+    setUploadPercent(0)
     setLoadError('')
     setMutationError('')
     if (botId !== null) void load()
@@ -163,12 +173,23 @@ export default function BotVersionManager({
     const targetBotId = botId
     const generation = ++mutationGenerationRef.current
     setBusy(true)
+    setUploadStage('uploading')
+    setUploadPercent(0)
     setMutationError('')
     try {
-      await apiForm(`/api/bots/${targetBotId}/versions`, 'POST', {
+      await apiFormWithProgress(`/api/bots/${targetBotId}/versions`, {
         upload_note: note,
         runtime_mode: mode,
         file,
+      }, {
+        onProgress: ({ percent }) => {
+          if (isCurrentMutation(targetBotId, generation)) setUploadPercent(percent)
+        },
+        onTransferComplete: () => {
+          if (!isCurrentMutation(targetBotId, generation)) return
+          setUploadPercent(100)
+          setUploadStage('preflight')
+        },
       })
       if (!isCurrentMutation(targetBotId, generation)) return
       toast.success(`已上传新版本`)
@@ -182,7 +203,11 @@ export default function BotVersionManager({
         setMutationError(errMsg(err, '上传失败'))
       }
     } finally {
-      if (isCurrentMutation(targetBotId, generation)) setBusy(false)
+      if (isCurrentMutation(targetBotId, generation)) {
+        setBusy(false)
+        setUploadStage('idle')
+        setUploadPercent(0)
+      }
     }
   }
 
@@ -277,9 +302,9 @@ export default function BotVersionManager({
                 type="file"
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null
-                  // 客户端 50MB 预检（与 MyBots 上传一致），避免大文件传完才被服务端拒
-                  if (f && f.size > 50 * 1024 * 1024) {
-                    toast.error('文件超过 50MB 上限')
+                  const sizeError = f ? botUploadSizeError(f) : null
+                  if (f && sizeError) {
+                    toast.error(sizeError)
                     setFile(null)
                     e.target.value = ''
                     return
@@ -291,13 +316,14 @@ export default function BotVersionManager({
               />
             </label>
             <p className="text-xs text-muted-foreground">
-              仅接受 Linux x86_64 ELF，最大 50MB；Windows .exe、macOS 程序和原始 .py 文件均不支持。
+              仅接受 Linux x86_64 ELF，最大 {BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。
             </p>
           </div>
           {mutationError && <ErrorMsg msg={mutationError} />}
+          <BotUploadProgress stage={uploadStage} percent={uploadPercent} />
           <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
             <Upload className="size-4" />
-            {busy ? '处理中…' : '上传新版本'}
+            {uploadStage === 'preflight' ? '服务端预检中…' : busy ? '上传中…' : '上传新版本'}
           </Button>
         </form>
         </DataRegion>
