@@ -101,6 +101,8 @@ def compute_official_ranking(
     matches: dict[str, dict],
     *,
     normalize_delta=None,
+    source_stage: int = 0,
+    ranking_cohort: str | None = None,
 ) -> list[dict]:
     """计算全员唯一连续正式名次（含破同分明细）。
 
@@ -108,8 +110,19 @@ def compute_official_ranking(
     pairings: 该阶段对阵（含 entry_a_id/entry_b_id/match_id）。
     matches: match_id → match dict。
     normalize_delta: GameSpec.normalize_delta（Holdem: 筹码差/BB；棋类透传）。
-    返回排序后的列表，每行加 rank + tiebreaks（dict）。
+    source_stage/ranking_cohort 标识本批积分与破同分项的可比较范围；
+    replace_top 合榜会保留各来源阶段的 cohort，跨 cohort 的相同 points
+    不能被解释为同一组破同分。
+    返回排序后的列表，每行加 rank + tiebreaks + 排名来源（dict）。
     """
+    source_stage = int(source_stage)
+    if source_stage < 0:
+        raise ValueError("source_stage 不能为负数")
+    cohort = (
+        ranking_cohort.strip()
+        if isinstance(ranking_cohort, str) and ranking_cohort.strip()
+        else f"stage:{source_stage}"
+    )
     # points 查表（entry_id → points）
     pts = {s["entry_id"]: float(s.get("points") or 0) for s in standings}
     opp_map = _entry_opponents_map(pairings, matches)
@@ -151,7 +164,14 @@ def compute_official_ranking(
             "technical_losses": technical_losses.get(eid, 0),
             "seed": int(s.get("seed") or 0),
         }
-        rows.append({**s, "tiebreaks": tiebreaks})
+        rows.append(
+            {
+                **s,
+                "source_stage": source_stage,
+                "ranking_cohort": cohort,
+                "tiebreaks": tiebreaks,
+            }
+        )
 
     # 排序：破同分链（注意 technical_losses 升序=越少越好，其余降序=越大越好）
     rows.sort(
@@ -188,6 +208,94 @@ def merge_replace_top(
     return merged
 
 
+def with_official_result_provenance(
+    contest: dict,
+    rows: list[dict],
+    *,
+    stage_entry_ids: dict[int, set[int]] | None = None,
+) -> list[dict]:
+    """Return official rows with stable source/cohort fields.
+
+    New snapshots persist both fields.  Older snapshots predate those columns and
+    wrote the final ``stage_idx`` onto every row, including the preliminary-stage
+    remainder of ``replace_top``.  For those rows, derive the source from the
+    immutable contest stage snapshot plus durable stage-result/pairing membership.
+    The rank boundary is only a fallback when legacy membership evidence is absent.
+    """
+
+    raw_stages = contest.get("stages_json") or "[]"
+    if isinstance(raw_stages, list):
+        stages = raw_stages
+    else:
+        try:
+            parsed = json.loads(raw_stages)
+        except (TypeError, ValueError):
+            parsed = []
+        stages = parsed if isinstance(parsed, list) else []
+    if not stages:
+        from bzplat.backend.contests.templates import get_template
+
+        template = get_template(str(contest.get("template_id") or ""))
+        template_stages = template.get("stages") if template else []
+        stages = template_stages if isinstance(template_stages, list) else []
+
+    try:
+        final_stage_idx = int(contest.get("current_stage_idx"))
+    except (TypeError, ValueError):
+        final_stage_idx = len(stages) - 1 if stages else 0
+    if stages and not 0 <= final_stage_idx < len(stages):
+        final_stage_idx = len(stages) - 1
+    final_stage = stages[final_stage_idx] if stages else {}
+    replace_top = (
+        isinstance(final_stage, dict)
+        and final_stage.get("ranking_mode") == "replace_top"
+        and final_stage_idx > 0
+    )
+    try:
+        scope = max(1, int(final_stage.get("ranking_scope") or 8))
+    except (TypeError, ValueError):
+        scope = 8
+    final_entries = (stage_entry_ids or {}).get(final_stage_idx, set())
+    final_cohort_size = min(scope, len(final_entries)) if final_entries else scope
+
+    enriched: list[dict] = []
+    for row in rows:
+        public = dict(row)
+        explicit_source = public.get("source_stage")
+        try:
+            source_stage = int(explicit_source)
+            if source_stage < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            if replace_top:
+                try:
+                    rank = int(public.get("rank") or 0)
+                    entry_id = int(public.get("entry_id"))
+                except (TypeError, ValueError):
+                    rank = 0
+                    entry_id = -1
+                in_final_cohort = 0 < rank <= final_cohort_size
+                if final_entries:
+                    in_final_cohort = in_final_cohort and entry_id in final_entries
+                source_stage = (
+                    final_stage_idx if in_final_cohort else final_stage_idx - 1
+                )
+            else:
+                try:
+                    source_stage = int(public.get("stage_idx"))
+                    if source_stage < 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    source_stage = final_stage_idx
+
+        raw_cohort = public.get("ranking_cohort")
+        cohort = raw_cohort.strip() if isinstance(raw_cohort, str) else ""
+        public["source_stage"] = source_stage
+        public["ranking_cohort"] = cohort or f"stage:{source_stage}"
+        enriched.append(public)
+    return enriched
+
+
 def persist_official_results(
     store,
     contest_id: int,
@@ -202,11 +310,20 @@ def persist_official_results(
         awarded = ""
         if awarded_fn:
             awarded = awarded_fn(r) or ""
+        raw_source_stage = r.get("source_stage")
+        source_stage = (
+            int(stage_idx) if raw_source_stage is None else int(raw_source_stage)
+        )
+        ranking_cohort = str(
+            r.get("ranking_cohort") or f"stage:{source_stage}"
+        )
         result_rows.append(
             {
                 "entry_id": r["entry_id"],
                 "rank": r["rank"],
                 "stage_idx": stage_idx,
+                "source_stage": source_stage,
+                "ranking_cohort": ranking_cohort,
                 "points": r["tiebreaks"]["points"],
                 "bot_id": r.get("bot_id"),
                 "user_id": r.get("user_id"),

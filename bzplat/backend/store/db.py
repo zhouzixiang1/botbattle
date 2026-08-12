@@ -1599,6 +1599,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "contests" not in tables:
         return
 
+    # ``replace_top`` 的正式榜由末阶段 Top 与前一阶段余下选手组成。旧表只保存
+    # 全榜生成时的 stage_idx，无法表达逐行积分/破同分的可比较范围；新列保持
+    # nullable 以便 API 对旧 snapshot 从阶段证据可靠派生。
+    if "contest_official_results" in tables:
+        _add_col(conn, "contest_official_results", "source_stage", "INTEGER")
+        _add_col(conn, "contest_official_results", "ranking_cohort", "TEXT")
+
     # 旧 notifications 仅作为 communications 站内消息的兼容读投影。
     # 既有行保持 NULL，不反向伪造成新会话；新写入在 communication 事务里带 public id。
     if "notifications" in tables:
@@ -8692,14 +8699,26 @@ class Store:
                 (contest_id,),
             )
             for row in result_rows:
+                raw_source_stage = row.get("source_stage")
+                source_stage = (
+                    int(row.get("stage_idx") or 0)
+                    if raw_source_stage is None
+                    else int(raw_source_stage)
+                )
+                ranking_cohort = str(
+                    row.get("ranking_cohort") or f"stage:{source_stage}"
+                )
                 c.execute(
                     "INSERT INTO contest_official_results"
-                    "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
-                    "tiebreaks_json, awarded) VALUES(?,?,?,?,?,?,?,?,?)",
+                    "(contest_id, entry_id, stage_idx, source_stage, ranking_cohort, "
+                    "rank, points, bot_id, user_id, tiebreaks_json, awarded) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         contest_id,
                         row["entry_id"],
                         int(row.get("stage_idx") or 0),
+                        source_stage,
+                        ranking_cohort,
                         row["rank"],
                         row.get("points") or 0,
                         row.get("bot_id"),
@@ -8727,25 +8746,36 @@ class Store:
         rank: int,
         *,
         stage_idx: int = 0,
+        source_stage: int | None = None,
+        ranking_cohort: str | None = None,
         points: float = 0,
         bot_id: int | None = None,
         user_id: int | None = None,
         tiebreaks_json: str = "{}",
         awarded: str = "",
     ) -> None:
+        resolved_source_stage = (
+            int(stage_idx) if source_stage is None else int(source_stage)
+        )
+        resolved_cohort = str(
+            ranking_cohort or f"stage:{resolved_source_stage}"
+        )
         with self._tx() as c:
             c.execute(
                 "INSERT INTO contest_official_results"
-                "(contest_id, entry_id, stage_idx, rank, points, bot_id, user_id, "
-                "tiebreaks_json, awarded) VALUES(?,?,?,?,?,?,?,?,?) "
+                "(contest_id, entry_id, stage_idx, source_stage, ranking_cohort, "
+                "rank, points, bot_id, user_id, tiebreaks_json, awarded) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(contest_id, entry_id) DO UPDATE SET "
-                "stage_idx=excluded.stage_idx, rank=excluded.rank, "
+                "stage_idx=excluded.stage_idx, source_stage=excluded.source_stage, "
+                "ranking_cohort=excluded.ranking_cohort, rank=excluded.rank, "
                 "points=excluded.points, bot_id=excluded.bot_id, "
                 "user_id=excluded.user_id, tiebreaks_json=excluded.tiebreaks_json, "
                 "awarded=excluded.awarded",
                 (
-                    contest_id, entry_id, stage_idx, rank, points, bot_id, user_id,
-                    tiebreaks_json, awarded,
+                    contest_id, entry_id, stage_idx, resolved_source_stage,
+                    resolved_cohort, rank, points, bot_id, user_id, tiebreaks_json,
+                    awarded,
                 ),
             )
 
