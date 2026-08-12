@@ -1488,13 +1488,13 @@ test('Holdem production replay uses empty space for a responsive current-positio
   await expect(overview).toContainText('本手底池')
   await expect(overview).toContainText('1,000')
   await expect(overview).toContainText('最近动作')
-  await expect(overview).toContainText('座位 1 · 弃牌')
-  await expect(overview).toContainText('胜手 座1 29 · 座2 40 · 平分 1')
+  await expect(overview).toContainText('admin（@zzx） · 弃牌 · 座位 1')
+  await expect(overview).toContainText('胜手 admin（@zzx） 29 · 测试Bot01（@tester01） 40 · 平分 1')
   await expect(page.getByTestId('holdem-seat-state-1')).toContainText('19,500')
   await expect(page.getByTestId('holdem-seat-state-1')).toContainText('-2,850')
   await expect(page.getByTestId('holdem-seat-state-2')).toContainText('20,500')
   await expect(page.getByTestId('holdem-seat-state-2')).toContainText('+2,850')
-  await expect(overview.getByLabel('第 70 手，座位 1 -500')).toBeVisible()
+  await expect(overview.getByLabel('第 70 手，admin（@zzx） -500')).toBeVisible()
 
   for (const viewport of [
     { width: 2560, height: 1080 },
@@ -1511,8 +1511,10 @@ test('Holdem production replay uses empty space for a responsive current-positio
     expect(timelineBox).not.toBeNull()
     expect(hudBox?.x ?? 9999).toBeLessThan(canvasBox?.x ?? 0)
     expect(canvasBox?.x ?? 9999).toBeLessThan(timelineBox?.x ?? 0)
-    // 两个信息栏按内容自然收口，小于一行的差异不用伪造空高度补齐。
-    expect(Math.abs((hudBox?.height ?? 0) - (timelineBox?.height ?? 0))).toBeLessThanOrEqual(24)
+    // 两侧信息按内容自然收口；动作区只保留有限上下文，不创建第二个纵向滚动 owner。
+    expect(timelineBox?.height ?? 9999).toBeLessThanOrEqual((canvasBox?.height ?? 0) + 1)
+    await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(7)
+    await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
     expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
     expect((timelineBox?.y ?? 0) + (timelineBox?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
@@ -1520,6 +1522,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
 
   for (const viewport of [
     { width: 1600, height: 900 },
+    { width: 1560, height: 900 },
     { width: 1536, height: 900 },
     { width: 1366, height: 768 },
     { width: 1280, height: 800 },
@@ -1532,6 +1535,8 @@ test('Holdem production replay uses empty space for a responsive current-positio
     expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
     expect(timelineBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
     expect((timelineBox?.y ?? 0) + (timelineBox?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
+    await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(7)
+    await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   }
 
@@ -1542,7 +1547,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
   ]) {
     await page.setViewportSize(viewport)
     await page.evaluate(() => window.scrollTo(0, 0))
-    await expect(timeline.getByRole('button', { name: '展开', exact: true })).toBeVisible()
+    await expect(timeline.getByRole('button', { name: '展开动作', exact: true })).toBeVisible()
     const hudBox = await overview.boundingBox()
     const canvasBox = await canvas.boundingBox()
     const timelineBox = await timeline.boundingBox()
@@ -1550,6 +1555,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
     expect(timelineBox?.y ?? 0).toBeGreaterThan((canvasBox?.y ?? 0) + (canvasBox?.height ?? 0))
     expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
   await page.setViewportSize({ width: 1366, height: 768 })
@@ -1559,7 +1565,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
   await page.evaluate(() => window.scrollTo(0, 0))
 
   await page.setViewportSize({ width: 1600, height: 900 })
-  await timeline.getByRole('button', { name: '折叠', exact: true }).click()
+  await timeline.getByRole('button', { name: '收起动作', exact: true }).click()
   const collapsedHud = await overview.boundingBox()
   const collapsedCanvas = await canvas.boundingBox()
   const collapsedTimeline = await timeline.boundingBox()
@@ -1622,13 +1628,13 @@ test('Holdem duplicate replay keeps 140-hand progress and physical Bot seats tru
   await expect(overview).toContainText('第 2/2 局 · 当前手 70 / 70')
   await expect(overview).toContainText('总计已结算 140 手')
   await expect(overview).toContainText('剩余 0 手')
-  await expect(overview).toContainText('座位 1 · 弃牌')
-  await expect(overview).toContainText('胜手 座1 70 · 座2 70')
+  await expect(overview).toContainText('physical_alpha（@alpha） · 弃牌 · 座位 1')
+  await expect(overview).toContainText('胜手 physical_alpha（@alpha） 70 · physical_beta（@beta） 70')
   await expect(overview.getByRole('progressbar', { name: '已完成手数' })).toHaveAttribute('aria-valuemax', '140')
   await expect(overview.getByRole('progressbar', { name: '已完成手数' })).toHaveAttribute('aria-valuenow', '140')
-  await expect(overview.getByLabel('第 2 局第 70 手，座位 1 -100')).toBeVisible()
+  await expect(overview.getByLabel('第 2 局第 70 手，physical_alpha（@alpha） -100')).toBeVisible()
 
-  await expect(page.locator('main')).toContainText('第 2 局 · 座1 · 弃牌')
+  await expect(page.locator('main')).toContainText('第 2 局 · physical_alpha（@alpha） · 弃牌（座位 1）')
   await expect(page.locator('main')).toContainText('结束 · 无单一整场胜者 · 正常结束')
   await expect(page.locator('main')).not.toContainText('结束 · 平局')
   await page.getByRole('combobox', { name: '跳转手' }).click()
@@ -1682,10 +1688,17 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
   const overview = page.getByTestId('holdem-position-overview')
   const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
   const eventLog = page.getByTestId('human-event-log')
+  const matchup = page.getByTestId('human-matchup')
   await expect(overview).toContainText('当前手 70 / 70')
   await expect(overview).toContainText('河牌')
-  await expect(overview).toContainText('座位 2 · 加注至 100')
+  await expect(overview).toContainText('tester01 · 加注至 100 · 座位 2')
   await expect(overview).not.toContainText(/6h|5h|Kh|Ts/)
+  await expect(matchup).toContainText('admin')
+  await expect(matchup).toContainText('tester01')
+  await expect(page.locator('[data-slot="summary-strip"]')).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /退出操作并观战/ })).toBeVisible()
+  await expect(eventLog.getByTestId('human-action-context-row')).toHaveCount(7)
+  await expect(eventLog.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
 
   let hudBox = await overview.boundingBox()
   let canvasBox = await canvas.boundingBox()
@@ -1695,8 +1708,10 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
 
   for (const viewport of [
     { width: 1600, height: 900 },
+    { width: 1560, height: 900 },
     { width: 1536, height: 900 },
     { width: 1366, height: 768 },
+    { width: 1280, height: 800 },
   ]) {
     await page.setViewportSize(viewport)
     hudBox = await overview.boundingBox()
@@ -1704,6 +1719,7 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
     logBox = await eventLog.boundingBox()
     expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
     expect(logBox?.x ?? 0).toBeGreaterThan((canvasBox?.x ?? 0) + (canvasBox?.width ?? 0))
+    await expect(eventLog.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
   for (const viewport of [
@@ -1717,6 +1733,7 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
     expect((hudBox?.y ?? 9999) + (hudBox?.height ?? 0)).toBeLessThanOrEqual((canvasBox?.y ?? 0) + 1)
     expect(logBox?.y ?? 0).toBeGreaterThan((canvasBox?.y ?? 0) + (canvasBox?.height ?? 0))
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await expect(eventLog.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
   await monitor.expectClean()
 })
@@ -1960,7 +1977,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   expect(await sse.emit(reconnectedEvents[4])).toBe(true)
   await expect(page.getByText('事件 4/5', { exact: true })).toBeVisible()
   await expect(page.getByText('事件 5/5 · 直播', { exact: true })).toBeVisible({ timeout: 2_500 })
-  await page.getByRole('button', { name: '暂停', exact: true }).click()
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
 
   expect(await sse.disconnect()).toBe(true)
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
@@ -1990,7 +2007,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await page.waitForTimeout(850)
   await expect(page.getByText('事件 5/9', { exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: '播放', exact: true }).click()
+  await page.getByRole('button', { name: '继续回放', exact: true }).click()
   await expect(page.getByText('事件 6/9', { exact: true })).toBeVisible({ timeout: 2_500 })
   await expect(page.getByText('事件 7/9', { exact: true })).toBeVisible({ timeout: 2_500 })
   await expect(page.getByText('事件 8/9', { exact: true })).toBeVisible({ timeout: 2_500 })
@@ -1998,9 +2015,9 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await expect(page.getByText('第 2/70 手', { exact: true })).toBeVisible()
 
   // 终态到尾后可从事件 1 重播，也可显式跳到结局；两者都不隐式跳转。
-  await page.getByRole('button', { name: '播放', exact: true }).click()
+  await page.getByRole('button', { name: '从头重播', exact: true }).click()
   await expect(page.getByText('事件 1/9', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '暂停', exact: true }).click()
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
   await page.getByRole('button', { name: /已结束 · 剩余 8 个事件 · 跳到结局/ }).click()
   await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '上一个事件', exact: true }).click()
@@ -2035,7 +2052,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await monitor.expectClean(expectedDetailCancellations())
 })
 
-test('private Bot debug stays folded, safe, bounded on mobile, and hidden when unauthorized', async ({ page }) => {
+test('private Bot debug stays folded, safe, bounded, and absent when empty or unauthorized', async ({ page }) => {
   await loginThroughUi(page, USER)
   const monitor = monitorBrowser(page)
   const allowedId = 'mock-private-debug-allowed'
@@ -2044,6 +2061,7 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
     `/api/matches/${allowedId}`,
   )
   const deniedId = 'mock-private-debug-denied'
+  const emptyId = 'mock-private-debug-empty'
   const staleId = 'mock-private-debug-stale'
   const longToken = `LONG_${'A'.repeat(3_950)}`
   const replay = [
@@ -2067,7 +2085,7 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
     },
   })
 
-  for (const id of [allowedId, deniedId, staleId]) {
+  for (const id of [allowedId, deniedId, emptyId, staleId]) {
     await routeStructuredReplay(page, id, replay)
     await page.route(`**/api/matches/${id}/view`, async (route) => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
@@ -2078,6 +2096,13 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(detail(allowedId, true)),
+    })
+  })
+  await page.route(`**/api/matches/${emptyId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(detail(emptyId, true)),
     })
   })
   let deniedDetailRequests = 0
@@ -2120,6 +2145,22 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
         total_bytes: 4_096,
         dropped_count: 3,
         updated_at: '2026-08-10T12:00:00',
+      }),
+    })
+  })
+  let emptyDebugRequests = 0
+  await page.route(`**/api/matches/${emptyId}/debug`, async (route) => {
+    emptyDebugRequests += 1
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        match_id: emptyId,
+        entries: [],
+        entry_count: 0,
+        total_bytes: 0,
+        dropped_count: 0,
+        updated_at: null,
       }),
     })
   })
@@ -2182,6 +2223,13 @@ test('private Bot debug stays folded, safe, bounded on mobile, and hidden when u
   await page.evaluate(() => window.scrollBy(0, 220))
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
     .toBeLessThanOrEqual(1)
+
+  // 有读取权限但没有实际 debug 输出时，整个私有区域都不占位。
+  await page.goto(`/#/match/${emptyId}`)
+  await expect.poll(() => emptyDebugRequests).toBe(1)
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(page.getByTestId('bot-debug-panel')).toHaveCount(0)
+  await expect(page.getByText('Bot 调试信息', { exact: true })).toHaveCount(0)
 
   // 上一局的私有响应在路由切换后才返回，不得渲染到新对局。
   await page.goto(`/#/match/${staleId}`)
@@ -2327,13 +2375,14 @@ test('MatchViewer preserves more than 4000 events across reconnect snapshots', a
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
   const position = page.getByTestId('playback-position')
   await expect(position).toHaveText('事件 1/4101')
-  await page.getByRole('button', { name: '暂停', exact: true }).click()
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
   const cursorBeforeReconnect = Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0)
   expect(await sse.disconnect()).toBe(true)
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: grownEvents })).toBe(true)
   await expect(position).toHaveText(`事件 ${cursorBeforeReconnect}/4351`)
-  await expect(page.getByText(`动作时序 (${cursorBeforeReconnect}/4351)`, { exact: true })).toBeVisible()
+  await expect(page.getByText(/^动作上下文 \(/)).toBeVisible()
+  await expect(page.getByTestId('match-action-context-row')).toHaveCount(Math.min(7, cursorBeforeReconnect))
   await monitor.expectClean(expectedDetailCancellations())
 })
 
@@ -2505,14 +2554,14 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
     await expect(page.locator('main')).not.toContainText('legacy_internal_reason')
     if (fixture.reason === 'five') {
       // The generic timeline must retain the game's richer match_end description.
-      await expect(page.getByText('结束 · 座1获胜 · 连成五子', { exact: true })).toBeVisible()
+      await expect(page.getByText('结束 · reason_a（@alpha）获胜 · 连成五子', { exact: true })).toBeVisible()
     }
     if (fixture.id === 'mock-reason-pencil-illegal') {
       for (let index = 1; index < fixture.events.length; index += 1) {
         await page.getByRole('button', { name: '下一个事件', exact: true }).click()
       }
-      await expect(page.getByText('座1 · 已用 1.2 秒 · 剩余 898.8 秒', { exact: true })).toBeVisible()
-      await expect(page.getByText('座1 · 错误让行', { exact: true })).toBeVisible()
+      await expect(page.getByText('reason_a（@alpha） · 已用 1.2 秒 · 剩余 898.8 秒 · 先手 / 红', { exact: true })).toBeVisible()
+      await expect(page.getByText('reason_a（@alpha） · 错误让行 · 先手 / 红', { exact: true })).toBeVisible()
       await expect(page.getByText('illegal', { exact: true })).toHaveCount(0)
       await expect(page.getByText('time_used', { exact: true })).toHaveCount(0)
     }
@@ -2563,8 +2612,8 @@ test('terminal reason presentation keeps normal adjudication neutral and faults 
     await expect(reason).toHaveText(`（${fixture.label}）`)
     await expect(reason).toHaveAttribute('data-tone', fixture.tone)
     if (id === 'mock-human-illegal') {
-      await expect(page.getByText('座1 · 非法连边', { exact: true })).toBeVisible()
-      await expect(page.getByText('座1 · 已用 2 秒 · 剩余 898 秒', { exact: true })).toBeVisible()
+      await expect(page.getByText('reason_bot（@alpha） · 非法连边 · 先手 / 红', { exact: true })).toBeVisible()
+      await expect(page.getByText('reason_bot（@alpha） · 已用 2 秒 · 剩余 898 秒 · 先手 / 红', { exact: true })).toBeVisible()
       await expect(page.getByText('illegal', { exact: true })).toHaveCount(0)
       await expect(page.getByText('time_used', { exact: true })).toHaveCount(0)
     }
@@ -2790,8 +2839,14 @@ test('Pencil human canvas rejects the production box-center click and stays squa
   const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
   const eventLog = page.getByTestId('human-event-log')
   const overview = page.getByTestId('pencil-position-overview')
+  const matchup = page.getByTestId('human-matchup')
   await expect(canvas).toBeVisible()
   await expect(overview).toBeVisible()
+  await expect(matchup).toContainText('pencil_reference')
+  await expect(matchup).toContainText('tester2')
+  await expect(page.locator('[data-slot="summary-strip"]')).toHaveCount(0)
+  await expect(eventLog.getByTestId('human-action-context-row')).toHaveCount(7)
+  await expect(eventLog.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
 
   for (const viewport of [
     { width: 2560, height: 1080 },
@@ -2799,9 +2854,11 @@ test('Pencil human canvas rejects the production box-center click and stays squa
     { width: 2048, height: 1024 },
     { width: 2048, height: 1152 },
     { width: 1600, height: 900 },
+    { width: 1560, height: 900 },
     { width: 1536, height: 1080 },
     { width: 1366, height: 768 },
     { width: 1312, height: 700 },
+    { width: 1280, height: 800 },
     { width: 1024, height: 768 },
     { width: 844, height: 390 },
     { width: 390, height: 700 },
@@ -2848,6 +2905,7 @@ test('Pencil human canvas rejects the production box-center click and stays squa
     }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow, `${viewport.width}px human view overflow`).toBeLessThanOrEqual(1)
+    await expect(eventLog.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
@@ -3067,7 +3125,7 @@ test('Pencil human canvas replaces an equal-length snapshot and finishes animati
 test('Pencil replay gives the square board priority while the timeline remains usable during page scroll', async ({ page }) => {
   const monitor = monitorBrowser(page)
   // 线上 Safari 对局 20260810143624-4149d6a3：此前宽屏方形棋盘按剩余横向
-  // 空间放大到 1200px+，首屏只能看到上半局面；完整时序又把右栏撑出视口。
+  // 空间放大到 1200px+，首屏只能看到上半局面；完整事件列表曾把右栏撑出视口。
   // fixture 使用上方从该对局提取的完整54步轨迹，并确定性重建原206个公开事件。
   const matchId = '20260810143624-4149d6a3'
   const expectedDetailCancellations = captureExactGetCancellations(
@@ -3168,6 +3226,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
     { width: 2048, height: 1024 },
     { width: 2048, height: 1152 },
     { width: 1600, height: 900 },
+    { width: 1560, height: 900 },
     { width: 1536, height: 1080 },
   ]) {
     await page.setViewportSize(viewport)
@@ -3196,17 +3255,14 @@ test('Pencil replay gives the square board priority while the timeline remains u
     expect(overviewContainment.overflowY).not.toBe('visible')
     expect(desktopTimeline?.x ?? 0).toBeGreaterThan((desktopCanvas?.x ?? 0) + (desktopCanvas?.width ?? 0))
     expect((desktopTimeline?.y ?? 0) + (desktopTimeline?.height ?? 0)).toBeLessThanOrEqual(viewport.height + 1)
-    const timelineScroll = await timeline.locator('div.overflow-y-auto').evaluate((element) => ({
-      clientHeight: element.clientHeight,
-      scrollHeight: element.scrollHeight,
-    }))
-    expect(timelineScroll.scrollHeight).toBeGreaterThan(timelineScroll.clientHeight)
+    await expect(timeline.getByTestId('match-action-context-row')).toHaveCount(7)
+    await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
   }
 
-  // 用户主动折叠宽屏时序后不得继续保留一条空右轨；概览与棋盘应并排占用主区，
+  // 用户主动折叠宽屏动作上下文后不得继续保留一条空右轨；概览与棋盘应并排占用主区，
   // 折叠标题移到下一行，展开后恢复三栏。
   await page.setViewportSize({ width: 1600, height: 900 })
-  await timeline.getByRole('button', { name: '折叠', exact: true }).click()
+  await timeline.getByRole('button', { name: '收起动作', exact: true }).click()
   const collapsedCanvas = await canvas.boundingBox()
   const collapsedOverview = await overview.boundingBox()
   const collapsedTimeline = await timeline.boundingBox()
@@ -3219,7 +3275,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
     (collapsedCanvas?.y ?? 0) + (collapsedCanvas?.height ?? 0),
   ))
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
-  await timeline.getByRole('button', { name: '展开', exact: true }).click()
+  await timeline.getByRole('button', { name: '展开动作', exact: true }).click()
 
   for (const viewport of [
     { width: 1366, height: 768 },
@@ -3276,15 +3332,16 @@ test('Pencil replay gives the square board priority while the timeline remains u
   ]) {
     await page.setViewportSize(viewport)
     const seatOneScore = page.getByTestId('pencil-seat-score-1')
-    await expect(seatOneScore).toContainText('座位 1 · 红')
+    await expect(seatOneScore).toContainText('pencil_reference')
+    await expect(seatOneScore).toContainText('先手 · 红 · 座位 1')
     await expect(seatOneScore).toContainText('4')
-    await expect(seatOneScore).not.toContainText('pencil_reference')
-    await expect(timeline.getByRole('button', { name: '展开', exact: true })).toBeVisible()
+    await expect(timeline.getByRole('button', { name: '展开动作', exact: true })).toBeVisible()
     const bounds = await canvas.boundingBox()
     expect(bounds).not.toBeNull()
     expect(Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0))).toBeLessThanOrEqual(1)
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow, `${viewport.width}px replay overflow`).toBeLessThanOrEqual(1)
+    await expect(timeline.locator('[data-scroll-region], .overflow-y-auto, .overflow-y-scroll')).toHaveCount(0)
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
     expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
     await page.evaluate(() => window.scrollTo(0, 0))
@@ -3577,7 +3634,7 @@ test('Pencil replay reconstructs the judge score for an illegal terminal', async
   await expect(overview).toContainText('0/25')
   await expect(overview).toContainText('25')
   await expect(overview).not.toContainText('2/25')
-  await expect(overview).toContainText('蓝方经裁判判定获胜')
+  await expect(overview).toContainText('legal_b（@beta） 经裁判判定获胜')
   await expect(overview).toContainText('终止前红 0 格 · 蓝 0 格 · 25 格未决')
   await expect(page.getByTestId('pencil-box-map').locator('[data-owner="0"], [data-owner="1"]')).toHaveCount(0)
 })
@@ -3639,16 +3696,16 @@ test('MatchViewer presents a zero-hand protocol loss as a terminal incident', as
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   const incident = page.getByRole('alert').filter({ hasText: 'Bot 技术判负' })
-  await expect(incident).toContainText('admin（@zzx）（座位 1）')
-  await expect(incident).toContainText('zxx02（@zhouzixiang）（座位 2）获胜')
+  await expect(incident).toContainText('admin（@zzx） · 座位 1')
+  await expect(incident).toContainText('zxx02（@zhouzixiang） · 座位 2 获胜')
   await expect(incident).toContainText('missing_response')
   await expect(incident).toContainText('第 1 次决策')
   await expect(incident).toContainText('Bot 响应缺少必填 response 字段')
   await expect(page.locator('main')).not.toContainText('落后')
   await expect(page.getByText(/\/70 手/)).toHaveCount(0)
-  await expect(page.getByRole('button', { name: '播放', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /回放|重播|跟播/ })).toHaveCount(0)
   await expect(page.getByText('手导航（点击跳转）', { exact: true })).toHaveCount(0)
-  await expect(page.getByText('结束 · 座2获胜 · Bot 响应协议错误', { exact: true })).toBeVisible()
+  await expect(page.getByText('结束 · zxx02（@zhouzixiang） 获胜 · Bot 响应协议错误', { exact: true })).toBeVisible()
   const canvasBox = await page.locator('canvas').boundingBox()
   expect(canvasBox).not.toBeNull()
   expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(16 / 9, 1)
@@ -3709,8 +3766,8 @@ test('MatchViewer keeps chess history playable after a mid-game technical loss',
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
   await expect(page.getByText('共 2 步', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: '播放', exact: true })).toBeVisible()
-  await expect(page.locator('main')).toContainText('动作时序')
+  await expect(page.getByRole('button', { name: /回放|重播|跟播/ })).toBeVisible()
+  await expect(page.locator('main')).toContainText('动作上下文')
   await expect(page.getByRole('alert')).toContainText('missing_response')
   await monitor.expectClean(expectedDetailCancellations())
 })

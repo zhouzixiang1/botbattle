@@ -1,5 +1,6 @@
 import { Badge } from '@/components/ui/badge'
 import type { GameAuxiliaryProps, RawEvent } from '@/games/base'
+import type { SeatInfo } from '@/games/canvas-types'
 import {
   holdemEventLeg,
   holdemPhysicalPairForEvent,
@@ -8,6 +9,7 @@ import {
   type HoldemViewModel,
   type Street,
 } from '@/games/holdem/reducer'
+import { eventSeatSubject, seatDisplay } from '@/games/seat-display'
 
 const STREET_LABELS: Record<Street, string> = {
   preflop: '翻牌前',
@@ -33,13 +35,15 @@ function formatNet(value: number): string {
   return `${value >= 0 ? '+' : ''}${formatChips(value)}`
 }
 
-function actionText(event: RawEvent | undefined): string {
+function actionText(event: RawEvent | undefined, seats?: SeatInfo[]): string {
   if (!event) return '等待首个动作'
   const seat = holdemPhysicalSeatForEvent(event.player, event)
   const action = String(event.action ?? '')
   const amount = Number(event.amount ?? 0)
   const amountText = amount > 0 ? ` ${formatChips(amount)}` : ''
-  return `座位 ${Number.isFinite(seat) ? seat + 1 : '?'} · ${ACTION_LABELS[action] ?? action}${amountText}`
+  const subject = eventSeatSubject(seats, seat)
+  const position = Number.isFinite(seat) ? `座位 ${seat + 1}` : '位置未知'
+  return `${subject} · ${ACTION_LABELS[action] ?? action}${amountText} · ${position}`
 }
 
 /**
@@ -48,7 +52,7 @@ function actionText(event: RawEvent | undefined): string {
  * 这里只展示公开事件可推导的局面，不读取底牌，也不会重复顶部 Bot 身份卡。
  * 宽屏时由通用 MatchViewer 放在牌桌侧栏，中屏横排在牌桌上方，窄屏自然堆叠。
  */
-export function HoldemReplayHud({ vm }: GameAuxiliaryProps) {
+export function HoldemReplayHud({ vm, seats }: GameAuxiliaryProps) {
   const state = vm as HoldemViewModel
   if (!state?.seats || !Array.isArray(state.events)) return null
 
@@ -75,6 +79,8 @@ export function HoldemReplayHud({ vm }: GameAuxiliaryProps) {
   const potLabel = state.pot > 0 ? '当前底池' : state.lastSettle ? '本手底池' : '当前底池'
   const potValue = state.pot > 0 ? state.pot : state.lastSettle?.pot ?? 0
   const lastAction = latestHoldemHandAction(state.events)
+  const identities = ([0, 1] as const).map((seat) => seatDisplay(seats?.[seat], seat))
+  const subjects = ([0, 1] as const).map((seat) => eventSeatSubject(seats, seat))
   const actingText = state.status === 'error'
     ? '对局已中止'
     : state.matchOver
@@ -90,7 +96,7 @@ export function HoldemReplayHud({ vm }: GameAuxiliaryProps) {
           : lastAction && state.toAct === null
             ? '等待下一街或结算'
           : state.toAct === 0 || state.toAct === 1
-            ? `座位 ${state.toAct + 1} 行动`
+            ? `${subjects[state.toAct]} 行动`
             : '等待裁判'
   const recentSettles = settles.slice(-6).reverse()
   const wins = ([0, 1] as const).map((seat) => settles.filter((event) => {
@@ -151,6 +157,7 @@ export function HoldemReplayHud({ vm }: GameAuxiliaryProps) {
 
         {([0, 1] as const).map((seat) => {
           const player = state.seats[seat]
+          const identity = identities[seat]
           const handWinners = state.lastSettle?.winners ?? []
           const status = state.status === 'error'
             ? '已中止'
@@ -172,9 +179,12 @@ export function HoldemReplayHud({ vm }: GameAuxiliaryProps) {
               data-testid={`holdem-seat-state-${seat + 1}`}
               className={`min-w-0 rounded-lg border px-3 py-2 ${hasStarted && state.toAct === seat && !state.matchOver ? 'border-primary/50 bg-primary/5 ring-1 ring-primary/20' : 'border-border/70 bg-muted/20'}`}
             >
-              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5">
-                <span className="text-xs font-semibold text-foreground">座位 {seat + 1}</span>
-                <span className="text-[10px] text-muted-foreground sm:text-[11px]">{hasStarted ? (seat === state.sbSeat ? '小盲 / 按钮' : '大盲') : '尚未发牌'}</span>
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <span className="min-w-0 truncate text-xs font-semibold text-foreground">{identity.subject}</span>
+                <span className="shrink-0 text-[10px] text-muted-foreground sm:text-[11px]">{identity.kind}</span>
+              </div>
+              <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                {identity.owner ? `${identity.owner} · ` : ''}{identity.seat} · {hasStarted ? (seat === state.sbSeat ? '小盲 / 按钮' : '大盲') : '尚未发牌'}
               </div>
               <div className="mt-1.5 grid grid-cols-3 gap-1.5 text-[11px]">
                 <div><span className="block text-muted-foreground">剩余</span><span className="font-mono font-medium text-foreground">{formatChips(player.chips)}</span></div>
@@ -192,14 +202,14 @@ export function HoldemReplayHud({ vm }: GameAuxiliaryProps) {
       <div className="mt-2 grid grid-cols-[0.9fr_1.1fr] gap-2 @max-3xs/holdem:grid-cols-1">
         <div className="min-w-0 rounded-lg border border-border/70 px-3 py-2">
           <div className="text-[11px] text-muted-foreground">最近动作</div>
-          <div className="mt-0.5 truncate text-xs font-medium text-foreground">{actionText(lastAction)}</div>
+          <div className="mt-0.5 truncate text-xs font-medium text-foreground">{actionText(lastAction, seats)}</div>
           <div className="mt-1 text-[11px] text-muted-foreground">
-            胜手 座1 {wins[0]} · 座2 {wins[1]}{draws > 0 ? ` · 平分 ${draws}` : ''}
+            胜手 {subjects[0]} {wins[0]} · {subjects[1]} {wins[1]}{draws > 0 ? ` · 平分 ${draws}` : ''}
           </div>
         </div>
         <div className="min-w-0 rounded-lg border border-border/70 px-3 py-2">
           <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-            <span>最近 {recentSettles.length || 0} 手 · 座位 1 净变化</span>
+            <span>最近 {recentSettles.length || 0} 手 · {subjects[0]} 净变化</span>
             <span className="shrink-0">单位：筹码</span>
           </div>
           {recentSettles.length ? (
@@ -218,7 +228,7 @@ export function HoldemReplayHud({ vm }: GameAuxiliaryProps) {
                 return (
                   <div
                     key={`${eventLeg ?? 0}-${hand}-${delta}`}
-                    aria-label={`${handLabel}，座位 1 ${formatNet(delta)}`}
+                    aria-label={`${handLabel}，${subjects[0]} ${formatNet(delta)}`}
                     className={`min-w-0 rounded px-1 py-1 text-center font-mono text-[10px] font-medium ${delta > 0 ? 'bg-success/10 text-success' : delta < 0 ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'}`}
                   >
                     {formatNet(delta)}

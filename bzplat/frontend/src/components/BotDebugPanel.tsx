@@ -51,6 +51,9 @@ export default function BotDebugPanel({
     payload.entries.filter((entry) => entry.seat === seat),
   )
 
+  // 有权限但没有任何实际输出时不占据页面层级；权限本身不是可展示内容。
+  if (payload.entry_count <= 0) return null
+
   const copyText = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -95,7 +98,7 @@ export default function BotDebugPanel({
               <TabsList className="grid w-full grid-cols-2">
                 {([0, 1] as const).map((seat) => (
                   <TabsTrigger key={seat} value={String(seat)} className="min-w-0">
-                    <span className="truncate">座位 {seat + 1} · {seatNames[seat]}</span>
+                    <span className="truncate">{seatNames[seat]} · 座位 {seat + 1}</span>
                     <span className="ml-1 text-[10px] opacity-70">({bySeat[seat].length})</span>
                   </TabsTrigger>
                 ))}
@@ -148,7 +151,7 @@ export default function BotDebugPanel({
                                       variant="ghost"
                                       size="icon-sm"
                                       className="shrink-0"
-                                      aria-label={`复制座位 ${seat + 1} 第 ${entry.turn} 次调试信息`}
+                                      aria-label={`复制 ${seatNames[seat]} 第 ${entry.turn} 次调试信息`}
                                       onClick={() => void copyText(text)}
                                     >
                                       <Copy className="size-3.5" />

@@ -22,6 +22,7 @@ import {
   reduceHoldemEvents,
 } from './reducer'
 import type { GameCanvasRenderer, Scene, SceneDelta, SeatInfo } from '@/games/canvas-types'
+import { seatDisplay } from '@/games/seat-display'
 import { ensurePokerJS } from '@/lib/pokerjs'
 
 // 牌桌布局比例（相对设计基线宽 W0=900）。桌面使用紧凑 16:9，
@@ -276,14 +277,9 @@ export const PokerCanvasRenderer: GameCanvasRenderer<HoldemScene> = {
   },
 }
 
-/** 座位显示名：BOT 名优先，否则 @用户名，再回退「座位 n」。 */
+/** 牌桌主标签使用 Bot 名或真人公开姓名；座位仅保留在次级行。 */
 function seatDisplayName(info: SeatInfo | undefined, idx: number): string {
-  const bot = (info?.botName || '').trim()
-  if (bot) return bot
-  const owner = (info?.ownerName || '').trim()
-  if (owner) return info?.isHuman ? `${owner}（人类）` : owner
-  // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
-  return `座位 ${idx + 1}`
+  return seatDisplay(info, idx).subject
 }
 
 function drawSeat(
@@ -344,12 +340,10 @@ function drawSeat(
   ctx.textAlign = 'center'
   ctx.fillText(fitText(ctx, name, seatW), x, y + 16 * s)
   ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = `${Math.round(11 * s)}px "DM Sans"`
-  const ownerLine = info?.isHuman
-    ? `@${info?.ownerName || '人类'}（你）`
-    : info?.ownerName
-      ? `@${info.ownerName}`
-      // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
-      : `座位 ${idx + 1}`
+  const identity = seatDisplay(info, idx)
+  const ownerLine = identity.owner
+    ? `${identity.owner} · ${identity.seat}`
+    : `${identity.kind} · ${identity.seat}`
   ctx.fillText(fitText(ctx, ownerLine, seatW), x, y + 30 * s)
   // 本轮剩余筹码 + 累计净筹码（旧 PokerTable 底部「累计」搬到座位旁）。
   // fitText 保护：大数字（如 20000）按座位宽度截断，防溢出。

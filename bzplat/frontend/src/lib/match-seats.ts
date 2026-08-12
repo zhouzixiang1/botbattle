@@ -46,9 +46,13 @@ export function seatInfos(m: MatchSeatRow | null | undefined): SeatInfo[] | unde
     const participant = resolveMatchParticipant(m, side)
     const hasPublicBotLabel = participant.botLabel !== 'Bot 名称不可用'
       && participant.botLabel !== 'Bot 已删除'
+    const missingOwnerLabel = participant.isHuman ? '真人用户不可用' : '所属用户不可用'
     return {
       botName: !participant.isHuman && hasPublicBotLabel ? participant.botLabel : undefined,
       ownerName: participant.ownerName || undefined,
+      ownerDisplayName: participant.ownerLabel !== missingOwnerLabel
+        ? participant.ownerLabel
+        : undefined,
       isHuman: participant.isHuman,
     }
   })

@@ -3,6 +3,7 @@ import { Clock } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import type { GameAuxiliaryProps } from '@/games/base'
 import type { PencilViewModel } from '@/games/pencil/reducer'
+import { eventSeatSubject, seatDisplay } from '@/games/seat-display'
 
 function formatClock(seconds: number): string {
   const value = Math.max(0, Math.floor(seconds))
@@ -28,7 +29,7 @@ function metric(label: string, value: number, total?: number) {
  * 本组件同步切为纵向。空白区域只承载可从当前回放帧直接推导的局面数据，避免
  * 重复通用对阵卡或展示并不存在的策略指标。
  */
-export function PencilReplayHud({ vm }: GameAuxiliaryProps) {
+export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
   const state = vm as PencilViewModel
   if (!state?.scores) return null
 
@@ -56,12 +57,14 @@ export function PencilReplayHud({ vm }: GameAuxiliaryProps) {
     ? state.winner
     : null
   const actingSeat = state.toAct === 0 || state.toAct === 1 ? state.toAct : null
+  const identities = ([0, 1] as const).map((seat) => seatDisplay(seats?.[seat], seat))
+  const subjects = ([0, 1] as const).map((seat) => eventSeatSubject(seats, seat))
   const stateLabel = state.matchOver
     ? '对局已结束'
     : state.mustPass && actingSeat != null
-      ? `座位 ${actingSeat + 1} 让行`
+      ? `${subjects[actingSeat]} 需要让行`
     : actingSeat != null
-      ? `座位 ${actingSeat + 1} 行动`
+      ? `${subjects[actingSeat]} 正在行动`
       : '等待裁判'
 
   return (
@@ -92,6 +95,7 @@ export function PencilReplayHud({ vm }: GameAuxiliaryProps) {
 
       <div className="mt-2 grid grid-cols-2 gap-2 2xl:grid-cols-1">
         {([0, 1] as const).map((seat) => {
+          const identity = identities[seat]
           const isActing = !state.matchOver && state.toAct === seat
           const remaining = state.timeRemaining?.[seat]
           const timedOut = state.timeOut === seat
@@ -104,10 +108,15 @@ export function PencilReplayHud({ vm }: GameAuxiliaryProps) {
               className={`min-w-0 rounded-lg border px-2.5 py-2 ${tint} ${isActing ? 'border-primary/50 ring-2 ring-primary/25' : 'border-border'}`}
             >
               <div className="flex min-w-0 items-center gap-2">
-                <Badge variant="outline" className={`shrink-0 px-1.5 text-[11px] leading-tight ${color}`}>
-                  座位 {seat + 1} · {seat === 0 ? '红' : '蓝'}
-                </Badge>
+                <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{identity.subject}</span>
                 <span className={`ml-auto shrink-0 font-mono text-xl font-bold leading-none ${color}`}>{state.scores[seat]}</span>
+              </div>
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+                {identity.owner && <span className="min-w-0 truncate">{identity.owner}</span>}
+                {identity.owner && <span aria-hidden="true">·</span>}
+                <Badge variant="outline" className={`shrink-0 px-1.5 text-[10px] leading-tight ${color}`}>
+                  {seat === 0 ? '先手 · 红' : '后手 · 蓝'} · {identity.seat}
+                </Badge>
               </div>
               <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
                 {isActing && !timedOut && (
@@ -195,10 +204,10 @@ export function PencilReplayHud({ vm }: GameAuxiliaryProps) {
           <div className="mt-1.5 rounded-lg bg-muted/45 px-2.5 py-2">
             <div className="text-xs font-semibold text-foreground">
               {adjudicatedWinner != null
-                ? `${adjudicatedWinner === 0 ? '红方' : '蓝方'}经裁判判定获胜`
+                ? `${subjects[adjudicatedWinner]} 经裁判判定获胜`
                 : leader == null
                   ? '双方暂时持平'
-                  : `${leader === 0 ? '红方' : '蓝方'}领先 ${scoreGap} 格`}
+                  : `${subjects[leader]} 领先 ${scoreGap} 格`}
             </div>
             <div className="mt-1 text-[11px] leading-tight text-muted-foreground">
               {adjudicatedWinner != null
