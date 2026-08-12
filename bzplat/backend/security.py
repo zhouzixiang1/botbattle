@@ -11,6 +11,7 @@ import re
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -67,6 +68,59 @@ _STATIC_SKIP_EXT = (
     ".map",
     ".webp",
 )
+
+
+def normalize_public_origin(value: str) -> str:
+    """Return one canonical HTTP(S) origin without path/query/credentials."""
+    raw = (value or "").strip()
+    if not raw or "\\" in raw or any(ord(char) < 0x20 or char.isspace() for char in raw):
+        raise ValueError("origin 格式无效")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("origin 格式无效") from exc
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("origin 必须是不含路径、查询或凭据的 HTTP(S) origin")
+    host = parsed.hostname
+    try:
+        if ":" in host:
+            host = f"[{host.lower()}]"
+        else:
+            host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("origin 主机名无效") from exc
+    if port == (443 if scheme == "https" else 80):
+        port = None
+    return f"{scheme}://{host}{f':{port}' if port is not None else ''}"
+
+
+def websocket_origin_allowed(
+    origin: str | None,
+    *,
+    public_origin: str | None = None,
+) -> bool:
+    """Fail closed unless a browser Origin matches ``BZ_PUBLIC_ORIGIN`` exactly."""
+    expected = (
+        os.environ.get("BZ_PUBLIC_ORIGIN", "")
+        if public_origin is None
+        else public_origin
+    )
+    if not origin or not expected:
+        return False
+    try:
+        return normalize_public_origin(origin) == normalize_public_origin(expected)
+    except ValueError:
+        return False
 
 
 class _UploadBodyTooLarge(MultiPartException):

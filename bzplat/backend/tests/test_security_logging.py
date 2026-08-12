@@ -20,7 +20,12 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
-from bzplat.backend.logging_config import ACCESS_LOGGER, AUDIT_LOGGER, setup_logging
+from bzplat.backend.logging_config import (
+    ACCESS_LOGGER,
+    AUDIT_LOGGER,
+    UvicornRequestTargetFilter,
+    setup_logging,
+)
 from bzplat.backend.security import (
     AVATAR_BODY_MAX_BYTES,
     BOT_UPLOAD_BODY_MAX_BYTES,
@@ -29,6 +34,8 @@ from bzplat.backend.security import (
     RateLimitMiddleware,
     audit_log,
     client_ip,
+    normalize_public_origin,
+    websocket_origin_allowed,
 )
 
 
@@ -42,6 +49,105 @@ def log_dir(tmp_path):
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def test_public_origin_normalization_and_exact_websocket_match():
+    assert normalize_public_origin("HTTPS://Example.COM:443/") == "https://example.com"
+    assert normalize_public_origin("http://127.0.0.1:50381") == "http://127.0.0.1:50381"
+    assert websocket_origin_allowed(
+        "HTTPS://Example.COM:443/", public_origin="https://example.com"
+    )
+    assert not websocket_origin_allowed(
+        "https://other.example", public_origin="https://example.com"
+    )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "",
+        "null",
+        "ws://example.com",
+        "https://user:pass@example.com",
+        "https://example.com/path",
+        "https://example.com?query=1",
+        "https://example.com#fragment",
+        "https://example.com\\@evil.test",
+    ],
+)
+def test_public_origin_rejects_missing_or_non_origin_values(origin):
+    assert not websocket_origin_allowed(origin, public_origin="https://example.com")
+
+
+def test_websocket_origin_fails_closed_without_public_origin(monkeypatch):
+    monkeypatch.delenv("BZ_PUBLIC_ORIGIN", raising=False)
+    assert not websocket_origin_allowed("https://example.com")
+    assert not websocket_origin_allowed(
+        "https://example.com", public_origin="https://example.com/path"
+    )
+
+
+def test_uvicorn_filter_projects_http_and_websocket_targets_to_path_only():
+    secret = "session-secret-must-not-survive"
+    request_filter = UvicornRequestTargetFilter()
+    http_record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        (("127.0.0.1", 1234), "GET", f"/api/items?token={secret}", "1.1", 200),
+        None,
+    )
+    ws_record = logging.LogRecord(
+        "uvicorn.error",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "WebSocket %s" [accepted]',
+        (("127.0.0.1", 1234), f"/api/matches/m1/play?token={secret}"),
+        None,
+    )
+
+    assert request_filter.filter(http_record)
+    assert request_filter.filter(ws_record)
+    assert http_record.args[1:] == ("GET", "/api/items", "1.1", 200)
+    assert ws_record.args[1] == "/api/matches/m1/play"
+    assert secret not in http_record.getMessage()
+    assert secret not in ws_record.getMessage()
+
+
+def test_uvicorn_http_and_websocket_queries_never_reach_serialized_logs(
+    log_dir, capsys
+):
+    http_secret = "http-query-secret"
+    ws_secret = "websocket-query-secret"
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1", 1234),
+        "GET",
+        f"/api/history?token={http_secret}&page=2",
+        "1.1",
+        200,
+    )
+    logging.getLogger("uvicorn.error").info(
+        '%s - "WebSocket %s" 403',
+        ("127.0.0.1", 1234),
+        f"/api/matches/m1/play?token={ws_secret}",
+    )
+    for logger_name in ("uvicorn.access", "uvicorn.error"):
+        for handler in logging.getLogger(logger_name).handlers:
+            handler.flush()
+
+    content = _read(log_dir / "app.log")
+    captured = capsys.readouterr()
+    console = captured.out + captured.err
+    assert http_secret not in content
+    assert ws_secret not in content
+    assert http_secret not in console
+    assert ws_secret not in console
+    assert 'GET /api/history HTTP/1.1" 200' in content
+    assert 'WebSocket /api/matches/m1/play" 403' in content
 
 
 # ── logging_config：三 handler 独立文件 + propagate 隔离 ────────────────────

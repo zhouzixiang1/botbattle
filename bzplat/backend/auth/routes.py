@@ -16,7 +16,7 @@ from starlette.datastructures import UploadFile
 
 from .auth_manager import COOKIE_NAME, AuthError, AuthManager, validate_phone
 from .captcha import CAPTCHA_TTL_SEC, CaptchaStore, png_to_data_url
-from .dependencies import require_admin, require_user
+from .dependencies import require_user
 from bzplat.backend.security import audit_log, client_ip
 from bzplat.backend.security import _env_bool
 
@@ -92,10 +92,6 @@ class ResendVerifyReq(BaseModel):
     captcha_answer: str
 
 
-class AdminResetReq(BaseModel):
-    username_or_email: str
-
-
 def _secure_cookie() -> bool:
     return os.environ.get("BZ_SECURE_COOKIE", "").strip().lower() in {
         "1",
@@ -125,8 +121,6 @@ def _err(exc: AuthError) -> HTTPException:
         "inactive": 403,
         "email_unverified": 403,
         "wrong_old_password": 401,
-        "invalid_reset_token": 400,
-        "expired_reset_token": 400,
         "invalid_code": 400,
         "expired_code": 400,
         "no_user": 404,
@@ -419,19 +413,3 @@ async def reset_password(req: ResetPasswordReq, request: Request) -> dict:
         "message": "密码已重置,请用新密码登录",
         "username": user.get("username"),
     }
-
-
-@router.post("/admin/create-reset-token")
-async def admin_create_reset_token(
-    req: AdminResetReq,
-    request: Request,
-    admin: dict = Depends(require_admin),
-) -> dict:
-    auth: AuthManager = request.app.state.auth
-    try:
-        token, user = auth.admin_create_reset_token(req.username_or_email)
-    except AuthError as exc:
-        audit_log(request, "admin_create_reset_token", result="fail", user=admin.get("username"), target=req.username_or_email, detail=exc.code)
-        raise _err(exc) from exc
-    audit_log(request, "admin_create_reset_token", result="ok", user=admin.get("username"), target=user.get("username"))
-    return {"ok": True, "token": token, "user": user}

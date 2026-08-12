@@ -29,6 +29,7 @@ cd bzplat/frontend && npm install
 | 变量 | 说明 | 默认 |
 |------|------|------|
 | `BZ_HOST` / `BZ_PORT` | 绑定地址/端口 | 127.0.0.1 / 50380 |
+| `BZ_PUBLIC_ORIGIN` | 浏览器实际访问的唯一 HTTP(S) origin；人机 WS 严格校验，生产必配 | 未设（WS fail closed） |
 | `BZ_DB_PATH` | SQLite 路径 | botzone.db |
 | `BZ_INSTANCE_KEY` | Docker 清理 namespace；输入会归一化为小写，结果须为 1–48 位字母、数字、`.`、`_`、`-`，生产/每个 worktree 必须稳定且唯一 | 未设时由绝对 DB 路径 SHA-256 派生 |
 | `BZ_DOCKER_HOST` | 生产 Docker 控制面显式覆写；只接受 canonical 本机 socket | `unix:///var/run/docker.sock` |
@@ -63,6 +64,7 @@ cd bzplat/frontend && npm install
 # .env 示例；instance key 上线后保持稳定
 BZ_INSTANCE_KEY=prod-main
 BZ_DOCKER_HOST=unix:///var/run/docker.sock
+BZ_PUBLIC_ORIGIN=https://bot.example.com
 
 scripts/platform-ctl.sh start     # 或：botzone serve
 # 默认 127.0.0.1:50380
@@ -135,6 +137,7 @@ cp /home/zzx/project/botbattle/botzone.db .worktrees/<分支名>/botzone.db
 cd .worktrees/<分支名>
 BZ_DB_PATH="$PWD/botzone.db" BZ_INSTANCE_KEY=qa-refactor-global-queue \
   BZ_DOCKER_HOST=unix:///var/run/docker.sock BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 BZ_SKIP_CAPTCHA=1 \
+  BZ_PUBLIC_ORIGIN=http://127.0.0.1:5173 \
   python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50381
 
 # 3) 终端 B：播种三类角色的隔离账号，然后启前端
@@ -214,13 +217,24 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 
 ### 6.1 systemd 部署
 `deploy/botzone-platform.service` 提供 systemd unit 模板。
+systemd 模板使用 `UMask=0077`，`scripts/platform-ctl.sh` 也在创建 PID、日志、数据库关联
+产物前固定 `umask 077`；生产 `.env`、数据库与日志应为 `0600`，私有运行目录为 `0700`。
+头像是公开静态内容，权限可按静态服务器的只读需求单独配置，不能因此放宽其他运行目录。
+服务默认只绑定 `127.0.0.1`；生产不得为方便反代改回 `0.0.0.0`，应让本机 frp/nginx 连接
+回环端口，避免绕过代理头覆盖、限流、TLS 与无查询参数日志边界。`platform-ctl.sh` 会在创建
+PID/日志目录前拒绝非回环 `BZ_HOST`；systemd 模板则把 `127.0.0.1:50380` 直接写入
+`ExecStart`，不依赖 systemd 不支持的 shell `${VAR:-default}` 展开。
 
 ### 6.2 日志（三文件 + 启动日志）
-- `logs/app.log`：业务/系统日志（`logging_config.setup_logging`，格式 `时间 级别 [模块] 消息`）。排查执行队列/自动 producer、Docker cleanup/恢复、对局/Bot 崩溃和 WS 在此；Bot EOF 附 stderr 末尾。
-- `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时）。
+- `logs/app.log`：业务/系统日志（`logging_config.setup_logging`，格式 `时间 级别 [模块] 消息`）。排查执行队列/自动 producer、Docker cleanup/恢复、对局/Bot 崩溃和 WS 在此；Bot EOF 附 stderr 末尾。Uvicorn HTTP/WS record 在 handler 序列化前只保留 path，不记录 query。
+- `logs/access.log`：HTTP 访问日志（真实 IP + 方法 + 路径 + 状态 + 耗时；middleware 使用 `request.url.path`，不含 query）。
 - `logs/audit.log`：安全审计（登录/注册/改密/上传/管理操作等）。
-- `logs/web.log`：uvicorn 启动 stdout。
+- `logs/web.log`：uvicorn 启动 stdout；CLI 禁止 Uvicorn 默认日志配置覆盖平台 handler，因此同样不含请求 query。
 - **admin「日志」Tab**：`GET /api/admin/logs?file={app|access|audit}`（文件参数白名单）。详见 [SECURITY.md](./SECURITY.md)。
+
+上游 nginx 是独立日志边界：其 `access_log` 必须用 `$request_method`、`$uri`、
+`$server_protocol` 组成请求行，禁止记录包含 query 的 `$request`/`$request_uri`。完整示例见
+[SECURITY.md](./SECURITY.md)。
 
 ### 6.3 测试种子账号
 ```bash

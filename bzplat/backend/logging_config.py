@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import logging.config
 import os
+import re
 from pathlib import Path
 
 from bzplat.backend.qa_safety import qa_instance_enabled
@@ -25,6 +26,59 @@ _DATEFMT = "%Y-%m-%d %H:%M:%S"
 # access / audit logger 名（消息体本身含结构化字段 ip=... method=... action=... 等）
 ACCESS_LOGGER = "bzplat.access"
 AUDIT_LOGGER = "bzplat.audit"
+
+# Uvicorn builds its HTTP and WebSocket access messages from positional args:
+# HTTP uses ``(client, method, path_with_query, version, status)`` on
+# ``uvicorn.access`` while WebSocket uses ``(client, path_with_query[, status])``
+# on ``uvicorn.error``.  Keep that stable metadata but project the request target
+# to its path before any handler serializes it.  The defensive regex also covers
+# an already-rendered Uvicorn message without guessing secret parameter names.
+_REQUEST_TARGET_QUERY_RE = re.compile(r'(?P<path>/[^\s"?]*)\?[^\s"]*')
+
+
+def _path_only(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    path, separator, _query = value.partition("?")
+    if separator and path.startswith("/"):
+        return path or "/"
+    return value
+
+
+def _strip_rendered_request_queries(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    return _REQUEST_TARGET_QUERY_RE.sub(r"\g<path>", value)
+
+
+class UvicornRequestTargetFilter(logging.Filter):
+    """Remove request queries from every serialized Uvicorn HTTP/WS record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not (record.name == "uvicorn" or record.name.startswith("uvicorn.")):
+            return True
+
+        if isinstance(record.args, tuple):
+            args = list(record.args)
+            if record.name == "uvicorn.access" and len(args) >= 3:
+                args[2] = _path_only(args[2])
+            elif (
+                record.name == "uvicorn.error"
+                and "WebSocket %s" in str(record.msg)
+                and len(args) >= 2
+            ):
+                args[1] = _path_only(args[1])
+            # Defensive support for a compatible Uvicorn formatter that has
+            # already combined the request line into one positional value.
+            record.args = tuple(_strip_rendered_request_queries(arg) for arg in args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: _strip_rendered_request_queries(value)
+                for key, value in record.args.items()
+            }
+
+        record.msg = _strip_rendered_request_queries(record.msg)
+        return True
 
 
 def setup_logging(log_dir: str | os.PathLike[str] | None = None, level: str = "INFO") -> None:
@@ -48,6 +102,9 @@ def setup_logging(log_dir: str | os.PathLike[str] | None = None, level: str = "I
         {
             "version": 1,
             "disable_existing_loggers": False,
+            "filters": {
+                "uvicorn_path_only": {"()": UvicornRequestTargetFilter},
+            },
             "formatters": {
                 "standard": {"format": _FMT, "datefmt": _DATEFMT},
             },
@@ -60,11 +117,13 @@ def setup_logging(log_dir: str | os.PathLike[str] | None = None, level: str = "I
                     "encoding": "utf-8",
                     "formatter": "standard",
                     "level": root_level,
+                    "filters": ["uvicorn_path_only"],
                 },
                 "console": {
                     "class": "logging.StreamHandler",
                     "formatter": "standard",
                     "level": root_level,
+                    "filters": ["uvicorn_path_only"],
                 },
                 # access.log：只落文件（访问量大，不刷控制台）
                 "access_file": {
@@ -92,8 +151,9 @@ def setup_logging(log_dir: str | os.PathLike[str] | None = None, level: str = "I
                 "handlers": ["file", "console"],
             },
             "loggers": {
-                # uvicorn 访问日志降噪（访问日志仍走 uvicorn 默认，但 app 逻辑落到 app.log）
+                # Uvicorn HTTP/WS 共用平台 handler，确保 query 投影在序列化前生效。
                 "uvicorn": {"level": "INFO", "handlers": ["file", "console"], "propagate": False},
+                "uvicorn.error": {"level": "INFO", "handlers": ["file", "console"], "propagate": False},
                 "uvicorn.access": {"level": "INFO", "handlers": ["file", "console"], "propagate": False},
                 # access / audit 独立 logger，propagate=False 不污染 root(app.log)
                 ACCESS_LOGGER: {"level": "INFO", "handlers": ["access_file"], "propagate": False},
@@ -103,4 +163,9 @@ def setup_logging(log_dir: str | os.PathLike[str] | None = None, level: str = "I
     )
 
 
-__all__ = ["setup_logging", "ACCESS_LOGGER", "AUDIT_LOGGER"]
+__all__ = [
+    "setup_logging",
+    "ACCESS_LOGGER",
+    "AUDIT_LOGGER",
+    "UvicornRequestTargetFilter",
+]

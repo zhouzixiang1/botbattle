@@ -6,9 +6,9 @@
 设计要点（调研结论）：
   - dev 服务 .env 配了真实 SMTP 且未设 BZ_TEST_CAPTCHA=1 → HTTP /register 的验证码无法被脚本
     解开，且批量 HTTP 注册会狂发真邮件。故用户与 Bot 用 DB-direct 播种（沿用 seed_test_accounts.py
-    与 e2e_smoke.sh 的模式），登录态用 **DB 直写 sessions 表** 生成不透明 Bearer token
-    （`store.add_session(new_session_token(), uid, session_expires())`）—— 服务端从同一 botzone.db
-    读 sessions，Bearer 真正打通 require_user/admin/organizer 全链路。
+    与 e2e_smoke.sh 的模式），登录态用 **DB 直写 sessions 表** 生成不透明 session token
+    （`store.add_session(new_session_token(), uid, session_expires())`）—— REST 用 Bearer，
+    人机 WebSocket 用 `bz_session` Cookie，服务端均从同一 botzone.db 验证。
   - Bot 执行方式由被测服务决定：生产式 Docker 沙箱，或 QA 服务显式设置 BZ_BOT_LOCAL=1。
   - 并发硬顶 = cpu//4；三款游戏均使用 GameSpec 固定规则（holdem 固定 70 手）。
   - 所有用户名/邮箱/Bot 名均 load_* 前缀，可一键识别清理；seed 按样例 ELF 内容幂等，
@@ -1240,12 +1240,18 @@ def _rating_snapshot(db_path: str, bot_ids: list[int]) -> dict[int, tuple]:
 def _play_human_match(api: Api, websockets, asyncio, mid: str, token: str, game: str) -> bool:
     """连接 WS /play，回应 your_turn 直到 match_end/error。"""
     ws_base = api.base.replace("http://", "ws://").replace("https://", "wss://")
-    url = f"{ws_base}/api/matches/{mid}/play?token={token}"
+    url = f"{ws_base}/api/matches/{mid}/play"
 
     async def play() -> bool:
         occupied: set[tuple[int, int]] = set()
         try:
-            async with websockets.connect(url, max_size=None, open_timeout=20) as ws:
+            async with websockets.connect(
+                url,
+                origin=api.base.rstrip("/"),
+                additional_headers={"Cookie": f"bz_session={token}"},
+                max_size=None,
+                open_timeout=20,
+            ) as ws:
                 while True:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=180)
@@ -1708,9 +1714,18 @@ def phase7_admin(api: Api, ctx: dict[str, Any]) -> None:
     else:
         warn(f"email template welcome 不可读 {r.status_code}（跳过 PUT）")
 
-    # POST /api/auth/admin/create-reset-token
-    r = api.authed(tok, "POST", "/api/auth/admin/create-reset-token", json={"username_or_email": u1})
-    check("POST /api/auth/admin/create-reset-token", r.status_code == 200, f"{r.status_code} {r.text[:80]}")
+    # 旧管理员改密 credential 入口必须保持下架；404 也证明不会触发邮件投递。
+    r = api.authed(
+        tok,
+        "POST",
+        "/api/auth/admin/create-reset-token",
+        json={"username_or_email": u1},
+    )
+    check(
+        "旧 POST /api/auth/admin/create-reset-token 已下架",
+        r.status_code == 404,
+        f"{r.status_code} {r.text[:80]}",
+    )
 
     # admin GET contest entries（用阶段 5 的赛事，若有）
     r = api.authed(tok, "GET", "/api/admin/contests?status=finished")

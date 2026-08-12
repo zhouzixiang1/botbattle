@@ -35,7 +35,7 @@
 - **Bot 运行环境可用**：可使用 Docker，或在测试服务设置 `BZ_BOT_LOCAL=1` 本机运行样例 ELF。
 - **样例 Bot 二进制存在**：`samples/{callbot,gomokubot,pencilbot}_linux_amd64`（仓库已带预编译 ELF）。
 
-> 注意：本脚本**不**依赖 `BZ_TEST_CAPTCHA=1` 或 `BZ_BOT_LOCAL=1`。用户与 Bot 通过 **DB-direct 播种**绕过验证码/SMTP（避免给真实 SMTP 灌垃圾邮件），登录态用 **DB 直写 `sessions` 表**生成不透明 Bearer token——服务端从同一 `botzone.db` 读 sessions，Bearer 真正打通 `require_user/admin/organizer` 全链路。
+> 注意：本脚本**不**依赖 `BZ_TEST_CAPTCHA=1` 或 `BZ_BOT_LOCAL=1`。用户与 Bot 通过 **DB-direct 播种**绕过验证码/SMTP（避免给真实 SMTP 灌垃圾邮件），登录态用 **DB 直写 `sessions` 表**生成不透明 session token——REST 用 Bearer，人机 WebSocket 用 `bz_session` Cookie，服务端均从同一 `botzone.db` 验证。
 
 ## 运行
 
@@ -43,6 +43,7 @@
 # 在 worktree 根启动隔离服务
 export BZ_DB_PATH="$PWD/botzone.db"
 BZ_INSTANCE_KEY=qa-loadtest BZ_QA_INSTANCE=1 BZ_BOT_LOCAL=1 \
+  BZ_PUBLIC_ORIGIN=http://127.0.0.1:50381 \
   python -m bzplat.backend.cli serve --port 50381
 
 # 另一终端：默认/相对 upload_root 均落到 <db.parent>/bot_uploads
@@ -101,7 +102,7 @@ python scripts/load_test.py \
 | **4 人类 vs Bot** | `POST /api/matches/human` 接收 202 request（固定展示座位 2），轮询取得 `match_id` 后才连接 WS `/api/matches/{id}/play`；结束后断言 completed、per-user 活跃 ≤1、match_type=human、**Glicko 不变**。共享 match slot + 1 sandbox unit 由 execution queue 单测与浏览器队列验收另行证明 | user |
 | **5 赛事** | `POST /api/contests`（4 人五子棋自定义 Swiss1→rest→Top2 KO，精确 3 场）；`/{id}/{open,register,dispatch,publish,start,resume}`；硬断言 published 后才 start，轮询到 finished；验服务端 estimate、两个阶段、全部 pairing/Match、连续 1-based 正式榜、contest 不更新 Glicko | organizer + user |
 | **6 代码配置边界** | `GET /api/admin/settings/runtime` 验 `source=code/mutable=false`；确认 runtime PATCH 与旧 admin template POST 写入口均 404；公开模板列表标记代码只读 | admin + 公开 |
-| **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches}` 与 `PATCH /api/admin/settings/site`；`GET /api/admin/bots/{id}/versions`；`POST /api/admin/users/{id}/role`；`DELETE` 后再 `GET /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/contests/{id}/entries`；`PUT /api/admin/email/templates/welcome` 断言代码模板以 409 拒写；`POST /api/auth/admin/create-reset-token` | admin |
+| **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches}` 与 `PATCH /api/admin/settings/site`；`GET /api/admin/bots/{id}/versions`；`POST /api/admin/users/{id}/role`；`DELETE` 后再 `GET /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/contests/{id}/entries`；`PUT /api/admin/email/templates/welcome` 断言代码模板以 409 拒写；旧 `POST /api/auth/admin/create-reset-token` 严格断言 404，确认管理员不能取得重置 credential 且不会触发邮件 | admin |
 
 ## 测试
 
@@ -132,7 +133,7 @@ pytest bzplat/backend/tests/test_load_test_seed.py \
 - **固定规则**：holdem 始终跑 70 手且每手固定 20000 筹码、50/100 盲注，gomoku 固定 15×15，pencil 固定 N=6；请求中传规则字段不能改变规则。阶段 2 目标 `TARGET_MATCHES=12`（三游戏×4），需为真实 70 手对局预留足够时间。
 - **双资源硬顶**：`max_match_slots=min(代码默认 2,max(1,cpu//4))`，`max_sandbox_units=slots×2`；Bot-vs-Bot 占 `1+2`，人机占 `1+1`，`starting/running/settling` 都占容量。管理端、旧 settings 与环境变量均不可覆盖。
 - **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。这里的 429 只表示 HTTP 限流；执行容量不足应返回/保持 202 queued。阶段 0 与阶段 2 统一只对精确 429 按 `Retry-After` 有界重试；首个 202 即停止，避免重复已接受请求。
-- **验收失败策略**：缺少 Python `websockets` 依赖会让阶段 4 失败；阶段 6 验证配置来源和写入口封闭，不通过临时改配置催化后台任务。自动 producer/唯一开关/混合来源容量由 `test_execution_queue.py` 与 `test_runtime_settings.py` 覆盖。
+- **验收失败策略**：缺少 Python `websockets` 依赖，或服务端 `BZ_PUBLIC_ORIGIN` 与 `--base` 不一致，都会让阶段 4 失败；阶段 6 验证配置来源和写入口封闭，不通过临时改配置催化后台任务。自动 producer/唯一开关/混合来源容量由 `test_execution_queue.py` 与 `test_runtime_settings.py` 覆盖。
 - **资源不调高**：不改 `bot_cpus/bot_memory`（只读硬顶）。
 - **Bot 运行失败不豁免**：可由隔离服务选择 Docker 或 `BZ_BOT_LOCAL=1`；阶段 2 要求三游戏各有 completed，且 completed 多于 aborted，不会把大量 EOF/aborted 只记 warning 后冒充通过。
 

@@ -273,10 +273,10 @@ export function isUnauthorized(e: unknown): boolean {
   return e instanceof UnauthorizedError || (e instanceof ApiError && e.status === 401)
 }
 
-/** 构造人类对战 WebSocket URL（带 token query 鉴权）。
- * 同源：根据当前 location 推断 ws/wss + host。 */
+/** 构造人类对战 WebSocket URL。
+ * 同源 HttpOnly ``bz_session`` cookie 由浏览器在握手时自动携带；
+ * 会话 token 不得进入 URL，避免泄漏到访问日志和诊断记录。 */
 export function playWsUrl(matchId: string): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const token = userToken.get() || ''
-  return `${proto}//${location.host}/api/matches/${matchId}/play?token=${encodeURIComponent(token)}`
+  return `${proto}//${location.host}/api/matches/${matchId}/play`
 }

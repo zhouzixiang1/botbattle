@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,50 @@ from bzplat.backend.qa_safety import primary_checkout_root
 
 SOURCE_ROOT = Path(main.__file__).resolve().parents[2]
 PRIMARY_ROOT = primary_checkout_root(SOURCE_ROOT)
+
+
+def test_platform_ctl_creates_runtime_state_with_private_umask():
+    script = (SOURCE_ROOT / "scripts" / "platform-ctl.sh").read_text(
+        encoding="utf-8"
+    )
+    strict_mode = script.index("set -euo pipefail")
+    private_umask = script.index("umask 077")
+    first_runtime_dir = script.index('PID_DIR="$ROOT/platform-ctl"')
+    assert strict_mode < private_umask < first_runtime_dir
+
+
+def test_platform_ctl_rejects_non_loopback_env_before_creating_runtime_dirs(
+    tmp_path,
+):
+    source = SOURCE_ROOT / "scripts" / "platform-ctl.sh"
+    isolated = tmp_path / "checkout"
+    (isolated / "scripts").mkdir(parents=True)
+    script = isolated / "scripts" / "platform-ctl.sh"
+    script.write_bytes(source.read_bytes())
+    script.chmod(0o700)
+    (isolated / ".env").write_text("BZ_HOST=0.0.0.0\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(script), "status"],
+        cwd=isolated,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "refusing non-loopback BZ_HOST=0.0.0.0" in result.stderr
+    assert not (isolated / "platform-ctl").exists()
+    assert not (isolated / "logs").exists()
+
+
+def test_systemd_template_creates_runtime_state_with_private_umask():
+    service = (SOURCE_ROOT / "deploy" / "botzone-platform.service").read_text(
+        encoding="utf-8"
+    )
+    assert "UMask=0077" in service
+    assert "--host 127.0.0.1 --port 50380" in service
+    assert "${" not in service
 
 
 def test_cli_rejects_primary_logs_before_logging_or_uvicorn(monkeypatch, tmp_path):
@@ -116,6 +161,26 @@ def test_cli_pins_default_qa_runtime_dirs_beside_database(monkeypatch, tmp_path)
         "avatars": str(runtime / "avatars"),
     }
     assert not runtime.exists(), "validation and env pinning must not create paths"
+
+
+def test_cli_preserves_application_owned_uvicorn_logging(monkeypatch):
+    """Uvicorn must not replace the query-stripping handlers after setup."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        "bzplat.backend.logging_config.setup_logging",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cli.uvicorn,
+        "run",
+        lambda *_args, **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.delenv("BZ_QA_INSTANCE", raising=False)
+
+    cli.serve(host="127.0.0.1", port=50381, reload=False)
+
+    assert captured["log_config"] is None
 
 
 def test_create_app_defaults_qa_uploads_and_avatars_beside_database(

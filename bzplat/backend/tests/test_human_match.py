@@ -8,6 +8,7 @@ import sqlite3
 
 import pytest
 
+from bzplat.backend.auth.auth_manager import COOKIE_NAME
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
@@ -408,11 +409,12 @@ def test_human_match_uses_shared_semaphore_and_one_sandbox_unit(store: Store):
 
 
 # ── WebSocket /play + POST /api/matches/human API ──────────────
-def test_human_match_api_and_websocket(store: Store, tmp_path):
-    """POST /api/matches/human 建局；WS /play 鉴权（拒绝无 token / 接受合法）。"""
+def test_human_match_api_and_websocket(store: Store, tmp_path, monkeypatch):
+    """POST /api/matches/human 建局；WS /play 仅接受 HttpOnly 会话 Cookie。"""
     from fastapi.testclient import TestClient
     from bzplat.backend.main import create_app
 
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
     os.environ.setdefault("BZ_BOT_LOCAL", "1")
     # 复用 store 的 db 路径建 app（同库）
     app = create_app(db_path=store.path)
@@ -450,14 +452,48 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
             time.sleep(0.02)
         assert mid is not None
 
-        # 无 token → 拒绝
-        with c.websocket_connect(f"/api/matches/{mid}/play") as ws:
+        # 无 Cookie → 拒绝
+        with c.websocket_connect(
+            f"/api/matches/{mid}/play",
+            headers={"origin": "http://testserver"},
+        ) as ws:
             msg = ws.receive_json()
         assert msg["type"] == "reject"
         assert msg["reason"] == "forbidden"
 
-        # 合法 token → 收 snapshot
-        with c.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
+        # 即使 query 里是合法长期 token 也必须拒绝，防止进入 access log。
+        with c.websocket_connect(
+            f"/api/matches/{mid}/play?token={token}",
+            headers={"origin": "http://testserver"},
+        ) as ws:
+            msg = ws.receive_json()
+        assert msg["type"] == "reject"
+        assert msg["reason"] == "forbidden"
+
+        # 合法 HttpOnly 会话 Cookie → 收 snapshot。TestClient 在此显式模拟
+        # 浏览器在同源 WebSocket 握手中自动携带 Cookie。
+        c.cookies.set(COOKIE_NAME, token)
+        with c.websocket_connect(
+            f"/api/matches/{mid}/play?token={token}",
+            headers={"origin": "http://testserver"},
+        ) as ws:
+            msg = ws.receive_json()
+        assert msg["type"] == "reject"
+        assert msg["reason"] == "forbidden"
+
+        for headers in ({}, {"origin": "https://evil.example"}):
+            with c.websocket_connect(
+                f"/api/matches/{mid}/play",
+                headers=headers,
+            ) as ws:
+                msg = ws.receive_json()
+            assert msg["type"] == "reject"
+            assert msg["reason"] == "forbidden"
+
+        with c.websocket_connect(
+            f"/api/matches/{mid}/play",
+            headers={"origin": "HTTP://TESTSERVER:80/"},
+        ) as ws:
             snap = ws.receive_json()
         assert snap["type"] == "snapshot"
         assert snap["match"]["human_seat"] == 1
@@ -477,13 +513,16 @@ def test_human_match_api_and_websocket(store: Store, tmp_path):
     assert u["id"] not in app.state.orch._human_active_users
 
 
-def test_completed_human_websocket_closes_after_one_snapshot(store: Store):
+def test_completed_human_websocket_closes_after_one_snapshot(
+    store: Store, monkeypatch
+):
     """A terminal reconnect is server-closed and removed from the SSE registry."""
     from fastapi.testclient import TestClient
     from starlette.websockets import WebSocketDisconnect
 
     from bzplat.backend.main import create_app
 
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
     app = create_app(db_path=store.path)
     s = app.state.store
     user = s.create_user("donews", "donews@example.com", hash_password("password1"))
@@ -506,7 +545,11 @@ def test_completed_human_websocket_closes_after_one_snapshot(store: Store):
     _, token = app.state.auth.authenticate("donews", "password1")
 
     with TestClient(app) as client:
-        with client.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
+        client.cookies.set(COOKIE_NAME, token)
+        with client.websocket_connect(
+            f"/api/matches/{mid}/play",
+            headers={"origin": "http://testserver"},
+        ) as ws:
             snapshot = ws.receive_json()
             assert snapshot["type"] == "snapshot"
             assert snapshot["match"]["status"] == "completed"
@@ -516,7 +559,9 @@ def test_completed_human_websocket_closes_after_one_snapshot(store: Store):
     assert mid not in app.state.orch._sse
 
 
-def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(store: Store):
+def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(
+    store: Store, monkeypatch
+):
     """非 ``{"response": ...}`` 或带额外键的消息不得解析 Future。
 
     只有通过当前游戏 ``validate_response_payload`` 的唯一信封才进
@@ -526,6 +571,7 @@ def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(sto
 
     from bzplat.backend.main import create_app
 
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
     app = create_app(db_path=store.path)
     mid = "20260809-human-strict-protocol"
     resolved: list[dict] = []
@@ -557,7 +603,11 @@ def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(sto
             human_seat=1,
         )
         _, token = app.state.auth.authenticate("strictws", "password1")
-        with client.websocket_connect(f"/api/matches/{mid}/play?token={token}") as ws:
+        client.cookies.set(COOKIE_NAME, token)
+        with client.websocket_connect(
+            f"/api/matches/{mid}/play",
+            headers={"origin": "http://testserver"},
+        ) as ws:
             assert ws.receive_json()["type"] == "snapshot"
 
             for invalid in (

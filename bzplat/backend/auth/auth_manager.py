@@ -23,7 +23,6 @@ from bzplat.backend.store.schema import (
 )
 
 SESSION_TTL_SEC = 7 * 24 * 3600
-PASSWORD_RESET_TTL_SEC = 24 * 3600
 COOKIE_NAME = "bz_session"
 _DEFAULT_CODE_TTL_MIN = 30
 
@@ -275,43 +274,6 @@ class AuthManager:
         return _safe_user(self.store.get_user(user["id"]))
 
     reset_password_with_code = reset_password
-
-    def reset_password_by_token(self, token: str, new_password: str) -> dict:
-        _validate_password(new_password)
-        r = self.store.get_password_reset(token)
-        if not r:
-            raise AuthError("invalid_reset_token", "重置链接无效或已使用")
-        try:
-            if datetime.fromisoformat(r["expires_at"]) < datetime.now():
-                raise AuthError("expired_reset_token", "重置链接已过期,请重新申请")
-        except (TypeError, ValueError) as exc:
-            raise AuthError("invalid_reset_token", "重置链接无效") from exc
-        user = self.store.get_user(r["user_id"])
-        if not user:
-            raise AuthError("no_user", "用户不存在")
-        result = self.store.reset_password_with_credential(
-            user["id"], hash_password(new_password), reset_token=token
-        )
-        if result == "expired":
-            raise AuthError("expired_reset_token", "重置链接已过期,请重新申请")
-        if result != "ok":
-            raise AuthError("invalid_reset_token", "重置链接无效或已使用")
-        return _safe_user(self.store.get_user(user["id"]))
-
-    def admin_create_reset_token(
-        self, username_or_email: str
-    ) -> tuple[str, dict]:
-        user = self.store.get_user_by_email(
-            username_or_email or ""
-        ) or self.store.get_user_by_username(username_or_email or "")
-        if not user:
-            raise AuthError("no_user", "用户不存在")
-        token = secrets.token_urlsafe(32)
-        expires = (
-            datetime.now() + timedelta(seconds=PASSWORD_RESET_TTL_SEC)
-        ).isoformat(timespec="seconds")
-        self.store.add_password_reset(token, user["id"], expires)
-        return token, _safe_user(user)
 
     def admin_set_user_role(self, user_id: int, role: str) -> dict:
         if role not in (ROLE_USER, ROLE_ORGANIZER, ROLE_ADMIN):

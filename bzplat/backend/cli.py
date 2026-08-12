@@ -84,6 +84,10 @@ def serve(
         port=port,
         reload=reload,
         log_level="info",
+        # setup_logging() owns Uvicorn's handlers and request-target filter.
+        # Reapplying Uvicorn's default config here would bypass both and write
+        # path+query request targets to the stdout-backed web.log.
+        log_config=None,
     )
 
 

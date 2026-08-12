@@ -6,7 +6,8 @@ After=network.target
 Type=simple
 WorkingDirectory=%h/project/botbattle
 EnvironmentFile=-%h/project/botbattle/.env
-ExecStart=%h/project/botbattle/.venv/bin/python -m bzplat.backend.cli serve --host ${BZ_HOST:-0.0.0.0} --port ${BZ_PORT:-50380}
+UMask=0077
+ExecStart=%h/project/botbattle/.venv/bin/python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50380
 Restart=on-failure
 RestartSec=3
 

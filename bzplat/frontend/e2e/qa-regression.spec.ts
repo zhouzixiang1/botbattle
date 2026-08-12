@@ -1328,12 +1328,17 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
     `/api/matches/${viewerId}`,
   )
   const monitor = monitorBrowser(page)
+  let humanPlayWsSearch: string | null = null
 
   // Register WebSocket interception before the first navigation. Vite creates
   // its HMR socket on that navigation; Playwright must install page-level WS
   // routing before any socket exists for subsequent business sockets to route.
   await page.routeWebSocket(
-    (url) => url.pathname === `/api/matches/${humanId}/play`,
+    (url) => {
+      const isHumanPlay = url.pathname === `/api/matches/${humanId}/play`
+      if (isHumanPlay) humanPlayWsSearch = url.search
+      return isHumanPlay
+    },
     (socket) => {
       setTimeout(() => {
         socket.send(JSON.stringify({
@@ -1408,7 +1413,14 @@ test('canonical terminal deltas drive MatchViewer and HumanPlay', async ({ page 
   await expect(page.getByTestId('holdem-seat-state-1')).toContainText('+37')
   await expect(page.getByTestId('holdem-seat-state-2')).toContainText('-37')
 
-  await page.goto(`/#/play/${humanId}`)
+  // REST still supports the legacy localStorage Bearer. Even when it is present,
+  // the WebSocket URL must stay credential-free and rely on the HttpOnly cookie.
+  await page.evaluate((matchId) => {
+    localStorage.setItem('bzplat_token', 'ws-secret-must-not-enter-url')
+    window.location.hash = `#/play/${matchId}`
+  }, humanId)
+  await expect(page).toHaveURL(new RegExp(`#\/play\/${humanId}$`))
+  await expect.poll(() => humanPlayWsSearch).toBe('')
   const humanStatus = page.getByRole('region', { name: '人类对战状态' })
   await expect(humanStatus).toContainText('对局结束 · 胜者：canonical_bot（@alpha）')
   await expect(page.getByText('累计 +23 / -23', { exact: true })).toBeVisible()

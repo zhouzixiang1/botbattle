@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # botzone-platform 启停
 set -euo pipefail
+# Runtime state contains the database, session-bearing logs and uploaded Bot
+# binaries.  Keep newly created files/directories private even when the caller's
+# interactive shell has a permissive umask.
+umask 077
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 PID_DIR="$ROOT/platform-ctl"
 LOG_DIR="$ROOT/logs"
-mkdir -p "$PID_DIR" "$LOG_DIR"
 PID_FILE="$PID_DIR/web.pid"
 LOG_FILE="$LOG_DIR/web.log"
 
@@ -15,6 +18,20 @@ LOG_FILE="$LOG_DIR/web.log"
 HOST="${BZ_HOST:-127.0.0.1}"
 PORT="${BZ_PORT:-50380}"
 PY="$ROOT/.venv/bin/python"
+
+# This production control script sits behind the local frp/nginx boundary.  A
+# stale .env must never reopen the raw Uvicorn port and let clients spoof trusted
+# proxy headers or bypass TLS/access-log policy.  Direct development can still
+# invoke the CLI explicitly in an isolated worktree.
+case "$HOST" in
+  127.0.0.1|localhost|::1) ;;
+  *)
+    echo "refusing non-loopback BZ_HOST=$HOST; platform-ctl must stay behind the local proxy" >&2
+    exit 1
+    ;;
+esac
+
+mkdir -p "$PID_DIR" "$LOG_DIR"
 
 start() {
   if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then

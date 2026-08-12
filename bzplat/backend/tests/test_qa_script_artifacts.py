@@ -328,6 +328,9 @@ def test_load_admin_phase_and_main_keep_the_final_queue_gate():
     assert '"request_id": phase7_request_id' in phase7_source
     assert "阶段7 强制 abort 挑战取得 Match" in phase7_source
     assert "warn(f\"阶段7 强制 abort 对局发起失败" not in phase7_source
+    assert '"/api/auth/admin/create-reset-token"' in phase7_source
+    assert "旧 POST /api/auth/admin/create-reset-token 已下架" in phase7_source
+    assert "r.status_code == 404" in phase7_source
     assert "全部阶段结束后队列与调度器健康归零" in main_source
     assert "wait_execution_queue_idle(" in main_source
     assert 'label="全部阶段结束后的稳定 clean gate"' in main_source
@@ -715,8 +718,10 @@ class _FakeWebSocket:
 class _FakeWebSockets:
     def __init__(self, events):
         self._events = events
+        self.calls: list[tuple[tuple, dict]] = []
 
-    def connect(self, *_args, **_kwargs):
+    def connect(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return _FakeWebSocket(self._events)
 
 
@@ -724,22 +729,24 @@ def test_load_human_websocket_error_is_failure_and_match_end_is_success():
     module = load_script("load_test")
     api = type("ApiStub", (), {"base": "http://qa.invalid"})()
 
+    failed_client = _FakeWebSockets(
+        [
+            {"type": "your_turn", "request": {}},
+            {"type": "error", "reason": "platform_error"},
+        ]
+    )
     failed = module._play_human_match(
         api,
-        _FakeWebSockets(
-            [
-                {"type": "your_turn", "request": {}},
-                {"type": "error", "reason": "platform_error"},
-            ]
-        ),
+        failed_client,
         asyncio,
         "match-1",
         "token",
         "holdem",
     )
+    completed_client = _FakeWebSockets([{"type": "match_end"}])
     completed = module._play_human_match(
         api,
-        _FakeWebSockets([{"type": "match_end"}]),
+        completed_client,
         asyncio,
         "match-2",
         "token",
@@ -749,6 +756,12 @@ def test_load_human_websocket_error_is_failure_and_match_end_is_success():
     assert failed is False
     assert completed is True
     assert module.WARN == ["WS holdem 返回 error: platform_error"]
+    for client in (failed_client, completed_client):
+        ((url,), kwargs), = client.calls
+        assert url.endswith("/play")
+        assert "?" not in url
+        assert kwargs["origin"] == "http://qa.invalid"
+        assert kwargs["additional_headers"] == {"Cookie": "bz_session=token"}
 
 
 def test_load_human_phase_checks_persisted_completed_status():

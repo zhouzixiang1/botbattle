@@ -27,6 +27,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 from starlette.datastructures import FormData, UploadFile
 
+from bzplat.backend.auth.auth_manager import COOKIE_NAME
 from bzplat.backend.auth.dependencies import (
     _extract_token,
     optional_user,
@@ -34,7 +35,7 @@ from bzplat.backend.auth.dependencies import (
     require_organizer,
     require_user,
 )
-from bzplat.backend.security import audit_log
+from bzplat.backend.security import audit_log, websocket_origin_allowed
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.bots.manager import MAX_BYTES
 
@@ -43,6 +44,12 @@ _DEBUG_NO_STORE_HEADERS = {
     "Cache-Control": "private, no-store, max-age=0",
     "Pragma": "no-cache",
     "Vary": "Authorization, Cookie",
+}
+_ADMIN_PRIVATE_HEADERS = {
+    "Cache-Control": "private, no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Vary": "Authorization, Cookie",
+    "Referrer-Policy": "no-referrer",
 }
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.presentation import build_stage_summaries
@@ -1267,14 +1274,28 @@ def retry_execution_request(
 async def play_websocket(websocket: WebSocket, match_id: str):
     """人类对战双向通道：推送事件（含 your_turn）+ 接收人类落子。
 
-    鉴权：query 参数 token（Bearer）或 cookie bz_session。
+    鉴权：Origin 必须与 ``BZ_PUBLIC_ORIGIN`` 严格匹配，随后仅从
+    同源握手自动携带的 HttpOnly cookie ``bz_session`` 取会话。
+    不接受 URL query token，避免长期会话进入 Uvicorn/反代访问日志。
     仅 match.human_user_id 本人可连；解析 pending 人类回合 Future。
     """
     store = websocket.app.state.store
     auth = websocket.app.state.auth
     orch = websocket.app.state.orch
+    if (
+        "token" in websocket.query_params
+        or not websocket_origin_allowed(websocket.headers.get("origin"))
+    ):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "reject",
+            "reason": "forbidden",
+            "message": "无权访问该对局",
+        })
+        await websocket.close()
+        return
     # 鉴权
-    token = websocket.query_params.get("token") or websocket.cookies.get("bz_session")
+    token = websocket.cookies.get(COOKIE_NAME)
     user = auth.verify_session(token)
     m = store.get_match(match_id)
     if not user or not m or m.get("human_user_id") != user["id"]:
@@ -2561,30 +2582,56 @@ async def finish_contest(
 
 # ── admin ─────────────────────────────────────────────────────
 
+_ADMIN_USER_RESPONSE_FIELDS = (
+    "id", "username", "email", "role", "display_name", "is_active",
+    "email_verified", "created_at", "last_login_at", "real_name", "phone",
+    "school", "student_id",
+)
+
+
+def _admin_user_for_api(user: dict[str, Any]) -> dict[str, Any]:
+    """Project one user through the admin response allowlist.
+
+    Admin may need PII to verify tournament registrations, but authentication
+    credentials and future Store-only columns must never become API fields.
+    """
+    return {field: user.get(field) for field in _ADMIN_USER_RESPONSE_FIELDS}
+
+
+def _set_admin_private_headers(response: Response) -> None:
+    response.headers.update(_ADMIN_PRIVATE_HEADERS)
+
 @router.get("/api/admin/users")
 def admin_users(
-    request: Request, q: str | None = None, real_name: bool | None = None,
+    request: Request, response: Response,
+    q: str | None = None, real_name: bool | None = None,
     page: int | None = None, per_page: int = 50,
     _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     result = _store(request).list_users(
         q=q, real_name=real_name, page=page, per_page=per_page,
     )
     if isinstance(result, dict):
-        return {"users": result["items"], "page": result["page"],
+        return {"users": [_admin_user_for_api(u) for u in result["items"]],
+                "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
-    return {"users": result}
+    return {"users": [_admin_user_for_api(u) for u in result]}
 
 
 @router.post("/api/admin/users/{user_id}/role")
 def admin_set_role(
-    user_id: int, role: str, request: Request, admin=Depends(require_admin)
+    user_id: int, role: str, request: Request, response: Response,
+    admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     if role not in ("user", "organizer", "admin"):
-        raise HTTPException(400, "非法角色")
+        raise HTTPException(400, "非法角色", headers=_ADMIN_PRIVATE_HEADERS)
     u = _store(request).update_user(user_id, role=role)
+    if not u:
+        raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
     audit_log(request, "admin_set_role", result="ok", user=admin.get("username"), target=user_id, detail=f"role={role}")
-    return {"user": u}
+    return {"user": _admin_user_for_api(u)}
 
 
 class AdminUserPatch(BaseModel):
@@ -2595,8 +2642,10 @@ class AdminUserPatch(BaseModel):
 
 @router.patch("/api/admin/users/{user_id}")
 def admin_patch_user(
-    user_id: int, body: AdminUserPatch, request: Request, _admin=Depends(require_admin)
+    user_id: int, body: AdminUserPatch, request: Request, response: Response,
+    _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     fields: dict[str, Any] = {}
     if body.is_active is not None:
         fields["is_active"] = 1 if body.is_active else 0
@@ -2604,14 +2653,14 @@ def admin_patch_user(
         fields["email_verified"] = 1 if body.email_verified else 0
     if body.role is not None:
         if body.role not in ("user", "organizer", "admin"):
-            raise HTTPException(400, "非法角色")
+            raise HTTPException(400, "非法角色", headers=_ADMIN_PRIVATE_HEADERS)
         fields["role"] = body.role
     if not fields:
-        raise HTTPException(400, "无更新字段")
+        raise HTTPException(400, "无更新字段", headers=_ADMIN_PRIVATE_HEADERS)
     u = _store(request).update_user(user_id, **fields)
     if not u:
-        raise HTTPException(404, "用户不存在")
-    return {"user": u}
+        raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
+    return {"user": _admin_user_for_api(u)}
 
 
 @router.delete("/api/admin/users/{user_id}")
@@ -2635,15 +2684,19 @@ def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admi
 
 @router.get("/api/admin/users/{user_id}/sessions")
 def admin_user_sessions(
-    user_id: int, request: Request, _admin=Depends(require_admin)
+    user_id: int, request: Request, response: Response,
+    _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     return {"sessions": _store(request).list_sessions(user_id)}
 
 
 @router.delete("/api/admin/users/{user_id}/sessions")
 def admin_revoke_sessions(
-    user_id: int, request: Request, _admin=Depends(require_admin)
+    user_id: int, request: Request, response: Response,
+    _admin=Depends(require_admin),
 ):
+    _set_admin_private_headers(response)
     n = _store(request).delete_sessions_for_user(user_id)
     return {"ok": True, "revoked": n}
 

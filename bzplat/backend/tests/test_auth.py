@@ -194,47 +194,56 @@ def test_request_reset_and_reset_password(tmp_path):
     assert empty == {}
 
 
-def test_admin_reset_token_updates_password_consumes_token_and_revokes_sessions(
-    tmp_path,
-):
-    auth, _ = _auth(tmp_path, mailer=False)
-    user = auth.register("tokenuser", "token@example.com", "password12")
-    auth.store.update_user(user["id"], email_verified=1)
-    _, old_session = auth.authenticate("tokenuser", "password12")
-    reset_token, _ = auth.admin_create_reset_token("token@example.com")
+def test_admin_reset_credential_endpoint_is_removed(tmp_path, monkeypatch):
+    """管理员不能从浏览器取得可改密 credential，旧入口须稳定为 404。"""
+    from fastapi.testclient import TestClient
+    from bzplat.backend.main import create_app
 
-    reset_user = auth.reset_password_by_token(reset_token, "tokenpass1")
+    monkeypatch.setenv("BZ_SKIP_CAPTCHA", "1")
+    app = create_app(db_path=str(tmp_path / "removed-admin-reset.db"))
+    admin = app.state.auth.register(
+        "resetadmin", "resetadmin@example.com", "password12"
+    )
+    app.state.store.update_user(admin["id"], role="admin", email_verified=1)
+    _, admin_session = app.state.auth.authenticate("resetadmin", "password12")
+    deliveries_before = app.state.store._conn.execute(
+        "SELECT COUNT(*) FROM deliveries"
+    ).fetchone()[0]
 
-    assert reset_user["id"] == user["id"]
-    assert auth.store.get_password_reset(reset_token) is None
-    assert auth.verify_session(old_session) is None
-    _, new_session = auth.authenticate("tokenuser", "tokenpass1")
-    assert new_session
-    with pytest.raises(AuthError) as reused:
-        auth.reset_password_by_token(reset_token, "anotherpass1")
-    assert reused.value.code == "invalid_reset_token"
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/auth/admin/create-reset-token",
+            json={"username_or_email": "resetadmin"},
+            headers={"Authorization": f"Bearer {admin_session}"},
+        )
+
+    assert response.status_code == 404
+    assert all(
+        getattr(route, "path", None) != "/api/auth/admin/create-reset-token"
+        for route in app.routes
+    )
+    assert not hasattr(app.state.auth, "admin_create_reset_token")
+    assert not hasattr(app.state.auth, "reset_password_by_token")
+    assert app.state.store._conn.execute(
+        "SELECT COUNT(*) FROM password_resets"
+    ).fetchone()[0] == 0
+    assert app.state.store._conn.execute(
+        "SELECT COUNT(*) FROM deliveries"
+    ).fetchone()[0] == deliveries_before
 
 
-def test_expired_reset_credentials_report_expired_without_consuming(tmp_path):
+def test_expired_reset_email_code_reports_expired_without_consuming(tmp_path):
     auth, _ = _auth(tmp_path, mailer=False)
     user = auth.register("expiredauth", "expiredauth@example.com", "password12")
     original_hash = auth.store.get_user(user["id"])["password_hash"]
     auth.store.add_email_code(
         user["id"], CODE_RESET, "222222", "2000-01-01T00:00:00"
     )
-    auth.store.add_password_reset(
-        "expired-auth-token", user["id"], "2000-01-01T00:00:00"
-    )
 
     with pytest.raises(AuthError) as code_error:
         auth.reset_password("expiredauth", "222222", "newpass123")
     assert code_error.value.code == "expired_code"
     assert auth.store.get_latest_email_code(user["id"], CODE_RESET) is not None
-
-    with pytest.raises(AuthError) as token_error:
-        auth.reset_password_by_token("expired-auth-token", "newpass123")
-    assert token_error.value.code == "expired_reset_token"
-    assert auth.store.get_password_reset("expired-auth-token") is not None
     assert auth.store.get_user(user["id"])["password_hash"] == original_hash
 
 
@@ -298,6 +307,10 @@ def test_skip_captcha_allows_login_with_any_answer(tmp_path, monkeypatch):
     )
     assert r.status_code == 200, r.text
     assert r.json().get("token")
+    session_cookie = r.headers.get("set-cookie", "")
+    assert session_cookie.startswith("bz_session=")
+    assert "HttpOnly" in session_cookie
+    assert "SameSite=lax" in session_cookie
 
 
 def test_skip_captcha_off_still_validates(tmp_path, monkeypatch):

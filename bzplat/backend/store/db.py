@@ -71,6 +71,22 @@ _AUTO_MATCH_FAIR_BOOTSTRAP_VERSION = 1
 _AUTO_MATCH_POLICY_VERSION = "owner-game-lane-v2"
 _RATING_PROJECTION_POLICY_VERSION = "owner-neutral-v3"
 _RATING_PROJECTION_LEGACY_VERSION = "legacy-unverified"
+
+# 管理端用户目录允许展示实名/联系信息，但认证凭据仍不属于目录契约。
+# 保持显式列清单，避免 users 后续新增敏感列时被 SELECT * 自动带到 API。
+_ADMIN_USER_COLUMNS = (
+    "id", "username", "email", "role", "display_name", "is_active",
+    "email_verified", "created_at", "last_login_at", "real_name", "phone",
+    "school", "student_id",
+)
+
+# 管理员只能查看会话审计元数据并按用户整体吊销；bearer token 永不离开 Store。
+_ADMIN_SESSION_COLUMNS = (
+    "s.user_id", "u.username", "s.expires_at", "s.created_at", "s.ip_addr",
+    "s.user_agent",
+)
+
+
 @dataclass(frozen=True)
 class _RatingProjectionMutationGuard:
     """Proof that the marker-settled projection was trusted before one write.
@@ -3421,7 +3437,7 @@ class Store:
         page: int | None = None, per_page: int = 50,
     ) -> list[dict] | dict:
         with self._tx() as c:
-            sql = "SELECT * FROM users WHERE 1=1"
+            sql = f"SELECT {','.join(_ADMIN_USER_COLUMNS)} FROM users WHERE 1=1"
             params: list[Any] = []
             if role:
                 sql += " AND role=?"
@@ -3571,7 +3587,7 @@ class Store:
     ) -> str:
         """原子消费一次性凭据、更新密码并撤销该用户的全部会话。
 
-        邮箱验证码与管理员重置 token 二选一。返回 ``ok``、``invalid`` 或
+        邮箱验证码与历史迁移兼容的重置 token 二选一。返回 ``ok``、``invalid`` 或
         ``expired``；``invalid`` 同时涵盖不存在、已使用和最终 CAS 竞争失败。
         凭据 CAS、密码更新与 session 删除共享同一个 ``BEGIN IMMEDIATE``
         事务，后两步异常时凭据消费也会随事务回滚。
@@ -9026,7 +9042,7 @@ class Store:
         """列会话（可选按用户）。关联用户名便于展示。"""
         with self._tx() as c:
             sql = (
-                "SELECT s.*, u.username FROM sessions s "
+                f"SELECT {','.join(_ADMIN_SESSION_COLUMNS)} FROM sessions s "
                 "LEFT JOIN users u ON s.user_id=u.id WHERE 1=1"
             )
             params: list[Any] = []

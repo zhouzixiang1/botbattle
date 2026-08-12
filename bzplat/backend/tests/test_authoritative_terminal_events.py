@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
 
 from bzplat.backend.api_routes import match_detail, match_replay
+from bzplat.backend.auth.auth_manager import COOKIE_NAME
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
@@ -686,7 +687,10 @@ def test_failure_terminal_is_broadcast_only_after_its_persisted_state(
     store.close()
 
 
-def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_path):
+def test_human_websocket_gets_one_canonical_terminal_after_completed_api(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("BZ_PUBLIC_ORIGIN", "http://testserver")
     result, engine_end = _normal_result(deltas=(23, -23), winner=0)
 
     class ControlledHumanRunner:
@@ -733,8 +737,10 @@ def test_human_websocket_gets_one_canonical_terminal_after_completed_api(tmp_pat
         assert request and request["current_match_id"]
         match_id = request["current_match_id"]
 
+        client.cookies.set(COOKIE_NAME, token)
         with client.websocket_connect(
-            f"/api/matches/{match_id}/play?token={token}"
+            f"/api/matches/{match_id}/play",
+            headers={"origin": "http://testserver"},
         ) as websocket:
             snapshot = websocket.receive_json()
             assert snapshot["type"] == "snapshot"
