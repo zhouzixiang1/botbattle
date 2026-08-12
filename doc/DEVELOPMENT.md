@@ -81,6 +81,10 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员（跳过邮箱验�
 查询端口或停止后 PID/端口未释放时均 fail closed，不会再创建进程。两种方式的 start/restart 都在
 返回成功前等待 `/api/health`，默认就绪上限 60 秒；`0.0.0.0` 绑定仍从 `127.0.0.1` 探活。
 stop 最多等待 90 秒完成 lifespan 并释放端口。
+PID fallback 的 `web.pid` 不是裸 PID，而是 PID、每次启动随机 nonce 与 Linux 进程 starttime 的
+私有身份记录；发信号前还会核对进程 CWD 与只存在于该进程环境的 nonce。旧裸 PID、PID 复用、身份
+字段缺失或不匹配都保留现场并拒绝发信号。user-systemd 探测也使用三态：只有明确 `not-found` 或
+已确认 unit 属于另一 checkout 才允许 fallback；DBus/systemctl/属性读取错误直接退出，不能静默降级。
 因此 `scripts/rebuild.sh` 可以复用同一入口，不会绕过 systemd 另起 `nohup` 进程。
 
 启动会先取得数据库邻接 dispatcher flock，并在共享 `<db>.docker-launch.lock` 内对**本 instance
@@ -97,7 +101,7 @@ label namespace** 清理、连续确认容器/name/token 为零，同时闭合 c
 scripts/platform-ctl.sh status
 service_pid="$(systemctl --user show botzone-platform.service \
   --property=MainPID --value 2>/dev/null || true)"
-[[ "$service_pid" =~ ^[1-9][0-9]*$ ]] || service_pid="$(cat platform-ctl/web.pid)"
+[[ "$service_pid" =~ ^[1-9][0-9]*$ ]] || service_pid="$(cut -d' ' -f1 platform-ctl/web.pid)"
 scripts/platform-ctl.sh stop
 ps -p "$service_pid" -o pid=,stat=,cmd=       # 应无输出
 ss -tlnp | grep ':50380'                      # 应无输出

@@ -315,6 +315,7 @@ def create_app(
     # Routes must not resolve BZ_AVATAR_DIR independently after app creation.
     app.state.avatar_dir = avatars_dir
     app.state.runtime_ceiling = concurrent_ceiling()
+    app.state.trusted_proxy_cidrs = trusted_proxy_cidrs
 
     # Added first = innermost user middleware: still before FastAPI form parsing,
     # while the existing security/access layers can decorate and log its 413.

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import time
 from pathlib import Path
 
 from bzplat.backend import main
@@ -97,6 +96,7 @@ if [[ "${1:-}" == "-0" ]]; then
   [[ "${2:-}" != "4242" && "${FAKE_NEW_PID_LIVE:-0}" == "1" ]] && exit 0
   exit 1
 fi
+/bin/kill "$@"
 printf 'dead\n' >"$FAKE_PROCESS_STATE"
 """,
     )
@@ -106,6 +106,7 @@ printf 'dead\n' >"$FAKE_PROCESS_STATE"
 set -eu
 printf '%s\n' "$*" >>"$FAKE_NOHUP_LOG"
 printf 'live\n' >"$FAKE_PROCESS_STATE"
+exec "$@"
 """,
     )
 
@@ -294,31 +295,92 @@ def test_pid_fallback_fails_closed_when_port_state_cannot_be_verified(tmp_path: 
     assert not Path(env["FAKE_NOHUP_LOG"]).exists()
 
 
-def test_pid_fallback_restart_stops_before_start_and_checks_readiness(tmp_path: Path):
+def test_pid_fallback_refuses_legacy_pid_record_without_signalling(tmp_path: Path):
     control, env = _isolated_control(tmp_path)
     checkout = control.parents[1]
     pid_dir = checkout / "platform-ctl"
     python = checkout / ".venv" / "bin" / "python"
     pid_dir.mkdir()
-    python.parent.mkdir(parents=True)
-    _write_executable(python, "#!/usr/bin/env bash\nexit 0\n")
     (pid_dir / "web.pid").write_text("4242\n", encoding="utf-8")
     Path(env["FAKE_PROCESS_STATE"]).write_text("live\n", encoding="utf-8")
-    env.update({"FAKE_LOAD_STATE": "not-found", "FAKE_NEW_PID_LIVE": "1"})
+    env.update({"FAKE_LOAD_STATE": "not-found"})
 
-    started = time.monotonic()
-    result = _run(control, env, "restart")
-    elapsed = time.monotonic() - started
+    result = _run(control, env, "stop")
 
-    assert result.returncode == 0, result.stderr
-    assert elapsed < 2
-    assert "stopped (pid file) pid=4242" in result.stdout
-    assert "started (pid file)" in result.stdout
+    assert result.returncode != 0
+    assert "invalid legacy or malformed PID identity record" in result.stderr
     assert (pid_dir / "web.pid").is_file()
-    assert Path(env["FAKE_PROCESS_STATE"]).read_text(encoding="utf-8") == "live\n"
-    assert "-m bzplat.backend.cli serve --host 127.0.0.1 --port 50491" in Path(
-        env["FAKE_NOHUP_LOG"]
-    ).read_text(encoding="utf-8")
+    assert not Path(env["FAKE_KILL_LOG"]).exists()
+
+
+def test_pid_fallback_record_cannot_kill_reused_unrelated_pid(tmp_path: Path):
+    control, env = _isolated_control(tmp_path)
+    pid_dir = control.parents[1] / "platform-ctl"
+    pid_dir.mkdir()
+    pid = os.getpid()
+    stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    starttime = stat_line.rsplit(") ", 1)[1].split()[19]
+    (pid_dir / "web.pid").write_text(
+        f"{pid} {'a' * 32} {starttime}\n", encoding="utf-8"
+    )
+    Path(env["FAKE_PROCESS_STATE"]).write_text("live\n", encoding="utf-8")
+    env.update({"FAKE_LOAD_STATE": "not-found"})
+
+    result = _run(control, env, "stop")
+
+    assert result.returncode != 0
+    assert "PID identity mismatch" in result.stderr
+    kill_calls = Path(env["FAKE_KILL_LOG"]).read_text(encoding="utf-8").splitlines()
+    assert kill_calls == [f"-0 {pid}"]
+    assert (pid_dir / "web.pid").is_file()
+
+
+def test_systemd_probe_failure_never_falls_back_to_pid_mode(tmp_path: Path):
+    control, env = _isolated_control(tmp_path)
+    fake_systemctl = Path(env["PATH"].split(":", 1)[0]) / "systemctl"
+    _write_executable(
+        fake_systemctl,
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >>\"$FAKE_SYSTEMCTL_LOG\"\nexit 77\n",
+    )
+
+    result = _run(control, env, "start")
+
+    assert result.returncode != 0
+    assert "refusing PID fallback" in result.stderr
+    assert not Path(env["FAKE_NOHUP_LOG"]).exists()
+    assert not (control.parents[1] / "platform-ctl").exists()
+
+
+def test_pid_fallback_owned_identity_can_start_status_and_stop(tmp_path: Path):
+    control, env = _isolated_control(tmp_path)
+    checkout = control.parents[1]
+    python = checkout / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    _write_executable(python, "#!/usr/bin/env bash\nexec /bin/sleep 30\n")
+    env.update({"FAKE_LOAD_STATE": "not-found"})
+
+    started = _run(control, env, "start")
+    try:
+        assert started.returncode == 0, started.stderr
+        record = (checkout / "platform-ctl" / "web.pid").read_text(
+            encoding="utf-8"
+        ).split()
+        assert len(record) == 3
+        assert record[0].isdigit()
+        assert len(record[1]) == 32
+        assert record[2].isdigit()
+
+        status = _run(control, env, "status")
+        assert status.returncode == 0, status.stderr
+        assert f"pid={record[0]}" in status.stdout
+
+        stopped = _run(control, env, "stop")
+        assert stopped.returncode == 0, stopped.stderr
+        assert not (checkout / "platform-ctl" / "web.pid").exists()
+    finally:
+        if (checkout / "platform-ctl" / "web.pid").exists():
+            pid = (checkout / "platform-ctl" / "web.pid").read_text().split()[0]
+            subprocess.run(["/bin/kill", pid], check=False)
 
 
 def test_default_runtime_flock_names_are_ignored_exactly_and_not_globally():

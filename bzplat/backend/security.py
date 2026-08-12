@@ -666,7 +666,18 @@ def audit_log(
     """
     tp = _env_bool("BZ_TRUST_PROXY", False) if trust_proxy is None else trust_proxy
     hops = max(1, _env_int("BZ_TRUSTED_PROXY_HOPS", 1))
-    ip = client_ip(request, trust_proxy=tp, hops=hops)
+    configured_networks = getattr(
+        getattr(request, "app", None),
+        "state",
+        None,
+    )
+    networks = getattr(configured_networks, "trusted_proxy_cidrs", None)
+    ip = client_ip(
+        request,
+        trust_proxy=tp,
+        hops=hops,
+        trusted_proxy_cidrs=networks,
+    )
     parts = [f"ip={ip}", f"action={action}", f"result={result}"]
     if user is not None:
         parts.append(f"user={user}")

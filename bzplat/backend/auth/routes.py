@@ -230,6 +230,7 @@ async def login(req: LoginReq, request: Request, response: Response) -> dict:
         request,
         trust_proxy=_env_bool("BZ_TRUST_PROXY", False),
         hops=_env_int("BZ_TRUSTED_PROXY_HOPS", 1),
+        trusted_proxy_cidrs=request.app.state.trusted_proxy_cidrs,
     )
     try:
         user, token = auth.authenticate(

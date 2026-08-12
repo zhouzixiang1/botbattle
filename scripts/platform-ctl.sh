@@ -61,13 +61,96 @@ systemd_property() {
     --property="$property" --value 2>/dev/null
 }
 
-uses_user_systemd() {
+detect_user_systemd() {
   local load_state working_directory
-  load_state="$(systemd_property LoadState)" || return 1
-  [[ "$load_state" == "loaded" ]] || return 1
-  working_directory="$(systemd_property WorkingDirectory)" || return 1
-  [[ -n "$working_directory" ]] || return 1
-  [[ "$(realpath -m "$working_directory")" == "$(realpath -m "$ROOT")" ]]
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! load_state="$(systemd_property LoadState)"; then
+    echo "cannot determine $SYSTEMD_UNIT LoadState; refusing PID fallback" >&2
+    return 2
+  fi
+  case "$load_state" in
+    not-found) return 1 ;;
+    loaded) ;;
+    *)
+      echo "unexpected $SYSTEMD_UNIT LoadState=$load_state; refusing PID fallback" >&2
+      return 2
+      ;;
+  esac
+  if ! working_directory="$(systemd_property WorkingDirectory)"; then
+    echo "cannot determine $SYSTEMD_UNIT WorkingDirectory; refusing PID fallback" >&2
+    return 2
+  fi
+  if [[ -z "$working_directory" ]]; then
+    echo "$SYSTEMD_UNIT is loaded without WorkingDirectory; refusing PID fallback" >&2
+    return 2
+  fi
+  if [[ "$(realpath -m "$working_directory")" == "$(realpath -m "$ROOT")" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+read_proc_starttime() {
+  local pid="$1" stat_line rest
+  local -a _proc_stat_fields=()
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ -r "/proc/$pid/stat" ]] || return 1
+  IFS= read -r stat_line <"/proc/$pid/stat" || return 1
+  [[ "$stat_line" == *") "* ]] || return 1
+  rest="${stat_line##*) }"
+  # After ``pid (comm)``, field 3 (state) is index 0; starttime is field 22.
+  read -r -a _proc_stat_fields <<<"$rest"
+  [[ "${#_proc_stat_fields[@]}" -gt 19 ]] || return 1
+  printf '%s\n' "${_proc_stat_fields[19]}"
+}
+
+read_pid_record() {
+  local record extra
+  PID_RECORD_PID=""
+  PID_RECORD_NONCE=""
+  PID_RECORD_STARTTIME=""
+  [[ -f "$PID_FILE" ]] || return 1
+  IFS= read -r record <"$PID_FILE" || return 2
+  read -r PID_RECORD_PID PID_RECORD_NONCE PID_RECORD_STARTTIME extra <<<"$record"
+  if [[ -n "${extra:-}" \
+        || ! "$PID_RECORD_PID" =~ ^[1-9][0-9]*$ \
+        || ! "$PID_RECORD_NONCE" =~ ^[0-9a-f]{32}$ \
+        || ! "$PID_RECORD_STARTTIME" =~ ^[1-9][0-9]*$ ]]; then
+    echo "invalid legacy or malformed PID identity record; refusing to signal any process: $PID_FILE" >&2
+    return 2
+  fi
+}
+
+pid_identity_matches() {
+  local pid="$1" nonce="$2" expected_starttime="$3"
+  local actual_starttime actual_cwd
+  kill -0 "$pid" 2>/dev/null || return 1
+  actual_starttime="$(read_proc_starttime "$pid")" || return 2
+  [[ "$actual_starttime" == "$expected_starttime" ]] || return 2
+  actual_cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || return 2
+  [[ "$actual_cwd" == "$(realpath -m "$ROOT")" ]] || return 2
+  if ! tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null \
+      | grep -Fxq "BZ_PLATFORM_CTL_NONCE=$nonce"; then
+    return 2
+  fi
+  return 0
+}
+
+require_owned_pid() {
+  local rc
+  read_pid_record || return $?
+  pid_identity_matches "$PID_RECORD_PID" "$PID_RECORD_NONCE" "$PID_RECORD_STARTTIME"
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$rc" -eq 1 ]]; then
+    return 1
+  fi
+  echo "PID identity mismatch for pid=$PID_RECORD_PID; preserving record and refusing to signal it" >&2
+  return 2
 }
 
 port_state() {
@@ -101,9 +184,9 @@ health_ready() {
 }
 
 wait_pid_ready() {
-  local pid="$1" deadline=$((SECONDS + READY_WAIT_SECONDS))
+  local pid="$1" nonce="$2" starttime="$3" deadline=$((SECONDS + READY_WAIT_SECONDS))
   while (( SECONDS < deadline )); do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_identity_matches "$pid" "$nonce" "$starttime"; then
       echo "platform process exited before becoming healthy; pid=$pid" >&2
       return 1
     fi
@@ -147,9 +230,9 @@ wait_systemd_ready() {
 }
 
 wait_pid_stopped() {
-  local pid="$1" deadline=$((SECONDS + STOP_WAIT_SECONDS)) rc
+  local pid="$1" nonce="$2" starttime="$3" deadline=$((SECONDS + STOP_WAIT_SECONDS)) rc
   while (( SECONDS < deadline )); do
-    if ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_identity_matches "$pid" "$nonce" "$starttime"; then
       if port_state "$PORT"; then
         :
       else
@@ -273,30 +356,44 @@ prepare_pid_runtime() {
 }
 
 start_pid() {
-  local pid
+  local pid nonce starttime rc
   prepare_pid_runtime
-  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    pid="$(cat "$PID_FILE")"
-    if health_ready "$HEALTH_URL"; then
-      echo "already running (pid file) pid=$pid"
-      return 0
+  if [[ -f "$PID_FILE" ]]; then
+    if require_owned_pid; then
+      pid="$PID_RECORD_PID"
+      if health_ready "$HEALTH_URL"; then
+        echo "already running (pid file) pid=$pid"
+        return 0
+      fi
+      echo "owned pid=$pid is live but health is unavailable; refusing a second process" >&2
+      return 1
+    else
+      rc=$?
+      if [[ "$rc" -eq 2 ]]; then return 1; fi
+      require_port_free
+      rm -f "$PID_FILE"
     fi
-    echo "pid file references live pid=$pid but health is unavailable; refusing a second process" >&2
-    return 1
   fi
-  rm -f "$PID_FILE"
   require_port_free
   if [[ ! -x "$PY" ]]; then
     echo "missing .venv; run: /usr/bin/python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'"
     exit 1
   fi
-  nohup "$PY" -m bzplat.backend.cli serve --host "$HOST" --port "$PORT" \
+  nonce="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  BZ_PLATFORM_CTL_NONCE="$nonce" nohup "$PY" -m bzplat.backend.cli serve --host "$HOST" --port "$PORT" \
     >>"$LOG_FILE" 2>&1 &
-  echo $! >"$PID_FILE"
-  pid="$(cat "$PID_FILE")"
-  if ! wait_pid_ready "$pid"; then
+  pid=$!
+  starttime="$(read_proc_starttime "$pid")" || {
     kill "$pid" 2>/dev/null || true
-    if ! wait_pid_stopped "$pid"; then
+    echo "cannot record platform process identity; pid=$pid" >&2
+    return 1
+  }
+  printf '%s %s %s\n' "$pid" "$nonce" "$starttime" >"$PID_FILE"
+  if ! wait_pid_ready "$pid" "$nonce" "$starttime"; then
+    if pid_identity_matches "$pid" "$nonce" "$starttime"; then
+      kill "$pid"
+    fi
+    if ! wait_pid_stopped "$pid" "$nonce" "$starttime"; then
       echo "preserving $PID_FILE because pid=$pid could not be confirmed stopped" >&2
       return 1
     fi
@@ -307,14 +404,19 @@ start_pid() {
 }
 
 stop_pid() {
-  local pid
+  local pid nonce starttime rc
   prepare_pid_runtime
   if [[ -f "$PID_FILE" ]]; then
-    pid="$(cat "$PID_FILE")"
-    if kill -0 "$pid" 2>/dev/null; then
+    if require_owned_pid; then
+      pid="$PID_RECORD_PID"
+      nonce="$PID_RECORD_NONCE"
+      starttime="$PID_RECORD_STARTTIME"
       kill "$pid"
-      wait_pid_stopped "$pid"
+      wait_pid_stopped "$pid" "$nonce" "$starttime"
     else
+      rc=$?
+      if [[ "$rc" -eq 2 ]]; then return 1; fi
+      pid="${PID_RECORD_PID:-unknown}"
       require_port_free
     fi
     rm -f "$PID_FILE"
@@ -326,25 +428,28 @@ stop_pid() {
 }
 
 status_pid() {
+  local rc
   prepare_pid_runtime
-  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    if health_ready "$HEALTH_URL"; then
-      echo "running (pid file) pid=$(cat "$PID_FILE")"
-      return 0
-    else
-      echo "unhealthy (pid file) pid=$(cat "$PID_FILE")"
+  if [[ -f "$PID_FILE" ]]; then
+    if require_owned_pid; then
+      if health_ready "$HEALTH_URL"; then
+        echo "running (pid file) pid=$PID_RECORD_PID"
+        return 0
+      fi
+      echo "unhealthy (pid file) pid=$PID_RECORD_PID"
       return 1
     fi
+    rc=$?
+    [[ "$rc" -eq 1 ]] || return 1
+  fi
+  if port_state; then
+    echo "unmanaged listener on $HOST:$PORT (no verified live PID record)"
+    return 1
   else
-    if port_state; then
-      echo "unmanaged listener on $HOST:$PORT (no live pid file)"
-      return 1
-    else
-      local rc=$?
-      [[ "$rc" -eq 1 ]] || return "$rc"
-      echo "stopped (pid file)"
-      return 1
-    fi
+    rc=$?
+    [[ "$rc" -eq 1 ]] || return "$rc"
+    echo "stopped (pid file)"
+    return 1
   fi
 }
 
@@ -353,7 +458,7 @@ logs_pid() {
   tail -n "$n" "$LOG_FILE" 2>/dev/null || echo "(no logs)"
 }
 
-if uses_user_systemd; then
+if detect_user_systemd; then
   case "${1:-}" in
     start) start_systemd ;;
     stop) stop_systemd ;;
@@ -363,6 +468,10 @@ if uses_user_systemd; then
     *) echo "usage: $0 start|stop|restart|status|logs [n]"; exit 1 ;;
   esac
 else
+  systemd_mode_rc=$?
+  if [[ "$systemd_mode_rc" -ne 1 ]]; then
+    exit "$systemd_mode_rc"
+  fi
   case "${1:-}" in
     start) start_pid ;;
     stop) stop_pid ;;
