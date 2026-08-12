@@ -7520,6 +7520,7 @@ class Store:
         game_id: str | None = None, page: int | None = None, per_page: int = 20,
         exclude_statuses: list[str] | None = None,
         hidden_owner_id: int | None = None,
+        exclude_showcases: bool = False,
     ) -> list[dict] | dict:
         """列赛事，并在分页 SQL 内完成隐藏状态的可见性过滤。
 
@@ -7529,6 +7530,8 @@ class Store:
         不会因 organizer 角色而看到他人草稿/已取消赛事。admin 调用方
         不传 ``exclude_statuses`` 即保持全见。条件必须在 SQL 分页前应用，
         不得拉取一页后再用 Python 裁剪（会使 total/页数泄漏且错位）。
+        ``exclude_showcases`` 只用于真实赛事发现列表；演示快照仍保留在库中，
+        并可通过已知详情链接读取其只读生命周期图。
         """
         with self._tx() as c:
             sql = "SELECT * FROM contests WHERE 1=1"
@@ -7542,6 +7545,8 @@ class Store:
             if game_id:
                 sql += " AND game_id=?"
                 params.append(game_id)
+            if exclude_showcases:
+                sql += " AND showcase_key IS NULL"
             # 隐藏状态过滤与显式 status 可同时存在：例如访客显式查
             # draft 仍必须得到空集；组织者则只能看自己的 draft。
             if exclude_statuses:

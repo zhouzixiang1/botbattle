@@ -692,6 +692,33 @@ test('contest detail changes its primary content and actions with lifecycle stag
             bot_name: 'winner_bot',
             owner_name: 'winner_user',
             awarded: '冠军',
+            tiebreaks: {
+              points: 3,
+              buchholz_cut1: 4,
+              sonneborn_berger: 2,
+              head_to_head: 1,
+              normalized_delta: 100,
+              technical_losses: 0,
+              seed: 1,
+            },
+          }, {
+            rank: 2,
+            entry_id: 1002,
+            bot_id: 12,
+            user_id: 22,
+            points: 3,
+            bot_name: 'runner_bot',
+            owner_name: 'runner_user',
+            awarded: '亚军',
+            tiebreaks: {
+              points: 3,
+              buchholz_cut1: 2,
+              sonneborn_berger: 1,
+              head_to_head: 0,
+              normalized_delta: -100,
+              technical_losses: 0,
+              seed: 2,
+            },
           }],
         }),
       })
@@ -744,8 +771,14 @@ test('contest detail changes its primary content and actions with lifecycle stag
   await expect(page.getByRole('tab', { name: /正式名次/ })).toHaveAttribute('data-state', 'active')
   await expect(page.getByRole('cell', { name: 'winner_bot', exact: true })).toBeVisible()
   await expect(page.getByText('冠军', { exact: true })).toBeVisible()
+  await expect(page.getByText(/对手分 Cut1 4/)).toBeVisible()
+  await expect(page.getByText(/对手分 Cut1 2/)).toBeVisible()
   await expect(page.getByText(/时间配置异常：报名截止时间晚于比赛开始时间/)).toBeVisible()
   await expect(page.getByRole('button', { name: /开放报名|截止报名|立即开赛|强制结束赛事/ })).toHaveCount(0)
+  const contestTabs = page.getByRole('tablist').first()
+  expect(await contestTabs.evaluate((element) => getComputedStyle(element).overflowY)).toBe('hidden')
+  await page.getByRole('tab', { name: /对阵/ }).click()
+  await expect(page.locator('[data-pairing-result="decided"]:visible').filter({ hasText: '座位 1 胜' })).toBeVisible()
 
   await page.goto('/#/contests/902')
   await expect(page.getByRole('tab', { name: /选手/ })).toHaveAttribute('data-state', 'active')

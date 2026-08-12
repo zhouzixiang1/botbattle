@@ -8,7 +8,8 @@
  */
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { MatchNatureBadge, MatchParticipantIdentity } from '@/components/MatchParticipants'
+import { MatchParticipantIdentity } from '@/components/MatchParticipants'
+import { PairingResult } from '@/components/contest/pairing-result'
 import {
   DataTable,
   Table,
@@ -43,14 +44,6 @@ interface Props {
 }
 
 const PER_PAGE = 30
-
-function pairingResultLabel(pairing: SchedulePairing): string {
-  if (pairing.is_bye === true && pairing.status === 'completed') return '座位 1 轮空晋级'
-  if (pairing.status !== 'completed') return '赛果待定'
-  if (pairing.match_winner === 0) return '座位 1 胜'
-  if (pairing.match_winner === 1) return '座位 2 胜'
-  return '平局'
-}
 
 export default function ScheduleTable({ pairings }: Props) {
   const [page, setPage] = useState(1)
@@ -112,8 +105,7 @@ export default function ScheduleTable({ pairings }: Props) {
               </div>
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <StatusBadge status={p.status || 'pending'} />
-                <MatchNatureBadge matchType="contest" />
-                <span className="text-xs font-medium text-foreground">{pairingResultLabel(p)}</span>
+                <PairingResult pairing={p} />
               </div>
               {p.match_id ? (
                 <Button asChild variant="outline" size="sm" className="min-h-11 w-full text-primary">
@@ -135,7 +127,7 @@ export default function ScheduleTable({ pairings }: Props) {
             <TableHead className="min-w-[8rem]">座位 1</TableHead>
             <TableHead className="min-w-[8rem]">座位 2</TableHead>
             <TableHead className="w-36">排期时间</TableHead>
-            <TableHead className="w-28">状态 / 性质</TableHead>
+            <TableHead className="w-32">状态 / 赛果</TableHead>
             <TableHead className="w-16 text-right">查看</TableHead>
           </TableRow>
         </TableHeader>
@@ -173,7 +165,7 @@ export default function ScheduleTable({ pairings }: Props) {
                 <TableCell>
                   <div className="flex flex-col items-start gap-1">
                     <StatusBadge status={p.status || 'pending'} />
-                    <MatchNatureBadge matchType="contest" />
+                    <PairingResult pairing={p} />
                   </div>
                 </TableCell>
                 <TableCell className="text-right">

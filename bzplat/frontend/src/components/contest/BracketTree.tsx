@@ -13,7 +13,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ChevronRight, ChevronDown } from 'lucide-react'
-import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
+import { MatchParticipants } from '@/components/MatchParticipants'
+import { PairingResult } from '@/components/contest/pairing-result'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { StatusBadge } from '@/components/ui/status'
@@ -240,12 +241,14 @@ export default function BracketTree({ pairings, completedRounds }: Props) {
                           />
                           {/* 排期时间 + 状态徽章（紧凑展示） */}
                           <div className="mt-1 flex flex-wrap items-center justify-center gap-1.5">
-                            <MatchNatureBadge matchType="contest" />
                             {scheduled && (
                               <span className="text-[10px] text-muted-foreground">{scheduled}</span>
                             )}
                             {p.status && p.status !== 'completed' && (
                               <StatusBadge status={p.status} />
+                            )}
+                            {p.status === 'completed' && (
+                              <PairingResult pairing={p} className="text-[10px]" />
                             )}
                           </div>
                           {p.match_id && p.status === 'completed' && (

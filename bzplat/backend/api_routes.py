@@ -2068,7 +2068,8 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
     result = _store(request).list_contests(status=status, game_id=game_id,
                                            page=page, per_page=per_page,
                                            exclude_statuses=exclude,
-                                           hidden_owner_id=hidden_owner_id)
+                                           hidden_owner_id=hidden_owner_id,
+                                           exclude_showcases=True)
     # 裁列表响应死字段（对抗审计：match_config_json/hands_per_match/phase/source_contest_id
     # 列表视图不消费；不动 organizer_id/stages_json/rest_ends_at/current_stage_idx/
     # official_results_ready——共享 list_contests 喂 /api/contests/{id} + 后端内部读取）。
@@ -2380,12 +2381,28 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
             gen(), media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="contest-{contest_id}-results.csv"'},
         )
+    # JSON 默认返回可直接展示的结构化破同分字段；不让前端猜测或解析数据库
+    # 存储格式。CSV 分支仍从同一份持久值展开，二者共享事实来源。
+    public_rows = []
+    for row in rows:
+        public = dict(row)
+        raw_tiebreaks = public.pop("tiebreaks_json", None) or "{}"
+        try:
+            import json as _json
+            parsed_tiebreaks = _json.loads(raw_tiebreaks)
+        except (TypeError, ValueError):
+            parsed_tiebreaks = {}
+        public["tiebreaks"] = (
+            parsed_tiebreaks if isinstance(parsed_tiebreaks, dict) else {}
+        )
+        public_rows.append(public)
+
     # json（默认）：返回结构化排名
     return {
         "contest_id": contest_id,
         "phase": c.get("phase") or "standalone",
         "ready": True,
-        "results": rows,
+        "results": public_rows,
     }
 
 

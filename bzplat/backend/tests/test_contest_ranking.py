@@ -152,15 +152,30 @@ def test_official_results_endpoint_csv_json(tmp_path):
     c = store.create_contest("P2导出", organizer_id=o["id"], game_id="holdem")["id"]
     ranking.persist_official_results(
         store, c,
-        [{"entry_id": 1, "rank": 1, "bot_id": b, "user_id": o["id"],
-          "tiebreaks": {"points": 6, "buchholz_cut1": 3, "sonneborn_berger": 3}}],
+        [
+            {"entry_id": 1, "rank": 1, "bot_id": b, "user_id": o["id"],
+             "tiebreaks": {"points": 6, "buchholz_cut1": 3,
+                           "sonneborn_berger": 3, "seed": 1}},
+            {"entry_id": 2, "rank": 2, "bot_id": b, "user_id": o["id"],
+             "tiebreaks": {"points": 6, "buchholz_cut1": 2,
+                           "sonneborn_berger": 2, "seed": 2}},
+        ],
     )
     client = TestClient(app)
     r = client.get(f"/api/contests/{c}/official-results?format=json")
     assert r.status_code == 200
     data = r.json()
     assert data["ready"] is True
-    assert len(data["results"]) == 1
+    assert len(data["results"]) == 2
+    assert [row["rank"] for row in data["results"]] == [1, 2]
+    assert data["results"][0]["points"] == data["results"][1]["points"] == 6
+    assert data["results"][0]["tiebreaks"] == {
+        "points": 6,
+        "buchholz_cut1": 3,
+        "sonneborn_berger": 3,
+        "seed": 1,
+    }
+    assert "tiebreaks_json" not in data["results"][0]
     r2 = client.get(f"/api/contests/{c}/official-results?format=csv")
     assert r2.status_code == 200
     assert "text/csv" in r2.headers.get("content-type", "")

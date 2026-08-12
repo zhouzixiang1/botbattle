@@ -143,13 +143,27 @@ def test_showcase_visibility_for_four_roles_and_write_conflicts(tmp_path):
     )
     store.freeze_contest_showcase(draft["id"], "contest_lifecycle_draft")
     store.freeze_contest_showcase(opened["id"], "contest_lifecycle_open")
+    real = store.create_contest(
+        "真实公开赛事", org["id"], game_id="gomoku", status="open",
+        template_id="gomoku_group_drr_ko",
+    )
 
     client = TestClient(app)
-    visitor_list = client.get("/api/contests").json()["contests"]
-    assert opened["id"] in {row["id"] for row in visitor_list}
+    normal = _headers(app, "showcase_user")
+    organizer = _headers(app, "showcase_org")
+    admin = _headers(app, "showcase_admin")
+    # 真实赛事发现列表对四种身份使用同一数据骨架：showcase 在 SQL 的
+    # COUNT/OFFSET 之前排除，不能占页、污染 total 或靠前端裁掉。
+    for headers in (None, normal, organizer, admin):
+        response = client.get(
+            "/api/contests?page=1&per_page=1", headers=headers,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 1
+        assert [row["id"] for row in payload["contests"]] == [real["id"]]
     assert client.get(f"/api/contests/{draft['id']}").status_code == 404
 
-    normal = _headers(app, "showcase_user")
     assert client.get(f"/api/contests/{opened['id']}", headers=normal).status_code == 200
     assert client.get(f"/api/contests/{draft['id']}", headers=normal).status_code == 404
     # A normal participant reaches the immutable business guard before Bot
@@ -162,7 +176,6 @@ def test_showcase_visibility_for_four_roles_and_write_conflicts(tmp_path):
     assert register.status_code == 409
     assert "演示快照" in register.json()["detail"]
 
-    organizer = _headers(app, "showcase_org")
     own_draft = client.get(f"/api/contests/{draft['id']}", headers=organizer)
     assert own_draft.status_code == 200
     assert own_draft.json()["contest"]["showcase_key"] == "contest_lifecycle_draft"
@@ -175,7 +188,6 @@ def test_showcase_visibility_for_four_roles_and_write_conflicts(tmp_path):
         f"/api/contests/{draft['id']}", headers=other_organizer
     ).status_code == 404
 
-    admin = _headers(app, "showcase_admin")
     admin_detail = client.get(f"/api/contests/{draft['id']}", headers=admin)
     assert admin_detail.status_code == 200
     assert client.patch(
@@ -200,12 +212,10 @@ def test_showcase_seed_marker_is_not_exposed_by_public_api(tmp_path):
     store.freeze_contest_showcase(contest["id"], "contest_lifecycle_open")
     client = TestClient(app)
     detail = client.get(f"/api/contests/{contest['id']}").json()["contest"]
-    listed = next(
-        row for row in client.get("/api/contests").json()["contests"]
-        if row["id"] == contest["id"]
-    )
     assert detail["description"] == "合成演示快照（只读，不代表真实活动赛事）。"
-    assert listed["description"] == detail["description"]
+    assert contest["id"] not in {
+        row["id"] for row in client.get("/api/contests").json()["contests"]
+    }
 
 
 def test_scheduler_reconcile_recovery_and_active_stats_skip_showcases(tmp_path):
