@@ -51,6 +51,7 @@ from bzplat.backend.security import (
     BotUploadBodyLimitMiddleware,
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
+    trusted_proxy_networks,
 )
 from bzplat.backend.store import Store
 
@@ -98,6 +99,9 @@ def create_app(
     max_concurrent: int | None = None,
 ) -> FastAPI:
     _load_dotenv()
+    # Parse once before any Store/runtime writer is created. A malformed proxy
+    # trust boundary must fail startup rather than silently trust a wider peer.
+    trusted_proxy_cidrs = trusted_proxy_networks()
     db_path = db_path or os.environ.get("BZ_DB_PATH", "botzone.db")
     qa_instance = qa_instance_enabled(os.environ.get("BZ_QA_INSTANCE"))
     avatar_raw = os.environ.get("BZ_AVATAR_DIR")
@@ -311,14 +315,21 @@ def create_app(
     # Routes must not resolve BZ_AVATAR_DIR independently after app creation.
     app.state.avatar_dir = avatars_dir
     app.state.runtime_ceiling = concurrent_ceiling()
+    app.state.trusted_proxy_cidrs = trusted_proxy_cidrs
 
     # Added first = innermost user middleware: still before FastAPI form parsing,
     # while the existing security/access layers can decorate and log its 413.
     app.add_middleware(BotUploadBodyLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
-    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(
+        RateLimitMiddleware,
+        trusted_proxy_cidrs=trusted_proxy_cidrs,
+    )
     # AccessLog 最后 add = 最外层，记录所有请求（含被限流的 429）
-    app.add_middleware(AccessLogMiddleware)
+    app.add_middleware(
+        AccessLogMiddleware,
+        trusted_proxy_cidrs=trusted_proxy_cidrs,
+    )
     app.include_router(auth_router)
     app.include_router(api_router)
     app.include_router(communications_router)

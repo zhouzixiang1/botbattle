@@ -57,7 +57,9 @@ def test_systemd_template_creates_runtime_state_with_private_umask():
         encoding="utf-8"
     )
     assert "UMask=0077" in service
-    assert "--host 127.0.0.1 --port 50380" in service
+    assert "bzplat.backend.cli serve" in service
+    assert "--host" not in service
+    assert "--port" not in service
     assert "${" not in service
 
 
@@ -134,6 +136,34 @@ def test_create_app_rejects_primary_avatars_before_store_or_mkdir(
     assert not (tmp_path / "qa.db").exists()
 
 
+def test_invalid_trusted_proxy_cidr_fails_before_store_or_runtime_writers(
+    monkeypatch, tmp_path
+):
+    calls: list[str] = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "Store",
+        lambda *_args, **_kwargs: calls.append("store"),
+    )
+    monkeypatch.setattr(
+        Path,
+        "mkdir",
+        lambda *_args, **_kwargs: calls.append("mkdir"),
+    )
+    monkeypatch.setenv(
+        "BZ_TRUSTED_PROXY_CIDRS",
+        "127.0.0.1/32,bad-cidr",
+    )
+
+    with pytest.raises(ValueError, match="BZ_TRUSTED_PROXY_CIDRS"):
+        main.create_app(db_path=str(tmp_path / "runtime" / "qa.db"))
+
+    assert calls == []
+    assert not (tmp_path / "runtime").exists()
+
+
 def test_cli_pins_default_qa_runtime_dirs_beside_database(monkeypatch, tmp_path):
     captured: dict[str, str] = {}
     monkeypatch.chdir(tmp_path)
@@ -164,7 +194,7 @@ def test_cli_pins_default_qa_runtime_dirs_beside_database(monkeypatch, tmp_path)
 
 
 def test_cli_preserves_application_owned_uvicorn_logging(monkeypatch):
-    """Uvicorn must not replace the query-stripping handlers after setup."""
+    """Uvicorn must preserve app-owned logging and socket-peer identity."""
     captured: dict[str, object] = {}
     monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
     monkeypatch.setattr(
@@ -181,6 +211,52 @@ def test_cli_preserves_application_owned_uvicorn_logging(monkeypatch):
     cli.serve(host="127.0.0.1", port=50381, reload=False)
 
     assert captured["log_config"] is None
+    assert captured["proxy_headers"] is False
+
+
+def test_cli_rejects_wildcard_bind_without_explicit_lan_gate(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        "bzplat.backend.logging_config.setup_logging",
+        lambda **_kwargs: calls.append("logging"),
+    )
+    monkeypatch.setattr(
+        cli.uvicorn,
+        "run",
+        lambda *_args, **_kwargs: calls.append("uvicorn"),
+    )
+    monkeypatch.delenv("BZ_ALLOW_LAN_BIND", raising=False)
+    monkeypatch.delenv("BZ_QA_INSTANCE", raising=False)
+
+    with pytest.raises(typer.BadParameter, match="BZ_ALLOW_LAN_BIND=1"):
+        cli.serve(host="0.0.0.0", port=50381, reload=False)
+
+    assert calls == []
+
+
+def test_cli_allows_explicit_wildcard_lan_bind_and_disables_proxy_rewrite(
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli, "_load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        "bzplat.backend.logging_config.setup_logging",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cli.uvicorn,
+        "run",
+        lambda *_args, **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setenv("BZ_ALLOW_LAN_BIND", "1")
+    monkeypatch.delenv("BZ_QA_INSTANCE", raising=False)
+
+    cli.serve(host="0.0.0.0", port=50381, reload=False)
+
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 50381
+    assert captured["proxy_headers"] is False
 
 
 def test_create_app_defaults_qa_uploads_and_avatars_beside_database(

@@ -17,8 +17,9 @@
 启动脚本和 systemd 模板分别固定 `umask 077` / `UMask=0077`，避免新建的数据库、
 WAL/SHM、会话相关日志和上传二进制继承交互 shell 的宽松权限。部署时仍须把既有 `.env`、
 数据库和日志收紧为 `0600`、私有运行目录收紧为 `0700`；公开头像目录单独按静态只读需求配置。
-生产 `platform-ctl.sh` 还会在创建运行目录前拒绝非回环 `BZ_HOST`，systemd 模板固定绑定
-`127.0.0.1:50380`；开发期需要其他监听地址时只能在隔离 worktree 直接调用 CLI。
+生产 `platform-ctl.sh` 与 CLI 默认拒绝非回环绑定。只有主机防火墙已经限制来源后，显式
+`BZ_HOST=0.0.0.0 + BZ_ALLOW_LAN_BIND=1` 才可开放受控 LAN；systemd 同样从 `.env` 经过
+CLI 门禁，直接调用 systemctl 不能绕过。未经 gate 的拒绝发生在运行目录、日志和数据库创建前。
 
 Uvicorn 的 HTTP access record 与 WebSocket accepted/rejected record 原生会把
 `path?query` 放进 positional args。平台在 handler 序列化前按 Uvicorn 记录结构只保留
@@ -85,12 +86,19 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 
 ```
 浏览器(真实公网IP) → nginx(X-Real-IP + X-Forwarded-For) → frp(TCP透传,不改HTTP头)
-→ 本机 uvicorn:50380 → 后端(client_ip 读 XFF) → 真实 IP
+→ 本机 uvicorn:50380(socket peer=127.0.0.1) → 后端校验 peer 后读 XFF → 真实 IP
 ```
 
 **关键开关 `BZ_TRUST_PROXY=1`**（公网经反代必需）：
 - `.env` 已设。未开启时 `request.client.host` 是 `127.0.0.1`（frp/uvicorn 对端），限流全站共一个桶（失效）、登录 IP 记录错误。
-- 开启后 `client_ip()`（`security.py`）**优先取 `X-Real-IP`**（nginx 覆盖式设置，客户端无法伪造）；无则取 `X-Forwarded-For` 的**倒数第 `BZ_TRUSTED_PROXY_HOPS` 跳**（受信代理前一跳，默认 1），而非最左可伪造段。
+- 开启后也不会无条件信任请求头：只有原始 ASGI socket peer 命中
+  `BZ_TRUSTED_PROXY_CIDRS` 才读取。缺失/空配置安全默认精确
+  `127.0.0.1/32,::1/128`，生产应显式设置该值；无效 CIDR 使应用在创建 Store/运行时前启动失败。
+- Uvicorn `proxy_headers=False`，不会在应用校验前用 XFF 改写 `scope.client`。因此从
+  `192.168.1.0/24` 直连的客户端即使伪造 `X-Real-IP/XFF`，限流、登录与审计仍使用真实 LAN peer；
+  **绝不能**为了 LAN 直连把客户端网段加入 `BZ_TRUSTED_PROXY_CIDRS`。
+- 对受信 peer，`client_ip()` 优先取合法 IP 形式的 `X-Real-IP`；无则取合法 XFF 的**倒数第
+  `BZ_TRUSTED_PROXY_HOPS` 跳**（默认 1），而非最左可伪造段。值非法或链长不足时回退 socket peer。
 - **nginx 推荐配置**（覆盖式，防伪造）：
   ```nginx
   proxy_set_header X-Real-IP $remote_addr;
@@ -106,10 +114,49 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
   会处理 XFF 的 HTTP 代理时才按真实拓扑调整。
 - 本地开发（无反代）保持 `BZ_TRUST_PROXY` 不设或 `0`。
 
+> `frp` 只是 TCP 透传，本身不会覆盖客户端伪造的 HTTP 头。把 loopback 列为 trusted peer 的硬前提是：
+> 远端 FRPS 映射端口不能被公网客户端直接访问，所有进入该 tunnel 的流量必须先经过会覆盖身份头的
+> nginx。若公网仍可直连 FRPS 的原始 50380，攻击者抵达本机时同样表现为 loopback peer，本 CIDR
+> 边界无法区分；必须先用远端安全组/防火墙关闭该旁路，不能用扩大或缩小 hops 代替。
+
 > 安全提示（审计 P1）：客户端可任意伪造 `X-Forwarded-For` 最左段。若 nginx 用追加式 `$proxy_add_x_forwarded_for` 且未配 `real_ip` 模块校验，攻击者每请求塞不同最左 IP 可绕过限流。代码侧已改为取倒数第 N 跳 + 优先 `X-Real-IP`（覆盖式不可伪造），彻底防御需运维正确配 nginx（覆盖式 XFF 或 `real_ip` 模块）。
 
 > Uvicorn 的 query 过滤不会修改远端 nginx 日志。上线时必须核对实际 `access_log`
 > 使用上述 `$uri` 格式，不能使用包含完整请求行的 `$request` 或包含参数的 `$request_uri`。
+
+## 受控 LAN 直连
+
+`0.0.0.0` 会监听机器的所有 IPv4 网卡，不等于“只监听 LAN”。开放前先审计现有规则、VPN/公网
+网卡和路由器端口转发，确保 TCP 50380 仅允许源 `192.168.1.0/24`；不存在防火墙证明时保持
+`127.0.0.1`。`BZ_ALLOW_LAN_BIND` 只是一道应用绑定门，不检测或证明主机防火墙已经生效；防火墙必须
+由部署者单独配置和验收。例如使用 UFW 的主机可在确认没有更早的宽泛 allow 后执行：
+
+```bash
+sudo ufw allow proto tcp from 192.168.1.0/24 to any port 50380
+sudo ufw deny 50380/tcp
+sudo ufw status numbered     # allow LAN 必须先匹配；删除任何更宽的 50380 allow
+```
+
+然后才修改 `.env` 并更新/重启 systemd unit：
+
+```bash
+BZ_HOST=0.0.0.0
+BZ_PORT=50380
+BZ_ALLOW_LAN_BIND=1
+BZ_TRUST_PROXY=1
+BZ_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
+```
+
+验收必须同时证明：本机 `127.0.0.1:50380` 健康、LAN 内不同来源可访问、LAN 伪造转发头时日志仍记
+LAN peer、非 LAN 来源被防火墙拒绝、remote nginx/frp 路径仍记公网真实 IP。不要在路由器做 50380
+公网端口转发。
+
+LAN HTTP 直连的支持范围是静态页面、公开 API，以及客户端显式携带登录响应中 Bearer token 的 REST
+请求。它不是完整的生产认证入口：生产 `BZ_SECURE_COOKIE=1` 时，浏览器不会向 HTTP IP 地址发送
+Secure session Cookie；人机 WebSocket 又只接受 session Cookie，且 Origin 必须与单值
+`BZ_PUBLIC_ORIGIN` 严格相等。因此 `http://192.168.1.13:50380` 不能使用人机 WebSocket，仍须通过与
+`BZ_PUBLIC_ORIGIN` 一致且证书有效的正式 HTTPS 名称。不能为方便直连而关闭 Secure Cookie、放宽
+Origin，或把该边界描述为 LAN 全功能访问。
 
 ## 限流（内存滑动窗口）
 
@@ -165,7 +212,10 @@ admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不�
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `BZ_TRUST_PROXY` | `0` | 公网经反代设 `1`（信任 XFF 取真实 IP） |
+| `BZ_ALLOW_LAN_BIND` | `0` | 主机防火墙已限制受信 LAN 后，才允许 `BZ_HOST=0.0.0.0` |
+| `BZ_TRUST_PROXY` | `0` | 公网经反代设 `1`，但仍只接受受信 socket peer 的代理头 |
+| `BZ_TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | 可写代理身份头的 peer；不能填直连客户端 LAN |
+| `BZ_TRUSTED_PROXY_HOPS` | `1` | 实际写入 XFF 的受信 HTTP 代理层数；frp 不计 |
 | `BZ_PUBLIC_ORIGIN` | 未设 | 人机 WebSocket 唯一允许的 HTTP(S) origin；生产必配 |
 | `BZ_RATE_LIMIT` | `1` | 开启 IP 限流 |
 | `BZ_HSTS` | `0` | HTTPS 部署可设 `1` 加 HSTS 头 |

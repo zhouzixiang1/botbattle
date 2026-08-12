@@ -7,7 +7,9 @@ Type=simple
 WorkingDirectory=%h/project/botbattle
 EnvironmentFile=-%h/project/botbattle/.env
 UMask=0077
-ExecStart=%h/project/botbattle/.venv/bin/python -m bzplat.backend.cli serve --host 127.0.0.1 --port 50380
+# CLI loads BZ_HOST/BZ_PORT from EnvironmentFile and enforces the explicit
+# BZ_ALLOW_LAN_BIND gate. Missing configuration remains loopback:50380.
+ExecStart=%h/project/botbattle/.venv/bin/python -m bzplat.backend.cli serve
 Restart=on-failure
 RestartSec=3
 

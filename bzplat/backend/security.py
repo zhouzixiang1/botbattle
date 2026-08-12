@@ -1,7 +1,8 @@
 """公网暴露加固：安全响应头 + 内存 IP 限流 + 访问日志 + 安全审计日志。
 
 单进程 uvicorn 用内存限流；多 worker 再换 Redis。
-信任 X-Forwarded-For 仅在 BZ_TRUST_PROXY=1 时开启（公网经 nginx/frp 代理必需）。
+代理身份头需要 BZ_TRUST_PROXY=1 且原始 socket peer 命中
+BZ_TRUSTED_PROXY_CIDRS；直连 LAN 永远使用真实 peer。
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -68,6 +70,8 @@ _STATIC_SKIP_EXT = (
     ".map",
     ".webp",
 )
+_DEFAULT_TRUSTED_PROXY_CIDRS = ("127.0.0.1/32", "::1/128")
+ProxyNetwork = IPv4Network | IPv6Network
 
 
 def normalize_public_origin(value: str) -> str:
@@ -278,10 +282,76 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def client_ip(request: Request, *, trust_proxy: bool, hops: int = 1) -> str:
+def trusted_proxy_networks(raw: str | None = None) -> tuple[ProxyNetwork, ...]:
+    """Parse the only socket peers allowed to supply proxy identity headers.
+
+    A missing/blank setting deliberately defaults to exact IPv4/IPv6 loopback,
+    which keeps the local nginx/frp path working without trusting LAN peers.
+    Malformed explicit configuration fails startup instead of silently widening
+    or disabling the identity boundary.
+    """
+    configured = os.environ.get("BZ_TRUSTED_PROXY_CIDRS") if raw is None else raw
+    if configured is None or not configured.strip():
+        entries = list(_DEFAULT_TRUSTED_PROXY_CIDRS)
+    else:
+        entries = [entry.strip() for entry in configured.split(",")]
+        if not entries or any(not entry for entry in entries):
+            raise ValueError("BZ_TRUSTED_PROXY_CIDRS 包含空 CIDR")
+
+    networks: list[ProxyNetwork] = []
+    for entry in entries:
+        try:
+            network = ip_network(entry, strict=True)
+        except ValueError as exc:
+            raise ValueError(
+                f"BZ_TRUSTED_PROXY_CIDRS 包含无效 CIDR: {entry}"
+            ) from exc
+        if network not in networks:
+            networks.append(network)
+    return tuple(networks)
+
+
+def validate_server_bind(
+    host: str,
+    *,
+    allow_lan_bind: bool | None = None,
+) -> str:
+    """Allow loopback by default and wildcard IPv4 only behind an explicit gate."""
+    normalized = (host or "").strip().lower()
+    if normalized in {"127.0.0.1", "localhost", "::1"}:
+        return normalized
+    allow_lan = (
+        _env_bool("BZ_ALLOW_LAN_BIND", False)
+        if allow_lan_bind is None
+        else allow_lan_bind
+    )
+    if normalized == "0.0.0.0" and allow_lan:
+        return normalized
+    if normalized == "0.0.0.0":
+        raise ValueError(
+            "BZ_HOST=0.0.0.0 需要显式设置 BZ_ALLOW_LAN_BIND=1，"
+            "并先把主机防火墙限制为受信 LAN"
+        )
+    raise ValueError(
+        f"不支持 BZ_HOST={host!r}；只允许 loopback，或经 "
+        "BZ_ALLOW_LAN_BIND=1 授权的 0.0.0.0"
+    )
+
+
+def client_ip(
+    request: Request,
+    *,
+    trust_proxy: bool,
+    hops: int = 1,
+    trusted_proxy_cidrs: tuple[ProxyNetwork, ...] | None = None,
+) -> str:
     """解析客户端真实 IP。
 
-    trust_proxy 开启时（部署在 nginx/frp 等反代后）：
+    只有同时满足 trust_proxy 开启且 ASGI socket peer 命中
+    ``BZ_TRUSTED_PROXY_CIDRS`` 时才读取代理头。缺省 CIDR 仅包含精确
+    IPv4/IPv6 loopback；直连 LAN/公网客户端伪造头时始终使用 socket peer。
+
+    对受信代理：
     - **优先信 X-Real-IP**（nginx 用 ``X-Real-IP: $remote_addr`` 覆盖式设置，
       客户端无法伪造——比 XFF 最左段可靠）。
     - X-Forwarded-For 取**倒数第 ``hops`` 跳**（受信代理前一跳），而非最左可伪造段。
@@ -289,24 +359,54 @@ def client_ip(request: Request, *, trust_proxy: bool, hops: int = 1) -> str:
       攻击者在 XFF 最左塞伪造 IP 不再击穿限流（审计 P1）。
     - 单层 nginx + 覆盖式配置（XFF 只 1 段=$remote_addr）时，最左==最右，行为不变。
 
-    注意：彻底防御需运维正确配 nginx（``set_real_ip_from`` + 覆盖式 XFF，
-    见 doc/SECURITY.md）。代码侧此处减少误配的伤害面。
+    Uvicorn 自带的 proxy-header 重写必须关闭，确保这里看到的
+    ``request.client`` 仍是不可伪造的 socket peer。
     """
-    if trust_proxy:
-        # 优先 X-Real-IP（nginx 覆盖，不可被客户端伪造）
+    peer = (
+        request.client.host
+        if request.client and request.client.host
+        else "unknown"
+    )
+    if trust_proxy and peer != "unknown":
+        try:
+            peer_address = ip_address(peer)
+        except ValueError:
+            peer_address = None
+        networks = (
+            trusted_proxy_networks()
+            if trusted_proxy_cidrs is None
+            else trusted_proxy_cidrs
+        )
+        peer_is_trusted = peer_address is not None and any(
+            peer_address.version == network.version and peer_address in network
+            for network in networks
+        )
+    else:
+        peer_is_trusted = False
+
+    if peer_is_trusted:
+        # X-Real-IP is accepted only from an allowlisted proxy socket peer.
         real = request.headers.get("x-real-ip")
-        if real:
-            return real.strip() or "unknown"
+        if real is not None:
+            try:
+                return ip_address(real.strip()).compressed
+            except ValueError:
+                # An allowlisted proxy that emits X-Real-IP owns this identity
+                # boundary.  If that authoritative header is malformed, do not
+                # silently fall through to a potentially client-supplied XFF.
+                return peer
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
             parts = [p.strip() for p in forwarded.split(",") if p.strip()]
-            if parts:
+            trusted_hops = max(1, hops)
+            if len(parts) >= trusted_hops:
                 # 取倒数第 hops 跳（受信代理前一跳），最左的可伪造
-                idx = max(0, len(parts) - max(1, hops))
-                return parts[idx] or "unknown"
-    if request.client and request.client.host:
-        return request.client.host
-    return "unknown"
+                candidate = parts[-trusted_hops]
+                try:
+                    return ip_address(candidate).compressed
+                except ValueError:
+                    pass
+    return peer
 
 
 class InMemoryRateLimiter:
@@ -361,13 +461,24 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """按路径分级的 IP 限流（register/login/captcha/upload/challenge）。"""
 
-    def __init__(self, app: ASGIApp, *, enabled: bool | None = None) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        enabled: bool | None = None,
+        trusted_proxy_cidrs: tuple[ProxyNetwork, ...] | None = None,
+    ) -> None:
         super().__init__(app)
         self.enabled = (
             _env_bool("BZ_RATE_LIMIT", True) if enabled is None else enabled
         )
         self.trust_proxy = _env_bool("BZ_TRUST_PROXY", False)
         self.proxy_hops = max(1, _env_int("BZ_TRUSTED_PROXY_HOPS", 1))
+        self.trusted_proxy_cidrs = (
+            trusted_proxy_networks()
+            if trusted_proxy_cidrs is None
+            else trusted_proxy_cidrs
+        )
         self._limiter = InMemoryRateLimiter()
         self._last_cleanup = time.monotonic()
 
@@ -423,7 +534,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             self._last_cleanup = now
 
         max_req, window = limits
-        ip = client_ip(request, trust_proxy=self.trust_proxy, hops=self.proxy_hops)
+        ip = client_ip(
+            request,
+            trust_proxy=self.trust_proxy,
+            hops=self.proxy_hops,
+            trusted_proxy_cidrs=self.trusted_proxy_cidrs,
+        )
         # The same resource commonly has a cheap GET and a stricter mutating
         # POST budget (notably Bot version history vs version upload). Sharing a
         # path-only bucket lets harmless reads consume the write allowance.
@@ -454,6 +570,9 @@ def security_settings() -> dict[str, Any]:
     return {
         "rate_limit": _env_bool("BZ_RATE_LIMIT", True),
         "trust_proxy": _env_bool("BZ_TRUST_PROXY", False),
+        "trusted_proxy_cidrs": [
+            str(network) for network in trusted_proxy_networks()
+        ],
         "hsts": _env_bool("BZ_HSTS", False),
         "secure_cookie": _env_bool("BZ_SECURE_COOKIE", False),
     }
@@ -463,16 +582,27 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
     """每个 HTTP 请求记一行访问日志（含真实客户端 IP）到 logs/access.log。
 
     格式：``ip=<IP> method=<METHOD> path=<path> status=<状态码> dt=<耗时ms>``
-    IP 经 ``client_ip()`` 解析（trust_proxy 开启时读 X-Forwarded-For/X-Real-IP）。
+    IP 经 ``client_ip()`` 解析；只有受信 socket peer 才能提供代理身份头。
     跳过静态资源与 /api/health，避免噪音。
     """
 
-    def __init__(self, app: ASGIApp, *, trust_proxy: bool | None = None) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        trust_proxy: bool | None = None,
+        trusted_proxy_cidrs: tuple[ProxyNetwork, ...] | None = None,
+    ) -> None:
         super().__init__(app)
         self.trust_proxy = (
             _env_bool("BZ_TRUST_PROXY", False) if trust_proxy is None else trust_proxy
         )
         self.proxy_hops = max(1, _env_int("BZ_TRUSTED_PROXY_HOPS", 1))
+        self.trusted_proxy_cidrs = (
+            trusted_proxy_networks()
+            if trusted_proxy_cidrs is None
+            else trusted_proxy_cidrs
+        )
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
@@ -490,14 +620,24 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             # 异常也要记访问日志（5xx/崩溃），再向上抛
             status = 500
             dt_ms = int((time.monotonic() - start) * 1000)
-            ip = client_ip(request, trust_proxy=self.trust_proxy, hops=self.proxy_hops)
+            ip = client_ip(
+                request,
+                trust_proxy=self.trust_proxy,
+                hops=self.proxy_hops,
+                trusted_proxy_cidrs=self.trusted_proxy_cidrs,
+            )
             _access_logger.info(
                 "ip=%s method=%s path=%s status=%s dt=%dms",
                 ip, request.method, path, status, dt_ms,
             )
             raise
         dt_ms = int((time.monotonic() - start) * 1000)
-        ip = client_ip(request, trust_proxy=self.trust_proxy, hops=self.proxy_hops)
+        ip = client_ip(
+            request,
+            trust_proxy=self.trust_proxy,
+            hops=self.proxy_hops,
+            trusted_proxy_cidrs=self.trusted_proxy_cidrs,
+        )
         _access_logger.info(
             "ip=%s method=%s path=%s status=%d dt=%dms",
             ip, request.method, path, status, dt_ms,
@@ -526,7 +666,18 @@ def audit_log(
     """
     tp = _env_bool("BZ_TRUST_PROXY", False) if trust_proxy is None else trust_proxy
     hops = max(1, _env_int("BZ_TRUSTED_PROXY_HOPS", 1))
-    ip = client_ip(request, trust_proxy=tp, hops=hops)
+    configured_networks = getattr(
+        getattr(request, "app", None),
+        "state",
+        None,
+    )
+    networks = getattr(configured_networks, "trusted_proxy_cidrs", None)
+    ip = client_ip(
+        request,
+        trust_proxy=tp,
+        hops=hops,
+        trusted_proxy_cidrs=networks,
+    )
     parts = [f"ip={ip}", f"action={action}", f"result={result}"]
     if user is not None:
         parts.append(f"user={user}")
