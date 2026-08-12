@@ -2198,11 +2198,7 @@ class ContestManager:
             matches = {mid: self.store.get_match(mid) for mid in match_ids if mid}
             matches = {k: v for k, v in matches.items() if v}
             return _ranking.compute_official_ranking(
-                standings,
-                pairings,
-                matches,
-                normalize_delta=normalize_delta,
-                source_stage=sidx,
+                standings, pairings, matches, normalize_delta=normalize_delta
             )
 
         ranking_rows = _rank_stage(stage_idx)

@@ -1029,8 +1029,6 @@ CREATE TABLE IF NOT EXISTS contest_official_results (
     contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
     entry_id        INTEGER NOT NULL,
     stage_idx       INTEGER NOT NULL DEFAULT 0,  -- 末阶段（全员榜来源）
-    source_stage    INTEGER,                     -- 本行积分/破同分来源阶段；旧快照为空
-    ranking_cohort  TEXT,                        -- 破同分可比较区间；旧快照为空
     rank            INTEGER NOT NULL,            -- 1-based 唯一连续正式名次
     points          REAL    NOT NULL DEFAULT 0,
     bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
