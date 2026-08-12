@@ -13,8 +13,14 @@
 > 上下文中已验证活跃的正式 Bot 对自身，不会从 DB 拾取或重新启用该临时 Bot。
 > 顺序单局等待上限为 360 秒；claim 后若与另一场共享 Docker launch fence，则单局上限为
 > 720 秒。阶段 2 固定 12 场（4 场 Holdem + 8 场棋类）使用一个 2880 秒绝对截止，计算为
-> `4×360 + 8×180`，claim 与完成共同消耗该预算，不会为每个阶段重复叠加等待。该脚本尚未在
-> 目标 HEAD 实跑，也不单独覆盖 request 取消/重试或证明双资源
+> `4×360 + 8×180`，claim 与完成共同消耗该预算，不会为每个阶段重复叠加等待。
+> 阶段 5 不再把内置 8 人瑞士→单败模板的约 19 场长赛程冒充上线必要条件：改用一届
+> 4 人五子棋自定义赛事（1 轮瑞士 2 场 → 休息/重新派遣/人工恢复 → Top2 单败 1 场），
+> 严格校验拓扑 3 场、600 秒共享绝对截止、两个阶段读模型、连续 1-based 正式榜、赛事
+> 不计 Glicko，并逐步验证 open→published→running→rest→running→finished。阶段 7 完成后
+> 还会再次要求 dispatcher 为 running/accepting、active/queued 与两类占用均为 0。
+> 它证明完整状态机；12 场真实吞吐由阶段 2 独立证明。
+> 该脚本也不单独覆盖 request 取消/重试或证明双资源
 > 峰值，因此历史退出码/通过数不能作为当前发布证据。
 
 ## 用途
@@ -46,6 +52,17 @@ python scripts/load_test.py \
 # 跳过种子（假设已种过 load_* 账号，只跑 HTTP 阶段）
 python scripts/load_test.py \
   --base http://127.0.0.1:50381 --db "$BZ_DB_PATH" --skip-seed
+
+# 干净新副本：先创建/校验专用 seed，再只跑赛事到 Admin 的 5–7
+python scripts/load_test.py \
+  --base http://127.0.0.1:50381 --db "$BZ_DB_PATH" \
+  --users 60 --start-phase 5
+
+# 复用既有 seed：只有 clean gate 证明队列/容量为 0、dispatcher 健康，且无活动
+# LoadTest 赛事时才继续；否则脚本停止，不会替操作者自动取消或删除现场
+python scripts/load_test.py \
+  --base http://127.0.0.1:50381 --db "$BZ_DB_PATH" \
+  --skip-seed --start-phase 5
 ```
 
 **退出码**：`0` = 全部通过；`1` = 用例失败或 QA 目标安全预检失败；`2` = 通过 QA marker 预检后的健康请求失败；`130` = 中断。
@@ -53,7 +70,7 @@ python scripts/load_test.py \
 ## 种子（不污染、幂等）
 
 - **60 普通用户** `load_u01..load_u60`（密码固定 `LoadTest1234`，邮箱 `@loadtest.local`），每人上传 3 款游戏 Bot（`{user}_{game}`）→ 180 Bot。
-- **2 组织者** `load_org1`/`load_org2`（各办 1 场赛事）。
+- **2 组织者** `load_org1`/`load_org2`（覆盖角色与权限；阶段 5 由 `load_org1` 主办一届有界赛事）。
 - **admin**：仅创建/复用专用 `load_admin`；不会扫描、复用或修改 copied DB 中的
   `admin`/`adminroot` 等任意管理员。
 - 所有账号/Bot 名均 `load_` 前缀、邮箱 `@loadtest.local`，可一键识别清理；**不动既有非 load 数据**。
@@ -82,9 +99,9 @@ python scripts/load_test.py \
 | **2 对局** | `POST /api/matches/challenge` 精确接收 202 request；按 `public_id` 查询直到 claim 出现 `match_id`，三游戏混跑 + 自博弈，目标 `TARGET_MATCHES=12`；并行等待终态后 GET Match/排行榜核对 Glicko。不再期待 admission 429，也不据此声称测得服务端峰值并发 | user |
 | **3 SSE snapshot** | `GET /api/matches/{id}/events`（只验首个非 ping 帧为 snapshot，且含 match + 历史列表；不覆盖后续实时增量） | 公开 |
 | **4 人类 vs Bot** | `POST /api/matches/human` 接收 202 request（固定展示座位 2），轮询取得 `match_id` 后才连接 WS `/api/matches/{id}/play`；结束后断言 completed、per-user 活跃 ≤1、match_type=human、**Glicko 不变**。共享 match slot + 1 sandbox unit 由 execution queue 单测与浏览器队列验收另行证明 | user |
-| **5 赛事** | `POST /api/contests`（template）；`/{id}/{open,register,dispatch,start,resume}`；轮询到 finished；验 standings/pairings/stage_results、contest 对局不更新 Glicko | organizer + user |
-| **6 代码配置边界** | `GET /api/admin/settings/runtime` 验 `source=code/mutable=false`；确认 runtime PATCH 与 admin template CRUD 均 404；公开模板列表标记代码只读 | admin + 公开 |
-| **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches,email/templates,contests}`；`POST /api/admin/users/{id}/role`；`DELETE /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/{users,contests}/{id}/{sessions,entries}`；`POST /api/auth/admin/create-reset-token` | admin |
+| **5 赛事** | `POST /api/contests`（4 人五子棋自定义 Swiss1→rest→Top2 KO，精确 3 场）；`/{id}/{open,register,dispatch,publish,start,resume}`；硬断言 published 后才 start，轮询到 finished；验服务端 estimate、两个阶段、全部 pairing/Match、连续 1-based 正式榜、contest 不更新 Glicko | organizer + user |
+| **6 代码配置边界** | `GET /api/admin/settings/runtime` 验 `source=code/mutable=false`；确认 runtime PATCH 与旧 admin template POST 写入口均 404；公开模板列表标记代码只读 | admin + 公开 |
+| **7 Admin** | `GET /api/admin/{users,stats,bots,contests,email/templates,email/outbox,logs,settings/runtime}`；`PATCH /api/admin/{bots,users,matches}` 与 `PATCH /api/admin/settings/site`；`GET /api/admin/bots/{id}/versions`；`POST /api/admin/users/{id}/role`；`DELETE` 后再 `GET /api/admin/users/{id}/sessions`（验 token 失效）；`GET /api/admin/contests/{id}/entries`；`PUT /api/admin/email/templates/welcome` 断言代码模板以 409 拒写；`POST /api/auth/admin/create-reset-token` | admin |
 
 ## 测试
 
@@ -100,7 +117,10 @@ python scripts/load_test.py \
 `bzplat/backend/tests/test_qa_script_artifacts.py` 还用假响应和零真实等待验证阶段 2 challenge：
 429 严格按 `Retry-After` 退避、重试次数有硬上限、复用同一 payload，且 202 后不再 POST；
 另外守护 429 耗尽和 waiter 超时均使整轮退出非零，以及阶段 1 软删除 extra Bot 后固定
-12 场仍只使用活跃正式 Bot。
+12 场仍只使用活跃正式 Bot；赛事 QA 的自定义阶段拓扑固定 3 场、绝对截止固定 600 秒，
+且 `--start-phase 5` 只选择 5/6/7 三阶段。`--start-phase` 是阶段后缀选择器，不是
+阶段内部 checkpoint：复用状态时会在任何 seed/session 写入前执行只读 clean gate；发现
+暂停调度器、活跃/排队任务、资源占用或 open/published/running/rest 的 `LoadTest %` 赛事即拒绝。
 
 ```bash
 pytest bzplat/backend/tests/test_load_test_seed.py \

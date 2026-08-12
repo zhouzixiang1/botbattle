@@ -5,6 +5,7 @@ import importlib.util
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -169,6 +170,167 @@ def test_api_replay_count_uses_nested_result_contract():
     assert load_module.SEQUENTIAL_MATCH_TIMEOUT_SEC == 360.0
     assert load_module.CONTENDED_MATCH_TIMEOUT_SEC == 720.0
     assert load_module.load_batch_timeout_seconds(games) == 2880.0
+
+    contest_payload = load_module.bounded_contest_payload("run1")
+    assert contest_payload["game_id"] == "gomoku"
+    assert load_module.CONTEST_ENTRANT_COUNT == 4
+    assert load_module.contest_match_count(contest_payload["stages"]) == 3
+    assert load_module.contest_timeout_seconds(contest_payload["stages"]) == 600.0
+    assert load_module.selected_phase_numbers(5) == (5, 6, 7)
+
+
+def test_load_contest_gate_is_bounded_but_keeps_the_full_lifecycle():
+    module = load_script("load_test")
+    source = (ROOT / "scripts" / "load_test.py").read_text(encoding="utf-8")
+    phase5_source = source.split("def phase5_contest", 1)[1].split(
+        "def phase6_code_config", 1
+    )[0]
+
+    payload = module.bounded_contest_payload("gate")
+    assert [stage["type"] for stage in payload["stages"]] == [
+        "swiss",
+        "single_elimination",
+    ]
+    assert payload["stages"][0]["rounds"] == 1
+    assert payload["stages"][0]["advance_count"] == 2
+    assert payload["stages"][0]["rest_after_minutes"] == 1
+    assert "time.monotonic() + 400" not in phase5_source
+    assert 'f"/api/contests/{cid}/publish"' in phase5_source
+    assert 'published.get("status") == "published"' in phase5_source
+    assert '"/resume"' not in phase5_source  # URL is formatted with the contest id.
+    assert 'f"/api/contests/{cid}/resume"' in phase5_source
+    assert "if not resumed:\n                    return\n                saw_running = True" in phase5_source
+    assert 'f"/api/contests/{cid}/official-results"' in phase5_source
+    assert "ratings_before == ratings_after" in phase5_source
+    assert "wait_execution_queue_idle(" in phase5_source
+
+
+def _clean_execution_queue_snapshot():
+    return {
+        "dispatcher": {
+            "state": "running",
+            "accepting": True,
+            "auto_enabled": False,
+            "pause_reason": "",
+            "retry_at": None,
+        },
+        "capacity": {
+            "match_slots": {"used": 0, "capacity": 2},
+            "sandbox_units": {"used": 0, "capacity": 4},
+            "running_matches": 0,
+        },
+        "active": [],
+        "queued": [],
+        "queued_count": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("dispatcher", "state"), "paused"),
+        (("dispatcher", "accepting"), False),
+        (("active",), [{"public_id": "req_active"}]),
+        (("queued",), [{"public_id": "req_queued"}]),
+        (("queued_count",), 1),
+        (("capacity", "match_slots", "used"), 1),
+        (("capacity", "sandbox_units", "used"), 2),
+        (("capacity", "running_matches"), 1),
+        (("capacity", "match_slots", "capacity"), 0),
+        (("queued_count",), False),
+    ],
+)
+def test_load_continuation_queue_gate_rejects_every_dirty_dimension(path, value):
+    module = load_script("load_test")
+    payload = _clean_execution_queue_snapshot()
+    target = payload
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    assert module.execution_queue_health_errors(payload)
+
+
+def test_load_continuation_queue_gate_accepts_exact_healthy_idle_snapshot():
+    module = load_script("load_test")
+    assert module.execution_queue_health_errors(_clean_execution_queue_snapshot()) == []
+    assert module.needs_continuation_gate(skip_seed=False, start_phase=0) is False
+    assert module.needs_continuation_gate(skip_seed=True, start_phase=0) is True
+    assert module.needs_continuation_gate(skip_seed=False, start_phase=5) is True
+
+
+@pytest.mark.parametrize(
+    ("status", "blocked"),
+    [
+        ("draft", False),
+        ("open", True),
+        ("published", True),
+        ("running", True),
+        ("rest", True),
+        ("finished", False),
+        ("cancelled", False),
+    ],
+)
+def test_load_continuation_db_gate_only_blocks_unfinished_load_contests(
+    tmp_path, status, blocked
+):
+    module = load_script("load_test")
+    db_path = tmp_path / "qa.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "CREATE TABLE contests(id INTEGER PRIMARY KEY,title TEXT,status TEXT)"
+        )
+        con.execute(
+            "INSERT INTO contests(title,status) VALUES(?,?)",
+            ("LoadTest stale", status),
+        )
+        con.execute(
+            "INSERT INTO contests(title,status) VALUES(?,?)",
+            ("Other contest", "running"),
+        )
+
+    rows = module.active_loadtest_contests(str(db_path))
+
+    assert bool(rows) is blocked
+    if rows:
+        assert rows == [{"id": 1, "title": "LoadTest stale", "status": status}]
+
+
+def test_load_continuation_gate_rejects_second_snapshot_that_becomes_dirty(
+    monkeypatch,
+):
+    module = load_script("load_test")
+    clean = _clean_execution_queue_snapshot()
+    dirty = _clean_execution_queue_snapshot()
+    dirty["queued"] = [{"public_id": "req_late"}]
+    dirty["queued_count"] = 1
+
+    class FakeApi:
+        db_path = "/tmp/unused-qa.db"
+
+        def __init__(self):
+            self.snapshots = iter([clean, dirty])
+
+        def poll_json(self, *_args, **_kwargs):
+            return next(self.snapshots)
+
+    monkeypatch.setattr(module, "active_loadtest_contests", lambda _path: [])
+
+    with pytest.raises(module.ContinuationCleanGateError, match="queued"):
+        module.require_continuation_clean(FakeApi())
+
+
+def test_load_admin_phase_and_main_keep_the_final_queue_gate():
+    source = (ROOT / "scripts" / "load_test.py").read_text(encoding="utf-8")
+    phase7_source = source.split("def phase7_admin", 1)[1].split("def main", 1)[0]
+    main_source = source.split("def main", 1)[1].split("def _rebuild_ctx", 1)[0]
+
+    assert '"request_id": phase7_request_id' in phase7_source
+    assert "阶段7 强制 abort 挑战取得 Match" in phase7_source
+    assert "warn(f\"阶段7 强制 abort 对局发起失败" not in phase7_source
+    assert "全部阶段结束后队列与调度器健康归零" in main_source
+    assert "wait_execution_queue_idle(" in main_source
+    assert 'label="全部阶段结束后的稳定 clean gate"' in main_source
 
 
 class _FakePollClock:

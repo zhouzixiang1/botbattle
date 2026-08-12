@@ -12,8 +12,8 @@
 | **集成测试** | pytest + TestClient | 鉴权、REST、SSE、WebSocket、生命周期与持久化 | 验证模块协作和错误状态 |
 | **架构契约** | pytest 源码扫描 + AST + 导入序 | 游戏注册表、裁判结果鸭子类型、持久化结果唯一 builder、无循环依赖、通用层无游戏分支/静默 game_id 兜底 | 防止解耦架构漂移 |
 | **隔离端到端冒烟** | `scripts/e2e_smoke.sh` | 临时 DB/uploads/avatars/logs 下的上传→挑战→赛事；挑战必须 `completed`，且 `result` 具有 `rounds_played`、双数值零和 `deltas` 与有限 `normalized_delta` | 验证核心链路且不写 checkout/主库，`aborted` 不得假通过 |
-| **API 关键链路脚本** | `scripts/api_full_test.py` | 挑战精确接收 202 request，校验 opaque `public_id`，轮询到 claim 后再读取 Match；轮询共享 1 秒节拍、校验 HTTP/JSON 并按 `Retry-After` 退避；排行榜同样严格校验 HTTP 200、JSON 对象/对象列表，以 `rated_matches` 验证已有计分样本，并按 `ranking_min_matches` 核对 `ranking_eligible` 与 1-based `rank`，不要求已下架的榜单 `matches_played`；顺序单局 360 秒、双槽争用单局 720 秒，四局并发共享 1440 秒 claim+完成绝对截止，三场循环赛共享 1080 秒截止；并发请求由持久队列自动补槽，不再按 admission 429 客户端重提 | 尚未在目标 HEAD 实跑；取消/重试由 `test_execution_queue` 覆盖，实时 SSE 增量与全部端点仍需其他层覆盖，不得把历史结果计入本轮发布证据 |
-| **真浏览器回归** | Playwright + Chromium | 访客/玩家/组织者/admin 的导航、表单、CRUD、赛事、实时通信 | 用真实 DOM、Console、Network 验证用户行为 |
+| **API 关键链路脚本** | `scripts/api_full_test.py` | 挑战精确接收 202 request，校验 opaque `public_id`，轮询到 claim 后再读取 Match；轮询共享 1 秒节拍、校验 HTTP/JSON 并按 `Retry-After` 退避；排行榜同样严格校验 HTTP 200、JSON 对象/对象列表，以 `rated_matches` 验证已有计分样本，并按 `ranking_min_matches` 核对 `ranking_eligible` 与 1-based `rank`，不要求已下架的榜单 `matches_played`；顺序单局 360 秒、双槽争用单局 720 秒，四局并发共享 1440 秒 claim+完成绝对截止，三场循环赛共享 1080 秒截止；并发请求由持久队列自动补槽，不再按 admission 429 客户端重提 | 当前 release 的真实运行与修正复核见 4.1；取消/重试另由 `test_execution_queue` 覆盖，实时 SSE 增量与全部端点仍由其他层覆盖，不把历史结果冒充本轮单次通过 |
+| **真浏览器回归** | Playwright + Chromium/Firefox/WebKit | 访客/玩家/组织者/admin 的导航、表单、CRUD、赛事、实时通信 | 用真实 DOM、Console、Network 验证用户行为与跨浏览器差异 |
 | **多局/赛事容量脚本** | `scripts/load_test.py` / `contest_stress.py` | 多用户、多游戏、多局终态；load 固定 12 场必须全部接受且全部取得终态，429 耗尽、POST 异常或 waiter 超时均硬失败；draft 名册容量与赛制估算 | 验证所列链路与容量；默认不证明持续打满并发或真实大赛排期 |
 
 ## 2. 后端测试范围
@@ -53,7 +53,7 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前静态有 6 个 spec（含新增全局执行队列 spec）；旧主线 56 条基线不能外推，最终测试条数与通过数在目标 HEAD 的统一门禁中回填：
+`bzplat/frontend/e2e/` 当前静态有 7 个 spec（每个浏览器 70 条，三浏览器共 210 条）；旧主线 56 条基线不能外推，最终通过数必须以目标代码序列的实际运行证据回填：
 
 | Spec | 重点 |
 |------|------|
@@ -62,15 +62,16 @@ pytest
 | `contest-workflow.spec.ts` | 组织者创建→开放→两名浏览器用户报名→发布→开赛→完成→admin 清理 |
 | `admin-audit.spec.ts` | admin 7 个业务 Tab、查询参数/返回数据一致性、关键保存操作与布局；唯一 `execution_control.auto_enabled` 开关的双向切换、manual/contest 不受影响文案和全来源长文本队列；赛事时间按状态收口、空值/显式 `NULL`、保存失败原位反馈、真实隔离库重载与 audit、Dialog 滚动与三视口；断言不存在运行时/赛制模板 Tab 与对应写 API |
 | `leaderboard-density.spec.ts` | 访客/普通用户/组织者/admin × Desktop/Laptop/Mobile；每个 context 精确断言 `/api/auth/me` 的匿名状态或 username/role，非访客三类各只登录一次并复用独立 storageState；全来源 active/queued、双容量与长 Bot/所有者/暂停原因折行；桌面七列表头、移动列表卡、公开排名/无名次计分样本分区、滚动中可操作的 Radix tabs/表头 sticky、慢响应切游戏立即清旧概览、根元素零横溢出、三游戏显式请求与 Console/Network clean |
+| `mobile-public-data-cards.spec.ts` | 390px 下 Bot 历史与赛事赛程使用无需横向滑动的紧凑卡片；双方用户、Bot/真人身份、对局性质、轮次、状态和赛果默认可见，主操作满足触控尺寸；同时守护反馈附件的中文选择按钮与文件摘要 |
 | `execution-queue.spec.ts` | Challenge 的 202 request、同一 `public_id` 轮询/刷新恢复、queued 取消、interrupted 重试、Match 出现后跳转；排行榜全来源队列/双容量、安全暂停、离线 stale 与公开字段白名单。文件存在不代表目标 HEAD 已执行通过 |
 
 运行前必须是 worktree 隔离实例；`beforeAll` 会校验 `/api/health` 的 `qa_instance=true`，Vite 也会拒绝代理到 50380：
 
 ```bash
 cd bzplat/frontend
-npm run test:e2e:install                  # 首次安装 Chromium
-BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --list
-BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
+npx playwright install chromium firefox webkit     # 首次安装三种浏览器
+BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --browser=all --list
+BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --browser=all --reporter=line
 ```
 
 ### 3.2 角色、视口与观察面
@@ -97,15 +98,31 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --reporter=line
 
 ## 4. 历史执行证据与当前发布门禁
 
-以下旧行只记录它们各自产生时的提交/分支证据，不能外推到当前全局执行队列重构。当前目标 HEAD
-必须重新跑完整门禁；“测试存在”“历史通过”或定向运行均不能写成当前发布通过：
+### 4.1 当前 release 候选复合证据
+
+本轮收口包含运行时间很长的真实 Bot 对局与三浏览器矩阵。以下结论逐项注明完整运行、定向复核或待收尾状态，不把不同运行简单相加成一次“全绿”，也不为追求形式上的单轮数字重复消耗数十分钟且没有新增覆盖的测试。
 
 | 检查 | 本轮状态 | 证据/说明 |
 |------|----------|-----------|
-| 全局执行队列重构发布门禁 | **待验证** | 当前文档只定义目标维度，尚未取得同一目标 HEAD 的完整 `pytest`、前端 build、Playwright 浏览器矩阵、Console/Network/后端日志与安全收尾证据。必须覆盖 202 持久请求、刷新恢复、取消/重试/RBAC、混合来源容量与 aging、人机 1 sandbox unit、赛事共享份额、Docker namespace 清理/不确定暂停/重启补偿、旧 active 手工 pause、`legacy-unverified` rebuild No-Go、39 trigger schema-idempotency；未执行项保持“待验证” |
-| 隔离端到端冒烟 | **ALL PASSED** | 本分支 `bash scripts/e2e_smoke.sh` 在 `/tmp` 临时 DB 与运行时目录完成，退出后回收自己的服务和目录；写目标不在主仓库 |
-| API 关键链路脚本 | **50 passed / 0 failed** | 全新临时库隔离运行 `scripts/api_full_test.py`，包含无 SMTP 注册回滚、全局并发上限精确接纳、超额 429 与释放后补槽等核心 API 链路；SSE 证据为终态 snapshot，不含实时增量 |
-| Playwright 收集 | **待最终整合门禁回填 / 5 spec** | 主线基线为 56 条；本次整合新增私有 Bot debug 回归，功能收口后统一执行 `npx playwright test --list` 和完整套件，不把分支历史静态数冒充目标 HEAD 证据 |
+| 后端完整 pytest | **1262 passed / 0 failed / 0 skipped，2 warnings（407.59s）** | 在生产代码基线完整运行；其后提交只改 QA/E2E/文档。当前候选 `--collect-only` 为 1293 条，新增或修正 QA 契约所在两文件 64/64，连同文档守卫合跑为 71/71。该表述是同一产品代码序列的复合证据，不冒充最终文档提交上的第二次 1262 条单轮运行 |
+| 前端生产构建 | **通过（2578 modules，3.46s）** | `npm run build` 完成 TypeScript 与 Vite 生产构建 |
+| Playwright 三浏览器矩阵 | **复合通过：209/210 + 修正后 6/6** | 7 个 spec、每浏览器 70 条；完整 Chromium/Firefox/WebKit 矩阵唯一失败是 Firefox 将 CSS 44px 读为 `43.99998474121094px`。仅放宽 `0.01px` 浮点读取容差后，对应测试在三浏览器连续两轮 6/6；没有把它写成未实际运行的单轮 210/210。完整矩阵持续监控 Console/Network，修正不改变产品代码 |
+| 全页面图片识别 | **完成，未发现 P0 或根级横向溢出** | 公开页面 219 张 PNG / 31 states、用户页面 99 张 PNG + 5 份状态 JSON、Admin 106 张 PNG / 42 states；逐图检查首屏、滚动中段、页尾及 Desktop/Mobile/Laptop 的统一设计、信息密度、留白、对齐、溢出、换行、sticky 与内外滚动 |
+| API 真实关键链路 | **复合通过：48 条真实流程 + 2 条修正复核** | 隔离 QA 栈完成鉴权、上传/版本、70 手挑战、SSE/回放、4 局并发队列、排行榜、赛事 3 场与自动完赛；原运行仅有 2 条脚本断言仍读取已下架的 `matches_played`。改为严格核对 `rated_matches`、`ranking_eligible`、`ranking_min_matches` 与 1-based `rank` 后，2 条定向测试及同一 QA 端点在线 canary 通过；不得描述为一次 50/50 单轮运行 |
+| 隔离端到端冒烟 | **ALL E2E CHECKS PASSED** | 当前候选在 `/tmp` 临时 DB/uploads/avatars/logs 与动态非 50380 端口完成用户、Linux ELF 上传、202 request、真实本地 Bot 对局、结果契约、排行榜和赛事启动；health 明确 `qa_instance=true`、SMTP 关闭，退出后临时服务和目录均已回收 |
+| 回放/详情 API 性能 | **所有实测 p95 均低于 100ms，且通过各端点既定门槛** | 48 samples × 4 workers 的只读冷测：`home_latest` 60.44ms、`history_page_1` 53.00ms、`metadata_for_large_replay` 42.01ms、`replay_typical` 9.87ms、143647B 的 `replay_large` 71.85ms；字段、隐私与契约门均通过 |
+| 评分重建生产同形副本演练 | **dry-run → apply → verify 通过** | 干净冷副本 integrity=`ok`、FK=0、活动 job=0；识别 1425 场 rated、31 场 neutral，重建影响 34 个 Bot。source/plan/rebuilt digest 前缀分别为 `4210365c` / `9dc13578` / `4bfbac7f`，apply 后 `verified_after_apply=true`，独立 verify 显示投影为 `owner-neutral-v3` 且水位一致 |
+| 默认限流与赛事负载 | **复合通过** | 同一代码序列的 phase 0–4 通过，其中 phase 2 在默认真实限流和全局队列下 12/12 请求全部接受并取得终态，用时 1759.3s；429 重试耗尽、POST 异常或 waiter 超时现在均硬失败。旧 phase 5 的失败仅因脚本把整个 19 场赛事生命周期误设为 400s，并非产品卡死；收敛为有界赛事后定向续跑 phase 5–7 为 55 passed / 0 failed / 0 warnings（173.2s），不冒充一次完整单轮运行 |
+| 有界赛事生命周期 | **3/3 对局完成，正式榜与评分隔离通过** | 4 人 Gomoku 自定义赛走完 `open→published→running→rest→running→finished`：Swiss 1 轮 2 场、休息期重新派遣并手动 resume、Top 2 单败决赛 1 场；3 个 pairing 与 3 个 Match 均 completed，正式榜 rank 精确为 1..4，参赛 Bot ratings 前后不变。phase 6/7 也全部通过，末尾 dispatcher=`running/accepting`、active/queued 与两类容量占用均为 0，且无活动 `LoadTest` 赛事 |
+| QA 隔离、日志与安全收尾 | **通过** | 使用绝对 worktree DB、独立 inode、唯一 `BZ_INSTANCE_KEY` 与非 50380 端口。收尾时 DB integrity=`ok`、FK rows=0；dispatcher=`running/accepting=1`，active/queued=0，`match_slots.used=0/2`、`sandbox_units.used=0/4`、running Match=0，execution jobs 为 completed 3 / cancelled 1 / active 0，活动 `LoadTest` 赛事为 0；评分投影 `owner-neutral-v3`、source_count=1456；QA Docker namespace 容器为 0、journal=`idle`；日志无 ERROR/CRITICAL/Traceback、Docker create intent 或 `SandboxControlUncertain`，并确认无本轮 load/pytest/playwright 进程残留 |
+
+### 4.2 历史专项证据
+
+以下各行只记录它们产生时的提交/分支证据，不能外推为当前 release 候选的一次完整运行；当前发布判断以 4.1 为准：
+
+| 检查 | 历史状态 | 证据/说明 |
+|------|----------|-----------|
+| 隔离端到端冒烟 | **ALL PASSED** | 本分支早期 `bash scripts/e2e_smoke.sh` 在 `/tmp` 临时 DB 与运行时目录完成，退出后回收自己的服务和目录；写目标不在主仓库 |
 | 通信/Bug 最小定向回归 | **32 passed / 1 warning（8.47s）** | `test_communications_feedback.py + test_auth.py + test_notifications.py + test_mail.py + test_security_logging.py::test_captcha_not_logged_in_plaintext`；使用临时 SQLite/附件目录，未启动服务、未连 SMTP；warning 为既有 Starlette/httpx deprecation |
 | 通信身份/缓存增量快检 | **9 passed / 1 warning；tsc 通过** | 本轮仅执行 `test_communications_feedback.py`、`python -m py_compile` 与 `tsc -b --pretty false`；新增私有 thread 缓存头、混合访客 token/认证用户拒绝、前端身份 epoch/冻结认证结构守卫。未执行 build 或 Playwright，不记为浏览器证据；warning 为既有 Starlette/httpx deprecation |
 | 通信生产副本迁移 | **通过** | 主库只读 `cp --reflink=never` 到工作树后 inode `12754843 → 19286808`；新代码连续打开副本两次，原 31 张表/13111 行按迁移前原列的全行哈希与行数均不变，第二次 schema hash 稳定；新增 10 表全为 0 行，旧通知投影列全 NULL，最终 41 表、`integrity_check=ok`、`foreign_key_check=0` |
