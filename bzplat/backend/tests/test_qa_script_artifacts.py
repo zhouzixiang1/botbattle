@@ -291,6 +291,38 @@ def test_load_phase2_transport_errors_make_the_final_exit_nonzero(
     assert (0 if module.FAIL == 0 else 1) == 1
 
 
+def test_load_phase2_selfplay_ignores_the_phase1_soft_deleted_extra_bot():
+    module = load_script("load_test")
+    users = [f"load_u{i:02d}" for i in range(1, 9)]
+    bots = {
+        username: {
+            game: user_idx * 10 + game_idx
+            for game_idx, game in enumerate(module.GAMES, start=1)
+        }
+        for user_idx, username in enumerate(users, start=1)
+    }
+    active_seed_bot_ids = {
+        bot_id for by_game in bots.values() for bot_id in by_game.values()
+    }
+    phase1_soft_deleted_extra_id = 999_999
+
+    pairs = module._phase2_pairs({"user_names": users, "bots": bots})
+
+    assert len(pairs) == module.TARGET_MATCHES == 12
+    assert all(
+        my_bot_id in active_seed_bot_ids and opponent_bot_id in active_seed_bot_ids
+        for my_bot_id, opponent_bot_id, _game in pairs
+    )
+    assert all(
+        phase1_soft_deleted_extra_id not in (my_bot_id, opponent_bot_id)
+        for my_bot_id, opponent_bot_id, _game in pairs
+    )
+    for index in range(0, module.TARGET_MATCHES, 4):
+        my_bot_id, opponent_bot_id, game = pairs[index]
+        owner = users[index % len(users)]
+        assert my_bot_id == opponent_bot_id == bots[owner][game]
+
+
 def test_api_leaderboard_check_uses_public_numeric_ranking_contract():
     module = load_script("api_full_test")
     payload = {

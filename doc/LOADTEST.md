@@ -9,6 +9,8 @@
 > 阶段 2 的 challenge POST 同样复用限流助手：只对明确的 429 用原 payload 最多尝试 3 次，
 > 首个非 429（包括已接受的 202）立即返回，绝不重复提交已接受 request；重试耗尽、POST
 > 异常或任一已接受 request 未在时限内取得终态，都是硬失败，不会被“大多数完成”掩盖。
+> 阶段 1 的 HTTP 上传 Bot 在验证版本、启停和 owner 删除后保持软删除；阶段 2 自博弈只用 seed
+> 上下文中已验证活跃的正式 Bot 对自身，不会从 DB 拾取或重新启用该临时 Bot。
 > 顺序单局等待上限为 360 秒；claim 后若与另一场共享 Docker launch fence，则单局上限为
 > 720 秒。阶段 2 固定 12 场（4 场 Holdem + 8 场棋类）使用一个 2880 秒绝对截止，计算为
 > `4×360 + 8×180`，claim 与完成共同消耗该预算，不会为每个阶段重复叠加等待。该脚本尚未在
@@ -61,8 +63,8 @@ python scripts/load_test.py \
   `upload_root/<bot_id>/vN/bot.bin`、具备执行位，且 `bots` 镜像与版本元数据一致；只有
   checksum、大小、平台元数据、磁盘内容和上述归属全部一致才复用。样例变化、复制库外部路径、
   权限或镜像漂移都会在 per-Bot 锁内发布并激活当前隔离目录的新版本。
-- `--skip-seed` 同样重新验证全部账号，并要求其已激活、已验证；验证完成前不会给任何
-  用户（尤其是管理员）签发新 session。
+- `--skip-seed` 同样重新验证全部账号，并要求其已激活、已验证；三款正式 Bot 必须齐全且保持活跃。
+  验证完成前不会给任何用户（尤其是管理员）签发新 session。
 
 `scripts/contest_stress.py` 使用相同契约：只使用 `cs_*@contest.local` 账号和专用
 `cs_admin`，绝不借用隔离副本中原有的管理员。其默认 dry-run 只创建 draft 赛事、
@@ -97,7 +99,8 @@ python scripts/load_test.py \
 
 `bzplat/backend/tests/test_qa_script_artifacts.py` 还用假响应和零真实等待验证阶段 2 challenge：
 429 严格按 `Retry-After` 退避、重试次数有硬上限、复用同一 payload，且 202 后不再 POST；
-另外守护 429 耗尽和 waiter 超时均使整轮退出非零。
+另外守护 429 耗尽和 waiter 超时均使整轮退出非零，以及阶段 1 软删除 extra Bot 后固定
+12 场仍只使用活跃正式 Bot。
 
 ```bash
 pytest bzplat/backend/tests/test_load_test_seed.py \

@@ -633,40 +633,40 @@ def _check_phase2_transport_outcomes(
     return challenge_errors, wait_errors
 
 
+def _phase2_pairs(
+    ctx: dict[str, Any], *, target: int = TARGET_MATCHES
+) -> list[tuple[int, int, str]]:
+    """Build challenges only from the active seed Bot inventory in ``ctx``."""
+    user_names = ctx["user_names"]
+    if not user_names:
+        raise ValueError("阶段2至少需要一个用户")
+
+    pairs: list[tuple[int, int, str]] = []
+    games_cycle = ["holdem", "gomoku", "pencil"] * ((target // 3) + 2)
+    for i in range(target):
+        game = games_cycle[i % len(games_cycle)]
+        owner = user_names[i % len(user_names)]
+        my = ctx["bots"][owner][game]
+        if i % 4 == 0:
+            # 产品允许同 Bot 自博弈。只使用 seed/重建 ctx 已校验为活跃的正式
+            # Bot，不从 DB 拾取 phase1 已软删除的临时 extra Bot。
+            pairs.append((my, my, game))
+            continue
+
+        opponent = user_names[(i + 7) % len(user_names)]
+        if owner == opponent and len(user_names) > 1:
+            opponent = user_names[(i + 1) % len(user_names)]
+        pairs.append((my, ctx["bots"][opponent][game], game))
+    return pairs
+
+
 def phase2_matches(api: Api, ctx: dict[str, Any]) -> None:
     print(f"\n=== 阶段 2：对局（三游戏混跑，目标 {TARGET_MATCHES} 场；"
           f"顺序提交、并行等待，挑战节流 {CHALLENGE_RATE}/{int(RATE_WINDOW)}s）===")
     user_names = ctx["user_names"]
 
-    # 构造对局对：跨用户对战 + 自博弈（同 owner 两不同 bot）
-    pairs: list[tuple[int, int, str]] = []  # (my_bot_id, opp_bot_id, game)
-    games_cycle = ["holdem", "gomoku", "pencil"] * ((TARGET_MATCHES // 3) + 2)
-    extra_bots = {}  # 缓存：username→extra holdem bot id
-    for i in range(TARGET_MATCHES):
-        game = games_cycle[i % len(games_cycle)]
-        if i % 4 == 0 and len(user_names) >= 1:
-            # 自博弈：同一 owner 的该游戏 bot vs 该 owner 的 extra bot（仅 holdem 有 extra）
-            owner = user_names[i % len(user_names)]
-            my = ctx["bots"][owner][game]
-            if game == "holdem":
-                if owner not in extra_bots:
-                    names = _all_bot_names(api.db_path, owner)
-                    extra = next((n for n in names if n == f"{owner}_extra"), None)
-                    extra_bots[owner] = _bot_id_by_name(api.db_path, extra) if extra else None
-                if extra_bots.get(owner):
-                    opp = extra_bots[owner]
-                    pairs.append((my, opp, game))
-                    continue
-            # 无 extra：跨账号同游戏 bot
-            other = user_names[(i + 1) % len(user_names)]
-            pairs.append((my, ctx["bots"][other][game], game))
-        else:
-            # 跨用户对战
-            a = user_names[i % len(user_names)]
-            b = user_names[(i + 7) % len(user_names)]
-            if a == b:
-                b = user_names[(i + 13) % len(user_names)]
-            pairs.append((ctx["bots"][a][game], ctx["bots"][b][game], game))
+    # 构造对局对：跨用户对战 + 同一活跃正式 Bot 自博弈。
+    pairs = _phase2_pairs(ctx)
 
     batch_timeout = load_batch_timeout_seconds([game for _, _, game in pairs])
     batch_deadline = time.monotonic() + batch_timeout
@@ -856,26 +856,6 @@ def _paced_human(
         max_attempts=max_attempts,
         default_retry_after=5.0,
     )
-
-
-def _all_bot_names(db_path: str, owner_username: str) -> list[str]:
-    con = sqlite3.connect(db_path)
-    try:
-        rows = con.execute(
-            "SELECT b.name FROM bots b JOIN users u ON b.owner_id=u.id WHERE u.username=?",
-            (owner_username,),
-        ).fetchall()
-        return [r[0] for r in rows]
-    finally:
-        con.close()
-
-
-def _bot_id_by_name(db_path: str, name: str) -> int:
-    con = sqlite3.connect(db_path)
-    try:
-        return int(con.execute("SELECT id FROM bots WHERE name=?", (name,)).fetchone()[0])
-    finally:
-        con.close()
 
 
 # ── 阶段 3：SSE snapshot ──────────────────────────────────────
@@ -1529,23 +1509,27 @@ def _rebuild_ctx(db_path: str) -> dict[str, Any]:
                 )
             validated_users.append((spec, user))
 
-        tokens: dict[str, str] = {}
         bots: dict[str, dict[str, int]] = {}
-        for spec, user in validated_users:
-            token = new_session_token()
-            store.add_session(token, user["id"], session_expires())
-            tokens[spec.username] = token
-
         for uname in user_names:
             user = store.get_user_by_username(uname)
             for gid in GAMES:
                 bname = f"{uname}_{gid}"
                 row = store._conn.execute(
-                    "SELECT id FROM bots WHERE owner_id=? AND name=?",
+                    "SELECT id, is_active FROM bots WHERE owner_id=? AND name=?",
                     (user["id"], bname),
                 ).fetchone()
-                if row:
-                    bots.setdefault(uname, {})[gid] = row["id"]
+                if row is None or not row["is_active"]:
+                    raise RuntimeError(
+                        "--skip-seed 需要完整且活跃的正式 load_* Bot；"
+                        f"{bname!r} 缺失或已停用，请重新安全运行 seed"
+                    )
+                bots.setdefault(uname, {})[gid] = row["id"]
+
+        tokens: dict[str, str] = {}
+        for spec, user in validated_users:
+            token = new_session_token()
+            store.add_session(token, user["id"], session_expires())
+            tokens[spec.username] = token
         return {
             "tokens": tokens,
             "bots": bots,
