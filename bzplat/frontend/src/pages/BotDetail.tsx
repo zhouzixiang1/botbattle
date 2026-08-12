@@ -378,7 +378,7 @@ export default function BotDetail() {
               <span className="ml-1.5 font-normal text-muted-foreground">
                 {profile.rank == null
                   ? `${ratedMatches}/${profile.ranking_min_matches} 场`
-                  : profile.percentile == null ? '' : `前 ${profile.percentile.toFixed(1)}%`}
+                  : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}%`}
               </span>
             </dd>
           </div>

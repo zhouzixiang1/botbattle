@@ -877,3 +877,23 @@ def test_match_views_keep_identity_first_finite_context_contract():
     assert "human-action-context-row" in e2e
     assert "width: 1560" in e2e
     assert "width: 1280" in e2e
+
+
+def test_public_pages_have_no_generic_summary_strip_component():
+    """Decorative overview bands stay removed instead of being reintroduced."""
+    frontend = ROOT / "bzplat" / "frontend" / "src"
+    layout = (frontend / "components" / "layout" / "page.tsx").read_text(
+        encoding="utf-8"
+    )
+    public_ui = (frontend / "pages" / "public-page-ui.tsx").read_text(
+        encoding="utf-8"
+    )
+    bot_detail = (frontend / "pages" / "BotDetail.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SummaryStrip" not in layout
+    assert 'data-slot="summary-strip"' not in layout
+    assert "SummaryMetric" not in public_ui
+    assert "超过 ${profile.percentile.toFixed(1)}%" in bot_detail
+    assert "前 ${profile.percentile.toFixed(1)}%" not in bot_detail

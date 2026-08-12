@@ -1,56 +1,9 @@
-import type { ReactNode } from 'react'
 import { Copy } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
-import { Identifier, OverflowText } from '@/components/ui/overflow-text'
+import { Identifier } from '@/components/ui/overflow-text'
 import { cn } from '@/lib/utils'
-
-function SummaryMetric({
-  label,
-  value,
-  detail,
-  icon,
-  mono = true,
-  className,
-}: {
-  label: string
-  value: ReactNode
-  detail?: ReactNode
-  icon?: ReactNode
-  mono?: boolean
-  className?: string
-}) {
-  return (
-    <div className={cn('flex min-w-0 items-start gap-2 rounded-lg px-2 py-1.5', className)}>
-      {icon && (
-        <span aria-hidden="true" className="mt-0.5 shrink-0 text-muted-foreground">
-          {icon}
-        </span>
-      )}
-      <div className="min-w-0 flex-1">
-        <OverflowText className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-          {label}
-        </OverflowText>
-        <OverflowText
-          lines={2}
-          tooltip={typeof value === 'string' || typeof value === 'number' ? String(value) : false}
-          className={cn(
-            'text-sm font-semibold text-foreground tabular-nums',
-            mono && 'font-mono',
-          )}
-        >
-          {value}
-        </OverflowText>
-        {detail && (
-          <OverflowText lines={2} className="mt-0.5 text-xs text-muted-foreground">
-            {detail}
-          </OverflowText>
-        )}
-      </div>
-    </div>
-  )
-}
 
 function CopyIdentifier({
   value,
@@ -93,4 +46,4 @@ function CopyIdentifier({
   )
 }
 
-export { CopyIdentifier, SummaryMetric }
+export { CopyIdentifier }

@@ -139,36 +139,5 @@ function StickyToolbar({
   )
 }
 
-const SUMMARY_COLUMNS = {
-  2: "sm:grid-cols-2",
-  3: "sm:grid-cols-3",
-  4: "sm:grid-cols-2 xl:grid-cols-4",
-  5: "sm:grid-cols-2 lg:grid-cols-5",
-  auto: "[grid-template-columns:repeat(auto-fit,minmax(min(11rem,100%),1fr))]",
-} as const
-
-function SummaryStrip({
-  className,
-  columns = "auto",
-  label = "数据概览",
-  ...props
-}: React.ComponentProps<"section"> & {
-  columns?: keyof typeof SUMMARY_COLUMNS
-  label?: string
-}) {
-  return (
-    <section
-      data-slot="summary-strip"
-      aria-label={label}
-      className={cn(
-        "grid min-w-0 gap-2 rounded-xl border bg-muted/25 p-3",
-        SUMMARY_COLUMNS[columns],
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-export { PageFrame, PageHeader, StickyToolbar, SummaryStrip }
+export { PageFrame, PageHeader, StickyToolbar }
 export type { PageFrameWidth }
