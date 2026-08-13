@@ -29,9 +29,68 @@ from bzplat.backend.runtime.docker_supervisor import (
     DockerSupervisor,
     DockerSupervisorError,
 )
+from bzplat.backend.runtime.limits import (
+    DockerResourceProfile,
+    PLATFORM_HIGH_PROFILE,
+    PLATFORM_LOW_PROFILE,
+)
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 ELF = SAMPLES / "callbot_linux_amd64"
+
+
+def test_host_budget_uses_tightest_affinity_and_cgroup_limits(monkeypatch):
+    import bzplat.backend.runtime.limits as limits
+
+    probes = {
+        "/proc/self/cgroup": "0::/user.slice/botbattle.service\n",
+        "/sys/fs/cgroup/cpu.max": "max 100000",
+        "/sys/fs/cgroup/user.slice/cpu.max": "250000 100000",
+        "/sys/fs/cgroup/user.slice/botbattle.service/cpu.max": "max 100000",
+        "/sys/fs/cgroup/memory.max": "max",
+        "/sys/fs/cgroup/user.slice/memory.max": str(
+            3 * 1024 * 1024 * 1024
+        ),
+        "/sys/fs/cgroup/user.slice/botbattle.service/memory.max": "max",
+        "/proc/meminfo": "MemTotal:       8388608 kB\n",
+    }
+    monkeypatch.setattr(limits, "_read_text", lambda path: probes.get(path))
+    monkeypatch.setattr(limits.os, "sched_getaffinity", lambda _pid: set(range(8)))
+    monkeypatch.setattr(limits.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(
+        limits.os,
+        "sysconf",
+        lambda name: 4 * 1024 * 1024 if name == "SC_PHYS_PAGES" else 4096,
+    )
+
+    budget = limits.effective_host_resource_budget()
+    assert budget.cpu_millis == 2500
+    assert budget.memory_mb == 3072
+
+
+def test_unlimited_cgroup_values_do_not_hide_affinity_or_physical_memory(
+    monkeypatch,
+):
+    import bzplat.backend.runtime.limits as limits
+
+    probes = {
+        "/sys/fs/cgroup/cpu.max": "max 100000",
+        "/sys/fs/cgroup/memory.max": "max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes": str(2**63 - 4096),
+        "/proc/meminfo": "MemTotal:       4194304 kB\n",
+    }
+    monkeypatch.setattr(limits, "_read_text", lambda path: probes.get(path))
+    monkeypatch.setattr(limits.os, "sched_getaffinity", lambda _pid: {0, 1})
+    monkeypatch.setattr(limits.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(
+        limits.os,
+        "sysconf",
+        lambda name: 1024 * 1024 if name == "SC_PHYS_PAGES" else 4096,
+    )
+
+    budget = limits.effective_host_resource_budget()
+    assert budget.cpu_millis == 2000
+    assert budget.memory_mb == 4096
 
 
 def test_classify_elf():
@@ -220,8 +279,6 @@ def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path):
             name=identity.container_name(1),
             binary_path=elf_path,
             image="debian:bookworm-slim",
-            memory="512m",
-            cpus="1",
         )
     )
     assert "--pull=never" in args
@@ -251,6 +308,63 @@ def test_docker_argv_is_linux_amd64_and_enforces_sandbox_baseline(tmp_path):
         args[args.index("--entrypoint")], args[args.index("--entrypoint") + 1]
     )
     assert args[-1] == "debian:bookworm-slim"
+
+
+def test_docker_high_profile_maps_to_fixed_resource_argv(tmp_path):
+    elf_path = tmp_path / "bot"
+    elf_path.write_bytes(b"unused")
+    identity = DockerExecutionIdentity("runtime-test", "req_high", 1)
+
+    args = DockerSupervisor.sandbox_options(
+        identity=identity,
+        slot=0,
+        name=identity.container_name(0),
+        binary_path=elf_path,
+        image="debian:bookworm-slim",
+        profile=PLATFORM_HIGH_PROFILE,
+    )
+
+    assert "--cpus=2" in args
+    assert "--memory=2048m" in args
+    assert "--memory-swap=2048m" in args
+    assert not any(arg in args for arg in ("--cpus=1", "--memory=512m"))
+
+
+def test_binary_runner_defaults_low_and_carries_validated_profile(monkeypatch):
+    runner = BinaryRunner(prefer_local=True)
+
+    default_sid = asyncio.run(runner.prepare_session(ELF))
+    assert runner._sessions[default_sid].profile is PLATFORM_LOW_PROFILE
+
+    observed = []
+
+    async def fake_start_local(session):
+        observed.append(session.profile)
+
+    monkeypatch.setattr(runner, "_start_local", fake_start_local)
+    high_sid = asyncio.run(
+        runner.start_session(ELF, profile=PLATFORM_HIGH_PROFILE)
+    )
+    assert runner._sessions[high_sid].profile is PLATFORM_HIGH_PROFILE
+    assert observed == [PLATFORM_HIGH_PROFILE]
+
+
+def test_unknown_or_forged_docker_profile_is_rejected(tmp_path):
+    runner = BinaryRunner(prefer_local=True)
+    with pytest.raises(ValueError, match="\u672a\u77e5 Docker \u8d44\u6e90\u6863\u4f4d"):
+        asyncio.run(runner.prepare_session(ELF, profile="platform_unbounded"))
+
+    identity = DockerExecutionIdentity("runtime-test", "req_forged", 1)
+    forged = DockerResourceProfile("platform_high", cpus=64, memory_mb=131072)
+    with pytest.raises(ValueError, match="\u672a\u77e5 Docker \u8d44\u6e90\u6863\u4f4d"):
+        DockerSupervisor.sandbox_options(
+            identity=identity,
+            slot=0,
+            name=identity.container_name(0),
+            binary_path=tmp_path / "bot",
+            image="debian:bookworm-slim",
+            profile=forged,
+        )
 
 
 def test_linux_image_gate_pulls_once_across_worker_event_loops(monkeypatch):
@@ -845,6 +959,7 @@ def test_match_runner_does_not_swallow_platform_fault_as_default_move():
             self._sessions[sid] = SimpleNamespace(
                 binary_path=Path(binary_path),
                 runtime_mode=runtime_mode,
+                profile=PLATFORM_LOW_PROFILE,
                 requests=[],
                 responses=[],
                 turn=0,
@@ -852,7 +967,7 @@ def test_match_runner_does_not_swallow_platform_fault_as_default_move():
             )
             return sid
 
-        async def prepare_session(self, binary_path, *, runtime_mode):
+        async def prepare_session(self, binary_path, *, runtime_mode, **_kwargs):
             return await self.start_session(binary_path, runtime_mode=runtime_mode)
 
         async def send(self, *_args, **_kwargs):

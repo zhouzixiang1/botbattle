@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import time
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,7 +24,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 from starlette.datastructures import FormData, UploadFile
 
@@ -38,12 +39,40 @@ from bzplat.backend.auth.dependencies import (
 from bzplat.backend.security import (
     BOT_UPLOAD_BODY_MAX_BYTES,
     audit_log,
+    client_ip,
     websocket_origin_allowed,
 )
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.bots.manager import MAX_BYTES
+from bzplat.backend.runtime.limits import (
+    MAX_BOT_RESPONSE_LINE_BYTES,
+    MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES,
+)
+from bzplat.backend.runtime.local_ai import (
+    LocalAIConnectionError,
+    LocalAIResponseRejected,
+)
+from bzplat.backend.runtime.local_ai_service import (
+    LocalAIAgentBusyError,
+    LocalAIRateLimitError,
+)
 
 logger = logging.getLogger(__name__)
+_LOCAL_AI_DB_TOUCH_INTERVAL_SECONDS = 15.0
+_LOCAL_AI_INBOUND_BURST = 20.0
+_LOCAL_AI_INBOUND_REFILL_PER_SECOND = 5.0
+
+
+async def _deny_local_ai_websocket(websocket: WebSocket) -> None:
+    """Reject a connector during HTTP upgrade without exposing credentials."""
+
+    await websocket.send_denial_response(
+        JSONResponse(
+            status_code=403,
+            content={"detail": "本地 Bot 连接凭据无效"},
+            headers={"Cache-Control": "no-store"},
+        )
+    )
 _DEBUG_NO_STORE_HEADERS = {
     "Cache-Control": "private, no-store, max-age=0",
     "Pragma": "no-cache",
@@ -98,6 +127,8 @@ from bzplat.backend.store.schema import (
     DEFAULT_RUNTIME_MODE,
     EXECUTION_SOURCE_HUMAN,
     EXECUTION_SOURCE_MANUAL,
+    EXECUTION_ENV_PLATFORM_LOW,
+    EXECUTION_ENV_REMOTE_LOCAL,
     LIKE_TARGET_TYPES,
     ROLE_ADMIN,
     ROLE_ORGANIZER,
@@ -326,6 +357,13 @@ def _execution_dispatcher(request: Request):
     return dispatcher
 
 
+def _local_ai(request: Request):
+    service = getattr(request.app.state, "local_ai_service", None)
+    if service is None:
+        raise HTTPException(503, "本地 Bot 连接服务未就绪")
+    return service
+
+
 def _require_social_target(
     store,
     target_type: str,
@@ -389,6 +427,8 @@ _PUBLIC_MATCH_LIST_FIELDS = frozenset(
         "created_at",
         "bot_a_id",
         "bot_b_id",
+        "bot_a_environment",
+        "bot_b_environment",
         "technical_loss",
         "result",
         "bot_a",
@@ -451,6 +491,191 @@ def my_bots(
         return {"bots": items, "page": result["page"],
                 "per_page": result["per_page"], "total": result["total"]}
     return {"bots": items}
+
+
+class LocalAIAgentCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    bot_id: int = Field(gt=0)
+    label: str = Field(min_length=2, max_length=32)
+
+
+def _private_no_store(response: Response) -> None:
+    for key, value in _ADMIN_PRIVATE_HEADERS.items():
+        response.headers[key] = value
+
+
+def _owned_local_agent(request: Request, public_id: str, user: dict) -> dict:
+    agent = _store(request).get_local_ai_agent_by_public_id(public_id)
+    if agent is None or int(agent["owner_id"]) != int(user["id"]):
+        raise HTTPException(404, "本地 Bot 连接不存在")
+    return agent
+
+
+@router.get("/api/local-ai/agents")
+async def list_local_ai_agents(
+    request: Request,
+    response: Response,
+    user=Depends(require_user),
+):
+    _private_no_store(response)
+    return {"items": await _local_ai(request).list_for_owner(int(user["id"]))}
+
+
+@router.get("/api/local-ai/client")
+async def download_local_ai_client(
+    request: Request,
+    _user=Depends(require_user),
+):
+    """Download the credential-free reference connector.
+
+    The script is a reviewed repository asset.  Tokens are deliberately never
+    embedded in the response or URL; the client reads ``BZ_LOCAL_AI_TOKEN`` on
+    the user's computer.
+    """
+
+    path = Path(__file__).resolve().parents[2] / "scripts" / "local_ai_client.py"
+    if not path.is_file():  # pragma: no cover - broken deployment artifact
+        raise HTTPException(503, "本地 Bot 连接器暂不可下载")
+    headers = dict(_ADMIN_PRIVATE_HEADERS)
+    headers["X-Content-Type-Options"] = "nosniff"
+    return FileResponse(
+        path,
+        media_type="text/x-python; charset=utf-8",
+        filename="local_ai_client.py",
+        headers=headers,
+    )
+
+
+@router.post("/api/local-ai/agents", status_code=201)
+async def create_local_ai_agent(
+    body: LocalAIAgentCreate,
+    request: Request,
+    response: Response,
+    user=Depends(require_user),
+):
+    _private_no_store(response)
+    try:
+        agent, token = await _local_ai(request).create(
+            owner_id=int(user["id"]),
+            bot_id=int(body.bot_id),
+            label=body.label,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    audit_log(
+        request,
+        "local_ai_create",
+        result="ok",
+        user=user.get("username"),
+        target=agent["public_id"],
+        detail=f"bot_id={agent['bot_id']}",
+    )
+    return {
+        "agent": agent,
+        "token": token,
+        "connection_url": "/api/local-ai/connect",
+    }
+
+
+@router.post("/api/local-ai/agents/{public_id}/rotate")
+async def rotate_local_ai_agent(
+    public_id: str,
+    request: Request,
+    response: Response,
+    user=Depends(require_user),
+):
+    _private_no_store(response)
+    current = _owned_local_agent(request, public_id, user)
+    try:
+        result = await _local_ai(request).rotate(
+            agent_id=int(current["id"]), owner_id=int(user["id"])
+        )
+    except LocalAIRateLimitError as exc:
+        raise HTTPException(
+            429, str(exc), headers={"Retry-After": str(exc.retry_after)}
+        ) from exc
+    except LocalAIAgentBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result is None:  # pragma: no cover - ownership raced with revoke
+        raise HTTPException(404, "本地 Bot 连接不存在")
+    agent, token = result
+    audit_log(
+        request,
+        "local_ai_rotate",
+        result="ok",
+        user=user.get("username"),
+        target=agent["public_id"],
+        detail=f"bot_id={agent['bot_id']}",
+    )
+    return {
+        "agent": agent,
+        "token": token,
+        "connection_url": "/api/local-ai/connect",
+    }
+
+
+@router.delete("/api/local-ai/agents/{public_id}")
+async def revoke_local_ai_agent(
+    public_id: str,
+    request: Request,
+    response: Response,
+    user=Depends(require_user),
+):
+    _private_no_store(response)
+    current = _owned_local_agent(request, public_id, user)
+    changed = await _local_ai(request).revoke(
+        agent_id=int(current["id"]), owner_id=int(user["id"])
+    )
+    if not changed:
+        raise HTTPException(409, "本地 Bot 连接已撤销")
+    audit_log(
+        request,
+        "local_ai_revoke",
+        result="ok",
+        user=user.get("username"),
+        target=public_id,
+        detail=f"bot_id={current['bot_id']}",
+    )
+    return {"ok": True}
+
+
+@router.get("/api/admin/local-ai/agents")
+async def admin_list_local_ai_agents(
+    request: Request,
+    response: Response,
+    page: int = 1,
+    per_page: int = 20,
+    _admin=Depends(require_admin),
+):
+    _private_no_store(response)
+    return await _local_ai(request).list_for_admin(
+        page=max(1, int(page)), per_page=max(1, min(100, int(per_page)))
+    )
+
+
+@router.delete("/api/admin/local-ai/agents/{public_id}")
+async def admin_revoke_local_ai_agent(
+    public_id: str,
+    request: Request,
+    response: Response,
+    admin=Depends(require_admin),
+):
+    _private_no_store(response)
+    current = _store(request).get_local_ai_agent_by_public_id(public_id)
+    if current is None:
+        raise HTTPException(404, "本地 Bot 连接不存在")
+    if not await _local_ai(request).revoke_as_admin(agent_id=int(current["id"])):
+        raise HTTPException(409, "本地 Bot 连接已撤销")
+    audit_log(
+        request,
+        "admin_local_ai_revoke",
+        result="ok",
+        user=admin.get("username"),
+        target=public_id,
+        detail=f"owner_id={current['owner_id']}",
+    )
+    return {"ok": True}
 
 
 @router.get("/api/bots/public")
@@ -947,9 +1172,14 @@ def rollback_bot_version(
 
 
 @router.post("/api/bots/{bot_id}/active")
-def set_bot_active(
+async def set_bot_active(
     bot_id: int, request: Request, active: bool = True, user=Depends(require_user)
 ):
+    public_ids = (
+        _store(request).list_active_local_ai_public_ids_for_bot(bot_id)
+        if not active
+        else []
+    )
     try:
         bot = _bots(request).set_active(bot_id, user["id"], active)
     except BotError as e:
@@ -960,11 +1190,13 @@ def set_bot_active(
             else 400
         )
         raise HTTPException(status, detail={"code": e.code, "message": e.message})
+    if public_ids:
+        await _local_ai(request).revoke_public_ids(public_ids)
     return {"bot": bot}
 
 
 @router.patch("/api/bots/{bot_id}")
-def update_my_bot(
+async def update_my_bot(
     bot_id: int, body: dict, request: Request, user=Depends(require_user)
 ):
     """Bot 拥有者改 display_name/description/is_active（受限白名单）。"""
@@ -983,6 +1215,11 @@ def update_my_bot(
         fields["is_active"] = 1 if body["is_active"] else 0
     if not fields:
         raise HTTPException(400, "无可更新字段")
+    public_ids = (
+        _store(request).list_active_local_ai_public_ids_for_bot(bot_id)
+        if fields.get("is_active") == 0
+        else []
+    )
     try:
         bot = _bots(request).patch_owner(bot_id, user["id"], **fields)
     except BotError as exc:
@@ -996,11 +1233,13 @@ def update_my_bot(
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
         ) from exc
+    if public_ids:
+        await _local_ai(request).revoke_public_ids(public_ids)
     return {"bot": _with_bot_runnable(bot)}
 
 
 @router.delete("/api/bots/{bot_id}")
-def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
+async def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
     """Bot 拥有者删除自己的 Bot（软删：is_active=0）。"""
     store = _store(request)
     bot = store.get_bot(bot_id)
@@ -1008,7 +1247,10 @@ def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
         raise HTTPException(404, "bot 不存在")
     if bot["owner_id"] != user["id"]:
         raise HTTPException(403, "无权删除他人的 Bot")
+    public_ids = store.list_active_local_ai_public_ids_for_bot(bot_id)
     store.update_bot(bot_id, is_active=0)
+    if public_ids:
+        await _local_ai(request).revoke_public_ids(public_ids)
     return {"ok": True}
 
 
@@ -1079,6 +1321,10 @@ class ChallengeBody(BaseModel):
     # 自博弈（my_bot_id == opponent_bot_id）允许——用于同 bot 新旧版本对比。
     my_bot_version_id: int | None = None
     opponent_bot_version_id: int | None = None
+    my_environment: Literal["platform_low", "remote_local"] = "platform_low"
+    opponent_environment: Literal["platform_low", "remote_local"] = "platform_low"
+    my_local_agent_id: str | None = Field(default=None, max_length=64)
+    opponent_local_agent_id: str | None = Field(default=None, max_length=64)
     game_id: str | None = None
     request_id: str | None = Field(
         default=None, pattern=r"^req_[A-Za-z0-9_-]{24}$"
@@ -1143,6 +1389,44 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
         )
         if existing is not None:
             return existing
+
+        async def resolve_local_agent(
+            *,
+            environment: str,
+            public_id: str | None,
+            bot_id: int,
+            side: str,
+        ) -> int | None:
+            if environment == EXECUTION_ENV_PLATFORM_LOW:
+                if public_id is not None:
+                    raise ValueError(f"{side}使用节能沙箱时不能选择本地连接")
+                return None
+            if environment != EXECUTION_ENV_REMOTE_LOCAL or not public_id:
+                raise ValueError(f"{side}使用本地 Bot 时必须选择在线连接")
+            agent = _store(request).get_local_ai_agent_by_public_id(public_id)
+            if (
+                agent is None
+                or int(agent["owner_id"]) != int(user["id"])
+                or int(agent["bot_id"]) != int(bot_id)
+                or str(agent.get("status") or "") != "active"
+            ):
+                raise ValueError(f"{side}本地连接与当前用户或 Bot 不匹配")
+            if not await _local_ai(request).is_available(int(agent["id"])):
+                raise ValueError(f"{side}本地 Bot 已离线或正在处理另一场对局")
+            return int(agent["id"])
+
+        local_a = await resolve_local_agent(
+            environment=body.my_environment,
+            public_id=body.my_local_agent_id,
+            bot_id=body.my_bot_id,
+            side="先手",
+        )
+        local_b = await resolve_local_agent(
+            environment=body.opponent_environment,
+            public_id=body.opponent_local_agent_id,
+            bot_id=body.opponent_bot_id,
+            side="后手",
+        )
         request_id = await _orch(request).challenge(
             body.my_bot_id,
             body.opponent_bot_id,
@@ -1150,6 +1434,10 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
             game_id=body.game_id,
             bot_a_version_id=body.my_bot_version_id,
             bot_b_version_id=body.opponent_bot_version_id,
+            bot_a_environment=body.my_environment,
+            bot_b_environment=body.opponent_environment,
+            bot_a_local_agent_id=local_a,
+            bot_b_local_agent_id=local_b,
             request_id=body.request_id,
             idempotency_fingerprint=fingerprint,
         )
@@ -1381,6 +1669,266 @@ async def play_websocket(websocket: WebSocket, match_id: str):
         receiver.cancel()
         await asyncio.gather(sender, receiver, return_exceptions=True)
         orch.unsubscribe(match_id, q)
+
+
+@router.websocket("/api/local-ai/connect")
+async def local_ai_websocket(websocket: WebSocket):
+    """Outbound-only user-hosted Bot transport.
+
+    The long-lived credential is accepted only in the Authorization header.
+    Browsers and URL query credentials are rejected, so tokens never enter
+    navigation history, referrers or request-target logs.
+    """
+
+    service = getattr(websocket.app.state, "local_ai_service", None)
+    if service is None:
+        await _deny_local_ai_websocket(websocket)
+        return
+
+    trust_proxy = str(os.environ.get("BZ_TRUST_PROXY", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    try:
+        proxy_hops = max(1, int(os.environ.get("BZ_TRUSTED_PROXY_HOPS", "1")))
+    except ValueError:
+        proxy_hops = 1
+    peer_ip = client_ip(
+        websocket,
+        trust_proxy=trust_proxy,
+        hops=proxy_hops,
+        trusted_proxy_cidrs=getattr(
+            websocket.app.state, "trusted_proxy_cidrs", None
+        ),
+    )
+    if not await service.handshake_gate.begin(peer_ip):
+        await _deny_local_ai_websocket(websocket)
+        return
+
+    agent = None
+    try:
+        authorization = str(websocket.headers.get("authorization") or "")
+        parts = authorization.split(" ", 1)
+        token = (
+            parts[1].strip()
+            if len(parts) == 2 and parts[0].lower() == "bearer"
+            else ""
+        )
+        if (
+            "token" in websocket.query_params
+            or websocket.headers.get("origin") is not None
+        ):
+            await _deny_local_ai_websocket(websocket)
+            return
+        agent = service.authenticate(token)
+        if agent is None:
+            # Closing before accept produces an HTTP 403 handshake denial; bad
+            # credentials never consume a long-lived WebSocket.
+            await _deny_local_ai_websocket(websocket)
+            return
+    finally:
+        await service.handshake_gate.end()
+
+    # The pre-auth concurrency gate has completed its only database lookup.
+    # Establish the durable/live connection afterwards so no await between a
+    # successful connect and the protected accept/ready block can strand it.
+    try:
+        connection, generation = await service.connect(agent)
+    except (LocalAIConnectionError, RuntimeError, ValueError):
+        await _deny_local_ai_websocket(websocket)
+        return
+
+    public_id = str(agent["public_id"])
+    connection_id = connection.connection_id
+    sender: asyncio.Task | None = None
+    receiver: asyncio.Task | None = None
+    last_db_touch = time.monotonic()
+    touch_lock = asyncio.Lock()
+    inbound_tokens = _LOCAL_AI_INBOUND_BURST
+    inbound_refilled_at = time.monotonic()
+
+    async def persist_liveness_if_due() -> None:
+        nonlocal last_db_touch
+        now = time.monotonic()
+        if now - last_db_touch < _LOCAL_AI_DB_TOUCH_INTERVAL_SECONDS:
+            return
+        async with touch_lock:
+            now = time.monotonic()
+            if now - last_db_touch < _LOCAL_AI_DB_TOUCH_INTERVAL_SECONDS:
+                return
+            await service.touch_connection(agent, connection_id, generation)
+            last_db_touch = now
+
+    def consume_inbound_token() -> bool:
+        nonlocal inbound_tokens, inbound_refilled_at
+        now = time.monotonic()
+        inbound_tokens = min(
+            _LOCAL_AI_INBOUND_BURST,
+            inbound_tokens
+            + (now - inbound_refilled_at) * _LOCAL_AI_INBOUND_REFILL_PER_SECOND,
+        )
+        inbound_refilled_at = now
+        if inbound_tokens < 1.0:
+            return False
+        inbound_tokens -= 1.0
+        return True
+
+    def refund_bound_turn_token() -> None:
+        """Do not classify one referee-requested reply as unsolicited traffic."""
+
+        nonlocal inbound_tokens
+        inbound_tokens = min(_LOCAL_AI_INBOUND_BURST, inbound_tokens + 1.0)
+
+    async def send_turns() -> None:
+        while True:
+            turn = await service.hub.next_turn(
+                public_id, connection_id, timeout=20.0
+            )
+            await persist_liveness_if_due()
+            if turn is None:
+                await websocket.send_json({"type": "ping"})
+                continue
+            remaining_ms = max(
+                0, int((float(turn.deadline_at) - time.monotonic()) * 1000)
+            )
+            await websocket.send_json(
+                {
+                    "type": "turn",
+                    "request_id": turn.request_id,
+                    "match_id": turn.match_id,
+                    "turn": turn.turn,
+                    "seat": turn.seat + 1,
+                    "input_line": turn.input,
+                    "timeout_ms": remaining_ms,
+                }
+            )
+
+    async def receive_responses() -> None:
+        while True:
+            raw = await websocket.receive_text()
+            if not consume_inbound_token():
+                await websocket.send_json(
+                    {"type": "reject", "reason": "rate_limit_exceeded"}
+                )
+                await websocket.close(code=1008)
+                return
+            if len(raw.encode("utf-8")) > MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES:
+                await websocket.send_json(
+                    {"type": "reject", "reason": "message_too_large"}
+                )
+                await websocket.close(code=1009)
+                return
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    {"type": "reject", "reason": "invalid_json"}
+                )
+                continue
+            if not isinstance(message, dict):
+                await websocket.send_json(
+                    {"type": "reject", "reason": "invalid_message"}
+                )
+                continue
+            if message.get("type") in {"ping", "pong"} and set(message) == {
+                "type"
+            }:
+                await service.hub.heartbeat(public_id, connection_id)
+                await persist_liveness_if_due()
+                await websocket.send_json({"type": "pong"})
+                continue
+            message_type = message.get("type")
+            response_fields = {
+                "type", "request_id", "match_id", "turn", "output",
+            }
+            failure_fields = {
+                "type", "request_id", "match_id", "turn", "reason",
+            }
+            if not (
+                (message_type == "response" and set(message) == response_fields)
+                or (message_type == "failure" and set(message) == failure_fields)
+            ):
+                await websocket.send_json(
+                    {"type": "reject", "reason": "invalid_message"}
+                )
+                continue
+            try:
+                if message_type == "response":
+                    output = message.get("output")
+                    if (
+                        not isinstance(output, str)
+                        or len(output.encode("utf-8"))
+                        > MAX_BOT_RESPONSE_LINE_BYTES
+                    ):
+                        await websocket.send_json(
+                            {"type": "reject", "reason": "invalid_output"}
+                        )
+                        continue
+                    accepted = await service.hub.submit_response(
+                        public_id,
+                        connection_id,
+                        request_id=message["request_id"],
+                        match_id=message["match_id"],
+                        turn=message["turn"],
+                        output=output,
+                    )
+                else:
+                    accepted = await service.hub.submit_failure(
+                        public_id,
+                        connection_id,
+                        request_id=message["request_id"],
+                        match_id=message["match_id"],
+                        turn=message["turn"],
+                        reason=message["reason"],
+                    )
+            except (LocalAIResponseRejected, TypeError, ValueError) as exc:
+                reason = getattr(exc, "reason", "invalid_response")
+                await websocket.send_json({"type": "reject", "reason": reason})
+                continue
+            # A response/failure that passed the exact request, match and turn
+            # binding is one-for-one traffic requested by the referee.  Return
+            # its admission token so fast deterministic Bots are not mistaken
+            # for an unsolicited frame flood.  Heartbeats, malformed frames and
+            # rejected/duplicate responses remain charged to the abuse bucket.
+            refund_bound_turn_token()
+            await persist_liveness_if_due()
+            await websocket.send_json(
+                {
+                    "type": "accepted",
+                    "request_id": accepted.request_id,
+                    "match_id": accepted.match_id,
+                    "turn": accepted.turn,
+                }
+            )
+
+    try:
+        # Cleanup ownership starts immediately after durable connect.  Failures
+        # in accept/ready/task construction cannot strand the hub registration
+        # or its SQLite online generation.
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "ready",
+                "agent_id": public_id,
+                "label": str(agent["label"]),
+                "game_id": str(agent["game_id"]),
+            }
+        )
+        sender = asyncio.create_task(send_turns())
+        receiver = asyncio.create_task(receive_responses())
+        await asyncio.wait(
+            {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        tasks = [task for task in (sender, receiver) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await service.disconnect(agent, connection_id, generation)
+        try:
+            await websocket.close(code=1000)
+        except (RuntimeError, WebSocketDisconnect):
+            pass
 
 
 @router.get("/api/matches")
@@ -2686,7 +3234,7 @@ class AdminUserPatch(BaseModel):
 
 
 @router.patch("/api/admin/users/{user_id}")
-def admin_patch_user(
+async def admin_patch_user(
     user_id: int, body: AdminUserPatch, request: Request, response: Response,
     _admin=Depends(require_admin),
 ):
@@ -2702,9 +3250,16 @@ def admin_patch_user(
         fields["role"] = body.role
     if not fields:
         raise HTTPException(400, "无更新字段", headers=_ADMIN_PRIVATE_HEADERS)
+    public_ids = (
+        _store(request).list_active_local_ai_public_ids_for_owner(user_id)
+        if fields.get("is_active") == 0
+        else []
+    )
     u = _store(request).update_user(user_id, **fields)
     if not u:
         raise HTTPException(404, "用户不存在", headers=_ADMIN_PRIVATE_HEADERS)
+    if public_ids:
+        await _local_ai(request).revoke_public_ids(public_ids)
     return {"user": _admin_user_for_api(u)}
 
 
@@ -2849,7 +3404,7 @@ def admin_bots(
 
 
 @router.patch("/api/admin/bots/{bot_id}")
-def admin_patch_bot(
+async def admin_patch_bot(
     bot_id: int, body: dict, request: Request, _admin=Depends(require_admin)
 ):
     allowed = {"is_active", "is_builtin", "display_name", "description"}
@@ -2870,6 +3425,11 @@ def admin_patch_bot(
         fields["description"] = str(body["description"])[:2000]
     if not fields:
         raise HTTPException(400, "无可更新字段")
+    public_ids = (
+        _store(request).list_active_local_ai_public_ids_for_bot(bot_id)
+        if fields.get("is_active") == 0
+        else []
+    )
     try:
         bot = _bots(request).patch_admin(bot_id, **fields)
     except BotError as exc:
@@ -2879,6 +3439,8 @@ def admin_patch_bot(
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
         ) from exc
+    if public_ids:
+        await _local_ai(request).revoke_public_ids(public_ids)
     return {"bot": _with_bot_runnable(bot)}
 
 
@@ -3584,6 +4146,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "index", "file": "INDEX.md", "title": "Wiki 首页", "summary": "玩家快速上手、协议与游戏规则导航"},
     {"slug": "protocol", "file": "PROTOCOL.md", "title": "协议规范", "summary": "请求/响应信封、两种运行模式与动作编码"},
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
+    {"slug": "local-ai", "file": "LOCAL_AI.md", "title": "本地 Bot 接入", "summary": "在自己的电脑运行 Bot，由平台负责裁判、回放与技术判定"},
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
     {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议与 C/Python 示例"},
     {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},

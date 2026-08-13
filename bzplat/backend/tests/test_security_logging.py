@@ -369,6 +369,23 @@ def test_rate_limit_separates_reads_from_upload_writes():
     assert limited.json()["code"] == "rate_limit_exceeded"
 
 
+def test_local_ai_rotate_paths_share_one_http_bucket(monkeypatch):
+    monkeypatch.setattr(security_module, "_LOCAL_AI_ROTATE_STRICT", (1, 60))
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, enabled=True)
+
+    @app.post("/api/local-ai/agents/{public_id}/rotate")
+    def rotate(public_id: str):
+        return {"public_id": public_id}
+
+    with TestClient(app) as client:
+        first = client.post("/api/local-ai/agents/lai_first/rotate")
+        second = client.post("/api/local-ai/agents/lai_second/rotate")
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
 def _asgi_scope(
     path: str = "/api/bots",
     *,

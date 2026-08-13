@@ -66,6 +66,16 @@ def test_import_store_first():
     ])
 
 
+def test_import_runtime_limits_and_local_ai_first():
+    """资源档位与本地连接模块可在空解释器中独立导入。"""
+    _assert_imports_clean([
+        "bzplat.backend.runtime.limits",
+        "bzplat.backend.runtime.local_ai",
+        "bzplat.backend.store.execution",
+        "bzplat.backend.cli",
+    ])
+
+
 def test_import_all_main_modules():
     """import 全部主模块——无 ImportError（综合顺序）。"""
     _assert_imports_clean([

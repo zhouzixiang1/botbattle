@@ -30,6 +30,8 @@ _PUBLIC_VIEWER_MATCH_FIELDS = frozenset(
         "rated",
         "rating_reason",
         "rating_settled",
+        "bot_a_environment",
+        "bot_b_environment",
         "bot_a",
         "bot_b",
     }
@@ -121,4 +123,11 @@ def match_for_viewer(store: Any, match_id: str) -> dict | None:
             human_user = store.get_user(int(hid))
         except Exception:
             human_user = None
-    return with_seat_info(m, human_user=human_user)
+    # Extract frozen environment fields from match_config before the seat
+    # whitelist removes that private container.  This keeps REST, SSE and the
+    # human WebSocket snapshot on one public contract without exposing local
+    # agent ids or version/path details.
+    from bzplat.backend.store.public_contract import sanitize_public_match
+
+    public = sanitize_public_match(m) or m
+    return with_seat_info(public, human_user=human_user)

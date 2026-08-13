@@ -37,6 +37,30 @@ EXECUTION_SOURCES = frozenset(
     }
 )
 
+# Botzone 传输模式与“代码在哪里执行”是两个正交契约。环境由任务来源和用户
+# 选择在入队时冻结，调用方不能提交任意 CPU/内存值。
+EXECUTION_ENV_PLATFORM_LOW = "platform_low"
+EXECUTION_ENV_PLATFORM_HIGH = "platform_high"
+EXECUTION_ENV_REMOTE_LOCAL = "remote_local"
+EXECUTION_ENV_HUMAN = "human"
+EXECUTION_ENVIRONMENTS = frozenset(
+    {
+        EXECUTION_ENV_PLATFORM_LOW,
+        EXECUTION_ENV_PLATFORM_HIGH,
+        EXECUTION_ENV_REMOTE_LOCAL,
+        EXECUTION_ENV_HUMAN,
+    }
+)
+EXECUTION_PROFILE_VERSION = 1
+
+# User-hosted Bot identities and sockets are intentionally small, fixed
+# product capacities.  A participant needs two simultaneous connections for a
+# local-vs-local practice match, while unbounded dormant identities or sockets
+# would turn the referee into a general connection host.
+LOCAL_AI_MAX_ACTIVE_AGENTS_PER_OWNER = 8
+LOCAL_AI_MAX_ONLINE_PER_OWNER = 4
+LOCAL_AI_MAX_ONLINE_GLOBAL = 64
+
 EXECUTION_QUEUED = "queued"
 EXECUTION_STARTING = "starting"
 EXECUTION_RUNNING = "running"
@@ -143,6 +167,34 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     CONSTRAINT chk_bot_version_arch CHECK (arch = 'amd64'),
     CONSTRAINT chk_bot_version_format CHECK (format = 'elf')
 );
+
+-- 用户电脑上的 Bot 连接身份。Bot 行仍是公开名称/所有者/游戏的唯一身份，
+-- agent 只声明“这一场由哪台用户电脑回答裁判请求”，绝不伪装成上传版本。
+-- 原始连接令牌只在创建/轮换响应中出现一次；数据库永久只保存 SHA-256。
+CREATE TABLE IF NOT EXISTS local_ai_agents (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_id             TEXT    NOT NULL UNIQUE,
+    owner_id              INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    bot_id                INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    label                 TEXT    NOT NULL,
+    game_id               TEXT    NOT NULL,
+    token_hash            TEXT    NOT NULL UNIQUE,
+    token_hint            TEXT    NOT NULL,
+    status                TEXT    NOT NULL DEFAULT 'active' CHECK (
+        status IN ('active','revoked')
+    ),
+    connection_generation INTEGER NOT NULL DEFAULT 0 CHECK (connection_generation>=0),
+    connected_at          TEXT,
+    disconnected_at       TEXT,
+    last_seen_at          TEXT,
+    created_at            TEXT    NOT NULL,
+    updated_at            TEXT    NOT NULL,
+    UNIQUE(owner_id,label)
+);
+CREATE INDEX IF NOT EXISTS idx_local_ai_agents_owner
+    ON local_ai_agents(owner_id,status,updated_at,id);
+CREATE INDEX IF NOT EXISTS idx_local_ai_agents_bot
+    ON local_ai_agents(bot_id,status,id);
 
 CREATE TABLE IF NOT EXISTS contests (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -363,6 +415,14 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     bot_b_id            INTEGER NOT NULL,
     bot_a_version_id    INTEGER,
     bot_b_version_id    INTEGER,
+    bot_a_environment   TEXT    NOT NULL DEFAULT 'platform_low' CHECK (
+        bot_a_environment IN ('platform_low','platform_high','remote_local','human')
+    ),
+    bot_b_environment   TEXT    NOT NULL DEFAULT 'platform_low' CHECK (
+        bot_b_environment IN ('platform_low','platform_high','remote_local','human')
+    ),
+    bot_a_local_agent_id INTEGER,
+    bot_b_local_agent_id INTEGER,
     human_user_id       INTEGER,
     human_seat          INTEGER CHECK (human_seat IN (0,1)),
     contest_id          INTEGER,
@@ -371,7 +431,10 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     rated               INTEGER NOT NULL CHECK (rated IN (0,1)),
     rating_reason       TEXT    NOT NULL,
     match_slots         INTEGER NOT NULL DEFAULT 1 CHECK (match_slots=1),
-    sandbox_units       INTEGER NOT NULL CHECK (sandbox_units IN (1,2)),
+    sandbox_units       INTEGER NOT NULL CHECK (sandbox_units BETWEEN 0 AND 2),
+    host_cpu_millis     INTEGER NOT NULL CHECK (host_cpu_millis>=0),
+    host_memory_mb      INTEGER NOT NULL CHECK (host_memory_mb>=0),
+    profile_version     INTEGER NOT NULL DEFAULT 1 CHECK (profile_version>=0),
     current_match_id    TEXT,
     auto_decision_id    INTEGER,
     cancel_requested    INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
@@ -391,9 +454,45 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     terminal_at         TEXT,
     CONSTRAINT chk_execution_job_human_resources CHECK (
         (source='human' AND match_type='human' AND sandbox_units=1
-         AND human_user_id IS NOT NULL AND human_seat IS NOT NULL) OR
-        (source<>'human' AND match_type<>'human' AND sandbox_units=2
-         AND human_user_id IS NULL AND human_seat IS NULL)
+         AND human_user_id IS NOT NULL AND human_seat IS NOT NULL
+         AND ((human_seat=0 AND bot_a_environment='human'
+               AND bot_b_environment='platform_low')
+              OR (human_seat=1 AND bot_b_environment='human'
+                  AND bot_a_environment='platform_low'))) OR
+        (source<>'human' AND match_type<>'human'
+         AND human_user_id IS NULL AND human_seat IS NULL
+         AND bot_a_environment<>'human' AND bot_b_environment<>'human')
+    ),
+    CONSTRAINT chk_execution_job_environment_source CHECK (
+        profile_version=0 OR
+        (source='contest' AND bot_a_environment='platform_high'
+                          AND bot_b_environment='platform_high') OR
+        (source='auto' AND bot_a_environment='platform_low'
+                       AND bot_b_environment='platform_low') OR
+        (source='manual' AND bot_a_environment IN ('platform_low','remote_local')
+                         AND bot_b_environment IN ('platform_low','remote_local')) OR
+        source='human'
+    ),
+    CONSTRAINT chk_execution_job_local_agents CHECK (
+        ((bot_a_environment='remote_local') = (bot_a_local_agent_id IS NOT NULL))
+        AND ((bot_b_environment='remote_local') = (bot_b_local_agent_id IS NOT NULL))
+        AND (bot_a_environment<>'remote_local' OR bot_a_version_id IS NULL)
+        AND (bot_b_environment<>'remote_local' OR bot_b_version_id IS NULL)
+    ),
+    CONSTRAINT chk_execution_job_resource_snapshot CHECK (
+        sandbox_units =
+            (CASE WHEN bot_a_environment IN ('platform_low','platform_high') THEN 1 ELSE 0 END)
+          + (CASE WHEN bot_b_environment IN ('platform_low','platform_high') THEN 1 ELSE 0 END)
+        AND (profile_version<>1 OR host_cpu_millis =
+            (CASE WHEN bot_a_environment='platform_low' THEN 1000
+                  WHEN bot_a_environment='platform_high' THEN 2000 ELSE 0 END)
+          + (CASE WHEN bot_b_environment='platform_low' THEN 1000
+                  WHEN bot_b_environment='platform_high' THEN 2000 ELSE 0 END))
+        AND (profile_version<>1 OR host_memory_mb =
+            (CASE WHEN bot_a_environment='platform_low' THEN 512
+                  WHEN bot_a_environment='platform_high' THEN 2048 ELSE 0 END)
+          + (CASE WHEN bot_b_environment='platform_low' THEN 512
+                  WHEN bot_b_environment='platform_high' THEN 2048 ELSE 0 END))
     ),
     CONSTRAINT chk_execution_job_contest_ref CHECK (
         (source='contest' AND contest_id IS NOT NULL
@@ -437,6 +536,25 @@ CREATE TABLE IF NOT EXISTS execution_job_attempts (
     terminal_reason TEXT    NOT NULL DEFAULT '',
     UNIQUE(job_id,attempt_no)
 );
+
+-- 本机 Bot 的占用凭据与 execution attempt 同生命周期。服务重启时旧 attempt
+-- 会由现有恢复管线进入终态，本表让“连接已释放”也成为可审计事实。
+CREATE TABLE IF NOT EXISTS local_ai_leases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id        INTEGER NOT NULL REFERENCES local_ai_agents(id) ON DELETE RESTRICT,
+    job_public_id   TEXT    NOT NULL,
+    attempt_no      INTEGER NOT NULL CHECK (attempt_no>=1),
+    seat            INTEGER NOT NULL CHECK (seat IN (0,1)),
+    status          TEXT    NOT NULL DEFAULT 'active' CHECK (
+        status IN ('active','released')
+    ),
+    acquired_at     TEXT    NOT NULL,
+    released_at     TEXT,
+    terminal_reason TEXT    NOT NULL DEFAULT '',
+    UNIQUE(job_public_id,attempt_no,seat)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_local_ai_agent_active_lease
+    ON local_ai_leases(agent_id) WHERE status='active';
 
 -- 单 dispatcher 控制面。跨进程唯一性由 DB 邻接 OS flock 提供；本表只保存
 -- 可诊断/可恢复的状态，不保存 lease、PID、boot id 或 daemon incarnation。
@@ -1108,6 +1226,9 @@ TECHNICAL_INCIDENT_MESSAGES = {
     "invalid_keep_running": "LongRunning Bot 的 KEEP_RUNNING 握手不正确",
     "decision_timeout": "Bot 未在决策时限内输出完整响应行",
     "response_line_too_large": "Bot 响应行超过 64 KiB 上限",
+    "local_ai_unavailable": "本地 Bot 连接已中断",
+    "local_ai_timeout": "本地 Bot 未在截止时间前响应",
+    "local_ai_revoked": "本地 Bot 连接已撤销",
 }
 
 # 公开 completed/match_end 唯一允许的稳定裁决码。游戏裁判与平台技术判负

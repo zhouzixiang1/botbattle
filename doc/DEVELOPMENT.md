@@ -53,6 +53,8 @@ cd bzplat/frontend && npm install
 `DOCKER_CONTEXT` 与 TLS 变量会从子命令环境中清除，不参与 daemon 选择；若显式设置
 `BZ_DOCKER_HOST`，任何非 canonical 值都会在 Store 迁移前 fail closed。平台不支持远端 Docker。
 
+这里的 `BZ_BOT_LOCAL=1` 是**平台开发测试回退**：它让服务器进程直接启动 ELF，生产不得开启。玩家使用的“本地 Bot”是另一项产品能力：用户端通过 WSS 主动连接，服务器仍只负责裁判；两者不要混用。
+
 邮件模块只提供一套 Botbattle 多游戏平台默认文案：邮箱验证、密码重置和验证完成欢迎信。
 新库通过 `INSERT OR IGNORE` 播种这三条模板，因此管理后台已经保存的自定义模板不会在重启时
 被覆盖；历史库如需恢复官方文案，必须先备份，再对这三个精确 key 做受控数据更新。
@@ -92,6 +94,10 @@ label namespace** 清理、连续确认容器/name/token 为零，同时闭合 c
 补偿才进入 `running/accepting`。同一 host boot 的未确认 create 属于人工边界，即使瞬时双零也保持
 `manual:` paused；不要直接改数据库状态，须在管理端按恢复流程重新做精确清场。其他 Docker 控制结果
 不确定时会保持 `paused` 并有界退避，不得以进程/端口已出现代替管理端队列状态与日志检查。
+本地 Bot 的旧在线态与租约也只允许取得 dispatcher flock 的实例重置；停服时先关闭连接并重置租约，
+最后释放 flock。第二实例若因 flock 已占用而启动失败，不得触碰这些共享状态。赛事任务 claim 还会用
+affinity/cgroup/物理资源共同计算的有效主机预算检查冻结的 4 核/4 GiB 请求；不足时保留排队并明确提示，
+不会自动换成节能沙箱。
 
 维护前先记录实际 PID，再通过统一脚本停止并核对进程和端口。systemd 模式从 unit 读取 MainPID；
 只有 PID fallback 才读取 `platform-ctl/web.pid`。脚本打印 `stopped` 时已确认 lifespan 进程退出且端口
@@ -185,6 +191,29 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 - `BZ_QA_INSTANCE=1` 通过独立代码能力门强制禁用自动排位；复制库中的 `execution_control.auto_enabled` 即使为真也无效，API 尝试开启返回 409。生产同样只以该字段作为自动 producer 的唯一开关，不存在 QA/生产两套参数 profile。
 - 合并走 GitHub PR；详见根目录 [`AGENTS.md`](../AGENTS.md)「worktree 隔离工作流」。
 
+### 2.6 本地 Bot 客户端
+
+公开客户端为 `scripts/local_ai_client.py`。它只实现 Traditional 进程生命周期：收到一条 `turn` 后启动一次用户命令，向 stdin 写一行，读取 stdout 首行并结束进程。游戏信封和动作校验仍由 GameSpec/裁判负责，客户端不能添加游戏名分支。
+
+```bash
+read -rsp "接入令牌: " BZ_LOCAL_AI_TOKEN && echo
+export BZ_LOCAL_AI_TOKEN
+python scripts/local_ai_client.py \
+  --url wss://bot.example.com/api/local-ai/connect \
+  --command ./my_bot
+```
+
+安全边界：
+
+- 客户端只接受 `wss://` 且拒绝 URL userinfo、query、fragment 和握手 30x 重定向；令牌只读 `BZ_LOCAL_AI_TOKEN`，只进入首个目标的 `Authorization: Bearer`，日志不输出连接异常正文，启动 Bot 子进程前还会从继承环境中移除该变量。重定向拒绝同时兼容 websockets 10.4--13 的 `handle_redirect` 与 14+ 的 `process_redirect`，未知连接实现 fail closed。
+- 单次服务端输入最大 1 MiB，Bot stdout 首行最大 64 KiB；`timeout_ms` 包括本机进程启动时间，超时后终止整个进程组。
+- 同一连接串行执行决策；断线按 1/2/4/8/16/30 秒退避，重连不改变服务端持有的绝对回合截止时间。
+- 服务端在数据库认证前按可信代理边界解析 peer IP，限制握手频率和同时认证数；Uvicorn 在解码前把单消息硬顶钉在 256 KiB（为 64 KiB Bot 输出经 JSON 转义预留空间），SansIO transport 每收到一条完整消息即暂停继续读取，应用兜底遇到超限消息立即以 1009 断开。已连接 socket 使用入站突发桶，SQLite 存活写合并到 15 秒一次。每用户最多 8 个 active identity、4 个在线连接，全站最多 64 个在线连接；令牌轮换同时受规范化 HTTP 路径桶和稳定 owner+agent 桶约束，并在同一 SQLite 事务拒绝仍持 active lease 的 identity，避免轮换中断正在执行的对局。
+- 撤销后的同名 identity 行可原子复用并换发全新 public id/token；账号或 Bot 停用会在同一 Store 事务撤销关联 identity、释放租约，transport 再由 hub 通知或周期复核关闭。
+- 用户端无需监听端口。生产反向代理必须允许 `/api/local-ai/connect` 的 WebSocket Upgrade 和 `Authorization` 请求头，并使用有效 TLS 证书。
+
+玩家操作与消息格式见 `wiki/LOCAL_AI.md`。客户端令牌不得写入 `.env`、systemd unit、命令参数、URL 或测试 fixture；自动托管时应使用操作系统凭据存储，在启动时注入环境变量。
+
 ## 3. 编码规范
 
 | 规范 | 要求 |
@@ -193,7 +222,7 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e
 | **常量集中** | 所有状态码/对局类型/`REGISTERED_ENGINES`/`VALID_GAME_IDS`/平台 settings 键名集中在 `store/schema.py`，别散落 |
 | **日志** | 后端**禁止 `print()`**，统一 `logging.getLogger(__name__)` |
 | **游戏解耦** | 通用层（matches/contests/store/api_routes）**禁止 `if game_id == ...` 分支**；经 `games.registry.get(game_id)` 取 `GameSpec`；持久化实体缺失/未知 game_id 必须失败，不能猜默认游戏 |
-| **资源硬顶** | 每 Bot `--cpus=1` / `--memory=512m`，全站 match slot 固定为 1、sandbox units 固定为 2，CPU ceiling/显式启动值/admin 均不可抬高；Bot 文件上限 100 MiB，全员循环 `FULL_RR_MAX_N=12`（`runtime/limits.py`） |
+| **资源硬顶** | `runtime/limits.py` 只允许节能档（每 Bot 1 核/512 MiB）与赛事档（每 Bot 2 核/2 GiB），后者仅 contest 来源可取；本地 Bot 不启动 Docker。全站 match slot 固定为 1，CPU ceiling/显式启动值/admin 均不可抬高；Bot 文件上限 100 MiB，全员循环 `FULL_RR_MAX_N=12` |
 | **运行参数** | `runtime/config.py` 是 action timeout、全局双资源容量/aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler 等参数的代码唯一来源；修改后须评审、测试并重新发布。自动排位只是 producer，唯一可变项为 `execution_control.auto_enabled`；`BZ_MAX_CONCURRENT_MATCHES` 与 admin runtime PATCH 均不支持 |
 | **前端图标** | 统一 lucide-react（**无 emoji**），按需导入 |
 | **前端颜色** | 用语义 token（`bg-background`/`text-primary`），不裸 hex、不硬编码 slate/brand 颜色 |

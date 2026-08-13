@@ -244,26 +244,27 @@ class _TraditionalLifecycleTransport:
         self.started: list[str] = []
         self.stopped: list[str] = []
 
-    def _state(self, path: str, mode: str) -> SimpleNamespace:
+    def _state(self, path: str, mode: str, profile=None) -> SimpleNamespace:
         return SimpleNamespace(
             binary_path=path,
             runtime_mode=mode,
+            profile=profile,
             requests=[],
             responses=[],
             turn=0,
             long_running=False,
         )
 
-    async def prepare_session(self, path, *, runtime_mode):
+    async def prepare_session(self, path, *, runtime_mode, profile=None):
         sid = f"logical-{len(self.prepared)}"
         self.prepared.append(str(path))
-        self._sessions[sid] = self._state(str(path), runtime_mode)
+        self._sessions[sid] = self._state(str(path), runtime_mode, profile)
         return sid
 
-    async def start_session(self, path, *, runtime_mode, **_kwargs):
+    async def start_session(self, path, *, runtime_mode, profile=None, **_kwargs):
         sid = f"process-{len(self.started)}"
         self.started.append(str(path))
-        self._sessions[sid] = self._state(str(path), runtime_mode)
+        self._sessions[sid] = self._state(str(path), runtime_mode, profile)
         return sid
 
     async def send(self, _sid, _line, *, timeout):
@@ -313,10 +314,12 @@ def test_traditional_human_match_prepares_history_without_idle_process():
 
 
 class _PrepareFailureTransport(_TraditionalLifecycleTransport):
-    async def prepare_session(self, path, *, runtime_mode):
+    async def prepare_session(self, path, *, runtime_mode, profile=None):
         if str(path).endswith("bad.bin"):
             raise BotCrashedError("cannot start")
-        return await super().prepare_session(path, runtime_mode=runtime_mode)
+        return await super().prepare_session(
+            path, runtime_mode=runtime_mode, profile=profile
+        )
 
 
 @pytest.mark.parametrize(

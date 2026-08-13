@@ -22,6 +22,7 @@ from bzplat.backend.runtime.config import (
     EXECUTION_POLL_SECONDS,
     EXECUTION_USER_ACTIVE_LIMIT,
 )
+from bzplat.backend.runtime.limits import effective_host_resource_budget
 from bzplat.backend.store.execution import (
     DockerLaunchInvariantError,
     ExecutionInvariantError,
@@ -47,6 +48,9 @@ class ExecutionDispatcher:
         max_sandbox_units: int | None = None,
         auto_capability_enabled: bool = True,
         contest_reconciler: Callable[[], Awaitable[int]] | None = None,
+        singleton_acquired: Callable[[], None] | None = None,
+        max_host_cpu_millis: int | None = None,
+        max_host_memory_mb: int | None = None,
     ) -> None:
         self.orch = orch
         self.store = store
@@ -58,6 +62,22 @@ class ExecutionDispatcher:
         )
         self.auto_capability_enabled = bool(auto_capability_enabled)
         self.contest_reconciler = contest_reconciler
+        self.singleton_acquired = singleton_acquired
+        detected_budget = effective_host_resource_budget()
+        # Explicit injection can lower a test/deployment budget but can never
+        # enlarge the process-visible cgroup/affinity ceiling.
+        self.max_host_cpu_millis = min(
+            detected_budget.cpu_millis,
+            max(1, int(max_host_cpu_millis))
+            if max_host_cpu_millis is not None
+            else detected_budget.cpu_millis,
+        )
+        self.max_host_memory_mb = min(
+            detected_budget.memory_mb,
+            max(1, int(max_host_memory_mb))
+            if max_host_memory_mb is not None
+            else detected_budget.memory_mb,
+        )
         self._wake = asyncio.Event()
         self._lock_fd: int | None = None
         self._started = False
@@ -73,9 +93,9 @@ class ExecutionDispatcher:
         db = Path(self.store.path).expanduser().resolve()
         return Path(str(db) + ".execution-dispatcher.lock")
 
-    def _acquire_singleton(self) -> None:
+    def _acquire_singleton(self) -> bool:
         if self._lock_fd is not None:
-            return
+            return False
         fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -85,6 +105,7 @@ class ExecutionDispatcher:
                 "同一数据库已有执行 dispatcher"
             ) from exc
         self._lock_fd = fd
+        return True
 
     def _release_singleton(self) -> None:
         if self._lock_fd is None:
@@ -94,9 +115,13 @@ class ExecutionDispatcher:
         self._lock_fd = None
 
     async def start(self) -> dict:
+        acquired_now = self._acquire_singleton()
         self._loop = asyncio.get_running_loop()
-        self._acquire_singleton()
         try:
+            if acquired_now and self.singleton_acquired is not None:
+                # Volatile connection/lease recovery is owned by the same
+                # process that proved exclusive queue ownership.
+                self.singleton_acquired()
             previous = self.repo.control()
             manual_pause_reason = (
                 str(previous.get("pause_reason") or "")
@@ -190,6 +215,10 @@ class ExecutionDispatcher:
         self._wake.set()
 
     async def close(self) -> None:
+        if self._lock_fd is None:
+            self._started = False
+            self._loop = None
+            return
         control = self.repo.control()
         if control["dispatcher_state"] != "paused":
             self.repo.set_control(
@@ -414,6 +443,8 @@ class ExecutionDispatcher:
                 aging_seconds=EXECUTION_AGING_SECONDS,
                 user_active_limit=EXECUTION_USER_ACTIVE_LIMIT,
                 contest_share_slots=EXECUTION_CONTEST_SHARE_SLOTS,
+                max_host_cpu_millis=self.max_host_cpu_millis,
+                max_host_memory_mb=self.max_host_memory_mb,
             )
             if job is None:
                 break
@@ -448,12 +479,18 @@ class ExecutionDispatcher:
             max_match_slots=self.max_match_slots,
             max_sandbox_units=self.max_sandbox_units,
             aging_seconds=EXECUTION_AGING_SECONDS,
+            max_host_cpu_millis=self.max_host_cpu_millis,
+            max_host_memory_mb=self.max_host_memory_mb,
             public_id=public_id,
         )
 
     @staticmethod
-    def _public_capacity(raw: dict) -> dict:
-        return {
+    def _public_capacity(
+        raw: dict,
+        *,
+        include_host_resources: bool = False,
+    ) -> dict:
+        projected = {
             "match_slots": {
                 "used": int(raw.get("occupied_match_slots") or 0),
                 "capacity": int(raw.get("max_match_slots") or 0),
@@ -464,6 +501,16 @@ class ExecutionDispatcher:
             },
             "running_matches": int(raw.get("running_matches") or 0),
         }
+        if include_host_resources:
+            projected["host_cpu_millis"] = {
+                "used": int(raw.get("used_host_cpu_millis") or 0),
+                "capacity": int(raw.get("max_host_cpu_millis") or 0),
+            }
+            projected["host_memory_mb"] = {
+                "used": int(raw.get("used_host_memory_mb") or 0),
+                "capacity": int(raw.get("max_host_memory_mb") or 0),
+            }
+        return projected
 
     @staticmethod
     def _eta(ahead_jobs: int, max_slots: int) -> dict:
@@ -480,7 +527,7 @@ class ExecutionDispatcher:
         if job is None:
             return None
         public_id = str(job.get("public_id") or "")
-        return {
+        projected = {
             "public_id": public_id,
             "request_id": public_id,
             "source": str(job.get("source") or ""),
@@ -489,6 +536,12 @@ class ExecutionDispatcher:
             "match_type": str(job.get("match_type") or ""),
             "match_id": job.get("current_match_id"),
             "sandbox_units": int(job.get("sandbox_units") or 0),
+            "bot_a_environment": str(
+                job.get("bot_a_environment") or "platform_low"
+            ),
+            "bot_b_environment": str(
+                job.get("bot_b_environment") or "platform_low"
+            ),
             "rated": bool(int(job.get("rated") or 0)),
             "rating_reason": str(job.get("rating_reason") or ""),
             "retryable": bool(int(job.get("retryable") or 0)),
@@ -498,13 +551,22 @@ class ExecutionDispatcher:
             "started_at": job.get("started_at"),
             "terminal_at": job.get("terminal_at"),
         }
+        blocked_code = str(job.get("capacity_blocked_code") or "")
+        blocked_reason = str(job.get("capacity_blocked_reason") or "")
+        if blocked_code:
+            projected["blocked_code"] = blocked_code
+            projected["blocked_reason"] = blocked_reason
+        return projected
 
     def public_request(self, public_id: str) -> dict | None:
         snap = self._capacity_snapshot(public_id=public_id)
         if snap["target"] is None:
             return None
         ahead_jobs = int(snap["ahead_jobs"])
-        return {
+        blocked_reason = str(
+            snap["target"].get("capacity_blocked_reason") or ""
+        )
+        projected = {
             "public_id": public_id,
             "request": self._public_job(snap["target"]),
             "ahead_jobs": ahead_jobs,
@@ -512,6 +574,9 @@ class ExecutionDispatcher:
             "capacity": self._public_capacity(snap["capacity"]),
             "eta": self._eta(ahead_jobs, self.max_match_slots),
         }
+        if blocked_reason:
+            projected["blocked_reason"] = blocked_reason
+        return projected
 
     def public_snapshot(
         self,
@@ -540,7 +605,10 @@ class ExecutionDispatcher:
                 "pause_reason": pause_reason,
                 "retry_at": control.get("retry_at"),
             },
-            "capacity": self._public_capacity(snap["capacity"]),
+            "capacity": self._public_capacity(
+                snap["capacity"],
+                include_host_resources=include_internal,
+            ),
             "active": [self._public_job(row) for row in active],
             "queued": [self._public_job(row) for row in queued],
             "queued_count": len(queued),

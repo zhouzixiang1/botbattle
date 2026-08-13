@@ -30,6 +30,7 @@ from bzplat.backend.runtime.binary_runner import (
     BotProtocolError,
     BotResponseLineTooLargeError,
 )
+from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
 from bzplat.backend.store import Store
 from bzplat.backend.tests.execution_helpers import challenge_and_start
 
@@ -164,6 +165,7 @@ class _Transport:
             "logic": SimpleNamespace(
                 binary_path="/bot/a",
                 runtime_mode=mode,
+                profile=PLATFORM_LOW_PROFILE,
                 requests=[],
                 responses=[],
                 turn=0,
@@ -172,11 +174,19 @@ class _Transport:
         }
         self.started = 0
 
-    async def start_session(self, path, *, runtime_mode, **_kwargs):
+    async def start_session(
+        self,
+        path,
+        *,
+        runtime_mode,
+        profile=PLATFORM_LOW_PROFILE,
+        **_kwargs,
+    ):
         sid = f"tmp-{self.started}"
         self.started += 1
         self._sessions[sid] = SimpleNamespace(
             binary_path=str(path), runtime_mode=runtime_mode,
+            profile=profile,
             requests=[], responses=[], turn=0, long_running=False,
         )
         return sid

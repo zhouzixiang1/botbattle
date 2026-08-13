@@ -6,12 +6,13 @@
 
 **对战核心**
 - 唯一上传格式为 **Linux x86_64 ELF**；拒绝 PE/`.exe`、Mach-O、ARM64 ELF 和原始 `.py`，Docker 硬隔离执行
+- 三种清晰的执行环境：日常节能沙箱（每 Bot 1 核 / 512 MiB）、正式赛事沙箱（每 Bot 2 核 / 2 GiB，仅锦标赛）和用户电脑主动连接的本地 Bot（平台只裁判，练习局不计平台排行榜）
 - 唯一 JSON 信封：Traditional / LongRunning 只区分进程生命周期；响应必须包含 `response`，可选 `debug` 走独立私有 sidecar，其余顶层字段忽略；LongRunning 必须握手且不回退
 - 各游戏独立裁判引擎 + 统一 GameSpec/结果契约；赛制与编排主流程无需游戏名分支
 - SSE 实时观赛 + 完整对局回放（播放/暂停/步进/倍速/逐手跳转）
 - 全站对局身份统一：逐座位显示 Bot 与所属用户或实际真人，并明确标注自动排位、用户挑战、自博弈、真人对战、锦标赛等性质；已参赛实体只停用、不硬删历史身份
 - 终局私有 Bot debug sidecar：双方作者对称调试，赛事延迟授权，公开回放零泄漏
-- 人类 vs Bot（WebSocket 实时交互；与其他来源共享全局容量，占 1 个对局槽 + 1 个沙箱单元，不计评分）
+- 人类 vs Bot（WebSocket 实时交互；与其他来源共享全局容量，占 1 个对局槽 + 1 个沙箱单元，不计平台排行榜）
 - 人工、人机、赛事与自动排位统一进入持久执行队列；挑战/人机返回 HTTP 202 请求，可刷新恢复、取消，基础设施中断后可安全重试
 
 **赛事与排行**
@@ -78,14 +79,14 @@ botzone create-admin alice alice@example.com 'password123'
 | **交付文档**（需求/设计/开发/测试/总结） | 甲方、干系人、平台开发者 | [`doc/`](doc/) |
 | **规则与协议**（游戏规则、对局协议、Bot 开发指南） | Bot 玩家、访客 | [`wiki/`](wiki/) |
 
-快速入口：[对局协议规范](wiki/PROTOCOL.md) · [Bot 开发指南](wiki/BOT_DEV.md) · [项目总览](doc/OVERVIEW.md)
+快速入口：[对局协议规范](wiki/PROTOCOL.md) · [Bot 开发指南](wiki/BOT_DEV.md) · [本地 Bot 接入](wiki/LOCAL_AI.md) · [项目总览](doc/OVERVIEW.md)
 
 ## 技术栈
 
 - **后端**：Python ≥ 3.12、FastAPI、uvicorn、SQLite、异步 SMTP delivery worker（captcha + Pillow）
 - **前端**：React 19 + Vite 8 + Tailwind CSS v4（CSS-first）+ shadcn/ui + Radix UI + lucide-react + recharts
 - **暗色模式**：next-themes + OKLCH 双主题 token（浅色默认 + 暗色对等）
-- **运行时**：Docker（必需；Linux x86_64 ELF 使用 debian:bookworm-slim）；本机 canonical socket + 实例/请求/attempt/座位标签构成精确清理边界
+- **运行时**：Docker 节能/赛事资源档位（Linux x86_64 ELF 使用 debian:bookworm-slim）+ 用户端主动建立的 TLS WebSocket 本地 Bot；平台 Docker 只连接 canonical 本机 socket
 - **评分**：Glicko-2（自实现，无外部依赖）
 
 ## 目录结构
@@ -99,7 +100,7 @@ botzone create-admin alice alice@example.com 'password123'
 ├── wiki/                 # Bot 玩家文档（规则/协议/Bot 开发指南）
 ├── contracts/            # 协议 JSON Schema
 ├── samples/              # 与现行协议逐字绑定的三游戏 C / Python 样例 Bot
-├── scripts/              # 启停、重建、冒烟、压测、浏览器验收、种子
+├── scripts/              # 启停、重建、冒烟、压测、浏览器验收、种子、本地 Bot 客户端
 └── deploy/               # systemd unit
 ```
 

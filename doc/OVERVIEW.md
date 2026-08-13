@@ -4,7 +4,7 @@
 
 ## 1. 项目定位
 
-**botbattle** 是一个**多游戏 Bot 线上对战平台**：用户上传自行编写的 Linux x86_64 ELF Bot，平台在 Docker 安全沙箱中自动运行对局，提供实时观赛、对局回放、Glicko-2 评分排行榜、组织者赛事、人类亲自上场等功能。
+**botbattle** 是一个**多游戏 Bot 线上对战平台**：参赛者平时可在平台节能沙箱或自己的电脑上测试 Bot，组织者开赛后由平台在统一的高性能赛事沙箱中裁判并给出名次；平台同时提供实时观赛、对局回放、Glicko-2 评分排行榜与人类亲自上场。
 
 支持三款游戏（这是有意的产品边界，非技术限制）：
 
@@ -19,12 +19,13 @@
 | 能力域 | 说明 |
 |--------|------|
 | **Bot 上传与沙箱对战** | 唯一接受 Linux x86_64 ELF；拒绝 PE、Mach-O、ARM64 ELF 与脚本；Docker 硬隔离（CPU/内存/网络/文件系统全限制） |
+| **三种执行环境** | 日常挑战与自动排位使用每 Bot 1 核/512 MiB 节能沙箱；正式赛事自动使用每 Bot 2 核/2 GiB 赛事沙箱；本地 Bot 从用户电脑主动建立 WSS 连接，平台只裁判且练习局不计平台排行榜 |
 | **三游戏裁判引擎** | 平台内置裁判模块，Bot 通过 stdin/stdout 行协议交互；赛制/编排主流程经统一 GameSpec 与结果契约调用，不写游戏名分支 |
 | **实时观赛** | SSE 推送对局事件流，前端棋盘/牌桌逐步可视化 |
 | **对局回放** | 完整事件录制，支持播放/暂停/步进/倍速/逐手跳转 |
 | **对局身份与检索** | 首页、历史、Bot 详情、搜索、赛事、回放与管理端共用座位身份契约：显示 Bot 与所属用户或实际真人，并明确自动排位、用户挑战、自博弈、真人对战、锦标赛等性质；已参赛实体只停用，不用硬删除抹掉历史身份 |
 | **私有 Bot 调试** | 可选响应 `debug` 经限额、清洗、脱敏后独立保存；终局按 Bot owner/赛事组织者/admin 授权查看，不进入公共回放 |
-| **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场；与其他来源共享全局 match slots，只占 1 个沙箱单元，不计评分 |
+| **人类 vs Bot** | WebSocket 实时交互，人类可亲自上场；与其他来源共享全局 match slots，只占 1 个沙箱单元，不计平台排行榜 |
 | **全来源执行队列** | 人工、人机、赛事与自动排位统一写持久 job；挑战/人机返回 HTTP 202 请求，支持刷新恢复、查询、取消与中断后重试，Match 仅在原子 claim 时创建 |
 | **Glicko-2 数值排行榜** | 按游戏分别排名；展示 1-based 名次/百分位、Rating、RD、95% 置信区间、不同对手数、变化量、最近对局与无名次计分样本 |
 | **赛事系统** | 6 种赛制阶段（单/双循环、分组、瑞士、单败淘汰）+ 10 个内置模板（含预赛/决赛），完整生命周期（草稿→报名→发布当前阶段排期→进行→休息→结束），积分榜 + 对阵图 + 正式名次；可部署六个明确标注、不可写的客户演示快照，回放仍由真实裁判链生成 |
@@ -43,13 +44,13 @@
 | **后端** | Python + FastAPI + uvicorn + SQLite | Python ≥ 3.12，FastAPI ≥ 0.115 |
 | **CLI** | typer | 入口 `botzone`（serve / create-admin） |
 | **评分** | Glicko-2（自实现，无外部依赖） | — |
-| **沙箱** | Docker（Linux x86_64 ELF: debian:bookworm-slim） | 必须，`BZ_BOT_LOCAL=1` 可在兼容 Linux 主机退回本机（仅测试） |
+| **执行环境** | Docker（Linux x86_64 ELF: debian:bookworm-slim）+ 用户端 WSS 本地 Bot | 节能 1 核/512 MiB；赛事 2 核/2 GiB；`BZ_BOT_LOCAL=1` 仅是平台开发测试回退，不等同于用户本地 Bot |
 | **邮件** | lifespan delivery worker 异步 SMTP（注册验证 / 密码重置高优先级，普通通知/广播可选） | python 标准库 smtplib；有界指数退避、确定性 Message-ID |
 | **前端** | React + Vite + Tailwind CSS v4 + shadcn/ui | React 19 / Vite 8 / Tailwind v4（CSS-first） |
 | **UI 组件** | shadcn/ui（new-york）+ Radix UI + lucide-react + recharts | 26 个共享原语 |
 | **暗色模式** | next-themes（class 策略）+ OKLCH 双主题 token | 浅色默认 + 暗色对等 |
 | **路由** | react-router-dom（HashRouter） | v7 |
-| **实时通信** | SSE（观赛）+ WebSocket（人类对战） | — |
+| **实时通信** | SSE（观赛）+ WebSocket（人类对战）+ Bearer 鉴权 WSS（本地 Bot） | — |
 
 ## 4. 目录结构
 
@@ -62,7 +63,7 @@ botbattle/
 │   │   ├── auth/              # 认证（13 路由 + 验证码 + 依赖）
 │   │   ├── games/             # 【游戏单一真相】GameSpec + registry + holdem/gomoku/pencil 自包含子包
 │   │   ├── store/             # SQLite（Store + schema.py + execution job/attempt/control；matches 按游戏分表）
-│   │   ├── runtime/           # Linux ELF 沙箱 + 本地 Docker namespace supervisor + config/limits
+│   │   ├── runtime/           # Linux ELF 资源档位、本地 Docker supervisor、本地 Bot 连接协调
 │   │   ├── matches/           # execution_queue dispatcher + orchestrator + runner
 │   │   ├── contests/          # 赛制 templates/stages/manager/ranking（模板由 games 聚合）
 │   │   ├── communications/    # 会话/消息/delivery、广播、Bug 反馈、诊断与 worker
@@ -81,7 +82,7 @@ botbattle/
 ├── wiki/                      # 面向 Bot 玩家的规则/协议/开发指南文档
 ├── contracts/                 # 协议 JSON Schema
 ├── samples/                   # 与现行协议逐字绑定的三游戏 C / Python 样例 Bot
-├── scripts/                   # 运维脚本（启停/重建/冒烟/压测/浏览器验收/种子）
+├── scripts/                   # 运维/QA 脚本 + 用户端 local_ai_client.py
 ├── deploy/                    # systemd unit
 ├── pyproject.toml             # Python 包定义 + 依赖 + pytest 配置
 ├── AGENTS.md                  # 开发规范（架构分层 + 约束 + 文档规范）
@@ -94,7 +95,7 @@ botbattle/
 |--------|------|------|
 | **源代码** | 后端 + 前端完整源码 | `bzplat/` |
 | **交付文档**（本文档集） | 6 份核心交付文档及专项/历史说明 | `doc/` |
-| **规则与协议文档** | 三游戏规则、对局协议、Bot 开发指南 | `wiki/` |
+| **规则与协议文档** | 三游戏规则、对局协议、Bot 开发指南、本地 Bot 接入 | `wiki/` |
 | **测试套件** | 后端 pytest + 隔离 API/E2E 脚本 + Playwright 真浏览器回归 | `bzplat/backend/tests/`、`bzplat/frontend/e2e/`、`scripts/` |
 | **部署配置** | systemd unit + 启停脚本 | `deploy/`、`scripts/platform-ctl.sh` |
 | **样例 Bot** | 三游戏样例源码与可上传 Linux x86_64 ELF | `samples/` |

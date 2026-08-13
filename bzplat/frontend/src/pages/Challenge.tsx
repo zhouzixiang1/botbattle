@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { User, Bot as BotIcon, Plus, Play, X as XIcon } from 'lucide-react'
+import { User, Bot as BotIcon, Laptop, Plus, Play, X as XIcon } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import OpponentPickerModal, { type PickBot } from '@/components/OpponentPickerModal'
 import {
@@ -19,6 +19,12 @@ import { ApiError, apiFetch, apiGet, apiJson, errMsg } from '@/api'
 import { useConfirm } from '@/hooks/use-confirm'
 import { useSingleFlightPolling } from '@/hooks/use-single-flight-polling'
 import { GAMES, type GameId } from '@/lib/games'
+import {
+  localAgentBotName,
+  localAgentStatus,
+  type ExecutionEnvironment,
+  type LocalAIAgent,
+} from '@/components/runtime-environment'
 
 /** 版本列表条目（公开视图：id+version+upload_note+created_at+size_bytes；owner 视图字段更多）。 */
 interface VersionRow {
@@ -36,9 +42,21 @@ interface SeatState {
   bot: PickBot | null
   /** 选定版本的 bot_versions.id；undefined/null = 用当前激活版本。 */
   versionId: number | undefined
+  environment: Extract<ExecutionEnvironment, 'platform_low' | 'remote_local'>
+  localAgentId: string | null
 }
 
-const EMPTY_SEAT: SeatState = { bot: null, versionId: undefined }
+const EMPTY_SEAT: SeatState = {
+  bot: null,
+  versionId: undefined,
+  environment: 'platform_low',
+  localAgentId: null,
+}
+const PLAYER_LABELS: Record<GameId, readonly [string, string]> = {
+  holdem: ['玩家 1', '玩家 2'],
+  gomoku: ['黑方', '白方'],
+  pencil: ['红方', '蓝方'],
+}
 const EXECUTION_SESSION_PREFIX = 'bzplat.challenge.execution.'
 const SUBMISSION_CONFIRMATION_MS = 12_000
 
@@ -62,25 +80,28 @@ function isTerminal(snapshot: ExecutionRequestSnapshot | null): boolean {
 /**
  * 合并后的挑战页：单一人/机对局，无模式切换。
  *
- * 两座位（显示从 1 起计；后端仍 0 起计）：
- * - 座位 1（先手 / 黑）：固定 Bot。
- * - 座位 2（后手 / 白）：Bot 或「我亲自上场」（人类固定坐此位）。
- * 提交按座位 2 类型走 /api/matches/challenge（bot vs bot）或
- * /api/matches/human（human_seat=1 固定，对应 0 起计后端座 1=后手/白）。
+ * 两个内部座位仍按 0/1 存储，展示名称按游戏切换：德州玩家 1/2、
+ * 五子棋黑/白方、点格棋红/蓝方。第二方可改为「我亲自上场」。
+ * 提交按第二方类型走 /api/matches/challenge（bot vs bot）或
+ * /api/matches/human（human_seat=1 固定）。
  */
 export default function Challenge() {
   const { isLoggedIn, user } = useAuth()
   const nav = useNavigate()
   const [gameId, setGameId] = useState<GameId>('holdem')
-  // 两座位（内部仍 0 起计以对齐后端；显示 +1）。
+  const playerLabels = PLAYER_LABELS[gameId]
+  // 两个位置内部仍 0 起计以对齐后端；界面按游戏显示玩家/颜色。
   const [seats, setSeats] = useState<[SeatState, SeatState]>([
     { ...EMPTY_SEAT },
     { ...EMPTY_SEAT },
   ])
-  // 座位 2 的类型：'bot' 或 'human'（人类固定座位 2 = 后手/白）。
+  // 第二方类型：'bot' 或 'human'（人类固定使用内部位置 1）。
   const [seat2Kind, setSeat2Kind] = useState<'bot' | 'human'>('bot')
   // 弹窗：pickingSeat 标记当前为哪个座位挑 bot（'s1'|'s2'）。
   const [pickingSeat, setPickingSeat] = useState<'s1' | 's2' | null>(null)
+  const [localAgents, setLocalAgents] = useState<LocalAIAgent[]>([])
+  const [agentsLoading, setAgentsLoading] = useState(false)
+  const [agentError, setAgentError] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [execution, setExecution] = useState<ExecutionRequestSnapshot | null>(null)
@@ -120,7 +141,6 @@ export default function Challenge() {
   }, [executionStorageKey])
 
   const acceptExecution = useCallback((snapshot: ExecutionRequestSnapshot) => {
-    pendingConfirmationUntil.current = 0
     setExecution(snapshot)
     rememberExecution(snapshot.public_id)
     setExecutionStale(false)
@@ -153,6 +173,27 @@ export default function Challenge() {
       setStorageChecked(true)
     }
   }, [executionStorageKey, isLoggedIn])
+
+  const loadLocalAgents = useCallback(async () => {
+    if (!isLoggedIn) return
+    setAgentsLoading(true)
+    try {
+      const data = await apiGet<{ items: LocalAIAgent[] }>('/api/local-ai/agents')
+      setLocalAgents((data.items || []).filter((agent) => agent.status !== 'revoked'))
+      setAgentError('')
+    } catch (err) {
+      setAgentError(errMsg(err, '本地 Bot 连接状态加载失败'))
+    } finally {
+      setAgentsLoading(false)
+    }
+  }, [isLoggedIn])
+
+  useEffect(() => {
+    if (!isLoggedIn) return
+    void loadLocalAgents()
+    const timer = window.setInterval(() => void loadLocalAgents(), 5_000)
+    return () => window.clearInterval(timer)
+  }, [isLoggedIn, loadLocalAgents])
 
   useEffect(() => {
     if (!error) return
@@ -202,14 +243,19 @@ export default function Challenge() {
       && user?.role !== 'admin'
       && bot.owner_id !== user?.id
     ) {
-      setError('Bot 对战的座位 1 只能使用自己的 Bot')
+      setError(`Bot 对战时，${playerLabels[0]}只能使用自己的 Bot`)
       setPickingSeat(null)
       return
     }
     const idx = slot === 's1' ? 0 : 1
     setSeats((s) => {
       const next: [SeatState, SeatState] = [s[0], s[1]]
-      next[idx] = { bot, versionId: undefined }
+      next[idx] = {
+        bot,
+        versionId: undefined,
+        environment: 'platform_low',
+        localAgentId: null,
+      }
       return next
     })
     setPickingSeat(null)
@@ -220,7 +266,10 @@ export default function Challenge() {
     const idx = slot === 's1' ? 0 : 1
     setSeats((s) => {
       const next: [SeatState, SeatState] = [s[0], s[1]]
-      next[idx] = { ...EMPTY_SEAT }
+      next[idx] = {
+        ...EMPTY_SEAT,
+        environment: s[idx].environment,
+      }
       return next
     })
   }
@@ -234,6 +283,37 @@ export default function Challenge() {
     })
   }
 
+  const setSeatEnvironment = (
+    slot: 's1' | 's2',
+    environment: SeatState['environment'],
+  ) => {
+    const idx = slot === 's1' ? 0 : 1
+    setSeats((current) => {
+      const next: [SeatState, SeatState] = [current[0], current[1]]
+      next[idx] = {
+        ...EMPTY_SEAT,
+        environment,
+      }
+      return next
+    })
+    setError('')
+  }
+
+  const setSeatLocalAgent = (slot: 's1' | 's2', publicId: string) => {
+    const idx = slot === 's1' ? 0 : 1
+    setSeats((current) => {
+      const next: [SeatState, SeatState] = [current[0], current[1]]
+      next[idx] = {
+        ...current[idx],
+        bot: null,
+        versionId: undefined,
+        environment: 'remote_local',
+        localAgentId: publicId,
+      }
+      return next
+    })
+  }
+
   const chooseSeat2Kind = (kind: 'bot' | 'human') => {
     const seat1Bot = seats[0].bot
     setSeat2Kind(kind)
@@ -243,7 +323,7 @@ export default function Challenge() {
       && seat1Bot
       && seat1Bot.owner_id !== user?.id
     ) {
-      setError('已切换为 Bot 对战，请为座位 1 选择自己的 Bot')
+      setError(`已切换为 Bot 对战，请为${playerLabels[0]}选择自己的 Bot`)
     } else {
       setError('')
       // 人类模式不展示版本，首次选 Bot 时不会拉历史；切回 Bot 模式且
@@ -254,7 +334,10 @@ export default function Challenge() {
       const next: [SeatState, SeatState] = [s[0], s[1]]
       if (kind === 'human') {
         // 人类 API 固定使用 Bot 当前激活版本，清掉不会被提交的历史版本状态。
-        next[0] = { ...next[0], versionId: undefined }
+        next[0] = next[0].environment === 'remote_local'
+          ? { ...EMPTY_SEAT }
+          : { ...next[0], versionId: undefined }
+        next[1] = { ...EMPTY_SEAT }
       } else if (
         user?.role !== 'admin'
         && next[0].bot
@@ -267,9 +350,19 @@ export default function Challenge() {
     })
   }
 
-  // 自博弈：座位 2 = Bot 且两座同 bot id。
-  const selfPlay =
-    seat2Kind === 'bot' && seats[0].bot && seats[1].bot && seats[0].bot!.id === seats[1].bot!.id
+  // 自博弈：第二方 = Bot 且双方使用同一 bot id。
+  const selectedLocalAgents = seats.map((seat) => (
+    seat.localAgentId
+      ? localAgents.find((agent) => agent.public_id === seat.localAgentId) || null
+      : null
+  )) as [LocalAIAgent | null, LocalAIAgent | null]
+  const selectedBotIds = seats.map((seat, index) => (
+    seat.environment === 'remote_local' ? selectedLocalAgents[index]?.bot_id ?? null : seat.bot?.id ?? null
+  )) as [number | null, number | null]
+  const selfPlay = seat2Kind === 'bot'
+    && selectedBotIds[0] != null
+    && selectedBotIds[0] === selectedBotIds[1]
+  const usesLocalBot = seat2Kind === 'bot' && seats.some((seat) => seat.environment === 'remote_local')
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -277,11 +370,11 @@ export default function Challenge() {
     setError('')
     try {
       if (seat2Kind === 'human') {
-        // 人类对战：人类固定座位 2（后端 0 起计 = 座 1）。座位 1 = Bot。
-        if (!seats[0].bot) throw new Error('请选择座位 1 的 Bot')
+        // 人类固定使用内部座位 1，平台 Bot 使用内部座位 0。
+        if (!seats[0].bot) throw new Error(`请选择${playerLabels[0]}的 Bot`)
         const body: Record<string, unknown> = {
           bot_id: seats[0].bot.id,
-          human_seat: 1, // 固定：人类 = 后端座 1 = 后手/白
+          human_seat: 1,
           game_id: gameId,
         }
         const requestId = createExecutionRequestId()
@@ -290,21 +383,45 @@ export default function Challenge() {
         // Persist before the network call. If the server commits but its 202
         // response is lost, the existing polling path can recover by this id.
         rememberExecution(requestId)
-        // 注：HumanChallengeBody 不接受 bot_version_id，故座位 1 选版本时人类对战忽略版本。
+        // HumanChallengeBody 不接受 bot_version_id，故第一方选版本时人类对战忽略版本。
         const d = await apiJson<ExecutionRequestSnapshot>('/api/matches/human', 'POST', body)
         if (d.public_id !== requestId) throw new Error('服务端返回的执行请求编号不一致')
         acceptExecution(d)
         return
       }
       // bot vs bot
-      if (!seats[0].bot || !seats[1].bot) throw new Error('请为两个座位各选择一个 Bot')
-      const body: Record<string, unknown> = {
-        my_bot_id: seats[0].bot.id,
-        opponent_bot_id: seats[1].bot.id,
-        game_id: gameId,
+      if (selectedBotIds[0] == null || selectedBotIds[1] == null) {
+        throw new Error('请为双方选择可用的 Bot')
       }
-      if (seats[0].versionId !== undefined) body.my_bot_version_id = seats[0].versionId
-      if (seats[1].versionId !== undefined) body.opponent_bot_version_id = seats[1].versionId
+      for (const index of [0, 1] as const) {
+        if (seats[index].environment !== 'remote_local') continue
+        const agent = selectedLocalAgents[index]
+        if (!agent) throw new Error(`请选择${playerLabels[index]}的本地 Bot 连接`)
+        if (!localAgentStatus(agent).available) {
+          throw new Error(`${agent.label} 当前不可用，请先在你的电脑上启动连接程序`)
+        }
+      }
+      if (
+        selectedLocalAgents[0]
+        && selectedLocalAgents[0]?.public_id === selectedLocalAgents[1]?.public_id
+      ) {
+        throw new Error('同一个本地连接不能同时控制双方，请分别启动两个连接')
+      }
+      const body: Record<string, unknown> = {
+        my_bot_id: selectedBotIds[0],
+        opponent_bot_id: selectedBotIds[1],
+        game_id: gameId,
+        my_environment: seats[0].environment,
+        opponent_environment: seats[1].environment,
+        my_local_agent_id: selectedLocalAgents[0]?.public_id ?? null,
+        opponent_local_agent_id: selectedLocalAgents[1]?.public_id ?? null,
+      }
+      if (seats[0].environment === 'platform_low' && seats[0].versionId !== undefined) {
+        body.my_bot_version_id = seats[0].versionId
+      }
+      if (seats[1].environment === 'platform_low' && seats[1].versionId !== undefined) {
+        body.opponent_bot_version_id = seats[1].versionId
+      }
       const requestId = createExecutionRequestId()
       body.request_id = requestId
       pendingConfirmationUntil.current = Date.now() + SUBMISSION_CONFIRMATION_MS
@@ -335,6 +452,7 @@ export default function Challenge() {
       { method: 'GET', signal },
     )
     if (signal.aborted || revision !== executionRevision.current) return
+    pendingConfirmationUntil.current = 0
     acceptExecution(next)
   }, [acceptExecution, executionPublicId])
 
@@ -393,7 +511,7 @@ export default function Challenge() {
     if (!execution || executionAction || execution.request.cancel_requested) return
     if (!await confirm({
       title: execution.request.status === 'queued' ? '取消排队' : '取消对局',
-      desc: '平台会先清理并确认该任务的沙箱容器为零，然后才释放容量。',
+      desc: '平台会安全停止当前任务，然后释放运行位。',
       confirmText: '确认取消',
       danger: true,
     })) return
@@ -443,10 +561,13 @@ export default function Challenge() {
 
   if (!isLoggedIn) {
     return (
-      <PageStub title="发起挑战" subtitle="选择游戏与座位 Bot（支持自博弈、人类对战、指定历史版本）">
+      <PageStub title="发起挑战" subtitle="选择游戏和双方 Bot（支持自博弈、人类对战、指定历史版本）">
         <p className="mx-auto max-w-md rounded-lg border border-border bg-card px-4 py-3 text-center text-sm text-muted-foreground">
           请先{' '}
-          <Link to="/login" className="font-medium text-primary hover:underline">
+          <Link
+            to="/login"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center px-1 font-medium text-primary hover:underline sm:min-h-0 sm:min-w-0 sm:px-0"
+          >
             登录
           </Link>{' '}
           后选择双方 Bot 发起挑战。
@@ -455,32 +576,64 @@ export default function Challenge() {
     )
   }
 
-  // bot 座位渲染（座位 1 与座位 2-bot 共用）。slot='s1'|'s2'；座位号显示 +1。
-  const renderBotSeat = (slot: 's1' | 's2') => {
+  // 两个内部座位共用选择器；标题由当前游戏决定。
+  const renderBotSeat = (slot: 's1' | 's2', showLabel = true) => {
     const idx = slot === 's1' ? 0 : 1
     const seat = seats[idx]
-    const seatLabel = slot === 's1' ? '座位 1（先手 / 黑）' : '座位 2（后手 / 白）'
+    const seatLabel = playerLabels[idx]
     const vc = seat.bot ? versionCache[seat.bot.id] : undefined
+    const localAgent = selectedLocalAgents[idx]
+    const gameAgents = localAgents.filter((agent) => agent.game_id === gameId)
     const mineOnly = slot === 's1' && seat2Kind === 'bot' && user?.role !== 'admin'
     const versionsEnabled = !(slot === 's1' && seat2Kind === 'human')
     return (
       <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <Label>{seatLabel}</Label>
-          {seat.bot && (
+        {showLabel && (
+          <div className="flex items-center justify-between">
+            <Label>{seatLabel}</Label>
+            {(seat.bot || seat.localAgentId) && (
+              <button
+                type="button"
+                onClick={() => clearSeat(slot)}
+                className="inline-flex min-h-[var(--control-height)] items-center gap-1 px-2 text-xs text-muted-foreground hover:text-destructive max-sm:min-h-11"
+              >
+                <XIcon className="size-3" /> 清除
+              </button>
+            )}
+          </div>
+        )}
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">运行位置</Label>
+          <Select
+            value={seat.environment}
+            onValueChange={(value) => setSeatEnvironment(slot, value as SeatState['environment'])}
+            disabled={seat2Kind === 'human'}
+          >
+            <SelectTrigger className="w-full" aria-label={`${seatLabel}运行位置`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="platform_low">节能沙箱</SelectItem>
+              {seat2Kind === 'bot' && <SelectItem value="remote_local">本地 Bot（我的电脑）</SelectItem>}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {seat.environment === 'platform_low' ? (
+          <>
+          {!showLabel && seat.bot && (
             <button
               type="button"
               onClick={() => clearSeat(slot)}
-              className="inline-flex min-h-11 items-center gap-1 px-2 text-xs text-muted-foreground hover:text-destructive"
+              className="inline-flex min-h-[var(--control-height)] items-center gap-1 px-2 text-xs text-muted-foreground hover:text-destructive max-sm:min-h-11"
             >
               <XIcon className="size-3" /> 清除
             </button>
           )}
-        </div>
         <button
           type="button"
           onClick={() => setPickingSeat(slot)}
-          className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg border border-dashed border-input px-3 py-2.5 text-left text-sm text-muted-foreground hover:bg-accent"
+          className="flex min-h-[var(--control-height)] w-full min-w-0 items-center gap-2 rounded-lg border border-dashed border-input px-3 py-2 text-left text-sm text-muted-foreground hover:bg-accent max-sm:min-h-11"
         >
           {seat.bot ? (
             <span className="flex min-w-0 flex-wrap items-center gap-2 text-foreground">
@@ -512,7 +665,7 @@ export default function Challenge() {
             value={seat.versionId === undefined ? 'current' : String(seat.versionId)}
             onValueChange={(v) => setSeatVersion(slot, v === 'current' ? undefined : Number(v))}
           >
-            <SelectTrigger className="h-11 w-full">
+            <SelectTrigger className="w-full" aria-label={`${seatLabel}版本`}>
               <SelectValue placeholder="选择版本" />
             </SelectTrigger>
             <SelectContent>
@@ -535,14 +688,63 @@ export default function Challenge() {
         {seat.bot && !versionsEnabled && (
           <p className="text-xs text-muted-foreground">人类对战使用该 Bot 的当前激活版本</p>
         )}
+          </>
+        ) : (
+          <div className="space-y-1.5">
+            <Select
+              value={seat.localAgentId || 'none'}
+              onValueChange={(value) => { if (value !== 'none') setSeatLocalAgent(slot, value) }}
+              disabled={agentsLoading && gameAgents.length === 0}
+            >
+              <SelectTrigger className="w-full" aria-label={`${seatLabel}本地 Bot 连接`}>
+                <SelectValue placeholder="选择本地 Bot" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none" disabled>
+                  {agentsLoading ? '正在读取连接…' : gameAgents.length === 0 ? '还没有本地连接' : '选择本地 Bot'}
+                </SelectItem>
+                {gameAgents.map((agent) => {
+                  const status = localAgentStatus(agent)
+                  return (
+                    <SelectItem key={agent.public_id} value={agent.public_id} disabled={!status.available}>
+                      {localAgentBotName(agent)} · {agent.label} · {status.label}
+                    </SelectItem>
+                  )
+                })}
+              </SelectContent>
+            </Select>
+            {localAgent ? (
+              <p className={cn('text-xs', localAgentStatus(localAgent).available ? 'text-primary' : 'text-destructive')}>
+                {localAgentBotName(localAgent)} · {localAgent.label} · {localAgentStatus(localAgent).label}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                先在“我的 Bot”建立连接，并让电脑保持在线。
+              </p>
+            )}
+          </div>
+        )}
       </div>
     )
   }
 
-  const ready = seat2Kind === 'human' ? !!seats[0].bot : !!seats[0].bot && !!seats[1].bot
+  const localSeatsAvailable = ([0, 1] as const).every((index) => (
+    seats[index].environment !== 'remote_local'
+    || (selectedLocalAgents[index] != null && localAgentStatus(selectedLocalAgents[index]!).available)
+  ))
+  const ready = seat2Kind === 'human'
+    ? !!seats[0].bot
+    : selectedBotIds[0] != null
+      && selectedBotIds[1] != null
+      && localSeatsAvailable
+      && (!usesLocalBot || !agentError)
+      && !(
+        selectedLocalAgents[0]
+        && selectedLocalAgents[0]?.public_id === selectedLocalAgents[1]?.public_id
+      )
 
   return (
-    <PageStub title="发起挑战" subtitle="座位 1 固定 Bot；座位 2 可选 Bot 或亲自上场（人类不计天梯）">
+    <PageStub title="发起挑战" subtitle="选择双方如何运行；日常测试使用节能沙箱或自己的电脑。">
       {!storageChecked || (pendingPublicId && !execution) ? (
         <Card
           className="mx-auto max-w-2xl gap-3 p-4"
@@ -563,10 +765,10 @@ export default function Challenge() {
                 announce={false}
               />
               <div className="flex flex-wrap gap-2">
-                <Button type="button" variant="outline" className="min-h-11" onClick={refreshExecution}>
+                <Button type="button" variant="outline" className="max-sm:min-h-11" onClick={refreshExecution}>
                   立即重试
                 </Button>
-                <Button type="button" variant="ghost" className="min-h-11" onClick={resetExecution}>
+                <Button type="button" variant="ghost" className="max-sm:min-h-11" onClick={resetExecution}>
                   放弃恢复并返回表单
                 </Button>
               </div>
@@ -589,7 +791,7 @@ export default function Challenge() {
                 />
                 {executionStale && <p className="mt-1 text-xs text-muted-foreground">队列位置可能已变化。</p>}
               </div>
-              <Button type="button" variant="outline" className="min-h-11" onClick={refreshExecution}>
+              <Button type="button" variant="outline" className="max-sm:min-h-11" onClick={refreshExecution}>
                 立即重试
               </Button>
             </div>
@@ -604,7 +806,11 @@ export default function Challenge() {
           />
         </div>
       ) : (
-      <form onSubmit={(e) => void onSubmit(e)} className="mx-auto max-w-2xl">
+      <form
+        onSubmit={(e) => void onSubmit(e)}
+        className="mx-auto w-full max-w-5xl max-sm:[&_[data-slot=button]]:min-h-11 max-sm:[&_[data-slot=button]]:min-w-11 max-sm:[&_[data-slot=select-trigger]]:min-h-11"
+        data-testid="challenge-form"
+      >
         <Card>
           <CardContent className="space-y-4">
             {/* 游戏筛选：切换时重置两座位（不同游戏的 bot 不互通） */}
@@ -617,7 +823,7 @@ export default function Challenge() {
                   resetSeatsOnGameChange()
                 }}
               >
-                <SelectTrigger className="mt-1.5 h-11 w-full">
+                <SelectTrigger className="mt-1.5 w-full" aria-label="游戏">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -636,20 +842,20 @@ export default function Challenge() {
                 </Badge>
               )}
               <div className="grid gap-3 sm:grid-cols-2">
-                {/* 座位 1：固定 Bot */}
+                {/* 第一方固定为 Bot。 */}
                 {renderBotSeat('s1')}
 
-                {/* 座位 2：Bot 或 人类（小开关，仅此座位有） */}
+                {/* 第二方可选 Bot 或本人。 */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label>座位 2（后手 / 白）</Label>
-                    <div className="inline-flex rounded-lg border border-input p-0.5 text-xs" role="group" aria-label="座位 2 玩家类型">
+                    <Label>{playerLabels[1]}</Label>
+                    <div className="inline-flex rounded-lg border border-input p-0.5 text-xs" role="group" aria-label={`${playerLabels[1]}玩家类型`}>
                       <button
                         type="button"
                         onClick={() => chooseSeat2Kind('bot')}
                         aria-pressed={seat2Kind === 'bot'}
                         className={cn(
-                          'inline-flex min-h-11 items-center gap-1 rounded-md px-2 py-1',
+                          'inline-flex min-h-[var(--control-height)] items-center gap-1 rounded-md px-2 py-1 max-sm:min-h-11',
                           seat2Kind === 'bot'
                             ? 'bg-primary/10 text-primary'
                             : 'text-muted-foreground hover:bg-accent',
@@ -663,7 +869,7 @@ export default function Challenge() {
                         onClick={() => chooseSeat2Kind('human')}
                         aria-pressed={seat2Kind === 'human'}
                         className={cn(
-                          'inline-flex min-h-11 items-center gap-1 rounded-md px-2 py-1',
+                          'inline-flex min-h-[var(--control-height)] items-center gap-1 rounded-md px-2 py-1 max-sm:min-h-11',
                           seat2Kind === 'human'
                             ? 'bg-primary/10 text-primary'
                             : 'text-muted-foreground hover:bg-accent',
@@ -675,72 +881,9 @@ export default function Challenge() {
                     </div>
                   </div>
 
-                  {seat2Kind === 'bot' ? (
-                    <div className="space-y-2">
-                      {seats[1].bot && (
-                        <button
-                          type="button"
-                          onClick={() => clearSeat('s2')}
-                          className="inline-flex min-h-11 items-center gap-1 px-2 text-xs text-muted-foreground hover:text-destructive"
-                        >
-                          <XIcon className="size-3" /> 清除
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setPickingSeat('s2')}
-                        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg border border-dashed border-input px-3 py-2.5 text-left text-sm text-muted-foreground hover:bg-accent"
-                      >
-                        {seats[1].bot ? (
-                          <span className="flex min-w-0 flex-wrap items-center gap-2 text-foreground">
-                            <BotIcon className="size-4 shrink-0 text-primary" />
-                            <strong className="max-w-full break-words [overflow-wrap:anywhere]">{seats[1].bot.display_name || seats[1].bot.name}</strong>
-                            <span className="max-w-full break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
-                              {seats[1].bot.owner_display || seats[1].bot.owner_name || '所属用户不可用'}
-                              {seats[1].bot.owner_id != null && seats[1].bot.owner_id === user?.id ? '（我的）' : ''}
-                            </span>
-                          </span>
-                        ) : (
-                          <>
-                            <Plus className="size-4" />
-                            选择 Bot（搜索 / 我的 / 按用户）
-                          </>
-                        )}
-                      </button>
-                      {seats[1].bot && (
-                        (() => {
-                          const vc = versionCache[seats[1].bot!.id]
-                          return (
-                            <Select
-                              value={seats[1].versionId === undefined ? 'current' : String(seats[1].versionId)}
-                              onValueChange={(v) => setSeatVersion('s2', v === 'current' ? undefined : Number(v))}
-                            >
-                              <SelectTrigger className="h-11 w-full">
-                                <SelectValue placeholder="选择版本" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="current">
-                                  {vc?.current !== undefined ? `当前版本 (v${vc.current})` : '当前版本'}
-                                </SelectItem>
-                                {(vc?.rows || []).map((vr) => {
-                                  const isCurrent = vc?.current !== undefined && vr.version === vc.current
-                                  return (
-                                    <SelectItem key={vr.id} value={String(vr.id)}>
-                                      v{vr.version}
-                                      {vr.upload_note ? ` ${vr.upload_note}` : ''}
-                                      {isCurrent ? ' · 当前' : ''}
-                                    </SelectItem>
-                                  )
-                                })}
-                              </SelectContent>
-                            </Select>
-                          )
-                        })()
-                      )}
-                    </div>
-                  ) : (
+                  {seat2Kind === 'bot' ? renderBotSeat('s2', false) : (
                     <div className="rounded-lg border border-dashed border-input px-3 py-3 text-sm text-muted-foreground">
-                      你（<strong className="break-words text-foreground [overflow-wrap:anywhere]">@{user?.username}</strong>）作为人类玩家，不计天梯。
+                      你（<strong className="break-words text-foreground [overflow-wrap:anywhere]">@{user?.username}</strong>）亲自上场，本局不计平台排行榜。
                     </div>
                   )}
                 </div>
@@ -748,10 +891,22 @@ export default function Challenge() {
 
               <p className="mt-3 text-xs text-muted-foreground">
                 {seat2Kind === 'human'
-                  ? '座位 1 选 Bot，座位 2 由你亲自上场。人类对战占 1 个沙箱单位、不计天梯。'
-                  : '两个座位可选同一个 Bot（自博弈），亦可各自指定历史版本对比。版本缺省=当前激活版本。'}
+                  ? `${playerLabels[0]}使用节能沙箱，${playerLabels[1]}由你亲自上场；本局不计平台排行榜。`
+                  : '节能沙箱由平台运行；本地 Bot 由你的电脑回答裁判请求，可两边都选本地连接。'}
               </p>
             </div>
+
+            {usesLocalBot && (
+              <div className="flex min-w-0 items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs" role="status">
+                <Laptop className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
+                <span className="min-w-0 break-words">
+                  <strong className="text-foreground">本地 Bot 练习局，不计平台排行榜。</strong>
+                  {' '}开始前请保持所选连接在线；平台只负责裁判，不会连接你的电脑端口。
+                </span>
+              </div>
+            )}
+
+            {agentError && <ErrorMsg msg={agentError} />}
 
             {error && (
               <div ref={errorAlertRef} role="alert" tabIndex={-1}>
@@ -761,7 +916,7 @@ export default function Challenge() {
             <Button
               type="submit"
               disabled={busy || !ready}
-              className="min-h-11 w-full gap-1.5"
+              className="w-full gap-1.5"
             >
               <Play className="size-4" />
               {busy ? '发起中…' : seat2Kind === 'human' ? '开始人类对战' : '开始对局'}
@@ -769,8 +924,10 @@ export default function Challenge() {
             {!busy && !ready && (
               <p className="text-center text-xs text-muted-foreground">
                 {seat2Kind === 'human'
-                  ? '请选择座位 1 的 Bot'
-                  : '请为两个座位各选择一个 Bot'}
+                  ? `请选择${playerLabels[0]}的 Bot`
+                  : usesLocalBot
+                    ? '请为双方选择可用连接；离线或正在对局的本地 Bot 不能开始'
+                    : '请为双方选择 Bot'}
               </p>
             )}
           </CardContent>

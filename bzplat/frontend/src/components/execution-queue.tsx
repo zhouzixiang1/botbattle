@@ -1,10 +1,12 @@
 import type { ReactNode } from 'react'
 import {
   Activity,
+  AlertTriangle,
   Bot,
   Clock3,
   Cpu,
   ListOrdered,
+  MemoryStick,
   PauseCircle,
   PlayCircle,
   RotateCcw,
@@ -18,6 +20,10 @@ import { Card } from '@/components/ui/card'
 import { ErrorMsg, Loading } from '@/components/ui/status'
 import { fmtTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import {
+  RuntimeEnvironmentBadge,
+  type ExecutionEnvironment,
+} from '@/components/runtime-environment'
 
 export type ExecutionSource = 'manual' | 'human' | 'contest' | 'auto'
 export type ExecutionStatus =
@@ -38,11 +44,18 @@ export interface ExecutionQueueJob {
   match_type: string
   match_id?: string | null
   sandbox_units: number
+  bot_a_environment?: ExecutionEnvironment | null
+  bot_b_environment?: ExecutionEnvironment | null
   rated: boolean
   rating_reason: string
   retryable: boolean
   cancel_requested: boolean
   reason: string
+  capacity_blocked_code?: string
+  capacity_blocked_reason?: string
+  /** Compatibility with the bounded public projection. */
+  blocked_code?: string
+  blocked_reason?: string
   created_at?: string | null
   started_at?: string | null
   terminal_at?: string | null
@@ -51,6 +64,8 @@ export interface ExecutionQueueJob {
 export interface ExecutionCapacity {
   match_slots: { used: number; capacity: number }
   sandbox_units: { used: number; capacity: number }
+  host_cpu_millis?: { used: number; capacity: number }
+  host_memory_mb?: { used: number; capacity: number }
   running_matches: number
 }
 
@@ -80,6 +95,10 @@ export interface ExecutionRequestSnapshot {
     dynamic: true
     note: string
   }
+  capacity_blocked_code?: string
+  capacity_blocked_reason?: string
+  blocked_code?: string
+  blocked_reason?: string
 }
 
 const SOURCE_LABEL: Record<ExecutionSource, string> = {
@@ -106,12 +125,13 @@ const GAME_LABEL: Record<string, string> = {
 }
 
 const RATING_REASON_LABEL: Record<string, string> = {
-  contest: '赛事对局不计评分',
-  human: '人机对战不计评分',
-  self_play: '自博弈不计评分',
-  bot_missing: 'Bot 信息不完整，不计评分',
-  same_owner: '同一所有者，不计评分',
-  eligible: '计入评分',
+  contest: '只计赛事成绩，不计平台排行榜',
+  human: '人机对战，不计平台排行榜',
+  self_play: '自博弈，不计平台排行榜',
+  bot_missing: 'Bot 信息不完整，不计平台排行榜',
+  same_owner: '同一所有者，不计平台排行榜',
+  remote_local: '本地 Bot 练习，不计平台排行榜',
+  eligible: '计入平台排行榜',
 }
 
 function dispatcherLabel(state: string, accepting: boolean): string {
@@ -125,30 +145,74 @@ function dispatcherLabel(state: string, accepting: boolean): string {
 function CapacityMeter({ capacity }: { capacity: ExecutionCapacity }) {
   const matchSlots = capacity.match_slots || { used: 0, capacity: 0 }
   const sandboxUnits = capacity.sandbox_units || { used: 0, capacity: 0 }
+  const hostCpu = capacity.host_cpu_millis
+  const hostMemory = capacity.host_memory_mb
+  const showHostResources = Boolean(hostCpu && hostMemory)
+  const cpuLabel = (value: number) => `${Number((value / 1000).toFixed(1))} 核`
+  const memoryLabel = (value: number) => (
+    value >= 1024 && value % 1024 === 0 ? `${value / 1024} GiB` : `${value} MiB`
+  )
   return (
-    <dl className="grid grid-cols-2 gap-2 text-xs">
+    <dl
+      className={cn('grid grid-cols-2 gap-2 text-xs', showHostResources && 'lg:grid-cols-4')}
+      aria-label="执行容量"
+    >
       <div className="rounded-md border border-border bg-muted/20 px-2.5 py-2">
         <dt className="inline-flex items-center gap-1 text-muted-foreground">
-          <Activity className="size-3.5" /> 对局槽
+          <Activity className="size-3.5" /> 同时运行
         </dt>
         <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-          {matchSlots.used} / {matchSlots.capacity}
+          {matchSlots.used} / {matchSlots.capacity} 场
         </dd>
       </div>
       <div className="rounded-md border border-border bg-muted/20 px-2.5 py-2">
         <dt className="inline-flex items-center gap-1 text-muted-foreground">
-          <Cpu className="size-3.5" /> 沙箱单位
+          <Cpu className="size-3.5" /> 平台 Bot 运行位
         </dt>
         <dd className="mt-0.5 font-mono font-semibold tabular-nums">
           {sandboxUnits.used} / {sandboxUnits.capacity}
         </dd>
       </div>
+      {hostCpu && (
+        <div
+          className="rounded-md border border-border bg-muted/20 px-2.5 py-2"
+          data-testid="host-cpu-capacity"
+        >
+          <dt className="inline-flex items-center gap-1 text-muted-foreground">
+            <Cpu className="size-3.5" /> 主机 CPU
+          </dt>
+          <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+            {cpuLabel(hostCpu.used)} / {cpuLabel(hostCpu.capacity)}
+          </dd>
+        </div>
+      )}
+      {hostMemory && (
+        <div
+          className="rounded-md border border-border bg-muted/20 px-2.5 py-2"
+          data-testid="host-memory-capacity"
+        >
+          <dt className="inline-flex items-center gap-1 text-muted-foreground">
+            <MemoryStick className="size-3.5" /> 主机内存
+          </dt>
+          <dd className="mt-0.5 font-mono font-semibold tabular-nums">
+            {memoryLabel(hostMemory.used)} / {memoryLabel(hostMemory.capacity)}
+          </dd>
+        </div>
+      )}
     </dl>
   )
 }
 
+function capacityBlockedReason(job: ExecutionQueueJob): string {
+  const code = job.capacity_blocked_code || job.blocked_code
+  return job.capacity_blocked_reason
+    || job.blocked_reason
+    || (code ? '当前主机资源不足；请求会保留排队，资源满足后再开始。' : '')
+}
+
 function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }) {
   const active = job.status === 'starting' || job.status === 'running' || job.status === 'settling'
+  const blockedReason = capacityBlockedReason(job)
   return (
     <li className="min-w-0 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -161,6 +225,10 @@ function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }
           <Badge variant={active ? 'default' : 'secondary'}>{SOURCE_LABEL[job.source] || job.source}</Badge>
           <span className="text-muted-foreground">{GAME_LABEL[job.game_id] || job.game_id}</span>
           <span className="text-muted-foreground">{STATUS_LABEL[job.status] || job.status}</span>
+          <RuntimeEnvironmentBadge environment={job.bot_a_environment} />
+          {job.bot_b_environment !== job.bot_a_environment && (
+            <RuntimeEnvironmentBadge environment={job.bot_b_environment} />
+          )}
         </div>
         {job.match_id && (
           <Link
@@ -172,10 +240,16 @@ function JobRow({ job, position }: { job: ExecutionQueueJob; position?: number }
         )}
       </div>
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span>{job.sandbox_units} 个沙箱单位</span>
-        <span>{job.rated ? '计入评分' : RATING_REASON_LABEL[job.rating_reason] || '不计评分'}</span>
+        <span>{job.sandbox_units === 0 ? '不占用平台运行位' : `占用 ${job.sandbox_units} 个平台 Bot 运行位`}</span>
+        <span>{job.rated ? '计入平台排行榜' : RATING_REASON_LABEL[job.rating_reason] || '不计平台排行榜'}</span>
         {job.cancel_requested && <span>正在安全取消</span>}
       </div>
+      {blockedReason && (
+        <p className="mt-1.5 flex min-w-0 items-start gap-1.5 text-xs text-warning-foreground" role="status">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />
+          <span className="min-w-0 break-words [overflow-wrap:anywhere]">{blockedReason}</span>
+        </p>
+      )}
     </li>
   )
 }
@@ -361,6 +435,9 @@ export function ExecutionRequestCard({
   onReset?: () => void
 }) {
   const { request, capacity, eta } = snapshot
+  const blockedReason = snapshot.capacity_blocked_reason
+    || snapshot.blocked_reason
+    || capacityBlockedReason(request)
   const terminal = request.status === 'completed' || request.status === 'cancelled' || request.status === 'interrupted'
   const cancellable = request.status === 'queued' || request.status === 'starting' || request.status === 'running'
   return (
@@ -383,20 +460,35 @@ export function ExecutionRequestCard({
         </span>
       </div>
 
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+        <RuntimeEnvironmentBadge environment={request.bot_a_environment} />
+        {request.bot_b_environment !== request.bot_a_environment && (
+          <RuntimeEnvironmentBadge environment={request.bot_b_environment} />
+        )}
+        <span>{request.rated ? '计入平台排行榜' : RATING_REASON_LABEL[request.rating_reason] || '不计平台排行榜'}</span>
+      </div>
+
       <CapacityMeter capacity={capacity} />
 
       {request.status === 'queued' && (
         <div className="rounded-lg border border-border bg-muted/20 px-3 py-2.5 text-xs">
-          <p>前方 {snapshot.ahead_jobs} 项任务，共 {snapshot.ahead_sandbox_units} 个沙箱单位。</p>
-          <p className="mt-1 text-muted-foreground">
-            动态预计等待 {durationRange(eta.min_seconds, eta.max_seconds)}；{eta.note}。
-          </p>
+          <p>前方 {snapshot.ahead_jobs} 项任务；全站按同一队列依次运行。</p>
+          {blockedReason ? (
+            <p className="mt-1 flex min-w-0 items-start gap-1.5 text-warning-foreground" role="status">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden="true" />
+              <span className="min-w-0 break-words [overflow-wrap:anywhere]">{blockedReason}</span>
+            </p>
+          ) : (
+            <p className="mt-1 text-muted-foreground">
+              动态预计等待 {durationRange(eta.min_seconds, eta.max_seconds)}；{eta.note}。
+            </p>
+          )}
         </div>
       )}
 
       {request.status === 'interrupted' && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs">
-          <p className="font-medium">本次执行因平台恢复而中断，未计入评分。</p>
+          <p className="font-medium">本次执行因平台恢复而中断，不计平台排行榜。</p>
           <p className="mt-1 text-muted-foreground">{request.reason || '可重新排队，系统不会复活原对局。'}</p>
         </div>
       )}
@@ -414,7 +506,7 @@ export function ExecutionRequestCard({
       )}
 
       {request.cancel_requested && request.status !== 'cancelled' && (
-        <p className="text-xs text-muted-foreground">取消请求已记录；平台会先确认沙箱清零，再释放容量。</p>
+      <p className="text-xs text-muted-foreground">取消请求已记录；平台会在当前任务安全停止后释放运行位。</p>
       )}
 
       <div className="flex flex-wrap justify-end gap-2">

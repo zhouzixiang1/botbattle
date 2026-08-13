@@ -11,6 +11,7 @@ import typer
 from bzplat.backend import cli, main
 from bzplat.backend.logging_config import setup_logging
 from bzplat.backend.qa_safety import primary_checkout_root
+from bzplat.backend.runtime.limits import MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES
 
 
 SOURCE_ROOT = Path(main.__file__).resolve().parents[2]
@@ -212,6 +213,7 @@ def test_cli_preserves_application_owned_uvicorn_logging(monkeypatch):
 
     assert captured["log_config"] is None
     assert captured["proxy_headers"] is False
+    assert captured["ws_max_size"] == MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES
 
 
 def test_cli_rejects_wildcard_bind_without_explicit_lan_gate(monkeypatch):

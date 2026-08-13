@@ -17,6 +17,8 @@ export interface PublicMatchParticipant {
 export interface MatchParticipantSource {
   match_type?: string
   human_seat?: number | null
+  bot_a_environment?: string | null
+  bot_b_environment?: string | null
   bot_a_id?: number | null
   bot_b_id?: number | null
   bot_a?: PublicMatchParticipant
@@ -36,6 +38,15 @@ export interface MatchParticipantSource {
   owner_a_display?: string
   owner_b_name?: string
   owner_b_display?: string
+}
+
+export function matchParticipantEnvironment(
+  source: MatchParticipantSource,
+  side: 0 | 1,
+): string | null {
+  return side === 0
+    ? source.bot_a_environment ?? null
+    : source.bot_b_environment ?? null
 }
 
 export interface ResolvedMatchParticipant {

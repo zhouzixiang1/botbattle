@@ -222,7 +222,7 @@ for (const viewport of VIEWPORTS) {
         'href',
         '#/match/holdem-human-active-match',
       )
-      await expect(queuePanel).toContainText('人机对战不计评分')
+      await expect(queuePanel).toContainText('人机对战，不计平台排行榜')
       const holdemTab = page.getByRole('tab', { name: '德州扑克', exact: true })
       const gomokuTab = page.getByRole('tab', { name: '五子棋', exact: true })
       await expect(holdemTab).toHaveAttribute('aria-selected', 'true')

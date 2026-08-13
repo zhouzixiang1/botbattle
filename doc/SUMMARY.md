@@ -59,6 +59,7 @@
 | 安全与日志 | access/audit 三文件日志、限流与审计埋点 |
 | 赛事修复 | 瑞士/淘汰多轮推进等（赛事压测发现） |
 | QA 与恢复加固 | worktree 写隔离、对局/赛事重启对账、评分恰好一次补算、两阶段派发补偿、admin 安全中止与删除、Playwright 真浏览器回归 |
+| 三种 Bot 执行环境 | 日常节能沙箱每 Bot 1 核/512 MiB；锦标赛固定赛事沙箱每 Bot 2 核/2 GiB；用户端本地 Bot 通过出站 WSS 接入，平台只运行裁判。全来源仍共享唯一对局槽，日常可混合两端，本地对局不计榜且不能参加赛事 |
 | Pencil 累计棋钟 | GameSpec 固定每方 900 秒，Bot-vs-Bot 与人类双方统一累计；回放/SSE 记录 `time_used`/`time_out`，对局页显示剩余时间与超时状态 |
 | 文档对齐 | 交付文档与 wiki 与代码现状一致（本轮） |
 
@@ -71,13 +72,13 @@
 |------|------|
 | 后端代码 | `bzplat/backend` 的非测试 `.py` 持续演进；精确数量以目标提交 `rg --files` 重新盘点为准 |
 | API 路由 | REST + SSE + WebSocket；精确数量以目标提交的自动化盘点为准 |
-| 数据库表 | SQLite 业务表 + per-game 对局表 + 通用 `execution_jobs/execution_job_attempts/execution_control`；自动排位只保留 decision/fair-state/auto 专属服务计数并映射通用 job，不再有独立 queue/control/lease；评分使用 immutable policy/settlement/sequence/projection state；具体数量由当前 schema 回归断言 |
+| 数据库表 | SQLite 业务表 + per-game 对局表 + 通用 `execution_jobs/execution_job_attempts/execution_control`；job 冻结双方执行环境与资源版本，`local_ai_agents/local_ai_leases` 保存本地连接身份和 attempt 占用审计；自动排位只保留 decision/fair-state/auto 专属服务计数并映射通用 job，不再有独立队列；评分使用 immutable policy/settlement/sequence/projection state；具体数量由当前 schema 回归断言 |
 | 游戏架构 | `games/` 注册表 + 3 自包含子包（shim 已删，真实现全在 games/） |
 | 前端组件 | 26 个 shadcn 共享原语 |
 | 前端页面 | 顶层业务页面均 lazy 分包；精确数量以目标提交的路由盘点为准 |
 | 自动化测试 | 后端 pytest + Playwright；最终数量以目标提交重新收集为准 |
 | 大规模压测 | 60 用户 × 8 阶段；历史结果仅作参考，本轮发布前须按固定 70/15/N=6 规则重跑 |
-| 浏览器验收 | 当前目标提交的完整执行结果以 `TESTING.md` 为准；隔离 QA 能力门强制禁用自动 producer，生产唯一开关为 `execution_control.auto_enabled`；全来源队列另有专门 Playwright spec，但目标 HEAD 尚须完整执行 |
+| 浏览器验收 | 当前目标提交的完整执行结果以 `TESTING.md` 为准；隔离 QA 能力门强制禁用自动 producer，生产唯一开关为 `execution_control.auto_enabled`；全来源队列由专门 Playwright spec 覆盖 |
 | 合并 PR | 早期 27 个里程碑后继续演进（游戏契约收敛、canvas 重写、安全日志、赛事修复等） |
 
 ## 4. 验收交付清单
@@ -91,9 +92,9 @@
 | 协议 JSON Schema | ✅ | `contracts/` |
 | 三游戏样例 Bot | ✅ C / Python 均与唯一现行协议绑定 | `samples/` |
 | 测试套件 | ✅ 契约、单元、集成与浏览器套件齐备；最终通过数以目标提交的 `TESTING.md` 证据为准 | `bzplat/backend/tests/` |
-| 隔离 API / 冒烟 | ⚠️ `api_full_test.py` 与 `e2e_smoke.sh` 已适配 202 request + `public_id` polling；取消/重试由 API/队列测试覆盖。两者仍须在目标 HEAD 的隔离运行栈重新取证，历史基线不算最终结果 | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
+| 隔离 API / 冒烟 | ✅ `e2e_smoke.sh` 已在目标候选的临时 QA 栈通过；`api_full_test.py` 已适配 202 request + `public_id` polling，取消/重试由 API/队列测试覆盖 | `scripts/api_full_test.py`、`scripts/e2e_smoke.sh` |
 | 压测脚本 | ✅ 脚本已交付；本轮未将历史基线冒充最终结果 | `scripts/load_test.py` |
-| 浏览器验收 | ⚠️ 历史 UI 基线通过；全局执行队列已新增 spec，但目标 HEAD 的静态收集、完整矩阵、Console/Network/日志尚待执行，不沿用 5 spec / 53 条旧数字 | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
+| 浏览器验收 | ✅ 目标候选完整三浏览器矩阵、Console/Network 守卫与响应式定向验收均通过；精确数量和耗时见 `TESTING.md` | `bzplat/frontend/e2e/`、`doc/TESTING.md` |
 | 部署配置 | ✅ | `deploy/` + `scripts/platform-ctl.sh` |
 
 ## 5. 经验教训
@@ -124,6 +125,6 @@
 
 ## 7. 结论
 
-botbattle 已形成完整的代码、文档、测试与部署交付面：三游戏核心由 `games/` GameSpec + 结果鸭子契约守护，Pencil 采用 Bot 与人类一致的每方 900 秒累计棋钟，前端具备 shadcn/ui 双主题、canvas/GSAP 观赛与响应式页面，本轮又补齐 QA 写隔离、恢复一致性和真实浏览器自动化。最终验收结论必须来自整合后的目标提交实际执行结果，统一记录在 `TESTING.md`，不以历史手填数字或静态盘点替代运行证据。
+botbattle 已形成完整的代码、文档与测试交付面：参赛者可用节能沙箱或自己的电脑完成日常调试，组织者的锦标赛统一使用高性能沙箱，超级管理员只负责连接、队列和主机资源诊断；三类路径仍由同一裁判、持久队列、回放与技术判定契约收口。双本地 Bot 与“本地 Bot 对上传 Bot”的真实连接器 canary 均已正常终局，验证了零/单沙箱、评分不变、匿名投影无凭据、断线重连不延长截止时间及令牌轮换；节能/赛事 Docker 的实际 HostConfig 仍因线上容器持续繁忙而保留为安全部署窗口中的门禁。该项完成前只能提交候选 PR，不能宣称已可部署。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

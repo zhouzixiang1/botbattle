@@ -1,10 +1,12 @@
 import { Link } from 'react-router-dom'
 
 import { Badge } from '@/components/ui/badge'
+import { RuntimeEnvironmentBadge } from '@/components/runtime-environment'
 import { EntityName, OverflowText } from '@/components/ui/overflow-text'
 import { matchTypeBadge } from '@/lib/games'
 import {
   isBotSelfPlay,
+  matchParticipantEnvironment,
   participantOwnerText,
   resolveMatchParticipant,
   type MatchParticipantSource,
@@ -183,6 +185,10 @@ export function MatchParticipantIdentity({
         <span aria-hidden="true">·</span>
         <span>{participant.seatLabel}</span>
         {seatDetail && <><span aria-hidden="true">·</span><span>{seatDetail}</span></>}
+        <RuntimeEnvironmentBadge
+          environment={matchParticipantEnvironment(source, side)}
+          className="h-4 px-1 text-[9px]"
+        />
       </div>
     </div>
   )

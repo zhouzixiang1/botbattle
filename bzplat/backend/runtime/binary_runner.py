@@ -20,7 +20,12 @@ from bzplat.backend.runtime.docker_supervisor import (
     DockerSupervisor,
     docker_cli_environment,
 )
-from bzplat.backend.runtime.limits import MAX_BOT_RESPONSE_LINE_BYTES
+from bzplat.backend.runtime.limits import (
+    MAX_BOT_RESPONSE_LINE_BYTES,
+    DockerResourceProfile,
+    PLATFORM_LOW_PROFILE,
+    resolve_docker_resource_profile,
+)
 
 from ..bots.classify import (
     BinaryInfo,
@@ -37,8 +42,6 @@ from ..store.schema import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_ACTION_TIMEOUT = ACTION_TIMEOUT_SEC
-DEFAULT_MEMORY = "512m"
-DEFAULT_CPUS = "1"
 DEFAULT_LINUX_IMAGE = "debian:bookworm-slim"
 DEFAULT_IMAGE_PREPARE_TIMEOUT = 300.0
 _DOCKER_INSPECT_TIMEOUT_SEC = 15.0
@@ -92,6 +95,7 @@ class BotSession:
     binary_path: Path
     proc: asyncio.subprocess.Process | None = None
     mode: str = "docker"  # docker | local（local 仅 BZ_BOT_LOCAL 测试开关）
+    profile: DockerResourceProfile = PLATFORM_LOW_PROFILE
     container_name: str = ""
     container_slot: int | None = None
     launch_token: str = ""
@@ -427,6 +431,7 @@ class BinaryRunner:
         *,
         info: BinaryInfo | None,
         runtime_mode: str,
+        profile: str | DockerResourceProfile = PLATFORM_LOW_PROFILE,
         execution_scope: ExecutionScope | None = None,
     ) -> BotSession:
         """校验二进制并创建逻辑会话；不启动进程。"""
@@ -434,6 +439,7 @@ class BinaryRunner:
             execution_scope.assert_current()
         if runtime_mode not in VALID_RUNTIME_MODES:
             raise ValueError(f"未知运行模式: {runtime_mode}")
+        resolved_profile = resolve_docker_resource_profile(profile)
         path = Path(binary_path).resolve()
         if not path.is_file():
             raise BotCrashedError(f"bot 二进制不存在: {path}")
@@ -453,7 +459,8 @@ class BinaryRunner:
         mode = self._select_mode(info)
         session = BotSession(
             session_id=sid, info=info, binary_path=path, mode=mode,
-            runtime_mode=runtime_mode, execution_scope=execution_scope,
+            profile=resolved_profile, runtime_mode=runtime_mode,
+            execution_scope=execution_scope,
         )
         return session
 
@@ -463,6 +470,7 @@ class BinaryRunner:
         *,
         info: BinaryInfo | None = None,
         runtime_mode: str = DEFAULT_RUNTIME_MODE,
+        profile: str | DockerResourceProfile = PLATFORM_LOW_PROFILE,
         execution_scope: ExecutionScope | None = None,
     ) -> str:
         """只登记 Traditional 的历史状态，不启动整场闲置 Bot 进程。"""
@@ -472,6 +480,7 @@ class BinaryRunner:
             binary_path,
             info=info,
             runtime_mode=runtime_mode,
+            profile=profile,
             execution_scope=execution_scope,
         )
         if session.mode == "docker":
@@ -490,11 +499,13 @@ class BinaryRunner:
                             info: BinaryInfo | None = None,
                             action_timeout: float = DEFAULT_ACTION_TIMEOUT,
                             runtime_mode: str = DEFAULT_RUNTIME_MODE,
+                            profile: str | DockerResourceProfile = PLATFORM_LOW_PROFILE,
                             execution_scope: ExecutionScope | None = None) -> str:
         session = self._new_session(
             binary_path,
             info=info,
             runtime_mode=runtime_mode,
+            profile=profile,
             execution_scope=execution_scope,
         )
         sid = session.session_id
@@ -658,8 +669,7 @@ class BinaryRunner:
                         owner_kind=owner_kind,
                         binary_path=session.binary_path,
                         image=self._linux_image,
-                        memory=DEFAULT_MEMORY,
-                        cpus=DEFAULT_CPUS,
+                        profile=session.profile,
                     ),
                     name=f"docker-create-{session.session_id}",
                 )

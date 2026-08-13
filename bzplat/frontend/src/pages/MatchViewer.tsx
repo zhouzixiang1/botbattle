@@ -88,13 +88,14 @@ const STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'destructive' | '
 }
 
 const RATING_REASON_LABEL: Record<string, string> = {
-  eligible: '计入天梯',
-  same_owner: '同所有者调试 · 不计天梯',
-  self_play: '自博弈调试 · 不计天梯',
-  human: '人机对局 · 不计天梯',
-  contest: '赛事积分 · 不计天梯',
-  bot_missing: '历史 Bot 缺失 · 不计天梯',
-  owner_missing: '历史所有者缺失 · 不计天梯',
+  eligible: '计入平台排行榜',
+  same_owner: '同所有者调试 · 不计平台排行榜',
+  self_play: '自博弈调试 · 不计平台排行榜',
+  human: '人机对局 · 不计平台排行榜',
+  contest: '赛事积分 · 不计平台排行榜',
+  bot_missing: '历史 Bot 缺失 · 不计平台排行榜',
+  owner_missing: '历史所有者缺失 · 不计平台排行榜',
+  remote_local: '本地 Bot 练习 · 不计平台排行榜',
 }
 
 function ratingBadge(match: MatchRow): {
@@ -107,7 +108,7 @@ function ratingBadge(match: MatchRow): {
   if (match.rated !== true) {
     if (match.rated !== false) return null
     return {
-      label: RATING_REASON_LABEL[match.rating_reason || ''] || '不计天梯',
+      label: RATING_REASON_LABEL[match.rating_reason || ''] || '不计平台排行榜',
       variant: 'secondary',
     }
   }

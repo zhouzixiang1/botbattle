@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,7 +17,10 @@ from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
-from bzplat.backend.matches.execution_queue import ExecutionDispatcher
+from bzplat.backend.matches.execution_queue import (
+    DispatcherAlreadyRunning,
+    ExecutionDispatcher,
+)
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.runtime.docker_supervisor import (
     ATTEMPT_LABEL,
@@ -38,7 +42,12 @@ from bzplat.backend.runtime.binary_runner import (
     BotSession,
     SandboxControlUncertain,
 )
+from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
+from bzplat.backend.runtime.local_ai import LocalAIHub
+from bzplat.backend.runtime.local_ai_service import LocalAIService
 from bzplat.backend.store import Store, rating_projection_digests
+from bzplat.backend.store.execution import ExecutionInvariantError
+from bzplat.backend.store.public_contract import sanitize_public_match
 from bzplat.backend.store.schema import (
     EXECUTION_SOURCE_AUTO,
     EXECUTION_SOURCE_CONTEST,
@@ -132,6 +141,17 @@ def _owned_bot(
         "bot_id": int(bot["id"]),
         "version_id": int(version["id"]),
     }
+
+
+def _local_agent(store: Store, bot: dict, key: str) -> dict:
+    return store.create_local_ai_agent(
+        owner_id=int(bot["user_id"]),
+        bot_id=int(bot["bot_id"]),
+        label=f"local-{key}",
+        public_id=f"agent-{key}",
+        token_hash=hashlib.sha256(f"token-{key}".encode()).hexdigest(),
+        token_hint=f"hint-{key}"[-8:],
+    )
 
 
 def _auth_headers(app, user: dict) -> dict[str, str]:
@@ -310,6 +330,8 @@ def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api
         "match_type",
         "match_id",
         "sandbox_units",
+        "bot_a_environment",
+        "bot_b_environment",
         "rated",
         "rating_reason",
         "retryable",
@@ -342,6 +364,8 @@ def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api
         "match_type": TYPE_CHALLENGE,
         "match_id": None,
         "sandbox_units": 2,
+        "bot_a_environment": "platform_low",
+        "bot_b_environment": "platform_low",
         "rated": True,
         "rating_reason": "eligible",
         "retryable": False,
@@ -354,6 +378,11 @@ def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api
         "owner_user_id",
         "bot_a_version_id",
         "bot_b_version_id",
+        "bot_a_local_agent_id",
+        "bot_b_local_agent_id",
+        "host_cpu_millis",
+        "host_memory_mb",
+        "profile_version",
         "match_config",
         "auto_decision_id",
     ):
@@ -1480,6 +1509,16 @@ def test_public_pause_reason_is_sanitized_but_admin_keeps_diagnostic(queue_store
     admin = dispatcher.public_snapshot(include_internal=True)
     assert raw_reason not in json.dumps(public, ensure_ascii=False)
     assert admin["dispatcher"]["pause_reason"] == raw_reason
+    assert "host_cpu_millis" not in public["capacity"]
+    assert "host_memory_mb" not in public["capacity"]
+    assert admin["capacity"]["host_cpu_millis"] == {
+        "used": 0,
+        "capacity": dispatcher.max_host_cpu_millis,
+    }
+    assert admin["capacity"]["host_memory_mb"] == {
+        "used": 0,
+        "capacity": dispatcher.max_host_memory_mb,
+    }
 
 
 def test_crash_recovery_never_revives_eventful_match(queue_store):
@@ -2208,6 +2247,568 @@ def test_auto_eventful_crash_requeues_and_public_projection_is_whitelisted(queue
     assert auto_job["current_match_id"] is None
 
 
+def test_execution_environment_snapshots_are_source_owned(queue_store):
+    store = queue_store
+    pair = (_bot(store, "environment-a"), _bot(store, "environment-b"))
+
+    manual = _enqueue_pair(store, pair)
+    assert (
+        manual["bot_a_environment"],
+        manual["bot_b_environment"],
+        manual["sandbox_units"],
+        manual["host_cpu_millis"],
+        manual["host_memory_mb"],
+        manual["profile_version"],
+    ) == ("platform_low", "platform_low", 2, 2000, 1024, 1)
+
+    automatic = _enqueue_pair(store, pair, source=EXECUTION_SOURCE_AUTO)
+    assert (
+        automatic["bot_a_environment"],
+        automatic["bot_b_environment"],
+        automatic["host_cpu_millis"],
+        automatic["host_memory_mb"],
+    ) == ("platform_low", "platform_low", 2000, 1024)
+
+    _, _, human = _enqueue_human(store, "environment-human")
+    assert (
+        human["bot_a_environment"],
+        human["bot_b_environment"],
+        human["sandbox_units"],
+        human["host_cpu_millis"],
+        human["host_memory_mb"],
+    ) == ("platform_low", "human", 1, 1000, 512)
+
+    contest = store.create_contest(
+        "High profile", pair[0]["user_id"], status="running", game_id="holdem"
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        pair[0]["bot_id"],
+        pair[1]["bot_id"],
+        bot_a_version_id=pair[0]["version_id"],
+        bot_b_version_id=pair[1]["version_id"],
+    )
+    official = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=pair[0]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=pair[0]["bot_id"],
+        bot_b_id=pair[1]["bot_id"],
+        bot_a_version_id=pair[0]["version_id"],
+        bot_b_version_id=pair[1]["version_id"],
+        # Callers cannot downgrade or replace the official profile.
+        bot_a_environment="remote_local",
+        bot_b_environment="platform_low",
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+    )
+    assert (
+        official["bot_a_environment"],
+        official["bot_b_environment"],
+        official["sandbox_units"],
+        official["host_cpu_millis"],
+        official["host_memory_mb"],
+    ) == ("platform_high", "platform_high", 2, 4000, 4096)
+
+
+@pytest.mark.parametrize(
+    ("host_cpu_millis", "host_memory_mb"),
+    [(3999, 4096), (4000, 4095)],
+)
+def test_official_profile_waits_on_undersized_host_without_downgrade(
+    queue_store,
+    host_cpu_millis,
+    host_memory_mb,
+):
+    store = queue_store
+    pair = (_bot(store, "host-gate-a"), _bot(store, "host-gate-b"))
+    _verify_projection(store)
+    contest = store.create_contest(
+        "Host gate", pair[0]["user_id"], status="running", game_id="holdem"
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        pair[0]["bot_id"],
+        pair[1]["bot_id"],
+        bot_a_version_id=pair[0]["version_id"],
+        bot_b_version_id=pair[1]["version_id"],
+    )
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=pair[0]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=pair[0]["bot_id"],
+        bot_b_id=pair[1]["bot_id"],
+        bot_a_version_id=pair[0]["version_id"],
+        bot_b_version_id=pair[1]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+    )
+
+    blocked = store.executions.claim_next(
+        max_match_slots=1,
+        max_sandbox_units=2,
+        max_host_cpu_millis=host_cpu_millis,
+        max_host_memory_mb=host_memory_mb,
+        aging_seconds=60,
+        user_active_limit=1,
+        contest_share_slots=1,
+    )
+    assert blocked is None
+    persisted = store.executions.get(job["public_id"])
+    assert persisted["status"] == "queued"
+    assert (
+        persisted["bot_a_environment"],
+        persisted["bot_b_environment"],
+        persisted["host_cpu_millis"],
+        persisted["host_memory_mb"],
+    ) == ("platform_high", "platform_high", 4000, 4096)
+
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(),
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        max_host_cpu_millis=host_cpu_millis,
+        max_host_memory_mb=host_memory_mb,
+    )
+    request = dispatcher.public_request(job["public_id"])
+    assert request["request"]["blocked_code"] == "host_resources_insufficient"
+    assert "不会降档" in request["blocked_reason"]
+    queued = dispatcher.public_snapshot()["queued"]
+    assert queued[0]["blocked_reason"] == request["blocked_reason"]
+
+    claimed = store.executions.claim_next(
+        max_match_slots=1,
+        max_sandbox_units=2,
+        max_host_cpu_millis=4000,
+        max_host_memory_mb=4096,
+        aging_seconds=60,
+        user_active_limit=1,
+        contest_share_slots=1,
+    )
+    assert claimed is not None
+    assert claimed["public_id"] == job["public_id"]
+    assert (
+        claimed["bot_a_environment"],
+        claimed["bot_b_environment"],
+    ) == ("platform_high", "platform_high")
+    match = store.get_match(str(claimed["current_match_id"]))
+    assert match["match_config"]["_execution_profile_version"] == 1
+
+
+def test_claim_rejects_unknown_or_tampered_resource_profile_snapshot(queue_store):
+    store = queue_store
+    pair = (_bot(store, "profile-guard-a"), _bot(store, "profile-guard-b"))
+
+    unknown = _enqueue_pair(store, pair)
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE execution_jobs SET profile_version=99 WHERE public_id=?",
+            (unknown["public_id"],),
+        )
+    with pytest.raises(ExecutionInvariantError, match="profile snapshot is unknown"):
+        _claim(store, slots=1, units=2)
+    assert store.list_matches(limit=20) == []
+
+    with store._tx() as conn:
+        # The schema CHECK already rejects ordinary writes. Simulate a damaged
+        # legacy database to prove claim still refuses a mismatched snapshot.
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute(
+            "UPDATE execution_jobs SET profile_version=1,host_memory_mb=513 "
+            "WHERE public_id=?",
+            (unknown["public_id"],),
+        )
+        conn.execute("PRAGMA ignore_check_constraints=OFF")
+    with pytest.raises(ExecutionInvariantError, match="profile snapshot mismatch"):
+        _claim(store, slots=1, units=2)
+    assert store.list_matches(limit=20) == []
+
+
+def test_remote_environment_freezes_agent_not_upload_version_and_is_unrated(
+    queue_store,
+):
+    store = queue_store
+    owner = _api_user(store, "remote-owner")
+    opponent = _api_user(store, "remote-opponent")
+    local_bot = _owned_bot(store, owner, "remote-owner")
+    docker_bot = _owned_bot(store, opponent, "remote-opponent")
+    agent = _local_agent(store, local_bot, "remote-owner")
+
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=owner["id"],
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=local_bot["bot_id"],
+        bot_b_id=docker_bot["bot_id"],
+        bot_a_version_id=local_bot["version_id"],
+        bot_b_version_id=docker_bot["version_id"],
+        bot_a_environment="remote_local",
+        bot_b_environment="platform_low",
+        bot_a_local_agent_id=agent["id"],
+    )
+
+    assert job["bot_a_version_id"] is None
+    assert job["bot_b_version_id"] == docker_bot["version_id"]
+    assert job["bot_a_local_agent_id"] == agent["id"]
+    assert (job["sandbox_units"], job["host_cpu_millis"], job["host_memory_mb"]) == (
+        1,
+        1000,
+        512,
+    )
+    assert job["rated"] == 0
+    assert job["rating_reason"] == "remote_local"
+
+
+def test_remote_environment_rejects_untrusted_binding(queue_store):
+    store = queue_store
+    owner = _api_user(store, "remote-binding-owner")
+    foreign = _api_user(store, "remote-binding-foreign")
+    administrator = _api_user(store, "remote-binding-admin", role="admin")
+    own_bot = _owned_bot(store, owner, "remote-binding-owner")
+    foreign_bot = _owned_bot(store, foreign, "remote-binding-foreign")
+    foreign_agent = _local_agent(store, foreign_bot, "remote-binding-foreign")
+
+    common = dict(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=owner["id"],
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=own_bot["bot_id"],
+        bot_b_id=foreign_bot["bot_id"],
+        bot_a_version_id=own_bot["version_id"],
+        bot_b_version_id=foreign_bot["version_id"],
+    )
+    with pytest.raises(ValueError, match="\u7528\u6237\u3001Bot \u6216\u6e38\u620f\u4e0d\u5339\u914d"):
+        store.executions.enqueue(
+            **common,
+            bot_b_environment="remote_local",
+            bot_b_local_agent_id=foreign_agent["id"],
+        )
+    with pytest.raises(ValueError, match="\u7528\u6237\u3001Bot \u6216\u6e38\u620f\u4e0d\u5339\u914d"):
+        store.executions.enqueue(
+            **{**common, "owner_user_id": administrator["id"]},
+            bot_b_environment="remote_local",
+            bot_b_local_agent_id=foreign_agent["id"],
+        )
+    with pytest.raises(ValueError, match="\u4f4e\u914d Docker \u6216\u672c\u5730 Bot"):
+        store.executions.enqueue(
+            **common,
+            bot_a_environment="platform_high",
+        )
+    with pytest.raises(ValueError, match="\u5fc5\u987b\u9009\u62e9\u8fde\u63a5"):
+        store.executions.enqueue(
+            **common,
+            bot_a_environment="remote_local",
+        )
+
+
+@pytest.mark.parametrize("blocked_by", ["offline", "active_lease"])
+def test_unavailable_remote_job_does_not_block_later_docker_job(
+    queue_store, blocked_by
+):
+    store = queue_store
+    remote_owner = _api_user(store, f"blocked-{blocked_by}-owner")
+    opponent = _api_user(store, f"blocked-{blocked_by}-opponent")
+    remote_bot = _owned_bot(store, remote_owner, f"blocked-{blocked_by}-remote")
+    remote_opponent = _owned_bot(store, opponent, f"blocked-{blocked_by}-opponent")
+    agent = _local_agent(store, remote_bot, f"blocked-{blocked_by}")
+    remote = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=remote_owner["id"],
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=remote_bot["bot_id"],
+        bot_b_id=remote_opponent["bot_id"],
+        bot_a_version_id=remote_bot["version_id"],
+        bot_b_version_id=remote_opponent["version_id"],
+        bot_a_environment="remote_local",
+        bot_a_local_agent_id=agent["id"],
+    )
+    fallback_pair = (_bot(store, f"fallback-{blocked_by}-a"), _bot(store, f"fallback-{blocked_by}-b"))
+    fallback = _enqueue_pair(store, fallback_pair)
+    _verify_projection(store)
+    store.executions.set_local_agent_available(
+        (lambda _agent_id: False)
+        if blocked_by == "offline"
+        else (lambda _agent_id: True)
+    )
+    if blocked_by == "active_lease":
+        with store._tx() as conn:
+            conn.execute(
+                "INSERT INTO local_ai_leases("
+                "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+                "VALUES(?, 'other-job', 1, 0, 'active', ?)",
+                (agent["id"], "2026-08-13T00:00:00"),
+            )
+
+    dispatcher = ExecutionDispatcher(
+        SimpleNamespace(),
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+    )
+    request = dispatcher.public_request(remote["public_id"])
+    assert request["request"]["blocked_code"] == "local_agent_unavailable"
+    assert "等待所选本地 Bot 上线并空闲" in request["blocked_reason"]
+    queued = dispatcher.public_snapshot()["queued"]
+    projected = next(
+        row for row in queued if row["public_id"] == remote["public_id"]
+    )
+    assert projected["blocked_reason"] == request["blocked_reason"]
+
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == fallback["public_id"]
+    assert store.executions.get(remote["public_id"])["status"] == "queued"
+
+
+def test_remote_claim_skips_binary_check_and_lease_releases_with_cleanup(queue_store):
+    store = queue_store
+    owner = _api_user(store, "lease-owner")
+    opponent = _api_user(store, "lease-opponent")
+    remote_bot = _owned_bot(store, owner, "lease-remote")
+    docker_bot = _owned_bot(store, opponent, "lease-docker")
+    agent = _local_agent(store, remote_bot, "lease")
+    Path(store.get_bot(remote_bot["bot_id"])["binary_path"]).unlink()
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=owner["id"],
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=remote_bot["bot_id"],
+        bot_b_id=docker_bot["bot_id"],
+        bot_a_version_id=remote_bot["version_id"],
+        bot_b_version_id=docker_bot["version_id"],
+        bot_a_environment="remote_local",
+        bot_a_local_agent_id=agent["id"],
+    )
+    store.executions.set_local_agent_available(lambda agent_id: agent_id == agent["id"])
+
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match = store.get_match(str(claimed["current_match_id"]))
+    assert match["match_config"] == {
+        **match["match_config"],
+        "_execution_profile_version": 1,
+        "_bot_a_environment": "remote_local",
+        "_bot_b_environment": "platform_low",
+        "_bot_a_local_agent_id": agent["id"],
+        "_bot_b_local_agent_id": None,
+    }
+    with store._tx() as conn:
+        lease = conn.execute(
+            "SELECT * FROM local_ai_leases WHERE job_public_id=?",
+            (job["public_id"],),
+        ).fetchone()
+        assert lease["status"] == "active"
+        assert lease["agent_id"] == agent["id"]
+
+    store.executions.mark_cleanup_confirmed(job["public_id"], 1)
+    with store._tx() as conn:
+        lease = conn.execute(
+            "SELECT * FROM local_ai_leases WHERE job_public_id=?",
+            (job["public_id"],),
+        ).fetchone()
+        assert lease["status"] == "released"
+        assert lease["released_at"]
+
+
+def test_claimed_local_transport_identity_cannot_follow_reused_agent_row(
+    queue_store, monkeypatch
+):
+    """A claimed attempt stays bound to the old public id after label reuse."""
+
+    store = queue_store
+    owner = _api_user(store, "frozen-local-owner")
+    opponent = _api_user(store, "frozen-local-opponent")
+    first_bot = _owned_bot(store, owner, "frozen-local-first")
+    replacement_bot = _owned_bot(store, owner, "frozen-local-replacement")
+    docker_bot = _owned_bot(store, opponent, "frozen-local-docker")
+    agent = _local_agent(store, first_bot, "frozen-local")
+    old_public_id = str(agent["public_id"])
+    connected_agent = store.connect_local_ai_agent(
+        int(agent["id"]), expected_public_id=old_public_id
+    )
+    assert connected_agent is not None
+    old_generation = int(connected_agent["connection_generation"])
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=owner["id"],
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=first_bot["bot_id"],
+        bot_b_id=docker_bot["bot_id"],
+        bot_a_version_id=first_bot["version_id"],
+        bot_b_version_id=docker_bot["version_id"],
+        bot_a_environment="remote_local",
+        bot_a_local_agent_id=agent["id"],
+    )
+    store.executions.set_local_agent_available(
+        lambda agent_id: int(agent_id) == int(agent["id"])
+    )
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == job["public_id"]
+    match_id = str(claimed["current_match_id"])
+    claimed_match = store.get_match(match_id)
+    frozen_config = claimed_match["match_config"]
+    assert frozen_config["_bot_a_local_agent_public_id"] == old_public_id
+    assert frozen_config["_bot_a_local_agent_generation"] == old_generation
+
+    # Revocation releases the durable lease; recreating the same owner label
+    # deliberately reuses the integer row id but changes Bot/public identity.
+    assert store.revoke_local_ai_agent(int(agent["id"]), int(owner["id"]))
+    replacement = store.create_local_ai_agent(
+        owner_id=int(owner["id"]),
+        bot_id=int(replacement_bot["bot_id"]),
+        label=str(agent["label"]),
+        public_id="agent-frozen-local-replacement",
+        token_hash=hashlib.sha256(b"replacement-token").hexdigest(),
+        token_hint="replace",
+    )
+    assert int(replacement["id"]) == int(agent["id"])
+    assert replacement["public_id"] != old_public_id
+    assert int(replacement["connection_generation"]) > old_generation
+
+    # A mutable row read at start is the exact vulnerability: prove the
+    # orchestrator no longer performs one after the claim snapshot exists.
+    monkeypatch.setattr(
+        store,
+        "get_local_ai_agent",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("runner must not resolve a reusable agent row")
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    async def exercise() -> None:
+        hub = LocalAIHub()
+        replacement_connection = await hub.register(str(replacement["public_id"]))
+        # This mirrors the service-side revoke that closes/tombstones the old
+        # transport before the same owner label is recreated.
+        await hub.revoke(old_public_id)
+
+        class _FrozenIdentityRunner:
+            async def run_binaries(self, *_args, **kwargs):
+                frozen_ids = kwargs.get("local_agent_ids")
+                captured["local_agent_ids"] = frozen_ids
+                # Exercise the real hub decision boundary. The old identity
+                # must fail as a Bot technical fault; the connected replacement
+                # must receive no turn at all.
+                return await hub.request_decision(
+                    frozen_ids[0],
+                    request_id="frozen-local-turn",
+                    match_id=match_id,
+                    seat=0,
+                    turn=1,
+                    deadline_at=time.monotonic() + 1.0,
+                    input="{}",
+                )
+
+        await MatchOrchestrator(
+            store, runner=_FrozenIdentityRunner(), max_concurrent=1
+        )._run_match(match_id)
+        assert (
+            await hub.next_turn(
+                str(replacement["public_id"]),
+                replacement_connection.connection_id,
+                timeout=0.01,
+            )
+            is None
+        )
+
+    asyncio.run(exercise())
+
+    assert captured["local_agent_ids"] == (old_public_id, None)
+    assert replacement["public_id"] not in captured["local_agent_ids"]
+    terminal = store.get_match(match_id)
+    assert (terminal["status"], terminal["reason"], terminal["winner"]) == (
+        "completed",
+        "technical_loss",
+        1,
+    )
+    public = sanitize_public_match(terminal)
+    assert "match_config" not in public
+    assert old_public_id not in json.dumps(public, ensure_ascii=False)
+    assert replacement["public_id"] not in json.dumps(public, ensure_ascii=False)
+
+
+def test_online_local_agent_claim_uses_only_the_live_memory_projection(
+    queue_store, monkeypatch
+):
+    store = queue_store
+    owner = _api_user(store, "live-claim-owner")
+    opponent = _api_user(store, "live-claim-opponent")
+    remote_bot = _owned_bot(store, owner, "live-claim-remote")
+    docker_bot = _owned_bot(store, opponent, "live-claim-docker")
+    agent = _local_agent(store, remote_bot, "live-claim")
+    job = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=owner["id"],
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=remote_bot["bot_id"],
+        bot_b_id=docker_bot["bot_id"],
+        bot_a_version_id=remote_bot["version_id"],
+        bot_b_version_id=docker_bot["version_id"],
+        bot_a_environment="remote_local",
+        bot_a_local_agent_id=agent["id"],
+    )
+    service = LocalAIService(store)
+
+    async def exercise() -> None:
+        connection, generation = await service.connect(agent)
+        store.executions.set_local_agent_available(service.is_available_now)
+
+        def forbidden_store_read(*_args, **_kwargs):
+            raise AssertionError("claim availability callback re-entered Store")
+
+        monkeypatch.setattr(store, "get_local_ai_agent", forbidden_store_read)
+        started = time.monotonic()
+        claimed = _claim(store, slots=1, units=2)
+        assert time.monotonic() - started < 0.5
+        assert claimed and claimed["public_id"] == job["public_id"]
+        await service.disconnect(agent, connection.connection_id, generation)
+
+    asyncio.run(exercise())
+
+
+def test_revoked_remote_identity_is_interrupted_without_blocking(queue_store):
+    store = queue_store
+    owner = _api_user(store, "revoked-owner")
+    opponent = _api_user(store, "revoked-opponent")
+    remote_bot = _owned_bot(store, owner, "revoked-remote")
+    docker_bot = _owned_bot(store, opponent, "revoked-opponent")
+    agent = _local_agent(store, remote_bot, "revoked")
+    remote = store.executions.enqueue(
+        source=EXECUTION_SOURCE_MANUAL,
+        owner_user_id=owner["id"],
+        game_id="holdem",
+        match_type=TYPE_CHALLENGE,
+        bot_a_id=remote_bot["bot_id"],
+        bot_b_id=docker_bot["bot_id"],
+        bot_a_version_id=remote_bot["version_id"],
+        bot_b_version_id=docker_bot["version_id"],
+        bot_a_environment="remote_local",
+        bot_a_local_agent_id=agent["id"],
+    )
+    assert store.revoke_local_ai_agent(agent["id"], owner["id"])
+    fallback_pair = (_bot(store, "revoked-fallback-a"), _bot(store, "revoked-fallback-b"))
+    fallback = _enqueue_pair(store, fallback_pair)
+    _verify_projection(store)
+    store.executions.set_local_agent_available(lambda _agent_id: True)
+
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == fallback["public_id"]
+    stopped = store.executions.get(remote["public_id"])
+    assert stopped["status"] == "interrupted"
+    assert stopped["retryable"] == 1
+    assert stopped["terminal_reason"] == "local_agent_unavailable"
+
+
 def test_docker_commands_are_local_deterministic_and_hardened(monkeypatch, tmp_path):
     monkeypatch.delenv("BZ_DOCKER_HOST", raising=False)
     monkeypatch.delenv("DOCKER_HOST", raising=False)
@@ -2242,8 +2843,7 @@ def test_docker_commands_are_local_deterministic_and_hardened(monkeypatch, tmp_p
         name=identity.container_name(0),
         binary_path=Path("/tmp/bot.elf"),
         image="debian:bookworm-slim",
-        memory="512m",
-        cpus="1",
+        profile=PLATFORM_LOW_PROFILE,
     )
     for required in (
         "--network=none",
@@ -2636,8 +3236,7 @@ def test_docker_create_persists_intent_before_rpc_and_marks_created(
         owner_kind="preflight",
         binary_path=tmp_path / "bot.elf",
         image="test-image",
-        memory="512m",
-        cpus="1",
+        profile=PLATFORM_LOW_PROFILE,
     )
 
     assert name == identity.container_name(0)
@@ -2679,8 +3278,7 @@ def test_docker_create_failure_keeps_ambiguous_intent(
             owner_kind="preflight",
             binary_path=tmp_path / "bot.elf",
             image="test-image",
-            memory="512m",
-            cpus="1",
+            profile=PLATFORM_LOW_PROFILE,
         )
 
     launch = queue_store.executions.docker_launch()
@@ -3042,6 +3640,117 @@ def test_app_main_and_preflight_runners_share_one_supervisor(
     app.state.store.close()
 
 
+def test_runtime_reset_runs_only_after_dispatcher_singleton_is_owned(queue_store):
+    class Runtime:
+        supervisor = None
+
+        async def cleanup_instance(self) -> None:
+            return None
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            return 0
+
+    first_resets: list[str] = []
+    second_resets: list[str] = []
+    first = ExecutionDispatcher(
+        Orch(),
+        queue_store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=False,
+        singleton_acquired=lambda: first_resets.append("first"),
+    )
+    second = ExecutionDispatcher(
+        Orch(),
+        queue_store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=False,
+        singleton_acquired=lambda: second_resets.append("second"),
+    )
+
+    async def exercise() -> None:
+        assert (await first.start())["outcome"] == "running"
+        with pytest.raises(DispatcherAlreadyRunning):
+            await second.start()
+        # A failed instance may be asked to close by an outer lifespan.  It
+        # must neither touch shared queue control nor release the owner's flock.
+        await second.close()
+        assert first._lock_fd is not None
+        await first.close()
+        assert (await second.start())["outcome"] == "running"
+        await second.close()
+
+    asyncio.run(exercise())
+    assert first_resets == ["first"]
+    assert second_resets == ["second"]
+
+
+def test_app_local_ai_shutdown_finishes_before_singleton_release(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("BZ_BOT_LOCAL", "1")
+    app = create_app(
+        db_path=str(tmp_path / "lifespan-order.db"),
+        upload_root=tmp_path / "uploads",
+    )
+    dispatcher = app.state.execution_dispatcher
+    events: list[str] = []
+
+    def reset_runtime_state() -> None:
+        assert dispatcher._lock_fd is not None
+        events.append(
+            "startup-reset" if not events else "shutdown-reset"
+        )
+
+    dispatcher.singleton_acquired = reset_runtime_state
+    monkeypatch.setattr(
+        app.state.store,
+        "reset_local_ai_runtime_state",
+        reset_runtime_state,
+    )
+    original_orch_shutdown = app.state.orch.shutdown
+
+    async def shutdown_orch() -> None:
+        events.append("orchestrator-shutdown")
+        await original_orch_shutdown()
+
+    async def shutdown_hub() -> None:
+        assert dispatcher._lock_fd is not None
+        events.append("local-ai-shutdown")
+
+    monkeypatch.setattr(app.state.orch, "shutdown", shutdown_orch)
+    monkeypatch.setattr(app.state.local_ai_service.hub, "shutdown", shutdown_hub)
+    original_release = dispatcher._release_singleton
+
+    def release_singleton() -> None:
+        events.append("singleton-release")
+        original_release()
+
+    monkeypatch.setattr(dispatcher, "_release_singleton", release_singleton)
+
+    async def exercise() -> None:
+        assert events == []
+        async with app.router.lifespan_context(app):
+            assert events == ["startup-reset"]
+
+    asyncio.run(exercise())
+    assert events == [
+        "startup-reset",
+        "orchestrator-shutdown",
+        "local-ai-shutdown",
+        "shutdown-reset",
+        "singleton-release",
+    ]
+    app.state.store.close()
+
+
 def test_unsettled_launch_journal_blocks_recovery_resume_and_claim(
     queue_store, tmp_path, monkeypatch
 ):
@@ -3399,10 +4108,25 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
             "SELECT requested_lane,actual_lane FROM auto_match_decisions"
         ).fetchone()) == ("bootstrap", "established")
         jobs = conn.execute(
-            "SELECT source,status,current_match_id,claimed_at,cleanup_state,last_error "
+            "SELECT source,status,current_match_id,claimed_at,cleanup_state,last_error,"
+            "bot_a_environment,bot_b_environment,sandbox_units,host_cpu_millis,"
+            "host_memory_mb,profile_version "
             "FROM execution_jobs ORDER BY id"
         ).fetchall()
-        assert tuple(jobs[0]) == ("auto", "queued", None, None, "none", "")
+        assert tuple(jobs[0]) == (
+            "auto",
+            "queued",
+            None,
+            None,
+            "none",
+            "",
+            "platform_low",
+            "platform_low",
+            2,
+            2000,
+            1024,
+            0,
+        )
         assert tuple(jobs[1]) == (
             "auto",
             "settling",
@@ -3410,6 +4134,12 @@ def test_legacy_queue_migration_is_idempotent_and_preserves_business_rows(tmp_pa
             "2026-08-09T12:02:00",
             "pending",
             "legacy_execution_unscoped",
+            "platform_low",
+            "platform_low",
+            2,
+            2000,
+            1024,
+            0,
         )
         attempt = conn.execute(
             "SELECT a.status,a.match_id,a.created_at,a.terminal_reason "

@@ -21,15 +21,14 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 
 | 参数 | 作用 |
 |------|------|
-| `--cpus=1` | 单核上限（硬编码，admin 不可抬高） |
-| `--memory=512m` | 内存上限（硬编码） |
+| `--cpus=<档位>` | 节能沙箱为 1，赛事沙箱为 2；只能从版本化白名单解析，admin 不可任意组合或抬高 |
+| `--memory=<档位>`、`--memory-swap=<档位>` | 节能沙箱均为 512m，赛事沙箱均为 2048m；内存与 swap 合计不超过所选档位 |
 | `--network=none` | 完全断网 |
 | `--read-only` | 根文件系统只读 |
 | `--tmpfs /tmp:rw,exec,nosuid,nodev,size=64m` | /tmp 有界可写且可执行；禁 suid 与设备节点，根 fs 仍只读 |
 | `--cap-drop=ALL` | 丢弃全部 Linux capabilities |
 | `--security-opt no-new-privileges` | 禁止提权 |
 | `--user 65534:65534` | 以 nobody 身份运行 |
-| `--memory-swap=512m` | 内存与 swap 合计不超过同一硬顶 |
 | `--pids-limit=64` | 限制进程数量 |
 | `--ulimit nofile=64:64`、`nproc=64:64` | 限制文件描述符和进程资源 |
 | `--log-driver=none` | 禁止 daemon 持久收集 Bot 容器日志 |
@@ -37,7 +36,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 | `--entrypoint /app/bot` | 忽略基础镜像自带 Entrypoint/CMD，直接执行已校验 ELF |
 | `--platform linux/amd64` | 运行目标固定为 Linux amd64 |
 
-所有参数均为**只读硬限制**，admin 面板不可抬高。容器名由
+平台管理两种 Docker 档位：`platform_low` 每 Bot 1 CPU / 512 MiB，用于日常节能挑战、自动排位、人机 Bot 侧与上传预检；`platform_high` 每 Bot 2 CPU / 2 GiB，仅由锦标赛使用。用户端 `remote_local` 和真人座位不创建平台容器。所有参数均为**只读硬限制**，admin 面板不可抬高。容器名由
 `instance namespace + request public_id hash + attempt + slot` 确定；容器同时带
 `io.botbattle.instance/job/attempt/slot` 四个执行 label；容器创建阶段另带唯一
 `io.botbattle.launch` token。namespace 优先取显式
@@ -85,21 +84,35 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 
 ## 全局执行容量
 
-所有会实际运行 Bot 的来源——人工挑战、人机、赛事、自动排位——先进入同一持久队列。容量按最保守的
-LongRunning 情况估算：Bot-vs-Bot 固定占 **1 match slot + 2 sandbox units**，人机固定占
-**1 match slot + 1 sandbox unit**。Traditional 实际同时存活的容器可能更少，但不会因此抬高硬上限。
+所有会实际运行 Bot 的来源——人工挑战、人机、赛事、自动排位——先进入同一持久队列。每场都占
+**1 match slot**；`sandbox units` 只计算平台实际管理的 Docker 座位，本地 Bot 和真人座位均为 0：
 
-```
-cpu_ceiling = max(1, os.cpu_count() // 4)  # 机器保护值
-configured  = 1                             # runtime/config.py 产品硬约束
-effective   = min(configured, cpu_ceiling) # 始终为 1
+| 对局来源 / 座位环境 | sandbox units | 冻结的主机资源需求 |
+|----------------------|---------------|----------------------|
+| 日常挑战或自动排位：节能 + 节能 | 2 | 2000 毫核 / 1024 MiB |
+| 日常挑战：节能 + 本地 Bot | 1 | 1000 毫核 / 512 MiB |
+| 日常挑战：本地 Bot + 本地 Bot | 0 | 0 / 0；平台只运行裁判 |
+| 人机：节能 + 真人 | 1 | 1000 毫核 / 512 MiB |
+| 锦标赛：赛事 + 赛事 | 2 | 4000 毫核 / 4096 MiB |
+
+Traditional 实际同时存活的容器可能更少，但不会因此抬高硬上限；本地 Bot 虽不占 Docker，仍占唯一裁判对局槽，不会绕过排队。
+
+```text
+max_match_slots  = 1
+host_cpu_budget  = min(进程 affinity、进程可见逻辑 CPU、各级 cgroup CPU quota)
+host_memory_budget = min(物理内存、各级 cgroup memory limit)
+effective_budget = min(上述探测值、显式的仅收紧启动注入)
 ```
 
 - `max_match_slots=1`，`max_sandbox_units=2`。显式启动参数、CPU 数量和管理员设置都不能放大；每次 claim 在一个
   `BEGIN IMMEDIATE` 中同时要求：活跃 job 的 slot 未满、实际全局 `running` match 数小于
-  `max_match_slots`、sandbox units 可容纳当前 job。任何来源都不能绕过其中任一维度。
+  `max_match_slots`、sandbox units 可容纳当前 job，并且冻结的 CPU/内存需求不超过当前主机预算。赛事主机不足
+  4 CPU 或 4 GiB 时该任务保持排队并给出资源不足原因，绝不静默降为节能档。任何来源都不能绕过其中任一维度。
 - `starting/running/settling` 都占容量；match/replay/rating policy 只在 claim 时同事务创建和绑定，
   单纯排队不产生“pending 对局”。未纳入新队列的历史 running match 也按 1 slot + 保守 2 units 计入。
+- job 入队时冻结两个座位的环境、`profile_version`、sandbox/CPU/内存向量；claim 重新用不可变历史 registry
+  校验并复制版本到 Match，runner 的 Traditional 每回合、LongRunning、复式与人机 Bot 侧都只解析该冻结版本。
+  未知版本、环境不兼容或快照漂移均在启动进程前 fail closed，不能回退到部署时的当前档位。
 - 人工/人机按用户同时活跃最多 1 条、排队最多 4 条；四类来源合计只占用唯一的全局 slot。
   基础优先级为人工/人机 > 赛事 > 自动，但每 60 秒增加一次无上限 aging，自动请求最终一定能越过
   后续到达的高优先级请求，不会永久饥饿。
@@ -115,7 +128,8 @@ effective   = min(configured, cpu_ceiling) # 始终为 1
 | Traditional | 每个决策点启动并停止 | 每次完整 `requests[]/responses[]` |
 | LongRunning | 整场一个进程 | 首回合完整历史；精确握手后为单 `request` |
 
-上传预检与正式首回合使用同一模式、同一信封、同一 response 校验。LongRunning 未在
+上传预检与正式首回合使用同一模式、同一信封、同一 response 校验；预检始终使用节能档
+`platform_low`（1 CPU / 512 MiB），不会占用赛事档。LongRunning 未在
 握手时间窗内输出固定字符串即技术负，runner 不切换模式。详见[协议规范](#/wiki?slug=protocol)。
 
 ## 德州牌型参考
@@ -186,11 +200,17 @@ Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的区间
 
 ### 旧库迁移与 schema 幂等边界
 
-- Store 迁移新增 `execution_jobs`、`execution_job_attempts`、`execution_control`。旧自动队列的 queued
+- Store 迁移新增 `execution_jobs`、`execution_job_attempts`、`execution_control`、`local_ai_agents` 与
+  `local_ai_leases`。队列表重建时为每个 job 增加双方环境、本地 agent 引用、sandbox/CPU/内存与
+  `profile_version` 冻结快照；保留全部 job/attempt ID 和生命周期。既有任务按历史 v0 迁为节能沙箱，
+  人机的真人位置保持 0 sandbox unit；不回填 token 或把历史任务推断为用户端本地 Bot。旧自动队列的 queued
   记录转换为 `source=auto,status=queued`；旧 active/dispatched 若无法证明旧 worker 与容器已停止，
   会转为仍占容量的 `settling` attempt，并把 control 置为 `paused`、写入 `manual:` 原因。普通重启不得
   自动跨越该人工确认边界：运维必须先证明旧平台/容器已停，再从管理端恢复以执行当前 instance 的
   精确 label 清场。
+- `local_ai_agents` 只保存连接 token 的 SHA-256 与短提示；新 token 只在创建/轮换响应中出现一次。
+  `local_ai_leases` 记录 agent 与 job/attempt/位置的占用和释放。服务启动时只有取得 dispatcher flock 的
+  唯一 owner 才能清除上个进程遗留的在线态并释放活跃租约，未取得 flock 的实例不得写这些临时状态。
 - 迁移先校验旧 row/decision/状态映射的一致性，任何歧义 fail closed；成功映射后才删除已退役的
   `auto_match_queue`、`auto_match_control`、`auto_match_dispatcher`、daily claims 和旧 runtime/auto KV。
   这些名称只描述迁移来源，不是现行队列或开关；现行唯一自动开关为

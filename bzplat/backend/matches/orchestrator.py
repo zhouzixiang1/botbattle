@@ -38,6 +38,10 @@ from bzplat.backend.runtime.binary_runner import (
     PlatformRunnerError,
     SandboxControlUncertain,
 )
+from bzplat.backend.runtime.limits import (
+    LEGACY_EXECUTION_RESOURCE_PROFILE_VERSION,
+    execution_resource_snapshot,
+)
 from bzplat.backend.store import Store
 from bzplat.backend.store.public_contract import (
     canonical_public_completed_reason,
@@ -57,6 +61,9 @@ from bzplat.backend.store.schema import (
     TYPE_CHALLENGE,
     TYPE_CONTEST,
     TYPE_HUMAN,
+    EXECUTION_ENV_HUMAN,
+    EXECUTION_ENV_PLATFORM_LOW,
+    EXECUTION_ENV_REMOTE_LOCAL,
     EXECUTION_SOURCE_CONTEST,
     EXECUTION_SOURCE_HUMAN,
     EXECUTION_SOURCE_MANUAL,
@@ -70,6 +77,27 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _frozen_execution_profile_version(
+    match_config: dict[str, Any],
+    environments: tuple[str, ...],
+) -> int:
+    """Validate and return the profile version frozen into a Match.
+
+    Matches created before durable execution profiles existed contain neither
+    key and use the v0/low-only contract. New execution attempts must copy the
+    job's exact version into ``_execution_profile_version`` at claim time.
+    """
+
+    raw = match_config.get(
+        "_execution_profile_version",
+        LEGACY_EXECUTION_RESOURCE_PROFILE_VERSION,
+    )
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError("_execution_profile_version 必须是整数")
+    execution_resource_snapshot(environments, raw)
+    return raw
 
 
 def _technical_incident_event(exc: BotTechnicalError) -> dict:
@@ -599,6 +627,10 @@ class MatchOrchestrator:
         game_id: str | None = None,
         bot_a_version_id: int | None = None,
         bot_b_version_id: int | None = None,
+        bot_a_environment: str = EXECUTION_ENV_PLATFORM_LOW,
+        bot_b_environment: str = EXECUTION_ENV_PLATFORM_LOW,
+        bot_a_local_agent_id: int | None = None,
+        bot_b_local_agent_id: int | None = None,
         duplicate: bool = False,
         duplicate_seed: int | None = None,
         contest_pairing_id: int | None = None,
@@ -611,10 +643,22 @@ class MatchOrchestrator:
         bot_b = self.store.get_bot(opponent_bot_id)
         if not bot_a or not bot_b:
             raise ValueError("bot 不存在")
-        if not bot_a.get("is_active") or not bot_a.get("binary_path"):
-            raise ValueError("座位0 bot 不可用")
-        if not bot_b.get("is_active") or not bot_b.get("binary_path"):
-            raise ValueError("座位1 bot 不可用")
+        environments = (str(bot_a_environment), str(bot_b_environment))
+        if any(
+            item not in {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_REMOTE_LOCAL}
+            for item in environments
+        ):
+            raise ValueError("日常挑战只允许节能沙箱或本地 Bot")
+        if not bot_a.get("is_active") or (
+            environments[0] == EXECUTION_ENV_PLATFORM_LOW
+            and not bot_a.get("binary_path")
+        ):
+            raise ValueError("先手 Bot 当前不可用")
+        if not bot_b.get("is_active") or (
+            environments[1] == EXECUTION_ENV_PLATFORM_LOW
+            and not bot_b.get("binary_path")
+        ):
+            raise ValueError("后手 Bot 当前不可用")
         ga = normalize_game_id(bot_a.get("game_id"))
         gb = normalize_game_id(bot_b.get("game_id"))
         if ga != gb:
@@ -631,12 +675,26 @@ class MatchOrchestrator:
 
         # 自博弈同 bot 同版本时，座位区分（seat 0/1）即可，不阻拦。显式 ID
         # 仍严格校验归属；None 则在此刻解析当前激活版本，而非推迟到 runner 启动。
-        version_a = self._snapshot_bot_version(
-            challenger_bot_id, bot_a_version_id, seat_label="座位0"
-        )
-        version_b = self._snapshot_bot_version(
-            opponent_bot_id, bot_b_version_id, seat_label="座位1"
-        )
+        if environments[0] == EXECUTION_ENV_REMOTE_LOCAL:
+            if bot_a_version_id is not None or bot_a_local_agent_id is None:
+                raise ValueError("本地 Bot 先手须选择连接，且不能指定上传版本")
+            version_a = None
+        else:
+            if bot_a_local_agent_id is not None:
+                raise ValueError("节能沙箱先手不能绑定本地连接")
+            version_a = self._snapshot_bot_version(
+                challenger_bot_id, bot_a_version_id, seat_label="先手"
+            )
+        if environments[1] == EXECUTION_ENV_REMOTE_LOCAL:
+            if bot_b_version_id is not None or bot_b_local_agent_id is None:
+                raise ValueError("本地 Bot 后手须选择连接，且不能指定上传版本")
+            version_b = None
+        else:
+            if bot_b_local_agent_id is not None:
+                raise ValueError("节能沙箱后手不能绑定本地连接")
+            version_b = self._snapshot_bot_version(
+                opponent_bot_id, bot_b_version_id, seat_label="后手"
+            )
 
         # 游戏规则参数（手数/棋盘/点阵）已由 GameSpec 钉死固定值，不再走 match_config。
         # match_config 仅保留版本快照等内部键（_run_match 读 _bot_a/b_version_id 解析版本路径）。
@@ -645,6 +703,8 @@ class MatchOrchestrator:
         spec = game_registry.get(gid)
         if duplicate and spec.build_match_plan is None:
             raise ValueError(f"游戏 {gid} 不支持 duplicate 对局")
+        if duplicate and EXECUTION_ENV_REMOTE_LOCAL in set(environments):
+            raise ValueError("本地 Bot 仅用于单场练习，不能使用复式赛制")
         mc: dict[str, Any] = {}
         if version_a is not None:
             mc["_bot_a_version_id"] = int(version_a["id"])
@@ -669,6 +729,10 @@ class MatchOrchestrator:
             bot_b_id=opponent_bot_id,
             bot_a_version_id=(int(version_a["id"]) if version_a else None),
             bot_b_version_id=(int(version_b["id"]) if version_b else None),
+            bot_a_environment=environments[0],
+            bot_b_environment=environments[1],
+            bot_a_local_agent_id=bot_a_local_agent_id,
+            bot_b_local_agent_id=bot_b_local_agent_id,
             match_config=mc,
             contest_id=contest_id,
             contest_pairing_id=contest_pairing_id,
@@ -1163,6 +1227,59 @@ class MatchOrchestrator:
             except Exception:
                 stored_mc = {}
         want_duplicate = bool(stored_mc.get("duplicate"))
+        environments = (
+            str(
+                stored_mc.get("_bot_a_environment")
+                or EXECUTION_ENV_PLATFORM_LOW
+            ),
+            str(
+                stored_mc.get("_bot_b_environment")
+                or EXECUTION_ENV_PLATFORM_LOW
+            ),
+        )
+        local_agent_public_ids = (
+            stored_mc.get("_bot_a_local_agent_public_id"),
+            stored_mc.get("_bot_b_local_agent_public_id"),
+        )
+        local_agent_generations = (
+            stored_mc.get("_bot_a_local_agent_generation"),
+            stored_mc.get("_bot_b_local_agent_generation"),
+        )
+        frozen_local_agent_public_ids: list[str | None] = [None, None]
+        try:
+            execution_profile_version = _frozen_execution_profile_version(
+                stored_mc, environments
+            )
+            for seat, environment in enumerate(environments):
+                if environment != EXECUTION_ENV_REMOTE_LOCAL:
+                    continue
+                public_id = str(local_agent_public_ids[seat] or "").strip()
+                generation = local_agent_generations[seat]
+                if (
+                    not public_id
+                    or isinstance(generation, bool)
+                    or not isinstance(generation, int)
+                    or generation < 0
+                ):
+                    raise ValueError("本地 Bot 对局缺少冻结连接身份")
+                frozen_local_agent_public_ids[seat] = public_id
+        except ValueError as exc:
+            logger.error(
+                "match %s has invalid frozen execution profile: %s",
+                match_id,
+                exc,
+            )
+            self._update_match_owned(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_match_config",
+                winner=None,
+                ended_at=_now(),
+            )
+            terminal_event = _authoritative_error("invalid_match_config")
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._broadcast(match_id, terminal_event)
+            return
         if want_duplicate and spec.build_match_plan is None:
             logger.error("match %s has unsupported duplicate config for %s", match_id, gid)
             self._update_match_owned(
@@ -1225,16 +1342,38 @@ class MatchOrchestrator:
                 )
 
         try:
-            path_a, mode_a = self._runtime_for_bot_version(
+            def runtime_for_seat(
+                bot: dict,
+                version_id: int | None,
+                *,
+                seat: int,
+            ) -> tuple[str | None, str, str | None]:
+                if environments[seat] == EXECUTION_ENV_REMOTE_LOCAL:
+                    # Claim freezes the transport identity, not merely the
+                    # reusable local_ai_agents row id.  Never resolve that row
+                    # here: revoke + same-label recreation may bind it to a
+                    # different Bot and public id before this task starts.
+                    public_id = frozen_local_agent_public_ids[seat]
+                    if public_id is None:  # pragma: no cover - guarded above
+                        raise ValueError("本地 Bot 对局缺少冻结连接身份")
+                    return None, DEFAULT_RUNTIME_MODE, public_id
+                path, mode = self._runtime_for_bot_version(
+                    bot, version_id, seat=seat
+                )
+                return path, mode, None
+
+            path_a, mode_a, local_agent_a = runtime_for_seat(
                 bot_a, version_a_id, seat=0
             )
-            path_b, mode_b = self._runtime_for_bot_version(
+            path_b, mode_b, local_agent_b = runtime_for_seat(
                 bot_b, version_b_id, seat=1
             )
             logger.info(
-                "match start id=%s game=%s type=%s a=%s(%s) b=%s(%s) duplicate=%s",
+                "match start id=%s game=%s type=%s a=%s(%s,%s) "
+                "b=%s(%s,%s) duplicate=%s",
                 match_id, gid, m.get("match_type"),
-                m["bot_a_id"], bot_a.get("name"), m["bot_b_id"], bot_b.get("name"),
+                m["bot_a_id"], bot_a.get("name"), environments[0],
+                m["bot_b_id"], bot_b.get("name"), environments[1],
                 want_duplicate,
             )
             self._update_match_owned(
@@ -1249,6 +1388,8 @@ class MatchOrchestrator:
                     on_debug=on_debug,
                     seed=dup_seed,
                     runtime_modes=(mode_a, mode_b),
+                    execution_environments=environments,
+                    execution_profile_version=execution_profile_version,
                     time_budget_per_side=spec.time_budget_per_side,
                     execution_scope=execution_scope,
                     duplicate=True,
@@ -1261,6 +1402,10 @@ class MatchOrchestrator:
                     on_event=on_event,
                     on_debug=on_debug,
                     runtime_modes=(mode_a, mode_b),
+                    execution_environments=environments,
+                    execution_profile_version=execution_profile_version,
+                    local_agent_ids=(local_agent_a, local_agent_b),
+                    match_id=match_id,
                     time_budget_per_side=spec.time_budget_per_side,
                     execution_scope=execution_scope,
                 )
@@ -1315,9 +1460,10 @@ class MatchOrchestrator:
             )
             self._broadcast(match_id, terminal_event)
             logger.info(
-                "match done id=%s winner=%s rounds=%s ea=%s eb=%s rated=%s",
+                "match done id=%s winner=%s rounds=%s ea=%s eb=%s "
+                "rating_eligible=%s",
                 match_id, winner, result.rounds_played, ea, eb,
-                m["match_type"] != TYPE_CONTEST,
+                bool(m.get("rated")),
             )
         except BotVersionUnavailableError as exc:
             self._abort_version_unavailable(match_id, exc, events)
@@ -1820,6 +1966,47 @@ class MatchOrchestrator:
             version_id = stored_mc.get(
                 "_bot_a_version_id" if bot_seat == 0 else "_bot_b_version_id"
             )
+            environments = (
+                str(
+                    stored_mc.get("_bot_a_environment")
+                    or (
+                        EXECUTION_ENV_PLATFORM_LOW
+                        if bot_seat == 0
+                        else EXECUTION_ENV_HUMAN
+                    )
+                ),
+                str(
+                    stored_mc.get("_bot_b_environment")
+                    or (
+                        EXECUTION_ENV_PLATFORM_LOW
+                        if bot_seat == 1
+                        else EXECUTION_ENV_HUMAN
+                    )
+                ),
+            )
+            try:
+                if environments[human_seat] != EXECUTION_ENV_HUMAN:
+                    raise ValueError("人类座位的执行环境必须是 human")
+                execution_profile_version = _frozen_execution_profile_version(
+                    stored_mc, environments
+                )
+            except ValueError as exc:
+                logger.error(
+                    "human match %s has invalid frozen execution profile: %s",
+                    match_id,
+                    exc,
+                )
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_ABORTED,
+                    reason="invalid_match_config",
+                    winner=None,
+                    ended_at=_now(),
+                )
+                terminal_event = _authoritative_error("invalid_match_config")
+                self._safe_flush_terminal_replay(match_id, [], terminal_event)
+                self._broadcast(match_id, terminal_event)
+                return
             events: list[dict] = []
             self._active_replay_events[match_id] = events
             try:
@@ -1890,6 +2077,8 @@ class MatchOrchestrator:
                     game_id=gid,
                     on_event=on_event,
                     runtime_mode=bot_mode,
+                    execution_environment=environments[bot_seat],
+                    execution_profile_version=execution_profile_version,
                     time_budget_per_side=spec.time_budget_per_side,
                     execution_scope=execution_scope,
                 )

@@ -39,6 +39,9 @@ from .schema import (
     CONTEST_RUNNING,
     DEFAULT_RUNTIME_MODE,
     MATCH_RATING_SETTLEMENTS_MIGRATION_SENTINEL,
+    LOCAL_AI_MAX_ACTIVE_AGENTS_PER_OWNER,
+    LOCAL_AI_MAX_ONLINE_GLOBAL,
+    LOCAL_AI_MAX_ONLINE_PER_OWNER,
     PUBLIC_MATCH_COMPLETED_REASONS,
     PUBLIC_MATCH_ERROR_FALLBACK,
     PUBLIC_MATCH_ERROR_REASONS,
@@ -98,6 +101,10 @@ class _RatingProjectionMutationGuard:
     """
 
     trusted_before: bool
+
+
+class LocalAIAgentBusyError(ValueError):
+    """A credential mutation would interrupt an active execution lease."""
 
 
 def _now() -> str:
@@ -1588,6 +1595,123 @@ def _ensure_rating_settlement_sequence(conn: sqlite3.Connection) -> None:
     _install_rating_source_guards(conn)
 
 
+def _schema_create_table_sql(table: str, *, as_name: str | None = None) -> str:
+    """Return one canonical CREATE TABLE statement from ``schema.SCHEMA``.
+
+    Execution jobs carry several coupled CHECK constraints.  Reusing the fresh
+    schema text keeps an upgraded database byte-for-byte aligned with a new one
+    instead of maintaining a second hand-copied definition in migrations.
+    """
+    marker = f"CREATE TABLE IF NOT EXISTS {table} ("
+    start = SCHEMA.find(marker)
+    if start < 0:
+        raise RuntimeError(f"SCHEMA missing table definition: {table}")
+    end = SCHEMA.find("\n);", start)
+    if end < 0:
+        raise RuntimeError(f"SCHEMA has unterminated table definition: {table}")
+    statement = SCHEMA[start : end + 3]
+    if as_name is not None:
+        statement = statement.replace(marker, f"CREATE TABLE {as_name} (", 1)
+    return statement
+
+
+def _ensure_execution_environment_schema(conn: sqlite3.Connection) -> None:
+    """Upgrade the durable queue to frozen per-seat execution environments.
+
+    SQLite cannot relax the old ``sandbox_units IN (1,2)`` / human-only CHECK
+    in place.  Rebuild the parent and its sole FK child in one Store transaction,
+    preserving every id and attempt.  Existing work is canonical low Docker;
+    the human seat remains non-Bot and therefore consumes no sandbox resource.
+    """
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "execution_jobs" not in tables:
+        return
+    expected = {
+        "bot_a_environment",
+        "bot_b_environment",
+        "bot_a_local_agent_id",
+        "bot_b_local_agent_id",
+        "host_cpu_millis",
+        "host_memory_mb",
+        "profile_version",
+    }
+    if expected.issubset(_table_cols(conn, "execution_jobs")):
+        return
+
+    attempts_exist = "execution_job_attempts" in tables
+    if attempts_exist:
+        conn.execute(
+            "CREATE TEMP TABLE execution_job_attempts_env_backup AS "
+            "SELECT * FROM execution_job_attempts"
+        )
+        conn.execute("DROP TABLE execution_job_attempts")
+
+    conn.execute(_schema_create_table_sql("execution_jobs", as_name="execution_jobs_env_new"))
+    conn.execute(
+        "INSERT INTO execution_jobs_env_new("
+        "id,public_id,source,status,priority,owner_user_id,game_id,match_type,"
+        "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,"
+        "bot_a_environment,bot_b_environment,bot_a_local_agent_id,"
+        "bot_b_local_agent_id,human_user_id,human_seat,contest_id,"
+        "contest_pairing_id,match_config,rated,rating_reason,match_slots,"
+        "sandbox_units,host_cpu_millis,host_memory_mb,profile_version,"
+        "current_match_id,auto_decision_id,cancel_requested,attempt_count,"
+        "cleanup_state,failure_count,next_attempt_at,retryable,terminal_reason,"
+        "last_error,created_at,claimed_at,started_at,settling_at,terminal_at) "
+        "SELECT id,public_id,source,status,priority,owner_user_id,game_id,match_type,"
+        "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,"
+        "CASE WHEN source='human' AND human_seat=0 THEN 'human' "
+        "     ELSE 'platform_low' END,"
+        "CASE WHEN source='human' AND human_seat=1 THEN 'human' "
+        "     ELSE 'platform_low' END,NULL,NULL,human_user_id,human_seat,contest_id,"
+        "contest_pairing_id,match_config,rated,rating_reason,match_slots,"
+        "sandbox_units,sandbox_units*1000,sandbox_units*512,0,current_match_id,"
+        "auto_decision_id,cancel_requested,attempt_count,cleanup_state,"
+        "failure_count,next_attempt_at,retryable,terminal_reason,last_error,"
+        "created_at,claimed_at,started_at,settling_at,terminal_at "
+        "FROM execution_jobs"
+    )
+    conn.execute("DROP TABLE execution_jobs")
+    conn.execute("ALTER TABLE execution_jobs_env_new RENAME TO execution_jobs")
+
+    if attempts_exist:
+        conn.execute(_schema_create_table_sql("execution_job_attempts"))
+        conn.execute(
+            "INSERT INTO execution_job_attempts("
+            "id,job_id,attempt_no,match_id,status,events_observed,created_at,"
+            "started_at,terminal_at,terminal_reason) "
+            "SELECT id,job_id,attempt_no,match_id,status,events_observed,created_at,"
+            "started_at,terminal_at,terminal_reason "
+            "FROM execution_job_attempts_env_backup"
+        )
+        conn.execute("DROP TABLE execution_job_attempts_env_backup")
+
+    conn.execute(
+        "CREATE INDEX idx_execution_jobs_dispatch "
+        "ON execution_jobs(status,priority,created_at,id)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_execution_jobs_owner "
+        "ON execution_jobs(owner_user_id,status,created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_execution_jobs_source "
+        "ON execution_jobs(source,status,created_at)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_execution_jobs_current_match "
+        "ON execution_jobs(current_match_id) WHERE current_match_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_execution_jobs_active_contest_pairing "
+        "ON execution_jobs(contest_pairing_id) WHERE contest_pairing_id IS NOT NULL "
+        "AND status IN ('queued','starting','running','settling')"
+    )
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """为已有库补列；必要时重建 contests 以放宽 status CHECK。"""
     tables = {
@@ -2783,6 +2907,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     if "execution_jobs" in tables_now:
+        _ensure_execution_environment_schema(conn)
         _add_col(
             conn,
             "execution_jobs",
@@ -2873,15 +2998,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
             terminal_reason = ""
             migration_error = "legacy_execution_unscoped" if is_active else ""
             conn.execute(
-                "INSERT OR IGNORE INTO execution_jobs("
+                "INSERT INTO execution_jobs("
                 "public_id,source,status,priority,owner_user_id,game_id,match_type,"
-                "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,match_config,"
-                "rated,rating_reason,match_slots,sandbox_units,current_match_id,"
+                "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,"
+                "bot_a_environment,bot_b_environment,bot_a_local_agent_id,"
+                "bot_b_local_agent_id,match_config,rated,rating_reason,match_slots,"
+                "sandbox_units,host_cpu_millis,host_memory_mb,profile_version,"
+                "current_match_id,"
                 "auto_decision_id,cancel_requested,attempt_count,cleanup_state,"
                 "retryable,terminal_reason,last_error,created_at,claimed_at,"
                 "settling_at,terminal_at) "
-                "VALUES(?, 'auto', ?, 10, NULL, ?, 'ladder', ?, ?, ?, ?, '{}',"
-                "1,'eligible',1,2,?,?,0,?,? ,?,?,?, ?,?,?,?)",
+                "VALUES(?, 'auto', ?, 10, NULL, ?, 'ladder', ?, ?, ?, ?, "
+                "'platform_low','platform_low',NULL,NULL,'{}',1,'eligible',1,"
+                "2,2000,1024,0,?,?,0,?,? ,?,?,?, ?,?,?,?) "
+                "ON CONFLICT(public_id) DO NOTHING",
                 (
                     public_id,
                     status,
@@ -3424,9 +3554,27 @@ class Store:
         sets = [f"{k}=?" for k in fields if k in allowed]
         vals = [v for k, v in fields.items() if k in allowed]
         with self._tx() as c:
+            disabling = "is_active" in fields and not bool(fields["is_active"])
+            if disabling:
+                c.execute("BEGIN IMMEDIATE")
             if sets:
                 vals.append(user_id)
                 c.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", vals)
+            if disabling:
+                now = _now()
+                c.execute(
+                    "UPDATE local_ai_agents SET status='revoked',"
+                    "connection_generation=connection_generation+1,connected_at=NULL,"
+                    "disconnected_at=?,updated_at=? WHERE owner_id=? "
+                    "AND status='active'",
+                    (now, now, int(user_id)),
+                )
+                c.execute(
+                    "UPDATE local_ai_leases SET status='released',released_at=?,"
+                    "terminal_reason='owner_disabled' WHERE status='active' "
+                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE owner_id=?)",
+                    (now, int(user_id)),
+                )
             return _row(
                 c.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             )
@@ -3671,6 +3819,466 @@ class Store:
 
     # ── bots ──────────────────────────────────────────────────
 
+    def create_local_ai_agent(
+        self,
+        *,
+        owner_id: int,
+        bot_id: int,
+        label: str,
+        public_id: str,
+        token_hash: str,
+        token_hint: str,
+    ) -> dict:
+        """Bind one outbound local-AI connection identity to an owned Bot."""
+        clean_label = str(label or "").strip()
+        if not 2 <= len(clean_label) <= 32:
+            raise ValueError("本地 Bot 名称须为 2–32 个字符")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            bot = c.execute(
+                "SELECT b.id,b.owner_id,b.game_id,b.is_active,"
+                "u.is_active AS owner_active FROM bots b "
+                "JOIN users u ON u.id=b.owner_id WHERE b.id=?",
+                (int(bot_id),),
+            ).fetchone()
+            if bot is None or int(bot["owner_id"]) != int(owner_id):
+                raise ValueError("只能为自己的 Bot 建立本地连接")
+            if int(bot["is_active"] or 0) != 1:
+                raise ValueError("请先启用这个 Bot")
+            if int(bot["owner_active"] or 0) != 1:
+                raise ValueError("账号已停用，不能创建本地 Bot 接入")
+            active_count = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM local_ai_agents "
+                    "WHERE owner_id=? AND status='active'",
+                    (int(owner_id),),
+                ).fetchone()[0]
+            )
+            if active_count >= LOCAL_AI_MAX_ACTIVE_AGENTS_PER_OWNER:
+                raise ValueError(
+                    f"每个账号最多保留 {LOCAL_AI_MAX_ACTIVE_AGENTS_PER_OWNER} "
+                    "个本地 Bot 接入，请先撤销不用的接入"
+                )
+            existing_label = c.execute(
+                "SELECT id,status FROM local_ai_agents "
+                "WHERE owner_id=? AND label=?",
+                (int(owner_id), clean_label),
+            ).fetchone()
+            if existing_label is not None:
+                if str(existing_label["status"] or "") != "revoked":
+                    raise ValueError("本地 Bot 名称已存在")
+                changed = c.execute(
+                    "UPDATE local_ai_agents SET public_id=?,bot_id=?,game_id=?,"
+                    "token_hash=?,token_hint=?,status='active',"
+                    "connection_generation=connection_generation+1,"
+                    "connected_at=NULL,disconnected_at=NULL,last_seen_at=NULL,"
+                    "created_at=?,updated_at=? WHERE id=? AND status='revoked'",
+                    (
+                        public_id,
+                        int(bot_id),
+                        str(bot["game_id"]),
+                        token_hash,
+                        token_hint,
+                        _now(),
+                        _now(),
+                        int(existing_label["id"]),
+                    ),
+                )
+                if changed.rowcount != 1:  # pragma: no cover - transaction guard
+                    raise RuntimeError("本地 Bot 接入复用失败")
+                return _row(
+                    c.execute(
+                        "SELECT * FROM local_ai_agents WHERE id=?",
+                        (int(existing_label["id"]),),
+                    ).fetchone()
+                )
+            try:
+                cur = c.execute(
+                    "INSERT INTO local_ai_agents("
+                    "public_id,owner_id,bot_id,label,game_id,token_hash,token_hint,"
+                    "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'active',?,?)",
+                    (
+                        public_id,
+                        int(owner_id),
+                        int(bot_id),
+                        clean_label,
+                        str(bot["game_id"]),
+                        token_hash,
+                        token_hint,
+                        _now(),
+                        _now(),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("本地 Bot 名称已存在") from exc
+            return _row(
+                c.execute(
+                    "SELECT * FROM local_ai_agents WHERE id=?", (cur.lastrowid,)
+                ).fetchone()
+            )
+
+    def list_local_ai_agents(self, owner_id: int) -> list[dict]:
+        with self._tx() as c:
+            return [
+                _row(row)
+                for row in c.execute(
+                    "SELECT a.*,b.name AS bot_name,b.display_name AS bot_display_name,"
+                    "b.is_active AS bot_active,u.is_active AS owner_active "
+                    "FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
+                    "JOIN users u ON u.id=a.owner_id WHERE a.owner_id=? "
+                    "ORDER BY a.status='active' DESC,a.updated_at DESC,a.id DESC",
+                    (int(owner_id),),
+                )
+            ]
+
+    def list_local_ai_agents_admin(
+        self, *, page: int = 1, per_page: int = 20
+    ) -> dict:
+        """Return connection metadata for operators, never credential hashes."""
+        normalized_page = max(1, int(page))
+        normalized_per_page = max(1, min(100, int(per_page)))
+        with self._tx() as c:
+            total = int(c.execute("SELECT COUNT(*) FROM local_ai_agents").fetchone()[0])
+            items = [
+                _row(row)
+                for row in c.execute(
+                    "SELECT a.id,a.public_id,a.owner_id,a.bot_id,a.label,a.game_id,"
+                    "a.status,a.connected_at,a.disconnected_at,a.last_seen_at,"
+                    "a.created_at,a.updated_at,b.name AS bot_name,"
+                    "b.display_name AS bot_display_name,b.is_active AS bot_active,"
+                    "u.username AS owner_name,u.display_name AS owner_display_name,"
+                    "u.is_active AS owner_active "
+                    "FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
+                    "JOIN users u ON u.id=a.owner_id "
+                    "ORDER BY a.status='active' DESC,a.updated_at DESC,a.id DESC "
+                    "LIMIT ? OFFSET ?",
+                    (
+                        normalized_per_page,
+                        (normalized_page - 1) * normalized_per_page,
+                    ),
+                )
+            ]
+            return {
+                "items": items,
+                "total": total,
+                "page": normalized_page,
+                "per_page": normalized_per_page,
+            }
+
+    def get_local_ai_agent(self, agent_id: int) -> dict | None:
+        with self._tx() as c:
+            return _row(
+                c.execute(
+                    "SELECT a.*,b.name AS bot_name,b.display_name AS bot_display_name,"
+                    "b.is_active AS bot_active,u.is_active AS owner_active "
+                    "FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
+                    "JOIN users u ON u.id=a.owner_id WHERE a.id=?",
+                    (int(agent_id),),
+                ).fetchone()
+            )
+
+    def has_active_local_ai_lease(self, agent_id: int) -> bool:
+        """Return whether one execution owns this agent between decisions."""
+        with self._tx() as c:
+            return c.execute(
+                "SELECT 1 FROM local_ai_leases WHERE agent_id=? "
+                "AND status='active' LIMIT 1",
+                (int(agent_id),),
+            ).fetchone() is not None
+
+    def get_local_ai_agent_by_public_id(self, public_id: str) -> dict | None:
+        with self._tx() as c:
+            return _row(
+                c.execute(
+                    "SELECT a.*,b.name AS bot_name,b.display_name AS bot_display_name,"
+                    "b.is_active AS bot_active,u.is_active AS owner_active "
+                    "FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
+                    "JOIN users u ON u.id=a.owner_id WHERE a.public_id=?",
+                    (str(public_id),),
+                ).fetchone()
+            )
+
+    def get_local_ai_agent_by_token_hash(self, token_hash: str) -> dict | None:
+        with self._tx() as c:
+            return _row(
+                c.execute(
+                    "SELECT a.*,b.name AS bot_name,b.display_name AS bot_display_name,"
+                    "b.is_active AS bot_active,u.is_active AS owner_active "
+                    "FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
+                    "JOIN users u ON u.id=a.owner_id WHERE a.token_hash=?",
+                    (str(token_hash),),
+                ).fetchone()
+            )
+
+    def rotate_local_ai_agent_token(
+        self,
+        agent_id: int,
+        owner_id: int,
+        *,
+        public_id: str,
+        token_hash: str,
+        token_hint: str,
+    ) -> dict | None:
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if c.execute(
+                "SELECT 1 FROM local_ai_leases WHERE agent_id=? "
+                "AND status='active' LIMIT 1",
+                (int(agent_id),),
+            ).fetchone() is not None:
+                raise LocalAIAgentBusyError(
+                    "本地 Bot 正在对局，结束并释放占用后才能更换令牌"
+                )
+            changed = c.execute(
+                "UPDATE local_ai_agents SET public_id=?,token_hash=?,token_hint=?,"
+                "connection_generation=connection_generation+1,connected_at=NULL,"
+                "disconnected_at=?,last_seen_at=NULL,updated_at=? "
+                "WHERE id=? AND owner_id=? AND status='active'",
+                (
+                    str(public_id), token_hash, token_hint, _now(), _now(),
+                    int(agent_id), int(owner_id),
+                ),
+            )
+            if changed.rowcount != 1:
+                return None
+            return _row(
+                c.execute("SELECT * FROM local_ai_agents WHERE id=?", (agent_id,)).fetchone()
+            )
+
+    def revoke_local_ai_agent(self, agent_id: int, owner_id: int) -> bool:
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            now = _now()
+            changed = c.execute(
+                "UPDATE local_ai_agents SET status='revoked',"
+                "connection_generation=connection_generation+1,connected_at=NULL,"
+                "disconnected_at=?,updated_at=? WHERE id=? AND owner_id=? "
+                "AND status='active'",
+                (now, now, int(agent_id), int(owner_id)),
+            )
+            c.execute(
+                "UPDATE local_ai_leases SET status='released',released_at=?,"
+                "terminal_reason='agent_revoked' WHERE agent_id=? AND status='active'",
+                (now, int(agent_id)),
+            )
+            return changed.rowcount == 1
+
+    def revoke_local_ai_agent_admin(self, agent_id: int) -> bool:
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            now = _now()
+            changed = c.execute(
+                "UPDATE local_ai_agents SET status='revoked',"
+                "connection_generation=connection_generation+1,connected_at=NULL,"
+                "disconnected_at=?,updated_at=? WHERE id=? AND status='active'",
+                (now, now, int(agent_id)),
+            )
+            c.execute(
+                "UPDATE local_ai_leases SET status='released',released_at=?,"
+                "terminal_reason='admin_revoked' WHERE agent_id=? AND status='active'",
+                (now, int(agent_id)),
+            )
+            return changed.rowcount == 1
+
+    def connect_local_ai_agent(
+        self, agent_id: int, *, expected_public_id: str
+    ) -> dict | None:
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            now = _now()
+            candidate = c.execute(
+                "SELECT a.owner_id,a.status,b.is_active AS bot_active,"
+                "u.is_active AS owner_active FROM local_ai_agents a "
+                "JOIN bots b ON b.id=a.bot_id JOIN users u ON u.id=a.owner_id "
+                "WHERE a.id=? AND a.public_id=?",
+                (int(agent_id), str(expected_public_id)),
+            ).fetchone()
+            if (
+                candidate is None
+                or str(candidate["status"] or "") != "active"
+                or int(candidate["bot_active"] or 0) != 1
+                or int(candidate["owner_active"] or 0) != 1
+            ):
+                return None
+            owner_online = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM local_ai_agents "
+                    "WHERE owner_id=? AND status='active' "
+                    "AND connected_at IS NOT NULL AND disconnected_at IS NULL",
+                    (int(candidate["owner_id"]),),
+                ).fetchone()[0]
+            )
+            global_online = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM local_ai_agents WHERE status='active' "
+                    "AND connected_at IS NOT NULL AND disconnected_at IS NULL"
+                ).fetchone()[0]
+            )
+            if owner_online >= LOCAL_AI_MAX_ONLINE_PER_OWNER:
+                raise ValueError(
+                    f"每个账号最多同时在线 {LOCAL_AI_MAX_ONLINE_PER_OWNER} 个本地 Bot"
+                )
+            if global_online >= LOCAL_AI_MAX_ONLINE_GLOBAL:
+                raise ValueError("平台本地 Bot 在线连接已满，请稍后重试")
+            changed = c.execute(
+                "UPDATE local_ai_agents SET connection_generation=connection_generation+1,"
+                "connected_at=?,disconnected_at=NULL,last_seen_at=?,updated_at=? "
+                "WHERE id=? AND public_id=? AND status='active'",
+                (now, now, now, int(agent_id), str(expected_public_id)),
+            )
+            if changed.rowcount != 1:
+                return None
+            return _row(
+                c.execute("SELECT * FROM local_ai_agents WHERE id=?", (agent_id,)).fetchone()
+            )
+
+    def touch_local_ai_agent(self, agent_id: int, generation: int) -> bool:
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            authorized = c.execute(
+                "SELECT 1 FROM local_ai_agents a "
+                "JOIN bots b ON b.id=a.bot_id JOIN users u ON u.id=a.owner_id "
+                "WHERE a.id=? AND a.status='active' "
+                "AND a.connection_generation=? AND a.connected_at IS NOT NULL "
+                "AND a.disconnected_at IS NULL AND b.is_active=1 AND u.is_active=1",
+                (int(agent_id), int(generation)),
+            ).fetchone()
+            if authorized is None:
+                return False
+            now = _now()
+            return c.execute(
+                "UPDATE local_ai_agents AS a SET last_seen_at=?,updated_at=? "
+                "WHERE id=? AND status='active' AND connection_generation=? "
+                "AND connected_at IS NOT NULL AND disconnected_at IS NULL",
+                (now, now, int(agent_id), int(generation)),
+            ).rowcount == 1
+
+    def local_ai_connection_still_authorized(
+        self, agent_id: int, generation: int
+    ) -> bool:
+        """Revalidate a live socket against current owner/Bot state."""
+
+        with self._tx() as c:
+            return c.execute(
+                "SELECT 1 FROM local_ai_agents a "
+                "JOIN bots b ON b.id=a.bot_id JOIN users u ON u.id=a.owner_id "
+                "WHERE a.id=? AND a.status='active' "
+                "AND a.connection_generation=? AND a.connected_at IS NOT NULL "
+                "AND a.disconnected_at IS NULL AND b.is_active=1 AND u.is_active=1",
+                (int(agent_id), int(generation)),
+            ).fetchone() is not None
+
+    def revoke_local_ai_agents_for_bot(
+        self, bot_id: int, *, reason: str = "bot_disabled"
+    ) -> list[str]:
+        """Atomically revoke all active connector identities for one Bot."""
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            rows = c.execute(
+                "SELECT id,public_id FROM local_ai_agents "
+                "WHERE bot_id=? AND status='active'",
+                (int(bot_id),),
+            ).fetchall()
+            if not rows:
+                return []
+            now = _now()
+            ids = [int(row["id"]) for row in rows]
+            marks = ",".join("?" for _ in ids)
+            c.execute(
+                f"UPDATE local_ai_agents SET status='revoked',"
+                "connection_generation=connection_generation+1,connected_at=NULL,"
+                f"disconnected_at=?,updated_at=? WHERE id IN ({marks})",
+                (now, now, *ids),
+            )
+            c.execute(
+                f"UPDATE local_ai_leases SET status='released',released_at=?,"
+                f"terminal_reason=? WHERE agent_id IN ({marks}) AND status='active'",
+                (now, str(reason)[:200], *ids),
+            )
+            return [str(row["public_id"]) for row in rows]
+
+    def list_active_local_ai_public_ids_for_bot(self, bot_id: int) -> list[str]:
+        with self._tx() as c:
+            return [
+                str(row[0])
+                for row in c.execute(
+                    "SELECT public_id FROM local_ai_agents "
+                    "WHERE bot_id=? AND status='active'",
+                    (int(bot_id),),
+                )
+            ]
+
+    def revoke_local_ai_agents_for_owner(
+        self, owner_id: int, *, reason: str = "owner_disabled"
+    ) -> list[str]:
+        """Atomically revoke all active connector identities for one account."""
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            rows = c.execute(
+                "SELECT id,public_id FROM local_ai_agents "
+                "WHERE owner_id=? AND status='active'",
+                (int(owner_id),),
+            ).fetchall()
+            if not rows:
+                return []
+            now = _now()
+            ids = [int(row["id"]) for row in rows]
+            marks = ",".join("?" for _ in ids)
+            c.execute(
+                f"UPDATE local_ai_agents SET status='revoked',"
+                "connection_generation=connection_generation+1,connected_at=NULL,"
+                f"disconnected_at=?,updated_at=? WHERE id IN ({marks})",
+                (now, now, *ids),
+            )
+            c.execute(
+                f"UPDATE local_ai_leases SET status='released',released_at=?,"
+                f"terminal_reason=? WHERE agent_id IN ({marks}) AND status='active'",
+                (now, str(reason)[:200], *ids),
+            )
+            return [str(row["public_id"]) for row in rows]
+
+    def list_active_local_ai_public_ids_for_owner(
+        self, owner_id: int
+    ) -> list[str]:
+        with self._tx() as c:
+            return [
+                str(row[0])
+                for row in c.execute(
+                    "SELECT public_id FROM local_ai_agents "
+                    "WHERE owner_id=? AND status='active'",
+                    (int(owner_id),),
+                )
+            ]
+
+    def disconnect_local_ai_agent(
+        self, agent_id: int, generation: int
+    ) -> bool:
+        with self._tx() as c:
+            now = _now()
+            return c.execute(
+                "UPDATE local_ai_agents SET disconnected_at=?,updated_at=? "
+                "WHERE id=? AND connection_generation=? AND disconnected_at IS NULL",
+                (now, now, int(agent_id), int(generation)),
+            ).rowcount == 1
+
+    def reset_local_ai_runtime_state(self) -> None:
+        """Fail closed after process restart; no in-memory connection survived."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            now = _now()
+            c.execute(
+                "UPDATE local_ai_agents SET disconnected_at=COALESCE(disconnected_at,?),"
+                "connected_at=NULL,updated_at=? WHERE connected_at IS NOT NULL",
+                (now, now),
+            )
+            c.execute(
+                "UPDATE local_ai_leases SET status='released',released_at=?,"
+                "terminal_reason='service_restart' WHERE status='active'",
+                (now,),
+            )
+
     def create_bot(
         self,
         owner_id: int | None = None,
@@ -3779,12 +4387,27 @@ class Store:
             }.intersection(fields):
                 c.execute("BEGIN IMMEDIATE")
                 projection_guard = self._rating_projection_mutation_guard_tx(c)
+            disabling = "is_active" in fields and not bool(fields["is_active"])
             if sets:
                 if "updated_at" not in fields:
                     sets.append("updated_at=?")
                     vals.append(_now())
                 vals.append(bot_id)
                 c.execute(f"UPDATE bots SET {','.join(sets)} WHERE id=?", vals)
+            if disabling:
+                now = _now()
+                c.execute(
+                    "UPDATE local_ai_agents SET status='revoked',"
+                    "connection_generation=connection_generation+1,connected_at=NULL,"
+                    "disconnected_at=?,updated_at=? WHERE bot_id=? AND status='active'",
+                    (now, now, int(bot_id)),
+                )
+                c.execute(
+                    "UPDATE local_ai_leases SET status='released',released_at=?,"
+                    "terminal_reason='bot_disabled' WHERE status='active' "
+                    "AND agent_id IN (SELECT id FROM local_ai_agents WHERE bot_id=?)",
+                    (now, int(bot_id)),
+                )
             if projection_guard is not None:
                 self._advance_rating_projection_state_tx(c, projection_guard)
             return _row(
