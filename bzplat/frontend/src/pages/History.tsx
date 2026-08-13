@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Clock3, ListFilter, Swords } from 'lucide-react'
+import { ListFilter, Swords } from 'lucide-react'
 
 import { apiGet, errMsg } from '@/api'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import Pagination from '@/components/Pagination'
 import { EmptyState, ErrorMsg, Loading, StatusBadge } from '@/components/ui/status'
@@ -11,7 +11,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { fmtTime } from '@/lib/format'
 import { GAMES, gameLabel } from '@/lib/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface Match extends MatchParticipantSource {
   id: string
@@ -61,8 +60,6 @@ export default function History() {
     setPage(1)
   }
 
-  const activeCount = matches.filter((match) => match.status === 'pending' || match.status === 'running').length
-
   return (
     <PageFrame layout="public-history">
       <PageHeader
@@ -104,15 +101,9 @@ export default function History() {
         <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
       </StickyToolbar>
 
-      <SummaryStrip columns={3}>
-        <SummaryMetric label="匹配记录" value={total} detail="当前筛选条件" icon={<Swords className="size-4" />} />
-        <SummaryMetric label="本页记录" value={matches.length} detail={`每页最多 ${PAGE_SIZE} 场`} />
-        <SummaryMetric label="本页活跃" value={activeCount} detail="排队中或进行中" icon={<Clock3 className="size-4" />} />
-      </SummaryStrip>
-
       <DataRegion
-        title="对局记录"
-        description={gameId || status ? '已应用页面顶部筛选条件' : '按创建时间查看最新记录'}
+        title={`对局记录 · 共 ${total} 场`}
+        description={gameId || status ? `已应用筛选条件 · 每页 ${PAGE_SIZE} 场` : `按创建时间查看 · 每页 ${PAGE_SIZE} 场`}
       >
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />

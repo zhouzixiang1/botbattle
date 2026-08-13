@@ -62,7 +62,7 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
               onClick={() => void refresh()}
               aria-label="刷新图形验证码"
               aria-busy={loading}
-              className="h-10 min-w-0 gap-1 overflow-hidden bg-muted p-0 text-xs text-muted-foreground"
+              className="h-10 min-h-10 min-w-0 gap-1 overflow-hidden bg-muted p-0 text-xs text-muted-foreground"
             >
               {img ? (
                 <img src={img} alt="图形验证码内容" className="h-full w-full object-contain" />
@@ -86,7 +86,7 @@ export default function CaptchaField({ onChange, className = '' }: Props) {
           placeholder="图中字符或算式结果"
           required
           autoComplete="off"
-          className="min-w-0 flex-1"
+          className="min-h-10 min-w-0 flex-1"
         />
       </div>
       {err && <span role="alert" className="text-xs text-destructive">{err}</span>}

@@ -131,7 +131,7 @@ pytest bzplat/backend/tests/test_load_test_seed.py \
 ## 注意
 
 - **固定规则**：holdem 始终跑 70 手且每手固定 20000 筹码、50/100 盲注，gomoku 固定 15×15，pencil 固定 N=6；请求中传规则字段不能改变规则。阶段 2 目标 `TARGET_MATCHES=12`（三游戏×4），需为真实 70 手对局预留足够时间。
-- **双资源硬顶**：`max_match_slots=min(代码默认 2,max(1,cpu//4))`，`max_sandbox_units=slots×2`；Bot-vs-Bot 占 `1+2`，人机占 `1+1`，`starting/running/settling` 都占容量。管理端、旧 settings 与环境变量均不可覆盖。
+- **双资源硬顶**：`max_match_slots=1`，`max_sandbox_units=2`；Bot-vs-Bot 占 `1+2`，人机占 `1+1`，`starting/running/settling` 都占容量。CPU ceiling、显式启动值、管理端、旧 settings 与环境变量均不可抬高。
 - **挑战限流（重要）**：dev 服务按 IP 限流，`/api/matches/challenge` = **8 req/60s**（所有请求来自 127.0.0.1 共享额度）。这里的 429 只表示 HTTP 限流；执行容量不足应返回/保持 202 queued。阶段 0 与阶段 2 统一只对精确 429 按 `Retry-After` 有界重试；首个 202 即停止，避免重复已接受请求。
 - **验收失败策略**：缺少 Python `websockets` 依赖，或服务端 `BZ_PUBLIC_ORIGIN` 与 `--base` 不一致，都会让阶段 4 失败；阶段 6 验证配置来源和写入口封闭，不通过临时改配置催化后台任务。自动 producer/唯一开关/混合来源容量由 `test_execution_queue.py` 与 `test_runtime_settings.py` 覆盖。
 - **资源不调高**：不改 `bot_cpus/bot_memory`（只读硬顶）。

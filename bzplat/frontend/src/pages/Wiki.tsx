@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { BookOpen, FileText } from 'lucide-react'
+import { BookOpen } from 'lucide-react'
 
 import { apiGet, errMsg } from '@/api'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
 import { renderMarkdown } from '@/lib/markdown'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface WikiPage {
   slug: string
@@ -110,12 +109,6 @@ export default function Wiki() {
         title="Wiki"
         description="协议规范、Bot 开发指南、游戏规则、样例与安全说明。"
       />
-
-      <SummaryStrip columns={3}>
-        <SummaryMetric label="文档页" value={pages.length} detail="当前公开目录" icon={<BookOpen className="size-4" />} />
-        <SummaryMetric label="当前页面" value={title || '—'} detail={current?.summary} mono={false} icon={<FileText className="size-4" />} />
-        <SummaryMetric label="正文规模" value={markdown.length} detail="字符（含代码）" />
-      </SummaryStrip>
 
       {pages.length > 0 && (
         <StickyToolbar label="Wiki 文档导航" className="items-stretch">

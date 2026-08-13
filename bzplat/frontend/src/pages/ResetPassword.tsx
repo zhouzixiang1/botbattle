@@ -65,7 +65,7 @@ export default function ResetPassword() {
   }
 
   return (
-    <AuthShell layout="auth-reset-password" title="重置密码" subtitle={step === 'request' ? '先请求邮件验证码' : '输入邮件验证码并设置新密码'}>
+    <AuthShell layout="auth-reset-password" title="重置密码" subtitle={step === 'request' ? '先获取邮件验证码。' : '输入验证码，设置新密码。'}>
       <Card density="compact" className="mx-auto w-full max-w-md">
         <CardContent>
           {step === 'request' ? (

@@ -188,16 +188,16 @@ export default function Dashboard() {
         compactOnMobile
         className="mt-5"
         action={queue ? (
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
             {queue.dispatcher.state === 'paused' && (
               <Button size="sm" className="min-h-11" variant="outline" disabled={savingAutoMatch} onClick={() => { void resumeQueue() }}>
                 清场并恢复
               </Button>
             )}
-            <div className="flex min-h-11 items-center gap-3 rounded-lg border border-border bg-background px-2.5 py-1.5">
-              <div className="text-right">
+            <div className="flex min-h-11 min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5">
+              <div className="min-w-0 text-right">
                 <div className="text-xs font-medium">自动排位</div>
-                <div className="text-xs text-muted-foreground">仅控制自动任务生产</div>
+                <div className="truncate text-xs text-muted-foreground">仅控制自动任务生产</div>
               </div>
               <Switch
                 checked={queue.dispatcher.auto_enabled}
@@ -212,23 +212,23 @@ export default function Dashboard() {
       />
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        <Card>
+        <Card className="min-w-0 overflow-hidden">
           <CardHeader><CardTitle>最近注册用户</CardTitle></CardHeader>
           {stats.recent_users.length === 0 ? (
             <EmptyState text="暂无用户" />
           ) : (
             <ul className="divide-y divide-border">
               {stats.recent_users.map((u) => (
-                <li key={u.id} className="flex items-center justify-between py-2 text-sm">
+                <li key={u.id} className="grid min-w-0 gap-1 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3">
                   <Link
                     to={`/user/${encodeURIComponent(u.username)}`}
-                    className="min-w-0 max-w-[10rem] truncate font-medium text-primary hover:underline"
+                    className="min-w-0 max-w-full truncate font-medium text-primary hover:underline"
                   >
                     <OverflowText tooltipFocusable={false}>{u.username}</OverflowText>
                   </Link>
-                  <span className="text-xs text-muted-foreground">
-                    <span className="mr-2">{ROLE_LABEL[u.role] || u.role}</span>
-                    {fmtTime(u.created_at)}
+                  <span className="flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground sm:justify-end sm:text-right">
+                    <span className="break-words [overflow-wrap:anywhere]">{ROLE_LABEL[u.role] || u.role}</span>
+                    <span className="break-words [overflow-wrap:anywhere]">{fmtTime(u.created_at)}</span>
                   </span>
                 </li>
               ))}
@@ -236,7 +236,7 @@ export default function Dashboard() {
           )}
         </Card>
 
-        <Card>
+        <Card className="min-w-0 overflow-hidden">
           <CardHeader><CardTitle>对局状态分布</CardTitle></CardHeader>
           <div className="space-y-2">
             <DistRow label="完成" n={stats.matches_completed} total={stats.matches} color="bg-success" />
@@ -255,12 +255,12 @@ export default function Dashboard() {
 function DistRow({ label, n, total, color }: { label: string; n: number; total: number; color: string }) {
   const pct = total > 0 ? Math.round((n / total) * 100) : 0
   return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="w-14 text-muted-foreground">{label}</span>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+    <div className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)_auto] items-center gap-2 text-xs">
+      <span className="text-muted-foreground">{label}</span>
+      <div className="h-2 min-w-0 overflow-hidden rounded-full bg-muted">
         <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="w-20 text-right font-mono text-muted-foreground">
+      <span className="min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-right font-mono text-muted-foreground">
         {n} ({pct}%)
       </span>
     </div>

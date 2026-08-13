@@ -8,18 +8,14 @@ import {
   Heart,
   LogIn,
   Swords,
-  Trophy,
-  Upload,
   UserPlus,
 } from 'lucide-react'
 
 import { apiGet, errMsg } from '@/api'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { useAuth } from '@/components/useAuth'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
-import { EntityName } from '@/components/ui/overflow-text'
 import {
   DataTable,
   Table,
@@ -34,7 +30,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { fmtTime } from '@/lib/format'
 import { GAMES, gameIcon, gameLabel } from '@/lib/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 interface Match extends MatchParticipantSource {
   id: string
@@ -55,12 +50,6 @@ interface LikedMatch extends MatchParticipantSource {
   match_type?: string
   created_at?: string
 }
-
-const QUICK_LINKS = [
-  { to: '/my-bots', label: '上传 Bot', detail: '提交 ELF 并选择游戏', icon: Upload },
-  { to: '/challenge', label: '发起挑战', detail: '指定对手、版本或亲自上场', icon: Swords },
-  { to: '/leaderboard', label: '查看排行', detail: '按游戏查看 Glicko-2 天梯', icon: Trophy },
-]
 
 export default function Home() {
   const { isLoggedIn } = useAuth()
@@ -88,15 +77,11 @@ export default function Home() {
       .finally(() => setLoading(false))
   }, [gameId])
 
-  const activeMatches = matches.filter((match) => match.status === 'pending' || match.status === 'running').length
-  const completedMatches = matches.filter((match) => match.status === 'completed').length
-
   return (
     <PageFrame layout="public-home">
       <PageHeader
-        eyebrow="Botbattle"
-        title="Bot 对战中心"
-        description="上传 Linux x86_64 ELF Bot，在隔离沙箱中完成德州扑克、五子棋与点格棋对局。"
+        title="Bot 对战"
+        description="上传 Bot，选择游戏和对手，开一场。"
         actions={
           isLoggedIn ? (
             <>
@@ -111,32 +96,6 @@ export default function Home() {
           )
         }
       />
-
-      <SummaryStrip columns={3}>
-        <SummaryMetric label="支持游戏" value={GAMES.length} detail={GAMES.map((game) => game.label).join(' · ')} icon={<Bot className="size-4" />} />
-        <SummaryMetric label="最新活跃" value={activeMatches} detail={`当前展示 ${matches.length} 场`} icon={<Swords className="size-4" />} />
-        <SummaryMetric label="本批完成" value={completedMatches} detail={gameId ? gameLabel(gameId) : '全部游戏'} icon={<Trophy className="size-4" />} />
-      </SummaryStrip>
-
-      <div className="grid min-w-0 gap-2 sm:grid-cols-3" aria-label="快速开始">
-        {QUICK_LINKS.map((item, index) => (
-          <Link key={item.to} to={item.to} className="group min-w-0">
-            <Card density="compact" className="h-full transition-colors hover:border-primary/40 hover:bg-accent/30">
-              <CardContent className="flex min-w-0 items-center gap-3">
-                <span className="flex min-w-0 size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 font-mono text-xs font-semibold text-primary">
-                  {index + 1}
-                </span>
-                <item.icon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
-                <span className="min-w-0 flex-1">
-                  <EntityName tooltip={false} tooltipFocusable={false} className="text-sm group-hover:text-primary">{item.label}</EntityName>
-                  <span className="block text-xs text-muted-foreground">{item.detail}</span>
-                </span>
-                <ArrowRight aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
-              </CardContent>
-            </Card>
-          </Link>
-        ))}
-      </div>
 
       <StickyToolbar label="首页对局筛选">
         <span className="shrink-0 text-xs font-medium text-muted-foreground">最新对局</span>
@@ -156,7 +115,7 @@ export default function Home() {
         </Button>
       </StickyToolbar>
 
-      <DataRegion title="最新对局" description="同一赛事批次仅展示最近一场，避免首页动态被单一赛事占满。">
+      <DataRegion title="最新对局" description="同一赛事连续开赛时只保留最近一场，方便浏览不同来源的对局。">
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />
         ) : loading ? (

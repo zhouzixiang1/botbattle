@@ -73,6 +73,11 @@ export function MatchParticipantIdentity({
     : state === 'loser'
       ? 'text-muted-foreground'
       : 'text-foreground'
+  const subject = participant.isHuman
+    ? participant.ownerName && participant.ownerLabel === participant.ownerName
+      ? `@${participant.ownerName}`
+      : participant.ownerLabel
+    : participant.botLabel
 
   if (explicitEmpty) {
     return (
@@ -106,46 +111,78 @@ export function MatchParticipantIdentity({
         className,
       )}
     >
-      <div className="mb-0.5 flex min-w-0 items-center gap-1.5 text-[10px] font-medium text-muted-foreground">
-        <span>{participant.seatLabel}</span>
-        {seatDetail && <span>· {seatDetail}</span>}
-        <span aria-hidden="true">·</span>
-        <span>{participant.isHuman ? '真人' : 'Bot'}</span>
-        {state === 'winner' && <Badge className="ml-auto h-4 px-1 text-[9px]">胜</Badge>}
-      </div>
-      {participant.isHuman ? (
-        <EntityName lines={textLines} tooltip="真人" tooltipFocusable={false} className={cn('text-sm font-semibold', stateClass)}>
-          真人
-        </EntityName>
-      ) : participant.botId != null && links ? (
-        <Link to={`/bot/${participant.botId}`} className="block min-w-0 hover:text-primary">
+      <div className="flex min-w-0 items-start gap-2">
+        {participant.isHuman && participant.ownerName && links ? (
+          <Link
+            to={`/user/${encodeURIComponent(participant.ownerName)}`}
+            className="block min-w-0 flex-1 hover:text-primary"
+          >
+            <EntityName
+              lines={textLines}
+              tooltip={subject}
+              tooltipFocusable={false}
+              className={cn('text-sm font-semibold hover:text-primary', stateClass)}
+            >
+              {subject}
+            </EntityName>
+          </Link>
+        ) : participant.isHuman ? (
+          <EntityName
+            lines={textLines}
+            tooltip={subject}
+            tooltipFocusable={false}
+            className={cn('min-w-0 flex-1 text-sm font-semibold', stateClass)}
+          >
+            {subject}
+          </EntityName>
+        ) : participant.botId != null && links ? (
+          <Link to={`/bot/${participant.botId}`} className="block min-w-0 flex-1 hover:text-primary">
+            <EntityName
+              lines={textLines}
+              tooltip={participant.botLabel}
+              tooltipFocusable={false}
+              className={cn('text-sm font-semibold hover:text-primary', stateClass)}
+            >
+              {participant.botLabel}
+            </EntityName>
+          </Link>
+        ) : (
           <EntityName
             lines={textLines}
             tooltip={participant.botLabel}
             tooltipFocusable={false}
-            className={cn('text-sm font-semibold hover:text-primary', stateClass)}
+            className={cn(
+              'min-w-0 flex-1 text-sm font-semibold',
+              participant.botId == null ? 'text-muted-foreground' : stateClass,
+            )}
           >
             {participant.botLabel}
           </EntityName>
-        </Link>
-      ) : (
-        <EntityName
-          lines={textLines}
-          tooltip={participant.botLabel}
-          tooltipFocusable={false}
-          className={cn(
-            'text-sm font-semibold',
-            participant.botId == null ? 'text-muted-foreground' : stateClass,
-          )}
-        >
-          {participant.botLabel}
-        </EntityName>
+        )}
+        {state === 'winner' && <Badge className="mt-0.5 h-4 shrink-0 px-1 text-[9px]">胜</Badge>}
+      </div>
+      {!participant.isHuman && (
+        <div className="mt-0.5 min-w-0">
+          <OwnerIdentity participant={participant} links={links} lines={textLines} />
+        </div>
       )}
-      <div className="mt-0.5 grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-1">
-        <span className="shrink-0 text-[10px] text-muted-foreground">
-          {participant.isHuman ? '用户' : '所属'}
-        </span>
-        <OwnerIdentity participant={participant} links={links} lines={textLines} />
+      {participant.isHuman && participant.ownerName && participant.ownerLabel !== participant.ownerName && (
+        <div className="mt-0.5 min-w-0">
+          <OverflowText
+            lines={textLines}
+            tooltip={`@${participant.ownerName}`}
+            tooltipFocusable={false}
+            className="text-xs text-muted-foreground"
+          >
+            @{participant.ownerName}
+          </OverflowText>
+        </div>
+      )}
+      <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10px] font-medium text-muted-foreground">
+        <span>{participant.isHuman ? '真人' : 'Bot'}</span>
+        <span aria-hidden="true">·</span>
+        <span>{participant.seatLabel}</span>
+        {seatDetail && <><span aria-hidden="true">·</span><span>{seatDetail}</span></>}
       </div>
     </div>
   )

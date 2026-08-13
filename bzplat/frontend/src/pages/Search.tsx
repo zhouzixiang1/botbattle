@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Bot as BotIcon, Search as SearchIcon, Swords, User as UserIcon } from 'lucide-react'
 
 import { apiGet, errMsg } from '@/api'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -24,7 +24,6 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { fmtRating, fmtTime } from '@/lib/format'
 import { GAMES, gameIcon, gameLabel } from '@/lib/games'
 import type { MatchParticipantSource } from '@/lib/match-participants'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 type SearchType = 'users' | 'bots' | 'matches'
 
@@ -179,13 +178,12 @@ export default function Search() {
         )}
       </StickyToolbar>
 
-      <SummaryStrip columns={3}>
-        <SummaryMetric label="关键词" value={query || '等待输入'} detail={query ? '当前 URL 可分享此搜索' : '输入后开始查询'} mono={false} icon={<SearchIcon className="size-4" />} />
-        <SummaryMetric label="结果类型" value={TYPE_LABEL[type]} detail={type === 'users' ? '不应用游戏筛选' : gameId ? gameLabel(gameId) : '全部游戏'} mono={false} />
-        <SummaryMetric label="本次结果" value={resultCount} detail="最多返回 30 条" />
-      </SummaryStrip>
-
-      <DataRegion title={`${TYPE_LABEL[type]}结果`} description={query ? `关键词：${query}` : '输入关键词后显示结果'}>
+      <DataRegion
+        title={`${TYPE_LABEL[type]}结果${query && !loading ? ` · ${resultCount} 条` : ''}`}
+        description={query
+          ? `关键词：${query}${type === 'users' ? '' : ` · ${gameId ? gameLabel(gameId) : '全部游戏'}`}`
+          : '输入关键词后显示结果'}
+      >
         {error ? (
           <ErrorMsg msg={error} className="px-4 py-6" />
         ) : !query.trim() ? (

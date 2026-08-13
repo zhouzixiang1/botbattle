@@ -3,27 +3,61 @@ import { expect, test } from '@playwright/test'
 import { monitorBrowser } from './helpers'
 
 const BOT_ID = 901
-let contestId = 0
+const CONTEST_ID = 920901
 
 test.beforeAll(async ({ request }) => {
   const health = await request.get('/api/health')
   expect(health.status(), await health.text()).toBe(200)
   expect((await health.json() as { qa_instance?: boolean }).qa_instance).toBe(true)
-
-  const contests = await request.get('/api/contests')
-  expect(contests.status(), await contests.text()).toBe(200)
-  const rows = (await contests.json() as { contests?: Array<{ id: number; status: string }> }).contests || []
-  for (const contest of rows.filter((item) => ['published', 'running', 'rest'].includes(item.status))) {
-    const detail = await request.get(`/api/contests/${contest.id}`)
-    if (!detail.ok()) continue
-    const payload = await detail.json() as { pairings?: unknown[] }
-    if (payload.pairings?.length) {
-      contestId = contest.id
-      break
-    }
-  }
-  expect(contestId, 'E2E prerequisite missing: a non-finished contest with pairings').toBeGreaterThan(0)
 })
+
+async function mockContestDetail(page: import('@playwright/test').Page) {
+  await page.route(new RegExp(`/api/contests/${CONTEST_ID}(?:\\?.*)?$`), async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        contest: {
+          id: CONTEST_ID,
+          title: '移动端赛程回归',
+          description: '验证双方身份与赛果在窄屏完整可读',
+          status: 'running',
+          organizer_id: 1,
+          game_id: 'gomoku',
+          template_id: 'gomoku_rr',
+          template_name: '五子棋单循环',
+          stages_json: JSON.stringify([{ key: 'rr', type: 'round_robin', scoring: 'ccgc_2_1_0' }]),
+          current_stage_idx: 0,
+          require_real_name: 0,
+        },
+        entries: [],
+        pairings: [{
+          id: 920902,
+          round_num: 3,
+          stage_idx: 0,
+          bot_a_id: 901,
+          bot_b_id: 902,
+          bot_a_name: '移动端 Alpha Bot',
+          bot_a_display: '移动端 Alpha Bot',
+          owner_a_name: 'owner_alpha',
+          owner_a_display: 'Alpha 所有者',
+          bot_b_name: '移动端 Beta Bot',
+          bot_b_display: '移动端 Beta Bot',
+          owner_b_name: 'owner_beta',
+          owner_b_display: 'Beta 所有者',
+          status: 'completed',
+          match_winner: 1,
+          match_id: 'mobile-card-contest-match',
+          scheduled_at: '2026-08-11T12:30:00+00:00',
+        }],
+        standings: [],
+        stage_standings: [],
+        entries_total: 0,
+        my_entry: null,
+      }),
+    })
+  })
+}
 
 async function mockBotDetail(page: import('@playwright/test').Page) {
   await page.route('**/api/comments?*', async (route) => {
@@ -139,17 +173,19 @@ test('desktop Bot history keeps the dense table', async ({ page }) => {
   await monitor.expectClean()
 })
 
-test('mobile contest schedule cards keep both seats, round, status, nature and result visible', async ({ page }) => {
+test('mobile contest schedule cards keep both participants, round, status and result visible', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto(`/#/contests/${contestId}`)
+  await mockContestDetail(page)
+  await page.goto(`/#/contests/${CONTEST_ID}`)
 
   const card = page.getByTestId('contest-schedule-mobile-card').first()
   await expect(card).toBeVisible()
   await expect(card.locator('[data-match-participant]')).toHaveCount(2)
   await expect(card).toContainText(/R\d+/)
-  await expect(card.locator('[data-match-nature="contest"]')).toHaveText('锦标赛')
-  await expect(card).toContainText(/座位 [12] 胜|平局|赛果待定|轮空晋级/)
+  const result = card.locator('[data-pairing-result]')
+  await expect(result).toHaveAttribute('data-pairing-result', 'decided')
+  await expect(result).toHaveText('移动端 Beta Bot 胜')
   const matchLink = card.getByRole('link', { name: '查看对局' })
   if (await matchLink.count()) expect((await matchLink.boundingBox())?.height).toBeGreaterThanOrEqual(44)
   await expect(page.getByRole('table', { name: '赛事对阵一览表' })).toBeHidden()

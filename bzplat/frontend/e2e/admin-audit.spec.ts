@@ -78,6 +78,9 @@ for (const viewport of ADMIN_VIEWPORTS) {
       }
 
     await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
+    await expect(page.getByText('最近注册用户', { exact: true })).toBeVisible()
+    await expect(page.getByText('对局状态分布', { exact: true })).toBeVisible()
+    await expect(page.getByTestId('execution-queue-panel')).toContainText('全站同一时刻只执行一场')
     await expectNoRootOverflow(page, 'dashboard')
 
     await selectAdminModule(page, '用户')
@@ -292,6 +295,7 @@ for (const viewport of ADMIN_VIEWPORTS) {
 }
 
 test('admin queue switch is a single boolean control and survives polling', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, ADMIN)
   let enabled = true
@@ -306,8 +310,8 @@ test('admin queue switch is a single boolean control and survives polling', asyn
       retry_at: null,
     },
     capacity: {
-      match_slots: { used: 0, capacity: 4 },
-      sandbox_units: { used: 0, capacity: 8 },
+      match_slots: { used: 0, capacity: 1 },
+      sandbox_units: { used: 0, capacity: 2 },
       running_matches: 0,
     },
     active: [],
@@ -334,6 +338,34 @@ test('admin queue switch is a single boolean control and survives polling', asyn
       body: JSON.stringify({ source: 'code', mutable: false, queue: snapshot() }),
     })
   })
+  await page.route('**/api/admin/stats', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        users: 123456789,
+        users_active: 98765432,
+        users_verified: 87654321,
+        bots: 123456789,
+        bots_active: 98765432,
+        matches: 999999999,
+        matches_completed: 888888888,
+        matches_aborted: 111111111,
+        matches_running: 12345678,
+        matches_pending: 9876543,
+        contests: 123456,
+        contests_running: 98765,
+        active_sessions: 123456,
+        recent_users: [{
+          id: 7001,
+          username: `very_long_unbroken_admin_dashboard_username_${'x'.repeat(96)}`,
+          email: 'long-user@example.test',
+          role: 'administrator_role_with_long_fallback_label',
+          created_at: '2026-08-12T23:59:59.123456+08:00',
+        }],
+      }),
+    })
+  })
   await page.route('**/api/execution-queue', async (route) => {
     publicQueueRequests += 1
     await route.fulfill({ status: 500, body: 'dashboard must use internal admin snapshot' })
@@ -357,6 +389,8 @@ test('admin queue switch is a single boolean control and survives polling', asyn
   const toggle = page.getByRole('switch', { name: '自动排位生产开关' })
   await expect(panel).toContainText('等待执行')
   await expect(toggle).toBeChecked()
+  await expect(page.getByText('最近注册用户', { exact: true })).toBeVisible()
+  await expect(page.getByText('对局状态分布', { exact: true })).toBeVisible()
   await expectNoRootOverflow(page, 'admin auto queue enabled')
 
   await toggle.click()
@@ -661,6 +695,7 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
 test('contest detail changes its primary content and actions with lifecycle stage', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, ADMIN)
+  let lifecycleStatus: 'open' | 'published' = 'open'
   const commonContest = {
     organizer_id: 1,
     title: '阶段详情',
@@ -688,12 +723,75 @@ test('contest detail changes its primary content and actions with lifecycle stag
             entry_id: 1001,
             bot_id: 11,
             user_id: 21,
+            source_stage: 1,
+            ranking_cohort: 'stage:1',
             points: 3,
             bot_name: 'winner_bot',
             owner_name: 'winner_user',
             awarded: '冠军',
+            tiebreaks: {
+              points: 3,
+              buchholz_cut1: 4,
+              sonneborn_berger: 2,
+              head_to_head: 1,
+              normalized_delta: 100,
+              technical_losses: 0,
+              seed: 1,
+            },
+          }, {
+            rank: 2,
+            entry_id: 1002,
+            bot_id: 12,
+            user_id: 22,
+            source_stage: 1,
+            ranking_cohort: 'stage:1',
+            points: 3,
+            bot_name: 'runner_bot',
+            owner_name: 'runner_user',
+            awarded: '亚军',
+            tiebreaks: {
+              points: 3,
+              buchholz_cut1: 2,
+              sonneborn_berger: 1,
+              head_to_head: 0,
+              normalized_delta: -100,
+              technical_losses: 0,
+              seed: 2,
+            },
+          }, {
+            rank: 9,
+            entry_id: 1003,
+            bot_id: 13,
+            user_id: 23,
+            source_stage: 0,
+            ranking_cohort: 'stage:0',
+            points: 3,
+            bot_name: 'preliminary_bot',
+            owner_name: 'preliminary_user',
+            awarded: '',
+            tiebreaks: {
+              points: 3,
+              buchholz_cut1: 99,
+              sonneborn_berger: 99,
+              head_to_head: 1,
+              normalized_delta: 999,
+              technical_losses: 0,
+              seed: 3,
+            },
           }],
         }),
+      })
+      return
+    }
+    if (
+      url.pathname === '/api/contests/902/publish' &&
+      route.request().method() === 'POST'
+    ) {
+      lifecycleStatus = 'published'
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'published' }),
       })
       return
     }
@@ -710,10 +808,17 @@ test('contest detail changes its primary content and actions with lifecycle stag
         contest: {
           ...commonContest,
           id: Number(match[1]),
-          status: finished ? 'finished' : 'open',
+          status: finished ? 'finished' : lifecycleStatus,
           title: finished ? '阶段详情-已完成' : '阶段详情-报名中',
           registration_closes_at: finished ? '2026-08-09T13:00:00' : '2026-08-09T11:00:00',
           official_results_ready: finished ? 1 : 0,
+          current_stage_idx: finished ? 1 : 0,
+          stages_json: finished
+            ? JSON.stringify([
+                { key: 'swiss', type: 'swiss', scoring: 'poker_3_1_0' },
+                { key: 'final', type: 'double_round_robin', scoring: 'poker_3_1_0', ranking_mode: 'replace_top', ranking_scope: 2 },
+              ])
+            : commonContest.stages_json,
         },
         entries: finished ? [{ id: 1001, user_id: 21, bot_id: 11, bot_name: 'winner_bot' }] : [],
         pairings: finished ? [{
@@ -726,7 +831,7 @@ test('contest detail changes its primary content and actions with lifecycle stag
           owner_a_display: 'Winner User',
           owner_b_name: 'runner_user',
           owner_b_display: 'Runner User',
-          stage_idx: 0,
+          stage_idx: 1,
           status: 'completed',
           match_winner: 0,
         }] : [],
@@ -744,13 +849,26 @@ test('contest detail changes its primary content and actions with lifecycle stag
   await expect(page.getByRole('tab', { name: /正式名次/ })).toHaveAttribute('data-state', 'active')
   await expect(page.getByRole('cell', { name: 'winner_bot', exact: true })).toBeVisible()
   await expect(page.getByText('冠军', { exact: true })).toBeVisible()
+  await expect(page.getByText(/对手分 Cut1 4/)).toBeVisible()
+  await expect(page.getByText(/对手分 Cut1 2/)).toBeVisible()
+  const preliminaryRow = page.getByRole('row').filter({ hasText: 'preliminary_bot' })
+  await expect(preliminaryRow.getByText('瑞士轮', { exact: true })).toBeVisible()
+  await expect(preliminaryRow.getByText('瑞士轮内名次已确定', { exact: true })).toBeVisible()
+  await expect(preliminaryRow.getByText(/对手分 Cut1/)).toHaveCount(0)
   await expect(page.getByText(/时间配置异常：报名截止时间晚于比赛开始时间/)).toBeVisible()
   await expect(page.getByRole('button', { name: /开放报名|截止报名|立即开赛|强制结束赛事/ })).toHaveCount(0)
+  const contestTabs = page.getByRole('tablist').first()
+  expect(await contestTabs.evaluate((element) => getComputedStyle(element).overflowY)).toBe('hidden')
+  await page.getByRole('tab', { name: /对阵/ }).click()
+  await expect(page.locator('[data-pairing-result="decided"]:visible').filter({ hasText: 'winner_bot 胜' })).toBeVisible()
 
   await page.goto('/#/contests/902')
   await expect(page.getByRole('tab', { name: /选手/ })).toHaveAttribute('data-state', 'active')
   await expect(page.getByRole('tab', { name: /对阵|阶段积分|正式名次/ })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '截止报名·出排期', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '立即开赛', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '截止报名·出排期', exact: true }).click()
+  await expect(page.getByRole('tab', { name: /对阵/ })).toHaveAttribute('data-state', 'active')
+  await expect(page.getByRole('button', { name: '立即开赛', exact: true })).toBeVisible()
   await monitor.expectClean()
 })

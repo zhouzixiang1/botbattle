@@ -48,7 +48,7 @@ export default function OpponentPickerModal({
 }: {
   gameId: GameId
   myUserId?: number
-  /** 发起 Bot-vs-Bot 时座位 1 必须属于当前用户，与后端 my_bot_id 权限一致。 */
+  /** 普通用户发起 Bot-vs-Bot 时座位 1 必须属于本人；管理员由调用方传 false。 */
   mineOnly?: boolean
   onClose: () => void
   onPick: (bot: PickBot) => void

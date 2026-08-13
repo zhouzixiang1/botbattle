@@ -28,6 +28,7 @@ interface VersionRow {
   created_at?: string
   uploaded_at?: string
   size_bytes?: number
+  runnable?: boolean
 }
 
 /** 一个座位的选中状态：bot + 选定版本 id（undefined=当前/激活版本）。 */
@@ -179,7 +180,11 @@ export default function Challenge() {
       )
       setVersionCache((c) => ({
         ...c,
-        [botId]: { rows: d.versions || [], current: d.current_version, loading: false },
+        [botId]: {
+          rows: (d.versions || []).filter((version) => version.runnable !== false),
+          current: d.current_version,
+          loading: false,
+        },
       }))
     } catch {
       setVersionCache((c) => ({
@@ -191,7 +196,12 @@ export default function Challenge() {
 
   // 选定某座位的 bot（来自弹窗）：写入 bot + 重置版本为「当前」+ 拉版本列表。
   const pickBotFor = (slot: 's1' | 's2', bot: PickBot) => {
-    if (slot === 's1' && seat2Kind === 'bot' && bot.owner_id !== user?.id) {
+    if (
+      slot === 's1'
+      && seat2Kind === 'bot'
+      && user?.role !== 'admin'
+      && bot.owner_id !== user?.id
+    ) {
       setError('Bot 对战的座位 1 只能使用自己的 Bot')
       setPickingSeat(null)
       return
@@ -227,7 +237,12 @@ export default function Challenge() {
   const chooseSeat2Kind = (kind: 'bot' | 'human') => {
     const seat1Bot = seats[0].bot
     setSeat2Kind(kind)
-    if (kind === 'bot' && seat1Bot && seat1Bot.owner_id !== user?.id) {
+    if (
+      kind === 'bot'
+      && user?.role !== 'admin'
+      && seat1Bot
+      && seat1Bot.owner_id !== user?.id
+    ) {
       setError('已切换为 Bot 对战，请为座位 1 选择自己的 Bot')
     } else {
       setError('')
@@ -240,7 +255,11 @@ export default function Challenge() {
       if (kind === 'human') {
         // 人类 API 固定使用 Bot 当前激活版本，清掉不会被提交的历史版本状态。
         next[0] = { ...next[0], versionId: undefined }
-      } else if (next[0].bot && next[0].bot.owner_id !== user?.id) {
+      } else if (
+        user?.role !== 'admin'
+        && next[0].bot
+        && next[0].bot.owner_id !== user?.id
+      ) {
         // 人类模式允许挑战任意 Bot；切回 Bot-vs-Bot 后 my_bot_id 必须重新选自己的。
         next[0] = { ...EMPTY_SEAT }
       }
@@ -442,7 +461,7 @@ export default function Challenge() {
     const seat = seats[idx]
     const seatLabel = slot === 's1' ? '座位 1（先手 / 黑）' : '座位 2（后手 / 白）'
     const vc = seat.bot ? versionCache[seat.bot.id] : undefined
-    const mineOnly = slot === 's1' && seat2Kind === 'bot'
+    const mineOnly = slot === 's1' && seat2Kind === 'bot' && user?.role !== 'admin'
     const versionsEnabled = !(slot === 's1' && seat2Kind === 'human')
     return (
       <div className="space-y-2">
@@ -475,7 +494,11 @@ export default function Challenge() {
           ) : (
             <>
               <Plus className="size-4" />
-              {mineOnly ? '选择我的 Bot' : '选择 Bot（搜索 / 我的 / 按用户）'}
+              {mineOnly
+                ? '选择我的 Bot'
+                : slot === 's1' && user?.role === 'admin'
+                  ? '选择全站可用 Bot（管理员）'
+                  : '选择 Bot（搜索 / 我的 / 按用户）'}
             </>
           )}
         </button>
@@ -759,7 +782,7 @@ export default function Challenge() {
         <OpponentPickerModal
           gameId={gameId}
           myUserId={user?.id}
-          mineOnly={pickingSeat === 's1' && seat2Kind === 'bot'}
+          mineOnly={pickingSeat === 's1' && seat2Kind === 'bot' && user?.role !== 'admin'}
           onClose={() => setPickingSeat(null)}
           onPick={(b) => pickBotFor(pickingSeat, b)}
         />

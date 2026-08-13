@@ -17,7 +17,7 @@
  */
 import type { ComponentType } from 'react'
 import type { LucideIcon } from 'lucide-react'
-import type { GameCanvasRenderer } from './canvas-types'
+import type { GameCanvasRenderer, SeatInfo } from './canvas-types'
 
 /**
  * 平台事件流的最小公共类型（对标后端 games/_board_protocol.py 的公共契约层）。
@@ -44,11 +44,7 @@ export interface HumanActionPanelProps {
 /** HUD/摘要只拿归约结果与通用座位身份，不让页面依赖具体 ViewModel。 */
 export interface GameAuxiliaryProps {
   vm: unknown
-  seats?: Array<{
-    botName?: string
-    ownerName?: string
-    isHuman?: boolean
-  }>
+  seats?: SeatInfo[]
 }
 
 export interface HumanPlayViewSpec {
@@ -164,8 +160,8 @@ export interface GameViewSpec {
   matchFormatLabel: string
   /** 从游戏 ViewModel 读取胜者；通用页不得猜测 winner/matchWinner 字段。 */
   winner: (vm: unknown) => number | null | undefined
-  /** 游戏事件的人类可读描述；通用页不解释扑克/棋类专属事件字段。 */
-  describeEvent: (event: RawEvent) => string
+  /** 游戏事件的人类可读描述；参与者姓名为主语，座位/颜色只作次级位置。 */
+  describeEvent: (event: RawEvent, seats?: SeatInfo[]) => string
   /** 游戏裁判 reason + 平台 reason 的唯一终局展示契约。 */
   terminalReason: TerminalReasonResolver
   /** 人类对战输入与布局契约。 */

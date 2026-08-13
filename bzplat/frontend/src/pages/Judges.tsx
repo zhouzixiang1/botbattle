@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react'
 import { ChevronDown, FileCode2, Scale } from 'lucide-react'
 
 import { apiGet, errMsg } from '@/api'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Identifier } from '@/components/ui/overflow-text'
 import { EmptyState, ErrorMsg, Loading } from '@/components/ui/status'
-import { CopyIdentifier, SummaryMetric } from '@/pages/public-page-ui'
+import { CopyIdentifier } from '@/pages/public-page-ui'
 
 interface JudgeGameMeta {
   game_id: string
@@ -51,8 +51,6 @@ export default function Judges() {
     }
   }, [])
 
-  const sourceCount = games.reduce((sum, game) => sum + game.source_files.length, 0)
-
   return (
     <PageFrame width="default" layout="public-judges">
       <PageHeader
@@ -60,12 +58,6 @@ export default function Judges() {
         title="裁判源码"
         description="每款游戏的权威裁判以明文公开；规则定义、协议适配与共享实现均可逐文件核查。"
       />
-
-      <SummaryStrip columns={3}>
-        <SummaryMetric label="注册游戏" value={games.length} detail="公开裁判入口" icon={<Scale className="size-4" />} />
-        <SummaryMetric label="源码文件" value={sourceCount} detail="按游戏白名单公开" icon={<FileCode2 className="size-4" />} />
-        <SummaryMetric label="加载策略" value="按需" detail="展开游戏后请求源码" mono={false} />
-      </SummaryStrip>
 
       {games.length > 0 && (
         <StickyToolbar label="裁判快速索引">

@@ -43,7 +43,7 @@ export default function Register() {
   }
 
   return (
-    <AuthShell layout="auth-register" title="注册账号" subtitle="创建账号并完成邮箱验证后即可加入 Bot 竞技">
+    <AuthShell layout="auth-register" title="注册账号" subtitle="创建账号，上传 Bot 或参加赛事。">
       <Card density="compact" className="mx-auto w-full max-w-2xl">
         <CardContent>
           <form onSubmit={(e) => void onSubmit(e)} className="grid min-w-0 gap-3 sm:grid-cols-2">

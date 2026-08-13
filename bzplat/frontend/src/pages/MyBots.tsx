@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Upload, Trash2, Pencil, Save, X, Power, Bot as BotIcon, History, MoreHorizontal } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -13,12 +13,25 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useConfirm } from '@/hooks/use-confirm'
 import { toast } from 'sonner'
-import { apiForm, apiGet, apiJson, errMsg } from '@/api'
+import {
+  apiFormWithProgress,
+  apiGet,
+  apiJson,
+  currentUserStore,
+  errMsg,
+  type CurrentUser,
+} from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import BotVersionManager from '@/components/BotVersionManager'
 import Pagination from '@/components/Pagination'
 import { Loading } from '@/components/ui/status'
 import { EntityName, Identifier, OverflowText } from '@/components/ui/overflow-text'
+import {
+  BOT_UPLOAD_MAX_LABEL,
+  BotUploadProgress,
+  botUploadSizeError,
+  type BotUploadStage,
+} from '@/components/bot-upload-progress'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,7 +39,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { CopyIdentifier, SummaryMetric } from '@/pages/public-page-ui'
+import { CopyIdentifier } from '@/pages/public-page-ui'
 
 interface Bot {
   id: number
@@ -46,7 +59,15 @@ interface Bot {
 }
 
 export default function MyBots() {
-  const { isLoggedIn } = useAuth()
+  const { user } = useAuth()
+  // An account switch must discard every form/request state owned by the old
+  // identity instead of reusing the same route component for the new account.
+  return <MyBotsForIdentity key={user?.id ?? 'guest'} user={user} />
+}
+
+function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
+  const isLoggedIn = user !== null
+  const userId = user?.id ?? null
   const [confirm, confirmDialog] = useConfirm()
   const [bots, setBots] = useState<Bot[]>([])
   const [error, setError] = useState('')
@@ -59,6 +80,9 @@ export default function MyBots() {
   const [runtimeMode, setRuntimeMode] = useState('traditional')
   const [filterGame, setFilterGame] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
+  const [uploadPercent, setUploadPercent] = useState<number | null>(0)
+  const uploadControllerRef = useRef<AbortController | null>(null)
   // 版本管理对话框状态：打开的 bot id（null = 关闭）+ 当前 bot 的运行模式
   const [verBot, setVerBot] = useState<{ id: number; name: string; current: number; mode: string } | null>(null)
   // 分页
@@ -92,33 +116,69 @@ export default function MyBots() {
     void load()
   }, [load])
 
+  useEffect(() => () => {
+    uploadControllerRef.current?.abort()
+    uploadControllerRef.current = null
+  }, [])
+
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
     if (!file) {
       setError('请选择 Linux x86_64 ELF 程序文件')
       return
     }
+    uploadControllerRef.current?.abort()
+    const controller = new AbortController()
+    uploadControllerRef.current = controller
+    const targetUserId = userId
+    const isCurrentUpload = () => (
+      uploadControllerRef.current === controller &&
+      !controller.signal.aborted &&
+      (currentUserStore.get()?.id ?? null) === targetUserId
+    )
     setBusy(true)
+    setUploadStage('uploading')
+    setUploadPercent(0)
     setError('')
     try {
-      await apiForm('/api/bots', 'POST', {
+      await apiFormWithProgress('/api/bots', {
         name,
         display_name: displayName,
         description,
         game_id: gameId,
         runtime_mode: runtimeMode,
         file,
+      }, {
+        signal: controller.signal,
+        onProgress: ({ percent }) => {
+          if (isCurrentUpload()) setUploadPercent(percent)
+        },
+        onTransferComplete: () => {
+          if (!isCurrentUpload()) return
+          setUploadPercent(100)
+          setUploadStage('preflight')
+        },
       })
+      if (!isCurrentUpload()) return
       setName('')
       setDisplayName('')
       setDescription('')
       setFile(null)
       await load()
+      if (!isCurrentUpload()) return
       toast.success('Bot 上传成功')
     } catch (err) {
-      setError(errMsg(err, '上传失败'))
+      if (isCurrentUpload()) setError(errMsg(err, '上传失败'))
     } finally {
-      setBusy(false)
+      const isCurrent = isCurrentUpload()
+      if (uploadControllerRef.current === controller) {
+        uploadControllerRef.current = null
+      }
+      if (isCurrent) {
+        setBusy(false)
+        setUploadStage('idle')
+        setUploadPercent(0)
+      }
     }
   }
 
@@ -190,18 +250,9 @@ export default function MyBots() {
     )
   }
 
-  const activeCount = bots.filter((bot) => Boolean(bot.is_active)).length
-  const runnableCount = bots.filter((bot) => bot.runnable !== false).length
-
   return (
     <PageFrame layout="account-my-bots">
       <PageHeader title="我的 Bot" description="上传 Linux x86_64 ELF，维护公开资料、运行状态与历史版本。" />
-
-      <SummaryStrip columns={3}>
-        <SummaryMetric label="Bot 总数" value={total} detail={filterGame ? gameLabel(filterGame) : '全部游戏'} icon={<BotIcon className="size-4" />} />
-        <SummaryMetric label="本页启用" value={activeCount} detail={`本页共 ${bots.length} 个`} icon={<Power className="size-4" />} />
-        <SummaryMetric label="本页可运行" value={runnableCount} detail="符合当前 ELF 契约" />
-      </SummaryStrip>
 
       {error && <ErrorMsg msg={error} />}
 
@@ -283,13 +334,14 @@ export default function MyBots() {
                   type="file"
                   onChange={(e) => {
                     const f = e.target.files?.[0] ?? null
-                    // 前端预校验：超过 50MB 直接拒绝（与服务端限制一致，避免无谓上传）
-                    if (f && f.size > 50 * 1024 * 1024) {
-                      setError('文件过大，请上传 ≤50MB 的 Linux x86_64 ELF 程序文件')
+                    const sizeError = f ? botUploadSizeError(f) : null
+                    if (f && sizeError) {
+                      setError(sizeError)
                       setFile(null)
                       e.target.value = ''
                       return
                     }
+                    setError('')
                     setFile(f)
                   }}
                   required
@@ -297,12 +349,13 @@ export default function MyBots() {
                 />
               </label>
               <p className="text-xs text-muted-foreground">
-                仅接受 Linux x86_64 ELF，最大 50MB；Windows .exe、macOS 程序和原始 .py 文件均不支持。
+                仅接受 Linux x86_64 ELF，最大 {BOT_UPLOAD_MAX_LABEL}；Windows .exe、macOS 程序和原始 .py 文件均不支持。
               </p>
             </div>
+            <BotUploadProgress stage={uploadStage} percent={uploadPercent} />
             <Button type="submit" disabled={busy} aria-busy={busy} className="w-full gap-1.5">
               <Upload className="size-4" />
-              {busy ? '上传中…' : '上传'}
+              {uploadStage === 'preflight' ? '服务端预检中…' : busy ? '上传中…' : '上传'}
             </Button>
           </form>
       </DataRegion>
@@ -428,6 +481,7 @@ export default function MyBots() {
       {confirmDialog}
       <BotVersionManager
         botId={verBot?.id ?? null}
+        identityKey={userId}
         botName={verBot?.name}
         currentVersion={verBot?.current}
         currentRuntimeMode={verBot?.mode}

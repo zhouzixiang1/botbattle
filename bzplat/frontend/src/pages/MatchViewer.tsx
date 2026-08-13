@@ -2,7 +2,7 @@
  * 统一对局页（实时观赛 + 历史回放合一）。路由 /match/:id 唯一页。
  *
  * - running/pending → 直播模式：开 SSE，从事件 1 按回放速度推进（DVR 模型），
- *   新事件先进入缓冲、显示「落后 N 个事件」、可「跳到最新」；match_end 到达后
+ *   新事件先进入缓冲；用户可返回实时画面或直接查看最终结果。match_end 到达后
  *   游标继续顺序补完（不强制跳结局）；已结束对局重开页同样自动从头播放。
  * - completed/aborted → 元数据先渲染，再按需加载结构化 replay events。
  * - 座位身份：从 match.bot_a/bot_b（后端 JOIN）构造 SeatInfo 传 canvas。
@@ -27,7 +27,9 @@ import { gameLabel, gameIcon, normalizeGameId } from '@/lib/games'
 import Comments from '@/components/Comments'
 import { SPEEDS } from '@/components/use-playback'
 import { findGame, resolveTerminalReason, unsupportedGameLabel } from '@/games'
+import type { SeatInfo } from '@/games/canvas-types'
 import { describePlatformEvent } from '@/games/reasons'
+import { eventSeatSubject } from '@/games/seat-display'
 import type { RawEvent } from '@/games/base'
 import {
   type MatchSeatRow,
@@ -60,14 +62,19 @@ function matchHasTechnicalLoss(match: MatchRow | null | undefined): boolean {
     .includes(String(match.reason ?? ''))
 }
 
-function describeTimelineEvent(event: RawEvent, gameDescription: string): string {
+const ACTION_CONTEXT_SIZE = 7
+
+function describeTimelineEvent(
+  event: RawEvent,
+  gameDescription: string,
+  seats?: SeatInfo[],
+): string {
   if (event.type === 'technical_incident') {
-    const seat = Number(event.seat)
-    const seatText = Number.isFinite(seat) ? `座位 ${seat + 1}` : 'Bot'
+    const subject = eventSeatSubject(seats, event.seat)
     const turn = Number(event.turn)
     const turnText = Number.isFinite(turn) && turn > 0 ? ` · 第 ${turn} 次决策` : ''
     const reason = resolveTerminalReason(event.reason, 'completed').label
-    return `${seatText} 技术故障${turnText}：${String(event.error || reason)}`
+    return `${subject} 技术故障${turnText}：${String(event.error || reason)}`
   }
   const platformDescription = describePlatformEvent(event)
   if (platformDescription) return platformDescription
@@ -128,10 +135,8 @@ export default function MatchViewer() {
   const [cursor, setCursor] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [speedIdx, setSpeedIdx] = useState(1)
-  // 时序面板折叠态（窄屏默认折叠，棋盘获全宽）
+  // 动作上下文折叠态（窄屏默认折叠，棋盘获全宽）
   const [timelineCollapsed, setTimelineCollapsed] = useState(false)
-  const logRef = useRef<HTMLDivElement>(null)
-  const curActionRef = useRef<HTMLDivElement>(null)
   // events 最新长度的 ref——SSE 回调需要在 React 提交前计算批量事件长度；
   // updater 保持纯函数，游标始终由独立的播放状态推进。
   const eventsLenRef = useRef(0)
@@ -402,7 +407,7 @@ export default function MatchViewer() {
       })
   }, [id, user?.id, match?.id, match?.status, match?.can_view_debug, debugPermissionScope])
 
-  // 窄屏默认折叠时序面板，并在旋转/调整窗口跨过 xl 断点时同步。
+  // 窄屏默认折叠动作上下文，并在旋转/调整窗口跨过 xl 断点时同步。
   // 同一布局内的手动折叠选择不会被 resize 覆盖。
   useEffect(() => {
     const media = window.matchMedia('(max-width: 1279px)')
@@ -587,15 +592,10 @@ export default function MatchViewer() {
   }
   const curSegmentIdx = (() => { for (let i = 0; i < bounds.length - 1; i++) if (cur >= bounds[i] && cur < bounds[i + 1]) return i; return bounds.length >= 2 ? bounds.length - 2 : 0 })()
 
-  // 动作日志自动滚动到当前步
-  useEffect(() => {
-    const c = logRef.current, row = curActionRef.current
-    if (!c || !row) return
-    const cTop = c.scrollTop, cBottom = cTop + c.clientHeight
-    const rTop = row.offsetTop, rBottom = rTop + row.offsetHeight
-    if (rTop < cTop) c.scrollTop = rTop
-    else if (rBottom > cBottom) c.scrollTop = rBottom - c.clientHeight
-  }, [cur])
+  // 页面 main 是唯一纵向滚动 owner。右轨只给当前事件有限上下文，避免长回放
+  // 在 1280/1560 与移动视口形成“页面滚动 + 日志滚动”的双纵滚。
+  const actionContextStart = Math.max(0, cur - ACTION_CONTEXT_SIZE + 1)
+  const actionContext = events.slice(actionContextStart, cur + 1)
 
   const GameIcon = gameIcon(gameId)
   const isLive = status === 'live' || isLiveMatch
@@ -604,6 +604,11 @@ export default function MatchViewer() {
     : eventWinner === 0 || eventWinner === 1
       ? eventWinner
       : null
+  const playbackLabel = playing
+    ? '暂停回放'
+    : cur >= total - 1
+      ? realtime ? '继续跟播' : '从头重播'
+      : '继续回放'
   const renderSeat = (seat: 0 | 1) => {
     if (!match) return null
     const isWinner = winnerSeat === seat
@@ -661,8 +666,14 @@ export default function MatchViewer() {
         })()}
         {progressText && <Badge variant="outline">{progressText}</Badge>}
         {lag > 0 && (
-          <Button variant="outline" size="sm" onClick={jumpToLive} className="gap-1">
-            <Radio className="size-3" />落后 {lag} 个事件 · 跳到最新
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={jumpToLive}
+            className="gap-1"
+            aria-label={`返回实时画面，当前落后 ${lag} 个回放事件`}
+          >
+            <Radio className="size-3" />返回实时画面
           </Button>
         )}
         {terminalBacklog > 0 && (
@@ -671,9 +682,10 @@ export default function MatchViewer() {
             size="sm"
             onClick={jumpToTerminal}
             className="h-auto max-w-full gap-1 whitespace-normal py-1.5 text-left"
+            aria-label={`直接查看最终结果，跳过剩余 ${terminalBacklog} 个回放事件`}
           >
             <SkipForward className="size-3 shrink-0" />
-            已结束 · 剩余 {terminalBacklog} 个事件 · 跳到结局
+            直接查看最终结果
           </Button>
         )}
       </div>
@@ -714,10 +726,10 @@ export default function MatchViewer() {
                 <div className="font-semibold text-foreground">Bot 技术判负</div>
                 <p className="mt-1 break-words text-sm text-muted-foreground">
                   {failedSeat === 0 || failedSeat === 1
-                    ? `${seatHeaderLabel(match, failedSeat)}（座位 ${failedSeat + 1}）发生技术故障`
+                    ? `${seatHeaderLabel(match, failedSeat)} · 座位 ${failedSeat + 1} 发生技术故障`
                     : '对局因 Bot 技术故障终止'}
                   {winnerSeat === 0 || winnerSeat === 1
-                    ? `，${seatHeaderLabel(match, winnerSeat)}（座位 ${winnerSeat + 1}）获胜。`
+                    ? `，${seatHeaderLabel(match, winnerSeat)} · 座位 ${winnerSeat + 1} 获胜。`
                     : '。'}
                 </p>
                 {technicalIncidents.length > 0 ? (
@@ -726,7 +738,7 @@ export default function MatchViewer() {
                       <div key={`${incident.seat}-${incident.turn ?? 'x'}-${index}`} className="rounded-md border border-destructive/20 bg-background/70 px-3 py-2 text-xs">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-medium text-foreground">
-                            座位 {Number(incident.seat) + 1}
+                            {eventSeatSubject(seats, incident.seat)} · 座位 {Number(incident.seat) + 1}
                             {incident.turn != null ? ` · 第 ${incident.turn} 次决策` : ''}
                           </span>
                           {incident.code && <Badge variant="outline" className="max-w-full break-all font-mono text-[10px]">{incident.code}</Badge>}
@@ -750,7 +762,8 @@ export default function MatchViewer() {
         && debugPermissionScope === `${id}:${user.id}`
         && match.can_view_debug
         && botDebug
-        && botDebug.match_id === match.id && (
+        && botDebug.match_id === match.id
+        && botDebug.entry_count > 0 && (
         <BotDebugPanel
           payload={botDebug}
           seatNames={[seatHeaderLabel(match, 0), seatHeaderLabel(match, 1)]}
@@ -832,7 +845,7 @@ export default function MatchViewer() {
                     )}
                     <Button variant="outline" size="sm" onClick={() => step(-1)} className="gap-1"><ChevronLeft className="size-4" />上一个事件</Button>
                     <Button variant="default" size="sm" onClick={togglePlay} className="gap-1.5">
-                      {playing ? <><Pause className="size-4" />暂停</> : <><Play className="size-4" />播放</>}
+                      {playing ? <Pause className="size-4" /> : <Play className="size-4" />}{playbackLabel}
                     </Button>
                     <Button variant="outline" size="sm" onClick={() => step(1)} className="gap-1">下一个事件<ChevronRight className="size-4" /></Button>
                     {navigation && (
@@ -856,7 +869,7 @@ export default function MatchViewer() {
                       </Select>
                     )}
                     <Select value={String(speedIdx)} onValueChange={(v) => setSpeedIdx(Number(v))}>
-                      <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs">
+                      <SelectTrigger size="sm" className="h-8 w-[5rem] text-xs" aria-label="回放速度">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -866,49 +879,56 @@ export default function MatchViewer() {
                   </div>
                   <div className="mt-2.5 flex items-center gap-3">
                     <span data-testid="playback-position" className="shrink-0 font-mono text-[10px] text-muted-foreground">事件 {cur + 1}/{total}{atLive && realtime ? ' · 直播' : ''}</span>
-                    <Slider min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
+                    <Slider aria-label="回放进度" min={0} max={Math.max(0, total - 1)} value={[cur]} onValueChange={(v) => seek(v[0])} className="flex-1" />
                   </div>
                 </CardContent>
               </Card>
             )}
           </div>
 
-          {/* 右：动作时序 */}
+          {/* 右：有限动作上下文 */}
           <Card
             data-testid="match-timeline"
             className={`flex flex-col gap-0 self-start overflow-hidden py-0 ${compactViewportDashboard ? '' : 'xl:sticky xl:top-6'} ${viewportDashboard
               ? compactViewportDashboard
-                ? 'max-h-[70dvh] md:col-span-2 md:col-start-1 md:row-start-2'
-                : 'max-h-[70dvh] md:col-span-2 md:col-start-1 md:row-start-2 xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1 2xl:max-h-[min(52rem,calc(100dvh-16rem))]'
+                ? 'md:col-span-2 md:col-start-1 md:row-start-2'
+                : 'md:col-span-2 md:col-start-1 md:row-start-2 xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1'
               : ReplayHud
                 ? timelineCollapsed
-                ? 'xl:col-span-2 xl:row-start-2'
-                : 'max-h-[min(70dvh,36rem)] xl:col-start-2 xl:row-start-1 xl:row-span-2 3xl:col-start-3 3xl:row-start-1 3xl:row-span-1'
-                : viewportFitCanvas
-                  ? 'max-h-[70dvh]'
-                  : 'max-h-[70vh] xl:max-h-[calc(100vh-3rem)]'}`}
+                  ? 'xl:col-span-2 xl:row-start-2'
+                  : 'xl:col-start-2 xl:row-start-1 xl:row-span-2 3xl:col-start-3 3xl:row-start-1 3xl:row-span-1'
+                : ''}`}
           >
             <div className="border-b border-border px-4 py-2">
               <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">
-                  动作时序 <span className="text-xs font-normal text-muted-foreground">({visible.length}/{total})</span>
+                <span className="min-w-0 text-sm font-medium">
+                  动作上下文 <span className="text-xs font-normal text-muted-foreground">({actionContextStart + 1}–{cur + 1}/{total})</span>
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => setTimelineCollapsed(c => !c)}>
-                  {timelineCollapsed ? '展开' : '折叠'}
+                  {timelineCollapsed ? '展开动作' : '收起动作'}
                 </Button>
               </div>
             </div>
             {!timelineCollapsed && (
-              <div ref={logRef} className="min-h-0 flex-1 overflow-y-auto p-2 text-xs">
-                {visible.map((ev, i) => (
-                  <div key={i} ref={i === cur ? curActionRef : undefined}
-                    className={`flex items-center gap-2 rounded px-2 py-1 ${i === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}>
-                    <span className="w-8 shrink-0 font-mono opacity-60">{i + 1}</span>
-                    <span className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">
-                      {describeTimelineEvent(ev, gameSpec?.describeEvent(ev) ?? String(ev.type || '?'))}
-                    </span>
-                  </div>
-                ))}
+              <div className="p-2 text-xs">
+                <p className="px-2 pb-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                  当前事件及之前最多 {ACTION_CONTEXT_SIZE - 1} 条；完整过程用下方进度条定位。
+                </p>
+                {actionContext.map((ev, index) => {
+                  const eventIndex = actionContextStart + index
+                  return (
+                    <div
+                      key={eventIndex}
+                      data-testid="match-action-context-row"
+                      className={`flex items-center gap-2 rounded px-2 py-1.5 ${eventIndex === cur ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground'}`}
+                    >
+                      <span className="w-8 shrink-0 font-mono opacity-60">{eventIndex + 1}</span>
+                      <span className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">
+                        {describeTimelineEvent(ev, gameSpec?.describeEvent(ev, seats) ?? String(ev.type || '?'), seats)}
+                      </span>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </Card>

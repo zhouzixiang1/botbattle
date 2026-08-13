@@ -35,7 +35,11 @@ from bzplat.backend.auth.dependencies import (
     require_organizer,
     require_user,
 )
-from bzplat.backend.security import audit_log, websocket_origin_allowed
+from bzplat.backend.security import (
+    BOT_UPLOAD_BODY_MAX_BYTES,
+    audit_log,
+    websocket_origin_allowed,
+)
 from bzplat.backend.bots import BotError, BotManager
 from bzplat.backend.bots.manager import MAX_BYTES
 
@@ -52,6 +56,7 @@ _ADMIN_PRIVATE_HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 from bzplat.backend.contests import ContestManager
+from bzplat.backend.contests.ranking import with_official_result_provenance
 from bzplat.backend.contests.presentation import build_stage_summaries
 from bzplat.backend.contests.showcase import (
     ShowcaseReadOnlyError,
@@ -105,6 +110,7 @@ from bzplat.backend.store.public_contract import sanitize_public_match
 router = APIRouter()
 _T = TypeVar("_T")
 _BINARY_FILE_SCHEMA = {"type": "string", "format": "binary"}
+_BOT_UPLOAD_BODY_MAX_MIB = BOT_UPLOAD_BODY_MAX_BYTES // (1024 * 1024)
 _BOT_CREATE_UPLOAD_OPENAPI = {
     "requestBody": {
         "required": True,
@@ -132,7 +138,9 @@ _BOT_CREATE_UPLOAD_OPENAPI = {
     "responses": {
         "400": {"description": "Bot 文件或参数无效，或预检失败"},
         "401": {"description": "未登录或会话过期"},
-        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "413": {
+            "description": f"multipart 请求体超过 {_BOT_UPLOAD_BODY_MAX_MIB} MiB"
+        },
         "503": {"description": "上传槽繁忙或沙箱暂不可用"},
     },
 }
@@ -156,7 +164,9 @@ _BOT_VERSION_UPLOAD_OPENAPI = {
     "responses": {
         "400": {"description": "Bot 文件或参数无效，或预检失败"},
         "401": {"description": "未登录或会话过期"},
-        "413": {"description": "multipart 请求体超过 51 MiB"},
+        "413": {
+            "description": f"multipart 请求体超过 {_BOT_UPLOAD_BODY_MAX_MIB} MiB"
+        },
         "503": {"description": "上传槽繁忙或沙箱暂不可用"},
     },
 }
@@ -1109,12 +1119,13 @@ def _existing_idempotent_request(
 
 @router.post("/api/matches/challenge", status_code=202)
 async def challenge(body: ChallengeBody, request: Request, user=Depends(require_user)):
-    # P1-3 安全修复：my_bot_id 必须属于当前用户（防用别人的 bot 开赛，污染其评分/战绩）。
-    # opponent_bot_id 允许任意（挑战他人 bot 是正常功能）。
+    # 普通用户只能用自己的 Bot 占座位 1，防止冒用他人身份污染评分/战绩；
+    # 管理员的显式全站调度能力沿用同一版本归属、可运行性和游戏一致性校验。
+    # opponent_bot_id 仍允许任意可用 Bot（挑战他人 Bot 是正常功能）。
     my_bot = _store(request).get_bot(body.my_bot_id)
     if not my_bot:
         raise HTTPException(404, "Bot 不存在")
-    if my_bot["owner_id"] != user["id"]:
+    if my_bot["owner_id"] != user["id"] and user.get("role") != ROLE_ADMIN:
         audit_log(request, "match_challenge", result="deny", user=user.get("username"),
                   detail=f"my_bot_id={body.my_bot_id} 非本人 bot")
         raise HTTPException(403, "只能用自己的 Bot 发起挑战")
@@ -2068,7 +2079,8 @@ def list_contests(request: Request, status: str | None = None, game_id: str | No
     result = _store(request).list_contests(status=status, game_id=game_id,
                                            page=page, per_page=per_page,
                                            exclude_statuses=exclude,
-                                           hidden_owner_id=hidden_owner_id)
+                                           hidden_owner_id=hidden_owner_id,
+                                           exclude_showcases=True)
     # 裁列表响应死字段（对抗审计：match_config_json/hands_per_match/phase/source_contest_id
     # 列表视图不消费；不动 organizer_id/stages_json/rest_ends_at/current_stage_idx/
     # official_results_ready——共享 list_contests 喂 /api/contests/{id} + 后端内部读取）。
@@ -2349,6 +2361,21 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
     if not int(c.get("official_results_ready") or 0):
         raise HTTPException(409, "正式名次尚未生成（赛事未结束或排名未落库）")
     rows = store.list_official_results(contest_id)
+    # replace_top 的正式榜同时包含决赛选手和预赛未晋级者；积分只在各自
+    # 来源阶段内可比较。先统一补齐读模型，再由 JSON/CSV 两种表示复用。
+    stage_entry_ids: dict[int, set[int]] = {}
+    for result in store.list_stage_results(contest_id):
+        try:
+            stage = int(result.get("stage_idx") or 0)
+            entry = int(result["entry_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        stage_entry_ids.setdefault(stage, set()).add(entry)
+    rows = with_official_result_provenance(
+        c,
+        rows,
+        stage_entry_ids=stage_entry_ids,
+    )
     if format.lower() == "csv":
         import csv as _csv
         import io
@@ -2357,7 +2384,8 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
             buf = io.StringIO()
             w = _csv.writer(buf)
             w.writerow(["rank", "entry_id", "bot_name", "owner_name", "points",
-                        "buchholz_cut1", "sonneborn_berger", "awarded"])
+                        "buchholz_cut1", "sonneborn_berger", "awarded",
+                        "source_stage", "ranking_cohort"])
             yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
             for r in rows:
@@ -2371,7 +2399,8 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
                     r["rank"], r["entry_id"], r.get("bot_name") or "",
                     r.get("owner_name") or "", r.get("points") or 0,
                     tb.get("buchholz_cut1", 0), tb.get("sonneborn_berger", 0),
-                    r.get("awarded") or "",
+                    r.get("awarded") or "", r["source_stage"],
+                    r["ranking_cohort"],
                 ])
                 yield buf.getvalue()
                 buf.seek(0); buf.truncate(0)
@@ -2380,12 +2409,28 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
             gen(), media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="contest-{contest_id}-results.csv"'},
         )
+    # JSON 默认返回可直接展示的结构化破同分字段；不让前端猜测或解析数据库
+    # 存储格式。CSV 分支仍从同一份持久值展开，二者共享事实来源。
+    public_rows = []
+    for row in rows:
+        public = dict(row)
+        raw_tiebreaks = public.pop("tiebreaks_json", None) or "{}"
+        try:
+            import json as _json
+            parsed_tiebreaks = _json.loads(raw_tiebreaks)
+        except (TypeError, ValueError):
+            parsed_tiebreaks = {}
+        public["tiebreaks"] = (
+            parsed_tiebreaks if isinstance(parsed_tiebreaks, dict) else {}
+        )
+        public_rows.append(public)
+
     # json（默认）：返回结构化排名
     return {
         "contest_id": contest_id,
         "phase": c.get("phase") or "standalone",
         "ready": True,
-        "results": rows,
+        "results": public_rows,
     }
 
 

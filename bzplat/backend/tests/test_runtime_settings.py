@@ -30,14 +30,29 @@ from bzplat.backend.store.schema import (
 
 def test_ceiling_formula():
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=8):
-        assert concurrent_ceiling() == 2  # 8//4
+        assert concurrent_ceiling() == 1
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=1):
         assert concurrent_ceiling() == 1
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=16):
-        assert concurrent_ceiling() == 4
-        assert clamp_concurrent(99) == 4
-        assert clamp_concurrent(2) == 2
-        assert default_max_concurrent() == 2
+        assert concurrent_ceiling() == 1
+        assert clamp_concurrent(99) == 1
+        assert clamp_concurrent(2) == 1
+        assert default_max_concurrent() == 1
+
+
+def test_explicit_startup_override_cannot_bypass_global_single_match_slot(tmp_path):
+    client, app = _admin_client(tmp_path, max_concurrent=99)
+
+    assert app.state.runtime_ceiling == 1
+    assert app.state.orch.max_concurrent == 1
+    assert app.state.execution_dispatcher.max_match_slots == 1
+    assert app.state.execution_dispatcher.max_sandbox_units == 2
+
+    response = client.get("/api/admin/settings/runtime")
+    assert response.status_code == 200
+    capacity = response.json()["queue"]["capacity"]
+    assert capacity["match_slots"]["capacity"] == 1
+    assert capacity["sandbox_units"]["capacity"] == 2
 
 
 def _admin_client(tmp_path, *, max_concurrent: int | None = 1):

@@ -116,6 +116,9 @@ export function AppShell() {
   // auth 页不显示侧边栏（干净居中）；其他页面统一显示侧边栏（含未登录）
   const isAuthPage = AUTH_PATHS.includes(location.pathname)
   const showSidebar = !isAuthPage
+  const authHeaderAction = location.pathname === '/login'
+    ? { to: '/register', label: '注册' }
+    : { to: '/login', label: '登录' }
 
   return (
     <div
@@ -411,8 +414,8 @@ export function AppShell() {
               )}
               <ThemeToggle className="max-xl:size-11" />
               {isAuthPage && !isLoggedIn && (
-                <Button asChild variant="ghost" size="sm" className="text-muted-foreground">
-                  <Link to="/login">登录</Link>
+                <Button asChild variant="ghost" size="sm" className="min-h-11 text-muted-foreground">
+                  <Link to={authHeaderAction.to}>{authHeaderAction.label}</Link>
                 </Button>
               )}
             </div>

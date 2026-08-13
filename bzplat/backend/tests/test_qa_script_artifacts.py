@@ -215,8 +215,8 @@ def _clean_execution_queue_snapshot():
             "retry_at": None,
         },
         "capacity": {
-            "match_slots": {"used": 0, "capacity": 2},
-            "sandbox_units": {"used": 0, "capacity": 4},
+            "match_slots": {"used": 0, "capacity": 1},
+            "sandbox_units": {"used": 0, "capacity": 2},
             "running_matches": 0,
         },
         "active": [],
@@ -831,3 +831,69 @@ def test_pencil_browser_regression_stays_bound_to_the_production_incident():
     assert "Pencil human canvas exposes legal edges to keyboard" in source
     assert "response: { x: -1, y: -1 }" in source
     assert "event.type === 'illegal'" in source
+
+
+def test_match_views_keep_identity_first_finite_context_contract():
+    """Replay/play pages keep one hierarchy and one vertical scroll owner."""
+    frontend = ROOT / "bzplat" / "frontend"
+    viewer = (frontend / "src" / "pages" / "MatchViewer.tsx").read_text(
+        encoding="utf-8"
+    )
+    human = (frontend / "src" / "pages" / "HumanPlay.tsx").read_text(
+        encoding="utf-8"
+    )
+    debug = (frontend / "src" / "components" / "BotDebugPanel.tsx").read_text(
+        encoding="utf-8"
+    )
+    seat_display = (frontend / "src" / "games" / "seat-display.ts").read_text(
+        encoding="utf-8"
+    )
+    e2e = (frontend / "e2e" / "qa-regression.spec.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const ACTION_CONTEXT_SIZE = 7" in viewer
+    assert "events.slice(actionContextStart, cur + 1)" in viewer
+    assert 'data-testid="match-action-context-row"' in viewer
+    assert "const HUMAN_EVENT_CONTEXT_SIZE = 7" in human
+    assert "events.slice(-HUMAN_EVENT_CONTEXT_SIZE).reverse()" in human
+    assert 'data-testid="human-action-context-row"' in human
+    assert "SummaryStrip" not in human
+    assert "overflow-y-auto" not in viewer
+    assert "overflow-y-auto" not in human
+
+    assert "botDebug.entry_count > 0" in viewer
+    assert "if (payload.entry_count <= 0) return null" in debug
+    assert "subject:" in seat_display
+    assert "owner:" in seat_display
+    assert "seatDisplay" in viewer or "eventSeatSubject" in viewer
+    assert "eventSeatSubject" in human
+    assert "user.role" not in viewer
+    assert "user.role" not in human
+
+    assert "mock-private-debug-empty" in e2e
+    assert "entry_count: 0" in e2e
+    assert "match-action-context-row" in e2e
+    assert "human-action-context-row" in e2e
+    assert "width: 1560" in e2e
+    assert "width: 1280" in e2e
+
+
+def test_public_pages_have_no_generic_summary_strip_component():
+    """Decorative overview bands stay removed instead of being reintroduced."""
+    frontend = ROOT / "bzplat" / "frontend" / "src"
+    layout = (frontend / "components" / "layout" / "page.tsx").read_text(
+        encoding="utf-8"
+    )
+    public_ui = (frontend / "pages" / "public-page-ui.tsx").read_text(
+        encoding="utf-8"
+    )
+    bot_detail = (frontend / "pages" / "BotDetail.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SummaryStrip" not in layout
+    assert 'data-slot="summary-strip"' not in layout
+    assert "SummaryMetric" not in public_ui
+    assert "超过 ${profile.percentile.toFixed(1)}%" in bot_detail
+    assert "前 ${profile.percentile.toFixed(1)}%" not in bot_detail

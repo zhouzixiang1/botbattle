@@ -152,19 +152,107 @@ def test_official_results_endpoint_csv_json(tmp_path):
     c = store.create_contest("P2导出", organizer_id=o["id"], game_id="holdem")["id"]
     ranking.persist_official_results(
         store, c,
-        [{"entry_id": 1, "rank": 1, "bot_id": b, "user_id": o["id"],
-          "tiebreaks": {"points": 6, "buchholz_cut1": 3, "sonneborn_berger": 3}}],
+        [
+            {"entry_id": 1, "rank": 1, "bot_id": b, "user_id": o["id"],
+             "tiebreaks": {"points": 6, "buchholz_cut1": 3,
+                           "sonneborn_berger": 3, "seed": 1}},
+            {"entry_id": 2, "rank": 2, "bot_id": b, "user_id": o["id"],
+             "tiebreaks": {"points": 6, "buchholz_cut1": 2,
+                           "sonneborn_berger": 2, "seed": 2}},
+        ],
     )
     client = TestClient(app)
     r = client.get(f"/api/contests/{c}/official-results?format=json")
     assert r.status_code == 200
     data = r.json()
     assert data["ready"] is True
-    assert len(data["results"]) == 1
+    assert len(data["results"]) == 2
+    assert [row["rank"] for row in data["results"]] == [1, 2]
+    assert data["results"][0]["points"] == data["results"][1]["points"] == 6
+    assert data["results"][0]["tiebreaks"] == {
+        "points": 6,
+        "buchholz_cut1": 3,
+        "sonneborn_berger": 3,
+        "seed": 1,
+    }
+    assert "tiebreaks_json" not in data["results"][0]
     r2 = client.get(f"/api/contests/{c}/official-results?format=csv")
     assert r2.status_code == 200
     assert "text/csv" in r2.headers.get("content-type", "")
     assert "rank" in r2.text
+
+
+def test_replace_top_endpoint_preserves_comparable_ranking_cohorts(tmp_path):
+    """跨阶段相同积分不能被公开成同一组破同分依据。"""
+    from bzplat.backend.crypto import hash_password
+    from fastapi.testclient import TestClient
+
+    from bzplat.backend.main import create_app
+
+    app = create_app(db_path=str(tmp_path / "cohorts.db"))
+    store = app.state.store
+    owner = store.create_user(
+        "cohort_org", "cohort@example.com", hash_password("pw123456"),
+        role="organizer",
+    )
+    store.update_user(owner["id"], email_verified=1)
+    contest = store.create_contest(
+        "分阶段正式榜",
+        organizer_id=owner["id"],
+        template_id="holdem_final_ranked",
+        game_id="holdem",
+        current_stage_idx=1,
+        status="finished",
+        stages_json='[{"type":"round_robin"},{"type":"double_round_robin",'
+                    '"ranking_mode":"replace_top","ranking_scope":1}]',
+    )
+    c_id = contest["id"]
+    store.upsert_official_result(
+        c_id, 101, 1, stage_idx=1, points=6,
+        tiebreaks_json='{"points":6,"buchholz_cut1":9}',
+    )
+    store.upsert_official_result(
+        c_id, 102, 2, stage_idx=1, points=6,
+        tiebreaks_json='{"points":6,"buchholz_cut1":2}',
+    )
+    # 只留下一个决赛成员，刻意覆盖“阶段快照部分存在”的旧数据边界；
+    # 来源判定必须同时满足末阶段成员身份与 Top-N 合榜边界。
+    store.upsert_stage_result(c_id, 1, 101, points=6)
+    store.update_contest(c_id, official_results_ready=1)
+
+    response = TestClient(app).get(f"/api/contests/{c_id}/official-results")
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert [(row["source_stage"], row["ranking_cohort"]) for row in results] == [
+        (1, "stage:1"),
+        (0, "stage:0"),
+    ]
+    csv_response = TestClient(app).get(
+        f"/api/contests/{c_id}/official-results?format=csv"
+    )
+    assert csv_response.status_code == 200
+    lines = csv_response.text.splitlines()
+    assert lines[0].endswith("source_stage,ranking_cohort")
+    assert lines[1].endswith("1,stage:1")
+    assert lines[2].endswith("0,stage:0")
+
+
+def test_replace_top_membership_does_not_override_scope_boundary():
+    """参加过末阶段但落在 Top-N 外的选手仍沿用前阶段正式排名。"""
+    from bzplat.backend.contests.ranking import with_official_result_provenance
+
+    contest = {
+        "current_stage_idx": 1,
+        "stages_json": '[{"type":"swiss"},{"type":"double_round_robin",'
+                       '"ranking_mode":"replace_top","ranking_scope":2}]',
+    }
+    rows = with_official_result_provenance(
+        contest,
+        [{"entry_id": 101, "rank": 8, "stage_idx": 1, "points": 6}],
+        stage_entry_ids={1: {101}},
+    )
+    assert rows[0]["source_stage"] == 0
+    assert rows[0]["ranking_cohort"] == "stage:0"
 
 
 def test_official_results_not_ready_returns_409(tmp_path):

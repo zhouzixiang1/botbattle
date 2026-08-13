@@ -12,9 +12,10 @@ from typing import Any
 
 CONFIGURATION_SOURCE = "code"
 
-# 对局/赛事通用运行参数。
+# 对局/赛事通用运行参数。全站所有来源只共享一个对局槽；该值是产品硬约束，
+# 不随 CPU 数量或管理员设置放大。
 ACTION_TIMEOUT_SEC = 60.0
-MAX_CONCURRENT_MATCHES = 2
+MAX_CONCURRENT_MATCHES = 1
 FULL_RR_MAX_N = 12
 
 # Bot 上传从读取请求文件到隐藏版本预检完成共用一个全局槽。等待超过
@@ -28,9 +29,8 @@ HUMAN_ACTION_TIMEOUT_SEC = 120.0
 HUMAN_MAX_CONSECUTIVE_TIMEOUTS = 5
 
 
-# 全来源执行队列：每个 job 固定占一个 match slot，Bot-vs-Bot
-# 占 2 个 sandbox unit，人机占 1 个。应用启动时 match slot 会经
-# machine ceiling 钳制，sandbox 容量按钳制后的 slot * 2 派生。
+# 全来源执行队列：每个 job 固定占唯一的全局 match slot，Bot-vs-Bot
+# 占 2 个 sandbox unit，人机占 1 个。sandbox 容量按该单槽 * 2 派生。
 EXECUTION_AGING_SECONDS = 60
 EXECUTION_USER_ACTIVE_LIMIT = 1
 EXECUTION_USER_QUEUED_LIMIT = 4

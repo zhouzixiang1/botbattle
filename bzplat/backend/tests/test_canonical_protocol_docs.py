@@ -182,6 +182,30 @@ def test_wiki_samples_are_the_runner_regression_sources() -> None:
         assert _wiki_sample(doc, marker, language) == (ROOT / source).read_text(encoding="utf-8")
 
 
+def test_player_wiki_explains_contest_formats_as_player_flows() -> None:
+    """赛事文档应回答玩家会经历什么，而不只是罗列模板名称。"""
+    guide = (ROOT / "wiki/GUIDE.md").read_text(encoding="utf-8")
+    for required in (
+        "每个 Bot 与其他 Bot 各赛一次",
+        "每对 Bot 交手两次",
+        "组内按单循环或双循环比赛",
+        "同分、尚未交手",
+        "每场胜者进入下一轮",
+        "休息可换 Bot",
+    ):
+        assert required in guide, f"平台指南缺少赛制过程: {required}"
+
+    game_docs = {
+        "wiki/TEXAS.md": ("瑞士 → 单败", "复式单循环", "Top 8 双循环决赛"),
+        "wiki/GOMOKU.md": ("分组双循环 → 单败", "瑞士 → 单败", "课堂双循环"),
+        "wiki/PENCIL.md": ("分组双循环 → 单败", "瑞士 → 单败", "900 秒累计棋钟"),
+    }
+    for relative, required_phrases in game_docs.items():
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        for phrase in required_phrases:
+            assert phrase in text, f"{relative} 缺少赛事流程: {phrase}"
+
+
 def test_retired_protocol_mutators_and_binary_are_absent() -> None:
     assert not (ROOT / "samples/callbot_bin").exists()
     assert not (ROOT / "scripts/migrate_bots_to_botzone.py").exists()

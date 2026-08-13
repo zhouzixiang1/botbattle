@@ -407,6 +407,76 @@ def test_execution_request_api_enforces_owner_202_cancel_and_retry(execution_api
     ).fetchone()[0] == before
 
 
+def test_admin_challenge_can_use_foreign_seat_one_with_strict_version_binding(
+    execution_api,
+):
+    app, client, store = (
+        execution_api.app,
+        execution_api.client,
+        execution_api.store,
+    )
+    first_owner = _api_user(store, "admin_seat_one_owner")
+    second_owner = _api_user(store, "admin_seat_two_owner")
+    administrator = _api_user(store, "admin_seat_one", role="admin")
+    first = _owned_bot(store, first_owner, "admin_seat_one_foreign")
+    second = _owned_bot(store, second_owner, "admin_seat_two_foreign")
+    _verify_projection(store)
+
+    normal_response = client.post(
+        "/api/matches/challenge",
+        headers=_auth_headers(app, second_owner),
+        json={
+            "my_bot_id": first["bot_id"],
+            "opponent_bot_id": second["bot_id"],
+            "my_bot_version_id": first["version_id"],
+            "opponent_bot_version_id": second["version_id"],
+        },
+    )
+    assert normal_response.status_code == 403
+
+    admin_headers = _auth_headers(app, administrator)
+    accepted = client.post(
+        "/api/matches/challenge",
+        headers=admin_headers,
+        json={
+            "my_bot_id": first["bot_id"],
+            "opponent_bot_id": second["bot_id"],
+            "my_bot_version_id": first["version_id"],
+            "opponent_bot_version_id": second["version_id"],
+        },
+    )
+    assert accepted.status_code == 202
+    public_id = accepted.json()["public_id"]
+    row = store._conn.execute(
+        "SELECT owner_user_id,bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id "
+        "FROM execution_jobs WHERE public_id=?",
+        (public_id,),
+    ).fetchone()
+    assert tuple(row) == (
+        administrator["id"],
+        first["bot_id"],
+        second["bot_id"],
+        first["version_id"],
+        second["version_id"],
+    )
+
+    wrong_version = client.post(
+        "/api/matches/challenge",
+        headers=admin_headers,
+        json={
+            "my_bot_id": first["bot_id"],
+            "opponent_bot_id": second["bot_id"],
+            "my_bot_version_id": second["version_id"],
+            "opponent_bot_version_id": second["version_id"],
+        },
+    )
+    assert wrong_version.status_code == 400
+    assert "版本不存在或不属于" in wrong_version.json()["detail"]
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs"
+    ).fetchone()[0] == 1
+
+
 def test_client_request_id_recovers_lost_202_without_duplicate_jobs(execution_api):
     """A retried POST must observe the already committed durable request."""
     app, client, store = (
@@ -1082,31 +1152,62 @@ def test_dispatcher_claims_manual_human_contest_and_auto_in_one_capacity_model(
     dispatcher = ExecutionDispatcher(
         orch,
         store,
-        max_match_slots=4,
-        max_sandbox_units=7,
+        max_match_slots=1,
+        max_sandbox_units=2,
         auto_capability_enabled=False,
     )
-    result = asyncio.run(dispatcher.run_once())
-    assert result["claimed"] == 4
-    assert [job["public_id"] for job in orch.started] == [
+    expected_jobs = [
         manual["public_id"],
         human_job["public_id"],
         contest_job["public_id"],
         automatic["public_id"],
     ]
-    assert [job["source"] for job in orch.started] == [
+    expected_sources = [
         EXECUTION_SOURCE_MANUAL,
         EXECUTION_SOURCE_HUMAN,
         EXECUTION_SOURCE_CONTEST,
         EXECUTION_SOURCE_AUTO,
     ]
+
+    for index, expected_id in enumerate(expected_jobs):
+        result = asyncio.run(dispatcher.run_once())
+        assert result["claimed"] == 1
+        assert [job["public_id"] for job in orch.started] == expected_jobs[: index + 1]
+        assert [job["source"] for job in orch.started] == expected_sources[: index + 1]
+
+        capacity = store.executions.snapshot(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+        )["capacity"]
+        assert capacity["used_match_slots"] == 1
+        assert capacity["used_sandbox_units"] in {1, 2}
+
+        claimed = orch.started[-1]
+        store.update_match(
+            claimed["current_match_id"],
+            status="aborted",
+            reason="test_sequential_slot_release",
+        )
+        with store._tx() as conn:
+            conn.execute(
+                "UPDATE execution_jobs SET status='settling',settling_at=? "
+                "WHERE public_id=?",
+                ("2026-08-12T12:00:00", expected_id),
+            )
+        store.executions.mark_cleanup_confirmed(
+            expected_id,
+            int(claimed["attempt_count"]),
+        )
+        assert store.executions.finalize_ready() == 1
+
     capacity = store.executions.snapshot(
-        max_match_slots=4,
-        max_sandbox_units=7,
+        max_match_slots=1,
+        max_sandbox_units=2,
         aging_seconds=60,
     )["capacity"]
-    assert capacity["used_match_slots"] == 4
-    assert capacity["used_sandbox_units"] == 7
+    assert capacity["used_match_slots"] == 0
+    assert capacity["used_sandbox_units"] == 0
     assert store.list_pairings(contest["id"])[0]["match_id"] == orch.started[2][
         "current_match_id"
     ]

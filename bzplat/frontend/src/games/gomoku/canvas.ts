@@ -7,6 +7,7 @@ import { fitText, scaleFactor } from '@/games/base'
 import { reduceGomokuEvents, type GomokuViewModel } from './reducer'
 import { gomokuTerminalReason } from './reasons'
 import type { GameCanvasRenderer, Scene, SceneDelta } from '@/games/canvas-types'
+import { seatDisplay } from '@/games/seat-display'
 
 interface GomokuScene extends Scene {
   size: number
@@ -112,9 +113,8 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     ctx.fillStyle = '#5b4413'
     ctx.font = `bold ${Math.round(15 * s)}px "DM Sans", sans-serif`
     ctx.textAlign = 'left'
-    const sc = ['黑', '白']
-    const name0 = seatShort(opts.seats?.[0], sc[0] ?? '黑')
-    const name1 = seatShort(opts.seats?.[1], sc[1] ?? '白')
+    const name0 = seatDisplay(opts.seats?.[0], 0).subject
+    const name1 = seatDisplay(opts.seats?.[1], 1).subject
     const turnLabel = next.matchOver
       ? (next.winner === null
         ? '平局'
@@ -132,17 +132,6 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     if (gx < 0 || gy < 0 || gx >= s.size || gy >= s.size) return null
     return { x: gx, y: gy }
   },
-}
-
-function seatShort(
-  info: { botName?: string; ownerName?: string; isHuman?: boolean } | undefined,
-  fallback: string,
-): string {
-  const bot = (info?.botName || '').trim()
-  if (bot) return bot
-  const owner = (info?.ownerName || '').trim()
-  if (owner) return info?.isHuman ? `${owner}` : owner
-  return fallback
 }
 
 /** gomoku 棋盘布局（draw 与 pick 共用，保证坐标一致）。margin 按宽比例缩放（对齐 holdem）。 */

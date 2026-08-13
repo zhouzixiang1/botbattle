@@ -39,7 +39,7 @@ export default function Login() {
   }
 
   return (
-    <AuthShell layout="auth-login" title="登录" subtitle="登录后上传 Bot、发起挑战并管理赛事消息">
+    <AuthShell layout="auth-login" title="登录" subtitle="登录后继续管理你的 Bot 和赛事。">
       <Card density="compact" className="mx-auto w-full max-w-md">
         <CardContent>
           <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">

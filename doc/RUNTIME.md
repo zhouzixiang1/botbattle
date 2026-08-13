@@ -90,19 +90,17 @@ LongRunning 情况估算：Bot-vs-Bot 固定占 **1 match slot + 2 sandbox units
 **1 match slot + 1 sandbox unit**。Traditional 实际同时存活的容器可能更少，但不会因此抬高硬上限。
 
 ```
-cpu_count = os.cpu_count()          # 真实核数，禁止伪造
-full      = max(1, cpu_count // 2)  # 满载对局数
-ceiling   = max(1, full // 2)       # = max(1, cpu_count // 4)
-configured = 2                       # runtime/config.py 代码常量
-effective  = min(configured, ceiling)
+cpu_ceiling = max(1, os.cpu_count() // 4)  # 机器保护值
+configured  = 1                             # runtime/config.py 产品硬约束
+effective   = min(configured, cpu_ceiling) # 始终为 1
 ```
 
-- `max_match_slots=effective`，`max_sandbox_units=effective×2`。每次 claim 在一个
+- `max_match_slots=1`，`max_sandbox_units=2`。显式启动参数、CPU 数量和管理员设置都不能放大；每次 claim 在一个
   `BEGIN IMMEDIATE` 中同时要求：活跃 job 的 slot 未满、实际全局 `running` match 数小于
   `max_match_slots`、sandbox units 可容纳当前 job。任何来源都不能绕过其中任一维度。
 - `starting/running/settling` 都占容量；match/replay/rating policy 只在 claim 时同事务创建和绑定，
   单纯排队不产生“pending 对局”。未纳入新队列的历史 running match 也按 1 slot + 保守 2 units 计入。
-- 人工/人机按用户同时活跃最多 1 条、排队最多 4 条；当非赛事请求等待时赛事最多占 1 个活跃 slot。
+- 人工/人机按用户同时活跃最多 1 条、排队最多 4 条；四类来源合计只占用唯一的全局 slot。
   基础优先级为人工/人机 > 赛事 > 自动，但每 60 秒增加一次无上限 aging，自动请求最终一定能越过
   后续到达的高优先级请求，不会永久饥饿。
 - rated job claim 前还须通过评分投影 readiness 与双方 Bot 的 rated-overlap 门禁。真正新建且没有任何旧业务表的库

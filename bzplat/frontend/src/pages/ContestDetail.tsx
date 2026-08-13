@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Trophy, Users, Swords, ListOrdered, Play, DoorOpen, RefreshCw, Timer, ChevronDown, ChevronRight, Plus, Download, AlertTriangle, ArrowLeft, CalendarClock } from 'lucide-react'
-import { DataRegion, PageFrame, PageHeader, StickyToolbar, SummaryStrip } from '@/components/layout'
-import { MatchNatureBadge, MatchParticipants } from '@/components/MatchParticipants'
+import { DataRegion, PageFrame, PageHeader, StickyToolbar } from '@/components/layout'
+import { MatchParticipants } from '@/components/MatchParticipants'
+import { PairingResult } from '@/components/contest/pairing-result'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -31,7 +32,6 @@ import { findGame, gameLabel } from '@/lib/games'
 import { fmtTime } from '@/lib/format'
 import type { MatchParticipantSource } from '@/lib/match-participants'
 import { toast } from 'sonner'
-import { SummaryMetric } from '@/pages/public-page-ui'
 
 const STAGE_TYPE_LABEL: Record<string, string> = {
   swiss: '瑞士轮',
@@ -160,7 +160,17 @@ interface OfficialResult {
   owner_name?: string
   owner_display?: string
   awarded?: string
-  tiebreaks_json?: string
+  source_stage?: number
+  ranking_cohort?: string
+  tiebreaks?: {
+    points?: number
+    buchholz_cut1?: number
+    sonneborn_berger?: number
+    head_to_head?: number
+    normalized_delta?: number
+    technical_losses?: number
+    seed?: number
+  }
 }
 
 function parseStages(c: Contest | null): Stage[] {
@@ -195,28 +205,56 @@ function ContestScheduleInfo({ c }: { c: Contest }) {
     <div
       role="region"
       aria-label="赛事时间安排"
-      className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4"
+      className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 border-t pt-2 text-xs"
     >
+      <CalendarClock aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
       {items.map((it) => {
         const future = it.time && new Date(it.time).getTime() > now
         return (
-          <div key={it.label} className="flex min-w-0 items-start gap-2 rounded-lg bg-muted/35 px-3 py-2">
-            <CalendarClock aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-            <div className="min-w-0">
-              <div className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-                {it.label}
-              </div>
-              <OverflowText lines={2} className="text-xs font-medium text-foreground">
-                {it.time ? fmtTime(it.time) : '—'}
-              </OverflowText>
-              {future && it.time && (
-                <Countdown endsAt={it.time} className="text-[11px] text-primary" />
-              )}
-            </div>
-          </div>
+          <span key={it.label} className="inline-flex min-w-0 flex-wrap items-center gap-1">
+            <span className="text-muted-foreground">{it.label}</span>
+            <time className="font-mono font-medium tabular-nums text-foreground">
+              {it.time ? fmtTime(it.time) : '—'}
+            </time>
+            {future && it.time && <Countdown endsAt={it.time} className="text-primary" />}
+          </span>
         )
       })}
     </div>
+  )
+}
+
+const TIEBREAK_NUMBER = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })
+
+function OfficialTiebreakDetail({
+  result,
+  hasPointTie,
+  sourceLabel,
+}: {
+  result: OfficialResult
+  hasPointTie: boolean
+  sourceLabel?: string | null
+}) {
+  if (!hasPointTie) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        {sourceLabel ? `${sourceLabel}内名次已确定` : '积分已区分'}
+      </span>
+    )
+  }
+  const tiebreaks = result.tiebreaks
+  if (!tiebreaks) return <span className="text-xs text-warning">破同分明细缺失</span>
+  const values: string[] = []
+  if (typeof tiebreaks.buchholz_cut1 === 'number') values.push(`对手分 Cut1 ${TIEBREAK_NUMBER.format(tiebreaks.buchholz_cut1)}`)
+  if (typeof tiebreaks.sonneborn_berger === 'number') values.push(`胜者分 SB ${TIEBREAK_NUMBER.format(tiebreaks.sonneborn_berger)}`)
+  if (typeof tiebreaks.head_to_head === 'number') values.push(`直接交手 ${TIEBREAK_NUMBER.format(tiebreaks.head_to_head * 100)}%`)
+  if (typeof tiebreaks.normalized_delta === 'number') values.push(`归一分差 ${TIEBREAK_NUMBER.format(tiebreaks.normalized_delta)}`)
+  if (typeof tiebreaks.technical_losses === 'number') values.push(`技术负 ${tiebreaks.technical_losses}`)
+  if (typeof tiebreaks.seed === 'number') values.push(`种子 ${tiebreaks.seed}`)
+  return (
+    <span className="block min-w-0 whitespace-normal text-xs leading-relaxed text-muted-foreground">
+      {values.length > 0 ? values.join(' · ') : '破同分明细缺失'}
+    </span>
   )
 }
 
@@ -241,7 +279,7 @@ export default function ContestDetail() {
   const actionLockRef = useRef(false)
   const activeContestIdRef = useRef<string | undefined>(id)
   const loadGenerationRef = useRef(0)
-  const contentTabInitializedRef = useRef(false)
+  const lastLoadedStatusRef = useRef<string | null>(null)
   const [confirm, confirmDialog, cancelConfirm] = useConfirm()
   // Params can change while this component instance is reused. Keep the authority
   // ref current during render, before effects run, so an old async handler cannot
@@ -312,8 +350,9 @@ export default function ContestDetail() {
       setStageTab(d.contest.current_stage_idx ?? 0)
       setEntriesTotal(d.entries_total ?? d.entries.length)
       setMyEntry(d.my_entry ?? null)
-      if (!contentTabInitializedRef.current) {
-        const status = d.contest.status
+      const status = d.contest.status
+      const previousStatus = lastLoadedStatusRef.current
+      if (previousStatus === null || previousStatus !== status) {
         setContentTab(
           status === 'finished'
             ? 'official'
@@ -321,8 +360,8 @@ export default function ContestDetail() {
               ? 'matchups'
               : 'entries',
         )
-        contentTabInitializedRef.current = true
       }
+      lastLoadedStatusRef.current = status
       setError(officialResultsError)
     } catch (e) {
       if (
@@ -356,7 +395,7 @@ export default function ContestDetail() {
     setStageTab(0)
     setStandingsPage(1)
     setContentTab('entries')
-    contentTabInitializedRef.current = false
+    lastLoadedStatusRef.current = null
     actionLockRef.current = false
     setBusyAction(false)
     return () => {
@@ -492,6 +531,15 @@ export default function ContestDetail() {
   )
   // 行号需要按全量排序位置计算（而非当前页内序），保证翻页后名次连续
   const standingsPageBase = (safeStandingsPage - 1) * standingsPerPage
+  const officialCohortPointCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const result of officialResults) {
+      const cohort = result.ranking_cohort || `stage:${result.source_stage ?? 0}`
+      const key = `${cohort}:${Number(result.points ?? 0)}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return counts
+  }, [officialResults])
 
   if (!contest) {
     return (
@@ -531,7 +579,7 @@ export default function ContestDetail() {
     <PageFrame width="wide" layout="public-contest-detail">
       <PageHeader
         title="锦标赛详情"
-        description="赛事状态、赛程、选手和名次共用同一信息工作台。"
+        description="查看赛程、选手和比赛结果。"
         actions={
           <>
             <Button asChild variant="outline" size="sm">
@@ -577,8 +625,32 @@ export default function ContestDetail() {
             {isDuplicate && <Badge variant="secondary">复式赛制</Badge>}
           </>
         }
-        contentClassName="space-y-3 p-3"
+        contentClassName="space-y-2 p-3"
       >
+          <dl className="flex min-w-0 flex-wrap gap-x-5 gap-y-1 text-xs">
+            <div className="inline-flex min-w-0 items-baseline gap-1.5">
+              <dt className="text-muted-foreground">游戏</dt>
+              <dd className="font-medium text-foreground">{gameLabel(contest.game_id)} · {contestGame?.matchFormatLabel || '规则不可用'}</dd>
+            </div>
+            <div className="inline-flex min-w-0 items-baseline gap-1.5">
+              <dt className="text-muted-foreground">赛制</dt>
+              <dd className="font-medium text-foreground">{templateLabel}{isDuplicate ? ' · 复式' : ''}</dd>
+            </div>
+            <div className="inline-flex min-w-0 items-baseline gap-1.5">
+              <dt className="text-muted-foreground">选手</dt>
+              <dd className="font-mono font-medium tabular-nums text-foreground">{entriesTotal}</dd>
+            </div>
+            <div className="inline-flex min-w-0 items-baseline gap-1.5">
+              <dt className="text-muted-foreground">阶段</dt>
+              <dd className="font-mono font-medium tabular-nums text-foreground">{stageLabel}</dd>
+            </div>
+            <div className="inline-flex min-w-0 items-baseline gap-1.5">
+              <dt className="text-muted-foreground">对阵</dt>
+              <dd className="font-mono font-medium tabular-nums text-foreground">
+                {estimate?.estimated_matches != null ? `预计 ${estimate.estimated_matches}` : pairings.length}
+              </dd>
+            </div>
+          </dl>
           {contest.status === 'rest' && (isShowcase || contest.rest_ends_at) && (
             <div className="flex min-w-0 items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
               <Timer aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
@@ -601,35 +673,6 @@ export default function ContestDetail() {
             </div>
           )}
       </DataRegion>
-
-      <SummaryStrip columns={4} label="赛事概览数据" className="grid-cols-2 xl:grid-cols-4">
-        <SummaryMetric
-          label="游戏"
-          value={gameLabel(contest.game_id)}
-          detail={contestGame ? contestGame.matchFormatLabel : '规则不可用'}
-          mono={false}
-          icon={<Swords className="size-4" />}
-        />
-        <SummaryMetric
-          label="赛制模板"
-          value={templateLabel}
-          detail={isDuplicate ? '复式赛制' : '标准赛制'}
-          mono={false}
-          icon={<Trophy className="size-4" />}
-        />
-        <SummaryMetric
-          label="报名选手"
-          value={entriesTotal}
-          detail={contest.require_real_name ? '报名需实名资料' : '公开报名资料'}
-          icon={<Users className="size-4" />}
-        />
-        <SummaryMetric
-          label="赛事阶段"
-          value={stageLabel}
-          detail={estimate?.estimated_matches != null ? `预计 ${estimate.estimated_matches} 场对局` : `${pairings.length} 场已排期`}
-          icon={<ListOrdered className="size-4" />}
-        />
-      </SummaryStrip>
 
       {error && <ErrorMsg msg={error} />}
 
@@ -728,7 +771,7 @@ export default function ContestDetail() {
       {/* 内容区按赛事阶段展示，避免草稿期出现空对阵、完赛后仍以临时积分为主。 */}
       <Tabs value={contentTab} onValueChange={(v) => setContentTab(v as typeof contentTab)} className="min-w-0">
         <StickyToolbar label="赛事内容导航" className="p-1.5">
-          <TabsList variant="line" className="w-full justify-start">
+          <TabsList variant="line" className="w-full justify-start overflow-y-hidden pb-1">
           {showMatchups && (
             <TabsTrigger value="matchups" className="gap-1.5">
               <Swords className="size-4" />对阵
@@ -762,13 +805,9 @@ export default function ContestDetail() {
         {/* Tab「对阵」：阶段切换(S4) + 阶段配置 + 对阵视图(S6a) + 正式名次(finished) */}
         <TabsContent value="matchups" className="mt-2 space-y-3">
           {stages.length > 0 && (
-            <DataRegion
-              title="阶段选择"
-              description="切换阶段查看独立排期、对阵进度与晋级情况。"
-              contentClassName="space-y-2 p-3"
-            >
+            <div className="min-w-0 space-y-2 rounded-xl border bg-card p-2">
               <Tabs value={String(stageTab)} onValueChange={(v) => setStageTab(Number(v))}>
-                <TabsList className="w-full justify-start">
+                <TabsList variant="line" className="w-full justify-start overflow-y-hidden pb-1">
                   {stages.map((s, i) => {
                     const prog = stageProgress.get(i)
                     const typeLabel = STAGE_TYPE_LABEL[s.type || ''] || `阶段${i + 1}`
@@ -797,7 +836,7 @@ export default function ContestDetail() {
                 <OverflowText
                   lines={3}
                   tooltip={false}
-                  className="rounded-lg bg-muted/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]"
+                  className="border-t px-2 pt-2 text-xs leading-relaxed text-muted-foreground [overflow-wrap:anywhere]"
                 >
                   <span className="font-medium text-foreground">本阶段配置：</span>
                   {[
@@ -813,11 +852,11 @@ export default function ContestDetail() {
                   ].filter(Boolean).join(' · ')}
                 </OverflowText>
               )}
-            </DataRegion>
+            </div>
           )}
 
           {/* 宽屏把对阵与阶段榜并排，窄屏自然上下排列。 */}
-          <div className="grid min-w-0 items-start gap-3 xl:grid-cols-[minmax(0,1fr)_22rem]">
+          <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_22rem]">
           <DataRegion
             title={`对阵${stages.length ? ` · ${STAGE_TYPE_LABEL[stages[stageTab]?.type || ''] || `阶段${stageTab + 1}`}` : ''}`}
             description={stagePairings.length > 0 ? `当前阶段共 ${stagePairings.length} 场对阵。` : '排期生成后将在这里显示。'}
@@ -843,6 +882,7 @@ export default function ContestDetail() {
                 </Button>
               </div>
             ) : undefined}
+            className="h-full"
             contentClassName="min-w-0 p-3"
           >
             {stagePairings.length === 0 ? (
@@ -1019,7 +1059,7 @@ export default function ContestDetail() {
         <TabsContent value="official" className="mt-2">
           <DataRegion
             title="正式名次"
-            description="完赛后固化的权威结果，不再随临时积分变化。"
+            description="完赛后固化的权威结果；同分行显示实际使用的破同分链，种子只作最终稳定兜底。"
             actions={
               <Button asChild variant="outline" size="sm">
                 <a href={`/api/contests/${id}/official-results?format=csv`}>
@@ -1029,27 +1069,36 @@ export default function ContestDetail() {
             }
           >
               <DataTable className="rounded-none border-0" scrollLabel="赛事正式名次表">
-                <Table className="min-w-[34rem]">
+                <Table className="min-w-[58rem]">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-14">名次</TableHead>
                       <TableHead>Bot</TableHead>
                       <TableHead>选手</TableHead>
                       <TableHead>积分</TableHead>
+                      <TableHead className="min-w-[22rem]">破同分依据</TableHead>
                       <TableHead className="hidden md:table-cell">奖项</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {officialResults.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={5}>
+                        <TableCell colSpan={6}>
                           <EmptyState
                             text={contest.official_results_ready ? '正式名次为空' : '正式名次尚未生成'}
                             icon={<Trophy className="size-7 opacity-40" />}
                           />
                         </TableCell>
                       </TableRow>
-                    ) : officialResults.map((result) => (
+                    ) : officialResults.map((result) => {
+                      const cohort = result.ranking_cohort || `stage:${result.source_stage ?? 0}`
+                      const tieKey = `${cohort}:${Number(result.points ?? 0)}`
+                      const hasPointTie = (officialCohortPointCounts.get(tieKey) ?? 0) > 1
+                      const sourceStage = result.source_stage
+                      const sourceLabel = typeof sourceStage === 'number'
+                        ? (STAGE_TYPE_LABEL[stages[sourceStage]?.type || ''] || `阶段 ${sourceStage + 1}`)
+                        : null
+                      return (
                       <TableRow key={result.entry_id}>
                         <TableCell className="font-mono text-base font-semibold text-primary">
                           {result.rank}
@@ -1084,12 +1133,27 @@ export default function ContestDetail() {
                             </Link>
                           ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
-                        <TableCell className="font-mono font-semibold">{result.points ?? 0}</TableCell>
+                        <TableCell className="font-mono font-semibold">
+                          <span>{result.points ?? 0}</span>
+                          {sourceLabel && stages.length > 1 && (
+                            <span className="mt-0.5 block font-sans text-[10px] font-normal text-muted-foreground">
+                              {sourceLabel}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="min-w-[22rem] max-w-[30rem]">
+                          <OfficialTiebreakDetail
+                            result={result}
+                            hasPointTie={hasPointTie}
+                            sourceLabel={stages.length > 1 ? sourceLabel : null}
+                          />
+                        </TableCell>
                         <TableCell className="hidden text-muted-foreground md:table-cell">
                           {result.awarded || '—'}
                         </TableCell>
                       </TableRow>
-                    ))}
+                      )
+                    })}
                   </TableBody>
                 </Table>
               </DataTable>
@@ -1121,7 +1185,7 @@ function StageStandingPanel({ summary }: { summary?: StageStandingSummary }) {
     <DataRegion
       title="阶段排名与晋级"
       description={sourceLabel}
-      className="min-w-0 self-start xl:sticky xl:top-[var(--sticky-table-offset)]"
+      className="h-full min-w-0"
       actions={summary && summary.total_pairings > 0 ? (
           <Badge variant="outline" className="text-[9px]">
             {summary.completed_pairings}/{summary.total_pairings} 场
@@ -1133,12 +1197,10 @@ function StageStandingPanel({ summary }: { summary?: StageStandingSummary }) {
       ) : (
         <DataTable
           className="rounded-none border-0"
-          viewportClassName="max-h-none xl:max-h-[32rem]"
-          overflow="both"
           scrollLabel="阶段排名与晋级表"
         >
           <Table>
-            <TableHeader sticky="region">
+            <TableHeader>
               <TableRow>
                 <TableHead className="w-12 px-2">名次</TableHead>
                 <TableHead className="px-2">Bot</TableHead>
@@ -1246,8 +1308,8 @@ function PairingFoldedList({ pairings }: { pairings: Pairing[] }) {
                       secondEmptyLabel={p.is_bye === true ? '轮空 (bye)' : undefined}
                     />
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
-                      <MatchNatureBadge matchType="contest" />
                       <StatusBadge status={p.status || 'pending'} />
+                      {p.status === 'completed' && <PairingResult pairing={p} />}
                       {p.scheduled_at && (
                         <span className="text-xs text-muted-foreground">{fmtTime(p.scheduled_at)}</span>
                       )}

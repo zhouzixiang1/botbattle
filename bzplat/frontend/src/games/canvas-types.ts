@@ -35,6 +35,7 @@ export interface DrawOpts {
 export interface SeatInfo {
   botName?: string
   ownerName?: string
+  ownerDisplayName?: string
   isHuman?: boolean
 }
 
