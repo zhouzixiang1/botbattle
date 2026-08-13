@@ -73,7 +73,11 @@ export function MatchParticipantIdentity({
     : state === 'loser'
       ? 'text-muted-foreground'
       : 'text-foreground'
-  const subject = participant.isHuman ? participant.ownerLabel : participant.botLabel
+  const subject = participant.isHuman
+    ? participant.ownerName && participant.ownerLabel === participant.ownerName
+      ? `@${participant.ownerName}`
+      : participant.ownerLabel
+    : participant.botLabel
 
   if (explicitEmpty) {
     return (
@@ -160,6 +164,18 @@ export function MatchParticipantIdentity({
       {!participant.isHuman && (
         <div className="mt-0.5 min-w-0">
           <OwnerIdentity participant={participant} links={links} lines={textLines} />
+        </div>
+      )}
+      {participant.isHuman && participant.ownerName && participant.ownerLabel !== participant.ownerName && (
+        <div className="mt-0.5 min-w-0">
+          <OverflowText
+            lines={textLines}
+            tooltip={`@${participant.ownerName}`}
+            tooltipFocusable={false}
+            className="text-xs text-muted-foreground"
+          >
+            @{participant.ownerName}
+          </OverflowText>
         </div>
       )}
       <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10px] font-medium text-muted-foreground">

@@ -520,7 +520,7 @@ for (const viewport of VIEWPORTS) {
       { path: '/', heading: 'Bot 对战', evidence: '上传 Bot，选择游戏和对手，开一场' },
       { path: '/leaderboard', heading: '排行榜', evidence: '每款游戏独立使用 Glicko-2 数值评分' },
       { path: '/history', heading: '对局历史', evidence: '查看双方用户、Bot 或真人身份以及对局性质' },
-      { path: '/contests', heading: '锦标赛', evidence: '查看公开赛事与排期' },
+      { path: '/contests', heading: '锦标赛', evidence: '浏览报名、排期、对阵与正式结果' },
       { path: '/wiki', heading: 'Wiki', evidence: '协议规范、Bot 开发指南' },
       { path: '/judges', heading: '裁判源码', evidence: '每款游戏的权威裁判以明文公开' },
       { path: '/challenge', heading: '发起挑战', evidence: '请先' },
@@ -836,6 +836,188 @@ test('upload rejects a Windows PE before creating a Bot', async ({ page }) => {
   }])
 })
 
+for (const lateStatus of [200, 401] as const) {
+  test(`Bot upload ${lateStatus} from account A cannot mutate account B`, async ({ page }) => {
+    const monitor = monitorBrowser(page)
+    await loginThroughUi(page, USER)
+    let mineReads = 0
+    await page.route('**/api/bots/mine?**', async (route) => {
+      mineReads += 1
+      await route.continue()
+    })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let observed!: () => void
+    const started = new Promise<void>((resolve) => { observed = resolve })
+    await page.route('**/api/bots', async (route) => {
+      const url = new URL(route.request().url())
+      if (route.request().method() !== 'POST' || url.pathname !== '/api/bots') {
+        await route.continue()
+        return
+      }
+      observed()
+      await gate
+      await route.fulfill({
+        status: lateStatus,
+        contentType: 'application/json',
+        body: JSON.stringify(lateStatus === 200
+          ? { bot: { id: 900001 } }
+          : { detail: 'expired account A upload' }),
+      })
+    })
+
+    await page.goto('/#/my-bots')
+    await expect.poll(() => mineReads).toBeGreaterThan(0)
+    const baselineReads = mineReads
+    await page.locator('#upload-name').fill(`delayed_a_${lateStatus}`)
+    await page.locator('#upload-file').setInputFiles({
+      name: 'tiny.elf',
+      mimeType: 'application/octet-stream',
+      buffer: Buffer.from('ELF'),
+    })
+    await page.locator('form').filter({ has: page.locator('#upload-name') })
+      .getByRole('button', { name: '上传', exact: true })
+      .click()
+    await started
+    await page.evaluate(() => {
+      localStorage.setItem('bzplat_token', 'account-b-token')
+      localStorage.setItem('bzplat_user', JSON.stringify({
+        id: 900002,
+        username: 'account_b',
+        email: 'b@example.test',
+        role: 'user',
+        display_name: '账号 B',
+        is_active: 1,
+      }))
+    })
+    const lateResponse = page.waitForResponse((response) => (
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bots'
+    ))
+    release()
+    expect((await lateResponse).status()).toBe(lateStatus)
+    await page.waitForTimeout(150)
+    expect(await page.evaluate(() => localStorage.getItem('bzplat_token'))).toBe('account-b-token')
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('bzplat_user') || '{}').id)).toBe(900002)
+    await expect(page).toHaveURL(/\/#\/my-bots$/)
+    await expect.poll(() => mineReads).toBe(baselineReads)
+    await expect(page.getByText('Bot 上传成功', { exact: true })).toHaveCount(0)
+    await expect(page.getByText(/expired account A upload|上传失败/)).toHaveCount(0)
+    await monitor.expectClean(lateStatus === 401 ? [{
+      kind: 'http',
+      method: 'POST',
+      status: 401,
+      pathname: '/api/bots',
+    }] : [])
+  })
+}
+
+test('late API 401 from account A cannot clear account B', async ({ page }) => {
+  const monitor = monitorBrowser(page)
+  await loginThroughUi(page, USER)
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let observed!: () => void
+  const started = new Promise<void>((resolve) => { observed = resolve })
+  await page.route('**/api/bots/mine?**', async (route) => {
+    const url = new URL(route.request().url())
+    if (url.searchParams.get('game_id') !== 'gomoku') {
+      await route.continue()
+      return
+    }
+    observed()
+    await gate
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'expired account A request' }),
+    })
+  })
+
+  await page.goto('/#/my-bots')
+  const filter = page.getByRole('region', { name: '我的 Bot 筛选' }).getByRole('combobox')
+  await filter.click()
+  await page.getByRole('option', { name: '五子棋', exact: true }).click()
+  await started
+  await page.evaluate(() => {
+    localStorage.setItem('bzplat_token', 'account-b-token')
+    localStorage.setItem('bzplat_user', JSON.stringify({
+      id: 900002,
+      username: 'account_b',
+      email: 'b@example.test',
+      role: 'user',
+      display_name: '账号 B',
+      is_active: 1,
+    }))
+  })
+  const lateResponse = page.waitForResponse((response) => (
+    response.request().method() === 'GET' &&
+    new URL(response.url()).pathname === '/api/bots/mine' &&
+    new URL(response.url()).searchParams.get('game_id') === 'gomoku'
+  ))
+  release()
+  expect((await lateResponse).status()).toBe(401)
+  await page.waitForTimeout(150)
+  expect(await page.evaluate(() => localStorage.getItem('bzplat_token'))).toBe('account-b-token')
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('bzplat_user') || '{}').id)).toBe(900002)
+  await expect(page).toHaveURL(/\/#\/my-bots$/)
+  await monitor.expectClean([{
+    kind: 'http',
+    method: 'GET',
+    status: 401,
+    pathname: '/api/bots/mine',
+    search: '?game_id=gomoku&page=1&per_page=20',
+  }])
+})
+
+for (const lateMeStatus of [200, 401] as const) {
+  test(`initial auth probe ${lateMeStatus} cannot overwrite a newer login`, async ({ page }) => {
+    const monitor = monitorBrowser(page)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let observed!: () => void
+    const started = new Promise<void>((resolve) => { observed = resolve })
+    await page.route('**/api/auth/me', async (route) => {
+      observed()
+      await gate
+      await route.fulfill({
+        status: lateMeStatus,
+        contentType: 'application/json',
+        body: JSON.stringify(lateMeStatus === 200 ? {
+          user: {
+            id: 900001,
+            username: 'account_a',
+            email: 'a@example.test',
+            role: 'user',
+            display_name: '账号 A',
+            is_active: 1,
+          },
+        } : { detail: 'expired account A probe' }),
+      })
+    })
+    const login = loginThroughUi(page, USER)
+    await started
+    await login
+    const newerSession = await page.evaluate(() => ({
+      token: localStorage.getItem('bzplat_token'),
+      user: localStorage.getItem('bzplat_user'),
+    }))
+    expect(newerSession.token).toBeTruthy()
+    expect(JSON.parse(newerSession.user || '{}').username).toBe(USER)
+    const lateResponse = page.waitForResponse((response) => (
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/auth/me'
+    ))
+    release()
+    expect((await lateResponse).status()).toBe(lateMeStatus)
+    await page.waitForTimeout(150)
+    expect(await page.evaluate(() => localStorage.getItem('bzplat_token'))).toBe(newerSession.token)
+    expect(await page.evaluate(() => localStorage.getItem('bzplat_user'))).toBe(newerSession.user)
+    await expect(page).toHaveURL(/\/#\/$/)
+    await monitor.expectClean()
+  })
+}
+
 test('contest game switching cannot submit a stale or mismatched template', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const cancelledGomokuTemplateFailures: string[] = []
@@ -900,10 +1082,13 @@ test('contest game switching cannot submit a stale or mismatched template', asyn
   })
 
   await page.goto('/#/contests')
+  await page.getByRole('region', { name: '赛事筛选与创建' })
+    .getByRole('button', { name: '创建赛事', exact: true })
+    .click()
   const form = page.locator('form')
   const gameSelect = form.getByRole('combobox').nth(0)
   const templateSelect = form.getByRole('combobox').nth(1)
-  const createButton = form.getByRole('button', { name: '创建比赛', exact: true })
+  const createButton = form.getByRole('button', { name: '创建赛事', exact: true })
   await expect(templateSelect).toContainText('德州初始模板')
 
   await gameSelect.click()
@@ -3334,7 +3519,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
   ]) {
     await page.setViewportSize(viewport)
     const seatOneScore = page.getByTestId('pencil-seat-score-1')
-    await expect(seatOneScore).toContainText('pencil_reference')
+    await expect(seatOneScore).toContainText('admin_pencil')
     await expect(seatOneScore).toContainText('先手 · 红 · 座位 1')
     await expect(seatOneScore).toContainText('4')
     await expect(timeline.getByRole('button', { name: '展开动作', exact: true })).toBeVisible()
@@ -3896,6 +4081,13 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   const staleUploadGate = new Promise<void>((resolve) => { releaseStaleUpload = resolve })
   let observeStaleUpload!: () => void
   const staleUploadObserved = new Promise<void>((resolve) => { observeStaleUpload = resolve })
+  const staleUploadFailures: string[] = []
+  page.on('requestfailed', (request) => {
+    if (
+      request.method() === 'POST' &&
+      new URL(request.url()).pathname === `/api/bots/${slowBotId}/versions`
+    ) staleUploadFailures.push(request.failure()?.errorText || '')
+  })
   let releaseCurrentUpload!: () => void
   const currentUploadGate = new Promise<void>((resolve) => { releaseCurrentUpload = resolve })
   let observeCurrentUpload!: () => void
@@ -3912,7 +4104,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
       status: 400,
       contentType: 'application/json',
       body: JSON.stringify({ detail: 'stale A upload failure' }),
-    })
+    }).catch(() => undefined)
   })
   await page.route(currentPattern, async (route) => {
     if (route.request().method() !== 'POST') {
@@ -3936,23 +4128,22 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await staleUploadObserved
   await page.keyboard.press('Escape')
+  await expect.poll(() => staleUploadFailures.length).toBe(1)
+  expect(staleUploadFailures[0]).toMatch(
+    /^(?:net::ERR_ABORTED|NS_BINDING_ABORTED|load request cancelled)$/i,
+  )
 
   await openBotVersionManager(page, botRow, primaryBot.name)
   await expect(manager.getByText(/^v\d+$/).first()).toBeVisible()
   await manager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await manager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await currentUploadObserved
-  await expect(manager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
-  await expect(manager.locator('[data-upload-stage="preflight"]')).toContainText('文件已上传，正在服务端预检')
+  await expect(manager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
+  await expect(manager.locator('[data-upload-stage]')).toHaveAttribute('data-upload-stage', /^(?:uploading|preflight)$/)
 
-  const staleFailureResponse = page.waitForResponse((response) => (
-    response.request().method() === 'POST' &&
-    new URL(response.url()).pathname === `/api/bots/${slowBotId}/versions`
-  ))
   releaseStaleUpload()
-  expect((await staleFailureResponse).status()).toBe(400)
   await expect(manager).not.toContainText('stale A upload failure')
-  await expect(manager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
+  await expect(manager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
 
   const currentSuccessResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -4055,8 +4246,8 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   await staleManager.locator('#ver-file').setInputFiles(HOLDEM_SAMPLE)
   await staleManager.getByRole('button', { name: '上传新版本', exact: true }).click()
   await nextUploadObserved
-  await expect(staleManager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
-  await expect(staleManager.locator('[data-upload-stage="preflight"]')).toContainText('文件已上传，正在服务端预检')
+  await expect(staleManager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
+  await expect(staleManager.locator('[data-upload-stage]')).toHaveAttribute('data-upload-stage', /^(?:uploading|preflight)$/)
 
   const staleRollbackResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -4065,7 +4256,7 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
   releaseStaleRollback()
   expect((await staleRollbackResponse).status()).toBe(500)
   await expect(staleManager).not.toContainText('stale B rollback failure')
-  await expect(staleManager.getByRole('button', { name: '服务端预检中…', exact: true })).toBeDisabled()
+  await expect(staleManager.getByRole('button', { name: /^(?:上传中…|服务端预检中…)$/ })).toBeDisabled()
 
   const nextUploadResponse = page.waitForResponse((response) => (
     response.request().method() === 'POST' &&
@@ -4099,10 +4290,10 @@ test('version dialog ignores stale Bot responses and repeated rollback stays cor
 
   await monitor.expectClean([
     {
-      kind: 'http',
+      kind: 'requestfailed',
       method: 'POST',
-      status: 400,
       pathname: `/api/bots/${slowBotId}/versions`,
+      errorText: staleUploadFailures[0],
     },
     {
       kind: 'http',

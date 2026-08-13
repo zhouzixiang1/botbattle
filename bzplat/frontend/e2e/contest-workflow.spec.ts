@@ -156,10 +156,13 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
     await loginThroughUi(page, ORGANIZER)
     await page.goto('/#/contests')
 
-  const form = page.locator('form')
-  const createButton = form.getByRole('button', { name: '创建比赛', exact: true })
-  await createButton.click()
-  expect(await page.locator('#contest-title').evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(false)
+    await page.getByRole('region', { name: '赛事筛选与创建' })
+      .getByRole('button', { name: '创建赛事', exact: true })
+      .click()
+    const form = page.locator('form')
+    const createButton = form.getByRole('button', { name: '创建赛事', exact: true })
+    await createButton.click()
+    expect(await page.locator('#contest-title').evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(false)
 
   const gameSelect = form.getByRole('combobox').nth(0)
   const templateSelect = form.getByRole('combobox').nth(1)

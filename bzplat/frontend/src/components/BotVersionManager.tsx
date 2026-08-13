@@ -56,6 +56,8 @@ export interface BotVersion {
 interface Props {
   /** 打开对话框的 Bot id；null = 关闭 */
   botId: number | null
+  /** 当前账号；账号切换会使旧账号的请求与回调立即失效。 */
+  identityKey: number | null
   botName?: string
   /** 当前版本（用于高亮 + 回滚后刷新外层列表） */
   currentVersion?: number
@@ -79,6 +81,7 @@ function fmtSize(n: number): string {
 
 export default function BotVersionManager({
   botId,
+  identityKey,
   botName,
   currentVersion,
   currentRuntimeMode,
@@ -103,21 +106,30 @@ export default function BotVersionManager({
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
   // Dialog 在 A→关闭→B 时会复用同一组件；A 的慢响应不得回灌 B。
   const activeBotIdRef = useRef<number | null>(botId)
+  const activeIdentityKeyRef = useRef<number | null>(identityKey)
   const requestGenerationRef = useRef(0)
   const mutationGenerationRef = useRef(0)
+  const uploadControllerRef = useRef<AbortController | null>(null)
   // Prop changes are authoritative during render, before the reset effect. This
   // closes the narrow render-to-effect window in which A could otherwise still
   // look current after the parent has already reused the dialog for B.
   activeBotIdRef.current = botId
+  activeIdentityKeyRef.current = identityKey
 
-  const isCurrentMutation = (targetBotId: number, generation: number) => (
+  const isCurrentMutation = (
+    targetBotId: number,
+    generation: number,
+    targetIdentityKey: number | null = identityKey,
+  ) => (
     activeBotIdRef.current === targetBotId &&
+    activeIdentityKeyRef.current === targetIdentityKey &&
     mutationGenerationRef.current === generation
   )
 
   const load = useCallback(async () => {
     if (botId === null) return
     const targetBotId = botId
+    const targetIdentityKey = identityKey
     const generation = ++requestGenerationRef.current
     setLoading(true)
     setLoadError('')
@@ -127,6 +139,7 @@ export default function BotVersionManager({
       )
       if (
         activeBotIdRef.current !== targetBotId ||
+        activeIdentityKeyRef.current !== targetIdentityKey ||
         requestGenerationRef.current !== generation
       ) return
       setVersions(d.versions || [])
@@ -134,20 +147,25 @@ export default function BotVersionManager({
     } catch (e) {
       if (
         activeBotIdRef.current !== targetBotId ||
+        activeIdentityKeyRef.current !== targetIdentityKey ||
         requestGenerationRef.current !== generation
       ) return
       setLoadError(errMsg(e, '加载版本历史失败'))
     } finally {
       if (
         activeBotIdRef.current === targetBotId &&
+        activeIdentityKeyRef.current === targetIdentityKey &&
         requestGenerationRef.current === generation
       ) setLoading(false)
     }
-  }, [botId])
+  }, [botId, identityKey])
 
   // 切换 Bot 时重置所有本地状态（busy 泄漏会导致新 Bot 对话框按钮被禁用）
   useEffect(() => {
+    uploadControllerRef.current?.abort()
+    uploadControllerRef.current = null
     activeBotIdRef.current = botId
+    activeIdentityKeyRef.current = identityKey
     requestGenerationRef.current += 1 // 立即使上一个 Bot 的在途响应失效
     mutationGenerationRef.current += 1 // 上传/回滚的 catch/finally 也必须立刻失效
     setVersions([])
@@ -162,7 +180,13 @@ export default function BotVersionManager({
     setLoadError('')
     setMutationError('')
     if (botId !== null) void load()
-  }, [botId, currentRuntimeMode, load])
+    return () => {
+      requestGenerationRef.current += 1
+      mutationGenerationRef.current += 1
+      uploadControllerRef.current?.abort()
+      uploadControllerRef.current = null
+    }
+  }, [botId, currentRuntimeMode, identityKey, load])
 
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
@@ -171,7 +195,16 @@ export default function BotVersionManager({
       return
     }
     const targetBotId = botId
+    const targetIdentityKey = identityKey
     const generation = ++mutationGenerationRef.current
+    uploadControllerRef.current?.abort()
+    const controller = new AbortController()
+    uploadControllerRef.current = controller
+    const isCurrentUpload = () => (
+      isCurrentMutation(targetBotId, generation, targetIdentityKey) &&
+      uploadControllerRef.current === controller &&
+      !controller.signal.aborted
+    )
     setBusy(true)
     setUploadStage('uploading')
     setUploadPercent(0)
@@ -182,28 +215,33 @@ export default function BotVersionManager({
         runtime_mode: mode,
         file,
       }, {
+        signal: controller.signal,
         onProgress: ({ percent }) => {
-          if (isCurrentMutation(targetBotId, generation)) setUploadPercent(percent)
+          if (isCurrentUpload()) setUploadPercent(percent)
         },
         onTransferComplete: () => {
-          if (!isCurrentMutation(targetBotId, generation)) return
+          if (!isCurrentUpload()) return
           setUploadPercent(100)
           setUploadStage('preflight')
         },
       })
-      if (!isCurrentMutation(targetBotId, generation)) return
+      if (!isCurrentUpload()) return
       toast.success(`已上传新版本`)
       setNote('')
       setFile(null)
       await load()
-      if (!isCurrentMutation(targetBotId, generation)) return
+      if (!isCurrentUpload()) return
       onChanged?.()
     } catch (err) {
-      if (isCurrentMutation(targetBotId, generation)) {
+      if (isCurrentUpload()) {
         setMutationError(errMsg(err, '上传失败'))
       }
     } finally {
-      if (isCurrentMutation(targetBotId, generation)) {
+      const isCurrent = isCurrentUpload()
+      if (uploadControllerRef.current === controller) {
+        uploadControllerRef.current = null
+      }
+      if (isCurrent) {
         setBusy(false)
         setUploadStage('idle')
         setUploadPercent(0)
@@ -218,6 +256,7 @@ export default function BotVersionManager({
       return
     }
     const targetBotId = botId
+    const targetIdentityKey = identityKey
     // 上传/回滚后外层列表的 currentVersion prop 可能尚未刷新；按钮高亮与
     // 防重复判断必须同用本地最新值，否则 v1→v2 后无法在同一弹窗切回 v1。
     if (v.version === (curVer ?? currentVersion)) return
@@ -227,23 +266,27 @@ export default function BotVersionManager({
       danger: true,
     })
     // 用户确认期间可能已经关掉 A 并打开 B；绝不能把 A 的版本号发给 B。
-    if (!ok || activeBotIdRef.current !== targetBotId) return
+    if (
+      !ok ||
+      activeBotIdRef.current !== targetBotId ||
+      activeIdentityKeyRef.current !== targetIdentityKey
+    ) return
     const generation = ++mutationGenerationRef.current
     setBusy(true)
     setMutationError('')
     try {
       await apiJson(`/api/bots/${targetBotId}/versions/${v.version}/activate`, 'POST')
-      if (!isCurrentMutation(targetBotId, generation)) return
+      if (!isCurrentMutation(targetBotId, generation, targetIdentityKey)) return
       toast.success(`已回滚到 v${v.version}`)
       await load()
-      if (!isCurrentMutation(targetBotId, generation)) return
+      if (!isCurrentMutation(targetBotId, generation, targetIdentityKey)) return
       onChanged?.()
     } catch (e) {
-      if (isCurrentMutation(targetBotId, generation)) {
+      if (isCurrentMutation(targetBotId, generation, targetIdentityKey)) {
         setMutationError(errMsg(e, '回滚失败'))
       }
     } finally {
-      if (isCurrentMutation(targetBotId, generation)) setBusy(false)
+      if (isCurrentMutation(targetBotId, generation, targetIdentityKey)) setBusy(false)
     }
   }
 

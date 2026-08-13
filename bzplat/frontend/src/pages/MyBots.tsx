@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Upload, Trash2, Pencil, Save, X, Power, Bot as BotIcon, History, MoreHorizontal } from 'lucide-react'
 import { useAuth } from '@/components/useAuth'
@@ -13,7 +13,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useConfirm } from '@/hooks/use-confirm'
 import { toast } from 'sonner'
-import { apiFormWithProgress, apiGet, apiJson, errMsg } from '@/api'
+import {
+  apiFormWithProgress,
+  apiGet,
+  apiJson,
+  currentUserStore,
+  errMsg,
+  type CurrentUser,
+} from '@/api'
 import { GAMES, gameLabel } from '@/lib/games'
 import BotVersionManager from '@/components/BotVersionManager'
 import Pagination from '@/components/Pagination'
@@ -52,7 +59,15 @@ interface Bot {
 }
 
 export default function MyBots() {
-  const { isLoggedIn } = useAuth()
+  const { user } = useAuth()
+  // An account switch must discard every form/request state owned by the old
+  // identity instead of reusing the same route component for the new account.
+  return <MyBotsForIdentity key={user?.id ?? 'guest'} user={user} />
+}
+
+function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
+  const isLoggedIn = user !== null
+  const userId = user?.id ?? null
   const [confirm, confirmDialog] = useConfirm()
   const [bots, setBots] = useState<Bot[]>([])
   const [error, setError] = useState('')
@@ -67,6 +82,7 @@ export default function MyBots() {
   const [file, setFile] = useState<File | null>(null)
   const [uploadStage, setUploadStage] = useState<BotUploadStage>('idle')
   const [uploadPercent, setUploadPercent] = useState<number | null>(0)
+  const uploadControllerRef = useRef<AbortController | null>(null)
   // 版本管理对话框状态：打开的 bot id（null = 关闭）+ 当前 bot 的运行模式
   const [verBot, setVerBot] = useState<{ id: number; name: string; current: number; mode: string } | null>(null)
   // 分页
@@ -100,12 +116,26 @@ export default function MyBots() {
     void load()
   }, [load])
 
+  useEffect(() => () => {
+    uploadControllerRef.current?.abort()
+    uploadControllerRef.current = null
+  }, [])
+
   const onUpload = async (e: FormEvent) => {
     e.preventDefault()
     if (!file) {
       setError('请选择 Linux x86_64 ELF 程序文件')
       return
     }
+    uploadControllerRef.current?.abort()
+    const controller = new AbortController()
+    uploadControllerRef.current = controller
+    const targetUserId = userId
+    const isCurrentUpload = () => (
+      uploadControllerRef.current === controller &&
+      !controller.signal.aborted &&
+      (currentUserStore.get()?.id ?? null) === targetUserId
+    )
     setBusy(true)
     setUploadStage('uploading')
     setUploadPercent(0)
@@ -119,24 +149,36 @@ export default function MyBots() {
         runtime_mode: runtimeMode,
         file,
       }, {
-        onProgress: ({ percent }) => setUploadPercent(percent),
+        signal: controller.signal,
+        onProgress: ({ percent }) => {
+          if (isCurrentUpload()) setUploadPercent(percent)
+        },
         onTransferComplete: () => {
+          if (!isCurrentUpload()) return
           setUploadPercent(100)
           setUploadStage('preflight')
         },
       })
+      if (!isCurrentUpload()) return
       setName('')
       setDisplayName('')
       setDescription('')
       setFile(null)
       await load()
+      if (!isCurrentUpload()) return
       toast.success('Bot 上传成功')
     } catch (err) {
-      setError(errMsg(err, '上传失败'))
+      if (isCurrentUpload()) setError(errMsg(err, '上传失败'))
     } finally {
-      setBusy(false)
-      setUploadStage('idle')
-      setUploadPercent(0)
+      const isCurrent = isCurrentUpload()
+      if (uploadControllerRef.current === controller) {
+        uploadControllerRef.current = null
+      }
+      if (isCurrent) {
+        setBusy(false)
+        setUploadStage('idle')
+        setUploadPercent(0)
+      }
     }
   }
 
@@ -439,6 +481,7 @@ export default function MyBots() {
       {confirmDialog}
       <BotVersionManager
         botId={verBot?.id ?? null}
+        identityKey={userId}
         botName={verBot?.name}
         currentVersion={verBot?.current}
         currentRuntimeMode={verBot?.mode}

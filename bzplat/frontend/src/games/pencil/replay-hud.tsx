@@ -150,7 +150,7 @@ export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
         </span>
       </div>
 
-      <div className="hidden 2xl:mt-3 2xl:flex 2xl:min-h-0 2xl:flex-1 2xl:flex-col">
+      <div className="hidden 2xl:mt-2 2xl:flex 2xl:min-h-0 2xl:flex-1 2xl:flex-col 3xl:mt-3">
         <div>
           <div className="flex items-center gap-2 text-[11px] leading-tight text-muted-foreground">
             <span className="font-medium">格子归属</span>
@@ -162,7 +162,7 @@ export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
             data-testid="pencil-box-map"
             role="img"
             aria-label={`格子归属缩略图：红方 ${mappedRedBoxes} 格，蓝方 ${mappedBlueBoxes} 格，未决 ${Math.max(0, totalBoxes - claimedBoxes)} 格`}
-            className="mx-auto mt-2 grid aspect-square w-full max-w-32 gap-1"
+            className="mx-auto mt-2 grid aspect-square w-full max-w-32 gap-1 2xl:max-w-24 3xl:max-w-32"
             style={{ gridTemplateColumns: `repeat(${Math.max(1, state.nDots - 1)}, minmax(0, 1fr))` }}
           >
             {boxMap.flatMap((row, rowIndex) => row.map((owner, columnIndex) => (
@@ -183,7 +183,7 @@ export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
           </div>
         </div>
 
-        <div className="mt-3">
+        <div className="mt-2 3xl:mt-3">
           <div className="flex items-center gap-2 text-[11px] leading-tight text-muted-foreground">
             <span className="font-medium">连边构成</span>
             <span className="ml-auto font-mono">红 {redEdges} · 蓝 {blueEdges} · 空 {Math.max(0, totalEdges - connectedEdges)}</span>
@@ -199,7 +199,7 @@ export function PencilReplayHud({ vm, seats }: GameAuxiliaryProps) {
           </div>
         </div>
 
-        <div className="mt-3 border-t border-border pt-3">
+        <div className="mt-2 border-t border-border pt-2 3xl:mt-3 3xl:pt-3">
           <div className="text-[11px] font-medium leading-tight text-muted-foreground">胜负态势</div>
           <div className="mt-1.5 rounded-lg bg-muted/45 px-2.5 py-2">
             <div className="text-xs font-semibold text-foreground">

@@ -146,10 +146,17 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const { suppressAuth = false, ...requestOptions } = options
   const headers = new Headers(requestOptions.headers || {})
-  const token = suppressAuth ? null : userToken.get()
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`)
+  const hasExplicitAuthorization = headers.has('Authorization')
+  const sentToken = suppressAuth ? null : userToken.get()
+  const sentUserId = suppressAuth ? null : (currentUserStore.get()?.id ?? null)
+  if (sentToken && !hasExplicitAuthorization) {
+    headers.set('Authorization', `Bearer ${sentToken}`)
   }
+  const sentIdentityIsCurrent = () => (
+    !hasExplicitAuthorization &&
+    userToken.get() === sentToken &&
+    (currentUserStore.get()?.id ?? null) === sentUserId
+  )
 
   let body = options.body
   if (
@@ -177,14 +184,15 @@ export async function apiFetch<T = unknown>(
     // Caller-isolated requests may carry a deliberately frozen identity.  A
     // late 401 from that identity must not clear or redirect a newer session.
     const soft = suppressAuth || path.includes('/api/auth/me') || isCredentialAuthPath(path)
-    if (!soft) {
+    const mayMutateCurrentAuth = !suppressAuth && sentIdentityIsCurrent()
+    if (!soft && mayMutateCurrentAuth) {
       userToken.clear()
       currentUserStore.clear()
       if (!isAuthPublicHash()) {
         const back = encodeURIComponent(location.hash.replace(/^#/, '') || '/')
         location.hash = `#/login?from=${back}&reason=expired`
       }
-    } else if (path.includes('/api/auth/me')) {
+    } else if (path.includes('/api/auth/me') && mayMutateCurrentAuth) {
       userToken.clear()
       currentUserStore.clear()
     }
@@ -303,8 +311,17 @@ export function apiFormWithProgress<T = unknown>(
 
     xhr.open('POST', path)
     xhr.withCredentials = true
-    const token = suppressAuth ? null : userToken.get()
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    // Freeze the identity that actually leaves the browser.  A large upload can
+    // finish after the user has signed out and established a different session;
+    // that stale response must never mutate the newer global auth state.
+    const sentToken = suppressAuth ? null : userToken.get()
+    const sentUserId = suppressAuth ? null : (currentUserStore.get()?.id ?? null)
+    if (sentToken) xhr.setRequestHeader('Authorization', `Bearer ${sentToken}`)
+
+    const sentIdentityIsCurrent = () => (
+      userToken.get() === sentToken &&
+      (currentUserStore.get()?.id ?? null) === sentUserId
+    )
 
     xhr.upload.addEventListener('progress', (event) => {
       const total = event.lengthComputable && event.total > 0 ? event.total : null
@@ -337,14 +354,18 @@ export function apiFormWithProgress<T = unknown>(
 
       if (status === 401) {
         const soft = suppressAuth || path.includes('/api/auth/me') || isCredentialAuthPath(path)
-        if (!soft) {
+        // Only the request identity whose credentials failed may clear the
+        // shared session.  In particular, a delayed 401 from account A cannot
+        // sign out account B after an account switch.
+        const mayMutateCurrentAuth = !suppressAuth && sentIdentityIsCurrent()
+        if (!soft && mayMutateCurrentAuth) {
           userToken.clear()
           currentUserStore.clear()
           if (!isAuthPublicHash()) {
             const back = encodeURIComponent(location.hash.replace(/^#/, '') || '/')
             location.hash = `#/login?from=${back}&reason=expired`
           }
-        } else if (path.includes('/api/auth/me')) {
+        } else if (path.includes('/api/auth/me') && mayMutateCurrentAuth) {
           userToken.clear()
           currentUserStore.clear()
         }
