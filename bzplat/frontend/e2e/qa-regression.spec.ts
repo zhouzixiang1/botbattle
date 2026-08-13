@@ -1453,7 +1453,11 @@ test('challenge is single-submit, reaches its terminal viewer, and Cmd+K aggrega
     const searchDialogs = page.getByRole('dialog')
     await expect(searchDialogs).toHaveCount(1)
     const search = searchDialogs.getByPlaceholder('搜索 Bot、用户、对局…')
-    await search.fill(fixtureBot.name)
+    // WebKit can acknowledge a synthetic fill before React observes cmdk's
+    // input event.  Type through the real keyboard path so this assertion
+    // exercises the same debounced search contract as a user.
+    await search.pressSequentially(fixtureBot.name)
+    await expect(search).toHaveValue(fixtureBot.name)
     const groupHeadings = searchDialogs.locator('[cmdk-group-heading]')
     await expect(groupHeadings.filter({ hasText: /^Bot$/ })).toHaveCount(1)
     await expect(groupHeadings.filter({ hasText: /^对局$/ })).toHaveCount(1)
@@ -2561,9 +2565,14 @@ test('MatchViewer preserves more than 4000 events across reconnect snapshots', a
   await expect(page.getByText('直播中', { exact: true })).toBeVisible()
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
   const position = page.getByTestId('playback-position')
-  await expect(position).toHaveText('事件 1/4101')
+  // Autoplay may advance before the first rendered assertion (notably on
+  // WebKit).  The contract here is the complete 4101-event prefix and cursor
+  // preservation across reconnect, not an engine-specific first-frame delay.
+  await expect(position).toHaveText(/^事件 \d+\/4101$/)
   await page.getByRole('button', { name: '暂停回放', exact: true }).click()
+  await expect(page.getByRole('button', { name: '继续回放', exact: true })).toBeVisible()
   const cursorBeforeReconnect = Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0)
+  expect(cursorBeforeReconnect).toBeGreaterThan(0)
   expect(await sse.disconnect()).toBe(true)
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: grownEvents })).toBe(true)
