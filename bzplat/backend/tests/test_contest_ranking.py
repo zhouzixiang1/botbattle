@@ -216,7 +216,7 @@ def test_replace_top_endpoint_preserves_comparable_ranking_cohorts(tmp_path):
         tiebreaks_json='{"points":6,"buchholz_cut1":2}',
     )
     # 只留下一个决赛成员，刻意覆盖“阶段快照部分存在”的旧数据边界；
-    # member 证据优先于其在总榜中的 rank。
+    # 来源判定必须同时满足末阶段成员身份与 Top-N 合榜边界。
     store.upsert_stage_result(c_id, 1, 101, points=6)
     store.update_contest(c_id, official_results_ready=1)
 
@@ -237,22 +237,22 @@ def test_replace_top_endpoint_preserves_comparable_ranking_cohorts(tmp_path):
     assert lines[2].endswith("0,stage:0")
 
 
-def test_replace_top_partial_stage_membership_beats_rank_boundary():
-    """阶段成员证据存在时，不因快照只剩一行而把第 8 名误判回预赛。"""
+def test_replace_top_membership_does_not_override_scope_boundary():
+    """参加过末阶段但落在 Top-N 外的选手仍沿用前阶段正式排名。"""
     from bzplat.backend.contests.ranking import with_official_result_provenance
 
     contest = {
         "current_stage_idx": 1,
-        "stages_json": '[{"type":"swiss"},{"type":"round_robin",'
-                       '"ranking_mode":"replace_top","ranking_scope":8}]',
+        "stages_json": '[{"type":"swiss"},{"type":"double_round_robin",'
+                       '"ranking_mode":"replace_top","ranking_scope":2}]',
     }
     rows = with_official_result_provenance(
         contest,
         [{"entry_id": 101, "rank": 8, "stage_idx": 1, "points": 6}],
         stage_entry_ids={1: {101}},
     )
-    assert rows[0]["source_stage"] == 1
-    assert rows[0]["ranking_cohort"] == "stage:1"
+    assert rows[0]["source_stage"] == 0
+    assert rows[0]["ranking_cohort"] == "stage:0"
 
 
 def test_official_results_not_ready_returns_409(tmp_path):

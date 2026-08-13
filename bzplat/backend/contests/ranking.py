@@ -244,13 +244,12 @@ def with_official_result_provenance(
             except (TypeError, ValueError):
                 rank = 0
                 entry_id = -1
-            # 一旦有阶段成员证据，就只按成员身份判定；仅在旧快照完全缺少
-            # 阶段结果时，才退回冻结赛制的 Top-N 名次边界。
-            in_final_cohort = (
-                entry_id in final_entries
-                if final_entries
-                else 0 < rank <= scope
-            )
+            # replace_top 的权威合榜边界始终是最终名次 Top-N。阶段成员证据
+            # 只用于确认这行确实参加过末阶段，不能把末阶段落选者也误算进
+            # 最终 cohort；旧快照完全没有成员证据时才只依赖名次边界。
+            in_final_cohort = 0 < rank <= scope
+            if final_entries:
+                in_final_cohort = in_final_cohort and entry_id in final_entries
             source_stage = (
                 final_stage_idx if in_final_cohort else final_stage_idx - 1
             )

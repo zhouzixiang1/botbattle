@@ -816,7 +816,7 @@ test('contest detail changes its primary content and actions with lifecycle stag
           stages_json: finished
             ? JSON.stringify([
                 { key: 'swiss', type: 'swiss', scoring: 'poker_3_1_0' },
-                { key: 'final', type: 'round_robin', scoring: 'poker_3_1_0', ranking_mode: 'replace_top', ranking_scope: 2 },
+                { key: 'final', type: 'double_round_robin', scoring: 'poker_3_1_0', ranking_mode: 'replace_top', ranking_scope: 2 },
               ])
             : commonContest.stages_json,
         },
@@ -831,7 +831,7 @@ test('contest detail changes its primary content and actions with lifecycle stag
           owner_a_display: 'Winner User',
           owner_b_name: 'runner_user',
           owner_b_display: 'Runner User',
-          stage_idx: 0,
+          stage_idx: 1,
           status: 'completed',
           match_winner: 0,
         }] : [],

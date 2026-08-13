@@ -139,7 +139,7 @@ test('desktop Bot history keeps the dense table', async ({ page }) => {
   await monitor.expectClean()
 })
 
-test('mobile contest schedule cards keep both seats, round, status, nature and result visible', async ({ page }) => {
+test('mobile contest schedule cards keep both participants, round, status and result visible', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(`/#/contests/${contestId}`)
@@ -148,8 +148,13 @@ test('mobile contest schedule cards keep both seats, round, status, nature and r
   await expect(card).toBeVisible()
   await expect(card.locator('[data-match-participant]')).toHaveCount(2)
   await expect(card).toContainText(/R\d+/)
-  await expect(card.locator('[data-match-nature="contest"]')).toHaveText('锦标赛')
-  await expect(card).toContainText(/座位 [12] 胜|平局|赛果待定|轮空晋级/)
+  const result = card.locator('[data-pairing-result]')
+  await expect(result).toContainText(/胜|平局|赛果待定|轮空晋级/)
+  const resultText = (await result.textContent()) || ''
+  if (resultText.endsWith(' 胜')) {
+    const participantTexts = await card.locator('[data-match-participant]').allTextContents()
+    expect(participantTexts.some((text) => text.includes(resultText.slice(0, -2)))).toBe(true)
+  }
   const matchLink = card.getByRole('link', { name: '查看对局' })
   if (await matchLink.count()) expect((await matchLink.boundingBox())?.height).toBeGreaterThanOrEqual(44)
   await expect(page.getByRole('table', { name: '赛事对阵一览表' })).toBeHidden()
