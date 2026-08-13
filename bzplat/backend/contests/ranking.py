@@ -188,6 +188,85 @@ def merge_replace_top(
     return merged
 
 
+def with_official_result_provenance(
+    contest: dict,
+    rows: list[dict],
+    *,
+    stage_entry_ids: dict[int, set[int]] | None = None,
+) -> list[dict]:
+    """为正式榜读模型补充积分来源阶段和可比较分组。
+
+    ``replace_top`` 榜单把决赛选手与预赛未晋级者拼在一起；两组积分与
+    破同分数据并不互相比较。来源可以由冻结的赛制、阶段结果成员关系和
+    最终名次边界稳定派生，无需为这次展示修复修改生产数据库 schema。
+    """
+    raw_stages = contest.get("stages_json") or "[]"
+    if isinstance(raw_stages, list):
+        stages = raw_stages
+    else:
+        try:
+            parsed = json.loads(raw_stages)
+        except (TypeError, ValueError):
+            parsed = []
+        stages = parsed if isinstance(parsed, list) else []
+    if not stages:
+        from bzplat.backend.contests.templates import get_template
+
+        template = get_template(str(contest.get("template_id") or ""))
+        template_stages = template.get("stages") if template else []
+        stages = template_stages if isinstance(template_stages, list) else []
+
+    try:
+        final_stage_idx = int(contest.get("current_stage_idx"))
+    except (TypeError, ValueError):
+        final_stage_idx = len(stages) - 1 if stages else 0
+    if stages and not 0 <= final_stage_idx < len(stages):
+        final_stage_idx = len(stages) - 1
+    final_stage = stages[final_stage_idx] if stages else {}
+    replace_top = (
+        isinstance(final_stage, dict)
+        and final_stage.get("ranking_mode") == "replace_top"
+        and final_stage_idx > 0
+    )
+    try:
+        scope = max(1, int(final_stage.get("ranking_scope") or 8))
+    except (TypeError, ValueError):
+        scope = 8
+    final_entries = (stage_entry_ids or {}).get(final_stage_idx, set())
+
+    enriched: list[dict] = []
+    for row in rows:
+        public = dict(row)
+        if replace_top:
+            try:
+                rank = int(public.get("rank") or 0)
+                entry_id = int(public.get("entry_id"))
+            except (TypeError, ValueError):
+                rank = 0
+                entry_id = -1
+            # 一旦有阶段成员证据，就只按成员身份判定；仅在旧快照完全缺少
+            # 阶段结果时，才退回冻结赛制的 Top-N 名次边界。
+            in_final_cohort = (
+                entry_id in final_entries
+                if final_entries
+                else 0 < rank <= scope
+            )
+            source_stage = (
+                final_stage_idx if in_final_cohort else final_stage_idx - 1
+            )
+        else:
+            try:
+                source_stage = int(public.get("stage_idx"))
+                if source_stage < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                source_stage = final_stage_idx
+        public["source_stage"] = source_stage
+        public["ranking_cohort"] = f"stage:{source_stage}"
+        enriched.append(public)
+    return enriched
+
+
 def persist_official_results(
     store,
     contest_id: int,

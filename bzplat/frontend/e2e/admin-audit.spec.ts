@@ -695,6 +695,7 @@ test('contest admin exposes only phase-appropriate actions and flags invalid sch
 test('contest detail changes its primary content and actions with lifecycle stage', async ({ page }) => {
   const monitor = monitorBrowser(page)
   await loginThroughUi(page, ADMIN)
+  let lifecycleStatus: 'open' | 'published' = 'open'
   const commonContest = {
     organizer_id: 1,
     title: '阶段详情',
@@ -722,6 +723,8 @@ test('contest detail changes its primary content and actions with lifecycle stag
             entry_id: 1001,
             bot_id: 11,
             user_id: 21,
+            source_stage: 1,
+            ranking_cohort: 'stage:1',
             points: 3,
             bot_name: 'winner_bot',
             owner_name: 'winner_user',
@@ -740,6 +743,8 @@ test('contest detail changes its primary content and actions with lifecycle stag
             entry_id: 1002,
             bot_id: 12,
             user_id: 22,
+            source_stage: 1,
+            ranking_cohort: 'stage:1',
             points: 3,
             bot_name: 'runner_bot',
             owner_name: 'runner_user',
@@ -753,8 +758,40 @@ test('contest detail changes its primary content and actions with lifecycle stag
               technical_losses: 0,
               seed: 2,
             },
+          }, {
+            rank: 9,
+            entry_id: 1003,
+            bot_id: 13,
+            user_id: 23,
+            source_stage: 0,
+            ranking_cohort: 'stage:0',
+            points: 3,
+            bot_name: 'preliminary_bot',
+            owner_name: 'preliminary_user',
+            awarded: '',
+            tiebreaks: {
+              points: 3,
+              buchholz_cut1: 99,
+              sonneborn_berger: 99,
+              head_to_head: 1,
+              normalized_delta: 999,
+              technical_losses: 0,
+              seed: 3,
+            },
           }],
         }),
+      })
+      return
+    }
+    if (
+      url.pathname === '/api/contests/902/publish' &&
+      route.request().method() === 'POST'
+    ) {
+      lifecycleStatus = 'published'
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'published' }),
       })
       return
     }
@@ -771,10 +808,17 @@ test('contest detail changes its primary content and actions with lifecycle stag
         contest: {
           ...commonContest,
           id: Number(match[1]),
-          status: finished ? 'finished' : 'open',
+          status: finished ? 'finished' : lifecycleStatus,
           title: finished ? '阶段详情-已完成' : '阶段详情-报名中',
           registration_closes_at: finished ? '2026-08-09T13:00:00' : '2026-08-09T11:00:00',
           official_results_ready: finished ? 1 : 0,
+          current_stage_idx: finished ? 1 : 0,
+          stages_json: finished
+            ? JSON.stringify([
+                { key: 'swiss', type: 'swiss', scoring: 'poker_3_1_0' },
+                { key: 'final', type: 'round_robin', scoring: 'poker_3_1_0', ranking_mode: 'replace_top', ranking_scope: 2 },
+              ])
+            : commonContest.stages_json,
         },
         entries: finished ? [{ id: 1001, user_id: 21, bot_id: 11, bot_name: 'winner_bot' }] : [],
         pairings: finished ? [{
@@ -807,17 +851,24 @@ test('contest detail changes its primary content and actions with lifecycle stag
   await expect(page.getByText('冠军', { exact: true })).toBeVisible()
   await expect(page.getByText(/对手分 Cut1 4/)).toBeVisible()
   await expect(page.getByText(/对手分 Cut1 2/)).toBeVisible()
+  const preliminaryRow = page.getByRole('row').filter({ hasText: 'preliminary_bot' })
+  await expect(preliminaryRow.getByText('瑞士轮', { exact: true })).toBeVisible()
+  await expect(preliminaryRow.getByText('瑞士轮内名次已确定', { exact: true })).toBeVisible()
+  await expect(preliminaryRow.getByText(/对手分 Cut1/)).toHaveCount(0)
   await expect(page.getByText(/时间配置异常：报名截止时间晚于比赛开始时间/)).toBeVisible()
   await expect(page.getByRole('button', { name: /开放报名|截止报名|立即开赛|强制结束赛事/ })).toHaveCount(0)
   const contestTabs = page.getByRole('tablist').first()
   expect(await contestTabs.evaluate((element) => getComputedStyle(element).overflowY)).toBe('hidden')
   await page.getByRole('tab', { name: /对阵/ }).click()
-  await expect(page.locator('[data-pairing-result="decided"]:visible').filter({ hasText: '座位 1 胜' })).toBeVisible()
+  await expect(page.locator('[data-pairing-result="decided"]:visible').filter({ hasText: 'winner_bot 胜' })).toBeVisible()
 
   await page.goto('/#/contests/902')
   await expect(page.getByRole('tab', { name: /选手/ })).toHaveAttribute('data-state', 'active')
   await expect(page.getByRole('tab', { name: /对阵|阶段积分|正式名次/ })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '截止报名·出排期', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '立即开赛', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '截止报名·出排期', exact: true }).click()
+  await expect(page.getByRole('tab', { name: /对阵/ })).toHaveAttribute('data-state', 'active')
+  await expect(page.getByRole('button', { name: '立即开赛', exact: true })).toBeVisible()
   await monitor.expectClean()
 })

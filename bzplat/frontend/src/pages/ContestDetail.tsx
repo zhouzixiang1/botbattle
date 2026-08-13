@@ -160,6 +160,8 @@ interface OfficialResult {
   owner_name?: string
   owner_display?: string
   awarded?: string
+  source_stage?: number
+  ranking_cohort?: string
   tiebreaks?: {
     points?: number
     buchholz_cut1?: number
@@ -224,8 +226,22 @@ function ContestScheduleInfo({ c }: { c: Contest }) {
 
 const TIEBREAK_NUMBER = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })
 
-function OfficialTiebreakDetail({ result, hasPointTie }: { result: OfficialResult; hasPointTie: boolean }) {
-  if (!hasPointTie) return <span className="text-xs text-muted-foreground">积分已区分</span>
+function OfficialTiebreakDetail({
+  result,
+  hasPointTie,
+  sourceLabel,
+}: {
+  result: OfficialResult
+  hasPointTie: boolean
+  sourceLabel?: string | null
+}) {
+  if (!hasPointTie) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        {sourceLabel ? `${sourceLabel}内名次已确定` : '积分已区分'}
+      </span>
+    )
+  }
   const tiebreaks = result.tiebreaks
   if (!tiebreaks) return <span className="text-xs text-warning">破同分明细缺失</span>
   const values: string[] = []
@@ -263,7 +279,7 @@ export default function ContestDetail() {
   const actionLockRef = useRef(false)
   const activeContestIdRef = useRef<string | undefined>(id)
   const loadGenerationRef = useRef(0)
-  const contentTabInitializedRef = useRef(false)
+  const lastLoadedStatusRef = useRef<string | null>(null)
   const [confirm, confirmDialog, cancelConfirm] = useConfirm()
   // Params can change while this component instance is reused. Keep the authority
   // ref current during render, before effects run, so an old async handler cannot
@@ -334,8 +350,9 @@ export default function ContestDetail() {
       setStageTab(d.contest.current_stage_idx ?? 0)
       setEntriesTotal(d.entries_total ?? d.entries.length)
       setMyEntry(d.my_entry ?? null)
-      if (!contentTabInitializedRef.current) {
-        const status = d.contest.status
+      const status = d.contest.status
+      const previousStatus = lastLoadedStatusRef.current
+      if (previousStatus === null || previousStatus !== status) {
         setContentTab(
           status === 'finished'
             ? 'official'
@@ -343,8 +360,8 @@ export default function ContestDetail() {
               ? 'matchups'
               : 'entries',
         )
-        contentTabInitializedRef.current = true
       }
+      lastLoadedStatusRef.current = status
       setError(officialResultsError)
     } catch (e) {
       if (
@@ -378,7 +395,7 @@ export default function ContestDetail() {
     setStageTab(0)
     setStandingsPage(1)
     setContentTab('entries')
-    contentTabInitializedRef.current = false
+    lastLoadedStatusRef.current = null
     actionLockRef.current = false
     setBusyAction(false)
     return () => {
@@ -514,11 +531,12 @@ export default function ContestDetail() {
   )
   // 行号需要按全量排序位置计算（而非当前页内序），保证翻页后名次连续
   const standingsPageBase = (safeStandingsPage - 1) * standingsPerPage
-  const officialPointCounts = useMemo(() => {
-    const counts = new Map<number, number>()
+  const officialCohortPointCounts = useMemo(() => {
+    const counts = new Map<string, number>()
     for (const result of officialResults) {
-      const points = Number(result.points ?? 0)
-      counts.set(points, (counts.get(points) ?? 0) + 1)
+      const cohort = result.ranking_cohort || `stage:${result.source_stage ?? 0}`
+      const key = `${cohort}:${Number(result.points ?? 0)}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
     }
     return counts
   }, [officialResults])
@@ -561,7 +579,7 @@ export default function ContestDetail() {
     <PageFrame width="wide" layout="public-contest-detail">
       <PageHeader
         title="锦标赛详情"
-        description="赛事状态、赛程、选手和名次共用同一信息工作台。"
+        description="查看赛程、选手和比赛结果。"
         actions={
           <>
             <Button asChild variant="outline" size="sm">
@@ -1073,7 +1091,13 @@ export default function ContestDetail() {
                         </TableCell>
                       </TableRow>
                     ) : officialResults.map((result) => {
-                      const hasPointTie = (officialPointCounts.get(Number(result.points ?? 0)) ?? 0) > 1
+                      const cohort = result.ranking_cohort || `stage:${result.source_stage ?? 0}`
+                      const tieKey = `${cohort}:${Number(result.points ?? 0)}`
+                      const hasPointTie = (officialCohortPointCounts.get(tieKey) ?? 0) > 1
+                      const sourceStage = result.source_stage
+                      const sourceLabel = typeof sourceStage === 'number'
+                        ? (STAGE_TYPE_LABEL[stages[sourceStage]?.type || ''] || `阶段 ${sourceStage + 1}`)
+                        : null
                       return (
                       <TableRow key={result.entry_id}>
                         <TableCell className="font-mono text-base font-semibold text-primary">
@@ -1109,9 +1133,20 @@ export default function ContestDetail() {
                             </Link>
                           ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
-                        <TableCell className="font-mono font-semibold">{result.points ?? 0}</TableCell>
+                        <TableCell className="font-mono font-semibold">
+                          <span>{result.points ?? 0}</span>
+                          {sourceLabel && stages.length > 1 && (
+                            <span className="mt-0.5 block font-sans text-[10px] font-normal text-muted-foreground">
+                              {sourceLabel}
+                            </span>
+                          )}
+                        </TableCell>
                         <TableCell className="min-w-[22rem] max-w-[30rem]">
-                          <OfficialTiebreakDetail result={result} hasPointTie={hasPointTie} />
+                          <OfficialTiebreakDetail
+                            result={result}
+                            hasPointTie={hasPointTie}
+                            sourceLabel={stages.length > 1 ? sourceLabel : null}
+                          />
                         </TableCell>
                         <TableCell className="hidden text-muted-foreground md:table-cell">
                           {result.awarded || '—'}

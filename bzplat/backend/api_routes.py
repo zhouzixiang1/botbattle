@@ -56,6 +56,7 @@ _ADMIN_PRIVATE_HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 from bzplat.backend.contests import ContestManager
+from bzplat.backend.contests.ranking import with_official_result_provenance
 from bzplat.backend.contests.presentation import build_stage_summaries
 from bzplat.backend.contests.showcase import (
     ShowcaseReadOnlyError,
@@ -2360,6 +2361,21 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
     if not int(c.get("official_results_ready") or 0):
         raise HTTPException(409, "正式名次尚未生成（赛事未结束或排名未落库）")
     rows = store.list_official_results(contest_id)
+    # replace_top 的正式榜同时包含决赛选手和预赛未晋级者；积分只在各自
+    # 来源阶段内可比较。先统一补齐读模型，再由 JSON/CSV 两种表示复用。
+    stage_entry_ids: dict[int, set[int]] = {}
+    for result in store.list_stage_results(contest_id):
+        try:
+            stage = int(result.get("stage_idx") or 0)
+            entry = int(result["entry_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        stage_entry_ids.setdefault(stage, set()).add(entry)
+    rows = with_official_result_provenance(
+        c,
+        rows,
+        stage_entry_ids=stage_entry_ids,
+    )
     if format.lower() == "csv":
         import csv as _csv
         import io
@@ -2368,7 +2384,8 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
             buf = io.StringIO()
             w = _csv.writer(buf)
             w.writerow(["rank", "entry_id", "bot_name", "owner_name", "points",
-                        "buchholz_cut1", "sonneborn_berger", "awarded"])
+                        "buchholz_cut1", "sonneborn_berger", "awarded",
+                        "source_stage", "ranking_cohort"])
             yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
             for r in rows:
@@ -2382,7 +2399,8 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
                     r["rank"], r["entry_id"], r.get("bot_name") or "",
                     r.get("owner_name") or "", r.get("points") or 0,
                     tb.get("buchholz_cut1", 0), tb.get("sonneborn_berger", 0),
-                    r.get("awarded") or "",
+                    r.get("awarded") or "", r["source_stage"],
+                    r["ranking_cohort"],
                 ])
                 yield buf.getvalue()
                 buf.seek(0); buf.truncate(0)
