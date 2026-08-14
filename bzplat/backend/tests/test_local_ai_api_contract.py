@@ -18,7 +18,6 @@ import bzplat.backend.api_routes as api_routes_module
 import bzplat.backend.runtime.local_ai_service as local_ai_service_module
 import bzplat.backend.store.db as store_db_module
 from fastapi.testclient import TestClient
-from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from bzplat.backend.crypto import hash_password
@@ -468,10 +467,11 @@ def test_local_ai_websocket_rejects_url_and_browser_credentials(
         ),
     )
     for url, headers in cases:
-        with pytest.raises(WebSocketDenialResponse) as denied:
+        with pytest.raises(WebSocketDisconnect) as denied:
             with client.websocket_connect(url, headers=headers):
                 pass
-        assert denied.value.status_code == 403
+        assert denied.value.code == 1008
+        assert denied.value.reason == "invalid_credentials"
 
     with client.websocket_connect(
         "/api/local-ai/connect", headers=bearer
@@ -918,21 +918,23 @@ def test_local_ai_websocket_pre_auth_gate_runs_before_db_lookup(
     monkeypatch.setattr(service, "authenticate", counted_authenticate)
     client = TestClient(app)
     for _ in range(20):
-        with pytest.raises(WebSocketDenialResponse) as denied:
+        with pytest.raises(WebSocketDisconnect) as denied:
             with client.websocket_connect(
                 "/api/local-ai/connect",
                 headers={"Authorization": "Bearer bzlai_" + "x" * 44},
             ):
                 pass
-        assert denied.value.status_code == 403
+        assert denied.value.code == 1008
+        assert denied.value.reason == "invalid_credentials"
     assert calls == 20
-    with pytest.raises(WebSocketDenialResponse) as limited:
+    with pytest.raises(WebSocketDisconnect) as limited:
         with client.websocket_connect(
             "/api/local-ai/connect",
             headers={"Authorization": "Bearer bzlai_" + "y" * 44},
         ):
             pass
-    assert limited.value.status_code == 403
+    assert limited.value.code == 1008
+    assert limited.value.reason == "invalid_credentials"
     assert calls == 20
 
 

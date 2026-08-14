@@ -24,7 +24,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 from starlette.datastructures import FormData, UploadFile
 
@@ -66,13 +66,12 @@ _LOCAL_AI_INBOUND_REFILL_PER_SECOND = 5.0
 async def _deny_local_ai_websocket(websocket: WebSocket) -> None:
     """Reject a connector during HTTP upgrade without exposing credentials."""
 
-    await websocket.send_denial_response(
-        JSONResponse(
-            status_code=403,
-            content={"detail": "本地 Bot 连接凭据无效"},
-            headers={"Cache-Control": "no-store"},
-        )
-    )
+    # Keep the rejection on the baseline ASGI WebSocket contract.  Uvicorn's
+    # SansIO backend can emit duplicate HTTP entity headers and leave its
+    # handshake state incomplete after ``websocket.http.response`` denial
+    # responses.  A close before accept is mapped to a valid HTTP 403 by every
+    # supported Uvicorn backend and never upgrades an unauthenticated peer.
+    await websocket.close(code=1008, reason="invalid_credentials")
 _DEBUG_NO_STORE_HEADERS = {
     "Cache-Control": "private, no-store, max-age=0",
     "Pragma": "no-cache",
