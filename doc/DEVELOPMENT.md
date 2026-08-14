@@ -236,7 +236,7 @@ python scripts/local_ai_client.py \
 - 客户端只接受 `wss://` 且拒绝 URL userinfo、query、fragment 和握手 30x 重定向；令牌只读 `BZ_LOCAL_AI_TOKEN`，只进入首个目标的 `Authorization: Bearer`，日志不输出连接异常正文，启动 Bot 子进程前还会从继承环境中移除该变量。重定向拒绝同时兼容 websockets 10.4--13 的 `handle_redirect` 与 14+ 的 `process_redirect`，未知连接实现 fail closed。
 - 单次服务端输入最大 1 MiB，Bot stdout 首行最大 64 KiB；`timeout_ms` 包括本机进程启动时间，超时后终止整个进程组。
 - 同一连接串行执行决策；断线按 1/2/4/8/16/30 秒退避，重连不改变服务端持有的绝对回合截止时间。
-- 服务端在数据库认证前按可信代理边界解析 peer IP，限制握手频率和同时认证数；Uvicorn 在解码前把单消息硬顶钉在 256 KiB（为 64 KiB Bot 输出经 JSON 转义预留空间），SansIO transport 每收到一条完整消息即暂停继续读取，应用兜底遇到超限消息立即以 1009 断开。已连接 socket 使用入站突发桶，SQLite 存活写合并到 15 秒一次。每用户最多 8 个 active identity、4 个在线连接，全站最多 64 个在线连接；令牌轮换同时受规范化 HTTP 路径桶和稳定 owner+agent 桶约束，并在同一 SQLite 事务拒绝仍持 active lease 的 identity，避免轮换中断正在执行的对局。
+- 服务端在数据库认证前按可信代理边界解析 peer IP，限制握手频率和同时认证数；未认证或被限流的连接在 `accept` 前发送标准 ASGI WebSocket policy close，由 Uvicorn 返回可解析的 HTTP 403，不走 SansIO 会产生重复实体头和未完成状态的 denial-response 扩展。Uvicorn 在解码前把单消息硬顶钉在 256 KiB（为 64 KiB Bot 输出经 JSON 转义预留空间），SansIO transport 每收到一条完整消息即暂停继续读取，应用兜底遇到超限消息立即以 1009 断开。已连接 socket 使用入站突发桶，SQLite 存活写合并到 15 秒一次。每用户最多 8 个 active identity、4 个在线连接，全站最多 64 个在线连接；令牌轮换同时受规范化 HTTP 路径桶和稳定 owner+agent 桶约束，并在同一 SQLite 事务拒绝仍持 active lease 的 identity，避免轮换中断正在执行的对局。
 - 撤销后的同名 identity 行可原子复用并换发全新 public id/token；账号或 Bot 停用会在同一 Store 事务撤销关联 identity、释放租约，transport 再由 hub 通知或周期复核关闭。
 - 用户端无需监听端口。生产反向代理必须允许 `/api/local-ai/connect` 的 WebSocket Upgrade 和 `Authorization` 请求头，并使用有效 TLS 证书。
 
