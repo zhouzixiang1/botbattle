@@ -12,6 +12,8 @@
    [Bot 开发指南](#/wiki?slug=bot-dev)构建为 Linux amd64 可执行文件。
 4. 上传前确认文件类型包含 `ELF 64-bit` 和 `x86-64`，再选择与程序一致的运行模式。
 
+想在上传前直接用自己电脑运行程序，可使用[本地 Bot 接入](#/wiki?slug=local-ai)。它由用户电脑主动连接，适合练习和调试，不计平台排行榜，也不能代替正式赛事版本。
+
 平台只接受 **Linux x86_64 ELF**。Windows、Linux 和 macOS 都可以使用开发指南中的
 Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 和 `.py` 源文件不能上传运行。
 
@@ -37,6 +39,7 @@ Docker 命令构建；`.exe`、Mach-O、ARM64 ELF 和 `.py` 源文件不能上�
 |------|------|
 | [通信协议](#/wiki?slug=protocol) | 信封、运行模式、三个游戏 payload 与故障处理 |
 | [Bot 开发指南](#/wiki?slug=bot-dev) | 完整最小示例、跨平台构建、验证、预检与排错 |
+| [本地 Bot 接入](#/wiki?slug=local-ai) | 三种运行环境、本机连接、令牌安全、消息格式与排错 |
 | [德州扑克](#/wiki?slug=texas) | 固定规则、动作码、请求字段与牌编码 |
 | [五子棋](#/wiki?slug=gomoku) | 固定规则、坐标、通信要点与完整示例 |
 | [点格棋](#/wiki?slug=pencil) | 固定规则、连走、累计棋钟、通信要点与完整示例 |

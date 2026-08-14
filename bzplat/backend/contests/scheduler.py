@@ -74,6 +74,14 @@ class ContestScheduler:
         的赛事快照，按快照里的 status 分派处理。避免「published→running 后同 tick 的 running
         循环又处理同一赛事」的双重推进。
         """
+        control = self.store.executions.control()
+        if self.store.executions.is_maintenance_control(control):
+            # Deployment readiness must not turn green while a background
+            # scheduler is still creating schedules, rounds or lifecycle
+            # transitions.  Existing active match completion is handled by the
+            # orchestrator callback; all proactive progression resumes on the
+            # next tick after explicit maintenance end.
+            return
         now = _now()
         # 一次性快照所有需检查的赛事（按 status 分组）
         snapshot: dict[str, list[dict]] = {}

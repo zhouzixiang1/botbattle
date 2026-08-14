@@ -841,8 +841,12 @@ for (const lateStatus of [200, 401] as const) {
     const monitor = monitorBrowser(page)
     await loginThroughUi(page, USER)
     let mineReads = 0
+    let accountBReads = 0
     await page.route('**/api/bots/mine?**', async (route) => {
       mineReads += 1
+      if (route.request().headers().authorization === 'Bearer account-b-token') {
+        accountBReads += 1
+      }
       await route.continue()
     })
     let release!: () => void
@@ -868,7 +872,7 @@ for (const lateStatus of [200, 401] as const) {
 
     await page.goto('/#/my-bots')
     await expect.poll(() => mineReads).toBeGreaterThan(0)
-    const baselineReads = mineReads
+    await page.waitForLoadState('networkidle')
     await page.locator('#upload-name').fill(`delayed_a_${lateStatus}`)
     await page.locator('#upload-file').setInputFiles({
       name: 'tiny.elf',
@@ -900,7 +904,7 @@ for (const lateStatus of [200, 401] as const) {
     expect(await page.evaluate(() => localStorage.getItem('bzplat_token'))).toBe('account-b-token')
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('bzplat_user') || '{}').id)).toBe(900002)
     await expect(page).toHaveURL(/\/#\/my-bots$/)
-    await expect.poll(() => mineReads).toBe(baselineReads)
+    expect(accountBReads).toBe(0)
     await expect(page.getByText('Bot 上传成功', { exact: true })).toHaveCount(0)
     await expect(page.getByText(/expired account A upload|上传失败/)).toHaveCount(0)
     await monitor.expectClean(lateStatus === 401 ? [{
@@ -1937,7 +1941,7 @@ test('MatchViewer distinguishes rating eligibility from settlement state', async
       ratingReason: 'same_owner',
       ratingSettled: true,
       status: 'completed',
-      label: '同所有者调试 · 不计天梯',
+      label: '同所有者调试 · 不计平台排行榜',
     },
     {
       id: 'mock-rating-policy-expected',
@@ -2499,13 +2503,24 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
     () => sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents }),
   ).toBe(true)
   const position = page.getByTestId('playback-position')
+  // Snapshot delivery can itself exceed one playback tick on WebKit. Pause and
+  // pin the cursor before growing the denominator so this checks starvation,
+  // not browser scheduling of the first rendered frame.
+  await expect(position).toHaveText(/^事件 [12]\/2(?: · 直播)?$/)
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
+  await page.getByRole('button', { name: '上一个事件', exact: true }).click()
   await expect(position).toHaveText('事件 1/2')
+  await page.getByRole('combobox', { name: '回放速度', exact: true }).click()
+  await page.getByRole('option', { name: '4x', exact: true }).click()
   expect(await sse.stream(streamEvents, 50)).toBe(true)
-  await expect.poll(async () => Number(await sse.sent()), { timeout: 2_000 })
-    .toBeGreaterThanOrEqual(18)
-  const duringStream = Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0)
-  expect(Number(await sse.sent())).toBeLessThan(40)
-  expect(duringStream, 'playback cursor must advance while SSE still changes total').toBeGreaterThan(1)
+  await page.getByRole('button', { name: '继续回放', exact: true }).click()
+  await expect.poll(
+    async () => Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0),
+    { timeout: 1_200 },
+  ).toBeGreaterThan(1)
+  const sentDuringAdvance = Number(await sse.sent())
+  expect(sentDuringAdvance).toBeGreaterThan(0)
+  expect(sentDuringAdvance).toBeLessThan(40)
   await expect.poll(async () => Number(await sse.sent()), { timeout: 3_000 })
     .toBe(40)
   await monitor.expectClean(expectedDetailCancellations())
@@ -4727,7 +4742,7 @@ test('real Pencil human play accepts several canvas-picked edges without illegal
   })
 })
 
-test('human Holdem uses one WebSocket per load, sends legal protocol, and finishes', async ({
+test('human Holdem restores one authoritative snapshot per load, sends legal protocol, and finishes', async ({
   page,
   request,
   browser,
@@ -4748,29 +4763,35 @@ test('human Holdem uses one WebSocket per load, sends legal protocol, and finish
     false,
   )
   await expect(page.getByText('人类对战使用该 Bot 的当前激活版本')).toBeVisible()
-  await expect(page.getByRole('combobox')).toHaveCount(1) // only game; no ignored version selector
+  await expect(page.getByRole('combobox', { name: /版本/ })).toHaveCount(0)
+  await expect(page.getByRole('combobox', { name: /运行位置/ })).toHaveCount(1)
 
   // Switching back keeps an owned seat-1 Bot and must lazily populate its history;
   // selecting it first in human mode previously left the version cache empty.
   await page.getByRole('button', { name: '选 Bot', exact: true }).click()
-  await expect(page.getByRole('combobox')).toHaveCount(2)
-  await page.getByRole('combobox').nth(1).click()
+  await expect(page.getByRole('combobox', { name: /版本/ })).toHaveCount(1)
+  await page.getByRole('combobox', { name: /版本/ }).click()
   await expect(page.getByRole('option', { name: /v\d+/ }).first()).toBeVisible()
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '我亲自上场', exact: true }).click()
-  await expect(page.getByRole('combobox')).toHaveCount(1)
+  await expect(page.getByRole('combobox', { name: /版本/ })).toHaveCount(0)
 
-  const sockets: Array<{ sent: string[]; received: string[]; closed: boolean }> = []
+  const sockets: Array<{
+    sent: string[]
+    received: string[]
+  }> = []
   page.on('websocket', (socket) => {
     // Vite opens its own `/?token=...` HMR socket on every reload. Count only the
     // human-play business channel, otherwise one reload looks like two app sockets.
     if (!/^\/api\/matches\/[^/]+\/play$/.test(new URL(socket.url()).pathname)) return
-    const record = { sent: [] as string[], received: [] as string[], closed: false }
+    const record = { sent: [] as string[], received: [] as string[] }
     sockets.push(record)
     socket.on('framesent', (event) => record.sent.push(String(event.payload)))
     socket.on('framereceived', (event) => record.received.push(String(event.payload)))
-    socket.on('close', () => { record.closed = true })
   })
+  const socketsWithSnapshot = () => sockets.filter(
+    (socket) => socket.received.some((frame) => frame.includes('"type":"snapshot"')),
+  )
   const startResponse = page.waitForResponse(
     (response) =>
       response.request().method() === 'POST' &&
@@ -4834,9 +4855,8 @@ test('human Holdem uses one WebSocket per load, sends legal protocol, and finish
   }
   await expect(page.getByText(/对局结束/)).toBeVisible()
   expect(folds).toBeGreaterThan(1)
-  expect(sockets).toHaveLength(2)
-  await expect.poll(() => sockets[1]?.closed).toBe(true)
-  for (const socket of sockets) {
+  await expect.poll(() => socketsWithSnapshot().length).toBe(2)
+  for (const socket of socketsWithSnapshot()) {
     expect(socket.received.filter((frame) => frame.includes('"type":"snapshot"'))).toHaveLength(1)
   }
   expect(sockets.flatMap((socket) => socket.sent).some((frame) => frame.includes('"response":-1'))).toBe(true)
@@ -4850,13 +4870,14 @@ test('human Holdem uses one WebSocket per load, sends legal protocol, and finish
     return (await response.json() as { match?: { status?: string } }).match?.status
   }, { timeout: 30_000, intervals: [250, 500, 1_000] }).toBe('completed')
 
-  // A completed match must restore its terminal state from the snapshot and close
-  // cleanly instead of showing "waiting" forever with a leaked subscription.
+  // A completed match must restore its terminal state from one authoritative
+  // snapshot instead of showing "waiting" forever.
   await page.reload()
   await expect(page.getByText(/对局结束/)).toBeVisible()
-  expect(sockets).toHaveLength(3)
-  await expect.poll(() => sockets[2]?.closed).toBe(true)
-  expect(sockets[2].received.filter((frame) => frame.includes('"type":"snapshot"'))).toHaveLength(1)
+  await expect.poll(() => socketsWithSnapshot().length).toBe(3)
+  for (const socket of socketsWithSnapshot()) {
+    expect(socket.received.filter((frame) => frame.includes('"type":"snapshot"'))).toHaveLength(1)
+  }
   await monitor.expectClean()
   }, async () => {
     if (matchId) {

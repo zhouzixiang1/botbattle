@@ -6,7 +6,7 @@ import json
 import logging
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from bzplat.backend.contests.stages import (
     PairingSpec,
@@ -25,7 +25,7 @@ from bzplat.backend.runtime.binary_integrity import require_binary_file_integrit
 from bzplat.backend.matches.result_contract import build_result_payload
 from bzplat.backend.games import normalize_game_id, registry as game_registry
 from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
-from bzplat.backend.store import Store
+from bzplat.backend.store import ExecutionQueueClosed, Store
 from bzplat.backend.store.db import match_deltas
 from bzplat.backend.store.validation import (
     validate_contest_times as _validate_contest_times,
@@ -45,6 +45,7 @@ from bzplat.backend.store.schema import (
     TYPE_CONTEST,
     require_supported_binary_metadata,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +83,36 @@ def _stored_game_id(row: dict, *, entity: str) -> str:
 
 
 class ContestManager:
-    def __init__(self, store: Store, orch: MatchOrchestrator) -> None:
+    def __init__(
+        self,
+        store: Store,
+        orch: MatchOrchestrator,
+        *,
+        execution_admission_required: Callable[[], bool] | None = None,
+    ) -> None:
         self.store = store
         self.orch = orch
+        # The production app enables the full dispatcher-state gate only once
+        # its singleton dispatcher owns the queue.  Pure contest unit-test
+        # managers keep their historical synchronous behavior, while the
+        # persistent deployment-drain bit is enforced for every caller.
+        self._execution_admission_required = execution_admission_required
+        # A deployment request and every contest path that can create/bind an
+        # execution unit share this process-local boundary.  SQLite guards the
+        # final writes as well; this lock closes the wider multi-transaction
+        # start/resume lifecycle so the maintenance API cannot acknowledge a
+        # drain halfway through it.
+        self.deployment_activity_lock = asyncio.Lock()
         # per-contest 锁：串行化所有写状态路径（start/publish/cancel/resume/advance/
         # maybe_finish/_dispatch_pending），防止请求与 scheduler/on_match_done 并发导致
         # 重复生成轮次或取消后继续派发。
         self._locks: dict[int, asyncio.Lock] = {}
+
+    def _requires_live_admission(self) -> bool:
+        """Whether this process currently owns the live execution queue."""
+        if self._execution_admission_required is None:
+            return False
+        return bool(self._execution_admission_required())
 
     def _lock(self, contest_id: int) -> asyncio.Lock:
         """取（或建）该 contest 的锁。
@@ -103,6 +127,32 @@ class ContestManager:
             lk = asyncio.Lock()
             self._locks[contest_id] = lk
         return lk
+
+    def _execution_admission_error(
+        self, *, maintenance_only: bool = False
+    ) -> ExecutionQueueClosed | None:
+        """Return the queue gate without mutating any contest state."""
+        control = self.store.executions.control()
+        if self.store.executions.is_maintenance_control(control):
+            return ExecutionQueueClosed(
+                "平台正在部署维护，赛事将在恢复后继续派发",
+                code="deployment_maintenance",
+            )
+        if maintenance_only:
+            return None
+        if self._requires_live_admission() and (
+            control.get("dispatcher_state") != "running"
+            or int(control.get("accepting") or 0) != 1
+        ):
+            return ExecutionQueueClosed(
+                "执行队列暂未开放，赛事对阵已保留",
+            )
+        return None
+
+    def _require_execution_admission(self) -> None:
+        error = self._execution_admission_error()
+        if error is not None:
+            raise error
 
     def create(
         self,
@@ -278,8 +328,14 @@ class ContestManager:
 
     async def open_registration(self, contest_id: int) -> dict:
         """手动开放报名；与发布、开赛等生命周期写路径共用赛事锁。"""
-        async with self._lock(contest_id):
-            return self._open_registration_locked(contest_id)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                error = self._execution_admission_error(
+                    maintenance_only=True
+                )
+                if error is not None:
+                    raise error
+                return self._open_registration_locked(contest_id)
 
     def _open_registration_locked(self, contest_id: int) -> dict:
         """draft→open 的实际逻辑（调用方已持 per-contest 锁）。
@@ -665,8 +721,9 @@ class ContestManager:
           pairing 的 scheduled_at 改成 now（立即到点）+ dispatch。避免重复生成 pairing。
         若要走两阶段（截止报名→出排期→到开赛时间再开打），用 publish() + 调度器。
         """
-        async with self._lock(contest_id):
-            return await self._start_locked(contest_id)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                return await self._start_locked(contest_id)
 
     async def _start_locked(self, contest_id: int) -> dict:
         """start 的实际逻辑（调用方已持 per-contest 锁）。"""
@@ -676,6 +733,10 @@ class ContestManager:
         require_mutable(c)
         if c["status"] not in (CONTEST_OPEN, CONTEST_DRAFT, CONTEST_PUBLISHED):
             raise ValueError("仅 open/draft/published 可开赛")
+        # Manual start must fail before validating/mutating schedules, pairing
+        # batches or lifecycle state.  The HTTP layer maps this queue gate to a
+        # retryable 503 instead of pretending the contest started.
+        self._require_execution_admission()
         game_id = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         self._assert_engine(game_id)
 
@@ -787,8 +848,14 @@ class ContestManager:
         调度器到点 dispatch（scheduled_at<=now 的 pairing 才开打）。
         组织者可手动调本方法提前出排期；调度器到 registration_closes_at 自动调。
         """
-        async with self._lock(contest_id):
-            return await self._publish_locked(contest_id)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                error = self._execution_admission_error(
+                    maintenance_only=True
+                )
+                if error is not None:
+                    raise error
+                return await self._publish_locked(contest_id)
 
     async def _publish_locked(self, contest_id: int) -> dict:
         """publish 的实际逻辑（调用方已持 per-contest 锁）。"""
@@ -1111,8 +1178,11 @@ class ContestManager:
 
     async def ensure_published_pairings(self, contest_id: int, stage_idx: int) -> None:
         """修复 published 空壳/残缺首批对阵；与取消/开赛共用赛事锁。"""
-        async with self._lock(contest_id):
-            self._ensure_published_pairings_locked(contest_id, stage_idx)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                if self._execution_admission_error() is not None:
+                    return
+                self._ensure_published_pairings_locked(contest_id, stage_idx)
 
     @staticmethod
     def _pairing_batch_signature(rows: list[dict]) -> Counter:
@@ -1292,8 +1362,9 @@ class ContestManager:
         注意：maybe_finish 持锁链路（_begin_stage/_maybe_next_*）调
         _dispatch_pending_locked（不重复获锁，防 asyncio.Lock 不可重入死锁）。
         """
-        async with self._lock(contest_id):
-            await self._dispatch_pending_locked(contest_id, stage_idx)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                await self._dispatch_pending_locked(contest_id, stage_idx)
 
     def _adjudicate_unavailable_pairing(
         self,
@@ -1341,41 +1412,20 @@ class ContestManager:
         import secrets
 
         mid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(4)
-        try:
-            self.store.create_match(
-                mid,
-                bot_a_id=pairing.get("bot_a_id"),
-                bot_b_id=pairing.get("bot_b_id"),
-                owner_id=contest.get("organizer_id"),
-                contest_id=contest["id"],
-                match_type=TYPE_CONTEST,
-                game_id=gid,
-                match_config={},
-            )
-            self.store.update_match(
-                mid,
-                status=STATUS_COMPLETED,
-                reason="contest_bot_unavailable",
-                winner=winner,
-                result=build_result_payload(
-                    game_registry.get(gid),
-                    rounds_played=0,
-                    deltas=[ea, eb],
-                ),
-                technical_loss=1,
-                ended_at=_now(),
-            )
-            self.store.upsert_replay(mid, "[]")
-            self.store.bind_contest_pairing_match(
-                contest["id"],
-                pairing["id"],
-                mid,
-                activate_running=activate_running,
-            )
-        except Exception:
-            # 绑定竞态失败时不留下无 pairing 引用的伪对局。
-            self.store.delete_match(mid)
-            raise
+        self.store.adjudicate_unavailable_contest_pairing(
+            contest["id"],
+            pairing["id"],
+            mid,
+            game_id=gid,
+            winner=winner,
+            result=build_result_payload(
+                game_registry.get(gid),
+                rounds_played=0,
+                deltas=[ea, eb],
+            ),
+            activate_running=activate_running,
+            require_execution_admission=self._requires_live_admission(),
+        )
         logger.warning(
             "contest technical loss: contest=%s pairing=%s match=%s winner=%s "
             "unavailable=%s",
@@ -1408,6 +1458,11 @@ class ContestManager:
         # P1-5 修复：锁内重检状态——published 可能在 scheduler snapshot 后被取消，
         # finished/cancelled 的 pending pairing 不应再派发（否则产孤儿对局）。
         if not c or c["status"] not in (CONTEST_PUBLISHED, CONTEST_RUNNING):
+            return
+        # Scheduler/reconcile/completion callbacks are retry loops.  Hold the
+        # existing pairing exactly as-is during deployment instead of creating
+        # a technical result, binding a match or moving published -> running.
+        if self._execution_admission_error() is not None:
             return
         require_mutable(c)
         now = _now()
@@ -1559,6 +1614,7 @@ class ContestManager:
                 pairing["id"],
                 mid,
                 activate_running=activate_running,
+                require_execution_admission=self._requires_live_admission(),
             )
             bound = True
             starter = getattr(self.orch, "start_prepared_match", None)
@@ -1875,82 +1931,83 @@ class ContestManager:
         显式证明是管理员主动中止时，才立即安全重派；platform_error
         等平台故障不在回调栈里无限快速重试，留给 scheduler/reconcile。
         """
-        async with self._lock(contest_id):
-            contest = self.store.get_contest(contest_id)
-            match = self.store.get_match(match_id)
-            if not contest or not match:
-                return None
-            if is_showcase(contest):
-                return contest
-            if match.get("status") == STATUS_ABORTED:
-                pairing = self.store.reset_aborted_contest_pairing(
-                    contest_id, match_id
-                )
-                if pairing:
-                    if not retry_aborted:
-                        backoff_at = (
-                            datetime.now() + timedelta(seconds=30)
-                        ).isoformat(timespec="seconds")
-                        # 不要把原本更远的排期拉近；平台故障至少退避
-                        # 30 秒，避免 scheduler 每个 tick 立即重创 match。
-                        scheduled_at = max(
-                            str(pairing.get("scheduled_at") or ""), backoff_at
-                        )
-                        pairing = self.store.update_contest_pairing(
-                            pairing["id"], scheduled_at=scheduled_at
-                        ) or pairing
-                    logger.warning(
-                        "contest match aborted without adjudication: contest=%s "
-                        "pairing=%s match=%s reason=%s; reset to pending%s",
-                        contest_id,
-                        pairing["id"],
-                        match_id,
-                        match.get("reason"),
-                        " with backoff" if not retry_aborted else " for admin redispatch",
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                contest = self.store.get_contest(contest_id)
+                match = self.store.get_match(match_id)
+                if not contest or not match:
+                    return None
+                if is_showcase(contest):
+                    return contest
+                if match.get("status") == STATUS_ABORTED:
+                    pairing = self.store.reset_aborted_contest_pairing(
+                        contest_id, match_id
                     )
-                    if (
-                        retry_aborted
-                        and contest.get("status") == CONTEST_RUNNING
-                    ):
-                        # The queue keeps a terminal match's job in ``settling``
-                        # until exact sandbox cleanup is confirmed.  Enqueue is
-                        # idempotent for an active contest_pairing_id, so trying
-                        # to redispatch before finalization merely returns the old
-                        # job and makes "immediate" admin redispatch a no-op.
-                        # Finalize after the orchestrator's cleanup barrier, then
-                        # verify this specific job no longer occupies the pairing.
-                        old_execution = self.store.executions.get_by_match(match_id)
-                        self.store.executions.finalize_ready()
-                        if old_execution is not None:
-                            latest_execution = self.store.executions.get(
-                                str(old_execution["public_id"])
+                    if pairing:
+                        if not retry_aborted:
+                            backoff_at = (
+                                datetime.now() + timedelta(seconds=30)
+                            ).isoformat(timespec="seconds")
+                            # 不要把原本更远的排期拉近；平台故障至少退避
+                            # 30 秒，避免 scheduler 每个 tick 立即重创 match。
+                            scheduled_at = max(
+                                str(pairing.get("scheduled_at") or ""), backoff_at
                             )
-                            if latest_execution and latest_execution.get("status") in {
-                                "queued", "starting", "running", "settling"
-                            }:
-                                logger.warning(
-                                    "contest admin abort awaits execution cleanup: "
-                                    "contest=%s pairing=%s request=%s",
-                                    contest_id,
-                                    pairing["id"],
-                                    old_execution["public_id"],
-                                )
-                                return self.store.get_contest(contest_id)
-                        await self._dispatch_pending_locked(
-                            contest_id, int(pairing.get("stage_idx") or 0)
+                            pairing = self.store.update_contest_pairing(
+                                pairing["id"], scheduled_at=scheduled_at
+                            ) or pairing
+                        logger.warning(
+                            "contest match aborted without adjudication: contest=%s "
+                            "pairing=%s match=%s reason=%s; reset to pending%s",
+                            contest_id,
+                            pairing["id"],
+                            match_id,
+                            match.get("reason"),
+                            " with backoff" if not retry_aborted else " for admin redispatch",
                         )
-                return self.store.get_contest(contest_id)
-            if match.get("status") == STATUS_COMPLETED:
-                self.store.complete_contest_pairing_for_match(
-                    contest_id, match_id
-                )
-            result = await self._maybe_finish_locked(contest_id)
-            latest = self.store.get_contest(contest_id)
-            if latest and latest.get("status") == CONTEST_RUNNING:
-                await self._dispatch_pending_locked(
-                    contest_id, int(latest.get("current_stage_idx") or 0)
-                )
-            return result or self.store.get_contest(contest_id)
+                        if (
+                            retry_aborted
+                            and contest.get("status") == CONTEST_RUNNING
+                        ):
+                            # The queue keeps a terminal match's job in ``settling``
+                            # until exact sandbox cleanup is confirmed.  Enqueue is
+                            # idempotent for an active contest_pairing_id, so trying
+                            # to redispatch before finalization merely returns the old
+                            # job and makes "immediate" admin redispatch a no-op.
+                            # Finalize after the orchestrator's cleanup barrier, then
+                            # verify this specific job no longer occupies the pairing.
+                            old_execution = self.store.executions.get_by_match(match_id)
+                            self.store.executions.finalize_ready()
+                            if old_execution is not None:
+                                latest_execution = self.store.executions.get(
+                                    str(old_execution["public_id"])
+                                )
+                                if latest_execution and latest_execution.get("status") in {
+                                    "queued", "starting", "running", "settling"
+                                }:
+                                    logger.warning(
+                                        "contest admin abort awaits execution cleanup: "
+                                        "contest=%s pairing=%s request=%s",
+                                        contest_id,
+                                        pairing["id"],
+                                        old_execution["public_id"],
+                                    )
+                                    return self.store.get_contest(contest_id)
+                            await self._dispatch_pending_locked(
+                                contest_id, int(pairing.get("stage_idx") or 0)
+                            )
+                    return self.store.get_contest(contest_id)
+                if match.get("status") == STATUS_COMPLETED:
+                    self.store.complete_contest_pairing_for_match(
+                        contest_id, match_id
+                    )
+                result = await self._maybe_finish_locked(contest_id)
+                latest = self.store.get_contest(contest_id)
+                if latest and latest.get("status") == CONTEST_RUNNING:
+                    await self._dispatch_pending_locked(
+                        contest_id, int(latest.get("current_stage_idx") or 0)
+                    )
+                return result or self.store.get_contest(contest_id)
 
     async def maybe_finish(self, contest_id: int) -> dict | None:
         """对局结束回调：检查当前阶段是否完成，进入 rest 或下一阶段。
@@ -1958,8 +2015,9 @@ class ContestManager:
         加 per-contest 锁串行化——防止多场对局同时完成的 on_match_done 并发回调
         + scheduler 并发调用导致重复生成轮次/重复对局。
         """
-        async with self._lock(contest_id):
-            return await self._maybe_finish_locked(contest_id)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                return await self._maybe_finish_locked(contest_id)
 
     async def _maybe_finish_locked(self, contest_id: int) -> dict | None:
         """maybe_finish 的实际逻辑（调用方已持锁）。"""
@@ -1973,6 +2031,12 @@ class ContestManager:
 
         stage_idx = int(c.get("current_stage_idx") or 0)
         self._sync_completed_pairings(contest_id, stage_idx)
+        # Mirroring an already completed match is part of draining that active
+        # work.  New rounds, stage snapshots and lifecycle transitions are not:
+        # hold them until explicit maintenance end so ready cannot race a
+        # scheduler write after the execution callback has quiesced.
+        if self._execution_admission_error() is not None:
+            return self.store.get_contest(contest_id)
         stages = _parse_stages(c)
         if not self._stage_done(contest_id, stage_idx):
             # 瑞士制：当前轮完成则生成下一轮
@@ -2045,6 +2109,15 @@ class ContestManager:
         所以对账须在 maybe_finish 之后显式 _dispatch_pending 死而复生的 pending pairing。
         返回处理的 contest 数。
         """
+        maintenance = self.store.executions.is_maintenance_control(
+            self.store.executions.control()
+        )
+        # Under deployment drain the dispatcher still invokes recovery so
+        # already-active attempts can be compensated, but proactive contest
+        # lifecycle writes must wait for explicit maintenance end.
+        if maintenance:
+            return 0
+
         # 0. 修复旧版本留下的观测时间线。此步骤幂等，覆盖 finished
         # 历史赛事以及当前 running 赛事，不改任何裁决结果。
         for contest in self.store.list_contests():
@@ -2126,8 +2199,9 @@ class ContestManager:
         此方法逐 pairing 隔离其他派发错误；Bot 缺失则与正常派发共用
         ``_adjudicate_unavailable_pairing`` 的单侧技术判负/双侧阻塞契约。
         """
-        async with self._lock(contest_id):
-            await self._dispatch_pending_safe_locked(contest_id, stage_idx)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                await self._dispatch_pending_safe_locked(contest_id, stage_idx)
 
     async def _dispatch_pending_safe_locked(self, contest_id: int, stage_idx: int) -> None:
         """_dispatch_pending_safe 的实际逻辑（调用方已持锁）。"""
@@ -2135,6 +2209,8 @@ class ContestManager:
         # reconcile 在锁外按 running 快照选中赛事后，可能先被 finish 收尾；
         # 锁内必须重检，终态不得再派发或制造 aborted 占位对局。
         if not c or c["status"] != CONTEST_RUNNING:
+            return
+        if self._execution_admission_error() is not None:
             return
         gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         # 复式赛制判断（与 _dispatch_pending_locked 一致）——reconcile 重派也保留
@@ -2464,8 +2540,9 @@ class ContestManager:
         scheduler tick（锁外）调本方法；maybe_finish 锁内链路调 _resume_locked
         （防 asyncio.Lock 不可重入死锁 + 防双发竞态，与 _dispatch_pending 同模式）。
         """
-        async with self._lock(contest_id):
-            return await self._resume_locked(contest_id)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                return await self._resume_locked(contest_id)
 
     async def _resume_locked(self, contest_id: int) -> dict:
         """resume 的实际逻辑（调用方已持 per-contest 锁）。"""
@@ -2475,6 +2552,10 @@ class ContestManager:
         require_mutable(c)
         if c["status"] != CONTEST_REST:
             raise ValueError("当前不在休息期")
+        # Resuming creates the next stage and moves the contest back to
+        # running.  Gate before either write so deployment cannot leave a
+        # misleading running stage with no admissible execution.
+        self._require_execution_admission()
         stage_idx = int(c.get("current_stage_idx") or 0)
         stages = _parse_stages(c)
         if stage_idx + 1 >= len(stages):
@@ -2488,16 +2569,21 @@ class ContestManager:
 
     async def advance(self, contest_id: int) -> dict:
         """组织者强制推进（跳过未完成检查时仅在阶段已完成时可用）。"""
-        c = self.store.get_contest(contest_id)
-        if not c:
-            raise ValueError("比赛不存在")
-        require_mutable(c)
-        if c["status"] == CONTEST_REST:
-            return await self.resume(contest_id)
-        stage_idx = int(c.get("current_stage_idx") or 0)
-        if not self._stage_done(contest_id, stage_idx):
-            raise ValueError("当前阶段对阵尚未全部完成")
-        return (await self.maybe_finish(contest_id)) or self.store.get_contest(contest_id)
+        async with self.deployment_activity_lock:
+            async with self._lock(contest_id):
+                c = self.store.get_contest(contest_id)
+                if not c:
+                    raise ValueError("比赛不存在")
+                require_mutable(c)
+                self._require_execution_admission()
+                if c["status"] == CONTEST_REST:
+                    return await self._resume_locked(contest_id)
+                stage_idx = int(c.get("current_stage_idx") or 0)
+                if not self._stage_done(contest_id, stage_idx):
+                    raise ValueError("当前阶段对阵尚未全部完成")
+                return (
+                    await self._maybe_finish_locked(contest_id)
+                ) or self.store.get_contest(contest_id)
 
     async def finish(self, contest_id: int) -> dict:
         """组织者/admin 强制结束赛事（running/rest → finished）。

@@ -15,7 +15,9 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, Event
+from types import SimpleNamespace
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -370,6 +372,50 @@ def test_upload_admission_is_shared_busy_and_worker_cancel_safe(
     assert create_calls == 2
 
 
+def test_cancelled_upload_releases_counter_and_permit_after_mutex_wait(
+    tmp_path,
+):
+    """Level cancellation cannot strand deployment/upload admission state."""
+    import bzplat.backend.api_routes as api_routes
+
+    app = _app(tmp_path)
+    app.state.store.executions.resume()
+    request = SimpleNamespace(app=app)
+
+    async def exercise() -> None:
+        entered = anyio.Event()
+        finished = anyio.Event()
+        scopes: list[anyio.CancelScope] = []
+
+        async def upload() -> None:
+            with anyio.CancelScope() as scope:
+                scopes.append(scope)
+                async with api_routes._bot_upload_admission(request):
+                    entered.set()
+                    await anyio.sleep_forever()
+            finished.set()
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(upload)
+            await entered.wait()
+            await app.state.bot_upload_activity_lock.acquire()
+            assert app.state.bot_upload_activity["active"] == 1
+            assert app.state.bot_upload_gate.locked()
+
+            scopes[0].cancel()
+            await anyio.sleep(0)
+            assert finished.is_set() is False
+            assert app.state.bot_upload_activity["active"] == 1
+
+            app.state.bot_upload_activity_lock.release()
+            await finished.wait()
+
+        assert app.state.bot_upload_activity["active"] == 0
+        assert app.state.bot_upload_gate.locked() is False
+
+    anyio.run(exercise, backend="asyncio")
+
+
 def test_upload_admission_precedes_multipart_receive(tmp_path, monkeypatch):
     """A busy lane rejects another authenticated body before its first byte."""
     from httpx import ASGITransport, AsyncClient
@@ -445,6 +491,117 @@ def test_upload_admission_precedes_multipart_receive(tmp_path, monkeypatch):
             response = await asyncio.wait_for(first, timeout=1)
             assert response.status_code == 200, response.text
             assert first_body_reads == 1
+
+    asyncio.run(exercise())
+
+
+def test_deployment_drain_linearizes_with_upload_and_waits_for_preflight(
+    tmp_path,
+    monkeypatch,
+):
+    """A pre-boundary upload is counted; post-boundary bodies are never read."""
+    from httpx import ASGITransport, AsyncClient
+
+    app = _app(tmp_path)
+    store, owner = _setup(app)
+    admin = store.create_user(
+        "uploadmaintadmin",
+        "uploadmaintadmin@example.test",
+        hash_password("pw123456"),
+        role="admin",
+    )
+    store.update_user(admin["id"], email_verified=1)
+    store.executions.resume()
+    entered = Event()
+    release = Event()
+
+    def blocking_create(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(timeout=3)
+        return {
+            "id": 991,
+            "owner_id": owner["id"],
+            "name": "pre-boundary-upload",
+            "current_version": 1,
+        }
+
+    monkeypatch.setattr(
+        app.state.bot_manager, "create_from_upload", blocking_create
+    )
+
+    boundary = "maintenance-body-not-read"
+
+    async def exercise():
+        rejected_body_reads = 0
+
+        async def rejected_body():
+            nonlocal rejected_body_reads
+            rejected_body_reads += 1
+            yield b"untrusted multipart bytes"
+
+        transport = ASGITransport(app=app)
+        user_headers = _login(app)
+        admin_headers = _login(
+            app, username="uploadmaintadmin", password="pw123456"
+        )
+        async with AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            first = asyncio.create_task(
+                client.post(
+                    "/api/bots",
+                    headers=user_headers,
+                    data={"name": "pre-boundary-upload", "game_id": "holdem"},
+                    files={
+                        "file": (
+                            "bot.bin",
+                            b"pre-boundary",
+                            "application/octet-stream",
+                        )
+                    },
+                )
+            )
+            try:
+                assert await asyncio.wait_for(
+                    asyncio.to_thread(entered.wait, 2), timeout=2.5
+                )
+                begun = await client.post(
+                    "/api/admin/execution-queue/maintenance",
+                    headers=admin_headers,
+                    json={"reason": "上传边界测试"},
+                )
+                assert begun.status_code == 200, begun.text
+                assert begun.json()["maintenance"]["requested"] is True
+                assert begun.json()["maintenance"]["ready"] is False
+                assert begun.json()["maintenance"]["uploads_in_flight"] == 1
+
+                rejected = await client.post(
+                    "/api/bots",
+                    headers={
+                        **user_headers,
+                        "Content-Type": (
+                            "multipart/form-data; boundary=" + boundary
+                        ),
+                    },
+                    content=rejected_body(),
+                )
+                assert rejected.status_code == 503
+                assert (
+                    rejected.json()["detail"]["code"]
+                    == "deployment_maintenance"
+                )
+                assert rejected_body_reads == 0
+            finally:
+                release.set()
+            completed = await asyncio.wait_for(first, timeout=2)
+            assert completed.status_code == 200, completed.text
+            ready = await client.get(
+                "/api/admin/execution-queue/maintenance",
+                headers=admin_headers,
+            )
+            assert ready.status_code == 200
+            assert ready.json()["maintenance"]["uploads_in_flight"] == 0
+            assert ready.json()["maintenance"]["ready"] is True
 
     asyncio.run(exercise())
 

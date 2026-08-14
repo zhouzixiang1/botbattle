@@ -51,9 +51,11 @@ graph TB
 
 ### 1.2 运行模型
 - **单进程 uvicorn factory**（`main:create_app`），默认 `127.0.0.1:50380`。
-- **lifespan** 启动顺序：① 获取数据库邻接 OS flock；② 以绝对 DB 路径 hash 或 `BZ_INSTANCE_KEY` 得到精确 Docker namespace，并在共享 launch flock 下删除该 namespace 全部容器、连续确认 label/name/token 为 0、闭合 `docker_launch_journal`；③ 在单事务补偿 `starting/running/settling` execution attempt；④ 收敛未纳入队列的历史 orphan Match；⑤ 按 `settled_order` 补算评分；⑥ 对账赛事并启动唯一 `ExecutionDispatcher`、`ContestScheduler` 与 `DeliveryWorker`。execution 与上传预检的每次 create 都先持久化 token/确定性名称/host boot id，再向本机 daemon 发送请求；dispatcher 的周期性 orphan 检查也必须先取得同一 launch flock，等待正常 `creating/created -> idle` 转移完成后再判定，不能把活跃启动窗口误报为遗留意图。同 boot 的未 ACK create 不能凭瞬时双零自动放行，须保持 `manual:` 暂停，直到观察并删除精确 token 容器，或 host boot 改变后取得完整双零证明。其他 Docker 控制结果不确定时保持持久 `paused`，不执行步骤③以后内容；可证明安全的故障有界重试，管理员恢复也必须重新清场。通信 worker 启动时恢复中断的 sending/processing claim，再按优先级处理事务邮件、普通邮件与广播批次。停服先置 `accepting=0`，再停止调度与投递 worker、取消/等待本进程 attempt 并尽力清理，崩溃由下一次启动统一恢复。
+- **lifespan** 启动顺序：① 获取数据库邻接 OS flock；② 由该唯一 owner 清除上个进程遗留的本地 Bot 在线态/租约；③ 以绝对 DB 路径 hash 或 `BZ_INSTANCE_KEY` 得到精确 Docker namespace，并在共享 launch flock 下删除该 namespace 全部容器、连续确认 label/name/token 为 0、闭合 `docker_launch_journal`；④ 在单事务补偿 `starting/running/settling` execution attempt；⑤ 收敛未纳入队列的历史 orphan Match；⑥ 按 `settled_order` 补算评分、对账赛事并启动唯一 `ExecutionDispatcher`、`ContestScheduler` 与 `DeliveryWorker`。未取得 flock 的第二实例不得写 volatile 状态或 execution control。execution 与上传预检的每次 create 都先持久化 token/确定性名称/host boot id，再向本机 daemon 发送请求；dispatcher 的周期性 orphan 检查也必须先取得同一 launch flock，等待正常 `creating/created -> idle` 转移完成后再判定，不能把活跃启动窗口误报为遗留意图。同 boot 的未 ACK create 不能凭瞬时双零自动放行，须保持 `manual:` 暂停，直到观察并删除精确 token 容器，或 host boot 改变后取得完整双零证明。其他 Docker 控制结果不确定时保持持久 `paused`，不执行后续补偿；可证明安全的故障有界重试，管理员恢复也必须重新清场。通信 worker 启动时恢复中断的 sending/processing claim，再按优先级处理事务邮件、普通邮件与广播批次。停服先置 `accepting=0`，再停止调度与投递 worker、取消/等待本进程 attempt、关闭本地 Bot transport 并释放租约，最后才释放 dispatcher flock；崩溃由下一任唯一 owner 统一恢复。
 - **Docker 退出归因**：`docker start -a` 只有在证明非零 `StartedAt` 之前的失败才属于平台控制故障。容器一旦已启动，其后传回的任何进程退出码（包括 125）均归属 Bot，不得借此暂停平台或逃避评分。
-- **并发控制**：`manual/human/contest/auto` 全部先写 `execution_jobs.queued`，没有来源可直接创建或启动 Match。全局 `match_slots` 代码硬顶固定为 **1**，显式启动参数和 CPU ceiling 都不能放大；因此四类来源合计同一时刻只运行一场。claim 的 `BEGIN IMMEDIATE` 同时检查全局实际 running Match 数、活跃 match slots 和 sandbox units；Bot-vs-Bot 为 `1+2`，人机为 `1+1`，全局 sandbox 容量为 2。`starting/running/settling` 均占容量，直到 exact job/attempt label 清零。人工/人机有 per-user 活跃/排队上限，赛事有共享份额；source priority 配合无上限 aging，自动来源不永久饥饿。rated claim 另受 projection readiness 与同 Bot 未结算 rated-overlap 门禁。
+- **并发控制**：`manual/human/contest/auto` 全部先写 `execution_jobs.queued`，没有来源可直接创建或启动 Match。全局 `match_slots` 代码硬顶固定为 **1**，显式启动参数和 CPU ceiling 都不能放大；因此四类来源合计同一时刻只运行一场。claim 的 `BEGIN IMMEDIATE` 同时检查全局实际 running Match 数、活跃 match slots、sandbox units，以及由 affinity、cgroup CPU quota、cgroup memory limit 和物理内存共同收紧的主机 CPU/内存预算；资源使用取 job 创建时冻结的环境快照。赛事双 Bot 固定需要 4000 毫核/4096 MiB，主机永久不足时保持排队并公开直观原因，绝不降为节能档。`starting/running/settling` 均占容量，直到 exact job/attempt label 清零。人工/人机有 per-user 活跃/排队上限，赛事有共享份额；source priority 配合无上限 aging，自动来源不永久饥饿。rated claim 另受 projection readiness 与同 Bot 未结算 rated-overlap 门禁。
+- **资源档位与本地连接身份冻结**：execution job 在入队时冻结环境、`profile_version` 与资源向量，claim 创建 Match 时把同一版本复制到私有 `_execution_profile_version`。本地 Bot 的数据库 agent 行可在撤销后因同名重建而复用，因此 claim 还必须在同一事务把当时的 `public_id + connection_generation` 写入私有对局配置；runner 只使用这组冻结 transport identity，绝不按可复用行 ID 回查当前连接。旧 attempt 在撤销或同名换绑后只能命中旧连接的撤销/离线故障并技术终局，不能把裁判请求发给替代 Bot。上述私有键均由公开 Match 投影整体移除。runner 只按不可变历史 registry 解析资源版本，Traditional 每次决策、LongRunning、复式两条 leg 与人机 Bot 侧均使用同一冻结档位；未知版本或版本不支持的环境在 Match 进入 running 前按无效配置中止，不能回落到部署时当前档位。v0 仅表示迁移前的节能沙箱，v1 才包含节能与赛事沙箱；发布新规格只能追加 registry 版本，禁止改写旧映射。
+- **本地 Bot 回合故障闭环**：正常 `response` 与客户端 `failure` 共用 hub 的 `request_id + match_id + turn + deadline` 强绑定校验。`failure` 只接受固定六类原因和精确五字段信封，不接收路径、stderr、命令或任意详情；命令缺失/启动失败、空输出、超限、无效输出、I/O 故障与决策超时均立即令 pending Future 抛出 `LocalAITechnicalError`，按技术负收敛并释放唯一对局槽。错请求、晚到或重复 failure 只能被拒绝，不能影响其他回合；纯网络断线仍保留原 deadline 与重连重投语义。
 - **重试所有权**：运行期基础设施中断在 Match 终态且 label 清零后，用户拥有的 manual/human 标为 `interrupted + retryable=1`；auto/contest 始终 `retryable=0`，但同一持久 job 以 `failure_count/next_attempt_at` 做 1、2、4…60 秒退避，contest 同步延后 pairing。通用 `/retry` 不得复活后台来源，普通无错误重启则即时恢复，以免产生重复 active job 或每秒 attempt 热循环。
 - **限流**：内存滑动窗口 IP 限流（单进程；多 worker 部署需换 Redis）。
 
@@ -202,7 +204,9 @@ SQLite 单文件（默认 `botzone.db`）；fresh schema 同时包含全局执�
 | `pair_stats` | 对手战绩统计（a_wins/a_losses/draws/samples）；`samples` 的权威值恒等于胜+负+平 |
 | `match_rating_policies` / `match_rating_settlements` | 创建时冻结评分资格与双方/游戏身份；完成时冻结全局单调 settled_order，marker 与评分副作用 exactly-once。已结算源不可改写/删除 |
 | `rating_projection_state` / `rating_settlement_sequence` | 记录当前投影策略、覆盖水位及 `mutation_revision/trusted_mutation_revision`，分配新结算序号；未验证、摘要落后或 mutation 链不可信时自动排位 fail closed |
-| `execution_jobs` / `execution_job_attempts` | `manual/human/contest/auto` 通用持久请求及不可复活 attempt；只在原子 claim 时创建/绑定 Match，`starting/running/settling` 共同持有容量 |
+| `execution_jobs` / `execution_job_attempts` | `manual/human/contest/auto` 通用持久请求及不可复活 attempt；job 冻结双方环境、本地连接引用、sandbox/CPU/内存向量与 `profile_version`，只在原子 claim 时创建/绑定 Match，`starting/running/settling` 共同持有容量 |
+| `local_ai_agents` | 用户端本地 Bot 的连接身份；绑定 owner/Bot/game、不可枚举 public_id、令牌哈希/提示、撤销状态、连接代次与有界在线时间，原始 token 只在创建或轮换响应中出现一次 |
+| `local_ai_leases` | 本地 Bot 与 execution attempt/位置的占用凭据；active 唯一索引阻止同一连接并发服务两场，终局、撤销或服务重启时留下 released 审计；短暂断线期间保留租约和原 deadline 供同一身份重连 |
 | `execution_control` | dispatcher `stopped/starting/running/paused/stopping`、accepting、唯一 auto boolean、暂停原因及有界重试时间；不保存 PID/token/lease/daemon incarnation |
 | `auto_match_decisions` / `auto_match_fair_state` | 自动选择的永久审计、游戏与 `bootstrap/established` lane 游标；生命周期映射到通用 job，不充当第二套活跃队列 |
 | `auto_match_*_service` | 每游戏 auto 专属 owner/Bot/owner-pair/Bot-pair/座位服务计数，不受前台挑战操纵 |
@@ -235,6 +239,13 @@ aborted 的自由文本/旧管理员码归一到稳定原因码，避免运行�
 物理 fence/daemon incarnation/circuit-breaker 字段以及旧 auto/runtime KV；管理员开关迁入
 `execution_control.auto_enabled`。业务 `matches_*`、ratings、rating_history、pair_stats 与 settlement 行不改写，
 迁移二次打开不重复 job/decision/attempt。
+
+**三环境与本地 Bot 增量迁移**：幂等创建 `local_ai_agents/local_ai_leases`，并重建带耦合 CHECK 的
+`execution_jobs`，新增双方环境、本地 agent 引用、`sandbox_units/host_cpu_millis/host_memory_mb` 与
+`profile_version` 快照，同时保留原 job/attempt 主键和生命周期。既有平台任务按历史 v0 迁为节能沙箱；
+人机的真人位置保持 0 sandbox unit。新建任务使用 v1 白名单，赛事固定双高性能沙箱，自动排位固定双节能沙箱，
+日常挑战允许节能与本地 Bot 混合。启动时仅取得 dispatcher flock 的实例重置遗留在线态并释放旧租约；
+不回填原始令牌，也不把历史任务猜成用户端本地 Bot。
 
 **trigger schema-idempotency**：当前 39 个现行 trigger 统一经 `_ensure_trigger` 安装。helper 先校验
 identifier 与 `sqlite_master.type`，再以规范化 SQL 比较定义；同定义时零 `DROP/CREATE`、
@@ -276,7 +287,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 用户浏览：`GET /api/users`、`/api/users/{name}/profile`、`/bots`、`/followers`、`/following`
 - 对局浏览：`GET /api/matches`（`status` / `game_id` / `has_technical_incidents` 过滤；默认全状态）、`/matches/liked-top`、`/matches/{id}`。详情只返回顶层 `match` 元数据；事件由 `GET /api/matches/{id}/replay` 按 `match_id/events/event_count/updated_at` 四字段返回结构化数组，不再把 `events_json` 字符串二次包入详情 JSON。详情仍只返回当前身份的 `can_view_debug` 授权布尔值，不返回私有记录存在性/数量/内容，并按 Authorization/Cookie 设置 `Vary`。索引存在但物理 match 缺失时两个端点都返回 404；无 replay 的活动对局返回空事件，畸形历史 JSON fail closed，终态仍由权威 match 行合成唯一公开终局。活动人类对局的公共 replay 采用访客视角，隐藏双方底牌与 `your_turn` 请求。新写回放、实时 SSE 与历史公开回放的唯一故障事件名为 `technical_incident`；列表、详情只暴露 `technical_incident_count`、`technical_incidents_by_seat` 与最多 3 条脱敏 `technical_incident_samples`。历史库中的 `bot_decide_error` / `bot_technical_error` 仅在 Store 读取边界归一化；为兼容这些摘要，列表/详情只通过 SQLite JSON1 投影 incident 对象，不再把整段回放读入 Python。中止终局唯一为 `error {reason}` 两字段；REST replay、SSE 与人类 WS 共用同一公共投影，任意 message/路径/未知码或 Bot debug 都不会越过边界
 - 排行与元数据：`GET /api/leaderboard`、`/api/levels/info`、`/api/site/info`。排行榜 `game_id` 必填且未知值 fail closed，不跨游戏混排；公开排名资格唯一读取 `runtime/config.py::RANKING_MIN_RATED_MATCHES`，与 auto bootstrap lane 解耦。`rating_delta` 只等于同 Bot、同游戏当前 rating 与上一条历史快照之差；最近对局须同时通过 history reason、matches_index 游戏、物理表 completed 行及 Bot 座位四项校验
-- 执行队列：`GET /api/execution-queue` 返回 dispatcher 状态、match slots/sandbox units、active/queued 白名单；不返回内部 DB id、version id、path/checksum/token/match_config/decision id。公开暂停原因是有界安全诊断
+- 执行队列：`GET /api/execution-queue` 返回 dispatcher 状态、match slots/sandbox units、active/queued 白名单；不返回内部 DB id、version id、path/checksum/token/match_config/decision id。公开暂停原因是有界安全诊断。主机 CPU/内存余量只进入管理员 runtime 诊断；永久资源不足的排队项返回稳定 code 与用户可读原因，界面显示原因并隐藏不成立的有限 ETA，不能暗示会自动降档或很快开赛
 - 搜索：`GET /api/search`
 - 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
 - Wiki：`GET /api/wiki`
@@ -285,7 +296,8 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 ### 4.2 鉴权端点（require_user，登录玩家）
 - Bot 管理：`GET /api/bots/mine` 是 owner 库存视图，同时返回 active 与 inactive Bot，使停用后仍可查看和重新启用；公开 `/api/bots/public` 仍只返回 active 且可执行的 Bot。写入端点为 `POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`。新建与版本上传共享 `runtime/limits.py::MAX_BOT_UPLOAD_BYTES=100 MiB`，ASGI 请求体硬顶额外保留 1 MiB multipart 信封；两条前端写入口都以 XHR 报告真实传输进度，并在 request body 传完后切换到独立“服务端预检”阶段，不能把等待 ELF/协议预检伪装成仍在上传。上传冻结发送时的账号与 Bearer；账号、Bot 或弹窗变化会终止旧 XHR，迟到成功/失败不得刷新新账号、弹提示或用旧 401 清除新会话。
-- 对局请求：`POST /api/matches/challenge` 与 `/api/matches/human` 均返回 HTTP 202 的持久 request，而不是立即返回 Match。响应给 `public_id`、真实 `ahead_jobs/ahead_sandbox_units`、双容量向量和注明动态的 ETA 区间；Match 只在 claim 时出现。Bot-vs-Bot 的座位 1 对普通用户仍要求 owner 相同；管理员可从公开的全站 active+runnable Bot 中选择，但显式版本仍须属于所选 Bot，且活跃性、二进制完整性与游戏一致性继续 fail closed。挑战允许同 bot 同/不同版本，评分资格在 job 创建时冻结；同 owner/自博弈、人机、赛事保持中性，人机公开契约固定 `human_seat=1`（展示座位 2）
+- 本地 Bot：`GET /api/local-ai/agents` 列出本人连接，`POST /api/local-ai/agents` 创建并仅一次返回 token，`POST /api/local-ai/agents/{public_id}/rotate` 轮换，`DELETE` 撤销；`GET /api/local-ai/client` 下载不含凭据的参考连接器。所有响应私有且 `no-store`，连接令牌只通过环境变量和 Authorization header 使用，不进入 URL。
+- 对局请求：`POST /api/matches/challenge` 与 `/api/matches/human` 均返回 HTTP 202 的持久 request，而不是立即返回 Match。响应给 `public_id`、真实 `ahead_jobs/ahead_sandbox_units`、双容量向量和注明动态的 ETA 区间；Match 只在 claim 时出现。Bot-vs-Bot 的内部位置 0 对普通用户仍要求 owner 相同；管理员可从公开的全站 active+runnable Bot 中选择，但显式版本仍须属于所选 Bot，且活跃性、二进制完整性与游戏一致性继续 fail closed。挑战允许同 bot 同/不同版本，评分资格在 job 创建时冻结；同 owner/自博弈、人机、赛事保持中性，人机公开契约固定 `human_seat=1`。挑战页按游戏显示双方：德州“玩家 1/2”、五子棋“黑方/白方”、点格棋“红方/蓝方”，不把内部座位编号误写成跨游戏规则
 - 请求管理：`GET /api/execution-requests/{public_id}` 查询；`DELETE` 取消本人 manual/human；管理员可取消更广来源，其中 queued contest 取消会把 pairing 保持为 `pending + match_id=NULL` 并将 `scheduled_at` 至少后移 30 秒，避免 scheduler 立即重建同一请求；`POST /retry` 仅重试可重试的 interrupted request。终态旧 Match 是不可变审计，新 attempt 使用同一 public request 但新 Match id
 - 私有调试：`GET /api/matches/{id}/debug`；必须登录且通过 Store 终态/owner/赛事角色授权，成功与拒绝均 `Cache-Control: private, no-store`，读取记审计但不记录内容
 - 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；API 预检用于友好提示，Store 的关注、收藏、评论、点赞与取消点赞仍在 `BEGIN IMMEDIATE` 写事务内复核 actor/target，竞态删除或不存在统一 404；删除实体使用同级写锁清理多态关系与缓存，避免检查后删除造成孤儿或 500
@@ -303,9 +315,11 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 ### 4.4 管理员端点（require_admin）
 - 用户管理：`GET /api/admin/users`、`POST /role`、`PATCH/DELETE /api/admin/users/{id}`、`/sessions`
 - Bot/赛事管理：`GET /api/admin/{bots,contests}`、`PATCH/DELETE`、`GET /api/admin/contests/{id}/entries`；对局列表走公开 `GET /api/matches`，管理操作为 `PATCH/DELETE /api/admin/matches/{id}`
+- 本地 Bot 连接：`GET /api/admin/local-ai/agents` 分页查看 owner/Bot/游戏/在线状态，`DELETE /api/admin/local-ai/agents/{public_id}` 撤销异常连接；管理员不读取 token/hash，也不能代用户创建或轮换凭据。
 - **一致性闸门**：活跃对局的状态只能经 orchestrator 安全中止为 `aborted`，后台不能手工伪造 `pending/running/completed`；赛事 match 中止后保留 aborted 历史，原 pairing 原子复位 pending 供安全重派，无 winner 不得推进阶段。管理员赛事时间按状态收口：`draft` 可改开放/截止/开赛时间，`open` 只能改未来的截止/开赛时间，`published` 只能改开赛时间，其余状态只读；所有 PATCH 与旧值合并后整体验证，非法请求零部分写。`published` 改开赛时间时，只有尚未有任何 `match_id` 才可在同一事务中按发布时的轮次错峰规则重排当前阶段 pending pairing；显式 `starts_at:null` 同步清空逐场排期，一旦有对局绑定即拒绝整次修改。管理端排期表不为缺失字段生成当前时间等假默认值，空报名时间显式保存为 `NULL`；“按时间自动开赛”关闭时必须提交 `starts_at: null`，与未提交该字段（保留旧值）严格区分。已被任何对局、报名或对阵引用的用户/Bot 只能停用、不能由管理员硬删，避免 `SET NULL/CASCADE` 永久抹掉历史参赛身份；只有从未参赛且无引用的实体允许硬删。`published` 赛事删除表示先取消尚未开打排期再删除，`running/rest`、`finished`、已有正式榜或仍有 active match 时拒绝删除。
 - **赛事删除与持久队列**：`published` 即使尚未绑定 Match，只要仍有 `queued/starting/running/settling` execution request 也必须拒绝删除；不能让 pairing 的级联删除留下仍可被 dispatcher claim 的孤儿 job。
 - 配置：`GET /api/admin/settings/runtime` 仅返回 `source=code, mutable=false` 的只读诊断；`PUT /api/admin/auto-match` 只改 `execution_control.auto_enabled`，从而控制 auto job 的生成与 claim eligibility，不能影响 manual/human/contest 或在途局；`POST /api/admin/execution-queue/resume` 触发实际 namespace 清场与恢复，不能凭标志跳过。两者均写审计，QA 开启 auto 返回 409；站点文案仍由 `PATCH /api/admin/settings/site` 管理。不存在 runtime PATCH。
+- **部署排空**：`GET/POST/DELETE /api/admin/execution-queue/maintenance` 分别读取、开始和结束计划部署排空。开始操作以单个 `BEGIN IMMEDIATE` 同时持久化独立 drain 位、关闭 admission 与自动排位；已有活动任务继续 finalize/cleanup，queued job 与赛事 pairing 原样保留。新 challenge/human/retry/赛事派发以及 Bot 新建/版本上传在同一线性化边界后拒绝；已有 queued request 的公开投影统一给出 `blocked_code=deployment_maintenance` 与“恢复调度后继续排队”，不再展示误导性的有限等待时间。`ready` 由 active/settling job、未被 execution job 跟踪的 legacy running Match、上传、Docker launch journal、本地 Bot lease、本进程 execution task 与应用恢复回调实时派生，任一探针不可用即 fail closed。启动、运行环境恢复和关闭都不清 drain；只有 ready 时显式 DELETE 才恢复接单，且自动排位保持关闭。三个端点仅超级管理员可用并记录 actor、前后状态和冲突码。
 - 模板：只保留公开 `GET /api/contests/templates`，响应来自游戏注册表并标记 `source=code, mutable=false`；不存在 `/api/admin/templates*` CRUD/预览路由。
 - 平台通信：`GET /api/admin/communications/{inbox,sent,drafts,failed}`、`GET /api/admin/communications/threads/{public_id}`、`POST .../reply`。失败投递读模型只返回 public ID、公开用户名和脱敏错误码，不返回收件地址或内部主键
 - 广播：`POST /api/admin/communications/broadcasts/preview`、`POST /create`、`POST /{public_id}/cancel`、`GET /api/admin/communications/broadcasts[/{public_id}]`、`GET /{public_id}/deliveries`与 `POST /{public_id}/retry-failed`。preview 先去重解析 active users / role / game Bot owners / contest entrants / selected public usernames，并把用户快照、subject/body/channels 绑定到短期 token/hash；approve 重新执行 admin 权限校验，但不重算或暗改受众。手动重试只对显式选中的 failed recipient/delivery 追加一次有界机会，已发送、已取消或已达管理上限的项不会被重置
@@ -320,6 +334,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 ### 4.5 实时端点
 - **SSE** `GET /api/matches/{id}/events`：观赛事件流（先推 snapshot 再增量）。snapshot 已是 `completed/aborted` 或收到 `match_end/error` 时由服务端结束生成器并退订；前端同步切换到终态回放且不重连。
 - **WebSocket** `WS /api/matches/{id}/play`：人类对战落子回传。发送与接收为两个受控任务；终态 snapshot、`match_end` 或 `error` 会由服务端主动关闭连接，finally 取消另一侧任务并退订，不能依赖浏览器自觉 close。
+- **本地 Bot WSS** `WS /api/local-ai/connect`：用户端连接器主动向平台建立长连接，以 Authorization Bearer 认证；拒绝浏览器 Origin 与 query token。裁判按 `request_id/match_id/turn/deadline` 下发请求，客户端只回固定 `response` 或有界 `failure` 信封；成功通过四项绑定的单次裁判响应属于服务端请求流量，不消耗防主动滥用的入站桶，心跳、无效、重复与错绑定帧仍计入并可被 1008 断开。断线重连不延长原 deadline，撤销/轮换立即使旧身份失效。
 
 ## 5. 前端架构
 
@@ -370,7 +385,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - **全站收口**：`PageFrame` 统一提供 `wide/default/narrow/readable` 宽度档与 `mx-auto min-w-0`；公共/账户页按内容选择宽度档，超宽屏收口居中，移动端仍使用全局响应式 gutter。旧 PageStub 的 1536px 收口只用于兼容尚未迁移页面。
 - **桌面双栏（按需）**：内容密集页在 children 内自行 `lg:grid lg:grid-cols-[...]` 双栏，吃满宽度提升密度；`<lg` 自动堆叠为单列（响应式不破坏）：
   - **MyBots**：移除与列表重复的 SummaryStrip；`xl:grid-cols-[22rem_minmax(0,1fr)]` —— 左栏上传表单按内容自然收口，右栏筛选 + Bot 列表主区；不创建嵌套纵向滚动或长驻表单，页面全程由全局 main 滚动。行内编辑字段使用 `minmax(0,…)`，窄屏不会被固定宽度撑出横向滚动。
-  - **Admin Dashboard**：执行队列复用同一紧凑左右布局；最近用户的名称/角色/时间以及状态分布的长计数均置于 `minmax(0,…)` 容器并允许安全折行或截断，320/390px 不产生根级横向溢出。
+  - **Admin Dashboard**：执行队列复用同一紧凑左右布局；队列头部把部署状态、运行/等待数量、自动排位开关与单一主操作收在同一行，窄屏回落为全宽纵排。管理员选择“准备维护”后，后端在同一事务持久化排空标志、停止接单并关闭自动排位；当前局继续自然结束，等待任务原样保留。界面按顶层 `maintenance` 投影区分“排空中 / 可安全停服”，并优先显示仍在运行的对局、上传检查、本地 Bot 租约、遗留 running Match、沙箱启动、执行任务或 `readiness_unavailable` 探针/应用恢复等实际阻塞项；从 begin 成功到显式 DELETE 的整个排空期（包括 `ready=true`）只短轮询 `GET /api/admin/execution-queue/maintenance`，不重复提交写请求或刷新无关统计，并持续守护 ready 是否回退。显式恢复调度后自动排位仍保持关闭，须由管理员另行开启。部署排空与 Docker 故障暂停分开显示，后者继续使用“清场并恢复”，避免把正常部署动作包装成故障处置。最近用户的名称/角色/时间以及状态分布的长计数均置于 `minmax(0,…)` 容器并允许安全折行或截断，维护确认框与主操作在 390px 触控视口提供至少 44px 命中区，320/390px 不产生根级横向溢出。
   - **ContestDetail**：头部仅保留赛事说明、必要规则/阶段元数据与时间；主内容用生命周期 Tab 切换。对阵 Tab 在 `xl` 使用 `minmax(0,1fr)+22rem` 的对阵/阶段排名等高双栏，页面承担唯一纵向滚动，右栏不再创建内部纵滚或 sticky 错位；所有 completed pairing 在表格、折叠组和淘汰树中都显示明确座位胜负/平局/轮空结果。
 - **长列表分页（统一约定）**：行数可能很大的列表页一律用**服务端分页**而非一次全量渲染。统一契约：
   - 后端：`store/db.py` 的 `_paginate(c, base_query, params, page, per_page)` helper（返回 `(rows, total)`，page 从 1 起，per_page clamp `max(1,min(200))`）。列表 store 方法加 `page: int | None = None, per_page: int = 50`——`page is None` 时返回旧的全量 list（向后兼容，内部调用如赛事 manager 需全量）；`page` 传入时返回分页。
@@ -422,7 +437,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 本节是全站共享 UI 基础层的新入口；公共与账户页已整体迁移，游戏工作台与管理端按各自交互密度继续分阶段接入，既有组件导出与 props 保持兼容。
 
-- **密度与字体**：`index.css` 统一定义 12/16/20px 响应式 page gutter、桌面 32px/触屏 40px 标准控件、36px 表头与 40–44px 数据行。Card 默认 `p-4 + gap-3`，并提供 `density="compact"`（`p-3 + gap-2`）。标题与正文统一使用本机中文无衬线 fallback，标识符继续用等宽字体；不再依赖远程字体加载。
+- **密度与字体**：`index.css` 统一定义 12/16/20px 响应式 page gutter、桌面 32px/触屏 40px 标准控件、36px 表头与 40–44px 数据行。Card 默认 `p-4 + gap-3`，并提供 `density="compact"`（`p-3 + gap-2`）。标题与正文统一使用本机中文无衬线 fallback，标识符继续用等宽字体；不再依赖远程字体加载。Challenge 与 MyBots 的手机表单、链接和行操作进一步固定为至少 `44×44px` 触控区域，`sm+` 仍使用紧凑控件；Challenge 双方选择区使用 `max-w-5xl` 内容档，不把桌面任务压在窄表单中。
 - **页面组合件**：新页面使用 `components/layout` 的 `PageFrame → PageHeader → StickyToolbar/DataRegion`；只有与当前判断直接相关的指标才可作为区域内紧凑字段出现，不再使用跨页面的装饰性摘要条。`PageFrame` 根固定带 `data-page-layout`；需要独立滚动时才声明 `overflow`，并产生 `data-overflow-allowed` 与 `data-scroll-region`；sticky 区域带 `data-sticky-region`。这些 data 属性同时是截图、遮挡与横向溢出扫描的稳定测试契约。
 - **单滚动 owner**：兼容用 `<Table>` 仍默认自己拥有横向滚动；新宽表用 `<DataTable scrollLabel="…"><Table>…</Table></DataTable>`，context 会关闭内层 Table overflow，禁止再套业务 `overflow-x-auto`。已有外层滚动容器时用 `<Table scrollOwner="parent">`。局部定高双轴表格用 `DataTable overflow="both"` + `TableHeader sticky="region"`；随文档滚动的表头用 `sticky="page"`，其 offset 只读取统一 CSS 变量。
 - **长文本**：实体名、Bot 名使用 `EntityName`，UUID/checksum/版本号使用 `Identifier`，一般截断文本使用 `OverflowText`。截断时才出现可键盘访问的 Radix Tooltip；嵌入 Link/Button 时由外层交互控件担任 TooltipTrigger，禁止回退原生 `title=`。
@@ -436,7 +451,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 
 | 威胁 | 防护措施 |
 |------|---------|
-| **恶意 Bot** | Docker 硬隔离：`--network=none --memory=512m --cpus=1 --read-only --tmpfs /tmp --cap-drop=ALL --security-opt no-new-privileges --user 65534:65534 --pull=never --entrypoint /app/bot`；镜像须先验为 `linux/amd64`；资源硬顶（admin 不可抬高） |
+| **恶意 Bot** | 平台 Docker 共用 `--network=none --read-only --tmpfs /tmp --cap-drop=ALL --security-opt no-new-privileges --user 65534:65534 --pull=never --entrypoint /app/bot`，镜像先验为 `linux/amd64`；日常/上传预检档每 Bot 1 CPU/512 MiB，赛事档每 Bot 2 CPU/2 GiB。job/Match 冻结档位版本，主机准入再受 affinity、cgroup 与物理资源共同收紧，赛事不得降档；用户端本地 Bot 不进入平台 Docker，其 Bearer WSS 身份、回合 deadline 与故障信封另按本地连接契约校验 |
 | **Bot debug 泄漏/XSS/资源放大** | stdout 行 64 KiB；debug 单条/深度/节点/容器/每座位/整场多级硬顶，NFC+控制/bidi/ANSI 清理和敏感信息脱敏；独立表与鉴权 API、`no-store`、纯文本/JSON 渲染；公共 result/replay/SSE/WS/log 全部不承载 debug |
 | **接口滥用** | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s、captcha 60/60s、其他 120/60s），`BZ_RATE_LIMIT` 可关；Uvicorn 不改写 ASGI peer，`BZ_TRUST_PROXY=1` 时也仅允许 `BZ_TRUSTED_PROXY_CIDRS` 内 socket peer 提供合法 X-Real-IP/XFF，直连 LAN 伪造头仍按真实 peer 分桶 |
 | **暴力破解** | 图形验证码（注册/登录）；登录失败不区分用户名/密码错误 |

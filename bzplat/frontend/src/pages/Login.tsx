@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { LogIn } from 'lucide-react'
 import CaptchaField, { type CaptchaValue } from '@/components/CaptchaField'
@@ -11,6 +11,8 @@ import { ErrorMsg } from '@/components/ui/status'
 import { useAuth } from '@/components/useAuth'
 import { errMsg, isUnauthorized } from '@/api'
 
+const RAPID_SUBMIT_GUARD_MS = 500
+
 export default function Login() {
   const { login } = useAuth()
   const nav = useNavigate()
@@ -20,11 +22,20 @@ export default function Login() {
   const [captcha, setCaptcha] = useState<CaptchaValue>({ captcha_id: '', captcha_answer: '' })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const submitInFlightRef = useRef(false)
+  const lastSubmitStartedAtRef = useRef(Number.NEGATIVE_INFINITY)
 
   const sessionTip = params.get('reason') === 'expired'
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
+    const now = performance.now()
+    if (
+      submitInFlightRef.current ||
+      now - lastSubmitStartedAtRef.current < RAPID_SUBMIT_GUARD_MS
+    ) return
+    submitInFlightRef.current = true
+    lastSubmitStartedAtRef.current = now
     setBusy(true)
     setError('')
     try {
@@ -34,6 +45,7 @@ export default function Login() {
     } catch (err) {
       setError(errMsg(err, isUnauthorized(err) ? '用户名或密码错误' : '登录失败'))
     } finally {
+      submitInFlightRef.current = false
       setBusy(false)
     }
   }

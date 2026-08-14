@@ -20,6 +20,7 @@ from bzplat.backend.games.holdem import protocol as proto
 from bzplat.backend.games.holdem.holdem_judge import Card, Suit
 from bzplat.backend.matches.runner import MatchRunner, _botzone_decide
 from bzplat.backend.runtime.binary_runner import BinaryRunner
+from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 
@@ -94,8 +95,16 @@ def test_build_request_history_format():
 
 class _FakeSession:
     """模拟 BotSession 协议状态。"""
-    def __init__(self, *, runtime_mode="longrunning", turn=0, long_running=False):
+    def __init__(
+        self,
+        *,
+        runtime_mode="longrunning",
+        turn=0,
+        long_running=False,
+        profile=PLATFORM_LOW_PROFILE,
+    ):
         self.runtime_mode = runtime_mode
+        self.profile = profile
         self.requests = []
         self.responses = []
         self.turn = turn
@@ -111,11 +120,20 @@ class _FakeRunner:
         self.sent_lines: list[str] = []
         self._tmp_counter = 0
 
-    async def start_session(self, binary_path, *, runtime_mode="longrunning"):
+    async def start_session(
+        self,
+        binary_path,
+        *,
+        runtime_mode="longrunning",
+        profile=PLATFORM_LOW_PROFILE,
+    ):
         """traditional 每回合重启：返回临时 session id（复用同一 session 的响应队列）。"""
         self._tmp_counter += 1
         sid = f"tmp_trad_{self._tmp_counter}"
-        self._sessions[sid] = _FakeSession(runtime_mode=runtime_mode)
+        self._sessions[sid] = _FakeSession(
+            runtime_mode=runtime_mode,
+            profile=profile,
+        )
         return sid
 
     async def stop_session(self, sid):

@@ -94,7 +94,7 @@ botzone create-admin <user> <email> '<pass>'   # 建管理员，跳过邮箱验�
 - **Python 包名必须是 `bzplat`，绝不能叫 `platform`**（会遮蔽标准库 `platform`）。所有 import 用绝对路径 `from bzplat.backend... import ...`。
 - **常量按职责集中**：状态码、对局类型、`REGISTERED_ENGINES`、`VALID_GAME_IDS`、`VALID_RUNTIME_MODES`（traditional/longrunning）及历史 `platform_settings` 键名集中在 `bzplat/backend/store/schema.py`；生产运行参数集中在 `bzplat/backend/runtime/config.py`，资源硬顶及机器 ceiling 计算集中在 `runtime/limits.py`。禁止在消费者中散落同义字面量。
 - **后端禁止 `print()`**：统一用 `logging.getLogger(__name__)`（全仓 10+ 模块均如此）。
-- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定全站对局并发 1（`runtime/limits.py` 的 CPU ceiling 与显式启动注入都不能放大）、action timeout、全局执行容量/aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；自动排位只是 `source=auto` producer，仅 `execution_control.auto_enabled` 管理员总开关可变，公平策略/队列长度/退避不是运行时参数；`runtime/limits.py` 固定每 Bot `--cpus=1` / `--memory=512m` 与 Bot 文件上限 100 MiB。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
+- **代码持有的运行参数**（admin 不可修改）：`runtime/config.py` 固定全站对局并发 1、action timeout、全局执行容量/aging/用户上限、自动排位 bootstrap 目标、公开排名资格、赛事 scheduler、人类对战及 `FULL_RR_MAX_N=12`；自动排位只是 `source=auto` producer，仅 `execution_control.auto_enabled` 管理员总开关可变，公平策略/队列长度/退避不是运行时参数。`runtime/limits.py` 以追加式历史 registry 管理 Docker 资源档位：日常节能/自动排位/人机 Bot 侧及上传预检使用每 Bot `1 CPU / 512 MiB`，锦标赛固定每 Bot `2 CPU / 2 GiB`，`remote_local`/human 不占平台沙箱；execution job 入队时冻结环境、档位版本与资源向量，claim/Match/runner 不得降档或改绑到当前同名规格。主机准入再取进程 affinity、逻辑 CPU、cgroup 祖先配额、物理内存与 cgroup 内存上限的共同最小值，显式注入只能收紧，不能放大。Bot 文件上限固定 100 MiB。全员单/双循环阶段可设 `allow_large_round_robin` 旁路，但只允许白名单内置决赛模板如 `holdem_final_ranked`。
 
 ## 架构分层（编辑时切勿越界）
 

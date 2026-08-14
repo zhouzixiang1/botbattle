@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { CircleCheck, Clock3, PauseCircle, PlayCircle, Wrench } from 'lucide-react'
 import { toast } from 'sonner'
 import { apiFetch, apiJson, errMsg } from '@/api'
 import { MetricCard, Card, CardHeader, CardTitle, EmptyState, Loading, ErrorMsg, RefreshBtn, Button } from './ui'
@@ -40,16 +41,21 @@ const ROLE_LABEL: Record<string, string> = {
   admin: '管理员',
 }
 
+type QueueAction = 'auto' | 'prepare-maintenance' | 'resume' | 'recover' | null
+
 export default function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [queue, setQueue] = useState<ExecutionQueueSnapshot | null>(null)
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
-  const [savingAutoMatch, setSavingAutoMatch] = useState(false)
+  const [queueAction, setQueueAction] = useState<QueueAction>(null)
   const requestRevision = useRef(0)
-  const toggleInFlight = useRef(false)
+  const queueMutationInFlight = useRef(false)
   const [confirm, confirmDialog] = useConfirm()
+  const maintenanceActive = Boolean(
+    queue?.maintenance?.requested || queue?.dispatcher.maintenance,
+  )
 
   const pollDashboard = useCallback(async (signal: AbortSignal) => {
     const revision = requestRevision.current
@@ -71,7 +77,7 @@ export default function Dashboard() {
     offline,
   } = useSingleFlightPolling({
     task: pollDashboard,
-    enabled: !savingAutoMatch,
+    enabled: queueAction === null && !maintenanceActive,
     intervalMs: 5_000,
     maxIntervalMs: 40_000,
     onSuccess: () => {
@@ -84,11 +90,32 @@ export default function Dashboard() {
     },
   })
 
+  const pollMaintenance = useCallback(async (signal: AbortSignal) => {
+    const revision = requestRevision.current
+    const updated = await apiFetch<ExecutionQueueSnapshot>(
+      '/api/admin/execution-queue/maintenance',
+      { method: 'GET', signal },
+    )
+    if (signal.aborted || revision !== requestRevision.current) return
+    setQueue(updated)
+    setLastUpdatedAt(Date.now())
+  }, [])
+
+  const { refresh: refreshMaintenance } = useSingleFlightPolling({
+    task: pollMaintenance,
+    enabled: queueAction === null && maintenanceActive,
+    intervalMs: 1_500,
+    maxIntervalMs: 12_000,
+    onSuccess: () => setError(''),
+    onError: (e) => setError(errMsg(e, '读取排空进度失败')),
+  })
+  const refreshCurrent = maintenanceActive ? refreshMaintenance : refresh
+
   const toggleAutoMatch = async (enabled: boolean) => {
-    if (toggleInFlight.current) return
+    if (queueMutationInFlight.current || queue?.maintenance?.requested || queue?.dispatcher.maintenance) return
     const revision = ++requestRevision.current
-    toggleInFlight.current = true
-    setSavingAutoMatch(true)
+    queueMutationInFlight.current = true
+    setQueueAction('auto')
     try {
       const updated = await apiJson<ExecutionQueueSnapshot>(
         '/api/admin/auto-match',
@@ -104,22 +131,23 @@ export default function Dashboard() {
         toast.error(errMsg(e, '更新自动排位总开关失败'))
       }
     } finally {
-      toggleInFlight.current = false
-      setSavingAutoMatch(false)
+      queueMutationInFlight.current = false
+      setQueueAction(null)
     }
   }
 
   const resumeQueue = async () => {
-    if (toggleInFlight.current) return
+    if (queueMutationInFlight.current) return
     if (!await confirm({
       title: '清场并恢复执行队列',
       desc: '将删除当前平台实例标签下的所有容器，确认清零后补偿中断任务并恢复派发。',
       confirmText: '清场并恢复',
       danger: true,
+      buttonClassName: 'min-h-12 sm:min-h-9',
     })) return
     const revision = ++requestRevision.current
-    toggleInFlight.current = true
-    setSavingAutoMatch(true)
+    queueMutationInFlight.current = true
+    setQueueAction('recover')
     try {
       const updated = await apiJson<ExecutionQueueSnapshot>(
         '/api/admin/execution-queue/resume',
@@ -130,14 +158,73 @@ export default function Dashboard() {
       setLastUpdatedAt(Date.now())
       if (updated.dispatcher.state === 'paused') {
         toast.error(updated.dispatcher.pause_reason || '清理尚未确认，队列仍保持暂停')
+      } else if (updated.maintenance?.requested) {
+        toast.success('运行环境已恢复，继续完成部署排空')
       } else {
         toast.success('全局执行队列已恢复')
       }
     } catch (e) {
       toast.error(errMsg(e, '恢复全局执行队列失败'))
     } finally {
-      toggleInFlight.current = false
-      setSavingAutoMatch(false)
+      queueMutationInFlight.current = false
+      setQueueAction(null)
+    }
+  }
+
+  const prepareMaintenance = async () => {
+    if (!queue || queueMutationInFlight.current || queue.maintenance?.requested) return
+    if (!await confirm({
+      title: '准备部署维护',
+      desc: '平台会立即停止接收新任务并关闭自动排位。当前对局继续到自然结束，等待中的任务不会丢失。',
+      confirmText: '开始排空',
+      buttonClassName: 'min-h-12 sm:min-h-9',
+    })) return
+    if (queueMutationInFlight.current) return
+    const revision = ++requestRevision.current
+    queueMutationInFlight.current = true
+    setQueueAction('prepare-maintenance')
+    try {
+      const updated = await apiJson<ExecutionQueueSnapshot>(
+        '/api/admin/execution-queue/maintenance',
+        'POST',
+        { reason: '管理员准备部署' },
+      )
+      if (revision !== requestRevision.current) return
+      setQueue(updated)
+      setLastUpdatedAt(Date.now())
+      toast.success(updated.maintenance?.ready
+        ? '已排空，可以安全停服'
+        : '已停止接单；当前任务结束后即可停服')
+    } catch (error) {
+      if (revision !== requestRevision.current) return
+      toast.error(errMsg(error, '开始排空失败'))
+    } finally {
+      queueMutationInFlight.current = false
+      setQueueAction(null)
+    }
+  }
+
+  const leaveMaintenance = async () => {
+    if (queueMutationInFlight.current) return
+    const revision = ++requestRevision.current
+    queueMutationInFlight.current = true
+    setQueueAction('resume')
+    try {
+      const updated = await apiJson<ExecutionQueueSnapshot>(
+        '/api/admin/execution-queue/maintenance',
+        'DELETE',
+      )
+      if (revision !== requestRevision.current) return
+      setQueue(updated)
+      setLastUpdatedAt(Date.now())
+      toast.success('调度已恢复；自动排位仍保持关闭')
+    } catch (error) {
+      if (revision === requestRevision.current) {
+        toast.error(errMsg(error, '恢复调度失败'))
+      }
+    } finally {
+      queueMutationInFlight.current = false
+      setQueueAction(null)
     }
   }
 
@@ -161,7 +248,7 @@ export default function Dashboard() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">平台总览统计</p>
-        <RefreshBtn onClick={refresh} className="min-h-11" />
+        <RefreshBtn onClick={refreshCurrent} className="min-h-11" />
       </div>
       {(error || offline) && (
         <div role="alert"><ErrorMsg msg={offline ? '当前离线；以下保留上次成功数据。' : error} /></div>
@@ -183,31 +270,19 @@ export default function Dashboard() {
         error={offline ? '当前离线；联网后会自动刷新内部队列诊断。' : error}
         stale={!!queue && (offline || !!error)}
         lastUpdatedAt={lastUpdatedAt}
-        onRetry={refresh}
+        onRetry={refreshCurrent}
         maxQueued={6}
         compactOnMobile
         className="mt-5"
         action={queue ? (
-          <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
-            {queue.dispatcher.state === 'paused' && (
-              <Button size="sm" className="min-h-11" variant="outline" disabled={savingAutoMatch} onClick={() => { void resumeQueue() }}>
-                清场并恢复
-              </Button>
-            )}
-            <div className="flex min-h-11 min-w-0 max-w-full items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5">
-              <div className="min-w-0 text-right">
-                <div className="text-xs font-medium">自动排位</div>
-                <div className="truncate text-xs text-muted-foreground">仅控制自动任务生产</div>
-              </div>
-              <Switch
-                checked={queue.dispatcher.auto_enabled}
-                disabled={savingAutoMatch}
-                onCheckedChange={(checked) => { void toggleAutoMatch(checked) }}
-                aria-label="自动排位生产开关"
-                className="relative before:absolute before:-inset-3 before:content-['']"
-              />
-            </div>
-          </div>
+          <MaintenanceControls
+            queue={queue}
+            action={queueAction}
+            onToggleAuto={(checked) => { void toggleAutoMatch(checked) }}
+            onPrepare={() => { void prepareMaintenance() }}
+            onLeave={() => { void leaveMaintenance() }}
+            onRecover={() => { void resumeQueue() }}
+          />
         ) : null}
       />
 
@@ -250,6 +325,146 @@ export default function Dashboard() {
       {confirmDialog}
     </div>
   )
+}
+
+function MaintenanceControls({
+  queue,
+  action,
+  onToggleAuto,
+  onPrepare,
+  onLeave,
+  onRecover,
+}: {
+  queue: ExecutionQueueSnapshot
+  action: QueueAction
+  onToggleAuto: (enabled: boolean) => void
+  onPrepare: () => void
+  onLeave: () => void
+  onRecover: () => void
+}) {
+  const requested = Boolean(queue.maintenance?.requested || queue.dispatcher.maintenance)
+  const ready = Boolean(queue.maintenance?.ready)
+  const faultPaused = queue.dispatcher.state === 'paused'
+  const busy = action !== null
+  const normal = queue.dispatcher.state === 'running' && queue.dispatcher.accepting
+  const status = faultPaused
+    ? {
+        label: requested ? '排空受阻' : '队列异常暂停',
+        detail: queue.dispatcher.pause_reason || '运行环境需要管理员确认后恢复',
+        icon: PauseCircle,
+        tone: 'border-destructive/30 bg-destructive/5 text-destructive',
+      }
+    : requested && ready
+    ? {
+        label: '可安全停服',
+        detail: `运行环境已清空 · ${queue.queued_count} 项等待任务已保留`,
+        icon: CircleCheck,
+        tone: 'border-primary/30 bg-primary/5 text-primary',
+      }
+    : requested
+      ? {
+          label: '排空中',
+          detail: maintenanceBlocker(queue),
+          icon: Clock3,
+          tone: 'border-warning/40 bg-warning/10 text-warning-foreground',
+        }
+      : {
+            label: normal ? '正常调度' : '调度暂未开放',
+            detail: `运行 ${queue.active.length} · 等待 ${queue.queued_count}`,
+            icon: normal ? PlayCircle : PauseCircle,
+            tone: 'border-border bg-muted/20 text-foreground',
+          }
+  const StatusIcon = status.icon
+
+  return (
+    <div
+      className="grid w-full min-w-0 gap-2 sm:w-auto sm:grid-cols-[minmax(10rem,auto)_auto_auto] sm:items-stretch"
+      data-testid="deployment-maintenance-control"
+    >
+      <div
+        className={`flex min-h-11 min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 ${status.tone}`}
+        role="status"
+        aria-live="polite"
+      >
+        <StatusIcon className="size-4 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 leading-tight">
+          <span className="block text-xs font-semibold">{status.label}</span>
+          <span className="mt-0.5 block break-words text-[0.6875rem] opacity-75 [overflow-wrap:anywhere]">
+            {status.detail}
+          </span>
+        </span>
+      </div>
+
+      <div className="flex min-h-11 min-w-0 items-center justify-between gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5 sm:justify-start">
+        <div className="min-w-0">
+          <div className="text-xs font-medium">自动排位</div>
+          <div className="truncate text-[0.6875rem] text-muted-foreground">
+            {queue.dispatcher.auto_enabled ? '继续生成练习局' : '已停止生成新局'}
+          </div>
+        </div>
+        <Switch
+          checked={queue.dispatcher.auto_enabled}
+          disabled={busy || requested}
+          onCheckedChange={onToggleAuto}
+          aria-label="自动排位生产开关"
+          className="relative before:absolute before:-inset-x-3 before:-inset-y-3.5 before:content-['']"
+        />
+      </div>
+
+      {faultPaused ? (
+        <Button
+          type="button"
+          size="sm"
+          className="min-h-11 w-full sm:w-auto"
+          variant="outline"
+          disabled={busy}
+          onClick={onRecover}
+        >
+          {action === 'recover' ? '正在清场…' : '清场并恢复'}
+        </Button>
+      ) : requested ? (
+        <Button
+          type="button"
+          size="sm"
+          className="min-h-11 w-full sm:w-auto"
+          disabled={busy || !ready}
+          onClick={onLeave}
+        >
+          <PlayCircle className="size-3.5" aria-hidden="true" />
+          {action === 'resume' ? '正在恢复…' : ready ? '恢复调度' : '正在排空…'}
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          className="min-h-11 w-full sm:w-auto"
+          variant="outline"
+          disabled={busy || !normal}
+          onClick={onPrepare}
+        >
+          <Wrench className="size-3.5" aria-hidden="true" />
+          准备维护
+        </Button>
+      )}
+    </div>
+  )
+}
+
+function maintenanceBlocker(queue: ExecutionQueueSnapshot): string {
+  const status = queue.maintenance
+  if (!status) return '正在确认运行环境已清空'
+  if (status.active_count > 0) return `还有 ${status.active_count} 场对局正在自然结束`
+  if ((status.uploads_in_flight || 0) > 0) return `还有 ${status.uploads_in_flight} 个上传正在完成检查`
+  if ((status.active_local_ai_leases || 0) > 0) return `还有 ${status.active_local_ai_leases} 个本地 Bot 连接正在释放`
+  if ((status.untracked_running_matches || 0) > 0) return `还有 ${status.untracked_running_matches} 场遗留对局仍标记为运行中`
+  if (status.docker_launch_state && status.docker_launch_state !== 'idle') return '沙箱正在完成启动或清理'
+  if ((status.owned_execution_tasks || 0) > 0) return `还有 ${status.owned_execution_tasks} 个执行任务正在收尾`
+  const unavailable = status.readiness_unavailable || []
+  if (unavailable.includes('application_recovery')) return '评分与赛事状态正在恢复，完成前不能停服'
+  if (unavailable.includes('upload_activity')) return '暂时无法确认上传活动，正在等待安全检查恢复'
+  if (unavailable.includes('owned_execution_tasks')) return '暂时无法确认执行任务，正在等待安全检查恢复'
+  if (unavailable.length > 0) return `还有 ${unavailable.length} 项运行环境检查暂不可用`
+  return '正在确认运行环境已清空'
 }
 
 function DistRow({ label, n, total, color }: { label: string; n: number; total: number; color: string }) {

@@ -45,7 +45,9 @@ from bzplat.backend.runtime.limits import (
     clamp_concurrent,
     concurrent_ceiling,
     default_max_concurrent,
+    effective_host_resource_budget,
 )
+from bzplat.backend.runtime.local_ai_service import LocalAIService
 from bzplat.backend.security import (
     AccessLogMiddleware,
     BotUploadBodyLimitMiddleware,
@@ -141,6 +143,8 @@ def create_app(
         # or migrate the selected DB. Commands independently pin the same socket.
         validate_local_docker_configuration()
     store = Store(db_path)
+    local_ai_service = LocalAIService(store)
+    store.executions.set_local_agent_available(local_ai_service.is_available_now)
     _seed_site_settings(store)
     effective_conc = _effective_max_concurrent(max_concurrent)
 
@@ -171,6 +175,11 @@ def create_app(
     # loop, so an asyncio semaphore avoids consuming the default thread pool
     # while uploads wait. Keep it separate from the cross-thread preflight gate.
     bot_upload_gate = asyncio.Semaphore(BOT_UPLOAD_ADMISSION_SLOTS)
+    # Deployment drain and upload admission share this loop-local mutex.  An
+    # upload becomes active before multipart parsing and remains counted until
+    # staging, preflight and DB commit/rollback have all converged.
+    bot_upload_activity_lock = asyncio.Lock()
+    bot_upload_activity = {"active": 0}
 
     def _pause_for_unscoped_docker(reason: str) -> None:
         launch = store.executions.docker_launch()
@@ -190,12 +199,25 @@ def create_app(
         supervisor=shared_supervisor,
     )
 
-    match_runner = MatchRunner(binary_runner, action_timeout=ACTION_TIMEOUT_SEC)
+    match_runner = MatchRunner(
+        binary_runner,
+        action_timeout=ACTION_TIMEOUT_SEC,
+        local_ai_hub=local_ai_service.hub,
+    )
     orch = MatchOrchestrator(store, runner=match_runner, max_concurrent=effective_conc)
-    contest_manager = ContestManager(store, orch)
+    execution_dispatcher: ExecutionDispatcher | None = None
+    contest_manager = ContestManager(
+        store,
+        orch,
+        execution_admission_required=lambda: bool(
+            execution_dispatcher is not None
+            and execution_dispatcher._started
+        ),
+    )
     # QA capability guard is independent from the persisted administrator switch:
     # a copied production DB may say enabled, but an isolated QA process must never
     # write background ladder matches.
+    host_budget = effective_host_resource_budget()
     execution_dispatcher = ExecutionDispatcher(
         orch,
         store,
@@ -203,6 +225,10 @@ def create_app(
         max_sandbox_units=effective_conc * 2,
         auto_capability_enabled=not qa_instance,
         contest_reconciler=contest_manager.reconcile_running_contests,
+        singleton_acquired=store.reset_local_ai_runtime_state,
+        uploads_in_flight=lambda: int(bot_upload_activity["active"]),
+        max_host_cpu_millis=host_budget.cpu_millis,
+        max_host_memory_mb=host_budget.memory_mb,
     )
 
     async def _on_match_done(match_id: str, contest_id: int | None) -> None:
@@ -280,8 +306,20 @@ def create_app(
             # Match tasks can be inside asyncio subprocess pipe setup.  Drain
             # them explicitly before the server closes the event loop; relying
             # on loop-wide cancellation can otherwise hang shutdown forever.
-            await orch.shutdown()
-            await execution_dispatcher.close()
+            try:
+                await orch.shutdown()
+            finally:
+                # Drain local transports and reset their durable volatile
+                # state while this process still owns the dispatcher
+                # singleton.  The flock release is deliberately final, even
+                # if draining a match task reported an error.
+                try:
+                    await local_ai_service.hub.shutdown()
+                finally:
+                    try:
+                        store.reset_local_ai_runtime_state()
+                    finally:
+                        await execution_dispatcher.close()
 
     app = FastAPI(title="botzone-platform", version="0.1.0", lifespan=lifespan)
     app.state.store = store
@@ -291,6 +329,7 @@ def create_app(
     app.state.captcha_store = captcha
     app.state.bot_manager = bot_manager
     app.state.binary_runner = binary_runner
+    app.state.local_ai_service = local_ai_service
     # Upload preflight runs in a worker thread and must own its BinaryRunner.
     # Sharing the orchestrator runner across event loops/threads would race its
     # session map and subprocess transports.
@@ -303,6 +342,8 @@ def create_app(
     )
     app.state.preflight_gate = preflight_gate
     app.state.bot_upload_gate = bot_upload_gate
+    app.state.bot_upload_activity_lock = bot_upload_activity_lock
+    app.state.bot_upload_activity = bot_upload_activity
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer

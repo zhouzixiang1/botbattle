@@ -112,7 +112,7 @@ def test_challenge_wrong_version_rejected(tmp_path):
     va_other = s.add_bot_version(ba["id"], binary_path=a_v2, format="elf")
     orch = MatchOrchestrator(s, runner=_NoopRunner(), max_concurrent=1)
     # va_other 属于 ba，但传给 bb 的 bot_b_version_id → 应拒
-    with pytest.raises(ValueError, match="座位1 指定的版本"):
+    with pytest.raises(ValueError, match="后手 指定的版本"):
         asyncio.run(orch.challenge(
             ba["id"], bb["id"], u,
             game_id="holdem",

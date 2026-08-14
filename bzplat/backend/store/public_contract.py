@@ -5,6 +5,7 @@ reason codes and bounded, translated technical-incident fields.
 """
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -18,6 +19,10 @@ from .schema import (
     STATUS_RUNNING,
     TECHNICAL_INCIDENT_EVENT,
     TECHNICAL_INCIDENT_MESSAGES,
+    EXECUTION_ENVIRONMENTS,
+    EXECUTION_ENV_HUMAN,
+    EXECUTION_ENV_PLATFORM_LOW,
+    TYPE_HUMAN,
 )
 
 HISTORICAL_TECHNICAL_INCIDENT_EVENTS = frozenset(
@@ -219,6 +224,28 @@ def sanitize_public_match(match: dict | None) -> dict | None:
     if match is None:
         return None
     public = dict(match)
+    # Rows created before execution environments were frozen all used the
+    # original low-resource platform sandbox. Preserve that historical fact
+    # instead of leaving the UI blank or guessing that an old contest was high
+    # performance. A historical human seat remains human.
+    environments = [EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_PLATFORM_LOW]
+    if public.get("match_type") == TYPE_HUMAN:
+        human_seat = public.get("human_seat")
+        if human_seat in (0, 1) and not isinstance(human_seat, bool):
+            environments[int(human_seat)] = EXECUTION_ENV_HUMAN
+    raw_config = public.get("match_config")
+    if isinstance(raw_config, str):
+        try:
+            raw_config = json.loads(raw_config)
+        except (TypeError, ValueError):
+            raw_config = {}
+    if isinstance(raw_config, dict):
+        for side in ("a", "b"):
+            value = raw_config.get(f"_bot_{side}_environment")
+            if value in EXECUTION_ENVIRONMENTS:
+                environments[0 if side == "a" else 1] = value
+    public["bot_a_environment"] = environments[0]
+    public["bot_b_environment"] = environments[1]
     # match_config stores frozen version ids and duplicate seeds for execution;
     # it is not part of the public match contract.
     public.pop("match_config", None)
@@ -259,7 +286,7 @@ def sanitize_public_incident(raw: Any) -> dict[str, Any] | None:
     else:
         sample["error"] = "Bot 响应格式错误（历史记录）"
     reason = raw.get("reason")
-    if reason in ("protocol_error", "timeout"):
+    if reason in ("protocol_error", "timeout", "technical_loss"):
         sample["reason"] = reason
     for key in ("turn", "leg"):
         value = raw.get(key)

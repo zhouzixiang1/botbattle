@@ -106,7 +106,8 @@ def test_matches_list_drops_dead_keeps_critical(tmp_path):
         allowed = {
             "id", "game_id", "status", "winner", "reason", "match_type",
             "contest_id", "created_at", "bot_a_id", "bot_b_id",
-            "technical_loss", "result", "bot_a", "bot_b",
+            "technical_loss", "result", "bot_a_environment",
+            "bot_b_environment", "bot_a", "bot_b",
         }
         assert set(m) <= allowed, f"matches 列表泄漏非公开字段: {set(m) - allowed}"
         # 守护：4 个会致回归的字段必须在（有消费者）

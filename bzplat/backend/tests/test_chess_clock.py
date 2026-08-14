@@ -10,6 +10,7 @@ import pytest
 import bzplat.backend.matches.runner as runner_module
 from bzplat.backend.matches.runner import _ChessClock, MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
+from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
 
 SAMPLES = Path(__file__).resolve().parents[3] / "samples"
 _PENCIL_BOT = SAMPLES / "pencilbot_linux_amd64"
@@ -121,14 +122,42 @@ class _FakeBinaryRunner:
         self._sessions: dict[str, object] = {}
         self.runtime_ready_calls = 0
 
-    async def start_session(self, _path: str, *, runtime_mode: str) -> str:
+    async def start_session(
+        self,
+        _path: str,
+        *,
+        runtime_mode: str,
+        profile=PLATFORM_LOW_PROFILE,
+    ) -> str:
         sid = f"session-{runtime_mode}"
-        self._sessions[sid] = SimpleNamespace(runtime_mode=runtime_mode, turn=0)
+        self._sessions[sid] = SimpleNamespace(
+            binary_path=_path,
+            runtime_mode=runtime_mode,
+            profile=profile,
+            requests=[],
+            responses=[],
+            turn=0,
+            long_running=False,
+        )
         return sid
 
-    async def prepare_session(self, _path: str, *, runtime_mode: str) -> str:
+    async def prepare_session(
+        self,
+        _path: str,
+        *,
+        runtime_mode: str,
+        profile=PLATFORM_LOW_PROFILE,
+    ) -> str:
         sid = f"session-{runtime_mode}"
-        self._sessions[sid] = SimpleNamespace(runtime_mode=runtime_mode, turn=0)
+        self._sessions[sid] = SimpleNamespace(
+            binary_path=_path,
+            runtime_mode=runtime_mode,
+            profile=profile,
+            requests=[],
+            responses=[],
+            turn=0,
+            long_running=False,
+        )
         return sid
 
     async def ensure_runtime_ready(self) -> None:

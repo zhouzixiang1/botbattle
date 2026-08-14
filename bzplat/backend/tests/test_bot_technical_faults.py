@@ -20,6 +20,7 @@ from bzplat.backend.runtime.binary_runner import (
     BotProtocolError,
     BotTechnicalError,
 )
+from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
 from bzplat.backend.store import Store
 from bzplat.backend.store.schema import STATUS_COMPLETED
 from bzplat.backend.tests.execution_helpers import (
@@ -29,9 +30,18 @@ from bzplat.backend.tests.execution_helpers import (
 
 
 class _TransportSession:
-    def __init__(self, path: str, runtime_mode: str) -> None:
+    def __init__(
+        self,
+        path: str,
+        runtime_mode: str,
+        *,
+        profile=PLATFORM_LOW_PROFILE,
+        execution_scope=None,
+    ) -> None:
         self.binary_path = path
         self.runtime_mode = runtime_mode
+        self.profile = profile
+        self.execution_scope = execution_scope
         self.requests: list = []
         self.responses: list = []
         self.turn = 0
@@ -49,13 +59,23 @@ class _ScriptedTransport:
     async def start_session(self, path, *, runtime_mode="longrunning", **_kwargs):
         sid = f"s{self._started}"
         self._started += 1
-        self._sessions[sid] = _TransportSession(str(path), runtime_mode)
+        self._sessions[sid] = _TransportSession(
+            str(path),
+            runtime_mode,
+            profile=_kwargs.get("profile", PLATFORM_LOW_PROFILE),
+            execution_scope=_kwargs.get("execution_scope"),
+        )
         return sid
 
-    async def prepare_session(self, path, *, runtime_mode):
+    async def prepare_session(self, path, *, runtime_mode, **_kwargs):
         sid = f"s{self._started}"
         self._started += 1
-        self._sessions[sid] = _TransportSession(str(path), runtime_mode)
+        self._sessions[sid] = _TransportSession(
+            str(path),
+            runtime_mode,
+            profile=_kwargs.get("profile", PLATFORM_LOW_PROFILE),
+            execution_scope=_kwargs.get("execution_scope"),
+        )
         return sid
 
     async def send(self, sid, _line, *, timeout=None):

@@ -235,7 +235,8 @@ def test_delayed_dispatcher_resume_runs_full_contest_recovery(store: Store):
         game_id="holdem",
     )
     store.bind_contest_pairing_match(
-        dead_contest["id"], dead_pairing["id"], dead_match_id
+        dead_contest["id"], dead_pairing["id"], dead_match_id,
+        require_execution_admission=False,
     )
 
     finished_contest = store.create_contest(
@@ -283,7 +284,8 @@ def test_delayed_dispatcher_resume_runs_full_contest_recovery(store: Store):
         },
     )
     store.bind_contest_pairing_match(
-        finished_contest["id"], finished_pairing["id"], finished_match_id
+        finished_contest["id"], finished_pairing["id"], finished_match_id,
+        require_execution_admission=False,
     )
     store.update_contest_pairing(finished_pairing["id"], status="completed")
     store.update_contest(
@@ -544,7 +546,12 @@ def test_published_partial_batch_with_bound_match_reports_inconsistency(store: S
         contest_id=cid,
         match_type="contest",
     )
-    store.bind_contest_pairing_match(cid, pairing["id"], "partial-bound-active")
+    store.bind_contest_pairing_match(
+        cid,
+        pairing["id"],
+        "partial-bound-active",
+        require_execution_admission=False,
+    )
     manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
 
     async def run():

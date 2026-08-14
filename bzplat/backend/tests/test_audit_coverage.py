@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 from datetime import datetime
@@ -921,6 +922,67 @@ def test_completed_result_survives_postprocess_exception(store: Store, monkeypat
     assert match["status"] == STATUS_COMPLETED
     assert match["reason"] == "completed"
     assert match["winner"] == 0
+
+
+def test_completed_match_log_uses_frozen_rating_policy(store: Store, caplog):
+    """Operational logs must reflect the frozen policy, not match type."""
+
+    class SuccessRunner:
+        async def run_binaries(self, *args, **kwargs):
+            return SimpleNamespace(
+                rounds_played=1,
+                rounds=[SimpleNamespace(deltas=[1, -1])],
+                winner=0,
+            )
+
+    owner, bot = _user_with_bot(
+        store, name="logpolicya", path=_fixture_binary(store, "log-policy")
+    )
+    orch = MatchOrchestrator(store, runner=SuccessRunner(), max_concurrent=1)
+    caplog.set_level(logging.INFO, logger="bzplat.backend.matches.orchestrator")
+
+    async def run():
+        mid = await challenge_and_start(
+            orch, bot["id"], bot["id"], owner["id"], game_id="gomoku"
+        )
+        await asyncio.wait_for(orch._tasks[mid], timeout=1)
+        return mid
+
+    mid = asyncio.run(run())
+    completed = [
+        record.getMessage()
+        for record in caplog.records
+        if f"match done id={mid}" in record.getMessage()
+    ]
+    assert len(completed) == 1
+    assert "rating_eligible=False" in completed[0]
+
+    caplog.clear()
+    _, other_bot = _user_with_bot(
+        store,
+        name="logpolicyb",
+        path=_fixture_binary(store, "log-policy-b"),
+    )
+
+    async def run_rated():
+        rated_mid = await challenge_and_start(
+            orch,
+            bot["id"],
+            other_bot["id"],
+            owner["id"],
+            game_id="gomoku",
+        )
+        await asyncio.wait_for(orch._tasks[rated_mid], timeout=1)
+        return rated_mid
+
+    rated_mid = asyncio.run(run_rated())
+    rated_completed = [
+        record.getMessage()
+        for record in caplog.records
+        if f"match done id={rated_mid}" in record.getMessage()
+    ]
+    assert len(rated_completed) == 1
+    assert "rating_eligible=True" in rated_completed[0]
 
 
 def test_platform_sandbox_fault_aborts_without_technical_loss_or_rating(store: Store):

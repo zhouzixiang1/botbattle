@@ -21,6 +21,12 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Iterable
 
+from bzplat.backend.runtime.limits import (
+    DockerResourceProfile,
+    PLATFORM_LOW_PROFILE,
+    resolve_docker_resource_profile,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -221,10 +227,10 @@ class DockerSupervisor:
         name: str,
         binary_path: Path,
         image: str,
-        memory: str,
-        cpus: str,
+        profile: DockerResourceProfile = PLATFORM_LOW_PROFILE,
         launch_token: str | None = None,
     ) -> list[str]:
+        profile = resolve_docker_resource_profile(profile)
         labels: list[str] = []
         for key, value in identity.labels(slot, launch_token=launch_token):
             labels.extend(["--label", f"{key}={value}"])
@@ -242,9 +248,9 @@ class DockerSupervisor:
             "no-new-privileges",
             "--user",
             "65534:65534",
-            f"--cpus={cpus}",
-            f"--memory={memory}",
-            f"--memory-swap={memory}",
+            f"--cpus={profile.docker_cpus}",
+            f"--memory={profile.docker_memory}",
+            f"--memory-swap={profile.docker_memory}",
             "--pids-limit=64",
             "--ulimit",
             "nofile=64:64",
@@ -355,9 +361,9 @@ class DockerSupervisor:
         owner_kind: str,
         binary_path: Path,
         image: str,
-        memory: str,
-        cpus: str,
+        profile: DockerResourceProfile = PLATFORM_LOW_PROFILE,
     ) -> str:
+        profile = resolve_docker_resource_profile(profile)
         name = identity.container_name(slot)
         journal = getattr(self, "launch_journal", None)
         if journal is None:
@@ -391,8 +397,7 @@ class DockerSupervisor:
             name=name,
             binary_path=binary_path,
             image=image,
-            memory=memory,
-            cpus=cpus,
+            profile=profile,
             launch_token=launch_token,
         )
         try:

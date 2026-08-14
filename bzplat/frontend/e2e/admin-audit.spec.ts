@@ -12,6 +12,11 @@ const ADMIN_VIEWPORTS = [
   { name: 'mobile', width: 390, height: 844, interactive: false },
 ] as const
 
+const MAINTENANCE_VIEWPORTS = [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 390, height: 844 },
+] as const
+
 async function expectNoRootOverflow(page: Page, label: string) {
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - window.innerWidth,
@@ -39,6 +44,23 @@ async function expectTouchTarget(locator: Locator, label: string) {
   expect(box, `${label} has no rendered box`).not.toBeNull()
   expect(box?.width ?? 0, `${label} width`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
   expect(box?.height ?? 0, `${label} height`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
+}
+
+async function expectPseudoTouchTarget(locator: Locator, label: string) {
+  const size = await locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    const pseudo = getComputedStyle(element, '::before')
+    const inset = (value: string) => {
+      const parsed = Number.parseFloat(value)
+      return Number.isFinite(parsed) ? parsed : 0
+    }
+    return {
+      width: rect.width - inset(pseudo.left) - inset(pseudo.right),
+      height: rect.height - inset(pseudo.top) - inset(pseudo.bottom),
+    }
+  })
+  expect(size.width, `${label} width`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
+  expect(size.height, `${label} height`).toBeGreaterThanOrEqual(MIN_TOUCH_TARGET_PX - RENDERING_EPSILON_PX)
 }
 
 test.beforeAll(async ({ request }) => {
@@ -404,6 +426,264 @@ test('admin queue switch is a single boolean control and survives polling', asyn
   await expectNoRootOverflow(page, 'admin auto queue re-enabled')
   await monitor.expectClean()
 })
+
+for (const viewport of MAINTENANCE_VIEWPORTS) {
+  test(`admin drains the active match into maintenance and resumes (${viewport.name})`, async ({ page }) => {
+    await page.setViewportSize(viewport)
+    const monitor = monitorBrowser(page)
+    await loginThroughUi(page, ADMIN)
+
+    let autoEnabled = true
+    let maintenance = false
+    let phase: 'active' | 'upload' | 'legacy' | 'application' | 'fault' | 'recovering' | 'ready' = 'active'
+    let beginAttempts = 0
+    let deleteAttempts = 0
+    let recoveryAttempts = 0
+    let maintenanceReads = 0
+    let autoRequests = 0
+    let statsReadsDuringMaintenance = 0
+    let runtimeReadsDuringMaintenance = 0
+    const maintenanceReasons: string[] = []
+
+    const snapshot = () => {
+      const active = phase === 'active'
+      const faultPaused = phase === 'fault'
+      const readinessUnavailable = phase === 'application' || phase === 'recovering'
+        ? ['application_recovery']
+        : []
+      return {
+        dispatcher: {
+          state: faultPaused ? 'paused' : 'running',
+          accepting: !maintenance && !faultPaused,
+          auto_enabled: autoEnabled,
+          maintenance,
+          pause_reason: faultPaused ? 'Docker 容器状态不确定，需要精确清场' : '',
+          retry_at: null,
+        },
+        capacity: {
+          match_slots: { used: active ? 1 : 0, capacity: 1 },
+          sandbox_units: { used: active ? 2 : 0, capacity: 2 },
+          running_matches: active || phase === 'legacy' ? 1 : 0,
+        },
+        active: active ? [{
+          public_id: 'maintenance-active-7001',
+          request_id: 'maintenance-active-7001',
+          source: 'contest',
+          status: 'running',
+          game_id: 'holdem',
+          match_type: 'contest',
+          match_id: 'maintenance-match-7001',
+          sandbox_units: 2,
+          bot_a_environment: 'platform_high',
+          bot_b_environment: 'platform_high',
+          rated: false,
+          rating_reason: 'contest',
+          retryable: false,
+          cancel_requested: false,
+          reason: '',
+        }] : [],
+        queued: [{
+          public_id: 'maintenance-queued-7002',
+          request_id: 'maintenance-queued-7002',
+          source: 'manual',
+          status: 'queued',
+          game_id: 'gomoku',
+          match_type: 'manual',
+          match_id: null,
+          sandbox_units: 2,
+          bot_a_environment: 'platform_low',
+          bot_b_environment: 'platform_low',
+          rated: true,
+          rating_reason: 'eligible',
+          retryable: false,
+          cancel_requested: false,
+          reason: '',
+        }],
+        queued_count: 7,
+        maintenance: {
+          requested: maintenance,
+          ready: maintenance && phase === 'ready',
+          reason: maintenance ? '管理员准备部署' : '',
+          active_count: active ? 1 : 0,
+          uploads_in_flight: phase === 'upload' ? 1 : 0,
+          active_local_ai_leases: 0,
+          untracked_running_matches: phase === 'legacy' ? 1 : 0,
+          docker_launch_state: 'idle',
+          owned_execution_tasks: active ? 1 : 0,
+          readiness_unavailable: readinessUnavailable,
+        },
+      }
+    }
+
+    await page.route('**/api/admin/stats', async (route) => {
+      if (maintenance) statsReadsDuringMaintenance += 1
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          users: 40,
+          users_active: 20,
+          users_verified: 18,
+          bots: 77,
+          bots_active: 60,
+          matches: 1949,
+          matches_completed: 1938,
+          matches_aborted: 9,
+          matches_running: phase === 'active' || phase === 'legacy' ? 1 : 0,
+          matches_pending: 7,
+          contests: 8,
+          contests_running: 1,
+          active_sessions: 12,
+          recent_users: [],
+        }),
+      })
+    })
+    await page.route('**/api/admin/settings/runtime', async (route) => {
+      if (maintenance) runtimeReadsDuringMaintenance += 1
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ source: 'code', mutable: false, queue: snapshot() }),
+      })
+    })
+    await page.route('**/api/admin/auto-match', async (route) => {
+      autoRequests += 1
+      await route.fulfill({ status: 500, body: 'maintenance must close auto atomically' })
+    })
+    await page.route('**/api/admin/execution-queue/maintenance', async (route) => {
+      if (route.request().method() === 'GET') {
+        maintenanceReads += 1
+        const runtimeSnapshot = snapshot()
+        if (maintenance) {
+          if (phase === 'active') phase = 'upload'
+          else if (phase === 'upload') phase = 'legacy'
+          else if (phase === 'legacy') phase = 'application'
+          else if (phase === 'application') phase = 'fault'
+          else if (phase === 'recovering') phase = 'ready'
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(runtimeSnapshot),
+        })
+        return
+      }
+      if (route.request().method() === 'POST') {
+        beginAttempts += 1
+        const body = route.request().postDataJSON() as { reason?: unknown }
+        expect(Object.keys(body)).toEqual(['reason'])
+        expect(body.reason).toBe('管理员准备部署')
+        maintenanceReasons.push(String(body.reason))
+        maintenance = true
+        autoEnabled = false
+        const drainingSnapshot = snapshot()
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(drainingSnapshot),
+        })
+        return
+      }
+      expect(route.request().method()).toBe('DELETE')
+      expect(snapshot().maintenance.ready).toBe(true)
+      deleteAttempts += 1
+      maintenance = false
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(snapshot()),
+      })
+    })
+    await page.route('**/api/admin/execution-queue/resume', async (route) => {
+      expect(route.request().method()).toBe('POST')
+      expect(maintenance).toBe(true)
+      expect(phase).toBe('fault')
+      recoveryAttempts += 1
+      phase = 'recovering'
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(snapshot()),
+      })
+    })
+
+    await page.goto('/#/admin')
+    const control = page.getByTestId('deployment-maintenance-control')
+    const toggle = page.getByRole('switch', { name: '自动排位生产开关' })
+    const prepare = page.getByRole('button', { name: '准备维护', exact: true })
+    await expect(control).toContainText('正常调度')
+    await expect(control).toContainText('运行 1 · 等待 7')
+    await expect(toggle).toBeChecked()
+    if (viewport.name === 'mobile') {
+      await expectTouchTarget(prepare, 'mobile prepare maintenance')
+      await expectPseudoTouchTarget(toggle, 'mobile auto-match switch')
+    }
+    await expectNoRootOverflow(page, `maintenance ready action ${viewport.name}`)
+
+    await prepare.click()
+    const dialog = page.getByRole('dialog', { name: '准备部署维护' })
+    await expect(dialog).toContainText('当前对局继续到自然结束')
+    const begin = dialog.getByRole('button', { name: '开始排空', exact: true })
+    if (viewport.name === 'mobile') {
+      await expectTouchTarget(dialog.getByRole('button', { name: '取消', exact: true }), 'mobile maintenance cancel')
+      await expectTouchTarget(begin, 'mobile begin maintenance')
+    }
+    await begin.click()
+
+    await expect(control).toContainText('排空中')
+    await expect(control).toContainText('还有 1 场对局正在自然结束')
+    await expect(control.getByRole('button', { name: '正在排空…', exact: true })).toBeDisabled()
+    await expect(toggle).not.toBeChecked()
+    await expect(toggle).toBeDisabled()
+    await expect(control).toContainText('还有 1 个上传正在完成检查', { timeout: 8_000 })
+    await expect(control).toContainText('还有 1 场遗留对局仍标记为运行中', { timeout: 8_000 })
+    await expect(control).toContainText('评分与赛事状态正在恢复，完成前不能停服', { timeout: 8_000 })
+    await expect(control).toContainText('排空受阻', { timeout: 8_000 })
+    await expect(control).toContainText('Docker 容器状态不确定，需要精确清场')
+
+    const recover = control.getByRole('button', { name: '清场并恢复', exact: true })
+    if (viewport.name === 'mobile') await expectTouchTarget(recover, 'mobile recover queue')
+    await recover.click()
+    const recoverDialog = page.getByRole('dialog', { name: '清场并恢复执行队列' })
+    const confirmRecover = recoverDialog.getByRole('button', { name: '清场并恢复', exact: true })
+    if (viewport.name === 'mobile') {
+      await expectTouchTarget(recoverDialog.getByRole('button', { name: '取消', exact: true }), 'mobile recovery cancel')
+      await expectTouchTarget(confirmRecover, 'mobile confirm recovery')
+    }
+    await confirmRecover.click()
+    await expect(page.getByText('运行环境已恢复，继续完成部署排空', { exact: true })).toBeVisible()
+    await expect(control).toContainText('评分与赛事状态正在恢复，完成前不能停服')
+    await expect(control).toContainText('可安全停服', { timeout: 8_000 })
+    await expect(control).toContainText('运行环境已清空 · 7 项等待任务已保留')
+    await expect(page.getByTestId('execution-queue-panel')).toContainText(
+      '运行环境已排空；等待任务已保留，恢复后会继续执行。',
+    )
+    expect(autoRequests).toBe(0)
+    expect(beginAttempts).toBe(1)
+    expect(recoveryAttempts).toBe(1)
+    expect(maintenanceReads).toBeGreaterThanOrEqual(6)
+    expect(maintenanceReasons.every((reason) => reason === '管理员准备部署')).toBe(true)
+    expect(statsReadsDuringMaintenance).toBe(0)
+    expect(runtimeReadsDuringMaintenance).toBe(0)
+    const readsAtReady = maintenanceReads
+    await expect.poll(() => maintenanceReads, { timeout: 4_000 }).toBeGreaterThan(readsAtReady)
+    expect(statsReadsDuringMaintenance).toBe(0)
+    expect(runtimeReadsDuringMaintenance).toBe(0)
+    await expectNoRootOverflow(page, `maintenance active ${viewport.name}`)
+
+    const resume = page.getByRole('button', { name: '恢复调度', exact: true })
+    if (viewport.name === 'mobile') await expectTouchTarget(resume, 'mobile resume scheduling')
+    await resume.click()
+    await expect(control).toContainText('正常调度')
+    await expect(control).toContainText('运行 0 · 等待 7')
+    await expect(toggle).not.toBeChecked()
+    await expect(toggle).toBeEnabled()
+    await expect(page.getByText('调度已恢复；自动排位仍保持关闭', { exact: true })).toBeVisible()
+    expect(deleteAttempts).toBe(1)
+    await expectNoRootOverflow(page, `maintenance resumed ${viewport.name}`)
+    await monitor.expectClean()
+  })
+}
 
 for (const viewport of ADMIN_VIEWPORTS) {
   test(`manual contest schedule stays explicit and scrollable with long text (${viewport.name})`, async ({ page }) => {

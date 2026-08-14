@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,6 @@ from bzplat.backend.runtime.binary_integrity import (
     BinaryIntegrityCacheKey,
     require_binary_file_integrity,
 )
-
 from .db import _all_game_ids, _matches_table, _now, _registered_game_id, _row
 from .schema import (
     EXECUTION_ACTIVE_STATES,
@@ -34,6 +34,11 @@ from .schema import (
     EXECUTION_SOURCE_MANUAL,
     EXECUTION_SOURCES,
     EXECUTION_STARTING,
+    EXECUTION_ENV_HUMAN,
+    EXECUTION_ENV_PLATFORM_HIGH,
+    EXECUTION_ENV_PLATFORM_LOW,
+    EXECUTION_ENV_REMOTE_LOCAL,
+    EXECUTION_PROFILE_VERSION,
     STATUS_ABORTED,
     STATUS_COMPLETED,
     STATUS_PENDING,
@@ -58,9 +63,35 @@ SOURCE_PRIORITY = {
     EXECUTION_SOURCE_AUTO: 10,
 }
 
+_PLATFORM_ENVIRONMENTS = frozenset(
+    {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_PLATFORM_HIGH}
+)
+_MANUAL_ENVIRONMENTS = frozenset(
+    {EXECUTION_ENV_PLATFORM_LOW, EXECUTION_ENV_REMOTE_LOCAL}
+)
+
 
 class ExecutionQueueClosed(ValueError):
     """The process is starting/stopping and must not accept a new request."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "execution_queue_closed",
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.message = str(message)
+
+
+class ExecutionMaintenanceConflict(ValueError):
+    """A requested maintenance transition is not safe in the current state."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.message = str(message)
 
 
 class ExecutionInvariantError(RuntimeError):
@@ -95,8 +126,18 @@ def _parse_time(value: Any) -> datetime:
 class ExecutionRepository:
     """Transactional operations for all executable match sources."""
 
-    def __init__(self, store: Store) -> None:
+    def __init__(
+        self,
+        store: Store,
+        *,
+        local_agent_available: Callable[[int], bool] | None = None,
+    ) -> None:
         self.store = store
+        # The repository owns durable identities and leases, but never reaches
+        # into the process-local WebSocket hub.  The application injects one
+        # cheap synchronous availability snapshot; absence fails remote jobs
+        # closed while ordinary Docker work keeps flowing.
+        self._local_agent_available = local_agent_available
         # Claim/refill run inside one SQLite write transaction.  Re-hashing up
         # to 100 MiB per candidate on every dispatcher tick would extend that
         # lock by seconds or gigabytes of I/O.  The helper's cache identity
@@ -104,6 +145,21 @@ class ExecutionRepository:
         # tampering still force a fresh digest while stable immutable versions
         # remain a bounded O(1) check.
         self._binary_integrity_cache: set[BinaryIntegrityCacheKey] = set()
+
+    def set_local_agent_available(
+        self, callback: Callable[[int], bool] | None
+    ) -> None:
+        self._local_agent_available = callback
+
+    def _is_local_agent_available(self, agent_id: int) -> bool:
+        callback = self._local_agent_available
+        if callback is None:
+            return False
+        try:
+            return bool(callback(int(agent_id)))
+        except Exception:
+            # A volatile hub lookup must never tear down the durable dispatcher.
+            return False
 
     @staticmethod
     def _backoff_contest_pairing_tx(
@@ -319,6 +375,17 @@ class ExecutionRepository:
         fields["updated_at"] = _now()
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if fields.get("accepting") == 1:
+                drain = conn.execute(
+                    "SELECT deployment_drain_requested FROM execution_control "
+                    "WHERE singleton=1"
+                ).fetchone()
+                if drain is None:
+                    raise ExecutionInvariantError(
+                        "execution_control singleton missing"
+                    )
+                if int(drain["deployment_drain_requested"] or 0):
+                    fields["accepting"] = 0
             conn.execute(
                 "UPDATE execution_control SET "
                 + ",".join(f"{name}=?" for name in fields)
@@ -331,11 +398,18 @@ class ExecutionRepository:
                 ).fetchone()
             )
 
-    def pause(self, reason: str, *, bounded_retry: bool = True) -> dict:
+    def pause(
+        self,
+        reason: str,
+        *,
+        bounded_retry: bool = True,
+        force_closed: bool = False,
+    ) -> dict:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT retry_count,dispatcher_state,accepting,pause_reason "
+                "SELECT retry_count,dispatcher_state,accepting,pause_reason,"
+                "deployment_drain_requested "
                 "FROM execution_control WHERE singleton=1"
             ).fetchone()
             existing_manual = bool(
@@ -358,8 +432,10 @@ class ExecutionRepository:
                 if bounded_retry
                 else None
             )
-            accepting = 1
-            if current and (
+            accepting = 0 if force_closed else 1
+            if not force_closed and current and (
+                int(current["deployment_drain_requested"] or 0) == 1
+                or
                 current["dispatcher_state"] in ("stopped", "stopping")
                 or (
                     current["dispatcher_state"] == "paused"
@@ -383,13 +459,191 @@ class ExecutionRepository:
 
     def resume(self) -> dict:
         self.assert_docker_launch_idle()
-        return self.set_control(
-            dispatcher_state="running",
-            accepting=True,
-            pause_reason="",
-            retry_count=0,
-            retry_at=None,
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT deployment_drain_requested FROM execution_control "
+                "WHERE singleton=1"
+            ).fetchone()
+            if current is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            conn.execute(
+                "UPDATE execution_control SET dispatcher_state='running',"
+                "accepting=?,pause_reason='',retry_count=0,retry_at=NULL,"
+                "updated_at=? WHERE singleton=1",
+                (
+                    0
+                    if int(current["deployment_drain_requested"] or 0)
+                    else 1,
+                    _now(),
+                ),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM execution_control WHERE singleton=1"
+                ).fetchone()
+            )
+
+    @staticmethod
+    def is_maintenance_control(control: dict[str, Any]) -> bool:
+        return int(control.get("deployment_drain_requested") or 0) == 1
+
+    def maintenance_status(self) -> dict[str, Any]:
+        """Return durable blockers; readiness is always derived, never stored."""
+        with self.store._tx() as conn:
+            control_row = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if control_row is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            return self.maintenance_status_tx(
+                conn, current=dict(control_row)
+            )
+
+    def begin_maintenance(self, reason: str) -> dict:
+        """Atomically request drain and close every source of new execution.
+
+        The same ``BEGIN IMMEDIATE`` transaction is used by enqueue and claim,
+        so success is the durable no-new-work boundary.  Work already active
+        finishes normally; queued requests remain unchanged for the explicit
+        post-deployment resume.
+        """
+        detail = str(reason or "").strip() or "管理员准备部署"
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_row = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if current_row is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            current = dict(current_row)
+            if self.is_maintenance_control(current):
+                conn.execute(
+                    "UPDATE execution_control SET accepting=0,auto_enabled=0,"
+                    "deployment_drain_reason=?,updated_at=? WHERE singleton=1",
+                    (detail[:1000], _now()),
+                )
+                return dict(
+                    conn.execute(
+                        "SELECT * FROM execution_control WHERE singleton=1"
+                    ).fetchone()
+                )
+            if current.get("dispatcher_state") != "running":
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_state_conflict",
+                    "执行队列未正常运行，请先完成运行环境恢复再准备部署",
+                )
+            conn.execute(
+                "UPDATE execution_control SET accepting=0,auto_enabled=0,"
+                "deployment_drain_requested=1,deployment_drain_reason=?,"
+                "updated_at=? WHERE singleton=1",
+                (detail[:1000], _now()),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM execution_control WHERE singleton=1"
+                ).fetchone()
+            )
+
+    def end_maintenance(self) -> dict:
+        """Atomically clear only the deployment gate; auto remains disabled."""
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_row = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if current_row is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            current = dict(current_row)
+            if not self.is_maintenance_control(current):
+                if (
+                    current.get("dispatcher_state") == "running"
+                    and int(current.get("accepting") or 0) == 1
+                ):
+                    return current
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_not_active",
+                    "执行队列当前不在部署维护状态",
+                )
+            status = self.maintenance_status_tx(conn, current=current)
+            if not status["ready"]:
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_not_ready",
+                    "维护边界尚未完全收敛，不能恢复接单",
+                )
+            conn.execute(
+                "UPDATE execution_control SET deployment_drain_requested=0,"
+                "deployment_drain_reason='',accepting=1,updated_at=? "
+                "WHERE singleton=1",
+                (_now(),),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM execution_control WHERE singleton=1"
+                ).fetchone()
+            )
+
+    def maintenance_status_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        current: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Transaction-local form used by the end-maintenance CAS."""
+        control = current or dict(
+            conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
         )
+        active_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE status IN "
+                "('starting','running','settling')"
+            ).fetchone()[0]
+        )
+        lease_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM local_ai_leases WHERE status='active'"
+            ).fetchone()[0]
+        )
+        # A legacy or partially recovered Match can still be running without
+        # an execution_jobs owner.  The capacity model already charges these
+        # rows conservatively; deployment readiness must use the same truth or
+        # it could turn green while an untracked sandbox is still live.
+        untracked_running = int(
+            self._capacity_tx(
+                conn,
+                max_match_slots=1,
+                max_sandbox_units=1,
+            )["untracked_running_matches"]
+        )
+        launch_state = str(self._docker_launch_tx(conn).get("state") or "")
+        requested = self.is_maintenance_control(control)
+        return {
+            "requested": requested,
+            "ready": bool(
+                requested
+                and control.get("dispatcher_state") == "running"
+                and int(control.get("accepting") or 0) == 0
+                and active_count == 0
+                and lease_count == 0
+                and untracked_running == 0
+                and launch_state == "idle"
+            ),
+            "reason": str(control.get("deployment_drain_reason") or ""),
+            "active_count": active_count,
+            "active_local_ai_leases": lease_count,
+            "untracked_running_matches": untracked_running,
+            "docker_launch_state": launch_state,
+        }
 
     def get_auto_enabled(self) -> bool:
         return bool(int(self.control()["auto_enabled"]))
@@ -397,6 +651,18 @@ class ExecutionRepository:
     def set_auto_enabled(self, enabled: bool) -> bool:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if current is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            if enabled and self.is_maintenance_control(dict(current)):
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_active",
+                    "维护期间不能开启自动排位，请先恢复执行队列",
+                )
             conn.execute(
                 "UPDATE execution_control SET auto_enabled=?,updated_at=? "
                 "WHERE singleton=1",
@@ -408,13 +674,194 @@ class ExecutionRepository:
     # Enqueue and read models
     # ------------------------------------------------------------------
     @staticmethod
+    def _resource_snapshot(
+        bot_a_environment: str,
+        bot_b_environment: str,
+    ) -> tuple[int, int, int]:
+        # Keep the Store package importable while runtime.limits itself loads
+        # store.schema.  The versioned registry is needed only when a job is
+        # created or claimed, not while this module is imported.
+        from bzplat.backend.runtime.limits import execution_resource_snapshot
+
+        return execution_resource_snapshot(
+            (bot_a_environment, bot_b_environment),
+            EXECUTION_PROFILE_VERSION,
+        )
+
+    @staticmethod
+    def _local_agent_snapshot_tx(
+        conn: sqlite3.Connection,
+        *,
+        agent_id: int,
+        bot_id: int,
+        game_id: str,
+        request_owner_id: int | None = None,
+        enforce_request_owner: bool = False,
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT a.id,a.public_id,a.connection_generation,a.owner_id,"
+            "a.bot_id,a.game_id,a.status,"
+            "b.owner_id AS bot_owner_id,b.game_id AS bot_game_id,"
+            "b.is_active AS bot_active,u.is_active AS owner_active "
+            "FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
+            "JOIN users u ON u.id=a.owner_id WHERE a.id=?",
+            (int(agent_id),),
+        ).fetchone()
+        if not (
+            row is not None
+            and str(row["status"] or "") == "active"
+            and int(row["bot_id"]) == int(bot_id)
+            and str(row["game_id"] or "") == game_id
+            and str(row["bot_game_id"] or "") == game_id
+            and int(row["owner_id"]) == int(row["bot_owner_id"])
+            and int(row["bot_active"] or 0) == 1
+            and int(row["owner_active"] or 0) == 1
+        ):
+            return None
+        if not enforce_request_owner:
+            return dict(row)
+        if request_owner_id is None:
+            return None
+        return (
+            dict(row)
+            if int(row["owner_id"]) == int(request_owner_id)
+            else None
+        )
+
+    @classmethod
+    def _local_agent_identity_tx(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        agent_id: int,
+        bot_id: int,
+        game_id: str,
+        request_owner_id: int | None = None,
+        enforce_request_owner: bool = False,
+    ) -> bool:
+        return cls._local_agent_snapshot_tx(
+            conn,
+            agent_id=agent_id,
+            bot_id=bot_id,
+            game_id=game_id,
+            request_owner_id=request_owner_id,
+            enforce_request_owner=enforce_request_owner,
+        ) is not None
+
+    def _execution_environment_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source: str,
+        owner_user_id: int | None,
+        game_id: str,
+        bot_a_id: int,
+        bot_b_id: int,
+        bot_a_version_id: int | None,
+        bot_b_version_id: int | None,
+        bot_a_environment: str | None,
+        bot_b_environment: str | None,
+        bot_a_local_agent_id: int | None,
+        bot_b_local_agent_id: int | None,
+        human_seat: int | None,
+    ) -> dict[str, Any]:
+        if source == EXECUTION_SOURCE_CONTEST:
+            environments = (
+                EXECUTION_ENV_PLATFORM_HIGH,
+                EXECUTION_ENV_PLATFORM_HIGH,
+            )
+            agent_ids: tuple[int | None, int | None] = (None, None)
+        elif source == EXECUTION_SOURCE_AUTO:
+            environments = (
+                EXECUTION_ENV_PLATFORM_LOW,
+                EXECUTION_ENV_PLATFORM_LOW,
+            )
+            agent_ids = (None, None)
+        elif source == EXECUTION_SOURCE_HUMAN:
+            if human_seat not in (0, 1):
+                raise ValueError("人类对局缺少有效座位")
+            environments = (
+                EXECUTION_ENV_HUMAN
+                if int(human_seat) == 0
+                else EXECUTION_ENV_PLATFORM_LOW,
+                EXECUTION_ENV_HUMAN
+                if int(human_seat) == 1
+                else EXECUTION_ENV_PLATFORM_LOW,
+            )
+            agent_ids = (None, None)
+        elif source == EXECUTION_SOURCE_MANUAL:
+            environments = (
+                str(bot_a_environment or EXECUTION_ENV_PLATFORM_LOW),
+                str(bot_b_environment or EXECUTION_ENV_PLATFORM_LOW),
+            )
+            if any(item not in _MANUAL_ENVIRONMENTS for item in environments):
+                raise ValueError("普通挑战只允许低配 Docker 或本地 Bot")
+            agent_ids = (bot_a_local_agent_id, bot_b_local_agent_id)
+        else:  # guarded by the caller, retained as a fail-closed boundary
+            raise ValueError(f"unknown execution source: {source}")
+
+        versions: list[int | None] = [bot_a_version_id, bot_b_version_id]
+        bots = (int(bot_a_id), int(bot_b_id))
+        normalized_agents: list[int | None] = [None, None]
+        for seat, environment in enumerate(environments):
+            supplied_agent = agent_ids[seat]
+            if environment == EXECUTION_ENV_REMOTE_LOCAL:
+                if supplied_agent is None:
+                    raise ValueError("本地 Bot 座位必须选择连接")
+                agent_id = int(supplied_agent)
+                if not self._local_agent_identity_tx(
+                    conn,
+                    agent_id=agent_id,
+                    bot_id=bots[seat],
+                    game_id=game_id,
+                    request_owner_id=owner_user_id,
+                    enforce_request_owner=True,
+                ):
+                    raise ValueError("本地 Bot 连接与用户、Bot 或游戏不匹配")
+                normalized_agents[seat] = agent_id
+                # A local connector is its own frozen execution identity; it
+                # must never masquerade as one uploaded immutable version.
+                versions[seat] = None
+            elif supplied_agent is not None:
+                raise ValueError("Docker 或人类座位不能绑定本地 Bot 连接")
+            elif environment == EXECUTION_ENV_HUMAN:
+                versions[seat] = None
+
+        remote_agents = [
+            agent_id for agent_id in normalized_agents if agent_id is not None
+        ]
+        if len(remote_agents) != len(set(remote_agents)):
+            raise ValueError("同一个本地 Bot 连接不能同时占用两个座位")
+
+        units, cpu_millis, memory_mb = self._resource_snapshot(*environments)
+        return {
+            "bot_a_environment": environments[0],
+            "bot_b_environment": environments[1],
+            "bot_a_local_agent_id": normalized_agents[0],
+            "bot_b_local_agent_id": normalized_agents[1],
+            "bot_a_version_id": versions[0],
+            "bot_b_version_id": versions[1],
+            "sandbox_units": units,
+            "host_cpu_millis": cpu_millis,
+            "host_memory_mb": memory_mb,
+            "profile_version": EXECUTION_PROFILE_VERSION,
+        }
+
+    @staticmethod
     def _rating_policy_tx(
         conn: sqlite3.Connection,
         *,
         source: str,
         bot_a_id: int,
         bot_b_id: int,
+        bot_a_environment: str,
+        bot_b_environment: str,
     ) -> tuple[bool, str]:
+        if EXECUTION_ENV_REMOTE_LOCAL in {
+            bot_a_environment,
+            bot_b_environment,
+        }:
+            return False, "remote_local"
         if source == EXECUTION_SOURCE_CONTEST:
             return False, "contest"
         if source == EXECUTION_SOURCE_HUMAN:
@@ -506,6 +953,10 @@ class ExecutionRepository:
         bot_b_id: int,
         bot_a_version_id: int | None,
         bot_b_version_id: int | None,
+        bot_a_environment: str | None = None,
+        bot_b_environment: str | None = None,
+        bot_a_local_agent_id: int | None = None,
+        bot_b_local_agent_id: int | None = None,
         match_config: dict[str, Any] | None,
         human_user_id: int | None,
         human_seat: int | None,
@@ -519,15 +970,33 @@ class ExecutionRepository:
         if source not in EXECUTION_SOURCES:
             raise ValueError(f"unknown execution source: {source}")
         gid = _registered_game_id(game_id)
+        environment = self._execution_environment_tx(
+            conn,
+            source=source,
+            owner_user_id=owner_user_id,
+            game_id=gid,
+            bot_a_id=int(bot_a_id),
+            bot_b_id=int(bot_b_id),
+            bot_a_version_id=bot_a_version_id,
+            bot_b_version_id=bot_b_version_id,
+            bot_a_environment=bot_a_environment,
+            bot_b_environment=bot_b_environment,
+            bot_a_local_agent_id=bot_a_local_agent_id,
+            bot_b_local_agent_id=bot_b_local_agent_id,
+            human_seat=human_seat,
+        )
+        bot_a_version_id = environment["bot_a_version_id"]
+        bot_b_version_id = environment["bot_b_version_id"]
         rated, rating_reason = self._rating_policy_tx(
             conn,
             source=source,
             bot_a_id=int(bot_a_id),
             bot_b_id=int(bot_b_id),
+            bot_a_environment=str(environment["bot_a_environment"]),
+            bot_b_environment=str(environment["bot_b_environment"]),
         )
         public = public_id or _new_public_id()
         now = created_at or _now()
-        units = 1 if source == EXECUTION_SOURCE_HUMAN else 2
         priority = SOURCE_PRIORITY[source]
         config = dict(match_config or {})
         config.pop("_rating_eligible", None)
@@ -539,32 +1008,50 @@ class ExecutionRepository:
         conn.execute(
             "INSERT INTO execution_jobs("
             "public_id,source,status,priority,owner_user_id,game_id,match_type,"
-            "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,human_user_id,"
-            "human_seat,contest_id,contest_pairing_id,match_config,rated,"
-            "rating_reason,match_slots,sandbox_units,auto_decision_id,created_at) "
-            "VALUES(?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)",
-            (
-                public,
-                source,
-                priority,
-                owner_user_id,
-                gid,
-                match_type,
-                bot_a_id,
-                bot_b_id,
-                bot_a_version_id,
-                bot_b_version_id,
-                human_user_id,
-                human_seat,
-                contest_id,
-                contest_pairing_id,
-                json.dumps(config, ensure_ascii=False, separators=(",", ":")),
-                1 if rated else 0,
-                rating_reason,
-                units,
-                auto_decision_id,
-                now,
-            ),
+            "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,"
+            "bot_a_environment,bot_b_environment,bot_a_local_agent_id,"
+            "bot_b_local_agent_id,human_user_id,human_seat,contest_id,"
+            "contest_pairing_id,match_config,rated,rating_reason,match_slots,"
+            "sandbox_units,host_cpu_millis,host_memory_mb,profile_version,"
+            "auto_decision_id,created_at) "
+            "VALUES(:public_id,:source,'queued',:priority,:owner_user_id,:game_id,"
+            ":match_type,:bot_a_id,:bot_b_id,:bot_a_version_id,:bot_b_version_id,"
+            ":bot_a_environment,:bot_b_environment,:bot_a_local_agent_id,"
+            ":bot_b_local_agent_id,:human_user_id,:human_seat,:contest_id,"
+            ":contest_pairing_id,:match_config,:rated,:rating_reason,1,"
+            ":sandbox_units,:host_cpu_millis,:host_memory_mb,:profile_version,"
+            ":auto_decision_id,:created_at)",
+            {
+                "public_id": public,
+                "source": source,
+                "priority": priority,
+                "owner_user_id": owner_user_id,
+                "game_id": gid,
+                "match_type": match_type,
+                "bot_a_id": bot_a_id,
+                "bot_b_id": bot_b_id,
+                "bot_a_version_id": bot_a_version_id,
+                "bot_b_version_id": bot_b_version_id,
+                "bot_a_environment": environment["bot_a_environment"],
+                "bot_b_environment": environment["bot_b_environment"],
+                "bot_a_local_agent_id": environment["bot_a_local_agent_id"],
+                "bot_b_local_agent_id": environment["bot_b_local_agent_id"],
+                "human_user_id": human_user_id,
+                "human_seat": human_seat,
+                "contest_id": contest_id,
+                "contest_pairing_id": contest_pairing_id,
+                "match_config": json.dumps(
+                    config, ensure_ascii=False, separators=(",", ":")
+                ),
+                "rated": 1 if rated else 0,
+                "rating_reason": rating_reason,
+                "sandbox_units": environment["sandbox_units"],
+                "host_cpu_millis": environment["host_cpu_millis"],
+                "host_memory_mb": environment["host_memory_mb"],
+                "profile_version": environment["profile_version"],
+                "auto_decision_id": auto_decision_id,
+                "created_at": now,
+            },
         )
         return dict(
             conn.execute(
@@ -583,6 +1070,10 @@ class ExecutionRepository:
         bot_b_id: int,
         bot_a_version_id: int | None,
         bot_b_version_id: int | None,
+        bot_a_environment: str | None = None,
+        bot_b_environment: str | None = None,
+        bot_a_local_agent_id: int | None = None,
+        bot_b_local_agent_id: int | None = None,
         match_config: dict[str, Any] | None = None,
         human_user_id: int | None = None,
         human_seat: int | None = None,
@@ -608,9 +1099,17 @@ class ExecutionRepository:
                     )
                     return dict(existing)
             control = conn.execute(
-                "SELECT accepting FROM execution_control WHERE singleton=1"
+                "SELECT accepting,deployment_drain_requested "
+                "FROM execution_control WHERE singleton=1"
             ).fetchone()
             if control is None or int(control["accepting"] or 0) != 1:
+                if control is not None and int(
+                    control["deployment_drain_requested"] or 0
+                ):
+                    raise ExecutionQueueClosed(
+                        "平台正在部署维护，暂不接收新的对局请求",
+                        code="deployment_maintenance",
+                    )
                 raise ExecutionQueueClosed("执行队列正在启动或停止，请稍后重试")
             if source == EXECUTION_SOURCE_CONTEST:
                 # Pairings remain ``pending + match_id=NULL`` until the global
@@ -656,6 +1155,10 @@ class ExecutionRepository:
                 bot_b_id=bot_b_id,
                 bot_a_version_id=bot_a_version_id,
                 bot_b_version_id=bot_b_version_id,
+                bot_a_environment=bot_a_environment,
+                bot_b_environment=bot_b_environment,
+                bot_a_local_agent_id=bot_a_local_agent_id,
+                bot_b_local_agent_id=bot_b_local_agent_id,
                 match_config=match_config,
                 human_user_id=human_user_id,
                 human_seat=human_seat,
@@ -785,11 +1288,15 @@ class ExecutionRepository:
         *,
         max_match_slots: int,
         max_sandbox_units: int,
+        max_host_cpu_millis: int | None = None,
+        max_host_memory_mb: int | None = None,
     ) -> dict:
         marks = "'starting','running','settling'"
         used = conn.execute(
             "SELECT COUNT(*) AS jobs,COALESCE(SUM(match_slots),0) AS slots,"
-            "COALESCE(SUM(sandbox_units),0) AS units FROM execution_jobs "
+            "COALESCE(SUM(sandbox_units),0) AS units,"
+            "COALESCE(SUM(host_cpu_millis),0) AS cpu_millis,"
+            "COALESCE(SUM(host_memory_mb),0) AS memory_mb FROM execution_jobs "
             f"WHERE status IN ({marks})"
         ).fetchone()
         # Count *every* registered match table, including historical/legacy
@@ -823,12 +1330,103 @@ class ExecutionRepository:
             # never make the global sandbox-unit limit under-report capacity.
             "used_sandbox_units": int(used["units"] or 0)
             + untracked_running * 2,
+            "used_host_cpu_millis": int(used["cpu_millis"] or 0)
+            + untracked_running * 2000,
+            "used_host_memory_mb": int(used["memory_mb"] or 0)
+            + untracked_running * 1024,
             "running_matches": running_matches,
             "untracked_running_matches": untracked_running,
             "occupied_match_slots": occupied_match_slots,
             "max_match_slots": max(1, int(max_match_slots)),
             "max_sandbox_units": max(1, int(max_sandbox_units)),
+            # The production dispatcher always supplies a process-visible
+            # ceiling.  None keeps older direct repository callers compatible.
+            "max_host_cpu_millis": (
+                max(1, int(max_host_cpu_millis))
+                if max_host_cpu_millis is not None
+                else 2**63 - 1
+            ),
+            "max_host_memory_mb": (
+                max(1, int(max_host_memory_mb))
+                if max_host_memory_mb is not None
+                else 2**63 - 1
+            ),
         }
+
+    @staticmethod
+    def _permanent_host_block(job: dict, capacity: dict) -> tuple[str, str]:
+        required_cpu = max(0, int(job.get("host_cpu_millis") or 0))
+        required_memory = max(0, int(job.get("host_memory_mb") or 0))
+        if (
+            required_cpu <= int(capacity["max_host_cpu_millis"])
+            and required_memory <= int(capacity["max_host_memory_mb"])
+        ):
+            return "", ""
+        cpu_label = (
+            str(required_cpu // 1000)
+            if required_cpu % 1000 == 0
+            else f"{required_cpu / 1000:.1f}"
+        )
+        memory_label = (
+            f"{required_memory // 1024} GiB"
+            if required_memory and required_memory % 1024 == 0
+            else f"{required_memory} MiB"
+        )
+        return (
+            "host_resources_insufficient",
+            f"该对局需要 {cpu_label} 核 CPU 和 {memory_label} 内存；"
+            "当前主机资源不足，请求会保留排队且不会降档",
+        )
+
+    def _local_agent_capacity_block_tx(
+        self,
+        conn: sqlite3.Connection,
+        job: dict,
+    ) -> tuple[str, str]:
+        if str(job.get("status") or "") != EXECUTION_QUEUED:
+            return "", ""
+        for suffix in ("a", "b"):
+            if (
+                str(job.get(f"bot_{suffix}_environment") or "")
+                != EXECUTION_ENV_REMOTE_LOCAL
+            ):
+                continue
+            frozen_agent = job.get(f"bot_{suffix}_local_agent_id")
+            agent_id = int(frozen_agent) if frozen_agent is not None else 0
+            has_active_lease = bool(
+                agent_id
+                and conn.execute(
+                    "SELECT 1 FROM local_ai_leases WHERE agent_id=? "
+                    "AND status='active' LIMIT 1",
+                    (agent_id,),
+                ).fetchone()
+                is not None
+            )
+            if (
+                not agent_id
+                or has_active_lease
+                or not self._is_local_agent_available(agent_id)
+            ):
+                return (
+                    "local_agent_unavailable",
+                    "等待所选本地 Bot 上线并空闲；保持连接后平台会自动继续排队",
+                )
+        return "", ""
+
+    def _project_capacity_block_tx(
+        self,
+        conn: sqlite3.Connection,
+        job: dict,
+        capacity: dict,
+    ) -> dict:
+        projected = dict(job)
+        code, reason = self._permanent_host_block(projected, capacity)
+        if not code:
+            code, reason = self._local_agent_capacity_block_tx(conn, projected)
+        if code:
+            projected["capacity_blocked_code"] = code
+            projected["capacity_blocked_reason"] = reason
+        return projected
 
     def snapshot(
         self,
@@ -836,6 +1434,8 @@ class ExecutionRepository:
         max_match_slots: int,
         max_sandbox_units: int,
         aging_seconds: int,
+        max_host_cpu_millis: int | None = None,
+        max_host_memory_mb: int | None = None,
         public_id: str | None = None,
         game_id: str | None = None,
     ) -> dict:
@@ -849,6 +1449,8 @@ class ExecutionRepository:
                 conn,
                 max_match_slots=max_match_slots,
                 max_sandbox_units=max_sandbox_units,
+                max_host_cpu_millis=max_host_cpu_millis,
+                max_host_memory_mb=max_host_memory_mb,
             )
             ordered = self._ordered_queued_tx(
                 conn,
@@ -887,12 +1489,21 @@ class ExecutionRepository:
                                 break
                             ahead_jobs += 1
                             ahead_units += int(row["sandbox_units"])
+            projected_ordered = [
+                self._project_capacity_block_tx(conn, row, capacity)
+                for row in ordered
+            ]
+            projected_target = (
+                self._project_capacity_block_tx(conn, dict(target), capacity)
+                if target is not None
+                else None
+            )
             return {
                 "control": control,
                 "capacity": capacity,
                 "active": active,
-                "queued": ordered,
-                "target": dict(target) if target is not None else None,
+                "queued": projected_ordered,
+                "target": projected_target,
                 "ahead_jobs": ahead_jobs,
                 "ahead_sandbox_units": ahead_units,
             }
@@ -932,6 +1543,44 @@ class ExecutionRepository:
         config["_rating_eligible"] = bool(int(job["rated"] or 0))
         config["_rating_reason"] = str(job["rating_reason"])
         config["_execution_request_id"] = str(job["public_id"])
+        config["_bot_a_environment"] = str(job["bot_a_environment"])
+        config["_bot_b_environment"] = str(job["bot_b_environment"])
+        config["_execution_profile_version"] = int(job["profile_version"])
+        config["_bot_a_local_agent_id"] = job.get("bot_a_local_agent_id")
+        config["_bot_b_local_agent_id"] = job.get("bot_b_local_agent_id")
+        # A local_ai_agents row may be revoked and later reused for the same
+        # owner-visible label.  Its integer primary key is therefore not an
+        # immutable transport identity.  Freeze the authenticated public id
+        # and durable connection generation in this claim transaction; the
+        # runner must never resolve the mutable row again after this point.
+        for seat, suffix in enumerate(("a", "b")):
+            if str(job[f"bot_{suffix}_environment"]) != EXECUTION_ENV_REMOTE_LOCAL:
+                continue
+            raw_agent_id = job.get(f"bot_{suffix}_local_agent_id")
+            snapshot = (
+                self._local_agent_snapshot_tx(
+                    conn,
+                    agent_id=int(raw_agent_id),
+                    bot_id=int(job[f"bot_{suffix}_id"]),
+                    game_id=gid,
+                    request_owner_id=job.get("owner_user_id"),
+                    enforce_request_owner=True,
+                )
+                if raw_agent_id is not None
+                else None
+            )
+            if snapshot is None:
+                raise ExecutionInvariantError(
+                    f"local AI seat {seat} identity changed before claim"
+                )
+            public_id = str(snapshot.get("public_id") or "").strip()
+            generation = int(snapshot.get("connection_generation") or 0)
+            if not public_id or generation < 0:
+                raise ExecutionInvariantError(
+                    f"local AI seat {seat} identity snapshot is invalid"
+                )
+            config[f"_bot_{suffix}_local_agent_public_id"] = public_id
+            config[f"_bot_{suffix}_local_agent_generation"] = generation
         if job.get("bot_a_version_id") is not None:
             config["_bot_a_version_id"] = int(job["bot_a_version_id"])
         if job.get("bot_b_version_id") is not None:
@@ -988,6 +1637,8 @@ class ExecutionRepository:
         aging_seconds: int,
         user_active_limit: int,
         contest_share_slots: int,
+        max_host_cpu_millis: int | None = None,
+        max_host_memory_mb: int | None = None,
     ) -> dict | None:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1006,6 +1657,8 @@ class ExecutionRepository:
                 conn,
                 max_match_slots=max_match_slots,
                 max_sandbox_units=max_sandbox_units,
+                max_host_cpu_millis=max_host_cpu_millis,
+                max_host_memory_mb=max_host_memory_mb,
             )
             if (
                 capacity["occupied_match_slots"] >= capacity["max_match_slots"]
@@ -1040,11 +1693,48 @@ class ExecutionRepository:
                 for job in queued:
                     if int(job["id"]) in invalid_job_ids:
                         continue
+                    try:
+                        from bzplat.backend.runtime.limits import (
+                            execution_resource_snapshot,
+                        )
+
+                        frozen_resources = execution_resource_snapshot(
+                            (
+                                str(job["bot_a_environment"]),
+                                str(job["bot_b_environment"]),
+                            ),
+                            int(job["profile_version"]),
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise ExecutionInvariantError(
+                            "execution resource profile snapshot is unknown"
+                        ) from exc
+                    persisted_resources = (
+                        int(job["sandbox_units"]),
+                        int(job.get("host_cpu_millis") or 0),
+                        int(job.get("host_memory_mb") or 0),
+                    )
+                    if frozen_resources != persisted_resources:
+                        raise ExecutionInvariantError(
+                            "execution resource profile snapshot mismatch"
+                        )
                     if (
                         int(job["sandbox_units"])
                         + capacity["used_sandbox_units"]
                         > capacity["max_sandbox_units"]
                     ):
+                        continue
+                    if (
+                        int(job.get("host_cpu_millis") or 0)
+                        + capacity["used_host_cpu_millis"]
+                        > capacity["max_host_cpu_millis"]
+                        or int(job.get("host_memory_mb") or 0)
+                        + capacity["used_host_memory_mb"]
+                        > capacity["max_host_memory_mb"]
+                    ):
+                        # Resource snapshots are immutable.  In particular,
+                        # an official match never falls back from the 2C/2GiB
+                        # per-Bot profile to make an undersized host fit.
                         continue
                     if (
                         not relax_contest_share
@@ -1066,17 +1756,37 @@ class ExecutionRepository:
                         ).fetchone()[0]
                         if int(active_owner) >= max(1, int(user_active_limit)):
                             continue
-                    seats = (0, 1)
-                    if job["source"] == EXECUTION_SOURCE_HUMAN:
-                        seats = (1 - int(job["human_seat"]),)
                     invalid_versions: list[tuple[int, int | None]] = []
-                    for seat in seats:
-                        bot_id = int(
-                            job[f"bot_{'a' if seat == 0 else 'b'}_id"]
-                        )
-                        frozen = job.get(
-                            f"bot_{'a' if seat == 0 else 'b'}_version_id"
-                        )
+                    invalid_agents: list[int] = []
+                    remote_agents: list[int] = []
+                    for seat in (0, 1):
+                        suffix = "a" if seat == 0 else "b"
+                        environment = str(job[f"bot_{suffix}_environment"])
+                        if environment == EXECUTION_ENV_HUMAN:
+                            continue
+                        bot_id = int(job[f"bot_{suffix}_id"])
+                        if environment == EXECUTION_ENV_REMOTE_LOCAL:
+                            frozen_agent = job.get(
+                                f"bot_{suffix}_local_agent_id"
+                            )
+                            agent_id = (
+                                int(frozen_agent)
+                                if frozen_agent is not None
+                                else 0
+                            )
+                            if not agent_id or not self._local_agent_identity_tx(
+                                conn,
+                                agent_id=agent_id,
+                                bot_id=bot_id,
+                                game_id=str(job["game_id"]),
+                                request_owner_id=job.get("owner_user_id"),
+                                enforce_request_owner=True,
+                            ):
+                                invalid_agents.append(agent_id)
+                            else:
+                                remote_agents.append(agent_id)
+                            continue
+                        frozen = job.get(f"bot_{suffix}_version_id")
                         version_id = int(frozen) if frozen is not None else None
                         if not self._version_identity_tx(
                             conn,
@@ -1084,6 +1794,29 @@ class ExecutionRepository:
                             version_id=version_id,
                         ):
                             invalid_versions.append((bot_id, version_id))
+                    if invalid_agents:
+                        conn.execute(
+                            "UPDATE execution_jobs SET status='interrupted',retryable=1,"
+                            "terminal_reason='local_agent_unavailable',"
+                            "last_error='local_agent_unavailable',terminal_at=? "
+                            "WHERE id=? AND status='queued'",
+                            (_now(), int(job["id"])),
+                        )
+                        invalid_job_ids.add(int(job["id"]))
+                        continue
+                    # Offline/busy is volatile, unlike a revoked or mismatched
+                    # identity. Skip this row without blocking later jobs.
+                    if any(
+                        not self._is_local_agent_available(agent_id)
+                        or conn.execute(
+                            "SELECT 1 FROM local_ai_leases WHERE agent_id=? "
+                            "AND status='active' LIMIT 1",
+                            (agent_id,),
+                        ).fetchone()
+                        is not None
+                        for agent_id in remote_agents
+                    ):
+                        continue
                     if invalid_versions:
                         terminal = _now()
                         user_retryable = job["source"] in {
@@ -1222,6 +1955,29 @@ class ExecutionRepository:
                     "WHERE id=? AND status='published'",
                     (now, selected["contest_id"]),
                 )
+            for seat, field in enumerate(
+                ("bot_a_local_agent_id", "bot_b_local_agent_id")
+            ):
+                agent_id = selected.get(field)
+                if agent_id is None:
+                    continue
+                try:
+                    conn.execute(
+                        "INSERT INTO local_ai_leases("
+                        "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+                        "VALUES(?,?,?,?,'active',?)",
+                        (
+                            int(agent_id),
+                            str(selected["public_id"]),
+                            attempt_no,
+                            seat,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise ExecutionInvariantError(
+                        "local AI lease claim lost"
+                    ) from exc
             changed = conn.execute(
                 "UPDATE execution_jobs SET status='starting',current_match_id=?,"
                 "attempt_count=?,claimed_at=?,started_at=NULL,settling_at=NULL,"
@@ -1252,6 +2008,26 @@ class ExecutionRepository:
     # ------------------------------------------------------------------
     # Runtime transitions and recovery
     # ------------------------------------------------------------------
+    @staticmethod
+    def _release_local_agent_leases_tx(
+        conn: sqlite3.Connection,
+        *,
+        public_id: str,
+        attempt_no: int,
+        reason: str,
+    ) -> None:
+        conn.execute(
+            "UPDATE local_ai_leases SET status='released',released_at=?,"
+            "terminal_reason=? WHERE job_public_id=? AND attempt_no=? "
+            "AND status='active'",
+            (
+                _now(),
+                str(reason)[:200],
+                str(public_id),
+                int(attempt_no),
+            ),
+        )
+
     def assert_active_attempt(self, public_id: str, attempt_no: int) -> None:
         with self.store._tx() as conn:
             row = conn.execute(
@@ -1280,6 +2056,12 @@ class ExecutionRepository:
     def mark_cleanup_confirmed(self, public_id: str, attempt_no: int) -> None:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._release_local_agent_leases_tx(
+                conn,
+                public_id=public_id,
+                attempt_no=attempt_no,
+                reason="cleanup_confirmed",
+            )
             conn.execute(
                 # Physical cleanup and the cause that required recovery are
                 # independent facts.  Preserve ``last_error`` until the
@@ -1341,6 +2123,21 @@ class ExecutionRepository:
                 raise PermissionError("无权重试该执行请求")
             if job["status"] != EXECUTION_INTERRUPTED or not int(job["retryable"]):
                 raise ValueError("该执行请求当前不可重试")
+            control = conn.execute(
+                "SELECT accepting,deployment_drain_requested "
+                "FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if control is None or int(control["accepting"] or 0) != 1:
+                if control is not None and int(
+                    control["deployment_drain_requested"] or 0
+                ):
+                    raise ExecutionQueueClosed(
+                        "平台正在部署维护，暂不接收重试请求",
+                        code="deployment_maintenance",
+                    )
+                raise ExecutionQueueClosed(
+                    "执行队列正在启动或停止，请稍后重试"
+                )
             conn.execute(
                 "UPDATE execution_jobs SET status='queued',current_match_id=NULL,"
                 "cancel_requested=0,cleanup_state='none',retryable=0,terminal_reason='',"
@@ -1395,6 +2192,12 @@ class ExecutionRepository:
                 conn, game_id=str(job["game_id"]), match_id=match_id
             )
             now = _now()
+            self._release_local_agent_leases_tx(
+                conn,
+                public_id=public_id,
+                attempt_no=int(job["attempt_count"]),
+                reason=str(reason),
+            )
             conn.execute(
                 "UPDATE execution_job_attempts SET status='interrupted',"
                 "terminal_at=?,terminal_reason=? WHERE job_id=? AND match_id=?",
@@ -1490,6 +2293,12 @@ class ExecutionRepository:
             ).fetchall()
             for raw in jobs:
                 job = dict(raw)
+                self._release_local_agent_leases_tx(
+                    conn,
+                    public_id=str(job["public_id"]),
+                    attempt_no=int(job["attempt_count"]),
+                    reason="namespace_recovery",
+                )
                 match_id = str(job.get("current_match_id") or "")
                 if not match_id:
                     raise ExecutionInvariantError(
@@ -2015,7 +2824,13 @@ class ExecutionRepository:
 
 
 __all__ = [
+    "EXECUTION_ENV_HUMAN",
+    "EXECUTION_ENV_PLATFORM_HIGH",
+    "EXECUTION_ENV_PLATFORM_LOW",
+    "EXECUTION_ENV_REMOTE_LOCAL",
+    "EXECUTION_PROFILE_VERSION",
     "ExecutionInvariantError",
+    "ExecutionMaintenanceConflict",
     "ExecutionQueueClosed",
     "ExecutionRepository",
     "SOURCE_PRIORITY",

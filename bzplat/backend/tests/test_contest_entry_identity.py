@@ -305,23 +305,54 @@ def test_delete_user_if_safe_rejects_queued_execution_identity(tmp_path, source)
         format="elf", game_id="pencil",
     )
     if source == "human":
-        values = (
-            f"req-{source}", source, victim["id"], "human", bot["id"],
-            bot["id"], victim["id"], 1, 1,
-        )
+        values = {
+            "public_id": f"req-{source}",
+            "source": source,
+            "owner_user_id": victim["id"],
+            "match_type": "human",
+            "bot_a_id": bot["id"],
+            "bot_b_id": bot["id"],
+            "bot_a_environment": "platform_low",
+            "bot_b_environment": "human",
+            "human_user_id": victim["id"],
+            "human_seat": 1,
+            "sandbox_units": 1,
+            "host_cpu_millis": 1000,
+            "host_memory_mb": 512,
+            "profile_version": 1,
+        }
     else:
-        values = (
-            f"req-{source}", source, victim["id"], "challenge", bot["id"],
-            bot["id"], None, None, 2,
-        )
+        values = {
+            "public_id": f"req-{source}",
+            "source": source,
+            "owner_user_id": victim["id"],
+            "match_type": "challenge",
+            "bot_a_id": bot["id"],
+            "bot_b_id": bot["id"],
+            "bot_a_environment": "platform_low",
+            "bot_b_environment": "platform_low",
+            "human_user_id": None,
+            "human_seat": None,
+            "sandbox_units": 2,
+            "host_cpu_millis": 2000,
+            "host_memory_mb": 1024,
+            "profile_version": 1,
+        }
+    values["created_at"] = "2026-08-11T00:00:00+00:00"
     with s._tx() as c:
         c.execute(
             "INSERT INTO execution_jobs("
             "public_id,source,status,priority,owner_user_id,game_id,match_type,"
-            "bot_a_id,bot_b_id,human_user_id,human_seat,match_config,rated,"
-            "rating_reason,sandbox_units,created_at) "
-            "VALUES(?,?,'queued',50,?,'pencil',?,?,?,?,?,'{}',0,'test',?,?)",
-            (*values, "2026-08-11T00:00:00+00:00"),
+            "bot_a_id,bot_b_id,bot_a_environment,bot_b_environment,"
+            "human_user_id,human_seat,match_config,rated,rating_reason,"
+            "sandbox_units,host_cpu_millis,host_memory_mb,profile_version,"
+            "created_at) VALUES("
+            ":public_id,:source,'queued',50,:owner_user_id,'pencil',"
+            ":match_type,:bot_a_id,:bot_b_id,:bot_a_environment,"
+            ":bot_b_environment,:human_user_id,:human_seat,'{}',0,'test',"
+            ":sandbox_units,:host_cpu_millis,:host_memory_mb,"
+            ":profile_version,:created_at)",
+            values,
         )
 
     result = s.delete_user_if_safe(victim["id"])

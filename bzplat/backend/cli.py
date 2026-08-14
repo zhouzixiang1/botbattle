@@ -80,6 +80,9 @@ def serve(
 
     # 统一日志：文件 + 控制台（uvicorn.run 前生效，确保所有模块落 app.log）
     from bzplat.backend.logging_config import setup_logging
+    from bzplat.backend.runtime.limits import (
+        MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES,
+    )
     setup_logging(level=os.environ.get("BZ_LOG_LEVEL", "INFO"))
     logging.getLogger(__name__).info("botbattle 启动 host=%s port=%s reload=%s", host, port, reload)
 
@@ -92,6 +95,10 @@ def serve(
         # The application validates proxy headers against the original ASGI
         # socket peer. Never let Uvicorn rewrite scope['client'] first.
         proxy_headers=False,
+        # Reject oversized Local AI frames before Uvicorn buffers and decodes
+        # them. Uvicorn's current SansIO backend pauses socket reads after
+        # each complete message, so no unsupported queue-size promise is made.
+        ws_max_size=MAX_LOCAL_AI_WEBSOCKET_MESSAGE_BYTES,
         log_level="info",
         # setup_logging() owns Uvicorn's handlers and request-target filter.
         # Reapplying Uvicorn's default config here would bypass both and write

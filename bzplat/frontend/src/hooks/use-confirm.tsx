@@ -25,6 +25,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 
 export interface ConfirmOptions {
   /** 标题（默认"确认操作"） */
@@ -37,6 +38,8 @@ export interface ConfirmOptions {
   cancelText?: string
   /** 危险操作（删除类）——确认按钮用 destructive 红色变体 */
   danger?: boolean
+  /** 两个操作按钮的附加样式；页面可按触控场景扩大命中区。 */
+  buttonClassName?: string
 }
 
 type Resolver = (ok: boolean) => void
@@ -80,6 +83,7 @@ export function useConfirm(): [
     confirmText = '确认',
     cancelText = '取消',
     danger = false,
+    buttonClassName,
   } = opts
 
   const dialog = (
@@ -90,10 +94,11 @@ export function useConfirm(): [
           {desc != null && <DialogDescription>{desc}</DialogDescription>}
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => settle(false)}>
+          <Button className={cn(buttonClassName)} variant="outline" onClick={() => settle(false)}>
             {cancelText}
           </Button>
           <Button
+            className={cn(buttonClassName)}
             variant={danger ? 'destructive' : 'default'}
             onClick={() => settle(true)}
           >

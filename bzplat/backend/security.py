@@ -33,6 +33,7 @@ _CAPTCHA_LIMIT = (60, 60)
 _UPLOAD_STRICT = (6, 60)
 _CHALLENGE_STRICT = (8, 60)
 _FEEDBACK_STRICT = (5, 60)
+_LOCAL_AI_ROTATE_STRICT = (5, 60)
 _API_DEFAULT = (120, 60)
 MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 BOT_UPLOAD_MULTIPART_OVERHEAD_BYTES = MULTIPART_OVERHEAD_BYTES
@@ -45,6 +46,9 @@ AVATAR_BODY_MAX_BYTES = 2 * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES
 _BOT_VERSION_UPLOAD_PATH = re.compile(r"/api/bots/[^/]+/versions")
 _BUG_ATTACHMENT_UPLOAD_PATH = re.compile(
     r"/api/feedback/bugs/[^/]+/attachments"
+)
+_LOCAL_AI_ROTATE_PATH = re.compile(
+    r"^/api/local-ai/agents/[^/]+/rotate$"
 )
 _BOT_UPLOAD_TOO_LARGE = {
     "code": "upload_body_too_large",
@@ -515,6 +519,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return _UPLOAD_STRICT
         if path == "/api/matches/challenge":
             return _CHALLENGE_STRICT
+        if method == "POST" and _LOCAL_AI_ROTATE_PATH.fullmatch(path):
+            return _LOCAL_AI_ROTATE_STRICT
         if method == "POST" and (
             path == "/api/feedback/bugs"
             or (path.startswith("/api/feedback/bugs/") and path.endswith("/attachments"))
@@ -523,6 +529,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path.startswith("/api/"):
             return _API_DEFAULT
         return None
+
+    @staticmethod
+    def _bucket_path(method: str, path: str) -> str:
+        """Collapse rotating public IDs onto one HTTP abuse-control bucket.
+
+        A successful token rotation intentionally changes the public path.  A
+        raw-path bucket would therefore grant a fresh allowance after every
+        response and make the route-level limit ineffective.  The service also
+        applies a stable owner+database-agent limit as the business boundary.
+        """
+
+        if method == "POST" and _LOCAL_AI_ROTATE_PATH.fullmatch(path):
+            return "/api/local-ai/agents/{agent}/rotate"
+        return path
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if not self.enabled:
@@ -547,7 +567,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # The same resource commonly has a cheap GET and a stricter mutating
         # POST budget (notably Bot version history vs version upload). Sharing a
         # path-only bucket lets harmless reads consume the write allowance.
-        key = f"{ip}:{request.method}:{request.url.path}"
+        bucket_path = self._bucket_path(request.method, request.url.path)
+        key = f"{ip}:{request.method}:{bucket_path}"
         ok, remaining, retry = self._limiter.check(key, max_req, window)
         if not ok:
             logger.warning("rate limit: ip=%s path=%s", ip, request.url.path)

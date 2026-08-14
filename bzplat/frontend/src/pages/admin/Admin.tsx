@@ -3,6 +3,7 @@ import {
   Bot,
   Inbox,
   LayoutDashboard,
+  Laptop,
   Medal,
   ScrollText,
   ShieldCheck,
@@ -22,10 +23,11 @@ import ContestsTab from '@/pages/admin/ContestsTab'
 import Dashboard from '@/pages/admin/Dashboard'
 import CommunicationsTab from '@/pages/admin/EmailTab'
 import LogsTab from '@/pages/admin/LogsTab'
+import LocalAIConnectionsTab from '@/pages/admin/LocalAIConnectionsTab'
 import MatchesTab from '@/pages/admin/MatchesTab'
 import UsersTab from '@/pages/admin/UsersTab'
 
-type TabKey = 'dashboard' | 'users' | 'bots' | 'matches' | 'contests' | 'communications' | 'logs'
+type TabKey = 'dashboard' | 'users' | 'bots' | 'local-ai' | 'matches' | 'contests' | 'communications' | 'logs'
 
 interface AdminTab {
   key: TabKey
@@ -38,6 +40,7 @@ const TABS: AdminTab[] = [
   { key: 'dashboard', label: '仪表盘', description: '平台概览与运行指标', icon: LayoutDashboard },
   { key: 'users', label: '用户', description: '账号、权限与实名状态', icon: Users },
   { key: 'bots', label: 'Bot', description: '版本、上架与运行能力', icon: Bot },
+  { key: 'local-ai', label: '本地连接', description: '用户电脑连接与占用状态', icon: Laptop },
   { key: 'matches', label: '对局', description: '对局记录与异常处置', icon: Swords },
   { key: 'contests', label: '锦标赛', description: '赛事生命周期与参赛者', icon: Medal },
   { key: 'communications', label: '通信中心', description: '收发信、群发与问题反馈', icon: Inbox },
@@ -146,6 +149,7 @@ export default function Admin() {
           {tab === 'dashboard' && <Dashboard />}
           {tab === 'users' && <UsersTab />}
           {tab === 'bots' && <BotsTab />}
+          {tab === 'local-ai' && <LocalAIConnectionsTab />}
           {tab === 'matches' && <MatchesTab />}
           {tab === 'contests' && <ContestsTab />}
           {tab === 'communications' && <CommunicationsTab />}

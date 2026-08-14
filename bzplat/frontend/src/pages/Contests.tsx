@@ -268,7 +268,7 @@ export default function Contests() {
         <DataRegion
           id="contest-create-panel"
           title="创建赛事"
-          description="选择游戏与内置赛制；时间留空时由组织者手动推进。"
+          description="新赛事统一使用赛事沙箱，每个 Bot 2 核 / 2 GiB；只计赛事成绩，不计平台排行榜。"
         >
           <form onSubmit={(event) => void onCreate(event)} className="min-w-0 space-y-3 p-3">
             {formError && <ErrorMsg msg={formError} />}

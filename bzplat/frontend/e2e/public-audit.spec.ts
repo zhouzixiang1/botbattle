@@ -282,12 +282,14 @@ test('home, search, and global search share participant ownership and nature lab
 test('invalid login is single-submit and displays the server error', async ({ page }) => {
   const monitor = monitorBrowser(page)
   let loginPosts = 0
-  page.on('request', (request) => {
-    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/auth/login') {
-      loginPosts += 1
-    }
+  await page.route('**/api/auth/login', async (route) => {
+    loginPosts += 1
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: '用户名或密码错误' }),
+    })
   })
-
   await page.goto('/#/login')
   const username = page.locator('#login-username')
   expect(await username.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(false)
@@ -301,7 +303,19 @@ test('invalid login is single-submit and displays the server error', async ({ pa
   expect((await responsePromise).status()).toBe(401)
   await expect(page.getByText(/用户名或密码错误|invalid_credentials/)).toBeVisible()
   expect(loginPosts).toBe(1)
+  await page.waitForTimeout(550)
+  const retryResponsePromise = page.waitForResponse(
+    (response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/auth/login',
+  )
+  await page.getByRole('button', { name: '登录', exact: true }).click()
+  expect((await retryResponsePromise).status()).toBe(401)
+  expect(loginPosts).toBe(2)
   await monitor.expectClean([{
+    kind: 'http',
+    method: 'POST',
+    status: 401,
+    pathname: '/api/auth/login',
+  }, {
     kind: 'http',
     method: 'POST',
     status: 401,

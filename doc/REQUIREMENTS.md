@@ -109,7 +109,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 需求 | 验收标准 |
 |------|---------|
 | 站点配置 | 站名/Logo/公告/About 可配（admin） |
-| 全来源执行队列 | manual/human/contest/auto 全部先写持久 job，四类合计同一时刻最多运行 1 场；Bot-vs-Bot 占 `1 match slot + 2 sandbox units`，人机占 `1+1`，`starting/running/settling` 均占容量；优先级带无上限 aging，Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
+| 全来源执行队列 | manual/human/contest/auto 全部先写持久 job，四类合计同一时刻最多运行 1 场；节能/赛事 Docker 座位各占 1 sandbox unit，本地 Bot/真人座位占 0，因此双节能、双赛事为 `1 match slot + 2 units`，节能与本地 Bot、人机为 `1+1`，双本地 Bot 为 `1+0`；`starting/running/settling` 均占容量；job 冻结环境、资源档位版本及 CPU/内存向量，主机准入受 affinity/cgroup/物理资源共同收紧且赛事不得降档；优先级带无上限 aging，Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
 | 持续公平自动排位 | 默认开启且无每日上限，只作为全局队列的 `source=auto` producer；按游戏/lane/所有者/Bot 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；唯一开关只影响 auto 生成/claim，不影响人工、人机、赛事或在途局 |
 
 ## 4. 非功能需求
@@ -118,7 +118,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 |------|------|------------|
 | **性能** | 单场对局低延迟 | holdem/gomoku Bot 单步决策固定超时 60s；Pencil 每方累计 900s（固定，含人类局）；沙箱镜像准备不计入 Bot 决策时间；全来源共享唯一对局槽 |
 | **性能** | 前端首屏快 | React.lazy 代码分割，主包 gzip ~115KB；recharts 等重依赖隔离到 BotDetail chunk |
-| **安全** | Bot 沙箱隔离 | Docker: `--network=none --memory=512m --cpus=1 --read-only --cap-drop=ALL --user 65534` |
+| **安全** | Bot 沙箱隔离 | Docker 共用 `--network=none --read-only --cap-drop=ALL --user 65534` 等硬化；日常节能与上传预检每 Bot 1 CPU/512 MiB，锦标赛每 Bot 2 CPU/2 GiB；本地 Bot 由用户电脑主动连接且不占平台沙箱，所有持久任务按冻结版本解析，不允许任意资源组合或降档 |
 | **安全** | 接口限流 | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s 等），可 `BZ_RATE_LIMIT` 开关 |
 | **安全** | 认证 | 密码 hash 存储，session token，cookie `bz_session`，验证码防爆破 |
 | **可靠** | 数据持久 | SQLite 单文件，自带 `_migrate` 自愈（补列/重建表），向后兼容旧库 |
