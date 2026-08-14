@@ -1734,6 +1734,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     if "messages" in tables:
         _add_col(conn, "messages", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+    if "execution_control" in tables:
+        _add_col(
+            conn,
+            "execution_control",
+            "deployment_drain_requested",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (deployment_drain_requested IN (0,1))",
+        )
+        _add_col(
+            conn,
+            "execution_control",
+            "deployment_drain_reason",
+            "TEXT NOT NULL DEFAULT ''",
+        )
     if "broadcast_recipients" in tables:
         _add_col(conn, "broadcast_recipients", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
         _add_col(conn, "broadcast_recipients", "max_attempts", "INTEGER NOT NULL DEFAULT 5")
@@ -2921,7 +2934,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ).fetchone()
         if old_switch is not None:
             conn.execute(
-                "UPDATE execution_control SET auto_enabled=?,updated_at=? "
+                "UPDATE execution_control SET auto_enabled="
+                "CASE WHEN deployment_drain_requested=1 THEN 0 ELSE ? END,"
+                "updated_at=? "
                 "WHERE singleton=1",
                 (1 if int(old_switch["enabled"] or 0) else 0, _now()),
             )
@@ -3063,7 +3078,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     if legacy_active:
         conn.execute(
-            "UPDATE execution_control SET dispatcher_state='paused',accepting=1,"
+            "UPDATE execution_control SET dispatcher_state='paused',accepting="
+            "CASE WHEN deployment_drain_requested=1 THEN 0 ELSE 1 END,"
             "pause_reason=?,retry_count=0,retry_at=NULL,updated_at=? WHERE singleton=1",
             (
                 "manual:升级前存在未完成的无命名空间执行；"
@@ -3304,6 +3320,38 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    @staticmethod
+    def _require_execution_admission_tx(
+        c: sqlite3.Connection, *, maintenance_only: bool = False
+    ) -> None:
+        """Check the deployment/queue gate inside an existing write txn.
+
+        Callers that create contest execution state use the full gate; stage
+        recovery paths only need the durable deployment bit.  Keeping this
+        check behind the same ``BEGIN IMMEDIATE`` as the mutation linearizes it
+        with ``ExecutionRepository.begin_maintenance`` across Store instances.
+        """
+        control = c.execute(
+            "SELECT dispatcher_state,accepting,deployment_drain_requested "
+            "FROM execution_control WHERE singleton=1"
+        ).fetchone()
+        if control is None:
+            raise RuntimeError("execution_control singleton missing")
+        from .execution import ExecutionQueueClosed
+
+        if int(control["deployment_drain_requested"] or 0):
+            raise ExecutionQueueClosed(
+                "平台正在部署维护，赛事将在恢复后继续派发",
+                code="deployment_maintenance",
+            )
+        if maintenance_only:
+            return
+        if (
+            control["dispatcher_state"] != "running"
+            or int(control["accepting"] or 0) != 1
+        ):
+            raise ExecutionQueueClosed("执行队列暂未开放，赛事对阵已保留")
 
     def close(self) -> None:
         with self._lock:
@@ -8440,6 +8488,7 @@ class Store:
         )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
                 "SELECT status, current_stage_idx FROM contests WHERE id=?",
                 (contest_id,),
@@ -8577,6 +8626,7 @@ class Store:
         )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
                 "SELECT status, current_stage_idx FROM contests WHERE id=?",
                 (contest_id,),
@@ -8746,6 +8796,7 @@ class Store:
         )
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
                 "SELECT status, current_stage_idx FROM contests WHERE id=?",
                 (contest_id,),
@@ -8973,6 +9024,141 @@ class Store:
 
     update_contest_pairing = update_pairing
 
+    def adjudicate_unavailable_contest_pairing(
+        self,
+        contest_id: int,
+        pairing_id: int,
+        match_id: str,
+        *,
+        game_id: str,
+        winner: int,
+        result: dict[str, Any],
+        activate_running: bool = False,
+        require_execution_admission: bool = True,
+    ) -> dict:
+        """Atomically persist one pre-execution technical contest result.
+
+        This is intentionally narrower than the normal execution path.  The
+        maintenance gate, synthetic Match, rating policy/index/replay and
+        pairing/lifecycle update share one ``BEGIN IMMEDIATE`` transaction, so
+        deployment drain can only win before the whole adjudication or after
+        it; no temporary technical Match can appear after ready became true.
+        """
+        gid = _registered_game_id(game_id)
+        table = _matches_table(gid)
+        if int(winner) not in (0, 1):
+            raise ValueError("技术赛果 winner 必须为 0 或 1")
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(
+                c, maintenance_only=not require_execution_admission
+            )
+            contest = c.execute(
+                "SELECT status,organizer_id FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if not contest or contest["status"] not in (
+                CONTEST_PUBLISHED,
+                CONTEST_RUNNING,
+            ):
+                raise ValueError("赛事状态已变化，不能写入技术赛果")
+            pairing = c.execute(
+                "SELECT * FROM contest_pairings WHERE id=? AND contest_id=? "
+                "AND status=? AND match_id IS NULL",
+                (pairing_id, contest_id, STATUS_PENDING),
+            ).fetchone()
+            if pairing is None:
+                raise ValueError("对阵已被派发或状态已变化")
+            bot_a_id = pairing["bot_a_id"]
+            bot_b_id = pairing["bot_b_id"]
+            if bot_a_id is None or bot_b_id is None:
+                raise ValueError("技术赛果要求双方 Bot 引用完整")
+            identities = c.execute(
+                "SELECT id,game_id FROM bots WHERE id IN (?,?)",
+                (bot_a_id, bot_b_id),
+            ).fetchall()
+            if len({int(row["id"]) for row in identities}) != 2 or any(
+                row["game_id"] != gid for row in identities
+            ):
+                raise ValueError("技术赛果 Bot 不存在或游戏不一致")
+            created_at = _now()
+            config_json = json.dumps(
+                {
+                    "_rating_eligible": False,
+                    "_rating_reason": "contest",
+                },
+                ensure_ascii=False,
+            )
+            c.execute(
+                f"INSERT INTO {table}(id,bot_a_id,bot_b_id,owner_id,"
+                "contest_id,reason,match_type,status,game_id,match_config,"
+                "result,winner,technical_loss,ended_at,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    match_id,
+                    bot_a_id,
+                    bot_b_id,
+                    contest["organizer_id"],
+                    contest_id,
+                    "contest_bot_unavailable",
+                    TYPE_CONTEST,
+                    STATUS_COMPLETED,
+                    gid,
+                    config_json,
+                    json.dumps(result, ensure_ascii=False),
+                    int(winner),
+                    1,
+                    created_at,
+                    created_at,
+                ),
+            )
+            c.execute(
+                "INSERT INTO match_rating_policies("
+                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+                "classified_at) VALUES(?,?,?,?,0,'contest','creation_v2',?)",
+                (match_id, gid, bot_a_id, bot_b_id, created_at),
+            )
+            c.execute(
+                "INSERT INTO matches_index(id,game_id) VALUES(?,?)",
+                (match_id, gid),
+            )
+            c.execute(
+                "INSERT INTO match_replays(match_id,events_json,updated_at) "
+                "VALUES(?,?,?)",
+                (match_id, "[]", created_at),
+            )
+            changed = c.execute(
+                "UPDATE contest_pairings SET match_id=?,status=? "
+                "WHERE id=? AND contest_id=? AND status=? AND match_id IS NULL",
+                (
+                    match_id,
+                    STATUS_COMPLETED,
+                    pairing_id,
+                    contest_id,
+                    STATUS_PENDING,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("对阵已被派发或状态已变化")
+            if activate_running:
+                changed = c.execute(
+                    "UPDATE contests SET status=?,starts_at=COALESCE(starts_at,?) "
+                    "WHERE id=? AND status=?",
+                    (
+                        CONTEST_RUNNING,
+                        created_at,
+                        contest_id,
+                        CONTEST_PUBLISHED,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("赛事已不处于 published 状态")
+            return _row(
+                c.execute(
+                    "SELECT * FROM contest_pairings WHERE id=?", (pairing_id,)
+                ).fetchone()
+            )
+
     def bind_contest_pairing_match(
         self,
         contest_id: int,
@@ -8980,6 +9166,7 @@ class Store:
         match_id: str,
         *,
         activate_running: bool = False,
+        require_execution_admission: bool = True,
     ) -> dict:
         """原子绑定 prepared match，并可在同一事务把 published 赛事转 running。
 
@@ -8988,6 +9175,10 @@ class Store:
         不会留下 pairing 与 contest 状态的半提交。
         """
         with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._require_execution_admission_tx(
+                c, maintenance_only=not require_execution_admission
+            )
             contest = c.execute(
                 "SELECT status FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
@@ -9429,15 +9620,7 @@ class Store:
     def set_auto_match_enabled(self, enabled: bool) -> bool:
         if type(enabled) is not bool:  # bool is deliberately strict at Store boundary.
             raise ValueError("自动排位总开关必须是布尔值")
-        with self._tx() as c:
-            c.execute("BEGIN IMMEDIATE")
-            changed = c.execute(
-                "UPDATE execution_control SET auto_enabled=?,updated_at=? WHERE singleton=1",
-                (1 if enabled else 0, _now()),
-            )
-            if changed.rowcount != 1:
-                raise RuntimeError("自动排位控制单例缺失")
-        return enabled
+        return self.executions.set_auto_enabled(enabled)
 
     def rating_integrity_diagnostics(self) -> dict:
         """Read-only No-Go audit for legacy eligibility and projection state.

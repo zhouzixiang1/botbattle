@@ -74,6 +74,25 @@ _MANUAL_ENVIRONMENTS = frozenset(
 class ExecutionQueueClosed(ValueError):
     """The process is starting/stopping and must not accept a new request."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "execution_queue_closed",
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.message = str(message)
+
+
+class ExecutionMaintenanceConflict(ValueError):
+    """A requested maintenance transition is not safe in the current state."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.message = str(message)
+
 
 class ExecutionInvariantError(RuntimeError):
     """Persisted execution state violates a fail-closed invariant."""
@@ -356,6 +375,17 @@ class ExecutionRepository:
         fields["updated_at"] = _now()
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if fields.get("accepting") == 1:
+                drain = conn.execute(
+                    "SELECT deployment_drain_requested FROM execution_control "
+                    "WHERE singleton=1"
+                ).fetchone()
+                if drain is None:
+                    raise ExecutionInvariantError(
+                        "execution_control singleton missing"
+                    )
+                if int(drain["deployment_drain_requested"] or 0):
+                    fields["accepting"] = 0
             conn.execute(
                 "UPDATE execution_control SET "
                 + ",".join(f"{name}=?" for name in fields)
@@ -368,11 +398,18 @@ class ExecutionRepository:
                 ).fetchone()
             )
 
-    def pause(self, reason: str, *, bounded_retry: bool = True) -> dict:
+    def pause(
+        self,
+        reason: str,
+        *,
+        bounded_retry: bool = True,
+        force_closed: bool = False,
+    ) -> dict:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT retry_count,dispatcher_state,accepting,pause_reason "
+                "SELECT retry_count,dispatcher_state,accepting,pause_reason,"
+                "deployment_drain_requested "
                 "FROM execution_control WHERE singleton=1"
             ).fetchone()
             existing_manual = bool(
@@ -395,8 +432,10 @@ class ExecutionRepository:
                 if bounded_retry
                 else None
             )
-            accepting = 1
-            if current and (
+            accepting = 0 if force_closed else 1
+            if not force_closed and current and (
+                int(current["deployment_drain_requested"] or 0) == 1
+                or
                 current["dispatcher_state"] in ("stopped", "stopping")
                 or (
                     current["dispatcher_state"] == "paused"
@@ -420,13 +459,191 @@ class ExecutionRepository:
 
     def resume(self) -> dict:
         self.assert_docker_launch_idle()
-        return self.set_control(
-            dispatcher_state="running",
-            accepting=True,
-            pause_reason="",
-            retry_count=0,
-            retry_at=None,
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT deployment_drain_requested FROM execution_control "
+                "WHERE singleton=1"
+            ).fetchone()
+            if current is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            conn.execute(
+                "UPDATE execution_control SET dispatcher_state='running',"
+                "accepting=?,pause_reason='',retry_count=0,retry_at=NULL,"
+                "updated_at=? WHERE singleton=1",
+                (
+                    0
+                    if int(current["deployment_drain_requested"] or 0)
+                    else 1,
+                    _now(),
+                ),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM execution_control WHERE singleton=1"
+                ).fetchone()
+            )
+
+    @staticmethod
+    def is_maintenance_control(control: dict[str, Any]) -> bool:
+        return int(control.get("deployment_drain_requested") or 0) == 1
+
+    def maintenance_status(self) -> dict[str, Any]:
+        """Return durable blockers; readiness is always derived, never stored."""
+        with self.store._tx() as conn:
+            control_row = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if control_row is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            return self.maintenance_status_tx(
+                conn, current=dict(control_row)
+            )
+
+    def begin_maintenance(self, reason: str) -> dict:
+        """Atomically request drain and close every source of new execution.
+
+        The same ``BEGIN IMMEDIATE`` transaction is used by enqueue and claim,
+        so success is the durable no-new-work boundary.  Work already active
+        finishes normally; queued requests remain unchanged for the explicit
+        post-deployment resume.
+        """
+        detail = str(reason or "").strip() or "管理员准备部署"
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_row = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if current_row is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            current = dict(current_row)
+            if self.is_maintenance_control(current):
+                conn.execute(
+                    "UPDATE execution_control SET accepting=0,auto_enabled=0,"
+                    "deployment_drain_reason=?,updated_at=? WHERE singleton=1",
+                    (detail[:1000], _now()),
+                )
+                return dict(
+                    conn.execute(
+                        "SELECT * FROM execution_control WHERE singleton=1"
+                    ).fetchone()
+                )
+            if current.get("dispatcher_state") != "running":
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_state_conflict",
+                    "执行队列未正常运行，请先完成运行环境恢复再准备部署",
+                )
+            conn.execute(
+                "UPDATE execution_control SET accepting=0,auto_enabled=0,"
+                "deployment_drain_requested=1,deployment_drain_reason=?,"
+                "updated_at=? WHERE singleton=1",
+                (detail[:1000], _now()),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM execution_control WHERE singleton=1"
+                ).fetchone()
+            )
+
+    def end_maintenance(self) -> dict:
+        """Atomically clear only the deployment gate; auto remains disabled."""
+        with self.store._tx() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_row = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if current_row is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            current = dict(current_row)
+            if not self.is_maintenance_control(current):
+                if (
+                    current.get("dispatcher_state") == "running"
+                    and int(current.get("accepting") or 0) == 1
+                ):
+                    return current
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_not_active",
+                    "执行队列当前不在部署维护状态",
+                )
+            status = self.maintenance_status_tx(conn, current=current)
+            if not status["ready"]:
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_not_ready",
+                    "维护边界尚未完全收敛，不能恢复接单",
+                )
+            conn.execute(
+                "UPDATE execution_control SET deployment_drain_requested=0,"
+                "deployment_drain_reason='',accepting=1,updated_at=? "
+                "WHERE singleton=1",
+                (_now(),),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM execution_control WHERE singleton=1"
+                ).fetchone()
+            )
+
+    def maintenance_status_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        current: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Transaction-local form used by the end-maintenance CAS."""
+        control = current or dict(
+            conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
         )
+        active_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE status IN "
+                "('starting','running','settling')"
+            ).fetchone()[0]
+        )
+        lease_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM local_ai_leases WHERE status='active'"
+            ).fetchone()[0]
+        )
+        # A legacy or partially recovered Match can still be running without
+        # an execution_jobs owner.  The capacity model already charges these
+        # rows conservatively; deployment readiness must use the same truth or
+        # it could turn green while an untracked sandbox is still live.
+        untracked_running = int(
+            self._capacity_tx(
+                conn,
+                max_match_slots=1,
+                max_sandbox_units=1,
+            )["untracked_running_matches"]
+        )
+        launch_state = str(self._docker_launch_tx(conn).get("state") or "")
+        requested = self.is_maintenance_control(control)
+        return {
+            "requested": requested,
+            "ready": bool(
+                requested
+                and control.get("dispatcher_state") == "running"
+                and int(control.get("accepting") or 0) == 0
+                and active_count == 0
+                and lease_count == 0
+                and untracked_running == 0
+                and launch_state == "idle"
+            ),
+            "reason": str(control.get("deployment_drain_reason") or ""),
+            "active_count": active_count,
+            "active_local_ai_leases": lease_count,
+            "untracked_running_matches": untracked_running,
+            "docker_launch_state": launch_state,
+        }
 
     def get_auto_enabled(self) -> bool:
         return bool(int(self.control()["auto_enabled"]))
@@ -434,6 +651,18 @@ class ExecutionRepository:
     def set_auto_enabled(self, enabled: bool) -> bool:
         with self.store._tx() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if current is None:
+                raise ExecutionInvariantError(
+                    "execution_control singleton missing"
+                )
+            if enabled and self.is_maintenance_control(dict(current)):
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_active",
+                    "维护期间不能开启自动排位，请先恢复执行队列",
+                )
             conn.execute(
                 "UPDATE execution_control SET auto_enabled=?,updated_at=? "
                 "WHERE singleton=1",
@@ -870,9 +1099,17 @@ class ExecutionRepository:
                     )
                     return dict(existing)
             control = conn.execute(
-                "SELECT accepting FROM execution_control WHERE singleton=1"
+                "SELECT accepting,deployment_drain_requested "
+                "FROM execution_control WHERE singleton=1"
             ).fetchone()
             if control is None or int(control["accepting"] or 0) != 1:
+                if control is not None and int(
+                    control["deployment_drain_requested"] or 0
+                ):
+                    raise ExecutionQueueClosed(
+                        "平台正在部署维护，暂不接收新的对局请求",
+                        code="deployment_maintenance",
+                    )
                 raise ExecutionQueueClosed("执行队列正在启动或停止，请稍后重试")
             if source == EXECUTION_SOURCE_CONTEST:
                 # Pairings remain ``pending + match_id=NULL`` until the global
@@ -1886,6 +2123,21 @@ class ExecutionRepository:
                 raise PermissionError("无权重试该执行请求")
             if job["status"] != EXECUTION_INTERRUPTED or not int(job["retryable"]):
                 raise ValueError("该执行请求当前不可重试")
+            control = conn.execute(
+                "SELECT accepting,deployment_drain_requested "
+                "FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if control is None or int(control["accepting"] or 0) != 1:
+                if control is not None and int(
+                    control["deployment_drain_requested"] or 0
+                ):
+                    raise ExecutionQueueClosed(
+                        "平台正在部署维护，暂不接收重试请求",
+                        code="deployment_maintenance",
+                    )
+                raise ExecutionQueueClosed(
+                    "执行队列正在启动或停止，请稍后重试"
+                )
             conn.execute(
                 "UPDATE execution_jobs SET status='queued',current_match_id=NULL,"
                 "cancel_requested=0,cleanup_state='none',retryable=0,terminal_reason='',"
@@ -2578,6 +2830,7 @@ __all__ = [
     "EXECUTION_ENV_REMOTE_LOCAL",
     "EXECUTION_PROFILE_VERSION",
     "ExecutionInvariantError",
+    "ExecutionMaintenanceConflict",
     "ExecutionQueueClosed",
     "ExecutionRepository",
     "SOURCE_PRIORITY",

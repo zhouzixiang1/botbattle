@@ -125,6 +125,34 @@ label。若进程仍在、端口仍监听或本 namespace 容器仍存在，不�
 窗口持有。运行中删除会让旧进程继续锁住已 unlink 的 inode，而新进程锁住同名新 inode，从而破坏
 互斥。仓库只精确忽略这两个默认文件名，不使用 `*.lock`；停服后它们也应保留，不能纳入缓存清理。
 
+#### 计划部署：先排空，再停服
+
+线上更新不得直接以 `restart` 抢断当前局。按以下顺序操作；三个 maintenance 端点均只允许超级管理员：
+
+1. 先确认执行服务为 `running`。若管理端显示运行环境故障 `paused`，先调用
+   `POST /api/admin/execution-queue/resume` 完成精确清场与业务对账；未恢复时开始排空会返回
+   `409 maintenance_state_conflict`。
+2. 在管理端点击“准备维护”，等价于一次
+   `POST /api/admin/execution-queue/maintenance`。成功响应必须同时满足
+   `maintenance.requested=true`、`dispatcher.accepting=false`、`dispatcher.auto_enabled=false`。
+   这一步一次提交即可；不要循环 POST。
+3. 轮询 `GET /api/admin/execution-queue/maintenance`，直到 `maintenance.ready=true`。期间当前局自然
+   收尾，既有 queued 任务和赛事配对保持原样；不得手工取消队列、改主库状态或提前停服。若
+   `active_count`、`uploads_in_flight`、`active_local_ai_leases`、`owned_execution_tasks`、
+   `untracked_running_matches` 非零，或 `docker_launch_state` 非 `idle`，继续等待。
+   `readiness_unavailable` 非空表示上传/任务探针不可用，或评分与赛事恢复仍在执行，不能视为就绪。
+4. 只有 ready 后才执行 `bash scripts/rebuild.sh`（构建并经统一入口重启），或按同一脚本的安全启停
+   边界完成维护。不要删除 DB 邻接 flock 文件，也不要跨 namespace 手工清容器。
+5. 重启健康检查通过后再次 GET。预期为 `dispatcher.state=running`、`accepting=false`、
+   `maintenance.requested=true`；启动清理、attempt 恢复和赛事/评分对账不会解除部署门。
+6. 验证新版本后调用一次 `DELETE /api/admin/execution-queue/maintenance`。只有 ready 仍成立时才返回
+   200，并恢复 `accepting=true`；`auto_enabled` 保持 false。确需自动排位时，再单独调用
+   `PUT /api/admin/auto-match` 并提交 `{"enabled": true}`。
+
+部署取消也使用第 6 步显式结束排空，不能靠重启、运行环境恢复或直接改数据库解除。若排空过程中又因
+Docker 不确定进入 `paused`，管理端执行“清场并恢复”后继续轮询；恢复只让 dispatcher 回到
+`running + accepting=false`，不会丢 queued job，也不会清除 drain。
+
 ### 2.2 构建前端
 ```bash
 cd bzplat/frontend && npm run build   # 产物 dist/，由后端 StaticFiles 托管

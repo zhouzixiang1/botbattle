@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from bzplat.backend.contests.manager import ContestManager
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.matches.execution_queue import (
@@ -46,7 +47,11 @@ from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
 from bzplat.backend.runtime.local_ai import LocalAIHub
 from bzplat.backend.runtime.local_ai_service import LocalAIService
 from bzplat.backend.store import Store, rating_projection_digests
-from bzplat.backend.store.execution import ExecutionInvariantError
+from bzplat.backend.store.execution import (
+    ExecutionInvariantError,
+    ExecutionMaintenanceConflict,
+    ExecutionQueueClosed,
+)
 from bzplat.backend.store.public_contract import sanitize_public_match
 from bzplat.backend.store.schema import (
     EXECUTION_SOURCE_AUTO,
@@ -1519,6 +1524,1049 @@ def test_public_pause_reason_is_sanitized_but_admin_keeps_diagnostic(queue_store
         "used": 0,
         "capacity": dispatcher.max_host_memory_mb,
     }
+
+
+def test_deployment_drain_finishes_active_work_and_preserves_waiting_jobs(
+    queue_store,
+):
+    store = queue_store
+    active_pair = (_bot(store, "drain-active-a"), _bot(store, "drain-active-b"))
+    waiting_pair = (_bot(store, "drain-wait-a"), _bot(store, "drain-wait-b"))
+    _verify_projection(store)
+    active = _enqueue_pair(store, active_pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == active["public_id"]
+    waiting = _enqueue_pair(store, waiting_pair)
+    waiting_before = store.executions.get(waiting["public_id"])
+
+    class Runtime:
+        supervisor = None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        def __init__(self) -> None:
+            self.started: list[str] = []
+
+        def active_execution_task_count(self) -> int:
+            return 0
+
+        def start_execution_job(self, job: dict) -> None:
+            self.started.append(str(job["public_id"]))
+
+    orch = Orch()
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=True,
+        uploads_in_flight=lambda: 0,
+    )
+
+    control = dispatcher.begin_maintenance("发布候选版本")
+    assert control["deployment_drain_requested"] == 1
+    assert control["accepting"] == 0
+    assert control["auto_enabled"] == 0
+    draining = dispatcher.public_snapshot(include_internal=True)
+    assert draining["dispatcher"]["state"] == "running"
+    assert draining["dispatcher"]["maintenance"] is True
+    assert draining["maintenance"] == {
+        "requested": True,
+        "ready": False,
+        "reason": "发布候选版本",
+        "active_count": 1,
+        "uploads_in_flight": 0,
+        "active_local_ai_leases": 0,
+        "untracked_running_matches": 0,
+        "docker_launch_state": "idle",
+        "owned_execution_tasks": 0,
+        "readiness_unavailable": [],
+    }
+    assert _claim(store, slots=1, units=2) is None
+    assert store.executions.refill_auto(
+        target_queued=1, bootstrap_target_matches=10
+    ) == {"outcome": "disabled", "inserted": 0}
+    with pytest.raises(ExecutionQueueClosed) as closed:
+        _enqueue_pair(
+            store,
+            (_bot(store, "drain-new-a"), _bot(store, "drain-new-b")),
+        )
+    assert getattr(closed.value, "code", "") == "deployment_maintenance"
+    waiting_after = store.executions.get(waiting["public_id"])
+    for field in (
+        "public_id",
+        "status",
+        "bot_a_version_id",
+        "bot_b_version_id",
+        "match_config",
+        "sandbox_units",
+        "profile_version",
+    ):
+        assert waiting_after[field] == waiting_before[field]
+
+    store.update_match(
+        claimed["current_match_id"], status="aborted", reason="test_complete"
+    )
+    store.executions.mark_cleanup_confirmed(active["public_id"], 1)
+    iteration = asyncio.run(dispatcher.run_once())
+    assert iteration["finalized"] == 1
+    assert iteration["claimed"] == 0
+    assert orch.started == []
+    ready = dispatcher.public_snapshot(include_internal=True)
+    assert ready["maintenance"]["ready"] is True
+    assert ready["queued"][0]["public_id"] == waiting["public_id"]
+    assert ready["queued"][0]["blocked_code"] == "deployment_maintenance"
+    assert ready["queued"][0]["blocked_reason"] == (
+        "部署维护中，恢复调度后继续排队"
+    )
+    request = dispatcher.public_request(waiting["public_id"])
+    assert request is not None
+    assert request["blocked_code"] == "deployment_maintenance"
+    assert request["blocked_reason"] == "部署维护中，恢复调度后继续排队"
+    assert request["request"]["blocked_code"] == "deployment_maintenance"
+
+    assert asyncio.run(dispatcher.end_maintenance()) is True
+    resumed = dispatcher.public_snapshot(include_internal=True)
+    assert resumed["dispatcher"]["maintenance"] is False
+    assert resumed["dispatcher"]["accepting"] is True
+    assert resumed["dispatcher"]["auto_enabled"] is False
+
+
+def test_deployment_ready_waits_for_launch_lease_callbacks_and_probes(
+    queue_store,
+):
+    store = queue_store
+    bot = _bot(store, "drain-local-agent")
+    agent = _local_agent(store, bot, "drain-ready")
+    store.executions.begin_maintenance("readiness blockers")
+
+    class Runtime:
+        supervisor = None
+
+    class NoProbeOrch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        def start_execution_job(self, _job: dict) -> None:
+            raise AssertionError
+
+    unavailable = ExecutionDispatcher(
+        NoProbeOrch(),
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+    ).public_snapshot(include_internal=True)
+    assert unavailable["maintenance"]["ready"] is False
+    assert unavailable["maintenance"]["readiness_unavailable"] == [
+        "upload_activity",
+        "owned_execution_tasks",
+    ]
+
+    owned_count = {"value": 0}
+
+    class Orch(NoProbeOrch):
+        def active_execution_task_count(self) -> int:
+            return owned_count["value"]
+
+    dispatcher = ExecutionDispatcher(
+        Orch(),
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        uploads_in_flight=lambda: 0,
+    )
+    assert dispatcher.public_snapshot(include_internal=True)["maintenance"][
+        "ready"
+    ] is True
+
+    owned_count["value"] = 1
+    assert dispatcher.public_snapshot(include_internal=True)["maintenance"][
+        "ready"
+    ] is False
+    owned_count["value"] = 0
+
+    store.executions.begin_docker_launch(
+        launch_token="maintenance-launch",
+        instance_key="qa-maintenance",
+        owner_kind="preflight",
+        job_public_id="upload-before-drain",
+        attempt_no=1,
+        slot=0,
+        container_name="bz-maintenance-launch",
+        host_boot_id="boot-a",
+    )
+    launch_blocked = dispatcher.public_snapshot(include_internal=True)
+    assert launch_blocked["maintenance"]["docker_launch_state"] == "creating"
+    assert launch_blocked["maintenance"]["ready"] is False
+    store.executions.mark_docker_launch_created("maintenance-launch")
+    store.executions.clear_docker_launch_created("maintenance-launch")
+
+    with store._tx() as conn:
+        conn.execute(
+            "INSERT INTO local_ai_leases("
+            "agent_id,job_public_id,attempt_no,seat,status,acquired_at) "
+            "VALUES(?, 'upload-before-drain', 1, 0, 'active', 'test')",
+            (agent["id"],),
+        )
+    lease_blocked = dispatcher.public_snapshot(include_internal=True)
+    assert lease_blocked["maintenance"]["active_local_ai_leases"] == 1
+    assert lease_blocked["maintenance"]["ready"] is False
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE local_ai_leases SET status='released',released_at='test',"
+            "terminal_reason='test' WHERE agent_id=?",
+            (agent["id"],),
+        )
+
+    store.create_match(
+        "maintenance-untracked-running",
+        bot["bot_id"],
+        bot["bot_id"],
+        owner_id=bot["user_id"],
+        game_id="holdem",
+    )
+    store.update_match("maintenance-untracked-running", status="running")
+    legacy_blocked = dispatcher.public_snapshot(include_internal=True)
+    assert legacy_blocked["maintenance"]["untracked_running_matches"] == 1
+    assert legacy_blocked["maintenance"]["ready"] is False
+    store.update_match(
+        "maintenance-untracked-running",
+        status="aborted",
+        reason="test cleanup",
+    )
+    assert dispatcher.public_snapshot(include_internal=True)["maintenance"][
+        "ready"
+    ] is True
+
+
+def test_deployment_ready_waits_for_match_completion_callback(queue_store):
+    store = queue_store
+    store.executions.begin_maintenance("callback barrier")
+    orch = MatchOrchestrator(store)
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        uploads_in_flight=lambda: 0,
+    )
+
+    async def exercise() -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def on_match_done(_match_id: str, _contest_id: int | None) -> None:
+            entered.set()
+            await release.wait()
+
+        orch.on_match_done = on_match_done
+        finish = asyncio.create_task(
+            orch._finish_match_task("callback-barrier", 42)
+        )
+        orch._tasks["callback-barrier"] = finish
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        blocked = dispatcher.public_snapshot(include_internal=True)
+        assert blocked["maintenance"]["owned_execution_tasks"] == 1
+        assert blocked["maintenance"]["ready"] is False
+        release.set()
+        await asyncio.wait_for(finish, timeout=1)
+        assert orch.active_execution_task_count() == 0
+        assert dispatcher.public_snapshot(include_internal=True)["maintenance"][
+            "ready"
+        ] is True
+
+    asyncio.run(exercise())
+
+
+def test_recovery_quiesce_waits_for_admin_abort_handoff(queue_store):
+    """Admin abort remains owned through replay and contest callback writes."""
+    store = queue_store
+    pair = (_bot(store, "abort-quiesce-a"), _bot(store, "abort-quiesce-b"))
+    match_id = "abort-quiesce-handoff"
+    store.create_match(
+        match_id,
+        pair[0]["bot_id"],
+        pair[1]["bot_id"],
+        owner_id=pair[0]["user_id"],
+        game_id="holdem",
+    )
+    store.update_match(match_id, status="running")
+    store.executions.begin_maintenance("abort handoff barrier")
+    orch = MatchOrchestrator(store)
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        uploads_in_flight=lambda: 0,
+    )
+
+    async def exercise() -> None:
+        callback_entered = asyncio.Event()
+        release_callback = asyncio.Event()
+
+        async def on_match_done(
+            _match_id: str, _contest_id: int | None
+        ) -> None:
+            callback_entered.set()
+            await release_callback.wait()
+
+        orch.on_match_done = on_match_done
+        abort = asyncio.create_task(orch.abort_match(match_id))
+        await asyncio.wait_for(callback_entered.wait(), timeout=1)
+        blocked = dispatcher.public_snapshot(include_internal=True)
+        assert blocked["maintenance"]["active_count"] == 0
+        assert blocked["maintenance"]["untracked_running_matches"] == 0
+        assert blocked["maintenance"]["owned_execution_tasks"] == 1
+        assert blocked["maintenance"]["ready"] is False
+
+        quiesce = asyncio.create_task(orch.quiesce_execution_tasks())
+        await asyncio.sleep(0)
+        assert quiesce.done() is False
+        assert orch._admin_abort_handoffs == {match_id}
+
+        release_callback.set()
+        aborted = await asyncio.wait_for(abort, timeout=1)
+        assert aborted["status"] == "aborted"
+        await asyncio.wait_for(quiesce, timeout=1)
+
+    asyncio.run(exercise())
+    assert orch.active_execution_task_count() == 0
+    assert orch._admin_abort_operations == set()
+    assert dispatcher.public_snapshot(include_internal=True)["maintenance"][
+        "ready"
+    ] is True
+
+
+def test_deployment_drain_survives_close_start_and_runtime_pause(
+    tmp_path,
+):
+    path = str(tmp_path / "deployment-drain.db")
+    store = Store(path)
+    store.executions.resume()
+    active_pair = (
+        _bot(store, "restart-active-a"),
+        _bot(store, "restart-active-b"),
+    )
+    pair = (_bot(store, "restart-drain-a"), _bot(store, "restart-drain-b"))
+    _verify_projection(store)
+    active = _enqueue_pair(store, active_pair)
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed["public_id"] == active["public_id"]
+    store.update_match(claimed["current_match_id"], status="running")
+    store.upsert_replay(
+        claimed["current_match_id"],
+        json.dumps([{"type": "match_start"}]),
+    )
+    waiting = _enqueue_pair(store, pair)
+    store.executions.begin_maintenance("等待部署")
+    before = store.executions.get(waiting["public_id"])
+    store.close()
+
+    reopened = Store(path)
+
+    class Runtime:
+        supervisor = None
+
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        async def cleanup_instance(self) -> None:
+            self.cleanup_calls += 1
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    runtime = Runtime()
+
+    class Orch:
+        runner = SimpleNamespace(runner=runtime)
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            return 0
+
+        async def quiesce_execution_tasks(self) -> None:
+            return None
+
+        def active_execution_task_count(self) -> int:
+            return 0
+
+        def start_execution_job(self, _job: dict) -> None:
+            raise AssertionError("deployment drain must not start queued work")
+
+    dispatcher = ExecutionDispatcher(
+        Orch(),
+        reopened,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=True,
+        uploads_in_flight=lambda: 0,
+    )
+
+    async def exercise() -> tuple[dict, dict, dict, bool, dict]:
+        started = await dispatcher.start()
+        once = await dispatcher.run_once()
+        reopened.executions.pause(
+            "runtime uncertainty during drain", bounded_retry=True
+        )
+        automatic = await dispatcher.run_once()
+        resumed = await dispatcher.admin_resume()
+        running = reopened.executions.control()
+        await dispatcher.stop()
+        await dispatcher.close()
+        return started, once, automatic, resumed, running
+
+    started, once, automatic, resumed, running = asyncio.run(exercise())
+    assert started["outcome"] == "running"
+    assert started["recovered"]["interrupted"] == 1
+    assert once["claimed"] == 0
+    assert automatic == {"outcome": "paused"}
+    assert resumed is True
+    assert running["dispatcher_state"] == "running"
+    assert running["deployment_drain_requested"] == 1
+    assert running["accepting"] == 0
+    assert running["auto_enabled"] == 0
+    assert reopened.executions.get(active["public_id"])["status"] == "interrupted"
+    assert reopened.executions.get(waiting["public_id"]) == before
+    assert runtime.cleanup_calls == 2
+    stopped = reopened.executions.control()
+    assert stopped["dispatcher_state"] == "stopped"
+    assert stopped["deployment_drain_requested"] == 1
+    assert stopped["accepting"] == 0
+
+    # A normal deployment restart performs cleanup/recovery and comes back as
+    # a live dispatcher held behind the persistent drain, never as a stale
+    # paused pseudo-ready state.  Only the explicit end transition reopens it.
+    restarted_dispatcher = ExecutionDispatcher(
+        Orch(),
+        reopened,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=True,
+        uploads_in_flight=lambda: 0,
+    )
+
+    async def restart_and_end() -> tuple[dict, dict, dict]:
+        restarted = await restarted_dispatcher.start()
+        held = restarted_dispatcher.public_snapshot(include_internal=True)
+        await restarted_dispatcher.end_maintenance()
+        ended = restarted_dispatcher.public_snapshot(include_internal=True)
+        await restarted_dispatcher.stop()
+        await restarted_dispatcher.close()
+        return restarted, held, ended
+
+    restarted, held, ended = asyncio.run(restart_and_end())
+    assert restarted["outcome"] == "running"
+    assert held["dispatcher"]["state"] == "running"
+    assert held["dispatcher"]["accepting"] is False
+    assert held["maintenance"]["requested"] is True
+    assert held["maintenance"]["ready"] is True
+    assert ended["dispatcher"]["accepting"] is True
+    assert ended["dispatcher"]["auto_enabled"] is False
+    assert ended["maintenance"]["requested"] is False
+    reopened.close()
+
+
+def test_deployment_drain_begin_rejects_paused_dispatcher(queue_store):
+    queue_store.executions.pause(
+        "manual:runtime uncertainty", bounded_retry=False
+    )
+    with pytest.raises(ExecutionMaintenanceConflict) as failed:
+        queue_store.executions.begin_maintenance("不能旁路运行时恢复")
+    assert getattr(failed.value, "code", "") == "maintenance_state_conflict"
+    control = queue_store.executions.control()
+    assert control["dispatcher_state"] == "paused"
+    assert control["deployment_drain_requested"] == 0
+
+
+def test_deployment_drain_linearizes_against_concurrent_enqueue(queue_store):
+    first = queue_store
+    pair = (_bot(first, "drain-race-a"), _bot(first, "drain-race-b"))
+    _verify_projection(first)
+    second = Store(first.path)
+    barrier = threading.Barrier(2)
+    outcome: dict[str, object] = {}
+
+    def begin() -> None:
+        barrier.wait()
+        outcome["begin"] = first.executions.begin_maintenance("race")
+
+    def enqueue() -> None:
+        barrier.wait()
+        try:
+            outcome["enqueue"] = second.executions.enqueue(
+                source=EXECUTION_SOURCE_MANUAL,
+                owner_user_id=pair[0]["user_id"],
+                game_id="holdem",
+                match_type=TYPE_CHALLENGE,
+                bot_a_id=pair[0]["bot_id"],
+                bot_b_id=pair[1]["bot_id"],
+                bot_a_version_id=pair[0]["version_id"],
+                bot_b_version_id=pair[1]["version_id"],
+            )
+        except ExecutionQueueClosed as exc:
+            outcome["enqueue"] = exc
+
+    threads = [threading.Thread(target=begin), threading.Thread(target=enqueue)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+    control = first.executions.control()
+    assert control["deployment_drain_requested"] == 1
+    assert control["accepting"] == 0
+    queued_or_closed = outcome["enqueue"]
+    if isinstance(queued_or_closed, Exception):
+        assert getattr(queued_or_closed, "code", "") == "deployment_maintenance"
+        assert first._conn.execute(
+            "SELECT COUNT(*) FROM execution_jobs"
+        ).fetchone()[0] == 0
+    else:
+        assert first.executions.get(queued_or_closed["public_id"])["status"] == "queued"
+    assert _claim(first, slots=1, units=2) is None
+    second.close()
+
+
+def test_deployment_drain_linearizes_against_concurrent_claim_and_refill(
+    tmp_path,
+):
+    path = str(tmp_path / "deployment-claim-race.db")
+    first = Store(path)
+    first.executions.resume()
+    queued_pair = (_bot(first, "claim-race-a"), _bot(first, "claim-race-b"))
+    auto_pair = (_bot(first, "refill-race-a"), _bot(first, "refill-race-b"))
+    _verify_projection(first)
+    queued = _enqueue_pair(first, queued_pair)
+    second = Store(path)
+    barrier = threading.Barrier(2)
+    outcome: dict[str, object] = {}
+
+    def begin() -> None:
+        barrier.wait()
+        outcome["begin"] = first.executions.begin_maintenance("claim race")
+
+    def claim() -> None:
+        barrier.wait()
+        outcome["claim"] = second.executions.claim_next(
+            max_match_slots=1,
+            max_sandbox_units=2,
+            aging_seconds=60,
+            user_active_limit=1,
+            contest_share_slots=1,
+        )
+
+    threads = [threading.Thread(target=begin), threading.Thread(target=claim)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+    claimed = outcome["claim"]
+    if claimed is None:
+        assert first.executions.get(queued["public_id"])["status"] == "queued"
+    else:
+        assert claimed["public_id"] == queued["public_id"]
+        assert first.executions.maintenance_status()["active_count"] == 1
+    assert _claim(first, slots=1, units=2) is None
+    assert first.executions.refill_auto(
+        target_queued=1, bootstrap_target_matches=10
+    ) == {"outcome": "disabled", "inserted": 0}
+    assert first.executions.control()["auto_enabled"] == 0
+    # Creating unrelated candidates after the boundary cannot make refill
+    # observable, because its control check linearizes on the same DB writer.
+    assert auto_pair[0]["bot_id"] != auto_pair[1]["bot_id"]
+    second.close()
+    first.close()
+
+
+def test_deployment_drain_schema_is_fresh_and_legacy_upgrade_safe(tmp_path):
+    fresh_path = str(tmp_path / "deployment-fresh.db")
+    fresh = Store(fresh_path)
+    fresh_control = fresh.executions.control()
+    assert fresh_control["deployment_drain_requested"] == 0
+    assert fresh_control["deployment_drain_reason"] == ""
+    fresh.close()
+
+    legacy_path = str(tmp_path / "deployment-legacy.db")
+    legacy = Store(legacy_path)
+    legacy.close()
+    with sqlite3.connect(legacy_path) as conn:
+        conn.execute(
+            "ALTER TABLE execution_control DROP COLUMN deployment_drain_reason"
+        )
+        conn.execute(
+            "ALTER TABLE execution_control DROP COLUMN deployment_drain_requested"
+        )
+    upgraded = Store(legacy_path)
+    upgraded_control = upgraded.executions.control()
+    assert upgraded_control["deployment_drain_requested"] == 0
+    assert upgraded_control["deployment_drain_reason"] == ""
+    upgraded.executions.resume()
+    upgraded.executions.begin_maintenance("升级后保持")
+    upgraded.close()
+    reopened = Store(legacy_path)
+    assert reopened.executions.control()["deployment_drain_requested"] == 1
+    assert reopened.executions.control()["accepting"] == 0
+    reopened.close()
+
+
+def test_deployment_maintenance_api_rbac_audit_and_ready_cas(
+    execution_api,
+    monkeypatch,
+):
+    app, client, store = (
+        execution_api.app,
+        execution_api.client,
+        execution_api.store,
+    )
+    owner = _api_user(store, "maintenance_owner")
+    opponent = _api_user(store, "maintenance_opponent")
+    organizer = _api_user(store, "maintenance_organizer", role="organizer")
+    admin = _api_user(store, "maintenance_admin", role="admin")
+    own_bots = [
+        _owned_bot(store, owner, f"maintenance_owner_{index}")
+        for index in range(2)
+    ]
+    opponent_bots = [
+        _owned_bot(store, opponent, f"maintenance_opponent_{index}")
+        for index in range(2)
+    ]
+    _verify_projection(store)
+    active = _enqueue_pair(store, (own_bots[0], opponent_bots[0]))
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["public_id"] == active["public_id"]
+    waiting = _enqueue_pair(store, (own_bots[1], opponent_bots[1]))
+    owner_headers = _auth_headers(app, owner)
+    organizer_headers = _auth_headers(app, organizer)
+    admin_headers = _auth_headers(app, admin)
+    path = "/api/admin/execution-queue/maintenance"
+    audit_calls: list[dict] = []
+
+    def record_audit(_request, action, **fields):
+        audit_calls.append({"action": action, **fields})
+
+    monkeypatch.setattr("bzplat.backend.api_routes.audit_log", record_audit)
+
+    assert client.get(path).status_code == 401
+    for forbidden_headers in (owner_headers, organizer_headers):
+        assert client.get(path, headers=forbidden_headers).status_code == 403
+        assert client.post(
+            path, headers=forbidden_headers, json={"reason": "越权"}
+        ).status_code == 403
+        assert client.delete(path, headers=forbidden_headers).status_code == 403
+
+    begun = client.post(
+        path, headers=admin_headers, json={"reason": "部署发布"}
+    )
+    assert begun.status_code == 200, begun.text
+    snapshot = begun.json()
+    assert snapshot["dispatcher"]["maintenance"] is True
+    assert snapshot["dispatcher"]["accepting"] is False
+    assert snapshot["dispatcher"]["auto_enabled"] is False
+    assert snapshot["maintenance"]["requested"] is True
+    assert snapshot["maintenance"]["ready"] is False
+    assert snapshot["maintenance"]["active_count"] == 1
+    assert snapshot["queued"][0]["public_id"] == waiting["public_id"]
+    assert snapshot["queued"][0]["blocked_code"] == "deployment_maintenance"
+    waiting_projection = client.get(
+        f"/api/execution-requests/{waiting['public_id']}",
+        headers=owner_headers,
+    )
+    assert waiting_projection.status_code == 200
+    assert waiting_projection.json()["blocked_code"] == (
+        "deployment_maintenance"
+    )
+    assert waiting_projection.json()["blocked_reason"] == (
+        "部署维护中，恢复调度后继续排队"
+    )
+    public = app.state.execution_dispatcher.public_snapshot(
+        include_internal=False
+    )
+    assert public["maintenance"]["reason"] == "平台正在部署维护"
+
+    repeated = client.post(
+        path, headers=admin_headers, json={"reason": "部署发布"}
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["maintenance"]["requested"] is True
+
+    auto_enable = client.put(
+        "/api/admin/auto-match",
+        headers=admin_headers,
+        json={"enabled": True},
+    )
+    assert auto_enable.status_code == 409
+    assert auto_enable.json()["detail"]["code"] == "maintenance_active"
+    auto_disable = client.put(
+        "/api/admin/auto-match",
+        headers=admin_headers,
+        json={"enabled": False},
+    )
+    assert auto_disable.status_code == 200
+    assert auto_disable.json()["dispatcher"]["auto_enabled"] is False
+
+    rejected = client.post(
+        "/api/matches/challenge",
+        headers=owner_headers,
+        json={
+            "my_bot_id": own_bots[0]["bot_id"],
+            "opponent_bot_id": opponent_bots[0]["bot_id"],
+            "game_id": "holdem",
+        },
+    )
+    assert rejected.status_code == 503
+    assert rejected.json()["detail"]["code"] == "deployment_maintenance"
+
+    not_ready = client.delete(path, headers=admin_headers)
+    assert not_ready.status_code == 409
+    assert not_ready.json()["detail"]["code"] == "maintenance_not_ready"
+    store.update_match(
+        claimed["current_match_id"], status="aborted", reason="test_complete"
+    )
+    assert store.executions.maintenance_status()["ready"] is False
+    store.executions.mark_cleanup_confirmed(active["public_id"], 1)
+    assert store.executions.finalize_ready() == 1
+    ready = client.get(path, headers=admin_headers)
+    assert ready.status_code == 200
+    assert ready.json()["maintenance"]["ready"] is True
+    assert ready.json()["queued"][0]["public_id"] == waiting["public_id"]
+
+    ended = client.delete(path, headers=admin_headers)
+    assert ended.status_code == 200, ended.text
+    assert ended.json()["maintenance"]["requested"] is False
+    assert ended.json()["dispatcher"]["accepting"] is True
+    assert ended.json()["dispatcher"]["auto_enabled"] is False
+    idempotent_end = client.delete(path, headers=admin_headers)
+    assert idempotent_end.status_code == 200
+    assert idempotent_end.json()["dispatcher"]["auto_enabled"] is False
+
+    # A fresh drain cannot be requested while runtime recovery is unresolved.
+    # The operator must use the orthogonal resume endpoint first.
+    store.executions.pause("manual:test pause", bounded_retry=False)
+    paused_begin = client.post(
+        path, headers=admin_headers, json={"reason": "错误时机"}
+    )
+    assert paused_begin.status_code == 409
+    assert paused_begin.json()["detail"]["code"] == "maintenance_state_conflict"
+
+    actions = [(call["action"], call.get("result")) for call in audit_calls]
+    assert actions.count(("admin_execution_maintenance_begin", "ok")) == 2
+    assert ("admin_execution_maintenance_begin", "conflict") in actions
+    assert ("admin_execution_maintenance_end", "conflict") in actions
+    assert actions.count(("admin_execution_maintenance_end", "ok")) == 2
+    assert ("admin_auto_match_toggle", "deny") in actions
+    assert any(
+        call["action"] == "admin_execution_maintenance_begin"
+        and call.get("result") == "ok"
+        and "requested=0->1" in str(call.get("detail"))
+        and "accepting=1->0" in str(call.get("detail"))
+        and "auto_enabled=1->0" in str(call.get("detail"))
+        for call in audit_calls
+    )
+    assert any(
+        call["action"] == "admin_execution_maintenance_end"
+        and call.get("result") == "ok"
+        and "requested=1->0" in str(call.get("detail"))
+        and "accepting=0->1" in str(call.get("detail"))
+        and "auto_enabled=0->0" in str(call.get("detail"))
+        for call in audit_calls
+    )
+
+
+def test_deployment_drain_holds_contest_pairing_before_adjudication_and_bind(
+    execution_api,
+):
+    app, client, store = (
+        execution_api.app,
+        execution_api.client,
+        execution_api.store,
+    )
+    organizer = _api_user(store, "drain_contest_org", role="organizer")
+    opponent = _api_user(store, "drain_contest_opponent")
+    admin = _api_user(store, "drain_contest_admin", role="admin")
+    first = _owned_bot(store, organizer, "drain_contest_first")
+    second = _owned_bot(store, opponent, "drain_contest_second")
+    contest = store.create_contest(
+        "Deployment held contest",
+        organizer["id"],
+        status="open",
+        game_id="holdem",
+        stages_json=json.dumps(
+            [
+                {
+                    "key": "rr",
+                    "type": "round_robin",
+                    "scoring": "poker_3_1_0",
+                    "rest_after_minutes": 0,
+                }
+            ]
+        ),
+        template_id="holdem_swiss_ko",
+    )
+    store.add_contest_entry(
+        contest["id"], organizer["id"], first["bot_id"]
+    )
+    store.add_contest_entry(
+        contest["id"], opponent["id"], second["bot_id"]
+    )
+    published = asyncio.run(
+        app.state.contest_manager.publish(contest["id"])
+    )
+    assert published["status"] == "published"
+    pairing_before = store.list_contest_pairings(contest["id"])[0]
+    assert pairing_before["status"] == "pending"
+    assert pairing_before["match_id"] is None
+    contest_before = store.get_contest(contest["id"])
+
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE bots SET is_active=0 WHERE id=?", (first["bot_id"],)
+        )
+
+    admin_headers = _auth_headers(app, admin)
+    organizer_headers = _auth_headers(app, organizer)
+    maintenance_path = "/api/admin/execution-queue/maintenance"
+    begun = client.post(
+        maintenance_path,
+        headers=admin_headers,
+        json={"reason": "赛事派发边界"},
+    )
+    assert begun.status_code == 200
+    assert begun.json()["maintenance"]["ready"] is True
+
+    # Scheduler/reconcile route: an unavailable Bot would normally produce a
+    # technical result, but drain gates before adjudication or lifecycle writes.
+    asyncio.run(
+        app.state.contest_manager._dispatch_pending(contest["id"], 0)
+    )
+    assert store.list_contest_pairings(contest["id"])[0] == pairing_before
+    assert store.get_contest(contest["id"]) == contest_before
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM execution_jobs WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchone()[0] == 0
+
+    # Organizer route gets a retryable, structured 503 and the published
+    # schedule remains byte-for-byte unchanged.
+    rejected = client.post(
+        f"/api/contests/{contest['id']}/start",
+        headers=organizer_headers,
+    )
+    assert rejected.status_code == 503
+    assert rejected.json()["detail"]["code"] == "deployment_maintenance"
+    assert rejected.headers["retry-after"] == "30"
+    assert store.list_contest_pairings(contest["id"])[0] == pairing_before
+    assert store.get_contest(contest["id"]) == contest_before
+
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE bots SET is_active=1 WHERE id=?", (first["bot_id"],)
+        )
+    ended = client.delete(maintenance_path, headers=admin_headers)
+    assert ended.status_code == 200
+    assert ended.json()["dispatcher"]["auto_enabled"] is False
+    resumed = client.post(
+        f"/api/contests/{contest['id']}/start",
+        headers=organizer_headers,
+    )
+    assert resumed.status_code == 200, resumed.text
+    jobs = store._conn.execute(
+        "SELECT * FROM execution_jobs WHERE contest_id=?",
+        (contest["id"],),
+    ).fetchall()
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "queued"
+    still_pending = store.list_contest_pairings(contest["id"])[0]
+    assert still_pending["status"] == "pending"
+    assert still_pending["match_id"] is None
+    claimed = _claim(store, slots=1, units=2)
+    assert claimed and claimed["source"] == EXECUTION_SOURCE_CONTEST
+    bound = store.list_contest_pairings(contest["id"])[0]
+    assert bound["status"] == "running"
+    assert bound["match_id"] == claimed["current_match_id"]
+
+
+def test_deployment_drain_blocks_contest_advance_without_side_effects(
+    execution_api,
+):
+    app, client, store = (
+        execution_api.app,
+        execution_api.client,
+        execution_api.store,
+    )
+    organizer = _api_user(store, "drain_advance_org", role="organizer")
+    opponent = _api_user(store, "drain_advance_opponent")
+    admin = _api_user(store, "drain_advance_admin", role="admin")
+    first = _owned_bot(store, organizer, "drain_advance_first")
+    second = _owned_bot(store, opponent, "drain_advance_second")
+    contest = store.create_contest(
+        "Deployment held advance",
+        organizer["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps(
+            [{"key": "rr", "type": "round_robin", "scoring": "poker_3_1_0"}]
+        ),
+        current_stage_idx=0,
+    )
+    store.add_contest_entry(contest["id"], organizer["id"], first["bot_id"])
+    store.add_contest_entry(contest["id"], opponent["id"], second["bot_id"])
+    match_id = "deployment-advance-complete"
+    store.create_match(
+        match_id,
+        first["bot_id"],
+        second["bot_id"],
+        owner_id=organizer["id"],
+        contest_id=contest["id"],
+        match_type=TYPE_CONTEST,
+        game_id="holdem",
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        result={"rounds_played": 1, "deltas": [1, -1], "normalized_delta": 0.01},
+    )
+    store.add_contest_pairing(
+        contest["id"],
+        first["bot_id"],
+        second["bot_id"],
+        status="completed",
+        match_id=match_id,
+        stage_idx=0,
+        round_num=1,
+    )
+    contest_before = store.get_contest(contest["id"])
+    entries_before = store.list_contest_entries(contest["id"])
+    pairings_before = store.list_contest_pairings(contest["id"])
+
+    begun = client.post(
+        "/api/admin/execution-queue/maintenance",
+        headers=_auth_headers(app, admin),
+        json={"reason": "推进边界"},
+    )
+    assert begun.status_code == 200
+    rejected = client.post(
+        f"/api/contests/{contest['id']}/advance",
+        headers=_auth_headers(app, organizer),
+    )
+    assert rejected.status_code == 503
+    assert rejected.json()["detail"]["code"] == "deployment_maintenance"
+    assert rejected.headers["retry-after"] == "30"
+    assert store.get_contest(contest["id"]) == contest_before
+    assert store.list_contest_entries(contest["id"]) == entries_before
+    assert store.list_contest_pairings(contest["id"]) == pairings_before
+
+
+def test_runtime_pause_recovery_reconciles_contest_before_returning(queue_store):
+    store = queue_store
+    organizer = store.create_user(
+        "recovery-contest-org",
+        "recovery-contest-org@example.test",
+        "hash",
+        role="organizer",
+    )
+    first = _bot(store, "recovery-contest-a")
+    second = _bot(store, "recovery-contest-b")
+    contest = store.create_contest(
+        "Recovery contest",
+        organizer["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=json.dumps(
+            [{"key": "rr", "type": "round_robin", "scoring": "poker_3_1_0"}]
+        ),
+        current_stage_idx=0,
+    )
+    store.add_contest_entry(contest["id"], first["user_id"], first["bot_id"])
+    store.add_contest_entry(contest["id"], second["user_id"], second["bot_id"])
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        first["bot_id"],
+        second["bot_id"],
+        bot_a_version_id=first["version_id"],
+        bot_b_version_id=second["version_id"],
+        status="pending",
+        stage_idx=0,
+        round_num=1,
+        published_at="2026-08-14T00:00:00",
+        scheduled_at="2026-08-14T00:00:00",
+    )
+
+    class Runtime:
+        supervisor = None
+
+        async def cleanup_instance(self) -> None:
+            return None
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        async def quiesce_execution_tasks(self) -> None:
+            return None
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            return 0
+
+        def start_execution_job(self, _job: dict) -> None:
+            raise AssertionError("recovery reconciliation must not claim")
+
+        async def challenge(
+            self,
+            bot_a_id: int,
+            bot_b_id: int,
+            **kwargs,
+        ) -> str:
+            job = store.executions.enqueue(
+                source=EXECUTION_SOURCE_CONTEST,
+                owner_user_id=kwargs["owner_user_id"],
+                game_id=kwargs["game_id"],
+                match_type=TYPE_CONTEST,
+                bot_a_id=bot_a_id,
+                bot_b_id=bot_b_id,
+                bot_a_version_id=kwargs.get("bot_a_version_id"),
+                bot_b_version_id=kwargs.get("bot_b_version_id"),
+                contest_id=kwargs["contest_id"],
+                contest_pairing_id=kwargs["contest_pairing_id"],
+            )
+            return str(job["public_id"])
+
+        def active_execution_task_count(self) -> int:
+            return 0
+
+    orch = Orch()
+    manager = ContestManager(
+        store, orch, execution_admission_required=lambda: True
+    )
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=False,
+        contest_reconciler=manager.reconcile_running_contests,
+        uploads_in_flight=lambda: 0,
+    )
+    store.executions.pause("runtime recovery", bounded_retry=True)
+    recovered = asyncio.run(dispatcher.admin_resume())
+    assert recovered is True
+    control = store.executions.control()
+    assert control["dispatcher_state"] == "running"
+    assert control["accepting"] == 1
+    assert control["deployment_drain_requested"] == 0
+    jobs = store._conn.execute(
+        "SELECT * FROM execution_jobs WHERE contest_pairing_id=?",
+        (pairing["id"],),
+    ).fetchall()
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "queued"
+    assert store.list_contest_pairings(contest["id"])[0]["match_id"] is None
 
 
 def test_crash_recovery_never_revives_eventful_match(queue_store):
@@ -3872,9 +4920,15 @@ def test_concurrent_admin_resume_has_one_atomic_recovery_gate(queue_store):
         assert runtime.cleanup_calls == 1
         release_cleanup.set()
         await reconcile_entered.wait()
-        # No claim path may observe running while the first recovery still
-        # awaits application reconciliation.
-        assert store.executions.control()["dispatcher_state"] == "paused"
+        # Recovery exposes running so contest reconciliation can enqueue, but
+        # run_once still has an explicit process-local barrier and cannot
+        # refill or claim before the callback converges.
+        assert store.executions.control()["dispatcher_state"] == "running"
+        assert await dispatcher.run_once() == {"outcome": "recovering"}
+        with pytest.raises(ExecutionMaintenanceConflict) as blocked:
+            dispatcher.begin_maintenance("恢复中不得部署")
+        assert blocked.value.code == "maintenance_recovery_in_progress"
+        assert store.executions.control()["deployment_drain_requested"] == 0
         assert second.done() is False
         release_reconcile.set()
         return await first, await second
@@ -3883,6 +4937,118 @@ def test_concurrent_admin_resume_has_one_atomic_recovery_gate(queue_store):
     assert runtime.cleanup_calls == 1
     assert orch.quiesce_calls == 1
     assert store.executions.control()["dispatcher_state"] == "running"
+
+
+def test_cancelled_admin_resume_persists_fail_closed_pause(queue_store):
+    """Client cancellation cannot expose a half-reconciled running queue."""
+    store = queue_store
+    rating_entered = asyncio.Event()
+
+    class Runtime:
+        supervisor = None
+
+        async def cleanup_instance(self) -> None:
+            return None
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        async def quiesce_execution_tasks(self) -> None:
+            return None
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            rating_entered.set()
+            await asyncio.Event().wait()
+            return 0
+
+    dispatcher = ExecutionDispatcher(
+        Orch(),
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=False,
+    )
+    store.executions.pause("manual:cancel recovery", bounded_retry=False)
+
+    async def exercise() -> None:
+        recovery = asyncio.create_task(dispatcher.admin_resume())
+        await asyncio.wait_for(rating_entered.wait(), timeout=1)
+        assert store.executions.control()["dispatcher_state"] == "running"
+        assert dispatcher._recovering_application_state is True
+        recovery.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await recovery
+        assert dispatcher._recovering_application_state is False
+        assert await dispatcher.run_once() == {"outcome": "paused"}
+
+    asyncio.run(exercise())
+    control = store.executions.control()
+    assert control["dispatcher_state"] == "paused"
+    assert control["accepting"] == 0
+    assert control["deployment_drain_requested"] == 0
+    assert "恢复被中断" in str(control["pause_reason"])
+
+
+def test_deployment_ready_waits_for_application_recovery(queue_store):
+    """Drain readiness stays red while rating/contest repair can still write."""
+    store = queue_store
+    rating_entered = asyncio.Event()
+    release_rating = asyncio.Event()
+
+    class Runtime:
+        supervisor = None
+
+        async def cleanup_instance(self) -> None:
+            return None
+
+        async def ensure_runtime_ready(self) -> None:
+            return None
+
+    class Orch:
+        runner = SimpleNamespace(runner=Runtime())
+
+        async def quiesce_execution_tasks(self) -> None:
+            return None
+
+        async def recover_unsettled_match_ratings(self) -> int:
+            rating_entered.set()
+            await release_rating.wait()
+            return 0
+
+        def active_execution_task_count(self) -> int:
+            return 0
+
+    dispatcher = ExecutionDispatcher(
+        Orch(),
+        store,
+        max_match_slots=1,
+        max_sandbox_units=2,
+        auto_capability_enabled=False,
+        uploads_in_flight=lambda: 0,
+    )
+    store.executions.begin_maintenance("deployment recovery barrier")
+    store.executions.pause("manual:runtime recovery", bounded_retry=False)
+
+    async def exercise() -> None:
+        recovery = asyncio.create_task(dispatcher.admin_resume())
+        await asyncio.wait_for(rating_entered.wait(), timeout=1)
+        snapshot = dispatcher.public_snapshot(include_internal=True)
+        assert snapshot["maintenance"]["requested"] is True
+        assert snapshot["maintenance"]["ready"] is False
+        assert "application_recovery" in snapshot["maintenance"][
+            "readiness_unavailable"
+        ]
+        release_rating.set()
+        assert await asyncio.wait_for(recovery, timeout=1) is True
+
+    asyncio.run(exercise())
+    ready = dispatcher.public_snapshot(include_internal=True)
+    assert ready["dispatcher"]["state"] == "running"
+    assert ready["dispatcher"]["accepting"] is False
+    assert ready["maintenance"]["ready"] is True
 
 
 def test_legacy_queue_migration_rejects_orphan_decision_before_drop(tmp_path):

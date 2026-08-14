@@ -269,6 +269,10 @@ class MatchOrchestrator:
         # ContestManager 只对这种显式管理员中止立即重派；平台故障
         # 产生的 aborted 必须留 pending 给 scheduler 有节制地重试。
         self._admin_abort_handoffs: set[str] = set()
+        # The HTTP abort coroutine can still write replay and contest state
+        # after the owned match task has been cancelled.  Track the complete
+        # operation so recovery and deployment readiness can await it.
+        self._admin_abort_operations: set[asyncio.Task] = set()
         self._sse: dict[str, list[asyncio.Queue]] = {}
         # Per-subscriber visibility for active human poker. Public spectators
         # receive no hole cards/turn request; the authenticated human receives
@@ -516,13 +520,41 @@ class MatchOrchestrator:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         self._tasks.clear()
-        self._admin_aborting.clear()
-        self._admin_abort_handoffs.clear()
+        current = asyncio.current_task()
+        while True:
+            abort_operations = [
+                task
+                for task in self._admin_abort_operations
+                if task is not current and not task.done()
+            ]
+            if not abort_operations:
+                break
+            await asyncio.gather(*abort_operations, return_exceptions=True)
+        # Completed abort operations release their own markers in finally.
+        # Only remove legacy stale markers when quiesce is not itself called by
+        # a live abort operation.
+        if current not in self._admin_abort_operations:
+            self._admin_aborting.clear()
+            self._admin_abort_handoffs.clear()
         self._human_turns.clear()
         self._human_active_users.clear()
         self._sse.clear()
         self._sse_human_views.clear()
         self._active_replay_events.clear()
+
+    def active_execution_task_count(self) -> int:
+        """Return tasks still capable of mutating an execution attempt."""
+        # ``public_snapshot`` is also called by sync FastAPI handlers running
+        # in a worker thread.  ``len`` is a safe, conservative read while the
+        # event loop owns mutations; iterating values could raise if a task is
+        # registered or released concurrently.  Normal completion keeps its
+        # entry until the final business callback has returned.
+        abort_markers = len(
+            self._admin_aborting | self._admin_abort_handoffs
+        )
+        return len(self._tasks) + max(
+            len(self._admin_abort_operations), abort_markers
+        )
 
     async def shutdown(self) -> None:
         """Stop owned attempts while the event loop can still clean children."""
@@ -884,6 +916,17 @@ class MatchOrchestrator:
                 raise asyncio.CancelledError
 
     async def abort_match(self, match_id: str) -> dict:
+        """Track the whole administrator abort as an execution mutation."""
+        operation = asyncio.current_task()
+        if operation is not None:
+            self._admin_abort_operations.add(operation)
+        try:
+            return await self._abort_match_owned(match_id)
+        finally:
+            if operation is not None:
+                self._admin_abort_operations.discard(operation)
+
+    async def _abort_match_owned(self, match_id: str) -> dict:
         """取消/drain 编排器拥有的任务并稳定落 aborted，终态不可倒退。"""
         reason = "admin_aborted"
         match = self.store.get_match(match_id)
@@ -959,18 +1002,21 @@ class MatchOrchestrator:
                     )
                 self._broadcast(match_id, terminal_event)
         finally:
-            self._admin_aborting.discard(match_id)
             # The cancelled task's finally deliberately yields ownership while
-            # admin abort is active. Once the terminal row exists, this handoff
-            # must run even when replay reading/flushing/broadcasting raises.
+            # admin abort is active.  Transfer the ownership marker before
+            # dropping ``_admin_aborting`` so maintenance readiness never sees
+            # a zero-count gap while replay/contest callbacks still mutate.
             if handoff_required:
                 self._admin_abort_handoffs.add(match_id)
+                self._admin_aborting.discard(match_id)
                 try:
                     await self._finish_match_task(
                         match_id, (updated or match).get("contest_id")
                     )
                 finally:
                     self._admin_abort_handoffs.discard(match_id)
+            else:
+                self._admin_aborting.discard(match_id)
         if terminal_error is not None:
             raise terminal_error
         return self.store.get_match(match_id)
@@ -1909,23 +1955,28 @@ class MatchOrchestrator:
         → _tasks 泄漏 + 赛事对局 on_match_done 不触发 → 赛事卡死。现抽成方法，
         所有对局结束路径（含 null-bot/崩溃/正常完成）统一调用。
         """
-        self._tasks.pop(match_id, None)
         if match_id in self._admin_aborting:
+            self._tasks.pop(match_id, None)
             return
         # P1-7：对局结束后清 SSE dict 的该 match_id 条目（直播已结束，防无界增长）。
         # 残留订阅者会在 _broadcast 时因 list 为空自然无操作；unsubscribe 也会清空 list。
         for queue in self._sse.pop(match_id, []):
             self._sse_human_views.pop(queue, None)
         self._active_replay_events.pop(match_id, None)
-        if self.on_match_done is not None:
-            try:
+        try:
+            if self.on_match_done is not None:
                 result = self.on_match_done(match_id, contest_id)
                 if asyncio.iscoroutine(result):
                     await result
-            except Exception:
-                # 对局完成回调（赛事 maybe_finish）失败必须可见——
-                # 原用 debug 级会静默吞掉，导致赛事卡 running 无从排查。
-                logger.exception("on_match_done failed match=%s", match_id)
+        except Exception:
+            # 对局完成回调（赛事 maybe_finish）失败必须可见——
+            # 原用 debug 级会静默吞掉，导致赛事卡 running 无从排查。
+            logger.exception("on_match_done failed match=%s", match_id)
+        finally:
+            # The callback may advance a contest and enqueue its next pairing.
+            # Keep this task owned until those writes converge so deployment
+            # readiness cannot become true in the middle of that callback.
+            self._tasks.pop(match_id, None)
 
     async def _run_human_match(
         self,

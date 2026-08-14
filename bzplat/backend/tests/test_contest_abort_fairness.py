@@ -96,7 +96,12 @@ def test_admin_abort_keeps_history_and_redispatches_without_ko_advance(tmp_path)
         match_type="contest",
         game_id="holdem",
     )
-    store.bind_contest_pairing_match(contest_id, pairing["id"], old_match_id)
+    store.bind_contest_pairing_match(
+        contest_id,
+        pairing["id"],
+        old_match_id,
+        require_execution_admission=False,
+    )
 
     # Completion callback only enqueues.  The test drives one atomic dispatcher
     # claim without starting a binary process.
@@ -233,7 +238,12 @@ def test_platform_error_aborted_match_is_not_immediately_redispatched(tmp_path):
         match_type="contest",
         game_id="holdem",
     )
-    store.bind_contest_pairing_match(contest_id, pairing["id"], failed_id)
+    store.bind_contest_pairing_match(
+        contest_id,
+        pairing["id"],
+        failed_id,
+        require_execution_admission=False,
+    )
     store.update_match(
         failed_id,
         status="aborted",

@@ -113,6 +113,7 @@ from bzplat.backend.runtime.limits import (
 from bzplat.backend.runtime.binary_runner import PlatformRunnerError
 from bzplat.backend.store.execution import (
     ExecutionIdempotencyConflict,
+    ExecutionMaintenanceConflict,
     ExecutionQueueClosed,
 )
 from bzplat.backend.store.schema import (
@@ -207,6 +208,10 @@ class _BotUploadBusy(Exception):
     """The one global upload/preflight lane did not open in time."""
 
 
+class _DeploymentMaintenance(Exception):
+    """Deployment drain closed upload admission before multipart parsing."""
+
+
 async def _finish_upload_step_before_cancel(awaitable: Awaitable[_T]) -> _T:
     """Keep admission held until a started file/thread operation really ends.
 
@@ -250,21 +255,55 @@ async def _bot_upload_admission(request: Request) -> AsyncIterator[None]:
     """Acquire the process-wide upload lane with bounded, cancel-safe waiting."""
 
     gate = getattr(request.app.state, "bot_upload_gate", None)
-    if gate is None:
+    activity_lock = getattr(
+        request.app.state, "bot_upload_activity_lock", None
+    )
+    activity = getattr(request.app.state, "bot_upload_activity", None)
+    if gate is None or activity_lock is None or activity is None:
+        # Partial assembly cannot prove that a deployment drain sees every
+        # body/preflight already in progress.  Fail closed instead of exposing
+        # a green maintenance-ready state with an uncounted upload.
         raise _BotUploadBusy
     acquired = False
+    counted = False
     try:
-        await asyncio.wait_for(
-            gate.acquire(), timeout=BOT_UPLOAD_ADMISSION_WAIT_SEC
-        )
+        async with activity_lock:
+            if _store(request).executions.is_maintenance_control(
+                _store(request).executions.control()
+            ):
+                raise _DeploymentMaintenance
+        try:
+            await asyncio.wait_for(
+                gate.acquire(), timeout=BOT_UPLOAD_ADMISSION_WAIT_SEC
+            )
+        except TimeoutError:
+            raise _BotUploadBusy
         acquired = True
-    except TimeoutError:
-        raise _BotUploadBusy
-    try:
+        async with activity_lock:
+            # Recheck after waiting for the lane: begin-maintenance shares
+            # this mutex, so no upload can cross its durable boundary.
+            if _store(request).executions.is_maintenance_control(
+                _store(request).executions.control()
+            ):
+                raise _DeploymentMaintenance
+            activity["active"] = int(activity.get("active") or 0) + 1
+            counted = True
         yield
     finally:
-        if acquired:
-            gate.release()
+        try:
+            if counted:
+                # AnyIO cancellation is level-triggered.  Once the upload body
+                # has propagated cancellation, a second cancellation while
+                # waiting for this mutex must not leak the active counter or
+                # leave the global upload permit held forever.
+                with anyio.CancelScope(shield=True):
+                    async with activity_lock:
+                        activity["active"] = max(
+                            0, int(activity.get("active") or 0) - 1
+                        )
+        finally:
+            if acquired:
+                gate.release()
 
 
 def _multipart_text(
@@ -308,6 +347,17 @@ def _upload_busy_error() -> HTTPException:
         headers={
             "Retry-After": str(max(1, math.ceil(BOT_UPLOAD_ADMISSION_WAIT_SEC)))
         },
+    )
+
+
+def _deployment_maintenance_error() -> HTTPException:
+    return HTTPException(
+        503,
+        detail={
+            "code": "deployment_maintenance",
+            "message": "平台正在部署维护，暂不接收 Bot 上传",
+        },
+        headers={"Retry-After": "30"},
     )
 
 
@@ -1048,6 +1098,16 @@ async def upload_bot(
                     binary_runner=_new_preflight_runner(request),
                 )
             )
+    except _DeploymentMaintenance:
+        audit_log(
+            request,
+            "bot_upload",
+            result="busy",
+            user=user.get("username"),
+            target=name,
+            detail="deployment_maintenance",
+        )
+        raise _deployment_maintenance_error()
     except _BotUploadBusy:
         audit_log(
             request,
@@ -1094,6 +1154,16 @@ async def upload_bot_version(
                     binary_runner=_new_preflight_runner(request),
                 )
             )
+    except _DeploymentMaintenance:
+        audit_log(
+            request,
+            "bot_version_upload",
+            result="busy",
+            user=user.get("username"),
+            target=bot_id,
+            detail="deployment_maintenance",
+        )
+        raise _deployment_maintenance_error()
     except _BotUploadBusy:
         audit_log(
             request,
@@ -1445,7 +1515,9 @@ async def challenge(body: ChallengeBody, request: Request, user=Depends(require_
         raise HTTPException(409, str(e))
     except ExecutionQueueClosed as e:
         audit_log(request, "match_challenge", result="busy", user=user.get("username"), detail=str(e))
-        raise HTTPException(503, str(e))
+        raise HTTPException(
+            503, detail={"code": e.code, "message": e.message}
+        )
     except ValueError as e:
         audit_log(request, "match_challenge", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
@@ -1492,7 +1564,9 @@ async def challenge_human(body: HumanChallengeBody, request: Request, user=Depen
         raise HTTPException(409, str(e))
     except ExecutionQueueClosed as e:
         audit_log(request, "match_human", result="busy", user=user.get("username"), detail=str(e))
-        raise HTTPException(503, str(e))
+        raise HTTPException(
+            503, detail={"code": e.code, "message": e.message}
+        )
     except ValueError as e:
         audit_log(request, "match_human", result="fail", user=user.get("username"), detail=str(e))
         raise HTTPException(400, str(e))
@@ -1562,6 +1636,10 @@ def retry_execution_request(
     owner = None if user.get("role") == ROLE_ADMIN else int(user["id"])
     try:
         _store(request).executions.retry(request_id, owner_user_id=owner)
+    except ExecutionQueueClosed as exc:
+        raise HTTPException(
+            503, detail={"code": exc.code, "message": exc.message}
+        ) from exc
     except (PermissionError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     dispatcher = _execution_dispatcher(request)
@@ -2518,6 +2596,12 @@ def _contest_for_api(contest: dict[str, Any]) -> dict[str, Any]:
 
 def _contest_write_http_error(exc: ValueError) -> HTTPException:
     """Map immutable showcase writes to conflict, preserving normal 400s."""
+    if isinstance(exc, ExecutionQueueClosed):
+        return HTTPException(
+            503,
+            detail={"code": exc.code, "message": exc.message},
+            headers={"Retry-After": "30"},
+        )
     return HTTPException(
         409 if isinstance(exc, ShowcaseReadOnlyError) else 400,
         str(exc),
@@ -3863,9 +3947,16 @@ def admin_get_runtime(request: Request, _admin=Depends(require_admin)):
     queue_snapshot = dispatcher.public_snapshot(include_internal=True) if dispatcher is not None else {
         "dispatcher": {
             "state": "stopped", "accepting": False, "auto_enabled": False,
-            "pause_reason": "调度器未就绪", "retry_at": None,
+            "maintenance": False, "pause_reason": "调度器未就绪", "retry_at": None,
         },
         "capacity": {}, "active": [], "queued": [], "queued_count": 0,
+        "maintenance": {
+            "requested": False, "ready": False, "reason": "",
+            "active_count": 0, "uploads_in_flight": 0,
+            "active_local_ai_leases": 0, "docker_launch_state": "unknown",
+            "owned_execution_tasks": 0,
+            "readiness_unavailable": ["dispatcher"],
+        },
     }
     return {
         "source": CONFIGURATION_SOURCE,
@@ -3929,7 +4020,19 @@ async def admin_toggle_auto_match(
         )
         raise HTTPException(409, "隔离 QA 实例禁止开启自动排位")
     previous = _store(request).get_auto_match_enabled()
-    _store(request).set_auto_match_enabled(bool(body.enabled))
+    try:
+        _store(request).set_auto_match_enabled(bool(body.enabled))
+    except ExecutionMaintenanceConflict as exc:
+        audit_log(
+            request,
+            "admin_auto_match_toggle",
+            result="deny",
+            user=admin.get("username"),
+            detail=exc.code,
+        )
+        raise HTTPException(
+            409, detail={"code": exc.code, "message": exc.message}
+        ) from exc
     scheduler.wake()
     audit_log(
         request,
@@ -3955,6 +4058,132 @@ async def admin_resume_execution_queue(
         user=admin.get("username"),
     )
     return dispatcher.public_snapshot(include_internal=True)
+
+
+class DeploymentMaintenanceBody(BaseModel):
+    reason: str = Field(default="管理员准备部署", max_length=200)
+
+    model_config = {"extra": "forbid"}
+
+
+def _maintenance_conflict(exc: ExecutionMaintenanceConflict) -> HTTPException:
+    return HTTPException(
+        409, detail={"code": exc.code, "message": exc.message}
+    )
+
+
+@router.get("/api/admin/execution-queue/maintenance")
+def admin_get_execution_maintenance(
+    request: Request,
+    _admin=Depends(require_admin),
+):
+    return _execution_dispatcher(request).public_snapshot(
+        include_internal=True
+    )
+
+
+@router.post("/api/admin/execution-queue/maintenance")
+async def admin_begin_execution_maintenance(
+    body: DeploymentMaintenanceBody,
+    request: Request,
+    admin=Depends(require_admin),
+):
+    dispatcher = _execution_dispatcher(request)
+    activity_lock = getattr(
+        request.app.state, "bot_upload_activity_lock", None
+    )
+    activity = getattr(request.app.state, "bot_upload_activity", None)
+    contest_manager = getattr(request.app.state, "contest_manager", None)
+    contest_activity_lock = getattr(
+        contest_manager, "deployment_activity_lock", None
+    )
+    if (
+        activity_lock is None
+        or activity is None
+        or contest_activity_lock is None
+    ):
+        raise HTTPException(503, "上传活动计数器未就绪，不能安全排空")
+    try:
+        async with activity_lock:
+            async with contest_activity_lock:
+                before = dispatcher.public_snapshot(include_internal=True)
+                dispatcher.begin_maintenance(body.reason)
+                after = dispatcher.public_snapshot(include_internal=True)
+    except ExecutionMaintenanceConflict as exc:
+        audit_log(
+            request,
+            "admin_execution_maintenance_begin",
+            result="conflict",
+            user=admin.get("username"),
+            detail=exc.code,
+        )
+        raise _maintenance_conflict(exc) from exc
+    audit_log(
+        request,
+        "admin_execution_maintenance_begin",
+        result="ok",
+        user=admin.get("username"),
+        detail=(
+            "requested="
+            f"{int(bool(before['maintenance']['requested']))}->"
+            f"{int(bool(after['maintenance']['requested']))} "
+            "accepting="
+            f"{int(bool(before['dispatcher']['accepting']))}->"
+            f"{int(bool(after['dispatcher']['accepting']))} "
+            "auto_enabled="
+            f"{int(bool(before['dispatcher']['auto_enabled']))}->"
+            f"{int(bool(after['dispatcher']['auto_enabled']))} "
+            f"active={after['maintenance']['active_count']} "
+            f"queued={after['queued_count']}"
+        ),
+    )
+    return after
+
+
+@router.delete("/api/admin/execution-queue/maintenance")
+async def admin_end_execution_maintenance(
+    request: Request,
+    admin=Depends(require_admin),
+):
+    dispatcher = _execution_dispatcher(request)
+    activity_lock = getattr(
+        request.app.state, "bot_upload_activity_lock", None
+    )
+    activity = getattr(request.app.state, "bot_upload_activity", None)
+    if activity_lock is None or activity is None:
+        raise HTTPException(503, "上传活动计数器未就绪，不能安全恢复")
+    try:
+        async with activity_lock:
+            before = dispatcher.public_snapshot(include_internal=True)
+            await dispatcher.end_maintenance()
+            after = dispatcher.public_snapshot(include_internal=True)
+    except ExecutionMaintenanceConflict as exc:
+        audit_log(
+            request,
+            "admin_execution_maintenance_end",
+            result="conflict",
+            user=admin.get("username"),
+            detail=exc.code,
+        )
+        raise _maintenance_conflict(exc) from exc
+    audit_log(
+        request,
+        "admin_execution_maintenance_end",
+        result="ok",
+        user=admin.get("username"),
+        detail=(
+            "requested="
+            f"{int(bool(before['maintenance']['requested']))}->"
+            f"{int(bool(after['maintenance']['requested']))} "
+            "accepting="
+            f"{int(bool(before['dispatcher']['accepting']))}->"
+            f"{int(bool(after['dispatcher']['accepting']))} "
+            "auto_enabled="
+            f"{int(bool(before['dispatcher']['auto_enabled']))}->"
+            f"{int(bool(after['dispatcher']['auto_enabled']))}"
+        ),
+    )
+    return after
 
 
 class SiteSettingsPatch(BaseModel):

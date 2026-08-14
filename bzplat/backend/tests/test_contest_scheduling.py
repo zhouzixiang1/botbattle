@@ -569,6 +569,12 @@ def test_match_can_bind_to_only_one_pairing(setup):
         match_id, users["b1"], users["b2"], contest_id=contest["id"],
         match_type="contest", game_id="holdem",
     )
-    store.bind_contest_pairing_match(contest["id"], first["id"], match_id)
+    store.bind_contest_pairing_match(
+        contest["id"], first["id"], match_id,
+        require_execution_admission=False,
+    )
     with pytest.raises(ValueError, match="多个赛事对阵"):
-        store.bind_contest_pairing_match(contest["id"], second["id"], match_id)
+        store.bind_contest_pairing_match(
+            contest["id"], second["id"], match_id,
+            require_execution_admission=False,
+        )

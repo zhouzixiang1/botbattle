@@ -8,6 +8,7 @@ from .db import (
 )
 from .execution import (
     ExecutionInvariantError,
+    ExecutionMaintenanceConflict,
     ExecutionQueueClosed,
     ExecutionRepository,
 )
@@ -38,6 +39,7 @@ from .schema import (
 __all__ = [
     "Store",
     "ExecutionInvariantError",
+    "ExecutionMaintenanceConflict",
     "ExecutionQueueClosed",
     "ExecutionRepository",
     "rating_plan_digest",

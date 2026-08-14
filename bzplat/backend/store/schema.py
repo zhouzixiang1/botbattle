@@ -565,6 +565,10 @@ CREATE TABLE IF NOT EXISTS execution_control (
     ),
     accepting           INTEGER NOT NULL DEFAULT 0 CHECK (accepting IN (0,1)),
     auto_enabled        INTEGER NOT NULL DEFAULT 1 CHECK (auto_enabled IN (0,1)),
+    deployment_drain_requested INTEGER NOT NULL DEFAULT 0 CHECK (
+        deployment_drain_requested IN (0,1)
+    ),
+    deployment_drain_reason TEXT NOT NULL DEFAULT '',
     pause_reason        TEXT    NOT NULL DEFAULT '',
     retry_count         INTEGER NOT NULL DEFAULT 0 CHECK (retry_count>=0),
     retry_at            TEXT,

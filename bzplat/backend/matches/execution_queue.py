@@ -26,10 +26,16 @@ from bzplat.backend.runtime.limits import effective_host_resource_budget
 from bzplat.backend.store.execution import (
     DockerLaunchInvariantError,
     ExecutionInvariantError,
+    ExecutionMaintenanceConflict,
 )
 
 
 logger = logging.getLogger(__name__)
+
+_DEPLOYMENT_MAINTENANCE_BLOCK_CODE = "deployment_maintenance"
+_DEPLOYMENT_MAINTENANCE_BLOCK_REASON = (
+    "部署维护中，恢复调度后继续排队"
+)
 
 
 class DispatcherAlreadyRunning(RuntimeError):
@@ -49,6 +55,7 @@ class ExecutionDispatcher:
         auto_capability_enabled: bool = True,
         contest_reconciler: Callable[[], Awaitable[int]] | None = None,
         singleton_acquired: Callable[[], None] | None = None,
+        uploads_in_flight: Callable[[], int] | None = None,
         max_host_cpu_millis: int | None = None,
         max_host_memory_mb: int | None = None,
     ) -> None:
@@ -63,6 +70,7 @@ class ExecutionDispatcher:
         self.auto_capability_enabled = bool(auto_capability_enabled)
         self.contest_reconciler = contest_reconciler
         self.singleton_acquired = singleton_acquired
+        self.uploads_in_flight = uploads_in_flight
         detected_budget = effective_host_resource_budget()
         # Explicit injection can lower a test/deployment budget but can never
         # enlarge the process-visible cgroup/affinity ceiling.
@@ -87,6 +95,7 @@ class ExecutionDispatcher:
         # physical cleanup -> DB compensation -> application reconcile gate;
         # the Docker flock alone cannot protect the later DB phase.
         self._recovery_lock = asyncio.Lock()
+        self._recovering_application_state = False
 
     @property
     def _lock_path(self) -> Path:
@@ -137,7 +146,7 @@ class ExecutionDispatcher:
                 # so ordinary startup must neither recover nor arm auto-retry.
                 state = self.repo.set_control(
                     dispatcher_state="paused",
-                    accepting=True,
+                    accepting=not self.repo.is_maintenance_control(previous),
                     pause_reason=manual_pause_reason,
                     retry_count=0,
                     retry_at=None,
@@ -168,7 +177,9 @@ class ExecutionDispatcher:
             # uses the same ordered pipeline as delayed pause -> resume, notably
             # allowing contest reconciliation to enqueue restored pairings.
             self.repo.resume()
-            application_recovered = await self._recover_application_state()
+            application_recovered = (
+                await self._recover_application_state_after_resume()
+            )
         except (
             SandboxControlUncertain,
             PlatformRunnerError,
@@ -179,6 +190,19 @@ class ExecutionDispatcher:
             state = self._pause_control_uncertainty(str(exc))
             self._started = True
             return {"outcome": "paused", "control": state}
+        except asyncio.CancelledError:
+            # The guarded application phase persists paused when cancellation
+            # follows resume.  Cancellation earlier in startup still leaves
+            # accepting closed; persist the same diagnosable pause before
+            # releasing the singleton for a clean retry.
+            if self.repo.control()["dispatcher_state"] != "paused":
+                self.repo.pause(
+                    "执行队列启动恢复被中断；等待下一次安全启动",
+                    bounded_retry=True,
+                    force_closed=True,
+                )
+            self._release_singleton()
+            raise
         except Exception:
             try:
                 self.repo.set_control(
@@ -316,6 +340,27 @@ class ExecutionDispatcher:
             "contests": contests_reconciled,
         }
 
+    async def _recover_application_state_after_resume(self) -> dict[str, int]:
+        """Run business recovery after admission state changes to running.
+
+        ``admin_resume`` is an HTTP coroutine and may be cancelled when its
+        client disconnects.  Once ``repo.resume()`` has exposed running state,
+        cancellation must persist a new fail-closed pause instead of leaving
+        half-applied rating/contest reconciliation looking healthy.
+        """
+        self._recovering_application_state = True
+        try:
+            return await self._recover_application_state()
+        except asyncio.CancelledError:
+            self.repo.pause(
+                "执行队列恢复被中断；等待下一次安全恢复",
+                bounded_retry=True,
+                force_closed=True,
+            )
+            raise
+        finally:
+            self._recovering_application_state = False
+
     async def _resume_paused_if_due(
         self, control: dict, *, administrator: bool = False
     ) -> bool:
@@ -327,6 +372,13 @@ class ExecutionDispatcher:
             if control["dispatcher_state"] == "running":
                 return True
             if control["dispatcher_state"] != "paused":
+                return False
+            if self.repo.is_maintenance_control(control) and not administrator:
+                # Deployment drain and runtime uncertainty are orthogonal.
+                # A background retry must not perform namespace recovery while
+                # an operator is preparing deployment; the explicit admin
+                # recovery action is still allowed and returns running with
+                # accepting held at zero by the persistent drain.
                 return False
             if (
                 str(control.get("pause_reason") or "").startswith("manual:")
@@ -352,10 +404,14 @@ class ExecutionDispatcher:
                 recovered = self.repo.recover_after_namespace_cleanup()
                 logger.warning("execution namespace recovered: %s", recovered)
                 # Keep the durable state paused until every awaited business
-                # reconciliation completes.  Otherwise a concurrent run_once
-                # can claim between resume() and contest/rating recovery.
-                await self._recover_application_state()
+                # reconciliation completes.  Runtime recovery is allowed to
+                # rebuild pending contest jobs while paused, so expose
+                # accepting=1 immediately before reconciliation but keep the
+                # dispatcher mutex held: no concurrent run_once can claim.  A
+                # persistent deployment drain makes resume() retain
+                # accepting=0 and the reconciler itself stays read-only.
                 self.repo.resume()
+                await self._recover_application_state_after_resume()
                 return True
             except (
                 SandboxControlUncertain,
@@ -379,6 +435,30 @@ class ExecutionDispatcher:
             return control["dispatcher_state"] == "running"
         return await self._resume_paused_if_due(control, administrator=True)
 
+    def begin_maintenance(self, reason: str) -> dict:
+        """Atomically enter the persistent no-admission deployment state."""
+        if self._recovering_application_state or self._recovery_lock.locked():
+            raise ExecutionMaintenanceConflict(
+                "maintenance_recovery_in_progress",
+                "运行环境正在恢复，请等待恢复完成后再准备部署",
+            )
+        state = self.repo.begin_maintenance(reason)
+        self._wake.set()
+        return state
+
+    async def end_maintenance(self) -> bool:
+        """Clear only a fully converged deployment drain; keep auto disabled."""
+        async with self._recovery_lock:
+            status = self._maintenance_snapshot(include_internal=True)
+            if status["requested"] and not status["ready"]:
+                raise ExecutionMaintenanceConflict(
+                    "maintenance_not_ready",
+                    "当前任务或上传仍在收尾，暂不能恢复调度",
+                )
+            self.repo.end_maintenance()
+            self._wake.set()
+            return True
+
     async def _process_cancellations(self) -> None:
         snapshot = self.repo.snapshot(
             max_match_slots=self.max_match_slots,
@@ -397,11 +477,15 @@ class ExecutionDispatcher:
                 logger.info("cancel converged elsewhere match=%s", match_id)
 
     async def run_once(self) -> dict:
+        if self._recovering_application_state:
+            return {"outcome": "recovering"}
         control = self.repo.control()
         if control["dispatcher_state"] == "paused":
             if not await self._resume_paused_if_due(control):
                 return {"outcome": "paused"}
             control = self.repo.control()
+        if self._recovering_application_state:
+            return {"outcome": "recovering"}
         if control["dispatcher_state"] != "running":
             return {"outcome": str(control["dispatcher_state"])}
 
@@ -427,6 +511,13 @@ class ExecutionDispatcher:
             return {"outcome": "paused"}
 
         await self._process_cancellations()
+        # ``run_once`` may have awaited the Docker launch guard or an active
+        # cancellation after its initial recovery check.  Recheck immediately
+        # before the fully synchronous finalize/refill/claim section so an
+        # administrator recovery that started during either await cannot be
+        # crossed by an old iteration.
+        if self._recovering_application_state:
+            return {"outcome": "recovering"}
         finalized = self.repo.finalize_ready()
         refill: dict = {"outcome": "capability_disabled", "inserted": 0}
         if self.auto_capability_enabled:
@@ -523,7 +614,11 @@ class ExecutionDispatcher:
         }
 
     @staticmethod
-    def _public_job(job: dict | None) -> dict | None:
+    def _public_job(
+        job: dict | None,
+        *,
+        maintenance_requested: bool = False,
+    ) -> dict | None:
         if job is None:
             return None
         public_id = str(job.get("public_id") or "")
@@ -553,6 +648,12 @@ class ExecutionDispatcher:
         }
         blocked_code = str(job.get("capacity_blocked_code") or "")
         blocked_reason = str(job.get("capacity_blocked_reason") or "")
+        if maintenance_requested and projected["status"] == "queued":
+            # Maintenance is the immediate reason this otherwise valid job
+            # cannot start.  Keep the durable capacity diagnosis untouched so
+            # it becomes visible again automatically after explicit resume.
+            blocked_code = _DEPLOYMENT_MAINTENANCE_BLOCK_CODE
+            blocked_reason = _DEPLOYMENT_MAINTENANCE_BLOCK_REASON
         if blocked_code:
             projected["blocked_code"] = blocked_code
             projected["blocked_reason"] = blocked_reason
@@ -563,19 +664,92 @@ class ExecutionDispatcher:
         if snap["target"] is None:
             return None
         ahead_jobs = int(snap["ahead_jobs"])
-        blocked_reason = str(
-            snap["target"].get("capacity_blocked_reason") or ""
+        maintenance_requested = self.repo.is_maintenance_control(
+            snap["control"]
         )
+        request = self._public_job(
+            snap["target"],
+            maintenance_requested=maintenance_requested,
+        )
+        assert request is not None
+        blocked_code = str(request.get("blocked_code") or "")
+        blocked_reason = str(request.get("blocked_reason") or "")
         projected = {
             "public_id": public_id,
-            "request": self._public_job(snap["target"]),
+            "request": request,
             "ahead_jobs": ahead_jobs,
             "ahead_sandbox_units": int(snap["ahead_sandbox_units"]),
             "capacity": self._public_capacity(snap["capacity"]),
             "eta": self._eta(ahead_jobs, self.max_match_slots),
         }
+        if blocked_code:
+            projected["blocked_code"] = blocked_code
         if blocked_reason:
             projected["blocked_reason"] = blocked_reason
+        return projected
+
+    def _maintenance_snapshot(
+        self, *, include_internal: bool
+    ) -> dict[str, Any]:
+        durable = self.repo.maintenance_status()
+        unavailable: list[str] = []
+        if self._recovering_application_state:
+            # Namespace cleanup has completed, but rating/contest recovery may
+            # still be writing durable state.  Keep deployment fail-closed
+            # until that awaited application reconciliation returns.
+            unavailable.append("application_recovery")
+        uploads = 0
+        if self.uploads_in_flight is None:
+            unavailable.append("upload_activity")
+        else:
+            try:
+                uploads = max(0, int(self.uploads_in_flight()))
+            except Exception:
+                logger.exception("deployment upload activity probe failed")
+                unavailable.append("upload_activity")
+        task_counter = getattr(self.orch, "active_execution_task_count", None)
+        owned_tasks = 0
+        if not callable(task_counter):
+            unavailable.append("owned_execution_tasks")
+        else:
+            try:
+                owned_tasks = max(0, int(task_counter()))
+            except Exception:
+                logger.exception("deployment owned-task probe failed")
+                unavailable.append("owned_execution_tasks")
+        requested = bool(durable["requested"])
+        ready = bool(
+            durable["ready"]
+            and uploads == 0
+            and owned_tasks == 0
+            and not unavailable
+        )
+        reason = str(durable.get("reason") or "")
+        if reason and not include_internal:
+            reason = "平台正在部署维护"
+        projected: dict[str, Any] = {
+            "requested": requested,
+            "ready": ready,
+            "reason": reason,
+            "active_count": int(durable["active_count"]),
+            "uploads_in_flight": uploads,
+        }
+        if include_internal:
+            projected.update(
+                {
+                    "active_local_ai_leases": int(
+                        durable["active_local_ai_leases"]
+                    ),
+                    "untracked_running_matches": int(
+                        durable["untracked_running_matches"]
+                    ),
+                    "docker_launch_state": str(
+                        durable["docker_launch_state"]
+                    ),
+                    "owned_execution_tasks": owned_tasks,
+                    "readiness_unavailable": unavailable,
+                }
+            )
         return projected
 
     def public_snapshot(
@@ -597,11 +771,15 @@ class ExecutionDispatcher:
         pause_reason = str(control.get("pause_reason") or "")
         if pause_reason and not include_internal:
             pause_reason = "执行服务暂时不可用，系统正在自动恢复"
+        maintenance = self._maintenance_snapshot(
+            include_internal=include_internal
+        )
         return {
             "dispatcher": {
                 "state": str(control.get("dispatcher_state") or "stopped"),
                 "accepting": bool(int(control.get("accepting") or 0)),
                 "auto_enabled": bool(int(control.get("auto_enabled") or 0)),
+                "maintenance": bool(maintenance["requested"]),
                 "pause_reason": pause_reason,
                 "retry_at": control.get("retry_at"),
             },
@@ -610,8 +788,15 @@ class ExecutionDispatcher:
                 include_host_resources=include_internal,
             ),
             "active": [self._public_job(row) for row in active],
-            "queued": [self._public_job(row) for row in queued],
+            "queued": [
+                self._public_job(
+                    row,
+                    maintenance_requested=bool(maintenance["requested"]),
+                )
+                for row in queued
+            ],
             "queued_count": len(queued),
+            "maintenance": maintenance,
         }
 
 

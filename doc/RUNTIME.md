@@ -121,6 +121,45 @@ effective_budget = min(上述探测值、显式的仅收紧启动注入)
   容量可在容器清零后释放，
   但同一 Bot 的 completed 未结算局仍阻止下一条 rated job，避免 Glicko 顺序重叠。
 
+## 部署排空状态机
+
+计划部署使用独立、持久的 `deployment_drain_requested` 控制位，不能用 dispatcher 的
+`paused/stopped` 或临时 `pause_reason` 代替。管理员开始排空时，Store 在一个
+`BEGIN IMMEDIATE` 事务内同时写入 `deployment_drain_requested=1`、`accepting=0` 和
+`auto_enabled=0`。因此事务边界之前已经入队或 claim 的工作保持原生命周期；边界之后的新挑战、
+人机、重试、赛事派发和 Bot 新建/版本上传被明确拒绝。已有 queued job、冻结版本、赛事 pairing 和
+自动排位 decision 均原样保留，不取消、不改序，也不生成技术赛果。维护期间 queued job 的公开读模型
+返回 `blocked_code=deployment_maintenance` 和“部署维护中，恢复调度后继续排队”；恢复后自动回到真实
+容量阻塞或动态 ETA，持久 job 本身不写入临时维护原因。
+
+排空不会停止 dispatcher loop：当前 `starting/running/settling` 继续完成、取消、评分结算与精确
+Docker 清理，但不再 claim 或补充自动任务。赛事 scheduler/reconcile 在检查 Bot 可用性、绑定 Match、
+写赛事运行态或技术结果之前检查同一 admission gate；维护期间只保留 pending pairing，恢复后再派发。
+Bot 上传与开始排空共用进程内 admission mutex；边界前已进入的 multipart/预检计入活动上传，边界后在
+读取请求体、写暂存文件或启动预检容器前拒绝。
+
+`maintenance.ready` 永远由当前事实派生，不持久化绿色状态；它同时要求：
+
+- drain 已请求，dispatcher 为 `running` 且 `accepting=0`；
+- 没有 `starting/running/settling` job，也没有缺少 execution job 所有者的 legacy/异常 `running` Match；
+- Docker launch journal 为 `idle`，没有 active 本地 Bot lease；
+- 没有本进程仍在执行终局/赛事回调的 execution task、评分/赛事应用恢复，也没有活动上传；
+- 上述任一探针缺失或异常时 fail closed，并在管理员投影的 `readiness_unavailable` 给出诊断项。
+
+部署排空与运行故障暂停是正交状态。排空期间若 Docker 控制不确定而进入 `paused`，后台有界重试不会
+自行跨过管理员正在准备的部署边界；管理员须使用“清场并恢复”执行精确 namespace cleanup、attempt
+补偿和赛事/评分对账。恢复成功后状态为 `running + drain=1 + accepting=0`，不会接新任务。正常重启也会
+先执行相同清理/恢复链，再回到这一状态；`start/recover/resume/close` 均不得清除 drain。
+管理员恢复请求若在已切换为 `running` 后被客户端取消，dispatcher 必须原子退回
+`paused + accepting=0`，不能把未完成的评分/赛事对账暴露为健康状态。管理员中止对局从取消 runner、
+写终局 replay 到赛事回调返回的整个协程都计入 owned task；namespace 清场须等待该 handoff 完成。
+上传请求取消时，活动计数递减与全局上传 permit 释放位于不可取消的短 cleanup 区，避免部署永远卡在
+“仍有上传”或后续上传永久拿不到槽位。
+
+只有管理员显式结束排空且上述 blockers 全部为零时，单个事务才清除 drain 并把 `accepting` 置 1。
+自动排位仍保持关闭，必须另行通过自动排位开关启用。这保证进程重启、运行环境恢复或重复请求都不会
+意外把平台重新开放。
+
 ## 运行模式边界
 
 | 模式 | 进程 | 请求 |

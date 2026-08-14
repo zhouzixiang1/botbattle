@@ -175,6 +175,11 @@ def create_app(
     # loop, so an asyncio semaphore avoids consuming the default thread pool
     # while uploads wait. Keep it separate from the cross-thread preflight gate.
     bot_upload_gate = asyncio.Semaphore(BOT_UPLOAD_ADMISSION_SLOTS)
+    # Deployment drain and upload admission share this loop-local mutex.  An
+    # upload becomes active before multipart parsing and remains counted until
+    # staging, preflight and DB commit/rollback have all converged.
+    bot_upload_activity_lock = asyncio.Lock()
+    bot_upload_activity = {"active": 0}
 
     def _pause_for_unscoped_docker(reason: str) -> None:
         launch = store.executions.docker_launch()
@@ -200,7 +205,15 @@ def create_app(
         local_ai_hub=local_ai_service.hub,
     )
     orch = MatchOrchestrator(store, runner=match_runner, max_concurrent=effective_conc)
-    contest_manager = ContestManager(store, orch)
+    execution_dispatcher: ExecutionDispatcher | None = None
+    contest_manager = ContestManager(
+        store,
+        orch,
+        execution_admission_required=lambda: bool(
+            execution_dispatcher is not None
+            and execution_dispatcher._started
+        ),
+    )
     # QA capability guard is independent from the persisted administrator switch:
     # a copied production DB may say enabled, but an isolated QA process must never
     # write background ladder matches.
@@ -213,6 +226,7 @@ def create_app(
         auto_capability_enabled=not qa_instance,
         contest_reconciler=contest_manager.reconcile_running_contests,
         singleton_acquired=store.reset_local_ai_runtime_state,
+        uploads_in_flight=lambda: int(bot_upload_activity["active"]),
         max_host_cpu_millis=host_budget.cpu_millis,
         max_host_memory_mb=host_budget.memory_mb,
     )
@@ -328,6 +342,8 @@ def create_app(
     )
     app.state.preflight_gate = preflight_gate
     app.state.bot_upload_gate = bot_upload_gate
+    app.state.bot_upload_activity_lock = bot_upload_activity_lock
+    app.state.bot_upload_activity = bot_upload_activity
     app.state.orch = orch
     app.state.contest_manager = contest_manager
     app.state.mailer = mailer

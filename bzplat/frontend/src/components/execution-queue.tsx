@@ -69,11 +69,25 @@ export interface ExecutionCapacity {
   running_matches: number
 }
 
+export interface ExecutionMaintenanceSnapshot {
+  requested: boolean
+  ready: boolean
+  reason: string
+  active_count: number
+  uploads_in_flight: number
+  active_local_ai_leases?: number
+  untracked_running_matches?: number
+  docker_launch_state?: string
+  owned_execution_tasks?: number
+  readiness_unavailable?: string[]
+}
+
 export interface ExecutionQueueSnapshot {
   dispatcher: {
     state: string
     accepting: boolean
     auto_enabled: boolean
+    maintenance?: boolean
     pause_reason: string
     retry_at?: string | null
   }
@@ -81,6 +95,7 @@ export interface ExecutionQueueSnapshot {
   active: ExecutionQueueJob[]
   queued: ExecutionQueueJob[]
   queued_count: number
+  maintenance?: ExecutionMaintenanceSnapshot
 }
 
 export interface ExecutionRequestSnapshot {
@@ -134,8 +149,9 @@ const RATING_REASON_LABEL: Record<string, string> = {
   eligible: '计入平台排行榜',
 }
 
-function dispatcherLabel(state: string, accepting: boolean): string {
+function dispatcherLabel(state: string, accepting: boolean, maintenance = false): string {
   if (state === 'paused') return '安全暂停'
+  if (maintenance) return '维护中'
   if (state === 'starting') return '正在启动'
   if (state === 'stopping' || state === 'draining') return '正在停止'
   if (state === 'stopped') return '已停止'
@@ -281,6 +297,7 @@ export function ExecutionQueuePanel({
     ? snapshot?.queued || []
     : (snapshot?.queued || []).slice(0, maxQueued)
   const hidden = Math.max(0, (snapshot?.queued.length || 0) - queued.length)
+  const maintenance = Boolean(snapshot?.maintenance?.requested || snapshot?.dispatcher.maintenance)
   const paused = snapshot?.dispatcher.state === 'paused'
 
   const renderSnapshot = () => snapshot ? (
@@ -297,6 +314,15 @@ export function ExecutionQueuePanel({
                 下次自动重试：{fmtTime(snapshot.dispatcher.retry_at)}
               </span>
             )}
+          </span>
+        </div>
+      )}
+
+      {maintenance && snapshot?.maintenance?.ready && (
+        <div className="flex items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2.5 text-xs" role="status">
+          <Square className="mt-0.5 size-4 shrink-0 fill-primary/15 text-primary" aria-hidden="true" />
+          <span className="break-words [overflow-wrap:anywhere]">
+            运行环境已排空；等待任务已保留，恢复后会继续执行。
           </span>
         </div>
       )}
@@ -361,7 +387,11 @@ export function ExecutionQueuePanel({
             {snapshot && (
               <span role="status" aria-live="polite">
                 <Badge variant={snapshot.dispatcher.accepting && !paused ? 'default' : 'secondary'}>
-                  {dispatcherLabel(snapshot.dispatcher.state, snapshot.dispatcher.accepting)}
+                  {dispatcherLabel(
+                    snapshot.dispatcher.state,
+                    snapshot.dispatcher.accepting,
+                    Boolean(snapshot.dispatcher.maintenance),
+                  )}
                 </Badge>
               </span>
             )}
@@ -378,7 +408,7 @@ export function ExecutionQueuePanel({
             </p>
           )}
         </div>
-        {action && <div className="min-w-0 max-w-full">{action}</div>}
+        {action && <div className="w-full min-w-0 max-w-full sm:w-auto">{action}</div>}
       </div>
 
       {error && (
