@@ -170,7 +170,7 @@ test('organizer contest lifecycle completes and preserves the terminal audit rec
   await page.getByRole('option', { name: '五子棋', exact: true }).last().click()
   await expect(templateSelect).toBeEnabled()
   await templateSelect.click()
-  await page.getByRole('option', { name: /棋类：双循环/ }).click()
+  await page.getByRole('option', { name: '五子棋：双循环', exact: true }).click()
   await page.locator('#contest-title').fill(title)
   await page.locator('#contest-desc').fill('Playwright organizer → player → admin lifecycle regression')
 

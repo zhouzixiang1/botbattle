@@ -193,13 +193,18 @@ def test_fail_response_parseable_per_game():
     """
     from bzplat.backend.games import registry
     from bzplat.backend.games.holdem.protocol import parse_response
-    from bzplat.backend.games.gomoku.protocol import parse_xy
+    from bzplat.backend.games.gomoku.protocol import parse_action
+    from bzplat.backend.games.pencil.protocol import parse_xy
 
     # fail_response 是可信的人类超时 payload；runner 统一包 canonical envelope。
     h = registry.get("holdem").protocol.fail_response()
     parse_response({"response": h})  # 不抛
 
-    # gomoku/pencil: fail_response 返回值能喂 parse_xy
-    for gid in ("gomoku", "pencil"):
-        g = registry.get(gid).protocol.fail_response()
-        assert parse_xy({"response": g}) == (-99, -99)
+    gomoku = registry.get("gomoku").protocol.fail_response()
+    assert parse_action({"response": gomoku}) == {
+        "action": "move",
+        "x": -99,
+        "y": -99,
+    }
+    pencil = registry.get("pencil").protocol.fail_response()
+    assert parse_xy({"response": pencil}) == (-99, -99)

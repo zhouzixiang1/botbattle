@@ -12,7 +12,7 @@ from bzplat.backend.games.gomoku.engine import (
     in_board,
 )
 from bzplat.backend.games.pencil.engine import PencilBoard, PencilSession
-from bzplat.backend.games.gomoku.protocol import build_gomoku_request, parse_xy
+from bzplat.backend.games.gomoku import protocol as gomoku_protocol
 from bzplat.backend.games.pencil.protocol import build_pencil_request
 
 
@@ -30,25 +30,23 @@ def test_gomoku_check_win_and_bounds():
 
 
 def test_gomoku_five_in_a_row_match():
-    """黑方连续下成五，白方应付固定点。"""
-    black_moves = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
-    white_moves = [(1, 0), (1, 1), (1, 2), (1, 3)]
-    bi = wi = 0
-
-    def decide_a(req):
-        nonlocal bi
-        x, y = black_moves[bi]
-        bi += 1
-        return {"response": {"x": x, "y": y}}
-
-    def decide_b(req):
-        nonlocal wi
-        x, y = white_moves[wi]
-        wi += 1
-        return {"response": {"x": x, "y": y}}
+    """完成指定开局后，黑方以恰好五连获胜。"""
+    normal = {0: iter([(10, 10), (11, 11)]), 1: iter([(0, 0), (0, 1)])}
 
     async def decide(player, req):
-        return decide_a(req) if player == 0 else decide_b(req)
+        phase = req["phase"]
+        if phase == "opening_proposal":
+            return {"response": {"action": "opening", "white2": {"x": 7, "y": 8}, "black3": {"x": 8, "y": 8}, "n": 2}}
+        if phase == "swap_choice":
+            return {"response": {"action": "swap", "swap": False}}
+        if phase == "white4":
+            return {"response": {"action": "move", "x": 6, "y": 8}}
+        if phase == "black5_candidates":
+            return {"response": {"action": "black5_candidates", "points": [{"x": 9, "y": 9}, {"x": 5, "y": 5}]}}
+        if phase == "black5_select":
+            return {"response": {"action": "black5_select", "index": 0}}
+        x, y = next(normal[player])
+        return {"response": {"action": "move", "x": x, "y": y}}
 
     result = asyncio.run(GomokuSession().run_async(decide))
     assert result.winner == 0
@@ -59,15 +57,13 @@ def test_gomoku_five_in_a_row_match():
 
 
 def test_gomoku_illegal_loses():
-    async def decide(player, req):
-        if player == 0:
-            return {"response": {"x": 0, "y": 0}}
-        return {"response": {"x": 0, "y": 0}}  # 占已有点 → 非法
+    async def decide(_player, _req):
+        return {"response": {"x": 0, "y": 0}}  # 旧协议在第一阶段即非法
 
     result = asyncio.run(GomokuSession().run_async(decide))
-    assert result.winner == 0
-    assert result.reason == "illegal"
-    assert result.rounds[0].winners == [0]
+    assert result.winner == 1
+    assert result.reason == "illegal_opening"
+    assert result.rounds[0].winners == [1]
 
 
 def test_pencil_score_and_continue():
@@ -177,19 +173,21 @@ def test_pencil_scoring_turn_requires_and_accepts_the_canonical_pass():
 
 
 def test_board_protocol_roundtrip():
-    # Botzone 标准协议：请求负载 {x,y,me}（信封由传输层包），无 v/t 字段。
-    g = build_gomoku_request(x=-1, y=-1, me=0)
-    assert g["x"] == -1 and g["me"] == 0
-    assert "t" not in g  # Botzone 化后无 t 字段
+    # Gomoku v2 请求显式冻结协议/规则并带自包含棋盘。
+    g = gomoku_protocol.build_request(
+        phase=gomoku_protocol.PHASE_OPENING,
+        me=0,
+        color=0,
+        board=[[-1] * 15 for _ in range(15)],
+        seat_colors=[0, 1],
+    )
+    assert g["protocol_version"] == 2 and g["me"] == 0
+    assert g["ruleset"] == "gomoku_ccgc_2013_v1"
     p = build_pencil_request(x=1, y=0, pass_=1, me=1, scores=[2, 1])
     assert p["pass"] == 1 and p["scores"] == [2, 1]
-    # response 必填；顶层调试字段忽略，游戏 payload 仍严格只有 x/y。
-    assert parse_xy({"x": 3, "y": 4}) == (None, None)
-    assert parse_xy({"response": {"x": 5, "y": 10}}) == (5, 10)
-    assert parse_xy({"response": {"x": 5, "y": 10}, "debug": "x"}) == (5, 10)
-    assert parse_xy({"response": {"x": 5, "y": 10, "debug": "x"}}) == (None, None)
-    assert parse_xy({}) == (None, None)
-    assert parse_xy({"response": {}}) == (None, None)
+    assert gomoku_protocol.parse_action({"response": {"action": "pass"}}) == {"action": "pass"}
+    assert gomoku_protocol.parse_action({"response": {"x": 5, "y": 10}}) is None
+    assert gomoku_protocol.parse_action({}) is None
 
 
 def test_run_session_pencil_rejects_removed_rule_params():

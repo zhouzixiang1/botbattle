@@ -92,20 +92,25 @@ def _completed_rating_match(
         "_rating_eligible": True,
         "_rating_reason": "eligible",
     }
+    contract = store.get_active_game_contract("gomoku")
     with store._tx() as conn:
         conn.execute("BEGIN IMMEDIATE")
         projection_guard = store._rating_projection_mutation_guard_tx(conn)
         conn.execute(
             "INSERT INTO matches_gomoku("
             "id,bot_a_id,bot_b_id,owner_id,winner,reason,match_type,status,"
-            "game_id,match_config,result,started_at,ended_at,created_at) "
-            "VALUES(?,?,?,?,?,'completed','challenge','completed','gomoku',?,?,?,?,?)",
+            "game_id,ruleset_version,protocol_version,rating_pool_id,match_config,"
+            "result,started_at,ended_at,created_at) "
+            "VALUES(?,?,?,?,?,'completed','challenge','completed','gomoku',?,?,?,?,?,?,?,?)",
             (
                 match_id,
                 bot_a_id,
                 bot_b_id,
                 owner_id,
                 winner,
+                contract["ruleset_version"],
+                contract["protocol_version"],
+                contract["rating_pool_id"],
                 json.dumps(match_config, ensure_ascii=False),
                 json.dumps(result, ensure_ascii=False),
                 now,
@@ -119,9 +124,16 @@ def _completed_rating_match(
         )
         conn.execute(
             "INSERT INTO match_rating_policies("
-            "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
-            "classified_at) VALUES(?,'gomoku',?,?,1,'eligible','creation_v2',?)",
-            (match_id, bot_a_id, bot_b_id, now),
+            "match_id,game_id,rating_pool_id,bot_a_id,bot_b_id,rated,"
+            "rating_reason,source,classified_at) "
+            "VALUES(?,'gomoku',?,?,?,1,'eligible','creation_v2',?)",
+            (
+                match_id,
+                contract["rating_pool_id"],
+                bot_a_id,
+                bot_b_id,
+                now,
+            ),
         )
         store._reserve_rating_settlement_order_tx(conn, match_id)
         store._advance_rating_projection_state_tx(conn, projection_guard)

@@ -376,8 +376,16 @@ def _with_bot_runnable(bot: dict) -> dict:
         str(public.get("os") or ""),
         str(public.get("arch") or ""),
     )
+    if public.get("retired_at") is not None:
+        runnable = False
     public["runnable"] = runnable
-    public["unsupported_reason"] = None if runnable else SUPPORTED_BINARY_ERROR
+    public["unsupported_reason"] = (
+        None
+        if runnable
+        else "该版本已退役"
+        if public.get("retired_at") is not None
+        else SUPPORTED_BINARY_ERROR
+    )
     return public
 
 
@@ -1196,7 +1204,19 @@ def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_use
     if not bot:
         raise HTTPException(404, "bot 不存在")
     is_owner = bot["owner_id"] == user["id"] or user.get("role") == "admin"
-    versions = [_with_bot_runnable(v) for v in store.list_bot_versions(bot_id)]
+    active_protocol = store.get_active_game_contract(bot["game_id"])[
+        "protocol_version"
+    ]
+    versions = []
+    for raw_version in store.list_bot_versions(bot_id):
+        version = _with_bot_runnable(raw_version)
+        if raw_version.get("retired_at") is not None:
+            version["runnable"] = False
+            version["unsupported_reason"] = "该版本已退役"
+        elif raw_version.get("protocol_version") != active_protocol:
+            version["runnable"] = False
+            version["unsupported_reason"] = "协议版本与当前游戏规则不兼容"
+        versions.append(version)
     if not is_owner:
         versions = [v for v in versions if v["runnable"]]
         # 公开视图：脱敏（不含 binary_path/runtime_mode 等敏感字段）。
@@ -1234,6 +1254,8 @@ def rollback_bot_version(
             "version_not_found": 404,
             "unsupported_binary": 409,
             "version_unavailable": 409,
+            "version_retired": 409,
+            "protocol_incompatible": 409,
         }.get(e.code, 400)
         raise HTTPException(status, detail={"code": e.code, "message": e.message})
     audit_log(request, "bot_version_rollback", result="ok", user=user.get("username"), target=bot_id, detail=f"v{version}")
@@ -1255,7 +1277,10 @@ async def set_bot_active(
         status = (
             404 if e.code == "not_found"
             else 403 if e.code == "forbidden"
-            else 409 if e.code in {"unsupported_binary", "version_unavailable"}
+            else 409 if e.code in {
+                "unsupported_binary", "version_unavailable",
+                "version_retired", "protocol_incompatible",
+            }
             else 400
         )
         raise HTTPException(status, detail={"code": e.code, "message": e.message})
@@ -3356,7 +3381,8 @@ def admin_delete_user(user_id: int, request: Request, admin=Depends(require_admi
     if not result["deleted"]:
         raise HTTPException(
             409,
-            "用户存在历史或活跃对局/赛事引用，或仍是赛事组织者，不能硬删："
+            "用户存在历史或活跃对局/赛事引用、退役规则版本审计证据，"
+            "或仍是赛事组织者，不能硬删："
             f"{result['blockers']}（请改为停用账号；历史参赛身份必须保留）",
         )
     for bot_id in result["bot_ids"]:
@@ -3539,8 +3565,8 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
     if not result["deleted"]:
         raise HTTPException(
             409,
-            f"bot 存在历史或活跃引用，不能硬删：{refs}"
-            "（对局/赛事；请改用停用 is_active=0，保留公开参赛身份）",
+            f"bot 存在历史或活跃引用、退役规则版本审计证据，不能硬删：{refs}"
+            "（请改用停用 is_active=0，保留公开参赛身份与版本审计）",
         )
     # 硬删 bot 后清理磁盘文件（bot_uploads/<id>/），避免孤儿
     _bots(request).purge_bot_files(bot_id)
@@ -3552,13 +3578,25 @@ def admin_delete_bot(bot_id: int, request: Request, admin=Depends(require_admin)
 def admin_bot_versions(
     bot_id: int, request: Request, _admin=Depends(require_admin)
 ):
-    if not _store(request).get_bot(bot_id):
+    store = _store(request)
+    bot = store.get_bot(bot_id)
+    if not bot:
         raise HTTPException(404, "bot 不存在")
+    active_protocol = store.get_active_game_contract(bot["game_id"])[
+        "protocol_version"
+    ]
+    versions = []
+    for raw_version in store.list_bot_versions(bot_id):
+        version = _with_bot_runnable(raw_version)
+        if raw_version.get("retired_at") is not None:
+            version["runnable"] = False
+            version["unsupported_reason"] = "该版本已退役"
+        elif raw_version.get("protocol_version") != active_protocol:
+            version["runnable"] = False
+            version["unsupported_reason"] = "协议版本与当前游戏规则不兼容"
+        versions.append(version)
     return {
-        "versions": [
-            _with_bot_runnable(version)
-            for version in _store(request).list_bot_versions(bot_id)
-        ]
+        "versions": versions
     }
 
 
@@ -4376,7 +4414,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
     {"slug": "local-ai", "file": "LOCAL_AI.md", "title": "本地 Bot 接入", "summary": "在自己的电脑运行 Bot，由平台负责裁判、回放与技术判定"},
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
-    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "15×15 规则、协议与 C/Python 示例"},
+    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "指定开局、交换、五手 N 打、禁手与 v2 示例"},
     {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},
     {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/数值评分/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
 ]

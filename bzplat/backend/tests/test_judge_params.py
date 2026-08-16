@@ -15,6 +15,7 @@ from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 from bzplat.backend.store import Store
+from bzplat.backend.tests._gomoku_v2 import standard_response
 
 
 @pytest.fixture()
@@ -93,7 +94,7 @@ def test_removed_judge_setting_rows_are_not_read_by_orchestrator(store):
 # ── run_session 用新参数构造 Session ──────────────────────────────
 
 def _run_callables(game_id, **kw):
-    """两个「总下第一空点」的 callable bot 自打自一局。"""
+    """两个遵守现行分阶段协议的 callable bot 自打自一局。"""
     import random
 
     rng = random.Random(0)
@@ -103,27 +104,9 @@ def _run_callables(game_id, **kw):
             return {"response": board_state[player_idx].play(request)}
         return decide
 
-    # gomoku: 每方维护本地棋盘，随机/顺序下空点
     if game_id == "gomoku":
-        class GState:
-            def __init__(self):
-                self.b = [[-1] * 99 for _ in range(99)]
-                self.i = 0
-            def play(self, req):
-                me = int(req.get("me", 0))
-                ox, oy = int(req.get("x", -1)), int(req.get("y", -1))
-                if ox >= 0:
-                    self.b[ox][oy] = 1 - me
-                # 顺序找一个空点
-                x = self.i
-                self.i += 1
-                self.b[x][0] = me
-                return {"x": x, "y": 0}
-        sa, sb = GState(), GState()
-
-        async def decide(player_idx, request):
-            payload = sa.play(request) if player_idx == 0 else sb.play(request)
-            return {"response": payload}
+        async def decide(_player_idx, request):
+            return standard_response(request)
 
         return asyncio.run(run_session(game_id, decide, rng=rng, **kw))
 
@@ -139,7 +122,7 @@ def test_gomoku_board_size_override_is_rejected():
 def test_gomoku_default_board_size():
     """不传 board_size 时用默认 15×15。"""
     result = _run_callables("gomoku")
-    assert result.reason in ("five", "illegal", "draw")
+    assert result.reason == "double_pass"
     assert result.rounds_played <= 15 * 15 + 1
 
 
@@ -248,9 +231,9 @@ def test_public_judges_is_the_only_rules_listing(tmp_path):
     assert app.state.store.get_setting("judge_holdem_bb") is None
 
 
-def test_time_budget_only_pencil():
-    """仅点格棋有 time_budget_per_side（象棋钟）；gomoku/holdem 为 None。"""
+def test_time_budget_is_enabled_for_timed_board_games():
+    """竞赛五子棋与点格棋均为每方累计 900 秒；Holdem 不启用棋钟。"""
     from bzplat.backend.games import registry
     assert registry.get("pencil").time_budget_per_side == 900.0
-    assert registry.get("gomoku").time_budget_per_side is None
+    assert registry.get("gomoku").time_budget_per_side == 900.0
     assert registry.get("holdem").time_budget_per_side is None

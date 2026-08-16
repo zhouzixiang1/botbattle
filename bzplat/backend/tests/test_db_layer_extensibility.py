@@ -28,6 +28,7 @@ def fake_fourth_game(monkeypatch):
     的效果——Store 建库时就会经 _migrate 自动建 matches_reversi。
     """
     real_ids = frozenset({"holdem", "gomoku", "pencil", "reversi"})
+    real_contract = dbmod.game_rule_contract
 
     def _fake_all_ids():
         return real_ids
@@ -38,8 +39,18 @@ def fake_fourth_game(monkeypatch):
             raise ValueError(f"未知 game_id: {game_id!r}")
         return f"matches_{gid}"
 
+    def _fake_game_rule_contract(game_id, *, legacy=False):
+        if game_id == "reversi":
+            return {
+                "ruleset_version": "reversi_test_v1",
+                "protocol_version": "reversi_action_test_v1",
+                "rating_pool_id": "reversi_rating_test_v1",
+            }
+        return real_contract(game_id, legacy=legacy)
+
     monkeypatch.setattr(dbmod, "_all_game_ids", _fake_all_ids)
     monkeypatch.setattr(dbmod, "_matches_table", _fake_matches_table)
+    monkeypatch.setattr(dbmod, "game_rule_contract", _fake_game_rule_contract)
     return real_ids
 
 

@@ -1,14 +1,15 @@
-"""棋类（Gomoku / Pencil）共享的 Botzone 标准行协议工具。
+"""Pencil 使用的 Botzone 标准坐标行协议工具。
 
 棋类协议**完全遵循 [Botzone](https://wiki.botzone.org.cn/index.php?title=Bot) 标准**：
 - 请求经 Botzone 信封包裹（Traditional 完整历史 / LongRunning 单 request），由
   ``games/_botzone_protocol.py`` + ``matches/runner._botzone_decide`` 传输层处理。
-- 请求负载（棋类）：``{x, y, ...}``（gomoku）/ ``{x, y, pass, ...}``（pencil）。
+- 请求负载：``{x, y, pass, ...}``。
 - 响应信封：``{"response": {"x":.., "y":..}}``（Botzone 标准）。
 
 本模块是**平台协议工具**（请求负载 builder + 响应解析），不是游戏规则——共享安全。
-它是棋类同构 JSON 原语的唯一实现，并通过各 GameSpec 的 shared_source_files 随
-公开裁判源码提供；各游戏 protocol.py 只导出本游戏实际使用的 builder。
+它是 Pencil 坐标 JSON 原语的唯一实现，并通过 Pencil GameSpec 的
+``shared_source_files`` 随公开裁判源码提供。Gomoku v2 是分阶段动作协议，拥有
+独立实现，不能复用本模块或退回旧 ``x/y`` 协议。
 """
 from __future__ import annotations
 
@@ -67,14 +68,6 @@ def validate_response_payload(payload: Any) -> Any:
     ):
         raise ValueError("response.x/response.y 必须是整数")
     return {"x": x, "y": y}
-
-
-def build_gomoku_request(*, x: int, y: int, me: int) -> dict[str, Any]:
-    """gomoku 请求负载（信封由传输层包）。Botzone 标准：对手最近一手 {x,y} + 本方座位 me。
-
-    黑方首手：``x=y=-1``（无上一手）。坐标 0-based。
-    """
-    return {"x": x, "y": y, "me": me}
 
 
 def build_pencil_request(

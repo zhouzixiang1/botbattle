@@ -105,6 +105,9 @@ async def _preflight_check(
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="点格棋",
+    ruleset_id="pencil_ccgc_v1",
+    protocol_version="pencil_xy_v1",
+    rating_pool_id="pencil_rating_v1",
     session_factory=_session_factory,
     protocol=_PROTOCOL,
     default_match_params={},  # 点阵边长钉死 DEFAULT_N（6），无对局级可配参数

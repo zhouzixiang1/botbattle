@@ -54,7 +54,8 @@ const EMPTY_SEAT: SeatState = {
 }
 const PLAYER_LABELS: Record<GameId, readonly [string, string]> = {
   holdem: ['玩家 1', '玩家 2'],
-  gomoku: ['黑方', '白方'],
+  // 竞赛五子棋在第三子后允许交换棋色，座位不能提前标成黑/白方。
+  gomoku: ['开局提案方', '交换决策方'],
   pencil: ['红方', '蓝方'],
 }
 const EXECUTION_SESSION_PREFIX = 'bzplat.challenge.execution.'
@@ -81,7 +82,7 @@ function isTerminal(snapshot: ExecutionRequestSnapshot | null): boolean {
  * 合并后的挑战页：单一人/机对局，无模式切换。
  *
  * 两个内部座位仍按 0/1 存储，展示名称按游戏切换：德州玩家 1/2、
- * 五子棋黑/白方、点格棋红/蓝方。第二方可改为「我亲自上场」。
+ * 五子棋开局提案方/交换决策方、点格棋红/蓝方。第二方可改为「我亲自上场」。
  * 提交按第二方类型走 /api/matches/challenge（bot vs bot）或
  * /api/matches/human（human_seat=1 固定）。
  */
@@ -90,7 +91,7 @@ export default function Challenge() {
   const nav = useNavigate()
   const [gameId, setGameId] = useState<GameId>('holdem')
   const playerLabels = PLAYER_LABELS[gameId]
-  // 两个位置内部仍 0 起计以对齐后端；界面按游戏显示玩家/颜色。
+  // 两个位置内部仍 0 起计以对齐后端；五子棋显示角色而不预判交换后的棋色。
   const [seats, setSeats] = useState<[SeatState, SeatState]>([
     { ...EMPTY_SEAT },
     { ...EMPTY_SEAT },

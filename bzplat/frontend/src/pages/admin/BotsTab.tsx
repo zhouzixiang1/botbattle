@@ -236,7 +236,7 @@ export default function BotsTab() {
                                   v{v.version}
                                   {v.runnable === false && (
                                     <span className="mt-0.5 block break-all text-[10px] text-destructive">
-                                      诊断：{v.format}/{v.os}-{v.arch}
+                                      诊断：{v.unsupported_reason || `${v.format}/${v.os}-${v.arch}`}
                                     </span>
                                   )}
                                 </TableCell>

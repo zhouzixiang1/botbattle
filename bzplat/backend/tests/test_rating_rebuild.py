@@ -183,7 +183,7 @@ def test_hard_delete_rejects_completed_unsettled_rated_lifecycle(tmp_path):
     assert result == {
         "found": True,
         "deleted": False,
-        "references": {"matches": 1, "pairings": 0},
+        "references": {"matches": 1, "pairings": 0, "audit_versions": 0},
     }
     assert store.get_bot(bot_a["id"]) is not None
     assert store.is_match_rating_settled("delete-unsettled-match") is False

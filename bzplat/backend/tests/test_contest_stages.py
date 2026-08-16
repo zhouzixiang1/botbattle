@@ -332,7 +332,7 @@ def test_contest_create_does_not_expose_rule_config_columns(store: Store):
     c = mgr.create(users[0]["id"], "t", template_id="holdem_swiss_ko")
     assert "hands_per_match" not in c
     assert "match_config_json" not in c
-    c2 = mgr.create(users[0]["id"], "t2", template_id="gomoku_group_drr_ko")
+    c2 = mgr.create(users[0]["id"], "t2", template_id="board_rr")
     assert "hands_per_match" not in c2
     assert "match_config_json" not in c2
     c3 = mgr.create(users[0]["id"], "t3", template_id="pencil_swiss_ko")
@@ -535,6 +535,69 @@ def test_single_elimination_generates_final(store: Store):
         assert len(r2) == 1, f"决赛应 1 场，实际 {len(r2)}"
         c2 = store.get_contest(cid)
         assert c2["status"] != "finished", "R1 完成不应直接 finished，应继续决赛"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("draw_reason", ["double_pass", "board_full"])
+def test_single_elimination_draw_blocks_without_finishing_or_losing_winners(
+    store: Store, draw_reason: str
+):
+    """8 人 KO 首轮任一合法和棋都须显式阻塞，不得提前完赛。"""
+    users, bots = _mk_bots(store, 8, game_id="gomoku")
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+    cid = manager.create(
+        users[0]["id"],
+        f"ko-draw-{draw_reason}",
+        game_id="gomoku",
+        stages=[
+            {
+                "key": "ko",
+                "type": "single_elimination",
+                "scoring": "ccgc_2_1_0",
+                "rest_after_minutes": 0,
+            }
+        ],
+    )["id"]
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(cid, user["id"], bot["id"])
+    store.update_contest(cid, status="running", current_stage_idx=0)
+
+    async def run():
+        await manager._begin_stage(cid, 0)
+        first_round = store.list_contest_pairings(cid, stage_idx=0)
+        assert len(first_round) == 4
+        decisive_winners: set[int] = set()
+        for index, pairing in enumerate(first_round):
+            match_id = pairing["match_id"]
+            assert match_id
+            winner = None if index == 0 else 0
+            if winner == 0:
+                decisive_winners.add(pairing["bot_a_id"])
+            store.update_match(
+                match_id,
+                status=STATUS_COMPLETED,
+                winner=winner,
+                reason=draw_reason if winner is None else "five",
+                result={"deltas": [0, 0] if winner is None else [1, -1]},
+            )
+            store.update_contest_pairing(pairing["id"], status="completed")
+
+        await manager.maybe_finish(cid)
+
+        contest = store.get_contest(cid)
+        assert contest["status"] == "running"
+        assert contest["current_stage_idx"] == 0
+        persisted = store.list_contest_pairings(cid, stage_idx=0)
+        assert len(persisted) == 4
+        assert {pairing["round_num"] for pairing in persisted} == {1}
+        assert store.list_stage_results(cid, stage_idx=0) == []
+        surviving_winners = {
+            pairing["bot_a_id"]
+            for pairing in persisted
+            if store.get_match(pairing["match_id"])["winner"] == 0
+        }
+        assert surviving_winners == decisive_winners
 
     asyncio.run(run())
 

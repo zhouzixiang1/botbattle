@@ -21,6 +21,7 @@ export type ExpectedBrowserIssue =
       status: number
       pathname: string
       search?: string
+      optional?: boolean
     }
   | {
       kind: 'requestfailed'
@@ -28,6 +29,7 @@ export type ExpectedBrowserIssue =
       pathname: string
       search?: string
       errorText: string
+      optional?: boolean
     }
 
 export interface BrowserMonitor {
@@ -188,7 +190,9 @@ export function monitorBrowser(page: Page): BrowserMonitor {
       const missing: ExpectedBrowserIssue[] = []
       for (const allowed of expected) {
         const index = unmatched.findIndex((issue) => matchesExpected(issue, allowed))
-        if (index === -1) missing.push(allowed)
+        if (index === -1) {
+          if (!allowed.optional) missing.push(allowed)
+        }
         else unmatched.splice(index, 1)
       }
       const evidence = [

@@ -101,20 +101,23 @@ def test_normalize_requires_registered_explicit_game():
 
 # ── run_session 经注册表分发 ──────────────────────────────────
 def test_run_session_gomoku_via_registry():
-    """registry.run_session('gomoku') 实际跑五子棋引擎（黑连五胜）。"""
-    black_moves = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
-    white_moves = [(1, 0), (1, 1), (1, 2), (1, 3)]
-    bi = wi = 0
+    """registry.run_session('gomoku') 实际跑竞赛规则状态机。"""
+    normal = {0: iter([(10, 10), (11, 11)]), 1: iter([(0, 0), (0, 1)])}
 
     async def decide(player, req):
-        nonlocal bi, wi
-        if player == 0:
-            x, y = black_moves[bi]
-            bi += 1
-            return {"response": {"x": x, "y": y}}
-        x, y = white_moves[wi]
-        wi += 1
-        return {"response": {"x": x, "y": y}}
+        phase = req["phase"]
+        if phase == "opening_proposal":
+            return {"response": {"action": "opening", "white2": {"x": 7, "y": 8}, "black3": {"x": 8, "y": 8}, "n": 2}}
+        if phase == "swap_choice":
+            return {"response": {"action": "swap", "swap": False}}
+        if phase == "white4":
+            return {"response": {"action": "move", "x": 6, "y": 8}}
+        if phase == "black5_candidates":
+            return {"response": {"action": "black5_candidates", "points": [{"x": 9, "y": 9}, {"x": 5, "y": 5}]}}
+        if phase == "black5_select":
+            return {"response": {"action": "black5_select", "index": 0}}
+        x, y = next(normal[player])
+        return {"response": {"action": "move", "x": x, "y": y}}
 
     result = asyncio.run(run_session("gomoku", decide))
     assert result.winner == 0
@@ -133,12 +136,12 @@ def test_run_session_unknown_raises():
 def test_protocol_fail_response_per_game():
     # holdem：Botzone 裸整数 -1（fold）；棋类：非法坐标 {-99,-99}。
     assert fail_response("holdem") == -1
-    assert fail_response("gomoku") == {"x": -99, "y": -99}
+    assert fail_response("gomoku") == {"action": "move", "x": -99, "y": -99}
     assert fail_response("pencil") == {"x": -99, "y": -99}
 
 
 def test_protocol_dumps_loads_roundtrip():
-    response = {"response": {"x": 5, "y": 6}}
+    response = {"response": {"action": "move", "x": 5, "y": 6}}
     line = json.dumps(response)
     back = loads("gomoku", line)
     assert back == response
@@ -203,13 +206,12 @@ def test_judge_games_derived():
     # 公开源码清单必须包含真正的纯规则实现；engine.py 只是平台适配层。
     # 由 GameSpec 按 game_id 派生可避免新增游戏时忘记公开权威规则文件。
     for game in games:
-        assert game["source_files"] == [
-            f'{game["game_id"]}_judge.py',
-            "engine.py",
-            "protocol.py",
-            "result.py",
-        ]
-        expected_shared = [] if game["game_id"] == "holdem" else ["_board_protocol.py"]
+        assert f'{game["game_id"]}_judge.py' in game["source_files"]
+        assert {"engine.py", "protocol.py", "result.py"}.issubset(game["source_files"])
+        assert game["ruleset_id"]
+        assert game["protocol_version"]
+        assert game["rating_pool_id"]
+        expected_shared = ["_board_protocol.py"] if game["game_id"] == "pencil" else []
         assert game["shared_source_files"] == expected_shared
         assert "params" not in game
 

@@ -27,6 +27,15 @@ const TURN_CLOSING_EVENTS = new Set([
   'move',
   'action',
   'pass',
+  'opening',
+  'swap',
+  'black5_candidates',
+  'black5_selected',
+  'time_used',
+  'time_out',
+  'illegal',
+  'forbidden',
+  'technical_incident',
   'settle',
   'match_end',
   'error',
@@ -61,10 +70,35 @@ function humanTurnCursor(events: Ev[], humanSeat: number): { ordinal: number; pe
 const HUMAN_TIMEOUT_SEC = 120
 const HUMAN_EVENT_CONTEXT_SIZE = 7
 
+function cumulativeClockRemaining(events: Ev[], seat: number): number | null {
+  let remaining: number | null = null
+  for (const event of events) {
+    if (event.type === 'match_start') {
+      const budget = Number(event.time_budget_per_side)
+      if (Number.isFinite(budget) && budget >= 0) remaining = budget
+    } else if (event.type === 'time_used' && Number(event.seat) === seat) {
+      const value = Number(event.remaining)
+      if (Number.isFinite(value) && value >= 0) remaining = value
+    } else if (event.type === 'time_out' && Number(event.seat) === seat) {
+      remaining = 0
+    }
+  }
+  return remaining
+}
+
+function humanTurnDeadline(events: Ev[], seat: number): number {
+  const cumulative = cumulativeClockRemaining(events, seat)
+  const allowed = cumulative === null
+    ? HUMAN_TIMEOUT_SEC
+    : Math.min(HUMAN_TIMEOUT_SEC, Math.max(0, cumulative))
+  return Date.now() + allowed * 1000
+}
+
 export default function HumanPlay() {
   const { id } = useParams<{ id: string }>()
   const [match, setMatch] = useState<MatchSeatRow | null>(null)
   const [events, setEvents] = useState<Ev[]>([])
+  const eventsRef = useRef<Ev[]>([])
   const [over, setOver] = useState(false)
   const [error, setError] = useState('')
   const [endInfo, setEndInfo] = useState<{ winner?: number | null; reason?: string } | null>(null)
@@ -86,6 +120,7 @@ export default function HumanPlay() {
     // Hash 参数切换时先丢弃旧局 UI；不能让同游戏、同事件数的旧 canvas 继续可点。
     setMatch(null)
     setEvents([])
+    eventsRef.current = []
     setOver(false)
     setError('')
     setEndInfo(null)
@@ -125,6 +160,7 @@ export default function HumanPlay() {
             turnOrdinalRef.current = cursor.ordinal
             setMatch(snapshotMatch)
             setEvents(history)
+            eventsRef.current = history
             setReconnecting(false)
             if (terminal || terminalStatus) {
               actionSubmittedRef.current = true
@@ -152,6 +188,7 @@ export default function HumanPlay() {
                 actionSubmittedRef.current = false
                 setActionSubmitted(false)
                 setError('')
+                setTurnDeadline(humanTurnDeadline(history, snapshotHumanSeat))
               } else if (!cursor.pending) {
                 // No action is currently legal. Preserve the submitted lock; the
                 // next live `your_turn` is the only normal path that unlocks it.
@@ -161,7 +198,9 @@ export default function HumanPlay() {
           } else if (ev.type === 'match_end' || ev.type === 'error') {
             actionSubmittedRef.current = true
             setActionSubmitted(true)
-            setEvents((prev) => [...prev, ev])
+            const nextEvents = [...eventsRef.current, ev]
+            eventsRef.current = nextEvents
+            setEvents(nextEvents)
             setOver(true)
             overRef.current = true
             setTurnDeadline(null)
@@ -188,7 +227,9 @@ export default function HumanPlay() {
             // 终态后不再需要双向通道；主动关闭令后端 receive_json 退出并 unsubscribe。
             ws.close(1000, 'match complete')
           } else {
-            setEvents((prev) => [...prev, ev])
+            const nextEvents = [...eventsRef.current, ev]
+            eventsRef.current = nextEvents
+            setEvents(nextEvents)
             setReconnecting(false)
             if (ev.type === 'your_turn') {
               turnOrdinalRef.current += 1
@@ -196,7 +237,7 @@ export default function HumanPlay() {
               actionSubmittedRef.current = false
               setActionSubmitted(false)
               setError('')
-              setTurnDeadline(Date.now() + HUMAN_TIMEOUT_SEC * 1000)
+              setTurnDeadline(humanTurnDeadline(nextEvents, Number(ev.player)))
             } else if (ev.type === 'reject') {
               // The backend explicitly did not consume this frame, so this same
               // turn may be retried. Do not unlock for ordinary action/move events.
@@ -306,6 +347,7 @@ export default function HumanPlay() {
   )
   const endSummary = endVm ? gameSpec?.humanPlay.endSummary?.(endVm) : null
   const ActionPanel = gameSpec?.humanPlay.ActionPanel
+  const TurnSurface = gameSpec?.humanPlay.TurnSurface
   const ReplayHud = gameSpec?.replay.Hud
   const viewportFitCanvas = gameSpec?.canvasFit === 'viewport'
   const viewportDashboard = viewportFitCanvas && Boolean(ReplayHud)
@@ -326,10 +368,11 @@ export default function HumanPlay() {
     : over && (match?.winner === 0 || match?.winner === 1)
       ? match.winner
       : null
+  const seatDetail = (seat: number) => (
+    gameSpec?.seatDetail?.(currentVm, seat) ?? gameSpec?.seatColors?.[seat]
+  )
   const myPosition = match
-    ? gameSpec?.seatColors?.[humanSeat]
-      ? `${humanSeat === 0 ? '先手' : '后手'} · ${gameSpec.seatColors[humanSeat]} · 座位 ${humanSeat + 1}`
-      : `真人 · 座位 ${humanSeat + 1}`
+    ? `真人 · 座位 ${humanSeat + 1}${seatDetail(humanSeat) ? ` · ${seatDetail(humanSeat)}` : ''}`
     : '正在确认你的位置'
 
   // useEffect 在提交后清状态；这一同步 guard 还会挡住路由切换后的首个 render。
@@ -375,7 +418,7 @@ export default function HumanPlay() {
               side={0}
               variant="panel"
               state={winnerSeat === 0 ? 'winner' : winnerSeat === 1 ? 'loser' : 'neutral'}
-              seatDetail={gameSpec?.seatColors?.[0]}
+              seatDetail={seatDetail(0)}
               className="order-1 border border-border bg-muted/20"
             />
             <div className="order-3 col-span-2 min-w-0 border-t border-border pt-3 text-center sm:order-2 sm:col-span-1 sm:border-x sm:border-t-0 sm:px-4 sm:py-1">
@@ -392,7 +435,7 @@ export default function HumanPlay() {
               side={1}
               variant="panel"
               state={winnerSeat === 1 ? 'winner' : winnerSeat === 0 ? 'loser' : 'neutral'}
-              seatDetail={gameSpec?.seatColors?.[1]}
+              seatDetail={seatDetail(1)}
               className="order-2 border border-border bg-muted/20 sm:order-3"
             />
           </CardContent>
@@ -471,24 +514,49 @@ export default function HumanPlay() {
             </div>
           )}
           <div className={`space-y-3 ${viewportFitCanvas ? 'w-full justify-self-center md:max-w-[min(52rem,calc(100dvh-6rem))] xl:max-w-[min(52rem,calc(100dvh-16rem))]' : ''} ${viewportDashboard ? 'md:col-start-2 md:row-start-1 xl:col-start-1 xl:row-start-2 2xl:col-start-2 2xl:row-start-1' : ''}`}>
-            <MatchBoard
-              gameId={gameSpec.id}
-              events={events}
-              seats={seats}
-              revealMode={gameSpec.humanPlay.revealMode}
-              onMove={(x, y) => {
-                const action = gameSpec.humanPlay.serializeBoardPick?.(x, y)
-                if (action) sendMove(action)
-              }}
-              interactive={boardInteractive}
-            />
-            {ActionPanel && (
-              <ActionPanel
+            {TurnSurface ? (
+              <TurnSurface
+                gameId={gameSpec.id}
+                events={events as RawEvent[]}
+                seats={seats}
+                revealMode={gameSpec.humanPlay.revealMode}
                 disabled={!canSubmitAction || over}
                 legal={canSubmitAction}
                 request={turnRequest}
                 onSubmit={sendMove}
+                renderBoard={({ events: surfaceEvents, onMove, interactive }) => (
+                  <MatchBoard
+                    gameId={gameSpec.id}
+                    events={(surfaceEvents ?? events) as Ev[]}
+                    seats={seats}
+                    revealMode={gameSpec.humanPlay.revealMode}
+                    onMove={onMove}
+                    interactive={interactive}
+                  />
+                )}
               />
+            ) : (
+              <>
+                <MatchBoard
+                  gameId={gameSpec.id}
+                  events={events}
+                  seats={seats}
+                  revealMode={gameSpec.humanPlay.revealMode}
+                  onMove={(x, y) => {
+                    const action = gameSpec.humanPlay.serializeBoardPick?.(x, y)
+                    if (action) sendMove(action)
+                  }}
+                  interactive={boardInteractive}
+                />
+                {ActionPanel && (
+                  <ActionPanel
+                    disabled={!canSubmitAction || over}
+                    legal={canSubmitAction}
+                    request={turnRequest}
+                    onSubmit={sendMove}
+                  />
+                )}
+              </>
             )}
           </div>
           <div className={viewportDashboard ? 'min-w-0 md:col-span-2 md:col-start-1 md:row-start-2 xl:sticky xl:top-[var(--sticky-table-offset)] xl:col-span-1 xl:col-start-2 xl:row-span-2 xl:row-start-1 2xl:col-start-3 2xl:row-span-1 2xl:row-start-1' : 'min-w-0'}>
@@ -507,19 +575,44 @@ export default function HumanPlay() {
             </div>
           )}
           <div className={`min-w-0 space-y-3 ${ReplayHud ? 'xl:col-start-1 xl:row-start-2 3xl:col-start-2 3xl:row-start-1' : ''}`}>
-            <MatchBoard
-              gameId={gameSpec.id}
-              events={events}
-              seats={seats}
-              revealMode={gameSpec.humanPlay.revealMode}
-            />
-            {ActionPanel && (
-              <ActionPanel
+            {TurnSurface ? (
+              <TurnSurface
+                gameId={gameSpec.id}
+                events={events as RawEvent[]}
+                seats={seats}
+                revealMode={gameSpec.humanPlay.revealMode}
                 disabled={!canSubmitAction || over}
                 legal={canSubmitAction}
                 request={turnRequest}
                 onSubmit={sendMove}
+                renderBoard={({ events: surfaceEvents, onMove, interactive }) => (
+                  <MatchBoard
+                    gameId={gameSpec.id}
+                    events={(surfaceEvents ?? events) as Ev[]}
+                    seats={seats}
+                    revealMode={gameSpec.humanPlay.revealMode}
+                    onMove={onMove}
+                    interactive={interactive}
+                  />
+                )}
               />
+            ) : (
+              <>
+                <MatchBoard
+                  gameId={gameSpec.id}
+                  events={events}
+                  seats={seats}
+                  revealMode={gameSpec.humanPlay.revealMode}
+                />
+                {ActionPanel && (
+                  <ActionPanel
+                    disabled={!canSubmitAction || over}
+                    legal={canSubmitAction}
+                    request={turnRequest}
+                    onSubmit={sendMove}
+                  />
+                )}
+              </>
             )}
           </div>
           <div className={`min-w-0 xl:sticky xl:top-[var(--sticky-table-offset)] ${ReplayHud

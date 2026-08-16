@@ -21,6 +21,7 @@ from bzplat.backend.runtime.limits import (
     resolve_execution_resource_profile,
 )
 from bzplat.backend.runtime.local_ai import LocalAIHub, LocalAITechnicalError
+from bzplat.backend.tests._gomoku_v2 import ILLEGAL_OPENING_LINE
 
 
 class _ProfileTransport:
@@ -84,7 +85,7 @@ class _ProfileTransport:
         assert timeout > 0
         # Canonical transport response, but an illegal game move.  The judge
         # ends immediately, keeping this a focused environment-routing test.
-        return '{"response":{"x":999,"y":999}}'
+        return ILLEGAL_OPENING_LINE
 
     async def read_extra_line(self, _session_id, *, timeout):
         assert timeout > 0
@@ -137,7 +138,7 @@ def test_high_profile_is_applied_to_both_logical_and_one_shot_sessions():
         )
     )
 
-    assert result.reason == "illegal"
+    assert result.reason == "illegal_opening"
     assert transport.prepared == [
         ("/bots/high-a", PLATFORM_HIGH_PROFILE),
         ("/bots/high-b", PLATFORM_HIGH_PROFILE),
@@ -188,7 +189,7 @@ def test_high_profile_is_applied_to_longrunning_sessions():
         )
     )
 
-    assert result.reason == "illegal"
+    assert result.reason == "illegal_opening"
     assert transport.prepared == []
     assert transport.started == [
         ("/bots/high-a", PLATFORM_HIGH_PROFILE),
@@ -244,7 +245,7 @@ def test_human_runner_uses_the_frozen_legacy_low_profile():
         )
     )
 
-    assert result.reason == "illegal"
+    assert result.reason == "illegal_opening"
     assert transport.prepared == [
         (
             "/bots/legacy-low",
@@ -381,7 +382,7 @@ def test_mixed_local_and_low_profile_routes_only_docker_seat_to_transport():
                 request_id=turn.request_id,
                 match_id=turn.match_id,
                 turn=turn.turn,
-                output='{"response":{"x":999,"y":999}}',
+                output=ILLEGAL_OPENING_LINE,
             )
 
         connector_task = asyncio.create_task(connector())
@@ -396,7 +397,7 @@ def test_mixed_local_and_low_profile_routes_only_docker_seat_to_transport():
             match_id="match-mixed",
         )
         await connector_task
-        assert result.reason == "illegal"
+        assert result.reason == "illegal_opening"
         assert transport.prepared == [("/bots/low-b", PLATFORM_LOW_PROFILE)]
         assert transport.started == []
         assert len(transport.stopped) == 1
@@ -420,7 +421,7 @@ def test_two_local_bots_use_referee_without_starting_any_docker_session():
                 request_id=turn.request_id,
                 match_id=turn.match_id,
                 turn=turn.turn,
-                output='{"response":{"x":999,"y":999}}',
+                output=ILLEGAL_OPENING_LINE,
             )
 
         connector_task = asyncio.create_task(first_connector())
@@ -435,7 +436,7 @@ def test_two_local_bots_use_referee_without_starting_any_docker_session():
             match_id="match-local-local",
         )
         await connector_task
-        assert result.reason == "illegal"
+        assert result.reason == "illegal_opening"
         assert transport.prepared == []
         assert transport.started == []
         assert transport.stopped == []

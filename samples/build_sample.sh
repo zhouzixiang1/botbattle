@@ -36,6 +36,6 @@ build "$ROOT/gomoku_showcase/gomoku_showcase_bot.c" \
 
 echo "built:"
 echo "  $OUT_DIR/callbot_linux_amd64 (holdem)"
-echo "  $OUT_DIR/gomokubot_linux_amd64 (gomoku)"
+echo "  $OUT_DIR/gomokubot_linux_amd64 (gomoku competition rules v2)"
 echo "  $OUT_DIR/pencilbot_linux_amd64 (pencil)"
-echo "  $SHOWCASE_OUT_DIR/gomoku_showcase_{tactical,steady,foundation}_linux_amd64 (showcase gomoku)"
+echo "  $SHOWCASE_OUT_DIR/gomoku_showcase_{tactical,steady,foundation}_linux_amd64 (showcase gomoku v2)"

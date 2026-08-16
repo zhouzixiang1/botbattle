@@ -11,6 +11,9 @@ TEMPLATES: list[dict[str, Any]] = [
         "id": "gomoku_group_drr_ko",
         "name": "五子棋：分组双循环 → 单败",
         "game_id": "gomoku",
+        # 历史赛事/演示快照仍需解析名称和冻结阶段；但五子棋允许
+        # 和棋，本模板未声明破和规则，不得继续用于新建赛事。
+        "creation_enabled": False,
         "stages": [
             {
                 "key": "group",
@@ -34,6 +37,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "id": "gomoku_swiss_ko",
         "name": "五子棋：瑞士 → 单败",
         "game_id": "gomoku",
+        "creation_enabled": False,
         "stages": [
             {
                 "key": "swiss",
@@ -55,7 +59,7 @@ TEMPLATES: list[dict[str, Any]] = [
     },
     {
         "id": "board_rr",
-        "name": "棋类：双循环（课堂演示）",
+        "name": "五子棋：双循环",
         "game_id": "gomoku",
         "stages": [
             {

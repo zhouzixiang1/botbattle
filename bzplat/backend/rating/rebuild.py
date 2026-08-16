@@ -219,6 +219,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
         "match_rating_settlements",
         "rating_projection_state",
         "rating_settlement_sequence",
+        "rating_pool_state",
         "execution_jobs",
         "execution_job_attempts",
         "execution_control",
@@ -231,6 +232,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
             "match_rating_policies",
             {
                 "game_id",
+                "rating_pool_id",
                 "bot_a_id",
                 "bot_b_id",
                 "rated",
@@ -256,6 +258,10 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
             },
         ),
         ("rating_settlement_sequence", {"next_order"}),
+        (
+            "rating_pool_state",
+            {"game_id", "active_pool_id", "ruleset_version", "protocol_version"},
+        ),
     ):
         actual = {
             str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
@@ -267,6 +273,15 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
 
 def _load_source(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[str]]:
     issues: list[str] = []
+    active_pools = {
+        str(row["game_id"]): str(row["active_pool_id"])
+        for row in conn.execute(
+            "SELECT game_id,active_pool_id FROM rating_pool_state"
+        )
+    }
+    missing_pool_state = sorted(set(VALID_GAME_IDS) - set(active_pools))
+    if missing_pool_state:
+        issues.append(f"游戏缺 active rating pool: {missing_pool_state}")
     policies = {
         str(row["match_id"]): dict(row)
         for row in conn.execute(
@@ -304,6 +319,10 @@ def _load_source(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[s
         if game_id not in VALID_GAME_IDS:
             issues.append(f"rating policy 游戏非法: {match_id} game={game_id!r}")
             continue
+        pool_id = str(policy.get("rating_pool_id") or "")
+        if not pool_id:
+            issues.append(f"rating policy 缺 rating_pool_id: {match_id}")
+            continue
         table = f"matches_{game_id}"
         match = conn.execute(
             f"SELECT id,status,winner,result,ended_at,created_at,match_type "
@@ -340,22 +359,33 @@ def _load_source(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[s
         ):
             issues.append(f"rated settlement 缺 Bot/结果输入: {match_id}")
             continue
-        source.append(
-            {
-                "settled_order": order,
-                "settled_at": str(settlement["settled_at"]),
-                "match_id": match_id,
-                "game_id": game_id,
-                "bot_a_id": policy.get("bot_a_id"),
-                "bot_b_id": policy.get("bot_b_id"),
-                "rated": rated,
-                "rating_reason": str(policy["rating_reason"]),
-                "winner": int(match["winner"]) if match["winner"] in (0, 1) else None,
-                "delta_a": int(deltas[0]) if rated else 0,
-                "delta_b": int(deltas[1]) if rated else 0,
-                "ended_at": str(match["ended_at"] or match["created_at"] or ""),
-            }
-        )
+        # Keep validating every historical settlement above, but replay only
+        # the active generation.  An archived pool is immutable audit evidence,
+        # never input to the current leaderboard after a ruleset cutover.
+        if pool_id == active_pools.get(game_id):
+            source.append(
+                {
+                    "settled_order": order,
+                    "settled_at": str(settlement["settled_at"]),
+                    "match_id": match_id,
+                    "game_id": game_id,
+                    "rating_pool_id": pool_id,
+                    "bot_a_id": policy.get("bot_a_id"),
+                    "bot_b_id": policy.get("bot_b_id"),
+                    "rated": rated,
+                    "rating_reason": str(policy["rating_reason"]),
+                    "winner": (
+                        int(match["winner"])
+                        if match["winner"] in (0, 1)
+                        else None
+                    ),
+                    "delta_a": int(deltas[0]) if rated else 0,
+                    "delta_b": int(deltas[1]) if rated else 0,
+                    "ended_at": str(
+                        match["ended_at"] or match["created_at"] or ""
+                    ),
+                }
+            )
 
     # A stopped maintenance window must not omit a completed match merely
     # because settlement crashed just before its marker transaction.
@@ -377,6 +407,8 @@ def _load_source(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[s
         rows = conn.execute(
             f"SELECT m.id FROM {table} m "
             "JOIN match_rating_policies p ON p.match_id=m.id "
+            "JOIN rating_pool_state pool ON pool.game_id=p.game_id "
+            "AND pool.active_pool_id=p.rating_pool_id "
             "WHERE m.status=? AND p.rating_reason NOT IN ('contest','human')",
             (STATUS_COMPLETED,),
         ).fetchall()

@@ -27,6 +27,7 @@ from bzplat.backend.tests.execution_helpers import (
     challenge_and_start,
     human_and_start,
 )
+from bzplat.backend.tests._gomoku_v2 import ILLEGAL_OPENING_LINE
 
 
 class _TransportSession:
@@ -233,7 +234,7 @@ def test_first_missing_response_stops_every_game_before_fake_completion(game_id)
 def test_protocol_valid_but_game_illegal_move_stays_with_the_judge():
     events: list[dict] = []
     runner = MatchRunner(
-        _ScriptedTransport('{"response":{"x":999,"y":999}}'),
+        _ScriptedTransport(ILLEGAL_OPENING_LINE),
         action_timeout=0.1,
     )
 
@@ -246,7 +247,7 @@ def test_protocol_valid_but_game_illegal_move_stays_with_the_judge():
         )
     )
 
-    assert result.reason == "illegal"
+    assert result.reason == "illegal_opening"
     assert result.winner == 1
     assert not [event for event in events if event["type"] == "technical_incident"]
 

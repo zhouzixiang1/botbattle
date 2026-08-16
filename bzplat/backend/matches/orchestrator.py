@@ -79,6 +79,17 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _stored_match_contract_is_current(match: dict[str, Any], spec: Any) -> bool:
+    """Require the full persisted ruleset/protocol/rating generation triple."""
+
+    return (
+        str(match.get("ruleset_version") or "") == str(spec.ruleset_id)
+        and str(match.get("protocol_version") or "")
+        == str(spec.protocol_version)
+        and str(match.get("rating_pool_id") or "") == str(spec.rating_pool_id)
+    )
+
+
 def _frozen_execution_profile_version(
     match_config: dict[str, Any],
     environments: tuple[str, ...],
@@ -249,6 +260,10 @@ class BotVersionUnavailableError(ValueError):
         self.seat = seat
 
 
+class BotVersionContractError(ValueError):
+    """A frozen runtime is retired or belongs to another protocol generation."""
+
+
 class MatchOrchestrator:
     def __init__(
         self,
@@ -390,6 +405,9 @@ class MatchOrchestrator:
         self._runtime_for_bot_version(
             bot,
             int(version["id"]) if version is not None else None,
+            expected_protocol=self.store.get_active_game_contract(bot["game_id"])[
+                "protocol_version"
+            ],
         )
         return version
 
@@ -399,6 +417,7 @@ class MatchOrchestrator:
         version_id: int | None,
         *,
         seat: int | None = None,
+        expected_protocol: str | None = None,
     ) -> tuple[str, str]:
         """Resolve exactly one immutable runtime or fail closed.
 
@@ -410,6 +429,9 @@ class MatchOrchestrator:
         """
         bot_id_raw = bot.get("id")
         bot_id = int(bot_id_raw) if bot_id_raw is not None else None
+        protocol = str(expected_protocol or "").strip()
+        if protocol and str(bot.get("protocol_version") or "") != protocol:
+            raise BotVersionContractError("Bot 协议与 Match 冻结协议不一致")
 
         if version_id is None:
             has_version_history = (
@@ -428,6 +450,10 @@ class MatchOrchestrator:
                 raise BotVersionUnavailableError(
                     bot_id=bot_id, version_id=version_id, seat=seat
                 )
+            if version.get("retired_at") is not None:
+                raise BotVersionContractError("Match 引用了已退役 Bot 版本")
+            if protocol and str(version.get("protocol_version") or "") != protocol:
+                raise BotVersionContractError("Bot 版本协议与 Match 冻结协议不一致")
             runtime = version
 
         path = str(runtime.get("binary_path") or "").strip()
@@ -1203,6 +1229,27 @@ class MatchOrchestrator:
             self._safe_flush_terminal_replay(match_id, [], terminal_event)
             self._broadcast(match_id, terminal_event)
             return
+        if not _stored_match_contract_is_current(m, spec):
+            logger.error(
+                "match %s contract is stale for loaded spec %s: "
+                "ruleset=%r protocol=%r pool=%r",
+                match_id,
+                gid,
+                m.get("ruleset_version"),
+                m.get("protocol_version"),
+                m.get("rating_pool_id"),
+            )
+            self._update_match_owned(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_match_config",
+                winner=None,
+                ended_at=_now(),
+            )
+            terminal_event = _authoritative_error("invalid_match_config")
+            self._safe_flush_terminal_replay(match_id, [], terminal_event)
+            self._broadcast(match_id, terminal_event)
+            return
         bot_a = self.store.get_bot(m["bot_a_id"])
         bot_b = self.store.get_bot(m["bot_b_id"])
         # 防护：bot 被删除后（ON DELETE SET NULL → bot_a_id/bot_b_id 为 NULL），
@@ -1404,7 +1451,10 @@ class MatchOrchestrator:
                         raise ValueError("本地 Bot 对局缺少冻结连接身份")
                     return None, DEFAULT_RUNTIME_MODE, public_id
                 path, mode = self._runtime_for_bot_version(
-                    bot, version_id, seat=seat
+                    bot,
+                    version_id,
+                    seat=seat,
+                    expected_protocol=str(m.get("protocol_version") or ""),
                 )
                 return path, mode, None
 
@@ -1511,6 +1561,18 @@ class MatchOrchestrator:
                 match_id, winner, result.rounds_played, ea, eb,
                 bool(m.get("rated")),
             )
+        except BotVersionContractError as exc:
+            logger.error("match %s has invalid frozen Bot contract: %s", match_id, exc)
+            self._update_match_owned(
+                match_id,
+                status=STATUS_ABORTED,
+                reason="invalid_match_config",
+                winner=None,
+                ended_at=_now(),
+            )
+            terminal_event = _authoritative_error("invalid_match_config")
+            self._safe_flush_terminal_replay(match_id, events, terminal_event)
+            self._broadcast(match_id, terminal_event)
         except BotVersionUnavailableError as exc:
             self._abort_version_unavailable(match_id, exc, events)
         except BotTechnicalError as exc:
@@ -1995,7 +2057,8 @@ class MatchOrchestrator:
             bot = self.store.get_bot(bot_id)
             try:
                 gid = normalize_game_id(m.get("game_id"))
-            except ValueError as exc:
+                spec = game_registry.get(gid)
+            except (KeyError, ValueError) as exc:
                 logger.error("human match %s has invalid stored game_id: %s", match_id, exc)
                 self.store.update_match(
                     match_id,
@@ -2005,6 +2068,23 @@ class MatchOrchestrator:
                     ended_at=_now(),
                 )
                 terminal_event = _authoritative_error("invalid_game_id")
+                self._safe_flush_terminal_replay(match_id, [], terminal_event)
+                self._broadcast(match_id, terminal_event)
+                return
+            if not _stored_match_contract_is_current(m, spec):
+                logger.error(
+                    "human match %s contract is stale for loaded spec %s",
+                    match_id,
+                    gid,
+                )
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_ABORTED,
+                    reason="invalid_match_config",
+                    winner=None,
+                    ended_at=_now(),
+                )
+                terminal_event = _authoritative_error("invalid_match_config")
                 self._safe_flush_terminal_replay(match_id, [], terminal_event)
                 self._broadcast(match_id, terminal_event)
                 return
@@ -2062,8 +2142,28 @@ class MatchOrchestrator:
             self._active_replay_events[match_id] = events
             try:
                 bot_path, bot_mode = self._runtime_for_bot_version(
-                    bot, version_id, seat=bot_seat
+                    bot,
+                    version_id,
+                    seat=bot_seat,
+                    expected_protocol=str(m.get("protocol_version") or ""),
                 )
+            except BotVersionContractError as exc:
+                logger.error(
+                    "human match %s has invalid frozen Bot contract: %s",
+                    match_id,
+                    exc,
+                )
+                self.store.update_match(
+                    match_id,
+                    status=STATUS_ABORTED,
+                    reason="invalid_match_config",
+                    winner=None,
+                    ended_at=_now(),
+                )
+                terminal_event = _authoritative_error("invalid_match_config")
+                self._safe_flush_terminal_replay(match_id, events, terminal_event)
+                self._broadcast(match_id, terminal_event)
+                return
             except BotVersionUnavailableError as exc:
                 self._abort_version_unavailable(match_id, exc, events)
                 return
@@ -2120,7 +2220,6 @@ class MatchOrchestrator:
                     self._human_turns.pop((match_id, player_idx), None)
 
             try:
-                spec = game_registry.get(gid)
                 result = await self.runner.run_bot_vs_human(
                     bot_path,
                     bot_seat=bot_seat,

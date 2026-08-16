@@ -116,7 +116,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 
 | 类别 | 需求 | 指标 / 实现 |
 |------|------|------------|
-| **性能** | 单场对局低延迟 | holdem/gomoku Bot 单步决策固定超时 60s；Pencil 每方累计 900s（固定，含人类局）；沙箱镜像准备不计入 Bot 决策时间；全来源共享唯一对局槽 |
+| **性能** | 单场对局低延迟 | holdem Bot 单步决策固定超时 60s；Gomoku/Pencil 每方累计 900s（固定，含人类局）；沙箱镜像准备不计入 Bot 决策时间；全来源共享唯一对局槽 |
 | **性能** | 前端首屏快 | React.lazy 代码分割，主包 gzip ~115KB；recharts 等重依赖隔离到 BotDetail chunk |
 | **安全** | Bot 沙箱隔离 | Docker 共用 `--network=none --read-only --cap-drop=ALL --user 65534` 等硬化；日常节能与上传预检每 Bot 1 CPU/512 MiB，锦标赛每 Bot 2 CPU/2 GiB；本地 Bot 由用户电脑主动连接且不占平台沙箱，所有持久任务按冻结版本解析，不允许任意资源组合或降档 |
 | **安全** | 接口限流 | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s 等），可 `BZ_RATE_LIMIT` 开关 |

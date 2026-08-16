@@ -58,14 +58,16 @@ def _insert_legacy_template(
 def test_builtin_templates_come_from_code_registry(store: Store):
     tpls = list_templates()
     ids = {t["id"] for t in tpls}
-    assert {"holdem_swiss_ko", "gomoku_group_drr_ko", "pencil_swiss_ko"}.issubset(ids)
+    assert {"holdem_swiss_ko", "board_rr", "pencil_swiss_ko"}.issubset(ids)
+    assert "gomoku_group_drr_ko" not in ids
+    assert get_template("gomoku_group_drr_ko")["creation_enabled"] is False
     assert store.list_contest_templates() == []
 
 
 def test_code_template_list_filters_by_game():
     gomoku = list_templates(game_id="gomoku")
     assert all(t["game_id"] == "gomoku" for t in gomoku)
-    assert any(t["id"] == "gomoku_group_drr_ko" for t in gomoku)
+    assert {t["id"] for t in gomoku} == {"board_rr"}
 
 
 # ── 校验 ───────────────────────────────────────────────────────
@@ -274,9 +276,21 @@ def test_create_rejects_template_game_mismatch(store: Store):
     assert store.list_contests() == []
 
 
-def test_resolve_stages_uses_code_templates():
-    tid, gid, stages = resolve_stages("gomoku_swiss_ko")
-    assert gid == "gomoku" and len(stages) >= 1
+def test_disabled_gomoku_template_cannot_be_used_for_new_contest(store: Store):
+    with pytest.raises(ValueError, match="已停用新建"):
+        resolve_stages("gomoku_swiss_ko")
+
+    manager = ContestManager(store, object())  # create 不消费 orchestrator
+    with pytest.raises(ValueError, match="已停用新建"):
+        manager.create(1, "停用模板", template_id="gomoku_swiss_ko")
+    with pytest.raises(ValueError, match="已停用新建"):
+        manager.create(
+            1,
+            "自定义阶段也不能伪装停用模板",
+            template_id="gomoku_swiss_ko",
+            game_id="gomoku",
+            stages=[{"key": "rr", "type": "round_robin"}],
+        )
 
 
 # ── 历史表内容不进入公开/运行模板集合 ───────────────────────────

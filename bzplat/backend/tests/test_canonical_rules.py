@@ -164,6 +164,39 @@ def test_admin_has_no_contest_template_editor_api(tmp_path):
     templates = public.json()["templates"]
     assert templates and all("match_config" not in row for row in templates)
     assert all(row["source"] == "code" for row in templates)
+    public_ids = {row["id"] for row in templates}
+    assert "board_rr" in public_ids
+    assert "gomoku_group_drr_ko" not in public_ids
+    assert "gomoku_swiss_ko" not in public_ids
+    gomoku_templates = client.get(
+        "/api/contests/templates", params={"game": "gomoku"}
+    )
+    assert gomoku_templates.status_code == 200
+    assert {
+        row["id"] for row in gomoku_templates.json()["templates"]
+    } == {"board_rr"}
+    for payload in (
+        {
+            "title": "停用五子棋模板",
+            "template_id": "gomoku_group_drr_ko",
+            "game_id": "gomoku",
+        },
+        {
+            "title": "自定义阶段不得伪装停用模板",
+            "template_id": "gomoku_swiss_ko",
+            "game_id": "gomoku",
+            "stages": [
+                {
+                    "key": "rr",
+                    "type": "round_robin",
+                    "scoring": "ccgc_2_1_0",
+                }
+            ],
+        },
+    ):
+        rejected = client.post("/api/contests", json=payload)
+        assert rejected.status_code == 400
+        assert "已停用新建" in rejected.json()["detail"]
     contests = client.get("/api/admin/contests").json()["contests"]
     assert contests and all("hands_per_match" not in row for row in contests)
     assert all("match_config_json" not in row for row in contests)

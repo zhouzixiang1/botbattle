@@ -42,8 +42,9 @@ def _assert_fragments(sql: str, *fragments: str) -> None:
 def _assert_rating_trigger_contract(triggers: dict[str, str]) -> None:
     global_contracts = {
         "trg_match_rating_policy_source_immutable": (
-            "BEFORE UPDATE OF match_id,game_id,bot_a_id,bot_b_id,rated,"
-            "rating_reason,source,classified_at ON match_rating_policies",
+            "BEFORE UPDATE OF match_id,game_id,rating_pool_id,bot_a_id,"
+            "bot_b_id,rated,rating_reason,source,classified_at "
+            "ON match_rating_policies",
             "rating policy source immutable",
         ),
         "trg_match_rating_policy_settled_delete": (

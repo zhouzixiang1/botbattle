@@ -197,7 +197,7 @@ def test_player_wiki_explains_contest_formats_as_player_flows() -> None:
 
     game_docs = {
         "wiki/TEXAS.md": ("瑞士 → 单败", "复式单循环", "Top 8 双循环决赛"),
-        "wiki/GOMOKU.md": ("分组双循环 → 单败", "瑞士 → 单败", "课堂双循环"),
+        "wiki/GOMOKU.md": ("分组双循环 → 单败", "瑞士 → 单败", "五子棋双循环"),
         "wiki/PENCIL.md": ("分组双循环 → 单败", "瑞士 → 单败", "900 秒累计棋钟"),
     }
     for relative, required_phrases in game_docs.items():

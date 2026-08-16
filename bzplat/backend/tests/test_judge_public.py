@@ -35,14 +35,17 @@ def test_public_judges_list_no_auth(tmp_path):
         assert g["summary"]
         # 权威纯规则 + 平台适配层/协议/结果契约均公开，其他包文件不泄露。
         assert isinstance(g["source_files"], list)
-        assert set(g["source_files"]) == {
+        expected_source_files = {
             f'{g["game_id"]}_judge.py',
             "engine.py",
             "protocol.py",
             "result.py",
         }
+        if g["game_id"] == "gomoku":
+            expected_source_files.add("forbidden.py")
+        assert set(g["source_files"]) == expected_source_files
         assert g["shared_source_files"] == (
-            [] if g["game_id"] == "holdem" else ["_board_protocol.py"]
+            ["_board_protocol.py"] if g["game_id"] == "pencil" else []
         )
         # 公开端点不返回可调参数当前值（那是 admin 能力）
         assert "params" not in g
@@ -91,22 +94,29 @@ def test_public_judges_gomoku_pencil(tmp_path):
     app = _app(tmp_path)
     client = TestClient(app)
     expected = {
-        "gomoku": ("五子棋", ("def check_win", "def is_legal_move")),
-        "pencil": ("点格棋", ("class PencilBoard", "def do_action")),
+        "gomoku": (
+            "五子棋",
+            ("def check_win", "def is_legal_move"),
+            {"gomoku_judge.py", "forbidden.py", "engine.py", "protocol.py", "result.py"},
+        ),
+        "pencil": (
+            "点格棋",
+            ("class PencilBoard", "def do_action"),
+            {"pencil_judge.py", "engine.py", "protocol.py", "result.py", "_board_protocol.py"},
+        ),
     }
-    for gid, (label, markers) in expected.items():
+    for gid, (label, markers, expected_files) in expected.items():
         resp = client.get(f"/api/judges/{gid}/source")
         assert resp.status_code == 200
         data = resp.json()
         assert data["game_id"] == gid
         assert data["label"] == label
         files = {f["name"]: f for f in data["files"]}
-        assert set(files) == {
-            f"{gid}_judge.py", "engine.py", "protocol.py", "result.py",
-            "_board_protocol.py",
-        }
+        assert set(files) == expected_files
         judge = files[f"{gid}_judge.py"]
         assert all(marker in judge["source"] for marker in markers)
+        if gid == "gomoku":
+            assert "def classify_black_move" in files["forbidden.py"]["source"]
         for name, item in files.items():
             expected_path = (
                 "backend/games/_board_protocol.py"

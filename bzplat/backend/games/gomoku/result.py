@@ -13,7 +13,7 @@ class RoundResult:
     """单局结果（通用契约：winners + deltas）。"""
 
     winners: list[int]  # 座位号；空表示平局
-    deltas: list[int]  # 长 2，零和（胜方 +1/-2、负方反之、平局 0）
+    deltas: list[int]  # 长 2，零和（胜方 +1、负方 -1、平局 0）
 
 
 @dataclass
@@ -24,7 +24,8 @@ class MatchResult:
     rounds: list[RoundResult] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     winner: int | None = None
-    reason: str = "draw"  # five | draw | illegal | error
+    # five / double_pass / board_full / forbidden_* / illegal_* / crash / error
+    reason: str = "draw"
     scores: list[int] = field(default_factory=lambda: [0, 0])
     moves: int = 0
     board_grid: list[list[int]] = field(default_factory=list)

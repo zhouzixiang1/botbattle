@@ -453,7 +453,11 @@ def test_lazy_next_round_batch_failure_rolls_back_and_retry_is_unique(
 
     with store._tx() as connection:
         connection.execute("DROP TRIGGER fail_second_lazy_round_pairing")
-    assert asyncio.run(advance_once()) is True
+    advanced = asyncio.run(advance_once())
+    if stage["type"] == "swiss":
+        assert advanced is True
+    else:
+        assert advanced == "created"
     next_round = [
         pairing for pairing in store.list_contest_pairings(contest_id, stage_idx=0)
         if pairing["round_num"] == 2
