@@ -54,8 +54,8 @@ ARM64 ELF 和原始 `.py` 都不属于可运行格式。跨系统构建见
 {"response":<本游戏的响应 payload>}
 ```
 
-`response` 的值由游戏决定：Holdem 是整数动作码；Gomoku / Pencil 是含 `x`、`y`
-整数坐标的对象。整个响应不能直接输出整数或坐标对象。真正参与请求历史重放、裁判与
+`response` 的值由游戏决定：Holdem 是整数动作码；Pencil 是 `x/y` 坐标；Gomoku v2
+是带 `action` 的分阶段动作对象。整个响应不能直接输出整数或坐标对象。真正参与请求历史重放、裁判与
 结果的始终只有 `response`。正式 Bot 对战还可附带一个可选顶层 `debug` sidecar；除
 `response` / `debug` 外的顶层字段全部忽略。
 
@@ -137,24 +137,52 @@ card = (点数 - 2) * 4 + 花色
 花色 = card % 4：0=红心，1=方块，2=黑桃，3=梅花
 ```
 
-## 4. Gomoku payload
+## 4. Gomoku v2 payload
 
-棋盘固定 **15×15**，坐标从 0 开始，黑方座位 0 先手。
-
-请求 payload：
-
-```json
-{"x":7,"y":7,"me":1}
-```
-
-- `x`,`y` 是对手最近一手；黑方首回合为 `-1,-1`。
-- `me` 是本方座位，`0` 黑、`1` 白。
-
-响应必须完整包在信封中：
+Gomoku 固定使用 `ruleset="gomoku_ccgc_2013_v1"`、`protocol_version=2`。请求是
+自包含快照，公共字段如下：
 
 ```json
-{"response":{"x":7,"y":8}}
+{
+  "protocol_version":2,
+  "ruleset":"gomoku_ccgc_2013_v1",
+  "phase":"normal_play",
+  "me":1,
+  "color":0,
+  "seat_colors":[1,0],
+  "board":[[-1,0,1]],
+  "pass_allowed":true,
+  "last":{"x":7,"y":8,"color":1}
+}
 ```
+
+- `me` 始终是参赛座位 `0/1`；三手交换后座位与棋色可能不同。
+- `color` 为当前棋色：`0` 黑、`1` 白；`seat_colors[me]` 与之一致。
+- `board` 是完整 `15×15` 列优先数组，`board[x][y]` 为 `-1/0/1`（空/黑/白）。
+- `phase` 决定本回合唯一允许的动作；阶段附加字段见下表。
+
+| `phase` | 决策方 | 附加字段 | 合法 `response` |
+|---|---|---|---|
+| `opening_proposal` | 开局座位 | `fixed_black1={7,7}`、`n_range=[2,5]` | `{"action":"opening","white2":{"x":7,"y":8},"black3":{"x":8,"y":8},"n":2}` |
+| `swap_choice` | 另一座位 | `n` | `{"action":"swap","swap":true}` |
+| `white4` | 最终白方 | `n` | `{"action":"move","x":6,"y":8}` |
+| `black5_candidates` | 最终黑方 | `n` | `{"action":"black5_candidates","points":[{"x":9,"y":9},{"x":5,"y":5}]}` |
+| `black5_select` | 最终白方 | `n`、`candidates` | `{"action":"black5_select","index":0}` |
+| `normal_play` | 当前棋色 | `pass_allowed`、`last` | `{"action":"move","x":4,"y":4}` 或 `{"action":"pass"}` |
+
+协议层只校验 `black5_candidates.points` 是点数组且每个坐标由两个整数组成；
+数量恰好为 N、坐标互不重复、全部为空点，以及在当前四子局面的旋转/镜像
+对称下互不同形，均由裁判按当前阶段统一校验。规则非法响应因此按
+`illegal_candidates` 判负，而不是传输层 `protocol_error`。
+
+动作仍必须放入标准信封，例如：
+
+```json
+{"response":{"action":"pass"}}
+```
+
+旧版 `{"response":{"x":7,"y":8}}` 没有 `action`，属于已废弃协议，会以
+`protocol_error` 拒绝；平台不会自动猜测阶段或回退到旧规则。
 
 ## 5. Pencil payload
 

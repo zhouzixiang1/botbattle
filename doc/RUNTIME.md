@@ -68,7 +68,7 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 
 ## 决策超时
 
-- `GameSpec.time_budget_per_side=None` 的游戏（当前 holdem / gomoku）使用代码常量 **60 秒 / 决策**；管理端、数据库和环境变量均不能覆盖。
+- `GameSpec.time_budget_per_side=None` 的游戏（当前仅 holdem）使用代码常量 **60 秒 / 决策**；Gomoku 与 Pencil 为每座位 **900 秒累计棋钟**。管理端、数据库和环境变量均不能覆盖。
 - Pencil 的 `GameSpec.time_budget_per_side=900`：双方各有一只独立、固定 **900 秒（15 分钟）累计棋钟**，Bot-vs-Bot 与人类对战走同一契约；每次等待只使用该座位的剩余时间，不能靠多回合重置。该固定规则不读取 `action_timeout_sec`，admin 不可改。
 - Bot 单步超时或 Pencil 累计棋钟耗尽在第一次发生时即终止对局，持久化为 `completed + reason=timeout + technical_loss=1`；不会生成代替动作继续对局。Bot-vs-Bot 技术结果进入评分/赛事积分，人机局由人类获胜但不计 Glicko。人类侧逐回合/累计超时仍走人类 inactivity 与游戏裁判逻辑。
 - 人类对战的 `human_action_timeout` 默认仍为 **120 秒 / 回合**，用于等待 WebSocket 落子的内层保护；Pencil 同时受外层 900 秒累计棋钟约束，以先到的限制为准。
@@ -159,6 +159,125 @@ Bot 上传与开始排空共用进程内 admission mutex；边界前已进入的
 只有管理员显式结束排空且上述 blockers 全部为零时，单个事务才清除 drain 并把 `accepting` 置 1。
 自动排位仍保持关闭，必须另行通过自动排位开关启用。这保证进程重启、运行环境恢复或重复请求都不会
 意外把平台重新开放。
+
+### 五子棋规则代际冷切运行手册
+
+五子棋从 `gomoku_freestyle_v1 / gomoku_xy_v1 / gomoku_freestyle_rating_v1`
+升级到 `gomoku_ccgc_2013_v1 / gomoku_action_v2 / gomoku_ccgc_2013_rating_v1`
+是一次**停服 hard cutover**，不提供旧协议兼容或在线迁移。正式入口为
+`python -m bzplat.backend.cli game-contract-cutover`，且只能按以下顺序执行：
+
+1. 按上一节请求 maintenance，轮询到 `maintenance.ready=true`；确认活动 job/Match、上传、Local AI
+   lease 与 Docker launch journal 全部静默。此时 drain 已 requested、`accepting=0`、`auto_enabled=0`。
+2. 停止 API、dispatcher、scheduler 与上传 worker，核对原 PID、50380 监听和本 instance 容器均已消失。
+   保留数据库邻接的 `.execution-dispatcher.lock` inode，不能删除或替换它。
+3. 停服后制作数据库逐字节冷备，并用 `cmp`、`PRAGMA integrity_check`、
+   `PRAGMA foreign_key_check` 验证；备份必须是不同文件/不同 inode。记录当前代码 release 与冷备路径，
+   二者构成唯一允许的回滚对。
+4. 对最终标准 ELF 执行 `file`、`sha256sum`、`stat -c %s`，将审核后的绝对路径、SHA-256 和 size
+   原样传给 dry-run。dry-run/apply 都会先从原始绝对 DB 路径取得 dispatcher flock，并在构造任何
+   `Store` 前强制验证目标与冷备不同 inode、逐字节 SHA-256 相同，且双方
+   `integrity_check=ok / foreign_key_check=0`；锁被占用、确认缺失或冷备陈旧时 Store 不会打开，目标
+   schema/bytes/mtime 不变。dry-run 随后只迁移同目录的临时 DB copy 并在 finally 删除，不迁移目标、
+   不创建 canonical `bot_uploads`；即便如此仍必须停服且先有可恢复冷备，apply 会重新验证同一 preimage。
+5. 审核 dry-run 的 `bot_count`、`from_contract/to_contract`、每 Bot 新 `vN`、canonical 路径、source
+   checksum/size、`existing_runtime_modes`、`replacement_runtime_modes`、
+   `runtime_mode_change_count` 与 `manifest_digest`。每个 Bot 的 runtime mode 必须原样继承，
+   `runtime_mode_change_count` 必须为 0；标准 ELF 会对 manifest 中每种模式分别预检。
+   任何 Bot 缺失、路径落入仓库 `samples/`、两个 Bot 共用目标路径，均为 No-Go。
+6. 回填同一 `manifest_digest` 与 `target_preimage_sha256` 执行 apply；后者在任何 Store
+   打开/迁移前绑定已审核的停服前镜像。首次 apply 只接受
+   `target == cold backup == target_preimage_sha256`。若事务已经提交但终端输出丢失，完全相同的命令
+   可以带原冷备重试：此时只允许 `cold backup == target_preimage_sha256` 且原始目标库已有同
+   `cutover_id + manifest_digest` marker，再由 Store 完整复核 marker、代际链、Bot/version 资产、评分
+   归档和活动任务后返回 `already_applied=true`；除此之外 DB 发生任何变化都必须重做 dry-run。CLI 在同一个预先取得的
+   dispatcher flock 内完成现行
+   `GameSpec` preflight、逐 Bot 私有 ELF staging 与单事务元数据切换；preflight 失败时不创建版本文件、
+   不写 cutover marker，也不改变数据库。生产不得设置 `BZ_BOT_LOCAL=1`。
+
+示例（绝对路径、摘要、size 与 cutover id 必须替换为本次已审核值）：
+
+```bash
+# dry-run：停服、冷备完成后执行；保存完整 JSON 并审核 manifest_digest/runtime-mode 报告
+python -m bzplat.backend.cli game-contract-cutover \
+  --db /absolute/path/botzone.db \
+  --cutover-id gomoku-ccgc-2013-v1-<deployment-id> \
+  --game-id gomoku \
+  --from-ruleset gomoku_freestyle_v1 \
+  --from-protocol gomoku_xy_v1 \
+  --from-rating-pool gomoku_freestyle_rating_v1 \
+  --source-binary /absolute/path/gomokubot_linux_amd64 \
+  --source-sha256 <reviewed-sha256> \
+  --source-size-bytes <reviewed-size> \
+  --upload-note 'platform standard Gomoku CCGC 2013 v2 hard cutover' \
+  --backup /absolute/path/botzone.pre-gomoku-cutover.db \
+  --confirm-service-stopped --confirm-cold-backup
+
+# apply：回填同一次 dry-run 的 manifest_digest；DB 与冷备路径均须再次逐字确认
+python -m bzplat.backend.cli game-contract-cutover \
+  --db /absolute/path/botzone.db \
+  --cutover-id gomoku-ccgc-2013-v1-<deployment-id> \
+  --game-id gomoku \
+  --from-ruleset gomoku_freestyle_v1 \
+  --from-protocol gomoku_xy_v1 \
+  --from-rating-pool gomoku_freestyle_rating_v1 \
+  --source-binary /absolute/path/gomokubot_linux_amd64 \
+  --source-sha256 <reviewed-sha256> \
+  --source-size-bytes <reviewed-size> \
+  --upload-note 'platform standard Gomoku CCGC 2013 v2 hard cutover' \
+  --apply --expect-manifest-digest <reviewed-manifest-digest> \
+  --expect-target-preimage-sha256 <reviewed-target-preimage-sha256> \
+  --confirm-db /absolute/path/botzone.db \
+  --backup /absolute/path/botzone.pre-gomoku-cutover.db \
+  --confirm-service-stopped --confirm-cold-backup
+```
+
+apply 的一个事务会把每个既有五子棋 Bot 的旧 version 标为 retired，新建使用标准 ELF、
+`gomoku_action_v2` 的固定 `vN` 并设为 current；不会原地修改旧 version 的路径、checksum、size 或版本号。
+新 `vN` 继承每个 Bot 原有的 `traditional`/`longrunning` 模式，不做全局改写。执行 apply 前必须
+确认环境未设置 `BZ_BOT_LOCAL`；正式 CLI 会拒绝本机 subprocess 预检，只允许生产 Docker runtime。
+旧 Gomoku Match/赛事仍冻结为 legacy 三元组，旧 queued/interrupted job 不可继续或重试。旧评分投影按
+legacy pool 归档，新 pool 从每 Bot 1500/350/0.06、0 场开始；离线 rating rebuild 只重放各游戏 active
+pool，不把 legacy Gomoku settlement 带回新榜。每个新 version 都必须落在数据库同目录的
+`bot_uploads/<bot_id>/vN/bot.bin`；内容可以相同，但路径与 inode 必须逐 Bot 唯一，旧文件不改。
+
+apply 后保持停服，至少完成以下验收后才启动：数据库 `integrity_check=ok`、FK 零违规；
+`rating_pool_state` 三元组与代码 GameSpec 完全一致；cutover marker 代际边形成唯一、无断链/分叉的
+from→to 三元组链，链尾等于 active contract；所有 Gomoku current version 均等于 dry-run manifest 为各
+Bot 固定的 vN（原 `MAX(version)+1`）、未 retired、SHA/size 与标准 ELF 相同；所有旧 version 均
+retired；新文件路径/inode 数均等于 Gomoku Bot 数；active legacy job
+为 0；首次恢复服务前新 Gomoku ratings 的 `matches_played` 总和为 0。用完全相同参数和原冷备再次 apply
+必须返回 `already_applied=true`、同一 manifest digest 且不新增 marker/version。后续代际切换必须使用
+从未在该游戏 cutover 链出现过的新 protocol ID，禁止 A→B→A 式复用；历史 marker 与其审计 vN/归档
+永久保留，只有链尾代际保持 active。新评分池产生合法对局后，幂等复核允许评分继续演进，不要求回到零。
+
+新代码启动会在任何 runtime 启动前核对所有 active contract；legacy DB 或三元组漂移会明确拒绝启动。
+runner 也会在启动 Bot 前核对 Match 冻结三元组。启动健康后 maintenance 仍应保持 requested、
+`accepting=0`、`auto_enabled=0`；完成真实对局/回放/排名验收后，先
+`DELETE /api/admin/execution-queue/maintenance` 恢复接单，再由管理员显式
+`PUT /api/admin/auto-match` 提交 `{"enabled": true}` 恢复自动排位。
+
+若 apply 前失败，修正原因后沿用同一冷备和已审核计划重试。若 apply 后必须回滚，按以下 fail-closed
+步骤执行，数据库与代码 release 必须作为一对恢复：
+
+1. 继续保持 maintenance、停服和 dispatcher flock，保存一份 post-cutover 故障库及其 SHA-256，供审计，
+   不得在故障库上直接“改回”字段。
+2. 确认目标库没有 `-wal`、`-shm`、`-journal` 或 hot journal；若存在，先停止并查明仍在访问数据库的
+   进程，禁止直接删除旁路文件。
+3. 在目标库同目录创建冷备临时副本，核对其 SHA-256 等于已审核 `target_preimage_sha256`，执行
+   `integrity_check=ok` 与 `foreign_key_check=0`，fsync 临时文件；再用同文件系统原子 rename 替换目标库，
+   最后 fsync 目标父目录。保留原冷备不动。
+4. 恢复与该冷备成对记录的旧代码 release；在仍停服状态下核对旧 active contract、所有 Bot current/
+   version protocol、legacy rating pool、队列与赛事冻结三元组均与 preimage 一致，并再次执行完整性/FK
+   检查。任何一项不一致都不得启动。
+5. 只使用已保存且已复核 digest 的 cutover manifest，逐个确认恢复后的 DB 已不再引用本次新增 vN，
+   再对 manifest 精确列出的 `bot_uploads/<bot_id>/vN/bot.bin` 和目录解除只读权限、unlink/rmdir，并 fsync
+   各父目录；禁止通配符、递归 `rm`、删除整个 `bot_uploads`，也不得触碰旧 version 字节或其他代际资产。
+6. 先以 maintenance 状态启动旧 release，验证 runtime contract、队列、评分与一场受控对局；验收完成后
+   才恢复接单，自动排位仍需另行显式开启。保存故障库、冷备、manifest、命令输出和验收日志。
+
+禁止只回滚代码、只恢复 DB、把 legacy version 原地重新激活，或执行反向在线 cutover；这些组合都会让
+runtime 规则、冻结契约、Bot 协议和评分代际失配。
 
 ## 运行模式边界
 

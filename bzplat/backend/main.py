@@ -259,6 +259,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # Store remains openable by the offline migration/cutover CLI, but the
+        # online process must never run a current GameSpec against a legacy
+        # persisted contract.  Check before the dispatcher flock, Docker
+        # cleanup, schedulers, uploads or delivery workers start.
+        store.assert_runtime_contracts_current()
         # Exact instance-label cleanup is the only recovery gate.  Only after it
         # proves zero may active attempts be requeued/interrupted and legacy
         # untracked running rows be marked orphaned.

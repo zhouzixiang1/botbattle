@@ -212,3 +212,42 @@ def test_legacy_pe_is_owner_visible_but_never_public_or_reactivated(tmp_path):
         "pe", "windows", "amd64"
     )
     assert unchanged["current_version"] == 2
+
+
+def test_admin_version_projection_prefers_retired_over_protocol_reason(tmp_path):
+    app = create_app(db_path=str(tmp_path / "retired-reason.db"))
+    store = app.state.store
+    owner = store.create_user(
+        "retiredowner", "retiredowner@example.com", hash_password("pw123456")
+    )
+    admin = store.create_user(
+        "retiredadmin",
+        "retiredadmin@example.com",
+        hash_password("pw123456"),
+        role="admin",
+    )
+    for user in (owner, admin):
+        store.update_user(user["id"], email_verified=1, is_active=1)
+    bot = store.create_bot(
+        owner["id"],
+        "retired_reason_bot",
+        binary_path=str(ELF),
+        game_id="gomoku",
+    )
+    version = store.add_bot_version(bot["id"], binary_path=str(ELF), version=1)
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE bot_versions SET protocol_version='gomoku_xy_v1',"
+            "retired_at='test',retirement_reason='ruleset_retired' WHERE id=?",
+            (version["id"],),
+        )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/admin/bots/{bot['id']}/versions",
+            headers=_auth(app, "retiredadmin"),
+        )
+    assert response.status_code == 200
+    projected = response.json()["versions"][0]
+    assert projected["runnable"] is False
+    assert projected["unsupported_reason"] == "该版本已退役"

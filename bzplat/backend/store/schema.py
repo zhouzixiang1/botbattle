@@ -12,6 +12,52 @@ RUNTIME_LONGRUNNING = "longrunning"
 VALID_RUNTIME_MODES = frozenset({RUNTIME_TRADITIONAL, RUNTIME_LONGRUNNING})
 DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL
 
+# 游戏规则 / Bot 协议 / 评分池是三个独立的持久化契约。通用层
+# 只查表，不按 game_id 写分支；一次大版规则切换由 Store 的离线
+# cutover API 原子推进 active contract。
+GOMOKU_LEGACY_RULESET = "gomoku_freestyle_v1"
+GOMOKU_CURRENT_RULESET = "gomoku_ccgc_2013_v1"
+GOMOKU_LEGACY_PROTOCOL = "gomoku_xy_v1"
+GOMOKU_CURRENT_PROTOCOL = "gomoku_action_v2"
+GOMOKU_LEGACY_RATING_POOL = "gomoku_freestyle_rating_v1"
+GOMOKU_CURRENT_RATING_POOL = "gomoku_ccgc_2013_rating_v1"
+
+GAME_RULE_CONTRACTS = {
+    "holdem": {
+        "ruleset_version": "holdem_hu_nlhe_v1",
+        "protocol_version": "holdem_action_v1",
+        "rating_pool_id": "holdem_rating_v1",
+    },
+    "gomoku": {
+        "ruleset_version": GOMOKU_CURRENT_RULESET,
+        "protocol_version": GOMOKU_CURRENT_PROTOCOL,
+        "rating_pool_id": GOMOKU_CURRENT_RATING_POOL,
+    },
+    "pencil": {
+        "ruleset_version": "pencil_ccgc_v1",
+        "protocol_version": "pencil_xy_v1",
+        "rating_pool_id": "pencil_rating_v1",
+    },
+}
+
+GAME_LEGACY_RULE_CONTRACTS = {
+    **GAME_RULE_CONTRACTS,
+    "gomoku": {
+        "ruleset_version": GOMOKU_LEGACY_RULESET,
+        "protocol_version": GOMOKU_LEGACY_PROTOCOL,
+        "rating_pool_id": GOMOKU_LEGACY_RATING_POOL,
+    },
+}
+
+
+def game_rule_contract(game_id: str, *, legacy: bool = False) -> dict[str, str]:
+    """返回一份可持久化的游戏契约副本；未知游戏 fail closed。"""
+    source = GAME_LEGACY_RULE_CONTRACTS if legacy else GAME_RULE_CONTRACTS
+    try:
+        return dict(source[game_id])
+    except KeyError as exc:
+        raise ValueError(f"未声明规则契约的游戏: {game_id!r}") from exc
+
 # 私有 Bot debug 持久化硬顶。schema CHECK、Store 防御性校验与上层
 # 内存收集器共用，避免三处同义数字漂移。
 MATCH_DEBUG_MAX_ENTRY_BYTES = 4 * 1024
@@ -140,6 +186,7 @@ CREATE TABLE IF NOT EXISTS bots (
     is_builtin      INTEGER NOT NULL DEFAULT 0,
     game_id         TEXT    NOT NULL,
     runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
+    protocol_version TEXT   NOT NULL DEFAULT '',
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
     UNIQUE(owner_id, name),
@@ -161,6 +208,9 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     arch            TEXT    NOT NULL DEFAULT 'amd64',
     format          TEXT    NOT NULL DEFAULT 'elf',
     runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
+    protocol_version TEXT   NOT NULL DEFAULT '',
+    retired_at      TEXT,
+    retirement_reason TEXT  NOT NULL DEFAULT '',
     uploaded_at     TEXT    NOT NULL,
     UNIQUE(bot_id, version),
     CONSTRAINT chk_bot_version_os CHECK (os = 'linux'),
@@ -178,6 +228,7 @@ CREATE TABLE IF NOT EXISTS local_ai_agents (
     bot_id                INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     label                 TEXT    NOT NULL,
     game_id               TEXT    NOT NULL,
+    protocol_version      TEXT    NOT NULL DEFAULT '',
     token_hash            TEXT    NOT NULL UNIQUE,
     token_hint            TEXT    NOT NULL,
     status                TEXT    NOT NULL DEFAULT 'active' CHECK (
@@ -208,6 +259,9 @@ CREATE TABLE IF NOT EXISTS contests (
     ends_at                 TEXT,
     created_at              TEXT    NOT NULL,
     game_id                 TEXT    NOT NULL,
+    ruleset_version          TEXT    NOT NULL DEFAULT '',
+    protocol_version         TEXT    NOT NULL DEFAULT '',
+    rating_pool_id           TEXT    NOT NULL DEFAULT '',
     stages_json             TEXT    NOT NULL DEFAULT '[]',
     current_stage_idx       INTEGER NOT NULL DEFAULT 0,
     template_id             TEXT    NOT NULL DEFAULT 'holdem_swiss_ko',
@@ -235,6 +289,9 @@ CREATE TABLE IF NOT EXISTS matches_holdem (
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
+    ruleset_version TEXT    NOT NULL DEFAULT '',
+    protocol_version TEXT   NOT NULL DEFAULT '',
+    rating_pool_id  TEXT    NOT NULL DEFAULT '',
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -259,6 +316,9 @@ CREATE TABLE IF NOT EXISTS matches_gomoku (
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
+    ruleset_version TEXT    NOT NULL DEFAULT '',
+    protocol_version TEXT   NOT NULL DEFAULT '',
+    rating_pool_id  TEXT    NOT NULL DEFAULT '',
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -283,6 +343,9 @@ CREATE TABLE IF NOT EXISTS matches_pencil (
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
+    ruleset_version TEXT    NOT NULL DEFAULT '',
+    protocol_version TEXT   NOT NULL DEFAULT '',
+    rating_pool_id  TEXT    NOT NULL DEFAULT '',
     match_config    TEXT    NOT NULL DEFAULT '{}',
     result          TEXT    NOT NULL DEFAULT '{}',
     human_user_id   INTEGER,
@@ -350,6 +413,7 @@ CREATE TABLE IF NOT EXISTS match_rating_settlements (
 CREATE TABLE IF NOT EXISTS match_rating_policies (
     match_id        TEXT    PRIMARY KEY,
     game_id         TEXT    NOT NULL,
+    rating_pool_id  TEXT    NOT NULL DEFAULT '',
     bot_a_id        INTEGER,
     bot_b_id        INTEGER,
     settled_order   INTEGER,
@@ -405,6 +469,9 @@ CREATE TABLE IF NOT EXISTS execution_jobs (
     priority            INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 100),
     owner_user_id       INTEGER,
     game_id             TEXT    NOT NULL,
+    ruleset_version     TEXT    NOT NULL DEFAULT '',
+    protocol_version    TEXT    NOT NULL DEFAULT '',
+    rating_pool_id      TEXT    NOT NULL DEFAULT '',
     match_type          TEXT    NOT NULL CHECK (
         match_type IN ('challenge','table','contest','ladder','human')
     ),
@@ -766,6 +833,95 @@ CREATE TABLE IF NOT EXISTS rating_history (
     created_at      TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_rating_history_bot ON rating_history(bot_id, game_id, id DESC);
+
+-- 每款游戏只有一个实时评分池。大版规则切换时，旧投影完整
+-- 归档，实时 ratings/history/pair_stats 从新池零样本开始。
+CREATE TABLE IF NOT EXISTS rating_pool_state (
+    game_id          TEXT PRIMARY KEY,
+    active_pool_id   TEXT NOT NULL,
+    ruleset_version  TEXT NOT NULL,
+    protocol_version TEXT NOT NULL,
+    activated_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rating_pool_archives (
+    game_id          TEXT NOT NULL,
+    pool_id          TEXT NOT NULL,
+    ruleset_version  TEXT NOT NULL,
+    protocol_version TEXT NOT NULL,
+    archived_at      TEXT NOT NULL,
+    ratings_count    INTEGER NOT NULL,
+    history_count    INTEGER NOT NULL,
+    pair_count       INTEGER NOT NULL,
+    projection_digest TEXT NOT NULL,
+    PRIMARY KEY(game_id,pool_id)
+);
+
+CREATE TABLE IF NOT EXISTS ratings_archive (
+    bot_id          INTEGER NOT NULL,
+    game_id         TEXT NOT NULL,
+    pool_id         TEXT NOT NULL,
+    rating          REAL NOT NULL,
+    rd              REAL NOT NULL,
+    vol             REAL NOT NULL,
+    wins            INTEGER NOT NULL,
+    losses          INTEGER NOT NULL,
+    draws            INTEGER NOT NULL,
+    delta_total     INTEGER NOT NULL,
+    matches_played  INTEGER NOT NULL,
+    last_played_at  TEXT,
+    archived_at     TEXT NOT NULL,
+    PRIMARY KEY(bot_id,game_id,pool_id)
+);
+
+CREATE TABLE IF NOT EXISTS rating_history_archive (
+    original_id     INTEGER NOT NULL,
+    bot_id          INTEGER NOT NULL,
+    game_id         TEXT NOT NULL,
+    pool_id         TEXT NOT NULL,
+    rating          REAL NOT NULL,
+    rd              REAL NOT NULL,
+    vol             REAL NOT NULL,
+    matches_played  INTEGER NOT NULL,
+    reason          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    archived_at     TEXT NOT NULL,
+    PRIMARY KEY(game_id,pool_id,original_id)
+);
+
+CREATE TABLE IF NOT EXISTS pair_stats_archive (
+    bot_a_id        INTEGER NOT NULL,
+    bot_b_id        INTEGER NOT NULL,
+    game_id         TEXT NOT NULL,
+    pool_id         TEXT NOT NULL,
+    samples         INTEGER NOT NULL,
+    last_played_at  TEXT NOT NULL,
+    a_wins          INTEGER NOT NULL,
+    a_losses        INTEGER NOT NULL,
+    draws            INTEGER NOT NULL,
+    archived_at     TEXT NOT NULL,
+    PRIMARY KEY(bot_a_id,bot_b_id,game_id,pool_id)
+);
+
+-- 一次性协议切换的幂等凭据。manifest_digest 不同时绝不得复用
+-- cutover_id，避免重跑静默创建另一批 vN。
+CREATE TABLE IF NOT EXISTS protocol_cutovers (
+    cutover_id       TEXT PRIMARY KEY,
+    game_id          TEXT NOT NULL,
+    from_ruleset     TEXT NOT NULL,
+    to_ruleset       TEXT NOT NULL,
+    from_protocol    TEXT NOT NULL,
+    to_protocol      TEXT NOT NULL,
+    from_rating_pool TEXT NOT NULL,
+    to_rating_pool   TEXT NOT NULL,
+    manifest_digest  TEXT NOT NULL,
+    manifest_json    TEXT NOT NULL,
+    bot_count        INTEGER NOT NULL,
+    retired_count    INTEGER NOT NULL,
+    cancelled_jobs   INTEGER NOT NULL,
+    archive_digest   TEXT NOT NULL,
+    completed_at     TEXT NOT NULL
+);
 
 -- 评论（target_type = match|bot；target_id = match_id 字符串 或 bot_id 整数）
 CREATE TABLE IF NOT EXISTS comments (
@@ -1243,15 +1399,24 @@ PUBLIC_MATCH_COMPLETED_REASONS = frozenset(
         "completed",
         "contest_bot_unavailable",
         "crash",
+        "double_pass",
         "draw",
         "error",
         "five",
         "illegal",
+        "illegal_candidates",
+        "illegal_opening",
+        "illegal_selection",
+        "illegal_swap",
         "majority",
         "protocol_error",
         "score",
         "technical_loss",
         "timeout",
+        "board_full",
+        "forbidden_double_four",
+        "forbidden_double_three",
+        "forbidden_overline",
     }
 )
 

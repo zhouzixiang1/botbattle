@@ -543,8 +543,10 @@ test('challenge names both sides by the selected game instead of generic seats',
   const gameSelect = page.getByRole('combobox').first()
   await gameSelect.click()
   await page.getByRole('option', { name: '五子棋', exact: true }).click()
-  await expect(page.getByText('黑方', { exact: true })).toBeVisible()
-  await expect(page.getByText('白方', { exact: true })).toBeVisible()
+  await expect(page.getByText('开局提案方', { exact: true })).toBeVisible()
+  await expect(page.getByText('交换决策方', { exact: true })).toBeVisible()
+  await expect(page.getByText('黑方', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('白方', { exact: true })).toHaveCount(0)
 
   await gameSelect.click()
   await page.getByRole('option', { name: '点格棋', exact: true }).click()

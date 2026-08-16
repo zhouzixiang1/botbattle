@@ -12,6 +12,8 @@ import sys
 import pytest
 
 from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
+from bzplat.backend.games.gomoku import protocol as gomoku_protocol
+from bzplat.backend.games.gomoku.gomoku_judge import BLACK, EMPTY, WHITE, new_board
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
 
@@ -187,9 +189,13 @@ def test_compiled_gomoku_sample_finishes_without_illegal_move(
             seed=20260809,
         )
     )
-    assert result.reason in {"five", "draw"}
+    assert result.reason in {"five", "double_pass", "board_full"}
     assert not [e for e in result.events if e.get("type") == "illegal"]
+    assert not [e for e in result.events if e.get("type") == "forbidden"]
     assert not [e for e in result.events if e.get("reason") == "crash"]
+    assert {e.get("type") for e in result.events} >= {
+        "opening", "swap", "black5_candidates", "black5_selected",
+    }
     assert result.events[-1]["type"] == "match_end"
 
 
@@ -208,9 +214,13 @@ def test_pyinstaller_gomoku_wiki_sample_finishes_without_illegal_move(
             seed=20260809,
         )
     )
-    assert result.reason in {"five", "draw"}
+    assert result.reason in {"five", "double_pass", "board_full"}
     assert not [e for e in result.events if e.get("type") == "illegal"]
+    assert not [e for e in result.events if e.get("type") == "forbidden"]
     assert not [e for e in result.events if e.get("reason") == "crash"]
+    assert {e.get("type") for e in result.events} >= {
+        "opening", "swap", "black5_candidates", "black5_selected",
+    }
     assert result.events[-1]["type"] == "match_end"
 
 
@@ -240,12 +250,34 @@ def test_python_pencil_sample_replays_full_history_and_keeps_running() -> None:
 
 
 def test_python_gomoku_sample_replays_full_history_and_keeps_running() -> None:
-    legal = [(x, y) for x in range(15) for y in range(15)]
-    used, only_free = legal[:-1], legal[-1]
-    requests = [{"x": -1, "y": -1, "me": 0}]
-    requests.extend({"x": x, "y": y, "me": 0} for x, y in used[::2])
-    responses = [{"x": x, "y": y} for x, y in used[1::2]]
-    envelope = {"requests": requests, "responses": responses}
+    empty = new_board()
+    opening = gomoku_protocol.build_request(
+        phase=gomoku_protocol.PHASE_OPENING,
+        me=0,
+        color=BLACK,
+        board=empty,
+        seat_colors=[BLACK, WHITE],
+    )
+    full = [[WHITE for _ in range(15)] for _ in range(15)]
+    only_free = (14, 14)
+    full[only_free[0]][only_free[1]] = EMPTY
+    current = gomoku_protocol.build_request(
+        phase=gomoku_protocol.PHASE_NORMAL,
+        me=1,
+        color=WHITE,
+        board=full,
+        seat_colors=[BLACK, WHITE],
+        pass_allowed=True,
+    )
+    envelope = {
+        "requests": [opening, current],
+        "responses": [{
+            "action": "opening",
+            "white2": {"x": 7, "y": 8},
+            "black3": {"x": 8, "y": 8},
+            "n": 2,
+        }],
+    }
 
     proc = subprocess.run(
         [sys.executable, str(SAMPLES / "gomokubot.py")],
@@ -256,8 +288,71 @@ def test_python_gomoku_sample_replays_full_history_and_keeps_running() -> None:
         check=True,
     )
     lines = proc.stdout.splitlines()
-    assert json.loads(lines[0]) == {"response": {"x": only_free[0], "y": only_free[1]}}
+    assert json.loads(lines[0]) == {
+        "response": {"action": "move", "x": only_free[0], "y": only_free[1]}
+    }
     assert lines[1] == ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
+
+
+def test_python_gomoku_sample_covers_competition_opening_actions() -> None:
+    board = new_board()
+    requests = [
+        gomoku_protocol.build_request(
+            phase=gomoku_protocol.PHASE_OPENING,
+            me=0,
+            color=BLACK,
+            board=board,
+            seat_colors=[BLACK, WHITE],
+        ),
+        gomoku_protocol.build_request(
+            phase=gomoku_protocol.PHASE_SWAP,
+            me=1,
+            color=WHITE,
+            board=board,
+            seat_colors=[BLACK, WHITE],
+            n=2,
+        ),
+        gomoku_protocol.build_request(
+            phase=gomoku_protocol.PHASE_BLACK5_CANDIDATES,
+            me=0,
+            color=BLACK,
+            board=board,
+            seat_colors=[BLACK, WHITE],
+            n=2,
+        ),
+        gomoku_protocol.build_request(
+            phase=gomoku_protocol.PHASE_BLACK5_SELECT,
+            me=1,
+            color=WHITE,
+            board=board,
+            seat_colors=[BLACK, WHITE],
+            n=2,
+            candidates=[{"x": 0, "y": 0}, {"x": 14, "y": 14}],
+        ),
+    ]
+    payload = "".join(json.dumps({"request": request}) + "\n" for request in requests)
+    proc = subprocess.run(
+        [sys.executable, str(SAMPLES / "gomokubot.py")],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    lines = proc.stdout.splitlines()
+    actions = [json.loads(lines[index])["response"] for index in (0, 2, 3, 4)]
+    assert actions[0] == {
+        "action": "opening",
+        "white2": {"x": 7, "y": 8},
+        "black3": {"x": 8, "y": 8},
+        "n": 2,
+    }
+    assert actions[1] == {"action": "swap", "swap": False}
+    assert actions[2] == {
+        "action": "black5_candidates",
+        "points": [{"x": 0, "y": 0}, {"x": 14, "y": 14}],
+    }
+    assert actions[3] == {"action": "black5_select", "index": 0}
 
 
 def test_holdem_strategy_samples_use_standard_history_fields(tmp_path: Path) -> None:

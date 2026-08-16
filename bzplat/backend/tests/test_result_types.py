@@ -17,6 +17,7 @@ from bzplat.backend.games.gomoku.result import MatchResult as GomokuResult
 from bzplat.backend.games.pencil.engine import PencilSession
 from bzplat.backend.games.pencil.result import MatchResult as PencilResult
 from bzplat.backend.games.base import MatchResult, RoundResult
+from bzplat.backend.tests._gomoku_v2 import seat_zero_winning_decider
 
 
 def test_round_result_is_minimal_contract():
@@ -101,21 +102,9 @@ def test_pencil_result_has_no_holdem_fields():
 
 
 def test_gomoku_session_returns_gomoku_result():
-    black = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
-    white = [(1, 0), (1, 1), (1, 2), (1, 3)]
-    bi = wi = 0
-
-    async def decide(player, req):
-        nonlocal bi, wi
-        if player == 0:
-            x, y = black[bi]
-            bi += 1
-        else:
-            x, y = white[wi]
-            wi += 1
-        return {"response": {"x": x, "y": y}}
-
-    result = asyncio.run(GomokuSession().run_async(decide))
+    result = asyncio.run(
+        GomokuSession().run_async(seat_zero_winning_decider())
+    )
     # PR4 起 result 不再共享基类——断言鸭子契约字段（通用层只读这些）
     assert hasattr(result, "rounds_played")
     assert hasattr(result, "rounds") and hasattr(result, "events")

@@ -19,7 +19,14 @@ from bzplat.backend.runtime.binary_integrity import (
     BinaryIntegrityCacheKey,
     require_binary_file_integrity,
 )
-from .db import _all_game_ids, _matches_table, _now, _registered_game_id, _row
+from .db import (
+    _active_game_contract_tx,
+    _all_game_ids,
+    _matches_table,
+    _now,
+    _registered_game_id,
+    _row,
+)
 from .schema import (
     EXECUTION_ACTIVE_STATES,
     EXECUTION_CANCELLED,
@@ -257,9 +264,27 @@ class ExecutionRepository:
             conn.execute("BEGIN IMMEDIATE")
             launch = self._docker_launch_tx(conn)
             control = conn.execute(
-                "SELECT dispatcher_state FROM execution_control WHERE singleton=1"
+                "SELECT dispatcher_state,accepting,auto_enabled,"
+                "deployment_drain_requested FROM execution_control "
+                "WHERE singleton=1"
             ).fetchone()
-            if control is None or control["dispatcher_state"] != "running":
+            online_runtime = bool(
+                control is not None
+                and control["dispatcher_state"] == "running"
+            )
+            cold_preflight = bool(
+                control is not None
+                and owner_kind == "preflight"
+                and control["dispatcher_state"] == "stopped"
+                and int(control["accepting"] or 0) == 0
+                and int(control["auto_enabled"] or 0) == 0
+                and int(control["deployment_drain_requested"] or 0) == 1
+            )
+            # A contract-cutover preflight is the sole Docker create allowed
+            # while the dispatcher is stopped.  The operator service must also
+            # hold the DB-adjacent dispatcher flock; these durable predicates
+            # ensure an arbitrary stopped process cannot use this exception.
+            if not online_runtime and not cold_preflight:
                 raise DockerLaunchInvariantError(
                     "dispatcher 未运行，禁止创建 Docker 容器"
                 )
@@ -695,13 +720,15 @@ class ExecutionRepository:
         agent_id: int,
         bot_id: int,
         game_id: str,
+        expected_protocol: str | None = None,
         request_owner_id: int | None = None,
         enforce_request_owner: bool = False,
     ) -> dict[str, Any] | None:
         row = conn.execute(
             "SELECT a.id,a.public_id,a.connection_generation,a.owner_id,"
-            "a.bot_id,a.game_id,a.status,"
+            "a.bot_id,a.game_id,a.protocol_version,a.status,"
             "b.owner_id AS bot_owner_id,b.game_id AS bot_game_id,"
+            "b.protocol_version AS bot_protocol_version,"
             "b.is_active AS bot_active,u.is_active AS owner_active "
             "FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
             "JOIN users u ON u.id=a.owner_id WHERE a.id=?",
@@ -713,6 +740,14 @@ class ExecutionRepository:
             and int(row["bot_id"]) == int(bot_id)
             and str(row["game_id"] or "") == game_id
             and str(row["bot_game_id"] or "") == game_id
+            and (
+                expected_protocol is None
+                or (
+                    str(row["protocol_version"] or "") == expected_protocol
+                    and str(row["bot_protocol_version"] or "")
+                    == expected_protocol
+                )
+            )
             and int(row["owner_id"]) == int(row["bot_owner_id"])
             and int(row["bot_active"] or 0) == 1
             and int(row["owner_active"] or 0) == 1
@@ -736,6 +771,7 @@ class ExecutionRepository:
         agent_id: int,
         bot_id: int,
         game_id: str,
+        expected_protocol: str | None = None,
         request_owner_id: int | None = None,
         enforce_request_owner: bool = False,
     ) -> bool:
@@ -744,6 +780,7 @@ class ExecutionRepository:
             agent_id=agent_id,
             bot_id=bot_id,
             game_id=game_id,
+            expected_protocol=expected_protocol,
             request_owner_id=request_owner_id,
             enforce_request_owner=enforce_request_owner,
         ) is not None
@@ -755,6 +792,7 @@ class ExecutionRepository:
         source: str,
         owner_user_id: int | None,
         game_id: str,
+        protocol_version: str,
         bot_a_id: int,
         bot_b_id: int,
         bot_a_version_id: int | None,
@@ -814,6 +852,7 @@ class ExecutionRepository:
                     agent_id=agent_id,
                     bot_id=bots[seat],
                     game_id=game_id,
+                    expected_protocol=protocol_version,
                     request_owner_id=owner_user_id,
                     enforce_request_owner=True,
                 ):
@@ -885,16 +924,27 @@ class ExecutionRepository:
         *,
         bot_id: int,
         version_id: int | None,
+        expected_game_id: str | None = None,
+        expected_protocol: str | None = None,
+        check_file: bool = True,
     ) -> bool:
         bot = conn.execute(
             "SELECT id,is_active,game_id,current_version,binary_path,runtime_mode,"
-            "format,os,arch "
+            "format,os,arch,protocol_version "
             "FROM bots WHERE id=?",
             (bot_id,),
         ).fetchone()
+        if bot is not None:
+            active_contract = _active_game_contract_tx(conn, str(bot["game_id"]))
+            expected_game_id = expected_game_id or str(bot["game_id"])
+            expected_protocol = (
+                expected_protocol or active_contract["protocol_version"]
+            )
         if (
             bot is None
             or int(bot["is_active"] or 0) != 1
+            or str(bot["game_id"] or "") != expected_game_id
+            or str(bot["protocol_version"] or "") != expected_protocol
             or str(bot["format"] or "") != SUPPORTED_BINARY_FORMAT
             or str(bot["os"] or "") != SUPPORTED_BINARY_OS
             or str(bot["arch"] or "") != SUPPORTED_BINARY_ARCH
@@ -917,12 +967,14 @@ class ExecutionRepository:
         else:
             version = conn.execute(
                 "SELECT bot_id,binary_path,runtime_mode,format,os,arch,checksum,"
-                "size_bytes FROM bot_versions WHERE id=?",
+                "size_bytes,protocol_version,retired_at FROM bot_versions WHERE id=?",
                 (version_id,),
             ).fetchone()
             if not (
                 version is not None
                 and int(version["bot_id"]) == bot_id
+                and version["retired_at"] is None
+                and str(version["protocol_version"] or "") == expected_protocol
                 and str(version["binary_path"] or "").strip()
                 and str(version["runtime_mode"] or "") in VALID_RUNTIME_MODES
                 and str(version["format"] or "") == SUPPORTED_BINARY_FORMAT
@@ -931,6 +983,8 @@ class ExecutionRepository:
             ):
                 return False
             runtime = dict(version)
+        if not check_file:
+            return True
         try:
             require_binary_file_integrity(
                 runtime,
@@ -970,11 +1024,30 @@ class ExecutionRepository:
         if source not in EXECUTION_SOURCES:
             raise ValueError(f"unknown execution source: {source}")
         gid = _registered_game_id(game_id)
+        contract = _active_game_contract_tx(conn, gid)
+        if source == EXECUTION_SOURCE_CONTEST:
+            contest = conn.execute(
+                "SELECT game_id,ruleset_version,protocol_version,rating_pool_id "
+                "FROM contests WHERE id=?",
+                (contest_id,),
+            ).fetchone()
+            if (
+                contest is None
+                or str(contest["game_id"] or "") != gid
+                or str(contest["ruleset_version"] or "")
+                != contract["ruleset_version"]
+                or str(contest["protocol_version"] or "")
+                != contract["protocol_version"]
+                or str(contest["rating_pool_id"] or "")
+                != contract["rating_pool_id"]
+            ):
+                raise ValueError("赛事规则版本已退役或与当前游戏契约不一致")
         environment = self._execution_environment_tx(
             conn,
             source=source,
             owner_user_id=owner_user_id,
             game_id=gid,
+            protocol_version=contract["protocol_version"],
             bot_a_id=int(bot_a_id),
             bot_b_id=int(bot_b_id),
             bot_a_version_id=bot_a_version_id,
@@ -987,6 +1060,28 @@ class ExecutionRepository:
         )
         bot_a_version_id = environment["bot_a_version_id"]
         bot_b_version_id = environment["bot_b_version_id"]
+        for suffix, bot_id, version_id in (
+            ("a", int(bot_a_id), bot_a_version_id),
+            ("b", int(bot_b_id), bot_b_version_id),
+        ):
+            seat_environment = str(environment[f"bot_{suffix}_environment"])
+            if seat_environment in {
+                EXECUTION_ENV_HUMAN,
+                EXECUTION_ENV_REMOTE_LOCAL,
+            }:
+                continue
+            frozen_version_id = (
+                int(version_id) if version_id is not None else None
+            )
+            if not self._version_identity_tx(
+                conn,
+                bot_id=bot_id,
+                version_id=frozen_version_id,
+                expected_game_id=gid,
+                expected_protocol=contract["protocol_version"],
+                check_file=False,
+            ):
+                raise ValueError("Bot 版本已退役或与当前游戏协议不兼容")
         rated, rating_reason = self._rating_policy_tx(
             conn,
             source=source,
@@ -1007,7 +1102,8 @@ class ExecutionRepository:
             )
         conn.execute(
             "INSERT INTO execution_jobs("
-            "public_id,source,status,priority,owner_user_id,game_id,match_type,"
+            "public_id,source,status,priority,owner_user_id,game_id,ruleset_version,"
+            "protocol_version,rating_pool_id,match_type,"
             "bot_a_id,bot_b_id,bot_a_version_id,bot_b_version_id,"
             "bot_a_environment,bot_b_environment,bot_a_local_agent_id,"
             "bot_b_local_agent_id,human_user_id,human_seat,contest_id,"
@@ -1015,6 +1111,7 @@ class ExecutionRepository:
             "sandbox_units,host_cpu_millis,host_memory_mb,profile_version,"
             "auto_decision_id,created_at) "
             "VALUES(:public_id,:source,'queued',:priority,:owner_user_id,:game_id,"
+            ":ruleset_version,:protocol_version,:rating_pool_id,"
             ":match_type,:bot_a_id,:bot_b_id,:bot_a_version_id,:bot_b_version_id,"
             ":bot_a_environment,:bot_b_environment,:bot_a_local_agent_id,"
             ":bot_b_local_agent_id,:human_user_id,:human_seat,:contest_id,"
@@ -1027,6 +1124,9 @@ class ExecutionRepository:
                 "priority": priority,
                 "owner_user_id": owner_user_id,
                 "game_id": gid,
+                "ruleset_version": contract["ruleset_version"],
+                "protocol_version": contract["protocol_version"],
+                "rating_pool_id": contract["rating_pool_id"],
                 "match_type": match_type,
                 "bot_a_id": bot_a_id,
                 "bot_b_id": bot_b_id,
@@ -1563,6 +1663,7 @@ class ExecutionRepository:
                     agent_id=int(raw_agent_id),
                     bot_id=int(job[f"bot_{suffix}_id"]),
                     game_id=gid,
+                    expected_protocol=str(job["protocol_version"]),
                     request_owner_id=job.get("owner_user_id"),
                     enforce_request_owner=True,
                 )
@@ -1588,8 +1689,9 @@ class ExecutionRepository:
         now = _now()
         conn.execute(
             f"INSERT INTO {table}(id,bot_a_id,bot_b_id,owner_id,contest_id,"
-            "reason,match_type,status,game_id,match_config,human_user_id,human_seat,"
-            "match_seed,created_at) VALUES(?,?,?,?,?,'',?,'pending',?,?,?,?,?,?)",
+            "reason,match_type,status,game_id,ruleset_version,protocol_version,"
+            "rating_pool_id,match_config,human_user_id,human_seat,match_seed,created_at) "
+            "VALUES(?,?,?,?,?,'',?,'pending',?,?,?,?,?,?,?,?,?)",
             (
                 match_id,
                 bot_a_id,
@@ -1598,6 +1700,9 @@ class ExecutionRepository:
                 job.get("contest_id"),
                 job["match_type"],
                 gid,
+                job["ruleset_version"],
+                job["protocol_version"],
+                job["rating_pool_id"],
                 json.dumps(config, ensure_ascii=False, separators=(",", ":")),
                 job.get("human_user_id"),
                 job.get("human_seat"),
@@ -1615,11 +1720,12 @@ class ExecutionRepository:
         )
         conn.execute(
             "INSERT INTO match_rating_policies("
-            "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,classified_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "match_id,game_id,rating_pool_id,bot_a_id,bot_b_id,rated,"
+            "rating_reason,source,classified_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 match_id,
                 gid,
+                job["rating_pool_id"],
                 bot_a_id,
                 bot_b_id,
                 int(job["rated"]),
@@ -1692,6 +1798,33 @@ class ExecutionRepository:
                     break
                 for job in queued:
                     if int(job["id"]) in invalid_job_ids:
+                        continue
+                    active_contract = _active_game_contract_tx(
+                        conn, str(job["game_id"])
+                    )
+                    frozen_contract = {
+                        "ruleset_version": str(job.get("ruleset_version") or ""),
+                        "protocol_version": str(job.get("protocol_version") or ""),
+                        "rating_pool_id": str(job.get("rating_pool_id") or ""),
+                    }
+                    if frozen_contract != active_contract:
+                        terminal = _now()
+                        conn.execute(
+                            "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+                            "terminal_reason='ruleset_retired',"
+                            "last_error='ruleset_retired',terminal_at=? "
+                            "WHERE id=? AND status='queued'",
+                            (terminal, int(job["id"])),
+                        )
+                        if job.get("auto_decision_id") is not None:
+                            conn.execute(
+                                "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                                "terminal_reason='ruleset_retired',terminal_at=? "
+                                "WHERE id=? AND lifecycle='queued'",
+                                (terminal, int(job["auto_decision_id"])),
+                            )
+                        self._backoff_contest_pairing_tx(conn, job)
+                        invalid_job_ids.add(int(job["id"]))
                         continue
                     try:
                         from bzplat.backend.runtime.limits import (
@@ -1779,6 +1912,7 @@ class ExecutionRepository:
                                 agent_id=agent_id,
                                 bot_id=bot_id,
                                 game_id=str(job["game_id"]),
+                                expected_protocol=str(job["protocol_version"]),
                                 request_owner_id=job.get("owner_user_id"),
                                 enforce_request_owner=True,
                             ):
@@ -1792,6 +1926,8 @@ class ExecutionRepository:
                             conn,
                             bot_id=bot_id,
                             version_id=version_id,
+                            expected_game_id=str(job["game_id"]),
+                            expected_protocol=str(job["protocol_version"]),
                         ):
                             invalid_versions.append((bot_id, version_id))
                     if invalid_agents:
@@ -1877,7 +2013,10 @@ class ExecutionRepository:
                             continue
                     if job["source"] == EXECUTION_SOURCE_CONTEST:
                         pairing = conn.execute(
-                            "SELECT p.*,c.status AS contest_status,c.starts_at "
+                            "SELECT p.*,c.status AS contest_status,c.starts_at,"
+                            "c.ruleset_version AS contest_ruleset_version,"
+                            "c.protocol_version AS contest_protocol_version,"
+                            "c.rating_pool_id AS contest_rating_pool_id "
                             "FROM contest_pairings p JOIN contests c ON c.id=p.contest_id "
                             "WHERE p.id=? AND p.contest_id=?",
                             (job["contest_pairing_id"], job["contest_id"]),
@@ -1904,6 +2043,12 @@ class ExecutionRepository:
                             == job["bot_a_version_id"]
                             and pairing["bot_b_version_id"]
                             == job["bot_b_version_id"]
+                            and pairing["contest_ruleset_version"]
+                            == job["ruleset_version"]
+                            and pairing["contest_protocol_version"]
+                            == job["protocol_version"]
+                            and pairing["contest_rating_pool_id"]
+                            == job["rating_pool_id"]
                         )
                         if (
                             pairing is None
@@ -2123,6 +2268,14 @@ class ExecutionRepository:
                 raise PermissionError("无权重试该执行请求")
             if job["status"] != EXECUTION_INTERRUPTED or not int(job["retryable"]):
                 raise ValueError("该执行请求当前不可重试")
+            active_contract = _active_game_contract_tx(conn, str(job["game_id"]))
+            frozen_contract = {
+                "ruleset_version": str(job["ruleset_version"] or ""),
+                "protocol_version": str(job["protocol_version"] or ""),
+                "rating_pool_id": str(job["rating_pool_id"] or ""),
+            }
+            if frozen_contract != active_contract:
+                raise ValueError("该执行请求使用的规则版本已退役")
             control = conn.execute(
                 "SELECT accepting,deployment_drain_requested "
                 "FROM execution_control WHERE singleton=1"

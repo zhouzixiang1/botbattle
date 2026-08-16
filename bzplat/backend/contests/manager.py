@@ -6,7 +6,7 @@ import json
 import logging
 from collections import Counter
 from datetime import datetime, timedelta
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from bzplat.backend.contests.stages import (
     PairingSpec,
@@ -48,6 +48,8 @@ from bzplat.backend.store.schema import (
 
 
 logger = logging.getLogger(__name__)
+
+EliminationAdvanceState = Literal["created", "champion", "blocked"]
 
 
 def _now() -> str:
@@ -186,6 +188,10 @@ class ContestManager:
                     if gid != template_gid:
                         raise ValueError(
                             f"模板 {template_id} 属于游戏 {template_gid}，不能用于游戏 {gid}"
+                        )
+                    if declared_template.get("creation_enabled", True) is False:
+                        raise ValueError(
+                            f"模板 {template_id} 已停用新建，仅供历史赛事展示"
                         )
             stage_list = stages
         else:
@@ -2057,8 +2063,23 @@ class ContestManager:
                 if await self._maybe_next_swiss_round(contest_id, stage_idx, stage):
                     return None  # 生成了下一轮，阶段未完成
             elif stype == "single_elimination":
-                if await self._maybe_next_elim_round(contest_id, stage_idx, stage):
+                elimination_state = await self._maybe_next_elim_round(
+                    contest_id, stage_idx, stage
+                )
+                if elimination_state == "created":
                     return None  # 生成了下一轮（半决赛/决赛），阶段未完成
+                if elimination_state == "blocked":
+                    # 淘汰赛已有 completed 和棋但没有权威晋级者。
+                    # 保持 running，不 snapshot/finish/advance，也不擅自重赛。
+                    return None
+                if elimination_state != "champion":  # pragma: no cover - typed guard
+                    logger.error(
+                        "unknown elimination advance state: contest=%s stage=%s state=%r",
+                        contest_id,
+                        stage_idx,
+                        elimination_state,
+                    )
+                    return None
 
         self._mark_stage_pairings_done(contest_id, stage_idx)
         self._snapshot_stage_results(contest_id, stage_idx)
@@ -2422,15 +2443,20 @@ class ContestManager:
 
     async def _maybe_next_elim_round(
         self, contest_id: int, stage_idx: int, stage: dict
-    ) -> bool:
-        """单败淘汰：当前轮完成后用胜者生成下一轮（半决赛/决赛）。返回是否生成了新一轮。
+    ) -> EliminationAdvanceState:
+        """单败淘汰进程的显式三态判定。
+
+        ``created`` 表示已原子生成下一轮；``champion`` 表示已有唯一
+        胜者；``blocked`` 表示当前轮无权威晋级者（含和棋）。调用方对
+        blocked 必须保持赛事 running，不得把它与“冠军已产生”共用一个
+        false 值。
 
         复现修复：500 人压测发现 KO 只跑四分之一就 finished——_stage_done 只看现有 pairing，
         但 single_elimination 只生成首轮，后续轮需根据胜者推进。
         """
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         if not pairings:
-            return False
+            return "blocked"
         max_round = max(int(p.get("round_num") or 1) for p in pairings)
         cur = [p for p in pairings if int(p.get("round_num") or 1) == max_round]
         # 当前轮全部完成
@@ -2443,14 +2469,14 @@ class ContestManager:
                 continue
             mid = p.get("match_id")
             if not mid:
-                return False
+                return "blocked"
             m = self.store.get_match(mid)
             if not m or m["status"] != STATUS_COMPLETED:
-                return False
+                return "blocked"
             w = m.get("winner")
-            if w is None:
+            if w not in (0, 1):
                 # 淘汰赛没有权威 winner 时不得以座位 0 兜底晋级。
-                # 显式阻塞，等待裁判/管理员按业务规则处理。
+                # 显式阻塞，不得擅定晋级者或重赛规则。
                 logger.error(
                     "elimination pairing has no adjudicated winner: "
                     "contest=%s pairing=%s match=%s",
@@ -2458,14 +2484,14 @@ class ContestManager:
                     p["id"],
                     mid,
                 )
-                return False
+                return "blocked"
             if w == 0:
                 winners.append((p["bot_a_id"], p.get("entry_a_id")))
             else:
                 winners.append((p["bot_b_id"], p.get("entry_b_id")))
         # 胜者 ≤1 → 已决出冠军，阶段真正完成
         if len(winners) <= 1:
-            return False
+            return "champion"
         # 用胜者生成下一轮（按 bracket_slot 顺序配对：相邻两胜者一组）
         key = stage.get("key") or f"stage{stage_idx}"
         next_round = max_round + 1
@@ -2522,7 +2548,7 @@ class ContestManager:
             expected_previous_max_round=max_round,
         )
         await self._dispatch_pending_locked(contest_id, stage_idx)
-        return True
+        return "created"
 
     async def _maybe_auto_resume(self, contest_id: int) -> dict | None:
         """maybe_finish 持锁链路调（rest→running 自动恢复）。调用方已持锁。"""

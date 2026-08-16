@@ -3,11 +3,13 @@
 验证：
 1. 各游戏的模板在自己包内（games/<game>/templates.py），spec 引用
 2. contests/templates.py 的 DEFAULT_TEMPLATES 从注册表派生（聚合各 spec.templates）
-3. 7 个内置模板完整（holdem×2 + gomoku×3[含 board_rr] + pencil×2）
+3. 历史模板仍可解析，``creation_enabled=false`` 不进新建列表
 4. get_template/list_templates/resolve_stages/resolve_template 经注册表派生工作
 5. 模板内容与历史一致（game_id/scoring/stages 结构）
 """
 from __future__ import annotations
+
+import pytest
 
 from bzplat.backend.contests.templates import (
     DEFAULT_TEMPLATES,
@@ -106,17 +108,27 @@ def test_get_template_unknown_returns_none():
     assert get_template("nonexistent") is None
 
 
-def test_list_templates_returns_all():
+def test_list_templates_returns_only_creation_enabled_by_default():
     tpls = list_templates()
-    assert len(tpls) == 10
-    assert {t["id"] for t in tpls} == set(DEFAULT_TEMPLATES.keys())
+    ids = {t["id"] for t in tpls}
+    assert len(tpls) == 8
+    assert ids == set(DEFAULT_TEMPLATES) - {
+        "gomoku_group_drr_ko",
+        "gomoku_swiss_ko",
+    }
+    assert {t["id"] for t in list_templates(include_disabled=True)} == set(
+        DEFAULT_TEMPLATES
+    )
 
 
-def test_resolve_stages_memory_fallback():
-    """无 store 时 resolve_stages 回退注册表派生的内存模板。"""
-    tid, gid, stages = resolve_stages("gomoku_swiss_ko")
-    assert tid == "gomoku_swiss_ko" and gid == "gomoku"
-    assert len(stages) == 2  # swiss + ko
+def test_disabled_gomoku_ko_templates_remain_readable_but_cannot_resolve_new():
+    historical = get_template("gomoku_swiss_ko")
+    assert historical is not None
+    assert historical["creation_enabled"] is False
+    with pytest.raises(ValueError, match="已停用新建"):
+        resolve_stages("gomoku_swiss_ko")
+    with pytest.raises(ValueError, match="已停用新建"):
+        resolve_template("gomoku_group_drr_ko")
 
 
 def test_resolve_template_with_match_config():

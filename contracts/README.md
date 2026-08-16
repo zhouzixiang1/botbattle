@@ -14,6 +14,7 @@ JSON 值，但只有正式 Bot-vs-Bot 对局会在终态后把它作为有界、
 上传预检丢弃它。`data` / `globaldata` 等其他顶层键始终丢弃。只有 `response` 进入历史、
 后续请求、裁判和结果。
 
-当前 JSON Schema 覆盖 Holdem；Gomoku / Pencil 共用相同的严格外层信封，其
-`response` payload 为 `{"x":int,"y":int}`，详见协议 Wiki。上传预检与正式首回合
-使用同一信封和严格规则。
+当前 JSON Schema 覆盖 Holdem；Gomoku / Pencil 共用相同的严格外层信封，
+但 payload 由各游戏自己定义。Pencil `response` 为 `{"x":int,"y":int}`；Gomoku 已升级为
+`gomoku_action_v2` 的分阶段 `action` 判别联合，旧 x/y-only 版本已退役，详见协议 Wiki。
+上传预检与正式首回合使用同一信封和严格规则。

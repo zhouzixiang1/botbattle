@@ -709,13 +709,14 @@ def test_bot_upload_rejects_non_elf_before_creating_user_data(tmp_path, payload)
 
     store = Store(str(tmp_path / "upload.db"))
     owner = store.create_user("elfowner", "elfowner@example.com", "hash")
-    manager = BotManager(store, upload_root=tmp_path / "uploads")
+    upload_root = tmp_path / "uploads"
+    manager = BotManager(store, upload_root=upload_root)
 
     with pytest.raises(BotError, match="仅支持 Linux x86_64 ELF") as failure:
         manager.create_from_upload(owner["id"], "badbot", payload)
     assert failure.value.code == "unsupported_binary"
     assert store.get_bot_by_owner_name(owner["id"], "badbot") is None
-    assert list((tmp_path / "uploads").iterdir()) == []
+    assert not upload_root.exists() or not any(upload_root.iterdir())
 
 
 @pytest.mark.parametrize("game_id", ["holdem", "gomoku", "pencil"])

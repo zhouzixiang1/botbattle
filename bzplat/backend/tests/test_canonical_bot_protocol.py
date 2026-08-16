@@ -22,7 +22,7 @@ from bzplat.backend.store.schema import DEFAULT_RUNTIME_MODE
 
 VALID_LINES = {
     "holdem": '{"response":0}',
-    "gomoku": '{"response":{"x":0,"y":0}}',
+    "gomoku": '{"response":{"action":"opening","white2":{"x":7,"y":8},"black3":{"x":8,"y":8},"n":2}}',
     "pencil": '{"response":{"x":0,"y":1}}',
 }
 
@@ -93,6 +93,12 @@ def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
         from bzplat.backend.games.holdem.engine import DEFAULT_HANDS
 
         assert transport.sent[0]["requests"][0]["max_hand"] == DEFAULT_HANDS == 70
+    elif game_id == "gomoku":
+        request = transport.sent[0]["requests"][0]
+        assert request["protocol_version"] == 2
+        assert request["ruleset"] == "gomoku_ccgc_2013_v1"
+        assert request["phase"] == "opening_proposal"
+        assert request["fixed_black1"] == {"x": 7, "y": 7}
     elif game_id == "pencil":
         assert transport.sent[0]["requests"][0] == {
             "x": -1,
@@ -268,8 +274,8 @@ class _TraditionalLifecycleTransport:
         return sid
 
     async def send(self, _sid, _line, *, timeout):
-        # 第一个决策格式合法但坐标越界，裁判立即结束，足以审计启动次数。
-        return '{"response":{"x":999,"y":999}}'
+        # v2 格式合法但指定开局越界，裁判立即结束，足以审计启动次数。
+        return '{"response":{"action":"opening","white2":{"x":0,"y":0},"black3":{"x":999,"y":999},"n":2}}'
 
     async def stop_session(self, sid):
         self.stopped.append(sid)
@@ -286,7 +292,7 @@ def test_traditional_match_prepares_history_without_idle_processes():
             runtime_modes=("traditional", "traditional"),
         )
     )
-    assert result.reason == "illegal"
+    assert result.reason == "illegal_opening"
     assert transport.prepared == ["/bots/a.bin", "/bots/b.bin"]
     assert transport.started == ["/bots/a.bin"]
     assert len(transport.stopped) == 3  # 单次进程 + 双方逻辑会话
@@ -307,7 +313,7 @@ def test_traditional_human_match_prepares_history_without_idle_process():
             runtime_mode="traditional",
         )
     )
-    assert result.reason == "illegal"
+    assert result.reason == "illegal_opening"
     assert transport.prepared == ["/bots/a.bin"]
     assert transport.started == ["/bots/a.bin"]
     assert len(transport.stopped) == 2  # 单次进程 + 逻辑会话

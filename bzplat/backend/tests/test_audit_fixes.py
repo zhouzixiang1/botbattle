@@ -160,8 +160,8 @@ def test_delete_non_current_version_keeps_mirror(tmp_path):
     assert after["runtime_mode"] == "traditional", f"删非当前版本改了 runtime_mode: {after['runtime_mode']}"
 
 
-def test_delete_current_version_rolls_back_to_max(tmp_path):
-    """删当前版本时仍正确回退到 max 版本。"""
+def test_delete_current_version_requires_explicit_switch(tmp_path):
+    """当前版本不可删；先显式切换后才能删普通非当前版本。"""
     from bzplat.backend.store import Store
     store = Store(str(tmp_path / "t.db"))
     store.create_user("u01", "u@e.com", "hx")
@@ -170,8 +170,12 @@ def test_delete_current_version_rolls_back_to_max(tmp_path):
     store.add_bot_version(b["id"], binary_path="v1", format="elf", runtime_mode="traditional")
     store.add_bot_version(b["id"], binary_path="v2", format="elf", runtime_mode="longrunning")
     assert store.get_bot(b["id"])["current_version"] == 2
-    # 删当前 v2
-    store.delete_bot_version(b["id"], 2)
+    before = dict(store.get_bot(b["id"]))
+    with pytest.raises(ValueError, match="当前版本禁止删除"):
+        store.delete_bot_version(b["id"], 2)
     after = store.get_bot(b["id"])
-    assert after["current_version"] == 1
-    assert after["runtime_mode"] == "traditional"  # 回退到 v1 的模式
+    assert after["current_version"] == before["current_version"] == 2
+    assert after["binary_path"] == before["binary_path"]
+    store.set_current_version(b["id"], 1)
+    assert store.delete_bot_version(b["id"], 2) is True
+    assert store.get_bot(b["id"])["current_version"] == 1

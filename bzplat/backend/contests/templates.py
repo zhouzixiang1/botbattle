@@ -76,15 +76,32 @@ def get_template(template_id: str) -> dict[str, Any] | None:
     return copy.deepcopy(t) if t else None
 
 
-def list_templates(*, game_id: str | None = None) -> list[dict[str, Any]]:
-    """列出代码注册表中的内置模板；不读取历史数据库模板表。"""
+def list_templates(
+    *, game_id: str | None = None, include_disabled: bool = False
+) -> list[dict[str, Any]]:
+    """列出代码注册表中可新建的内置模板。
+
+    ``creation_enabled=false`` 的模板只供历史赛事和演示快照解析；
+    ``get_template`` 仍可读，但默认列表不对新建入口暴露。
+    """
     templates = _get_default_templates().values()
     if game_id is not None:
         from bzplat.backend.games import normalize_game_id
 
         gid = normalize_game_id(game_id)
         templates = (t for t in templates if t.get("game_id") == gid)
+    if not include_disabled:
+        templates = (
+            t for t in templates if t.get("creation_enabled", True) is not False
+        )
     return [copy.deepcopy(t) for t in templates]
+
+
+def _require_creation_enabled(template_id: str, template: dict[str, Any]) -> None:
+    if template.get("creation_enabled", True) is False:
+        raise ValueError(
+            f"模板 {template_id} 已停用新建，仅供历史赛事展示"
+        )
 
 
 def resolve_stages(
@@ -98,6 +115,10 @@ def resolve_stages(
         if not stages:
             raise ValueError("自定义 stages 须为非空数组")
         tid = "custom" if template_id is None else template_id
+        if template_id is not None:
+            declared = get_template(template_id)
+            if declared is not None:
+                _require_creation_enabled(template_id, declared)
         if not isinstance(game_id, str) or not game_id.strip():
             raise ValueError("自定义阶段必须明确指定 game_id")
         from bzplat.backend.games import normalize_game_id
@@ -108,6 +129,7 @@ def resolve_stages(
     tpl = get_template(tid)
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
+    _require_creation_enabled(tid, tpl)
     from bzplat.backend.games import normalize_game_id
 
     template_game_id = normalize_game_id(tpl["game_id"])
@@ -130,6 +152,7 @@ def resolve_template(
     tpl = None
     base = get_template(tid)
     if base:
+        _require_creation_enabled(tid, base)
         tpl = {
             "game_id": base["game_id"],
             "stages": base["stages"],

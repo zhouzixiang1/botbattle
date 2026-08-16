@@ -1664,7 +1664,7 @@ test('Holdem production replay uses empty space for a responsive current-positio
   await page.setViewportSize({ width: 1536, height: 900 })
   await page.goto(`/#/match/${matchId}`)
   const overview = page.getByTestId('holdem-position-overview')
-  const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
+  const canvas = page.getByRole('img', { name: '德州扑克对局画面' })
   const timeline = page.getByTestId('match-timeline')
   await page.getByRole('button', { name: /直接查看最终结果/ }).click()
   // 回退到终局前的 settle：座位状态必须是本手结果，
@@ -1881,7 +1881,7 @@ test('human Holdem reuses the public-position HUD without exposing hole-card tex
   await page.setViewportSize({ width: 1920, height: 1080 })
   await page.goto(`/#/play/${matchId}`)
   const overview = page.getByTestId('holdem-position-overview')
-  const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
+  const canvas = page.getByRole('img', { name: '德州扑克对局画面' })
   const eventLog = page.getByTestId('human-event-log')
   const matchup = page.getByTestId('human-matchup')
   await expect(overview).toContainText('当前手 70 / 70')
@@ -2220,7 +2220,7 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await page.getByRole('button', { name: /直接查看最终结果，跳过剩余 1 个回放事件/ }).click()
   await expect(page.getByText('事件 9/9', { exact: true })).toBeVisible()
 
-  const canvas = page.getByRole('img', { name: 'holdem 对局画面' })
+  const canvas = page.getByRole('img', { name: '德州扑克对局画面' })
   const canvasBox = await canvas.boundingBox()
   const timelineBox = await page.getByTestId('match-timeline').boundingBox()
   const resultCardBox = await page.getByTestId('match-result-card').boundingBox()
@@ -3046,8 +3046,8 @@ test('Pencil human canvas rejects the production box-center click and stays squa
 
   await page.setViewportSize({ width: 1312, height: 700 })
   await page.goto(`/#/play/${matchId}`)
-  await expect(page.getByText('轮到你连边', { exact: true })).toBeVisible()
-  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  await expect(page.getByRole('region', { name: '人类对战状态' })).toContainText('轮到你连边')
+  const canvas = page.locator('canvas[aria-label^="点格棋对局画面"]')
   const eventLog = page.getByTestId('human-event-log')
   const overview = page.getByTestId('pencil-position-overview')
   const matchup = page.getByTestId('human-matchup')
@@ -3200,8 +3200,8 @@ test('Pencil human pass request disables the board and submits the only legal pa
   )
 
   await page.goto(`/#/play/${matchId}`)
-  await expect(page.getByText('轮到你确认让行', { exact: true })).toBeVisible()
-  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  await expect(page.getByRole('region', { name: '人类对战状态' })).toContainText('轮到你确认让行')
+  const canvas = page.locator('canvas[aria-label^="点格棋对局画面"]')
   await expect(canvas).toHaveAttribute('data-pick-state', 'inactive')
   const edge = await pencilCanvasPoint(canvas, 5, 4)
   await canvas.click({ position: edge })
@@ -3251,7 +3251,7 @@ test('Pencil human canvas exposes legal edges to keyboard and screen-reader user
   )
 
   await page.goto(`/#/play/${matchId}`)
-  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  const canvas = page.locator('canvas[aria-label^="点格棋对局画面"]')
   await expect(canvas).toHaveAttribute('role', 'button')
   await expect(canvas).toHaveAttribute('tabindex', '0')
   await canvas.focus()
@@ -3306,7 +3306,7 @@ test('Pencil human canvas replaces an equal-length snapshot and finishes animati
   )
 
   await page.goto(`/#/play/${matchId}`)
-  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  const canvas = page.locator('canvas[aria-label^="点格棋对局画面"]')
   await expect(canvas).toBeVisible()
   sendServerEvent(eventsWithEdge(1, 0)[3])
   await expect(page.getByText('轮到你连边', { exact: false })).toBeVisible()
@@ -3409,7 +3409,7 @@ test('Pencil replay gives the square board priority while the timeline remains u
   // 1024px 高度模拟浏览器 chrome 进一步压缩后的网页可用区域。
   await page.setViewportSize({ width: 2048, height: 1024 })
   await page.goto(`/#/match/${matchId}`)
-  const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+  const canvas = page.locator('canvas[aria-label^="点格棋对局画面"]')
   const timeline = page.getByTestId('match-timeline')
   const overview = page.getByTestId('pencil-position-overview')
   await expect(canvas).toBeVisible()
@@ -4570,12 +4570,12 @@ test('unknown match game is an explicit unsupported state, never a Holdem replay
   await page.goto(`/#/match/${matchId}`)
   await expect(page.getByText('不支持的游戏（future_chess）').first()).toBeVisible()
   await expect(page.getByText('回放不可用：不支持的游戏（future_chess）')).toBeVisible()
-  await expect(page.getByRole('img', { name: /holdem 对局画面/ })).toHaveCount(0)
+  await expect(page.getByRole('img', { name: /德州扑克对局画面/ })).toHaveCount(0)
   expect(replayRequests).toBe(0)
   await monitor.expectClean(expectedDetailCancellations())
 })
 
-test('Gomoku human canvas serializes its canonical response envelope', async ({ page }) => {
+test('Gomoku human canvas serializes its v2 move response envelope', async ({ page }) => {
   const monitor = monitorBrowser(page)
   const matchId = 'mock-gomoku-human-action'
   let sentAction: Record<string, unknown> | null = null
@@ -4597,22 +4597,41 @@ test('Gomoku human canvas serializes its canonical response envelope', async ({ 
           bot_b: { owner_name: 'tester2', is_human: true },
         },
         events: [
-          { type: 'match_start', size: 15 },
-          { type: 'turn', player: 1 },
-          { type: 'your_turn', player: 1, request: { x: -1, y: -1, me: 1 } },
+          {
+            type: 'match_start', size: 15, ruleset: 'gomoku_ccgc_2013_v1',
+            protocol_version: 2, time_budget_per_side: 900,
+          },
+          { type: 'turn', player: 1, color: 1, phase: 'normal_play', pass_allowed: true },
+          {
+            type: 'your_turn',
+            player: 1,
+            request: {
+              protocol_version: 2,
+              ruleset: 'gomoku_ccgc_2013_v1',
+              phase: 'normal_play',
+              me: 1,
+              color: 1,
+              seat_colors: [0, 1],
+              board: Array.from({ length: 15 }, () => Array(15).fill(-1)),
+              pass_allowed: true,
+            },
+          },
         ],
       }))
     }, 0)
   })
 
   await page.goto(`/#/play/${matchId}`)
-  await expect(page.getByText('轮到你落子')).toBeVisible()
-  const canvas = page.getByRole('img', { name: 'gomoku 对局画面' })
+  await expect(page.getByText('轮到你落子或 PASS')).toBeVisible()
+  const canvas = page.getByRole('button', { name: /五子棋对局画面/ })
   await expect(canvas).toBeVisible()
-  await canvas.click({ position: { x: 300, y: 240 } })
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  await canvas.click({ position: { x: box!.width * 0.5, y: box!.height * 0.55 } })
   await expect.poll(() => sentAction).not.toBeNull()
   expect(Object.keys(sentAction!)).toEqual(['response'])
-  expect(Object.keys(sentAction!.response as Record<string, unknown>).sort()).toEqual(['x', 'y'])
+  expect(Object.keys(sentAction!.response as Record<string, unknown>).sort()).toEqual(['action', 'x', 'y'])
+  expect((sentAction!.response as Record<string, unknown>).action).toBe('move')
   expect(Number.isInteger((sentAction!.response as Record<string, unknown>).x)).toBe(true)
   expect(Number.isInteger((sentAction!.response as Record<string, unknown>).y)).toBe(true)
   await monitor.expectClean()
@@ -4671,7 +4690,7 @@ test('real Pencil human play accepts several canvas-picked edges without illegal
     const startResponse = await startResponsePromise
     matchId = await waitForAcceptedExecutionMatch(page, startResponse, 'human')
 
-    const canvas = page.locator('canvas[aria-label^="pencil 对局画面"]')
+    const canvas = page.locator('canvas[aria-label^="点格棋对局画面"]')
     await expect(canvas).toBeVisible({ timeout: 20_000 })
 
     const waitForEdgeTurn = async () => {

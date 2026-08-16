@@ -83,12 +83,13 @@ def test_protocols_are_independent_modules():
     for p in (gproto, pproto, hproto):
         assert callable(p.dumps_request)
         assert callable(p.loads_response)
-    assert hasattr(gproto, "build_gomoku_request")
+    assert hasattr(gproto, "build_request")
     assert not hasattr(gproto, "build_pencil_request")
     assert hasattr(pproto, "build_pencil_request")
     assert not hasattr(pproto, "build_gomoku_request")
-    assert gproto.dumps_request is pproto.dumps_request
-    assert gproto.parse_xy is pproto.parse_xy
+    # Gomoku v2 是分阶段动作协议，不再复用 Pencil 的 x/y payload。
+    assert not hasattr(gproto, "parse_xy")
+    assert hasattr(gproto, "parse_action")
 
 
 # ── spec 引用本包（不经旧 engine./protocol. 路径）──────────────
@@ -123,17 +124,22 @@ def test_run_session_holdem_via_registry():
 def test_run_session_gomoku_via_registry():
     from bzplat.backend.games import run_session
 
-    black = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
-    white = [(1, 0), (1, 1), (1, 2), (1, 3)]
-    bi = wi = 0
+    normal = {0: iter([(10, 10), (11, 11)]), 1: iter([(0, 0), (0, 1)])}
 
     async def decide(player, req):
-        nonlocal bi, wi
-        if player == 0:
-            x, y = black[bi]; bi += 1
-        else:
-            x, y = white[wi]; wi += 1
-        return {"response": {"x": x, "y": y}}
+        phase = req["phase"]
+        if phase == "opening_proposal":
+            return {"response": {"action": "opening", "white2": {"x": 7, "y": 8}, "black3": {"x": 8, "y": 8}, "n": 2}}
+        if phase == "swap_choice":
+            return {"response": {"action": "swap", "swap": False}}
+        if phase == "white4":
+            return {"response": {"action": "move", "x": 6, "y": 8}}
+        if phase == "black5_candidates":
+            return {"response": {"action": "black5_candidates", "points": [{"x": 9, "y": 9}, {"x": 5, "y": 5}]}}
+        if phase == "black5_select":
+            return {"response": {"action": "black5_select", "index": 0}}
+        x, y = next(normal[player])
+        return {"response": {"action": "move", "x": x, "y": y}}
 
     result = asyncio.run(run_session("gomoku", decide))
     assert result.winner == 0 and result.reason == "five"

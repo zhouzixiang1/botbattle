@@ -262,7 +262,7 @@ export default function BotVersionManager({
     if (v.version === (curVer ?? currentVersion)) return
     const ok = await confirm({
       title: `回滚到 v${v.version}?`,
-      desc: `将把当前版本切换为 v${v.version}（运行模式: ${v.runtime_mode}）。其他版本保留，可随时再切回。`,
+      desc: `将把当前版本切换为 v${v.version}（运行模式: ${v.runtime_mode}）。其他兼容版本仍会保留；已退役协议版本不能恢复。`,
       danger: true,
     })
     // 用户确认期间可能已经关掉 A 并打开 B；绝不能把 A 的版本号发给 B。
@@ -304,7 +304,7 @@ export default function BotVersionManager({
             {botName && <EntityName lines={2} tooltip={botName} className="min-w-0 text-sm">{botName}</EntityName>}
           </DialogTitle>
           <DialogDescription>
-            上传新版本、查看历史、回滚到任意旧版本。每版本独立标明 Botzone 运行模式，回滚时恢复。
+            上传新版本、查看历史，并切换到当前协议兼容的版本。已退役协议版本仅保留审计记录，不能恢复。
           </DialogDescription>
         </DialogHeader>
 
@@ -371,7 +371,7 @@ export default function BotVersionManager({
         </form>
         </DataRegion>
 
-        <DataRegion title="版本历史" description="版本号是该 Bot 内部的业务序列，可随时切换。">
+        <DataRegion title="版本历史" description="版本号是该 Bot 内部的业务序列；只有当前协议兼容版本可以切换。">
           {loading ? (
             <Loading text="加载中…" />
           ) : loadError ? (
@@ -391,7 +391,11 @@ export default function BotVersionManager({
                       <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm font-medium text-foreground">
                         <span>v{v.version}</span>
                         {isCurrent && <Badge variant="default">当前</Badge>}
-                        {v.runnable === false && <Badge variant="destructive">不可运行</Badge>}
+                        {v.runnable === false && (
+                          <Badge variant="destructive">
+                            {v.unsupported_reason === '该版本已退役' ? '已退役' : '不可运行'}
+                          </Badge>
+                        )}
                       </div>
                       <div className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span>{fmtTime(v.uploaded_at)}</span>

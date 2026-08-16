@@ -15,7 +15,7 @@
  * 通用组件（MatchBoard 等）经 getGame(id) 取 spec，不再 if game_id 分支。
  * 新增一款游戏 = 建 src/games/<game>/ 子包 + index.ts 注册一行。
  */
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import type { GameCanvasRenderer, SeatInfo } from './canvas-types'
 
@@ -41,6 +41,27 @@ export interface HumanActionPanelProps {
   onSubmit: (action: HumanActionEnvelope) => void
 }
 
+/**
+ * 需要在棋盘上先编辑一个动作草稿的游戏（例如指定开局、N 个候选点）可以接管
+ * 「棋盘 + 操作区」。通用 HumanPlay 仍只拥有连接、回合锁和提交；游戏组件只
+ * 解释自己的 request，并最终提交标准 HumanActionEnvelope。
+ */
+export interface HumanTurnSurfaceProps extends HumanActionPanelProps {
+  gameId: string
+  events: RawEvent[]
+  seats?: SeatInfo[]
+  revealMode?: 'all' | 'showdown'
+  /**
+   * 由通用页注入棋盘渲染入口，避免游戏动作组件反向 import 注册表并形成循环依赖。
+   * 游戏可以追加仅用于本地预览的草稿事件；权威 events 始终由 HumanPlay 持有。
+   */
+  renderBoard: (options: {
+    events?: RawEvent[]
+    onMove?: (x: number, y: number) => void
+    interactive?: boolean
+  }) => ReactNode
+}
+
 /** HUD/摘要只拿归约结果与通用座位身份，不让页面依赖具体 ViewModel。 */
 export interface GameAuxiliaryProps {
   vm: unknown
@@ -62,6 +83,8 @@ export interface HumanPlayViewSpec {
   invalidBoardPickMessage?: string
   /** 非画布动作（如扑克，或棋类协议的让行）由游戏包提供完整输入组件及序列化。 */
   ActionPanel?: ComponentType<HumanActionPanelProps>
+  /** 多点/多阶段棋盘动作由游戏包接管完整输入面；页面不得按 game_id 猜协议。 */
+  TurnSurface?: ComponentType<HumanTurnSurfaceProps>
   /** 终局附加摘要；返回 null 表示该游戏无需额外摘要。 */
   endSummary?: (vm: unknown) => string | null
 }
@@ -154,6 +177,8 @@ export interface GameViewSpec {
   canvasFit?: 'container' | 'viewport'
   /** 座位着色（如 gomoku=['黑','白'], pencil=['红','蓝']）—— 取代渲染层按游戏名分支 */
   seatColors?: string[]
+  /** 动态座位身份（颜色交换等）；未声明时回退 seatColors。 */
+  seatDetail?: (vm: unknown | null, seat: number) => string | undefined
   /** 进度单位：hand=手数(扑克), move=步数(棋类) —— 取代 Home 等页面的游戏名分支 */
   progressUnit: 'hand' | 'move'
   /** 赛事等列表使用的固定对局规模文案。 */

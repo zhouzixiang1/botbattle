@@ -97,6 +97,11 @@ class GameSpec:
 
     game_id: str
     label: str
+    # 持久化代际：execution job/Match/评分池与 Bot version 均冻结这些值，
+    # 避免规则或协议升级后重新解释历史数据。
+    ruleset_id: str
+    protocol_version: str
+    rating_pool_id: str
 
     # 裁判引擎
     session_factory: SessionFactory
@@ -139,7 +144,7 @@ class GameSpec:
     # 返回 list[LegSpec]，每 leg 含 seat_swap（是否对调座位）+ 共享 params（deal_sequence 等）。
     build_match_plan: Callable[[int, dict[str, Any]], list[dict[str, Any]]] | None = None
     # 每方总时间预算（秒）；None=不限时（走原单步 action_timeout 超时）。
-    # 仅 pencil 设 900.0（象棋钟：每方累计 15 分钟，超时判负）。
+    # Gomoku/Pencil 设 900.0（每座位累计 15 分钟，超时判负）。
     time_budget_per_side: float | None = None
 
     def __post_init__(self) -> None:
@@ -150,6 +155,10 @@ class GameSpec:
         公开该游戏的权威纯规则 ``<game_id>_judge.py``。这既不在通用层枚举
         游戏名，也避免新游戏遗漏真正的规则实现。
         """
+        for field_name in ("ruleset_id", "protocol_version", "rating_pool_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} 必须是非空字符串")
         judge_file = f"{self.game_id}_judge.py"
         files = tuple(self.source_files) or (
             judge_file,
@@ -237,6 +246,9 @@ class GameRegistry:
             out.append({
                 "game_id": spec.game_id,
                 "label": spec.label,
+                "ruleset_id": spec.ruleset_id,
+                "protocol_version": spec.protocol_version,
+                "rating_pool_id": spec.rating_pool_id,
                 "code_path": spec.code_path,
                 "summary": spec.summary,
                 "source_files": list(spec.source_files),

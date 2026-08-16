@@ -344,9 +344,10 @@ export default function GameCanvas({
   const keyboardInteractive = Boolean(
     interactive && onMove && spec?.CanvasRenderer?.keyboardPicks,
   )
+  const gameName = spec?.label ?? String(gameId ?? '')
   const ariaLabel = keyboardInteractive
-    ? `${gameId ?? ''} 对局画面，方向键选择可用位置，回车提交${keyboardPick ? `，当前位置 (${keyboardPick.x},${keyboardPick.y})` : ''}`
-    : `${gameId ?? ''} 对局画面${interactive && onMove ? '，点击棋盘选择动作' : ''}`
+    ? `${gameName}对局画面，方向键选择合法位置，回车提交${keyboardPick ? `，当前位置 (${keyboardPick.x},${keyboardPick.y})` : ''}`
+    : `${gameName}对局画面${interactive && onMove ? '，点击棋盘选择动作' : ''}`
 
   return (
     <div
@@ -359,8 +360,14 @@ export default function GameCanvas({
         ref={canvasRef}
         // 宽度撑满父容器；高度按游戏声明的宽高比自动撑开。
         // 位图分辨率由上方 DPR effect 按 width/height 设定，不再用 maxWidth 封顶。
-        style={{ width: '100%', height: 'auto', aspectRatio: String(aspectRatio), display: 'block' }}
-        className={`${className ?? ''}${interactive && onMove
+        style={{
+          width: '100%',
+          height: 'auto',
+          aspectRatio: String(aspectRatio),
+          display: 'block',
+          touchAction: interactive && onMove ? 'manipulation' : 'auto',
+        }}
+        className={`${className ? `${className} ` : ''}rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50${interactive && onMove
           ? hoverState === 'invalid' ? ' cursor-not-allowed' : ' cursor-crosshair'
           : ''}`}
         data-pick-state={interactive && onMove ? hoverState : 'inactive'}

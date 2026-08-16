@@ -46,7 +46,7 @@ from bzplat.backend.store.schema import (
 logger = logging.getLogger(__name__)
 
 SEED_VERSION = "contest-showcase-v1"
-SHOWCASE_STRATEGY_VERSION = "gomoku-showcase-matrix-v2"
+SHOWCASE_STRATEGY_VERSION = "gomoku-showcase-matrix-v3"
 SHOWCASE_UPLOAD_BASENAME = "bot_uploads_showcase"
 SHOWCASE_UPLOAD_MARKER = ".botbattle-contest-showcase"
 SHOWCASE_UPLOAD_MARKER_CONTENT = f"{SEED_VERSION}\n"
@@ -54,6 +54,7 @@ ORGANIZER_USERNAME = "showcase_organizer"
 PLAYER_PREFIX = "showcase_player_"
 BOT_PREFIX = "showcase_gomoku_"
 SHOWCASE_GAME_ID = "gomoku"
+HISTORICAL_SHOWCASE_TEMPLATE_ID = "gomoku_group_drr_ko"
 PLAYER_COUNT = 12
 TARGET_STATUS = {
     "contest_lifecycle_draft": CONTEST_DRAFT,
@@ -83,20 +84,20 @@ SHOWCASE_PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "tactical": {
         "label": "战术型",
         "filename": "gomoku_showcase_tactical_linux_amd64",
-        "checksum": "ade0b2135d997925a66eead6312a9445f5fa22bc154770a2a5f62f250f284963",
-        "size": 785616,
+        "checksum": "b58e1cc3c8dece688332cec3b780da2d32d8fdfc7daf38baa4f3af981251ded7",
+        "size": 789760,
     },
     "steady": {
         "label": "稳健型",
         "filename": "gomoku_showcase_steady_linux_amd64",
-        "checksum": "39c3b1ecc86c77f6f600d5a6a9862e47e003ceb12efc997560b97b97258d0106",
-        "size": 785616,
+        "checksum": "895ee49576ef98a3f3001e6d980a49b66f32ec6ab7a88c29fb4f79dd1140e1e2",
+        "size": 789760,
     },
     "foundation": {
         "label": "基础型",
         "filename": "gomoku_showcase_foundation_linux_amd64",
-        "checksum": "7ea63c34bdd092a0bed86a4165829b18a3a0b7d6d846cffef2f216d6214c3f5f",
-        "size": 785616,
+        "checksum": "b33cc91ea5d6ff370414e8c9c2fca905d10032866a3560020b3d134132dac4bb",
+        "size": 789760,
     },
 }
 SHOWCASE_PLAYER_PROFILES = (
@@ -857,6 +858,49 @@ def _running_stages() -> list[dict[str, Any]]:
     ]
 
 
+def _create_historical_showcase_contest(
+    manager: ContestManager,
+    key: str,
+    organizer_id: int,
+    *,
+    starts_at: str | None,
+) -> dict[str, Any]:
+    """Create only the isolated, soon-to-be-frozen historical showcase graph.
+
+    The named Gomoku KO template remains readable for old contests but is not a
+    product creation option because a drawn elimination match has no sourced
+    tie-break rule.  Showcase snapshots intentionally preserve that historical
+    lifecycle, so they persist its validated stage snapshot through the low-level
+    Store API instead of weakening ``ContestManager.create`` for real contests.
+    """
+    from bzplat.backend.contests.templates import get_template
+    from bzplat.backend.contests.validation import validate_stage
+
+    template = get_template(HISTORICAL_SHOWCASE_TEMPLATE_ID)
+    if template is None or template.get("creation_enabled", True) is not False:
+        raise ShowcaseSeedError("历史演示模板契约异常")
+    raw_stages = (
+        _running_stages()
+        if key == "contest_lifecycle_running"
+        else template["stages"]
+    )
+    stages = [
+        validate_stage(stage, idx, SHOWCASE_GAME_ID)
+        for idx, stage in enumerate(raw_stages)
+    ]
+    return manager.store.create_contest(
+        TITLE[key],
+        organizer_id,
+        description=_description(key),
+        status=CONTEST_DRAFT,
+        template_id=HISTORICAL_SHOWCASE_TEMPLATE_ID,
+        game_id=SHOWCASE_GAME_ID,
+        stages_json=json.dumps(stages, ensure_ascii=False),
+        require_real_name=1 if key == "contest_lifecycle_open" else 0,
+        starts_at=starts_at,
+    )
+
+
 async def _ensure_roster(
     manager: ContestManager,
     contest: dict[str, Any],
@@ -1058,20 +1102,14 @@ async def _drive_contest(
 
     if existing is None:
         starts_at = None
-        stages = None
         if key == "contest_lifecycle_running":
             from datetime import datetime
 
             starts_at = datetime.now().isoformat(timespec="seconds")
-            stages = _running_stages()
-        existing = manager.create(
+        existing = _create_historical_showcase_contest(
+            manager,
+            key,
             int(organizer["id"]),
-            TITLE[key],
-            description=_description(key),
-            template_id="gomoku_group_drr_ko",
-            game_id=SHOWCASE_GAME_ID,
-            stages=stages,
-            require_real_name=1 if key == "contest_lifecycle_open" else 0,
             starts_at=starts_at,
         )
         emit(f"{key}：创建赛事 #{existing['id']}")
@@ -1278,7 +1316,7 @@ def _verify_showcase_integrity(store: Store, upload_root: Path) -> dict[str, Any
             raise ShowcaseSeedError(f"{key} 标题不符合 seed 契约")
         if contest.get("game_id") != SHOWCASE_GAME_ID:
             raise ShowcaseSeedError(f"{key} 游戏不是 {SHOWCASE_GAME_ID}")
-        if contest.get("template_id") != "gomoku_group_drr_ko":
+        if contest.get("template_id") != HISTORICAL_SHOWCASE_TEMPLATE_ID:
             raise ShowcaseSeedError(f"{key} 赛制模板异常")
         description = str(contest.get("description") or "")
         present_markers = [
@@ -1666,7 +1704,7 @@ def rollback_showcases(
             raise ShowcaseSeedError(f"赛事 #{contest['id']} 标题不符合 seed 契约")
         if (
             contest.get("game_id") != SHOWCASE_GAME_ID
-            or contest.get("template_id") != "gomoku_group_drr_ko"
+            or contest.get("template_id") != HISTORICAL_SHOWCASE_TEMPLATE_ID
         ):
             raise ShowcaseSeedError(f"赛事 #{contest['id']} 游戏/模板异常")
         if key is not None and contest.get("status") != TARGET_STATUS[marker_key]:

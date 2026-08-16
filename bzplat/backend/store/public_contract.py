@@ -37,14 +37,48 @@ READ_TECHNICAL_INCIDENT_EVENTS = (
 # the public projection before a new event type or field can cross REST/SSE/WS.
 _PUBLIC_EVENT_FIELDS: dict[str, frozenset[str]] = {
     "match_start": frozenset(
-        {"game_id", "num_hands", "n_dots", "size", "first", "scores", "leg"}
+        {
+            "game_id",
+            "num_hands",
+            "n_dots",
+            "size",
+            "first",
+            "scores",
+            "leg",
+            "ruleset",
+            "protocol_version",
+            "time_budget_per_side",
+        }
     ),
-    "turn": frozenset({"player", "last", "pass_", "scores", "leg"}),
+    "turn": frozenset(
+        {"player", "color", "phase", "last", "pass_", "pass_allowed", "scores", "leg"}
+    ),
     "move": frozenset(
-        {"player", "x", "y", "move_index", "scored", "scores", "closed_boxes", "leg"}
+        {
+            "player",
+            "color",
+            "phase",
+            "selected_by",
+            "x",
+            "y",
+            "move_index",
+            "scored",
+            "scores",
+            "closed_boxes",
+            "leg",
+        }
     ),
-    "illegal": frozenset({"player", "move", "why", "leg"}),
-    "pass": frozenset({"player", "leg"}),
+    "illegal": frozenset({"player", "phase", "action", "why", "leg"}),
+    "pass": frozenset({"player", "color", "move_index", "leg"}),
+    "opening": frozenset(
+        {"player", "opening_code", "n", "black1", "white2", "black3"}
+    ),
+    "swap": frozenset({"player", "swapped", "seat_colors"}),
+    "black5_candidates": frozenset({"player", "n", "points"}),
+    "black5_selected": frozenset({"player", "index", "point"}),
+    "forbidden": frozenset(
+        {"player", "color", "x", "y", "forbidden_kind"}
+    ),
     "hand_start": frozenset({"hand", "sb", "bb", "chips", "leg"}),
     "deal_hole": frozenset({"hand", "holes", "leg"}),
     "action": frozenset({"hand", "player", "action", "amount", "leg"}),
@@ -77,6 +111,18 @@ _PUBLIC_REQUEST_FIELDS = frozenset(
         "max_hand",
         "total_win_chips",
         "total_win_games",
+        "protocol_version",
+        "ruleset",
+        "phase",
+        "color",
+        "seat_colors",
+        "board",
+        "pass_allowed",
+        "fixed_black1",
+        "n_range",
+        "n",
+        "candidates",
+        "last",
     }
 )
 

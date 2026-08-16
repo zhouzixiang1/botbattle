@@ -124,6 +124,10 @@ class ExecutionDispatcher:
         self._lock_fd = None
 
     async def start(self) -> dict:
+        # Keep the dispatcher safe when embedded outside FastAPI as well.  The
+        # check precedes the singleton flock and every Docker cleanup/runtime
+        # call; offline Store/CLI use remains deliberately available.
+        self.store.assert_runtime_contracts_current()
         acquired_now = self._acquire_singleton()
         self._loop = asyncio.get_running_loop()
         try:

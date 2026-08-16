@@ -640,10 +640,12 @@ def test_showcase_profiles_are_checksum_pinned_and_deterministically_ranked():
             paths[a], paths[b], game_id="gomoku",
             runtime_modes=("longrunning", "longrunning"), seed=20260810,
         )
-        assert result.reason in {"five", "draw"}
+        assert result.reason in {"five", "double_pass", "board_full"}
         assert not [
             event for event in result.events
-            if event.get("type") in {"illegal", "technical_incident"}
+            if event.get("type") in {
+                "illegal", "forbidden", "technical_incident",
+            }
             or event.get("reason") in {"crash", "timeout", "protocol_error"}
         ]
         assert result.events[-1]["type"] == "match_end"

@@ -1,7 +1,7 @@
 """五子棋 GameSpec——引擎/协议/配置/模板统一声明。
 
-引擎/协议/结果已物理迁入本包（games/gomoku/）。protocol.py 只公开
-五子棋 API，棋类同构 JSON 原语由公开的 _board_protocol.py 唯一实现。
+引擎/协议/结果已物理迁入本包（games/gomoku/）。``protocol.py`` 只公开
+五子棋 v2 分阶段动作 API；旧坐标协议与 Pencil 的共享坐标原语不再适用。
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ _PROTOCOL = ProtocolSpec(
     dumps_request=proto.dumps_request,
     loads_response=proto.loads_response,
     validate_response_payload=proto.validate_response_payload,
-    fail_response=lambda: {"x": -99, "y": -99},  # 人类超时等游戏内兜底
+    fail_response=proto.fail_response,
 )
 
 
@@ -59,8 +59,8 @@ def _progress_from_events(events: list[dict[str, Any]]) -> int:
 
 def _eta_for_match(match_config: dict[str, Any]) -> int:
     _validate_match_params(match_config)
-    # gomoku 单局固定 ETA（无可调参数）
-    return 60
+    # 两个座位各有 900s 累计棋钟；ETA 取最坏棋钟上界。
+    return 1_800
 
 
 async def _preflight_check(
@@ -74,7 +74,15 @@ async def _preflight_check(
     from bzplat.backend.runtime.binary_runner import BotCrashedError, PlatformRunnerError
     import asyncio
 
-    req = proto.build_gomoku_request(x=-1, y=-1, me=0)
+    from bzplat.backend.games.gomoku.gomoku_judge import new_board
+
+    req = proto.build_request(
+        phase=proto.PHASE_OPENING,
+        me=0,
+        color=0,
+        board=new_board(),
+        seat_colors=[0, 1],
+    )
     try:
         payload = await botzone.preflight_exchange(
             binary_path,
@@ -84,10 +92,20 @@ async def _preflight_check(
             runtime_mode=runtime_mode,
             timeout=timeout,
         )
-        x, y = payload["x"], payload["y"]
-        if not (0 <= x < 15 and 0 <= y < 15):
-            return False, f"坐标越界: ({x},{y})"
-        return True, f"响应合法: ({x},{y})"
+        if payload.get("action") != proto.ACTION_OPENING:
+            return False, "首回合必须提交 opening 动作"
+        from bzplat.backend.games.gomoku.gomoku_judge import validate_opening
+
+        white2 = payload["white2"]
+        black3 = payload["black3"]
+        opening = validate_opening(
+            (white2["x"], white2["y"]),
+            (black3["x"], black3["y"]),
+            payload["n"],
+        )
+        if opening is None:
+            return False, "指定开局不属于合法 26 类，或 N 不在 2..5"
+        return True, f"v2 指定开局响应合法: {opening}"
     except PlatformRunnerError:
         raise
     except BotCrashedError as exc:
@@ -101,6 +119,9 @@ async def _preflight_check(
 SPEC = GameSpec(
     game_id=GAME_ID,
     label="五子棋",
+    ruleset_id=proto.RULESET_ID,
+    protocol_version="gomoku_action_v2",
+    rating_pool_id="gomoku_ccgc_2013_rating_v1",
     session_factory=_session_factory,
     protocol=_PROTOCOL,
     default_match_params={},
@@ -111,7 +132,8 @@ SPEC = GameSpec(
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/gomoku/engine.py",
-    summary="15×15；黑先；横竖斜连续≥5 即胜；无禁手。",
+    summary="15×15；26 种指定开局、三手交换、五手 N 打；黑方三三/四四/长连禁手；每方累计 15 分钟。",
     preflight_check=_preflight_check,
-    shared_source_files=("_board_protocol.py",),
+    source_files=("gomoku_judge.py", "forbidden.py", "engine.py", "protocol.py", "result.py"),
+    time_budget_per_side=900.0,
 )

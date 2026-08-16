@@ -322,7 +322,8 @@ Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例
 | Windows/macOS 本机运行 PyInstaller | 生成宿主系统格式 | 使用 `python:3.12-bookworm` + `--platform linux/amd64` |
 | 忘记换行或 flush | 决策超时并技术判负 | 每次输出完整行后立即 flush |
 | 顶层输出 `0` | `protocol_error` | 输出 `{"response":0}` |
-| 棋类输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
+| Pencil 输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
+| Gomoku 仍输出旧 `x/y` 动作 | `protocol_error` | 按请求 `phase` 输出 `gomoku_action_v2` 的分阶段 `action`；旧二进制已退役 |
 | Pencil ELF 启动后 8 秒无响应 | 未按 Botzone JSON 首回合通信 | 移除旧 SAU `name?/new/move/take` 文本入口；按上节读取完整信封，输出换行并 flush |
 | 附加顶层 `debug` | 正式 Bot 对战终局后按权限私有展示；预检丢弃 | 保持小而结构化，绝不放密码或 token；动作仍只由 `response` 决定 |
 | 附加 `data/globaldata` | 平台忽略 | 只有 `response` 与可选私有 `debug` 有定义 |
@@ -337,7 +338,7 @@ Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例
 - 日常挑战、自动排位、人机 Bot 侧与上传预检使用节能沙箱：每个 Bot 1 核、512 MiB、无网络、只读根文件系统，仅 `/tmp` 可写。
 - 锦标赛统一使用赛事沙箱：每个 Bot 2 核、2 GiB；参赛者不能在日常挑战中选择该档位，主机资源不足时赛事会等待，不会自动降档。
 - 本地 Bot 在用户自己的电脑运行，不占平台 Docker 资源；平台只负责裁判、排队、回放与技术判定。本地 Bot 对局不计排行榜，也不能参加锦标赛。
-- Holdem / Gomoku 使用平台固定的单步决策时限。
+- Holdem 使用平台固定的单步决策时限；Gomoku / Pencil 使用每座位 900 秒的累计棋钟。
 - Pencil 双方各有固定 900 秒累计棋钟；每次思考消耗同一份总预算。
 - 棋钟信息只用于页面展示和回放，不改变 Bot 输入协议。
 

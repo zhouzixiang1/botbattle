@@ -22,6 +22,7 @@ from bzplat.backend.tests.execution_helpers import (
     human_and_start,
     start_claimed_match,
 )
+from bzplat.backend.tests._gomoku_v2 import standard_response
 
 
 @pytest.fixture
@@ -241,28 +242,16 @@ def test_human_turn_registry_resolve_and_no_rating(store: Store):
     orch = _orch(store)
     done = asyncio.Event()
 
-    occupied: set[tuple[int, int]] = set()
-
     async def solver():
-        """模拟 WS：重建棋盘并始终提交 canonical 的合法空点。"""
+        """模拟 WS：按裁判给出的阶段提交 canonical v2 动作。"""
         for _ in range(500):
             for (mid, pidx), entry in list(orch._human_turns.items()):
                 if mid == mid_ref["id"] and not entry["future"].done():
                     request = entry["request"]
-                    last = (int(request.get("x", -1)), int(request.get("y", -1)))
-                    if last[0] >= 0 and last[1] >= 0:
-                        occupied.add(last)
-                    move = next(
-                        (x, y)
-                        for x in range(15)
-                        for y in range(15)
-                        if (x, y) not in occupied
-                    )
-                    occupied.add(move)
                     orch.resolve_human_turn(
                         mid,
                         pidx,
-                        {"response": {"x": move[0], "y": move[1]}},
+                        standard_response(request),
                     )
             if done.is_set():
                 return
@@ -283,8 +272,8 @@ def test_human_turn_registry_resolve_and_no_rating(store: Store):
 
     mm = asyncio.run(run())
     assert mm["status"] == "completed"
-    assert mm["reason"] in {"five", "draw"}
-    assert mm["result"]["rounds_played"] >= 9
+    assert mm["reason"] in {"five", "double_pass", "board_full"}
+    assert mm["result"]["rounds_played"] >= 5
     replay = store.get_replay(mm["id"])
     replay_events = json.loads(replay["events_json"])
     assert not [ev for ev in replay_events if ev.get("type") == "illegal"]
@@ -621,7 +610,9 @@ def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(
                 assert "动作协议错误" in rejection["message"]
                 assert resolved == []
 
-            ws.send_json({"response": {"x": 7, "y": 7}})
+            ws.send_json(
+                {"response": {"action": "move", "x": 7, "y": 7}}
+            )
             current_turn = ws.receive_json()
             assert current_turn["type"] == "reject"
             assert "当前非你的回合" in current_turn["message"]
@@ -630,7 +621,9 @@ def test_human_websocket_rejects_noncanonical_actions_without_resolving_turn(
         {
             "match_id": mid,
             "seat": 1,
-            "move": {"response": {"x": 7, "y": 7}},
+            "move": {
+                "response": {"action": "move", "x": 7, "y": 7}
+            },
         }
     ]
 

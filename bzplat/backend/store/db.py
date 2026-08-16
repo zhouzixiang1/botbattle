@@ -5,14 +5,17 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import secrets
 import sqlite3
+import stat
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from bzplat.backend.mail import seed_email_templates
@@ -64,6 +67,7 @@ from .schema import (
     MATCH_DEBUG_MAX_ENTRIES_PER_SEAT,
     MATCH_DEBUG_MAX_ENTRY_BYTES,
     VALID_RUNTIME_MODES,
+    game_rule_contract,
     require_supported_binary_metadata,
 )
 from .validation import validate_contest_times
@@ -107,8 +111,96 @@ class LocalAIAgentBusyError(ValueError):
     """A credential mutation would interrupt an active execution lease."""
 
 
+@dataclass
+class _OfflineCutoverGuard:
+    """Process-local proof that the DB dispatcher flock is exclusively held."""
+
+    store_identity: int | None
+    database_path: str
+    thread_id: int
+    active: bool = True
+
+
+@contextlib.contextmanager
+def offline_cutover_path_guard(database_path: str | os.PathLike[str]):
+    """Lock one DB path before opening a migration-capable :class:`Store`.
+
+    The CLI must acquire the same DB-adjacent flock as the dispatcher before
+    ``Store.__init__`` can execute schema migrations.  The returned proof is
+    deliberately unbound until the caller constructs and binds that exact
+    Store instance.
+    """
+
+    database = str(Path(database_path).expanduser().resolve())
+    lock_path = database + ".execution-dispatcher.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                "规则 hard cutover 仅允许停服冷切；dispatcher 仍在线"
+            ) from exc
+        guard = _OfflineCutoverGuard(
+            store_identity=None,
+            database_path=database,
+            thread_id=threading.get_ident(),
+        )
+        try:
+            yield guard
+        finally:
+            guard.active = False
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _version_in_cutover_manifest_tx(
+    conn: sqlite3.Connection, *, bot_id: int, version: int
+) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM protocol_cutovers cutover,"
+            "json_each(cutover.manifest_json) item "
+            "WHERE CAST(json_extract(item.value,'$.bot_id') AS INTEGER)=? "
+            "AND CAST(json_extract(item.value,'$.version') AS INTEGER)=? LIMIT 1",
+            (int(bot_id), int(version)),
+        ).fetchone()
+    )
+
+
+def _cutover_audit_version_count_tx(
+    conn: sqlite3.Connection,
+    *,
+    bot_id: int | None = None,
+    owner_id: int | None = None,
+) -> int:
+    filters: list[str] = []
+    params: list[int] = []
+    if bot_id is not None:
+        filters.append("version.bot_id=?")
+        params.append(int(bot_id))
+    if owner_id is not None:
+        filters.append("bot.owner_id=?")
+        params.append(int(owner_id))
+    if not filters:
+        raise ValueError("cutover audit version scope required")
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM bot_versions version "
+        "JOIN bots bot ON bot.id=version.bot_id WHERE "
+        + " AND ".join(filters)
+        + " AND (version.retired_at IS NOT NULL OR EXISTS("
+        "SELECT 1 FROM protocol_cutovers cutover,"
+        "json_each(cutover.manifest_json) item "
+        "WHERE CAST(json_extract(item.value,'$.bot_id') AS INTEGER)=version.bot_id "
+        "AND CAST(json_extract(item.value,'$.version') AS INTEGER)=version.version))",
+        tuple(params),
+    ).fetchone()
+    return int(row["n"] if row else 0)
 
 
 _GLICKO_95_Z = 1.96
@@ -637,6 +729,9 @@ CREATE TABLE matches_{suffix} (
     match_type      TEXT    NOT NULL DEFAULT 'challenge',
     status          TEXT    NOT NULL DEFAULT 'pending',
     game_id         TEXT    NOT NULL,
+    ruleset_version TEXT    NOT NULL DEFAULT '',
+    protocol_version TEXT   NOT NULL DEFAULT '',
+    rating_pool_id  TEXT    NOT NULL DEFAULT '',
     match_config    TEXT    NOT NULL DEFAULT '{{}}',  -- 内部快照 JSON（Bot 版本/duplicate）；{{}} 经 .format 转义为字面空 JSON
     result          TEXT    NOT NULL DEFAULT '{{}}',  -- 对局结果详情 JSON（rounds_played/deltas/normalized_delta）
     human_user_id   INTEGER,
@@ -669,6 +764,25 @@ def _matches_table(game_id: str) -> str:
     """game_id → 对应的物理表名（matches_holdem/gomoku/pencil）。"""
     gid = _registered_game_id(game_id)
     return f"matches_{gid}"
+
+
+def _active_game_contract_tx(
+    conn: sqlite3.Connection, game_id: str
+) -> dict[str, str]:
+    """取当前已激活的持久化契约；缺失/空值一律 fail closed。"""
+    gid = _registered_game_id(game_id)
+    row = conn.execute(
+        "SELECT active_pool_id,ruleset_version,protocol_version "
+        "FROM rating_pool_state WHERE game_id=?",
+        (gid,),
+    ).fetchone()
+    if row is None or any(not str(row[key] or "").strip() for key in row.keys()):
+        raise RuntimeError(f"游戏 {gid} 的 active contract 缺失")
+    return {
+        "ruleset_version": str(row["ruleset_version"]),
+        "protocol_version": str(row["protocol_version"]),
+        "rating_pool_id": str(row["active_pool_id"]),
+    }
 
 
 def _all_game_ids() -> frozenset[str]:
@@ -820,6 +934,12 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
     rebuild command so the two paths cannot silently diverge on hash semantics.
     """
     issues: list[str] = []
+    active_pools = {
+        str(row["game_id"]): str(row["active_pool_id"])
+        for row in conn.execute(
+            "SELECT game_id,active_pool_id FROM rating_pool_state"
+        ).fetchall()
+    }
     sentinel = conn.execute(
         "SELECT match_id,settled_at,settled_order FROM match_rating_settlements "
         "WHERE match_id=?",
@@ -850,8 +970,9 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
     policies = {
         str(row["match_id"]): dict(row)
         for row in conn.execute(
-            "SELECT match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,"
-            "source,classified_at,settled_order FROM match_rating_policies"
+            "SELECT match_id,game_id,rating_pool_id,bot_a_id,bot_b_id,rated,"
+            "rating_reason,source,classified_at,settled_order "
+            "FROM match_rating_policies"
         ).fetchall()
     }
     settlement_by_id = {str(row["match_id"]): row for row in settlements}
@@ -886,6 +1007,12 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
         elif int(policy_order or -1) != int(settlement_order or -2):
             issues.append(f"rating policy/settlement order mismatch: {match_id}")
         game_id = str(policy.get("game_id") or "")
+        pool_id = str(policy.get("rating_pool_id") or "")
+        active_pool = active_pools.get(game_id)
+        if not pool_id:
+            issues.append(f"rating policy missing pool: {match_id}")
+        if active_pool is None:
+            issues.append(f"rating pool state missing: {game_id}")
         match_row: dict[str, Any] | None = None
         if game_id in _all_game_ids():
             raw = conn.execute(
@@ -922,9 +1049,14 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
             "settlement": settlement,
             "match": match_row,
         }
-        source_rows.append(source_row)
-        if settlement is not None:
-            settled_source_rows.append(source_row)
+        # Historical pools remain immutable audit input, but only the active
+        # pool contributes to the live leaderboard projection.  This is the
+        # boundary that prevents a later rebuild from silently reinterpreting
+        # pre-cutover games under the new ruleset.
+        if pool_id == active_pool:
+            source_rows.append(source_row)
+            if settlement is not None:
+                settled_source_rows.append(source_row)
 
     max_policy_order = max(
         (int(row["settled_order"]) for row in policies.values() if row.get("settled_order") is not None),
@@ -974,8 +1106,17 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
         "settled_plan_digest": rating_plan_digest(
             settled_source_digest, bot_universe_digest
         ),
-        "source_settlement_count": len(settlements),
-        "source_last_settled_order": max(orders, default=0),
+        "source_settlement_count": sum(
+            1 for row in settled_source_rows if row.get("settlement") is not None
+        ),
+        "source_last_settled_order": max(
+            (
+                int(row["settlement"]["settled_order"])
+                for row in settled_source_rows
+                if row.get("settlement") is not None
+            ),
+            default=0,
+        ),
         "sequence_next_order": next_order,
         "issues": sorted(set(issues)),
     }
@@ -1100,9 +1241,10 @@ def _install_rating_source_guards(conn: sqlite3.Connection) -> None:
         conn,
         "trg_match_rating_policy_source_immutable",
         "CREATE TRIGGER trg_match_rating_policy_source_immutable "
-        "BEFORE UPDATE OF match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+        "BEFORE UPDATE OF match_id,game_id,rating_pool_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
         "classified_at ON match_rating_policies WHEN "
         "OLD.match_id IS NOT NEW.match_id OR OLD.game_id IS NOT NEW.game_id OR "
+        "OLD.rating_pool_id IS NOT NEW.rating_pool_id OR "
         "OLD.bot_a_id IS NOT NEW.bot_a_id OR "
         "OLD.bot_b_id IS NOT NEW.bot_b_id OR OLD.rated IS NOT NEW.rated OR "
         "OLD.rating_reason IS NOT NEW.rating_reason OR OLD.source IS NOT NEW.source OR "
@@ -1338,6 +1480,14 @@ def _ensure_match_rating_policy_identity(conn: sqlite3.Connection) -> None:
     _add_col(conn, "match_rating_policies", "bot_a_id", "INTEGER")
     _add_col(conn, "match_rating_policies", "bot_b_id", "INTEGER")
     _add_col(conn, "match_rating_policies", "settled_order", "INTEGER")
+    # Legacy classification below inserts the frozen pool id for Matches that
+    # predate policy rows, so this column must exist before that pass.
+    _add_col(
+        conn,
+        "match_rating_policies",
+        "rating_pool_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )
     for gid in sorted(_all_game_ids()):
         table = _matches_table(gid)
         conn.execute(
@@ -1380,6 +1530,7 @@ def _classify_legacy_match_rating_policies(conn: sqlite3.Connection) -> None:
             "WHERE policy.match_id IS NULL"
         ).fetchall()
         for row in rows:
+            legacy_contract = game_rule_contract(gid, legacy=True)
             if row["match_type"] == TYPE_CONTEST:
                 rated, reason = False, "contest"
             elif row["match_type"] == TYPE_HUMAN:
@@ -1396,10 +1547,11 @@ def _classify_legacy_match_rating_policies(conn: sqlite3.Connection) -> None:
                 rated, reason = True, "eligible"
             conn.execute(
                 "INSERT INTO match_rating_policies("
-                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
-                "classified_at) VALUES(?,?,?,?,?,?,'legacy_migration',?)",
+                "match_id,game_id,rating_pool_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+                "classified_at) VALUES(?,?,?,?,?,?,?,'legacy_migration',?)",
                 (
-                    row["id"], gid, row["bot_a_id"], row["bot_b_id"],
+                    row["id"], gid, legacy_contract["rating_pool_id"],
+                    row["bot_a_id"], row["bot_b_id"],
                     1 if rated else 0, reason, classified_at,
                 ),
             )
@@ -1712,7 +1864,133 @@ def _ensure_execution_environment_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
+def _ensure_game_contract_state(
+    conn: sqlite3.Connection, *, fresh_schema: bool
+) -> None:
+    """为旧实体回填规则/协议/评分池契约。
+
+    旧库的 Gomoku 在显式 cutover 前必须保持 legacy；新库则直接
+    使用代码声明的 current contract。通用层只遍历声明表，不写
+    ``if game_id == ...`` 分支。
+    """
+    _add_col(
+        conn,
+        "protocol_cutovers",
+        "manifest_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    for table, columns in (
+        ("bots", (("protocol_version", "TEXT NOT NULL DEFAULT ''"),)),
+        (
+            "bot_versions",
+            (
+                ("protocol_version", "TEXT NOT NULL DEFAULT ''"),
+                ("retired_at", "TEXT"),
+                ("retirement_reason", "TEXT NOT NULL DEFAULT ''"),
+            ),
+        ),
+        ("local_ai_agents", (("protocol_version", "TEXT NOT NULL DEFAULT ''"),)),
+        (
+            "contests",
+            (
+                ("ruleset_version", "TEXT NOT NULL DEFAULT ''"),
+                ("protocol_version", "TEXT NOT NULL DEFAULT ''"),
+                ("rating_pool_id", "TEXT NOT NULL DEFAULT ''"),
+            ),
+        ),
+        (
+            "execution_jobs",
+            (
+                ("ruleset_version", "TEXT NOT NULL DEFAULT ''"),
+                ("protocol_version", "TEXT NOT NULL DEFAULT ''"),
+                ("rating_pool_id", "TEXT NOT NULL DEFAULT ''"),
+            ),
+        ),
+        (
+            "match_rating_policies",
+            (("rating_pool_id", "TEXT NOT NULL DEFAULT ''"),),
+        ),
+    ):
+        for column, declaration in columns:
+            _add_col(conn, table, column, declaration)
+
+    for game_id in sorted(_all_game_ids()):
+        contract = game_rule_contract(game_id, legacy=not fresh_schema)
+        conn.execute(
+            "INSERT OR IGNORE INTO rating_pool_state("
+            "game_id,active_pool_id,ruleset_version,protocol_version,activated_at) "
+            "VALUES(?,?,?,?,?)",
+            (
+                game_id,
+                contract["rating_pool_id"],
+                contract["ruleset_version"],
+                contract["protocol_version"],
+                _now(),
+            ),
+        )
+        historical = game_rule_contract(game_id, legacy=True)
+        for table in ("matches_" + game_id,):
+            for column, declaration in (
+                ("ruleset_version", "TEXT NOT NULL DEFAULT ''"),
+                ("protocol_version", "TEXT NOT NULL DEFAULT ''"),
+                ("rating_pool_id", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                _add_col(conn, table, column, declaration)
+        conn.execute(
+            "UPDATE bots SET protocol_version=? WHERE game_id=? "
+            "AND protocol_version=''",
+            (historical["protocol_version"], game_id),
+        )
+        conn.execute(
+            "UPDATE bot_versions SET protocol_version=? WHERE protocol_version='' "
+            "AND bot_id IN (SELECT id FROM bots WHERE game_id=?)",
+            (historical["protocol_version"], game_id),
+        )
+        conn.execute(
+            "UPDATE local_ai_agents SET protocol_version=? WHERE game_id=? "
+            "AND protocol_version=''",
+            (historical["protocol_version"], game_id),
+        )
+        conn.execute(
+            "UPDATE contests SET ruleset_version=?,protocol_version=?,rating_pool_id=? "
+            "WHERE game_id=? AND (ruleset_version='' OR protocol_version='' "
+            "OR rating_pool_id='')",
+            (
+                historical["ruleset_version"],
+                historical["protocol_version"],
+                historical["rating_pool_id"],
+                game_id,
+            ),
+        )
+        conn.execute(
+            f"UPDATE matches_{game_id} SET ruleset_version=?,protocol_version=?,"
+            "rating_pool_id=? WHERE ruleset_version='' OR protocol_version='' "
+            "OR rating_pool_id=''",
+            (
+                historical["ruleset_version"],
+                historical["protocol_version"],
+                historical["rating_pool_id"],
+            ),
+        )
+        conn.execute(
+            "UPDATE execution_jobs SET ruleset_version=?,protocol_version=?,"
+            "rating_pool_id=? WHERE game_id=? AND (ruleset_version='' "
+            "OR protocol_version='' OR rating_pool_id='')",
+            (
+                historical["ruleset_version"],
+                historical["protocol_version"],
+                historical["rating_pool_id"],
+                game_id,
+            ),
+        )
+        conn.execute(
+            "UPDATE match_rating_policies SET rating_pool_id=? WHERE game_id=? "
+            "AND rating_pool_id=''",
+            (historical["rating_pool_id"], game_id),
+        )
+
+
+def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
     """为已有库补列；必要时重建 contests 以放宽 status CHECK。"""
     tables = {
         r[0]
@@ -3188,6 +3466,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "'auto_match_reserve_slots','auto_match_placement_games',"
         "'auto_match_max_per_round','auto_match_daily_cap','auto_match_enabled')"
     )
+    _ensure_game_contract_state(conn, fresh_schema=fresh_schema)
     _install_rated_overlap_triggers(conn)
 
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
@@ -3281,7 +3560,7 @@ class Store:
         ).fetchone() is None
         with self._tx() as conn:
             conn.executescript(SCHEMA)
-            _migrate(conn)
+            _migrate(conn, fresh_schema=fresh_schema)
             if fresh_schema:
                 _certify_fresh_rating_projection(conn)
             seed_email_templates(conn, _now())
@@ -3320,6 +3599,38 @@ class Store:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    @contextlib.contextmanager
+    def offline_cutover_guard(self):
+        """Prove that no platform process owns this database's dispatcher.
+
+        The production ASGI process owns this exact flock from startup until
+        shutdown.  A hard ruleset cutover must hold it across asset staging and
+        the metadata transaction, so an online ``Store`` call cannot race an
+        upload, preflight, claim, or scheduler callback.
+        """
+
+        with offline_cutover_path_guard(self.path) as guard:
+            yield self.bind_offline_cutover_guard(guard)
+
+    def bind_offline_cutover_guard(
+        self, guard: _OfflineCutoverGuard
+    ) -> _OfflineCutoverGuard:
+        """Bind a pre-open path guard to this exact Store and thread."""
+
+        database = str(Path(self.path).expanduser().resolve())
+        if (
+            not isinstance(guard, _OfflineCutoverGuard)
+            or not guard.active
+            or guard.database_path != database
+            or guard.thread_id != threading.get_ident()
+            or guard.store_identity not in (None, id(self))
+        ):
+            raise RuntimeError(
+                "规则 hard cutover 缺少当前 Store 的停服独占 guard"
+            )
+        guard.store_identity = id(self)
+        return guard
 
     @staticmethod
     def _require_execution_admission_tx(
@@ -3884,7 +4195,7 @@ class Store:
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             bot = c.execute(
-                "SELECT b.id,b.owner_id,b.game_id,b.is_active,"
+                "SELECT b.id,b.owner_id,b.game_id,b.protocol_version,b.is_active,"
                 "u.is_active AS owner_active FROM bots b "
                 "JOIN users u ON u.id=b.owner_id WHERE b.id=?",
                 (int(bot_id),),
@@ -3895,6 +4206,9 @@ class Store:
                 raise ValueError("请先启用这个 Bot")
             if int(bot["owner_active"] or 0) != 1:
                 raise ValueError("账号已停用，不能创建本地 Bot 接入")
+            contract = _active_game_contract_tx(c, str(bot["game_id"]))
+            if str(bot["protocol_version"] or "") != contract["protocol_version"]:
+                raise ValueError("Bot 协议与当前游戏契约不一致")
             active_count = int(
                 c.execute(
                     "SELECT COUNT(*) FROM local_ai_agents "
@@ -3917,6 +4231,7 @@ class Store:
                     raise ValueError("本地 Bot 名称已存在")
                 changed = c.execute(
                     "UPDATE local_ai_agents SET public_id=?,bot_id=?,game_id=?,"
+                    "protocol_version=?,"
                     "token_hash=?,token_hint=?,status='active',"
                     "connection_generation=connection_generation+1,"
                     "connected_at=NULL,disconnected_at=NULL,last_seen_at=NULL,"
@@ -3925,6 +4240,7 @@ class Store:
                         public_id,
                         int(bot_id),
                         str(bot["game_id"]),
+                        contract["protocol_version"],
                         token_hash,
                         token_hint,
                         _now(),
@@ -3943,14 +4259,16 @@ class Store:
             try:
                 cur = c.execute(
                     "INSERT INTO local_ai_agents("
-                    "public_id,owner_id,bot_id,label,game_id,token_hash,token_hint,"
-                    "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'active',?,?)",
+                    "public_id,owner_id,bot_id,label,game_id,protocol_version,"
+                    "token_hash,token_hint,status,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,'active',?,?)",
                     (
                         public_id,
                         int(owner_id),
                         int(bot_id),
                         clean_label,
                         str(bot["game_id"]),
+                        contract["protocol_version"],
                         token_hash,
                         token_hint,
                         _now(),
@@ -4138,7 +4456,10 @@ class Store:
                 "SELECT a.owner_id,a.status,b.is_active AS bot_active,"
                 "u.is_active AS owner_active FROM local_ai_agents a "
                 "JOIN bots b ON b.id=a.bot_id JOIN users u ON u.id=a.owner_id "
-                "WHERE a.id=? AND a.public_id=?",
+                "JOIN rating_pool_state state ON state.game_id=a.game_id "
+                "WHERE a.id=? AND a.public_id=? AND a.game_id=b.game_id "
+                "AND a.protocol_version=b.protocol_version "
+                "AND state.protocol_version=a.protocol_version",
                 (int(agent_id), str(expected_public_id)),
             ).fetchone()
             if (
@@ -4186,9 +4507,12 @@ class Store:
             authorized = c.execute(
                 "SELECT 1 FROM local_ai_agents a "
                 "JOIN bots b ON b.id=a.bot_id JOIN users u ON u.id=a.owner_id "
+                "JOIN rating_pool_state state ON state.game_id=a.game_id "
                 "WHERE a.id=? AND a.status='active' "
                 "AND a.connection_generation=? AND a.connected_at IS NOT NULL "
-                "AND a.disconnected_at IS NULL AND b.is_active=1 AND u.is_active=1",
+                "AND a.disconnected_at IS NULL AND b.is_active=1 AND u.is_active=1 "
+                "AND a.game_id=b.game_id AND a.protocol_version=b.protocol_version "
+                "AND state.protocol_version=a.protocol_version",
                 (int(agent_id), int(generation)),
             ).fetchone()
             if authorized is None:
@@ -4210,9 +4534,12 @@ class Store:
             return c.execute(
                 "SELECT 1 FROM local_ai_agents a "
                 "JOIN bots b ON b.id=a.bot_id JOIN users u ON u.id=a.owner_id "
+                "JOIN rating_pool_state state ON state.game_id=a.game_id "
                 "WHERE a.id=? AND a.status='active' "
                 "AND a.connection_generation=? AND a.connected_at IS NOT NULL "
-                "AND a.disconnected_at IS NULL AND b.is_active=1 AND u.is_active=1",
+                "AND a.disconnected_at IS NULL AND b.is_active=1 AND u.is_active=1 "
+                "AND a.game_id=b.game_id AND a.protocol_version=b.protocol_version "
+                "AND state.protocol_version=a.protocol_version",
                 (int(agent_id), int(generation)),
             ).fetchone() is not None
 
@@ -4360,11 +4687,12 @@ class Store:
         now = _now()
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            contract = _active_game_contract_tx(c, game_id)
             projection_guard = self._rating_projection_mutation_guard_tx(c)
             cur = c.execute(
                 "INSERT INTO bots(owner_id, name, display_name, description, "
                 "os, arch, format, binary_path, is_builtin, is_active, game_id, runtime_mode, "
-                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "protocol_version,created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     owner_id,
                     name,
@@ -4378,6 +4706,7 @@ class Store:
                     is_active,
                     game_id,
                     runtime_mode,
+                    contract["protocol_version"],
                     now,
                     now,
                 ),
@@ -4392,6 +4721,542 @@ class Store:
             )
             self._advance_rating_projection_state_tx(c, projection_guard)
             return _row(c.execute("SELECT * FROM bots WHERE id=?", (bid,)).fetchone())
+
+    def get_active_game_contract(self, game_id: str) -> dict[str, str]:
+        """读取当前规则/协议/评分池契约的防御性副本。"""
+        with self._tx() as c:
+            return _active_game_contract_tx(c, game_id)
+
+    def _validated_cutover_binary_root(
+        self, supplied: str | os.PathLike[str]
+    ) -> Path:
+        """Validate the DB-adjacent asset root without following a symlink leaf."""
+
+        database = Path(self.path).expanduser().resolve()
+        expected = database.parent / "bot_uploads"
+        candidate = Path(
+            os.path.abspath(str(Path(supplied).expanduser()))
+        )
+        if candidate != expected:
+            raise ValueError(
+                "cutover 资产根目录必须是目标数据库旁的 canonical bot_uploads"
+            )
+        try:
+            info = candidate.lstat()
+        except (FileNotFoundError, OSError) as exc:
+            raise ValueError("canonical bot_uploads 根目录不存在") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError("canonical bot_uploads 不得是符号链接或非目录")
+        if int(info.st_uid) != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise ValueError(
+                "canonical bot_uploads 必须由当前用户持有且不可被 group/other 写入"
+            )
+        try:
+            if candidate.resolve(strict=True) != candidate:
+                raise ValueError("canonical bot_uploads 路径不得经过符号链接")
+        except OSError as exc:
+            raise ValueError("canonical bot_uploads 根目录不可读") from exc
+        return candidate
+
+    def _assert_protocol_cutover_postconditions_tx(
+        self,
+        c: sqlite3.Connection,
+        marker: sqlite3.Row,
+        *,
+        verify_assets: bool,
+        enforce_live_generation: bool,
+    ) -> None:
+        """Verify the durable hard-cutover generation without blocking evolution.
+
+        Marker versions are immutable audit evidence, but a later compatible
+        upload may legitimately become current and the target rating pool may
+        legitimately advance.  Conversely, a legacy-protocol version may never
+        become runnable again.
+        """
+
+        marker_data = dict(marker)
+        gid = _registered_game_id(str(marker_data.get("game_id") or ""))
+        manifest = _loads_json(marker_data.get("manifest_json"), default=None)
+        issues: list[str] = []
+        if not isinstance(manifest, list):
+            raise RuntimeError("cutover postcondition drift: manifest_json 损坏")
+        normalized_manifest = sorted(
+            [dict(entry) for entry in manifest],
+            key=lambda entry: int(entry.get("bot_id") or 0),
+        )
+        if _canonical_digest(normalized_manifest) != str(
+            marker_data.get("manifest_digest") or ""
+        ):
+            issues.append("manifest digest 不匹配")
+        if int(marker_data.get("bot_count") or -1) != len(normalized_manifest):
+            issues.append("marker bot_count 不匹配")
+
+        target = {
+            "ruleset_version": str(marker_data.get("to_ruleset") or ""),
+            "protocol_version": str(marker_data.get("to_protocol") or ""),
+            "rating_pool_id": str(marker_data.get("to_rating_pool") or ""),
+        }
+        source = {
+            "ruleset_version": str(marker_data.get("from_ruleset") or ""),
+            "protocol_version": str(marker_data.get("from_protocol") or ""),
+            "rating_pool_id": str(marker_data.get("from_rating_pool") or ""),
+        }
+        if enforce_live_generation and _active_game_contract_tx(c, gid) != target:
+            issues.append("active contract 不是 marker target")
+
+        root: Path | None = None
+        if verify_assets:
+            try:
+                root = self._validated_cutover_binary_root(
+                    Path(self.path).expanduser().resolve().parent / "bot_uploads"
+                )
+            except ValueError as exc:
+                issues.append(str(exc))
+
+        seen_bots: set[int] = set()
+        seen_paths: set[str] = set()
+        seen_inodes: set[tuple[int, int]] = set()
+        immutable_fields = (
+            "version",
+            "binary_path",
+            "checksum",
+            "size_bytes",
+            "os",
+            "arch",
+            "format",
+            "runtime_mode",
+            "upload_note",
+        )
+        for entry in normalized_manifest:
+            try:
+                bot_id = int(entry["bot_id"])
+                version = int(entry["version"])
+            except (KeyError, TypeError, ValueError):
+                issues.append("manifest bot_id/version 非法")
+                continue
+            if bot_id in seen_bots:
+                issues.append(f"manifest 重复 Bot {bot_id}")
+            seen_bots.add(bot_id)
+            version_row = c.execute(
+                "SELECT * FROM bot_versions WHERE bot_id=? AND version=?",
+                (bot_id, version),
+            ).fetchone()
+            if version_row is None:
+                issues.append(f"marker Bot {bot_id} v{version} 版本行缺失")
+                continue
+            for field in immutable_fields:
+                expected_value = entry.get(field)
+                actual_value = version_row[field]
+                if field in {"version", "size_bytes"}:
+                    try:
+                        equal = int(actual_value) == int(expected_value)
+                    except (TypeError, ValueError):
+                        equal = False
+                else:
+                    equal = str(actual_value or "") == str(expected_value or "")
+                if not equal:
+                    issues.append(f"marker Bot {bot_id} v{version} {field} 漂移")
+            if str(version_row["protocol_version"] or "") != target[
+                "protocol_version"
+            ]:
+                issues.append(f"marker Bot {bot_id} v{version} protocol 漂移")
+            if enforce_live_generation and version_row["retired_at"] is not None:
+                issues.append(f"链尾 marker Bot {bot_id} v{version} 已退役")
+
+            binary_path = Path(str(entry.get("binary_path") or ""))
+            path_text = str(binary_path)
+            if path_text in seen_paths:
+                issues.append("多个 marker 版本共用路径")
+            seen_paths.add(path_text)
+            if root is not None:
+                expected_path = root / str(bot_id) / f"v{version}" / "bot.bin"
+                if binary_path != expected_path:
+                    issues.append(f"marker Bot {bot_id} v{version} 路径非 canonical")
+                    continue
+                try:
+                    version_dir = binary_path.parent
+                    bot_dir = version_dir.parent
+                    version_dir_stat = version_dir.lstat()
+                    bot_dir_stat = bot_dir.lstat()
+                    leaf = binary_path.lstat()
+                    if (
+                        stat.S_ISLNK(version_dir_stat.st_mode)
+                        or not stat.S_ISDIR(version_dir_stat.st_mode)
+                        or stat.S_IMODE(version_dir_stat.st_mode) != 0o555
+                        or int(version_dir_stat.st_uid) != os.geteuid()
+                        or stat.S_ISLNK(bot_dir_stat.st_mode)
+                        or not stat.S_ISDIR(bot_dir_stat.st_mode)
+                        or stat.S_IMODE(bot_dir_stat.st_mode) & 0o022
+                        or int(bot_dir_stat.st_uid) != os.geteuid()
+                        or stat.S_ISLNK(leaf.st_mode)
+                        or not stat.S_ISREG(leaf.st_mode)
+                        or stat.S_IMODE(leaf.st_mode) != 0o555
+                        or int(leaf.st_uid) != os.geteuid()
+                        or int(leaf.st_nlink) != 1
+                    ):
+                        raise OSError("not a regular nofollow asset")
+                    if binary_path.resolve(strict=True) != binary_path:
+                        raise OSError("asset path traverses symlink")
+                    before = (
+                        int(leaf.st_dev), int(leaf.st_ino), int(leaf.st_size),
+                        int(leaf.st_mtime_ns), int(leaf.st_ctime_ns),
+                    )
+                    digest = hashlib.sha256()
+                    with binary_path.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    after_stat = binary_path.lstat()
+                    after = (
+                        int(after_stat.st_dev), int(after_stat.st_ino),
+                        int(after_stat.st_size), int(after_stat.st_mtime_ns),
+                        int(after_stat.st_ctime_ns),
+                    )
+                    if before != after:
+                        raise OSError("asset changed while hashing")
+                except OSError:
+                    issues.append(f"marker Bot {bot_id} v{version} 资产缺失或不安全")
+                else:
+                    if int(after_stat.st_size) != int(entry.get("size_bytes") or -1):
+                        issues.append(f"marker Bot {bot_id} v{version} 资产 size 漂移")
+                    if digest.hexdigest() != str(entry.get("checksum") or ""):
+                        issues.append(f"marker Bot {bot_id} v{version} 资产 hash 漂移")
+                    inode = (int(after_stat.st_dev), int(after_stat.st_ino))
+                    if inode in seen_inodes:
+                        issues.append("多个 marker 版本共用 inode")
+                    seen_inodes.add(inode)
+
+        if enforce_live_generation:
+            current_rows = c.execute(
+                "SELECT b.id AS bot_id,b.current_version,b.binary_path AS bot_path,"
+                "b.os AS bot_os,b.arch AS bot_arch,b.format AS bot_format,"
+                "b.runtime_mode AS bot_runtime,b.protocol_version AS bot_protocol,"
+                "v.id AS version_id,v.version AS version_number,"
+                "v.binary_path AS version_path,v.os AS version_os,v.arch AS version_arch,"
+                "v.format AS version_format,v.runtime_mode AS version_runtime,"
+                "v.protocol_version AS version_protocol,v.retired_at AS version_retired "
+                "FROM bots b LEFT JOIN bot_versions v ON v.bot_id=b.id "
+                "AND v.version=b.current_version WHERE b.game_id=? ORDER BY b.id",
+                (gid,),
+            ).fetchall()
+            for row in current_rows:
+                bot_id = int(row["bot_id"])
+                if row["version_id"] is None:
+                    issues.append(f"Bot {bot_id} current version 行缺失")
+                    continue
+                if row["version_retired"] is not None:
+                    issues.append(f"Bot {bot_id} current version 已退役")
+                if (
+                    str(row["bot_protocol"] or "") != target["protocol_version"]
+                    or str(row["version_protocol"] or "") != target["protocol_version"]
+                ):
+                    issues.append(f"Bot {bot_id} current protocol 非 target")
+                mirrors = (
+                    ("binary_path", row["bot_path"], row["version_path"]),
+                    ("os", row["bot_os"], row["version_os"]),
+                    ("arch", row["bot_arch"], row["version_arch"]),
+                    ("format", row["bot_format"], row["version_format"]),
+                    ("runtime_mode", row["bot_runtime"], row["version_runtime"]),
+                )
+                if any(
+                    str(left or "") != str(right or "")
+                    for _, left, right in mirrors
+                ):
+                    issues.append(f"Bot {bot_id} current mirror 漂移")
+
+            wrong_unretired = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM bot_versions WHERE bot_id IN "
+                    "(SELECT id FROM bots WHERE game_id=?) AND protocol_version<>? "
+                    "AND retired_at IS NULL",
+                    (gid, target["protocol_version"]),
+                ).fetchone()[0]
+            )
+            if wrong_unretired:
+                issues.append(
+                    f"{wrong_unretired} 个非 current protocol 版本未退役"
+                )
+            wrong_active_agents = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM local_ai_agents a "
+                    "JOIN bots b ON b.id=a.bot_id WHERE a.status='active' "
+                    "AND (a.game_id=? OR b.game_id=?) AND NOT ("
+                    "a.game_id=? AND b.game_id=? AND "
+                    "a.protocol_version=? AND b.protocol_version=?)",
+                    (
+                        gid,
+                        gid,
+                        gid,
+                        gid,
+                        target["protocol_version"],
+                        target["protocol_version"],
+                    ),
+                ).fetchone()[0]
+            )
+            if wrong_active_agents:
+                issues.append(
+                    f"{wrong_active_agents} 个非 current protocol Local AI agent 仍 active"
+                )
+
+        source_version_count = int(
+            c.execute(
+                "SELECT COUNT(*) FROM bot_versions WHERE bot_id IN "
+                "(SELECT id FROM bots WHERE game_id=?) AND protocol_version=?",
+                (gid, source["protocol_version"]),
+            ).fetchone()[0]
+        )
+        try:
+            marker_retired_count = int(marker_data["retired_count"])
+        except (KeyError, TypeError, ValueError):
+            marker_retired_count = -1
+        if source_version_count != marker_retired_count:
+            issues.append("marker retired_count 与 source protocol 审计集不匹配")
+        active_legacy_jobs = int(
+            c.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE game_id=? AND "
+                "status IN ('queued','starting','running','settling') AND "
+                "ruleset_version=? AND protocol_version=? AND rating_pool_id=?",
+                (
+                    gid,
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                    source["rating_pool_id"],
+                ),
+            ).fetchone()[0]
+        )
+        retryable_legacy_jobs = int(
+            c.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE game_id=? "
+                "AND status='interrupted' AND retryable<>0 AND "
+                "ruleset_version=? AND protocol_version=? AND rating_pool_id=?",
+                (
+                    gid,
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                    source["rating_pool_id"],
+                ),
+            ).fetchone()[0]
+        )
+        if active_legacy_jobs or retryable_legacy_jobs:
+            issues.append(
+                "legacy contract job 仍可运行/\u91cd\u8bd5: "
+                f"active={active_legacy_jobs} retryable={retryable_legacy_jobs}"
+            )
+
+        archive = c.execute(
+            "SELECT * FROM rating_pool_archives WHERE game_id=? AND pool_id=?",
+            (gid, source["rating_pool_id"]),
+        ).fetchone()
+        if archive is None:
+            issues.append("legacy rating archive 缺失")
+        else:
+            archived_ratings = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT * FROM ratings_archive WHERE game_id=? AND pool_id=? "
+                    "ORDER BY bot_id",
+                    (gid, source["rating_pool_id"]),
+                ).fetchall()
+            ]
+            archived_history = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT * FROM rating_history_archive WHERE game_id=? AND pool_id=? "
+                    "ORDER BY original_id",
+                    (gid, source["rating_pool_id"]),
+                ).fetchall()
+            ]
+            archived_pairs = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT * FROM pair_stats_archive WHERE game_id=? AND pool_id=? "
+                    "ORDER BY bot_a_id,bot_b_id",
+                    (gid, source["rating_pool_id"]),
+                ).fetchall()
+            ]
+            digest = rating_projection_digest(
+                archived_ratings, archived_history, archived_pairs
+            )
+            if (
+                str(archive["ruleset_version"] or "") != source["ruleset_version"]
+                or str(archive["protocol_version"] or "")
+                != source["protocol_version"]
+            ):
+                issues.append("legacy rating archive contract 漂移")
+            if (
+                len(archived_ratings) != int(archive["ratings_count"])
+                or len(archived_history) != int(archive["history_count"])
+                or len(archived_pairs) != int(archive["pair_count"])
+            ):
+                issues.append("legacy rating archive count 漂移")
+            if (
+                digest != str(archive["projection_digest"] or "")
+                or digest != str(marker_data.get("archive_digest") or "")
+            ):
+                issues.append("legacy rating archive digest 漂移")
+        if enforce_live_generation and not self._rating_projection_status_tx(c)["ready"]:
+            issues.append("target rating projection 未 ready")
+
+        if issues:
+            raise RuntimeError(
+                "cutover postcondition drift: " + "; ".join(issues[:12])
+            )
+
+    @staticmethod
+    def _protocol_cutover_chain_tx(
+        c: sqlite3.Connection, game_id: str
+    ) -> list[sqlite3.Row]:
+        markers = c.execute(
+            "SELECT * FROM protocol_cutovers WHERE game_id=?",
+            (game_id,),
+        ).fetchall()
+        if not markers:
+            return []
+
+        def before(row: sqlite3.Row) -> tuple[str, str, str]:
+            return (
+                str(row["from_ruleset"]), str(row["from_protocol"]),
+                str(row["from_rating_pool"]),
+            )
+
+        def after(row: sqlite3.Row) -> tuple[str, str, str]:
+            return (
+                str(row["to_ruleset"]), str(row["to_protocol"]),
+                str(row["to_rating_pool"]),
+            )
+
+        by_source: dict[tuple[str, str, str], sqlite3.Row] = {}
+        targets: set[tuple[str, str, str]] = set()
+        for marker in markers:
+            source = before(marker)
+            target = after(marker)
+            if source == target or source in by_source or target in targets:
+                raise RuntimeError(
+                    "cutover marker chain 存在环、分叉或合并"
+                )
+            by_source[source] = marker
+            targets.add(target)
+        heads = [marker for marker in markers if before(marker) not in targets]
+        if len(heads) != 1:
+            raise RuntimeError("cutover marker chain 断链或多起点")
+        ordered: list[sqlite3.Row] = []
+        current = heads[0]
+        seen: set[str] = set()
+        while current is not None:
+            cutover_id = str(current["cutover_id"])
+            if cutover_id in seen:
+                raise RuntimeError("cutover marker chain 存在环")
+            seen.add(cutover_id)
+            ordered.append(current)
+            current = by_source.get(after(current))
+        if len(ordered) != len(markers):
+            raise RuntimeError("cutover marker chain 断链或分叉")
+        protocol_generations = [str(ordered[0]["from_protocol"])] + [
+            str(marker["to_protocol"]) for marker in ordered
+        ]
+        if len(protocol_generations) != len(set(protocol_generations)):
+            raise RuntimeError("cutover marker chain 禁止复用 protocol 代际 ID")
+        return ordered
+
+    def assert_protocol_cutover_postconditions(
+        self,
+        cutover_id: str | None = None,
+        *,
+        expected_manifest_digest: str | None = None,
+    ) -> None:
+        """Fail closed if an applied cutover marker no longer matches reality."""
+
+        with self._tx() as c:
+            selected_id = None
+            if cutover_id is not None:
+                marker = c.execute(
+                    "SELECT * FROM protocol_cutovers WHERE cutover_id=?",
+                    (str(cutover_id or "").strip(),),
+                ).fetchone()
+                if marker is None:
+                    raise RuntimeError("cutover marker 不存在")
+                selected_id = str(marker["cutover_id"])
+                game_ids = [str(marker["game_id"])]
+            else:
+                game_ids = [
+                    str(row["game_id"])
+                    for row in c.execute(
+                        "SELECT DISTINCT game_id FROM protocol_cutovers ORDER BY game_id"
+                    ).fetchall()
+                ]
+            for game_id in game_ids:
+                chain = self._protocol_cutover_chain_tx(c, game_id)
+                for index, marker in enumerate(chain):
+                    if selected_id is not None and str(marker["cutover_id"]) != selected_id:
+                        continue
+                    if (
+                        expected_manifest_digest is not None
+                        and str(marker["manifest_digest"] or "")
+                        != str(expected_manifest_digest)
+                    ):
+                        raise RuntimeError("cutover marker manifest digest 不匹配")
+                    self._assert_protocol_cutover_postconditions_tx(
+                        c,
+                        marker,
+                        verify_assets=True,
+                        enforce_live_generation=index == len(chain) - 1,
+                    )
+
+    def runtime_contract_drift(self) -> list[dict[str, Any]]:
+        """Compare durable active contracts with the loaded GameSpec registry.
+
+        This is intentionally not part of ``Store.__init__``: offline migration,
+        planning and cutover commands must be able to open a legacy database.
+        ASGI runtime startup calls it before acquiring the dispatcher or opening
+        any Bot/preflight runtime.
+        """
+
+        from bzplat.backend.games import registry
+
+        expected = {
+            game_id: {
+                "ruleset_version": registry.get(game_id).ruleset_id,
+                "protocol_version": registry.get(game_id).protocol_version,
+                "rating_pool_id": registry.get(game_id).rating_pool_id,
+            }
+            for game_id in registry.all_ids()
+        }
+        with self._tx() as c:
+            actual = {
+                str(row["game_id"]): {
+                    "ruleset_version": str(row["ruleset_version"] or ""),
+                    "protocol_version": str(row["protocol_version"] or ""),
+                    "rating_pool_id": str(row["active_pool_id"] or ""),
+                }
+                for row in c.execute(
+                    "SELECT game_id,ruleset_version,protocol_version,active_pool_id "
+                    "FROM rating_pool_state"
+                ).fetchall()
+            }
+        return [
+            {
+                "game_id": game_id,
+                "expected": expected.get(game_id),
+                "actual": actual.get(game_id),
+            }
+            for game_id in sorted(set(expected) | set(actual))
+            if expected.get(game_id) != actual.get(game_id)
+        ]
+
+    def assert_runtime_contracts_current(self) -> None:
+        """Fail closed before online runtime can reinterpret legacy entities."""
+
+        drift = self.runtime_contract_drift()
+        if drift:
+            detail = "; ".join(
+                f"{item['game_id']}: actual={item['actual']!r}, "
+                f"expected={item['expected']!r}"
+                for item in drift
+            )
+            raise RuntimeError(
+                "持久化游戏契约与当前裁判不一致；拒绝启动在线 runtime。"
+                "请先停服并执行离线 game-contract-cutover。" + detail
+            )
+        self.assert_protocol_cutover_postconditions()
 
     def get_bot(self, bot_id: int) -> dict | None:
         with self._tx() as c:
@@ -4463,13 +5328,15 @@ class Store:
             )
 
     def delete_bot(self, bot_id: int) -> bool:
-        # 注意：此处不做「活跃引用」业务校验——那是 admin_delete_bot 端点的职责（业务规则）。
-        # 本方法保持纯 store 行为：直接删，FK ON DELETE SET NULL（matches，保历史）/ CASCADE
-        # （contest_pairings）由 DB 处理。管理端须改调 delete_bot_if_safe() 原子判断。
+        # 注意：此处不做一般「活跃引用」业务校验——那是 admin_delete_bot
+        # 端点的职责。不过 retired version 是规则迁移的不可删审计证据，任何
+        # Store 入口都不得借 bots→bot_versions CASCADE 绕过这一硬边界。
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
             if not c.execute("SELECT 1 FROM bots WHERE id=?", (bot_id,)).fetchone():
                 return False
+            if _cutover_audit_version_count_tx(c, bot_id=bot_id):
+                raise ValueError("规则迁移版本是不可删除审计证据，禁止删除 Bot")
             _delete_social_target(c, "bot", bot_id)
             return c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
 
@@ -4581,6 +5448,9 @@ class Store:
                 "matches": match_count,
                 "pairings": int(pairing_row["n"] if pairing_row else 0)
                 + int(entry_row["n"] if entry_row else 0),
+                "audit_versions": _cutover_audit_version_count_tx(
+                    c, bot_id=bot_id
+                ),
             }
             if any(refs.values()):
                 return {"found": True, "deleted": False, "references": refs}
@@ -4665,6 +5535,14 @@ class Store:
                     SUPPORTED_BINARY_OS,
                     SUPPORTED_BINARY_ARCH,
                 ))
+                sql += (
+                    " AND protocol_version=(SELECT state.protocol_version "
+                    "FROM rating_pool_state state WHERE state.game_id=bots.game_id) "
+                    "AND (current_version=0 OR EXISTS(SELECT 1 FROM bot_versions v "
+                    "WHERE v.bot_id=bots.id AND v.version=bots.current_version "
+                    "AND v.retired_at IS NULL "
+                    "AND v.protocol_version=bots.protocol_version))"
+                )
             if not include_builtin:
                 sql += " AND is_builtin=0"
             if game_id:
@@ -4691,6 +5569,7 @@ class Store:
         arch: str = SUPPORTED_BINARY_ARCH,
         format: str = SUPPORTED_BINARY_FORMAT,
         runtime_mode: str | None = None,
+        protocol_version: str | None = None,
         version: int | None = None,
     ) -> dict:
         require_supported_binary_metadata(format, os, arch)
@@ -4701,6 +5580,17 @@ class Store:
         if runtime_mode not in VALID_RUNTIME_MODES:
             raise ValueError(f"非法 runtime_mode: {runtime_mode}")
         with self._tx() as c:
+            bot_row = c.execute(
+                "SELECT game_id FROM bots WHERE id=?", (bot_id,)
+            ).fetchone()
+            if bot_row is None:
+                raise ValueError("bot 不存在")
+            active_contract = _active_game_contract_tx(c, bot_row["game_id"])
+            protocol = str(
+                protocol_version or active_contract["protocol_version"]
+            ).strip()
+            if protocol != active_contract["protocol_version"]:
+                raise ValueError("新版本协议与当前游戏契约不一致")
             if version is None:
                 row = c.execute(
                     "SELECT MAX(version) AS mv FROM bot_versions WHERE bot_id=?",
@@ -4710,7 +5600,7 @@ class Store:
             cur = c.execute(
                 "INSERT INTO bot_versions(bot_id, version, binary_path, "
                 "upload_note, checksum, size_bytes, os, arch, format, runtime_mode, "
-                "uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "protocol_version,uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     bot_id,
                     version,
@@ -4722,24 +5612,22 @@ class Store:
                     arch,
                     format,
                     runtime_mode,
+                    protocol,
                     _now(),
                 ),
             )
             vid = cur.lastrowid
             c.execute(
                 "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
-                "format=?, runtime_mode=?, updated_at=? WHERE id=?",
-                (version, binary_path, os, arch, format, runtime_mode, _now(), bot_id),
+                "format=?, runtime_mode=?,protocol_version=?, updated_at=? WHERE id=?",
+                (version, binary_path, os, arch, format, runtime_mode, protocol, _now(), bot_id),
             )
             return _row(
                 c.execute("SELECT * FROM bot_versions WHERE id=?", (vid,)).fetchone()
             )
 
     def delete_bot_version(self, bot_id: int, version: int) -> bool:
-        """删除指定版本；若删的是当前版本，回退到 max(version)（含 runtime_mode）。
-
-        删非当前版本时**不动 bots 镜像**——否则会覆盖用户主动回滚到的旧版本状态。
-        """
+        """删除非当前、非规则迁移审计、未被执行冻结的普通版本。"""
         with self._tx() as c:
             # 先读当前版本，判定删的是否是当前版本
             cur_bot = c.execute(
@@ -4748,9 +5636,17 @@ class Store:
             is_current = cur_bot and cur_bot["current_version"] == version
 
             version_row = c.execute(
-                "SELECT id FROM bot_versions WHERE bot_id=? AND version=?",
+                "SELECT id,retired_at FROM bot_versions WHERE bot_id=? AND version=?",
                 (bot_id, version),
             ).fetchone()
+            if version_row and version_row["retired_at"] is not None:
+                raise ValueError("退役版本是规则迁移审计证据，禁止删除")
+            if version_row and _version_in_cutover_manifest_tx(
+                c, bot_id=bot_id, version=version
+            ):
+                raise ValueError("该版本被规则切换 marker 引用，禁止删除")
+            if version_row and is_current:
+                raise ValueError("当前版本禁止删除；请先显式切换到其他兼容版本")
             if version_row and c.execute(
                 "SELECT 1 FROM execution_jobs "
                 "WHERE status IN ('queued','starting','running','settling') "
@@ -4765,20 +5661,6 @@ class Store:
             )
             if cur.rowcount == 0:
                 return False
-            # 仅当删的是当前版本，才回退镜像到剩余最新版本
-            if is_current:
-                row = c.execute(
-                    "SELECT MAX(version) AS mv, binary_path, os, arch, format, runtime_mode "
-                    "FROM bot_versions WHERE bot_id=?",
-                    (bot_id,),
-                ).fetchone()
-                if row and row["mv"]:
-                    c.execute(
-                        "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
-                        "format=?, runtime_mode=?, updated_at=? WHERE id=?",
-                        (row["mv"], row["binary_path"], row["os"], row["arch"],
-                         row["format"], row["runtime_mode"], _now(), bot_id),
-                    )
             return True
 
     def set_current_version(self, bot_id: int, version: int) -> dict | None:
@@ -4789,19 +5671,709 @@ class Store:
         """
         with self._tx() as c:
             row = c.execute(
-                "SELECT version, binary_path, os, arch, format, runtime_mode "
-                "FROM bot_versions WHERE bot_id=? AND version=?",
+                "SELECT v.version,v.binary_path,v.os,v.arch,v.format,v.runtime_mode,"
+                "v.protocol_version,v.retired_at,b.game_id FROM bot_versions v "
+                "JOIN bots b ON b.id=v.bot_id "
+                "WHERE v.bot_id=? AND v.version=?",
                 (bot_id, version),
             ).fetchone()
             if not row:
                 return None
+            active_contract = _active_game_contract_tx(c, row["game_id"])
+            if row["retired_at"] is not None:
+                raise ValueError("该版本已退役，不可回滚")
+            if str(row["protocol_version"] or "") != active_contract["protocol_version"]:
+                raise ValueError("该版本协议与当前游戏不兼容")
             c.execute(
                 "UPDATE bots SET current_version=?, binary_path=?, os=?, arch=?, "
-                "format=?, runtime_mode=?, updated_at=? WHERE id=?",
+                "format=?, runtime_mode=?,protocol_version=?, updated_at=? WHERE id=?",
                 (row["version"], row["binary_path"], row["os"], row["arch"],
-                 row["format"], row["runtime_mode"], _now(), bot_id),
+                 row["format"], row["runtime_mode"], row["protocol_version"], _now(), bot_id),
             )
             return _row(c.execute("SELECT * FROM bots WHERE id=?", (bot_id,)).fetchone())
+
+    def bot_has_cutover_audit_versions(self, bot_id: int) -> bool:
+        with self._tx() as c:
+            return bool(_cutover_audit_version_count_tx(c, bot_id=bot_id))
+
+    def get_protocol_cutover(self, cutover_id: str) -> dict[str, Any] | None:
+        """Return one immutable cutover marker and its canonical manifest."""
+
+        with self._tx() as c:
+            row = c.execute(
+                "SELECT * FROM protocol_cutovers WHERE cutover_id=?",
+                (str(cutover_id or "").strip(),),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            manifest = _loads_json(result.pop("manifest_json", ""), default=None)
+            if not isinstance(manifest, list):
+                raise RuntimeError("protocol_cutovers manifest_json 已损坏")
+            result["version_manifest"] = manifest
+            return result
+
+    def cutover_game_contract(
+        self,
+        *,
+        cutover_id: str,
+        game_id: str,
+        from_contract: dict[str, str],
+        to_contract: dict[str, str],
+        version_manifest: list[dict[str, Any]],
+        canonical_binary_root: str | os.PathLike[str],
+        offline_guard: _OfflineCutoverGuard,
+        retirement_reason: str = "ruleset_retired",
+    ) -> dict[str, Any]:
+        """Atomically replace every Bot binary while advancing one game contract.
+
+        The caller owns asset construction and preflight.  This boundary accepts
+        only per-Bot canonical immutable paths plus SHA-256/size metadata,
+        verifies their actual ELF headers, then performs the complete metadata,
+        rating and queue switch in one SQLite transaction.  The caller must hold
+        :meth:`offline_cutover_guard` across staging and this call.
+        """
+
+        resolved_database = str(Path(self.path).expanduser().resolve())
+        if (
+            not isinstance(offline_guard, _OfflineCutoverGuard)
+            or not offline_guard.active
+            or offline_guard.store_identity != id(self)
+            or offline_guard.database_path != resolved_database
+            or offline_guard.thread_id != threading.get_ident()
+        ):
+            raise RuntimeError(
+                "规则 hard cutover 缺少当前 Store 的停服独占 guard"
+            )
+        binary_root = self._validated_cutover_binary_root(canonical_binary_root)
+
+        gid = _registered_game_id(game_id)
+        clean_cutover_id = str(cutover_id or "").strip()
+        if not clean_cutover_id:
+            raise ValueError("cutover_id 不能为空")
+
+        contract_keys = ("ruleset_version", "protocol_version", "rating_pool_id")
+
+        def normalize_contract(raw: dict[str, str], *, label: str) -> dict[str, str]:
+            normalized = {
+                key: str(raw.get(key) or "").strip() for key in contract_keys
+            }
+            if any(not value for value in normalized.values()):
+                raise ValueError(f"{label} contract 字段不能为空")
+            return normalized
+
+        source = normalize_contract(from_contract, label="from")
+        target = normalize_contract(to_contract, label="to")
+        if source == target:
+            raise ValueError("规则切换前后 contract 不能相同")
+        if source["protocol_version"] == target["protocol_version"]:
+            raise ValueError(
+                "game-contract-cutover 仅用于不兼容协议代际，protocol 必须变更"
+            )
+        normalized_manifest: list[dict[str, Any]] = []
+        for raw in version_manifest:
+            bot_id = int(raw["bot_id"])
+            version = int(raw["version"])
+            candidate = Path(
+                os.path.abspath(
+                    str(Path(str(raw.get("binary_path") or "")).expanduser())
+                )
+            )
+            try:
+                resolved_candidate = candidate.resolve(strict=True)
+            except (FileNotFoundError, OSError) as exc:
+                raise ValueError(f"cutover 资产不可读: {candidate}") from exc
+            expected_path = binary_root / str(bot_id) / f"v{version}" / "bot.bin"
+            if candidate != expected_path or resolved_candidate != candidate:
+                raise ValueError(
+                    "manifest binary_path 必须是逐 Bot 唯一 canonical "
+                    "bot_uploads/<bot_id>/vN/bot.bin"
+                )
+            binary_path = str(candidate)
+            entry = {
+                "bot_id": bot_id,
+                "version": version,
+                "expected_current_version": int(raw["expected_current_version"]),
+                "expected_current_version_id": (
+                    None
+                    if raw.get("expected_current_version_id") is None
+                    else int(raw["expected_current_version_id"])
+                ),
+                "expected_current_checksum": str(
+                    raw.get("expected_current_checksum") or ""
+                ).lower(),
+                "expected_current_binary_path": str(
+                    raw.get("expected_current_binary_path") or ""
+                ),
+                "expected_current_runtime_mode": str(
+                    raw.get("expected_current_runtime_mode") or DEFAULT_RUNTIME_MODE
+                ),
+                "binary_path": binary_path,
+                "checksum": str(raw.get("checksum") or "").lower(),
+                "size_bytes": int(raw["size_bytes"]),
+                "os": str(raw.get("os") or SUPPORTED_BINARY_OS),
+                "arch": str(raw.get("arch") or SUPPORTED_BINARY_ARCH),
+                "format": str(raw.get("format") or SUPPORTED_BINARY_FORMAT),
+                "runtime_mode": str(raw.get("runtime_mode") or DEFAULT_RUNTIME_MODE),
+                "upload_note": str(raw.get("upload_note") or "ruleset cutover"),
+            }
+            if entry["bot_id"] <= 0 or entry["version"] <= 0:
+                raise ValueError("manifest bot_id/version 必须为正整数")
+            if entry["expected_current_version"] < 0:
+                raise ValueError("manifest expected_current_version 非法")
+            if entry["size_bytes"] <= 0:
+                raise ValueError("manifest size_bytes 必须为正整数")
+            if (
+                len(entry["checksum"]) != 64
+                or any(ch not in "0123456789abcdef" for ch in entry["checksum"])
+            ):
+                raise ValueError("manifest checksum 必须是小写 SHA-256")
+            require_supported_binary_metadata(
+                entry["format"], entry["os"], entry["arch"]
+            )
+            if entry["runtime_mode"] not in VALID_RUNTIME_MODES:
+                raise ValueError("manifest runtime_mode 非法")
+            if entry["expected_current_runtime_mode"] not in VALID_RUNTIME_MODES:
+                raise ValueError("manifest expected_current_runtime_mode 非法")
+            if entry["runtime_mode"] != entry["expected_current_runtime_mode"]:
+                raise ValueError("hard cutover 必须保留每个 Bot 当前 runtime_mode")
+            normalized_manifest.append(entry)
+        normalized_manifest.sort(key=lambda item: item["bot_id"])
+        bot_ids = [entry["bot_id"] for entry in normalized_manifest]
+        if len(bot_ids) != len(set(bot_ids)):
+            raise ValueError("manifest 含重复 bot_id")
+        binary_paths = [entry["binary_path"] for entry in normalized_manifest]
+        if len(binary_paths) != len(set(binary_paths)):
+            raise ValueError("manifest 的每个 Bot 必须使用唯一版本路径")
+        manifest_digest = _canonical_digest(normalized_manifest)
+        manifest_json = json.dumps(
+            normalized_manifest, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        marker_fields = {
+            "game_id": gid,
+            "from_ruleset": source["ruleset_version"],
+            "to_ruleset": target["ruleset_version"],
+            "from_protocol": source["protocol_version"],
+            "to_protocol": target["protocol_version"],
+            "from_rating_pool": source["rating_pool_id"],
+            "to_rating_pool": target["rating_pool_id"],
+            "manifest_digest": manifest_digest,
+            "manifest_json": manifest_json,
+        }
+
+        def marker_result(row: sqlite3.Row, *, already_applied: bool) -> dict[str, Any]:
+            result = dict(row)
+            result["already_applied"] = already_applied
+            return result
+
+        def assert_marker(row: sqlite3.Row) -> None:
+            mismatched = [
+                key for key, value in marker_fields.items()
+                if str(row[key]) != str(value)
+            ]
+            if mismatched:
+                raise ValueError(
+                    "cutover_id 已被不同切换占用: " + ",".join(mismatched)
+                )
+
+        # Hash assets before taking BEGIN IMMEDIATE; only an inode/stat snapshot
+        # is rechecked under the write lock.  Runner integrity still re-hashes at
+        # claim, so an asset changed after cutover fails closed before execution.
+        from bzplat.backend.bots.classify import (
+            classify_binary,
+            require_supported_binary,
+        )
+
+        asset_stats: dict[int, tuple[int, int, int, int, int]] = {}
+        asset_inodes: set[tuple[int, int]] = set()
+        for entry in normalized_manifest:
+            path = entry["binary_path"]
+            try:
+                before = os.stat(path)
+                if not stat.S_ISREG(before.st_mode):
+                    raise ValueError(f"cutover 资产不是普通文件: {path}")
+                digest = hashlib.sha256()
+                with open(path, "rb") as binary:
+                    header = binary.read(4096)
+                    require_supported_binary(classify_binary(header))
+                    digest.update(header)
+                    for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                after = os.stat(path)
+            except ValueError:
+                raise
+            except OSError as exc:
+                raise ValueError(f"cutover 资产不可读: {path}") from exc
+            fingerprint = (
+                int(after.st_dev),
+                int(after.st_ino),
+                int(after.st_size),
+                int(after.st_mtime_ns),
+                int(after.st_ctime_ns),
+            )
+            if (
+                (before.st_dev, before.st_ino, before.st_size,
+                 before.st_mtime_ns, before.st_ctime_ns)
+                != fingerprint
+            ):
+                raise ValueError(f"cutover 资产校验期间发生变化: {path}")
+            if int(after.st_size) != entry["size_bytes"]:
+                raise ValueError(f"cutover 资产大小不匹配: {path}")
+            if digest.hexdigest() != entry["checksum"]:
+                raise ValueError(f"cutover 资产 SHA-256 不匹配: {path}")
+            inode = (int(after.st_dev), int(after.st_ino))
+            if inode in asset_inodes:
+                raise ValueError("每个 Bot 的 cutover 资产必须是独立文件，禁止硬链接共享")
+            asset_inodes.add(inode)
+            asset_stats[entry["bot_id"]] = fingerprint
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            control = c.execute(
+                "SELECT dispatcher_state,accepting,auto_enabled,"
+                "deployment_drain_requested FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if control is None:
+                raise RuntimeError("execution_control singleton missing")
+            if (
+                int(control["deployment_drain_requested"] or 0) != 1
+                or int(control["accepting"] or 0) != 0
+                or int(control["auto_enabled"] or 0) != 0
+                or str(control["dispatcher_state"] or "") != "stopped"
+            ):
+                raise ValueError(
+                    "hard cutover 要求已请求部署维护、停止接单/自动排位且 dispatcher 已停服"
+                )
+            active_jobs = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM execution_jobs WHERE status IN "
+                    "('starting','running','settling')"
+                ).fetchone()[0]
+            )
+            active_attempts = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM execution_job_attempts WHERE status IN "
+                    "('starting','running','settling')"
+                ).fetchone()[0]
+            )
+            active_matches = sum(
+                int(
+                    c.execute(
+                        f"SELECT COUNT(*) FROM {_matches_table(other_game)} "
+                        "WHERE status IN (?,?)",
+                        (STATUS_PENDING, STATUS_RUNNING),
+                    ).fetchone()[0]
+                )
+                for other_game in _all_game_ids()
+            )
+            active_leases = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM local_ai_leases WHERE status='active'"
+                ).fetchone()[0]
+            )
+            launch = c.execute(
+                "SELECT state FROM docker_launch_journal WHERE singleton=1"
+            ).fetchone()
+            if launch is None or str(launch["state"] or "") != "idle":
+                raise ValueError("Docker launch journal 未静默，禁止 hard cutover")
+            if active_jobs or active_attempts or active_matches or active_leases:
+                raise ValueError(
+                    "hard cutover 排空失败: "
+                    f"jobs={active_jobs} attempts={active_attempts} "
+                    f"matches={active_matches} local_leases={active_leases}"
+                )
+            existing = c.execute(
+                "SELECT * FROM protocol_cutovers WHERE cutover_id=?",
+                (clean_cutover_id,),
+            ).fetchone()
+            if existing is not None:
+                assert_marker(existing)
+                chain = self._protocol_cutover_chain_tx(c, gid)
+                marker_index = next(
+                    (
+                        index
+                        for index, row in enumerate(chain)
+                        if str(row["cutover_id"]) == clean_cutover_id
+                    ),
+                    -1,
+                )
+                if marker_index < 0:  # pragma: no cover - same transaction invariant
+                    raise RuntimeError("cutover marker chain 缺失当前 marker")
+                self._assert_protocol_cutover_postconditions_tx(
+                    c,
+                    existing,
+                    verify_assets=True,
+                    enforce_live_generation=marker_index == len(chain) - 1,
+                )
+                return marker_result(existing, already_applied=True)
+
+            if target != game_rule_contract(gid):
+                raise ValueError("目标 contract 与代码声明的 current contract 不一致")
+            active = _active_game_contract_tx(c, gid)
+            if active != source:
+                raise ValueError(
+                    f"active contract 已变化，期望 {source!r}，实际 {active!r}"
+                )
+            if not self._rating_projection_status_tx(c)["ready"]:
+                raise ValueError("评分投影未通过校验，禁止归档并切换评分池")
+            table = _matches_table(gid)
+            unsettled = int(
+                c.execute(
+                    f"SELECT COUNT(*) FROM {table} m "
+                    "LEFT JOIN match_rating_settlements s ON s.match_id=m.id "
+                    "WHERE m.status=? AND m.match_type NOT IN (?,?) "
+                    "AND s.match_id IS NULL",
+                    (STATUS_COMPLETED, TYPE_CONTEST, TYPE_HUMAN),
+                ).fetchone()[0]
+            )
+            if unsettled:
+                raise ValueError("仍有未结算的旧规则 Match，禁止切换")
+            live_contests = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM contests WHERE game_id=? "
+                    "AND showcase_key IS NULL AND status NOT IN (?,?)",
+                    (gid, CONTEST_FINISHED, CONTEST_CANCELLED),
+                ).fetchone()[0]
+            )
+            if live_contests:
+                raise ValueError("仍有未终结的旧规则赛事，禁止切换")
+
+            database_bots = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT * FROM bots WHERE game_id=? ORDER BY id", (gid,)
+                ).fetchall()
+            ]
+            if bot_ids != [int(row["id"]) for row in database_bots]:
+                raise ValueError("manifest 必须且只能覆盖该游戏的全部 Bot")
+            for entry in normalized_manifest:
+                current_stat = os.stat(entry["binary_path"])
+                current_fingerprint = (
+                    int(current_stat.st_dev), int(current_stat.st_ino),
+                    int(current_stat.st_size), int(current_stat.st_mtime_ns),
+                    int(current_stat.st_ctime_ns),
+                )
+                if current_fingerprint != asset_stats[entry["bot_id"]]:
+                    raise ValueError("cutover 资产在事务开始前发生变化")
+
+            existing_chain = self._protocol_cutover_chain_tx(c, gid)
+            if existing_chain:
+                chain_tail = existing_chain[-1]
+                previous_target = {
+                    "ruleset_version": str(chain_tail["to_ruleset"]),
+                    "protocol_version": str(chain_tail["to_protocol"]),
+                    "rating_pool_id": str(chain_tail["to_rating_pool"]),
+                }
+                if previous_target != source:
+                    raise ValueError("cutover marker chain 断链；from contract 不是链尾")
+
+            drift_checks = (
+                (
+                    "SELECT COUNT(*) FROM bots WHERE game_id=? AND protocol_version<>?",
+                    (gid, source["protocol_version"]),
+                    "Bot protocol 漂移",
+                ),
+                (
+                    "SELECT COUNT(*) FROM bot_versions WHERE bot_id IN "
+                    "(SELECT id FROM bots WHERE game_id=?) AND retired_at IS NULL "
+                    "AND protocol_version<>?",
+                    (gid, source["protocol_version"]),
+                    "未退役 Bot version protocol 漂移",
+                ),
+                (
+                    "SELECT COUNT(*) FROM bot_versions WHERE bot_id IN "
+                    "(SELECT id FROM bots WHERE game_id=?) AND retired_at IS NOT NULL "
+                    "AND protocol_version=?",
+                    (gid, source["protocol_version"]),
+                    "source protocol 世代在切换前已有退役版本",
+                ),
+                (
+                    "SELECT COUNT(*) FROM execution_jobs WHERE game_id=? AND "
+                    "status IN ('queued','starting','running','settling') AND "
+                    "(ruleset_version<>? OR protocol_version<>? OR rating_pool_id<>?)",
+                    (
+                        gid,
+                        source["ruleset_version"],
+                        source["protocol_version"],
+                        source["rating_pool_id"],
+                    ),
+                    "可运行执行任务 contract 漂移",
+                ),
+            )
+            for sql, params, message in drift_checks:
+                if int(c.execute(sql, params).fetchone()[0]):
+                    raise ValueError(message)
+
+            by_bot = {int(row["id"]): row for row in database_bots}
+            for entry in normalized_manifest:
+                bot = by_bot[entry["bot_id"]]
+                if int(bot["current_version"] or 0) != entry["expected_current_version"]:
+                    raise ValueError(f"Bot {entry['bot_id']} current_version 已变化")
+                current_version = None
+                if int(bot["current_version"] or 0) > 0:
+                    current_version = c.execute(
+                        "SELECT * FROM bot_versions WHERE bot_id=? AND version=?",
+                        (entry["bot_id"], int(bot["current_version"])),
+                    ).fetchone()
+                    if current_version is None:
+                        raise ValueError(f"Bot {entry['bot_id']} 当前版本行缺失")
+                    if current_version["retired_at"] is not None:
+                        raise ValueError(f"Bot {entry['bot_id']} 当前版本已退役")
+                    if str(current_version["protocol_version"] or "") != source[
+                        "protocol_version"
+                    ]:
+                        raise ValueError(f"Bot {entry['bot_id']} 当前版本协议非 source")
+                actual_current_id = (
+                    int(current_version["id"]) if current_version is not None else None
+                )
+                actual_current_checksum = (
+                    str(current_version["checksum"] or "")
+                    if current_version is not None else ""
+                )
+                actual_current_path = (
+                    str(current_version["binary_path"] or "")
+                    if current_version is not None
+                    else str(bot["binary_path"] or "")
+                )
+                actual_current_runtime_mode = str(
+                    current_version["runtime_mode"]
+                    if current_version is not None
+                    else bot["runtime_mode"]
+                )
+                if actual_current_id != entry["expected_current_version_id"]:
+                    raise ValueError(f"Bot {entry['bot_id']} 当前版本 id 已变化")
+                if actual_current_checksum != entry["expected_current_checksum"]:
+                    raise ValueError(f"Bot {entry['bot_id']} 当前 checksum 已变化")
+                if actual_current_path != entry["expected_current_binary_path"]:
+                    raise ValueError(f"Bot {entry['bot_id']} 当前路径已变化")
+                if (
+                    actual_current_runtime_mode
+                    != entry["expected_current_runtime_mode"]
+                ):
+                    raise ValueError(f"Bot {entry['bot_id']} 当前 runtime_mode 已变化")
+                maximum = int(
+                    c.execute(
+                        "SELECT COALESCE(MAX(version),0) FROM bot_versions WHERE bot_id=?",
+                        (entry["bot_id"],),
+                    ).fetchone()[0]
+                )
+                if entry["version"] != maximum + 1:
+                    raise ValueError(
+                        f"Bot {entry['bot_id']} 新版本号必须固定为 v{maximum + 1}"
+                    )
+
+            archived_at = _now()
+            rating_rows = [
+                dict(row) for row in c.execute(
+                    "SELECT * FROM ratings WHERE game_id=? ORDER BY bot_id", (gid,)
+                ).fetchall()
+            ]
+            history_rows = [
+                dict(row) for row in c.execute(
+                    "SELECT * FROM rating_history WHERE game_id=? ORDER BY id", (gid,)
+                ).fetchall()
+            ]
+            pair_rows = [
+                dict(row) for row in c.execute(
+                    "SELECT p.* FROM pair_stats p JOIN bots a ON a.id=p.bot_a_id "
+                    "JOIN bots b ON b.id=p.bot_b_id "
+                    "WHERE a.game_id=? AND b.game_id=? ORDER BY p.bot_a_id,p.bot_b_id",
+                    (gid, gid),
+                ).fetchall()
+            ]
+            archive_digest = rating_projection_digest(
+                rating_rows, history_rows, pair_rows
+            )
+            c.execute(
+                "INSERT INTO ratings_archive(bot_id,game_id,pool_id,rating,rd,vol,"
+                "wins,losses,draws,delta_total,matches_played,last_played_at,archived_at) "
+                "SELECT bot_id,game_id,?,rating,rd,vol,wins,losses,draws,delta_total,"
+                "matches_played,last_played_at,? FROM ratings WHERE game_id=?",
+                (source["rating_pool_id"], archived_at, gid),
+            )
+            c.execute(
+                "INSERT INTO rating_history_archive(original_id,bot_id,game_id,pool_id,"
+                "rating,rd,vol,matches_played,reason,created_at,archived_at) "
+                "SELECT id,bot_id,game_id,?,rating,rd,vol,matches_played,reason,"
+                "created_at,? FROM rating_history WHERE game_id=?",
+                (source["rating_pool_id"], archived_at, gid),
+            )
+            c.execute(
+                "INSERT INTO pair_stats_archive(bot_a_id,bot_b_id,game_id,pool_id,"
+                "samples,last_played_at,a_wins,a_losses,draws,archived_at) "
+                "SELECT p.bot_a_id,p.bot_b_id,?,?,p.samples,p.last_played_at,"
+                "p.a_wins,p.a_losses,p.draws,? FROM pair_stats p "
+                "JOIN bots a ON a.id=p.bot_a_id JOIN bots b ON b.id=p.bot_b_id "
+                "WHERE a.game_id=? AND b.game_id=?",
+                (gid, source["rating_pool_id"], archived_at, gid, gid),
+            )
+            c.execute(
+                "INSERT INTO rating_pool_archives(game_id,pool_id,ruleset_version,"
+                "protocol_version,archived_at,ratings_count,history_count,pair_count,"
+                "projection_digest) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    gid, source["rating_pool_id"], source["ruleset_version"],
+                    source["protocol_version"], archived_at, len(rating_rows),
+                    len(history_rows), len(pair_rows), archive_digest,
+                ),
+            )
+
+            new_version_ids: list[int] = []
+            for entry in normalized_manifest:
+                cur = c.execute(
+                    "INSERT INTO bot_versions(bot_id,version,binary_path,upload_note,"
+                    "checksum,size_bytes,os,arch,format,runtime_mode,protocol_version,"
+                    "uploaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        entry["bot_id"], entry["version"], entry["binary_path"],
+                        entry["upload_note"], entry["checksum"], entry["size_bytes"],
+                        entry["os"], entry["arch"], entry["format"],
+                        entry["runtime_mode"], target["protocol_version"], archived_at,
+                    ),
+                )
+                new_version_ids.append(int(cur.lastrowid))
+                c.execute(
+                    "UPDATE bots SET current_version=?,binary_path=?,os=?,arch=?,format=?,"
+                    "runtime_mode=?,protocol_version=?,updated_at=? WHERE id=?",
+                    (
+                        entry["version"], entry["binary_path"], entry["os"],
+                        entry["arch"], entry["format"], entry["runtime_mode"],
+                        target["protocol_version"], archived_at, entry["bot_id"],
+                    ),
+                )
+            retired_count = int(
+                c.execute(
+                    "UPDATE bot_versions SET retired_at=?,"
+                    "retirement_reason=CASE WHEN retirement_reason='' THEN ? "
+                    "ELSE retirement_reason END WHERE bot_id IN "
+                    "(SELECT id FROM bots WHERE game_id=?) AND retired_at IS NULL "
+                    "AND protocol_version<>?",
+                    (
+                        archived_at,
+                        str(retirement_reason)[:200],
+                        gid,
+                        target["protocol_version"],
+                    ),
+                ).rowcount
+            )
+
+            queued = c.execute(
+                "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+                "terminal_reason='ruleset_retired',last_error='ruleset_retired',"
+                "terminal_at=? WHERE game_id=? AND status='queued'",
+                (archived_at, gid),
+            ).rowcount
+            interrupted = c.execute(
+                "UPDATE execution_jobs SET retryable=0,terminal_reason='ruleset_retired',"
+                "last_error='ruleset_retired',terminal_at=COALESCE(terminal_at,?) "
+                "WHERE game_id=? AND status='interrupted'",
+                (archived_at, gid),
+            ).rowcount
+            c.execute(
+                "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                "terminal_reason='ruleset_retired',terminal_at=? "
+                "WHERE game_id=? AND lifecycle='queued'",
+                (archived_at, gid),
+            )
+            c.execute(
+                "UPDATE local_ai_agents SET status='revoked',"
+                "connection_generation=connection_generation+1,connected_at=NULL,"
+                "disconnected_at=?,updated_at=? WHERE game_id=? AND status='active'",
+                (archived_at, archived_at, gid),
+            )
+            c.execute(
+                "UPDATE local_ai_leases SET status='released',released_at=?,"
+                "terminal_reason='ruleset_retired' WHERE status='active' AND agent_id IN "
+                "(SELECT id FROM local_ai_agents WHERE game_id=?)",
+                (archived_at, gid),
+            )
+
+            c.execute(
+                "UPDATE ratings SET rating=1500.0,rd=350.0,vol=0.06,wins=0,losses=0,"
+                "draws=0,delta_total=0,matches_played=0,last_played_at=NULL "
+                "WHERE game_id=?",
+                (gid,),
+            )
+            c.execute("DELETE FROM rating_history WHERE game_id=?", (gid,))
+            c.execute(
+                "DELETE FROM pair_stats WHERE bot_a_id IN "
+                "(SELECT id FROM bots WHERE game_id=?) AND bot_b_id IN "
+                "(SELECT id FROM bots WHERE game_id=?)",
+                (gid, gid),
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO ratings(bot_id,game_id) "
+                "SELECT id,game_id FROM bots WHERE game_id=?",
+                (gid,),
+            )
+            for service_table in (
+                "auto_match_owner_service", "auto_match_bot_service",
+                "auto_match_bot_pair_service", "auto_match_owner_pair_service",
+            ):
+                c.execute(f"DELETE FROM {service_table} WHERE game_id=?", (gid,))
+            changed = c.execute(
+                "UPDATE rating_pool_state SET active_pool_id=?,ruleset_version=?,"
+                "protocol_version=?,activated_at=? WHERE game_id=? AND "
+                "active_pool_id=? AND ruleset_version=? AND protocol_version=?",
+                (
+                    target["rating_pool_id"], target["ruleset_version"],
+                    target["protocol_version"], archived_at, gid,
+                    source["rating_pool_id"], source["ruleset_version"],
+                    source["protocol_version"],
+                ),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("active contract compare-and-swap 失败")
+
+            live = rating_projection_digests(c)
+            if live["issues"]:
+                raise RuntimeError(
+                    "切换后评分源校验失败: " + "; ".join(live["issues"][:5])
+                )
+            c.execute(
+                "UPDATE rating_projection_state SET policy_version=?,rebuilt_at=?,"
+                "source_settlement_count=?,source_last_settled_order=?,source_digest=?,"
+                "projection_digest=?,plan_digest=?,"
+                "trusted_mutation_revision=mutation_revision WHERE singleton=1",
+                (
+                    _RATING_PROJECTION_POLICY_VERSION, archived_at,
+                    int(live["source_settlement_count"]),
+                    int(live["source_last_settled_order"]), live["source_digest"],
+                    live["projection_digest"], live["plan_digest"],
+                ),
+            )
+            c.execute(
+                "INSERT INTO protocol_cutovers(cutover_id,game_id,from_ruleset,"
+                "to_ruleset,from_protocol,to_protocol,from_rating_pool,to_rating_pool,"
+                "manifest_digest,manifest_json,bot_count,retired_count,cancelled_jobs,"
+                "archive_digest,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    clean_cutover_id, gid, source["ruleset_version"],
+                    target["ruleset_version"], source["protocol_version"],
+                    target["protocol_version"], source["rating_pool_id"],
+                    target["rating_pool_id"], manifest_digest, manifest_json,
+                    len(database_bots), retired_count,
+                    int(queued) + int(interrupted), archive_digest, archived_at,
+                ),
+            )
+            marker = c.execute(
+                "SELECT * FROM protocol_cutovers WHERE cutover_id=?",
+                (clean_cutover_id,),
+            ).fetchone()
+            if marker is None:  # pragma: no cover - transaction invariant
+                raise RuntimeError("cutover marker 写入失败")
+            self._assert_protocol_cutover_postconditions_tx(
+                c,
+                marker,
+                verify_assets=True,
+                enforce_live_generation=True,
+            )
+            chain = self._protocol_cutover_chain_tx(c, gid)
+            if not chain or str(chain[-1]["cutover_id"]) != clean_cutover_id:
+                raise RuntimeError("cutover marker 未成为唯一链尾")
+            return marker_result(marker, already_applied=False)
 
     def list_bot_versions(self, bot_id: int) -> list[dict]:
         with self._tx() as c:
@@ -5114,6 +6686,8 @@ class Store:
             for row in c.execute(
                 "SELECT policy.match_id,policy.game_id,policy.rating_reason,"
                 "policy.settled_order FROM match_rating_policies policy "
+                "JOIN rating_pool_state pool ON pool.game_id=policy.game_id "
+                "AND pool.active_pool_id=policy.rating_pool_id "
                 "LEFT JOIN match_rating_settlements settled "
                 "ON settled.match_id=policy.match_id "
                 "WHERE policy.settled_order IS NOT NULL "
@@ -5121,18 +6695,13 @@ class Store:
             ).fetchall()
         ]
         reserved_orders = [int(row["settled_order"]) for row in reserved]
-        expected_orders = list(
-            range(settled_count + 1, settled_count + len(reserved) + 1)
-        )
         expected_issues = {
             f"rating policy reserved but unsettled: {row['match_id']}"
             for row in reserved
         }
         shape_valid = bool(
-            settled_last == settled_count
-            and reserved_orders == expected_orders
-            and int(live["sequence_next_order"])
-            == settled_count + len(reserved) + 1
+            reserved_orders == sorted(set(reserved_orders))
+            and all(order > settled_last for order in reserved_orders)
             and set(live["issues"]) == expected_issues
         )
         if shape_valid:
@@ -5236,6 +6805,7 @@ class Store:
             "FROM bots b JOIN users u ON u.id=b.owner_id "
             "JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
             "JOIN bot_versions v ON v.bot_id=b.id AND v.version=b.current_version "
+            "JOIN rating_pool_state pool ON pool.game_id=b.game_id "
             "LEFT JOIN auto_match_owner_service os "
             "ON os.owner_id=b.owner_id AND os.game_id=b.game_id "
             "LEFT JOIN auto_match_bot_service bs "
@@ -5243,6 +6813,8 @@ class Store:
             "WHERE b.is_active=1 AND b.is_builtin=0 AND u.is_active=1 "
             "AND b.binary_path<>'' AND v.binary_path<>'' "
             "AND b.binary_path=v.binary_path AND b.runtime_mode=v.runtime_mode "
+            "AND v.retired_at IS NULL AND b.protocol_version=pool.protocol_version "
+            "AND v.protocol_version=pool.protocol_version "
             "AND b.format=? AND b.os=? AND b.arch=? "
             "AND v.format=? AND v.os=? AND v.arch=? "
             "AND NOT EXISTS (SELECT 1 FROM execution_jobs q "
@@ -5567,8 +7139,10 @@ class Store:
         tbl = _matches_table(gid)
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            contract = _active_game_contract_tx(c, gid)
             identities = c.execute(
-                "SELECT id,owner_id,game_id FROM bots WHERE id IN (?,?) ORDER BY id",
+                "SELECT id,owner_id,game_id,protocol_version FROM bots "
+                "WHERE id IN (?,?) ORDER BY id",
                 (bot_a_id, bot_b_id),
             ).fetchall()
             by_id = {int(row["id"]): row for row in identities}
@@ -5576,6 +7150,12 @@ class Store:
                 raise ValueError("Bot 不存在")
             if by_id[bot_a_id]["game_id"] != gid or by_id[bot_b_id]["game_id"] != gid:
                 raise ValueError("Bot 与对局游戏不一致")
+            if any(
+                str(by_id[bot_id]["protocol_version"] or "")
+                != contract["protocol_version"]
+                for bot_id in (bot_a_id, bot_b_id)
+            ):
+                raise ValueError("Bot 协议与当前游戏规则不兼容")
             if match_type == TYPE_CONTEST:
                 rating_reason = "contest"
             elif match_type == TYPE_HUMAN:
@@ -5600,9 +7180,10 @@ class Store:
             created_at = _now()
             c.execute(
                 f"INSERT INTO {tbl}(id, bot_a_id, bot_b_id, owner_id, "
-                "contest_id, reason, match_type, status, game_id, match_config, "
+                "contest_id, reason, match_type, status, game_id,ruleset_version,"
+                "protocol_version,rating_pool_id,match_config, "
                 "human_user_id, human_seat, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     bot_a_id,
@@ -5613,6 +7194,9 @@ class Store:
                     match_type,
                     "pending",
                     gid,
+                    contract["ruleset_version"],
+                    contract["protocol_version"],
+                    contract["rating_pool_id"],
                     mc_json,
                     human_user_id,
                     human_seat,
@@ -5621,11 +7205,12 @@ class Store:
             )
             c.execute(
                 "INSERT INTO match_rating_policies("
-                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
-                "classified_at) VALUES(?,?,?,?,?,?,?,?)",
+                "match_id,game_id,rating_pool_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+                "classified_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     gid,
+                    contract["rating_pool_id"],
                     bot_a_id,
                     bot_b_id,
                     1 if rated_pair else 0,
@@ -6718,6 +8303,8 @@ class Store:
                     f"SELECT m.*,policy.settled_order AS _rating_settled_order "
                     f"FROM {tbl} m "
                     "JOIN match_rating_policies policy ON policy.match_id=m.id "
+                    "JOIN rating_pool_state pool ON pool.game_id=policy.game_id "
+                    "AND pool.active_pool_id=policy.rating_pool_id "
                     "LEFT JOIN match_rating_settlements settled ON settled.match_id=m.id "
                     "WHERE m.status=? AND m.match_type NOT IN (?,?) "
                     "AND settled.match_id IS NULL "
@@ -7922,13 +9509,16 @@ class Store:
         )
         gid = _registered_game_id(game_id)
         with self._tx() as c:
+            contract = _active_game_contract_tx(c, gid)
             cur = c.execute(
                 "INSERT INTO contests(title, description, organizer_id, status, "
                 "registration_opens_at, registration_closes_at, starts_at, "
-                "ends_at, created_at, game_id, stages_json, "
+                "ends_at, created_at, game_id, ruleset_version, protocol_version, "
+                "rating_pool_id, "
+                "stages_json, "
                 "current_stage_idx, template_id, phase, "
                 "source_contest_id, require_real_name) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     title,
                     description,
@@ -7940,6 +9530,9 @@ class Store:
                     ends_at,
                     _now(),
                     gid,
+                    contract["ruleset_version"],
+                    contract["protocol_version"],
+                    contract["rating_pool_id"],
                     stages_json,
                     current_stage_idx,
                     template_id,
@@ -9050,11 +10643,14 @@ class Store:
             raise ValueError("技术赛果 winner 必须为 0 或 1")
         with self._tx() as c:
             c.execute("BEGIN IMMEDIATE")
+            contract = _active_game_contract_tx(c, gid)
             self._require_execution_admission_tx(
                 c, maintenance_only=not require_execution_admission
             )
             contest = c.execute(
-                "SELECT status,organizer_id FROM contests WHERE id=?",
+                "SELECT status,organizer_id,game_id,ruleset_version,protocol_version,"
+                "rating_pool_id "
+                "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
             if not contest or contest["status"] not in (
@@ -9062,6 +10658,13 @@ class Store:
                 CONTEST_RUNNING,
             ):
                 raise ValueError("赛事状态已变化，不能写入技术赛果")
+            if (
+                contest["game_id"] != gid
+                or contest["ruleset_version"] != contract["ruleset_version"]
+                or contest["protocol_version"] != contract["protocol_version"]
+                or contest["rating_pool_id"] != contract["rating_pool_id"]
+            ):
+                raise ValueError("赛事规则版本已退役，不能生成新赛果")
             pairing = c.execute(
                 "SELECT * FROM contest_pairings WHERE id=? AND contest_id=? "
                 "AND status=? AND match_id IS NULL",
@@ -9074,13 +10677,15 @@ class Store:
             if bot_a_id is None or bot_b_id is None:
                 raise ValueError("技术赛果要求双方 Bot 引用完整")
             identities = c.execute(
-                "SELECT id,game_id FROM bots WHERE id IN (?,?)",
+                "SELECT id,game_id,protocol_version FROM bots WHERE id IN (?,?)",
                 (bot_a_id, bot_b_id),
             ).fetchall()
             if len({int(row["id"]) for row in identities}) != 2 or any(
-                row["game_id"] != gid for row in identities
+                row["game_id"] != gid
+                or row["protocol_version"] != contract["protocol_version"]
+                for row in identities
             ):
-                raise ValueError("技术赛果 Bot 不存在或游戏不一致")
+                raise ValueError("技术赛果 Bot 不存在或游戏/协议不一致")
             created_at = _now()
             config_json = json.dumps(
                 {
@@ -9091,9 +10696,10 @@ class Store:
             )
             c.execute(
                 f"INSERT INTO {table}(id,bot_a_id,bot_b_id,owner_id,"
-                "contest_id,reason,match_type,status,game_id,match_config,"
+                "contest_id,reason,match_type,status,game_id,ruleset_version,"
+                "protocol_version,rating_pool_id,match_config,"
                 "result,winner,technical_loss,ended_at,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     match_id,
                     bot_a_id,
@@ -9104,6 +10710,9 @@ class Store:
                     TYPE_CONTEST,
                     STATUS_COMPLETED,
                     gid,
+                    contract["ruleset_version"],
+                    contract["protocol_version"],
+                    contract["rating_pool_id"],
                     config_json,
                     json.dumps(result, ensure_ascii=False),
                     int(winner),
@@ -9114,9 +10723,9 @@ class Store:
             )
             c.execute(
                 "INSERT INTO match_rating_policies("
-                "match_id,game_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
-                "classified_at) VALUES(?,?,?,?,0,'contest','creation_v2',?)",
-                (match_id, gid, bot_a_id, bot_b_id, created_at),
+                "match_id,game_id,rating_pool_id,bot_a_id,bot_b_id,rated,rating_reason,source,"
+                "classified_at) VALUES(?,?,?,?,?,0,'contest','creation_v2',?)",
+                (match_id, gid, contract["rating_pool_id"], bot_a_id, bot_b_id, created_at),
             )
             c.execute(
                 "INSERT INTO matches_index(id,game_id) VALUES(?,?)",
@@ -9938,6 +11547,9 @@ class Store:
                 "contest_entries": int(entry_row["n"] if entry_row else 0),
                 "organized_contests": int(organized_row["n"] if organized_row else 0),
                 "active_execution_jobs": int(execution_row["n"] if execution_row else 0),
+                "audit_versions": _cutover_audit_version_count_tx(
+                    c, owner_id=user_id
+                ),
             }
             if any(blockers.values()):
                 return {
@@ -9966,6 +11578,8 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             if not c.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
                 return False
+            if _cutover_audit_version_count_tx(c, owner_id=user_id):
+                raise ValueError("规则迁移版本是不可删除审计证据，禁止删除用户")
             _delete_comment_likes_for(c, "user_id=?", (user_id,))
             _delete_user_likes(c, user_id)
             for row in c.execute(

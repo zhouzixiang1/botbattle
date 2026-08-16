@@ -13,6 +13,7 @@ import pytest
 from bzplat.backend.games import registry
 from bzplat.backend.games.holdem.result import MatchResult as HMR, RoundResult as HRR
 from bzplat.backend.games.gomoku.result import MatchResult as GMR, RoundResult as GRR
+from bzplat.backend.tests._gomoku_v2 import seat_zero_winning_decider
 from bzplat.backend.games.pencil.result import MatchResult as PMR, RoundResult as PRR
 from bzplat.backend.matches.result_contract import (
     RESULT_COMMON_FIELDS,
@@ -139,21 +140,9 @@ def test_real_gomoku_result_satisfies_contract():
     """真实跑一局 gomoku，断言产出的 MatchResult 满足鸭子契约。"""
     from bzplat.backend.games.gomoku.engine import GomokuSession
 
-    black = [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)]
-    white = [(1, 0), (1, 1), (1, 2), (1, 3)]
-    bi = wi = 0
-
-    async def decide(player, req):
-        nonlocal bi, wi
-        if player == 0:
-            x, y = black[bi]
-            bi += 1
-        else:
-            x, y = white[wi]
-            wi += 1
-        return {"response": {"x": x, "y": y}}
-
-    result = asyncio.run(GomokuSession().run_async(decide))
+    result = asyncio.run(
+        GomokuSession().run_async(seat_zero_winning_decider())
+    )
     # 契约字段
     assert hasattr(result, "rounds_played")
     assert hasattr(result, "rounds") and len(result.rounds) == 1

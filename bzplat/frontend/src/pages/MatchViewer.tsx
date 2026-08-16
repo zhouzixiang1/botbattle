@@ -449,15 +449,17 @@ export default function MatchViewer() {
     ? Math.max(0, total - 1 - cur)
     : 0
   const eventWinner = visibleVm && gameSpec ? gameSpec.winner(visibleVm) : undefined
+  const visibleSeatDetail = (seat: number) => (
+    gameSpec?.seatDetail?.(visibleVm, seat) ?? gameSpec?.seatColors?.[seat]
+  )
   const colorLabel = (seat: number) => {
     // 显示从 1 起计（后端 0 起计，DB CHECK 约束未变）。
     if (!match) return `座位 ${seat + 1}`
-    // 棋类座位着色（黑白/红蓝）经 spec.seatColors 取（消除游戏名分支）
-    const seatColors = gameSpec?.seatColors
-    if (seatColors && seatColors[seat]) {
-      return `${seatHeaderLabel(match, seat as 0 | 1)}（${seatColors[seat]}）`
-    }
-    return seatHeaderLabel(match, seat as 0 | 1)
+    // 动态棋色（如五子棋交换）经 seatDetail 取；固定棋色回退 seatColors。
+    const detail = visibleSeatDetail(seat)
+    return detail
+      ? `${seatHeaderLabel(match, seat as 0 | 1)}（${detail}）`
+      : seatHeaderLabel(match, seat as 0 | 1)
   }
   const winnerLabel = resolveWinnerLabel(match, eventWinner, finished, colorLabel)
   const visibleProgress = visibleVm && gameSpec ? gameSpec.replay.progress(visibleVm) : null
@@ -619,7 +621,7 @@ export default function MatchViewer() {
         side={seat}
         variant="panel"
         state={isWinner ? 'winner' : winnerSeat != null ? 'loser' : 'neutral'}
-        seatDetail={gameSpec?.seatColors?.[seat]}
+        seatDetail={visibleSeatDetail(seat)}
         className={`${seat === 0 ? 'order-1' : 'order-2 sm:order-3'} border ${isWinner ? 'border-primary/40 bg-primary/5' : 'border-border bg-muted/20'}`}
       />
     )
