@@ -68,6 +68,32 @@ class SessionFactory(Protocol):
     ) -> Any: ...
 
 
+class MatchRecordExporter(Protocol):
+    """Build one game's public, deterministic single-match record payload.
+
+    Callers must pass only public match metadata and events from the canonical
+    replay projection.  A game opts in by assigning this callable on its
+    ``GameSpec``; games without it remain explicitly unsupported.
+    """
+
+    def __call__(
+        self,
+        *,
+        match: dict[str, Any],
+        events: list[dict[str, Any]],
+        replay_updated_at: str | None,
+    ) -> dict[str, Any]: ...
+
+
+class MatchRecordExportError(ValueError):
+    """A stored match cannot be represented by a game's public record format.
+
+    Exporters raise this controlled error for unknown/mixed frozen contracts or
+    contradictory public replay metadata.  The generic HTTP layer maps it to a
+    fail-closed conflict without exposing persistence details.
+    """
+
+
 @dataclass(frozen=True)
 class ProtocolSpec:
     """一款游戏的 Bot 行协议（序列化/反序列化/响应契约/兜底响应）。
@@ -146,6 +172,10 @@ class GameSpec:
     # 每方总时间预算（秒）；None=不限时（走原单步 action_timeout 超时）。
     # Gomoku/Pencil 设 900.0（每座位累计 15 分钟，超时判负）。
     time_budget_per_side: float | None = None
+
+    # 单场公开记录导出。None 表示该游戏尚未定义稳定导出格式；通用 API
+    # 只检查能力是否存在，不按 game_id 分支。
+    record_exporter: MatchRecordExporter | None = None
 
     def __post_init__(self) -> None:
         """派生并校验公开裁判源码白名单。

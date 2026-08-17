@@ -8019,6 +8019,89 @@ class Store:
                 "updated_at": (replay or {}).get("updated_at"),
             }
 
+    def get_match_record_source(self, match_id: str) -> dict[str, Any] | None:
+        """Read detailed match identity and its finalized public replay atomically.
+
+        Match completion commits before the orchestrator's best-effort terminal
+        replay flush.  A record download therefore cannot infer finality from
+        ``matches_*.status`` alone: during that narrow window it would otherwise
+        export an older live prefix plus a synthesized terminal.  This method
+        reads the participant joins, raw replay and canonical public replay in
+        one SQLite snapshot and reports finality only when the persisted JSON
+        array itself ends in the terminal type required by the match row.
+
+        Raw replay JSON never leaves this Store boundary.
+        """
+        with self._tx() as c:
+            c.execute("BEGIN")
+            tbl = self._match_table_of(c, match_id)
+            if not tbl:
+                return None
+            sel = (
+                "m.*, "
+                "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+                "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
+                "ua.username AS bot_a_owner_name, ua.display_name AS bot_a_owner_display, "
+                "ub.username AS bot_b_owner_name, ub.display_name AS bot_b_owner_display, "
+                "hu.username AS human_user_name, hu.display_name AS human_user_display, "
+                f"{_technical_incident_projection_sql('m')} "
+                "AS _replay_incident_events_json"
+            )
+            row = c.execute(
+                f"SELECT {sel} FROM {tbl} m "
+                "LEFT JOIN bots ba ON m.bot_a_id=ba.id "
+                "LEFT JOIN bots bb ON m.bot_b_id=bb.id "
+                "LEFT JOIN users ua ON ba.owner_id=ua.id "
+                "LEFT JOIN users ub ON bb.owner_id=ub.id "
+                "LEFT JOIN users hu ON m.human_user_id=hu.id "
+                "WHERE m.id=?",
+                (match_id,),
+            ).fetchone()
+            match = _parse_match_json_cols(_row(row))
+            if match is None:
+                # A stale locator is not proof that the physical match exists.
+                return None
+            self._attach_rating_settlement_state_tx(c, match)
+
+            replay = _row(
+                c.execute(
+                    "SELECT match_id,events_json,updated_at "
+                    "FROM match_replays WHERE match_id=?",
+                    (match_id,),
+                ).fetchone()
+            )
+            raw_events: Any = None
+            raw_json = (replay or {}).get("events_json")
+            if isinstance(raw_json, str):
+                try:
+                    parsed = json.loads(raw_json)
+                except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, list):
+                    raw_events = parsed
+
+            expected_terminal = {
+                STATUS_COMPLETED: "match_end",
+                STATUS_ABORTED: "error",
+            }.get(match.get("status"))
+            finalized = bool(
+                expected_terminal
+                and raw_events
+                and isinstance(raw_events[-1], dict)
+                and raw_events[-1].get("type") == expected_terminal
+            )
+            events = _sanitize_public_replay_events(replay, match)
+            return {
+                "match": match,
+                "replay": {
+                    "match_id": match_id,
+                    "events": events,
+                    "event_count": len(events),
+                    "updated_at": (replay or {}).get("updated_at"),
+                },
+                "replay_finalized": finalized,
+            }
+
     # ── ratings（per-game：PK = bot_id + game_id，全面解耦 PR3）─────────
 
     def _bot_game_id(self, c, bot_id: int) -> str:
