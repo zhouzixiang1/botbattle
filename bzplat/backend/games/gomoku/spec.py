@@ -11,6 +11,7 @@ from bzplat.backend.games.base import GameSpec, ProtocolSpec
 from bzplat.backend.games import _botzone_protocol as botzone
 from bzplat.backend.games.gomoku.engine import BOARD_SIZE, GomokuSession
 from bzplat.backend.games.gomoku import protocol as proto
+from bzplat.backend.games.gomoku.record import build_record
 from bzplat.backend.games.gomoku import templates as _templates_mod
 
 GAME_ID = "gomoku"
@@ -136,4 +137,5 @@ SPEC = GameSpec(
     preflight_check=_preflight_check,
     source_files=("gomoku_judge.py", "forbidden.py", "engine.py", "protocol.py", "result.py"),
     time_budget_per_side=900.0,
+    record_exporter=build_record,
 )

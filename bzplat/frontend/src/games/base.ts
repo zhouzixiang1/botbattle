@@ -96,6 +96,11 @@ export interface ReplayNavigationSpec {
   label?: (segment: number, events: RawEvent[]) => string
 }
 
+export interface ReplayRecordDownloadSpec {
+  /** 面向用户的下载动作名称；未声明表示该游戏不提供记录导出。 */
+  label: string
+}
+
 export interface ReplayViewSpec {
   /** 回放主画面与时序的排布由游戏声明。 */
   layout: 'wide' | 'with-timeline'
@@ -109,6 +114,8 @@ export interface ReplayViewSpec {
   Hud?: ComponentType<GameAuxiliaryProps>
   /** 可选的分段导航（例如德州逐手跳转）。 */
   navigation?: ReplayNavigationSpec
+  /** 可选的公开对局记录下载能力；下载地址由通用 MatchViewer 构造。 */
+  recordDownload?: ReplayRecordDownloadSpec
 }
 
 export type TerminalReasonTone = 'neutral' | 'danger'

@@ -10,7 +10,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert } from 'lucide-react'
+import { Play, Pause, ChevronLeft, ChevronRight, SkipBack, SkipForward, Radio, ArrowLeft, History, TriangleAlert, Download } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import BotDebugPanel, { type BotDebugPayload } from '@/components/BotDebugPanel'
 import MatchBoard from '@/components/MatchBoard'
@@ -612,6 +612,10 @@ export default function MatchViewer() {
     : cur >= total - 1
       ? realtime ? '继续跟播' : '从头重播'
       : '继续回放'
+  const recordDownload = match?.id === id
+    && (match?.status === 'completed' || match?.status === 'aborted')
+    ? gameSpec?.replay.recordDownload
+    : undefined
   const renderSeat = (seat: 0 | 1) => {
     if (!match) return null
     const isWinner = winnerSeat === seat
@@ -628,7 +632,17 @@ export default function MatchViewer() {
   }
 
   return (
-    <PageStub title={isLive ? '实时观赛' : '对局详情'}>
+    <PageStub
+      title={isLive ? '实时观赛' : '对局详情'}
+      actions={recordDownload && id ? (
+        <Button asChild variant="outline" size="sm" className="max-sm:min-h-11">
+          <a href={`/api/matches/${encodeURIComponent(id)}/record`} download>
+            <Download aria-hidden="true" className="size-4" />
+            {recordDownload.label}
+          </a>
+        </Button>
+      ) : undefined}
+    >
       <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
         <span className="max-w-full break-all font-mono text-xs text-muted-foreground">{id}</span>
         {match && (

@@ -94,6 +94,7 @@ from bzplat.backend.contests.showcase import (
 )
 from bzplat.backend.contests.templates import list_templates
 from bzplat.backend.games import registry as game_registry
+from bzplat.backend.games.base import MatchRecordExportError
 from bzplat.backend.matches import MatchOrchestrator
 from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
@@ -493,6 +494,62 @@ _PUBLIC_MATCH_LIST_FIELDS = frozenset(
     }
 )
 _PUBLIC_MATCH_ENGAGEMENT_FIELDS = frozenset({"likes_count", "views_count"})
+_PUBLIC_MATCH_RECORD_FIELDS = frozenset(
+    {
+        "id",
+        "game_id",
+        "status",
+        "winner",
+        "reason",
+        "match_type",
+        "contest_id",
+        "human_seat",
+        "created_at",
+        "started_at",
+        "ended_at",
+        "technical_loss",
+        "result",
+        "bot_a",
+        "bot_b",
+    }
+)
+_MATCH_RECORD_CONTRACT_FIELDS = ("ruleset_version", "protocol_version")
+_MATCH_RECORD_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+}
+_SAFE_RECORD_FILENAME_COMPONENT = re.compile(r"[^A-Za-z0-9_-]+")
+_MATCH_RECORD_CONTRACT_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
+
+
+def _public_match_record_source(match: dict) -> dict[str, Any]:
+    """Build the game exporter input from an explicit public allow-list."""
+    # ``Store.get_match_record_source`` already joined Bot owners and the
+    # optional human identity in the replay snapshot.  Do not perform a second
+    # user query here or mix participant labels from another database state.
+    public = _with_seat_info(match)
+    source = {
+        key: value
+        for key, value in public.items()
+        if key in _PUBLIC_MATCH_RECORD_FIELDS
+    }
+    # Frozen rule/protocol ids are needed to interpret historical records, but
+    # rating pools, Bot version ids/paths and match_config are intentionally not.
+    for key in _MATCH_RECORD_CONTRACT_FIELDS:
+        value = match.get(key)
+        if not isinstance(value, str) or not _MATCH_RECORD_CONTRACT_ID.fullmatch(value):
+            raise ValueError(f"invalid frozen match contract: {key}")
+        source[key] = value
+    return source
+
+
+def _match_record_filename(game_id: str, match_id: str) -> str:
+    """Return an ASCII-only attachment filename with no header metacharacters."""
+    safe_game = _SAFE_RECORD_FILENAME_COMPONENT.sub("-", game_id).strip("-_")
+    safe_match = _SAFE_RECORD_FILENAME_COMPONENT.sub("-", match_id).strip("-_")
+    safe_game = (safe_game or "game")[:32]
+    safe_match = (safe_match or "match")[:80]
+    return f"botbattle-{safe_game}-{safe_match}.json"
 
 
 def _public_match_list_rows(
@@ -2197,6 +2254,85 @@ def match_replay(match_id: str, request: Request):
     if payload is None:
         raise HTTPException(404, "对局不存在")
     return payload
+
+
+@router.get("/api/matches/{match_id}/record")
+def match_record(match_id: str, request: Request):
+    """Download one terminal match through its game's public record capability."""
+    store = _store(request)
+    source = store.get_match_record_source(match_id)
+    if source is None:
+        raise HTTPException(404, "对局不存在", headers=_MATCH_RECORD_HEADERS)
+    match = source["match"]
+    if match.get("status") not in (STATUS_COMPLETED, STATUS_ABORTED):
+        raise HTTPException(
+            409,
+            "对局尚未结束，暂不能导出记录",
+            headers=_MATCH_RECORD_HEADERS,
+        )
+
+    try:
+        spec = game_registry.get(match["game_id"])
+    except (KeyError, TypeError):
+        raise HTTPException(
+            409,
+            "该对局的游戏不支持记录导出",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
+    if spec.record_exporter is None:
+        raise HTTPException(
+            409,
+            "该游戏暂不支持记录导出",
+            headers=_MATCH_RECORD_HEADERS,
+        )
+
+    if not source["replay_finalized"]:
+        raise HTTPException(
+            409,
+            "对局记录尚未完成持久化，暂不能导出",
+            headers=_MATCH_RECORD_HEADERS,
+        )
+
+    replay = source["replay"]
+    try:
+        record_source = _public_match_record_source(match)
+    except ValueError:
+        raise HTTPException(
+            409,
+            "对局规则契约损坏，无法导出记录",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
+    try:
+        record = spec.record_exporter(
+            match=record_source,
+            events=list(replay["events"]),
+            replay_updated_at=replay.get("updated_at"),
+        )
+    except MatchRecordExportError:
+        raise HTTPException(
+            409,
+            "对局规则或回放契约冲突，无法导出记录",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
+    content = (
+        json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    filename = _match_record_filename(str(spec.game_id), match_id)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={
+            **_MATCH_RECORD_HEADERS,
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
 
 
 @router.get("/api/matches/{match_id}/events")

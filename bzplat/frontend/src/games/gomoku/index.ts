@@ -150,5 +150,8 @@ export const gomokuSpec: GameViewSpec = {
     progress: (vm) => (vm as GomokuViewModel).moveCount,
     Hud: GomokuReplayHud,
     Summary: GomokuReplaySummary,
+    recordDownload: {
+      label: '导出棋谱（JSON）',
+    },
   },
 }
