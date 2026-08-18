@@ -146,6 +146,7 @@ const RATING_REASON_LABEL: Record<string, string> = {
   bot_missing: 'Bot 信息不完整，不计平台排行榜',
   same_owner: '同一所有者，不计平台排行榜',
   remote_local: '本地 Bot 练习，不计平台排行榜',
+  ranked_bot_not_selected: '至少一方未派遣参榜，不计平台排行榜',
   eligible: '计入平台排行榜',
 }
 

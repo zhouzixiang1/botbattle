@@ -20,8 +20,10 @@ def _rated_bot(
 ) -> dict:
     user = store.create_user(username, f"{username}@example.com", "hash")
     bot = store.create_bot(
-        user["id"], name, display_name=f"{name} display", game_id="holdem"
+        user["id"], name, display_name=f"{name} display",
+        binary_path=f"/tmp/{name}", format="elf", game_id="holdem"
     )
+    store.select_ranked_bot(int(user["id"]), int(bot["id"]), if_empty=True)
     store.ensure_rating(bot["id"], game_id="holdem")
     store.update_rating_row(
         bot["id"],

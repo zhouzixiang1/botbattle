@@ -1,5 +1,6 @@
 """SQLite 存储层导出。"""
 from .db import (
+    RankedBotSelectionBusyError,
     Store,
     rating_plan_digest,
     rating_projection_digest,
@@ -38,6 +39,7 @@ from .schema import (
 
 __all__ = [
     "Store",
+    "RankedBotSelectionBusyError",
     "ExecutionInvariantError",
     "ExecutionMaintenanceConflict",
     "ExecutionQueueClosed",

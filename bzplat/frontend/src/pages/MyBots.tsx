@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Save,
   Trash2,
+  Trophy,
   Upload,
   Wifi,
   WifiOff,
@@ -32,6 +33,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useConfirm } from '@/hooks/use-confirm'
 import { toast } from 'sonner'
 import {
+  ApiError,
   apiFormWithProgress,
   apiGet,
   apiJson,
@@ -75,11 +77,31 @@ interface Bot {
   format?: string
   current_version?: number
   is_active?: number
+  is_ranked?: number | boolean
   updated_at?: string
   game_id?: string
   runtime_mode?: string
   runnable?: boolean
   unsupported_reason?: string | null
+}
+
+interface RankingMutationResponse {
+  bot: Bot
+  cancelled_queued_jobs?: number
+}
+
+function rankingMutationError(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    try {
+      const detail = JSON.parse(error.detail) as { message?: unknown }
+      if (typeof detail?.message === 'string' && detail.message.trim()) {
+        return detail.message
+      }
+    } catch {
+      // Plain-string API details already render correctly through errMsg.
+    }
+  }
+  return errMsg(error, fallback)
 }
 
 export default function MyBots() {
@@ -97,6 +119,8 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [rankingBusyBotId, setRankingBusyBotId] = useState<number | null>(null)
+  const rankingActionRefs = useRef(new Map<number, HTMLButtonElement>())
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [description, setDescription] = useState('')
@@ -223,6 +247,95 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
     }
   }
 
+  const setRankingBot = async (bot: Bot) => {
+    const botName = bot.display_name || bot.name
+    const gameName = gameLabel(bot.game_id)
+    const targetUserId = userId
+    const isCurrentIdentity = () => (
+      (currentUserStore.get()?.id ?? null) === targetUserId
+    )
+
+    if (bot.is_ranked) {
+      const confirmed = await confirm({
+        title: '退出排行榜',
+        desc: `确认让 ${botName} 退出${gameName}排行榜？历史已完成评分与对局记录保留；尚未开始的旧计分排队会取消。如有进行中或待结算的计分对局，暂不能退出。`,
+        confirmText: '确认退出',
+        buttonClassName: 'max-sm:min-h-[44px] max-sm:min-w-[44px]',
+      })
+      if (!confirmed) {
+        requestAnimationFrame(() => rankingActionRefs.current.get(bot.id)?.focus())
+        return
+      }
+
+      setRankingBusyBotId(bot.id)
+      setError('')
+      try {
+        const result = await apiJson<RankingMutationResponse>(`/api/bots/${bot.id}/ranking`, 'DELETE')
+        if (!isCurrentIdentity()) return
+        setBots((current) => current.map((item) => (
+          item.id === bot.id ? { ...item, ...result.bot, is_ranked: false } : item
+        )))
+        const cancelled = Math.max(0, Number(result.cancelled_queued_jobs || 0))
+        toast.success(cancelled > 0
+          ? `${botName} 已退出${gameName}排行榜；已取消 ${cancelled} 个旧计分排队`
+          : `${botName} 已退出${gameName}排行榜`)
+      } catch (e) {
+        if (isCurrentIdentity()) setError(rankingMutationError(e, '退出排行榜失败'))
+      } finally {
+        if (isCurrentIdentity()) setRankingBusyBotId(null)
+      }
+      return
+    }
+
+    const unavailableReason = bot.runnable === false
+      ? '更新为可运行版本后才能派遣参榜。'
+      : !bot.is_active
+        ? '先启用此 Bot 才能派遣参榜。'
+        : ''
+    if (unavailableReason) {
+      setError(unavailableReason)
+      return
+    }
+
+    const currentRanked = bots.find((item) => (
+      item.id !== bot.id && item.game_id === bot.game_id && Boolean(item.is_ranked)
+    ))
+    const confirmed = await confirm({
+      title: currentRanked ? '切换排行榜 Bot' : '派遣排行榜 Bot',
+      desc: currentRanked
+        ? `确认由 ${botName} 替换 ${currentRanked.display_name || currentRanked.name}？历史已完成评分保留，尚未开始的旧计分排队会取消；如有进行中或待结算的计分对局，暂不能切换。`
+        : `确认派遣 ${botName} 参加${gameName}排行榜？每个账号每款游戏只能派遣一个 Bot；当前参榜 Bot（如有）的历史已完成评分保留，尚未开始的旧计分排队会取消。如有进行中或待结算的计分对局，暂不能切换。`,
+      confirmText: currentRanked ? '确认切换' : '确认派遣',
+      buttonClassName: 'max-sm:min-h-[44px] max-sm:min-w-[44px]',
+    })
+    if (!confirmed) {
+      requestAnimationFrame(() => rankingActionRefs.current.get(bot.id)?.focus())
+      return
+    }
+
+    setRankingBusyBotId(bot.id)
+    setError('')
+    try {
+      const result = await apiJson<RankingMutationResponse>(`/api/bots/${bot.id}/ranking`, 'PUT')
+      if (!isCurrentIdentity()) return
+      const selected = result.bot
+      const selectedGameId = selected.game_id || bot.game_id
+      setBots((current) => current.map((item) => {
+        if (item.id === bot.id) return { ...item, ...selected, is_ranked: true }
+        if (item.game_id === selectedGameId) return { ...item, is_ranked: false }
+        return item
+      }))
+      const cancelled = Math.max(0, Number(result.cancelled_queued_jobs || 0))
+      toast.success(cancelled > 0
+        ? `已将 ${botName} 派遣到${gameName}排行榜；已取消 ${cancelled} 个旧计分排队`
+        : `已将 ${botName} 派遣到${gameName}排行榜`)
+    } catch (e) {
+      if (isCurrentIdentity()) setError(rankingMutationError(e, '派遣排行榜 Bot 失败'))
+    } finally {
+      if (isCurrentIdentity()) setRankingBusyBotId(null)
+    }
+  }
+
   const [editing, setEditing] = useState<number | null>(null)
   const [editDisplay, setEditDisplay] = useState('')
   const [editDesc, setEditDesc] = useState('')
@@ -277,9 +390,9 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   return (
     <PageFrame
       layout="account-my-bots"
-      className="max-sm:[&_[data-slot=button]]:min-h-11 max-sm:[&_[data-slot=button]]:min-w-11 max-sm:[&_[data-slot=input]]:min-h-11 max-sm:[&_[data-slot=select-trigger]]:min-h-11"
+      className="max-sm:[&_[data-slot=button]]:min-h-[44px] max-sm:[&_[data-slot=button]]:min-w-[44px] max-sm:[&_[data-slot=input]]:min-h-[44px] max-sm:[&_[data-slot=select-trigger]]:min-h-[44px]"
     >
-      <PageHeader title="我的 Bot" description="上传 Linux x86_64 ELF，维护公开资料、运行状态与历史版本。" />
+      <PageHeader title="我的 Bot" description="上传 Linux x86_64 ELF，维护运行状态，并为每款游戏派遣一个排行榜 Bot。" />
 
       {error && <ErrorMsg msg={error} />}
 
@@ -408,7 +521,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
           <span className="ml-auto shrink-0 text-xs text-muted-foreground">第 {page} 页</span>
       </StickyToolbar>
 
-      <DataRegion title="Bot 列表" description="主操作保持可见，版本、编辑与删除收纳在更多菜单。">
+      <DataRegion title="Bot 列表" description="每个账号每款游戏最多派遣一个 Bot；已完成评分保留，切换会取消旧计分排队，进行中或待结算时暂不可操作。">
         {loading ? (
           <Loading text="正在加载 Bot…" />
         ) : bots.length === 0 ? (
@@ -427,6 +540,10 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                       <Badge variant="secondary">{gameLabel(b.game_id)}</Badge>
                       {b.runnable === false && <Badge variant="destructive">不可运行</Badge>}
                       <Badge variant={b.is_active ? 'default' : 'outline'}>{b.is_active ? '已启用' : '已停用'}</Badge>
+                      <Badge variant={b.is_ranked ? 'default' : 'outline'}>
+                        <Trophy className="size-3" aria-hidden="true" />
+                        {b.is_ranked ? '排行榜 Bot' : '未参榜'}
+                      </Badge>
                     </div>
                     {b.description && (
                       <OverflowText lines={2} tooltip={false} className="mt-1 text-xs text-muted-foreground">{b.description}</OverflowText>
@@ -446,8 +563,41 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                         {b.unsupported_reason || '仅保留为历史记录；请上传 Linux x86_64 ELF 新版本。'}
                       </p>
                     )}
+                    {!b.is_ranked && (b.runnable === false || !b.is_active) && (
+                      <p id={`ranking-help-${b.id}`} className="mt-1 text-xs text-muted-foreground">
+                        {b.runnable === false
+                          ? '更新为可运行版本后才能派遣参榜。'
+                          : '先启用此 Bot 才能派遣参榜。'}
+                      </p>
+                    )}
                   </div>
-                  <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+                  <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                    <Button
+                      ref={(node) => {
+                        if (node) rankingActionRefs.current.set(b.id, node)
+                        else rankingActionRefs.current.delete(b.id)
+                      }}
+                      type="button"
+                      variant={b.is_ranked ? 'outline' : 'default'}
+                      size="sm"
+                      disabled={
+                        rankingBusyBotId !== null
+                        || (!b.is_ranked && (b.runnable === false || !b.is_active))
+                      }
+                      aria-busy={rankingBusyBotId === b.id}
+                      aria-describedby={
+                        !b.is_ranked && (b.runnable === false || !b.is_active)
+                          ? `ranking-help-${b.id}`
+                          : undefined
+                      }
+                      onClick={() => void setRankingBot(b)}
+                      className="gap-1 max-sm:min-h-[44px]"
+                    >
+                      <Trophy className="size-3.5" aria-hidden="true" />
+                      {rankingBusyBotId === b.id
+                        ? '处理中…'
+                        : b.is_ranked ? '退出排名' : '派遣参榜'}
+                    </Button>
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <span>
@@ -457,7 +607,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                             size="sm"
                             disabled={!b.is_active && b.runnable === false}
                             onClick={() => void toggleActive(b)}
-                            className="gap-1"
+                            className="gap-1 max-sm:min-h-[44px]"
                           >
                             <Power className="size-3.5" />
                             {b.is_active ? '停用' : b.runnable === false ? '不可启用' : '启用'}

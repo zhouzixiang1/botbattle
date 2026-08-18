@@ -76,7 +76,7 @@ DEFAULT_DB_PATH = "botzone.db"
 
 _AUTO_MATCH_FAIR_BOOTSTRAP_VERSION = 1
 _AUTO_MATCH_POLICY_VERSION = "owner-game-lane-v2"
-_RATING_PROJECTION_POLICY_VERSION = "owner-neutral-v3"
+_RATING_PROJECTION_POLICY_VERSION = "owner-ranked-bot-v4"
 _RATING_PROJECTION_LEGACY_VERSION = "legacy-unverified"
 
 # 管理端用户目录允许展示实名/联系信息，但认证凭据仍不属于目录契约。
@@ -109,6 +109,10 @@ class _RatingProjectionMutationGuard:
 
 class LocalAIAgentBusyError(ValueError):
     """A credential mutation would interrupt an active execution lease."""
+
+
+class RankedBotSelectionBusyError(ValueError):
+    """Changing the ranked representative would cross an active rated lifecycle."""
 
 
 @dataclass
@@ -1079,14 +1083,16 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
     bots = [
         {
             "id": int(row["id"]),
+            "owner_id": int(row["owner_id"]),
             "game_id": str(row["game_id"]),
             "is_active": int(row["is_active"]),
+            "is_ranked": int(row["is_ranked"]),
             "format": str(row["format"]),
             "os": str(row["os"]),
             "arch": str(row["arch"]),
         }
         for row in conn.execute(
-            "SELECT id,game_id,is_active,format,os,arch FROM bots "
+            "SELECT id,owner_id,game_id,is_active,is_ranked,format,os,arch FROM bots "
             "ORDER BY game_id,id"
         ).fetchall()
     ]
@@ -1122,20 +1128,31 @@ def rating_projection_digests(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-def _rating_eligible_sql(alias: str) -> str:
-    """SQL expression for the immutable rating policy of one match row.
+def _insert_rating_eligible_sql(alias: str) -> str:
+    """Read the application-owned rating policy from a new Match payload.
 
-    The database trigger deliberately derives ownership from canonical Bot rows
-    instead of trusting JSON supplied by a caller.  ``match_config`` still
-    freezes the same result for public explanation and post-processing.
+    A Match row must exist before its immutable ``match_rating_policies`` row
+    can reference it.  The two canonical creation paths therefore overwrite
+    ``match_config._rating_eligible`` immediately before INSERT, and this
+    boundary trigger consumes that boolean during the short pre-policy window.
+    Missing, invalid, or non-boolean legacy payloads fail closed as rated; they
+    can never bypass the overlap fence by omitting the internal field.
     """
     return (
-        f"({alias}.match_type NOT IN ('{TYPE_CONTEST}','{TYPE_HUMAN}') "
-        f"AND {alias}.bot_a_id IS NOT NULL AND {alias}.bot_b_id IS NOT NULL "
-        f"AND {alias}.bot_a_id<>{alias}.bot_b_id AND EXISTS ("
-        "SELECT 1 FROM bots rating_a JOIN bots rating_b "
-        f"ON rating_a.id={alias}.bot_a_id AND rating_b.id={alias}.bot_b_id "
-        "WHERE rating_a.owner_id<>rating_b.owner_id))"
+        "(CASE WHEN "
+        f"json_valid({alias}.match_config) AND "
+        f"json_type({alias}.match_config,'$._rating_eligible') "
+        "IN ('true','false') THEN "
+        f"json_extract({alias}.match_config,'$._rating_eligible')=1 "
+        "ELSE 1 END)"
+    )
+
+
+def _frozen_rating_eligible_sql(alias: str) -> str:
+    """Read one existing Match's immutable policy, conservatively if absent."""
+    return (
+        "COALESCE((SELECT frozen.rated FROM match_rating_policies frozen "
+        f"WHERE frozen.match_id={alias}.id),1)=1"
     )
 
 
@@ -1201,11 +1218,12 @@ def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
     """Enforce one rating-bearing lifecycle per Bot at the SQLite boundary."""
     for gid in sorted(_all_game_ids()):
         table = _matches_table(gid)
-        new_rated = _rating_eligible_sql("NEW")
-        existing_rated = _rating_eligible_sql("m")
+        inserted_rated = _insert_rating_eligible_sql("NEW")
+        updated_rated = _frozen_rating_eligible_sql("OLD")
         overlap = (
-            f"SELECT 1 FROM {table} m WHERE m.id<>NEW.id "
-            f"AND ({existing_rated}) "
+            f"SELECT 1 FROM {table} m "
+            "LEFT JOIN match_rating_policies policy ON policy.match_id=m.id "
+            "WHERE m.id<>NEW.id AND COALESCE(policy.rated,1)=1 "
             "AND (m.bot_a_id IN (NEW.bot_a_id,NEW.bot_b_id) "
             "OR m.bot_b_id IN (NEW.bot_a_id,NEW.bot_b_id)) "
             "AND (m.status IN ('pending','running') OR "
@@ -1220,7 +1238,7 @@ def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
             f"CREATE TRIGGER {insert_name} "
             f"BEFORE INSERT ON {table} "
             "WHEN NEW.status IN ('pending','running') "
-            f"AND ({new_rated}) AND EXISTS ({overlap}) "
+            f"AND ({inserted_rated}) AND EXISTS ({overlap}) "
             "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END",
         )
         update_name = f"trg_{table}_rated_overlap_update"
@@ -1230,7 +1248,7 @@ def _install_rated_overlap_triggers(conn: sqlite3.Connection) -> None:
             f"CREATE TRIGGER {update_name} "
             f"BEFORE UPDATE OF bot_a_id,bot_b_id,match_type,status ON {table} "
             "WHEN NEW.status IN ('pending','running') "
-            f"AND ({new_rated}) AND EXISTS ({overlap}) "
+            f"AND ({updated_rated}) AND EXISTS ({overlap}) "
             "BEGIN SELECT RAISE(ABORT, 'rated match lifecycle overlap'); END",
         )
 
@@ -1319,8 +1337,10 @@ def _install_rating_projection_mutation_triggers(
         conn,
         "trg_bots_projection_mutation_update",
         "CREATE TRIGGER trg_bots_projection_mutation_update "
-        "AFTER UPDATE OF game_id,is_active,format,os,arch ON bots WHEN "
+        "AFTER UPDATE OF owner_id,game_id,is_active,is_ranked,format,os,arch "
+        "ON bots WHEN OLD.owner_id IS NOT NEW.owner_id OR "
         "OLD.game_id IS NOT NEW.game_id OR OLD.is_active IS NOT NEW.is_active OR "
+        "OLD.is_ranked IS NOT NEW.is_ranked OR "
         "OLD.format IS NOT NEW.format OR OLD.os IS NOT NEW.os OR "
         f"OLD.arch IS NOT NEW.arch BEGIN {bump} END",
     )
@@ -1988,6 +2008,116 @@ def _ensure_game_contract_state(
             "AND rating_pool_id=''",
             (historical["rating_pool_id"], game_id),
         )
+
+
+def _ensure_ranked_bot_selection(
+    conn: sqlite3.Connection, *, fresh_schema: bool
+) -> None:
+    """Install the one-ranked-Bot invariant and seed an existing database once.
+
+    ``SCHEMA`` runs before migrations, so the partial index cannot live there:
+    an existing ``bots`` table does not gain the new column from
+    ``CREATE TABLE IF NOT EXISTS``.  First-install is therefore identified by
+    the old table lacking ``is_ranked`` -- never merely by an object name.  A
+    canonical index is verified byte-for-byte after whitespace normalization;
+    collisions and drift fail closed rather than silently reassigning an owner
+    who intentionally left their ranked seat empty.
+    """
+    index_name = "idx_bots_one_ranked_per_owner_game"
+    create_sql = (
+        f"CREATE UNIQUE INDEX {index_name} "
+        "ON bots(owner_id,game_id) WHERE is_ranked=1"
+    )
+    desired_sql = _normalize_schema_sql(create_sql)
+    objects = conn.execute(
+        "SELECT type,sql FROM sqlite_master WHERE name=? ORDER BY type",
+        (index_name,),
+    ).fetchall()
+    conflicts = sorted(
+        str(row["type"]) for row in objects if str(row["type"]) != "index"
+    )
+    if conflicts:
+        raise RuntimeError(
+            f"schema object name collision for ranked Bot index {index_name}: "
+            f"{conflicts}"
+        )
+    index_rows = [row for row in objects if str(row["type"]) == "index"]
+    if len(index_rows) > 1:
+        raise RuntimeError(f"duplicate ranked Bot index definition: {index_name}")
+    if index_rows:
+        current_sql = _normalize_schema_sql(str(index_rows[0]["sql"] or ""))
+        if current_sql != desired_sql:
+            raise RuntimeError(f"ranked Bot index definition mismatch: {index_name}")
+        if "is_ranked" not in _table_cols(conn, "bots"):
+            raise RuntimeError("canonical ranked Bot index exists without is_ranked")
+        return
+
+    had_ranked_column = "is_ranked" in _table_cols(conn, "bots")
+    bot_count = int(conn.execute("SELECT COUNT(*) FROM bots").fetchone()[0])
+    if had_ranked_column and bot_count and not fresh_schema:
+        raise RuntimeError(
+            f"ranked Bot index missing on non-empty migrated database: {index_name}"
+        )
+    if fresh_schema and bot_count:
+        raise RuntimeError("fresh schema unexpectedly contains Bots before migration")
+    _add_col(
+        conn,
+        "bots",
+        "is_ranked",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (is_ranked IN (0,1))",
+    )
+    if not had_ranked_column:
+        # Existing public candidates are reduced deterministically to the Bot
+        # that would rank highest today.  A fresh schema has no rows here; its
+        # first successfully activated upload is selected by BotManager.
+        conn.execute("UPDATE bots SET is_ranked=0 WHERE is_ranked<>0")
+        conn.execute(
+            "WITH candidates AS ("
+            " SELECT b.id,ROW_NUMBER() OVER ("
+            "  PARTITION BY b.owner_id,b.game_id ORDER BY "
+            "  (COALESCE(r.matches_played,0)>=?) DESC,"
+            "  COALESCE(r.rating,1500.0) DESC,"
+            "  COALESCE(r.matches_played,0) DESC,b.id ASC"
+            " ) AS choice_rank "
+            " FROM bots b "
+            " LEFT JOIN ratings r ON r.bot_id=b.id AND r.game_id=b.game_id "
+            " JOIN rating_pool_state pool ON pool.game_id=b.game_id "
+            " WHERE b.is_active=1 AND b.binary_path<>'' "
+            " AND b.format=? AND b.os=? AND b.arch=? "
+            " AND b.protocol_version=pool.protocol_version "
+            " AND ((b.current_version=0 AND NOT EXISTS("
+            "   SELECT 1 FROM bot_versions any_version WHERE any_version.bot_id=b.id"
+            " )) OR EXISTS("
+            "   SELECT 1 FROM bot_versions v WHERE v.bot_id=b.id "
+            "   AND v.version=b.current_version AND v.retired_at IS NULL "
+            "   AND v.binary_path<>'' AND v.binary_path=b.binary_path "
+            "   AND v.runtime_mode=b.runtime_mode "
+            "   AND v.protocol_version=pool.protocol_version "
+            "   AND v.format=? AND v.os=? AND v.arch=?"
+            " ))"
+            ") UPDATE bots SET is_ranked=1 WHERE id IN ("
+            " SELECT id FROM candidates WHERE choice_rank=1"
+            ")",
+            (
+                max(1, int(RANKING_MIN_RATED_MATCHES)),
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+                SUPPORTED_BINARY_ARCH,
+                SUPPORTED_BINARY_FORMAT,
+                SUPPORTED_BINARY_OS,
+                SUPPORTED_BINARY_ARCH,
+            ),
+        )
+    conn.execute(create_sql)
+    installed = conn.execute(
+        "SELECT type,sql FROM sqlite_master WHERE name=?", (index_name,)
+    ).fetchall()
+    if (
+        len(installed) != 1
+        or str(installed[0]["type"]) != "index"
+        or _normalize_schema_sql(str(installed[0]["sql"] or "")) != desired_sql
+    ):
+        raise RuntimeError(f"ranked Bot index verification failed: {index_name}")
 
 
 def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
@@ -3467,6 +3597,7 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
         "'auto_match_max_per_round','auto_match_daily_cap','auto_match_enabled')"
     )
     _ensure_game_contract_state(conn, fresh_schema=fresh_schema)
+    _ensure_ranked_bot_selection(conn, fresh_schema=fresh_schema)
     _install_rated_overlap_triggers(conn)
 
     # ── 非赛事 completed 对局评分结算凭据（恰好一次）────────────────────
@@ -5327,6 +5458,243 @@ class Store:
                 c.execute("SELECT * FROM bots WHERE id=?", (bot_id,)).fetchone()
             )
 
+    @staticmethod
+    def _ranked_bot_candidate_tx(
+        c: sqlite3.Connection, *, owner_id: int, bot_id: int
+    ) -> sqlite3.Row | None:
+        bot = c.execute(
+            "SELECT * FROM bots WHERE id=? AND owner_id=?",
+            (int(bot_id), int(owner_id)),
+        ).fetchone()
+        if bot is None or int(bot["is_active"] or 0) != 1:
+            return None
+        if (
+            str(bot["binary_path"] or "").strip() == ""
+            or str(bot["format"] or "") != SUPPORTED_BINARY_FORMAT
+            or str(bot["os"] or "") != SUPPORTED_BINARY_OS
+            or str(bot["arch"] or "") != SUPPORTED_BINARY_ARCH
+        ):
+            return None
+        contract = _active_game_contract_tx(c, str(bot["game_id"]))
+        if str(bot["protocol_version"] or "") != contract["protocol_version"]:
+            return None
+        current_version = int(bot["current_version"] or 0)
+        if current_version == 0:
+            has_versions = c.execute(
+                "SELECT 1 FROM bot_versions WHERE bot_id=? LIMIT 1", (int(bot_id),)
+            ).fetchone()
+            return bot if has_versions is None else None
+        version = c.execute(
+            "SELECT * FROM bot_versions WHERE bot_id=? AND version=?",
+            (int(bot_id), current_version),
+        ).fetchone()
+        if (
+            version is None
+            or version["retired_at"] is not None
+            or str(version["binary_path"] or "") != str(bot["binary_path"] or "")
+            or str(version["runtime_mode"] or "") != str(bot["runtime_mode"] or "")
+            or str(version["protocol_version"] or "") != contract["protocol_version"]
+            or str(version["format"] or "") != SUPPORTED_BINARY_FORMAT
+            or str(version["os"] or "") != SUPPORTED_BINARY_OS
+            or str(version["arch"] or "") != SUPPORTED_BINARY_ARCH
+        ):
+            return None
+        return bot
+
+    @staticmethod
+    def _ranked_bot_busy_tx(
+        c: sqlite3.Connection, *, bot_id: int, game_id: str
+    ) -> bool:
+        active_job = c.execute(
+            "SELECT 1 FROM execution_jobs WHERE rated=1 "
+            "AND status IN ('starting','running','settling') "
+            "AND game_id=? AND ? IN (bot_a_id,bot_b_id) LIMIT 1",
+            (str(game_id), int(bot_id)),
+        ).fetchone()
+        if active_job is not None:
+            return True
+        table = _matches_table(game_id)
+        busy_match = c.execute(
+            f"SELECT 1 FROM {table} m "
+            "LEFT JOIN match_rating_policies policy ON policy.match_id=m.id "
+            "LEFT JOIN match_rating_settlements settled ON settled.match_id=m.id "
+            "WHERE COALESCE(policy.rated,1)=1 "
+            "AND ? IN (m.bot_a_id,m.bot_b_id) "
+            "AND (m.status IN (?,?) OR "
+            "(m.status=? AND settled.match_id IS NULL)) LIMIT 1",
+            (
+                int(bot_id),
+                STATUS_PENDING,
+                STATUS_RUNNING,
+                STATUS_COMPLETED,
+            ),
+        ).fetchone()
+        return busy_match is not None
+
+    @staticmethod
+    def _cancel_ranked_bot_queued_jobs_tx(
+        c: sqlite3.Connection, *, bot_id: int, game_id: str, terminal_at: str
+    ) -> int:
+        rows = c.execute(
+            "SELECT id,auto_decision_id FROM execution_jobs WHERE rated=1 "
+            "AND status='queued' AND game_id=? AND ? IN (bot_a_id,bot_b_id) "
+            "ORDER BY id",
+            (str(game_id), int(bot_id)),
+        ).fetchall()
+        if not rows:
+            return 0
+        ids = [int(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        c.execute(
+            "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+            "terminal_reason='ranking_entry_changed',"
+            "last_error='ranking_entry_changed',next_attempt_at=NULL,terminal_at=? "
+            f"WHERE status='queued' AND id IN ({placeholders})",
+            (terminal_at, *ids),
+        )
+        decision_ids = [
+            int(row["auto_decision_id"])
+            for row in rows
+            if row["auto_decision_id"] is not None
+        ]
+        if decision_ids:
+            decision_placeholders = ",".join("?" for _ in decision_ids)
+            c.execute(
+                "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                "terminal_reason='ranking_entry_changed',terminal_at=? "
+                f"WHERE lifecycle='queued' AND id IN ({decision_placeholders})",
+                (terminal_at, *decision_ids),
+            )
+        return len(ids)
+
+    def select_ranked_bot(
+        self, owner_id: int, bot_id: int, *, if_empty: bool = False
+    ) -> dict:
+        """Atomically replace one owner's ranked representative for a game."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            target = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            if target is None:
+                raise LookupError("bot 不存在")
+            if int(target["owner_id"]) != int(owner_id):
+                raise PermissionError("无权修改他人的 Bot")
+            current = c.execute(
+                "SELECT * FROM bots WHERE owner_id=? AND game_id=? AND is_ranked=1",
+                (int(owner_id), str(target["game_id"])),
+            ).fetchone()
+            if current is not None and (
+                if_empty or int(current["id"]) == int(bot_id)
+            ):
+                return {
+                    "bot": _row(target),
+                    "selected_bot_id": int(current["id"]),
+                    "previous_bot_id": int(current["id"]),
+                    "cancelled_queued_jobs": 0,
+                    "changed": False,
+                }
+            candidate = self._ranked_bot_candidate_tx(
+                c, owner_id=int(owner_id), bot_id=int(bot_id)
+            )
+            if candidate is None:
+                raise ValueError("Bot 当前未启用或不可运行，不能参加排位")
+            previous_id = int(current["id"]) if current is not None else None
+            if current is not None and self._ranked_bot_busy_tx(
+                c,
+                bot_id=int(current["id"]),
+                game_id=str(current["game_id"]),
+            ):
+                raise RankedBotSelectionBusyError(
+                    "当前排位 Bot 仍有进行中或待结算的计分对局"
+                )
+            now = _now()
+            cancelled = 0
+            if current is not None:
+                cancelled = self._cancel_ranked_bot_queued_jobs_tx(
+                    c,
+                    bot_id=int(current["id"]),
+                    game_id=str(current["game_id"]),
+                    terminal_at=now,
+                )
+            guard = self._rating_projection_mutation_guard_tx(c)
+            c.execute(
+                "UPDATE bots SET is_ranked=0,updated_at=? "
+                "WHERE owner_id=? AND game_id=? AND is_ranked=1",
+                (now, int(owner_id), str(target["game_id"])),
+            )
+            changed = c.execute(
+                "UPDATE bots SET is_ranked=1,updated_at=? "
+                "WHERE id=? AND owner_id=? AND game_id=? AND is_active=1",
+                (
+                    now,
+                    int(bot_id),
+                    int(owner_id),
+                    str(target["game_id"]),
+                ),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("排位 Bot 原子切换失败")
+            self._advance_rating_projection_state_tx(c, guard)
+            selected = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            return {
+                "bot": _row(selected),
+                "selected_bot_id": int(bot_id),
+                "previous_bot_id": previous_id,
+                "cancelled_queued_jobs": cancelled,
+                "changed": True,
+            }
+
+    def clear_ranked_bot(self, owner_id: int, bot_id: int) -> dict:
+        """Withdraw one selected Bot while retaining its complete rating history."""
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            bot = c.execute("SELECT * FROM bots WHERE id=?", (int(bot_id),)).fetchone()
+            if bot is None:
+                raise LookupError("bot 不存在")
+            if int(bot["owner_id"]) != int(owner_id):
+                raise PermissionError("无权修改他人的 Bot")
+            if int(bot["is_ranked"] or 0) != 1:
+                return {
+                    "bot": _row(bot),
+                    "selected_bot_id": None,
+                    "previous_bot_id": None,
+                    "cancelled_queued_jobs": 0,
+                    "changed": False,
+                }
+            if self._ranked_bot_busy_tx(
+                c, bot_id=int(bot_id), game_id=str(bot["game_id"])
+            ):
+                raise RankedBotSelectionBusyError(
+                    "当前排位 Bot 仍有进行中或待结算的计分对局"
+                )
+            now = _now()
+            cancelled = self._cancel_ranked_bot_queued_jobs_tx(
+                c,
+                bot_id=int(bot_id),
+                game_id=str(bot["game_id"]),
+                terminal_at=now,
+            )
+            guard = self._rating_projection_mutation_guard_tx(c)
+            c.execute(
+                "UPDATE bots SET is_ranked=0,updated_at=? "
+                "WHERE id=? AND owner_id=? AND is_ranked=1",
+                (now, int(bot_id), int(owner_id)),
+            )
+            self._advance_rating_projection_state_tx(c, guard)
+            updated = c.execute(
+                "SELECT * FROM bots WHERE id=?", (int(bot_id),)
+            ).fetchone()
+            return {
+                "bot": _row(updated),
+                "selected_bot_id": None,
+                "previous_bot_id": int(bot_id),
+                "cancelled_queued_jobs": cancelled,
+                "changed": True,
+            }
+
     def delete_bot(self, bot_id: int) -> bool:
         # 注意：此处不做一般「活跃引用」业务校验——那是 admin_delete_bot
         # 端点的职责。不过 retired version 是规则迁移的不可删审计证据，任何
@@ -5454,8 +5822,11 @@ class Store:
             }
             if any(refs.values()):
                 return {"found": True, "deleted": False, "references": refs}
+            projection_guard = self._rating_projection_mutation_guard_tx(c)
             _delete_social_target(c, "bot", bot_id)
             deleted = c.execute("DELETE FROM bots WHERE id=?", (bot_id,)).rowcount > 0
+            if deleted:
+                self._advance_rating_projection_state_tx(c, projection_guard)
             return {"found": True, "deleted": deleted, "references": refs}
 
     def bot_active_references(self, bot_id: int) -> dict:
@@ -6453,6 +6824,7 @@ class Store:
             rating = d.get("rating")
             public_candidate = (
                 bool(d.get("is_active"))
+                and bool(d.get("is_ranked"))
                 and d.get("format") == SUPPORTED_BINARY_FORMAT
                 and d.get("os") == SUPPORTED_BINARY_OS
                 and d.get("arch") == SUPPORTED_BINARY_ARCH
@@ -6496,7 +6868,7 @@ class Store:
                     AS technical_failures
                 FROM ratings r
                 JOIN bots b ON b.id=r.bot_id AND b.game_id=r.game_id
-                WHERE b.is_active=1 AND b.format=:binary_format
+                WHERE b.is_active=1 AND b.is_ranked=1 AND b.format=:binary_format
                   AND b.os=:binary_os AND b.arch=:binary_arch
                   AND b.game_id=:game_id
                   AND r.matches_played >= :ranking_min_matches
@@ -6605,17 +6977,19 @@ class Store:
         """Return whether a Bot is already in a rating-bearing active match.
 
         Pending/running and completed-but-unsettled are one rating lifecycle.
-        Contest, human, self-play and same-owner comparisons are neutral and do
-        not block.  Callers hold the same SQLite transaction used for selection
-        or creation; per-game triggers enforce the same rule for every writer.
+        The immutable policy row is the only authority: current owners or
+        ranked selections must never reinterpret a historical Match.  Callers
+        hold the same SQLite transaction used for selection or creation;
+        per-game triggers enforce the same rule for every writer.
         """
         gids = (game_id,) if game_id is not None else tuple(_all_game_ids())
         for gid in gids:
             tbl = _matches_table(gid)
-            rated = _rating_eligible_sql("m")
             row = c.execute(
-                f"SELECT 1 FROM {tbl} m WHERE ({rated}) "
-                "AND (m.bot_a_id=? OR m.bot_b_id=?) AND ("
+                f"SELECT 1 FROM {tbl} m "
+                "LEFT JOIN match_rating_policies policy ON policy.match_id=m.id "
+                "WHERE COALESCE(policy.rated,1)=1 AND "
+                "(m.bot_a_id=? OR m.bot_b_id=?) AND ("
                 "m.status IN (?,?) OR (m.status=? AND NOT EXISTS ("
                 "SELECT 1 FROM match_rating_settlements settled "
                 "WHERE settled.match_id=m.id))) LIMIT 1",
@@ -6810,7 +7184,8 @@ class Store:
             "ON os.owner_id=b.owner_id AND os.game_id=b.game_id "
             "LEFT JOIN auto_match_bot_service bs "
             "ON bs.bot_id=b.id AND bs.game_id=b.game_id "
-            "WHERE b.is_active=1 AND b.is_builtin=0 AND u.is_active=1 "
+            "WHERE b.is_active=1 AND b.is_ranked=1 AND b.is_builtin=0 "
+            "AND u.is_active=1 "
             "AND b.binary_path<>'' AND v.binary_path<>'' "
             "AND b.binary_path=v.binary_path AND b.runtime_mode=v.runtime_mode "
             "AND v.retired_at IS NULL AND b.protocol_version=pool.protocol_version "
@@ -7141,7 +7516,7 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             contract = _active_game_contract_tx(c, gid)
             identities = c.execute(
-                "SELECT id,owner_id,game_id,protocol_version FROM bots "
+                "SELECT id,owner_id,game_id,protocol_version,is_ranked FROM bots "
                 "WHERE id IN (?,?) ORDER BY id",
                 (bot_a_id, bot_b_id),
             ).fetchall()
@@ -7164,6 +7539,10 @@ class Store:
                 rating_reason = "self_play"
             elif int(by_id[bot_a_id]["owner_id"]) == int(by_id[bot_b_id]["owner_id"]):
                 rating_reason = "same_owner"
+            elif not int(by_id[bot_a_id]["is_ranked"] or 0) or not int(
+                by_id[bot_b_id]["is_ranked"] or 0
+            ):
+                rating_reason = "ranked_bot_not_selected"
             else:
                 rating_reason = "eligible"
             rated_pair = rating_reason == "eligible"
@@ -8429,7 +8808,8 @@ class Store:
             eligibility_from = (
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
                 "LEFT JOIN users u ON b.owner_id=u.id "
-                "WHERE b.is_active=1 AND b.format=? AND b.os=? AND b.arch=? "
+                "WHERE b.is_active=1 AND b.is_ranked=1 "
+                "AND b.format=? AND b.os=? AND b.arch=? "
                 "AND b.game_id=?"
             )
             eligibility_params: tuple[Any, ...] = (
@@ -8480,7 +8860,8 @@ class Store:
                 " AND (lm.bot_a_id=r.bot_id OR lm.bot_b_id=r.bot_id) "
                 " ORDER BY rh.id DESC LIMIT 1"
                 ") "
-                "WHERE b.is_active=1 AND b.format=? AND b.os=? AND b.arch=? "
+                "WHERE b.is_active=1 AND b.is_ranked=1 "
+                "AND b.format=? AND b.os=? AND b.arch=? "
                 "AND b.game_id=?"
             )
             item_params: tuple[Any, ...] = (
@@ -8584,7 +8965,7 @@ class Store:
                 "SELECT r.bot_id, r.rating, r.rd, r.matches_played, r.last_played_at, "
                 "b.name AS bot_name, b.game_id, b.binary_path, b.is_active, b.is_builtin "
                 "FROM ratings r JOIN bots b ON r.bot_id=b.id AND r.game_id=b.game_id "
-                "WHERE b.is_active=1 AND b.is_builtin=0 "
+                "WHERE b.is_active=1 AND b.is_ranked=1 AND b.is_builtin=0 "
                 "AND b.binary_path!='' "
                 "AND b.format=? AND b.os=? AND b.arch=?"
             )
@@ -11644,11 +12025,14 @@ class Store:
 
             # users→comments/bots 会级联，但 likes.target_id 是多态文本列，不具备
             # DB 外键。先清该用户所写评论收到的赞，再清其每个 Bot 的社交目标。
+            projection_guard = self._rating_projection_mutation_guard_tx(c)
             _delete_comment_likes_for(c, "user_id=?", (user_id,))
             _delete_user_likes(c, user_id)
             for bot_id in bot_ids:
                 _delete_social_target(c, "bot", bot_id)
             deleted = c.execute("DELETE FROM users WHERE id=?", (user_id,)).rowcount > 0
+            if deleted:
+                self._advance_rating_projection_state_tx(c, projection_guard)
             return {
                 "found": True,
                 "deleted": deleted,

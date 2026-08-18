@@ -70,7 +70,7 @@ def _verify_projection(store: Store) -> None:
         live = rating_projection_digests(conn)
         assert live["issues"] == []
         conn.execute(
-            "UPDATE rating_projection_state SET policy_version='owner-neutral-v3',"
+            "UPDATE rating_projection_state SET policy_version='owner-ranked-bot-v4',"
             "rebuilt_at='test',source_settlement_count=?,"
             "source_last_settled_order=?,source_digest=?,projection_digest=?,"
             "plan_digest=?,trusted_mutation_revision=mutation_revision "
@@ -100,6 +100,7 @@ def _bot(store: Store, key: str, *, game_id: str = "holdem") -> dict:
         game_id=game_id,
     )
     version = store.add_bot_version(bot["id"], binary_path=binary_path)
+    store.select_ranked_bot(int(user["id"]), int(bot["id"]), if_empty=True)
     store.ensure_rating(bot["id"], game_id=game_id)
     return {
         "user_id": int(user["id"]),
@@ -141,6 +142,7 @@ def _owned_bot(
         game_id=game_id,
     )
     version = store.add_bot_version(bot["id"], binary_path=binary_path)
+    store.select_ranked_bot(int(owner["id"]), int(bot["id"]), if_empty=True)
     return {
         "user_id": int(owner["id"]),
         "bot_id": int(bot["id"]),

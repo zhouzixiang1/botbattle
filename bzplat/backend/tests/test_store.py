@@ -246,6 +246,7 @@ def test_bots_versions_ratings(tmp_path):
     assert ver["version"] == 1
     assert s.get_bot(bot["id"])["current_version"] == 1
     assert len(s.list_bot_versions(bot["id"])) == 1
+    s.select_ranked_bot(int(u["id"]), int(bot["id"]), if_empty=True)
 
     rating = s.ensure_rating(bot["id"])
     assert rating["rating"] == 1500.0

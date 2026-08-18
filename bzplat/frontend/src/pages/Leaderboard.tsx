@@ -367,7 +367,7 @@ export default function Leaderboard() {
     <PageFrame layout="public-leaderboard">
       <PageHeader
         title="排行榜"
-        description="每款游戏独立使用 Glicko-2 数值评分；公开名次与计分样本分区展示。"
+        description="每款游戏独立使用 Glicko-2 数值评分；每个账号每款游戏最多派遣一个 Bot，公开名次与计分样本分区展示。"
       />
 
       <StickyToolbar label="排行榜游戏选择">
@@ -401,13 +401,13 @@ export default function Leaderboard() {
 
       <DataRegion
         title="数值评分明细"
-        description={rankingMinMatches ? `公开名次要求至少 ${rankingMinMatches} 场计分对局；95% 区间按 Rating ± 1.96 × RD。` : '正在读取排名门槛。'}
+        description={rankingMinMatches ? `仅展示当前派遣参榜的 Bot；公开名次要求至少 ${rankingMinMatches} 场计分对局，95% 区间按 Rating ± 1.96 × RD。` : '仅展示当前派遣参榜的 Bot；正在读取排名门槛。'}
         actions={<Gauge className="size-4 text-primary" />}
       >
         {loading ? (
           <Loading text="正在加载排行榜…" />
         ) : rows.length === 0 ? (
-          <EmptyState text="该游戏暂无可排名 Bot" icon={<Trophy className="size-6 opacity-40" />} className="py-10" />
+          <EmptyState text="该游戏暂无已派遣参榜 Bot" icon={<Trophy className="size-6 opacity-40" />} className="py-10" />
         ) : (
           <>
             <div className="hidden md:block" data-testid="leaderboard-desktop">

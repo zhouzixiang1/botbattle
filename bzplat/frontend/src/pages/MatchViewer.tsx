@@ -96,6 +96,7 @@ const RATING_REASON_LABEL: Record<string, string> = {
   bot_missing: '历史 Bot 缺失 · 不计平台排行榜',
   owner_missing: '历史所有者缺失 · 不计平台排行榜',
   remote_local: '本地 Bot 练习 · 不计平台排行榜',
+  ranked_bot_not_selected: '未派遣排行榜 Bot · 不计平台排行榜',
 }
 
 function ratingBadge(match: MatchRow): {

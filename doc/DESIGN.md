@@ -143,7 +143,7 @@ SQLite 单文件（默认 `botzone.db`）；fresh schema 同时包含全局执�
 | 表 | 用途 | 关键列 |
 |----|------|--------|
 | `users` | 用户 | id/username/email/password_hash/role/display_name/bio/avatar/xp/level/last_active_at + **实名信息**（real_name/phone/school/student_id，可选，不公开） |
-| `bots` | Bot | owner_id/name/display_name/game_id/os/arch/format/binary_path/current_version/is_active |
+| `bots` | Bot | owner_id/name/display_name/game_id/os/arch/format/binary_path/current_version/is_active/is_ranked；partial unique index 保证每个 `(owner_id,game_id)` 至多一个排位代表 |
 | `matches_holdem` / `matches_gomoku` / `matches_pencil` | 对局（**每游戏一张表**） | id/bot_a_id/bot_b_id/owner_id/contest_id/winner/reason/match_type/status/game_id/**`match_config`(JSON 配置)**/**`result`(JSON 结果)**/human_user_id/human_seat/match_seed/technical_loss/likes_count/views_count；三表结构一致，配置/结果走游戏无关的双 JSON 列，不保留游戏专属结果列 |
 | `matches_index` | 对局定位 | id(PK)/game_id——get_match(id) 先查此表定位到哪张 matches_<game> |
 | `match_debug_sessions` | 私有调试批次 | match_id(PK/FK→matches_index CASCADE)/entry_count/total_bytes/dropped_count/created_at/updated_at；只允许终态 Bot-vs-Bot 批量写 |
@@ -281,8 +281,8 @@ identifier 与 `sqlite_master.type`，再以规范化 SQL 比较定义；同定�
 canonical 前缀 + 当前 projection/plan + trusted revision”全部吻合时，才在写后同步 trusted revision
 与五项摘要。合法 completed-unsettled 只能作为连续尾部跨重启延续；通用硬删、`game_id` 变更或
 无 marker 的低层评分写会永久保持 stale，直至离线 rebuild。新 Bot 与默认 Rating 原子创建，正常
-`is_active` 开关及严格无引用的失败上传 staging 回滚走可信 guard。mutation lineage 从
-`owner-neutral-v3` 才成为认证条件；旧 `owner-neutral-v2` 即使摘要表面吻合，升级后也一律保持
+`is_active`/`is_ranked` 开关及严格无引用的失败上传 staging 回滚走可信 guard。mutation lineage 从
+`owner-ranked-bot-v4` 才完整覆盖排位代表；旧 `owner-neutral-v3` 及更早标记即使摘要表面吻合，升级后也一律保持
 fail closed，必须由离线 rebuild 重新认证。
 
 **第 4 游戏扩展性**：`schema.py` 的字面 DDL 只覆盖 holdem/gomoku/pencil 三表；新增注册游戏（如 reversi）后 SCHEMA 不会自动建 `matches_<new>` 表。`_migrate()` 末尾对 `registry.all_ids()` 里**每个**已注册游戏幂等执行 `CREATE TABLE IF NOT EXISTS matches_<game>`（用 `_CREATE_MATCHES_TABLE_SQL` 模板）+ 6 条统一索引（bot_a_id/bot_b_id/owner_id/contest_id/status/created_at）。`Store.__init__` 在建库后断言"每个注册游戏的物理表都存在"——注册了但表没建出来的 drift 在启动即报（而非 create_match 时才崩 `no such table`）。跨游戏 `UNION ALL` 聚合的 WHERE 参数数 = 子查询数（= 已注册游戏数），不得硬编码 `* 3`（否则第 4 游戏触发 `Incorrect number of bindings`）。**结论：新增一款游戏的 DB 成本 = `schema.py` 两个 frozenset 各加 id（仅做启动一致性断言）+ `games/__init__.py` 注册；无需手写 DDL。**
@@ -307,9 +307,9 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - **裁判公开**：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（裁判源码全文）——裁判是公开可审计的规则定义（区别于 Bot 私有黑盒），源码对全体玩家透明
 
 ### 4.2 鉴权端点（require_user，登录玩家）
-- Bot 管理：`GET /api/bots/mine` 是 owner 库存视图，同时返回 active 与 inactive Bot，使停用后仍可查看和重新启用；公开 `/api/bots/public` 仍只返回 active 且可执行的 Bot。写入端点为 `POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`。新建与版本上传共享 `runtime/limits.py::MAX_BOT_UPLOAD_BYTES=100 MiB`，ASGI 请求体硬顶额外保留 1 MiB multipart 信封；两条前端写入口都以 XHR 报告真实传输进度，并在 request body 传完后切换到独立“服务端预检”阶段，不能把等待 ELF/协议预检伪装成仍在上传。上传冻结发送时的账号与 Bearer；账号、Bot 或弹窗变化会终止旧 XHR，迟到成功/失败不得刷新新账号、弹提示或用旧 401 清除新会话。
+- Bot 管理：`GET /api/bots/mine` 是 owner 库存视图，同时返回 active 与 inactive Bot，使停用后仍可查看和重新启用；公开 `/api/bots/public` 仍只返回 active 且可执行的 Bot。写入端点为 `POST /api/bots`（上传）、`/versions`、`/active`、`PATCH/DELETE /api/bots/{id}`。每个 `(owner_id,game_id)` 另有至多一个 `is_ranked=true` 排位代表：该游戏首个通过预检并激活的 Bot 在空席时自动派遣，owner 可用 `PUT /api/bots/{id}/ranking` 原子切换、用 `DELETE` 退出；停用和版本更新不隐式释放席位，切换不复制或重置任何历史评分。切换事务会拒绝涉及原代表的 starting/running/settling 或 completed-unsettled 计分生命周期，并原子取消其尚未 claim 的旧计分请求及 auto decision；partial unique index 是跨进程最终防线。新建与版本上传共享 `runtime/limits.py::MAX_BOT_UPLOAD_BYTES=100 MiB`，ASGI 请求体硬顶额外保留 1 MiB multipart 信封；两条前端写入口都以 XHR 报告真实传输进度，并在 request body 传完后切换到独立“服务端预检”阶段，不能把等待 ELF/协议预检伪装成仍在上传。上传冻结发送时的账号与 Bearer；账号、Bot 或弹窗变化会终止旧 XHR，迟到成功/失败不得刷新新账号、弹提示或用旧 401 清除新会话。
 - 本地 Bot：`GET /api/local-ai/agents` 列出本人连接，`POST /api/local-ai/agents` 创建并仅一次返回 token，`POST /api/local-ai/agents/{public_id}/rotate` 轮换，`DELETE` 撤销；`GET /api/local-ai/client` 下载不含凭据的参考连接器。所有响应私有且 `no-store`，连接令牌只通过环境变量和 Authorization header 使用，不进入 URL。
-- 对局请求：`POST /api/matches/challenge` 与 `/api/matches/human` 均返回 HTTP 202 的持久 request，而不是立即返回 Match。响应给 `public_id`、真实 `ahead_jobs/ahead_sandbox_units`、双容量向量和注明动态的 ETA 区间；Match 只在 claim 时出现。Bot-vs-Bot 的内部位置 0 对普通用户仍要求 owner 相同；管理员可从公开的全站 active+runnable Bot 中选择，但显式版本仍须属于所选 Bot，且活跃性、二进制完整性与游戏一致性继续 fail closed。挑战允许同 bot 同/不同版本，评分资格在 job 创建时冻结；同 owner/自博弈、人机、赛事保持中性，人机公开契约固定 `human_seat=1`。挑战页按游戏显示双方：德州“玩家 1/2”、五子棋“开局提案方/交换决策方”、点格棋“红方/蓝方”；五子棋黑白归属只按权威 `seat_colors` 展示，不能从座位推断
+- 对局请求：`POST /api/matches/challenge` 与 `/api/matches/human` 均返回 HTTP 202 的持久 request，而不是立即返回 Match。响应给 `public_id`、真实 `ahead_jobs/ahead_sandbox_units`、双容量向量和注明动态的 ETA 区间；Match 只在 claim 时出现。Bot-vs-Bot 的内部位置 0 对普通用户仍要求 owner 相同；管理员可从公开的全站 active+runnable Bot 中选择，但显式版本仍须属于所选 Bot，且活跃性、二进制完整性与游戏一致性继续 fail closed。挑战允许所有 active+runnable Bot 练习，同 bot、同 owner、自博弈、人机、赛事以及任一方不是该 owner/game 当前排位代表时均冻结为中性；只有不同 owner 的两个当前代表可计分。创建时冻结资格，claim 前还会复核代表身份，切换后遗留请求以 `ranking_entry_changed` 收敛而不启动 Match；`ranked_bot_not_selected` 是未派遣练习 Bot 的统一公开原因。人机公开契约固定 `human_seat=1`。挑战页按游戏显示双方：德州“玩家 1/2”、五子棋“开局提案方/交换决策方”、点格棋“红方/蓝方”；五子棋黑白归属只按权威 `seat_colors` 展示，不能从座位推断
 - 请求管理：`GET /api/execution-requests/{public_id}` 查询；`DELETE` 取消本人 manual/human；管理员可取消更广来源，其中 queued contest 取消会把 pairing 保持为 `pending + match_id=NULL` 并将 `scheduled_at` 至少后移 30 秒，避免 scheduler 立即重建同一请求；`POST /retry` 仅重试可重试的 interrupted request。终态旧 Match 是不可变审计，新 attempt 使用同一 public request 但新 Match id
 - 私有调试：`GET /api/matches/{id}/debug`；必须登录且通过 Store 终态/owner/赛事角色授权，成功与拒绝均 `Cache-Control: private, no-store`，读取记审计但不记录内容
 - 社交：`POST/DELETE /api/users/{id}/follow`、`/api/bots/{id}/favorite`；API 预检用于友好提示，Store 的关注、收藏、评论、点赞与取消点赞仍在 `BEGIN IMMEDIATE` 写事务内复核 actor/target，竞态删除或不存在统一 404；删除实体使用同级写锁清理多态关系与缓存，避免检查后删除造成孤儿或 500

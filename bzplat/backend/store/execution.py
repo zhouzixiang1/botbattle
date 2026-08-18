@@ -908,7 +908,7 @@ class ExecutionRepository:
         if bot_a_id == bot_b_id:
             return False, "self_play"
         rows = conn.execute(
-            "SELECT id,owner_id FROM bots WHERE id IN (?,?)",
+            "SELECT id,owner_id,is_ranked FROM bots WHERE id IN (?,?)",
             (bot_a_id, bot_b_id),
         ).fetchall()
         owner_by_bot = {int(row["id"]): int(row["owner_id"]) for row in rows}
@@ -916,6 +916,11 @@ class ExecutionRepository:
             return False, "bot_missing"
         if owner_by_bot[bot_a_id] == owner_by_bot[bot_b_id]:
             return False, "same_owner"
+        ranked_by_bot = {
+            int(row["id"]): bool(int(row["is_ranked"] or 0)) for row in rows
+        }
+        if not ranked_by_bot[bot_a_id] or not ranked_by_bot[bot_b_id]:
+            return False, "ranked_bot_not_selected"
         return True, "eligible"
 
     def _version_identity_tx(
@@ -1999,6 +2004,30 @@ class ExecutionRepository:
                         invalid_job_ids.add(int(job["id"]))
                         continue
                     if int(job["rated"] or 0):
+                        ranked_rows = conn.execute(
+                            "SELECT id FROM bots WHERE is_ranked=1 "
+                            "AND id IN (?,?)",
+                            (int(job["bot_a_id"]), int(job["bot_b_id"])),
+                        ).fetchall()
+                        if len({int(row["id"]) for row in ranked_rows}) != 2:
+                            terminal = _now()
+                            conn.execute(
+                                "UPDATE execution_jobs SET status='cancelled',"
+                                "retryable=0,terminal_reason='ranking_entry_changed',"
+                                "last_error='ranking_entry_changed',next_attempt_at=NULL,"
+                                "terminal_at=? WHERE id=? AND status='queued'",
+                                (terminal, int(job["id"])),
+                            )
+                            if job.get("auto_decision_id") is not None:
+                                conn.execute(
+                                    "UPDATE auto_match_decisions SET "
+                                    "lifecycle='cancelled',"
+                                    "terminal_reason='ranking_entry_changed',"
+                                    "terminal_at=? WHERE id=? AND lifecycle='queued'",
+                                    (terminal, int(job["auto_decision_id"])),
+                                )
+                            invalid_job_ids.add(int(job["id"]))
+                            continue
                         if projection_ready is None:
                             projection_ready = bool(
                                 self.store._rating_projection_status_tx(conn)["ready"]
@@ -2893,7 +2922,7 @@ class ExecutionRepository:
                 )
                 reason = (
                     ("冷启动通道" if actual_lane == "bootstrap" else "稳定通道")
-                    + f" · owner/Bot 轮转 · Bot交手 {bot_pair} · "
+                    + f" · owner/排位代表轮转 · Bot交手 {bot_pair} · "
                     + f"owner交手 {owner_pair} · Rating差 {gap:.0f} · 先后手平衡"
                 )
                 now = _now()
@@ -2907,7 +2936,7 @@ class ExecutionRepository:
                     "bot_a_seat_debt_before,bot_b_seat_debt_before,selection_reason,"
                     "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        "owner-game-lane-v4-bootstrap",
+                        "owner-game-ranked-bot-v5-bootstrap",
                         int(state["revision"] or 0),
                         cursor,
                         requested_lane,

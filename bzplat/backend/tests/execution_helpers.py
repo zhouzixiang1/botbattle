@@ -27,7 +27,7 @@ def verify_rating_projection(store) -> None:
         live = rating_projection_digests(conn)
         assert live["issues"] == []
         conn.execute(
-            "UPDATE rating_projection_state SET policy_version='owner-neutral-v3',"
+            "UPDATE rating_projection_state SET policy_version='owner-ranked-bot-v4',"
             "rebuilt_at='test',source_settlement_count=?,"
             "source_last_settled_order=?,source_digest=?,projection_digest=?,"
             "plan_digest=?,trusted_mutation_revision=mutation_revision "

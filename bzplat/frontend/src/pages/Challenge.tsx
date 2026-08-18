@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { User, Bot as BotIcon, Laptop, Plus, Play, X as XIcon } from 'lucide-react'
+import { User, Bot as BotIcon, Laptop, Plus, Play, Trophy, X as XIcon } from 'lucide-react'
 import PageStub from '@/components/PageStub'
 import OpponentPickerModal, { type PickBot } from '@/components/OpponentPickerModal'
 import {
@@ -640,6 +640,10 @@ export default function Challenge() {
             <span className="flex min-w-0 flex-wrap items-center gap-2 text-foreground">
               <BotIcon className="size-4 shrink-0 text-primary" />
               <strong className="max-w-full break-words [overflow-wrap:anywhere]">{seat.bot.display_name || seat.bot.name}</strong>
+              <Badge variant={seat.bot.is_ranked ? 'default' : 'outline'} className="text-[10px]">
+                <Trophy className="size-3" aria-hidden="true" />
+                {seat.bot.is_ranked ? '排行榜 Bot' : '练习 Bot'}
+              </Badge>
               <span className="max-w-full break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
                 {seat.bot.owner_display || seat.bot.owner_name || '所属用户不可用'}
                 {seat.bot.owner_id != null && seat.bot.owner_id === user?.id ? '（我的）' : ''}

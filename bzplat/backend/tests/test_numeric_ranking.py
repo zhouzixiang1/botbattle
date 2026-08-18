@@ -24,6 +24,7 @@ def _rated_bot(
     bot = store.create_bot(
         user["id"], name, game_id=game_id, binary_path=f"/tmp/{name}", format="elf"
     )
+    store.select_ranked_bot(user["id"], bot["id"])
     store.ensure_rating(bot["id"], game_id=game_id)
     store.update_rating_row(
         bot["id"],

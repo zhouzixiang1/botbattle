@@ -68,6 +68,7 @@ def _user_with_bot(store: Store, *, name: str, path: str, game: str = "gomoku"):
     b = store.create_bot(
         u["id"], f"{name}_bot", binary_path=path, format="elf", game_id=game
     )
+    store.select_ranked_bot(int(u["id"]), int(b["id"]), if_empty=True)
     store.ensure_rating(b["id"])
     return u, b
 

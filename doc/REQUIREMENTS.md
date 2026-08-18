@@ -40,12 +40,13 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 | 上传 Bot | 唯一接受 Linux x86_64 ELF；PE/`.exe`、Mach-O、ARM64 ELF、原始 `.py` 与脚本全部拒绝；预检按所选 runtime_mode 使用正式首回合同一信封，LongRunning 必须握手 |
 | 历史二进制 | 旧库中非 Linux x86_64 ELF 记录只可供 owner/admin 审计，必须标记为不可运行；不得出现在公开选择器、搜索、排行榜、自动排位或报名候选中，也不得由 owner/admin 重新激活；即使旧版本没有 checksum/size，缺失文件也须在 job 创建/claim 的完整性门禁拒绝 |
 | 版本管理 | 同一 Bot 可上传多版本，可切换激活版本，可删/改名/改简介 |
+| 排行榜派遣 | 同一账号在同一游戏最多派遣一个 Bot 参加平台排行榜和自动排位；首个通过预检的 Bot 在该游戏尚无派遣项时自动成为排行榜 Bot，之后可由 owner 原子替换或退出。切换不搬运、不清空历史 Rating/RD/对局，未派遣 Bot 仍可练习和参加锦标赛 |
 | Bot 详情页 | 数值评分卡（Rating/RD/95% 区间/公开名次/样本/可靠性）+ 对局历史 + 对手战绩 + 评分曲线（recharts）|
 
 ### 3.3 对局与观赛
 | 需求 | 验收标准 |
 |------|---------|
-| Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值）；POST 返回 HTTP 202 持久 request，不在排队阶段创建 Match；支持查询、刷新恢复、取消及 interrupted 重试，取得容量后才沙箱运行，符合资格的完成局计 Glicko |
+| Bot vs Bot 挑战 | 选对手（全部/我的/按用户搜索）+ 选游戏（规则参数已钉死固定值）；POST 返回 HTTP 202 持久 request，不在排队阶段创建 Match；支持查询、刷新恢复、取消及 interrupted 重试，取得容量后才沙箱运行。不同 owner 的双方都必须是各自该游戏当前排行榜 Bot 才计 Glicko；其他组合仍可练习但明确标记不计分 |
 | 实时观赛 | SSE 推送事件流，前端棋盘/牌桌逐步渲染 |
 | 对局回放 | 完整事件录制，播放/暂停/步进/倍速（0.5x-4x）/逐手跳转/进度拖动 |
 | Pencil 累计棋钟 | 每方固定 900 秒；Bot-vs-Bot 与人类对战均累计实际决策时间，成功/耗尽分别落 `time_used`/`time_out` 事件，并在点格棋观赛/回放显示剩余时间与超时状态 |
@@ -58,7 +59,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 ### 3.4 评分与排行
 | 需求 | 验收标准 |
 |------|---------|
-| Glicko-2 评分 | 自实现，按游戏分别排名；对局完成自动更新（contest/human 除外） |
+| Glicko-2 评分 | 自实现，按游戏分别排名；只有不同 owner 的两个当前排行榜 Bot 之间的平台对局自动更新，contest/human/本地 Bot/未派遣 Bot 练习局除外；资格在 execution job 创建时冻结，派遣变化不得重释历史 policy |
 | 数值排名 | 至少 `RANKING_MIN_RATED_MATCHES` 场才有公开名次；展示 1-based 名次/总数、百分位、Rating/RD、95% 区间和样本进度，不输出定性标签 |
 | 排名趋势 | `rating_history` 记录评分变化；排行榜显示相邻变化和 30 日基线变化 |
 
@@ -110,7 +111,7 @@ Bot 竞赛平台允许用户提交自动化程序（Bot），由平台托管运�
 |------|---------|
 | 站点配置 | 站名/Logo/公告/About 可配（admin） |
 | 全来源执行队列 | manual/human/contest/auto 全部先写持久 job，四类合计同一时刻最多运行 1 场；节能/赛事 Docker 座位各占 1 sandbox unit，本地 Bot/真人座位占 0，因此双节能、双赛事为 `1 match slot + 2 units`，节能与本地 Bot、人机为 `1+1`，双本地 Bot 为 `1+0`；`starting/running/settling` 均占容量；job 冻结环境、资源档位版本及 CPU/内存向量，主机准入受 affinity/cgroup/物理资源共同收紧且赛事不得降档；优先级带无上限 aging，Match/index/replay/policy 只在原子 claim 时创建；Docker 不确定时安全暂停且不释放容量 |
-| 持续公平自动排位 | 默认开启且无每日上限，只作为全局队列的 `source=auto` producer；按游戏/lane/所有者/Bot 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；唯一开关只影响 auto 生成/claim，不影响人工、人机、赛事或在途局 |
+| 持续公平自动排位 | 默认开启且无每日上限，只作为全局队列的 `source=auto` producer；每个 owner/game 只消费当前唯一排行榜 Bot，按游戏/lane/所有者/pair 轮转并平衡对手与座位，永久 decision 审计映射到通用 job；唯一开关只影响 auto 生成/claim，不影响人工、人机、赛事或在途局 |
 
 ## 4. 非功能需求
 

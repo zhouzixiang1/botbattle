@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Bot as BotIcon, User as UserIcon } from 'lucide-react'
+import { ArrowLeft, Bot as BotIcon, Trophy, User as UserIcon } from 'lucide-react'
 import { apiGet, errMsg } from '@/api'
 import { gameLabel, type GameId } from '@/lib/games'
 import {
@@ -22,7 +22,8 @@ export interface PickBot {
   owner_name?: string
   owner_display?: string
   game_id?: string
-  is_active?: number
+  is_active?: number | boolean
+  is_ranked?: number | boolean
   runnable?: boolean
 }
 
@@ -102,7 +103,7 @@ export default function OpponentPickerModal({
 
   const tabBtn = (t: Tab) =>
     cn(
-      'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+      'rounded-full px-3 py-1 text-xs font-medium transition-colors max-sm:min-h-[44px]',
       tab === t ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-accent'
     )
 
@@ -139,6 +140,9 @@ export default function OpponentPickerModal({
               )}
             </div>
           )}
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+            排行榜 Bot 与练习 Bot 均可挑战；只有符合平台计分规则的排行榜 Bot 对局才会产生新评分。
+          </p>
         </div>
 
         {/* 内容区 */}
@@ -156,7 +160,7 @@ export default function OpponentPickerModal({
                     <button
                       type="button"
                       onClick={() => { setSelUser(u); setPage(1) }}
-                      className="flex w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-accent"
+                      className="flex min-h-[44px] w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-accent"
                     >
                       <span className="text-sm font-medium text-foreground">{u.display_name || u.username}</span>
                       <span className="text-xs text-muted-foreground">@{u.username}</span>
@@ -169,7 +173,7 @@ export default function OpponentPickerModal({
 
           {tab === 'users' && selUser && (
             <div className="mb-2 flex items-center gap-2 text-sm">
-              <button type="button" onClick={() => setSelUser(null)} className="inline-flex items-center gap-1 text-primary hover:underline">
+              <button type="button" onClick={() => setSelUser(null)} className="inline-flex min-h-[44px] items-center gap-1 text-primary hover:underline">
                 <ArrowLeft className="size-3.5" />返回用户搜索
               </button>
               <span className="text-muted-foreground">已选：{selUser.display_name || selUser.username}</span>
@@ -196,13 +200,17 @@ export default function OpponentPickerModal({
                         <button
                           type="button"
                           onClick={() => onPick(b)}
-                          className="flex w-full items-center justify-between px-2 py-2.5 text-left transition-colors hover:bg-primary/5"
+                          className="flex min-h-[44px] w-full items-center justify-between gap-3 px-2 py-2.5 text-left transition-colors hover:bg-primary/5"
                         >
-                          <span className="text-sm font-medium text-foreground">
-                            {b.display_name || b.name}
+                          <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium text-foreground">
+                            <span className="min-w-0 break-words [overflow-wrap:anywhere]">{b.display_name || b.name}</span>
                             {tab === 'mine' && <Badge variant="outline" className="ml-2 text-[10px]">自博弈</Badge>}
+                            <Badge variant={b.is_ranked ? 'default' : 'outline'} className="text-[10px]">
+                              <Trophy className="size-3" aria-hidden="true" />
+                              {b.is_ranked ? '排行榜 Bot' : '练习 Bot'}
+                            </Badge>
                           </span>
-                          <span className="text-xs text-muted-foreground">
+                          <span className="max-w-[45%] shrink-0 break-words text-right text-xs text-muted-foreground [overflow-wrap:anywhere]">
                             {b.owner_display || b.owner_name || '所属用户不可用'}
                           </span>
                         </button>
