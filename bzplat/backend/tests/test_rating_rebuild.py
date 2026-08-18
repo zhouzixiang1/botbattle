@@ -47,7 +47,7 @@ def _mark_projection_verified(store: Store) -> None:
         live = rating_projection_digests(conn)
         assert live["issues"] == []
         conn.execute(
-            "UPDATE rating_projection_state SET policy_version='owner-neutral-v3',"
+            "UPDATE rating_projection_state SET policy_version='owner-ranked-bot-v4',"
             "source_settlement_count=?,source_last_settled_order=?,source_digest=?,"
             "projection_digest=?,plan_digest=?,"
             "trusted_mutation_revision=mutation_revision WHERE singleton=1",
@@ -65,7 +65,7 @@ def test_fresh_store_certifies_empty_projection_and_keeps_it_current(tmp_path):
     store = Store(str(tmp_path / "fresh-projection.db"))
     initial = store.rating_projection_status()
     assert initial["ready"] is True
-    assert initial["state"]["policy_version"] == "owner-neutral-v3"
+    assert initial["state"]["policy_version"] == "owner-ranked-bot-v4"
 
     _bot(store, "fresh-projection")
     after_bot = store.rating_projection_status()
@@ -122,6 +122,7 @@ def _bot(
         game_id="gomoku",
     )
     store.add_bot_version(bot["id"], binary_path=binary_path)
+    store.select_ranked_bot(int(owner_id), int(bot["id"]), if_empty=True)
     store.ensure_rating(bot["id"], game_id="gomoku")
     return bot
 
@@ -217,6 +218,7 @@ def test_rebuild_dry_run_apply_verify_is_source_preserving_and_idempotent(tmp_pa
         store, orch, "legacy-same-owner", bot_a["id"], bot_b["id"],
         winner=0, ended_at="2026-08-10T10:01:00",
     )
+    store.select_ranked_bot(int(owner["id"]), int(bot_b["id"]))
     _complete(
         store, orch, "eligible-2", bot_b["id"], bot_c["id"],
         winner=1, ended_at="2026-08-10T10:02:00",
@@ -564,7 +566,7 @@ def test_v2_projection_state_upgrade_requires_v3_offline_rebuild(tmp_path):
     upgraded = Store(str(db))
     status = upgraded.rating_projection_status()
     assert status["ready"] is False
-    assert status["required_policy_version"] == "owner-neutral-v3"
+    assert status["required_policy_version"] == "owner-ranked-bot-v4"
     assert status["state"]["policy_version"] == "owner-neutral-v2"
     assert status["state"]["mutation_revision"] == 0
     assert status["state"]["trusted_mutation_revision"] == 0
@@ -580,7 +582,7 @@ def test_v2_projection_state_upgrade_requires_v3_offline_rebuild(tmp_path):
     rebuilt = Store(str(db))
     rebuilt_status = rebuilt.rating_projection_status()
     assert rebuilt_status["ready"] is True
-    assert rebuilt_status["state"]["policy_version"] == "owner-neutral-v3"
+    assert rebuilt_status["state"]["policy_version"] == "owner-ranked-bot-v4"
     assert rebuilt_status["state"]["mutation_revision"] == (
         rebuilt_status["state"]["trusted_mutation_revision"]
     )
@@ -770,11 +772,13 @@ def test_numeric_rank_diff_matches_public_leaderboard_scope_and_order():
         }
 
     bot_universe = [
-        {
-            "id": bot_id,
-            "game_id": "gomoku",
-            "is_active": active,
-            "format": "elf",
+            {
+                "id": bot_id,
+                "owner_id": bot_id,
+                "game_id": "gomoku",
+                "is_active": active,
+                "is_ranked": 1,
+                "format": "elf",
             "os": "linux",
             "arch": arch,
         }

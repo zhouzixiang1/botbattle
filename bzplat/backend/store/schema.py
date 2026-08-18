@@ -183,6 +183,7 @@ CREATE TABLE IF NOT EXISTS bots (
     binary_path     TEXT    NOT NULL DEFAULT '',
     current_version INTEGER NOT NULL DEFAULT 0,
     is_active       INTEGER NOT NULL DEFAULT 1,
+    is_ranked       INTEGER NOT NULL DEFAULT 0,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
     game_id         TEXT    NOT NULL,
     runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
@@ -193,6 +194,7 @@ CREATE TABLE IF NOT EXISTS bots (
     CONSTRAINT chk_bot_os CHECK (os = 'linux'),
     CONSTRAINT chk_bot_arch CHECK (arch = 'amd64'),
     CONSTRAINT chk_format CHECK (format = 'elf'),
+    CONSTRAINT chk_bot_ranked CHECK (is_ranked IN (0,1)),
     CONSTRAINT chk_runtime CHECK (runtime_mode IN ('traditional', 'longrunning'))
 );
 
@@ -427,7 +429,7 @@ CREATE INDEX IF NOT EXISTS idx_match_rating_policies_reason
 
 -- 排行榜投影是否已经按当前评分资格真值完整重建。升级只负责识别旧污染，
 -- 不会擅自重放历史；维护重建必须在同一事务刷新四类投影后再把此哨兵推进到
--- owner-neutral-v3，并记录它覆盖到的 settlement 序号和可信 mutation 链。
+-- owner-ranked-bot-v4，并记录它覆盖到的 settlement 序号和可信 mutation 链。
 -- v2 没有 mutation lineage，升级后必须离线重建，不能沿用其“已验证”标记。
 CREATE TABLE IF NOT EXISTS rating_projection_state (
     singleton                   INTEGER PRIMARY KEY CHECK (singleton=1),

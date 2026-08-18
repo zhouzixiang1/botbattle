@@ -92,7 +92,9 @@ def _assert_rating_trigger_contract(triggers: dict[str, str]) -> None:
             _PROJECTION_BUMP,
         ),
         "trg_bots_projection_mutation_update": (
-            "AFTER UPDATE OF game_id,is_active,format,os,arch ON bots",
+            "AFTER UPDATE OF owner_id,game_id,is_active,is_ranked,format,os,arch ON bots",
+            "OLD.owner_id IS NOT NEW.owner_id",
+            "OLD.is_ranked IS NOT NEW.is_ranked",
             _PROJECTION_BUMP,
         ),
         "trg_match_rating_policy_projection_mutation_order": (
@@ -127,12 +129,18 @@ def _assert_rating_trigger_contract(triggers: dict[str, str]) -> None:
             f"trg_{table}_rated_overlap_insert": (
                 f"BEFORE INSERT ON {table}",
                 "NEW.status IN ('pending','running')",
+                "json_type(NEW.match_config,'$._rating_eligible') IN ('true','false')",
+                "LEFT JOIN match_rating_policies policy ON policy.match_id=m.id",
+                "COALESCE(policy.rated,1)=1",
                 "rated match lifecycle overlap",
             ),
             f"trg_{table}_rated_overlap_update": (
                 "BEFORE UPDATE OF bot_a_id,bot_b_id,match_type,status "
                 f"ON {table}",
                 "NEW.status IN ('pending','running')",
+                "SELECT frozen.rated FROM match_rating_policies frozen",
+                "LEFT JOIN match_rating_policies policy ON policy.match_id=m.id",
+                "COALESCE(policy.rated,1)=1",
                 "rated match lifecycle overlap",
             ),
             f"trg_{table}_rating_source_update": (
@@ -154,6 +162,10 @@ def _assert_rating_trigger_contract(triggers: dict[str, str]) -> None:
         expected_names.update(game_contracts)
         for name, fragments in game_contracts.items():
             _assert_fragments(triggers.get(name, ""), *fragments)
+        for operation in ("insert", "update"):
+            assert "JOIN bots rating_a" not in triggers[
+                f"trg_{table}_rated_overlap_{operation}"
+            ]
 
     missing = expected_names - set(triggers)
     assert not missing, sorted(missing)

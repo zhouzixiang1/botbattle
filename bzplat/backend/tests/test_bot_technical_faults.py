@@ -286,6 +286,7 @@ def _user_bot(store: Store, name: str, game_id: str):
         runtime_mode="traditional",
     )
     store.set_current_version(bot["id"], 1)
+    store.select_ranked_bot(int(user["id"]), int(bot["id"]), if_empty=True)
     store.ensure_rating(bot["id"], game_id=game_id)
     return user, bot, version
 

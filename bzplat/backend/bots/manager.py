@@ -19,7 +19,7 @@ from ..bots.classify import (
     classify_binary,
     require_supported_binary,
 )
-from ..store import Store
+from ..store import RankedBotSelectionBusyError, Store
 from ..runtime.limits import MAX_BOT_UPLOAD_BYTES
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,7 @@ class BotManager:
                 binary_runner=binary_runner,
             )
             self.store.update_bot(bot["id"], is_active=1)
+            self.store.select_ranked_bot(owner_id, bot["id"], if_empty=True)
         except Exception:
             self.purge_bot_files(bot["id"])
             if not self.store.delete_unpublished_bot(bot["id"]):
@@ -1104,6 +1105,39 @@ class BotManager:
 
     def set_active(self, bot_id: int, owner_id: int, active: bool) -> dict:
         return self.patch_owner(bot_id, owner_id, is_active=1 if active else 0)
+
+    def select_ranked(self, bot_id: int, owner_id: int) -> dict:
+        """Select one active executable Bot as the owner's game representative."""
+        with self._bot_version_lock(bot_id):
+            bot = self.store.get_bot(bot_id)
+            if not bot:
+                raise BotError("not_found", "bot 不存在")
+            if int(bot["owner_id"]) != int(owner_id):
+                raise BotError("forbidden", "无权修改他人的 Bot")
+            if not bot.get("is_active"):
+                raise BotError("ranking_unavailable", "Bot 当前未启用，不能参加排位")
+            self._require_activatable(bot)
+            try:
+                return self.store.select_ranked_bot(owner_id, bot_id)
+            except LookupError as exc:
+                raise BotError("not_found", str(exc)) from exc
+            except PermissionError as exc:
+                raise BotError("forbidden", str(exc)) from exc
+            except RankedBotSelectionBusyError as exc:
+                raise BotError("ranking_busy", str(exc)) from exc
+            except ValueError as exc:
+                raise BotError("ranking_unavailable", str(exc)) from exc
+
+    def clear_ranked(self, bot_id: int, owner_id: int) -> dict:
+        """Withdraw the current representative without deleting its history."""
+        try:
+            return self.store.clear_ranked_bot(owner_id, bot_id)
+        except LookupError as exc:
+            raise BotError("not_found", str(exc)) from exc
+        except PermissionError as exc:
+            raise BotError("forbidden", str(exc)) from exc
+        except RankedBotSelectionBusyError as exc:
+            raise BotError("ranking_busy", str(exc)) from exc
 
     def patch_owner(self, bot_id: int, owner_id: int, **fields) -> dict:
         """Apply an owner edit without allowing activation of an unsupported file."""

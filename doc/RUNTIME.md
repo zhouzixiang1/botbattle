@@ -343,8 +343,9 @@ queued --原子 claim/建 Match--> starting --> running --> settling --label=0--
 
 1. 游戏按固定游标轮转；`bootstrap/established` 两条内部服务 lane 持久交替。bootstrap 目标场数只帮助
    新 Bot 获得自动服务，与公开排名资格常量彼此独立。
-2. 先按每游戏 auto 专属 owner 服务次数/最近轮次排序；同一 owner 在自动活跃请求中最多占一席，
-   owner 内再轮转服务最少的 Bot。
+2. 先按每游戏 auto 专属 owner 服务次数/最近轮次排序；候选只包含每个 owner/game 当前唯一
+   `is_ranked=true` 排位代表，同一 owner 在自动活跃请求中最多占一席。其他 active Bot 仍可练习或参赛，
+   但不会被 auto producer 选中。
 3. 对手依次按 Bot pair、owner pair、Rating 距离、服务债务和稳定 ID；座位用 auto 专属计数平衡。
    双方必须同游戏、不同 Bot、不同 owner，same-owner 评分仍保持中性。
 4. 决策永久记录策略版本、游标/lane、服务计数、pair 次数、Rating 差、座位债务、冻结版本、
@@ -358,6 +359,11 @@ Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的区间
 
 ### 旧库迁移与 schema 幂等边界
 
+- 首次出现 `bots.is_ranked` 时，迁移只在同一 owner/game 的 active、现行协议且可执行 Bot 中选择一个代表，
+  按公开资格、Rating、计分场次和稳定 Bot ID 确定性排序，再建立 `(owner_id,game_id) WHERE is_ranked=1`
+  partial unique index。该回填只执行一次；后续 owner 显式退出留下的空席在重启时不得被静默补回。
+  Bot universe 因新增 owner/代表维度从 v3 升为 v4，旧生产库迁移后必须停服执行下述 rating rebuild，
+  不能由启动迁移伪造可信摘要。
 - Store 迁移新增 `execution_jobs`、`execution_job_attempts`、`execution_control`、`local_ai_agents` 与
   `local_ai_leases`。队列表重建时为每个 job 增加双方环境、本地 agent 引用、sandbox/CPU/内存与
   `profile_version` 冻结快照；保留全部 job/attempt ID 和生命周期。既有任务按历史 v0 迁为节能沙箱，
@@ -383,8 +389,9 @@ Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的区间
 
 ### 排行榜重建与上线 No-Go
 
-execution job 创建事务会冻结评分资格：不同所有者 Bot 挑战/ladder 计分；同 Bot、自有不同 Bot、人机与
-赛事均为中性局。中性局完成后仍写 exactly-once settlement marker，但不改 ratings、历史、胜负或
+execution job 创建事务会冻结评分资格：只有不同所有者、且双方都是各自 owner/game 当前唯一排位代表的
+Bot 挑战/ladder 计分；同 Bot、自有不同 Bot、任一未派遣 Bot、人机与赛事均为中性局。未派遣原因统一为
+`ranked_bot_not_selected`。中性局完成后仍写 exactly-once settlement marker，但不改 ratings、历史、胜负或
 pair_stats；对局详情同时返回创建时资格 `rated/rating_reason` 与唯一公开的 marker 布尔真值
 `rating_settled`（内部 order/status 不出公共契约），两者
 不可互相代替。符合资格的在途、完成未落 marker、完成已落 marker、中止对局分别显示“预计计分”、
@@ -395,14 +402,52 @@ pair_stats；对局详情同时返回创建时资格 `rated/rating_reason` 与�
 旧库不会在启动迁移时冒险自动重放。`rating_projection_state` 未经当前策略验证或落后于 settlement
 水位时，自动排位一律暂停。生产升级前必须在停服维护窗完成以下流程，否则是发布 **No-Go**：
 
+1. 在线请求 deployment maintenance，等待 `ready=true`，再停止 API、dispatcher、scheduler 与 worker；确认
+   监听端口、生产 namespace 容器、上传、Local AI lease、运行对局和 SQLite `-wal/-shm/-journal` sidecar
+   全部为零。
+2. 在拉取/运行新代码前，先为旧 schema 主库制作一份逐字节相同的**迁移前冷备**，记录 release SHA、数据库
+   SHA-256、inode、`integrity_check=ok` 与空 `foreign_key_check`。旧 release 的回滚只能与这份迁移前冷备
+   成对执行，禁止让旧代码写迁移后的数据库。
+3. 拉取并构建目标 release，但仍不启动 50380。`rating-rebuild` 是只读评分命令，**不会执行 Store schema
+   migration**；必须先用新代码在停服状态离线打开并立即关闭目标库，使 `is_ranked`、canonical partial unique
+   index 和首次确定性派遣在同一 Store migration 事务中落地：
+
+   ```bash
+   python - <<'PY'
+   from pathlib import Path
+   from bzplat.backend.store import Store
+
+   db = Path("/absolute/path/botzone.db").resolve(strict=True)
+   Store(str(db)).close()
+   PY
+   ```
+
+4. 仍保持停服，只读核验 `bots.is_ranked`、`idx_bots_one_ranked_per_owner_game` 的 canonical partial unique
+   定义、每个 `(owner_id,game_id)` 最多一行 `is_ranked=1`、首次 backfill 计划以及 integrity/FK。随后从此
+   **迁移后、重建前**主库再制作第二份逐字节相同的冷备；下述 `rating-rebuild --apply` 的 `--backup`
+   必须指向这第二份冷备，不能误用缺少 `is_ranked` 的迁移前冷备。
+5. 仅在上述 schema 与双冷备门禁全部通过后，按下方命令执行 dry-run，审核三项摘要与全榜 diff，再 apply
+   和独立 verify。启动服务后仍保持 maintenance，先完成 schema/v4 投影、排行榜、RBAC 与受控代表
+   `PUT → DELETE → PUT` 验收；此时 `accepting=0` 且 `auto_enabled=0`，不得声称已验收新挑战或自动候选。
+   上述只读/控制面检查通过后才解除 maintenance，并断言 `accepting=1`、`auto_enabled=0`；在自动排位仍
+   关闭时依次完成“当前代表对当前代表”的计分 canary 与“非代表对当前代表”的中性练习 canary，核对
+   settlement、Rating/RD/history/pair_stats。最后才显式恢复自动排位，并观察一个新 auto job 的双方均为
+   当前代表、不同 owner 且冻结为 `rated=1/rating_reason=eligible`。
+
+若离线迁移或评分重建验收失败，保持服务停止：保存故障库后，用旧 release + 迁移前冷备成对回滚；若仅
+评分 apply 失败且事务已完整回滚，可继续使用新 release + 已验证的迁移后冷备重新审计。服务一旦在新 schema
+上恢复写入，恢复任一冷备都会丢失其后的合法业务写，必须重新进入维护并单独评估，不能自动回退。
+
 在线事务还要求 `mutation_revision == trusted_mutation_revision`。评分/Bot universe/source 输入的每次
 DML 都由数据库递增前者；只有写前完整可信的显式 mutation guard 才能在同一事务同步后者和全部
 摘要。completed 后合法、连续的未结算尾部可跨重启继续，但任何 stale 状态都不能被后续
 ensure/评分/中性 marker/可见性写“洗白”；通用硬删、换 `game_id` 与无 marker 的低层评分写必须走
-下述离线 rebuild 才能恢复自动排位。该认证从 `owner-neutral-v3` 起生效；升级前遗留的 v2 标记
+下述离线 rebuild 才能恢复自动排位。排位代表进入 Bot universe 后，认证从 `owner-ranked-bot-v4` 起生效；
+升级前遗留的 `owner-neutral-v3` 及更早标记
 没有可信 mutation lineage，即使摘要吻合也必须先离线重建。
 
 ```bash
+# 前置条件：新代码已离线完成 Store migration，且第二份冷备与当前目标逐字节相同。
 # 1. 默认只读 dry-run；保存同一只读快照的三项摘要与全榜 diff
 python -m bzplat.backend.cli rating-rebuild --db /absolute/path/botzone.db
 
@@ -422,8 +467,9 @@ python -m bzplat.backend.cli rating-rebuild --db /absolute/path/botzone.db --ver
 
 dry-run/verify 用 SQLite 只读 URI，并显式 `BEGIN` 固定单一读快照，不改变文件字节或 mtime；该快照同时
 产生 immutable source、Bot universe plan 与 rebuilt projection 三项 digest；plan 的 Bot universe 精确包含
-线上榜可见性消费的 `id/game_id/is_active/format/os/arch`，任何 active 或二进制 metadata 漂移都使已审核
-plan 失效。rated source 还要求 `rated ⇔ rating_reason=eligible`，`deltas` 必须恰为两个非 bool 整数且零和。
+线上榜可见性消费的 `id/owner_id/game_id/is_active/is_ranked/format/os/arch`，任何 owner、active、排位代表
+或二进制 metadata 漂移都使已审核 plan 失效。rated source 还要求 `rated ⇔ rating_reason=eligible`，
+`deltas` 必须恰为两个非 bool 整数且零和。
 全榜 diff 复用线上榜的 active Linux/amd64 ELF eligibility、独立公开排名资格阈值与
 `rating → matches_played → bot_id` 排序。apply 除绝对路径二次确认和停服声明外，要求冷备
 与目标双方 `integrity_check=ok`、`foreign_key_check=0`，并在首个 DML 前同时核对三项已审核 digest、

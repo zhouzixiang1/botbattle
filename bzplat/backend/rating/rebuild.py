@@ -31,7 +31,7 @@ from bzplat.backend.store.schema import (
     is_supported_binary_metadata,
 )
 
-CURRENT_POLICY_VERSION = "owner-neutral-v3"
+CURRENT_POLICY_VERSION = "owner-ranked-bot-v4"
 _RATING_FIELDS = (
     "rating",
     "rd",
@@ -170,7 +170,7 @@ def _load_bot_universe(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     bots = [
         dict(row)
         for row in conn.execute(
-            "SELECT id,game_id,is_active,format,os,arch FROM bots "
+            "SELECT id,owner_id,game_id,is_active,is_ranked,format,os,arch FROM bots "
             "ORDER BY game_id,id"
         )
     ]
@@ -585,6 +585,7 @@ def _leaderboard_projection(
             bot is None
             or str(bot.get("game_id") or "") != game_id
             or int(bot.get("is_active") or 0) != 1
+            or int(bot.get("is_ranked") or 0) != 1
             or not is_supported_binary_metadata(
                 str(bot.get("format") or ""),
                 str(bot.get("os") or ""),

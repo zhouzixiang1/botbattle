@@ -156,6 +156,7 @@ def _seed_ratings(app, count=12, game_id="holdem", prefix="usr"):
     store = app.state.store
     _, bots = _seed_bots(app, count=count, game_id=game_id, prefix=prefix)
     for i, b in enumerate(bots):
+        store.select_ranked_bot(int(b["owner_id"]), int(b["id"]), if_empty=True)
         store.ensure_rating(b["id"])
         store.upsert_rating(
             b["id"], rating=1500.0 + i, rd=200.0, vol=0.06,

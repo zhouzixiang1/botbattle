@@ -41,6 +41,7 @@ interface BotProfile {
   owner_name?: string
   owner_display?: string
   is_active: number | boolean
+  is_ranked: number | boolean
   current_version?: number
   created_at?: string
   rating?: number
@@ -316,6 +317,7 @@ export default function BotDetail() {
   }
 
   const ratedMatches = profile.rated_matches ?? ((profile.wins ?? 0) + (profile.losses ?? 0) + (profile.draws ?? 0))
+  const isRanked = Boolean(profile.is_ranked)
   const GameIcon = gameIcon(profile.game_id)
 
   return (
@@ -333,15 +335,17 @@ export default function BotDetail() {
 
       {actionError && <ErrorMsg msg={actionError} />}
 
-      <DataRegion title="Bot 资料" description="身份、版本与当前评分" contentClassName="p-4">
+      <DataRegion title="Bot 资料" description="身份、参榜状态、版本与当前评分" contentClassName="p-4">
         <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
           <div className="min-w-0 space-y-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <Badge variant="outline"><GameIcon className="size-3.5" />{gameLabel(profile.game_id)}</Badge>
-              {profile.ranking_eligible && profile.rank != null ? (
-                <Badge variant="outline" className="font-mono">公开排名 #{profile.rank} / {profile.rank_total}</Badge>
+              {!isRanked ? (
+                <Badge variant="outline"><Trophy className="size-3" aria-hidden="true" />未参加排行榜</Badge>
+              ) : profile.ranking_eligible && profile.rank != null ? (
+                <Badge variant="outline" className="font-mono"><Trophy className="size-3" aria-hidden="true" />公开排名 #{profile.rank} / {profile.rank_total}</Badge>
               ) : (
-                <Badge variant="secondary" className="font-mono">排名资格 {ratedMatches}/{profile.ranking_min_matches}</Badge>
+                <Badge variant="secondary" className="font-mono"><Trophy className="size-3" aria-hidden="true" />参榜中 · 资格 {ratedMatches}/{profile.ranking_min_matches}</Badge>
               )}
               {!profile.is_active && <Badge variant="secondary">已停用</Badge>}
             </div>
@@ -374,10 +378,14 @@ export default function BotDetail() {
           <div className="min-w-0">
             <dt className="text-xs text-muted-foreground">公开名次</dt>
             <dd className="mt-0.5 font-mono font-semibold tabular-nums">
-              {profile.rank == null ? '暂未入榜' : `第 ${profile.rank} / ${profile.rank_total} 名`}
+              {!isRanked
+                ? '未参加排行榜'
+                : profile.rank == null ? '暂未获得公开名次' : `第 ${profile.rank} / ${profile.rank_total} 名`}
               <span className="ml-1.5 font-normal text-muted-foreground">
-                {profile.rank == null
-                  ? `${ratedMatches}/${profile.ranking_min_matches} 场`
+                {!isRanked
+                  ? '历史评分保留'
+                  : profile.rank == null
+                    ? `${ratedMatches}/${profile.ranking_min_matches} 场`
                   : profile.percentile == null ? '' : `超过 ${profile.percentile.toFixed(1)}%`}
               </span>
             </dd>

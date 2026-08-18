@@ -1346,6 +1346,68 @@ async def set_bot_active(
     return {"bot": bot}
 
 
+@router.put("/api/bots/{bot_id}/ranking")
+def select_ranked_bot(
+    bot_id: int, request: Request, user=Depends(require_user)
+):
+    """Atomically make this Bot the owner's sole ranked entry for its game."""
+    try:
+        result = _bots(request).select_ranked(bot_id, int(user["id"]))
+    except BotError as exc:
+        status = {
+            "not_found": 404,
+            "forbidden": 403,
+            "ranking_busy": 409,
+            "ranking_unavailable": 409,
+            "unsupported_binary": 409,
+            "version_unavailable": 409,
+            "version_retired": 409,
+            "protocol_incompatible": 409,
+        }.get(exc.code, 400)
+        raise HTTPException(
+            status, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+    audit_log(
+        request,
+        "bot_ranking_select",
+        result="ok",
+        user=user.get("username"),
+        target=bot_id,
+        detail=(
+            f"previous={result.get('previous_bot_id')} "
+            f"cancelled={result.get('cancelled_queued_jobs', 0)}"
+        ),
+    )
+    return {**result, "bot": _with_bot_runnable(result["bot"])}
+
+
+@router.delete("/api/bots/{bot_id}/ranking")
+def clear_ranked_bot(
+    bot_id: int, request: Request, user=Depends(require_user)
+):
+    """Withdraw this ranked entry while retaining all Bot and rating history."""
+    try:
+        result = _bots(request).clear_ranked(bot_id, int(user["id"]))
+    except BotError as exc:
+        status = {
+            "not_found": 404,
+            "forbidden": 403,
+            "ranking_busy": 409,
+        }.get(exc.code, 400)
+        raise HTTPException(
+            status, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+    audit_log(
+        request,
+        "bot_ranking_clear",
+        result="ok",
+        user=user.get("username"),
+        target=bot_id,
+        detail=f"cancelled={result.get('cancelled_queued_jobs', 0)}",
+    )
+    return {**result, "bot": _with_bot_runnable(result["bot"])}
+
+
 @router.patch("/api/bots/{bot_id}")
 async def update_my_bot(
     bot_id: int, body: dict, request: Request, user=Depends(require_user)

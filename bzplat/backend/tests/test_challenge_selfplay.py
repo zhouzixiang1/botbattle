@@ -291,6 +291,8 @@ def test_different_owner_challenge_remains_rated(tmp_path):
         bot_b = s.create_bot(
             owner_b, "rated-b", binary_path=path_b, format="elf", game_id="holdem"
         )
+        s.select_ranked_bot(int(owner_a), int(bot_a["id"]), if_empty=True)
+        s.select_ranked_bot(int(owner_b), int(bot_b["id"]), if_empty=True)
         s.ensure_rating(bot_a["id"])
         s.ensure_rating(bot_b["id"])
         orch = MatchOrchestrator(s, runner=_NoopRunner(), max_concurrent=1)
