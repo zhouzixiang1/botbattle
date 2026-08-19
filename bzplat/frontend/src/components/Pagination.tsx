@@ -11,9 +11,18 @@ interface Props {
   perPage: number
   total: number
   onPageChange: (page: number) => void
+  ariaLabel?: string
+  disabled?: boolean
 }
 
-export default function Pagination({ page, perPage, total, onPageChange }: Props) {
+export default function Pagination({
+  page,
+  perPage,
+  total,
+  onPageChange,
+  ariaLabel = '分页导航',
+  disabled = false,
+}: Props) {
   const totalPages = Math.max(1, Math.ceil(total / perPage))
   if (totalPages <= 1) return null
 
@@ -29,41 +38,52 @@ export default function Pagination({ page, perPage, total, onPageChange }: Props
   if (totalPages > 1) add(totalPages)
 
   return (
-    <div className="flex flex-wrap items-center justify-center gap-1.5 py-3 text-sm text-muted-foreground">
-      <span className="mr-2">共 {total} 条</span>
+    <nav
+      aria-label={ariaLabel}
+      className="flex flex-wrap items-center justify-center gap-2 py-3 text-sm text-muted-foreground"
+    >
+      <span className="mr-2 max-sm:mr-0 max-sm:basis-full max-sm:text-center">共 {total} 条</span>
       <Button
+        type="button"
         variant="outline"
         size="sm"
-        disabled={page <= 1}
+        aria-label="上一页"
+        disabled={disabled || page <= 1}
         onClick={() => onPageChange(page - 1)}
-        className="h-8 px-2"
+        className="h-8 px-2 max-md:h-11 max-md:min-w-11"
       >
-        <ChevronLeft className="size-4" />
+        <ChevronLeft aria-hidden="true" className="size-4" />
       </Button>
       {pages.map((p, i) =>
         typeof p === 'number' ? (
           <Button
             key={`${p}-${i}`}
+            type="button"
             variant={p === page ? 'default' : 'outline'}
             size="sm"
+            aria-label={`第 ${p} 页`}
+            aria-current={p === page ? 'page' : undefined}
+            disabled={disabled}
             onClick={() => onPageChange(p)}
-            className="h-8 min-w-8 px-2 font-mono"
+            className="h-8 min-w-8 px-2 font-mono max-md:h-11 max-md:min-w-11"
           >
             {p}
           </Button>
         ) : (
-          <span key={`ellipsis-${i}`} className="px-1">…</span>
+          <span key={`ellipsis-${i}`} aria-hidden="true" className="px-1">…</span>
         ),
       )}
       <Button
+        type="button"
         variant="outline"
         size="sm"
-        disabled={page >= totalPages}
+        aria-label="下一页"
+        disabled={disabled || page >= totalPages}
         onClick={() => onPageChange(page + 1)}
-        className="h-8 px-2"
+        className="h-8 px-2 max-md:h-11 max-md:min-w-11"
       >
-        <ChevronRight className="size-4" />
+        <ChevronRight aria-hidden="true" className="size-4" />
       </Button>
-    </div>
+    </nav>
   )
 }

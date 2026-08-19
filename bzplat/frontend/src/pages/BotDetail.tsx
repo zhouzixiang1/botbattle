@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { Star, ArrowLeft, Trophy, Swords, Target, History as HistoryIcon } from 'lucide-react'
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from 'recharts'
@@ -170,6 +170,50 @@ function MobileMatchCard({ match, botId }: { match: MatchRow; botId: number }) {
   )
 }
 
+function MobileOpponentCard({ opponent }: { opponent: OpponentRow }) {
+  const total = opponent.wins + opponent.losses + opponent.draws
+  const winRate = total > 0 ? (opponent.wins + opponent.draws * 0.5) / total : 0
+  return (
+    <article data-testid="bot-opponent-mobile-card" className="space-y-2.5 px-3 py-3">
+      <Link
+        to={`/bot/${opponent.opponent_id}`}
+        className="flex min-h-11 min-w-0 items-center rounded-md font-medium hover:text-primary focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        <EntityName
+          lines={2}
+          tooltip={false}
+          tooltipFocusable={false}
+          className="text-sm hover:text-primary"
+        >
+          {opponent.opponent_display || opponent.opponent_name || '未命名 Bot'}
+        </EntityName>
+      </Link>
+      <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 rounded-lg bg-muted/30 p-2.5 text-sm">
+        <div className="min-w-0">
+          <dt className="text-xs text-muted-foreground">交手</dt>
+          <dd className="font-mono font-semibold tabular-nums">{opponent.samples}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-xs text-muted-foreground">胜率</dt>
+          <dd className="font-mono font-semibold tabular-nums">{fmtPct(winRate)}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-xs text-muted-foreground">胜</dt>
+          <dd className="font-mono font-semibold tabular-nums text-success">{opponent.wins}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-xs text-muted-foreground">负</dt>
+          <dd className="font-mono font-semibold tabular-nums text-destructive">{opponent.losses}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-xs text-muted-foreground">平</dt>
+          <dd className="font-mono font-semibold tabular-nums text-muted-foreground">{opponent.draws}</dd>
+        </div>
+      </dl>
+    </article>
+  )
+}
+
 const chartConfig = {
   rating: { label: 'Rating', color: 'var(--chart-1)' },
 } satisfies ChartConfig
@@ -216,78 +260,187 @@ export default function BotDetail() {
   const [history, setHistory] = useState<RatingPoint[]>([])
   const [profileError, setProfileError] = useState('')
   const [matchesError, setMatchesError] = useState('')
+  const [opponentsError, setOpponentsError] = useState('')
   const [actionError, setActionError] = useState('')
   const [loading, setLoading] = useState(true)
   const [matchesLoading, setMatchesLoading] = useState(true)
+  const [opponentsLoading, setOpponentsLoading] = useState(true)
   const [favorited, setFavorited] = useState(false)
   const [favCount, setFavCount] = useState(0)
   // 对局历史分页
   const [matchesPage, setMatchesPage] = useState(1)
   const [matchesTotal, setMatchesTotal] = useState(0)
   const matchesPerPage = 30
+  const [opponentsPage, setOpponentsPage] = useState(1)
+  const [opponentsTotal, setOpponentsTotal] = useState(0)
+  const [opponentsReloadKey, setOpponentsReloadKey] = useState(0)
+  const opponentsPerPage = 20
+  const profileRequestSeqRef = useRef(0)
+  const matchesRequestSeqRef = useRef(0)
+  const opponentsRequestSeqRef = useRef(0)
+  const favoriteContextRef = useRef('')
+  favoriteContextRef.current = `${botId}:${user?.id ?? 'anonymous'}`
 
   useEffect(() => {
+    setMatchesPage(1)
+    setOpponentsPage(1)
+    setMatches([])
+    setOpponents([])
+    setMatchesTotal(0)
+    setOpponentsTotal(0)
+    setMatchesError('')
+    setOpponentsError('')
+    setActionError('')
+  }, [botId])
+
+  useEffect(() => {
+    const requestSeq = ++profileRequestSeqRef.current
     if (!Number.isInteger(botId) || botId <= 0) {
+      setProfile(null)
+      setHistory([])
+      setFavorited(false)
+      setFavCount(0)
       setProfileError('无效的 Bot 标识')
       setLoading(false)
       return
     }
+    let cancelled = false
+    const isStale = () => cancelled || requestSeq !== profileRequestSeqRef.current
     setLoading(true)
+    setProfile(null)
+    setHistory([])
+    setFavorited(false)
+    setFavCount(0)
     setProfileError('')
-    Promise.all([
-      apiGet<{ profile: BotProfile }>(`/api/bots/${botId}/profile`),
-      apiGet<{ opponents: OpponentRow[] }>(`/api/bots/${botId}/opponents?limit=20`),
-      apiGet<{ history: RatingPoint[] }>(`/api/bots/${botId}/rating-history?limit=100`),
-    ])
-      .then(([p, o, h]) => {
-        setProfile(p.profile)
-        setOpponents(o.opponents || [])
-        setHistory(h.history || [])
-      })
-      .catch((e) => setProfileError(errMsg(e)))
-      .finally(() => setLoading(false))
-    if (user) {
-      apiGet<{ favorited: boolean; favorite_count: number }>(
+    // StrictMode 会同步执行 effect→cleanup→effect；延后一拍让探测性首轮只清
+    // timer。已发出的真实请求不 abort，靠本 effect 的失效标记与代次丢弃迟到结果。
+    const startTimer = window.setTimeout(() => {
+      void Promise.all([
+        apiGet<{ profile: BotProfile }>(`/api/bots/${botId}/profile`),
+        apiGet<{ history: RatingPoint[] }>(`/api/bots/${botId}/rating-history?limit=100`),
+      ])
+        .then(([p, h]) => {
+          if (isStale()) return
+          setProfile(p.profile)
+          setHistory(h.history || [])
+        })
+        .catch((e) => {
+          if (isStale()) return
+          setProfileError(errMsg(e))
+        })
+        .finally(() => {
+          if (isStale()) return
+          setLoading(false)
+        })
+      if (!user) return
+      void apiGet<{ favorited: boolean; favorite_count: number }>(
         `/api/bots/${botId}/favorite-status`,
       )
         .then((fs) => {
+          if (isStale()) return
           setFavorited(fs.favorited)
           setFavCount(fs.favorite_count)
         })
-        .catch(() => {})
+        .catch(() => {
+          if (isStale()) return
+          // 收藏状态读取失败不应阻断公开 Bot 资料。
+        })
+    }, 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(startTimer)
     }
   }, [botId, user])
 
   // 对局历史单独分页（切页只重拉 matches，不重置 profile/opponents/history）
   useEffect(() => {
+    const requestSeq = ++matchesRequestSeqRef.current
     if (!Number.isInteger(botId) || botId <= 0) {
       setMatchesLoading(false)
       return
     }
+    let cancelled = false
+    const isStale = () => cancelled || requestSeq !== matchesRequestSeqRef.current
     setMatchesLoading(true)
     setMatchesError('')
-    apiGet<{ matches: MatchRow[]; total?: number }>(
-      `/api/bots/${botId}/matches?page=${matchesPage}&per_page=${matchesPerPage}`,
-    )
-      .then((m) => {
-        setMatches(m.matches || [])
-        if (m.total !== undefined) setMatchesTotal(m.total)
-      })
-      .catch((e) => setMatchesError(errMsg(e)))
-      .finally(() => setMatchesLoading(false))
+    const startTimer = window.setTimeout(() => {
+      void apiGet<{ matches: MatchRow[]; total?: number }>(
+        `/api/bots/${botId}/matches?page=${matchesPage}&per_page=${matchesPerPage}`,
+      )
+        .then((m) => {
+          if (isStale()) return
+          setMatches(m.matches || [])
+          if (m.total !== undefined) setMatchesTotal(m.total)
+        })
+        .catch((e) => {
+          if (isStale()) return
+          setMatchesError(errMsg(e))
+        })
+        .finally(() => {
+          if (isStale()) return
+          setMatchesLoading(false)
+        })
+    }, 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(startTimer)
+    }
   }, [botId, matchesPage])
+
+  useEffect(() => {
+    const requestSeq = ++opponentsRequestSeqRef.current
+    if (!Number.isInteger(botId) || botId <= 0) {
+      setOpponentsLoading(false)
+      return
+    }
+    let cancelled = false
+    const isStale = () => cancelled || requestSeq !== opponentsRequestSeqRef.current
+    setOpponentsLoading(true)
+    setOpponentsError('')
+    const startTimer = window.setTimeout(() => {
+      void apiGet<{
+        opponents: OpponentRow[]
+        page?: number
+        per_page?: number
+        total?: number
+      }>(`/api/bots/${botId}/opponents?page=${opponentsPage}&per_page=${opponentsPerPage}`)
+        .then((result) => {
+          if (isStale()) return
+          const rows = result.opponents || []
+          setOpponents(rows)
+          setOpponentsTotal(result.total ?? rows.length)
+        })
+        .catch((e) => {
+          if (isStale()) return
+          setOpponentsError(errMsg(e))
+        })
+        .finally(() => {
+          if (isStale()) return
+          setOpponentsLoading(false)
+        })
+    }, 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(startTimer)
+    }
+  }, [botId, opponentsPage, opponentsReloadKey])
 
   function toggleFavorite() {
     if (!user) return
     const method = favorited ? 'DELETE' : 'POST'
+    const actionContext = `${botId}:${user.id}`
     apiJson(`/api/bots/${botId}/favorite`, method)
       .then(() => {
+        if (favoriteContextRef.current !== actionContext) return
         setActionError('')
         setFavorited(!favorited)
         setFavCount((c) => c + (favorited ? -1 : 1))
         toast.success(favorited ? '已取消收藏' : '收藏成功')
       })
-      .catch((e) => setActionError(errMsg(e)))
+      .catch((e) => {
+        if (favoriteContextRef.current !== actionContext) return
+        setActionError(errMsg(e))
+      })
   }
 
   if (loading) {
@@ -413,7 +566,7 @@ export default function BotDetail() {
         <StickyToolbar label="Bot 详情分区">
           <TabsList className="w-full sm:w-auto">
             <TabsTrigger value="history"><HistoryIcon className="size-3.5" />对局历史 <span className="text-xs text-muted-foreground">{matchesTotal || matches.length}</span></TabsTrigger>
-            <TabsTrigger value="opponents"><Swords className="size-3.5" />对手战绩 <span className="text-xs text-muted-foreground">{opponents.length}</span></TabsTrigger>
+            <TabsTrigger value="opponents"><Swords className="size-3.5" />对手战绩 <span className="text-xs text-muted-foreground">{opponentsTotal}</span></TabsTrigger>
             <TabsTrigger value="rating"><Target className="size-3.5" />评分曲线</TabsTrigger>
           </TabsList>
         </StickyToolbar>
@@ -481,50 +634,89 @@ export default function BotDetail() {
               perPage={matchesPerPage}
               total={matchesTotal}
               onPageChange={setMatchesPage}
+              ariaLabel="Bot 对局历史分页"
+              disabled={matchesLoading}
             />
           </DataRegion>
         </TabsContent>
 
         <TabsContent value="opponents">
-          <DataRegion title="对手战绩" description="近期交手累计结果">
-            <DataTable className="rounded-none border-0" scrollLabel="Bot 对手战绩">
-              <Table aria-label="Bot 对手战绩" className="min-w-[32rem]">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="min-w-[6rem]">对手</TableHead>
-                  <TableHead>交手</TableHead>
-                  <TableHead>胜</TableHead>
-                  <TableHead>负</TableHead>
-                  <TableHead>平</TableHead>
-                  <TableHead>胜率</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {opponents.length === 0 ? (
-                  <TableRow><TableCell colSpan={6}><EmptyState text="暂无对手战绩" /></TableCell></TableRow>
-                ) : (
-                  opponents.map((o) => {
-                    const t = o.wins + o.losses + o.draws
-                    const r = t > 0 ? (o.wins + o.draws * 0.5) / t : 0
-                    return (
-                      <TableRow key={o.opponent_id}>
-                        <TableCell className="max-w-[12rem] whitespace-normal">
-                          <Link to={`/bot/${o.opponent_id}`} className="block min-w-0 hover:text-primary">
-                            <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{o.opponent_display || o.opponent_name || '未命名 Bot'}</EntityName>
-                          </Link>
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">{o.samples}</TableCell>
-                        <TableCell className="text-success">{o.wins}</TableCell>
-                        <TableCell className="text-destructive">{o.losses}</TableCell>
-                        <TableCell className="text-muted-foreground">{o.draws}</TableCell>
-                        <TableCell className="font-mono text-sm">{fmtPct(r)}</TableCell>
-                      </TableRow>
-                    )
-                  })
-                )}
-              </TableBody>
-              </Table>
-            </DataTable>
+          <DataRegion
+            title="对手战绩"
+            description={`当前评分池计分交手 · 第 ${opponentsPage} 页 · 每页 ${opponentsPerPage} 个 · 共 ${opponentsTotal} 个对手`}
+          >
+            {opponentsError ? (
+              <div className="space-y-3 px-4 py-6">
+                <ErrorMsg msg={opponentsError} />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setOpponentsReloadKey((key) => key + 1)}
+                  className="max-sm:min-h-11"
+                >
+                  重试
+                </Button>
+              </div>
+            ) : opponentsLoading ? (
+              <Loading text="正在加载对手战绩…" />
+            ) : opponents.length === 0 ? (
+              <EmptyState text="暂无对手战绩" />
+            ) : (
+              <>
+                <div className="divide-y md:hidden" aria-label="Bot 对手战绩移动视图">
+                  {opponents.map((opponent) => (
+                    <MobileOpponentCard key={opponent.opponent_id} opponent={opponent} />
+                  ))}
+                </div>
+                <div className="hidden md:block">
+                  <DataTable className="rounded-none border-0" scrollLabel="Bot 对手战绩">
+                    <Table aria-label="Bot 对手战绩" className="min-w-[32rem]">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="min-w-[6rem]">对手</TableHead>
+                          <TableHead>交手</TableHead>
+                          <TableHead>胜</TableHead>
+                          <TableHead>负</TableHead>
+                          <TableHead>平</TableHead>
+                          <TableHead>胜率</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {opponents.map((opponent) => {
+                          const total = opponent.wins + opponent.losses + opponent.draws
+                          const winRate = total > 0
+                            ? (opponent.wins + opponent.draws * 0.5) / total
+                            : 0
+                          return (
+                            <TableRow key={opponent.opponent_id}>
+                              <TableCell className="max-w-[12rem] whitespace-normal">
+                                <Link to={`/bot/${opponent.opponent_id}`} className="block min-w-0 hover:text-primary">
+                                  <EntityName lines={2} tooltip={false} tooltipFocusable={false} className="text-sm hover:text-primary">{opponent.opponent_display || opponent.opponent_name || '未命名 Bot'}</EntityName>
+                                </Link>
+                              </TableCell>
+                              <TableCell className="text-muted-foreground">{opponent.samples}</TableCell>
+                              <TableCell className="text-success">{opponent.wins}</TableCell>
+                              <TableCell className="text-destructive">{opponent.losses}</TableCell>
+                              <TableCell className="text-muted-foreground">{opponent.draws}</TableCell>
+                              <TableCell className="font-mono text-sm">{fmtPct(winRate)}</TableCell>
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  </DataTable>
+                </div>
+              </>
+            )}
+            <Pagination
+              page={opponentsPage}
+              perPage={opponentsPerPage}
+              total={opponentsTotal}
+              onPageChange={setOpponentsPage}
+              ariaLabel="Bot 对手战绩分页"
+              disabled={opponentsLoading}
+            />
           </DataRegion>
         </TabsContent>
 

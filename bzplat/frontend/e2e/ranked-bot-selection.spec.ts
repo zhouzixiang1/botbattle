@@ -331,7 +331,7 @@ test('Bot detail separates dispatch status from historical ranking eligibility',
       : path.endsWith('/matches')
         ? { matches: [], total: 0 }
         : path.endsWith('/opponents')
-          ? { opponents: [] }
+          ? { opponents: [], page: 1, per_page: 20, total: 0 }
           : path.endsWith('/rating-history')
             ? { history: [] }
             : path.endsWith('/favorite-status')

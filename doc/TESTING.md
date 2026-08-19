@@ -51,13 +51,13 @@ pytest
 | **管理端安全操作** | 活跃 match 仅可经 orchestrator abort；用户/Bot 一旦有历史或活跃参赛引用只能停用、不得硬删，赛事按状态与引用拒绝危险删除；批量指派做字段与归属校验 |
 | **QA 隔离** | `test_qa_*`、`test_seed_test_accounts`、`test_qa_script_artifacts`、`test_load_test_seed`、`test_runtime_settings`：拒绝 50380、主库同路径/同 inode、主 checkout 运行时写目标与错误 Vite 代理；每个实例使用唯一 `BZ_INSTANCE_KEY`；隔离 QA 的代码能力门强制禁用自动 producer，复制库中的 `execution_control.auto_enabled` 不能绕过且开启 API 返回 409；同名 QA Bot 复用还必须满足规范路径、执行位、ELF 元数据与内容完整性 |
 | **社交/通知/成长/站点** | `test_notifications`、`test_comments_likes`、`test_social`、`test_xp_level`、`test_load_test_seed`、`test_wiki_pages`；覆盖 actor/target 不存在或在 API 预检后竞态删除时，关注/收藏/评论/点赞/取消点赞都由 `BEGIN IMMEDIATE` 写事务稳定返回 404，XP 与通知无副作用；删实体/用户清孤儿且即时同步对局点赞缓存；自评论不通知自己；通知使用展示层 1-based 座位；偏好 REST 严格 boolean，浏览器忽略迟到初始 GET、按字段串行合并快速点击并让最后一次操作成为服务端/UI 真值 |
-| **单游戏数值排行榜契约** | `test_ranked_bot_selection`、`test_numeric_ranking`、`test_leaderboard_density`、`test_pagination`、`test_response_field_whitelist`、`test_rating_rebuild`；每个 owner/game 至多一个 `is_ranked` 代表，首次成功上传空席自动派遣，PUT 切换与 DELETE 退出受 owner/RBAC、可执行性、partial unique index 和在途计分屏障共同守护；切换保留历史 Rating/RD/history，并原子取消旧 queued rated job。Store/API 缺失或未知 `game_id` 必须拒绝，1-based 全局名次/百分位、Rating/RD、95% 区间、计分资格与样本概览由后端权威生成，分页名次保持全局连续，公开资格不读取 auto bootstrap 目标且只纳入当前代表；评分变化只读同游戏历史快照。最近对局必须同时存在于历史 reason、同 game 索引和物理 completed 行，且该 Bot 确为任一座位参赛方。公开行不返回定性标签、内部累计分差、重复 game_id 或恒定平台三元组 |
+| **单游戏数值排行榜契约** | `test_ranked_bot_selection`、`test_numeric_ranking`、`test_leaderboard_density`、`test_bot_profile`、`test_pagination`、`test_response_field_whitelist`、`test_rating_rebuild`；每个 owner/game 至多一个 `is_ranked` 代表，首次成功上传空席自动派遣，PUT 切换与 DELETE 退出受 owner/RBAC、可执行性、partial unique index 和在途计分屏障共同守护；切换保留历史 Rating/RD/history，并原子取消旧 queued rated job。Store/API 缺失或未知 `game_id` 必须拒绝，1-based 全局名次/百分位、Rating/RD、95% 区间、计分资格与样本概览由后端权威生成，分页名次保持全局连续，公开资格不读取 auto bootstrap 目标且只纳入当前代表；评分变化只读同游戏历史快照。Bot 对手战绩分页须覆盖精确总数、稳定跨页排序、当前 Bot 胜负视角、空尾页、`per_page` 边界及无 `page` 的旧 `limit` 响应，并只读取当前评分池 `pair_stats`。最近对局必须同时存在于历史 reason、同 game 索引和物理 completed 行，且该 Bot 确为任一座位参赛方。公开行不返回定性标签、内部累计分差、重复 game_id 或恒定平台三元组 |
 
 ## 3. Playwright 真浏览器回归
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前静态有 9 个 spec（含 `ranked-bot-selection.spec.ts`）；每个浏览器及三浏览器总数必须以目标代码序列的 `playwright --list` 与实际运行证据回填，旧主线基线不能外推：
+`bzplat/frontend/e2e/` 当前静态有 11 个 spec（含 `ranked-bot-selection.spec.ts` 与 `bot-opponent-pagination.spec.ts`）；每个浏览器及三浏览器总数必须以目标代码序列的 `playwright --list` 与实际运行证据回填，旧主线基线不能外推：
 
 | Spec | 重点 |
 |------|------|
@@ -111,9 +111,9 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --browser=all --report
 
 | 检查 | 本轮状态 | 证据/说明 |
 |------|----------|-----------|
-| 后端完整 pytest | **当前门槛 1552/1552，0 skipped** | 合并前必须从第 1 项冻结运行到 exit 0，且 tracked+untracked 的路径、mode 与内容指纹前后一致；本轮另有排位代表/执行队列/重建/删除/迁移定向 311 passed。warning 仅允许既有 TestClient/httpx 弃用与 OpenAPI operation-id 提示 |
+| 后端完整 pytest | **当前门槛 1554/1554，0 skipped** | 合并前必须从第 1 项冻结运行到 exit 0，且 tracked+untracked 的路径、mode 与内容指纹前后一致；本轮新增 Bot 对手分页完整契约与未知 Bot 404 两项，另有排位代表/执行队列/重建/删除/迁移定向 311 passed。warning 仅允许既有 TestClient/httpx 弃用与 OpenAPI operation-id 提示 |
 | 前端生产构建 | **通过（2586 modules）** | 当前候选已完成 TypeScript 与 Vite 生产构建；任何后续前端变更都须重新构建 |
-| Playwright 三浏览器矩阵 | **当前门槛 294/294** | Chromium、Firefox、WebKit 各 98 项，0 failure/0 retry；合并前必须在隔离 QA DB/instance/origin 上从第 1 项完整运行并保持候选指纹不变。新增 15 项三浏览器定向覆盖派遣、切换、退出、历史评分、练习 Bot 可选、冻结不计分原因、结构化 409、44px 触控与焦点恢复 |
+| Playwright 三浏览器矩阵 | **当前门槛 306/306** | 静态 `--list` 为 Chromium、Firefox、WebKit 各 102 项，0 failure/0 retry；合并前必须在隔离 QA DB/instance/origin 上从第 1 项完整运行并保持候选指纹不变。排位代表 15 项三浏览器定向继续覆盖派遣、切换、退出、历史评分、练习 Bot 可选、冻结不计分原因、结构化 409、44px 触控与焦点恢复；本轮另新增 12 项三浏览器定向，覆盖对手完整总数、三页替换、局部错误重试、移动卡片、键盘/ARIA、640–767px 触控边界及跨 Bot 迟到响应隔离 |
 | 单用户单游戏排位代表生产副本演练 | **migration → dry-run → apply → verify → no-op 通过** | 从停服冷备逐字节复制到独立 inode；旧库 95 个 Bot、91 个 owner/game 席位，首次迁移确定性派遣 79 个可执行代表，两个多 Bot 组分别保留 Bot 1 与 1118，canonical partial unique index 冲突为 0。v4 dry-run 读取 4102 个 settlement（4068 rated、34 neutral），source/plan/rebuilt digest 分别为 `adfd18bd…308d` / `417148b9…a3e` / `b9f099e6…50ef`，公开候选 79，Rating 与名次变化均为 0；apply 后独立 verify 为 `owner-ranked-bot-v4`、mutation/trusted revision 一致、integrity=`ok`、FK=0。Bot/版本/比赛/队列/冻结 policy/settlement/旧评分归档的逻辑指纹前后一致；提交后重新制作 exact 冷备的二次 apply 为零写，文件 SHA-256 与 mtime 不变；误用重建前冷备会按完整业务摘要 fail closed |
 | Gomoku hard cutover 副本演练 | **dry-run → apply → second apply → verify 全部通过** | 生产同形数据库物理副本上，用正式标准 ELF 对 Traditional/LongRunning 分别执行 Docker 预检；32 个 Bot 各新建不可变 vN 并设为 current，52 个旧版本退役，2 个旧 Gomoku queued job 取消，运行模式保持 20/12。第二次同参数与原冷备返回 `already_applied=true`；1545 场历史 Match/Replay/赛事/旧版本不可变字段逐行零差异，32 条新路径为独立 inode、mode 0555、hash 一致，integrity=`ok`、FK=0、新评分池场次为 0 |
 | 全页面图片识别 | **完成，未发现 P0 或根级横向溢出** | 公开页面 219 张 PNG / 31 states、用户页面 99 张 PNG + 5 份状态 JSON、Admin 106 张 PNG / 42 states；逐图检查首屏、滚动中段、页尾及 Desktop/Mobile/Laptop 的统一设计、信息密度、留白、对齐、溢出、换行、sticky 与内外滚动 |

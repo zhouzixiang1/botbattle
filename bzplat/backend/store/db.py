@@ -6919,51 +6919,84 @@ class Store:
             return d
 
     def bot_opponents_stats(
-        self, bot_id: int, *, limit: int = 20
-    ) -> list[dict]:
+        self,
+        bot_id: int,
+        *,
+        limit: int = 20,
+        page: int | None = None,
+        per_page: int = 20,
+    ) -> list[dict] | dict:
         """返回该 Bot 对各对手的战绩（按交手次数倒序），从 pair_stats 读。
 
         每行含 opponent_id/opponent_name/opponent_display/game_id/
         wins/losses/draws/samples/last_played_at（wins 从 bot_id 视角）。
+
+        ``page`` 为空时保留旧 ``limit`` 列表契约；提供 ``page`` 时返回
+        ``{items, page, per_page, total}``。分页的总数与当前页在同一个
+        SQLite 读事务中取得，避免结算并发写入时两者来自不同快照。
         """
+
+        def project(row: sqlite3.Row | dict) -> dict:
+            d = _row(row) if isinstance(row, sqlite3.Row) else row
+            a_id, b_id = d["bot_a_id"], d["bot_b_id"]
+            opponent_side = "b" if a_id == bot_id else "a"
+            opponent_id = b_id if a_id == bot_id else a_id
+            # pair_stats 以小 id 为 a 规范化；目标在 b 位时须翻转胜负视角。
+            wins = d["a_wins"] if a_id == bot_id else d["a_losses"]
+            losses = d["a_losses"] if a_id == bot_id else d["a_wins"]
+            opponent_name = d[f"bot_{opponent_side}_name"]
+            return {
+                "opponent_id": opponent_id,
+                "opponent_name": (
+                    opponent_name if opponent_name is not None else f"#{opponent_id}"
+                ),
+                "opponent_display": d[f"bot_{opponent_side}_display"] or "",
+                "game_id": d[f"bot_{opponent_side}_game_id"] or "",
+                "wins": wins,
+                "losses": losses,
+                "draws": d["draws"],
+                "samples": d["samples"],
+                "last_played_at": d["last_played_at"],
+            }
+
+        sql = (
+            "SELECT ps.bot_a_id, ps.bot_b_id, ps.a_wins, ps.a_losses, "
+            "ps.draws, (ps.a_wins+ps.a_losses+ps.draws) AS samples, "
+            "ps.last_played_at, "
+            "ba.name AS bot_a_name, ba.display_name AS bot_a_display, "
+            "ba.game_id AS bot_a_game_id, "
+            "bb.name AS bot_b_name, bb.display_name AS bot_b_display, "
+            "bb.game_id AS bot_b_game_id "
+            "FROM pair_stats ps "
+            "LEFT JOIN bots ba ON ba.id=ps.bot_a_id "
+            "LEFT JOIN bots bb ON bb.id=ps.bot_b_id "
+            "WHERE ps.bot_a_id=? OR ps.bot_b_id=? "
+            "ORDER BY samples DESC, ps.last_played_at DESC, "
+            "ps.bot_a_id, ps.bot_b_id"
+        )
+        params = (bot_id, bot_id)
         with self._tx() as c:
-            # bot 可能在 bot_a 或 bot_b 位
-            rows = c.execute(
-                "SELECT ps.bot_a_id, ps.bot_b_id, ps.a_wins, ps.a_losses, "
-                "ps.draws, (ps.a_wins+ps.a_losses+ps.draws) AS samples, "
-                "ps.last_played_at "
-                "FROM pair_stats ps "
-                "WHERE ps.bot_a_id=? OR ps.bot_b_id=? "
-                "ORDER BY samples DESC, ps.last_played_at DESC, "
-                "ps.bot_a_id, ps.bot_b_id LIMIT ?",
-                (bot_id, bot_id, max(1, min(limit, 100))),
-            ).fetchall()
-            out: list[dict] = []
-            for r in rows:
-                d = _row(r)
-                a_id, b_id = d["bot_a_id"], d["bot_b_id"]
-                opp_id = b_id if a_id == bot_id else a_id
-                # 视角还原：若 bot 是 a，wins=a_wins；若 bot 是 b，wins=a_losses
-                if bot_id == a_id:
-                    wins, losses = d["a_wins"], d["a_losses"]
-                else:
-                    wins, losses = d["a_losses"], d["a_wins"]
-                opp = c.execute(
-                    "SELECT name, display_name, game_id FROM bots WHERE id=?",
-                    (opp_id,),
-                ).fetchone()
-                out.append({
-                    "opponent_id": opp_id,
-                    "opponent_name": opp["name"] if opp else f"#{opp_id}",
-                    "opponent_display": opp["display_name"] if opp else "",
-                    "game_id": opp["game_id"] if opp else "",
-                    "wins": wins,
-                    "losses": losses,
-                    "draws": d["draws"],
-                    "samples": d["samples"],
-                    "last_played_at": d["last_played_at"],
-                })
-            return out
+            if page is not None:
+                normalized_page = max(1, int(page))
+                normalized_per_page = max(1, min(200, int(per_page)))
+                c.execute("BEGIN")
+                rows, total = _paginate(
+                    c,
+                    sql,
+                    params,
+                    page=normalized_page,
+                    per_page=normalized_per_page,
+                )
+                return {
+                    "items": [project(row) for row in rows],
+                    "page": normalized_page,
+                    "per_page": normalized_per_page,
+                    "total": total,
+                }
+
+            legacy_limit = max(1, min(int(limit), 100))
+            rows = c.execute(f"{sql} LIMIT ?", params + (legacy_limit,)).fetchall()
+            return [project(row) for row in rows]
 
     # ── matches（全面解耦 PR3：拆每游戏一张表 + matches_index 定位）─────
 
