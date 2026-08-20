@@ -12,6 +12,7 @@
 - GET /api/comments
 - GET /api/notifications
 - GET /api/bots/{id}/matches
+- GET /api/bots/{id}/opponents
 - GET /api/contests/{id}（entries 子分页）
 - GET /api/admin/users
 - GET /api/admin/bots（已支持，回归校验）
@@ -298,6 +299,133 @@ def test_bot_matches_pagination(tmp_path):
     old = c.get(f"/api/bots/{b1['id']}/matches?limit=100&offset=0").json()
     assert "page" not in old
     assert len(old["matches"]) == 11
+
+
+# ── /api/bots/{id}/opponents ──────────────────────────────────
+
+def test_bot_opponents_pagination_is_complete_stable_and_public(tmp_path):
+    app = _new_app(tmp_path, "opponents.db")
+    store = app.state.store
+    owner = store.create_user(
+        "oppowner", "oppowner@ex.com", hash_password("pw123456")
+    )
+    store.update_user(owner["id"], email_verified=1)
+
+    # 先建 3 个较小 id 的对手，再建目标和 20 个较大 id 的对手，确保目标
+    # 同时出现在 pair_stats 的 a/b 两侧，分页不能破坏胜负视角。
+    lower = [
+        store.create_bot(
+            owner["id"], f"lower{i}", binary_path="/tmp", format="elf",
+            game_id="holdem",
+        )
+        for i in range(3)
+    ]
+    target = store.create_bot(
+        owner["id"], "target", binary_path="/tmp", format="elf",
+        game_id="holdem",
+    )
+    higher = [
+        store.create_bot(
+            owner["id"], f"higher{i:02d}", binary_path="/tmp", format="elf",
+            game_id="holdem",
+        )
+        for i in range(20)
+    ]
+    opponents = lower + higher
+    for index, opponent in enumerate(opponents):
+        lo, hi = sorted((target["id"], opponent["id"]))
+        if index == 0:
+            # target 在 b 位，a 胜即 target 负。
+            store.upsert_pair_stats(lo, hi, a_wins_delta=1)
+        elif target["id"] == lo:
+            store.upsert_pair_stats(lo, hi, a_wins_delta=1)
+        else:
+            # target 在 b 位，a 负即 target 胜。
+            store.upsert_pair_stats(lo, hi, a_losses_delta=1)
+
+    # 固定时间后，全部一场的行只靠规范化 pair id 稳定破同分；对于固定目标
+    # 该顺序等价于 opponent_id 升序。
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE pair_stats SET last_played_at='2026-08-20T00:00:00' "
+            "WHERE bot_a_id=? OR bot_b_id=?",
+            (target["id"], target["id"]),
+        )
+        pair_count = int(conn.execute(
+            "SELECT COUNT(*) FROM pair_stats "
+            "WHERE bot_a_id=? OR bot_b_id=?",
+            (target["id"], target["id"]),
+        ).fetchone()[0])
+
+    client = TestClient(app)  # 无认证：端点是公开读接口。
+    page_1_response = client.get(
+        f"/api/bots/{target['id']}/opponents?page=1"
+    )
+    assert page_1_response.status_code == 200
+    page_1 = page_1_response.json()
+    assert page_1.keys() == {"opponents", "page", "per_page", "total"}
+    assert page_1["page"] == 1
+    assert page_1["per_page"] == 20
+    assert page_1["total"] == pair_count == len(opponents) == 23
+    assert len(page_1["opponents"]) == 20
+
+    page_2 = client.get(
+        f"/api/bots/{target['id']}/opponents?page=2&per_page=20"
+    ).json()
+    assert page_2["total"] == 23
+    assert len(page_2["opponents"]) == 3
+    first_ids = [row["opponent_id"] for row in page_1["opponents"]]
+    second_ids = [row["opponent_id"] for row in page_2["opponents"]]
+    expected_ids = sorted(opponent["id"] for opponent in opponents)
+    assert first_ids + second_ids == expected_ids
+    assert set(first_ids).isdisjoint(second_ids)
+
+    # target 在 b 位的两种结果都按 target 视角还原；target 在 a 位亦保持正向。
+    rows_by_id = {
+        row["opponent_id"]: row
+        for row in page_1["opponents"] + page_2["opponents"]
+    }
+    assert rows_by_id[lower[0]["id"]]["losses"] == 1
+    assert rows_by_id[lower[0]["id"]]["wins"] == 0
+    assert rows_by_id[lower[1]["id"]]["wins"] == 1
+    assert rows_by_id[higher[0]["id"]]["wins"] == 1
+
+    # 参数钳制与超尾页都保留权威 total；超尾页不重复最后一页。
+    low_clamp = client.get(
+        f"/api/bots/{target['id']}/opponents?page=0&per_page=0"
+    ).json()
+    assert low_clamp["page"] == 1
+    assert low_clamp["per_page"] == 1
+    assert low_clamp["total"] == 23
+    assert len(low_clamp["opponents"]) == 1
+
+    high_clamp = client.get(
+        f"/api/bots/{target['id']}/opponents?page=1&per_page=999"
+    ).json()
+    assert high_clamp["per_page"] == 200
+    assert high_clamp["total"] == 23
+    assert len(high_clamp["opponents"]) == 23
+
+    beyond = client.get(
+        f"/api/bots/{target['id']}/opponents?page=99&per_page=20"
+    ).json()
+    assert beyond["page"] == 99
+    assert beyond["total"] == 23
+    assert beyond["opponents"] == []
+
+    # 不带 page 时保持旧响应形状和 limit 行为。
+    legacy = client.get(
+        f"/api/bots/{target['id']}/opponents?limit=5"
+    ).json()
+    assert legacy.keys() == {"opponents"}
+    assert len(legacy["opponents"]) == 5
+
+
+def test_bot_opponents_pagination_returns_404_for_unknown_bot(tmp_path):
+    client = TestClient(_new_app(tmp_path, "opponents-404.db"))
+    response = client.get("/api/bots/999999/opponents?page=1&per_page=20")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "bot 不存在"
 
 
 # ── /api/contests/{id}（entries 子分页）──────────────────────

@@ -1108,12 +1108,38 @@ def bot_matches(
 
 @router.get("/api/bots/{bot_id}/opponents")
 def bot_opponents(
-    bot_id: int, request: Request, limit: int = 20
+    bot_id: int,
+    request: Request,
+    limit: int = 20,
+    page: int | None = None,
+    per_page: int = 20,
 ):
-    """某 Bot 对各对手的战绩（公开，从 pair_stats 读）。"""
-    if not _store(request).get_bot(bot_id):
+    """某 Bot 对各对手的战绩（公开，从 pair_stats 读）。
+
+    旧 ``limit`` 列表响应保持兼容；提供 ``page`` 时使用全站统一的
+    ``{opponents, page, per_page, total}`` 服务端分页契约。
+    """
+    store = _store(request)
+    if not store.get_bot(bot_id):
         raise HTTPException(404, "bot 不存在")
-    return {"opponents": _store(request).bot_opponents_stats(bot_id, limit=max(1, min(limit, 200)))}
+    if page is not None:
+        result = store.bot_opponents_stats(
+            bot_id,
+            page=page,
+            per_page=per_page,
+        )
+        return {
+            "opponents": result["items"],
+            "page": result["page"],
+            "per_page": result["per_page"],
+            "total": result["total"],
+        }
+    return {
+        "opponents": store.bot_opponents_stats(
+            bot_id,
+            limit=max(1, min(limit, 200)),
+        )
+    }
 
 
 @router.get("/api/bots/{bot_id}/rating-history")

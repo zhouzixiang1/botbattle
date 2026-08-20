@@ -110,7 +110,7 @@ async function mockBotDetail(page: import('@playwright/test').Page) {
       })
     }
     if (url.pathname.endsWith('/opponents')) {
-      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"opponents":[]}' })
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"opponents":[],"page":1,"per_page":20,"total":0}' })
     }
     if (url.pathname.endsWith('/rating-history')) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: '{"history":[]}' })
