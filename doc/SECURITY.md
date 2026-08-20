@@ -60,6 +60,21 @@ active+runnable Bot 集合中选择任意座位 1。该管理员例外只放宽 
 显式 `my_bot_version_id` 仍必须属于座位 1 Bot，双方版本/当前版本仍须通过文件完整性、Linux
 x86_64 ELF、运行模式、激活状态和游戏一致性校验，失败不创建 execution job 或 Match。
 
+## 公开单场对局日志边界
+
+`GET /api/matches/{id}/log` 只导出一场已经进入 `completed/aborted` 的公开 canonical replay。
+Store 在同一个 SQLite 读快照中核对权威 Match、原始 replay 尾项和公共投影：只有持久化数组最后
+一项与状态对应为 `match_end/error` 时才返回 JSON v1；活动局、未知游戏、损坏契约或终态回放尚未
+落稳均 fail closed，不把内存事件前缀或服务端合成终局伪装成完整文件。实现只读既有 Match 与
+`match_replays`，不增加表、列或迁移。
+
+文件只包含正向白名单的公开 `match` 与结构化 `replay`。事件继续经过 REST/SSE/WS 共用的
+`store.public_contract`：未知诊断事件默认丢弃，历史技术故障只输出有界稳定码与脱敏说明，原始
+message/path、Bot 二进制或版本路径、执行配置、令牌、stdout/stderr、应用日志和私有 debug 均不得
+进入。响应为单场 `application/json` attachment，固定 `no-store`、`nosniff` 与有界 ASCII 文件名；
+同一持久状态确定性序列化，不加入下载时间。此前明确下线的按月/批量 matchpacks、公开列表和
+`/data` 页面不因单场导出恢复。
+
 ## 私有 Bot debug 边界
 
 Bot stdout 顶层 `debug` 是独立于动作/回放的私有 sidecar：单行传输 64 KiB 硬顶，收集阶段再做
@@ -72,8 +87,8 @@ sidecar 只在 Bot-vs-Bot 终态后原子写独立表；写失败不回滚对局
 赛事 organizer/admin 可在单场终态读取，参赛 Bot owner 等整赛 `finished/cancelled`；人类对战仅
 admin 可审计空结果。赛事类型、`contest_id` 或赛事实体任一不一致时，非 admin 一律 fail-closed。
 接口返回 `private, no-store`，拒绝不暴露记录存在性。内容不进入
-`responses[]`、Bot 请求、result、REST replay、SSE/WS、通知或任何日志；前端只用文本节点/
-安全 JSON 渲染，不解释 HTML、Markdown 或链接。
+`responses[]`、Bot 请求、result、REST replay、SSE/WS、通知、公开对局日志、游戏专项棋谱或任何
+应用日志；前端只用文本节点/安全 JSON 渲染，不解释 HTML、Markdown 或链接。
 
 ## WebSocket 会话边界
 
