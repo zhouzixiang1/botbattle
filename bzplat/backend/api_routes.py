@@ -518,6 +518,8 @@ _MATCH_RECORD_HEADERS = {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
 }
+_MATCH_LOG_FORMAT = "botbattle.match.log"
+_MATCH_LOG_FORMAT_VERSION = 1
 _SAFE_RECORD_FILENAME_COMPONENT = re.compile(r"[^A-Za-z0-9_-]+")
 _MATCH_RECORD_CONTRACT_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
 
@@ -550,6 +552,12 @@ def _match_record_filename(game_id: str, match_id: str) -> str:
     safe_game = (safe_game or "game")[:32]
     safe_match = (safe_match or "match")[:80]
     return f"botbattle-{safe_game}-{safe_match}.json"
+
+
+def _match_log_filename(game_id: str, match_id: str) -> str:
+    """Return the safe attachment name for one public match log."""
+    record_name = _match_record_filename(game_id, match_id)
+    return f"{record_name[:-5]}-log.json"
 
 
 def _public_match_list_rows(
@@ -2344,11 +2352,98 @@ def match_replay(match_id: str, request: Request):
     return payload
 
 
+@router.get("/api/matches/{match_id}/log")
+def match_log(match_id: str, request: Request):
+    """Download one finalized canonical public replay for any known game."""
+    try:
+        source = _store(request).get_match_record_source(match_id)
+    except ValueError:
+        raise HTTPException(
+            409,
+            "对局游戏定位损坏，无法导出日志",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
+    if source is None:
+        raise HTTPException(404, "对局不存在", headers=_MATCH_RECORD_HEADERS)
+    match = source["match"]
+    if match.get("status") not in (STATUS_COMPLETED, STATUS_ABORTED):
+        raise HTTPException(
+            409,
+            "对局尚未结束，暂不能导出日志",
+            headers=_MATCH_RECORD_HEADERS,
+        )
+
+    try:
+        spec = game_registry.get(match["game_id"])
+    except (AttributeError, KeyError, TypeError):
+        raise HTTPException(
+            409,
+            "该对局的游戏不支持日志导出",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
+
+    if not source["replay_finalized"]:
+        raise HTTPException(
+            409,
+            "对局日志尚未完成持久化，暂不能导出",
+            headers=_MATCH_RECORD_HEADERS,
+        )
+
+    try:
+        public_match = _public_match_record_source(match)
+    except ValueError:
+        raise HTTPException(
+            409,
+            "对局规则契约损坏，无法导出日志",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
+
+    payload = {
+        "format": _MATCH_LOG_FORMAT,
+        "format_version": _MATCH_LOG_FORMAT_VERSION,
+        "match": public_match,
+        "replay": source["replay"],
+    }
+    try:
+        content = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        raise HTTPException(
+            409,
+            "对局公开日志数据损坏，无法导出",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
+    filename = _match_log_filename(str(spec.game_id), match_id)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={
+            **_MATCH_RECORD_HEADERS,
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
 @router.get("/api/matches/{match_id}/record")
 def match_record(match_id: str, request: Request):
     """Download one terminal match through its game's public record capability."""
     store = _store(request)
-    source = store.get_match_record_source(match_id)
+    try:
+        source = store.get_match_record_source(match_id)
+    except ValueError:
+        raise HTTPException(
+            409,
+            "对局游戏定位损坏，无法导出记录",
+            headers=_MATCH_RECORD_HEADERS,
+        ) from None
     if source is None:
         raise HTTPException(404, "对局不存在", headers=_MATCH_RECORD_HEADERS)
     match = source["match"]
@@ -2361,7 +2456,7 @@ def match_record(match_id: str, request: Request):
 
     try:
         spec = game_registry.get(match["game_id"])
-    except (KeyError, TypeError):
+    except (AttributeError, KeyError, TypeError):
         raise HTTPException(
             409,
             "该对局的游戏不支持记录导出",

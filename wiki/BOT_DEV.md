@@ -325,7 +325,7 @@ Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例
 | Pencil 输出裸 `{x,y}` | `protocol_error` | 输出 `{"response":{"x":x,"y":y}}` |
 | Gomoku 仍输出旧 `x/y` 动作 | `protocol_error` | 按请求 `phase` 输出 `gomoku_action_v2` 的分阶段 `action`；旧二进制已退役 |
 | Pencil ELF 启动后 8 秒无响应 | 未按 Botzone JSON 首回合通信 | 移除旧 SAU `name?/new/move/take` 文本入口；按上节读取完整信封，输出换行并 flush |
-| 附加顶层 `debug` | 正式 Bot 对战终局后按权限私有展示；预检丢弃 | 保持小而结构化，绝不放密码或 token；动作仍只由 `response` 决定 |
+| 附加顶层 `debug` | 正式 Bot 对战终局后按权限私有展示；预检丢弃，公开对局日志与棋谱也不包含它 | 保持小而结构化，绝不放密码或 token；动作仍只由 `response` 决定 |
 | 附加 `data/globaldata` | 平台忽略 | 只有 `response` 与可选私有 `debug` 有定义 |
 | 单行响应超过 64 KiB | `protocol_error` | 压缩或删减 `debug`，每次只输出一行 JSON |
 | LongRunning 未精确握手 | `protocol_error`，不回退 | 首响应后立即输出固定握手行 |
@@ -356,7 +356,12 @@ Traditional/LongRunning 都不能转换协议，应从本指南的 Pencil 示例
 
 `debug` 可以是字符串、数值、数组或对象；建议用短对象，便于按座位、决策序号和 duplicate
 leg 阅读。平台会截断、清洗并脱敏，不能把它当持久存储或秘密保管箱。应用日志仍写 stderr，
-但 stderr 只供管理员运维排障，不会混入调试面板。
+但 stderr 只供管理员运维排障，不会混入调试面板或公开下载。
+
+对局终态页面的“导出对局日志（JSON）”是三游戏共用的单场 canonical 公共回放快照，不是
+Bot 运行日志。它不会导出原始请求/响应行、stdout/stderr 或上述私有 `debug`；若要让比赛双方作者
+查看策略诊断，仍应使用有界 `debug` 与页面私有调试面板。五子棋的“导出棋谱（JSON）”还会增加
+规则专项派生字段，与通用日志是两个独立格式。按月或批量对局数据集仍处于下线状态。
 
 完整字段与规则：[通信协议](#/wiki?slug=protocol) · [德州扑克](#/wiki?slug=texas) ·
 [五子棋](#/wiki?slug=gomoku) · [点格棋](#/wiki?slug=pencil)。

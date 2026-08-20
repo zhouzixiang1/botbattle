@@ -617,6 +617,15 @@ export default function MatchViewer() {
     && (match?.status === 'completed' || match?.status === 'aborted')
     ? gameSpec?.replay.recordDownload
     : undefined
+  const matchLogDownload = match?.id === id
+    && (match?.status === 'completed' || match?.status === 'aborted')
+    && gameSpec
+    && id
+    ? {
+        href: `/api/matches/${encodeURIComponent(id)}/log`,
+        label: '导出对局日志（JSON）',
+      }
+    : undefined
   const renderSeat = (seat: 0 | 1) => {
     if (!match) return null
     const isWinner = winnerSeat === seat
@@ -635,13 +644,25 @@ export default function MatchViewer() {
   return (
     <PageStub
       title={isLive ? '实时观赛' : '对局详情'}
-      actions={recordDownload && id ? (
-        <Button asChild variant="outline" size="sm" className="max-sm:min-h-11">
-          <a href={`/api/matches/${encodeURIComponent(id)}/record`} download>
-            <Download aria-hidden="true" className="size-4" />
-            {recordDownload.label}
-          </a>
-        </Button>
+      actions={matchLogDownload || (recordDownload && id) ? (
+        <>
+          {matchLogDownload && (
+            <Button asChild variant="outline" size="sm" className="min-h-11">
+              <a href={matchLogDownload.href} download>
+                <Download aria-hidden="true" className="size-4" />
+                {matchLogDownload.label}
+              </a>
+            </Button>
+          )}
+          {recordDownload && id && (
+            <Button asChild variant="outline" size="sm" className="min-h-11">
+              <a href={`/api/matches/${encodeURIComponent(id)}/record`} download>
+                <Download aria-hidden="true" className="size-4" />
+                {recordDownload.label}
+              </a>
+            </Button>
+          )}
+        </>
       ) : undefined}
     >
       <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">

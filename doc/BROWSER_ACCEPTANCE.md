@@ -26,7 +26,7 @@
 | 挑战 `/challenge` | 门禁 | 操作 | 操作 | 操作 | Bot-v-Bot、自博弈、指定版本、人类后手；普通用户/组织者座位 1 仅本人 Bot，admin 可选全站 active+runnable Bot；POST 精确为 202 持久请求，claim 前不伪造 Match；排队位置/双容量/动态 ETA、刷新恢复、离线重连、取消与 interrupted 重试；重复提交只产生一条 request |
 | 排行榜 `/leaderboard` | 读 | 读 | 读 | 读 | 单游戏 tabs、无重复 SummaryStrip、公开排名/无名次计分样本分区、1-based 名次/百分位、Rating/RD/95% 区间、样本与分页；全来源单槽队列的 active/queued、安全暂停、长名/原因，桌面运行/等待左右紧凑布局；轮询/离线恢复、三视口上下滚动、sticky、无横溢出 |
 | 对局历史 `/history` | 读 | 读 | 读 | 读 | 状态/游戏/技术故障筛选、错误恢复、分页 |
-| 对局 `/match/:id` | 读 | 读 | 读 | 读 | live 从首事件推进、终态切回放、长动作列表、异常原因、SSE 收敛；Pencil 在超宽/标准/横屏/移动比例下重排局面概览、完整方形棋盘与独立时序；德州 HUD 与 70 手定位在 2560/1920/1760/1600/1536/1366/1280/1024/390/320 无根横溢出，滚动 sticky 与时序折叠后无空右轨；复式赛显示 2×70 总进度、物理 Bot 换座与分局计分；私有 debug 仅按 owner/赛事角色/终态授权，长文本不溢出且无 HTML/链接执行 |
+| 对局 `/match/:id` | 读 | 读 | 读 | 读 | live 从首事件推进、终态切回放、长动作列表、异常原因、SSE 收敛；三游戏终态公开 JSON v1 日志真实下载，live/未知游戏/路由切换零 `/log` 请求，Gomoku 同时保留独立棋谱入口；Pencil 在超宽/标准/横屏/移动比例下重排局面概览、完整方形棋盘与独立时序；德州 HUD 与 70 手定位在 2560/1920/1760/1600/1536/1366/1280/1024/390/320 无根横溢出，滚动 sticky 与时序折叠后无空右轨；复式赛显示 2×70 总进度、物理 Bot 换座与分局计分；私有 debug 仅按 owner/赛事角色/终态授权，长文本不溢出且无 HTML/链接执行，并且不进入公开日志 |
 | Bot `/bot/:id` | 读 | 操作 | 操作 | 操作 | 版本/战绩、关注、收藏、评论、长说明、不可运行标识；对局历史与当前评分池对手战绩独立服务端分页，Tab 数字使用完整总数，切页仅替换对应列表且错误互不污染；桌面表格、移动卡片、键盘分页、44px 触控与无根横溢出 |
 | 人类对局 `/play/:id` | — | 操作 | 操作 | 操作 | 仅参与者可落子、唯一 WS、canonical response、Pencil 无效区域零发送/合法边多步推进/成格后让行/键盘读屏、终态关闭；德州 HUD 与公开回放同源但不出现底牌文本 |
 | 我的 Bot `/my-bots` | 门禁 | 操作 | 操作 | 操作 | ELF 上传、PE/Mach-O/ARM 拒绝、编辑、激活、回滚、删除、空/错误态 |
@@ -52,12 +52,13 @@
 | 编号 | 角色 | 必做操作 | 最小证据 |
 |---|---|---|---|
 | G-01 | 未登录 | 六个主导航、所有公开深链、刷新/前进/后退、搜索、404、登录失败、注册/验证/重置边界 | DOM + URL + Console/Network + 三视口/滚动 |
+| G-02 | 未登录 | 依次打开 Holdem/Gomoku/Pencil 的终态对局（合计覆盖 completed 与 aborted）并下载公开日志；再打开 live、未知游戏与连续切换的对局；Gomoku 同时操作日志/棋谱两个入口 | 下载文件名为 `botbattle-{game}-{safe_match}-log.json`，JSON 顶层严格 `format/format_version/match/replay` 且 replay 等于 canonical 公开回放；live/未知/旧路由零 `/log` 请求，两个 Gomoku 下载不串端点；Tab/Enter、320/390px 高度至少 44px、无根溢出，Console/Network 干净 |
 | U-01 | 普通用户 | UI 登录/退出，编辑个人资料和通知偏好 | POST/PUT 只发生一次，刷新后值一致 |
 | U-02 | 普通用户 | 上传真实 Linux x86_64 ELF；上传真实 Windows x64 PE 并被拒绝 | 成功 Bot 可见；PE 为精确 400 且 DB 中无新 Bot |
 | U-03 | 普通用户 | 编辑 Bot、上传版本、回滚、激活、删除无引用的临时 Bot | 版本号和 active 状态一致；失败不改旧版本 |
 | U-04 | 普通用户 | Bot-v-Bot、自博弈、人类对局；排队、刷新恢复、取消与中断重试 | 每次提交仅一个 202 request；queued 时无 `match_id` 且不跳 viewer，claim 后才按 `match_id` 进入 viewer/play；刷新/session 恢复同一 `public_id`，离线不丢请求；取消 queued 收敛为 cancelled，取消 active 经确认且清理前容量不提前释放；retryable interrupted 重新排队但保留旧 attempt 审计。SSE/WS 到权威终态；Pencil 无效命中零发送、合法边与让行/键盘链路不退化 |
 | U-05 | 普通用户 | 赛事报名、换 Bot、退赛；关注/收藏/评论/点赞 | 页面计数、刷新结果和 API 返回一致 |
-| U-06 | 普通用户 | 普通终态对局双方 Bot owner 各查看双方 debug；无关用户与真人座位尝试访问 | owner 同内容、无关用户无面板且不请求私有 API、拒绝不暴露记录存在性 |
+| U-06 | 普通用户 | 普通终态对局双方 Bot owner 各查看双方 debug；无关用户与真人座位尝试访问；再下载同场公开日志 | owner 同内容、无关用户无面板且不请求私有 API、拒绝不暴露记录存在性；公开日志在所有身份下内容一致且不包含 private debug |
 | U-07 | 未登录/普通用户 | 提交问题、可选多张截图、刷新后追踪、追加回复；提交/回复/上传中登录、退出或切换账号；从通知深链进入站内信 | 身份变化立即中止旧详情和旧写操作并清空旧账号列表，迟到响应不可回填选择/loading；访客多文件上传停止余下文件且不得混入新账号 Authorization，错 token/混合身份均 404；认证反馈与通信详情 no-store/no-referrer |
 | O-01 | 组织者 | 三游戏切换与代码模板，标题/说明/实名/时间边界建赛 | game/template 不串线；留空时间仍为 `NULL` |
 | O-02 | 组织者 | `draft→open→published→running→(rest)→finished` | 报名截止只发布排期；`starts_at=NULL` 不自动开赛 |
@@ -76,6 +77,7 @@
 | Spec | 已自动化的矩阵子集 |
 |---|---|
 | `public-audit.spec.ts` | G-01 的公开深链、导航历史、404、登录失败、Network 故障恢复 |
+| `match-log-export.spec.ts` | G-02：三游戏终态（合计覆盖 completed 与 aborted）日志、live/未知/跨路由零错误请求、Gomoku 日志与棋谱双入口、真实文件名/JSON、Tab/Enter、320/390px 触控；Chromium/Firefox/WebKit 共 18/18 项通过 |
 | `qa-regression.spec.ts` | 三视口公开页与受保护页访客门禁、U-02～U-04 的核心链路、私有 debug 折叠/纯文本/长文本移动端/无权限零请求、实时通信、协议/二进制/版本/异常终态与权限回归 |
 | `contest-workflow.spec.ts` | U-05 的报名、O-01/O-02 的建赛与真实多浏览器主生命周期、终态清理保护 |
 | `admin-audit.spec.ts` | A-01、A-03、A-05、A-07，以及 A-02/A-04 的只读和部分写操作；含赛事状态边界、Dialog 内保存错误、真实隔离库 `NULL` 重载/audit、非法排期、自动 producer strict boolean、全来源队列与长文本滚动 |

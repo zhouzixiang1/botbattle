@@ -7647,7 +7647,11 @@ class Store:
         ).fetchone()
         if not row:
             return None
-        return _matches_table(row["game_id"])
+        raw_game_id = row["game_id"]
+        game_id = _registered_game_id(raw_game_id)
+        if raw_game_id != game_id:
+            raise ValueError("matches_index.game_id 不是规范游戏标识")
+        return _matches_table(game_id)
 
     @staticmethod
     def _reserve_rating_settlement_order_tx(
@@ -8473,6 +8477,9 @@ class Store:
             if match is None:
                 # A stale locator is not proof that the physical match exists.
                 return None
+            expected_game_id = tbl.removeprefix("matches_")
+            if match.get("game_id") != expected_game_id:
+                raise ValueError("对局行 game_id 与定位表/物理表不一致")
             self._attach_rating_settlement_state_tx(c, match)
 
             replay = _row(
