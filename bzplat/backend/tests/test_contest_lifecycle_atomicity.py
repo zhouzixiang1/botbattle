@@ -364,6 +364,103 @@ def test_next_stage_batch_is_atomic_and_restart_retry_replaces_legacy_partial(
     recovered.close()
 
 
+def test_next_stage_recovery_does_not_overwrite_deleted_real_opponent(tmp_path):
+    """A completed/no-match row with entry B is progress drift, never a safe bye."""
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    store.update_contest(
+        contest_id,
+        status="rest",
+        current_stage_idx=0,
+        stages_json=json.dumps(
+            [
+                {"key": "rr", "type": "round_robin"},
+                {"key": "ko", "type": "single_elimination"},
+            ]
+        ),
+    )
+    damaged = store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        status="completed",
+        stage_idx=1,
+        stage_key="ko",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+    assert store.delete_bot(entries[1]["bot_id"])
+    with pytest.raises(ValueError, match="已有运行进度"):
+        store.create_contest_stage_pairings(
+            contest_id,
+            1,
+            [
+                {
+                    "bot_a_id": entries[0]["bot_id"],
+                    "bot_b_id": None,
+                    "entry_a_id": entries[0]["id"],
+                    "entry_b_id": None,
+                    "round_num": 1,
+                    "status": "completed",
+                    "stage_key": "ko",
+                }
+            ],
+            expected_current_stage_idx=0,
+            activate_running=True,
+        )
+    persisted = store.list_contest_pairings(contest_id, stage_idx=1)
+    assert [row["id"] for row in persisted] == [damaged["id"]]
+    assert persisted[0]["entry_b_id"] == entries[1]["id"]
+    assert persisted[0]["bot_b_id"] is None
+    assert store.get_contest(contest_id)["status"] == "rest"
+    store.close()
+
+
+def test_published_rebuild_does_not_overwrite_deleted_real_opponent(tmp_path):
+    """Published recovery uses the same strict no-opponent predicate."""
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    store.update_contest(
+        contest_id,
+        status="published",
+        current_stage_idx=0,
+        stages_json=json.dumps([{"key": "swiss", "type": "swiss"}]),
+    )
+    damaged = store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        status="completed",
+        stage_idx=0,
+        stage_key="swiss",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+    assert store.delete_bot(entries[1]["bot_id"])
+    with pytest.raises(ValueError, match="已有运行进度"):
+        store.replace_unstarted_contest_stage_pairings(
+            contest_id,
+            0,
+            [
+                {
+                    "bot_a_id": entries[0]["bot_id"],
+                    "bot_b_id": None,
+                    "entry_a_id": entries[0]["id"],
+                    "entry_b_id": None,
+                    "round_num": 1,
+                    "status": "completed",
+                    "stage_key": "swiss",
+                }
+            ],
+            expected_existing_ids=[damaged["id"]],
+        )
+    persisted = store.list_contest_pairings(contest_id, stage_idx=0)
+    assert [row["id"] for row in persisted] == [damaged["id"]]
+    assert persisted[0]["entry_b_id"] == entries[1]["id"]
+    assert persisted[0]["bot_b_id"] is None
+    store.close()
+
+
 @pytest.mark.parametrize(
     ("stage", "player_count", "expected_next_rows"),
     [
@@ -563,3 +660,379 @@ def test_finished_unready_official_results_recover_atomically_after_restart(
     assert response.status_code == 200
     assert len(response.json()["results"]) == 2
     app.state.store.close()
+
+
+@pytest.mark.parametrize("drift", ["missing", "aborted", "deleted_opponent"])
+def test_finished_unready_recovery_refuses_unadjudicated_pairings(
+    tmp_path, drift
+):
+    """Terminal status cannot freeze missing/aborted/deleted drift into a ranking."""
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    match_id = None
+    if drift == "deleted_opponent":
+        store.update_contest(
+            contest_id,
+            stages_json=json.dumps([{"key": "swiss", "type": "swiss"}]),
+        )
+    else:
+        match_id = f"unready-{drift}"
+        if drift == "aborted":
+            store.create_match(
+                match_id,
+                entries[0]["bot_id"],
+                entries[1]["bot_id"],
+                owner_id=entries[0]["user_id"],
+                contest_id=contest_id,
+                match_type="contest",
+                game_id="holdem",
+            )
+            store.update_match(match_id, status="aborted", reason="test_abort")
+        # ``missing`` intentionally leaves a non-null logical match id with no
+        # row in matches_index/the per-game match table.
+        if drift == "missing":
+            match_id = "unready-missing-match"
+
+    pairing = store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        match_id=match_id,
+        status="completed",
+        stage_idx=0,
+        stage_key="swiss" if drift == "deleted_opponent" else "rr",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+    store.update_contest(
+        contest_id, status="finished", current_stage_idx=0,
+        official_results_ready=0,
+    )
+    if drift == "deleted_opponent":
+        assert store.delete_bot(entries[1]["bot_id"])
+        damaged = next(
+            row for row in store.list_contest_pairings(contest_id)
+            if row["id"] == pairing["id"]
+        )
+        assert damaged["entry_b_id"] == entries[1]["id"]
+        assert damaged["bot_b_id"] is None
+
+    manager = ContestManager(store, _SuccessOrch())
+    assert asyncio.run(manager.reconcile_running_contests()) == 1
+    blocked = store.get_contest(contest_id)
+    assert blocked["status"] == "finished"
+    assert blocked["official_results_ready"] == 0
+    assert store.list_official_results(contest_id) == []
+    # A repeated startup remains fail-closed and cannot turn the same drift
+    # into a different result.
+    assert asyncio.run(manager.reconcile_running_contests()) == 1
+    assert store.get_contest(contest_id)["official_results_ready"] == 0
+    assert store.list_official_results(contest_id) == []
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("participant_count", "expected_ready"),
+    [(0, True), (1, True), (2, False)],
+)
+def test_finished_unready_zero_pairing_recovery_uses_active_entry_gate(
+    tmp_path, participant_count, expected_ready
+):
+    """An empty current stage is terminal only with at most one active entry."""
+    store = Store(str(tmp_path / f"zero-pairing-{participant_count}.db"))
+    organizer = store.create_user(
+        f"zero-org-{participant_count}",
+        f"zero-org-{participant_count}@example.com",
+        "hash",
+        role="organizer",
+    )
+    contest_id = store.create_contest(
+        f"zero pairing {participant_count}",
+        organizer_id=organizer["id"],
+        status="finished",
+        game_id="holdem",
+        current_stage_idx=0,
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )["id"]
+    entry_ids = []
+    for index in range(participant_count):
+        player = store.create_user(
+            f"zero-player-{index}", f"zero-player-{index}@example.com", "hash"
+        )
+        bot = store.create_bot(
+            player["id"], f"zero-bot-{index}", binary_path="/tmp", format="elf",
+            game_id="holdem",
+        )
+        entry_ids.append(store.add_contest_entry(
+            contest_id, player["id"], bot["id"]
+        )["id"])
+
+    manager = ContestManager(store, _SuccessOrch())
+
+    async def recover_concurrently():
+        return await asyncio.gather(
+            manager.reconcile_running_contests(),
+            manager.reconcile_running_contests(),
+        )
+
+    attempts = asyncio.run(recover_concurrently())
+    assert max(attempts) == 1
+    recovered = store.get_contest(contest_id)
+    assert recovered["official_results_ready"] == int(expected_ready)
+    official = store.list_official_results(contest_id)
+    if participant_count == 1:
+        assert len(official) == 1
+        assert official[0]["entry_id"] == entry_ids[0]
+        assert official[0]["rank"] == 1
+        assert official[0]["points"] == 0
+    else:
+        assert official == []
+    assert asyncio.run(manager.reconcile_running_contests()) == (
+        0 if expected_ready else 1
+    )
+    store.close()
+
+
+@pytest.mark.parametrize("drift", ["missing", "aborted", "completed"])
+def test_terminal_replace_top_rechecks_every_stage_before_snapshot(
+    tmp_path, drift
+):
+    """A completed final cannot hide a missing/aborted qualifier Match."""
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    for entry in entries:
+        store.update_entry(contest_id, entry["user_id"], eliminated=0)
+    store.update_contest(
+        contest_id,
+        status="running",
+        current_stage_idx=1,
+        stages_json=json.dumps(
+            [
+                {"key": "qualifier", "type": "round_robin"},
+                {
+                    "key": "final",
+                    "type": "round_robin",
+                    "ranking_mode": "replace_top",
+                    "ranking_scope": 2,
+                },
+            ]
+        ),
+    )
+
+    qualifier_match_id = f"replace-top-qualifier-{drift}"
+    if drift != "missing":
+        store.create_match(
+            qualifier_match_id,
+            entries[0]["bot_id"],
+            entries[1]["bot_id"],
+            owner_id=entries[0]["user_id"],
+            contest_id=contest_id,
+            match_type="contest",
+            game_id="holdem",
+        )
+        update = {
+            "status": drift,
+            "winner": 0 if drift == "completed" else None,
+            "result": {"deltas": [100, -100]} if drift == "completed" else {},
+        }
+        if drift == "aborted":
+            update["reason"] = "test_abort"
+        store.update_match(qualifier_match_id, **update)
+    store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        match_id=qualifier_match_id,
+        status="completed",
+        stage_idx=0,
+        stage_key="qualifier",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+
+    final_match_id = f"replace-top-final-{drift}"
+    store.create_match(
+        final_match_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        owner_id=entries[0]["user_id"],
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(
+        final_match_id,
+        status="completed",
+        winner=1,
+        result={"deltas": [-50, 50]},
+    )
+    store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        match_id=final_match_id,
+        status="completed",
+        stage_idx=1,
+        stage_key="final",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+
+    result = asyncio.run(ContestManager(store, _SuccessOrch()).maybe_finish(contest_id))
+    state = store.get_contest(contest_id)
+    if drift == "completed":
+        assert result["status"] == "finished"
+        assert state["status"] == "finished"
+        assert state["official_results_ready"] == 1
+        assert len(store.list_stage_results(contest_id, stage_idx=1)) == 2
+        assert len(store.list_official_results(contest_id)) == 2
+    else:
+        assert result is None
+        assert state["status"] == "running"
+        assert state["current_stage_idx"] == 1
+        assert state["official_results_ready"] == 0
+        assert store.list_stage_results(contest_id, stage_idx=1) == []
+        assert store.list_official_results(contest_id) == []
+    store.close()
+
+
+@pytest.mark.parametrize("status", ["running", "rest"])
+def test_force_finish_rejects_two_active_entries_without_current_pairings(
+    tmp_path, status
+):
+    """running/rest cannot freeze a two-player empty graph into a zero table."""
+    store, contest_id = _setup(tmp_path)
+    for entry in store.list_contest_entries(contest_id):
+        store.update_entry(contest_id, entry["user_id"], eliminated=0)
+    store.update_contest(contest_id, status=status, current_stage_idx=0)
+
+    manager = ContestManager(store, _SuccessOrch())
+    with pytest.raises(ValueError, match="仍有未完成对阵"):
+        asyncio.run(manager.finish(contest_id))
+    state = store.get_contest(contest_id)
+    assert state["status"] == status
+    assert state["official_results_ready"] == 0
+    assert store.list_official_results(contest_id) == []
+    store.close()
+
+
+def test_persisted_later_empty_stage_cannot_recover_from_prior_standings(
+    tmp_path,
+):
+    """Recovery must not rank an empty final and reverse its qualifier winner."""
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    store.update_entry(contest_id, entries[0]["user_id"], seed=1, eliminated=1)
+    store.update_entry(contest_id, entries[1]["user_id"], seed=2, eliminated=0)
+    store.update_contest(
+        contest_id,
+        status="finished",
+        current_stage_idx=1,
+        official_results_ready=0,
+        stages_json=json.dumps(
+            [
+                {"key": "qualifier", "type": "round_robin"},
+                {"key": "final", "type": "single_elimination"},
+            ]
+        ),
+    )
+    match_id = "one-active-qualifier"
+    store.create_match(
+        match_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        owner_id=entries[0]["user_id"],
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=1,
+        result={"deltas": [-100, 100]},
+    )
+    store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        match_id=match_id,
+        status="completed",
+        stage_idx=0,
+        stage_key="qualifier",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+
+    manager = ContestManager(store, _SuccessOrch())
+    assert asyncio.run(manager.reconcile_running_contests()) == 1
+    state = store.get_contest(contest_id)
+    assert state["official_results_ready"] == 0
+    assert store.list_official_results(contest_id) == []
+    store.close()
+
+
+def test_generated_empty_next_stage_finalizes_from_completed_prior_stage(
+    tmp_path,
+):
+    """A real qualifier champion needs no one-player final and keeps rank #1."""
+    store, contest_id = _setup(tmp_path)
+    entries = store.list_contest_entries(contest_id)
+    store.update_entry(contest_id, entries[0]["user_id"], seed=1, eliminated=0)
+    store.update_entry(contest_id, entries[1]["user_id"], seed=2, eliminated=0)
+    store.update_contest(
+        contest_id,
+        status="running",
+        current_stage_idx=0,
+        stages_json=json.dumps(
+            [
+                {
+                    "key": "qualifier",
+                    "type": "round_robin",
+                    "advance_count": 1,
+                },
+                {"key": "final", "type": "single_elimination"},
+            ]
+        ),
+    )
+    match_id = "generated-one-player-final"
+    store.create_match(
+        match_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        owner_id=entries[0]["user_id"],
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=1,
+        result={"deltas": [-100, 100]},
+    )
+    store.add_contest_pairing(
+        contest_id,
+        entries[0]["bot_id"],
+        entries[1]["bot_id"],
+        match_id=match_id,
+        status="completed",
+        stage_idx=0,
+        stage_key="qualifier",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+
+    manager = ContestManager(store, _SuccessOrch())
+    result = asyncio.run(manager.maybe_finish(contest_id))
+    assert result["status"] == "finished"
+    assert result["current_stage_idx"] == 0
+    assert result["official_results_ready"] == 1
+    assert store.list_contest_pairings(contest_id, stage_idx=1) == []
+    official = store.list_official_results(contest_id)
+    assert [row["entry_id"] for row in official] == [
+        entries[1]["id"],
+        entries[0]["id"],
+    ]
+    assert [row["rank"] for row in official] == [1, 2]
+    store.close()

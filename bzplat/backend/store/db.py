@@ -70,7 +70,10 @@ from .schema import (
     game_rule_contract,
     require_supported_binary_metadata,
 )
-from .validation import validate_contest_times
+from .validation import (
+    is_authoritative_no_opponent_pairing,
+    validate_contest_times,
+)
 
 DEFAULT_DB_PATH = "botzone.db"
 
@@ -707,6 +710,15 @@ def _loads_json(raw: str | None, *, default: Any) -> Any:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return default
+
+
+def _contest_stage_type(stages_json: str | None, stage_idx: int) -> object:
+    """Resolve one persisted stage type without guessing from keys/templates."""
+    stages = _loads_json(stages_json, default=[])
+    if not isinstance(stages, list) or not 0 <= int(stage_idx) < len(stages):
+        return None
+    stage = stages[int(stage_idx)]
+    return stage.get("type") if isinstance(stage, dict) else None
 
 
 def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -10587,7 +10599,8 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
-                "SELECT status, current_stage_idx FROM contests WHERE id=?",
+                "SELECT status, current_stage_idx, stages_json "
+                "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
             if not contest:
@@ -10599,9 +10612,11 @@ class Store:
                 raise ValueError("赛事当前阶段已变化，拒绝重复生成对阵")
             if stage_idx not in (current_idx, current_idx + 1):
                 raise ValueError("赛事阶段只能生成当前阶段或紧邻的下一阶段")
+            stage_type = _contest_stage_type(contest["stages_json"], stage_idx)
 
             existing = c.execute(
-                "SELECT id, match_id, status, bot_b_id FROM contest_pairings "
+                "SELECT id, entry_b_id, bot_b_id, match_id, status "
+                "FROM contest_pairings "
                 "WHERE contest_id=? AND stage_idx=? ORDER BY id",
                 (contest_id, stage_idx),
             ).fetchall()
@@ -10614,7 +10629,9 @@ class Store:
                     row["status"] not in (STATUS_PENDING, STATUS_COMPLETED)
                     or (
                         row["status"] == STATUS_COMPLETED
-                        and row["bot_b_id"] is not None
+                        and not is_authoritative_no_opponent_pairing(
+                            stage_type, _row(row)
+                        )
                     )
                     for row in existing
                 ):
@@ -10895,16 +10912,19 @@ class Store:
             c.execute("BEGIN IMMEDIATE")
             self._require_execution_admission_tx(c, maintenance_only=True)
             contest = c.execute(
-                "SELECT status, current_stage_idx FROM contests WHERE id=?",
+                "SELECT status, current_stage_idx, stages_json "
+                "FROM contests WHERE id=?",
                 (contest_id,),
             ).fetchone()
             if not contest or contest["status"] != CONTEST_PUBLISHED:
                 raise ValueError("published 赛事状态已变化，拒绝重建对阵")
             if int(contest["current_stage_idx"] or 0) != int(stage_idx):
                 raise ValueError("published 赛事当前阶段已变化，拒绝重建对阵")
+            stage_type = _contest_stage_type(contest["stages_json"], stage_idx)
 
             current = c.execute(
-                "SELECT id, match_id, status, bot_b_id FROM contest_pairings "
+                "SELECT id, entry_b_id, bot_b_id, match_id, status "
+                "FROM contest_pairings "
                 "WHERE contest_id=? AND stage_idx=? ORDER BY id",
                 (contest_id, stage_idx),
             ).fetchall()
@@ -10915,7 +10935,12 @@ class Store:
                 raise ValueError("published 对阵已绑定对局，不能自动重建")
             if any(
                 row["status"] not in (STATUS_PENDING, STATUS_COMPLETED)
-                or (row["status"] == STATUS_COMPLETED and row["bot_b_id"] is not None)
+                or (
+                    row["status"] == STATUS_COMPLETED
+                    and not is_authoritative_no_opponent_pairing(
+                        stage_type, _row(row)
+                    )
+                )
                 for row in current
             ):
                 raise ValueError("published 对阵已有运行进度，不能自动重建")
@@ -10995,7 +11020,7 @@ class Store:
                 "COALESCE(ua.display_name,eua.display_name) AS owner_a_display, "
                 "COALESCE(ub.username,eub.username) AS owner_b_name, "
                 "COALESCE(ub.display_name,eub.display_name) AS owner_b_display, "
-                "m.winner AS match_winner "
+                "m.winner AS match_winner, m.status AS match_status "
                 "FROM contest_pairings p "
                 "LEFT JOIN bots ba ON p.bot_a_id=ba.id "
                 "LEFT JOIN bots bb ON p.bot_b_id=bb.id "

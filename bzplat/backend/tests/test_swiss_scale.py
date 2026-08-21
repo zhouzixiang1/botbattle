@@ -8,6 +8,9 @@
 """
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 import time
 
 from bzplat.backend.contests.stages import (
@@ -127,3 +130,104 @@ def test_estimate_propagates_advance_count(tmp_path):
         f"advance 传播后应 15+6=21，实际 {est['estimated_matches']}"
     )
     s.close()
+
+
+def test_estimate_advance_count_cannot_inflate_small_roster(tmp_path):
+    """A configured Top 8 cannot turn four Swiss entrants into an eight-player KO."""
+    from bzplat.backend.contests.manager import ContestManager
+    from bzplat.backend.store import Store
+
+    store = Store(str(tmp_path / "small-advance-estimate.db"))
+    organizer = store.create_user(
+        "small-advance-org", "small-advance-org@example.com", "hash"
+    )
+    contest_id = store.create_contest(
+        "small advance estimate",
+        organizer_id=organizer["id"],
+        game_id="holdem",
+        stages_json=(
+            '[{"key":"swiss","type":"swiss","rounds":1,'
+            '"advance_count":8},'
+            '{"key":"ko","type":"single_elimination"}]'
+        ),
+    )["id"]
+    for index in range(4):
+        user = store.create_user(
+            f"small-advance-user-{index}",
+            f"small-advance-{index}@example.com",
+            "hash",
+        )
+        bot = store.create_bot(
+            user["id"],
+            f"small-advance-bot-{index}",
+            binary_path="/tmp",
+            format="elf",
+            game_id="holdem",
+        )
+        store.add_contest_entry(contest_id, user["id"], bot["id"])
+
+    estimate = ContestManager(
+        store,
+        type("EstimateOrchestrator", (), {"max_concurrent": 1})(),
+    ).estimate(contest_id)
+    assert estimate["estimated_matches"] == 5  # Swiss 2 + four-player KO 3.
+    store.close()
+
+
+def test_estimate_duplicate_round_robin_keeps_jobs_but_counts_both_legs(
+    tmp_path,
+):
+    """4-player duplicate RR is 6 queued jobs but 12 leg-duration units."""
+    from bzplat.backend.contests.manager import ContestManager
+    from bzplat.backend.store import Store
+
+    store = Store(str(tmp_path / "duplicate-estimate.db"))
+    organizer = store.create_user(
+        "duplicate-org", "duplicate-org@example.com", "hash", role="organizer"
+    )
+    contest_id = store.create_contest(
+        "duplicate estimate",
+        organizer_id=organizer["id"],
+        game_id="holdem",
+        template_id="holdem_dup_rr",
+        stages_json=(
+            '[{"key":"dup_rr","type":"round_robin","duplicate":true}]'
+        ),
+    )["id"]
+    for index in range(4):
+        user = store.create_user(
+            f"duplicate-user-{index}", f"du{index}@example.com", "hash"
+        )
+        bot = store.create_bot(
+            user["id"],
+            f"duplicate-bot-{index}",
+            binary_path="/tmp",
+            format="elf",
+            game_id="holdem",
+        )
+        store.add_contest_entry(contest_id, user["id"], bot["id"])
+
+    manager = ContestManager(
+        store,
+        type("EstimateOrchestrator", (), {"max_concurrent": 1})(),
+    )
+    estimate = manager.estimate(contest_id)
+    assert estimate["estimated_matches"] == 6
+    # Holdem's registry ETA is 70 hands * 2s = 140s per leg.
+    assert estimate["eta_seconds"] == 12 * 140
+    store.close()
+
+
+def test_estimate_eta_has_no_game_name_branch():
+    """Duplicate ETA dispatches through GameSpec capabilities, not game ids."""
+    from bzplat.backend.contests.manager import ContestManager
+    from bzplat.backend.store.schema import VALID_GAME_IDS
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ContestManager.estimate)))
+    string_literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert set(VALID_GAME_IDS).isdisjoint(string_literals)
+    assert "build_match_plan" in inspect.getsource(ContestManager.estimate)

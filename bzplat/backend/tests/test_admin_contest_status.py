@@ -63,10 +63,74 @@ def _published_pairings(store, contest_id):
     return bot_a, bot_b, first, third
 
 
+def _running_two_player_contest(store, contest_id):
+    """Build a valid current-stage roster without bypassing entry identity."""
+    owner = store.get_user_by_username("statusadmin")
+    opponent = store.create_user(
+        f"status-player-{contest_id}",
+        f"status-player-{contest_id}@example.com",
+        "hash",
+    )
+    bot_a = store.create_bot(
+        owner["id"],
+        f"status-finish-a-{contest_id}",
+        binary_path="/tmp",
+        format="elf",
+        game_id="holdem",
+    )
+    bot_b = store.create_bot(
+        opponent["id"],
+        f"status-finish-b-{contest_id}",
+        binary_path="/tmp",
+        format="elf",
+        game_id="holdem",
+    )
+    entry_a = store.add_contest_entry(contest_id, owner["id"], bot_a["id"])
+    entry_b = store.add_contest_entry(
+        contest_id, opponent["id"], bot_b["id"]
+    )
+    store.update_contest(
+        contest_id,
+        status="running",
+        current_stage_idx=0,
+        stages_json=json.dumps([{"key": "rr", "type": "round_robin"}]),
+    )
+    return owner, bot_a, bot_b, entry_a, entry_b
+
+
 def test_admin_finish_uses_manager_and_returns_success(tmp_path):
     """旧实现先写 finished，随后引用未定义 admin 而 500；现在须完整收尾并返回 200。"""
     app, store, contest_id, headers = _setup(tmp_path)
-    store.update_contest(contest_id, status="running")
+    owner, bot_a, bot_b, entry_a, entry_b = _running_two_player_contest(
+        store, contest_id
+    )
+    match_id = f"admin-finish-completed-{contest_id}"
+    store.create_match(
+        match_id,
+        bot_a["id"],
+        bot_b["id"],
+        owner_id=owner["id"],
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        result={"deltas": [100, -100]},
+    )
+    store.add_contest_pairing(
+        contest_id,
+        bot_a["id"],
+        bot_b["id"],
+        match_id=match_id,
+        status="completed",
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entry_a["id"],
+        entry_b_id=entry_b["id"],
+    )
 
     response = TestClient(app).patch(
         f"/api/admin/contests/{contest_id}", json={"status": "finished"}, headers=headers
@@ -77,6 +141,27 @@ def test_admin_finish_uses_manager_and_returns_success(tmp_path):
     saved = store.get_contest(contest_id)
     assert saved["status"] == "finished"
     assert saved["ends_at"]
+    assert saved["official_results_ready"] == 1
+    assert len(store.list_official_results(contest_id)) == 2
+
+
+def test_admin_finish_rejects_two_player_zero_pairing_graph(tmp_path):
+    """Admin cannot freeze a missing current-stage batch into a zero table."""
+    app, store, contest_id, headers = _setup(tmp_path)
+    _running_two_player_contest(store, contest_id)
+
+    response = TestClient(app).patch(
+        f"/api/admin/contests/{contest_id}",
+        json={"status": "finished"},
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "未完成对阵" in response.json()["detail"]
+    saved = store.get_contest(contest_id)
+    assert saved["status"] == "running"
+    assert saved["official_results_ready"] == 0
+    assert store.list_official_results(contest_id) == []
 
 
 def test_admin_terminal_contest_cannot_be_cancelled(tmp_path):

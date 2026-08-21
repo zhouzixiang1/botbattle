@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal
 
 from bzplat.backend.contests.stages import (
     PairingSpec,
+    effective_group_count,
     estimate_match_count,
     generate_stage_pairings,
     swiss_rounds_needed,
@@ -28,6 +29,7 @@ from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
 from bzplat.backend.store import ExecutionQueueClosed, Store
 from bzplat.backend.store.db import match_deltas
 from bzplat.backend.store.validation import (
+    is_authoritative_no_opponent_pairing,
     validate_contest_times as _validate_contest_times,
 )
 from bzplat.backend.store.schema import (
@@ -1096,16 +1098,22 @@ class ContestManager:
         require_mutable(c)
         stages = _parse_stages(c)
         if stage_idx < 0 or stage_idx >= len(stages):
-            self.store.update_contest(
-                contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
+            self._finish_adjudicated_contest_locked(
+                contest_id,
+                int(c.get("current_stage_idx") or 0),
+                gate_stage_idx=stage_idx,
+                context="invalid-stage",
             )
             return
         stage, specs, bot_to_entry = self._stage_pairing_plan(c, stage_idx)
         # specs 为空（如 single_elimination 收到 <2 bot → 无对手）：阶段无对阵 →
         # 直接 finished（防 maybe_finish 反复尝试空阶段）。
         if not specs:
-            self.store.update_contest(
-                contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
+            self._finish_adjudicated_contest_locked(
+                contest_id,
+                int(c.get("current_stage_idx") or 0),
+                gate_stage_idx=stage_idx,
+                context="empty-stage",
             )
             return
 
@@ -1715,6 +1723,7 @@ class ContestManager:
                 "wins": 0,
                 "draws": 0,
                 "losses": 0,
+                "byes": 0,
                 "delta_total": 0,
                 "group_id": e.get("group_id") or "",
                 "eliminated": int(e.get("eliminated") or 0),
@@ -1728,16 +1737,15 @@ class ContestManager:
                 # 轮空获得本赛制的“胜场分”，但它不是一场对局：不增
                 # wins/draws/losses、delta_total，也没有对手记录。KO bye
                 # 是直接晋级，不在此计分。
-                if (
-                    stage.get("type") == "swiss"
-                    and p.get("bot_b_id") is None
-                    and p.get("status") == "completed"
+                if stage.get("type") == "swiss" and (
+                    is_authoritative_no_opponent_pairing(stage.get("type"), p)
                 ):
                     entry_id = p.get("entry_a_id")
                     if entry_id in stats:
                         stats[entry_id]["points"] += points_for_result(
                             scoring, 0, 0
                         )
+                        stats[entry_id]["byes"] += 1
                 continue
             m = self.store.get_match(mid)
             if not m or m["status"] != STATUS_COMPLETED:
@@ -1795,16 +1803,21 @@ class ContestManager:
         return rows
 
     def _stage_done(self, contest_id: int, stage_idx: int) -> bool:
+        contest = self.store.get_contest(contest_id)
+        stages = _parse_stages(contest or {})
+        stage_type = (
+            stages[stage_idx].get("type")
+            if 0 <= stage_idx < len(stages)
+            else None
+        )
         pairings = self.store.list_contest_pairings(contest_id, stage_idx=stage_idx)
         if not pairings:
             return False
         for p in pairings:
-            # 轮空占位 pairing（bot_b_id=None、无 match、status=completed）视为已完成。
-            if (
-                p.get("bot_b_id") is None
-                and not p.get("match_id")
-                and p.get("status") == "completed"
-            ):
+            # 只有赛制允许且身份/对局/状态四项完整的 no-opponent 行才是
+            # 已完成轮空。真实对手 Bot 被 FK SET NULL 后仍保留 entry_b_id，
+            # 必须阻断阶段推进。
+            if is_authoritative_no_opponent_pairing(stage_type, p):
                 continue
             mid = p.get("match_id")
             if not mid:
@@ -2081,10 +2094,21 @@ class ContestManager:
                     )
                     return None
 
+        has_next = stage_idx + 1 < len(stages)
+        if not has_next and self._has_unfinished_pairings(contest_id):
+            # ``_stage_done`` intentionally checks only the current stage so it
+            # can drive ordinary stage generation.  Freezing a terminal result
+            # is stricter: a low-level delete/abort in any earlier stage must
+            # not be hidden merely because the final stage completed.
+            logger.error(
+                "skip automatic finalization for unadjudicated contest=%s",
+                contest_id,
+            )
+            return None
+
         self._mark_stage_pairings_done(contest_id, stage_idx)
         self._snapshot_stage_results(contest_id, stage_idx)
         rest_min = int((stages[stage_idx].get("rest_after_minutes") or 0) if stages else 0)
-        has_next = stage_idx + 1 < len(stages)
 
         if has_next and rest_min > 0:
             ends = (datetime.now() + timedelta(minutes=rest_min)).isoformat(
@@ -2100,15 +2124,11 @@ class ContestManager:
             await self._begin_stage(contest_id, stage_idx + 1)
             return self.store.get_contest(contest_id)
 
-        self.store.update_contest(
-            contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
-        )
-        # P2：末阶段完成 → 计算全员唯一正式名次（破同分链）并落库
-        try:
-            self._finalize_official_results(contest_id, stage_idx)
-        except Exception:
-            logger.exception("compute official results failed contest=%s", contest_id)
-        return self.store.get_contest(contest_id)
+        return self._finish_adjudicated_contest_locked(
+            contest_id,
+            stage_idx,
+            context="automatic",
+        ) or self.store.get_contest(contest_id)
 
     async def reconcile_running_contests(self) -> int:
         """启动对账：让 active contest 与缺正式榜的 finished contest 收敛。
@@ -2184,6 +2204,16 @@ class ContestManager:
                     and latest["status"] == CONTEST_FINISHED
                     and not int(latest.get("official_results_ready") or 0)
                 ):
+                    # A terminal status alone is not proof that every durable
+                    # pairing was adjudicated.  Recovery uses the same
+                    # all-stage fail-closed gate as automatic and force finish.
+                    if self._has_unfinished_pairings(contest_id):
+                        logger.error(
+                            "skip official-results recovery for unfinished "
+                            "terminal contest=%s",
+                            contest_id,
+                        )
+                        return
                     stage_idx = int(latest.get("current_stage_idx") or 0)
                     self._finalize_official_results(contest_id, stage_idx)
             return
@@ -2316,21 +2346,24 @@ class ContestManager:
         if not pairings:
             return False
         max_round = max(int(p.get("round_num") or 1) for p in pairings)
-        # 当前轮是否全部结束
-        cur = [p for p in pairings if int(p.get("round_num") or 1) == max_round]
-        for p in cur:
-            if (
-                p.get("bot_b_id") is None
-                and not p.get("match_id")
-                and p.get("status") == "completed"
+
+        def _is_adjudicated(pairing: dict[str, Any]) -> bool:
+            """A Swiss history row is either a strict bye or a completed match."""
+            if is_authoritative_no_opponent_pairing(
+                stage.get("type"), pairing
             ):
-                continue
-            mid = p.get("match_id")
-            if not mid:
+                return True
+            match_id = pairing.get("match_id")
+            if not match_id:
                 return False
-            m = self.store.get_match(mid)
-            if not m or m["status"] != STATUS_COMPLETED:
-                return False
+            match = self.store.get_match(match_id)
+            return bool(match and match["status"] == STATUS_COMPLETED)
+
+        # Every earlier round is part of the Swiss score/opponent/seat history.
+        # A later round must never be generated while any row is unadjudicated;
+        # otherwise drift in R1 could be skipped merely because R2 completed.
+        if not all(_is_adjudicated(pairing) for pairing in pairings):
+            return False
         total_rounds = int(stage.get("rounds") or swiss_rounds_needed(
             len(self.store.list_contest_entries(contest_id))
         ))
@@ -2361,7 +2394,7 @@ class ContestManager:
         for p in pairings:
             entry_a = p.get("entry_a_id")
             entry_b = p.get("entry_b_id")
-            if p.get("bot_b_id") is None and not p.get("match_id"):
+            if is_authoritative_no_opponent_pairing(stage.get("type"), p):
                 if entry_a is not None:
                     bye_counts_by_entry[int(entry_a)] += 1
                 continue
@@ -2462,9 +2495,9 @@ class ContestManager:
         # 当前轮全部完成
         winners: list[tuple[int, int | None]] = []  # (bot_id, entry_id)
         for p in cur:
-            # 轮空占位 pairing（bot_b_id=None、无 match、status=completed）：
-            # 视为已完成，胜者为轮空者 bot_a。
-            if p.get("bot_b_id") is None and not p.get("match_id"):
+            # 权威 no-opponent pairing 视为已完成，胜者为轮空者 bot_a。
+            # entry_b_id 仍存在的 deleted-opponent 行绝不能晋级座位 A。
+            if is_authoritative_no_opponent_pairing(stage.get("type"), p):
                 winners.append((p["bot_a_id"], p.get("entry_a_id")))
                 continue
             mid = p.get("match_id")
@@ -2585,10 +2618,11 @@ class ContestManager:
         stage_idx = int(c.get("current_stage_idx") or 0)
         stages = _parse_stages(c)
         if stage_idx + 1 >= len(stages):
-            self.store.update_contest(
-                contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
-            )
-            return self.store.get_contest(contest_id)
+            return self._finish_adjudicated_contest_locked(
+                contest_id,
+                stage_idx,
+                context="resume-terminal",
+            ) or self.store.get_contest(contest_id)
         self._advance_participants(contest_id, stage_idx)
         await self._begin_stage(contest_id, stage_idx + 1)
         return self.store.get_contest(contest_id)
@@ -2621,6 +2655,48 @@ class ContestManager:
         async with self._lock(contest_id):
             return self._finish_locked(contest_id)
 
+    def _finish_adjudicated_contest_locked(
+        self,
+        contest_id: int,
+        stage_idx: int,
+        *,
+        gate_stage_idx: int | None = None,
+        context: str,
+        raise_on_unfinished: bool = False,
+    ) -> dict | None:
+        """Publish one terminal status and official table behind the shared gate.
+
+        ``gate_stage_idx`` is normally the persisted current stage.  Stage
+        creation passes its intended target so an entirely missing next-stage
+        batch cannot be hidden by the previous stage's complete graph.
+        """
+        if self._has_unfinished_pairings(
+            contest_id,
+            through_stage_idx=gate_stage_idx,
+        ):
+            message = (
+                "赛事仍有未完成对阵，无法强制结束；"
+                "请等待对局完成或先安全中止对局"
+            )
+            if raise_on_unfinished:
+                raise ValueError(message)
+            logger.error(
+                "skip %s finalization for unadjudicated contest=%s",
+                context,
+                contest_id,
+            )
+            return None
+        self.store.update_contest(
+            contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
+        )
+        try:
+            self._finalize_official_results(contest_id, stage_idx)
+        except Exception:
+            logger.exception(
+                "%s official results failed contest=%s", context, contest_id
+            )
+        return self.store.get_contest(contest_id)
+
     def _finish_locked(self, contest_id: int) -> dict:
         """finish 的实际逻辑（调用方已持 per-contest 锁并在此重读状态）。"""
         c = self.store.get_contest(contest_id)
@@ -2629,35 +2705,66 @@ class ContestManager:
         require_mutable(c)
         if c["status"] not in (CONTEST_RUNNING, CONTEST_REST):
             raise ValueError("仅运行中/休息中的赛事可强制结束")
-        if self._has_unfinished_pairings(contest_id):
-            raise ValueError(
-                "赛事仍有未完成对阵，无法强制结束；请等待对局完成或先安全中止对局"
-            )
         stage_idx = int(c.get("current_stage_idx") or 0)
-        self.store.update_contest(
-            contest_id, status=CONTEST_FINISHED, ends_at=_now(), rest_ends_at=None
+        result = self._finish_adjudicated_contest_locked(
+            contest_id,
+            stage_idx,
+            context="force-finish",
+            raise_on_unfinished=True,
         )
-        try:
-            self._finalize_official_results(contest_id, stage_idx)
-        except Exception:
-            logger.exception("force-finish official results failed contest=%s", contest_id)
-        return self.store.get_contest(contest_id)
+        assert result is not None  # raise_on_unfinished guarantees a result.
+        return result
 
-    def _has_unfinished_pairings(self, contest_id: int) -> bool:
-        """强制结束前的安全闸门；调用方须持赛事锁。
+    def _has_unfinished_pairings(
+        self,
+        contest_id: int,
+        *,
+        through_stage_idx: int | None = None,
+    ) -> bool:
+        """全赛事终局裁决门禁；调用方须持赛事锁。
+
+        自动终局、finished 恢复和强制结束都只能通过这一门禁。它检查所有已到达
+        阶段，而非只看当前阶段：每行必须是权威轮空，或绑定一场真实 completed
+        Match。持久化的后续空阶段一律 fail closed，防止按空 standings 固化/反转
+        名次。仅初始 0/1 人阶段，或 ``_begin_stage`` 明确尝试紧邻下一阶段且只剩
+        一名 active 参赛者时，空图才是合法终局。
 
         当前 orchestrator 没有能等待 runner 收敛的 contest-aware abort。与其先写
         finished 后让后台任务晚写结果，保守拒绝任何未绑定、缺失或仍活跃的对阵；
-        同时检查未被 pairing 正确绑定的赛事活跃 match。
+        同时检查未被 pairing 正确绑定的赛事活跃 Match。
         """
         if self.store.contest_has_active_matches(contest_id):
             return True
+        contest = self.store.get_contest(contest_id)
+        if not contest:
+            return True
+        stages = _parse_stages(contest or {})
+        persisted_stage_idx = int(contest.get("current_stage_idx") or 0)
+        explicit_next_stage = through_stage_idx is not None
+        current_stage_idx = (
+            persisted_stage_idx
+            if through_stage_idx is None
+            else int(through_stage_idx)
+        )
+        if current_stage_idx < 0 or current_stage_idx >= len(stages):
+            return True
+
+        pairings_by_stage: dict[int, list[dict[str, Any]]] = {
+            stage_idx: [] for stage_idx in range(current_stage_idx + 1)
+        }
         for pairing in self.store.list_contest_pairings(contest_id):
-            if (
-                pairing.get("bot_b_id") is None
-                and not pairing.get("match_id")
-                and pairing.get("status") == STATUS_COMPLETED
-            ):
+            stage_idx = int(pairing.get("stage_idx") or 0)
+            # Future/unknown-stage rows are lifecycle drift, not evidence that
+            # the reached stage graph is complete.
+            if stage_idx < 0 or stage_idx > current_stage_idx or stage_idx >= len(stages):
+                return True
+            pairings_by_stage[stage_idx].append(pairing)
+            stage_type = (
+                stages[stage_idx].get("type")
+                if 0 <= stage_idx < len(stages)
+                else None
+            )
+            if is_authoritative_no_opponent_pairing(stage_type, pairing):
                 continue
             match_id = pairing.get("match_id")
             if not match_id:
@@ -2665,6 +2772,26 @@ class ContestManager:
             match = self.store.get_match(match_id)
             if not match or match.get("status") != STATUS_COMPLETED:
                 return True
+
+        entries = self.store.list_contest_entries(contest_id)
+        active_entry_count = sum(
+            not bool(entry.get("eliminated"))
+            for entry in entries
+        )
+        for stage_idx, stage_pairings in pairings_by_stage.items():
+            if stage_pairings:
+                continue
+            initial_zero_or_one = (
+                stage_idx == current_stage_idx == 0 and len(entries) <= 1
+            )
+            generated_next_stage_champion = (
+                explicit_next_stage
+                and stage_idx == current_stage_idx == persisted_stage_idx + 1
+                and active_entry_count <= 1
+            )
+            if initial_zero_or_one or generated_next_stage_champion:
+                continue
+            return True
         return False
 
     def estimate(self, contest_id: int) -> dict:
@@ -2673,15 +2800,39 @@ class ContestManager:
             raise ValueError("比赛不存在")
         n = len(self.store.list_contest_entries(contest_id))
         stages = _parse_stages(c)
-        # P3：estimate 按 advance_count 传播各 stage 人数。
-        # stage1 用 n；stage2 用 stage1 的 advance_count（决赛 Top8 循环等）。
+        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
+        spec = game_registry.get(gid)
+        # estimate 按晋级契约传播各 stage 人数。与 _advance_participants 一致，
+        # 分组 Top-N 优先于全局 advance_count；两者都不能放大当前人数。
         total = 0
+        execution_legs = 0
         cur_n = n
         for st in stages:
-            total += estimate_match_count(st, cur_n)
+            stage_matches = estimate_match_count(st, cur_n)
+            total += stage_matches
+            leg_count = 1
+            if st.get("duplicate"):
+                if spec.build_match_plan is None:
+                    raise ValueError(f"游戏 {gid} 不支持 duplicate 赛制")
+                match_plan = spec.build_match_plan(0, {"duplicate": True})
+                if not match_plan:
+                    raise ValueError(f"游戏 {gid} 的 duplicate 对局计划为空")
+                leg_count = len(match_plan)
+            execution_legs += stage_matches * leg_count
+            advance_per_group = st.get("advance_per_group")
+            if advance_per_group and int(advance_per_group) > 0:
+                group_count = effective_group_count(
+                    cur_n,
+                    int(st.get("group_count") or 4),
+                )
+                cur_n = min(
+                    cur_n,
+                    group_count * int(advance_per_group),
+                )
+                continue
             ac = st.get("advance_count")
             if ac and int(ac) > 0:
-                cur_n = int(ac)
+                cur_n = min(cur_n, int(ac))
         # Production uses MatchOrchestrator.max_concurrent.  Lightweight
         # read-only estimators/test doubles need no execution interface, so
         # fall back to the same immutable code policy instead of a DB setting.
@@ -2690,9 +2841,8 @@ class ContestManager:
             int(getattr(self.orch, "max_concurrent", MAX_CONCURRENT_MATCHES)),
         )
         # 粗估每场时长：经 spec.eta_for_match（消除 if game_id）
-        gid = _stored_game_id(c, entity=f"赛事 #{contest_id}")
         sec_per = _estimate_sec_per_match(gid, {})
-        eta_sec = (total / conc) * sec_per if conc else 0
+        eta_sec = (execution_legs / conc) * sec_per if conc else 0
         return {
             "entries": n,
             "estimated_matches": total,

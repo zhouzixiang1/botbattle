@@ -1,4 +1,4 @@
-import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test'
+import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test'
 
 import { loginThroughUi, monitorBrowser } from './helpers'
 
@@ -17,6 +17,7 @@ const EXPECTED_ROLES = {
 const VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900 },
   { name: 'laptop', width: 1024, height: 768 },
+  { name: 'tablet', width: 768, height: 900 },
   { name: 'mobile', width: 390, height: 844 },
 ] as const
 
@@ -27,7 +28,7 @@ const roleStates: Partial<Record<Exclude<Role, 'guest'>, StorageState>> = {}
 
 test.beforeAll(async ({ browser, baseURL }) => {
   // Authenticate each real role once and reuse its localStorage-backed bearer
-  // session at every viewport. Repeating the login form for all 12 role/viewport
+  // session at every viewport. Repeating the login form for every role/viewport
   // combinations would test the login rate limiter instead of the leaderboard.
   for (const role of Object.keys(USERS) as Array<keyof typeof USERS>) {
     const context = await browser.newContext({ baseURL })
@@ -39,14 +40,14 @@ test.beforeAll(async ({ browser, baseURL }) => {
 })
 
 function mockedLeaderboard(gameId: string) {
-  const rows = Array.from({ length: 12 }, (_, index) => {
-    const eligible = index < 10
-    const played = eligible ? 24 + index : 8 + (index - 10)
+  const rows = Array.from({ length: 25 }, (_, index) => {
+    const eligible = index < 22
+    const played = eligible ? 24 + index : 8 + (index - 22)
     const rank = eligible ? index + 1 : null
     return {
       rank,
-      rank_total: 10,
-      percentile: rank == null ? null : Number((100 * (10 - rank) / 9).toFixed(2)),
+      rank_total: 22,
+      percentile: rank == null ? null : Number((100 * (22 - rank) / 21).toFixed(2)),
       bot_id: 80_000 + index,
       bot_name: `${gameId}_bot_${index + 1}`,
       bot_display: index === 0
@@ -78,14 +79,14 @@ function mockedLeaderboard(gameId: string) {
     game_id: gameId,
     ranking_min_matches: 10,
     summary: {
-      total: 12,
-      eligible: 10,
-      sample: 2,
+      total: 25,
+      eligible: 22,
+      sample: 3,
       last_rated_at: '2026-08-10T12:30:00',
     },
     page: 1,
     per_page: 50,
-    total: 12,
+    total: 25,
   }
 }
 
@@ -152,8 +153,53 @@ async function assertNoHorizontalOverflow(page: Page, label: string) {
   expect(overflow, `${label} overflows by ${overflow}px`).toBeLessThanOrEqual(1)
 }
 
+function verticallyOverlaps(
+  first: { y: number; height: number },
+  second: { y: number; height: number },
+) {
+  return Math.max(first.y, second.y) < Math.min(first.y + first.height, second.y + second.height)
+}
+
+async function assertOwnsCenterHit(locator: Locator, label: string) {
+  await locator.scrollIntoViewIfNeeded()
+  const ownsCenterHit = await locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2))
+    const y = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2))
+    const hit = document.elementFromPoint(x, y)
+    return hit != null && element.contains(hit)
+  })
+  expect(ownsCenterHit, `${label} must not be covered at its center point`).toBe(true)
+}
+
+async function assertTopRankingRowsUnobscured(desktop: Locator, label: string) {
+  const headerBox = await desktop.getByRole('columnheader', { name: '名次', exact: true }).boundingBox()
+  expect(headerBox, `${label} table header must have layout`).not.toBeNull()
+
+  const rows = [1, 2, 3].map((rank) => ({
+    rank,
+    cell: desktop.getByRole('cell', { name: `#${rank}`, exact: true }),
+    locator: desktop.getByRole('cell', { name: `#${rank}`, exact: true }).locator('xpath=..'),
+  }))
+
+  for (const row of rows) {
+    await expect(row.cell, `${label} rank #${row.rank} must have one rank cell`).toHaveCount(1)
+    await expect(row.locator, `${label} rank #${row.rank} must have one row`).toHaveCount(1)
+    const rowBox = await row.locator.boundingBox()
+    expect(rowBox, `${label} rank #${row.rank} must have layout`).not.toBeNull()
+    expect(
+      verticallyOverlaps(headerBox!, rowBox!),
+      `${label} table header must not overlap rank #${row.rank}`,
+    ).toBe(false)
+  }
+
+  for (const row of rows) {
+    await assertOwnsCenterHit(row.locator, `${label} rank #${row.rank}`)
+  }
+}
+
 for (const viewport of VIEWPORTS) {
-  test(`leaderboard stays dense, sticky and role-neutral (${viewport.name})`, async ({ browser, baseURL }) => {
+  test(`leaderboard stays dense, unobscured and role-neutral (${viewport.name})`, async ({ browser, baseURL }) => {
     test.setTimeout(120_000)
     for (const role of ['guest', 'user', 'organizer', 'admin'] as const) {
       const { context, page } = await openAs(browser, baseURL!, role, viewport)
@@ -207,6 +253,8 @@ for (const viewport of VIEWPORTS) {
       const main = page.locator('main')
       await expect(main.getByRole('heading', { name: '排行榜', exact: true })).toBeVisible()
       await expect(main).toContainText('每款游戏独立使用 Glicko-2 数值评分')
+      await expect(main).toContainText('Rating 由 Glicko-2 根据对手实力与不确定度更新，不等于胜场累计')
+      await expect(main).toContainText('赛事积分不进入平台 Rating')
       await expect(main.locator('[data-slot="summary-strip"]')).toHaveCount(0)
       await expect(main.getByText('Bot 总数', { exact: true })).toHaveCount(0)
       await expect(main.getByText('最近更新', { exact: true })).toHaveCount(0)
@@ -239,11 +287,23 @@ for (const viewport of VIEWPORTS) {
       if (viewport.name === 'mobile') {
         await expect(page.getByTestId('leaderboard-mobile')).toBeVisible()
         await expect(page.getByTestId('leaderboard-desktop')).toBeHidden()
+        const firstItem = activeLayout.getByRole('listitem').first()
+        await expect(firstItem).toContainText('超长排行榜 Bot 名称-')
+        await expect(firstItem.getByText('#1', { exact: true })).toBeVisible()
+        await assertOwnsCenterHit(firstItem, `${role}/${viewport.name} rank #1`)
       } else {
         await expect(page.getByTestId('leaderboard-desktop')).toBeVisible()
         await expect(page.getByTestId('leaderboard-mobile')).toBeHidden()
+        // The original regression came from page-sticky being applied inside
+        // DataTable's horizontal overflow viewport.  Geometry guards the user-
+        // visible result; this attribute assertion also makes restoring the
+        // exact offending `sticky="page"` prop fail deterministically.
+        await expect(
+          activeLayout.locator('[data-slot="table-header"]'),
+        ).not.toHaveAttribute('data-sticky-region')
         await expect(main.getByRole('columnheader', { name: 'Bot / 所有者', exact: true })).toBeVisible()
         await expect(main.getByRole('columnheader', { name: '最近对局', exact: true })).toBeVisible()
+        await assertTopRankingRowsUnobscured(activeLayout, `${role}/${viewport.name}`)
       }
 
       const longName = main.getByRole('link', { name: /^超长排行榜 Bot 名称-/ }).first()
@@ -258,14 +318,12 @@ for (const viewport of VIEWPORTS) {
       expect(tabsBox).not.toBeNull()
       expect(tabsBox!.y).toBeGreaterThanOrEqual(viewport.width < 1024 ? 54 : -1)
       expect(tabsBox!.y).toBeLessThan(viewport.height)
-      await assertNoHorizontalOverflow(page, `${role}/${viewport.name}/scrolled`)
-
       if (viewport.name !== 'mobile') {
-        const headerBox = await page.getByRole('columnheader', { name: '名次', exact: true }).boundingBox()
-        expect(headerBox).not.toBeNull()
-        expect(headerBox!.y).toBeGreaterThanOrEqual(tabsBox!.y + tabsBox!.height - 2)
-        expect(headerBox!.y).toBeLessThan(viewport.height)
+        await expect(
+          activeLayout.locator('[data-slot="table-header"]'),
+        ).not.toHaveAttribute('data-sticky-region')
       }
+      await assertNoHorizontalOverflow(page, `${role}/${viewport.name}/scrolled`)
 
       const gomokuResponse = page.waitForResponse((response) => {
         const url = new URL(response.url())

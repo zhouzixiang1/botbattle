@@ -1,7 +1,35 @@
 """Persistence-level validation shared by safe Store write paths."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
+from typing import Any
+
+from .schema import STATUS_COMPLETED
+
+
+_NO_OPPONENT_STAGE_TYPES = frozenset({"swiss", "single_elimination"})
+
+
+def is_authoritative_no_opponent_pairing(
+    stage_type: object,
+    pairing: Mapping[str, Any],
+) -> bool:
+    """Return whether ``pairing`` is a durable no-opponent placeholder.
+
+    Only Swiss and single-elimination stages can create such rows.  Requiring
+    both durable entry/Bot identities on side B to be absent prevents a real
+    opponent whose Bot was later deleted (FK ``SET NULL``) from being mistaken
+    for a bye.  Pending, match-bound and otherwise drifted rows fail closed.
+    """
+    return bool(
+        isinstance(stage_type, str)
+        and stage_type in _NO_OPPONENT_STAGE_TYPES
+        and pairing.get("entry_b_id") is None
+        and pairing.get("bot_b_id") is None
+        and pairing.get("match_id") is None
+        and pairing.get("status") == STATUS_COMPLETED
+    )
 
 
 def _parse_local_time(value: str, label: str) -> datetime:
@@ -49,4 +77,7 @@ def validate_contest_times(
                 )
 
 
-__all__ = ["validate_contest_times"]
+__all__ = [
+    "is_authoritative_no_opponent_pairing",
+    "validate_contest_times",
+]

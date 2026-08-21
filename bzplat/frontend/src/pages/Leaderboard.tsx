@@ -401,7 +401,7 @@ export default function Leaderboard() {
 
       <DataRegion
         title="数值评分明细"
-        description={rankingMinMatches ? `仅展示当前派遣参榜的 Bot；公开名次要求至少 ${rankingMinMatches} 场计分对局，95% 区间按 Rating ± 1.96 × RD。` : '仅展示当前派遣参榜的 Bot；正在读取排名门槛。'}
+        description={rankingMinMatches ? `仅展示当前派遣参榜的 Bot；公开名次要求至少 ${rankingMinMatches} 场计分对局，95% 区间按 Rating ± 1.96 × RD。Rating 由 Glicko-2 根据对手实力与不确定度更新，不等于胜场累计；赛事积分不进入平台 Rating。` : '仅展示当前派遣参榜的 Bot；正在读取排名门槛。'}
         actions={<Gauge className="size-4 text-primary" />}
       >
         {loading ? (
@@ -413,7 +413,7 @@ export default function Leaderboard() {
             <div className="hidden md:block" data-testid="leaderboard-desktop">
               <DataTable className="rounded-none border-0" scrollLabel="排行榜数值明细">
                 <Table aria-label="排行榜数值明细" className="min-w-[72rem]">
-                  <TableHeader sticky="page">
+                  <TableHeader>
                     <TableRow>
                       <TableHead>名次</TableHead>
                       <TableHead className="min-w-48">Bot / 所有者</TableHead>

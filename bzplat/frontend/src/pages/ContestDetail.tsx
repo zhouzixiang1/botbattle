@@ -42,8 +42,8 @@ const STAGE_TYPE_LABEL: Record<string, string> = {
   single_elimination: '单败淘汰',
 }
 const SCORING_LABEL: Record<string, string> = {
-  poker_3_1_0: '计分 3/1/0',
-  ccgc_2_1_0: '计分 2/1/0',
+  poker_3_1_0: '胜 3 / 平 1 / 负 0',
+  ccgc_2_1_0: '胜 2 / 平 1 / 负 0',
 }
 
 interface Contest {
@@ -120,6 +120,7 @@ interface Standing {
   wins: number
   draws: number
   losses: number
+  byes: number
   delta_total: number
   group_id?: string
   bot_name?: string
@@ -134,6 +135,7 @@ interface StageStandingRow {
   wins: number
   draws: number
   losses: number
+  byes: number
   delta_total: number
   group_id?: string
   rank: number
@@ -225,6 +227,15 @@ function ContestScheduleInfo({ c }: { c: Contest }) {
 }
 
 const TIEBREAK_NUMBER = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 })
+
+function scoreBreakdown({
+  wins,
+  draws,
+  losses,
+  byes,
+}: Pick<Standing, 'wins' | 'draws' | 'losses' | 'byes'>) {
+  return `${wins} 胜 / ${draws} 平 / ${losses} 负 · 轮空 ${byes || 0}`
+}
 
 function OfficialTiebreakDetail({
   result,
@@ -540,6 +551,15 @@ export default function ContestDetail() {
     }
     return counts
   }, [officialResults])
+  const stageRowsByEntry = useMemo(() => {
+    const rows = new Map<string, StageStandingRow>()
+    for (const summary of stageStandings) {
+      for (const row of summary.rows) {
+        rows.set(`${summary.stage_idx}:${row.entry_id}`, row)
+      }
+    }
+    return rows
+  }, [stageStandings])
 
   if (!contest) {
     return (
@@ -566,6 +586,9 @@ export default function ContestDetail() {
   const showMatchups = pairings.length > 0 || ['published', 'running', 'rest', 'finished'].includes(contest.status)
   const showStandings = standings.length > 0 || ['running', 'rest', 'finished'].includes(contest.status)
   const showOfficial = contest.status === 'finished'
+  const currentScoringLabel = SCORING_LABEL[
+    stages[contest.current_stage_idx ?? 0]?.scoring || ''
+  ] || '按本阶段规则计分'
   const templateLabel = contest.template_name || contest.template_id || '未指定模板'
   const stageLabel = stages.length > 0
     ? `${Math.min((contest.current_stage_idx ?? 0) + 1, stages.length)} / ${stages.length}`
@@ -1002,16 +1025,16 @@ export default function ContestDetail() {
         <TabsContent value="standings" className="mt-2">
           <DataRegion
             title="阶段积分"
-            description="赛中数据随已完成对局更新；正式结果以完赛后的名次为准。"
+            description={`赛事积分与平台 Rating 相互独立；本阶段计分：${currentScoringLabel}。胜/平/负仅统计真实对局，瑞士轮轮空会按胜场分加分，轮空次数单独列出。正式结果以完赛后的名次为准。`}
           >
               <DataTable className="rounded-none border-0 border-b" scrollLabel="阶段积分表">
-                <Table className="min-w-[28rem]">
+                <Table className="min-w-[38rem]">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-14">名次</TableHead>
                       <TableHead className="min-w-[6rem]">Bot</TableHead>
                       <TableHead>积分</TableHead>
-                      <TableHead className="hidden sm:table-cell">W/D/L</TableHead>
+                      <TableHead className="min-w-[13rem]">实际战绩 / 轮空</TableHead>
                       <TableHead className="hidden md:table-cell">累计分差</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -1034,8 +1057,8 @@ export default function ContestDetail() {
                             )}
                           </TableCell>
                           <TableCell className="font-mono font-semibold text-primary">{s.points}</TableCell>
-                          <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
-                            <span className="text-success">{s.wins}</span>/{s.draws}/<span className="text-destructive">{s.losses}</span>
+                          <TableCell className="font-mono text-xs text-muted-foreground">
+                            {scoreBreakdown(s)}
                           </TableCell>
                           <TableCell className="hidden font-mono text-xs text-muted-foreground md:table-cell">{s.delta_total}</TableCell>
                         </TableRow>
@@ -1059,7 +1082,7 @@ export default function ContestDetail() {
         <TabsContent value="official" className="mt-2">
           <DataRegion
             title="正式名次"
-            description="完赛后固化的权威结果；同分行显示实际使用的破同分链，种子只作最终稳定兜底。"
+            description="完赛后固化的权威结果；赛事积分不改变平台 Rating。实际战绩不把瑞士轮轮空记作胜场，轮空次数单独列出；同分行显示实际使用的破同分链。"
             actions={
               <Button asChild variant="outline" size="sm">
                 <a href={`/api/contests/${id}/official-results?format=csv`}>
@@ -1069,13 +1092,14 @@ export default function ContestDetail() {
             }
           >
               <DataTable className="rounded-none border-0" scrollLabel="赛事正式名次表">
-                <Table className="min-w-[58rem]">
+                <Table className="min-w-[72rem]">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-14">名次</TableHead>
                       <TableHead>Bot</TableHead>
                       <TableHead>选手</TableHead>
                       <TableHead>积分</TableHead>
+                      <TableHead className="min-w-[13rem]">计分构成</TableHead>
                       <TableHead className="min-w-[22rem]">破同分依据</TableHead>
                       <TableHead className="hidden md:table-cell">奖项</TableHead>
                     </TableRow>
@@ -1083,7 +1107,7 @@ export default function ContestDetail() {
                   <TableBody>
                     {officialResults.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={6}>
+                        <TableCell colSpan={7}>
                           <EmptyState
                             text={contest.official_results_ready ? '正式名次为空' : '正式名次尚未生成'}
                             icon={<Trophy className="size-7 opacity-40" />}
@@ -1095,6 +1119,7 @@ export default function ContestDetail() {
                       const tieKey = `${cohort}:${Number(result.points ?? 0)}`
                       const hasPointTie = (officialCohortPointCounts.get(tieKey) ?? 0) > 1
                       const sourceStage = result.source_stage
+                      const scoreRow = stageRowsByEntry.get(`${sourceStage ?? 0}:${result.entry_id}`)
                       const sourceLabel = typeof sourceStage === 'number'
                         ? (STAGE_TYPE_LABEL[stages[sourceStage]?.type || ''] || `阶段 ${sourceStage + 1}`)
                         : null
@@ -1140,6 +1165,9 @@ export default function ContestDetail() {
                               {sourceLabel}
                             </span>
                           )}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          {scoreRow ? scoreBreakdown(scoreRow) : '历史计分构成不可用'}
                         </TableCell>
                         <TableCell className="min-w-[22rem] max-w-[30rem]">
                           <OfficialTiebreakDetail
@@ -1223,8 +1251,11 @@ function StageStandingPanel({ summary }: { summary?: StageStandingSummary }) {
                       </Link>
                     ) : <span className="text-xs text-muted-foreground">已删除 Bot</span>}
                     <OverflowText tooltip={false} className="text-[10px] text-muted-foreground">
-                      {row.owner_name ? `@${row.owner_display || row.owner_name}` : `${row.wins}/${row.draws}/${row.losses}`}
+                      {row.owner_name ? `@${row.owner_display || row.owner_name}` : '参赛身份不可用'}
                     </OverflowText>
+                    <span className="block font-mono text-xs leading-relaxed text-muted-foreground">
+                      {scoreBreakdown(row)}
+                    </span>
                   </TableCell>
                   <TableCell className="px-2 py-2 text-right font-mono text-xs font-semibold text-primary">
                     {row.points}

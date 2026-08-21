@@ -56,9 +56,19 @@ def round_robin(bot_ids: list[int], *, double: bool = False) -> list[PairingSpec
     return out
 
 
+def effective_group_count(participant_count: int, requested_group_count: int) -> int:
+    """Return the shared group count that guarantees two players per group."""
+    return max(1, min(requested_group_count, participant_count // 2))
+
+
 def snake_groups(bot_ids: list[int], group_count: int) -> dict[str, list[int]]:
-    """蛇形种子分组。bot_ids 已按种子排序（强→弱）。"""
-    g = max(1, min(group_count, len(bot_ids)))
+    """蛇形种子分组。bot_ids 已按种子排序（强→弱）。
+
+    两人以上时组数不得超过人数的一半，确保每组至少两人并能生成
+    实际 round-robin 对阵；否则默认四组会让 2–4 人赛事全空、5–7 人
+    赛事遗漏落入单人组的参赛者。
+    """
+    g = effective_group_count(len(bot_ids), group_count)
     groups: dict[str, list[int]] = {f"G{i+1}": [] for i in range(g)}
     keys = list(groups.keys())
     direction = 1
@@ -305,7 +315,7 @@ def estimate_match_count(stage: dict[str, Any], n: int) -> int:
     if stype == "double_round_robin":
         return n * (n - 1)
     if stype.startswith("group_"):
-        g = max(1, min(int(stage.get("group_count") or 4), n))
+        g = effective_group_count(n, int(stage.get("group_count") or 4))
         sizes = [n // g + (1 if i < n % g else 0) for i in range(g)]
         double = "double" in stype
         total = 0
