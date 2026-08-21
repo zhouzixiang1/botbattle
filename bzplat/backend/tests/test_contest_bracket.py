@@ -8,6 +8,7 @@ from bzplat.backend.api_routes import _public_contest_pairings
 from bzplat.backend.crypto import hash_password
 from bzplat.backend.main import create_app
 from bzplat.backend.store import Store
+from bzplat.backend.store.validation import is_authoritative_no_opponent_pairing
 
 
 def _store(tmp_path) -> Store:
@@ -15,27 +16,38 @@ def _store(tmp_path) -> Store:
 
 
 @pytest.mark.parametrize(
-    ("override", "expected"),
+    ("stage_type", "override", "expected"),
     [
-        ({}, True),
-        ({"entry_b_id": 17}, False),
-        ({"bot_b_id": 23}, False),
-        ({"match_id": "historical-match"}, False),
-        ({"status": "pending"}, False),
+        ("swiss", {}, True),
+        ("single_elimination", {}, True),
+        ("round_robin", {}, False),
+        ("group_round_robin", {}, False),
+        (None, {}, False),
+        ([], {}, False),
+        ({"type": "swiss"}, {}, False),
+        ("swiss", {"entry_b_id": 17}, False),
+        ("swiss", {"bot_b_id": 23}, False),
+        ("swiss", {"match_id": "historical-match"}, False),
+        ("swiss", {"match_id": ""}, False),
+        ("swiss", {"status": "pending"}, False),
     ],
 )
-def test_public_pairing_bye_requires_all_four_authoritative_conditions(
-    override, expected
+def test_no_opponent_pairing_requires_allowed_stage_and_authoritative_shape(
+    stage_type, override, expected
 ):
     row = {
         "id": 1,
+        "stage_idx": 0,
         "entry_b_id": None,
         "bot_b_id": None,
         "match_id": None,
         "status": "completed",
         **override,
     }
-    assert _public_contest_pairings([row])[0]["is_bye"] is expected
+    assert is_authoritative_no_opponent_pairing(stage_type, row) is expected
+    assert _public_contest_pairings(
+        [row], stage_types={0: stage_type}
+    )[0]["is_bye"] is expected
 
 
 def test_contest_bracket_resolves_names(tmp_path):
@@ -187,7 +199,9 @@ def test_bracket_endpoint_and_detail_named(tmp_path):
         "bot_b_version_id", "pairing_seed", "published_at", "color_first",
     ):
         assert internal not in bracket_pairing
-    assert bracket_rows[bye_pairing["id"]]["is_bye"] is True
+    # Round-robin never creates no-opponent placeholders.  Even the otherwise
+    # matching four-column shape must fail closed instead of being labelled bye.
+    assert bracket_rows[bye_pairing["id"]]["is_bye"] is False
     # detail 含 named entries
     r = c.get(f"/api/contests/{cid}")
     ents = r.json()["entries"]
@@ -218,6 +232,109 @@ def test_bracket_endpoint_and_detail_named(tmp_path):
     assert deleted_bot_pairing["bot_b_id"] is None
     assert deleted_bot_pairing["is_bye"] is False
     assert deleted_bot_pairing["owner_b_name"] == "bob"
+
+
+@pytest.mark.parametrize(
+    ("actual_match_status", "pairing_status", "expected_completed"),
+    [
+        (None, "completed", 0),
+        ("pending", "completed", 0),
+        ("running", "completed", 0),
+        ("aborted", "completed", 0),
+        ("completed", "pending", 1),
+    ],
+)
+def test_stage_summary_completion_uses_joined_match_truth(
+    tmp_path, actual_match_status, pairing_status, expected_completed
+):
+    """Pairing status cannot forge completion; the joined Match is authoritative."""
+    app = create_app(
+        db_path=str(tmp_path / f"stage-match-{actual_match_status or 'missing'}.db")
+    )
+    store = app.state.store
+    organizer = store.create_user(
+        "summary-org", "summary-org@example.com", "hash", role="organizer"
+    )
+    users = [
+        store.create_user(
+            f"summary-user-{index}", f"summary-{index}@example.com", "hash"
+        )
+        for index in range(2)
+    ]
+    bots = [
+        store.create_bot(
+            user["id"],
+            f"summary-bot-{index}",
+            binary_path="/tmp",
+            format="elf",
+            game_id="holdem",
+        )
+        for index, user in enumerate(users)
+    ]
+    contest = store.create_contest(
+        "Stage match truth",
+        organizer_id=organizer["id"],
+        status="running",
+        game_id="holdem",
+        stages_json=(
+            '[{"key":"rr","type":"round_robin",'
+            '"scoring":"poker_3_1_0"}]'
+        ),
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    match_id = f"stage-match-{actual_match_status or 'missing'}"
+    if actual_match_status is not None:
+        store.create_match(
+            match_id,
+            bots[0]["id"],
+            bots[1]["id"],
+            contest_id=contest["id"],
+            match_type="contest",
+            game_id="holdem",
+        )
+        if actual_match_status != "pending":
+            update: dict = {"status": actual_match_status}
+            if actual_match_status == "completed":
+                update.update(
+                    winner=0,
+                    result={"deltas": [100, -100]},
+                )
+            store.update_match(match_id, **update)
+    pairing = store.add_contest_pairing(
+        contest["id"],
+        bots[0]["id"],
+        bots[1]["id"],
+        match_id=match_id,
+        status=pairing_status,
+        stage_idx=0,
+        stage_key="rr",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+
+    raw_pairing = next(
+        row for row in store.contest_bracket(contest["id"])
+        if row["id"] == pairing["id"]
+    )
+    assert raw_pairing["match_status"] == actual_match_status
+
+    response = TestClient(app).get(f"/api/contests/{contest['id']}")
+    assert response.status_code == 200
+    body = response.json()
+    public_pairing = next(
+        row for row in body["pairings"] if row["id"] == pairing["id"]
+    )
+    assert "match_status" not in public_pairing
+    summary = body["stage_standings"][0]
+    assert summary["completed_pairings"] == expected_completed
+    assert summary["total_pairings"] == 1
+    assert summary["status"] == (
+        "completed" if expected_completed else "running"
+    )
+    assert summary["advancement_final"] is bool(expected_completed)
 
 
 def test_legacy_pairing_recovers_unique_entries_without_guessing_bye(tmp_path):
@@ -278,3 +395,120 @@ def test_legacy_pairing_recovers_unique_entries_without_guessing_bye(tmp_path):
         "legacy-alice": 7.0,
         "legacy-bob": 4.0,
     }
+
+
+def test_persisted_swiss_stage_summary_derives_byes_from_pairing_graph(tmp_path):
+    """历史 stage snapshot 无 byes 列，API 仍从权威 pairing 准确恢复。"""
+    app = create_app(db_path=str(tmp_path / "persisted-swiss-byes.db"))
+    store = app.state.store
+    organizer = store.create_user(
+        "bye-org", "bye-org@example.com", "hash", role="organizer"
+    )
+    players = [
+        store.create_user(f"bye-player-{index}", f"bp{index}@example.com", "hash")
+        for index in range(3)
+    ]
+    bots = [
+        store.create_bot(
+            player["id"], f"bye-bot-{index}", binary_path="/tmp", format="elf",
+            game_id="holdem",
+        )
+        for index, player in enumerate(players)
+    ]
+    contest = store.create_contest(
+        "Persisted Swiss",
+        organizer_id=organizer["id"],
+        game_id="holdem",
+        status="finished",
+        stages_json=(
+            '[{"key":"swiss","type":"swiss","rounds":1,'
+            '"scoring":"poker_3_1_0"}]'
+        ),
+        current_stage_idx=0,
+    )
+    entries = [
+        store.add_contest_entry(contest["id"], player["id"], bot["id"])
+        for player, bot in zip(players, bots)
+    ]
+    match_id = "persisted-swiss-real-match"
+    store.create_match(
+        match_id, bots[0]["id"], bots[1]["id"], game_id="holdem",
+        contest_id=contest["id"], match_type="contest",
+    )
+    store.update_match(
+        match_id, status="completed", winner=0, reason="completed",
+        result={"rounds_played": 70, "deltas": [10, -10], "normalized_delta": 0.1},
+    )
+    store.add_contest_pairing(
+        contest["id"], bots[0]["id"], bots[1]["id"],
+        entry_a_id=entries[0]["id"], entry_b_id=entries[1]["id"],
+        match_id=match_id, status="completed", stage_idx=0, stage_key="swiss",
+    )
+    store.add_contest_pairing(
+        contest["id"], bots[2]["id"], None,
+        entry_a_id=entries[2]["id"], entry_b_id=None,
+        status="completed", stage_idx=0, stage_key="swiss",
+    )
+
+    client = TestClient(app)
+    live_response = client.get(f"/api/contests/{contest['id']}")
+    assert live_response.status_code == 200
+    live_stage = live_response.json()["stage_standings"][0]
+    public_bye = next(
+        row for row in live_response.json()["pairings"]
+        if row["id"] != next(
+            pairing["id"]
+            for pairing in store.list_contest_pairings(contest["id"])
+            if pairing.get("match_id")
+        )
+    )
+    assert public_bye["is_bye"] is True
+    assert live_stage["source"] == "live"
+    live_rows = {row["entry_id"]: row for row in live_stage["rows"]}
+    assert {
+        entry_id: (row["points"], row["wins"], row["losses"], row["byes"])
+        for entry_id, row in live_rows.items()
+    } == {
+        entries[0]["id"]: (3.0, 1, 0, 0),
+        entries[1]["id"]: (0.0, 0, 1, 0),
+        entries[2]["id"]: (3.0, 0, 0, 1),
+    }
+
+    for index, (entry, bot) in enumerate(zip(entries, bots)):
+        store.upsert_stage_result(
+            contest["id"], 0, entry["id"], bot_id=bot["id"],
+            stage_key="swiss", points=3.0 if index in (0, 2) else 0.0,
+            wins=1 if index == 0 else 0, losses=1 if index == 1 else 0,
+        )
+
+    response = client.get(f"/api/contests/{contest['id']}")
+    assert response.status_code == 200
+    stage = response.json()["stage_standings"][0]
+    assert stage["source"] == "persisted"
+    rows = {row["entry_id"]: row for row in stage["rows"]}
+    assert {
+        entry_id: (row["points"], row["wins"], row["draws"], row["losses"], row["byes"])
+        for entry_id, row in rows.items()
+    } == {
+        entries[0]["id"]: (3.0, 1, 0, 0, 0),
+        entries[1]["id"]: (0.0, 0, 0, 1, 0),
+        entries[2]["id"]: (3.0, 0, 0, 0, 1),
+    }
+
+    # Historical projection remains pairing-backed after the bye Bot is deleted;
+    # entry identity survives and no stage-result schema column is required.
+    assert store.delete_bot(bots[2]["id"])
+    historical_stage = client.get(
+        f"/api/contests/{contest['id']}"
+    ).json()["stage_standings"][0]
+    historical_bye = next(
+        row for row in historical_stage["rows"]
+        if row["entry_id"] == entries[2]["id"]
+    )
+    assert historical_bye["byes"] == 1
+    assert (
+        historical_bye["wins"]
+        == historical_bye["draws"]
+        == historical_bye["losses"]
+        == 0
+    )

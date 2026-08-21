@@ -139,6 +139,7 @@ from bzplat.backend.store.schema import (
     is_supported_binary_metadata,
 )
 from bzplat.backend.store.public_contract import sanitize_public_match
+from bzplat.backend.store.validation import is_authoritative_no_opponent_pairing
 router = APIRouter()
 _T = TypeVar("_T")
 _BINARY_FILE_SCHEMA = {"type": "string", "format": "binary"}
@@ -2978,6 +2979,7 @@ _PUBLIC_PAIRING_INTERNAL_FIELDS = (
     "pairing_seed",
     "published_at",
     "color_first",
+    "match_status",
 )
 
 _PUBLIC_PAIRING_FIELDS = frozenset(
@@ -3007,18 +3009,40 @@ _PUBLIC_PAIRING_FIELDS = frozenset(
 )
 
 
-def _public_contest_pairings(rows: list[dict]) -> list[dict]:
+def _contest_stage_types(contest: dict[str, Any]) -> dict[int, object]:
+    """Return persisted stage types keyed by index; malformed history is unknown."""
+    raw = contest.get("stages_json") or "[]"
+    if isinstance(raw, list):
+        stages = raw
+    else:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = []
+        stages = parsed if isinstance(parsed, list) else []
+    return {
+        index: stage.get("type")
+        for index, stage in enumerate(stages)
+        if isinstance(stage, dict)
+    }
+
+
+def _public_contest_pairings(
+    rows: list[dict], *, stage_types: dict[int, object] | None = None
+) -> list[dict]:
     """Return schedule rows with public Bot/user identity and no execution keys."""
+    known_stage_types = stage_types or {}
     projected: list[dict] = []
     for row in rows:
         public = dict(row)
+        try:
+            stage_idx = int(row.get("stage_idx") or 0)
+        except (TypeError, ValueError):
+            stage_idx = -1
         # bot_b_id 可能因历史硬删除被 SET NULL，legacy pairing 也可能没有 entry id。
-        # 仅四项权威条件同时满足才认作真实轮空；歧义一律 fail closed。
-        public["is_bye"] = bool(
-            row.get("entry_b_id") is None
-            and row.get("bot_b_id") is None
-            and row.get("match_id") is None
-            and row.get("status") == STATUS_COMPLETED
+        # 赛制类型与四项权威条件必须同时成立；歧义一律 fail closed。
+        public["is_bye"] = is_authoritative_no_opponent_pairing(
+            known_stage_types.get(stage_idx), row
         )
         for field in _PUBLIC_PAIRING_INTERNAL_FIELDS:
             public.pop(field, None)
@@ -3141,7 +3165,9 @@ def contest_detail(
     # 阶段投影依赖 entry_a_id / entry_b_id 求实际参赛者；响应才裁掉这些
     # 内部关联键。不能拿 public pairings 反哺内部 presentation，否则阶段榜会变空。
     raw_pairings = store.contest_bracket(contest_id)
-    pairings = _public_contest_pairings(raw_pairings)
+    pairings = _public_contest_pairings(
+        raw_pairings, stage_types=_contest_stage_types(c)
+    )
     stage_entries = (
         entries
         if not isinstance(entries_result, dict)
@@ -3218,7 +3244,8 @@ def contest_bracket(
         raise HTTPException(404, "比赛不存在")
     return {
         "pairings": _public_contest_pairings(
-            _store(request).contest_bracket(contest_id)
+            _store(request).contest_bracket(contest_id),
+            stage_types=_contest_stage_types(contest),
         )
     }
 

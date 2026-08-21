@@ -1063,7 +1063,21 @@ test('contest game switching cannot submit a stale or mismatched template', asyn
           { id: 'gomoku_leak', name: '错误混入模板', game_id: 'gomoku' },
           { id: 'pencil_race_safe', name: '点格棋竞态模板', game_id: 'pencil' },
         ]
-      : [{ id: 'holdem_race_safe', name: '德州初始模板', game_id: 'holdem' }]
+      : [
+          {
+            id: 'holdem_fast',
+            name: '德州快速模板',
+            game_id: 'holdem',
+            summary: '大规模快速完成，样本较少。',
+          },
+          {
+            id: 'holdem_race_safe',
+            name: '德州公平模板',
+            game_id: 'holdem',
+            recommended: true,
+            summary: '同一副牌交换座位，公平优先。',
+          },
+        ]
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -1093,7 +1107,8 @@ test('contest game switching cannot submit a stale or mismatched template', asyn
   const gameSelect = form.getByRole('combobox').nth(0)
   const templateSelect = form.getByRole('combobox').nth(1)
   const createButton = form.getByRole('button', { name: '创建赛事', exact: true })
-  await expect(templateSelect).toContainText('德州初始模板')
+  await expect(templateSelect).toContainText('德州公平模板 · 推荐')
+  await expect(form.getByText('同一副牌交换座位，公平优先。', { exact: true })).toBeVisible()
 
   await gameSelect.click()
   await page.getByRole('option', { name: '五子棋', exact: true }).last().click()

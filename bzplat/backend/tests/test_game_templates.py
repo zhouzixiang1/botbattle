@@ -13,6 +13,7 @@ import pytest
 
 from bzplat.backend.contests.templates import (
     DEFAULT_TEMPLATES,
+    default_template_id,
     get_template,
     list_templates,
     resolve_stages,
@@ -93,6 +94,57 @@ def test_templates_have_stages():
         assert isinstance(t["stages"], list) and len(t["stages"]) >= 1
         for s in t["stages"]:
             assert "type" in s and "scoring" in s
+
+
+def test_holdem_recommends_duplicate_round_robin_as_fair_default():
+    holdem = list_templates(game_id="holdem")
+    recommended = [template for template in holdem if template.get("recommended")]
+    assert [template["id"] for template in recommended] == ["holdem_dup_rr"]
+    assert holdem[0]["id"] == "holdem_dup_rr"
+    assert "≤12" in recommended[0]["name"]
+    assert "同一副牌交换座位" in recommended[0]["summary"]
+    assert "耗时高于瑞士制" in recommended[0]["summary"]
+    assert default_template_id("holdem") == "holdem_dup_rr"
+
+
+def test_swiss_templates_remain_explicit_large_scale_options():
+    holdem = {template["id"]: template for template in list_templates(game_id="holdem")}
+    for template_id in ("holdem_swiss_ko", "holdem_prelim_swiss"):
+        template = holdem[template_id]
+        assert template.get("recommended") is not True
+        assert "大规模" in template["name"]
+        assert "样本" in template["summary"] or "总场次较少" in template["summary"]
+
+
+def test_omitted_template_uses_game_scoped_registry_default():
+    tid, gid, stages, match_config = resolve_template(None, game_id="holdem")
+    assert (tid, gid, match_config) == ("holdem_dup_rr", "holdem", {})
+    assert stages == get_template("holdem_dup_rr")["stages"]
+
+    # 没有 recommended 元数据的游戏继续使用自己的代码顺序，不猜成德州。
+    board_default = list_templates(game_id="gomoku")[0]
+    assert default_template_id("gomoku") == board_default["id"]
+    _tid, board_gid, _stages, _config = resolve_template(None, game_id="gomoku")
+    assert board_gid == "gomoku"
+
+
+def test_omitted_game_stays_with_first_game_when_another_game_is_recommended(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    first_template = list_templates()[0]
+    assert first_template["game_id"] == registry.judge_games()[0]["game_id"]
+    other_game_template = next(
+        template
+        for template in DEFAULT_TEMPLATES.values()
+        if template["game_id"] != first_template["game_id"]
+        and template.get("creation_enabled", True) is not False
+    )
+    monkeypatch.setitem(other_game_template, "recommended", True)
+
+    expected = default_template_id(first_template["game_id"])
+    assert default_template_id() == expected == "holdem_dup_rr"
+    tid, gid, _stages, _config = resolve_template(None)
+    assert (tid, gid) == (expected, first_template["game_id"])
 
 
 # ── get/list/resolve 经注册表派生 ──────────────────────────────

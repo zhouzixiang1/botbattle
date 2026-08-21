@@ -9,6 +9,9 @@ import json
 from collections import defaultdict
 from typing import Any
 
+from bzplat.backend.store.schema import STATUS_COMPLETED
+from bzplat.backend.store.validation import is_authoritative_no_opponent_pairing
+
 
 def _stages(contest: dict[str, Any]) -> list[dict[str, Any]]:
     raw = contest.get("stages_json") or "[]"
@@ -29,6 +32,30 @@ def _participants(pairings: list[dict[str, Any]]) -> set[int]:
             if value is not None:
                 result.add(int(value))
     return result
+
+
+def _swiss_byes(
+    stage: dict[str, Any], pairings: list[dict[str, Any]]
+) -> dict[int, int]:
+    """Derive awarded Swiss byes from the durable stage pairing graph.
+
+    Stage snapshots predate the public ``byes`` field and deliberately do not
+    persist it.  Keeping this projection pairing-backed makes both historical
+    and live summaries accurate without a schema migration.  All authoritative
+    no-opponent conditions are required so a deleted opponent or incomplete
+    pairing is never presented as an awarded bye.
+    """
+    stage_type = stage.get("type")
+    if stage_type != "swiss":
+        return {}
+    counts: dict[int, int] = defaultdict(int)
+    for pairing in pairings:
+        entry_a_id = pairing.get("entry_a_id")
+        if entry_a_id is not None and is_authoritative_no_opponent_pairing(
+            stage_type, pairing
+        ):
+            counts[int(entry_a_id)] += 1
+    return dict(counts)
 
 
 def _rank_rows(rows: list[dict[str, Any]], *, grouped: bool) -> list[dict[str, Any]]:
@@ -122,6 +149,7 @@ def build_stage_summaries(
     for stage_idx, stage in enumerate(stages):
         stage_pairings = pairing_by_stage.get(stage_idx, [])
         participant_ids = _participants(stage_pairings)
+        bye_counts = _swiss_byes(stage, stage_pairings)
         persisted = persisted_by_stage.get(stage_idx, [])
         if persisted:
             source_rows = persisted
@@ -166,6 +194,7 @@ def build_stage_summaries(
                     "wins": int(source_row.get("wins") or 0),
                     "draws": int(source_row.get("draws") or 0),
                     "losses": int(source_row.get("losses") or 0),
+                    "byes": bye_counts.get(int(entry_id), 0),
                     "delta_total": int(source_row.get("delta_total") or 0),
                     "group_id": source_row.get("group_id") or entry.get("group_id") or "",
                 }
@@ -173,8 +202,15 @@ def build_stage_summaries(
 
         grouped = str(stage.get("type") or "").startswith("group_")
         rows = _rank_rows(rows, grouped=grouped)
+        stage_type = stage.get("type")
         completed_count = sum(
-            1 for pairing in stage_pairings if pairing.get("status") == "completed"
+            1
+            for pairing in stage_pairings
+            if is_authoritative_no_opponent_pairing(stage_type, pairing)
+            or (
+                pairing.get("match_id") is not None
+                and pairing.get("match_status") == STATUS_COMPLETED
+            )
         )
         all_completed = bool(stage_pairings) and completed_count == len(stage_pairings)
 

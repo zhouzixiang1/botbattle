@@ -13,8 +13,34 @@ SCORING_POKER = "poker_3_1_0"
 
 TEMPLATES: list[dict[str, Any]] = [
     {
+        # 公平优先默认：每对选手用同一副牌交换座位跑两条 leg。循环赛仍受
+        # FULL_RR_MAX_N=12 的通用门禁约束，避免默认模板在大规模报名时无界膨胀。
+        "id": "holdem_dup_rr",
+        "name": "德州：复式单循环（公平优先，≤12 人）",
+        "summary": (
+            "推荐用于 12 人以内赛事：每对 Bot 使用同一副牌交换座位各赛 70 手，"
+            "降低发牌与座位差异；耗时高于瑞士制。"
+        ),
+        "recommended": True,
+        "game_id": "holdem",
+        "stages": [
+            {
+                "key": "dup_rr",
+                "type": "round_robin",
+                "duplicate": True,
+                "scoring": SCORING_POKER,
+                "rest_after_minutes": 0,
+                "allow_bot_swap_in_rest": False,
+            },
+        ],
+    },
+    {
         "id": "holdem_swiss_ko",
-        "name": "德州：瑞士 → 单败",
+        "name": "德州：瑞士 → 单败（大规模快速）",
+        "summary": (
+            "适合参赛人数较多、需要控制总场次的赛事；瑞士轮只覆盖部分对手，"
+            "样本少于循环赛。"
+        ),
         "game_id": "holdem",
         "stages": [
             {
@@ -38,6 +64,10 @@ TEMPLATES: list[dict[str, Any]] = [
     {
         "id": "holdem_rr",
         "name": "德州：单循环（小规模）",
+        "summary": (
+            "12 人以内每对 Bot 交手一次，覆盖完整对手；不使用同副牌换座，"
+            "公平性与耗时介于复式单循环和瑞士制之间。"
+        ),
         "game_id": "holdem",
         "stages": [
             {
@@ -52,7 +82,11 @@ TEMPLATES: list[dict[str, Any]] = [
     {
         # 预赛：单阶段瑞士，全员唯一正式名次（公开报名，无人数上限）。
         "id": "holdem_prelim_swiss",
-        "name": "德州：预赛（瑞士全员排名）",
+        "name": "德州：预赛（大规模瑞士快速排名）",
+        "summary": (
+            "面向大规模公开预赛，约进行 ceil(log2(人数)) 轮；总场次较少，"
+            "完整名次会更依赖破同分规则。"
+        ),
         "game_id": "holdem",
         "phase": "preliminary",
         "stages": [
@@ -88,26 +122,6 @@ TEMPLATES: list[dict[str, Any]] = [
                 "type": "double_round_robin",
                 "ranking_mode": "replace_top",
                 "ranking_scope": 8,
-                "scoring": SCORING_POKER,
-                "rest_after_minutes": 0,
-                "allow_bot_swap_in_rest": False,
-            },
-        ],
-    },
-    {
-        # P2 residual：复式赛制（duplicate）——每对阵 1 场 duplicate 对局 = 2 leg
-        # （同副牌交换座位），合并净筹码判胜负。消除发牌运气，纯比策略。
-        # 单循环骨架：每对对手 1 场 duplicate 对局（内部 2 leg）。
-        # 仅 holdem 支持（spec.build_match_plan 非 None）；duplicate=True 触发
-        # ContestManager 走 challenge_duplicate 路径。
-        "id": "holdem_dup_rr",
-        "name": "德州：复式单循环（同副牌）",
-        "game_id": "holdem",
-        "stages": [
-            {
-                "key": "dup_rr",
-                "type": "round_robin",
-                "duplicate": True,
                 "scoring": SCORING_POKER,
                 "rest_after_minutes": 0,
                 "allow_bot_swap_in_rest": False,

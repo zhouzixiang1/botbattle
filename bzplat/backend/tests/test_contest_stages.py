@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 
 from bzplat.backend.contests.manager import ContestManager
+from bzplat.backend.contests.ranking import with_official_result_provenance
 from bzplat.backend.contests.stages import (
+    effective_group_count,
+    estimate_match_count,
     generate_stage_pairings,
     group_round_robin,
     round_robin,
@@ -17,6 +20,7 @@ from bzplat.backend.contests.stages import (
 )
 from bzplat.backend.contests.templates import resolve_stages
 from bzplat.backend.crypto import hash_password
+from bzplat.backend.games import registry as game_registry
 from bzplat.backend.matches.orchestrator import MatchOrchestrator
 from bzplat.backend.matches.runner import MatchRunner
 from bzplat.backend.runtime.binary_runner import BinaryRunner
@@ -38,6 +42,50 @@ def test_group_drr():
     assert all(s.group_id for s in specs)
     # 每组 4 人双循环 = 12，两组 = 24
     assert len(specs) == 24
+
+
+@pytest.mark.parametrize(
+    ("participant_count", "expected_groups", "expected_single_matches"),
+    [
+        (2, 1, 1),
+        (3, 1, 3),
+        (4, 2, 2),
+        (5, 2, 4),
+        (6, 3, 3),
+        (7, 3, 5),
+        (8, 4, 4),
+    ],
+)
+def test_default_group_count_keeps_every_small_roster_in_round_robin(
+    participant_count, expected_groups, expected_single_matches
+):
+    """Default four groups shrink so n=2..8 has no empty/singleton group."""
+    bots = list(range(1, participant_count + 1))
+    single = group_round_robin(bots, group_count=4)
+    double = group_round_robin(bots, group_count=4, double=True)
+
+    assert len(single) == expected_single_matches
+    assert len(double) == expected_single_matches * 2
+    assert effective_group_count(participant_count, 4) == expected_groups
+    assert estimate_match_count(
+        {"type": "group_round_robin", "group_count": 4},
+        participant_count,
+    ) == len(single)
+    assert estimate_match_count(
+        {"type": "group_double_round_robin", "group_count": 4},
+        participant_count,
+    ) == len(double)
+    assert len({pairing.group_id for pairing in single}) == expected_groups
+    for pairings, expected_appearances in ((single, 1), (double, 2)):
+        appearances = {
+            bot_id: sum(
+                bot_id in (pairing.bot_a_id, pairing.bot_b_id)
+                for pairing in pairings
+            )
+            for bot_id in bots
+        }
+        assert set(appearances) == set(bots)
+        assert min(appearances.values()) >= expected_appearances
 
 
 def test_swiss_and_ko():
@@ -359,6 +407,143 @@ class _FakeOrch:
         return mid
 
 
+@pytest.mark.parametrize(
+    (
+        "participant_count",
+        "expected_group_matches",
+        "expected_advancers",
+        "expected_total_matches",
+    ),
+    [
+        (5, 8, 4, 11),
+        (7, 10, 6, 15),
+        (12, 24, 8, 31),
+    ],
+)
+def test_pencil_default_group_manager_estimate_matches_full_lifecycle(
+    store: Store,
+    participant_count,
+    expected_group_matches,
+    expected_advancers,
+    expected_total_matches,
+):
+    """Pencil group advancement, KO jobs and ETA share the generated graph."""
+    users, bots = _mk_bots(store, participant_count, game_id="pencil")
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+    contest = manager.create(
+        users[0]["id"],
+        "pencil-default-small-roster",
+        game_id="pencil",
+    )
+    assert contest["template_id"] == "pencil_group_drr_ko"
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+
+    estimate = manager.estimate(contest["id"])
+
+    async def run_full_lifecycle():
+        started = await manager.start(contest["id"])
+        assert started["status"] == "running"
+        group_pairings = store.list_contest_pairings(
+            contest["id"], stage_idx=0
+        )
+        assert len(group_pairings) == expected_group_matches
+        assert {
+            bot_id
+            for pairing in group_pairings
+            for bot_id in (pairing["bot_a_id"], pairing["bot_b_id"])
+            if bot_id is not None
+        } == {bot["id"] for bot in bots}
+
+        _complete_all_pairs(
+            store, contest["id"], 0, winner_fn=lambda _a, _b: 0
+        )
+        rested = await manager.maybe_finish(contest["id"])
+        assert rested["status"] == "rest"
+        resumed = await manager.resume(contest["id"])
+        assert resumed["status"] == "running"
+        assert resumed["current_stage_idx"] == 1
+        active_entries = [
+            entry
+            for entry in store.list_contest_entries(contest["id"])
+            if not entry["eliminated"]
+        ]
+        assert len(active_entries) == expected_advancers
+
+        for _ in range(expected_advancers + 1):
+            state = store.get_contest(contest["id"])
+            if state["status"] == "finished":
+                break
+            assert state["current_stage_idx"] == 1
+            assert _complete_all_pairs(
+                store, contest["id"], 1, winner_fn=lambda _a, _b: 0
+            ) > 0
+            await manager.maybe_finish(contest["id"])
+        else:  # pragma: no cover - bounded lifecycle guard
+            pytest.fail("Pencil KO did not converge")
+
+    asyncio.run(run_full_lifecycle())
+    pairings = store.list_contest_pairings(contest["id"], stage_idx=0)
+    assert len(pairings) == expected_group_matches
+    actual_match_jobs = sum(
+        pairing.get("match_id") is not None
+        for pairing in store.list_contest_pairings(contest["id"])
+    )
+    assert actual_match_jobs == expected_total_matches
+    assert estimate["estimated_matches"] == actual_match_jobs
+    assert estimate["eta_seconds"] == (
+        actual_match_jobs * game_registry.get("pencil").eta_for_match({})
+    )
+    final = store.get_contest(contest["id"])
+    assert final["status"] == "finished"
+    assert final["official_results_ready"] == 1
+
+
+def test_group_estimate_prefers_per_group_advancement_like_lifecycle(
+    store: Store,
+):
+    """When both fields exist, four groups × Top1 overrides global Top8."""
+    users, bots = _mk_bots(store, 8, game_id="pencil")
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+    contest = manager.create(
+        users[0]["id"],
+        "group-advance-priority",
+        game_id="pencil",
+        stages=[
+            {
+                "key": "group",
+                "type": "group_double_round_robin",
+                "group_count": 4,
+                "advance_per_group": 1,
+                "advance_count": 8,
+            },
+            {"key": "ko", "type": "single_elimination"},
+        ],
+    )
+    for user, bot in zip(users, bots):
+        store.add_contest_entry(contest["id"], user["id"], bot["id"])
+
+    estimate = manager.estimate(contest["id"])
+
+    async def reach_ko():
+        await manager.start(contest["id"])
+        assert len(store.list_contest_pairings(contest["id"], stage_idx=0)) == 8
+        _complete_all_pairs(
+            store, contest["id"], 0, winner_fn=lambda _a, _b: 0
+        )
+        await manager.maybe_finish(contest["id"])
+
+    asyncio.run(reach_ko())
+    active_entries = [
+        entry
+        for entry in store.list_contest_entries(contest["id"])
+        if not entry["eliminated"]
+    ]
+    assert len(active_entries) == 4
+    assert len(store.list_contest_pairings(contest["id"], stage_idx=1)) == 2
+    assert estimate["estimated_matches"] == 11  # group DRR 8 + four-player KO 3.
+
+
 def _complete_all_pairs(store: Store, cid: int, stage_idx: int, *, winner_fn) -> int:
     """把某 stage 的所有 pending/running pairing 的 match 标完成（winner_fn(a,b)->0|1）。"""
     n = 0
@@ -481,6 +666,11 @@ def test_swiss_odd_multi_round_byes_are_scored_rotated_and_persisted(store: Stor
         }
         assert initial_standings[first_bye["entry_a_id"]]["points"] == 3
         assert initial_standings[first_bye["entry_a_id"]]["wins"] == 0
+        assert initial_standings[first_bye["entry_a_id"]]["byes"] == 1
+        assert {
+            row["byes"] for entry_id, row in initial_standings.items()
+            if entry_id != first_bye["entry_a_id"]
+        } == {0}
         assert first_bye["status"] == "completed" and first_bye["match_id"] is None
 
         for round_num in range(1, 4):
@@ -501,9 +691,307 @@ def test_swiss_odd_multi_round_byes_are_scored_rotated_and_persisted(store: Stor
         assert {pairing["entry_a_id"] for pairing in byes} == {
             entry["id"] for entry in store.list_contest_entries(cid)
         }
+        final_standings = manager.standings(cid, stage_idx=0)
+        assert {row["byes"] for row in final_standings} == {1}
+        assert all(row["wins"] + row["losses"] == 2 for row in final_standings)
+        assert all(
+            row["points"] == 3 * (row["wins"] + row["byes"])
+            for row in final_standings
+        )
         assert store.get_contest(cid)["status"] == "finished"
 
+        # Terminal lifecycle persists the same bye-inclusive points into both
+        # the stage snapshot and official ranking.  W/D/L remains match-only:
+        # the no-match bye is not a fake win in either live or durable rows.
+        standings_by_entry = {row["entry_id"]: row for row in final_standings}
+        stage_results = store.list_stage_results(cid, stage_idx=0)
+        assert len(stage_results) == 3
+        for row in stage_results:
+            standing = standings_by_entry[row["entry_id"]]
+            assert (
+                row["points"], row["wins"], row["draws"], row["losses"]
+            ) == (
+                standing["points"], standing["wins"],
+                standing["draws"], standing["losses"],
+            )
+            assert row["points"] == 3 * (row["wins"] + standing["byes"])
+            assert row["wins"] + row["draws"] + row["losses"] == 2
+
+        official = store.list_official_results(cid)
+        assert [row["rank"] for row in official] == [1, 2, 3]
+        assert {row["stage_idx"] for row in official} == {0}
+        assert {
+            row["entry_id"]: row["points"] for row in official
+        } == {
+            entry_id: standing["points"]
+            for entry_id, standing in standings_by_entry.items()
+        }
+        public_official = with_official_result_provenance(
+            store.get_contest(cid), official
+        )
+        assert {row["source_stage"] for row in public_official} == {0}
+
     asyncio.run(run())
+
+
+def _deleted_opponent_no_match_fixture(
+    store: Store, stage: dict
+) -> tuple[int, list[dict], list[dict], dict]:
+    """Persist a completed/no-match real pairing, then trigger FK SET NULL."""
+    users, bots = _mk_bots(store, 2)
+    contest_id = store.create_contest(
+        f"deleted-opponent-{stage['type']}",
+        users[0]["id"],
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )["id"]
+    entries = [
+        store.add_contest_entry(contest_id, user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    store.update_contest(contest_id, status="running", current_stage_idx=0)
+    pairing = store.add_contest_pairing(
+        contest_id,
+        bots[0]["id"],
+        bots[1]["id"],
+        status="completed",
+        stage_idx=0,
+        stage_key=stage.get("key") or "stage0",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+    assert store.delete_bot(bots[1]["id"])
+    persisted = next(
+        row
+        for row in store.list_contest_pairings(contest_id, stage_idx=0)
+        if row["id"] == pairing["id"]
+    )
+    assert persisted["entry_b_id"] == entries[1]["id"]
+    assert persisted["bot_b_id"] is None
+    assert persisted["match_id"] is None
+    assert persisted["status"] == "completed"
+    return contest_id, entries, bots, persisted
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        {"key": "swiss", "type": "swiss", "rounds": 2},
+        {"key": "rr", "type": "round_robin"},
+    ],
+)
+def test_deleted_opponent_no_match_blocks_swiss_and_round_robin_lifecycle(
+    store: Store, stage: dict
+):
+    """FK SET NULL cannot turn a real Swiss/RR opponent into a completed bye."""
+    contest_id, _entries, _bots, _pairing = _deleted_opponent_no_match_fixture(
+        store, stage
+    )
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+
+    assert manager._stage_done(contest_id, 0) is False
+    assert manager._has_unfinished_pairings(contest_id) is True
+    standings = manager.standings(contest_id, stage_idx=0)
+    assert {row["points"] for row in standings} == {0.0}
+    assert {row["byes"] for row in standings} == {0}
+    if stage["type"] == "swiss":
+        assert asyncio.run(
+            manager._maybe_next_swiss_round(contest_id, 0, stage)
+        ) is False
+    with pytest.raises(ValueError, match="仍有未完成对阵"):
+        asyncio.run(manager.finish(contest_id))
+    assert store.get_contest(contest_id)["status"] == "running"
+
+
+def test_deleted_opponent_no_match_blocks_elimination_advance(store: Store):
+    """KO must not promote seat A when side B survives only as entry identity."""
+    stage = {"key": "ko", "type": "single_elimination"}
+    contest_id, _entries, _bots, _pairing = _deleted_opponent_no_match_fixture(
+        store, stage
+    )
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+
+    assert manager._stage_done(contest_id, 0) is False
+    assert asyncio.run(
+        manager._maybe_next_elim_round(contest_id, 0, stage)
+    ) == "blocked"
+    assert manager._has_unfinished_pairings(contest_id) is True
+    with pytest.raises(ValueError, match="仍有未完成对阵"):
+        asyncio.run(manager.finish(contest_id))
+    assert store.get_contest(contest_id)["status"] == "running"
+
+
+def test_swiss_history_drift_blocks_later_round_instead_of_counting_fake_bye(
+    store: Store,
+):
+    """An FK-damaged R1 blocks R3 even when every R2 row is adjudicated."""
+    users, bots = _mk_bots(store, 3)
+    stage = {"key": "swiss", "type": "swiss", "rounds": 3}
+    contest_id = store.create_contest(
+        "swiss-bye-drift",
+        users[0]["id"],
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )["id"]
+    entries = [
+        store.add_contest_entry(contest_id, user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    store.update_contest(contest_id, status="running", current_stage_idx=0)
+
+    # R1 says B had a real opponent A, but the match was never bound.  Deleting
+    # old A nulls bot_b_id while entry_b_id remains, reproducing the drift that
+    # used to increment B's bye counter.
+    store.add_contest_pairing(
+        contest_id,
+        bots[1]["id"],
+        bots[0]["id"],
+        round_num=1,
+        status="completed",
+        stage_idx=0,
+        stage_key="swiss",
+        entry_a_id=entries[1]["id"],
+        entry_b_id=entries[0]["id"],
+    )
+    assert store.delete_bot(bots[0]["id"])
+    replacement_path = Path(store.path).resolve().parent / "bot-fixtures" / "replacement-a"
+    replacement_path.write_bytes(b"test fixture")
+    replacement = store.create_bot(
+        users[0]["id"],
+        "replacement-a",
+        binary_path=str(replacement_path),
+        format="elf",
+        game_id="holdem",
+    )
+    store.update_entry(contest_id, users[0]["id"], bot_id=replacement["id"])
+
+    # R2: replacement A beats B; C receives the sole authoritative bye.
+    match_id = "swiss-bye-drift-r2"
+    store.create_match(
+        match_id,
+        replacement["id"],
+        bots[1]["id"],
+        owner_id=users[0]["id"],
+        contest_id=contest_id,
+        match_type="contest",
+        game_id="holdem",
+    )
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        result={"deltas": [100, -100]},
+    )
+    store.add_contest_pairing(
+        contest_id,
+        replacement["id"],
+        bots[1]["id"],
+        round_num=2,
+        match_id=match_id,
+        status="completed",
+        stage_idx=0,
+        stage_key="swiss",
+        entry_a_id=entries[0]["id"],
+        entry_b_id=entries[1]["id"],
+    )
+    store.add_contest_pairing(
+        contest_id,
+        bots[2]["id"],
+        None,
+        round_num=2,
+        status="completed",
+        stage_idx=0,
+        stage_key="swiss",
+        entry_a_id=entries[2]["id"],
+        entry_b_id=None,
+    )
+
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+    assert asyncio.run(
+        manager._maybe_next_swiss_round(contest_id, 0, stage)
+    ) is False
+    pairings = store.list_contest_pairings(contest_id, stage_idx=0)
+    assert not any(pairing["round_num"] == 3 for pairing in pairings)
+    standings = {
+        row["entry_id"]: row for row in manager.standings(contest_id, stage_idx=0)
+    }
+    assert standings[entries[1]["id"]]["byes"] == 0
+    assert standings[entries[2]["id"]]["byes"] == 1
+    assert store.get_contest(contest_id)["status"] == "running"
+
+
+def test_swiss_fully_adjudicated_history_allows_next_round(store: Store):
+    """All earlier real matches completed plus strict byes may generate R3."""
+    users, bots = _mk_bots(store, 3)
+    stage = {"key": "swiss", "type": "swiss", "rounds": 3}
+    contest_id = store.create_contest(
+        "swiss-complete-history",
+        users[0]["id"],
+        game_id="holdem",
+        stages_json=json.dumps([stage]),
+    )["id"]
+    entries = [
+        store.add_contest_entry(contest_id, user["id"], bot["id"])
+        for user, bot in zip(users, bots)
+    ]
+    store.update_contest(contest_id, status="running", current_stage_idx=0)
+
+    for round_num, seats, bye_index in (
+        (1, (0, 1), 2),
+        (2, (0, 2), 1),
+    ):
+        match_id = f"swiss-complete-history-r{round_num}"
+        a_index, b_index = seats
+        store.create_match(
+            match_id,
+            bots[a_index]["id"],
+            bots[b_index]["id"],
+            owner_id=users[0]["id"],
+            contest_id=contest_id,
+            match_type="contest",
+            game_id="holdem",
+        )
+        store.update_match(
+            match_id,
+            status="completed",
+            winner=0,
+            result={"deltas": [100, -100]},
+        )
+        store.add_contest_pairing(
+            contest_id,
+            bots[a_index]["id"],
+            bots[b_index]["id"],
+            round_num=round_num,
+            match_id=match_id,
+            status="completed",
+            stage_idx=0,
+            stage_key="swiss",
+            entry_a_id=entries[a_index]["id"],
+            entry_b_id=entries[b_index]["id"],
+        )
+        store.add_contest_pairing(
+            contest_id,
+            bots[bye_index]["id"],
+            None,
+            round_num=round_num,
+            status="completed",
+            stage_idx=0,
+            stage_key="swiss",
+            entry_a_id=entries[bye_index]["id"],
+            entry_b_id=None,
+        )
+
+    manager = ContestManager(store, _FakeOrch(store))  # type: ignore[arg-type]
+    assert asyncio.run(
+        manager._maybe_next_swiss_round(contest_id, 0, stage)
+    ) is True
+    round_three = [
+        pairing
+        for pairing in store.list_contest_pairings(contest_id, stage_idx=0)
+        if pairing["round_num"] == 3
+    ]
+    assert len(round_three) == 2
+    assert sum(pairing["entry_b_id"] is None for pairing in round_three) == 1
 
 
 def test_single_elimination_generates_final(store: Store):

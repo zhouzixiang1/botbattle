@@ -26,7 +26,10 @@ def _build_default_templates() -> dict[str, dict[str, Any]]:
     from bzplat.backend.games import registry as _reg
 
     out: dict[str, dict[str, Any]] = {}
-    for gid in _reg.all_ids():
+    # all_ids() 是用于集合一致性校验的 frozenset，不能承担产品默认顺序；
+    # judge_games() 保留 GameRegistry 的注册顺序，使跨进程模板顺序确定。
+    for game in _reg.judge_games():
+        gid = str(game["game_id"])
         for t in _reg.get(gid).templates:
             out[t["id"]] = copy.deepcopy(t)
     return out
@@ -97,6 +100,38 @@ def list_templates(
     return [copy.deepcopy(t) for t in templates]
 
 
+def default_template_id(game_id: str | None = None) -> str:
+    """Return the code-owned default without embedding a game-name branch.
+
+    A game may mark one creation-enabled template ``recommended=true``.  If it
+    does not, registry order remains the deterministic compatibility fallback.
+    When the caller omits ``game_id``, the first creation-enabled template fixes
+    the compatibility-default game before recommendations are considered.  A
+    recommendation from another game therefore cannot change or break that
+    default.  Multiple recommendations inside the selected game fail closed.
+    """
+    templates = list_templates(game_id=game_id)
+    if not templates:
+        scope = f"游戏 {game_id}" if game_id is not None else "平台"
+        raise ValueError(f"{scope}没有可用于新建赛事的模板")
+    if game_id is None:
+        default_game_id = str(templates[0]["game_id"])
+        templates = [
+            template
+            for template in templates
+            if template.get("game_id") == default_game_id
+        ]
+    recommended = [
+        template
+        for template in templates
+        if template.get("recommended") is True
+    ]
+    if len(recommended) > 1:
+        scope = f"游戏 {game_id or templates[0]['game_id']}"
+        raise RuntimeError(f"{scope}存在多个推荐赛事模板")
+    return str((recommended or templates)[0]["id"])
+
+
 def _require_creation_enabled(template_id: str, template: dict[str, Any]) -> None:
     if template.get("creation_enabled", True) is False:
         raise ValueError(
@@ -125,7 +160,7 @@ def resolve_stages(
 
         gid = normalize_game_id(game_id)
         return tid, gid, copy.deepcopy(stages)
-    tid = "holdem_swiss_ko" if template_id is None else template_id
+    tid = default_template_id(game_id) if template_id is None else template_id
     tpl = get_template(tid)
     if not tpl:
         raise ValueError(f"未知模板: {tid}")
@@ -148,7 +183,7 @@ def resolve_template(
     game_id: str | None = None,
 ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
     """返回代码模板的 (template_id, game_id, stages, match_config)。"""
-    tid = "holdem_swiss_ko" if template_id is None else template_id
+    tid = default_template_id(game_id) if template_id is None else template_id
     tpl = None
     base = get_template(tid)
     if base:

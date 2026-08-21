@@ -55,6 +55,8 @@ interface Template {
   id: string
   name: string
   game_id: string
+  summary?: string
+  recommended?: boolean
 }
 
 // Radix Select 必须全生命周期保持受控且不能用空字符串；该值不可能通过后端
@@ -143,7 +145,7 @@ export default function Contests() {
           // 即使服务端过滤契约回退，也绝不让异游戏模板进入可提交状态。
           const tpls = (d.templates || []).filter((t) => t.game_id === requestedGame)
           setTemplates(tpls)
-          setTemplateId(tpls[0]?.id || '')
+          setTemplateId(tpls.find((template) => template.recommended)?.id || tpls[0]?.id || '')
           setTemplatesForGame(requestedGame)
         })
         .catch((err: unknown) => {
@@ -287,9 +289,24 @@ export default function Contests() {
                   onValueChange={(value) => { if (value && value !== TEMPLATE_PENDING_VALUE) setTemplateId(value) }}
                   disabled={templatesLoading || templates.length === 0}
                 >
-                  <SelectTrigger className="w-full"><SelectValue>{selectedTemplate?.name || templatePlaceholder}</SelectValue></SelectTrigger>
-                  <SelectContent>{templates.map((template) => <SelectItem key={template.id} value={template.id}>{template.name}</SelectItem>)}</SelectContent>
+                  <SelectTrigger className="w-full" aria-describedby="contest-template-summary">
+                    <SelectValue>
+                      {selectedTemplate
+                        ? `${selectedTemplate.name}${selectedTemplate.recommended ? ' · 推荐' : ''}`
+                        : templatePlaceholder}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {templates.map((template) => (
+                      <SelectItem key={template.id} value={template.id}>
+                        {template.name}{template.recommended ? ' · 推荐' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
                 </Select>
+                <p id="contest-template-summary" className="text-sm leading-relaxed text-muted-foreground">
+                  {selectedTemplate?.summary || '模板决定对阵覆盖、总场次与预计耗时。'}
+                </p>
                 {templateError && <ErrorMsg msg={templateError} className="text-xs" />}
               </div>
               <div className="space-y-1.5"><Label htmlFor="contest-title">标题</Label><Input id="contest-title" value={title} onChange={(event) => setTitle(event.target.value)} required /></div>
