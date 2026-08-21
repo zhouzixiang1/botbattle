@@ -4613,7 +4613,7 @@ test('Gomoku human canvas serializes its v2 move response envelope', async ({ pa
         },
         events: [
           {
-            type: 'match_start', size: 15, ruleset: 'gomoku_ccgc_2013_v1',
+            type: 'match_start', size: 15, ruleset: 'gomoku_ccgc_2013_five_move_two_v2',
             protocol_version: 2, time_budget_per_side: 900,
           },
           { type: 'turn', player: 1, color: 1, phase: 'normal_play', pass_allowed: true },
@@ -4622,7 +4622,7 @@ test('Gomoku human canvas serializes its v2 move response envelope', async ({ pa
             player: 1,
             request: {
               protocol_version: 2,
-              ruleset: 'gomoku_ccgc_2013_v1',
+              ruleset: 'gomoku_ccgc_2013_five_move_two_v2',
               phase: 'normal_play',
               me: 1,
               color: 1,

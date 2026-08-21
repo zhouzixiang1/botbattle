@@ -4760,7 +4760,7 @@ WIKI_PAGES: list[dict[str, str]] = [
     {"slug": "bot-dev", "file": "BOT_DEV.md", "title": "Bot 开发指南", "summary": "从零编写一个 Bot：样例、编译、上传、调试"},
     {"slug": "local-ai", "file": "LOCAL_AI.md", "title": "本地 Bot 接入", "summary": "在自己的电脑运行 Bot，由平台负责裁判、回放与技术判定"},
     {"slug": "texas", "file": "TEXAS.md", "title": "德州扑克 (TexasHoldem2p)", "summary": "固定 70 手规则、请求字段与完整示例"},
-    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "指定开局、交换、五手 N 打、禁手与 v2 示例"},
+    {"slug": "gomoku", "file": "GOMOKU.md", "title": "五子棋 (Gomoku)", "summary": "指定开局、交换、五手二打、禁手与 v2 示例"},
     {"slug": "pencil", "file": "PENCIL.md", "title": "点格棋 (Pencil)", "summary": "N=6 规则、900 秒棋钟、协议与示例"},
     {"slug": "guide", "file": "GUIDE.md", "title": "平台功能指南", "summary": "对局/裁判/数值评分/等级/锦标赛/Bot详情/用户主页/社交/通知/设置——一页看全"},
 ]

@@ -6,11 +6,12 @@ import type { SeatInfo } from '@/games/canvas-types'
 import { GomokuCanvasRenderer } from '@/games/gomoku/canvas'
 import { GomokuHumanTurnSurface } from '@/games/gomoku/human-actions'
 import {
-  GOMOKU_COMPETITION_RULESET,
   gomokuColorLabel,
   gomokuForbiddenLabel,
   gomokuPhaseLabel,
   gomokuSeatDetail,
+  isCurrentGomokuCompetitionRuleset,
+  isGomokuCompetitionRuleset,
   reduceGomokuEvents,
   type GomokuViewModel,
 } from '@/games/gomoku/reducer'
@@ -35,7 +36,7 @@ function actorColor(event: RawEvent): string {
 }
 
 function phaseSuffix(event: RawEvent): string {
-  return event.phase ? ` · ${gomokuPhaseLabel(event.phase)}` : ''
+  return event.phase ? ` · ${gomokuPhaseLabel(event.phase, event.n)}` : ''
 }
 
 function pointText(value: unknown): string {
@@ -53,8 +54,11 @@ function displaySeconds(value: unknown): string {
 function describeGomokuEvent(event: RawEvent, seats?: SeatInfo[]): string {
   const actor = (value: unknown) => eventSeatSubject(seats, value, `座位 ${displaySeat(value)}`)
   if (event.type === 'match_start') {
-    return event.ruleset === GOMOKU_COMPETITION_RULESET
-      ? '对局开始 · 全国竞赛规则 · 15×15'
+    if (isCurrentGomokuCompetitionRuleset(event.ruleset)) {
+      return '对局开始 · 现行五手二打规则 · 15×15'
+    }
+    return isGomokuCompetitionRuleset(event.ruleset)
+      ? '对局开始 · 历史竞赛规则 · 15×15'
       : '对局开始 · 旧版自由五子棋'
   }
   if (event.type === 'turn') {
@@ -64,10 +68,10 @@ function describeGomokuEvent(event: RawEvent, seats?: SeatInfo[]): string {
     const request = event.request && typeof event.request === 'object'
       ? event.request as Record<string, unknown>
       : null
-    return `轮到你${request?.phase ? ` · ${gomokuPhaseLabel(request.phase)}` : ''}`
+    return `轮到你${request?.phase ? ` · ${gomokuPhaseLabel(request.phase, request.n)}` : ''}`
   }
   if (event.type === 'opening') {
-    return `${actor(event.player)}提交指定开局 ${String(event.opening_code || '')} · N=${String(event.n)} · 黑1 ${pointText(event.black1)} · 白2 ${pointText(event.white2)} · 黑3 ${pointText(event.black3)}`
+    return `${actor(event.player)}提交指定开局 ${String(event.opening_code || '')} · ${gomokuPhaseLabel('black5_candidates', event.n)} · 黑1 ${pointText(event.black1)} · 白2 ${pointText(event.white2)} · 黑3 ${pointText(event.black3)}`
   }
   if (event.type === 'swap') {
     const mapping = Array.isArray(event.seat_colors) && event.seat_colors.length === 2
@@ -110,7 +114,7 @@ function turnLabelForRequest(request: Record<string, unknown> | null): string {
   if (phase === 'opening_proposal') return '轮到你提交指定开局'
   if (phase === 'swap_choice') return '轮到你决定是否交换棋色'
   if (phase === 'white4') return '轮到你落白 4'
-  if (phase === 'black5_candidates') return '轮到你提交黑 5 候选'
+  if (phase === 'black5_candidates') return '轮到你提交五手二打候选'
   if (phase === 'black5_select') return '轮到你保留黑 5'
   if (phase === 'normal_play') return '轮到你落子或 PASS'
   return '轮到你操作'
@@ -140,7 +144,7 @@ export const gomokuSpec: GameViewSpec = {
     TurnSurface: GomokuHumanTurnSurface,
     endSummary: (vm) => {
       const state = vm as GomokuViewModel
-      if (state.ruleset !== GOMOKU_COMPETITION_RULESET) return null
+      if (!isGomokuCompetitionRuleset(state.ruleset)) return null
       const opening = state.openingCode ? `开局 ${state.openingCode}` : '指定开局'
       return `${opening}${state.n !== null ? ` · ${state.n} 打` : ''} · 座位 1 执${gomokuColorLabel(state.seatColors[0])} / 座位 2 执${gomokuColorLabel(state.seatColors[1])}`
     },

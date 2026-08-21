@@ -1,10 +1,11 @@
 import { Badge } from '@/components/ui/badge'
 import type { GameAuxiliaryProps } from '@/games/base'
 import {
-  GOMOKU_COMPETITION_RULESET,
   gomokuColorLabel,
   gomokuForbiddenLabel,
   gomokuPhaseLabel,
+  isCurrentGomokuCompetitionRuleset,
+  isGomokuCompetitionRuleset,
   type GomokuViewModel,
 } from '@/games/gomoku/reducer'
 
@@ -16,7 +17,8 @@ function selectedLabel(vm: GomokuViewModel): string | null {
 
 export function GomokuReplaySummary({ vm }: GameAuxiliaryProps) {
   const state = vm as GomokuViewModel
-  const competition = state.ruleset === GOMOKU_COMPETITION_RULESET
+  const competition = isGomokuCompetitionRuleset(state.ruleset)
+  const currentCompetition = isCurrentGomokuCompetitionRuleset(state.ruleset)
   const selected = selectedLabel(state)
 
   return (
@@ -25,9 +27,9 @@ export function GomokuReplaySummary({ vm }: GameAuxiliaryProps) {
       className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-xs"
     >
       <Badge variant={competition ? 'default' : 'secondary'}>
-        {competition ? '全国竞赛规则' : '旧版自由五子棋'}
+        {currentCompetition ? '现行五手二打规则' : competition ? '历史竞赛规则' : '旧版自由五子棋'}
       </Badge>
-      <span className="font-medium text-foreground">{gomokuPhaseLabel(state.phase)}</span>
+      <span className="font-medium text-foreground">{gomokuPhaseLabel(state.phase, state.n)}</span>
       {state.openingCode && (
         <span data-testid="gomoku-opening-summary" className="text-muted-foreground">
           开局 {state.openingCode}{state.n !== null ? ` · ${state.n} 打` : ''}

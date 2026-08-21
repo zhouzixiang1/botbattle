@@ -9,6 +9,7 @@ import pytest
 from bzplat.backend.games.gomoku import protocol as proto
 from bzplat.backend.games.gomoku.engine import GomokuSession
 from bzplat.backend.games.gomoku.gomoku_judge import (
+    BLACK5_CANDIDATE_COUNT,
     OPENING_CATALOG,
     new_board,
     validate_black5_candidates,
@@ -49,10 +50,12 @@ def test_opening_geometry_is_exactly_26_symmetry_classes():
     assert sum(key[0] == "straight" for key in OPENING_CATALOG) == 13
     assert sum(key[0] == "diagonal" for key in OPENING_CATALOG) == 13
     assert validate_opening((7, 8), (8, 8), 2)
-    assert validate_opening((8, 8), (9, 7), 5)
+    assert validate_opening((8, 8), (9, 7), 2)
     assert validate_opening((7, 9), (8, 8), 2) is None
     assert validate_opening((7, 8), (10, 10), 2) is None
     assert validate_opening((7, 8), (8, 8), 1) is None
+    assert validate_opening((7, 8), (8, 8), 3) is None
+    assert BLACK5_CANDIDATE_COUNT == 2
 
 
 def _four_stone_board(
@@ -89,6 +92,20 @@ def test_black5_candidates_only_need_distinct_coordinates_without_residual_symme
     # 白2/白4 与黑1/黑3 的彩色布局打破所有非恒等 D4 对称；
     # 因此即使两点相对棋盘中心旋转对称，在当前盘面下仍不同形。
     assert validate_black5_candidates(board, [(0, 0), (14, 14)])
+
+
+@pytest.mark.parametrize(
+    "candidates",
+    [
+        [(0, 0)],
+        [(0, 0), (1, 0), (2, 0)],
+        [(7, 7), (0, 0)],  # occupied by black 1
+        [(-1, 0), (0, 0)],
+        [(15, 0), (0, 0)],
+    ],
+)
+def test_black5_candidates_require_exactly_two_empty_in_bounds_points(candidates):
+    assert not validate_black5_candidates(_four_stone_board(), candidates)
 
 
 def test_engine_rejects_distinct_coordinates_that_are_same_shape():
@@ -151,8 +168,8 @@ def test_duplicate_candidates_are_game_illegal_not_protocol_fault():
     assert incident["why"] == "candidate_not_empty_distinct_shape"
 
 
-@pytest.mark.parametrize("n", [1, 6])
-def test_opening_n_range_is_game_illegal_not_protocol_fault(n: int):
+@pytest.mark.parametrize("n", [0, 1, 3, 4, 5, 6])
+def test_opening_non_two_n_is_game_illegal_not_protocol_fault(n: int):
     opening = {
         "action": "opening",
         "white2": {"x": 7, "y": 8},
@@ -168,9 +185,11 @@ def test_opening_n_range_is_game_illegal_not_protocol_fault(n: int):
 
     assert result.winner == 1
     assert result.reason == "illegal_opening"
+    incident = next(event for event in result.events if event["type"] == "illegal")
+    assert incident["why"] == "five_move_candidate_count_must_be_two"
 
 
-@pytest.mark.parametrize("count", [1, 6])
+@pytest.mark.parametrize("count", [0, 1, 3, 4, 5, 6])
 def test_candidate_count_is_game_illegal_not_protocol_fault(count: int):
     wrong_count_action = {
         "action": "black5_candidates",
@@ -228,11 +247,13 @@ def test_v2_protocol_rejects_legacy_xy_and_accepts_every_action_shape():
     assert proto.validate_response_payload({"action": "black5_select", "index": 1})
 
 
-def test_opening_swap_n_choice_and_double_pass_are_replayed_without_candidate_stones():
+def test_opening_swap_fixed_two_and_double_pass_are_replayed_without_candidate_stones():
     calls: list[tuple[int, str, int | None]] = []
+    requests: list[dict] = []
 
     async def decide(seat: int, request: dict):
         calls.append((seat, request["phase"], request["color"]))
+        requests.append(request)
         return _base_action(request, swap=True)
 
     result = asyncio.run(GomokuSession().run_async(decide))
@@ -250,6 +271,16 @@ def test_opening_swap_n_choice_and_double_pass_are_replayed_without_candidate_st
         proto.PHASE_BLACK5_CANDIDATES,
         proto.PHASE_BLACK5_SELECT,
     ]
+    assert requests[0]["n_range"] == [
+        BLACK5_CANDIDATE_COUNT,
+        BLACK5_CANDIDATE_COUNT,
+    ]
+    assert "n" not in requests[0]
+    assert all(
+        request["n"] == BLACK5_CANDIDATE_COUNT
+        for request in requests[1:]
+    )
+    assert all("n_range" not in request for request in requests[1:])
     # swap 后：seat0 执白，故白4/候选选择归 seat0；seat1 执黑提交 N 点。
     assert [seat for seat, _, _ in calls[:5]] == [0, 1, 0, 1, 0]
     candidate_event = next(e for e in result.events if e["type"] == "black5_candidates")
@@ -258,6 +289,33 @@ def test_opening_swap_n_choice_and_double_pass_are_replayed_without_candidate_st
     assert selected["point"] == {"x": 9, "y": 9}
     assert result.board_grid[9][9] == 0
     assert result.board_grid[5][5] == -1
+
+
+def test_request_builder_pins_two_and_rejects_every_non_two_override():
+    board = new_board()
+    opening = proto.build_request(
+        phase=proto.PHASE_OPENING,
+        me=0,
+        color=0,
+        board=board,
+        seat_colors=[0, 1],
+    )
+    assert opening["n_range"] == [
+        BLACK5_CANDIDATE_COUNT,
+        BLACK5_CANDIDATE_COUNT,
+    ]
+    assert "n" not in opening
+
+    for n in (0, 1, 3, 4, 5, 6, True):
+        with pytest.raises(ValueError, match="固定为 2"):
+            proto.build_request(
+                phase=proto.PHASE_BLACK5_CANDIDATES,
+                me=0,
+                color=0,
+                board=board,
+                seat_colors=[0, 1],
+                n=n,
+            )
 
 
 def test_legacy_xy_bot_loses_at_opening_instead_of_silently_falling_back():

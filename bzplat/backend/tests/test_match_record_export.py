@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password
@@ -17,6 +18,7 @@ from bzplat.backend.store.schema import (
     GOMOKU_CURRENT_RULESET,
     GOMOKU_LEGACY_PROTOCOL,
     GOMOKU_LEGACY_RULESET,
+    GOMOKU_PREVIOUS_RULESET,
 )
 
 
@@ -119,7 +121,7 @@ def test_current_gomoku_record_is_public_lossless_deterministic_and_downloadable
             "game_id": "gomoku",
             "size": 15,
             "first": 0,
-            "ruleset": "gomoku_ccgc_2013_v1",
+            "ruleset": GOMOKU_CURRENT_RULESET,
             "protocol_version": GOMOKU_EVENT_PROTOCOL_VERSION,
             "private": private,
         },
@@ -252,7 +254,7 @@ def test_current_gomoku_record_is_public_lossless_deterministic_and_downloadable
     }
     assert record["format"] == "botbattle.gomoku.record"
     assert record["format_version"] == 1
-    assert record["match"]["ruleset_version"] == "gomoku_ccgc_2013_v1"
+    assert record["match"]["ruleset_version"] == GOMOKU_CURRENT_RULESET
     assert record["match"]["protocol_version"] == "gomoku_action_v2"
     assert record["updated_at"] == replay["updated_at"]
     assert record["event_count"] == replay["event_count"]
@@ -367,6 +369,168 @@ def test_legacy_gomoku_record_uses_frozen_contract_and_algebraic_coordinates(
     assert [event["stone_no"] for event in moves] == [1, 2, 3]
     assert [event["stone_color"] for event in moves] == ["black", "white", "black"]
     assert [event["algebraic"] for event in moves] == ["A15", "O1", "H8"]
+
+
+@pytest.mark.parametrize("candidate_count", [3, 4])
+def test_previous_competition_record_preserves_and_enriches_historical_n(
+    tmp_path, candidate_count
+):
+    client, store, _, _, bot_a, bot_b, _, _ = _fixture(tmp_path)
+    match_id = f"previous-competition-n{candidate_count}"
+    _create_gomoku_match(store, match_id, bot_a["id"], bot_b["id"])
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        reason="five",
+        result={"rounds_played": 5, "deltas": [1, -1], "normalized_delta": 1},
+    )
+    with store._tx() as conn:
+        conn.execute(
+            "UPDATE matches_gomoku SET ruleset_version=? WHERE id=?",
+            (GOMOKU_PREVIOUS_RULESET, match_id),
+        )
+    points = [
+        {"x": 9, "y": 9},
+        {"x": 5, "y": 5},
+        {"x": 10, "y": 8},
+        {"x": 4, "y": 6},
+    ][:candidate_count]
+    events = [
+        {
+            "type": "match_start",
+            "game_id": "gomoku",
+            "size": 15,
+            "ruleset": GOMOKU_PREVIOUS_RULESET,
+            "protocol_version": GOMOKU_EVENT_PROTOCOL_VERSION,
+        },
+        {
+            "type": "opening",
+            "player": 0,
+            "n": candidate_count,
+            "black1": {"x": 7, "y": 7},
+            "white2": {"x": 7, "y": 8},
+            "black3": {"x": 8, "y": 8},
+        },
+        {"type": "swap", "player": 1, "swapped": False},
+        {
+            "type": "move",
+            "player": 1,
+            "color": 1,
+            "phase": "white4",
+            "x": 6,
+            "y": 8,
+            "move_index": 4,
+        },
+        {
+            "type": "black5_candidates",
+            "player": 0,
+            "n": candidate_count,
+            "points": points,
+        },
+        {
+            "type": "black5_selected",
+            "player": 1,
+            "index": candidate_count - 1,
+            "point": points[-1],
+        },
+        {
+            "type": "move",
+            "player": 0,
+            "color": 0,
+            "phase": "black5_select",
+            "x": points[-1]["x"],
+            "y": points[-1]["y"],
+            "move_index": 5,
+        },
+        {"type": "match_end", "winner": 0, "reason": "five"},
+    ]
+    store.upsert_replay(match_id, json.dumps(events))
+
+    response = client.get(f"/api/matches/{match_id}/record")
+    assert response.status_code == 200
+    record = response.json()
+    candidate = next(
+        event for event in record["events"] if event["type"] == "black5_candidates"
+    )
+    assert candidate["n"] == candidate_count
+    assert candidate["points"] == points
+    assert len(candidate["algebraic_points"]) == candidate_count
+    assert candidate["candidate_for_stone_no"] == 5
+    selected = next(
+        event for event in record["events"] if event["type"] == "black5_selected"
+    )
+    assert selected["selected_stone_no"] == 5
+    assert selected["algebraic"] == candidate["algebraic_points"][-1]
+
+
+def test_fixed_two_record_keeps_malformed_historical_n3_lossless_without_deriving(
+    tmp_path,
+):
+    client, store, _, _, bot_a, bot_b, _, _ = _fixture(tmp_path)
+    match_id = "fixed-two-malformed-n3"
+    _create_gomoku_match(store, match_id, bot_a["id"], bot_b["id"])
+    store.update_match(
+        match_id,
+        status="completed",
+        winner=0,
+        reason="five",
+        result={"rounds_played": 4, "deltas": [1, -1], "normalized_delta": 1},
+    )
+    points = [{"x": 9, "y": 9}, {"x": 5, "y": 5}, {"x": 10, "y": 8}]
+    events = [
+        {
+            "type": "match_start",
+            "game_id": "gomoku",
+            "size": 15,
+            "ruleset": GOMOKU_CURRENT_RULESET,
+            "protocol_version": GOMOKU_EVENT_PROTOCOL_VERSION,
+        },
+        {
+            "type": "opening",
+            "player": 0,
+            "n": 3,
+            "black1": {"x": 7, "y": 7},
+            "white2": {"x": 7, "y": 8},
+            "black3": {"x": 8, "y": 8},
+        },
+        {
+            "type": "move",
+            "player": 1,
+            "color": 1,
+            "x": 6,
+            "y": 8,
+            "move_index": 4,
+        },
+        {"type": "black5_candidates", "player": 0, "n": 3, "points": points},
+        {
+            "type": "black5_selected",
+            "player": 1,
+            "index": 0,
+            "point": points[0],
+        },
+        {"type": "match_end", "winner": 0, "reason": "five"},
+    ]
+    store.upsert_replay(match_id, json.dumps(events))
+
+    response = client.get(f"/api/matches/{match_id}/record")
+    assert response.status_code == 200
+    candidate = next(
+        event
+        for event in response.json()["events"]
+        if event["type"] == "black5_candidates"
+    )
+    assert candidate["n"] == 3
+    assert candidate["points"] == points
+    assert "algebraic_points" not in candidate
+    assert "candidate_for_stone_no" not in candidate
+    selected = next(
+        event
+        for event in response.json()["events"]
+        if event["type"] == "black5_selected"
+    )
+    assert "algebraic" not in selected
+    assert "selected_stone_no" not in selected
 
 
 def test_aborted_gomoku_record_uses_authoritative_public_terminal(tmp_path):

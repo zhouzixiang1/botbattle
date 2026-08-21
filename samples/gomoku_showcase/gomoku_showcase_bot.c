@@ -1,7 +1,7 @@
 /* 全国机器博弈竞赛五子棋 v2 的确定性赛事演示 Bot。
  *
  * PROFILE=1 tactical、2 steady、3 foundation。三档均覆盖指定开局、
- * 三手交换、N 打与 PASS，并仅从当前 request 的完整棋盘决策；没有随机数、
+ * 三手交换、五手二打与 PASS，并仅从当前 request 的完整棋盘决策；没有随机数、
  * 时钟或进程内历史，因此 Traditional / LongRunning 的轨迹一致。
  */
 #define _GNU_SOURCE
@@ -20,6 +20,7 @@
 #define SIZE 15
 #define CELLS (SIZE * SIZE)
 #define EMPTY (-1)
+#define BLACK5_CANDIDATE_COUNT 2
 #define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 static int board[SIZE][SIZE];
@@ -37,19 +38,6 @@ static const char *last_occurrence(const char *text, const char *needle) {
 static const char *current_request(const char *line) {
     const char *request = last_occurrence(line, "\"protocol_version\"");
     return request ? request : last_occurrence(line, "\"phase\"");
-}
-
-static int number_after(const char *text, const char *key, int fallback) {
-    char pattern[40];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *cursor = strstr(text, pattern);
-    if (!cursor) return fallback;
-    cursor = strchr(cursor + strlen(pattern), ':');
-    if (!cursor) return fallback;
-    cursor++;
-    while (isspace((unsigned char)*cursor)) cursor++;
-    if (*cursor != '-' && !isdigit((unsigned char)*cursor)) return fallback;
-    return (int)strtol(cursor, NULL, 10);
 }
 
 static int string_after(
@@ -172,10 +160,9 @@ static int choose_candidate(int index, int *out_x, int *out_y) {
     return 0;
 }
 
-static void emit_candidates(int count) {
-    if (count < 2 || count > 5) count = 2;
+static void emit_candidates(void) {
     fputs("{\"response\":{\"action\":\"black5_candidates\",\"points\":[", stdout);
-    for (int index = 0; index < count; index++) {
+    for (int index = 0; index < BLACK5_CANDIDATE_COUNT; index++) {
         int x = -99, y = -99;
         choose_candidate(index, &x, &y);
         if (index) fputc(',', stdout);
@@ -201,7 +188,7 @@ static void respond(const char *request) {
         choose_white4(&x, &y);
         printf("{\"response\":{\"action\":\"move\",\"x\":%d,\"y\":%d}}\n", x, y);
     } else if (strcmp(phase, "black5_candidates") == 0) {
-        emit_candidates(number_after(request, "n", 2));
+        emit_candidates();
     } else if (strcmp(phase, "black5_select") == 0) {
         fputs("{\"response\":{\"action\":\"black5_select\",\"index\":0}}\n", stdout);
     } else if (strcmp(phase, "normal_play") == 0) {

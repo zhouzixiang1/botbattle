@@ -18,12 +18,17 @@ from bzplat.backend.store.schema import (
     GOMOKU_CURRENT_RULESET,
     GOMOKU_LEGACY_PROTOCOL,
     GOMOKU_LEGACY_RULESET,
+    GOMOKU_PREVIOUS_RULESET,
 )
 
 
 FORMAT = "botbattle.gomoku.record"
 FORMAT_VERSION = 1
 _CURRENT_CONTRACT = (GOMOKU_CURRENT_RULESET, GOMOKU_CURRENT_PROTOCOL)
+_PREVIOUS_COMPETITION_CONTRACT = (
+    GOMOKU_PREVIOUS_RULESET,
+    GOMOKU_CURRENT_PROTOCOL,
+)
 _LEGACY_CONTRACT = (GOMOKU_LEGACY_RULESET, GOMOKU_LEGACY_PROTOCOL)
 
 _MATCH_FIELDS = (
@@ -146,7 +151,9 @@ def _contract_generation(match: dict[str, Any], events: list[dict[str, Any]]) ->
         raise MatchRecordExportError("record source is not a Gomoku match")
     pair = (match.get("ruleset_version"), match.get("protocol_version"))
     if pair == _CURRENT_CONTRACT:
-        generation = "current"
+        generation = "fixed_two"
+    elif pair == _PREVIOUS_COMPETITION_CONTRACT:
+        generation = "competition_variable"
     elif pair == _LEGACY_CONTRACT:
         generation = "legacy"
     else:
@@ -156,7 +163,7 @@ def _contract_generation(match: dict[str, Any], events: list[dict[str, Any]]) ->
     for event in events:
         if event.get("type") != "match_start":
             continue
-        if generation == "current":
+        if generation != "legacy":
             # The persisted Match contract uses the stable protocol identifier
             # ``gomoku_action_v2``.  Replay events intentionally carry the
             # wire-format's numeric schema version (currently ``2``), as
@@ -169,7 +176,7 @@ def _contract_generation(match: dict[str, Any], events: list[dict[str, Any]]) ->
             }
             if any(event.get(key) != value for key, value in expected.items()):
                 raise MatchRecordExportError(
-                    "current match_start conflicts with its frozen contract"
+                    "competition match_start conflicts with its frozen contract"
                 )
         else:
             expected = {
@@ -201,6 +208,7 @@ def _enrich_events(
     events: list[dict[str, Any]], *, generation: str
 ) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
+    competition = generation in {"fixed_two", "competition_variable"}
     next_stone_no = 1
     numbering_reliable = True
     opening_established = generation == "legacy"
@@ -226,7 +234,7 @@ def _enrich_events(
         if event_type == "opening":
             stones = _opening_stones(event)
             if (
-                generation == "current"
+                competition
                 and numbering_reliable
                 and not opening_established
                 and next_stone_no == 1
@@ -257,7 +265,7 @@ def _enrich_events(
 
             persisted = _exact_int(event.get("move_index"))
             index_ok = False
-            if generation == "current":
+            if competition:
                 index_ok = persisted == next_stone_no
             elif persisted is not None:
                 if legacy_index_base is None:
@@ -268,7 +276,7 @@ def _enrich_events(
                 if legacy_index_base is not None:
                     index_ok = persisted == next_stone_no - (1 - legacy_index_base)
 
-            if generation == "current":
+            if competition:
                 # PASS consumes a turn without placing a stone, so color can no
                 # longer be inferred from stone-number parity.  Current events
                 # carry the authoritative color explicitly (also after swap).
@@ -288,7 +296,7 @@ def _enrich_events(
                     )
                 )
             selection_ok = True
-            if generation == "current" and next_stone_no == 5:
+            if competition and next_stone_no == 5:
                 selection_ok = bool(
                     selected_state
                     and selected_state[1] == next_stone_no
@@ -333,12 +341,15 @@ def _enrich_events(
                 else []
             )
             complete = bool(
-                generation == "current"
+                competition
                 and numbering_reliable
                 and opening_established
                 and next_stone_no == 5
-                and n is not None
-                and 2 <= n <= 5
+                and (
+                    n == 2
+                    if generation == "fixed_two"
+                    else n is not None and 2 <= n <= 5
+                )
                 and len(parsed_points) == n
                 and all(point is not None for point in parsed_points)
                 and len(set(parsed_points)) == n

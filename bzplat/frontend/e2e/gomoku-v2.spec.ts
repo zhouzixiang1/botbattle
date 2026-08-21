@@ -2,7 +2,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { monitorBrowser } from './helpers'
 
-const RULESET = 'gomoku_ccgc_2013_v1'
+const RULESET = 'gomoku_ccgc_2013_five_move_two_v2'
+const PREVIOUS_COMPETITION_RULESET = 'gomoku_ccgc_2013_v1'
 
 type Point = { x: number; y: number }
 type Fixture = {
@@ -22,10 +23,10 @@ function boardWith(stones: Array<Point & { color: 0 | 1 }>) {
   return board
 }
 
-function matchStart() {
+function matchStart(ruleset = RULESET) {
   return {
     type: 'match_start', game_id: 'gomoku', size: 15,
-    ruleset: RULESET, protocol_version: 2, time_budget_per_side: 900,
+    ruleset, protocol_version: 2, time_budget_per_side: 900,
   }
 }
 
@@ -388,7 +389,7 @@ test('live Gomoku match does not expose a partial record download', async ({ pag
   await monitor.expectClean(optionalStrictModeReplayAbort(id))
 })
 
-test('competition replay exposes opening, swap, N candidates, retained point and forbidden adjudication', async ({ page }, testInfo) => {
+test('competition replay exposes opening, swap, two candidates, retained point and forbidden adjudication', async ({ page }, testInfo) => {
   await mockAnonymousAuth(page)
   const monitor = monitorBrowser(page)
   const id = 'gomoku-v2-competition-replay'
@@ -447,7 +448,7 @@ test('competition replay exposes opening, swap, N candidates, retained point and
   await jump.click()
 
   const summary = page.getByTestId('gomoku-replay-summary')
-  await expect(summary).toContainText('全国竞赛规则')
+  await expect(summary).toContainText('现行五手二打规则')
   await expect(summary).toContainText('开局 D1 · 2 打')
   await expect(summary).toContainText('已交换棋色')
   await expect(summary).toContainText('座位 1 执白 · 座位 2 执黑')
@@ -467,6 +468,49 @@ test('competition replay exposes opening, swap, N candidates, retained point and
   expect(canvasBox).not.toBeNull()
   expect((canvasBox?.width ?? 0) / (canvasBox?.height ?? 1)).toBeCloseTo(1, 1)
   await page.screenshot({ path: testInfo.outputPath('gomoku-v2-mobile.png'), fullPage: true })
+  await monitor.expectClean(optionalStrictModeReplayAbort(id))
+})
+
+test('historical three-candidate replay keeps its authoritative count', async ({ page }) => {
+  await mockAnonymousAuth(page)
+  const monitor = monitorBrowser(page)
+  const id = 'gomoku-v2-historical-three-candidates'
+  const board4 = boardWith([...firstThree, { x: 6, y: 7, color: 1 }])
+  const events = [
+    matchStart(PREVIOUS_COMPETITION_RULESET),
+    { type: 'turn', player: 0, color: 0, phase: 'opening_proposal' },
+    { ...opening, n: 3 },
+    { type: 'turn', player: 1, color: 1, phase: 'swap_choice' },
+    { type: 'swap', player: 1, swapped: false, seat_colors: [0, 1] },
+    { type: 'move', player: 1, color: 1, x: 6, y: 7, phase: 'white4', move_index: 4 },
+    { type: 'turn', player: 0, color: 0, phase: 'black5_candidates' },
+    {
+      type: 'black5_candidates', player: 0, n: 3,
+      points: [{ x: 6, y: 6 }, { x: 8, y: 6 }, { x: 9, y: 9 }],
+    },
+    {
+      type: 'match_end', game_id: 'gomoku', ruleset: PREVIOUS_COMPETITION_RULESET, protocol_version: 2,
+      winner: 0, reason: 'five', moves: 5, opening_code: 'D1', n: 3,
+      seat_colors: [0, 1], board: board4,
+    },
+  ]
+  await mockReplay(page, id, events, 'five', 0)
+
+  await page.goto(`/#/match/${id}`)
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
+  const slider = page.getByRole('slider')
+  await slider.press('Home')
+  for (let index = 0; index < 6; index += 1) await slider.press('ArrowRight')
+
+  const summary = page.getByTestId('gomoku-replay-summary')
+  await expect(page.getByTestId('playback-position')).toContainText('事件 7/9')
+  await expect(summary).toContainText('历史竞赛规则')
+  await expect(summary).toContainText('五手三打')
+  await expect(summary).toContainText('开局 D1 · 3 打')
+  await expect(page.getByTestId('match-timeline')).toContainText('五手三打')
+
+  await slider.press('ArrowRight')
+  await expect(page.getByTestId('gomoku-candidate-summary')).toContainText('候选 3 点')
   await monitor.expectClean(optionalStrictModeReplayAbort(id))
 })
 
@@ -528,7 +572,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
     opening: {
       humanSeat: 0,
       request: request('opening_proposal', 0, 0, [0, 1], emptyBoard(), {
-        fixed_black1: { x: 7, y: 7 }, n_range: [2, 5],
+        fixed_black1: { x: 7, y: 7 }, n_range: [2, 2],
       }),
       events: [matchStart(), { type: 'turn', player: 0, color: 0, phase: 'opening_proposal' }],
     },
@@ -546,6 +590,15 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
       ],
     },
     candidates: {
+      humanSeat: 1,
+      request: request('black5_candidates', 1, 0, [1, 0], board4, { n: 2 }),
+      events: [
+        matchStart(), opening, { type: 'swap', player: 1, swapped: true, seat_colors: [1, 0] },
+        { type: 'move', player: 0, color: 1, x: 6, y: 7, phase: 'white4', move_index: 4 },
+        { type: 'turn', player: 1, color: 0, phase: 'black5_candidates' },
+      ],
+    },
+    'candidate-keyboard': {
       humanSeat: 1,
       request: request('black5_candidates', 1, 0, [1, 0], board4, { n: 2 }),
       events: [
@@ -603,7 +656,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
     closed: {
       humanSeat: 0,
       request: request('opening_proposal', 0, 0, [0, 1], emptyBoard(), {
-        fixed_black1: { x: 7, y: 7 }, n_range: [2, 5],
+        fixed_black1: { x: 7, y: 7 }, n_range: [2, 2],
       }),
       pending: false,
       events: [
@@ -612,7 +665,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
         {
           type: 'your_turn', player: 0,
           request: request('opening_proposal', 0, 0, [0, 1], emptyBoard(), {
-            fixed_black1: { x: 7, y: 7 }, n_range: [2, 5],
+            fixed_black1: { x: 7, y: 7 }, n_range: [2, 2],
           }),
         },
         { type: 'time_used', seat: 0, used: 1, remaining: 899, budget: 900 },
@@ -660,10 +713,12 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
 
   await page.goto('/#/play/gomoku-v2-human-opening')
   await expect(page.getByTestId('gomoku-human-phase')).toHaveText('指定开局')
+  await expect(page.getByTestId('gomoku-human-surface')).toContainText('五手二打固定提交 2 个候选')
+  await expect(page.getByTestId('gomoku-opening-controls').getByText('N 值', { exact: true })).toHaveCount(0)
+  await expect(page.getByTestId('gomoku-opening-controls').getByRole('button', { name: '3', exact: true })).toHaveCount(0)
   let canvas = page.getByRole('button', { name: /五子棋对局画面/ })
   await clickGrid(canvas, { x: 7, y: 8 })
   await clickGrid(canvas, { x: 8, y: 8 })
-  await page.getByTestId('gomoku-opening-controls').getByRole('button', { name: '3', exact: true }).click()
   const surfaceButtons = page.getByTestId('gomoku-human-surface').getByRole('button')
   const buttonSizes = await surfaceButtons.evaluateAll((buttons) => buttons.map((button) => {
     const rect = button.getBoundingClientRect()
@@ -681,7 +736,7 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
   await page.getByTestId('gomoku-submit-opening').click()
   await expect.poll(() => sent.get('opening')?.at(-1)).toEqual({
     response: {
-      action: 'opening', white2: { x: 7, y: 8 }, black3: { x: 8, y: 8 }, n: 3,
+      action: 'opening', white2: { x: 7, y: 8 }, black3: { x: 8, y: 8 }, n: 2,
     },
   })
 
@@ -696,11 +751,36 @@ test('human v2 surface submits every phase envelope and stays touch-safe at 390p
 
   await page.goto('/#/play/gomoku-v2-human-candidates')
   canvas = page.getByRole('button', { name: /五子棋对局画面/ })
+  await expect(page.getByTestId('gomoku-human-phase')).toHaveText('五手二打')
+  await expect(page.getByTestId('gomoku-submit-candidates')).toBeDisabled()
   await clickGrid(canvas, { x: 6, y: 6 })
+  await expect(page.getByTestId('gomoku-submit-candidates')).toBeDisabled()
   await clickGrid(canvas, { x: 8, y: 6 })
+  await expect(page.getByTestId('gomoku-submit-candidates')).toBeEnabled()
+  await expect(page.getByText('已选 2/2', { exact: true })).toHaveAttribute('aria-live', 'polite')
+  await clickGrid(canvas, { x: 9, y: 6 })
+  await expect(page.getByText('已选 2/2', { exact: true })).toBeVisible()
   await page.getByTestId('gomoku-submit-candidates').click()
   await expect.poll(() => sent.get('candidates')?.at(-1)).toEqual({
     response: { action: 'black5_candidates', points: [{ x: 6, y: 6 }, { x: 8, y: 6 }] },
+  })
+
+  await page.goto('/#/play/gomoku-v2-human-candidate-keyboard')
+  canvas = page.getByRole('button', { name: /五子棋对局画面/ })
+  await canvas.focus()
+  await canvas.press('ArrowRight')
+  await expect(canvas).toHaveAccessibleName(/当前位置 \(0,0\)/)
+  await canvas.press('Enter')
+  await expect(page.getByText('已选 1/2', { exact: true })).toHaveAttribute('aria-live', 'polite')
+  await canvas.press('ArrowRight')
+  await canvas.press('ArrowRight')
+  await expect(canvas).toHaveAccessibleName(/当前位置 \(1,0\)/)
+  await canvas.press('Enter')
+  await expect(page.getByRole('button', { name: '移除候选 1，坐标 0,0' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '移除候选 2，坐标 1,0' })).toBeVisible()
+  await page.getByTestId('gomoku-submit-candidates').click()
+  await expect.poll(() => sent.get('candidate-keyboard')?.at(-1)).toEqual({
+    response: { action: 'black5_candidates', points: [{ x: 0, y: 0 }, { x: 1, y: 0 }] },
   })
 
   await page.goto('/#/play/gomoku-v2-human-candidate-shape')

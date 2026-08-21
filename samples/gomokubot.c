@@ -15,6 +15,7 @@
 #define EMPTY (-1)
 #define BLACK 0
 #define WHITE 1
+#define BLACK5_CANDIDATE_COUNT 2
 #define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 static int board[SIZE][SIZE];
@@ -173,10 +174,9 @@ static int choose_candidate(int index, int *out_x, int *out_y) {
     return 0;
 }
 
-static void emit_candidates(int count) {
-    if (count < 2 || count > 5) count = 2;
+static void emit_candidates(void) {
     fputs("{\"response\":{\"action\":\"black5_candidates\",\"points\":[", stdout);
-    for (int index = 0; index < count; index++) {
+    for (int index = 0; index < BLACK5_CANDIDATE_COUNT; index++) {
         int x = -99, y = -99;
         if (!choose_candidate(index, &x, &y)) {
             x = -99;
@@ -202,7 +202,7 @@ static void respond(const char *request) {
     } else if (strcmp(phase, "swap_choice") == 0) {
         fputs("{\"response\":{\"action\":\"swap\",\"swap\":false}}\n", stdout);
     } else if (strcmp(phase, "black5_candidates") == 0) {
-        emit_candidates(number_after(request, "n", 2));
+        emit_candidates();
     } else if (strcmp(phase, "black5_select") == 0) {
         fputs("{\"response\":{\"action\":\"black5_select\",\"index\":0}}\n", stdout);
     } else if (strcmp(phase, "white4") == 0) {

@@ -1,6 +1,6 @@
 """全国机器博弈竞赛五子棋纯裁判（游戏规则，0 平台依赖）。
 
-只管游戏规则：15×15 棋盘、26 种指定开局的几何约束、五手 N 打候选
+只管游戏规则：15×15 棋盘、26 种指定开局的几何约束、五手二打候选
 不同形、落子、胜负与计分。
 黑方三三/四四/长连判定由同包纯模块 :mod:`forbidden` 提供。
 不 import protocol/result/engine/orchestrator/runner —— 可独立审计/复用/单测。
@@ -14,6 +14,7 @@ CENTER = BOARD_SIZE // 2
 BLACK = 0
 WHITE = 1
 EMPTY = -1
+BLACK5_CANDIDATE_COUNT = 2
 
 # 方向：横、竖、两斜
 _DIRS = ((1, 0), (0, 1), (1, 1), (1, -1))
@@ -129,7 +130,11 @@ def validate_opening(
     黑1固定 H8（内部坐标 ``(7,7)``）；白2必须相邻；黑3须位于中心
     5×5 且不能占用已有两点。对称规整后恰好形成直指/斜指各 13 类。
     """
-    if isinstance(n, bool) or not isinstance(n, int) or not 2 <= n <= 5:
+    if (
+        isinstance(n, bool)
+        or not isinstance(n, int)
+        or n != BLACK5_CANDIDATE_COUNT
+    ):
         return None
     wx, wy = white2
     bx, by = black3
@@ -152,7 +157,7 @@ def validate_black5_candidates(
     candidates: list[tuple[int, int]],
     size: int = BOARD_SIZE,
 ) -> bool:
-    """验证五手 N 打候选点是当前彩色四子盘面下的“不同形”。
+    """验证五手二打候选点是当前彩色四子盘面下的“不同形”。
 
     两个候选点若能被某个保持当前黑/白子集合不变的 D4
     旋转或镜像互相映射，它们便是同形打点，不能同时提交。
@@ -165,7 +170,7 @@ def validate_black5_candidates(
         return False
     if len(board) != size or any(len(column) != size for column in board):
         return False
-    if not 2 <= len(candidates) <= 5:
+    if len(candidates) != BLACK5_CANDIDATE_COUNT:
         return False
 
     black: set[tuple[int, int]] = set()
@@ -262,6 +267,7 @@ __all__ = [
     "BLACK",
     "WHITE",
     "EMPTY",
+    "BLACK5_CANDIDATE_COUNT",
     "OPENING_CATALOG",
     "in_board",
     "line_lengths",

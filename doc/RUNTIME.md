@@ -162,6 +162,8 @@ Bot 上传与开始排空共用进程内 admission mutex；边界前已进入的
 
 ### 五子棋规则代际冷切运行手册
 
+#### 历史首切：自由棋 → CCGC 2013 v1（协议变更）
+
 五子棋从 `gomoku_freestyle_v1 / gomoku_xy_v1 / gomoku_freestyle_rating_v1`
 升级到 `gomoku_ccgc_2013_v1 / gomoku_action_v2 / gomoku_ccgc_2013_rating_v1`
 是一次**停服 hard cutover**，不提供旧协议兼容或在线迁移。正式入口为
@@ -247,9 +249,11 @@ from→to 三元组链，链尾等于 active contract；所有 Gomoku current ve
 Bot 固定的 vN（原 `MAX(version)+1`）、未 retired、SHA/size 与标准 ELF 相同；所有旧 version 均
 retired；新文件路径/inode 数均等于 Gomoku Bot 数；active legacy job
 为 0；首次恢复服务前新 Gomoku ratings 的 `matches_played` 总和为 0。用完全相同参数和原冷备再次 apply
-必须返回 `already_applied=true`、同一 manifest digest 且不新增 marker/version。后续代际切换必须使用
-从未在该游戏 cutover 链出现过的新 protocol ID，禁止 A→B→A 式复用；历史 marker 与其审计 vN/归档
-永久保留，只有链尾代际保持 active。新评分池产生合法对局后，幂等复核允许评分继续演进，不要求回到零。
+必须返回 `already_applied=true`、同一 manifest digest 且不新增 marker/version。后续若再次更换 wire 协议，
+仍须使用从未在该游戏 cutover 链出现过的新 protocol ID；协议不变而只换 ruleset/评分池时必须改用下节
+`game-rule-cutover`。ruleset、protocol 与 rating pool 均禁止 A→B→A 式回用；历史 marker 与其审计
+vN/归档永久保留，只有链尾代际保持 active。新评分池产生合法对局后，幂等复核允许评分继续演进，
+不要求回到零。
 
 新代码启动会在任何 runtime 启动前核对所有 active contract；legacy DB 或三元组漂移会明确拒绝启动。
 runner 也会在启动 Bot 前核对 Match 冻结三元组。启动健康后 maintenance 仍应保持 requested、
@@ -278,6 +282,90 @@ runner 也会在启动 Bot 前核对 Match 冻结三元组。启动健康后 mai
 
 禁止只回滚代码、只恢复 DB、把 legacy version 原地重新激活，或执行反向在线 cutover；这些组合都会让
 runtime 规则、冻结契约、Bot 协议和评分代际失配。
+
+#### 现行切换：CCGC 2013 v1 → 固定五手二打（同协议）
+
+现行目标契约为
+`gomoku_ccgc_2013_five_move_two_v2 / gomoku_action_v2 / gomoku_ccgc_2013_five_move_two_rating_v2`；
+来源是上一竞赛代
+`gomoku_ccgc_2013_v1 / gomoku_action_v2 / gomoku_ccgc_2013_rating_v1`。两代 wire 都是
+`gomoku_action_v2`，但新局的开局请求固定发送 `n_range=[2,2]`，响应 `n` 与黑 5 候选数只能为 2。
+因此这不是协议二进制替换，必须使用专用离线入口
+`python -m bzplat.backend.cli game-rule-cutover`，不得把同协议代际塞进上节 `game-contract-cutover`。
+
+只能按以下顺序执行：
+
+1. 请求 maintenance 并等待 `maintenance.ready=true`，确认 `accepting=0`、`auto_enabled=0`；随后停止
+   API、dispatcher、scheduler 与上传 worker。数据库中的 dispatcher 必须为 `stopped`，全站
+   starting/running/settling job 与 attempt、pending/running Match、Local AI lease 均为 0，Docker launch
+   journal 为 `idle`。目标游戏还必须没有未结算旧规则 Match 或未结束的非 showcase 赛事。
+2. 停服后制作不同 inode 的逐字节冷备，核对 `cmp`、SHA-256、`PRAGMA integrity_check=ok` 与
+   `PRAGMA foreign_key_check` 零行；保留数据库邻接 `.execution-dispatcher.lock`。dry-run/apply 都要求
+   `--db`、`--backup` 为绝对路径并先取得该 flock，确认缺失时不会打开 Store。
+3. 执行 dry-run。CLI 只在目标库同目录创建临时 copy 并在结束时删除，目标 DB 零写；目标契约直接取
+   当前代码 GameSpec，调用方只声明来源三元组。保存完整 JSON，审核 `from_contract/to_contract`、
+   `bot_count/current_version_count/bot_snapshot_digest`、三项评分投影 digest、
+   `queued_job_ids/retryable_interrupted_job_ids/cancelled_job_count`、`plan_digest`、
+   `target_preimage_sha256`。rule-only 计划的 `version_manifest` 必须为空，`manifest_digest` 必须是空数组
+   `[]` 的 canonical SHA-256；任何 current Bot/version 协议、镜像字段、canonical 路径、SHA/size、权限、
+   inode 漂移均为 No-Go。
+4. 本命令不会重新预检或替换 Bot。切换前须通知并复核仍返回 `n=3/4` 的旧构建：它们的版本可保留，
+   但任何新局都会被现行裁判判为非法，不存在兼容回落。此次生产快照中曾固定三打/四打的排位 Bot
+   `#1103`、`#1112` 必须单独确认是否已上传 fixed2 版本；仓库 C/Python 与 showcase 样例只返回
+   `n=2` 和两个候选。执行日仍须从只读生产快照刷新该清单，不能只依赖这里的历史 ID。
+5. apply 必须回填同一次 dry-run 的 `plan_digest`、空 `manifest_digest` 与
+   `target_preimage_sha256`，并再次逐字确认 DB/冷备路径。首次 apply 只接受目标库仍等于审核 preimage；
+   事务提交后输出丢失时，完全相同的 cutover id、来源三元组、digest 与原冷备可以重试，CLI 只在完整
+   marker 边和资产/评分后置条件吻合时返回 `already_applied=true`。
+
+示例（路径、部署 ID 与三个 digest 必须替换为本次 dry-run 的审核值）：
+
+```bash
+# dry-run：保存 JSON，审核 plan_digest/manifest_digest/target_preimage_sha256
+python -m bzplat.backend.cli game-rule-cutover \
+  --db /absolute/path/botzone.db \
+  --cutover-id gomoku-five-move-two-v2-<deployment-id> \
+  --game-id gomoku \
+  --from-ruleset gomoku_ccgc_2013_v1 \
+  --from-protocol gomoku_action_v2 \
+  --from-rating-pool gomoku_ccgc_2013_rating_v1 \
+  --backup /absolute/path/botzone.pre-five-move-two.db \
+  --confirm-service-stopped --confirm-cold-backup
+
+# apply：只接受上述同一审核计划与冷备 preimage
+python -m bzplat.backend.cli game-rule-cutover \
+  --db /absolute/path/botzone.db \
+  --cutover-id gomoku-five-move-two-v2-<deployment-id> \
+  --game-id gomoku \
+  --from-ruleset gomoku_ccgc_2013_v1 \
+  --from-protocol gomoku_action_v2 \
+  --from-rating-pool gomoku_ccgc_2013_rating_v1 \
+  --apply \
+  --expect-plan-digest <reviewed-plan-digest> \
+  --expect-manifest-digest <reviewed-empty-manifest-digest> \
+  --expect-target-preimage-sha256 <reviewed-target-preimage-sha256> \
+  --confirm-db /absolute/path/botzone.db \
+  --backup /absolute/path/botzone.pre-five-move-two.db \
+  --confirm-service-stopped --confirm-cold-backup
+```
+
+apply 在一个事务中按上一 pool 归档 `ratings/rating_history/pair_stats`，把现行评分重置为
+1500/350/0.06、0 胜负平、0 场，清空该游戏自动排位服务历史，取消来源契约的 queued job 并关闭
+interrupted job 的通用重试，再以 compare-and-swap 推进 active ruleset/pool 和写入空 manifest marker。
+它不会新建、退役、改写或 pin 任何 Bot/version，也不会创建/删除 `bot_uploads` 文件；历史 Match、回放、
+赛事与上一评分池归档保持原契约。
+
+apply 后继续停服，至少复核：数据库完整性/FK；marker 链唯一且链尾等于现行三元组；空 manifest、
+`bot_count=retired_count=0`；所有 current Bot/version ID、路径、checksum、size、runtime mode 与 preimage
+一致；旧 pool 归档 digest/行数一致；新 pool 所有 Bot 为默认评分且 0 场；旧 queued/retryable job 已按
+`ruleset_retired` 收敛；历史 `gomoku_ccgc_2013_v1` 三打/四打回放仍显示真实候选数。以 maintenance 状态
+启动新代码后，使用 fixed2 样例各跑 Traditional/LongRunning 受控对局，核对开局 wire
+`n_range=[2,2]`、响应 `n=2`、回放/HUD 和新评分池；再恢复接单，自动排位最后单独开启。
+
+若 apply 前失败，修正后必须重跑 dry-run；若 apply 后回滚，保持停服和 flock，保存 post-cutover 故障库，
+按上节同样的无 WAL/SHM/journal、完整性/FK、同文件系统原子替换与父目录 fsync 规则恢复原冷备及配对的
+旧代码 release。rule-only 切换没有新增 vN 或资产目录，回滚时**不得删除或改写任何 Bot 文件**。只回滚
+代码、只改 `rating_pool_state`、反向运行 cutover 或把归档评分手工灌回当前表均禁止。
 
 ## 运行模式边界
 

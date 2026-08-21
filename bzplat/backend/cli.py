@@ -242,19 +242,51 @@ def _readonly_cutover_marker_digest(database: Path, cutover_id: str) -> str | No
     return None if row is None else str(row[0] or "")
 
 
-def _cutover_plan_copy(database: Path) -> Path:
-    """Create one fsynced same-directory DB copy for zero-target-write dry-run."""
+def _readonly_cutover_marker_contract(
+    database: Path, cutover_id: str
+) -> dict[str, str] | None:
+    """Bind a rule-only lost-output retry to its complete immutable edge."""
+
+    columns = (
+        "game_id",
+        "from_ruleset",
+        "to_ruleset",
+        "from_protocol",
+        "to_protocol",
+        "from_rating_pool",
+        "to_rating_pool",
+        "manifest_digest",
+        "manifest_json",
+    )
+    try:
+        with sqlite3.connect(
+            database.as_uri() + "?mode=ro&immutable=1", uri=True
+        ) as conn:
+            row = conn.execute(
+                f"SELECT {','.join(columns)} FROM protocol_cutovers "
+                "WHERE cutover_id=?",
+                (str(cutover_id or "").strip(),),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return {column: str(row[index] or "") for index, column in enumerate(columns)}
+
+
+def _cutover_plan_copy_from(source_database: Path, target_database: Path) -> Path:
+    """Copy reviewed bytes beside the target so canonical assets resolve there."""
 
     fd, raw_path = tempfile.mkstemp(
-        prefix=f".{database.name}.cutover-plan-",
+        prefix=f".{target_database.name}.cutover-plan-",
         suffix=".db",
-        dir=database.parent,
+        dir=target_database.parent,
     )
     candidate = Path(raw_path)
     try:
         target_file = os.fdopen(fd, "wb")
         fd = -1
-        with database.open("rb") as source, target_file as target:
+        with source_database.open("rb") as source, target_file as target:
             shutil.copyfileobj(source, target, length=1024 * 1024)
             target.flush()
             os.fsync(target.fileno())
@@ -265,6 +297,12 @@ def _cutover_plan_copy(database: Path) -> Path:
             os.close(fd)
         candidate.unlink(missing_ok=True)
         raise
+
+
+def _cutover_plan_copy(database: Path) -> Path:
+    """Create one fsynced same-directory DB copy for zero-target-write dry-run."""
+
+    return _cutover_plan_copy_from(database, database)
 
 
 def _remove_cutover_plan_copy(path: Path) -> None:
@@ -603,6 +641,232 @@ def game_contract_cutover(
                     _remove_cutover_plan_copy(plan_copy)
     except BotError as exc:
         raise typer.BadParameter(f"{exc.code}: {exc.message}") from exc
+    except (ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
+
+
+@app.command("game-rule-cutover")
+def game_rule_cutover(
+    db: str = typer.Option(..., "--db", help="待切换数据库的绝对路径"),
+    cutover_id: str = typer.Option(..., "--cutover-id"),
+    game_id: str = typer.Option(..., "--game-id"),
+    from_ruleset: str = typer.Option(..., "--from-ruleset"),
+    from_protocol: str = typer.Option(..., "--from-protocol"),
+    from_rating_pool: str = typer.Option(..., "--from-rating-pool"),
+    apply: bool = typer.Option(False, "--apply", help="提交切换；默认只生成计划"),
+    expect_plan_digest: str | None = typer.Option(
+        None,
+        "--expect-plan-digest",
+        help="apply 必须回填刚审核的 dry-run plan_digest",
+    ),
+    expect_manifest_digest: str | None = typer.Option(
+        None,
+        "--expect-manifest-digest",
+        help="apply 必须回填 dry-run 的空 manifest 摘要",
+    ),
+    expect_target_preimage_sha256: str | None = typer.Option(
+        None,
+        "--expect-target-preimage-sha256",
+        help="apply 必须回填 dry-run 输出的 target_preimage_sha256",
+    ),
+    confirm_db: str | None = typer.Option(
+        None, "--confirm-db", help="apply 时逐字确认目标数据库绝对路径"
+    ),
+    backup: str | None = typer.Option(
+        None, "--backup", help="停服后生成的 SQLite 冷备绝对路径"
+    ),
+    confirm_service_stopped: bool = typer.Option(
+        False,
+        "--confirm-service-stopped",
+        help="确认 API/worker/scheduler/上传预检均已停止",
+    ),
+    confirm_cold_backup: bool = typer.Option(
+        False, "--confirm-cold-backup", help="确认 backup 是停服后的完整冷备"
+    ),
+):
+    """规划或执行协议不变、规则与评分池同时换代的离线切换。"""
+
+    database = Path(db)
+    if not database.is_absolute():
+        raise typer.BadParameter("--db 必须是显式绝对路径")
+    try:
+        database = database.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter("数据库不存在") from exc
+    if not database.is_file():
+        raise typer.BadParameter("--db 必须是普通文件")
+    if not confirm_service_stopped:
+        raise typer.BadParameter("dry-run/apply 缺少 --confirm-service-stopped 停服确认")
+    if not confirm_cold_backup:
+        raise typer.BadParameter("dry-run/apply 缺少 --confirm-cold-backup 冷备确认")
+    if not backup:
+        raise typer.BadParameter("dry-run/apply 必须提供 --backup 的冷备绝对路径")
+    if apply:
+        if not confirm_db or not Path(confirm_db).is_absolute():
+            raise typer.BadParameter("--confirm-db 必须再次填写目标绝对路径")
+        try:
+            confirmed = Path(confirm_db).resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise typer.BadParameter("--confirm-db 文件不存在") from exc
+        if confirmed != database:
+            raise typer.BadParameter("--confirm-db 与 --db 不是同一个目标")
+        if not expect_plan_digest:
+            raise typer.BadParameter("--apply 必须提供 --expect-plan-digest")
+        if not expect_manifest_digest:
+            raise typer.BadParameter("--apply 必须提供 --expect-manifest-digest")
+        if not expect_target_preimage_sha256:
+            raise typer.BadParameter(
+                "--apply 必须提供 --expect-target-preimage-sha256"
+            )
+
+    from bzplat.backend.store.db import offline_cutover_path_guard
+    from bzplat.backend.store.schema import game_rule_contract
+
+    source = {
+        "ruleset_version": from_ruleset,
+        "protocol_version": from_protocol,
+        "rating_pool_id": from_rating_pool,
+    }
+    target = game_rule_contract(game_id)
+    expected_empty_manifest = hashlib.sha256(b"[]").hexdigest()
+    try:
+        with offline_cutover_path_guard(database) as path_guard:
+            cold_backup, target_digest, backup_digest = (
+                _validated_cutover_cold_backup(
+                    database,
+                    backup,
+                    require_target_equality=not apply,
+                )
+            )
+            preimage_digest = target_digest
+            lost_output_retry = False
+            if apply:
+                reviewed_preimage = str(
+                    expect_target_preimage_sha256 or ""
+                ).strip().lower()
+                if backup_digest != reviewed_preimage:
+                    raise typer.BadParameter(
+                        "--expect-target-preimage-sha256 与冷备不一致；"
+                        "请使用 dry-run 时的同一冷备"
+                    )
+                if str(expect_manifest_digest or "") != expected_empty_manifest:
+                    raise typer.BadParameter(
+                        "--expect-manifest-digest 不是 rule-only 空 manifest 摘要"
+                    )
+                if target_digest != reviewed_preimage:
+                    marker = _readonly_cutover_marker_contract(database, cutover_id)
+                    expected_marker = {
+                        "game_id": game_id,
+                        "from_ruleset": source["ruleset_version"],
+                        "to_ruleset": target["ruleset_version"],
+                        "from_protocol": source["protocol_version"],
+                        "to_protocol": target["protocol_version"],
+                        "from_rating_pool": source["rating_pool_id"],
+                        "to_rating_pool": target["rating_pool_id"],
+                        "manifest_digest": expected_empty_manifest,
+                        "manifest_json": "[]",
+                    }
+                    if marker != expected_marker:
+                        raise typer.BadParameter(
+                            "目标 DB 已偏离审核 preimage 且没有完整匹配的"
+                            " rule-only cutover marker；拒绝打开 Store"
+                        )
+                    lost_output_retry = True
+                    preimage_digest = reviewed_preimage
+
+            if lost_output_retry:
+                reviewed_copy = _cutover_plan_copy_from(cold_backup, database)
+                try:
+                    reviewed_store = Store(str(reviewed_copy))
+                    try:
+                        reviewed_plan = reviewed_store.plan_game_rule_cutover(
+                            cutover_id=cutover_id,
+                            game_id=game_id,
+                            from_contract=source,
+                            to_contract=target,
+                        )
+                    finally:
+                        reviewed_store.close()
+                finally:
+                    _remove_cutover_plan_copy(reviewed_copy)
+                if reviewed_plan.get("plan_digest") != str(
+                    expect_plan_digest or ""
+                ).strip().lower():
+                    raise typer.BadParameter(
+                        "--expect-plan-digest 与已绑定冷备中的原审核计划不一致"
+                    )
+                if reviewed_plan.get("manifest_digest") != str(
+                    expect_manifest_digest or ""
+                ).strip().lower():
+                    raise typer.BadParameter(
+                        "--expect-manifest-digest 与已绑定冷备计划不一致"
+                    )
+
+            plan_copy: Path | None = None
+            store_path = database
+            if not apply:
+                plan_copy = _cutover_plan_copy(database)
+                store_path = plan_copy
+            try:
+                store = Store(str(store_path))
+                try:
+                    if not apply:
+                        plan = store.plan_game_rule_cutover(
+                            cutover_id=cutover_id,
+                            game_id=game_id,
+                            from_contract=source,
+                            to_contract=target,
+                        )
+                        report: dict[str, object] = {
+                            "mode": "dry-run",
+                            **plan,
+                            "database": str(database),
+                            "backup_path": str(cold_backup),
+                            "target_preimage_sha256": preimage_digest,
+                        }
+                    else:
+                        offline_guard = store.bind_offline_cutover_guard(path_guard)
+                        if not lost_output_retry:
+                            plan = store.plan_game_rule_cutover(
+                                cutover_id=cutover_id,
+                                game_id=game_id,
+                                from_contract=source,
+                                to_contract=target,
+                            )
+                            if plan.get("plan_digest") != str(
+                                expect_plan_digest or ""
+                            ).strip().lower():
+                                raise typer.BadParameter(
+                                    "--expect-plan-digest 与当前冷库计划不一致；"
+                                    "请重新审核 dry-run"
+                                )
+                            if plan.get("manifest_digest") != str(
+                                expect_manifest_digest or ""
+                            ).strip().lower():
+                                raise typer.BadParameter(
+                                    "--expect-manifest-digest 与当前计划不一致"
+                                )
+                        applied = store.apply_game_rule_cutover(
+                            cutover_id=cutover_id,
+                            game_id=game_id,
+                            from_contract=source,
+                            to_contract=target,
+                            expected_plan_digest=str(expect_plan_digest or ""),
+                            offline_guard=offline_guard,
+                        )
+                        report = {
+                            "mode": "applied",
+                            "database": str(database),
+                            "backup_path": str(cold_backup),
+                            "target_preimage_sha256": preimage_digest,
+                            **applied,
+                        }
+                finally:
+                    store.close()
+            finally:
+                if plan_copy is not None:
+                    _remove_cutover_plan_copy(plan_copy)
     except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
