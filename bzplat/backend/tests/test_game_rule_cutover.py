@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -65,20 +66,36 @@ def _certify_projection(store: Store) -> None:
         )
 
 
-def _canonical_bot(store: Store, tmp_path: Path, key: str) -> tuple[dict, dict]:
+def _canonical_bot(
+    store: Store,
+    tmp_path: Path,
+    key: str,
+    *,
+    uploader_permissions: bool = False,
+    bot_dir_mode: int | None = None,
+) -> tuple[dict, dict]:
     owner = store.create_user(key, f"{key}@example.test", "hash")
     bot = store.create_bot(owner["id"], key, game_id="gomoku")
     root = tmp_path / "bot_uploads"
     root.mkdir(mode=0o755, exist_ok=True)
     bot_dir = root / str(bot["id"])
-    bot_dir.mkdir(mode=0o755)
+    bot_dir.mkdir(
+        mode=(
+            bot_dir_mode
+            if bot_dir_mode is not None
+            else (0o700 if uploader_permissions else 0o755)
+        )
+    )
+    if bot_dir_mode is not None:
+        bot_dir.chmod(bot_dir_mode)
     version_dir = bot_dir / "v1"
-    version_dir.mkdir(mode=0o755)
+    version_dir.mkdir(mode=0o700 if uploader_permissions else 0o755)
     binary = version_dir / "bot.bin"
     payload = Path("/bin/true").read_bytes()
     binary.write_bytes(payload)
-    binary.chmod(0o555)
-    version_dir.chmod(0o555)
+    binary.chmod(0o755 if uploader_permissions else 0o555)
+    if not uploader_permissions:
+        version_dir.chmod(0o555)
     version = store.add_bot_version(
         bot["id"],
         binary_path=str(binary),
@@ -87,6 +104,75 @@ def _canonical_bot(store: Store, tmp_path: Path, key: str) -> tuple[dict, dict]:
         upload_note=f"{key} current",
     )
     return owner, version
+
+
+@pytest.mark.parametrize("bot_dir_mode", [0o700, 0o755])
+def test_rule_cutover_accepts_live_uploader_asset_permissions(
+    tmp_path, bot_dir_mode
+):
+    store = Store(str(tmp_path / f"uploader-permissions-{bot_dir_mode:o}.db"))
+    _set_previous_contract(store)
+    _, version = _canonical_bot(
+        store,
+        tmp_path,
+        f"uploader_permissions_{bot_dir_mode:o}",
+        uploader_permissions=True,
+        bot_dir_mode=bot_dir_mode,
+    )
+    binary = Path(version["binary_path"])
+    assert stat.S_IMODE(binary.parent.parent.stat().st_mode) == bot_dir_mode
+    assert stat.S_IMODE(binary.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(binary.stat().st_mode) == 0o755
+    _certify_projection(store)
+
+    plan = _plan(store, "uploader-permissions-cutover")
+    _prepare_cold_cutover(store)
+    result = _apply(store, plan)
+
+    assert result["already_applied"] is False
+    assert store.get_active_game_contract("gomoku") == game_rule_contract("gomoku")
+    store.assert_runtime_contracts_current()
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("target", "mode"),
+    [
+        ("bot_dir", 0o720),
+        ("version_dir", 0o720),
+        ("binary", 0o775),
+        ("version_dir", 0o755),
+        ("version_dir", 0o555),
+        ("binary", 0o555),
+    ],
+)
+def test_rule_cutover_rejects_unsafe_or_noncanonical_uploader_permissions(
+    tmp_path, target, mode
+):
+    store = Store(str(tmp_path / f"unsafe-permissions-{target}-{mode:o}.db"))
+    _set_previous_contract(store)
+    _, version = _canonical_bot(
+        store,
+        tmp_path,
+        f"unsafe_{target}_{mode:o}",
+        uploader_permissions=True,
+    )
+    binary = Path(version["binary_path"])
+    targets = {
+        "bot_dir": binary.parent.parent,
+        "version_dir": binary.parent,
+        "binary": binary,
+    }
+    targets[target].chmod(mode)
+    _certify_projection(store)
+
+    with pytest.raises(ValueError, match="current asset 缺失或不安全"):
+        _plan(store, f"unsafe-{target}-{mode:o}-cutover")
+    assert store.get_active_game_contract("gomoku") == PREVIOUS_CONTRACT
+    assert store._conn.execute(
+        "SELECT COUNT(*) FROM protocol_cutovers"
+    ).fetchone()[0] == 0
+    store.close()
 
 
 def _prepare_cold_cutover(store: Store) -> None:

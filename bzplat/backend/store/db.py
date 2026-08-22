@@ -6249,21 +6249,33 @@ class Store:
                         version_dir_stat = version_dir.lstat()
                         bot_dir_stat = bot_dir.lstat()
                         before = version_path.lstat()
+                        bot_dir_mode = stat.S_IMODE(bot_dir_stat.st_mode)
+                        version_dir_mode = stat.S_IMODE(version_dir_stat.st_mode)
+                        binary_mode = stat.S_IMODE(before.st_mode)
+                        uploader_shape = (
+                            version_dir_mode == 0o700
+                            and binary_mode == 0o755
+                        )
+                        hard_cutover_shape = (
+                            version_dir_mode == 0o555
+                            and binary_mode == 0o555
+                        )
                         if (
                             stat.S_ISLNK(version_dir_stat.st_mode)
                             or not stat.S_ISDIR(version_dir_stat.st_mode)
-                            or stat.S_IMODE(version_dir_stat.st_mode) != 0o555
                             or int(version_dir_stat.st_uid) != os.geteuid()
+                            or version_dir_mode & 0o022
                             or stat.S_ISLNK(bot_dir_stat.st_mode)
                             or not stat.S_ISDIR(bot_dir_stat.st_mode)
-                            or stat.S_IMODE(bot_dir_stat.st_mode) & 0o022
+                            or bot_dir_mode & 0o022
                             or int(bot_dir_stat.st_uid) != os.geteuid()
                             or stat.S_ISLNK(before.st_mode)
                             or not stat.S_ISREG(before.st_mode)
-                            or stat.S_IMODE(before.st_mode) != 0o555
+                            or binary_mode & 0o022
                             or int(before.st_uid) != os.geteuid()
                             or int(before.st_nlink) != 1
                             or version_path.resolve(strict=True) != version_path
+                            or not (uploader_shape or hard_cutover_shape)
                         ):
                             raise OSError("unsafe current asset")
                         hasher = hashlib.sha256()
