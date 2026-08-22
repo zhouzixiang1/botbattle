@@ -83,6 +83,10 @@ _ADMIN_PRIVATE_HEADERS = {
     "Vary": "Authorization, Cookie",
     "Referrer-Policy": "no-referrer",
 }
+_CONTEST_IDENTITY_PRIVATE_HEADERS = {
+    **_ADMIN_PRIVATE_HEADERS,
+    "X-Content-Type-Options": "nosniff",
+}
 from bzplat.backend.contests import ContestManager
 from bzplat.backend.contests.ranking import with_official_result_provenance
 from bzplat.backend.contests.presentation import build_stage_summaries
@@ -111,6 +115,10 @@ from bzplat.backend.runtime.limits import (
     cpu_count,
 )
 from bzplat.backend.runtime.binary_runner import PlatformRunnerError
+from bzplat.backend.store import (
+    ContestRealNameRosterForbidden,
+    ContestRosterWriteValidationError,
+)
 from bzplat.backend.store.execution import (
     ExecutionIdempotencyConflict,
     ExecutionMaintenanceConflict,
@@ -121,6 +129,8 @@ from bzplat.backend.store.schema import (
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
+    CONTEST_IDENTITY_SOURCE_LEGACY,
+    CONTEST_IDENTITY_SOURCE_REGISTRATION,
     CONTEST_OPEN,
     CONTEST_PUBLISHED,
     CONTEST_REST,
@@ -2918,6 +2928,70 @@ class ContestDispatch(BaseModel):
     bot_id: int
 
 
+_CONTEST_ENTRY_PUBLIC_FIELDS = (
+    "id",
+    "contest_id",
+    "user_id",
+    "bot_id",
+    "registered_at",
+    "group_id",
+    "seed",
+    "eliminated",
+    "dispatched_at",
+)
+_CONTEST_OFFICIAL_RESULT_PUBLIC_FIELDS = (
+    "id",
+    "contest_id",
+    "entry_id",
+    "stage_idx",
+    "rank",
+    "points",
+    "bot_id",
+    "user_id",
+    "tiebreaks_json",
+    "awarded",
+    "bot_name",
+    "bot_display",
+    "owner_name",
+    "owner_display",
+    "source_stage",
+    "ranking_cohort",
+)
+
+
+def _public_my_contest_entry(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Positive allow-list for my_entry; snapshot storage never crosses REST."""
+    if entry is None:
+        return None
+    return {key: entry.get(key) for key in _CONTEST_ENTRY_PUBLIC_FIELDS}
+
+
+def _strip_contest_identity_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Positive allow-list for public results; future Store columns stay private."""
+    return {
+        field: row.get(field)
+        for field in _CONTEST_OFFICIAL_RESULT_PUBLIC_FIELDS
+        if field in row
+    }
+
+
+def _csv_safe_cell(value: object, *, force_text: bool = False) -> object:
+    """Return an Excel-safe CSV cell without changing numeric values.
+
+    User-controlled strings that could be interpreted as formulas are prefixed
+    with an apostrophe.  ``force_text`` is used for phone and student numbers so
+    leading zeroes survive spreadsheet import and long values avoid scientific
+    notation.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    trimmed = value.lstrip(" \t\r\n")
+    dangerous = bool(trimmed and trimmed[0] in ("=", "+", "-", "@"))
+    if force_text or dangerous or value[0] in ("\t", "\r", "\n"):
+        return "'" + value
+    return value
+
+
 def _template_for_api(template: dict[str, Any]) -> dict[str, Any]:
     """Return the read-only public shape of one code-owned template."""
     public = dict(template)
@@ -2946,10 +3020,9 @@ def _contest_write_http_error(exc: ValueError) -> HTTPException:
             detail={"code": exc.code, "message": exc.message},
             headers={"Retry-After": "30"},
         )
-    return HTTPException(
-        409 if isinstance(exc, ShowcaseReadOnlyError) else 400,
-        str(exc),
-    )
+    if isinstance(exc, ContestRealNameRosterForbidden):
+        return HTTPException(403, str(exc))
+    return HTTPException(409 if isinstance(exc, ShowcaseReadOnlyError) else 400, str(exc))
 
 
 @router.get("/api/contests/templates")
@@ -3133,7 +3206,7 @@ def create_contest(body: ContestCreate, request: Request, user=Depends(require_o
 
 @router.get("/api/contests/{contest_id}")
 def contest_detail(
-    contest_id: int, request: Request,
+    contest_id: int, request: Request, response: Response,
     entries_page: int | None = None, entries_per_page: int = 50,
     user=Depends(optional_user),
 ):
@@ -3147,10 +3220,23 @@ def contest_detail(
     ):
         raise HTTPException(404, "比赛不存在")
     store = _store(request)
+    is_organizer = bool(
+        user
+        and (
+            c.get("organizer_id") == user.get("id")
+            or user.get("role") == ROLE_ADMIN
+        )
+    )
+    include_identity = bool(
+        is_organizer and int(c.get("require_real_name") or 0)
+    )
     # entries 可单列分页（115 报名场景）：提供 entries_page 时返回分页元信息，
     # 否则保持旧的全量列表契约（pairings/standings 不分页——stage 级，量小）。
     entries_result = store.contest_entries_named(
-        contest_id, page=entries_page, per_page=entries_per_page,
+        contest_id,
+        page=entries_page,
+        per_page=entries_per_page,
+        include_identity=include_identity,
     )
     if isinstance(entries_result, dict):
         entries = entries_result["items"]
@@ -3171,7 +3257,7 @@ def contest_detail(
     stage_entries = (
         entries
         if not isinstance(entries_result, dict)
-        else store.contest_entries_named(contest_id)
+        else store.contest_entries_named(contest_id, include_identity=False)
     )
     stage_summaries = build_stage_summaries(
         _contests(request), c, stage_entries, raw_pairings
@@ -3186,27 +3272,13 @@ def contest_detail(
         estimate = _contests(request).estimate(contest_id)
     except ValueError:
         estimate = None
-    # my_entry + is_organizer：当前登录用户的报名条目 + 是否赛事组织者（组织者可见实名）。
-    # 未登录或未报名时 my_entry 为 null。实名脱敏：仅组织者/admin 可见 real_name/phone/
-    # school/student_id（contest_entries_named 已 JOIN 这几列，这里对非组织者剔除）。
-    my_entry = None
-    is_organizer = False
-    try:
-        token = _extract_token(request)
-        u = request.app.state.auth.verify_session(token) if token else None
-        if u:
-            my_entry = store.get_entry(contest_id, u["id"])
-            is_organizer = (
-                c.get("organizer_id") == u.get("id")
-                or u.get("role") == ROLE_ADMIN
-            )
-    except Exception:
-        pass
-    # 非组织者脱敏实名字段（隐私保护——实名仅组织者用于线下核对/上报）
-    if not is_organizer:
-        for e in entries:
-            for k in ("real_name", "phone", "school", "student_id"):
-                e.pop(k, None)
+    # my_entry 必须使用正向白名单；contest_entries 新增任何内部快照列都不会
+    # 因 SELECT * 自动进入公开响应。实名详情只在实名赛 + 组织者/admin 下投影。
+    my_entry = _public_my_contest_entry(
+        store.get_entry(contest_id, user["id"]) if user else None
+    )
+    if include_identity:
+        response.headers.update(_CONTEST_IDENTITY_PRIVATE_HEADERS)
     # 裁 standings/pairings 响应死字段（对抗审计：前端 ContestDetail/BracketTree/
     # ScheduleTable 不消费；表列与内部计算保留——仅从响应 dict 去掉）。
     _STANDINGS_DEAD = ("entry_id", "user_id", "seed", "eliminated")
@@ -3262,27 +3334,100 @@ async def organizer_add_entry(
 ):
     """P5 组织者名单：单条加人（draft/open 允许）。
 
-    有意设计：此处**绕开** register 流程的 owner 校验——组织者可替他人把任意其名下
-    Bot 加进赛事（如现场代报名/补录）。权限收口在 _require_contest_organizer（仅组织者或
-    admin 可调用），bot 归属/游戏/激活状态等业务校验仍保留。
+    非实名赛允许组织者现场补录；实名赛采集 PII 必须由参赛者本人 register，只有
+    admin 的显式高权限 override 可以代报名，且成功/失败都写无 PII 安全审计。
     """
     store = _store(request)
     c = store.get_contest(contest_id)
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
+    requires_identity = bool(int(c.get("require_real_name") or 0))
+    admin_override = requires_identity and user.get("role") == ROLE_ADMIN
+    if requires_identity and not admin_override:
+        audit_log(
+            request,
+            "contest_real_name_roster_override",
+            result="fail",
+            user=user.get("username"),
+            target=contest_id,
+            detail="mode=single; reason=self_registration_required",
+        )
+        raise HTTPException(403, ContestRealNameRosterForbidden.MESSAGE)
     raw_uid = body.get("user_id")
     raw_bid = body.get("bot_id")
     if raw_uid is None or raw_bid is None:
+        if admin_override:
+            audit_log(
+                request,
+                "contest_real_name_roster_override",
+                result="fail",
+                user=user.get("username"),
+                target=contest_id,
+                detail="mode=single; reason=missing_ids",
+            )
         raise HTTPException(400, "user_id 与 bot_id 均不可为空")
     try:
         uid, bid = int(raw_uid), int(raw_bid)
     except (TypeError, ValueError):
+        if admin_override:
+            audit_log(
+                request,
+                "contest_real_name_roster_override",
+                result="fail",
+                user=user.get("username"),
+                target=contest_id,
+                detail="mode=single; reason=invalid_ids",
+            )
         raise HTTPException(400, "user_id / bot_id 必须是整数")
     try:
-        await _contests(request).add_roster_entry(contest_id, uid, bid)
-    except ValueError as exc:
+        entry = await _contests(request).add_roster_entry(
+            contest_id,
+            uid,
+            bid,
+            allow_real_name_override=admin_override,
+        )
+    except ContestRealNameRosterForbidden as exc:
+        # Covers a zero-entry 0→1 flag change between the API read and the
+        # Manager/Store linearization point.
+        audit_log(
+            request,
+            "contest_real_name_roster_override",
+            result="fail",
+            user=user.get("username"),
+            target=contest_id,
+            detail="mode=single; reason=self_registration_required",
+        )
         raise _contest_write_http_error(exc) from exc
+    except ValueError as exc:
+        if admin_override:
+            audit_log(
+                request,
+                "contest_real_name_roster_override",
+                result="fail",
+                user=user.get("username"),
+                target=contest_id,
+                detail=(
+                    f"mode=single; user_id={uid}; bot_id={bid}; "
+                    "reason=validation_failed"
+                ),
+            )
+        raise _contest_write_http_error(exc) from exc
+    actual_identity_override = (
+        entry.get("identity_source") == CONTEST_IDENTITY_SOURCE_REGISTRATION
+    )
+    if actual_identity_override:
+        audit_log(
+            request,
+            "contest_real_name_roster_override",
+            result="ok",
+            user=user.get("username"),
+            target=contest_id,
+            detail=(
+                f"mode=single; entry_id={entry['id']}; "
+                f"user_id={uid}; bot_id={bid}"
+            ),
+        )
     return {"ok": True}
 
 
@@ -3296,11 +3441,62 @@ async def organizer_assign_entries(
     if not c:
         raise HTTPException(404, "赛事不存在")
     _require_contest_organizer(c, user)
+    requires_identity = bool(int(c.get("require_real_name") or 0))
+    admin_override = requires_identity and user.get("role") == ROLE_ADMIN
+    if requires_identity and not admin_override:
+        audit_log(
+            request,
+            "contest_real_name_roster_override",
+            result="fail",
+            user=user.get("username"),
+            target=contest_id,
+            detail=(
+                f"mode=bulk; assign_all={int(body.assign_all)}; "
+                f"submitted={len(body.entries or [])}; "
+                "reason=self_registration_required"
+            ),
+        )
+        raise HTTPException(403, ContestRealNameRosterForbidden.MESSAGE)
     from bzplat.backend.games import normalize_game_id
-    cgid = normalize_game_id(c.get("game_id"))
+    try:
+        cgid = normalize_game_id(c.get("game_id"))
+    except ValueError as exc:
+        if admin_override:
+            audit_log(
+                request,
+                "contest_real_name_roster_override",
+                result="fail",
+                user=user.get("username"),
+                target=contest_id,
+                detail="mode=bulk; reason=contest_game_invalid",
+            )
+        raise HTTPException(400, str(exc)) from exc
     if body.assign_all:
-        gid = normalize_game_id(cgid if body.game_id is None else body.game_id)
+        try:
+            gid = normalize_game_id(
+                cgid if body.game_id is None else body.game_id
+            )
+        except ValueError as exc:
+            if admin_override:
+                audit_log(
+                    request,
+                    "contest_real_name_roster_override",
+                    result="fail",
+                    user=user.get("username"),
+                    target=contest_id,
+                    detail="mode=bulk; assign_all=1; reason=invalid_game",
+                )
+            raise HTTPException(400, str(exc)) from exc
         if gid != cgid:
+            if admin_override:
+                audit_log(
+                    request,
+                    "contest_real_name_roster_override",
+                    result="fail",
+                    user=user.get("username"),
+                    target=contest_id,
+                    detail="mode=bulk; assign_all=1; reason=game_mismatch",
+                )
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
         bots = store.list_bots(
             active_only=True, runnable_only=True, game_id=gid
@@ -3323,11 +3519,66 @@ async def organizer_assign_entries(
                 for e in body.entries or []
             ]
         except (TypeError, ValueError):
+            if admin_override:
+                audit_log(
+                    request,
+                    "contest_real_name_roster_override",
+                    result="fail",
+                    user=user.get("username"),
+                    target=contest_id,
+                    detail="mode=bulk; assign_all=0; reason=invalid_ids",
+                )
             raise HTTPException(400, "user_id / bot_id 必须是整数")
     try:
-        return await _contests(request).assign_roster_entries(contest_id, target)
-    except ValueError as exc:
+        result = await _contests(request).assign_roster_entries(
+            contest_id,
+            target,
+            allow_real_name_override=admin_override,
+        )
+    except ContestRealNameRosterForbidden as exc:
+        audit_log(
+            request,
+            "contest_real_name_roster_override",
+            result="fail",
+            user=user.get("username"),
+            target=contest_id,
+            detail=(
+                f"mode=bulk; assign_all={int(body.assign_all)}; "
+                "reason=self_registration_required"
+            ),
+        )
         raise _contest_write_http_error(exc) from exc
+    except ValueError as exc:
+        if admin_override:
+            audit_log(
+                request,
+                "contest_real_name_roster_override",
+                result="fail",
+                user=user.get("username"),
+                target=contest_id,
+                detail=(
+                    f"mode=bulk; assign_all={int(body.assign_all)}; "
+                    f"requested={len(target)}; reason=validation_failed"
+                ),
+            )
+        raise _contest_write_http_error(exc) from exc
+    actual_identity_override = bool(
+        result.pop("_identity_required_at_commit", False)
+    )
+    if actual_identity_override:
+        audit_log(
+            request,
+            "contest_real_name_roster_override",
+            result="ok",
+            user=user.get("username"),
+            target=contest_id,
+            detail=(
+                f"mode=bulk; assign_all={int(body.assign_all)}; "
+                f"requested={len(target)}; added={result['added']}; "
+                f"skipped={len(result['skipped'])}"
+            ),
+        )
+    return result
 
 
 @router.delete("/api/contests/{contest_id}/entries/{user_id}")
@@ -3378,6 +3629,9 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
         rows,
         stage_entry_ids=stage_entry_ids,
     )
+    # 正式成绩是公开能力。即使未来 Store 行扩展，也不允许实名/快照字段
+    # 被 JSON 或 CSV 的通用 dict 流程顺带带出。
+    rows = [_strip_contest_identity_fields(row) for row in rows]
     if format.lower() == "csv":
         import csv as _csv
         import io
@@ -3398,18 +3652,26 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
                 except Exception:
                     tb = {}
                 w.writerow([
-                    r["rank"], r["entry_id"], r.get("bot_name") or "",
-                    r.get("owner_name") or "", r.get("points") or 0,
-                    tb.get("buchholz_cut1", 0), tb.get("sonneborn_berger", 0),
-                    r.get("awarded") or "", r["source_stage"],
-                    r["ranking_cohort"],
+                    _csv_safe_cell(r["rank"]),
+                    _csv_safe_cell(r["entry_id"]),
+                    _csv_safe_cell(r.get("bot_name") or ""),
+                    _csv_safe_cell(r.get("owner_name") or ""),
+                    _csv_safe_cell(r.get("points") or 0),
+                    _csv_safe_cell(tb.get("buchholz_cut1", 0)),
+                    _csv_safe_cell(tb.get("sonneborn_berger", 0)),
+                    _csv_safe_cell(r.get("awarded") or ""),
+                    _csv_safe_cell(r["source_stage"]),
+                    _csv_safe_cell(r["ranking_cohort"]),
                 ])
                 yield buf.getvalue()
                 buf.seek(0); buf.truncate(0)
 
         return StreamingResponse(
             gen(), media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="contest-{contest_id}-results.csv"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="contest-{contest_id}-results.csv"',
+                "X-Content-Type-Options": "nosniff",
+            },
         )
     # JSON 默认返回可直接展示的结构化破同分字段；不让前端猜测或解析数据库
     # 存储格式。CSV 分支仍从同一份持久值展开，二者共享事实来源。
@@ -3437,39 +3699,126 @@ def contest_official_results(contest_id: int, request: Request, format: str = "j
 
 
 @router.get("/api/contests/{contest_id}/export")
-def contest_export(contest_id: int, request: Request, format: str = "csv"):
-    """组织者导出：报名名单（含实名）+ 结果排名合并 CSV。
+def contest_export(
+    contest_id: int,
+    request: Request,
+    format: str = "csv",
+    schema: str | None = None,
+):
+    """Organizer/admin roster export.
 
-    仅赛事组织者/admin 可访问（实名隐私）。任何赛事状态可导出：
-    - 报名中（draft/open）：导出已报名名单（rank 列空）。
-    - 已结束（finished）：含正式排名 + 战绩。
-    列：rank, seed, group_id, bot_name, owner_name, real_name, phone, school,
-    student_id, points, wins, draws, losses, eliminated, awarded, registered_at。
+    Omitting ``schema`` preserves the original 16-column CSV v1 contract.
+    ``schema=2`` adds stable ids, account/Bot display names, identity provenance,
+    stage/result context and human-readable Chinese statuses.  PII is projected
+    only when the contest itself requires real-name registration.
     """
+    def private_error(status_code: int, detail: str) -> HTTPException:
+        return HTTPException(
+            status_code,
+            detail,
+            headers=dict(_CONTEST_IDENTITY_PRIVATE_HEADERS),
+        )
+
     store = _store(request)
     c = store.get_contest(contest_id)
     if not c:
-        raise HTTPException(404, "比赛不存在")
+        raise private_error(404, "比赛不存在")
     if format.lower() not in ("csv",):
-        raise HTTPException(400, "仅支持 format=csv")
+        raise private_error(400, "仅支持 format=csv")
+    try:
+        schema_version = 1 if schema is None else int(schema)
+    except (TypeError, ValueError):
+        raise private_error(400, "仅支持 schema=1 或 schema=2") from None
+    if schema_version not in (1, 2):
+        raise private_error(400, "仅支持 schema=1 或 schema=2")
     # 组织者鉴权（实名隐私——仅组织者/admin 可导出）。用 _extract_token + verify_session
     # 取当前用户（endpoint 无 Depends(require_user)，直接从 request 解析）。
     token = _extract_token(request)
     user = request.app.state.auth.verify_session(token) if token else None
     if not user:
-        raise HTTPException(401, "未登录或会话过期")
-    _require_contest_organizer(c, user)
+        raise private_error(401, "未登录或会话过期")
+    if c.get("organizer_id") != user.get("id") and user.get("role") != ROLE_ADMIN:
+        raise private_error(403, "仅该场赛事组织者或管理员可操作")
     rows = store.list_contest_export(contest_id)
+    # The contest object above is an authorization/status view from an earlier
+    # autocommit SELECT.  Identity authorization must come from the same SQL
+    # snapshot that projected each export row, otherwise delete-last/toggle/
+    # reinsert can mix a stale gate with newer profile data.
+    requires_identity = bool(
+        rows
+        and all(int(row.get("identity_required") or 0) == 1 for row in rows)
+    )
     import csv as _csv
     import io
 
-    def _safe(v: object) -> object:
-        """防 CSV 公式注入：以 =/+/-/@ 开头的字符串前缀单引号（Excel 不解释为公式）。"""
-        if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@"):
-            return "'" + v
-        return v
+    contest_status_labels = {
+        CONTEST_DRAFT: "草稿",
+        CONTEST_OPEN: "报名中",
+        CONTEST_PUBLISHED: "赛程已发布",
+        CONTEST_RUNNING: "进行中",
+        CONTEST_REST: "阶段间休息",
+        CONTEST_FINISHED: "已结束",
+        CONTEST_CANCELLED: "已取消",
+    }
 
-    def gen():
+    def _stage_key(row: dict[str, Any]) -> str:
+        value = row.get("stage_key")
+        if value:
+            return str(value)
+        stage_idx = row.get("stage_idx")
+        if stage_idx is None:
+            return ""
+        # The key is descriptive only; the stable zero-based stage_idx remains
+        # an independent exported column and is never inferred from this label.
+        raw_stages = c.get("stages_json") or "[]"
+        try:
+            normalized_stage_idx = int(stage_idx)
+            stages = (
+                json.loads(raw_stages)
+                if isinstance(raw_stages, str)
+                else raw_stages
+            )
+            stage = (
+                stages[normalized_stage_idx]
+                if isinstance(stages, list)
+                else None
+            )
+        except (IndexError, TypeError, ValueError):
+            return ""
+        return (
+            str(stage.get("key") or f"stage{normalized_stage_idx}")
+            if isinstance(stage, dict)
+            else f"stage{normalized_stage_idx}"
+        )
+
+    def _identity_source_label(value: object) -> str:
+        return {
+            CONTEST_IDENTITY_SOURCE_REGISTRATION: "报名时资料快照",
+            CONTEST_IDENTITY_SOURCE_LEGACY: "历史报名：当前资料回退（非快照）",
+        }.get(str(value or ""), "")
+
+    def _entry_status(row: dict[str, Any]) -> str:
+        if c.get("status") == CONTEST_CANCELLED:
+            return "赛事已取消"
+        if int(row.get("eliminated") or 0):
+            return "已淘汰"
+        if c.get("status") == CONTEST_FINISHED:
+            return "已完赛"
+        return "参赛中"
+
+    def _result_status(row: dict[str, Any]) -> str:
+        source = row.get("result_source")
+        if source == "official":
+            return "正式成绩"
+        if source == "stage":
+            return "阶段成绩"
+        if c.get("status") == CONTEST_CANCELLED:
+            return "赛事已取消"
+        if c.get("status") == CONTEST_FINISHED:
+            return "正式成绩待生成"
+        return "暂无成绩"
+
+    def gen_v1():
         buf = io.StringIO()
         w = _csv.writer(buf)
         # BOM 让 Excel 正确识别 UTF-8
@@ -3482,24 +3831,206 @@ def contest_export(contest_id: int, request: Request, format: str = "csv"):
         buf.seek(0); buf.truncate(0)
         for r in rows:
             w.writerow([
-                r.get("rank") if r.get("rank") is not None else "",
-                r.get("seed") or 0, _safe(r.get("group_id") or ""),
-                _safe(r.get("bot_name") or ""), _safe(r.get("owner_name") or ""),
-                _safe(r.get("real_name") or ""), _safe(r.get("phone") or ""),
-                _safe(r.get("school") or ""), _safe(r.get("student_id") or ""),
-                r.get("points") if r.get("points") is not None else "",
-                r.get("wins") if r.get("wins") is not None else "",
-                r.get("draws") if r.get("draws") is not None else "",
-                r.get("losses") if r.get("losses") is not None else "",
-                int(bool(r.get("eliminated"))),
-                _safe(r.get("awarded") or ""), r.get("registered_at") or "",
+                _csv_safe_cell(
+                    r.get("rank") if r.get("rank") is not None else ""
+                ),
+                _csv_safe_cell(r.get("seed") or 0),
+                _csv_safe_cell(r.get("group_id") or ""),
+                _csv_safe_cell(r.get("bot_name") or ""),
+                _csv_safe_cell(r.get("owner_name") or ""),
+                _csv_safe_cell(r.get("real_name") or ""),
+                _csv_safe_cell(
+                    r.get("phone") or "", force_text=bool(r.get("phone"))
+                ),
+                _csv_safe_cell(r.get("school") or ""),
+                _csv_safe_cell(
+                    r.get("student_id") or "",
+                    force_text=bool(r.get("student_id")),
+                ),
+                _csv_safe_cell(
+                    r.get("points") if r.get("points") is not None else ""
+                ),
+                _csv_safe_cell(
+                    r.get("wins") if r.get("wins") is not None else ""
+                ),
+                _csv_safe_cell(
+                    r.get("draws") if r.get("draws") is not None else ""
+                ),
+                _csv_safe_cell(
+                    r.get("losses") if r.get("losses") is not None else ""
+                ),
+                _csv_safe_cell(int(bool(r.get("eliminated")))),
+                _csv_safe_cell(r.get("awarded") or ""),
+                _csv_safe_cell(r.get("registered_at") or ""),
             ])
             yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
 
+    v2_headers = [
+        "报名ID(entry_id)",
+        "用户ID(user_id)",
+        "用户账号(username)",
+        "用户显示名(user_display)",
+        "Bot ID(bot_id)",
+        "Bot内部名(bot_name)",
+        "Bot显示名(bot_display)",
+        "实名姓名(real_name)",
+        "手机号(phone)",
+        "学校(school)",
+        "学号(student_id)",
+        "实名来源(identity_source)",
+        "实名采集时间(identity_captured_at)",
+        "实名完整性(identity_completeness)",
+        "正式名次(rank)",
+        "种子(seed)",
+        "分组(group_id)",
+        "赛事状态(contest_status)",
+        "参赛状态(entry_status)",
+        "成绩状态(result_status)",
+        "阶段索引(stage_idx)",
+        "阶段标识(stage_key)",
+        "积分(points)",
+        "胜(wins)",
+        "平(draws)",
+        "负(losses)",
+        "净分(delta_total)",
+        "奖项(awarded)",
+        "报名时间(registered_at)",
+    ]
+
+    def gen_v2():
+        buf = io.StringIO()
+        writer = _csv.writer(buf)
+        yield "\ufeff"
+        writer.writerow(v2_headers)
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        for row in rows:
+            row_requires_identity = bool(
+                int(row.get("identity_required") or 0)
+            )
+            writer.writerow(
+                [
+                    _csv_safe_cell(
+                        row.get("entry_id")
+                        if row.get("entry_id") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(
+                        row.get("user_id")
+                        if row.get("user_id") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(row.get("username") or ""),
+                    _csv_safe_cell(row.get("user_display") or ""),
+                    _csv_safe_cell(
+                        row.get("bot_id")
+                        if row.get("bot_id") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(row.get("bot_name") or ""),
+                    _csv_safe_cell(row.get("bot_display") or ""),
+                    _csv_safe_cell(row.get("real_name") or ""),
+                    _csv_safe_cell(
+                        row.get("phone") or "",
+                        force_text=bool(row.get("phone")),
+                    ),
+                    _csv_safe_cell(row.get("school") or ""),
+                    _csv_safe_cell(
+                        row.get("student_id") or "",
+                        force_text=bool(row.get("student_id")),
+                    ),
+                    _csv_safe_cell(
+                        _identity_source_label(row.get("identity_source"))
+                    ),
+                    _csv_safe_cell(row.get("identity_captured_at") or ""),
+                    _csv_safe_cell((
+                        "完整" if int(row.get("identity_complete") or 0) else "不完整"
+                    ) if row_requires_identity else ""),
+                    _csv_safe_cell(
+                        row.get("rank") if row.get("rank") is not None else ""
+                    ),
+                    _csv_safe_cell(
+                        row.get("seed")
+                        if int(row.get("seed") or 0) > 0
+                        else ""
+                    ),
+                    _csv_safe_cell(row.get("group_id") or ""),
+                    _csv_safe_cell(
+                        contest_status_labels.get(
+                            str(c.get("status") or ""), "未知"
+                        )
+                    ),
+                    _csv_safe_cell(_entry_status(row)),
+                    _csv_safe_cell(_result_status(row)),
+                    _csv_safe_cell(
+                        row.get("stage_idx")
+                        if row.get("stage_idx") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(_stage_key(row)),
+                    _csv_safe_cell(
+                        row.get("points")
+                        if row.get("points") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(
+                        row.get("wins") if row.get("wins") is not None else ""
+                    ),
+                    _csv_safe_cell(
+                        row.get("draws")
+                        if row.get("draws") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(
+                        row.get("losses")
+                        if row.get("losses") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(
+                        row.get("delta_total")
+                        if row.get("delta_total") is not None
+                        else ""
+                    ),
+                    _csv_safe_cell(row.get("awarded") or ""),
+                    _csv_safe_cell(row.get("registered_at") or ""),
+                ]
+            )
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    legacy_count = sum(
+        1
+        for row in rows
+        if row.get("identity_source") == CONTEST_IDENTITY_SOURCE_LEGACY
+    )
+    audit_log(
+        request,
+        "contest_export",
+        result="ok",
+        user=user.get("username"),
+        target=contest_id,
+        detail=(
+            f"schema={schema_version}; rows={len(rows)}; "
+            f"identity={'required' if requires_identity else 'excluded'}; "
+            f"legacy_fallback_rows={legacy_count}"
+        ),
+    )
+
+    filename = (
+        f"contest-{contest_id}-export.csv"
+        if schema_version == 1
+        else f"contest-{contest_id}-participants-v2.csv"
+    )
+    headers = {
+        **_CONTEST_IDENTITY_PRIVATE_HEADERS,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+
     return StreamingResponse(
-        gen(), media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="contest-{contest_id}-export.csv"'},
+        gen_v1() if schema_version == 1 else gen_v2(),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
     )
 
 
@@ -3529,7 +4060,7 @@ async def register_contest(
     # 赛事报名经验
     from bzplat.backend.store.schema import XP_CONTEST_PARTICIPATE
     _store(request).award_xp(user["id"], XP_CONTEST_PARTICIPATE)
-    return {"entry": entry}
+    return {"entry": _public_my_contest_entry(entry)}
 
 
 @router.post("/api/contests/{contest_id}/dispatch")
@@ -3542,7 +4073,7 @@ async def dispatch_contest(
         )
     except ValueError as e:
         raise _contest_write_http_error(e) from e
-    return {"entry": entry}
+    return {"entry": _public_my_contest_entry(entry)}
 
 
 @router.post("/api/contests/{contest_id}/start")
@@ -4122,9 +4653,23 @@ async def admin_delete_contest(contest_id: int, request: Request, admin=Depends(
 
 @router.get("/api/admin/contests/{contest_id}/entries")
 def admin_contest_entries(
-    contest_id: int, request: Request, _admin=Depends(require_admin)
+    contest_id: int,
+    request: Request,
+    response: Response,
+    _admin=Depends(require_admin),
 ):
-    return {"entries": _store(request).contest_entries_named(contest_id)}
+    store = _store(request)
+    contest = store.get_contest(contest_id)
+    if not contest:
+        raise HTTPException(404, "赛事不存在")
+    include_identity = bool(int(contest.get("require_real_name") or 0))
+    if include_identity:
+        response.headers.update(_CONTEST_IDENTITY_PRIVATE_HEADERS)
+    return {
+        "entries": store.contest_entries_named(
+            contest_id, include_identity=include_identity
+        )
+    }
 
 
 class AdminAssignEntries(BaseModel):
@@ -4143,21 +4688,74 @@ class AdminAssignEntries(BaseModel):
 
 @router.post("/api/admin/contests/{contest_id}/entries/bulk")
 async def admin_assign_entries(
-    contest_id: int, body: AdminAssignEntries, request: Request, _admin=Depends(require_admin)
+    contest_id: int,
+    body: AdminAssignEntries,
+    request: Request,
+    admin=Depends(require_admin),
 ):
     """管理员批量指派参赛者+Bot。绕开 register() 的 CONTEST_OPEN + owner 校验（admin 专享）。
     校验：bot 存在+active、bot.game_id==contest.game_id、用户未重复报名。"""
     store = _store(request)
     c = store.get_contest(contest_id)
     if not c:
+        audit_log(
+            request,
+            "admin_assign_entries",
+            result="fail",
+            user=admin.get("username"),
+            target=contest_id,
+            detail="real_name_override=0; reason=contest_missing",
+        )
         raise HTTPException(404, "赛事不存在")
+    requires_identity = bool(int(c.get("require_real_name") or 0))
     from bzplat.backend.games import normalize_game_id
-    cgid = normalize_game_id(c.get("game_id"))
+    try:
+        cgid = normalize_game_id(c.get("game_id"))
+    except ValueError as exc:
+        audit_log(
+            request,
+            "admin_assign_entries",
+            result="fail",
+            user=admin.get("username"),
+            target=contest_id,
+            detail=(
+                f"real_name_override={int(requires_identity)}; "
+                "reason=contest_game_invalid"
+            ),
+        )
+        raise HTTPException(400, str(exc)) from exc
 
     # 解析目标 entries 列表
     if body.assign_all:
-        gid = normalize_game_id(cgid if body.game_id is None else body.game_id)
+        try:
+            gid = normalize_game_id(
+                cgid if body.game_id is None else body.game_id
+            )
+        except ValueError as exc:
+            audit_log(
+                request,
+                "admin_assign_entries",
+                result="fail",
+                user=admin.get("username"),
+                target=contest_id,
+                detail=(
+                    f"real_name_override={int(requires_identity)}; "
+                    "reason=invalid_game"
+                ),
+            )
+            raise HTTPException(400, str(exc)) from exc
         if gid != cgid:
+            audit_log(
+                request,
+                "admin_assign_entries",
+                result="fail",
+                user=admin.get("username"),
+                target=contest_id,
+                detail=(
+                    f"real_name_override={int(requires_identity)}; "
+                    "reason=game_mismatch"
+                ),
+            )
             raise HTTPException(400, f"assign_all 的 game_id {gid} 与赛事 {cgid} 不一致")
         bots = store.list_bots(
             active_only=True, runnable_only=True, game_id=gid
@@ -4182,14 +4780,57 @@ async def admin_assign_entries(
                 bid = int(e.get("bot_id"))
                 target.append((uid, bid))
         except (TypeError, ValueError):
+            audit_log(
+                request,
+                "admin_assign_entries",
+                result="fail",
+                user=admin.get("username"),
+                target=contest_id,
+                detail=(
+                    f"real_name_override={int(requires_identity)}; "
+                    "reason=invalid_ids"
+                ),
+            )
             raise HTTPException(400, "user_id / bot_id 必须是整数")
 
     try:
-        result = await _contests(request).assign_roster_entries(contest_id, target)
+        result = await _contests(request).assign_roster_entries(
+            contest_id,
+            target,
+            allow_real_name_override=True,
+        )
     except ValueError as exc:
+        failure_requires_identity = (
+            exc.identity_required_at_commit
+            if isinstance(exc, ContestRosterWriteValidationError)
+            else requires_identity
+        )
+        audit_log(
+            request,
+            "admin_assign_entries",
+            result="fail",
+            user=admin.get("username"),
+            target=contest_id,
+            detail=(
+                f"real_name_override={int(failure_requires_identity)}; "
+                f"requested={len(target)}; reason=validation_failed"
+            ),
+        )
         raise _contest_write_http_error(exc) from exc
-    audit_log(request, "admin_assign_entries", result="ok", target=contest_id,
-              detail=f"added={result['added']} skipped={len(result['skipped'])}")
+    actual_identity_override = bool(
+        result.pop("_identity_required_at_commit", False)
+    )
+    audit_log(
+        request,
+        "admin_assign_entries",
+        result="ok",
+        user=admin.get("username"),
+        target=contest_id,
+        detail=(
+            f"real_name_override={int(actual_identity_override)}; requested={len(target)}; "
+            f"added={result['added']}; skipped={len(result['skipped'])}"
+        ),
+    )
     return result
 
 

@@ -16,6 +16,11 @@ type BrowserIssue =
 
 export type ExpectedBrowserIssue =
   | {
+      kind: 'console-warning'
+      messageIncludes: string
+      optional?: boolean
+    }
+  | {
       kind: 'http'
       method: string
       status: number
@@ -54,6 +59,9 @@ function issueText(issue: BrowserIssue): string {
 
 function matchesExpected(issue: BrowserIssue, expected: ExpectedBrowserIssue): boolean {
   if (issue.kind !== expected.kind) return false
+  if (issue.kind === 'console-warning' && expected.kind === 'console-warning') {
+    return issue.message.includes(expected.messageIncludes)
+  }
   if (issue.kind === 'http' && expected.kind === 'http') {
     const url = new URL(issue.url)
     return issue.method === expected.method &&

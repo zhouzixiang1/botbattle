@@ -2175,17 +2175,56 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await expect.poll(() => sse.disconnect()).toBe(true)
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
   await expect(page.getByText('加载中…', { exact: true })).toHaveCount(0)
+  // Keep the first frame observable before introducing a playback backlog.  The
+  // live interval starts with the metadata response, so a full snapshot can land
+  // immediately before its next tick (most consistently in WebKit).
+  expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents.slice(0, 1) })).toBe(true)
+  await expect(page.getByText('事件 1/1 · 直播', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
   await expect(page.getByText('事件 1/4', { exact: true })).toBeVisible()
   expect(replayRequests).toBe(0)
-  await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
 
   // 即使自动播放已经追到当前尾部，后续事件也必须先增加分母，再按速度推进。
+  const playbackPosition = page.getByTestId('playback-position')
+  await playbackPosition.evaluate((node) => {
+    type PlaybackWindow = typeof window & {
+      __matchPlaybackObserver?: MutationObserver
+      __matchPlaybackSequence?: number[]
+    }
+    const playbackWindow = window as PlaybackWindow
+    playbackWindow.__matchPlaybackObserver?.disconnect()
+    const sequence: number[] = []
+    const record = () => {
+      const match = node.textContent?.match(/^事件 (\d+)\/4/)
+      if (!match) return
+      const cursor = Number(match[1])
+      if (sequence[sequence.length - 1] !== cursor) sequence.push(cursor)
+    }
+    const observer = new MutationObserver(record)
+    observer.observe(node, { childList: true, characterData: true, subtree: true })
+    playbackWindow.__matchPlaybackObserver = observer
+    playbackWindow.__matchPlaybackSequence = sequence
+    record()
+  })
   await page.getByRole('combobox').filter({ hasText: '1x' }).click()
   await page.getByRole('option', { name: '0.5x', exact: true }).click()
-  await expect(page.getByText('事件 4/4 · 直播', { exact: true })).toBeVisible({ timeout: 6_000 })
+  await page.getByRole('button', { name: '继续回放', exact: true }).click()
+  await expect(playbackPosition).toHaveText('事件 4/4 · 直播', { timeout: 6_000 })
+  await expect.poll(() => page.evaluate(() => {
+    type PlaybackWindow = typeof window & { __matchPlaybackSequence?: number[] }
+    return [...((window as PlaybackWindow).__matchPlaybackSequence ?? [])]
+  })).toEqual([1, 2, 3, 4])
+  await page.evaluate(() => {
+    type PlaybackWindow = typeof window & { __matchPlaybackObserver?: MutationObserver }
+    const playbackWindow = window as PlaybackWindow
+    playbackWindow.__matchPlaybackObserver?.disconnect()
+  })
+  await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
   expect(await sse.emit(reconnectedEvents[4])).toBe(true)
   await expect(page.getByText('事件 4/5', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '继续回放', exact: true }).click()
   await expect(page.getByText('事件 5/5 · 直播', { exact: true })).toBeVisible({ timeout: 2_500 })
   await page.getByRole('button', { name: '暂停回放', exact: true }).click()
 
@@ -2461,6 +2500,8 @@ test('private Bot debug stays folded, safe, bounded, and absent when empty or un
 
 test('MatchViewer playback clock cannot be starved by continuous SSE traffic', async ({ page }) => {
   const matchId = 'mock-live-continuous-clock'
+  const streamIntervalMs = 50
+  const playbackTickMs = 175
   const expectedDetailCancellations = captureExactGetCancellations(
     page,
     `/api/matches/${matchId}`,
@@ -2484,6 +2525,7 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
     bot_b: { name: 'clock_beta', owner_name: 'beta' },
     result: { rounds_played: 0, deltas: [0, 0] },
   }
+  await page.clock.install()
   const sse = await installControlledEventSource(page)
   let releaseMatchResponse!: () => void
   const matchResponseGate = new Promise<void>((resolve) => {
@@ -2527,17 +2569,51 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
   await expect(position).toHaveText('事件 1/2')
   await page.getByRole('combobox', { name: '回放速度', exact: true }).click()
   await page.getByRole('option', { name: '4x', exact: true }).click()
-  expect(await sse.stream(streamEvents, 50)).toBe(true)
+
+  const pauseTarget = await page.evaluate(() => Date.now() + 100)
+  await page.clock.pauseAt(pauseTarget)
+  await page.evaluate((expectedDelay) => {
+    type ProbeWindow = typeof window & { __playbackIntervalInstalls?: number }
+    const probeWindow = window as ProbeWindow
+    const originalSetInterval = window.setInterval.bind(window)
+    probeWindow.__playbackIntervalInstalls = 0
+    window.setInterval = ((
+      handler: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      if (delay === expectedDelay) {
+        probeWindow.__playbackIntervalInstalls =
+          (probeWindow.__playbackIntervalInstalls ?? 0) + 1
+      }
+      return originalSetInterval(handler, delay, ...args)
+    }) as typeof window.setInterval
+  }, playbackTickMs)
+
+  const playbackIntervalInstalls = () => page.evaluate(() => (
+    window as typeof window & { __playbackIntervalInstalls?: number }
+  ).__playbackIntervalInstalls ?? 0)
+
   await page.getByRole('button', { name: '继续回放', exact: true }).click()
-  await expect.poll(
-    async () => Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0),
-    { timeout: 1_200 },
-  ).toBeGreaterThan(1)
-  const sentDuringAdvance = Number(await sse.sent())
-  expect(sentDuringAdvance).toBeGreaterThan(0)
-  expect(sentDuringAdvance).toBeLessThan(40)
-  await expect.poll(async () => Number(await sse.sent()), { timeout: 3_000 })
-    .toBe(40)
+  await expect.poll(playbackIntervalInstalls).toBeGreaterThan(0)
+  const installsBeforeStream = await playbackIntervalInstalls()
+
+  expect(await sse.stream(streamEvents, streamIntervalMs)).toBe(true)
+  const halfStreamWindowMs =
+    streamIntervalMs * (streamEvents.length / 2) + 25
+
+  await page.clock.runFor(halfStreamWindowMs)
+  expect(Number(await sse.sent())).toBe(20)
+  await expect(position).toHaveText('事件 6/22')
+  expect(await playbackIntervalInstalls()).toBe(installsBeforeStream)
+
+  await page.clock.runFor(halfStreamWindowMs)
+  expect(Number(await sse.sent())).toBe(40)
+  await expect(position).toHaveText('事件 12/42')
+  expect(await playbackIntervalInstalls()).toBe(installsBeforeStream)
+
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
+  await page.clock.resume()
   await monitor.expectClean(expectedDetailCancellations())
 })
 
@@ -3634,7 +3710,12 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
   })
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
-  await expect(page.getByText('已中止', { exact: true })).toBeVisible()
+  const matchStatusStrip = page.getByTestId('rating-state').locator('..')
+  const abortedStatus = matchStatusStrip
+    .locator('[data-slot="badge"][data-variant="destructive"]')
+    .filter({ hasText: /^已中止$/ })
+  await expect(abortedStatus).toHaveCount(1)
+  await expect(abortedStatus).toBeVisible()
   await expect(page.locator('main')).toContainText('平台运行异常')
   await expect(page.locator('main')).not.toContainText('正常结束')
   // The terminal event is retained behind the pinned cursor. Advancing exposes

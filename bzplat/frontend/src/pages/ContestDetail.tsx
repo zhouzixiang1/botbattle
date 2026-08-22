@@ -98,6 +98,16 @@ interface Entry {
   phone?: string
   school?: string
   student_id?: string
+  identity_source?: 'registration_profile' | 'current_profile_legacy'
+  identity_captured_at?: string | null
+}
+
+const EXPORT_LINK_CLASS = 'max-sm:h-auto max-sm:min-h-[44px] max-sm:w-full max-sm:whitespace-normal max-sm:py-2 max-sm:text-center max-sm:leading-snug'
+
+function identitySourceLabel(source: Entry['identity_source']): string {
+  if (source === 'registration_profile') return '报名时资料快照'
+  if (source === 'current_profile_legacy') return '历史报名：当前资料回退（非快照）'
+  return '报名资料'
 }
 interface Pairing extends MatchParticipantSource {
   id: number
@@ -278,6 +288,7 @@ export default function ContestDetail() {
   const [standings, setStandings] = useState<Standing[]>([])
   const [stageStandings, setStageStandings] = useState<StageStandingSummary[]>([])
   const [officialResults, setOfficialResults] = useState<OfficialResult[]>([])
+  const [serverIsOrganizer, setServerIsOrganizer] = useState(false)
   const [myEntry, setMyEntry] = useState<Entry | null>(null)
   const [estimate, setEstimate] = useState<{ estimated_matches?: number; eta_seconds?: number } | null>(null)
   const [bots, setBots] = useState<Array<{ id: number; name: string; display_name?: string }>>([])
@@ -334,6 +345,7 @@ export default function ContestDetail() {
         entries_per_page?: number
         entries_total?: number
         my_entry?: Entry | null
+        is_organizer?: boolean
       }>(`/api/contests/${targetId}?entries_page=${targetEntriesPage}&entries_per_page=${entriesPerPage}`)
       let nextOfficialResults: OfficialResult[] = []
       let officialResultsError = ''
@@ -361,6 +373,7 @@ export default function ContestDetail() {
       setStageTab(d.contest.current_stage_idx ?? 0)
       setEntriesTotal(d.entries_total ?? d.entries.length)
       setMyEntry(d.my_entry ?? null)
+      setServerIsOrganizer(d.is_organizer === true)
       const status = d.contest.status
       const previousStatus = lastLoadedStatusRef.current
       if (previousStatus === null || previousStatus !== status) {
@@ -397,6 +410,7 @@ export default function ContestDetail() {
     setStandings([])
     setStageStandings([])
     setOfficialResults([])
+    setServerIsOrganizer(false)
     setMyEntry(null)
     setEstimate(null)
     setBots([])
@@ -437,6 +451,10 @@ export default function ContestDetail() {
   }, [id, isLoggedIn, contest?.game_id, contest?.showcase_key])
 
   const isOrg = !!user && !!contest && (user.role === 'admin' || user.id === contest.organizer_id)
+  const canExportIdentity = Boolean(contest?.require_real_name && serverIsOrganizer)
+  const canAssignEntries = Boolean(
+    contest && serverIsOrganizer && (!contest.require_real_name || user?.role === 'admin'),
+  )
   // myEntry 来自后端 my_entry 字段（不分页，休息换 Bot UI 依赖；entries 分页后前端 find 不可靠）
   // 实名校验：赛事要求实名且当前用户未填完整 → 提示去设置页补填
   const needsRealName = !!contest?.require_real_name && !!user && !(
@@ -597,6 +615,22 @@ export default function ContestDetail() {
   const canSwapBot = isLoggedIn && Boolean(myEntry) && ['rest', 'draft', 'open', 'published'].includes(contest.status)
   const canManageLifecycle = isOrg && ['draft', 'open', 'published', 'running', 'rest'].includes(contest.status)
   const showActionRegion = isShowcase || canRegister || canSwapBot || canManageLifecycle
+  const rosterDescription = contest.require_real_name
+    ? serverIsOrganizer
+      ? `每页 ${entriesPerPage} 人；导出按报名 ID、用户 ID 与 Bot ID 稳定关联账号和显示名。新报名使用报名时资料快照；历史报名若无快照会明确标注当前资料回退。${user?.role === 'admin' ? '管理员代报名会写入审计。' : '实名赛事仅允许选手本人报名，组织者不能代报名或批量指派。'}`
+      : `每页 ${entriesPerPage} 人；本赛事要求实名报名，报名资料仅对赛事组织者可见。`
+    : serverIsOrganizer
+      ? `每页 ${entriesPerPage} 人；导出按报名 ID、用户 ID 与 Bot ID 稳定关联账号和显示名。`
+      : `每页 ${entriesPerPage} 人；公开显示账号和 Bot 身份。`
+  const officialDescription = [
+    '完赛后固化的权威结果；赛事积分不改变平台 Rating。实际战绩不把瑞士轮轮空记作胜场，轮空次数单独列出；同分行显示实际使用的破同分链。',
+    contest.require_real_name
+      ? '公开成绩 CSV 永不包含报名时实名资料。'
+      : '公开成绩 CSV 只含公开身份与赛果。',
+    canExportIdentity
+      ? '组织者成绩明细按报名 ID、用户 ID 与 Bot ID 关联报名资料，并标明资料来自报名快照或历史回退。'
+      : null,
+  ].filter(Boolean).join(' ')
 
   return (
     <PageFrame width="wide" layout="public-contest-detail">
@@ -923,14 +957,14 @@ export default function ContestDetail() {
 
         </TabsContent>
 
-        {/* Tab「选手」：报名列表（含组织者批量指派/导出/实名显示/移除） */}
+        {/* Tab「选手」：报名列表（非实名组织者/admin 可批量指派；实名赛仅 admin 可审计代报名） */}
         <TabsContent value="entries" className="mt-2">
           <DataRegion
             title={`报名选手（${entriesTotal}）`}
-            description={`每页 ${entriesPerPage} 人；组织者可查看实名资料并导出名单。`}
+            description={rosterDescription}
             actions={
               <>
-                {isOrg && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
+                {canAssignEntries && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -939,10 +973,11 @@ export default function ContestDetail() {
                     <Plus aria-hidden="true" className="size-3.5" />批量指派
                   </Button>
                 )}
-                {isOrg && (
-                  <Button asChild size="sm" variant="outline">
-                    <a href={`/api/contests/${id}/export?format=csv`}>
-                      <Download aria-hidden="true" className="size-3.5" />导出名单
+                {serverIsOrganizer && (
+                  <Button asChild size="sm" variant="outline" className={EXPORT_LINK_CLASS}>
+                    <a href={`/api/contests/${id}/export?format=csv&schema=2`} download>
+                      <Download aria-hidden="true" className="size-3.5" />
+                      {contest.require_real_name ? '导出实名报名名单' : '导出报名名单'}
                     </a>
                   </Button>
                 )}
@@ -985,14 +1020,18 @@ export default function ContestDetail() {
                             </Badge>
                           )}
                           {e.eliminated ? <Badge variant="destructive">淘汰</Badge> : null}
-                          {isOrg && e.real_name && (
-                            <OverflowText
-                              lines={2}
-                              tooltip={[e.real_name, e.phone, e.school, e.student_id].filter(Boolean).join(' / ')}
-                              className="basis-full text-xs text-muted-foreground [overflow-wrap:anywhere]"
-                            >
-                              {[e.real_name, e.phone, e.school, e.student_id].filter(Boolean).join(' / ')}
-                            </OverflowText>
+                          {serverIsOrganizer && contest.require_real_name && e.real_name && (
+                            <div className="basis-full min-w-0 text-xs leading-relaxed text-muted-foreground">
+                              <span className="font-medium text-foreground">
+                                {identitySourceLabel(e.identity_source)}
+                              </span>
+                              {e.identity_captured_at && (
+                                <span> · 采集于 {fmtTime(e.identity_captured_at)}</span>
+                              )}
+                              <span className="block break-words [overflow-wrap:anywhere]">
+                                {[e.real_name, e.phone, e.school, e.student_id].filter(Boolean).join(' / ')}
+                              </span>
+                            </div>
                           )}
                         </div>
                         {isOrg && !isShowcase && (contest.status === 'draft' || contest.status === 'open') && (
@@ -1082,13 +1121,23 @@ export default function ContestDetail() {
         <TabsContent value="official" className="mt-2">
           <DataRegion
             title="正式名次"
-            description="完赛后固化的权威结果；赛事积分不改变平台 Rating。实际战绩不把瑞士轮轮空记作胜场，轮空次数单独列出；同分行显示实际使用的破同分链。"
+            description={officialDescription}
             actions={
-              <Button asChild variant="outline" size="sm">
-                <a href={`/api/contests/${id}/official-results?format=csv`}>
-                  <Download aria-hidden="true" className="size-3.5" />导出 CSV
-                </a>
-              </Button>
+              <>
+                <Button asChild variant="outline" size="sm" className={EXPORT_LINK_CLASS}>
+                  <a href={`/api/contests/${id}/official-results?format=csv`} download>
+                    <Download aria-hidden="true" className="size-3.5" />导出公开成绩 CSV
+                  </a>
+                </Button>
+                {canExportIdentity && (
+                  <Button asChild variant="outline" size="sm" className={EXPORT_LINK_CLASS}>
+                    <a href={`/api/contests/${id}/export?format=csv&schema=2`} download>
+                      <Download aria-hidden="true" className="size-3.5" />
+                      导出组织者成绩明细（含实名报名资料）
+                    </a>
+                  </Button>
+                )}
+              </>
             }
           >
               <DataTable className="rounded-none border-0" scrollLabel="赛事正式名次表">

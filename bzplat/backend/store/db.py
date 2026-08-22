@@ -36,6 +36,8 @@ from .schema import (
     CONTEST_CANCELLED,
     CONTEST_DRAFT,
     CONTEST_FINISHED,
+    CONTEST_IDENTITY_SOURCE_LEGACY,
+    CONTEST_IDENTITY_SOURCE_REGISTRATION,
     CONTEST_OPEN,
     CONTEST_PUBLISHED,
     CONTEST_REST,
@@ -118,6 +120,27 @@ class RankedBotSelectionBusyError(ValueError):
     """Changing the ranked representative would cross an active rated lifecycle."""
 
 
+class ContestRealNameRosterForbidden(ValueError):
+    """A proxy roster write lacks the participant consent required for PII capture."""
+
+    MESSAGE = "实名赛事仅允许参赛者本人报名，组织者不可代报名"
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)
+
+
+class ContestRosterWriteValidationError(ValueError):
+    """Roster validation failed after the Store acquired its writer lock.
+
+    The non-PII gate bit lets an authorized API audit the actual identity mode
+    used by the failed transaction instead of an earlier autocommit view.
+    """
+
+    def __init__(self, message: str, *, identity_required_at_commit: bool) -> None:
+        super().__init__(message)
+        self.identity_required_at_commit = bool(identity_required_at_commit)
+
+
 @dataclass
 class _OfflineCutoverGuard:
     """Process-local proof that the DB dispatcher flock is exclusively held."""
@@ -164,6 +187,56 @@ def offline_cutover_path_guard(database_path: str | os.PathLike[str]):
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+_CONTEST_IDENTITY_PROFILE_FIELDS = (
+    "real_name",
+    "phone",
+    "school",
+    "student_id",
+)
+
+
+def _registration_identity_tx(
+    conn: sqlite3.Connection,
+    contest_id: int,
+    user_id: int,
+    *,
+    captured_at: str,
+) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
+    """Freeze a complete registration profile inside the entry write transaction.
+
+    Non-real-name contests deliberately persist six NULLs.  Existing real-name
+    entries also remain NULL after migration; their explicitly labelled legacy
+    fallback is a private read-model concern, not a fabricated snapshot.
+    """
+    contest = conn.execute(
+        "SELECT require_real_name FROM contests WHERE id=?", (contest_id,)
+    ).fetchone()
+    if not contest:
+        raise ValueError("赛事不存在")
+    if not int(contest["require_real_name"] or 0):
+        return (None, None, None, None, None, None)
+    user = conn.execute(
+        "SELECT real_name,phone,school,student_id FROM users WHERE id=?",
+        (user_id,),
+    ).fetchone()
+    values = tuple(
+        str(user[field] or "").strip() if user is not None else ""
+        for field in _CONTEST_IDENTITY_PROFILE_FIELDS
+    )
+    if not all(values):
+        raise ValueError(
+            "本赛事要求实名，参赛者须先填写完整实名信息（姓名/手机号/学校/学号）"
+        )
+    return (
+        values[0],
+        values[1],
+        values[2],
+        values[3],
+        captured_at,
+        CONTEST_IDENTITY_SOURCE_REGISTRATION,
+    )
 
 
 def _version_in_cutover_manifest_tx(
@@ -269,6 +342,63 @@ _UNIQUE_CONTEST_ENTRY_SQL = (
     "(SELECT contest_id,bot_id,MIN(id) AS entry_id FROM contest_entries "
     "WHERE bot_id IS NOT NULL GROUP BY contest_id,bot_id HAVING COUNT(*)=1)"
 )
+
+
+def _contest_identity_projection_sql(
+    *,
+    entry_alias: str = "e",
+    user_alias: str = "u",
+    gate_sql: str | None = None,
+) -> str:
+    """Private identity projection, optionally gated inside the same SQL row.
+
+    ``gate_sql`` must be a trusted internal SQL predicate from the same SELECT
+    (normally the joined contest's ``require_real_name``).  Wrapping every
+    projected value prevents a stale preliminary gate read from authorizing PII
+    fetched from a newer entry/profile snapshot.
+    """
+
+    def gated(expression: str) -> str:
+        if gate_sql is None:
+            return expression
+        return f"CASE WHEN {gate_sql} THEN ({expression}) ELSE NULL END"
+
+    raw_source = (
+        f"CASE WHEN {entry_alias}.identity_source="
+        f"'{CONTEST_IDENTITY_SOURCE_REGISTRATION}' "
+        f"THEN '{CONTEST_IDENTITY_SOURCE_REGISTRATION}' "
+        f"WHEN {entry_alias}.identity_source IS NULL "
+        f"THEN '{CONTEST_IDENTITY_SOURCE_LEGACY}' ELSE NULL END"
+    )
+    projected: list[str] = []
+    completeness_terms: list[str] = []
+    for field in _CONTEST_IDENTITY_PROFILE_FIELDS:
+        snapshot = f"{entry_alias}.{field}_snapshot"
+        current = f"{user_alias}.{field}"
+        value = (
+            f"CASE WHEN {entry_alias}.identity_source="
+            f"'{CONTEST_IDENTITY_SOURCE_REGISTRATION}' THEN {snapshot} "
+            f"WHEN {entry_alias}.identity_source IS NULL THEN {current} "
+            "ELSE NULL END"
+        )
+        projected.append(f"{gated(value)} AS {field}")
+        completeness_terms.append(f"TRIM(COALESCE(({value}),''))<>''")
+    completeness = (
+        f"CASE WHEN {' AND '.join(completeness_terms)} THEN 1 ELSE 0 END"
+    )
+    captured_at = (
+        f"CASE WHEN {entry_alias}.identity_source="
+        f"'{CONTEST_IDENTITY_SOURCE_REGISTRATION}' "
+        f"THEN {entry_alias}.identity_captured_at ELSE NULL END"
+    )
+    projected.extend(
+        (
+            f"{gated(raw_source)} AS identity_source",
+            f"{gated(captured_at)} AS identity_captured_at",
+            f"{gated(completeness)} AS identity_complete",
+        )
+    )
+    return ", ".join(projected)
 
 
 def _apply_effective_entry_ids(row: dict, *fields: tuple[str, str]) -> dict:
@@ -2414,6 +2544,12 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             ("seed", "INTEGER NOT NULL DEFAULT 0"),
             ("eliminated", "INTEGER NOT NULL DEFAULT 0"),
             ("dispatched_at", "TEXT"),
+            ("real_name_snapshot", "TEXT"),
+            ("phone_snapshot", "TEXT"),
+            ("school_snapshot", "TEXT"),
+            ("student_id_snapshot", "TEXT"),
+            ("identity_captured_at", "TEXT"),
+            ("identity_source", "TEXT"),
         ):
             _add_col(conn, "contest_entries", col, decl)
 
@@ -2665,8 +2801,12 @@ def _migrate(conn: sqlite3.Connection, *, fresh_schema: bool = False) -> None:
             "bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL, "  # SET NULL：删 bot 留 entry
             "registered_at TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', "
             "seed INTEGER NOT NULL DEFAULT 0, eliminated INTEGER NOT NULL DEFAULT 0, "
-            "dispatched_at TEXT)",
-            "contest_id, user_id, bot_id, registered_at, group_id, seed, eliminated, dispatched_at",
+            "dispatched_at TEXT, real_name_snapshot TEXT, phone_snapshot TEXT, "
+            "school_snapshot TEXT, student_id_snapshot TEXT, identity_captured_at TEXT, "
+            "identity_source TEXT)",
+            "contest_id, user_id, bot_id, registered_at, group_id, seed, eliminated, "
+            "dispatched_at, real_name_snapshot, phone_snapshot, school_snapshot, "
+            "student_id_snapshot, identity_captured_at, identity_source",
         ),
         "contest_pairings": (
             "CREATE TABLE {n}_new ("
@@ -11005,11 +11145,27 @@ class Store:
         sets = [f"{k}=?" for k in clean]
         vals = list(clean.values())
         with self._tx() as c:
+            # ``require_real_name`` controls whether private PII may be read.
+            # Serialize every attempted change with entry insertion before the
+            # first SELECT.  Once any entry exists the flag is immutable, so a
+            # detail/export read cannot observe an old gate beside newer rows.
+            if "require_real_name" in clean:
+                c.execute("BEGIN IMMEDIATE")
             current = c.execute(
                 "SELECT * FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
             if not current:
                 return None
+            if (
+                "require_real_name" in clean
+                and int(clean["require_real_name"] or 0)
+                != int(current["require_real_name"] or 0)
+                and c.execute(
+                    "SELECT 1 FROM contest_entries WHERE contest_id=? LIMIT 1",
+                    (contest_id,),
+                ).fetchone()
+            ):
+                raise ValueError("赛事已有报名，不能修改实名要求")
             # A partial time PATCH is only meaningful after merging the stored
             # values.  Validate that complete candidate before the single UPDATE,
             # so an invalid schedule cannot partially write another field.
@@ -11214,10 +11370,20 @@ class Store:
 
     def add_entry(self, contest_id: int, user_id: int, bot_id: int) -> dict:
         with self._tx() as c:
+            # sqlite3's default deferred mode does not start a transaction for
+            # SELECT.  Reserve the writer before reading the contest/profile so
+            # the six identity columns and the entry share one linearization point.
+            c.execute("BEGIN IMMEDIATE")
+            registered_at = _now()
+            identity = _registration_identity_tx(
+                c, contest_id, user_id, captured_at=registered_at
+            )
             cur = c.execute(
                 "INSERT INTO contest_entries(contest_id, user_id, bot_id, "
-                "registered_at) VALUES(?,?,?,?)",
-                (contest_id, user_id, bot_id, _now()),
+                "registered_at, real_name_snapshot, phone_snapshot, school_snapshot, "
+                "student_id_snapshot, identity_captured_at, identity_source) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (contest_id, user_id, bot_id, registered_at, *identity),
             )
             eid = cur.lastrowid
             return _row(
@@ -11239,15 +11405,30 @@ class Store:
         后续副作用。
         """
         with self._tx() as c:
+            # Must precede the contest-status, duplicate and identity reads.
+            # _tx() itself deliberately does not BEGIN, and this method is not
+            # called from another Store transaction, so this is not nested.
+            c.execute("BEGIN IMMEDIATE")
             contest = c.execute(
-                "SELECT status FROM contests WHERE id=?", (contest_id,)
+                "SELECT status,require_real_name FROM contests WHERE id=?", (contest_id,)
             ).fetchone()
             if not contest or contest["status"] != CONTEST_OPEN:
                 raise ValueError("比赛未开放报名")
+            if c.execute(
+                "SELECT 1 FROM contest_entries WHERE contest_id=? AND user_id=?",
+                (contest_id, user_id),
+            ).fetchone():
+                raise ValueError("该用户在此比赛中已报名")
+            registered_at = _now()
+            identity = _registration_identity_tx(
+                c, contest_id, user_id, captured_at=registered_at
+            )
             cur = c.execute(
-                "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at) "
-                "VALUES(?,?,?,?) ON CONFLICT(contest_id, user_id) DO NOTHING",
-                (contest_id, user_id, bot_id, _now()),
+                "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at, "
+                "real_name_snapshot, phone_snapshot, school_snapshot, student_id_snapshot, "
+                "identity_captured_at, identity_source) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(contest_id, user_id) DO NOTHING",
+                (contest_id, user_id, bot_id, registered_at, *identity),
             )
             if cur.rowcount != 1:
                 raise ValueError("该用户在此比赛中已报名")
@@ -11258,24 +11439,67 @@ class Store:
             )
 
     def add_contest_roster_entries(
-        self, contest_id: int, entries: list[tuple[int, int]]
-    ) -> tuple[list[dict], list[int]]:
-        """组织者/admin 批量新增名册；状态复核与整批写入同一事务。"""
+        self,
+        contest_id: int,
+        entries: list[tuple[int, int]],
+        *,
+        allow_real_name_override: bool = False,
+        return_identity_required: bool = False,
+    ) -> tuple[list[dict], list[int]] | tuple[list[dict], list[int], bool]:
+        """Add a proxy roster atomically, with explicit admin PII override.
+
+        A real-name contest may only use this proxy path when an already
+        authorized admin caller passes ``allow_real_name_override=True``.  Normal
+        self-registration uses :meth:`add_contest_entry_once` instead.  The Store
+        repeats this gate after acquiring the database writer lock so an API or
+        Manager pre-check cannot be invalidated by another process toggling the
+        contest's identity requirement.
+        """
         with self._tx() as c:
+            # Reserve the writer before every contest/duplicate/identity SELECT.
+            # See add_contest_entry_once: _tx() has not opened a transaction here.
+            c.execute("BEGIN IMMEDIATE")
             contest = c.execute(
-                "SELECT status FROM contests WHERE id=?", (contest_id,)
+                "SELECT status,require_real_name FROM contests WHERE id=?",
+                (contest_id,),
             ).fetchone()
             if not contest:
                 raise ValueError("赛事不存在")
             if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
                 raise ValueError("开赛后不可改名册")
+            if (
+                int(contest["require_real_name"] or 0)
+                and not allow_real_name_override
+            ):
+                raise ContestRealNameRosterForbidden()
             added: list[dict] = []
             skipped: list[int] = []
             for user_id, bot_id in entries:
+                if c.execute(
+                    "SELECT 1 FROM contest_entries WHERE contest_id=? AND user_id=?",
+                    (contest_id, user_id),
+                ).fetchone():
+                    skipped.append(user_id)
+                    continue
+                registered_at = _now()
+                try:
+                    identity = _registration_identity_tx(
+                        c, contest_id, user_id, captured_at=registered_at
+                    )
+                except ValueError as exc:
+                    raise ContestRosterWriteValidationError(
+                        str(exc),
+                        identity_required_at_commit=bool(
+                            int(contest["require_real_name"] or 0)
+                        ),
+                    ) from exc
                 cur = c.execute(
-                    "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at) "
-                    "VALUES(?,?,?,?) ON CONFLICT(contest_id, user_id) DO NOTHING",
-                    (contest_id, user_id, bot_id, _now()),
+                    "INSERT INTO contest_entries(contest_id, user_id, bot_id, registered_at, "
+                    "real_name_snapshot, phone_snapshot, school_snapshot, "
+                    "student_id_snapshot, identity_captured_at, identity_source) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(contest_id, user_id) DO NOTHING",
+                    (contest_id, user_id, bot_id, registered_at, *identity),
                 )
                 if cur.rowcount != 1:
                     skipped.append(user_id)
@@ -11283,7 +11507,12 @@ class Store:
                 added.append(_row(c.execute(
                     "SELECT * FROM contest_entries WHERE id=?", (cur.lastrowid,)
                 ).fetchone()))
-            return added, skipped
+            result = (added, skipped)
+            if return_identity_required:
+                # This bit was read after BEGIN IMMEDIATE and therefore names
+                # the same linearization point as every captured snapshot.
+                return (*result, bool(int(contest["require_real_name"] or 0)))
+            return result
 
     def delete_contest_roster_entry(self, contest_id: int, user_id: int) -> bool:
         """组织者/admin 删除名册；状态复核与 DELETE 同一事务。"""
@@ -11908,57 +12137,115 @@ class Store:
             return result
 
     def contest_entries_named(
-        self, contest_id: int, *, page: int | None = None, per_page: int = 50,
+        self,
+        contest_id: int,
+        *,
+        page: int | None = None,
+        per_page: int = 50,
+        include_identity: bool = False,
     ) -> list[dict] | dict:
-        """返回报名（带 bot 名/owner 名 + seed/group/eliminated + 实名信息）。
+        """Return named entries; private identity is opt-in and contest-gated.
 
         LEFT JOIN bots：bot_id 现可为 NULL（删 bot 后保留 entry，P0 SET NULL）。
-        实名字段（real_name/phone/school/student_id）随行返回——**调用方（api 层）负责
-        对非组织者脱敏**（contest_detail 仅组织者可见；export 端点组织者 gated）。
+        默认查询不读取实名列。只有调用方显式请求且赛事本身要求实名时，才投影
+        报名快照；历史 NULL 快照明确标为 current_profile_legacy 并回退当前资料。
+        非实名赛事即使调用方误传 include_identity=True 也不会读取或返回 PII。
         ``page`` 为 None 时返回 list（旧契约）；给定时返回分页 dict。
         """
         with self._tx() as c:
+            identity_columns = ""
+            identity_join = ""
+            if include_identity:
+                gate = "COALESCE(identity_gate.require_real_name,0)=1"
+                identity_columns = (
+                    ", identity_gate.require_real_name AS _identity_required, "
+                    + _contest_identity_projection_sql(gate_sql=gate)
+                )
+                identity_join = (
+                    "JOIN contests identity_gate "
+                    "ON identity_gate.id=e.contest_id "
+                )
             sql = (
-                "SELECT e.*, b.name AS bot_name, b.display_name AS bot_display, "
+                "SELECT e.id,e.contest_id,e.user_id,e.bot_id,e.registered_at,"
+                "e.group_id,e.seed,e.eliminated,e.dispatched_at, "
+                "b.name AS bot_name, b.display_name AS bot_display, "
                 "b.game_id, u.username AS username, u.username AS owner_name, "
-                "u.display_name AS owner_display, "
-                "u.real_name, u.phone, u.school, u.student_id "
-                "FROM contest_entries e "
-                "LEFT JOIN bots b ON e.bot_id=b.id "
+                "u.display_name AS owner_display"
+                + identity_columns
+                + " FROM contest_entries e "
+                + identity_join
+                + "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN users u ON e.user_id=u.id "
                 "WHERE e.contest_id=? ORDER BY e.seed, e.registered_at"
             )
             params = (contest_id,)
+
+            def finalize_identity(row: dict) -> dict:
+                identity_required = bool(
+                    int(row.pop("_identity_required", 0) or 0)
+                )
+                if not identity_required:
+                    for field in (
+                        *_CONTEST_IDENTITY_PROFILE_FIELDS,
+                        "identity_source",
+                        "identity_captured_at",
+                        "identity_complete",
+                    ):
+                        row.pop(field, None)
+                return row
+
             if page is not None:
                 pp = max(1, min(200, int(per_page)))
                 rows, total = _paginate(c, sql, params, page=page, per_page=pp)
+                if include_identity:
+                    rows = [finalize_identity(row) for row in rows]
                 return {"items": rows, "page": max(1, int(page)), "per_page": pp, "total": total}
-            return [_row(r) for r in c.execute(sql, params).fetchall()]
+            rows = [_row(r) for r in c.execute(sql, params).fetchall()]
+            return (
+                [finalize_identity(row) for row in rows]
+                if include_identity
+                else rows
+            )
 
     def list_contest_export(self, contest_id: int) -> list[dict]:
-        """合并导出：一行 per 报名者 = 报名信息（实名）+ 结果排名 + 战绩。
+        """Private export rows with stable identities, provenance and results.
 
-        LEFT JOIN official_results：未完赛/未出排名者 rank/points 列为 NULL（仍出现）。
-        stage_results 取末阶段（official_results.stage_idx）。供组织者导出 CSV。
+        Real-name fields are selected only for a real-name contest.  New entries
+        use their immutable registration snapshot; legacy entries use an explicit
+        current-profile fallback.  For unfinished contests, the latest persisted
+        stage result remains visible without being mislabeled as an official rank.
         """
         with self._tx() as c:
+            gate = "COALESCE(identity_gate.require_real_name,0)=1"
+            identity_columns = _contest_identity_projection_sql(gate_sql=gate)
             rows = c.execute(
-                "SELECT e.id AS entry_id, e.seed, e.group_id, e.eliminated, e.registered_at, "
-                "u.username AS owner_name, u.display_name AS owner_display, "
-                "u.real_name, u.phone, u.school, u.student_id, "
+                "SELECT e.id AS entry_id,e.user_id,e.bot_id,e.seed,e.group_id,"
+                "e.eliminated,e.registered_at, "
+                "identity_gate.require_real_name AS identity_required, "
+                "u.username,u.display_name AS user_display,"
+                "u.username AS owner_name,u.display_name AS owner_display, "
                 "b.name AS bot_name, b.display_name AS bot_display, "
-                "r.rank, r.points, r.awarded, r.stage_idx, "
-                "sr.wins, sr.draws, sr.losses, sr.delta_total "
+                + identity_columns + ", "
+                "r.rank,COALESCE(r.points,sr.points) AS points,r.awarded,"
+                "COALESCE(r.stage_idx,sr.stage_idx) AS stage_idx,sr.stage_key, "
+                "sr.wins,sr.draws,sr.losses,sr.delta_total, "
+                "CASE WHEN r.entry_id IS NOT NULL THEN 'official' "
+                "WHEN sr.entry_id IS NOT NULL THEN 'stage' ELSE 'none' END AS result_source "
                 "FROM contest_entries e "
+                "JOIN contests identity_gate ON identity_gate.id=e.contest_id "
                 "LEFT JOIN users u ON e.user_id=u.id "
                 "LEFT JOIN bots b ON e.bot_id=b.id "
                 "LEFT JOIN contest_official_results r "
                 "  ON r.entry_id=e.id AND r.contest_id=e.contest_id "
                 "LEFT JOIN contest_stage_results sr "
                 "  ON sr.entry_id=e.id AND sr.contest_id=e.contest_id "
-                "  AND sr.stage_idx=r.stage_idx "
+                "  AND sr.stage_idx=COALESCE(r.stage_idx,("
+                "    SELECT MAX(latest.stage_idx) FROM contest_stage_results latest "
+                "    WHERE latest.contest_id=e.contest_id AND latest.entry_id=e.id"
+                "  )) "
                 "WHERE e.contest_id=? "
-                "ORDER BY CASE WHEN r.rank IS NULL THEN 999999 ELSE r.rank END, e.seed",
+                "ORDER BY CASE WHEN r.rank IS NULL THEN 999999 ELSE r.rank END,"
+                "CASE WHEN e.seed=0 THEN 999999 ELSE e.seed END,e.id",
                 (contest_id,),
             ).fetchall()
             return [_row(r) for r in rows]
