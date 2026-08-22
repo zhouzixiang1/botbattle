@@ -1115,6 +1115,16 @@ async def _drive_contest(
         emit(f"{key}：创建赛事 #{existing['id']}")
 
     cid = int(existing["id"])
+    # The only real-name showcase targets the open state.  Open it before
+    # constructing its roster so every synthetic participant follows the same
+    # self-registration path as the product; do not grant the offline seed an
+    # un-audited proxy-PII override.  Non-real-name draft snapshots retain their
+    # historical organizer roster flow.
+    if (
+        existing["status"] == CONTEST_DRAFT
+        and int(existing.get("require_real_name") or 0)
+    ):
+        existing = await manager.open_registration(cid)
     existing = await _ensure_roster(
         manager, existing, players, bots, ENTRY_COUNT[key]
     )

@@ -4,11 +4,16 @@
 - 显式 entries 列表模式
 - assign_all 便捷模式（按 game_id 全选）
 - 重复报名跳过 / bot 不可用跳过 / 游戏不匹配跳过
+- 实名赛事 admin override 冻结快照并写无 PII 审计
 - 管理员移除报名成功/失败审计
 - 非 admin 403 / 赛事不存在 404
 """
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 from fastapi.testclient import TestClient
 
 from bzplat.backend.crypto import hash_password, new_session_token, session_expires
@@ -122,6 +127,222 @@ def test_admin_assign_all_by_game(tmp_path):
     s.close()
 
 
+def test_admin_bulk_real_name_gate_reports_users_freezes_and_audits(
+    tmp_path, monkeypatch
+):
+    """实名赛批量代报名逐项跳过缺资料用户，并返回明确数量/用户。"""
+    s, st, _admin, users, cid, tok, client = _setup(tmp_path)
+    st.update_contest(cid, require_real_name=1)
+    complete_user = users[0][0]
+    incomplete_user = users[1][0]
+    st.update_user(
+        complete_user["id"], real_name="批量实名", phone="13800138000",
+        school="批量大学", student_id="BULK001",
+    )
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append(
+            {"action": action, **fields}
+        ),
+    )
+
+    response = client.post(
+        f"/api/admin/contests/{cid}/entries/bulk",
+        headers={"Authorization": f"Bearer {tok}"},
+        json={"entries": [
+            {"user_id": complete_user["id"], "bot_id": users[0][1]["id"]},
+            {"user_id": incomplete_user["id"], "bot_id": users[1][1]["id"]},
+        ]},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["added"] == 1
+    assert body["identity_incomplete_count"] == 1
+    assert body["identity_incomplete_users"] == [incomplete_user["id"]]
+    assert any(
+        f"user {incomplete_user['id']} 实名信息不完整" in item
+        for item in body["skipped"]
+    )
+    stored = st.get_entry(cid, complete_user["id"])
+    assert stored["identity_source"] == "registration_profile"
+    assert stored["real_name_snapshot"] == "批量实名"
+    assert st.get_entry(cid, incomplete_user["id"]) is None
+    assert audits == [
+        {
+            "action": "admin_assign_entries",
+            "result": "ok",
+            "user": "adminusr",
+            "target": cid,
+            "detail": (
+                "real_name_override=1; requested=2; added=1; skipped=1"
+            ),
+        }
+    ]
+    assert all(
+        private not in repr(audits)
+        for private in ("批量实名", "13800138000", "批量大学", "BULK001")
+    )
+    s.close()
+
+
+def test_admin_bulk_audit_uses_identity_gate_at_store_commit(
+    tmp_path, monkeypatch
+):
+    """A 0→1 toggle before Store BEGIN is audited as an actual PII override."""
+    s, st, _admin, users, cid, tok, client = _setup(tmp_path)
+    user, bot = users[0]
+    st.update_user(
+        user["id"], real_name="竞态实名", phone="01001234567",
+        school="竞态学校", student_id="000042",
+    )
+    second = Store(st.path)
+    original_add = st.add_contest_roster_entries
+    store_boundary = threading.Barrier(2)
+    release_store = threading.Event()
+    audits: list[dict] = []
+
+    def paused_add(*args, **kwargs):
+        store_boundary.wait(timeout=5)
+        if not release_store.wait(timeout=5):
+            raise TimeoutError("admin roster Store release timed out")
+        return original_add(*args, **kwargs)
+
+    monkeypatch.setattr(st, "add_contest_roster_entries", paused_add)
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append(
+            {"action": action, **fields}
+        ),
+    )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                client.post,
+                f"/api/admin/contests/{cid}/entries/bulk",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"entries": [{
+                    "user_id": user["id"], "bot_id": bot["id"]
+                }]},
+            )
+            store_boundary.wait(timeout=5)
+            try:
+                second.update_contest(cid, require_real_name=1)
+            finally:
+                release_store.set()
+            response = future.result(timeout=10)
+
+        assert response.status_code == 200, response.text
+        assert "_identity_required_at_commit" not in response.json()
+        assert int(st.get_contest(cid)["require_real_name"]) == 1
+        entry = st.get_entry(cid, user["id"])
+        assert entry["identity_source"] == "registration_profile"
+        assert entry["real_name_snapshot"] == "竞态实名"
+        assert audits == [{
+            "action": "admin_assign_entries",
+            "result": "ok",
+            "user": "adminusr",
+            "target": cid,
+            "detail": (
+                "real_name_override=1; requested=1; added=1; skipped=0"
+            ),
+        }]
+        assert all(
+            private not in repr(audits)
+            for private in ("竞态实名", "01001234567", "竞态学校", "000042")
+        )
+    finally:
+        release_store.set()
+        second.close()
+        s.close()
+
+
+def test_admin_bulk_failed_audit_uses_identity_gate_at_store_commit(
+    tmp_path, monkeypatch
+):
+    """A failed 0→1 override is audited from the Store transaction gate."""
+    s, st, _admin, users, cid, tok, client = _setup(tmp_path)
+    user, bot = users[0]  # Intentionally has no real-name profile.
+    second = Store(st.path)
+    original_add = st.add_contest_roster_entries
+    store_boundary = threading.Barrier(2)
+    release_store = threading.Event()
+    audits: list[dict] = []
+
+    def paused_add(*args, **kwargs):
+        store_boundary.wait(timeout=5)
+        if not release_store.wait(timeout=5):
+            raise TimeoutError("failed admin roster Store release timed out")
+        return original_add(*args, **kwargs)
+
+    monkeypatch.setattr(st, "add_contest_roster_entries", paused_add)
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append(
+            {"action": action, **fields}
+        ),
+    )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                client.post,
+                f"/api/admin/contests/{cid}/entries/bulk",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"entries": [{
+                    "user_id": user["id"], "bot_id": bot["id"]
+                }]},
+            )
+            store_boundary.wait(timeout=5)
+            try:
+                second.update_contest(cid, require_real_name=1)
+            finally:
+                release_store.set()
+            response = future.result(timeout=10)
+
+        assert response.status_code == 400, response.text
+        assert "实名" in response.text
+        assert int(st.get_contest(cid)["require_real_name"]) == 1
+        assert st.list_contest_entries(cid) == []
+        assert audits == [{
+            "action": "admin_assign_entries",
+            "result": "fail",
+            "user": "adminusr",
+            "target": cid,
+            "detail": (
+                "real_name_override=1; requested=1; "
+                "reason=validation_failed"
+            ),
+        }]
+    finally:
+        release_store.set()
+        second.close()
+        s.close()
+
+
+def test_store_bulk_rechecks_identity_atomically(tmp_path):
+    """绕过 manager 的批量写也会因缺实名整批回滚，不留下半份名册。"""
+    s, st, _admin, users, cid, _tok, _client = _setup(tmp_path)
+    st.update_contest(cid, require_real_name=1)
+    st.update_user(
+        users[0][0]["id"], real_name="完整用户", phone="13800138000",
+        school="完整学校", student_id="COMPLETE001",
+    )
+    with pytest.raises(ValueError, match="实名"):
+        st.add_contest_roster_entries(
+            cid,
+            [
+                (users[0][0]["id"], users[0][1]["id"]),
+                (users[1][0]["id"], users[1][1]["id"]),
+            ],
+            allow_real_name_override=True,
+        )
+    assert st.list_contest_entries(cid) == []
+    s.close()
+
+
 def test_admin_assign_skips_duplicates(tmp_path):
     s, st, admin, users, cid, tok, c = _setup(tmp_path)
     # 先指派 user0
@@ -166,17 +387,38 @@ def test_admin_assign_requires_admin(tmp_path):
     s.close()
 
 
-def test_admin_assign_contest_not_found(tmp_path):
+def test_admin_assign_contest_not_found(tmp_path, monkeypatch):
     s, st, admin, users, cid, tok, c = _setup(tmp_path)
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append(
+            {"action": action, **fields}
+        ),
+    )
     r = c.post("/api/admin/contests/99999/entries/bulk",
                headers={"Authorization": f"Bearer {tok}"},
                json={"assign_all": True, "game_id": "holdem"})
     assert r.status_code == 404
+    assert audits == [{
+        "action": "admin_assign_entries",
+        "result": "fail",
+        "user": "adminusr",
+        "target": 99999,
+        "detail": "real_name_override=0; reason=contest_missing",
+    }]
     s.close()
 
 
-def test_admin_assign_rejects_missing_or_non_integer_ids(tmp_path):
+def test_admin_assign_rejects_missing_or_non_integer_ids(tmp_path, monkeypatch):
     s, _st, _admin, _users, cid, tok, c = _setup(tmp_path)
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        "bzplat.backend.api_routes.audit_log",
+        lambda _request, action, **fields: audits.append(
+            {"action": action, **fields}
+        ),
+    )
     for entry in ({"user_id": 1}, {"user_id": "x", "bot_id": 2}):
         r = c.post(
             f"/api/admin/contests/{cid}/entries/bulk",
@@ -185,4 +427,15 @@ def test_admin_assign_rejects_missing_or_non_integer_ids(tmp_path):
         )
         assert r.status_code == 400, r.text
         assert "必须是整数" in r.text
+    assert len(audits) == 2
+    assert all(
+        audit == {
+            "action": "admin_assign_entries",
+            "result": "fail",
+            "user": "adminusr",
+            "target": cid,
+            "detail": "real_name_override=0; reason=invalid_ids",
+        }
+        for audit in audits
+    )
     s.close()
