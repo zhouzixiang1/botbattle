@@ -13,6 +13,7 @@ from bzplat.backend.games.gomoku.engine import (
 )
 from bzplat.backend.games.pencil.engine import PencilBoard, PencilSession
 from bzplat.backend.games.gomoku import protocol as gomoku_protocol
+from bzplat.backend.store.schema import GOMOKU_CURRENT_RULESET
 from bzplat.backend.games.pencil.protocol import build_pencil_request
 
 
@@ -182,7 +183,7 @@ def test_board_protocol_roundtrip():
         seat_colors=[0, 1],
     )
     assert g["protocol_version"] == 2 and g["me"] == 0
-    assert g["ruleset"] == "gomoku_ccgc_2013_v1"
+    assert g["ruleset"] == GOMOKU_CURRENT_RULESET
     p = build_pencil_request(x=1, y=0, pass_=1, me=1, scores=[2, 1])
     assert p["pass"] == 1 and p["scores"] == [2, 1]
     assert gomoku_protocol.parse_action({"response": {"action": "pass"}}) == {"action": "pass"}

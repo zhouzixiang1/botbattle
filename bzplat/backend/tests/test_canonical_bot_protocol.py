@@ -96,9 +96,11 @@ def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
     elif game_id == "gomoku":
         request = transport.sent[0]["requests"][0]
         assert request["protocol_version"] == 2
-        assert request["ruleset"] == "gomoku_ccgc_2013_v1"
+        assert request["ruleset"] == registry.get("gomoku").ruleset_id
         assert request["phase"] == "opening_proposal"
         assert request["fixed_black1"] == {"x": 7, "y": 7}
+        assert request["n_range"] == [2, 2]
+        assert "n" not in request
     elif game_id == "pencil":
         assert transport.sent[0]["requests"][0] == {
             "x": -1,
@@ -109,6 +111,32 @@ def test_preflight_uses_canonical_first_turn_for_all_games_and_modes(
         }
     assert transport.extra_reads == (1 if runtime_mode == "longrunning" else 0)
     assert transport.extra_timeouts == ([1.0] if runtime_mode == "longrunning" else [])
+    assert transport.stopped == ["s0"]
+
+
+@pytest.mark.parametrize("runtime_mode", ["traditional", "longrunning"])
+@pytest.mark.parametrize("n", [3, 4])
+def test_gomoku_preflight_rejects_non_two_opening_in_every_mode(
+    runtime_mode, n
+):
+    response = json.loads(VALID_LINES["gomoku"])
+    response["response"]["n"] = n
+    transport = _PreflightTransport(
+        json.dumps(response),
+        handshake=botzone.KEEP_RUNNING_SIGNAL,
+    )
+
+    ok, detail = asyncio.run(
+        preflight_bot(
+            "gomoku",
+            "/staged/bot.bin",
+            transport,
+            runtime_mode=runtime_mode,
+        )
+    )
+
+    assert not ok
+    assert "固定值 2" in detail
     assert transport.stopped == ["s0"]
 
 

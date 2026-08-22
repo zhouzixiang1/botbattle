@@ -4931,7 +4931,11 @@ class Store:
             marker_data.get("manifest_digest") or ""
         ):
             issues.append("manifest digest 不匹配")
-        if int(marker_data.get("bot_count") or -1) != len(normalized_manifest):
+        try:
+            marker_bot_count = int(marker_data["bot_count"])
+        except (KeyError, TypeError, ValueError):
+            marker_bot_count = -1
+        if marker_bot_count != len(normalized_manifest):
             issues.append("marker bot_count 不匹配")
 
         target = {
@@ -4944,11 +4948,27 @@ class Store:
             "protocol_version": str(marker_data.get("from_protocol") or ""),
             "rating_pool_id": str(marker_data.get("from_rating_pool") or ""),
         }
+        rule_only = source["protocol_version"] == target["protocol_version"]
+        if any(not value for value in (*source.values(), *target.values())):
+            issues.append("marker contract 字段为空")
+        if source == target:
+            issues.append("marker source/target contract 相同")
+        if source["rating_pool_id"] == target["rating_pool_id"]:
+            issues.append("cutover marker 必须更换 rating pool")
+        if rule_only and (
+            source["ruleset_version"] == target["ruleset_version"]
+            or source["rating_pool_id"] == target["rating_pool_id"]
+        ):
+            issues.append("同协议 rule-only marker 必须同时更换 ruleset/rating pool")
+        if rule_only and normalized_manifest:
+            issues.append("同协议 rule-only marker 不得持久 pin Bot version")
+        if rule_only and marker_bot_count != 0:
+            issues.append("同协议 rule-only marker bot_count 必须为 0")
         if enforce_live_generation and _active_game_contract_tx(c, gid) != target:
             issues.append("active contract 不是 marker target")
 
         root: Path | None = None
-        if verify_assets:
+        if verify_assets and normalized_manifest:
             try:
                 root = self._validated_cutover_binary_root(
                     Path(self.path).expanduser().resolve().parent / "bot_uploads"
@@ -5140,19 +5160,23 @@ class Store:
                     f"{wrong_active_agents} 个非 current protocol Local AI agent 仍 active"
                 )
 
-        source_version_count = int(
-            c.execute(
-                "SELECT COUNT(*) FROM bot_versions WHERE bot_id IN "
-                "(SELECT id FROM bots WHERE game_id=?) AND protocol_version=?",
-                (gid, source["protocol_version"]),
-            ).fetchone()[0]
-        )
         try:
             marker_retired_count = int(marker_data["retired_count"])
         except (KeyError, TypeError, ValueError):
             marker_retired_count = -1
-        if source_version_count != marker_retired_count:
-            issues.append("marker retired_count 与 source protocol 审计集不匹配")
+        if rule_only:
+            if marker_retired_count != 0:
+                issues.append("同协议 rule-only marker retired_count 必须为 0")
+        else:
+            source_version_count = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM bot_versions WHERE bot_id IN "
+                    "(SELECT id FROM bots WHERE game_id=?) AND protocol_version=?",
+                    (gid, source["protocol_version"]),
+                ).fetchone()[0]
+            )
+            if source_version_count != marker_retired_count:
+                issues.append("marker retired_count 与 source protocol 审计集不匹配")
         active_legacy_jobs = int(
             c.execute(
                 "SELECT COUNT(*) FROM execution_jobs WHERE game_id=? AND "
@@ -5272,6 +5296,12 @@ class Store:
         for marker in markers:
             source = before(marker)
             target = after(marker)
+            if source[1] == target[1] and (
+                source[0] == target[0] or source[2] == target[2]
+            ):
+                raise RuntimeError(
+                    "同协议 rule-only marker 必须同时更换 ruleset/rating pool"
+                )
             if source == target or source in by_source or target in targets:
                 raise RuntimeError(
                     "cutover marker chain 存在环、分叉或合并"
@@ -5293,11 +5323,44 @@ class Store:
             current = by_source.get(after(current))
         if len(ordered) != len(markers):
             raise RuntimeError("cutover marker chain 断链或分叉")
-        protocol_generations = [str(ordered[0]["from_protocol"])] + [
-            str(marker["to_protocol"]) for marker in ordered
-        ]
-        if len(protocol_generations) != len(set(protocol_generations)):
-            raise RuntimeError("cutover marker chain 禁止复用 protocol 代际 ID")
+        protocol_generations = [str(ordered[0]["from_protocol"])]
+        seen_protocols = set(protocol_generations)
+        ruleset_generations = [str(ordered[0]["from_ruleset"])]
+        seen_rulesets = set(ruleset_generations)
+        rating_pool_generations = [str(ordered[0]["from_rating_pool"])]
+        seen_rating_pools = set(rating_pool_generations)
+        for marker in ordered:
+            from_protocol = str(marker["from_protocol"])
+            to_protocol = str(marker["to_protocol"])
+            if from_protocol != protocol_generations[-1]:
+                raise RuntimeError("cutover marker protocol 代际断链")
+            if to_protocol != from_protocol:
+                if to_protocol in seen_protocols:
+                    raise RuntimeError(
+                        "cutover marker chain 禁止回用 protocol 代际 ID"
+                    )
+                seen_protocols.add(to_protocol)
+                protocol_generations.append(to_protocol)
+            from_ruleset = str(marker["from_ruleset"])
+            to_ruleset = str(marker["to_ruleset"])
+            if from_ruleset != ruleset_generations[-1]:
+                raise RuntimeError("cutover marker ruleset 代际断链")
+            if to_ruleset != from_ruleset:
+                if to_ruleset in seen_rulesets:
+                    raise RuntimeError("cutover marker chain 禁止回用 ruleset 代际 ID")
+                seen_rulesets.add(to_ruleset)
+                ruleset_generations.append(to_ruleset)
+            from_pool = str(marker["from_rating_pool"])
+            to_pool = str(marker["to_rating_pool"])
+            if from_pool != rating_pool_generations[-1]:
+                raise RuntimeError("cutover marker rating pool 代际断链")
+            if to_pool != from_pool:
+                if to_pool in seen_rating_pools:
+                    raise RuntimeError(
+                        "cutover marker chain 禁止回用 rating pool 代际 ID"
+                    )
+                seen_rating_pools.add(to_pool)
+                rating_pool_generations.append(to_pool)
         return ordered
 
     def assert_protocol_cutover_postconditions(
@@ -5397,7 +5460,8 @@ class Store:
             )
             raise RuntimeError(
                 "持久化游戏契约与当前裁判不一致；拒绝启动在线 runtime。"
-                "请先停服并执行离线 game-contract-cutover。" + detail
+                "请先停服并执行适用的离线 game-rule-cutover 或 "
+                "game-contract-cutover（见 doc/RUNTIME.md）。" + detail
             )
         self.assert_protocol_cutover_postconditions()
 
@@ -6096,6 +6160,794 @@ class Store:
             result["version_manifest"] = manifest
             return result
 
+    @staticmethod
+    def _normalize_cutover_contract(
+        raw: dict[str, str], *, label: str
+    ) -> dict[str, str]:
+        keys = ("ruleset_version", "protocol_version", "rating_pool_id")
+        normalized = {key: str(raw.get(key) or "").strip() for key in keys}
+        if any(not value for value in normalized.values()):
+            raise ValueError(f"{label} contract 字段不能为空")
+        return normalized
+
+    def _rule_cutover_bot_snapshot_tx(
+        self,
+        c: sqlite3.Connection,
+        *,
+        game_id: str,
+        protocol_version: str,
+        verify_assets: bool,
+    ) -> dict[str, Any]:
+        """Validate current Bot identities without persisting a deletion pin.
+
+        A same-wire rule cutover deliberately keeps every current version in
+        place.  Its marker therefore stores an empty manifest; this ephemeral
+        snapshot binds dry-run to apply while still allowing ordinary uploads
+        and retention after the cutover.
+        """
+
+        rows = c.execute(
+            "SELECT b.id AS bot_id,b.current_version,b.binary_path AS bot_path,"
+            "b.os AS bot_os,b.arch AS bot_arch,b.format AS bot_format,"
+            "b.runtime_mode AS bot_runtime,b.protocol_version AS bot_protocol,"
+            "v.id AS version_id,v.version AS version_number,"
+            "v.binary_path AS version_path,v.checksum,v.size_bytes,"
+            "v.os AS version_os,v.arch AS version_arch,v.format AS version_format,"
+            "v.runtime_mode AS version_runtime,v.protocol_version AS version_protocol,"
+            "v.upload_note,v.retired_at AS version_retired "
+            "FROM bots b LEFT JOIN bot_versions v ON v.bot_id=b.id "
+            "AND v.version=b.current_version WHERE b.game_id=? ORDER BY b.id",
+            (game_id,),
+        ).fetchall()
+        versioned = [row for row in rows if row["version_id"] is not None]
+        root: Path | None = None
+        if verify_assets and versioned:
+            root = self._validated_cutover_binary_root(
+                Path(self.path).expanduser().resolve().parent / "bot_uploads"
+            )
+
+        snapshot: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        seen_inodes: set[tuple[int, int]] = set()
+        issues: list[str] = []
+        for row in rows:
+            bot_id = int(row["bot_id"])
+            current_version = int(row["current_version"] or 0)
+            if str(row["bot_protocol"] or "") != protocol_version:
+                issues.append(f"Bot {bot_id} protocol 非 source")
+            if row["version_id"] is None:
+                issues.append(f"Bot {bot_id} current version 行缺失")
+                continue
+            if int(row["version_number"] or 0) != current_version:
+                issues.append(f"Bot {bot_id} current version 编号漂移")
+            if row["version_retired"] is not None:
+                issues.append(f"Bot {bot_id} current version 已退役")
+            if str(row["version_protocol"] or "") != protocol_version:
+                issues.append(f"Bot {bot_id} current version protocol 非 source")
+            mirrors = (
+                (row["bot_path"], row["version_path"]),
+                (row["bot_os"], row["version_os"]),
+                (row["bot_arch"], row["version_arch"]),
+                (row["bot_format"], row["version_format"]),
+                (row["bot_runtime"], row["version_runtime"]),
+            )
+            if any(str(left or "") != str(right or "") for left, right in mirrors):
+                issues.append(f"Bot {bot_id} current mirror 漂移")
+
+            version_path = Path(str(row["version_path"] or ""))
+            digest = ""
+            inode: tuple[int, int] | None = None
+            asset_stat: dict[str, int] | None = None
+            if root is not None:
+                expected_path = root / str(bot_id) / f"v{current_version}" / "bot.bin"
+                if version_path != expected_path:
+                    issues.append(f"Bot {bot_id} current path 非 canonical")
+                else:
+                    try:
+                        version_dir = version_path.parent
+                        bot_dir = version_dir.parent
+                        version_dir_stat = version_dir.lstat()
+                        bot_dir_stat = bot_dir.lstat()
+                        before = version_path.lstat()
+                        bot_dir_mode = stat.S_IMODE(bot_dir_stat.st_mode)
+                        version_dir_mode = stat.S_IMODE(version_dir_stat.st_mode)
+                        binary_mode = stat.S_IMODE(before.st_mode)
+                        uploader_shape = (
+                            version_dir_mode == 0o700
+                            and binary_mode == 0o755
+                        )
+                        hard_cutover_shape = (
+                            version_dir_mode == 0o555
+                            and binary_mode == 0o555
+                        )
+                        if (
+                            stat.S_ISLNK(version_dir_stat.st_mode)
+                            or not stat.S_ISDIR(version_dir_stat.st_mode)
+                            or int(version_dir_stat.st_uid) != os.geteuid()
+                            or version_dir_mode & 0o022
+                            or stat.S_ISLNK(bot_dir_stat.st_mode)
+                            or not stat.S_ISDIR(bot_dir_stat.st_mode)
+                            or bot_dir_mode & 0o022
+                            or int(bot_dir_stat.st_uid) != os.geteuid()
+                            or stat.S_ISLNK(before.st_mode)
+                            or not stat.S_ISREG(before.st_mode)
+                            or binary_mode & 0o022
+                            or int(before.st_uid) != os.geteuid()
+                            or int(before.st_nlink) != 1
+                            or version_path.resolve(strict=True) != version_path
+                            or not (uploader_shape or hard_cutover_shape)
+                        ):
+                            raise OSError("unsafe current asset")
+                        hasher = hashlib.sha256()
+                        with version_path.open("rb") as stream:
+                            for chunk in iter(
+                                lambda: stream.read(1024 * 1024), b""
+                            ):
+                                hasher.update(chunk)
+                        after = version_path.lstat()
+                        before_fingerprint = (
+                            int(before.st_dev), int(before.st_ino), int(before.st_size),
+                            int(before.st_mtime_ns), int(before.st_ctime_ns),
+                        )
+                        after_fingerprint = (
+                            int(after.st_dev), int(after.st_ino), int(after.st_size),
+                            int(after.st_mtime_ns), int(after.st_ctime_ns),
+                        )
+                        if before_fingerprint != after_fingerprint:
+                            raise OSError("current asset changed while hashing")
+                        digest = hasher.hexdigest()
+                        inode = (int(after.st_dev), int(after.st_ino))
+                        asset_stat = {
+                            "dev": int(after.st_dev),
+                            "ino": int(after.st_ino),
+                            "size": int(after.st_size),
+                            "mtime_ns": int(after.st_mtime_ns),
+                            "ctime_ns": int(after.st_ctime_ns),
+                            "mode": stat.S_IMODE(after.st_mode),
+                            "uid": int(after.st_uid),
+                            "nlink": int(after.st_nlink),
+                        }
+                        if int(after.st_size) != int(row["size_bytes"] or -1):
+                            issues.append(f"Bot {bot_id} current asset size 漂移")
+                        if digest != str(row["checksum"] or ""):
+                            issues.append(f"Bot {bot_id} current asset hash 漂移")
+                    except OSError:
+                        issues.append(f"Bot {bot_id} current asset 缺失或不安全")
+            path_text = str(version_path)
+            if path_text in seen_paths:
+                issues.append("多个 current Bot version 共用路径")
+            seen_paths.add(path_text)
+            if inode is not None:
+                if inode in seen_inodes:
+                    issues.append("多个 current Bot version 共用 inode")
+                seen_inodes.add(inode)
+            snapshot.append(
+                {
+                    "bot_id": bot_id,
+                    "current_version": current_version,
+                    "version_id": int(row["version_id"]),
+                    "binary_path": path_text,
+                    "checksum": str(row["checksum"] or ""),
+                    "size_bytes": int(row["size_bytes"] or 0),
+                    "os": str(row["version_os"] or ""),
+                    "arch": str(row["version_arch"] or ""),
+                    "format": str(row["version_format"] or ""),
+                    "runtime_mode": str(row["version_runtime"] or ""),
+                    "protocol_version": str(row["version_protocol"] or ""),
+                    "upload_note": str(row["upload_note"] or ""),
+                    "verified_sha256": digest,
+                    "asset_stat": asset_stat,
+                }
+            )
+
+        wrong_active_agents = int(
+            c.execute(
+                "SELECT COUNT(*) FROM local_ai_agents a JOIN bots b ON b.id=a.bot_id "
+                "WHERE a.status='active' AND (a.game_id=? OR b.game_id=?) AND NOT ("
+                "a.game_id=? AND b.game_id=? AND a.protocol_version=? "
+                "AND b.protocol_version=?)",
+                (
+                    game_id,
+                    game_id,
+                    game_id,
+                    game_id,
+                    protocol_version,
+                    protocol_version,
+                ),
+            ).fetchone()[0]
+        )
+        if wrong_active_agents:
+            issues.append(
+                f"{wrong_active_agents} 个 current Local AI agent 身份漂移"
+            )
+        if issues:
+            raise ValueError("rule-only cutover Bot 快照失败: " + "; ".join(issues[:12]))
+        return {
+            "bot_count": len(rows),
+            "current_version_count": len(versioned),
+            "snapshot_digest": _canonical_digest(snapshot),
+        }
+
+    def _game_rule_cutover_plan_tx(
+        self,
+        c: sqlite3.Connection,
+        *,
+        cutover_id: str,
+        game_id: str,
+        source: dict[str, str],
+        target: dict[str, str],
+    ) -> dict[str, Any]:
+        if target != game_rule_contract(game_id):
+            raise ValueError("目标 contract 与代码声明的 current contract 不一致")
+        active = _active_game_contract_tx(c, game_id)
+        if active != source:
+            raise ValueError(
+                f"active contract 已变化，期望 {source!r}，实际 {active!r}"
+            )
+        projection = self._rating_projection_status_tx(c)
+        if not projection["ready"]:
+            raise ValueError("评分投影未通过校验，禁止归档并切换评分池")
+        table = _matches_table(game_id)
+        unsettled = int(
+            c.execute(
+                f"SELECT COUNT(*) FROM {table} m "
+                "LEFT JOIN match_rating_settlements s ON s.match_id=m.id "
+                "WHERE m.status=? AND m.match_type NOT IN (?,?) "
+                "AND s.match_id IS NULL",
+                (STATUS_COMPLETED, TYPE_CONTEST, TYPE_HUMAN),
+            ).fetchone()[0]
+        )
+        if unsettled:
+            raise ValueError("仍有未结算的旧规则 Match，禁止切换")
+        live_contests = int(
+            c.execute(
+                "SELECT COUNT(*) FROM contests WHERE game_id=? "
+                "AND showcase_key IS NULL AND status NOT IN (?,?)",
+                (game_id, CONTEST_FINISHED, CONTEST_CANCELLED),
+            ).fetchone()[0]
+        )
+        if live_contests:
+            raise ValueError("仍有未终结的旧规则赛事，禁止切换")
+        chain = self._protocol_cutover_chain_tx(c, game_id)
+        if chain:
+            for index, marker in enumerate(chain):
+                self._assert_protocol_cutover_postconditions_tx(
+                    c,
+                    marker,
+                    verify_assets=True,
+                    enforce_live_generation=index == len(chain) - 1,
+                )
+            tail = chain[-1]
+            previous_target = {
+                "ruleset_version": str(tail["to_ruleset"]),
+                "protocol_version": str(tail["to_protocol"]),
+                "rating_pool_id": str(tail["to_rating_pool"]),
+            }
+            if previous_target != source:
+                raise ValueError("cutover marker chain 断链；from contract 不是链尾")
+
+        wrong_runnable = int(
+            c.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE game_id=? AND "
+                "status IN ('queued','starting','running','settling') AND "
+                "(ruleset_version<>? OR protocol_version<>? OR rating_pool_id<>?)",
+                (
+                    game_id,
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                    source["rating_pool_id"],
+                ),
+            ).fetchone()[0]
+        )
+        wrong_retryable = int(
+            c.execute(
+                "SELECT COUNT(*) FROM execution_jobs WHERE game_id=? "
+                "AND status='interrupted' AND retryable<>0 AND "
+                "(ruleset_version<>? OR protocol_version<>? OR rating_pool_id<>?)",
+                (
+                    game_id,
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                    source["rating_pool_id"],
+                ),
+            ).fetchone()[0]
+        )
+        if wrong_runnable or wrong_retryable:
+            raise ValueError("可运行/可重试执行任务 contract 漂移")
+        snapshot = self._rule_cutover_bot_snapshot_tx(
+            c,
+            game_id=game_id,
+            protocol_version=source["protocol_version"],
+            verify_assets=True,
+        )
+        queued_ids = [
+            int(row["id"])
+            for row in c.execute(
+                "SELECT id FROM execution_jobs WHERE game_id=? AND status='queued' "
+                "AND ruleset_version=? AND protocol_version=? AND rating_pool_id=? "
+                "ORDER BY id",
+                (
+                    game_id,
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                    source["rating_pool_id"],
+                ),
+            ).fetchall()
+        ]
+        retryable_ids = [
+            int(row["id"])
+            for row in c.execute(
+                "SELECT id FROM execution_jobs WHERE game_id=? "
+                "AND status='interrupted' AND retryable<>0 AND ruleset_version=? "
+                "AND protocol_version=? AND rating_pool_id=? ORDER BY id",
+                (
+                    game_id,
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                    source["rating_pool_id"],
+                ),
+            ).fetchall()
+        ]
+        plan_basis = {
+            "kind": "same-protocol-rule-only-v1",
+            "cutover_id": cutover_id,
+            "game_id": game_id,
+            "from_contract": source,
+            "to_contract": target,
+            "bot_snapshot_digest": snapshot["snapshot_digest"],
+            "bot_count": snapshot["bot_count"],
+            "current_version_count": snapshot["current_version_count"],
+            "rating_source_digest": projection["source_digest"],
+            "rating_projection_digest": projection["projection_digest"],
+            "rating_plan_digest": projection["plan_digest"],
+            "queued_job_ids": queued_ids,
+            "retryable_interrupted_job_ids": retryable_ids,
+        }
+        return {
+            **plan_basis,
+            "plan_digest": _canonical_digest(plan_basis),
+            "manifest_digest": _canonical_digest([]),
+            "version_manifest": [],
+            "cancelled_job_count": len(queued_ids) + len(retryable_ids),
+        }
+
+    def plan_game_rule_cutover(
+        self,
+        *,
+        cutover_id: str,
+        game_id: str,
+        from_contract: dict[str, str],
+        to_contract: dict[str, str],
+    ) -> dict[str, Any]:
+        """Plan a same-wire ruleset/rating-pool cutover without DB writes."""
+
+        gid = _registered_game_id(game_id)
+        clean_cutover_id = str(cutover_id or "").strip()
+        if not clean_cutover_id:
+            raise ValueError("cutover_id 不能为空")
+        source = self._normalize_cutover_contract(from_contract, label="from")
+        target = self._normalize_cutover_contract(to_contract, label="to")
+        if source["protocol_version"] != target["protocol_version"]:
+            raise ValueError("game-rule-cutover 要求 from/to protocol 完全相同")
+        if source["ruleset_version"] == target["ruleset_version"]:
+            raise ValueError("game-rule-cutover 必须更换 ruleset")
+        if source["rating_pool_id"] == target["rating_pool_id"]:
+            raise ValueError("game-rule-cutover 必须更换 rating pool")
+        with self._tx() as c:
+            existing = c.execute(
+                "SELECT * FROM protocol_cutovers WHERE cutover_id=?",
+                (clean_cutover_id,),
+            ).fetchone()
+            if existing is not None:
+                expected = (
+                    gid,
+                    source["ruleset_version"],
+                    target["ruleset_version"],
+                    source["protocol_version"],
+                    target["protocol_version"],
+                    source["rating_pool_id"],
+                    target["rating_pool_id"],
+                )
+                actual = tuple(
+                    str(existing[key])
+                    for key in (
+                        "game_id", "from_ruleset", "to_ruleset", "from_protocol",
+                        "to_protocol", "from_rating_pool", "to_rating_pool",
+                    )
+                )
+                if actual != expected:
+                    raise ValueError("cutover_id 已被不同切换占用")
+                chain = self._protocol_cutover_chain_tx(c, gid)
+                marker_index = next(
+                    index
+                    for index, marker in enumerate(chain)
+                    if str(marker["cutover_id"]) == clean_cutover_id
+                )
+                self._assert_protocol_cutover_postconditions_tx(
+                    c,
+                    existing,
+                    verify_assets=True,
+                    enforce_live_generation=marker_index == len(chain) - 1,
+                )
+                return {
+                    "cutover_id": clean_cutover_id,
+                    "game_id": gid,
+                    "from_contract": source,
+                    "to_contract": target,
+                    "already_applied": True,
+                    "manifest_digest": str(existing["manifest_digest"]),
+                    "version_manifest": [],
+                }
+            return {
+                "cutover_id": clean_cutover_id,
+                "game_id": gid,
+                "from_contract": source,
+                "to_contract": target,
+                "already_applied": False,
+                **self._game_rule_cutover_plan_tx(
+                    c,
+                    cutover_id=clean_cutover_id,
+                    game_id=gid,
+                    source=source,
+                    target=target,
+                ),
+            }
+
+    def apply_game_rule_cutover(
+        self,
+        *,
+        cutover_id: str,
+        game_id: str,
+        from_contract: dict[str, str],
+        to_contract: dict[str, str],
+        expected_plan_digest: str,
+        offline_guard: _OfflineCutoverGuard,
+    ) -> dict[str, Any]:
+        """Atomically advance ruleset/pool while retaining same-wire Bot assets."""
+
+        resolved_database = str(Path(self.path).expanduser().resolve())
+        if (
+            not isinstance(offline_guard, _OfflineCutoverGuard)
+            or not offline_guard.active
+            or offline_guard.store_identity != id(self)
+            or offline_guard.database_path != resolved_database
+            or offline_guard.thread_id != threading.get_ident()
+        ):
+            raise RuntimeError("规则 rule-only cutover 缺少当前 Store 的停服独占 guard")
+        gid = _registered_game_id(game_id)
+        clean_cutover_id = str(cutover_id or "").strip()
+        if not clean_cutover_id:
+            raise ValueError("cutover_id 不能为空")
+        source = self._normalize_cutover_contract(from_contract, label="from")
+        target = self._normalize_cutover_contract(to_contract, label="to")
+        if source["protocol_version"] != target["protocol_version"]:
+            raise ValueError("game-rule-cutover 要求 from/to protocol 完全相同")
+        if source["ruleset_version"] == target["ruleset_version"]:
+            raise ValueError("game-rule-cutover 必须更换 ruleset")
+        if source["rating_pool_id"] == target["rating_pool_id"]:
+            raise ValueError("game-rule-cutover 必须更换 rating pool")
+        reviewed_plan_digest = str(expected_plan_digest or "").strip().lower()
+        if len(reviewed_plan_digest) != 64 or any(
+            ch not in "0123456789abcdef" for ch in reviewed_plan_digest
+        ):
+            raise ValueError("expected_plan_digest 必须是小写 SHA-256")
+
+        empty_manifest: list[dict[str, Any]] = []
+        manifest_json = "[]"
+        manifest_digest = _canonical_digest(empty_manifest)
+        marker_fields = {
+            "game_id": gid,
+            "from_ruleset": source["ruleset_version"],
+            "to_ruleset": target["ruleset_version"],
+            "from_protocol": source["protocol_version"],
+            "to_protocol": target["protocol_version"],
+            "from_rating_pool": source["rating_pool_id"],
+            "to_rating_pool": target["rating_pool_id"],
+            "manifest_digest": manifest_digest,
+            "manifest_json": manifest_json,
+        }
+
+        def result(row: sqlite3.Row, *, already_applied: bool) -> dict[str, Any]:
+            value = dict(row)
+            value["already_applied"] = already_applied
+            return value
+
+        with self._tx() as c:
+            c.execute("BEGIN IMMEDIATE")
+            control = c.execute(
+                "SELECT dispatcher_state,accepting,auto_enabled,"
+                "deployment_drain_requested FROM execution_control WHERE singleton=1"
+            ).fetchone()
+            if control is None or (
+                int(control["deployment_drain_requested"] or 0) != 1
+                or int(control["accepting"] or 0) != 0
+                or int(control["auto_enabled"] or 0) != 0
+                or str(control["dispatcher_state"] or "") != "stopped"
+            ):
+                raise ValueError(
+                    "rule-only cutover 要求已请求部署维护、停止接单/自动排位且 dispatcher 已停服"
+                )
+            active_jobs = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM execution_jobs WHERE status IN "
+                    "('starting','running','settling')"
+                ).fetchone()[0]
+            )
+            active_attempts = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM execution_job_attempts WHERE status IN "
+                    "('starting','running','settling')"
+                ).fetchone()[0]
+            )
+            active_matches = sum(
+                int(
+                    c.execute(
+                        f"SELECT COUNT(*) FROM {_matches_table(other_game)} "
+                        "WHERE status IN (?,?)",
+                        (STATUS_PENDING, STATUS_RUNNING),
+                    ).fetchone()[0]
+                )
+                for other_game in _all_game_ids()
+            )
+            active_leases = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM local_ai_leases WHERE status='active'"
+                ).fetchone()[0]
+            )
+            launch = c.execute(
+                "SELECT state FROM docker_launch_journal WHERE singleton=1"
+            ).fetchone()
+            if launch is None or str(launch["state"] or "") != "idle":
+                raise ValueError("Docker launch journal 未静默，禁止 rule-only cutover")
+            if active_jobs or active_attempts or active_matches or active_leases:
+                raise ValueError(
+                    "rule-only cutover 排空失败: "
+                    f"jobs={active_jobs} attempts={active_attempts} "
+                    f"matches={active_matches} local_leases={active_leases}"
+                )
+
+            existing = c.execute(
+                "SELECT * FROM protocol_cutovers WHERE cutover_id=?",
+                (clean_cutover_id,),
+            ).fetchone()
+            if existing is not None:
+                mismatched = [
+                    key for key, value in marker_fields.items()
+                    if str(existing[key]) != str(value)
+                ]
+                if mismatched:
+                    raise ValueError(
+                        "cutover_id 已被不同切换占用: " + ",".join(mismatched)
+                    )
+                chain = self._protocol_cutover_chain_tx(c, gid)
+                marker_index = next(
+                    index
+                    for index, marker in enumerate(chain)
+                    if str(marker["cutover_id"]) == clean_cutover_id
+                )
+                self._assert_protocol_cutover_postconditions_tx(
+                    c,
+                    existing,
+                    verify_assets=True,
+                    enforce_live_generation=marker_index == len(chain) - 1,
+                )
+                return result(existing, already_applied=True)
+
+            plan = self._game_rule_cutover_plan_tx(
+                c,
+                cutover_id=clean_cutover_id,
+                game_id=gid,
+                source=source,
+                target=target,
+            )
+            if plan["plan_digest"] != reviewed_plan_digest:
+                raise ValueError(
+                    "expected_plan_digest 与当前冷库计划不一致；请重新审核 dry-run"
+                )
+
+            archived_at = _now()
+            rating_rows = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT * FROM ratings WHERE game_id=? ORDER BY bot_id", (gid,)
+                ).fetchall()
+            ]
+            history_rows = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT * FROM rating_history WHERE game_id=? ORDER BY id", (gid,)
+                ).fetchall()
+            ]
+            pair_rows = [
+                dict(row)
+                for row in c.execute(
+                    "SELECT p.* FROM pair_stats p JOIN bots a ON a.id=p.bot_a_id "
+                    "JOIN bots b ON b.id=p.bot_b_id WHERE a.game_id=? AND b.game_id=? "
+                    "ORDER BY p.bot_a_id,p.bot_b_id",
+                    (gid, gid),
+                ).fetchall()
+            ]
+            archive_digest = rating_projection_digest(
+                rating_rows, history_rows, pair_rows
+            )
+            c.execute(
+                "INSERT INTO ratings_archive(bot_id,game_id,pool_id,rating,rd,vol,"
+                "wins,losses,draws,delta_total,matches_played,last_played_at,archived_at) "
+                "SELECT bot_id,game_id,?,rating,rd,vol,wins,losses,draws,delta_total,"
+                "matches_played,last_played_at,? FROM ratings WHERE game_id=?",
+                (source["rating_pool_id"], archived_at, gid),
+            )
+            c.execute(
+                "INSERT INTO rating_history_archive(original_id,bot_id,game_id,pool_id,"
+                "rating,rd,vol,matches_played,reason,created_at,archived_at) "
+                "SELECT id,bot_id,game_id,?,rating,rd,vol,matches_played,reason,"
+                "created_at,? FROM rating_history WHERE game_id=?",
+                (source["rating_pool_id"], archived_at, gid),
+            )
+            c.execute(
+                "INSERT INTO pair_stats_archive(bot_a_id,bot_b_id,game_id,pool_id,"
+                "samples,last_played_at,a_wins,a_losses,draws,archived_at) "
+                "SELECT p.bot_a_id,p.bot_b_id,?,?,p.samples,p.last_played_at,"
+                "p.a_wins,p.a_losses,p.draws,? FROM pair_stats p "
+                "JOIN bots a ON a.id=p.bot_a_id JOIN bots b ON b.id=p.bot_b_id "
+                "WHERE a.game_id=? AND b.game_id=?",
+                (gid, source["rating_pool_id"], archived_at, gid, gid),
+            )
+            c.execute(
+                "INSERT INTO rating_pool_archives(game_id,pool_id,ruleset_version,"
+                "protocol_version,archived_at,ratings_count,history_count,pair_count,"
+                "projection_digest) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    gid,
+                    source["rating_pool_id"],
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                    archived_at,
+                    len(rating_rows),
+                    len(history_rows),
+                    len(pair_rows),
+                    archive_digest,
+                ),
+            )
+
+            queued = int(
+                c.execute(
+                    "UPDATE execution_jobs SET status='cancelled',retryable=0,"
+                    "terminal_reason='ruleset_retired',last_error='ruleset_retired',"
+                    "terminal_at=? WHERE game_id=? AND status='queued' "
+                    "AND ruleset_version=? AND protocol_version=? AND rating_pool_id=?",
+                    (
+                        archived_at,
+                        gid,
+                        source["ruleset_version"],
+                        source["protocol_version"],
+                        source["rating_pool_id"],
+                    ),
+                ).rowcount
+            )
+            interrupted = int(
+                c.execute(
+                    "UPDATE execution_jobs SET retryable=0,"
+                    "terminal_reason='ruleset_retired',last_error='ruleset_retired',"
+                    "terminal_at=COALESCE(terminal_at,?) WHERE game_id=? "
+                    "AND status='interrupted' AND retryable<>0 AND ruleset_version=? "
+                    "AND protocol_version=? AND rating_pool_id=?",
+                    (
+                        archived_at,
+                        gid,
+                        source["ruleset_version"],
+                        source["protocol_version"],
+                        source["rating_pool_id"],
+                    ),
+                ).rowcount
+            )
+            c.execute(
+                "UPDATE auto_match_decisions SET lifecycle='cancelled',"
+                "terminal_reason='ruleset_retired',terminal_at=? "
+                "WHERE game_id=? AND lifecycle='queued'",
+                (archived_at, gid),
+            )
+
+            c.execute(
+                "UPDATE ratings SET rating=1500.0,rd=350.0,vol=0.06,wins=0,losses=0,"
+                "draws=0,delta_total=0,matches_played=0,last_played_at=NULL "
+                "WHERE game_id=?",
+                (gid,),
+            )
+            c.execute("DELETE FROM rating_history WHERE game_id=?", (gid,))
+            c.execute(
+                "DELETE FROM pair_stats WHERE bot_a_id IN "
+                "(SELECT id FROM bots WHERE game_id=?) AND bot_b_id IN "
+                "(SELECT id FROM bots WHERE game_id=?)",
+                (gid, gid),
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO ratings(bot_id,game_id) "
+                "SELECT id,game_id FROM bots WHERE game_id=?",
+                (gid,),
+            )
+            for service_table in (
+                "auto_match_owner_service",
+                "auto_match_bot_service",
+                "auto_match_bot_pair_service",
+                "auto_match_owner_pair_service",
+            ):
+                c.execute(f"DELETE FROM {service_table} WHERE game_id=?", (gid,))
+            changed = c.execute(
+                "UPDATE rating_pool_state SET active_pool_id=?,ruleset_version=?,"
+                "protocol_version=?,activated_at=? WHERE game_id=? AND "
+                "active_pool_id=? AND ruleset_version=? AND protocol_version=?",
+                (
+                    target["rating_pool_id"],
+                    target["ruleset_version"],
+                    target["protocol_version"],
+                    archived_at,
+                    gid,
+                    source["rating_pool_id"],
+                    source["ruleset_version"],
+                    source["protocol_version"],
+                ),
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("active contract compare-and-swap 失败")
+
+            live = rating_projection_digests(c)
+            if live["issues"]:
+                raise RuntimeError(
+                    "切换后评分源校验失败: " + "; ".join(live["issues"][:5])
+                )
+            c.execute(
+                "UPDATE rating_projection_state SET policy_version=?,rebuilt_at=?,"
+                "source_settlement_count=?,source_last_settled_order=?,source_digest=?,"
+                "projection_digest=?,plan_digest=?,trusted_mutation_revision="
+                "mutation_revision WHERE singleton=1",
+                (
+                    _RATING_PROJECTION_POLICY_VERSION,
+                    archived_at,
+                    int(live["source_settlement_count"]),
+                    int(live["source_last_settled_order"]),
+                    live["source_digest"],
+                    live["projection_digest"],
+                    live["plan_digest"],
+                ),
+            )
+            c.execute(
+                "INSERT INTO protocol_cutovers(cutover_id,game_id,from_ruleset,"
+                "to_ruleset,from_protocol,to_protocol,from_rating_pool,to_rating_pool,"
+                "manifest_digest,manifest_json,bot_count,retired_count,cancelled_jobs,"
+                "archive_digest,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    clean_cutover_id,
+                    gid,
+                    source["ruleset_version"],
+                    target["ruleset_version"],
+                    source["protocol_version"],
+                    target["protocol_version"],
+                    source["rating_pool_id"],
+                    target["rating_pool_id"],
+                    manifest_digest,
+                    manifest_json,
+                    0,
+                    0,
+                    queued + interrupted,
+                    archive_digest,
+                    archived_at,
+                ),
+            )
+            marker = c.execute(
+                "SELECT * FROM protocol_cutovers WHERE cutover_id=?",
+                (clean_cutover_id,),
+            ).fetchone()
+            if marker is None:  # pragma: no cover - transaction invariant
+                raise RuntimeError("cutover marker 写入失败")
+            self._assert_protocol_cutover_postconditions_tx(
+                c, marker, verify_assets=True, enforce_live_generation=True
+            )
+            chain = self._protocol_cutover_chain_tx(c, gid)
+            if not chain or str(chain[-1]["cutover_id"]) != clean_cutover_id:
+                raise RuntimeError("cutover marker 未成为唯一链尾")
+            return result(marker, already_applied=False)
+
     def cutover_game_contract(
         self,
         *,
@@ -6153,6 +7005,8 @@ class Store:
             raise ValueError(
                 "game-contract-cutover 仅用于不兼容协议代际，protocol 必须变更"
             )
+        if source["rating_pool_id"] == target["rating_pool_id"]:
+            raise ValueError("game-contract-cutover 必须更换 rating pool")
         normalized_manifest: list[dict[str, Any]] = []
         for raw in version_manifest:
             bot_id = int(raw["bot_id"])

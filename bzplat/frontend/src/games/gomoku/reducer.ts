@@ -2,14 +2,20 @@ import { useMemo } from 'react'
 
 import type { RawEvent } from '@/games/base'
 
-export const GOMOKU_COMPETITION_RULESET = 'gomoku_ccgc_2013_v1'
+export const GOMOKU_COMPETITION_RULESET = 'gomoku_ccgc_2013_five_move_two_v2'
+export const GOMOKU_PREVIOUS_COMPETITION_RULESET = 'gomoku_ccgc_2013_v1'
 export const GOMOKU_LEGACY_RULESET = 'gomoku_freestyle_v1'
+
+const GOMOKU_COMPETITION_RULESETS = new Set([
+  GOMOKU_COMPETITION_RULESET,
+  GOMOKU_PREVIOUS_COMPETITION_RULESET,
+])
 
 export const GOMOKU_PHASE_LABELS: Record<string, string> = {
   opening_proposal: '指定开局',
   swap_choice: '三手交换',
   white4: '白 4',
-  black5_candidates: '五手 N 打',
+  black5_candidates: '五手候选',
   black5_select: '保留黑 5',
   normal_play: '正常行棋',
   terminal: '对局结束',
@@ -120,8 +126,21 @@ export function gomokuColorLabel(value: unknown): string {
   return color(value) === 0 ? '黑' : color(value) === 1 ? '白' : '待定'
 }
 
-export function gomokuPhaseLabel(value: unknown): string {
+export function isGomokuCompetitionRuleset(value: unknown): boolean {
+  return GOMOKU_COMPETITION_RULESETS.has(String(value || ''))
+}
+
+export function isCurrentGomokuCompetitionRuleset(value: unknown): boolean {
+  return String(value || '') === GOMOKU_COMPETITION_RULESET
+}
+
+export function gomokuPhaseLabel(value: unknown, candidateCount?: unknown): string {
   const phase = String(value || '')
+  if (phase === 'black5_candidates') {
+    const count = finiteInteger(candidateCount)
+    const numeral = count === 2 ? '二' : count === 3 ? '三' : count === 4 ? '四' : count === 5 ? '五' : null
+    return numeral ? `五手${numeral}打` : GOMOKU_PHASE_LABELS[phase]
+  }
   return GOMOKU_PHASE_LABELS[phase] || phase || '准备中'
 }
 
@@ -142,7 +161,7 @@ export function gomokuSeatDetail(vm: unknown | null, seat: number): string | und
   const state = vm as GomokuViewModel | null
   if (!state) return undefined
   const mapped = state?.seatColors?.[seat] ?? (seat as GomokuColor)
-  if (state.ruleset !== GOMOKU_COMPETITION_RULESET) {
+  if (!isGomokuCompetitionRuleset(state.ruleset)) {
     return `${seat === 0 ? '先手' : '后手'} · ${gomokuColorLabel(mapped)}`
   }
   return `${seat === 0 ? '开局提案方' : '交换决策方'} · 当前执${gomokuColorLabel(mapped)}`
@@ -194,7 +213,7 @@ export function reduceGomokuEvents(events: RawEvent[]): GomokuViewModel {
       status = 'live'
       ruleset = typeof ev.ruleset === 'string' && ev.ruleset ? ev.ruleset : GOMOKU_LEGACY_RULESET
       protocolVersion = finiteInteger(ev.protocol_version)
-      phase = ruleset === GOMOKU_COMPETITION_RULESET ? 'opening_proposal' : 'normal_play'
+      phase = isGomokuCompetitionRuleset(ruleset) ? 'opening_proposal' : 'normal_play'
       openingCode = ''
       n = null
       swapped = null

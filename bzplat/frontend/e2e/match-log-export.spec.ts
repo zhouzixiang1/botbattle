@@ -44,7 +44,7 @@ const terminalFixtures: MatchFixture[] = [
     events: [
       {
         type: 'match_start', game_id: 'gomoku', size: 15,
-        ruleset: 'gomoku_ccgc_2013_v1', protocol_version: 2,
+        ruleset: 'gomoku_ccgc_2013_five_move_two_v2', protocol_version: 2,
       },
       {
         type: 'opening', player: 0, opening_code: 'D1', n: 2,
@@ -286,7 +286,7 @@ test('live match hides partial exports and a stale terminal response cannot rest
     events: [
       {
         type: 'match_start', game_id: 'gomoku', size: 15,
-        ruleset: 'gomoku_ccgc_2013_v1', protocol_version: 2,
+        ruleset: 'gomoku_ccgc_2013_five_move_two_v2', protocol_version: 2,
       },
     ],
   }

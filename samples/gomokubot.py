@@ -2,7 +2,7 @@
 """全国机器博弈竞赛五子棋 v2 确定性样例 Bot。
 
 Traditional 读取 ``requests[-1]``，LongRunning 读取 ``request``；两种模式
-收到的当前请求都带完整棋盘。Bot 覆盖指定开局、三手交换、白4、N 打、
+收到的当前请求都带完整棋盘。Bot 覆盖指定开局、三手交换、白4、五手二打、
 候选选择和正常行棋，并始终使用平台标准 ``response`` 信封。
 """
 from __future__ import annotations
@@ -15,6 +15,7 @@ SIZE = 15
 EMPTY = -1
 BLACK = 0
 WHITE = 1
+BLACK5_CANDIDATE_COUNT = 2
 KEEP_RUNNING = ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 PHASE_OPENING = "opening_proposal"
@@ -114,9 +115,7 @@ def _safe_black_move(board: list[list[int]]) -> tuple[int, int] | None:
     return None
 
 
-def _candidate_points(
-    board: list[list[int]], count: int
-) -> list[dict[str, int]]:
+def _candidate_points(board: list[list[int]]) -> list[dict[str, int]]:
     points: list[dict[str, int]] = []
     reserved: set[tuple[int, int]] = set()
     for point in (*_CANDIDATE_PLAN, *_all_empty(board)):
@@ -125,7 +124,7 @@ def _candidate_points(
             continue
         reserved.add(point)
         points.append({"x": x, "y": y})
-        if len(points) == count:
+        if len(points) == BLACK5_CANDIDATE_COUNT:
             return points
     raise ValueError("棋盘没有足够的黑5候选点")
 
@@ -150,10 +149,7 @@ def _respond(request: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("白4无空点")
         return {"action": "move", "x": point[0], "y": point[1]}
     if phase == PHASE_BLACK5_CANDIDATES:
-        count = request.get("n")
-        if isinstance(count, bool) or not isinstance(count, int) or not 2 <= count <= 5:
-            raise ValueError("n 必须是 2..5")
-        return {"action": "black5_candidates", "points": _candidate_points(board, count)}
+        return {"action": "black5_candidates", "points": _candidate_points(board)}
     if phase == PHASE_BLACK5_SELECT:
         candidates = request.get("candidates")
         if not isinstance(candidates, list) or not candidates:

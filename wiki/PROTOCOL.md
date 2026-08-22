@@ -151,13 +151,14 @@ card = (点数 - 2) * 4 + 花色
 
 ## 4. Gomoku v2 payload
 
-Gomoku 固定使用 `ruleset="gomoku_ccgc_2013_v1"`、`protocol_version=2`。请求是
+Gomoku 新局固定使用 `ruleset="gomoku_ccgc_2013_five_move_two_v2"`、`protocol_version=2`。上一竞赛代
+`gomoku_ccgc_2013_v1` 仅用于历史对局与回放解释，不能用于创建新局。请求是
 自包含快照，公共字段如下：
 
 ```json
 {
   "protocol_version":2,
-  "ruleset":"gomoku_ccgc_2013_v1",
+  "ruleset":"gomoku_ccgc_2013_five_move_two_v2",
   "phase":"normal_play",
   "me":1,
   "color":0,
@@ -175,15 +176,20 @@ Gomoku 固定使用 `ruleset="gomoku_ccgc_2013_v1"`、`protocol_version=2`。请
 
 | `phase` | 决策方 | 附加字段 | 合法 `response` |
 |---|---|---|---|
-| `opening_proposal` | 开局座位 | `fixed_black1={7,7}`、`n_range=[2,5]` | `{"action":"opening","white2":{"x":7,"y":8},"black3":{"x":8,"y":8},"n":2}` |
+| `opening_proposal` | 开局座位 | `fixed_black1={7,7}`、`n_range=[2,2]` | `{"action":"opening","white2":{"x":7,"y":8},"black3":{"x":8,"y":8},"n":2}` |
 | `swap_choice` | 另一座位 | `n` | `{"action":"swap","swap":true}` |
 | `white4` | 最终白方 | `n` | `{"action":"move","x":6,"y":8}` |
 | `black5_candidates` | 最终黑方 | `n` | `{"action":"black5_candidates","points":[{"x":9,"y":9},{"x":5,"y":5}]}` |
 | `black5_select` | 最终白方 | `n`、`candidates` | `{"action":"black5_select","index":0}` |
 | `normal_play` | 当前棋色 | `pass_allowed`、`last` | `{"action":"move","x":4,"y":4}` 或 `{"action":"pass"}` |
 
+现行规则固定为**五手二打**。为保持 `gomoku_action_v2` wire 兼容，开局请求仍使用
+`n_range`，但它固定为单值范围 `[2,2]`；后续阶段请求中的 `n` 都是 `2`。Bot 在 `opening` 中返回其他
+`n`，或提交不等于两个黑5候选，都会被裁判判为规则非法。历史回放若已经记录三打、四打，
+仍按原事件数量展示，不会重写为二打。
+
 协议层只校验 `black5_candidates.points` 是点数组且每个坐标由两个整数组成；
-数量恰好为 N、坐标互不重复、全部为空点，以及在当前四子局面的旋转/镜像
+数量恰好为 2、坐标互不重复、全部为空点，以及在当前四子局面的旋转/镜像
 对称下互不同形，均由裁判按当前阶段统一校验。规则非法响应因此按
 `illegal_candidates` 判负，而不是传输层 `protocol_error`。
 

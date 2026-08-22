@@ -196,6 +196,15 @@ def test_compiled_gomoku_sample_finishes_without_illegal_move(
     assert {e.get("type") for e in result.events} >= {
         "opening", "swap", "black5_candidates", "black5_selected",
     }
+    candidate_events = [
+        event for event in result.events
+        if event.get("type") == "black5_candidates"
+    ]
+    assert candidate_events
+    assert all(
+        event.get("n") == 2 and len(event.get("points") or []) == 2
+        for event in candidate_events
+    )
     assert result.events[-1]["type"] == "match_end"
 
 
@@ -221,6 +230,15 @@ def test_pyinstaller_gomoku_wiki_sample_finishes_without_illegal_move(
     assert {e.get("type") for e in result.events} >= {
         "opening", "swap", "black5_candidates", "black5_selected",
     }
+    candidate_events = [
+        event for event in result.events
+        if event.get("type") == "black5_candidates"
+    ]
+    assert candidate_events
+    assert all(
+        event.get("n") == 2 and len(event.get("points") or []) == 2
+        for event in candidate_events
+    )
     assert result.events[-1]["type"] == "match_end"
 
 
@@ -353,6 +371,38 @@ def test_python_gomoku_sample_covers_competition_opening_actions() -> None:
         "points": [{"x": 0, "y": 0}, {"x": 14, "y": 14}],
     }
     assert actions[3] == {"action": "black5_select", "index": 0}
+
+
+def test_gomoku_samples_emit_exactly_two_for_historical_non_two_request(
+    built_samples: Path,
+) -> None:
+    request = gomoku_protocol.build_request(
+        phase=gomoku_protocol.PHASE_BLACK5_CANDIDATES,
+        me=0,
+        color=BLACK,
+        board=new_board(),
+        seat_colors=[BLACK, WHITE],
+        n=2,
+    )
+    # A stale external caller may still replay an old v2 request whose n was
+    # 3/4.  Current samples must not echo that configurable behavior.
+    request["n"] = 4
+    line = json.dumps({"request": request}) + "\n"
+    for command in (
+        [sys.executable, str(SAMPLES / "gomokubot.py")],
+        [str(built_samples / "gomokubot_linux_amd64")],
+    ):
+        proc = subprocess.run(
+            command,
+            input=line,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        response = json.loads(proc.stdout.splitlines()[0])["response"]
+        assert response["action"] == "black5_candidates"
+        assert len(response["points"]) == 2
 
 
 def test_holdem_strategy_samples_use_standard_history_fields(tmp_path: Path) -> None:

@@ -16,11 +16,13 @@ DEFAULT_RUNTIME_MODE = RUNTIME_TRADITIONAL
 # 只查表，不按 game_id 写分支；一次大版规则切换由 Store 的离线
 # cutover API 原子推进 active contract。
 GOMOKU_LEGACY_RULESET = "gomoku_freestyle_v1"
-GOMOKU_CURRENT_RULESET = "gomoku_ccgc_2013_v1"
+GOMOKU_PREVIOUS_RULESET = "gomoku_ccgc_2013_v1"
+GOMOKU_CURRENT_RULESET = "gomoku_ccgc_2013_five_move_two_v2"
 GOMOKU_LEGACY_PROTOCOL = "gomoku_xy_v1"
 GOMOKU_CURRENT_PROTOCOL = "gomoku_action_v2"
 GOMOKU_LEGACY_RATING_POOL = "gomoku_freestyle_rating_v1"
-GOMOKU_CURRENT_RATING_POOL = "gomoku_ccgc_2013_rating_v1"
+GOMOKU_PREVIOUS_RATING_POOL = "gomoku_ccgc_2013_rating_v1"
+GOMOKU_CURRENT_RATING_POOL = "gomoku_ccgc_2013_five_move_two_rating_v2"
 
 GAME_RULE_CONTRACTS = {
     "holdem": {
@@ -905,8 +907,9 @@ CREATE TABLE IF NOT EXISTS pair_stats_archive (
     PRIMARY KEY(bot_a_id,bot_b_id,game_id,pool_id)
 );
 
--- 一次性协议切换的幂等凭据。manifest_digest 不同时绝不得复用
--- cutover_id，避免重跑静默创建另一批 vN。
+-- 一次性游戏契约切换的幂等与审计凭据。hard cutover 的 manifest 固定
+-- 新建 vN；same-protocol rule-only 使用空 manifest。完整切换边不同或
+-- manifest_digest 不同时绝不得复用 cutover_id。
 CREATE TABLE IF NOT EXISTS protocol_cutovers (
     cutover_id       TEXT PRIMARY KEY,
     game_id          TEXT NOT NULL,

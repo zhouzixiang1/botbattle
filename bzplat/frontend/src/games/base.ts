@@ -42,7 +42,7 @@ export interface HumanActionPanelProps {
 }
 
 /**
- * 需要在棋盘上先编辑一个动作草稿的游戏（例如指定开局、N 个候选点）可以接管
+ * 需要在棋盘上先编辑一个动作草稿的游戏（例如指定开局、两个候选点）可以接管
  * 「棋盘 + 操作区」。通用 HumanPlay 仍只拥有连接、回合锁和提交；游戏组件只
  * 解释自己的 request，并最终提交标准 HumanActionEnvelope。
  */

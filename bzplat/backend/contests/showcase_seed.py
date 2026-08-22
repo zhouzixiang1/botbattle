@@ -46,7 +46,7 @@ from bzplat.backend.store.schema import (
 logger = logging.getLogger(__name__)
 
 SEED_VERSION = "contest-showcase-v1"
-SHOWCASE_STRATEGY_VERSION = "gomoku-showcase-matrix-v3"
+SHOWCASE_STRATEGY_VERSION = "gomoku-showcase-matrix-v4"
 SHOWCASE_UPLOAD_BASENAME = "bot_uploads_showcase"
 SHOWCASE_UPLOAD_MARKER = ".botbattle-contest-showcase"
 SHOWCASE_UPLOAD_MARKER_CONTENT = f"{SEED_VERSION}\n"
@@ -84,19 +84,19 @@ SHOWCASE_PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "tactical": {
         "label": "战术型",
         "filename": "gomoku_showcase_tactical_linux_amd64",
-        "checksum": "b58e1cc3c8dece688332cec3b780da2d32d8fdfc7daf38baa4f3af981251ded7",
+        "checksum": "74a6de76e0b37c78eec9496456babc769c6ba660d1be62f5c6c07b7faf4c0b53",
         "size": 789760,
     },
     "steady": {
         "label": "稳健型",
         "filename": "gomoku_showcase_steady_linux_amd64",
-        "checksum": "895ee49576ef98a3f3001e6d980a49b66f32ec6ab7a88c29fb4f79dd1140e1e2",
+        "checksum": "2877aefad883013998b648c9ba6042aacfddc6963bac1a08c95b3755803b41ce",
         "size": 789760,
     },
     "foundation": {
         "label": "基础型",
         "filename": "gomoku_showcase_foundation_linux_amd64",
-        "checksum": "b33cc91ea5d6ff370414e8c9c2fca905d10032866a3560020b3d134132dac4bb",
+        "checksum": "3178c41eff119fcc3749651c70287a535c7e9ef6c04fe269c299af7c3cadb97a",
         "size": 789760,
     },
 }

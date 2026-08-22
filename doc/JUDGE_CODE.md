@@ -20,7 +20,7 @@ games.registry.get(game_id).run_session(decide, **params)
 # 或：from bzplat.backend.games import run_session
 ```
 
-每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。Pencil 的 x/y JSON 原语使用随公开源码返回的 `games/_board_protocol.py`；Gomoku v2 的开局/交换/N 打/PASS 判别联合由自身 `protocol.py` 实现。
+每款游戏的 Session 都实现 `run_async(decide) → MatchResult`。结果类型**独立定义、不共享基类**，只靠鸭子契约（见下）。Pencil 的 x/y JSON 原语使用随公开源码返回的 `games/_board_protocol.py`；Gomoku v2 的开局/交换/五手二打/PASS 判别联合由自身 `protocol.py` 实现。
 
 ## 解耦契约
 
@@ -41,7 +41,7 @@ games.registry.get(game_id).run_session(decide, **params)
 | 游戏 | 固定规则 |
 |------|----------|
 | Holdem | 70 手；每手起始筹码 20000；小盲 50；大盲 100 |
-| Gomoku | 15×15；26 种指定开局；三手交换；五手 N 打；黑方长连/三三/四四禁手 |
+| Gomoku | 15×15；26 种指定开局；三手交换；五手二打；黑方长连/三三/四四禁手 |
 | Pencil | N=6；红先；每方累计棋钟 900 秒 |
 
 这些值不存入 `platform_settings`，不接受 match_config、admin 或直接 `run_session` kwargs 覆盖；未知参数立即报错。Holdem 上传预检与正式首请求均发送 `max_hand=70`。修改规则常量属于游戏规则变更，必须同时修改裁判/契约、测试与 Wiki 并走代码评审。Pencil 棋钟链路为 `GameSpec.time_budget_per_side` → orchestrator → `run_binaries`/`run_bot_vs_human` → `time_used/time_out` 事件。
@@ -58,7 +58,7 @@ games.registry.get(game_id).run_session(decide, **params)
 
 ### 五子棋（规则 `gomoku_judge.py`，适配 `engine.py`）
 
-- **固定 15×15**（不可通过 match_config 或 admin 调整）；座位 0 提交 26 种之一的指定开局与 N=2..5，座位 1 行使三手交换权；最终白方落白4、最终黑方提交 N 个黑5候选、最终白方选择唯一黑5。
+- **固定 15×15**（不可通过 match_config 或 admin 调整）；座位 0 提交 26 种之一的指定开局，五手候选数固定为 2，座位 1 行使三手交换权；最终白方落白4、最终黑方提交正好两个不同形的黑5候选、最终白方选择唯一黑5。历史回放中的三打、四打事件按原值展示，不参与新局规则判定。
 - 黑方恰好五连优先获胜；否则长连、三三、四四判负。白方连续 ≥5 胜；第五子后允许 PASS，两方连续 PASS 或满盘为和棋。
 - 指定开局几何与普通落子在 `gomoku_judge.py`，黑方禁手的递归真三/四检测在同一纯规则包的 `forbidden.py`，两者均不依赖平台层。
 - 格式正确但非法着 → 裁判判负；Bot 协议错误/超时由平台层技术判负。棋盘下满无人成五 → 平局。

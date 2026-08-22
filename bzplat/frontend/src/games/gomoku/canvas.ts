@@ -1,10 +1,11 @@
-/** 全国机器博弈竞赛五子棋 canvas：规则阶段、交换棋色、N 打候选与禁手均可回放。 */
+/** 全国机器博弈竞赛五子棋 canvas：规则阶段、交换棋色、五手候选与禁手均可回放。 */
 import type { RawEvent } from '@/games/base'
 import { fitText, scaleFactor } from '@/games/base'
 import {
-  GOMOKU_COMPETITION_RULESET,
   gomokuColorLabel,
   gomokuPhaseLabel,
+  isCurrentGomokuCompetitionRuleset,
+  isGomokuCompetitionRuleset,
   reduceGomokuEvents,
   type GomokuColor,
   type GomokuPoint,
@@ -239,7 +240,7 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
       }
     }
 
-    // 权威 N 打候选始终保留为回放标记；被保留点使用绿色实线，其余为蓝色虚线。
+    // 权威五手候选始终按事件原值保留为回放标记；被保留点使用绿色实线，其余为蓝色虚线。
     next.candidates.forEach((candidate, index) => {
       drawCandidate(
         ctx,
@@ -251,7 +252,7 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
       )
     })
 
-    // 人类输入草稿不进入权威棋盘：开局三子用半透明棋子，N 打用编号环。
+    // 人类输入草稿不进入权威棋盘：开局三子用半透明棋子，五手二打用编号环。
     const interaction = next.interaction
     if (interaction?.phase === 'opening_proposal') {
       const fixed = interaction.fixedBlack1 ?? { x: 7, y: 7 }
@@ -304,8 +305,12 @@ export const GomokuCanvasRenderer: GameCanvasRenderer<GomokuScene> = {
     const s = scaleFactor(W)
     const name0 = seatDisplay(opts.seats?.[0], 0).subject
     const name1 = seatDisplay(opts.seats?.[1], 1).subject
-    const ruleLabel = next.ruleset === GOMOKU_COMPETITION_RULESET ? '竞赛规则' : '旧版自由棋'
-    const phaseLabel = gomokuPhaseLabel(next.phase)
+    const ruleLabel = isCurrentGomokuCompetitionRuleset(next.ruleset)
+      ? '现行五手二打规则'
+      : isGomokuCompetitionRuleset(next.ruleset)
+        ? '历史竞赛规则'
+        : '旧版自由棋'
+    const phaseLabel = gomokuPhaseLabel(next.phase, next.n)
     const turnLabel = next.matchOver
       ? next.winner === null
         ? '平局'

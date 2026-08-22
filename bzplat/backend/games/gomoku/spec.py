@@ -105,7 +105,7 @@ async def _preflight_check(
             payload["n"],
         )
         if opening is None:
-            return False, "指定开局不属于合法 26 类，或 N 不在 2..5"
+            return False, "指定开局不属于合法 26 类，或五手候选数不是固定值 2"
         return True, f"v2 指定开局响应合法: {opening}"
     except PlatformRunnerError:
         raise
@@ -122,7 +122,7 @@ SPEC = GameSpec(
     label="五子棋",
     ruleset_id=proto.RULESET_ID,
     protocol_version="gomoku_action_v2",
-    rating_pool_id="gomoku_ccgc_2013_rating_v1",
+    rating_pool_id="gomoku_ccgc_2013_five_move_two_rating_v2",
     session_factory=_session_factory,
     protocol=_PROTOCOL,
     default_match_params={},
@@ -133,7 +133,7 @@ SPEC = GameSpec(
     templates=_templates_mod.TEMPLATES,
     default_scoring="ccgc_2_1_0",
     code_path="bzplat/backend/games/gomoku/engine.py",
-    summary="15×15；26 种指定开局、三手交换、五手 N 打；黑方三三/四四/长连禁手；每方累计 15 分钟。",
+    summary="15×15；26 种指定开局、三手交换、五手二打；黑方三三/四四/长连禁手；每方累计 15 分钟。",
     preflight_check=_preflight_check,
     source_files=("gomoku_judge.py", "forbidden.py", "engine.py", "protocol.py", "result.py"),
     time_budget_per_side=900.0,

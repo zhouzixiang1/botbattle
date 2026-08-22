@@ -28,6 +28,9 @@ def test_default_match_params_all_empty():
         ("holdem", {"num_hands": 1}),
         ("holdem", {"starting_stack": 1}),
         ("gomoku", {"board_size": 5}),
+        ("gomoku", {"n": 3}),
+        ("gomoku", {"five_move_n": 4}),
+        ("gomoku", {"black5_candidates": 5}),
         ("pencil", {"n_dots": 99}),
         ("pencil", {"time_limit": 1}),
     ],
@@ -44,6 +47,7 @@ def test_eta_accepts_only_canonical_empty_config():
     for game_id, cfg in (
         ("holdem", {"hands": 1}),
         ("gomoku", {"board_size": 9}),
+        ("gomoku", {"n": 3}),
         ("pencil", {"n_dots": 3}),
     ):
         with pytest.raises(ValueError, match="规则固定"):
@@ -59,6 +63,8 @@ def test_eta_accepts_only_canonical_empty_config():
         ("holdem", {"sb": 25}),
         ("holdem", {"bb": 50}),
         ("gomoku", {"board_size": 9}),
+        ("gomoku", {"n": 3}),
+        ("gomoku", {"five_move_n": 4}),
         ("pencil", {"n_dots": 3}),
         ("pencil", {"num_hands": 1}),
     ],

@@ -1,14 +1,18 @@
 # 五子棋
 
 本平台 `game_id` 为 `gomoku`，当前规则代际为
-`gomoku_ccgc_2013_v1`，Bot 协议为 `gomoku_action_v2`。这一代以
+`gomoku_ccgc_2013_five_move_two_v2`，Bot 协议仍为 `gomoku_action_v2`。这一代以
 《中国五子棋竞赛规则—2013》的指定开局棋规和《2025 全国机器博弈竞赛程序册》
 的五子棋项目约束为依据。
+
+上一竞赛代 `gomoku_ccgc_2013_v1` 及更早自由棋代只用于解释历史对局；旧回放仍按当时事件中的
+候选数和阶段恢复，不会套用现行固定二打规则重新计算。
 
 规则来源的页码口径如下：
 
 - 《中国五子棋竞赛规则—2013》第 2–14 页规定棋盘、术语、指定开局、三手交换、
-  五手 N 打和黑方禁手，第 18–20 页规定纸面记录方法，第 20–26 页规定用时、胜负与和棋；
+  五手 N 打和黑方禁手；平台现行单局将 N 固定为 2（五手二打）。第 18–20 页规定纸面记录方法，
+  第 20–26 页规定用时、胜负与和棋；
 - 《2025 全国机器博弈竞赛程序册》印刷第 6–7 页规定本届赛制、2/1/0 计分和单方
   包干 15 分钟，印刷第 65–68 页重申五子棋项目规则。程序册 PDF 中对应物理页为
   15–16、74–77。
@@ -24,7 +28,7 @@
   交换后座位 1 执黑、座位 0 执白。请求中的 `me` 始终是座位，`color` 才是当前棋色。
 - 黑1固定在天元 H8（内部 `(7,7)`）；开局方同时提交相邻的白2、中心 5×5
   范围内的黑3，对称归一后必须属于直指/斜指各 13 种的 **26 种指定开局**。
-- 开局方同时声明 `N=2..5`。三手交换后，最终白方落白4，最终黑方提交正好 N 个
+- 五手候选数固定为 `2`。三手交换后，最终白方落白4，最终黑方提交正好两个
   **互不重复、均为空点且不同形**的黑5候选点，最终白方只保留其中一点作为真实黑5。“不同形”按当前黑白四子局面仍保持不变的旋转/镜像对称判定；未选候选点不进入棋盘。
 - 黑方落子若形成恰好五连，立即获胜；否则黑方长连、三三或四四是禁手，由数字裁判
   自动判黑方负。“恰好五连与其他禁手同时形成”时以五连胜优先。
@@ -32,11 +36,12 @@
 - 前五子必须按开局流程完成，不能 PASS。此后可选择 PASS；两方连续 PASS 则和棋。
   棋盘填满且没有胜者也是和棋。
 - 每个参赛座位有 **900 秒累计棋钟**；开局、交换、候选与普通行棋都计入同一侧总时间。
-- 越界、重复占位、阶段不匹配或候选数不等于 N 等规则非法动作由裁判判负；
+- 越界、重复占位、阶段不匹配、开局返回 `n!=2` 或黑5候选数不等于 2 等规则非法动作由裁判判负；
   信封/响应格式错误、Bot 崩溃或棋钟耗尽是平台技术终局。
 
-平台会在对局、回放和时间线中显示指定开局、是否交换、N 打候选与选择、棋色、
-PASS 以及禁手类型。线下规则中的“由对手指出/裁判确认”在平台上改为自动、确定性判定，
+平台会在对局、回放和时间线中显示指定开局、是否交换、五手候选与选择、棋色、
+PASS 以及禁手类型。新局显示“五手二打”；历史回放若已记录三打、四打，仍按事件真实数量显示。
+线下规则中的“由对手指出/裁判确认”在平台上改为自动、确定性判定，
 不允许 Bot 选择接受非法着。
 
 ## 单场棋谱导出
@@ -60,7 +65,7 @@ PASS 以及禁手类型。线下规则中的“由对手指出/裁判确认”�
 
 阅读 v1 棋谱时须区分三组编号：
 
-- `event_seq` 是从 1 开始的公开事件序号；交换、N 打候选、候选选择、PASS、判罚和终局等
+- `event_seq` 是从 1 开始的公开事件序号；交换、五手候选、候选选择、PASS、判罚和终局等
   不落子的动作也各占一个事件，因此它不等于棋子手数。
 - `stone_no` 是实际留在棋盘上的棋子序号。`opening_stones` 明确记录黑1、白2、黑3；
   `black5_candidates` 的 `algebraic_points` 只是针对 `candidate_for_stone_no` 的候选，未被选中的点
@@ -72,9 +77,11 @@ PASS 以及禁手类型。线下规则中的“由对手指出/裁判确认”�
 
 代数坐标始终采用**初始黑方视角**：横线 A–O 从左到右，纵线 1–15 从黑方一侧向白方一侧，
 平台内部 `(x,y)` 转换为 `A+x` 与 `15-y`，所以天元 `(7,7)` 为 H8。发生交换后坐标系也不会
-翻转。现行 v2 对局会完整保留指定开局、交换、N 打、PASS 与判罚事件；旧对局也使用同一 v1
-外壳并原样保留其公开历史事件，只接受已知的 current/legacy 规则协议配对。坐标、座位或手数
-派生字段仅在开局、连续落子编号、N 打选择和禁手关联完整一致时添加；断档或畸形事件仍保留原
+翻转。现行 v2 对局会完整保留指定开局、交换、五手候选、PASS 与判罚事件；旧对局也使用同一 v1
+外壳并原样保留其公开历史事件，只接受已知的现行固定二打、上一竞赛代或更早自由棋
+规则协议配对。历史事件中的候选数
+仍是权威值，不会因新局固定二打而被重写。坐标、座位或手数派生字段仅在开局、连续落子编号、
+候选选择和禁手关联完整一致时添加；断档或畸形事件仍保留原
 公开内容，但不会继续猜补缺失的规则、协议或手数信息。
 
 这是一种 **botbattle 平台 JSON 记录格式**，不是赛事组委会规定的官方电子棋谱格式。所附
@@ -86,7 +93,8 @@ PASS 以及禁手类型。线下规则中的“由对手指出/裁判确认”�
 
 通信必须使用[统一信封](#/wiki?slug=protocol)。每个请求都自包含
 `protocol_version=2`、`ruleset`、`phase`、`me`、`color`、`seat_colors`、
-`board`与 `pass_allowed`；特殊阶段还会带 `n`、`candidates`、`last` 等字段。
+`board`与 `pass_allowed`；开局阶段带固定的 `n_range=[2,2]`，后续特殊阶段还会带
+`n=2`、`candidates`、`last` 等字段。
 
 Bot 须根据 `phase` 返回下列标准信封之一：
 
@@ -103,19 +111,20 @@ Bot 须根据 `phase` 返回下列标准信封之一：
 Traditional 每次从完整 `requests[]/responses[]` 恢复状态；LongRunning 在首次响应后完成精确握手，
 后续处理单个 `request`。
 
-> 规则升级采用硬切换：旧 `gomoku_xy_v1` 二进制版本已废弃，不能回滚、选用、排队或参赛。
-> 平台为已有五子棋 Bot 建立一个通过 v2 完整对局验收的新标准版本并设为当前版本；
-> 旧文件和版本元数据只作历史审计保留。新规则使用独立评分池，所有 Bot 从默认评分、
-> 0 场开始；旧规则评分只随历史对局归档展示，不会混入新排行榜或日后的评分重建。
+> 历史上从 `gomoku_xy_v1` 升到 `gomoku_action_v2` 时采用过不兼容协议硬切换：旧二进制版本已
+> 废弃，平台当时为已有 Bot 建立了通过 v2 完整对局验收的新标准版本，旧文件只作审计保留。
+> 本次固定二打仍使用 `gomoku_action_v2`，不会替既有 current version 重写策略或重跑预检；新上传
+> 预检和新局裁判都会拒绝非 2，硬编码旧 ruleset 或 `n=3/4` 的 Bot 须由用户更新。现行规则使用
+> 独立评分池并从默认评分、0 场开始，上一代评分只随历史对局归档展示。
 
-硬切换会撤销已有五子棋本地接入令牌。使用本地 Bot 的玩家须先把本机程序更新为 v2
+上述历史硬切换会撤销已有五子棋本地接入令牌。使用旧 x/y 本地 Bot 的玩家须先把本机程序更新为 v2
 动作协议，再在“我的 Bot”中重新创建接入；原显示名称可以复用。旧令牌和旧 `{x,y}`
 程序不会被自动转换。
 
 ## 锦标赛流程
 
 五子棋赛事按“草稿 → 开放报名 → 发布排期 → 开赛 → 阶段休息（模板包含时）→ 已结束”推进，
-新建的每场对局都冻结 `gomoku_ccgc_2013_v1`，胜 / 平 / 负按 **2 / 1 / 0** 计分。
+新建的每场对局都冻结 `gomoku_ccgc_2013_five_move_two_v2`，胜 / 平 / 负按 **2 / 1 / 0** 计分。
 《2025 全国机器博弈竞赛程序册》中 45 队的“9 个 5 人组双循环 → 3 个 6 人组双循环 →
 JA/JB/JC 各 3 人双循环”是该届赛事编排，不作为任意人数赛事的单局规则。
 平台当前只对新建五子棋赛事提供 **五子棋双循环** 内置模板：所有 Bot 两两比赛两次并
@@ -137,7 +146,7 @@ JA/JB/JC 各 3 人双循环”是该届赛事编排，不作为任意人数赛�
 
 - 必须根据 `phase`而不是假定“每回合都落一子”；
 - `me` 不会因交换改变，棋色以 `color` / `seat_colors` 为准；
-- 黑5候选必须正好提交请求中的 N 个互不重复、均为空且不同形的点，选择阶段只返回有效索引；
+- 新局的 `n` 固定为 2；黑5候选必须正好提交两个互不重复、均为空且不同形的点，选择阶段只返回有效索引。旧 Bot 若仍返回 `n=3/4` 或相应数量的候选，会被裁判判为非法，必须重新编译上传；
 - 黑方普通行棋要避免长连、三三和四四；策略即使是随机的，也不能返回已占点或越界点。
 
 ### 完整 C 示例
@@ -164,6 +173,7 @@ JA/JB/JC 各 3 人双循环”是该届赛事编排，不作为任意人数赛�
 #define EMPTY (-1)
 #define BLACK 0
 #define WHITE 1
+#define BLACK5_CANDIDATE_COUNT 2
 #define KEEP_RUNNING ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 static int board[SIZE][SIZE];
@@ -322,10 +332,9 @@ static int choose_candidate(int index, int *out_x, int *out_y) {
     return 0;
 }
 
-static void emit_candidates(int count) {
-    if (count < 2 || count > 5) count = 2;
+static void emit_candidates(void) {
     fputs("{\"response\":{\"action\":\"black5_candidates\",\"points\":[", stdout);
-    for (int index = 0; index < count; index++) {
+    for (int index = 0; index < BLACK5_CANDIDATE_COUNT; index++) {
         int x = -99, y = -99;
         if (!choose_candidate(index, &x, &y)) {
             x = -99;
@@ -351,7 +360,7 @@ static void respond(const char *request) {
     } else if (strcmp(phase, "swap_choice") == 0) {
         fputs("{\"response\":{\"action\":\"swap\",\"swap\":false}}\n", stdout);
     } else if (strcmp(phase, "black5_candidates") == 0) {
-        emit_candidates(number_after(request, "n", 2));
+        emit_candidates();
     } else if (strcmp(phase, "black5_select") == 0) {
         fputs("{\"response\":{\"action\":\"black5_select\",\"index\":0}}\n", stdout);
     } else if (strcmp(phase, "white4") == 0) {
@@ -405,7 +414,7 @@ int main(void) {
 """全国机器博弈竞赛五子棋 v2 确定性样例 Bot。
 
 Traditional 读取 ``requests[-1]``，LongRunning 读取 ``request``；两种模式
-收到的当前请求都带完整棋盘。Bot 覆盖指定开局、三手交换、白4、N 打、
+收到的当前请求都带完整棋盘。Bot 覆盖指定开局、三手交换、白4、五手二打、
 候选选择和正常行棋，并始终使用平台标准 ``response`` 信封。
 """
 from __future__ import annotations
@@ -418,6 +427,7 @@ SIZE = 15
 EMPTY = -1
 BLACK = 0
 WHITE = 1
+BLACK5_CANDIDATE_COUNT = 2
 KEEP_RUNNING = ">>>BOTZONE_REQUEST_KEEP_RUNNING<<<"
 
 PHASE_OPENING = "opening_proposal"
@@ -517,9 +527,7 @@ def _safe_black_move(board: list[list[int]]) -> tuple[int, int] | None:
     return None
 
 
-def _candidate_points(
-    board: list[list[int]], count: int
-) -> list[dict[str, int]]:
+def _candidate_points(board: list[list[int]]) -> list[dict[str, int]]:
     points: list[dict[str, int]] = []
     reserved: set[tuple[int, int]] = set()
     for point in (*_CANDIDATE_PLAN, *_all_empty(board)):
@@ -528,7 +536,7 @@ def _candidate_points(
             continue
         reserved.add(point)
         points.append({"x": x, "y": y})
-        if len(points) == count:
+        if len(points) == BLACK5_CANDIDATE_COUNT:
             return points
     raise ValueError("棋盘没有足够的黑5候选点")
 
@@ -553,10 +561,7 @@ def _respond(request: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("白4无空点")
         return {"action": "move", "x": point[0], "y": point[1]}
     if phase == PHASE_BLACK5_CANDIDATES:
-        count = request.get("n")
-        if isinstance(count, bool) or not isinstance(count, int) or not 2 <= count <= 5:
-            raise ValueError("n 必须是 2..5")
-        return {"action": "black5_candidates", "points": _candidate_points(board, count)}
+        return {"action": "black5_candidates", "points": _candidate_points(board)}
     if phase == PHASE_BLACK5_SELECT:
         candidates = request.get("candidates")
         if not isinstance(candidates, list) or not candidates:

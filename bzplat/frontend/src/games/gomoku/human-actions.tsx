@@ -18,6 +18,8 @@ const BOARD_PHASES = new Set([
   'normal_play',
 ])
 
+const BLACK5_CANDIDATE_COUNT = 2
+
 function integer(value: unknown): number | null {
   const parsed = Number(value)
   return Number.isInteger(parsed) ? parsed : null
@@ -42,21 +44,11 @@ function pointLabel(point: GomokuPoint) {
   return `(${point.x}, ${point.y})`
 }
 
-function openingNRange(request: Record<string, unknown> | null): number[] {
-  const range = Array.isArray(request?.n_range) ? request.n_range : [2, 5]
-  const lower = integer(range[0]) ?? 2
-  const upper = integer(range[1]) ?? 5
-  return Array.from(
-    { length: Math.max(0, upper - lower + 1) },
-    (_, index) => lower + index,
-  ).filter((value) => value >= 2 && value <= 5)
-}
-
-function phaseInstruction(phase: string, n: number): string {
-  if (phase === 'opening_proposal') return '黑 1 固定在天元。依次点白 2、黑 3，再指定五手 N 打数量。'
+function phaseInstruction(phase: string): string {
+  if (phase === 'opening_proposal') return '黑 1 固定在天元。依次点白 2、黑 3；五手二打固定提交 2 个候选。'
   if (phase === 'swap_choice') return '查看前三手后决定是否交换棋色；座位不变，只交换黑白身份。'
   if (phase === 'white4') return '你当前执白。点一个空点落下白 4。'
-  if (phase === 'black5_candidates') return `你当前执黑。依次选择 ${n} 个不同形的空点；同一剩余对称轨道只可选一个，候选点尚不落入正式棋盘。`
+  if (phase === 'black5_candidates') return '你当前执黑。为五手二打依次选择 2 个不同形的空点；同一剩余对称轨道只可选一个，候选点尚不落入正式棋盘。'
   if (phase === 'black5_select') return '你当前执白。从候选中保留一个点；该点将成为唯一真实的黑 5。'
   if (phase === 'normal_play') return '点一个空点落子；裁判按当前棋色判定五连与黑方禁手。'
   return '等待裁判给出可执行动作。'
@@ -71,17 +63,12 @@ export function GomokuHumanTurnSurface({
   onSubmit,
 }: HumanTurnSurfaceProps) {
   const phase = typeof request?.phase === 'string' ? request.phase : ''
-  const requestN = integer(request?.n)
-  const availableN = useMemo(() => openingNRange(request), [request])
   const [draftPoints, setDraftPoints] = useState<GomokuPoint[]>([])
-  const [openingN, setOpeningN] = useState(availableN[0] ?? 2)
 
   useEffect(() => {
     setDraftPoints([])
-    setOpeningN(openingNRange(request)[0] ?? 2)
   }, [request])
 
-  const n = phase === 'black5_candidates' ? requestN ?? 2 : openingN
   const candidates = readPoints(request?.candidates)
   const actionEnabled = legal && !disabled && Boolean(request)
   const boardEnabled = actionEnabled && BOARD_PHASES.has(phase)
@@ -93,8 +80,8 @@ export function GomokuHumanTurnSurface({
     request: request ?? {},
     phase,
     points: draftPoints,
-    n,
-  }), [draftPoints, n, phase, request])
+    n: BLACK5_CANDIDATE_COUNT,
+  }), [draftPoints, phase, request])
   const boardEvents = useMemo(
     () => request ? [...events, draftEvent] : events,
     [draftEvent, events, request],
@@ -124,7 +111,7 @@ export function GomokuHumanTurnSurface({
       setDraftPoints((current) => {
         const exists = current.some((point) => samePoint(point, target))
         if (exists) return current.filter((point) => !samePoint(point, target))
-        return current.length < n ? [...current, target] : current
+        return current.length < BLACK5_CANDIDATE_COUNT ? [...current, target] : current
       })
       return
     }
@@ -142,13 +129,13 @@ export function GomokuHumanTurnSurface({
         action: 'opening',
         white2: draftPoints[0],
         black3: draftPoints[1],
-        n: openingN,
+        n: BLACK5_CANDIDATE_COUNT,
       },
     })
   }
 
   const confirmCandidates = () => {
-    if (draftPoints.length !== n) return
+    if (draftPoints.length !== BLACK5_CANDIDATE_COUNT) return
     onSubmit({ response: { action: 'black5_candidates', points: draftPoints } })
   }
 
@@ -163,7 +150,7 @@ export function GomokuHumanTurnSurface({
       <div className="min-w-0 rounded-lg border border-border bg-card px-3 py-2.5 shadow-xs">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Badge variant="outline" data-testid="gomoku-human-phase">
-            {gomokuPhaseLabel(phase)}
+            {gomokuPhaseLabel(phase, BLACK5_CANDIDATE_COUNT)}
           </Badge>
           {(integer(request?.me) === 0 || integer(request?.me) === 1) && (
             <span className="text-xs text-muted-foreground">
@@ -172,12 +159,12 @@ export function GomokuHumanTurnSurface({
           )}
           {phase === 'black5_candidates' && (
             <span className="ml-auto text-xs font-medium tabular-nums text-foreground" aria-live="polite">
-              已选 {draftPoints.length}/{n}
+              已选 {draftPoints.length}/{BLACK5_CANDIDATE_COUNT}
             </span>
           )}
         </div>
         <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
-          {phaseInstruction(phase, n)}
+          {phaseInstruction(phase)}
         </p>
 
         {phase === 'opening_proposal' && (
@@ -199,22 +186,6 @@ export function GomokuHumanTurnSurface({
                   {draftPoints[1] ? pointLabel(draftPoints[1]) : '待选择'}
                 </span>
               </div>
-            </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="mr-0.5 text-xs font-medium text-foreground">N 值</span>
-              {availableN.map((value) => (
-                <Button
-                  key={value}
-                  type="button"
-                  variant={openingN === value ? 'default' : 'outline'}
-                  className="min-h-11 min-w-11 px-3 tabular-nums"
-                  aria-pressed={openingN === value}
-                  disabled={!actionEnabled}
-                  onClick={() => setOpeningN(value)}
-                >
-                  {value}
-                </Button>
-              ))}
             </div>
             <div className="flex min-w-0 flex-wrap gap-2">
               <Button
@@ -296,10 +267,10 @@ export function GomokuHumanTurnSurface({
                 type="button"
                 className="min-h-11 flex-1 sm:flex-none"
                 data-testid="gomoku-submit-candidates"
-                disabled={!actionEnabled || draftPoints.length !== n}
+                disabled={!actionEnabled || draftPoints.length !== BLACK5_CANDIDATE_COUNT}
                 onClick={confirmCandidates}
               >
-                <Check aria-hidden="true" />提交 {n} 个候选
+                <Check aria-hidden="true" />提交 2 个候选
               </Button>
             </div>
           </div>

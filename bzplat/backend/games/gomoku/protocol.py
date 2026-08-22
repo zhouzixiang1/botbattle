@@ -9,8 +9,9 @@ import json
 from typing import Any, Iterable
 
 from bzplat.backend.games import _botzone_protocol as envelope_protocol
+from bzplat.backend.games.gomoku.gomoku_judge import BLACK5_CANDIDATE_COUNT
 
-RULESET_ID = "gomoku_ccgc_2013_v1"
+RULESET_ID = "gomoku_ccgc_2013_five_move_two_v2"
 LEGACY_RULESET_ID = "gomoku_freestyle_v1"
 PROTOCOL_VERSION = 2
 
@@ -97,9 +98,8 @@ def validate_response_payload(payload: Any) -> dict[str, Any]:
         if not isinstance(points, list):
             raise ValueError("black5_candidates.points 必须是坐标列表")
         normalized = [_point(point, field="points[]") for point in points]
-        # 坐标重复、占用以及相对当前四子盘面是否“不同形”
-        # 都是有状态的游戏规则，由纯裁判
-        # validate_black5_candidates 统一处理。
+        # 候选数必须为固定二打；坐标重复、占用以及相对当前四子盘面是否
+        # “不同形”都是有状态的游戏规则，统一留给纯裁判判定。
         return {"action": action, "points": normalized}
 
     if action == ACTION_BLACK5_SELECT:
@@ -154,6 +154,14 @@ def build_request(
     colors = list(seat_colors)
     if len(colors) != 2 or sorted(colors) != [0, 1]:
         raise ValueError("seat_colors 必须是黑白颜色的双射")
+    if n is not None and (
+        isinstance(n, bool)
+        or not isinstance(n, int)
+        or n != BLACK5_CANDIDATE_COUNT
+    ):
+        raise ValueError(
+            f"五手候选数固定为 {BLACK5_CANDIDATE_COUNT}，不能设为 {n!r}"
+        )
     request: dict[str, Any] = {
         "protocol_version": PROTOCOL_VERSION,
         "ruleset": RULESET_ID,
@@ -166,9 +174,12 @@ def build_request(
     }
     if phase == PHASE_OPENING:
         request["fixed_black1"] = {"x": 7, "y": 7}
-        request["n_range"] = [2, 5]
-    if n is not None:
-        request["n"] = n
+        request["n_range"] = [
+            BLACK5_CANDIDATE_COUNT,
+            BLACK5_CANDIDATE_COUNT,
+        ]
+    elif n is not None:
+        request["n"] = BLACK5_CANDIDATE_COUNT
     if candidates is not None:
         request["candidates"] = [dict(point) for point in candidates]
     if last is not None:

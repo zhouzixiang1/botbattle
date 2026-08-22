@@ -1,6 +1,6 @@
 """全国机器博弈竞赛五子棋适配层。
 
-状态机严格执行：指定开局 → 三手交换 → 白4 → 五手 N 打 → 正常行棋。
+状态机严格执行：指定开局 → 三手交换 → 白4 → 五手二打 → 正常行棋。
 纯棋规（开局几何、棋盘、禁手）留在 ``gomoku_judge.py``/``forbidden.py``；
 本模块只负责协议、参赛座位与棋色映射、事件和平台结果。
 """
@@ -15,6 +15,7 @@ from bzplat.backend.games.gomoku import protocol as proto
 from bzplat.backend.games.gomoku.forbidden import BlackMoveKind, classify_black_move
 from bzplat.backend.games.gomoku.gomoku_judge import (
     BLACK,
+    BLACK5_CANDIDATE_COUNT,
     BOARD_SIZE,
     CENTER,
     WHITE,
@@ -141,7 +142,9 @@ class GomokuSession:
         seat_colors = [BLACK, WHITE]
         moves_n = 0
         last: dict[str, int] | None = None
-        n = 2
+        # ``n`` 仍保留在 v2 wire/event 结构中供现有 Bot 与历史回放使用，
+        # 但它是裁判常量，不再由开局 Bot 选择或覆盖。
+        n = BLACK5_CANDIDATE_COUNT
         opening_code = ""
         candidates: list[dict[str, int]] = []
         winner: int | None = None
@@ -157,7 +160,7 @@ class GomokuSession:
             time_budget_per_side=900,
         )
 
-        # 1. 开局方（seat 0）一次提交白2、黑3及 N；黑1固定天元。
+        # 1. 开局方（seat 0）提交白2、黑3，并确认固定二打；黑1固定天元。
         action, failure = await self._request_action(
             decide,
             phase=proto.PHASE_OPENING,
@@ -179,15 +182,19 @@ class GomokuSession:
         else:
             white2 = (int(action["white2"]["x"]), int(action["white2"]["y"]))
             black3 = (int(action["black3"]["x"]), int(action["black3"]["y"]))
-            n = int(action["n"])
-            opening_code = validate_opening(white2, black3, n) or ""
+            proposed_n = int(action["n"])
+            opening_code = validate_opening(white2, black3, proposed_n) or ""
             if not opening_code:
                 winner, reason = 1, "illegal_opening"
                 await self._emit_illegal(
                     seat=0,
                     phase=proto.PHASE_OPENING,
                     action=action,
-                    why="not_one_of_26_openings",
+                    why=(
+                        "five_move_candidate_count_must_be_two"
+                        if proposed_n != BLACK5_CANDIDATE_COUNT
+                        else "not_one_of_26_openings"
+                    ),
                 )
             else:
                 stones = (
@@ -292,7 +299,7 @@ class GomokuSession:
                         move_index=moves_n,
                     )
 
-        # 4. 最终黑方提交 N 个不同形空点（候选不进入正式棋盘）。
+        # 4. 最终黑方提交两个不同形空点（候选不进入正式棋盘）。
         if winner is None and reason == "draw":
             black_seat = seat_for(BLACK)
             action, failure = await self._request_action(

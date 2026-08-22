@@ -175,8 +175,10 @@ sha256sum samples/gomoku_showcase/*_linux_amd64
 脚本还会从 `samples/gomoku_showcase/gomoku_showcase_bot.c` 构建赛事演示专用的
 `tactical/steady/foundation` 三档 LongRunning ELF。三档不读时钟、不用随机数，checksum
 由演示 seed manifest 锁定；它们是合成的强/中/弱矩阵，不是自然形成的 12 种独立棋力。
-当前 Gomoku 样例和三档演示 ELF 均为 `gomoku_action_v2`，支持指定开局、交换、N 打和 PASS；
+当前 Gomoku 样例和三档演示 ELF 均为 `gomoku_action_v2`，支持指定开局、交换、固定五手二打和 PASS；
 改源码后必须通过 Traditional/LongRunning 真实自对局、禁手零触发与 checked-in ELF 可重建一致性后才能更新 manifest。
+同一 wire 下仍会按现行规则拒绝 `n=3/4` 或非两个黑 5 候选；旧构建必须更新策略并重新编译，不能只因
+仍使用 `gomoku_action_v2` 就视为兼容现行 `gomoku_ccgc_2013_five_move_two_v2`。
 
 玩家侧跨系统构建说明不依赖仓库脚本，见 `wiki/BOT_DEV.md`。
 
@@ -451,16 +453,17 @@ apply 为 zero-write no-op。
 
 ### 6.6 游戏规则代际冷切命令
 
-`python -m bzplat.backend.cli game-contract-cutover` 是规则/协议不兼容升级的长期离线入口。命令的
-dry-run 与 apply 都要求 API/dispatcher/scheduler/上传预检已经停服，并提供与目标逐字节一致、
-不同 inode、完整性与外键均通过的冷备；实现会在构造可迁移 Store 之前先取得
-目标数据库邻接的 dispatcher flock 并验证冷备。dry-run 只迁移并规划同目录临时 DB copy，
-不写目标 DB 或创建 `bot_uploads`；apply 还必须提供目标 DB 二次确认、标准 ELF 的精确
-SHA-256/size，以及同一 dry-run 审核得到的 manifest digest 和 `target_preimage_sha256`。首次 apply
-要求目标与原冷备仍逐字节等于该 preimage；提交后输出丢失的幂等重试仍使用同一原冷备，并只在原始库
-marker 摘要匹配且完整 postcondition 复核通过时返回 no-op。不得用临时 SQL 或一次性脚本替代，也不得
-直接复用仓库 sample 路径作为各 Bot 的 current binary。完整 maintenance、冷备、验收、恢复接单、恢复
-自动排位与成对回滚步骤见
+`python -m bzplat.backend.cli game-contract-cutover` 是 wire 协议不兼容升级的长期离线入口，会用经审核
+的标准 ELF 为每个 Bot 建立新版本；`python -m bzplat.backend.cli game-rule-cutover` 专用于协议 ID 不变、
+但 ruleset 与 rating pool 同时换代的离线切换，保留现有 Bot/version，marker manifest 固定为空。
+两条命令的 dry-run 与 apply 都要求 API/dispatcher/scheduler/上传预检已经停服，并提供与目标逐字节一致、
+不同 inode、完整性与外键均通过的冷备；实现会在构造可迁移 Store 之前先取得目标数据库邻接的 dispatcher
+flock 并验证冷备。dry-run 只迁移并规划同目录临时 DB copy，不写目标 DB 或创建 `bot_uploads`。
+不兼容协议 apply 须回填标准 ELF 的精确 SHA-256/size、manifest digest 与 preimage；同协议规则 apply
+须回填 `plan_digest`、空 manifest digest 与 preimage。两者都要求目标 DB 二次确认，提交后输出丢失的
+幂等重试也只能使用原冷备，并在完整 marker/postcondition 复核通过时返回 no-op。不得用临时 SQL 或
+一次性脚本替代，也不得把同 wire 规则变化静默混入旧评分池。完整 maintenance、冷备、验收、恢复接单、
+恢复自动排位与成对回滚步骤见
 [RUNTIME.md](./RUNTIME.md#五子棋规则代际冷切运行手册)。
 
 > 返回 [doc/INDEX.md](./INDEX.md)
