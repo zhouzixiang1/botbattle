@@ -41,6 +41,7 @@ interface BotProfile {
   owner_name?: string
   owner_display?: string
   is_active: number | boolean
+  is_deleted?: boolean
   is_ranked: number | boolean
   current_version?: number
   created_at?: string
@@ -500,7 +501,9 @@ export default function BotDetail() {
               ) : (
                 <Badge variant="secondary" className="font-mono"><Trophy className="size-3" aria-hidden="true" />参榜中 · 资格 {ratedMatches}/{profile.ranking_min_matches}</Badge>
               )}
-              {!profile.is_active && <Badge variant="secondary">已停用</Badge>}
+              {profile.is_deleted
+                ? <Badge variant="destructive">已删除</Badge>
+                : !profile.is_active && <Badge variant="secondary">已停用</Badge>}
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
               <span className="inline-flex min-w-0 items-center gap-1">所有者

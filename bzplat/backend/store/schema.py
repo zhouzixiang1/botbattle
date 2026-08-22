@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS bots (
     current_version INTEGER NOT NULL DEFAULT 0,
     is_active       INTEGER NOT NULL DEFAULT 1,
     is_ranked       INTEGER NOT NULL DEFAULT 0,
+    owner_deleted_at TEXT,
     is_builtin      INTEGER NOT NULL DEFAULT 0,
     game_id         TEXT    NOT NULL,
     runtime_mode    TEXT    NOT NULL DEFAULT '__DEFAULT_RUNTIME_MODE__',
@@ -197,6 +198,8 @@ CREATE TABLE IF NOT EXISTS bots (
     CONSTRAINT chk_bot_arch CHECK (arch = 'amd64'),
     CONSTRAINT chk_format CHECK (format = 'elf'),
     CONSTRAINT chk_bot_ranked CHECK (is_ranked IN (0,1)),
+    CONSTRAINT chk_bot_owner_deleted CHECK (
+        owner_deleted_at IS NULL OR (is_active=0 AND is_ranked=0)),
     CONSTRAINT chk_runtime CHECK (runtime_mode IN ('traditional', 'longrunning'))
 );
 

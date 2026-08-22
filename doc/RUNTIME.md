@@ -470,7 +470,7 @@ Docker 诊断。ETA 明确是随对局时长、优先级和资源变化的区间
 - 存量评分投影只标为 `legacy-unverified`，摘要留空；启动迁移不擅自重放历史。完成下节的离线
   `rating-rebuild` 前，projection readiness 会阻止 rated/auto claim，因此这是升级上线的明确 No-Go，
   不是可忽略告警。
-- 当前 39 个现行 trigger 由 `_ensure_trigger` 规范化比较。定义相同的二次打开不执行 trigger
+- 当前 46 个现行 trigger 由 `_ensure_trigger` 规范化比较。定义相同的二次打开不执行 trigger
   `DROP/CREATE`，`schema_version` 不因这些 trigger 改变；缺失/过期定义修复一次，对象类型冲突、非法
   identifier 或创建后定义不符会抛错并由 Store 事务回滚。Store 的其他迁移仍可能执行 DML，所以整体
   只保证逻辑幂等，不保证数据库文件字节、SHA-256 或 mtime 不变。

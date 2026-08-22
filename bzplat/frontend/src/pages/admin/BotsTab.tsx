@@ -19,6 +19,7 @@ interface Bot {
   format: string
   current_version: number
   is_active: boolean
+  is_deleted?: boolean
   is_builtin: boolean
   created_at: string
   runnable?: boolean
@@ -179,7 +180,11 @@ export default function BotsTab() {
                   <TableCell className="px-3 py-2 font-mono text-xs text-muted-foreground">v{b.current_version}</TableCell>
                   <TableCell className="px-3 py-2">
                     <div className="flex gap-1">
-                      {b.is_active ? <Badge variant="secondary" className="text-[10px]">启用</Badge> : <Badge variant="outline" className="text-[10px] text-muted-foreground">停用</Badge>}
+                      {b.is_deleted
+                        ? <Badge variant="destructive" className="text-[10px]">所有者已删除</Badge>
+                        : b.is_active
+                          ? <Badge variant="secondary" className="text-[10px]">启用</Badge>
+                          : <Badge variant="outline" className="text-[10px] text-muted-foreground">停用</Badge>}
                       {b.runnable === false && <Badge variant="destructive" className="text-[10px]">不可运行</Badge>}
                     </div>
                   </TableCell>
@@ -189,10 +194,10 @@ export default function BotsTab() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        disabled={busyId === b.id || (!b.is_active && b.runnable === false)}
+                        disabled={busyId === b.id || b.is_deleted || (!b.is_active && b.runnable === false)}
                         onClick={() => void patch(b.id, { is_active: !b.is_active })}
                       >
-                        {b.is_active ? '下架' : b.runnable === false ? '不可上架' : '上架'}
+                        {b.is_deleted ? '不可上架' : b.is_active ? '下架' : b.runnable === false ? '不可上架' : '上架'}
                       </Button>
                       <Button
                         type="button"
