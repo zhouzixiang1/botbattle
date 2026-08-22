@@ -15,6 +15,7 @@ _PROJECTION_BUMP = (
     "UPDATE rating_projection_state SET "
     "mutation_revision=mutation_revision+1 WHERE singleton=1"
 )
+_EXPECTED_TRIGGER_COUNT = 46
 
 
 def _normalize_sql(sql: str) -> str:
@@ -37,6 +38,42 @@ def _schema_state(db_path: Path) -> tuple[int, dict[str, str]]:
 def _assert_fragments(sql: str, *fragments: str) -> None:
     for fragment in fragments:
         assert fragment in sql, (fragment, sql)
+
+
+def _assert_owner_delete_trigger_contract(triggers: dict[str, str]) -> None:
+    assert len(triggers) == _EXPECTED_TRIGGER_COUNT, sorted(triggers)
+    contracts = {
+        "trg_bots_owner_deleted_guard_insert": (
+            "BEFORE INSERT ON bots",
+            "deleted Bot must be inactive and unranked",
+        ),
+        "trg_bots_owner_deleted_guard_update": (
+            "BEFORE UPDATE OF owner_deleted_at,is_active,is_ranked ON bots",
+            "deleted Bot tombstone invariant",
+        ),
+        "trg_contest_entries_live_bot_insert": (
+            "BEFORE INSERT ON contest_entries",
+            "contest entry Bot must be active",
+        ),
+        "trg_contest_entries_live_bot_update": (
+            "BEFORE UPDATE OF bot_id ON contest_entries",
+            "contest entry Bot must be active",
+        ),
+        "trg_contests_live_state_deleted_bot_guard": (
+            "BEFORE UPDATE OF status ON contests",
+            "live contest cannot reference owner-deleted Bot",
+        ),
+        "trg_contest_pairings_live_bot_insert": (
+            "BEFORE INSERT ON contest_pairings",
+            "live contest pairing cannot reference owner-deleted Bot",
+        ),
+        "trg_contest_pairings_live_bot_update": (
+            "BEFORE UPDATE OF contest_id,bot_a_id,bot_b_id ON contest_pairings",
+            "live contest pairing cannot reference owner-deleted Bot",
+        ),
+    }
+    for name, fragments in contracts.items():
+        _assert_fragments(triggers.get(name, ""), *fragments)
 
 
 def _assert_rating_trigger_contract(triggers: dict[str, str]) -> None:
@@ -179,6 +216,7 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
     store.close()
     version_before, triggers_before = _schema_state(db_path)
     _assert_rating_trigger_contract(triggers_before)
+    _assert_owner_delete_trigger_contract(triggers_before)
 
     reopened = Store(str(db_path))
     reopened.close()
@@ -187,6 +225,7 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
     assert version_after == version_before
     assert triggers_after == triggers_before
     _assert_rating_trigger_contract(triggers_after)
+    _assert_owner_delete_trigger_contract(triggers_after)
 
 
 def test_docker_launch_journal_schema_and_singleton_are_reopen_idempotent(

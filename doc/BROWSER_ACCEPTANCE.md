@@ -55,7 +55,7 @@
 | G-02 | 未登录 | 依次打开 Holdem/Gomoku/Pencil 的终态对局（合计覆盖 completed 与 aborted）并下载公开日志；再打开 live、未知游戏与连续切换的对局；Gomoku 同时操作日志/棋谱两个入口 | 下载文件名为 `botbattle-{game}-{safe_match}-log.json`，JSON 顶层严格 `format/format_version/match/replay` 且 replay 等于 canonical 公开回放；live/未知/旧路由零 `/log` 请求，两个 Gomoku 下载不串端点；Tab/Enter、320/390px 高度至少 44px、无根溢出，Console/Network 干净 |
 | U-01 | 普通用户 | UI 登录/退出，编辑个人资料和通知偏好 | POST/PUT 只发生一次，刷新后值一致 |
 | U-02 | 普通用户 | 上传真实 Linux x86_64 ELF；上传真实 Windows x64 PE 并被拒绝 | 成功 Bot 可见；PE 为精确 400 且 DB 中无新 Bot |
-| U-03 | 普通用户 | 编辑 Bot、上传版本、回滚、激活、删除无引用的临时 Bot | 版本号和 active 状态一致；失败不改旧版本 |
+| U-03 | 普通用户 | 编辑 Bot、上传版本、回滚、激活与可逆停用；不可逆删除 Bot 并刷新/翻页 | 停用 Bot 仍在库存且可重新启用；删除后从库存消失、不能再修改/启用/参榜/换版，但版本、评分、赛事与历史身份保留；慢请求有“删除中”反馈且不重复提交，末页唯一项删除后回到上一有效页，失败不改旧状态 |
 | U-04 | 普通用户 | Bot-v-Bot、自博弈、人类对局；排队、刷新恢复、取消与中断重试 | 每次提交仅一个 202 request；queued 时无 `match_id` 且不跳 viewer，claim 后才按 `match_id` 进入 viewer/play；刷新/session 恢复同一 `public_id`，离线不丢请求；取消 queued 收敛为 cancelled，取消 active 经确认且清理前容量不提前释放；retryable interrupted 重新排队但保留旧 attempt 审计。SSE/WS 到权威终态；Pencil 无效命中零发送、合法边与让行/键盘链路不退化 |
 | U-05 | 普通用户 | 赛事报名、换 Bot、退赛；关注/收藏/评论/点赞 | 页面计数、刷新结果和 API 返回一致 |
 | U-06 | 普通用户 | 普通终态对局双方 Bot owner 各查看双方 debug；无关用户与真人座位尝试访问；再下载同场公开日志 | owner 同内容、无关用户无面板且不请求私有 API、拒绝不暴露记录存在性；公开日志在所有身份下内容一致且不包含 private debug |
@@ -80,6 +80,7 @@
 | `public-audit.spec.ts` | G-01 的公开深链、导航历史、404、登录失败、Network 故障恢复 |
 | `match-log-export.spec.ts` | G-02：三游戏终态（合计覆盖 completed 与 aborted）日志、live/未知/跨路由零错误请求、Gomoku 日志与棋谱双入口、真实文件名/JSON、Tab/Enter、320/390px 触控；Chromium/Firefox/WebKit 共 18/18 项通过 |
 | `gomoku-v2.spec.ts` | U-08：现行 fixed2 开局/精确双候选/键盘与读屏/390px 触控，以及上一竞赛代三打回放的真实 N 与规则标签；Chromium/Firefox/WebKit 共 21/21 项通过 |
+| `bot-owner-delete.spec.ts` | U-03：owner 删除与停用分离、慢 DELETE 单提交/aria-busy、成功隐藏与停用 Bot 保留、末页回退、390px 确认按钮 44px、Console/Network clean；Chromium/Firefox/WebKit 共 6/6 项通过 |
 | `qa-regression.spec.ts` | 三视口公开页与受保护页访客门禁、U-02～U-04 的核心链路、私有 debug 折叠/纯文本/长文本移动端/无权限零请求、实时通信、协议/二进制/版本/异常终态与权限回归 |
 | `contest-workflow.spec.ts` | U-05 的报名、O-01/O-02 的建赛与真实多浏览器主生命周期、终态清理保护 |
 | `contest-scoring-clarity.spec.ts` | 瑞士轮 3/1/0、真实 W/D/L 与轮空分列、阶段榜/正式榜/阶段面板同一计分构成、赛事积分与平台 Rating 隔离；390px 下两张宽表的具名横滚区域可聚焦且页面零根溢出 |

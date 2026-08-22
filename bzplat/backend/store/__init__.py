@@ -1,5 +1,7 @@
 """SQLite 存储层导出。"""
 from .db import (
+    BotDeletedError,
+    BotOwnerDeleteBusyError,
     RankedBotSelectionBusyError,
     Store,
     rating_plan_digest,
@@ -39,6 +41,8 @@ from .schema import (
 
 __all__ = [
     "Store",
+    "BotDeletedError",
+    "BotOwnerDeleteBusyError",
     "RankedBotSelectionBusyError",
     "ExecutionInvariantError",
     "ExecutionMaintenanceConflict",

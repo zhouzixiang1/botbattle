@@ -548,6 +548,10 @@ def test_existing_database_backfill_is_deterministic_and_never_repeats(tmp_path)
         "    is_ranked       INTEGER NOT NULL DEFAULT 0,\n", ""
     ).replace(
         "    CONSTRAINT chk_bot_ranked CHECK (is_ranked IN (0,1)),\n", ""
+    ).replace(
+        "    CONSTRAINT chk_bot_owner_deleted CHECK (\n"
+        "        owner_deleted_at IS NULL OR (is_active=0 AND is_ranked=0)),\n",
+        "",
     )
     conn = sqlite3.connect(db)
     conn.executescript(legacy_schema)

@@ -7,6 +7,7 @@ import {
   History,
   KeyRound,
   Laptop,
+  LoaderCircle,
   MoreHorizontal,
   Pencil,
   Power,
@@ -120,6 +121,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [rankingBusyBotId, setRankingBusyBotId] = useState<number | null>(null)
+  const [deletingBotId, setDeletingBotId] = useState<number | null>(null)
   const rankingActionRefs = useRef(new Map<number, HTMLButtonElement>())
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -360,18 +362,36 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
   }
 
   const del = async (b: Bot) => {
+    const botName = b.display_name || b.name
     if (!await confirm({
       title: '删除 Bot',
-      desc: `确定删除 ${b.display_name || b.name}？（将停用此 Bot）`,
-      confirmText: '删除',
+      desc: `删除后，${botName} 将从“我的 Bot”管理列表移除，不能恢复，也不能用同名重新创建。历史对局、评分、版本和 Bot 名称会继续保留。`,
+      confirmText: '从管理列表删除',
       danger: true,
+      buttonClassName: 'max-sm:min-h-[44px]',
     })) return
+    setDeletingBotId(b.id)
+    setError('')
     try {
       await apiJson(`/api/bots/${b.id}`, 'DELETE')
-      await load()
-      toast.success('Bot 已删除')
+      // The DELETE contract is an owner-visible tombstone, not the reversible
+      // active switch. Hide the row as soon as the server commits, then refresh
+      // the canonical page projection (which excludes owner-deleted Bots).
+      setBots((current) => current.filter((item) => item.id !== b.id))
+      setTotal((current) => Math.max(0, current - 1))
+      if (bots.length === 1 && page > 1) {
+        // Avoid reloading the now-empty page. The page state owns the request,
+        // so its effect performs exactly one canonical load for the prior page.
+        setLoading(true)
+        setPage(page - 1)
+      } else {
+        await load()
+      }
+      toast.success(`${botName} 已从管理列表删除`)
     } catch (e) {
       setError(errMsg(e, '删除失败'))
+    } finally {
+      setDeletingBotId((current) => current === b.id ? null : current)
     }
   }
 
@@ -620,16 +640,27 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
                           : b.is_active ? '停用 Bot' : '启用 Bot'}
                       </TooltipContent>
                     </Tooltip>
+                    {deletingBotId === b.id && (
+                      <span role="status" aria-live="polite" className="text-xs font-medium text-muted-foreground">
+                        删除中…
+                      </span>
+                    )}
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
                           type="button"
                           variant="outline"
                           size="icon-sm"
-                          aria-label={`管理 ${b.display_name || b.name}`}
+                          disabled={deletingBotId !== null}
+                          aria-busy={deletingBotId === b.id}
+                          aria-label={deletingBotId === b.id
+                            ? `${b.display_name || b.name} 删除中`
+                            : `管理 ${b.display_name || b.name}`}
                           className="max-sm:min-h-11 max-sm:min-w-11"
                         >
-                          <MoreHorizontal className="size-4" />
+                          {deletingBotId === b.id
+                            ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+                            : <MoreHorizontal className="size-4" />}
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
@@ -662,7 +693,7 @@ function MyBotsForIdentity({ user }: { user: CurrentUser | null }) {
           </ul>
         )}
       </DataRegion>
-      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} />
+      <Pagination page={page} perPage={perPage} total={total} onPageChange={setPage} disabled={deletingBotId !== null} />
       </div>
       </div>
       {confirmDialog}
