@@ -60,7 +60,7 @@ pytest
 
 ### 3.1 套件结构
 
-`bzplat/frontend/e2e/` 当前静态有 14 个 spec；每个浏览器及三浏览器总数必须以目标代码序列的 `playwright --list` 与实际运行证据为准，旧主线基线不能外推：
+`bzplat/frontend/e2e/` 当前静态有 15 个 spec；每个浏览器及三浏览器总数必须以目标代码序列的 `playwright --list` 与实际运行证据为准，旧主线基线不能外推：
 
 | Spec | 重点 |
 |------|------|
@@ -122,15 +122,15 @@ BZ_E2E_BASE_URL=http://127.0.0.1:5173 npm run test:e2e -- --browser=all --report
 
 | 检查 | 本轮状态 | 证据/说明 |
 |------|----------|-----------|
-| 后端完整 pytest | **待集成树重跑** | 两个单独 PR 的完整套件均已通过；本集成候选必须从第 1 项重新冻结运行到 pytest exit 0 后，才可回填最终数量、耗时与指纹 |
-| 前端生产构建 | **待集成树重跑** | 本集成候选必须重新完成 TypeScript 与 Vite 生产构建 |
-| Playwright 三浏览器矩阵 | **待集成树重跑** | 本集成候选必须在 fresh 隔离栈从 test 1 无过滤运行 Chromium、Firefox、WebKit，workers=1、retries=0，并同时覆盖 owner 删除与赛事实名导出后再回填证据 |
+| 后端完整 pytest | **1754 passed / 2 warnings（832.43s）** | 集成代码序列 `cb1a04d` 从第 1 项无过滤运行到 exit 0；两条 warning 均为既有 deprecation。日志 SHA-256 为 `a021913ff46daa340c91e674b321db48437da9fd1c1946121456e3601b2205fc`；候选源码与样例文件指纹前后稳定，watchdog 零事件 |
+| 前端生产构建 | **通过（2586 modules）** | `tsc -b && vite build` exit 0，Vite 生产构建 534ms；日志 SHA-256 为 `eb6384cadd625be1248092c0c54f76e140620949ecc74b08312aa490259fb5fb` |
+| Playwright 三浏览器矩阵 | **345/345 passed（38.2m）** | fresh 隔离栈从 test 1 无过滤运行，Chromium/Firefox/WebKit 各 115；`workers=1`、`retries=0`。owner Bot 删除与赛事实名导出均在三浏览器通过，候选 HEAD、working diff、tracked 与样例指纹前后一致，watchdog 零事件；日志 SHA-256 为 `bba391b54a45154eb62554b9eca242bd7d697335cebe3b73ab448bc8e2aa730f` |
 | 单用户单游戏排位代表生产副本演练 | **migration → dry-run → apply → verify → no-op 通过** | 从停服冷备逐字节复制到独立 inode；旧库 95 个 Bot、91 个 owner/game 席位，首次迁移确定性派遣 79 个可执行代表，两个多 Bot 组分别保留 Bot 1 与 1118，canonical partial unique index 冲突为 0。v4 dry-run 读取 4102 个 settlement（4068 rated、34 neutral），source/plan/rebuilt digest 分别为 `adfd18bd…308d` / `417148b9…a3e` / `b9f099e6…50ef`，公开候选 79，Rating 与名次变化均为 0；apply 后独立 verify 为 `owner-ranked-bot-v4`、mutation/trusted revision 一致、integrity=`ok`、FK=0。Bot/版本/比赛/队列/冻结 policy/settlement/旧评分归档的逻辑指纹前后一致；提交后重新制作 exact 冷备的二次 apply 为零写，文件 SHA-256 与 mtime 不变；误用重建前冷备会按完整业务摘要 fail closed |
 | Gomoku hard cutover 副本演练 | **dry-run → apply → second apply → verify 全部通过** | 生产同形数据库物理副本上，用正式标准 ELF 对 Traditional/LongRunning 分别执行 Docker 预检；32 个 Bot 各新建不可变 vN 并设为 current，52 个旧版本退役，2 个旧 Gomoku queued job 取消，运行模式保持 20/12。第二次同参数与原冷备返回 `already_applied=true`；1545 场历史 Match/Replay/赛事/旧版本不可变字段逐行零差异，32 条新路径为独立 inode、mode 0555、hash 一致，integrity=`ok`、FK=0、新评分池场次为 0 |
 | Gomoku fixed2 同协议冷切演练 | **dry-run → lost-output apply → idempotent recovery → verify 全部通过** | 隔离环境先用正式 hard-cut API 构造历史 `xy_v1→action_v2` marker，再以正式 `game-rule-cutover` 完成 `action_v2→action_v2` 规则代际切换；dry-run 对目标 DB 零写。首次 apply 故意丢弃 stdout 后，绑定原冷备与原 plan/manifest/preimage 摘要的重试返回 `already_applied=true`，再次重试 SQLite `.dump` 零差异；错误 plan digest exit 2 且目标 SHA/mtime 不变。rule marker 使用空 manifest、版本与 Local AI 原地保留；旧 ratings/history/pair `4/4/2` 完整归档，新池评分归零，旧 queued/retry 收敛，其他游戏投影与全局 fairness cursor 不变；历史 N=3/N=4 Match/Replay/Record 前后逐字节一致，最终 quick/integrity=`ok`、FK=0、runtime contract 为 fixed2。生产副本直接搬到非 canonical 根会被历史 marker 的资产路径守卫拒绝，因此真实上线必须在停服后的生产 canonical 根执行，不得改写 marker 绕过 |
 | 全页面图片识别 | **完成，未发现 P0 或根级横向溢出** | 公开页面 219 张 PNG / 31 states、用户页面 99 张 PNG + 5 份状态 JSON、Admin 106 张 PNG / 42 states；逐图检查首屏、滚动中段、页尾及 Desktop/Mobile/Laptop 的统一设计、信息密度、留白、对齐、溢出、换行、sticky 与内外滚动 |
 | API 真实关键链路 | **复合通过：48 条真实流程 + 2 条修正复核** | 隔离 QA 栈完成鉴权、上传/版本、70 手挑战、SSE/回放、4 局并发队列、排行榜、赛事 3 场与自动完赛；原运行仅有 2 条脚本断言仍读取已下架的 `matches_played`。改为严格核对 `rated_matches`、`ranking_eligible`、`ranking_min_matches` 与 1-based `rank` 后，2 条定向测试及同一 QA 端点在线 canary 通过；不得描述为一次 50/50 单轮运行 |
-| 隔离端到端冒烟 | **待集成树重跑** | 本集成候选必须在脚本自建 fresh `/tmp` DB/uploads/avatars/logs、动态非 50380 端口与唯一 `BZ_INSTANCE_KEY` 下重新完成全流程，验证 `qa_instance=true` 且退出后服务、端口、目录、容器与生产 50380/主库完全隔离 |
+| 隔离端到端冒烟 | **ALL E2E CHECKS PASSED** | 脚本自建 fresh `/tmp` DB/uploads/avatars/logs，使用动态端口 60185 与唯一 `BZ_INSTANCE_KEY=qa-user-data-smoke-final`，确认 `qa_instance=true` 并 exit 0；日志 SHA-256 为 `005634325afb661742ed572a3329229e850ffbefe3bb2eab167d2d336596966a`。退出后服务、端口、临时 runtime 与 QA Docker 容器均已回收；进程环境与日志证明仅连接 `/tmp` DB 且未请求 50380，主库同期字节变化来自仍运行的生产 Docker 对局与真实访问，不冒充文件未变化 |
 | Local AI 真实接入 canary | **双本地与混合路径通过** | 隔离 QA 使用正式连接器协议与真实 Traditional ELF 完成双本地及“本地 Bot 对上传 Bot”五子棋。双本地为 `remote_local / remote_local`、`sandbox_units=0`；混合路径为 `remote_local / platform_low`、`sandbox_units=1`、`1000m CPU / 512 MiB / profile v1`。两局均不计平台排行榜、评分前后不变、正常终局且无技术判负，匿名详情/列表/执行投影不含连接身份或令牌。混合路径还在首回合主动断线后以同 token 重连，保持同 `request_id + match_id + turn`，剩余时间从 59999ms 降至 58988ms，估算绝对 deadline 仅漂移 1.398ms；终局轮换后旧 token 拒绝、新 token 与新 public id 正常上线。连接、lease 与队列均已释放。 |
 | 回放/详情 API 性能 | **所有实测 p95 均低于 100ms，且通过各端点既定门槛** | 48 samples × 4 workers 的只读冷测：`home_latest` 60.44ms、`history_page_1` 53.00ms、`metadata_for_large_replay` 42.01ms、`replay_typical` 9.87ms、143647B 的 `replay_large` 71.85ms；字段、隐私与契约门均通过 |
 | 默认限流与赛事负载 | **复合通过** | 同一代码序列的 phase 0–4 通过，其中 phase 2 在默认真实限流和全局队列下 12/12 请求全部接受并取得终态，用时 1759.3s；429 重试耗尽、POST 异常或 waiter 超时现在均硬失败。旧 phase 5 的失败仅因脚本把整个 19 场赛事生命周期误设为 400s，并非产品卡死；收敛为有界赛事后定向续跑 phase 5–7 为 55 passed / 0 failed / 0 warnings（173.2s），不冒充一次完整单轮运行 |
