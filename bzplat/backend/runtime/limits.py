@@ -1,4 +1,4 @@
-"""运行时资源硬顶：全局单场执行与 Bot 上传容量。"""
+"""运行时资源硬顶：全局双场执行与 Bot 上传容量。"""
 from __future__ import annotations
 
 import os
@@ -373,7 +373,7 @@ def cpu_count() -> int:
 
 
 def concurrent_ceiling() -> int:
-    """全站执行硬顶：所有来源同一时刻合计最多一场。"""
+    """全站执行硬顶：每 4 个可见逻辑核一场，且合计最多两场。"""
     return min(MAX_CONCURRENT_MATCHES, max(1, cpu_count() // 4))
 
 

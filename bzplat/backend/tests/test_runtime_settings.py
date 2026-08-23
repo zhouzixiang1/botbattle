@@ -13,6 +13,7 @@ from bzplat.backend.runtime.config import (
     ACTION_TIMEOUT_SEC,
     AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES,
     CONFIGURATION_SOURCE,
+    MAX_CONCURRENT_MATCHES,
     RANKING_MIN_RATED_MATCHES,
 )
 from bzplat.backend.runtime.limits import (
@@ -30,32 +31,35 @@ from bzplat.backend.store.schema import (
 
 def test_ceiling_formula():
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=8):
-        assert concurrent_ceiling() == 1
+        assert concurrent_ceiling() == 2
     with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=1):
         assert concurrent_ceiling() == 1
-    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=16):
+    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=7):
         assert concurrent_ceiling() == 1
-        assert clamp_concurrent(99) == 1
-        assert clamp_concurrent(2) == 1
-        assert default_max_concurrent() == 1
+    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=16):
+        assert concurrent_ceiling() == 2
+        assert clamp_concurrent(99) == 2
+        assert clamp_concurrent(2) == 2
+        assert default_max_concurrent() == 2
 
 
-def test_explicit_startup_override_cannot_bypass_global_single_match_slot(tmp_path):
-    client, app = _admin_client(tmp_path, max_concurrent=99)
+def test_explicit_startup_override_cannot_bypass_global_match_cap(tmp_path):
+    with mock.patch("bzplat.backend.runtime.limits.os.cpu_count", return_value=8):
+        client, app = _admin_client(tmp_path, max_concurrent=99)
 
-    assert app.state.runtime_ceiling == 1
-    assert app.state.orch.max_concurrent == 1
-    assert app.state.execution_dispatcher.max_match_slots == 1
-    assert app.state.execution_dispatcher.max_sandbox_units == 2
+    assert app.state.runtime_ceiling == 2
+    assert app.state.orch.max_concurrent == 2
+    assert app.state.execution_dispatcher.max_match_slots == 2
+    assert app.state.execution_dispatcher.max_sandbox_units == 4
 
     response = client.get("/api/admin/settings/runtime")
     assert response.status_code == 200
     capacity = response.json()["queue"]["capacity"]
-    assert capacity["match_slots"]["capacity"] == 1
-    assert capacity["sandbox_units"]["capacity"] == 2
+    assert capacity["match_slots"]["capacity"] == 2
+    assert capacity["sandbox_units"]["capacity"] == 4
 
 
-def _admin_client(tmp_path, *, max_concurrent: int | None = 1):
+def _admin_client(tmp_path, *, max_concurrent: int | None = None):
     db = str(tmp_path / "t.db")
     app = create_app(db_path=db, max_concurrent=max_concurrent)
     store: Store = app.state.store
@@ -78,13 +82,14 @@ def test_runtime_diagnostics_are_explicitly_code_owned(tmp_path):
     assert data["source"] == CONFIGURATION_SOURCE
     assert data["mutable"] is False
     assert data["action_timeout_sec"] == ACTION_TIMEOUT_SEC
-    assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == 1
+    expected = default_max_concurrent()
+    assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == expected
     assert data["bot_cpus"] == 1
     assert data["bot_memory_mb"] == 512
     assert data["auto_match"]["enabled"] is True
     assert data["auto_match"]["mutable"] is True
-    assert data["queue"]["capacity"]["match_slots"]["capacity"] == 1
-    assert data["queue"]["capacity"]["sandbox_units"]["capacity"] == 2
+    assert data["queue"]["capacity"]["match_slots"]["capacity"] == expected
+    assert data["queue"]["capacity"]["sandbox_units"]["capacity"] == expected * 2
     assert "interval_sec" not in data["auto_match"]
     assert data["contest_scheduler"] == {"enabled": True, "interval": 15}
     assert "auto_match" not in data["readonly"]
@@ -103,7 +108,11 @@ def test_qa_instance_uses_code_disabled_auto_match_profile(monkeypatch, tmp_path
     assert data["mutable"] is False
     assert data["auto_match"]["enabled"] is True
     assert app.state.execution_dispatcher.auto_capability_enabled is False
-    assert data["max_concurrent_matches"] == app.state.orch.max_concurrent == 1
+    assert (
+        data["max_concurrent_matches"]
+        == app.state.orch.max_concurrent
+        == default_max_concurrent()
+    )
 
 
 @pytest.mark.parametrize(
@@ -123,7 +132,7 @@ def test_runtime_patch_route_does_not_exist(tmp_path, payload):
 
     assert response.status_code == 404
     assert app.state.store.get_settings() == before
-    assert app.state.orch.max_concurrent == 1
+    assert app.state.orch.max_concurrent == default_max_concurrent()
     assert app.state.orch.runner.action_timeout == ACTION_TIMEOUT_SEC
 
 
@@ -173,6 +182,7 @@ def test_code_configuration_is_immutable():
     import bzplat.backend.runtime.config as config
 
     assert AUTO_MATCH_BOOTSTRAP_TARGET_MATCHES == 10
+    assert MAX_CONCURRENT_MATCHES == 2
     assert RANKING_MIN_RATED_MATCHES == 10
     assert not hasattr(config, "AUTO_MATCH_CONFIG")
     assert not hasattr(config, "QA_AUTO_MATCH_CONFIG")

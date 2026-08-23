@@ -12,10 +12,13 @@ from typing import Any
 
 CONFIGURATION_SOURCE = "code"
 
-# 对局/赛事通用运行参数。全站所有来源只共享一个对局槽；该值是产品硬约束，
-# 不随 CPU 数量或管理员设置放大。
+# 对局/赛事通用运行参数。全站所有来源共享两个对局槽；该值是产品硬约束，
+# 以 8 vCPU / 16 GiB 主机为基准：最重赛事对局为 4 vCPU / 4 GiB，
+# 两场合计 8 vCPU / 8 GiB。队列外上传预检可短时再用 1 vCPU / 512 MiB，
+# 因此双槽是饱和上限而非 CPU 低延迟保证。主机资源门可继续收紧，但管理员
+# 与显式参数不能放大。
 ACTION_TIMEOUT_SEC = 60.0
-MAX_CONCURRENT_MATCHES = 1
+MAX_CONCURRENT_MATCHES = 2
 FULL_RR_MAX_N = 12
 
 # Bot 上传从读取请求文件到隐藏版本预检完成共用一个全局槽。等待超过
@@ -29,8 +32,8 @@ HUMAN_ACTION_TIMEOUT_SEC = 120.0
 HUMAN_MAX_CONSECUTIVE_TIMEOUTS = 5
 
 
-# 全来源执行队列：每个 job 固定占唯一的全局 match slot，Bot-vs-Bot
-# 占 2 个 sandbox unit，人机占 1 个。sandbox 容量按该单槽 * 2 派生。
+# 全来源执行队列：每个 job 固定占 1 个全局 match slot，Bot-vs-Bot
+# 占 2 个 sandbox unit，人机占 1 个。sandbox 容量按双槽 * 2 派生。
 EXECUTION_AGING_SECONDS = 60
 EXECUTION_USER_ACTIVE_LIMIT = 1
 EXECUTION_USER_QUEUED_LIMIT = 4

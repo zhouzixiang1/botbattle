@@ -102,7 +102,12 @@ for (const viewport of ADMIN_VIEWPORTS) {
     await expect(page.getByText('平台总览统计', { exact: true })).toBeVisible()
     await expect(page.getByText('最近注册用户', { exact: true })).toBeVisible()
     await expect(page.getByText('对局状态分布', { exact: true })).toBeVisible()
-    await expect(page.getByTestId('execution-queue-panel')).toContainText('全站同一时刻只执行一场')
+    const runtimeHealth = await page.request.get('/api/health')
+    expect(runtimeHealth.status(), await runtimeHealth.text()).toBe(200)
+    const runtimeCapacity = (await runtimeHealth.json() as { max_concurrent: number }).max_concurrent
+    await expect(page.getByTestId('execution-queue-panel')).toContainText(
+      `全站当前对局槽上限 ${runtimeCapacity} 场`,
+    )
     await expectNoRootOverflow(page, 'dashboard')
 
     await selectAdminModule(page, '用户')

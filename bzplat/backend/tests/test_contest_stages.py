@@ -491,8 +491,11 @@ def test_pencil_default_group_manager_estimate_matches_full_lifecycle(
     )
     assert actual_match_jobs == expected_total_matches
     assert estimate["estimated_matches"] == actual_match_jobs
-    assert estimate["eta_seconds"] == (
-        actual_match_jobs * game_registry.get("pencil").eta_for_match({})
+    assert estimate["max_concurrent"] == 2
+    assert estimate["eta_seconds"] == int(
+        actual_match_jobs
+        * game_registry.get("pencil").eta_for_match({})
+        / estimate["max_concurrent"]
     )
     final = store.get_contest(contest["id"])
     assert final["status"] == "finished"

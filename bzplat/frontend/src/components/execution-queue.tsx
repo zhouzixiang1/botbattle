@@ -399,7 +399,10 @@ export function ExecutionQueuePanel({
             {stale && <Badge variant="outline">数据可能已过期</Badge>}
           </div>
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-            全站同一时刻只执行一场；人工、人机、赛事与自动排位按同一队列等待。
+            {snapshot
+              ? `全站当前对局槽上限 ${snapshot.capacity.match_slots.capacity} 场；`
+              : '正在获取全站对局槽容量；'}
+            主机资源不足的任务继续排队。人工、人机、赛事与自动排位共用同一队列。
           </p>
           {(lastUpdatedAt || (loading && snapshot)) && (
             <p className="mt-0.5 text-xs text-muted-foreground">

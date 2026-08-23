@@ -120,12 +120,13 @@ function mockedExecutionQueue() {
       retry_at: null,
     },
     capacity: {
-      match_slots: { used: 1, capacity: 1 },
-      sandbox_units: { used: 1, capacity: 2 },
-      running_matches: 1,
+      match_slots: { used: 2, capacity: 2 },
+      sandbox_units: { used: 3, capacity: 4 },
+      running_matches: 2,
     },
     active: [
       job(1, 'human', 'running', 'holdem'),
+      job(5, 'contest', 'running', 'pencil'),
     ],
     queued: [
       job(2, 'auto', 'queued', 'gomoku'),
@@ -265,7 +266,8 @@ for (const viewport of VIEWPORTS) {
       }
       await expect(queuePanel).toContainText('正在执行')
       await expect(queuePanel).toContainText('等待执行')
-      await expect(queuePanel).toContainText('全站同一时刻只执行一场')
+      await expect(queuePanel).toContainText('全站当前对局槽上限 2 场')
+      await expect(queuePanel.getByRole('link', { name: '进入观赛' })).toHaveCount(2)
       await expect(queuePanel.getByRole('link', { name: '进入观赛' }).first()).toHaveAttribute(
         'href',
         '#/match/holdem-human-active-match',

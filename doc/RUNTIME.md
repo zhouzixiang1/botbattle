@@ -95,25 +95,34 @@ LongRunning 对局会同时保留双方各一个容器；Traditional 在决策�
 | 人机：节能 + 真人 | 1 | 1000 毫核 / 512 MiB |
 | 锦标赛：赛事 + 赛事 | 2 | 4000 毫核 / 4096 MiB |
 
-Traditional 实际同时存活的容器可能更少，但不会因此抬高硬上限；本地 Bot 虽不占 Docker，仍占唯一裁判对局槽，不会绕过排队。
+Traditional 实际同时存活的容器可能更少，但不会因此抬高硬上限；本地 Bot 虽不占 Docker，每场仍占 1 个裁判对局槽，不会绕过排队。
 
 ```text
-max_match_slots  = 1
+max_match_slots  = 2
+max_sandbox_units = 4
 host_cpu_budget  = min(进程 affinity、进程可见逻辑 CPU、各级 cgroup CPU quota)
 host_memory_budget = min(物理内存、各级 cgroup memory limit)
 effective_budget = min(上述探测值、显式的仅收紧启动注入)
 ```
 
-- `max_match_slots=1`，`max_sandbox_units=2`。显式启动参数、CPU 数量和管理员设置都不能放大；每次 claim 在一个
+- `max_match_slots=2`，`max_sandbox_units=4`。这是按 8 vCPU / 16 GiB 主机设定的代码硬顶：最重赛事一场为
+  2 个赛事 Bot，共需 4 CPU / 4 GiB；两场合计 8 CPU / 8 GiB，并为系统、应用与 SQLite 保留约 8 GiB 内存。
+  显式启动参数和管理员设置不能把硬顶放大到 2 以上；affinity、逻辑 CPU、cgroup 配额、物理内存和 cgroup
+  内存上限仍可进一步压低实际并发。每次 claim 在一个
   `BEGIN IMMEDIATE` 中同时要求：活跃 job 的 slot 未满、实际全局 `running` match 数小于
   `max_match_slots`、sandbox units 可容纳当前 job，并且冻结的 CPU/内存需求不超过当前主机预算。赛事主机不足
   4 CPU 或 4 GiB 时该任务保持排队并给出资源不足原因，绝不静默降为节能档。任何来源都不能绕过其中任一维度。
+- 上传预检不属于 execution job，仍由独立单槽 admission 控制；它可在双赛事运行时短暂再占 1 CPU / 512 MiB。
+  因此 8 vCPU 规划下双槽表示饱和吞吐上限，容器 CPU quota 短时合计可达 9 vCPU，并不承诺零超售或低延迟；
+  需要严格 CPU 预留的部署必须再让预检参与统一资源门，不能仅靠调高/调低管理员设置（该设置本来也不存在）。
 - `starting/running/settling` 都占容量；match/replay/rating policy 只在 claim 时同事务创建和绑定，
   单纯排队不产生“pending 对局”。未纳入新队列的历史 running match 也按 1 slot + 保守 2 units 计入。
 - job 入队时冻结两个座位的环境、`profile_version`、sandbox/CPU/内存向量；claim 重新用不可变历史 registry
   校验并复制版本到 Match，runner 的 Traditional 每回合、LongRunning、复式与人机 Bot 侧都只解析该冻结版本。
   未知版本、环境不兼容或快照漂移均在启动进程前 fail closed，不能回退到部署时的当前档位。
-- 人工/人机按用户同时活跃最多 1 条、排队最多 4 条；四类来源合计只占用唯一的全局 slot。
+- 人工/人机按用户同时活跃最多 1 条、排队最多 4 条；四类来源合计共享 2 个全局 slot。
+  `contest_share_slots=1` 只在存在可运行的非赛事请求时限制赛事优先占用；它不新增第三个 slot，若非赛事请求
+  因资源或业务门禁暂不可 claim，dispatcher 可放宽该份额以免物理容量空转。
   基础优先级为人工/人机 > 赛事 > 自动，但每 60 秒增加一次无上限 aging，自动请求最终一定能越过
   后续到达的高优先级请求，不会永久饥饿。
 - rated job claim 前还须通过评分投影 readiness 与双方 Bot 的 rated-overlap 门禁。真正新建且没有任何旧业务表的库
