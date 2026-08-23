@@ -43,7 +43,7 @@ from bzplat.backend.runtime.binary_runner import (
     BotSession,
     SandboxControlUncertain,
 )
-from bzplat.backend.runtime.limits import PLATFORM_LOW_PROFILE
+from bzplat.backend.runtime.limits import HostResourceBudget, PLATFORM_LOW_PROFILE
 from bzplat.backend.runtime.local_ai import LocalAIHub
 from bzplat.backend.runtime.local_ai_service import LocalAIService
 from bzplat.backend.store import Store, rating_projection_digests
@@ -3360,6 +3360,221 @@ def test_execution_environment_snapshots_are_source_owned(queue_store):
         official["host_cpu_millis"],
         official["host_memory_mb"],
     ) == ("platform_high", "platform_high", 2, 4000, 4096)
+
+
+def test_8vcpu_16gib_budget_admits_two_official_matches_and_holds_third(
+    queue_store,
+    monkeypatch,
+):
+    store = queue_store
+    bots = [_bot(store, f"dual-capacity-{index}") for index in range(6)]
+    contest = store.create_contest(
+        "Dual capacity", bots[0]["user_id"], status="running", game_id="holdem"
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[offset]["bot_id"],
+            bots[offset + 1]["bot_id"],
+            bot_a_version_id=bots[offset]["version_id"],
+            bot_b_version_id=bots[offset + 1]["version_id"],
+        )
+        for offset in (0, 2, 4)
+    ]
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[0]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[offset]["bot_id"],
+            bot_b_id=bots[offset + 1]["bot_id"],
+            bot_a_version_id=bots[offset]["version_id"],
+            bot_b_version_id=bots[offset + 1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairings[index]["id"],
+        )
+        for index, offset in enumerate((0, 2, 4))
+    ]
+
+    monkeypatch.setattr(
+        "bzplat.backend.matches.execution_queue.effective_host_resource_budget",
+        lambda: HostResourceBudget(cpu_millis=8000, memory_mb=16 * 1024),
+    )
+
+    class RecordingOrchestrator:
+        def __init__(self) -> None:
+            self.started: list[dict] = []
+
+        def start_execution_job(self, job: dict) -> None:
+            self.started.append(job)
+
+    orch = RecordingOrchestrator()
+    dispatcher = ExecutionDispatcher(
+        orch,
+        store,
+        max_match_slots=2,
+        max_sandbox_units=4,
+        max_host_cpu_millis=8000,
+        max_host_memory_mb=16 * 1024,
+        auto_capability_enabled=False,
+    )
+    result = asyncio.run(dispatcher.run_once())
+    assert result["claimed"] == 2
+    assert {job["public_id"] for job in orch.started} == {
+        jobs[0]["public_id"],
+        jobs[1]["public_id"],
+    }
+
+    snapshot = store.executions.snapshot(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        max_host_cpu_millis=8000,
+        max_host_memory_mb=16 * 1024,
+        aging_seconds=60,
+    )
+    assert snapshot["capacity"]["used_match_slots"] == 2
+    assert snapshot["capacity"]["used_sandbox_units"] == 4
+    assert snapshot["capacity"]["used_host_cpu_millis"] == 8000
+    assert snapshot["capacity"]["used_host_memory_mb"] == 8192
+    assert store.executions.get(jobs[2]["public_id"])["status"] == "queued"
+
+
+@pytest.mark.parametrize(
+    ("host_cpu_millis", "host_memory_mb"),
+    [(7999, 16 * 1024), (8000, 8191)],
+)
+def test_dual_official_matches_require_full_aggregate_host_budget(
+    queue_store,
+    host_cpu_millis,
+    host_memory_mb,
+):
+    store = queue_store
+    bots = [_bot(store, f"dual-host-gate-{index}") for index in range(4)]
+    contest = store.create_contest(
+        "Dual host gate", bots[0]["user_id"], status="running", game_id="holdem"
+    )
+    pairings = [
+        store.add_pairing(
+            contest["id"],
+            bots[offset]["bot_id"],
+            bots[offset + 1]["bot_id"],
+            bot_a_version_id=bots[offset]["version_id"],
+            bot_b_version_id=bots[offset + 1]["version_id"],
+        )
+        for offset in (0, 2)
+    ]
+    _verify_projection(store)
+    jobs = [
+        store.executions.enqueue(
+            source=EXECUTION_SOURCE_CONTEST,
+            owner_user_id=bots[0]["user_id"],
+            game_id="holdem",
+            match_type=TYPE_CONTEST,
+            bot_a_id=bots[offset]["bot_id"],
+            bot_b_id=bots[offset + 1]["bot_id"],
+            bot_a_version_id=bots[offset]["version_id"],
+            bot_b_version_id=bots[offset + 1]["version_id"],
+            contest_id=contest["id"],
+            contest_pairing_id=pairings[index]["id"],
+        )
+        for index, offset in enumerate((0, 2))
+    ]
+    claim_kwargs = {
+        "max_match_slots": 2,
+        "max_sandbox_units": 4,
+        "max_host_cpu_millis": host_cpu_millis,
+        "max_host_memory_mb": host_memory_mb,
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+    }
+
+    first = store.executions.claim_next(**claim_kwargs)
+    assert first and first["public_id"] == jobs[0]["public_id"]
+    assert store.executions.claim_next(**claim_kwargs) is None
+    assert store.executions.get(jobs[1]["public_id"])["status"] == "queued"
+
+
+def test_untracked_running_match_charges_max_profile_before_second_slot_claim(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"untracked-host-gate-{index}") for index in range(4)]
+    store.create_match(
+        "untracked-high-profile",
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        owner_id=bots[0]["user_id"],
+        match_type=TYPE_CONTEST,
+        game_id="holdem",
+    )
+    store.update_match("untracked-high-profile", status="running")
+
+    contest = store.create_contest(
+        "Untracked host gate",
+        bots[2]["user_id"],
+        status="running",
+        game_id="holdem",
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[2]["bot_id"],
+        bots[3]["bot_id"],
+        bot_a_version_id=bots[2]["version_id"],
+        bot_b_version_id=bots[3]["version_id"],
+    )
+    _verify_projection(store)
+    queued = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[2]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[2]["bot_id"],
+        bot_b_id=bots[3]["bot_id"],
+        bot_a_version_id=bots[2]["version_id"],
+        bot_b_version_id=bots[3]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+    )
+    claim_kwargs = {
+        "max_match_slots": 2,
+        "max_sandbox_units": 4,
+        "max_host_cpu_millis": 6000,
+        "max_host_memory_mb": 5120,
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+    }
+
+    # Slot and sandbox limits alone would admit the second contest.  The
+    # orphan is conservatively charged as a current high-profile two-Bot
+    # match (4000m / 4096 MiB), so the aggregate host budget blocks it.
+    assert store.executions.claim_next(**claim_kwargs) is None
+    snapshot = store.executions.snapshot(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        max_host_cpu_millis=6000,
+        max_host_memory_mb=5120,
+        aging_seconds=60,
+    )
+    capacity = snapshot["capacity"]
+    assert capacity["untracked_running_matches"] == 1
+    assert capacity["used_match_slots"] == 0
+    assert capacity["occupied_match_slots"] == 1
+    assert capacity["used_sandbox_units"] == 2
+    assert capacity["used_host_cpu_millis"] == 4000
+    assert capacity["used_host_memory_mb"] == 4096
+    assert store.executions.get(queued["public_id"])["status"] == "queued"
+
+    store.update_match(
+        "untracked-high-profile",
+        status="aborted",
+        reason="test cleanup",
+    )
+    claimed = store.executions.claim_next(**claim_kwargs)
+    assert claimed and claimed["public_id"] == queued["public_id"]
 
 
 @pytest.mark.parametrize(

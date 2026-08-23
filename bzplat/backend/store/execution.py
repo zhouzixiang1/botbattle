@@ -1427,18 +1427,34 @@ class ExecutionRepository:
             )
         untracked_running = max(0, running_matches - tracked_running)
         occupied_match_slots = int(used["slots"] or 0) + untracked_running
+        if untracked_running:
+            # Keep Store importable while runtime.limits imports store.schema.
+            # An untracked legacy Match has no frozen job vector, so derive the
+            # fail-closed two-Bot maximum from the append-only resource registry.
+            from bzplat.backend.runtime.limits import (
+                maximum_execution_match_resource_snapshot,
+            )
+
+            untracked_resources = maximum_execution_match_resource_snapshot()
+        else:
+            untracked_resources = (0, 0, 0)
+        (
+            untracked_sandbox_units,
+            untracked_host_cpu_millis,
+            untracked_host_memory_mb,
+        ) = untracked_resources
         return {
             "used_jobs": int(used["jobs"] or 0),
             "used_match_slots": int(used["slots"] or 0),
             # A legacy/untracked running match has no durable resource vector.
             # Charge the conservative Bot-vs-Bot maximum so such a live row can
-            # never make the global sandbox-unit limit under-report capacity.
+            # never make any global resource dimension under-report capacity.
             "used_sandbox_units": int(used["units"] or 0)
-            + untracked_running * 2,
+            + untracked_running * untracked_sandbox_units,
             "used_host_cpu_millis": int(used["cpu_millis"] or 0)
-            + untracked_running * 2000,
+            + untracked_running * untracked_host_cpu_millis,
             "used_host_memory_mb": int(used["memory_mb"] or 0)
-            + untracked_running * 1024,
+            + untracked_running * untracked_host_memory_mb,
             "running_matches": running_matches,
             "untracked_running_matches": untracked_running,
             "occupied_match_slots": occupied_match_slots,
