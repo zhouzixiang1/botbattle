@@ -56,6 +56,7 @@ from bzplat.backend.runtime.local_ai_service import (
     LocalAIAgentBusyError,
     LocalAIRateLimitError,
 )
+from bzplat.backend.store import BotDeletedError
 
 logger = logging.getLogger(__name__)
 _LOCAL_AI_DB_TOUCH_INTERVAL_SECONDS = 15.0
@@ -370,9 +371,22 @@ def _bots(request: Request) -> BotManager:
     return request.app.state.bot_manager
 
 
-def _with_bot_runnable(bot: dict) -> dict:
+def _with_bot_runnable(
+    bot: dict, *, include_owner_deleted_at: bool = False
+) -> dict:
     """Expose current executability without rewriting legacy metadata."""
     public = dict(bot)
+    has_owner_tombstone = "owner_deleted_at" in public
+    owner_deleted_at = public.get("owner_deleted_at")
+    if has_owner_tombstone:
+        public["is_deleted"] = owner_deleted_at is not None
+        if not include_owner_deleted_at:
+            public.pop("owner_deleted_at", None)
+            # Owner deletion writes ``updated_at`` in the same statement as
+            # the private tombstone.  Keeping it would disclose the exact
+            # deletion time through ordinary detail/profile projections.
+            if owner_deleted_at is not None:
+                public.pop("updated_at", None)
     runnable = is_supported_binary_metadata(
         str(public.get("format") or ""),
         str(public.get("os") or ""),
@@ -380,10 +394,14 @@ def _with_bot_runnable(bot: dict) -> dict:
     )
     if public.get("retired_at") is not None:
         runnable = False
+    if owner_deleted_at is not None:
+        runnable = False
     public["runnable"] = runnable
     public["unsupported_reason"] = (
         None
         if runnable
+        else "Bot 已删除"
+        if owner_deleted_at is not None
         else "该版本已退役"
         if public.get("retired_at") is not None
         else SUPPORTED_BINARY_ERROR
@@ -684,6 +702,11 @@ async def create_local_ai_agent(
             bot_id=int(body.bot_id),
             label=body.label,
         )
+    except BotDeletedError as exc:
+        raise HTTPException(
+            409,
+            detail={"code": "bot_deleted", "message": str(exc)},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     audit_log(
@@ -1224,7 +1247,7 @@ async def upload_bot(
         audit_log(request, "bot_upload", result="fail", user=user.get("username"), target=name, detail="sandbox_unavailable")
         raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
     audit_log(request, "bot_upload", result="ok", user=user.get("username"), target=name, detail=f"game={game_id} mode={runtime_mode} size={len(raw)}")
-    return {"bot": bot}
+    return {"bot": _with_bot_runnable(bot)}
 
 
 @router.post(
@@ -1275,12 +1298,15 @@ async def upload_bot_version(
         raise _upload_busy_error()
     except BotError as e:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail=e.code)
-        raise HTTPException(400, detail={"code": e.code, "message": e.message})
+        raise HTTPException(
+            409 if e.code == "bot_deleted" else 400,
+            detail={"code": e.code, "message": e.message},
+        )
     except PlatformRunnerError:
         audit_log(request, "bot_version_upload", result="fail", user=user.get("username"), target=bot_id, detail="sandbox_unavailable")
         raise HTTPException(503, "Bot 沙箱暂不可用，请稍后重试")
     audit_log(request, "bot_version_upload", result="ok", user=user.get("username"), target=bot_id, detail=f"size={len(raw)}")
-    return {"bot": bot}
+    return {"bot": _with_bot_runnable(bot)}
 
 
 @router.get("/api/bots/{bot_id}/versions")
@@ -1302,7 +1328,10 @@ def list_my_bot_versions(bot_id: int, request: Request, user=Depends(require_use
     versions = []
     for raw_version in store.list_bot_versions(bot_id):
         version = _with_bot_runnable(raw_version)
-        if raw_version.get("retired_at") is not None:
+        if bot.get("owner_deleted_at") is not None:
+            version["runnable"] = False
+            version["unsupported_reason"] = "Bot 已删除"
+        elif raw_version.get("retired_at") is not None:
             version["runnable"] = False
             version["unsupported_reason"] = "该版本已退役"
         elif raw_version.get("protocol_version") != active_protocol:
@@ -1348,10 +1377,11 @@ def rollback_bot_version(
             "version_unavailable": 409,
             "version_retired": 409,
             "protocol_incompatible": 409,
+            "bot_deleted": 409,
         }.get(e.code, 400)
         raise HTTPException(status, detail={"code": e.code, "message": e.message})
     audit_log(request, "bot_version_rollback", result="ok", user=user.get("username"), target=bot_id, detail=f"v{version}")
-    return {"bot": result}
+    return {"bot": _with_bot_runnable(result)}
 
 
 @router.post("/api/bots/{bot_id}/active")
@@ -1371,14 +1401,14 @@ async def set_bot_active(
             else 403 if e.code == "forbidden"
             else 409 if e.code in {
                 "unsupported_binary", "version_unavailable",
-                "version_retired", "protocol_incompatible",
+                "version_retired", "protocol_incompatible", "bot_deleted",
             }
             else 400
         )
         raise HTTPException(status, detail={"code": e.code, "message": e.message})
     if public_ids:
         await _local_ai(request).revoke_public_ids(public_ids)
-    return {"bot": bot}
+    return {"bot": _with_bot_runnable(bot)}
 
 
 @router.put("/api/bots/{bot_id}/ranking")
@@ -1398,6 +1428,7 @@ def select_ranked_bot(
             "version_unavailable": 409,
             "version_retired": 409,
             "protocol_incompatible": 409,
+            "bot_deleted": 409,
         }.get(exc.code, 400)
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
@@ -1428,6 +1459,7 @@ def clear_ranked_bot(
             "not_found": 404,
             "forbidden": 403,
             "ranking_busy": 409,
+            "bot_deleted": 409,
         }.get(exc.code, 400)
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
@@ -1475,7 +1507,7 @@ async def update_my_bot(
             404 if exc.code == "not_found"
             else 403 if exc.code == "forbidden"
             else 409
-            if exc.code in {"unsupported_binary", "version_unavailable"}
+            if exc.code in {"unsupported_binary", "version_unavailable", "bot_deleted"}
             else 400
         )
         raise HTTPException(
@@ -1488,18 +1520,68 @@ async def update_my_bot(
 
 @router.delete("/api/bots/{bot_id}")
 async def delete_my_bot(bot_id: int, request: Request, user=Depends(require_user)):
-    """Bot 拥有者删除自己的 Bot（软删：is_active=0）。"""
-    store = _store(request)
-    bot = store.get_bot(bot_id)
-    if not bot:
-        raise HTTPException(404, "bot 不存在")
-    if bot["owner_id"] != user["id"]:
-        raise HTTPException(403, "无权删除他人的 Bot")
-    public_ids = store.list_active_local_ai_public_ids_for_bot(bot_id)
-    store.update_bot(bot_id, is_active=0)
-    if public_ids:
-        await _local_ai(request).revoke_public_ids(public_ids)
-    return {"ok": True}
+    """Irreversibly remove a Bot from owner inventory while retaining history."""
+
+    async def converge_delete() -> dict:
+        # Keep the durable transaction, in-memory transport revocation and audit
+        # in one drainable task.  If the client disconnects after the worker has
+        # started, _finish_upload_step_before_cancel waits for all three before
+        # propagating cancellation to the ASGI boundary.
+        try:
+            result = await asyncio.to_thread(
+                _bots(request).delete_owner, bot_id, int(user["id"])
+            )
+        except BotError as exc:
+            audit_log(
+                request,
+                "bot_owner_delete",
+                result="fail",
+                user=user.get("username"),
+                target=bot_id,
+                detail=exc.code,
+            )
+            raise
+        try:
+            public_ids = result.get("revoked_local_ai_public_ids") or []
+            if public_ids:
+                await _local_ai(request).revoke_public_ids(public_ids)
+        except Exception:
+            audit_log(
+                request,
+                "bot_owner_delete",
+                result="fail",
+                user=user.get("username"),
+                target=bot_id,
+                detail="transport_revoke_failed",
+            )
+            raise
+        audit_log(
+            request,
+            "bot_owner_delete",
+            result="ok",
+            user=user.get("username"),
+            target=bot_id,
+            detail=(
+                f"changed={int(bool(result.get('changed')))} "
+                f"cancelled={result.get('cancelled_queued_jobs', 0)} "
+                f"invalidated_retryable={result.get('invalidated_retryable_jobs', 0)}"
+            ),
+        )
+        return result
+
+    try:
+        result = await _finish_upload_step_before_cancel(converge_delete())
+    except BotError as exc:
+        status = {
+            "not_found": 404,
+            "forbidden": 403,
+            "bot_busy": 409,
+            "ranking_busy": 409,
+        }.get(exc.code, 400)
+        raise HTTPException(
+            status, detail={"code": exc.code, "message": exc.message}
+        ) from exc
+    return {"ok": True, "changed": bool(result.get("changed"))}
 
 
 # ── matches ───────────────────────────────────────────────────
@@ -3849,7 +3931,7 @@ def admin_bots(
     for row in rows:
         owner = store.get_user(row.get("owner_id")) if row.get("owner_id") else None
         enriched.append({
-            **_with_bot_runnable(row),
+            **_with_bot_runnable(row, include_owner_deleted_at=True),
             "owner_name": owner.get("username") if owner else None,
             "owner_display": owner.get("display_name") if owner else None,
         })
@@ -3889,14 +3971,16 @@ async def admin_patch_bot(
         bot = _bots(request).patch_admin(bot_id, **fields)
     except BotError as exc:
         status = 404 if exc.code == "not_found" else 409 if exc.code in {
-            "unsupported_binary", "version_unavailable",
+            "unsupported_binary", "version_unavailable", "bot_deleted",
         } else 400
         raise HTTPException(
             status, detail={"code": exc.code, "message": exc.message}
         ) from exc
     if public_ids:
         await _local_ai(request).revoke_public_ids(public_ids)
-    return {"bot": _with_bot_runnable(bot)}
+    return {
+        "bot": _with_bot_runnable(bot, include_owner_deleted_at=True)
+    }
 
 
 @router.delete("/api/admin/bots/{bot_id}")
@@ -3934,7 +4018,10 @@ def admin_bot_versions(
     versions = []
     for raw_version in store.list_bot_versions(bot_id):
         version = _with_bot_runnable(raw_version)
-        if raw_version.get("retired_at") is not None:
+        if bot.get("owner_deleted_at") is not None:
+            version["runnable"] = False
+            version["unsupported_reason"] = "Bot 已删除"
+        elif raw_version.get("retired_at") is not None:
             version["runnable"] = False
             version["unsupported_reason"] = "该版本已退役"
         elif raw_version.get("protocol_version") != active_protocol:

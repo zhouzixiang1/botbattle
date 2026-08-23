@@ -2175,17 +2175,56 @@ test('MatchViewer replays live history sequentially and stays compact across vie
   await expect.poll(() => sse.disconnect()).toBe(true)
   await expect(page.getByText('连接中', { exact: true })).toBeVisible()
   await expect(page.getByText('加载中…', { exact: true })).toHaveCount(0)
+  // Keep the first frame observable before introducing a playback backlog.  The
+  // live interval starts with the metadata response, so a full snapshot can land
+  // immediately before its next tick (most consistently in WebKit).
+  expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents.slice(0, 1) })).toBe(true)
+  await expect(page.getByText('事件 1/1 · 直播', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
   expect(await sse.emit({ type: 'snapshot', match: runningMatch, events: initialEvents })).toBe(true)
   await expect(page.getByText('事件 1/4', { exact: true })).toBeVisible()
   expect(replayRequests).toBe(0)
-  await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
 
   // 即使自动播放已经追到当前尾部，后续事件也必须先增加分母，再按速度推进。
+  const playbackPosition = page.getByTestId('playback-position')
+  await playbackPosition.evaluate((node) => {
+    type PlaybackWindow = typeof window & {
+      __matchPlaybackObserver?: MutationObserver
+      __matchPlaybackSequence?: number[]
+    }
+    const playbackWindow = window as PlaybackWindow
+    playbackWindow.__matchPlaybackObserver?.disconnect()
+    const sequence: number[] = []
+    const record = () => {
+      const match = node.textContent?.match(/^事件 (\d+)\/4/)
+      if (!match) return
+      const cursor = Number(match[1])
+      if (sequence[sequence.length - 1] !== cursor) sequence.push(cursor)
+    }
+    const observer = new MutationObserver(record)
+    observer.observe(node, { childList: true, characterData: true, subtree: true })
+    playbackWindow.__matchPlaybackObserver = observer
+    playbackWindow.__matchPlaybackSequence = sequence
+    record()
+  })
   await page.getByRole('combobox').filter({ hasText: '1x' }).click()
   await page.getByRole('option', { name: '0.5x', exact: true }).click()
-  await expect(page.getByText('事件 4/4 · 直播', { exact: true })).toBeVisible({ timeout: 6_000 })
+  await page.getByRole('button', { name: '继续回放', exact: true }).click()
+  await expect(playbackPosition).toHaveText('事件 4/4 · 直播', { timeout: 6_000 })
+  await expect.poll(() => page.evaluate(() => {
+    type PlaybackWindow = typeof window & { __matchPlaybackSequence?: number[] }
+    return [...((window as PlaybackWindow).__matchPlaybackSequence ?? [])]
+  })).toEqual([1, 2, 3, 4])
+  await page.evaluate(() => {
+    type PlaybackWindow = typeof window & { __matchPlaybackObserver?: MutationObserver }
+    const playbackWindow = window as PlaybackWindow
+    playbackWindow.__matchPlaybackObserver?.disconnect()
+  })
+  await expect(page.getByText('第 1/70 手', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
   expect(await sse.emit(reconnectedEvents[4])).toBe(true)
   await expect(page.getByText('事件 4/5', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '继续回放', exact: true }).click()
   await expect(page.getByText('事件 5/5 · 直播', { exact: true })).toBeVisible({ timeout: 2_500 })
   await page.getByRole('button', { name: '暂停回放', exact: true }).click()
 
@@ -3634,7 +3673,12 @@ test('MatchViewer reconnects transient SSE, localizes terminal errors, and warns
   })
   const monitor = monitorBrowser(page)
   await page.goto(`/#/match/${matchId}`)
-  await expect(page.getByText('已中止', { exact: true })).toBeVisible()
+  const matchStatusStrip = page.getByTestId('rating-state').locator('..')
+  const abortedStatus = matchStatusStrip
+    .locator('[data-slot="badge"][data-variant="destructive"]')
+    .filter({ hasText: /^已中止$/ })
+  await expect(abortedStatus).toHaveCount(1)
+  await expect(abortedStatus).toBeVisible()
   await expect(page.locator('main')).toContainText('平台运行异常')
   await expect(page.locator('main')).not.toContainText('正常结束')
   // The terminal event is retained behind the pinned cursor. Advancing exposes
