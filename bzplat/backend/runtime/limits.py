@@ -329,6 +329,30 @@ def execution_resource_snapshot(
     )
 
 
+def maximum_execution_match_resource_snapshot() -> tuple[int, int, int]:
+    """Return a fail-closed resource vector for an untracked two-Bot match.
+
+    A legacy running Match has no durable execution job from which to recover
+    its historical profile.  Admission therefore charges the independent
+    maximum of every immutable profile version.  Keeping this derivation next
+    to the append-only registry prevents recovery accounting from drifting
+    when a higher resource tier is added later.
+    """
+
+    snapshots = [
+        execution_resource_snapshot((name, name), profile_version)
+        for profile_version, profiles in EXECUTION_RESOURCE_PROFILE_REGISTRY.items()
+        for name in profiles
+    ]
+    if not snapshots:
+        raise RuntimeError("执行资源档位注册表不能为空")
+    return (
+        max(snapshot[0] for snapshot in snapshots),
+        max(snapshot[1] for snapshot in snapshots),
+        max(snapshot[2] for snapshot in snapshots),
+    )
+
+
 def resolve_docker_resource_profile(
     profile: str | DockerResourceProfile = PLATFORM_LOW_PROFILE,
 ) -> DockerResourceProfile:

@@ -116,11 +116,14 @@ effective_budget = min(上述探测值、显式的仅收紧启动注入)
   因此 8 vCPU 规划下双槽表示饱和吞吐上限，容器 CPU quota 短时合计可达 9 vCPU，并不承诺零超售或低延迟；
   需要严格 CPU 预留的部署必须再让预检参与统一资源门，不能仅靠调高/调低管理员设置（该设置本来也不存在）。
 - `starting/running/settling` 都占容量；match/replay/rating policy 只在 claim 时同事务创建和绑定，
-  单纯排队不产生“pending 对局”。未纳入新队列的历史 running match 也按 1 slot + 保守 2 units 计入。
+  单纯排队不产生“pending 对局”。未纳入新队列的历史 running match 也按 1 slot，并从追加式资源档位
+  registry 推导双 Bot 最大向量计入；当前即保守计作 2 units / 4000 毫核 / 4096 MiB，不能低估后再放入第二场。
 - job 入队时冻结两个座位的环境、`profile_version`、sandbox/CPU/内存向量；claim 重新用不可变历史 registry
   校验并复制版本到 Match，runner 的 Traditional 每回合、LongRunning、复式与人机 Bot 侧都只解析该冻结版本。
   未知版本、环境不兼容或快照漂移均在启动进程前 fail closed，不能回退到部署时的当前档位。
-- 人工/人机按用户同时活跃最多 1 条、排队最多 4 条；四类来源合计共享 2 个全局 slot。
+- 人工/人机按用户未终态请求（queued/starting/running/settling）合计最多 4 条，其中同时活跃最多 1 条；
+  因而没有活跃局时最多 4 条排队，有 1 条活跃时最多另排 3 条，人机来源另限同一时刻仅 1 条未终态请求。
+  四类来源合计共享 2 个全局 slot。
   `contest_share_slots=1` 只在存在可运行的非赛事请求时限制赛事优先占用；它不新增第三个 slot，若非赛事请求
   因资源或业务门禁暂不可 claim，dispatcher 可放宽该份额以免物理容量空转。
   基础优先级为人工/人机 > 赛事 > 自动，但每 60 秒增加一次无上限 aging，自动请求最终一定能越过

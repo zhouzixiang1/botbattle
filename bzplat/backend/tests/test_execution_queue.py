@@ -3497,6 +3497,86 @@ def test_dual_official_matches_require_full_aggregate_host_budget(
     assert store.executions.get(jobs[1]["public_id"])["status"] == "queued"
 
 
+def test_untracked_running_match_charges_max_profile_before_second_slot_claim(
+    queue_store,
+):
+    store = queue_store
+    bots = [_bot(store, f"untracked-host-gate-{index}") for index in range(4)]
+    store.create_match(
+        "untracked-high-profile",
+        bots[0]["bot_id"],
+        bots[1]["bot_id"],
+        owner_id=bots[0]["user_id"],
+        match_type=TYPE_CONTEST,
+        game_id="holdem",
+    )
+    store.update_match("untracked-high-profile", status="running")
+
+    contest = store.create_contest(
+        "Untracked host gate",
+        bots[2]["user_id"],
+        status="running",
+        game_id="holdem",
+    )
+    pairing = store.add_pairing(
+        contest["id"],
+        bots[2]["bot_id"],
+        bots[3]["bot_id"],
+        bot_a_version_id=bots[2]["version_id"],
+        bot_b_version_id=bots[3]["version_id"],
+    )
+    _verify_projection(store)
+    queued = store.executions.enqueue(
+        source=EXECUTION_SOURCE_CONTEST,
+        owner_user_id=bots[2]["user_id"],
+        game_id="holdem",
+        match_type=TYPE_CONTEST,
+        bot_a_id=bots[2]["bot_id"],
+        bot_b_id=bots[3]["bot_id"],
+        bot_a_version_id=bots[2]["version_id"],
+        bot_b_version_id=bots[3]["version_id"],
+        contest_id=contest["id"],
+        contest_pairing_id=pairing["id"],
+    )
+    claim_kwargs = {
+        "max_match_slots": 2,
+        "max_sandbox_units": 4,
+        "max_host_cpu_millis": 6000,
+        "max_host_memory_mb": 5120,
+        "aging_seconds": 60,
+        "user_active_limit": 1,
+        "contest_share_slots": 1,
+    }
+
+    # Slot and sandbox limits alone would admit the second contest.  The
+    # orphan is conservatively charged as a current high-profile two-Bot
+    # match (4000m / 4096 MiB), so the aggregate host budget blocks it.
+    assert store.executions.claim_next(**claim_kwargs) is None
+    snapshot = store.executions.snapshot(
+        max_match_slots=2,
+        max_sandbox_units=4,
+        max_host_cpu_millis=6000,
+        max_host_memory_mb=5120,
+        aging_seconds=60,
+    )
+    capacity = snapshot["capacity"]
+    assert capacity["untracked_running_matches"] == 1
+    assert capacity["used_match_slots"] == 0
+    assert capacity["occupied_match_slots"] == 1
+    assert capacity["used_sandbox_units"] == 2
+    assert capacity["used_host_cpu_millis"] == 4000
+    assert capacity["used_host_memory_mb"] == 4096
+    assert store.executions.get(queued["public_id"])["status"] == "queued"
+
+    store.update_match(
+        "untracked-high-profile",
+        status="aborted",
+        reason="test cleanup",
+    )
+    claimed = store.executions.claim_next(**claim_kwargs)
+    assert claimed and claimed["public_id"] == queued["public_id"]
+
+
 @pytest.mark.parametrize(
     ("host_cpu_millis", "host_memory_mb"),
     [(3999, 4096), (4000, 4095)],
