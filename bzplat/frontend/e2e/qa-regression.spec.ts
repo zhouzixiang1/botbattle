@@ -2500,6 +2500,8 @@ test('private Bot debug stays folded, safe, bounded, and absent when empty or un
 
 test('MatchViewer playback clock cannot be starved by continuous SSE traffic', async ({ page }) => {
   const matchId = 'mock-live-continuous-clock'
+  const streamIntervalMs = 50
+  const playbackTickMs = 175
   const expectedDetailCancellations = captureExactGetCancellations(
     page,
     `/api/matches/${matchId}`,
@@ -2523,6 +2525,7 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
     bot_b: { name: 'clock_beta', owner_name: 'beta' },
     result: { rounds_played: 0, deltas: [0, 0] },
   }
+  await page.clock.install()
   const sse = await installControlledEventSource(page)
   let releaseMatchResponse!: () => void
   const matchResponseGate = new Promise<void>((resolve) => {
@@ -2566,17 +2569,51 @@ test('MatchViewer playback clock cannot be starved by continuous SSE traffic', a
   await expect(position).toHaveText('事件 1/2')
   await page.getByRole('combobox', { name: '回放速度', exact: true }).click()
   await page.getByRole('option', { name: '4x', exact: true }).click()
-  expect(await sse.stream(streamEvents, 50)).toBe(true)
+
+  const pauseTarget = await page.evaluate(() => Date.now() + 100)
+  await page.clock.pauseAt(pauseTarget)
+  await page.evaluate((expectedDelay) => {
+    type ProbeWindow = typeof window & { __playbackIntervalInstalls?: number }
+    const probeWindow = window as ProbeWindow
+    const originalSetInterval = window.setInterval.bind(window)
+    probeWindow.__playbackIntervalInstalls = 0
+    window.setInterval = ((
+      handler: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
+      if (delay === expectedDelay) {
+        probeWindow.__playbackIntervalInstalls =
+          (probeWindow.__playbackIntervalInstalls ?? 0) + 1
+      }
+      return originalSetInterval(handler, delay, ...args)
+    }) as typeof window.setInterval
+  }, playbackTickMs)
+
+  const playbackIntervalInstalls = () => page.evaluate(() => (
+    window as typeof window & { __playbackIntervalInstalls?: number }
+  ).__playbackIntervalInstalls ?? 0)
+
   await page.getByRole('button', { name: '继续回放', exact: true }).click()
-  await expect.poll(
-    async () => Number((await position.textContent())?.match(/事件 (\d+)\//)?.[1] ?? 0),
-    { timeout: 1_200 },
-  ).toBeGreaterThan(1)
-  const sentDuringAdvance = Number(await sse.sent())
-  expect(sentDuringAdvance).toBeGreaterThan(0)
-  expect(sentDuringAdvance).toBeLessThan(40)
-  await expect.poll(async () => Number(await sse.sent()), { timeout: 3_000 })
-    .toBe(40)
+  await expect.poll(playbackIntervalInstalls).toBeGreaterThan(0)
+  const installsBeforeStream = await playbackIntervalInstalls()
+
+  expect(await sse.stream(streamEvents, streamIntervalMs)).toBe(true)
+  const halfStreamWindowMs =
+    streamIntervalMs * (streamEvents.length / 2) + 25
+
+  await page.clock.runFor(halfStreamWindowMs)
+  expect(Number(await sse.sent())).toBe(20)
+  await expect(position).toHaveText('事件 6/22')
+  expect(await playbackIntervalInstalls()).toBe(installsBeforeStream)
+
+  await page.clock.runFor(halfStreamWindowMs)
+  expect(Number(await sse.sent())).toBe(40)
+  await expect(position).toHaveText('事件 12/42')
+  expect(await playbackIntervalInstalls()).toBe(installsBeforeStream)
+
+  await page.getByRole('button', { name: '暂停回放', exact: true }).click()
+  await page.clock.resume()
   await monitor.expectClean(expectedDetailCancellations())
 })
 

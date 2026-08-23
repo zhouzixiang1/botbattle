@@ -222,10 +222,71 @@ def test_store_reopen_preserves_schema_and_rating_trigger_contract(tmp_path):
     reopened.close()
     version_after, triggers_after = _schema_state(db_path)
 
+    with sqlite3.connect(db_path) as conn:
+        entry_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(contest_entries)")
+        }
+    assert {
+        "real_name_snapshot",
+        "phone_snapshot",
+        "school_snapshot",
+        "student_id_snapshot",
+        "identity_captured_at",
+        "identity_source",
+    } <= entry_columns
+
     assert version_after == version_before
     assert triggers_after == triggers_before
     _assert_rating_trigger_contract(triggers_after)
     _assert_owner_delete_trigger_contract(triggers_after)
+
+
+def test_legacy_contest_entries_gain_nullable_identity_columns_idempotently(tmp_path):
+    """迁移只补 nullable 列，不把旧用户当前资料伪装成报名快照。"""
+    db_path = (tmp_path / "legacy-contest-identity.db").resolve()
+    store = Store(str(db_path))
+    organizer = store.create_user("legacy-org", "legacy-org@e.com", "x")
+    entrant = store.create_user(
+        "legacy-entry", "legacy-entry@e.com", "x", real_name="当前姓名",
+        phone="13800138000", school="当前学校", student_id="CURRENT001",
+    )
+    bot = store.create_bot(
+        entrant["id"], "legacy-entry-bot", binary_path="/tmp/legacy-entry",
+        format="elf", game_id="holdem",
+    )
+    contest = store.create_contest(
+        "旧实名赛", organizer_id=organizer["id"], game_id="holdem",
+        require_real_name=1,
+    )
+    entry = store.add_contest_entry(contest["id"], entrant["id"], bot["id"])
+    store.close()
+
+    identity_columns = (
+        "real_name_snapshot", "phone_snapshot", "school_snapshot",
+        "student_id_snapshot", "identity_captured_at", "identity_source",
+    )
+    with sqlite3.connect(db_path) as conn:
+        for column in identity_columns:
+            conn.execute(f"ALTER TABLE contest_entries DROP COLUMN {column}")
+
+    migrated = Store(str(db_path))
+    migrated_entry = migrated.get_entry(contest["id"], entrant["id"])
+    assert migrated_entry["id"] == entry["id"]
+    assert all(migrated_entry[column] is None for column in identity_columns)
+    migrated.close()
+
+    with sqlite3.connect(db_path) as conn:
+        first_version = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+        first_columns = tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(contest_entries)")
+        )
+    reopened = Store(str(db_path))
+    reopened.close()
+    with sqlite3.connect(db_path) as conn:
+        assert int(conn.execute("PRAGMA schema_version").fetchone()[0]) == first_version
+        assert tuple(
+            row[1] for row in conn.execute("PRAGMA table_info(contest_entries)")
+        ) == first_columns
 
 
 def test_docker_launch_journal_schema_and_singleton_are_reopen_idempotent(

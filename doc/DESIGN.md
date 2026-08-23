@@ -237,7 +237,7 @@ completed 对局的 `winner` 为空时返回 `blocked`，赛事保持 running，
 | `sessions` | 会话（token, user_id, expires_at，认证核心） |
 | `platform_settings` | 站点文案等仍允许网页维护的 KV；历史 runtime/模板/auto/daily-cap 键不参与运行并在迁移中删除 |
 | `contest_templates` | 历史只读表；不再 seed/对账，现行模板只从 `games/<game>/templates.py` 经注册表聚合 |
-| `contest_entries` | 赛事报名（user_id, bot_id SET NULL, group_id, seed）—— **P0：排名/积分键为 entry.id（换 Bot 不丢分）**；bot FK = SET NULL（删 Bot 留报名） |
+| `contest_entries` | 赛事报名（user_id, bot_id SET NULL, group_id, seed）—— **P0：排名/积分键为 entry.id（换 Bot 不丢分）**；三个 entry 写入口都在任何赛事/重复/资料读取前取得 `BEGIN IMMEDIATE`，拿锁后才生成 `registered_at`，实名赛新报名由同一线性点冻结 `real_name/phone/school/student_id` 四项快照与 `identity_captured_at/identity_source=registration_profile`，非实名赛六列恒为 NULL；`contests.require_real_name` 仅零报名时可变，有 entry 后不可翻转；bot FK = SET NULL（删 Bot 留报名） |
 | `contest_pairings` | 赛事对阵（entry_a_id/entry_b_id 身份键 + bot_a_id/bot_b_id SET NULL）—— P0：pairing 快照 entry 身份 |
 | `contest_stage_results` | 阶段成绩（entry_id 唯一键 + bot_id SET NULL + 原始分差累计 `delta_total`）——唯一键 (contest_id, stage_idx, entry_id) |
 | `pair_stats` | 对手战绩统计（a_wins/a_losses/draws/samples）；`samples` 的权威值恒等于胜+负+平 |
@@ -254,6 +254,8 @@ completed 对局的 `winner` 为空时返回 `blocked`，赛事保持 running，
 `Store._migrate()` 在每次建连时自愈：为旧库补新增列（game_id/xp/level/bio/avatar/likes_count 等），必要时重建表放宽 CHECK 约束（纳入 rest/ladder/human 等新状态）。**向后兼容，不破坏现有数据**（除对局数据——见下）。
 
 **Bot owner 墓碑增量迁移**：旧库只为 `bots` 增加 nullable `owner_deleted_at`，不回填或猜测历史停用行。fresh 与 migrated 库均通过同一 canonical trigger 安装器守护墓碑不可逆、inactive+unranked、赛事报名活 Bot、draft→live 门禁以及 live pairing 墓碑座位门禁；定义校验与二次打开遵循既有 trigger schema-idempotency 机制，不重写 Bot、版本、赛事或历史对局资产。
+
+**赛事实名快照增量迁移**：`contest_entries` 幂等增加四项 nullable 快照列及采集时间、来源列；新库 DDL 与所有历史表重建模板保持同构。迁移不读取 `users` 当前资料、不回填旧报名，因此旧实名赛 entry 六列仍为 NULL。只有实名赛的组织者/admin 私有读模型可回退该用户的当前资料，并明确返回 `identity_source=current_profile_legacy`、`identity_captured_at=NULL`；这是“历史报名的当前资料回退”，不是认证结果或报名时快照。非实名赛事即使调用方请求私有投影，也不读取或返回用户实名字段。
 
 **communications 增量迁移**：只新建上述 10 张表，并为 `notifications` 补一个可空投影列/部分唯一索引。不回填、不改写、不删除任何旧 `notifications`、`email_templates`、`email_outbox` 或其他业务行，也不把旧通知伪造为新 conversation。旧模板自定义正文原样保留；官方 verify/reset/welcome 的新执行路径固定使用代码版本。迁移必须以二次打开、`integrity_check`、`foreign_key_check` 和旧表全行哈希/行数不变作为验收边界。
 迁移还会删除多态社交表中已失去用户或目标的孤儿行、按真实 likes 重算每场对局的
@@ -332,7 +334,8 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 排行与元数据：`GET /api/leaderboard`、`/api/levels/info`、`/api/site/info`。排行榜 `game_id` 必填且未知值 fail closed，不跨游戏混排；公开排名资格唯一读取 `runtime/config.py::RANKING_MIN_RATED_MATCHES`，与 auto bootstrap lane 解耦。`rating_delta` 只等于同 Bot、同游戏当前 rating 与上一条历史快照之差；最近对局须同时通过 history reason、matches_index 游戏、物理表 completed 行及 Bot 座位四项校验
 - 执行队列：`GET /api/execution-queue` 返回 dispatcher 状态、match slots/sandbox units、active/queued 白名单；不返回内部 DB id、version id、path/checksum/token/match_config/decision id。公开暂停原因是有界安全诊断。主机 CPU/内存余量只进入管理员 runtime 诊断；永久资源不足的排队项返回稳定 code 与用户可读原因，界面显示原因并隐藏不成立的有限 ETA，不能暗示会自动降档或很快开赛
 - 搜索：`GET /api/search`
-- 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`
+- 赛事浏览：`GET /api/contests`、`/api/contests/{id}`、`/bracket`、`/templates`。详情的 `entries` 与 `my_entry` 均使用正向字段白名单；访客/参赛者永不取得实名或内部快照列。只有 `require_real_name=true` 且当前用户是赛事组织者/admin 时，详情才附加四项私有实名、`identity_source/identity_captured_at/identity_complete`，并固定 `private, no-store, max-age=0`、`Pragma: no-cache`、`Vary: Authorization, Cookie`、`Referrer-Policy: no-referrer` 与 `nosniff`。非实名赛事不因组织者/admin 身份投影当前用户 PII
+- 公开正式成绩：`GET /api/contests/{id}/official-results?format=json|csv` 永远只消费公开结果白名单，不包含实名、联系方式、学校、学号、快照或来源字段；CSV 继续使用 `contest-{id}-results.csv` 与既有 10 列，并对用户控制的名称/奖项做公式注入防护
 - Wiki：`GET /api/wiki`
 - Bug 反馈：`POST /api/feedback/bugs`；访客必须通过图形验证码与独立 IP 限流，成功响应含追踪令牌并固定 `no-store/no-referrer`。请求是严格 JSON，附件不得 base64 混入，只能在创建后用独立 multipart 端点上传
 - **裁判公开**：`GET /api/judges`（裁判列表）、`GET /api/judges/{game_id}/source`（裁判源码全文）——裁判是公开可审计的规则定义（区别于 Bot 私有黑盒），源码对全体玩家透明
@@ -347,12 +350,14 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - 互动：`POST/DELETE /api/comments`、`/api/likes`、`POST /api/matches/{id}/view`；评论/点赞请求使用严格 target 枚举且必须引用当前存在的实体，通知排除行为发起者本人
 - 通信：`GET /api/communications/{inbox,sent}`、`GET /api/communications/threads/{public_id}`、`POST .../{read,reply}`；只允许已登录用户读取/回复自己的 participant thread，无用户任意私信创建 API。用户与管理员的私有 thread 详情响应统一固定 `no-store/no-referrer`。旧 `GET /api/notifications`、`POST /read`、`/read-all` 继续读兼容投影；`GET/PUT /api/notification-prefs` 四字段唯一类型为 boolean
 - Bug 追踪：`GET /api/feedback/bugs`、`GET /api/feedback/bugs/{public_id}`；登录用户只能读自己提交的反馈，认证列表与详情同样固定 `no-store/no-referrer`。访客以创建时一次性返回的追踪令牌访问 `GET /api/feedback/bugs/{public_id}/track` 并在同一线程 `POST .../track/reply`；创建/追踪/回复响应均 `no-store/no-referrer`，未授权、错误/缺失 token 与不存在统一 404。附件上传为独立 multipart 路由，下载为 `GET .../attachments/{attachment_public_id}`；登录 owner/admin 或持令牌访客才可读写，服务端二次校验路径、大小与 SHA-256。访客 token 授权只在请求没有认证用户时成立；即使同一请求误带另一账号的 Authorization 也统一 404，绝不把访客附件归到该账号。当前附件契约保留原始图片字节以便完整性复查，本轮不做 EXIF 重编码/剥离；界面继续提示不要上传含隐私的截图，EXIF 清理留作独立安全增强
-- 赛事：`POST /api/contests/{id}/register`
+- 赛事：`POST /api/contests/{id}/register` 只允许本人报名。实名赛在 Manager 做完整性提示后，Store 仍先取得 SQLite 写锁，再读取赛事门禁与四项资料、生成时间并提交 entry 快照；并发资料修改只能完整落在线性点之前或报名 commit 之后，不能留下“旧资料快照 + 新资料先提交”的中间状态。`require_real_name` 的变化使用同一写锁且有任何 entry 时拒绝；考虑到删掉最后 entry 后仍存在合法改旗窗口，`contest_entries_named` 与私有导出不依赖前置门禁 SELECT，而在投影 entry 的同一 SQL 快照内 JOIN contest，并对四项身份、来源、采集时间与完整性逐列 `CASE require_real_name`。报名后修改个人资料不改变既有 entry。`register`/`dispatch` 返回的 `entry` 与详情 `my_entry` 共用公开正向白名单，不能因底层 `SELECT *` 新增快照列而泄漏
 - 认证：`GET /api/auth/me`、`POST /logout`、`/change-password`、`PUT /profile`、`POST /avatar`。前端 AuthProvider 以单调代次串行化 `/me`、登录与退出的共享状态投影；初始 `/me` 的迟到 200/401 都不能覆盖或清除其后建立的新账号会话。
 
 ### 4.3 组织者端点（require_organizer 或 admin）
 - `POST /api/contests`（创建赛事）
 - `POST /api/contests/{id}/{open,start,resume,advance}`（赛事推进，require_organizer）
+- `POST /api/contests/{id}/entries`、`/entries/bulk` 与 admin 批量入口是唯一代报名路径。非实名赛维持组织者现场补录语义；实名赛必须由参赛者本人走 `/register` 表达同意，普通 organizer 的单条与批量（含 `assign_all`）在 API、Manager、Store 三层 fail closed 为 403，写入前拒绝且零 entry/零快照。admin 可在通用两路或专用 admin 批量路由显式 override，仍须逐项满足资料完整、Bot 归属/游戏/可用性与名册状态；批量缺资料项不静默消失，响应给出 `identity_incomplete_count`、`identity_incomplete_users` 与逐项 `skipped` 原因。admin override 的成功审计使用 Store 在 `BEGIN IMMEDIATE` 后读取、与实际快照同一线性点的实名门禁，不使用 API 的前置赛事视图；同一事务内的实名校验失败通过无 PII 专用异常携带该门禁，确保并发 0→1 后回滚也记录 `result=fail + real_name_override=1`。业务失败、缺字段、非法 ID、非法/不匹配游戏同样审计 actor、contest、entry/user/Bot ID 或计数与 reason code，普通 organizer 拒绝也审计。所有审计绝不写姓名、电话、学校、学号或快照值
+- `GET /api/contests/{id}/export?format=csv` 是组织者/admin 私有名单导出。省略 `schema`（或 `schema=1`）保留 16 列 v1 与 `contest-{id}-export.csv`；`schema=2` 使用 `contest-{id}-participants-v2.csv`，以中英双语表头给出稳定 entry/user/Bot ID、账号/显示名、报名实名与来源、阶段/成绩/中文状态。v2 的空 seed 留空，手机号/学号前置 ASCII apostrophe 以保留前导零并避免科学计数，所有用户控制字符串统一防表格公式注入。成功及 400/401/403/404 错误均使用详情同款私有禁止缓存/引用/嗅探头；错误响应没有下载文件名。审计仅记录 actor、contest、schema、行数、是否排除实名与 legacy 行数，绝不记录 PII
 - 注：`register`/`dispatch` 为 require_user（报名/换 Bot 由登录用户发起）
 
 ### 4.4 管理员端点（require_admin）
@@ -499,6 +504,7 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 | **Bot debug 泄漏/XSS/资源放大** | stdout 行 64 KiB；debug 单条/深度/节点/容器/每座位/整场多级硬顶，NFC+控制/bidi/ANSI 清理和敏感信息脱敏；独立表与鉴权 API、`no-store`、纯文本/JSON 渲染；公共 result/replay/SSE/WS/log 全部不承载 debug |
 | **公开对局日志越权/注入/伪完整** | 只导出单场终态 canonical public replay 与公开 match 正向白名单；同快照验证原始尾项已经持久化，活动/未知/损坏/未落稳均 409；JSON attachment 使用 `no-store + nosniff` 和有界 ASCII 文件名，确定性序列化；私有 debug、stdout/stderr、路径、执行配置和令牌零进入，已下线 bulk 数据集端点保持 404 |
 | **公开记录越权/注入** | 单场 exporter 只接收公开 match 正向白名单、canonical public replay 与快照时间，禁止读取 Bot 文件/版本路径、冻结执行配置、令牌或私有 debug；活动局和尚待响应请求不导出，终局中已经脱敏的历史交互事件可按公共回放保留且继续受字段白名单约束。响应 `no-store + nosniff`，ASCII 文件名先清洗再进入 `Content-Disposition`。Gomoku JSON v1 明确是平台格式；附件未给出组委会电子格式时不宣称官方或外部软件兼容 |
+| **赛事名单 PII 越权/漂移/表格注入** | 非实名赛详情与任何 schema 导出都不读取当前实名资料；`require_real_name` 仅零报名可改，三个 entry 入口与开关变化都先取 `BEGIN IMMEDIATE`，有 entry 后拒绝翻转。读模型仍防御删最后 entry→改旗→重插窗口：身份七列与 `identity_required` 在同一 JOIN SQL 快照内门控，v2 完整性及审计只使用该行门禁。实名赛新 entry 在同一线性点冻结快照；普通 organizer 无权替他人形成 PII 快照，admin override 才可代报名且成功审计读取实际写入门禁；legacy 只在授权私有读边界以 `current_profile_legacy` 回退且采集时间为空。公开正式榜永不消费 PII。私有详情/导出使用 `private, no-store + Vary + no-referrer + nosniff`，CSV 手机/学号强制文本、全部可控字符串防公式注入 |
 | **接口滥用** | 分级 IP 限流（auth 20/60s、challenge 8/60s、upload 6/60s、captcha 60/60s、其他 120/60s），`BZ_RATE_LIMIT` 可关；Uvicorn 不改写 ASGI peer，`BZ_TRUST_PROXY=1` 时也仅允许 `BZ_TRUSTED_PROXY_CIDRS` 内 socket peer 提供合法 X-Real-IP/XFF，直连 LAN 伪造头仍按真实 peer 分桶 |
 | **暴力破解** | 图形验证码（注册/登录）；登录失败不区分用户名/密码错误 |
 | **密码泄露** | 密码 hash 存储（非明文）；自助重置请求对不存在账号保持统一响应，邮箱重置码以单事务 CAS 消费，并在同一事务更新密码、撤销该用户全部 session，竞争请求仅一方成功且任一步失败整体回滚；管理员没有返回重置 credential 的 API |
@@ -514,6 +520,6 @@ API 按权限分为以下四类；具体路由数以目标提交的代码与自�
 - **`logs/access.log`**：HTTP 访问日志（`AccessLogMiddleware`，含真实 IP + 方法 + 路径 + 状态 + 耗时）。
 - **`logs/audit.log`**：安全审计日志（`audit_log()` 辅助，敏感操作含 actor+IP+action+result；`result=fail` 升 WARNING）。
 
-埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、owner Bot 逻辑删除（`bot_owner_delete` 的成功/幂等/失败）、对局创建、人类对战、私有对局 debug 读取（只记 actor/match/结果/条数，不记内容）、赛事创建、admin 删用户/bot/赛事/赛事报名、赛事状态/时间修改、改角色。运行参数和赛制模板无管理写入口，因此不产生对应写审计。管理员可在前端 admin「日志」Tab 切换三文件查看（`/api/admin/logs?file={app|access|audit}`，文件参数白名单防路径穿越）；后端按结构化首行聚合多行记录后再筛选，确保 ERROR/关键字筛选仍包含 traceback 和对局上下文，响应只返回安全文件名而不泄漏服务器绝对路径。验证码日志脱敏（SMTP 未配置时不打明文）。
+埋点：登录成功/失败、注册、验证邮箱、改密、重置密码、登出、Bot 上传/版本、owner Bot 逻辑删除（`bot_owner_delete` 的成功/幂等/失败）、对局创建、人类对战、私有对局 debug 读取（只记 actor/match/结果/条数，不记内容）、赛事创建/私有名单导出（只记 schema、行数与来源计数，不记 PII）、实名赛普通 organizer 代报名拒绝与 admin override 全结果（只记 contest、entry/user/Bot ID、计数和 reason code）、admin 删用户/bot/赛事/赛事报名、赛事状态/时间修改、改角色。运行参数和赛制模板无管理写入口，因此不产生对应写审计。管理员可在前端 admin「日志」Tab 切换三文件查看（`/api/admin/logs?file={app|access|audit}`，文件参数白名单防路径穿越）；后端按结构化首行聚合多行记录后再筛选，确保 ERROR/关键字筛选仍包含 traceback 和对局上下文，响应只返回安全文件名而不泄漏服务器绝对路径。验证码日志脱敏（SMTP 未配置时不打明文）。
 
 > 返回 [doc/INDEX.md](./INDEX.md)

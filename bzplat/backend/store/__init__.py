@@ -2,6 +2,8 @@
 from .db import (
     BotDeletedError,
     BotOwnerDeleteBusyError,
+    ContestRealNameRosterForbidden,
+    ContestRosterWriteValidationError,
     RankedBotSelectionBusyError,
     Store,
     rating_plan_digest,
@@ -43,6 +45,8 @@ __all__ = [
     "Store",
     "BotDeletedError",
     "BotOwnerDeleteBusyError",
+    "ContestRealNameRosterForbidden",
+    "ContestRosterWriteValidationError",
     "RankedBotSelectionBusyError",
     "ExecutionInvariantError",
     "ExecutionMaintenanceConflict",

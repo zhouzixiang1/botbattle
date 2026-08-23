@@ -26,7 +26,11 @@ from bzplat.backend.runtime.binary_integrity import require_binary_file_integrit
 from bzplat.backend.matches.result_contract import build_result_payload
 from bzplat.backend.games import normalize_game_id, registry as game_registry
 from bzplat.backend.runtime.config import FULL_RR_MAX_N, MAX_CONCURRENT_MATCHES
-from bzplat.backend.store import ExecutionQueueClosed, Store
+from bzplat.backend.store import (
+    ContestRealNameRosterForbidden,
+    ExecutionQueueClosed,
+    Store,
+)
 from bzplat.backend.store.db import match_deltas
 from bzplat.backend.store.validation import (
     is_authoritative_no_opponent_pairing,
@@ -440,8 +444,14 @@ class ContestManager:
     def _roster_target_error(
         self, contest: dict, user_id: int, bot_id: int
     ) -> str | None:
-        if not self.store.get_user(user_id):
+        target_user = self.store.get_user(user_id)
+        if not target_user:
             return f"user {user_id} 不存在"
+        if int(contest.get("require_real_name") or 0) and not all(
+            (target_user.get(field) or "").strip()
+            for field in ("real_name", "phone", "school", "student_id")
+        ):
+            return f"user {user_id} 实名信息不完整"
         bot = self.store.get_bot(bot_id)
         if not bot or not bot.get("is_active") or not bot.get("binary_path"):
             return f"bot {bot_id} 不可用"
@@ -457,9 +467,14 @@ class ContestManager:
         return None
 
     async def add_roster_entry(
-        self, contest_id: int, user_id: int, bot_id: int
+        self,
+        contest_id: int,
+        user_id: int,
+        bot_id: int,
+        *,
+        allow_real_name_override: bool = False,
     ) -> dict:
-        """组织者/admin 单条代报名；仅 draft/open，且与 publish 共用赛事锁。"""
+        """Proxy-register one entrant; real-name capture needs admin override."""
         async with self._lock(contest_id):
             contest = self.store.get_contest(contest_id)
             if not contest:
@@ -467,20 +482,32 @@ class ContestManager:
             require_mutable(contest)
             if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
                 raise ValueError("开赛后不可改名册")
+            if (
+                int(contest.get("require_real_name") or 0)
+                and not allow_real_name_override
+            ):
+                raise ContestRealNameRosterForbidden()
             error = self._roster_target_error(contest, user_id, bot_id)
             if error:
                 raise ValueError(error)
-            added, skipped = self.store.add_contest_roster_entries(
-                contest_id, [(user_id, bot_id)]
+            added, skipped, _identity_required = self.store.add_contest_roster_entries(
+                contest_id,
+                [(user_id, bot_id)],
+                allow_real_name_override=allow_real_name_override,
+                return_identity_required=True,
             )
             if skipped or not added:
                 raise ValueError("该用户已报名")
             return added[0]
 
     async def assign_roster_entries(
-        self, contest_id: int, targets: list[tuple[int, int]]
+        self,
+        contest_id: int,
+        targets: list[tuple[int, int]],
+        *,
+        allow_real_name_override: bool = False,
     ) -> dict:
-        """组织者/admin 批量代报名；校验后整批在 Store 单事务写入。"""
+        """Proxy-register a roster; real-name capture needs admin override."""
         async with self._lock(contest_id):
             contest = self.store.get_contest(contest_id)
             if not contest:
@@ -488,8 +515,14 @@ class ContestManager:
             require_mutable(contest)
             if contest["status"] not in (CONTEST_DRAFT, CONTEST_OPEN):
                 raise ValueError("开赛后不可改名册")
+            if (
+                int(contest.get("require_real_name") or 0)
+                and not allow_real_name_override
+            ):
+                raise ContestRealNameRosterForbidden()
 
             skipped: list[str] = []
+            identity_incomplete_users: list[int] = []
             valid: list[tuple[int, int]] = []
             seen: set[int] = set()
             for user_id, bot_id in targets:
@@ -500,11 +533,20 @@ class ContestManager:
                 error = self._roster_target_error(contest, user_id, bot_id)
                 if error:
                     skipped.append(f"{error}，跳过")
+                    if error == f"user {user_id} 实名信息不完整":
+                        identity_incomplete_users.append(user_id)
                     continue
                 valid.append((user_id, bot_id))
 
-            added, duplicate_users = self.store.add_contest_roster_entries(
-                contest_id, valid
+            (
+                added,
+                duplicate_users,
+                identity_required_at_commit,
+            ) = self.store.add_contest_roster_entries(
+                contest_id,
+                valid,
+                allow_real_name_override=allow_real_name_override,
+                return_identity_required=True,
             )
             skipped.extend(
                 f"user {user_id} 已报名，跳过" for user_id in duplicate_users
@@ -512,7 +554,12 @@ class ContestManager:
             return {
                 "added": len(added),
                 "skipped": skipped,
+                "identity_incomplete_count": len(identity_incomplete_users),
+                "identity_incomplete_users": identity_incomplete_users,
                 "total_entries": len(self.store.list_contest_entries(contest_id)),
+                # Private Manager/API coordination metadata.  Handlers consume
+                # and remove it before serializing the public response.
+                "_identity_required_at_commit": identity_required_at_commit,
             }
 
     async def delete_roster_entry(self, contest_id: int, user_id: int) -> bool:

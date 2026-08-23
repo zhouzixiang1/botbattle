@@ -1258,15 +1258,23 @@ CREATE INDEX IF NOT EXISTS idx_bug_attachments_report
     ON bug_attachments(bug_report_id, id);
 
 CREATE TABLE IF NOT EXISTS contest_entries (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    contest_id      INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
-    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    bot_id          INTEGER REFERENCES bots(id) ON DELETE SET NULL,
-    registered_at   TEXT    NOT NULL,
-    group_id        TEXT    NOT NULL DEFAULT '',
-    seed            INTEGER NOT NULL DEFAULT 0,
-    eliminated      INTEGER NOT NULL DEFAULT 0,
-    dispatched_at   TEXT,
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    contest_id          INTEGER NOT NULL REFERENCES contests(id) ON DELETE CASCADE,
+    user_id             INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    bot_id              INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+    registered_at       TEXT    NOT NULL,
+    group_id            TEXT    NOT NULL DEFAULT '',
+    seed                INTEGER NOT NULL DEFAULT 0,
+    eliminated          INTEGER NOT NULL DEFAULT 0,
+    dispatched_at       TEXT,
+    -- 实名赛在报名事务中冻结资料；历史行保持 NULL，由私有读模型明确标为
+    -- current_profile_legacy，绝不把迁移时的当前资料伪装成报名快照。
+    real_name_snapshot  TEXT,
+    phone_snapshot      TEXT,
+    school_snapshot     TEXT,
+    student_id_snapshot TEXT,
+    identity_captured_at TEXT,
+    identity_source     TEXT,
     UNIQUE(contest_id, user_id)
 );
 
@@ -1474,6 +1482,11 @@ CONTEST_RUNNING = "running"
 CONTEST_REST = "rest"
 CONTEST_FINISHED = "finished"
 CONTEST_CANCELLED = "cancelled"
+
+# 赛事报名实名来源。持久化只写报名时快照；旧报名在私有读边界派生 legacy
+# 来源，不回写本常量，避免把当前资料伪装成历史快照。
+CONTEST_IDENTITY_SOURCE_REGISTRATION = "registration_profile"
+CONTEST_IDENTITY_SOURCE_LEGACY = "current_profile_legacy"
 
 # 以下 runtime 键只标识旧库历史记录；现行值来自 runtime/config.py。
 SETTING_CONTEST_SCHEDULER_ENABLED = "contest_scheduler_enabled"
